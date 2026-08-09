@@ -279,6 +279,29 @@ HMODULE loadRealModule(const std::wstring& moduleDir, const std::string& configu
     return nullptr;
 }
 
+std::wstring widenUtf8(const std::string& s) { return widen(s); }
+
+size_t resolveProcsChained(HMODULE preferred, HMODULE fallback, const char* const* names,
+                           size_t count, void** procs, void* unresolvedStub,
+                           size_t* fromFallback) {
+    size_t missing = 0, fell = 0;
+    for (size_t i = 0; i < count; ++i) {
+        void* p = preferred ? reinterpret_cast<void*>(GetProcAddress(preferred, names[i]))
+                            : nullptr;
+        if (!p && fallback) {
+            p = reinterpret_cast<void*>(GetProcAddress(fallback, names[i]));
+            if (p) ++fell;
+        }
+        if (!p) {
+            ++missing;
+            p = unresolvedStub;
+        }
+        procs[i] = p;
+    }
+    if (fromFallback) *fromFallback = fell;
+    return missing;
+}
+
 size_t resolveProcs(HMODULE real, const char* const* names, size_t count, void** procs,
                     void* unresolvedStub) {
     if (!real) return 0;

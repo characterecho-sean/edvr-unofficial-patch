@@ -2,10 +2,10 @@
 
 Three fixes for things that make Odyssey uncomfortable in a headset.
 
-> **⚠️ Do not install this if you already use EDHM or ReShade.** They also
-> install themselves as `d3d11.dll`, only one file can have that name, and
-> overwriting theirs will break them. An attempt at running both crashed the
-> game on startup and has been removed. See [Compatibility](#compatibility).
+> **Already running EDHM or ReShade?** They install themselves as `d3d11.dll`
+> too, and only one file can have that name — so don't just overwrite theirs.
+> See [Running alongside other mods](#running-alongside-other-mods), which takes
+> one rename and one setting.
 
 ## What it fixes
 
@@ -49,20 +49,47 @@ Everything is in `edvr.ini`, next to the game. With the file missing you get the
 defaults, which are what most people want. `black_void` and `panel_distance` can
 be changed while the game runs; the rest need a restart.
 
-## Compatibility
+## Running alongside other mods
 
-**EDVR cannot currently run alongside EDHM or ReShade.** All three work by being
-the `d3d11.dll` next to the game, and only one file can have that name.
+EDHM and ReShade also install themselves as `d3d11.dll`, and only one file can
+have that name. To run both:
 
-A setting to chain through another one existed briefly and **crashed the game on
-startup**, before it could write anything to its log. The cause is structural
-rather than a small bug: loading another mod's DLL has to happen while Windows
-holds the loader lock, and that runs the other mod's startup code at a point
-where Windows does not support it. Making it work means loading the other mod
-later and re-pointing everything afterwards, which is a real design and needs
-testing against an actual EDHM install before it goes near anyone's game.
+1. **Rename** the other mod's `d3d11.dll` to something else — say
+   `d3d11_edhm.dll` — leaving it in the same folder.
+2. **Put EDVR's `d3d11.dll`** in its place.
+3. In `edvr.ini`, under `[advanced]`, set `real_dll = d3d11_edhm.dll`.
 
-Until then, one or the other. Sorry.
+EDVR loads that file and passes everything through it, so both mods work.
+Anything the other mod doesn't handle falls through to Windows' own
+`d3d11.dll`. Restart the game for it to take effect.
+
+If the name is wrong or the file won't load, EDVR says so in the log and carries
+on without it — the game still starts, you just don't get the other mod.
+
+**One catch with EDHM.** Its uninstaller runs `del d3d11.dll`, which after this
+is *EDVR's* file, not EDHM's. Running it removes EDVR and leaves EDHM's renamed
+copy behind. To undo the pair cleanly: delete `d3d11.dll` and `edvr.ini`, rename
+`d3d11_edhm.dll` back to `d3d11.dll`, and then use EDHM's uninstaller if you
+want EDHM gone too.
+
+<details>
+<summary>Why an earlier version of this crashed, if you hit that</summary>
+
+The first attempt loaded the other mod during `DllMain`. Windows holds the
+loader lock there, and loading a DLL that isn't already in memory runs *its*
+startup code under that lock — which Windows doesn't support. ReShade does real
+work in its startup, so the game died instantly, before anything could be
+logged.
+
+It now loads the other mod on the first graphics call instead, once `DllMain`
+has returned and the lock is released. Windows' own `d3d11.dll` is still loaded
+early, so nothing is left without a destination in between.
+
+Tested with a stand-in proxy that does work in its own `DllMain` — the exact
+thing that used to crash — plus the three ways it can go wrong: a name that
+doesn't exist, a file that isn't a proxy, and a setting pointed at EDVR itself.
+All three fall back to the system DLL and say so.
+</details>
 
 ## Game updates
 

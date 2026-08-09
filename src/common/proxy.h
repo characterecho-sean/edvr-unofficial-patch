@@ -35,6 +35,21 @@ std::string readConfigStringEarly(const std::wstring& moduleDir, const wchar_t* 
 size_t resolveProcs(HMODULE real, const char* const* names, size_t count, void** procs,
                     void* unresolvedStub);
 
+// As above, but anything `preferred` does not export is taken from `fallback`
+// before giving up on the stub. Returns the count still unresolved, and reports
+// how many came from the fallback.
+//
+// For chaining through another proxy. EDHM and ReShade export the handful of
+// entry points they care about, not all of d3d11's. Without a fallback the rest
+// would become no-op stubs and the game would lose functions that work perfectly
+// well in the system copy.
+size_t resolveProcsChained(HMODULE preferred, HMODULE fallback, const char* const* names,
+                           size_t count, void** procs, void* unresolvedStub,
+                           size_t* fromFallback);
+
+// UTF-8 to wide, for config values naming a path.
+std::wstring widenUtf8(const std::string& s);
+
 // Last-resort diagnostic for failures that happen before the log exists, or
 // that stop the game from starting at all.
 void writeFatalNote(const std::wstring& dir, const wchar_t* text);

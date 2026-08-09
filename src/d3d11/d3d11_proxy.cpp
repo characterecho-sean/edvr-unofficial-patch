@@ -33,7 +33,8 @@ const char* const kExportNames[] = {
 };
 constexpr size_t kExportCount = sizeof(kExportNames) / sizeof(kExportNames[0]);
 
-HMODULE g_realModule = nullptr;
+HMODULE g_realModule = nullptr;    // what exports currently forward to
+HMODULE g_systemModule = nullptr;  // Windows' own, always resolved, never null
 HMODULE g_selfModule = nullptr;
 std::wstring* g_moduleDir = nullptr;
 
@@ -86,23 +87,21 @@ void loaderPhase() {
 
     g_moduleDir = new std::wstring(edvr::moduleDirectory(g_selfModule));
 
-    // Always the system copy. Chaining through another proxy used to be
-    // configurable here and it CRASHED THE GAME on launch, reported by a user
-    // running ReShade 6.8.0 and EDHM v22.01.
+    // ALWAYS the system copy here, never a configured chain target.
     //
-    // The reason is this line's context, not its arguments. loaderPhase runs
-    // inside DllMain, and LoadLibrary of a DLL that is not already mapped runs
-    // that DLL's own DllMain while the loader lock is held -- from inside ours.
-    // Windows does not support that, and ReShade does real work in its DllMain.
-    // Loading the system d3d11.dll is fine only because it is already mapped, so
-    // the call bumps a refcount and runs no new entry point.
+    // This runs inside DllMain. LoadLibrary of a DLL that is not already mapped
+    // runs that DLL's own DllMain while the loader lock is held -- from inside
+    // ours -- which Windows does not support and which crashed the game for a
+    // user running ReShade 6.8.0 with EDHM v22.01. The system d3d11.dll is safe
+    // only because it is already mapped, so the call bumps a refcount and runs
+    // no entry point.
     //
-    // Making chaining safe means loading the target after DllMain returns and
-    // re-pointing the export table then. That is a real design, not a tweak, and
-    // it needs testing against a live EDHM or ReShade install before it goes
-    // anywhere near anyone's game. Until then edvr cannot share a game folder
-    // with another d3d11 proxy, and the README says so.
+    // Chaining happens later, in chainThroughOtherProxy(), once DllMain has
+    // returned. Loading the system copy first is not wasted: it guarantees every
+    // export has somewhere to go for the window between DllMain and the first
+    // export call, which is the window a deferred-only design would leave empty.
     g_realModule = edvr::loadRealModule(*g_moduleDir, "", L"d3d11.dll", L"d3d11.dll");
+    g_systemModule = g_realModule;   // kept so chaining can fall back to it
     if (!g_realModule) {
         edvr::breadcrumb("gfx: FAILED to load real d3d11.dll");
         return;
@@ -120,6 +119,87 @@ void loaderPhase() {
 
     edvr::breadcrumb(g_realCreateDevice ? "gfx: exports resolved, loader phase done"
                                         : "gfx: FAILED no D3D11CreateDevice");
+}
+
+// Loads another d3d11 proxy -- EDHM, ReShade -- and re-points every export at
+// it, so both mods end up in the chain.
+//
+// Runs from the first export call, NOT from DllMain. That distinction is the
+// whole fix: by now the loader lock is released and the other mod's startup
+// code can run normally, which is exactly what it could not do before.
+//
+// Nothing here is required for edvr to work. Every failure leaves the system
+// d3d11.dll in place, which is what was already resolved during the loader
+// phase, and says why in the log.
+void chainThroughOtherProxy(edvr::Config& cfg) {
+    const std::string configured = cfg.getString("advanced.real_dll", "");
+    if (configured.empty()) return;
+
+    std::wstring path = edvr::widenUtf8(configured);
+    if (path.empty()) return;
+    if (path.find(L':') == std::wstring::npos && path.find(L'\\') == std::wstring::npos) {
+        path = *g_moduleDir + L"\\" + path;
+    }
+
+    // Refuse to load ourselves. Pointing this at a copy of edvr, or at the very
+    // file this code is running from, would recurse until the stack ran out.
+    wchar_t self[MAX_PATH]{};
+    GetModuleFileNameW(g_selfModule, self, MAX_PATH);
+    wchar_t want[MAX_PATH]{};
+    if (GetFullPathNameW(path.c_str(), MAX_PATH, want, nullptr) &&
+        _wcsicmp(self, want) == 0) {
+        edvr::Log::get().note(
+            "advanced.real_dll points at edvr itself (%S). Ignored -- chaining to "
+            "ourselves would recurse forever. Point it at the OTHER mod's renamed dll.",
+            want);
+        return;
+    }
+
+    const HMODULE chained = LoadLibraryW(path.c_str());
+    if (!chained) {
+        edvr::Log::get().note(
+            "advanced.real_dll = %s could not be loaded from %S (error %lu). Still "
+            "forwarding to the system d3d11.dll, so edvr works and the other mod does "
+            "not. Check the name and that the file is really there.",
+            configured.c_str(), path.c_str(), GetLastError());
+        return;
+    }
+
+    // Only swap once the new module actually provides the entry points. A DLL
+    // that loads but exports nothing useful would otherwise leave every call
+    // jumping into a stub.
+    auto create = reinterpret_cast<PFN_D3D11CreateDevice>(
+        GetProcAddress(chained, "D3D11CreateDevice"));
+    if (!create) {
+        edvr::Log::get().note(
+            "advanced.real_dll = %s loaded but exports no D3D11CreateDevice, so it is "
+            "not a d3d11 proxy. Ignored; still forwarding to the system d3d11.dll.",
+            configured.c_str());
+        FreeLibrary(chained);
+        return;
+    }
+
+    // Prefer the chained module, fall back to the system copy for anything it
+    // does not export. EDHM and ReShade wrap the entry points they care about
+    // and no more; without the fallback the rest would become no-op stubs and
+    // the game would lose functions that work fine in the system dll.
+    size_t fromSystem = 0;
+    const size_t missing = edvr::resolveProcsChained(
+        chained, g_systemModule, kExportNames, kExportCount, edvr_realProcs_d3d11,
+        reinterpret_cast<void*>(&edvr_unresolved_d3d11), &fromSystem);
+
+    g_realModule = chained;
+    g_realCreateDevice = create;
+    if (auto* swap = reinterpret_cast<PFN_D3D11CreateDeviceAndSwapChain>(
+            GetProcAddress(chained, "D3D11CreateDeviceAndSwapChain"))) {
+        g_realCreateDeviceAndSwapChain = swap;
+    }
+    // else: keep the system one resolved during the loader phase.
+
+    edvr::Log::get().note(
+        "chaining through %S -- %zu export(s) from it, %zu from the system d3d11.dll, "
+        "%zu unresolved",
+        path.c_str(), kExportCount - fromSystem - missing, fromSystem, missing);
 }
 
 INIT_ONCE g_initOnce = INIT_ONCE_STATIC_INIT;
@@ -155,9 +235,13 @@ BOOL CALLBACK initOnceCallback(PINIT_ONCE, PVOID, PVOID*) {
             "against this machine's d3d11.dll with build.bat",
             g_missingExports, kExportCount);
     }
+    // Now, out from under the loader lock, is when another proxy can safely be
+    // brought in.
+    chainThroughOtherProxy(cfg);
+
     // Which DLL is really being forwarded to, asked of the module itself rather
-    // than assumed. If someone reports that another mod stopped working, this
-    // line is the first thing worth seeing.
+    // than assumed -- intent and outcome can differ. If someone reports that
+    // another mod stopped working, this line is the first thing worth seeing.
     wchar_t realPath[MAX_PATH]{};
     const DWORD n = g_realModule ? GetModuleFileNameW(g_realModule, realPath, MAX_PATH) : 0;
     if (n == 0 || n >= MAX_PATH) wcscpy_s(realPath, L"(unknown)");

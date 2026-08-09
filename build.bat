@@ -109,6 +109,14 @@ cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /DNDEBUG ^
 if errorlevel 1 ( echo [edvr] ERROR: smoke build failed & exit /b 1 )
 echo [edvr] built %BUILD%\smoke.exe
 
+echo [edvr] === fakechain.dll ===
+if not exist "%OBJ%\fakechain" mkdir "%OBJ%\fakechain"
+cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /DNDEBUG /LD ^
+    /Fo"%OBJ%\fakechain\\" /Fe"%BUILD%\fakechain.dll" ^
+    "%ROOT%\tools\fakechain\fakechain.cpp" /link /INCREMENTAL:NO kernel32.lib
+if errorlevel 1 ( echo [edvr] ERROR: fakechain build failed & exit /b 1 )
+echo [edvr] built %BUILD%\fakechain.dll
+
 echo.
 echo [edvr] To install: copy build\d3d11.dll and edvr.ini next to
 echo        EliteDangerous64.exe. See README.md.

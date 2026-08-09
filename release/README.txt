@@ -4,11 +4,11 @@ EDVR - an unofficial patch for Elite Dangerous: Odyssey in VR
 Three fixes for things that make Odyssey uncomfortable in a headset.
 
 
-DO NOT INSTALL THIS IF YOU ALREADY USE EDHM OR RESHADE
+ALREADY RUNNING EDHM OR RESHADE?
 
-They also install themselves as d3d11.dll, only one file can have that name, and
-overwriting theirs will break them. Running both crashed the game on startup and
-that option has been removed. One or the other, for now.
+They install themselves as d3d11.dll too, and only one file can have that name,
+so do not just overwrite theirs. See RUNNING ALONGSIDE OTHER MODS below - it
+takes one rename and one setting.
 
 
 WHAT IT FIXES
@@ -41,7 +41,8 @@ INSTALL
 1. Close Elite Dangerous.
 
 2. Check there is no d3d11.dll already next to EliteDangerous64.exe. If there
-   is, stop - you have another mod installed and this will break it.
+   is, you have another mod installed - see RUNNING ALONGSIDE OTHER MODS below
+   before going any further, or you will break it.
 
 3. Copy d3d11.dll and edvr.ini into the folder containing
    EliteDangerous64.exe, normally:
@@ -63,6 +64,35 @@ edvr_logs folder you can also delete.
 
 Frontier's launcher may remove d3d11.dll by itself when it verifies the install.
 That is not a problem - it has simply uninstalled EDVR. Copy the file back.
+
+
+RUNNING ALONGSIDE OTHER MODS
+
+EDHM and ReShade also install themselves as d3d11.dll, and only one file can
+have that name. To run both:
+
+1. Rename the other mod's d3d11.dll to something else, for example
+   d3d11_edhm.dll, leaving it in the same folder.
+
+2. Put EDVR's d3d11.dll in its place.
+
+3. In edvr.ini, under [advanced], set:
+
+      real_dll = d3d11_edhm.dll
+
+EDVR then loads that file and passes everything through it, so both mods work.
+Anything the other mod does not handle goes to Windows' own d3d11.dll. Restart
+the game for it to take effect.
+
+If the name is wrong or the file will not load, EDVR says so in the log and
+carries on without it - the game still starts, you just do not get the other
+mod.
+
+One catch with EDHM: its uninstaller deletes a file called d3d11.dll, which
+after this is EDVR's, not EDHM's. Running it removes EDVR and leaves EDHM's
+renamed copy behind. To undo the pair cleanly, delete d3d11.dll and edvr.ini,
+rename d3d11_edhm.dll back to d3d11.dll, then use EDHM's uninstaller if you
+want EDHM gone too.
 
 
 SETTINGS
