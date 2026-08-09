@@ -1,0 +1,253 @@
+#!/usr/bin/env python3
+"""Generate forwarding thunks for a proxy DLL from a real DLL's export table.
+
+A proxy DLL has to export everything the original did or the process fails to
+start. Hand-maintaining that list is how proxies break on OS updates, so we read
+the export directory of the real binary and emit:
+
+  <out>/edvr_thunks_<tag>.asm   MASM: a pointer array plus one jmp thunk per export
+  <out>/edvr_<tag>.def          linker EXPORTS mapping real names -> thunk symbols
+  <out>/edvr_exports_<tag>.inc  C string array of names, in pointer-array order
+
+Exports named on the command line as --wrap are omitted from the thunks and
+mapped in the .def to a C++ implementation of the same name, so we can intercept
+a handful of entry points while everything else passes straight through.
+
+Pure stdlib PE parsing: no dumpbin, no pefile, nothing to install.
+"""
+
+import argparse
+import os
+import struct
+import sys
+
+IMAGE_DOS_SIGNATURE = 0x5A4D
+IMAGE_NT_SIGNATURE = 0x00004550
+PE32PLUS_MAGIC = 0x20B
+
+
+class PeError(Exception):
+    pass
+
+
+class PeFile:
+    def __init__(self, data: bytes):
+        self.data = data
+        if len(data) < 0x40:
+            raise PeError("file too small")
+        if struct.unpack_from("<H", data, 0)[0] != IMAGE_DOS_SIGNATURE:
+            raise PeError("not a PE file (bad MZ)")
+        e_lfanew = struct.unpack_from("<I", data, 0x3C)[0]
+        if struct.unpack_from("<I", data, e_lfanew)[0] != IMAGE_NT_SIGNATURE:
+            raise PeError("not a PE file (bad PE signature)")
+
+        coff = e_lfanew + 4
+        (self.machine, self.num_sections, _, _, _, opt_size, _) = struct.unpack_from(
+            "<HHIIIHH", data, coff
+        )
+        opt = coff + 20
+        magic = struct.unpack_from("<H", data, opt)[0]
+        if magic != PE32PLUS_MAGIC:
+            raise PeError("only PE32+ (x64) is supported; got magic 0x%X" % magic)
+
+        # Data directory count sits at a fixed offset within the PE32+ optional
+        # header; the export directory is entry 0.
+        num_dirs = struct.unpack_from("<I", data, opt + 108)[0]
+        if num_dirs < 1:
+            raise PeError("no data directories")
+        self.export_rva, self.export_size = struct.unpack_from("<II", data, opt + 112)
+
+        self.sections = []
+        sec = opt + opt_size
+        for i in range(self.num_sections):
+            base = sec + i * 40
+            name = data[base : base + 8].rstrip(b"\0").decode("ascii", "replace")
+            vsize, vaddr, rawsize, rawptr = struct.unpack_from("<IIII", data, base + 8)
+            self.sections.append((name, vaddr, vsize, rawptr, rawsize))
+
+    def rva_to_offset(self, rva: int) -> int:
+        for _, vaddr, vsize, rawptr, rawsize in self.sections:
+            if vaddr <= rva < vaddr + max(vsize, rawsize):
+                delta = rva - vaddr
+                if delta < rawsize:
+                    return rawptr + delta
+                raise PeError("RVA 0x%X is in uninitialised data" % rva)
+        raise PeError("RVA 0x%X not in any section" % rva)
+
+    def read_cstr(self, rva: int) -> str:
+        off = self.rva_to_offset(rva)
+        end = self.data.index(b"\0", off)
+        return self.data[off:end].decode("ascii", "replace")
+
+    def exports(self):
+        """Returns (dll_name, [(name_or_None, ordinal, is_forwarder)])."""
+        if self.export_rva == 0:
+            return ("", [])
+        off = self.rva_to_offset(self.export_rva)
+        # IMAGE_EXPORT_DIRECTORY: Characteristics, TimeDateStamp, MajorVersion,
+        # MinorVersion, Name, Base, NumberOfFunctions, NumberOfNames,
+        # AddressOfFunctions, AddressOfNames, AddressOfNameOrdinals.
+        (_char, _tds, _major, _minor, name_rva, ordinal_base, num_funcs,
+         num_names, funcs_rva, names_rva,
+         name_ords_rva) = struct.unpack_from("<IIHHIIIIIII", self.data, off)
+
+        dll_name = self.read_cstr(name_rva) if name_rva else ""
+
+        func_off = self.rva_to_offset(funcs_rva) if num_funcs else 0
+        func_rvas = [
+            struct.unpack_from("<I", self.data, func_off + 4 * i)[0]
+            for i in range(num_funcs)
+        ]
+
+        ordinal_to_name = {}
+        if num_names:
+            names_off = self.rva_to_offset(names_rva)
+            ords_off = self.rva_to_offset(name_ords_rva)
+            for i in range(num_names):
+                nrva = struct.unpack_from("<I", self.data, names_off + 4 * i)[0]
+                idx = struct.unpack_from("<H", self.data, ords_off + 2 * i)[0]
+                ordinal_to_name[idx] = self.read_cstr(nrva)
+
+        out = []
+        lo, hi = self.export_rva, self.export_rva + self.export_size
+        for idx, rva in enumerate(func_rvas):
+            if rva == 0:
+                continue
+            out.append(
+                (ordinal_to_name.get(idx), ordinal_base + idx, lo <= rva < hi)
+            )
+        return (dll_name, out)
+
+
+ASM_TEMPLATE_HEAD = """; Generated by tools/gen_exports.py from {source}
+; {named} named exports, {ordinal_only} ordinal-only, {wrapped} wrapped in C++.
+; Do not edit: regenerate with build.bat.
+;
+; Each thunk is a single indirect jmp through a slot the DLL fills at load time
+; with GetProcAddress against the real module. Leaf, no prologue, no unwind info
+; needed, and the tail jump leaves the caller's frame and arguments untouched
+; whatever the target's signature turns out to be.
+
+.DATA
+
+PUBLIC edvr_realProcs_{tag}
+edvr_realProcs_{tag} QWORD {count} DUP(0)
+
+.CODE
+
+; Substituted for any export the real module does not provide: returning zero
+; beats jumping through a null slot.
+PUBLIC edvr_unresolved_{tag}
+edvr_unresolved_{tag} PROC
+    xor eax, eax
+    ret
+edvr_unresolved_{tag} ENDP
+
+"""
+
+ASM_THUNK = """PUBLIC {sym}
+{sym} PROC
+    jmp QWORD PTR [edvr_realProcs_{tag} + {offset}]
+{sym} ENDP
+
+"""
+
+ASM_TEMPLATE_TAIL = """END
+"""
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--source", required=True, help="path to the real DLL")
+    ap.add_argument("--tag", required=True, help="short identifier, e.g. d3d11")
+    ap.add_argument("--out", required=True, help="output directory")
+    ap.add_argument(
+        "--wrap",
+        action="append",
+        default=[],
+        help="export implemented in C++ instead of thunked (repeatable)",
+    )
+    args = ap.parse_args()
+
+    try:
+        with open(args.source, "rb") as f:
+            pe = PeFile(f.read())
+        dll_name, exports = pe.exports()
+    except (PeError, OSError) as exc:
+        print("gen_exports: %s: %s" % (args.source, exc), file=sys.stderr)
+        return 1
+
+    wrapped = set(args.wrap)
+    named = [(n, o, f) for (n, o, f) in exports if n]
+    ordinal_only = [(n, o, f) for (n, o, f) in exports if not n]
+    thunked = [(n, o, f) for (n, o, f) in named if n not in wrapped]
+
+    missing = wrapped - {n for (n, _, _) in named}
+    if missing:
+        print(
+            "gen_exports: warning: --wrap names not exported by %s: %s"
+            % (dll_name or args.source, ", ".join(sorted(missing))),
+            file=sys.stderr,
+        )
+
+    os.makedirs(args.out, exist_ok=True)
+    tag = args.tag
+
+    asm_path = os.path.join(args.out, "edvr_thunks_%s.asm" % tag)
+    with open(asm_path, "w", newline="\r\n") as f:
+        f.write(
+            ASM_TEMPLATE_HEAD.format(
+                source=os.path.basename(args.source),
+                named=len(named),
+                ordinal_only=len(ordinal_only),
+                wrapped=len(wrapped) - len(missing),
+                tag=tag,
+                count=max(len(thunked), 1),
+            )
+        )
+        for i, (name, _ordinal, _fwd) in enumerate(thunked):
+            f.write(
+                ASM_THUNK.format(sym="edvr_%s_thunk_%d" % (tag, i), tag=tag, offset=i * 8)
+            )
+        f.write(ASM_TEMPLATE_TAIL)
+
+    def_path = os.path.join(args.out, "edvr_%s.def" % tag)
+    with open(def_path, "w", newline="\r\n") as f:
+        f.write("; Generated by tools/gen_exports.py from %s\n" % os.path.basename(args.source))
+        f.write("EXPORTS\n")
+        for i, (name, _ordinal, _fwd) in enumerate(thunked):
+            f.write("    %s = edvr_%s_thunk_%d\n" % (name, tag, i))
+        # Wrapped exports map to an edvr_impl_-prefixed C++ symbol so our
+        # definition can never collide with a declaration in a system header.
+        for name in sorted(wrapped - missing):
+            f.write("    %s = edvr_impl_%s\n" % (name, name))
+        for _name, ordinal, _fwd in ordinal_only:
+            # Kept so the ordinal space stays intact for anything importing by
+            # ordinal; resolved at runtime like the rest.
+            f.write("    ; ordinal-only export @%d not forwarded\n" % ordinal)
+
+    inc_path = os.path.join(args.out, "edvr_exports_%s.inc" % tag)
+    with open(inc_path, "w", newline="\r\n") as f:
+        f.write("// Generated by tools/gen_exports.py from %s\n"
+                % os.path.basename(args.source))
+        for name, _ordinal, _fwd in thunked:
+            f.write('    "%s",\n' % name)
+
+    forwarders = sum(1 for (_n, _o, fwd) in thunked if fwd)
+    print(
+        "gen_exports: %s -> %d thunks (%d forwarders), %d wrapped, %d ordinal-only"
+        % (os.path.basename(args.source), len(thunked), forwarders,
+           len(wrapped) - len(missing), len(ordinal_only))
+    )
+    if ordinal_only:
+        print(
+            "gen_exports: warning: %d ordinal-only exports were NOT reproduced; "
+            "if the host imports any of them by ordinal the proxy will fail to load"
+            % len(ordinal_only),
+            file=sys.stderr,
+        )
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

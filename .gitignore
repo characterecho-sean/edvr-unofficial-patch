@@ -1,0 +1,8 @@
+﻿build/
+dist/
+__pycache__/
+*.pyc
+*.edvrlog
+edvr_logs/
+edvr_FATAL.txt
+edvr_breadcrumbs.txt
