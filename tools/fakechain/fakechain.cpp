@@ -43,10 +43,20 @@ extern "C" __declspec(dllexport) HRESULT WINAPI D3D11CreateDevice(
     UINT numLevels, UINT sdk, void** device, UINT* got, void** ctx) {
     marker("D3D11CreateDevice went through fakechain");
     if (!g_system) {
-        wchar_t sys[MAX_PATH]{};
-        GetSystemDirectoryW(sys, MAX_PATH);
-        wcscat_s(sys, MAX_PATH, L"\\d3d11.dll");
-        g_system = LoadLibraryW(sys);
+        // Resolve "the original d3d11.dll" BY NAME, which is what a real proxy
+        // does and what 3Dmigoto does. This is the whole point of the test: the
+        // module already loaded under that name is edvr, so this hands back
+        // edvr's own export and the two call each other until the stack ends.
+        //
+        // A proxy that resolved the system path explicitly would not do this.
+        // 3Dmigoto does not, hence EDHM crashing when chained.
+        g_system = GetModuleHandleW(L"d3d11.dll");
+        if (!g_system) {
+            wchar_t sys[MAX_PATH]{};
+            GetSystemDirectoryW(sys, MAX_PATH);
+            wcscat_s(sys, MAX_PATH, L"\\d3d11.dll");
+            g_system = LoadLibraryW(sys);
+        }
     }
     if (!g_system) return E_FAIL;
     auto real = reinterpret_cast<PFN_Create>(GetProcAddress(g_system, "D3D11CreateDevice"));

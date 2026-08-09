@@ -49,6 +49,10 @@ typedef HRESULT(WINAPI* PFN_D3D11CreateDeviceAndSwapChain)(
 
 PFN_D3D11CreateDevice             g_realCreateDevice = nullptr;
 PFN_D3D11CreateDeviceAndSwapChain g_realCreateDeviceAndSwapChain = nullptr;
+// Windows' own, kept separately: when a chained proxy calls back into us these
+// are the only way out of the loop.
+PFN_D3D11CreateDevice             g_systemCreateDevice = nullptr;
+PFN_D3D11CreateDeviceAndSwapChain g_systemCreateDeviceAndSwapChain = nullptr;
 
 edvr::FaultBudget g_createBudget("D3D11CreateDevice", 3);
 
@@ -116,6 +120,9 @@ void loaderPhase() {
         GetProcAddress(g_realModule, "D3D11CreateDevice"));
     g_realCreateDeviceAndSwapChain = reinterpret_cast<PFN_D3D11CreateDeviceAndSwapChain>(
         GetProcAddress(g_realModule, "D3D11CreateDeviceAndSwapChain"));
+
+    g_systemCreateDevice = g_realCreateDevice;
+    g_systemCreateDeviceAndSwapChain = g_realCreateDeviceAndSwapChain;
 
     edvr::breadcrumb(g_realCreateDevice ? "gfx: exports resolved, loader phase done"
                                         : "gfx: FAILED no D3D11CreateDevice");
@@ -260,6 +267,42 @@ void shutdown() {
     edvr::Log::get().close();
 }
 
+// Depth of this thread's journey through our own device-creation exports.
+//
+// Breaks the loop when a chained proxy asks for "the original d3d11.dll" BY
+// NAME. The module already loaded under that name is us, so it gets our export
+// back, calls it, and we call the chain again -- forever. Verified: it ends in
+// STATUS_STACK_OVERFLOW, 0xC00000FD, with nothing logged, which is exactly what
+// EDHM users reported.
+//
+// 3Dmigoto resolves the original that way, so this is not a hypothetical.
+//
+// Depth 1 is the game calling us, and goes to the chain. Depth 2 or more is the
+// chain calling back, and must go to the system copy or nothing ever reaches
+// Direct3D.
+thread_local int g_createDepth = 0;
+
+struct CreateDepth {
+    CreateDepth() { ++g_createDepth; }
+    ~CreateDepth() { --g_createDepth; }
+    bool reentrant() const { return g_createDepth > 1; }
+};
+
+bool g_loopReported = false;
+
+void reportLoopOnce() {
+    if (g_loopReported) return;
+    g_loopReported = true;
+    // A breadcrumb as well as the log: breadcrumbs are written immediately with
+    // no buffering, so they survive whatever happens next.
+    edvr::breadcrumb("gfx: chained proxy called us back, routing it to the system dll");
+    edvr::Log::get().note(
+        "the chained proxy asked for d3d11.dll and got edvr, because that is the name "
+        "edvr is loaded under. Sending it to the system d3d11.dll instead, which is what "
+        "it actually wanted. Both mods still work; without this the two would call each "
+        "other until the stack ran out.");
+}
+
 }  // namespace
 
 // Exported as D3D11CreateDevice / D3D11CreateDeviceAndSwapChain by the
@@ -273,10 +316,19 @@ extern "C" HRESULT WINAPI edvr_impl_D3D11CreateDevice(
     if (!g_realCreateDevice) return E_FAIL;
     ensureInitialised();
 
+    CreateDepth depth;
+    PFN_D3D11CreateDevice target = g_realCreateDevice;
+    if (depth.reentrant()) {
+        reportLoopOnce();
+        target = g_systemCreateDevice ? g_systemCreateDevice : g_realCreateDevice;
+    }
+
     const HRESULT hr =
-        g_realCreateDevice(adapter, driverType, software, flags, featureLevels,
-                           numFeatureLevels, sdkVersion, ppDevice, pFeatureLevel, ppContext);
-    if (SUCCEEDED(hr) && ppDevice && *ppDevice) {
+        target(adapter, driverType, software, flags, featureLevels,
+               numFeatureLevels, sdkVersion, ppDevice, pFeatureLevel, ppContext);
+    // Only hook on the way out of the OUTERMOST call. Hooking the device a
+    // second time on the way back up would install our vtable copy twice.
+    if (SUCCEEDED(hr) && ppDevice && *ppDevice && !depth.reentrant()) {
         attachToDevice(*ppDevice, nullptr, driverType, flags, hr);
     }
     return hr;
@@ -291,10 +343,18 @@ extern "C" HRESULT WINAPI edvr_impl_D3D11CreateDeviceAndSwapChain(
     if (!g_realCreateDeviceAndSwapChain) return E_FAIL;
     ensureInitialised();
 
-    const HRESULT hr = g_realCreateDeviceAndSwapChain(
+    CreateDepth depth;
+    PFN_D3D11CreateDeviceAndSwapChain target = g_realCreateDeviceAndSwapChain;
+    if (depth.reentrant()) {
+        reportLoopOnce();
+        target = g_systemCreateDeviceAndSwapChain ? g_systemCreateDeviceAndSwapChain
+                                                  : g_realCreateDeviceAndSwapChain;
+    }
+
+    const HRESULT hr = target(
         adapter, driverType, software, flags, featureLevels, numFeatureLevels, sdkVersion,
         swapChainDesc, ppSwapChain, ppDevice, pFeatureLevel, ppContext);
-    if (SUCCEEDED(hr) && ppDevice && *ppDevice) {
+    if (SUCCEEDED(hr) && ppDevice && *ppDevice && !depth.reentrant()) {
         attachToDevice(*ppDevice, ppSwapChain ? *ppSwapChain : nullptr, driverType, flags, hr);
     }
     return hr;
