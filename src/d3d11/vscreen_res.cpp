@@ -52,6 +52,12 @@ namespace {
 // restart. That is not the risk profile of a patch that rewrites instructions.
 constexpr uint32_t kMinWidth = 640;      // below this it is not a render size
 
+// What Elite forces today. Used only to recognise "the user asked for the stock
+// resolution", which means do nothing -- NOT to find the sites, which is done
+// by shape so that a build forcing some other size still works.
+constexpr uint32_t kStockWidth = 1920;
+constexpr uint32_t kStockHeight = 1080;
+
 // A band, not an exact count, so a build that adds or drops a call site still
 // works. Zero means the shape is gone entirely; a large number means the shape
 // stopped being distinctive. Either is a refusal.
@@ -171,6 +177,27 @@ bool writeImm(uint8_t* at, uint32_t value) {
 
 bool applyVScreenModeResolution(uint32_t width, uint32_t height) {
     if (g_applied) return true;
+
+    // Asking for the stock resolution is asking for nothing, so do nothing --
+    // and do it BEFORE the scan, not after.
+    //
+    // This is what lets the shipped ini default to 1920x1080 rather than to 0.
+    // A default of 0 means "off" and reads as a missing value; 1920x1080 says
+    // what the game already does, so the setting documents itself and the
+    // numbers to change are right there. Either way nothing is written and the
+    // 81 MB scan never runs.
+    //
+    // The trade: on some future build that forces a different size, asking for
+    // exactly 1920x1080 will be treated as "leave it alone" rather than as an
+    // instruction to force it down to that. Worth it for a default that
+    // explains itself, and the log says which resolution the game is really
+    // forcing whenever the fix does run.
+    if (width == kStockWidth && height == kStockHeight) {
+        Log::get().note("vScreen resolution: off (set to %ux%u, which is the game's own "
+                        "resolution). Nothing was scanned and nothing was written.",
+                        width, height);
+        return false;
+    }
 
     // The game allocates render targets from these numbers, so absurd values
     // cost VRAM at best and fail allocation at worst.
