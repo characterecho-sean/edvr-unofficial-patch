@@ -86,6 +86,21 @@ void Config::parse() {
 
     const char* p = text.data();
     const char* end = p + read;
+
+    // Skip a UTF-8 byte order mark.
+    //
+    // Notepad writes one by default, so an edvr.ini a user edited and saved is
+    // likely to start with EF BB BF. Without this the BOM sticks to the front of
+    // the first line, "[fix]" stops looking like a section header, and every
+    // setting under it is filed under the WRONG section -- the file loads
+    // "successfully", the log looks clean, and nothing the user changed has any
+    // effect. Exactly the bug report nobody can diagnose.
+    if (read >= 3 && static_cast<unsigned char>(p[0]) == 0xEF &&
+        static_cast<unsigned char>(p[1]) == 0xBB &&
+        static_cast<unsigned char>(p[2]) == 0xBF) {
+        p += 3;
+    }
+
     std::string section;
     while (p < end) {
         const char* lineEnd = p;
