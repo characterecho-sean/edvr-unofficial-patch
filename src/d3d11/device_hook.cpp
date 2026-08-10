@@ -128,9 +128,16 @@ void hookDevice(ID3D11Device* device) {
     // The panel resolution, if asked for. Applied here because it has to land
     // before the game builds its render chain, and the device exists first.
     //
-    // Unlike everything else in this DLL, this writes to the game's code. It is
-    // off unless both values are set, refuses on any build but the one it was
-    // read from, and undoes itself on unload.
+    // Unlike everything else in this DLL, this writes to the game's code. It
+    // identifies what it edits by shape rather than by build, refuses if what it
+    // finds does not look right, and undoes itself on unload. Asking for the
+    // stock resolution -- which is what the shipped ini does -- is a no-op it
+    // takes before scanning anything.
+    //
+    // It is NOT part of the toggle hotkey, and cannot be: it changes what size
+    // the game ALLOCATES, so images already made keep the size they were made
+    // at. Switching it mid-session would leave a mix of both, which renders
+    // worse than either. Comparing it means changing the value and restarting.
     {
         Config& cfg = Config::get();
         const uint32_t w = static_cast<uint32_t>(cfg.getInt("fix.vscreen_res_width", 0));
