@@ -111,15 +111,14 @@ The black-void and screen-distance fixes key off the size of the images sent to
 the headset and the colour the screen's surround is cleared to, neither of which
 is version specific.
 
-**The resolution fix is the exception, deliberately.** It is tied to one exact
-game version, and after an Elite update it will switch itself off and say so in
-the log. That is by design: it edits the game's code, and code moves between
-versions, so anything short of certainty about what it is editing is not good
-enough. The other three fixes will carry on working. The resolution fix stays
-off until this patch is checked against the new version and released again — so
-if an update lands and your on-foot screen goes soft again, that is the
-safeguard doing its job, and the fix is to wait for a new release rather than to
-force it.
+**The resolution fix works the same way**, which is worth saying because it
+edits code and the obvious design would not. Pinning it to one game version
+would be safe and would also break it at every update, leaving it switched off
+more often than on. Instead it looks for the shape of the thing it changes — a
+check on which screen is being drawn, a forced 16:9 size, the real size read
+from the game's data otherwise — and that shape occurs in exactly six places.
+If a future version still forces the resolution this way, it will find it and
+say what it found. If it does not, it does nothing and says that instead.
 
 If anything stops matching, that fix does nothing, the game renders normally,
 and the log says so.
@@ -152,12 +151,22 @@ Its safeguards, because they are the reason to trust it:
 
 - **No file on disk is modified.** The change exists only in memory, and the
   original values are put back when the game closes.
-- **It refuses on any game version other than the one it was checked against.**
-  After an Elite update it switches itself off and says so in the log. That is
-  the intended behaviour, not a bug — the correct fix is for the patch to be
-  re-checked against the new version, not worked around.
-- **It refuses unless it finds exactly what it expects** — six sites, all
-  matching. Five or seven means the code has moved and it does nothing.
+- **It recognises the code it changes, rather than trusting a version number.**
+  It looks for a very specific shape: a check on which screen is being drawn,
+  a 16:9 size forced only in that case, and the real size read from the game's
+  own data otherwise. That shape occurs in exactly six places in 81 MB of code.
+  Identifying the thing being edited says more about whether it is the right
+  thing than a version number does.
+- **It refuses if what it finds looks wrong** — too few places, too many, or
+  places that disagree about which resolution is being forced. Any of those and
+  it does nothing and says so in the log.
+- **It cannot corrupt the game's code.** It replaces a number with another
+  number of the same size. Instruction lengths and program flow are untouched,
+  so there is no way for it to leave the game running something that means
+  anything different. The worst case, if it ever matched the wrong thing, is
+  something drawn at an odd size — visible, and gone on restart.
+- **It says what it found before changing it**, so the log shows the resolution
+  the game was really forcing rather than one this patch assumed.
 - **All or nothing.** If any single write fails, every earlier one is undone
   before it gives up. A half-applied resolution looks worse than none.
 

@@ -225,21 +225,20 @@ BOOL CALLBACK initOnceCallback(PINIT_ONCE, PVOID, PVOID*) {
                               "developed against",
                               build.c_str());
     } else {
-        // Not a warning for the three fixes that find their targets by shape --
-        // an unseen build is the expected case for those, and saying otherwise
-        // would send people chasing a problem they do not have.
+        // Not a warning. Every fix here identifies its target by what that
+        // target does or looks like, so an unfamiliar build is the expected
+        // case rather than a degraded one, and saying otherwise would send
+        // people chasing a problem they do not have.
         //
-        // It IS the deciding fact for the resolution fix, which edits code and
-        // is tied to one exact build. Saying "that is fine" without qualifying
-        // it would have been true when there were three fixes and is not true
-        // now.
+        // This line briefly said the resolution fix would refuse on an unknown
+        // build, which was true while it was pinned to one. It no longer is:
+        // it recognises the code it edits, and reports what it found.
         edvr::Log::get().note(
-            "game build %s -- not the build this was developed against (330683). The "
-            "brightness, black void and screen distance fixes are unaffected: they find "
-            "their targets by what those targets do, not by which build compiled them. "
-            "The on-foot RESOLUTION fix will refuse, because it edits code and code "
-            "moves between builds. If anything fails to match, the lines below say so "
-            "and nothing is touched.",
+            "game build %s -- not the build this was developed against (330683). Every "
+            "fix here finds its target by what that target does or looks like, not by "
+            "which build compiled it, so an unfamiliar build is expected rather than a "
+            "problem. If anything fails to match, the lines below say so and nothing is "
+            "touched.",
             build.empty() ? "(unreadable)" : build.c_str());
     }
 
