@@ -1,7 +1,7 @@
 EDVR - an unofficial patch for Elite Dangerous: Odyssey in VR
 =============================================================
 
-Three fixes for things that make Odyssey uncomfortable in a headset.
+Four fixes for things that make Odyssey uncomfortable in a headset.
 
 
 ALREADY RUNNING EDHM OR RESHADE?
@@ -31,9 +31,30 @@ dark. This makes it properly black.
 The on-foot screen's distance. Fixed by the game, adjustable here. The stock
 distance is the default because it is about right.
 
-It does NOT make the on-foot screen sharper. That is set in 29 different places
-inside the game and could not be changed from outside without breaking the
-picture. It was tried thoroughly.
+The on-foot screen's sharpness. OFF by default - read this bit before turning
+it on.
+
+Elite draws that screen at 1920x1080 whatever your headset can do, which is why
+text on foot looks soft. This raises it. 4K is a clear improvement, and it
+applies to HMD (Cinema Mode) too, which puts the whole game on that same screen.
+Set vscreen_res_width and vscreen_res_height in edvr.ini and restart the game.
+
+It is the one fix here that changes the game's code while it runs, and it is off
+until you choose otherwise. It does not touch any file on disk, it puts the
+original values back when the game closes, and it swaps one number for another
+of the same size - so the game runs the same instructions either way. It finds
+what to change by recognising its shape rather than by trusting a version
+number, and if it does not find exactly what it expects it does nothing and says
+so in the log.
+
+It also is not free. At 3840x2160 the game makes over a hundred images of about
+32 MB each, plus others that grow with it. If your frame rate drops below your
+headset's refresh, step down to 3200x1800 - juddering is worse than soft text.
+
+(Earlier versions of this file said the on-foot screen could not be made
+sharper, that it was set in 29 places and had been tried thoroughly. That was
+wrong. It is set in ONE place, six times over, and the 29 places were downstream
+of it.)
 
 
 INSTALL
@@ -100,7 +121,11 @@ SETTINGS
 Everything is in edvr.ini, next to the game, with a plain description above each
 setting. With the file missing you get the defaults, which are what most people
 want. The screen's blackness and distance can be changed while the game is
-running; the rest need a restart.
+running; the brightness fix and the sharpness fix need a restart.
+
+The sharpness setting ships showing 1920x1080 - Elite's own resolution - rather
+than being blank or zero, so you can see what the game does and what you would
+be changing it from. As shipped it does nothing.
 
 
 IF SOMETHING GOES WRONG
@@ -114,22 +139,36 @@ nothing personal.
 
 GAME UPDATES
 
-The brightness fix finds its target by what it does rather than by which version
-of Elite compiled it, so a game update should not break it. If anything ever
-stops matching, that fix does nothing, the game renders normally, and the log
-says so.
+Every fix here finds its target by what that target does or looks like, rather
+than by which version of Elite compiled it, so a game update should not break
+them. If anything ever stops matching, that fix does nothing, the game renders
+normally, and the log says so.
 
 Developed against game build 330683 (4.4.0.3).
 
 
 WHAT IT DOES AND DOES NOT DO
 
-Does: loads alongside the game as a d3d11.dll proxy, forwarding every call to
-Windows' real d3d11.dll, and changes three things about how frames are drawn.
+Loads alongside the game as a d3d11.dll proxy, forwarding every call to Windows'
+real d3d11.dll.
 
-Does not: modify, patch or write to the game's memory or any game file. Touch
-the network, your account, or anything the server sees. Read or change gameplay
-state. Interact with anti-cheat.
+Three of the four fixes never touch the game at all. They change how frames are
+drawn from outside it. With the sharpness fix left off - which is how it ships -
+nothing in the game's memory is read or written.
+
+The sharpness fix is the exception. To raise the on-foot screen's resolution it
+rewrites twelve numbers in the game's code, in memory, while it runs: the width
+and height that screen is forced to, in the six places the game sets them.
+Nothing else is touched. No file on disk is modified, and the original values go
+back when the game closes.
+
+None of the four touches the network, your account, or anything the server sees.
+None reads or changes gameplay state - your position, ship, cargo, credits or
+missions. None interacts with anti-cheat, and none tries to hide from anything.
+
+If you would rather nothing here went near the game's code, leave
+vscreen_res_width and vscreen_res_height at 1920x1080 and it behaves exactly as
+earlier versions did.
 
 
 ANTIVIRUS
