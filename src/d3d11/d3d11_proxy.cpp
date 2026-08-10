@@ -225,14 +225,21 @@ BOOL CALLBACK initOnceCallback(PINIT_ONCE, PVOID, PVOID*) {
                               "developed against",
                               build.c_str());
     } else {
-        // Not a warning. The fix finds its pass by shape, so a build it has never
-        // seen is the expected case, not a degraded one -- and saying otherwise
+        // Not a warning for the three fixes that find their targets by shape --
+        // an unseen build is the expected case for those, and saying otherwise
         // would send people chasing a problem they do not have.
+        //
+        // It IS the deciding fact for the resolution fix, which edits code and
+        // is tied to one exact build. Saying "that is fine" without qualifying
+        // it would have been true when there were three fixes and is not true
+        // now.
         edvr::Log::get().note(
-            "game build %s -- not the build the fix was developed against (330683). "
-            "That is fine: the pass is found by what it does, not by which build "
-            "compiled it. If detection fails, the lines below say so and nothing is "
-            "touched.",
+            "game build %s -- not the build this was developed against (330683). The "
+            "brightness, black void and screen distance fixes are unaffected: they find "
+            "their targets by what those targets do, not by which build compiled them. "
+            "The on-foot RESOLUTION fix will refuse, because it edits code and code "
+            "moves between builds. If anything fails to match, the lines below say so "
+            "and nothing is touched.",
             build.empty() ? "(unreadable)" : build.c_str());
     }
 

@@ -28,6 +28,14 @@ rectangle instead of darkness. This makes it properly black.
 distance is the default because it is about right — this is for anyone whose
 comfort differs.
 
+**The on-foot screen's resolution.** *Off by default — see the warning below.*
+Elite renders that screen at 1920x1080 regardless of your headset, which is why
+text on foot looks soft. This raises it; 4K is a clear improvement and also
+applies to HMD (Cinema Mode). It costs GPU time and video memory in proportion,
+and it is the one fix here that changes the game's code in memory — read
+[What it does and does not do](#what-it-does-and-does-not-do) before enabling
+it.
+
 ## Install
 
 1. Close Elite Dangerous.
@@ -99,9 +107,19 @@ result and runs exactly twice per frame, once per eye, and requires that to hold
 for five frames running before it acts. Identifying it by a fixed fingerprint
 instead would break on every game update.
 
-The other two fixes key off the size of the images sent to the headset and the
-colour the screen's surround is cleared to, neither of which is version
-specific.
+The black-void and screen-distance fixes key off the size of the images sent to
+the headset and the colour the screen's surround is cleared to, neither of which
+is version specific.
+
+**The resolution fix is the exception, deliberately.** It is tied to one exact
+game version, and after an Elite update it will switch itself off and say so in
+the log. That is by design: it edits the game's code, and code moves between
+versions, so anything short of certainty about what it is editing is not good
+enough. The other three fixes will carry on working. The resolution fix stays
+off until this patch is checked against the new version and released again — so
+if an update lands and your on-foot screen goes soft again, that is the
+safeguard doing its job, and the fix is to wait for a new release rather than to
+force it.
 
 If anything stops matching, that fix does nothing, the game renders normally,
 and the log says so.
@@ -114,14 +132,43 @@ not a fault — it has simply uninstalled EDVR. Copy the file back.
 ## What it does and does not do
 
 It loads alongside the game as a `d3d11.dll` proxy, forwarding every call to
-Windows' real `d3d11.dll`. It changes three things about how frames are drawn:
-one extra copy per frame so both eyes share an exposure value, one substituted
-argument to a screen-clearing call, and — only if you change the distance — one
-substituted copy of the panel's position for two draws.
+Windows' real `d3d11.dll`.
 
-It does not modify, patch or write to the game's memory or any game file. It
-does not touch the network, your account, or anything the server sees. It does
-not read or change gameplay state, and it does not interact with anti-cheat.
+**Three of the four fixes never touch the game.** They change how frames are
+drawn from outside it: one extra copy per frame so both eyes share an exposure
+value, one substituted argument to a screen-clearing call, and — only if you
+change the distance — one substituted copy of the panel's position for two
+draws. With the resolution fix off, nothing in the game's memory is read or
+written.
+
+**The resolution fix is different, and it is off by default.** To raise the
+on-foot screen's resolution it rewrites twelve numbers in the game's code, in
+memory, while it runs. Those twelve numbers are the width and height the game
+forces for that screen, in the six places it does so. Nothing else is touched —
+not the surrounding instructions, not the game's decision about which screen to
+draw, not anything outside those twelve values.
+
+Its safeguards, because they are the reason to trust it:
+
+- **No file on disk is modified.** The change exists only in memory, and the
+  original values are put back when the game closes.
+- **It refuses on any game version other than the one it was checked against.**
+  After an Elite update it switches itself off and says so in the log. That is
+  the intended behaviour, not a bug — the correct fix is for the patch to be
+  re-checked against the new version, not worked around.
+- **It refuses unless it finds exactly what it expects** — six sites, all
+  matching. Five or seven means the code has moved and it does nothing.
+- **All or nothing.** If any single write fails, every earlier one is undone
+  before it gives up. A half-applied resolution looks worse than none.
+
+For all four fixes: nothing touches the network, your account, or anything the
+server sees. Nothing reads or changes gameplay state — your position, ship,
+cargo, credits or missions. Nothing interacts with anti-cheat, and nothing
+attempts to hide from anything.
+
+If you would rather no part of this went near the game's code, leave
+`vscreen_res_width` and `vscreen_res_height` at 0 and the DLL behaves exactly as
+earlier versions did.
 
 ## Build
 

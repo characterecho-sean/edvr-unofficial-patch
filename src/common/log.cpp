@@ -100,7 +100,7 @@ bool Log::open(const std::wstring& dir, const wchar_t* tag) {
     }
 
     m_open = true;
-    note("EDVR log -- per-eye brightness fix for Elite Dangerous in VR");
+    note("EDVR log -- unofficial VR fixes for Elite Dangerous: Odyssey");
     note("If you are reporting a problem, paste this whole file.");
     return true;
 }

@@ -11,6 +11,7 @@
 #include "../common/vtable_hook.h"
 #include "exposure_fix.h"
 #include "vscreen.h"
+#include "vscreen_res.h"
 
 namespace edvr {
 namespace {
@@ -123,6 +124,19 @@ void hookDevice(ID3D11Device* device) {
 
     installExposureFix(device);
     installVScreenFixes(device);
+
+    // The panel resolution, if asked for. Applied here because it has to land
+    // before the game builds its render chain, and the device exists first.
+    //
+    // Unlike everything else in this DLL, this writes to the game's code. It is
+    // off unless both values are set, refuses on any build but the one it was
+    // read from, and undoes itself on unload.
+    {
+        Config& cfg = Config::get();
+        const uint32_t w = static_cast<uint32_t>(cfg.getInt("fix.vscreen_res_width", 0));
+        const uint32_t h = static_cast<uint32_t>(cfg.getInt("fix.vscreen_res_height", 0));
+        if (w && h) applyVScreenModeResolution(w, h);
+    }
     hookFactoryForDevice(device);
 }
 
@@ -192,6 +206,7 @@ void hookFactoryForDevice(ID3D11Device* device) {
 void shutdownDeviceHooks() {
     // Reverse of install order: vScreen's vtable copy was taken on top of the
     // exposure fix's, so it comes off first.
+    revertVScreenModeResolution();
     shutdownVScreenFixes();
     shutdownExposureFix();
     if (!g_state) return;
