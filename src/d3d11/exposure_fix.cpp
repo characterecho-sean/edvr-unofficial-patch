@@ -1,4 +1,4 @@
-#include "exposure_fix.h"
+﻿#include "exposure_fix.h"
 
 #include <windows.h>
 
@@ -63,6 +63,9 @@ struct State {
     bool     gaveUpNotice = false;
 
     uint32_t seenThisFrame = 0;
+    // Whether the game did ANY compute work this frame. The give-up notice
+    // counts these frames rather than all frames -- see exposureFixFrameBoundary.
+    bool     computeThisFrame = false;
     ID3D11UnorderedAccessView* firstEye[4] = {nullptr, nullptr, nullptr, nullptr};
     uint64_t applied = 0;
     bool     rejected = false;
@@ -252,6 +255,11 @@ void STDMETHODCALLTYPE hookedDispatch(ID3D11DeviceContext* self, UINT x, UINT y,
     State* s = g_state;
     const bool isTarget = isExposureDispatch();
 
+    // Any compute work at all means the game is rendering a scene, which is the
+    // only condition under which the exposure pass could appear. Menus and
+    // loading screens do not count -- see the frame counter at the boundary.
+    s->computeThisFrame = true;
+
     s->realDispatch(self, x, y, z);
     if (!isTarget) return;
 
@@ -310,7 +318,18 @@ void exposureFixFrameBoundary() {
     // Say so when detection comes up empty. Otherwise a build where the shape
     // stopped matching produces a log identical to one where the user never got
     // into VR, and there is no way to tell those apart from a bug report.
-    ++s->frames;
+    // Count frames in which the game did compute work, NOT frames since launch.
+    //
+    // Counting every frame fired this notice during a loading screen: 5000
+    // frames went by in three seconds, and the target was found 68 ms later. The
+    // log then read "NOT ENGAGED ... the game is stock" directly above the line
+    // announcing detection -- exactly the thing that produces a bug report about
+    // a fix that is working.
+    //
+    // A frame with no compute work is a frame in which the exposure pass could
+    // not have run, so it is not evidence of anything.
+    if (s->computeThisFrame) ++s->frames;
+    s->computeThisFrame = false;
     if (!s->announced && !s->gaveUpNotice && s->frames >= kGiveUpFrames) {
         s->gaveUpNotice = true;
         Log::get().note(
@@ -408,3 +427,4 @@ void shutdownExposureFix() {
 }
 
 }  // namespace edvr
+
