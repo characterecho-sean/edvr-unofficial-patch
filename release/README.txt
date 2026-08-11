@@ -1,7 +1,7 @@
 EDVR - an unofficial patch for Elite Dangerous: Odyssey in VR
 =============================================================
 
-Four fixes for things that make Odyssey uncomfortable in a headset.
+Five fixes for things that make Odyssey uncomfortable in a headset.
 
 
 ALREADY RUNNING EDHM OR RESHADE?
@@ -30,6 +30,17 @@ dark. This makes it properly black.
 
 The on-foot screen's distance. Fixed by the game, adjustable here. The stock
 distance is the default because it is about right.
+
+The one-frame flash when you jump or drop out of supercruise. Once per
+transition Elite draws a single frame from the wrong viewpoint - a hard cut to
+somewhere else and straight back. On a monitor it is a blink; in a headset the
+visual system reads it as the world lurching. EDVR spots that frame and does not
+send it to your headset, so SteamVR holds the previous frame for a moment
+instead, exactly as it does whenever a game misses a frame.
+
+This one needs a second file installed, and it installs differently from the
+rest - see the openvr folder in this download, which has its own instructions.
+Everything else works without it.
 
 The on-foot screen's sharpness. OFF by default - read this bit before turning
 it on.
@@ -130,11 +141,18 @@ be changing it from. As shipped it does nothing.
 
 IF SOMETHING GOES WRONG
 
-Delete d3d11.dll. The game returns to normal immediately.
+Delete d3d11.dll. The game returns to normal immediately. If you installed the
+transition flash fix too, also delete the openvr_api.dll you copied in and
+rename openvr_api_orig.dll back.
 
-If you report a problem, include edvr_logs\edvr_gfx_*.log. It is plain text -
+If you report a problem, include everything in edvr_logs\. It is plain text -
 open it in Notepad and paste the whole thing. It is a few kilobytes and contains
 nothing personal.
+
+If you saw a flash that got through, press PAUSE right after it and then quit.
+That writes the last ten seconds of viewpoint history to the log, which shows
+whether the frame was spotted and let through or never spotted at all. Those are
+different problems and the log is the only thing that tells them apart.
 
 
 GAME UPDATES
@@ -144,6 +162,12 @@ than by which version of Elite compiled it, so a game update should not break
 them. If anything ever stops matching, that fix does nothing, the game renders
 normally, and the log says so.
 
+The transition flash fix is the one exception, because there is nothing to
+recognise - the viewpoint it watches is a block of numbers rather than code. So
+it checks the numbers instead: a viewpoint moves smoothly, and it requires what
+it finds to behave that way over 300 rendered frames before it will act on it.
+If a game update moves that block, it disables itself and says so.
+
 Developed against game build 330683 (4.4.0.3).
 
 
@@ -152,9 +176,13 @@ WHAT IT DOES AND DOES NOT DO
 Loads alongside the game as a d3d11.dll proxy, forwarding every call to Windows'
 real d3d11.dll.
 
-Three of the four fixes never touch the game at all. They change how frames are
+All but one of the fixes never touch the game at all. They change how frames are
 drawn from outside it. With the sharpness fix left off - which is how it ships -
-nothing in the game's memory is read or written.
+nothing in the game's memory is written.
+
+The transition flash fix reads one thing from the game: where the renderer is
+drawing from. That is camera state, not gameplay state. It never writes to what
+it reads, and the only action it can take is to not forward one call to SteamVR.
 
 The sharpness fix is the exception. To raise the on-foot screen's resolution it
 rewrites twelve numbers in the game's code, in memory, while it runs: the width
@@ -162,7 +190,7 @@ and height that screen is forced to, in the six places the game sets them.
 Nothing else is touched. No file on disk is modified, and the original values go
 back when the game closes.
 
-None of the four touches the network, your account, or anything the server sees.
+None of them touches the network, your account, or anything the server sees.
 None reads or changes gameplay state - your position, ship, cargo, credits or
 missions. None interacts with anti-cheat, and none tries to hide from anything.
 
