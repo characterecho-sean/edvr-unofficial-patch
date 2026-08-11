@@ -16,8 +16,8 @@
 //
 // Refuses unless it finds exactly six sites, refuses on an unverified game
 // build, rolls back completely if any single write fails, and reverts on
-// unload. A partially applied resolution renders worse than none -- 6m.2
-// established that by shipping one.
+// unload. A partially applied resolution renders worse than none, as an earlier
+// version of this established the hard way by shipping one.
 #pragma once
 
 #include <cstdint>

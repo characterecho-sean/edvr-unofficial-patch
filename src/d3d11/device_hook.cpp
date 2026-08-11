@@ -1,4 +1,4 @@
-#include "device_hook.h"
+﻿#include "device_hook.h"
 
 #include <windows.h>
 
@@ -11,6 +11,7 @@
 #include "../common/vtable_hook.h"
 #include "exposure_fix.h"
 #include "vscreen.h"
+#include "glitch_frame.h"
 #include "vscreen_res.h"
 
 namespace edvr {
@@ -47,6 +48,7 @@ struct State {
     PFN_CreateSwapChainForHwnd realCreateSwapChainForHwnd = nullptr;
 
     Hotkey toggleKey;
+    Hotkey dumpKey;
 };
 
 State* g_state = nullptr;
@@ -68,6 +70,9 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
     const HRESULT hr = g_state->realPresent(self, syncInterval, flags);
     guardedBudget(g_budget, [&] {
         if (g_state->toggleKey.pressed()) toggleExposureFix();
+        // Deliberately not part of the toggle: it reports, it does not change
+        // anything, so there is no reason for it to follow the fix being off.
+        if (g_state->dumpKey.pressed()) dumpCameraRing();
         exposureFixFrameBoundary();
         vScreenFrameBoundary();
     });
@@ -97,6 +102,8 @@ State& ensureState() {
         g_state = new State();
         g_state->toggleKey.setKey(virtualKeyFromName(
             Config::get().getString("hotkey.toggle_exposure", "SCROLLLOCK").c_str()));
+        g_state->dumpKey.setKey(virtualKeyFromName(
+            Config::get().getString("hotkey.dump_camera", "PAUSE").c_str()));
     }
     return *g_state;
 }
@@ -124,6 +131,7 @@ void hookDevice(ID3D11Device* device) {
 
     installExposureFix(device);
     installVScreenFixes(device);
+    installGlitchFrameFix();
 
     // The panel resolution, if asked for. Applied here because it has to land
     // before the game builds its render chain, and the device exists first.
@@ -214,6 +222,7 @@ void shutdownDeviceHooks() {
     // Reverse of install order: vScreen's vtable copy was taken on top of the
     // exposure fix's, so it comes off first.
     revertVScreenModeResolution();
+    shutdownGlitchFrameFix();
     shutdownVScreenFixes();
     shutdownExposureFix();
     if (!g_state) return;
@@ -223,3 +232,4 @@ void shutdownDeviceHooks() {
 }
 
 }  // namespace edvr
+

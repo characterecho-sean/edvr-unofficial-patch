@@ -1,6 +1,6 @@
 # EDVR — an unofficial patch for Elite Dangerous: Odyssey in VR
 
-Three fixes for things that make Odyssey uncomfortable in a headset.
+Fixes for things that make Odyssey uncomfortable in a headset.
 
 > **Already running EDHM or ReShade?** They install themselves as `d3d11.dll`
 > too, and only one file can have that name — so don't just overwrite theirs.
@@ -18,6 +18,20 @@ is — uncomfortable, and hard to unsee once noticed.
 Measured on a held view at a star: the eyes differed by about **1.5 stops**
 without the fix and about **0.4** with it. What remains is the glow around the
 star in the eye that can actually see it, which is correct.
+
+*Written up in detail in [docs/eye-brightness.md](docs/eye-brightness.md) —
+what causes it, how it was measured, and what a fix inside the game would be.*
+
+**The one-frame flash when you jump or drop out of supercruise.** Once per
+transition, Elite draws a single frame from the wrong viewpoint — a hard cut to
+somewhere else and straight back. On a monitor it is a blink; in a headset the
+visual system reads it as the world lurching. EDVR spots that frame and does not
+send it to your headset, so SteamVR holds the previous frame for a moment
+instead. **This one needs a second file installed — see [Install](#install).**
+
+*Written up in detail in [docs/transition-flash.md](docs/transition-flash.md) —
+three consecutive frames measured in three different coordinate spaces, and what
+would fix it properly.*
 
 **The grey haze around the on-foot screen.** On foot, Elite shows the world on a
 flat screen floating in front of you, surrounded by dark grey — RGB(32,32,32).
@@ -50,6 +64,36 @@ Press **Scroll Lock** in game to toggle the brightness fix on and off. Look at a
 star with one eye dimmed and press it — the difference is immediate.
 
 **Uninstall:** delete those two files.
+
+### The transition flash fix needs one more step
+
+Optional, and separate because it installs differently: it **replaces** a file
+the game ships rather than adding one. Everything else works without it.
+
+The reason it cannot ride along with `d3d11.dll` is that the decision not to show
+a frame has to be made where frames are handed to SteamVR, and that is
+`openvr_api.dll`.
+
+1. Close Elite Dangerous.
+2. Go to
+   `%LOCALAPPDATA%\Frontier_Developments\Products\elite-dangerous-odyssey-64\Openvr\win64`.
+3. **Rename** the `openvr_api.dll` already there to `openvr_api_orig.dll`. Do not
+   delete it — EDVR loads it and passes everything through to it.
+4. Copy EDVR's `openvr_api.dll` (from the `openvr` folder of the release) into
+   its place.
+5. Start the game.
+
+**Uninstall:** delete the file you copied in and rename `openvr_api_orig.dll`
+back.
+
+To check it worked, look for a second log in `edvr_logs\` with `vr` in the name.
+It should say `compositor hook installed on IVRCompositor_014`. If it says the
+compositor version is not one this build knows, the fix is off, the game runs
+normally, and the version string it prints is worth reporting.
+
+If you see a flash anyway, press **Pause** straight after it and send the logs —
+that writes the last ten seconds of viewpoint history, which is what separates
+"detected and let through" from "never detected".
 
 ## Settings
 
@@ -120,6 +164,21 @@ from the game's data otherwise — and that shape occurs in exactly six places.
 If a future version still forces the resolution this way, it will find it and
 say what it found. If it does not, it does nothing and says that instead.
 
+**The transition flash fix is the exception, and it is worth being direct about
+it.** Everything above finds its target by recognising a shape. This one cannot:
+the viewpoint it watches is a block of numbers in a constant buffer, and there is
+no instruction pattern to recognise — only a size and an offset, both measured
+from build 330683.
+
+So it does the next best thing and checks the *data* instead of trusting the
+address. A viewpoint moves, and it moves smoothly enough that a straight-line
+guess from the previous two frames is usually close. EDVR watches the first 300
+rendered frames and requires what it finds to behave that way. If a game update
+moves that block, what is at the old offset will not move like a viewpoint, and
+the fix disables itself and says so in the log rather than acting on nonsense.
+It also switches itself off for the session if it ever starts withholding frames
+continuously, because permanent judder would be worse than the flash.
+
 If anything stops matching, that fix does nothing, the game renders normally,
 and the log says so.
 
@@ -131,14 +190,16 @@ not a fault — it has simply uninstalled EDVR. Copy the file back.
 ## What it does and does not do
 
 It loads alongside the game as a `d3d11.dll` proxy, forwarding every call to
-Windows' real `d3d11.dll`.
+Windows' real `d3d11.dll`. If you install the transition flash fix as well, that
+adds an `openvr_api.dll` proxy which forwards every call to the game's own copy.
 
-**Three of the four fixes never touch the game.** They change how frames are
+**All but one of the fixes never touch the game.** They change how frames are
 drawn from outside it: one extra copy per frame so both eyes share an exposure
-value, one substituted argument to a screen-clearing call, and — only if you
-change the distance — one substituted copy of the panel's position for two
-draws. With the resolution fix off, nothing in the game's memory is read or
-written.
+value, one substituted argument to a screen-clearing call, one substituted copy
+of the panel's position for two draws if you change the distance, and — for the
+transition flash — reading a constant buffer the game has already filled and, on
+the rare frame that was drawn from the wrong place, not forwarding one call to
+SteamVR. With the resolution fix off, nothing in the game's memory is written.
 
 **The resolution fix is different, and it is off by default.** To raise the
 on-foot screen's resolution it rewrites twelve numbers in the game's code, in
@@ -170,10 +231,15 @@ Its safeguards, because they are the reason to trust it:
 - **All or nothing.** If any single write fails, every earlier one is undone
   before it gives up. A half-applied resolution looks worse than none.
 
-For all four fixes: nothing touches the network, your account, or anything the
+For every fix here: nothing touches the network, your account, or anything the
 server sees. Nothing reads or changes gameplay state — your position, ship,
 cargo, credits or missions. Nothing interacts with anti-cheat, and nothing
 attempts to hide from anything.
+
+The transition flash fix reads one thing from the game — where the renderer is
+drawing from — and that is camera state, not gameplay state. It is read only, it
+never writes to the buffer it reads, and the only action it can take is to not
+forward a call.
 
 If you would rather no part of this went near the game's code, leave
 `vscreen_res_width` and `vscreen_res_height` at 0 and the DLL behaves exactly as
@@ -182,8 +248,7 @@ earlier versions did.
 ## Build
 
 Needs Visual Studio 2022 with the C++ workload, and Python. Python is used only
-to read the export table of your system `d3d11.dll`, so the proxy exports
-exactly what the original does.
+to read export tables, so each proxy exports exactly what the original does.
 
 ```
 build.bat
@@ -195,6 +260,17 @@ without needing the game or a headset:
 ```
 build\smoke.exe build\d3d11.dll
 ```
+
+`build\openvr_api.dll` is built too, if it can find a copy of `openvr_api.dll` to
+read exports from — it looks in the game's install and in `reference\`. Unlike
+`d3d11.dll` that file is not a Windows component, so there is no system copy to
+fall back on. Point it at one explicitly with:
+
+```
+build.bat --openvr "path\to\openvr_api.dll"
+```
+
+Without it everything except the transition flash fix still builds.
 
 ## Antivirus
 

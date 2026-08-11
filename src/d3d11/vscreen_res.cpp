@@ -265,8 +265,8 @@ bool applyVScreenModeResolution(uint32_t width, uint32_t height) {
                         width, height, srcW, srcH);
     }
 
-    // All or nothing. A half-applied resolution renders worse than none -- 6m.2
-    // established that by shipping one.
+    // All or nothing. A half-applied resolution renders worse than none, as an
+    // earlier version of this established the hard way by shipping one.
     size_t done = 0;
     for (; done < found; ++done) {
         if (!writeImm(g_sites[done].width, width)) break;

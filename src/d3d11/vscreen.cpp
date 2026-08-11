@@ -12,6 +12,7 @@
 #include "../common/guard.h"
 #include "../common/log.h"
 #include "../common/vtable_hook.h"
+#include "glitch_frame.h"
 
 namespace edvr {
 namespace {
@@ -86,6 +87,15 @@ struct State {
     void*    mappedResource = nullptr;
     void*    mappedData = nullptr;
     uint32_t mappedBytes = 0;
+
+    // A second mapped buffer, tracked only so the transition-flash detector can
+    // read the camera the game wrote. Separate from the pair above because the
+    // panel transform and the scene camera live in different buffers and can be
+    // mapped at the same time -- sharing one slot let whichever unmapped second
+    // overwrite the other's record.
+    void*    camResource = nullptr;
+    void*    camData = nullptr;
+    uint32_t camBytes = 0;
 
     uint32_t eyeDrawsThisFrame = 0;
     uint32_t eyeDrawsLastFrame = 0;
@@ -251,6 +261,27 @@ HRESULT STDMETHODCALLTYPE hookedMap(ID3D11DeviceContext* self, ID3D11Resource* r
             s->mappedData = mapped->pData;
             s->mappedBytes = d.ByteWidth;
         }
+    } else if (SUCCEEDED(hr) && mapped && sub == 0 && res) {
+        // The scene camera buffer, for the transition-flash detector, recognised
+        // by size.
+        //
+        // GetType FIRST. Map is called on textures as well as buffers, and
+        // ID3D11Buffer::GetDesc and ID3D11Texture2D::GetDesc occupy the same
+        // vtable slot on their respective interfaces -- so calling the buffer
+        // one on a texture writes a 44-byte texture description into the
+        // 20-byte buffer description below. That is a stack smash, and it
+        // brought the whole process down on the first frame.
+        D3D11_RESOURCE_DIMENSION dim = D3D11_RESOURCE_DIMENSION_UNKNOWN;
+        res->GetType(&dim);
+        if (dim == D3D11_RESOURCE_DIMENSION_BUFFER) {
+            D3D11_BUFFER_DESC d{};
+            static_cast<ID3D11Buffer*>(res)->GetDesc(&d);
+            if (glitchFrameWantsBuffer(d.ByteWidth)) {
+                s->camResource = res;
+                s->camData = mapped->pData;
+                s->camBytes = d.ByteWidth;
+            }
+        }
     }
     return hr;
 }
@@ -268,6 +299,14 @@ void STDMETHODCALLTYPE hookedUnmap(ID3D11DeviceContext* self, ID3D11Resource* re
         s->mappedResource = nullptr;
         s->mappedData = nullptr;
         s->mappedBytes = 0;
+    }
+    if (res == s->camResource && s->camData) {
+        // Same rule as above: read before forwarding, because after the real
+        // Unmap the memory is no longer ours to look at.
+        guardedBudget(g_budget, [&] { glitchFrameObserve(s->camData, s->camBytes); });
+        s->camResource = nullptr;
+        s->camData = nullptr;
+        s->camBytes = 0;
     }
     s->realUnmap(self, res, sub);
 }
@@ -309,6 +348,9 @@ void vScreenFrameBoundary() {
     // it. The render mode rarely changes between consecutive frames, and when it
     // does the override skips one.
     s->eyeDrawsLastFrame = s->eyeDrawsThisFrame;
+    // The flash detector needs the count for the frame that just ended, to tell
+    // a rendered scene from a menu. It has to be told before the counter resets.
+    glitchFrameBoundary(s->eyeDrawsLastFrame);
     s->eyeDrawsThisFrame = 0;
 }
 

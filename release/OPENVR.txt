@@ -1,0 +1,78 @@
+EDVR - the transition flash fix (optional)
+==========================================
+
+This folder holds ONE file: openvr_api.dll.
+
+It stops the single-frame flash you sometimes get when you jump, drop out of
+supercruise, or close the galaxy map -- where the world cuts to somewhere else
+for one frame and straight back.
+
+You do not need it for any of the other fixes. If you skip this folder
+entirely, everything else in EDVR still works.
+
+
+WHY IT INSTALLS DIFFERENTLY
+---------------------------
+
+d3d11.dll is a file you ADD next to the game. This one REPLACES a file the game
+already ships. So it takes one extra step: you rename Elite's copy first, and
+EDVR loads it and passes everything through to it.
+
+Nothing is deleted. Undoing it is renaming one file back.
+
+
+INSTALL
+-------
+
+1. Close Elite Dangerous.
+
+2. Go to the game's OpenVR folder, normally:
+
+   %LOCALAPPDATA%\Frontier_Developments\Products\elite-dangerous-odyssey-64\Openvr\win64
+
+   Paste that into the Explorer address bar if you cannot find it.
+
+3. RENAME the openvr_api.dll already there to:
+
+       openvr_api_orig.dll
+
+   Do not delete it. EDVR needs it -- it does the actual work, and EDVR only
+   watches one call.
+
+4. Copy the openvr_api.dll from THIS folder into that folder.
+
+5. Start the game.
+
+
+CHECK IT WORKED
+---------------
+
+Look in edvr_logs\ next to the game. There will be a second log file with "vr"
+in the name. It should say:
+
+    compositor hook installed on IVRCompositor_014
+
+If it says the compositor version is not one this build knows, the fix is off
+and the game is running normally -- please report the version string it prints.
+
+
+IF SOMETHING GOES WRONG
+-----------------------
+
+Delete the openvr_api.dll you copied in, and rename openvr_api_orig.dll back to
+openvr_api.dll. That is a complete uninstall.
+
+If the game will not start at all, do that first, then send the log.
+
+EDVR refuses to install this hook a second time if a previous run crashed while
+it was active -- it leaves a marker file and checks for it on startup. So a
+crash here does not repeat on the next launch.
+
+
+IF YOU STILL SEE A FLASH
+------------------------
+
+Press Pause right after it happens, then quit and send edvr_logs\. That writes
+the last ten seconds of viewpoint history to the log, which shows whether the
+frame was spotted and let through or never spotted at all. Without it a report
+is only "I saw a flash", which is not something anyone can act on.
