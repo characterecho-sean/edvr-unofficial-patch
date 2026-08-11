@@ -152,12 +152,20 @@ void validate() {
             s->bufferBytes, s->posOffset, s->validateFrames);
         return;
     }
+    // By now the compositor hook has long since seen its first eight Submit
+    // calls, so this is a reliable moment to say whether the other half is
+    // there -- and the most visible line in the log to say it on.
     Log::get().note(
         "transition flash fix ACTIVE: watching the camera at float %u of the %u-byte "
         "scene buffer, which moved in %u of the first %u frames. Threshold %.0f world "
-        "units, or %.1fx the current speed, whichever is larger.",
+        "units, or %.1fx the current speed, whichever is larger. %s",
         s->posOffset, s->bufferBytes, s->validateMoved, s->validateFrames,
-        s->jumpMin, s->jumpFactor);
+        s->jumpMin, s->jumpFactor,
+        glitchConsumerPresent()
+            ? "openvr_api.dll is installed, so bad frames will be withheld."
+            : "WARNING: openvr_api.dll is NOT installed, so bad frames will be "
+              "detected and logged but NOT withheld -- you will still see the flash. "
+              "See the openvr folder in the download.");
 }
 
 }  // namespace
@@ -341,13 +349,17 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
         ++s->windowWithheld;
         if (s->notesLeft > 0) {
             --s->notesLeft;
+            const bool acted = glitchConsumerPresent();
             Log::get().note(
                 "transition flash: frame %u was drawn from %.0f world units off the "
                 "camera's path (threshold %.0f), at (%+.0f %+.0f %+.0f) with %u eye "
-                "draws. Withheld; SteamVR will reproject the previous frame. %u this "
-                "session.",
+                "draws. %s %u detected this session.",
                 s->frameNo, s->lastResid, s->lastTrip, s->frameFarPos[0],
-                s->frameFarPos[1], s->frameFarPos[2], gateDraws, s->framesWithheld);
+                s->frameFarPos[1], s->frameFarPos[2], gateDraws,
+                acted ? "Withheld; SteamVR will reproject the previous frame."
+                      : "NOT withheld -- openvr_api.dll is not installed, so nothing "
+                        "was in a position to stop it being shown.",
+                s->framesWithheld);
         }
     } else if (s->jumpedThisFrame) {
         unmarkGlitchFrame();
@@ -496,11 +508,23 @@ void shutdownGlitchFrameFix() {
     if (!s || !s->enabled) return;
     if (s->disabledForSession) {
         Log::get().note("transition flash fix: disabled during the session, see above.");
+    } else if (!glitchConsumerPresent()) {
+        // Says DETECTED, never "withheld". This half cannot withhold anything on
+        // its own, and a summary claiming otherwise would tell somebody who
+        // skipped the second file that the fix had been working all along.
+        Log::get().note(
+            "transition flash fix: %u bad frame(s) detected this session, and NONE of "
+            "them were withheld -- openvr_api.dll is not installed, so the detection "
+            "had nothing to act on. Everything else in EDVR works without it; only "
+            "this fix needs it. See the openvr folder in the download.",
+            s->framesWithheld);
     } else {
         Log::get().note(
             "transition flash fix: %u frame(s) withheld this session. Compare that "
             "against how many jumps, drops and map closes happened: roughly one per "
-            "transition is it working, many more means it is firing on something else.",
+            "transition is it working, many more means it is firing on something else. "
+            "The openvr log counts the same frames from the other side and should read "
+            "exactly twice this, once per eye.",
             s->framesWithheld);
     }
     g_state = nullptr;

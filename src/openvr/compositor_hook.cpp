@@ -140,6 +140,10 @@ vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
         if (++s->submitCalls >= 8 && s->eyesSeen == 3u) {
             s->validated = true;
             if (s->sentinel) s->sentinel->confirm();
+            // Announced only now, not at install: the d3d11 side is asking
+            // "will anything actually act on what I detect", and a hook that has
+            // not proved it is on the right slot is not an answer to that.
+            announceGlitchConsumer();
             Log::get().note("compositor hook validated after %u calls (both eyes seen)",
                             s->submitCalls);
         }

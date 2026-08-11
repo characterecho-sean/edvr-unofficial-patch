@@ -43,4 +43,14 @@ void unmarkGlitchFrame();
 // point rather than reusing this one.
 void clearGlitchFrame();
 
+// Announced by openvr_api.dll once its hook is validated, and read by d3d11.dll.
+//
+// The two halves install separately and the openvr one is optional, so d3d11 can
+// detect a bad frame and have nothing on the other end to act on it. Without
+// this the log would report "12 frames withheld" to somebody who skipped the
+// second file and had none withheld at all -- which is exactly the kind of
+// counter that gets believed and wastes a day.
+void announceGlitchConsumer();
+bool glitchConsumerPresent();
+
 }  // namespace edvr

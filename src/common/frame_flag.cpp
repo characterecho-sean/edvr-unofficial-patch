@@ -14,6 +14,9 @@ namespace {
 struct Shared {
     volatile LONG flag;
     volatile LONG counted;
+    // Set by openvr_api.dll when its hook is live. Without it, d3d11.dll is
+    // detecting bad frames that nothing is in a position to withhold.
+    volatile LONG consumer;
 };
 
 // Session-local, so two copies of the game do not share one flag.
@@ -56,6 +59,16 @@ void clearGlitchFrame() {
     if (!s) return;
     InterlockedExchange(&s->flag, 0);
     InterlockedExchange(&s->counted, 0);
+}
+
+void announceGlitchConsumer() {
+    Shared* s = map();
+    if (s) InterlockedExchange(&s->consumer, 1);
+}
+
+bool glitchConsumerPresent() {
+    Shared* s = map();
+    return s && InterlockedCompareExchange(&s->consumer, 0, 0) != 0;
 }
 
 }  // namespace edvr
