@@ -30,6 +30,10 @@ constexpr size_t kSlotUnmap                 = 15;
 constexpr size_t kSlotDrawIndexedInstanced  = 20;
 constexpr size_t kSlotDrawInstanced         = 21;
 constexpr size_t kSlotOMSetRenderTargets    = 33;
+// The other way to bind render targets. Same effect on slot 0, and it is the
+// call an engine makes whenever a UAV is bound alongside -- so leaving it out
+// meant the binding could change without us seeing it.
+constexpr size_t kSlotOMSetRtvAndUav        = 34;
 constexpr size_t kSlotClearRenderTargetView = 50;
 constexpr size_t kHighestSlotUsed           = 50;
 
@@ -51,11 +55,9 @@ typedef void(STDMETHODCALLTYPE* PFN_OMSetRenderTargets)(ID3D11DeviceContext*, UI
                                                         ID3D11DepthStencilView*);
 typedef void(STDMETHODCALLTYPE* PFN_ClearRtv)(ID3D11DeviceContext*,
                                               ID3D11RenderTargetView*, const FLOAT[4]);
-
-// Most draws into eye-sized targets a frame may hold and still be the on-foot
-// panel. On foot it is exactly 2, one per eye. In the cockpit the scene is
-// drawn per eye and it is in the hundreds -- which is why this bound exists.
-constexpr uint32_t kMaxPanelDraws = 4;
+typedef void(STDMETHODCALLTYPE* PFN_OMSetRtvAndUav)(
+    ID3D11DeviceContext*, UINT, ID3D11RenderTargetView* const*, ID3D11DepthStencilView*,
+    UINT, UINT, ID3D11UnorderedAccessView* const*, const UINT*);
 
 struct State {
     VTableHook hook;
@@ -69,6 +71,7 @@ struct State {
     PFN_Map                  realMap = nullptr;
     PFN_Unmap                realUnmap = nullptr;
     PFN_OMSetRenderTargets   realOMSetRenderTargets = nullptr;
+    PFN_OMSetRtvAndUav       realOMSetRtvAndUav = nullptr;
     PFN_ClearRtv             realClearRtv = nullptr;
 
     bool  blackVoid = true;
@@ -105,15 +108,24 @@ struct State {
 
     uint32_t eyeDrawsThisFrame = 0;
     uint32_t eyeDrawsLastFrame = 0;
+    // Keep counting eye draws even when the panel distance fix is off, because
+    // the transition-flash detector cannot act without the count.
+    bool     countForFlashFix = false;
     uint64_t voidClears = 0;
     // Grey voids forced to black in one frame, and the smallest and largest
-    // counts seen across every frame that forced at least one.
+    // counts seen SINCE THE LAST REPORT.
     //
-    // Both eyes are cleared the same way, so a healthy session has one count and
-    // repeats it: min == max. A session where they differ had frames that
-    // treated one eye and not the other, which is what a one-eye grey void looks
-    // like from in here -- and it is worth being able to read that off a log
-    // instead of asking whether it looked right.
+    // Both eyes are cleared the same way, so a healthy window has one count and
+    // repeats it: min == max. A window where they differ had frames that treated
+    // one eye and not the other, which is what a one-eye grey void looks like
+    // from in here -- and it is worth being able to read that off a log instead
+    // of asking whether it looked right.
+    //
+    // Per report window, not per session. Session-wide extremes never recover: a
+    // single odd frame during a mode change pins the low end at 1 and every
+    // later report then accuses the fix of a fault that stopped happening
+    // minutes ago. A window that resets says what is true NOW, which is the only
+    // thing a reader can act on.
     uint32_t voidThisFrame = 0;
     uint32_t voidFrameMin = 0xFFFFFFFFu;
     uint32_t voidFrameMax = 0;
@@ -125,7 +137,6 @@ struct State {
     uint32_t totalsTick = 0;
     uint32_t panelMissW[8] = {}, panelMissH[8] = {};
     uint32_t panelMissCount = 0;
-    bool     panelMissNoted = false;
     uint64_t panelOverrides = 0;
 
     // Answers about the CURRENTLY BOUND views, computed on first use and thrown
@@ -168,6 +179,14 @@ bool targetIsEyeSized(void* rtv) {
     if (!rtv) return false;
 
     bool out = false;
+    // Under SEH, because the pointer is only as good as the binding that named
+    // it. The hooks below see every rebind we know how to see, but not every one
+    // that exists -- ClearState and ExecuteCommandList both drop the binding
+    // without passing through here -- so a released view can still be named by
+    // curRtv0 for the rest of a frame. Resolving it then reads freed memory.
+    // The fix for that is the frame-boundary reset in vScreenFrameBoundary; this
+    // is what turns the remaining window into a skipped draw instead of a crash.
+    guardedBudget(g_budget, [&] {
     ID3D11Resource* res = nullptr;
     static_cast<ID3D11View*>(rtv)->GetResource(&res);
     if (res) {
@@ -196,6 +215,7 @@ bool targetIsEyeSized(void* rtv) {
         }
         res->Release();
     }
+    });  // guardedBudget
     return out;
 }
 
@@ -208,11 +228,6 @@ bool isFlatGrey(const FLOAT c[4]) {
     return fabsf(c[0] - c[1]) < 1e-4f && fabsf(c[1] - c[2]) < 1e-4f;
 }
 
-// Swaps in a modified copy of the panel's transform for one draw.
-//
-// Nothing of the game's is written to. Its own values are copied into a buffer
-// of ours with one number changed, ours is used for the draw, and the original
-// is put back immediately after.
 // Does this draw sample the on-foot panel?
 //
 // The panel is whatever size the game forces for that view mode -- 1920x1080 by
@@ -226,32 +241,40 @@ bool srv0IsPanelSized(State* s) {
 
     bool out = false;
     uint32_t lastW = 0, lastH = 0;
-    ID3D11Resource* res = nullptr;
-    static_cast<ID3D11View*>(s->curPsSrv0)->GetResource(&res);
-    if (res) {
-        D3D11_RESOURCE_DIMENSION dim = D3D11_RESOURCE_DIMENSION_UNKNOWN;
-        res->GetType(&dim);
-        if (dim == D3D11_RESOURCE_DIMENSION_TEXTURE2D) {
-            D3D11_TEXTURE2D_DESC d{};
-            static_cast<ID3D11Texture2D*>(res)->GetDesc(&d);
-            lastW = d.Width;
-            lastH = d.Height;
-            out = (d.Width == w && d.Height == h);
+    // Guarded for the same reason as targetIsEyeSized: a view we last saw bound
+    // is not proof of a view that is still alive.
+    guardedBudget(g_budget, [&] {
+        ID3D11Resource* res = nullptr;
+        static_cast<ID3D11View*>(s->curPsSrv0)->GetResource(&res);
+        if (res) {
+            D3D11_RESOURCE_DIMENSION dim = D3D11_RESOURCE_DIMENSION_UNKNOWN;
+            res->GetType(&dim);
+            if (dim == D3D11_RESOURCE_DIMENSION_TEXTURE2D) {
+                D3D11_TEXTURE2D_DESC d{};
+                static_cast<ID3D11Texture2D*>(res)->GetDesc(&d);
+                lastW = d.Width;
+                lastH = d.Height;
+                out = (d.Width == w && d.Height == h);
+            }
+            res->Release();
         }
-        res->Release();
-    }
+    });
     // What an eye-sized draw sampled when it was NOT the panel.
     //
     // In HMD Cinema Mode the override applies once a frame rather than twice, so
     // one of the two composite draws reads something else -- and one eye is
     // corrected while the other is not. Guessing at what it reads has been the
     // expensive move all day; this records the sizes and says them once.
-    if (!out && !s->panelMissNoted) {
+    //
+    // "Once" means once per distinct size, up to eight, which is what the table
+    // below enforces. A panelMissNoted flag used to appear in this condition; it
+    // was never assigned anywhere, so it said nothing about anything.
+    if (!out && s->panelMissCount < 8) {
         bool known = false;
         for (uint32_t i = 0; i < s->panelMissCount; ++i) {
             if (s->panelMissW[i] == lastW && s->panelMissH[i] == lastH) { known = true; break; }
         }
-        if (!known && s->panelMissCount < 8) {
+        if (!known) {
             s->panelMissW[s->panelMissCount] = lastW;
             s->panelMissH[s->panelMissCount] = lastH;
             ++s->panelMissCount;
@@ -267,12 +290,29 @@ bool srv0IsPanelSized(State* s) {
     return out;
 }
 
+// Swaps in a modified copy of the panel's transform for one draw.
+//
+// Nothing of the game's is written to. Its own values are copied into a buffer
+// of ours with one number changed, ours is used for the draw, and the original
+// is put back immediately after.
 bool beginPanelOverride(ID3D11DeviceContext* self) {
     State* s = g_state;
-    if (!s->distanceEnabled) return false;
+    // Counting eye draws is not part of the panel distance fix, even though it
+    // happens here.
+    //
+    // The transition-flash detector needs this count to tell a rendered scene
+    // from a menu, and it is the only place the count can be taken. It used to
+    // sit below the distanceEnabled test, so with panel_distance at its shipped
+    // default of 1.0 nothing counted, the count stayed 0, and the flash fix --
+    // which is on by default and asks the user to replace a file in their game
+    // install -- never withheld a single frame. It reported itself as armed
+    // throughout. Two features that have nothing to do with each other, and one
+    // silently switched the other off.
+    if (!s->distanceEnabled && !s->countForFlashFix) return false;
     if (s->curRtv0Eye < 0) s->curRtv0Eye = targetIsEyeSized(s->curRtv0) ? 1 : 0;
     if (s->curRtv0Eye == 0) return false;
     ++s->eyeDrawsThisFrame;
+    if (!s->distanceEnabled) return false;
 
     // An eye-sized target is not enough on its own: in the cockpit hundreds of
     // draws land in those textures and rebinding on all of them would corrupt
@@ -300,7 +340,16 @@ bool beginPanelOverride(ID3D11DeviceContext* self) {
         return false;
     }
     if (cb != s->compositeCb || s->shadowBytes == 0) return false;
-    if (s->distanceIndex * 4u + 4u > s->shadowBytes) return false;
+    // 64-bit, because the operands are not.
+    //
+    // panel_distance_index is read with strtol and cast to uint32_t, so a
+    // negative in the ini arrives as a huge positive: -1 becomes 0xFFFFFFFF,
+    // and 0xFFFFFFFF * 4u + 4u wraps to exactly 0. The check then passed and
+    // the write below went about 16 GB past a 256-byte buffer. edvr.ini invites
+    // the user to change this number if a game update moves the field, so it is
+    // reachable from a documented, hand-edited setting -- and nothing here is
+    // wrapped in guarded(), so it took the process down rather than degrading.
+    if (static_cast<uint64_t>(s->distanceIndex) * 4ull + 4ull > s->shadowBytes) return false;
 
     const uint32_t bytes = s->shadowBytes;
     if (!s->ourCb || s->ourCbBytes != bytes) {
@@ -369,6 +418,24 @@ void STDMETHODCALLTYPE hookedOMSetRenderTargets(ID3D11DeviceContext* self, UINT 
     // address after a rebind is not evidence of an identical view.
     g_state->curRtv0Eye = -1;
     g_state->realOMSetRenderTargets(self, n, rtvs, dsv);
+}
+
+void STDMETHODCALLTYPE hookedOMSetRtvAndUav(ID3D11DeviceContext* self, UINT n,
+                                            ID3D11RenderTargetView* const* rtvs,
+                                            ID3D11DepthStencilView* dsv, UINT uavStart,
+                                            UINT uavCount,
+                                            ID3D11UnorderedAccessView* const* uavs,
+                                            const UINT* counts) {
+    // D3D11_KEEP_RENDER_TARGETS_UNCHANGED asks for the UAVs to be set while the
+    // render targets are left alone, so it says nothing about slot 0 and must
+    // not be treated as a rebind. Spelled out rather than named: the SDK header
+    // this builds against does not define the constant.
+    constexpr UINT kKeepRenderTargetsUnchanged = 0xFFFFFFFFu;
+    if (n != kKeepRenderTargetsUnchanged) {
+        g_state->curRtv0 = (n && rtvs) ? rtvs[0] : nullptr;
+        g_state->curRtv0Eye = -1;
+    }
+    g_state->realOMSetRtvAndUav(self, n, rtvs, dsv, uavStart, uavCount, uavs, counts);
 }
 
 void STDMETHODCALLTYPE hookedPSSetShaderResources(ID3D11DeviceContext* self, UINT start,
@@ -480,6 +547,26 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
     if (on) endPanelOverride(self);
 }
 
+// Read panel_distance_index, refusing anything that cannot be a float index.
+//
+// getInt goes through strtol, so the ini can supply a negative or something
+// enormous, and a cast to uint32_t turns both into a huge unsigned. The shadow
+// buffer holds sizeof(shadow)/4 floats and nothing outside that range can ever
+// be the field we want, so the value is rejected here rather than defended
+// against at the point of the write.
+uint32_t readDistanceIndex(Config& cfg) {
+    constexpr int kMaxIndex = static_cast<int>(sizeof(State::shadow) / sizeof(float)) - 1;
+    const int raw = cfg.getInt("advanced.panel_distance_index", 47);
+    if (raw < 0 || raw > kMaxIndex) {
+        Log::get().note("vScreen: panel_distance_index = %d is outside 0..%d and cannot "
+                        "be a position in that buffer. Using 47. Panel distance is "
+                        "unaffected by the bad value rather than acting on it.",
+                        raw, kMaxIndex);
+        return 47u;
+    }
+    return static_cast<uint32_t>(raw);
+}
+
 }  // namespace
 
 void vScreenRefreshConfig() {
@@ -495,8 +582,8 @@ void vScreenRefreshConfig() {
     s->blackVoid = cfg.getBool("fix.black_void", true);
     s->distanceScale = cfg.getFloat("fix.panel_distance", 1.0f);
     s->distanceEnabled = s->distanceScale != 1.0f;
-    s->distanceIndex =
-        static_cast<uint32_t>(cfg.getInt("advanced.panel_distance_index", 47));
+    s->distanceIndex = readDistanceIndex(cfg);
+    s->countForFlashFix = glitchFrameNeedsEyeDraws();
 
     if (wasVoid != s->blackVoid || wasScale != s->distanceScale) {
         Log::get().note("vScreen config reloaded: black void %s, panel distance x%.3f "
@@ -508,6 +595,23 @@ void vScreenRefreshConfig() {
 void vScreenFrameBoundary() {
     State* s = g_state;
     if (!s) return;
+
+    // Forget which views were bound, once a frame.
+    //
+    // Not because the per-binding answers go stale on their own -- they are
+    // recomputed at every rebind we can see -- but because we cannot see every
+    // rebind. ClearState, ExecuteCommandList and a command list replayed onto
+    // this context all drop the binding without passing through a hook, and
+    // after any of those curRtv0 names a view that may already be gone.
+    //
+    // Bounding that to a single frame is what the deleted panelSrcCache clear
+    // used to do by accident. Removing it in the same change that removed the
+    // maps took away a safety net that was doing real work.
+    s->curRtv0 = nullptr;
+    s->curPsSrv0 = nullptr;
+    s->curRtv0Eye = -1;
+    s->curPsSrv0Panel = -1;
+
     if (s->eyeDrawsThisFrame > s->eyeDrawsMax) s->eyeDrawsMax = s->eyeDrawsThisFrame;
 
     // Frames that forced nothing are menus and loading screens, not asymmetry.
@@ -527,17 +631,23 @@ void vScreenFrameBoundary() {
         s->totalsTick = 0;
         Log::get().note(
             "vScreen totals: panel distance applied %llu time(s), void cleared to black "
-            "%llu time(s) (%u-%u per frame), largest eye-draw count %u. Two eyes a "
-            "frame, so these should climb steadily; if they stop, the fix engaged once "
-            "and then stopped matching. The per-frame void range should be a single "
-            "number repeated -- a low end below the high end means some frames treated "
-            "one eye and not the other. The eye-draw count is 2 at the stock panel "
-            "resolution, and much larger means intermediate targets are being miscounted "
-            "as eye textures.",
+            "%llu time(s) (%u-%u per frame over the last 1800), largest eye-draw count "
+            "%u. Two eyes a frame, so these should climb steadily; if they stop, the fix "
+            "engaged once and then stopped matching. The per-frame void range should be "
+            "a single number repeated -- a low end below the high end means some frames "
+            "in THIS window treated one eye and not the other. The eye-draw count is 2 "
+            "at the stock panel resolution, and much larger means intermediate targets "
+            "are being miscounted as eye textures.",
             static_cast<unsigned long long>(s->panelOverrides),
             static_cast<unsigned long long>(s->voidClears),
             s->voidFrameMin == 0xFFFFFFFFu ? 0u : s->voidFrameMin, s->voidFrameMax,
             s->eyeDrawsMax);
+        // Reset for the next window. A session-wide extreme never recovers: one
+        // odd frame during a mode change pins the low end at 1 and every later
+        // report then accuses the fix of a fault that stopped happening long
+        // ago. The reader needs to know what is true now.
+        s->voidFrameMin = 0xFFFFFFFFu;
+        s->voidFrameMax = 0;
     }
 
     s->eyeDrawsLastFrame = s->eyeDrawsThisFrame;
@@ -570,8 +680,10 @@ void installVScreenFixes(ID3D11Device* device) {
     g_state->blackVoid = wantVoid;
     g_state->distanceScale = scale;
     g_state->distanceEnabled = scale != 1.0f;
-    g_state->distanceIndex =
-        static_cast<uint32_t>(cfg.getInt("advanced.panel_distance_index", 47));
+    g_state->distanceIndex = readDistanceIndex(cfg);
+    // installGlitchFrameFix is called before this, deliberately, so this is its
+    // settled answer rather than a guess about config it has not read yet.
+    g_state->countForFlashFix = glitchFrameNeedsEyeDraws();
 
     // Only when the panel is actually being raised past the eye-sized threshold.
     // At the stock size it is below it anyway and there is nothing to exclude.
@@ -594,6 +706,11 @@ void installVScreenFixes(ID3D11Device* device) {
         Log::get().note("vScreen: context vtable unusable; not installing");
         s.hook.uninstall();
         ctx->Release();
+        // g_state back to null, not merely leaked. Leaving it set makes the
+        // guard at the top of this function refuse a later attempt, and leaves
+        // the periodic totals reporting on a fix that was never installed.
+        delete g_state;
+        g_state = nullptr;
         return;
     }
 
@@ -601,6 +718,8 @@ void installVScreenFixes(ID3D11Device* device) {
                    reinterpret_cast<void**>(&s.realClearRtv));
     s.hook.replace(kSlotOMSetRenderTargets, &hookedOMSetRenderTargets,
                    reinterpret_cast<void**>(&s.realOMSetRenderTargets));
+    s.hook.replace(kSlotOMSetRtvAndUav, &hookedOMSetRtvAndUav,
+                   reinterpret_cast<void**>(&s.realOMSetRtvAndUav));
     s.hook.replace(kSlotPSSetShaderResources, &hookedPSSetShaderResources,
                    reinterpret_cast<void**>(&s.realPSSetShaderResources));
     s.hook.replace(kSlotVSSetConstantBuffers, &hookedVSSetConstantBuffers,
@@ -619,12 +738,18 @@ void installVScreenFixes(ID3D11Device* device) {
         Log::get().note("vScreen: vtable commit failed; not installing");
         s.hook.uninstall();
         ctx->Release();
+        delete g_state;
+        g_state = nullptr;
         return;
     }
 
-    Log::get().note("vScreen fixes installed: black void %s, panel distance %s",
+    Log::get().note("vScreen fixes installed: black void %s, panel distance %s, eye-draw "
+                    "counting %s",
                     s.blackVoid ? "on" : "off",
-                    s.distanceEnabled ? "on" : "off (1.0)");
+                    s.distanceEnabled ? "on" : "off (1.0)",
+                    (s.distanceEnabled || s.countForFlashFix)
+                        ? "on"
+                        : "OFF -- the transition flash fix cannot act without it");
     ctx->Release();
 }
 

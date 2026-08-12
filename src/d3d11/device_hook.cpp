@@ -135,8 +135,11 @@ void hookDevice(ID3D11Device* device) {
     s.device = device;
 
     installExposureFix(device);
-    installVScreenFixes(device);
+    // Before the vScreen fixes, which ask it whether it needs the eye-draw
+    // count. It installs no hooks of its own -- it is driven from vScreen's Map
+    // and Unmap -- so nothing else depends on the order.
     installGlitchFrameFix();
+    installVScreenFixes(device);
 
     // The panel resolution, if asked for. Applied here because it has to land
     // before the game builds its render chain, and the device exists first.

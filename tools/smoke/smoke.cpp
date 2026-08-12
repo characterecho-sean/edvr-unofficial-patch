@@ -136,34 +136,76 @@ int main(int argc, char** argv) {
     // Alternating sizes matters. A small target teaches the wrong answer, and
     // the eye-sized target that follows it is the one that has to come back
     // black anyway.
+    // Skipping this must never read as passing it.
+    //
+    // The loop below used to be guarded by "&& blackVoidOn" and nothing else, so
+    // a run with black_void = 0 skipped the entire regression check and still
+    // printed SMOKE TEST PASSED. The one condition the test exists to catch was
+    // indistinguishable from a configuration choice -- and so was a vtable
+    // rejection, or a chained proxy swallowing the clear.
+    bool regressionRan = false;
     if (rc == 0 && blackVoidOn) {
         const int kRounds = 16;
-        int black = 0, measured = 0;
+        int black = 0, measured = 0, greyKept = 0, greyMeasured = 0;
         for (int i = 0; i < kRounds; ++i) {
             // Not named "small": windows.h defines that as char, via rpcndr.h.
             unsigned char tiny[3] = {0, 0, 0};
-            clearGreyReadBack(device, ctx, 256, 256, tiny);  // freed before the next
+            if (clearGreyReadBack(device, ctx, 256, 256, tiny)) {  // freed before the next
+                ++greyMeasured;
+                // A 256x256 target is not an eye texture and must come back
+                // UNCHANGED. This is the other direction the bug fails in: a
+                // stale "yes, eye-sized" attached to a recycled small view would
+                // blacken something the fix has no business touching, and the
+                // all-black assertion below cannot see that at all.
+                if (tiny[0] == 32 && tiny[1] == 32 && tiny[2] == 32) ++greyKept;
+            }
             unsigned char big[3] = {0, 0, 0};
             if (!clearGreyReadBack(device, ctx, 2048, 2048, big)) continue;
             ++measured;
             if (big[0] == 0 && big[1] == 0 && big[2] == 0) ++black;
         }
-        if (measured == 0) {
-            rc = fail("could not repeat the eye-sized clear");
-        } else if (black == measured) {
-            printf("  ok    %d eye-sized clears across %d view create/destroy rounds, "
-                   "all black\n",
-                   measured, kRounds);
+        if (measured == 0 || greyMeasured == 0) {
+            rc = fail("could not repeat the clears");
         } else {
-            printf("  FAIL  %d of %d eye-sized clears came back black\n", black, measured);
-            printf("        A view test is remembering an answer past the life of the "
-                   "view it came from.\n");
-            rc = 1;
+            regressionRan = true;
+            if (black == measured) {
+                printf("  ok    %d eye-sized clears across %d view create/destroy rounds, "
+                       "all black\n",
+                       measured, kRounds);
+            } else {
+                printf("  FAIL  %d of %d eye-sized clears came back black\n", black,
+                       measured);
+                printf("        A view test is remembering an answer past the life of "
+                       "the view it came from.\n");
+                rc = 1;
+            }
+            if (greyKept == greyMeasured) {
+                printf("  ok    %d non-eye clears left alone\n", greyMeasured);
+            } else {
+                printf("  FAIL  %d of %d non-eye clears were altered\n",
+                       greyMeasured - greyKept, greyMeasured);
+                printf("        The fix is acting on targets that are not eye "
+                       "textures.\n");
+                rc = 1;
+            }
         }
     }
 
     ctx->Release();
     device->Release();
-    printf("\n%s\n", rc == 0 ? "SMOKE TEST PASSED" : "SMOKE TEST FAILED");
-    return rc;
+
+    if (rc != 0) {
+        printf("\nSMOKE TEST FAILED\n");
+        return rc;
+    }
+    if (!regressionRan) {
+        // Deliberately not a failure -- black_void = 0 is a legitimate setting --
+        // but it must not be reported as a clean run either.
+        printf("\nSMOKE TEST PASSED, BUT THE VIEW-RECYCLING CHECK DID NOT RUN\n");
+        printf("        It needs the black void fix active. Set black_void = 1 in an\n");
+        printf("        edvr.ini next to the DLL to exercise it.\n");
+        return 0;
+    }
+    printf("\nSMOKE TEST PASSED\n");
+    return 0;
 }

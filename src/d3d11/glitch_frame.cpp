@@ -218,6 +218,11 @@ void installGlitchFrameFix() {
     // that is never echoed back cannot be told apart from one that is ignored.
 }
 
+bool glitchFrameNeedsEyeDraws() {
+    State* s = g_state;
+    return s && s->enabled;
+}
+
 bool glitchFrameWantsBuffer(uint32_t bytes) {
     State* s = g_state;
     return s && s->enabled && !s->disabledForSession && bytes == s->bufferBytes;

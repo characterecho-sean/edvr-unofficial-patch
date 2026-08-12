@@ -35,6 +35,16 @@ void glitchFrameObserve(const void* data, uint32_t bytes);
 // and withholding achieves nothing.
 void glitchFrameBoundary(uint32_t eyeDraws);
 
+// Does the detector need that count at all?
+//
+// It cannot act without one -- it refuses to judge a frame that does not look
+// like a rendered scene -- and the count is produced by the panel-distance code
+// in vscreen.cpp as a by-product. That made this fix silently depend on an
+// unrelated setting being non-default: with panel_distance at its shipped 1.0
+// the counting never ran, so the count was always 0, so no frame was ever
+// withheld. Asking here is what keeps the two independent.
+bool glitchFrameNeedsEyeDraws();
+
 // Writes the recorded camera history to the log. Bound to a key so a player who
 // sees a flash can capture the seconds around it on their own machine.
 void dumpCameraRing();
