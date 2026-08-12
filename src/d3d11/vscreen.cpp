@@ -1,4 +1,4 @@
-#include "vscreen.h"
+﻿#include "vscreen.h"
 
 #include <windows.h>
 
@@ -23,6 +23,7 @@ namespace {
 // ID3D11DeviceContext methods follow in d3d11.h declaration order. None of
 // these collide with the exposure fix's slots, so the two hooks coexist.
 constexpr size_t kSlotVSSetConstantBuffers  = 7;
+constexpr size_t kSlotPSSetShaderResources  = 8;
 constexpr size_t kSlotDrawIndexed           = 12;
 constexpr size_t kSlotDraw                  = 13;
 constexpr size_t kSlotMap                   = 14;
@@ -35,6 +36,8 @@ constexpr size_t kHighestSlotUsed           = 50;
 
 typedef void(STDMETHODCALLTYPE* PFN_SetConstantBuffers)(ID3D11DeviceContext*, UINT, UINT,
                                                         ID3D11Buffer* const*);
+typedef void(STDMETHODCALLTYPE* PFN_SetShaderResources)(ID3D11DeviceContext*, UINT, UINT,
+                                                        ID3D11ShaderResourceView* const*);
 typedef void(STDMETHODCALLTYPE* PFN_Draw)(ID3D11DeviceContext*, UINT, UINT);
 typedef void(STDMETHODCALLTYPE* PFN_DrawIndexed)(ID3D11DeviceContext*, UINT, UINT, INT);
 typedef void(STDMETHODCALLTYPE* PFN_DrawInstanced)(ID3D11DeviceContext*, UINT, UINT, UINT,
@@ -59,6 +62,7 @@ struct State {
     VTableHook hook;
 
     PFN_SetConstantBuffers   realVSSetConstantBuffers = nullptr;
+    PFN_SetShaderResources   realPSSetShaderResources = nullptr;
     PFN_Draw                 realDraw = nullptr;
     PFN_DrawIndexed          realDrawIndexed = nullptr;
     PFN_DrawInstanced        realDrawInstanced = nullptr;
@@ -75,6 +79,9 @@ struct State {
 
     void* curRtv0 = nullptr;
     void* curVsCb0 = nullptr;
+    // Slot 0 of the pixel shader's resources: what the draw is sampling. The
+    // panel composite reads the panel, and that is how it is recognised.
+    void* curPsSrv0 = nullptr;
 
     // The panel's transform, as the game last wrote it. Captured from the Unmap
     // the game wrote it through, so reading it costs nothing.
@@ -100,9 +107,17 @@ struct State {
     uint32_t eyeDrawsThisFrame = 0;
     uint32_t eyeDrawsLastFrame = 0;
     uint64_t voidClears = 0;
+    // Largest eye-draw count seen. At 1920x1080 nothing but the composite is
+    // eye-sized and this stays at 2; if raising the panel scales intermediate
+    // targets past 2048 they get miscounted and this climbs, which is the
+    // suspected reason the distance fix dies above the stock resolution.
+    uint32_t eyeDrawsMax = 0;
+    uint32_t totalsTick = 0;
     uint64_t panelOverrides = 0;
 
     std::unordered_map<void*, bool> eyeSizedCache;
+    // Which shader-resource views are the panel, for the composite test.
+    std::unordered_map<void*, bool> panelSrcCache;
 
     // The size the panel has been raised to, or 0 when it has not been. Used to
     // keep the panel out of the eye-draw count -- see targetIsEyeSized.
@@ -173,16 +188,61 @@ bool isFlatGrey(const FLOAT c[4]) {
 // Nothing of the game's is written to. Its own values are copied into a buffer
 // of ours with one number changed, ours is used for the draw, and the original
 // is put back immediately after.
+// Does this draw sample the on-foot panel?
+//
+// The panel is whatever size the game forces for that view mode -- 1920x1080 by
+// default, or the raised size when the resolution fix is on. Nothing else an
+// eye-sized draw samples has exactly those dimensions.
+bool srv0IsPanelSized(State* s) {
+    if (!s->curPsSrv0) return false;
+    const uint32_t w = s->panelW ? s->panelW : 1920;
+    const uint32_t h = s->panelH ? s->panelH : 1080;
+
+    auto it = s->panelSrcCache.find(s->curPsSrv0);
+    if (it != s->panelSrcCache.end()) return it->second;
+
+    bool out = false;
+    ID3D11Resource* res = nullptr;
+    static_cast<ID3D11View*>(s->curPsSrv0)->GetResource(&res);
+    if (res) {
+        D3D11_RESOURCE_DIMENSION dim = D3D11_RESOURCE_DIMENSION_UNKNOWN;
+        res->GetType(&dim);
+        if (dim == D3D11_RESOURCE_DIMENSION_TEXTURE2D) {
+            D3D11_TEXTURE2D_DESC d{};
+            static_cast<ID3D11Texture2D*>(res)->GetDesc(&d);
+            out = (d.Width == w && d.Height == h);
+        }
+        res->Release();
+    }
+    // Same reasoning as the eye-sized cache: view addresses get reused, so drop
+    // the whole thing rather than trust it forever.
+    if (s->panelSrcCache.size() > 512) s->panelSrcCache.clear();
+    s->panelSrcCache[s->curPsSrv0] = out;
+    return out;
+}
+
 bool beginPanelOverride(ID3D11DeviceContext* self) {
     State* s = g_state;
     if (!s->distanceEnabled) return false;
     if (!targetIsEyeSized(s->curRtv0)) return false;
     ++s->eyeDrawsThisFrame;
 
-    // An eye-sized target is not enough on its own. In the cockpit hundreds of
+    // An eye-sized target is not enough on its own: in the cockpit hundreds of
     // draws land in those textures and rebinding on all of them would corrupt
-    // the view, so the previous frame has to have looked like a panel frame.
-    if (s->eyeDrawsLastFrame == 0 || s->eyeDrawsLastFrame > kMaxPanelDraws) return false;
+    // the view. So this draw has to be the panel composite -- and it is
+    // recognised by WHAT IT READS, not by how many draws the frame made.
+    //
+    // The count was the old rule and it never worked on foot. In HMD Cinema Mode
+    // the composite is 2 draws into the eye textures and the count passed; on
+    // foot for real the helmet HUD is drawn into the eye textures too -- about
+    // 60 draws, and 1174 measured in one frame -- so it rejected every frame and
+    // the distance setting did nothing. It was verified in Cinema Mode, which
+    // shares this rendering path, and shipped.
+    //
+    // The composite reads the panel: a texture of exactly the size the game
+    // forces for that view mode. HUD draws read glyph sheets and atlases, so
+    // they are excluded however many of them there are.
+    if (!srv0IsPanelSized(s)) return false;
 
     void* cb = s->curVsCb0;
     if (!cb) return false;
@@ -258,6 +318,13 @@ void STDMETHODCALLTYPE hookedOMSetRenderTargets(ID3D11DeviceContext* self, UINT 
                                                 ID3D11DepthStencilView* dsv) {
     g_state->curRtv0 = (n && rtvs) ? rtvs[0] : nullptr;
     g_state->realOMSetRenderTargets(self, n, rtvs, dsv);
+}
+
+void STDMETHODCALLTYPE hookedPSSetShaderResources(ID3D11DeviceContext* self, UINT start,
+                                                  UINT n,
+                                                  ID3D11ShaderResourceView* const* srvs) {
+    if (start == 0 && n && srvs) g_state->curPsSrv0 = srvs[0];
+    g_state->realPSSetShaderResources(self, start, n, srvs);
 }
 
 void STDMETHODCALLTYPE hookedVSSetConstantBuffers(ID3D11DeviceContext* self, UINT start,
@@ -390,6 +457,26 @@ void vScreenFrameBoundary() {
     // Carried to the next frame: a draw cannot know how many more will follow
     // it. The render mode rarely changes between consecutive frames, and when it
     // does the override skips one.
+    if (s->eyeDrawsThisFrame > s->eyeDrawsMax) s->eyeDrawsMax = s->eyeDrawsThisFrame;
+
+    // Report the totals periodically rather than at shutdown.
+    //
+    // shutdownVScreenFixes only runs on FreeLibrary, and a game closing is
+    // process termination -- so anything logged there is never seen. That is why
+    // this log has no shutdown lines at all, and why a totals line written there
+    // produced nothing after a full session.
+    if (++s->totalsTick >= 1800) {
+        s->totalsTick = 0;
+        Log::get().note(
+            "vScreen totals: panel distance applied %llu time(s), void cleared to black "
+            "%llu time(s), largest eye-draw count %u. Two eyes a frame, so these should "
+            "climb steadily; if they stop, the fix engaged once and then stopped "
+            "matching. The eye-draw count is 2 at the stock panel resolution, and much "
+            "larger means intermediate targets are being miscounted as eye textures.",
+            static_cast<unsigned long long>(s->panelOverrides),
+            static_cast<unsigned long long>(s->voidClears), s->eyeDrawsMax);
+    }
+
     s->eyeDrawsLastFrame = s->eyeDrawsThisFrame;
     // The flash detector needs the count for the frame that just ended, to tell
     // a rendered scene from a menu. It has to be told before the counter resets.
@@ -451,6 +538,8 @@ void installVScreenFixes(ID3D11Device* device) {
                    reinterpret_cast<void**>(&s.realClearRtv));
     s.hook.replace(kSlotOMSetRenderTargets, &hookedOMSetRenderTargets,
                    reinterpret_cast<void**>(&s.realOMSetRenderTargets));
+    s.hook.replace(kSlotPSSetShaderResources, &hookedPSSetShaderResources,
+                   reinterpret_cast<void**>(&s.realPSSetShaderResources));
     s.hook.replace(kSlotVSSetConstantBuffers, &hookedVSSetConstantBuffers,
                    reinterpret_cast<void**>(&s.realVSSetConstantBuffers));
     s.hook.replace(kSlotMap, &hookedMap, reinterpret_cast<void**>(&s.realMap));
@@ -478,6 +567,22 @@ void installVScreenFixes(ID3D11Device* device) {
 
 void shutdownVScreenFixes() {
     if (!g_state) return;
+
+    // How often each fix actually did something.
+    //
+    // Both announce their FIRST application and nothing after it, so a fix that
+    // engages once and then stops is indistinguishable in the log from one that
+    // runs every frame. That ambiguity is costing test flights right now.
+    Log::get().note("vScreen totals: panel distance applied %llu time(s), void cleared to "
+                    "black %llu time(s). Two eyes a frame, so a working session is tens "
+                    "of thousands of each; single digits mean it engaged once and then "
+                    "stopped. Largest eye-draw count seen this session: %u -- it is 2 at "
+                    "the stock panel resolution, and anything much larger means "
+                    "intermediate targets are being miscounted as eye textures.",
+                    static_cast<unsigned long long>(g_state->panelOverrides),
+                    static_cast<unsigned long long>(g_state->voidClears),
+                    g_state->eyeDrawsMax);
+
     g_state->distanceEnabled = false;
     if (g_state->ourCb) {
         g_state->ourCb->Release();
@@ -487,3 +592,8 @@ void shutdownVScreenFixes() {
 }
 
 }  // namespace edvr
+
+
+
+
+
