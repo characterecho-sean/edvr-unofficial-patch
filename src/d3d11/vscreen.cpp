@@ -113,6 +113,9 @@ struct State {
     // suspected reason the distance fix dies above the stock resolution.
     uint32_t eyeDrawsMax = 0;
     uint32_t totalsTick = 0;
+    uint32_t panelMissW[8] = {}, panelMissH[8] = {};
+    uint32_t panelMissCount = 0;
+    bool     panelMissNoted = false;
     uint64_t panelOverrides = 0;
 
     std::unordered_map<void*, bool> eyeSizedCache;
@@ -202,6 +205,7 @@ bool srv0IsPanelSized(State* s) {
     if (it != s->panelSrcCache.end()) return it->second;
 
     bool out = false;
+    uint32_t lastW = 0, lastH = 0;
     ID3D11Resource* res = nullptr;
     static_cast<ID3D11View*>(s->curPsSrv0)->GetResource(&res);
     if (res) {
@@ -210,13 +214,46 @@ bool srv0IsPanelSized(State* s) {
         if (dim == D3D11_RESOURCE_DIMENSION_TEXTURE2D) {
             D3D11_TEXTURE2D_DESC d{};
             static_cast<ID3D11Texture2D*>(res)->GetDesc(&d);
+            lastW = d.Width;
+            lastH = d.Height;
             out = (d.Width == w && d.Height == h);
         }
         res->Release();
     }
-    // Same reasoning as the eye-sized cache: view addresses get reused, so drop
-    // the whole thing rather than trust it forever.
-    if (s->panelSrcCache.size() > 512) s->panelSrcCache.clear();
+    // What an eye-sized draw sampled when it was NOT the panel.
+    //
+    // In HMD Cinema Mode the override applies once a frame rather than twice, so
+    // one of the two composite draws reads something else -- and one eye is
+    // corrected while the other is not. Guessing at what it reads has been the
+    // expensive move all day; this records the sizes and says them once.
+    if (!out && !s->panelMissNoted) {
+        bool known = false;
+        for (uint32_t i = 0; i < s->panelMissCount; ++i) {
+            if (s->panelMissW[i] == lastW && s->panelMissH[i] == lastH) { known = true; break; }
+        }
+        if (!known && s->panelMissCount < 8) {
+            s->panelMissW[s->panelMissCount] = lastW;
+            s->panelMissH[s->panelMissCount] = lastH;
+            ++s->panelMissCount;
+            Log::get().note("vScreen: an eye-sized draw sampled %ux%u, which is not the "
+                            "panel (%ux%u), so it was left alone. If a mode corrects only "
+                            "one eye, this is what the other one is reading.",
+                            lastW, lastH, w, h);
+        }
+    }
+
+    // Cached for THIS FRAME only -- cleared at every frame boundary.
+    //
+    // Caching until it grows to 512 entries is not safe here. D3D recycles view
+    // addresses, so an entry saying "this view is not the panel" can outlive the
+    // view and attach itself to a new one that IS. That is not hypothetical: in
+    // HMD Cinema Mode it left one eye permanently unmatched, so the panel
+    // distance and black void applied to one eye and not the other -- which
+    // shipped, briefly, as 0.5.2.
+    //
+    // Within a single frame a view address cannot be freed and reissued, so a
+    // per-frame cache is exactly as fast for the repeated lookups that matter
+    // and cannot go stale. It is a handful of distinct views a frame.
     s->panelSrcCache[s->curPsSrv0] = out;
     return out;
 }
@@ -457,6 +494,10 @@ void vScreenFrameBoundary() {
     // Carried to the next frame: a draw cannot know how many more will follow
     // it. The render mode rarely changes between consecutive frames, and when it
     // does the override skips one.
+    // Per-frame: view addresses are stable within a frame and recyclable across
+    // frames, so this is the only interval the cache is valid over.
+    s->panelSrcCache.clear();
+
     if (s->eyeDrawsThisFrame > s->eyeDrawsMax) s->eyeDrawsMax = s->eyeDrawsThisFrame;
 
     // Report the totals periodically rather than at shutdown.
@@ -592,6 +633,8 @@ void shutdownVScreenFixes() {
 }
 
 }  // namespace edvr
+
+
 
 
 
