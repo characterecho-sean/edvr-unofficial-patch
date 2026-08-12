@@ -6,7 +6,6 @@
 
 #include <cmath>
 #include <cstring>
-#include <unordered_map>
 
 #include "../common/config.h"
 #include "../common/guard.h"
@@ -107,6 +106,17 @@ struct State {
     uint32_t eyeDrawsThisFrame = 0;
     uint32_t eyeDrawsLastFrame = 0;
     uint64_t voidClears = 0;
+    // Grey voids forced to black in one frame, and the smallest and largest
+    // counts seen across every frame that forced at least one.
+    //
+    // Both eyes are cleared the same way, so a healthy session has one count and
+    // repeats it: min == max. A session where they differ had frames that
+    // treated one eye and not the other, which is what a one-eye grey void looks
+    // like from in here -- and it is worth being able to read that off a log
+    // instead of asking whether it looked right.
+    uint32_t voidThisFrame = 0;
+    uint32_t voidFrameMin = 0xFFFFFFFFu;
+    uint32_t voidFrameMax = 0;
     // Largest eye-draw count seen. At 1920x1080 nothing but the composite is
     // eye-sized and this stays at 2; if raising the panel scales intermediate
     // targets past 2048 they get miscounted and this climbs, which is the
@@ -118,9 +128,23 @@ struct State {
     bool     panelMissNoted = false;
     uint64_t panelOverrides = 0;
 
-    std::unordered_map<void*, bool> eyeSizedCache;
-    // Which shader-resource views are the panel, for the composite test.
-    std::unordered_map<void*, bool> panelSrcCache;
+    // Answers about the CURRENTLY BOUND views, computed on first use and thrown
+    // away the moment the binding changes. -1 unknown, 0 no, 1 yes.
+    //
+    // These replace two maps keyed by view pointer. Nothing keyed by a view
+    // pointer can be kept across a binding: D3D reuses freed addresses, so an
+    // entry outlives its view and then answers for a different one. Both maps
+    // did exactly that in shipped builds -- panelSrcCache in 0.5.2, which left
+    // one eye at the wrong panel distance, and eyeSizedCache in 0.5.2 as well,
+    // which left one eye's void grey after an external-camera/on-foot switch
+    // recreated the eye textures.
+    //
+    // A bound view cannot be destroyed -- the context holds a reference to it --
+    // so for exactly as long as one of these is valid, the pointer it describes
+    // is alive and unchanged. That is the whole invariant, and it is not a
+    // question of how long a stale entry survives before something notices.
+    int8_t curRtv0Eye = -1;
+    int8_t curPsSrv0Panel = -1;
 
     // The size the panel has been raised to, or 0 when it has not been. Used to
     // keep the panel out of the eye-draw count -- see targetIsEyeSized.
@@ -133,13 +157,15 @@ FaultBudget g_budget("vScreen", 5);
 // Is this render target one of the two textures sent to the headset?
 //
 // By size. The graphics layer never sees what is submitted to the headset, and
-// nothing else in an Elite frame is drawn into at 2048x2048 or larger. Cached
-// per view, since it costs a resource lookup.
+// nothing else in an Elite frame is drawn into at 2048x2048 or larger.
+//
+// Uncached. The two callers each hold a live view for the duration of the call:
+// ClearRenderTargetView is given one, and the draw path asks about the one
+// currently bound. Callers that ask repeatedly remember the answer for as long
+// as the binding lasts -- see curRtv0Eye.
 bool targetIsEyeSized(void* rtv) {
     State* s = g_state;
     if (!rtv) return false;
-    auto it = s->eyeSizedCache.find(rtv);
-    if (it != s->eyeSizedCache.end()) return it->second;
 
     bool out = false;
     ID3D11Resource* res = nullptr;
@@ -170,10 +196,6 @@ bool targetIsEyeSized(void* rtv) {
         }
         res->Release();
     }
-    // View addresses get reused, so this cannot be trusted forever. Dropping it
-    // wholesale is cheap and correct.
-    if (s->eyeSizedCache.size() > 512) s->eyeSizedCache.clear();
-    s->eyeSizedCache[rtv] = out;
     return out;
 }
 
@@ -198,11 +220,9 @@ bool isFlatGrey(const FLOAT c[4]) {
 // eye-sized draw samples has exactly those dimensions.
 bool srv0IsPanelSized(State* s) {
     if (!s->curPsSrv0) return false;
+    if (s->curPsSrv0Panel >= 0) return s->curPsSrv0Panel != 0;
     const uint32_t w = s->panelW ? s->panelW : 1920;
     const uint32_t h = s->panelH ? s->panelH : 1080;
-
-    auto it = s->panelSrcCache.find(s->curPsSrv0);
-    if (it != s->panelSrcCache.end()) return it->second;
 
     bool out = false;
     uint32_t lastW = 0, lastH = 0;
@@ -242,26 +262,16 @@ bool srv0IsPanelSized(State* s) {
         }
     }
 
-    // Cached for THIS FRAME only -- cleared at every frame boundary.
-    //
-    // Caching until it grows to 512 entries is not safe here. D3D recycles view
-    // addresses, so an entry saying "this view is not the panel" can outlive the
-    // view and attach itself to a new one that IS. That is not hypothetical: in
-    // HMD Cinema Mode it left one eye permanently unmatched, so the panel
-    // distance and black void applied to one eye and not the other -- which
-    // shipped, briefly, as 0.5.2.
-    //
-    // Within a single frame a view address cannot be freed and reissued, so a
-    // per-frame cache is exactly as fast for the repeated lookups that matter
-    // and cannot go stale. It is a handful of distinct views a frame.
-    s->panelSrcCache[s->curPsSrv0] = out;
+    // Remembered only until this view is unbound -- see curPsSrv0Panel.
+    s->curPsSrv0Panel = out ? 1 : 0;
     return out;
 }
 
 bool beginPanelOverride(ID3D11DeviceContext* self) {
     State* s = g_state;
     if (!s->distanceEnabled) return false;
-    if (!targetIsEyeSized(s->curRtv0)) return false;
+    if (s->curRtv0Eye < 0) s->curRtv0Eye = targetIsEyeSized(s->curRtv0) ? 1 : 0;
+    if (s->curRtv0Eye == 0) return false;
     ++s->eyeDrawsThisFrame;
 
     // An eye-sized target is not enough on its own: in the cockpit hundreds of
@@ -340,6 +350,7 @@ void STDMETHODCALLTYPE hookedClearRtv(ID3D11DeviceContext* self,
     // the target.
     if (s->blackVoid && rtv && c && isFlatGrey(c) && targetIsEyeSized(rtv)) {
         const FLOAT black[4] = {0.0f, 0.0f, 0.0f, c[3]};
+        ++s->voidThisFrame;
         if (++s->voidClears == 1) {
             Log::get().note("vScreen: void %.3f,%.3f,%.3f forced to black",
                             c[0], c[1], c[2]);
@@ -354,13 +365,19 @@ void STDMETHODCALLTYPE hookedOMSetRenderTargets(ID3D11DeviceContext* self, UINT 
                                                 ID3D11RenderTargetView* const* rtvs,
                                                 ID3D11DepthStencilView* dsv) {
     g_state->curRtv0 = (n && rtvs) ? rtvs[0] : nullptr;
+    // Unconditionally, even when the pointer looks unchanged: an identical
+    // address after a rebind is not evidence of an identical view.
+    g_state->curRtv0Eye = -1;
     g_state->realOMSetRenderTargets(self, n, rtvs, dsv);
 }
 
 void STDMETHODCALLTYPE hookedPSSetShaderResources(ID3D11DeviceContext* self, UINT start,
                                                   UINT n,
                                                   ID3D11ShaderResourceView* const* srvs) {
-    if (start == 0 && n && srvs) g_state->curPsSrv0 = srvs[0];
+    if (start == 0 && n && srvs) {
+        g_state->curPsSrv0 = srvs[0];
+        g_state->curPsSrv0Panel = -1;
+    }
     g_state->realPSSetShaderResources(self, start, n, srvs);
 }
 
@@ -491,14 +508,14 @@ void vScreenRefreshConfig() {
 void vScreenFrameBoundary() {
     State* s = g_state;
     if (!s) return;
-    // Carried to the next frame: a draw cannot know how many more will follow
-    // it. The render mode rarely changes between consecutive frames, and when it
-    // does the override skips one.
-    // Per-frame: view addresses are stable within a frame and recyclable across
-    // frames, so this is the only interval the cache is valid over.
-    s->panelSrcCache.clear();
-
     if (s->eyeDrawsThisFrame > s->eyeDrawsMax) s->eyeDrawsMax = s->eyeDrawsThisFrame;
+
+    // Frames that forced nothing are menus and loading screens, not asymmetry.
+    if (s->voidThisFrame) {
+        if (s->voidThisFrame < s->voidFrameMin) s->voidFrameMin = s->voidThisFrame;
+        if (s->voidThisFrame > s->voidFrameMax) s->voidFrameMax = s->voidThisFrame;
+    }
+    s->voidThisFrame = 0;
 
     // Report the totals periodically rather than at shutdown.
     //
@@ -510,12 +527,17 @@ void vScreenFrameBoundary() {
         s->totalsTick = 0;
         Log::get().note(
             "vScreen totals: panel distance applied %llu time(s), void cleared to black "
-            "%llu time(s), largest eye-draw count %u. Two eyes a frame, so these should "
-            "climb steadily; if they stop, the fix engaged once and then stopped "
-            "matching. The eye-draw count is 2 at the stock panel resolution, and much "
-            "larger means intermediate targets are being miscounted as eye textures.",
+            "%llu time(s) (%u-%u per frame), largest eye-draw count %u. Two eyes a "
+            "frame, so these should climb steadily; if they stop, the fix engaged once "
+            "and then stopped matching. The per-frame void range should be a single "
+            "number repeated -- a low end below the high end means some frames treated "
+            "one eye and not the other. The eye-draw count is 2 at the stock panel "
+            "resolution, and much larger means intermediate targets are being miscounted "
+            "as eye textures.",
             static_cast<unsigned long long>(s->panelOverrides),
-            static_cast<unsigned long long>(s->voidClears), s->eyeDrawsMax);
+            static_cast<unsigned long long>(s->voidClears),
+            s->voidFrameMin == 0xFFFFFFFFu ? 0u : s->voidFrameMin, s->voidFrameMax,
+            s->eyeDrawsMax);
     }
 
     s->eyeDrawsLastFrame = s->eyeDrawsThisFrame;

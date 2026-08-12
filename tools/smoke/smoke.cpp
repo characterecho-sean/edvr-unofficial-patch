@@ -28,6 +28,53 @@ int fail(const char* what) {
     return 1;
 }
 
+// Clear a freshly made w*h target to Elite's grey and read one pixel back.
+//
+// Everything is created and destroyed inside, which is the point of the second
+// test below: it hands the runtime a steady supply of freed view addresses to
+// hand back out.
+bool clearGreyReadBack(ID3D11Device* device, ID3D11DeviceContext* ctx, UINT w, UINT h,
+                       unsigned char out[3]) {
+    D3D11_TEXTURE2D_DESC td{};
+    td.Width = w; td.Height = h; td.MipLevels = 1; td.ArraySize = 1;
+    td.Format = DXGI_FORMAT_R8G8B8A8_UNORM; td.SampleDesc.Count = 1;
+    td.Usage = D3D11_USAGE_DEFAULT; td.BindFlags = D3D11_BIND_RENDER_TARGET;
+
+    ID3D11Texture2D* tex = nullptr;
+    ID3D11RenderTargetView* rtv = nullptr;
+    if (FAILED(device->CreateTexture2D(&td, nullptr, &tex)) || !tex) return false;
+    if (FAILED(device->CreateRenderTargetView(tex, nullptr, &rtv)) || !rtv) {
+        tex->Release();
+        return false;
+    }
+
+    const float grey[4] = {32.0f / 255.0f, 32.0f / 255.0f, 32.0f / 255.0f, 1.0f};
+    ctx->ClearRenderTargetView(rtv, grey);
+
+    D3D11_TEXTURE2D_DESC sd = td;
+    sd.Width = 1; sd.Height = 1;
+    sd.Usage = D3D11_USAGE_STAGING;
+    sd.BindFlags = 0;
+    sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    bool ok = false;
+    ID3D11Texture2D* stage = nullptr;
+    if (SUCCEEDED(device->CreateTexture2D(&sd, nullptr, &stage)) && stage) {
+        D3D11_BOX box{0, 0, 0, 1, 1, 1};
+        ctx->CopySubresourceRegion(stage, 0, 0, 0, 0, tex, 0, &box);
+        D3D11_MAPPED_SUBRESOURCE m{};
+        if (SUCCEEDED(ctx->Map(stage, 0, D3D11_MAP_READ, 0, &m))) {
+            const unsigned char* px = static_cast<const unsigned char*>(m.pData);
+            out[0] = px[0]; out[1] = px[1]; out[2] = px[2];
+            ok = true;
+            ctx->Unmap(stage, 0);
+        }
+        stage->Release();
+    }
+    rtv->Release();
+    tex->Release();
+    return ok;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -61,46 +108,58 @@ int main(int argc, char** argv) {
 
     // The black void fix, end to end.
     int rc = 0;
-    D3D11_TEXTURE2D_DESC td{};
-    td.Width = 2048; td.Height = 2048; td.MipLevels = 1; td.ArraySize = 1;
-    td.Format = DXGI_FORMAT_R8G8B8A8_UNORM; td.SampleDesc.Count = 1;
-    td.Usage = D3D11_USAGE_DEFAULT; td.BindFlags = D3D11_BIND_RENDER_TARGET;
-
-    ID3D11Texture2D* eye = nullptr;
-    ID3D11RenderTargetView* rtv = nullptr;
-    if (SUCCEEDED(device->CreateTexture2D(&td, nullptr, &eye)) && eye &&
-        SUCCEEDED(device->CreateRenderTargetView(eye, nullptr, &rtv))) {
-
-        const float grey[4] = {32.0f / 255.0f, 32.0f / 255.0f, 32.0f / 255.0f, 1.0f};
-        ctx->ClearRenderTargetView(rtv, grey);
-
-        D3D11_TEXTURE2D_DESC sd = td;
-        sd.Width = 1; sd.Height = 1;
-        sd.Usage = D3D11_USAGE_STAGING;
-        sd.BindFlags = 0;
-        sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-        ID3D11Texture2D* stage = nullptr;
-        if (SUCCEEDED(device->CreateTexture2D(&sd, nullptr, &stage)) && stage) {
-            D3D11_BOX box{0, 0, 0, 1, 1, 1};
-            ctx->CopySubresourceRegion(stage, 0, 0, 0, 0, eye, 0, &box);
-            D3D11_MAPPED_SUBRESOURCE m{};
-            if (SUCCEEDED(ctx->Map(stage, 0, D3D11_MAP_READ, 0, &m))) {
-                const unsigned char* px = static_cast<const unsigned char*>(m.pData);
-                const bool black = px[0] == 0 && px[1] == 0 && px[2] == 0;
-                printf("  %s  cleared an eye-sized target to grey 32,32,32 and read "
-                       "back %u,%u,%u\n",
-                       black ? "ok  " : "note", px[0], px[1], px[2]);
-                printf("        %s\n",
-                       black ? "black void is working"
-                             : "black void did nothing -- expected if black_void = 0");
-                ctx->Unmap(stage, 0);
-            }
-            stage->Release();
-        }
-        rtv->Release();
-        eye->Release();
-    } else {
+    unsigned char px[3] = {0, 0, 0};
+    bool blackVoidOn = false;
+    if (!clearGreyReadBack(device, ctx, 2048, 2048, px)) {
         rc = fail("could not make a test render target");
+    } else {
+        blackVoidOn = px[0] == 0 && px[1] == 0 && px[2] == 0;
+        printf("  %s  cleared an eye-sized target to grey 32,32,32 and read back "
+               "%u,%u,%u\n",
+               blackVoidOn ? "ok  " : "note", px[0], px[1], px[2]);
+        printf("        %s\n",
+               blackVoidOn ? "black void is working"
+                           : "black void did nothing -- expected if black_void = 0");
+    }
+
+    // The same fix again, after the runtime has been given every chance to hand
+    // back a view address it already used.
+    //
+    // This is the shape of the bug that shipped twice. Both view tests used to
+    // cache their answer keyed by the view pointer, and D3D reissues freed
+    // addresses -- so an answer recorded for a small target could later be
+    // returned for an eye-sized one that happened to land on the same address,
+    // and that eye kept its grey void. In the game the trigger was switching
+    // between the external camera and on foot, which destroys and recreates the
+    // eye textures; here it is just churn.
+    //
+    // Alternating sizes matters. A small target teaches the wrong answer, and
+    // the eye-sized target that follows it is the one that has to come back
+    // black anyway.
+    if (rc == 0 && blackVoidOn) {
+        const int kRounds = 16;
+        int black = 0, measured = 0;
+        for (int i = 0; i < kRounds; ++i) {
+            // Not named "small": windows.h defines that as char, via rpcndr.h.
+            unsigned char tiny[3] = {0, 0, 0};
+            clearGreyReadBack(device, ctx, 256, 256, tiny);  // freed before the next
+            unsigned char big[3] = {0, 0, 0};
+            if (!clearGreyReadBack(device, ctx, 2048, 2048, big)) continue;
+            ++measured;
+            if (big[0] == 0 && big[1] == 0 && big[2] == 0) ++black;
+        }
+        if (measured == 0) {
+            rc = fail("could not repeat the eye-sized clear");
+        } else if (black == measured) {
+            printf("  ok    %d eye-sized clears across %d view create/destroy rounds, "
+                   "all black\n",
+                   measured, kRounds);
+        } else {
+            printf("  FAIL  %d of %d eye-sized clears came back black\n", black, measured);
+            printf("        A view test is remembering an answer past the life of the "
+                   "view it came from.\n");
+            rc = 1;
+        }
     }
 
     ctx->Release();
