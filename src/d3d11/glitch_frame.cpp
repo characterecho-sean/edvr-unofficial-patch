@@ -175,11 +175,19 @@ void installGlitchFrameFix() {
     g_state = &s;
 
     Config& cfg = Config::get();
+    // The switch is a choice and lives in [fix]; the three numbers below it are
+    // tuning and live in [advanced], which is where edvr.ini documents them.
+    //
+    // They were read from [fix] until now, so nothing set them: the section is
+    // part of the key, an unknown key is ignored, and a missing one falls back
+    // to the default. The shipped ini happens to state the defaults, so this was
+    // invisible unless somebody actually changed a value -- at which point the
+    // sensitivity they were tuning silently did not move.
     s.enabled = cfg.getBool("fix.transition_flash", true);
-    s.jumpMin = cfg.getFloat("fix.transition_flash_units", 2000.0f);
-    s.jumpFactor = cfg.getFloat("fix.transition_flash_speed_factor", 8.0f);
+    s.jumpMin = cfg.getFloat("advanced.transition_flash_units", 2000.0f);
+    s.jumpFactor = cfg.getFloat("advanced.transition_flash_speed_factor", 8.0f);
     s.maxConsecutive =
-        static_cast<uint32_t>(cfg.getInt("fix.transition_flash_max_consecutive", 2));
+        static_cast<uint32_t>(cfg.getInt("advanced.transition_flash_max_consecutive", 2));
     s.bufferBytes = static_cast<uint32_t>(cfg.getInt("advanced.camera_buffer_bytes", 5376));
     s.posOffset = static_cast<uint32_t>(cfg.getInt("advanced.camera_buffer_offset", 1100));
 
@@ -198,10 +206,16 @@ void installGlitchFrameFix() {
     // from one that was never built in.
     Log::get().note(
         "transition flash fix armed: looking for the camera at float %u of a %u-byte "
-        "constant buffer. It watches the first 300 rendered frames before acting, and "
-        "reports here either way. Needs openvr_api.dll installed as well to be able to "
-        "withhold anything.",
-        s.posOffset, s.bufferBytes);
+        "constant buffer, threshold %.0f units or %.1fx speed, at most %u frames in a "
+        "row. It watches the first 300 rendered frames before acting, and reports here "
+        "either way. Needs openvr_api.dll installed as well to be able to withhold "
+        "anything.",
+        s.posOffset, s.bufferBytes, s.jumpMin, s.jumpFactor, s.maxConsecutive);
+
+    // The settings are printed rather than assumed. Three of them were read from
+    // the wrong section for the whole of 0.5.x and no log line would have shown
+    // it, because the values the ini stated were also the defaults. A number
+    // that is never echoed back cannot be told apart from one that is ignored.
 }
 
 bool glitchFrameWantsBuffer(uint32_t bytes) {
