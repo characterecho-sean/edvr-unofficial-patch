@@ -49,6 +49,7 @@ struct State {
 
     Hotkey toggleKey;
     Hotkey dumpKey;
+    uint64_t frameCounter = 0;
 };
 
 State* g_state = nullptr;
@@ -75,6 +76,10 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
         if (g_state->dumpKey.pressed()) dumpCameraRing();
         exposureFixFrameBoundary();
         vScreenFrameBoundary();
+        // Polled rather than watched, about once a second at 90Hz. The user is
+        // wearing a headset and cannot see a text editor, so the settings that
+        // are worth tuning by feel have to take effect without a restart.
+        if ((++g_state->frameCounter % 90) == 0) vScreenRefreshConfig();
     });
     return hr;
 }

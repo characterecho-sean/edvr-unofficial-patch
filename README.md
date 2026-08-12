@@ -50,6 +50,10 @@ and it is the one fix here that changes the game's code in memory — read
 [What it does and does not do](#what-it-does-and-does-not-do) before enabling
 it.
 
+Any 16:9 size from 640 wide up to 8192 works. The useful ones are **2880x1620**,
+**3200x1800**, **3840x2160** and **5120x2880** — the last is about 1.8x the
+memory of 4K, so it wants headroom.
+
 ## Install
 
 1. Close Elite Dangerous.

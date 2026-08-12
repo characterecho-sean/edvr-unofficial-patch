@@ -103,6 +103,10 @@ struct State {
     uint64_t panelOverrides = 0;
 
     std::unordered_map<void*, bool> eyeSizedCache;
+
+    // The size the panel has been raised to, or 0 when it has not been. Used to
+    // keep the panel out of the eye-draw count -- see targetIsEyeSized.
+    uint32_t panelW = 0, panelH = 0;
 };
 
 State* g_state = nullptr;
@@ -129,6 +133,22 @@ bool targetIsEyeSized(void* rtv) {
             D3D11_TEXTURE2D_DESC d{};
             static_cast<ID3D11Texture2D*>(res)->GetDesc(&d);
             out = d.Width >= 2048 && d.Height >= 2048;
+            // ...except the on-foot panel itself, once it has been raised.
+            //
+            // The comment above this test says nothing else in an Elite frame is
+            // drawn into at 2048x2048 or larger. That was true when it was
+            // written, and the resolution fix made it false: at 3840x2160 the
+            // panel clears the threshold on both axes, so every scene draw into
+            // it is counted as an eye draw. eyeDrawsLastFrame goes from 3 to
+            // hundreds, the panel composite is never recognised, and the panel
+            // distance fix silently stops working -- at 4K but not at 2880x1620,
+            // whose height is still under 2048.
+            //
+            // Excluded by value rather than by raising the threshold, which
+            // would only defer the same collision to the next size someone picks.
+            if (out && s->panelW && d.Width == s->panelW && d.Height == s->panelH) {
+                out = false;
+            }
         }
         res->Release();
     }
@@ -341,6 +361,29 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
 
 }  // namespace
 
+void vScreenRefreshConfig() {
+    State* s = g_state;
+    if (!s) return;
+    Config& cfg = Config::get();
+    // Cheap: one GetFileAttributesEx, and only when the write time moved.
+    if (!cfg.reloadIfChanged()) return;
+
+    const bool  wasVoid  = s->blackVoid;
+    const float wasScale = s->distanceScale;
+
+    s->blackVoid = cfg.getBool("fix.black_void", true);
+    s->distanceScale = cfg.getFloat("fix.panel_distance", 1.0f);
+    s->distanceEnabled = s->distanceScale != 1.0f;
+    s->distanceIndex =
+        static_cast<uint32_t>(cfg.getInt("advanced.panel_distance_index", 47));
+
+    if (wasVoid != s->blackVoid || wasScale != s->distanceScale) {
+        Log::get().note("vScreen config reloaded: black void %s, panel distance x%.3f "
+                        "(index %u)",
+                        s->blackVoid ? "on" : "off", s->distanceScale, s->distanceIndex);
+    }
+}
+
 void vScreenFrameBoundary() {
     State* s = g_state;
     if (!s) return;
@@ -360,7 +403,14 @@ void installVScreenFixes(ID3D11Device* device) {
     Config& cfg = Config::get();
     const bool wantVoid = cfg.getBool("fix.black_void", true);
     const float scale = cfg.getFloat("fix.panel_distance", 1.0f);
-    if (!wantVoid && scale == 1.0f) return;   // nothing asked for
+    // Install the hooks whenever EITHER fix could be wanted now or later. Both
+    // are documented as changeable while the game runs, and a hook that was
+    // never installed cannot be switched on by editing a file -- so returning
+    // here on "nothing asked for" would make the documented behaviour impossible
+    // for anyone who starts with both off.
+    if (!wantVoid && scale == 1.0f && !cfg.getBool("fix.panel_hooks_always", true)) {
+        return;
+    }
 
     ID3D11DeviceContext* ctx = nullptr;
     device->GetImmediateContext(&ctx);
@@ -372,6 +422,22 @@ void installVScreenFixes(ID3D11Device* device) {
     g_state->distanceEnabled = scale != 1.0f;
     g_state->distanceIndex =
         static_cast<uint32_t>(cfg.getInt("advanced.panel_distance_index", 47));
+
+    // Only when the panel is actually being raised past the eye-sized threshold.
+    // At the stock size it is below it anyway and there is nothing to exclude.
+    {
+        const uint32_t pw = static_cast<uint32_t>(cfg.getInt("fix.vscreen_res_width", 0));
+        const uint32_t ph = static_cast<uint32_t>(cfg.getInt("fix.vscreen_res_height", 0));
+        if (pw >= 2048 && ph >= 2048) {
+            g_state->panelW = pw;
+            g_state->panelH = ph;
+            Log::get().note(
+                "vScreen: %ux%u targets will NOT be counted as eye textures. The panel "
+                "has been raised to a size that would otherwise be mistaken for one, "
+                "which disables the panel distance fix.",
+                pw, ph);
+        }
+    }
 
     State& s = *g_state;
     if (!s.hook.attach(ctx) || s.hook.executablePrefix() <= kHighestSlotUsed) {
