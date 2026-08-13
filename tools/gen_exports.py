@@ -259,6 +259,14 @@ def main() -> int:
         help="export implemented in C++ instead of thunked (repeatable)",
     )
     ap.add_argument(
+        "--extra-export",
+        action="append",
+        default=[],
+        help="additional symbol to export, implemented in C++ (repeatable). Used for "
+             "build-check hooks the real DLL does not have; additive, so nothing that "
+             "imports the real exports is affected",
+    )
+    ap.add_argument(
         "--lazy",
         action="store_true",
         help="fill the export table on the first call instead of from DllMain, "
@@ -321,6 +329,11 @@ def main() -> int:
         # definition can never collide with a declaration in a system header.
         for name in sorted(wrapped - missing):
             f.write("    %s = edvr_impl_%s\n" % (name, name))
+        for extra in args.extra_export:
+            # Additive only. The proxy must export everything the original did;
+            # exporting one more is inert, because nothing imports by that name
+            # except our own build check.
+            f.write("    %s\n" % extra)
         for _name, ordinal, _fwd in ordinal_only:
             # Kept so the ordinal space stays intact for anything importing by
             # ordinal; resolved at runtime like the rest.

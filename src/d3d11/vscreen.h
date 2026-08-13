@@ -54,6 +54,16 @@ void vScreenRefreshConfig();
 // of one.
 void vScreenFrameBoundary();
 
+// Did the ClearState and ExecuteCommandList hooks actually run?
+//
+// For the build check only. Their vtable slots were counted from declaration
+// order rather than measured, and ClearState's neighbour is FinishCommandList --
+// so smoke calls both and asks. Calling them and merely observing that rendering
+// still works cannot catch a miscount: every plausible off-by-one lands on a
+// method the test never invokes.
+bool vScreenHooksSawClearState();
+bool vScreenHooksSawExecuteCommandList();
+
 void shutdownVScreenFixes();
 
 }  // namespace edvr

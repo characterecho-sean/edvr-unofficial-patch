@@ -210,17 +210,37 @@ int main(int argc, char** argv) {
         }
         ctx->ClearState();
 
-        // Still working afterwards. ClearState drops every binding, and the
-        // point of hooking it is that we notice; if the hook had landed on the
-        // wrong method, state we rely on would be stale rather than cleared.
-        unsigned char after[3] = {0, 0, 0};
-        if (clearGreyReadBack(device, ctx, 2048, 2048, after) && after[0] == 0 &&
-            after[1] == 0 && after[2] == 0) {
-            printf("  ok    survived ClearState and ExecuteCommandList\n");
+        // Ask whether the hooks RAN, rather than whether rendering survived.
+        //
+        // Checking that a clear still works afterwards cannot catch a miscount:
+        // every plausible off-by-one lands on a method this test never calls, so
+        // rendering carries on regardless and the gate passes for exactly the
+        // regression it exists to catch.
+        typedef unsigned int (*PFN_Selftest)();
+        PFN_Selftest flags =
+            reinterpret_cast<PFN_Selftest>(GetProcAddress(mod, "edvr_selftest_hooks"));
+        const unsigned int bits = flags ? flags() : 0u;
+        if (!flags) {
+            printf("  FAIL  edvr_selftest_hooks is not exported\n");
+            rc = 1;
+        } else if ((bits & 1u) == 0) {
+            printf("  FAIL  calling ClearState did not reach our hook\n");
+            printf("        Slot %d is not ClearState in this runtime.\n", 110);
+            rc = 1;
+        } else if ((bits & 2u) == 0) {
+            printf("  FAIL  calling ExecuteCommandList did not reach our hook\n");
+            printf("        Slot %d is not ExecuteCommandList in this runtime.\n", 58);
+            rc = 1;
         } else {
+            printf("  ok    ClearState and ExecuteCommandList both reached their hooks\n");
+        }
+
+        // ...and that rendering still works afterwards.
+        unsigned char after[3] = {0, 0, 0};
+        if (rc == 0 && (!clearGreyReadBack(device, ctx, 2048, 2048, after) ||
+                        after[0] != 0 || after[1] != 0 || after[2] != 0)) {
             printf("  FAIL  the black void stopped working after ClearState/"
                    "ExecuteCommandList\n");
-            printf("        Slot 58 or 110 is not the method it was counted to be.\n");
             rc = 1;
         }
     }

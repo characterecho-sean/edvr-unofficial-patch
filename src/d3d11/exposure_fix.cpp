@@ -6,6 +6,7 @@
 #include <string>
 #include <iterator>
 #include <unordered_map>
+#include <unordered_set>
 
 #include "../common/config.h"
 #include "../common/guard.h"
@@ -63,11 +64,13 @@ struct State {
     // parameter texture, and it runs once per eye. Detecting that costs one
     // evaluation per distinct compute shader and then nothing.
     std::unordered_map<uint64_t, bool> shapeVerdict;
-    // Distinct compute shaders the shape test has ever run on. shapeVerdict is
-    // pruned of negatives every frame while detection is looking, so its size is
-    // not this -- and the give-up notice, which names itself "the thing to
-    // report", was reporting a number the prune had just set to nearly zero.
-    uint64_t shadersExamined = 0;
+    // Hashes the shape test has ever run on. A counter cannot do this job: the
+    // prune below removes negatives every frame, so the map "forgets" a shader
+    // and the next frame's probe counts it again -- the give-up notice, which
+    // calls itself the thing to report, would print tens of thousands where it
+    // means a handful. This set is never pruned; it holds one 64-bit hash per
+    // distinct compute shader the game creates.
+    std::unordered_set<uint64_t> everExamined;
     uint32_t detectStreak = 0;    // consecutive frames the candidate ran twice
     bool     announced = false;
     uint64_t frames = 0;
@@ -267,7 +270,7 @@ bool isExposureDispatch() {
     if (it != s->shapeVerdict.end()) return it->second;
 
     const bool match = shapeLooksLikeExposure(s->curUav);
-    if (s->shapeVerdict.find(h) == s->shapeVerdict.end()) ++s->shadersExamined;
+    s->everExamined.insert(h);
     s->shapeVerdict[h] = match;
     if (match) {
         Log::get().note("exposure fix: candidate compute shader %016llX matches the "
@@ -408,7 +411,7 @@ void exposureFixFrameBoundary() {
             "star and the eyes still differ, the pass has changed shape and the fix "
             "needs updating; this log is the thing to report.",
             static_cast<unsigned long long>(s->frames),
-            static_cast<size_t>(s->shadersExamined));
+            s->everExamined.size());
     }
 }
 

@@ -82,7 +82,17 @@ void Sentinel::clearTrip() {
     // Deleting it on the refusing launch keeps the protection -- a hook that
     // really does crash still gets thrown out every other launch, and says so
     // -- while costing a false trip one session instead of all of them.
-    DeleteFileW(m_path);
+    if (!DeleteFileW(m_path) && GetFileAttributesW(m_path) != INVALID_FILE_ATTRIBUTES) {
+        // Still there. Left unsaid, this is a permanent lockout wearing a
+        // one-session message: the file cannot be removed (read-only, or held by
+        // something), so every launch refuses and every launch promises to try
+        // again next time.
+        Log::get().note("the crash sentinel file could not be deleted, so this will "
+                        "keep refusing every launch. Delete %S by hand, or set "
+                        "ignore_sentinel = 1 under [advanced] to start anyway.",
+                        m_path);
+        return;
+    }
     m_tripped = false;
 }
 

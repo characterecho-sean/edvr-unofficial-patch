@@ -174,7 +174,17 @@ void Log::note(const char* fmt, ...) {
 
     va_list ap;
     va_start(ap, fmt);
-    const int m = _vsnprintf_s(line + n, sizeof(line) - n - 3, _TRUNCATE, fmt, ap);
+    // Room for the marker is reserved up front, not found afterwards.
+    //
+    // Formatting into the whole buffer and then looking for space left exactly
+    // one byte, so the "...[truncated]" marker could never render -- a single
+    // space was appended instead, and a truncated line looked like an ordinary
+    // one. Messages lose the marker's width of capacity; a line long enough to
+    // notice that is a line being truncated anyway.
+    static const char kMark[] = " ...[truncated]";
+    const int kMarkLen = static_cast<int>(sizeof(kMark)) - 1;
+    const int m = _vsnprintf_s(line + n, sizeof(line) - n - 3 - kMarkLen, _TRUNCATE,
+                               fmt, ap);
     va_end(ap);
     if (m > 0) {
         n += m;
@@ -187,10 +197,8 @@ void Log::note(const char* fmt, ...) {
         // timestamp -- and the messages long enough to hit this are the ones
         // carrying paths and diagnostics somebody is reading off a support log.
         n += static_cast<int>(strlen(line + n));
-        static const char kMark[] = " ...[truncated]";
         const int room = static_cast<int>(sizeof(line)) - n - 3;
-        int take = static_cast<int>(sizeof(kMark)) - 1;
-        if (take > room) take = room;
+        const int take = kMarkLen < room ? kMarkLen : room;
         if (take > 0) {
             memcpy(line + n, kMark, static_cast<size_t>(take));
             n += take;

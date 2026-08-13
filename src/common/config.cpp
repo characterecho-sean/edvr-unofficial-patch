@@ -98,7 +98,7 @@ void Config::parse() {
     }
 
     BY_HANDLE_FILE_INFORMATION info{};
-    if (GetFileInformationByHandle(f, &info)) m_lastWrite = info.ftLastWriteTime;
+    const BOOL haveInfo = GetFileInformationByHandle(f, &info);
     std::vector<char> text(size + 1, 0);
     DWORD read = 0;
     const BOOL readOk = ReadFile(f, text.data(), size, &read, nullptr);
@@ -182,6 +182,14 @@ void Config::parse() {
         parsed[section.empty() ? key : section + "." + key] = val;
     }
     m_impl->values.swap(parsed);
+    // Stamped only now, on the success path.
+    //
+    // Stamping it up front meant a read that failed -- an editor holding the
+    // file mid-save -- kept the old values, correctly, but recorded the new
+    // timestamp with them. reloadIfChanged() then saw nothing to do and that
+    // edit was never picked up for the rest of the session. The size-check bail
+    // above already avoided this; the read path did not.
+    if (haveInfo) m_lastWrite = info.ftLastWriteTime;
 }
 
 bool Config::reloadIfChanged() {

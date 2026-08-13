@@ -931,6 +931,34 @@ void installVScreenFixes(ID3D11Device* device) {
     ctx->Release();
 }
 
+bool vScreenHooksSawClearState() { return g_state && g_state->sawClearState; }
+bool vScreenHooksSawExecuteCommandList() {
+    return g_state && g_state->sawExecuteCommandList;
+}
+
+}  // namespace edvr
+
+// One extra export, for the build check only.
+//
+// smoke.exe loads this DLL the way the game does and therefore cannot call
+// anything that is not exported. It needs to ask whether the ClearState and
+// ExecuteCommandList hooks actually RAN, because checking that rendering still
+// works afterwards cannot catch a slot miscount -- every plausible off-by-one
+// lands on a method the test never calls.
+//
+// Additive: the proxy still exports everything the real d3d11.dll does, plus
+// this. Nothing in the game imports it.
+//
+// bit 0 = ClearState hook ran, bit 1 = ExecuteCommandList hook ran.
+extern "C" unsigned int edvr_selftest_hooks() {
+    unsigned int bits = 0;
+    if (edvr::vScreenHooksSawClearState()) bits |= 1u;
+    if (edvr::vScreenHooksSawExecuteCommandList()) bits |= 2u;
+    return bits;
+}
+
+namespace edvr {
+
 void shutdownVScreenFixes() {
     if (!g_state) return;
 
@@ -942,9 +970,10 @@ void shutdownVScreenFixes() {
     Log::get().note("vScreen totals: panel distance applied %llu time(s), void cleared to "
                     "black %llu time(s). Two eyes a frame, so a working session is tens "
                     "of thousands of each; single digits mean it engaged once and then "
-                    "stopped. Largest eye-draw count seen this session: %u -- it is 2 at "
-                    "the stock panel resolution, and anything much larger means "
-                    "intermediate targets are being miscounted as eye textures.",
+                    "stopped. Largest eye-draw count seen this session: %u -- a peak that "
+                    "depends on what you were doing (about 2 in HMD Cinema Mode, tens to "
+                    "over a thousand on foot, a few hundred in flight), not a fault "
+                    "indicator.",
                     static_cast<unsigned long long>(g_state->panelOverrides),
                     static_cast<unsigned long long>(g_state->voidClears),
                     g_state->eyeDrawsMax);

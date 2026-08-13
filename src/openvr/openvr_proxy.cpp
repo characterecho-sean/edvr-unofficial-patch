@@ -69,32 +69,50 @@ INIT_ONCE g_loadOnce = INIT_ONCE_STATIC_INIT;
 // this side kept it because bare `jmp [slot]` thunks need the slot filled before
 // the first call. The generated thunks now check first and come here instead.
 BOOL CALLBACK loadOnceCallback(PINIT_ONCE, PVOID, PVOID*) {
-    g_moduleDir = new std::wstring(edvr::moduleDirectory(g_selfModule));
-
-    // No system fallback: openvr_api.dll is not an OS component, so the only
-    // correct source is the copy that shipped with the game -- which the install
-    // steps rename to openvr_api_orig.dll, the default when nothing is set.
-    std::string realDll =
-        edvr::readConfigStringEarly(*g_moduleDir, L"edvr.ini", "advanced.real_openvr_dll");
-    if (realDll.empty()) realDll = "openvr_api_orig.dll";
-    g_realModule = edvr::loadRealModule(*g_moduleDir, realDll, nullptr, L"openvr_api.dll");
-    if (!g_realModule) edvr::breadcrumb("vr: FAILED to load openvr_api_orig.dll");
-
-    // Called even when nothing loaded, which is the whole point: it fills the
-    // table with the stub so the thunks have somewhere to go. Returning early
-    // here left the generated table all zeros and the first forwarded call
-    // jumped through null -- a startup crash on the one mistake the install
-    // steps warn about, forgetting to rename the game's openvr_api.dll.
+    // STUB-FILL FIRST, before anything that can throw or fail.
+    //
+    // Two reasons, and the ordering is the fix for both. An exception escaping
+    // this callback leaves the INIT_ONCE permanently in-progress, so every later
+    // caller blocks forever -- catching it outside, in edvr_lazyInit_openvr, was
+    // not enough because the damage is done by unwinding THROUGH
+    // InitOnceExecuteOnce. And the ready flag is published unconditionally
+    // afterwards, so a table that never got filled would be jumped through.
+    // Filling it here means the worst case is every export returning zero.
     g_missingExports =
-        edvr::resolveProcs(g_realModule, kExportNames, kExportCount, edvr_realProcs_openvr,
+        edvr::resolveProcs(nullptr, kExportNames, kExportCount, edvr_realProcs_openvr,
                            reinterpret_cast<void*>(&edvr_unresolved_openvr));
 
-    if (g_realModule) {
+    // Everything below can throw -- std::wstring, std::string -- so it is caught
+    // here rather than by the caller.
+    try {
+        g_moduleDir = new std::wstring(edvr::moduleDirectory(g_selfModule));
+
+        // No system fallback: openvr_api.dll is not an OS component, so the only
+        // correct source is the copy that shipped with the game -- which the
+        // install steps rename to openvr_api_orig.dll, the default when nothing
+        // is set.
+        std::string realDll = edvr::readConfigStringEarly(*g_moduleDir, L"edvr.ini",
+                                                          "advanced.real_openvr_dll");
+        if (realDll.empty()) realDll = "openvr_api_orig.dll";
+        g_realModule =
+            edvr::loadRealModule(*g_moduleDir, realDll, nullptr, L"openvr_api.dll");
+        if (!g_realModule) {
+            edvr::breadcrumb("vr: FAILED to load openvr_api_orig.dll");
+            return TRUE;   // the stubs above stand
+        }
+
+        // Now the real thing, over the stubs.
+        g_missingExports = edvr::resolveProcs(g_realModule, kExportNames, kExportCount,
+                                              edvr_realProcs_openvr,
+                                              reinterpret_cast<void*>(&edvr_unresolved_openvr));
+
         g_realGetGenericInterface = reinterpret_cast<PFN_VR_GetGenericInterface>(
             GetProcAddress(g_realModule, "VR_GetGenericInterface"));
         edvr::breadcrumb(g_realGetGenericInterface
                              ? "vr: exports resolved"
                              : "vr: FAILED no VR_GetGenericInterface");
+    } catch (...) {
+        edvr::breadcrumb("vr: lazy init threw; every export will return failure");
     }
     return TRUE;
 }
@@ -130,13 +148,11 @@ extern "C" void edvr_lazyInit_openvr() {
     static thread_local bool s_inProgress = false;
     if (s_inProgress) return;
 
-    // No exception may leave this function.
-    //
-    // It is extern "C" and called from assembly, and /EHsc lets the compiler
-    // assume extern "C" does not throw -- so a std::bad_alloc from the `new`
-    // inside the callback would hit the fail-fast handler and take the process
-    // down at startup. The catch is not a recovery: the table is stub-filled
-    // either way, so the game loses VR rather than the whole process.
+    // The callback catches its own exceptions -- see loadOnceCallback. This
+    // second net is for anything InitOnceExecuteOnce itself might raise, because
+    // this function is extern "C" and called from assembly, and /EHsc lets the
+    // compiler assume extern "C" does not throw: an escape here is a fail-fast
+    // process kill at startup, not an unwind.
     s_inProgress = true;
     try {
         InitOnceExecuteOnce(&g_loadOnce, loadOnceCallback, nullptr, nullptr);

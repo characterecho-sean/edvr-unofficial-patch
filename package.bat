@@ -29,17 +29,22 @@ REM earlier source revision would be zipped alongside today's ini and README, an
 REM smoke.exe -- built by build.bat, and named in its closing message as the way
 REM to check a build -- was invoked by nothing at all. It was entirely possible
 REM to ship a DLL that would have failed its own test.
+REM Gated with `||`, not `if errorlevel 1`.
+REM
+REM `if errorlevel N` means "exit code >= N", and a process killed by an access
+REM violation exits with a negative NTSTATUS -- so it read a CRASH as success.
+REM Measured. `%errorlevel%` is no good either: these gates sit inside
+REM parenthesised blocks, where it expands once at parse time. `||` keys off the
+REM command's own exit code and is immune to both.
 echo [edvr] building before packaging
-call "%ROOT%\build.bat"
-if errorlevel 1 (
-    echo [edvr] ERROR: build failed; nothing packaged
+call "%ROOT%\build.bat" || (
+    echo [edvr] ERROR: build failed or crashed; nothing packaged
     exit /b 1
 )
 
 echo [edvr] running the build checks
-"%ROOT%\build\smoke.exe" "%ROOT%\build\d3d11.dll"
-if errorlevel 1 (
-    echo [edvr] ERROR: smoke test failed; nothing packaged
+"%ROOT%\build\smoke.exe" "%ROOT%\build\d3d11.dll" || (
+    echo [edvr] ERROR: smoke test failed or crashed; nothing packaged
     exit /b 1
 )
 

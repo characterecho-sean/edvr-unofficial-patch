@@ -35,7 +35,7 @@ INI = os.path.join(ROOT, 'edvr.ini')
 
 # cfg.getBool("fix.black_void", true) and friends, plus the early reader.
 READ_RE = re.compile(r'get(?:Bool|Int|Float|String)\s*\(\s*"([^"]+)"')
-EARLY_RE = re.compile(r'readConfigStringEarly\s*\([^,]+,[^,]+,\s*"([^"]+)"')
+EARLY_RE = re.compile(r'readConfigStringEarly\s*\([^,]+,[^,]+,\s*"([^"]+)"', re.S)
 
 # A section we know about followed by a dotted name, anywhere in a string. Used
 # to catch key names mentioned in log text that nothing actually reads.
@@ -51,15 +51,22 @@ def source_files():
 
 
 def keys_read():
-    """Keys the code actually asks Config for, as {key: [file:line, ...]}."""
+    """Keys the code actually asks Config for, as {key: [file:line, ...]}.
+
+    Matched against the whole file, not line by line. A call the formatter
+    wrapped across two lines is the same call, and a contract check whose answer
+    depends on where an argument list breaks is worse than none -- the first time
+    that happened it reported a live, correctly-read key as dead.
+    """
     found = {}
     for path in source_files():
         rel = os.path.relpath(path, ROOT).replace('\\', '/')
         with open(path, encoding='utf-8', errors='replace') as f:
-            for i, line in enumerate(f, 1):
-                for rx in (READ_RE, EARLY_RE):
-                    for key in rx.findall(line):
-                        found.setdefault(key, []).append('%s:%d' % (rel, i))
+            text = f.read()
+        for rx in (READ_RE, EARLY_RE):
+            for m in rx.finditer(text):
+                line = text.count('\n', 0, m.start()) + 1
+                found.setdefault(m.group(1), []).append('%s:%d' % (rel, line))
     return found
 
 

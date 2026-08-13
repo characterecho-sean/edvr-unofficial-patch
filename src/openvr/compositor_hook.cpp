@@ -81,12 +81,19 @@ struct State {
     uint32_t submitCalls = 0;
     uint32_t eyesSeen = 0;         // bit 0 left, bit 1 right
 
+    // Refused this session, so a SECOND compositor request does not sail past.
+    //
+    // clearTrip() resets the sentinel in memory as well as on disk, so after a
+    // refusal trippedOnStartup() is false -- and the very scenarios the refusal
+    // message cites (SteamVR restarting, the headset waking) are exactly the ones
+    // that ask for the interface again. The hook would install mid-"refused"
+    // session, which is not what the user was told.
+    bool     refusedThisSession = false;
     uint32_t framesWithheld = 0;
     uint32_t notesLeft = 80;
 };
 
 State* g_state = nullptr;
-FaultBudget g_posesBudget("compositor.WaitGetPoses", 5);
 
 // Cheap sanity check on the arguments of what we believe is Submit. If the
 // vtable index were wrong we would be reading another method's registers, and
@@ -310,8 +317,10 @@ void* interceptInterface(void* iface, const char* interfaceVersion) {
     // is for; a false trip costs a single flash-fix-less session instead of all
     // of them.
     if (!s.sentinel) s.sentinel = new Sentinel(cfg.logDir().c_str(), L"compositor_hook");
+    if (s.refusedThisSession) return iface;
     if (s.sentinel->trippedOnStartup() &&
         !cfg.getBool("advanced.ignore_sentinel", false)) {
+        s.refusedThisSession = true;
         s.sentinel->clearTrip();
         Log::get().note(
             "SENTINEL TRIPPED: the previous run armed the compositor hook and never "

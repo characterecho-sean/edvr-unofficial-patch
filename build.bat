@@ -113,7 +113,8 @@ echo.
 echo [edvr] === d3d11.dll ===
 python "%ROOT%\tools\gen_exports.py" --source "%SystemRoot%\System32\d3d11.dll" ^
     --tag d3d11 --out "%GEN%" ^
-    --wrap D3D11CreateDevice --wrap D3D11CreateDeviceAndSwapChain
+    --wrap D3D11CreateDevice --wrap D3D11CreateDeviceAndSwapChain ^
+    --extra-export edvr_selftest_hooks
 if errorlevel 1 ( echo [edvr] ERROR: export generation failed & exit /b 1 )
 
 if not exist "%OBJ%\d3d11" mkdir "%OBJ%\d3d11"
@@ -195,6 +196,13 @@ echo        Pass --openvr ^<path^> to build it. Everything except the
 echo        transition flash fix works without it.
 :openvr_done
 
+REM Gated with `||`, not `if errorlevel 1`.
+REM
+REM `if errorlevel N` means "exit code >= N", and a process killed by an access
+REM violation exits with a negative NTSTATUS -- so it read a CRASH as success.
+REM Measured. `%errorlevel%` is no good either: these gates sit inside
+REM parenthesised blocks, where it expands once at parse time. `||` keys off the
+REM command's own exit code and is immune to both.
 echo [edvr] === smoke.exe ===
 if not exist "%OBJ%\smoke" mkdir "%OBJ%\smoke"
 cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /DNDEBUG ^
@@ -232,8 +240,10 @@ if exist "%BUILD%\openvr_api.dll" (
     if not exist "%BUILD%\vrtest" mkdir "%BUILD%\vrtest"
     copy /Y "%BUILD%\openvr_api.dll" "%BUILD%\vrtest\openvr_api.dll" >nul
     copy /Y "%BUILD%\fakevr.dll" "%BUILD%\vrtest\openvr_api_orig.dll" >nul
-    "%BUILD%\openvr_smoke.exe" "%BUILD%\vrtest"
-    if errorlevel 1 ( echo [edvr] ERROR: openvr startup test failed & exit /b 1 )
+    "%BUILD%\openvr_smoke.exe" "%BUILD%\vrtest" || (
+        echo [edvr] ERROR: openvr startup test failed or crashed
+        exit /b 1
+    )
 )
 
 REM Do the code, edvr.ini and the log messages agree about setting names?
@@ -247,8 +257,10 @@ where python >nul 2>&1
 if errorlevel 1 (
     echo [edvr] NOTE: python not found, skipping the config contract check
 ) else (
-    python "%ROOT%\tools\check_config_contract.py"
-    if errorlevel 1 ( echo [edvr] ERROR: config contract check failed & exit /b 1 )
+    python "%ROOT%\tools\check_config_contract.py" || (
+        echo [edvr] ERROR: config contract check failed or crashed
+        exit /b 1
+    )
 )
 
 echo.
