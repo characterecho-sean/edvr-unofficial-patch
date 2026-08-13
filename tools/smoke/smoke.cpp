@@ -191,6 +191,40 @@ int main(int argc, char** argv) {
         }
     }
 
+    // The two hooks whose vtable slots were counted rather than measured.
+    //
+    // Calling them proves the slot: if 58 or 110 named some other method, this
+    // is where the process falls over or the clear below stops working, at
+    // build time, instead of on somebody's headset. A miscount that lands on a
+    // neighbour -- FinishCommandList sits beside ClearState -- would otherwise
+    // be invisible until it mattered.
+    if (rc == 0) {
+        ID3D11DeviceContext* deferred = nullptr;
+        if (SUCCEEDED(device->CreateDeferredContext(0, &deferred)) && deferred) {
+            ID3D11CommandList* list = nullptr;
+            if (SUCCEEDED(deferred->FinishCommandList(FALSE, &list)) && list) {
+                ctx->ExecuteCommandList(list, FALSE);
+                list->Release();
+            }
+            deferred->Release();
+        }
+        ctx->ClearState();
+
+        // Still working afterwards. ClearState drops every binding, and the
+        // point of hooking it is that we notice; if the hook had landed on the
+        // wrong method, state we rely on would be stale rather than cleared.
+        unsigned char after[3] = {0, 0, 0};
+        if (clearGreyReadBack(device, ctx, 2048, 2048, after) && after[0] == 0 &&
+            after[1] == 0 && after[2] == 0) {
+            printf("  ok    survived ClearState and ExecuteCommandList\n");
+        } else {
+            printf("  FAIL  the black void stopped working after ClearState/"
+                   "ExecuteCommandList\n");
+            printf("        Slot 58 or 110 is not the method it was counted to be.\n");
+            rc = 1;
+        }
+    }
+
     ctx->Release();
     device->Release();
 
@@ -199,12 +233,20 @@ int main(int argc, char** argv) {
         return rc;
     }
     if (!regressionRan) {
-        // Deliberately not a failure -- black_void = 0 is a legitimate setting --
-        // but it must not be reported as a clean run either.
-        printf("\nSMOKE TEST PASSED, BUT THE VIEW-RECYCLING CHECK DID NOT RUN\n");
-        printf("        It needs the black void fix active. Set black_void = 1 in an\n");
-        printf("        edvr.ini next to the DLL to exercise it.\n");
-        return 0;
+        // A failure, not a caveat.
+        //
+        // Renaming the outcome was not enough: build.bat offers this command as
+        // the way to check the build, and it exited 0 against
+        // C:\Windows\System32\d3d11.dll -- a DLL containing none of these fixes.
+        // A check that could not run has verified nothing, and saying so in
+        // words while returning success puts the burden on somebody reading
+        // scrollback. black_void = 0 is a legitimate setting and this is a
+        // legitimate way to find out that it is on.
+        printf("\nSMOKE TEST FAILED: THE VIEW-RECYCLING CHECK COULD NOT RUN\n");
+        printf("        The first eye-sized clear did not come back black, so the\n");
+        printf("        black void fix is not acting. Either this DLL is not an EDVR\n");
+        printf("        build, or black_void = 0 in an edvr.ini beside it.\n");
+        return 1;
     }
     printf("\nSMOKE TEST PASSED\n");
     return 0;

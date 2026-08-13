@@ -200,6 +200,21 @@ void installGlitchFrameFix() {
         Log::get().note("transition flash fix off: threshold or buffer size is zero.");
         return;
     }
+    // Three floats have to fit at that offset, inside that buffer.
+    //
+    // Checked here and not only at the read, so an impossible pair is refused
+    // rather than printed. Echoing a value is what makes a wrong one visible --
+    // but echoing one without checking it just states the absurdity and arms
+    // anyway: "looking for the camera at float 4294967295 of a 256-byte buffer".
+    if (static_cast<uint64_t>(s.posOffset) * 4u + 12u > s.bufferBytes) {
+        s.enabled = false;
+        Log::get().note(
+            "transition flash fix off: camera_buffer_offset %u needs three floats inside "
+            "a %u-byte buffer, which does not fit. Check [advanced] in edvr.ini; the "
+            "defaults are 1100 and 5376.",
+            s.posOffset, s.bufferBytes);
+        return;
+    }
     // Said at install, not only when validation finishes, so a log from a
     // session that never reached a rendered scene still shows whether this was
     // armed at all. A fix that is silent until it succeeds is indistinguishable
@@ -220,7 +235,12 @@ void installGlitchFrameFix() {
 
 bool glitchFrameNeedsEyeDraws() {
     State* s = g_state;
-    return s && s->enabled;
+    // disabledForSession, like its sibling below. Without it this answers "yes"
+    // forever: `enabled` is set once at install and never falls, so once the
+    // detector has given up -- no buffer, validation failed, runaway guard --
+    // vScreen would go on resolving a view per render-target rebind, every
+    // frame, for a consumer that will never look at the count again.
+    return s && s->enabled && !s->disabledForSession;
 }
 
 bool glitchFrameWantsBuffer(uint32_t bytes) {
@@ -232,7 +252,13 @@ void glitchFrameObserve(const void* data, uint32_t bytes) {
     State* s = g_state;
     if (!s || !s->enabled || s->disabledForSession) return;
     if (bytes != s->bufferBytes) return;
-    if (bytes < (s->posOffset + 3) * 4) return;
+    // Widened deliberately. posOffset comes from the ini through getInt and is
+    // stored unsigned, so a negative or very large value becomes something near
+    // 0xFFFFFFFF; (posOffset + 3) * 4 then wraps to a tiny number, this check
+    // passes, and the read below lands gigabytes past the buffer. The identical
+    // wrap in vscreen.cpp was a hard crash on a documented, hand-edited setting,
+    // and this one was left behind when that was fixed.
+    if (static_cast<uint64_t>(s->posOffset) * 4u + 12u > bytes) return;
 
     const float* pos = &static_cast<const float*>(data)[s->posOffset];
     // Non-finite values compare false in both directions, so a NaN here would

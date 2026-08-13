@@ -35,7 +35,19 @@ constexpr size_t kSlotOMSetRenderTargets    = 33;
 // meant the binding could change without us seeing it.
 constexpr size_t kSlotOMSetRtvAndUav        = 34;
 constexpr size_t kSlotClearRenderTargetView = 50;
-constexpr size_t kHighestSlotUsed           = 50;
+// The two calls that drop every binding at once without naming any of them.
+//
+// Neither was hooked, so after either one curRtv0/curPsSrv0 still named views
+// the context had just released, and the answers about them stayed "known".
+// A draw after a mid-frame ClearState was still treated as the panel composite
+// -- measured at 2 overrides per frame where there should be 1 -- and the
+// restore then bound a constant buffer the game had deliberately unbound.
+//
+// ExecuteCommandList is the same story: a command list carries its own state,
+// and unless RestoreContextState is TRUE the context comes back cleared.
+constexpr size_t kSlotExecuteCommandList    = 58;
+constexpr size_t kSlotClearState            = 110;
+constexpr size_t kHighestSlotUsed           = 110;
 
 typedef void(STDMETHODCALLTYPE* PFN_SetConstantBuffers)(ID3D11DeviceContext*, UINT, UINT,
                                                         ID3D11Buffer* const*);
@@ -58,6 +70,9 @@ typedef void(STDMETHODCALLTYPE* PFN_ClearRtv)(ID3D11DeviceContext*,
 typedef void(STDMETHODCALLTYPE* PFN_OMSetRtvAndUav)(
     ID3D11DeviceContext*, UINT, ID3D11RenderTargetView* const*, ID3D11DepthStencilView*,
     UINT, UINT, ID3D11UnorderedAccessView* const*, const UINT*);
+typedef void(STDMETHODCALLTYPE* PFN_ClearState)(ID3D11DeviceContext*);
+typedef void(STDMETHODCALLTYPE* PFN_ExecuteCommandList)(ID3D11DeviceContext*,
+                                                        ID3D11CommandList*, BOOL);
 
 struct State {
     VTableHook hook;
@@ -73,6 +88,10 @@ struct State {
     PFN_OMSetRenderTargets   realOMSetRenderTargets = nullptr;
     PFN_OMSetRtvAndUav       realOMSetRtvAndUav = nullptr;
     PFN_ClearRtv             realClearRtv = nullptr;
+    PFN_ClearState           realClearState = nullptr;
+    PFN_ExecuteCommandList   realExecuteCommandList = nullptr;
+    bool sawClearState = false;
+    bool sawExecuteCommandList = false;
 
     bool  blackVoid = true;
     bool  distanceEnabled = false;
@@ -150,10 +169,18 @@ struct State {
     // which left one eye's void grey after an external-camera/on-foot switch
     // recreated the eye textures.
     //
-    // A bound view cannot be destroyed -- the context holds a reference to it --
-    // so for exactly as long as one of these is valid, the pointer it describes
-    // is alive and unchanged. That is the whole invariant, and it is not a
-    // question of how long a stale entry survives before something notices.
+    // A bound view cannot be destroyed while it is bound -- the context holds a
+    // reference to it -- so an answer is true for as long as the binding it was
+    // computed from lasts. That is the invariant, and it is only worth as much as
+    // our ability to SEE the binding end.
+    //
+    // Which is where the first version of this was wrong. It claimed the point
+    // was settled and stale entries were no longer a question. But OMSetRenderTargets
+    // is not the only way a binding ends: OMSetRenderTargetsAndUnorderedAccessViews,
+    // ClearState and ExecuteCommandList all end one without naming it, and none
+    // of the three were hooked. All four are hooked now, and the answers are
+    // dropped once a frame regardless, so an end we still cannot see costs one
+    // frame rather than the session.
     int8_t curRtv0Eye = -1;
     int8_t curPsSrv0Panel = -1;
 
@@ -163,17 +190,29 @@ struct State {
 };
 
 State* g_state = nullptr;
-FaultBudget g_budget("vScreen", 5);
+
+// One budget per thing that can fail, not one for the file.
+//
+// A budget that is exhausted stops running its body at all, so sharing one
+// across unrelated features means a fault in any of them switches off all of
+// them. That happened: a bad camera_buffer_offset faulted in the transition
+// flash reader, burned the shared budget, and the black void fix -- which has
+// nothing to do with it -- stopped clearing, silently, with a log line naming
+// only "vScreen". Splitting them also makes the FEATURE-DISABLED line say which
+// one actually failed.
+FaultBudget g_viewBudget("vScreen.views", 5);        // resolving a bound view
+FaultBudget g_panelCbBudget("vScreen.panelBuffer", 5);  // reading the panel's transform
+FaultBudget g_cameraBudget("vScreen.cameraRead", 5);    // reading the scene camera
 
 // Is this render target one of the two textures sent to the headset?
 //
 // By size. The graphics layer never sees what is submitted to the headset, and
 // nothing else in an Elite frame is drawn into at 2048x2048 or larger.
 //
-// Uncached. The two callers each hold a live view for the duration of the call:
-// ClearRenderTargetView is given one, and the draw path asks about the one
-// currently bound. Callers that ask repeatedly remember the answer for as long
-// as the binding lasts -- see curRtv0Eye.
+// Uncached. ClearRenderTargetView is handed a live view, so that caller is safe
+// by construction. The draw path asks about the view it last SAW bound, which is
+// a weaker thing -- hence the guard below rather than a claim. Callers that ask
+// repeatedly remember the answer for as long as the binding lasts, see curRtv0Eye.
 bool targetIsEyeSized(void* rtv) {
     State* s = g_state;
     if (!rtv) return false;
@@ -186,7 +225,7 @@ bool targetIsEyeSized(void* rtv) {
     // curRtv0 for the rest of a frame. Resolving it then reads freed memory.
     // The fix for that is the frame-boundary reset in vScreenFrameBoundary; this
     // is what turns the remaining window into a skipped draw instead of a crash.
-    guardedBudget(g_budget, [&] {
+    guardedBudget(g_viewBudget, [&] {
     ID3D11Resource* res = nullptr;
     static_cast<ID3D11View*>(rtv)->GetResource(&res);
     if (res) {
@@ -243,7 +282,7 @@ bool srv0IsPanelSized(State* s) {
     uint32_t lastW = 0, lastH = 0;
     // Guarded for the same reason as targetIsEyeSized: a view we last saw bound
     // is not proof of a view that is still alive.
-    guardedBudget(g_budget, [&] {
+    guardedBudget(g_viewBudget, [&] {
         ID3D11Resource* res = nullptr;
         static_cast<ID3D11View*>(s->curPsSrv0)->GetResource(&res);
         if (res) {
@@ -454,6 +493,51 @@ void STDMETHODCALLTYPE hookedVSSetConstantBuffers(ID3D11DeviceContext* self, UIN
     g_state->realVSSetConstantBuffers(self, start, n, bufs);
 }
 
+// Everything is unbound. Forget all of it -- this is the one place where
+// forgetting the pointers is the truth rather than a guess.
+void forgetBindings(State* s) {
+    s->curRtv0 = nullptr;
+    s->curPsSrv0 = nullptr;
+    s->curVsCb0 = nullptr;
+    s->curRtv0Eye = -1;
+    s->curPsSrv0Panel = -1;
+}
+
+// Both of these say so the first time they run.
+//
+// Their vtable slots were derived by counting declaration order, not measured,
+// and a miscount would silently replace an unrelated method -- FinishCommandList
+// and ClearState are neighbours in that table. One line each is what turns "the
+// count looks right" into evidence, on whatever machine the log came from.
+void STDMETHODCALLTYPE hookedClearState(ID3D11DeviceContext* self) {
+    State* s = g_state;
+    if (!s->sawClearState) {
+        s->sawClearState = true;
+        Log::get().note("vScreen: ClearState seen (slot %zu); bindings dropped with it",
+                        kSlotClearState);
+    }
+    forgetBindings(s);
+    s->realClearState(self);
+}
+
+void STDMETHODCALLTYPE hookedExecuteCommandList(ID3D11DeviceContext* self,
+                                                ID3D11CommandList* list,
+                                                BOOL restoreContextState) {
+    State* s = g_state;
+    if (!s->sawExecuteCommandList) {
+        s->sawExecuteCommandList = true;
+        Log::get().note("vScreen: ExecuteCommandList seen (slot %zu, restore=%d). Draws "
+                        "recorded on a deferred context replay past every hook here, so "
+                        "they are neither counted nor corrected.",
+                        kSlotExecuteCommandList, restoreContextState ? 1 : 0);
+    }
+    s->realExecuteCommandList(self, list, restoreContextState);
+    // After the call, and only when the context was not restored: with
+    // RestoreContextState TRUE the bindings we recorded are put back, so
+    // dropping them would cost the fix a frame for no reason.
+    if (!restoreContextState) forgetBindings(s);
+}
+
 HRESULT STDMETHODCALLTYPE hookedMap(ID3D11DeviceContext* self, ID3D11Resource* res,
                                     UINT sub, D3D11_MAP type, UINT flags,
                                     D3D11_MAPPED_SUBRESOURCE* mapped) {
@@ -500,7 +584,7 @@ void STDMETHODCALLTYPE hookedUnmap(ID3D11DeviceContext* self, ID3D11Resource* re
     // Read before forwarding: after the real Unmap the memory is no longer ours
     // to look at.
     if (res == s->mappedResource && s->mappedData) {
-        guardedBudget(g_budget, [&] {
+        guardedBudget(g_panelCbBudget, [&] {
             memcpy(s->shadow, s->mappedData, s->mappedBytes);
             s->shadowBytes = s->mappedBytes;
         });
@@ -511,7 +595,7 @@ void STDMETHODCALLTYPE hookedUnmap(ID3D11DeviceContext* self, ID3D11Resource* re
     if (res == s->camResource && s->camData) {
         // Same rule as above: read before forwarding, because after the real
         // Unmap the memory is no longer ours to look at.
-        guardedBudget(g_budget, [&] { glitchFrameObserve(s->camData, s->camBytes); });
+        guardedBudget(g_cameraBudget, [&] { glitchFrameObserve(s->camData, s->camBytes); });
         s->camResource = nullptr;
         s->camData = nullptr;
         s->camBytes = 0;
@@ -596,21 +680,29 @@ void vScreenFrameBoundary() {
     State* s = g_state;
     if (!s) return;
 
-    // Forget which views were bound, once a frame.
+    // Re-decide what the bound views are, once a frame -- but do NOT forget what
+    // is bound.
     //
-    // Not because the per-binding answers go stale on their own -- they are
-    // recomputed at every rebind we can see -- but because we cannot see every
-    // rebind. ClearState, ExecuteCommandList and a command list replayed onto
-    // this context all drop the binding without passing through a hook, and
-    // after any of those curRtv0 names a view that may already be gone.
+    // Nulling the pointers here was a bug. Nothing re-acquires them: they are
+    // only ever written from OMSetRenderTargets and its UAV variant, so a game
+    // that binds a target once and then draws for many frames loses the fix
+    // after the first Present and never gets it back. Measured on a harness
+    // that binds once and then draws each frame: 1800 overrides before that
+    // change, 1 after it. Not "the first draws of a frame" -- the rest of the
+    // session.
     //
-    // Bounding that to a single frame is what the deleted panelSrcCache clear
-    // used to do by accident. Removing it in the same change that removed the
-    // maps took away a safety net that was doing real work.
-    s->curRtv0 = nullptr;
-    s->curPsSrv0 = nullptr;
+    // Dropping the ANSWERS is still worth doing, and is all that was wanted: it
+    // is the one-frame bound the deleted panelSrcCache clear used to provide by
+    // accident. The pointers themselves are dropped by the hooks below, at the
+    // points where the binding genuinely goes away.
     s->curRtv0Eye = -1;
     s->curPsSrv0Panel = -1;
+
+    // Re-asked every frame, not on config reload. The answer changes when the
+    // detector gives up on itself, which is not something an ini edit causes --
+    // and vScreenRefreshConfig returns early unless the file's write time moved,
+    // so asking there would never see it. One bool call a frame.
+    s->countForFlashFix = glitchFrameNeedsEyeDraws();
 
     if (s->eyeDrawsThisFrame > s->eyeDrawsMax) s->eyeDrawsMax = s->eyeDrawsThisFrame;
 
@@ -718,6 +810,10 @@ void installVScreenFixes(ID3D11Device* device) {
                    reinterpret_cast<void**>(&s.realClearRtv));
     s.hook.replace(kSlotOMSetRenderTargets, &hookedOMSetRenderTargets,
                    reinterpret_cast<void**>(&s.realOMSetRenderTargets));
+    s.hook.replace(kSlotClearState, &hookedClearState,
+                   reinterpret_cast<void**>(&s.realClearState));
+    s.hook.replace(kSlotExecuteCommandList, &hookedExecuteCommandList,
+                   reinterpret_cast<void**>(&s.realExecuteCommandList));
     s.hook.replace(kSlotOMSetRtvAndUav, &hookedOMSetRtvAndUav,
                    reinterpret_cast<void**>(&s.realOMSetRtvAndUav));
     s.hook.replace(kSlotPSSetShaderResources, &hookedPSSetShaderResources,
