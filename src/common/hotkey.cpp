@@ -1,3 +1,5 @@
+// GENERATED from src/common/hotkey.cpp in the private edvr repo -- do not edit here.
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 7a1d2c4131a14ea4]
 #include "hotkey.h"
 
 #include <windows.h>

@@ -1,3 +1,5 @@
+// GENERATED from src/common/config.h in the private edvr repo -- do not edit here.
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 995ee70d2546003f]
 // Hot-reloadable key=value config.
 //
 // The user is wearing a headset and cannot see a text editor, so every tunable

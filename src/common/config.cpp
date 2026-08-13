@@ -1,3 +1,5 @@
+// GENERATED from src/common/config.cpp in the private edvr repo -- do not edit here.
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 6834199bcea745e2]
 #include "config.h"
 
 #include <windows.h>

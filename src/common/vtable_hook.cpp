@@ -1,3 +1,5 @@
+// GENERATED from src/common/vtable_hook.cpp in the private edvr repo -- do not edit here.
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 6fa1bdd8b1f26230]
 #include "vtable_hook.h"
 
 #include <windows.h>

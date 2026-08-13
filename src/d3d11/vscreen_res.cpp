@@ -1,3 +1,5 @@
+// GENERATED from src/d3d11/vscreen_res.cpp in the private edvr repo -- do not edit here.
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 8245742252bb8460]
 #include "vscreen_res.h"
 
 #include <windows.h>

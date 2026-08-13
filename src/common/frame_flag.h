@@ -1,3 +1,5 @@
+// GENERATED from src/common/frame_flag.h in the private edvr repo -- do not edit here.
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 c3fb452355740f4c]
 // A one-bit channel between the two proxies, for the frame that must not be
 // shown.
 //

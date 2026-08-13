@@ -1,3 +1,5 @@
+// GENERATED from src/common/guard.h in the private edvr repo -- do not edit here.
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 a209b7327b753810]
 // SEH containment for hook bodies.
 //
 // A fault anywhere in our code must degrade to vanilla behaviour, never to a
