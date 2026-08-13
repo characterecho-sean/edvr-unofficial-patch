@@ -819,7 +819,7 @@ void installVScreenFixes(ID3D11Device* device) {
     // never installed cannot be switched on by editing a file -- so returning
     // here on "nothing asked for" would make the documented behaviour impossible
     // for anyone who starts with both off.
-    if (!wantVoid && scale == 1.0f && !cfg.getBool("fix.panel_hooks_always", true)) {
+    if (!wantVoid && scale == 1.0f && !cfg.getBool("advanced.panel_hooks_always", true)) {
         return;
     }
 

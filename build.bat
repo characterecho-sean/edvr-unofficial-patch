@@ -175,6 +175,21 @@ cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /DNDEBUG /LD ^
 if errorlevel 1 ( echo [edvr] ERROR: fakechain build failed & exit /b 1 )
 echo [edvr] built %BUILD%\fakechain.dll
 
+REM Do the code, edvr.ini and the log messages agree about setting names?
+REM
+REM Three settings were read from the wrong section for the whole of 0.5.x and
+REM nothing anywhere said so, because a key that does not match is simply not
+REM there and a missing key falls back to its default. Only run when python is
+REM available; a missing interpreter must not stop a build.
+echo [edvr] === config contract ===
+where python >nul 2>&1
+if errorlevel 1 (
+    echo [edvr] NOTE: python not found, skipping the config contract check
+) else (
+    python "%ROOT%\tools\check_config_contract.py"
+    if errorlevel 1 ( echo [edvr] ERROR: config contract check failed & exit /b 1 )
+)
+
 echo.
 echo [edvr] To install: copy build\d3d11.dll and edvr.ini next to
 echo        EliteDangerous64.exe. See README.md.
