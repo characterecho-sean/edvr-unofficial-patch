@@ -41,6 +41,15 @@ constexpr uint32_t kNoBufferGiveUp = 2000;
 // Frames of a rendered scene needed before the detector is allowed to act.
 constexpr uint32_t kValidateFrames = 300;
 
+// Rendered frames after which a value that still has not moved is accepted as
+// not being the camera.
+//
+// Deliberately large -- several minutes of actual play. The 300-frame window
+// answers "is it moving NOW", which a docked or landed player makes false
+// without saying anything about the offset; this answers "has it EVER moved",
+// which only a wrong offset makes false.
+constexpr uint32_t kValidateGiveUp = 20000;
+
 struct RingEntry {
     uint64_t qpc;
     uint32_t frame;
@@ -127,6 +136,7 @@ struct State {
     uint32_t  candidatesMissed = 0;   // distinct buffers past the four we track
     uint32_t validateFrames = 0;
     uint32_t validateMoved = 0;
+    uint32_t revalidations = 0;
 
     RingEntry ring[kRingFrames] = {};
     uint64_t  ringHead = 0;
@@ -160,8 +170,46 @@ void validate() {
     State* s = g_state;
     if (s->validated || s->validateFrames < kValidateFrames) return;
 
-    s->validated = true;
     if (s->validateMoved < 30) {
+        // A parked player is not a wrong offset.
+        //
+        // This used to conclude, permanently, from the FIRST 300 rendered
+        // frames. Those are whatever the session opens with -- and a session
+        // that opens docked, or on a landing pad, has a near-field scene where
+        // the furthest object offset is the same value frame after frame.
+        // Measured exactly that: 25 of 300 frames, one buffer, 22,950 writes of
+        // which 10,529 moved, furthest 125 units. The value was moving; the
+        // SCENE was not going anywhere. In the session where this worked the
+        // same offset read in the thousands, because the player was flying.
+        //
+        // So: try again rather than give up. A wrong offset stays wrong however
+        // long you wait, which is what the much larger budget below is for; a
+        // camera starts moving the moment the player does.
+        if (s->renderedFrames < kValidateGiveUp) {
+            if (s->revalidations < 3) {
+                Log::get().note(
+                    "transition flash: the value at float %u of the %u-byte buffer moved "
+                    "in only %u of %u frames of rendered scene, furthest %.0f units. That "
+                    "is what a stationary scene looks like as well as what a wrong offset "
+                    "looks like, so this is not a verdict yet -- watching another %u "
+                    "frames. Fly somewhere.",
+                    s->posOffset, s->bufferBytes, s->validateMoved, s->validateFrames,
+                    static_cast<double>(std::sqrt(s->candidateCount ? s->candidates[0].maxMag2
+                                                                   : 0.0f)),
+                    kValidateFrames);
+            }
+            ++s->revalidations;
+            s->validateFrames = 0;
+            s->validateMoved = 0;
+            for (uint32_t i = 0; i < s->candidateCount; ++i) {
+                s->candidates[i].seen = 0;
+                s->candidates[i].moved = 0;
+                s->candidates[i].maxMag2 = 0.0f;
+            }
+            return;
+        }
+
+        s->validated = true;
         s->disabledForSession = true;
         Log::get().note(
             "transition flash fix DISABLED: the %u-byte buffer was found, but the value "
@@ -189,6 +237,7 @@ void validate() {
         }
         return;
     }
+    s->validated = true;
     // By now the compositor hook has long since seen its first eight Submit
     // calls, so this is a reliable moment to say whether the other half is
     // there -- and the most visible line in the log to say it on.
