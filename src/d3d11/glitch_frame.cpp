@@ -106,6 +106,25 @@ struct State {
     // Startup validation.
     bool     validated = false;
     bool     sawBuffer = false;
+
+    // Distinct buffers of the configured size, and how each one behaved.
+    //
+    // The camera buffer is identified by SIZE ALONE, and a size is not unique. If
+    // the game has more than one 5376-byte constant buffer, whichever is unmapped
+    // gets observed, and a static one can mask the real camera entirely. That is
+    // consistent with what a failing session looks like -- a value that moves in
+    // 23 of 300 rendered frames rather than 0 or 300 -- but nothing in the log
+    // could tell that apart from "the offset is wrong", so it is recorded now.
+    struct Candidate {
+        const void* res = nullptr;
+        uint32_t    seen = 0;
+        uint32_t    moved = 0;
+        float       last[3] = {};
+        float       maxMag2 = 0.0f;
+    };
+    Candidate candidates[4];
+    uint32_t  candidateCount = 0;
+    uint32_t  candidatesMissed = 0;   // distinct buffers past the four we track
     uint32_t validateFrames = 0;
     uint32_t validateMoved = 0;
 
@@ -150,6 +169,24 @@ void validate() {
             "this does not, so it is not the camera on this build of the game. Nothing "
             "has been changed and the game renders normally.",
             s->bufferBytes, s->posOffset, s->validateMoved, s->validateFrames);
+        // Which buffers of that size were seen, and how each behaved.
+        //
+        // The size is not unique, so "the value does not move" has two very
+        // different causes: the offset is wrong, or a second buffer of the same
+        // size is being watched instead of the camera. These lines separate
+        // them. A candidate with a large maximum magnitude that moves most
+        // frames IS the camera and something else was masking it.
+        Log::get().note("  %u distinct %u-byte buffer(s) seen%s:", s->candidateCount,
+                        s->bufferBytes,
+                        s->candidatesMissed ? " (and more than four existed)" : "");
+        for (uint32_t i = 0; i < s->candidateCount; ++i) {
+            const State::Candidate& c = s->candidates[i];
+            Log::get().note("    buffer %p: moved in %u of %u writes, furthest %.0f units, "
+                            "last (%+.2f %+.2f %+.2f)",
+                            c.res, c.moved, c.seen,
+                            static_cast<double>(std::sqrt(c.maxMag2)),
+                            c.last[0], c.last[1], c.last[2]);
+        }
         return;
     }
     // By now the compositor hook has long since seen its first eight Submit
@@ -265,12 +302,19 @@ bool glitchFrameNeedsEyeDraws() {
 
 bool glitchFrameWantsBuffer(uint32_t bytes) {
     State* s = g_state;
-    return s && s->enabled && !s->disabledForSession && bytes == s->bufferBytes;
+    // Still true after the fix disables itself: the camera history is what a
+    // user reports a flash with, and it cannot be recorded if nothing is
+    // observed. The cost is one size compare per Map plus the read itself.
+    return s && s->enabled && bytes == s->bufferBytes;
 }
 
-void glitchFrameObserve(const void* data, uint32_t bytes) {
+void glitchFrameObserve(const void* data, uint32_t bytes, const void* resource) {
     State* s = g_state;
-    if (!s || !s->enabled || s->disabledForSession) return;
+    // NOT gated on disabledForSession here. A stood-down fix still tracks the
+    // camera so the history dump describes the moment the user pressed the key,
+    // rather than the moment the fix gave up. The gate that matters -- never
+    // acting -- is below, after the tracking.
+    if (!s || !s->enabled) return;
     if (bytes != s->bufferBytes) return;
     // Widened deliberately. posOffset comes from the ini through getInt and is
     // stored unsigned, so a negative or very large value becomes something near
@@ -287,10 +331,38 @@ void glitchFrameObserve(const void* data, uint32_t bytes) {
 
     s->sawBuffer = true;
 
+    // Record which buffer this was, while validation is still deciding.
+    if (!s->validated && resource) {
+        State::Candidate* c = nullptr;
+        for (uint32_t i = 0; i < s->candidateCount; ++i) {
+            if (s->candidates[i].res == resource) { c = &s->candidates[i]; break; }
+        }
+        if (!c && s->candidateCount < 4) c = &s->candidates[s->candidateCount++];
+        if (!c) {
+            ++s->candidatesMissed;
+        } else {
+            if (c->res != resource) {
+                c->res = resource;
+                for (uint32_t a = 0; a < 3; ++a) c->last[a] = pos[a];
+            } else if (pos[0] != c->last[0] || pos[1] != c->last[1] ||
+                       pos[2] != c->last[2]) {
+                ++c->moved;
+                for (uint32_t a = 0; a < 3; ++a) c->last[a] = pos[a];
+            }
+            ++c->seen;
+            const float mm = pos[0] * pos[0] + pos[1] * pos[1] + pos[2] * pos[2];
+            if (mm > c->maxMag2) c->maxMag2 = mm;
+        }
+    }
+
     const float m2 = pos[0] * pos[0] + pos[1] * pos[1] + pos[2] * pos[2];
     if (m2 <= s->frameFarMag2) return;
     s->frameFarMag2 = m2;
     for (uint32_t a = 0; a < 3; ++a) s->frameFarPos[a] = pos[a];
+
+    // Everything above is observation. Everything below can withhold a frame,
+    // so a fix that has stood down stops exactly here.
+    if (s->disabledForSession) return;
 
     // Re-decide here, on every new furthest camera, rather than at the frame
     // boundary.
@@ -422,6 +494,21 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
     }
 
     if (s->disabledForSession) {
+        // Keep recording the history even though nothing will act on it.
+        //
+        // The dump is the only tool a user has for reporting a flash, and it
+        // froze the instant the fix stood down -- so pressing the key after a
+        // flash produced the ten seconds before the fix gave up, minutes
+        // earlier, with nothing saying so. That is worse than an empty dump: the
+        // frames looked plausible and described a completely different moment.
+        if (s->frameFarMag2 >= 0.0f) {
+            RingEntry& e = s->ring[s->ringHead % kRingFrames];
+            e.qpc = static_cast<uint64_t>(qpcNow());
+            e.frame = s->frameNo;
+            e.eyeDraws = eyeDraws;
+            for (uint32_t a = 0; a < 3; ++a) e.pos[a] = s->frameFarPos[a];
+            ++s->ringHead;
+        }
         s->frameFarMag2 = -1.0f;
         s->jumpedThisFrame = false;
         return;

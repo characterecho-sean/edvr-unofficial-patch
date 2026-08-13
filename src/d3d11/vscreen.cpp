@@ -587,7 +587,7 @@ void STDMETHODCALLTYPE hookedUnmap(ID3D11DeviceContext* self, ID3D11Resource* re
     if (res == s->camResource && s->camData) {
         // Same rule as above: read before forwarding, because after the real
         // Unmap the memory is no longer ours to look at.
-        guardedBudget(g_cameraBudget, [&] { glitchFrameObserve(s->camData, s->camBytes); });
+        guardedBudget(g_cameraBudget, [&] { glitchFrameObserve(s->camData, s->camBytes, s->camResource); });
         s->camResource = nullptr;
         s->camData = nullptr;
         s->camBytes = 0;

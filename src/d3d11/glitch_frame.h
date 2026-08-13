@@ -27,7 +27,11 @@ void installGlitchFrameFix();
 // Called from the Map/Unmap hooks. The detector picks out the buffers it cares
 // about by size, so passing it everything is intended.
 bool glitchFrameWantsBuffer(uint32_t bytes);
-void glitchFrameObserve(const void* data, uint32_t bytes);
+// `resource` identifies WHICH buffer this is. The camera buffer is recognised by
+// its size alone, and a size is not unique -- when validation fails, the first
+// thing worth knowing is whether several buffers of that size exist and which one
+// was being watched.
+void glitchFrameObserve(const void* data, uint32_t bytes, const void* resource);
 
 // Called once per frame, after Present. eyeDraws is the number of draws that
 // reached the eye textures in the frame just finished -- used to tell a rendered
