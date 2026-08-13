@@ -170,7 +170,8 @@ bool Config::reloadIfChanged() {
 std::string Config::getString(const char* key, const char* def) const {
     if (!m_impl) return def ? def : "";
     auto it = m_impl->values.find(key);
-    return it == m_impl->values.end() ? std::string(def ? def : "") : it->second;
+    if (it != m_impl->values.end()) return it->second;
+    return std::string(def ? def : "");
 }
 
 bool Config::getBool(const char* key, bool def) const {
