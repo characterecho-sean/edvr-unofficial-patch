@@ -1,5 +1,5 @@
 // GENERATED from tools/openvr_smoke/openvr_smoke.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 be17693dc6365c61]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 36d76d159724dd7f]
 // openvr_smoke -- checks the openvr proxy's startup path without the game.
 //
 // The thing under test is that the proxy does NOT load the real openvr_api.dll
@@ -29,6 +29,7 @@
 #include <cstdio>
 #include <cstring>
 
+#include "../../src/common/frame_flag.h"
 #include "../../src/common/guard.h"
 
 namespace {
@@ -105,6 +106,49 @@ int faultChild(const char* dir) {
 //
 // Asserted here rather than trusted, because neither failure shows up as a
 // crash or a wrong pixel; they show up as a fix that quietly is not running.
+// The channel the head-offset gate runs on.
+//
+// d3d11.dll decides which mode the player is in and openvr_api.dll acts on it,
+// so the answer crosses a module boundary through a named mapping. A mistake in
+// that struct is invisible at compile time in BOTH modules and shows up only as
+// a viewpoint that moves in the cockpit, so the round trip is asserted here --
+// where the other cross-module channel already is.
+int frameFlagChecks() {
+    int bad = 0;
+
+    edvr::setExternalCameraOnFoot(false);
+    if (edvr::externalCameraOnFoot()) {
+        printf("  FAIL  the mode flag reads true after being cleared\n");
+        ++bad;
+    }
+    edvr::setExternalCameraOnFoot(true);
+    if (!edvr::externalCameraOnFoot()) {
+        printf("  FAIL  the mode flag did not survive a set\n");
+        ++bad;
+    }
+
+    // It must NOT behave like the glitch mark. That one is cleared every frame
+    // by design; this one is a STATE, and clearing it at the frame boundary
+    // would drop the player out of the offset one frame after entering it.
+    edvr::clearGlitchFrame();
+    if (!edvr::externalCameraOnFoot()) {
+        printf("  FAIL  the frame boundary cleared the mode state\n");
+        ++bad;
+    }
+
+    // ...and the two must not share storage.
+    edvr::markGlitchFrame();
+    edvr::setExternalCameraOnFoot(false);
+    if (!edvr::glitchFrameMarked()) {
+        printf("  FAIL  clearing the mode flag also cleared the glitch mark\n");
+        ++bad;
+    }
+    edvr::clearGlitchFrame();
+
+    if (bad == 0) printf("  ok    the mode flag round-trips and is independent\n");
+    return bad;
+}
+
 int sentinelChecks() {
     wchar_t base[MAX_PATH];
     GetTempPathW(MAX_PATH, base);
@@ -264,6 +308,10 @@ int main(int argc, char** argv) {
 
     // Shared code with no other coverage. Runs last because it touches nothing
     // the assertions above depend on.
+    if (frameFlagChecks() != 0) {
+        printf("\nOPENVR SMOKE FAILED\n");
+        return 1;
+    }
     if (sentinelChecks() != 0) {
         printf("\nOPENVR SMOKE FAILED\n");
         return 1;

@@ -1,5 +1,5 @@
 // GENERATED from src/common/frame_flag.h in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 c3fb452355740f4c]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 95719844830959cd]
 // A one-bit channel between the two proxies, for the frame that must not be
 // shown.
 //
@@ -56,5 +56,20 @@ void clearGlitchFrame();
 // counter that gets believed and wastes a day.
 void announceGlitchConsumer();
 bool glitchConsumerPresent();
+
+// The player is on foot in the external camera, having arrived there from the
+// flat panel -- the one state where moving the head pose is wanted.
+//
+// Set by d3d11.dll, which is the only half that can tell the modes apart: it
+// watches the panel composite, and the panel stopping while a full scene is
+// drawn into the eyes is what the transition looks like. Read by
+// openvr_api.dll, which is the only half that can act on it, because the head
+// pose passes through there. Neither can do the other's job, which is why this
+// is a channel rather than a local.
+//
+// UNLIKE the glitch flag, this one is a STATE and persists across frames. It is
+// not cleared at the frame boundary; it is cleared when the panel comes back.
+void setExternalCameraOnFoot(bool on);
+bool externalCameraOnFoot();
 
 }  // namespace edvr

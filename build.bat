@@ -237,6 +237,7 @@ cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /DNDEBUG ^
     "%ROOT%\tools\openvr_smoke\openvr_smoke.cpp" ^
     "%ROOT%\src\common\guard.cpp" "%ROOT%\src\common\log.cpp" ^
     "%ROOT%\src\common\config.cpp" "%ROOT%\src\common\proxy.cpp" ^
+    "%ROOT%\src\common\frame_flag.cpp" ^
     /link /INCREMENTAL:NO kernel32.lib user32.lib version.lib
 if errorlevel 1 ( echo [edvr] ERROR: openvr_smoke build failed & exit /b 1 )
 echo [edvr] built %BUILD%\openvr_smoke.exe
