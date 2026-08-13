@@ -191,8 +191,21 @@ EXTERN edvr_lazyInit_{tag}:PROC
 ; 128 is a multiple of 16, so rsp stays 0 (mod 16) -- correct for the call, and
 ; correct for the 16-byte movaps slots at rsp+64 and above. 32 bytes at the
 ; bottom are the shadow space the callee is entitled to.
-edvr_lazyShim_{tag} PROC
+; PROC FRAME, and the prologue annotated, so this function has unwind info.
+;
+; It did not, and that is not cosmetic. x64 exception handling walks the stack
+; with the .pdata/.xdata tables; a function with no entry is assumed to be a leaf
+; and its return address is read from [rsp]. This one moves rsp by 128 and then
+; CALLS, so an unwinder would have taken the return address out of the middle of
+; the shadow space below -- and every SEH handler above, including the game's,
+; would fail to run. A fault in the initialiser became an uncatchable process
+; kill rather than the degrade-to-vanilla this project promises.
+;
+; Confirmed by dumpbin: without these, thunks.obj contributes no .pdata at all.
+edvr_lazyShim_{tag} PROC FRAME
     sub     rsp, 128
+    .ALLOCSTACK 128
+    .ENDPROLOG
     mov     QWORD PTR [rsp+32], rcx
     mov     QWORD PTR [rsp+40], rdx
     mov     QWORD PTR [rsp+48], r8
@@ -216,6 +229,9 @@ edvr_lazyShim_{tag} ENDP
 
 """
 
+# The thunk itself needs no unwind info: it never moves rsp, so unwinding its
+# frame as a leaf reads the return address from the right place. Only the shim,
+# which allocates, needs a real entry.
 ASM_LAZY_THUNK = """PUBLIC {sym}
 {sym} PROC
     cmp BYTE PTR [edvr_ready_{tag}], 0

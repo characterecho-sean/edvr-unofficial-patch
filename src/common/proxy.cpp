@@ -252,6 +252,22 @@ std::string readConfigStringEarly(const std::wstring& moduleDir, const wchar_t* 
 
         std::string key = line.substr(0, eq);
         std::string val = line.substr(eq + 1);
+
+        // Inline comments end the value, as they do in Config::parse.
+        //
+        // They did not here, one commit after that rule was added there -- the
+        // two parsers drifting apart in exactly the way the comment above
+        // forbids. The consequence was specific: with
+        // `real_openvr_dll = openvr_api_orig.dll ; the game's own copy`, the
+        // early reader kept the comment, LoadLibraryW failed, every export
+        // resolved to the do-nothing stub, and the game got no VR at all.
+        for (size_t i = 1; i < val.size(); ++i) {
+            if ((val[i] == ';' || val[i] == '#') &&
+                (val[i - 1] == ' ' || val[i - 1] == '	')) {
+                val.erase(i);
+                break;
+            }
+        }
         auto trim = [](std::string& s) {
             const size_t a = s.find_first_not_of(" \t");
             if (a == std::string::npos) { s.clear(); return; }

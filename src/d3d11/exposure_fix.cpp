@@ -63,6 +63,11 @@ struct State {
     // parameter texture, and it runs once per eye. Detecting that costs one
     // evaluation per distinct compute shader and then nothing.
     std::unordered_map<uint64_t, bool> shapeVerdict;
+    // Distinct compute shaders the shape test has ever run on. shapeVerdict is
+    // pruned of negatives every frame while detection is looking, so its size is
+    // not this -- and the give-up notice, which names itself "the thing to
+    // report", was reporting a number the prune had just set to nearly zero.
+    uint64_t shadersExamined = 0;
     uint32_t detectStreak = 0;    // consecutive frames the candidate ran twice
     bool     announced = false;
     uint64_t frames = 0;
@@ -262,6 +267,7 @@ bool isExposureDispatch() {
     if (it != s->shapeVerdict.end()) return it->second;
 
     const bool match = shapeLooksLikeExposure(s->curUav);
+    if (s->shapeVerdict.find(h) == s->shapeVerdict.end()) ++s->shadersExamined;
     s->shapeVerdict[h] = match;
     if (match) {
         Log::get().note("exposure fix: candidate compute shader %016llX matches the "
@@ -401,7 +407,8 @@ void exposureFixFrameBoundary() {
             "been touched and the game is stock. If this is a VR session at a bright "
             "star and the eyes still differ, the pass has changed shape and the fix "
             "needs updating; this log is the thing to report.",
-            static_cast<unsigned long long>(s->frames), s->shapeVerdict.size());
+            static_cast<unsigned long long>(s->frames),
+            static_cast<size_t>(s->shadersExamined));
     }
 }
 
@@ -454,6 +461,19 @@ void installExposureFix(ID3D11Device* device) {
         Log::get().note("exposure fix: context vtable unusable; not installing");
         s.hook.uninstall();
         ctx->Release();
+        // Delete and null, as vscreen does on its own failure paths. Leaving it
+        // set meant exposureFixFrameBoundary ran all session for a fix that was
+        // never installed, and at 5000 frames announced "NOT ENGAGED ... the
+        // game is stock" -- a report about a fix that had never been there.
+        //
+        // The critical section is initialised above this point, so it has to go
+        // back before the object does.
+        if (g_state->lockReady) {
+            DeleteCriticalSection(&g_state->lock);
+            g_state->lockReady = false;
+        }
+        delete g_state;
+        g_state = nullptr;
         return;
     }
 
@@ -470,6 +490,19 @@ void installExposureFix(ID3D11Device* device) {
         Log::get().note("exposure fix: vtable commit failed; not installing");
         s.hook.uninstall();
         ctx->Release();
+        // Delete and null, as vscreen does on its own failure paths. Leaving it
+        // set meant exposureFixFrameBoundary ran all session for a fix that was
+        // never installed, and at 5000 frames announced "NOT ENGAGED ... the
+        // game is stock" -- a report about a fix that had never been there.
+        //
+        // The critical section is initialised above this point, so it has to go
+        // back before the object does.
+        if (g_state->lockReady) {
+            DeleteCriticalSection(&g_state->lock);
+            g_state->lockReady = false;
+        }
+        delete g_state;
+        g_state = nullptr;
         return;
     }
 

@@ -318,8 +318,8 @@ void* interceptInterface(void* iface, const char* interfaceVersion) {
             "confirmed it. That usually means it crashed, but a session that simply "
             "ended early -- SteamVR restarting, or quitting from the menu -- looks the "
             "same from here. Skipping the hook for THIS session only; it will try again "
-            "next launch. If the game keeps crashing, set ignore_sentinel = 0 and report "
-            "the log.");
+            "next launch. If it keeps happening, the hook really is crashing -- report the "
+            "log. To force it on anyway, set ignore_sentinel = 1 under [advanced].");
         return iface;
     }
 

@@ -1,4 +1,4 @@
-﻿#include "vscreen_res.h"
+#include "vscreen_res.h"
 
 #include <windows.h>
 

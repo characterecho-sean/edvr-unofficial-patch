@@ -149,6 +149,25 @@ python "%ROOT%\tools\gen_exports.py" --source "%OPENVR_SRC%" ^
     --tag openvr --out "%GEN%" --wrap VR_GetGenericInterface --lazy
 if errorlevel 1 ( echo [edvr] ERROR: openvr export generation failed & exit /b 1 )
 
+REM The lazy shim MUST carry unwind info.
+REM
+REM It moves rsp by 128 and then calls. x64 exception handling walks the stack
+REM with the .pdata tables, and a function with no entry is assumed to be a leaf
+REM whose return address sits at [rsp] -- so an unwinder would read it out of the
+REM shim's own shadow space and every SEH handler above would be skipped. That
+REM shipped once, with thunks.obj contributing no .pdata at all.
+REM
+REM Asserted here rather than at runtime because the runtime paths that would
+REM expose it are not reachable from a test: a faulting DllMain is caught inside
+REM LoadLibrary and never propagates. Checking the generated source is exact.
+findstr /C:".ENDPROLOG" "%GEN%\edvr_thunks_openvr.asm" >nul
+if errorlevel 1 (
+    echo [edvr] ERROR: the lazy openvr shim has no unwind directives.
+    echo        A fault inside it would be uncatchable. See ASM_LAZY_HEAD in
+    echo        tools\gen_exports.py.
+    exit /b 1
+)
+
 if not exist "%OBJ%\openvr" mkdir "%OBJ%\openvr"
 ml64.exe /nologo /c /Fo"%OBJ%\openvr\thunks.obj" "%GEN%\edvr_thunks_openvr.asm" >nul
 if errorlevel 1 ( echo [edvr] ERROR: ml64 failed for openvr & exit /b 1 )

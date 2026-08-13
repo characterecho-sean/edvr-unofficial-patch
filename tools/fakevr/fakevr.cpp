@@ -31,6 +31,20 @@
 
 BOOL APIENTRY DllMain(HMODULE, DWORD reason, LPVOID) {
     if (reason == DLL_PROCESS_ATTACH) {
+        // Fault on demand, so the proxy's lazy-load path can be tested for the
+        // thing that matters more than whether it works: whether it stays
+        // catchable when it does not.
+        //
+        // The proxy loads this DLL from inside a thunk, through an assembly shim
+        // that moves the stack pointer. If that shim has no unwind info, an
+        // exception raised here cannot be unwound past it and every SEH handler
+        // above -- including the game's -- is skipped, turning a recoverable
+        // fault into a hard process kill. That shipped once.
+        char buf[8]{};
+        if (GetEnvironmentVariableA("EDVR_FAKEVR_FAULT", buf, sizeof(buf)) && buf[0] == '1') {
+            volatile int* boom = nullptr;
+            *boom = 1;
+        }
         void* p = malloc(64 * 1024);
         if (p) {
             memset(p, 0xA5, 64 * 1024);

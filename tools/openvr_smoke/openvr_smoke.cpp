@@ -25,6 +25,7 @@
 #include <windows.h>
 
 #include <cstdio>
+#include <cstring>
 
 namespace {
 
@@ -46,7 +47,45 @@ typedef unsigned long long(*PFN_Probe)(unsigned long long, double, unsigned long
 
 }  // namespace
 
+// A real module whose DllMain faults must degrade, not kill the process.
+//
+// This started life as a test that the fault stays CATCHABLE, to lock in the
+// unwind info the assembly shim was missing. It does not test that: Windows
+// catches a faulting DllMain inside LoadLibraryW and returns failure rather than
+// propagating an exception, so nothing ever reaches the handler -- measured, the
+// child exits with "no exception seen" either way. The unwind info is still
+// required, for faults raised in our own initialiser rather than in someone
+// else's DllMain, and build.bat asserts it is present instead.
+//
+// What this DOES pin down is worth keeping: the export still returns, the
+// process survives, and resolveProcs has filled the table with the do-nothing
+// stub, so the game loses VR instead of dying at startup.
+//
+// A child process because the fault is arranged by an environment variable read
+// in the stand-in's DllMain, and the table resolves once per process.
+int faultChild(const char* dir) {
+    wchar_t proxy[MAX_PATH];
+    _snwprintf_s(proxy, _TRUNCATE, L"%hs\\openvr_api.dll", dir);
+    HMODULE m = LoadLibraryW(proxy);
+    if (!m) return 3;
+    FARPROC p = GetProcAddress(m, "VR_GetInitToken");
+    if (!p) return 4;
+
+    unsigned long long v = 12345;
+    __try {
+        v = reinterpret_cast<unsigned long long(*)()>(p)();
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 0;   // also a pass: it returned control to us either way
+    }
+    // The stub returns 0. Anything else means we forwarded into a module whose
+    // DllMain faulted. Not returning at all -- the process being killed -- is
+    // the failure, and shows up as an exit code that is neither 0 nor 6.
+    return v == 0 ? 0 : 6;
+}
+
 int main(int argc, char** argv) {
+    if (argc >= 3 && strcmp(argv[2], "--fault-child") == 0) return faultChild(argv[1]);
+
     printf("edvr openvr smoke\n");
     if (argc < 2) {
         printf("usage: openvr_smoke.exe <dir with openvr_api.dll + openvr_api_orig.dll>\n");
@@ -97,6 +136,39 @@ int main(int argc, char** argv) {
         return fail("the real module still is not loaded after a forwarded call");
     }
     printf("  ok    real module loaded on demand\n");
+
+    // 5. A real module whose DllMain faults degrades instead of killing us.
+    {
+        wchar_t self[MAX_PATH]{};
+        GetModuleFileNameW(nullptr, self, MAX_PATH);
+        wchar_t cmd[MAX_PATH * 2];
+        _snwprintf_s(cmd, _TRUNCATE, L"\"%s\" \"%hs\" --fault-child", self, argv[1]);
+
+        SetEnvironmentVariableW(L"EDVR_FAKEVR_FAULT", L"1");
+        STARTUPINFOW si{};
+        si.cb = sizeof(si);
+        PROCESS_INFORMATION pi{};
+        const BOOL ok = CreateProcessW(nullptr, cmd, nullptr, nullptr, FALSE, 0, nullptr,
+                                       nullptr, &si, &pi);
+        SetEnvironmentVariableW(L"EDVR_FAKEVR_FAULT", nullptr);
+        if (!ok) return fail("could not start the fault child");
+
+        WaitForSingleObject(pi.hProcess, 20000);
+        DWORD code = 0xFFFFFFFF;
+        GetExitCodeProcess(pi.hProcess, &code);
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+
+        if (code != 0) {
+            printf("  FAIL  a faulting real-module DllMain did not degrade cleanly "
+                   "(child exit 0x%08lX)\n", code);
+            printf("        Expected the export to return the stub's zero and the\n");
+            printf("        process to survive. It did not return at all.\n");
+            printf("\nOPENVR SMOKE FAILED\n");
+            return 1;
+        }
+        printf("  ok    a faulting real module degrades to stubs, process survives\n");
+    }
 
     printf("\nOPENVR SMOKE PASSED\n");
     return 0;

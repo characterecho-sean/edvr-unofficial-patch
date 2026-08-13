@@ -87,18 +87,28 @@ void Config::parse() {
         return;
     }
 
-    BY_HANDLE_FILE_INFORMATION info{};
-    if (GetFileInformationByHandle(f, &info)) m_lastWrite = info.ftLastWriteTime;
-
     const DWORD size = GetFileSize(f, nullptr);
     if (size == INVALID_FILE_SIZE || size > (1u << 20)) {
+        // Deliberately WITHOUT stamping m_lastWrite. Stamping first meant a file
+        // that was briefly unreadable -- or briefly enormous -- was never read
+        // again if it came back with the same timestamp, which is what restoring
+        // a backup or a git checkout does.
         CloseHandle(f);
         return;
     }
+
+    BY_HANDLE_FILE_INFORMATION info{};
+    if (GetFileInformationByHandle(f, &info)) m_lastWrite = info.ftLastWriteTime;
     std::vector<char> text(size + 1, 0);
     DWORD read = 0;
-    ReadFile(f, text.data(), size, &read, nullptr);
+    const BOOL readOk = ReadFile(f, text.data(), size, &read, nullptr);
     CloseHandle(f);
+    // A failed or short read is not an empty file. The result was discarded, so
+    // `read` came back 0, the parse produced nothing, and the swap below
+    // installed an empty map -- every setting reverted to its compiled-in
+    // default for the rest of the session, because m_lastWrite had already been
+    // stamped. Exactly what the swap-on-success was added to prevent.
+    if (!readOk || read < size) return;
 
     const char* p = text.data();
     const char* end = p + read;

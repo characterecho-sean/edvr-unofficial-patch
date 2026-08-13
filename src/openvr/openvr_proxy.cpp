@@ -110,7 +110,41 @@ BOOL CALLBACK loadOnceCallback(PINIT_ONCE, PVOID, PVOID*) {
 // stub by then, so the table is safe to jump through and there is nothing to be
 // gained by retrying on every call.
 extern "C" void edvr_lazyInit_openvr() {
-    InitOnceExecuteOnce(&g_loadOnce, loadOnceCallback, nullptr, nullptr);
+    // Re-entered on the SAME thread, so return rather than wait.
+    //
+    // InitOnceExecuteOnce blocks a second caller until the first finishes; if
+    // that second caller IS the first, on the same thread, it waits for itself
+    // and never comes back. Reachable: the module we load, or a chained OpenVR
+    // wrapper, calling an openvr export from its own DllMain -- which runs
+    // inside our LoadLibraryW, inside this function. A frozen headset is worse
+    // than a crash, and "never a hang" is one of this project's rules.
+    //
+    // Returning early leaves the table holding the do-nothing stub for that one
+    // re-entrant call, which is the same answer it would have given before any
+    // of this existed.
+    // Per-thread, not a shared "who owns it" word: with a shared one, a second
+    // thread arriving mid-init overwrites the owner id, and the thread actually
+    // running the callback then fails its own re-entry check and waits for
+    // itself after all. A plain thread_local bool has no such race and needs no
+    // atomics.
+    static thread_local bool s_inProgress = false;
+    if (s_inProgress) return;
+
+    // No exception may leave this function.
+    //
+    // It is extern "C" and called from assembly, and /EHsc lets the compiler
+    // assume extern "C" does not throw -- so a std::bad_alloc from the `new`
+    // inside the callback would hit the fail-fast handler and take the process
+    // down at startup. The catch is not a recovery: the table is stub-filled
+    // either way, so the game loses VR rather than the whole process.
+    s_inProgress = true;
+    try {
+        InitOnceExecuteOnce(&g_loadOnce, loadOnceCallback, nullptr, nullptr);
+    } catch (...) {
+        edvr::breadcrumb("vr: lazy init threw; exports will return failure");
+    }
+    s_inProgress = false;
+
     _ReadWriteBarrier();
     edvr_ready_openvr = 1;
 }
