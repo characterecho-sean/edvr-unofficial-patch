@@ -1,3 +1,5 @@
+// GENERATED from tools/openvr_smoke/openvr_smoke.cpp in the private edvr repo -- do not edit here.
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 be17693dc6365c61]
 // openvr_smoke -- checks the openvr proxy's startup path without the game.
 //
 // The thing under test is that the proxy does NOT load the real openvr_api.dll
@@ -26,6 +28,8 @@
 
 #include <cstdio>
 #include <cstring>
+
+#include "../../src/common/guard.h"
 
 namespace {
 
@@ -81,6 +85,94 @@ int faultChild(const char* dir) {
     // DllMain faulted. Not returning at all -- the process being killed -- is
     // the failure, and shows up as an exit code that is neither 0 nor 6.
     return v == 0 ? 0 : 6;
+}
+
+// The crash sentinel's lifecycle, which is shared code with none of its own.
+//
+// Both of its bugs were lifecycle rather than logic, and both were invisible:
+//
+//   arm() set its flag whether or not the file was written. The file lives in
+//   the log directory, which only Log::open() creates -- and that returns early
+//   when log.enabled = 0. So with logging off nothing was ever written, no
+//   launch saw a trip, and a hook that really was crashing re-armed every start:
+//   the protection was absent in exactly the configuration with no log to
+//   diagnose it from.
+//
+//   A trip was permanent. confirm() runs on validation, on commit failure, and
+//   from a shutdown needing FreeLibrary that a closing game never does -- so any
+//   session ending early left the file behind and every later launch refused,
+//   announcing a crash that never happened.
+//
+// Asserted here rather than trusted, because neither failure shows up as a
+// crash or a wrong pixel; they show up as a fix that quietly is not running.
+int sentinelChecks() {
+    wchar_t base[MAX_PATH];
+    GetTempPathW(MAX_PATH, base);
+    wchar_t dir[MAX_PATH];
+    _snwprintf_s(dir, _TRUNCATE, L"%sedvr_sentinel_test_%lu", base, GetCurrentProcessId());
+    wchar_t file[MAX_PATH];
+    _snwprintf_s(file, _TRUNCATE, L"%s\\probe.armed", dir);
+
+    RemoveDirectoryW(dir);   // from a previous run, if any
+    int rc = 0;
+
+    {
+        // The directory does NOT exist yet. This is the log.enabled = 0 case.
+        edvr::Sentinel s(dir, L"probe");
+        if (s.trippedOnStartup()) {
+            printf("  FAIL  a fresh sentinel reports a trip with no file present\n");
+            rc = 1;
+        }
+        if (!s.arm()) {
+            printf("  FAIL  arm() failed with no log directory -- it must create it\n");
+            rc = 1;
+        } else if (GetFileAttributesW(file) == INVALID_FILE_ATTRIBUTES) {
+            printf("  FAIL  arm() reported success but wrote no file\n");
+            rc = 1;
+        }
+    }
+    {
+        // A new sentinel over the same path is the next launch.
+        edvr::Sentinel s(dir, L"probe");
+        if (!s.trippedOnStartup()) {
+            printf("  FAIL  the armed file did not trip the next sentinel\n");
+            rc = 1;
+        }
+        s.clearTrip();
+        if (GetFileAttributesW(file) != INVALID_FILE_ATTRIBUTES) {
+            printf("  FAIL  clearTrip() left the file in place -- a false trip would\n");
+            printf("        then refuse every launch forever\n");
+            rc = 1;
+        }
+        if (s.trippedOnStartup()) {
+            printf("  FAIL  clearTrip() left the in-memory trip set, so a second request\n");
+            printf("        this session would install after being refused\n");
+            rc = 1;
+        }
+    }
+    {
+        // The normal success path: armed, then confirmed.
+        edvr::Sentinel s(dir, L"probe");
+        s.arm();
+        s.confirm();
+        if (GetFileAttributesW(file) != INVALID_FILE_ATTRIBUTES) {
+            printf("  FAIL  confirm() did not remove the armed file\n");
+            rc = 1;
+        }
+    }
+    {
+        // Somewhere it cannot possibly write. arm() must say so rather than
+        // claiming protection it does not have.
+        edvr::Sentinel s(L"\\\\?\\Z:\\nonexistent-volume\\edvr", L"probe");
+        if (s.arm()) {
+            printf("  FAIL  arm() returned true for a path it cannot write\n");
+            rc = 1;
+        }
+    }
+
+    RemoveDirectoryW(dir);
+    if (rc == 0) printf("  ok    crash sentinel arms, trips, clears and confirms\n");
+    return rc;
 }
 
 int main(int argc, char** argv) {
@@ -168,6 +260,13 @@ int main(int argc, char** argv) {
             return 1;
         }
         printf("  ok    a faulting real module degrades to stubs, process survives\n");
+    }
+
+    // Shared code with no other coverage. Runs last because it touches nothing
+    // the assertions above depend on.
+    if (sentinelChecks() != 0) {
+        printf("\nOPENVR SMOKE FAILED\n");
+        return 1;
     }
 
     printf("\nOPENVR SMOKE PASSED\n");

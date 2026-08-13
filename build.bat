@@ -227,9 +227,17 @@ cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /DNDEBUG /LD ^
     "%ROOT%\tools\fakevr\fakevr.cpp" /link /INCREMENTAL:NO kernel32.lib
 if errorlevel 1 ( echo [edvr] ERROR: fakevr build failed & exit /b 1 )
 if not exist "%OBJ%\openvrsmoke" mkdir "%OBJ%\openvrsmoke"
+REM Links the shared guard, and what guard.cpp needs, because the harness now
+REM also exercises the crash sentinel -- shared code whose two bugs were a
+REM silent arm failure and a permanent lockout, neither of which shows up as a
+REM crash or a wrong pixel.
 cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /DNDEBUG ^
+    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
     /Fo"%OBJ%\openvrsmoke\\" /Fe"%BUILD%\openvr_smoke.exe" ^
-    "%ROOT%\tools\openvr_smoke\openvr_smoke.cpp" /link /INCREMENTAL:NO kernel32.lib
+    "%ROOT%\tools\openvr_smoke\openvr_smoke.cpp" ^
+    "%ROOT%\src\common\guard.cpp" "%ROOT%\src\common\log.cpp" ^
+    "%ROOT%\src\common\config.cpp" "%ROOT%\src\common\proxy.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib user32.lib version.lib
 if errorlevel 1 ( echo [edvr] ERROR: openvr_smoke build failed & exit /b 1 )
 echo [edvr] built %BUILD%\openvr_smoke.exe
 
