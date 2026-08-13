@@ -687,6 +687,26 @@ uint32_t readDistanceIndex(Config& cfg) {
 
 }  // namespace
 
+void vScreenSetPanelSize(uint32_t width, uint32_t height) {
+    State* s = g_state;
+    if (!s || !width || !height) return;
+    s->panelW = width;
+    s->panelH = height;
+
+    // Only worth a line when it is a size that collides with the eye-texture
+    // test, because that is the case that used to break the fix silently.
+    if (width >= 2048 && height >= 2048) {
+        Log::get().note(
+            "vScreen: the panel renders at %ux%u, so targets of exactly that size are "
+            "NOT counted as eye textures. Without that exclusion every scene draw into "
+            "the panel is mistaken for an eye draw and the panel distance fix stops "
+            "matching.",
+            width, height);
+    } else {
+        Log::get().note("vScreen: the panel renders at %ux%u", width, height);
+    }
+}
+
 void vScreenRefreshConfig() {
     State* s = g_state;
     if (!s) return;
@@ -836,21 +856,13 @@ void installVScreenFixes(ID3D11Device* device) {
     // settled answer rather than a guess about config it has not read yet.
     g_state->countForFlashFix = glitchFrameNeedsEyeDraws();
 
-    // Only when the panel is actually being raised past the eye-sized threshold.
-    // At the stock size it is below it anyway and there is nothing to exclude.
-    {
-        const uint32_t pw = static_cast<uint32_t>(cfg.getInt("fix.vscreen_res_width", 0));
-        const uint32_t ph = static_cast<uint32_t>(cfg.getInt("fix.vscreen_res_height", 0));
-        if (pw >= 2048 && ph >= 2048) {
-            g_state->panelW = pw;
-            g_state->panelH = ph;
-            Log::get().note(
-                "vScreen: %ux%u targets will NOT be counted as eye textures. The panel "
-                "has been raised to a size that would otherwise be mistaken for one, "
-                "which disables the panel distance fix.",
-                pw, ph);
-        }
-    }
+    // The panel size is NOT read from config here.
+    //
+    // It arrives through vScreenSetPanelSize once the resolution patch has run
+    // and its result is known -- see the header for why the requested value is
+    // the wrong thing to trust. Until then panelW/H stay 0 and the recogniser
+    // falls back to the stock 1920x1080, which is correct for every session
+    // that never asks for anything else.
 
     State& s = *g_state;
     if (!s.hook.attach(ctx) || s.hook.executablePrefix() <= kHighestSlotUsed) {

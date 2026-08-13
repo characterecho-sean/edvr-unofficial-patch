@@ -6,3 +6,6 @@ __pycache__/
 edvr_logs/
 edvr_FATAL.txt
 edvr_breadcrumbs.txt
+
+# Claude Code's working directory: agent worktrees, local settings, transcripts.
+.claude/

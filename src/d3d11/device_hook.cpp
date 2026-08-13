@@ -158,7 +158,19 @@ void hookDevice(ID3D11Device* device) {
         Config& cfg = Config::get();
         const uint32_t w = static_cast<uint32_t>(cfg.getInt("fix.vscreen_res_width", 0));
         const uint32_t h = static_cast<uint32_t>(cfg.getInt("fix.vscreen_res_height", 0));
-        if (w && h) applyVScreenModeResolution(w, h);
+        // Elite's own on-foot panel size, and what the panel still renders at if
+        // the patch is not asked for or refuses.
+        const uint32_t kStockW = 1920, kStockH = 1080;
+
+        const bool applied = (w && h) && applyVScreenModeResolution(w, h);
+
+        // Tell vScreen what the panel ACTUALLY renders at, from the outcome
+        // rather than the request. This return value used to be discarded, and
+        // vScreen took the requested size from config behind a >= 2048 test of
+        // its own -- so a refused patch left it recognising a panel that was
+        // never created, and an applied 2560x1440 left it recognising the stock
+        // size. Either way the panel distance fix silently stopped matching.
+        vScreenSetPanelSize(applied ? w : kStockW, applied ? h : kStockH);
     }
     hookFactoryForDevice(device);
 }

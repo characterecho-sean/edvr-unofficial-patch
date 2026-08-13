@@ -1,9 +1,10 @@
-﻿#include "exposure_fix.h"
+#include "exposure_fix.h"
 
 #include <windows.h>
 
 #include <cstdlib>
 #include <string>
+#include <iterator>
 #include <unordered_map>
 
 #include "../common/config.h"
@@ -23,7 +24,10 @@ namespace {
 constexpr size_t kSlotDispatch             = 41;
 constexpr size_t kSlotCSSetUAVs            = 68;
 constexpr size_t kSlotCSSetShader          = 69;
-constexpr size_t kHighestSlotUsed          = 69;
+// Drops every binding without naming any of them, which is why the shadows
+// above have to be told about it.
+constexpr size_t kSlotClearState           = 110;
+constexpr size_t kHighestSlotUsed          = 110;
 
 typedef void(STDMETHODCALLTYPE* PFN_SetShader)(ID3D11DeviceContext*, void*,
                                                ID3D11ClassInstance* const*, UINT);
@@ -31,12 +35,14 @@ typedef void(STDMETHODCALLTYPE* PFN_Dispatch)(ID3D11DeviceContext*, UINT, UINT, 
 typedef void(STDMETHODCALLTYPE* PFN_CSSetUAVs)(ID3D11DeviceContext*, UINT, UINT,
                                                ID3D11UnorderedAccessView* const*,
                                                const UINT*);
+typedef void(STDMETHODCALLTYPE* PFN_ClearState)(ID3D11DeviceContext*);
 
 struct State {
     VTableHook    hook;
     PFN_SetShader realCSSetShader = nullptr;
     PFN_Dispatch  realDispatch = nullptr;
     PFN_CSSetUAVs realCSSetUAVs = nullptr;
+    PFN_ClearState realClearState = nullptr;
 
     // Shadow state, so a dispatch knows what was bound before it.
     void* curCS = nullptr;
@@ -227,6 +233,20 @@ void STDMETHODCALLTYPE hookedCSSetUAVs(ID3D11DeviceContext* self, UINT start, UI
     s->realCSSetUAVs(self, start, n, uavs, counts);
 }
 
+// Everything is unbound, so forget what we thought was bound.
+//
+// These shadows were written in the two hooks above and never cleared -- not at
+// the frame boundary, not anywhere -- while ClearState was not hooked at all. So
+// after the game cleared state and released those views, curUav still named
+// them and the next unseen compute shader ran the shape probe over freed
+// memory. vscreen.cpp hit the same thing and hooks this for the same reason.
+void STDMETHODCALLTYPE hookedClearState(ID3D11DeviceContext* self) {
+    State* s = g_state;
+    s->curCS = nullptr;
+    for (uint32_t i = 0; i < 4; ++i) s->curUav[i] = nullptr;
+    s->realClearState(self);
+}
+
 // Is this dispatch the exposure pass? Pinned hash if configured, otherwise
 // shape detection, cached per shader so the cost is one evaluation each.
 bool isExposureDispatch() {
@@ -253,7 +273,19 @@ bool isExposureDispatch() {
 
 void STDMETHODCALLTYPE hookedDispatch(ID3D11DeviceContext* self, UINT x, UINT y, UINT z) {
     State* s = g_state;
-    const bool isTarget = isExposureDispatch();
+
+    // Classification runs INSIDE the guard.
+    //
+    // It was called here, bare, one line above the guarded region it feeds.
+    // isExposureDispatch reaches shapeLooksLikeExposure, which makes COM calls
+    // through the curUav shadow -- and that shadow is only as fresh as the last
+    // CSSetUnorderedAccessViews we saw. After a ClearState (now hooked below,
+    // but a command list can still do it) those pointers can name released
+    // views, and the probe would run on them with no SEH at all. The budget is
+    // the same one the copy uses: if we cannot classify, we cannot act, so
+    // there is nothing to keep alive separately.
+    bool isTarget = false;
+    guardedBudget(g_budget, [&] { isTarget = isExposureDispatch(); });
 
     // Any compute work at all means the game is rendering a scene, which is the
     // only condition under which the exposure pass could appear. Menus and
@@ -318,6 +350,33 @@ void exposureFixFrameBoundary() {
     }
     s->seenThisFrame = 0;
     for (uint32_t i = 0; i < 4; ++i) s->firstEye[i] = nullptr;
+
+    // Forget what was bound, once a frame.
+    //
+    // ClearState is hooked now, but it is not the only way these go stale: a
+    // command list replayed onto this context resets the bindings without
+    // passing through any hook we own. This bounds that to a frame, which is
+    // what vscreen.cpp settled on for the same reason. It costs one re-probe
+    // per shader per frame while detection is still running, and nothing
+    // afterwards.
+    s->curCS = nullptr;
+    for (uint32_t i = 0; i < 4; ++i) s->curUav[i] = nullptr;
+
+    // Drop the NO answers while detection is still looking.
+    //
+    // shapeVerdict was written once per shader and never revisited, so the real
+    // exposure pass being probed once in a transient binding state -- the first
+    // dispatch after a clear, say -- blacklisted it for the whole session. The
+    // fix then never engaged, and the give-up notice went on to report that the
+    // game is stock, which is a different and wrong thing.
+    //
+    // Yes answers are kept: those are confirmed across frames anyway, and a
+    // shader that matched the shape once does not stop having matched it.
+    if (!s->announced && !s->gaveUpNotice && s->targetHash == 0) {
+        for (auto it = s->shapeVerdict.begin(); it != s->shapeVerdict.end();) {
+            it = it->second ? std::next(it) : s->shapeVerdict.erase(it);
+        }
+    }
 
     // Say so when detection comes up empty. Otherwise a build where the shape
     // stopped matching produces a log identical to one where the user never got
@@ -404,6 +463,8 @@ void installExposureFix(ID3D11Device* device) {
                    reinterpret_cast<void**>(&s.realCSSetUAVs));
     s.hook.replace(kSlotDispatch, &hookedDispatch,
                    reinterpret_cast<void**>(&s.realDispatch));
+    s.hook.replace(kSlotClearState, &hookedClearState,
+                   reinterpret_cast<void**>(&s.realClearState));
 
     if (!s.hook.commit()) {
         Log::get().note("exposure fix: vtable commit failed; not installing");
