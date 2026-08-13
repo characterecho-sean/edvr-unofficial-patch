@@ -146,10 +146,10 @@ void validate() {
         s->disabledForSession = true;
         Log::get().note(
             "transition flash fix DISABLED: the %u-byte buffer was found, but the value "
-            "at float %u did not move in %u frames. A camera moves; this does not, so it "
-            "is not the camera on this build of the game. Nothing has been changed and "
-            "the game renders normally.",
-            s->bufferBytes, s->posOffset, s->validateFrames);
+            "at float %u moved in only %u of %u frames of RENDERED SCENE. A camera moves; "
+            "this does not, so it is not the camera on this build of the game. Nothing "
+            "has been changed and the game renders normally.",
+            s->bufferBytes, s->posOffset, s->validateMoved, s->validateFrames);
         return;
     }
     // By now the compositor hook has long since seen its first eight Submit
@@ -157,8 +157,8 @@ void validate() {
     // there -- and the most visible line in the log to say it on.
     Log::get().note(
         "transition flash fix ACTIVE: watching the camera at float %u of the %u-byte "
-        "scene buffer, which moved in %u of the first %u frames. Threshold %.0f world "
-        "units, or %.1fx the current speed, whichever is larger. %s",
+        "scene buffer, which moved in %u of the first %u frames of rendered scene. "
+        "Threshold %.0f world units, or %.1fx the current speed, whichever is larger. %s",
         s->posOffset, s->bufferBytes, s->validateMoved, s->validateFrames,
         s->jumpMin, s->jumpFactor,
         glitchConsumerPresent()
@@ -376,7 +376,27 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
 
     // Startup validation, before anything can act on what it sees.
     if (!s->validated) {
-        if (s->sawBuffer && s->frameFarMag2 >= 0.0f) {
+        // Only frames that actually RENDERED A SCENE count.
+        //
+        // Without this, validation runs over whatever 300 frames happen to come
+        // first -- and in a menu the camera is legitimately parked, so it
+        // concludes the value never moves and disables the fix for the session.
+        // Measured doing exactly that: 300 frames at about 100fps with 0 to 22
+        // eye draws, then "did not move in 300 frames", four seconds after a
+        // 1790fps loading screen and before the game had drawn anything.
+        //
+        // Both the other users of this counter already had the rule. The
+        // give-up branch below counts renderedFrames, for the same reason
+        // spelled out in its own comment; the detector itself refuses to act
+        // below this threshold in glitchFrameObserve. Validation was the one
+        // place still counting frames the game had not drawn.
+        //
+        // The cost is that validation waits for real rendering, which is what it
+        // was always meant to measure. It is a race that used to be won more
+        // often than lost, which is worse than losing it consistently: the fix
+        // worked in one session and silently did not in the next.
+        const bool renderedThisFrame = eyeDraws >= s->minEyeDraws;
+        if (s->sawBuffer && s->frameFarMag2 >= 0.0f && renderedThisFrame) {
             ++s->validateFrames;
             if (s->camPrevValid >= 1) {
                 float d = 0.0f;
