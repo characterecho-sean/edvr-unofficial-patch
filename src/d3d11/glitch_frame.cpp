@@ -1,3 +1,5 @@
+// GENERATED from src/d3d11/glitch_frame.cpp in the private edvr repo -- do not edit here.
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 c9d1ed0e4381538e]
 #include "glitch_frame.h"
 
 #include <windows.h>

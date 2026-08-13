@@ -1,3 +1,5 @@
+// GENERATED from src/d3d11/binding_shadow.h in the private edvr repo -- do not edit here.
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 038eb7424a585c35]
 // What the immediate context has bound, as far as we can see -- in one place.
 //
 // WHY THIS EXISTS
