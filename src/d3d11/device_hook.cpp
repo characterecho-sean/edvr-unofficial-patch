@@ -9,6 +9,7 @@
 #include "../common/hotkey.h"
 #include "../common/log.h"
 #include "../common/vtable_hook.h"
+#include "binding_shadow.h"
 #include "exposure_fix.h"
 #include "vscreen.h"
 #include "glitch_frame.h"
@@ -84,6 +85,14 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
         // Deliberately not part of the toggle: it reports, it does not change
         // anything, so there is no reason for it to follow the fix being off.
         if (g_state->dumpKey.pressed()) dumpCameraRing();
+        // One per-frame invalidation for both fixes, before either boundary.
+        //
+        // This used to be two, with opposite policies: vscreen dropped its
+        // derived answers and kept its pointers, exposure_fix dropped its
+        // pointers. Each had a failure mode the other did not, and having two
+        // guaranteed the next fix would copy one of them wrongly. device_hook
+        // owns the frame; it owns this.
+        bindingFrameBoundary();
         exposureFixFrameBoundary();
         vScreenFrameBoundary();
         // Polled rather than watched, about once a second at 90Hz. The user is

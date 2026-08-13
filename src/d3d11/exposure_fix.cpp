@@ -12,6 +12,7 @@
 #include "../common/guard.h"
 #include "../common/log.h"
 #include "../common/vtable_hook.h"
+#include "binding_shadow.h"
 
 namespace edvr {
 namespace {
@@ -45,9 +46,13 @@ struct State {
     PFN_CSSetUAVs realCSSetUAVs = nullptr;
     PFN_ClearState realClearState = nullptr;
 
-    // Shadow state, so a dispatch knows what was bound before it.
-    void* curCS = nullptr;
-    void* curUav[4] = {nullptr, nullptr, nullptr, nullptr};
+    // The bound shader and UAVs live in binding_shadow, shared with vscreen.
+    // They used to live here, with the opposite policy: this file nulled the
+    // pointers every frame while vscreen kept them, so an engine that filters a
+    // redundant re-bind would have left this fix reading nullptr for the rest of
+    // the session -- silently inert, with the give-up notice blaming the game
+    // for being stock. One module, one policy: keep the pointers, expire the
+    // answers.
 
     bool     enabled = false;
     uint64_t targetHash = 0;      // pinned by config, or learned by detection
@@ -99,6 +104,10 @@ constexpr uint64_t kGiveUpFrames = 5000;
 
 State* g_state = nullptr;
 FaultBudget g_budget("exposureFix", 5);
+
+BindSlot uavSlot(uint32_t i) {
+    return static_cast<BindSlot>(static_cast<uint32_t>(BindSlot::CsUav0) + i);
+}
 
 uint64_t hashOf(void* shader) {
     if (!shader || !g_state || !g_state->lockReady) return 0;
@@ -183,62 +192,44 @@ void shareExposure(ID3D11DeviceContext* ctx, ID3D11UnorderedAccessView* const* f
 // tiny texture holding the tonemap parameters the rest of the frame reads. Both
 // are unusual enough that nothing else in the frame matches, and neither depends
 // on the shader's bytecode, so this survives the game being rebuilt.
-bool shapeLooksLikeExposure(void* const* uavs) {
-    auto sizeOf = [](void* view, bool wantBuffer, uint32_t* a, uint32_t* b) -> bool {
-        if (!view) return false;
-        ID3D11Resource* res = nullptr;
-        static_cast<ID3D11UnorderedAccessView*>(view)->GetResource(&res);
-        if (!res) return false;
+bool shapeLooksLikeExposure() {
+    // Slot 0 is a small structured buffer holding the luminance range; slot 1 is
+    // a tiny texture holding the tonemap parameters the rest of the frame reads.
+    // Both are unusual enough that nothing else in the frame matches, and
+    // neither depends on the shader's bytecode, so this survives a rebuild.
+    //
+    // Resolved through binding_shadow, which owns the guard, the budget and the
+    // GetType-first rule. A view that cannot be resolved -- because it is no
+    // longer live -- reads as "not the exposure pass", which is the safe answer.
+    ResourceInfo buf;
+    if (!bindingResolve(bindingGet(uavSlot(0)), &buf) || !buf.isBuffer) return false;
+    if (buf.a == 0 || buf.a > 256) return false;
 
-        D3D11_RESOURCE_DIMENSION dim = D3D11_RESOURCE_DIMENSION_UNKNOWN;
-        res->GetType(&dim);
-        bool ok = false;
-        if (wantBuffer && dim == D3D11_RESOURCE_DIMENSION_BUFFER) {
-            D3D11_BUFFER_DESC d{};
-            static_cast<ID3D11Buffer*>(res)->GetDesc(&d);
-            *a = d.ByteWidth;
-            *b = d.StructureByteStride;
-            ok = true;
-        } else if (!wantBuffer && dim == D3D11_RESOURCE_DIMENSION_TEXTURE2D) {
-            D3D11_TEXTURE2D_DESC d{};
-            static_cast<ID3D11Texture2D*>(res)->GetDesc(&d);
-            *a = d.Width;
-            *b = d.Height;
-            ok = true;
-        }
-        res->Release();
-        return ok;
-    };
-
-    uint32_t bytes = 0, stride = 0;
-    if (!sizeOf(uavs[0], true, &bytes, &stride)) return false;
-    // A handful of floats of state. Bounded rather than exact, so a build that
-    // adds a field to it still matches.
-    if (bytes == 0 || bytes > 64) return false;
-
-    uint32_t w = 0, h = 0;
-    if (!sizeOf(uavs[1], false, &w, &h)) return false;
+    ResourceInfo strip;
+    if (!bindingResolve(bindingGet(uavSlot(1)), &strip) || !strip.isTexture2D) return false;
     // A parameter strip: a few texels, one row.
-    if (h != 1 || w == 0 || w > 64) return false;
+    if (strip.b != 1 || strip.a == 0 || strip.a > 64) return false;
 
     return true;
 }
 
 void STDMETHODCALLTYPE hookedCSSetShader(ID3D11DeviceContext* self, void* shader,
                                          ID3D11ClassInstance* const* inst, UINT n) {
-    g_state->curCS = shader;
+    bindingSet(BindSlot::Cs, shader);
     g_state->realCSSetShader(self, shader, inst, n);
 }
 
 void STDMETHODCALLTYPE hookedCSSetUAVs(ID3D11DeviceContext* self, UINT start, UINT n,
                                        ID3D11UnorderedAccessView* const* uavs,
                                        const UINT* counts) {
-    State* s = g_state;
     for (UINT i = 0; i < n && uavs; ++i) {
         const UINT slot = start + i;
-        if (slot < 4) s->curUav[slot] = uavs[i];
+        if (slot < 4) {
+            bindingSet(static_cast<BindSlot>(static_cast<uint32_t>(BindSlot::CsUav0) + slot),
+                       uavs[i]);
+        }
     }
-    s->realCSSetUAVs(self, start, n, uavs, counts);
+    g_state->realCSSetUAVs(self, start, n, uavs, counts);
 }
 
 // Everything is unbound, so forget what we thought was bound.
@@ -249,10 +240,8 @@ void STDMETHODCALLTYPE hookedCSSetUAVs(ID3D11DeviceContext* self, UINT start, UI
 // them and the next unseen compute shader ran the shape probe over freed
 // memory. vscreen.cpp hit the same thing and hooks this for the same reason.
 void STDMETHODCALLTYPE hookedClearState(ID3D11DeviceContext* self) {
-    State* s = g_state;
-    s->curCS = nullptr;
-    for (uint32_t i = 0; i < 4; ++i) s->curUav[i] = nullptr;
-    s->realClearState(self);
+    bindingForgetAll();
+    g_state->realClearState(self);
 }
 
 // Is this dispatch the exposure pass? Pinned hash if configured, otherwise
@@ -261,7 +250,7 @@ bool isExposureDispatch() {
     State* s = g_state;
     if (!s->enabled || s->rejected) return false;
 
-    const uint64_t h = hashOf(s->curCS);
+    const uint64_t h = hashOf(bindingGet(BindSlot::Cs));
     if (h == 0) return false;
     if (s->targetHash != 0) return h == s->targetHash;
     if (s->pinned) return false;   // pinned but not matching: do nothing
@@ -269,7 +258,7 @@ bool isExposureDispatch() {
     auto it = s->shapeVerdict.find(h);
     if (it != s->shapeVerdict.end()) return it->second;
 
-    const bool match = shapeLooksLikeExposure(s->curUav);
+    const bool match = shapeLooksLikeExposure();
     s->everExamined.insert(h);
     s->shapeVerdict[h] = match;
     if (match) {
@@ -308,7 +297,8 @@ void STDMETHODCALLTYPE hookedDispatch(ID3D11DeviceContext* self, UINT x, UINT y,
         ++s->seenThisFrame;
         if (s->seenThisFrame == 1) {
             for (uint32_t i = 0; i < 4; ++i) {
-                s->firstEye[i] = static_cast<ID3D11UnorderedAccessView*>(s->curUav[i]);
+                s->firstEye[i] = static_cast<ID3D11UnorderedAccessView*>(
+                    bindingGet(uavSlot(i)));
             }
         } else if (s->seenThisFrame == 2) {
             // Running exactly twice a frame is the other half of the signature:
@@ -320,7 +310,7 @@ void STDMETHODCALLTYPE hookedDispatch(ID3D11DeviceContext* self, UINT x, UINT y,
 
             ID3D11UnorderedAccessView* second[4];
             for (uint32_t i = 0; i < 4; ++i) {
-                second[i] = static_cast<ID3D11UnorderedAccessView*>(s->curUav[i]);
+                second[i] = static_cast<ID3D11UnorderedAccessView*>(bindingGet(uavSlot(i)));
             }
             if (!s->announced) {
                 s->announced = true;
@@ -331,7 +321,7 @@ void STDMETHODCALLTYPE hookedDispatch(ID3D11DeviceContext* self, UINT x, UINT y,
                 Log::get().note("exposure fix: confirmed compute shader %016llX runs "
                                 "once per eye. Pin it with exposure_shader under "
                                 "[advanced] in edvr.ini if you want to skip detection.",
-                                static_cast<unsigned long long>(hashOf(s->curCS)));
+                                static_cast<unsigned long long>(hashOf(bindingGet(BindSlot::Cs))));
             }
             shareExposure(self, s->firstEye, second);
         }
@@ -368,8 +358,6 @@ void exposureFixFrameBoundary() {
     // what vscreen.cpp settled on for the same reason. It costs one re-probe
     // per shader per frame while detection is still running, and nothing
     // afterwards.
-    s->curCS = nullptr;
-    for (uint32_t i = 0; i < 4; ++i) s->curUav[i] = nullptr;
 
     // Drop the NO answers while detection is still looking.
     //

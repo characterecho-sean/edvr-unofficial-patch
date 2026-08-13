@@ -11,6 +11,7 @@
 #include "../common/guard.h"
 #include "../common/log.h"
 #include "../common/vtable_hook.h"
+#include "binding_shadow.h"
 #include "glitch_frame.h"
 
 namespace edvr {
@@ -113,11 +114,14 @@ struct State {
     float distanceScale = 1.0f;
     uint32_t distanceIndex = 47;
 
-    void* curRtv0 = nullptr;
-    void* curVsCb0 = nullptr;
-    // Slot 0 of the pixel shader's resources: what the draw is sampling. The
-    // panel composite reads the panel, and that is how it is recognised.
-    void* curPsSrv0 = nullptr;
+    // The bound views themselves live in binding_shadow, shared with the
+    // exposure fix so the two cannot drift into opposite policies again. What
+    // stays here is only what this file DERIVES from them, tagged with the
+    // generation it was derived at.
+    bool     rtv0Eye = false;
+    uint32_t rtv0EyeGen = 0;
+    bool     psSrv0Panel = false;
+    uint32_t psSrv0PanelGen = 0;
 
     // The panel's transform, as the game last wrote it. Captured from the Unmap
     // the game wrote it through, so reading it costs nothing.
@@ -184,20 +188,6 @@ struct State {
     // which left one eye's void grey after an external-camera/on-foot switch
     // recreated the eye textures.
     //
-    // A bound view cannot be destroyed while it is bound -- the context holds a
-    // reference to it -- so an answer is true for as long as the binding it was
-    // computed from lasts. That is the invariant, and it is only worth as much as
-    // our ability to SEE the binding end.
-    //
-    // Which is where the first version of this was wrong. It claimed the point
-    // was settled and stale entries were no longer a question. But OMSetRenderTargets
-    // is not the only way a binding ends: OMSetRenderTargetsAndUnorderedAccessViews,
-    // ClearState and ExecuteCommandList all end one without naming it, and none
-    // of the three were hooked. All four are hooked now, and the answers are
-    // dropped once a frame regardless, so an end we still cannot see costs one
-    // frame rather than the session.
-    int8_t curRtv0Eye = -1;
-    int8_t curPsSrv0Panel = -1;
 
     // The size the panel has been raised to, or 0 when it has not been. Used to
     // keep the panel out of the eye-draw count -- see targetIsEyeSized.
@@ -215,7 +205,10 @@ State* g_state = nullptr;
 // nothing to do with it -- stopped clearing, silently, with a log line naming
 // only "vScreen". Splitting them also makes the FEATURE-DISABLED line say which
 // one actually failed.
-FaultBudget g_viewBudget("vScreen.views", 5);        // resolving a bound view
+// Resolving a bound view had a third budget here. It moved to binding_shadow
+// with the probe itself, which is the right place for it: the exposure fix runs
+// the same probe, and a fault resolving a view should disable view resolution
+// for both rather than one fix's copy path.
 FaultBudget g_panelCbBudget("vScreen.panelBuffer", 5);  // reading the panel's transform
 FaultBudget g_cameraBudget("vScreen.cameraRead", 5);    // reading the scene camera
 
@@ -224,52 +217,30 @@ FaultBudget g_cameraBudget("vScreen.cameraRead", 5);    // reading the scene cam
 // By size. The graphics layer never sees what is submitted to the headset, and
 // nothing else in an Elite frame is drawn into at 2048x2048 or larger.
 //
-// Uncached. ClearRenderTargetView is handed a live view, so that caller is safe
-// by construction. The draw path asks about the view it last SAW bound, which is
-// a weaker thing -- hence the guard below rather than a claim. Callers that ask
-// repeatedly remember the answer for as long as the binding lasts, see curRtv0Eye.
+// Resolved through binding_shadow, which owns the guard and the budget. A view
+// that can no longer be resolved answers "no" -- see the note there about why
+// callers must read a failed resolve as "do nothing" rather than as a verdict.
 bool targetIsEyeSized(void* rtv) {
     State* s = g_state;
     if (!rtv) return false;
 
-    bool out = false;
-    // Under SEH, because the pointer is only as good as the binding that named
-    // it. The hooks below see every rebind we know how to see, but not every one
-    // that exists -- ClearState and ExecuteCommandList both drop the binding
-    // without passing through here -- so a released view can still be named by
-    // curRtv0 for the rest of a frame. Resolving it then reads freed memory.
-    // The fix for that is the frame-boundary reset in vScreenFrameBoundary; this
-    // is what turns the remaining window into a skipped draw instead of a crash.
-    guardedBudget(g_viewBudget, [&] {
-    ID3D11Resource* res = nullptr;
-    static_cast<ID3D11View*>(rtv)->GetResource(&res);
-    if (res) {
-        D3D11_RESOURCE_DIMENSION dim = D3D11_RESOURCE_DIMENSION_UNKNOWN;
-        res->GetType(&dim);
-        if (dim == D3D11_RESOURCE_DIMENSION_TEXTURE2D) {
-            D3D11_TEXTURE2D_DESC d{};
-            static_cast<ID3D11Texture2D*>(res)->GetDesc(&d);
-            out = d.Width >= 2048 && d.Height >= 2048;
-            // ...except the on-foot panel itself, once it has been raised.
-            //
-            // The comment above this test says nothing else in an Elite frame is
-            // drawn into at 2048x2048 or larger. That was true when it was
-            // written, and the resolution fix made it false: at 3840x2160 the
-            // panel clears the threshold on both axes, so every scene draw into
-            // it is counted as an eye draw. eyeDrawsLastFrame goes from 3 to
-            // hundreds, the panel composite is never recognised, and the panel
-            // distance fix silently stops working -- at 4K but not at 2880x1620,
-            // whose height is still under 2048.
-            //
-            // Excluded by value rather than by raising the threshold, which
-            // would only defer the same collision to the next size someone picks.
-            if (out && s->panelW && d.Width == s->panelW && d.Height == s->panelH) {
-                out = false;
-            }
-        }
-        res->Release();
-    }
-    });  // guardedBudget
+    ResourceInfo info;
+    if (!bindingResolve(rtv, &info) || !info.isTexture2D) return false;
+
+    bool out = info.a >= 2048 && info.b >= 2048;
+    // ...except the on-foot panel itself, once it has been raised.
+    //
+    // The comment above says nothing else in an Elite frame is drawn into at
+    // 2048x2048 or larger. That was true when it was written, and the resolution
+    // fix made it false: at 3840x2160 the panel clears the threshold on both
+    // axes, so every scene draw into it is counted as an eye draw. The count
+    // goes from 3 to hundreds, the composite is never recognised, and the panel
+    // distance fix silently stops working -- at 4K but not at 2880x1620, whose
+    // height is still under 2048.
+    //
+    // Excluded by value rather than by raising the threshold, which would only
+    // defer the same collision to the next size someone picks.
+    if (out && s->panelW && info.a == s->panelW && info.b == s->panelH) out = false;
     return out;
 }
 
@@ -288,31 +259,24 @@ bool isFlatGrey(const FLOAT c[4]) {
 // default, or the raised size when the resolution fix is on. Nothing else an
 // eye-sized draw samples has exactly those dimensions.
 bool srv0IsPanelSized(State* s) {
-    if (!s->curPsSrv0) return false;
-    if (s->curPsSrv0Panel >= 0) return s->curPsSrv0Panel != 0;
+    void* srv = bindingGet(BindSlot::PsSrv0);
+    if (!srv) return false;
+
+    // The answer is remembered against the generation it was computed at, so it
+    // cannot outlive the binding it describes OR the frame it was computed in --
+    // binding_shadow bumps that generation on both. The old tri-state was reset
+    // only from the two hooks this file happens to own.
+    const uint32_t gen = bindingGeneration(BindSlot::PsSrv0);
+    if (s->psSrv0PanelGen == gen) return s->psSrv0Panel;
+
     const uint32_t w = s->panelW ? s->panelW : 1920;
     const uint32_t h = s->panelH ? s->panelH : 1080;
 
-    bool out = false;
-    uint32_t lastW = 0, lastH = 0;
-    // Guarded for the same reason as targetIsEyeSized: a view we last saw bound
-    // is not proof of a view that is still alive.
-    guardedBudget(g_viewBudget, [&] {
-        ID3D11Resource* res = nullptr;
-        static_cast<ID3D11View*>(s->curPsSrv0)->GetResource(&res);
-        if (res) {
-            D3D11_RESOURCE_DIMENSION dim = D3D11_RESOURCE_DIMENSION_UNKNOWN;
-            res->GetType(&dim);
-            if (dim == D3D11_RESOURCE_DIMENSION_TEXTURE2D) {
-                D3D11_TEXTURE2D_DESC d{};
-                static_cast<ID3D11Texture2D*>(res)->GetDesc(&d);
-                lastW = d.Width;
-                lastH = d.Height;
-                out = (d.Width == w && d.Height == h);
-            }
-            res->Release();
-        }
-    });
+    ResourceInfo info;
+    const bool resolved = bindingResolve(srv, &info) && info.isTexture2D;
+    const uint32_t lastW = resolved ? info.a : 0;
+    const uint32_t lastH = resolved ? info.b : 0;
+    const bool out = resolved && lastW == w && lastH == h;
     // What an eye-sized draw sampled when it was NOT the panel.
     //
     // In HMD Cinema Mode the override applies once a frame rather than twice, so
@@ -339,8 +303,8 @@ bool srv0IsPanelSized(State* s) {
         }
     }
 
-    // Remembered only until this view is unbound -- see curPsSrv0Panel.
-    s->curPsSrv0Panel = out ? 1 : 0;
+    s->psSrv0Panel = out;
+    s->psSrv0PanelGen = gen;
     return out;
 }
 
@@ -363,8 +327,12 @@ bool beginPanelOverride(ID3D11DeviceContext* self) {
     // throughout. Two features that have nothing to do with each other, and one
     // silently switched the other off.
     if (!s->distanceEnabled && !s->countForFlashFix) return false;
-    if (s->curRtv0Eye < 0) s->curRtv0Eye = targetIsEyeSized(s->curRtv0) ? 1 : 0;
-    if (s->curRtv0Eye == 0) return false;
+    const uint32_t rtvGen = bindingGeneration(BindSlot::Rtv0);
+    if (s->rtv0EyeGen != rtvGen) {
+        s->rtv0Eye = targetIsEyeSized(bindingGet(BindSlot::Rtv0));
+        s->rtv0EyeGen = rtvGen;
+    }
+    if (!s->rtv0Eye) return false;
     ++s->eyeDrawsThisFrame;
     if (!s->distanceEnabled) return false;
 
@@ -385,7 +353,7 @@ bool beginPanelOverride(ID3D11DeviceContext* self) {
     // they are excluded however many of them there are.
     if (!srv0IsPanelSized(s)) return false;
 
-    void* cb = s->curVsCb0;
+    void* cb = bindingGet(BindSlot::VsCb0);
     if (!cb) return false;
     if (!s->compositeCb) {
         // Learn it now; its contents arrive with the next write, so the override
@@ -467,10 +435,10 @@ void STDMETHODCALLTYPE hookedClearRtv(ID3D11DeviceContext* self,
 void STDMETHODCALLTYPE hookedOMSetRenderTargets(ID3D11DeviceContext* self, UINT n,
                                                 ID3D11RenderTargetView* const* rtvs,
                                                 ID3D11DepthStencilView* dsv) {
-    g_state->curRtv0 = (n && rtvs) ? rtvs[0] : nullptr;
     // Unconditionally, even when the pointer looks unchanged: an identical
-    // address after a rebind is not evidence of an identical view.
-    g_state->curRtv0Eye = -1;
+    // address after a rebind is not evidence of an identical view. bindingSet
+    // bumps the generation either way.
+    bindingSet(BindSlot::Rtv0, (n && rtvs) ? rtvs[0] : nullptr);
     g_state->realOMSetRenderTargets(self, n, rtvs, dsv);
 }
 
@@ -486,8 +454,7 @@ void STDMETHODCALLTYPE hookedOMSetRtvAndUav(ID3D11DeviceContext* self, UINT n,
     // this builds against does not define the constant.
     constexpr UINT kKeepRenderTargetsUnchanged = 0xFFFFFFFFu;
     if (n != kKeepRenderTargetsUnchanged) {
-        g_state->curRtv0 = (n && rtvs) ? rtvs[0] : nullptr;
-        g_state->curRtv0Eye = -1;
+        bindingSet(BindSlot::Rtv0, (n && rtvs) ? rtvs[0] : nullptr);
     }
     g_state->realOMSetRtvAndUav(self, n, rtvs, dsv, uavStart, uavCount, uavs, counts);
 }
@@ -495,28 +462,19 @@ void STDMETHODCALLTYPE hookedOMSetRtvAndUav(ID3D11DeviceContext* self, UINT n,
 void STDMETHODCALLTYPE hookedPSSetShaderResources(ID3D11DeviceContext* self, UINT start,
                                                   UINT n,
                                                   ID3D11ShaderResourceView* const* srvs) {
-    if (start == 0 && n && srvs) {
-        g_state->curPsSrv0 = srvs[0];
-        g_state->curPsSrv0Panel = -1;
-    }
+    if (start == 0 && n && srvs) bindingSet(BindSlot::PsSrv0, srvs[0]);
     g_state->realPSSetShaderResources(self, start, n, srvs);
 }
 
 void STDMETHODCALLTYPE hookedVSSetConstantBuffers(ID3D11DeviceContext* self, UINT start,
                                                   UINT n, ID3D11Buffer* const* bufs) {
-    if (start == 0 && n && bufs) g_state->curVsCb0 = bufs[0];
+    if (start == 0 && n && bufs) bindingSet(BindSlot::VsCb0, bufs[0]);
     g_state->realVSSetConstantBuffers(self, start, n, bufs);
 }
 
 // Everything is unbound. Forget all of it -- this is the one place where
 // forgetting the pointers is the truth rather than a guess.
-void forgetBindings(State* s) {
-    s->curRtv0 = nullptr;
-    s->curPsSrv0 = nullptr;
-    s->curVsCb0 = nullptr;
-    s->curRtv0Eye = -1;
-    s->curPsSrv0Panel = -1;
-}
+void forgetBindings(State*) { bindingForgetAll(); }
 
 // Both of these say so the first time they run.
 //
@@ -734,23 +692,11 @@ void vScreenFrameBoundary() {
     State* s = g_state;
     if (!s) return;
 
-    // Re-decide what the bound views are, once a frame -- but do NOT forget what
-    // is bound.
-    //
-    // Nulling the pointers here was a bug. Nothing re-acquires them: they are
-    // only ever written from OMSetRenderTargets and its UAV variant, so a game
-    // that binds a target once and then draws for many frames loses the fix
-    // after the first Present and never gets it back. Measured on a harness
-    // that binds once and then draws each frame: 1800 overrides before that
-    // change, 1 after it. Not "the first draws of a frame" -- the rest of the
-    // session.
-    //
-    // Dropping the ANSWERS is still worth doing, and is all that was wanted: it
-    // is the one-frame bound the deleted panelSrcCache clear used to provide by
-    // accident. The pointers themselves are dropped by the hooks below, at the
-    // points where the binding genuinely goes away.
-    s->curRtv0Eye = -1;
-    s->curPsSrv0Panel = -1;
+    // The per-frame invalidation lives in binding_shadow now, and device_hook
+    // calls it once for both fixes. Doing it here as well would be harmless but
+    // would put the policy back in two places, which is the thing that went
+    // wrong: this file kept pointers and dropped answers while exposure_fix
+    // dropped pointers, and each had its own failure mode.
 
     // Re-asked every frame, not on config reload. The answer changes when the
     // detector gives up on itself, which is not something an ini edit causes --
