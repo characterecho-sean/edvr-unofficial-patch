@@ -93,6 +93,21 @@ struct State {
     bool sawClearState = false;
     bool sawExecuteCommandList = false;
 
+    // How long the learned panel buffer has gone without being used, and how
+    // many times we have given up on one.
+    //
+    // compositeCb is learned exactly once, behind `if (!compositeCb)`. If the
+    // game destroys that buffer and makes another at a DIFFERENT address, the
+    // learn site can never fire again and the panel distance fix is dead for the
+    // session with nothing said. A stall is the only symptom available from in
+    // here, so a long enough one drops the pointer and lets it re-learn.
+    //
+    // Costs at most one frame of override when it fires, and firing while the
+    // player is simply not on foot is harmless for the same reason.
+    uint64_t overridesAtLastCheck = 0;
+    uint32_t framesSinceOverride = 0;
+    uint32_t relearns = 0;
+
     bool  blackVoid = true;
     bool  distanceEnabled = false;
     float distanceScale = 1.0f;
@@ -546,12 +561,31 @@ HRESULT STDMETHODCALLTYPE hookedMap(ID3D11DeviceContext* self, ID3D11Resource* r
     // Only the one buffer we care about, so this is a pointer compare on a very
     // hot path and nothing more.
     if (SUCCEEDED(hr) && mapped && sub == 0 && res == s->compositeCb) {
-        D3D11_BUFFER_DESC d{};
-        static_cast<ID3D11Buffer*>(res)->GetDesc(&d);
-        if (d.ByteWidth <= sizeof(s->shadow)) {
-            s->mappedResource = res;
-            s->mappedData = mapped->pData;
-            s->mappedBytes = d.ByteWidth;
+        // GetType FIRST here too, for the reason spelled out in the branch below.
+        //
+        // This branch was the one that did not do it. compositeCb is a raw
+        // pointer with no reference held, so after the game destroys that buffer
+        // the address can come back as a TEXTURE -- at which point
+        // ID3D11Buffer::GetDesc writes 44 bytes of texture description into the
+        // 20-byte local below. That is a /GS stack-smash fast-fail: not an
+        // exception, not catchable by SEH, and this hook has no guard anyway.
+        // The neighbouring branch carried the warning and the fix; this one
+        // carried neither.
+        D3D11_RESOURCE_DIMENSION dim = D3D11_RESOURCE_DIMENSION_UNKNOWN;
+        res->GetType(&dim);
+        if (dim == D3D11_RESOURCE_DIMENSION_BUFFER) {
+            D3D11_BUFFER_DESC d{};
+            static_cast<ID3D11Buffer*>(res)->GetDesc(&d);
+            if (d.ByteWidth <= sizeof(s->shadow)) {
+                s->mappedResource = res;
+                s->mappedData = mapped->pData;
+                s->mappedBytes = d.ByteWidth;
+            }
+        } else {
+            // The address is no longer our buffer. Forget it so the next
+            // composite draw can learn the real one.
+            s->compositeCb = nullptr;
+            s->shadowBytes = 0;
         }
     } else if (SUCCEEDED(hr) && mapped && sub == 0 && res) {
         // The scene camera buffer, for the transition-flash detector, recognised
@@ -703,6 +737,31 @@ void vScreenFrameBoundary() {
     // and vScreenRefreshConfig returns early unless the file's write time moved,
     // so asking there would never see it. One bool call a frame.
     s->countForFlashFix = glitchFrameNeedsEyeDraws();
+
+    // Give up on a learned panel buffer that has stopped being used.
+    //
+    // 600 frames is about seven seconds at 90Hz -- long enough that walking
+    // around, menus and loading do not trip it, short enough that a buffer
+    // recreated at a new address costs seconds rather than the session. The
+    // relearn cap stops this becoming per-second churn if the fix is simply
+    // never going to match on this build.
+    if (s->distanceEnabled && s->compositeCb) {
+        if (s->panelOverrides != s->overridesAtLastCheck) {
+            s->overridesAtLastCheck = s->panelOverrides;
+            s->framesSinceOverride = 0;
+        } else if (++s->framesSinceOverride >= 600) {
+            s->framesSinceOverride = 0;
+            s->compositeCb = nullptr;
+            s->shadowBytes = 0;
+            if (++s->relearns <= 3) {
+                Log::get().note(
+                    "vScreen: the panel's transform buffer has gone 600 frames unused, so "
+                    "it is being forgotten and learned again. Expected when you are not on "
+                    "foot; if it repeats while the panel IS visible, the buffer is being "
+                    "recreated and the distance fix was silently dead before this.");
+            }
+        }
+    }
 
     if (s->eyeDrawsThisFrame > s->eyeDrawsMax) s->eyeDrawsMax = s->eyeDrawsThisFrame;
 

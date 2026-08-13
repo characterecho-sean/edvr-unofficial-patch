@@ -304,7 +304,19 @@ size_t resolveProcsChained(HMODULE preferred, HMODULE fallback, const char* cons
 
 size_t resolveProcs(HMODULE real, const char* const* names, size_t count, void** procs,
                     void* unresolvedStub) {
-    if (!real) return 0;
+    // No real module: every slot gets the stub, and every export is missing.
+    //
+    // Returning 0 and leaving the table as it was found meant leaving it full of
+    // zeros, because that is how the generated table is defined. The thunks are
+    // bare `jmp QWORD PTR [slot]` with no null check, so the first forwarded
+    // call jumped through address 0 -- an access violation at startup, on the
+    // exact path that exists to degrade gracefully. The stub is here precisely
+    // so that "returning zero beats jumping through a null slot"; it just was
+    // never installed on the one path that needed it most.
+    if (!real) {
+        for (size_t i = 0; i < count; ++i) procs[i] = unresolvedStub;
+        return count;
+    }
     size_t missing = 0;
     for (size_t i = 0; i < count; ++i) {
         void* p = reinterpret_cast<void*>(GetProcAddress(real, names[i]));

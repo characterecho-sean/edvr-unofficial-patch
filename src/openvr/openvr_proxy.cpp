@@ -65,14 +65,17 @@ void loaderPhase() {
         edvr::readConfigStringEarly(*g_moduleDir, L"edvr.ini", "advanced.real_openvr_dll");
     if (realDll.empty()) realDll = "openvr_api_orig.dll";
     g_realModule = edvr::loadRealModule(*g_moduleDir, realDll, nullptr, L"openvr_api.dll");
-    if (!g_realModule) {
-        edvr::breadcrumb("vr: FAILED to load openvr_api_orig.dll");
-        return;
-    }
+    if (!g_realModule) edvr::breadcrumb("vr: FAILED to load openvr_api_orig.dll");
 
+    // Called even when nothing loaded, which is the whole point: it fills the
+    // table with the stub so the thunks have somewhere to go. Returning early
+    // here left the generated table all zeros and the first forwarded call
+    // jumped through null -- a startup crash on the one mistake the install
+    // steps warn about, forgetting to rename the game's openvr_api.dll.
     g_missingExports =
         edvr::resolveProcs(g_realModule, kExportNames, kExportCount, edvr_realProcs_openvr,
                            reinterpret_cast<void*>(&edvr_unresolved_openvr));
+    if (!g_realModule) return;
 
     g_realGetGenericInterface = reinterpret_cast<PFN_VR_GetGenericInterface>(
         GetProcAddress(g_realModule, "VR_GetGenericInterface"));

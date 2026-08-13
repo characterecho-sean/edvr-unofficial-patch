@@ -283,9 +283,13 @@ void STDMETHODCALLTYPE hookedDispatch(ID3D11DeviceContext* self, UINT x, UINT y,
             }
             if (!s->announced) {
                 s->announced = true;
+                // The key is advanced.exposure_shader. It said fix.b1_exposure_cs,
+                // which is this repo's predecessor's name for it and is read by
+                // nothing here -- so anyone following the instruction was
+                // silently ignored, on the support path where it matters most.
                 Log::get().note("exposure fix: confirmed compute shader %016llX runs "
-                                "once per eye. Pin it with fix.b1_exposure_cs if you "
-                                "want to skip detection.",
+                                "once per eye. Pin it with exposure_shader under "
+                                "[advanced] in edvr.ini if you want to skip detection.",
                                 static_cast<unsigned long long>(hashOf(s->curCS)));
             }
             shareExposure(self, s->firstEye, second);

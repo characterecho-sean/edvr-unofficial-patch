@@ -176,7 +176,26 @@ void Log::note(const char* fmt, ...) {
     va_start(ap, fmt);
     const int m = _vsnprintf_s(line + n, sizeof(line) - n - 3, _TRUNCATE, fmt, ap);
     va_end(ap);
-    if (m > 0) n += m;
+    if (m > 0) {
+        n += m;
+    } else if (m < 0) {
+        // Truncated, not failed.
+        //
+        // _vsnprintf_s with _TRUNCATE returns -1 when the text did not fit,
+        // having already written as much as did and NUL-terminated it. Testing
+        // `m > 0` therefore threw the whole message away and left a bare
+        // timestamp -- and the messages long enough to hit this are the ones
+        // carrying paths and diagnostics somebody is reading off a support log.
+        n += static_cast<int>(strlen(line + n));
+        static const char kMark[] = " ...[truncated]";
+        const int room = static_cast<int>(sizeof(line)) - n - 3;
+        int take = static_cast<int>(sizeof(kMark)) - 1;
+        if (take > room) take = room;
+        if (take > 0) {
+            memcpy(line + n, kMark, static_cast<size_t>(take));
+            n += take;
+        }
+    }
 
     line[n++] = '\r';
     line[n++] = '\n';

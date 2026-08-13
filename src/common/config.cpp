@@ -7,6 +7,8 @@
 #include <string>
 #include <vector>
 
+#include "log.h"
+
 namespace edvr {
 
 struct Config::Impl {
@@ -124,6 +126,24 @@ void Config::parse() {
 
         std::string key = line.substr(0, eq);
         std::string val = line.substr(eq + 1);
+
+        // A trailing comment ends the value.
+        //
+        // Whole comment LINES were skipped above, but a comment after a value
+        // was kept as part of it: "black_void = 1 ; keep this on" read as the
+        // string "1 ; keep this on", which is not "1", so the fix the user was
+        // annotating to keep switched off. Every ini in the world lets you do
+        // this and nothing warned.
+        //
+        // Only when the marker follows whitespace, so a value that legitimately
+        // contains one -- a filename with a '#' -- survives.
+        for (size_t i = 1; i < val.size(); ++i) {
+            if ((val[i] == ';' || val[i] == '#') && (val[i - 1] == ' ' || val[i - 1] == '\t')) {
+                val.erase(i);
+                break;
+            }
+        }
+
         auto trim = [](std::string& s) {
             const size_t a = s.find_first_not_of(" \t");
             if (a == std::string::npos) { s.clear(); return; }
@@ -154,10 +174,27 @@ std::string Config::getString(const char* key, const char* def) const {
 }
 
 bool Config::getBool(const char* key, bool def) const {
-    const std::string v = getString(key, "");
+    std::string v = getString(key, "");
     if (v.empty()) return def;
-    return v == "1" || v == "true" || v == "yes" || v == "on" ||
-           v == "TRUE" || v == "True";
+    for (char& c : v) {
+        if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+    }
+    if (v == "1" || v == "true" || v == "yes" || v == "on") return true;
+    if (v == "0" || v == "false" || v == "no" || v == "off") return false;
+
+    // Unrecognised, so the DEFAULT -- not false.
+    //
+    // The old list was six exact spellings with no case folding, so "On", "YES"
+    // and "True " all fell through to false. For a setting that defaults to true
+    // that means typing a word meaning "yes" switched the fix OFF, silently,
+    // which is the worst possible reading of the user's intent.
+    //
+    // One key cannot be reported this way: log.enabled is read before the log is
+    // open, and note() no-ops until then. Everything else lands.
+    Log::get().note("edvr.ini: %s = \"%s\" is not a yes/no value, so the default (%s) is "
+                    "being used. Write 1/0, true/false, yes/no or on/off.",
+                    key, v.c_str(), def ? "on" : "off");
+    return def;
 }
 
 int Config::getInt(const char* key, int def) const {
