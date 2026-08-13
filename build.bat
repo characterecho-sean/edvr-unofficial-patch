@@ -41,10 +41,23 @@ shift
 goto parse_args
 :arg_openvr
 set "OPENVR_SRC=%~2"
+set "OPENVR_EXPLICIT=1"
 shift
 shift
 goto parse_args
 :args_done
+
+REM A path given explicitly must exist. The fallback below is for finding the
+REM game's copy automatically; applying it to a typo'd --openvr instead built the
+REM export table from a DIFFERENT openvr build, and every export the two did not
+REM share then resolved to the do-nothing stub at runtime -- a silent wrong
+REM answer in the one case where the user had been specific.
+if defined OPENVR_EXPLICIT (
+    if not exist "%OPENVR_SRC%" (
+        echo [edvr] ERROR: --openvr path does not exist: %OPENVR_SRC%
+        exit /b 1
+    )
+)
 
 REM Where the game keeps its own copy, if --openvr was not given.
 if not defined OPENVR_SRC (

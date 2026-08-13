@@ -1,8 +1,9 @@
-﻿#include "proxy.h"
+#include "proxy.h"
 
 #include <cstdio>
 #include <vector>
 
+#include "config.h"  // executableDirectory
 #include "log.h"
 
 namespace edvr {
@@ -157,12 +158,28 @@ void writeFatalNote(const std::wstring& dir, const wchar_t* text) {
 
 std::string readConfigStringEarly(const std::wstring& moduleDir, const wchar_t* iniName,
                                   const char* dottedKey) {
-    if (moduleDir.size() + wcslen(iniName) + 2 > MAX_PATH) return std::string();
+    // The same two candidates Config::init uses, in the same order: beside this
+    // module, then beside the .exe.
+    //
+    // Only the first was tried. That is fine for d3d11.dll, which sits next to
+    // the exe -- but the openvr proxy lives in Openvr\win64, and edvr.ini's own
+    // header tells the user the file belongs next to EliteDangerous64.exe. So
+    // advanced.real_openvr_dll, documented in that file, was read from a
+    // directory the documentation never mentions: the early read came back
+    // empty, the default DLL was loaded, and Config -- which DOES search both --
+    // later logged the configured value as though it were in effect. Every other
+    // advanced.* key from the same file worked, which made the one dead setting
+    // look impossible.
+    HANDLE f = INVALID_HANDLE_VALUE;
     wchar_t path[MAX_PATH];
-    _snwprintf_s(path, _TRUNCATE, L"%s\\%s", moduleDir.c_str(), iniName);
-
-    HANDLE f = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
-                           OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    const std::wstring dirs[] = {moduleDir, executableDirectory()};
+    for (const std::wstring& dir : dirs) {
+        if (dir.size() + wcslen(iniName) + 2 > MAX_PATH) continue;
+        _snwprintf_s(path, _TRUNCATE, L"%s\\%s", dir.c_str(), iniName);
+        f = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (f != INVALID_HANDLE_VALUE) break;
+    }
     if (f == INVALID_HANDLE_VALUE) return std::string();  // absent file: nothing configured
 
     // The whole file, with the same 1 MB ceiling Config::parse uses.
@@ -197,6 +214,22 @@ std::string readConfigStringEarly(const std::wstring& moduleDir, const wchar_t* 
     std::string section;
     const char* p = text.data();
     const char* end = p + bytesRead;
+
+    // Skip a UTF-8 BOM, as Config::parse does.
+    //
+    // It did not, and that is the copy drifting apart exactly as the comment
+    // above warns it must not. A Notepad-saved ini starts with EF BB BF, which
+    // glues itself to the first line -- so if that line is a section header it
+    // stops looking like one and every key beneath it is filed under the wrong
+    // name. Here that means the configured DLL is not found; through Config the
+    // same bytes parse correctly, so the log then reports a value that was never
+    // used.
+    if (bytesRead >= 3 && static_cast<unsigned char>(p[0]) == 0xEF &&
+        static_cast<unsigned char>(p[1]) == 0xBB &&
+        static_cast<unsigned char>(p[2]) == 0xBF) {
+        p += 3;
+    }
+
     while (p < end) {
         const char* lineEnd = p;
         while (lineEnd < end && *lineEnd != '\n' && *lineEnd != '\r') ++lineEnd;
@@ -235,12 +268,46 @@ std::string readConfigStringEarly(const std::wstring& moduleDir, const wchar_t* 
     return std::string();
 }
 
+// Is this module the one this code is running from?
+//
+// GetModuleHandleEx with FROM_ADDRESS on a local function is the only way to
+// ask that does not depend on a filename: the proxy is deployed under the name
+// of the DLL it replaces, so comparing paths would have to know which name it
+// was wearing.
+bool isSelf(HMODULE candidate) {
+    HMODULE self = nullptr;
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                            reinterpret_cast<LPCWSTR>(&isSelf), &self)) {
+        return false;
+    }
+    return self != nullptr && self == candidate;
+}
+
 HMODULE loadRealModule(const std::wstring& moduleDir, const std::string& configuredPath,
                        const wchar_t* systemFallback, const wchar_t* what) {
     if (!configuredPath.empty()) {
         std::wstring p = widen(configuredPath);
         if (!isAbsolutePath(p)) p = moduleDir + L"\\" + p;
         HMODULE m = LoadLibraryW(p.c_str());
+        if (m && isSelf(m)) {
+            // Pointed at us. LoadLibrary returns our own module, GetProcAddress
+            // then hands back each thunk's OWN address, and the slot that thunk
+            // jumps through now points at itself: a two-instruction infinite
+            // loop at 100% CPU with no log, because the thunks bypass every
+            // initialiser. The wrapped export recurses to a stack overflow
+            // instead. Plausible while experimenting with chaining -- the value
+            // to set really is the name of a DLL in this directory, and the
+            // proxy's own name is right there.
+            //
+            // The d3d11 chain loader refuses this for itself; doing it here
+            // covers both proxies through the shared helper.
+            Log::get().note("real %S: the configured path %S is edvr itself; refusing, "
+                            "because loading it would make every export jump to itself",
+                            what, p.c_str());
+            FreeLibrary(m);
+            m = nullptr;
+        }
         if (m) {
             Log::get().note("real %S loaded from configured path %S", what, p.c_str());
             return m;

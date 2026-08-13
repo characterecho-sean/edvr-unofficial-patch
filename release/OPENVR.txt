@@ -1,7 +1,7 @@
 EDVR - the transition flash fix (optional)
 ==========================================
 
-This folder holds ONE file: openvr_api.dll.
+This folder holds openvr_api.dll and this note.
 
 It stops the single-frame flash you sometimes get when you jump, drop out of
 supercruise, or close the galaxy map -- where the world cuts to somewhere else

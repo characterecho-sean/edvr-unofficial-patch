@@ -216,13 +216,13 @@ vr::EVRCompositorError hookedWaitGetPoses(void* self,
     // skip a single frame.
     clearGlitchFrame();
 
-    guardedBudget(g_posesBudget, [&] {
-        static uint32_t poll = 0;
-        if (++poll >= 90) {
-            poll = 0;
-            Config::get().reloadIfChanged();
-        }
-    });
+    // There was a config reload poll here, roughly once a second, on the frame
+    // path. It had no consumers: every setting this module reads is read once at
+    // install, so the poll cost a GetFileAttributesEx per second -- and a full
+    // reparse on every ini edit -- to update a map nothing in this DLL would
+    // look at again. The d3d11 side polls for its own hot-reloadable settings
+    // and that is where the ones users are told they can change live actually
+    // live.
 
     return result;
 }
@@ -260,11 +260,27 @@ void* interceptInterface(void* iface, const char* interfaceVersion) {
     const int submitOverride = cfg.getInt("advanced.submit_index", -1);
     const int posesOverride = cfg.getInt("advanced.waitgetposes_index", -1);
     if (submitOverride >= 0 && posesOverride >= 0) {
-        submitSlot = static_cast<size_t>(submitOverride);
-        posesSlot = static_cast<size_t>(posesOverride);
-        known = true;
-        Log::get().note("using config vtable overrides: Submit=%d WaitGetPoses=%d",
-                        submitOverride, posesOverride);
+        // The two must be different slots.
+        //
+        // Only ">= 0" was checked. Setting both to the same number made the
+        // second replace() take the FIRST hook as its "original", so
+        // realWaitGetPoses became hookedSubmit: the first Submit reinterpreted
+        // its arguments as a pose array, and once the hook went inert it called
+        // the real Submit with garbage -- outside any SEH, on frame one. A typo
+        // in a hand-edited advanced setting should not be able to do that.
+        if (submitOverride == posesOverride) {
+            Log::get().note(
+                "IGNORING the vtable overrides: submit_index and waitgetposes_index are "
+                "both %d, and they must name different slots. Using the layout this build "
+                "knows instead.",
+                submitOverride);
+        } else {
+            submitSlot = static_cast<size_t>(submitOverride);
+            posesSlot = static_cast<size_t>(posesOverride);
+            known = true;
+            Log::get().note("using config vtable overrides: Submit=%d WaitGetPoses=%d",
+                            submitOverride, posesOverride);
+        }
     }
 
     if (!known) {
@@ -276,16 +292,34 @@ void* interceptInterface(void* iface, const char* interfaceVersion) {
         return iface;
     }
 
-    // A previous run armed the hook and never confirmed it, which means it very
-    // likely crashed. Refuse to try the same thing again unattended.
+    // A previous run armed the hook and never confirmed it.
+    //
+    // Refuse this session, then clear the trip so the next one tries again.
+    //
+    // It used to refuse forever. confirm() runs on validation, on commit
+    // failure, and from shutdownCompositorHook -- which only happens on
+    // FreeLibrary, and a game closing is process termination, so it never runs
+    // at all. Any session that ended before eight valid submits therefore left
+    // the file behind: SteamVR restarting, the headset dropping to standby, or
+    // the player quitting from the menu. Every later launch then announced that
+    // the hook had "very likely crashed" when nothing had, and the only cure was
+    // deleting a file the message named but nobody would find.
+    //
+    // One session is the right price. A hook that genuinely crashes still gets
+    // thrown out on the launch after every crash, which is what the protection
+    // is for; a false trip costs a single flash-fix-less session instead of all
+    // of them.
     if (!s.sentinel) s.sentinel = new Sentinel(cfg.logDir().c_str(), L"compositor_hook");
     if (s.sentinel->trippedOnStartup() &&
         !cfg.getBool("advanced.ignore_sentinel", false)) {
+        s.sentinel->clearTrip();
         Log::get().note(
-            "SENTINEL TRIPPED: a previous run armed the compositor hook and never "
-            "confirmed it, so it very likely crashed. Hook disabled. Delete "
-            "%S\\compositor_hook.armed to try again.",
-            cfg.logDir().c_str());
+            "SENTINEL TRIPPED: the previous run armed the compositor hook and never "
+            "confirmed it. That usually means it crashed, but a session that simply "
+            "ended early -- SteamVR restarting, or quitting from the menu -- looks the "
+            "same from here. Skipping the hook for THIS session only; it will try again "
+            "next launch. If the game keeps crashing, set ignore_sentinel = 0 and report "
+            "the log.");
         return iface;
     }
 
@@ -304,7 +338,16 @@ void* interceptInterface(void* iface, const char* interfaceVersion) {
         return iface;
     }
 
-    s.sentinel->arm();
+    if (!s.sentinel->arm()) {
+        // Say so rather than proceeding quietly. With log.enabled = 0 the log
+        // directory may not exist, and arm() used to set its flag regardless --
+        // so the file was never written, the next launch saw no trip, and a hook
+        // that really was crashing re-armed every start. arm() creates the
+        // directory now, but if it still cannot write, this session is running
+        // without the protection and that is worth one line.
+        Log::get().note("NOTE: the crash sentinel could not be written, so a crash in "
+                        "this hook will not disable it next launch.");
+    }
     breadcrumb("vr: arming compositor hook");
 
     s.compositorHook.replace(submitSlot, reinterpret_cast<void*>(&hookedSubmit),

@@ -186,8 +186,28 @@ void installGlitchFrameFix() {
     s.enabled = cfg.getBool("fix.transition_flash", true);
     s.jumpMin = cfg.getFloat("advanced.transition_flash_units", 2000.0f);
     s.jumpFactor = cfg.getFloat("advanced.transition_flash_speed_factor", 8.0f);
-    s.maxConsecutive =
-        static_cast<uint32_t>(cfg.getInt("advanced.transition_flash_max_consecutive", 2));
+    // 0 would mean "never withhold anything" -- `consecutive < 0` is never true
+    // -- while the log went on saying the fix was armed and then ACTIVE. That is
+    // a switch disguised as a limit, and an accidental one: the value is
+    // documented as a cap on a run, so 0 reads as "no runs allowed", not as
+    // "disable the feature". Anyone who wants it off has fix.transition_flash.
+    //
+    // The cap is also unreachable above 1 in practice: a marked frame resets the
+    // camera history, so the next frame cannot be evaluated and a run of two
+    // never forms. The knob is kept because it bounds a future detector that
+    // could produce runs, and because removing a documented setting is worse
+    // than one that is quietly generous.
+    const int maxConsec = cfg.getInt("advanced.transition_flash_max_consecutive", 2);
+    if (maxConsec < 1) {
+        s.maxConsecutive = 1;
+        Log::get().note(
+            "transition_flash_max_consecutive = %d would stop every frame from being "
+            "withheld while the fix still reported itself active, so 1 is being used. "
+            "To turn the fix off, set transition_flash = 0 under [fix].",
+            maxConsec);
+    } else {
+        s.maxConsecutive = static_cast<uint32_t>(maxConsec);
+    }
     s.bufferBytes = static_cast<uint32_t>(cfg.getInt("advanced.camera_buffer_bytes", 5376));
     s.posOffset = static_cast<uint32_t>(cfg.getInt("advanced.camera_buffer_offset", 1100));
 

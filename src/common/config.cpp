@@ -67,11 +67,25 @@ void Config::init(const std::wstring& moduleDir) {
 }
 
 void Config::parse() {
-    m_impl->values.clear();
+    // Parsed into a local and swapped in only on success.
+    //
+    // This used to clear every value first and then open the file. A failed open
+    // -- an editor holding the file, or the momentary absence while a save-by-
+    // rename completes -- therefore dropped the whole configuration to defaults,
+    // and the reload poll runs about once a second with a text editor open,
+    // which is exactly when somebody is editing. reloadIfChanged() would report
+    // success too. Nothing survives being read at the wrong instant now.
+    std::map<std::string, std::string> parsed;
 
     HANDLE f = CreateFileW(m_path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
                            nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (f == INVALID_HANDLE_VALUE) return;  // absent file is fine: all defaults
+    if (f == INVALID_HANDLE_VALUE) {
+        // An ini that is genuinely absent means "all defaults", which is only
+        // true on the FIRST parse; later it means the file went away mid-session
+        // and the values we already have are better than nothing.
+        if (m_impl->values.empty()) m_impl->values.swap(parsed);
+        return;
+    }
 
     BY_HANDLE_FILE_INFORMATION info{};
     if (GetFileInformationByHandle(f, &info)) m_lastWrite = info.ftLastWriteTime;
@@ -155,8 +169,9 @@ void Config::parse() {
         if (key.empty()) continue;
         // Section-qualified keys, so [openvr] hook_compositor reads as
         // "openvr.hook_compositor". Bare "a.b = c" also works.
-        m_impl->values[section.empty() ? key : section + "." + key] = val;
+        parsed[section.empty() ? key : section + "." + key] = val;
     }
+    m_impl->values.swap(parsed);
 }
 
 bool Config::reloadIfChanged() {

@@ -6,6 +6,9 @@
 // implementation.
 #pragma once
 
+#include <atomic>
+#include <string>
+
 #include <windows.h>  // GetExceptionCode() in guarded()
 
 #include <cstdint>
@@ -23,13 +26,18 @@ public:
     explicit FaultBudget(const char* name, int budget = 3)
         : m_name(name), m_remaining(budget) {}
 
-    bool shouldRun() const { return m_remaining > 0; }
+    bool shouldRun() const { return m_remaining.load(std::memory_order_relaxed) > 0; }
     void charge();
     const char* name() const { return m_name; }
 
 private:
     const char* m_name;
-    volatile int m_remaining;
+    // Atomic, not volatile int. Budgets are shared across threads -- shader
+    // creation runs on the loader's threads while the frame boundary runs on the
+    // render thread -- and `--m_remaining` on a volatile is a read-modify-write
+    // with no atomicity at all. Lost decrements need two overlapping faults;
+    // the undefined behaviour needs none.
+    std::atomic<int> m_remaining;
 };
 
 // Runs f() under SEH. This function itself holds no objects requiring unwind,
@@ -64,8 +72,13 @@ public:
     Sentinel(const wchar_t* dir, const wchar_t* name);
 
     bool trippedOnStartup() const { return m_tripped; }
-    void arm();
+    // False if the file could not be written, in which case there is no
+    // protection this session and the caller should say so.
+    bool arm();
     void confirm();
+    // Forget a trip, so a false one costs a single session rather than every
+    // future launch. See the comment on the definition.
+    void clearTrip();
 
 private:
     wchar_t m_path[520]{};

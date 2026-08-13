@@ -22,8 +22,29 @@ if "%VER%"=="" (
 set "STAGE=%ROOT%\dist\edvr-%VER%"
 set "ZIP=%ROOT%\dist\edvr-%VER%.zip"
 
+REM Build, then test, then package. In that order, always.
+REM
+REM This used to check only that build\d3d11.dll existed. A stale binary from an
+REM earlier source revision would be zipped alongside today's ini and README, and
+REM smoke.exe -- built by build.bat, and named in its closing message as the way
+REM to check a build -- was invoked by nothing at all. It was entirely possible
+REM to ship a DLL that would have failed its own test.
+echo [edvr] building before packaging
+call "%ROOT%\build.bat"
+if errorlevel 1 (
+    echo [edvr] ERROR: build failed; nothing packaged
+    exit /b 1
+)
+
+echo [edvr] running the build checks
+"%ROOT%\build\smoke.exe" "%ROOT%\build\d3d11.dll"
+if errorlevel 1 (
+    echo [edvr] ERROR: smoke test failed; nothing packaged
+    exit /b 1
+)
+
 if not exist "%ROOT%\build\d3d11.dll" (
-    echo [edvr] ERROR: build\d3d11.dll not found. Run build.bat first.
+    echo [edvr] ERROR: build\d3d11.dll not found after building.
     exit /b 1
 )
 

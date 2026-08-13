@@ -9,7 +9,7 @@
 //
 // A named shared mapping is used rather than an exported symbol because it does
 // not care which module loads first, works if one of them is absent, and adds
-// nothing to either DLL's export table. It is per-session and holds three
+// nothing to either DLL's export table. It is per-process and holds two
 // integers.
 //
 // Nothing here reads or writes game state. It carries one flag between two parts
@@ -31,16 +31,18 @@ bool glitchFrameMarked();
 //
 // The detector re-decides several times per frame, as each new camera candidate
 // arrives, and an early candidate can look like a jump while the frame's final
-// verdict is no. That is legitimate -- but it must not be counted. Reusing
-// clearGlitchFrame() for it made the next mark in the same frame look like a
-// fresh frame, and the session total read 1258 for four frames actually
-// withheld.
+// verdict is no.
+//
+// Identical to clearGlitchFrame() today, and kept as its own name because the
+// two mean different things to a reader: one is "I was wrong", the other is
+// "this frame is over". They used to differ -- a `counted` field distinguished
+// them, so a withdrawn mark would not be tallied twice -- but that total moved
+// into glitch_frame.cpp and the field became write-only. It has been removed
+// rather than left as a mechanism the header describes and nothing implements.
 void unmarkGlitchFrame();
 
 // Called once per frame, so a mark applies to exactly one frame. Without this a
-// single detection would suppress every frame that followed. This is also what
-// re-arms the counter, which is why the mid-frame case above needs its own entry
-// point rather than reusing this one.
+// single detection would suppress every frame that followed.
 void clearGlitchFrame();
 
 // Announced by openvr_api.dll once its hook is validated, and read by d3d11.dll.

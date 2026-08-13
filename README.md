@@ -164,7 +164,9 @@ edits code and the obvious design would not. Pinning it to one game version
 would be safe and would also break it at every update, leaving it switched off
 more often than on. Instead it looks for the shape of the thing it changes — a
 check on which screen is being drawn, a forced 16:9 size, the real size read
-from the game's data otherwise — and that shape occurs in exactly six places.
+from the game's data otherwise — and in the version this was built against that
+shape occurs in six places. It accepts between three and twelve, provided they
+all agree.
 If a future version still forces the resolution this way, it will find it and
 say what it found. If it does not, it does nothing and says that instead.
 
@@ -198,7 +200,7 @@ Windows' real `d3d11.dll`. If you install the transition flash fix as well, that
 adds an `openvr_api.dll` proxy which forwards every call to the game's own copy.
 
 **All but one of the fixes never touch the game.** They change how frames are
-drawn from outside it: one extra copy per frame so both eyes share an exposure
+drawn from outside it: four small copies per frame so both eyes share an exposure
 value, one substituted argument to a screen-clearing call, one substituted copy
 of the panel's position for two draws if you change the distance, and — for the
 transition flash — reading a constant buffer the game has already filled and, on
@@ -219,7 +221,9 @@ Its safeguards, because they are the reason to trust it:
 - **It recognises the code it changes, rather than trusting a version number.**
   It looks for a very specific shape: a check on which screen is being drawn,
   a 16:9 size forced only in that case, and the real size read from the game's
-  own data otherwise. That shape occurs in exactly six places in 81 MB of code.
+  own data otherwise. That shape occurs in six places in 81 MB of code on the
+  version this was built against; EDVR accepts between three and twelve, so a
+  game update that adds or drops one does not switch the feature off.
   Identifying the thing being edited says more about whether it is the right
   thing than a version number does.
 - **It refuses if what it finds looks wrong** — too few places, too many, or
@@ -246,7 +250,9 @@ never writes to the buffer it reads, and the only action it can take is to not
 forward a call.
 
 If you would rather no part of this went near the game's code, leave
-`vscreen_res_width` and `vscreen_res_height` at 0 and the DLL behaves exactly as
+`vscreen_res_width` and `vscreen_res_height` at the stock 1920x1080 -- which is
+what the shipped edvr.ini has, and what means "do not patch anything" -- and the
+DLL behaves exactly as
 earlier versions did.
 
 ## Build

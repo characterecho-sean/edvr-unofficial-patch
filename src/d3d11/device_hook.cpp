@@ -53,13 +53,23 @@ struct State {
 };
 
 State* g_state = nullptr;
-FaultBudget g_budget("deviceHook", 8);
+// One budget per thing that can fail. Shader creation runs on whatever thread
+// the game streams assets from; the frame boundary runs on the render thread and
+// carries the exposure boundary, the vScreen boundary (which hosts the flash
+// detector's per-frame work), the hotkeys and the config reload poll.
+//
+// Sharing one meant eight faults during asset streaming permanently stopped the
+// entire frame heartbeat -- while the per-draw hooks, on their own budgets, kept
+// running and mutating state. The log said only "FEATURE-DISABLED deviceHook",
+// which does not tell anyone that the heartbeat is gone.
+FaultBudget g_createBudget("deviceHook.createShader", 8);
+FaultBudget g_frameBudget("deviceHook.frameBoundary", 8);
 
 HRESULT STDMETHODCALLTYPE hookedCreateCS(ID3D11Device* self, const void* bytecode,
                                          SIZE_T len, ID3D11ClassLinkage* linkage,
                                          void** out) {
     const HRESULT hr = g_state->realCreateCS(self, bytecode, len, linkage, out);
-    guardedBudget(g_budget, [&] {
+    guardedBudget(g_createBudget, [&] {
         if (FAILED(hr) || !bytecode || len == 0 || !out || !*out) return;
         registerShaderHash(*out, fnv1a64(bytecode, len));
     });
@@ -69,7 +79,7 @@ HRESULT STDMETHODCALLTYPE hookedCreateCS(ID3D11Device* self, const void* bytecod
 HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
                                         UINT flags) {
     const HRESULT hr = g_state->realPresent(self, syncInterval, flags);
-    guardedBudget(g_budget, [&] {
+    guardedBudget(g_frameBudget, [&] {
         if (g_state->toggleKey.pressed()) toggleExposureFix();
         // Deliberately not part of the toggle: it reports, it does not change
         // anything, so there is no reason for it to follow the fix being off.

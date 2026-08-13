@@ -91,8 +91,12 @@ eye dimmed and press it; the difference is immediate.
 
 UNINSTALL
 
-Delete d3d11.dll and edvr.ini. That is the whole of it, apart from a small
-edvr_logs folder you can also delete.
+Delete d3d11.dll and edvr.ini. That is the whole of it, apart from three things
+you can also delete: the edvr_logs folder, edvr_breadcrumbs.txt, and
+edvr_FATAL.txt if one is there. All three sit next to EliteDangerous64.exe.
+
+If you also installed openvr_api.dll for the transition flash fix, delete it
+from Openvr\win64 and rename openvr_api_orig.dll back to openvr_api.dll.
 
 Frontier's launcher may remove d3d11.dll by itself when it verifies the install.
 That is not a problem - it has simply uninstalled EDVR. Copy the file back.

@@ -7,9 +7,26 @@
 
 namespace edvr {
 
+// Does the foreground window belong to this process?
+//
+// GetAsyncKeyState is global: it reports the key whoever is typing, in whatever
+// application. Without this check, Scroll Lock pressed in a browser toggled the
+// brightness fix and Pause wrote a camera dump -- and VR users routinely have
+// another window focused while the headset keeps rendering, so this is the
+// normal case rather than an edge one.
+//
+// Observation only, as before. Nothing is intercepted or withheld from the game.
+static bool gameHasFocus() {
+    HWND fg = GetForegroundWindow();
+    if (!fg) return false;
+    DWORD pid = 0;
+    GetWindowThreadProcessId(fg, &pid);
+    return pid == GetCurrentProcessId();
+}
+
 bool Hotkey::pressed() {
     if (m_vk == 0) return false;
-    const bool down = (GetAsyncKeyState(m_vk) & 0x8000) != 0;
+    const bool down = (GetAsyncKeyState(m_vk) & 0x8000) != 0 && gameHasFocus();
     const bool edge = down && !m_down;
     m_down = down;
     return edge;

@@ -14,10 +14,26 @@
 // What it does NOT change: the comparison, the branch, the mode value, the
 // struct read, or anything that is not one of those immediates.
 //
-// Refuses unless it finds exactly six sites, refuses on an unverified game
-// build, rolls back completely if any single write fails, and reverts on
-// unload. A partially applied resolution renders worse than none, as an earlier
-// version of this established the hard way by shipping one.
+// The actual policy, which this comment previously overstated in two ways:
+//
+//   * It accepts between three and twelve sites, all agreeing, and refuses
+//     outside that band -- see kMinSites and kMaxExpected. Six is what build
+//     330683 has. The band exists so a game update that adds or drops a call
+//     site does not disable the feature while the shape it matches is still
+//     unambiguous. "Exactly six" was never what the code did.
+//
+//   * It PROCEEDS on an unverified game build and says so in the log; it does
+//     not refuse. What protects an unknown build is the shape match and the site
+//     count, not a version number, and refusing on every update would make the
+//     feature useless the day Frontier ships one.
+//
+// Rolling back completely if any single write fails, and reverting on unload,
+// were both accurate: a partially applied resolution renders worse than none,
+// as an earlier version of this established by shipping one.
+//
+// This is the one feature that writes to the game's code, so what it claims has
+// to match what it does. README.md carried the same "exactly six" and has been
+// corrected with it.
 #pragma once
 
 #include <cstdint>

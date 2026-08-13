@@ -806,9 +806,11 @@ void vScreenFrameBoundary() {
             "%u. Two eyes a frame, so these should climb steadily; if they stop, the fix "
             "engaged once and then stopped matching. The per-frame void range should be "
             "a single number repeated -- a low end below the high end means some frames "
-            "in THIS window treated one eye and not the other. The eye-draw count is 2 "
-            "at the stock panel resolution, and much larger means intermediate targets "
-            "are being miscounted as eye textures.",
+            "in THIS window treated one eye and not the other. The eye-draw count is a "
+            "session peak and depends entirely on what you were doing: about 2 in HMD "
+            "Cinema Mode, tens to over a thousand on foot with the helmet HUD drawn, and "
+            "a few hundred in flight. It is NOT a fault indicator -- the flash detector "
+            "needs it above 100 to consider a frame at all.",
             static_cast<unsigned long long>(s->panelOverrides),
             static_cast<unsigned long long>(s->voidClears),
             s->voidFrameMin == 0xFFFFFFFFu ? 0u : s->voidFrameMin, s->voidFrameMax,
@@ -839,7 +841,16 @@ void installVScreenFixes(ID3D11Device* device) {
     // never installed cannot be switched on by editing a file -- so returning
     // here on "nothing asked for" would make the documented behaviour impossible
     // for anyone who starts with both off.
-    if (!wantVoid && scale == 1.0f && !cfg.getBool("advanced.panel_hooks_always", true)) {
+    //
+    // The flash fix is part of that test, not a bystander. These context hooks
+    // are its ONLY source of the camera it watches, the eye-draw count it gates
+    // on, and the frame boundary that drives its cooldowns -- it installs
+    // nothing itself. Consulting only the two panel fixes meant that turning
+    // both off, with panel_hooks_always = 0, silently took the flash fix with
+    // them: armed in the log, then nothing, and not even the give-up notice,
+    // because the frame counter it waits on also lives in here.
+    if (!wantVoid && scale == 1.0f && !glitchFrameNeedsEyeDraws() &&
+        !cfg.getBool("advanced.panel_hooks_always", true)) {
         return;
     }
 
