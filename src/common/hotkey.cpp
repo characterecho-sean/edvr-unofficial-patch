@@ -1,11 +1,13 @@
 // GENERATED from src/common/hotkey.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 7a1d2c4131a14ea4]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 1bb15aef111c8650]
 #include "hotkey.h"
 
 #include <windows.h>
 
 #include <cstdlib>
 #include <cstring>
+
+#include "log.h"
 
 namespace edvr {
 
@@ -61,6 +63,18 @@ int virtualKeyFromName(const char* name) {
         {"NUMPAD8", VK_NUMPAD8},   {"NUMPAD9", VK_NUMPAD9},
         {"MULTIPLY", VK_MULTIPLY}, {"DIVIDE", VK_DIVIDE},
         {"ADD", VK_ADD},           {"SUBTRACT", VK_SUBTRACT},
+        // The arrow keys were missing, and Elite binds the camera-view cycle to
+        // one of them by default. Asking for RIGHT fell through to the
+        // unrecognised path below, which returned "no key" in silence -- so the
+        // feature simply never fired and nothing said why.
+        {"RIGHT", VK_RIGHT},       {"LEFT", VK_LEFT},
+        {"UP", VK_UP},             {"DOWN", VK_DOWN},
+        {"RIGHTARROW", VK_RIGHT},  {"LEFTARROW", VK_LEFT},
+        {"UPARROW", VK_UP},        {"DOWNARROW", VK_DOWN},
+        {"SPACE", VK_SPACE},       {"TAB", VK_TAB},
+        {"ENTER", VK_RETURN},      {"RETURN", VK_RETURN},
+        {"BACKSPACE", VK_BACK},    {"ESCAPE", VK_ESCAPE},
+        {"ESC", VK_ESCAPE},
     };
 
     for (const Entry& e : kTable) {
@@ -72,6 +86,16 @@ int virtualKeyFromName(const char* name) {
         if (c >= 'a' && c <= 'z') return c - 'a' + 'A';
         if ((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')) return c;
     }
+    // A name nobody recognises is NOT the same as no key, and returning 0 for
+    // both is what made this invisible: a typo, or a key this table has never
+    // heard of, produced a feature that silently never fired. An empty setting
+    // is a choice and returns 0 above, without comment; getting here means
+    // somebody asked for something specific and did not get it.
+    Log::get().note("hotkey \"%s\" is not a key name EDVR knows, so nothing is "
+                    "bound. Try F1-F24, SCROLLLOCK, PAUSE, NUMLOCK, INSERT, HOME, "
+                    "END, DELETE, PAGEUP, PAGEDOWN, LEFT, RIGHT, UP, DOWN, SPACE, "
+                    "TAB, ENTER, ESCAPE, NUMPAD0-9, a single letter or digit, or "
+                    "0x## for a virtual-key code.", name);
     return 0;
 }
 
