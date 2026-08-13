@@ -27,6 +27,10 @@ extern "C" {
 // Provided by the generated assembly: one slot per thunked export.
 extern void* edvr_realProcs_openvr[];
 void edvr_unresolved_openvr();
+// Set to 1 by us once the table above is filled. Every thunk tests it and calls
+// edvr_lazyInit_openvr below if it is still zero.
+extern unsigned char edvr_ready_openvr;
+void edvr_lazyInit_openvr();
 }
 
 namespace {
@@ -48,14 +52,23 @@ edvr::FaultBudget g_interfaceBudget("VR_GetGenericInterface", 3);
 
 size_t g_missingExports = 0;
 
-// Runs under loader lock. Kept to the minimum that must happen before any export
-// can be called: the generated thunks jump through a table that has to be
-// populated, so the real module must be loaded here. Everything that can wait --
-// config parsing, creating directories, opening the log -- is deferred to
-// ensureInitialised() below, out from under the lock.
-void loaderPhase() {
-    edvr::breadcrumb("vr: DllMain attach");
+INIT_ONCE g_loadOnce = INIT_ONCE_STATIC_INIT;
 
+// Loads the real openvr_api.dll and fills the export table.
+//
+// NOT called from DllMain. It runs from the first thunked export call, which is
+// an ordinary call on an ordinary stack with no loader lock held.
+//
+// That distinction is the entire point. openvr_api_orig.dll is a module nothing
+// else in the process has mapped, so LoadLibrary on it runs its DllMain and CRT
+// startup -- nested inside ours, under the loader lock. Windows does not support
+// that. It happened to work for Valve's DLL, which is why it survived this long,
+// but advanced.real_openvr_dll is documented for chaining another OpenVR wrapper
+// and those have real startup code. The d3d11 side was rebuilt to defer after
+// exactly this pattern crashed the game for a user running ReShade with EDHM;
+// this side kept it because bare `jmp [slot]` thunks need the slot filled before
+// the first call. The generated thunks now check first and come here instead.
+BOOL CALLBACK loadOnceCallback(PINIT_ONCE, PVOID, PVOID*) {
     g_moduleDir = new std::wstring(edvr::moduleDirectory(g_selfModule));
 
     // No system fallback: openvr_api.dll is not an OS component, so the only
@@ -75,14 +88,34 @@ void loaderPhase() {
     g_missingExports =
         edvr::resolveProcs(g_realModule, kExportNames, kExportCount, edvr_realProcs_openvr,
                            reinterpret_cast<void*>(&edvr_unresolved_openvr));
-    if (!g_realModule) return;
 
-    g_realGetGenericInterface = reinterpret_cast<PFN_VR_GetGenericInterface>(
-        GetProcAddress(g_realModule, "VR_GetGenericInterface"));
-
-    edvr::breadcrumb(g_realGetGenericInterface ? "vr: exports resolved"
-                                               : "vr: FAILED no VR_GetGenericInterface");
+    if (g_realModule) {
+        g_realGetGenericInterface = reinterpret_cast<PFN_VR_GetGenericInterface>(
+            GetProcAddress(g_realModule, "VR_GetGenericInterface"));
+        edvr::breadcrumb(g_realGetGenericInterface
+                             ? "vr: exports resolved"
+                             : "vr: FAILED no VR_GetGenericInterface");
+    }
+    return TRUE;
 }
+
+}  // namespace
+
+// Called from the generated thunks, before they jump through the table.
+//
+// The ready flag is set LAST and behind a barrier, so a thread that sees it set
+// is guaranteed to see the filled table: the compiler may not hoist the store
+// above the writes, and x86 does not reorder stores against each other. It is
+// set even when the load failed -- resolveProcs has filled every slot with the
+// stub by then, so the table is safe to jump through and there is nothing to be
+// gained by retrying on every call.
+extern "C" void edvr_lazyInit_openvr() {
+    InitOnceExecuteOnce(&g_loadOnce, loadOnceCallback, nullptr, nullptr);
+    _ReadWriteBarrier();
+    edvr_ready_openvr = 1;
+}
+
+namespace {
 
 INIT_ONCE g_initOnce = INIT_ONCE_STATIC_INIT;
 
@@ -119,6 +152,10 @@ void shutdown() {
 // __cdecl on Windows.
 extern "C" void* __cdecl edvr_impl_VR_GetGenericInterface(const char* interfaceVersion,
                                                           vr::EVRInitError* error) {
+    // This one is a real C function rather than a generated thunk, so nothing
+    // has checked the ready flag on its behalf. It can legitimately be the first
+    // export the game calls.
+    edvr_lazyInit_openvr();
     if (!g_realGetGenericInterface) {
         if (error) *error = 1;  // VRInitError_Unknown
         return nullptr;
@@ -138,9 +175,14 @@ extern "C" void* __cdecl edvr_impl_VR_GetGenericInterface(const char* interfaceV
 BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID reserved) {
     switch (reason) {
         case DLL_PROCESS_ATTACH:
+            // Deliberately nothing else. No LoadLibrary, no file reads, no
+            // allocation -- see edvr_lazyInit_openvr for why, and note that
+            // breadcrumb() only opens and appends a file, which is safe here and
+            // is the last-resort channel when nothing later gets far enough to
+            // open a log.
             g_selfModule = module;
             DisableThreadLibraryCalls(module);
-            loaderPhase();
+            edvr::breadcrumb("vr: DllMain attach (real module load deferred)");
             break;
 
         case DLL_PROCESS_DETACH:

@@ -128,8 +128,12 @@ echo.
 echo [edvr] === openvr_api.dll ===
 if not exist "%OPENVR_SRC%" goto no_openvr
 
+REM --lazy: this proxy must not load its real module from DllMain. The d3d11
+REM side can, because the system d3d11.dll is already mapped and the call only
+REM bumps a refcount; openvr_api_orig.dll is mapped by nothing, so loading it
+REM there runs its DllMain under the loader lock.
 python "%ROOT%\tools\gen_exports.py" --source "%OPENVR_SRC%" ^
-    --tag openvr --out "%GEN%" --wrap VR_GetGenericInterface
+    --tag openvr --out "%GEN%" --wrap VR_GetGenericInterface --lazy
 if errorlevel 1 ( echo [edvr] ERROR: openvr export generation failed & exit /b 1 )
 
 if not exist "%OBJ%\openvr" mkdir "%OBJ%\openvr"
@@ -174,6 +178,31 @@ cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /DNDEBUG /LD ^
     "%ROOT%\tools\fakechain\fakechain.cpp" /link /INCREMENTAL:NO kernel32.lib
 if errorlevel 1 ( echo [edvr] ERROR: fakechain build failed & exit /b 1 )
 echo [edvr] built %BUILD%\fakechain.dll
+
+echo [edvr] === fakevr.dll + openvr_smoke.exe ===
+if not exist "%OBJ%\fakevr" mkdir "%OBJ%\fakevr"
+cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /DNDEBUG /LD ^
+    /Fo"%OBJ%\fakevr\\" /Fe"%BUILD%\fakevr.dll" ^
+    "%ROOT%\tools\fakevr\fakevr.cpp" /link /INCREMENTAL:NO kernel32.lib
+if errorlevel 1 ( echo [edvr] ERROR: fakevr build failed & exit /b 1 )
+if not exist "%OBJ%\openvrsmoke" mkdir "%OBJ%\openvrsmoke"
+cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /DNDEBUG ^
+    /Fo"%OBJ%\openvrsmoke\\" /Fe"%BUILD%\openvr_smoke.exe" ^
+    "%ROOT%\tools\openvr_smoke\openvr_smoke.cpp" /link /INCREMENTAL:NO kernel32.lib
+if errorlevel 1 ( echo [edvr] ERROR: openvr_smoke build failed & exit /b 1 )
+echo [edvr] built %BUILD%\openvr_smoke.exe
+
+REM Run it. A startup test nothing runs is a startup test that rots -- the
+REM fakechain harness exists because the loader-lock crash shipped once, and the
+REM openvr side then recreated the same hazard with no equivalent check.
+REM Skipped when the openvr proxy was not built.
+if exist "%BUILD%\openvr_api.dll" (
+    if not exist "%BUILD%\vrtest" mkdir "%BUILD%\vrtest"
+    copy /Y "%BUILD%\openvr_api.dll" "%BUILD%\vrtest\openvr_api.dll" >nul
+    copy /Y "%BUILD%\fakevr.dll" "%BUILD%\vrtest\openvr_api_orig.dll" >nul
+    "%BUILD%\openvr_smoke.exe" "%BUILD%\vrtest"
+    if errorlevel 1 ( echo [edvr] ERROR: openvr startup test failed & exit /b 1 )
+)
 
 REM Do the code, edvr.ini and the log messages agree about setting names?
 REM

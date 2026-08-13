@@ -152,6 +152,81 @@ ASM_THUNK = """PUBLIC {sym}
 
 """
 
+# --- lazy variant -----------------------------------------------------------
+#
+# Same thunk, plus a check that the table has been filled, and a slow path that
+# fills it on the first call.
+#
+# This exists so a proxy does not have to load the real DLL from DllMain.
+# LoadLibrary of a module nothing else has mapped runs that module's own DllMain
+# under the loader lock, re-entrantly, which Windows does not support -- it is
+# what crashed the game for a user running ReShade 6.8.0 with EDHM. The d3d11
+# side was rebuilt to defer for that reason; the openvr side could not, because
+# its exports are bare `jmp [slot]` and something has to fill the slot before
+# the first call. This is that something.
+#
+# The first call happens on an ordinary call stack with no loader lock held,
+# which is the whole point.
+
+ASM_LAZY_HEAD = """.DATA
+
+; Non-zero once the export table has been filled. Written by C, read by every
+; thunk below. Byte-sized so the check is one compare against memory.
+PUBLIC edvr_ready_{tag}
+edvr_ready_{tag} BYTE 0
+
+.CODE
+
+EXTERN edvr_lazyInit_{tag}:PROC
+
+; Calls the C initialiser without disturbing anything the real function will
+; expect to find.
+;
+; A thunk is transparent: it must not change the arguments, and on x64 the first
+; four live in rcx/rdx/r8/r9 and xmm0-xmm3, all of which a call is free to
+; clobber. So they are saved around it. Arguments five and up sit above the
+; return address and are untouched, because rsp is restored exactly.
+;
+; Stack: a thunk entry has rsp = 8 (mod 16). The call into here makes it 0, and
+; 128 is a multiple of 16, so rsp stays 0 (mod 16) -- correct for the call, and
+; correct for the 16-byte movaps slots at rsp+64 and above. 32 bytes at the
+; bottom are the shadow space the callee is entitled to.
+edvr_lazyShim_{tag} PROC
+    sub     rsp, 128
+    mov     QWORD PTR [rsp+32], rcx
+    mov     QWORD PTR [rsp+40], rdx
+    mov     QWORD PTR [rsp+48], r8
+    mov     QWORD PTR [rsp+56], r9
+    movaps  XMMWORD PTR [rsp+64], xmm0
+    movaps  XMMWORD PTR [rsp+80], xmm1
+    movaps  XMMWORD PTR [rsp+96], xmm2
+    movaps  XMMWORD PTR [rsp+112], xmm3
+    call    edvr_lazyInit_{tag}
+    movaps  xmm3, XMMWORD PTR [rsp+112]
+    movaps  xmm2, XMMWORD PTR [rsp+96]
+    movaps  xmm1, XMMWORD PTR [rsp+80]
+    movaps  xmm0, XMMWORD PTR [rsp+64]
+    mov     r9,  QWORD PTR [rsp+56]
+    mov     r8,  QWORD PTR [rsp+48]
+    mov     rdx, QWORD PTR [rsp+40]
+    mov     rcx, QWORD PTR [rsp+32]
+    add     rsp, 128
+    ret
+edvr_lazyShim_{tag} ENDP
+
+"""
+
+ASM_LAZY_THUNK = """PUBLIC {sym}
+{sym} PROC
+    cmp BYTE PTR [edvr_ready_{tag}], 0
+    jne @F
+    call edvr_lazyShim_{tag}
+@@:
+    jmp QWORD PTR [edvr_realProcs_{tag} + {offset}]
+{sym} ENDP
+
+"""
+
 ASM_TEMPLATE_TAIL = """END
 """
 
@@ -166,6 +241,12 @@ def main() -> int:
         action="append",
         default=[],
         help="export implemented in C++ instead of thunked (repeatable)",
+    )
+    ap.add_argument(
+        "--lazy",
+        action="store_true",
+        help="fill the export table on the first call instead of from DllMain, "
+             "so the real module is never loaded under the loader lock",
     )
     args = ap.parse_args()
 
@@ -205,9 +286,12 @@ def main() -> int:
                 count=max(len(thunked), 1),
             )
         )
+        if args.lazy:
+            f.write(ASM_LAZY_HEAD.format(tag=tag))
+        template = ASM_LAZY_THUNK if args.lazy else ASM_THUNK
         for i, (name, _ordinal, _fwd) in enumerate(thunked):
             f.write(
-                ASM_THUNK.format(sym="edvr_%s_thunk_%d" % (tag, i), tag=tag, offset=i * 8)
+                template.format(sym="edvr_%s_thunk_%d" % (tag, i), tag=tag, offset=i * 8)
             )
         f.write(ASM_TEMPLATE_TAIL)
 
