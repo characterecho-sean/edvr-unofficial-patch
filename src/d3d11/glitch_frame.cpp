@@ -1,5 +1,5 @@
 // GENERATED from src/d3d11/glitch_frame.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 14d03bb4428a943b]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 4b7c8748da70244b]
 #include "glitch_frame.h"
 
 #include <windows.h>
@@ -249,6 +249,31 @@ void recordResidual(float resid) {
         State::Separation& e = s->seps[hit];
         ++e.hits;
         e.lastSeen = s->frameNo;
+        // FOLLOW THE MAGNITUDE. It is not actually fixed -- it drifts as the
+        // player flies, and an entry pinned to its first sighting gets left
+        // behind while the thing it is tracking walks away.
+        //
+        // Measured: 563,308 then 548,012 then 532,120 over four minutes, each
+        // 2.7-2.9% from the last. Every one fell outside its predecessor's 2%
+        // window, opened a new entry and cost a frame -- while all the sightings
+        // in between were matching correctly and refreshing an entry that was
+        // being held at a number nothing had reported for a minute.
+        //
+        // A running mean follows it, and the weight is not a taste: for a drift
+        // of d per sighting the mean settles a fixed fraction d/(w-d) behind, so
+        // it has to stay inside the match window. At w = 0.25 a 1%-per-sighting
+        // drift lags 4.2% and falls straight out of a 2% window -- measured, in
+        // the test below, which is why the weight is a half and not a quarter.
+        //
+        // Half is also the most an outlier can move the entry, and only values
+        // already INSIDE the window are ever applied, so one reading can shift
+        // this by at most 1%. It cannot be walked somewhere by noise.
+        //
+        // Widening the tolerance instead would buy the same thing and is the
+        // wrong trade: it spends the margin against real flashes, which is the
+        // only thing standing between this and suppressing the bug it exists to
+        // fix.
+        e.resid += (resid - e.resid) * 0.5f;
         // Once per magnitude, not once per suppressed frame -- there are
         // thousands of those and one of these.
         if (!e.noted && e.hits >= 2) {

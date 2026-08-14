@@ -1,5 +1,5 @@
 // GENERATED from tools/glitch_test/glitch_test.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 385e6e152d735aea]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 e6ec882ef389be69]
 // glitch_test -- drives the transition-flash detector without the game.
 //
 // The port of glitch_frame.cpp into this repo compiled, linked, and passed
@@ -441,6 +441,41 @@ int main(int argc, char** argv) {
               "withheld because an earlier, novel candidate had already decided "
               "it -- the two halves are reading different residuals");
         settle(b, x, 20);
+    }
+
+    // --- 7c. The separation DRIFTS ----------------------------------------
+    //
+    // It is not a fixed number. Measured over four minutes of one flight:
+    // 563,308 then 548,012 then 532,120, each 2.7-2.9% from the last, so each
+    // fell outside its predecessor's 2% window and cost a frame -- while all the
+    // sightings in between matched fine and kept refreshing an entry pinned to a
+    // number nothing had reported for a minute.
+    //
+    // The rate here is 0.5% per sighting, which is roughly two hundred times
+    // what the field showed -- the flips arrive about thirty a second, so those
+    // three readings are 0.002% apart each. Deliberately harsher than reality,
+    // and still inside what the running mean can hold: the lag is d/(w-d), so
+    // 0.5% at weight 0.5 settles 1.0% behind against a 2% window.
+    //
+    // Sixty sightings, so the total travel is 26%. No fixed tolerance covers
+    // that, and one wide enough to try would be wider than the 5.7% gap between
+    // the closest pair of genuine transitions.
+    settle(b, x, 40);
+    {
+        uint32_t drifted = 0;
+        float sep = 563308.0f;
+        for (uint32_t i = 0; i < 60; ++i) {
+            settle(b, x, 6);
+            x += 30.0f;
+            if (frame(b, x, sep, 0.0f)) ++drifted;
+            x += 30.0f;
+            frame(b, x, 0.0f, 0.0f);
+            sep *= 0.995f;
+        }
+        check("a separation that drifts is followed, not re-learned", drifted <= 1,
+              std::to_string(drifted) +
+                  " frames withheld tracking one separation across 26% of drift "
+                  "-- the entry is being left behind rather than following");
     }
 
     // --- 8. The field replay ----------------------------------------------
