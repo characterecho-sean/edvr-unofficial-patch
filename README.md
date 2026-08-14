@@ -70,6 +70,10 @@ person exactly as you do now. Explorer Cam changes where the camera is while you
 are already in that mode, and nothing else — no reach, no information, no
 advantage a player without it does not have.
 
+It works by replacing one of the camera's presets — **Commander Rear Profile** —
+so you cycle to that preset when you want the 3D view. Every other preset keeps
+its normal position.
+
 It is off until you tell it your camera key, and it takes a few minutes to set
 up. See [Explorer Cam](#explorer-cam) below.
 
@@ -88,6 +92,14 @@ has size, and a settlement is a place rather than a picture.
 Moving your head moves your view *of* that screen, and the screen is still one
 image. Only the external camera renders in stereo, so that is the only place
 this applies.
+
+**It replaces one camera preset: Commander Rear Profile.** While you are on that
+preset the camera sits at your commander's head rather than where the preset
+normally puts it — that is the whole feature, and it does mean the preset stops
+doing its usual job. Cycle to it for the 3D view, cycle off it for the normal
+framing. **Every other preset is untouched** and keeps its usual position, so
+nothing you already use for screenshots changes. If you would rather give up a
+different one, `fix.head_offset_view` selects which.
 
 ### It gives you no capability you do not already have
 
@@ -125,9 +137,9 @@ another player observes, and no gameplay data of any kind is read or written.
 
 2. Set `hotkey.external_camera_next` to your next-camera-view binding.
 
-3. Get on foot, open the camera, and cycle to the view **behind** your
-   commander — the offset is for that one, because the view the camera opens on
-   faces back at you.
+3. Get on foot, open the camera, and cycle to the **Commander Rear Profile**
+   preset. That is the one Explorer Cam replaces, and it is not the preset the
+   camera opens on — you cycle to it each time you want the 3D view.
 
 4. Tune the three offsets with the headset on. They reload about once a second,
    so you do not need to restart:
