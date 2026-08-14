@@ -1,5 +1,5 @@
 // GENERATED from src/d3d11/head_offset_gate.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 f1f0ee7891763e87]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 0e0aade0a6fa8019]
 #include "head_offset_gate.h"
 
 #include "../common/config.h"
@@ -535,17 +535,21 @@ void headOffsetGateFrame(uint32_t frameNo, uint32_t panelDraws, uint32_t eyeDraw
     if (!g.gateViewWarned && g.gateInCamera && !viewOk && g.gateWantView > 0 &&
         !g.gateHaveNextKey && g.viewOverride < 0) {
         g.gateViewWarned = true;
+        // Names the CAUSE rather than a setting to change, because the setting
+        // that would change it is not the same in every build. What is true
+        // everywhere is that nothing could say which camera view this is.
         Log::get().note(
-            "head offset: NOT SET UP YET, which on a fresh install is the "
-            "expected state rather than a fault. You are in the external "
-            "camera on view %d, fix.head_offset_view wants %d, and nothing "
-            "here can change the view: hotkey.external_camera_next is not "
-            "bound.\n"
-            "  To use it: set hotkey.external_camera_next to YOUR "
-            "next-camera-view key, then press it once in the camera.\n"
-            "  Or set fix.head_offset_view = -1 to apply the offset in any "
-            "camera view, including the portrait one that faces back at you.",
-            g.gateViewIndex, g.gateWantView);
+            "head offset: the camera view could not be read from the game, so "
+            "this cannot tell which preset you are on. It wants view %d and is "
+            "assuming %d, so the offset will not engage.\n"
+            "  The search for the view index found nothing usable -- see the "
+            "camera view lines above for how much memory it covered and how "
+            "many attempts it made. After a game update, "
+            "d3d11.camera_index_type_offset no longer points at the right "
+            "thing and needs re-measuring.\n"
+            "  fix.head_offset_view = -1 applies the offset in every camera "
+            "preset, including the one that faces back at you.",
+            g.gateWantView, g.gateViewIndex);
     }
     const bool wantOffset = g.gateInCamera && viewOk;
     // Published EVERY frame, not only on change, because this call is also

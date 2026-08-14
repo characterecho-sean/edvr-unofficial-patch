@@ -193,13 +193,12 @@ SETTING IT UP
    external camera looks identical to boarding your ship, and guessing wrong
    would move your viewpoint inside your own cockpit.
 
-2. Set hotkey.external_camera_next to your next-camera-view binding.
-
-3. Get on foot, open the camera, and cycle to the COMMANDER REAR PROFILE
+2. Get on foot, open the camera, and cycle to the COMMANDER REAR PROFILE
    preset. That is the one Explorer Cam replaces, and it is not the preset the
-   camera opens on - you cycle to it each time you want the 3D view.
+   camera opens on - you cycle to it each time you want the 3D view. EDVR reads
+   which preset you are on from the game, so there is nothing else to bind.
 
-4. Tune these three with the headset on. They reload about once a second, so
+3. Tune these three with the headset on. They reload about once a second, so
    you do not need to restart:
 
        head_offset_right   = 0.0     + is to your commander's right

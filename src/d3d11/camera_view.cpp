@@ -1,5 +1,5 @@
 // GENERATED from src/d3d11/camera_view.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 383ad8c97bb7f75f]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 bd558a3b6f7cc1d7]
 #include "camera_view.h"
 
 #include <windows.h>
@@ -347,10 +347,10 @@ void cameraViewRequestScan() {
         if (!g_s.exhaustedNoted) {
             g_s.exhaustedNoted = true;
             Log::get().note("camera view: %u attempts made and none found the "
-                            "camera settings, so the view will be counted from "
-                            "keypresses for the rest of this session. Bind "
-                            "hotkey.external_camera_next if you have not.",
-                            g_s.attempts);
+                            "camera settings, so which camera preset you are on "
+                            "is unknown for the rest of this session. If the "
+                            "game has updated, d3d11.camera_index_type_offset "
+                            "needs re-measuring.", g_s.attempts);
         }
         return;
     }

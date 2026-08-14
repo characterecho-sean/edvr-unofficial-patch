@@ -52,14 +52,17 @@ struct State {
 
     Hotkey toggleKey;
     Hotkey dumpKey;
-    // The external camera, and the key that cycles its view.
+    // The external camera key, and only that one.
     //
-    // A keypress is not a heuristic, and it is the whole reason this feature
-    // can tell entering the external camera from boarding a ship: render state
-    // alone cannot (EVIDENCE 6ac.6b). Unbound by default, which leaves the gate
-    // on its weaker timing-window path rather than guessing.
+    // A keypress is not a heuristic, and it is the whole reason this feature can
+    // tell entering the external camera from boarding a ship: render state alone
+    // cannot. Unbound by default, and the gate does nothing at all without it.
+    //
+    // There is no next-camera-view key here. It existed as a fallback for
+    // counting the camera preset by hand, and EDVR reads the preset from the
+    // game instead -- so it was a second binding to explain, to get wrong, and
+    // to keep in step, in exchange for nothing a working install uses.
     Hotkey externalCamKey;
-    Hotkey externalCamNextKey;
     uint64_t frameCounter = 0;
 };
 
@@ -100,7 +103,6 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
         // them -- it watches for the same press the game gets, so it knows
         // which mode the player just asked for.
         if (g_state->externalCamKey.pressed()) headOffsetGateKeyPressed();
-        if (g_state->externalCamNextKey.pressed()) headOffsetGateViewBumped();
         // Reading the view the game is actually on, and telling the gate.
         //
         // The keypress count above stays as the fallback, for when this cannot
@@ -151,7 +153,6 @@ State& ensureState() {
         g_state->toggleKey.setBinding(Config::get().getString("hotkey.toggle_exposure", "SCROLLLOCK").c_str());
         g_state->dumpKey.setBinding(Config::get().getString("hotkey.dump_camera", "PAUSE").c_str());
         g_state->externalCamKey.setBinding(Config::get().getString("hotkey.external_camera", "").c_str());
-        g_state->externalCamNextKey.setBinding(Config::get().getString("hotkey.external_camera_next", "").c_str());
         // A CONFIGURED key, not a pressed one. The gate refuses to arm without
         // this, so a fresh install with nothing bound is genuinely inert rather
         // than falling back to a heuristic that cannot tell the external camera
