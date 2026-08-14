@@ -1,5 +1,5 @@
 // GENERATED from src/d3d11/camera_view.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 ee175f0592d0f535]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 703cd5d18c586288]
 #include "camera_view.h"
 
 #include <windows.h>
@@ -73,6 +73,21 @@ constexpr size_t kMaxGap = 2;
 // riding that out and losing the feature for five minutes.
 constexpr uint32_t kMoveGrace = 120;
 
+// How long a run that is LONG ENOUGH but reads wrong is kept under observation
+// before the scan is written off.
+//
+// The candidate test samples the ordinal once, at whatever instant the scan
+// happens to finish, and treats that one sample as a property of the run. It is
+// not: the slot holds a non-view value while the game changes mode, which is
+// exactly the moment a player triggers a scan by walking about. Measured three
+// times in one day, twice on the developer's machine and once on a reporter's --
+// the same run rejected as "reads something else" and accepted a minute later.
+//
+// Ten seconds is longer than any mode change observed (25-86 frames, 6ac.6c)
+// and short enough that a run which is genuinely not the camera settings is not
+// watched for a meaningful part of a session.
+constexpr uint32_t kProbeWindow = 600;
+
 struct Region {
     const uint8_t* base;
     size_t         size;
@@ -103,6 +118,14 @@ struct State {
     // "the 12th match in address order" stopped being "the 12th record of the
     // array" the moment anything else of that type existed.
     const uint8_t* chosen = nullptr;
+
+    // The one run that was long enough for the ordinal but did not read as a
+    // view when the scan sampled it. Kept and re-read rather than discarded --
+    // see kProbeWindow. Only ever set when there is exactly ONE such run, so
+    // this cannot become the guess between equals that the refusal exists to
+    // prevent.
+    const uint8_t* provisional = nullptr;
+    uint32_t  provisionalFrames = 0;
 
     bool      scanning = false;
     bool      scanned = false;
@@ -387,8 +410,10 @@ void finishScan() {
     // SLOTS, not filled records: the ordinal is a position in the array, and a
     // hole earlier in the run does not move it.
     std::vector<size_t> candidates;
+    std::vector<size_t> longEnough;
     for (size_t r = 0; r < runs.size(); ++r) {
         if (runs[r].slots <= g_s.ordinal) continue;
+        longEnough.push_back(r);
         const uint32_t v = recordValue(runs[r].base + g_s.ordinal * kStride);
         if (v <= g_s.plausibleMax) candidates.push_back(r);
     }
@@ -435,6 +460,28 @@ void finishScan() {
         return;
     }
     if (candidates.empty()) {
+        // ONE LONG-ENOUGH RUN THAT READ WRONG IS NOT A NEGATIVE YET.
+        //
+        // The probe above is a single sample taken at whatever instant the walk
+        // happened to finish, and that instant is very often a mode change --
+        // because what makes a player trigger a scan is walking about. Throwing
+        // the run away costs the whole attempt and a minute of cooldown, for a
+        // value that is usually correct again within a second.
+        //
+        // Still exactly one, though. Two long-enough runs is the ambiguity that
+        // has to stay a refusal: watching both and taking whichever blinks first
+        // is the coin toss with extra steps.
+        if (longEnough.size() == 1) {
+            g_s.provisional = runs[longEnough[0]].base + g_s.ordinal * kStride;
+            g_s.provisionalFrames = kProbeWindow;
+            Log::get().note("camera view: run %zu is long enough for ordinal %zu "
+                            "but did not read as a view just now. Watching it for "
+                            "%u frames before writing it off -- that slot holds "
+                            "something else while the game changes mode, and a "
+                            "scan finishing at that moment is common.",
+                            longEnough[0], g_s.ordinal, kProbeWindow);
+            return;
+        }
         Log::get().note("camera view: no run holds a plausible view at ordinal "
                         "%zu, so the camera settings array was not among what "
                         "was found.", g_s.ordinal);
@@ -501,6 +548,8 @@ void cameraViewRequestScan() {
     }
     g_s.scanning = true;
     g_s.chosen = nullptr;
+    g_s.provisional = nullptr;   // a fresh search supersedes the old maybe
+    g_s.provisionalFrames = 0;
     g_s.readFaults = 0;          // a new search gets a fresh budget
     g_s.readFaultsNoted = false;
     g_s.records.clear();
@@ -532,6 +581,29 @@ void cameraViewTick(uint32_t eyeDraws) {
     }
     if (g_s.cooldown > 0) --g_s.cooldown;
 
+    // The run the last scan could not make its mind up about, re-read.
+    if (g_s.provisional && !g_s.usable && !g_s.scanning) {
+        const uint32_t v = recordValue(g_s.provisional);
+        if (v <= g_s.plausibleMax) {
+            g_s.chosen = g_s.provisional;
+            g_s.usable = true;
+            g_s.cooldown = 0;
+            g_s.readFaults = 0;
+            g_s.readFaultsNoted = false;
+            g_s.badReads = 0;
+            g_s.provisional = nullptr;
+            g_s.provisionalFrames = 0;
+            Log::get().note("camera view: that run reads %u now -- a plausible "
+                            "view -- so it is being tracked after all. It was "
+                            "mid-change when the scan sampled it.", v);
+        } else if (--g_s.provisionalFrames == 0) {
+            g_s.provisional = nullptr;
+            Log::get().note("camera view: that run never read as a view in %u "
+                            "frames, so it is not the camera settings after all. "
+                            "Waiting for the next scan.", kProbeWindow);
+        }
+    }
+
     // A RESCAN ASKS FOR ITSELF. Only the first search waits for the caller.
     //
     // The caller's trigger is the settled flat panel, which is the right moment
@@ -543,10 +615,20 @@ void cameraViewTick(uint32_t eyeDraws) {
     // (issue #2): 3m18s and 5m01s between the array going quiet and the rescan
     // that recovered it, both spent waiting for a panel rather than for memory.
     //
-    // Gameplay is the only precondition a rescan actually needs, and by
-    // definition it has already been met -- the array was being read a moment
-    // ago. requestScan does the rest of the gating (cooldown, rescan budget).
-    if (g_s.needRescan && g_s.sawGameplay) cameraViewRequestScan();
+    // A RETRY AFTER A FAILED ATTEMPT IS THE SAME PROBLEM. A scan that finishes
+    // as the player enters the camera fails (see kProbeWindow) and leaves them
+    // in the camera -- so the panel that would ask for the retry does not come
+    // back until they give up and leave. Measured: one attempt in a session,
+    // the rest of it with no Explorer Cam.
+    //
+    // The FIRST attempt still waits for the caller. Its timing is the one that
+    // genuinely needs judgement -- too early and it searches an empty heap --
+    // and `attempts > 0` is proof that judgement has already been exercised
+    // once. requestScan does the rest of the gating (cooldown, budgets).
+    if (g_s.sawGameplay && !g_s.provisional &&
+        (g_s.needRescan || g_s.attempts > 0)) {
+        cameraViewRequestScan();
+    }
 
     if (!g_s.scanning) return;
     if (scanSlice()) finishScan();
