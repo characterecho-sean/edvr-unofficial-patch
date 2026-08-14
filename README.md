@@ -335,6 +335,26 @@ the fix disables itself and says so in the log rather than acting on nonsense.
 It also switches itself off for the session if it ever starts withholding frames
 continuously, because permanent judder would be worse than the flash.
 
+**On a planet surface it used to do exactly that.** Flying
+low over terrain, the game alternates between two shadow-cascade cameras from one
+frame to the next, and the distance between them looks like an enormous jump —
+measured at about 568,000 units, thirty-eight times in eight minutes of straight
+flight. Every one was withheld, three frames apart, which is felt as rhythmic
+judder; then the runaway guard above turned the fix off for the session, taking
+the real flash fix with it. A jump that keeps recurring at the same size is a
+fixed distance between two render passes, not a transition — real transitions
+vary in size, because real motion does — so the first of a size is withheld and
+matching ones after it are left alone. The log says so once per size, and the
+end-of-session totals count them separately. `transition_flash_repeat_percent`
+in `edvr.ini` controls it, and there is a note there about why raising
+`transition_flash_units` cannot help: the false jumps are much *larger* than the
+real ones, not smaller.
+
+Both eyes of a frame now agree, too. The verdict is decided
+once, at whichever eye the game submits first, and the second eye follows it —
+previously the two read the flag independently, and a decision changing between
+them would have shown one eye the current frame and the other the previous one.
+
 If anything stops matching, that fix does nothing, the game renders normally,
 and the log says so.
 

@@ -84,6 +84,27 @@ struct State {
     uint32_t submitCalls = 0;
     uint32_t eyesSeen = 0;         // bit 0 left, bit 1 right
 
+    // THE VERDICT FOR A WHOLE FRAME, DECIDED ONCE, AT THE FIRST EYE.
+    //
+    // Both eyes used to read the flag independently, and the flag legitimately
+    // changes mid-frame: the detector re-decides on every new furthest camera
+    // and can set, withdraw and re-raise it inside one frame by design. A
+    // transition landing between Submit(left) and Submit(right) therefore shows
+    // one eye this frame and the other a reprojection of the last one -- a
+    // one-frame binocular mismatch, which is exactly what a flash feels like,
+    // produced by the fix for flashes.
+    //
+    // The shared channel carries no frame identity (EDVR-31), so this cannot be
+    // done by comparing frame numbers; it is done by sampling once and making
+    // the second eye follow. Consistent-late beats split in both directions: two
+    // eyes showing the previous frame is a dropped frame, which VR runtimes and
+    // people are used to. Two eyes disagreeing is not.
+    //
+    // Cleared at WaitGetPoses, which is the frame boundary this file already
+    // uses for exactly this purpose. The latch itself lives in frame_flag.h,
+    // shared, so this file and its private fork cannot drift on it.
+    SubmitPairLatch pairLatch;
+
     // Refused this session, so a SECOND compositor request does not sail past.
     //
     // clearTrip() resets the sentinel in memory as well as on disk, so after a
@@ -178,7 +199,8 @@ vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
     //
     // Only once validated: a hook that has not proved it is on the right slot
     // has no business withholding anything.
-    if (s->validated && glitchFrameMarked()) {
+    // Sampled once per frame, at whichever eye arrives first. See SubmitPairLatch.
+    if (s->validated && s->pairLatch.verdict(glitchFrameMarked())) {
         ++s->framesWithheld;
         if (s->notesLeft > 0) {
             --s->notesLeft;
@@ -229,6 +251,8 @@ vr::EVRCompositorError hookedWaitGetPoses(void* self,
     // suppress every frame after it, and the headset would freeze rather than
     // skip a single frame.
     clearGlitchFrame();
+    // ...and where the next frame's pair verdict starts undecided.
+    s->pairLatch.reset();
 
     // The head offset, applied BEFORE the game sees the poses.
     //

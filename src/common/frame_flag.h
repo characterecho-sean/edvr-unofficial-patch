@@ -1,5 +1,5 @@
 // GENERATED from src/common/frame_flag.h in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 6e9eed4eca6d4ffc]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 c11f21f7b44ae7d4]
 // A one-bit channel between the two proxies, for the frame that must not be
 // shown.
 //
@@ -115,5 +115,54 @@ bool externalCameraOnFootLive(uint32_t maxAgeFrames);
 // seconds in, because until the player first enters the camera the gate is
 // publishing "no" continuously and the two look identical from here.
 bool externalCameraEverPublished();
+
+// ONE VERDICT PER FRAME, over a channel that carries no frame identity.
+//
+// The mark above is read once per eye, at each Submit, and it legitimately
+// changes DURING a frame: the detector re-decides on every new furthest camera
+// and can set, withdraw and re-raise it by design. So a transition landing
+// between Submit(left) and Submit(right) shows one eye this frame and the other
+// a reprojection of the last one -- a one-frame binocular mismatch, which is
+// what a flash feels like. The fix for flashes, producing one.
+//
+// It cannot be solved by comparing frame numbers, because this channel does not
+// carry one (EDVR-31). It is solved by sampling once and making the second eye
+// follow, which is available without any protocol change at all.
+//
+// CONSISTENT-LATE BEATS SPLIT, in both directions. Two eyes showing the previous
+// frame is a dropped frame, which runtimes reproject and people are used to. Two
+// eyes disagreeing is not something either handles.
+//
+// Header-only and pure, so the property can be asserted without a compositor --
+// and shared, so the two copies of the hook cannot drift. compositor_hook.cpp is
+// FORKED and its "kept aligned by hand" regions have no mechanical check, which
+// is the standing gap in the sync tooling; this is four lines fewer to keep
+// aligned by remembering.
+class SubmitPairLatch {
+public:
+    // The verdict for this frame. The first call after reset() decides it; every
+    // later call in the same frame gets the same answer, whatever the flag has
+    // done since.
+    bool verdict(bool markedNow) {
+        if (!m_latched) {
+            m_latched = true;
+            m_withhold = markedNow;
+        }
+        return m_withhold;
+    }
+
+    // Called at the frame boundary -- WaitGetPoses, which is where the mark
+    // itself is cleared.
+    void reset() {
+        m_latched = false;
+        m_withhold = false;
+    }
+
+    bool latched() const { return m_latched; }
+
+private:
+    bool m_latched = false;
+    bool m_withhold = false;
+};
 
 }  // namespace edvr

@@ -236,6 +236,24 @@ if errorlevel 1 ( echo [edvr] ERROR: gate_test build failed & exit /b 1 )
     exit /b 1
 )
 
+echo [edvr] === glitch_test.exe ===
+REM The transition-flash detector, replayed without the game. This repo SHIPS
+REM that fix, and until now had no way to run its test -- which is how a signal
+REM the private ledger had already refuted stayed in a release until a user felt
+REM it as judder on a planet surface.
+if not exist "%OBJ%\glitchtest" mkdir "%OBJ%\glitchtest"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\glitchtest"\ ^
+    /Fe"%BUILD%\glitch_test.exe" "%ROOT%\tools\glitch_test\glitch_test.cpp" ^
+    "%ROOT%\src\d3d11\glitch_frame.cpp" "%ROOT%\src\common\config.cpp" ^
+    "%ROOT%\src\common\frame_flag.cpp" "%ROOT%\src\common\log.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib
+if errorlevel 1 ( echo [edvr] ERROR: glitch_test build failed & exit /b 1 )
+"%BUILD%\glitch_test.exe" "%BUILD%\glitchscratch" || (
+    echo [edvr] ERROR: the transition flash detector failed its own test
+    exit /b 1
+)
+
 echo [edvr] === pose_test.exe ===
 if not exist "%OBJ%\posetest" mkdir "%OBJ%\posetest"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^

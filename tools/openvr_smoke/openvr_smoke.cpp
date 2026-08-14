@@ -1,5 +1,5 @@
 // GENERATED from tools/openvr_smoke/openvr_smoke.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 3b3b5fdbb25ae876]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 432d462bae9afd2e]
 // openvr_smoke -- checks the openvr proxy's startup path without the game.
 //
 // The thing under test is that the proxy does NOT load the real openvr_api.dll
@@ -147,6 +147,78 @@ int frameFlagChecks() {
     edvr::clearGlitchFrame();
 
     if (bad == 0) printf("  ok    the mode flag round-trips and is independent\n");
+    return bad;
+}
+
+// Both eyes of a frame get the same verdict, whenever the flag moves.
+//
+// The mark is read once per eye, at each Submit, and it legitimately changes
+// mid-frame -- the detector re-decides on every new furthest camera. A change
+// landing between the two Submits would show one eye this frame and the other a
+// reprojection of the last one: a one-frame binocular mismatch, which is what a
+// flash feels like. The fix for flashes, producing one.
+//
+// The channel carries no frame identity (EDVR-31), so this is asserted on the
+// latch rather than on frame numbers.
+int submitPairChecks() {
+    int bad = 0;
+
+    // The flag comes up between the two eyes. The first eye decided "show it",
+    // so the second must show it too.
+    {
+        edvr::SubmitPairLatch latch;
+        const bool left = latch.verdict(false);
+        const bool right = latch.verdict(true);
+        if (left || right) {
+            printf("  FAIL  the flag rising between eyes split the pair "
+                   "(left %s, right %s)\n", left ? "withheld" : "shown",
+                   right ? "withheld" : "shown");
+            ++bad;
+        }
+    }
+
+    // And the other direction: the first eye decided "withhold", so the second
+    // is withheld even though the mark has since been withdrawn. Consistent-late
+    // rather than one eye ahead of the other.
+    {
+        edvr::SubmitPairLatch latch;
+        const bool left = latch.verdict(true);
+        const bool right = latch.verdict(false);
+        if (!left || !right) {
+            printf("  FAIL  the flag falling between eyes split the pair "
+                   "(left %s, right %s)\n", left ? "withheld" : "shown",
+                   right ? "withheld" : "shown");
+            ++bad;
+        }
+    }
+
+    // A third read -- a runtime that submits more than twice, or a retry --
+    // still follows the frame's verdict rather than re-deciding.
+    {
+        edvr::SubmitPairLatch latch;
+        latch.verdict(true);
+        latch.verdict(false);
+        if (!latch.verdict(false)) {
+            printf("  FAIL  a third Submit in one frame re-decided\n");
+            ++bad;
+        }
+    }
+
+    // The boundary releases it, so the next frame is judged on its own merits.
+    // Without this one detection would withhold every frame that followed, which
+    // is the headset freezing rather than skipping a frame.
+    {
+        edvr::SubmitPairLatch latch;
+        latch.verdict(true);
+        latch.reset();
+        if (latch.latched() || latch.verdict(false)) {
+            printf("  FAIL  the frame boundary did not release the pair verdict\n");
+            ++bad;
+        }
+    }
+
+    if (bad == 0)
+        printf("  ok    both eyes of a frame get the same verdict\n");
     return bad;
 }
 
@@ -638,6 +710,10 @@ int main(int argc, char** argv) {
         return 1;
     }
     if (frameFlagChecks() != 0) {
+        printf("\nOPENVR SMOKE FAILED\n");
+        return 1;
+    }
+    if (submitPairChecks() != 0) {
         printf("\nOPENVR SMOKE FAILED\n");
         return 1;
     }

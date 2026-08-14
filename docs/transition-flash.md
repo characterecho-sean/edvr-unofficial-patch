@@ -156,12 +156,42 @@ Two details do most of the work:
 **Known limits, stated plainly.** The viewpoint EDVR can see is the furthest-out
 camera in each frame, because Elite renders the main view camera-relative and its
 world position never reaches a constant buffer. Which camera that is depends on
-which passes ran, and which passes ran depends on how heavy the frame was. So
-the signal is partly a measure of scene complexity, and roughly half the frames
-it withholds in a session are ordinary frames rather than bad ones. Each costs
-one repeated frame and is imperceptible alone; a run of them would not be, which
-is why there is a hard cap of two in a row and a guard that switches the whole
-thing off for the session if it ever starts firing continuously.
+which passes ran, and which passes ran depends on how heavy the frame was. So the
+signal is partly a measure of scene complexity rather than of where the view is.
+
+That is not a small caveat, and on a planet surface it was the whole story.
+Flying low over terrain the frame alternates between two shadow cascades, and the
+distance between them reads as an enormous jump — measured at about 568,000 units
+against genuine transitions of 2,300 to 24,000, thirty-eight times in eight
+minutes while the ship flew straight. All of them were withheld, about three
+frames apart, which is felt as rhythmic judder rather than as anything to do with
+flashes; then the runaway guard turned the fix off for the rest of the session
+and the real flashes came back with it.
+
+**The discriminator is repetition.** A fixed distance between two render passes
+recurs at the same size indefinitely; a real transition does not, because real
+motion varies. Of fourteen genuine transitions measured in one session the
+closest pair were 5.7% apart, while the cascade pair repeated within 1.5%. So the
+first jump of a given size is withheld — it cannot be known to repeat yet — and
+matching ones after it are recognised and left alone. `edvr.ini` documents the
+tolerance as `transition_flash_repeat_percent`, and the end-of-session totals
+report the two counts separately, so a log tells you which kind you had.
+
+This matters beyond the judder. Every withheld frame costs the detector its next
+frame or two while it rebuilds its prediction, and arrivals and wakes churn the
+pass mix for *seconds* — so a cascade flip firing shortly before a genuine bad
+frame spent the detector's shot early and the real flash was shown. Some share of
+"detected and let through" reports is likely to have been that.
+
+There is still a hard cap of two withholds in a row, and the guard that switches
+the whole thing off if it ever starts firing continuously.
+
+**Both eyes of a frame now get the same answer.** The decision is taken once, at
+whichever eye the game submits first, and the second eye follows it. Previously
+each eye read the flag independently and the flag can legitimately change while a
+frame is being drawn, so a change landing between the two submissions would have
+shown one eye the current frame and the other the previous one — a one-frame
+mismatch between the eyes, which feels like exactly the thing this fix is for.
 
 This is a workaround with a measurable failure mode, kept because the alternative
 is watching the flash. It is not a substitute for fixing the ordering.

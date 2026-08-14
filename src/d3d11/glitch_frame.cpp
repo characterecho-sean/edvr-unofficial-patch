@@ -1,5 +1,5 @@
 // GENERATED from src/d3d11/glitch_frame.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 c9d1ed0e4381538e]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 4d2f70e2c85fb4e5]
 #include "glitch_frame.h"
 
 #include <windows.h>
@@ -29,6 +29,55 @@ constexpr uint32_t kRebaseCooldown = 120;
 // the thing it was built for, and it switches itself off for the session.
 constexpr uint32_t kRunawayWindow = 2000;
 constexpr uint32_t kRunawayLimit = 40;      // 2% of the window
+
+// Distinct jump magnitudes remembered, so a magnitude that RECURS can be told
+// from one that does not.
+//
+// WHAT THIS IS FOR (EVIDENCE 6v, and the field session that made it matter)
+//
+// The signal this detector watches is the frame's furthest-from-origin camera,
+// and 6v established that which camera that is depends on which render passes
+// ran -- not on where the view is. A frame that drew shadow cascades reports a
+// camera hundreds of thousands of units from the one a lighter frame reports,
+// and the "jump" between them is the FIXED SEPARATION between two cascades. It
+// recurs to within a fraction of a percent, forever, while the player flies in
+// a straight line.
+//
+// Measured on a planet surface, one session, forty logged jumps: thirty-eight
+// between 562,949 and 571,365 units -- a spread of 1.5% -- and two genuine
+// transitions at 7,311 and 8,735. The detector withheld all forty, in bursts of
+// nine inside a second, until the runaway guard disabled it for the session.
+// That is the rhythmic judder the field report described, and the fix taking
+// itself off the field with it.
+//
+// A repeating magnitude is therefore not a transition. 6v put it exactly: an
+// exactly repeating residual is what a fixed separation produces and what
+// genuine motion does not.
+constexpr uint32_t kSeparations = 16;
+
+// A magnitude counts as the same one within this fraction of itself.
+//
+// RELATIVE, not absolute, and the difference is not cosmetic. 6v's cascade pair
+// repeated within 51 units at 146,000 -- one part in 2,900 -- which makes an
+// absolute tolerance of a few hundred look generous. The pair measured in the
+// field spans 8,416 units at 568,000, which the same tolerance would have missed
+// entirely, and the whole fix with it.
+//
+// 2% is chosen against the case that must NOT be suppressed. The one session
+// holding both kinds gives fourteen genuine transition residuals -- 2,297,
+// 2,468, 2,609, 3,010, 3,638, 4,220, 5,408, 5,882, 6,070, 6,856, 8,644, 11,195,
+// 11,906, 12,477 -- whose closest pair, 2,468 and 2,609, is 5.7% apart. Real
+// flashes vary because real motion varies; separations do not.
+constexpr float kDefaultRepeatPercent = 2.0f;
+
+// Rebase notes, which used to be one per SESSION.
+//
+// `rebaseNoted` latched on the first one, so every later change of reference
+// frame -- a different magnitude, a different cause, possibly the one somebody
+// is reporting -- was silent, and the last line in the log described an event
+// minutes earlier. A rebase already sets kRebaseCooldown, so they cannot burst;
+// the latch was suppressing nothing but information.
+constexpr uint32_t kRebaseNotes = 8;
 
 // RENDERED frames to wait for the camera buffer before concluding it is not
 // there on this build.
@@ -108,7 +157,22 @@ struct State {
     uint32_t lastEyeDraws = 0;
     uint32_t framesWithheld = 0;
     uint32_t notesLeft = 40;
-    bool     rebaseNoted = false;
+    uint32_t rebaseNotesLeft = kRebaseNotes;
+
+    // Jump magnitudes seen before. See kSeparations.
+    struct Separation {
+        float    resid = 0.0f;
+        uint32_t lastSeen = 0;
+        uint32_t hits = 0;
+        bool     noted = false;
+    };
+    Separation seps[kSeparations] = {};
+    float      repeatPercent = kDefaultRepeatPercent;
+    uint32_t   suppressed = 0;
+    // Set by the detector, read by the boundary: this frame's jump matched a
+    // magnitude already known to recur, so it is a pass flip and not a frame to
+    // withhold.
+    bool       suppressedThisFrame = false;
 
     // Runaway guard, counted over a sliding window.
     uint32_t windowFrames = 0;
@@ -147,6 +211,69 @@ struct State {
 // Reads of the game's mapped memory happen inside the caller's fault guard in
 // vscreen.cpp, so this file needs no budget of its own.
 State* g_state = nullptr;
+
+// The remembered magnitude matching `resid`, or -1.
+//
+// Stale entries do not match. A separation that has not been seen for a runaway
+// window is no longer characteristic of the scene being rendered -- the player
+// has flown somewhere else -- and holding it forever would let one afternoon's
+// cascade geometry suppress a genuine flash an hour later.
+int findSeparation(float resid) {
+    State* s = g_state;
+    if (s->repeatPercent <= 0.0f) return -1;
+    const float tol = resid * (s->repeatPercent * 0.01f);
+    for (uint32_t i = 0; i < kSeparations; ++i) {
+        if (s->seps[i].hits == 0) continue;
+        if (s->frameNo - s->seps[i].lastSeen > kRunawayWindow) continue;
+        if (fabsf(s->seps[i].resid - resid) <= tol) return static_cast<int>(i);
+    }
+    return -1;
+}
+
+// Pure. Kept separate from recording on purpose: the detector re-decides on
+// every new furthest camera within a frame, so a query that also counted a hit
+// would inflate the count by however many candidates that frame happened to
+// have. Recording happens once, at the frame boundary.
+bool residualIsKnownSeparation(float resid) { return findSeparation(resid) >= 0; }
+
+// Remember a magnitude, or refresh one already remembered.
+//
+// Refreshing matters as much as inserting. Without it a separation that is
+// suppressing correctly ages out after a runaway window and fires again, which
+// is the same judder at a longer period.
+void recordResidual(float resid) {
+    State* s = g_state;
+    if (s->repeatPercent <= 0.0f) return;
+    const int hit = findSeparation(resid);
+    if (hit >= 0) {
+        State::Separation& e = s->seps[hit];
+        ++e.hits;
+        e.lastSeen = s->frameNo;
+        // Once per magnitude, not once per suppressed frame -- there are
+        // thousands of those and one of these.
+        if (!e.noted && e.hits >= 2) {
+            e.noted = true;
+            Log::get().note(
+                "transition flash: a jump of about %.0f world units has now "
+                "happened %u times. A repeating magnitude is a fixed separation "
+                "between two of the game's render passes, not a transition -- so "
+                "frames matching it are no longer being withheld. This is the "
+                "detector recognising the scene, not a fault.",
+                static_cast<double>(e.resid), e.hits);
+        }
+        return;
+    }
+    // A free slot, or the least recently seen.
+    uint32_t victim = 0;
+    for (uint32_t i = 0; i < kSeparations; ++i) {
+        if (s->seps[i].hits == 0) { victim = i; break; }
+        if (s->seps[i].lastSeen < s->seps[victim].lastSeen) victim = i;
+    }
+    s->seps[victim] = State::Separation{};
+    s->seps[victim].resid = resid;
+    s->seps[victim].lastSeen = s->frameNo;
+    s->seps[victim].hits = 1;
+}
 
 bool finite3(const float* p) {
     for (uint32_t a = 0; a < 3; ++a) {
@@ -295,6 +422,24 @@ void installGlitchFrameFix() {
             maxConsec);
     } else {
         s.maxConsecutive = static_cast<uint32_t>(maxConsec);
+    }
+    // Clamped rather than trusted, and 0 is a real setting rather than an error:
+    // it turns the suppression off, which is the escape hatch if a build ever
+    // produces genuine flashes that coincidentally repeat. A negative or absurd
+    // value is a typo, and the direction of the mistake matters -- too large a
+    // tolerance suppresses real flashes, which is silent.
+    const float repeat = cfg.getFloat("advanced.transition_flash_repeat_percent",
+                                      kDefaultRepeatPercent);
+    if (!std::isfinite(repeat) || repeat < 0.0f || repeat > 50.0f) {
+        Log::get().note(
+            "transition_flash_repeat_percent = %.2f is outside 0 to 50, so %.1f is "
+            "being used. This is how close two jump magnitudes have to be for the "
+            "second to be treated as the same fixed separation; too large and real "
+            "flashes get suppressed, which nothing would tell you.",
+            static_cast<double>(repeat), static_cast<double>(kDefaultRepeatPercent));
+        s.repeatPercent = kDefaultRepeatPercent;
+    } else {
+        s.repeatPercent = repeat;
     }
     s.bufferBytes = static_cast<uint32_t>(cfg.getInt("advanced.camera_buffer_bytes", 5376));
     s.posOffset = static_cast<uint32_t>(cfg.getInt("advanced.camera_buffer_offset", 1100));
@@ -468,9 +613,20 @@ void glitchFrameObserve(const void* data, uint32_t bytes, const void* resource) 
     if (jumped == s->jumpedThisFrame) return;
     s->jumpedThisFrame = jumped;
 
-    if (jumped && s->cooldown == 0 && s->consecutive < s->maxConsecutive) {
+    // A magnitude we have seen recur is a pass flip, not a transition.
+    //
+    // Checked HERE as well as at the boundary because this is the gate that
+    // actually reaches the compositor -- the boundary runs at Present, after
+    // Submit has already carried the flag to the headset. A suppression that
+    // only happened at the boundary would withhold the frame and then tidy up
+    // afterwards, which is the exact mistake the comment above this function
+    // records being made once already.
+    s->suppressedThisFrame = jumped && residualIsKnownSeparation(resid);
+
+    if (jumped && !s->suppressedThisFrame && s->cooldown == 0 &&
+        s->consecutive < s->maxConsecutive) {
         markGlitchFrame();
-    } else if (!jumped) {
+    } else if (!jumped || s->suppressedThisFrame) {
         // Withdraw, do not clear: a further candidate later in the same frame
         // can re-raise this.
         unmarkGlitchFrame();
@@ -562,14 +718,26 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
         }
         s->frameFarMag2 = -1.0f;
         s->jumpedThisFrame = false;
+        s->suppressedThisFrame = false;
         return;
     }
 
-    if (s->jumpedThisFrame && rendering && s->cooldown == 0 &&
+    if (s->jumpedThisFrame && rendering && s->suppressedThisFrame) {
+        // Recorded again, not merely counted: refreshing the entry is what stops
+        // a separation that is suppressing correctly from ageing out of the
+        // memory and firing all over again.
+        ++s->suppressed;
+        recordResidual(s->lastResid);
+        unmarkGlitchFrame();
+    } else if (s->jumpedThisFrame && rendering && s->cooldown == 0 &&
         s->consecutive < s->maxConsecutive) {
         s->markedThisFrame = true;
         ++s->framesWithheld;
         ++s->windowWithheld;
+        // The first of a kind is always withheld -- it cannot be known to repeat
+        // until it has. That is the cost of this approach and it is one frame per
+        // novel magnitude, against one frame every three that it replaces.
+        recordResidual(s->lastResid);
         if (s->notesLeft > 0) {
             --s->notesLeft;
             const bool acted = glitchConsumerPresent();
@@ -623,8 +791,19 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
             // same event and withholding them buys nothing but judder.
             s->cooldown = kRebaseCooldown;
             s->camPrevValid = 0;
-            if (!s->rebaseNoted) {
-                s->rebaseNoted = true;
+            // NOT recorded as a separation, deliberately, though it is a
+            // repeating-magnitude memory sitting right here.
+            //
+            // `back` is measured against a two-step extrapolation of the
+            // pre-jump path, so for a real change of reference frame it is the
+            // size of that change -- and the one measured in the field was 4,999
+            // units, which is squarely inside the range genuine transitions live
+            // in (2,297 to 12,477 in the session that had both). Feeding it to
+            // the suppressor would teach the detector to ignore a real flash of
+            // that size later. The separations that matter here take the
+            // RETURNED branch anyway: the cascade flips back, it does not stay.
+            if (s->rebaseNotesLeft > 0) {
+                --s->rebaseNotesLeft;
                 Log::get().note(
                     "transition flash: the camera did not return after a jump (%.0f "
                     "units off the old path), so that was a change of reference frame "
@@ -665,6 +844,16 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
     // Runaway guard. A detector that withholds frames continuously is wrong
     // about the scene, and the failure mode -- permanent judder -- is worse than
     // the flash it exists to remove.
+    //
+    // DO NOT TIGHTEN THIS LIMIT to catch pass flips. It was measured catching
+    // them and that is not the good news it sounds like: 72 of 2000 on a planet
+    // surface, which means twenty-five seconds of judder first and then no flash
+    // fix at all for the rest of the session, from a scene that was rendering
+    // perfectly correctly. Station arrivals legitimately burst, so a tighter
+    // limit would take the fix off the field more often rather than less. The
+    // separation memory above is what addresses that class; this stays a
+    // backstop for a detector that is wrong in some way nobody has seen yet, and
+    // after the suppression a trip here means something again.
     if (++s->windowFrames >= kRunawayWindow) {
         if (s->windowWithheld > kRunawayLimit) {
             s->disabledForSession = true;
@@ -672,9 +861,11 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
                 "transition flash fix DISABLED for this session: %u of the last %u "
                 "frames were withheld, far more than the handful of transitions any "
                 "session contains. Whatever it is watching is not the camera, or this "
-                "scene breaks the assumption it rests on. The game renders normally "
-                "from here; please report this with the log.",
-                s->windowWithheld, s->windowFrames);
+                "scene breaks the assumption it rests on. %u frame(s) had already been "
+                "recognised as render-pass flips and left alone, so this is something "
+                "else. The game renders normally from here; please report this with "
+                "the log.",
+                s->windowWithheld, s->windowFrames, s->suppressed);
         }
         s->windowFrames = 0;
         s->windowWithheld = 0;
@@ -684,6 +875,7 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
     if (s->cooldown > 0) --s->cooldown;
     s->markedThisFrame = false;
     s->jumpedThisFrame = false;
+    s->suppressedThisFrame = false;
     s->frameFarMag2 = -1.0f;
 }
 
@@ -743,12 +935,15 @@ void shutdownGlitchFrameFix() {
             s->framesWithheld);
     } else {
         Log::get().note(
-            "transition flash fix: %u frame(s) withheld this session. Compare that "
+            "transition flash fix: %u frame(s) withheld this session, and %u more "
+            "recognised as render-pass flips and left alone. Compare the first number "
             "against how many jumps, drops and map closes happened: roughly one per "
             "transition is it working, many more means it is firing on something else. "
-            "The openvr log counts the same frames from the other side and should read "
-            "exactly twice this, once per eye.",
-            s->framesWithheld);
+            "The second number is expected to be large on a planet surface and is not "
+            "a fault -- it is frames that would have been withheld before, and felt as "
+            "judder. The openvr log counts the withheld ones from the other side and "
+            "should read exactly twice the first number, once per eye.",
+            s->framesWithheld, s->suppressed);
     }
     g_state = nullptr;
 }
