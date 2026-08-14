@@ -1,5 +1,5 @@
 // GENERATED from src/d3d11/camera_view.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 f44d2554b3a9e1fb]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 93f25cf02880460c]
 #include "camera_view.h"
 
 #include <windows.h>
@@ -25,6 +25,12 @@ constexpr size_t kPage = 4096;
 // scan absorbed 23 of them. The budget is not there to tolerate that; it is
 // there so a scan walking nonsense stops instead of faulting forever.
 constexpr uint64_t kMaxFaults = 4096;
+
+// Per-READ faults, which are a different thing from scan faults and need a much
+// smaller budget. A scan walks unknown memory once and expects a few misses; a
+// read touches one known address every frame forever, so a handful of failures
+// means that address is gone, not that we were unlucky.
+constexpr uint64_t kMaxReadFaults = 8;
 
 struct Region {
     const uint8_t* base;
@@ -53,6 +59,15 @@ struct State {
 
     int       lastView = -1;
     bool      failNoted = false;
+    // Once the record has proven to be somebody else's, STAY at "do not know".
+    //
+    // The old code only suppressed the log line: the next in-range garbage was
+    // reported as authoritative again, so a reused block flickered between
+    // "correct" and "wrong" with the wrong readings silently winning. Reuse is
+    // not a transient -- the allocation is gone -- so the answer is gone until
+    // a fresh scan, and the gate falls back to counting keypresses.
+    bool      lost = false;
+    uint64_t  readFaults = 0;
 };
 
 State g_s;
@@ -198,12 +213,30 @@ bool scanSlice() {
     return g_s.regionIndex >= g_s.regions.size();
 }
 
-// The value in a record, or 0xFFFFFFFF if it cannot be read.
+// The value in a record, or 0xFFFFFFFF if it cannot be read or is not a record
+// any more.
+//
+// THE ANCHOR IS RE-CHECKED EVERY TIME. A record is identified by its first
+// qword being the type pointer, and that is what the scan matched -- but the
+// address was then trusted for the rest of the session. Heap memory gets
+// recycled. Once that allocation belongs to something else, the "view index" is
+// whatever the new owner put there, and small integers are the most common
+// thing in a heap, so the <= 7 plausibility filter passes it happily. Re-reading
+// one qword per frame is nothing next to believing a number from a freed block.
 uint32_t recordValue(size_t i) {
     uint32_t v = 0xFFFFFFFFu;
-    guarded("camera_view/read", [&] {
+    // A budget, because a decommitted page faults on EVERY read. Without one
+    // this is ~90 access violations and ~90 formatted log lines per second for
+    // the rest of the session -- the guard absorbing them correctly and the log
+    // becoming unreadable, which is the instrument destroying the evidence.
+    if (g_s.readFaults > kMaxReadFaults) return v;
+    const bool ok = guarded("camera_view/read", [&] {
+        const uint8_t* const* anchor =
+            reinterpret_cast<const uint8_t* const*>(g_s.records[i]);
+        if (*anchor != g_s.typePtr) return;   // not a record of ours any more
         v = *reinterpret_cast<const uint32_t*>(g_s.records[i] + g_s.valueOffset);
     });
+    if (!ok) ++g_s.readFaults;
     return v;
 }
 
@@ -246,13 +279,19 @@ void finishScan() {
 void cameraViewConfigure() {
     Config& cfg = Config::get();
     g_s.track = cfg.getBool("d3d11.camera_index_track", true);
-    g_s.ordinal = static_cast<size_t>(cfg.getInt("d3d11.camera_index_ordinal", 11));
-    g_s.valueOffset =
-        static_cast<size_t>(cfg.getInt("d3d11.camera_index_value_offset", 0x10));
-    g_s.plausibleMax =
-        static_cast<uint32_t>(cfg.getInt("d3d11.camera_index_plausible_max", 7));
-    g_s.bytesPerFrame =
-        static_cast<size_t>(cfg.getInt("d3d11.camera_index_mb_per_frame", 64)) << 20;
+    g_s.ordinal = static_cast<size_t>(
+        cfg.getIntInRange("d3d11.camera_index_ordinal", 11, 0, 4095));
+    g_s.valueOffset = static_cast<size_t>(
+        cfg.getIntInRange("d3d11.camera_index_value_offset", 0x10, 0, 0x1000));
+    // Bounded: -1 wrapped to 0xFFFFFFFF and disabled the only filter standing
+    // between heap garbage and a view index the gate believes.
+    g_s.plausibleMax = static_cast<uint32_t>(
+        cfg.getIntInRange("d3d11.camera_index_plausible_max", 7, 0, 1023));
+    // Bounded: 0 meant the walk advanced nothing and never finished, silently,
+    // and a negative scanned the whole address space in a single frame -- the
+    // multi-second stall the slicing exists to prevent.
+    g_s.bytesPerFrame = static_cast<size_t>(
+        cfg.getIntInRange("d3d11.camera_index_mb_per_frame", 64, 1, 256)) << 20;
     // Hex, because that is how an offset into an executable is written
     // everywhere else it appears -- in the log, in EVIDENCE, in a debugger.
     g_s.typeOffset = static_cast<uintptr_t>(strtoull(
@@ -280,7 +319,7 @@ void cameraViewTick() {
 }
 
 int cameraViewCurrent() {
-    if (!g_s.track || !g_s.scanned) return -1;
+    if (!g_s.track || !g_s.scanned || g_s.lost) return -1;
     if (g_s.ordinal >= g_s.records.size()) return -1;
     const uint32_t v = recordValue(g_s.ordinal);
     // Outside the range means the record has been reused and the answer would
@@ -294,9 +333,13 @@ int cameraViewCurrent() {
                             out, g_s.ordinal);
         } else if (!g_s.failNoted) {
             g_s.failNoted = true;
-            Log::get().note("camera view: ordinal %zu now reads outside the "
-                            "plausible range, so the record has been reused. "
-                            "Counting keypresses from here.", g_s.ordinal);
+            g_s.lost = true;
+            Log::get().note("camera view: ordinal %zu no longer reads as a camera "
+                            "record, so that heap block has been reused. LATCHED "
+                            "to \"do not know\" -- the allocation is gone, and a "
+                            "later in-range value from whatever owns it now would "
+                            "be garbage that happens to look plausible. Counting "
+                            "keypresses from here.", g_s.ordinal);
         }
     }
     return out;

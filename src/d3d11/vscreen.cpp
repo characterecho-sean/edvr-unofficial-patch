@@ -336,7 +336,26 @@ bool beginPanelOverride(ID3D11DeviceContext* self) {
     // install -- never withheld a single frame. It reported itself as armed
     // throughout. Two features that have nothing to do with each other, and one
     // silently switched the other off.
-    if (!s->distanceEnabled && !s->countForFlashFix) return false;
+    // Three subscribers now, and this early return has learned each one late.
+    //
+    // It predates both the flash fix and the head-offset gate, and each time it
+    // was the SAME bug: a feature whose only source of eye-draw and panel counts
+    // is this function, silently starved because two unrelated settings were
+    // off. The flash fix added countForFlashFix; the gate is the third, and it
+    // starves in the configuration a user reaches by turning the panel distance
+    // fix off and leaving the flash fix off -- the gate then sees zeros forever,
+    // never arms, and nothing anywhere says why.
+    //
+    // The install-time gate already asked headOffsetGateWantsPanel(); this
+    // per-draw one did not, so the hooks were installed and then fed nothing.
+    //
+    // The real fix is structural: counters this load-bearing belong in frame
+    // state that features subscribe to, not inside one fix's fast path, so the
+    // next feature cannot make this mistake a fourth time.
+    if (!s->distanceEnabled && !s->countForFlashFix &&
+        !headOffsetGateWantsPanel()) {
+        return false;
+    }
     const uint32_t rtvGen = bindingGeneration(BindSlot::Rtv0);
     if (s->rtv0EyeGen != rtvGen) {
         s->rtv0Eye = targetIsEyeSized(bindingGet(BindSlot::Rtv0));

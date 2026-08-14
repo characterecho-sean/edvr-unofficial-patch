@@ -1,5 +1,5 @@
 // GENERATED from src/common/config.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 6834199bcea745e2]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 1433c781c9f7c9a1]
 #include "config.h"
 
 #include <windows.h>
@@ -242,7 +242,50 @@ int Config::getInt(const char* key, int def) const {
 float Config::getFloat(const char* key, float def) const {
     const std::string v = getString(key, "");
     if (v.empty()) return def;
-    return strtof(v.c_str(), nullptr);
+    // A value that does not parse reads 0.0 silently, and 0.0 is a legitimate
+    // setting for most of these -- so "I typed 2,75 in a comma locale" and "I
+    // meant 0" are indistinguishable in the log and in the headset. strtof's
+    // endptr tells them apart, so it is used.
+    const char* s = v.c_str();
+    char* end = nullptr;
+    const float out = strtof(s, &end);
+    if (end == s) {
+        Log::get().note("%s = \"%s\" is not a number; using %g. If you meant a "
+                        "decimal, use a point rather than a comma.", key, s, def);
+        return def;
+    }
+    return out;
+}
+
+// Bounded integers, because every unbounded one has cost something.
+//
+// getInt returns whatever strtol produces and the caller casts it. Cast to
+// uint32_t, -1 becomes 4294967295: an intent grace period of thirteen hours, an
+// entry window that never closes, a plausibility filter that admits every
+// value. Four separate settings reached that state and none of them said a
+// word -- the failure is always "the feature behaves as though the setting were
+// absent", which is the hardest kind to attribute.
+//
+// Clamping rather than refusing, and SAYING SO, for the same reason the head
+// offset clamps: a refused value silently becomes a default that is nothing
+// like what was asked for, where a clamped one is the nearest thing that works.
+int Config::getIntInRange(const char* key, int def, int lo, int hi) const {
+    const std::string v = getString(key, "");
+    if (v.empty()) return def;
+    const char* s = v.c_str();
+    char* end = nullptr;
+    const long raw = strtol(s, &end, 0);
+    if (end == s) {
+        Log::get().note("%s = \"%s\" is not a number; using %d.", key, s, def);
+        return def;
+    }
+    if (raw < lo || raw > hi) {
+        const long c = raw < lo ? lo : hi;
+        Log::get().note("%s = %ld is outside %d..%d, so %ld is being used.",
+                        key, raw, lo, hi, c);
+        return static_cast<int>(c);
+    }
+    return static_cast<int>(raw);
 }
 
 }  // namespace edvr

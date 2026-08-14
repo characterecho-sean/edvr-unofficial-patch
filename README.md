@@ -199,13 +199,19 @@ It loads alongside the game as a `d3d11.dll` proxy, forwarding every call to
 Windows' real `d3d11.dll`. If you install the transition flash fix as well, that
 adds an `openvr_api.dll` proxy which forwards every call to the game's own copy.
 
-**All but one of the fixes never touch the game.** They change how frames are
+**Most of the fixes never touch the game.** They change how frames are
 drawn from outside it: four small copies per frame so both eyes share an exposure
 value, one substituted argument to a screen-clearing call, one substituted copy
 of the panel's position for two draws if you change the distance, and — for the
 transition flash — reading a constant buffer the game has already filled and, on
 the rare frame that was drawn from the wrong place, not forwarding one call to
-SteamVR. With the resolution fix off, nothing in the game's memory is written.
+SteamVR.
+
+**Two of them do more than that, and both are described in full below:** the
+resolution fix rewrites twelve numbers in the game's code, and the on-foot stereo
+fix reads one number out of the game's memory and changes the headset position
+the game is told about. Neither is on by default in a way that does anything
+until you configure it.
 
 **The resolution fix is different, and it is off by default.** To raise the
 on-foot screen's resolution it rewrites twelve numbers in the game's code, in
@@ -238,6 +244,64 @@ Its safeguards, because they are the reason to trust it:
   the game was really forcing rather than one this patch assumed.
 - **All or nothing.** If any single write fails, every earlier one is undone
   before it gives up. A half-applied resolution looks worse than none.
+
+**The on-foot stereo fix is the other one that does more, and it does nothing
+until you set it up.** On foot, Elite renders first person to a flat panel — one
+image, shown to both eyes, which is why walking around does not feel like VR.
+The external camera does not: it renders the world properly in stereo. This fix
+moves your viewpoint to where your commander's head is while you are in that
+camera, so on foot has real stereoscopic depth.
+
+It cannot make first person stereo, and does not try. The flat panel is flat.
+Only the external camera renders in stereo, so that is the only place this
+applies.
+
+Two things it does that the fixes above do not:
+
+- **It changes the headset position the game is told about.** Every frame, the
+  game asks SteamVR where your head is. EDVR adds your configured offset to that
+  answer before the game reads it, so the game moves its own camera — as far as
+  Elite knows, you leaned. That is what makes it work: culling and object
+  placement follow, which they do not if you merely move the rendered image.
+  It is a client-side view change. It does not touch your ship, your commander,
+  the server, or anything another player sees.
+- **It reads one number out of the game's memory:** which external camera view
+  is currently showing. That is camera state, not gameplay state. To find where
+  that number lives it searches the game's memory once, on the first frame you
+  are on foot, for a marker that identifies the camera settings. It reads only
+  to find that marker, keeps nothing except the one small view index, and skips
+  the game's code entirely. It never writes.
+
+Its safeguards, because they are the reason to trust it:
+
+- **It does nothing at all until you bind your own camera key.** With
+  `hotkey.external_camera` unset — which is how it ships — the fix never
+  activates, whatever else is configured. It refuses to guess: on screen,
+  entering the external camera looks the same as boarding your ship and the same
+  as leaving HMD Cinema Mode, and guessing wrong would move your viewpoint
+  inside your cockpit.
+- **EDVR only watches that key. It never presses it, sends it, or interferes
+  with the game receiving it.**
+- **Your viewpoint moves at most 10 metres per axis.** Larger values are clamped
+  to that and the log says so. It clamps rather than refusing, because refusing
+  would snap the view several metres in a single frame — which is unpleasant
+  when you are wearing the thing.
+- **It gives up rather than guessing.** If the memory search finds nothing, or
+  the value stops looking like a camera view, it says "do not know" and falls
+  back to counting your camera-key presses. It never substitutes a number that
+  might be wrong.
+- **It expires.** The two halves of EDVR agree once a frame about which mode you
+  are in. If the half that decides ever stops running, the half that moves your
+  view stops trusting it within about a second and puts your viewpoint back.
+- **The marker it looks for will move when the game updates.** When that happens
+  it finds nothing, says so in the log, and falls back to key counting — the fix
+  degrades, it does not misbehave. `camera_index_type_offset` in `edvr.ini` can
+  be corrected by hand if you know the new value, without waiting for a build.
+
+**Comfort note.** These settings move the viewpoint of a headset you are
+wearing. Change them a little at a time, and expect the transition into and out
+of the camera to be a cut rather than a glide — the game's own camera change is
+already a cut, so the fix does not add one that was not there.
 
 For every fix here: nothing touches the network, your account, or anything the
 server sees. Nothing reads or changes gameplay state — your position, ship,

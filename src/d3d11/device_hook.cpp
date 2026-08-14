@@ -152,6 +152,11 @@ State& ensureState() {
         g_state->dumpKey.setBinding(Config::get().getString("hotkey.dump_camera", "PAUSE").c_str());
         g_state->externalCamKey.setBinding(Config::get().getString("hotkey.external_camera", "").c_str());
         g_state->externalCamNextKey.setBinding(Config::get().getString("hotkey.external_camera_next", "").c_str());
+        // A CONFIGURED key, not a pressed one. The gate refuses to arm without
+        // this, so a fresh install with nothing bound is genuinely inert rather
+        // than falling back to a heuristic that cannot tell the external camera
+        // from the inside of your own ship.
+        headOffsetGateSetKeyBound(g_state->externalCamKey.key() != 0);
         cameraViewConfigure();
     }
     return *g_state;

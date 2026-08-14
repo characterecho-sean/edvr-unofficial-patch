@@ -1,5 +1,5 @@
 #include "compositor_hook.h"
-#include "pose_offset.h"
+#include "head_offset.h"
 
 #include <windows.h>
 
@@ -77,31 +77,6 @@ struct State {
 
     Sentinel* sentinel = nullptr;
 
-    // The head-pose offset: where the player's viewpoint is moved to, in the
-    // tracking frame, and whether it is being moved at all.
-    //
-    // Elite renders from the poses WaitGetPoses returns (EVIDENCE 6ac.1), so
-    // translating the HMD pose translates the viewpoint AND the game's own
-    // culling and object placement with it -- as far as the game knows, the
-    // player leaned. That is what makes this work where editing a camera
-    // constant buffer did not: those moved the rendered view and left the
-    // game's idea of the camera behind it.
-    float    headOffset[3] = {};
-    float    headYawSin = 0.0f, headYawCos = 1.0f;
-    float    headYawDeg = 0.0f;
-    bool     headOffsetGamePoses = true;
-    bool     headOffsetExternalOnly = true;
-    bool     headOffsetNoted = false;
-    bool     headOffsetGateNoted = false;
-    bool     headOffsetStaleNoted = false;
-    // Poses actually offset. A counter rather than a flag because "the offset
-    // is configured" and "the offset reached a pose" are different claims, and
-    // only the second one is evidence.
-    uint32_t headOffsetApplied = 0;
-    // ~1 second at 90 Hz. Both halves run once per rendered frame, so this is
-    // slack for jitter rather than a timeout anybody should need to tune: in
-    // normal operation the gate's stamp moves every single frame.
-    uint32_t headOffsetMaxStale = 90;
     uint32_t configPollCounter = 0;
 
     bool     inert = false;        // hook installed but doing nothing
@@ -222,195 +197,9 @@ vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
     return s->realSubmit(self, eye, texture, bounds, flags);
 }
 
-// Read the offset, CLAMPING anything that is not a sane number of metres.
-//
-// Ten metres, not two. Two was set from "the on-foot target is under a metre",
-// which was wrong about the job: the external camera starts a few metres behind
-// the commander, so reaching the head means travelling that whole distance
-// first. The user hit the limit at -2.3 while positioning it, which is well
-// inside normal use. A limit that a correct value trips is not a safety limit.
-//
-// CLAMPED, not zeroed, and the difference matters more than the number.
-// Refusing to 0 threw away the whole offset, so a value one notch too far
-// snapped the viewpoint several metres in one frame -- a large involuntary jump
-// for someone wearing the headset, which is exactly what a limit protecting
-// them should not cause. It also read as a bug rather than as a limit: the user
-// reported it as "it jumped back", because from inside a headset there is no
-// log to see. Clamping stops the movement at the boundary, which is
-// self-evident without reading anything.
-//
-// A limit is still worth having. This value is added to a head pose, and a
-// fat-fingered 100 puts the viewpoint far enough away that the world is a speck
-// -- disorienting, and indistinguishable from the fix being broken.
-// The axes are NAMED, and forward is positive, which means it is stored
-// negated.
-//
-// They were head_offset_x/y/z, handed to the pose untouched. That is the OpenVR
-// tracking frame -- +x right, +y up, -z forward -- and it is right, but nobody
-// placing a camera thinks in it. The tuned value for the on-foot viewpoint was
-// z = -2.6 for a position 2.6 m FORWARD of where the camera starts, so the one
-// axis anybody actually reaches for was the one whose sign read backwards.
-//
-//     head_offset_right      +x, unchanged
-//     head_offset_up         +y, unchanged
-//     head_offset_forward    stored as -z
-//
-// Everything downstream still sees the OpenVR frame. The flip lives here, at
-// the one place the number crosses from the file into the program, so
-// applyPoseOffset and its test are untouched by it and there is exactly one
-// line where the sign can be wrong.
-//
-// The old names are NOT accepted as a fallback. The same number means opposite
-// directions under head_offset_z and head_offset_forward, so honouring a stale
-// key would move somebody's viewpoint 5 m the wrong way without saying so.
-// They are detected and reported instead, which is the one case where silence
-// is worse than an error.
-// One axis: NaN out, clamp, and report in the value the player typed.
-//
-// CLAMPED, not zeroed, and the difference matters more than the number.
-// Refusing to 0 threw away the whole offset, so a value one notch too far
-// snapped the viewpoint several metres in one frame -- a large involuntary jump
-// for someone wearing the headset, which is exactly what a limit protecting
-// them should not cause.
-float readOffsetAxis(Config& cfg, const char* key, float v) {
-    constexpr float kMax = 10.0f;
-    // NaN first, and not by comparison: NaN fails every ordered test, so a
-    // clamp written as min/max would pass it straight through to the pose. A
-    // NaN in a transform propagates to every vertex and the frame goes blank,
-    // with nothing in the log to say why.
-    if (v != v) {
-        Log::get().note("%s is not a number; using 0.", key);
-        return 0.0f;
-    }
-    if (v > kMax || v < -kMax) {
-        const float c = v > kMax ? kMax : -kMax;
-        Log::get().note("%s = %.3f is beyond +/-%.1f m, so %.1f is being used. "
-                        "This value moves the viewpoint of a headset somebody is "
-                        "wearing. If you need more range than this, raise the "
-                        "limit in the source rather than working around it.",
-                        key, v, kMax, c);
-        return c;
-    }
-    return v;
-}
 
-// Warn once about a name that no longer does anything.
-// The section is prepended HERE, so no string literal anywhere spells out
-// "openvr.head_offset_x".
-//
-// That is not cosmetic. tools/check_config_contract.py treats a section.key
-// literal as either a setting being read or a setting being named, and demands
-// the two agree with edvr.ini -- which is the rule that stops a documented
-// setting and a real one drifting apart. These are neither: they are names
-// being REFUSED, and documenting them as settings to satisfy a checker would
-// tell users they can set something that does nothing.
-void notePlacementRetired(Config& cfg, const char* bare, const char* now,
-                          bool* noted, const char* extra) {
-    if (*noted) return;
-    const std::string key = std::string("openvr.") + bare;
-    if (cfg.getString(key.c_str(), "").empty()) return;
-    *noted = true;
-    Log::get().note("[openvr] %s is a retired name and is being IGNORED. Use %s "
-                    "instead%s.", bare, now, extra);
-}
 
-void readHeadOffset(State* s) {
-    Config& cfg = Config::get();
-    // Read one axis at a time, with each key spelled out where it is used.
-    //
-    // A {key, axis, sign} table was tidier and hid every key name from
-    // check_config_contract, which requires the literal to be the argument of
-    // the get. That check is what stops a documented setting and a read setting
-    // drifting apart -- the failure where a user sets something real-looking
-    // and nothing happens -- and it is worth more than three saved lines.
-    //
-    // FORWARD IS STORED NEGATED, and this is the only place that happens.
-    // +x right, +y up and -z forward is the OpenVR tracking frame, and it is
-    // right, but nobody placing a camera thinks in it. The tuned value was
-    // z = -2.75 for a viewpoint 2.75 m in FRONT of where the camera starts, so
-    // the one axis anybody reaches for was the one whose sign read backwards.
-    // Everything downstream still sees the OpenVR frame, so applyPoseOffset and
-    // its test are untouched by this and there is exactly one line where the
-    // sign can be wrong.
-    s->headOffset[0] = readOffsetAxis(
-        cfg, "openvr.head_offset_right",
-        cfg.getFloat("openvr.head_offset_right", 0.0f));
-    s->headOffset[1] = readOffsetAxis(
-        cfg, "openvr.head_offset_up",
-        cfg.getFloat("openvr.head_offset_up", 0.0f));
-    s->headOffset[2] = -readOffsetAxis(
-        cfg, "openvr.head_offset_forward",
-        cfg.getFloat("openvr.head_offset_forward", 0.0f));
 
-    // The old names are NOT accepted as a fallback. The same number means
-    // opposite directions under head_offset_z and head_offset_forward, so
-    // honouring a stale key would move somebody's viewpoint 5.5 m the wrong way
-    // without saying so. They are reported instead, which is the one case where
-    // silence is worse than an error.
-    static bool retiredX = false, retiredY = false, retiredZ = false;
-    notePlacementRetired(cfg, "head_offset_x", "head_offset_right",
-                         &retiredX, "");
-    notePlacementRetired(cfg, "head_offset_y", "head_offset_up",
-                         &retiredY, "");
-    notePlacementRetired(cfg, "head_offset_z", "head_offset_forward",
-                         &retiredZ,
-                         ", and flip its sign -- head_offset_z = -2.75 is "
-                         "head_offset_forward = 2.75");
-    // Wrapped rather than clamped. A yaw is periodic, so 190 and -170 are the
-    // same heading and neither is a mistake worth refusing -- unlike a
-    // translation, where a big number really does put the viewpoint somewhere
-    // useless. fmodf keeps it in (-360, 360), which is all the trig needs.
-    const float rawYaw = cfg.getFloat("openvr.head_yaw_degrees", 0.0f);
-    s->headYawDeg = (rawYaw == rawYaw) ? fmodf(rawYaw, 360.0f) : 0.0f;
-    const float rad = s->headYawDeg * 3.14159265358979f / 180.0f;
-    s->headYawSin = sinf(rad);
-    s->headYawCos = cosf(rad);
-    // sinf(pi) is about 1.2e-16 rather than 0, so a half turn never compares
-    // exactly equal to "no rotation". The test in applyHeadOffset is written to
-    // notice cos too, which at 180 degrees is -1 and unmistakable.
-
-    s->headOffsetGamePoses = cfg.getBool("openvr.head_offset_game_poses", true);
-    // Default ON. An ungated offset moves the cockpit view too, which was
-    // right for the one-key diagnostic and is wrong for a feature.
-    s->headOffsetExternalOnly =
-        cfg.getBool("openvr.head_offset_external_only", true);
-    // Clamped low, not just defaulted. Zero would disarm the offset on any
-    // frame the two halves did not line up exactly, and a huge value turns the
-    // guard off without saying so -- which is the failure it exists to prevent.
-    const int stale = cfg.getInt("openvr.head_offset_max_stale_frames", 90);
-    s->headOffsetMaxStale = static_cast<uint32_t>(stale < 2 ? 2 : stale);
-    s->headOffsetNoted = false;   // say it again after a change
-    s->headOffsetStaleNoted = false;
-}
-
-// Translate the HMD pose the runtime just produced, in the tracking frame.
-//
-// mDeviceToAbsoluteTracking is a 3x4 row-major rigid transform: the left 3x3 is
-// the rotation and column 3 is the position, so translating in the TRACKING
-// frame is an add to m[0..2][3] and touches the rotation not at all. Adding it
-// to the rotated axes instead would express the offset in the HEAD's frame,
-// which is the form 6x.1 refuted.
-//
-// An invalid pose is left alone. The runtime marks a pose invalid when it has
-// nothing to report -- tracking lost, device asleep -- and the matrix behind it
-// is not required to be meaningful. Offsetting a matrix that is not a pose
-// produces a pose, which is worse than the flag the game already knows how to
-// handle.
-void applyHeadOffset(State* s, vr::TrackedDevicePose_t* poses, uint32_t count) {
-    if (!poses || count <= vr::k_unTrackedDeviceIndex_Hmd) return;
-    vr::TrackedDevicePose_t& hmd = poses[vr::k_unTrackedDeviceIndex_Hmd];
-    if (!hmd.bPoseIsValid) return;
-    // Elite's external camera is a self-facing portrait view: it looks back at
-    // the commander. Placed at the head that has the player facing backwards,
-    // which inverts the whole point of being there, so the yaw turns them round
-    // without disturbing the placement.
-    //
-    // The arithmetic lives in pose_offset.h so it can be tested without a
-    // headset. See tools/pose_test.
-    applyPoseOffset(hmd.mDeviceToAbsoluteTracking.m, s->headOffset,
-                    s->headYawSin, s->headYawCos);
-    ++s->headOffsetApplied;
-}
 
 vr::EVRCompositorError hookedWaitGetPoses(void* self,
                                           vr::TrackedDevicePose_t* renderPoses,
@@ -446,77 +235,14 @@ vr::EVRCompositorError hookedWaitGetPoses(void* self,
     // Outside the telemetry guard below on purpose. That guard has a fault
     // budget and disables itself after five faults, which is right for logging
     // -- losing a log line is nothing -- but wrong for something that changes
-    // what the player sees: a viewpoint that silently reverts partway through a
-    // session is worse than one that never moved, because the log would still
-    // say it was on. This does no allocation, no locking and no calls; it adds
-    // three floats to a struct the runtime just filled.
-    // Gated on the mode d3d11.dll reports, unless explicitly told not to be.
+    // what the player sees.
     //
-    // Read every frame rather than cached: the whole point is that it changes
-    // when the player enters and leaves the external camera, and it is one
-    // interlocked read of a mapped LONG.
-    //
-    // The transition itself is not smoothed. Entering the external camera is
-    // already a viewpoint cut -- the game moves the camera metres in one frame
-    // -- so the offset arriving on the same frame adds no discontinuity that
-    // was not there. Fading it in would spread OUR change across frames the
-    // game is also moving, which is harder to reason about, not easier.
-    // LIVE, not merely last-written. d3d11's gate runs inside a fault-budgeted
-    // guard that stops running permanently after a few faults, and it would
-    // then freeze at its last answer -- a frozen "yes" leaving the offset
-    // applied in the cockpit for the rest of the session while both logs still
-    // say it is gated. The reader stops trusting a flag nobody is refreshing.
-    const bool gateOn = !s->headOffsetExternalOnly ||
-                        edvr::externalCameraOnFootLive(s->headOffsetMaxStale);
-    // The stuck case, named in the log rather than left as a silent recovery.
-    // The raw flag still reading "on foot in the external camera" while the
-    // live one has given up means the value is real but nobody is refreshing
-    // it -- so it is the gate that died, not the player who moved. Without this
-    // line the symptom is "the offset stopped working" and the cause is
-    // invisible.
-    if (s->headOffsetExternalOnly && !gateOn && !s->headOffsetStaleNoted &&
-        edvr::externalCameraOnFoot()) {
-        s->headOffsetStaleNoted = true;
-        Log::get().note(
-            "head offset gate STALE: d3d11 still has the flag set to on-foot "
-            "external camera, but has not refreshed it for %u frames, so it is "
-            "being treated as off. The gate has stopped running -- its fault "
-            "budget on the Present path, or a lost hook after the device or "
-            "swapchain was recreated. The offset is off from here rather than "
-            "left applied in whatever mode you are actually in.",
-            s->headOffsetMaxStale);
-    }
-    // Yaw counts as "something to do". Without it here, a config that turns the
-    // view without moving it -- which is a perfectly reasonable thing to want --
-    // would do nothing at all.
-    const bool anyChange = s->headOffset[0] != 0.0f || s->headOffset[1] != 0.0f ||
-                           s->headOffset[2] != 0.0f || s->headYawDeg != 0.0f;
-    if (gateOn && anyChange) {
-        applyHeadOffset(s, renderPoses, renderCount);
-        // gamePoses as well, by default. Which array Elite renders from is not
-        // established -- the whole point of this test -- and offsetting only
-        // one would let a negative result mean either "the game ignores our
-        // poses" or "we picked the wrong array", which are very different
-        // answers. Separable by config once the question is settled.
-        if (s->headOffsetGamePoses) applyHeadOffset(s, gamePoses, gameCount);
-        if (!s->headOffsetNoted) {
-            s->headOffsetNoted = true;
-            Log::get().note(
-                "HEAD OFFSET ACTIVE: (%+.3f %+.3f %+.3f) m and %+.1f degrees of yaw, "
-                "in the tracking frame, applied to renderPoses%s. Gated to the "
-                "on-foot external camera: %s.",
-                s->headOffset[0], s->headOffset[1], s->headOffset[2], s->headYawDeg,
-                s->headOffsetGamePoses ? " and gamePoses" : " only",
-                s->headOffsetExternalOnly ? "yes"
-                                          : "NO, it applies in every mode including "
-                                            "the cockpit");
-        }
-        if (!s->headOffsetGateNoted && s->headOffsetExternalOnly) {
-            s->headOffsetGateNoted = true;
-            Log::get().note("head offset gate: applying, because d3d11 reports "
-                            "on-foot external camera.");
-        }
-    }
+    // The feature lives in head_offset.cpp, which is SHARED. It was written
+    // inline here, in a file that is FORKED, and this copy lost the
+    // install-time config read in the hand-copy -- so this build ran every
+    // session with the offsets still zero and did nothing at all. That is not
+    // a mistake sync_common can see in a forked file. It can see it there.
+    headOffsetApply(result, renderPoses, renderCount, gamePoses, gameCount);
 
     // The config reload poll, BACK, and the reason it was removed is the
     // reason it returns.
@@ -533,7 +259,7 @@ vr::EVRCompositorError hookedWaitGetPoses(void* self,
         s->configPollCounter = 0;
         if (Config::get().reloadIfChanged()) {
             Log::get().note("config reloaded");
-            readHeadOffset(s);
+            headOffsetConfigure();
         }
     }
 
@@ -554,9 +280,31 @@ void* interceptInterface(void* iface, const char* interfaceVersion) {
     if (strncmp(interfaceVersion, "IVRCompositor_", 14) != 0) return iface;
     if (s.compositorHook.attached()) return iface;  // already hooked
 
-    if (!cfg.getBool("fix.transition_flash", true)) {
-        Log::get().note("transition flash fix off; compositor passed through unhooked");
+    // TWO features live behind this hook now, and it must install if EITHER
+    // wants it.
+    //
+    // It installed only for the transition-flash fix, because that was the only
+    // thing here when it was written. The head offset then moved in -- and
+    // fix.transition_flash = 0 silently took the head offset down with it, in a
+    // build where d3d11.dll went on logging "head offset ON" every time the
+    // player entered the camera. Two halves disagreeing about whether a feature
+    // is running, with only one of them able to say so.
+    //
+    // The gate is what decides whether the offset can ever be wanted; the
+    // offsets themselves are read after install, so the honest test at this
+    // point is "is the feature switched on at all".
+    const bool wantFlash = cfg.getBool("fix.transition_flash", true);
+    const bool wantOffset = cfg.getBool("fix.head_offset_gate", true);
+    if (!wantFlash && !wantOffset) {
+        Log::get().note("compositor passed through unhooked: fix.transition_flash "
+                        "and fix.head_offset_gate are both off, and those are the "
+                        "only two features that need this hook.");
         return iface;
+    }
+    if (!wantFlash) {
+        Log::get().note("transition flash fix off, but the compositor hook is "
+                        "installed anyway for the head offset -- no eye submits "
+                        "will be withheld.");
     }
 
     size_t submitSlot = 0, posesSlot = 0;
@@ -634,7 +382,10 @@ void* interceptInterface(void* iface, const char* interfaceVersion) {
             "ended early -- SteamVR restarting, or quitting from the menu -- looks the "
             "same from here. Skipping the hook for THIS session only; it will try again "
             "next launch. If it keeps happening, the hook really is crashing -- report the "
-            "log. To force it on anyway, set ignore_sentinel = 1 under [advanced].");
+            "log. To force it on anyway, set ignore_sentinel = 1 under [advanced].\n"
+            "  This takes down EVERY feature that needs this hook: the transition "
+            "flash fix AND the on-foot head offset. d3d11.dll cannot tell, so it "
+            "will go on logging \"head offset ON\" while nothing moves.");
         return iface;
     }
 
@@ -678,6 +429,21 @@ void* interceptInterface(void* iface, const char* interfaceVersion) {
     breadcrumb("vr: compositor hook committed");
     Log::get().note("compositor hook installed on %s (Submit slot %zu, WaitGetPoses "
                     "slot %zu)", interfaceVersion, submitSlot, posesSlot);
+
+    // READ THE CONFIG NOW, not only when the ini changes.
+    //
+    // This line was missing, and its absence is what a whole shipped release of
+    // the head offset amounted to: the values kept their zero initialisers for
+    // the entire session, so the feature was configured, logged as gated, and
+    // did nothing -- unless the player happened to save edvr.ini mid-flight,
+    // which then snap-loaded the full offset into a live scene.
+    //
+    // The same class cost a flight on the d3d11 side and produced
+    // tools/check_config_paths.py. Here the structural answer is that
+    // head_offset.cpp is SHARED, so there is one reader and both builds call it
+    // from install and from reload.
+    headOffsetConfigure();
+
     return iface;
 }
 

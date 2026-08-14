@@ -36,8 +36,14 @@ INSTALL
 
        openvr_api_orig.dll
 
-   Do not delete it. EDVR needs it -- it does the actual work, and EDVR only
-   watches one call.
+   Do not delete it. EDVR needs it -- it does the actual work.
+
+   EDVR watches two calls in it. One is the frame submission, where it can
+   withhold a single bad frame from the headset (the transition flash fix).
+   The other is the call that reports where your head is: with the on-foot
+   stereo fix configured, EDVR adds your offset to that answer while you are
+   in the external camera, so the game moves its own camera. That fix does
+   nothing until you bind your own external-camera key in edvr.ini.
 
 4. Copy the openvr_api.dll from THIS folder into that folder.
 

@@ -34,7 +34,10 @@ SRC = os.path.join(ROOT, 'src')
 INI = os.path.join(ROOT, 'edvr.ini')
 
 # cfg.getBool("fix.black_void", true) and friends, plus the early reader.
-READ_RE = re.compile(r'get(?:Bool|Int|Float|String)\s*\(\s*"([^"]+)"')
+# getIntInRange and friends count as reads. A validated accessor is the
+# preferred one, so a checker that only knew the bare gets would push new
+# code back towards the unvalidated form to stay visible.
+READ_RE = re.compile(r'get(?:Bool|Int|Float|String)[A-Za-z]*\s*\(\s*"([^"]+)"')
 EARLY_RE = re.compile(r'readConfigStringEarly\s*\([^,]+,[^,]+,\s*"([^"]+)"', re.S)
 
 # A section we know about followed by a dotted name, anywhere in a string. Used

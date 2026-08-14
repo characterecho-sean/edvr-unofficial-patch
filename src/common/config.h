@@ -1,5 +1,5 @@
 // GENERATED from src/common/config.h in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 995ee70d2546003f]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 a795fc3f415a8148]
 // Hot-reloadable key=value config.
 //
 // The user is wearing a headset and cannot see a text editor, so every tunable
@@ -27,6 +27,10 @@ public:
     bool        getBool(const char* key, bool def) const;
     int         getInt(const char* key, int def) const;
     float       getFloat(const char* key, float def) const;
+    // getInt, with bounds. Prefer this for anything a wrong value can make
+    // behave as though the setting were absent -- which is most of them, and
+    // is the failure that is hardest to attribute from a log.
+    int         getIntInRange(const char* key, int def, int lo, int hi) const;
     std::string getString(const char* key, const char* def) const;
 
     const std::wstring& path() const { return m_path; }

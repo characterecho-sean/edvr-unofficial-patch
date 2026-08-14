@@ -1,5 +1,5 @@
 // GENERATED from src/d3d11/head_offset_gate.h in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 7bf51c22dad0bdc3]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 f115b9f54880446f]
 // When to move the head pose: on foot, in the external camera, and nowhere
 // else.
 //
@@ -53,6 +53,16 @@ void headOffsetGateConfigure();
 // supply: boarding a ship from the external camera produces no panel frame
 // ever, so without this the latch stayed on in the cockpit.
 void headOffsetGateKeyPressed();
+
+// Tell the gate whether hotkey.external_camera is CONFIGURED, which is not the
+// same as having been pressed.
+//
+// It used to infer "the player has a key" from the first press, so a correctly
+// set-up user ran the weaker no-key path for the whole first part of every
+// session -- and that path is the one that cannot tell entering the camera from
+// boarding a ship. The window was open exactly until the moment it stopped
+// being needed.
+void headOffsetGateSetKeyBound(bool bound);
 
 // The player pressed hotkey.external_camera_next, so the camera has moved to
 // the next view in its cycle.

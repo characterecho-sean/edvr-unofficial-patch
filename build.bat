@@ -180,7 +180,7 @@ cl.exe %CFLAGS% /Fo"%OBJ%\openvr"\ ^
     "%ROOT%\src\common\guard.cpp" "%ROOT%\src\common\vtable_hook.cpp" ^
     "%ROOT%\src\common\hotkey.cpp" "%ROOT%\src\common\proxy.cpp" ^
     "%ROOT%\src\common\frame_flag.cpp" ^
-    "%ROOT%\src\openvr\openvr_proxy.cpp" "%ROOT%\src\openvr\compositor_hook.cpp"
+    "%ROOT%\src\openvr\openvr_proxy.cpp" "%ROOT%\src\openvr\compositor_hook.cpp" "%ROOT%\src\openvr\head_offset.cpp"
 if errorlevel 1 ( echo [edvr] ERROR: openvr compile failed & exit /b 1 )
 
 link.exe /nologo /DLL /MACHINE:X64 /INCREMENTAL:NO ^
@@ -275,6 +275,11 @@ REM Three settings were read from the wrong section for the whole of 0.5.x and
 REM nothing anywhere said so, because a key that does not match is simply not
 REM there and a missing key falls back to its default. Only run when python is
 REM available; a missing interpreter must not stop a build.
+echo.
+echo [edvr] === install-read check ===
+python "%ROOT%\tools\check_install_reads.py"
+if errorlevel 1 ( echo [edvr] ERROR: a config reader runs only on the reload path & exit /b 1 )
+
 echo [edvr] === config contract ===
 where python >nul 2>&1
 if errorlevel 1 (

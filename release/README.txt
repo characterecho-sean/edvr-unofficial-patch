@@ -1,7 +1,7 @@
 EDVR - an unofficial patch for Elite Dangerous: Odyssey in VR
 =============================================================
 
-Five fixes for things that make Odyssey uncomfortable in a headset.
+Six fixes for things that make Odyssey uncomfortable in a headset.
 
 
 ALREADY RUNNING EDHM OR RESHADE?
@@ -180,9 +180,19 @@ WHAT IT DOES AND DOES NOT DO
 Loads alongside the game as a d3d11.dll proxy, forwarding every call to Windows'
 real d3d11.dll.
 
-All but one of the fixes never touch the game at all. They change how frames are
-drawn from outside it. With the sharpness fix left off - which is how it ships -
-nothing in the game's memory is written.
+Most of the fixes never touch the game at all - they change how frames are drawn
+from outside it. Two do more, and both ship inert:
+
+  The resolution fix rewrites twelve numbers in the game's code while it runs.
+  It is off by default.
+
+  The on-foot stereo fix reads one number from the game's memory - which
+  external camera view is showing - and changes the headset position the game
+  is told about, so the game moves its own camera. It does nothing at all until
+  you bind your own external-camera key, because guessing wrong would move your
+  viewpoint inside your cockpit. It never writes to the game's memory.
+
+Neither touches the network, your account, or anything the server sees.
 
 The transition flash fix reads one thing from the game: where the renderer is
 drawing from. That is camera state, not gameplay state. It never writes to what

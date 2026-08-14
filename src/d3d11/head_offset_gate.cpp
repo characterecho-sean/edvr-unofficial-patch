@@ -1,5 +1,5 @@
 // GENERATED from src/d3d11/head_offset_gate.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 6859edeef0481cb9]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 493e09e8f98a3cd3]
 #include "head_offset_gate.h"
 
 #include "../common/config.h"
@@ -23,10 +23,11 @@ struct Gate {
     uint32_t gateEnterWindow = 60;       // frames after the panel stops
     uint32_t gateNearMisses = 0;         // rejected candidates, logged
     bool     gateIntent = false;
-    bool     gateHaveKey = false;
+    bool     gateHaveKey = false;      // a press has been seen
+    bool     gateKeyBound = false;     // a key is CONFIGURED, pressed or not
     int32_t  gateViewIndex = 0;
-    int32_t  gateWantView = -1;          // -1 = any view
-    int32_t  gateViewCount = 0;          // 0 = do not wrap
+    int32_t  gateWantView = 1;           // -1 = any view; matches edvr.ini
+    int32_t  gateViewCount = 6;          // 0 = do not wrap; matches edvr.ini
     bool     gateHaveNextKey = false;
     bool     gateViewWarned = false;
     bool     gatePanelSeenNoted = false;
@@ -49,12 +50,26 @@ Gate g;
 
 void headOffsetGateConfigure() {
     Config& cfg = Config::get();
+    // DEFAULTS HERE MATCH edvr.ini's DEFAULTS, and they did not.
+    //
+    // head_offset_view defaulted to -1 in code and 1 in the file; view_count to
+    // 0 and 6. A user with a partial or pasted ini therefore got "any view",
+    // which arms the offset in the front-facing camera as well -- the opposite
+    // of what the file they were reading said. This is the same class as the
+    // commented-out log.max_mb that migrate_ini found, on the two keys with the
+    // highest consequence in the feature.
+    //
+    // BOUNDED, too. Every one of these was cast straight to uint32_t, so a
+    // negative became about 4.29e9: an intent grace of thirteen hours, an entry
+    // window that never closes, a ceiling that never fires. Four settings, one
+    // silent failure shape -- the feature behaves as though the setting were
+    // absent, which is the hardest thing to attribute from a log.
     // The gate costs a GetDesc per eye-sized draw, so it is only paid for when
     // something wants the answer. Default ON: the head offset it feeds is the
     // feature, and an ungated offset moves the cockpit view.
     g.gateWantsPanel = cfg.getBool("fix.head_offset_gate", true);
     g.gateMaxFrames = static_cast<uint32_t>(
-        cfg.getInt("fix.head_offset_max_frames", 3600));
+        cfg.getIntInRange("fix.head_offset_max_frames", 3600, 0, 1000000));
     // 60, not 5.
     //
     // 5 came from two entries that both logged "2 frames", and a sample of two
@@ -72,19 +87,11 @@ void headOffsetGateConfigure() {
     // and every other way of leaving the panel, which is why it is not simply
     // removed.
     g.gateEnterWindow = static_cast<uint32_t>(
-        cfg.getInt("fix.head_offset_enter_window", 60));
+        cfg.getIntInRange("fix.head_offset_enter_window", 60, 0, 100000));
     g.gateIntentGrace = static_cast<uint32_t>(
-        cfg.getInt("fix.head_offset_intent_grace", 180));
-    g.gateWantView = cfg.getInt("fix.head_offset_view", -1);
-    g.gateViewCount = cfg.getInt("fix.head_offset_view_count", 0);
-    // Asking for a view nothing can ever reach.
-    //
-    // The index only moves when hotkey.external_camera_next is pressed, so with
-    // no key bound it is 0 forever and any head_offset_view above 0 can never
-    // match. The offset would simply never arm, with every other part of the
-    // gate working perfectly and nothing saying why -- which is the exact shape
-    // of the bug that cost a flight when fix.head_offset_gate was read on the
-    // wrong config path.
+        cfg.getIntInRange("fix.head_offset_intent_grace", 180, 0, 100000));
+    g.gateWantView = cfg.getIntInRange("fix.head_offset_view", 1, -1, 63);
+    g.gateViewCount = cfg.getIntInRange("fix.head_offset_view_count", 6, 0, 64);
     // The "you have not bound the view key" warning does NOT live here.
     //
     // It did, and it was wrong the moment a build could read the view from
@@ -93,6 +100,8 @@ void headOffsetGateConfigure() {
     // build where it demonstrably does. It has moved into the frame path,
     // which can tell. See headOffsetGateFrame.
 }
+
+void headOffsetGateSetKeyBound(bool bound) { g.gateKeyBound = bound; }
 
 void headOffsetGateKeyPressed() {
     g.gateHaveKey = true;
@@ -288,9 +297,29 @@ void headOffsetGateFrame(uint32_t frameNo, uint32_t panelDraws, uint32_t eyeDraw
         //
         // Without a key it is still the only thing in the way, so it stays
         // for that case.
-        const bool intentOk = !g.gateHaveKey || g.gateIntent;
-        const bool timingOk = g.gateHaveKey ||
-                              g.gateSincePanel <= g.gateEnterWindow;
+        // ARMING NEEDS POSITIVE EVIDENCE, and this is the change that makes
+        // the whole feature safe rather than merely usually right.
+        //
+        // It used to arm on absence: the panel stopped, a full scene is being
+        // drawn, and that happened within a window. But 6ac.6b already REFUTED
+        // that as a discriminator -- entering the external camera, boarding a
+        // ship and leaving HMD Cinema Mode are indistinguishable in render
+        // state -- and 6ac.6c refuted the window as the tiebreak, measuring it
+        // at 2, 6, 61 and 2 frames across four sessions.
+        //
+        // So an unconfigured install would arm on the player walking into their
+        // own ship, and move their viewpoint 2.75 m inside the cockpit until a
+        // 30-second ceiling took it off. The consequence class here is "the
+        // viewpoint moved in the wrong mode"; evidence that cannot distinguish
+        // the modes does not support it, whatever the timing.
+        //
+        // The player's keypress is the missing information, not a missing
+        // heuristic. Without a bound key the gate now does NOTHING, which is
+        // what the ini has always claimed and what makes a fresh install
+        // genuinely inert. The window survives only as a sanity bound on top.
+        const bool intentOk = g.gateKeyBound && g.gateIntent;
+        const bool timingOk = g.gateSincePanel <= g.gateEnterWindow ||
+                              g.gateIntentAge <= g.gateIntentGrace;
         if (!g.gateInCamera && intentOk && timingOk && sceneNow &&
             g.gatePanelRun > 30) {
             g.gateInCamera = true;
