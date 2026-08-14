@@ -1,5 +1,5 @@
 // GENERATED from tools/glitch_test/glitch_test.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 e6ec882ef389be69]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 012bc029bffa512c]
 // glitch_test -- drives the transition-flash detector without the game.
 //
 // The port of glitch_frame.cpp into this repo compiled, linked, and passed
@@ -476,6 +476,57 @@ int main(int argc, char** argv) {
               std::to_string(drifted) +
                   " frames withheld tracking one separation across 26% of drift "
                   "-- the entry is being left behind rather than following");
+    }
+
+    // --- 7d. A frame where the buffer is not a camera ---------------------
+    //
+    // The offset EDVR watches stops holding a camera during heavy frames.
+    // Measured in a station arrival, from a ring the player dumped himself:
+    // |pos| of 1.03e26 and 2.71e17 across six consecutive frames at 2,200+ eye
+    // draws. finite3 passes those -- 1e26 is a perfectly finite float -- and then
+    // squaring it gives 1e52 against a float ceiling of 3.4e38, so the residual
+    // is infinity.
+    //
+    // Infinity does not merely produce a wrong answer, it POISONS the memory:
+    // fabsf(entry - inf) <= inf is true, so an infinite residual matches
+    // whichever entry it meets first and the running mean then drags that entry
+    // to infinity. A separation learned over a minute of flight is destroyed by
+    // one garbage frame, and the cascade it was suppressing starts costing
+    // frames again with nothing connecting the two.
+    settle(b, x, 40);
+    {
+        // Teach it a separation and confirm it is being suppressed.
+        x += 30.0f;
+        frame(b, x, 568000.0f, 0.0f);
+        settle(b, x, 10);
+        x += 30.0f;
+        frame(b, x, 568000.0f, 0.0f);
+        settle(b, x, 10);
+        x += 30.0f;
+        const bool suppressedBefore = !frame(b, x, 568000.0f, 0.0f);
+        check("the separation is being suppressed before the garbage frame",
+              suppressedBefore, "the fixture is not set up");
+
+        // Now the buffer stops being a camera.
+        settle(b, x, 10);
+        x += 30.0f;
+        frame(b, x, 1.03e26f, 0.0f);
+        settle(b, x, 10);
+
+        // The separation must still be recognised.
+        //
+        // This pins the guard inside the memory rather than the one at the
+        // caller, and cannot separate them: with infinity, EVERY entry matches,
+        // so the poisoning lands on whichever slot is at index 0 -- arbitrary,
+        // and the first version of this case passed because it happened to miss
+        // the entry under test. The assertion is kept as the property that
+        // matters (a garbage frame must not cost a learned separation); the
+        // caller-side check is defence in depth that no fixture can isolate.
+        x += 30.0f;
+        check("a garbage frame does not destroy a learned separation",
+              !frame(b, x, 568000.0f, 0.0f),
+              "an infinite residual matched a real entry and dragged it away");
+        settle(b, x, 20);
     }
 
     // --- 8. The field replay ----------------------------------------------

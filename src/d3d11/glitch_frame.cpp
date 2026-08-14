@@ -1,5 +1,5 @@
 // GENERATED from src/d3d11/glitch_frame.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 4b7c8748da70244b]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 3954c0d55c890c29]
 #include "glitch_frame.h"
 
 #include <windows.h>
@@ -77,7 +77,14 @@ constexpr float kDefaultRepeatPercent = 2.0f;
 // is reporting -- was silent, and the last line in the log described an event
 // minutes earlier. A rebase already sets kRebaseCooldown, so they cannot burst;
 // the latch was suppressing nothing but information.
-constexpr uint32_t kRebaseNotes = 8;
+//
+// Eight was wrong for a different reason, and "they cannot burst" was simply
+// false: one mode change produced eight of them inside 400 ms, which spent the
+// whole session's budget on a single event and left every stand-down afterwards
+// silent. Each costs 120 frames during which nothing can be withheld, and that
+// is precisely where a real flash gets through -- so these are the lines worth
+// keeping. Matched to the jump-note budget.
+constexpr uint32_t kRebaseNotes = 40;
 
 // RENDERED frames to wait for the camera buffer before concluding it is not
 // there on this build.
@@ -221,6 +228,16 @@ State* g_state = nullptr;
 int findSeparation(float resid) {
     State* s = g_state;
     if (s->repeatPercent <= 0.0f) return -1;
+    // GUARDED HERE, not only at the caller, because infinity does not fail this
+    // comparison -- it passes it. `fabsf(anything - inf) <= inf` is true in IEEE,
+    // so an infinite residual matches whichever entry it reaches first, and
+    // recordResidual then drags that entry to infinity through the running mean.
+    // One garbage frame destroys a separation learned over a minute of flight.
+    //
+    // The caller refuses non-finite residuals too. This is here because a memory
+    // whose correctness depends on every future caller remembering to filter its
+    // input is a memory that will be poisoned eventually.
+    if (!std::isfinite(resid)) return -1;
     const float tol = resid * (s->repeatPercent * 0.01f);
     for (uint32_t i = 0; i < kSeparations; ++i) {
         if (s->seps[i].hits == 0) continue;
@@ -244,6 +261,7 @@ bool residualIsKnownSeparation(float resid) { return findSeparation(resid) >= 0;
 void recordResidual(float resid) {
     State* s = g_state;
     if (s->repeatPercent <= 0.0f) return;
+    if (!std::isfinite(resid)) return;   // never let one into the table
     const int hit = findSeparation(resid);
     if (hit >= 0) {
         State::Separation& e = s->seps[hit];
@@ -624,6 +642,22 @@ void glitchFrameObserve(const void* data, uint32_t bytes, const void* resource) 
     }
     resid = sqrtf(resid);
     speed = sqrtf(speed);
+
+    // A RESIDUAL THAT IS NOT A NUMBER CANNOT BE JUDGED.
+    //
+    // finite3 above proves the POSITION is finite, and that is not enough: the
+    // buffer at this offset stops holding a camera during heavy frames, and a
+    // finite 1e26 squares to 1e52 against a float ceiling of 3.4e38. Measured in
+    // a station arrival -- |pos| of 1.03e26 and 2.71e17 across six consecutive
+    // frames at 2,200+ eye draws, in a ring the player dumped himself.
+    //
+    // Infinity then poisons the separation memory rather than merely being
+    // wrong: fabsf(entry - inf) <= inf is TRUE, so an infinite residual matches
+    // whichever entry it meets first and the running mean drags that entry to
+    // infinity. A separation learned over a minute of flight is destroyed by one
+    // frame of garbage, and the cascade it was suppressing starts costing frames
+    // again with nothing in the log to connect the two.
+    if (!std::isfinite(resid) || !std::isfinite(speed)) return;
 
     // Compared against a PREDICTION, not against the last position, so
     // travelling fast is not itself suspicious. The speed term then covers
