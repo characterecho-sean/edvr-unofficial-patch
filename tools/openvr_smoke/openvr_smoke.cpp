@@ -1,5 +1,5 @@
 // GENERATED from tools/openvr_smoke/openvr_smoke.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 9aba43479b1785f0]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 0092dc09aca9a783]
 // openvr_smoke -- checks the openvr proxy's startup path without the game.
 //
 // The thing under test is that the proxy does NOT load the real openvr_api.dll
@@ -30,6 +30,7 @@
 #include <cstring>
 
 #include "../../src/common/frame_flag.h"
+#include "../../src/common/hotkey.h"
 #include "../../src/common/guard.h"
 
 namespace {
@@ -146,6 +147,74 @@ int frameFlagChecks() {
     edvr::clearGlitchFrame();
 
     if (bad == 0) printf("  ok    the mode flag round-trips and is independent\n");
+    return bad;
+}
+
+// Hotkey bindings, including combinations.
+//
+// Elite's own default for the external camera is CTRL + ALT + SPACE, so chords
+// are the normal case rather than an extra. A parser that dropped the modifiers
+// would leave a binding watching bare SPACE -- firing constantly, in a build
+// whose whole job is to know which mode the player asked for. Silent, and
+// exactly backwards, so it is asserted.
+int hotkeyChecks() {
+    int bad = 0;
+    uint32_t m = 0xFFFFFFFFu;
+
+    if (edvr::virtualKeyFromName("F9", &m) != VK_F9 || m != 0) {
+        printf("  FAIL  a plain key did not parse, or invented modifiers\n");
+        ++bad;
+    }
+    const int space = edvr::virtualKeyFromName("CTRL+ALT+SPACE", &m);
+    if (space != VK_SPACE || m != (edvr::kHotkeyCtrl | edvr::kHotkeyAlt)) {
+        printf("  FAIL  CTRL+ALT+SPACE parsed as vk=%d mods=%u\n", space, m);
+        ++bad;
+    }
+    // Elite's default written the other ways people write it.
+    if (edvr::virtualKeyFromName("ctrl + alt + space", &m) != VK_SPACE ||
+        m != (edvr::kHotkeyCtrl | edvr::kHotkeyAlt)) {
+        printf("  FAIL  lower case and spaces did not parse the same\n");
+        ++bad;
+    }
+    if (edvr::virtualKeyFromName("CONTROL-MENU-SPACE", &m) != VK_SPACE ||
+        m != (edvr::kHotkeyCtrl | edvr::kHotkeyAlt)) {
+        printf("  FAIL  the CONTROL/MENU spellings or '-' did not parse\n");
+        ++bad;
+    }
+    if (edvr::virtualKeyFromName("SHIFT+F11", &m) != VK_F11 ||
+        m != edvr::kHotkeyShift) {
+        printf("  FAIL  SHIFT+F11 did not parse\n");
+        ++bad;
+    }
+    // A component that is not a modifier must make the WHOLE binding
+    // unrecognised. Taking the last part and ignoring the rest would turn a
+    // typo into a different, live binding.
+    if (edvr::virtualKeyFromName("CTRL+WOMBAT+SPACE", &m) != 0) {
+        printf("  FAIL  an unknown modifier did not reject the binding\n");
+        ++bad;
+    }
+    if (edvr::virtualKeyFromName("CTRL+", &m) != 0) {
+        printf("  FAIL  a binding with no key was accepted\n");
+        ++bad;
+    }
+
+    // setBinding must carry BOTH halves. This is the regression that matters:
+    // setKey(virtualKeyFromName(s)) compiles and drops the modifiers.
+    edvr::Hotkey k;
+    k.setBinding("CTRL+ALT+SPACE");
+    if (k.key() != VK_SPACE || k.mods() != (edvr::kHotkeyCtrl | edvr::kHotkeyAlt)) {
+        printf("  FAIL  setBinding dropped the modifiers\n");
+        ++bad;
+    }
+    // ...and setting a plain key afterwards must clear them, or the chord's
+    // modifiers would linger on a binding that no longer wants any.
+    k.setKey(VK_F9);
+    if (k.mods() != 0) {
+        printf("  FAIL  setKey left stale modifiers behind\n");
+        ++bad;
+    }
+
+    if (bad == 0) printf("  ok    hotkey bindings parse, including combinations\n");
     return bad;
 }
 
@@ -391,6 +460,10 @@ int main(int argc, char** argv) {
     // liveFlagChecks BEFORE frameFlagChecks, and the order is load-bearing: its
     // first assertion is the "d3d11 never published" case, which stops existing
     // the moment anything calls setExternalCameraOnFoot.
+    if (hotkeyChecks() != 0) {
+        printf("\nOPENVR SMOKE FAILED\n");
+        return 1;
+    }
     if (liveFlagChecks() != 0) {
         printf("\nOPENVR SMOKE FAILED\n");
         return 1;

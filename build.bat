@@ -129,7 +129,8 @@ cl.exe %CFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "%ROOT%\src\d3d11\d3d11_proxy.cpp" "%ROOT%\src\d3d11\device_hook.cpp" ^
     "%ROOT%\src\d3d11\exposure_fix.cpp" "%ROOT%\src\d3d11\vscreen.cpp" ^
     "%ROOT%\src\d3d11\glitch_frame.cpp" "%ROOT%\src\d3d11\vscreen_res.cpp" ^
-    "%ROOT%\src\d3d11\binding_shadow.cpp" "%ROOT%\src\d3d11\head_offset_gate.cpp"
+    "%ROOT%\src\d3d11\binding_shadow.cpp" "%ROOT%\src\d3d11\head_offset_gate.cpp" ^
+    "%ROOT%\src\d3d11\camera_view.cpp"
 if errorlevel 1 ( echo [edvr] ERROR: compile failed & exit /b 1 )
 
 link.exe /nologo /DLL /MACHINE:X64 /INCREMENTAL:NO ^
@@ -249,7 +250,7 @@ cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /DNDEBUG ^
     "%ROOT%\tools\openvr_smoke\openvr_smoke.cpp" ^
     "%ROOT%\src\common\guard.cpp" "%ROOT%\src\common\log.cpp" ^
     "%ROOT%\src\common\config.cpp" "%ROOT%\src\common\proxy.cpp" ^
-    "%ROOT%\src\common\frame_flag.cpp" ^
+    "%ROOT%\src\common\frame_flag.cpp" "%ROOT%\src\common\hotkey.cpp" ^
     /link /INCREMENTAL:NO kernel32.lib user32.lib version.lib
 if errorlevel 1 ( echo [edvr] ERROR: openvr_smoke build failed & exit /b 1 )
 echo [edvr] built %BUILD%\openvr_smoke.exe

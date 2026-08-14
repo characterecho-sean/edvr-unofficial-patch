@@ -8,6 +8,7 @@
 #include "../common/guard.h"
 #include "../common/hotkey.h"
 #include "head_offset_gate.h"
+#include "camera_view.h"
 #include "../common/log.h"
 #include "../common/vtable_hook.h"
 #include "binding_shadow.h"
@@ -100,6 +101,14 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
         // which mode the player just asked for.
         if (g_state->externalCamKey.pressed()) headOffsetGateKeyPressed();
         if (g_state->externalCamNextKey.pressed()) headOffsetGateViewBumped();
+        // Reading the view the game is actually on, and telling the gate.
+        //
+        // The keypress count above stays as the fallback, for when this cannot
+        // answer: an offset a game update has moved, a record that has been
+        // reused, a scan that found nothing. cameraViewCurrent returns -1 in
+        // all of those and the gate goes back to counting.
+        cameraViewTick();
+        headOffsetGateSetView(cameraViewCurrent());
         // One per-frame invalidation for both fixes, before either boundary.
         //
         // This used to be two, with opposite policies: vscreen dropped its
@@ -139,14 +148,11 @@ HRESULT STDMETHODCALLTYPE hookedCreateSwapChainForHwnd(
 State& ensureState() {
     if (!g_state) {
         g_state = new State();
-        g_state->toggleKey.setKey(virtualKeyFromName(
-            Config::get().getString("hotkey.toggle_exposure", "SCROLLLOCK").c_str()));
-        g_state->dumpKey.setKey(virtualKeyFromName(
-            Config::get().getString("hotkey.dump_camera", "PAUSE").c_str()));
-        g_state->externalCamKey.setKey(virtualKeyFromName(
-            Config::get().getString("hotkey.external_camera", "").c_str()));
-        g_state->externalCamNextKey.setKey(virtualKeyFromName(
-            Config::get().getString("hotkey.external_camera_next", "").c_str()));
+        g_state->toggleKey.setBinding(Config::get().getString("hotkey.toggle_exposure", "SCROLLLOCK").c_str());
+        g_state->dumpKey.setBinding(Config::get().getString("hotkey.dump_camera", "PAUSE").c_str());
+        g_state->externalCamKey.setBinding(Config::get().getString("hotkey.external_camera", "").c_str());
+        g_state->externalCamNextKey.setBinding(Config::get().getString("hotkey.external_camera_next", "").c_str());
+        cameraViewConfigure();
     }
     return *g_state;
 }

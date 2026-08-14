@@ -1,6 +1,9 @@
 // GENERATED from src/common/hotkey.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 1bb15aef111c8650]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 d839d33abd006208]
 #include "hotkey.h"
+
+#include <cctype>
+#include <string>
 
 #include <windows.h>
 
@@ -28,16 +31,83 @@ static bool gameHasFocus() {
     return pid == GetCurrentProcessId();
 }
 
+// Are the required modifiers held, and no extra ones?
+//
+// BOTH halves matter. Requiring them stops a bare SPACE firing a binding that
+// is CTRL+ALT+SPACE. Rejecting extras stops CTRL+ALT+SPACE ALSO firing a
+// binding that is plain SPACE -- which is the same key, and in Elite those can
+// be two different commands.
+static bool modsHeld(uint32_t want) {
+    const bool ctrl  = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
+    const bool alt   = (GetAsyncKeyState(VK_MENU) & 0x8000) != 0;
+    const bool shift = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
+    return ctrl  == ((want & kHotkeyCtrl) != 0) &&
+           alt   == ((want & kHotkeyAlt) != 0) &&
+           shift == ((want & kHotkeyShift) != 0);
+}
+
+void Hotkey::setBinding(const char* name) {
+    uint32_t m = 0;
+    m_vk = virtualKeyFromName(name, &m);
+    m_mods = m_vk ? m : 0;
+}
+
 bool Hotkey::pressed() {
     if (m_vk == 0) return false;
-    const bool down = (GetAsyncKeyState(m_vk) & 0x8000) != 0 && gameHasFocus();
+    const bool keyDown = (GetAsyncKeyState(m_vk) & 0x8000) != 0;
+    const bool down = keyDown && modsHeld(m_mods) && gameHasFocus();
     const bool edge = down && !m_down;
     m_down = down;
     return edge;
 }
 
-int virtualKeyFromName(const char* name) {
+int virtualKeyFromName(const char* name) { return virtualKeyFromName(name, nullptr); }
+
+int virtualKeyFromName(const char* name, uint32_t* mods) {
+    if (mods) *mods = 0;
     if (!name || !*name) return 0;
+
+    // Split on '+' or '-' and take the modifiers off the front. The LAST
+    // component is the key; everything before it must be a modifier, and a
+    // component that is neither makes the whole binding unrecognised rather
+    // than quietly becoming a different one.
+    {
+        std::string s(name);
+        size_t cut = s.find_first_of("+-");
+        if (cut != std::string::npos) {
+            uint32_t m = 0;
+            size_t start = 0;
+            bool ok = true;
+            std::string last;
+            while (true) {
+                const size_t sep = s.find_first_of("+-", start);
+                std::string part = s.substr(start, sep == std::string::npos
+                                                       ? std::string::npos
+                                                       : sep - start);
+                // Trim spaces and upper-case, so "ctrl + alt + space" works.
+                size_t b = part.find_first_not_of(" 	");
+                size_t e = part.find_last_not_of(" 	");
+                part = (b == std::string::npos) ? std::string()
+                                                : part.substr(b, e - b + 1);
+                for (char& c : part) c = static_cast<char>(toupper(c));
+                if (sep == std::string::npos) { last = part; break; }
+                if (part == "CTRL" || part == "CONTROL") m |= kHotkeyCtrl;
+                else if (part == "ALT" || part == "MENU") m |= kHotkeyAlt;
+                else if (part == "SHIFT") m |= kHotkeyShift;
+                else { ok = false; break; }
+                start = sep + 1;
+            }
+            if (!ok || last.empty()) {
+                Log::get().note("hotkey: \"%s\" is not a binding this understands. "
+                                "Modifiers are CTRL, ALT and SHIFT, joined with '+', "
+                                "and the key comes last -- CTRL+ALT+SPACE.", name);
+                return 0;
+            }
+            const int vk = virtualKeyFromName(last.c_str(), nullptr);
+            if (vk && mods) *mods = m;
+            return vk;
+        }
+    }
 
     if (name[0] == '0' && (name[1] == 'x' || name[1] == 'X')) {
         return static_cast<int>(strtol(name, nullptr, 16));

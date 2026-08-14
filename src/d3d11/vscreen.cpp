@@ -1,5 +1,6 @@
 ﻿#include "vscreen.h"
 #include "head_offset_gate.h"
+#include "camera_view.h"
 
 #include <windows.h>
 
@@ -711,6 +712,7 @@ void vScreenRefreshConfig() {
     // session -- and it cost a flight when fix.head_offset_gate did exactly
     // that.
     headOffsetGateConfigure();
+    cameraViewConfigure();
 
     if (wasVoid != s->blackVoid || wasScale != s->distanceScale) {
         Log::get().note("vScreen config reloaded: black void %s, panel distance x%.3f "
@@ -807,6 +809,11 @@ void vScreenFrameBoundary() {
     // The gate decides on the counts for the frame that just ended, so it is
     // told before they reset -- same rule as the flash detector above.
     headOffsetGateFrame(s->frameNo, s->panelCompositeDraws, s->eyeDrawsThisFrame);
+    // The first frame the flat panel is seen is the earliest moment the game is
+    // known to be loaded AND the player known to be on foot, which is what the
+    // scan needs. At startup the process holds a fraction of the memory it
+    // reaches in play, and a scan there finds nothing.
+    if (headOffsetGatePanelFirstSeen()) cameraViewRequestScan();
     s->panelCompositeDraws = 0;
     s->eyeDrawsThisFrame = 0;
     ++s->frameNo;
