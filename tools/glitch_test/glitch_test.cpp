@@ -1,5 +1,5 @@
 // GENERATED from tools/glitch_test/glitch_test.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 012bc029bffa512c]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 e410ca7ce2abb21a]
 // glitch_test -- drives the transition-flash detector without the game.
 //
 // The port of glitch_frame.cpp into this repo compiled, linked, and passed
@@ -526,6 +526,44 @@ int main(int argc, char** argv) {
         check("a garbage frame does not destroy a learned separation",
               !frame(b, x, 568000.0f, 0.0f),
               "an infinite residual matched a real entry and dragged it away");
+        settle(b, x, 20);
+    }
+
+    // --- 7e. A frame with no world camera in it ---------------------------
+    //
+    // Elite renders camera-relative, so the main view's transform lives in head
+    // space at magnitude ~0.09 and the only world-space cameras in a frame come
+    // from auxiliary passes. A frame where none of those ran therefore reports
+    // its furthest camera at the origin -- and the "jump" that produces is just
+    // the distance from the last world camera to zero.
+    //
+    // Three field instances, each a good frame withheld: 7,618 units "from"
+    // (-0 -0 +0), 10,277 from (-0 +0 +0), 6,856 from (+0 +0 -0). The first is
+    // the frame a player reported a flash on.
+    //
+    // The repeat suppression cannot catch these: the magnitude is wherever the
+    // previous world camera happened to be, so it never repeats.
+    settle(b, x, 40);
+    {
+        // Flying along with a world-space pass running, as usual.
+        for (uint32_t i = 0; i < 20; ++i) {
+            x += 30.0f;
+            frame(b, x, 4000.0f, 0.0f);
+        }
+        // Now a frame in which no auxiliary pass ran. The camera it reports is
+        // the head-space one, a fraction of a unit from the origin.
+        x += 30.0f;
+        const bool markedOnOrigin = frame(b, 0.04f, -0.02f, 0.07f);
+        check("a frame with no world camera is not a jump", !markedOnOrigin,
+              "the furthest camera collapsing to the origin was read as motion");
+
+        // ...and the world pass coming back is not one either, which is the
+        // other half: if the origin frame had entered the track, the return to
+        // the real camera would look like the same jump reversed.
+        x += 30.0f;
+        const bool markedOnWorldReturn = frame(b, x, 4000.0f, 0.0f);
+        check("...and neither is the world camera coming back", !markedOnWorldReturn,
+              "the origin frame got into the prediction and the recovery fired");
         settle(b, x, 20);
     }
 

@@ -1,5 +1,5 @@
 // GENERATED from src/d3d11/glitch_frame.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 bba22d3560c21e88]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 ceb2408b45958cbb]
 #include "glitch_frame.h"
 
 #include <windows.h>
@@ -118,6 +118,31 @@ constexpr uint32_t kValidateFrames = 300;
 // one whose game did not exit cleanly. vScreen has printed its totals on a timer
 // since long before anybody noticed this; this is the same answer.
 constexpr uint32_t kTotalsEvery = 1800;
+
+// Below this magnitude, a camera is not a WORLD camera and the frame carries no
+// reading at all.
+//
+// Elite renders camera-relative (6t): the main view's transform sits in head
+// space at magnitude about 0.09 (6v.5), and its world position never reaches a
+// constant buffer. The only world-space cameras in a frame belong to auxiliary
+// passes, and those are measured in thousands to hundreds of thousands -- 9,967
+// and 136,405 in 6v, and 5,012 / 7,600 / 568,000 in the field.
+//
+// So a frame whose FURTHEST camera is at the origin is a frame in which no
+// auxiliary pass ran, not a frame drawn from the origin. The "jump" it produces
+// is the distance from the previous frame's world camera to zero -- pure pass
+// composition, exactly 6v, and invisible to the repeat suppression because that
+// distance is whatever the last world camera happened to be and so never repeats.
+//
+// Measured three times, each a good frame withheld: frame 11774 at 7,618 units
+// "from" (-0 -0 +0), frame 17613 at 10,277 from (-0 +0 +0), frame 28667 at 6,856
+// from (+0 +0 -0). The first of those is the frame a player reported seeing a
+// flash on, in a log that ends 89 ms later.
+//
+// Ten units. Not a tuned number: it sits two decades above the head-space
+// magnitudes it must exclude and nearly three below the smallest world camera
+// ever recorded, in a gap four decades wide.
+constexpr float kWorldCameraFloor2 = 10.0f * 10.0f;
 
 // Rendered frames after which a value that still has not moved is accepted as
 // not being the camera.
@@ -620,6 +645,16 @@ void glitchFrameObserve(const void* data, uint32_t bytes, const void* resource) 
     }
 
     const float m2 = pos[0] * pos[0] + pos[1] * pos[1] + pos[2] * pos[2];
+
+    // A head-space camera is not a reading. See kWorldCameraFloor2.
+    //
+    // Refused BEFORE it can become the frame's furthest, so a frame carrying
+    // only head-space cameras ends with frameFarMag2 still negative -- which
+    // every test below already treats as "nothing was seen this frame". It
+    // therefore contributes no jump, no prediction update and no ring entry, and
+    // the gap in the ring's frame numbers is what says it happened.
+    if (m2 < kWorldCameraFloor2) return;
+
     if (m2 <= s->frameFarMag2) return;
     s->frameFarMag2 = m2;
     for (uint32_t a = 0; a < 3; ++a) s->frameFarPos[a] = pos[a];
