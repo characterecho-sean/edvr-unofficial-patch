@@ -836,7 +836,7 @@ void vScreenFrameBoundary() {
     // against running twice. The old trigger was the FIRST panel sighting,
     // which on a default install is the main menu four seconds after launch --
     // 5 GB of an eventual 11 GB allocated, and the scan found nothing.
-    if (headOffsetGateSettledOnFoot()) cameraViewRequestScan();
+    if (headOffsetGatePanelSettled()) cameraViewRequestScan();
     s->panelCompositeDraws = 0;
     s->eyeDrawsThisFrame = 0;
     ++s->frameNo;

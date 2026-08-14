@@ -1,5 +1,5 @@
 // GENERATED from src/d3d11/camera_view.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 9ac3e1b30cf5cb19]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 383ad8c97bb7f75f]
 #include "camera_view.h"
 
 #include <windows.h>
@@ -71,6 +71,7 @@ struct State {
     bool      usable = false;
     uint32_t  attempts = 0;
     uint32_t  cooldown = 0;
+    bool      exhaustedNoted = false;
     std::vector<const uint8_t*> records;
 
     int       lastView = -1;
@@ -177,10 +178,12 @@ void collectRegions() {
     // allocated, and a negative from it says nothing at all -- which is the
     // failure that cost two attempts before the trigger moved to the first
     // panel frame.
-    Log::get().note("camera view: scanning %zu region(s), %.0f MB, %zu thread "
-                    "stack(s) excluded.",
-                    g_s.regions.size(), (double)total / (1024.0 * 1024.0),
-                    stacks.size());
+    Log::get().note("camera view: attempt %u of %u -- scanning %zu region(s), "
+                    "%.0f MB, %zu thread stack(s) excluded. If that megabyte "
+                    "figure is a few thousand rather than around ten, this ran "
+                    "before the game finished loading and will be retried.",
+                    g_s.attempts + 1, kMaxAttempts, g_s.regions.size(),
+                    (double)total / (1024.0 * 1024.0), stacks.size());
 }
 
 // One frame's slice of the walk. Returns true when the whole address space has
@@ -337,7 +340,20 @@ void cameraViewConfigure() {
 
 void cameraViewRequestScan() {
     if (!g_s.track || g_s.usable || g_s.scanning || !g_s.typePtr) return;
-    if (g_s.cooldown > 0 || g_s.attempts >= kMaxAttempts) return;
+    if (g_s.cooldown > 0) return;
+    if (g_s.attempts >= kMaxAttempts) {
+        // Once, so the log distinguishes "gave up" from "never asked". The last
+        // flight could not tell those apart and neither could I.
+        if (!g_s.exhaustedNoted) {
+            g_s.exhaustedNoted = true;
+            Log::get().note("camera view: %u attempts made and none found the "
+                            "camera settings, so the view will be counted from "
+                            "keypresses for the rest of this session. Bind "
+                            "hotkey.external_camera_next if you have not.",
+                            g_s.attempts);
+        }
+        return;
+    }
     g_s.scanning = true;
     g_s.records.clear();
     g_s.regionIndex = 0;

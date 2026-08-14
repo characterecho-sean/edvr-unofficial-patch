@@ -1,5 +1,5 @@
 // GENERATED from src/d3d11/head_offset_gate.h in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 43e1ded01080ae90]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 a2c96a0e7eb18df0]
 // When to move the head pose: on foot, in the external camera, and nowhere
 // else.
 //
@@ -104,22 +104,30 @@ bool headOffsetGateWantsPanel();
 // The caller resets its own counters; this does not touch them.
 void headOffsetGateFrame(uint32_t frameNo, uint32_t panelDraws, uint32_t eyeDraws);
 
-// Is the player SETTLED ON FOOT right now -- panel composited, a real scene in
-// the eyes, and the panel run long enough to mean it?
+// Has the flat panel been composited steadily for a while?
 //
-// It used to be "the first frame the panel was seen", and that was wrong in a
-// way only a differently-configured build could show. The panel is recognised
-// by its size, which with the resolution fix off is 1920x1080 -- and so is
-// plenty of what the main menu draws. So on a default install the first
-// sighting landed FOUR SECONDS after launch, in the menu, and anything hung off
-// it ran against a process that had allocated 5 GB of its eventual 11 GB.
-// Measured: 5 records found instead of 17. The private build only worked
-// because its raised panel resolution made the size test selective by accident.
+// This is "the game is drawing the on-foot screen", and it is deliberately NOT
+// "the player is definitely on foot in the world", because nothing here can
+// tell those apart. The panel is recognised by its size, which with the
+// resolution fix off is 1920x1080 -- and so is plenty of what the main menu
+// draws. A default install therefore sees a settled "panel" about four seconds
+// after launch, in a menu, with half the game's memory yet to be allocated.
 //
-// All three conditions together are what "the player is on foot in the game"
-// looks like: the panel is being composited, the helmet HUD is putting hundreds
-// of draws into the eyes (the menu manages about twenty), and it has been that
-// way for long enough not to be a transient.
-bool headOffsetGateSettledOnFoot();
+// TWO WRONG ANSWERS ARE ON RECORD HERE, and the second is the more instructive.
+//
+// The first was the FIRST panel frame, which fired in the menu as above.
+//
+// The second added "and a full scene is in the eyes", reasoning that the helmet
+// HUD puts hundreds of draws there on foot. It never fired at all -- because on
+// foot the world is drawn to the PANEL, and a full scene in the eyes is what
+// happens when the panel STOPS. The two conditions are close to mutually
+// exclusive, so ANDing them asked for a state that barely occurs. The gate's own
+// log proved it by absence: a run of 90 settled panel frames, and no scan.
+//
+// So this stays a weak signal, honestly labelled. What makes the feature work is
+// not this being right; it is that a scan which finds nothing tries again later.
+// Do not add a third condition here without evidence that the state it names
+// actually occurs.
+bool headOffsetGatePanelSettled();
 
 }  // namespace edvr
