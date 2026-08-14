@@ -1,5 +1,5 @@
 // GENERATED from src/d3d11/glitch_frame.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 3954c0d55c890c29]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 bba22d3560c21e88]
 #include "glitch_frame.h"
 
 #include <windows.h>
@@ -99,6 +99,26 @@ constexpr uint32_t kNoBufferGiveUp = 2000;
 // Frames of a rendered scene needed before the detector is allowed to act.
 constexpr uint32_t kValidateFrames = 300;
 
+// How often the running totals are printed.
+//
+// THE END OF THE SESSION IS NOT A PLACE TO PUT NUMBERS ANYBODY WILL SEE.
+//
+// shutdownGlitchFrameFix has never once logged in the field, across every
+// session this fix has been debugged from. It is reached only from shutdown(),
+// and DllMain calls that only when `reserved` is null -- a FreeLibrary unload,
+// which does not happen to a game's d3d11.dll. Real exits take the other branch,
+// where Windows has already terminated every other thread, possibly while one
+// held the log's spinlock. Anything there that takes a lock risks hanging the
+// process rather than losing a line, which is why that branch is deliberately
+// minimal, and it should stay that way: the fault is not that exit does too
+// little, it is that the numbers were put somewhere only exit could reach.
+//
+// Five sessions of bug-hunting wanted "withheld versus recognised" and no log
+// has ever carried it. The population that most needs a summary is exactly the
+// one whose game did not exit cleanly. vScreen has printed its totals on a timer
+// since long before anybody noticed this; this is the same answer.
+constexpr uint32_t kTotalsEvery = 1800;
+
 // Rendered frames after which a value that still has not moved is accepted as
 // not being the camera.
 //
@@ -176,6 +196,11 @@ struct State {
     Separation seps[kSeparations] = {};
     float      repeatPercent = kDefaultRepeatPercent;
     uint32_t   suppressed = 0;
+    // Periodic totals: when they were last printed, and what they said. Printed
+    // only when a counter has moved, so a quiet session stays quiet.
+    uint32_t   totalsAt = 0;
+    uint32_t   totalsWithheld = 0;
+    uint32_t   totalsSuppressed = 0;
     // Set by the detector, read by the boundary: this frame's jump matched a
     // magnitude already known to recur, so it is a pass flip and not a frame to
     // withhold.
@@ -949,6 +974,33 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
         s->windowWithheld = 0;
     }
 
+    // Running totals, on a timer rather than at shutdown. See kTotalsEvery.
+    //
+    // Gated on a counter having MOVED, so this says nothing at all through a
+    // session where the fix never fires -- which is most of them, and which is
+    // also the answer to "did it do anything": no line means no.
+    if (s->frameNo - s->totalsAt >= kTotalsEvery) {
+        s->totalsAt = s->frameNo;
+        if (s->framesWithheld != s->totalsWithheld ||
+            s->suppressed != s->totalsSuppressed) {
+            const bool acted = glitchConsumerPresent();
+            Log::get().note(
+                "transition flash so far: %u frame(s) %s this session, and %u "
+                "more recognised as render-pass flips and left alone (%u and %u "
+                "since the last of these lines). Compare the first number against "
+                "how many jumps, drops and map closes you have made: roughly one "
+                "per transition is it working. The second is expected to be large "
+                "near a planet surface and is not a fault -- those are frames that "
+                "would have been withheld before, and felt as judder.",
+                s->framesWithheld, acted ? "withheld" : "detected but NOT withheld "
+                                           "(openvr_api.dll is not installed)",
+                s->suppressed, s->framesWithheld - s->totalsWithheld,
+                s->suppressed - s->totalsSuppressed);
+            s->totalsWithheld = s->framesWithheld;
+            s->totalsSuppressed = s->suppressed;
+        }
+    }
+
     if (s->markedThisFrame) ++s->consecutive; else s->consecutive = 0;
     if (s->cooldown > 0) --s->cooldown;
     s->markedThisFrame = false;
@@ -996,6 +1048,17 @@ void dumpCameraRing() {
     Log::get().note("--- end camera history ---");
 }
 
+// NOT REACHED ON A NORMAL GAME EXIT, and nothing that matters may live here.
+//
+// shutdown() calls this, and DllMain calls shutdown() only for a FreeLibrary
+// unload -- which does not happen to a game's d3d11.dll. Process exit takes the
+// other branch on purpose: every other thread is already dead and may have been
+// holding the log's spinlock, so that path must not take one.
+//
+// So this runs for the test harness and for a hot unload, and that is all. The
+// session totals it used to be the only source of are printed on a timer now
+// (kTotalsEvery); if you find yourself wanting to add a summary here, it will
+// not be read. Add it there instead.
 void shutdownGlitchFrameFix() {
     State* s = g_state;
     if (!s || !s->enabled) return;

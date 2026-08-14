@@ -174,8 +174,16 @@ motion varies. Of fourteen genuine transitions measured in one session the
 closest pair were 5.7% apart, while the cascade pair repeated within 1.5%. So the
 first jump of a given size is withheld — it cannot be known to repeat yet — and
 matching ones after it are recognised and left alone. `edvr.ini` documents the
-tolerance as `transition_flash_repeat_percent`, and the end-of-session totals
-report the two counts separately, so a log tells you which kind you had.
+tolerance as `transition_flash_repeat_percent`.
+
+The two counts are reported separately in a `transition flash so far:` line,
+printed roughly every twenty seconds and only when one of them has moved — so no
+such line at all means the fix never fired. It is deliberately not left to the
+end of the session: the log has no end. A game's `d3d11.dll` is never unloaded,
+only terminated with the process, and the teardown path that runs then is
+restricted to what is safe when every other thread is already dead. A summary
+written there would be a summary nobody ever saw, which is what the previous one
+was for five sessions of debugging.
 
 This matters beyond the judder. Every withheld frame costs the detector its next
 frame or two while it rebuilds its prediction, and arrivals and wakes churn the

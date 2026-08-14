@@ -344,8 +344,10 @@ judder; then the runaway guard above turned the fix off for the session, taking
 the real flash fix with it. A jump that keeps recurring at the same size is a
 fixed distance between two render passes, not a transition — real transitions
 vary in size, because real motion does — so the first of a size is withheld and
-matching ones after it are left alone. The log says so once per size, and the
-end-of-session totals count them separately. `transition_flash_repeat_percent`
+matching ones after it are left alone. The log says so once per size, and a
+`transition flash so far:` line counts the two separately every twenty seconds or
+so — only when something has changed, so no such line means it never fired.
+`transition_flash_repeat_percent`
 in `edvr.ini` controls it, and there is a note there about why raising
 `transition_flash_units` cannot help: the false jumps are much *larger* than the
 real ones, not smaller.
