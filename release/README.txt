@@ -182,21 +182,18 @@ SETTING IT UP
 
 2. Set hotkey.external_camera_next to your next-camera-view binding.
 
-3. Get on foot, open the camera, and cycle to the view the offsets are tuned
-   for -- over your commander's shoulder. The view the camera opens on faces
-   back at you, which is not somewhere worth putting your head. If the offset
-   engages in a view you did not expect, the log names the view you are on.
+3. Get on foot, open the camera, and cycle to the view BEHIND your commander.
+   The view the camera opens on faces back at you; the offset is for the other.
 
 4. Tune these three with the headset on. They reload about once a second, so
    you do not need to restart:
 
-       head_offset_right   = -0.25   + is to your commander's right
-       head_offset_up      =  0.25   + is up
-       head_offset_forward =  1.25   + is the way your commander faces
+       head_offset_right   = 0.0     + is to your commander's right
+       head_offset_up      = 0.8     + is up
+       head_offset_forward = 2.75    + is the way your commander faces
 
-   forward is the largest of the three, because the camera sits back from your
-   commander. These are a starting point, not a universal answer -- people
-   differ on how far back they want to sit. Change them a little at a time.
+   forward is the large one, because the camera starts several metres behind
+   your commander. These values are a starting point, not a universal answer.
 
 COMFORT: these move the viewpoint of a headset you are wearing. Change them a
 little at a time. Entering and leaving is a cut rather than a glide, because the

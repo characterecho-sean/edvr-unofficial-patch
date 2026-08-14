@@ -124,28 +124,22 @@ another player observes, and no gameplay data of any kind is read or written.
 
 2. Set `hotkey.external_camera_next` to your next-camera-view binding.
 
-3. Get on foot, open the camera, and cycle to the view the offsets are tuned
-   for — over your commander's shoulder. The view the camera opens on faces
-   back at you, which is not somewhere worth putting your head.
-
-   `fix.head_offset_view` selects it, and ships as **2**. If the offset engages
-   in a view you did not expect, the log names the view you are actually on when
-   it refuses, so it is one flight to find rather than a guess. The count starts
-   at 0 every time the game launches.
+3. Get on foot, open the camera, and cycle to the view **behind** your
+   commander — the offset is for that one, because the view the camera opens on
+   faces back at you.
 
 4. Tune the three offsets with the headset on. They reload about once a second,
    so you do not need to restart:
 
    ```
-   head_offset_right   = -0.25   + is to your commander's right
-   head_offset_up      =  0.25   + is up
-   head_offset_forward =  1.25   + is the way your commander faces
+   head_offset_right   = 0.0     + is to your commander's right
+   head_offset_up      = 0.8     + is up
+   head_offset_forward = 2.75    + is the way your commander faces
    ```
 
-   `forward` is the largest of the three, because the camera sits back from your
-   commander and reaching them means covering that distance. These are a
-   starting point rather than a universal answer — people differ on how far back
-   they want to sit, and moving forward past the head is a different feel again.
+   `forward` is the large one, because the camera starts several metres behind
+   your commander and reaching their head means covering that distance. The
+   values above are a good starting point, not a universal answer.
 
 **Comfort.** These move the viewpoint of a headset you are wearing. Change them
 a little at a time. Entering and leaving is a cut rather than a glide, because
