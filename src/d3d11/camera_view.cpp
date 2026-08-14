@@ -1,5 +1,5 @@
 // GENERATED from src/d3d11/camera_view.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 bd558a3b6f7cc1d7]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 39c54d1b8f3cec81]
 #include "camera_view.h"
 
 #include <windows.h>
@@ -37,6 +37,15 @@ constexpr uint64_t kMaxReadFaults = 8;
 // game-update case -- stops rather than walking the heap every minute forever.
 constexpr uint32_t kMaxAttempts = 4;
 constexpr uint32_t kRetryCooldown = 3600;
+
+// Rescans after the array has MOVED, which is a different budget from attempts
+// to find it in the first place. Re-finding is cheap to justify -- the array
+// demonstrably exists, we had it a moment ago -- so this is generous. It is
+// bounded at all only so that a pathological session cannot walk the heap
+// forever, and briefly delayed so a move during a mode change is not chased
+// several times over.
+constexpr uint32_t kMaxRescans = 16;
+constexpr uint32_t kRescanCooldown = 240;
 
 struct Region {
     const uint8_t* base;
@@ -76,14 +85,20 @@ struct State {
 
     int       lastView = -1;
     bool      failNoted = false;
-    // Once the record has proven to be somebody else's, STAY at "do not know".
+    // The record has proven to be somebody else's, so RESCAN -- do not latch.
     //
-    // The old code only suppressed the log line: the next in-range garbage was
-    // reported as authoritative again, so a reused block flickered between
-    // "correct" and "wrong" with the wrong readings silently winning. Reuse is
-    // not a transient -- the allocation is gone -- so the answer is gone until
-    // a fresh scan, and the gate falls back to counting keypresses.
-    bool      lost = false;
+    // Three positions have been held here and only the third is right. Trusting
+    // the address forever let reused heap report garbage as a camera view.
+    // Latching to "do not know" stopped that, and killed the feature for the
+    // session the first time the game moved its array -- measured, 40 seconds
+    // into a working session: "ordinal 11 no longer reads as a camera record".
+    //
+    // The anchor check is what makes the third option available. It does not
+    // merely suspect the address is stale, it PROVES it: the first qword is no
+    // longer the type pointer, so this is not the record. The array itself
+    // still exists somewhere, and a scan is exactly the thing that finds it.
+    bool      needRescan = false;
+    uint32_t  rescans = 0;
     uint64_t  readFaults = 0;
 };
 
@@ -341,7 +356,13 @@ void cameraViewConfigure() {
 void cameraViewRequestScan() {
     if (!g_s.track || g_s.usable || g_s.scanning || !g_s.typePtr) return;
     if (g_s.cooldown > 0) return;
-    if (g_s.attempts >= kMaxAttempts) {
+    // A rescan after a move does not spend the find-it-first-time budget.
+    if (g_s.needRescan) {
+        if (g_s.rescans >= kMaxRescans) return;
+        ++g_s.rescans;
+        g_s.needRescan = false;
+        g_s.attempts = 0;      // this is a re-find, not another failed search
+    } else if (g_s.attempts >= kMaxAttempts) {
         // Once, so the log distinguishes "gave up" from "never asked". The last
         // flight could not tell those apart and neither could I.
         if (!g_s.exhaustedNoted) {
@@ -370,7 +391,7 @@ void cameraViewTick() {
 }
 
 int cameraViewCurrent() {
-    if (!g_s.track || !g_s.usable || g_s.lost) return -1;
+    if (!g_s.track || !g_s.usable) return -1;
     if (g_s.ordinal >= g_s.records.size()) return -1;
     const uint32_t v = recordValue(g_s.ordinal);
     // Outside the range means the record has been reused and the answer would
@@ -382,15 +403,22 @@ int cameraViewCurrent() {
         if (out >= 0) {
             Log::get().note("camera view is %d (ordinal %zu, read from the game)",
                             out, g_s.ordinal);
-        } else if (!g_s.failNoted) {
-            g_s.failNoted = true;
-            g_s.lost = true;
-            Log::get().note("camera view: ordinal %zu no longer reads as a camera "
-                            "record, so that heap block has been reused. LATCHED "
-                            "to \"do not know\" -- the allocation is gone, and a "
-                            "later in-range value from whatever owns it now would "
-                            "be garbage that happens to look plausible. Counting "
-                            "keypresses from here.", g_s.ordinal);
+        } else {
+            // Not a latch: the array moved, so go and find it again. The
+            // anchor check proved this address is no longer a record of ours,
+            // which also means a scan can tell the real one from garbage.
+            g_s.usable = false;
+            g_s.needRescan = true;
+            g_s.cooldown = kRescanCooldown;
+            if (!g_s.failNoted) {
+                g_s.failNoted = true;
+                Log::get().note("camera view: ordinal %zu no longer reads as a "
+                                "camera record, so the game has moved its camera "
+                                "settings. Scanning again shortly to find where "
+                                "they went; the offset will not engage until it "
+                                "does. This is expected occasionally and is not "
+                                "a fault.", g_s.ordinal);
+            }
         }
     }
     return out;

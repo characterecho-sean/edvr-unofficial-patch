@@ -1,5 +1,5 @@
 // GENERATED from tools/gate_test/gate_test.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 301e174e242b9eb0]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 c841c2bae080427b]
 // gate_test -- replays frame sequences through the head-offset gate.
 //
 // WHY
@@ -251,6 +251,44 @@ int main(int argc, char** argv) {
     check(true, "in the camera");
     idleFrame(400);
     check(false, "400 frames of neither panel nor scene");
+
+    // A SECOND PRESS WHILE STILL IN FIRST PERSON is still an entry.
+    //
+    // Measured in a real session: two presses 1.2 s apart while entering the
+    // camera, the panel not yet stopped, and the blind toggle read the second
+    // as leaving. Every later entry then needed an even number of presses.
+    // The panel being up is proof the player is not in the camera, so there is
+    // nothing to toggle out of.
+    begin(true);
+    headOffsetGateSetView(g_wantView);
+    panelFrame(200);
+    headOffsetGateKeyPressed();      // the player presses...
+    panelFrame(1);
+    headOffsetGateKeyPressed();      // ...and presses again, still on the panel
+    panelFrame(2);
+    sceneFrame(4);
+    check(true, "two presses while the panel was still up, then the camera");
+
+    // ...and three presses is no different from one, for the same reason.
+    begin(true);
+    headOffsetGateSetView(g_wantView);
+    panelFrame(200);
+    headOffsetGateKeyPressed();
+    headOffsetGateKeyPressed();
+    headOffsetGateKeyPressed();
+    panelFrame(2);
+    sceneFrame(4);
+    check(true, "three presses while the panel was up");
+
+    // But IN the camera, a second press still means leave -- that is the case
+    // the panel cannot answer, and the toggle has to survive there.
+    begin(true);
+    headOffsetGateSetView(g_wantView);
+    enterCamera();
+    check(true, "in the camera");
+    headOffsetGateKeyPressed();
+    sceneFrame(2);
+    check(false, "pressing again IN the camera still leaves");
 
     // -------------------------------------------------------------- intent
     //

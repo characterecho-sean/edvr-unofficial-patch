@@ -1,5 +1,5 @@
 // GENERATED from src/d3d11/head_offset_gate.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 0e0aade0a6fa8019]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 013f516576c58266]
 #include "head_offset_gate.h"
 
 #include "../common/config.h"
@@ -121,7 +121,26 @@ void headOffsetGateSetKeyBound(bool bound) { g.gateKeyBound = bound; }
 
 void headOffsetGateKeyPressed() {
     g.gateHaveKey = true;
-    g.gateIntent = !g.gateIntent;
+    // A press while the FLAT PANEL is up can only mean "enter".
+    //
+    // A blind toggle assumes this module's idea of where the player is has
+    // stayed in step with the player's, and any extra or missed press inverts
+    // it for the rest of the session. Measured: two presses 1.2 s apart while
+    // entering the camera -- the panel had not stopped yet, so the second one
+    // was made from first person -- and the toggle read the second as leaving.
+    // Every later entry then needed an even number of presses to work.
+    //
+    // The panel is proof, not inference: it is composited in first person and
+    // not in the external camera (6aa.4). While it is up the player is
+    // demonstrably NOT in the camera, so there is nothing to toggle out of and
+    // a press means one thing. The toggle survives only where the panel cannot
+    // answer -- in the camera, where pressing again is genuinely "leave".
+    const bool panelUpNow = g.gateSincePanel <= 2 && g.gatePanelRun > 0;
+    if (panelUpNow && !g.gateInCamera) {
+        g.gateIntent = true;
+    } else {
+        g.gateIntent = !g.gateIntent;
+    }
     // The AGE is reset here, and it was not, which broke the second entry into
     // the camera in every session.
     //
@@ -145,11 +164,14 @@ void headOffsetGateKeyPressed() {
     // REMEMBERS it, and the next toggle lands on the same one. So resetting to
     // 0 on entry does not resynchronise the count, it desynchronises it by
     // exactly however far the player had cycled before.
-    Log::get().note("external camera key pressed: intent %s. View index still %d "
+    Log::get().note("external camera key pressed: intent %s%s. View index still %d "
                     "(not reset -- the game remembers the view across toggles).",
                     g.gateIntent ? "SET -- the head offset may arm when the flat "
                                    "panel stops"
                                  : "CLEARED -- the head offset comes off now",
+                    panelUpNow && !g.gateInCamera
+                        ? " (the flat panel is up, so this can only be an entry)"
+                        : "",
                     g.gateViewIndex);
 }
 
