@@ -1,5 +1,5 @@
 // GENERATED from src/d3d11/head_offset_gate.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 ea42dd628ebab926]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 70d45b0a2886db3d]
 #include "head_offset_gate.h"
 
 #include "../common/config.h"
@@ -40,8 +40,8 @@ struct Gate {
     // Set by headOffsetGateSetView. -1 means nobody can tell us, so the
     // keypress count stands.
     int      viewOverride = -1;
-    // The one-frame edge behind headOffsetGatePanelFirstSeen.
-    bool     panelFirstSeen = false;
+    // Panel composited, real scene in the eyes, and the panel run settled.
+    bool     settledOnFoot = false;
 };
 
 Gate g;
@@ -171,10 +171,10 @@ void headOffsetGateSetView(int view) { g.viewOverride = view; }
 
 bool headOffsetGateWantsPanel() { return g.gateWantsPanel; }
 
-bool headOffsetGatePanelFirstSeen() { return g.panelFirstSeen; }
+bool headOffsetGateSettledOnFoot() { return g.settledOnFoot; }
 
 void headOffsetGateFrame(uint32_t frameNo, uint32_t panelDraws, uint32_t eyeDraws) {
-    g.panelFirstSeen = false;   // a one-frame edge, cleared before it can be set
+    g.settledOnFoot = false;    // recomputed every frame, below
     if (!g.gateWantsPanel) {
         // Switched off: CLEAR, do not freeze.
         //
@@ -198,13 +198,13 @@ void headOffsetGateFrame(uint32_t frameNo, uint32_t panelDraws, uint32_t eyeDraw
     // the same frames is a separate fact, and assuming they were the same
     // cost a session: the override's note appeared and the gate's counter
     // was never confirmed to have moved at all.
+    // SETTLED ON FOOT: panel composited, a real scene in the eyes, and the
+    // panel run long enough to mean it. Recomputed every frame rather than
+    // latched on the first panel sighting -- see the header for what that cost.
+    g.settledOnFoot = panelNow && sceneNow && g.gatePanelRun > 30;
+
     if (panelNow && !g.gatePanelSeenNoted) {
         g.gatePanelSeenNoted = true;
-        // Published rather than acted on. This is the first frame the game
-        // is known to be loaded AND the player known to be on foot, which is
-        // a useful moment to hang private diagnostics off; the gate itself has
-        // no business knowing what they are.
-        g.panelFirstSeen = true;
         Log::get().note("head offset gate: the flat panel is being counted "
                         "(first seen at frame %u). It needs 30 such frames "
                         "before it will arm.", frameNo);

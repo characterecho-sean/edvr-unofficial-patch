@@ -1,5 +1,5 @@
 // GENERATED from src/d3d11/camera_view.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 93f25cf02880460c]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 9ac3e1b30cf5cb19]
 #include "camera_view.h"
 
 #include <windows.h>
@@ -32,6 +32,12 @@ constexpr uint64_t kMaxFaults = 4096;
 // means that address is gone, not that we were unlucky.
 constexpr uint64_t kMaxReadFaults = 8;
 
+// Four attempts, a minute apart. Enough to cover a slow load or a player who
+// reaches the surface late; few enough that a genuinely wrong anchor -- the
+// game-update case -- stops rather than walking the heap every minute forever.
+constexpr uint32_t kMaxAttempts = 4;
+constexpr uint32_t kRetryCooldown = 3600;
+
 struct Region {
     const uint8_t* base;
     size_t         size;
@@ -55,6 +61,16 @@ struct State {
 
     bool      scanning = false;
     bool      scanned = false;
+    // RETRY, because "the right moment to scan" is a judgement and it has
+    // already been wrong twice: once at DLL-attach with 127 MB allocated, and
+    // once four seconds after launch with 5 GB of an eventual 11 GB. Both times
+    // the scan latched its failure and never looked again, so a single bad
+    // guess about timing disabled the feature for the whole session.
+    //
+    // A scan that finds nothing usable is now an attempt, not a verdict.
+    bool      usable = false;
+    uint32_t  attempts = 0;
+    uint32_t  cooldown = 0;
     std::vector<const uint8_t*> records;
 
     int       lastView = -1;
@@ -240,9 +256,20 @@ uint32_t recordValue(size_t i) {
     return v;
 }
 
+// Called when a scan completes. Sets `usable` only if the ordinal is really
+// there and really plausible; anything else is a failed attempt that will be
+// retried.
 void finishScan() {
     g_s.scanning = false;
     g_s.scanned = true;
+    ++g_s.attempts;
+    g_s.cooldown = kRetryCooldown;
+    const char* retry =
+        g_s.attempts < kMaxAttempts
+            ? " Trying again in about a minute, in case this ran before the game "
+              "had finished loading."
+            : " That was the last attempt; the view will be counted from "
+              "keypresses for the rest of this session.";
 
     if (g_s.records.empty()) {
         Log::get().note(
@@ -252,6 +279,7 @@ void finishScan() {
             "(0x%llX) no longer points at the right thing.",
             (double)g_s.bytesScanned / (1024.0 * 1024.0),
             (unsigned long long)g_s.typeOffset);
+        Log::get().note("camera view:%s", retry);
         return;
     }
     if (g_s.ordinal >= g_s.records.size()) {
@@ -261,9 +289,14 @@ void finishScan() {
                         "d3d11.camera_index_type_offset moved. Falling back to "
                         "counting keypresses.",
                         g_s.records.size(), g_s.ordinal);
+        Log::get().note("camera view:%s", retry);
         return;
     }
     const uint32_t v = recordValue(g_s.ordinal);
+    if (v <= g_s.plausibleMax) {
+        g_s.usable = true;      // found it; no more attempts
+        g_s.cooldown = 0;
+    }
     Log::get().note("camera view: %zu record(s) over %.0f MB; tracking ordinal %zu, "
                     "which reads %u%s.",
                     g_s.records.size(),
@@ -303,7 +336,8 @@ void cameraViewConfigure() {
 }
 
 void cameraViewRequestScan() {
-    if (!g_s.track || g_s.scanned || g_s.scanning || !g_s.typePtr) return;
+    if (!g_s.track || g_s.usable || g_s.scanning || !g_s.typePtr) return;
+    if (g_s.cooldown > 0 || g_s.attempts >= kMaxAttempts) return;
     g_s.scanning = true;
     g_s.records.clear();
     g_s.regionIndex = 0;
@@ -314,12 +348,13 @@ void cameraViewRequestScan() {
 }
 
 void cameraViewTick() {
+    if (g_s.cooldown > 0) --g_s.cooldown;
     if (!g_s.scanning) return;
     if (scanSlice()) finishScan();
 }
 
 int cameraViewCurrent() {
-    if (!g_s.track || !g_s.scanned || g_s.lost) return -1;
+    if (!g_s.track || !g_s.usable || g_s.lost) return -1;
     if (g_s.ordinal >= g_s.records.size()) return -1;
     const uint32_t v = recordValue(g_s.ordinal);
     // Outside the range means the record has been reused and the answer would

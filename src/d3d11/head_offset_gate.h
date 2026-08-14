@@ -1,5 +1,5 @@
 // GENERATED from src/d3d11/head_offset_gate.h in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 70d6974806df4217]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 43e1ded01080ae90]
 // When to move the head pose: on foot, in the external camera, and nowhere
 // else.
 //
@@ -104,11 +104,22 @@ bool headOffsetGateWantsPanel();
 // The caller resets its own counters; this does not touch them.
 void headOffsetGateFrame(uint32_t frameNo, uint32_t panelDraws, uint32_t eyeDraws);
 
-// True on the ONE frame the flat panel was first counted -- the earliest moment
-// the game is known to be loaded and the player known to be on foot.
+// Is the player SETTLED ON FOOT right now -- panel composited, a real scene in
+// the eyes, and the panel run long enough to mean it?
 //
-// Exists so private diagnostics can hang off that moment without this module
-// knowing what they are. Public builds ignore it.
-bool headOffsetGatePanelFirstSeen();
+// It used to be "the first frame the panel was seen", and that was wrong in a
+// way only a differently-configured build could show. The panel is recognised
+// by its size, which with the resolution fix off is 1920x1080 -- and so is
+// plenty of what the main menu draws. So on a default install the first
+// sighting landed FOUR SECONDS after launch, in the menu, and anything hung off
+// it ran against a process that had allocated 5 GB of its eventual 11 GB.
+// Measured: 5 records found instead of 17. The private build only worked
+// because its raised panel resolution made the size test selective by accident.
+//
+// All three conditions together are what "the player is on foot in the game"
+// looks like: the panel is being composited, the helmet HUD is putting hundreds
+// of draws into the eyes (the menu manages about twenty), and it has been that
+// way for long enough not to be a transient.
+bool headOffsetGateSettledOnFoot();
 
 }  // namespace edvr
