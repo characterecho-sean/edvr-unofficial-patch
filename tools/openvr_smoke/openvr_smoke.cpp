@@ -1,5 +1,5 @@
 // GENERATED from tools/openvr_smoke/openvr_smoke.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 36d76d159724dd7f]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 9aba43479b1785f0]
 // openvr_smoke -- checks the openvr proxy's startup path without the game.
 //
 // The thing under test is that the proxy does NOT load the real openvr_api.dll
@@ -146,6 +146,85 @@ int frameFlagChecks() {
     edvr::clearGlitchFrame();
 
     if (bad == 0) printf("  ok    the mode flag round-trips and is independent\n");
+    return bad;
+}
+
+// The heartbeat, which is the part that decides whether a player's viewpoint
+// stays moved after the gate stops running.
+//
+// Written as a test because the failure is invisible in every log: a frozen
+// gate publishes nothing, so nothing says the flag went stale, and the symptom
+// is "the offset is applied in the cockpit" several minutes later.
+int liveFlagChecks() {
+    int bad = 0;
+    const uint32_t kMaxAge = 5;
+
+    // FIRST, before anything in this process has published: the d3d11-absent
+    // case, where openvr_api.dll is installed and its partner is not. There is
+    // nobody to ask, which is not the same as being told no, and guessing yes
+    // would apply the offset in every mode with no gate at all.
+    //
+    // This assertion is why liveFlagChecks runs before frameFlagChecks: once
+    // anything has called setExternalCameraOnFoot, the "never published" state
+    // is unreachable for the rest of the process and the case goes untested.
+    if (edvr::externalCameraOnFootLive(kMaxAge)) {
+        printf("  FAIL  the live flag read true with nothing ever published\n");
+        ++bad;
+    }
+
+    // A writer that keeps publishing keeps it live, including across a run of
+    // frames longer than the staleness window -- the heartbeat is the WRITES,
+    // not the changes.
+    bool heldLive = true;
+    for (uint32_t i = 0; i < kMaxAge * 4; ++i) {
+        edvr::setExternalCameraOnFoot(true);
+        if (!edvr::externalCameraOnFootLive(kMaxAge)) heldLive = false;
+    }
+    if (!heldLive) {
+        printf("  FAIL  an actively refreshed flag went stale while being written\n");
+        ++bad;
+    }
+
+    // Now the writer stops. The raw flag still says yes -- that is the whole
+    // hazard -- and the live one must give up within the window.
+    uint32_t agedOutAt = 0;
+    for (uint32_t i = 1; i <= kMaxAge * 3; ++i) {
+        if (!edvr::externalCameraOnFootLive(kMaxAge)) { agedOutAt = i; break; }
+    }
+    if (!edvr::externalCameraOnFoot()) {
+        printf("  FAIL  the raw flag did not stay set -- the test is not testing "
+               "the stuck case\n");
+        ++bad;
+    }
+    if (agedOutAt == 0) {
+        printf("  FAIL  a frozen gate never aged out; the offset would stay "
+               "applied for the session\n");
+        ++bad;
+    } else if (agedOutAt <= kMaxAge) {
+        printf("  FAIL  aged out after %u frames, inside the %u-frame window\n",
+               agedOutAt, kMaxAge);
+        ++bad;
+    }
+
+    // And it recovers: a gate that starts publishing again is believed again,
+    // so a single fault-and-recover does not disable the feature for good.
+    edvr::setExternalCameraOnFoot(true);
+    if (!edvr::externalCameraOnFootLive(kMaxAge)) {
+        printf("  FAIL  a gate that resumed publishing was not believed again\n");
+        ++bad;
+    }
+
+    // A live NO is still a no. The stamp moving must not be mistaken for the
+    // answer being yes.
+    edvr::setExternalCameraOnFoot(false);
+    if (edvr::externalCameraOnFootLive(kMaxAge)) {
+        printf("  FAIL  a refreshed 'off' read as on\n");
+        ++bad;
+    }
+    edvr::setExternalCameraOnFoot(false);
+
+    if (bad == 0)
+        printf("  ok    the mode flag ages out when the gate stops publishing\n");
     return bad;
 }
 
@@ -308,6 +387,14 @@ int main(int argc, char** argv) {
 
     // Shared code with no other coverage. Runs last because it touches nothing
     // the assertions above depend on.
+    //
+    // liveFlagChecks BEFORE frameFlagChecks, and the order is load-bearing: its
+    // first assertion is the "d3d11 never published" case, which stops existing
+    // the moment anything calls setExternalCameraOnFoot.
+    if (liveFlagChecks() != 0) {
+        printf("\nOPENVR SMOKE FAILED\n");
+        return 1;
+    }
     if (frameFlagChecks() != 0) {
         printf("\nOPENVR SMOKE FAILED\n");
         return 1;

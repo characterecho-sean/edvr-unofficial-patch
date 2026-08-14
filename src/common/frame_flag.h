@@ -1,5 +1,5 @@
 // GENERATED from src/common/frame_flag.h in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 95719844830959cd]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 96efa584b7275e33]
 // A one-bit channel between the two proxies, for the frame that must not be
 // shown.
 //
@@ -69,7 +69,41 @@ bool glitchConsumerPresent();
 //
 // UNLIKE the glitch flag, this one is a STATE and persists across frames. It is
 // not cleared at the frame boundary; it is cleared when the panel comes back.
+// Call this EVERY frame, with the current answer, not only when it changes. The
+// repetition is the point: it is also the heartbeat that externalCameraOnFootLive
+// reads, so "d3d11 says no" and "d3d11 has stopped saying anything" stay
+// distinguishable.
 void setExternalCameraOnFoot(bool on);
+
+// The last value written, whenever it was written.
+//
+// Prefer externalCameraOnFootLive for anything that MOVES THE PLAYER. This one
+// cannot tell a current "yes" from a "yes" left behind by a writer that has
+// since stopped, and the header used to say as much without doing anything
+// about it: "a wrong answer here does not expire on its own".
 bool externalCameraOnFoot();
+
+// True only if d3d11.dll says yes AND has said something within maxAgeFrames
+// calls of this function.
+//
+// WHY A HEARTBEAT. The writer runs inside a fault-budgeted SEH guard on the
+// Present path, and that guard stops running its body permanently after a few
+// faults. The gate would then freeze at whatever it last published. Frozen ON
+// means the head offset stays applied in every mode -- including the cockpit --
+// for the rest of the session, with both logs still saying it is gated, because
+// no line is printed for a decision that is never re-made. The same freeze
+// follows from the d3d11 hook being lost to a recreated device or swapchain.
+//
+// This is the argument the openvr half already makes for keeping the offset
+// itself outside its own budgeted guard: a fault budget is right for logging,
+// where losing a line costs nothing, and wrong for anything that changes what
+// the player sees. The writer here cannot move out of its guard -- it is
+// derived from the render state the guard exists to inspect -- so the reader
+// stops trusting it instead.
+//
+// Counted in READER frames rather than time. Both halves run once per rendered
+// frame, so the units match without a clock, and a stall that freezes both
+// halves together does not age the flag while nothing is being drawn anyway.
+bool externalCameraOnFootLive(uint32_t maxAgeFrames);
 
 }  // namespace edvr

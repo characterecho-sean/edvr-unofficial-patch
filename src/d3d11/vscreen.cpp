@@ -1,4 +1,5 @@
 ﻿#include "vscreen.h"
+#include "head_offset_gate.h"
 
 #include <windows.h>
 
@@ -146,6 +147,14 @@ struct State {
 
     uint32_t eyeDrawsThisFrame = 0;
     uint32_t eyeDrawsLastFrame = 0;
+    // Draws that sampled the flat on-foot panel this frame. The head-offset
+    // gate's other input: the panel being composited is direct evidence of
+    // on-foot first person, which is what tells it from the external camera
+    // that mode turns into.
+    uint32_t panelCompositeDraws = 0;
+    // Frames since the hooks were installed. Only the gate's log lines use it,
+    // to say when the panel was first counted.
+    uint32_t frameNo = 0;
     // Keep counting eye draws even when the panel distance fix is off, because
     // the transition-flash detector cannot act without the count.
     bool     countForFlashFix = false;
@@ -334,6 +343,22 @@ bool beginPanelOverride(ID3D11DeviceContext* self) {
     }
     if (!s->rtv0Eye) return false;
     ++s->eyeDrawsThisFrame;
+
+    // The head-offset gate's signal, recorded BEFORE the "does anything want to
+    // act" test below, and NOT conditional on the distance fix.
+    //
+    // This is an observation, not an intervention: it says the flat panel was
+    // on screen this frame. Putting it after the early return would tie one
+    // feature's inputs to another feature's setting, so turning the panel
+    // distance off would silently stop the head offset ever arming -- with
+    // every other part of it working and nothing saying why.
+    //
+    // srv0IsPanelSized memoises against the binding generation, so asking here
+    // and again below is one resolve per draw, not two. It is skipped entirely
+    // when the gate is off, because the answer costs a GetDesc and nothing
+    // wants it.
+    if (headOffsetGateWantsPanel() && srv0IsPanelSized(s)) ++s->panelCompositeDraws;
+
     if (!s->distanceEnabled) return false;
 
     // An eye-sized target is not enough on its own: in the cockpit hundreds of
@@ -680,6 +705,12 @@ void vScreenRefreshConfig() {
     s->distanceEnabled = s->distanceScale != 1.0f;
     s->distanceIndex = readDistanceIndex(cfg);
     s->countForFlashFix = glitchFrameNeedsEyeDraws();
+    // Every fix.head_offset_* key, on the reload path as well as the startup
+    // one. A config reader on only one of the two is a specific repeatable bug
+    // -- reload-only means the value stays its C++ initialiser for the whole
+    // session -- and it cost a flight when fix.head_offset_gate did exactly
+    // that.
+    headOffsetGateConfigure();
 
     if (wasVoid != s->blackVoid || wasScale != s->distanceScale) {
         Log::get().note("vScreen config reloaded: black void %s, panel distance x%.3f "
@@ -773,13 +804,19 @@ void vScreenFrameBoundary() {
     // The flash detector needs the count for the frame that just ended, to tell
     // a rendered scene from a menu. It has to be told before the counter resets.
     glitchFrameBoundary(s->eyeDrawsLastFrame);
+    // The gate decides on the counts for the frame that just ended, so it is
+    // told before they reset -- same rule as the flash detector above.
+    headOffsetGateFrame(s->frameNo, s->panelCompositeDraws, s->eyeDrawsThisFrame);
+    s->panelCompositeDraws = 0;
     s->eyeDrawsThisFrame = 0;
+    ++s->frameNo;
 }
 
 void installVScreenFixes(ID3D11Device* device) {
     if (!device || g_state) return;
 
     Config& cfg = Config::get();
+    headOffsetGateConfigure();
     const bool wantVoid = cfg.getBool("fix.black_void", true);
     const float scale = cfg.getFloat("fix.panel_distance", 1.0f);
     // Install the hooks whenever EITHER fix could be wanted now or later. Both
@@ -796,6 +833,7 @@ void installVScreenFixes(ID3D11Device* device) {
     // them: armed in the log, then nothing, and not even the give-up notice,
     // because the frame counter it waits on also lives in here.
     if (!wantVoid && scale == 1.0f && !glitchFrameNeedsEyeDraws() &&
+        !headOffsetGateWantsPanel() &&
         !cfg.getBool("advanced.panel_hooks_always", true)) {
         return;
     }

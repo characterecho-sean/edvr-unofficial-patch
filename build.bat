@@ -129,7 +129,7 @@ cl.exe %CFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "%ROOT%\src\d3d11\d3d11_proxy.cpp" "%ROOT%\src\d3d11\device_hook.cpp" ^
     "%ROOT%\src\d3d11\exposure_fix.cpp" "%ROOT%\src\d3d11\vscreen.cpp" ^
     "%ROOT%\src\d3d11\glitch_frame.cpp" "%ROOT%\src\d3d11\vscreen_res.cpp" ^
-    "%ROOT%\src\d3d11\binding_shadow.cpp"
+    "%ROOT%\src\d3d11\binding_shadow.cpp" "%ROOT%\src\d3d11\head_offset_gate.cpp"
 if errorlevel 1 ( echo [edvr] ERROR: compile failed & exit /b 1 )
 
 link.exe /nologo /DLL /MACHINE:X64 /INCREMENTAL:NO ^
@@ -219,6 +219,18 @@ cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /DNDEBUG /LD ^
     "%ROOT%\tools\fakechain\fakechain.cpp" /link /INCREMENTAL:NO kernel32.lib
 if errorlevel 1 ( echo [edvr] ERROR: fakechain build failed & exit /b 1 )
 echo [edvr] built %BUILD%\fakechain.dll
+
+echo [edvr] === pose_test.exe ===
+if not exist "%OBJ%\posetest" mkdir "%OBJ%\posetest"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\posetest"\ ^
+    /Fe"%BUILD%\pose_test.exe" "%ROOT%\tools\pose_test\pose_test.cpp" ^
+    /link /INCREMENTAL:NO
+if errorlevel 1 ( echo [edvr] ERROR: pose_test build failed & exit /b 1 )
+"%BUILD%\pose_test.exe" || (
+    echo [edvr] ERROR: the head pose arithmetic is wrong
+    exit /b 1
+)
 
 echo [edvr] === fakevr.dll + openvr_smoke.exe ===
 if not exist "%OBJ%\fakevr" mkdir "%OBJ%\fakevr"

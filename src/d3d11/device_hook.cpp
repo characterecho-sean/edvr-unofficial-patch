@@ -7,6 +7,7 @@
 #include "../common/config.h"
 #include "../common/guard.h"
 #include "../common/hotkey.h"
+#include "head_offset_gate.h"
 #include "../common/log.h"
 #include "../common/vtable_hook.h"
 #include "binding_shadow.h"
@@ -50,6 +51,14 @@ struct State {
 
     Hotkey toggleKey;
     Hotkey dumpKey;
+    // The external camera, and the key that cycles its view.
+    //
+    // A keypress is not a heuristic, and it is the whole reason this feature
+    // can tell entering the external camera from boarding a ship: render state
+    // alone cannot (EVIDENCE 6ac.6b). Unbound by default, which leaves the gate
+    // on its weaker timing-window path rather than guessing.
+    Hotkey externalCamKey;
+    Hotkey externalCamNextKey;
     uint64_t frameCounter = 0;
 };
 
@@ -85,6 +94,12 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
         // Deliberately not part of the toggle: it reports, it does not change
         // anything, so there is no reason for it to follow the fix being off.
         if (g_state->dumpKey.pressed()) dumpCameraRing();
+        // Told to the gate, not acted on here. These keys are the player's OWN
+        // Elite bindings: EDVR does not send them, press them or interfere with
+        // them -- it watches for the same press the game gets, so it knows
+        // which mode the player just asked for.
+        if (g_state->externalCamKey.pressed()) headOffsetGateKeyPressed();
+        if (g_state->externalCamNextKey.pressed()) headOffsetGateViewBumped();
         // One per-frame invalidation for both fixes, before either boundary.
         //
         // This used to be two, with opposite policies: vscreen dropped its
@@ -128,6 +143,10 @@ State& ensureState() {
             Config::get().getString("hotkey.toggle_exposure", "SCROLLLOCK").c_str()));
         g_state->dumpKey.setKey(virtualKeyFromName(
             Config::get().getString("hotkey.dump_camera", "PAUSE").c_str()));
+        g_state->externalCamKey.setKey(virtualKeyFromName(
+            Config::get().getString("hotkey.external_camera", "").c_str()));
+        g_state->externalCamNextKey.setKey(virtualKeyFromName(
+            Config::get().getString("hotkey.external_camera_next", "").c_str()));
     }
     return *g_state;
 }
