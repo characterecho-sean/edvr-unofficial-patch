@@ -63,11 +63,12 @@ camera, and the surface, the ship you just landed, and the room you are standing
 in all have depth for the first time.
 
 **It gives you nothing you could not already do.** The external camera is
-Elite's own, on your own key, and it is a look-around mode: you cannot shoot,
-scan, open a panel, use a terminal or touch anything in the world from inside
-it. To play, you switch back to first person exactly as you do now. Explorer Cam
-changes where the camera is while you are already looking around, and nothing
-else — no reach, no information, no advantage a player without it does not have.
+Elite's own, on your own key. You can move and look around in it, but you cannot
+interact with the world: no shooting, scanning, opening a panel, using a
+terminal or picking anything up. To do any of that you switch back to first
+person exactly as you do now. Explorer Cam changes where the camera is while you
+are already in that mode, and nothing else — no reach, no information, no
+advantage a player without it does not have.
 
 It is off until you tell it your camera key, and it takes a few minutes to set
 up. See [Explorer Cam](#explorer-cam) below.
@@ -93,10 +94,10 @@ this applies.
 This matters more than the effect does, so it is worth being plain about.
 
 The external camera is Elite's own feature, opened with your own binding, and it
-is a **look-around mode**. Inside it you cannot shoot, scan, mine, open a panel,
-use a terminal, pick anything up, or interact with the world in any way. Your
-commander stands still. To do anything at all you switch back to first person —
-the flat screen — exactly as you do today.
+lets you move and look around, but **not act**. Inside it you cannot shoot,
+scan, mine, open a panel, use a terminal, pick anything up, or interact with the
+world in any way. To do any of that you switch back to first person — the flat
+screen — exactly as you do today.
 
 Explorer Cam changes **where the camera is while you are already in that mode**,
 and nothing else. It does not extend how far you can see, reveal anything the

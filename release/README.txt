@@ -30,10 +30,11 @@ viewpoint at your commander's head while you are in that camera and the world
 finally has distance in it.
 
 It gives you nothing you could not already do. The external camera is Elite's
-own, on your own key, and it is a look-around mode - you cannot shoot, scan,
-open a panel, use a terminal or touch anything from inside it. To play you
-switch back to first person exactly as you do now. Explorer Cam changes where
-the camera is while you are already looking around, and nothing else.
+own, on your own key. You can move and look around in it, but you cannot
+interact with the world: no shooting, scanning, opening a panel, using a
+terminal or picking anything up. To do any of that you switch back to first
+person exactly as you do now. Explorer Cam changes where the camera is while
+you are already in that mode, and nothing else.
 
 It is off until you tell it your camera key. See EXPLORER CAM below.
 
@@ -156,10 +157,10 @@ while you are in that camera.
 It cannot make first person 3D and does not try. The flat screen is flat.
 
 IT GIVES YOU NO CAPABILITY YOU DO NOT ALREADY HAVE. The external camera is
-Elite's own feature, opened with your own binding, and it is a look-around mode:
-inside it you cannot shoot, scan, mine, open a panel, use a terminal, pick
-anything up or interact with the world at all. Your commander stands still. To
-do anything you switch back to first person, exactly as you do today.
+Elite's own feature, opened with your own binding. You can move and look around
+in it, but you cannot act: no shooting, scanning, mining, opening a panel, using
+a terminal or picking anything up. To do any of that you switch back to first
+person, exactly as you do today.
 
 Explorer Cam changes where the camera is while you are already in that mode, and
 nothing else. It does not extend how far you can see, reveal anything the camera
