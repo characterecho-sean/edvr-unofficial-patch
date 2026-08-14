@@ -1,5 +1,5 @@
 // GENERATED from src/openvr/head_offset.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 455cc936e1f8118a]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 ecfe7ae36f820cea]
 #include "head_offset.h"
 
 #include <cmath>
@@ -90,6 +90,17 @@ void headOffsetConfigure() {
     // be the argument of the get, and that check is what stops a documented
     // setting and a read setting drifting apart. Hiding the keys behind a
     // helper that takes only the name would buy three lines and lose that.
+    //
+    // THE CODE DEFAULT IS ZERO WHILE THE INI SHIPS REAL VALUES, and that is
+    // deliberate rather than the mismatch EDVR-96 was about.
+    //
+    // The rule "code defaults must equal ini defaults" exists because a partial
+    // ini otherwise behaves unlike the file somebody is reading -- and for
+    // fix.head_offset_view that was dangerous, because the code's -1 armed in
+    // every camera view while the file said one. The direction of the error is
+    // what matters. Here, zero means "do not move anybody", so a missing or
+    // partial ini leaves the game exactly as it was. Matching the file instead
+    // would move a player's viewpoint using a number they had never seen.
     //
     // FORWARD IS STORED NEGATED, and this is the only place it happens. The
     // tracking frame has -z forward, which is correct and reads backwards to

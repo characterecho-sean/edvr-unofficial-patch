@@ -1,5 +1,5 @@
 // GENERATED from src/d3d11/head_offset_gate.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 63ae381069f8e9d8]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 c3177f599b2aeb04]
 #include "head_offset_gate.h"
 
 #include "../common/config.h"
@@ -26,7 +26,7 @@ struct Gate {
     bool     gateHaveKey = false;      // a press has been seen
     bool     gateKeyBound = false;     // a key is CONFIGURED, pressed or not
     int32_t  gateViewIndex = 0;
-    int32_t  gateWantView = 1;           // -1 = any view; matches edvr.ini
+    int32_t  gateWantView = 2;           // -1 = any view; matches edvr.ini
     int32_t  gateViewCount = 6;          // 0 = do not wrap; matches edvr.ini
     bool     gateHaveNextKey = false;
     bool     gateViewWarned = false;
@@ -91,7 +91,7 @@ void headOffsetGateConfigure() {
         cfg.getIntInRange("fix.head_offset_enter_window", 60, 0, 100000));
     g.gateIntentGrace = static_cast<uint32_t>(
         cfg.getIntInRange("fix.head_offset_intent_grace", 180, 0, 100000));
-    g.gateWantView = cfg.getIntInRange("fix.head_offset_view", 1, -1, 63);
+    g.gateWantView = cfg.getIntInRange("fix.head_offset_view", 2, -1, 63);
     g.gateViewCount = cfg.getIntInRange("fix.head_offset_view_count", 6, 0, 64);
     // The "you have not bound the view key" warning does NOT live here.
     //
@@ -336,7 +336,7 @@ void headOffsetGateFrame(uint32_t frameNo, uint32_t panelDraws, uint32_t eyeDraw
         // at 2, 6, 61 and 2 frames across four sessions.
         //
         // So an unconfigured install would arm on the player walking into their
-        // own ship, and move their viewpoint 2.75 m inside the cockpit until a
+        // own ship, and move their viewpoint into the cockpit until a
         // 30-second ceiling took it off. The consequence class here is "the
         // viewpoint moved in the wrong mode"; evidence that cannot distinguish
         // the modes does not support it, whatever the timing.
