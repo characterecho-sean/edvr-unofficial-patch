@@ -1,5 +1,5 @@
 // GENERATED from src/d3d11/head_offset_gate.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 8f12384c7513de93]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 6859edeef0481cb9]
 #include "head_offset_gate.h"
 
 #include "../common/config.h"
@@ -85,21 +85,13 @@ void headOffsetGateConfigure() {
     // gate working perfectly and nothing saying why -- which is the exact shape
     // of the bug that cost a flight when fix.head_offset_gate was read on the
     // wrong config path.
-    if (g.gateWantView > 0 && !g.gateHaveNextKey && !g.gateViewWarned) {
-        g.gateViewWarned = true;
-        Log::get().note(
-            "head offset: NOT SET UP YET, and this is the expected state on a "
-            "fresh install rather than a fault. fix.head_offset_view = %d, but "
-            "hotkey.external_camera_next is not bound, so the view count cannot "
-            "leave 0 and the offset will never arm.\n"
-            "  To use it: set hotkey.external_camera to YOUR Elite "
-            "external-camera key, hotkey.external_camera_next to your "
-            "next-camera-view key, then get on foot, open the camera and press "
-            "the view key once.\n"
-            "  Or set fix.head_offset_view = -1 to apply the offset in any "
-            "camera view, including the portrait one that faces back at you.",
-            g.gateWantView);
-    }
+    // The "you have not bound the view key" warning does NOT live here.
+    //
+    // It did, and it was wrong the moment a build could read the view from
+    // somewhere else: config time is too early to know whether anything will
+    // supply an index, so it announced that the offset could never arm to a
+    // build where it demonstrably does. It has moved into the frame path,
+    // which can tell. See headOffsetGateFrame.
 }
 
 void headOffsetGateKeyPressed() {
@@ -440,13 +432,17 @@ void headOffsetGateFrame(uint32_t frameNo, uint32_t panelDraws, uint32_t eyeDraw
     // -- which is exactly how it is used, since the camera opens on the
     // portrait view and the useful one is the next -- could then never arm
     // it, because by then the window was long closed.
-    // The GAME's view if it can be read, the keypress count otherwise.
+    // The GAME's view if somebody can read it, the keypress count otherwise.
     //
-    // Counting presses has no origin (6ac.6d): the game remembers the view
-    // across camera toggles, so the count is never known to be right, and a
-    // single missed press desyncs it for the whole session. Ordinal 11 of
-    // the camera settings array is the game's own answer (6ad.8), verified
-    // stable across two launches with entirely different heap bases.
+    // The count is ANCHORED, which 6ac.6d originally denied and has been
+    // corrected: the game's view resets to 0 at every launch and this
+    // counter starts at 0 when the proxy loads, so they are in step by
+    // construction. What the count cannot survive is a MISSED press, which
+    // desyncs it silently for the rest of the session.
+    //
+    // That is what an override is for, and it is strictly better where one
+    // exists: it needs no key bound at all, it cannot drift, and it
+    // corrects a count that already has.
     //
     // -1 means "do not know" -- not scanned yet, no records found, or a
     // value outside the plausible range -- and falls back to the count
@@ -464,6 +460,36 @@ void headOffsetGateFrame(uint32_t frameNo, uint32_t panelDraws, uint32_t eyeDraw
     }
     const bool viewOk =
         g.gateWantView < 0 || g.gateViewIndex == g.gateWantView;
+
+    // Say so when the view can NEVER match, and only then.
+    //
+    // The conditions are checked here rather than at config time because
+    // three of them are only knowable in a frame: whether the player has
+    // actually reached the camera, whether an override is supplying an
+    // index, and whether the count has moved. A build that reads the view
+    // from the game needs no key bound at all, and telling its user to bind
+    // one -- with "the offset will never arm", while it arms -- is worse
+    // than saying nothing.
+    //
+    // Every clause is load-bearing: in the camera (so it is the moment the
+    // player expects something), the view does not match, no key can ever
+    // change it, and nobody is supplying it. That combination is a dead
+    // configuration and nothing else is.
+    if (!g.gateViewWarned && g.gateInCamera && !viewOk && g.gateWantView > 0 &&
+        !g.gateHaveNextKey && g.viewOverride < 0) {
+        g.gateViewWarned = true;
+        Log::get().note(
+            "head offset: NOT SET UP YET, which on a fresh install is the "
+            "expected state rather than a fault. You are in the external "
+            "camera on view %d, fix.head_offset_view wants %d, and nothing "
+            "here can change the view: hotkey.external_camera_next is not "
+            "bound.\n"
+            "  To use it: set hotkey.external_camera_next to YOUR "
+            "next-camera-view key, then press it once in the camera.\n"
+            "  Or set fix.head_offset_view = -1 to apply the offset in any "
+            "camera view, including the portrait one that faces back at you.",
+            g.gateViewIndex, g.gateWantView);
+    }
     const bool wantOffset = g.gateInCamera && viewOk;
     // Published EVERY frame, not only on change, because this call is also
     // the heartbeat openvr_api.dll uses to decide the answer is still being
