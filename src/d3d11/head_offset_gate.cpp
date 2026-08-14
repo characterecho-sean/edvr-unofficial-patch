@@ -1,5 +1,5 @@
 // GENERATED from src/d3d11/head_offset_gate.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 7faf0d2b25db8588]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 8f12384c7513de93]
 #include "head_offset_gate.h"
 
 #include "../common/config.h"
@@ -88,9 +88,16 @@ void headOffsetGateConfigure() {
     if (g.gateWantView > 0 && !g.gateHaveNextKey && !g.gateViewWarned) {
         g.gateViewWarned = true;
         Log::get().note(
-            "fix.head_offset_view = %d, but hotkey.external_camera_next is not "
-            "set, so the view index never leaves 0 and the head offset can never "
-            "arm. Bind that key, or set head_offset_view = -1 for any view.",
+            "head offset: NOT SET UP YET, and this is the expected state on a "
+            "fresh install rather than a fault. fix.head_offset_view = %d, but "
+            "hotkey.external_camera_next is not bound, so the view count cannot "
+            "leave 0 and the offset will never arm.\n"
+            "  To use it: set hotkey.external_camera to YOUR Elite "
+            "external-camera key, hotkey.external_camera_next to your "
+            "next-camera-view key, then get on foot, open the camera and press "
+            "the view key once.\n"
+            "  Or set fix.head_offset_view = -1 to apply the offset in any "
+            "camera view, including the portrait one that faces back at you.",
             g.gateWantView);
     }
 }
