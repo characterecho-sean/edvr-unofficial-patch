@@ -1,5 +1,5 @@
 // GENERATED from src/d3d11/camera_view.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 63213c1a45675313]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 ee175f0592d0f535]
 #include "camera_view.h"
 
 #include <windows.h>
@@ -52,6 +52,26 @@ constexpr uint32_t kMaxRescans = 16;
 // array apart from unrelated objects of the same type scattered elsewhere.
 constexpr size_t kStride = 0x18;
 constexpr uint32_t kRescanCooldown = 240;
+
+// Empty slots the grouping will bridge rather than end a run on. The reasoning,
+// and the field evidence for it, is on cameraViewGroupRuns in the header.
+//
+// Two, not more. One is what has been measured; two gives the same shape a
+// little room without letting unrelated objects a few strides apart be swept
+// into one array.
+constexpr size_t kMaxGap = 2;
+
+// Consecutive frames the chosen record may fail to read before this concludes
+// the array has actually MOVED.
+//
+// Without it, any single bad read spent a rescan -- and a rescan is not cheap:
+// it walks ten gigabytes, and the trigger that starts one may be minutes away.
+// The same user's logs show what that costs, twice, with the array never having
+// moved at all: every scan of a session found it at the same address, and the
+// only thing that had changed was that the records go briefly quiet while the
+// game rebuilds them. Two seconds of holding still is the difference between
+// riding that out and losing the feature for five minutes.
+constexpr uint32_t kMoveGrace = 120;
 
 struct Region {
     const uint8_t* base;
@@ -115,6 +135,9 @@ struct State {
     bool      needRescan = false;
     uint32_t  rescans = 0;
     bool      sawGameplay = false;
+    // Consecutive frames the chosen record has not read as a record. Reset by
+    // any good read, so this counts one episode rather than a session's total.
+    uint32_t  badReads = 0;
     // Faults on the CURRENT record, reset whenever a new one is chosen.
     //
     // It never reset, and finishScan's own candidate probes charged it -- so
@@ -351,25 +374,21 @@ void finishScan() {
         return;
     }
 
-    // Runs of consecutive records at the array's own stride.
+    // Runs of records at the array's own stride, bridging the occasional empty
+    // slot -- see cameraViewGroupRuns for why the bridging is load-bearing.
     std::sort(g_s.records.begin(), g_s.records.end());
-    struct Run { const uint8_t* base; size_t count; };
-    std::vector<Run> runs;
-    for (size_t i = 0; i < g_s.records.size(); ++i) {
-        if (!runs.empty() &&
-            g_s.records[i] == runs.back().base + runs.back().count * kStride) {
-            ++runs.back().count;
-        } else {
-            runs.push_back({g_s.records[i], 1});
-        }
-    }
+    const std::vector<CameraViewRun> runs =
+        cameraViewGroupRuns(g_s.records, kStride, kMaxGap);
 
     // A candidate is a run long enough to hold the ordinal, whose value there
     // looks like a view. Both halves matter: length alone would accept any
     // long stretch, and plausibility alone would accept a lone small integer.
+    //
+    // SLOTS, not filled records: the ordinal is a position in the array, and a
+    // hole earlier in the run does not move it.
     std::vector<size_t> candidates;
     for (size_t r = 0; r < runs.size(); ++r) {
-        if (runs[r].count <= g_s.ordinal) continue;
+        if (runs[r].slots <= g_s.ordinal) continue;
         const uint32_t v = recordValue(runs[r].base + g_s.ordinal * kStride);
         if (v <= g_s.plausibleMax) candidates.push_back(r);
     }
@@ -383,13 +402,18 @@ void finishScan() {
                     g_s.records.size(),
                     (double)g_s.bytesScanned / (1024.0 * 1024.0), runs.size(),
                     kStride, candidates.size(), g_s.ordinal);
+    // Slots AND filled, because they came apart in the field and the log said
+    // only "record(s)" -- which read as a short array rather than as a whole one
+    // with a hole in it, and that is the difference between "the anchor is
+    // wrong" and "the grouping is wrong".
     for (size_t r = 0; r < runs.size() && r < 8; ++r) {
-        const uint32_t v = runs[r].count > g_s.ordinal
+        const uint32_t v = runs[r].slots > g_s.ordinal
                                ? recordValue(runs[r].base + g_s.ordinal * kStride)
                                : 0xFFFFFFFFu;
-        Log::get().note("camera view:   run %zu at %p, %zu record(s)%s",
-                        r, (const void*)runs[r].base, runs[r].count,
-                        runs[r].count > g_s.ordinal
+        Log::get().note("camera view:   run %zu at %p, %zu slot(s), %zu filled%s",
+                        r, (const void*)runs[r].base, runs[r].slots,
+                        runs[r].present,
+                        runs[r].slots > g_s.ordinal
                             ? (v <= g_s.plausibleMax ? " -- ordinal reads a plausible view"
                                                      : " -- ordinal reads something else")
                             : " -- too short for the ordinal");
@@ -404,6 +428,7 @@ void finishScan() {
         // against it.
         g_s.readFaults = 0;
         g_s.readFaultsNoted = false;
+        g_s.badReads = 0;
         Log::get().note("camera view: tracking run %zu, ordinal %zu, which reads "
                         "%u -- a plausible view.",
                         candidates[0], g_s.ordinal, recordValue(g_s.chosen));
@@ -506,6 +531,23 @@ void cameraViewTick(uint32_t eyeDraws) {
         }
     }
     if (g_s.cooldown > 0) --g_s.cooldown;
+
+    // A RESCAN ASKS FOR ITSELF. Only the first search waits for the caller.
+    //
+    // The caller's trigger is the settled flat panel, which is the right moment
+    // to search the first time: it is the earliest point the game is known
+    // loaded and the player known to be on foot. It is the wrong moment to
+    // RE-search, because the array is rebuilt while the player is in the
+    // external camera -- where the flat panel is precisely what is not being
+    // drawn, and does not come back until they leave. Measured in a user's logs
+    // (issue #2): 3m18s and 5m01s between the array going quiet and the rescan
+    // that recovered it, both spent waiting for a panel rather than for memory.
+    //
+    // Gameplay is the only precondition a rescan actually needs, and by
+    // definition it has already been met -- the array was being read a moment
+    // ago. requestScan does the rest of the gating (cooldown, rescan budget).
+    if (g_s.needRescan && g_s.sawGameplay) cameraViewRequestScan();
+
     if (!g_s.scanning) return;
     if (scanSlice()) finishScan();
 }
@@ -524,9 +566,38 @@ int cameraViewCurrent() {
     // ever requested. Nothing logs, and the feature is simply off for the
     // session.
     if (out < 0) {
+        // HOLD THE ADDRESS FIRST. A bad read is not yet proof of a move.
+        //
+        // The anchor check proves this address is not a record RIGHT NOW. It
+        // does not prove the array went anywhere, and in the field it usually
+        // has not: every scan of a reported session re-found the array at the
+        // address it had already been at. What actually happens is that the
+        // game rebuilds these records when the player's surroundings change,
+        // and they read as nothing for a moment while it does.
+        //
+        // Spending a rescan on that is expensive out of all proportion -- ten
+        // gigabytes walked to rediscover the same pointer, and minutes of no
+        // Explorer Cam while the trigger comes round again. So: report "do not
+        // know" immediately, which takes the offset off and is the safe answer
+        // either way, but keep the address and keep reading it.
+        if (++g_s.badReads < kMoveGrace) {
+            // Once per episode. lastView is cleared just below, so the next
+            // frame of the same episode does not come back through here.
+            if (g_s.lastView >= 0) {
+                Log::get().note("camera view: ordinal %zu stopped reading as a "
+                                "camera record. Holding the address for up to %u "
+                                "frames before concluding it has moved -- the "
+                                "records go quiet for a moment when the game "
+                                "rebuilds them, and the offset is off meanwhile.",
+                                g_s.ordinal, kMoveGrace);
+            }
+            g_s.lastView = -1;
+            return -1;
+        }
         // Not a latch: the array moved, so go and find it again. The anchor
         // check proved this address is no longer a record of ours, which also
         // means a scan can tell the real one from garbage.
+        g_s.badReads = 0;
         g_s.usable = false;
         g_s.chosen = nullptr;
         g_s.needRescan = true;
@@ -535,14 +606,23 @@ int cameraViewCurrent() {
         // first one, so moves 2 through 17 announced nothing at all and the
         // last line anybody saw promised a retry that had already happened
         // fifteen times.
-        Log::get().note("camera view: ordinal %zu no longer reads as a camera "
-                        "record, so the game has moved its camera settings "
-                        "(move %u). Scanning again shortly to find where they "
-                        "went; the offset will not engage until it does. This "
-                        "is expected occasionally and is not a fault.",
-                        g_s.ordinal, g_s.rescans + 1);
+        Log::get().note("camera view: ordinal %zu has not read as a camera record "
+                        "for %u frames, so the game really has moved its camera "
+                        "settings (move %u). Scanning again to find where they "
+                        "went; the offset will not engage until it does. This is "
+                        "expected occasionally and is not a fault.",
+                        g_s.ordinal, kMoveGrace, g_s.rescans + 1);
         g_s.lastView = -1;
         return -1;
+    }
+    // A good read ends the episode. Counting a session's total instead would
+    // mean a hundred and twenty scattered bad frames across an hour declared a
+    // move that never happened.
+    if (g_s.badReads > 0) {
+        Log::get().note("camera view: ordinal %zu is reading as a camera record "
+                        "again after %u frame(s). It had not moved.",
+                        g_s.ordinal, g_s.badReads);
+        g_s.badReads = 0;
     }
     if (out != g_s.lastView) {
         g_s.lastView = out;

@@ -1,5 +1,5 @@
 // GENERATED from src/d3d11/camera_view.h in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 07006448cf4be7e1]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 69ef9c6c597faa9a]
 // Which external-camera view the game is showing, read from the game.
 //
 // WHY THIS EXISTS
@@ -47,9 +47,70 @@
 // offset in the wrong place, which is worse than not knowing.
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
+#include <vector>
 
 namespace edvr {
+
+// One stretch of the array, found by walking record addresses at its stride.
+//
+// `slots` is how many stride-sized POSITIONS the run spans. `present` is how
+// many of them actually held a record. They are not the same number and the
+// difference is the whole point: the ordinal indexes slots, not records, so a
+// run with a hole in it still has its ordinal exactly where it always was.
+struct CameraViewRun {
+    const uint8_t* base;
+    size_t         slots;
+    size_t         present;
+};
+
+// Group SORTED record addresses into runs, tolerating up to `maxGap` empty
+// slots inside one run.
+//
+// TOLERATING GAPS IS NOT A LOOSENING, IT IS THE BUG FIX
+//
+// The first version ended a run at the first address that was not exactly one
+// stride on, which assumes every slot of the array is occupied at every moment.
+// It is not. From a user's logs (issue #2), the same array, three scans, twelve
+// minutes apart, identical each time:
+//
+//     run 0 at 000002CF115436C0, 10 record(s) -- too short for the ordinal
+//     run 1 at 000002CF115437C8,  2 record(s) -- too short for the ordinal
+//
+// 0x...36C0 + 10 * 0x18 = 0x...37B0, and run 1 begins at 0x...37C8 -- one slot
+// further on. One record in the middle had stopped carrying the type pointer.
+// And 0x...36C0 + 11 * 0x18 = 0x...37C8, so run 1's base IS the ordinal-11
+// record: the answer was present, readable, and correct, and the grouping threw
+// it away because neither fragment was twelve long on its own. Explorer Cam was
+// dead for the remaining twenty-four minutes of that session and every retry
+// found the same split.
+//
+// The safeguards that make gaps safe to bridge are unchanged: a candidate still
+// has to read a plausible view AT the ordinal, and two qualifying runs are still
+// a refusal rather than a coin toss. A bridged slot that happens to be the
+// ordinal reads as empty and is rejected on its own merits.
+inline std::vector<CameraViewRun> cameraViewGroupRuns(
+        const std::vector<const uint8_t*>& sorted, size_t stride, size_t maxGap) {
+    std::vector<CameraViewRun> runs;
+    if (stride == 0) return runs;
+    for (const uint8_t* rec : sorted) {
+        if (!runs.empty()) {
+            CameraViewRun& back = runs.back();
+            const uint8_t* end = back.base + back.slots * stride;
+            if (rec >= end) {
+                const size_t d = static_cast<size_t>(rec - end);
+                if (d % stride == 0 && d / stride <= maxGap) {
+                    back.slots += d / stride + 1;
+                    ++back.present;
+                    continue;
+                }
+            }
+        }
+        runs.push_back({rec, 1, 1});
+    }
+    return runs;
+}
 
 // Reads d3d11.camera_index_*. Safe to call repeatedly.
 void cameraViewConfigure();
