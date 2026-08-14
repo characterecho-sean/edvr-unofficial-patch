@@ -1,5 +1,5 @@
 // GENERATED from src/common/guard.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 4fc6c6c10da5ce1b]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 15581887918751b0]
 #include "guard.h"
 
 #include <windows.h>
@@ -11,9 +11,65 @@
 
 namespace edvr {
 
+// ONCE PER SITE, which is what guard.h has always promised and what this did
+// not do.
+//
+// Every fault got a formatted line. That is fine for the faults this was
+// written for -- a handful, from a hook touching something unexpected -- and
+// ruinous for the one that came later: a memory scan walking freed pages can
+// take thousands in a single frame, and the log fills with the same line while
+// the thing being diagnosed scrolls out of reach. The instrument destroys the
+// evidence, which is the failure this project keeps meeting from new
+// directions.
+//
+// Sites are string literals at the call, so pointer identity is the cheapest
+// correct key: no hashing, no allocation, and nothing to get wrong in a
+// context where the process may be part-way through faulting.
+//
+// The COUNT is kept and reported at the end, because "once" must not mean the
+// total is lost -- a site that faulted twice and a site that faulted forty
+// thousand times are different problems, and the first line looks identical.
+namespace {
+
+struct FaultSite {
+    const char* site;
+    uint64_t    count;
+};
+
+// More than the codebase has sites; a scan that somehow exceeded it would fall
+// through to logging every fault, which is the old behaviour rather than a new
+// failure.
+constexpr unsigned kMaxSites = 32;
+FaultSite g_sites[kMaxSites];
+unsigned  g_siteCount = 0;
+
+}  // namespace
+
 int guardFilter(unsigned long code, const char* site) {
-    Log::get().note("FAULT exception=0x%08lX site=%s", code, site ? site : "?");
+    const char* key = site ? site : "?";
+    for (unsigned i = 0; i < g_siteCount; ++i) {
+        if (g_sites[i].site == key) {
+            ++g_sites[i].count;
+            return EXCEPTION_EXECUTE_HANDLER;   // already reported once
+        }
+    }
+    if (g_siteCount < kMaxSites) {
+        g_sites[g_siteCount++] = {key, 1};
+    }
+    Log::get().note("FAULT exception=0x%08lX site=%s. Further faults at this "
+                    "site are counted rather than logged; the total is in the "
+                    "shutdown summary.", code, key);
     return EXCEPTION_EXECUTE_HANDLER;
+}
+
+void reportFaultSites() {
+    for (unsigned i = 0; i < g_siteCount; ++i) {
+        if (g_sites[i].count > 1) {
+            Log::get().note("FAULT TOTAL site=%s: %llu absorbed this session.",
+                            g_sites[i].site,
+                            (unsigned long long)g_sites[i].count);
+        }
+    }
 }
 
 void FaultBudget::charge() {

@@ -1,5 +1,5 @@
 // GENERATED from src/common/hotkey.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 7556a5bbc5f6748c]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 dd6a808c73bd882b]
 #include "hotkey.h"
 
 #include <cctype>
@@ -111,11 +111,33 @@ void hotkeyResetBindings() { g_bindingCount = 0; }
 
 bool Hotkey::pressed() {
     if (m_vk == 0) return false;
-    const bool keyDown = (GetAsyncKeyState(m_vk) & 0x8000) != 0;
-    const bool down = keyDown && hotkeyWouldFire(m_vk, m_mods, heldMods()) &&
-                      gameHasFocus();
-    const bool edge = down && !m_down;
-    m_down = down;
+    return pressedWith((GetAsyncKeyState(m_vk) & 0x8000) != 0, heldMods(),
+                       gameHasFocus());
+}
+
+bool Hotkey::pressedWith(bool keyDown, uint32_t held, bool focused) {
+    if (m_vk == 0) return false;
+    const bool fire = keyDown && hotkeyWouldFire(m_vk, m_mods, held) && focused;
+    const bool edge = fire && !m_down;
+
+    // m_down latches the RAW key, not whether this binding fired.
+    //
+    // It used to latch the composite, and that let one physical press produce
+    // an edge from a binding that had already been suppressed. Press
+    // CTRL+ALT+SPACE with a bare SPACE binding also configured: SPACE is
+    // suppressed, so its m_down stays false. Release CTRL and ALT while SPACE
+    // is still held and the suppression lifts -- keyDown is still true, m_down
+    // is still false, and a fresh edge is minted from a press the player made
+    // once and finished with.
+    //
+    // On a toggle that is not a stray event, it is an inversion: the combo set
+    // the intent, and letting go of the modifiers clears it again.
+    //
+    // Latching the raw key makes the suppression unable to create edges at all,
+    // because an edge now requires the key to have been physically UP. It also
+    // fixes the same shape for focus: a press made while another window has
+    // focus no longer fires the moment focus returns.
+    m_down = keyDown;
     return edge;
 }
 

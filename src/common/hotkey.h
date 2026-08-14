@@ -1,5 +1,5 @@
 // GENERATED from src/common/hotkey.h in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 2c4b9a0821e54ea8]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 401f72e9de3f4700]
 // Edge-triggered hotkey polling.
 //
 // Polled from the frame loop with GetAsyncKeyState rather than installed as a
@@ -40,6 +40,17 @@ public:
 
     // True exactly once per physical press, with the modifiers held.
     bool pressed();
+
+    // pressed(), with the world supplied instead of read.
+    //
+    // pressed() asks Windows for the key state and the foreground window, so
+    // nothing can assert its edge behaviour -- and the edge behaviour is where
+    // the bug was: a suppressed binding could mint an edge when the modifiers
+    // were released, inverting a toggle from a press the player had finished
+    // with. Threading the inputs through one function makes that testable
+    // without a keyboard, and leaves pressed() as the thin part that reads
+    // them.
+    bool pressedWith(bool keyDown, uint32_t held, bool focused);
 
 private:
     int      m_vk = 0;

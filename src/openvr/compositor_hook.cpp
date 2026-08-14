@@ -448,6 +448,8 @@ void* interceptInterface(void* iface, const char* interfaceVersion) {
 }
 
 void shutdownCompositorHook() {
+    // Per-site fault totals, so "logged once" does not mean "counted once".
+    reportFaultSites();
     if (!g_state) return;
     Log::get().note("transition flash: %u eye-submit(s) withheld this session.",
                     g_state->framesWithheld);

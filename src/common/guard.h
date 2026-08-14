@@ -1,5 +1,5 @@
 // GENERATED from src/common/guard.h in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 a209b7327b753810]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 ac62d7977b512883]
 // SEH containment for hook bodies.
 //
 // A fault anywhere in our code must degrade to vanilla behaviour, never to a
@@ -17,9 +17,21 @@
 
 namespace edvr {
 
-// SEH filter. Logs the exception once per site and returns
+// SEH filter. Logs the exception ONCE PER SITE and returns
 // EXCEPTION_EXECUTE_HANDLER.
+//
+// Once per site, and it means it now -- it used to log every fault, which a
+// memory scan over freed pages can turn into thousands of identical lines in
+// one frame, burying whatever was being diagnosed. Later faults at a site
+// already reported are counted instead.
 int guardFilter(unsigned long code, const char* site);
+
+// Print the per-site totals. Call once at shutdown.
+//
+// "Once per site" must not mean the total is lost: a site that faulted twice
+// and one that faulted forty thousand times produce the same first line, and
+// they are very different problems.
+void reportFaultSites();
 
 // Per-feature fault budget. Once exceeded, shouldRun() stays false for the rest
 // of the session.

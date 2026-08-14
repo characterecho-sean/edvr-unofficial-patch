@@ -268,6 +268,8 @@ void ensureInitialised() {
 }
 
 void shutdown() {
+    // Per-site fault totals, so "logged once" does not mean "counted once".
+    edvr::reportFaultSites();
     edvr::shutdownDeviceHooks();
     edvr::Log::get().note("edvr d3d11 proxy detaching");
     edvr::Log::get().close();

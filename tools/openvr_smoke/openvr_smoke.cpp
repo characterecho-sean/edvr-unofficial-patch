@@ -1,5 +1,5 @@
 // GENERATED from tools/openvr_smoke/openvr_smoke.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 bf94b9f3a106b5ca]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 3b3b5fdbb25ae876]
 // openvr_smoke -- checks the openvr proxy's startup path without the game.
 //
 // The thing under test is that the proxy does NOT load the real openvr_api.dll
@@ -223,6 +223,91 @@ int hotkeyMatchChecks() {
     edvr::hotkeyResetBindings();
     if (bad == 0)
         printf("  ok    modifier matching: extras allowed, one press one binding\n");
+    return bad;
+}
+
+// One physical press must produce at most one edge, per binding.
+//
+// The parsing and matching tests above cover which binding SHOULD fire. This
+// covers when the edge happens, which is a separate thing and is where the
+// harder bug lived: a binding that was correctly suppressed could still mint an
+// edge later, from a press that was already over.
+int hotkeyEdgeChecks() {
+    int bad = 0;
+    const uint32_t C = edvr::kHotkeyCtrl, A = edvr::kHotkeyAlt, S = edvr::kHotkeyShift;
+
+    edvr::hotkeyResetBindings();
+    edvr::Hotkey combo, bare;
+    combo.setBinding("CTRL+ALT+SPACE");
+    bare.setBinding("SPACE");
+
+    // THE BUG. The player presses CTRL+ALT+SPACE and lets go of the modifiers
+    // slightly before the spacebar, which is how anybody releases a chord.
+    //
+    //   frame 1  all three down   -> the combo fires, the bare one is suppressed
+    //   frame 2  modifiers up, SPACE still down
+    //            -> suppression lifts. The bare binding used to fire HERE,
+    //               from a press the player made once and had finished with.
+    int comboFires = 0, bareFires = 0;
+    if (combo.pressedWith(true, C | A, true)) ++comboFires;
+    if (bare.pressedWith(true, C | A, true)) ++bareFires;
+    if (combo.pressedWith(true, 0, true)) ++comboFires;
+    if (bare.pressedWith(true, 0, true)) ++bareFires;      // <- the old edge
+    // ...and the key finally comes up.
+    combo.pressedWith(false, 0, true);
+    bare.pressedWith(false, 0, true);
+
+    if (comboFires != 1) {
+        printf("  FAIL  the combo fired %d time(s) for one press, expected 1\n",
+               comboFires);
+        ++bad;
+    }
+    if (bareFires != 0) {
+        printf("  FAIL  releasing the modifiers minted %d edge(s) on the bare "
+               "binding from a press that was already over\n", bareFires);
+        ++bad;
+    }
+
+    // Holding a key does not repeat.
+    edvr::hotkeyResetBindings();
+    edvr::Hotkey solo;
+    solo.setBinding("F9");
+    int fires = 0;
+    for (int i = 0; i < 20; ++i) {
+        if (solo.pressedWith(true, 0, true)) ++fires;
+    }
+    if (fires != 1) {
+        printf("  FAIL  holding a key fired %d time(s), expected 1\n", fires);
+        ++bad;
+    }
+    // ...and releasing then pressing again does.
+    solo.pressedWith(false, 0, true);
+    if (!solo.pressedWith(true, 0, true)) {
+        printf("  FAIL  a second press after releasing did not fire\n");
+        ++bad;
+    }
+
+    // A press made while the game does NOT have focus must not fire when focus
+    // comes back with the key still held. Same shape as the chord case: the
+    // edge would come from a press aimed at another application.
+    edvr::hotkeyResetBindings();
+    edvr::Hotkey bg;
+    bg.setBinding("F10");
+    bg.pressedWith(true, 0, false);          // pressed elsewhere
+    if (bg.pressedWith(true, 0, true)) {
+        printf("  FAIL  a key held from before the game regained focus fired\n");
+        ++bad;
+    }
+    // A fresh press once focused does fire.
+    bg.pressedWith(false, 0, true);
+    if (!bg.pressedWith(true, 0, true)) {
+        printf("  FAIL  a fresh press after focus returned did not fire\n");
+        ++bad;
+    }
+
+    edvr::hotkeyResetBindings();
+    if (bad == 0)
+        printf("  ok    one physical press produces at most one edge\n");
     return bad;
 }
 
@@ -537,6 +622,10 @@ int main(int argc, char** argv) {
     // first assertion is the "d3d11 never published" case, which stops existing
     // the moment anything calls setExternalCameraOnFoot.
     if (hotkeyMatchChecks() != 0) {
+        printf("\nOPENVR SMOKE FAILED\n");
+        return 1;
+    }
+    if (hotkeyEdgeChecks() != 0) {
         printf("\nOPENVR SMOKE FAILED\n");
         return 1;
     }
