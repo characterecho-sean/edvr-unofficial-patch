@@ -23,6 +23,20 @@ Measured on a held view at a star: the eyes differed by about 1.5 stops without
 the fix and about 0.4 with it. What remains is the glow around the star in the
 eye that can actually see it, which is correct.
 
+On foot not being in 3D - Explorer Cam. On foot Elite draws the world onto a
+flat screen and shows that same flat image to both eyes, so nothing has depth.
+The external camera renders in proper stereo, so Explorer Cam puts your
+viewpoint at your commander's head while you are in that camera and the world
+finally has distance in it.
+
+It gives you nothing you could not already do. The external camera is Elite's
+own, on your own key, and it is a look-around mode - you cannot shoot, scan,
+open a panel, use a terminal or touch anything from inside it. To play you
+switch back to first person exactly as you do now. Explorer Cam changes where
+the camera is while you are already looking around, and nothing else.
+
+It is off until you tell it your camera key. See EXPLORER CAM below.
+
 The grey haze around the on-foot screen. On foot Elite shows the world on a flat
 screen floating in front of you, surrounded by dark grey. On an OLED headset that
 grey is lit pixels, so the screen sits in a glowing rectangle instead of in the
@@ -131,6 +145,61 @@ rename d3d11_edhm.dll back to d3d11.dll, then use EDHM's uninstaller if you
 want EDHM gone too.
 
 
+EXPLORER CAM
+
+On foot, Elite renders the world to a flat screen and shows that one image to
+both eyes. That is why walking around a planet does not feel like VR - there is
+no depth in it, because none is being drawn. The external camera does render in
+proper stereo, so Explorer Cam moves your viewpoint to your commander's head
+while you are in that camera.
+
+It cannot make first person 3D and does not try. The flat screen is flat.
+
+IT GIVES YOU NO CAPABILITY YOU DO NOT ALREADY HAVE. The external camera is
+Elite's own feature, opened with your own binding, and it is a look-around mode:
+inside it you cannot shoot, scan, mine, open a panel, use a terminal, pick
+anything up or interact with the world at all. Your commander stands still. To
+do anything you switch back to first person, exactly as you do today.
+
+Explorer Cam changes where the camera is while you are already in that mode, and
+nothing else. It does not extend how far you can see, reveal anything the camera
+was not already showing, let you act from somewhere you could not act from, or
+remove a step anyone else has to take. A player using it and a player without it
+can do the same things in the same order with the same clicks. One of them is
+looking at it in 3D.
+
+SETTING IT UP
+
+1. In edvr.ini, set hotkey.external_camera to YOUR Elite external-camera
+   binding. Combinations work - Elite's own default is a combination:
+
+       external_camera = CTRL+ALT+SPACE
+
+   Nothing happens until you do this. With it unset Explorer Cam does not
+   activate at all, whatever else is configured. On screen, entering the
+   external camera looks identical to boarding your ship, and guessing wrong
+   would move your viewpoint inside your own cockpit.
+
+2. Set hotkey.external_camera_next to your next-camera-view binding.
+
+3. Get on foot, open the camera, and cycle to the view BEHIND your commander.
+   The view the camera opens on faces back at you; the offset is for the other.
+
+4. Tune these three with the headset on. They reload about once a second, so
+   you do not need to restart:
+
+       head_offset_right   = 0.0     + is to your commander's right
+       head_offset_up      = 0.8     + is up
+       head_offset_forward = 2.75    + is the way your commander faces
+
+   forward is the large one, because the camera starts several metres behind
+   your commander. These values are a starting point, not a universal answer.
+
+COMFORT: these move the viewpoint of a headset you are wearing. Change them a
+little at a time. Entering and leaving is a cut rather than a glide, because the
+game's own camera change is already a cut.
+
+
 SETTINGS
 
 Everything is in edvr.ini, next to the game, with a plain description above each
@@ -186,11 +255,11 @@ from outside it. Two do more, and both ship inert:
   The resolution fix rewrites twelve numbers in the game's code while it runs.
   It is off by default.
 
-  The on-foot stereo fix reads one number from the game's memory - which
-  external camera view is showing - and changes the headset position the game
-  is told about, so the game moves its own camera. It does nothing at all until
-  you bind your own external-camera key, because guessing wrong would move your
-  viewpoint inside your cockpit. It never writes to the game's memory.
+  Explorer Cam reads one number from the game's memory - which external camera
+  view is showing - and changes the headset position the game is told about, so
+  the game moves its own camera. It does nothing at all until you bind your own
+  external-camera key, because guessing wrong would move your viewpoint inside
+  your cockpit. It never writes to the game's memory.
 
 Neither touches the network, your account, or anything the server sees.
 

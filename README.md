@@ -54,6 +54,133 @@ Any 16:9 size from 640 wide up to 8192 works. The useful ones are **2880x1620**,
 **3200x1800**, **3840x2160** and **5120x2880** — the last is about 1.8x the
 memory of 4K, so it wants headroom.
 
+**On foot not being in 3D — Explorer Cam.** On foot, Elite draws the world onto
+a flat screen and shows that same flat image to both eyes. Nothing has depth:
+you are looking at a photograph of a planet rather than standing on one. The
+external camera is different — it renders the world properly in stereo — so
+Explorer Cam puts your viewpoint at your commander's head while you are in that
+camera, and the surface, the ship you just landed, and the room you are standing
+in all have depth for the first time.
+
+**It gives you nothing you could not already do.** The external camera is
+Elite's own, on your own key, and it is a look-around mode: you cannot shoot,
+scan, open a panel, use a terminal or touch anything in the world from inside
+it. To play, you switch back to first person exactly as you do now. Explorer Cam
+changes where the camera is while you are already looking around, and nothing
+else — no reach, no information, no advantage a player without it does not have.
+
+It is off until you tell it your camera key, and it takes a few minutes to set
+up. See [Explorer Cam](#explorer-cam) below.
+
+## Explorer Cam
+
+On foot, Elite renders the world to a flat screen and shows that one image to
+both eyes. That is why walking around a planet does not feel like VR — there is
+no depth in it, because there is genuinely none being drawn.
+
+The external camera does not work that way. It renders the world in proper
+stereo. Explorer Cam moves your viewpoint to your commander's head while you are
+in that camera, so on foot has real depth: the ground has distance, your ship
+has size, and a settlement is a place rather than a picture.
+
+**It cannot make first person 3D**, and does not try. The flat screen is flat.
+Moving your head moves your view *of* that screen, and the screen is still one
+image. Only the external camera renders in stereo, so that is the only place
+this applies.
+
+### It gives you no capability you do not already have
+
+This matters more than the effect does, so it is worth being plain about.
+
+The external camera is Elite's own feature, opened with your own binding, and it
+is a **look-around mode**. Inside it you cannot shoot, scan, mine, open a panel,
+use a terminal, pick anything up, or interact with the world in any way. Your
+commander stands still. To do anything at all you switch back to first person —
+the flat screen — exactly as you do today.
+
+Explorer Cam changes **where the camera is while you are already in that mode**,
+and nothing else. It does not extend how far you can see, reveal anything the
+camera was not already showing you, let you act from somewhere you could not act
+from before, or remove a step anyone else has to take. A player running Explorer
+Cam and a player without it can do exactly the same things, in the same order,
+with the same clicks. One of them is looking at it in 3D.
+
+Nor does it touch anything shared: no network path, no server state, nothing
+another player observes, and no gameplay data of any kind is read or written.
+
+### Setting it up
+
+1. Set `hotkey.external_camera` in `edvr.ini` to **your** Elite external-camera
+   binding. Combinations work — Elite's own default is `CTRL+ALT+SPACE`:
+
+   ```
+   external_camera = CTRL+ALT+SPACE
+   ```
+
+   **Nothing happens until you do this.** With it unset, Explorer Cam does not
+   activate at all, whatever else is configured. That is deliberate: on screen,
+   entering the external camera looks identical to boarding your ship, and
+   guessing wrong would move your viewpoint inside your own cockpit.
+
+2. Set `hotkey.external_camera_next` to your next-camera-view binding.
+
+3. Get on foot, open the camera, and cycle to the view **behind** your
+   commander — the offset is for that one, because the view the camera opens on
+   faces back at you.
+
+4. Tune the three offsets with the headset on. They reload about once a second,
+   so you do not need to restart:
+
+   ```
+   head_offset_right   = 0.0     + is to your commander's right
+   head_offset_up      = 0.8     + is up
+   head_offset_forward = 2.75    + is the way your commander faces
+   ```
+
+   `forward` is the large one, because the camera starts several metres behind
+   your commander and reaching their head means covering that distance. The
+   values above are a good starting point, not a universal answer.
+
+**Comfort.** These move the viewpoint of a headset you are wearing. Change them
+a little at a time. Entering and leaving is a cut rather than a glide, because
+the game's own camera change is already a cut.
+
+### What it does under the hood
+
+Two things the other fixes do not, both worth knowing about:
+
+- **It changes the headset position the game is told about.** Every frame the
+  game asks SteamVR where your head is; EDVR adds your offset to that answer
+  before the game reads it. The game then moves its *own* camera — as far as
+  Elite knows, you leaned. That is what makes it work at all: culling and object
+  placement follow. Moving the rendered image instead leaves the game's idea of
+  the camera behind, which is what three earlier attempts did.
+- **It reads one number from the game's memory:** which external camera view is
+  showing, so the offset applies to the right one. That is camera state. To find
+  where that number lives it searches once, on the first frame you are on foot,
+  for a marker identifying the camera settings — it reads only to find that
+  marker, keeps nothing but the small view index, skips the game's code, and
+  never writes.
+
+Its safeguards, because they are the reason to trust it:
+
+- **Nothing happens without your camera key**, as above.
+- **EDVR only watches that key.** It never presses it, sends it, or interferes
+  with the game receiving it.
+- **Your viewpoint moves at most 10 m per axis.** Beyond that it clamps and says
+  so, rather than refusing — refusing would snap the view several metres in one
+  frame, which is unpleasant when you are wearing it.
+- **It gives up rather than guessing.** If the search finds nothing, or the value
+  stops looking like a camera view, it reports "do not know" and falls back to
+  counting your camera-key presses. It never substitutes a number that might be
+  wrong.
+- **It expires.** The two halves of EDVR agree once a frame about which mode you
+  are in. If the deciding half stops running, the half that moves your view stops
+  trusting it within about a second and puts your viewpoint back.
+- **It degrades on game updates.** The marker it looks for will move when Elite
+  updates. When it does, EDVR finds nothing, says so in the log, and falls back
+  to key counting. `camera_index_type_offset` can be corrected by hand if you
+  know the new value, without waiting for a build.
 ## Install
 
 1. Close Elite Dangerous.
@@ -245,63 +372,9 @@ Its safeguards, because they are the reason to trust it:
 - **All or nothing.** If any single write fails, every earlier one is undone
   before it gives up. A half-applied resolution looks worse than none.
 
-**The on-foot stereo fix is the other one that does more, and it does nothing
-until you set it up.** On foot, Elite renders first person to a flat panel — one
-image, shown to both eyes, which is why walking around does not feel like VR.
-The external camera does not: it renders the world properly in stereo. This fix
-moves your viewpoint to where your commander's head is while you are in that
-camera, so on foot has real stereoscopic depth.
-
-It cannot make first person stereo, and does not try. The flat panel is flat.
-Only the external camera renders in stereo, so that is the only place this
-applies.
-
-Two things it does that the fixes above do not:
-
-- **It changes the headset position the game is told about.** Every frame, the
-  game asks SteamVR where your head is. EDVR adds your configured offset to that
-  answer before the game reads it, so the game moves its own camera — as far as
-  Elite knows, you leaned. That is what makes it work: culling and object
-  placement follow, which they do not if you merely move the rendered image.
-  It is a client-side view change. It does not touch your ship, your commander,
-  the server, or anything another player sees.
-- **It reads one number out of the game's memory:** which external camera view
-  is currently showing. That is camera state, not gameplay state. To find where
-  that number lives it searches the game's memory once, on the first frame you
-  are on foot, for a marker that identifies the camera settings. It reads only
-  to find that marker, keeps nothing except the one small view index, and skips
-  the game's code entirely. It never writes.
-
-Its safeguards, because they are the reason to trust it:
-
-- **It does nothing at all until you bind your own camera key.** With
-  `hotkey.external_camera` unset — which is how it ships — the fix never
-  activates, whatever else is configured. It refuses to guess: on screen,
-  entering the external camera looks the same as boarding your ship and the same
-  as leaving HMD Cinema Mode, and guessing wrong would move your viewpoint
-  inside your cockpit.
-- **EDVR only watches that key. It never presses it, sends it, or interferes
-  with the game receiving it.**
-- **Your viewpoint moves at most 10 metres per axis.** Larger values are clamped
-  to that and the log says so. It clamps rather than refusing, because refusing
-  would snap the view several metres in a single frame — which is unpleasant
-  when you are wearing the thing.
-- **It gives up rather than guessing.** If the memory search finds nothing, or
-  the value stops looking like a camera view, it says "do not know" and falls
-  back to counting your camera-key presses. It never substitutes a number that
-  might be wrong.
-- **It expires.** The two halves of EDVR agree once a frame about which mode you
-  are in. If the half that decides ever stops running, the half that moves your
-  view stops trusting it within about a second and puts your viewpoint back.
-- **The marker it looks for will move when the game updates.** When that happens
-  it finds nothing, says so in the log, and falls back to key counting — the fix
-  degrades, it does not misbehave. `camera_index_type_offset` in `edvr.ini` can
-  be corrected by hand if you know the new value, without waiting for a build.
-
-**Comfort note.** These settings move the viewpoint of a headset you are
-wearing. Change them a little at a time, and expect the transition into and out
-of the camera to be a cut rather than a glide — the game's own camera change is
-already a cut, so the fix does not add one that was not there.
+**Explorer Cam is the other one that does more**, and it has its own section
+above: [Explorer Cam](#explorer-cam) covers what it reads, what it changes, its
+safeguards, and why it gives a player no capability they did not already have.
 
 For every fix here: nothing touches the network, your account, or anything the
 server sees. Nothing reads or changes gameplay state — your position, ship,
