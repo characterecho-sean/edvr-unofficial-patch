@@ -123,7 +123,11 @@ another player observes, and no gameplay data of any kind is read or written.
 
 ### Setting it up
 
-1. Set `hotkey.external_camera` in `edvr.ini` to **your** Elite external-camera
+1. **Install `openvr_api.dll`** if you have not — see the `openvr` folder in
+   the release and its `READ-ME-FIRST.txt`. Explorer Cam is applied in that
+   file; without it nothing below has any effect.
+
+2. Set `hotkey.external_camera` in `edvr.ini` to **your** Elite external-camera
    binding. Combinations work — Elite's own default is `CTRL+ALT+SPACE`:
 
    ```
@@ -135,12 +139,12 @@ another player observes, and no gameplay data of any kind is read or written.
    entering the external camera looks identical to boarding your ship, and
    guessing wrong would move your viewpoint inside your own cockpit.
 
-2. Get on foot, open the camera, and cycle to the **Commander Rear Profile**
+3. Get on foot, open the camera, and cycle to the **Commander Rear Profile**
    preset. That is the one Explorer Cam replaces, and it is not the preset the
    camera opens on — you cycle to it each time you want the 3D view. EDVR reads
    which preset you are on from the game, so there is nothing else to bind.
 
-3. Tune the three offsets with the headset on. They reload about once a second,
+4. Tune the three offsets with the headset on. They reload about once a second,
    so you do not need to restart:
 
    ```
@@ -208,10 +212,17 @@ star with one eye dimmed and press it — the difference is immediate.
 
 **Uninstall:** delete those two files.
 
-### The transition flash fix needs one more step
+### The transition flash fix and Explorer Cam need one more step
 
-Optional, and separate because it installs differently: it **replaces** a file
-the game ships rather than adding one. Everything else works without it.
+**Both of these need `openvr_api.dll`**, and it installs differently from
+`d3d11.dll`: it **replaces** a file the game ships rather than adding one. See
+the `openvr` folder in the release, which has its own instructions.
+
+Without it, the exposure, black void, panel distance and resolution fixes all
+work normally — but the transition flash fix can only detect and log, and
+**Explorer Cam does nothing at all**, because the half that moves your viewpoint
+is the half you skipped. EDVR says so in the log the first time Explorer Cam
+would have engaged, rather than leaving you to work it out.
 
 The reason it cannot ride along with `d3d11.dll` is that the decision not to show
 a frame has to be made where frames are handed to SteamVR, and that is

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # GENERATED from tools/check_install_reads.py in the private edvr repo -- do not edit here.
-# Edit there, then: python tools/sync_common.py --write   [body-sha256 6d8a4649205fa661]
+# Edit there, then: python tools/sync_common.py --write   [body-sha256 00af47cb16754c11]
 """Config readers must be called on the INSTALL path, not only on reload.
 
 WHY THIS EXISTS
@@ -117,6 +117,18 @@ def main():
         outside = [c for c in calls
                    if not any(a <= c <= b for a, b in spans)]
         line_of = lambda p: text.count('\n', 0, p) + 1
+        # The docstring says "at least twice, and at least one outside" -- and
+        # only the second half was enforced, so deleting the RELOAD-path call
+        # (the whole live-tuning loop) passed silently. A checker that enforces
+        # less than it claims is the same defect it exists to catch.
+        inside = [c for c in calls if any(a <= c <= b for a, b in spans)]
+        if not inside:
+            print('  FAIL  %s() is never called from the config-reload path in %s'
+                  % (reader, rel))
+            print('        Its settings would then be startup-only, and the ini')
+            print('        advertises them as live. Call it from both.')
+            bad += 1
+            continue
         if not outside:
             print('  FAIL  %s() is called only from the config-reload path in %s'
                   % (reader, rel))

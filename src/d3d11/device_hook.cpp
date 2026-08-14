@@ -109,7 +109,6 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
         // answer: an offset a game update has moved, a record that has been
         // reused, a scan that found nothing. cameraViewCurrent returns -1 in
         // all of those and the gate goes back to counting.
-        cameraViewTick();
         headOffsetGateSetView(cameraViewCurrent());
         // One per-frame invalidation for both fixes, before either boundary.
         //

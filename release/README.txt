@@ -59,7 +59,8 @@ instead, exactly as it does whenever a game misses a frame.
 
 This one needs a second file installed, and it installs differently from the
 rest - see the openvr folder in this download, which has its own instructions.
-Everything else works without it.
+Explorer Cam needs that same file. Without it the other fixes work normally,
+this one can only detect and log, and Explorer Cam does nothing at all.
 
 The on-foot screen's sharpness. OFF by default - read this bit before turning
 it on.
@@ -183,7 +184,11 @@ looking at it in 3D.
 
 SETTING IT UP
 
-1. In edvr.ini, set hotkey.external_camera to YOUR Elite external-camera
+1. Install openvr_api.dll if you have not - see the openvr folder in this
+   download and its READ-ME-FIRST.txt. Explorer Cam is applied in that file;
+   without it nothing below has any effect.
+
+2. In edvr.ini, set hotkey.external_camera to YOUR Elite external-camera
    binding. Combinations work - Elite's own default is a combination:
 
        external_camera = CTRL+ALT+SPACE
@@ -193,12 +198,12 @@ SETTING IT UP
    external camera looks identical to boarding your ship, and guessing wrong
    would move your viewpoint inside your own cockpit.
 
-2. Get on foot, open the camera, and cycle to the COMMANDER REAR PROFILE
+3. Get on foot, open the camera, and cycle to the COMMANDER REAR PROFILE
    preset. That is the one Explorer Cam replaces, and it is not the preset the
    camera opens on - you cycle to it each time you want the 3D view. EDVR reads
    which preset you are on from the game, so there is nothing else to bind.
 
-3. Tune these three with the headset on. They reload about once a second, so
+4. Tune these three with the headset on. They reload about once a second, so
    you do not need to restart:
 
        head_offset_right   = 0.0     + is to your commander's right
@@ -248,11 +253,19 @@ than by which version of Elite compiled it, so a game update should not break
 them. If anything ever stops matching, that fix does nothing, the game renders
 normally, and the log says so.
 
-The transition flash fix is the one exception, because there is nothing to
-recognise - the viewpoint it watches is a block of numbers rather than code. So
-it checks the numbers instead: a viewpoint moves smoothly, and it requires what
-it finds to behave that way over 300 rendered frames before it will act on it.
-If a game update moves that block, it disables itself and says so.
+Two fixes work differently, because there is nothing to recognise - what they
+watch is data rather than code.
+
+The transition flash fix checks the numbers instead: a viewpoint moves smoothly,
+and it requires what it finds to behave that way over 300 rendered frames before
+it will act on it. If a game update moves that block, it disables itself and
+says so.
+
+Explorer Cam searches for the camera settings by a marker whose position is
+recorded in edvr.ini as camera_index_type_offset. A game update will move that
+marker. When it does, the search finds nothing, says so in the log, tries again
+a few times, and then the offset simply does not engage - it never guesses. If
+you know the new value you can set it yourself without waiting for a new build.
 
 Developed against game build 330683 (4.4.0.3).
 

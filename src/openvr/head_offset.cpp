@@ -1,5 +1,5 @@
 // GENERATED from src/openvr/head_offset.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 ecfe7ae36f820cea]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 3493e7996bcc07ac]
 #include "head_offset.h"
 
 #include <cmath>
@@ -213,7 +213,15 @@ void headOffsetApply(vr::EVRCompositorError err,
     // set up correctly and simply never happens, with no line anywhere saying
     // why. The flash fix already warns about its missing half; this is the same
     // warning for the same shape of install.
-    if (g.externalOnly && !gateOn && !g.orphanNoted) {
+    //
+    // Gated on NOTHING HAVING EVER PUBLISHED, which is the difference between
+    // this warning and a lie. Without that test it fired on every healthy
+    // session about forty seconds in, because until the player first enters the
+    // camera the gate publishes "no" continuously -- and "publishing no" read
+    // identically to "absent" from here. A warning that appears on correct
+    // installs is worse than no warning: it trains people to ignore the log.
+    if (g.externalOnly && !gateOn && !g.orphanNoted &&
+        !externalCameraEverPublished()) {
         if (++g.orphanFrames > 3600) {
             g.orphanNoted = true;
             Log::get().note(

@@ -1,5 +1,5 @@
 // GENERATED from tools/gate_test/gate_test.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 c841c2bae080427b]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 c4756e5e74e13399]
 // gate_test -- replays frame sequences through the head-offset gate.
 //
 // WHY
@@ -95,11 +95,18 @@ void begin(bool keyBound) {
 
 // Enter the camera the way a set-up player does: on foot, press the key, the
 // panel stops and the scene appears a couple of frames later.
+//
+// The scene run is 12 frames, not 4, and the difference is the test being
+// realistic rather than the code being lenient. The gate now requires the panel
+// to have been gone for several consecutive frames before arming -- one dropped
+// frame used to be enough, which is a one-frame pose jump on any hitch. Nobody
+// enters a camera for four frames; the mode change alone takes 25 to 86
+// (6ac.6c), so a helper that fed four was encoding an entry that cannot happen.
 void enterCamera() {
     panelFrame(200);
     headOffsetGateKeyPressed();
     panelFrame(2);          // the game takes a few frames to change mode
-    sceneFrame(4);
+    sceneFrame(12);
 }
 
 }  // namespace
@@ -226,7 +233,7 @@ int main(int argc, char** argv) {
     panelFrame(200);                 // disembark: first person again
     headOffsetGateKeyPressed();      // enter a second time
     panelFrame(2);
-    sceneFrame(4);
+    sceneFrame(12);
     check(true, "SECOND entry in the same session");
 
     // THE PANEL COMING BACK is first person again, so the offset comes off.
@@ -240,7 +247,7 @@ int main(int argc, char** argv) {
     // than a toggle back off.
     headOffsetGateKeyPressed();
     panelFrame(2);
-    sceneFrame(4);
+    sceneFrame(12);
     check(true, "the press after a panel-return exit is a fresh entry");
 
     // NEITHER PANEL NOR SCENE for a long stretch -- a menu, a load screen --
@@ -266,7 +273,7 @@ int main(int argc, char** argv) {
     panelFrame(1);
     headOffsetGateKeyPressed();      // ...and presses again, still on the panel
     panelFrame(2);
-    sceneFrame(4);
+    sceneFrame(12);
     check(true, "two presses while the panel was still up, then the camera");
 
     // ...and three presses is no different from one, for the same reason.
@@ -277,7 +284,7 @@ int main(int argc, char** argv) {
     headOffsetGateKeyPressed();
     headOffsetGateKeyPressed();
     panelFrame(2);
-    sceneFrame(4);
+    sceneFrame(12);
     check(true, "three presses while the panel was up");
 
     // But IN the camera, a second press still means leave -- that is the case
@@ -290,6 +297,42 @@ int main(int argc, char** argv) {
     sceneFrame(2);
     check(false, "pressing again IN the camera still leaves");
 
+    // ONE DROPPED PANEL FRAME MUST NOT ARM ANYTHING.
+    //
+    // A hitch, a stutter, one composite missed -- sincePanel >= 1 satisfied the
+    // window, so the gate armed for exactly as long as it took the panel to
+    // come back. That is a one-frame pose jump of the whole offset, and the
+    // panel's return then ate the pending intent as well, so the entry the
+    // player actually asked for was discarded too.
+    begin(true);
+    headOffsetGateSetView(g_wantView);
+    panelFrame(200);
+    headOffsetGateKeyPressed();      // a real entry press, pending
+    sceneFrame(1);                   // one frame without the panel
+    check(false, "a single dropped panel frame did not arm");
+    panelFrame(30);                  // ...and the panel comes back
+    check(false, "still off after the panel returned");
+    // The press must SURVIVE that, and the real entry still work.
+    sceneFrame(12);
+    check(true, "the real entry still works after the hitch");
+
+    // THE SHIP VANITY CAMERA MUST NOT GET THE ON-FOOT OFFSET.
+    //
+    // The same Elite binding opens the ship's camera. On-foot panel credit used
+    // to outlive the panel by 300 frames, so boarding and pressing the key
+    // within about three seconds armed the on-foot offset on the ship camera --
+    // the offset applied in a cockpit, which is the outcome this gate exists to
+    // prevent.
+    begin(true);
+    headOffsetGateSetView(g_wantView);
+    panelFrame(200);                 // on foot
+    sceneFrame(120);                 // board the ship: a full scene, no panel
+    headOffsetGateKeyPressed();      // check the ship camera
+    sceneFrame(20);
+    check(false, "the ship vanity camera did not get the on-foot offset");
+    sceneFrame(600);
+    check(false, "...and still not, later in the flight");
+
     // -------------------------------------------------------------- intent
     //
     // A PRESS THAT DID SOMETHING ELSE expires. A camera key pressed in a menu,
@@ -300,7 +343,7 @@ int main(int argc, char** argv) {
     headOffsetGateKeyPressed();
     headOffsetGateSetView(g_wantView);
     panelFrame(400);                 // the panel never stops: it did not enter
-    sceneFrame(4);
+    sceneFrame(12);
     check(false, "a press that never entered the camera expired");
 
     // -------------------------------------------------------------- the gate
@@ -323,7 +366,7 @@ int main(int argc, char** argv) {
         // ...and switches it back on. The old code resumed the stale latch here.
         Config::get().set("fix.head_offset_gate", "1");
         headOffsetGateConfigure();
-        sceneFrame(4);
+        sceneFrame(12);
         check(false, "the gate was switched back on somewhere else");
     }
 

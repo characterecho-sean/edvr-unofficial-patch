@@ -1,5 +1,5 @@
 // GENERATED from src/d3d11/camera_view.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 4e2218a48cef0c6a]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 63213c1a45675313]
 #include "camera_view.h"
 
 #include <windows.h>
@@ -100,7 +100,6 @@ struct State {
     std::vector<const uint8_t*> records;
 
     int       lastView = -1;
-    bool      failNoted = false;
     // The record has proven to be somebody else's, so RESCAN -- do not latch.
     //
     // Three positions have been held here and only the third is right. Trusting
@@ -115,7 +114,16 @@ struct State {
     // still exists somewhere, and a scan is exactly the thing that finds it.
     bool      needRescan = false;
     uint32_t  rescans = 0;
+    bool      sawGameplay = false;
+    // Faults on the CURRENT record, reset whenever a new one is chosen.
+    //
+    // It never reset, and finishScan's own candidate probes charged it -- so
+    // nine faults across an entire session, from any cause, permanently
+    // disabled candidate selection and guaranteed that every one of the 16
+    // rescans would fail. A budget that outlives the thing it is budgeting for
+    // is not a budget, it is a countdown to the feature switching itself off.
     uint64_t  readFaults = 0;
+    bool      readFaultsNoted = false;
 };
 
 State g_s;
@@ -279,7 +287,16 @@ uint32_t recordValue(const uint8_t* rec) {
     // this is ~90 access violations and ~90 formatted log lines per second for
     // the rest of the session -- the guard absorbing them correctly and the log
     // becoming unreadable, which is the instrument destroying the evidence.
-    if (g_s.readFaults > kMaxReadFaults) return v;
+    if (g_s.readFaults > kMaxReadFaults) {
+        if (!g_s.readFaultsNoted) {
+            g_s.readFaultsNoted = true;
+            Log::get().note("camera view: %llu faults reading the chosen record, "
+                            "so it is no longer being read. The page it lives on "
+                            "has probably gone; a rescan will pick it up again.",
+                            (unsigned long long)g_s.readFaults);
+        }
+        return v;
+    }
     const bool ok = guarded("camera_view/read", [&] {
         const uint8_t* const* anchor =
             reinterpret_cast<const uint8_t* const*>(rec);
@@ -382,6 +399,11 @@ void finishScan() {
         g_s.chosen = runs[candidates[0]].base + g_s.ordinal * kStride;
         g_s.usable = true;
         g_s.cooldown = 0;
+        // The probes above charged the budget while deciding. They were reads of
+        // OTHER runs, not of the record finally chosen, so they must not count
+        // against it.
+        g_s.readFaults = 0;
+        g_s.readFaultsNoted = false;
         Log::get().note("camera view: tracking run %zu, ordinal %zu, which reads "
                         "%u -- a plausible view.",
                         candidates[0], g_s.ordinal, recordValue(g_s.chosen));
@@ -454,6 +476,8 @@ void cameraViewRequestScan() {
     }
     g_s.scanning = true;
     g_s.chosen = nullptr;
+    g_s.readFaults = 0;          // a new search gets a fresh budget
+    g_s.readFaultsNoted = false;
     g_s.records.clear();
     g_s.regionIndex = 0;
     g_s.regionOffset = 0;
@@ -462,7 +486,25 @@ void cameraViewRequestScan() {
     collectRegions();
 }
 
-void cameraViewTick() {
+void cameraViewTick(uint32_t eyeDraws) {
+    // Attempts spent before the game was being played do not count.
+    //
+    // The scan is triggered by the on-foot panel, which the main menu also
+    // satisfies -- so somebody who launches and walks away can exhaust all four
+    // attempts on an empty heap and have none left when they start playing. A
+    // drawn scene is proof the game is past the menu: thousands of draws into
+    // the eye textures, against about twenty for the menu.
+    if (!g_s.sawGameplay && eyeDraws > 1000) {
+        g_s.sawGameplay = true;
+        if (g_s.attempts > 0 && !g_s.usable) {
+            Log::get().note("camera view: the game is being played now, so the "
+                            "%u attempt(s) made before it was are being refunded "
+                            "-- those searched a heap that was not populated yet.",
+                            g_s.attempts);
+            g_s.attempts = 0;
+            g_s.cooldown = 0;
+        }
+    }
     if (g_s.cooldown > 0) --g_s.cooldown;
     if (!g_s.scanning) return;
     if (scanSlice()) finishScan();
@@ -475,29 +517,37 @@ int cameraViewCurrent() {
     // be a guess. -1 says "do not know", which the caller treats as "fall
     // back", rather than a number that happens to be wrong.
     const int out = v <= g_s.plausibleMax ? static_cast<int>(v) : -1;
+    // The recovery branch is keyed on the ANSWER, not on the answer having
+    // changed. Edge-gating it on lastView wedged the module silently in one
+    // case: a record that dies before its first plausible read leaves lastView
+    // at its -1 initialiser, the transition never happens, and no rescan is
+    // ever requested. Nothing logs, and the feature is simply off for the
+    // session.
+    if (out < 0) {
+        // Not a latch: the array moved, so go and find it again. The anchor
+        // check proved this address is no longer a record of ours, which also
+        // means a scan can tell the real one from garbage.
+        g_s.usable = false;
+        g_s.chosen = nullptr;
+        g_s.needRescan = true;
+        g_s.cooldown = kRescanCooldown;
+        // Reported per MOVE, not once per session. failNoted latched on the
+        // first one, so moves 2 through 17 announced nothing at all and the
+        // last line anybody saw promised a retry that had already happened
+        // fifteen times.
+        Log::get().note("camera view: ordinal %zu no longer reads as a camera "
+                        "record, so the game has moved its camera settings "
+                        "(move %u). Scanning again shortly to find where they "
+                        "went; the offset will not engage until it does. This "
+                        "is expected occasionally and is not a fault.",
+                        g_s.ordinal, g_s.rescans + 1);
+        g_s.lastView = -1;
+        return -1;
+    }
     if (out != g_s.lastView) {
         g_s.lastView = out;
-        if (out >= 0) {
-            Log::get().note("camera view is %d (ordinal %zu, read from the game)",
-                            out, g_s.ordinal);
-        } else {
-            // Not a latch: the array moved, so go and find it again. The
-            // anchor check proved this address is no longer a record of ours,
-            // which also means a scan can tell the real one from garbage.
-            g_s.usable = false;
-            g_s.chosen = nullptr;
-            g_s.needRescan = true;
-            g_s.cooldown = kRescanCooldown;
-            if (!g_s.failNoted) {
-                g_s.failNoted = true;
-                Log::get().note("camera view: ordinal %zu no longer reads as a "
-                                "camera record, so the game has moved its camera "
-                                "settings. Scanning again shortly to find where "
-                                "they went; the offset will not engage until it "
-                                "does. This is expected occasionally and is not "
-                                "a fault.", g_s.ordinal);
-            }
-        }
+        Log::get().note("camera view is %d (ordinal %zu, read from the game)",
+                        out, g_s.ordinal);
     }
     return out;
 }

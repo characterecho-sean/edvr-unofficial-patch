@@ -1,5 +1,5 @@
 // GENERATED from src/common/frame_flag.h in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 96efa584b7275e33]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 6e9eed4eca6d4ffc]
 // A one-bit channel between the two proxies, for the frame that must not be
 // shown.
 //
@@ -105,5 +105,15 @@ bool externalCameraOnFoot();
 // frame, so the units match without a clock, and a stall that freezes both
 // halves together does not age the flag while nothing is being drawn anyway.
 bool externalCameraOnFootLive(uint32_t maxAgeFrames);
+
+// Has ANYTHING ever published the mode, whatever it said?
+//
+// "Nobody is publishing" and "the publisher says no" are different facts and a
+// reader that cannot tell them apart will accuse a healthy install of being
+// broken. That is not hypothetical: the openvr side warned "nothing has
+// reported the player's mode" on every correctly-configured session about forty
+// seconds in, because until the player first enters the camera the gate is
+// publishing "no" continuously and the two look identical from here.
+bool externalCameraEverPublished();
 
 }  // namespace edvr

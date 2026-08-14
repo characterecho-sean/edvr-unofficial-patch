@@ -836,6 +836,11 @@ void vScreenFrameBoundary() {
     // against running twice. The old trigger was the FIRST panel sighting,
     // which on a default install is the main menu four seconds after launch --
     // 5 GB of an eventual 11 GB allocated, and the scan found nothing.
+    // The scan's tick sits beside its trigger, where the frame's counters are.
+    // It was in device_hook, which does not have them -- and the tick needs the
+    // eye-draw count to tell "the game is being played" from "the main menu is
+    // on screen", which is what stops a menu-dweller burning every attempt.
+    cameraViewTick(s->eyeDrawsThisFrame);
     if (headOffsetGatePanelSettled()) cameraViewRequestScan();
     s->panelCompositeDraws = 0;
     s->eyeDrawsThisFrame = 0;

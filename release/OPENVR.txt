@@ -38,6 +38,9 @@ INSTALL
 
    Do not delete it. EDVR needs it -- it does the actual work.
 
+   TWO features need this file: the transition flash fix and Explorer Cam.
+   Without it they do nothing -- the other fixes are unaffected.
+
    EDVR watches two calls in it. One is the frame submission, where it can
    withhold a single bad frame from the headset (the transition flash fix).
    The other is the call that reports where your head is: with the on-foot

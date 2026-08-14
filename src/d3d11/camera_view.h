@@ -1,5 +1,5 @@
 // GENERATED from src/d3d11/camera_view.h in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 f8a330565b36ada7]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 07006448cf4be7e1]
 // Which external-camera view the game is showing, read from the game.
 //
 // WHY THIS EXISTS
@@ -60,7 +60,14 @@ void cameraViewRequestScan();
 
 // Does a slice of the scan if one is running, and nothing at all otherwise.
 // Called once per frame from the Present path.
-void cameraViewTick();
+//
+// `eyeDraws` is the frame's draw count into the eye textures, which is how the
+// scanner knows the game is actually being played rather than sitting in a
+// menu. The menu manages about twenty; a drawn scene is thousands. Without it,
+// a player who leaves the game on the main menu can burn every scan attempt
+// before they start playing -- the menu satisfies the panel signature about
+// four seconds after launch, and each attempt cools down for forty seconds.
+void cameraViewTick(uint32_t eyeDraws);
 
 // The view the game reports, or -1 when it is not known.
 int cameraViewCurrent();

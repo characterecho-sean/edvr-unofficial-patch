@@ -1,5 +1,5 @@
 // GENERATED from src/openvr/head_offset.h in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 8d53d0971dfe2e3e]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 31a25c7f3b4e2b8d]
 // Moving the viewpoint, on the openvr side.
 //
 // WHY THIS IS ITS OWN FILE
@@ -42,9 +42,17 @@ namespace edvr {
 // somebody happens to save the ini mid-flight.
 void headOffsetConfigure();
 
-// True once headOffsetConfigure has run. Asserted by openvr_smoke after the
-// install path, because "configured and inert" produces no error, no wrong
-// pixel and no log line -- only a feature that does nothing.
+// True once headOffsetConfigure has run.
+//
+// NOT asserted by openvr_smoke, and this comment used to claim it was. The
+// assertion was written, then removed once it became clear it could not work --
+// smoke LOADS the proxy as a DLL, so the DLL's copy of this module has its own
+// statics and the test's copy is never configured. The claim outlived the code,
+// which in a file whose subject is "a header promised something nobody
+// implemented" is not a small irony.
+//
+// What actually enforces the install-time read is tools/check_install_reads.py,
+// statically, over both repos' compositor_hook.cpp.
 bool headOffsetConfigured();
 
 // Apply the offset to the poses the runtime just returned.

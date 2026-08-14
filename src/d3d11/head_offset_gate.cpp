@@ -1,5 +1,5 @@
 // GENERATED from src/d3d11/head_offset_gate.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 013f516576c58266]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 c58e19c5e1bcbc4e]
 #include "head_offset_gate.h"
 
 #include "../common/config.h"
@@ -19,7 +19,6 @@ struct Gate {
     uint32_t gateIdleFrames = 0;         // frames with neither panel nor scene
     bool     gateExternal = false;       // the latch itself
     uint32_t gateSinceEnter = 0;         // frames since the latch was set
-    uint32_t gateMaxFrames = 3600;       // ceiling on the latch, 0 = none
     uint32_t gateEnterWindow = 60;       // frames after the panel stops
     uint32_t gateNearMisses = 0;         // rejected candidates, logged
     bool     gateIntent = false;
@@ -32,6 +31,9 @@ struct Gate {
     bool     gateViewWarned = false;
     bool     gatePanelSeenNoted = false;
     bool     gateViewSynced = false;
+    bool     gateViewEverRead = false;   // something has supplied a real index
+    bool     gateViewLostNoted = false;
+    bool     gateNoConsumerNoted = false;
     uint32_t gateIntentAge = 0;          // frames since the key was pressed
     uint32_t gateIntentGrace = 180;      // frames a press gets to take effect
     bool     gateInCamera = false;       // in the camera, whatever the view
@@ -69,8 +71,6 @@ void headOffsetGateConfigure() {
     // something wants the answer. Default ON: the head offset it feeds is the
     // feature, and an ungated offset moves the cockpit view.
     g.gateWantsPanel = cfg.getBool("fix.head_offset_gate", true);
-    g.gateMaxFrames = static_cast<uint32_t>(
-        cfg.getIntInRange("fix.head_offset_max_frames", 3600, 0, 1000000));
     // 60, not 5.
     //
     // 5 came from two entries that both logged "2 frames", and a sample of two
@@ -370,8 +370,22 @@ void headOffsetGateFrame(uint32_t frameNo, uint32_t panelDraws, uint32_t eyeDraw
         const bool intentOk = g.gateKeyBound && g.gateIntent;
         const bool timingOk = g.gateSincePanel <= g.gateEnterWindow ||
                               g.gateIntentAge <= g.gateIntentGrace;
-        if (!g.gateInCamera && intentOk && timingOk && sceneNow &&
-            g.gatePanelRun > 30) {
+        // The panel must have been gone for a WHILE, not for one frame.
+        //
+        // sincePanel >= 1 satisfied the window, so a single dropped panel frame
+        // -- a hitch, a stutter, one composite missed -- armed the gate for
+        // exactly as long as it took the panel to come back. That is a
+        // one-frame pose jump of whatever the offset is, and the panel's return
+        // then both exited AND ate the pending intent, so the entry the player
+        // actually asked for was silently discarded too. One hitch inside the
+        // grace period cost a jolt and a missed entry.
+        //
+        // The mode change itself takes 25 to 86 frames (6ac.6c), so requiring
+        // several panel-less frames costs nothing real and rejects every
+        // single-frame gap.
+        const bool panelGoneAWhile = g.gateSincePanel >= 8;
+        if (!g.gateInCamera && intentOk && timingOk && panelGoneAWhile &&
+            sceneNow && g.gatePanelRun > 30) {
             g.gateInCamera = true;
             g.gateSinceEnter = 0;
             Log::get().note(
@@ -399,51 +413,19 @@ void headOffsetGateFrame(uint32_t frameNo, uint32_t panelDraws, uint32_t eyeDraw
             g.gateIdleFrames = 0;
         }
 
-        // A CEILING on the latch, because the exit above cannot fire in the
-        // one case that matters.
-        //
-        // Leaving the external camera normally brings the panel back and
-        // clears this. Going somewhere else -- boarding the ship is the
-        // measured case -- never does: the cockpit draws a full scene every
-        // frame, so the idle exit never counts, the panel never returns, and
-        // the offset stays applied in the ship. That is exactly what
-        // happened, and the latch was still set 2000 frames later when the
-        // session ended.
-        //
-        // A ceiling is not a discriminator and is not pretending to be one.
-        // It bounds a wrong answer instead of avoiding it, and the number is
-        // a guess about how long somebody sits in the camera -- 1798 frames
-        // was measured in one sitting, so the default is well past that.
-        // Telling the cockpit from the on-foot external camera properly
-        // needs a positive signal for one of them, which nothing here has
-        // yet.
-        // ...and it does not apply when a key is bound, for the same reason
-        // the window does not.
-        //
-        // This is what made the offset "occasionally snap back to the
-        // default": 3600 frames is thirty seconds, so sitting in the camera
-        // longer than that switched it off, mid-use, with the player still
-        // in the camera and nothing to put it back. Reported as the engine
-        // tripping an out-of-bounds check on the camera; it was this timer.
-        //
-        // It was added as a backstop for a latch that could not tell it had
-        // left the camera. The keypress exit tells it, so the backstop now
-        // only fires on correct behaviour.
-        if (!g.gateHaveKey && g.gateInCamera && g.gateMaxFrames &&
-            g.gateSinceEnter > g.gateMaxFrames) {
-            g.gateInCamera = false;
-            g.gateExternal = false;
-            ++g.gateExits;
-            edvr::setExternalCameraOnFoot(false);
-            Log::get().note(
-                "head offset OFF: %u frames in the external camera without the "
-                "flat panel coming back, which is past the ceiling "
-                "(fix.head_offset_max_frames = %u). Either you left it some way "
-                "other than returning to first person -- boarding the ship does "
-                "this -- or you were in it a very long time and the ceiling is "
-                "too low.",
-                g.gateSinceEnter, g.gateMaxFrames);
-        }
+            // THE CEILING IS GONE, and its knob with it.
+            //
+            // It bounded a latch that could not tell it had left the camera,
+            // which was real while the gate armed on render state alone.
+            // Arming now requires a bound key, and that key is also the exit,
+            // so the case it guarded cannot arise -- its own condition,
+            // !gateHaveKey && gateInCamera, had become unreachable.
+            //
+            // Left in place it did active harm rather than nothing: 3600
+            // frames is thirty seconds, the verified hold in this camera is
+            // 9833, and once it fired there was no way to re-arm without
+            // leaving and re-entering. A backstop that can only fire on
+            // correct behaviour is not a backstop.
 
         // While latched, say what the frame looks like, occasionally.
         //
@@ -484,18 +466,28 @@ void headOffsetGateFrame(uint32_t frameNo, uint32_t panelDraws, uint32_t eyeDraw
             ++g.gateNearMisses;
             Log::get().note(
                 "head offset NOT armed: panelRun=%u (needs >30), sincePanel=%u "
-                "(window %u, %s), eyeDraws=%u (needs >50), intent=%s (key %s), "
-                "view=%d (wants %d).",
-                g.gatePanelRun, g.gateSincePanel, g.gateEnterWindow,
-                g.gateHaveKey ? "IGNORED, a key is bound" : "applies",
-                eyeDraws,
+                "(needs >=8, window %u), eyeDraws=%u (needs >50), intent=%s, "
+                "key %s, pressed %s, view=%d (wants %d).",
+                g.gatePanelRun, g.gateSincePanel, g.gateEnterWindow, eyeDraws,
                 g.gateIntent ? "set" : "CLEAR",
-                g.gateHaveKey ? "bound" : "not bound",
+                g.gateKeyBound ? "BOUND" : "NOT BOUND -- nothing can arm",
+                g.gateHaveKey ? "yes" : "not yet this session",
                 g.gateViewIndex, g.gateWantView);
         }
 
         // Too long since the panel for this to be a transition FROM it.
-        if (g.gateSincePanel > 300) g.gatePanelRun = 0;
+        // On-foot credit dies with the panel, not 300 frames later.
+        //
+        // 300 frames of grace let the ship-vanity route survive: board the ship,
+        // press the camera key within ~3 seconds, and the gate still believed
+        // the player was settled on foot -- so the on-foot offset armed on the
+        // SHIP camera. The credit existed to ride out brief panel gaps, and
+        // panelGoneAWhile above is now what does that job, for eight frames
+        // rather than three hundred.
+        //
+        // 90 frames is still generous for a stutter and far short of a mode
+        // change anybody could act on.
+        if (g.gateSincePanel > 90) g.gatePanelRun = 0;
     }
     // The offset is armed from two SEPARATE facts, and keeping them apart
     // is what lets the view change matter.
@@ -527,6 +519,31 @@ void headOffsetGateFrame(uint32_t frameNo, uint32_t panelDraws, uint32_t eyeDraw
     // value outside the plausible range -- and falls back to the count
     // rather than substituting a number that happens to be wrong.
     const int gameView = g.viewOverride;
+    // LOSING the view is a reason to stop, not a reason to carry on.
+    //
+    // Only assigning on gameView >= 0 means that when the read dies mid-camera
+    // -- the game moves its settings, which it demonstrably does -- gateViewIndex
+    // keeps its last value, viewOk stays true, and the offset rides on whatever
+    // preset the player cycles to next. The log meanwhile says the offset "will
+    // not engage", because that message is written for the case where it never
+    // engaged. Wrong in the dangerous direction and contradicted by its own log.
+    //
+    // So: once something HAS been supplying the view, losing it drops the
+    // offset until it comes back. That is the fail-safe direction, and the
+    // rescan is already on its way.
+    if (g.gateViewEverRead && gameView < 0) {
+        if (!g.gateViewLostNoted) {
+            g.gateViewLostNoted = true;
+            Log::get().note("head offset OFF: the camera view can no longer be "
+                            "read, so which preset you are on is unknown. It is "
+                            "coming off rather than staying on a preset it "
+                            "cannot confirm; it will come back when the view "
+                            "does.");
+        }
+    } else if (gameView >= 0) {
+        g.gateViewEverRead = true;
+        g.gateViewLostNoted = false;
+    }
     if (gameView >= 0 && gameView != g.gateViewIndex) {
         if (!g.gateViewSynced) {
             g.gateViewSynced = true;
@@ -537,8 +554,9 @@ void headOffsetGateFrame(uint32_t frameNo, uint32_t panelDraws, uint32_t eyeDraw
         }
         g.gateViewIndex = gameView;
     }
-    const bool viewOk =
-        g.gateWantView < 0 || g.gateViewIndex == g.gateWantView;
+    const bool viewLost = g.gateViewEverRead && gameView < 0;
+    const bool viewOk = !viewLost &&
+        (g.gateWantView < 0 || g.gateViewIndex == g.gateWantView);
 
     // Say so when the view can NEVER match, and only then.
     //
@@ -593,6 +611,24 @@ void headOffsetGateFrame(uint32_t frameNo, uint32_t panelDraws, uint32_t eyeDraw
             g.gateSinceEnter = 0;
             Log::get().note("head offset ON: on foot in the external camera, "
                             "view %d.", g.gateViewIndex);
+            // The offset is applied in openvr_api.dll. If that half is not
+            // installed, this side arms, logs the line above, and nothing
+            // whatsoever happens to the viewpoint -- and the only message that
+            // would explain it lives in the DLL the player skipped.
+            //
+            // The transition flash fix already warns about its missing half for
+            // exactly this reason. This is the same warning and the more
+            // necessary one: the flash fix degrades to a detector that still
+            // logs, this degrades to nothing at all.
+            if (!glitchConsumerPresent() && !g.gateNoConsumerNoted) {
+                g.gateNoConsumerNoted = true;
+                Log::get().note(
+                    "head offset: ...but openvr_api.dll is NOT INSTALLED (or is "
+                    "a different EDVR version), and that is the half which "
+                    "actually moves the viewpoint. Nothing will happen. Explorer "
+                    "Cam needs BOTH files -- see the openvr folder in the release "
+                    "and its READ-ME-FIRST.txt.");
+            }
         } else {
             ++g.gateExits;
             Log::get().note("head offset OFF: camera view is %d and the offset "

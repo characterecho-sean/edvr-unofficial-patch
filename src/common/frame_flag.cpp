@@ -1,5 +1,5 @@
 // GENERATED from src/common/frame_flag.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 ff5703e05f43a4dd]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 dbd2e85cfb7f945e]
 #include "frame_flag.h"
 
 #include <windows.h>
@@ -145,6 +145,13 @@ bool externalCameraOnFoot() {
     // wrong answer here does not expire on its own -- which is what
     // externalCameraOnFootLive is for.
     return s && InterlockedCompareExchange(&s->externalCam, 0, 0) != 0;
+}
+
+bool externalCameraEverPublished() {
+    Shared* s = map();
+    // The stamp only ever moves when setExternalCameraOnFoot is called, so a
+    // nonzero stamp is proof somebody published -- regardless of what they said.
+    return s && InterlockedCompareExchange(&s->externalCamStamp, 0, 0) != 0;
 }
 
 bool externalCameraOnFootLive(uint32_t maxAgeFrames) {
