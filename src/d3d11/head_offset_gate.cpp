@@ -1,5 +1,5 @@
 // GENERATED from src/d3d11/head_offset_gate.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 493e09e8f98a3cd3]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 ea42dd628ebab926]
 #include "head_offset_gate.h"
 
 #include "../common/config.h"
@@ -101,6 +101,21 @@ void headOffsetGateConfigure() {
     // which can tell. See headOffsetGateFrame.
 }
 
+void headOffsetGateReset() {
+    const bool wasOn = g.gateExternal;
+    const bool keyBound = g.gateKeyBound;   // config, not state
+    g = Gate();
+    g.gateKeyBound = keyBound;
+    // Publish OFF explicitly before going quiet. A reader that only sees the
+    // heartbeat stop has to wait out its staleness window; one that is told
+    // stops immediately.
+    setExternalCameraOnFoot(false);
+    if (wasOn) {
+        Log::get().note("head offset OFF: the gate was reset, so every latch and "
+                        "count is cleared rather than frozen where it stood.");
+    }
+}
+
 void headOffsetGateSetKeyBound(bool bound) { g.gateKeyBound = bound; }
 
 void headOffsetGateKeyPressed() {
@@ -160,7 +175,18 @@ bool headOffsetGatePanelFirstSeen() { return g.panelFirstSeen; }
 
 void headOffsetGateFrame(uint32_t frameNo, uint32_t panelDraws, uint32_t eyeDraws) {
     g.panelFirstSeen = false;   // a one-frame edge, cleared before it can be set
-    if (!g.gateWantsPanel) return;
+    if (!g.gateWantsPanel) {
+        // Switched off: CLEAR, do not freeze.
+        //
+        // This used to be a bare early return, which stopped the exits, the
+        // ageing and the heartbeat all at once and left gateInCamera true. The
+        // reader gave up a second later, so the offset was still applied for
+        // that second -- and switching the gate back on republished the stale
+        // latch wherever the player was by then, which for a hot-reload during
+        // play means the cockpit.
+        if (g.gateExternal || g.gateInCamera) headOffsetGateReset();
+        return;
+    }
 
     const bool panelNow = panelDraws > 0;
     const bool sceneNow = eyeDraws > 50;

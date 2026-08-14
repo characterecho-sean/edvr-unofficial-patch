@@ -1,5 +1,5 @@
 // GENERATED from src/common/hotkey.h in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 4cb3697e93de8750]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 2c4b9a0821e54ea8]
 // Edge-triggered hotkey polling.
 //
 // Polled from the frame loop with GetAsyncKeyState rather than installed as a
@@ -63,5 +63,18 @@ private:
 // and may be null.
 int virtualKeyFromName(const char* name, uint32_t* mods);
 int virtualKeyFromName(const char* name);
+
+// Would a binding of (vk, mods) fire with `held` modifiers down?
+//
+// Pure, and separated from pressed() so it can be asserted without a keyboard.
+// The rule has two halves and both were wrong at some point: the binding's
+// modifiers must be HELD (extras allowed, so sprinting with Shift does not make
+// EDVR miss the player's camera key), and no OTHER binding on the same key may
+// be a strictly better match (so one press cannot fire two bindings and toggle
+// an intent straight back off).
+bool hotkeyWouldFire(int vk, uint32_t mods, uint32_t held);
+
+// Forget every registered binding. For tests; bindings re-register on setBinding.
+void hotkeyResetBindings();
 
 }  // namespace edvr

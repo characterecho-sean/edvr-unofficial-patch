@@ -1,5 +1,5 @@
 // GENERATED from tools/openvr_smoke/openvr_smoke.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 0092dc09aca9a783]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 bf94b9f3a106b5ca]
 // openvr_smoke -- checks the openvr proxy's startup path without the game.
 //
 // The thing under test is that the proxy does NOT load the real openvr_api.dll
@@ -147,6 +147,82 @@ int frameFlagChecks() {
     edvr::clearGlitchFrame();
 
     if (bad == 0) printf("  ok    the mode flag round-trips and is independent\n");
+    return bad;
+}
+
+// Which binding fires, given what is physically held.
+//
+// This is the rule that decides whether EDVR sees the same camera keypress the
+// game sees, and a miss is expensive: external_camera is a TOGGLE, so one
+// dropped press inverts the intent for the rest of the session and the offset
+// arms in the wrong place or never arms at all. Asserted rather than reasoned
+// about, because the failure is invisible -- a press that did nothing.
+int hotkeyMatchChecks() {
+    int bad = 0;
+    const uint32_t C = edvr::kHotkeyCtrl, A = edvr::kHotkeyAlt, S = edvr::kHotkeyShift;
+
+    edvr::hotkeyResetBindings();
+    edvr::Hotkey combo, plainOther;
+    combo.setBinding("CTRL+ALT+SPACE");        // Elite's default camera bind
+    plainOther.setBinding("F9");               // an unrelated single key
+
+    // THE CASE THAT MOTIVATED THIS. Sprinting holds Shift; the player presses
+    // their camera key. Under equality this missed, and the intent desynced.
+    if (!edvr::hotkeyWouldFire(VK_SPACE, C | A, C | A | S)) {
+        printf("  FAIL  CTRL+ALT+SPACE did not fire with Shift also held\n");
+        ++bad;
+    }
+    if (!edvr::hotkeyWouldFire(VK_SPACE, C | A, C | A)) {
+        printf("  FAIL  CTRL+ALT+SPACE did not fire with exactly its modifiers\n");
+        ++bad;
+    }
+    // ...but a missing required modifier still must not fire.
+    if (edvr::hotkeyWouldFire(VK_SPACE, C | A, C)) {
+        printf("  FAIL  CTRL+ALT+SPACE fired with Alt not held\n");
+        ++bad;
+    }
+    if (edvr::hotkeyWouldFire(VK_SPACE, C | A, 0)) {
+        printf("  FAIL  CTRL+ALT+SPACE fired on a bare press\n");
+        ++bad;
+    }
+
+    // LEGACY SEMANTICS. A plain binding with no combo on the same key fires
+    // whatever else is held -- which is how Scroll Lock and Pause behaved before
+    // modifiers existed here at all. Equality silently changed that.
+    if (!edvr::hotkeyWouldFire(VK_F9, 0, S)) {
+        printf("  FAIL  a plain binding stopped firing while Shift was held -- "
+               "an unannounced change to keys that predate combos\n");
+        ++bad;
+    }
+
+    // ONE PRESS, ONE BINDING. With both bound on the same key, CTRL+ALT+SPACE
+    // must fire the combo and NOT the bare one: firing both would set the
+    // camera intent and clear it again in the same frame.
+    edvr::Hotkey plainSame;
+    plainSame.setBinding("SPACE");
+    if (!edvr::hotkeyWouldFire(VK_SPACE, C | A, C | A)) {
+        printf("  FAIL  registering a bare SPACE binding broke the combo\n");
+        ++bad;
+    }
+    if (edvr::hotkeyWouldFire(VK_SPACE, 0, C | A)) {
+        printf("  FAIL  one press fired BOTH the combo and the bare binding on "
+               "the same key\n");
+        ++bad;
+    }
+    // ...and the bare one still fires on its own press.
+    if (!edvr::hotkeyWouldFire(VK_SPACE, 0, 0)) {
+        printf("  FAIL  the bare binding stopped firing on a bare press\n");
+        ++bad;
+    }
+    // The suppression must be specific to the key, not global.
+    if (!edvr::hotkeyWouldFire(VK_F9, 0, C | A)) {
+        printf("  FAIL  a combo on SPACE suppressed an unrelated binding on F9\n");
+        ++bad;
+    }
+
+    edvr::hotkeyResetBindings();
+    if (bad == 0)
+        printf("  ok    modifier matching: extras allowed, one press one binding\n");
     return bad;
 }
 
@@ -460,6 +536,10 @@ int main(int argc, char** argv) {
     // liveFlagChecks BEFORE frameFlagChecks, and the order is load-bearing: its
     // first assertion is the "d3d11 never published" case, which stops existing
     // the moment anything calls setExternalCameraOnFoot.
+    if (hotkeyMatchChecks() != 0) {
+        printf("\nOPENVR SMOKE FAILED\n");
+        return 1;
+    }
     if (hotkeyChecks() != 0) {
         printf("\nOPENVR SMOKE FAILED\n");
         return 1;

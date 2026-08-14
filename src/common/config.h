@@ -1,5 +1,5 @@
 // GENERATED from src/common/config.h in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 a795fc3f415a8148]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 73ce62cf4d4d3b01]
 // Hot-reloadable key=value config.
 //
 // The user is wearing a headset and cannot see a text editor, so every tunable
@@ -32,6 +32,17 @@ public:
     // is the failure that is hardest to attribute from a log.
     int         getIntInRange(const char* key, int def, int lo, int hi) const;
     std::string getString(const char* key, const char* def) const;
+
+    // Set a value in memory, without touching the file.
+    //
+    // For tests, which need to ask what a module does when a setting CHANGES --
+    // the gate freezing its latch on fix.head_offset_gate = 0 was a real
+    // defect, and reproducing it by writing an ini and waiting for a write-time
+    // poll would test the file watcher rather than the gate.
+    //
+    // Not used by the DLLs: a setting the game can change behind the file would
+    // make the log and the ini disagree about what is running.
+    void set(const char* key, const char* value);
 
     const std::wstring& path() const { return m_path; }
     const std::wstring& logDir() const { return m_logDir; }

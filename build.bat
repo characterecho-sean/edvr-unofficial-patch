@@ -221,6 +221,21 @@ cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /DNDEBUG /LD ^
 if errorlevel 1 ( echo [edvr] ERROR: fakechain build failed & exit /b 1 )
 echo [edvr] built %BUILD%\fakechain.dll
 
+echo.
+echo [edvr] === gate_test.exe ===
+if not exist "%OBJ%\gatetest" mkdir "%OBJ%\gatetest"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\gatetest"\ /Fe"%BUILD%\gate_test.exe" ^
+    "%ROOT%\tools\gate_test\gate_test.cpp" ^
+    "%ROOT%\src\d3d11\head_offset_gate.cpp" "%ROOT%\src\common\config.cpp" ^
+    "%ROOT%\src\common\log.cpp" "%ROOT%\src\common\frame_flag.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib user32.lib
+if errorlevel 1 ( echo [edvr] ERROR: gate_test build failed & exit /b 1 )
+"%BUILD%\gate_test.exe" "%ROOT%" || (
+    echo [edvr] ERROR: the head-offset gate arms where it should not
+    exit /b 1
+)
+
 echo [edvr] === pose_test.exe ===
 if not exist "%OBJ%\posetest" mkdir "%OBJ%\posetest"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^

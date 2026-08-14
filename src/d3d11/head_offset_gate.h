@@ -1,5 +1,5 @@
 // GENERATED from src/d3d11/head_offset_gate.h in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 f115b9f54880446f]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 70d6974806df4217]
 // When to move the head pose: on foot, in the external camera, and nowhere
 // else.
 //
@@ -45,6 +45,18 @@ namespace edvr {
 // Reads fix.head_offset_*. Safe to call repeatedly; it is on the hot-reload
 // path as well as the startup one.
 void headOffsetGateConfigure();
+
+// Drop every latch, counter and intent, and publish OFF.
+//
+// Called when the gate is switched off, and by the frame-feed test between
+// scenarios. Turning the gate off used to take the early return and simply stop
+// running -- which froze the latch rather than clearing it, so the offset stayed
+// applied for about a second and, worse, turning the gate back on republished
+// the stale latch wherever the player had gone in the meantime.
+//
+// "Stop deciding" and "decide no" are different answers, and only one of them is
+// safe to leave behind.
+void headOffsetGateReset();
 
 // The player pressed hotkey.external_camera. A toggle: the first press is an
 // intent to ENTER, the next is an exit.

@@ -1,5 +1,5 @@
 // GENERATED from src/common/config.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 1433c781c9f7c9a1]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 1035ef3ede713f98]
 #include "config.h"
 
 #include <windows.h>
@@ -231,6 +231,14 @@ bool Config::getBool(const char* key, bool def) const {
                     "being used. Write 1/0, true/false, yes/no or on/off.",
                     key, v.c_str(), def ? "on" : "off");
     return def;
+}
+
+void Config::set(const char* key, const char* value) {
+    if (!key || !value) return;
+    if (!m_impl) m_impl = new Impl();
+    std::string k(key);
+    for (char& c : k) c = static_cast<char>(tolower(c));
+    m_impl->values[k] = value;
 }
 
 int Config::getInt(const char* key, int def) const {

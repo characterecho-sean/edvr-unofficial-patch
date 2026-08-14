@@ -1,5 +1,5 @@
 // GENERATED from src/common/hotkey.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 d839d33abd006208]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 7556a5bbc5f6748c]
 #include "hotkey.h"
 
 #include <cctype>
@@ -31,31 +31,89 @@ static bool gameHasFocus() {
     return pid == GetCurrentProcessId();
 }
 
-// Are the required modifiers held, and no extra ones?
+// Which modifiers are physically down right now.
+static uint32_t heldMods() {
+    uint32_t m = 0;
+    if (GetAsyncKeyState(VK_CONTROL) & 0x8000) m |= kHotkeyCtrl;
+    if (GetAsyncKeyState(VK_MENU) & 0x8000) m |= kHotkeyAlt;
+    if (GetAsyncKeyState(VK_SHIFT) & 0x8000) m |= kHotkeyShift;
+    return m;
+}
+
+// SUBSET, not equality: the binding's modifiers must be held, and extra ones
+// are allowed.
 //
-// BOTH halves matter. Requiring them stops a bare SPACE firing a binding that
-// is CTRL+ALT+SPACE. Rejecting extras stops CTRL+ALT+SPACE ALSO firing a
-// binding that is plain SPACE -- which is the same key, and in Elite those can
-// be two different commands.
-static bool modsHeld(uint32_t want) {
-    const bool ctrl  = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
-    const bool alt   = (GetAsyncKeyState(VK_MENU) & 0x8000) != 0;
-    const bool shift = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
-    return ctrl  == ((want & kHotkeyCtrl) != 0) &&
-           alt   == ((want & kHotkeyAlt) != 0) &&
-           shift == ((want & kHotkeyShift) != 0);
+// Equality was the first attempt and it is wrong for the job. These are the
+// player's OWN Elite bindings, and EDVR is trying to see the same press the
+// game sees -- while the player is holding Shift to sprint, or Ctrl for
+// something else. Under equality, CTRL+ALT+SPACE with Shift also down does not
+// match, EDVR misses the press, and the intent toggle desynchronises for the
+// session. Missing a press is the expensive failure here; that is the whole
+// class of bug this gate has been chasing.
+//
+// It also silently changed two settings that predate all of this. Scroll Lock
+// and Pause used to fire whatever was held, because nothing looked at
+// modifiers at all. Equality quietly made them fire only when bare -- an
+// unannounced change to behaviour people already had muscle memory for.
+// Subset restores it.
+static bool modsSatisfied(uint32_t want, uint32_t held) {
+    return (want & ~held) == 0;
+}
+
+// Bindings that exist, so a plain one can tell when a combo on the same key is
+// the better match.
+//
+// Subset matching alone lets ONE physical press fire TWO bindings: with SHIFT+F
+// and bare F both bound, pressing SHIFT+F satisfies both. For this feature that
+// is not cosmetic -- external_camera is a toggle, so a double fire sets the
+// intent and immediately clears it, and the offset never arms.
+//
+// A registry rather than an ordering rule, because the bindings are independent
+// objects polled in whatever order the frame loop happens to use, and a rule
+// that depends on the combo being polled first would be right only by accident.
+struct Registered { int vk; uint32_t mods; };
+static Registered g_bindings[16];
+static unsigned   g_bindingCount = 0;
+
+static void registerBinding(int vk, uint32_t mods) {
+    if (!vk) return;
+    for (unsigned i = 0; i < g_bindingCount; ++i) {
+        if (g_bindings[i].vk == vk && g_bindings[i].mods == mods) return;
+    }
+    if (g_bindingCount < 16) g_bindings[g_bindingCount++] = {vk, mods};
+}
+
+// Is some OTHER binding on this key a strictly better match right now?
+static bool betterMatchExists(int vk, uint32_t mine, uint32_t held) {
+    for (unsigned i = 0; i < g_bindingCount; ++i) {
+        const Registered& b = g_bindings[i];
+        if (b.vk != vk || b.mods == mine) continue;
+        // More modifiers, all of them held: that binding is what the player
+        // pressed, and this one is the accidental subset.
+        if (modsSatisfied(b.mods, held) && (b.mods & ~mine) != 0) return true;
+    }
+    return false;
 }
 
 void Hotkey::setBinding(const char* name) {
     uint32_t m = 0;
     m_vk = virtualKeyFromName(name, &m);
     m_mods = m_vk ? m : 0;
+    registerBinding(m_vk, m_mods);
 }
+
+bool hotkeyWouldFire(int vk, uint32_t mods, uint32_t held) {
+    if (!vk) return false;
+    return modsSatisfied(mods, held) && !betterMatchExists(vk, mods, held);
+}
+
+void hotkeyResetBindings() { g_bindingCount = 0; }
 
 bool Hotkey::pressed() {
     if (m_vk == 0) return false;
     const bool keyDown = (GetAsyncKeyState(m_vk) & 0x8000) != 0;
-    const bool down = keyDown && modsHeld(m_mods) && gameHasFocus();
+    const bool down = keyDown && hotkeyWouldFire(m_vk, m_mods, heldMods()) &&
+                      gameHasFocus();
     const bool edge = down && !m_down;
     m_down = down;
     return edge;
