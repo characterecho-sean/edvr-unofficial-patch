@@ -1,5 +1,5 @@
 // GENERATED from tools/glitch_test/glitch_test.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 417532592929a10c]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 385e6e152d735aea]
 // glitch_test -- drives the transition-flash detector without the game.
 //
 // The port of glitch_frame.cpp into this repo compiled, linked, and passed
@@ -398,6 +398,84 @@ int main(int argc, char** argv) {
     }
     check("three distinct separations cost three frames, not thirty", churn <= 3,
           std::to_string(churn) + " frames withheld across three separations");
+
+    // --- 7b. SEVERAL CAMERAS IN ONE FRAME ---------------------------------
+    //
+    // The failure the first version of this fix shipped with, and the reason the
+    // replay below is not enough on its own: the ring records one camera per
+    // frame -- the furthest -- while the real frame hands the detector several,
+    // in increasing distance, and it re-decides on each.
+    //
+    // The verdict used to be taken on the FIRST magnitude to cross the
+    // threshold, while the residual the boundary logs and remembers is the LAST
+    // one evaluated. So a frame opening on a novel magnitude and closing on a
+    // known one was withheld AND recorded as recurring, and the field log has
+    // exactly that: "a jump of about 564596 world units ... 2 times" followed by
+    // "frame 13438 was drawn from 564654 world units ... Withheld", same
+    // millisecond, same frame, both from the withheld branch.
+    settle(b, x, 40);
+    {
+        // Teach it the separation, on a frame with a single camera.
+        x += 30.0f;
+        frame(b, x, 568000.0f, 0.0f);
+        settle(b, x, 20);
+        x += 30.0f;
+        frame(b, x, 568000.0f, 0.0f);
+        settle(b, x, 20);
+
+        // Now a frame carrying TWO cameras beyond the near one: a novel
+        // magnitude first, then the known separation, which is further out and
+        // so is what the boundary will see.
+        x += 30.0f;
+        b.setPos(x, 0.0f, 0.0f);
+        glitchFrameObserve(b.f, kBytes, b.res);          // the near camera
+        b.setPos(x, 300000.0f, 0.0f);
+        glitchFrameObserve(b.f, kBytes, b.res);          // novel, crosses first
+        b.setPos(x, 568000.0f, 0.0f);
+        glitchFrameObserve(b.f, kBytes, b.res);          // the known separation
+        const bool marked = glitchFrameMarked();
+        glitchFrameBoundary(kEyeDraws);
+        clearGlitchFrame();
+        check("the verdict follows the camera the frame is judged on", !marked,
+              "a frame whose furthest camera is a recognised separation was "
+              "withheld because an earlier, novel candidate had already decided "
+              "it -- the two halves are reading different residuals");
+        settle(b, x, 20);
+    }
+
+    // --- 8. The field replay ----------------------------------------------
+    //
+    // Not a shape derived from the field: the field itself. These are the
+    // furthest-camera positions and eye-draw counts EDVR recorded in its own ring
+    // buffer, dumped with the Pause key during a burst of judder over a planet
+    // surface on 2026-08-14, frames 13425-13470.
+    //
+    // The synthetic fixtures above all pass while this one reproduces judder,
+    // which is the whole reason it is here. A fixture written from a description
+    // of a bug tests the description.
+    settle(b, x, 200);
+    {
+        struct Rec { float x, y, z; uint32_t eye; };
+        static const Rec kRing[] = {
+#include "field_ring_13425.inc"
+        };
+        uint32_t withheld = 0, farFrames = 0;
+        for (const Rec& r : kRing) {
+            const bool isFar = r.y < -100000.0f;
+            if (isFar) ++farFrames;
+            b.setPos(r.x, r.y, r.z);
+            glitchFrameObserve(b.f, kBytes, b.res);
+            const bool marked = glitchFrameMarked();
+            glitchFrameBoundary(r.eye);
+            clearGlitchFrame();
+            if (marked) ++withheld;
+        }
+        printf("      [dbg] replay: %u far frames, %u withheld\n", farFrames, withheld);
+        check("the field burst costs one frame, not one every three",
+              withheld <= 2,
+              std::to_string(withheld) + " of " + std::to_string(farFrames) +
+                  " cascade frames withheld replaying the recorded ring");
+    }
 
     clearGlitchFrame();
     shutdownGlitchFrameFix();

@@ -1,5 +1,5 @@
 // GENERATED from src/d3d11/glitch_frame.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 4d2f70e2c85fb4e5]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 14d03bb4428a943b]
 #include "glitch_frame.h"
 
 #include <windows.h>
@@ -610,8 +610,6 @@ void glitchFrameObserve(const void* data, uint32_t bytes, const void* resource) 
     s->lastTrip = trip;
 
     const bool jumped = resid > trip;
-    if (jumped == s->jumpedThisFrame) return;
-    s->jumpedThisFrame = jumped;
 
     // A magnitude we have seen recur is a pass flip, not a transition.
     //
@@ -621,12 +619,33 @@ void glitchFrameObserve(const void* data, uint32_t bytes, const void* resource) 
     // only happened at the boundary would withhold the frame and then tidy up
     // afterwards, which is the exact mistake the comment above this function
     // records being made once already.
+    //
+    // RE-DECIDED ON EVERY CANDIDATE, and there used to be an early return here
+    // that skipped any candidate agreeing with the frame's current verdict. That
+    // put the two halves out of step, because a frame carries SEVERAL cameras
+    // and they are evaluated in increasing distance: the verdict was taken on
+    // the first magnitude to cross the threshold, while `lastResid` -- the one
+    // the boundary logs and remembers -- is the last one evaluated. A novel
+    // magnitude opening the frame and a known one closing it therefore withheld
+    // the frame and recorded it as recurring in the same breath.
+    //
+    // That is not a hypothesis. It is the pair of lines the field session
+    // printed, on the same millisecond, for the same frame:
+    //
+    //   transition flash: a jump of about 564596 world units ... 2 times.
+    //   transition flash: frame 13438 was drawn from 564654 world units ...
+    //                     Withheld
+    //
+    // Both come from the withheld branch, in that order. Eleven consecutive
+    // cascade frames were withheld while the memory holding their magnitude was
+    // being refreshed by the very frames it should have been suppressing.
     s->suppressedThisFrame = jumped && residualIsKnownSeparation(resid);
+    s->jumpedThisFrame = jumped;
 
     if (jumped && !s->suppressedThisFrame && s->cooldown == 0 &&
         s->consecutive < s->maxConsecutive) {
         markGlitchFrame();
-    } else if (!jumped || s->suppressedThisFrame) {
+    } else {
         // Withdraw, do not clear: a further candidate later in the same frame
         // can re-raise this.
         unmarkGlitchFrame();
