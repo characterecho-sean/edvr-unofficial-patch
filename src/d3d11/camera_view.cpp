@@ -1,5 +1,5 @@
 // GENERATED from src/d3d11/camera_view.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 f4d52257b050f971]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 8ce7bff4e99cf596]
 #include "camera_view.h"
 
 #include <windows.h>
@@ -464,6 +464,29 @@ void checkAnchors(const uint8_t* oldBase) {
             : "Not yet conclusive.");
 }
 
+// ONE PLACE THAT LEARNS THE ARRAY'S ADDRESS, called from every path that finds
+// it. There are three -- the scan's single-candidate branch, the behavioural
+// watcher, and the provisional run proving itself over 600 frames -- and the
+// hunt was wired to the first only. A whole test flight produced no anchor
+// evidence because of it: the array was found by another path, so nothing was
+// ever recorded to compare against when it moved.
+void noteArrayBase(const uint8_t* base) {
+    if (!base) return;
+    if (g_s.arrayBase && base != g_s.arrayBase) checkAnchors(g_s.arrayBase);
+    g_s.arrayBase = base;
+    if (g_s.anchorHuntDone) return;
+    g_s.anchorHuntDone = true;
+    if (g_s.regions.empty()) {
+        // Said out loud rather than logging "0 places found", which reads as
+        // evidence when it is the absence of a search.
+        Log::get().note(
+            "camera view: cannot look for pointers to the camera array -- the "
+            "region list was released when the scan finished, so there is "
+            "nothing to search. No anchor evidence from this session.");
+        return;
+    }
+    huntAnchors(base);
+}
 // Is there a record at this address AT ALL?
 //
 // Distinguishes an EMPTY slot in the array from one holding a value we do not
@@ -706,10 +729,7 @@ void finishScan() {
     if (candidates.size() == 1) {
         g_s.chosen = runs[candidates[0]].base + g_s.ordinal * kStride;
         // The array's own base, which is what a pointer to it would hold.
-        const uint8_t* newBase = runs[candidates[0]].base;
-        if (g_s.arrayBase && newBase != g_s.arrayBase) checkAnchors(g_s.arrayBase);
-        g_s.arrayBase = newBase;
-        if (!g_s.anchorHuntDone) { g_s.anchorHuntDone = true; huntAnchors(newBase); }
+        noteArrayBase(runs[candidates[0]].base);
         g_s.usable = true;
         g_s.cooldown = 0;
         // The probes above charged the budget while deciding. They were reads of
@@ -913,6 +933,10 @@ void pollCandidates() {
 
     if (qualified == 1) {
         g_s.chosen = g_s.cands[qualifiedAt].rec;
+        // Lowest-addressed record found, which is the array's base for a
+        // contiguous run. A base that is slightly off finds nothing and says
+        // so; not looking at all finds nothing and says nothing.
+        noteArrayBase(g_s.records.empty() ? nullptr : g_s.records.front());
         g_s.usable = true;
         g_s.readFaults = 0;
         g_s.readFaultsNoted = false;
@@ -965,6 +989,7 @@ void cameraViewTick(uint32_t eyeDraws) {
         const uint32_t v = recordValue(g_s.provisional);
         if (v <= g_s.plausibleMax) {
             g_s.chosen = g_s.provisional;
+            noteArrayBase(g_s.provisional - g_s.ordinal * kStride);
             g_s.usable = true;
             g_s.cooldown = 0;
             g_s.readFaults = 0;
