@@ -1,11 +1,12 @@
 // GENERATED from src/d3d11/camera_view.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 cae32e946ac4f6e7]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 4c9f9e38755215c8]
 #include "camera_view.h"
 
 #include <windows.h>
 #include <tlhelp32.h>
 
 #include <algorithm>
+#include <cstdio>
 #include <string>
 #include <vector>
 
@@ -473,34 +474,88 @@ void finishScan() {
     // ordinal cannot distinguish the anchor being wrong from the grouping being
     // wrong.
     //
-    // Every slot, empty ones included, because a hole is evidence: it is what
-    // says the records moved rather than that there are fewer of them. The scan
-    // retries roughly a minute apart, so cycling camera presets between attempts
-    // makes the slot that TRACKS the preset the one that changed between dumps --
-    // which is a fact about the game rather than an inference about it.
-    if (candidates.empty() && !runs.empty()) {
+    // IT WALKS THE RECORD LIST, NOT THE RUNS, and that is the whole point of it.
+    //
+    // The first version walked runs, and runs are exactly what is unreliable
+    // here: a record that has moved out of contiguity is not in any run, so the
+    // records most worth seeing were the ones it could not show. 6am's capture
+    // has ten records inside a run and two somewhere else, and the two missing
+    // addresses are precisely the evidence needed -- if the twelfth RECORD in
+    // address order holds a plausible view wherever it sits, then the ordinal
+    // counts records rather than slots, and that is a different fix from a wider
+    // gap tolerance.
+    //
+    // So: every record the scan found, in address order, with its offset in
+    // strides from the first. Holes are printed too, because a hole is evidence
+    // -- it says the records moved rather than that there are fewer of them --
+    // but the walk is anchored on records and merely notes the gaps between
+    // them, which is the reverse of what it did before.
+    //
+    // FOUND-THEN and READS-NOW are both shown, because they disagree and the
+    // disagreement is real. The 14:14 capture reported twelve records present
+    // and only ten still readable seconds later: `present` is counted during the
+    // scan and the value is re-read at this moment, and in between the array was
+    // losing entries. Printing one number would have hidden the very behaviour
+    // that explains the failure.
+    if (candidates.empty() && !g_s.records.empty()) {
         Log::get().note(
-            "camera view: no run fits, so here is every slot that was found. The "
-            "one that holds your camera preset is the one whose value CHANGES when "
-            "you cycle cameras -- this is printed again on each retry, about a "
-            "minute apart, so switching preset in between is what identifies it. "
-            "(empty) means the slot is inside the group but holds nothing.");
-        for (size_t r = 0; r < runs.size() && r < 8; ++r) {
-            for (size_t sIdx = 0; sIdx < runs[r].slots && sIdx < 24; ++sIdx) {
-                const uint8_t* rec = runs[r].base + sIdx * kStride;
-                const uint32_t v = recordValue(rec);
-                if (v == 0xFFFFFFFFu) {
-                    Log::get().note("camera view:   run %zu slot %2zu at %p (empty)",
-                                    r, sIdx, (const void*)rec);
-                } else {
+            "camera view: no run fits, so here is every record the scan found, in "
+            "address order. FOUND is what the scan saw; READS is what the same "
+            "address holds right now, and the two differing means the array is "
+            "losing entries as we look. The one that holds your camera preset is "
+            "the one whose READS value CHANGES when you cycle cameras -- this is "
+            "printed again on each retry, about a minute apart, so switching "
+            "preset in between is what identifies it.");
+
+        const uint8_t* first = g_s.records.front();
+        size_t shown = 0, stillReading = 0;
+        for (size_t i = 0; i < g_s.records.size() && shown < 40; ++i) {
+            const uint8_t* rec = g_s.records[i];
+            // Distance from the first record, in strides. This is the number the
+            // ordinal is currently compared against, so printing it beside the
+            // record index is what makes the two readings distinguishable at a
+            // glance: where they differ, the records are not contiguous.
+            const size_t slotIdx = static_cast<size_t>(rec - first) / kStride;
+            if (i > 0) {
+                const size_t prev =
+                    static_cast<size_t>(g_s.records[i - 1] - first) / kStride;
+                if (slotIdx > prev + 1) {
                     Log::get().note(
-                        "camera view:   run %zu slot %2zu at %p = %u%s%s", r, sIdx,
-                        (const void*)rec, v,
-                        v <= g_s.plausibleMax ? " -- could be a view" : "",
-                        (r == 0 && sIdx == g_s.ordinal) ? "   <- the ordinal" : "");
+                        "camera view:   ... %zu empty slot(s) here ...",
+                        slotIdx - prev - 1);
                 }
             }
+            const uint32_t v = recordValue(rec);
+            char reads[48];
+            if (v == 0xFFFFFFFFu) {
+                snprintf(reads, sizeof(reads), "READS gone");
+            } else {
+                snprintf(reads, sizeof(reads), "READS %u%s", v,
+                         v <= g_s.plausibleMax ? " -- could be a view" : "");
+            }
+            Log::get().note(
+                "camera view:   record %2zu (slot %2zu) at %p  %s%s%s", i,
+                slotIdx, (const void*)rec, reads,
+                i == g_s.ordinal ? "   <- ordinal counted over RECORDS" : "",
+                slotIdx == g_s.ordinal ? "   <- ordinal counted over SLOTS" : "");
+            if (v != 0xFFFFFFFFu) ++stillReading;
+            ++shown;
         }
+        if (g_s.records.size() > shown) {
+            Log::get().note("camera view:   ... and %zu more not shown ...",
+                            g_s.records.size() - shown);
+        }
+        // The scan's count against this instant's, which is the shrinking made
+        // visible. They differed by two in the capture that prompted this, and a
+        // dump that printed only one of them would have hidden it.
+        Log::get().note(
+            "camera view: the scan found %zu record(s); %zu of the %zu shown "
+            "still read as records now%s.",
+            g_s.records.size(), stillReading, shown,
+            stillReading < shown
+                ? " -- the array is losing entries while we watch, which is the "
+                  "failure itself rather than a bad read"
+                : "");
     }
 
     if (candidates.size() == 1) {
