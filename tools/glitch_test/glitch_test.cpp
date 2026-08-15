@@ -1,5 +1,5 @@
 // GENERATED from tools/glitch_test/glitch_test.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 61caf830ea495e39]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 b5b6636326ab57aa]
 // glitch_test -- drives the transition-flash detector without the game.
 //
 // The port of glitch_frame.cpp into this repo compiled, linked, and passed
@@ -1104,7 +1104,23 @@ int main(int argc, char** argv) {
               std::to_string(multi) +
                   " of 3 withheld; the governor is counting candidates rather "
                   "than frames, so one withheld frame spends the whole budget");
-        settle(b, x, 200);
+
+        // A FRAME THAT IS NOT WITHHELD MUST COST NOTHING, which is the half the
+        // first fix missed and which is NOT tested here. It could not be built:
+        // withdrawing a mark needs a later candidate that is FURTHER from the
+        // origin -- otherwise glitchFrameObserve returns before re-deciding --
+        // and also not itself a jump, and a position far enough out to be the
+        // frame's furthest is necessarily far from the predicted track. The
+        // reachable withdrawal is a further candidate that is SUPPRESSED, which
+        // needs a certified park or a learned separation set up first.
+        //
+        // So the boundary-charging fix rests on the field log and on the code
+        // reading, not on a fixture: a session with zero frames withheld by
+        // either counter in which the governor spent its whole budget four
+        // times. Charging where the counting happens makes the two the same
+        // predicate, which is the property that matters, and 8c2 above pins the
+        // per-frame half of it. Worth building properly when the park fixtures
+        // can be reused for it.        settle(b, x, 200);
     }
 
     // --- 8d. The burst governor: the fix may not cost more than the artefact -

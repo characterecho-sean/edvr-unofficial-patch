@@ -1,5 +1,5 @@
 // GENERATED from src/d3d11/glitch_frame.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 2a08ba00a4c14d2c]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 09b743d24ef64428]
 #include "glitch_frame.h"
 
 #include <windows.h>
@@ -1476,31 +1476,6 @@ void glitchFrameObserve(const void* data, uint32_t bytes, const void* resource) 
         : s->cooldown > 0                  ? kVerdictCooldown
                                            : kVerdictConsecutive;
     if (willMark) {
-        // ONE ENTRY PER FRAME, however many candidates that frame carried.
-        //
-        // This ran per candidate, and glitchFrameObserve is called on every new
-        // furthest camera WITHIN a frame -- so one withheld frame that happened
-        // to carry three candidates wrote three entries, all stamped with the
-        // same frame number, and the governor read its whole budget as spent.
-        //
-        // Measured within one turn of shipping it: a session that withheld ONE
-        // frame in total logged "3 frames withheld inside 60 -- the whole
-        // budget", stood down, and let both of the flashes the player reported
-        // straight through. The bound designed to stop the fix costing more than
-        // the artefact instead stopped the fix working, on a storm that never
-        // happened. Exactly the failure the density guard was removed for,
-        // reached by a different route.
-        //
-        // The same reasoning is on observeShell's once-per-frame gate, and for
-        // the same reason: a per-candidate count is not a count of frames.
-        const uint32_t lastAt =
-            s->withheldHead == 0
-                ? 0u
-                : s->withheldAt[(s->withheldHead - 1) % kBurstHistory];
-        if (s->withheldHead == 0 || lastAt != s->frameNo) {
-            s->withheldAt[s->withheldHead % kBurstHistory] = s->frameNo;
-            ++s->withheldHead;
-        }
         markGlitchFrame();
     } else {
         // Withdraw, do not clear: a further candidate later in the same frame
@@ -1676,6 +1651,22 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
         }
         unmarkGlitchFrame();
     } else if (wasWithheld) {
+        // THE GOVERNOR IS CHARGED HERE, beside the counter, and not during the
+        // draws where it used to be.
+        //
+        // A mark taken during the draws can still be withdrawn by a later
+        // candidate in the same frame -- that is what unmarkGlitchFrame is for --
+        // so charging at the decision billed the budget for frames that were
+        // never withheld at all. Measured: a session with ZERO frames withheld
+        // by either counter, in which the governor reported spending its whole
+        // budget four separate times and let three flashes through.
+        //
+        // This is the third time one predicate has been evaluated in two places
+        // and drifted: the withheld counter, then the burst budget twice. The
+        // rule the file has arrived at is that anything derived from "was this
+        // frame withheld" reads wasWithheld, here, once.
+        s->withheldAt[s->withheldHead % kBurstHistory] = s->frameNo;
+        ++s->withheldHead;
         // Counted, not excluded: see the note above on endering.
         if (!rendering) ++s->withheldNotRendering;
         s->markedThisFrame = true;
