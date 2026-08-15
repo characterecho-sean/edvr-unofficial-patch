@@ -148,6 +148,21 @@ struct State {
     float     poseStepNoteMm = 50.0f;
     Hotkey    poseDumpKey;
     bool      poseKeyBound = false;
+    // The external-camera key, watched on THIS side too.
+    //
+    // The camera history is dumped by two keys -- the history key and, when the
+    // player is chasing a transition, their own camera key. The pose history had
+    // only the first, so a session spent pressing the camera key produced four
+    // camera histories and no pose histories at all, which is a diagnostic that
+    // is present exactly when nobody is looking for it.
+    //
+    // Watched here rather than signalled across the shared block for the same
+    // reason the history key is: a channel for a diagnostic keypress is more
+    // machinery than the thing it carries.
+    Hotkey    poseCamKey;
+    bool      poseCamBound = false;
+    bool      poseDumpOnCam = false;
+    uint32_t  poseDumpCountdown = 0;
 
     // Refused this session, so a SECOND compositor request does not sail past.
     //
@@ -200,6 +215,28 @@ void configurePoseRing(State* s) {
     // Clamped anyway: 0 would flag every frame and drown the verdict it exists
     // to make readable.
     s->poseStepNoteMm = (std::isfinite(mm) && mm > 0.0f && mm <= 1000.0f) ? mm : 50.0f;
+
+    s->poseCamKey.setBinding(cfg.getString("hotkey.external_camera", "").c_str());
+    s->poseCamBound = s->poseCamKey.key() != 0;
+    s->poseDumpOnCam = cfg.getBool("advanced.dump_camera_on_external_cam", false);
+
+    // SAID OUT LOUD, once, because an instrument that records silently and
+    // dumps on a key is indistinguishable from one that is not there. A whole
+    // stage-0 run produced four camera histories and no pose histories, and
+    // nothing in either log said why.
+    static bool announced = false;
+    if (!announced) {
+        announced = true;
+        Log::get().note(
+            "headset pose history armed: recording where the runtime says your "
+            "headset is, every frame, before any EDVR offset. Written by %s%s, "
+            "alongside the viewpoint history in the other log. Nothing is "
+            "withheld or changed because of it -- a bad pose from tracking is "
+            "not something this can fix, only tell apart from the game's.",
+            s->poseKeyBound ? "the history key" : "NO history key (unbound)",
+            s->poseCamBound && s->poseDumpOnCam ? " and your external-camera key"
+                                                : "");
+    }
 }
 
 // The pose history, and the verdict that makes it worth having.
@@ -442,6 +479,13 @@ vr::EVRCompositorError hookedWaitGetPoses(void* self,
     // a diagnostic keypress would be more machinery than the thing it carries,
     // and the two logs are read together anyway.
     if (s->poseKeyBound && s->poseDumpKey.pressed()) dumpPoseRing(s);
+    // The camera key arms a delayed dump, matching the other side: the ring
+    // holds the frames BEFORE it is written, so taking it on the press would
+    // capture the approach and none of the transition.
+    if (s->poseCamBound && s->poseDumpOnCam && s->poseCamKey.pressed()) {
+        s->poseDumpCountdown = 180;
+    }
+    if (s->poseDumpCountdown > 0 && --s->poseDumpCountdown == 0) dumpPoseRing(s);
 
     // The head offset, applied BEFORE the game sees the poses.
     //
