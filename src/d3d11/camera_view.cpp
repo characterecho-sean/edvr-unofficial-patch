@@ -1,5 +1,5 @@
 // GENERATED from src/d3d11/camera_view.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 703cd5d18c586288]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 301f043f3d7d66a5]
 #include "camera_view.h"
 
 #include <windows.h>
@@ -353,6 +353,22 @@ uint32_t recordValue(const uint8_t* rec) {
     return v;
 }
 
+// Is there a record at this address AT ALL?
+//
+// Distinguishes an EMPTY slot in the array from one holding a value we do not
+// recognise, and those are opposite situations. An empty slot means the array
+// has been found and the game has not filled it yet -- wait. A filled slot
+// holding something implausible means this is probably not the array -- look
+// elsewhere. recordValue answers 0xFFFFFFFF to both.
+bool slotOccupied(const uint8_t* rec) {
+    bool ok = false;
+    guarded("camera_view/anchor", [&] {
+        const uint8_t* const* anchor = reinterpret_cast<const uint8_t* const*>(rec);
+        ok = (*anchor == g_s.typePtr);
+    });
+    return ok;
+}
+
 // Called when a scan completes. Picks the camera settings ARRAY out of the
 // matches, then the ordinal within it.
 //
@@ -472,8 +488,32 @@ void finishScan() {
         // has to stay a refusal: watching both and taking whichever blinks first
         // is the coin toss with extra steps.
         if (longEnough.size() == 1) {
-            g_s.provisional = runs[longEnough[0]].base + g_s.ordinal * kStride;
+            const CameraViewRun& r = runs[longEnough[0]];
+            g_s.provisional = r.base + g_s.ordinal * kStride;
             g_s.provisionalFrames = kProbeWindow;
+
+            // AN EMPTY SLOT IS NOT A WRONG ANSWER, and must not cost an attempt.
+            //
+            // Measured: a session where every scan found the array at the address
+            // the working sessions used, with 12 of 15 slots holding a record and
+            // the ordinal in one of the holes. The game had not finished filling
+            // it. Charging that to the four-attempt budget spends the feature's
+            // whole allowance waiting for the game to do something it was always
+            // going to do -- and the log said "ordinal reads something else",
+            // which describes the opposite situation and sent the diagnosis after
+            // a wrong anchor.
+            if (!slotOccupied(g_s.provisional)) {
+                if (g_s.attempts > 0) --g_s.attempts;
+                Log::get().note(
+                    "camera view: run %zu is the right shape for ordinal %zu, but "
+                    "that slot is EMPTY -- %zu of %zu slots hold a record, so the "
+                    "array is here and the game has not filled it yet. This does "
+                    "not count as an attempt. Watching it for %u frames and "
+                    "scanning again after that.",
+                    longEnough[0], g_s.ordinal, r.present, r.slots, kProbeWindow);
+                return;
+            }
+
             Log::get().note("camera view: run %zu is long enough for ordinal %zu "
                             "but did not read as a view just now. Watching it for "
                             "%u frames before writing it off -- that slot holds "

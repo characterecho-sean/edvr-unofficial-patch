@@ -82,6 +82,10 @@ struct State {
     // It does NOT catch a crash half an hour in -- that session confirmed long
     // before, and disabling the hooks at the next launch would not obviously
     // help anyway, since such a crash is not reproducible from startup.
+    // Dump the camera history on every external-camera keypress. Diagnostic,
+    // off by default: 900 lines a press.
+    bool dumpOnExternalCam = false;
+
     Sentinel* sentinel = nullptr;
     uint32_t  framesSeen = 0;
     bool      sentinelConfirmed = false;
@@ -143,7 +147,18 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
         // Elite bindings: EDVR does not send them, press them or interfere with
         // them -- it watches for the same press the game gets, so it knows
         // which mode the player just asked for.
-        if (g_state->externalCamKey.pressed()) headOffsetGateKeyPressed();
+        if (g_state->externalCamKey.pressed()) {
+            headOffsetGateKeyPressed();
+            // The camera history, captured on the press rather than on a key the
+            // player has to reach for afterwards.
+            //
+            // Entering and leaving the external camera is reported as flashing,
+            // and it is a transition nobody can press Pause during: the report is
+            // "there was a flash going in and out", by which time the ten seconds
+            // of history are the ten seconds after it. This puts the capture on
+            // the event itself. Off by default -- it writes 900 lines per press.
+            if (g_state->dumpOnExternalCam) dumpCameraRing();
+        }
         // Reading the view the game is actually on, and telling the gate.
         //
         // The keypress count above stays as the fallback, for when this cannot
@@ -193,6 +208,8 @@ State& ensureState() {
         g_state->toggleKey.setBinding(Config::get().getString("hotkey.toggle_exposure", "SCROLLLOCK").c_str());
         g_state->dumpKey.setBinding(Config::get().getString("hotkey.dump_camera", "PAUSE").c_str());
         g_state->externalCamKey.setBinding(Config::get().getString("hotkey.external_camera", "").c_str());
+        g_state->dumpOnExternalCam =
+            Config::get().getBool("advanced.dump_camera_on_external_cam", false);
         // A CONFIGURED key, not a pressed one. The gate refuses to arm without
         // this, so a fresh install with nothing bound is genuinely inert rather
         // than falling back to a heuristic that cannot tell the external camera
