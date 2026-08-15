@@ -296,15 +296,54 @@ void dumpPoseRing(State* s) {
     // THE VERDICT. Two numbers and a count, so the next "was that EDVR?" session
     // does not have to be reconstructed by hand from three log files.
     if (worstStepMm > s->poseStepNoteMm) {
-        Log::get().note(
-            "--- the headset moved %.0f mm in ONE frame at f%u, past the %.0f mm "
-            "worth noting. A head does not travel that far in eleven "
-            "milliseconds, so that frame's viewpoint came from the TRACKING and "
-            "not from the game. This is not something EDVR can fix -- the "
-            "compositor reprojects from the same tracking data -- but it is a "
-            "different bug from the game drawing a bad frame, and they look "
-            "identical from inside a headset. ---",
-            worstStepMm, worstFrame, s->poseStepNoteMm);
+        // DID IT COME BACK? The same question the camera side has always asked,
+        // and for the same reason: a step that RETURNS is a one-frame tracking
+        // fault, and a step that STAYS is the runtime re-establishing where zero
+        // is. Those are completely different events and only one of them is a
+        // fault -- calling a recentre a tracking glitch would send somebody after
+        // their base stations over something working as designed.
+        //
+        // Measured within a frame of writing this: a 172 mm step to (0.001,
+        // -0.001, -0.001) that stayed there, with the head moving sub-millimetre
+        // either side. A recentre at a mode change, not a glitch.
+        bool returned = false;
+        {
+            const float* before = nullptr;
+            uint32_t seen = 0;
+            for (uint64_t i = first; i < s->poseHead; ++i) {
+                const State::PoseEntry& e = s->poseRing[i % 900];
+                if (e.frame == worstFrame) { seen = 1; continue; }
+                if (!seen) { before = e.pos; continue; }
+                if (++seen > 11) break;
+                if (before) {
+                    float d2 = 0.0f;
+                    for (uint32_t a = 0; a < 3; ++a) {
+                        const float d = e.pos[a] - before[a];
+                        d2 += d * d;
+                    }
+                    if (sqrtf(d2) * 1000.0f <= s->poseStepNoteMm) { returned = true; break; }
+                }
+            }
+        }
+        if (returned) {
+            Log::get().note(
+                "--- the headset moved %.0f mm in ONE frame at f%u and came BACK, "
+                "past the %.0f mm worth noting. A head does not travel that far and "
+                "return, so that frame's viewpoint came from the TRACKING and not "
+                "from the game. EDVR cannot fix it -- the compositor reprojects from "
+                "the same tracking data -- but it is a different bug from the game "
+                "drawing a bad frame, and the two are identical from inside a "
+                "headset. ---",
+                worstStepMm, worstFrame, s->poseStepNoteMm);
+        } else {
+            Log::get().note(
+                "--- the reported headset position moved %.0f mm in one frame at f%u "
+                "and STAYED there. That is the runtime re-establishing where zero "
+                "is, not a tracking fault -- Elite does it at some mode changes. It "
+                "still moves your viewpoint, and EDVR neither causes it nor can "
+                "prevent it, but nothing is wrong with your tracking. ---",
+                worstStepMm, worstFrame);
+        }
     } else {
         Log::get().note(
             "--- the largest one-frame headset movement here is %.0f mm, under "
