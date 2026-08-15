@@ -1,5 +1,5 @@
 // GENERATED from src/d3d11/camera_view.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 a0651a5a9993bfdd]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 a473aad5e0becabe]
 #include "camera_view.h"
 
 #include <windows.h>
@@ -1036,9 +1036,23 @@ void cameraViewTick(uint32_t eyeDraws) {
                             "mid-change when the scan sampled it.", v);
         } else if (--g_s.provisionalFrames == 0) {
             g_s.provisional = nullptr;
+            // ARM THE RESCAN THIS MESSAGE USED TO ONLY PROMISE. The empty-slot
+            // branch refunds its attempt, and the refund zeroes the very
+            // condition (`attempts > 0`) the self-trigger fires on -- so the
+            // expiry left the module waiting for the settled-flat-panel
+            // caller, which cannot fire while the player is in the camera
+            // (6ae.7, re-entered through the refund; measured as a 72-second
+            // dead window in 6as, spent exactly while the player was there
+            // cycling). A re-find on the rescan budget, with the short
+            // cooldown overriding finishScan's leftover retry cooldown: the
+            // array demonstrably exists, and the watcher needs candidates
+            // FRESHER than the last rebuild -- the tail relocates repeatedly,
+            // so only a prompt scan can hand it addresses worth watching.
+            g_s.needRescan = true;
+            g_s.cooldown = kRescanCooldown;
             Log::get().note("camera view: that run never read as a view in %u "
                             "frames, so it is not the camera settings after all. "
-                            "Waiting for the next scan.", kProbeWindow);
+                            "Scanning again in a few seconds.", kProbeWindow);
         }
     }
 
