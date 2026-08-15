@@ -204,6 +204,32 @@ mismatch between the eyes, which feels like exactly the thing this fix is for.
 This is a workaround with a measurable failure mode, kept because the alternative
 is watching the flash. It is not a substitute for fixing the ordering.
 
+## The one at the external camera is Elite's, and cannot be hidden
+
+Entering and leaving the on-foot external camera shows the world from the wrong
+place for a frame or two — usually described as being briefly under the terrain.
+It is not this fix misfiring: it happens identically with `transition_flash = 0`,
+where EDVR withholds nothing at all.
+
+It also cannot be worked around from out here, and that is worth recording
+because the obvious idea looks sound. Since the player's own key press announces
+the transition, the frame before it is known good, so holding that frame across
+the transition should hide the whole thing. It was built and measured, and it
+fails for a reason nothing in the design anticipated: **declining a frame stalls
+the game.** The compositor waits for a submit that never arrives — which is where
+the 80-odd milliseconds per withheld frame goes — and Elite does not begin the
+transition until its frames are reaching the compositor again.
+
+So the hold does not cover the transition. It postpones it. Measured at a hold of
+ten frames, the ten held frames still show the ordinary pre-transition view; the
+transition begins four frames *after* the hold releases, and the bad frame lands
+five frames after that. Holds of 18, 30 and 90 frames each did the same thing.
+There is no length that works, because the thing being outlasted is waiting for
+the hold to stop.
+
+The switch survives as `hold_frames_on_external_cam`, defaulting to 0, with that
+measurement written beside it so the idea is not rediscovered from scratch.
+
 **If you see a flash that got through:** press **Pause** immediately, then quit
 and send `edvr_logs\`. That writes the last ten seconds of viewpoint history,
 which shows whether the frame was detected and let through or never detected at
