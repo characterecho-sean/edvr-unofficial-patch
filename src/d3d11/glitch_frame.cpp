@@ -1,5 +1,5 @@
 // GENERATED from src/d3d11/glitch_frame.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 915db1e959285328]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 6e25368f0d3c8b94]
 #include "glitch_frame.h"
 
 #include <windows.h>
@@ -231,6 +231,17 @@ constexpr float kDefaultParkUnits = 64.0f;
 // is defending against and why it applies to shells and never to parks.
 constexpr uint32_t kDefaultDwellFrames = 20;
 
+// The let-through sample: how many lines a session, and how far apart.
+//
+// A SAMPLE, NOT A COUNT, and the log says so on every line. Every suppressed
+// cascade frame is a jump that was let through -- 1,344 of them in one measured
+// session -- so one line each would bury the log this exists to make readable.
+// Forty lines spread at least 120 frames apart covers the transitions a player
+// makes in a session without covering the steady-state noise between them, and
+// the running totals line already carries the counts.
+constexpr uint32_t kLetThroughNotes = 40;
+constexpr uint32_t kLetThroughGap = 120;
+
 // Rendered frames after which a value that still has not moved is accepted as
 // not being the camera.
 //
@@ -375,6 +386,8 @@ struct State {
     float      radiusTolerance = kDefaultRadiusTolerance;
     float      parkUnits = kDefaultParkUnits;
     uint32_t   dwellFrames = kDefaultDwellFrames;
+    uint32_t   letThroughNotes = 0;
+    uint32_t   lastLetThroughFrame = 0;
 
     uint32_t   suppressed = 0;
     // Split, because which invariant did the work is the data that says whether
@@ -732,6 +745,29 @@ void observeShell(const float* pos, float radius) {
     }
 }
 
+// Which of the five it was, named the way the reader would ask.
+//
+// The order matters and mirrors the decision above exactly: park is tested
+// first because it gates the shell, and the two counters are checked last
+// because they apply only once nothing suppressed. Reading a different order
+// here would produce a log that disagrees with the code it describes.
+const char* letThroughReason(State* s, float resid) {
+    if (s->parkSuppressedThisFrame)
+        return "it landed on a camera already proven to sit in one place";
+    if (s->radiusSuppressedThisFrame)
+        return "it landed at a distance already proven to be a render pass";
+    if (residualIsKnownSeparation(resid))
+        return "a jump of this size has happened before, so it is a fixed gap "
+               "between two render passes rather than the view moving";
+    if (s->cooldown > 0)
+        return "the detector is still settling after a recent jump and will not "
+               "judge again yet";
+    if (s->consecutive >= s->maxConsecutive)
+        return "the frames before it were already withheld and withholding more "
+               "in a row would be judder";
+    return "nothing suppressed it and no counter blocked it, which should not be "
+           "possible here -- please report this line";
+}
 bool finite3(const float* p) {
     for (uint32_t a = 0; a < 3; ++a) {
         if (!std::isfinite(p[a])) return false;
@@ -1212,8 +1248,40 @@ void glitchFrameObserve(const void* data, uint32_t bytes, const void* resource) 
                              s->radiusSuppressedThisFrame ||
                              (jumped && residualIsKnownSeparation(resid));
     s->jumpedThisFrame = jumped;
-    if (jumped && !s->suppressedThisFrame && s->cooldown == 0 &&
-        s->consecutive < s->maxConsecutive) {
+    // WHY A JUMP WAS LET THROUGH, which the log has never said.
+    //
+    // It says why a frame WAS withheld, in detail. It has never said why one
+    // was not, and there are five different reasons -- three suppressions and
+    // two gates -- that are indistinguishable from outside. Measured cost of
+    // that gap on 2026-08-15: a flash on leaving a low wake was captured in the
+    // ring, cleared the threshold, and was not withheld; nothing in the log
+    // could say which of the five let it go, so the leading explanation had to
+    // be reconstructed by arithmetic on the ring afterwards and could not be
+    // confirmed at all. An instrument that reports only its positives cannot
+    // settle a report about a false negative.
+    //
+    // ONLY FOR JUMPS THAT CLEARED THE THRESHOLD, and rate-limited hard. Every
+    // suppressed cascade frame is a jump -- 1,344 of them in one session -- and
+    // a line each would bury the log it is meant to make readable.
+    const bool willMark = jumped && !s->suppressedThisFrame && s->cooldown == 0 &&
+                          s->consecutive < s->maxConsecutive;
+    if (jumped && !willMark) {
+        if (s->letThroughNotes < kLetThroughNotes &&
+            s->frameNo - s->lastLetThroughFrame >= kLetThroughGap) {
+            ++s->letThroughNotes;
+            s->lastLetThroughFrame = s->frameNo;
+            Log::get().note(
+                "transition flash: frame %u jumped %.0f units (threshold %.0f) to "
+                "(%+.0f %+.0f %+.0f) and was NOT withheld -- %s. This line is "
+                "capped at %u a session and one per %u frames, so it is a sample, "
+                "not a count.",
+                s->frameNo, static_cast<double>(resid), static_cast<double>(trip),
+                pos[0], pos[1], pos[2], letThroughReason(s, resid), kLetThroughNotes,
+                kLetThroughGap);
+        }
+    }
+
+    if (willMark) {
         markGlitchFrame();
     } else {
         // Withdraw, do not clear: a further candidate later in the same frame
