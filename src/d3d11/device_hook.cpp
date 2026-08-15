@@ -174,10 +174,26 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
         g_state->holdFramesOnExternalCam = static_cast<uint32_t>(
             Config::get().getIntInRange("advanced.hold_frames_on_external_cam", 0, 0, 120));
 
-        if (g_state->dumpKey.pressed()) dumpCameraRing("the history key");
-        // The delayed dump armed by the camera key, above.
+        // The history key dumps TWICE: now, and again two seconds from now.
+        //
+        // A flash you react to sits about 300 ms back, which is the last few
+        // rows of a ring that holds only what came BEFORE the press. And a bad
+        // frame is one that leaves the line and RETURNS -- a shape that needs
+        // frames on both sides of it, which an event at the ring's edge does
+        // not have. So the one capture that is guaranteed to contain the thing
+        // being chased is also the one least able to show it.
+        //
+        // The second dump costs one more press of nothing: same ring, two
+        // seconds later, by which time the event has moved to the middle with
+        // its recovery behind it. The pair is the point -- the first is the
+        // reaction-time capture, the second is the one you read.
+        if (g_state->dumpKey.pressed()) {
+            dumpCameraRing("the history key");
+            g_state->dumpCountdown = kDumpDelayFrames;
+        }
+        // The delayed dump, armed by either key.
         if (g_state->dumpCountdown > 0 && --g_state->dumpCountdown == 0) {
-            dumpCameraRing("your external-camera key");
+            dumpCameraRing("a key you pressed two seconds ago", kDumpDelayFrames);
         }
         // Told to the gate, not acted on here. These keys are the player's OWN
         // Elite bindings: EDVR does not send them, press them or interfere with

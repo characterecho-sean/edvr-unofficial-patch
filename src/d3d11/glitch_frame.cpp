@@ -1,10 +1,11 @@
 // GENERATED from src/d3d11/glitch_frame.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 663092dab8753164]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 47e99cdf2d20eb20]
 #include "glitch_frame.h"
 
 #include <windows.h>
 
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 
 #include "../common/config.h"
@@ -1494,7 +1495,7 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
     s->frameFarMag2 = -1.0f;
 }
 
-void dumpCameraRing(const char* trigger) {
+void dumpCameraRing(const char* trigger, uint32_t framesAfterPress) {
     State* s = g_state;
     if (!s) return;
     if (!s->observing) {
@@ -1515,6 +1516,24 @@ void dumpCameraRing(const char* trigger) {
     const int64_t freq = qpcFrequency();
     const uint64_t newest = s->ring[(s->ringHead - 1) % kRingFrames].qpc;
 
+    // Where zero is, spelled out rather than left to be guessed.
+    //
+    // Two capture paths reach here and they have DIFFERENT zero points: the
+    // immediate dump is written AT the press, the delayed one about two seconds
+    // after it. Same columns, same units, and a reader who assumes the wrong one
+    // is out by two seconds -- in the direction that hides the event, because it
+    // pushes the moment being looked for off the end of the ring.
+    char zero[160];
+    if (framesAfterPress > 0) {
+        snprintf(zero, sizeof(zero),
+                 "%u frames AFTER the press -- roughly two seconds, so the press "
+                 "itself is further back and what you reacted to further back "
+                 "still",
+                 framesAfterPress);
+    } else {
+        snprintf(zero, sizeof(zero), "the moment you pressed");
+    }
+
     Log::get().note(
         "--- camera history: %llu frames, oldest first, written on %s. ZERO "
         "MILLISECONDS IS %s -- the reaction time between seeing something and "
@@ -1525,10 +1544,7 @@ void dumpCameraRing(const char* trigger) {
         "%u frame(s) withheld so far this session. ---",
         static_cast<unsigned long long>(have),
         trigger ? trigger : "the history key",
-        (trigger && strstr(trigger, "camera key"))
-            ? "about two seconds AFTER the press, so the press is further back"
-            : "the moment you pressed",
-        s->framesWithheld);
+        zero, s->framesWithheld);
 
     for (uint64_t i = first; i < s->ringHead; ++i) {
         const RingEntry& e = s->ring[i % kRingFrames];

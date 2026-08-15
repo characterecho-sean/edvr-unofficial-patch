@@ -1,5 +1,5 @@
 // GENERATED from src/d3d11/glitch_frame.h in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 23fe7214cc95ccff]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 411a71bc3c17780f]
 // The one-frame flash at a transition.
 //
 // Jumping, dropping out of supercruise, or closing the galaxy map occasionally
@@ -57,7 +57,7 @@ bool glitchFrameNeedsEyeDraws();
 // zero milliseconds means -- the history key dumps AT the press, the camera key
 // two seconds after it, and a reader who does not know which is subtracting a
 // reaction time from the wrong end.
-void dumpCameraRing(const char* trigger = nullptr);
+void dumpCameraRing(const char* trigger = nullptr, uint32_t framesAfterPress = 0);
 
 void shutdownGlitchFrameFix();
 
