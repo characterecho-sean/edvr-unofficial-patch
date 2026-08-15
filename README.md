@@ -114,7 +114,7 @@ proper stereo, so that is where Explorer Cam works: it moves your viewpoint to
 your commander's head while you are in that camera. **It cannot make first
 person 3D** — the flat screen stays flat — and it does not try.
 
-**It replaces one camera preset: Commander Rear Profile.** On that preset the
+**It replaces one camera preset: Commander Right Shoulder.** On that preset the
 camera sits at your commander's head instead of the preset's usual framing;
 cycle to it for the 3D view, off it for normal framing. Every other preset is
 untouched. `fix.head_offset_view` selects a different preset to give up instead.
@@ -151,20 +151,23 @@ player observes, and no gameplay data read or written.
    camera looks identical to boarding your ship, and guessing wrong would move
    your viewpoint inside your own cockpit.
 
-3. Get on foot, open the camera, and cycle to **Commander Rear Profile**. It is
+3. Get on foot, open the camera, and cycle to **Commander Right Shoulder**. It is
    not the preset the camera opens on. EDVR reads which preset you are on from
    the game — nothing else to bind.
 
 4. Tune the offsets with the headset on; they reload about once a second:
 
    ```
-   head_offset_right   = 0.0     + is to your commander's right
-   head_offset_up      = 0.8     + is up
-   head_offset_forward = 2.75    + is the way your commander faces
+   head_offset_right   = -0.25   + is to your commander's right
+   head_offset_up      = 0.25    + is up
+   head_offset_forward = 1.25    + is the way your commander faces
    ```
 
-   `forward` is the large one — the camera starts several metres behind your
-   commander. These are starting points, not universal answers.
+   These are tuned for Commander Right Shoulder, which already sits close to
+   your commander and faces the way they face — so the numbers are small, and
+   the negative `right` brings you off the shoulder onto the centre line. Pick a
+   preset several metres further back and `forward` becomes the large one, two
+   to three metres instead of one. Starting points, not universal answers.
 
 **Comfort.** These move the viewpoint of a headset you are wearing; change them
 a little at a time. Entering and leaving is a cut rather than a glide, because

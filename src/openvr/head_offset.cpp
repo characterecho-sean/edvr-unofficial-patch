@@ -1,5 +1,5 @@
 // GENERATED from src/openvr/head_offset.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 3493e7996bcc07ac]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 68e32e222e22593d]
 #include "head_offset.h"
 
 #include <cmath>
@@ -20,8 +20,8 @@ struct State {
     float    yawSin = 0.0f, yawCos = 1.0f;
     float    yawDeg = 0.0f;
     // The values as the PLAYER wrote them, kept for the log. Reporting the
-    // internal ones tells somebody their head_offset_forward = 2.75 is
-    // "-2.750" and invites them to correct a sign that is already right.
+    // internal ones tells somebody their head_offset_forward = 1.25 is
+    // "-1.250" and invites them to correct a sign that is already right.
     float    shown[3] = {};
 
     bool     gamePoses = true;
@@ -104,8 +104,8 @@ void headOffsetConfigure() {
     //
     // FORWARD IS STORED NEGATED, and this is the only place it happens. The
     // tracking frame has -z forward, which is correct and reads backwards to
-    // anybody placing a camera: the tuned value was z = -2.75 for a viewpoint
-    // 2.75 m in FRONT of where the camera starts.
+    // anybody placing a camera: the shipped value is z = -1.25 for a viewpoint
+    // 1.25 m in FRONT of where the camera starts.
     g.shown[0] = clampAxis("openvr.head_offset_right",
                           cfg.getFloat("openvr.head_offset_right", 0.0f));
     g.shown[1] = clampAxis("openvr.head_offset_up",
@@ -245,8 +245,8 @@ void headOffsetApply(vr::EVRCompositorError err,
     if (!g.activeNoted) {
         g.activeNoted = true;
         // Reported as the player wrote them, WITH the key names. The internal
-        // form negates forward, so echoing that prints "-2.750" for a
-        // head_offset_forward of 2.75 and invites somebody to correct a sign
+        // form negates forward, so echoing that prints "-1.250" for a
+        // head_offset_forward of 1.25 and invites somebody to correct a sign
         // that is already correct.
         Log::get().note(
             "HEAD OFFSET ACTIVE: head_offset_right %+.3f, head_offset_up %+.3f, "

@@ -1,5 +1,5 @@
 // GENERATED from src/d3d11/head_offset_gate.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 c58e19c5e1bcbc4e]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 c3d11228a1ddb92f]
 #include "head_offset_gate.h"
 
 #include "../common/config.h"
@@ -91,7 +91,7 @@ void headOffsetGateConfigure() {
         cfg.getIntInRange("fix.head_offset_enter_window", 60, 0, 100000));
     g.gateIntentGrace = static_cast<uint32_t>(
         cfg.getIntInRange("fix.head_offset_intent_grace", 180, 0, 100000));
-    g.gateWantView = cfg.getIntInRange("fix.head_offset_view", 1, -1, 63);
+    g.gateWantView = cfg.getIntInRange("fix.head_offset_view", 2, -1, 63);
     g.gateViewCount = cfg.getIntInRange("fix.head_offset_view_count", 6, 0, 64);
     // The "you have not bound the view key" warning does NOT live here.
     //
