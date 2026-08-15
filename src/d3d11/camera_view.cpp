@@ -1,5 +1,5 @@
 // GENERATED from src/d3d11/camera_view.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 d971ade966ae184c]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 f4d52257b050f971]
 #include "camera_view.h"
 
 #include <windows.h>
@@ -72,6 +72,9 @@ constexpr size_t kMaxGap = 2;
 constexpr size_t   kMaxCandidates = 32;
 constexpr uint32_t kChangesToCertify = 3;
 constexpr uint32_t kCandPollFrames = 15;
+// Places holding the array's address that are worth remembering. Sixty-four is
+// far more than a real pointer graph needs and cheap to re-read.
+constexpr size_t kMaxAnchorSites = 64;
 
 // Consecutive frames the chosen record may fail to read before this concludes
 // the array has actually MOVED.
@@ -162,6 +165,33 @@ struct State {
     };
     std::vector<Cand> cands;
     uint32_t candPoll = 0;
+
+    // THE ANCHOR HUNT. Evidence gathering, and deliberately not yet acted on.
+    //
+    // Near a planet the game rebuilds this array every few seconds -- measured
+    // 2026-08-15: a scan succeeded, read a plausible view, and the array had
+    // moved three seconds later, twice in one minute. An eleven-gigabyte walk
+    // takes about two seconds, so no scan can keep up and no addressing scheme
+    // survives, which is why the ordinal, the record-order reading and the
+    // behavioural watcher all failed the same way. The premise they shared --
+    // that the array is stable and only its layout varies -- is false here.
+    //
+    // What would survive is a POINTER to the array, because whatever the game
+    // updates when it rebuilds is by definition current. So: while an array
+    // address is known, remember every place in memory that holds that address.
+    // When the array moves, re-read those places. One that now holds the NEW
+    // array's address is a live anchor, and re-finding becomes a dereference
+    // instead of a heap walk.
+    //
+    // NOTHING IS ACTED ON UNTIL A CANDIDATE HAS SURVIVED A MOVE. A pointer that
+    // merely happens to contain the old address proves nothing -- copies, stale
+    // locals and coincidence all look identical until the array moves and only
+    // the real one follows. That is the same standard the rest of this file
+    // holds: certify by observation, refuse to guess between equals.
+    const uint8_t* arrayBase = nullptr;
+    std::vector<const uint8_t* const*> anchorSites;
+    bool     anchorHuntDone = false;
+    uint32_t anchorSurvived = 0;
     bool     candNoted = false;
 
     int       lastView = -1;
@@ -373,6 +403,65 @@ uint32_t recordValue(const uint8_t* rec) {
     });
     if (!ok) ++g_s.readFaults;
     return v;
+}
+
+// Collect every place in memory holding 	arget. One pass, capped.
+void huntAnchors(const uint8_t* target) {
+    g_s.anchorSites.clear();
+    if (!target) return;
+    for (const Region& r : g_s.regions) {
+        if (g_s.anchorSites.size() >= kMaxAnchorSites) break;
+        guarded("camera_view/anchorhunt", [&] {
+            const uint8_t* const* p =
+                reinterpret_cast<const uint8_t* const*>(r.base);
+            const size_t n = r.size / sizeof(void*);
+            for (size_t i = 0; i < n; ++i) {
+                if (p[i] == target) {
+                    g_s.anchorSites.push_back(&p[i]);
+                    if (g_s.anchorSites.size() >= kMaxAnchorSites) return;
+                }
+            }
+        });
+    }
+    Log::get().note(
+        "camera view: %zu place(s) in memory hold the camera array's address. "
+        "None is trusted yet -- when the array moves, whichever of them follows "
+        "it is a live pointer to it, and re-finding the array becomes instant "
+        "instead of an eleven-gigabyte search. This line is evidence, not a fix.",
+        g_s.anchorSites.size());
+}
+
+// After a move: which of them followed?
+void checkAnchors(const uint8_t* oldBase) {
+    if (g_s.anchorSites.empty()) return;
+    size_t followed = 0, stale = 0, gone = 0;
+    const uint8_t* firstNew = nullptr;
+    for (const uint8_t* const* site : g_s.anchorSites) {
+        const uint8_t* now = nullptr;
+        const bool ok = guarded("camera_view/anchorcheck",
+                                [&] { now = *site; });
+        if (!ok) { ++gone; continue; }
+        if (now == oldBase) { ++stale; continue; }
+        // Does it point at something that looks like one of our records?
+        uint32_t v = 0xFFFFFFFFu;
+        guarded("camera_view/anchorpeek", [&] {
+            const uint8_t* const* anchor =
+                reinterpret_cast<const uint8_t* const*>(now);
+            if (*anchor == g_s.typePtr) v = 0;
+        });
+        if (v == 0) { ++followed; if (!firstNew) firstNew = now; }
+    }
+    ++g_s.anchorSurvived;
+    Log::get().note(
+        "camera view: the array moved, and of the %zu place(s) that held its "
+        "address, %zu now point at a camera record, %zu still hold the old "
+        "address and %zu could not be read. %s",
+        g_s.anchorSites.size(), followed, stale, gone,
+        followed == 1
+            ? "Exactly one followed, which is what a live pointer to the array "
+              "looks like -- report this log and it becomes the way the array is "
+              "found."
+            : "Not yet conclusive.");
 }
 
 // Is there a record at this address AT ALL?
@@ -616,6 +705,11 @@ void finishScan() {
 
     if (candidates.size() == 1) {
         g_s.chosen = runs[candidates[0]].base + g_s.ordinal * kStride;
+        // The array's own base, which is what a pointer to it would hold.
+        const uint8_t* newBase = runs[candidates[0]].base;
+        if (g_s.arrayBase && newBase != g_s.arrayBase) checkAnchors(g_s.arrayBase);
+        g_s.arrayBase = newBase;
+        if (!g_s.anchorHuntDone) { g_s.anchorHuntDone = true; huntAnchors(newBase); }
         g_s.usable = true;
         g_s.cooldown = 0;
         // The probes above charged the budget while deciding. They were reads of
