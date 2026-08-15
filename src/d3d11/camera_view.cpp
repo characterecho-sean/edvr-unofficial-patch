@@ -1,5 +1,5 @@
 // GENERATED from src/d3d11/camera_view.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 8ce7bff4e99cf596]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 2a3e406300964d06]
 #include "camera_view.h"
 
 #include <windows.h>
@@ -471,7 +471,17 @@ void checkAnchors(const uint8_t* oldBase) {
 // evidence because of it: the array was found by another path, so nothing was
 // ever recorded to compare against when it moved.
 void noteArrayBase(const uint8_t* base) {
-    if (!base) return;
+    if (!base) {
+        // Reachable from exactly one caller: behavioural certification while a
+        // rescan is in flight, before its first match -- the record list is
+        // empty, so there is no address to hunt from. Said out loud rather
+        // than returned from silently: a silent branch in the instrument that
+        // exists to explain silences is how 6ao's archaeology restarts.
+        Log::get().note(
+            "camera view: the array's base is not known at this instant (the "
+            "record list is mid-rescan), so no pointer hunt from this find.");
+        return;
+    }
     if (g_s.arrayBase && base != g_s.arrayBase) checkAnchors(g_s.arrayBase);
     g_s.arrayBase = base;
     if (g_s.anchorHuntDone) return;

@@ -16,6 +16,29 @@ namespace {
 constexpr size_t kBufferCapBytes = 1u * 1024u * 1024u;
 constexpr DWORD  kFlushIntervalMs = 250;
 
+// The link time of the module this code is compiled into, read from its own PE
+// header. This is the identity a binary carries wherever it is copied, and the
+// log states it so "which build produced this log" is never again a diagnosis
+// (6ao: the anchor hunt was debugged three times in source that had never
+// flown). Zero when the header is not as expected -- "no stamp", not an error.
+// Kept textually identical in both repos' log.cpp; cross-diff when touching.
+uint32_t moduleLinkStamp() {
+    HMODULE mod = nullptr;
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                            reinterpret_cast<LPCWSTR>(&moduleLinkStamp), &mod) ||
+        !mod) {
+        return 0;
+    }
+    const uint8_t* base = reinterpret_cast<const uint8_t*>(mod);
+    const IMAGE_DOS_HEADER* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE) return 0;
+    const IMAGE_NT_HEADERS* nt =
+        reinterpret_cast<const IMAGE_NT_HEADERS*>(base + dos->e_lfanew);
+    if (nt->Signature != IMAGE_NT_SIGNATURE) return 0;
+    return nt->FileHeader.TimeDateStamp;
+}
+
 }  // namespace
 
 int64_t qpcNow() {
@@ -101,6 +124,26 @@ bool Log::open(const std::wstring& dir, const wchar_t* tag) {
 
     m_open = true;
     note("EDVR log -- unofficial VR fixes for Elite Dangerous: Odyssey");
+    // TimeDateStamp is seconds since 1970 UTC unless a reproducible-build flag
+    // replaced it with a hash; the hex is the identity either way.
+    const uint32_t stamp = moduleLinkStamp();
+    if (stamp != 0) {
+        ULARGE_INTEGER t;
+        t.QuadPart = 116444736000000000ull +
+                     static_cast<uint64_t>(stamp) * 10000000ull;
+        FILETIME ft;
+        ft.dwLowDateTime  = t.LowPart;
+        ft.dwHighDateTime = t.HighPart;
+        SYSTEMTIME bs{};
+        if (FileTimeToSystemTime(&ft, &bs)) {
+            note("build %08X -- this DLL was linked %04u-%02u-%02u "
+                 "%02u:%02u:%02u UTC",
+                 stamp, bs.wYear, bs.wMonth, bs.wDay, bs.wHour, bs.wMinute,
+                 bs.wSecond);
+        } else {
+            note("build %08X", stamp);
+        }
+    }
     note("If you are reporting a problem, paste this whole file.");
     return true;
 }
