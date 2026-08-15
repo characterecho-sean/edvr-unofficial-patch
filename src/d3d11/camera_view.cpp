@@ -1,5 +1,5 @@
 // GENERATED from src/d3d11/camera_view.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 2a3e406300964d06]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 a0651a5a9993bfdd]
 #include "camera_view.h"
 
 #include <windows.h>
@@ -536,6 +536,30 @@ bool slotOccupied(const uint8_t* rec) {
 void finishScan() {
     g_s.scanning = false;
     g_s.scanned = true;
+
+    // THE SCAN FINISHED SECOND; THE QUESTION WAS ALREADY ANSWERED.
+    //
+    // The behavioural watcher keeps polling the old candidates while a rescan
+    // walks the heap -- deliberately, because the watcher answering mid-scan
+    // is the fast path when the game rebuilds the array. Measured 2026-08-15
+    // (6ar): the watcher certified the preset's new slot one second into an
+    // eleven-gigabyte walk, and 1.5 seconds later this function's
+    // unconditional `chosen = nullptr` threw that answer away. `usable` stayed
+    // true, so the read path refused on !chosen, the poll and the scan
+    // request both gated off on usable, and the module was silently wedged
+    // for the rest of the session -- the exact shape this file has hunted
+    // twice before. A scan that completes after certification is stale
+    // evidence about an answered question: say so and change nothing,
+    // including the attempt budget, which is for FINDING.
+    if (g_s.usable && g_s.chosen) {
+        Log::get().note(
+            "camera view: the scan finished after the preset had already been "
+            "identified by behaviour, so its result is not needed and nothing "
+            "changes. (The identification stands; this line exists because a "
+            "scan completion used to overwrite it.)");
+        return;
+    }
+
     ++g_s.attempts;
     g_s.cooldown = kRetryCooldown;
     g_s.chosen = nullptr;
@@ -1049,7 +1073,26 @@ void cameraViewTick(uint32_t eyeDraws) {
 }
 
 int cameraViewCurrent() {
-    if (!g_s.track || !g_s.usable || !g_s.chosen) return -1;
+    if (!g_s.track) return -1;
+    // `usable && !chosen` is a state no path should produce -- usable means
+    // "a record was chosen and certified" -- and it is also a state that used
+    // to be PERMANENT: the read path refused on !chosen while the poll and
+    // the scan request both gated off on usable, so nothing could ever mend
+    // it and nothing ever logged (6ar: 3m45s of silence after a completing
+    // scan clobbered a mid-scan certification). The finishScan guard removes
+    // the known producer; this converts any future producer into one log
+    // line and a rescan instead of a feature that is quietly off until
+    // relaunch.
+    if (g_s.usable && !g_s.chosen) {
+        Log::get().note(
+            "camera view: certified but nothing chosen -- a state that should "
+            "be impossible and used to wedge this feature for the session. "
+            "Recovering with a rescan; please report this log.");
+        g_s.usable = false;
+        g_s.needRescan = true;
+        g_s.cooldown = kRescanCooldown;
+    }
+    if (!g_s.usable || !g_s.chosen) return -1;
     const uint32_t v = recordValue(g_s.chosen);
     // Outside the range means the record has been reused and the answer would
     // be a guess. -1 says "do not know", which the caller treats as "fall
