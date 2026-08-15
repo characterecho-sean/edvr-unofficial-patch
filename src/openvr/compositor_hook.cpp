@@ -3,11 +3,13 @@
 
 #include <windows.h>
 
+#include <cmath>
 #include <cstring>
 
 #include "../common/config.h"
 #include "../common/frame_flag.h"
 #include "../common/guard.h"
+#include "../common/hotkey.h"
 #include "../common/log.h"
 #include "../common/proxy.h"  // breadcrumb(), EDVR_BREADCRUMB_ONCE
 #include "../common/vtable_hook.h"
@@ -112,6 +114,41 @@ struct State {
     bool     holdThisFrame = false;
     uint32_t holdFramesSeen = 0;
 
+    // THE POSE RING. Forensics, and only forensics.
+    //
+    // A tracking glitch -- inside-out feature loss, a lighthouse reflection, a
+    // marginal cable, USB power management, an IMU correction -- produces a
+    // one-frame wrong pose that is perceptually identical to the game drawing
+    // one frame from the wrong place. The runtime does not reliably separate
+    // them: bPoseIsValid and eTrackingResult catch gross failures, and small
+    // snaps arrive flagged perfectly valid.
+    //
+    // EDVR CAN ATTRIBUTE THIS AND MUST NEVER TRY TO FIX IT, and the reason is
+    // structural rather than cautious. The compositor's display-time
+    // reprojection takes its pose from tracking directly, so withholding a frame
+    // warps the previous one by the SAME bad pose; and filtering the pose handed
+    // to the game would leave render and warp disagreeing, which is worse than
+    // the snap. So: no detector, no marking, no withhold is ever keyed on any of
+    // this. It records, and the log tells the difference afterwards.
+    //
+    // Recorded BEFORE headOffsetApply. The instrument measures the HEADSET, not
+    // our modification of it -- with Explorer Cam engaged the offset moves the
+    // pose by metres, and an instrument that recorded the result would report
+    // EDVR's own work as a tracking fault.
+    struct PoseEntry {
+        uint64_t qpc;
+        uint32_t frame;
+        float    pos[3];
+        int32_t  result;
+        uint8_t  valid;
+    };
+    PoseEntry poseRing[900] = {};
+    uint64_t  poseHead = 0;
+    uint32_t  poseFrame = 0;
+    float     poseStepNoteMm = 50.0f;
+    Hotkey    poseDumpKey;
+    bool      poseKeyBound = false;
+
     // Refused this session, so a SECOND compositor request does not sail past.
     //
     // clearTrip() resets the sentinel in memory as well as on disk, so after a
@@ -150,6 +187,103 @@ bool submitArgsLookSane(vr::EVREye eye, const vr::Texture_t* texture) {
 }
 
 // ---------------------------------------------------------------------------
+
+// Read at install AND on reload, because a threshold you tune by looking at logs
+// is one you will want to change without relaunching.
+void configurePoseRing(State* s) {
+    if (!s) return;
+    Config& cfg = Config::get();
+    s->poseDumpKey.setBinding(cfg.getString("hotkey.dump_camera", "PAUSE").c_str());
+    s->poseKeyBound = s->poseDumpKey.key() != 0;
+    const float mm = cfg.getFloat("advanced.pose_step_note_mm", 50.0f);
+    // Note-only, so a wrong value costs a misleading line rather than behaviour.
+    // Clamped anyway: 0 would flag every frame and drown the verdict it exists
+    // to make readable.
+    s->poseStepNoteMm = (std::isfinite(mm) && mm > 0.0f && mm <= 1000.0f) ? mm : 50.0f;
+}
+
+// The pose history, and the verdict that makes it worth having.
+//
+// The three-way discrimination is the point: a game camera jump, an HMD pose
+// jump, a stall, and an EDVR withhold all feel identical in a headset and are
+// completely different bugs. The camera ring on the d3d11 side answers the first
+// and the last; this answers the second and the third, in the same capture.
+//
+// No threshold here decides anything. The step figure is a NOTE -- it names the
+// largest one-frame movement in the window so a reader can judge it, and nothing
+// in EDVR behaves differently because of it.
+void dumpPoseRing(State* s) {
+    if (!s || s->poseHead == 0) return;
+    const uint64_t have = s->poseHead < 900 ? s->poseHead : 900;
+    const uint64_t first = s->poseHead - have;
+    const int64_t freq = qpcFrequency();
+    const uint64_t newest = s->poseRing[(s->poseHead - 1) % 900].qpc;
+
+    Log::get().note(
+        "--- headset pose history: %llu frames, oldest first. Columns are "
+        "milliseconds before the dump, frame number, the headset position the "
+        "RUNTIME reported (before any EDVR offset), how far it moved since the "
+        "frame before, and the tracking state. ---",
+        static_cast<unsigned long long>(have));
+
+    float  worstStepMm = 0.0f;
+    uint32_t worstFrame = 0;
+    uint32_t badStates = 0;
+    const float* prev = nullptr;
+
+    for (uint64_t i = first; i < s->poseHead; ++i) {
+        const State::PoseEntry& e = s->poseRing[i % 900];
+        float stepMm = 0.0f;
+        if (prev) {
+            float d2 = 0.0f;
+            for (uint32_t a = 0; a < 3; ++a) {
+                const float d = e.pos[a] - prev[a];
+                d2 += d * d;
+            }
+            stepMm = sqrtf(d2) * 1000.0f;
+            if (stepMm > worstStepMm) { worstStepMm = stepMm; worstFrame = e.frame; }
+        }
+        if (!e.valid || e.result != vr::TrackingResult_Running_OK) ++badStates;
+        const double msAgo =
+            freq ? static_cast<double>(static_cast<int64_t>(newest - e.qpc)) * 1000.0 /
+                       static_cast<double>(freq)
+                 : 0.0;
+        Log::get().note("HMD %8.1fms f%-7u pos=(%+.3f %+.3f %+.3f) step=%6.1fmm %s%s",
+                        -msAgo, e.frame, e.pos[0], e.pos[1], e.pos[2], stepMm,
+                        e.valid ? "" : "POSE-INVALID ",
+                        e.result == vr::TrackingResult_Running_OK
+                            ? "" : "TRACKING-NOT-OK");
+        prev = e.pos;
+    }
+
+    // THE VERDICT. Two numbers and a count, so the next "was that EDVR?" session
+    // does not have to be reconstructed by hand from three log files.
+    if (worstStepMm > s->poseStepNoteMm) {
+        Log::get().note(
+            "--- the headset moved %.0f mm in ONE frame at f%u, past the %.0f mm "
+            "worth noting. A head does not travel that far in eleven "
+            "milliseconds, so that frame's viewpoint came from the TRACKING and "
+            "not from the game. This is not something EDVR can fix -- the "
+            "compositor reprojects from the same tracking data -- but it is a "
+            "different bug from the game drawing a bad frame, and they look "
+            "identical from inside a headset. ---",
+            worstStepMm, worstFrame, s->poseStepNoteMm);
+    } else {
+        Log::get().note(
+            "--- the largest one-frame headset movement here is %.0f mm, under "
+            "the %.0f mm worth noting, so tracking looks clean across this "
+            "window. Anything seen in it came from somewhere else. ---",
+            worstStepMm, s->poseStepNoteMm);
+    }
+    if (badStates > 0) {
+        Log::get().note(
+            "--- %u of those frames had an invalid pose or a tracking state other "
+            "than running. Those are the ones the runtime knew about; the "
+            "millimetre column is for the ones it did not. ---",
+            badStates);
+    }
+    Log::get().note("--- end headset pose history ---");
+}
 
 vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
                                     const vr::Texture_t* texture,
@@ -283,6 +417,32 @@ vr::EVRCompositorError hookedWaitGetPoses(void* self,
         s->holdFramesSeen = 0;
     }
 
+    // The pose, recorded BEFORE the offset below touches it. See PoseEntry.
+    if (result == 0 && renderPoses && renderCount > vr::k_unTrackedDeviceIndex_Hmd) {
+        guarded("poseRing/record", [&] {
+            const vr::TrackedDevicePose_t& hmd =
+                renderPoses[vr::k_unTrackedDeviceIndex_Hmd];
+            State::PoseEntry& e = s->poseRing[s->poseHead % 900];
+            e.qpc = static_cast<uint64_t>(qpcNow());
+            e.frame = ++s->poseFrame;
+            // Row-major 3x4: the translation is the last column.
+            e.pos[0] = hmd.mDeviceToAbsoluteTracking.m[0][3];
+            e.pos[1] = hmd.mDeviceToAbsoluteTracking.m[1][3];
+            e.pos[2] = hmd.mDeviceToAbsoluteTracking.m[2][3];
+            e.result = static_cast<int32_t>(hmd.eTrackingResult);
+            e.valid = hmd.bPoseIsValid ? 1u : 0u;
+            ++s->poseHead;
+        });
+    }
+
+    // The same key that dumps the camera history on the other side, polled here
+    // too, so one press produces both halves of the picture in their own logs.
+    //
+    // Polled rather than signalled across the shared block: a second channel for
+    // a diagnostic keypress would be more machinery than the thing it carries,
+    // and the two logs are read together anyway.
+    if (s->poseKeyBound && s->poseDumpKey.pressed()) dumpPoseRing(s);
+
     // The head offset, applied BEFORE the game sees the poses.
     //
     // Outside the telemetry guard below on purpose. That guard has a fault
@@ -313,6 +473,7 @@ vr::EVRCompositorError hookedWaitGetPoses(void* self,
         if (Config::get().reloadIfChanged()) {
             Log::get().note("config reloaded");
             headOffsetConfigure();
+            configurePoseRing(s);
         }
     }
 
@@ -482,6 +643,8 @@ void* interceptInterface(void* iface, const char* interfaceVersion) {
     breadcrumb("vr: compositor hook committed");
     Log::get().note("compositor hook installed on %s (Submit slot %zu, WaitGetPoses "
                     "slot %zu)", interfaceVersion, submitSlot, posesSlot);
+
+    configurePoseRing(&s);
 
     // READ THE CONFIG NOW, not only when the ini changes.
     //
