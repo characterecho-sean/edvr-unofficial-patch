@@ -1,5 +1,5 @@
 // GENERATED from tools/glitch_test/glitch_test.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 eaeef697d08cee2e]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 da7c6b8b2009bcbd]
 // glitch_test -- drives the transition-flash detector without the game.
 //
 // The port of glitch_frame.cpp into this repo compiled, linked, and passed
@@ -794,6 +794,52 @@ int main(int argc, char** argv) {
               std::to_string(withheld) +
                   " frames withheld on the 6v block pair; it has one direction, so "
                   "the separation memory has to be the thing that catches it");
+    }
+
+    // --- 7j. Recognised geometry must not blind the detector --------------
+    //
+    // The one that mattered most, and the one every earlier fixture missed
+    // because they all asked "was this frame withheld" and never "can the
+    // detector still see".
+    //
+    // A suppressed jump used to arm the return test anyway. An auxiliary camera
+    // never returns to the view's path -- it alternates -- so the test failed
+    // and bought a 120-frame stand-down, every time. On foot the frame
+    // alternates every four to six frames, so the stand-down was re-armed
+    // roughly twenty times over before it could expire and the detector was
+    // blind for the entire mode. Measured: 40 rebase notes, zero withheld
+    // frames, and a one-frame excursion to radius 339,722 sitting unjudged in
+    // the middle of it at the exact transition a player reported flashing.
+    settle(b, x, 150);
+    {
+        // Teach it a park, the way the on-foot alternation does.
+        const float kAux[3] = {-25522.0f, 2704.0f, 47190.0f};
+        float nx = 1500.0f;
+        for (uint32_t i = 0; i < 150; ++i) {
+            nx += 7.0f;
+            if ((i % 5) == 4) frame(b, kAux[0], kAux[1], kAux[2]);
+            else              frame(b, nx, 0.0f, 0.0f);
+        }
+        // It is recognised now: alternating onto it costs nothing.
+        uint32_t cost = 0;
+        for (uint32_t i = 0; i < 30; ++i) {
+            nx += 7.0f;
+            if ((i % 5) == 4) { if (frame(b, kAux[0], kAux[1], kAux[2])) ++cost; }
+            else              { if (frame(b, nx, 0.0f, 0.0f)) ++cost; }
+        }
+        check("alternating onto recognised geometry costs no frames", cost == 0,
+              std::to_string(cost) + " withheld while alternating onto a known park");
+
+        // AND THE DETECTOR CAN STILL SEE. A genuine one-frame excursion, in the
+        // middle of that alternation, must still be caught -- which it cannot be
+        // if the alternation has stood it down.
+        nx += 7.0f;
+        const bool caught = frame(b, nx, 11000.0f, -6000.0f);
+        check("...and a real excursion during it is still caught", caught,
+              "the alternation blinded the detector -- suppressing the mark is "
+              "not enough, the rebase has to go too");
+        nx += 7.0f;
+        frame(b, nx, 0.0f, 0.0f);
     }
 
     // --- 8. The field replay ----------------------------------------------

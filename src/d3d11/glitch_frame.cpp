@@ -1,5 +1,5 @@
 // GENERATED from src/d3d11/glitch_frame.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 37f783b04187bb1b]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 e9e8fa469293d488]
 #include "glitch_frame.h"
 
 #include <windows.h>
@@ -1231,7 +1231,36 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
     // other ten: station arrivals produced bursts of eleven and twelve withheld
     // frames, and at roughly 80 ms each that is most of a second of judder --
     // worse than the flash it was trying to remove.
-    if (s->awaitingReturn && s->frameFarMag2 >= 0.0f) {
+    // RECOGNISED GEOMETRY IS NOT A JUMP, SO IT MUST NOT REBASE EITHER.
+    //
+    // The three invariants suppress the MARK. They did not touch this, and this
+    // is where the damage was: `awaitingReturn` keys on jumpedThisFrame, which
+    // is set whether or not the jump was recognised. So every suppressed flip
+    // still armed the return test, still failed it -- an auxiliary camera does
+    // not come back to the view's path, it alternates -- and still bought a
+    // 120-frame stand-down.
+    //
+    // On foot that is continuous. Measured, four transitions in one session: the
+    // frame alternates between radius 5,009 and 53,713 every four to six frames,
+    // so a 120-frame cooldown is re-armed roughly twenty times before it could
+    // ever expire. The log carries 40 rebase notes, its whole budget, and zero
+    // withheld frames.
+    //
+    // And in the middle of that, at f14962, one frame at radius 339,722 with
+    // 5,009 and 53,713 either side of it -- a one-frame excursion that returns,
+    // which is the shape the original bug was defined by (6t, 6u), at the exact
+    // transition a player reported flashing. It was not suppressed: nothing
+    // certified is within five times that radius. It was never judged at all,
+    // because the detector had been standing down for the whole mode.
+    //
+    // So a suppressed frame now contributes NOTHING: no mark, no rebase, and no
+    // entry in the view's track either. It is the same reasoning as the
+    // world-camera floor -- a camera we have identified as an auxiliary pass is
+    // not evidence about where the view is, in any direction.
+    if (s->suppressedThisFrame) {
+        // Deliberately empty. The track, the return test and the cooldown all
+        // carry on from the last camera that WAS the view.
+    } else if (s->awaitingReturn && s->frameFarMag2 >= 0.0f) {
         s->awaitingReturn = false;
         float back = 0.0f;
         for (uint32_t a = 0; a < 3; ++a) {
