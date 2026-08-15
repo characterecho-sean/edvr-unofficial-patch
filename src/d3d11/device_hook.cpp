@@ -155,6 +155,24 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
         if (g_state->toggleKey.pressed()) toggleExposureFix();
         // Deliberately not part of the toggle: it reports, it does not change
         // anything, so there is no reason for it to follow the fix being off.
+        // The two diagnostic settings, re-read every frame.
+        //
+        // They were read once at install, like everything else in ensureState,
+        // and both are numbers you find by FEEL from inside a headset -- which
+        // means a relaunch per guess, which is not tuning. The same argument the
+        // head offset made when it moved onto the reload path, and vscreen.h
+        // records the same mistake before that: two settings documented as
+        // changeable while the game runs that were never re-read, reported as
+        // the fix being broken.
+        //
+        // Every frame rather than on a poll, because the cost is two lookups in
+        // a map that is already in memory -- vScreenRefreshConfig does the file
+        // check, so nothing here touches the disk.
+        g_state->dumpOnExternalCam =
+            Config::get().getBool("advanced.dump_camera_on_external_cam", false);
+        g_state->holdFramesOnExternalCam = static_cast<uint32_t>(
+            Config::get().getIntInRange("advanced.hold_frames_on_external_cam", 0, 0, 120));
+
         if (g_state->dumpKey.pressed()) dumpCameraRing();
         // The delayed dump armed by the camera key, above.
         if (g_state->dumpCountdown > 0 && --g_state->dumpCountdown == 0) {
@@ -186,7 +204,22 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
             // the only one that is not a guess: the player has just told us a
             // transition is starting. Everything the detector does downstream of
             // this is inference; this is not.
-            if (g_state->holdFramesOnExternalCam > 0) {
+            // ON FOOT ONLY, and the same state Explorer Cam gates on.
+            //
+            // This is the player's own Elite binding and it opens the SHIP's
+            // vanity camera too. Holding frames there costs 83 ms each for a
+            // transition this was never measured against and does not claim to
+            // fix -- and a hold in the cockpit is the same shape of mistake as
+            // the head offset arming there, which is the failure the gate exists
+            // to prevent.
+            //
+            // Two ways to be in the right place, because the press means
+            // opposite things at each end: entering, the flat panel is up and
+            // settled; leaving, the gate is already published as on-foot
+            // external. Neither alone covers both directions.
+            const bool onFootContext =
+                headOffsetGatePanelSettled() || externalCameraOnFoot();
+            if (g_state->holdFramesOnExternalCam > 0 && onFootContext) {
                 requestSubmitHold(g_state->holdFramesOnExternalCam);
             }
         }
