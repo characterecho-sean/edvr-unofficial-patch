@@ -1,5 +1,5 @@
 // GENERATED from tools/glitch_test/glitch_test.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 5f83e586509f76c6]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 61caf830ea495e39]
 // glitch_test -- drives the transition-flash detector without the game.
 //
 // The port of glitch_frame.cpp into this repo compiled, linked, and passed
@@ -1067,6 +1067,44 @@ int main(int argc, char** argv) {
               std::to_string(certified) +
                   " shell(s) certified replaying ordinary flight -- a radius the "
                   "player occupies is exempting the player's own bad frames");
+    }
+
+    // --- 8c2. One frame, one unit of budget --------------------------------
+    {
+        // ONE FRAME MUST COST ONE UNIT OF BUDGET, whatever it carries.
+        //
+        // glitchFrameObserve runs on every new furthest camera within a frame,
+        // so a frame carrying several candidates used to write several budget
+        // entries under one frame number -- and the governor read its whole
+        // budget as spent on a single withheld frame. Shipped and caught in one
+        // turn: a session that withheld ONE frame stood the fix down and let two
+        // reported flashes through.
+        //
+        // Two writes per frame here, which is what the field frame carried.
+        Config::get().set("advanced.transition_flash_separation", "off");
+        Config::get().set("advanced.transition_flash_burst_limit", "3");
+        installGlitchFrameFix();
+        settle(b, x, 200);
+        uint32_t multi = 0;
+        for (uint32_t i = 0; i < 3; ++i) {
+            x += 30.0f;
+            // Two candidates in one frame: a near camera, then a further one.
+            // The second is the frame's furthest and is the one judged.
+            b.setPos(x, 9000.0f, 0.0f);
+            glitchFrameObserve(b.f, kBytes, b.res);
+            b.setPos(x, 40000.0f + 900.0f * static_cast<float>(i), 0.0f);
+            glitchFrameObserve(b.f, kBytes, b.res);
+            if (glitchFrameMarked()) ++multi;
+            glitchFrameBoundary(kEyeDraws);
+            clearGlitchFrame();
+            settle(b, x, 4);
+        }
+        check("a frame with several candidates costs one unit of budget",
+              multi >= 2,
+              std::to_string(multi) +
+                  " of 3 withheld; the governor is counting candidates rather "
+                  "than frames, so one withheld frame spends the whole budget");
+        settle(b, x, 200);
     }
 
     // --- 8d. The burst governor: the fix may not cost more than the artefact -

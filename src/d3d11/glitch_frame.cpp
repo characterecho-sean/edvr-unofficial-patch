@@ -1,5 +1,5 @@
 // GENERATED from src/d3d11/glitch_frame.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 14bf0f19d3065c97]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 2a08ba00a4c14d2c]
 #include "glitch_frame.h"
 
 #include <windows.h>
@@ -250,6 +250,9 @@ constexpr uint32_t kDefaultBurstLimit = 3;
 constexpr uint32_t kDefaultBurstWindow = 60;
 constexpr uint32_t kBurstCooldown = 180;
 constexpr uint32_t kBurstHistory = 16;
+// How often the stand-down may say so. Often enough that a governor which is
+// down for most of a session is visible; rarely enough not to paper the log.
+constexpr uint32_t kBurstNoteGap = 900;
 
 constexpr uint32_t kLetThroughNotes = 40;
 constexpr uint32_t kLetThroughGap = 120;
@@ -475,7 +478,7 @@ struct State {
     // apart -- can never satisfy. That asymmetry is why they are trusted to act
     // and this is not.
     uint32_t   separationMode = 1;
-    bool       burstNoted = false;
+    uint32_t   burstNotedFrame = 0;
     uint32_t   lastLetThroughFrame = 0;
 
     uint32_t   suppressed = 0;
@@ -1422,8 +1425,11 @@ void glitchFrameObserve(const void* data, uint32_t bytes, const void* resource) 
     }
     if (s->burstStandDown == 0 && recentWithholds >= s->burstLimit) {
         s->burstStandDown = kBurstCooldown;
-        if (!s->burstNoted) {
-            s->burstNoted = true;
+        // Rate-limited, not once-only. It used to say this the first time and
+        // stay silent for every later stand-down, so a governor that was down
+        // most of a session looked like one that had fired once and recovered.
+        if (s->frameNo - s->burstNotedFrame >= kBurstNoteGap || s->burstNotedFrame == 0) {
+            s->burstNotedFrame = s->frameNo;
             Log::get().note(
                 "transition flash: %u frames withheld inside %u -- the whole "
                 "budget -- which costs about "
@@ -1470,8 +1476,31 @@ void glitchFrameObserve(const void* data, uint32_t bytes, const void* resource) 
         : s->cooldown > 0                  ? kVerdictCooldown
                                            : kVerdictConsecutive;
     if (willMark) {
-        s->withheldAt[s->withheldHead % kBurstHistory] = s->frameNo;
-        ++s->withheldHead;
+        // ONE ENTRY PER FRAME, however many candidates that frame carried.
+        //
+        // This ran per candidate, and glitchFrameObserve is called on every new
+        // furthest camera WITHIN a frame -- so one withheld frame that happened
+        // to carry three candidates wrote three entries, all stamped with the
+        // same frame number, and the governor read its whole budget as spent.
+        //
+        // Measured within one turn of shipping it: a session that withheld ONE
+        // frame in total logged "3 frames withheld inside 60 -- the whole
+        // budget", stood down, and let both of the flashes the player reported
+        // straight through. The bound designed to stop the fix costing more than
+        // the artefact instead stopped the fix working, on a storm that never
+        // happened. Exactly the failure the density guard was removed for,
+        // reached by a different route.
+        //
+        // The same reasoning is on observeShell's once-per-frame gate, and for
+        // the same reason: a per-candidate count is not a count of frames.
+        const uint32_t lastAt =
+            s->withheldHead == 0
+                ? 0u
+                : s->withheldAt[(s->withheldHead - 1) % kBurstHistory];
+        if (s->withheldHead == 0 || lastAt != s->frameNo) {
+            s->withheldAt[s->withheldHead % kBurstHistory] = s->frameNo;
+            ++s->withheldHead;
+        }
         markGlitchFrame();
     } else {
         // Withdraw, do not clear: a further candidate later in the same frame
