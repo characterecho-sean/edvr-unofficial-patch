@@ -1,5 +1,5 @@
 // GENERATED from src/common/hotkey.h in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 401f72e9de3f4700]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 745d9f82c1d57fb2]
 // Edge-triggered hotkey polling.
 //
 // Polled from the frame loop with GetAsyncKeyState rather than installed as a
@@ -35,6 +35,23 @@ public:
     // SPACE. That is a binding that fires when it should not, which is worse
     // than one that never fires, so there is one call that cannot do it.
     void setBinding(const char* name);
+    // Did a press get thrown away because another window had focus?
+    //
+    // True once per such press, cleared by reading. The focus rule is right --
+    // GetAsyncKeyState is global and Scroll Lock typed in a browser used to
+    // toggle the brightness fix -- but its failure is SILENT, and for a
+    // diagnostic key that is the worst possible shape: the player presses the
+    // key that is supposed to write a log, nothing is written, and the log they
+    // would consult to find out why is the one that was not written. Measured:
+    // a session where the external-camera key registered twice and Pause never
+    // did, leaving a reported flash with no capture. In VR another window
+    // holding focus is the ordinary case, not an edge one.
+    bool takeMissedWhileUnfocused() {
+        const bool m = m_missedUnfocused;
+        m_missedUnfocused = false;
+        return m;
+    }
+
     int  key() const { return m_vk; }
     uint32_t mods() const { return m_mods; }
 
@@ -56,6 +73,7 @@ private:
     int      m_vk = 0;
     uint32_t m_mods = 0;
     bool     m_down = false;
+    bool     m_missedUnfocused = false;
 };
 
 // Maps a config string to a virtual-key code, with optional modifiers.

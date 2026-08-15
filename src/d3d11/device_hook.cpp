@@ -71,6 +71,7 @@ struct State {
     // off by default: 900 lines a press.
     bool     dumpOnExternalCam = false;
     uint32_t dumpCountdown = 0;
+    uint32_t missedDumpNotes = 0;
     // Frames to hold across an external-camera transition. 0 = off, and it stays
     // there: see the note beside the setting in edvr.ini.
     uint32_t holdFramesOnExternalCam = 0;
@@ -113,6 +114,11 @@ constexpr uint32_t kSentinelConfirmFrames = 600;
 // leaves eight seconds of ordinary flight in front of the event to compare
 // against.
 constexpr uint32_t kDumpDelayFrames = 180;
+
+// How many times a session to point out that a history-key press was ignored
+// because another window had focus. Three is enough to be noticed and few
+// enough that a player who works with a browser focused is not papered with it.
+constexpr uint32_t kMissedDumpNotes = 3;
 
 State* g_state = nullptr;
 // One budget per thing that can fail. Shader creation runs on whatever thread
@@ -190,6 +196,32 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
         if (g_state->dumpKey.pressed()) {
             dumpCameraRing("the history key");
             g_state->dumpCountdown = kDumpDelayFrames;
+        }
+        // THE PRESS THAT WENT NOWHERE, said out loud.
+        //
+        // Hotkeys only fire while the game window has focus, which is correct --
+        // GetAsyncKeyState is global, and Scroll Lock typed in a browser used to
+        // toggle the brightness fix. But in VR another window holding focus is
+        // ordinary rather than exceptional, and for THIS key the silent failure
+        // is circular: the player presses the key that writes the log, nothing
+        // is written, and the log that would explain why is the one that was not
+        // written. Measured 2026-08-15: a session where the external-camera key
+        // registered twice and Pause never did, so a reported flash had no
+        // capture and the reason was invisible.
+        //
+        // Capped, because a player who keeps a browser focused could otherwise
+        // paper the log with it -- and after three the point has been made.
+        if (g_state->missedDumpNotes < kMissedDumpNotes &&
+            g_state->dumpKey.takeMissedWhileUnfocused()) {
+            ++g_state->missedDumpNotes;
+            Log::get().note(
+                "the camera history key was pressed, but another window had "
+                "focus, so nothing was written. EDVR only acts on its hotkeys "
+                "while Elite itself is the active window -- otherwise a key "
+                "typed in a browser would reach it. Click on the game window "
+                "(the flat one on your desktop) and press it again. Said at most "
+                "%u times a session.",
+                kMissedDumpNotes);
         }
         // The delayed dump, armed by either key.
         if (g_state->dumpCountdown > 0 && --g_state->dumpCountdown == 0) {

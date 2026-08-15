@@ -1,5 +1,5 @@
 // GENERATED from src/common/hotkey.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 dd6a808c73bd882b]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 36fd7f3b33246134]
 #include "hotkey.h"
 
 #include <cctype>
@@ -117,8 +117,17 @@ bool Hotkey::pressed() {
 
 bool Hotkey::pressedWith(bool keyDown, uint32_t held, bool focused) {
     if (m_vk == 0) return false;
-    const bool fire = keyDown && hotkeyWouldFire(m_vk, m_mods, held) && focused;
+    const bool matches = keyDown && hotkeyWouldFire(m_vk, m_mods, held);
+    const bool fire = matches && focused;
     const bool edge = fire && !m_down;
+
+    // The same edge test, on the far side of the focus rule.
+    //
+    // A press that matched the binding and was thrown away only because another
+    // window had focus is recorded here so somebody can be told. It uses !m_down
+    // for the same reason the real edge does: one physical press, one report,
+    // not one a frame for as long as the key is held.
+    if (matches && !focused && !m_down) m_missedUnfocused = true;
 
     // m_down latches the RAW key, not whether this binding fired.
     //
