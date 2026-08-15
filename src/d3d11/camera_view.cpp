@@ -1,5 +1,5 @@
 // GENERATED from src/d3d11/camera_view.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 301f043f3d7d66a5]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 cae32e946ac4f6e7]
 #include "camera_view.h"
 
 #include <windows.h>
@@ -458,6 +458,49 @@ void finishScan() {
                             ? (v <= g_s.plausibleMax ? " -- ordinal reads a plausible view"
                                                      : " -- ordinal reads something else")
                             : " -- too short for the ordinal");
+    }
+
+    // WHEN NOTHING FITS, PRINT WHAT WAS THERE.
+    //
+    // The summary above says the ordinal did not land on a usable value; it does
+    // not say what any of the other slots held, and that is the only information
+    // that can settle where the view index actually lives. Three layouts have now
+    // been recorded for the same twelve records -- one run of 12 (works), one run
+    // of 14 with 12 filled (ordinal reads something else), and two runs of 10 + 2
+    // separated by a five-slot hole (ordinal lands in the hole). "Index 11 from
+    // the base" and "the last of the twelve" are the same slot in the first
+    // layout and different slots in the third, so a log that reports only the
+    // ordinal cannot distinguish the anchor being wrong from the grouping being
+    // wrong.
+    //
+    // Every slot, empty ones included, because a hole is evidence: it is what
+    // says the records moved rather than that there are fewer of them. The scan
+    // retries roughly a minute apart, so cycling camera presets between attempts
+    // makes the slot that TRACKS the preset the one that changed between dumps --
+    // which is a fact about the game rather than an inference about it.
+    if (candidates.empty() && !runs.empty()) {
+        Log::get().note(
+            "camera view: no run fits, so here is every slot that was found. The "
+            "one that holds your camera preset is the one whose value CHANGES when "
+            "you cycle cameras -- this is printed again on each retry, about a "
+            "minute apart, so switching preset in between is what identifies it. "
+            "(empty) means the slot is inside the group but holds nothing.");
+        for (size_t r = 0; r < runs.size() && r < 8; ++r) {
+            for (size_t sIdx = 0; sIdx < runs[r].slots && sIdx < 24; ++sIdx) {
+                const uint8_t* rec = runs[r].base + sIdx * kStride;
+                const uint32_t v = recordValue(rec);
+                if (v == 0xFFFFFFFFu) {
+                    Log::get().note("camera view:   run %zu slot %2zu at %p (empty)",
+                                    r, sIdx, (const void*)rec);
+                } else {
+                    Log::get().note(
+                        "camera view:   run %zu slot %2zu at %p = %u%s%s", r, sIdx,
+                        (const void*)rec, v,
+                        v <= g_s.plausibleMax ? " -- could be a view" : "",
+                        (r == 0 && sIdx == g_s.ordinal) ? "   <- the ordinal" : "");
+                }
+            }
+        }
     }
 
     if (candidates.size() == 1) {
