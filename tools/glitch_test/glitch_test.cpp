@@ -1,5 +1,5 @@
 // GENERATED from tools/glitch_test/glitch_test.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 ef05278b83d34dc6]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 5a4241af818029a9]
 // glitch_test -- drives the transition-flash detector without the game.
 //
 // The port of glitch_frame.cpp into this repo compiled, linked, and passed
@@ -932,6 +932,42 @@ int main(int argc, char** argv) {
               withheld <= 2,
               std::to_string(withheld) + " of " + std::to_string(farFrames) +
                   " cascade frames withheld replaying the recorded ring");
+    }
+
+    // --- 9. The instrument outlives the fix -------------------------------
+    //
+    // transition_flash = 0 is the control a bug report needs: with nothing
+    // withheld, whatever the player saw was not EDVR. That configuration used to
+    // take the viewpoint history down with the fix and answer "the transition
+    // flash fix is off, so nothing has been recorded" -- the instrument refusing
+    // to measure the one case it exists to settle.
+    {
+        Config::get().set("fix.transition_flash", "0");
+        installGlitchFrameFix();
+
+        // Still watching: the Map gate is what feeds the history, so if this
+        // goes false nothing is recorded whatever else is true.
+        check("the history still records with the fix switched off",
+              glitchFrameWantsBuffer(kBytes),
+              "fix.transition_flash = 0 took the instrument down with the fix");
+
+        // And still not acting. A jump that would certainly be withheld with the
+        // fix on must produce nothing at all with it off.
+        Buffer c;
+        float cx = 1000.0f;
+        for (uint32_t i = 0; i < 400; ++i) { cx += 30.0f; frame(c, cx, 0.0f, 0.0f); }
+        uint32_t marked = 0;
+        for (uint32_t i = 0; i < 5; ++i) {
+            cx += 30.0f;
+            if (frame(c, cx, 30000.0f, -20000.0f)) ++marked;
+            cx += 30.0f;
+            frame(c, cx, 0.0f, 0.0f);
+        }
+        check("...and still withholds nothing", marked == 0,
+              std::to_string(marked) + " frames withheld by a fix that is switched off");
+
+        Config::get().set("fix.transition_flash", "1");
+        installGlitchFrameFix();
     }
 
     clearGlitchFrame();

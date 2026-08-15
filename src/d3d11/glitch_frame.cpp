@@ -1,5 +1,5 @@
 // GENERATED from src/d3d11/glitch_frame.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 4943f351615bdc9a]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 8867a42bc2a3369c]
 #include "glitch_frame.h"
 
 #include <windows.h>
@@ -241,7 +241,27 @@ struct RingEntry {
 };
 
 struct State {
+    // enabled    the fix may withhold frames
+    // observing  the viewpoint history is being recorded
+    //
+    // TWO THINGS, and they were one. `enabled` gated both, so
+    // fix.transition_flash = 0 took the instrument down with the fix -- and that
+    // configuration is precisely the control a bug report needs: with nothing
+    // withheld, anything still seen is definitively not EDVR's. Asking for it
+    // produced "camera history dump requested, but the transition flash fix is
+    // off, so nothing has been recorded", which is the instrument refusing to
+    // measure the one case it was built to settle.
+    //
+    // The file already half-believed this: it goes on recording after the
+    // detector stands down mid-session, with a comment saying the dump must
+    // describe the moment the user pressed the key rather than the moment the
+    // fix gave up. That reasoning simply never reached `enabled`.
+    //
+    // Observation costs a size compare per Map, a twelve-byte read, one ring
+    // write a frame, and the eye-draw count. Only somebody who has turned the
+    // fix off pays it, and what they get for it is a usable bug report.
     bool     enabled = false;
+    bool     observing = false;
     bool     disabledForSession = false;
 
     // Which buffer holds the camera, and where in it.
@@ -817,7 +837,19 @@ void installGlitchFrameFix() {
     s.posOffset = static_cast<uint32_t>(cfg.getInt("advanced.camera_buffer_offset", 1100));
 
     if (!s.enabled) {
-        Log::get().note("transition flash fix off (fix.transition_flash = 0)");
+        // Off, but still watching. See State::observing.
+        if (static_cast<uint64_t>(s.posOffset) * 4u + 12u <= s.bufferBytes &&
+            s.bufferBytes != 0) {
+            s.observing = true;
+            Log::get().note(
+                "transition flash fix off (fix.transition_flash = 0). No frame will "
+                "be withheld. The viewpoint history is still being recorded, so the "
+                "history key still works -- which makes this the clean control for "
+                "reporting a flash: with nothing withheld, whatever you saw was not "
+                "EDVR.");
+        } else {
+            Log::get().note("transition flash fix off (fix.transition_flash = 0)");
+        }
         return;
     }
     if (s.jumpMin <= 0.0f || s.bufferBytes == 0) {
@@ -840,6 +872,11 @@ void installGlitchFrameFix() {
             s.posOffset, s.bufferBytes);
         return;
     }
+    // The geometry is sound, so there is somewhere to watch. Set on BOTH paths
+    // through this function -- the fix being on or off decides whether anything
+    // is withheld, never whether anything is recorded.
+    s.observing = true;
+
     // Said at install, not only when validation finishes, so a log from a
     // session that never reached a rendered scene still shows whether this was
     // armed at all. A fix that is silent until it succeeds is indistinguishable
@@ -865,7 +902,7 @@ bool glitchFrameNeedsEyeDraws() {
     // detector has given up -- no buffer, validation failed, runaway guard --
     // vScreen would go on resolving a view per render-target rebind, every
     // frame, for a consumer that will never look at the count again.
-    return s && s->enabled && !s->disabledForSession;
+    return s && s->observing && !s->disabledForSession;
 }
 
 bool glitchFrameWantsBuffer(uint32_t bytes) {
@@ -873,7 +910,7 @@ bool glitchFrameWantsBuffer(uint32_t bytes) {
     // Still true after the fix disables itself: the camera history is what a
     // user reports a flash with, and it cannot be recorded if nothing is
     // observed. The cost is one size compare per Map plus the read itself.
-    return s && s->enabled && bytes == s->bufferBytes;
+    return s && s->observing && bytes == s->bufferBytes;
 }
 
 void glitchFrameObserve(const void* data, uint32_t bytes, const void* resource) {
@@ -882,7 +919,7 @@ void glitchFrameObserve(const void* data, uint32_t bytes, const void* resource) 
     // camera so the history dump describes the moment the user pressed the key,
     // rather than the moment the fix gave up. The gate that matters -- never
     // acting -- is below, after the tracking.
-    if (!s || !s->enabled) return;
+    if (!s || !s->observing) return;
     if (bytes != s->bufferBytes) return;
     // Widened deliberately. posOffset comes from the ini through getInt and is
     // stored unsigned, so a negative or very large value becomes something near
@@ -949,8 +986,8 @@ void glitchFrameObserve(const void* data, uint32_t bytes, const void* resource) 
     observeShell(pos, radius);
 
     // Everything above is observation. Everything below can withhold a frame,
-    // so a fix that has stood down stops exactly here.
-    if (s->disabledForSession) return;
+    // so a fix that has stood down -- or was never switched on -- stops here.
+    if (!s->enabled || s->disabledForSession) return;
 
     // Re-decide here, on every new furthest camera, rather than at the frame
     // boundary.
@@ -1080,9 +1117,32 @@ void glitchFrameObserve(const void* data, uint32_t bytes, const void* resource) 
 
 void glitchFrameBoundary(uint32_t eyeDraws) {
     State* s = g_state;
-    if (!s || !s->enabled) return;
+    if (!s || !s->observing) return;
 
     ++s->frameNo;
+
+    // OBSERVING BUT NOT ACTING. Record the frame and stop.
+    //
+    // Everything past here validates, decides and withholds, and none of it has
+    // any business running for a fix the player has switched off. The ring does,
+    // because a history is the whole reason to run with it off: nothing withheld
+    // means anything seen was somebody else's.
+    if (!s->enabled) {
+        if (s->frameFarMag2 >= 0.0f) {
+            RingEntry& e = s->ring[s->ringHead % kRingFrames];
+            e.qpc = static_cast<uint64_t>(qpcNow());
+            e.frame = s->frameNo;
+            e.eyeDraws = eyeDraws;
+            for (uint32_t a = 0; a < 3; ++a) e.pos[a] = s->frameFarPos[a];
+            ++s->ringHead;
+        }
+        s->frameFarMag2 = -1.0f;
+        s->jumpedThisFrame = false;
+        s->suppressedThisFrame = false;
+        s->radiusSuppressedThisFrame = false;
+        s->parkSuppressedThisFrame = false;
+        return;
+    }
 
     // The gate the detector ACTUALLY used while the frame now ending was being
     // drawn, captured before it is overwritten below. The bookkeeping has to
@@ -1437,9 +1497,11 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
 void dumpCameraRing() {
     State* s = g_state;
     if (!s) return;
-    if (!s->enabled) {
-        Log::get().note("camera history dump requested, but the transition flash fix is "
-                        "off, so nothing has been recorded.");
+    if (!s->observing) {
+        Log::get().note("camera history dump requested, but nothing is being recorded: "
+                        "the viewpoint offset and buffer size in [advanced] do not "
+                        "describe a place a camera could be, so there was nothing to "
+                        "watch.");
         return;
     }
     if (s->ringHead == 0) {
