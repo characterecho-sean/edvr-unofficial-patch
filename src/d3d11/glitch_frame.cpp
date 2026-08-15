@@ -1,5 +1,5 @@
 // GENERATED from src/d3d11/glitch_frame.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 1c9fba2f3677c733]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 14bf0f19d3065c97]
 #include "glitch_frame.h"
 
 #include <windows.h>
@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <string>
 
 #include "../common/config.h"
 #include "../common/frame_flag.h"
@@ -239,6 +240,17 @@ constexpr uint32_t kDefaultDwellFrames = 20;
 // Forty lines spread at least 120 frames apart covers the transitions a player
 // makes in a session without covering the steady-state noise between them, and
 // the running totals line already carries the counts.
+// The burst governor's shape. See the long note at the decision.
+//
+// Three withholds in sixty frames, then stand down for two seconds. Three is
+// above what any single transition has ever cost (one or two) and far below the
+// eight-in-fifteen storm that prompted this. The cooldown is long enough to sit
+// out a storm and short enough that the next genuine event is still covered.
+constexpr uint32_t kDefaultBurstLimit = 3;
+constexpr uint32_t kDefaultBurstWindow = 60;
+constexpr uint32_t kBurstCooldown = 180;
+constexpr uint32_t kBurstHistory = 16;
+
 constexpr uint32_t kLetThroughNotes = 40;
 constexpr uint32_t kLetThroughGap = 120;
 
@@ -283,16 +295,21 @@ enum RingVerdict : uint8_t {
     kVerdictSeparation,      // this jump size has happened before
     kVerdictCooldown,        // still settling after a recent jump
     kVerdictConsecutive,     // too many in a row already
+    kVerdictBurst,           // the governor stood the fix down: see kDefaultBurstLimit
+    kVerdictWithheldSepWould,// withheld, and the separation memory would have excused it
 };
 
 const char* ringVerdictName(uint8_t v) {
     switch (v) {
         case kVerdictWithheld:    return "WITHHELD";
+        case kVerdictWithheldSepWould:
+            return "WITHHELD -- the separation memory would have excused this";
         case kVerdictPark:        return "let through: a parked camera";
         case kVerdictShell:       return "let through: a known distance";
         case kVerdictSeparation:  return "let through: a repeating jump size";
         case kVerdictCooldown:    return "let through: still settling";
         case kVerdictConsecutive: return "let through: too many in a row";
+        case kVerdictBurst:       return "let through: the burst governor stood down";
         default:                  return "";
     }
 }
@@ -434,6 +451,31 @@ struct State {
     uint32_t   letThroughNotes = 0;
     // This frame's verdict, set at the decision and consumed at the boundary.
     uint8_t    verdictThisFrame = kVerdictQuiet;
+    // The burst governor's book: frame numbers of recent withholds, and the
+    // stand-down it triggers.
+    uint32_t   withheldAt[kBurstHistory] = {};
+    uint32_t   withheldHead = 0;
+    uint32_t   burstLimit = kDefaultBurstLimit;
+    uint32_t   burstWindow = kDefaultBurstWindow;
+    uint32_t   burstStandDown = 0;
+    // What the separation memory is allowed to DO. 0 = off entirely, 1 = log
+    // only (recognise and report, never excuse), 2 = act.
+    //
+    // Default is log-only, and that is a demotion made on evidence. The memory
+    // is the only member of the family that is keyed on the JUMP rather than on
+    // where the jump landed, and the only one that trusts a second sighting.
+    // Both of its field failures came through exactly those two properties: it
+    // learned a magnitude from a withheld low-wake transition and then used it
+    // to excuse the next low-wake transition, because a transition to a fixed
+    // reset position from a similar view radius repeats its jump size just as a
+    // pass separation does. Transitions taught it to ignore transitions.
+    //
+    // Park and shell are keyed on the destination and certify by observation
+    // over seconds, which transitions -- episodic, twice a session, minutes
+    // apart -- can never satisfy. That asymmetry is why they are trusted to act
+    // and this is not.
+    uint32_t   separationMode = 1;
+    bool       burstNoted = false;
     uint32_t   lastLetThroughFrame = 0;
 
     uint32_t   suppressed = 0;
@@ -1041,6 +1083,22 @@ void installGlitchFrameFix() {
     // in the wide gap between separates them. The floor of 8 keeps it clear of
     // the cascades; the ceiling of 120 keeps it under what the view does, since
     // a value above that would never fire and would silently restore the bug.
+    {
+        const std::string mode =
+            cfg.getString("advanced.transition_flash_separation", "log");
+        s.separationMode = mode == "act" ? 2u : (mode == "off" ? 0u : 1u);
+        if (mode != "act" && mode != "log" && mode != "off") {
+            Log::get().note(
+                "transition_flash_separation = '%s' is not act, log or off, so log "
+                "is being used -- the repeating-jump-size rule reports what it "
+                "would have excused without excusing it.",
+                mode.c_str());
+        }
+    }
+    s.burstLimit = static_cast<uint32_t>(cfg.getIntInRange(
+        "advanced.transition_flash_burst_limit", kDefaultBurstLimit, 1, 30));
+    s.burstWindow = static_cast<uint32_t>(cfg.getIntInRange(
+        "advanced.transition_flash_burst_window", kDefaultBurstWindow, 10, 600));
     s.dwellFrames = static_cast<uint32_t>(cfg.getIntInRange(
         "advanced.transition_flash_dwell_frames", kDefaultDwellFrames, 8, 120));
     s.bufferBytes = static_cast<uint32_t>(cfg.getInt("advanced.camera_buffer_bytes", 5376));
@@ -1312,7 +1370,8 @@ void glitchFrameObserve(const void* data, uint32_t bytes, const void* resource) 
         !s->parkSuppressedThisFrame && jumped && radiusIsCertifiedShell(radius);
     s->suppressedThisFrame = s->parkSuppressedThisFrame ||
                              s->radiusSuppressedThisFrame ||
-                             (jumped && residualIsKnownSeparation(resid));
+                             (jumped && s->separationMode >= 2 &&
+                              residualIsKnownSeparation(resid));
     s->jumpedThisFrame = jumped;
     // WHY A JUMP WAS LET THROUGH, which the log has never said.
     //
@@ -1329,8 +1388,58 @@ void glitchFrameObserve(const void* data, uint32_t bytes, const void* resource) 
     // ONLY FOR JUMPS THAT CLEARED THE THRESHOLD, and rate-limited hard. Every
     // suppressed cascade frame is a jump -- 1,344 of them in one session -- and
     // a line each would bury the log it is meant to make readable.
+    // THE BURST GOVERNOR: the fix may never cost more than the artefact.
+    //
+    // Not a rate limit on withholding -- a bound on the DAMAGE withholding does.
+    // A withheld frame costs about 80 ms, because the compositor waits for a
+    // submit that never comes. Measured 2026-08-15: eight withholds inside 170
+    // ms of game time, alternating so max_consecutive never saw two in a row,
+    // each followed by an 80 ms frame -- roughly 650 ms of stall spent hiding an
+    // artefact that would have cost a fraction of that. The magnitudes were
+    // 5068, 5492, 5796, 6008, 6225, 6500, 6803, 8769: one camera separating
+    // steadily from the view, each step 3.5 to 8 per cent above the last, so the
+    // 2 per cent match window never fired and every one was a novel magnitude.
+    //
+    // It is deliberately blind to WHY the storm is happening. Drift is one
+    // cause and Rule B will handle that one properly; this bounds the cost of
+    // every cause, including the ones no invariant models yet.
+    //
+    // HOW THIS DIFFERS FROM THE DENSITY GUARD THAT WAS REMOVED. That one denied
+    // individual marks silently and, on its first field outing, denied the FIRST
+    // mark of a genuine flash. This lets the budget's worth through untouched --
+    // a real transition costs one or two withholds and never reaches three --
+    // and only then stands the fix down, once, out loud. The residual risk is
+    // real and worth naming: a storm immediately before a genuine flash can
+    // still spend the budget, and then the flash is missed. That is the trade
+    // the bound accepts, and the log says when it was taken so the miss is
+    // attributable rather than mysterious.
+    uint32_t recentWithholds = 0;
+    for (uint32_t i = 0; i < kBurstHistory; ++i) {
+        const uint32_t at = s->withheldAt[i];
+        if (at != 0 && s->frameNo >= at && s->frameNo - at < s->burstWindow) {
+            ++recentWithholds;
+        }
+    }
+    if (s->burstStandDown == 0 && recentWithholds >= s->burstLimit) {
+        s->burstStandDown = kBurstCooldown;
+        if (!s->burstNoted) {
+            s->burstNoted = true;
+            Log::get().note(
+                "transition flash: %u frames withheld inside %u -- the whole "
+                "budget -- which costs about "
+                "%u ms of stall, more than the flash being hidden. Standing down "
+                "for %u frames. This is the fix refusing to be worse than the "
+                "problem; a single transition costs one or two frames and never "
+                "reaches this. If it keeps happening, something is producing a "
+                "storm of jumps and the camera history will show what.",
+                recentWithholds, s->burstWindow, recentWithholds * 80,
+                kBurstCooldown);
+        }
+    }
+
     const bool willMark = jumped && !s->suppressedThisFrame && s->cooldown == 0 &&
-                          s->consecutive < s->maxConsecutive;
+                          s->consecutive < s->maxConsecutive &&
+                          s->burstStandDown == 0;
     if (jumped && !willMark) {
         if (s->letThroughNotes < kLetThroughNotes &&
             s->frameNo - s->lastLetThroughFrame >= kLetThroughGap) {
@@ -1351,13 +1460,18 @@ void glitchFrameObserve(const void* data, uint32_t bytes, const void* resource) 
     // Same order as the tests above, so the name matches the branch.
     s->verdictThisFrame =
         !jumped                            ? kVerdictQuiet
-        : willMark                         ? kVerdictWithheld
+        : willMark ? (s->separationMode >= 1 && residualIsKnownSeparation(resid)
+                          ? kVerdictWithheldSepWould
+                          : kVerdictWithheld)
         : s->parkSuppressedThisFrame       ? kVerdictPark
         : s->radiusSuppressedThisFrame     ? kVerdictShell
         : residualIsKnownSeparation(resid) ? kVerdictSeparation
+        : s->burstStandDown > 0            ? kVerdictBurst
         : s->cooldown > 0                  ? kVerdictCooldown
                                            : kVerdictConsecutive;
     if (willMark) {
+        s->withheldAt[s->withheldHead % kBurstHistory] = s->frameNo;
+        ++s->withheldHead;
         markGlitchFrame();
     } else {
         // Withdraw, do not clear: a further candidate later in the same frame
@@ -1371,6 +1485,7 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
     if (!s || !s->observing) return;
 
     ++s->frameNo;
+    if (s->burstStandDown > 0) --s->burstStandDown;
 
     // OBSERVING BUT NOT ACTING. Record the frame and stop.
     //
@@ -1507,8 +1622,9 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
     // frame withheld during draws and later judged "not a rendered scene" WAS
     // withheld, and a counter that quietly drops it is lying in the same
     // direction as before. It is counted separately instead, below.
-    if (s->verdictThisFrame != kVerdictQuiet &&
-        s->verdictThisFrame != kVerdictWithheld) {
+    const bool wasWithheld = s->verdictThisFrame == kVerdictWithheld ||
+                             s->verdictThisFrame == kVerdictWithheldSepWould;
+    if (s->verdictThisFrame != kVerdictQuiet && !wasWithheld) {
         // Recorded again, not merely counted: refreshing the entry is what stops
         // a separation that is suppressing correctly from ageing out of the
         // memory and firing all over again.
@@ -1530,7 +1646,7 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
             recordResidual(s->lastResid);
         }
         unmarkGlitchFrame();
-    } else if (s->verdictThisFrame == kVerdictWithheld) {
+    } else if (wasWithheld) {
         // Counted, not excluded: see the note above on endering.
         if (!rendering) ++s->withheldNotRendering;
         s->markedThisFrame = true;

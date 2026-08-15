@@ -1,5 +1,5 @@
 // GENERATED from tools/glitch_test/glitch_test.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 ab3b294cad0f4486]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 5f83e586509f76c6]
 // glitch_test -- drives the transition-flash detector without the game.
 //
 // The port of glitch_frame.cpp into this repo compiled, linked, and passed
@@ -175,6 +175,14 @@ int main(int argc, char** argv) {
         "transition_flash_units = 2000\r\n"
         "transition_flash_speed_factor = 8.0\r\n"
         "transition_flash_max_consecutive = 2\r\n"
+        // The suite below was written against a separation memory that ACTS and
+        // against no burst governor, and it still tests those mechanisms -- so it
+        // states them rather than inheriting whatever the shipped default becomes.
+        // The default is log-only now (1e step 2); fixture L covers that, and the
+        // governor fixture covers the bound. Everything else here is asking "does
+        // the memory recognise this?", which needs it switched on.
+        "transition_flash_separation = act\r\n"
+        "transition_flash_burst_limit = 30\r\n"
         "camera_buffer_bytes = 5376\r\n"
         "camera_buffer_offset = 1100\r\n"
         "[log]\r\n"
@@ -1061,6 +1069,88 @@ int main(int argc, char** argv) {
                   "player occupies is exempting the player's own bad frames");
     }
 
+    // --- 8d. The burst governor: the fix may not cost more than the artefact -
+    //
+    // FIELD SERIES, verbatim. One camera separating steadily from the view on
+    // 2026-08-15: magnitudes 5068, 5492, 5796, 6008, 6225, 6500, 6803, 8769,
+    // each 3.5 to 8 per cent above the last, so the 2 per cent match window
+    // never fired and every one was a novel magnitude. Eight withholds inside
+    // 170 ms of game time, alternating so max_consecutive never saw two in a
+    // row, each costing about 80 ms of stall -- roughly 650 ms spent hiding an
+    // artefact that would have cost a fraction of it.
+    //
+    // Every suppression is off for this, deliberately. The governor has to hold
+    // when nothing else does, because its job is to bound storms no invariant
+    // models yet -- and the drift rule that will handle THIS storm properly is
+    // not written.
+    {
+        Config::get().set("advanced.transition_flash_separation", "off");
+        Config::get().set("advanced.transition_flash_burst_limit", "3");
+        Config::get().set("advanced.transition_flash_burst_window", "60");
+        installGlitchFrameFix();
+        settle(b, x, 200);
+
+        static const float kDrift[] = {5068.0f, 5492.0f, 5796.0f, 6008.0f,
+                                       6225.0f, 6500.0f, 6803.0f, 8769.0f};
+        uint32_t withheld = 0;
+        for (float mag : kDrift) {
+            x += 30.0f;
+            if (frame(b, x, mag, 0.0f)) ++withheld;
+            x += 30.0f;
+            frame(b, x, 0.0f, 0.0f);
+        }
+        check("the governor bounds a storm no invariant recognises",
+              withheld <= 3,
+              std::to_string(withheld) +
+                  " frames withheld replaying the measured drift series; at about "
+                  "80 ms of stall each that is what the player felt as judder, and "
+                  "the whole point of the bound is that it does not depend on "
+                  "recognising why the storm is happening");
+        settle(b, x, 200);
+    }
+
+    // --- 8e. Fixture L: a transition must not excuse the next transition ------
+    //
+    // THE FAILURE, from the field. Two low wakes in one session, minutes apart.
+    // The first was withheld -- correctly -- and in being withheld it taught the
+    // separation memory its magnitude. The second produced a jump of nearly the
+    // same size, because both go to the same fixed reset position from a similar
+    // view radius, and the memory excused it: "let through: a repeating jump
+    // size", 726 ms before the player reached the key.
+    //
+    // That is the premise failing, not the implementation. A repeating magnitude
+    // IS a pass separation when it repeats at frame rate; a transition repeats it
+    // too, twice a session, and the rule cannot tell them apart because it is
+    // keyed on the jump rather than on where the jump landed.
+    //
+    // Both directions are asserted, because "the fix works now" is not the claim
+    // -- the claim is that this specific change is what makes the difference.
+    {
+        const float kFirst = 17515.0f, kSecond = 17551.0f;   // 0.2% apart
+
+        Config::get().set("advanced.transition_flash_burst_limit", "30");
+        Config::get().set("advanced.transition_flash_separation", "act");
+        installGlitchFrameFix();
+        settle(b, x, 200);
+        oneFrameExcursion(b, x, kFirst);
+        settle(b, x, 200);
+        const bool actExcused = !oneFrameExcursion(b, x, kSecond);
+        check("with the memory acting, the first wake excuses the second",
+              actExcused,
+              "the fixture does not reproduce the field failure, so it proves "
+              "nothing about the change that stops it");
+
+        Config::get().set("advanced.transition_flash_separation", "log");
+        installGlitchFrameFix();
+        settle(b, x, 200);
+        oneFrameExcursion(b, x, kFirst);
+        settle(b, x, 200);
+        const bool logWithheld = oneFrameExcursion(b, x, kSecond);
+        check("with the memory log-only, the second wake is withheld",
+              logWithheld,
+              "the second transition is still being excused by the first");
+        settle(b, x, 200);
+    }
     // --- 9. The instrument outlives the fix -------------------------------
     //
     // transition_flash = 0 is the control a bug report needs: with nothing
