@@ -1,5 +1,5 @@
 // GENERATED from tools/glitch_test/glitch_test.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 1c5ff287fa48099f]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 eaeef697d08cee2e]
 // glitch_test -- drives the transition-flash detector without the game.
 //
 // The port of glitch_frame.cpp into this repo compiled, linked, and passed
@@ -704,6 +704,68 @@ int main(int argc, char** argv) {
         installGlitchFrameFix();
     }
 
+    // --- 7i. The parked camera --------------------------------------------
+    //
+    // Fixture H. The two measured landings, verbatim: four units apart at a
+    // radius of 69,000. The sphere refuses them -- one direction, which is
+    // fixture G's rule and must not bend -- and the separation memory missed
+    // them by 0.05 of a percentage point, 73,460 against 71,958 across a 2%
+    // window. Keyed on the destination, they are the same place every time.
+    settle(b, x, 150);
+    {
+        const float kPark[3] = {-33141.0f, -32695.0f, -50433.0f};
+
+        // THE SEPARATION MEMORY IS OFF FOR THIS WHOLE CASE, as it is for
+        // fixture F, and for the same reason: with it on, the assertion cannot
+        // say which invariant acted.
+        //
+        // Three drafts tried to defeat it geometrically instead and each failed
+        // differently -- a near track at 7 units a frame keeps the jump sizes
+        // inside 2% so the separation memory covers everything; at 300 it sweeps
+        // smoothly and the drift-following tracks it; at 600 the returns start
+        // rebasing and a 120-frame cooldown swallows the fixture, so it passed
+        // with the park switched off, vacuously. Tuning a fixture until it fails
+        // for the reason you wanted is not the same as testing the thing.
+        Config::get().set("advanced.transition_flash_repeat_percent", "0");
+        installGlitchFrameFix();
+
+        float nx = 1500.0f;
+        uint32_t withheldEarly = 0, withheldLate = 0;
+        for (uint32_t i = 0; i < 150; ++i) {
+            nx += 7.0f;
+            bool marked = false;
+            if ((i % 3) == 2) {
+                // The four-unit wobble the field showed, so an exact-match
+                // implementation would not pass this.
+                const float j = static_cast<float>(static_cast<int>(i % 5) - 2);
+                marked = frame(b, kPark[0] + j, kPark[1], kPark[2] - j);
+            } else {
+                marked = frame(b, nx, 0.0f, 0.0f);
+            }
+            if (i < 90) { if (marked) ++withheldEarly; }
+            else        { if (marked) ++withheldLate; }
+        }
+        check("a parked camera certifies and stops costing frames",
+              withheldLate == 0 && withheldEarly > 0,
+              std::to_string(withheldLate) +
+                  " frames still withheld after the park should have certified, and " +
+                  std::to_string(withheldEarly) +
+                  " before it did -- if that second number is 0 the fixture withheld "
+                  "nothing at all and proves nothing");
+
+        // A genuine excursion 500 units off the park still marks.
+        settle(b, x, 150);
+        x += 30.0f;
+        const bool caught = frame(b, kPark[0] + 500.0f, kPark[1] - 500.0f,
+                                  kPark[2] + 500.0f);
+        check("an excursion 500 units off a certified park is still withheld",
+              caught, "the park's tolerance is swallowing frames well outside it");
+        x += 30.0f;
+        frame(b, x, 0.0f, 0.0f);
+        Config::get().set("advanced.transition_flash_repeat_percent", "2.0");
+        installGlitchFrameFix();
+    }
+
     // --- 7h. Complementarity ----------------------------------------------
     //
     // Fixture G. 6v's measured block alternation holds two FIXED positions, so
@@ -713,6 +775,11 @@ int main(int argc, char** argv) {
     settle(b, x, 40);
     {
         // 6v: A = (+9082 -135976 -5865), |A| = 136,405, in blocks of 4-6 frames.
+        //
+        // Since the park invariant landed, this is what catches it -- a fixed
+        // position IS a park, and that is the right answer. What the case still
+        // proves, and the reason it stays, is the negative half: the sphere must
+        // never certify a camera with one bearing, whatever else does.
         uint32_t withheld = 0;
         for (uint32_t i = 0; i < 90; ++i) {
             x += 30.0f;

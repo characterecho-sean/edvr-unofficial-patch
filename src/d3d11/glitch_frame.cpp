@@ -1,5 +1,5 @@
 // GENERATED from src/d3d11/glitch_frame.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 8098d57764d676f1]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 37f783b04187bb1b]
 #include "glitch_frame.h"
 
 #include <windows.h>
@@ -198,6 +198,32 @@ constexpr float kShellDirCos = 0.966f;
 // the thing this exists to catch.
 constexpr float kDefaultRadiusTolerance = 0.005f;
 
+// THE THIRD INVARIANT: a camera that does not move at all.
+//
+// Two withholds at radius ~69,000 landed four units apart -- (-33141 -32695
+// -50433) and (-33140 -32695 -50437). The sphere refused to certify it, exactly
+// as it must: one direction is a parked camera, and certifying that would let
+// any stationary pass switch the detector off. The separation memory should have
+// taken it and missed by 0.05 of a percentage point -- 73,460 against 71,958 is
+// 2.05% apart against a 2% window.
+//
+// The answer is not to widen a tolerance on one data point. It is to key on what
+// actually recurred, which is neither the jump size nor the distance: it is the
+// DESTINATION. All three invariants are the same statement -- the track landed
+// where auxiliary geometry has landed before -- and the separation memory, keyed
+// on jump size, is the weakest form of it because its key varies with where the
+// jump started. Both field misses trace to exactly that.
+//
+// ABSOLUTE, not relative, and that is the point of it being a separate rule: the
+// observed park held to four units at a radius of 69,000, which no percentage
+// worth having would express. Sixty-four units keeps an order of magnitude of
+// slack over the measurement.
+//
+// A park and an orbit are complementary by construction and an entry may certify
+// as only one: the orbit needs three directions, the park needs the position to
+// hold still. Whichever is proven first is what that entry is.
+constexpr float kDefaultParkUnits = 64.0f;
+
 // Rendered frames after which a value that still has not moved is accepted as
 // not being the camera.
 //
@@ -282,18 +308,32 @@ struct State {
         uint32_t framesSeen = 0;
         float    lastDir[3] = {};
         uint32_t distinctDirs = 0;
-        bool     certified = false;
+        bool     certified = false;      // an orbit: one distance, many bearings
+
+        // The parked variant, on the same record rather than in a table of its
+        // own: a park has a fixed position and therefore a fixed radius, so the
+        // radius lookup already finds it and only the position needs checking.
+        // The shape tag is which of the two certifications it holds.
+        float    parkPos[3] = {};
+        uint32_t parkFrames = 0;
+        bool     parked = false;         // a point: one place, over and over
     };
     Shell      shells[kShells] = {};
     float      radiusTolerance = kDefaultRadiusTolerance;
+    float      parkUnits = kDefaultParkUnits;
 
     uint32_t   suppressed = 0;
     // Split, because which invariant did the work is the data that says whether
     // both are earning their place -- and whether the deferred per-source-track
     // idea is ever needed.
     uint32_t   suppressedByRadius = 0;
+    uint32_t   suppressedByPark = 0;
+    // The frame of the most recent withhold, so a history dump can say whether
+    // anything in it was ours. See dumpCameraRing.
+    uint32_t   lastWithheldFrame = 0;
     uint32_t   suppressedBySeparation = 0;
     bool       radiusSuppressedThisFrame = false;
+    bool       parkSuppressedThisFrame = false;
     // Periodic totals: when they were last printed, and what they said. Printed
     // only when a counter has moved, so a quiet session stays quiet.
     uint32_t   totalsAt = 0;
@@ -465,6 +505,29 @@ bool radiusIsCertifiedShell(float radius) {
     return i >= 0 && g_state->shells[i].certified;
 }
 
+// Squared distance between two points, which both park tests want.
+float dist2(const float* a, const float* b) {
+    float d2 = 0.0f;
+    for (uint32_t i = 0; i < 3; ++i) {
+        const float d = a[i] - b[i];
+        d2 += d * d;
+    }
+    return d2;
+}
+
+// Did the track land where a certified parked camera sits?
+//
+// Found by radius first -- a fixed point has a fixed distance, so the same
+// lookup serves -- and then confirmed by position, because two different parked
+// cameras can share a radius and only one of them is this one.
+bool positionIsCertifiedPark(const float* pos, float radius) {
+    State* s = g_state;
+    if (s->parkUnits <= 0.0f) return false;
+    const int i = findShell(radius);
+    if (i < 0 || !s->shells[i].parked) return false;
+    return dist2(pos, s->shells[i].parkPos) <= s->parkUnits * s->parkUnits;
+}
+
 // Learn from a camera position, whether or not it produced a jump.
 //
 // This is the half that costs nothing: every accepted world camera teaches the
@@ -512,7 +575,34 @@ void observeShell(const float* pos, float radius) {
         }
     }
 
-    if (!e.certified && e.framesSeen >= kShellCertifyFrames &&
+    // The parked variant, tracked alongside. A run of sightings at one place
+    // certifies a point; anything that moves further than the tolerance starts
+    // the run again, so a camera that drifts never qualifies as parked.
+    if (s->parkUnits > 0.0f) {
+        if (e.parkFrames > 0 && dist2(pos, e.parkPos) <= s->parkUnits * s->parkUnits) {
+            ++e.parkFrames;
+        } else {
+            for (uint32_t a = 0; a < 3; ++a) e.parkPos[a] = pos[a];
+            e.parkFrames = 1;
+        }
+        // ONE CERTIFICATION PER ENTRY. `distinctDirs <= 1` is the complement of
+        // the orbit's gate, so a record cannot be both -- and `!e.certified`
+        // makes whichever was proven first the answer, rather than letting a
+        // camera that parks after orbiting quietly change shape.
+        if (!e.parked && !e.certified && e.parkFrames >= kShellCertifyFrames &&
+            e.distinctDirs <= 1) {
+            e.parked = true;
+            Log::get().note(
+                "transition flash: a camera parked at (%+.0f %+.0f %+.0f) identified "
+                "(%u sightings without moving) -- an auxiliary render pass being "
+                "resampled, not the view. Frames that land on it are no longer "
+                "withheld. A view that has not moved in a third of a second is not "
+                "a view that just jumped.",
+                e.parkPos[0], e.parkPos[1], e.parkPos[2], e.parkFrames);
+        }
+    }
+
+    if (!e.certified && !e.parked && e.framesSeen >= kShellCertifyFrames &&
         e.distinctDirs >= kShellCertifyDirs) {
         e.certified = true;
         Log::get().note(
@@ -706,6 +796,22 @@ void installGlitchFrameFix() {
         s.radiusTolerance = kDefaultRadiusTolerance;
     } else {
         s.radiusTolerance = radiusTol;
+    }
+    // ABSOLUTE units, where the two settings above it are proportional. The ini
+    // says so beside all three; a park is a fixed point and a percentage of a
+    // 69,000-unit radius would be hundreds of units of slack on a camera that
+    // was measured holding still to four.
+    const float parkUnits = cfg.getFloat("advanced.transition_flash_park_units",
+                                         kDefaultParkUnits);
+    if (!std::isfinite(parkUnits) || parkUnits < 0.0f || parkUnits > 1000.0f) {
+        Log::get().note(
+            "transition_flash_park_units = %.1f is outside 0 to 1000, so %.0f is "
+            "being used. It is how still a camera has to hold, in world units, to "
+            "count as parked.",
+            static_cast<double>(parkUnits), static_cast<double>(kDefaultParkUnits));
+        s.parkUnits = kDefaultParkUnits;
+    } else {
+        s.parkUnits = parkUnits;
     }
     s.bufferBytes = static_cast<uint32_t>(cfg.getInt("advanced.camera_buffer_bytes", 5376));
     s.posOffset = static_cast<uint32_t>(cfg.getInt("advanced.camera_buffer_offset", 1100));
@@ -954,9 +1060,12 @@ void glitchFrameObserve(const void* data, uint32_t bytes, const void* resource) 
     // has one direction and can never certify a sphere -- the separation memory
     // takes it. Today's swinging camera has a different jump size every time --
     // the shell takes it.
-    s->radiusSuppressedThisFrame = jumped && radiusIsCertifiedShell(radius);
-    s->suppressedThisFrame =
-        s->radiusSuppressedThisFrame || (jumped && residualIsKnownSeparation(resid));
+    s->parkSuppressedThisFrame = jumped && positionIsCertifiedPark(pos, radius);
+    s->radiusSuppressedThisFrame =
+        !s->parkSuppressedThisFrame && jumped && radiusIsCertifiedShell(radius);
+    s->suppressedThisFrame = s->parkSuppressedThisFrame ||
+                             s->radiusSuppressedThisFrame ||
+                             (jumped && residualIsKnownSeparation(resid));
     s->jumpedThisFrame = jumped;
 
     if (jumped && !s->suppressedThisFrame && s->cooldown == 0 &&
@@ -1056,6 +1165,7 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
         s->jumpedThisFrame = false;
         s->suppressedThisFrame = false;
         s->radiusSuppressedThisFrame = false;
+        s->parkSuppressedThisFrame = false;
         return;
     }
 
@@ -1064,7 +1174,12 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
         // a separation that is suppressing correctly from ageing out of the
         // memory and firing all over again.
         ++s->suppressed;
-        if (s->radiusSuppressedThisFrame) {
+        if (s->parkSuppressedThisFrame) {
+            ++s->suppressedByPark;
+            // Not recorded as a separation, for the same reason a radius
+            // suppression is not: the jump size that landed here depends on
+            // where it started, and the whole finding is that it varies.
+        } else if (s->radiusSuppressedThisFrame) {
             ++s->suppressedByRadius;
             // NOT recorded as a separation. A radius-suppressed jump has a size
             // that varies with where the swing came from -- that is the reason
@@ -1081,6 +1196,7 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
         s->markedThisFrame = true;
         ++s->framesWithheld;
         ++s->windowWithheld;
+        s->lastWithheldFrame = s->frameNo;
         // The first of a kind is always withheld -- it cannot be known to repeat
         // until it has. That is the cost of this approach and it is one frame per
         // novel magnitude, against one frame every three that it replaces.
@@ -1231,7 +1347,8 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
             Log::get().note(
                 "transition flash so far: %u frame(s) %s this session, and %u "
                 "more recognised as render-pass geometry and left alone -- %u by a "
-                "repeating jump size, %u by a camera orbiting at a fixed distance "
+                "repeating jump size, %u by a camera orbiting at a fixed distance, "
+                "%u by a camera parked in one place "
                 "(%u and %u since the last of these lines). Compare the first "
                 "number against how many jumps, drops and map closes you have "
                 "made: roughly one per transition is it working. The others are "
@@ -1241,7 +1358,7 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
                 s->framesWithheld, acted ? "withheld" : "detected but NOT withheld "
                                            "(openvr_api.dll is not installed)",
                 s->suppressed, s->suppressedBySeparation, s->suppressedByRadius,
-                s->framesWithheld - s->totalsWithheld,
+                s->suppressedByPark, s->framesWithheld - s->totalsWithheld,
                 s->suppressed - s->totalsSuppressed);
             s->totalsWithheld = s->framesWithheld;
             s->totalsSuppressed = s->suppressed;
@@ -1254,6 +1371,7 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
     s->jumpedThisFrame = false;
     s->suppressedThisFrame = false;
     s->radiusSuppressedThisFrame = false;
+    s->parkSuppressedThisFrame = false;
     s->frameFarMag2 = -1.0f;
 }
 
@@ -1292,6 +1410,35 @@ void dumpCameraRing() {
                  : 0.0;
         Log::get().note("CAM %8.1fms f%-7u eye=%-5u pos=(%+.2f %+.2f %+.2f)",
                         -msAgo, e.frame, e.eyeDraws, e.pos[0], e.pos[1], e.pos[2]);
+    }
+    // WAS ANY OF THIS OURS? The question every one of these dumps has been
+    // opened to answer, worked out by hand every time.
+    //
+    // A player presses this key because they saw something. Whether EDVR
+    // withheld a frame anywhere near that moment is the difference between "the
+    // fix did this" and "the fix was not involved" -- and it took reading the
+    // withheld list against the ring's frame numbers to find out. It is two
+    // numbers we already have.
+    if (s->framesWithheld == 0) {
+        Log::get().note(
+            "--- no frame has been withheld at all this session, so nothing in this "
+            "history was EDVR withholding. Whatever was seen came from somewhere "
+            "else. ---");
+    } else {
+        const uint32_t ago = s->frameNo - s->lastWithheldFrame;
+        if (ago <= have) {
+            Log::get().note(
+                "--- the most recent withheld frame is %u, %u frame(s) before this "
+                "dump, so it IS inside this history. %u withheld this session. ---",
+                s->lastWithheldFrame, ago, s->framesWithheld);
+        } else {
+            Log::get().note(
+                "--- NO frame was withheld within the %llu frames of this history. "
+                "The most recent was frame %u, %u frames ago, and %u were withheld "
+                "this session. Nothing in this capture was EDVR withholding. ---",
+                static_cast<unsigned long long>(have), s->lastWithheldFrame, ago,
+                s->framesWithheld);
+        }
     }
     Log::get().note("--- end camera history ---");
 }
