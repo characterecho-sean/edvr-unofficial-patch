@@ -1,5 +1,5 @@
 // GENERATED from src/d3d11/glitch_frame.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 e14f8111f3d69fd9]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 4c9dd7c3dfa8faab]
 #include "glitch_frame.h"
 
 #include <windows.h>
@@ -382,6 +382,12 @@ struct State {
     // prediction is built from the previous frame's camera anyway.
     uint32_t lastEyeDraws = 0;
     uint32_t framesWithheld = 0;
+    // Frames withheld during the draws that the boundary then judged not to be a
+    // rendered scene. They WERE withheld -- the compositor had already acted --
+    // so they are reported rather than deducted. A number that climbs here means
+    // the eye-draw gate and the per-candidate decision disagree about what a
+    // frame is, which is worth knowing and used to be invisible.
+    uint32_t withheldNotRendering = 0;
     uint32_t notesLeft = 40;
     uint32_t rebaseNotesLeft = kRebaseNotes;
 
@@ -1498,7 +1504,31 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
         return;
     }
 
-    if (s->jumpedThisFrame && rendering && s->suppressedThisFrame) {
+    // ONE PREDICATE DECIDES AND COUNTS, and this used to be two.
+    //
+    // The decision was made per candidate during the draws -- that is the flag
+    // the compositor reads at Submit -- and then the boundary RE-DERIVED it from
+    // jumpedThisFrame, cooldown and consecutive to do the counting. Two
+    // expressions for one thing, and they drifted: the boundary's copy never
+    // learned about the density guard, and it reads consecutive as of the
+    // boundary rather than as of the decision.
+    //
+    // Measured 2026-08-15: the d3d11 totals line claimed 152 frames withheld in a
+    // session where the compositor withheld 6 eye-submits, which is 3 frames.
+    // Fifty-fold, in the number a player is told to compare against how many
+    // transitions they made -- and the number I used to diagnose judder, wrongly.
+    //
+    // verdictThisFrame IS the decision: set at the last candidate of the frame,
+    // which is the state the flag was in when Submit read it. Counting it cannot
+    // disagree with what happened.
+    //
+    // endering is deliberately NOT part of the test any more. It is known only
+    // here, at the boundary, and the compositor has already acted by then -- so a
+    // frame withheld during draws and later judged "not a rendered scene" WAS
+    // withheld, and a counter that quietly drops it is lying in the same
+    // direction as before. It is counted separately instead, below.
+    if (s->verdictThisFrame != kVerdictQuiet &&
+        s->verdictThisFrame != kVerdictWithheld) {
         // Recorded again, not merely counted: refreshing the entry is what stops
         // a separation that is suppressing correctly from ageing out of the
         // memory and firing all over again.
@@ -1520,8 +1550,9 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
             recordResidual(s->lastResid);
         }
         unmarkGlitchFrame();
-    } else if (s->jumpedThisFrame && rendering && s->cooldown == 0 &&
-        s->consecutive < s->maxConsecutive) {
+    } else if (s->verdictThisFrame == kVerdictWithheld) {
+        // Counted, not excluded: see the note above on endering.
+        if (!rendering) ++s->withheldNotRendering;
         s->markedThisFrame = true;
         ++s->framesWithheld;
         ++s->windowWithheld;
@@ -1738,7 +1769,9 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
                 "more recognised as render-pass geometry and left alone -- %u by a "
                 "repeating jump size, %u by a camera orbiting at a fixed distance, "
                 "%u by a camera parked in one place "
-                "(%u and %u since the last of these lines). Compare the first "
+                "(%u and %u since the last of these lines; %u were withheld on a "
+                "frame the eye-draw gate did not call a rendered scene). Compare "
+                "the first "
                 "number against how many jumps, drops and map closes you have "
                 "made: roughly one per transition is it working. The others are "
                 "expected to be large near a planet surface and are not a fault -- "
@@ -1748,7 +1781,7 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
                                            "(openvr_api.dll is not installed)",
                 s->suppressed, s->suppressedBySeparation, s->suppressedByRadius,
                 s->suppressedByPark, s->framesWithheld - s->totalsWithheld,
-                s->suppressed - s->totalsSuppressed);
+                s->suppressed - s->totalsSuppressed, s->withheldNotRendering);
             s->totalsWithheld = s->framesWithheld;
             s->totalsSuppressed = s->suppressed;
         }
