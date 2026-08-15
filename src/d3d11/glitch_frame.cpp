@@ -1,5 +1,5 @@
 // GENERATED from src/d3d11/glitch_frame.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 b8c8d38fda1c4758]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 8098d57764d676f1]
 #include "glitch_frame.h"
 
 #include <windows.h>
@@ -165,7 +165,25 @@ constexpr float kWorldCameraFloor2 = 10.0f * 10.0f;
 // a sphere, and a one-frame excursion cannot certify by construction. Both
 // halves are required: sightings alone would certify a parked camera, directions
 // alone would certify noise.
-constexpr uint32_t kShells = 8;
+// SIXTY-FOUR, and eight was badly wrong -- my number, not the design's.
+//
+// A ten-second ring from one session carries twelve or more radii in constant
+// use: 68,900 on 440 of 900 frames, then 7,000, 6,900, 7,100, 67,200, 7,200,
+// 8,000, 7,700, 7,500, 9,700, 8,800, 9,800. Against eight slots that table does
+// nothing but evict, and every eviction throws away a certification and makes
+// the next sighting of that radius start from nothing.
+//
+// The symptom in the log is unmistakable once you know to look: 29 shells
+// certified in five minutes, five of them at 6,861 / 6,868 / 6,879 / 6,882 /
+// 6,885 -- all inside the 0.5% tolerance of each other, so all the SAME shell,
+// learned and lost and learned again. Meanwhile the split counter read 460
+// suppressed by jump size against 24 by radius: the invariant was barely getting
+// to work, and four of the ten frames still being withheld sat on radii the
+// table had already identified and forgotten.
+//
+// The cost of the larger table is a linear scan of floats on the observe path,
+// which is nothing next to the sqrtf already there.
+constexpr uint32_t kShells = 64;
 constexpr uint32_t kShellCertifyFrames = 30;
 constexpr uint32_t kShellCertifyDirs = 3;
 // cos 15 degrees: how far the camera must swing to count as a new direction.
