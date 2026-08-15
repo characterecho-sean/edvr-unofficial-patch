@@ -1,5 +1,5 @@
 // GENERATED from tools/glitch_test/glitch_test.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 48d717508919d367]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 9d57f8549d1a9f91]
 // glitch_test -- drives the transition-flash detector without the game.
 //
 // The port of glitch_frame.cpp into this repo compiled, linked, and passed
@@ -1288,6 +1288,112 @@ int main(int argc, char** argv) {
         check("L: a transition minutes later is still withheld", lWithheld,
               "the second low wake is being excused by the first again, which is "
               "the failure the bar was built to prevent");
+        settle(b, x, 200);
+    }
+
+    // --- 8g. Rule B: fixtures M and N -----------------------------------------
+    //
+    // THE FIRST MARK ALWAYS MARKS; everything after it in the band, landing
+    // nearby, is the same camera still separating. Fixture M is the measured
+    // storm verbatim; fixture N is the adversarial case that forces the landing
+    // term to exist -- a magnitude inside the band cannot be excused on size
+    // alone, because a transition mid-drift can land at its reset position with
+    // a size that happens to fit.
+    //
+    // M runs BOTH directions in one binary, fixture-L style: with the rule off
+    // (drift_pct = 0) the storm must reproduce, because a fixture that cannot
+    // produce the failure proves nothing about the fix. The governor is raised
+    // out of the way in both halves -- it caps this storm too (fixture 8d), and
+    // a cap is exactly what would let a broken Rule B pass "at most two".
+    {
+        static const float kSeries[] = {5068.0f, 5492.0f, 5796.0f, 6008.0f,
+                                        6225.0f, 6500.0f, 6803.0f, 8769.0f};
+
+        // M, first direction: the rule off, the storm real.
+        Config::get().set("advanced.transition_flash_separation", "act");
+        Config::get().set("advanced.transition_flash_burst_limit", "30");
+        Config::get().set("advanced.transition_flash_drift_pct", "0");
+        installGlitchFrameFix();
+        settle(b, x, 200);
+        uint32_t preWithheld = 0;
+        for (float mag : kSeries) {
+            x += 30.0f;
+            if (frame(b, x, mag, 0.0f)) ++preWithheld;
+            x += 30.0f;
+            if (frame(b, x, 0.0f, 0.0f)) ++preWithheld;
+        }
+        check("M reproduces the drift storm with Rule B off", preWithheld >= 6,
+              std::to_string(preWithheld) +
+                  " of 8 withheld; a low number here means the fixture is not "
+                  "exercising the failure Rule B exists to remove");
+
+        // M, second direction: the rule on. Two marks are the specification --
+        // the first, which nothing may excuse, and the 6803->8769 step, which is
+        // +28.9% and OUTSIDE the one-sided band: a step that size is a fresh
+        // event, and excusing it would widen the band by argument rather than
+        // by measurement.
+        //
+        // THE LONG SETTLE IS LOAD-BEARING. State survives install (the static
+        // State is the game's semantics, on purpose), so the first half's
+        // eight withholds put all eight magnitudes in the separation table --
+        // and drift YIELDS to recognised magnitudes, so a fresh replay would
+        // be handed to the separation path and withheld 8 of 8. The system's
+        // own decay is the isolation: entries unseen for a runaway window no
+        // longer match, which is also the semantics the field build runs on.
+        Config::get().set("advanced.transition_flash_drift_pct", "10");
+        installGlitchFrameFix();
+        settle(b, x, 2100);
+        uint32_t postWithheld = 0;
+        bool firstMarked = false;
+        for (uint32_t i = 0; i < 8; ++i) {
+            x += 30.0f;
+            const bool m = frame(b, x, kSeries[i], 0.0f);
+            if (i == 0) firstMarked = m;
+            if (m) ++postWithheld;
+            x += 30.0f;
+            if (frame(b, x, 0.0f, 0.0f)) ++postWithheld;
+        }
+        check("M: the first mark always marks", firstMarked,
+              "the opening frame of the storm was excused with no chain to "
+              "continue -- the density guard's exact failure, rebuilt");
+        check("M: the drift costs at most two frames", postWithheld <= 2,
+              std::to_string(postWithheld) +
+                  " of 8 withheld with Rule B on; the chain is not following "
+                  "the measured 3.5-8.4% steps");
+        settle(b, x, 200);
+
+        // N. Chain live -- seed withheld, one step suppressed -- then a jump
+        // whose SIZE fits the band and whose LANDING is the far side of the
+        // path, which is the reset-position shape of a real flash. It must
+        // still be withheld, whatever its size says.
+        //
+        // Same long settle, same reason: M's halves left 5068 in the table
+        // with two marks, and N's seed is 5068 -- a third mark inside the
+        // window would CERTIFY it and suppress the very seed the fixture
+        // needs withheld.
+        installGlitchFrameFix();
+        settle(b, x, 2100);
+        x += 30.0f;
+        const bool nSeed = frame(b, x, 5068.0f, 0.0f);
+        x += 30.0f;
+        frame(b, x, 0.0f, 0.0f);
+        x += 30.0f;
+        const bool nStep = frame(b, x, 5350.0f, 0.0f);   // +5.6%, lands 288 away
+        x += 30.0f;
+        frame(b, x, 0.0f, 0.0f);
+        x += 30.0f;
+        const bool nFlash = frame(b, x, -5600.0f, 0.0f); // +4.7% by size; lands
+        x += 30.0f;                                      // ~11,000 units away
+        frame(b, x, 0.0f, 0.0f);
+        check("N: the chain is live when the flash arrives", nSeed && !nStep,
+              std::string(nSeed ? "" : "the seed mark was not withheld; ") +
+                  (nStep ? "the drift step was withheld, so nothing was being "
+                           "excused and the assertion below is vacuous"
+                         : ""));
+        check("N: a real flash mid-drift, in band by size, is still withheld",
+              nFlash,
+              "the flash was excused on magnitude alone -- the landing term is "
+              "missing or too loose, and this version must not ship (1e step 3)");
         settle(b, x, 200);
     }
 

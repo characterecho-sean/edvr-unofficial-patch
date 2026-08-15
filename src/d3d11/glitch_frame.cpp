@@ -1,5 +1,5 @@
 // GENERATED from src/d3d11/glitch_frame.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 985cad9aff06c164]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 5fb8e6d35cf252e2]
 #include "glitch_frame.h"
 
 #include <windows.h>
@@ -263,6 +263,44 @@ constexpr uint32_t kBurstNoteGap = 900;
 constexpr uint32_t kSepMarkWindow = 5400;
 constexpr uint32_t kSepMarksToCertify = 3;
 
+// Rule B's shape (1e step 3). A camera separating steadily from the view
+// produces a strictly CLIMBING magnitude -- measured 5068 to 8769 across eight
+// marks, each step 3.5 to 8.4 per cent above the last, so every one was novel
+// to the separation memory's 2 per cent window and every one was withheld
+// (6an, failure two: ~650 ms of stall in 170 ms of game time). The chain
+// remembers the last withheld magnitude and where it landed; a new mark whose
+// magnitude sits in the one-sided band just above the head AND whose landing
+// is near the head's landing is the same camera one step further out.
+//
+// THE FIRST MARK ALWAYS MARKS. A chain exists only after a withhold has seeded
+// it, so nothing here can deny the opening frame of a genuine flash -- the
+// density guard lacked exactly this and blocked a real flash on its first
+// field outing, which is why it is a stated requirement and not a preference.
+//
+// TWO BOUNDS BESIDE THE BAND, both flat and both measured, because the two
+// shapes tried first were arguments and the fixtures refused each in turn.
+// The spec sketched a ~600-frame TTL with a landing allowance proportional to
+// the head: at 568k that allowance is 56,800 units and it swallowed the
+// 11,928-unit gap between two WOBBLING CASCADE POSITIONS -- Rule B excusing
+// the exact flips the separation memory exists to certify honestly. The
+// second draft scaled the allowance with the chain's age: at age 22 that
+// handed 5,500 units to the measured 5.7%-apart pair of GENUINE transitions,
+// and at age 6 it swallowed the multi-candidate fixture's 912-unit landings.
+//
+// The measured storm (6an) is the only drift on record, and it is dense:
+// marks 1-3 frames apart, landings stepping 220-428 units. So:
+// - kDriftMaxGap = 8: the chain is dead past eight frames. 2-4x the measured
+//   cadence, and refuses the 21-frame genuine pair, fixture O's 166-frame
+//   descent pairs (the trust bar's case, not this rule's) and fixture L's
+//   202-frame transition probe.
+// - kDriftLandingUnits = 500: covers the measured 428-unit worst step with
+//   margin, and is 24x smaller than the cascade wobble distance it must
+//   refuse. Flat, because "the landing crawls" is the measurement; any growth
+//   law on top of it was invention.
+constexpr uint32_t kDriftMaxGap = 8;
+constexpr float    kDriftLandingUnits = 500.0f;
+constexpr float    kDefaultDriftPct = 10.0f;
+
 constexpr uint32_t kLetThroughNotes = 40;
 constexpr uint32_t kLetThroughGap = 120;
 
@@ -309,6 +347,7 @@ enum RingVerdict : uint8_t {
     kVerdictConsecutive,     // too many in a row already
     kVerdictBurst,           // the governor stood the fix down: see kDefaultBurstLimit
     kVerdictWithheldSepWould,// withheld, and the separation memory would have excused it
+    kVerdictDrift,           // the drift chain's camera, one step further out (Rule B)
 };
 
 const char* ringVerdictName(uint8_t v) {
@@ -319,6 +358,7 @@ const char* ringVerdictName(uint8_t v) {
         case kVerdictPark:        return "let through: a parked camera";
         case kVerdictShell:       return "let through: a known distance";
         case kVerdictSeparation:  return "let through: a repeating jump size";
+        case kVerdictDrift:       return "let through: a separation drifting wider";
         case kVerdictCooldown:    return "let through: still settling";
         case kVerdictConsecutive: return "let through: too many in a row";
         case kVerdictBurst:       return "let through: the burst governor stood down";
@@ -519,8 +559,19 @@ struct State {
     // anything in it was ours. See dumpCameraRing.
     uint32_t   lastWithheldFrame = 0;
     uint32_t   suppressedBySeparation = 0;
+    uint32_t   suppressedByDrift = 0;
     bool       radiusSuppressedThisFrame = false;
     bool       parkSuppressedThisFrame = false;
+    bool       driftSuppressedThisFrame = false;
+
+    // Rule B: the drift chain. Seeded ONLY by an actual withhold, at the frame
+    // boundary where wasWithheld is read -- so the first mark of anything has
+    // already been paid before a chain exists. Advanced only by a frame this
+    // rule itself suppressed; dead once nothing has advanced it for the TTL.
+    float      driftHead = 0.0f;
+    float      driftLanding[3] = {};
+    uint32_t   driftFrame = 0;          // 0 = no chain
+    float      driftPct = kDefaultDriftPct;
     // Periodic totals: when they were last printed, and what they said. Printed
     // only when a counter has moved, so a quiet session stays quiet.
     uint32_t   totalsAt = 0;
@@ -777,6 +828,43 @@ bool positionIsCertifiedPark(const float* pos, float radius) {
     const int i = findShell(radius);
     if (i < 0 || !s->shells[i].parked) return false;
     return dist2(pos, s->shells[i].certParkPos) <= s->parkUnits * s->parkUnits;
+}
+
+// Rule B: is this jump the drift chain's camera, one step further out?
+//
+// One-sided on purpose. At or below the head is the separation memory's
+// territory -- a REPEATING size -- and above the band is a different event;
+// the measured storm climbed 3.5 to 8.4 per cent per mark, and its one step
+// past the band (6803 to 8769, +28.9%) is a step this must NOT excuse, which
+// is what fixture M's "at most two marks" pins.
+//
+// THE LANDING TERM IS NOT OPTIONAL. A transition mid-drift can land at its
+// reset position with a magnitude that happens to sit in the band -- fixture
+// N's case -- and magnitude alone cannot tell it from the drifting camera.
+// The drifting camera's landing CRAWLS; a transition lands kilometres away.
+// See the note at kDriftLandingUnits for the two shapes this test refused
+// before settling on the flat measured bound.
+//
+// AND DRIFT YIELDS TO RECOGNITION. A magnitude matching any separation entry
+// -- certified or not -- is the REPEATING phenomenon, and it belongs to the
+// separation memory whichever way that memory then rules: if this rule ate
+// those frames the trust bar would starve (measured: fixture O's pair members
+// sit 0.8% apart, and drift-suppressing the second member of every pair
+// silently delayed certification -- frames suppressed here record no marks).
+// The measured storm's steps were 3.5-8.4% apart and never matched within
+// 2%, so drift loses nothing real by yielding.
+bool residualIsDriftContinuation(float resid, const float* pos) {
+    State* s = g_state;
+    if (s->driftPct <= 0.0f) return false;
+    if (s->driftFrame == 0) return false;
+    const uint32_t age = s->frameNo - s->driftFrame;
+    if (age == 0 || age > kDriftMaxGap) return false;
+    if (!std::isfinite(resid)) return false;
+    if (residualIsRecognisedSeparation(resid)) return false;
+    const float head = s->driftHead;
+    if (resid <= head) return false;
+    if (resid > head * (1.0f + s->driftPct * 0.01f)) return false;
+    return dist2(pos, s->driftLanding) <= kDriftLandingUnits * kDriftLandingUnits;
 }
 
 // Learn from a camera position, whether or not it produced a jump.
@@ -1175,6 +1263,24 @@ void installGlitchFrameFix() {
         "advanced.transition_flash_burst_limit", kDefaultBurstLimit, 1, 30));
     s.burstWindow = static_cast<uint32_t>(cfg.getIntInRange(
         "advanced.transition_flash_burst_window", kDefaultBurstWindow, 10, 600));
+    // A PERCENTAGE, like repeat_percent above and unlike the radius tolerance;
+    // the ini says so beside it. 0 turns Rule B off -- the escape hatch if a
+    // build ever produces genuine flashes that drift in lockstep with their
+    // own landings, which nothing measured suggests but nothing rules out.
+    const float driftPct = cfg.getFloat("advanced.transition_flash_drift_pct",
+                                        kDefaultDriftPct);
+    if (!std::isfinite(driftPct) || driftPct < 0.0f || driftPct > 50.0f) {
+        Log::get().note(
+            "transition_flash_drift_pct = %.1f is outside 0 to 50, so %.0f is "
+            "being used. It is how far above the last withheld jump, in per cent, "
+            "a new jump may sit -- landing nearby -- and still be the same camera "
+            "drifting away rather than a fresh event. Too large and a real flash "
+            "near a drift gets suppressed, which nothing would tell you.",
+            static_cast<double>(driftPct), static_cast<double>(kDefaultDriftPct));
+        s.driftPct = kDefaultDriftPct;
+    } else {
+        s.driftPct = driftPct;
+    }
     s.dwellFrames = static_cast<uint32_t>(cfg.getIntInRange(
         "advanced.transition_flash_dwell_frames", kDefaultDwellFrames, 8, 120));
     s.bufferBytes = static_cast<uint32_t>(cfg.getInt("advanced.camera_buffer_bytes", 5376));
@@ -1444,8 +1550,17 @@ void glitchFrameObserve(const void* data, uint32_t bytes, const void* resource) 
     s->parkSuppressedThisFrame = jumped && positionIsCertifiedPark(pos, radius);
     s->radiusSuppressedThisFrame =
         !s->parkSuppressedThisFrame && jumped && radiusIsCertifiedShell(radius);
+    // Rule B consults last: the certified invariants carry evidence gathered
+    // over seconds, the chain carries one withhold's worth. The flag is stored
+    // (not re-derived at the boundary) because the landing test needs THIS
+    // candidate's position, which the boundary no longer has.
+    s->driftSuppressedThisFrame =
+        !s->parkSuppressedThisFrame && !s->radiusSuppressedThisFrame && jumped &&
+        !(s->separationMode >= 2 && residualIsKnownSeparation(resid)) &&
+        residualIsDriftContinuation(resid, pos);
     s->suppressedThisFrame = s->parkSuppressedThisFrame ||
                              s->radiusSuppressedThisFrame ||
+                             s->driftSuppressedThisFrame ||
                              (jumped && s->separationMode >= 2 &&
                               residualIsKnownSeparation(resid));
     s->jumpedThisFrame = jumped;
@@ -1545,6 +1660,7 @@ void glitchFrameObserve(const void* data, uint32_t bytes, const void* resource) 
         : s->parkSuppressedThisFrame       ? kVerdictPark
         : s->radiusSuppressedThisFrame     ? kVerdictShell
         : residualIsKnownSeparation(resid) ? kVerdictSeparation
+        : s->driftSuppressedThisFrame      ? kVerdictDrift
         : s->burstStandDown > 0            ? kVerdictBurst
         : s->cooldown > 0                  ? kVerdictCooldown
                                            : kVerdictConsecutive;
@@ -1555,6 +1671,23 @@ void glitchFrameObserve(const void* data, uint32_t bytes, const void* resource) 
         // can re-raise this.
         unmarkGlitchFrame();
     }
+#ifdef EDVR_GLITCH_TRACE
+    // TEMPORARY investigation scaffolding, compiled only when the define is
+    // passed by hand. Not part of any build script.
+    if (jumped) {
+        printf("[trace] f%u resid=%.0f trip=%.0f mark=%d park=%d shell=%d "
+               "sepKnown=%d drift=%d burst=%u cd=%u consec=%u/%u head=%.0f "
+               "chainAge=%u\n",
+               s->frameNo, static_cast<double>(resid), static_cast<double>(trip),
+               willMark ? 1 : 0, s->parkSuppressedThisFrame ? 1 : 0,
+               s->radiusSuppressedThisFrame ? 1 : 0,
+               residualIsKnownSeparation(resid) ? 1 : 0,
+               s->driftSuppressedThisFrame ? 1 : 0, s->burstStandDown,
+               s->cooldown, s->consecutive, s->maxConsecutive,
+               static_cast<double>(s->driftHead),
+               s->driftFrame ? s->frameNo - s->driftFrame : 0);
+    }
+#endif
 }
 
 void glitchFrameBoundary(uint32_t eyeDraws) {
@@ -1586,6 +1719,7 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
         s->suppressedThisFrame = false;
         s->radiusSuppressedThisFrame = false;
         s->parkSuppressedThisFrame = false;
+        s->driftSuppressedThisFrame = false;
         return;
     }
 
@@ -1673,6 +1807,7 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
         s->suppressedThisFrame = false;
         s->radiusSuppressedThisFrame = false;
         s->parkSuppressedThisFrame = false;
+        s->driftSuppressedThisFrame = false;
         return;
     }
 
@@ -1718,6 +1853,21 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
             // the separation memory misses these -- so feeding them in would
             // stock the table with magnitudes that mean nothing and widen its
             // chance of matching a real flash.
+        } else if (s->driftSuppressedThisFrame) {
+            ++s->suppressedByDrift;
+            // The chain advances to the step it just excused -- the drifting
+            // camera is HERE now, and the next step is judged from here. Once
+            // per frame, at the boundary, like every other piece of withhold
+            // bookkeeping; advancing at the decision would let several
+            // candidates in one frame walk the chain forward together.
+            //
+            // NOT recorded as a separation, for the drift's own reason: these
+            // magnitudes are each seen once by construction -- that is what
+            // drifting means -- so the table would only accumulate junk with a
+            // widening chance of matching a real flash.
+            s->driftHead = s->lastResid;
+            for (uint32_t a = 0; a < 3; ++a) s->driftLanding[a] = s->frameFarPos[a];
+            s->driftFrame = s->frameNo;
         } else {
             ++s->suppressedBySeparation;
             recordResidual(s->lastResid);
@@ -1750,6 +1900,14 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
         // until it has. That is the cost of this approach and it is one frame per
         // novel magnitude, against one frame every three that it replaces.
         recordResidual(s->lastResid);
+        // Rule B's chain is seeded HERE, by the withhold itself -- which is the
+        // structural form of "the first mark always marks": nothing can be
+        // excused as a continuation until an actual withhold has established
+        // what it would be continuing. A later novel withhold re-seeds, because
+        // the freshest paid-for magnitude is the chain's base by definition.
+        s->driftHead = s->lastResid;
+        for (uint32_t a = 0; a < 3; ++a) s->driftLanding[a] = s->frameFarPos[a];
+        s->driftFrame = s->frameNo;
         // AFTER recordResidual, which is what creates the entry. Counting first
         // meant the first occurrence of a magnitude never counted toward its own
         // certification, so the bar was silently four marks rather than three.
@@ -1961,7 +2119,8 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
                 "transition flash so far: %u frame(s) %s this session, and %u "
                 "more recognised as render-pass geometry and left alone -- %u by a "
                 "repeating jump size, %u by a camera orbiting at a fixed distance, "
-                "%u by a camera parked in one place "
+                "%u by a camera parked in one place, %u by a separation drifting "
+                "wider "
                 "(%u and %u since the last of these lines; %u were withheld on a "
                 "frame the eye-draw gate did not call a rendered scene). Compare "
                 "the first "
@@ -1973,7 +2132,8 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
                 s->framesWithheld, acted ? "withheld" : "detected but NOT withheld "
                                            "(openvr_api.dll is not installed)",
                 s->suppressed, s->suppressedBySeparation, s->suppressedByRadius,
-                s->suppressedByPark, s->framesWithheld - s->totalsWithheld,
+                s->suppressedByPark, s->suppressedByDrift,
+                s->framesWithheld - s->totalsWithheld,
                 s->suppressed - s->totalsSuppressed, s->withheldNotRendering);
             s->totalsWithheld = s->framesWithheld;
             s->totalsSuppressed = s->suppressed;
@@ -1987,6 +2147,7 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
     s->suppressedThisFrame = false;
     s->radiusSuppressedThisFrame = false;
     s->parkSuppressedThisFrame = false;
+    s->driftSuppressedThisFrame = false;
     s->frameFarMag2 = -1.0f;
     s->verdictThisFrame = kVerdictQuiet;
 }
