@@ -84,7 +84,8 @@ struct State {
     // help anyway, since such a crash is not reproducible from startup.
     // Dump the camera history on every external-camera keypress. Diagnostic,
     // off by default: 900 lines a press.
-    bool dumpOnExternalCam = false;
+    bool     dumpOnExternalCam = false;
+    uint32_t dumpCountdown = 0;
 
     Sentinel* sentinel = nullptr;
     uint32_t  framesSeen = 0;
@@ -99,6 +100,15 @@ struct State {
 // has confirmed long before, because a false trip costs them every fix for a
 // session and that is the cost this must not impose casually.
 constexpr uint32_t kSentinelConfirmFrames = 600;
+
+// Frames to wait after an external-camera keypress before dumping the history.
+//
+// About two seconds, which is comfortably past the mode change: the panel-to-
+// scene delay alone has been measured at 2 to 86 frames, and the flash being
+// chased is on the transition itself. The ring is 900 frames, so this still
+// leaves eight seconds of ordinary flight in front of the event to compare
+// against.
+constexpr uint32_t kDumpDelayFrames = 180;
 
 State* g_state = nullptr;
 // One budget per thing that can fail. Shader creation runs on whatever thread
@@ -143,21 +153,30 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
         // Deliberately not part of the toggle: it reports, it does not change
         // anything, so there is no reason for it to follow the fix being off.
         if (g_state->dumpKey.pressed()) dumpCameraRing();
+        // The delayed dump armed by the camera key, above.
+        if (g_state->dumpCountdown > 0 && --g_state->dumpCountdown == 0) {
+            dumpCameraRing();
+        }
         // Told to the gate, not acted on here. These keys are the player's OWN
         // Elite bindings: EDVR does not send them, press them or interfere with
         // them -- it watches for the same press the game gets, so it knows
         // which mode the player just asked for.
         if (g_state->externalCamKey.pressed()) {
             headOffsetGateKeyPressed();
-            // The camera history, captured on the press rather than on a key the
-            // player has to reach for afterwards.
+            // The camera history, triggered by the press but taken AFTER it.
             //
             // Entering and leaving the external camera is reported as flashing,
-            // and it is a transition nobody can press Pause during: the report is
-            // "there was a flash going in and out", by which time the ten seconds
-            // of history are the ten seconds after it. This puts the capture on
-            // the event itself. Off by default -- it writes 900 lines per press.
-            if (g_state->dumpOnExternalCam) dumpCameraRing();
+            // and it is a transition nobody can press Pause during: by the time
+            // they reach that key the ten seconds of history are the ten seconds
+            // after the thing they wanted.
+            //
+            // Dumping ON the press has the same fault in the other direction --
+            // the ring holds the frames BEFORE it, so it would capture ten
+            // seconds of standing still and none of the transition. The delay is
+            // the whole point: two seconds later the ring holds the press, the
+            // mode change and the flash, with eight seconds of ordinary flight
+            // in front of them for comparison.
+            if (g_state->dumpOnExternalCam) g_state->dumpCountdown = kDumpDelayFrames;
         }
         // Reading the view the game is actually on, and telling the gate.
         //
