@@ -72,6 +72,12 @@ typedef vr::EVRCompositorError(*PFN_WaitGetPoses)(void* self,
                                                   vr::TrackedDevicePose_t* gamePoses,
                                                   uint32_t gameCount);
 
+// Frames between a diagnostic keypress and the delayed dump it arms. Held equal
+// to the d3d11 side's kDumpDelayFrames on purpose -- the two logs are read side
+// by side, and a different offset in each would mean subtracting a different
+// number from each before they could be compared at all.
+constexpr uint32_t kPoseDumpDelayFrames = 180;
+
 struct State {
     VTableHook       compositorHook;
     PFN_Submit       realSubmit = nullptr;
@@ -539,15 +545,27 @@ vr::EVRCompositorError hookedWaitGetPoses(void* self,
     // Polled rather than signalled across the shared block: a second channel for
     // a diagnostic keypress would be more machinery than the thing it carries,
     // and the two logs are read together anyway.
-    if (s->poseKeyBound && s->poseDumpKey.pressed()) dumpPoseRing(s, "the history key", 0);
-    // The camera key arms a delayed dump, matching the other side: the ring
-    // holds the frames BEFORE it is written, so taking it on the press would
-    // capture the approach and none of the transition.
+    // The history key dumps twice, and this ring needs the second one MORE than
+    // the camera ring does.
+    //
+    // The verdict here distinguishes a tracking fault from a re-origin by asking
+    // whether the headset RETURNED to where it was or stayed put -- a question
+    // answered entirely by the frames AFTER the step. A step in the last rows of
+    // the ring has no after, so the one capture certain to hold the event is the
+    // one where the test cannot run. Two seconds later it has frames on both
+    // sides and the question is answerable.
+    if (s->poseKeyBound && s->poseDumpKey.pressed()) {
+        dumpPoseRing(s, "the history key", 0);
+        s->poseDumpCountdown = kPoseDumpDelayFrames;
+    }
+    // The camera key arms the same delay, and did first: the ring holds the
+    // frames BEFORE it is written, so taking it on the press would capture the
+    // approach and none of the transition.
     if (s->poseCamBound && s->poseDumpOnCam && s->poseCamKey.pressed()) {
-        s->poseDumpCountdown = 180;
+        s->poseDumpCountdown = kPoseDumpDelayFrames;
     }
     if (s->poseDumpCountdown > 0 && --s->poseDumpCountdown == 0) {
-        dumpPoseRing(s, "your external-camera key", 180);
+        dumpPoseRing(s, "a key you pressed two seconds ago", kPoseDumpDelayFrames);
     }
 
     // The head offset, applied BEFORE the game sees the poses.
