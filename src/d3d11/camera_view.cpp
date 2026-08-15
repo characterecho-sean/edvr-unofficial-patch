@@ -1,5 +1,5 @@
 // GENERATED from src/d3d11/camera_view.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 6da784a6014780ac]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 d971ade966ae184c]
 #include "camera_view.h"
 
 #include <windows.h>
@@ -754,6 +754,28 @@ void cameraViewRequestScan() {
     collectRegions();
 }
 
+// Read a CANDIDATE, without touching the chosen record's fault budget.
+//
+// recordValue exists to read ONE known address every frame, and its budget of
+// eight is sized for that: a handful of failures there means the address is
+// gone. Polling ten candidates through it spends that budget in seconds, and
+// once spent recordValue answers 0xFFFFFFFF for everything -- which the poll
+// below then read as "out of range" and used to disqualify every candidate
+// permanently. Measured: "9 faults reading the chosen record", after which the
+// watcher could never identify anything, so cycling presets did nothing.
+//
+// Speculative reads of addresses we are not yet sure about are a different
+// activity from reading the one we chose, and they get their own accounting.
+uint32_t candidateValue(const uint8_t* rec) {
+    if (!rec) return 0xFFFFFFFFu;
+    uint32_t v = 0xFFFFFFFFu;
+    guarded("camera_view/cand", [&] {
+        const uint8_t* const* anchor = reinterpret_cast<const uint8_t* const*>(rec);
+        if (*anchor != g_s.typePtr) return;
+        v = *reinterpret_cast<const uint32_t*>(rec + g_s.valueOffset);
+    });
+    return v;
+}
 // Watch the candidates for one that behaves like a camera preset.
 //
 // Certifies on the SAME terms as everything else in this codebase: observation,
@@ -770,7 +792,13 @@ void pollCandidates() {
     size_t qualified = 0, qualifiedAt = 0;
     for (size_t i = 0; i < g_s.cands.size(); ++i) {
         State::Cand& c = g_s.cands[i];
-        const uint32_t v = recordValue(c.rec);
+        if (!c.rec) continue;                       // already disqualified
+        const uint32_t v = candidateValue(c.rec);
+        // UNREADABLE IS NOT OUT OF RANGE, and conflating them is what broke
+        // this. 0xFFFFFFFF means the anchor did not match or the read faulted --
+        // the records go briefly quiet while the game rebuilds them, which is
+        // routine -- so the sample is skipped rather than held against it.
+        if (v == 0xFFFFFFFFu) continue;
         // OUT OF RANGE DISQUALIFIES PERMANENTLY. A preset index never leaves
         // 0..view_count; a record that does was never one, and letting it back
         // in after wandering is how a garbage slot earns three "changes".
@@ -779,7 +807,6 @@ void pollCandidates() {
             c.rec = nullptr;
             continue;
         }
-        if (!c.rec) continue;
         if (v != c.last) {
             c.last = v;
             ++c.changes;
