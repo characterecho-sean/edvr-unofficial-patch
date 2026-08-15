@@ -1,5 +1,5 @@
 // GENERATED from src/d3d11/camera_view.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 4c9f9e38755215c8]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 6da784a6014780ac]
 #include "camera_view.h"
 
 #include <windows.h>
@@ -61,6 +61,17 @@ constexpr uint32_t kRescanCooldown = 240;
 // little room without letting unrelated objects a few strides apart be swept
 // into one array.
 constexpr size_t kMaxGap = 2;
+
+// Candidates watched at once, changes needed to be believed, and how often they
+// are read.
+//
+// Three changes because one is noise and two is a coincidence between two
+// records; a player cycling presets produces three in a couple of seconds.
+// Polled every 15 frames -- six times a second is far faster than anybody
+// cycles, and thirty-two qword reads at that rate is nothing.
+constexpr size_t   kMaxCandidates = 32;
+constexpr uint32_t kChangesToCertify = 3;
+constexpr uint32_t kCandPollFrames = 15;
 
 // Consecutive frames the chosen record may fail to read before this concludes
 // the array has actually MOVED.
@@ -142,6 +153,16 @@ struct State {
     uint32_t  cooldown = 0;
     bool      exhaustedNoted = false;
     std::vector<const uint8_t*> records;
+
+    // The watched candidates. See the note in finishScan.
+    struct Cand {
+        const uint8_t* rec;
+        uint32_t last;
+        uint32_t changes;
+    };
+    std::vector<Cand> cands;
+    uint32_t candPoll = 0;
+    bool     candNoted = false;
 
     int       lastView = -1;
     // The record has proven to be somebody else's, so RESCAN -- do not latch.
@@ -558,6 +579,41 @@ void finishScan() {
                 : "");
     }
 
+    // BEHAVIOURAL IDENTIFICATION. Every plausible record becomes a candidate,
+    // and the one that BEHAVES like a camera preset is the one taken.
+    //
+    // A static ordinal cannot be right. Four layouts of the same array have been
+    // recorded inside one build -- 10, 12, 14 and 19 records, with the preset at
+    // slot 11 in the twelve-record form and garbage there in the nineteen. Both
+    // readings of "ordinal 11", counted over records and over slots, point at
+    // the same wrong place in the 19-record capture, so neither is the rule.
+    //
+    // What a preset does is unmistakable: it holds a small integer, it stays in
+    // range, and it CHANGES when the player cycles cameras. Nothing else in that
+    // array does all three. So the candidates are watched instead of chosen, and
+    // this certifies like every other invariant here -- on observation, with
+    // "do not know" as the answer until the evidence arrives, and with a refusal
+    // rather than a guess when more than one candidate qualifies.
+    //
+    // The ordinal survives as a HINT and only as a tie-break, which is what it
+    // has always deserved: it was measured twice and then contradicted.
+    g_s.cands.clear();
+    for (const uint8_t* rec : g_s.records) {
+        const uint32_t v = recordValue(rec);
+        if (v > g_s.plausibleMax) continue;
+        if (g_s.cands.size() >= kMaxCandidates) break;
+        g_s.cands.push_back({rec, v, 0});
+    }
+    if (!g_s.cands.empty()) {
+        Log::get().note(
+            "camera view: watching %zu candidate record(s) to see which one "
+            "behaves like a camera preset -- a small number that stays in range "
+            "and CHANGES when you cycle cameras. Cycle through your presets once "
+            "and it will identify itself. Until then the preset is unknown and "
+            "the head offset stays off.",
+            g_s.cands.size());
+    }
+
     if (candidates.size() == 1) {
         g_s.chosen = runs[candidates[0]].base + g_s.ordinal * kStride;
         g_s.usable = true;
@@ -698,6 +754,68 @@ void cameraViewRequestScan() {
     collectRegions();
 }
 
+// Watch the candidates for one that behaves like a camera preset.
+//
+// Certifies on the SAME terms as everything else in this codebase: observation,
+// a refusal to guess between equals, and "do not know" as a legitimate answer.
+// If two records both change three times we have learned that we cannot tell
+// them apart, which is information -- guessing between them would put a wrong
+// number into the head-offset gate and move somebody's viewpoint on the strength
+// of it.
+void pollCandidates() {
+    if (g_s.usable || g_s.cands.empty()) return;
+    if (++g_s.candPoll < kCandPollFrames) return;
+    g_s.candPoll = 0;
+
+    size_t qualified = 0, qualifiedAt = 0;
+    for (size_t i = 0; i < g_s.cands.size(); ++i) {
+        State::Cand& c = g_s.cands[i];
+        const uint32_t v = recordValue(c.rec);
+        // OUT OF RANGE DISQUALIFIES PERMANENTLY. A preset index never leaves
+        // 0..view_count; a record that does was never one, and letting it back
+        // in after wandering is how a garbage slot earns three "changes".
+        if (v > g_s.plausibleMax) {
+            c.changes = 0;
+            c.rec = nullptr;
+            continue;
+        }
+        if (!c.rec) continue;
+        if (v != c.last) {
+            c.last = v;
+            ++c.changes;
+        }
+        if (c.changes >= kChangesToCertify) {
+            ++qualified;
+            qualifiedAt = i;
+        }
+    }
+
+    if (qualified == 1) {
+        g_s.chosen = g_s.cands[qualifiedAt].rec;
+        g_s.usable = true;
+        g_s.readFaults = 0;
+        g_s.readFaultsNoted = false;
+        Log::get().note(
+            "camera view: identified by behaviour -- the record at %p changed "
+            "value %u times while staying in range, and nothing else in the "
+            "array did. That is your camera preset, and it reads %u now. Found "
+            "by watching rather than by counting to a fixed position, because "
+            "four different array layouts have been seen in one game build.",
+            (const void*)g_s.chosen, g_s.cands[qualifiedAt].changes,
+            recordValue(g_s.chosen));
+        return;
+    }
+
+    if (qualified > 1 && !g_s.candNoted) {
+        g_s.candNoted = true;
+        Log::get().note(
+            "camera view: %zu records changed like a camera preset, so which one "
+            "it is cannot be told from here and the preset stays unknown. This is "
+            "a refusal rather than a failure -- guessing would move your viewpoint "
+            "on the strength of the wrong number. Please report this log.",
+            qualified);
+    }
+}
 void cameraViewTick(uint32_t eyeDraws) {
     // Attempts spent before the game was being played do not count.
     //
@@ -706,6 +824,8 @@ void cameraViewTick(uint32_t eyeDraws) {
     // attempts on an empty heap and have none left when they start playing. A
     // drawn scene is proof the game is past the menu: thousands of draws into
     // the eye textures, against about twenty for the menu.
+    pollCandidates();
+
     if (!g_s.sawGameplay && eyeDraws > 1000) {
         g_s.sawGameplay = true;
         if (g_s.attempts > 0 && !g_s.usable) {
