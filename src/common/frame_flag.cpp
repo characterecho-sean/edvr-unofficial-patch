@@ -1,5 +1,5 @@
 // GENERATED from src/common/frame_flag.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 dbd2e85cfb7f945e]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 4735533268d70aad]
 #include "frame_flag.h"
 
 #include <windows.h>
@@ -41,6 +41,25 @@ struct Shared {
     // the name (2^32 frames is over a year at 90 Hz), and it compares with a
     // plain !=.
     volatile LONG externalCamStamp;
+    // holdFrames  frames the openvr half should decline to submit, counting
+    //             down, set by d3d11 when the player presses a key that starts
+    //             a transition
+    //
+    // NOT a detection. Every other route in this file is one half telling the
+    // other what it INFERRED; this is the player telling us directly. They
+    // pressed the external-camera key, so a transition is starting -- there is
+    // nothing to detect and nothing to get wrong about which mode we are in.
+    //
+    // It exists because during that transition Elite draws several frames from
+    // somewhere the player is not, and no amount of detection helps: withholding
+    // shows the PREVIOUS frame, and by the time a detector has recognised a bad
+    // frame the previous one is already bad too. Starting the hold at the press
+    // means the frame being held is the last good one before any of it.
+    //
+    // Separate from `flag` because `flag` is cleared at every WaitGetPoses by
+    // design -- one detection must not suppress the frames after it -- and this
+    // is the opposite: a deliberate run, counted down by the reader.
+    volatile LONG holdFrames;
 };
 
 // Per PROCESS, not per logon session.
@@ -57,10 +76,11 @@ struct Shared {
 // The name is built once, at first use. The two DLLs are in the same process,
 // so the channel between them is unaffected.
 //
-// _v4 because the struct changed again -- externalCamStamp was added. A
-// mismatched pair from different builds must not agree on a layout they
-// disagree about, and a d3d11.dll writing a fourth field into a three-field
-// mapping made by an older openvr_api.dll would write past the end of it.
+// _v5 because the struct changed again -- holdFrames was added. _v4 was
+// externalCamStamp, _v3 the field before that. A mismatched pair from different
+// builds must not agree on a layout they disagree about, and a d3d11.dll writing
+// a fifth field into a four-field mapping made by an older openvr_api.dll would
+// write past the end of it.
 //
 // The version bump matters more for this field than for the last one. An old
 // openvr_api.dll paired with a new d3d11.dll would find no stamp at all, read
@@ -71,7 +91,7 @@ const wchar_t* mappingName() {
     static wchar_t name[64];
     static bool built = false;
     if (!built) {
-        _snwprintf_s(name, _TRUNCATE, L"Local\\edvr_glitch_frame_v4_%lu",
+        _snwprintf_s(name, _TRUNCATE, L"Local\\edvr_glitch_frame_v5_%lu",
                      GetCurrentProcessId());
         built = true;
     }
@@ -145,6 +165,25 @@ bool externalCameraOnFoot() {
     // wrong answer here does not expire on its own -- which is what
     // externalCameraOnFootLive is for.
     return s && InterlockedCompareExchange(&s->externalCam, 0, 0) != 0;
+}
+
+void requestSubmitHold(uint32_t frames) {
+    Shared* s = map();
+    if (!s) return;
+    // Set, not added. A second press during a hold restarts it rather than
+    // extending it: two transitions in quick succession is one event as far as
+    // the player is concerned, and adding would let a rapid double-press hold
+    // for twice as long as either press asked for.
+    InterlockedExchange(&s->holdFrames, static_cast<LONG>(frames));
+}
+
+bool takeSubmitHoldFrame() {
+    Shared* s = map();
+    if (!s) return false;
+    const LONG n = InterlockedCompareExchange(&s->holdFrames, 0, 0);
+    if (n <= 0) return false;
+    InterlockedDecrement(&s->holdFrames);
+    return true;
 }
 
 bool externalCameraEverPublished() {

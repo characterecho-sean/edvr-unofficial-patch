@@ -105,6 +105,13 @@ struct State {
     // shared, so this file and its private fork cannot drift on it.
     SubmitPairLatch pairLatch;
 
+    // This frame is inside a hold the player asked for by pressing their
+    // external-camera key. Taken at WaitGetPoses, which is the frame boundary,
+    // so it applies to the NEXT frame's submits -- the same place and the same
+    // reasoning as the pair latch's reset.
+    bool     holdThisFrame = false;
+    uint32_t holdFramesSeen = 0;
+
     // Refused this session, so a SECOND compositor request does not sail past.
     //
     // clearTrip() resets the sentinel in memory as well as on disk, so after a
@@ -200,7 +207,12 @@ vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
     // Only once validated: a hook that has not proved it is on the right slot
     // has no business withholding anything.
     // Sampled once per frame, at whichever eye arrives first. See SubmitPairLatch.
-    if (s->validated && s->pairLatch.verdict(glitchFrameMarked())) {
+    //
+    // The hold is ORed in at the same sample, so it goes through the same latch
+    // and both eyes agree about it too. A hold that split a pair would be the
+    // one-eye-behind-the-other failure the latch exists to prevent, arriving by
+    // a different door.
+    if (s->validated && s->pairLatch.verdict(glitchFrameMarked() || s->holdThisFrame)) {
         ++s->framesWithheld;
         if (s->notesLeft > 0) {
             --s->notesLeft;
@@ -253,6 +265,23 @@ vr::EVRCompositorError hookedWaitGetPoses(void* self,
     clearGlitchFrame();
     // ...and where the next frame's pair verdict starts undecided.
     s->pairLatch.reset();
+
+    // One frame off the hold, if one is running. Consumed here rather than at
+    // Submit because Submit runs twice a frame and this is a count of FRAMES.
+    const bool wasHolding = s->holdThisFrame;
+    s->holdThisFrame = takeSubmitHoldFrame();
+    if (s->holdThisFrame) {
+        ++s->holdFramesSeen;
+    } else if (wasHolding) {
+        Log::get().note(
+            "transition hold: %u frame(s) held across the transition you asked "
+            "for with the external-camera key. If that looked like a freeze "
+            "rather than a steady image, lower hold_frames_on_external_cam; if "
+            "the wrong viewpoint still showed, raise it. The camera history's "
+            "millisecond column is what says which.",
+            s->holdFramesSeen);
+        s->holdFramesSeen = 0;
+    }
 
     // The head offset, applied BEFORE the game sees the poses.
     //

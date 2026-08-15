@@ -1,5 +1,5 @@
 // GENERATED from src/common/frame_flag.h in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 c11f21f7b44ae7d4]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 7a73700fd8052ba0]
 // A one-bit channel between the two proxies, for the frame that must not be
 // shown.
 //
@@ -115,6 +115,30 @@ bool externalCameraOnFootLive(uint32_t maxAgeFrames);
 // seconds in, because until the player first enters the camera the gate is
 // publishing "no" continuously and the two look identical from here.
 bool externalCameraEverPublished();
+
+// Ask the openvr half to decline the next `frames` frames.
+//
+// NOT A DETECTION, and that is the whole point of it. Everything else across
+// this channel is one half telling the other what it inferred; this is the
+// player saying so. They pressed the external-camera key, so a transition is
+// starting -- there is nothing to recognise and nothing to be wrong about.
+//
+// It exists because during that transition Elite draws several frames from
+// somewhere the player is not -- confirmed with fix.transition_flash = 0, so it
+// is the game's and not ours -- and detection cannot help: withholding shows the
+// PREVIOUS frame, and by the time a detector has recognised a bad one, the
+// previous frame is already bad too. Starting at the press means the frame being
+// held is the last good one before any of it.
+//
+// The cost is unmeasured and is the reason this ships off by default. One
+// withheld frame has measured 74-82 ms because the compositor waits for a submit
+// that never comes; whether a RUN of them costs that each or settles into steady
+// reprojection is not known, and the difference is between a smooth hold and a
+// freeze. The ring's timing column is the readout.
+void requestSubmitHold(uint32_t frames);
+
+// One frame of that hold, consumed by the reader. True while the hold is live.
+bool takeSubmitHoldFrame();
 
 // ONE VERDICT PER FRAME, over a channel that carries no frame identity.
 //

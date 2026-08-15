@@ -5,6 +5,7 @@
 #include <dxgi1_2.h>
 
 #include "../common/config.h"
+#include "../common/frame_flag.h"
 #include "../common/guard.h"
 #include "../common/hotkey.h"
 #include "head_offset_gate.h"
@@ -86,6 +87,8 @@ struct State {
     // off by default: 900 lines a press.
     bool     dumpOnExternalCam = false;
     uint32_t dumpCountdown = 0;
+    // Frames to hold across an external-camera transition. 0 = off.
+    uint32_t holdFramesOnExternalCam = 0;
 
     Sentinel* sentinel = nullptr;
     uint32_t  framesSeen = 0;
@@ -177,6 +180,15 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
             // mode change and the flash, with eight seconds of ordinary flight
             // in front of them for comparison.
             if (g_state->dumpOnExternalCam) g_state->dumpCountdown = kDumpDelayFrames;
+            // Hold the last good frame across the transition.
+            //
+            // Asked for on the PRESS, which is the earliest possible moment and
+            // the only one that is not a guess: the player has just told us a
+            // transition is starting. Everything the detector does downstream of
+            // this is inference; this is not.
+            if (g_state->holdFramesOnExternalCam > 0) {
+                requestSubmitHold(g_state->holdFramesOnExternalCam);
+            }
         }
         // Reading the view the game is actually on, and telling the gate.
         //
@@ -229,6 +241,8 @@ State& ensureState() {
         g_state->externalCamKey.setBinding(Config::get().getString("hotkey.external_camera", "").c_str());
         g_state->dumpOnExternalCam =
             Config::get().getBool("advanced.dump_camera_on_external_cam", false);
+        g_state->holdFramesOnExternalCam = static_cast<uint32_t>(
+            Config::get().getIntInRange("advanced.hold_frames_on_external_cam", 0, 0, 120));
         // A CONFIGURED key, not a pressed one. The gate refuses to arm without
         // this, so a fresh install with nothing bound is genuinely inert rather
         // than falling back to a heuristic that cannot tell the external camera
