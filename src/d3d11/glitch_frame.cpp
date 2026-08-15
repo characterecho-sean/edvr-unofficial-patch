@@ -1,5 +1,5 @@
 // GENERATED from src/d3d11/glitch_frame.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 6e25368f0d3c8b94]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 e14f8111f3d69fd9]
 #include "glitch_frame.h"
 
 #include <windows.h>
@@ -239,6 +239,21 @@ constexpr uint32_t kDefaultDwellFrames = 20;
 // Forty lines spread at least 120 frames apart covers the transitions a player
 // makes in a session without covering the steady-state noise between them, and
 // the running totals line already carries the counts.
+// The judder guard: withholds allowed inside one second of frames.
+//
+// max_consecutive bounds a RUN and says nothing about density, and density is
+// what judder actually is. Measured 2026-08-15 at a 2000-unit threshold: 16
+// frames withheld inside 42 -- 38% of them, for half a second -- with no run
+// ever exceeding two, so the consecutive limit passed the whole burst. The
+// player reported judder that had not been there before.
+//
+// Four in ninety frames. A real transition costs one or two, so this is well
+// clear of the thing the fix exists for, and far below the density that reads
+// as stutter.
+constexpr uint32_t kDefaultDensityMax = 4;
+constexpr uint32_t kDensityWindow = 90;
+constexpr uint32_t kDensityHistory = 16;
+
 constexpr uint32_t kLetThroughNotes = 40;
 constexpr uint32_t kLetThroughGap = 120;
 
@@ -256,7 +271,48 @@ struct RingEntry {
     uint32_t frame;
     uint32_t eyeDraws;
     float    pos[3];
+
+    // WHAT THE DETECTOR DECIDED ABOUT THIS FRAME, carried on the frame itself.
+    //
+    // The reason a jump was let through used to be reported only as a sampled
+    // log line, capped at forty a session -- and a session near a planet
+    // surface spends that cap in its first minute on repeating cascade
+    // magnitudes. Measured 2026-08-15: a flash was captured in the ring at
+    // f21941 and not one let-through line survived to describe it, because the
+    // budget was gone long before. A sample cannot be relied on to cover the
+    // one frame somebody pressed a key about.
+    //
+    // Stored per frame instead, and printed only when the ring is dumped: no
+    // rate limit is needed because nothing is written until somebody asks, and
+    // the answer is then guaranteed to be there for the frame they care about.
+    uint8_t  verdict;
 };
+
+// What ended up in RingEntry::verdict. Order is the order the detector tests
+// them, so the name matches the branch that produced it.
+enum RingVerdict : uint8_t {
+    kVerdictQuiet = 0,       // no jump this frame
+    kVerdictWithheld,        // jumped, nothing excused it, frame withheld
+    kVerdictPark,            // landed on a camera proven to sit in one place
+    kVerdictShell,           // landed at a distance proven to be a render pass
+    kVerdictSeparation,      // this jump size has happened before
+    kVerdictCooldown,        // still settling after a recent jump
+    kVerdictConsecutive,     // too many in a row already
+    kVerdictDensity,         // too many in the last second, however spaced
+};
+
+const char* ringVerdictName(uint8_t v) {
+    switch (v) {
+        case kVerdictWithheld:    return "WITHHELD";
+        case kVerdictPark:        return "let through: a parked camera";
+        case kVerdictShell:       return "let through: a known distance";
+        case kVerdictSeparation:  return "let through: a repeating jump size";
+        case kVerdictCooldown:    return "let through: still settling";
+        case kVerdictConsecutive: return "let through: too many in a row";
+        case kVerdictDensity:     return "let through: too many in the last second";
+        default:                  return "";
+    }
+}
 
 struct State {
     // enabled    the fix may withhold frames
@@ -387,6 +443,14 @@ struct State {
     float      parkUnits = kDefaultParkUnits;
     uint32_t   dwellFrames = kDefaultDwellFrames;
     uint32_t   letThroughNotes = 0;
+    // This frame's verdict, set at the decision and consumed at the boundary.
+    uint8_t    verdictThisFrame = kVerdictQuiet;
+    // Frame numbers of recent withholds, for the density guard. A tiny ring:
+    // only the last few matter, and anything older than the window is ignored
+    // whether it is still in here or not.
+    uint32_t   withheldAt[kDensityHistory] = {};
+    uint32_t   withheldHead = 0;
+    uint32_t   densityMax = kDefaultDensityMax;
     uint32_t   lastLetThroughFrame = 0;
 
     uint32_t   suppressed = 0;
@@ -975,6 +1039,8 @@ void installGlitchFrameFix() {
     // in the wide gap between separates them. The floor of 8 keeps it clear of
     // the cascades; the ceiling of 120 keeps it under what the view does, since
     // a value above that would never fire and would silently restore the bug.
+    s.densityMax = static_cast<uint32_t>(cfg.getIntInRange(
+        "advanced.transition_flash_max_per_second", kDefaultDensityMax, 1, 45));
     s.dwellFrames = static_cast<uint32_t>(cfg.getIntInRange(
         "advanced.transition_flash_dwell_frames", kDefaultDwellFrames, 8, 120));
     s.bufferBytes = static_cast<uint32_t>(cfg.getInt("advanced.camera_buffer_bytes", 5376));
@@ -1263,8 +1329,19 @@ void glitchFrameObserve(const void* data, uint32_t bytes, const void* resource) 
     // ONLY FOR JUMPS THAT CLEARED THE THRESHOLD, and rate-limited hard. Every
     // suppressed cascade frame is a jump -- 1,344 of them in one session -- and
     // a line each would bury the log it is meant to make readable.
+    // How many frames we have withheld inside the last second.
+    //
+    // Counted over the ring rather than kept as a running total, because a
+    // total would need decaying and a decay is a second thing to get wrong.
+    uint32_t recent = 0;
+    for (uint32_t i = 0; i < kDensityHistory; ++i) {
+        const uint32_t at = s->withheldAt[i];
+        if (at != 0 && s->frameNo >= at && s->frameNo - at < kDensityWindow) ++recent;
+    }
+
     const bool willMark = jumped && !s->suppressedThisFrame && s->cooldown == 0 &&
-                          s->consecutive < s->maxConsecutive;
+                          s->consecutive < s->maxConsecutive &&
+                          recent < s->densityMax;
     if (jumped && !willMark) {
         if (s->letThroughNotes < kLetThroughNotes &&
             s->frameNo - s->lastLetThroughFrame >= kLetThroughGap) {
@@ -1281,7 +1358,20 @@ void glitchFrameObserve(const void* data, uint32_t bytes, const void* resource) 
         }
     }
 
+    // The verdict, recorded on the frame rather than sampled into the log.
+    // Same order as the tests above, so the name matches the branch.
+    s->verdictThisFrame =
+        !jumped                            ? kVerdictQuiet
+        : willMark                         ? kVerdictWithheld
+        : s->parkSuppressedThisFrame       ? kVerdictPark
+        : s->radiusSuppressedThisFrame     ? kVerdictShell
+        : residualIsKnownSeparation(resid) ? kVerdictSeparation
+        : s->cooldown > 0                  ? kVerdictCooldown
+        : s->consecutive >= s->maxConsecutive ? kVerdictConsecutive
+                                           : kVerdictDensity;
     if (willMark) {
+        s->withheldAt[s->withheldHead % kDensityHistory] = s->frameNo;
+        ++s->withheldHead;
         markGlitchFrame();
     } else {
         // Withdraw, do not clear: a further candidate later in the same frame
@@ -1308,10 +1398,12 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
             e.qpc = static_cast<uint64_t>(qpcNow());
             e.frame = s->frameNo;
             e.eyeDraws = eyeDraws;
+        e.verdict = s->verdictThisFrame;
             for (uint32_t a = 0; a < 3; ++a) e.pos[a] = s->frameFarPos[a];
             ++s->ringHead;
         }
         s->frameFarMag2 = -1.0f;
+        s->verdictThisFrame = kVerdictQuiet;
         s->jumpedThisFrame = false;
         s->suppressedThisFrame = false;
         s->radiusSuppressedThisFrame = false;
@@ -1393,10 +1485,12 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
             e.qpc = static_cast<uint64_t>(qpcNow());
             e.frame = s->frameNo;
             e.eyeDraws = eyeDraws;
+        e.verdict = s->verdictThisFrame;
             for (uint32_t a = 0; a < 3; ++a) e.pos[a] = s->frameFarPos[a];
             ++s->ringHead;
         }
         s->frameFarMag2 = -1.0f;
+        s->verdictThisFrame = kVerdictQuiet;
         s->jumpedThisFrame = false;
         s->suppressedThisFrame = false;
         s->radiusSuppressedThisFrame = false;
@@ -1594,6 +1688,7 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
         e.qpc = static_cast<uint64_t>(qpcNow());
         e.frame = s->frameNo;
         e.eyeDraws = eyeDraws;
+        e.verdict = s->verdictThisFrame;
         for (uint32_t a = 0; a < 3; ++a) e.pos[a] = s->frameFarPos[a];
         ++s->ringHead;
     }
@@ -1667,6 +1762,7 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
     s->radiusSuppressedThisFrame = false;
     s->parkSuppressedThisFrame = false;
     s->frameFarMag2 = -1.0f;
+    s->verdictThisFrame = kVerdictQuiet;
 }
 
 void dumpCameraRing(const char* trigger, uint32_t framesAfterPress) {
@@ -1726,8 +1822,9 @@ void dumpCameraRing(const char* trigger, uint32_t framesAfterPress) {
             freq ? static_cast<double>(static_cast<int64_t>(newest - e.qpc)) * 1000.0 /
                        static_cast<double>(freq)
                  : 0.0;
-        Log::get().note("CAM %8.1fms f%-7u eye=%-5u pos=(%+.2f %+.2f %+.2f)",
-                        -msAgo, e.frame, e.eyeDraws, e.pos[0], e.pos[1], e.pos[2]);
+        Log::get().note("CAM %8.1fms f%-7u eye=%-5u pos=(%+.2f %+.2f %+.2f) %s",
+                        -msAgo, e.frame, e.eyeDraws, e.pos[0], e.pos[1], e.pos[2],
+                        ringVerdictName(e.verdict));
     }
     // WAS ANY OF THIS OURS? The question every one of these dumps has been
     // opened to answer, worked out by hand every time.

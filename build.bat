@@ -326,7 +326,10 @@ if errorlevel 1 (
 
 echo.
 echo [edvr] To install: copy build\d3d11.dll and edvr.ini next to
-echo        EliteDangerous64.exe. See README.md.
+echo        EliteDangerous64.exe, and build\openvr_api.dll into
+echo        Openvr\win64, replacing the game's file of that name --
+echo        the original must already be renamed openvr_api_orig.dll.
+echo        The two halves do NOT go in the same place. See README.md.
 echo.
 echo [edvr] To check the build without the game:
 echo        build\smoke.exe build\d3d11.dll
