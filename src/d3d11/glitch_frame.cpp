@@ -1,5 +1,5 @@
 // GENERATED from src/d3d11/glitch_frame.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 e9e8fa469293d488]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 4943f351615bdc9a]
 #include "glitch_frame.h"
 
 #include <windows.h>
@@ -1260,6 +1260,14 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
     if (s->suppressedThisFrame) {
         // Deliberately empty. The track, the return test and the cooldown all
         // carry on from the last camera that WAS the view.
+    } else if (s->awaitingReturn && s->markedThisFrame) {
+        // STILL IN THE SAME GLITCH. This frame was judged off the path and
+        // withheld on its own merits, so the event is not over and this is not
+        // the moment to decide it was a change of reference frame. The run is
+        // bounded by max_consecutive, which is the setting that exists to say
+        // how long a glitch is allowed to be; the branch below ends it as soon
+        // as a frame is NOT withheld, either because it came back or because the
+        // run hit its cap.
     } else if (s->awaitingReturn && s->frameFarMag2 >= 0.0f) {
         s->awaitingReturn = false;
         float back = 0.0f;
@@ -1310,10 +1318,32 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
             s->preJumpPrev2[a] = s->camPrev2[a];
         }
         s->awaitingReturn = true;
-        // The path is broken, so the prediction is discarded and rebuilt from
-        // the next two frames. Keeping it anchored to the pre-jump position left
-        // every following frame far from a stale guess and fired on all of them.
-        s->camPrevValid = 0;
+        // THE PREDICTION IS KEPT, and this is the change that makes a two-frame
+        // glitch catchable at all.
+        //
+        // It used to be discarded here, which meant the frame after a withhold
+        // could not be judged: glitchFrameObserve refuses to act below
+        // camPrevValid 2. This file's own comment on transition_flash_max_
+        // consecutive admitted the consequence -- "the cap is also unreachable
+        // above 1 in practice: a marked frame resets the camera history, so the
+        // next frame cannot be evaluated and a run of two never forms". A
+        // documented setting that could never do anything, and a whole class of
+        // glitch that could never be caught.
+        //
+        // The class is real and a player described it exactly: "below the planet
+        // surface for a frame or two before being positioned correctly". One
+        // frame withheld, the second shown, and the flash survives the fix.
+        //
+        // The bad frame does NOT enter the track -- camPrev and camPrev2 keep
+        // their pre-jump values -- so the next frame is judged against the path
+        // the view was on before the glitch, which is exactly the question worth
+        // asking of it. The prediction is one frame stale by then, worth about
+        // one frame of ordinary motion against a threshold in the thousands.
+        //
+        // The reason it was discarded is still real and is now handled by the
+        // thing built for it: anchoring to a stale guess once withheld 44 frames
+        // instead of 2. `consecutive` caps the run at max_consecutive, and the
+        // rebase below ends it for good when the camera has genuinely moved.
     } else if (s->frameFarMag2 >= 0.0f) {
         for (uint32_t a = 0; a < 3; ++a) {
             s->camPrev2[a] = s->camPrev[a];

@@ -1,5 +1,5 @@
 // GENERATED from tools/glitch_test/glitch_test.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 da7c6b8b2009bcbd]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 ef05278b83d34dc6]
 // glitch_test -- drives the transition-flash detector without the game.
 //
 // The port of glitch_frame.cpp into this repo compiled, linked, and passed
@@ -820,6 +820,14 @@ int main(int argc, char** argv) {
             if ((i % 5) == 4) frame(b, kAux[0], kAux[1], kAux[2]);
             else              frame(b, nx, 0.0f, 0.0f);
         }
+        // CLEAR THE COOLDOWN THE LEARNING PHASE LEFT BEHIND, before measuring
+        // anything. Until the park certifies, the alternation is marked like any
+        // other jump, and each of those stands the detector down for 120 frames.
+        // Measuring inside that window makes "costs no frames" true for the
+        // wrong reason -- it was true here for exactly that reason until the
+        // excursion assertion below started failing and gave it away.
+        for (uint32_t i = 0; i < 200; ++i) { nx += 7.0f; frame(b, nx, 0.0f, 0.0f); }
+
         // It is recognised now: alternating onto it costs nothing.
         uint32_t cost = 0;
         for (uint32_t i = 0; i < 30; ++i) {
@@ -833,13 +841,63 @@ int main(int argc, char** argv) {
         // AND THE DETECTOR CAN STILL SEE. A genuine one-frame excursion, in the
         // middle of that alternation, must still be caught -- which it cannot be
         // if the alternation has stood it down.
+        //
+        // Deliberately enormous -- radius and residual both about 1.5 million,
+        // clear of every magnitude and every shell any earlier fixture in this
+        // file has taught the detector. A smaller one kept colliding with them,
+        // and a collision here reads as blindness when it is the opposite.
         nx += 7.0f;
-        const bool caught = frame(b, nx, 11000.0f, -6000.0f);
+        const bool caught = frame(b, nx, 1200000.0f, -900000.0f);
         check("...and a real excursion during it is still caught", caught,
               "the alternation blinded the detector -- suppressing the mark is "
               "not enough, the rebase has to go too");
         nx += 7.0f;
         frame(b, nx, 0.0f, 0.0f);
+    }
+
+    // --- 7k. A glitch that lasts TWO frames --------------------------------
+    //
+    // "Below the planet surface for a frame or two before being positioned
+    // correctly" -- a player describing the flash that survived every fix so
+    // far. One frame withheld, the second shown, and the flash remains.
+    //
+    // transition_flash_max_consecutive has shipped at 2 since the beginning and
+    // has never once been reachable: a marked frame discarded the prediction, so
+    // the frame after a withhold could not be judged at all. This file's own
+    // comment on the setting said so.
+    settle(b, x, 150);
+    {
+        uint32_t caught = 0;
+        // Two consecutive frames off the path, then back.
+        x += 30.0f;
+        if (frame(b, x, 21000.0f, -9000.0f)) ++caught;
+        x += 30.0f;
+        if (frame(b, x, 21500.0f, -9200.0f)) ++caught;
+        x += 30.0f;
+        const bool third = frame(b, x, 0.0f, 0.0f);
+        check("both frames of a two-frame glitch are withheld", caught == 2,
+              std::to_string(caught) + " of 2 withheld -- the frame after a "
+              "withhold is not being judged at all");
+        check("...and the frame it returns on is not", !third,
+              "the run ran past the excursion");
+        settle(b, x, 150);
+    }
+
+    // AND THE RUN IS STILL BOUNDED. A camera that leaves and stays away is a
+    // change of reference frame, not a glitch, and must not be withheld
+    // indefinitely -- anchoring to a stale prediction once withheld 44 frames
+    // instead of 2, which is the reason the prediction used to be discarded.
+    {
+        uint32_t run = 0;
+        for (uint32_t i = 0; i < 40; ++i) {
+            x += 30.0f;
+            if (frame(b, x + 60000.0f, 40000.0f, 0.0f)) ++run;
+        }
+        check("a camera that leaves and stays is not withheld indefinitely",
+              run <= 2,
+              std::to_string(run) + " of 40 withheld after the reference frame "
+              "moved -- max_consecutive is not bounding the run");
+        settle(b, x, 150);
     }
 
     // --- 8. The field replay ----------------------------------------------
