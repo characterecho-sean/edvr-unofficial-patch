@@ -298,7 +298,9 @@ of the panel's position if you change the distance, and — for the transition
 flash — reading a constant buffer the game has already filled and, on the rare
 frame drawn from the wrong place, not forwarding one call to SteamVR. That read
 is camera state, not gameplay state; it never writes to the buffer it reads, and
-the only action it can take is to not forward a call.
+the only action it can take is to not forward a call — or to hand SteamVR the
+game's own previous frame in its place: a copy EDVR keeps of the last frame it
+forwarded, always the game's content, never EDVR's.
 
 **Two fixes do more, and each is described in full:** the resolution fix
 (below) rewrites twelve numbers in the game's code; Explorer Cam

@@ -1,5 +1,5 @@
 // GENERATED from tools/openvr_smoke/openvr_smoke.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 432d462bae9afd2e]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 e09eb3696fc9489c]
 // openvr_smoke -- checks the openvr proxy's startup path without the game.
 //
 // The thing under test is that the proxy does NOT load the real openvr_api.dll
@@ -25,13 +25,16 @@
 //
 // Usage: openvr_smoke.exe <dir containing openvr_api.dll and openvr_api_orig.dll>
 #include <windows.h>
+#include <d3d11.h>
 
 #include <cstdio>
 #include <cstring>
+#include <vector>
 
 #include "../../src/common/frame_flag.h"
 #include "../../src/common/hotkey.h"
 #include "../../src/common/guard.h"
+#include "../../src/openvr/resubmit_shadow.h"
 
 namespace {
 
@@ -219,6 +222,175 @@ int submitPairChecks() {
 
     if (bad == 0)
         printf("  ok    both eyes of a frame get the same verdict\n");
+    return bad;
+}
+
+// The resubmit shadow: a withhold hands SteamVR the game's own PREVIOUS
+// frame, never the live one and never EDVR-authored pixels (1f).
+//
+// Driven against a real D3D11 device (WARP, so no GPU and no headset is
+// needed) with textures whose bytes are known, because the property under
+// test is about CONTENTS: the substitute must hold what was last forwarded,
+// a withheld frame's content must never reach it, and a shape change must
+// fall back to classic withholding rather than submit a stale-shaped copy.
+int resubmitChecks() {
+    int bad = 0;
+
+    ID3D11Device* dev = nullptr;
+    ID3D11DeviceContext* ctx = nullptr;
+    if (FAILED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0,
+                                 nullptr, 0, D3D11_SDK_VERSION, &dev, nullptr,
+                                 &ctx)) ||
+        !dev || !ctx) {
+        // WARP ships with Windows 8+; failing to create it is a broken machine,
+        // not an acceptable skip -- a skipped cell would report a fix as
+        // covered that no test had touched.
+        printf("  FAIL  could not create a WARP device to test the resubmit "
+               "shadow against\n");
+        return 1;
+    }
+
+    auto makeTex = [&](uint32_t side, uint8_t fill) {
+        D3D11_TEXTURE2D_DESC d{};
+        d.Width = side;
+        d.Height = side;
+        d.MipLevels = 1;
+        d.ArraySize = 1;
+        d.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        d.SampleDesc.Count = 1;
+        d.Usage = D3D11_USAGE_DEFAULT;
+        d.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+        std::vector<uint8_t> bytes(static_cast<size_t>(side) * side * 4, fill);
+        D3D11_SUBRESOURCE_DATA init{};
+        init.pSysMem = bytes.data();
+        init.SysMemPitch = side * 4;
+        ID3D11Texture2D* t = nullptr;
+        dev->CreateTexture2D(&d, &init, &t);
+        return t;
+    };
+    auto firstByte = [&](void* tex, uint32_t side, uint8_t* out) {
+        D3D11_TEXTURE2D_DESC d{};
+        d.Width = side;
+        d.Height = side;
+        d.MipLevels = 1;
+        d.ArraySize = 1;
+        d.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        d.SampleDesc.Count = 1;
+        d.Usage = D3D11_USAGE_STAGING;
+        d.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        ID3D11Texture2D* staging = nullptr;
+        if (FAILED(dev->CreateTexture2D(&d, nullptr, &staging)) || !staging)
+            return false;
+        ctx->CopyResource(staging, static_cast<ID3D11Texture2D*>(tex));
+        D3D11_MAPPED_SUBRESOURCE map{};
+        bool ok = false;
+        if (SUCCEEDED(ctx->Map(staging, 0, D3D11_MAP_READ, 0, &map))) {
+            *out = static_cast<const uint8_t*>(map.pData)[0];
+            ctx->Unmap(staging, 0);
+            ok = true;
+        }
+        staging->Release();
+        return ok;
+    };
+
+    ID3D11Texture2D* texA = makeTex(64, 0xAA);   // the frame that gets forwarded
+    ID3D11Texture2D* texB = makeTex(64, 0xBB);   // the live (withheld) frame
+    ID3D11Texture2D* texC = makeTex(128, 0xCC);  // a shape change
+    if (!texA || !texB || !texC) {
+        printf("  FAIL  could not create the resubmit test textures\n");
+        if (texA) texA->Release();
+        if (texB) texB->Release();
+        if (texC) texC->Release();
+        ctx->Release();
+        dev->Release();
+        return 1;
+    }
+
+    edvr::resubmitShadowConfigure();
+
+    // Before anything was forwarded, a withhold has nothing to hand over --
+    // classic withholding, which is the never-worse-than-before floor.
+    if (edvr::resubmitShadowForWithhold(0, texB) != nullptr) {
+        printf("  FAIL  a substitute was offered before any frame had been "
+               "forwarded\n");
+        ++bad;
+    }
+
+    // Pattern A is forwarded; the next frame is withheld while the live
+    // texture holds pattern B. The substitute must be a texture that is
+    // neither the live one nor the forwarded original, holding A's bytes.
+    edvr::resubmitShadowNoteForwarded(0, texA);
+    void* sub = edvr::resubmitShadowForWithhold(0, texB);
+    if (!sub || sub == texB || sub == texA) {
+        printf("  FAIL  the withheld frame was not offered an EDVR-owned copy "
+               "(got %p, live %p, forwarded %p)\n", sub,
+               static_cast<void*>(texB), static_cast<void*>(texA));
+        ++bad;
+    } else {
+        uint8_t v = 0;
+        if (!firstByte(sub, 64, &v) || v != 0xAA) {
+            printf("  FAIL  the substitute holds 0x%02X, not the forwarded "
+                   "frame's 0xAA\n", v);
+            ++bad;
+        }
+    }
+
+    // A second consecutive withhold forwards the SAME content again: nothing
+    // a withheld frame carries may reach the shadow.
+    void* sub2 = edvr::resubmitShadowForWithhold(0, texB);
+    if (sub2 != sub) {
+        printf("  FAIL  consecutive withholds got different substitutes\n");
+        ++bad;
+    } else if (sub2) {
+        uint8_t v = 0;
+        if (!firstByte(sub2, 64, &v) || v != 0xAA) {
+            printf("  FAIL  the second consecutive withhold's content changed "
+                   "to 0x%02X -- a withheld frame reached the shadow\n", v);
+            ++bad;
+        }
+    }
+
+    // The eye texture changes shape mid-flight: this withhold must fall back
+    // to classic (nullptr) rather than submit a 64x64 copy where a 128x128
+    // frame belongs.
+    if (edvr::resubmitShadowForWithhold(0, texC) != nullptr) {
+        printf("  FAIL  a shape change mid-flight was handed the stale-shaped "
+               "copy\n");
+        ++bad;
+    }
+
+    // ...and the next FORWARDED frame at the new shape rebuilds the copy.
+    edvr::resubmitShadowNoteForwarded(0, texC);
+    void* sub3 = edvr::resubmitShadowForWithhold(0, texC);
+    if (!sub3 || sub3 == texC) {
+        printf("  FAIL  the copy did not rebuild after a shape change\n");
+        ++bad;
+    } else {
+        uint8_t v = 0;
+        if (!firstByte(sub3, 128, &v) || v != 0xCC) {
+            printf("  FAIL  the rebuilt copy holds 0x%02X, not the newly "
+                   "forwarded 0xCC\n", v);
+            ++bad;
+        }
+    }
+
+    // The eyes do not share a shadow: eye 1 never forwarded, so it still
+    // withholds classically whatever eye 0 has.
+    if (edvr::resubmitShadowForWithhold(1, texB) != nullptr) {
+        printf("  FAIL  eye 1 was offered eye 0's frame\n");
+        ++bad;
+    }
+
+    edvr::resubmitShadowShutdown();
+    texA->Release();
+    texB->Release();
+    texC->Release();
+    ctx->Release();
+    dev->Release();
+
+    if (bad == 0)
+        printf("  ok    a withheld frame resubmits the game's previous frame, "
+               "and only that\n");
     return bad;
 }
 
@@ -714,6 +886,10 @@ int main(int argc, char** argv) {
         return 1;
     }
     if (submitPairChecks() != 0) {
+        printf("\nOPENVR SMOKE FAILED\n");
+        return 1;
+    }
+    if (resubmitChecks() != 0) {
         printf("\nOPENVR SMOKE FAILED\n");
         return 1;
     }

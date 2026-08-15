@@ -14,6 +14,7 @@
 #include "../common/proxy.h"  // breadcrumb(), EDVR_BREADCRUMB_ONCE
 #include "../common/vtable_hook.h"
 #include "openvr_min.h"
+#include "resubmit_shadow.h"
 
 namespace edvr {
 namespace {
@@ -471,6 +472,33 @@ vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
 
     if (s->validated && s->pairLatch.verdict(glitchFrameMarked() || s->holdThisFrame)) {
         ++s->framesWithheld;
+        // 1f: hand SteamVR the game's own previous frame instead of a missed
+        // deadline. The copy is EDVR's, refreshed only from frames that were
+        // actually forwarded -- never from this one -- so what goes out is the
+        // last thing the player was already shown, on time, at the current
+        // pose. The thread gate for the copy machinery PASSED 2026-08-15
+        // (Submit and Present both on thread 3108). Whenever no acceptable
+        // copy exists, the classic withhold below still happens: this path
+        // can never be worse than the fix was without it.
+        void* shadow = nullptr;
+        if (texture && texture->eType == vr::TextureType_DirectX) {
+            shadow = resubmitShadowForWithhold(eye == vr::Eye_Left ? 0u : 1u,
+                                               texture->handle);
+        }
+        if (shadow) {
+            if (s->notesLeft > 0) {
+                --s->notesLeft;
+                Log::get().note(
+                    "transition flash: frame replaced with the previous frame's "
+                    "copy (eye %d), submitted on time -- no reprojection stall. "
+                    "%u eye-submits withheld so far -- two per frame, so half "
+                    "this many frames.",
+                    static_cast<int>(eye), s->framesWithheld);
+            }
+            vr::Texture_t sub = *texture;
+            sub.handle = shadow;
+            return s->realSubmit(self, eye, &sub, bounds, flags);
+        }
         if (s->notesLeft > 0) {
             --s->notesLeft;
             Log::get().note("transition flash: frame NOT submitted (eye %d). SteamVR will "
@@ -485,7 +513,22 @@ vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
         return 0;   // VRCompositorError_None
     }
 
-    return s->realSubmit(self, eye, texture, bounds, flags);
+    {
+        const vr::EVRCompositorError result =
+            s->realSubmit(self, eye, texture, bounds, flags);
+        // This frame was FORWARDED and accepted, so it becomes the copy a
+        // later withhold can hand over. After realSubmit on purpose: the copy
+        // is queued on the immediate context behind this frame's rendering,
+        // and ordering on the context is what guarantees the copy holds the
+        // completed frame (the same reasoning the private build's luminance
+        // sampling rests on).
+        if (s->validated && result == 0 && texture &&
+            texture->eType == vr::TextureType_DirectX && texture->handle) {
+            resubmitShadowNoteForwarded(eye == vr::Eye_Left ? 0u : 1u,
+                                        texture->handle);
+        }
+        return result;
+    }
 }
 
 
@@ -803,6 +846,7 @@ void* interceptInterface(void* iface, const char* interfaceVersion) {
     // head_offset.cpp is SHARED, so there is one reader and both builds call it
     // from install and from reload.
     headOffsetConfigure();
+    resubmitShadowConfigure();
 
     return iface;
 }
@@ -811,8 +855,12 @@ void shutdownCompositorHook() {
     // Per-site fault totals, so "logged once" does not mean "counted once".
     reportFaultSites();
     if (!g_state) return;
-    Log::get().note("transition flash: %u eye-submit(s) withheld this session.",
-                    g_state->framesWithheld);
+    Log::get().note("transition flash: %u eye-submit(s) withheld this session "
+                    "(%u replaced with the previous frame's copy on time, %u "
+                    "fell back to a missed deadline).",
+                    g_state->framesWithheld, resubmitShadowResubmits(),
+                    resubmitShadowFallbacks());
+    resubmitShadowShutdown();
     g_state->compositorHook.uninstall();
     if (g_state->sentinel) g_state->sentinel->confirm();
 }
