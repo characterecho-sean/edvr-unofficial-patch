@@ -1,5 +1,5 @@
 // GENERATED from src/d3d11/glitch_frame.h in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 411a71bc3c17780f]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 3c8141196f5a3b4a]
 // The one-frame flash at a transition.
 //
 // Jumping, dropping out of supercruise, or closing the galaxy map occasionally
@@ -53,11 +53,20 @@ bool glitchFrameNeedsEyeDraws();
 
 // Writes the recorded camera history to the log. Bound to a key so a player who
 // sees a flash can capture the seconds around it on their own machine.
-// 	rigger names the key that asked for it, and decides what the header says
+// The trigger names the key that asked for it, and decides what the header says
 // zero milliseconds means -- the history key dumps AT the press, the camera key
 // two seconds after it, and a reader who does not know which is subtracting a
 // reaction time from the wrong end.
 void dumpCameraRing(const char* trigger = nullptr, uint32_t framesAfterPress = 0);
+
+// How many radii are currently certified as auxiliary render passes.
+//
+// FOR TESTS, and specifically for the normal-flight corpus. The corpus asserts
+// that nothing the view does may certify, and that assertion has to be exact:
+// checking it behaviourally would mean firing a probe excursion at every radius
+// the corpus ever visited, and any radius missed is a premise failure that ships.
+// One number, checked once, covers all of it.
+uint32_t glitchFrameCertifiedShells();
 
 void shutdownGlitchFrameFix();
 

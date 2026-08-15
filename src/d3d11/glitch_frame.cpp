@@ -1,5 +1,5 @@
 // GENERATED from src/d3d11/glitch_frame.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 47e99cdf2d20eb20]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 915db1e959285328]
 #include "glitch_frame.h"
 
 #include <windows.h>
@@ -225,6 +225,12 @@ constexpr float kDefaultRadiusTolerance = 0.005f;
 // hold still. Whichever is proven first is what that entry is.
 constexpr float kDefaultParkUnits = 64.0f;
 
+// Consecutive frames on a radius that prove the radius belongs to the view.
+//
+// PASSES VISIT; THE VIEW STAYS. See the long note in observeShell for what this
+// is defending against and why it applies to shells and never to parks.
+constexpr uint32_t kDefaultDwellFrames = 20;
+
 // Rendered frames after which a value that still has not moved is accepted as
 // not being the camera.
 //
@@ -331,6 +337,17 @@ struct State {
         uint32_t distinctDirs = 0;
         bool     certified = false;      // an orbit: one distance, many bearings
 
+        // TRANSIENCE. How long the track has sat on this radius without leaving.
+        //
+        // PASSES VISIT; THE VIEW STAYS. The spatial invariants say WHERE geometry
+        // repeats; dwell says WHOSE it is, and it is the premise the shell rule
+        // was missing. Measured on both sides: 6v's cascade blocks rest 4-6
+        // frames, the view rests 100+ (6ah). Anything that stays is the view.
+        uint32_t dwellRun = 0;
+        uint32_t maxDwell = 0;
+        bool     dwellDisqualified = false;   // permanent, and revokes
+        bool     refusedNoted = false;
+
         // The parked variant, on the same record rather than in a table of its
         // own: a park has a fixed position and therefore a fixed radius, so the
         // radius lookup already finds it and only the position needs checking.
@@ -338,10 +355,26 @@ struct State {
         float    parkPos[3] = {};
         uint32_t parkFrames = 0;
         bool     parked = false;         // a point: one place, over and over
+
+        // THE CERTIFIED POINT, FROZEN, and separate from the run tracker above.
+        //
+        // parkPos is a CANDIDATE: it follows the camera, and observeShell moves it
+        // to whatever position arrives whenever the run breaks. The suppression
+        // test used to read it, and observeShell runs BEFORE the decision in the
+        // same frame -- so by the time "is this position the parked one?" was
+        // asked, parkPos had already been rewritten to the position being asked
+        // about. It compared the frame against itself and answered yes.
+        //
+        // The effect was that ANY position sharing a parked record's radius band
+        // was exempt, not just the parked point. Measured on the replay of the
+        // 2026-08-15 wake capture: the real bad frame, 9,445 units from the view
+        // and nowhere near any parked camera, came back park-suppressed.
+        float    certParkPos[3] = {};
     };
     Shell      shells[kShells] = {};
     float      radiusTolerance = kDefaultRadiusTolerance;
     float      parkUnits = kDefaultParkUnits;
+    uint32_t   dwellFrames = kDefaultDwellFrames;
 
     uint32_t   suppressed = 0;
     // Split, because which invariant did the work is the data that says whether
@@ -546,7 +579,7 @@ bool positionIsCertifiedPark(const float* pos, float radius) {
     if (s->parkUnits <= 0.0f) return false;
     const int i = findShell(radius);
     if (i < 0 || !s->shells[i].parked) return false;
-    return dist2(pos, s->shells[i].parkPos) <= s->parkUnits * s->parkUnits;
+    return dist2(pos, s->shells[i].certParkPos) <= s->parkUnits * s->parkUnits;
 }
 
 // Learn from a camera position, whether or not it produced a jump.
@@ -577,6 +610,64 @@ void observeShell(const float* pos, float radius) {
     // certify it outright, which is not a third of a second of evidence -- it is
     // one frame wearing a disguise.
     if (e.framesSeen > 0 && e.lastSeen == s->frameNo) return;
+
+    // TRANSIENCE, TESTED BEFORE lastSeen IS OVERWRITTEN.
+    //
+    // PASSES VISIT; THE VIEW STAYS. Every other test in this file asks WHERE the
+    // geometry is -- a repeating jump size, a recurring radius, a fixed point --
+    // and none of them can say whose geometry it is. This one can, and it is the
+    // premise the shell rule shipped without.
+    //
+    // THE FAILURE IT EXISTS TO PREVENT (EVIDENCE 6ai, low wake capture of
+    // 2026-08-15): a shell certified at radius 6864, and that radius was the
+    // player. 38% of every frame recorded that session sat inside the 0.5% band;
+    // the most-seen positions in it were the ordinary flight positions, held for
+    // a hundred consecutive frames at a time; the median radius over 900 frames
+    // of flight was 6872. A ship flying near a body holds a near-constant
+    // distance from its centre while its bearing changes continuously -- it
+    // performs the orbit the certification was built to treat as aux-only. And
+    // the damage was not theoretical: one of the two bad frames in that capture
+    // sat 0.37% off the certified radius, inside the band and therefore exempt,
+    // certified 0.3 s before it happened.
+    //
+    // SHELLS ONLY, AND THE SYMMETRY IS EXACT. A park REQUIRES rest -- 1c's
+    // parked cascade legitimately sits at one point for thirty frames, and the
+    // 69k park is the proof -- so prohibiting rest at a POINT would undo that
+    // fix. Park: rest at a place, required. Shell: rest on a radius, forbidden.
+    // The difference is that a point is a place geometry can honestly sit, while
+    // a radius is a place only the thing being drawn from can honestly live on.
+    if (e.framesSeen > 0 && e.lastSeen + 1 == s->frameNo) {
+        ++e.dwellRun;
+    } else {
+        e.dwellRun = 1;
+    }
+    if (e.dwellRun > e.maxDwell) e.maxDwell = e.dwellRun;
+
+    if (!e.dwellDisqualified && e.dwellRun >= s->dwellFrames) {
+        e.dwellDisqualified = true;
+        // REVOKED, not merely refused. A shell certified far from anything can
+        // later collide with a flight radius near a body -- the session is long
+        // and the ship goes places -- so a certification has to be able to lose
+        // its evidence as well as gain it. Permanent for this entry either way:
+        // once the track has been shown to live here, later transience is the
+        // artefact moving through, not proof the view left.
+        const bool wasCertified = e.certified;
+        e.certified = false;
+        if (!e.refusedNoted) {
+            e.refusedNoted = true;
+            Log::get().note(
+                "transition flash: radius %.0f %s -- the camera has now sat on it "
+                "for %u frames without leaving, and a render pass behind the view "
+                "visits a distance, it does not live at one. A ship near a planet "
+                "holds a constant distance from its centre while its bearing "
+                "changes; that is flight, not an artefact. Jumps landing on this "
+                "radius are judged normally%s.",
+                static_cast<double>(e.radius),
+                wasCertified ? "is no longer treated as an auxiliary render pass"
+                             : "will not be certified as an auxiliary render pass",
+                e.dwellRun, wasCertified ? " again" : "");
+        }
+    }
 
     e.lastSeen = s->frameNo;
     ++e.framesSeen;
@@ -613,6 +704,9 @@ void observeShell(const float* pos, float radius) {
         if (!e.parked && !e.certified && e.parkFrames >= kShellCertifyFrames &&
             e.distinctDirs <= 1) {
             e.parked = true;
+            // Frozen here, at the moment the evidence is complete, and never
+            // touched again. The candidate above goes on following the camera.
+            for (uint32_t a = 0; a < 3; ++a) e.certParkPos[a] = e.parkPos[a];
             Log::get().note(
                 "transition flash: a camera parked at (%+.0f %+.0f %+.0f) identified "
                 "(%u sightings without moving) -- an auxiliary render pass being "
@@ -623,15 +717,18 @@ void observeShell(const float* pos, float radius) {
         }
     }
 
-    if (!e.certified && !e.parked && e.framesSeen >= kShellCertifyFrames &&
+    if (!e.certified && !e.parked && !e.dwellDisqualified &&
+        e.framesSeen >= kShellCertifyFrames &&
         e.distinctDirs >= kShellCertifyDirs) {
         e.certified = true;
         Log::get().note(
             "transition flash: a camera orbiting at radius %.0f identified (%u "
-            "sightings in %u distinct directions) -- an auxiliary render pass, not "
-            "the view. Frames whose camera lands on it are no longer withheld. A "
-            "view does not hold one distance while it swings.",
-            static_cast<double>(e.radius), e.framesSeen, e.distinctDirs);
+            "sightings in %u distinct directions, never resting on it for more "
+            "than %u frames) -- an auxiliary render pass, not the view. Frames "
+            "whose camera lands on it are no longer withheld. A view does not "
+            "hold one distance while it swings AND keep moving off it.",
+            static_cast<double>(e.radius), e.framesSeen, e.distinctDirs,
+            e.maxDwell);
     }
 }
 
@@ -834,6 +931,16 @@ void installGlitchFrameFix() {
     } else {
         s.parkUnits = parkUnits;
     }
+    // How long a camera has to sit on a radius before that radius is the view's.
+    //
+    // Twenty frames, about a fifth of a second, and it is bracketed by
+    // measurement rather than chosen between guesses: 6v's cascade blocks rest
+    // four to six frames, and the view rests a hundred or more (6ah). Anything
+    // in the wide gap between separates them. The floor of 8 keeps it clear of
+    // the cascades; the ceiling of 120 keeps it under what the view does, since
+    // a value above that would never fire and would silently restore the bug.
+    s.dwellFrames = static_cast<uint32_t>(cfg.getIntInRange(
+        "advanced.transition_flash_dwell_frames", kDefaultDwellFrames, 8, 120));
     s.bufferBytes = static_cast<uint32_t>(cfg.getInt("advanced.camera_buffer_bytes", 5376));
     s.posOffset = static_cast<uint32_t>(cfg.getInt("advanced.camera_buffer_offset", 1100));
 
@@ -1105,7 +1212,6 @@ void glitchFrameObserve(const void* data, uint32_t bytes, const void* resource) 
                              s->radiusSuppressedThisFrame ||
                              (jumped && residualIsKnownSeparation(resid));
     s->jumpedThisFrame = jumped;
-
     if (jumped && !s->suppressedThisFrame && s->cooldown == 0 &&
         s->consecutive < s->maxConsecutive) {
         markGlitchFrame();
@@ -1598,6 +1704,16 @@ void dumpCameraRing(const char* trigger, uint32_t framesAfterPress) {
 // session totals it used to be the only source of are printed on a timer now
 // (kTotalsEvery); if you find yourself wanting to add a summary here, it will
 // not be read. Add it there instead.
+uint32_t glitchFrameCertifiedShells() {
+    State* s = g_state;
+    if (!s) return 0;
+    uint32_t n = 0;
+    for (uint32_t i = 0; i < kShells; ++i) {
+        if (s->shells[i].certified) ++n;
+    }
+    return n;
+}
+
 void shutdownGlitchFrameFix() {
     State* s = g_state;
     if (!s || !s->enabled) return;

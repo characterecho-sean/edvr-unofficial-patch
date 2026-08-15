@@ -355,7 +355,7 @@ void dumpPoseRing(State* s, const char* trigger, uint32_t framesAfterPress) {
         }
         if (returned) {
             Log::get().note(
-                "--- the headset moved %.0f mm in ONE frame at f%u, %.0f ms before this "
+                "--- the headset moved %.1f mm in ONE frame at f%u, %.0f ms before this "
                 "was written, and came BACK. A head does not travel that far and "
                 "return, so that frame's viewpoint came from the TRACKING and not "
                 "from the game. EDVR cannot fix it -- the compositor reprojects from "
@@ -365,7 +365,7 @@ void dumpPoseRing(State* s, const char* trigger, uint32_t framesAfterPress) {
                 lastStepMm, lastStepFrame, lastStepMsAgo);
         } else {
             Log::get().note(
-                "--- the reported headset position moved %.0f mm in one frame at f%u, "
+                "--- the reported headset position moved %.1f mm in one frame at f%u, "
                 "%.0f ms before this was written, and STAYED there. That is the runtime "
                 "re-establishing where zero is, not a tracking fault -- Elite does it "
                 "at some mode changes. It still moves your viewpoint, and EDVR neither "
@@ -375,7 +375,7 @@ void dumpPoseRing(State* s, const char* trigger, uint32_t framesAfterPress) {
     } else {
         Log::get().note(
             "--- the largest one-frame headset movement anywhere in this window is "
-            "%.0f mm, under the %.0f mm worth noting, so tracking looks clean "
+            "%.1f mm, under the %.0f mm worth noting, so tracking looks clean "
             "across it. Anything seen came from somewhere else. ---",
             biggestMm, s->poseStepNoteMm);
     }

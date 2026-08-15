@@ -1,5 +1,5 @@
 // GENERATED from tools/glitch_test/glitch_test.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 5a4241af818029a9]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 ab3b294cad0f4486]
 // glitch_test -- drives the transition-flash detector without the game.
 //
 // The port of glitch_frame.cpp into this repo compiled, linked, and passed
@@ -932,6 +932,133 @@ int main(int argc, char** argv) {
               withheld <= 2,
               std::to_string(withheld) + " of " + std::to_string(farFrames) +
                   " cascade frames withheld replaying the recorded ring");
+    }
+
+    // --- 8b. Fixture J: the flight radius must never certify ---------------
+    //
+    // PASSES VISIT; THE VIEW STAYS. Recorded field data: the ring EDVR wrote
+    // while flying near a body on 2026-08-15, the segment that certified "a
+    // camera orbiting at radius 6864 in 3 distinct directions" when 6864 was THE
+    // SHIP. The certification then exempted a genuine bad frame that landed 0.37%
+    // off it, a third of a second later (EVIDENCE 6ai).
+    //
+    // Two assertions, because refusing is not the same as taking it back: a
+    // radius that is safe out in space can become the flight radius on arrival,
+    // so a shell certified BEFORE this data arrives has to lose its certification
+    // to it.
+    settle(b, x, 200);
+    {
+        // THE SEPARATION MEMORY IS OFF FOR THIS FIXTURE, and that is not a
+        // convenience. The visiting pass below has to jump between a near track
+        // and radius 6864 to certify at all, which teaches magnitudes in the
+        // same range as the field excursion this fixture ends by probing -- so
+        // with the memory on, the probe is suppressed by a size the fixture
+        // itself taught, and the shell rule under test is never reached. Same
+        // collision fixtures F and H are set up around.
+        Config::get().set("advanced.transition_flash_repeat_percent", "0");
+        installGlitchFrameFix();
+
+        struct Rec { float x, y, z; uint32_t eye; };
+        static const Rec kFlight[] = {
+#include "field_ring_flight_6864.inc"
+        };
+
+        // First, hand it a genuine orbiting pass at the same radius, the way
+        // fixture E does -- alternating, so it VISITS. This certifies 6864
+        // legitimately, and is what the replay below has to revoke.
+        float ang = 0.0f, nx = 900.0f;
+        for (uint32_t i = 0; i < 240; ++i) {
+            nx += 7.0f;
+            if ((i % 3) == 2) {
+                ang += 0.31f + 0.0037f * static_cast<float>(i);
+                const float r = 6864.0f * (1.0f + 0.0012f * sinf(ang * 2.7f));
+                frame(b, r * cosf(ang), r * sinf(ang) * 0.8f, r * sinf(ang) * 0.6f);
+            } else {
+                frame(b, nx, 0.0f, 0.0f);
+            }
+        }
+        const uint32_t certifiedBefore = glitchFrameCertifiedShells();
+        check("the alternating pass at 6864 certifies, so there is something to revoke",
+              certifiedBefore > 0,
+              "fixture J cannot test revocation: nothing certified from the "
+              "visiting pass, so the replay below would prove only refusal");
+
+        // INDEX 495 is the real bad frame -- f11645, one frame out to
+        // (-163.5 -499.6 6818.2) and back to the prior position exactly on the
+        // next. It is replayed in its own context rather than probed for
+        // synthetically afterwards: a synthetic approach has to jump to reach
+        // the position, and the jump it makes to get there teaches the
+        // separation memory a magnitude close to the one being tested. The
+        // recorded frames arrive with the history the field gave them.
+        constexpr size_t kBadFrame = 495;
+        uint32_t withheld = 0;
+        bool markedBad = false;
+        for (size_t i = 0; i < sizeof(kFlight) / sizeof(kFlight[0]); ++i) {
+            const Rec& r = kFlight[i];
+            b.setPos(r.x, r.y, r.z);
+            glitchFrameObserve(b.f, kBytes, b.res);
+            const bool marked = glitchFrameMarked();
+            glitchFrameBoundary(r.eye);
+            clearGlitchFrame();
+            if (marked) ++withheld;
+            if (i == kBadFrame) markedBad = marked;
+        }
+        printf("      [dbg] flight replay: %u frames, %u withheld, %u shells "
+               "certified before, %u after\n",
+               static_cast<uint32_t>(sizeof(kFlight) / sizeof(kFlight[0])), withheld,
+               certifiedBefore, glitchFrameCertifiedShells());
+
+        check("living at a radius revokes it",
+              glitchFrameCertifiedShells() < certifiedBefore,
+              "the recorded flight ring sat on 6864 for 474 consecutive frames and "
+              "the certification survived it");
+
+        check("the bad frame that was excused by the flight radius is withheld again",
+              markedBad,
+              "frame 11645, the recorded wrong viewpoint, is still being treated as "
+              "an auxiliary pass");
+        Config::get().set("advanced.transition_flash_repeat_percent", "2.0");
+        settle(b, x, 60);
+    }
+
+    // --- 8c. Fixture K: the normal-flight corpus --------------------------
+    //
+    // THE PREMISE FAILURE ABOVE WAS CAUGHT BY LUCK -- a flash happened to land
+    // in-band during a capture somebody dumped. This is the systematic version:
+    // several minutes of ordinary play across four sessions, with one assertion
+    // over all of it. NOTHING THE VIEW DOES MAY CERTIFY.
+    //
+    // It is checked as a count rather than by behaviour on purpose. Firing a
+    // probe excursion at each radius the corpus visited would leave every radius
+    // not probed as a premise failure that ships, which is exactly how the last
+    // one shipped.
+    //
+    // Note what this does NOT establish: the corpus is near-body flight and
+    // wake transitions, recorded on one machine. Station interiors, canyons and
+    // deep supercruise are not in it yet, so a premise that fails only there
+    // still fails silently. Adding a session is appending a segment.
+    {
+        Config::get().set("fix.transition_flash", "1");
+        installGlitchFrameFix();
+        struct Rec { float x, y, z; uint32_t eye; };
+        static const Rec kCorpus[] = {
+#include "field_corpus_flight.inc"
+        };
+        for (const Rec& r : kCorpus) {
+            b.setPos(r.x, r.y, r.z);
+            glitchFrameObserve(b.f, kBytes, b.res);
+            glitchFrameMarked();
+            glitchFrameBoundary(r.eye);
+            clearGlitchFrame();
+        }
+        const uint32_t certified = glitchFrameCertifiedShells();
+        printf("      [dbg] corpus: %u frames of ordinary flight, %u shells certified\n",
+               static_cast<uint32_t>(sizeof(kCorpus) / sizeof(kCorpus[0])), certified);
+        check("nothing the view does may certify",
+              certified == 0,
+              std::to_string(certified) +
+                  " shell(s) certified replaying ordinary flight -- a radius the "
+                  "player occupies is exempting the player's own bad frames");
     }
 
     // --- 9. The instrument outlives the fix -------------------------------
