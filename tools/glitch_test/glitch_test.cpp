@@ -1,5 +1,5 @@
 // GENERATED from tools/glitch_test/glitch_test.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 b5b6636326ab57aa]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 48d717508919d367]
 // glitch_test -- drives the transition-flash detector without the game.
 //
 // The port of glitch_frame.cpp into this repo compiled, linked, and passed
@@ -319,8 +319,13 @@ int main(int argc, char** argv) {
     // The first flip of a magnitude cannot be known to repeat, so it is
     // withheld. Every one after it is recognised.
     const uint32_t firstRun = cascadeFlips(b, x, 568000.0f, 30);
-    check("a recurring separation is withheld once, not repeatedly",
-          firstRun <= 1,
+    // COST RAISED BY THE TRUST BAR, deliberately. A separation is believed after
+    // three marks rather than two (1e step 4), so a novel magnitude costs three
+    // frames before it stops costing anything. That is the price of not letting
+    // one low wake excuse the next; it is paid once per magnitude, and the burst
+    // governor bounds it.
+    check("a recurring separation costs three frames, not thirty",
+          firstRun <= 3,
           std::to_string(firstRun) + " frames withheld in 30");
     const uint32_t secondRun = cascadeFlips(b, x, 568000.0f, 60);
     check("...and not at all once it is recognised", secondRun == 0,
@@ -405,7 +410,8 @@ int main(int argc, char** argv) {
     for (uint32_t round = 0; round < 3; ++round) {
         churn += cascadeFlips(b, x, 120000.0f + 40000.0f * round, 30);
     }
-    check("three distinct separations cost three frames, not thirty", churn <= 3,
+    check("three distinct separations cost three frames each, not thirty",
+          churn <= 9,
           std::to_string(churn) + " frames withheld across three separations");
 
     // --- 7b. SEVERAL CAMERAS IN ONE FRAME ---------------------------------
@@ -511,6 +517,13 @@ int main(int argc, char** argv) {
         x += 30.0f;
         frame(b, x, 568000.0f, 0.0f);
         settle(b, x, 10);
+        // Three more, because the bar needs three marks before it suppresses.
+        for (uint32_t i = 0; i < 3; ++i) {
+            x += 30.0f;
+            frame(b, x, 568000.0f, 0.0f);
+            x += 30.0f;
+            frame(b, x, 0.0f, 0.0f);
+        }
         x += 30.0f;
         const bool suppressedBefore = !frame(b, x, 568000.0f, 0.0f);
         check("the separation is being suppressed before the garbage frame",
@@ -798,7 +811,7 @@ int main(int argc, char** argv) {
             }
         }
         check("a parked auxiliary camera is caught, and not by the sphere",
-              withheld <= 1,
+              withheld <= 3,
               std::to_string(withheld) +
                   " frames withheld on the 6v block pair; it has one direction, so "
                   "the separation memory has to be the thing that catches it");
@@ -936,8 +949,8 @@ int main(int argc, char** argv) {
             if (marked) ++withheld;
         }
         printf("      [dbg] replay: %u far frames, %u withheld\n", farFrames, withheld);
-        check("the field burst costs one frame, not one every three",
-              withheld <= 2,
+        check("the field burst costs three frames, not one every three",
+              withheld <= 3,
               std::to_string(withheld) + " of " + std::to_string(farFrames) +
                   " cascade frames withheld replaying the recorded ring");
     }
@@ -1188,10 +1201,16 @@ int main(int argc, char** argv) {
         settle(b, x, 200);
         oneFrameExcursion(b, x, kFirst);
         settle(b, x, 200);
+        // RETIRED ASSERTION. This used to check that the field failure still
+        // reproduced with the memory acting -- one low wake excusing the next.
+        // The trust bar (1e step 4) makes that unreachable in ct too: two
+        // marks minutes apart restart the count instead of accumulating, so
+        // there is no configuration left in which the first wake excuses the
+        // second. Fixture 8f's L half is the live version of this.
         const bool actExcused = !oneFrameExcursion(b, x, kSecond);
-        check("with the memory acting, the first wake excuses the second",
-              actExcused,
-              "the fixture does not reproduce the field failure, so it proves "
+        check("...and the bar makes that unreachable even with the memory acting",
+              !actExcused,
+              "the second wake is still being excused by the first with "
               "nothing about the change that stops it");
 
         Config::get().set("advanced.transition_flash_separation", "log");
@@ -1205,6 +1224,73 @@ int main(int argc, char** argv) {
               "the second transition is still being excused by the first");
         settle(b, x, 200);
     }
+    // --- 8f. The trust bar: O, P and L against one rule ----------------------
+    //
+    // PAIRS CO-MOVE. All three cases are measured, and the bar has to admit two
+    // of them and refuse the third -- which is the only reason to believe the
+    // numbers rather than merely to have chosen them.
+    //
+    //   O  descent, 2026-08-15: pairs 166 frames apart, ~5000 units, 17 of 40
+    //      withholds in one session. Both cameras track the moving view, so no
+    //      park and no shell can certify it -- 0 by orbit, 0 by park in the log.
+    //   P  the 568k planetary cascade: marks every 12.6 s.
+    //   L  two low wakes minutes apart, 17515 then 17551 units, where the first
+    //      taught the memory to excuse the second.
+    {
+        Config::get().set("advanced.transition_flash_separation", "act");
+        Config::get().set("advanced.transition_flash_burst_limit", "30");
+
+        // O -- must certify quickly and stop costing frames.
+        installGlitchFrameFix();
+        settle(b, x, 200);
+        uint32_t oWithheld = 0;
+        for (uint32_t pair = 0; pair < 6; ++pair) {
+            for (uint32_t k = 0; k < 2; ++k) {
+                x += 30.0f;
+                if (frame(b, x, 4950.0f + 40.0f * static_cast<float>(k), 0.0f)) {
+                    ++oWithheld;
+                }
+                x += 30.0f;
+                frame(b, x, 0.0f, 0.0f);
+            }
+            settle(b, x, 160);          // the measured 166-frame cadence
+        }
+        check("O: a co-moving pair certifies and stops costing frames",
+              oWithheld <= 4,
+              std::to_string(oWithheld) +
+                  " of 12 withheld across six descent pairs; the bar is too high "
+                  "for the case the separation memory exists to catch");
+
+        // P -- the cascade, marking every 12.6 s, must reach the bar too.
+        installGlitchFrameFix();
+        settle(b, x, 200);
+        uint32_t pWithheld = 0;
+        for (uint32_t i = 0; i < 5; ++i) {
+            x += 30.0f;
+            if (frame(b, x, 568000.0f + 900.0f * static_cast<float>(i), 0.0f)) {
+                ++pWithheld;
+            }
+            x += 30.0f;
+            frame(b, x, 0.0f, 0.0f);
+            settle(b, x, 1130);         // 12.6 s at 90 Hz
+        }
+        check("P: a cascade 12.6 s apart still certifies", pWithheld <= 3,
+              std::to_string(pWithheld) +
+                  " of 5 withheld; the window is too narrow for the slowest "
+                  "measured pass separation, which is the one that set it");
+
+        // L -- minutes apart, must NEVER certify.
+        installGlitchFrameFix();
+        settle(b, x, 200);
+        oneFrameExcursion(b, x, 17515.0f);
+        settle(b, x, 5600);             // over a minute: outside the window
+        const bool lWithheld = oneFrameExcursion(b, x, 17551.0f);
+        check("L: a transition minutes later is still withheld", lWithheld,
+              "the second low wake is being excused by the first again, which is "
+              "the failure the bar was built to prevent");
+        settle(b, x, 200);
+    }
+
     // --- 9. The instrument outlives the fix -------------------------------
     //
     // transition_flash = 0 is the control a bug report needs: with nothing

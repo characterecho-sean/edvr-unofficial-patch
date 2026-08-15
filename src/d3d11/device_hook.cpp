@@ -72,6 +72,7 @@ struct State {
     bool     dumpOnExternalCam = false;
     uint32_t dumpCountdown = 0;
     uint32_t missedDumpNotes = 0;
+    bool     threadNoted = false;
     // Frames to hold across an external-camera transition. 0 = off, and it stays
     // there: see the note beside the setting in edvr.ini.
     uint32_t holdFramesOnExternalCam = 0;
@@ -156,6 +157,16 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
         ++g_state->framesSeen >= kSentinelConfirmFrames) {
         g_state->sentinelConfirmed = true;
         if (g_state->sentinel) g_state->sentinel->confirm();
+    }
+
+    // The other half of 1f's gate. See the note at hookedSubmit.
+    if (!g_state->threadNoted) {
+        g_state->threadNoted = true;
+        Log::get().note(
+            "Present is running on thread %lu. If the openvr log reports a "
+            "different thread for Submit, a copy issued from Submit would touch "
+            "the immediate context off its own thread.",
+            static_cast<unsigned long>(GetCurrentThreadId()));
     }
 
     guardedBudget(g_frameBudget, [&] {

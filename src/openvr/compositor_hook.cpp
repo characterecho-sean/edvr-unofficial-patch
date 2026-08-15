@@ -118,6 +118,7 @@ struct State {
     // so it applies to the NEXT frame's submits -- the same place and the same
     // reasoning as the pair latch's reset.
     bool     holdThisFrame = false;
+    bool     threadNoted = false;
     uint32_t holdFramesSeen = 0;
 
     // THE POSE RING. Forensics, and only forensics.
@@ -450,6 +451,24 @@ vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
     // and both eyes agree about it too. A hold that split a pair would be the
     // one-eye-behind-the-other failure the latch exists to prevent, arriving by
     // a different door.
+    // THREAD IDENTITY, logged once, and it gates a design rather than debugging
+    // one. 1f proposes replacing a withheld Submit with a copy of the last
+    // forwarded frame, which means calling CopyResource on the game's immediate
+    // context from this callsite -- and D3D11 immediate contexts are single
+    // threaded. The measured call order (Submit, Submit, Present, WaitGetPoses)
+    // implies this is the render thread, but implies is not verified: if this id
+    // and the one Present logs differ, the design is dead as written and the
+    // deferred-copy variant needs its own spec. Verify, do not assume.
+    EDVR_BREADCRUMB_ONCE("vr: submit thread");
+    if (!s->threadNoted) {
+        s->threadNoted = true;
+        Log::get().note(
+            "compositor: Submit is running on thread %lu. Compare with the "
+            "Present thread in the d3d11 log -- if they differ, anything that "
+            "touches the immediate context from here is unsafe.",
+            static_cast<unsigned long>(GetCurrentThreadId()));
+    }
+
     if (s->validated && s->pairLatch.verdict(glitchFrameMarked() || s->holdThisFrame)) {
         ++s->framesWithheld;
         if (s->notesLeft > 0) {

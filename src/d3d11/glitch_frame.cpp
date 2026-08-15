@@ -1,5 +1,5 @@
 // GENERATED from src/d3d11/glitch_frame.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 09b743d24ef64428]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 985cad9aff06c164]
 #include "glitch_frame.h"
 
 #include <windows.h>
@@ -254,6 +254,15 @@ constexpr uint32_t kBurstHistory = 16;
 // down for most of a session is visible; rarely enough not to paper the log.
 constexpr uint32_t kBurstNoteGap = 900;
 
+// The trust bar's shape, pinned by the three measured cases.
+//
+// Sixty seconds and three marks. The descent pairs marked 166 frames apart and
+// the 568k cascade every 12.6 s -- both comfortably inside -- while the two low
+// wakes were minutes apart and cannot accumulate. Three rather than two because
+// two is what a pair of transitions produces.
+constexpr uint32_t kSepMarkWindow = 5400;
+constexpr uint32_t kSepMarksToCertify = 3;
+
 constexpr uint32_t kLetThroughNotes = 40;
 constexpr uint32_t kLetThroughGap = 120;
 
@@ -400,6 +409,25 @@ struct State {
         uint32_t lastSeen = 0;
         uint32_t hits = 0;
         bool     noted = false;
+
+        // THE TRUST BAR. A magnitude is not believed because it happened twice.
+        //
+        // PAIRS CO-MOVE is the family's fourth clause and this is the member that
+        // serves it: when both cameras track the moving view, positions drift so
+        // no park certifies, radii change so no shell certifies, and the jump
+        // between them is the only thing that holds still. Jump-keyed is correct
+        // for relative geometry -- which is why this is the fourth invariant and
+        // not a redundancy. What it lacked was a reason to be believed.
+        //
+        // Certification is by mark RECENCY-DENSITY, and the three measured cases
+        // set the bar between them. The descent pairs marked 166 frames apart,
+        // the 568k planetary cascade every 12.6 s, and the two low-wake
+        // transitions minutes apart -- so a window that admits the first two and
+        // refuses the third is what separates a co-moving pair from an event that
+        // merely happens to repeat its size.
+        uint32_t marks = 0;
+        uint32_t lastMarkFrame = 0;
+        bool     certified = false;
     };
     Separation seps[kSeparations] = {};
     float      repeatPercent = kDefaultRepeatPercent;
@@ -592,13 +620,58 @@ int findSeparation(float resid) {
 // evidence rather than on a rate. max_consecutive bounds a run. Nothing else is
 // needed, and a second limiter whose premise was a measurement error is worse
 // than nothing, because it fails exactly when the fix is most needed.
-bool residualIsKnownSeparation(float resid) { return findSeparation(resid) >= 0; }
+// KNOWN is not the same as TRUSTED, and this is the only place that decides.
+//
+// findSeparation answers "have we seen this magnitude"; this answers "has it
+// earned the right to excuse a frame". The gap between those two questions is
+// what let a low wake teach the memory to excuse the next low wake.
+bool residualIsKnownSeparation(float resid) {
+    const int i = findSeparation(resid);
+    return i >= 0 && g_state->seps[i].certified;
+}
+
+// Has it been seen at all? For reporting what WOULD have been excused.
+bool residualIsRecognisedSeparation(float resid) { return findSeparation(resid) >= 0; }
 
 // Remember a magnitude, or refresh one already remembered.
 //
 // Refreshing matters as much as inserting. Without it a separation that is
 // suppressing correctly ages out after a runaway window and fires again, which
 // is the same judder at a longer period.
+// A MARK counts toward certification. A refresh does not.
+//
+// recordResidual is called from two places: a frame that was WITHHELD, which is
+// this magnitude costing the player something, and a frame that was suppressed,
+// which is it costing nothing. Only the first is evidence that a co-moving pair
+// is really there and really recurring, so only the first advances the bar.
+void recordSeparationMark(float resid) {
+    State* s = g_state;
+    if (s->repeatPercent <= 0.0f || !std::isfinite(resid)) return;
+    const int hit = findSeparation(resid);
+    if (hit < 0) return;                       // recordResidual creates it
+    State::Separation& e = s->seps[hit];
+    // OUTSIDE THE WINDOW IS A RESTART, not an increment. Two low-wake
+    // transitions minutes apart must never accumulate toward the same
+    // certification -- that is the failure this whole bar exists to prevent.
+    if (e.marks > 0 && s->frameNo - e.lastMarkFrame <= kSepMarkWindow) {
+        ++e.marks;
+    } else {
+        e.marks = 1;
+    }
+    e.lastMarkFrame = s->frameNo;
+    if (!e.certified && e.marks >= kSepMarksToCertify) {
+        e.certified = true;
+        Log::get().note(
+            "transition flash: a separation of about %.0f world units has cost %u "
+            "frames within %u, so it is a fixed gap between two render passes "
+            "that MOVE WITH the view -- no fixed point to certify, no fixed "
+            "radius either, which is why nothing else here catches it. Frames "
+            "whose jump matches it are no longer withheld. A transition repeats "
+            "its size too, but minutes apart, and cannot reach this.",
+            static_cast<double>(e.resid), e.marks, kSepMarkWindow);
+    }
+}
+
 void recordResidual(float resid) {
     State* s = g_state;
     if (s->repeatPercent <= 0.0f) return;
@@ -1088,7 +1161,7 @@ void installGlitchFrameFix() {
     // a value above that would never fire and would silently restore the bug.
     {
         const std::string mode =
-            cfg.getString("advanced.transition_flash_separation", "log");
+            cfg.getString("advanced.transition_flash_separation", "act");
         s.separationMode = mode == "act" ? 2u : (mode == "off" ? 0u : 1u);
         if (mode != "act" && mode != "log" && mode != "off") {
             Log::get().note(
@@ -1466,7 +1539,7 @@ void glitchFrameObserve(const void* data, uint32_t bytes, const void* resource) 
     // Same order as the tests above, so the name matches the branch.
     s->verdictThisFrame =
         !jumped                            ? kVerdictQuiet
-        : willMark ? (s->separationMode >= 1 && residualIsKnownSeparation(resid)
+        : willMark ? (s->separationMode >= 1 && residualIsRecognisedSeparation(resid)
                           ? kVerdictWithheldSepWould
                           : kVerdictWithheld)
         : s->parkSuppressedThisFrame       ? kVerdictPark
@@ -1677,6 +1750,10 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
         // until it has. That is the cost of this approach and it is one frame per
         // novel magnitude, against one frame every three that it replaces.
         recordResidual(s->lastResid);
+        // AFTER recordResidual, which is what creates the entry. Counting first
+        // meant the first occurrence of a magnitude never counted toward its own
+        // certification, so the bar was silently four marks rather than three.
+        recordSeparationMark(s->lastResid);
         if (s->notesLeft > 0) {
             --s->notesLeft;
             const bool acted = glitchConsumerPresent();
