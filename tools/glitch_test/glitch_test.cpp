@@ -1,5 +1,5 @@
 // GENERATED from tools/glitch_test/glitch_test.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 40c4aebfda2ffbd5]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 ab3b294cad0f4486]
 // glitch_test -- drives the transition-flash detector without the game.
 //
 // The port of glitch_frame.cpp into this repo compiled, linked, and passed
@@ -294,22 +294,7 @@ int main(int argc, char** argv) {
     // A harness that cannot produce the field failure proves nothing about a
     // change that makes it stop -- and this file's own history has an assertion
     // that passed against a detector that withheld nothing at all.
-    // THE DENSITY GUARD IS OFF FOR THIS ONE, and that is the honest setup.
-    //
-    // The guard caps withholds at four in ninety frames, so with it on this
-    // fixture reports three of thirty and reads as "the bug does not reproduce"
-    // -- when what actually happened is that the guard hid it. The separation
-    // memory is what is under test here, and it has to be measured against the
-    // full cost of not having it.
-    //
-    // Worth stating plainly because it is also true in the field: the guard
-    // masks a failure of the separation memory. If that memory ever stops
-    // working, the log's withheld count will stay small and comfortable while
-    // the frames it should have suppressed sail through unmarked. The guard
-    // bounds the SYMPTOM, and the counts in the totals line are no longer a
-    // measure of how well the memory is doing its job.
     Config::get().set("advanced.transition_flash_repeat_percent", "0");
-    Config::get().set("advanced.transition_flash_max_per_second", "45");
     installGlitchFrameFix();
     settle(b, x, 10);
     const uint32_t unsuppressed = cascadeFlips(b, x, 568000.0f, 30);
@@ -320,7 +305,6 @@ int main(int argc, char** argv) {
               "low number here means the fixture is not exercising the bug");
 
     Config::get().set("advanced.transition_flash_repeat_percent", "2.0");
-    Config::get().set("advanced.transition_flash_max_per_second", "45");
     installGlitchFrameFix();
     settle(b, x, 10);
 

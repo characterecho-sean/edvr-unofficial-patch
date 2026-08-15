@@ -1,5 +1,5 @@
 // GENERATED from src/d3d11/glitch_frame.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 4c9dd7c3dfa8faab]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 1c9fba2f3677c733]
 #include "glitch_frame.h"
 
 #include <windows.h>
@@ -239,21 +239,6 @@ constexpr uint32_t kDefaultDwellFrames = 20;
 // Forty lines spread at least 120 frames apart covers the transitions a player
 // makes in a session without covering the steady-state noise between them, and
 // the running totals line already carries the counts.
-// The judder guard: withholds allowed inside one second of frames.
-//
-// max_consecutive bounds a RUN and says nothing about density, and density is
-// what judder actually is. Measured 2026-08-15 at a 2000-unit threshold: 16
-// frames withheld inside 42 -- 38% of them, for half a second -- with no run
-// ever exceeding two, so the consecutive limit passed the whole burst. The
-// player reported judder that had not been there before.
-//
-// Four in ninety frames. A real transition costs one or two, so this is well
-// clear of the thing the fix exists for, and far below the density that reads
-// as stutter.
-constexpr uint32_t kDefaultDensityMax = 4;
-constexpr uint32_t kDensityWindow = 90;
-constexpr uint32_t kDensityHistory = 16;
-
 constexpr uint32_t kLetThroughNotes = 40;
 constexpr uint32_t kLetThroughGap = 120;
 
@@ -298,7 +283,6 @@ enum RingVerdict : uint8_t {
     kVerdictSeparation,      // this jump size has happened before
     kVerdictCooldown,        // still settling after a recent jump
     kVerdictConsecutive,     // too many in a row already
-    kVerdictDensity,         // too many in the last second, however spaced
 };
 
 const char* ringVerdictName(uint8_t v) {
@@ -309,7 +293,6 @@ const char* ringVerdictName(uint8_t v) {
         case kVerdictSeparation:  return "let through: a repeating jump size";
         case kVerdictCooldown:    return "let through: still settling";
         case kVerdictConsecutive: return "let through: too many in a row";
-        case kVerdictDensity:     return "let through: too many in the last second";
         default:                  return "";
     }
 }
@@ -451,12 +434,6 @@ struct State {
     uint32_t   letThroughNotes = 0;
     // This frame's verdict, set at the decision and consumed at the boundary.
     uint8_t    verdictThisFrame = kVerdictQuiet;
-    // Frame numbers of recent withholds, for the density guard. A tiny ring:
-    // only the last few matter, and anything older than the window is ignored
-    // whether it is still in here or not.
-    uint32_t   withheldAt[kDensityHistory] = {};
-    uint32_t   withheldHead = 0;
-    uint32_t   densityMax = kDefaultDensityMax;
     uint32_t   lastLetThroughFrame = 0;
 
     uint32_t   suppressed = 0;
@@ -551,6 +528,25 @@ int findSeparation(float resid) {
 // every new furthest camera within a frame, so a query that also counted a hit
 // would inflate the count by however many candidates that frame happened to
 // have. Recording happens once, at the frame boundary.
+// WHY THERE IS NO DENSITY GUARD HERE, since one was added and taken out again.
+
+// A cap of four withholds per ninety frames was added on 2026-08-15 to stop
+// judder, on the strength of a totals line reporting 152 frames withheld in a
+// session. That number was wrong: the compositor had withheld three. The
+// counter re-derived its own verdict at the frame boundary instead of counting
+// the decision, and the two had drifted -- see the note in glitchFrameBoundary.
+//
+// So the guard was built against judder this code was not producing, and it had
+// a cost that showed up in the very next capture: frames f7708 and f7709 of the
+// 14:51 session, a low-wake entry landing on the same reset position seen six
+// times now, both let through with "too many in the last second". The guard
+// blocked the withhold of the flash it was supposed to be helping with.
+//
+// The runaway guard already covers the case this was reaching for -- a detector
+// firing constantly stands itself down for the session -- and it does so on
+// evidence rather than on a rate. max_consecutive bounds a run. Nothing else is
+// needed, and a second limiter whose premise was a measurement error is worse
+// than nothing, because it fails exactly when the fix is most needed.
 bool residualIsKnownSeparation(float resid) { return findSeparation(resid) >= 0; }
 
 // Remember a magnitude, or refresh one already remembered.
@@ -1045,8 +1041,6 @@ void installGlitchFrameFix() {
     // in the wide gap between separates them. The floor of 8 keeps it clear of
     // the cascades; the ceiling of 120 keeps it under what the view does, since
     // a value above that would never fire and would silently restore the bug.
-    s.densityMax = static_cast<uint32_t>(cfg.getIntInRange(
-        "advanced.transition_flash_max_per_second", kDefaultDensityMax, 1, 45));
     s.dwellFrames = static_cast<uint32_t>(cfg.getIntInRange(
         "advanced.transition_flash_dwell_frames", kDefaultDwellFrames, 8, 120));
     s.bufferBytes = static_cast<uint32_t>(cfg.getInt("advanced.camera_buffer_bytes", 5376));
@@ -1335,19 +1329,8 @@ void glitchFrameObserve(const void* data, uint32_t bytes, const void* resource) 
     // ONLY FOR JUMPS THAT CLEARED THE THRESHOLD, and rate-limited hard. Every
     // suppressed cascade frame is a jump -- 1,344 of them in one session -- and
     // a line each would bury the log it is meant to make readable.
-    // How many frames we have withheld inside the last second.
-    //
-    // Counted over the ring rather than kept as a running total, because a
-    // total would need decaying and a decay is a second thing to get wrong.
-    uint32_t recent = 0;
-    for (uint32_t i = 0; i < kDensityHistory; ++i) {
-        const uint32_t at = s->withheldAt[i];
-        if (at != 0 && s->frameNo >= at && s->frameNo - at < kDensityWindow) ++recent;
-    }
-
     const bool willMark = jumped && !s->suppressedThisFrame && s->cooldown == 0 &&
-                          s->consecutive < s->maxConsecutive &&
-                          recent < s->densityMax;
+                          s->consecutive < s->maxConsecutive;
     if (jumped && !willMark) {
         if (s->letThroughNotes < kLetThroughNotes &&
             s->frameNo - s->lastLetThroughFrame >= kLetThroughGap) {
@@ -1373,11 +1356,8 @@ void glitchFrameObserve(const void* data, uint32_t bytes, const void* resource) 
         : s->radiusSuppressedThisFrame     ? kVerdictShell
         : residualIsKnownSeparation(resid) ? kVerdictSeparation
         : s->cooldown > 0                  ? kVerdictCooldown
-        : s->consecutive >= s->maxConsecutive ? kVerdictConsecutive
-                                           : kVerdictDensity;
+                                           : kVerdictConsecutive;
     if (willMark) {
-        s->withheldAt[s->withheldHead % kDensityHistory] = s->frameNo;
-        ++s->withheldHead;
         markGlitchFrame();
     } else {
         // Withdraw, do not clear: a further candidate later in the same frame
