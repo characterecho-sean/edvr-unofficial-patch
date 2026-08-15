@@ -10,6 +10,7 @@
 #include "head_offset_gate.h"
 #include "camera_view.h"
 #include "../common/log.h"
+#include "../common/proxy.h"
 #include "../common/vtable_hook.h"
 #include "binding_shadow.h"
 #include "exposure_fix.h"
@@ -64,7 +65,36 @@ struct State {
     // to keep in step, in exchange for nothing a working install uses.
     Hotkey externalCamKey;
     uint64_t frameCounter = 0;
+
+    // Crash sentinel for the d3d11 half.
+    //
+    // The openvr half has had one since it was written, and this half -- which
+    // hooks the device, the context, the swapchain and the factory, and is much
+    // the larger of the two -- had none. So a configuration that crashed during
+    // install or in the first frames crashed on EVERY launch, and the only cure
+    // was finding the documentation and deleting the file. That is the state a
+    // user cannot get themselves out of.
+    //
+    // WHAT IT DOES AND DOES NOT COVER, because the difference matters. It arms
+    // before the first vtable write and confirms once the hooks have survived a
+    // few seconds of presenting, so it catches the class that makes an install
+    // unusable: a crash at install or shortly after, which repeats every launch.
+    // It does NOT catch a crash half an hour in -- that session confirmed long
+    // before, and disabling the hooks at the next launch would not obviously
+    // help anyway, since such a crash is not reproducible from startup.
+    Sentinel* sentinel = nullptr;
+    uint32_t  framesSeen = 0;
+    bool      sentinelConfirmed = false;
 };
+
+// Presented frames before the hooks are treated as having survived install.
+//
+// About six seconds of play, which is past the loading screen and into a drawn
+// scene. Long enough that the risky part -- the first frames through four
+// patched vtables -- is behind us, short enough that a player who quits normally
+// has confirmed long before, because a false trip costs them every fix for a
+// session and that is the cost this must not impose casually.
+constexpr uint32_t kSentinelConfirmFrames = 600;
 
 State* g_state = nullptr;
 // One budget per thing that can fail. Shader creation runs on whatever thread
@@ -93,6 +123,17 @@ HRESULT STDMETHODCALLTYPE hookedCreateCS(ID3D11Device* self, const void* bytecod
 HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
                                         UINT flags) {
     const HRESULT hr = g_state->realPresent(self, syncInterval, flags);
+
+    // OUTSIDE the fault budget, and that is the point. Confirming is a file
+    // delete; putting it inside would mean a burst of faults anywhere in the
+    // frame work stops the confirmation, the sentinel trips on the next launch,
+    // and every fix switches itself off over something that never crashed.
+    if (!g_state->sentinelConfirmed &&
+        ++g_state->framesSeen >= kSentinelConfirmFrames) {
+        g_state->sentinelConfirmed = true;
+        if (g_state->sentinel) g_state->sentinel->confirm();
+    }
+
     guardedBudget(g_frameBudget, [&] {
         if (g_state->toggleKey.pressed()) toggleExposureFix();
         // Deliberately not part of the toggle: it reports, it does not change
@@ -169,16 +210,55 @@ void hookDevice(ID3D11Device* device) {
     State& s = ensureState();
     if (s.device) return;
 
+    Config& sentinelCfg = Config::get();
+    if (!s.sentinel) {
+        s.sentinel = new Sentinel(sentinelCfg.logDir().c_str(), L"d3d11_hooks");
+    }
+    if (s.sentinel->trippedOnStartup() &&
+        !sentinelCfg.getBool("advanced.ignore_sentinel", false)) {
+        // Cleared here, so a false trip costs one session rather than every
+        // future launch -- the same bargain the compositor hook struck, and for
+        // the same reason: quitting from the menu before the confirmation looks
+        // identical to crashing from in here.
+        s.sentinel->clearTrip();
+        Log::get().note(
+            "SENTINEL TRIPPED: the previous run installed the d3d11 hooks and never "
+            "confirmed them, which usually means it crashed -- though a session that "
+            "ended in the first few seconds looks the same from here. EVERY fix in "
+            "d3d11.dll is off for THIS session only, and it will try again next "
+            "launch: the black void, the panel distance, the exposure share, the "
+            "transition flash detector and Explorer Cam's half of the gate. The game "
+            "renders exactly as it would without EDVR installed.\n"
+            "  If this keeps happening, the hooks really are crashing and the log is "
+            "worth reporting. To force them on anyway, set ignore_sentinel = 1 under "
+            "[advanced].");
+        return;
+    }
+
     if (!s.deviceHook.attach(device) ||
         s.deviceHook.executablePrefix() <= kDevCreateComputeShader) {
         Log::get().note("device vtable unusable; fix not installed");
         s.deviceHook.uninstall();
         return;
     }
+
+    // Armed before the first vtable WRITE, not before the attach: attaching only
+    // reads the table and copies it, and a session that dies there did not die of
+    // anything we changed.
+    if (!s.sentinel->arm()) {
+        Log::get().note("NOTE: the crash sentinel could not be written, so a crash in "
+                        "these hooks will not disable them next launch.");
+    }
+    breadcrumb("gfx: arming d3d11 hooks");
+
     s.deviceHook.replace(kDevCreateComputeShader, &hookedCreateCS,
                          reinterpret_cast<void**>(&s.realCreateCS));
     if (!s.deviceHook.commit()) {
         s.deviceHook.uninstall();
+        // Nothing was patched, so there is nothing to be protecting against.
+        // Leaving it armed would trip on the next launch over an install that
+        // never happened.
+        s.sentinel->confirm();
         return;
     }
     s.device = device;
@@ -295,6 +375,13 @@ void shutdownDeviceHooks() {
     shutdownVScreenFixes();
     shutdownExposureFix();
     if (!g_state) return;
+    // An orderly unload is not a crash, whether or not we got as far as the
+    // frame count that normally confirms. Without this, a session that ends
+    // cleanly inside the first six seconds would arm the next launch's refusal.
+    if (g_state->sentinel && !g_state->sentinelConfirmed) {
+        g_state->sentinelConfirmed = true;
+        g_state->sentinel->confirm();
+    }
     g_state->factoryHook.uninstall();
     g_state->swapChainHook.uninstall();
     g_state->deviceHook.uninstall();

@@ -1,5 +1,5 @@
 // GENERATED from src/d3d11/glitch_frame.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 ceb2408b45958cbb]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 b8c8d38fda1c4758]
 #include "glitch_frame.h"
 
 #include <windows.h>
@@ -144,6 +144,42 @@ constexpr uint32_t kTotalsEvery = 1800;
 // ever recorded, in a gap four decades wide.
 constexpr float kWorldCameraFloor2 = 10.0f * 10.0f;
 
+// THE SECOND INVARIANT: a camera orbiting at a fixed radius.
+//
+// The separation memory above keys on JUMP SIZE, and there is a shape it cannot
+// see. Six of ten remaining withholds in one session sat at wildly different
+// directions but one radius -- |pos| 7,609 to 7,635, inside 0.3% -- an auxiliary
+// camera at a fixed distance from the view origin, swinging as the player turns.
+// The jump size varies with where the swing came from, so the separation memory
+// caught two of the six. The radius does not vary. 6v.2 recorded the same
+// signature at 136,405.
+//
+// WHY THIS ONE IS STRONGER THAN THE ONE IT JOINS. A sphere is visible on every
+// frame the camera is sampled, not only at jumps -- so it can be certified by
+// watching, before it has ever caused a mark. The separation memory pays one
+// withheld frame to learn each magnitude; this learns for free while the player
+// flies. The radius is already computed on the hot path.
+//
+// CERTIFICATION IS WHAT KEEPS IT HONEST. A radius seen once is a coincidence; a
+// radius seen for a third of a second in three provably different directions is
+// a sphere, and a one-frame excursion cannot certify by construction. Both
+// halves are required: sightings alone would certify a parked camera, directions
+// alone would certify noise.
+constexpr uint32_t kShells = 8;
+constexpr uint32_t kShellCertifyFrames = 30;
+constexpr uint32_t kShellCertifyDirs = 3;
+// cos 15 degrees: how far the camera must swing to count as a new direction.
+constexpr float kShellDirCos = 0.966f;
+
+// A FRACTION, not a percentage -- unlike transition_flash_repeat_percent beside
+// it, which is one. The two are documented together in the ini for that reason.
+//
+// Tight, and it has to be: the measured spread is 0.3% at 7.6k and 6v held to
+// about 0.005% at 136k, while the genuine-flash band (9,900 to 24,000 off path)
+// sits adjacent to this session's shell. A thick shell would start swallowing
+// the thing this exists to catch.
+constexpr float kDefaultRadiusTolerance = 0.005f;
+
 // Rendered frames after which a value that still has not moved is accepted as
 // not being the camera.
 //
@@ -220,7 +256,26 @@ struct State {
     };
     Separation seps[kSeparations] = {};
     float      repeatPercent = kDefaultRepeatPercent;
+
+    // Radii the furthest camera keeps landing on. See kShells.
+    struct Shell {
+        float    radius = 0.0f;
+        uint32_t lastSeen = 0;
+        uint32_t framesSeen = 0;
+        float    lastDir[3] = {};
+        uint32_t distinctDirs = 0;
+        bool     certified = false;
+    };
+    Shell      shells[kShells] = {};
+    float      radiusTolerance = kDefaultRadiusTolerance;
+
     uint32_t   suppressed = 0;
+    // Split, because which invariant did the work is the data that says whether
+    // both are earning their place -- and whether the deferred per-source-track
+    // idea is ever needed.
+    uint32_t   suppressedByRadius = 0;
+    uint32_t   suppressedBySeparation = 0;
+    bool       radiusSuppressedThisFrame = false;
     // Periodic totals: when they were last printed, and what they said. Printed
     // only when a counter has moved, so a quiet session stays quiet.
     uint32_t   totalsAt = 0;
@@ -366,6 +421,89 @@ void recordResidual(float resid) {
     s->seps[victim].resid = resid;
     s->seps[victim].lastSeen = s->frameNo;
     s->seps[victim].hits = 1;
+}
+
+// The remembered shell matching this radius, or -1. Stale entries do not match,
+// for the same reason separations do not: a graphics change that moves a cascade
+// distance should cost one frame, not a session of wrong answers.
+int findShell(float radius) {
+    State* s = g_state;
+    if (s->radiusTolerance <= 0.0f) return -1;
+    if (!std::isfinite(radius) || radius <= 0.0f) return -1;
+    const float tol = radius * s->radiusTolerance;
+    for (uint32_t i = 0; i < kShells; ++i) {
+        if (s->shells[i].framesSeen == 0) continue;
+        if (s->frameNo - s->shells[i].lastSeen > kRunawayWindow) continue;
+        if (fabsf(s->shells[i].radius - radius) <= tol) return static_cast<int>(i);
+    }
+    return -1;
+}
+
+// Only a CERTIFIED shell suppresses. An entry still gathering evidence is a
+// hypothesis, and acting on a hypothesis is how the first version of the
+// separation memory came to withhold eleven frames in a row.
+bool radiusIsCertifiedShell(float radius) {
+    const int i = findShell(radius);
+    return i >= 0 && g_state->shells[i].certified;
+}
+
+// Learn from a camera position, whether or not it produced a jump.
+//
+// This is the half that costs nothing: every accepted world camera teaches the
+// table, so by the time a swing produces a mark the sphere is usually already
+// certified and the mark never happens.
+void observeShell(const float* pos, float radius) {
+    State* s = g_state;
+    if (s->radiusTolerance <= 0.0f) return;
+    if (!std::isfinite(radius) || radius <= 0.0f) return;
+
+    int hit = findShell(radius);
+    if (hit < 0) {
+        uint32_t victim = 0;
+        for (uint32_t i = 0; i < kShells; ++i) {
+            if (s->shells[i].framesSeen == 0) { victim = i; break; }
+            if (s->shells[i].lastSeen < s->shells[victim].lastSeen) victim = i;
+        }
+        s->shells[victim] = State::Shell{};
+        s->shells[victim].radius = radius;
+        hit = static_cast<int>(victim);
+    }
+    State::Shell& e = s->shells[hit];
+
+    // ONCE PER FRAME, however many cameras that frame carried. Counting per
+    // write would let a single heavy frame with a dozen passes on one shell
+    // certify it outright, which is not a third of a second of evidence -- it is
+    // one frame wearing a disguise.
+    if (e.framesSeen > 0 && e.lastSeen == s->frameNo) return;
+
+    e.lastSeen = s->frameNo;
+    ++e.framesSeen;
+    e.radius += (radius - e.radius) * 0.25f;
+
+    const float inv = 1.0f / radius;
+    const float dir[3] = {pos[0] * inv, pos[1] * inv, pos[2] * inv};
+    if (e.distinctDirs == 0) {
+        for (uint32_t a = 0; a < 3; ++a) e.lastDir[a] = dir[a];
+        e.distinctDirs = 1;
+    } else {
+        const float dot = dir[0] * e.lastDir[0] + dir[1] * e.lastDir[1] +
+                          dir[2] * e.lastDir[2];
+        if (dot < kShellDirCos) {
+            for (uint32_t a = 0; a < 3; ++a) e.lastDir[a] = dir[a];
+            ++e.distinctDirs;
+        }
+    }
+
+    if (!e.certified && e.framesSeen >= kShellCertifyFrames &&
+        e.distinctDirs >= kShellCertifyDirs) {
+        e.certified = true;
+        Log::get().note(
+            "transition flash: a camera orbiting at radius %.0f identified (%u "
+            "sightings in %u distinct directions) -- an auxiliary render pass, not "
+            "the view. Frames whose camera lands on it are no longer withheld. A "
+            "view does not hold one distance while it swings.",
+            static_cast<double>(e.radius), e.framesSeen, e.distinctDirs);
+    }
 }
 
 bool finite3(const float* p) {
@@ -534,6 +672,23 @@ void installGlitchFrameFix() {
     } else {
         s.repeatPercent = repeat;
     }
+    // A FRACTION here, where the setting above it is a percentage. That is not
+    // an oversight but it IS a trap, so the ini says so beside both of them.
+    const float radiusTol = cfg.getFloat("advanced.transition_flash_radius_tolerance",
+                                         kDefaultRadiusTolerance);
+    if (!std::isfinite(radiusTol) || radiusTol < 0.0f || radiusTol > 0.05f) {
+        Log::get().note(
+            "transition_flash_radius_tolerance = %.4f is outside 0 to 0.05, so %.4f "
+            "is being used. It is a FRACTION -- 0.005 is half a percent -- and it is "
+            "how close two camera distances have to be to count as the same orbit. "
+            "Too wide and a genuine bad frame that happens to land near one gets "
+            "treated as the pass and shown.",
+            static_cast<double>(radiusTol),
+            static_cast<double>(kDefaultRadiusTolerance));
+        s.radiusTolerance = kDefaultRadiusTolerance;
+    } else {
+        s.radiusTolerance = radiusTol;
+    }
     s.bufferBytes = static_cast<uint32_t>(cfg.getInt("advanced.camera_buffer_bytes", 5376));
     s.posOffset = static_cast<uint32_t>(cfg.getInt("advanced.camera_buffer_offset", 1100));
 
@@ -659,6 +814,16 @@ void glitchFrameObserve(const void* data, uint32_t bytes, const void* resource) 
     s->frameFarMag2 = m2;
     for (uint32_t a = 0; a < 3; ++a) s->frameFarPos[a] = pos[a];
 
+    // LEARNED HERE, above every gate below it, and that placement is the point.
+    //
+    // A shell is evidence gathered by watching, so it must be gathered while the
+    // detector is still validating, while it has stood down, and on frames with
+    // no jump in them -- all states the returns below this line exit in. By the
+    // time a swinging camera produces a mark the sphere is usually certified
+    // already, and the mark never happens.
+    const float radius = sqrtf(m2);
+    observeShell(pos, radius);
+
     // Everything above is observation. Everything below can withhold a frame,
     // so a fix that has stood down stops exactly here.
     if (s->disabledForSession) return;
@@ -758,7 +923,22 @@ void glitchFrameObserve(const void* data, uint32_t bytes, const void* resource) 
     // Both come from the withheld branch, in that order. Eleven consecutive
     // cascade frames were withheld while the memory holding their magnitude was
     // being refreshed by the very frames it should have been suppressing.
-    s->suppressedThisFrame = jumped && residualIsKnownSeparation(resid);
+    // TWO INVARIANTS, ONE GATE. Geometry that repeats is a pass; a genuine
+    // excursion is one frame and repeats nothing.
+    //
+    // The shell is tested on WHERE THE TRACK LANDED, not on how far it travelled
+    // -- the whole reason it catches what the separation memory cannot is that
+    // the destination is the invariant and the distance is not. Where it came
+    // from is irrelevant.
+    //
+    // They are complementary rather than redundant, and the measured cases prove
+    // it in both directions: 6v's block alternation holds one position, so it
+    // has one direction and can never certify a sphere -- the separation memory
+    // takes it. Today's swinging camera has a different jump size every time --
+    // the shell takes it.
+    s->radiusSuppressedThisFrame = jumped && radiusIsCertifiedShell(radius);
+    s->suppressedThisFrame =
+        s->radiusSuppressedThisFrame || (jumped && residualIsKnownSeparation(resid));
     s->jumpedThisFrame = jumped;
 
     if (jumped && !s->suppressedThisFrame && s->cooldown == 0 &&
@@ -857,6 +1037,7 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
         s->frameFarMag2 = -1.0f;
         s->jumpedThisFrame = false;
         s->suppressedThisFrame = false;
+        s->radiusSuppressedThisFrame = false;
         return;
     }
 
@@ -865,7 +1046,17 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
         // a separation that is suppressing correctly from ageing out of the
         // memory and firing all over again.
         ++s->suppressed;
-        recordResidual(s->lastResid);
+        if (s->radiusSuppressedThisFrame) {
+            ++s->suppressedByRadius;
+            // NOT recorded as a separation. A radius-suppressed jump has a size
+            // that varies with where the swing came from -- that is the reason
+            // the separation memory misses these -- so feeding them in would
+            // stock the table with magnitudes that mean nothing and widen its
+            // chance of matching a real flash.
+        } else {
+            ++s->suppressedBySeparation;
+            recordResidual(s->lastResid);
+        }
         unmarkGlitchFrame();
     } else if (s->jumpedThisFrame && rendering && s->cooldown == 0 &&
         s->consecutive < s->maxConsecutive) {
@@ -1021,15 +1212,18 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
             const bool acted = glitchConsumerPresent();
             Log::get().note(
                 "transition flash so far: %u frame(s) %s this session, and %u "
-                "more recognised as render-pass flips and left alone (%u and %u "
-                "since the last of these lines). Compare the first number against "
-                "how many jumps, drops and map closes you have made: roughly one "
-                "per transition is it working. The second is expected to be large "
-                "near a planet surface and is not a fault -- those are frames that "
-                "would have been withheld before, and felt as judder.",
+                "more recognised as render-pass geometry and left alone -- %u by a "
+                "repeating jump size, %u by a camera orbiting at a fixed distance "
+                "(%u and %u since the last of these lines). Compare the first "
+                "number against how many jumps, drops and map closes you have "
+                "made: roughly one per transition is it working. The others are "
+                "expected to be large near a planet surface and are not a fault -- "
+                "they are frames that would have been withheld before, and felt as "
+                "judder.",
                 s->framesWithheld, acted ? "withheld" : "detected but NOT withheld "
                                            "(openvr_api.dll is not installed)",
-                s->suppressed, s->framesWithheld - s->totalsWithheld,
+                s->suppressed, s->suppressedBySeparation, s->suppressedByRadius,
+                s->framesWithheld - s->totalsWithheld,
                 s->suppressed - s->totalsSuppressed);
             s->totalsWithheld = s->framesWithheld;
             s->totalsSuppressed = s->suppressed;
@@ -1041,6 +1235,7 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
     s->markedThisFrame = false;
     s->jumpedThisFrame = false;
     s->suppressedThisFrame = false;
+    s->radiusSuppressedThisFrame = false;
     s->frameFarMag2 = -1.0f;
 }
 

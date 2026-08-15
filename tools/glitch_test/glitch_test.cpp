@@ -1,5 +1,5 @@
 // GENERATED from tools/glitch_test/glitch_test.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 e410ca7ce2abb21a]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 1c5ff287fa48099f]
 // glitch_test -- drives the transition-flash detector without the game.
 //
 // The port of glitch_frame.cpp into this repo compiled, linked, and passed
@@ -26,6 +26,7 @@
 // Usage: glitch_test.exe <scratch dir>
 #include <windows.h>
 
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -567,6 +568,167 @@ int main(int argc, char** argv) {
         settle(b, x, 20);
     }
 
+    // --- 7f. The swing: a camera orbiting at a fixed radius ---------------
+    //
+    // Fixture E. The six positions below are measured, not invented -- the
+    // withheld frames of the 19:18 session, six of ten sharing one radius
+    // (7,609-7,635, inside 0.3%) while pointing in wildly different directions.
+    // An auxiliary camera at a fixed distance, swinging as the player turns.
+    //
+    // The separation memory keys on jump size, which varies with where the swing
+    // came from; it caught two of these six in the field. The radius does not
+    // vary, and a sphere can be certified by watching rather than by paying a
+    // withheld frame per magnitude.
+    settle(b, x, 40);
+    {
+        // THE DIRECTION SWEEPS CONTINUOUSLY, and that is what makes this a test
+        // of the radius rather than of the memory beside it.
+        //
+        // The first draft cycled the six measured positions in a fixed order --
+        // which makes the jumps between them a repeating set of six magnitudes,
+        // exactly what the separation memory already catches. It passed with the
+        // sphere switched off, so it was testing the wrong invariant. The field
+        // swing was continuous: a camera at one distance pointing somewhere new
+        // each time, so no jump size ever repeats.
+        //
+        // Radius 7,619 with a 0.15% wobble, both from the measurement (six
+        // withholds spanning 7,609-7,635). The direction advances 27-39 degrees
+        // a step, so consecutive positions are always new.
+        // THE FRAME ALTERNATES between a near camera and the sphere, which is
+        // what the field did -- the sphere is an auxiliary pass that runs on
+        // some frames, and the jump is from the near track out to it.
+        //
+        // A sweep with nothing to alternate against produces no jumps at all:
+        // the step-to-step motion along a sphere is smooth, so the speed term in
+        // the threshold covers it and nothing is ever marked. That draft passed
+        // with the sphere switched off because there was nothing to suppress.
+        //
+        // The near track is deliberately kept SMALL. With it out at a hundred
+        // thousand units the jump length is dominated by the track and barely
+        // moves as the sphere swings, which puts consecutive jumps inside 2% of
+        // each other -- and then the separation memory catches them and the
+        // fixture is, again, testing the wrong invariant. In the field the two
+        // were comparable and the jumps ranged 6,639 to 10,111, which is what
+        // this reproduces.
+        const float kRadius = 7619.0f;
+        float ang = 0.0f, nx = 1500.0f;
+        uint32_t withheldEarly = 0, withheldLate = 0;
+        for (uint32_t i = 0; i < 240; ++i) {
+            nx += 7.0f;
+            bool marked = false;
+            if ((i % 3) == 2) {
+                // The turn RATE drifts, so no two jumps are the same size. A
+                // fixed step gives a handful of repeating magnitudes, which is
+                // exactly what the memory beside this one already handles.
+                ang += 0.31f + 0.0037f * static_cast<float>(i);
+                const float r = kRadius * (1.0f + 0.0015f * sinf(ang * 2.7f));
+                // Components chosen so x^2 + y^2 + z^2 is exactly r^2: the
+                // radius is the constant under test and must not wander with
+                // the direction.
+                marked = frame(b, r * cosf(ang), r * sinf(ang) * 0.8f,
+                               r * sinf(ang) * 0.6f);
+            } else {
+                marked = frame(b, nx, 0.0f, 0.0f);
+            }
+            if (i < 90) { if (marked) ++withheldEarly; }
+            else        { if (marked) ++withheldLate; }
+        }
+        check("an orbiting camera certifies and stops costing frames",
+              withheldLate == 0,
+              std::to_string(withheldLate) +
+                  " frames still withheld after the sphere should have certified "
+                  "(" + std::to_string(withheldEarly) + " before it did)");
+    }
+
+    // --- 7g. The real thing during a swing --------------------------------
+    //
+    // Fixture F, and the regression guard for the whole idea. With a certified
+    // sphere active, a genuine one-frame excursion whose camera lands on NO
+    // certified shell must still be withheld.
+    {
+        // THE SEPARATION MEMORY IS SWITCHED OFF FOR THIS CASE, so the assertion
+        // can only be about the shell.
+        //
+        // With both active the test cannot say which one acted, and that is not
+        // hypothetical: two drafts of this case failed because an earlier fixture
+        // had taught the separation table a magnitude within 2% of the excursion.
+        // The detector was right both times; the test was measuring the wrong
+        // thing. Isolating the invariant under test is what makes a pass mean
+        // what the name says.
+        Config::get().set("advanced.transition_flash_repeat_percent", "0");
+        installGlitchFrameFix();
+
+        // LONGER THAN THE REBASE COOLDOWN, which is 120 frames.
+        //
+        // The swing ends on a jump, the return to the smooth track is a change
+        // of reference frame, and that stands the detector down for 120 frames.
+        // A 20-frame settle left the excursion below inside that window, so it
+        // was not marked -- and the assertion read that as the sphere swallowing
+        // it. The next case has the same requirement for the same reason.
+        settle(b, x, 150);
+        x += 30.0f;
+        // 11,662 off the path -- inside the measured genuine band of 2,300 to
+        // 24,000, and at a radius on no certified shell.
+        const bool caught = frame(b, x, 10000.0f, -6000.0f);
+        check("a genuine excursion off every shell is still withheld", caught,
+              "the sphere swallowed a transition that was nowhere near it");
+        x += 30.0f;
+        frame(b, x, 0.0f, 0.0f);
+    }
+
+    // THE ACCEPTED LIMIT, asserted rather than left to be discovered.
+    //
+    // A real wrong-viewpoint frame that lands ON a certified shell, within half a
+    // percent, is suppressed and therefore shown. The shell is thin and a glitch
+    // offset is a vector sum with the excursion rather than a swing, so landing
+    // on it is a coincidence -- and a rarer one than the blindness windows the
+    // false positives themselves open at every transition (6a.1). This test
+    // exists so the limit is documented by something that fails if it changes,
+    // not by a comment.
+    {
+        settle(b, x, 150);   // past the rebase cooldown, as above
+        // Straight onto the shell: same distance, a direction not seen before.
+        const float onShell[3] = {0.0f, -7619.0f, 0.0f};
+        x += 30.0f;
+        const bool suppressedOnShell = !frame(b, onShell[0], onShell[1], onShell[2]);
+        check("an excursion landing exactly on a certified shell is NOT withheld",
+              suppressedOnShell,
+              "this is the accepted limit of the radius invariant; if this now "
+              "fires, the shell has been widened or the rule has changed");
+        x += 30.0f;
+        frame(b, x, 0.0f, 0.0f);
+
+        // Back on, for the complementarity case below -- which is about the
+        // separation memory doing the work the shell cannot.
+        Config::get().set("advanced.transition_flash_repeat_percent", "2.0");
+        installGlitchFrameFix();
+    }
+
+    // --- 7h. Complementarity ----------------------------------------------
+    //
+    // Fixture G. 6v's measured block alternation holds two FIXED positions, so
+    // each has one direction and can never certify a sphere -- if it did, a
+    // parked camera would be enough to switch the detector off. The separation
+    // memory is what takes that case. Two invariants, neither redundant.
+    settle(b, x, 40);
+    {
+        // 6v: A = (+9082 -135976 -5865), |A| = 136,405, in blocks of 4-6 frames.
+        uint32_t withheld = 0;
+        for (uint32_t i = 0; i < 90; ++i) {
+            x += 30.0f;
+            if ((i % 5) == 4) {
+                if (frame(b, 9082.0f, -135976.0f, -5865.0f)) ++withheld;
+            } else {
+                frame(b, x, 0.0f, 0.0f);
+            }
+        }
+        check("a parked auxiliary camera is caught, and not by the sphere",
+              withheld <= 1,
+              std::to_string(withheld) +
+                  " frames withheld on the 6v block pair; it has one direction, so "
+                  "the separation memory has to be the thing that catches it");
+    }
+
     // --- 8. The field replay ----------------------------------------------
     //
     // Not a shape derived from the field: the field itself. These are the
@@ -611,3 +773,4 @@ int main(int argc, char** argv) {
     printf("GLITCH TEST PASSED\n");
     return 0;
 }
+
