@@ -1,5 +1,5 @@
 // GENERATED from src/d3d11/glitch_frame.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 8867a42bc2a3369c]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 663092dab8753164]
 #include "glitch_frame.h"
 
 #include <windows.h>
@@ -1494,7 +1494,7 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
     s->frameFarMag2 = -1.0f;
 }
 
-void dumpCameraRing() {
+void dumpCameraRing(const char* trigger) {
     State* s = g_state;
     if (!s) return;
     if (!s->observing) {
@@ -1516,12 +1516,19 @@ void dumpCameraRing() {
     const uint64_t newest = s->ring[(s->ringHead - 1) % kRingFrames].qpc;
 
     Log::get().note(
-        "--- camera history: %llu frames, oldest first. Columns are milliseconds "
-        "before the dump, frame number, draws that reached the eye textures, and the "
-        "camera position. A bad frame is one whose position leaves the line the frames "
-        "either side of it are following, and returns. %u frame(s) withheld so far this "
-        "session. ---",
-        static_cast<unsigned long long>(have), s->framesWithheld);
+        "--- camera history: %llu frames, oldest first, written on %s. ZERO "
+        "MILLISECONDS IS %s -- the reaction time between seeing something and "
+        "reaching a key is what that column exists to let you subtract. Columns "
+        "are milliseconds before that point, frame number, draws that reached the "
+        "eye textures, and the camera position. A bad frame is one whose position "
+        "leaves the line the frames either side of it are following, and returns. "
+        "%u frame(s) withheld so far this session. ---",
+        static_cast<unsigned long long>(have),
+        trigger ? trigger : "the history key",
+        (trigger && strstr(trigger, "camera key"))
+            ? "about two seconds AFTER the press, so the press is further back"
+            : "the moment you pressed",
+        s->framesWithheld);
 
     for (uint64_t i = first; i < s->ringHead; ++i) {
         const RingEntry& e = s->ring[i % kRingFrames];

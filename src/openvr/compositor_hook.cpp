@@ -249,7 +249,7 @@ void configurePoseRing(State* s) {
 // No threshold here decides anything. The step figure is a NOTE -- it names the
 // largest one-frame movement in the window so a reader can judge it, and nothing
 // in EDVR behaves differently because of it.
-void dumpPoseRing(State* s) {
+void dumpPoseRing(State* s, const char* trigger, uint32_t framesAfterPress) {
     if (!s || s->poseHead == 0) return;
     const uint64_t have = s->poseHead < 900 ? s->poseHead : 900;
     const uint64_t first = s->poseHead - have;
@@ -257,14 +257,29 @@ void dumpPoseRing(State* s) {
     const uint64_t newest = s->poseRing[(s->poseHead - 1) % 900].qpc;
 
     Log::get().note(
-        "--- headset pose history: %llu frames, oldest first. Columns are "
-        "milliseconds before the dump, frame number, the headset position the "
-        "RUNTIME reported (before any EDVR offset), how far it moved since the "
-        "frame before, and the tracking state. ---",
-        static_cast<unsigned long long>(have));
+        "--- headset pose history: %llu frames, oldest first, written on %s. "
+        "ZERO MILLISECONDS IS %s -- the reaction time between seeing something "
+        "and reaching a key is what this column exists to let you subtract. "
+        "Columns are milliseconds before that point, frame number, the headset "
+        "position the RUNTIME reported (before any EDVR offset), how far it "
+        "moved since the frame before, and the tracking state. ---",
+        static_cast<unsigned long long>(have), trigger,
+        framesAfterPress == 0
+            ? "the moment you pressed"
+            : "about two seconds AFTER the press, so the press is further back");
 
-    float  worstStepMm = 0.0f;
-    uint32_t worstFrame = 0;
+    // THE MOST RECENT qualifying step, not the largest anywhere in the window.
+    //
+    // The window is ten seconds and a player presses the key a second or two
+    // after seeing something. Reporting the largest step meant a 150 mm recentre
+    // seven seconds earlier outranked everything near the press and read as the
+    // answer -- it is a bystander, and the line said nothing about when it was.
+    // Recency is the property that matters here; size is on every row already.
+    float    lastStepMm = 0.0f;
+    uint32_t lastStepFrame = 0;
+    double   lastStepMsAgo = 0.0;
+    uint32_t qualifying = 0;
+    float    biggestMm = 0.0f;
     uint32_t badStates = 0;
     const float* prev = nullptr;
 
@@ -278,13 +293,20 @@ void dumpPoseRing(State* s) {
                 d2 += d * d;
             }
             stepMm = sqrtf(d2) * 1000.0f;
-            if (stepMm > worstStepMm) { worstStepMm = stepMm; worstFrame = e.frame; }
+            if (stepMm > biggestMm) biggestMm = stepMm;
         }
         if (!e.valid || e.result != vr::TrackingResult_Running_OK) ++badStates;
         const double msAgo =
             freq ? static_cast<double>(static_cast<int64_t>(newest - e.qpc)) * 1000.0 /
                        static_cast<double>(freq)
                  : 0.0;
+        // Oldest first, so the last one to pass is the most recent one.
+        if (stepMm > s->poseStepNoteMm) {
+            ++qualifying;
+            lastStepMm = stepMm;
+            lastStepFrame = e.frame;
+            lastStepMsAgo = msAgo;
+        }
         Log::get().note("HMD %8.1fms f%-7u pos=(%+.3f %+.3f %+.3f) step=%6.1fmm %s%s",
                         -msAgo, e.frame, e.pos[0], e.pos[1], e.pos[2], stepMm,
                         e.valid ? "" : "POSE-INVALID ",
@@ -295,7 +317,7 @@ void dumpPoseRing(State* s) {
 
     // THE VERDICT. Two numbers and a count, so the next "was that EDVR?" session
     // does not have to be reconstructed by hand from three log files.
-    if (worstStepMm > s->poseStepNoteMm) {
+    if (qualifying > 0) {
         // DID IT COME BACK? The same question the camera side has always asked,
         // and for the same reason: a step that RETURNS is a one-frame tracking
         // fault, and a step that STAYS is the runtime re-establishing where zero
@@ -312,7 +334,7 @@ void dumpPoseRing(State* s) {
             uint32_t seen = 0;
             for (uint64_t i = first; i < s->poseHead; ++i) {
                 const State::PoseEntry& e = s->poseRing[i % 900];
-                if (e.frame == worstFrame) { seen = 1; continue; }
+                if (e.frame == lastStepFrame) { seen = 1; continue; }
                 if (!seen) { before = e.pos; continue; }
                 if (++seen > 11) break;
                 if (before) {
@@ -327,29 +349,29 @@ void dumpPoseRing(State* s) {
         }
         if (returned) {
             Log::get().note(
-                "--- the headset moved %.0f mm in ONE frame at f%u and came BACK, "
-                "past the %.0f mm worth noting. A head does not travel that far and "
+                "--- the headset moved %.0f mm in ONE frame at f%u, %.0f ms before this "
+                "was written, and came BACK. A head does not travel that far and "
                 "return, so that frame's viewpoint came from the TRACKING and not "
                 "from the game. EDVR cannot fix it -- the compositor reprojects from "
                 "the same tracking data -- but it is a different bug from the game "
                 "drawing a bad frame, and the two are identical from inside a "
                 "headset. ---",
-                worstStepMm, worstFrame, s->poseStepNoteMm);
+                lastStepMm, lastStepFrame, lastStepMsAgo);
         } else {
             Log::get().note(
-                "--- the reported headset position moved %.0f mm in one frame at f%u "
-                "and STAYED there. That is the runtime re-establishing where zero "
-                "is, not a tracking fault -- Elite does it at some mode changes. It "
-                "still moves your viewpoint, and EDVR neither causes it nor can "
-                "prevent it, but nothing is wrong with your tracking. ---",
-                worstStepMm, worstFrame);
+                "--- the reported headset position moved %.0f mm in one frame at f%u, "
+                "%.0f ms before this was written, and STAYED there. That is the runtime "
+                "re-establishing where zero is, not a tracking fault -- Elite does it "
+                "at some mode changes. It still moves your viewpoint, and EDVR neither "
+                "causes it nor can prevent it, but nothing is wrong with your tracking. ---",
+                lastStepMm, lastStepFrame, lastStepMsAgo);
         }
     } else {
         Log::get().note(
-            "--- the largest one-frame headset movement here is %.0f mm, under "
-            "the %.0f mm worth noting, so tracking looks clean across this "
-            "window. Anything seen in it came from somewhere else. ---",
-            worstStepMm, s->poseStepNoteMm);
+            "--- the largest one-frame headset movement anywhere in this window is "
+            "%.0f mm, under the %.0f mm worth noting, so tracking looks clean "
+            "across it. Anything seen came from somewhere else. ---",
+            biggestMm, s->poseStepNoteMm);
     }
     if (badStates > 0) {
         Log::get().note(
@@ -517,14 +539,16 @@ vr::EVRCompositorError hookedWaitGetPoses(void* self,
     // Polled rather than signalled across the shared block: a second channel for
     // a diagnostic keypress would be more machinery than the thing it carries,
     // and the two logs are read together anyway.
-    if (s->poseKeyBound && s->poseDumpKey.pressed()) dumpPoseRing(s);
+    if (s->poseKeyBound && s->poseDumpKey.pressed()) dumpPoseRing(s, "the history key", 0);
     // The camera key arms a delayed dump, matching the other side: the ring
     // holds the frames BEFORE it is written, so taking it on the press would
     // capture the approach and none of the transition.
     if (s->poseCamBound && s->poseDumpOnCam && s->poseCamKey.pressed()) {
         s->poseDumpCountdown = 180;
     }
-    if (s->poseDumpCountdown > 0 && --s->poseDumpCountdown == 0) dumpPoseRing(s);
+    if (s->poseDumpCountdown > 0 && --s->poseDumpCountdown == 0) {
+        dumpPoseRing(s, "your external-camera key", 180);
+    }
 
     // The head offset, applied BEFORE the game sees the poses.
     //

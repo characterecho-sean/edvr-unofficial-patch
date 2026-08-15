@@ -1,5 +1,5 @@
 // GENERATED from src/d3d11/glitch_frame.h in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 eef107b514392522]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 23fe7214cc95ccff]
 // The one-frame flash at a transition.
 //
 // Jumping, dropping out of supercruise, or closing the galaxy map occasionally
@@ -53,7 +53,11 @@ bool glitchFrameNeedsEyeDraws();
 
 // Writes the recorded camera history to the log. Bound to a key so a player who
 // sees a flash can capture the seconds around it on their own machine.
-void dumpCameraRing();
+// 	rigger names the key that asked for it, and decides what the header says
+// zero milliseconds means -- the history key dumps AT the press, the camera key
+// two seconds after it, and a reader who does not know which is subtracting a
+// reaction time from the wrong end.
+void dumpCameraRing(const char* trigger = nullptr);
 
 void shutdownGlitchFrameFix();
 

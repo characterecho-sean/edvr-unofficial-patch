@@ -1,4 +1,4 @@
-﻿#include "device_hook.h"
+#include "device_hook.h"
 
 #include <windows.h>
 
@@ -67,6 +67,14 @@ struct State {
     Hotkey externalCamKey;
     uint64_t frameCounter = 0;
 
+    // Dump the camera history on every external-camera keypress. Diagnostic,
+    // off by default: 900 lines a press.
+    bool     dumpOnExternalCam = false;
+    uint32_t dumpCountdown = 0;
+    // Frames to hold across an external-camera transition. 0 = off, and it stays
+    // there: see the note beside the setting in edvr.ini.
+    uint32_t holdFramesOnExternalCam = 0;
+
     // Crash sentinel for the d3d11 half.
     //
     // The openvr half has had one since it was written, and this half -- which
@@ -83,13 +91,6 @@ struct State {
     // It does NOT catch a crash half an hour in -- that session confirmed long
     // before, and disabling the hooks at the next launch would not obviously
     // help anyway, since such a crash is not reproducible from startup.
-    // Dump the camera history on every external-camera keypress. Diagnostic,
-    // off by default: 900 lines a press.
-    bool     dumpOnExternalCam = false;
-    uint32_t dumpCountdown = 0;
-    // Frames to hold across an external-camera transition. 0 = off.
-    uint32_t holdFramesOnExternalCam = 0;
-
     Sentinel* sentinel = nullptr;
     uint32_t  framesSeen = 0;
     bool      sentinelConfirmed = false;
@@ -173,10 +174,10 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
         g_state->holdFramesOnExternalCam = static_cast<uint32_t>(
             Config::get().getIntInRange("advanced.hold_frames_on_external_cam", 0, 0, 120));
 
-        if (g_state->dumpKey.pressed()) dumpCameraRing();
+        if (g_state->dumpKey.pressed()) dumpCameraRing("the history key");
         // The delayed dump armed by the camera key, above.
         if (g_state->dumpCountdown > 0 && --g_state->dumpCountdown == 0) {
-            dumpCameraRing();
+            dumpCameraRing("your external-camera key");
         }
         // Told to the gate, not acted on here. These keys are the player's OWN
         // Elite bindings: EDVR does not send them, press them or interfere with
