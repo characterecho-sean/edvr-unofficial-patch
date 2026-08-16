@@ -1,5 +1,5 @@
 // GENERATED from src/d3d11/head_offset_gate.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 78419e0f00cd37d6]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 f020a475db639741]
 #include "head_offset_gate.h"
 
 #include "../common/config.h"
@@ -19,6 +19,13 @@ namespace {
 // its camera view to 0 while EDVR held or counted the old one (6ay), so the
 // count must restart at the game's own reset point to stay anchored.
 constexpr uint32_t kNewFootSessionFrames = 900;
+
+// How long the journal's Disembark may stand in for a stale Status.json.
+// Measured flag lag after the event: ~5.8 s (session 1, 10:57:06->10:57:12)
+// and <=6.7 s (session 2, 11:02:21->11:02:28), so ten seconds covers the
+// airlock animation with margin while staying far below a real ship leg.
+// The grace usually ends earlier anyway -- at the first on-foot sample.
+constexpr uint32_t kFootGraceFrames = 900;
 
 // One instance, file-local. The gate is per-process by nature -- there is one
 // player in one mode -- and keeping it out of the render hooks' State is what
@@ -66,6 +73,16 @@ struct Gate {
     bool     autoIntentNoted = false;
     uint32_t liveSample = 0;             // running Status.json sample count
     uint32_t sampleAtPanelStop = 0;      // liveSample when the panel stopped
+    // THE DISEMBARK'S STALE-STATUS WINDOW (measured 2026-08-16, both field
+    // sessions): after the journal's Disembark, Status.json keeps answering
+    // "not on foot" for ~6 seconds of airlock animation. Until the flag has
+    // been observed TRUE in this foot session, false describes the PREVIOUS
+    // leg -- so the boarding-exit must not fire on it (it killed the latch
+    // six frames running at 10:57:12), and keyless arming leans on the
+    // journal's own declaration instead of losing entries to the window.
+    bool     liveOnFootSeenThisFoot = false;
+    bool     footGraceJournal = false;   // Disembark declared, flag not yet true
+    uint32_t footGraceFrame = 0;         // when that declaration landed
     bool     gateNoConsumerNoted = false;
     uint32_t gateIntentAge = 0;          // frames since the key was pressed
     uint32_t gateIntentGrace = 180;      // frames a press gets to take effect
@@ -163,13 +180,25 @@ void headOffsetGateSetOnFootLive(bool known, bool onFoot, uint32_t sample) {
     g.liveOnFootKnown = known;
     g.liveOnFoot = onFoot;
     g.liveSample = sample;
+    // The first true of a foot session retires the disembark grace: from
+    // here the flag describes THIS leg, and false means boarding again.
+    if (known && onFoot) g.liveOnFootSeenThisFoot = true;
 }
 
 uint32_t headOffsetGateEnterCount() { return g.gateCameraEnters; }
 
 int headOffsetGateCountedView() { return g.gateViewIndex; }
 
-void headOffsetGateNewFootSession(const char* source) {
+void headOffsetGateNewFootSession(const char* source, bool journalSaysSo) {
+    // The grace opens OUTSIDE the dedupe: when the panel heuristic spoke
+    // first, the journal's later echo is a duplicate reset but not duplicate
+    // news -- it still says the status file is lagging this landing. The
+    // grace is inert once the flag has been seen true, so a late open costs
+    // nothing.
+    if (journalSaysSo) {
+        g.footGraceJournal = true;
+        g.footGraceFrame = g.gateFrameNo ? g.gateFrameNo : 1;
+    }
     // ONE BOUNDARY, POSSIBLY TWO DETECTORS. The journal's Disembark and the
     // panel-return heuristic both mark the same landing, seconds apart --
     // whichever speaks first does the work and the other stands down, so the
@@ -181,12 +210,15 @@ void headOffsetGateNewFootSession(const char* source) {
     g.gateLastFootReset = g.gateFrameNo ? g.gateFrameNo : 1;
     g.gateViewIndex = 0;
     g.gateBridgeStarted = false;   // any held view belongs to the old session
+    g.liveOnFootSeenThisFoot = false;   // this session's flag not yet observed
     Log::get().note(
         "head offset: a new on-foot session (%s). The game resets its camera "
         "view to 0 across this, so the view count and any held view restart "
         "from 0 with it.",
         source);
 }
+
+void headOffsetGateNoteEmbark() { g.footGraceJournal = false; }
 
 void headOffsetGateKeyPressed() {
     g.gateHaveKey = true;
@@ -475,9 +507,21 @@ void headOffsetGateFrame(uint32_t frameNo, uint32_t panelDraws, uint32_t eyeDraw
         // meaning -- and only while the live context is KNOWN; menus, a
         // missing Status.json or the watcher being off all answer unknown,
         // which restores the bind-a-key requirement precisely.
-        const bool autoIntent =
-            !g.gateKeyBound && g.liveOnFootKnown && g.liveOnFoot &&
+        // Two ways to know the player is on foot: a fresh Status.json sample,
+        // or the journal's Disembark inside its grace window -- the file lags
+        // that boundary by ~6 measured seconds, and entries made during the
+        // lag were being lost (11:02:28 armed only because the player took
+        // 6.7 s to enter; the 60-frame windows before that were forfeit).
+        // The grace dies at the first true sample, at Embark, or at expiry;
+        // physics closes the boarding hole -- a re-board requires standing
+        // first, and standing is the true sample that ends the grace.
+        const bool statusFresh =
+            g.liveOnFootKnown && g.liveOnFoot &&
             g.liveSample > g.sampleAtPanelStop;
+        const bool graceActive =
+            g.footGraceJournal && !g.liveOnFootSeenThisFoot &&
+            g.gateFrameNo - g.footGraceFrame < kFootGraceFrames;
+        const bool autoIntent = !g.gateKeyBound && (statusFresh || graceActive);
         if (autoIntent && !g.autoIntentNoted) {
             g.autoIntentNoted = true;
             Log::get().note(
@@ -526,7 +570,13 @@ void headOffsetGateFrame(uint32_t frameNo, uint32_t panelDraws, uint32_t eyeDraw
         // closes it without one -- and it must beat the offset, because an
         // offset that follows the player into the cockpit is the failure this
         // module exists to prevent.
-        if (g.gateInCamera && g.liveOnFootKnown && !g.liveOnFoot) {
+        // Only a flag that has been TRUE this foot session gets to say the
+        // player left it. Right after a disembark the file still answers for
+        // the previous leg (~6 s measured), and firing on that stale false
+        // killed the latch six frames running while the player stood in the
+        // camera (10:57:12). False-before-first-true is history, not news.
+        if (g.gateInCamera && g.liveOnFootKnown && !g.liveOnFoot &&
+            g.liveOnFootSeenThisFoot) {
             g.gateInCamera = false;
             g.gateExternal = false;
             ++g.gateExits;

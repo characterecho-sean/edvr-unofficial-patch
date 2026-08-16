@@ -1,5 +1,5 @@
 // GENERATED from tools/gate_test/gate_test.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 b2aa6e71c144b5c0]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 29dbbb69e3e8ca4e]
 // gate_test -- replays frame sequences through the head-offset gate.
 //
 // WHY
@@ -535,6 +535,92 @@ int main(int argc, char** argv) {
     panelFrame(200);
     sceneFrame(30);
     check(false, "keyless with no live context: nothing can arm, as before");
+
+    // --------------------------------- the disembark's stale-status window
+    //
+    // Measured 2026-08-16, both field sessions: after the journal's
+    // Disembark, Status.json keeps answering "not on foot" for ~6 seconds
+    // while the airlock animation runs. A player entering the camera inside
+    // that window is on foot by the game's own declaration -- and the
+    // boarding-exit firing on the stale flag killed the latch six frames
+    // running (10:57:12). Until the flag has been seen TRUE this foot
+    // session, false describes the PREVIOUS leg, not a boarding.
+    begin(true);
+    headOffsetGateSetView(g_wantView);
+    headOffsetGateSetOnFootLive(true, false, 1);   // in the ship
+    sceneFrame(2000);                              // the leg
+    headOffsetGateNewFootSession("test: journal Disembark");
+    panelFrame(60);                                // standing, panel up
+    headOffsetGateKeyPressed();                    // straight into the camera
+    panelFrame(2);
+    headOffsetGateSetOnFootLive(true, false, 2);   // stale: still "in ship"
+    sceneFrame(12);
+    headOffsetGateViewBumped();
+    headOffsetGateViewBumped();
+    sceneFrame(2);
+    check(true, "a stale not-on-foot sample straight after disembarking does "
+                "not kill the camera the player is standing in");
+    headOffsetGateSetOnFootLive(true, true, 3);    // the flag catches up
+    sceneFrame(30);
+    check(true, "the flag catching up changes nothing");
+    headOffsetGateSetOnFootLive(true, false, 4);   // NOW false means boarded
+    sceneFrame(2);
+    check(false, "false after true is a boarding and exits");
+
+    // The other side of the same window: KEYLESS arming during it. The
+    // journal has declared the foot session; demanding a fresh Status
+    // sample agree forfeits every fast entry (11:02:28 armed only because
+    // the player took 6.7 s to reach the camera).
+    begin(false);
+    headOffsetGateSetView(g_wantView);
+    headOffsetGateSetOnFootLive(true, false, 1);   // in the ship
+    sceneFrame(2000);                              // the leg
+    headOffsetGateNewFootSession("test: journal Disembark", true);
+    headOffsetGateSetOnFootLive(true, false, 2);   // stale through the airlock
+    panelFrame(60);                                // standing, panel up
+    sceneFrame(12);                                // straight into the camera
+    check(true, "keyless: the journal's disembark stands in while the status "
+                "file catches up, so a fast entry is not forfeit");
+
+    // The grace is a window, not a licence: expired with the status never
+    // confirming, entries revert to needing the fresh sample.
+    begin(false);
+    headOffsetGateSetView(g_wantView);
+    headOffsetGateSetOnFootLive(true, false, 1);
+    sceneFrame(2000);
+    headOffsetGateNewFootSession("test: journal Disembark", true);
+    headOffsetGateSetOnFootLive(true, false, 2);
+    sceneFrame(1000);                              // grace expires unconfirmed
+    panelFrame(60);
+    sceneFrame(12);
+    check(false, "keyless: the disembark grace expires and the old rule "
+                 "stands");
+
+    // Embark cancels the grace: boarding again is not a camera entry.
+    begin(false);
+    headOffsetGateSetView(g_wantView);
+    headOffsetGateSetOnFootLive(true, false, 1);
+    sceneFrame(2000);
+    headOffsetGateNewFootSession("test: journal Disembark", true);
+    headOffsetGateNoteEmbark();
+    headOffsetGateSetOnFootLive(true, false, 2);
+    panelFrame(60);
+    sceneFrame(12);
+    check(false, "keyless: an embark cancels the grace");
+
+    // The grace opens even when the reset itself dedupes: the panel
+    // heuristic spoke first, the journal's echo is a duplicate reset but
+    // not duplicate news about the status file lagging.
+    begin(false);
+    headOffsetGateSetView(g_wantView);
+    headOffsetGateSetOnFootLive(true, false, 1);
+    sceneFrame(2000);                              // the leg
+    panelFrame(30);                                // heuristic fires the reset
+    headOffsetGateNewFootSession("test: journal Disembark", true);  // deduped
+    headOffsetGateSetOnFootLive(true, false, 2);   // still stale
+    panelFrame(30);
+    sceneFrame(12);
+    check(true, "keyless: a deduped journal echo still opens the grace");
 
     // ------------------------------------------------------- certification
     //

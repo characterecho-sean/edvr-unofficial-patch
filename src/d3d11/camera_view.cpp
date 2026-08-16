@@ -1,5 +1,5 @@
 // GENERATED from src/d3d11/camera_view.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 eba771dc0ae0c11d]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 bf18baea98c74f33]
 #include "camera_view.h"
 
 #include <windows.h>
@@ -101,6 +101,20 @@ constexpr size_t kMaxAnchorSites = 64;
 // game rebuilds them. Two seconds of holding still is the difference between
 // riding that out and losing the feature for five minutes.
 constexpr uint32_t kMoveGrace = 120;
+
+// Pointer-hunt bounds. Hunts are re-run when the array is re-found at a NEW
+// base while a region list is still in hand; a session that keeps moving is
+// capped rather than walked forever. The refind walk tolerates the gaps the
+// field dumps show (empty slots mid-array) and stops at more slots than any
+// observed layout has had.
+constexpr uint32_t kMaxHunts = 6;
+constexpr size_t   kMaxRefindSlots = 32;
+
+// Candidate step evidence, capped: the 11:02:28 non-certification could not
+// be diagnosed because nothing said whether the watched records stepped at
+// all. A handful of lines answers that; a line per step would be the log
+// burying itself again.
+constexpr uint32_t kStepNotes = 16;
 
 // How long a run that is LONG ENOUGH but reads wrong is kept under observation
 // before the scan is written off.
@@ -209,8 +223,11 @@ struct State {
     // holds: certify by observation, refuse to guess between equals.
     const uint8_t* arrayBase = nullptr;
     std::vector<const uint8_t* const*> anchorSites;
-    bool     anchorHuntDone = false;
+    const uint8_t* huntedBase = nullptr;   // the base the sites were hunted for
+    uint32_t hunts = 0;
     uint32_t anchorSurvived = 0;
+    uint32_t anchorFollowedMoves = 0;      // moves resolved by a pointer, not a scan
+    uint32_t stepNotes = 0;                // candidate step evidence, capped
     bool     candNoted = false;
 
     int       lastView = -1;
@@ -449,9 +466,10 @@ void huntAnchors(const uint8_t* target) {
     }
     Log::get().note(
         "camera view: %zu place(s) in memory hold the camera array's address. "
-        "None is trusted yet -- when the array moves, whichever of them follows "
-        "it is a live pointer to it, and re-finding the array becomes instant "
-        "instead of an eleven-gigabyte search. This line is evidence, not a fix.",
+        "When the array moves, whichever of them follows it is a live pointer "
+        "to it, and re-finding becomes a dereference instead of an "
+        "eleven-gigabyte search -- through the same proving any find passes, "
+        "so a pointer that lies costs a probe, never a wrong offset.",
         g_s.anchorSites.size());
 }
 
@@ -483,8 +501,7 @@ void checkAnchors(const uint8_t* oldBase) {
         g_s.anchorSites.size(), followed, stale, gone,
         followed == 1
             ? "Exactly one followed, which is what a live pointer to the array "
-              "looks like -- report this log and it becomes the way the array is "
-              "found."
+              "looks like."
             : "Not yet conclusive.");
 }
 
@@ -508,17 +525,26 @@ void noteArrayBase(const uint8_t* base) {
     }
     if (g_s.arrayBase && base != g_s.arrayBase) checkAnchors(g_s.arrayBase);
     g_s.arrayBase = base;
-    if (g_s.anchorHuntDone) return;
-    g_s.anchorHuntDone = true;
+    // Re-hunt for every NEW base while a region list is in hand -- the
+    // one-shot hunt left later homes with no pointers at all, so the first
+    // move was the last one a pointer could ever resolve.
+    if (base == g_s.huntedBase) return;
+    if (g_s.hunts >= kMaxHunts) return;
     if (g_s.regions.empty()) {
-        // Said out loud rather than logging "0 places found", which reads as
-        // evidence when it is the absence of a search.
-        Log::get().note(
-            "camera view: cannot look for pointers to the camera array -- the "
-            "region list was released when the scan finished, so there is "
-            "nothing to search. No anchor evidence from this session.");
+        // Said out loud ONCE rather than logging "0 places found", which
+        // reads as evidence when it is the absence of a search. Later finds
+        // reach here routinely (a pointer-followed base has no fresh region
+        // list), and that is not news.
+        if (g_s.hunts == 0) {
+            Log::get().note(
+                "camera view: cannot look for pointers to the camera array -- "
+                "the region list was released when the scan finished, so there "
+                "is nothing to search. No anchor evidence from this find.");
+        }
         return;
     }
+    ++g_s.hunts;
+    g_s.huntedBase = base;
     huntAnchors(base);
 }
 // Is there a record at this address AT ALL?
@@ -535,6 +561,122 @@ bool slotOccupied(const uint8_t* rec) {
         ok = (*anchor == g_s.typePtr);
     });
     return ok;
+}
+
+// Rebuild the candidate watch list from g_s.records, CARRYING earned votes
+// for records still at the same address. Rescans run every few seconds
+// during churn -- and one now fires on every camera entry -- so the old
+// unconditional wipe restarted every candidate's two-step walk mid-stride,
+// which is one suspect for the 11:02:28 non-certification the step notes
+// exist to settle.
+void rebuildCands() {
+    std::vector<State::Cand> prior;
+    prior.swap(g_s.cands);
+    size_t carried = 0;
+    for (const uint8_t* rec : g_s.records) {
+        const uint32_t v = recordValue(rec);
+        if (v > g_s.plausibleMax) continue;
+        if (g_s.cands.size() >= kMaxCandidates) break;
+        State::Cand c{};
+        c.rec = rec;
+        const State::Cand* old = nullptr;
+        for (const State::Cand& p : prior) {
+            if (p.rec == rec) { old = &p; break; }
+        }
+        if (old) {
+            c.vote = old->vote;   // progress survives the refresh
+            ++carried;
+        } else {
+            c.vote.last = v;
+            c.vote.primed = true;
+            // Anchored when the record already reads the view the gate's
+            // count predicts (0 after a disembark, the last confirmed view
+            // within a session): such a candidate certifies on the two steps
+            // the player's own walk to their preset supplies.
+            c.vote.anchored =
+                v == static_cast<uint32_t>(headOffsetGateCountedView());
+        }
+        g_s.cands.push_back(c);
+    }
+    if (!g_s.cands.empty()) {
+        char carriedNote[64] = "";
+        if (carried) {
+            snprintf(carriedNote, sizeof(carriedNote),
+                     " (%zu carried forward with their progress)", carried);
+        }
+        Log::get().note(
+            "camera view: watching %zu candidate record(s)%s to see which one "
+            "behaves like a camera preset -- a small number that stays in range "
+            "and CHANGES when you cycle cameras. Cycle through your presets once "
+            "and it will identify itself. Until then the preset is unknown and "
+            "the head offset stays off.",
+            g_s.cands.size(), carriedNote);
+    }
+}
+
+// At read-death, before spending a scan: do the remembered pointer sites
+// nominate a new home? A nomination is NOT a certification -- whatever they
+// point at re-enters through the same proving every find passes (the
+// ordinal through its 600-frame probe, the watcher through behavioural
+// certification), so a wrong pointer costs a probe, never a wrong offset.
+// Refusals mirror the scan's: sites that disagree are none of them believed.
+bool anchorRefind() {
+    if (g_s.anchorSites.empty()) return false;
+    const uint8_t* nominated = nullptr;
+    bool disagree = false;
+    for (const uint8_t* const* site : g_s.anchorSites) {
+        const uint8_t* now = nullptr;
+        if (!guarded("camera_view/anchorfollow", [&] { now = *site; })) continue;
+        if (!now || now == g_s.arrayBase) continue;   // stale: the dead home
+        if (!slotOccupied(now)) continue;             // target is not a record
+        if (!nominated) { nominated = now; continue; }
+        if (now != nominated) disagree = true;
+    }
+    if (!nominated) return false;
+    if (disagree) {
+        Log::get().note(
+            "camera view: the remembered pointers disagree about where the "
+            "array went, so none of them is believed and the scan decides.");
+        return false;
+    }
+    // The census line the anchor hunt promised: which sites followed.
+    checkAnchors(g_s.arrayBase);
+    // Walk the nominated base the way the scan reports one: records at the
+    // known stride, gaps tolerated, capped above any observed layout.
+    g_s.records.clear();
+    for (size_t slot = 0; slot < kMaxRefindSlots; ++slot) {
+        const uint8_t* rec = nominated + slot * kStride;
+        if (slotOccupied(rec)) g_s.records.push_back(rec);
+    }
+    if (g_s.records.size() < 3) {
+        g_s.records.clear();
+        return false;
+    }
+    ++g_s.anchorFollowedMoves;
+    rebuildCands();
+    // The ordinal re-enters as PROVISIONAL, and only when the walk is
+    // gapless through it -- the provisional prover back-computes the base
+    // by ordinal * stride, which a gap would silently shift.
+    const uint8_t* ordRec = g_s.records.size() > g_s.ordinal
+                                ? g_s.records[g_s.ordinal] : nullptr;
+    const bool gapless =
+        ordRec == nominated + g_s.ordinal * kStride;
+    if (ordRec && gapless) {
+        g_s.provisional = ordRec;
+        g_s.provisionalFrames = kProbeWindow;
+    }
+    g_s.arrayBase = nominated;
+    Log::get().note(
+        "camera view: a remembered pointer already names the array's new home "
+        "-- %zu record(s) at %p, adopted for proving instead of walking the "
+        "heap (pointer follow %u). %s",
+        g_s.records.size(), (const void*)nominated, g_s.anchorFollowedMoves,
+        (ordRec && gapless)
+            ? "The ordinal re-enters through its probe and the watcher gets "
+              "the records as candidates."
+            : "The ordinal slot is empty or behind a gap, so the watcher "
+              "alone decides from these candidates.");
+    return true;
 }
 
 // Called when a scan completes. Picks the camera settings ARRAY out of the
@@ -767,32 +909,7 @@ void finishScan() {
     //
     // The ordinal survives as a HINT and only as a tie-break, which is what it
     // has always deserved: it was measured twice and then contradicted.
-    g_s.cands.clear();
-    for (const uint8_t* rec : g_s.records) {
-        const uint32_t v = recordValue(rec);
-        if (v > g_s.plausibleMax) continue;
-        if (g_s.cands.size() >= kMaxCandidates) break;
-        State::Cand c{};
-        c.rec = rec;
-        c.vote.last = v;
-        c.vote.primed = true;
-        // Anchored when the record already reads the view the gate's count
-        // predicts (0 after a disembark, the last confirmed view within a
-        // session): such a candidate certifies on the two steps the player's
-        // own walk to their preset supplies.
-        c.vote.anchored =
-            v == static_cast<uint32_t>(headOffsetGateCountedView());
-        g_s.cands.push_back(c);
-    }
-    if (!g_s.cands.empty()) {
-        Log::get().note(
-            "camera view: watching %zu candidate record(s) to see which one "
-            "behaves like a camera preset -- a small number that stays in range "
-            "and CHANGES when you cycle cameras. Cycle through your presets once "
-            "and it will identify itself. Until then the preset is unknown and "
-            "the head offset stays off.",
-            g_s.cands.size());
-    }
+    rebuildCands();
 
     if (candidates.size() == 1) {
         g_s.chosen = runs[candidates[0]].base + g_s.ordinal * kStride;
@@ -1089,8 +1206,34 @@ void pollCandidates() {
         // pure, and driven directly by the frame-feed test, because both of
         // this module's field-caught certification bugs (6au, 6aw) were in
         // exactly this judgement and cost a flight each to find.
-        if (cameraViewCertStep(&c.vote, v, inCamera, pressRecent,
-                               g_s.pressWitness)) {
+        const uint32_t beforeChanges = c.vote.changes;
+        const uint32_t beforeLast = c.vote.last;
+        const bool certified = cameraViewCertStep(&c.vote, v, inCamera,
+                                                  pressRecent, g_s.pressWitness);
+        // Step evidence, capped: the 11:02:28 non-certification was
+        // undiagnosable because nothing said whether the watched records
+        // stepped at all during the player's cycling.
+        if (c.vote.changes > beforeChanges && g_s.stepNotes < kStepNotes) {
+            ++g_s.stepNotes;
+            Log::get().note(
+                "camera view: watched record %zu stepped %u -> %u in the "
+                "camera (%u sequential%s%s). Capped at %u such lines a "
+                "session.",
+                i, beforeLast, v, c.vote.changes,
+                c.vote.anchored ? ", anchored at the predicted start" : "",
+                c.vote.coincident ? ", press-coincident" : "",
+                kStepNotes);
+        } else if (beforeChanges > 0 && c.vote.changes == 0 &&
+                   g_s.stepNotes < kStepNotes) {
+            ++g_s.stepNotes;
+            Log::get().note(
+                "camera view: watched record %zu broke its sequence "
+                "(%u -> %u %s), so its %u step(s) start over.",
+                i, beforeLast, v,
+                inCamera ? "in the camera" : "OUT of the camera",
+                beforeChanges);
+        }
+        if (certified) {
             ++qualified;
             qualifiedAt = i;
         }
@@ -1291,6 +1434,13 @@ int cameraViewCurrent() {
         g_s.badReads = 0;
         g_s.usable = false;
         g_s.chosen = nullptr;
+        // A remembered pointer may already name the new home: one guarded
+        // dereference against ten gigabytes walked, and the nomination still
+        // has to prove itself the way any find does.
+        if (anchorRefind()) {
+            g_s.lastView = -1;
+            return -1;
+        }
         g_s.needRescan = true;
         g_s.cooldown = kRescanCooldown;
         // Reported per MOVE, not once per session. failNoted latched on the

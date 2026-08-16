@@ -69,6 +69,7 @@ struct State {
     Hotkey externalCamKey;
     Hotkey extCamNextKey;
     uint32_t lastJournalDisembarks = 0;
+    uint32_t lastJournalEmbarks = 0;
     uint32_t lastCameraEnters = 0;
     uint64_t frameCounter = 0;
 
@@ -253,7 +254,13 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
             if (d != g_state->lastJournalDisembarks) {
                 g_state->lastJournalDisembarks = d;
                 headOffsetGateNewFootSession(
-                    "the game's journal says you disembarked");
+                    "the game's journal says you disembarked",
+                    /*journalSaysSo=*/true);
+            }
+            const uint32_t e = journalEmbarks();
+            if (e != g_state->lastJournalEmbarks) {
+                g_state->lastJournalEmbarks = e;
+                headOffsetGateNoteEmbark();
             }
         }
         // The game's live on-foot word, and the camera-entry edge. The first

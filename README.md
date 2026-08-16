@@ -248,11 +248,7 @@ file won't load, EDVR says so in the log and carries on without it.
 is *EDVR's* file. To undo the pair cleanly: delete `d3d11.dll` and `edvr.ini`,
 rename `d3d11_edhm.dll` back, then run EDHM's uninstaller if wanted.
 
-**ReShade is different, and currently cannot run alongside EDVR.** EDHM is a
-proxy that chains; ReShade wraps the graphics objects themselves, and the two
-approaches collide — either load order fails. This is a known limitation with a
-planned fix, not a configuration problem: no rename or setting makes it work
-today, and the attempt costs nothing worse than ReShade's effects not loading.
+**ReShade (not the VRToolKit variant) should "just work" (tm)**
 
 <details>
 <summary>Why an earlier version of this crashed, if you hit that</summary>

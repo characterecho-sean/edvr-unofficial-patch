@@ -1,5 +1,5 @@
 // GENERATED from src/d3d11/head_offset_gate.h in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 1e5e6a046d8c4a46]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 bef4bcb9e1123940]
 // When to move the head pose: on foot, in the external camera, and nowhere
 // else.
 //
@@ -91,7 +91,14 @@ void headOffsetGateSetNextKeyBound(bool bound);
 // the journal's Disembark (authoritative, wired in device_hook) and the
 // panel-return heuristic (fallback, internal) -- and it dedupes, so the
 // first to speak does the work. `source` names the caller in the log.
-void headOffsetGateNewFootSession(const char* source);
+// `journalSaysSo` marks the authoritative caller: besides the deduped reset
+// it opens the arming grace for the stale-status window that follows a real
+// disembark (Status.json answers "not on foot" for ~6 more seconds).
+void headOffsetGateNewFootSession(const char* source, bool journalSaysSo = false);
+
+// The journal's Embark: cancels any open disembark grace -- boarding again
+// is not a camera entry, however fresh the disembark was.
+void headOffsetGateNoteEmbark();
 
 // The game's own live word on whether the player is on foot (Status.json's
 // OnFoot flag, fed per frame from the journal watcher). What it buys is

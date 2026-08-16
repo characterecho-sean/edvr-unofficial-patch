@@ -1,5 +1,5 @@
 // GENERATED from src/d3d11/glitch_frame.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 5fb8e6d35cf252e2]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 8e194f8d9140714d]
 #include "glitch_frame.h"
 
 #include <windows.h>
@@ -1031,6 +1031,11 @@ const char* letThroughReason(State* s, float resid) {
     if (residualIsKnownSeparation(resid))
         return "a jump of this size has happened before, so it is a fixed gap "
                "between two render passes rather than the view moving";
+    if (s->driftSuppressedThisFrame)
+        return "it continued a separation already being watched drifting wider";
+    if (s->burstStandDown > 0)
+        return "the burst governor is standing down after spending its withhold "
+               "budget, so nothing is withheld until it comes back";
     if (s->cooldown > 0)
         return "the detector is still settling after a recent jump and will not "
                "judge again yet";

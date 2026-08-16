@@ -1,5 +1,5 @@
 // GENERATED from src/common/guard.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 15581887918751b0]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 f97fba872af534d2]
 #include "guard.h"
 
 #include <windows.h>
@@ -50,6 +50,17 @@ int guardFilter(unsigned long code, const char* site) {
     for (unsigned i = 0; i < g_siteCount; ++i) {
         if (g_sites[i].site == key) {
             ++g_sites[i].count;
+            // Restate the running total at every power of two. The shutdown
+            // summary this used to defer to NEVER WRITES in the field -- the
+            // game exits by TerminateProcess, so no log on the reporting rig
+            // has ever ended with one -- and a count nobody can see is a
+            // count that does not exist. Doubling keeps it to a handful of
+            // lines however bad it gets, and makes runaway visible AS runaway.
+            if ((g_sites[i].count & (g_sites[i].count - 1)) == 0) {
+                Log::get().note("FAULT TOTAL site=%s: %llu absorbed so far this "
+                                "session.", key,
+                                (unsigned long long)g_sites[i].count);
+            }
             return EXCEPTION_EXECUTE_HANDLER;   // already reported once
         }
     }
@@ -57,8 +68,9 @@ int guardFilter(unsigned long code, const char* site) {
         g_sites[g_siteCount++] = {key, 1};
     }
     Log::get().note("FAULT exception=0x%08lX site=%s. Further faults at this "
-                    "site are counted rather than logged; the total is in the "
-                    "shutdown summary.", code, key);
+                    "site are counted rather than logged; the running total is "
+                    "restated as it doubles, so a hard exit cannot eat it.",
+                    code, key);
     return EXCEPTION_EXECUTE_HANDLER;
 }
 
