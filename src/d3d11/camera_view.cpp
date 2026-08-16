@@ -1,5 +1,5 @@
 // GENERATED from src/d3d11/camera_view.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 b8f2afad20218489]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 61237f693116116b]
 #include "camera_view.h"
 
 #include <windows.h>
@@ -1003,8 +1003,30 @@ void pollCandidates() {
             continue;
         }
         if (v != c.last) {
+            // A change counts only when it steps UP BY EXACTLY ONE. The
+            // watcher's premise was "the preset is the record that changes
+            // when you cycle" -- and the field found the second thing that
+            // changes records: the game itself, rewriting the array every ten
+            // to thirty seconds near a planet. A rebuild certified a record
+            // that then read 0, frozen, for seventeen seconds of the player
+            // pressing keys at it (6au: certified "reads 6 now", a value the
+            // player cannot even produce). Presses step the cycle +1 at a
+            // time; rebuilds write arbitrary values. The exact step is the
+            // same discriminator that made the original differential search
+            // converge (6ad.7e), applied to the same question.
+            //
+            // ANY OTHER CHANGE RESETS THE COUNT rather than being ignored:
+            // ignored, a garbage slot oscillating 0-1-0-1 banks a +1 at every
+            // rise and certifies; reset, it can never hold three. The 5-to-0
+            // wrap resets too -- one forward loop still supplies five
+            // sequential steps and three certify, and forward cycling is the
+            // gesture the message below instructs.
+            if (v == c.last + 1) {
+                ++c.changes;
+            } else {
+                c.changes = 0;
+            }
             c.last = v;
-            ++c.changes;
         }
         if (c.changes >= kChangesToCertify) {
             ++qualified;
