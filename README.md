@@ -140,38 +140,31 @@ player observes, and no gameplay data read or written.
    Explorer Cam is applied in `openvr_api.dll`; without it nothing below has any
    effect.
 
-2. Set `hotkey.external_camera` in `edvr.ini` to **your** Elite external-camera
-   binding. Combinations work — Elite's default is `CTRL+ALT+SPACE`:
+2. **Hotkeys: usually nothing to do.** EDVR reads your external-camera and
+   next-camera-view keys straight from your Elite key configuration at
+   startup — if they are on keyboard keys (Elite's defaults are
+   `CTRL+ALT+SPACE` and an arrow key), you are done, and the log's first
+   lines say which keys were adopted. EDVR only *watches* these keys; it
+   never presses them or interferes with the game receiving them.
 
-   ```
-   external_camera = CTRL+ALT+SPACE
-   ```
+   They matter because on screen, entering the camera looks identical to
+   boarding your ship — the camera key is how EDVR knows which it was. And
+   near a planet the game rebuilds its camera data every few seconds, so the
+   next-view key's presses are what carry "which preset am I on" through the
+   gaps.
 
-   **Nothing happens until you do this.** Deliberate: on screen, entering the
-   camera looks identical to boarding your ship, and guessing wrong would move
-   your viewpoint inside your own cockpit.
+   To override, set them yourself in `edvr.ini` under `[hotkey]` — any key
+   your keyboard types, written as itself (`\` and `[` included; write `;`
+   and `#` as `SEMICOLON` and `HASH`), combinations like `CTRL+ALT+SPACE`
+   welcome. If your camera is bound **only to a controller**, bind a keyboard
+   key for it in Elite (Options → Controls) for now — controller support is
+   planned.
 
-3. Set `hotkey.external_camera_next` to **your** Elite next-camera-view
-   binding too — strongly recommended:
-
-   ```
-   external_camera_next = RIGHT
-   ```
-
-   EDVR reads which preset you are on from the game, but near a planet the
-   game rebuilds its camera data every few seconds and that read drops out.
-   With this key bound, your own presses carry the answer through the gaps and
-   confirm the read when it returns — without it, the offset can lag or stick
-   to the wrong preset while the read is down. Any key your keyboard types
-   works, written as itself — `\` and `[` included. The two exceptions are
-   `;` and `#`, which start comments in the ini: write those as `SEMICOLON`
-   and `HASH`.
-
-4. Get on foot, open the camera, and cycle to **Commander Right Shoulder** —
+3. Get on foot, open the camera, and cycle to **Commander Right Shoulder** —
    two presses from the view the camera opens on. That is the preset the
    offset replaces; every other preset keeps its normal framing.
 
-5. Tune the offsets with the headset on; they reload about once a second:
+4. Tune the offsets with the headset on; they reload about once a second:
 
    ```
    head_offset_right   = -0.25   + is to your commander's right

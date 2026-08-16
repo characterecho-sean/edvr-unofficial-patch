@@ -1,5 +1,5 @@
 // GENERATED from tools/gate_test/gate_test.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 ca38f659b2131e51]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 55713ea45b6a2e63]
 // gate_test -- replays frame sequences through the head-offset gate.
 //
 // WHY
@@ -88,8 +88,13 @@ void check(bool want, const char* what) {
     ++g_bad;
 }
 
-// Every scenario starts from a clean gate with the shipped configuration.
+// Every scenario starts from a clean gate with the shipped configuration --
+// except that begin(false) scenarios are exercising the PARKED keyless path
+// (advanced.keyless_camera, default off since the 2026-08-16 pivot to keyed
+// entries), so they switch it on explicitly. The shipped default gets its
+// own fixture below.
 void begin(bool keyBound) {
+    Config::get().set("advanced.keyless_camera", keyBound ? "0" : "1");
     headOffsetGateReset();
     headOffsetGateConfigure();
     headOffsetGateSetKeyBound(keyBound);
@@ -551,6 +556,24 @@ int main(int argc, char** argv) {
     panelFrame(200);
     sceneFrame(30);
     check(false, "keyless with no live context: nothing can arm, as before");
+
+    // THE SHIPPED DEFAULT: keyless parked (advanced.keyless_camera=0). No
+    // key bound means nothing arms, however alive the on-foot status is --
+    // the 6bf copy circus showed the view cannot be supplied without
+    // presses, so an entry with no view source is a latch with no payoff.
+    Config::get().set("advanced.keyless_camera", "0");
+    headOffsetGateReset();
+    headOffsetGateConfigure();
+    headOffsetGateSetKeyBound(false);
+    headOffsetGateSetView(g_wantView);
+    g_frame = 0;
+    headOffsetGateSetOnFootLive(true, true, 1);
+    panelFrame(200);
+    sceneFrame(30);
+    headOffsetGateSetOnFootLive(true, true, 2);
+    sceneFrame(12);
+    check(false, "shipped default: keyless is parked, so no key means no "
+                 "arming even with the status alive");
 
     // --------------------------------- the disembark's stale-status window
     //

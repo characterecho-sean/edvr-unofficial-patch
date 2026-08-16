@@ -1,5 +1,5 @@
 // GENERATED from src/d3d11/head_offset_gate.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 1b09963907d428f1]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 21aca78c8d4f02dd]
 #include "head_offset_gate.h"
 
 #include "../common/config.h"
@@ -94,6 +94,7 @@ struct Gate {
     bool     liveOnFootSeenThisFoot = false;
     bool     footGraceJournal = false;   // Disembark declared, flag not yet true
     uint32_t footGraceFrame = 0;         // when that declaration landed
+    bool     gateKeylessOn = false;      // advanced.keyless_camera (parked)
     bool     gateNoConsumerNoted = false;
     uint32_t gateIntentAge = 0;          // frames since the key was pressed
     uint32_t gateIntentGrace = 180;      // frames a press gets to take effect
@@ -159,6 +160,15 @@ void headOffsetGateConfigure() {
     g.gateWantView = cfg.getIntInRange("fix.head_offset_view", 2, -1, 63);
     g.gateViewCount = cfg.getIntInRange("fix.head_offset_view_count", 6, 0, 64);
     g.gateBridgeOn = cfg.getBool("fix.head_offset_view_bridge", true);
+    // KEYLESS ENTRY IS PARKED, default off (product decision 2026-08-16).
+    // The entry side field-certified -- grace, window, boarding-exit all
+    // landed -- but the VIEW cannot be supplied without presses when the
+    // game runs its near-settlement copy circus: 6bf measured a stale array
+    // at the usual base reading 0 for an entire camera stay while the
+    // player cycled the real one, and certification honestly refused all
+    // the way down. Keyed mode counts presses and is immune. The machinery
+    // stays for the controller-support work, behind this flag.
+    g.gateKeylessOn = cfg.getBool("advanced.keyless_camera", false);
     // The "you have not bound the view key" warning does NOT live here.
     //
     // It did, and it was wrong the moment a build could read the view from
@@ -532,7 +542,8 @@ void headOffsetGateFrame(uint32_t frameNo, uint32_t panelDraws, uint32_t eyeDraw
         const bool graceActive =
             g.footGraceJournal && !g.liveOnFootSeenThisFoot &&
             g.gateFrameNo - g.footGraceFrame < kFootGraceFrames;
-        const bool autoIntent = !g.gateKeyBound && (statusFresh || graceActive);
+        const bool autoIntent = g.gateKeylessOn && !g.gateKeyBound &&
+                                (statusFresh || graceActive);
         if (autoIntent && !g.autoIntentNoted) {
             g.autoIntentNoted = true;
             Log::get().note(
@@ -682,10 +693,11 @@ void headOffsetGateFrame(uint32_t frameNo, uint32_t panelDraws, uint32_t eyeDraw
                 g.gateIntent ? "set" : "CLEAR",
                 g.gateKeyBound
                     ? "BOUND"
-                    : (g.liveOnFootKnown
+                    : (g.gateKeylessOn && g.liveOnFootKnown
                            ? "not bound (keyless: the game's on-foot status "
                              "stands in)"
-                           : "NOT BOUND -- nothing can arm"),
+                           : "NOT BOUND -- bind hotkey.external_camera or let "
+                             "read_game_bindings adopt it; nothing can arm"),
                 g.gateHaveKey ? "yes" : "not yet this session",
                 g.gateViewIndex, g.gateWantView);
         }
