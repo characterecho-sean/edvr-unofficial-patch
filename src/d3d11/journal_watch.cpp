@@ -1,5 +1,5 @@
 // GENERATED from src/d3d11/journal_watch.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 7c78415ba460c5e0]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 b94a21e20c563501]
 #include "journal_watch.h"
 
 #include <windows.h>
@@ -34,6 +34,13 @@ struct State {
     bool         active = false;
     bool         gameplay = false;
     uint32_t     disembarks = 0;
+    uint32_t     embarks = 0;
+    // Live Flags2 from Status.json: OnFoot is bit 0. `onFootKnown` is false
+    // whenever the file lacks a Flags2 field, which is exactly the menu and
+    // shutdown states -- Status then carries only "Flags":0.
+    bool         onFootKnown = false;
+    bool         onFoot = false;
+    uint32_t     statusSamples = 0;   // successful Status.json parses
     uint32_t     frame = 0;
     uint32_t     polls = 0;
     uint32_t     faults = 0;
@@ -49,6 +56,11 @@ struct State {
     // boundary is still seen. Sixteen bytes covers `"event":"` plus slack.
     char         carry[32] = {};
     uint32_t     carryLen = 0;
+    // Consecutive Status.json parse misses. The game rewrites the file about
+    // once a second and a read can land mid-write; one blip must not read as
+    // the player teleporting off their feet, so `known` only drops after a
+    // few misses in a row.
+    uint32_t     statusMisses = 0;
 };
 State g_s;
 
@@ -94,6 +106,8 @@ void onEvent(const char* name, uint32_t len) {
         }
     } else if (len == 9 && memcmp(name, "Disembark", 9) == 0) {
         ++g_s.disembarks;
+    } else if (len == 6 && memcmp(name, "Embark", 6) == 0) {
+        ++g_s.embarks;
     } else if (len == 8 && memcmp(name, "Shutdown", 8) == 0) {
         // The game is leaving. Gameplay ends with it; a relaunch gets a new
         // journal and a fresh LoadGame.
@@ -114,6 +128,44 @@ void scanRange(const char* p, uint32_t n) {
         while (end < n && p[end] != '"' && end - start < 40) ++end;
         if (end < n && p[end] == '"') onEvent(p + start, end - start);
         i = end;
+    }
+}
+
+// Status.json, reread whole on the same cadence: it is a few hundred bytes,
+// rewritten by the game about once a second. The single fact taken from it is
+// Flags2's OnFoot bit; a file without a Flags2 field -- the menu, shutdown --
+// answers "not known", and callers fall back to keys.
+void pollStatus() {
+    const std::wstring path = g_s.dir + L"\\Status.json";
+    HANDLE f = CreateFileW(path.c_str(), GENERIC_READ,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE |
+                               FILE_SHARE_DELETE,
+                           nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL,
+                           nullptr);
+    bool parsed = false;
+    bool sawFlags2 = false;
+    uint32_t flags2 = 0;
+    if (f != INVALID_HANDLE_VALUE) {
+        char buf[2048];
+        DWORD got = 0;
+        if (ReadFile(f, buf, sizeof(buf) - 1, &got, nullptr) && got > 0) {
+            buf[got] = '\0';
+            parsed = true;
+            const char* p = strstr(buf, "\"Flags2\":");
+            if (p) {
+                sawFlags2 = true;
+                flags2 = static_cast<uint32_t>(strtoul(p + 9, nullptr, 10));
+            }
+        }
+        CloseHandle(f);
+    }
+    if (parsed) {
+        g_s.statusMisses = 0;
+        ++g_s.statusSamples;
+        g_s.onFootKnown = sawFlags2;
+        g_s.onFoot = sawFlags2 && (flags2 & 0x01u) != 0;
+    } else if (++g_s.statusMisses >= 3) {
+        g_s.onFootKnown = false;
     }
 }
 
@@ -206,6 +258,8 @@ void journalWatchTick() {
     if (++s.frame % kPollFrames != 0) return;
     ++s.polls;
 
+    pollStatus();
+
     // Find or refresh the file being tailed.
     if (s.handle == INVALID_HANDLE_VALUE || s.polls % kReglobPolls == 0) {
         const std::wstring newest = newestJournal();
@@ -266,6 +320,10 @@ retire:
 bool journalWatchActive() { return g_s.active; }
 bool journalGameplay() { return g_s.gameplay; }
 uint32_t journalDisembarks() { return g_s.disembarks; }
+uint32_t journalEmbarks() { return g_s.embarks; }
+bool journalOnFootKnown() { return g_s.active && g_s.onFootKnown; }
+bool journalOnFoot() { return g_s.onFoot; }
+uint32_t journalStatusSamples() { return g_s.statusSamples; }
 
 void journalWatchShutdown() { closeFile(); }
 

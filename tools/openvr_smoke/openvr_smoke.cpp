@@ -1,5 +1,5 @@
 // GENERATED from tools/openvr_smoke/openvr_smoke.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 b63ab97741a10ff2]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 bf7c8642fc261434]
 // openvr_smoke -- checks the openvr proxy's startup path without the game.
 //
 // The thing under test is that the proxy does NOT load the real openvr_api.dll
@@ -35,6 +35,7 @@
 #include "../../src/common/hotkey.h"
 #include "../../src/common/guard.h"
 #include "../../src/openvr/resubmit_shadow.h"
+#include "../../src/d3d11/elite_binds.h"
 
 namespace {
 
@@ -652,6 +653,34 @@ int hotkeyChecks() {
     const int hash = edvr::virtualKeyFromName("HASH", &m);
     if (hash == 0 || edvr::virtualKeyFromName("#", &m) != hash) {
         printf("  FAIL  HASH and '#' did not bind the same key\n");
+        ++bad;
+    }
+
+    // Elite's Key_ names translate to bindings this parser accepts -- the
+    // bridge that lets bindings be adopted from the game's own files.
+    char t[32];
+    if (!edvr::eliteBindsTranslateKey("Key_F11", t, sizeof(t)) ||
+        edvr::virtualKeyFromName(t, &m) != VK_F11) {
+        printf("  FAIL  Key_F11 did not translate to F11\n");
+        ++bad;
+    }
+    if (!edvr::eliteBindsTranslateKey("Key_RightArrow", t, sizeof(t)) ||
+        edvr::virtualKeyFromName(t, &m) != VK_RIGHT) {
+        printf("  FAIL  Key_RightArrow did not translate to RIGHT\n");
+        ++bad;
+    }
+    if (!edvr::eliteBindsTranslateKey("Key_LeftBracket", t, sizeof(t)) ||
+        edvr::virtualKeyFromName(t, &m) == 0) {
+        printf("  FAIL  Key_LeftBracket did not translate to a bindable key\n");
+        ++bad;
+    }
+    if (!edvr::eliteBindsTranslateKey("Key_SemiColon", t, sizeof(t)) ||
+        edvr::virtualKeyFromName(t, &m) == 0) {
+        printf("  FAIL  Key_SemiColon did not translate to a bindable key\n");
+        ++bad;
+    }
+    if (edvr::eliteBindsTranslateKey("Key_LeftShift", t, sizeof(t))) {
+        printf("  FAIL  a bare modifier translated as a main key\n");
         ++bad;
     }
 

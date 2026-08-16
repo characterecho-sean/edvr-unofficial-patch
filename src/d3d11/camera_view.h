@@ -1,5 +1,5 @@
 // GENERATED from src/d3d11/camera_view.h in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 ee445275521245e2]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 f33d05c05a7bc453]
 // Which external-camera view the game is showing, read from the game.
 //
 // WHY THIS EXISTS
@@ -130,9 +130,22 @@ struct CameraViewVote {
     uint32_t changes = 0;      // sequential in-camera steps
     uint32_t coincident = 0;   // ...of which landed beside a witnessed press
     bool     primed = false;
+    // Primed at the value the gate's count PREDICTED (0 after a disembark,
+    // the last confirmed view within a session). An anchored candidate
+    // certifies on TWO sequential in-camera steps -- which is exactly the
+    // player's mandatory cycle from the opening view to their preset -- so a
+    // keyless install certifies at the moment of arrival. An impostor must
+    // sit at the predicted value at priming AND step twice in-camera, a far
+    // narrower coincidence than the unanchored three-step bar tolerates.
+    bool     anchored = false;
 };
 bool cameraViewCertStep(CameraViewVote* vote, uint32_t value, bool inCamera,
                         bool pressRecent, bool witnessed);
+
+// A camera entry happened (the gate's latch, relayed by the frame path):
+// rescan promptly if nothing is certified, so fresh candidates exist while
+// the player is still cycling to their view. Runs on the rescan budget.
+void cameraViewNudgeRescan();
 
 // The player pressed the next-view key (called from the hotkey watcher,
 // which gates it on gameplay). Timestamps the press for coincidence testing.

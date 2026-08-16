@@ -1,0 +1,217 @@
+// GENERATED from src/d3d11/elite_binds.cpp in the private edvr repo -- do not edit here.
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 efac9ef8d35b66ea]
+#include "elite_binds.h"
+
+#include <windows.h>
+
+#include <cstdio>
+#include <cstring>
+#include <string>
+#include <vector>
+
+#include "../common/log.h"
+
+namespace edvr {
+namespace {
+
+// Elite's Key_ names that are not simply their own EDVR name once the prefix
+// is stripped. Everything else -- Key_F11, Key_A, Key_5 -- maps by stripping.
+struct KeyMap { const char* elite; const char* ours; };
+const KeyMap kKeyMap[] = {
+    {"RightArrow", "RIGHT"},     {"LeftArrow", "LEFT"},
+    {"UpArrow", "UP"},           {"DownArrow", "DOWN"},
+    {"Space", "SPACE"},          {"Enter", "ENTER"},
+    {"Return", "ENTER"},         {"Backspace", "BACKSPACE"},
+    {"Tab", "TAB"},              {"Escape", "ESCAPE"},
+    {"Insert", "INSERT"},        {"Home", "HOME"},
+    {"End", "END"},              {"Delete", "DELETE"},
+    {"PageUp", "PAGEUP"},        {"PageDown", "PAGEDOWN"},
+    {"ScrollLock", "SCROLLLOCK"},{"Pause", "PAUSE"},
+    {"NumLock", "NUMLOCK"},      {"CapsLock", "CAPSLOCK"},
+    {"BackSlash", "BACKSLASH"},  {"Slash", "SLASH"},
+    {"LeftBracket", "LEFTBRACKET"}, {"RightBracket", "RIGHTBRACKET"},
+    {"SemiColon", "SEMICOLON"},  {"Apostrophe", "APOSTROPHE"},
+    {"Comma", "COMMA"},          {"Period", "PERIOD"},
+    {"Grave", "GRAVE"},          {"Minus", "MINUS"},
+    {"Equals", "EQUALS"},        {"Hash", "HASH"},
+    {"Numpad_0", "NUMPAD0"},     {"Numpad_1", "NUMPAD1"},
+    {"Numpad_2", "NUMPAD2"},     {"Numpad_3", "NUMPAD3"},
+    {"Numpad_4", "NUMPAD4"},     {"Numpad_5", "NUMPAD5"},
+    {"Numpad_6", "NUMPAD6"},     {"Numpad_7", "NUMPAD7"},
+    {"Numpad_8", "NUMPAD8"},     {"Numpad_9", "NUMPAD9"},
+    {"Numpad_Multiply", "MULTIPLY"}, {"Numpad_Divide", "DIVIDE"},
+    {"Numpad_Add", "ADD"},       {"Numpad_Subtract", "SUBTRACT"},
+    {"Numpad_Decimal", "DECIMAL"},
+    // Elite names the modifier keys as keys; as a MAIN binding they are not
+    // meaningful to EDVR and translate to nothing.
+};
+
+// Modifier Key_ names, for <Modifier> sub-elements.
+const KeyMap kModMap[] = {
+    {"LeftShift", "SHIFT"},   {"RightShift", "SHIFT"},
+    {"LeftControl", "CTRL"},  {"RightControl", "CTRL"},
+    {"LeftAlt", "ALT"},       {"RightAlt", "ALT"},
+};
+
+std::wstring bindingsDir() {
+    wchar_t appdata[MAX_PATH] = {};
+    const DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", appdata, MAX_PATH);
+    if (n == 0 || n >= MAX_PATH) return std::wstring();
+    return std::wstring(appdata) +
+           L"\\Frontier Developments\\Elite Dangerous\\Options\\Bindings";
+}
+
+bool readWholeFile(const std::wstring& path, std::string* out) {
+    HANDLE f = CreateFileW(path.c_str(), GENERIC_READ,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                           OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (f == INVALID_HANDLE_VALUE) return false;
+    const DWORD size = GetFileSize(f, nullptr);
+    if (size == INVALID_FILE_SIZE || size > (4u << 20)) {
+        CloseHandle(f);
+        return false;
+    }
+    out->resize(size);
+    DWORD got = 0;
+    const BOOL ok = ReadFile(f, &(*out)[0], size, &got, nullptr);
+    CloseHandle(f);
+    if (!ok) return false;
+    out->resize(got);
+    return true;
+}
+
+// Extract attribute="value" following `from` within the next `span` bytes.
+bool attrAfter(const std::string& text, size_t from, size_t span,
+               const char* attr, std::string* out) {
+    const std::string needle = std::string(attr) + "=\"";
+    const size_t at = text.find(needle, from);
+    if (at == std::string::npos || at > from + span) return false;
+    const size_t start = at + needle.size();
+    const size_t end = text.find('"', start);
+    if (end == std::string::npos) return false;
+    *out = text.substr(start, end - start);
+    return true;
+}
+
+}  // namespace
+
+bool eliteBindsTranslateKey(const char* eliteKey, char* out, size_t outLen) {
+    if (!eliteKey || !out || outLen == 0) return false;
+    const char* name = eliteKey;
+    if (strncmp(name, "Key_", 4) == 0) name += 4;
+    for (const KeyMap& m : kKeyMap) {
+        if (_stricmp(name, m.elite) == 0) {
+            snprintf(out, outLen, "%s", m.ours);
+            return true;
+        }
+    }
+    // Single letter or digit maps as itself; anything longer that the table
+    // does not know is a name this build cannot express.
+    if (name[0] != '\0' && name[1] == '\0' &&
+        ((name[0] >= 'A' && name[0] <= 'Z') ||
+         (name[0] >= 'a' && name[0] <= 'z') ||
+         (name[0] >= '0' && name[0] <= '9'))) {
+        snprintf(out, outLen, "%c", name[0]);
+        return true;
+    }
+    // F-keys: F1..F24 pass through.
+    if ((name[0] == 'F' || name[0] == 'f') && name[1] >= '0' && name[1] <= '9') {
+        snprintf(out, outLen, "%s", name);
+        return true;
+    }
+    return false;
+}
+
+bool eliteBindsLookup(const char* element, char* out, size_t outLen) {
+    if (!element || !out || outLen == 0) return false;
+    const std::wstring dir = bindingsDir();
+    if (dir.empty()) return false;
+
+    // The active preset names, one per bind context in current builds.
+    std::string presets;
+    if (!readWholeFile(dir + L"\\StartPreset.4.start", &presets) &&
+        !readWholeFile(dir + L"\\StartPreset.start", &presets)) {
+        return false;
+    }
+
+    // Each named preset resolves to <name>.<version>.binds; rather than
+    // parsing versions, scan every .binds file whose name begins with a
+    // preset line. The files are small and this runs once.
+    std::vector<std::string> names;
+    {
+        size_t start = 0;
+        while (start < presets.size()) {
+            size_t end = presets.find_first_of("\r\n", start);
+            if (end == std::string::npos) end = presets.size();
+            if (end > start) names.push_back(presets.substr(start, end - start));
+            start = presets.find_first_not_of("\r\n", end);
+            if (start == std::string::npos) break;
+        }
+    }
+
+    WIN32_FIND_DATAW fd{};
+    HANDLE find = FindFirstFileW((dir + L"\\*.binds").c_str(), &fd);
+    if (find == INVALID_HANDLE_VALUE) return false;
+    bool found = false;
+    do {
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+        // Match the file to an active preset name (prefix, case-insensitive).
+        char fname[MAX_PATH];
+        WideCharToMultiByte(CP_UTF8, 0, fd.cFileName, -1, fname, sizeof(fname),
+                            nullptr, nullptr);
+        bool active = names.empty();
+        for (const std::string& n : names) {
+            if (_strnicmp(fname, n.c_str(), n.size()) == 0) { active = true; break; }
+        }
+        if (!active) continue;
+
+        std::string text;
+        if (!readWholeFile(dir + L"\\" + fd.cFileName, &text)) continue;
+
+        const size_t el = text.find(std::string("<") + element);
+        if (el == std::string::npos) continue;
+        // Primary then Secondary, keyboard only, within this element's span
+        // (the next 600 bytes comfortably cover both bindings and modifiers).
+        for (const char* slot : {"<Primary ", "<Secondary "}) {
+            const size_t s = text.find(slot, el);
+            if (s == std::string::npos || s > el + 600) continue;
+            std::string device, key;
+            if (!attrAfter(text, s, 120, "Device", &device)) continue;
+            if (_stricmp(device.c_str(), "Keyboard") != 0) continue;
+            if (!attrAfter(text, s, 160, "Key", &key)) continue;
+            char keyName[32];
+            if (!eliteBindsTranslateKey(key.c_str(), keyName, sizeof(keyName)))
+                continue;
+            // Modifiers attached to this slot, before the element ends.
+            std::string prefix;
+            size_t m = s;
+            for (int guard = 0; guard < 3; ++guard) {
+                const size_t mod = text.find("<Modifier ", m);
+                if (mod == std::string::npos || mod > el + 600) break;
+                std::string mdev, mkey;
+                if (attrAfter(text, mod, 120, "Device", &mdev) &&
+                    _stricmp(mdev.c_str(), "Keyboard") == 0 &&
+                    attrAfter(text, mod, 160, "Key", &mkey)) {
+                    const char* mn = mkey.c_str();
+                    if (strncmp(mn, "Key_", 4) == 0) mn += 4;
+                    for (const KeyMap& mm : kModMap) {
+                        if (_stricmp(mn, mm.elite) == 0) {
+                            prefix += mm.ours;
+                            prefix += "+";
+                            break;
+                        }
+                    }
+                }
+                m = mod + 10;
+            }
+            snprintf(out, outLen, "%s%s", prefix.c_str(), keyName);
+            found = true;
+            break;
+        }
+        if (found) break;
+    } while (FindNextFileW(find, &fd));
+    FindClose(find);
+    return found;
+}
+
+}  // namespace edvr

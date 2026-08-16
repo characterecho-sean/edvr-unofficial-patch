@@ -11,6 +11,7 @@
 #include "head_offset_gate.h"
 #include "camera_view.h"
 #include "journal_watch.h"
+#include "elite_binds.h"
 #include "../common/log.h"
 #include "../common/proxy.h"
 #include "../common/vtable_hook.h"
@@ -68,6 +69,7 @@ struct State {
     Hotkey externalCamKey;
     Hotkey extCamNextKey;
     uint32_t lastJournalDisembarks = 0;
+    uint32_t lastCameraEnters = 0;
     uint64_t frameCounter = 0;
 
     // Dump the camera history on every external-camera keypress. Diagnostic,
@@ -254,6 +256,20 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
                     "the game's journal says you disembarked");
             }
         }
+        // The game's live on-foot word, and the camera-entry edge. The first
+        // is what makes a KEYLESS install work at all (the gate turns it into
+        // intent, 6bb); the second nudges the view scanner so fresh
+        // candidates exist while the player is still cycling to their view --
+        // which is what the anchored two-step certification feeds on.
+        headOffsetGateSetOnFootLive(journalOnFootKnown(), journalOnFoot(),
+                                    journalStatusSamples());
+        {
+            const uint32_t entries = headOffsetGateEnterCount();
+            if (entries != g_state->lastCameraEnters) {
+                g_state->lastCameraEnters = entries;
+                cameraViewNudgeRescan();
+            }
+        }
         // Camera keys mean the CAMERA only once gameplay has started. Before
         // LoadGame every press is menu navigation -- and the next-view key is
         // typically an arrow, which menus eat by the dozen; counting those
@@ -371,6 +387,26 @@ State& ensureState() {
         g_state->externalCamKey.setBinding(Config::get().getString("hotkey.external_camera", "").c_str());
         g_state->extCamNextKey.setBinding(
             Config::get().getString("hotkey.external_camera_next", "").c_str());
+        // Bindings the ini leaves empty are read from the GAME's own key
+        // configuration (Options\Bindings), so a keyboard player needs no
+        // setup at all. An explicit ini value always wins; a binding on a
+        // controller is skipped (EDVR watches the keyboard) and the keyless
+        // Status-driven detection covers that player instead.
+        if (Config::get().getBool("hotkey.read_game_bindings", true)) {
+            char b[48];
+            if (g_state->externalCamKey.key() == 0 &&
+                eliteBindsLookup("PhotoCameraToggle", b, sizeof(b))) {
+                g_state->externalCamKey.setBinding(b);
+                Log::get().note("hotkey: external_camera adopted from your "
+                                "Elite bindings: %s", b);
+            }
+            if (g_state->extCamNextKey.key() == 0 &&
+                eliteBindsLookup("VanityCameraScrollRight", b, sizeof(b))) {
+                g_state->extCamNextKey.setBinding(b);
+                Log::get().note("hotkey: external_camera_next adopted from "
+                                "your Elite bindings: %s", b);
+            }
+        }
         headOffsetGateSetNextKeyBound(g_state->extCamNextKey.key() != 0);
         cameraViewSetPressWitness(g_state->extCamNextKey.key() != 0);
         journalWatchConfigure();

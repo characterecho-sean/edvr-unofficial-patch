@@ -1,5 +1,5 @@
 // GENERATED from src/d3d11/head_offset_gate.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 343a935453a4bae8]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 78419e0f00cd37d6]
 #include "head_offset_gate.h"
 
 #include "../common/config.h"
@@ -60,11 +60,21 @@ struct Gate {
     bool     gateSyncRefusedNoted = false;
     uint32_t gateFrameNo = 0;            // the frame Frame() last ran for
     uint32_t gateLastFootReset = 0;      // when a new-session reset last fired
+    // The game's live on-foot word (Status.json via the journal watcher).
+    bool     liveOnFootKnown = false;
+    bool     liveOnFoot = false;
+    bool     autoIntentNoted = false;
+    uint32_t liveSample = 0;             // running Status.json sample count
+    uint32_t sampleAtPanelStop = 0;      // liveSample when the panel stopped
     bool     gateNoConsumerNoted = false;
     uint32_t gateIntentAge = 0;          // frames since the key was pressed
     uint32_t gateIntentGrace = 180;      // frames a press gets to take effect
     bool     gateInCamera = false;       // in the camera, whatever the view
     uint32_t gateEnters = 0, gateExits = 0;
+    // Camera entries (the gateInCamera latch), distinct from gateEnters which
+    // counts the OFFSET arming: the scan nudge wants the camera edge, before
+    // the player has cycled to the right view.
+    uint32_t gateCameraEnters = 0;
 
     // Set by headOffsetGateSetView. -1 means nobody can tell us, so the
     // keypress count stands.
@@ -148,6 +158,16 @@ void headOffsetGateReset() {
 void headOffsetGateSetKeyBound(bool bound) { g.gateKeyBound = bound; }
 
 void headOffsetGateSetNextKeyBound(bool bound) { g.gateHaveNextKey = bound; }
+
+void headOffsetGateSetOnFootLive(bool known, bool onFoot, uint32_t sample) {
+    g.liveOnFootKnown = known;
+    g.liveOnFoot = onFoot;
+    g.liveSample = sample;
+}
+
+uint32_t headOffsetGateEnterCount() { return g.gateCameraEnters; }
+
+int headOffsetGateCountedView() { return g.gateViewIndex; }
 
 void headOffsetGateNewFootSession(const char* source) {
     // ONE BOUNDARY, POSSIBLY TWO DETECTORS. The journal's Disembark and the
@@ -379,6 +399,10 @@ void headOffsetGateFrame(uint32_t frameNo, uint32_t panelDraws, uint32_t eyeDraw
                         g.gateSinceEnter);
     } else {
         ++g.gateSincePanel;
+        // The moment the panel stopped, in Status samples: keyless arming
+        // requires a FRESHER on-foot sample than this, so a stale second of
+        // "on foot" cannot arm the offset into a boarding animation.
+        if (g.gateSincePanel == 1) g.sampleAtPanelStop = g.liveSample;
         // The window is TIGHT, and measured rather than chosen.
         //
         // Both real entries logged "the flat panel stopped 2 frame(s) ago".
@@ -440,6 +464,28 @@ void headOffsetGateFrame(uint32_t frameNo, uint32_t panelDraws, uint32_t eyeDraw
         // what the ini has always claimed and what makes a fresh install
         // genuinely inert. The window survives only as a sanity bound on top.
         const bool intentOk = g.gateKeyBound && g.gateIntent;
+        // KEYLESS INTENT, from the game's own word instead of a binding. The
+        // key exists because render state alone cannot tell entering the
+        // camera from boarding a ship (6ac.6b) -- but the game can: Status's
+        // OnFoot flag HOLDS through the whole camera window (6bb, measured
+        // across eight view changes) and drops on boarding, which also
+        // announces Embark. So: still on foot per the game, with the on-foot
+        // screen gone and a stereo scene up, is the external camera. Only
+        // when no camera key is bound -- a bound key keeps exactly its old
+        // meaning -- and only while the live context is KNOWN; menus, a
+        // missing Status.json or the watcher being off all answer unknown,
+        // which restores the bind-a-key requirement precisely.
+        const bool autoIntent =
+            !g.gateKeyBound && g.liveOnFootKnown && g.liveOnFoot &&
+            g.liveSample > g.sampleAtPanelStop;
+        if (autoIntent && !g.autoIntentNoted) {
+            g.autoIntentNoted = true;
+            Log::get().note(
+                "head offset: no external-camera key is bound, and the game's "
+                "own status says you are on foot -- so entering the external "
+                "camera will be detected from that instead. Binding "
+                "hotkey.external_camera still gives the crispest entries.");
+        }
         const bool timingOk = g.gateSincePanel <= g.gateEnterWindow ||
                               g.gateIntentAge <= g.gateIntentGrace;
         // The panel must have been gone for a WHILE, not for one frame.
@@ -456,16 +502,39 @@ void headOffsetGateFrame(uint32_t frameNo, uint32_t panelDraws, uint32_t eyeDraw
         // several panel-less frames costs nothing real and rejects every
         // single-frame gap.
         const bool panelGoneAWhile = g.gateSincePanel >= 8;
-        if (!g.gateInCamera && intentOk && timingOk && panelGoneAWhile &&
+        const bool entryAsked =
+            (intentOk && timingOk) ||
+            (autoIntent && g.gateSincePanel <= g.gateEnterWindow);
+        if (!g.gateInCamera && entryAsked && panelGoneAWhile &&
             sceneNow && g.gatePanelRun > 30) {
             g.gateInCamera = true;
+            ++g.gateCameraEnters;
             g.gateSinceEnter = 0;
             Log::get().note(
                 "on-foot external camera: the flat panel stopped %u frame(s) ago "
                 "after %u settled frames, and %u draws are reaching the eye "
-                "textures. View index %d.",
+                "textures. View index %d%s.",
                 g.gateSincePanel, g.gatePanelRun, eyeDraws,
-                g.gateViewIndex);
+                g.gateViewIndex,
+                intentOk ? "" : " (entered keylessly, from the game's own "
+                                "on-foot status)");
+        }
+        // BOARDING EXITS THE CAMERA, by the game's own word. The player can
+        // board their ship directly from the external camera; the panel never
+        // returns and no key is pressed, which is exactly the latch-stuck
+        // case the camera key existed to close. The live OnFoot flag dropping
+        // closes it without one -- and it must beat the offset, because an
+        // offset that follows the player into the cockpit is the failure this
+        // module exists to prevent.
+        if (g.gateInCamera && g.liveOnFootKnown && !g.liveOnFoot) {
+            g.gateInCamera = false;
+            g.gateExternal = false;
+            ++g.gateExits;
+            edvr::setExternalCameraOnFoot(false);
+            Log::get().note(
+                "head offset OFF: the game's status says you are no longer on "
+                "foot, so the external camera is over -- boarded, most likely. "
+                "Coming off before the cockpit does.");
         }
         // Neither panel nor scene for a long stretch: a menu, a loading
         // screen, or a mode change we cannot see. Drop the latch rather
@@ -550,7 +619,12 @@ void headOffsetGateFrame(uint32_t frameNo, uint32_t panelDraws, uint32_t eyeDraw
                 "key %s, pressed %s, view=%d (wants %d).",
                 g.gatePanelRun, g.gateSincePanel, g.gateEnterWindow, eyeDraws,
                 g.gateIntent ? "set" : "CLEAR",
-                g.gateKeyBound ? "BOUND" : "NOT BOUND -- nothing can arm",
+                g.gateKeyBound
+                    ? "BOUND"
+                    : (g.liveOnFootKnown
+                           ? "not bound (keyless: the game's on-foot status "
+                             "stands in)"
+                           : "NOT BOUND -- nothing can arm"),
                 g.gateHaveKey ? "yes" : "not yet this session",
                 g.gateViewIndex, g.gateWantView);
         }

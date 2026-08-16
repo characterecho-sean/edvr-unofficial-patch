@@ -1,5 +1,5 @@
 // GENERATED from src/d3d11/head_offset_gate.h in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 61d9b2087e0970ac]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 1e5e6a046d8c4a46]
 // When to move the head pose: on foot, in the external camera, and nowhere
 // else.
 //
@@ -92,6 +92,29 @@ void headOffsetGateSetNextKeyBound(bool bound);
 // panel-return heuristic (fallback, internal) -- and it dedupes, so the
 // first to speak does the work. `source` names the caller in the log.
 void headOffsetGateNewFootSession(const char* source);
+
+// The game's own live word on whether the player is on foot (Status.json's
+// OnFoot flag, fed per frame from the journal watcher). What it buys is
+// KEYLESS camera detection: on foot per the game, with the on-foot screen
+// gone and a stereo scene rendering, is the external camera -- boarding
+// drops the flag and announces Embark, and 6bb measured the flag HOLDING
+// through the entire camera window. `known` false (menus, no Status.json,
+// watcher off) restores the key-only behaviour exactly.
+// `sample` is the running count of Status.json reads: keyless arming
+// requires an on-foot sample taken AFTER the panel stopped, so boarding
+// from the camera -- panel gone, previous sample still saying on-foot for
+// up to a second -- cannot put the offset in the boarding animation.
+void headOffsetGateSetOnFootLive(bool known, bool onFoot, uint32_t sample);
+
+// Rising-edge counter of camera entries, for the caller that nudges the
+// view scanner: fresh candidates at every entry is what makes the anchored
+// certification land while the player is still cycling to their view.
+uint32_t headOffsetGateEnterCount();
+
+// The gate's current counted view -- the anchor a candidate record must
+// read at priming time for the two-step anchored certification (0 after a
+// disembark, the last confirmed view within a session).
+int headOffsetGateCountedView();
 
 // Supply an authoritative view index, or -1 for "not known".
 //

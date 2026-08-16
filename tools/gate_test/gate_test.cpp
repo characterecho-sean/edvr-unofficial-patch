@@ -1,5 +1,5 @@
 // GENERATED from tools/gate_test/gate_test.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 e0a75b7f7e172521]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 b2aa6e71c144b5c0]
 // gate_test -- replays frame sequences through the head-offset gate.
 //
 // WHY
@@ -429,6 +429,14 @@ int main(int argc, char** argv) {
     check(true, "two presses reach the wanted view and the offset arms, "
                 "read or no read");
 
+    // AND THE HOLD HAS NO CLOCK AT ALL: staying in the camera on the held
+    // view for as long as the player wishes is the product requirement
+    // (2026-08-15) -- the wall-clock TTL greeted every relanding with a dead
+    // bridge, and the in-camera budget contradicted indefinite stays. An
+    // hour of frames on the hold stays on.
+    sceneFrame(324000);
+    check(true, "an hour in the camera on the held view is still on");
+
     // A CAMERA TOGGLE WITHIN a session keeps the count: leaving the camera
     // to on-foot and coming straight back is the case the game genuinely
     // remembers across, and no vehicle scene intervenes.
@@ -484,6 +492,49 @@ int main(int argc, char** argv) {
     sceneFrame(12);
     check(true, "a long menu stretch does not start a new session, and the "
                 "held view still arms");
+
+    // --------------------------------------------------------- keyless mode
+    //
+    // No camera key bound, and the game's own status standing in for it
+    // (6bb: the OnFoot flags HOLD through the whole camera window and drop
+    // on boarding). The sample counter models Status.json's ~1 Hz cadence:
+    // keyless arming requires an on-foot sample taken AFTER the panel
+    // stopped, so boarding's stale second of "on foot" cannot arm the
+    // offset into the boarding animation.
+    begin(false);
+    headOffsetGateSetView(g_wantView);
+    headOffsetGateSetOnFootLive(true, true, 1);
+    panelFrame(200);
+    sceneFrame(6);                            // panel stops: entering the camera
+    headOffsetGateSetOnFootLive(true, true, 2);   // a fresh on-foot sample
+    sceneFrame(12);
+    check(true, "keyless: on foot per the game, panel gone, scene up -- the "
+                "external camera, no key needed");
+
+    // Boarding from the camera: the flag drops, the offset must beat the
+    // cockpit.
+    headOffsetGateSetOnFootLive(true, false, 3);
+    sceneFrame(2);
+    check(false, "keyless: the game says not on foot, so the camera is over");
+
+    // Boarding INSTEAD of the camera: the panel stops, the scene appears,
+    // and the only on-foot samples are from BEFORE the panel stopped --
+    // stale. No fresh sample, no arming, however on-foot the old one says.
+    begin(false);
+    headOffsetGateSetView(g_wantView);
+    headOffsetGateSetOnFootLive(true, true, 1);
+    panelFrame(200);
+    sceneFrame(30);                           // boarding: no fresh sample yet
+    check(false, "keyless: a stale on-foot sample does not arm into a "
+                 "boarding animation");
+
+    // No live context at all (no Status.json, watcher off): keyless stays
+    // the dead configuration it always was.
+    begin(false);
+    headOffsetGateSetView(g_wantView);
+    panelFrame(200);
+    sceneFrame(30);
+    check(false, "keyless with no live context: nothing can arm, as before");
 
     // ------------------------------------------------------- certification
     //
@@ -556,20 +607,41 @@ int main(int argc, char** argv) {
             ++cbad;
         }
 
+        // The anchored two-step (keyless): primed at the value the count
+        // predicted, two sequential in-camera steps certify -- the player's
+        // own walk from the opening view to their preset.
+        CameraViewVote anchored{};
+        cameraViewCertStep(&anchored, 0, true, false, false);   // primes
+        anchored.anchored = true;   // primed at the predicted entry view
+        const bool a1 = cameraViewCertStep(&anchored, 1, true, false, false);
+        const bool a2 = cameraViewCertStep(&anchored, 2, true, false, false);
+        if (a1 || !a2) {
+            printf("  FAIL  the anchored bar did not certify on exactly two "
+                   "steps from the predicted view\n");
+            ++cbad;
+        }
+
+        // ...and a broken sequence forfeits the anchor: after noise, the
+        // same candidate is back to the unanchored three-step bar.
+        CameraViewVote forfeited{};
+        cameraViewCertStep(&forfeited, 0, true, false, false);
+        forfeited.anchored = true;
+        cameraViewCertStep(&forfeited, 1, true, false, false);
+        cameraViewCertStep(&forfeited, 5, true, false, false);  // noise: reset
+        cameraViewCertStep(&forfeited, 6, true, false, false);
+        const bool f2 = cameraViewCertStep(&forfeited, 7, true, false, false);
+        if (f2 || forfeited.anchored) {
+            printf("  FAIL  a broken sequence kept its anchor or certified "
+                   "on two post-noise steps\n");
+            ++cbad;
+        }
+
         if (cbad == 0) {
             printf("  ok    certification needs the player's finger: presses "
                    "certify, counters and noise cannot\n");
         }
         g_bad += cbad;
     }
-
-    // AND THE HOLD HAS NO CLOCK AT ALL: staying in the camera on the held
-    // view for as long as the player wishes is the product requirement
-    // (2026-08-15) -- the wall-clock TTL greeted every relanding with a dead
-    // bridge, and the in-camera budget contradicted indefinite stays. An
-    // hour of frames on the hold stays on.
-    sceneFrame(324000);
-    check(true, "an hour in the camera on the held view is still on");
 
     // THE POISONED READER (6aw): the array contains a counter that certifies
     // under shape rules and supplies garbage. A read that DISAGREES while the

@@ -1,5 +1,5 @@
 // GENERATED from src/d3d11/camera_view.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 2f79a059d3186b4c]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 eba771dc0ae0c11d]
 #include "camera_view.h"
 
 #include <windows.h>
@@ -776,6 +776,12 @@ void finishScan() {
         c.rec = rec;
         c.vote.last = v;
         c.vote.primed = true;
+        // Anchored when the record already reads the view the gate's count
+        // predicts (0 after a disembark, the last confirmed view within a
+        // session): such a candidate certifies on the two steps the player's
+        // own walk to their preset supplies.
+        c.vote.anchored =
+            v == static_cast<uint32_t>(headOffsetGateCountedView());
         g_s.cands.push_back(c);
     }
     if (!g_s.cands.empty()) {
@@ -1013,16 +1019,34 @@ bool cameraViewCertStep(CameraViewVote* c, uint32_t v, bool inCamera,
         } else {
             c->changes = 0;
             c->coincident = 0;
+            // A broken sequence forfeits the anchor too: the anchor's claim
+            // was about stepping FROM the predicted value, and this stopped.
+            c->anchored = false;
         }
         c->last = v;
     }
-    return witnessed ? c->coincident >= 2 : c->changes >= kChangesToCertify;
+    if (witnessed) return c->coincident >= 2;
+    // Anchored two-step: primed at the value the gate predicted and stepped
+    // twice in-camera since -- the player's own walk from the opening view
+    // to their preset. The unanchored bar stays at three.
+    if (c->anchored && c->changes >= 2) return true;
+    return c->changes >= kChangesToCertify;
 }
 
 void cameraViewNotePress() { g_s.lastPressTick = g_s.tick ? g_s.tick : 1; }
 
 void cameraViewSetPressWitness(bool nextKeyBound) {
     g_s.pressWitness = nextKeyBound;
+}
+
+void cameraViewNudgeRescan() {
+    // A camera entry with nothing certified: the player is about to cycle,
+    // and cycling past fresh candidates is what certifies. Same shape as the
+    // provisional-expiry rescan (6as): the rescan budget, a short cooldown
+    // override, and the tick self-trigger picks it up.
+    if (g_s.usable || g_s.scanning || !g_s.sawGameplay) return;
+    g_s.needRescan = true;
+    if (g_s.cooldown > 60) g_s.cooldown = 60;
 }
 
 // Watch the candidates for one that behaves like a camera preset.
@@ -1091,7 +1115,9 @@ void pollCandidates() {
             (const void*)g_s.chosen, won.vote.changes,
             g_s.pressWitness
                 ? " with your view-key press landing beside each counted step"
-                : " while you cycled",
+                : (won.vote.anchored
+                       ? " from exactly the view the count predicted"
+                       : " while you cycled"),
             recordValue(g_s.chosen));
         return;
     }
