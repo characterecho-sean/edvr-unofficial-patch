@@ -1,5 +1,5 @@
 // GENERATED from tools/gate_test/gate_test.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 8447c48a023cb5b1]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 e0a75b7f7e172521]
 // gate_test -- replays frame sequences through the head-offset gate.
 //
 // WHY
@@ -445,6 +445,29 @@ int main(int argc, char** argv) {
     sceneFrame(12);
     check(true, "a same-session toggle keeps the held view and re-arms");
 
+    // THE JOURNAL'S BOUNDARY AND THE HEURISTIC'S ARE ONE RESET. Disembark
+    // (wired from device_hook) and the panel-return heuristic mark the same
+    // landing seconds apart; whichever speaks first does the work and the
+    // second is deduped, so a landing resets once, not twice.
+    begin(true);
+    headOffsetGateSetView(g_wantView);
+    enterCamera();
+    headOffsetGateSetView(-1);
+    sceneFrame(20);
+    check(true, "in the camera, read dead, holding");
+    headOffsetGateKeyPressed();               // out to the ship
+    sceneFrame(2000);                         // the leg
+    headOffsetGateNewFootSession("test: journal Disembark");
+    panelFrame(200);                          // panel returns: the heuristic
+    headOffsetGateKeyPressed();               // would fire here -- deduped
+    panelFrame(2);
+    sceneFrame(12);
+    check(false, "the journal's reset put the new session on view 0");
+    headOffsetGateViewBumped();
+    headOffsetGateViewBumped();
+    sceneFrame(2);
+    check(true, "two presses reach the wanted view after a journal reset");
+
     // AN IDLE STRETCH (map, menu) is not a vehicle leg and must not reset:
     // neither panel nor scene accrues toward the session boundary.
     begin(true);
@@ -461,6 +484,84 @@ int main(int argc, char** argv) {
     sceneFrame(12);
     check(true, "a long menu stretch does not start a new session, and the "
                 "held view still arms");
+
+    // ------------------------------------------------------- certification
+    //
+    // The pure judgement both flight-caught certification bugs lived in,
+    // replayed on a desk instead of a planet: 6au (rebuild noise counted as
+    // behaviour) and 6aw (a counter steps like a player). The scan machinery
+    // is not needed to prove the rules, which is the whole point of the seam.
+    {
+        int cbad = 0;
+
+        // Legacy bar (no next-view key): three sequential in-camera steps.
+        CameraViewVote legacy{};
+        cameraViewCertStep(&legacy, 0, true, false, false);   // primes
+        bool early = cameraViewCertStep(&legacy, 1, true, false, false);
+        early = early || cameraViewCertStep(&legacy, 2, true, false, false);
+        const bool third = cameraViewCertStep(&legacy, 3, true, false, false);
+        if (early || !third) {
+            printf("  FAIL  the legacy bar did not certify on exactly three "
+                   "sequential in-camera steps\n");
+            ++cbad;
+        }
+
+        // 6au's shape: arbitrary rebuild writes reset and never accumulate.
+        CameraViewVote noise{};
+        cameraViewCertStep(&noise, 6, true, false, false);
+        cameraViewCertStep(&noise, 0, true, false, false);    // 6->0 resets
+        cameraViewCertStep(&noise, 3, true, false, false);    // 0->3 resets
+        if (cameraViewCertStep(&noise, 4, true, false, false)) {
+            printf("  FAIL  rebuild noise accumulated toward certification\n");
+            ++cbad;
+        }
+
+        // 6aw's shape, out of camera: a counter climbing 0,1,2,3,4 with the
+        // player elsewhere certifies nothing, however sequential it is.
+        CameraViewVote counter{};
+        cameraViewCertStep(&counter, 0, false, false, false);
+        bool out = false;
+        for (uint32_t v = 1; v <= 4; ++v) {
+            out = out || cameraViewCertStep(&counter, v, false, false, false);
+        }
+        if (out) {
+            printf("  FAIL  a counter certified while the player was out of "
+                   "the camera\n");
+            ++cbad;
+        }
+
+        // Witnessed bar: two steps landing beside real presses certify...
+        CameraViewVote witnessed{};
+        cameraViewCertStep(&witnessed, 0, true, false, true);
+        const bool w1 = cameraViewCertStep(&witnessed, 1, true, true, true);
+        const bool w2 = cameraViewCertStep(&witnessed, 2, true, true, true);
+        if (w1 || !w2) {
+            printf("  FAIL  the witnessed bar did not certify on exactly two "
+                   "press-coincident steps\n");
+            ++cbad;
+        }
+
+        // ...and the 6aw hole the legacy bar still has is CLOSED by it: an
+        // in-camera counter climbing sequentially with no press near any
+        // step never certifies, however long it runs.
+        CameraViewVote inCam{};
+        cameraViewCertStep(&inCam, 0, true, false, true);
+        bool climbed = false;
+        for (uint32_t v = 1; v <= 5; ++v) {
+            climbed = climbed || cameraViewCertStep(&inCam, v, true, false, true);
+        }
+        if (climbed) {
+            printf("  FAIL  a counter certified under the witnessed bar "
+                   "without a single press\n");
+            ++cbad;
+        }
+
+        if (cbad == 0) {
+            printf("  ok    certification needs the player's finger: presses "
+                   "certify, counters and noise cannot\n");
+        }
+        g_bad += cbad;
+    }
 
     // AND THE HOLD HAS NO CLOCK AT ALL: staying in the camera on the held
     // view for as long as the player wishes is the product requirement

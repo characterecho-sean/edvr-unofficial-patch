@@ -1,5 +1,5 @@
 // GENERATED from src/d3d11/camera_view.h in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 69ef9c6c597faa9a]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 ee445275521245e2]
 // Which external-camera view the game is showing, read from the game.
 //
 // WHY THIS EXISTS
@@ -111,6 +111,36 @@ inline std::vector<CameraViewRun> cameraViewGroupRuns(
     }
     return runs;
 }
+
+// The per-sample certification decision, exposed as a pure function so the
+// frame-feed test can drive it without the scan machinery. Both of this
+// module's field-caught certification bugs (6au: rebuild noise counted as
+// behaviour; 6aw: a counter steps like a player) lived exactly here.
+//
+// A change counts only when it steps UP BY EXACTLY ONE and the player is IN
+// the external camera; any other change resets everything (an oscillating
+// slot must never accumulate). With a next-view key bound ("witnessed" mode)
+// certification needs TWO steps each coincident with a real press -- a
+// record that moves exactly when the finger does is the preset, and a
+// counter ticking between presses can hardly ever qualify, with the
+// two-qualifiers refusal covering the storm case where it briefly might.
+// Without the key, the legacy bar stands: three sequential in-camera steps.
+struct CameraViewVote {
+    uint32_t last = 0;
+    uint32_t changes = 0;      // sequential in-camera steps
+    uint32_t coincident = 0;   // ...of which landed beside a witnessed press
+    bool     primed = false;
+};
+bool cameraViewCertStep(CameraViewVote* vote, uint32_t value, bool inCamera,
+                        bool pressRecent, bool witnessed);
+
+// The player pressed the next-view key (called from the hotkey watcher,
+// which gates it on gameplay). Timestamps the press for coincidence testing.
+void cameraViewNotePress();
+
+// Whether a next-view key is configured at all: chooses between the
+// witnessed and legacy certification bars above.
+void cameraViewSetPressWitness(bool nextKeyBound);
 
 // Reads d3d11.camera_index_*. Safe to call repeatedly.
 void cameraViewConfigure();

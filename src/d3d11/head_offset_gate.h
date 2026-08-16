@@ -1,5 +1,5 @@
 // GENERATED from src/d3d11/head_offset_gate.h in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 b0a8574f21b19097]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 61d9b2087e0970ac]
 // When to move the head pose: on foot, in the external camera, and nowhere
 // else.
 //
@@ -84,6 +84,14 @@ void headOffsetGateViewBumped();
 // distinction as headOffsetGateSetKeyBound: the bridge's log line and the
 // dead-config warning need to know a key exists before its first press.
 void headOffsetGateSetNextKeyBound(bool bound);
+
+// A new on-foot session has begun: the game resets its external-camera view
+// to 0 across this boundary (6ay), so the counted view and any held view
+// restart from 0 with it. Two detectors call this for the same landing --
+// the journal's Disembark (authoritative, wired in device_hook) and the
+// panel-return heuristic (fallback, internal) -- and it dedupes, so the
+// first to speak does the work. `source` names the caller in the log.
+void headOffsetGateNewFootSession(const char* source);
 
 // Supply an authoritative view index, or -1 for "not known".
 //

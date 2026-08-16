@@ -10,6 +10,7 @@
 #include "../common/hotkey.h"
 #include "head_offset_gate.h"
 #include "camera_view.h"
+#include "journal_watch.h"
 #include "../common/log.h"
 #include "../common/proxy.h"
 #include "../common/vtable_hook.h"
@@ -66,6 +67,7 @@ struct State {
     // to keep in step, in exchange for nothing a working install uses.
     Hotkey externalCamKey;
     Hotkey extCamNextKey;
+    uint32_t lastJournalDisembarks = 0;
     uint64_t frameCounter = 0;
 
     // Dump the camera history on every external-camera keypress. Diagnostic,
@@ -239,11 +241,30 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
         if (g_state->dumpCountdown > 0 && --g_state->dumpCountdown == 0) {
             dumpCameraRing("a key you pressed two seconds ago", kDumpDelayFrames);
         }
+        // The game's own journal, polled about once a second: it states the
+        // two boundaries EDVR used to infer -- gameplay starting (LoadGame)
+        // and on-foot sessions beginning (Disembark, where the game resets
+        // its camera view to 0).
+        journalWatchTick();
+        if (journalWatchActive()) {
+            const uint32_t d = journalDisembarks();
+            if (d != g_state->lastJournalDisembarks) {
+                g_state->lastJournalDisembarks = d;
+                headOffsetGateNewFootSession(
+                    "the game's journal says you disembarked");
+            }
+        }
+        // Camera keys mean the CAMERA only once gameplay has started. Before
+        // LoadGame every press is menu navigation -- and the next-view key is
+        // typically an arrow, which menus eat by the dozen; counting those
+        // walked the view count away from reality before the game even began
+        // (6ba). Without the journal, behaviour is exactly as before.
+        const bool keysMeanGame = !journalWatchActive() || journalGameplay();
         // Told to the gate, not acted on here. These keys are the player's OWN
         // Elite bindings: EDVR does not send them, press them or interfere with
         // them -- it watches for the same press the game gets, so it knows
         // which mode the player just asked for.
-        if (g_state->externalCamKey.pressed()) {
+        if (keysMeanGame && g_state->externalCamKey.pressed()) {
             headOffsetGateKeyPressed();
             // The camera history, triggered by the press but taken AFTER it.
             //
@@ -291,8 +312,12 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
         // during a hold was then INVISIBLE: the offset stayed armed on every
         // preset the player cycled to. With this bound, the count follows
         // each press, so the offset drops the moment you cycle off the wanted
-        // view and returns when you cycle back -- read or no read.
-        if (g_state->extCamNextKey.pressed()) {
+        // view and returns when you cycle back -- read or no read. The press
+        // is also timestamped for the watcher: a candidate record stepping
+        // exactly when the finger does is the certification no impostor has
+        // matched (6aw).
+        if (keysMeanGame && g_state->extCamNextKey.pressed()) {
+            cameraViewNotePress();
             headOffsetGateViewBumped();
         }
         // Reading the view the game is actually on, and telling the gate.
@@ -347,6 +372,8 @@ State& ensureState() {
         g_state->extCamNextKey.setBinding(
             Config::get().getString("hotkey.external_camera_next", "").c_str());
         headOffsetGateSetNextKeyBound(g_state->extCamNextKey.key() != 0);
+        cameraViewSetPressWitness(g_state->extCamNextKey.key() != 0);
+        journalWatchConfigure();
         g_state->dumpOnExternalCam =
             Config::get().getBool("advanced.dump_camera_on_external_cam", false);
         g_state->holdFramesOnExternalCam = static_cast<uint32_t>(
@@ -526,6 +553,7 @@ void hookFactoryForDevice(ID3D11Device* device) {
 }
 
 void shutdownDeviceHooks() {
+    journalWatchShutdown();
     // Reverse of install order: vScreen's vtable copy was taken on top of the
     // exposure fix's, so it comes off first.
     revertVScreenModeResolution();

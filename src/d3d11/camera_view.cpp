@@ -1,5 +1,5 @@
 // GENERATED from src/d3d11/camera_view.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 b0ce7eaddae76e0b]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 2f79a059d3186b4c]
 #include "camera_view.h"
 
 #include <windows.h>
@@ -80,6 +80,12 @@ constexpr size_t kMaxGap = 2;
 constexpr size_t   kMaxCandidates = 32;
 constexpr uint32_t kChangesToCertify = 3;
 constexpr uint32_t kCandPollFrames = 15;
+// How close, in frames, a candidate's step must land to a witnessed press to
+// count as coincident. Two poll intervals: the write happens within a frame
+// of the press and the poll sees it at most one cadence later; thirty covers
+// that with slack while staying far below the seconds between a player's
+// deliberate presses.
+constexpr uint32_t kPressCoincidenceFrames = 30;
 // Places holding the array's address that are worth remembering. Sixty-four is
 // far more than a real pointer graph needs and cheap to re-read.
 constexpr size_t kMaxAnchorSites = 64;
@@ -168,11 +174,16 @@ struct State {
     // The watched candidates. See the note in finishScan.
     struct Cand {
         const uint8_t* rec;
-        uint32_t last;
-        uint32_t changes;
+        CameraViewVote vote;
     };
     std::vector<Cand> cands;
     uint32_t candPoll = 0;
+    // Press-coincidence certification (6aw's consequence): the tick clock,
+    // when the next-view key last fired against it, and whether such a key
+    // exists at all.
+    uint32_t tick = 0;
+    uint32_t lastPressTick = 0;
+    bool     pressWitness = false;
 
     // THE ANCHOR HUNT. Evidence gathering, and deliberately not yet acted on.
     //
@@ -761,7 +772,11 @@ void finishScan() {
         const uint32_t v = recordValue(rec);
         if (v > g_s.plausibleMax) continue;
         if (g_s.cands.size() >= kMaxCandidates) break;
-        g_s.cands.push_back({rec, v, 0});
+        State::Cand c{};
+        c.rec = rec;
+        c.vote.last = v;
+        c.vote.primed = true;
+        g_s.cands.push_back(c);
     }
     if (!g_s.cands.empty()) {
         Log::get().note(
@@ -962,18 +977,70 @@ uint32_t candidateValue(const uint8_t* rec) {
     });
     return v;
 }
+// The one judgement both field-caught certification bugs lived in, pure so
+// the frame-feed test can replay them on a desk. The rules, each bought by a
+// flight:
+//
+// STEP (6au): a change counts only when the value steps UP BY EXACTLY ONE --
+// rebuild noise writes arbitrary values, presses step the cycle. Any other
+// change resets everything: ignored instead, a slot oscillating 0-1-0-1
+// banks a +1 at every rise. The 5-to-0 wrap resets too; a forward loop still
+// supplies five sequential steps.
+//
+// WITNESS (6aw): the array contains a counter that rebuilds increment
+// sequentially -- indistinguishable from presses by shape -- so an in-camera
+// requirement joins the step (the preset can only change while the player is
+// in the camera), and with a next-view key bound, certification needs TWO
+// steps each landing beside a witnessed press. A counter ticking between
+// presses accrues plain changes, which the witnessed bar ignores; the rare
+// storm where its ticks straddle the player's presses lands in the
+// two-qualifiers refusal rather than in a wrong certification.
+//
+// Without a bound key there are no witnessed presses, so the legacy bar --
+// three sequential in-camera steps -- still stands for that configuration,
+// with 6aw's in-camera-counter exposure documented as its cost.
+bool cameraViewCertStep(CameraViewVote* c, uint32_t v, bool inCamera,
+                        bool pressRecent, bool witnessed) {
+    if (!c->primed) {
+        c->primed = true;
+        c->last = v;
+        return false;
+    }
+    if (v != c->last) {
+        if (v == c->last + 1 && inCamera) {
+            ++c->changes;
+            if (pressRecent) ++c->coincident;
+        } else {
+            c->changes = 0;
+            c->coincident = 0;
+        }
+        c->last = v;
+    }
+    return witnessed ? c->coincident >= 2 : c->changes >= kChangesToCertify;
+}
+
+void cameraViewNotePress() { g_s.lastPressTick = g_s.tick ? g_s.tick : 1; }
+
+void cameraViewSetPressWitness(bool nextKeyBound) {
+    g_s.pressWitness = nextKeyBound;
+}
+
 // Watch the candidates for one that behaves like a camera preset.
 //
 // Certifies on the SAME terms as everything else in this codebase: observation,
 // a refusal to guess between equals, and "do not know" as a legitimate answer.
-// If two records both change three times we have learned that we cannot tell
-// them apart, which is information -- guessing between them would put a wrong
-// number into the head-offset gate and move somebody's viewpoint on the strength
-// of it.
+// If two records both qualify we have learned that we cannot tell them apart,
+// which is information -- guessing between them would put a wrong number into
+// the head-offset gate and move somebody's viewpoint on the strength of it.
 void pollCandidates() {
     if (g_s.usable || g_s.cands.empty()) return;
     if (++g_s.candPoll < kCandPollFrames) return;
     g_s.candPoll = 0;
+
+    const bool inCamera = headOffsetGateInCamera();
+    const bool pressRecent =
+        g_s.lastPressTick != 0 &&
+        g_s.tick - g_s.lastPressTick <= kPressCoincidenceFrames;
 
     size_t qualified = 0, qualifiedAt = 0;
     for (size_t i = 0; i < g_s.cands.size(); ++i) {
@@ -985,60 +1052,21 @@ void pollCandidates() {
         // the records go briefly quiet while the game rebuilds them, which is
         // routine -- so the sample is skipped rather than held against it.
         if (v == 0xFFFFFFFFu) continue;
-        // OUT OF RANGE DEMOTES, IT NO LONGER EXECUTES. The execution rule --
-        // one out-of-range reading nulls the candidate for good -- assumed a
-        // preset index never leaves 0..view_count, and the field refuted it:
-        // the record that IS the preset read 8 during a rebuild transition
-        // and was certified as the preset seconds later (6at.4, record 01C0).
-        // Under permanent disqualification, one unlucky poll during churn
-        // executes the only right answer for that candidate generation.
-        //
-        // What the execution was protecting against still cannot happen: the
-        // change count resets on EVERY out-of-range sample, so a garbage slot
-        // that wanders in and out of range can never hold three changes --
-        // each excursion sends it back to zero. The cost of demotion is that
-        // a genuine preset's cycling progress restarts after a transition
-        // state, which is one extra press.
+        // OUT OF RANGE DEMOTES, IT NO LONGER EXECUTES (6at.4: the record that
+        // IS the preset read 8 during a rebuild transition). The change count
+        // resets on every out-of-range sample, so a wandering slot still can
+        // never accumulate; the genuine preset merely restarts its progress.
         if (v > g_s.plausibleMax) {
-            c.changes = 0;
+            c.vote.changes = 0;
+            c.vote.coincident = 0;
             continue;
         }
-        if (v != c.last) {
-            // A change counts only when it steps UP BY EXACTLY ONE, WITNESSED
-            // WHILE THE PLAYER IS IN THE EXTERNAL CAMERA. Both clauses are
-            // field-bought, one flight apart:
-            //
-            // The step clause (6au): rebuilds write arbitrary values into
-            // records every ten to thirty seconds near a planet, and
-            // any-change counting certified a record that then read a frozen
-            // 0 through seventeen seconds of the player pressing keys at it.
-            // Presses step +1; rebuild noise does not. (6ad.7e is the
-            // precedent: the exact modular step made the original search
-            // converge.)
-            //
-            // The witness clause (6aw): the array also contains a COUNTER
-            // that a rebuild increments 0,1,2,3 -- sequential, exactly like
-            // presses -- and it certified under the step rule alone, out of
-            // the camera, 34 seconds before the player arrived. What no
-            // impostor has satisfied is CONTEXT: the true preset can only
-            // change while the player is in the camera pressing the view
-            // key, because the game freezes it everywhere else. So a change
-            // seen outside the camera disqualifies this stretch outright --
-            // whatever moved, it was not the player.
-            //
-            // ANY DISQUALIFIED CHANGE RESETS THE COUNT rather than being
-            // ignored: ignored, a slot oscillating 0-1-0-1 banks a +1 at
-            // every rise and certifies; reset, it can never hold three. The
-            // 5-to-0 wrap resets too -- one forward loop still supplies five
-            // sequential steps and three certify.
-            if (v == c.last + 1 && headOffsetGateInCamera()) {
-                ++c.changes;
-            } else {
-                c.changes = 0;
-            }
-            c.last = v;
-        }
-        if (c.changes >= kChangesToCertify) {
+        // The certification decision itself lives in cameraViewCertStep --
+        // pure, and driven directly by the frame-feed test, because both of
+        // this module's field-caught certification bugs (6au, 6aw) were in
+        // exactly this judgement and cost a flight each to find.
+        if (cameraViewCertStep(&c.vote, v, inCamera, pressRecent,
+                               g_s.pressWitness)) {
             ++qualified;
             qualifiedAt = i;
         }
@@ -1053,13 +1081,17 @@ void pollCandidates() {
         g_s.usable = true;
         g_s.readFaults = 0;
         g_s.readFaultsNoted = false;
+        const State::Cand& won = g_s.cands[qualifiedAt];
         Log::get().note(
-            "camera view: identified by behaviour -- the record at %p changed "
-            "value %u times while staying in range, and nothing else in the "
-            "array did. That is your camera preset, and it reads %u now. Found "
-            "by watching rather than by counting to a fixed position, because "
-            "four different array layouts have been seen in one game build.",
-            (const void*)g_s.chosen, g_s.cands[qualifiedAt].changes,
+            "camera view: identified by behaviour -- the record at %p stepped "
+            "in range %u time(s)%s, and nothing else in the array did. That is "
+            "your camera preset, and it reads %u now. Found by watching rather "
+            "than by counting to a fixed position, because four different "
+            "array layouts have been seen in one game build.",
+            (const void*)g_s.chosen, won.vote.changes,
+            g_s.pressWitness
+                ? " with your view-key press landing beside each counted step"
+                : " while you cycled",
             recordValue(g_s.chosen));
         return;
     }
@@ -1075,6 +1107,7 @@ void pollCandidates() {
     }
 }
 void cameraViewTick(uint32_t eyeDraws) {
+    ++g_s.tick;   // the clock press-coincidence is measured against
     // Attempts spent before the game was being played do not count.
     //
     // The scan is triggered by the on-foot panel, which the main menu also

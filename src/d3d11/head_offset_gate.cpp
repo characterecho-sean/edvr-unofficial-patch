@@ -1,5 +1,5 @@
 // GENERATED from src/d3d11/head_offset_gate.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 674bdebae7743ae4]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 343a935453a4bae8]
 #include "head_offset_gate.h"
 
 #include "../common/config.h"
@@ -58,6 +58,8 @@ struct Gate {
     bool     gateBridgeOn = true;        // fix.head_offset_view_bridge
     bool     gateBridgeStarted = false;  // once per contiguous unreadable run
     bool     gateSyncRefusedNoted = false;
+    uint32_t gateFrameNo = 0;            // the frame Frame() last ran for
+    uint32_t gateLastFootReset = 0;      // when a new-session reset last fired
     bool     gateNoConsumerNoted = false;
     uint32_t gateIntentAge = 0;          // frames since the key was pressed
     uint32_t gateIntentGrace = 180;      // frames a press gets to take effect
@@ -147,6 +149,25 @@ void headOffsetGateSetKeyBound(bool bound) { g.gateKeyBound = bound; }
 
 void headOffsetGateSetNextKeyBound(bool bound) { g.gateHaveNextKey = bound; }
 
+void headOffsetGateNewFootSession(const char* source) {
+    // ONE BOUNDARY, POSSIBLY TWO DETECTORS. The journal's Disembark and the
+    // panel-return heuristic both mark the same landing, seconds apart --
+    // whichever speaks first does the work and the other stands down, so the
+    // log carries one line per landing rather than an echo.
+    if (g.gateLastFootReset != 0 &&
+        g.gateFrameNo - g.gateLastFootReset < 900) {
+        return;
+    }
+    g.gateLastFootReset = g.gateFrameNo ? g.gateFrameNo : 1;
+    g.gateViewIndex = 0;
+    g.gateBridgeStarted = false;   // any held view belongs to the old session
+    Log::get().note(
+        "head offset: a new on-foot session (%s). The game resets its camera "
+        "view to 0 across this, so the view count and any held view restart "
+        "from 0 with it.",
+        source);
+}
+
 void headOffsetGateKeyPressed() {
     g.gateHaveKey = true;
     // A press while the FLAT PANEL is up can only mean "enter".
@@ -229,6 +250,7 @@ bool headOffsetGateInCamera() { return g.gateInCamera; }
 bool headOffsetGatePanelSettled() { return g.panelSettled; }
 
 void headOffsetGateFrame(uint32_t frameNo, uint32_t panelDraws, uint32_t eyeDraws) {
+    g.gateFrameNo = frameNo;    // the clock NewFootSession dedupes against
     g.panelSettled = false;     // recomputed every frame, below
     if (!g.gateWantsPanel) {
         // Switched off: CLEAR, do not freeze.
@@ -276,15 +298,13 @@ void headOffsetGateFrame(uint32_t frameNo, uint32_t panelDraws, uint32_t eyeDraw
         // preset 0 (6ay, ninth flight, seen directly). Restarting the count
         // at 0 here anchors it to the game's own reset, exactly as launch
         // does -- presses then track every view change with no read needed.
+        //
+        // This is the HEURISTIC detector for that boundary; the journal's
+        // Disembark (wired in device_hook) is the authoritative one and
+        // usually speaks first. Both call the same reset, which dedupes.
         if (g.gateAwayScene >= kNewFootSessionFrames) {
-            g.gateViewIndex = 0;
-            g.gateBridgeStarted = false;   // any held view is from the old session
-            Log::get().note(
-                "head offset: a new on-foot session (the screen is back after "
-                "%u frames of ship or vehicle scene). The game resets its "
-                "camera view to 0 across this, so the view count and any held "
-                "view restart from 0 with it.",
-                g.gateAwayScene);
+            headOffsetGateNewFootSession(
+                "the on-foot screen returned after a ship or vehicle leg");
         }
         g.gateAwayScene = 0;
         g.gateSincePanel = 0;

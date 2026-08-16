@@ -130,7 +130,7 @@ cl.exe %CFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "%ROOT%\src\d3d11\exposure_fix.cpp" "%ROOT%\src\d3d11\vscreen.cpp" ^
     "%ROOT%\src\d3d11\glitch_frame.cpp" "%ROOT%\src\d3d11\vscreen_res.cpp" ^
     "%ROOT%\src\d3d11\binding_shadow.cpp" "%ROOT%\src\d3d11\head_offset_gate.cpp" ^
-    "%ROOT%\src\d3d11\camera_view.cpp"
+    "%ROOT%\src\d3d11\camera_view.cpp" "%ROOT%\src\d3d11\journal_watch.cpp"
 if errorlevel 1 ( echo [edvr] ERROR: compile failed & exit /b 1 )
 
 link.exe /nologo /DLL /MACHINE:X64 /INCREMENTAL:NO ^
@@ -230,7 +230,9 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     "%ROOT%\tools\gate_test\gate_test.cpp" ^
     "%ROOT%\src\d3d11\head_offset_gate.cpp" "%ROOT%\src\common\config.cpp" ^
     "%ROOT%\src\common\log.cpp" "%ROOT%\src\common\frame_flag.cpp" ^
-    /link /INCREMENTAL:NO kernel32.lib user32.lib
+    "%ROOT%\src\d3d11\camera_view.cpp" "%ROOT%\src\common\guard.cpp" ^
+    "%ROOT%\src\common\proxy.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib user32.lib version.lib
 if errorlevel 1 ( echo [edvr] ERROR: gate_test build failed & exit /b 1 )
 "%BUILD%\gate_test.exe" "%ROOT%" || (
     echo [edvr] ERROR: the head-offset gate arms where it should not
