@@ -1,0 +1,122 @@
+name: Crash, or the game will not start
+description: The game closes by itself, freezes, or never reaches the menu.
+title: "[crash] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Sorry this is happening. First, so you can play in the meantime: **delete `d3d11.dll`** from the game folder and the game returns to normal immediately. If you installed the transition flash fix as well, also delete the `openvr_api.dll` you copied in and rename `openvr_api_orig.dll` back.
+
+        Then please fill this in. Every field below has cost me a session of guessing at some point — the ones marked required are the ones I cannot work without.
+
+        **Where the files live.** `edvr_breadcrumbs.txt` and `edvr_FATAL.txt` sit next to `EliteDangerous64.exe`. The logs are in the `edvr_logs\` folder beside it. If you cannot find the game folder, open the log you do have and read its third line — it prints the folder it loaded from.
+
+  - type: textarea
+    id: breadcrumbs
+    attributes:
+      label: edvr_breadcrumbs.txt
+      description: |
+        **This is the most important file in a crash report and almost nobody sends it.** The log is written through a buffer, so a crash eats the last few lines — the breadcrumb file is written one line at a time with no buffering, specifically so it survives. It is what tells me whether EDVR got its hooks installed and whether the game exited normally or was killed.
+
+        It sits next to `EliteDangerous64.exe`. Drag it in, or paste the whole thing. It is short.
+      placeholder: Drag edvr_breadcrumbs.txt here, or paste its contents.
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: The logs from the crashed session
+      description: |
+        Everything in `edvr_logs\`, or at least **both files from the run that crashed** — `edvr_gfx_*.log` and `edvr_vr_*.log` with matching timestamps. One without the other only tells half the story: the two halves of EDVR are separate DLLs and each one logs things the other cannot see.
+
+        They are plain text. The module directory line contains your game folder path, and if EDVR read your Elite key bindings the log names your `.binds` file, which may include your commander name — glance over it if that matters to you.
+      placeholder: Drag the log files here, or paste them.
+    validations:
+      required: true
+
+  - type: input
+    id: build
+    attributes:
+      label: Which EDVR build
+      description: The second line of any EDVR log. Copy it whole — the linked timestamp is what actually identifies the build.
+      placeholder: "build 6A820743 -- this DLL was linked 2026-08-16 18:53:55 UTC"
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happens
+    attributes:
+      label: What happens, and when
+      description: |
+        How far does it get — no window at all, the launcher, the main menu, in flight, on foot? Does it happen every time or now and then? If now and then, roughly how long into a session?
+    validations:
+      required: true
+
+  - type: textarea
+    id: other-mods
+    attributes:
+      label: Other mods
+      description: |
+        **Name the DLL each one is installed as.** EDHM, ReShade and 3Dmigoto all install as a `d3d11.dll` or a `dxgi.dll`, and two of them reaching for the same thing is a recurring cause of exactly this. Version numbers help.
+
+        Write "none" if there are none — that is a useful answer too.
+      placeholder: |
+        EDHM v22.01, renamed to d3d11_edhm.dll
+        ReShade 6.8.0, installed as dxgi.dll
+    validations:
+      required: true
+
+  - type: textarea
+    id: ini
+    attributes:
+      label: Anything you changed in edvr.ini
+      description: |
+        Just the lines you changed from what shipped. These are the ones that matter most, if you have touched any of them: `vscreen_res_width` / `vscreen_res_height`, `panel_distance`, `transition_flash`, `head_offset_gate`, `camera_index_track`, and `advanced.real_dll`.
+
+        Write "nothing" if it is the file as shipped.
+    validations:
+      required: true
+
+  - type: input
+    id: game-folder
+    attributes:
+      label: Your game folder
+      description: |
+        The third line of the `edvr_gfx` log prints it. Steam, the Frontier launcher and Epic all put the game somewhere different, and knowing which layout you have is genuinely useful to me.
+      placeholder: "F:\\Program Files (x86)\\Frontier\\EDLaunch\\Products\\elite-dangerous-odyssey-64"
+    validations:
+      required: true
+
+  - type: input
+    id: headset
+    attributes:
+      label: Headset and runtime
+      description: Which headset, and what it runs through — SteamVR, Oculus, Oasis, WMR, Virtual Desktop.
+      placeholder: HP Reverb G2 via the Oasis driver
+    validations:
+      required: true
+
+  - type: input
+    id: faulting-module
+    attributes:
+      label: Faulting module (optional, but it often settles the whole question)
+      description: |
+        Windows **Event Viewer** → Windows Logs → Application. Find the *Application Error* entry for `EliteDangerous64.exe` and copy the **faulting module name** line. That one field usually says outright whether this is EDVR, another mod, the driver, or the game.
+      placeholder: "Faulting module name: d3d11.dll, version ..."
+
+  - type: textarea
+    id: fatal
+    attributes:
+      label: edvr_FATAL.txt (optional — only if one exists)
+      description: If EDVR caught something fatal it writes this file next to `EliteDangerous64.exe`. Most crashes do not produce one; its absence is not a problem.
+
+  - type: textarea
+    id: system
+    attributes:
+      label: System (optional)
+      placeholder: |
+        Windows 11, latest update
+        RTX 5080
+        Intel Core i7 9700K

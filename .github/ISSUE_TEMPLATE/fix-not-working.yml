@@ -1,0 +1,98 @@
+name: A fix is not doing what it should
+description: The game runs, but one of the fixes does nothing, or does the wrong thing.
+title: "[fix] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The logs answer most of these on their own — every fix says in the log whether it armed, what it matched, and why it declined. So the two log files are worth more here than a description of what you saw.
+
+        They live in `edvr_logs\` next to `EliteDangerous64.exe`. If you cannot find the game folder, open any log and read its third line — it prints the folder it loaded from.
+
+  - type: dropdown
+    id: which-fix
+    attributes:
+      label: Which fix
+      options:
+        - Explorer Cam (stereo depth on foot)
+        - Transition flash (the flash when jumping, dropping, or closing the map)
+        - Eye brightness / exposure
+        - The on-foot screen's resolution
+        - The on-foot screen's distance
+        - The black void around the on-foot screen
+        - Something else, or I am not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Both logs, from the same session
+      description: |
+        **`edvr_gfx_*.log` and `edvr_vr_*.log` with matching timestamps, from one run where the problem happened.** This is the thing I most often have to ask for a second time.
+
+        The two halves of EDVR are separate DLLs in different folders and neither can see what the other does. Explorer Cam in particular is decided in the gfx half and applied in the vr half — sent one of them, I can see that it did not happen but not why. If the vr log is missing entirely, say so, because that is itself an answer.
+
+        Please send the whole files rather than the lines that look relevant. What explains a fix declining is usually somewhere you would not think to look.
+
+        They are plain text. The module directory line contains your game folder path, and if EDVR read your Elite key bindings the log names your `.binds` file, which may include your commander name — glance over it if that matters to you.
+      placeholder: Drag both log files here, or paste them.
+    validations:
+      required: true
+
+  - type: input
+    id: build
+    attributes:
+      label: Which EDVR build
+      description: The second line of any EDVR log. Copy it whole — the linked timestamp is what actually identifies the build.
+      placeholder: "build 6A820743 -- this DLL was linked 2026-08-16 18:53:55 UTC"
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected, and what happened instead
+      description: |
+        If it is Explorer Cam, say which camera preset you were on and how you got into the camera — the preset the offset is for is a setting, and the wrong one is the most common reason nothing happens.
+
+        If it is the transition flash and you saw one get through: press **Pause** right after it and then quit. That writes the last ten seconds of viewpoint history into the log, which is the only thing that separates "the bad frame was spotted and let through" from "it was never spotted at all". Those are different problems with different fixes.
+    validations:
+      required: true
+
+  - type: textarea
+    id: ini
+    attributes:
+      label: Anything you changed in edvr.ini
+      description: Just the lines you changed from what shipped. Write "nothing" if it is the file as shipped.
+    validations:
+      required: true
+
+  - type: textarea
+    id: other-mods
+    attributes:
+      label: Other mods
+      description: |
+        Name the DLL each one is installed as — EDHM, ReShade and 3Dmigoto all install as a `d3d11.dll` or a `dxgi.dll`. Write "none" if there are none.
+      placeholder: |
+        EDHM v22.01, renamed to d3d11_edhm.dll
+        ReShade 6.8.0, installed as dxgi.dll
+    validations:
+      required: true
+
+  - type: input
+    id: headset
+    attributes:
+      label: Headset and runtime
+      description: Which headset, and what it runs through — SteamVR, Oculus, Oasis, WMR, Virtual Desktop.
+      placeholder: HP Reverb G2 via the Oasis driver
+    validations:
+      required: true
+
+  - type: input
+    id: game-folder
+    attributes:
+      label: Your game folder (optional)
+      description: The third line of the `edvr_gfx` log prints it. Steam, the Frontier launcher and Epic all put the game somewhere different.
+      placeholder: "C:\\SteamLibrary\\steamapps\\common\\Elite Dangerous\\Products\\elite-dangerous-odyssey-64"

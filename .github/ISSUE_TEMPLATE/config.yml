@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Question about how something works
+    url: https://github.com/characterecho-sean/edvr-unofficial-patch/blob/main/README.md
+    about: The README covers what each fix does, what it reads, and every setting in edvr.ini. Worth a look before opening an issue.
