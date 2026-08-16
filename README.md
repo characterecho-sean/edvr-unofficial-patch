@@ -140,13 +140,14 @@ player observes, and no gameplay data read or written.
    Explorer Cam is applied in `openvr_api.dll`; without it nothing below has any
    effect.
 
-2. **Hotkeys: usually nothing to do.** EDVR reads your external-camera and
-   next-camera-view keys straight from your Elite key configuration — if
-   they are on keyboard keys (Elite's defaults are `CTRL+ALT+SPACE` and an
-   arrow key), you are done, and the log's first lines say which keys were
-   adopted. Rebind them in Elite mid-session and EDVR follows within a few
-   seconds. EDVR only *watches* these keys; it never presses them or
-   interferes with the game receiving them.
+2. **Hotkeys: nothing to do.** EDVR reads your external-camera and
+   next-camera-view keys straight from your Elite key configuration — the
+   *on-foot* camera binding, which Elite keeps separate from the ship's.
+   If they are on keyboard keys, you are done: the log's first lines name
+   the keys it adopted and the file they came from. Rebind them in Elite,
+   even mid-session, and EDVR follows within a few seconds. EDVR only
+   *watches* these keys; it never presses them or interferes with the game
+   receiving them.
 
    They matter because on screen, entering the camera looks identical to
    boarding your ship — the camera key is how EDVR knows which it was. And
@@ -154,12 +155,9 @@ player observes, and no gameplay data read or written.
    next-view key's presses are what carry "which preset am I on" through the
    gaps.
 
-   To override, set them yourself in `edvr.ini` under `[hotkey]` — any key
-   your keyboard types, written as itself (`\` and `[` included; write `;`
-   and `#` as `SEMICOLON` and `HASH`), combinations like `CTRL+ALT+SPACE`
-   welcome. If your camera is bound **only to a controller**, bind a keyboard
-   key for it in Elite (Options → Controls) for now — controller support is
-   planned.
+   If your camera is bound **only to a controller**, bind a keyboard key for
+   it in Elite (Options → Controls) for now — EDVR watches the keyboard, and
+   controller support is planned.
 
 3. Get on foot, open the camera, and cycle to **Commander Right Shoulder** —
    two presses from the view the camera opens on. That is the preset the

@@ -10,6 +10,7 @@
 #include "../common/frame_flag.h"
 #include "../common/guard.h"
 #include "../common/hotkey.h"
+#include "../d3d11/elite_binds.h"   // the camera key, from the game's own bindings
 #include "../common/log.h"
 #include "../common/proxy.h"  // breadcrumb(), EDVR_BREADCRUMB_ONCE
 #include "../common/vtable_hook.h"
@@ -224,8 +225,22 @@ void configurePoseRing(State* s) {
     // to make readable.
     s->poseStepNoteMm = (std::isfinite(mm) && mm > 0.0f && mm <= 1000.0f) ? mm : 50.0f;
 
-    s->poseCamKey.setBinding(cfg.getString("hotkey.external_camera", "").c_str());
-    s->poseCamBound = s->poseCamKey.key() != 0;
+    // The camera key comes from the GAME's bindings, like everywhere else
+    // (0.7.1 retired the ini keys). ONCE, not on every reload: this runs on
+    // the ~1 Hz config reload, and a directory walk per second to keep a
+    // default-off diagnostic in step is not a trade worth making. Stated
+    // limit: rebinding mid-session moves the camera ring's trigger (the
+    // d3d11 side follows live) but not this pose ring's until a restart.
+    static bool camKeyRead = false;
+    if (!camKeyRead) {
+        camKeyRead = true;
+        char b[48];
+        if (eliteBindsLookup("PhotoCameraToggle_Humanoid", b, sizeof(b),
+                             "PhotoCameraToggle")) {
+            s->poseCamKey.setBinding(b);
+        }
+        s->poseCamBound = s->poseCamKey.key() != 0;
+    }
     s->poseDumpOnCam = cfg.getBool("advanced.dump_camera_on_external_cam", false);
 
     // SAID OUT LOUD, once, because an instrument that records silently and

@@ -182,7 +182,8 @@ cl.exe %CFLAGS% /Fo"%OBJ%\openvr"\ ^
     "%ROOT%\src\common\hotkey.cpp" "%ROOT%\src\common\proxy.cpp" ^
     "%ROOT%\src\common\frame_flag.cpp" ^
     "%ROOT%\src\openvr\openvr_proxy.cpp" "%ROOT%\src\openvr\compositor_hook.cpp" ^
-    "%ROOT%\src\openvr\head_offset.cpp" "%ROOT%\src\openvr\resubmit_shadow.cpp"
+    "%ROOT%\src\openvr\head_offset.cpp" "%ROOT%\src\openvr\resubmit_shadow.cpp" ^
+    "%ROOT%\src\d3d11\elite_binds.cpp"
 if errorlevel 1 ( echo [edvr] ERROR: openvr compile failed & exit /b 1 )
 
 link.exe /nologo /DLL /MACHINE:X64 /INCREMENTAL:NO ^

@@ -1,5 +1,5 @@
 // GENERATED from src/d3d11/head_offset_gate.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 21aca78c8d4f02dd]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 c4cc2323081cf8e2]
 #include "head_offset_gate.h"
 
 #include "../common/config.h"
@@ -549,8 +549,8 @@ void headOffsetGateFrame(uint32_t frameNo, uint32_t panelDraws, uint32_t eyeDraw
             Log::get().note(
                 "head offset: no external-camera key is bound, and the game's "
                 "own status says you are on foot -- so entering the external "
-                "camera will be detected from that instead. Binding "
-                "hotkey.external_camera still gives the crispest entries.");
+                "camera will be detected from that instead. A keyboard "
+                "binding in Elite still gives the crispest entries.");
         }
         const bool timingOk = g.gateSincePanel <= g.gateEnterWindow ||
                               g.gateIntentAge <= g.gateIntentGrace;
@@ -696,8 +696,9 @@ void headOffsetGateFrame(uint32_t frameNo, uint32_t panelDraws, uint32_t eyeDraw
                     : (g.gateKeylessOn && g.liveOnFootKnown
                            ? "not bound (keyless: the game's on-foot status "
                              "stands in)"
-                           : "NOT BOUND -- bind hotkey.external_camera or let "
-                             "read_game_bindings adopt it; nothing can arm"),
+                           : "NOT BOUND -- no keyboard camera key found in "
+                             "your Elite bindings; bind one in Elite and it "
+                             "is picked up within seconds"),
                 g.gateHaveKey ? "yes" : "not yet this session",
                 g.gateViewIndex, g.gateWantView);
         }

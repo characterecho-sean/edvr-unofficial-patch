@@ -68,12 +68,10 @@ struct State {
     // to keep in step, in exchange for nothing a working install uses.
     Hotkey externalCamKey;
     Hotkey extCamNextKey;
-    // Which of the two camera hotkeys came from the INI: those never move.
-    // The others were adopted from the game's bindings files and follow them
-    // live -- Elite rewrites Options\Bindings the moment a rebind or preset
-    // switch is applied, and a slow stat (below) notices within seconds.
-    bool     externalKeyFromIni = false;
-    bool     nextKeyFromIni = false;
+    // Both camera hotkeys come from the GAME's bindings files and follow
+    // them live (0.7.1 removed the ini overrides outright) -- Elite
+    // rewrites Options\Bindings the moment a rebind or preset switch is
+    // applied, and a slow stat (below) notices within seconds.
     uint64_t bindsFingerprint = 0;
     uint64_t bindsPending = 0;       // a change waiting to hold for one beat
     uint32_t bindsCheckIn = 450;
@@ -271,8 +269,7 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
         // and half a save is not a configuration.
         if (--g_state->bindsCheckIn == 0) {
             g_state->bindsCheckIn = kBindsCheckFrames;
-            if (Config::get().getBool("hotkey.read_game_bindings", true) &&
-                (!g_state->externalKeyFromIni || !g_state->nextKeyFromIni)) {
+            if (Config::get().getBool("hotkey.read_game_bindings", true)) {
                 const uint64_t fp = eliteBindsFingerprint();
                 if (fp == g_state->bindsFingerprint) {
                     g_state->bindsPending = 0;
@@ -436,7 +433,7 @@ HRESULT STDMETHODCALLTYPE hookedCreateSwapChainForHwnd(
 void readoptGameBindings() {
     char b[48];
     bool changed = false;
-    if (!g_state->externalKeyFromIni) {
+    {
         const auto before = g_state->externalCamKey.key();
         // The ON-FOOT element first: the game acts on _Humanoid on foot,
         // and the ship's PhotoCameraToggle only agrees by coincidence --
@@ -461,7 +458,7 @@ void readoptGameBindings() {
         }
         headOffsetGateSetKeyBound(g_state->externalCamKey.key() != 0);
     }
-    if (!g_state->nextKeyFromIni) {
+    {
         const auto before = g_state->extCamNextKey.key();
         if (eliteBindsLookup("VanityCameraScrollRight", b, sizeof(b))) {
             g_state->extCamNextKey.setBinding(b);
@@ -497,28 +494,21 @@ State& ensureState() {
         g_state = new State();
         g_state->toggleKey.setBinding(Config::get().getString("hotkey.toggle_exposure", "SCROLLLOCK").c_str());
         g_state->dumpKey.setBinding(Config::get().getString("hotkey.dump_camera", "PAUSE").c_str());
-        g_state->externalCamKey.setBinding(Config::get().getString("hotkey.external_camera", "").c_str());
-        g_state->extCamNextKey.setBinding(
-            Config::get().getString("hotkey.external_camera_next", "").c_str());
-        g_state->externalKeyFromIni = g_state->externalCamKey.key() != 0;
-        g_state->nextKeyFromIni = g_state->extCamNextKey.key() != 0;
-        // Bindings the ini leaves empty are read from the GAME's own key
-        // configuration (Options\Bindings), so a keyboard player needs no
-        // setup at all. An explicit ini value always wins; a binding on a
-        // controller is skipped (EDVR watches the keyboard). Adopted keys
-        // FOLLOW the game's files: rebind in Elite mid-session and the
-        // stat cadence in the frame path picks it up within seconds.
+        // The camera keys come from the GAME's own key configuration, and
+        // only from there (0.7.1 removed the ini overrides: two keys nobody
+        // needed to set once adoption read the right element from the right
+        // file). Non-keyboard bindings skip with a log line, and the keys
+        // FOLLOW the game's files: rebind in Elite mid-session and the stat
+        // cadence in the frame path picks it up within seconds.
         if (Config::get().getBool("hotkey.read_game_bindings", true)) {
             char b[48];
-            if (g_state->externalCamKey.key() == 0 &&
-                eliteBindsLookup("PhotoCameraToggle_Humanoid", b, sizeof(b),
+            if (eliteBindsLookup("PhotoCameraToggle_Humanoid", b, sizeof(b),
                                  "PhotoCameraToggle")) {
                 g_state->externalCamKey.setBinding(b);
                 Log::get().note("hotkey: external_camera adopted from your "
                                 "Elite bindings: %s", b);
             }
-            if (g_state->extCamNextKey.key() == 0 &&
-                eliteBindsLookup("VanityCameraScrollRight", b, sizeof(b))) {
+            if (eliteBindsLookup("VanityCameraScrollRight", b, sizeof(b))) {
                 g_state->extCamNextKey.setBinding(b);
                 Log::get().note("hotkey: external_camera_next adopted from "
                                 "your Elite bindings: %s", b);
