@@ -1,5 +1,5 @@
 // GENERATED from tools/openvr_smoke/openvr_smoke.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 f16876084b1374db]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 33c2ff950bbdfc5f]
 // openvr_smoke -- checks the openvr proxy's startup path without the game.
 //
 // The thing under test is that the proxy does NOT load the real openvr_api.dll
@@ -724,6 +724,129 @@ int hotkeyChecks() {
             printf("  FAIL  a missing bindings directory did not read as 0\n");
             ++bad;
         }
+    }
+
+    // The lookup's file and element selection, against a fixture directory
+    // reproducing the 12:14 field failure: Elite keeps a stale
+    // previous-format preset (Custom.4.1.binds, untouched since 2025)
+    // beside the file it actually maintains (Custom.4.2.binds, rewritten
+    // on every Apply), and on foot it acts on PhotoCameraToggle_Humanoid,
+    // not the ship's PhotoCameraToggle.
+    {
+        wchar_t tmp[MAX_PATH] = {};
+        GetTempPathW(MAX_PATH, tmp);
+        wchar_t dir[MAX_PATH] = {};
+        swprintf_s(dir, L"%sedvr_binds_lookup_test", tmp);
+        CreateDirectoryW(dir, nullptr);
+        auto writeFile = [&](const wchar_t* name, const char* body,
+                             int yearsOld) {
+            wchar_t path[MAX_PATH];
+            swprintf_s(path, L"%s\\%s", dir, name);
+            HANDLE f = CreateFileW(path, GENERIC_WRITE, 0, nullptr,
+                                   CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL,
+                                   nullptr);
+            DWORD wrote = 0;
+            WriteFile(f, body, (DWORD)strlen(body), &wrote, nullptr);
+            if (yearsOld > 0) {
+                FILETIME now{};
+                GetSystemTimeAsFileTime(&now);
+                ULARGE_INTEGER u{};
+                u.LowPart = now.dwLowDateTime;
+                u.HighPart = now.dwHighDateTime;
+                u.QuadPart -= 365ull * 24 * 3600 * 10000000ull * yearsOld;
+                FILETIME old{};
+                old.dwLowDateTime = u.LowPart;
+                old.dwHighDateTime = u.HighPart;
+                SetFileTime(f, nullptr, nullptr, &old);
+            }
+            CloseHandle(f);
+        };
+        auto cleanup = [&]() {
+            for (const wchar_t* n :
+                 {L"StartPreset.4.start", L"Custom.4.1.binds",
+                  L"Custom.4.2.binds"}) {
+                wchar_t path[MAX_PATH];
+                swprintf_s(path, L"%s\\%s", dir, n);
+                DeleteFileW(path);
+            }
+            RemoveDirectoryW(dir);
+        };
+        writeFile(L"StartPreset.4.start", "Custom\nCustom\n", 0);
+        // The stale relic: on-foot camera F11, next-view RightArrow.
+        writeFile(L"Custom.4.1.binds",
+                  "<Root>\n"
+                  "<PhotoCameraToggle><Secondary Device=\"Keyboard\" "
+                  "Key=\"Key_F11\" /></PhotoCameraToggle>\n"
+                  "<PhotoCameraToggle_Humanoid><Secondary Device=\"Keyboard\" "
+                  "Key=\"Key_F11\" /></PhotoCameraToggle_Humanoid>\n"
+                  "<VanityCameraScrollRight><Secondary Device=\"Keyboard\" "
+                  "Key=\"Key_RightArrow\" /></VanityCameraScrollRight>\n"
+                  "</Root>\n",
+                  1);
+        // The maintained file, after the field rebind: on-foot camera moved
+        // to backslash, next-view to right-bracket; the SHIP camera stays
+        // F11, exactly as on the reporting rig.
+        writeFile(L"Custom.4.2.binds",
+                  "<Root>\n"
+                  "<PhotoCameraToggle><Secondary Device=\"Keyboard\" "
+                  "Key=\"Key_F11\" /></PhotoCameraToggle>\n"
+                  "<PhotoCameraToggle_Humanoid><Secondary Device=\"Keyboard\" "
+                  "Key=\"Key_BackSlash\" /></PhotoCameraToggle_Humanoid>\n"
+                  "<VanityCameraScrollRight><Secondary Device=\"Keyboard\" "
+                  "Key=\"Key_RightBracket\" /></VanityCameraScrollRight>\n"
+                  "</Root>\n",
+                  0);
+        char v[48] = {};
+        if (!edvr::eliteBindsLookupDir(dir, "VanityCameraScrollRight", v,
+                                       sizeof(v)) ||
+            edvr::virtualKeyFromName(v, &m) !=
+                edvr::virtualKeyFromName("RIGHTBRACKET", &m)) {
+            printf("  FAIL  a stale previous-format preset file outranked "
+                   "the maintained one (got %s)\n", v);
+            ++bad;
+        }
+        if (!edvr::eliteBindsLookupDir(dir, "PhotoCameraToggle_Humanoid", v,
+                                       sizeof(v), "PhotoCameraToggle") ||
+            edvr::virtualKeyFromName(v, &m) !=
+                edvr::virtualKeyFromName("BACKSLASH", &m)) {
+            printf("  FAIL  the on-foot camera element did not answer with "
+                   "the maintained file's key (got %s)\n", v);
+            ++bad;
+        }
+        // A Humanoid entry moved OFF the keyboard must refuse rather than
+        // fall through to the ship element's keyboard key -- that key does
+        // nothing on foot. The GamePad primary sits right before the ship
+        // element so a span that bleeds across elements is caught too.
+        writeFile(L"Custom.4.2.binds",
+                  "<Root>\n"
+                  "<PhotoCameraToggle_Humanoid><Primary Device=\"GamePad\" "
+                  "Key=\"GamePad_DPadRight\" /></PhotoCameraToggle_Humanoid>\n"
+                  "<PhotoCameraToggle><Secondary Device=\"Keyboard\" "
+                  "Key=\"Key_F11\" /></PhotoCameraToggle>\n"
+                  "</Root>\n",
+                  0);
+        if (edvr::eliteBindsLookupDir(dir, "PhotoCameraToggle_Humanoid", v,
+                                      sizeof(v), "PhotoCameraToggle")) {
+            printf("  FAIL  an on-foot camera on a controller fell through "
+                   "to the ship element's keyboard key (%s)\n", v);
+            ++bad;
+        }
+        // With the Humanoid element entirely ABSENT (older formats), the
+        // fallback element is the right answer.
+        writeFile(L"Custom.4.2.binds",
+                  "<Root>\n"
+                  "<PhotoCameraToggle><Secondary Device=\"Keyboard\" "
+                  "Key=\"Key_F11\" /></PhotoCameraToggle>\n"
+                  "</Root>\n",
+                  0);
+        if (!edvr::eliteBindsLookupDir(dir, "PhotoCameraToggle_Humanoid", v,
+                                       sizeof(v), "PhotoCameraToggle") ||
+            edvr::virtualKeyFromName(v, &m) != VK_F11) {
+            printf("  FAIL  an absent on-foot element did not fall back to "
+                   "the ship element\n");
+            ++bad;
+        }
+        cleanup();
     }
 
     // setBinding must carry BOTH halves. This is the regression that matters:

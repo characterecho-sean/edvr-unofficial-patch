@@ -435,15 +435,23 @@ HRESULT STDMETHODCALLTYPE hookedCreateSwapChainForHwnd(
 // stands still, which is the missed-press desync class.
 void readoptGameBindings() {
     char b[48];
+    bool changed = false;
     if (!g_state->externalKeyFromIni) {
         const auto before = g_state->externalCamKey.key();
-        if (eliteBindsLookup("PhotoCameraToggle", b, sizeof(b))) {
+        // The ON-FOOT element first: the game acts on _Humanoid on foot,
+        // and the ship's PhotoCameraToggle only agrees by coincidence --
+        // measured 12:14, a Humanoid rebind EDVR missed entirely while
+        // faithfully watching the unchanged ship key.
+        if (eliteBindsLookup("PhotoCameraToggle_Humanoid", b, sizeof(b),
+                             "PhotoCameraToggle")) {
             g_state->externalCamKey.setBinding(b);
             if (g_state->externalCamKey.key() != before) {
+                changed = true;
                 Log::get().note("hotkey: your Elite bindings changed -- "
                                 "external_camera is now %s.", b);
             }
         } else if (before != 0) {
+            changed = true;
             g_state->externalCamKey.setBinding("");
             Log::get().note(
                 "hotkey: your Elite bindings changed and the external camera "
@@ -458,10 +466,12 @@ void readoptGameBindings() {
         if (eliteBindsLookup("VanityCameraScrollRight", b, sizeof(b))) {
             g_state->extCamNextKey.setBinding(b);
             if (g_state->extCamNextKey.key() != before) {
+                changed = true;
                 Log::get().note("hotkey: your Elite bindings changed -- "
                                 "external_camera_next is now %s.", b);
             }
         } else if (before != 0) {
+            changed = true;
             g_state->extCamNextKey.setBinding("");
             Log::get().note(
                 "hotkey: your Elite bindings changed and the next-view key is "
@@ -470,6 +480,15 @@ void readoptGameBindings() {
         }
         headOffsetGateSetNextKeyBound(g_state->extCamNextKey.key() != 0);
         cameraViewSetPressWitness(g_state->extCamNextKey.key() != 0);
+    }
+    // Silence here cost a field session: the files changed, the re-read ran,
+    // the answers matched -- and nothing said so, which is indistinguishable
+    // from the mechanism being dead. The bindings: lines above name the file
+    // each answer came from.
+    if (!changed) {
+        Log::get().note(
+            "hotkey: your Elite bindings files changed, but both camera keys "
+            "read the same as before.");
     }
 }
 
@@ -492,7 +511,8 @@ State& ensureState() {
         if (Config::get().getBool("hotkey.read_game_bindings", true)) {
             char b[48];
             if (g_state->externalCamKey.key() == 0 &&
-                eliteBindsLookup("PhotoCameraToggle", b, sizeof(b))) {
+                eliteBindsLookup("PhotoCameraToggle_Humanoid", b, sizeof(b),
+                                 "PhotoCameraToggle")) {
                 g_state->externalCamKey.setBinding(b);
                 Log::get().note("hotkey: external_camera adopted from your "
                                 "Elite bindings: %s", b);

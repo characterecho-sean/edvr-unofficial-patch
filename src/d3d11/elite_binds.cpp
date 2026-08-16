@@ -1,9 +1,10 @@
 // GENERATED from src/d3d11/elite_binds.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 b33213bc4167d8fe]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 72949619fcf969ec]
 #include "elite_binds.h"
 
 #include <windows.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -122,10 +123,63 @@ bool eliteBindsTranslateKey(const char* eliteKey, char* out, size_t outLen) {
     return false;
 }
 
-bool eliteBindsLookup(const char* element, char* out, size_t outLen) {
-    if (!element || !out || outLen == 0) return false;
-    const std::wstring dir = bindingsDir();
-    if (dir.empty()) return false;
+// One element in one file's text: is the tag present, and does it carry a
+// keyboard binding? The tag is matched CLOSED ("<Name>") -- a bare prefix
+// also matched <PhotoCameraToggle_Humanoid> when asked for
+// <PhotoCameraToggle>, and only file layout kept that from answering with
+// the wrong element. The slot search is bounded by the element's own close
+// tag, not a byte count: with a fixed span, an element missing its
+// Secondary borrowed the NEXT element's, which is how a controller-bound
+// on-foot camera read as the ship's F11.
+bool parseElementIn(const std::string& text, const char* element, char* out,
+                    size_t outLen, bool* present) {
+    const size_t el = text.find(std::string("<") + element + ">");
+    if (present) *present = el != std::string::npos;
+    if (el == std::string::npos) return false;
+    size_t end = text.find(std::string("</") + element + ">", el);
+    if (end == std::string::npos) end = el + 600;   // damaged file: old bound
+    for (const char* slot : {"<Primary ", "<Secondary "}) {
+        const size_t s = text.find(slot, el);
+        if (s == std::string::npos || s > end) continue;
+        std::string device, key;
+        if (!attrAfter(text, s, 120, "Device", &device)) continue;
+        if (_stricmp(device.c_str(), "Keyboard") != 0) continue;
+        if (!attrAfter(text, s, 160, "Key", &key)) continue;
+        char keyName[32];
+        if (!eliteBindsTranslateKey(key.c_str(), keyName, sizeof(keyName)))
+            continue;
+        // Modifiers attached to this slot, before the element ends.
+        std::string prefix;
+        size_t m = s;
+        for (int guard = 0; guard < 3; ++guard) {
+            const size_t mod = text.find("<Modifier ", m);
+            if (mod == std::string::npos || mod > end) break;
+            std::string mdev, mkey;
+            if (attrAfter(text, mod, 120, "Device", &mdev) &&
+                _stricmp(mdev.c_str(), "Keyboard") == 0 &&
+                attrAfter(text, mod, 160, "Key", &mkey)) {
+                const char* mn = mkey.c_str();
+                if (strncmp(mn, "Key_", 4) == 0) mn += 4;
+                for (const KeyMap& mm : kModMap) {
+                    if (_stricmp(mn, mm.elite) == 0) {
+                        prefix += mm.ours;
+                        prefix += "+";
+                        break;
+                    }
+                }
+            }
+            m = mod + 10;
+        }
+        snprintf(out, outLen, "%s%s", prefix.c_str(), keyName);
+        return true;
+    }
+    return false;
+}
+
+bool eliteBindsLookupDir(const wchar_t* dirC, const char* element, char* out,
+                         size_t outLen, const char* fallbackElement) {
+    if (!dirC || !dirC[0] || !element || !out || outLen == 0) return false;
+    const std::wstring dir(dirC);
 
     // The active preset names, one per bind context in current builds.
     std::string presets;
@@ -133,10 +187,6 @@ bool eliteBindsLookup(const char* element, char* out, size_t outLen) {
         !readWholeFile(dir + L"\\StartPreset.start", &presets)) {
         return false;
     }
-
-    // Each named preset resolves to <name>.<version>.binds; rather than
-    // parsing versions, scan every .binds file whose name begins with a
-    // preset line. The files are small and this runs once.
     std::vector<std::string> names;
     {
         size_t start = 0;
@@ -149,69 +199,80 @@ bool eliteBindsLookup(const char* element, char* out, size_t outLen) {
         }
     }
 
+    // Candidate files NEWEST-FIRST. Elite keeps previous-format presets
+    // beside the live one -- a Custom.4.1.binds untouched since January
+    // 2025 sat beside the maintained Custom.4.2.binds and answered a live
+    // rebind with January's keys, because directory order put it first.
+    // The file the game maintains is the one it rewrites on every Apply,
+    // so recency picks the truth and self-heals across format bumps.
+    struct Cand {
+        std::wstring name;
+        char utf8[MAX_PATH];
+        FILETIME wt;
+    };
+    std::vector<Cand> cands;
     WIN32_FIND_DATAW fd{};
     HANDLE find = FindFirstFileW((dir + L"\\*.binds").c_str(), &fd);
     if (find == INVALID_HANDLE_VALUE) return false;
-    bool found = false;
     do {
         if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
-        // Match the file to an active preset name (prefix, case-insensitive).
-        char fname[MAX_PATH];
-        WideCharToMultiByte(CP_UTF8, 0, fd.cFileName, -1, fname, sizeof(fname),
-                            nullptr, nullptr);
+        Cand c;
+        WideCharToMultiByte(CP_UTF8, 0, fd.cFileName, -1, c.utf8,
+                            sizeof(c.utf8), nullptr, nullptr);
+        // Prefix plus the version dot, so preset "Custom" does not also
+        // claim a preset named "Custom2".
         bool active = names.empty();
         for (const std::string& n : names) {
-            if (_strnicmp(fname, n.c_str(), n.size()) == 0) { active = true; break; }
+            if (_strnicmp(c.utf8, n.c_str(), n.size()) == 0 &&
+                c.utf8[n.size()] == '.') {
+                active = true;
+                break;
+            }
         }
         if (!active) continue;
-
-        std::string text;
-        if (!readWholeFile(dir + L"\\" + fd.cFileName, &text)) continue;
-
-        const size_t el = text.find(std::string("<") + element);
-        if (el == std::string::npos) continue;
-        // Primary then Secondary, keyboard only, within this element's span
-        // (the next 600 bytes comfortably cover both bindings and modifiers).
-        for (const char* slot : {"<Primary ", "<Secondary "}) {
-            const size_t s = text.find(slot, el);
-            if (s == std::string::npos || s > el + 600) continue;
-            std::string device, key;
-            if (!attrAfter(text, s, 120, "Device", &device)) continue;
-            if (_stricmp(device.c_str(), "Keyboard") != 0) continue;
-            if (!attrAfter(text, s, 160, "Key", &key)) continue;
-            char keyName[32];
-            if (!eliteBindsTranslateKey(key.c_str(), keyName, sizeof(keyName)))
-                continue;
-            // Modifiers attached to this slot, before the element ends.
-            std::string prefix;
-            size_t m = s;
-            for (int guard = 0; guard < 3; ++guard) {
-                const size_t mod = text.find("<Modifier ", m);
-                if (mod == std::string::npos || mod > el + 600) break;
-                std::string mdev, mkey;
-                if (attrAfter(text, mod, 120, "Device", &mdev) &&
-                    _stricmp(mdev.c_str(), "Keyboard") == 0 &&
-                    attrAfter(text, mod, 160, "Key", &mkey)) {
-                    const char* mn = mkey.c_str();
-                    if (strncmp(mn, "Key_", 4) == 0) mn += 4;
-                    for (const KeyMap& mm : kModMap) {
-                        if (_stricmp(mn, mm.elite) == 0) {
-                            prefix += mm.ours;
-                            prefix += "+";
-                            break;
-                        }
-                    }
-                }
-                m = mod + 10;
-            }
-            snprintf(out, outLen, "%s%s", prefix.c_str(), keyName);
-            found = true;
-            break;
-        }
-        if (found) break;
+        c.name = fd.cFileName;
+        c.wt = fd.ftLastWriteTime;
+        cands.push_back(c);
     } while (FindNextFileW(find, &fd));
     FindClose(find);
-    return found;
+    std::sort(cands.begin(), cands.end(), [](const Cand& a, const Cand& b) {
+        return CompareFileTime(&a.wt, &b.wt) > 0;
+    });
+
+    for (const Cand& c : cands) {
+        std::string text;
+        if (!readWholeFile(dir + L"\\" + c.name, &text)) continue;
+        // The first file that CONTAINS the element answers ALONE -- falling
+        // through to an older file would resurrect exactly the stale keys
+        // recency exists to bury. The fallback element is consulted only
+        // where the primary is absent from this file: on foot the game
+        // acts on the _Humanoid element exclusively, so a Humanoid entry
+        // bound to a controller must not inherit the ship element's
+        // keyboard key -- that key does nothing on foot.
+        for (const char* wanted : {element, fallbackElement}) {
+            if (!wanted) break;
+            bool present = false;
+            if (parseElementIn(text, wanted, out, outLen, &present)) {
+                Log::get().note("bindings: %s read from %s: %s", wanted,
+                                c.utf8, out);
+                return true;
+            }
+            if (present) {
+                Log::get().note(
+                    "bindings: %s in %s is not on a keyboard key, so there "
+                    "is nothing for EDVR to watch for it.",
+                    wanted, c.utf8);
+                return false;
+            }
+        }
+    }
+    return false;
+}
+
+bool eliteBindsLookup(const char* element, char* out, size_t outLen,
+                      const char* fallbackElement) {
+    return eliteBindsLookupDir(bindingsDir().c_str(), element, out, outLen,
+                               fallbackElement);
 }
 
 unsigned long long eliteBindsFingerprintDir(const wchar_t* dir) {
