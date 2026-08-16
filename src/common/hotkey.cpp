@@ -1,5 +1,5 @@
 // GENERATED from src/common/hotkey.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 36fd7f3b33246134]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 3eb7696ce9e02a1a]
 #include "hotkey.h"
 
 #include <cctype>
@@ -156,40 +156,56 @@ int virtualKeyFromName(const char* name, uint32_t* mods) {
     if (mods) *mods = 0;
     if (!name || !*name) return 0;
 
-    // Split on '+' or '-' and take the modifiers off the front. The LAST
-    // component is the key; everything before it must be a modifier, and a
-    // component that is neither makes the whole binding unrecognised rather
-    // than quietly becoming a different one.
+    // Modifiers are PEELED FROM THE FRONT, not split out of the whole string.
+    //
+    // The old parser split on every '+' and '-' and called the last piece the
+    // key -- which made '-', '+' and '=' unbindable as keys, because the
+    // characters themselves were separators. A field user bound '\\' and '['
+    // (6az), and the punctuation row is exactly where people put camera keys.
+    // Peeling instead means a separator only counts when it FOLLOWS a
+    // modifier word, so CTRL+ALT+SPACE and CONTROL-MENU-SPACE parse exactly
+    // as before while SHIFT+- means shift and the minus key, and a lone '-'
+    // is just the minus key.
+    //
+    // A leading token that is not a modifier still rejects the WHOLE binding
+    // (CTRL+WOMBAT+SPACE binds nothing and says so) -- taking the last part
+    // and ignoring the rest would turn a typo into a different, live binding.
     {
         std::string s(name);
-        size_t cut = s.find_first_of("+-");
-        if (cut != std::string::npos) {
-            uint32_t m = 0;
-            size_t start = 0;
-            bool ok = true;
-            std::string last;
-            while (true) {
-                const size_t sep = s.find_first_of("+-", start);
-                std::string part = s.substr(start, sep == std::string::npos
-                                                       ? std::string::npos
-                                                       : sep - start);
-                // Trim spaces and upper-case, so "ctrl + alt + space" works.
-                size_t b = part.find_first_not_of(" 	");
-                size_t e = part.find_last_not_of(" 	");
-                part = (b == std::string::npos) ? std::string()
-                                                : part.substr(b, e - b + 1);
-                for (char& c : part) c = static_cast<char>(toupper(c));
-                if (sep == std::string::npos) { last = part; break; }
-                if (part == "CTRL" || part == "CONTROL") m |= kHotkeyCtrl;
-                else if (part == "ALT" || part == "MENU") m |= kHotkeyAlt;
-                else if (part == "SHIFT") m |= kHotkeyShift;
-                else { ok = false; break; }
-                start = sep + 1;
-            }
-            if (!ok || last.empty()) {
-                Log::get().note("hotkey: \"%s\" is not a binding this understands. "
-                                "Modifiers are CTRL, ALT and SHIFT, joined with '+', "
-                                "and the key comes last -- CTRL+ALT+SPACE.", name);
+        uint32_t m = 0;
+        size_t pos = 0;
+        while (true) {
+            // Skip leading spaces, read a word, upper-case it.
+            while (pos < s.size() && (s[pos] == ' ' || s[pos] == '\t')) ++pos;
+            size_t w = pos;
+            while (w < s.size() && (isalpha(static_cast<unsigned char>(s[w])))) ++w;
+            std::string word = s.substr(pos, w - pos);
+            for (char& c : word) c = static_cast<char>(toupper(c));
+            uint32_t bit = 0;
+            if (word == "CTRL" || word == "CONTROL") bit = kHotkeyCtrl;
+            else if (word == "ALT" || word == "MENU") bit = kHotkeyAlt;
+            else if (word == "SHIFT") bit = kHotkeyShift;
+            if (!bit) break;
+            // A modifier word must be FOLLOWED by a separator to be one --
+            // otherwise it is (an attempt at) the key itself.
+            size_t after = w;
+            while (after < s.size() && (s[after] == ' ' || s[after] == '\t')) ++after;
+            if (after >= s.size() || (s[after] != '+' && s[after] != '-')) break;
+            m |= bit;
+            pos = after + 1;
+        }
+        if (pos > 0) {
+            // Something was peeled: the remainder, trimmed, is the key.
+            size_t b = s.find_first_not_of(" \t", pos);
+            size_t e = s.find_last_not_of(" \t");
+            std::string last = (b == std::string::npos)
+                                   ? std::string()
+                                   : s.substr(b, e - b + 1);
+            if (last.empty()) {
+                Log::get().note("hotkey: \"%s\" has modifiers but no key. "
+                                "Modifiers are CTRL, ALT and SHIFT, joined with "
+                                "'+', and the key comes last -- CTRL+ALT+SPACE.",
+                                name);
                 return 0;
             }
             const int vk = virtualKeyFromName(last.c_str(), nullptr);
@@ -233,17 +249,58 @@ int virtualKeyFromName(const char* name, uint32_t* mods) {
         {"SPACE", VK_SPACE},       {"TAB", VK_TAB},
         {"ENTER", VK_RETURN},      {"RETURN", VK_RETURN},
         {"BACKSPACE", VK_BACK},    {"ESCAPE", VK_ESCAPE},
-        {"ESC", VK_ESCAPE},
+        {"ESC", VK_ESCAPE},        {"CAPSLOCK", VK_CAPITAL},
+        {"PRINTSCREEN", VK_SNAPSHOT}, {"APPS", VK_APPS},
+        {"MENU_KEY", VK_APPS},     {"DECIMAL", VK_DECIMAL},
+        {"NUMPADDOT", VK_DECIMAL},
     };
 
     for (const Entry& e : kTable) {
         if (_stricmp(name, e.name) == 0) return e.vk;
     }
-    // Single printable character: use its uppercase VK.
-    if (name[1] == '\0') {
+
+    // The punctuation row, by NAME. Resolved through the character rather than
+    // through a hard-coded VK_OEM_* code, because the OEM codes are positions
+    // on a US keyboard and these names describe CHARACTERS -- on another
+    // layout the character lives on a different physical key, and the one the
+    // player actually presses is the one that types it.
+    struct CharName { const char* name; wchar_t ch; };
+    static const CharName kCharNames[] = {
+        {"BACKSLASH", L'\\'},   {"SLASH", L'/'},
+        {"LEFTBRACKET", L'['},  {"RIGHTBRACKET", L']'},
+        {"SEMICOLON", L';'},    {"APOSTROPHE", L'\''},
+        {"QUOTE", L'\''},       {"COMMA", L','},
+        {"PERIOD", L'.'},       {"DOT", L'.'},
+        {"GRAVE", L'`'},        {"BACKTICK", L'`'},
+        {"TILDE", L'`'},        {"MINUS", L'-'},
+        {"DASH", L'-'},         {"EQUALS", L'='},
+        {"PLUS", L'='},
+    };
+    wchar_t toScan = 0;
+    for (const CharName& e : kCharNames) {
+        if (_stricmp(name, e.name) == 0) { toScan = e.ch; break; }
+    }
+
+    // Single printable character: letters and digits map directly; anything
+    // else -- '\\', '[', ';', '-', whatever the player's camera key types --
+    // goes through the keyboard layout.
+    if (!toScan && name[1] == '\0') {
         const char c = name[0];
         if (c >= 'a' && c <= 'z') return c - 'a' + 'A';
         if ((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')) return c;
+        if (c > 0x20 && c < 0x7F) toScan = static_cast<wchar_t>(c);
+    }
+    if (toScan) {
+        // VkKeyScanW asks the ACTIVE layout which key types this character.
+        // The low byte is the physical key; the high byte says which
+        // modifiers the character itself needs, and that half is deliberately
+        // ignored -- a binding names a KEY, so '|' and '\\' are the same
+        // binding, and whether to require Shift is what the CTRL/ALT/SHIFT
+        // prefix is for. -1 means no key on this layout types it, which
+        // falls through to the say-so below rather than binding nothing
+        // silently.
+        const SHORT scan = VkKeyScanW(toScan);
+        if (scan != -1) return scan & 0xFF;
     }
     // A name nobody recognises is NOT the same as no key, and returning 0 for
     // both is what made this invisible: a typo, or a key this table has never
@@ -251,10 +308,14 @@ int virtualKeyFromName(const char* name, uint32_t* mods) {
     // is a choice and returns 0 above, without comment; getting here means
     // somebody asked for something specific and did not get it.
     Log::get().note("hotkey \"%s\" is not a key name EDVR knows, so nothing is "
-                    "bound. Try F1-F24, SCROLLLOCK, PAUSE, NUMLOCK, INSERT, HOME, "
-                    "END, DELETE, PAGEUP, PAGEDOWN, LEFT, RIGHT, UP, DOWN, SPACE, "
-                    "TAB, ENTER, ESCAPE, NUMPAD0-9, a single letter or digit, or "
-                    "0x## for a virtual-key code.", name);
+                    "bound. Try F1-F24, SCROLLLOCK, PAUSE, NUMLOCK, CAPSLOCK, "
+                    "PRINTSCREEN, INSERT, HOME, END, DELETE, PAGEUP, PAGEDOWN, "
+                    "LEFT, RIGHT, UP, DOWN, SPACE, TAB, ENTER, ESCAPE, "
+                    "NUMPAD0-9, DECIMAL, any single character your keyboard "
+                    "types (letters, digits, punctuation like \\ [ ] ; ' , . "
+                    "/ ` - =), names for those (BACKSLASH, LEFTBRACKET, "
+                    "SEMICOLON, ...), or 0x## for a raw virtual-key code.",
+                    name);
     return 0;
 }
 

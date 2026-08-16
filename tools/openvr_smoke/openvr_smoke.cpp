@@ -1,5 +1,5 @@
 // GENERATED from tools/openvr_smoke/openvr_smoke.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 e09eb3696fc9489c]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 0898c05b7d31798f]
 // openvr_smoke -- checks the openvr proxy's startup path without the game.
 //
 // The thing under test is that the proxy does NOT load the real openvr_api.dll
@@ -600,6 +600,51 @@ int hotkeyChecks() {
     }
     if (edvr::virtualKeyFromName("CTRL+", &m) != 0) {
         printf("  FAIL  a binding with no key was accepted\n");
+        ++bad;
+    }
+
+    // The punctuation row (6az: a field user bound '\\' and '[' and got
+    // "not a key name EDVR knows"). Characters resolve through the keyboard
+    // layout, names resolve to the same key as their character, and '-' is a
+    // KEY unless it follows a modifier word -- the old parser split on it
+    // anywhere, which made the minus key unbindable.
+    const int backslash = edvr::virtualKeyFromName("\\", &m);
+    if (backslash == 0 || m != 0) {
+        printf("  FAIL  '\\' did not bind (vk=%d mods=%u)\n", backslash, m);
+        ++bad;
+    }
+    if (edvr::virtualKeyFromName("BACKSLASH", &m) != backslash) {
+        printf("  FAIL  BACKSLASH and '\\' bound different keys\n");
+        ++bad;
+    }
+    const int lbracket = edvr::virtualKeyFromName("[", &m);
+    if (lbracket == 0) {
+        printf("  FAIL  '[' did not bind\n");
+        ++bad;
+    }
+    if (edvr::virtualKeyFromName("LEFTBRACKET", &m) != lbracket) {
+        printf("  FAIL  LEFTBRACKET and '[' bound different keys\n");
+        ++bad;
+    }
+    const int minus = edvr::virtualKeyFromName("-", &m);
+    if (minus == 0 || m != 0) {
+        printf("  FAIL  '-' alone did not bind as the minus key\n");
+        ++bad;
+    }
+    if (edvr::virtualKeyFromName("SHIFT+-", &m) != minus ||
+        m != edvr::kHotkeyShift) {
+        printf("  FAIL  SHIFT+- did not parse as shift and the minus key\n");
+        ++bad;
+    }
+    if (edvr::virtualKeyFromName(";", &m) == 0) {
+        printf("  FAIL  ';' did not bind\n");
+        ++bad;
+    }
+    // A shifted character names the same physical key as its base: the high
+    // half of the layout lookup is deliberately ignored.
+    if (edvr::virtualKeyFromName("|", &m) != backslash) {
+        printf("  FAIL  '|' and '\\' are the same physical key and did not "
+               "bind alike\n");
         ++bad;
     }
 
