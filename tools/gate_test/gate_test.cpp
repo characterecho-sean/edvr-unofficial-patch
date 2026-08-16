@@ -1,5 +1,5 @@
 // GENERATED from tools/gate_test/gate_test.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 1be0be4c231ad3c8]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 8447c48a023cb5b1]
 // gate_test -- replays frame sequences through the head-offset gate.
 //
 // WHY
@@ -396,12 +396,14 @@ int main(int argc, char** argv) {
     check(false, "with the bridge off, losing the read drops the offset at once");
     Config::get().set("fix.head_offset_view_bridge", "1");
 
-    // THE RELANDING CASE, which is the bridge's real job (sixth flight of
-    // 2026-08-15): the read dies near a planet, the player leaves the camera,
-    // flies, relands MINUTES later and re-enters -- still on the held view,
-    // the game agreeing. The hold must survive the whole absence: the game
-    // freezes the view while the camera is closed, so time away costs
-    // nothing.
+    // THE RELANDING CASE, corrected twice by the field (sixth and ninth
+    // flights of 2026-08-15). The first version held the old view across the
+    // whole absence, on "the game freezes the view while the camera is
+    // closed" -- and the ninth flight showed the offset applied on preset 0
+    // at re-entry: the game RESETS its camera view to 0 across a vehicle
+    // leg. The hold is only for dead-read stretches WITHIN an on-foot
+    // session; a ship leg starts a new session, where the count restarts at
+    // the game's own 0 and presses track from there with no read at all.
     begin(true);
     headOffsetGateSetView(g_wantView);
     enterCamera();
@@ -412,13 +414,53 @@ int main(int argc, char** argv) {
     headOffsetGateKeyPressed();           // leave the camera for the ship
     sceneFrame(1);
     check(false, "left the camera");
-    sceneFrame(6000);                     // fly away and back
-    panelFrame(200);                      // relanded, on foot again
+    sceneFrame(6000);                     // the ship leg: vehicle scene
+    panelFrame(200);                      // relanded, on foot: NEW session
     headOffsetGateKeyPressed();           // re-enter the camera
     panelFrame(2);
     sceneFrame(12);
-    check(true, "re-entered minutes later: the bridge held, because the view "
-                "cannot change while the camera is closed");
+    check(false, "a new on-foot session opens the camera on view 0, and the "
+                 "old held view does not arm there");
+    headOffsetGateViewBumped();           // cycle: 0 -> 1
+    sceneFrame(2);
+    check(false, "view 1 is not the wanted one either");
+    headOffsetGateViewBumped();           // cycle: 1 -> 2
+    sceneFrame(2);
+    check(true, "two presses reach the wanted view and the offset arms, "
+                "read or no read");
+
+    // A CAMERA TOGGLE WITHIN a session keeps the count: leaving the camera
+    // to on-foot and coming straight back is the case the game genuinely
+    // remembers across, and no vehicle scene intervenes.
+    begin(true);
+    headOffsetGateSetView(g_wantView);
+    enterCamera();
+    headOffsetGateSetView(-1);
+    sceneFrame(20);
+    check(true, "in the camera, read dead, holding");
+    headOffsetGateKeyPressed();           // out to on-foot
+    panelFrame(60);                       // walking about: panel, no vehicle
+    headOffsetGateKeyPressed();           // straight back in
+    panelFrame(2);
+    sceneFrame(12);
+    check(true, "a same-session toggle keeps the held view and re-arms");
+
+    // AN IDLE STRETCH (map, menu) is not a vehicle leg and must not reset:
+    // neither panel nor scene accrues toward the session boundary.
+    begin(true);
+    headOffsetGateSetView(g_wantView);
+    enterCamera();
+    headOffsetGateSetView(-1);
+    sceneFrame(20);
+    headOffsetGateKeyPressed();           // out to on-foot
+    panelFrame(30);
+    idleFrame(2000);                      // a long map session
+    panelFrame(60);                       // back on foot
+    headOffsetGateKeyPressed();           // into the camera again
+    panelFrame(2);
+    sceneFrame(12);
+    check(true, "a long menu stretch does not start a new session, and the "
+                "held view still arms");
 
     // AND THE HOLD HAS NO CLOCK AT ALL: staying in the camera on the held
     // view for as long as the player wishes is the product requirement

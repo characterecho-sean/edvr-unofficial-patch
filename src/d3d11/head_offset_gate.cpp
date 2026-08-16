@@ -1,5 +1,5 @@
 // GENERATED from src/d3d11/head_offset_gate.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 2983d9bc9c0f9d52]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 674bdebae7743ae4]
 #include "head_offset_gate.h"
 
 #include "../common/config.h"
@@ -9,6 +9,17 @@
 namespace edvr {
 namespace {
 
+// Vehicle-scene frames after which the panel's return means a NEW on-foot
+// session rather than the same one continuing. Ten seconds at 90 Hz: the
+// shortest ship leg between landings is minutes and a boarding animation
+// alone is tens of seconds, while every same-session interruption is either
+// shorter or is not vehicle scene at all -- a camera stint is in-camera
+// (excluded by the counter's own condition) and a map or menu is idle, not
+// scene. Measured need: at every observed second landing the game had reset
+// its camera view to 0 while EDVR held or counted the old one (6ay), so the
+// count must restart at the game's own reset point to stay anchored.
+constexpr uint32_t kNewFootSessionFrames = 900;
+
 // One instance, file-local. The gate is per-process by nature -- there is one
 // player in one mode -- and keeping it out of the render hooks' State is what
 // lets the same logic serve both builds instead of being forked into each.
@@ -17,6 +28,11 @@ struct Gate {
     uint32_t gatePanelRun = 0;           // consecutive frames settled on the panel
     uint32_t gateSincePanel = 0;         // frames since the panel was last seen
     uint32_t gateIdleFrames = 0;         // frames with neither panel nor scene
+    // Scene-without-panel frames OUTSIDE the camera since the panel was last
+    // seen: ship or SRV time. The panel returning after enough of this is a
+    // NEW on-foot session, and the game resets its camera view to 0 across
+    // that boundary -- see the reset at the panelNow block.
+    uint32_t gateAwayScene = 0;
     bool     gateExternal = false;       // the latch itself
     uint32_t gateSinceEnter = 0;         // frames since the latch was set
     uint32_t gateEnterWindow = 60;       // frames after the panel stops
@@ -177,7 +193,9 @@ void headOffsetGateKeyPressed() {
     // 0 on entry does not resynchronise the count, it desynchronises it by
     // exactly however far the player had cycled before.
     Log::get().note("external camera key pressed: intent %s%s. View index still %d "
-                    "(not reset -- the game remembers the view across toggles).",
+                    "(the game keeps the view across toggles WITHIN an on-foot "
+                    "session; a ship or vehicle leg resets it to 0, and the "
+                    "count restarts with it).",
                     g.gateIntent ? "SET -- the head offset may arm when the flat "
                                    "panel stops"
                                  : "CLEARED -- the head offset comes off now",
@@ -249,6 +267,26 @@ void headOffsetGateFrame(uint32_t frameNo, uint32_t panelDraws, uint32_t eyeDraw
     }
 
     if (panelNow) {
+        // A NEW ON-FOOT SESSION: the panel is back after a vehicle leg, and
+        // the game resets its external-camera view to 0 across that boundary.
+        // "The game remembers the view across toggles" -- printed on every
+        // press -- turned out to be true only WITHIN an on-foot session:
+        // at every observed second landing the game was back on view 0 while
+        // EDVR held or counted the old view, so the offset appeared on
+        // preset 0 (6ay, ninth flight, seen directly). Restarting the count
+        // at 0 here anchors it to the game's own reset, exactly as launch
+        // does -- presses then track every view change with no read needed.
+        if (g.gateAwayScene >= kNewFootSessionFrames) {
+            g.gateViewIndex = 0;
+            g.gateBridgeStarted = false;   // any held view is from the old session
+            Log::get().note(
+                "head offset: a new on-foot session (the screen is back after "
+                "%u frames of ship or vehicle scene). The game resets its "
+                "camera view to 0 across this, so the view count and any held "
+                "view restart from 0 with it.",
+                g.gateAwayScene);
+        }
+        g.gateAwayScene = 0;
         g.gateSincePanel = 0;
         g.gateIdleFrames = 0;
         if (g.gatePanelRun < 10000) ++g.gatePanelRun;
@@ -425,6 +463,14 @@ void headOffsetGateFrame(uint32_t frameNo, uint32_t panelDraws, uint32_t eyeDraw
             }
         } else {
             g.gateIdleFrames = 0;
+            // Vehicle time: a full scene, no panel, and not the camera. This
+            // is what accrues toward the new-session boundary at the panelNow
+            // block -- a camera stint is excluded by gateInCamera, and a map
+            // or menu is idle rather than scene, so only ship and SRV legs
+            // count.
+            if (!g.gateInCamera && g.gateAwayScene < 1000000) {
+                ++g.gateAwayScene;
+            }
         }
 
             // THE CEILING IS GONE, and its knob with it.
