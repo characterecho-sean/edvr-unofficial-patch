@@ -1,5 +1,5 @@
 // GENERATED from tools/openvr_smoke/openvr_smoke.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 0898c05b7d31798f]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 b63ab97741a10ff2]
 // openvr_smoke -- checks the openvr proxy's startup path without the game.
 //
 // The thing under test is that the proxy does NOT load the real openvr_api.dll
@@ -645,6 +645,13 @@ int hotkeyChecks() {
     if (edvr::virtualKeyFromName("|", &m) != backslash) {
         printf("  FAIL  '|' and '\\' are the same physical key and did not "
                "bind alike\n");
+        ++bad;
+    }
+    // HASH exists because a bare '#' after "= " is eaten by the ini's own
+    // trailing-comment rule -- the name is the reliable spelling there.
+    const int hash = edvr::virtualKeyFromName("HASH", &m);
+    if (hash == 0 || edvr::virtualKeyFromName("#", &m) != hash) {
+        printf("  FAIL  HASH and '#' did not bind the same key\n");
         ++bad;
     }
 

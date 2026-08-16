@@ -163,7 +163,9 @@ player observes, and no gameplay data read or written.
    With this key bound, your own presses carry the answer through the gaps and
    confirm the read when it returns — without it, the offset can lag or stick
    to the wrong preset while the read is down. Any key your keyboard types
-   works, `\` and `[` included.
+   works, written as itself — `\` and `[` included. The two exceptions are
+   `;` and `#`, which start comments in the ini: write those as `SEMICOLON`
+   and `HASH`.
 
 4. Get on foot, open the camera, and cycle to **Commander Right Shoulder** —
    two presses from the view the camera opens on. That is the preset the

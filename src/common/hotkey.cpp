@@ -1,5 +1,5 @@
 // GENERATED from src/common/hotkey.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 3eb7696ce9e02a1a]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 c7624edcf21a5c5f]
 #include "hotkey.h"
 
 #include <cctype>
@@ -275,6 +275,11 @@ int virtualKeyFromName(const char* name, uint32_t* mods) {
         {"TILDE", L'`'},        {"MINUS", L'-'},
         {"DASH", L'-'},         {"EQUALS", L'='},
         {"PLUS", L'='},
+        // '#' by name, because bare ';' and '#' after "= " are eaten by the
+        // ini's own trailing-comment rule -- SEMICOLON and HASH are the
+        // reliable spellings in a config value, and the ini says so. (On a
+        // UK layout '#' is its own physical key, so it is a real binding.)
+        {"HASH", L'#'},         {"POUND", L'#'},
     };
     wchar_t toScan = 0;
     for (const CharName& e : kCharNames) {

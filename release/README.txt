@@ -208,7 +208,8 @@ SETTING IT UP
    With this key bound, your own presses carry the answer through the gaps
    and confirm the read when it returns; without it, the offset can lag or
    stick to the wrong preset while the read is down. Any key your keyboard
-   types works, punctuation included.
+   types works, written as itself, punctuation included - except ; and #,
+   which start comments in this file: write those as SEMICOLON and HASH.
 
 4. Get on foot, open the camera, and cycle to COMMANDER RIGHT SHOULDER -
    two presses from the view the camera opens on. That is the preset the
