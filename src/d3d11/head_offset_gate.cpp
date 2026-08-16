@@ -1,5 +1,5 @@
 // GENERATED from src/d3d11/head_offset_gate.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 5858b5559e05e991]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 f88ca50baa20aa29]
 #include "head_offset_gate.h"
 
 #include "../common/config.h"
@@ -9,12 +9,15 @@
 namespace edvr {
 namespace {
 
-// How long the view bridge covers a read that has died before the strict
-// lost-view behaviour takes over. 2700 frames is thirty seconds at 90 Hz:
-// the rebuild windows the bridge exists to span measured 3-10 seconds once
-// re-finds retried promptly (6at), so thirty covers a slow cycle with margin
-// -- while bounding how long a press nobody saw could leave the offset on
-// the wrong view. Frames rather than seconds because the gate ticks once per
+// The view bridge's IN-CAMERA budget, per camera stint. 2700 frames is
+// thirty seconds at 90 Hz of time actually spent in the camera on an
+// unconfirmed view -- out-of-camera time is free, because the game freezes
+// the view while the camera is closed (proven across every leave-and-reland
+// of 2026-08-15), and each entry with a live bridge starts a fresh stint.
+// Thirty seconds bounds a stint in which a press nobody saw moved the view
+// and nothing re-certified; a player actually cycling certifies the record
+// in three sequential presses and ends the episode properly long before
+// this fires. Frames rather than seconds because the gate ticks once per
 // presented frame and owns no clock.
 constexpr uint32_t kBridgeFrames = 2700;
 
@@ -404,6 +407,15 @@ void headOffsetGateFrame(uint32_t frameNo, uint32_t panelDraws, uint32_t eyeDraw
             sceneNow && g.gatePanelRun > 30) {
             g.gateInCamera = true;
             g.gateSinceEnter = 0;
+            // A LIVE bridge refills at each camera entry: the stint about to
+            // start gets its full in-camera budget, because each stint's
+            // exposure is bounded by that stint's own presses (see the note at
+            // the bridge decision). An EXPIRED bridge stays expired -- the
+            // fail-safe latched in-camera and only a successful read unlatches
+            // it.
+            if (g.gateBridgeStarted && g.gateBridgeLeft > 0) {
+                g.gateBridgeLeft = kBridgeFrames;
+            }
             Log::get().note(
                 "on-foot external camera: the flat panel stopped %u frame(s) ago "
                 "after %u settled frames, and %u draws are reaching the eye "
@@ -577,7 +589,17 @@ void headOffsetGateFrame(uint32_t frameNo, uint32_t panelDraws, uint32_t eyeDraw
                       "returns, the offset follows the old one until it does.");
         }
         if (g.gateBridgeLeft > 0) {
-            --g.gateBridgeLeft;
+            // THE CLOCK ONLY RUNS IN THE CAMERA. Outside it the game itself
+            // freezes the view -- "View index still 2" survived every
+            // leave-and-reland of the 2026-08-15 sessions -- so out-of-camera
+            // time cannot stale the held value and spends nothing. In-camera
+            // frames are what the budget counts, because unseen presses are
+            // the only exposure and they can only happen there. Measured
+            // failure this fixes: the read died, the old wall-clock TTL
+            // expired 30 s later, and the player entered the camera at +90 s
+            // -- already on the held view, the game agreeing -- to a dead
+            // bridge that could never arm.
+            if (g.gateInCamera) --g.gateBridgeLeft;
         } else if (!g.gateViewLostNoted) {
             g.gateViewLostNoted = true;
             Log::get().note("head offset OFF: the camera view can no longer be "

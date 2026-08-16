@@ -1,5 +1,5 @@
 // GENERATED from tools/gate_test/gate_test.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 9b3914bb8c57255e]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 b3d6e7b1e2348975]
 // gate_test -- replays frame sequences through the head-offset gate.
 //
 // WHY
@@ -395,6 +395,52 @@ int main(int argc, char** argv) {
     sceneFrame(2);
     check(false, "with the bridge off, losing the read drops the offset at once");
     Config::get().set("fix.head_offset_view_bridge", "1");
+
+    // THE RELANDING CASE, which is the bridge's real job (sixth flight of
+    // 2026-08-15): the read dies near a planet, the player leaves the camera,
+    // flies, relands MINUTES later and re-enters -- still on the held view,
+    // the game agreeing -- and the old wall-clock TTL had expired an hour of
+    // frames ago. The clock must not run outside the camera: the game freezes
+    // the view there, so time out spends nothing.
+    begin(true);
+    headOffsetGateSetView(g_wantView);
+    enterCamera();
+    check(true, "in the camera on the wanted view");
+    headOffsetGateSetView(-1);            // the rebuild takes the read away
+    sceneFrame(20);
+    check(true, "holding on the bridge");
+    headOffsetGateKeyPressed();           // leave the camera for the ship
+    sceneFrame(1);
+    check(false, "left the camera");
+    sceneFrame(6000);                     // fly away and back: far past 2700
+    panelFrame(200);                      // relanded, on foot again
+    headOffsetGateKeyPressed();           // re-enter the camera
+    panelFrame(2);
+    sceneFrame(12);
+    check(true, "re-entered minutes later: the bridge held, because the view "
+                "cannot change while the camera is closed");
+
+    // The in-camera budget is real: a single stint on an unconfirmed view
+    // longer than the whole budget still falls back to the strict drop.
+    sceneFrame(2800);
+    check(false, "a continuous in-camera stint outliving the budget drops it");
+
+    // ...and each ENTRY with a live bridge starts a fresh stint: two stints
+    // that TOGETHER outspend the budget stay held, because the exposure is
+    // per-stint (each stint's own presses), not cumulative.
+    begin(true);
+    headOffsetGateSetView(g_wantView);
+    enterCamera();
+    headOffsetGateSetView(-1);
+    sceneFrame(2000);                     // most of the budget, first stint
+    check(true, "first stint, most of the budget spent, still held");
+    headOffsetGateKeyPressed();           // out
+    sceneFrame(50);
+    panelFrame(200);
+    headOffsetGateKeyPressed();           // back in: fresh stint
+    panelFrame(2);
+    sceneFrame(2000);                     // would exceed 2700 cumulatively
+    check(true, "second stint refilled the budget; the two do not accumulate");
 
     // ------------------------------------------------------------------ exits
     //
