@@ -151,11 +151,25 @@ player observes, and no gameplay data read or written.
    camera looks identical to boarding your ship, and guessing wrong would move
    your viewpoint inside your own cockpit.
 
-3. Get on foot, open the camera, and cycle to **Commander Right Shoulder**. It is
-   not the preset the camera opens on. EDVR reads which preset you are on from
-   the game — nothing else to bind.
+3. Set `hotkey.external_camera_next` to **your** Elite next-camera-view
+   binding too — strongly recommended:
 
-4. Tune the offsets with the headset on; they reload about once a second:
+   ```
+   external_camera_next = RIGHT
+   ```
+
+   EDVR reads which preset you are on from the game, but near a planet the
+   game rebuilds its camera data every few seconds and that read drops out.
+   With this key bound, your own presses carry the answer through the gaps and
+   confirm the read when it returns — without it, the offset can lag or stick
+   to the wrong preset while the read is down. Any key your keyboard types
+   works, `\` and `[` included.
+
+4. Get on foot, open the camera, and cycle to **Commander Right Shoulder** —
+   two presses from the view the camera opens on. That is the preset the
+   offset replaces; every other preset keeps its normal framing.
+
+5. Tune the offsets with the headset on; they reload about once a second:
 
    ```
    head_offset_right   = -0.25   + is to your commander's right
@@ -186,6 +200,11 @@ Two things the other fixes do not:
   lives it searches once, on the first frame you are on foot, for a marker
   identifying the camera settings — it keeps nothing but the small view index,
   skips the game's code, and never writes.
+- **It reads event names from the game's journal** — the documented file Elite
+  writes for third-party tools in Saved Games — to know when gameplay has
+  started and when you step onto your feet, which is where the game resets its
+  camera view. Names only (`LoadGame`, `Disembark`); no other content is read
+  or kept, and `d3d11.journal_watch = 0` turns it off entirely.
 
 Its safeguards, because they are the reason to trust it:
 

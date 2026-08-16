@@ -36,9 +36,9 @@ terminal or picking anything up. To do any of that you switch back to first
 person exactly as you do now. Explorer Cam changes where the camera is while
 you are already in that mode, and nothing else.
 
-It works by replacing one of the camera's presets - COMMANDER REAR PROFILE - so
-you cycle to that preset when you want the 3D view. Every other preset keeps its
-normal position.
+It works by replacing one of the camera's presets - COMMANDER RIGHT SHOULDER -
+so you cycle to that preset when you want the 3D view. Every other preset keeps
+its normal position.
 
 It is off until you tell it your camera key. See EXPLORER CAM below.
 
@@ -161,7 +161,7 @@ while you are in that camera.
 
 It cannot make first person 3D and does not try. The flat screen is flat.
 
-IT REPLACES ONE CAMERA PRESET: COMMANDER REAR PROFILE. While you are on that
+IT REPLACES ONE CAMERA PRESET: COMMANDER RIGHT SHOULDER. While you are on that
 preset the camera sits at your commander's head instead of where the preset
 normally puts it. That is the whole feature, and it does mean the preset stops
 doing its usual job - cycle to it for the 3D view, cycle off it for the normal
@@ -198,20 +198,36 @@ SETTING IT UP
    external camera looks identical to boarding your ship, and guessing wrong
    would move your viewpoint inside your own cockpit.
 
-3. Get on foot, open the camera, and cycle to the COMMANDER REAR PROFILE
-   preset. That is the one Explorer Cam replaces, and it is not the preset the
-   camera opens on - you cycle to it each time you want the 3D view. EDVR reads
-   which preset you are on from the game, so there is nothing else to bind.
+3. Set hotkey.external_camera_next to YOUR Elite next-camera-view binding
+   too - strongly recommended:
 
-4. Tune these three with the headset on. They reload about once a second, so
+       external_camera_next = RIGHT
+
+   EDVR reads which preset you are on from the game, but near a planet the
+   game rebuilds its camera data every few seconds and that read drops out.
+   With this key bound, your own presses carry the answer through the gaps
+   and confirm the read when it returns; without it, the offset can lag or
+   stick to the wrong preset while the read is down. Any key your keyboard
+   types works, punctuation included.
+
+4. Get on foot, open the camera, and cycle to COMMANDER RIGHT SHOULDER -
+   two presses from the view the camera opens on. That is the preset the
+   offset replaces, and you cycle to it each time you want the 3D view.
+   Every other preset keeps its normal framing; fix.head_offset_view picks
+   a different one if you would rather give that one up.
+
+5. Tune these three with the headset on. They reload about once a second, so
    you do not need to restart:
 
-       head_offset_right   = 0.0     + is to your commander's right
-       head_offset_up      = 0.8     + is up
-       head_offset_forward = 2.75    + is the way your commander faces
+       head_offset_right   = -0.25   + is to your commander's right
+       head_offset_up      = 0.25    + is up
+       head_offset_forward = 1.25    + is the way your commander faces
 
-   forward is the large one, because the camera starts several metres behind
-   your commander. These values are a starting point, not a universal answer.
+   Small numbers, because Commander Right Shoulder already sits close to your
+   commander and faces their way; the negative right brings you off the
+   shoulder onto the centre line. A preset several metres further back needs
+   forward at two to three metres instead. Starting points, not universal
+   answers.
 
 COMFORT: these move the viewpoint of a headset you are wearing. Change them a
 little at a time. Entering and leaving is a cut rather than a glide, because the
@@ -286,6 +302,12 @@ from outside it. Two do more, and both ship inert:
   the game moves its own camera. It does nothing at all until you bind your own
   external-camera key, because guessing wrong would move your viewpoint inside
   your cockpit. It never writes to the game's memory.
+
+EDVR also reads event NAMES from the game's journal - the documented file Elite
+writes for third-party tools in Saved Games - to know when gameplay has started
+and when you step onto your feet, which is where the game resets its camera
+view. Nothing else in that file is read or kept, and journal_watch = 0 under
+[d3d11] turns it off.
 
 Neither touches the network, your account, or anything the server sees.
 
