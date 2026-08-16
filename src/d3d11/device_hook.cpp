@@ -48,6 +48,12 @@ struct State {
 
     ID3D11Device*   device = nullptr;
     IDXGISwapChain* swapChain = nullptr;
+    // The factory we hooked, as an identity token only: compared, never
+    // dereferenced, and no reference is held (the factory is released right
+    // after hooking, as it always was). Patching entries in place hooks every
+    // factory sharing the table, so the swapchain hooks above need to know
+    // which one is the game's.
+    void*           factory = nullptr;
 
     PFN_CreateShader realCreateCS = nullptr;
     PFN_Present      realPresent = nullptr;
@@ -160,6 +166,13 @@ FaultBudget g_frameBudget("deviceHook.frameBoundary", 8);
 HRESULT STDMETHODCALLTYPE hookedCreateCS(ID3D11Device* self, const void* bytecode,
                                          SIZE_T len, ID3D11ClassLinkage* linkage,
                                          void** out) {
+    // Patching vtable entries in place hooks the CLASS, so any other device
+    // sharing this table -- a wrapper mod's internal one, a second device the
+    // game makes for a probe -- arrives here and must pass straight through.
+    // See vtable_hook.h.
+    if (self != g_state->device) {
+        return g_state->realCreateCS(self, bytecode, len, linkage, out);
+    }
     const HRESULT hr = g_state->realCreateCS(self, bytecode, len, linkage, out);
     guardedBudget(g_createBudget, [&] {
         if (FAILED(hr) || !bytecode || len == 0 || !out || !*out) return;
@@ -170,6 +183,12 @@ HRESULT STDMETHODCALLTYPE hookedCreateCS(ID3D11Device* self, const void* bytecod
 
 HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
                                         UINT flags) {
+    // Not our swapchain: forward and do no frame work. A second swapchain
+    // (an overlay's, a mod's) shares this vtable and its Present is not our
+    // frame boundary. See vtable_hook.h.
+    if (self != g_state->swapChain) {
+        return g_state->realPresent(self, syncInterval, flags);
+    }
     const HRESULT hr = g_state->realPresent(self, syncInterval, flags);
 
     // OUTSIDE the fault budget, and that is the point. Confirming is a file
@@ -410,7 +429,13 @@ HRESULT STDMETHODCALLTYPE hookedCreateSwapChain(IDXGIFactory* self, IUnknown* de
                                                 DXGI_SWAP_CHAIN_DESC* desc,
                                                 IDXGISwapChain** out) {
     const HRESULT hr = g_state->realCreateSwapChain(self, device, desc, out);
-    if (SUCCEEDED(hr) && out && *out) hookSwapChain(*out);
+    // Only swapchains from the factory we attached to are the game's. A
+    // wrapper mod makes its own through a factory sharing this vtable, and
+    // hooking one of those would put our frame boundary on somebody else's
+    // presentation. See vtable_hook.h.
+    if (SUCCEEDED(hr) && out && *out && self == g_state->factory) {
+        hookSwapChain(*out);
+    }
     return hr;
 }
 
@@ -420,7 +445,10 @@ HRESULT STDMETHODCALLTYPE hookedCreateSwapChainForHwnd(
     IDXGISwapChain1** out) {
     const HRESULT hr =
         g_state->realCreateSwapChainForHwnd(self, device, hwnd, desc, fs, restrictTo, out);
-    if (SUCCEEDED(hr) && out && *out) hookSwapChain(*out);
+    if (SUCCEEDED(hr) && out && *out &&
+        static_cast<void*>(self) == g_state->factory) {
+        hookSwapChain(*out);
+    }
     return hr;
 }
 
@@ -679,6 +707,7 @@ void hookFactoryForDevice(ID3D11Device* device) {
     const size_t needed =
         factory2 ? kFactory2CreateSwapChainForHwnd : kFactoryCreateSwapChain;
 
+    s.factory = factory;
     if (s.factoryHook.attach(factory) && s.factoryHook.executablePrefix() > needed) {
         s.factoryHook.replace(kFactoryCreateSwapChain, &hookedCreateSwapChain,
                               reinterpret_cast<void**>(&s.realCreateSwapChain));

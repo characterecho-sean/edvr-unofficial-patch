@@ -82,6 +82,11 @@ constexpr uint32_t kPoseDumpDelayFrames = 180;
 
 struct State {
     VTableHook       compositorHook;
+    // The compositor interface we hooked, as an identity token: compared,
+    // never dereferenced. Patching vtable entries in place hooks every object
+    // sharing the table, and the runtime can hand out more than one interface
+    // pointer over a session. See vtable_hook.h.
+    void*            ownerIface = nullptr;
     PFN_Submit       realSubmit = nullptr;
     PFN_WaitGetPoses realWaitGetPoses = nullptr;
 
@@ -414,6 +419,12 @@ vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
     State* s = g_state;
     if (!s || !s->realSubmit) return 0;
 
+    // Not the interface we attached to: forward untouched. In-place patching
+    // hooks the class, so a second compositor pointer reaches this thunk and
+    // withholding ITS frames would be acting on somebody else's submission.
+    if (self != s->ownerIface) {
+        return s->realSubmit(self, eye, texture, bounds, flags);
+    }
     if (s->inert) return s->realSubmit(self, eye, texture, bounds, flags);
 
     // Validate before doing anything else. A hook on the wrong slot fails here
@@ -557,6 +568,10 @@ vr::EVRCompositorError hookedWaitGetPoses(void* self,
                                           uint32_t gameCount) {
     State* s = g_state;
     if (!s || !s->realWaitGetPoses) return 0;
+    if (self != s->ownerIface) {
+        return s->realWaitGetPoses(self, renderPoses, renderCount, gamePoses,
+                                   gameCount);
+    }
 
     // WaitGetPoses blocks until the compositor releases the app, which makes it
     // the natural frame boundary.
@@ -809,6 +824,7 @@ void* interceptInterface(void* iface, const char* interfaceVersion) {
         Log::get().note("compositor vtable attach failed; passing through");
         return iface;
     }
+    s.ownerIface = iface;
     // Range-check against the executable prefix, not the copy width: the copy is
     // deliberately over-wide so the host can call methods past the last one we
     // recognise.

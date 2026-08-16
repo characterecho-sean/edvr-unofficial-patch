@@ -41,6 +41,11 @@ typedef void(STDMETHODCALLTYPE* PFN_ClearState)(ID3D11DeviceContext*);
 
 struct State {
     VTableHook    hook;
+    // The context these hooks were installed for. Identity only -- compared,
+    // never dereferenced. In-place vtable patching hooks the class, so
+    // deferred contexts and a wrapper mod's internal ones reach our thunks
+    // too and must pass straight through. See vtable_hook.h.
+    ID3D11DeviceContext* ownerCtx = nullptr;
     PFN_SetShader realCSSetShader = nullptr;
     PFN_Dispatch  realDispatch = nullptr;
     PFN_CSSetUAVs realCSSetUAVs = nullptr;
@@ -213,8 +218,19 @@ bool shapeLooksLikeExposure() {
     return true;
 }
 
+// Is this call for the context we installed on? In-place vtable patching
+// hooks every object of the class, so a deferred context or a wrapper mod's
+// internal one lands here too and must leave untouched.
+inline bool foreignContext(ID3D11DeviceContext* self) {
+    return self != g_state->ownerCtx;
+}
+
 void STDMETHODCALLTYPE hookedCSSetShader(ID3D11DeviceContext* self, void* shader,
                                          ID3D11ClassInstance* const* inst, UINT n) {
+    if (foreignContext(self)) {
+        g_state->realCSSetShader(self, shader, inst, n);
+        return;
+    }
     bindingSet(BindSlot::Cs, shader);
     g_state->realCSSetShader(self, shader, inst, n);
 }
@@ -222,6 +238,10 @@ void STDMETHODCALLTYPE hookedCSSetShader(ID3D11DeviceContext* self, void* shader
 void STDMETHODCALLTYPE hookedCSSetUAVs(ID3D11DeviceContext* self, UINT start, UINT n,
                                        ID3D11UnorderedAccessView* const* uavs,
                                        const UINT* counts) {
+    if (foreignContext(self)) {
+        g_state->realCSSetUAVs(self, start, n, uavs, counts);
+        return;
+    }
     for (UINT i = 0; i < n && uavs; ++i) {
         const UINT slot = start + i;
         if (slot < 4) {
@@ -240,6 +260,10 @@ void STDMETHODCALLTYPE hookedCSSetUAVs(ID3D11DeviceContext* self, UINT start, UI
 // them and the next unseen compute shader ran the shape probe over freed
 // memory. vscreen.cpp hit the same thing and hooks this for the same reason.
 void STDMETHODCALLTYPE hookedClearState(ID3D11DeviceContext* self) {
+    if (foreignContext(self)) {
+        g_state->realClearState(self);
+        return;
+    }
     bindingForgetAll();
     g_state->realClearState(self);
 }
@@ -271,6 +295,10 @@ bool isExposureDispatch() {
 
 void STDMETHODCALLTYPE hookedDispatch(ID3D11DeviceContext* self, UINT x, UINT y, UINT z) {
     State* s = g_state;
+    if (foreignContext(self)) {
+        s->realDispatch(self, x, y, z);
+        return;
+    }
 
     // Classification runs INSIDE the guard.
     //
@@ -448,6 +476,7 @@ void installExposureFix(ID3D11Device* device) {
     g_state->copyBtoA = false;
 
     State& s = *g_state;
+    s.ownerCtx = ctx;
     if (!s.hook.attach(ctx) || s.hook.executablePrefix() <= kHighestSlotUsed) {
         Log::get().note("exposure fix: context vtable unusable; not installing");
         s.hook.uninstall();

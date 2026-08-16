@@ -33,6 +33,21 @@ size_t probeVTableLength(void** vtable, size_t maxEntries) {
     return count;
 }
 
+bool VTableHook::writeEntry(void** vtable, size_t slot, void* value) {
+    DWORD oldProtect = 0;
+    if (!VirtualProtect(&vtable[slot], sizeof(void*), PAGE_READWRITE, &oldProtect)) {
+        Log::get().note("VTableHook: could not make vtable slot %zu at %p "
+                        "writable (err %lu)", slot, (void*)&vtable[slot],
+                        GetLastError());
+        return false;
+    }
+    const bool ok =
+        guarded("VTableHook::writeEntry", [&] { vtable[slot] = value; });
+    DWORD ignored = 0;
+    VirtualProtect(&vtable[slot], sizeof(void*), oldProtect, &ignored);
+    return ok;
+}
+
 bool VTableHook::attach(void* object, size_t maxEntries) {
     if (m_object) return false;
     if (!object) return false;
@@ -53,56 +68,53 @@ bool VTableHook::attach(void* object, size_t maxEntries) {
         return false;
     }
 
-    // Copy as wide a window as is readable, NOT just the executable prefix.
-    //
-    // Stopping the copy at the first slot that does not look like code is how
-    // you build a vtable that works right up until the host calls a method past
-    // the cut and reads off the end of our buffer. That is a use of
-    // uninitialised heap, and it will not reproduce until something unusual
-    // happens -- teardown, an interface the game rarely uses, a runtime update
-    // that adds a method. Copy generously and let the tail be whatever the
-    // original held.
-    m_copy.clear();
-    m_copy.reserve(maxEntries);
-    for (size_t i = 0; i < maxEntries; ++i) {
-        void* entry = nullptr;
-        if (!guarded("VTableHook::attach/copy", [&] { entry = vt[i]; })) break;
-        m_copy.push_back(entry);
-    }
-    if (m_copy.size() < m_execPrefix) {
-        m_copy.clear();
-        return false;
-    }
-
-    m_object   = object;
-    m_original = vt;
+    m_object = object;
+    m_vtable = vt;
+    m_patches.clear();
     return true;
 }
 
 bool VTableHook::replace(size_t index, void* replacement, void** origOut) {
     if (!m_object || m_committed) return false;
     if (index >= m_execPrefix) return false;
-    if (origOut) *origOut = m_copy[index];
-    m_copy[index] = replacement;
+
+    void* original = nullptr;
+    if (!guarded("VTableHook::replace/read-slot",
+                 [&] { original = m_vtable[index]; })) {
+        return false;
+    }
+    if (origOut) *origOut = original;
+    Patch p;
+    p.slot = index;
+    p.replacement = replacement;
+    p.original = original;
+    m_patches.push_back(p);
     return true;
 }
 
 bool VTableHook::commit() {
     if (!m_object || m_committed) return false;
+    if (m_patches.empty()) return false;
 
-    void** target = reinterpret_cast<void**>(m_object);
-    DWORD oldProtect = 0;
-    if (!VirtualProtect(target, sizeof(void*), PAGE_READWRITE, &oldProtect)) {
-        Log::get().note("VTableHook: VirtualProtect failed on %p (err %lu)",
-                        m_object, GetLastError());
+    size_t written = 0;
+    for (; written < m_patches.size(); ++written) {
+        const Patch& p = m_patches[written];
+        if (!writeEntry(m_vtable, p.slot, p.replacement)) break;
+    }
+    if (written < m_patches.size()) {
+        // Partial patch is worse than none: a half-installed fix is a fix
+        // whose invariants nobody has reasoned about. Put back what went in.
+        for (size_t i = 0; i < written; ++i) {
+            const Patch& p = m_patches[i];
+            writeEntry(m_vtable, p.slot, p.original);
+        }
+        Log::get().note("VTableHook: %zu of %zu entries could not be patched at "
+                        "%p, so all of them were rolled back and the fix is off.",
+                        m_patches.size() - written, m_patches.size(),
+                        (void*)m_vtable);
+        m_patches.clear();
         return false;
     }
-    const bool ok = guarded("VTableHook::commit",
-                            [&] { *target = reinterpret_cast<void*>(m_copy.data()); });
-    DWORD ignored = 0;
-    VirtualProtect(target, sizeof(void*), oldProtect, &ignored);
-
-    if (!ok) return false;
     m_committed = true;
     return true;
 }
@@ -110,20 +122,32 @@ bool VTableHook::commit() {
 void VTableHook::uninstall() {
     if (!m_object) return;
     if (m_committed) {
-        void** target = reinterpret_cast<void**>(m_object);
-        DWORD oldProtect = 0;
-        if (VirtualProtect(target, sizeof(void*), PAGE_READWRITE, &oldProtect)) {
-            guarded("VTableHook::uninstall",
-                    [&] { *target = reinterpret_cast<void*>(m_original); });
-            DWORD ignored = 0;
-            VirtualProtect(target, sizeof(void*), oldProtect, &ignored);
+        // Reverse order, so that where we patched one slot twice the chain
+        // unwinds the way it was built.
+        for (size_t i = m_patches.size(); i-- > 0;) {
+            const Patch& p = m_patches[i];
+            void* now = nullptr;
+            if (!guarded("VTableHook::uninstall/read-slot",
+                         [&] { now = m_vtable[p.slot]; })) {
+                continue;
+            }
+            if (now != p.replacement) {
+                // Somebody hooked this slot after us. Their entry is the live
+                // one and restoring ours would delete their hook; our thunk
+                // stays reachable through whatever they forward to.
+                Log::get().note("VTableHook: slot %zu at %p was hooked after us, "
+                                "so it is being left alone rather than restored.",
+                                p.slot, (void*)m_vtable);
+                continue;
+            }
+            writeEntry(m_vtable, p.slot, p.original);
         }
         m_committed = false;
     }
     m_object = nullptr;
-    m_original = nullptr;
+    m_vtable = nullptr;
     m_execPrefix = 0;
-    m_copy.clear();
+    m_patches.clear();
 }
 
 }  // namespace edvr

@@ -80,6 +80,16 @@ typedef void(STDMETHODCALLTYPE* PFN_ExecuteCommandList)(ID3D11DeviceContext*,
 struct State {
     VTableHook hook;
 
+    // The context these hooks were installed for. Identity only -- it is
+    // compared, never dereferenced, and no reference is held on it.
+    //
+    // Patching vtable entries in place hooks the CLASS, so every context
+    // sharing this table arrives at our thunks: deferred contexts the game
+    // creates, and the internal ones a wrapper mod like ReShade owns. Acting
+    // on those would attribute another context's draws to the panel and
+    // corrupt state nobody can see is wrong. See vtable_hook.h.
+    ID3D11DeviceContext* ownerCtx = nullptr;
+
     PFN_SetConstantBuffers   realVSSetConstantBuffers = nullptr;
     PFN_SetShaderResources   realPSSetShaderResources = nullptr;
     PFN_Draw                 realDraw = nullptr;
@@ -323,8 +333,22 @@ bool srv0IsPanelSized(State* s) {
 // Nothing of the game's is written to. Its own values are copied into a buffer
 // of ours with one number changed, ours is used for the draw, and the original
 // is put back immediately after.
+// Is this call for the context we installed on? Patching vtable entries in
+// place hooks the CLASS, so deferred contexts and a wrapper mod's internal
+// ones reach every thunk in this file. Treating one of those as the immediate
+// context would count its draws as eye draws and fire the panel override on
+// somebody else's work -- silently, since it all looks like ordinary
+// rendering from here. See vtable_hook.h.
+inline bool foreignContext(ID3D11DeviceContext* self) {
+    return self != g_state->ownerCtx;
+}
+
 bool beginPanelOverride(ID3D11DeviceContext* self) {
     State* s = g_state;
+    // A draw on somebody else's context is not our panel and not an eye draw.
+    // This one early return covers all four draw thunks, and it covers them
+    // where the counting actually happens rather than four times over.
+    if (foreignContext(self)) return false;
     // Counting eye draws is not part of the panel distance fix, even though it
     // happens here.
     //
@@ -462,6 +486,10 @@ void endPanelOverride(ID3D11DeviceContext* self) {
 void STDMETHODCALLTYPE hookedClearRtv(ID3D11DeviceContext* self,
                                       ID3D11RenderTargetView* rtv, const FLOAT c[4]) {
     State* s = g_state;
+    if (foreignContext(self)) {
+        s->realClearRtv(self, rtv, c);
+        return;
+    }
     // Cheap test first: four float compares, and only a match pays to resolve
     // the target.
     if (s->blackVoid && rtv && c && isFlatGrey(c) && targetIsEyeSized(rtv)) {
@@ -480,6 +508,10 @@ void STDMETHODCALLTYPE hookedClearRtv(ID3D11DeviceContext* self,
 void STDMETHODCALLTYPE hookedOMSetRenderTargets(ID3D11DeviceContext* self, UINT n,
                                                 ID3D11RenderTargetView* const* rtvs,
                                                 ID3D11DepthStencilView* dsv) {
+    if (foreignContext(self)) {
+        g_state->realOMSetRenderTargets(self, n, rtvs, dsv);
+        return;
+    }
     // Unconditionally, even when the pointer looks unchanged: an identical
     // address after a rebind is not evidence of an identical view. bindingSet
     // bumps the generation either way.
@@ -493,6 +525,11 @@ void STDMETHODCALLTYPE hookedOMSetRtvAndUav(ID3D11DeviceContext* self, UINT n,
                                             UINT uavCount,
                                             ID3D11UnorderedAccessView* const* uavs,
                                             const UINT* counts) {
+    if (foreignContext(self)) {
+        g_state->realOMSetRtvAndUav(self, n, rtvs, dsv, uavStart, uavCount, uavs,
+                                    counts);
+        return;
+    }
     // D3D11_KEEP_RENDER_TARGETS_UNCHANGED asks for the UAVs to be set while the
     // render targets are left alone, so it says nothing about slot 0 and must
     // not be treated as a rebind. Spelled out rather than named: the SDK header
@@ -507,12 +544,20 @@ void STDMETHODCALLTYPE hookedOMSetRtvAndUav(ID3D11DeviceContext* self, UINT n,
 void STDMETHODCALLTYPE hookedPSSetShaderResources(ID3D11DeviceContext* self, UINT start,
                                                   UINT n,
                                                   ID3D11ShaderResourceView* const* srvs) {
+    if (foreignContext(self)) {
+        g_state->realPSSetShaderResources(self, start, n, srvs);
+        return;
+    }
     if (start == 0 && n && srvs) bindingSet(BindSlot::PsSrv0, srvs[0]);
     g_state->realPSSetShaderResources(self, start, n, srvs);
 }
 
 void STDMETHODCALLTYPE hookedVSSetConstantBuffers(ID3D11DeviceContext* self, UINT start,
                                                   UINT n, ID3D11Buffer* const* bufs) {
+    if (foreignContext(self)) {
+        g_state->realVSSetConstantBuffers(self, start, n, bufs);
+        return;
+    }
     if (start == 0 && n && bufs) bindingSet(BindSlot::VsCb0, bufs[0]);
     g_state->realVSSetConstantBuffers(self, start, n, bufs);
 }
@@ -529,6 +574,10 @@ void forgetBindings(State*) { bindingForgetAll(); }
 // count looks right" into evidence, on whatever machine the log came from.
 void STDMETHODCALLTYPE hookedClearState(ID3D11DeviceContext* self) {
     State* s = g_state;
+    if (foreignContext(self)) {
+        s->realClearState(self);
+        return;
+    }
     if (!s->sawClearState) {
         s->sawClearState = true;
         Log::get().note("vScreen: ClearState seen (slot %zu); bindings dropped with it",
@@ -542,6 +591,10 @@ void STDMETHODCALLTYPE hookedExecuteCommandList(ID3D11DeviceContext* self,
                                                 ID3D11CommandList* list,
                                                 BOOL restoreContextState) {
     State* s = g_state;
+    if (foreignContext(self)) {
+        s->realExecuteCommandList(self, list, restoreContextState);
+        return;
+    }
     if (!s->sawExecuteCommandList) {
         s->sawExecuteCommandList = true;
         Log::get().note("vScreen: ExecuteCommandList seen (slot %zu, restore=%d). Draws "
@@ -560,6 +613,9 @@ HRESULT STDMETHODCALLTYPE hookedMap(ID3D11DeviceContext* self, ID3D11Resource* r
                                     UINT sub, D3D11_MAP type, UINT flags,
                                     D3D11_MAPPED_SUBRESOURCE* mapped) {
     State* s = g_state;
+    if (foreignContext(self)) {
+        return s->realMap(self, res, sub, type, flags, mapped);
+    }
     const HRESULT hr = s->realMap(self, res, sub, type, flags, mapped);
     // Only the one buffer we care about, so this is a pointer compare on a very
     // hot path and nothing more.
@@ -618,6 +674,10 @@ HRESULT STDMETHODCALLTYPE hookedMap(ID3D11DeviceContext* self, ID3D11Resource* r
 void STDMETHODCALLTYPE hookedUnmap(ID3D11DeviceContext* self, ID3D11Resource* res,
                                    UINT sub) {
     State* s = g_state;
+    if (foreignContext(self)) {
+        s->realUnmap(self, res, sub);
+        return;
+    }
     // Read before forwarding: after the real Unmap the memory is no longer ours
     // to look at.
     if (res == s->mappedResource && s->mappedData) {
@@ -895,6 +955,7 @@ void installVScreenFixes(ID3D11Device* device) {
     // that never asks for anything else.
 
     State& s = *g_state;
+    s.ownerCtx = ctx;
     if (!s.hook.attach(ctx) || s.hook.executablePrefix() <= kHighestSlotUsed) {
         Log::get().note("vScreen: context vtable unusable; not installing");
         s.hook.uninstall();

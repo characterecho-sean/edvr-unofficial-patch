@@ -83,6 +83,27 @@ int main(int argc, char** argv) {
 
     char full[MAX_PATH];
     if (!GetFullPathNameA(proxy, MAX_PATH, full, nullptr)) return fail("GetFullPathName");
+
+    // Clear the crash sentinel before loading, or this gate tests nothing
+    // every other run.
+    //
+    // The DLL arms a sentinel before its first vtable write and confirms it
+    // after about six seconds of frames. smoke presents no frames and exits,
+    // so it always leaves the sentinel armed -- and the NEXT run reads that
+    // as "the previous run crashed", disables every fix, and reports the
+    // hooks missing. Measured: a run that passed, then an identical run that
+    // failed with "slot 110 is not ClearState". A release gate that
+    // alternates is worse than no gate, because package.bat runs this one.
+    {
+        char armed[MAX_PATH];
+        strncpy_s(armed, full, _TRUNCATE);
+        if (char* slash = strrchr(armed, '\\')) {
+            *slash = '\0';
+            strncat_s(armed, "\\edvr_logs\\d3d11_hooks.armed", _TRUNCATE);
+            DeleteFileA(armed);
+        }
+    }
+
     HMODULE mod = LoadLibraryA(full);
     if (!mod) return fail("the proxy did not load");
     printf("  ok    proxy loaded\n");

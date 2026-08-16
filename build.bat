@@ -225,6 +225,24 @@ if errorlevel 1 ( echo [edvr] ERROR: fakechain build failed & exit /b 1 )
 echo [edvr] built %BUILD%\fakechain.dll
 
 echo.
+echo [edvr] === vtable_test.exe ===
+REM The object-wrapping collision (issue #6), without needing ReShade. These
+REM cells were written against the copy-and-swap-vptr mechanism and FAILED on
+REM it, which is the only reason to believe them now.
+if not exist "%OBJ%\vtabletest" mkdir "%OBJ%\vtabletest"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\vtabletest"\ ^
+    /Fe"%BUILD%\vtable_test.exe" "%ROOT%\tools\vtable_test\vtable_test.cpp" ^
+    "%ROOT%\src\common\vtable_hook.cpp" "%ROOT%\src\common\guard.cpp" ^
+    "%ROOT%\src\common\log.cpp" "%ROOT%\src\common\config.cpp" ^
+    "%ROOT%\src\common\proxy.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib user32.lib version.lib
+if errorlevel 1 ( echo [edvr] ERROR: vtable_test build failed & exit /b 1 )
+"%BUILD%\vtable_test.exe" || (
+    echo [edvr] ERROR: vtable hooking does not compose with object wrappers
+    exit /b 1
+)
+
 echo [edvr] === config_test.exe ===
 REM The real parser over the real shipped edvr.ini. The file's own layout
 REM depends on two parser properties -- repeated section headers, last value
