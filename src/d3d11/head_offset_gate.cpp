@@ -1,5 +1,5 @@
 // GENERATED from src/d3d11/head_offset_gate.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 f020a475db639741]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 1b09963907d428f1]
 #include "head_offset_gate.h"
 
 #include "../common/config.h"
@@ -26,6 +26,17 @@ constexpr uint32_t kNewFootSessionFrames = 900;
 // airlock animation with margin while staying far below a real ship leg.
 // The grace usually ends earlier anyway -- at the first on-foot sample.
 constexpr uint32_t kFootGraceFrames = 900;
+
+// The KEYLESS entry window. The keyed window (head_offset_enter_window, 60)
+// is paced by a keypress, which is instant; the keyless confirmation is
+// paced by Status.json -- the poll interval plus the game's own ~1 Hz write
+// cadence. Measured arrivals after the panel stopped: +53 frames (11:00:34,
+// latched) and +90 frames (11:27:10, forfeited by the 60-frame window while
+// the player stood in the camera with the read alive on view 2). 240 covers
+// poll + write with margin. The boarding hazard this window brushes is
+// bounded the same way it always was: a wrong latch dies at the next
+// not-on-foot sample, one poll later.
+constexpr uint32_t kKeylessEnterWindow = 240;
 
 // One instance, file-local. The gate is per-process by nature -- there is one
 // player in one mode -- and keeping it out of the render hooks' State is what
@@ -548,7 +559,7 @@ void headOffsetGateFrame(uint32_t frameNo, uint32_t panelDraws, uint32_t eyeDraw
         const bool panelGoneAWhile = g.gateSincePanel >= 8;
         const bool entryAsked =
             (intentOk && timingOk) ||
-            (autoIntent && g.gateSincePanel <= g.gateEnterWindow);
+            (autoIntent && g.gateSincePanel <= kKeylessEnterWindow);
         if (!g.gateInCamera && entryAsked && panelGoneAWhile &&
             sceneNow && g.gatePanelRun > 30) {
             g.gateInCamera = true;

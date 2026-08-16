@@ -1,5 +1,5 @@
 // GENERATED from tools/gate_test/gate_test.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 29dbbb69e3e8ca4e]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 ca38f659b2131e51]
 // gate_test -- replays frame sequences through the head-offset gate.
 //
 // WHY
@@ -516,6 +516,22 @@ int main(int argc, char** argv) {
     headOffsetGateSetOnFootLive(true, false, 3);
     sceneFrame(2);
     check(false, "keyless: the game says not on foot, so the camera is over");
+
+    // THE CONFIRMATION ARRIVES ON THE FILE'S SCHEDULE, NOT THE WINDOW'S.
+    // Measured 2026-08-16 (11:27:10): the fresh sample landed ~90 frames
+    // after the panel stopped -- Status.json polls plus the game's ~1 Hz
+    // write cadence -- and the 60-frame entry window had already closed, so
+    // a certified entry with the read alive and view 2 on screen never
+    // latched. The keyless window must outlast the cadence it waits on.
+    begin(false);
+    headOffsetGateSetView(g_wantView);
+    headOffsetGateSetOnFootLive(true, true, 1);
+    panelFrame(200);
+    sceneFrame(90);                           // in the camera, sample pending
+    headOffsetGateSetOnFootLive(true, true, 2);   // the poll finally lands
+    sceneFrame(12);
+    check(true, "keyless: a fresh sample on the file's own schedule still "
+                "latches the entry");
 
     // Boarding INSTEAD of the camera: the panel stops, the scene appears,
     // and the only on-foot samples are from BEFORE the panel stopped --

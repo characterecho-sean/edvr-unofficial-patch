@@ -1,5 +1,5 @@
 // GENERATED from src/d3d11/journal_watch.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 b94a21e20c563501]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 0fea3f945f16a3df]
 #include "journal_watch.h"
 
 #include <windows.h>
@@ -13,9 +13,13 @@
 namespace edvr {
 namespace {
 
-// About once a second at 90 Hz. The journal is written on gameplay events,
-// which arrive seconds apart; polling faster buys nothing.
-constexpr uint32_t kPollFrames = 90;
+// Halved from 90 on 2026-08-16: the keyless entry latch waits on this
+// cadence -- measured sample arrivals landed +53 and +90 frames after a
+// panel stop, against a 60-frame entry window -- and a 2 KB Status read
+// plus a bounded journal slice every half second costs nothing measurable.
+// The entry window was widened too; this cuts the latch latency the player
+// actually feels.
+constexpr uint32_t kPollFrames = 45;
 
 // Re-glob for a newer journal file every eighth poll (~12 s): a new part or a
 // relaunch appears within that, and directory listings are the expensive half.
