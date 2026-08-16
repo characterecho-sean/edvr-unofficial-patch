@@ -1,5 +1,5 @@
 // GENERATED from src/d3d11/head_offset_gate.h in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 472decba5d14a60e]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 b0a8574f21b19097]
 // When to move the head pose: on foot, in the external camera, and nowhere
 // else.
 //
@@ -79,6 +79,11 @@ void headOffsetGateSetKeyBound(bool bound);
 // The player pressed hotkey.external_camera_next, so the camera has moved to
 // the next view in its cycle.
 void headOffsetGateViewBumped();
+
+// Tell the gate whether hotkey.external_camera_next is CONFIGURED. Same
+// distinction as headOffsetGateSetKeyBound: the bridge's log line and the
+// dead-config warning need to know a key exists before its first press.
+void headOffsetGateSetNextKeyBound(bool bound);
 
 // Supply an authoritative view index, or -1 for "not known".
 //

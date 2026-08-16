@@ -1,5 +1,5 @@
 // GENERATED from src/d3d11/head_offset_gate.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 db30dfca7d593f33]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 2983d9bc9c0f9d52]
 #include "head_offset_gate.h"
 
 #include "../common/config.h"
@@ -128,6 +128,8 @@ void headOffsetGateReset() {
 }
 
 void headOffsetGateSetKeyBound(bool bound) { g.gateKeyBound = bound; }
+
+void headOffsetGateSetNextKeyBound(bool bound) { g.gateHaveNextKey = bound; }
 
 void headOffsetGateKeyPressed() {
     g.gateHaveKey = true;

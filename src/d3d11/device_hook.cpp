@@ -65,6 +65,7 @@ struct State {
     // game instead -- so it was a second binding to explain, to get wrong, and
     // to keep in step, in exchange for nothing a working install uses.
     Hotkey externalCamKey;
+    Hotkey extCamNextKey;
     uint64_t frameCounter = 0;
 
     // Dump the camera history on every external-camera keypress. Diagnostic,
@@ -283,6 +284,17 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
                 requestSubmitHold(g_state->holdFramesOnExternalCam);
             }
         }
+        // The next-view key, promoted to the public build on 2026-08-15. It
+        // was deliberately private-only while the game read covered
+        // everything -- but near a planet the read dies for stretches, the
+        // bridge holds the last confirmed view through them, and cycling
+        // during a hold was then INVISIBLE: the offset stayed armed on every
+        // preset the player cycled to. With this bound, the count follows
+        // each press, so the offset drops the moment you cycle off the wanted
+        // view and returns when you cycle back -- read or no read.
+        if (g_state->extCamNextKey.pressed()) {
+            headOffsetGateViewBumped();
+        }
         // Reading the view the game is actually on, and telling the gate.
         //
         // The keypress count above stays as the fallback, for when this cannot
@@ -332,6 +344,9 @@ State& ensureState() {
         g_state->toggleKey.setBinding(Config::get().getString("hotkey.toggle_exposure", "SCROLLLOCK").c_str());
         g_state->dumpKey.setBinding(Config::get().getString("hotkey.dump_camera", "PAUSE").c_str());
         g_state->externalCamKey.setBinding(Config::get().getString("hotkey.external_camera", "").c_str());
+        g_state->extCamNextKey.setBinding(
+            Config::get().getString("hotkey.external_camera_next", "").c_str());
+        headOffsetGateSetNextKeyBound(g_state->extCamNextKey.key() != 0);
         g_state->dumpOnExternalCam =
             Config::get().getBool("advanced.dump_camera_on_external_cam", false);
         g_state->holdFramesOnExternalCam = static_cast<uint32_t>(
