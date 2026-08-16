@@ -1,5 +1,5 @@
 // GENERATED from src/d3d11/camera_view.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 a473aad5e0becabe]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 b8f2afad20218489]
 #include "camera_view.h"
 
 #include <windows.h>
@@ -46,7 +46,14 @@ constexpr uint32_t kRetryCooldown = 3600;
 // bounded at all only so that a pathological session cannot walk the heap
 // forever, and briefly delayed so a move during a mode change is not chased
 // several times over.
-constexpr uint32_t kMaxRescans = 16;
+//
+// Sixty-four, up from sixteen, on measurement: near a planet the game
+// reshapes the array every ten to thirty seconds -- five moves inside two
+// minutes in one capture (6at.3) -- and each reshape is a move, so sixteen
+// was a twenty-minute planet session ending with the feature quietly off for
+// good. Each rescan walks the heap once (~2 s); sixty-four bounds the
+// session's worst case at about two minutes of scanning spread across hours.
+constexpr uint32_t kMaxRescans = 64;
 
 // The camera settings records are 0x18 bytes and lie back to back (6ad.7a,
 // 6ad.8a: stride 0x18, no gaps, 19 of them). That structure is what tells the
@@ -209,6 +216,11 @@ struct State {
     // still exists somewhere, and a scan is exactly the thing that finds it.
     bool      needRescan = false;
     uint32_t  rescans = 0;
+    // Whether the scan in flight is a RE-FIND (the array was had a moment ago)
+    // rather than a first search. A re-find that comes back unusable retries
+    // in seconds on the rescan budget; a first search that fails waits the
+    // long cooldown and spends the find budget. See finishScan.
+    bool      refinding = false;
     bool      sawGameplay = false;
     // Consecutive frames the chosen record has not read as a record. Reset by
     // any good read, so this counts one episode rather than a session's total.
@@ -835,6 +847,28 @@ void finishScan() {
                         "Refusing rather than picking; the run list above is "
                         "what a fix would need.", candidates.size());
     }
+
+    // A RE-FIND THAT CAME BACK UNUSABLE IS NOT A FAILED SEARCH. The records
+    // are right there, at the base they have always been at -- the layout is
+    // just mid-rebuild, and near a planet it rebuilds every ten to thirty
+    // seconds (6at.3). Charging the find budget and waiting the long cooldown
+    // turned each rebuild into a forty-second dead window, stacked (6at.2).
+    // So: give back the attempt, and go again in a few seconds on the rescan
+    // budget, which is sized for exactly this churn. The behavioural watcher
+    // keeps the candidate list this scan just built in the meantime -- fresh
+    // candidates are the thing the player's cycling needs to meet.
+    if (g_s.refinding) {
+        if (g_s.attempts > 0) --g_s.attempts;
+        g_s.needRescan = true;
+        g_s.cooldown = kRescanCooldown;
+        Log::get().note(
+            "camera view: the array is here (%zu record(s) at its usual base) "
+            "but mid-rebuild. Scanning again in a few seconds rather than "
+            "spending a search attempt on a layout that will not be the layout "
+            "by then.",
+            g_s.records.size());
+        return;
+    }
     Log::get().note("camera view:%s", retry);
 }
 
@@ -874,6 +908,7 @@ void cameraViewRequestScan() {
         if (g_s.rescans >= kMaxRescans) return;
         ++g_s.rescans;
         g_s.needRescan = false;
+        g_s.refinding = true;
         g_s.attempts = 0;      // this is a re-find, not another failed search
     } else if (g_s.attempts >= kMaxAttempts) {
         // Once, so the log distinguishes "gave up" from "never asked". The last
@@ -887,6 +922,8 @@ void cameraViewRequestScan() {
                             "needs re-measuring.", g_s.attempts);
         }
         return;
+    } else {
+        g_s.refinding = false;   // an ordinary attempt spends the find budget
     }
     g_s.scanning = true;
     g_s.chosen = nullptr;
@@ -947,12 +984,22 @@ void pollCandidates() {
         // the records go briefly quiet while the game rebuilds them, which is
         // routine -- so the sample is skipped rather than held against it.
         if (v == 0xFFFFFFFFu) continue;
-        // OUT OF RANGE DISQUALIFIES PERMANENTLY. A preset index never leaves
-        // 0..view_count; a record that does was never one, and letting it back
-        // in after wandering is how a garbage slot earns three "changes".
+        // OUT OF RANGE DEMOTES, IT NO LONGER EXECUTES. The execution rule --
+        // one out-of-range reading nulls the candidate for good -- assumed a
+        // preset index never leaves 0..view_count, and the field refuted it:
+        // the record that IS the preset read 8 during a rebuild transition
+        // and was certified as the preset seconds later (6at.4, record 01C0).
+        // Under permanent disqualification, one unlucky poll during churn
+        // executes the only right answer for that candidate generation.
+        //
+        // What the execution was protecting against still cannot happen: the
+        // change count resets on EVERY out-of-range sample, so a garbage slot
+        // that wanders in and out of range can never hold three changes --
+        // each excursion sends it back to zero. The cost of demotion is that
+        // a genuine preset's cycling progress restarts after a transition
+        // state, which is one extra press.
         if (v > g_s.plausibleMax) {
             c.changes = 0;
-            c.rec = nullptr;
             continue;
         }
         if (v != c.last) {
