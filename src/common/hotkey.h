@@ -1,5 +1,3 @@
-// GENERATED from src/common/hotkey.h in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 745d9f82c1d57fb2]
 // Edge-triggered hotkey polling.
 //
 // Polled from the frame loop with GetAsyncKeyState rather than installed as a

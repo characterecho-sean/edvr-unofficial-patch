@@ -1,5 +1,3 @@
-// GENERATED from src/openvr/resubmit_shadow.h in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 e0590a4fcbe49788]
 // The last forwarded frame, kept so a withhold can hand SteamVR a copy of it
 // instead of a missed deadline.
 //

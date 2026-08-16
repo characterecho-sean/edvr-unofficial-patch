@@ -1,5 +1,3 @@
-// GENERATED from src/d3d11/elite_binds.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 72949619fcf969ec]
 #include "elite_binds.h"
 
 #include <windows.h>

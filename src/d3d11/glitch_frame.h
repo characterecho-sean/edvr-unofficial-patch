@@ -1,5 +1,3 @@
-// GENERATED from src/d3d11/glitch_frame.h in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 3c8141196f5a3b4a]
 // The one-frame flash at a transition.
 //
 // Jumping, dropping out of supercruise, or closing the galaxy map occasionally

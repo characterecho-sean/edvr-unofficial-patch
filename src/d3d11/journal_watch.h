@@ -1,5 +1,3 @@
-// GENERATED from src/d3d11/journal_watch.h in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 9eef3171c54c09e9]
 // Elite's own journal, read for the boundaries it states outright.
 //
 // The game writes a documented event stream for third-party tools:

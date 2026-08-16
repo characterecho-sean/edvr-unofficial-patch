@@ -1,5 +1,3 @@
-// GENERATED from src/d3d11/camera_view.h in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 f33d05c05a7bc453]
 // Which external-camera view the game is showing, read from the game.
 //
 // WHY THIS EXISTS

@@ -1,5 +1,3 @@
-// GENERATED from src/d3d11/head_offset_gate.h in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 bef4bcb9e1123940]
 // When to move the head pose: on foot, in the external camera, and nowhere
 // else.
 //

@@ -1,5 +1,3 @@
-// GENERATED from src/common/guard.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 f97fba872af534d2]
 #include "guard.h"
 
 #include <windows.h>

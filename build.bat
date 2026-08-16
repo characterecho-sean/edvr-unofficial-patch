@@ -225,6 +225,24 @@ if errorlevel 1 ( echo [edvr] ERROR: fakechain build failed & exit /b 1 )
 echo [edvr] built %BUILD%\fakechain.dll
 
 echo.
+echo [edvr] === config_test.exe ===
+REM The real parser over the real shipped edvr.ini. The file's own layout
+REM depends on two parser properties -- repeated section headers, last value
+REM wins -- that were originally read out of config.cpp rather than observed,
+REM and every symptom of either being false shows up in the game rather than
+REM in a build.
+if not exist "%OBJ%\cfgtest" mkdir "%OBJ%\cfgtest"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\cfgtest"\ ^
+    /Fe"%BUILD%\config_test.exe" "%ROOT%\tools\config_test\config_test.cpp" ^
+    "%ROOT%\src\common\config.cpp" "%ROOT%\src\common\log.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib
+if errorlevel 1 ( echo [edvr] ERROR: config_test build failed & exit /b 1 )
+"%BUILD%\config_test.exe" "%ROOT%" "%BUILD%\cfgscratch" || (
+    echo [edvr] ERROR: the shipped edvr.ini does not parse as documented
+    exit /b 1
+)
+
 echo [edvr] === gate_test.exe ===
 if not exist "%OBJ%\gatetest" mkdir "%OBJ%\gatetest"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^

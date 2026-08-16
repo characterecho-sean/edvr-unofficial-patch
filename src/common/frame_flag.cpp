@@ -1,5 +1,3 @@
-// GENERATED from src/common/frame_flag.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 4735533268d70aad]
 #include "frame_flag.h"
 
 #include <windows.h>

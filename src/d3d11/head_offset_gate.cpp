@@ -1,5 +1,3 @@
-// GENERATED from src/d3d11/head_offset_gate.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 c4cc2323081cf8e2]
 #include "head_offset_gate.h"
 
 #include "../common/config.h"

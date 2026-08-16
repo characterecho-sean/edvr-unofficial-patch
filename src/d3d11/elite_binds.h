@@ -1,5 +1,3 @@
-// GENERATED from src/d3d11/elite_binds.h in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 ab95754318217555]
 // The player's own Elite keybindings, read from where the game keeps them.
 //
 // Elite stores bindings as XML in Options\Bindings\*.binds under its local

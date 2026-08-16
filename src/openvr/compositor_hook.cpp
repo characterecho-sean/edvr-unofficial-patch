@@ -652,11 +652,11 @@ vr::EVRCompositorError hookedWaitGetPoses(void* self,
     // -- losing a log line is nothing -- but wrong for something that changes
     // what the player sees.
     //
-    // The feature lives in head_offset.cpp, which is SHARED. It was written
-    // inline here, in a file that is FORKED, and this copy lost the
-    // install-time config read in the hand-copy -- so this build ran every
-    // session with the offsets still zero and did nothing at all. That is not
-    // a mistake sync_common can see in a forked file. It can see it there.
+    // The feature lives in head_offset.cpp. It was written inline here, back
+    // when this file was hand-copied between two repos, and this copy lost
+    // the install-time config read -- so this build ran every session with
+    // the offsets still zero and did nothing at all. One file, one call, is
+    // what makes that failure impossible rather than merely unlikely.
     headOffsetApply(result, renderPoses, renderCount, gamePoses, gameCount);
 
     // The config reload poll, BACK, and the reason it was removed is the

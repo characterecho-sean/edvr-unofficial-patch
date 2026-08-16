@@ -1,5 +1,3 @@
-// GENERATED from src/d3d11/camera_view.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 bf18baea98c74f33]
 #include "camera_view.h"
 
 #include <windows.h>

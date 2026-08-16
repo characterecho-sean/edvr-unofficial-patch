@@ -1,5 +1,3 @@
-// GENERATED from src/common/proxy.h in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 0de6c625cdde4dad]
 // Shared plumbing for the two proxy DLLs.
 //
 // Both edvr's d3d11.dll and openvr_api.dll work the same way: load the real

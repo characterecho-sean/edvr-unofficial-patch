@@ -1,5 +1,3 @@
-// GENERATED from src/common/vtable_hook.h in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 74ab56c465c403a2]
 // COM vtable interception by vtable copy and vptr swap.
 //
 // We copy the object's vtable into memory we own, patch the entries we care

@@ -1,5 +1,3 @@
-// GENERATED from src/openvr/pose_offset.h in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 97a2ba6d3b9da999]
 // Move and turn an HMD pose, in the tracking frame.
 //
 // Extracted from compositor_hook.cpp so it can be tested without a headset. The

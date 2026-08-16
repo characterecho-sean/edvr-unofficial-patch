@@ -1,5 +1,3 @@
-// GENERATED from src/d3d11/journal_watch.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 0fea3f945f16a3df]
 #include "journal_watch.h"
 
 #include <windows.h>

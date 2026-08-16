@@ -1,5 +1,3 @@
-// GENERATED from src/d3d11/vscreen_res.h in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 8961cfff1d0f18a9]
 // The second place in edvr that writes to the game's code, and the last.
 //
 // vscreen_patch.cpp rewrites ONE texture allocation's size arguments. That

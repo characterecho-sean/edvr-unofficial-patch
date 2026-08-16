@@ -1,19 +1,18 @@
-// GENERATED from src/openvr/head_offset.h in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 31a25c7f3b4e2b8d]
 // Moving the viewpoint, on the openvr side.
 //
 // WHY THIS IS ITS OWN FILE
 //
-// It was written inline in compositor_hook.cpp, which is FORKED between the two
-// repos -- so the public copy was made by hand, and one line did not survive the
-// copy: the call that reads the offsets at install. The public build therefore
-// ran a whole session with headOffset still zero-initialised, and the feature
-// did nothing at all for anyone who installed it. Every end-to-end verification
-// in the evidence ledger had been done on the other build.
+// It was written inline in compositor_hook.cpp, back when this code lived in
+// two repos and that file was hand-copied between them. One line did not
+// survive the copy: the call that reads the offsets at install. This build
+// therefore ran a whole session with headOffset still zero-initialised, and
+// the feature did nothing at all for anyone who installed it. Every
+// end-to-end verification in the evidence ledger had been done on the other
+// build.
 //
-// sync_common.py cannot see that class of mistake in a forked file, by
-// construction. It can see it here. That is the entire reason this file exists,
-// and it is worth more than the tidiness.
+// The fork is gone (2026-08-16, one repo now) but the lesson outlives it:
+// a feature that lives in its own file, called from one line, cannot be
+// half-copied or half-deleted. That is worth more than the tidiness.
 //
 // WHAT IT DOES
 //

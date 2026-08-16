@@ -1,5 +1,3 @@
-// GENERATED from src/openvr/head_offset.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 68e32e222e22593d]
 #include "head_offset.h"
 
 #include <cmath>

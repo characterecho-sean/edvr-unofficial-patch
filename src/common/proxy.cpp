@@ -1,5 +1,3 @@
-// GENERATED from src/common/proxy.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 d62d56b4e14a4dc7]
 #include "proxy.h"
 
 #include <cstdio>

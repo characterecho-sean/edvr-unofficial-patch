@@ -1,5 +1,3 @@
-// GENERATED from src/openvr/resubmit_shadow.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 8ca78a66a521a87a]
 #include "resubmit_shadow.h"
 
 #include <windows.h>

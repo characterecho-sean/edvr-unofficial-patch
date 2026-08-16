@@ -1,5 +1,3 @@
-// GENERATED from src/d3d11/binding_shadow.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 d8265457ab7a5658]
 #include "binding_shadow.h"
 
 #include <windows.h>
