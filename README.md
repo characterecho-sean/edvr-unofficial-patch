@@ -141,11 +141,12 @@ player observes, and no gameplay data read or written.
    effect.
 
 2. **Hotkeys: usually nothing to do.** EDVR reads your external-camera and
-   next-camera-view keys straight from your Elite key configuration at
-   startup — if they are on keyboard keys (Elite's defaults are
-   `CTRL+ALT+SPACE` and an arrow key), you are done, and the log's first
-   lines say which keys were adopted. EDVR only *watches* these keys; it
-   never presses them or interferes with the game receiving them.
+   next-camera-view keys straight from your Elite key configuration — if
+   they are on keyboard keys (Elite's defaults are `CTRL+ALT+SPACE` and an
+   arrow key), you are done, and the log's first lines say which keys were
+   adopted. Rebind them in Elite mid-session and EDVR follows within a few
+   seconds. EDVR only *watches* these keys; it never presses them or
+   interferes with the game receiving them.
 
    They matter because on screen, entering the camera looks identical to
    boarding your ship — the camera key is how EDVR knows which it was. And

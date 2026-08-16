@@ -1,5 +1,5 @@
 // GENERATED from src/d3d11/elite_binds.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 efac9ef8d35b66ea]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 b33213bc4167d8fe]
 #include "elite_binds.h"
 
 #include <windows.h>
@@ -212,6 +212,38 @@ bool eliteBindsLookup(const char* element, char* out, size_t outLen) {
     } while (FindNextFileW(find, &fd));
     FindClose(find);
     return found;
+}
+
+unsigned long long eliteBindsFingerprintDir(const wchar_t* dir) {
+    if (!dir || !dir[0]) return 0;
+    const std::wstring glob = std::wstring(dir) + L"\\*";
+    WIN32_FIND_DATAW fd{};
+    HANDLE find = FindFirstFileW(glob.c_str(), &fd);
+    if (find == INVALID_HANDLE_VALUE) return 0;
+    // FNV-1a over each file's name, size and write time. Enumeration order
+    // is filesystem-defined but stable between consecutive calls on the same
+    // volume, which is all a change detector needs.
+    unsigned long long fp = 1469598103934665603ull;
+    const auto fold = [&fp](const void* p, size_t n) {
+        const unsigned char* b = static_cast<const unsigned char*>(p);
+        for (size_t i = 0; i < n; ++i) {
+            fp ^= b[i];
+            fp *= 1099511628211ull;
+        }
+    };
+    do {
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+        fold(fd.cFileName, wcslen(fd.cFileName) * sizeof(wchar_t));
+        fold(&fd.nFileSizeLow, sizeof(fd.nFileSizeLow));
+        fold(&fd.nFileSizeHigh, sizeof(fd.nFileSizeHigh));
+        fold(&fd.ftLastWriteTime, sizeof(fd.ftLastWriteTime));
+    } while (FindNextFileW(find, &fd));
+    FindClose(find);
+    return fp ? fp : 1;   // 0 stays reserved for "could not enumerate"
+}
+
+unsigned long long eliteBindsFingerprint() {
+    return eliteBindsFingerprintDir(bindingsDir().c_str());
 }
 
 }  // namespace edvr

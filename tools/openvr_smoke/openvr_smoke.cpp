@@ -1,5 +1,5 @@
 // GENERATED from tools/openvr_smoke/openvr_smoke.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 bf7c8642fc261434]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 f16876084b1374db]
 // openvr_smoke -- checks the openvr proxy's startup path without the game.
 //
 // The thing under test is that the proxy does NOT load the real openvr_api.dll
@@ -682,6 +682,48 @@ int hotkeyChecks() {
     if (edvr::eliteBindsTranslateKey("Key_LeftShift", t, sizeof(t))) {
         printf("  FAIL  a bare modifier translated as a main key\n");
         ++bad;
+    }
+
+    // The bindings-change fingerprint: stable across reads when nothing
+    // changed, moved by a file growing (a rebind rewrites the file), and 0
+    // for a directory that is not there -- the trio live re-adoption needs.
+    {
+        wchar_t tmp[MAX_PATH] = {};
+        GetTempPathW(MAX_PATH, tmp);
+        wchar_t dir[MAX_PATH] = {};
+        swprintf_s(dir, L"%sedvr_binds_fp_test", tmp);
+        CreateDirectoryW(dir, nullptr);
+        wchar_t file[MAX_PATH] = {};
+        swprintf_s(file, L"%s\\Custom.4.0.binds", dir);
+        DWORD wrote = 0;
+        HANDLE f = CreateFileW(file, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                               FILE_ATTRIBUTE_NORMAL, nullptr);
+        WriteFile(f, "<Root/>", 7, &wrote, nullptr);
+        CloseHandle(f);
+        const unsigned long long fpA = edvr::eliteBindsFingerprintDir(dir);
+        const unsigned long long fpB = edvr::eliteBindsFingerprintDir(dir);
+        f = CreateFileW(file, FILE_APPEND_DATA, 0, nullptr, OPEN_EXISTING,
+                        FILE_ATTRIBUTE_NORMAL, nullptr);
+        WriteFile(f, "<!-- rebound -->", 16, &wrote, nullptr);
+        CloseHandle(f);
+        const unsigned long long fpC = edvr::eliteBindsFingerprintDir(dir);
+        DeleteFileW(file);
+        RemoveDirectoryW(dir);
+        const unsigned long long fpGone = edvr::eliteBindsFingerprintDir(dir);
+        if (fpA == 0 || fpA != fpB) {
+            printf("  FAIL  bindings fingerprint not stable across unchanged "
+                   "reads\n");
+            ++bad;
+        }
+        if (fpC == fpA) {
+            printf("  FAIL  bindings fingerprint did not move when a file "
+                   "changed\n");
+            ++bad;
+        }
+        if (fpGone != 0) {
+            printf("  FAIL  a missing bindings directory did not read as 0\n");
+            ++bad;
+        }
     }
 
     // setBinding must carry BOTH halves. This is the regression that matters:

@@ -68,6 +68,15 @@ struct State {
     // to keep in step, in exchange for nothing a working install uses.
     Hotkey externalCamKey;
     Hotkey extCamNextKey;
+    // Which of the two camera hotkeys came from the INI: those never move.
+    // The others were adopted from the game's bindings files and follow them
+    // live -- Elite rewrites Options\Bindings the moment a rebind or preset
+    // switch is applied, and a slow stat (below) notices within seconds.
+    bool     externalKeyFromIni = false;
+    bool     nextKeyFromIni = false;
+    uint64_t bindsFingerprint = 0;
+    uint64_t bindsPending = 0;       // a change waiting to hold for one beat
+    uint32_t bindsCheckIn = 450;
     uint32_t lastJournalDisembarks = 0;
     uint32_t lastJournalEmbarks = 0;
     uint32_t lastCameraEnters = 0;
@@ -122,12 +131,22 @@ constexpr uint32_t kSentinelConfirmFrames = 600;
 // against.
 constexpr uint32_t kDumpDelayFrames = 180;
 
+// How often the Elite bindings directory is stat'd for changes: one listing
+// every ~5 seconds. Two consecutive stable sightings commit a change, so a
+// rebind lands in ten seconds at the outside, and a directory Elite is
+// mid-writing is never parsed.
+constexpr uint32_t kBindsCheckFrames = 450;
+
 // How many times a session to point out that a history-key press was ignored
 // because another window had focus. Three is enough to be noticed and few
 // enough that a player who works with a browser focused is not papered with it.
 constexpr uint32_t kMissedDumpNotes = 3;
 
 State* g_state = nullptr;
+
+// Defined below ensureState; used by the frame-path bindings-change check.
+void readoptGameBindings();
+
 // One budget per thing that can fail. Shader creation runs on whatever thread
 // the game streams assets from; the frame boundary runs on the render thread and
 // carries the exposure boundary, the vScreen boundary (which hosts the flash
@@ -243,6 +262,28 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
         // The delayed dump, armed by either key.
         if (g_state->dumpCountdown > 0 && --g_state->dumpCountdown == 0) {
             dumpCameraRing("a key you pressed two seconds ago", kDumpDelayFrames);
+        }
+        // The player's Elite bindings, re-read when the game rewrites them.
+        // Elite saves Options\Bindings the moment a rebind or preset switch
+        // is applied, so a slow stat notices within seconds and the adopted
+        // hotkeys follow without a restart. The change must HOLD across two
+        // checks before anything is re-read: an Apply writes several files,
+        // and half a save is not a configuration.
+        if (--g_state->bindsCheckIn == 0) {
+            g_state->bindsCheckIn = kBindsCheckFrames;
+            if (Config::get().getBool("hotkey.read_game_bindings", true) &&
+                (!g_state->externalKeyFromIni || !g_state->nextKeyFromIni)) {
+                const uint64_t fp = eliteBindsFingerprint();
+                if (fp == g_state->bindsFingerprint) {
+                    g_state->bindsPending = 0;
+                } else if (fp == g_state->bindsPending) {
+                    g_state->bindsFingerprint = fp;
+                    g_state->bindsPending = 0;
+                    readoptGameBindings();
+                } else {
+                    g_state->bindsPending = fp;
+                }
+            }
         }
         // The game's own journal, polled about once a second: it states the
         // two boundaries EDVR used to infer -- gameplay starting (LoadGame)
@@ -386,6 +427,52 @@ HRESULT STDMETHODCALLTYPE hookedCreateSwapChainForHwnd(
     return hr;
 }
 
+// Re-run the game-bindings adoption after Elite rewrote its files. Only the
+// keys the ini leaves empty are touched -- an explicit ini value never moves.
+// A keyboard binding that VANISHED (moved to a controller, unbound) clears
+// the watch rather than leaving a phantom key: pressing a key the game no
+// longer acts on would flip EDVR's idea of where you are while the game
+// stands still, which is the missed-press desync class.
+void readoptGameBindings() {
+    char b[48];
+    if (!g_state->externalKeyFromIni) {
+        const auto before = g_state->externalCamKey.key();
+        if (eliteBindsLookup("PhotoCameraToggle", b, sizeof(b))) {
+            g_state->externalCamKey.setBinding(b);
+            if (g_state->externalCamKey.key() != before) {
+                Log::get().note("hotkey: your Elite bindings changed -- "
+                                "external_camera is now %s.", b);
+            }
+        } else if (before != 0) {
+            g_state->externalCamKey.setBinding("");
+            Log::get().note(
+                "hotkey: your Elite bindings changed and the external camera "
+                "is no longer on a keyboard key, so the old key is no longer "
+                "watched. Bind a keyboard key for it in Elite to use Explorer "
+                "Cam.");
+        }
+        headOffsetGateSetKeyBound(g_state->externalCamKey.key() != 0);
+    }
+    if (!g_state->nextKeyFromIni) {
+        const auto before = g_state->extCamNextKey.key();
+        if (eliteBindsLookup("VanityCameraScrollRight", b, sizeof(b))) {
+            g_state->extCamNextKey.setBinding(b);
+            if (g_state->extCamNextKey.key() != before) {
+                Log::get().note("hotkey: your Elite bindings changed -- "
+                                "external_camera_next is now %s.", b);
+            }
+        } else if (before != 0) {
+            g_state->extCamNextKey.setBinding("");
+            Log::get().note(
+                "hotkey: your Elite bindings changed and the next-view key is "
+                "no longer on a keyboard key, so the old key is no longer "
+                "watched.");
+        }
+        headOffsetGateSetNextKeyBound(g_state->extCamNextKey.key() != 0);
+        cameraViewSetPressWitness(g_state->extCamNextKey.key() != 0);
+    }
+}
+
 State& ensureState() {
     if (!g_state) {
         g_state = new State();
@@ -394,11 +481,14 @@ State& ensureState() {
         g_state->externalCamKey.setBinding(Config::get().getString("hotkey.external_camera", "").c_str());
         g_state->extCamNextKey.setBinding(
             Config::get().getString("hotkey.external_camera_next", "").c_str());
+        g_state->externalKeyFromIni = g_state->externalCamKey.key() != 0;
+        g_state->nextKeyFromIni = g_state->extCamNextKey.key() != 0;
         // Bindings the ini leaves empty are read from the GAME's own key
         // configuration (Options\Bindings), so a keyboard player needs no
         // setup at all. An explicit ini value always wins; a binding on a
-        // controller is skipped (EDVR watches the keyboard) and the keyless
-        // Status-driven detection covers that player instead.
+        // controller is skipped (EDVR watches the keyboard). Adopted keys
+        // FOLLOW the game's files: rebind in Elite mid-session and the
+        // stat cadence in the frame path picks it up within seconds.
         if (Config::get().getBool("hotkey.read_game_bindings", true)) {
             char b[48];
             if (g_state->externalCamKey.key() == 0 &&
@@ -413,6 +503,7 @@ State& ensureState() {
                 Log::get().note("hotkey: external_camera_next adopted from "
                                 "your Elite bindings: %s", b);
             }
+            g_state->bindsFingerprint = eliteBindsFingerprint();
         }
         headOffsetGateSetNextKeyBound(g_state->extCamNextKey.key() != 0);
         cameraViewSetPressWitness(g_state->extCamNextKey.key() != 0);
