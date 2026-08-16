@@ -1,5 +1,5 @@
 // GENERATED from tools/gate_test/gate_test.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 af2d8b9e2bc9f415]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 9b3914bb8c57255e]
 // gate_test -- replays frame sequences through the head-offset gate.
 //
 // WHY
@@ -358,6 +358,43 @@ int main(int argc, char** argv) {
     headOffsetGateSetView(g_otherView);
     sceneFrame(2);
     check(false, "the view changed away again while in the camera");
+
+    // ----------------------------------------------------------- view bridge
+    //
+    // The read DYING mid-camera is routine near a planet: the game rebuilds
+    // its camera records every ten to thirty seconds (6ar-6at), and the strict
+    // drop landed exactly when the player was sitting still in the wanted
+    // view, supplying none of the presses re-certification needs. The bridge
+    // holds the last confirmed view for a bounded window; the first re-read
+    // corrects it that frame; expiry restores the strict drop; and 0 in the
+    // config restores the old rule entirely. Each property pinned. The hold is
+    // the half that fails against the pre-bridge build.
+    begin(true);
+    headOffsetGateSetView(g_wantView);
+    enterCamera();
+    check(true, "in the camera on the wanted view, read alive");
+    headOffsetGateSetView(-1);            // the rebuild takes the read away
+    sceneFrame(200);                      // well inside the bridge window
+    check(true, "the read died mid-use and the offset held: the bridge");
+    headOffsetGateSetView(g_otherView);   // it returns saying the player moved
+    sceneFrame(2);
+    check(false, "the returning read named a different view and won at once");
+    headOffsetGateSetView(g_wantView);
+    sceneFrame(2);
+    check(true, "back on the wanted view");
+    headOffsetGateSetView(-1);
+    sceneFrame(2800);                     // outlives kBridgeFrames (2700)
+    check(false, "a window longer than the bridge restored the strict drop");
+
+    Config::get().set("fix.head_offset_view_bridge", "0");
+    begin(true);
+    headOffsetGateSetView(g_wantView);
+    enterCamera();
+    check(true, "in the camera, bridge configured off");
+    headOffsetGateSetView(-1);
+    sceneFrame(2);
+    check(false, "with the bridge off, losing the read drops the offset at once");
+    Config::get().set("fix.head_offset_view_bridge", "1");
 
     // ------------------------------------------------------------------ exits
     //
