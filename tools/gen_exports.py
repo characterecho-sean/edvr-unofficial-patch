@@ -1,6 +1,4 @@
 #!/usr/bin/env python3
-# GENERATED from tools/gen_exports.py in the private edvr repo -- do not edit here.
-# Edit there, then: python tools/sync_common.py --write   [body-sha256 e59e047d6fb9daa9]
 """Generate forwarding thunks for a proxy DLL from a real DLL's export table.
 
 A proxy DLL has to export everything the original did or the process fails to

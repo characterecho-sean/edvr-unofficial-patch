@@ -1,5 +1,3 @@
-// GENERATED from tools/fakevr/fakevr.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 5517e9283bb8fea5]
 // A stand-in for the game's openvr_api.dll, for testing the proxy's startup.
 //
 // Two jobs.

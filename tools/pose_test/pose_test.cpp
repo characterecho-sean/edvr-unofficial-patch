@@ -1,5 +1,3 @@
-// GENERATED from tools/pose_test/pose_test.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 7052f99b5a103456]
 // pose_test -- the head-pose offset arithmetic, without a headset.
 //
 // Six lines of matrix work that fail quietly. A transposed index garbles the

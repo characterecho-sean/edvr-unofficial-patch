@@ -1,6 +1,4 @@
 #!/usr/bin/env python3
-# GENERATED from tools/check_install_reads.py in the private edvr repo -- do not edit here.
-# Edit there, then: python tools/sync_common.py --write   [body-sha256 00af47cb16754c11]
 """Config readers must be called on the INSTALL path, not only on reload.
 
 WHY THIS EXISTS

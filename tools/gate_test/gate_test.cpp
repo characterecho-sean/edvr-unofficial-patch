@@ -1,5 +1,3 @@
-// GENERATED from tools/gate_test/gate_test.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 55713ea45b6a2e63]
 // gate_test -- replays frame sequences through the head-offset gate.
 //
 // WHY

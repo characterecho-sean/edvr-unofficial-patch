@@ -1,5 +1,3 @@
-// GENERATED from tools/glitch_test/field_ring_13425.inc in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 5d147cd1ff03f905]
 // Recorded field data, not a fixture written by hand.
 //
 // The furthest-camera position and eye-draw count EDVR wrote into its own ring

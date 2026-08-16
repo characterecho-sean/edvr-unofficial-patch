@@ -1,5 +1,3 @@
-// GENERATED from tools/glitch_test/field_corpus_flight.inc in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 3466b8ea2d3b5d21]
 // Recorded field data, not a fixture written by hand.
 //
 // FIXTURE K -- THE NORMAL-FLIGHT CORPUS. Rings from ordinary play, several

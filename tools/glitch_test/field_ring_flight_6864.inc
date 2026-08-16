@@ -1,5 +1,3 @@
-// GENERATED from tools/glitch_test/field_ring_flight_6864.inc in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 9ee5666ad59f899c]
 // Recorded field data, not a fixture written by hand.
 //
 // FIXTURE J. The ring EDVR wrote during the low wake entry of 2026-08-15
