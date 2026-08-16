@@ -132,9 +132,18 @@ game build. It is a reproduction, not a survey.
 ## What EDVR does about it
 
 Nothing that should be mistaken for a proper fix. It **detects the bad frame
-while it is still being drawn and declines to hand it to SteamVR.** SteamVR then
-reprojects the previous frame, exactly as it does whenever a game misses a frame,
-so the player sees nothing rather than something wrong.
+while it is still being drawn and hands SteamVR a copy of the previous frame in
+its place** — EDVR keeps a copy of the last frame it actually forwarded, and a
+caught frame becomes an on-time submit of that copy at the current pose. One
+repeated frame, no stall, always the game's own picture; EDVR draws nothing.
+
+When no copy is usable — the first frames of a session, or the eye textures
+changing size — it falls back to the old mechanism: declining the submit
+entirely, which SteamVR answers by reprojecting the previous frame itself. That
+fallback costs about 80 ms while the compositor waits for a frame that never
+comes, which was the price of *every* caught frame before 0.7.0 and the source
+of the judder some configurations felt. `transition_flash_resubmit = 0`
+restores it as the only behaviour.
 
 Detection works by watching the viewpoint the game is drawing from and comparing
 it against a straight-line prediction from the previous two frames. Ordinary
@@ -149,9 +158,8 @@ Two details do most of the work:
 - **Ask whether it came back.** A bad frame leaves the path for one frame and
   returns. Arriving at a station or opening a map moves the whole coordinate
   system and *stays* there. Without this test, a station arrival produced bursts
-  of eleven and twelve withheld frames — and since declining to submit costs
-  about 80 ms while the compositor waits for a frame that never comes, that is
-  most of a second of judder, which is worse than the flash it was removing.
+  of eleven and twelve withheld frames — under the pre-0.7.0 mechanism, most of
+  a second of stall, which was worse than the flash it was removing.
 
 **Known limits, stated plainly.** The viewpoint EDVR can see is the furthest-out
 camera in each frame, because Elite renders the main view camera-relative and its
@@ -168,15 +176,32 @@ frames apart, which is felt as rhythmic judder rather than as anything to do wit
 flashes; then the runaway guard turned the fix off for the rest of the session
 and the real flashes came back with it.
 
-**The discriminator is repetition.** A fixed distance between two render passes
-recurs at the same size indefinitely; a real transition does not, because real
-motion varies. Of fourteen genuine transitions measured in one session the
-closest pair were 5.7% apart, while the cascade pair repeated within 1.5%. So the
-first jump of a given size is withheld — it cannot be known to repeat yet — and
-matching ones after it are recognised and left alone. `edvr.ini` documents the
-tolerance as `transition_flash_repeat_percent`.
+**The discriminator is repetition — of geometry, in four shapes.** A fixed
+distance between two render passes recurs at the same size indefinitely; a real
+transition does not, because real motion varies. Of fourteen genuine transitions
+measured in one session the closest pair were 5.7% apart, while the cascade pair
+repeated within 1.5%. Field sessions then found three more shapes the same
+principle covers, and each is recognised separately:
 
-The two counts are reported separately in a `transition flash so far:` line,
+- **A repeating jump size** is a fixed gap between two passes — but a jump size
+  can also repeat across two *transitions* to the same reset point, so this rule
+  only acts after a size has cost three frames inside a minute
+  (`transition_flash_repeat_percent`).
+- **A recurring distance** is a camera orbiting the view at a fixed radius; a
+  camera that *sits* on a distance for a third of a second is the view itself,
+  and that distance is never excused — or stops being excused, if it was
+  (`transition_flash_radius_tolerance`, `transition_flash_dwell_frames`).
+- **A recurring landing point** is a parked camera being resampled
+  (`transition_flash_park_units`).
+- **A steadily climbing size, landing near its last landing,** is one camera
+  drifting away from the view (`transition_flash_drift_pct`).
+
+Above all of them sits a **burst governor**: more than three caught frames
+inside sixty stands the fix down for two seconds, whatever the cause — the fix
+may never cost more than the thing it hides, including for storm shapes nothing
+above recognises yet (`transition_flash_burst_limit`).
+
+The counts are reported, split by rule, in a `transition flash so far:` line,
 printed roughly every twenty seconds and only when one of them has moved — so no
 such line at all means the fix never fired. It is deliberately not left to the
 end of the session: the log has no end. A game's `d3d11.dll` is never unloaded,
@@ -185,14 +210,16 @@ restricted to what is safe when every other thread is already dead. A summary
 written there would be a summary nobody ever saw, which is what the previous one
 was for five sessions of debugging.
 
-This matters beyond the judder. Every withheld frame costs the detector its next
+This matters beyond the judder. Every caught frame costs the detector its next
 frame or two while it rebuilds its prediction, and arrivals and wakes churn the
 pass mix for *seconds* — so a cascade flip firing shortly before a genuine bad
 frame spent the detector's shot early and the real flash was shown. Some share of
-"detected and let through" reports is likely to have been that.
+"detected and let through" reports is likely to have been that. The recognition
+rules above exist to keep those shots loaded.
 
-There is still a hard cap of two withholds in a row, and the guard that switches
-the whole thing off if it ever starts firing continuously.
+There is still a hard cap of two catches in a row, the burst governor above,
+and the guard that switches the whole thing off if it ever starts firing
+continuously.
 
 **Both eyes of a frame now get the same answer.** The decision is taken once, at
 whichever eye the game submits first, and the second eye follows it. Previously
@@ -227,8 +254,17 @@ five frames after that. Holds of 18, 30 and 90 frames each did the same thing.
 There is no length that works, because the thing being outlasted is waiting for
 the hold to stop.
 
+**0.7.0 changed the premise of that measurement, and honesty requires saying
+so.** The refutation rested on declining-stalls-the-game — and a caught frame
+is no longer declined, it is replaced with a copy submitted on time, so the
+game keeps receiving frames and should keep running the transition underneath
+the hold. Whether a hold now covers the bad frames instead of postponing them
+is an open question that has not been re-measured; the switch still ships at 0,
+and the measurement above stands as the record of why it was 0 before.
+
 The switch survives as `hold_frames_on_external_cam`, defaulting to 0, with that
-measurement written beside it so the idea is not rediscovered from scratch.
+history written beside it so the idea is neither rediscovered from scratch nor
+dismissed on a measurement whose premise has moved.
 
 **If you see a flash that got through:** press **Pause** immediately, then quit
 and send `edvr_logs\`. That writes the last ten seconds of viewpoint history,
