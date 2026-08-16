@@ -1,5 +1,5 @@
 // GENERATED from tools/gate_test/gate_test.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 b3d6e7b1e2348975]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 1be0be4c231ad3c8]
 // gate_test -- replays frame sequences through the head-offset gate.
 //
 // WHY
@@ -383,8 +383,8 @@ int main(int argc, char** argv) {
     sceneFrame(2);
     check(true, "back on the wanted view");
     headOffsetGateSetView(-1);
-    sceneFrame(2800);                     // outlives kBridgeFrames (2700)
-    check(false, "a window longer than the bridge restored the strict drop");
+    sceneFrame(2800);                     // the old TTL would have expired here
+    check(true, "the hold has no clock: a long dead-read stretch stays on");
 
     Config::get().set("fix.head_offset_view_bridge", "0");
     begin(true);
@@ -399,9 +399,9 @@ int main(int argc, char** argv) {
     // THE RELANDING CASE, which is the bridge's real job (sixth flight of
     // 2026-08-15): the read dies near a planet, the player leaves the camera,
     // flies, relands MINUTES later and re-enters -- still on the held view,
-    // the game agreeing -- and the old wall-clock TTL had expired an hour of
-    // frames ago. The clock must not run outside the camera: the game freezes
-    // the view there, so time out spends nothing.
+    // the game agreeing. The hold must survive the whole absence: the game
+    // freezes the view while the camera is closed, so time away costs
+    // nothing.
     begin(true);
     headOffsetGateSetView(g_wantView);
     enterCamera();
@@ -412,7 +412,7 @@ int main(int argc, char** argv) {
     headOffsetGateKeyPressed();           // leave the camera for the ship
     sceneFrame(1);
     check(false, "left the camera");
-    sceneFrame(6000);                     // fly away and back: far past 2700
+    sceneFrame(6000);                     // fly away and back
     panelFrame(200);                      // relanded, on foot again
     headOffsetGateKeyPressed();           // re-enter the camera
     panelFrame(2);
@@ -420,27 +420,47 @@ int main(int argc, char** argv) {
     check(true, "re-entered minutes later: the bridge held, because the view "
                 "cannot change while the camera is closed");
 
-    // The in-camera budget is real: a single stint on an unconfirmed view
-    // longer than the whole budget still falls back to the strict drop.
-    sceneFrame(2800);
-    check(false, "a continuous in-camera stint outliving the budget drops it");
+    // AND THE HOLD HAS NO CLOCK AT ALL: staying in the camera on the held
+    // view for as long as the player wishes is the product requirement
+    // (2026-08-15) -- the wall-clock TTL greeted every relanding with a dead
+    // bridge, and the in-camera budget contradicted indefinite stays. An
+    // hour of frames on the hold stays on.
+    sceneFrame(324000);
+    check(true, "an hour in the camera on the held view is still on");
 
-    // ...and each ENTRY with a live bridge starts a fresh stint: two stints
-    // that TOGETHER outspend the budget stay held, because the exposure is
-    // per-stint (each stint's own presses), not cumulative.
+    // THE POISONED READER (6aw): the array contains a counter that certifies
+    // under shape rules and supplies garbage. A read that DISAGREES while the
+    // player is OUT of the camera is impossible for the real preset -- the
+    // game freezes the view there -- so the gate must keep the confirmed
+    // value and distrust the reader, and the next entry must arm on the held
+    // view, not the poison.
     begin(true);
     headOffsetGateSetView(g_wantView);
     enterCamera();
-    headOffsetGateSetView(-1);
-    sceneFrame(2000);                     // most of the budget, first stint
-    check(true, "first stint, most of the budget spent, still held");
-    headOffsetGateKeyPressed();           // out
+    check(true, "in the camera on the wanted view, read alive");
+    headOffsetGateKeyPressed();           // leave the camera
+    sceneFrame(1);
+    check(false, "left the camera");
+    headOffsetGateSetView(0);             // a suspect reader says 0 out here
+    sceneFrame(50);                       // refused: the view cannot change here
+    headOffsetGateSetView(-1);            // the poisoned reader dies (6aw did)
     sceneFrame(50);
     panelFrame(200);
-    headOffsetGateKeyPressed();           // back in: fresh stint
+    headOffsetGateKeyPressed();           // re-enter
     panelFrame(2);
-    sceneFrame(2000);                     // would exceed 2700 cumulatively
-    check(true, "second stint refilled the budget; the two do not accumulate");
+    sceneFrame(12);
+    check(true, "an out-of-camera read naming another view was refused, and "
+                "the entry armed on the confirmed view instead of the poison");
+    // In the camera a live reader is believed again -- the player can
+    // genuinely cycle here -- so a disagreeing in-camera read syncs and the
+    // wrong view correctly drops the offset.
+    headOffsetGateSetView(0);
+    sceneFrame(2);
+    check(false, "the same read in the camera syncs, and the wrong view "
+                 "drops the offset as ever");
+    headOffsetGateSetView(g_wantView);
+    sceneFrame(2);
+    check(true, "and back on the wanted view it returns");
 
     // ------------------------------------------------------------------ exits
     //

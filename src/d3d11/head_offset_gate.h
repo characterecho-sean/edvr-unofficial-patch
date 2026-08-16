@@ -1,5 +1,5 @@
 // GENERATED from src/d3d11/head_offset_gate.h in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 a2c96a0e7eb18df0]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 472decba5d14a60e]
 // When to move the head pose: on foot, in the external camera, and nowhere
 // else.
 //
@@ -103,6 +103,17 @@ bool headOffsetGateWantsPanel();
 //
 // The caller resets its own counters; this does not touch them.
 void headOffsetGateFrame(uint32_t frameNo, uint32_t panelDraws, uint32_t eyeDraws);
+
+// Is the player in the external camera right now, whatever the view?
+//
+// Exported for camera_view's certification: the true preset can only change
+// while the player is IN the camera pressing the view key -- the game freezes
+// it everywhere else -- so a candidate record whose value moves outside the
+// camera has disqualified itself as the preset for that stretch (6aw: the
+// array contains a counter that rebuilds increment sequentially, and it
+// certified under every shape-based rule; context is the discriminator no
+// observed impostor satisfies).
+bool headOffsetGateInCamera();
 
 // Has the flat panel been composited steadily for a while?
 //

@@ -1,5 +1,5 @@
 // GENERATED from src/d3d11/head_offset_gate.cpp in the private edvr repo -- do not edit here.
-// Edit there, then: python tools/sync_common.py --write   [body-sha256 f88ca50baa20aa29]
+// Edit there, then: python tools/sync_common.py --write   [body-sha256 db30dfca7d593f33]
 #include "head_offset_gate.h"
 
 #include "../common/config.h"
@@ -8,18 +8,6 @@
 
 namespace edvr {
 namespace {
-
-// The view bridge's IN-CAMERA budget, per camera stint. 2700 frames is
-// thirty seconds at 90 Hz of time actually spent in the camera on an
-// unconfirmed view -- out-of-camera time is free, because the game freezes
-// the view while the camera is closed (proven across every leave-and-reland
-// of 2026-08-15), and each entry with a live bridge starts a fresh stint.
-// Thirty seconds bounds a stint in which a press nobody saw moved the view
-// and nothing re-certified; a player actually cycling certifies the record
-// in three sequential presses and ends the episode properly long before
-// this fires. Frames rather than seconds because the gate ticks once per
-// presented frame and owns no clock.
-constexpr uint32_t kBridgeFrames = 2700;
 
 // One instance, file-local. The gate is per-process by nature -- there is one
 // player in one mode -- and keeping it out of the render hooks' State is what
@@ -45,12 +33,15 @@ struct Gate {
     bool     gateViewSynced = false;
     bool     gateViewEverRead = false;   // something has supplied a real index
     bool     gateViewLostNoted = false;
-    // The view bridge: how long a read that has died may be covered by the
-    // counted view before the strict lost-view behaviour takes over, and the
-    // per-episode bookkeeping. See the long note at the loss decision.
+    // The view bridge: a read that has died is covered by the counted view
+    // for as long as it takes to come back. No expiry -- the player stays in
+    // Explorer Cam as long as they wish (stated as a product requirement,
+    // 2026-08-15), and the held value cannot go stale outside the camera
+    // because the game freezes it there. See the long note at the loss
+    // decision for the exposure this accepts.
     bool     gateBridgeOn = true;        // fix.head_offset_view_bridge
     bool     gateBridgeStarted = false;  // once per contiguous unreadable run
-    uint32_t gateBridgeLeft = 0;
+    bool     gateSyncRefusedNoted = false;
     bool     gateNoConsumerNoted = false;
     uint32_t gateIntentAge = 0;          // frames since the key was pressed
     uint32_t gateIntentGrace = 180;      // frames a press gets to take effect
@@ -212,6 +203,8 @@ void headOffsetGateViewBumped() {
 void headOffsetGateSetView(int view) { g.viewOverride = view; }
 
 bool headOffsetGateWantsPanel() { return g.gateWantsPanel; }
+
+bool headOffsetGateInCamera() { return g.gateInCamera; }
 
 bool headOffsetGatePanelSettled() { return g.panelSettled; }
 
@@ -407,15 +400,6 @@ void headOffsetGateFrame(uint32_t frameNo, uint32_t panelDraws, uint32_t eyeDraw
             sceneNow && g.gatePanelRun > 30) {
             g.gateInCamera = true;
             g.gateSinceEnter = 0;
-            // A LIVE bridge refills at each camera entry: the stint about to
-            // start gets its full in-camera budget, because each stint's
-            // exposure is bounded by that stint's own presses (see the note at
-            // the bridge decision). An EXPIRED bridge stays expired -- the
-            // fail-safe latched in-camera and only a successful read unlatches
-            // it.
-            if (g.gateBridgeStarted && g.gateBridgeLeft > 0) {
-                g.gateBridgeLeft = kBridgeFrames;
-            }
             Log::get().note(
                 "on-foot external camera: the flat panel stopped %u frame(s) ago "
                 "after %u settled frames, and %u draws are reaching the eye "
@@ -572,35 +556,31 @@ void headOffsetGateFrame(uint32_t frameNo, uint32_t panelDraws, uint32_t eyeDraw
         g.gateViewEverRead = true;
         g.gateViewLostNoted = false;
         g.gateBridgeStarted = false;   // any successful read ends the episode
-        g.gateBridgeLeft = 0;
     } else if (g.gateViewEverRead) {
         if (g.gateBridgeOn && !g.gateBridgeStarted) {
             g.gateBridgeStarted = true;
-            g.gateBridgeLeft = kBridgeFrames;
+            // NO EXPIRY, and that is a product decision, not an oversight: the
+            // player stays in Explorer Cam as long as they wish (2026-08-15),
+            // and the held value cannot go stale outside the camera because
+            // the game freezes the view there. The exposure that remains is a
+            // press nobody saw while IN the camera on a dead read -- the
+            // offset then follows the old view until any successful read, and
+            // cycling forward re-certifies in three witnessed presses. The
+            // wall-clock TTL tried first expired while the player was away
+            // and dead bridges greeted every relanding; the in-camera budget
+            // tried second contradicted indefinite camera stays.
             Log::get().note(
                 "camera view: the read died mid-camera (the game rebuilds its "
                 "records near a planet), so the last confirmed view %d is being "
-                "held for up to %u frames while it comes back. %s",
-                g.gateViewIndex, kBridgeFrames,
+                "held until it comes back. %s",
+                g.gateViewIndex,
                 g.gateHaveNextKey
                     ? "Your view-key presses still count during the hold."
                     : "No next-view key is bound, so cycling during the hold "
                       "cannot be seen -- if you switch presets before the read "
                       "returns, the offset follows the old one until it does.");
         }
-        if (g.gateBridgeLeft > 0) {
-            // THE CLOCK ONLY RUNS IN THE CAMERA. Outside it the game itself
-            // freezes the view -- "View index still 2" survived every
-            // leave-and-reland of the 2026-08-15 sessions -- so out-of-camera
-            // time cannot stale the held value and spends nothing. In-camera
-            // frames are what the budget counts, because unseen presses are
-            // the only exposure and they can only happen there. Measured
-            // failure this fixes: the read died, the old wall-clock TTL
-            // expired 30 s later, and the player entered the camera at +90 s
-            // -- already on the held view, the game agreeing -- to a dead
-            // bridge that could never arm.
-            if (g.gateInCamera) --g.gateBridgeLeft;
-        } else if (!g.gateViewLostNoted) {
+        if (!g.gateBridgeOn && !g.gateViewLostNoted) {
             g.gateViewLostNoted = true;
             Log::get().note("head offset OFF: the camera view can no longer be "
                             "read, so which preset you are on is unknown. It is "
@@ -609,18 +589,39 @@ void headOffsetGateFrame(uint32_t frameNo, uint32_t panelDraws, uint32_t eyeDraw
                             "does.");
         }
     }
+    // THE SYNC TRUSTS ONLY WHAT COULD BE TRUE. A read that differs from the
+    // held view while the player is OUT of the camera is impossible for the
+    // real preset -- the game freezes the view there -- so it is evidence
+    // about the SUPPLIER, not about the view (6aw: a counter in the array
+    // certified and supplied 3-then-0 while the player stood outside; the
+    // sync took both and the bridge faithfully held the poison). In-camera
+    // reads sync as always: the player can genuinely cycle there.
     if (gameView >= 0 && gameView != g.gateViewIndex) {
-        if (!g.gateViewSynced) {
-            g.gateViewSynced = true;
-            Log::get().note("camera view: the game says %d, the keypress count "
-                            "said %d. Using the game's from here, so a missed "
-                            "press no longer desyncs anything.",
-                            gameView, g.gateViewIndex);
+        if (g.gateInCamera || !g.gateViewEverRead) {
+            if (!g.gateViewSynced) {
+                g.gateViewSynced = true;
+                Log::get().note("camera view: the game says %d, the keypress count "
+                                "said %d. Using the game's from here, so a missed "
+                                "press no longer desyncs anything.",
+                                gameView, g.gateViewIndex);
+            }
+            g.gateViewIndex = gameView;
+        } else {
+            if (!g.gateSyncRefusedNoted) {
+                g.gateSyncRefusedNoted = true;
+                Log::get().note(
+                    "camera view: a read said %d while you were not in the camera, "
+                    "where the view cannot change -- keeping the confirmed %d and "
+                    "treating the reader as suspect. It will be believed again the "
+                    "next time it agrees, or the next time you are in the camera.",
+                    gameView, g.gateViewIndex);
+            }
         }
-        g.gateViewIndex = gameView;
+    } else if (gameView >= 0) {
+        g.gateSyncRefusedNoted = false;   // agreement: the reader is sane again
     }
     const bool bridging =
-        gameView < 0 && g.gateViewEverRead && g.gateBridgeLeft > 0;
+        gameView < 0 && g.gateViewEverRead && g.gateBridgeOn;
     const bool viewLost = g.gateViewEverRead && gameView < 0 && !bridging;
     const bool viewOk = !viewLost &&
         (g.gateWantView < 0 || g.gateViewIndex == g.gateWantView);
