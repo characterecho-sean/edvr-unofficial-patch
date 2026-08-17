@@ -438,13 +438,24 @@ void dumpPoseRing(State* s, const char* trigger, uint32_t framesAfterPress) {
 //
 // Nothing is submitted, copied or changed here. It reads a size and writes it
 // into EDVR's own channel.
-void noteEyeTextureSize(State* s, const vr::Texture_t* texture,
+void noteEyeTextureSize(State* s, vr::EVREye eye, const vr::Texture_t* texture,
                         const vr::VRTextureBounds_t* bounds) {
     if (!s->validated) return;
     if (!texture || texture->eType != vr::TextureType_DirectX || !texture->handle) {
         return;
     }
+    // ONE EYE ONLY. The two eyes carry different bounds -- that is how a
+    // double-wide texture names them -- so sampling whichever Submit happens
+    // to land on the cadence alternates between two answers, and every
+    // alternation looks like the render resolution moving. Left is arbitrary
+    // and consistent, which is all this needs.
+    if (eye != vr::Eye_Left) return;
     if (s->eyeSizeCountdown) { --s->eyeSizeCountdown; return; }
+    // Re-armed HERE, before any of the early returns below. Setting it after
+    // them meant the steady state -- size unchanged, the common case -- left
+    // it at zero, so every Submit from then on paid a guarded GetDesc: 180 a
+    // second, for a value the countdown exists to sample every three.
+    s->eyeSizeCountdown = 600;
 
     D3D11_TEXTURE2D_DESC desc = {};
     bool ok = false;
@@ -471,10 +482,17 @@ void noteEyeTextureSize(State* s, const vr::Texture_t* texture,
     // eye. A span that is not a sane fraction is treated the same way rather
     // than trusted: this is somebody else's struct and the cost of believing
     // a bad one is publishing a size nothing can match.
+    //
+    // Absolute value, because OpenVR permits the bounds to run backwards:
+    // vMin=1, vMax=0 is the ordinary way to say the texture's origin is
+    // flipped, and it is common. A signed span fails the sanity test below,
+    // leaves the multiplier at 1.0, and publishes the whole double-wide
+    // width -- which matches nothing, kills all four fixes, and looks
+    // exactly like the bug this function was written to end.
     float uSpan = 1.0f, vSpan = 1.0f;
     if (bounds) {
-        const float u = bounds->uMax - bounds->uMin;
-        const float v = bounds->vMax - bounds->vMin;
+        const float u = fabsf(bounds->uMax - bounds->uMin);
+        const float v = fabsf(bounds->vMax - bounds->vMin);
         if (u > 0.01f && u <= 1.0f) uSpan = u;
         if (v > 0.01f && v <= 1.0f) vSpan = v;
     }
@@ -493,7 +511,6 @@ void noteEyeTextureSize(State* s, const vr::Texture_t* texture,
     announceEyeTextureSize(eyeW, eyeH);
     s->eyeSizeW = eyeW;
     s->eyeSizeH = eyeH;
-    s->eyeSizeCountdown = 600;
     // Both halves want this in their own log: this one is where it was read,
     // and the d3d11 log is where the consequences are. Whichever log a report
     // arrives with, the size is in it.
@@ -557,7 +574,7 @@ vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
     // Before any decision about this frame, and unconditional on all of them:
     // it is an observation about the texture's shape, and the half that needs
     // it is starved without it whether or not this frame is withheld.
-    noteEyeTextureSize(s, texture, bounds);
+    noteEyeTextureSize(s, eye, texture, bounds);
 
     // The frame the d3d11 side marked as drawn from the wrong viewpoint: do not
     // pass it on. SteamVR reprojects the previous frame, exactly as it does for

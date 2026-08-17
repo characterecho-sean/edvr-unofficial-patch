@@ -286,13 +286,12 @@ void noteUncountedTarget(State* s, uint32_t w, uint32_t h) {
 // (frame_flag.h); this side matches against it. Nothing else in the answer is
 // inferred when that value is present.
 //
-// The 2048x2048 threshold stays as the fallback for a session with no openvr
-// proxy installed, and stays ALONGSIDE the published size rather than being
-// replaced by it, so this function can never count fewer targets than the build
-// before it did. The scene is drawn into intermediate targets whose sizes are
-// the game's business and not the headset's, and quietly narrowing to an exact
-// match would have been a second silent regression of the same shape as the one
-// this fixes.
+// The 2048x2048 threshold is the FALLBACK ONLY, for a session where no openvr
+// proxy is installed to answer. Where the headset has named a size, that size
+// is the whole test and the threshold is not consulted -- keeping it alongside
+// was tried and measured harmful: it counted 28 atlas draws a frame on a Quest
+// 3 while the real eye textures went uncounted, which is a false positive in
+// the same feature the false negative was breaking.
 //
 // Resolved through binding_shadow, which owns the guard and the budget. A view
 // that can no longer be resolved answers "no" -- see the note there about why
@@ -304,38 +303,52 @@ bool targetIsEyeSized(void* rtv) {
     ResourceInfo info;
     if (!bindingResolve(rtv, &info) || !info.isTexture2D) return false;
 
-    // THE PANEL IS 16:9 AND AN EYE NEVER IS. Checked first, and by shape
-    // rather than by size, because size cannot separate them at all when the
-    // player has set the panel to the same size as their eye textures.
+    // ORDER MATTERS, and getting it wrong is a regression rather than a miss.
     //
-    // Elite's flat on-foot panel is 16:9 at every size it can be set to --
-    // the ini refuses anything else, and the stock 1920x1080 is 16:9 too. A
-    // per-eye render target is not: it is roughly square or taller than wide
-    // on every headset measured (Quest 3 1456x1560, Index 1440x1600, Beyond
-    // 2560x2560). So the aspect is a property of what the target IS, and it
-    // stays true whatever either side is resized to -- which the old
-    // exclusion, an equality test against the panel size, could not.
+    // What the headset was actually handed is a FACT; everything below it is
+    // a heuristic. The first version of this checked the 16:9 shape rule
+    // first, and that inverts the two: a Pimax 8KX renders 3840x2160 an eye
+    // and the 5K series 2560x1440, both exactly 16:9, so the shape veto threw
+    // away the runtime's own answer and left those headsets with zero eye
+    // draws and all four fixes dead -- worse than the guess it replaced,
+    // which at least counted them for clearing 2048. The fact goes first.
     //
-    // Exact integer ratio rather than a float tolerance: every size the panel
-    // can take is exactly 16:9, so anything approximate would only widen this
-    // into targets it was not meant to catch.
-    if (isPanelShaped(info.a, info.b)) {
-        // Say so if it is ALSO what the headset is being given. That is a
-        // 16:9 headset (a Pimax 8KX renders 3840x2160 an eye), where this
-        // rule has the sign backwards and the log should show it rather than
-        // the player discovering it as silence.
-        if (s->eyeW && info.a == s->eyeW && info.b == s->eyeH &&
+    // A tolerance of two pixels, not equality. The published size is a float
+    // fraction of a texture width rounded to an integer, so bounds that are
+    // not exactly one half (an inset, a guard band) land a pixel out and an
+    // equality test would then match nothing at all -- silently, which is the
+    // failure this whole change exists to end.
+    const auto near2 = [](uint32_t a, uint32_t b) {
+        return (a > b ? a - b : b - a) <= 2u;
+    };
+    if (s->eyeW && near2(info.a, s->eyeW) && near2(info.b, s->eyeH)) {
+        // ...unless it is ALSO exactly the panel, which is the one genuinely
+        // ambiguous case: two textures of one size cannot be told apart by
+        // size. Counted rather than excluded, because excluding costs four
+        // fixes at once and counting costs only the panel-distance fix
+        // matching a draw into the panel. Reported once, either way.
+        if (s->panelW && info.a == s->panelW && info.b == s->panelH &&
             !s->sixteenNineEyeNoted) {
             s->sixteenNineEyeNoted = true;
             Log::get().note(
-                "vScreen: your eye textures are %ux%u, which is 16:9 -- the same "
-                "shape as the on-foot panel. This recogniser treats 16:9 targets "
-                "as the panel, so it will not count them as eye draws and the "
-                "fixes that need that count will stay off. Please report this "
-                "line with your headset model; it is the one case the shape rule "
-                "gets wrong.",
+                "vScreen: your eye textures and the on-foot panel are BOTH %ux%u, "
+                "so nothing here can tell one from the other by size. They are "
+                "being counted as eye textures, which keeps the black void, the "
+                "transition flash fix and Explorer Cam fed; the panel distance fix "
+                "may match a draw into the panel and place it wrongly. Set "
+                "fix.vscreen_res_width/height to a size your eye textures are not "
+                "if the panel sits at the wrong distance.",
                 info.a, info.b);
         }
+        return true;
+    }
+
+    // The panel, by SHAPE. 16:9 is what Elite's flat panel is at every size
+    // it can be set to, and a per-eye target is square-ish on every headset
+    // measured here (Quest 3 1456x1560, Pimax 4184x4132, Index 1440x1600,
+    // Beyond 2560x2560). Reached only when the published size did not claim
+    // this target, so a 16:9 headset is no longer caught by it.
+    if (isPanelShaped(info.a, info.b)) {
         ++s->panelExclusions;
         noteUncountedTarget(s, info.a, info.b);
         return false;
@@ -343,29 +356,26 @@ bool targetIsEyeSized(void* rtv) {
 
     bool out;
     if (s->eyeW) {
-        // The headset told us. Match it exactly, and do NOT also keep the old
-        // threshold as an alternative: with the real size in hand, "2048 or
-        // larger" only adds false positives, and it added them measurably --
-        // a session on a Quest 3 counted 28 draws a frame that were shadow
-        // and atlas targets clearing 2048, while the actual 1456x1560 eye
-        // textures were never counted once and the black void stayed grey.
-        //
-        // Exact rather than at-least, for the same reason: at-least means
-        // every 4096x4096 atlas outranks a 1456-wide eye texture. If a build
-        // ever renders larger and downsamples on the way out this will read
-        // as "no eye textures", and the starvation line names every size it
-        // saw -- so that failure arrives as a report with the answer in it
-        // rather than as silence.
-        out = info.a == s->eyeW && info.b == s->eyeH;
+        // The headset named a size and this is not it. With the real answer
+        // in hand the old threshold is not a second opinion worth having: it
+        // counted 28 draws a frame of atlas targets on a Quest 3 while the
+        // actual 1456x1560 eye textures went uncounted and the void stayed
+        // grey.
+        out = false;
     } else {
         // Nobody published: openvr_api.dll is not installed, or its hook has
-        // not validated yet. Fall back to the old guess, which is the only
-        // thing this side can do alone, and which is what every build before
-        // the channel existed did. This is why the threshold is kept at all.
+        // not validated yet. Fall back to the old guess, which is all this
+        // side can do alone -- and keep the panel-size exclusion with it,
+        // because the shape rule does NOT cover a panel the player set to a
+        // non-16:9 size. vscreen_res warns about those and applies them
+        // anyway (see vscreen_res.cpp), so 3840x2400 is a configuration a
+        // user can really be in, and without this it would be counted as an
+        // eye texture on every scene draw into it.
         out = info.a >= 2048 && info.b >= 2048;
-        // The panel used to be excluded here by an equality test. The shape
-        // rule above now does that job for every size, so the only thing left
-        // for this branch is the guess itself.
+        if (out && s->panelW && info.a == s->panelW && info.b == s->panelH) {
+            out = false;
+            ++s->panelExclusions;
+        }
     }
 
     if (!out) noteUncountedTarget(s, info.a, info.b);
@@ -961,11 +971,10 @@ void vScreenFrameBoundary() {
             if (!s->eyeSizeNoted) {
                 s->eyeSizeNoted = true;
                 Log::get().note(
-                    "vScreen: openvr_api.dll says the headset is being given %ux%u, so "
-                    "that is now what an eye texture IS here rather than a guess from "
-                    "size. Targets of 2048x2048 or larger still count as well, because "
-                    "the scene passes through intermediate targets of the game's own "
-                    "choosing.",
+                    "vScreen: openvr_api.dll says one eye is %ux%u, so that is now what "
+                    "an eye texture IS here -- matched to within two pixels, and the "
+                    "old 2048x2048 guess is no longer used at all. It stays only for "
+                    "sessions where openvr_api.dll is not installed to answer.",
                     w, h);
             }
             // The collision that made four fixes inert at once, said outright
