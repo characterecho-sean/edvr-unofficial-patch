@@ -138,6 +138,37 @@ void requestSubmitHold(uint32_t frames);
 // One frame of that hold, consumed by the reader. True while the hold is live.
 bool takeSubmitHoldFrame();
 
+// The size of the texture the game hands the headset, as openvr_api.dll read it
+// off the Submit argument.
+//
+// WHY THIS IS A CHANNEL AND NOT A CONSTANT. The d3d11 half has to decide, per
+// render target, whether it is one of the eyes -- everything downstream of that
+// answer (the black void, the panel distance, the transition-flash detector's
+// "is a scene being drawn", and the head-offset gate) is fed by it. It cannot
+// see a Submit, so it guessed by size: 2048x2048 or larger. A guess is what the
+// openvr half never has to make, because the texture is handed to it by name.
+//
+// Two failures came of the guess, and both are silent by construction -- a
+// target that is not recognised produces no line, because nothing happened.
+// A headset whose eye textures are under 2048 on an axis is never recognised at
+// all. And a panel raised to a size that is ALSO 2048-or-larger has to be told
+// apart from the eyes, which was done by size too -- so a vscreen_res that
+// happens to equal the eye textures excluded the eyes along with the panel.
+//
+// Published as one packed value rather than two fields on purpose: a reader
+// that catches a half-written pair gets a width from this session and a height
+// from the last one, and the eye test is an equality test. Width and height are
+// each under 65536 for any headset that exists, so both fit in one LONG and the
+// exchange is atomic.
+void announceEyeTextureSize(uint32_t width, uint32_t height);
+
+// The eye-texture size, or false when nobody has published one -- openvr_api.dll
+// is not installed, its hook has not validated yet, or the game submits
+// something that is not a D3D11 texture. False means "no answer", never "no":
+// callers must fall back to what they did before this existed rather than treat
+// it as evidence about any particular target.
+bool eyeTextureSize(uint32_t* width, uint32_t* height);
+
 // ONE VERDICT PER FRAME, over a channel that carries no frame identity.
 //
 // The mark above is read once per eye, at each Submit, and it legitimately

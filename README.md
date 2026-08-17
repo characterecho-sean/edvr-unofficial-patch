@@ -292,6 +292,34 @@ object.
 </details>
 
 <details>
+<summary>If everything except the exposure fix stopped working</summary>
+
+Look in `edvr_gfx_*.log` for the periodic `vScreen totals:` line. If
+**`largest eye-draw count`** is `0` and stays `0` while you are actually
+flying or on foot, that one number is the whole fault: the black void, the
+panel distance, the transition flash fix and Explorer Cam all read it, and a
+zero switches all four off at once. The exposure fix does not read it, which
+is why it keeps working and makes the rest look individually broken.
+
+EDVR decides which render targets are your eye textures. Before 0.7.3 it
+guessed by size — 2048×2048 or larger, minus anything exactly the size of the
+on-foot panel. Two things defeated that guess, both silently:
+
+- **A panel raised to exactly your eye-texture size.** The panel exclusion
+  then removed the eyes along with the panel. This is the one to suspect if
+  you set `vscreen_res_width`/`_height` to `3840`/`2160`.
+- **Eye textures under 2048 on an axis**, which never qualified at all.
+
+From 0.7.3, `openvr_api.dll` reads the size of the texture the game actually
+submits and tells the graphics side, so it matches your real eye textures
+instead of guessing, and says so in both logs. If the count is still stuck at
+0, EDVR now prints a line naming every target size it did see — please attach
+it to an issue. As an immediate workaround on any version, set
+`vscreen_res_width`/`_height` to `2880`/`1620` (short enough that nothing
+collides) or back to `1920`/`1080`.
+</details>
+
+<details>
 <summary>Why an earlier version of this crashed with EDHM, if you hit that</summary>
 
 The first attempt loaded the other mod during `DllMain`, where Windows holds the

@@ -958,11 +958,30 @@ void headOffsetGateFrame(uint32_t frameNo, uint32_t panelDraws, uint32_t eyeDraw
         ++g.gateIntentAge;
         if (g.gateIntentAge > g.gateIntentGrace) {
             g.gateIntent = false;
+            // WHICH KIND of failure, on the line that reports it.
+            //
+            // The rejection line that names the four numbers is itself behind
+            // `sceneNow && panelRun > 30`, so in the one failure where the gate
+            // is fed nothing at all -- no eye draws, no panel composites, the
+            // vScreen recogniser matching nothing -- it cannot print, and this
+            // line was the only trace left. It read as "your press did not
+            // count", which sent a player looking at their bindings while the
+            // cause was three modules away. A gate that has never seen a single
+            // panel draw is not judging presses; it is starved, and the vScreen
+            // totals in this same log say so.
+            const bool everSawPanel = g.gatePanelSeenNoted;
             Log::get().note("external camera intent expired: %u frames since the "
                             "key with the gate never arming, so that press was "
                             "not an entry into the camera. Cleared, so the next "
-                            "press is a fresh one rather than a toggle back.",
-                            g.gateIntentAge);
+                            "press is a fresh one rather than a toggle back.%s",
+                            g.gateIntentAge,
+                            everSawPanel
+                                ? ""
+                                : " The gate has not seen the flat panel drawn ONCE this "
+                                  "session, so it is not judging your presses -- it has "
+                                  "no input. Read the vScreen totals line above: an "
+                                  "eye-draw count stuck at 0 means the recogniser is "
+                                  "matching nothing, and this is downstream of that.");
             g.gateIntentAge = 0;
         }
     }

@@ -58,6 +58,18 @@ struct Shared {
     // design -- one detection must not suppress the frames after it -- and this
     // is the opposite: a deliberate run, counted down by the reader.
     volatile LONG holdFrames;
+    // eyeSize  the width and height of the texture submitted to the headset,
+    //          packed as (width << 16) | height, written by openvr_api.dll
+    //
+    // The direction of every other field in here is d3d11 -> openvr. This one
+    // runs the other way, and for the mirror-image reason: the openvr half is
+    // handed the eye texture and the d3d11 half was reduced to guessing which
+    // of the render targets it sees is one. See the header.
+    //
+    // Packed into one field so a reader cannot catch half of a pair. Zero means
+    // nobody has published, which is a state the reader must handle: the openvr
+    // proxy is optional and this is written only after its hook validates.
+    volatile LONG eyeSize;
 };
 
 // Per PROCESS, not per logon session.
@@ -74,22 +86,27 @@ struct Shared {
 // The name is built once, at first use. The two DLLs are in the same process,
 // so the channel between them is unaffected.
 //
-// _v5 because the struct changed again -- holdFrames was added. _v4 was
-// externalCamStamp, _v3 the field before that. A mismatched pair from different
-// builds must not agree on a layout they disagree about, and a d3d11.dll writing
-// a fifth field into a four-field mapping made by an older openvr_api.dll would
-// write past the end of it.
+// _v6 because the struct changed again -- eyeSize was added. _v5 was
+// holdFrames, _v4 externalCamStamp, _v3 the field before that. A mismatched pair
+// from different builds must not agree on a layout they disagree about, and a
+// d3d11.dll writing a sixth field into a five-field mapping made by an older
+// openvr_api.dll would write past the end of it.
 //
-// The version bump matters more for this field than for the last one. An old
-// openvr_api.dll paired with a new d3d11.dll would find no stamp at all, read
-// zeros, and conclude the gate is dead -- which fails safe -- but the reverse
-// pairing would have a new reader trusting a stamp nobody writes. Separate
-// mappings make both pairings inert instead of subtly wrong.
+// The version bump matters more for these later fields than for the early ones.
+// An old openvr_api.dll paired with a new d3d11.dll would find no stamp at all,
+// read zeros, and conclude the gate is dead -- which fails safe -- but the
+// reverse pairing would have a new reader trusting a stamp nobody writes.
+// Separate mappings make both pairings inert instead of subtly wrong.
+//
+// eyeSize is built to survive that pairing on its own as well: an unmatched
+// reader sees 0, which every caller is required to read as "no answer" and fall
+// back on. Mismatched halves therefore behave exactly like a session with no
+// openvr proxy installed, which is a supported configuration and not a fault.
 const wchar_t* mappingName() {
     static wchar_t name[64];
     static bool built = false;
     if (!built) {
-        _snwprintf_s(name, _TRUNCATE, L"Local\\edvr_glitch_frame_v5_%lu",
+        _snwprintf_s(name, _TRUNCATE, L"Local\\edvr_glitch_frame_v6_%lu",
                      GetCurrentProcessId());
         built = true;
     }
@@ -173,6 +190,29 @@ void requestSubmitHold(uint32_t frames) {
     // the player is concerned, and adding would let a rapid double-press hold
     // for twice as long as either press asked for.
     InterlockedExchange(&s->holdFrames, static_cast<LONG>(frames));
+}
+
+void announceEyeTextureSize(uint32_t width, uint32_t height) {
+    Shared* s = map();
+    if (!s) return;
+    // Refused rather than truncated. A size that does not fit the packing is a
+    // size this was not written for, and half of it is worse than none of it:
+    // the reader compares for equality, so a truncated width would answer "not
+    // an eye texture" for every target including the real ones.
+    if (!width || !height || width > 0xFFFFu || height > 0xFFFFu) return;
+    InterlockedExchange(&s->eyeSize,
+                        static_cast<LONG>((width << 16) | height));
+}
+
+bool eyeTextureSize(uint32_t* width, uint32_t* height) {
+    Shared* s = map();
+    if (!s) return false;
+    const LONG packed = InterlockedCompareExchange(&s->eyeSize, 0, 0);
+    if (!packed) return false;
+    const uint32_t v = static_cast<uint32_t>(packed);
+    if (width) *width = v >> 16;
+    if (height) *height = v & 0xFFFFu;
+    return true;
 }
 
 bool takeSubmitHoldFrame() {

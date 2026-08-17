@@ -2,6 +2,7 @@
 #include "head_offset.h"
 
 #include <windows.h>
+#include <d3d11.h>   // GetDesc on the submitted texture, for its size only
 
 #include <cmath>
 #include <cstring>
@@ -126,6 +127,19 @@ struct State {
     // reasoning as the pair latch's reset.
     bool     holdThisFrame = false;
     bool     threadNoted = false;
+
+    // What has been published to the d3d11 half about the eye textures, and how
+    // many submits until the next look.
+    //
+    // Re-read on a cadence rather than once, because the size is not a property
+    // of the session: Elite recreates its eye textures when SteamVR's render
+    // resolution changes under it, and a value published once would then name a
+    // texture that no longer exists -- which is worse than never publishing,
+    // since the reader is being asked to match against it. Every 600 submits is
+    // roughly every three seconds at 90Hz (two submits a frame) and costs one
+    // GetDesc.
+    uint32_t eyeSizeCountdown = 0;
+    uint32_t eyeSizeW = 0, eyeSizeH = 0;
     uint32_t holdFramesSeen = 0;
 
     // THE POSE RING. Forensics, and only forensics.
@@ -414,6 +428,50 @@ void dumpPoseRing(State* s, const char* trigger, uint32_t framesAfterPress) {
     Log::get().note("--- end headset pose history ---");
 }
 
+// Tell the d3d11 half how big the headset's eye textures are.
+//
+// This side is handed the texture; the other side was left guessing at it from
+// dimensions alone, and paid for the guess twice (see frame_flag.h). One
+// GetDesc every few seconds, through the guard, on a handle that belongs to the
+// game -- a stale one costs a fault entry and a session without the answer,
+// which is exactly the state every build before this one was in.
+//
+// Nothing is submitted, copied or changed here. It reads a size and writes it
+// into EDVR's own channel.
+void noteEyeTextureSize(State* s, const vr::Texture_t* texture) {
+    if (!s->validated) return;
+    if (!texture || texture->eType != vr::TextureType_DirectX || !texture->handle) {
+        return;
+    }
+    if (s->eyeSizeCountdown) { --s->eyeSizeCountdown; return; }
+    s->eyeSizeCountdown = 600;
+
+    D3D11_TEXTURE2D_DESC desc = {};
+    bool ok = false;
+    guarded("vr: eye texture desc", [&] {
+        static_cast<ID3D11Texture2D*>(texture->handle)->GetDesc(&desc);
+        ok = true;
+    });
+    if (!ok || !desc.Width || !desc.Height) return;
+    if (desc.Width == s->eyeSizeW && desc.Height == s->eyeSizeH) return;
+
+    const bool first = (s->eyeSizeW == 0);
+    s->eyeSizeW = desc.Width;
+    s->eyeSizeH = desc.Height;
+    announceEyeTextureSize(desc.Width, desc.Height);
+    // Both halves want this in their own log: this one is where it was read,
+    // and the d3d11 log is where the consequences are. Whichever log a report
+    // arrives with, the size is in it.
+    Log::get().note(
+        "compositor: the game submits %ux%u to the headset%s. Told the d3d11 "
+        "half, which uses it to tell your eye textures from everything else it "
+        "sees. If Elite submits ONE texture for both eyes this is that texture, "
+        "which is the size the graphics side sees as well.",
+        desc.Width, desc.Height,
+        first ? "" : " -- this CHANGED, so the render resolution moved under the "
+                     "game");
+}
+
 vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
                                     const vr::Texture_t* texture,
                                     const vr::VRTextureBounds_t* bounds,
@@ -455,6 +513,11 @@ vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
                             s->submitCalls);
         }
     }
+
+    // Before any decision about this frame, and unconditional on all of them:
+    // it is an observation about the texture's shape, and the half that needs
+    // it is starved without it whether or not this frame is withheld.
+    noteEyeTextureSize(s, texture);
 
     // The frame the d3d11 side marked as drawn from the wrong viewpoint: do not
     // pass it on. SteamVR reprojects the previous frame, exactly as it does for
