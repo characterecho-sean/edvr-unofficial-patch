@@ -7,9 +7,11 @@
 #include <d3d11.h>
 
 #include <cmath>
+#include <cstdio>   // _snprintf_s, for the sizes list in the starvation line
 #include <cstring>
 
 #include "../common/config.h"
+#include "../common/frame_flag.h"  // the eye-texture size, from the openvr half
 #include "../common/guard.h"
 #include "../common/log.h"
 #include "../common/vtable_hook.h"
@@ -212,6 +214,23 @@ struct State {
     // The size the panel has been raised to, or 0 when it has not been. Used to
     // keep the panel out of the eye-draw count -- see targetIsEyeSized.
     uint32_t panelW = 0, panelH = 0;
+
+    // What openvr_api.dll says the headset is actually being given, or 0 when
+    // nobody has said. Refreshed once a frame -- one interlocked read -- rather
+    // than at install, because the openvr half publishes only after its Submit
+    // hook validates, which is several seconds after this module installs.
+    uint32_t eyeW = 0, eyeH = 0;
+    bool     eyeSizeNoted = false;
+    bool     collisionNoted = false;
+    bool     sixteenNineEyeNoted = false;
+
+    // Render targets that were looked at and NOT counted, and how many times
+    // the panel exclusion was the reason. Diagnosis only: a recogniser that
+    // never says yes is otherwise indistinguishable from a game that never drew.
+    uint32_t rtSeenW[8] = {}, rtSeenH[8] = {};
+    uint32_t rtSeenCount = 0;
+    uint64_t panelExclusions = 0;
+    bool     starvationNoted = false;
 };
 
 State* g_state = nullptr;
@@ -232,10 +251,47 @@ State* g_state = nullptr;
 FaultBudget g_panelCbBudget("vScreen.panelBuffer", 5);  // reading the panel's transform
 FaultBudget g_cameraBudget("vScreen.cameraRead", 5);    // reading the scene camera
 
+// Is this target the shape of the on-foot panel rather than of an eye?
+//
+// 16:9 exactly. Elite's panel is 16:9 at every resolution the ini allows and
+// at its stock 1920x1080; per-eye render targets are square-ish or taller
+// than wide on every headset measured. Integer cross-multiply so there is no
+// float tolerance to widen it.
+bool isPanelShaped(uint32_t w, uint32_t h) {
+    return h != 0 && w * 9u == h * 16u;
+}
+
+// Remember a target that was NOT counted, so the log can say what was seen.
+//
+// A recogniser that answers "no" to everything produces no lines at all, which
+// is how a session where NOTHING was recognised reads exactly like a session
+// where nothing needed to be. Eight distinct sizes, once each, and only ones
+// big enough to be an eye texture on any headset -- the UI and shadow maps are
+// not what a reader is trying to identify.
+void noteUncountedTarget(State* s, uint32_t w, uint32_t h) {
+    if (w < 1024 && h < 1024) return;
+    for (uint32_t i = 0; i < s->rtSeenCount; ++i) {
+        if (s->rtSeenW[i] == w && s->rtSeenH[i] == h) return;
+    }
+    if (s->rtSeenCount >= 8) return;
+    s->rtSeenW[s->rtSeenCount] = w;
+    s->rtSeenH[s->rtSeenCount] = h;
+    ++s->rtSeenCount;
+}
+
 // Is this render target one of the two textures sent to the headset?
 //
-// By size. The graphics layer never sees what is submitted to the headset, and
-// nothing else in an Elite frame is drawn into at 2048x2048 or larger.
+// PREFERABLY BY THE SIZE THE HEADSET WAS ACTUALLY GIVEN. openvr_api.dll is
+// handed the texture at Submit and publishes its size over the shared channel
+// (frame_flag.h); this side matches against it. Nothing else in the answer is
+// inferred when that value is present.
+//
+// The 2048x2048 threshold is the FALLBACK ONLY, for a session where no openvr
+// proxy is installed to answer. Where the headset has named a size, that size
+// is the whole test and the threshold is not consulted -- keeping it alongside
+// was tried and measured harmful: it counted 28 atlas draws a frame on a Quest
+// 3 while the real eye textures went uncounted, which is a false positive in
+// the same feature the false negative was breaking.
 //
 // Resolved through binding_shadow, which owns the guard and the budget. A view
 // that can no longer be resolved answers "no" -- see the note there about why
@@ -247,20 +303,82 @@ bool targetIsEyeSized(void* rtv) {
     ResourceInfo info;
     if (!bindingResolve(rtv, &info) || !info.isTexture2D) return false;
 
-    bool out = info.a >= 2048 && info.b >= 2048;
-    // ...except the on-foot panel itself, once it has been raised.
+    // ORDER MATTERS, and getting it wrong is a regression rather than a miss.
     //
-    // The comment above says nothing else in an Elite frame is drawn into at
-    // 2048x2048 or larger. That was true when it was written, and the resolution
-    // fix made it false: at 3840x2160 the panel clears the threshold on both
-    // axes, so every scene draw into it is counted as an eye draw. The count
-    // goes from 3 to hundreds, the composite is never recognised, and the panel
-    // distance fix silently stops working -- at 4K but not at 2880x1620, whose
-    // height is still under 2048.
+    // What the headset was actually handed is a FACT; everything below it is
+    // a heuristic. The first version of this checked the 16:9 shape rule
+    // first, and that inverts the two: a Pimax 8KX renders 3840x2160 an eye
+    // and the 5K series 2560x1440, both exactly 16:9, so the shape veto threw
+    // away the runtime's own answer and left those headsets with zero eye
+    // draws and all four fixes dead -- worse than the guess it replaced,
+    // which at least counted them for clearing 2048. The fact goes first.
     //
-    // Excluded by value rather than by raising the threshold, which would only
-    // defer the same collision to the next size someone picks.
-    if (out && s->panelW && info.a == s->panelW && info.b == s->panelH) out = false;
+    // A tolerance of two pixels, not equality. The published size is a float
+    // fraction of a texture width rounded to an integer, so bounds that are
+    // not exactly one half (an inset, a guard band) land a pixel out and an
+    // equality test would then match nothing at all -- silently, which is the
+    // failure this whole change exists to end.
+    const auto near2 = [](uint32_t a, uint32_t b) {
+        return (a > b ? a - b : b - a) <= 2u;
+    };
+    if (s->eyeW && near2(info.a, s->eyeW) && near2(info.b, s->eyeH)) {
+        // ...unless it is ALSO exactly the panel, which is the one genuinely
+        // ambiguous case: two textures of one size cannot be told apart by
+        // size. Counted rather than excluded, because excluding costs four
+        // fixes at once and counting costs only the panel-distance fix
+        // matching a draw into the panel. Reported once, either way.
+        if (s->panelW && info.a == s->panelW && info.b == s->panelH &&
+            !s->sixteenNineEyeNoted) {
+            s->sixteenNineEyeNoted = true;
+            Log::get().note(
+                "vScreen: your eye textures and the on-foot panel are BOTH %ux%u, "
+                "so nothing here can tell one from the other by size. They are "
+                "being counted as eye textures, which keeps the black void, the "
+                "transition flash fix and Explorer Cam fed; the panel distance fix "
+                "may match a draw into the panel and place it wrongly. Set "
+                "fix.vscreen_res_width/height to a size your eye textures are not "
+                "if the panel sits at the wrong distance.",
+                info.a, info.b);
+        }
+        return true;
+    }
+
+    // The panel, by SHAPE. 16:9 is what Elite's flat panel is at every size
+    // it can be set to, and a per-eye target is square-ish on every headset
+    // measured here (Quest 3 1456x1560, Pimax 4184x4132, Index 1440x1600,
+    // Beyond 2560x2560). Reached only when the published size did not claim
+    // this target, so a 16:9 headset is no longer caught by it.
+    if (isPanelShaped(info.a, info.b)) {
+        ++s->panelExclusions;
+        noteUncountedTarget(s, info.a, info.b);
+        return false;
+    }
+
+    bool out;
+    if (s->eyeW) {
+        // The headset named a size and this is not it. With the real answer
+        // in hand the old threshold is not a second opinion worth having: it
+        // counted 28 draws a frame of atlas targets on a Quest 3 while the
+        // actual 1456x1560 eye textures went uncounted and the void stayed
+        // grey.
+        out = false;
+    } else {
+        // Nobody published: openvr_api.dll is not installed, or its hook has
+        // not validated yet. Fall back to the old guess, which is all this
+        // side can do alone -- and keep the panel-size exclusion with it,
+        // because the shape rule does NOT cover a panel the player set to a
+        // non-16:9 size. vscreen_res warns about those and applies them
+        // anyway (see vscreen_res.cpp), so 3840x2400 is a configuration a
+        // user can really be in, and without this it would be counted as an
+        // eye texture on every scene draw into it.
+        out = info.a >= 2048 && info.b >= 2048;
+        if (out && s->panelW && info.a == s->panelW && info.b == s->panelH) {
+            out = false;
+            ++s->panelExclusions;
+        }
+    }
+
+    if (!out) noteUncountedTarget(s, info.a, info.b);
     return out;
 }
 
@@ -842,6 +960,82 @@ void vScreenFrameBoundary() {
     }
 
     if (s->eyeDrawsThisFrame > s->eyeDrawsMax) s->eyeDrawsMax = s->eyeDrawsThisFrame;
+
+    // What the headset is actually being given, if the other half is installed
+    // and has validated. One interlocked read a frame.
+    {
+        uint32_t w = 0, h = 0;
+        if (eyeTextureSize(&w, &h) && (w != s->eyeW || h != s->eyeH)) {
+            s->eyeW = w;
+            s->eyeH = h;
+            if (!s->eyeSizeNoted) {
+                s->eyeSizeNoted = true;
+                Log::get().note(
+                    "vScreen: openvr_api.dll says one eye is %ux%u, so that is now what "
+                    "an eye texture IS here -- matched to within two pixels, and the "
+                    "old 2048x2048 guess is no longer used at all. It stays only for "
+                    "sessions where openvr_api.dll is not installed to answer.",
+                    w, h);
+            }
+            // The collision that made four fixes inert at once, said outright
+            // the moment it can be known -- it needs both sizes, and the panel
+            // size is settled at install while this one arrives seconds later.
+            if (!s->collisionNoted && s->panelW == w && s->panelH == h) {
+                s->collisionNoted = true;
+                Log::get().note(
+                    "vScreen: the panel resolution you asked for (%ux%u) is EXACTLY the "
+                    "size of your eye textures, so nothing here can tell one from the "
+                    "other by size. The panel is no longer being excluded from the "
+                    "eye-draw count, which is what keeps the black void, the transition "
+                    "flash fix and Explorer Cam fed -- but the panel distance fix can now "
+                    "match a draw INTO the panel and put it at the wrong distance. If the "
+                    "panel sits wrong, set fix.vscreen_res_width/height to a size your "
+                    "eye textures are not: 2880x1620 is a safe pick at any headset "
+                    "resolution, and 1920x1080 turns the resolution fix off entirely.",
+                    w, h);
+            }
+        }
+    }
+
+    // NOTHING has been recognised, for long enough that it is not startup.
+    //
+    // Every fix in this file plus two outside it read the eye-draw count, and a
+    // count of zero switches all of them off together, silently -- the totals
+    // line below carries the zero, but it carries it inside a paragraph that
+    // says the number is not a fault indicator, which is true of every value it
+    // can take except this one. A session that reported "everything except the
+    // exposure fix stopped working in 0.7" was exactly this, and the log it came
+    // with could not distinguish the two causes, so this line names both and
+    // prints the sizes it did see.
+    //
+    // 1800 frames is the totals window -- twenty seconds at 90Hz. Menus and
+    // loading legitimately draw nothing eye-sized, so this waits out a window
+    // rather than firing at the first quiet frame.
+    if (!s->starvationNoted && s->frameNo >= 1800 && s->eyeDrawsMax == 0) {
+        s->starvationNoted = true;
+        char sizes[192];
+        sizes[0] = '\0';
+        for (uint32_t i = 0; i < s->rtSeenCount; ++i) {
+            char one[32];
+            _snprintf_s(one, sizeof(one), _TRUNCATE, "%s%ux%u", i ? ", " : "",
+                        s->rtSeenW[i], s->rtSeenH[i]);
+            strncat_s(sizes, sizeof(sizes), one, _TRUNCATE);
+        }
+        Log::get().note(
+            "vScreen: NOT ONE eye-sized render target in %u frames. The black void, the "
+            "panel distance, the transition flash fix and Explorer Cam all read that "
+            "count, so all four are inert -- not broken, starved. They will say nothing "
+            "further, which is why this line exists. Largest targets seen: %s. The panel "
+            "is at %ux%u and its exclusion answered no %llu time(s); the headset %s. If "
+            "one of those sizes is your eye texture, that is the collision -- change "
+            "fix.vscreen_res_width/height (2880x1620 is safe, 1920x1080 is off). If none "
+            "of them is, install openvr_api.dll as well so this side stops guessing at "
+            "what your eye textures are.",
+            s->frameNo, s->rtSeenCount ? sizes : "none big enough to be one",
+            s->panelW, s->panelH,
+            static_cast<unsigned long long>(s->panelExclusions),
+            s->eyeW ? "has published its size" : "has published nothing");
+    }
 
     // Frames that forced nothing are menus and loading screens, not asymmetry.
     if (s->voidThisFrame) {

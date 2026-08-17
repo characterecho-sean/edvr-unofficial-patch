@@ -2,6 +2,7 @@
 #include "head_offset.h"
 
 #include <windows.h>
+#include <d3d11.h>   // GetDesc on the submitted texture, for its size only
 
 #include <cmath>
 #include <cstring>
@@ -126,6 +127,19 @@ struct State {
     // reasoning as the pair latch's reset.
     bool     holdThisFrame = false;
     bool     threadNoted = false;
+
+    // What has been published to the d3d11 half about the eye textures, and how
+    // many submits until the next look.
+    //
+    // Re-read on a cadence rather than once, because the size is not a property
+    // of the session: Elite recreates its eye textures when SteamVR's render
+    // resolution changes under it, and a value published once would then name a
+    // texture that no longer exists -- which is worse than never publishing,
+    // since the reader is being asked to match against it. Every 600 submits is
+    // roughly every three seconds at 90Hz (two submits a frame) and costs one
+    // GetDesc.
+    uint32_t eyeSizeCountdown = 0;
+    uint32_t eyeSizeW = 0, eyeSizeH = 0;
     uint32_t holdFramesSeen = 0;
 
     // THE POSE RING. Forensics, and only forensics.
@@ -414,6 +428,107 @@ void dumpPoseRing(State* s, const char* trigger, uint32_t framesAfterPress) {
     Log::get().note("--- end headset pose history ---");
 }
 
+// Tell the d3d11 half how big the headset's eye textures are.
+//
+// This side is handed the texture; the other side was left guessing at it from
+// dimensions alone, and paid for the guess twice (see frame_flag.h). One
+// GetDesc every few seconds, through the guard, on a handle that belongs to the
+// game -- a stale one costs a fault entry and a session without the answer,
+// which is exactly the state every build before this one was in.
+//
+// Nothing is submitted, copied or changed here. It reads a size and writes it
+// into EDVR's own channel.
+void noteEyeTextureSize(State* s, vr::EVREye eye, const vr::Texture_t* texture,
+                        const vr::VRTextureBounds_t* bounds) {
+    if (!s->validated) return;
+    if (!texture || texture->eType != vr::TextureType_DirectX || !texture->handle) {
+        return;
+    }
+    // ONE EYE ONLY. The two eyes carry different bounds -- that is how a
+    // double-wide texture names them -- so sampling whichever Submit happens
+    // to land on the cadence alternates between two answers, and every
+    // alternation looks like the render resolution moving. Left is arbitrary
+    // and consistent, which is all this needs.
+    if (eye != vr::Eye_Left) return;
+    if (s->eyeSizeCountdown) { --s->eyeSizeCountdown; return; }
+    // Re-armed HERE, before any of the early returns below. Setting it after
+    // them meant the steady state -- size unchanged, the common case -- left
+    // it at zero, so every Submit from then on paid a guarded GetDesc: 180 a
+    // second, for a value the countdown exists to sample every three.
+    s->eyeSizeCountdown = 600;
+
+    D3D11_TEXTURE2D_DESC desc = {};
+    bool ok = false;
+    guarded("vr: eye texture desc", [&] {
+        static_cast<ID3D11Texture2D*>(texture->handle)->GetDesc(&desc);
+        ok = true;
+    });
+    if (!ok || !desc.Width || !desc.Height) return;
+
+    // THE BOUNDS ARE THE HALF OF THIS THAT MATTERS, and leaving them out is
+    // what made the first version of this useless on the hardware it was
+    // written for.
+    //
+    // Elite submits ONE double-wide texture holding both eyes and names each
+    // eye by its bounds -- measured 2026-08-17 on a Quest 3 over Steam Link:
+    // the submitted texture is 2912x1560 while the render targets the scene
+    // is actually drawn into are 1456x1560, exactly half the width. Publishing
+    // the whole texture told the other half to look for something twice as
+    // wide as anything that exists, so it matched nothing at all and the black
+    // void stayed grey with the answer, 1456x1560, sitting in its own list of
+    // sizes it had seen and rejected.
+    //
+    // bounds may legitimately be null, which means the whole texture is the
+    // eye. A span that is not a sane fraction is treated the same way rather
+    // than trusted: this is somebody else's struct and the cost of believing
+    // a bad one is publishing a size nothing can match.
+    //
+    // Absolute value, because OpenVR permits the bounds to run backwards:
+    // vMin=1, vMax=0 is the ordinary way to say the texture's origin is
+    // flipped, and it is common. A signed span fails the sanity test below,
+    // leaves the multiplier at 1.0, and publishes the whole double-wide
+    // width -- which matches nothing, kills all four fixes, and looks
+    // exactly like the bug this function was written to end.
+    float uSpan = 1.0f, vSpan = 1.0f;
+    if (bounds) {
+        const float u = fabsf(bounds->uMax - bounds->uMin);
+        const float v = fabsf(bounds->vMax - bounds->vMin);
+        if (u > 0.01f && u <= 1.0f) uSpan = u;
+        if (v > 0.01f && v <= 1.0f) vSpan = v;
+    }
+    const uint32_t eyeW =
+        static_cast<uint32_t>(static_cast<float>(desc.Width) * uSpan + 0.5f);
+    const uint32_t eyeH =
+        static_cast<uint32_t>(static_cast<float>(desc.Height) * vSpan + 0.5f);
+    if (!eyeW || !eyeH) return;
+    if (eyeW == s->eyeSizeW && eyeH == s->eyeSizeH) return;
+
+    const bool first = (s->eyeSizeW == 0);
+    const bool shared = (eyeW != desc.Width || eyeH != desc.Height);
+    // Published BEFORE the cache is committed, so a refusal inside the
+    // channel is retried on the next sample instead of being remembered as
+    // done. The cache is what suppresses the log, not what proves it landed.
+    announceEyeTextureSize(eyeW, eyeH);
+    s->eyeSizeW = eyeW;
+    s->eyeSizeH = eyeH;
+    // Both halves want this in their own log: this one is where it was read,
+    // and the d3d11 log is where the consequences are. Whichever log a report
+    // arrives with, the size is in it.
+    Log::get().note(
+        "compositor: ONE EYE is %ux%u%s. Told the d3d11 half, which uses it to "
+        "tell your eye textures from everything else it sees. The submitted "
+        "texture is %ux%u%s.%s",
+        eyeW, eyeH,
+        first ? "" : " -- this CHANGED, so the render resolution moved under "
+                     "the game",
+        desc.Width, desc.Height,
+        shared ? " and holds BOTH eyes, so the per-eye size above is that "
+                 "texture narrowed by the bounds this Submit named"
+               : ", one eye per texture",
+        shared ? " Watch for the per-eye size in the graphics log, not this one."
+               : "");
+}
+
 vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
                                     const vr::Texture_t* texture,
                                     const vr::VRTextureBounds_t* bounds,
@@ -455,6 +570,11 @@ vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
                             s->submitCalls);
         }
     }
+
+    // Before any decision about this frame, and unconditional on all of them:
+    // it is an observation about the texture's shape, and the half that needs
+    // it is starved without it whether or not this frame is withheld.
+    noteEyeTextureSize(s, eye, texture, bounds);
 
     // The frame the d3d11 side marked as drawn from the wrong viewpoint: do not
     // pass it on. SteamVR reprojects the previous frame, exactly as it does for
