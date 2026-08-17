@@ -3,38 +3,79 @@
 #include "../common/config.h"
 #include "../common/frame_flag.h"
 #include "../common/log.h"
+#include "../common/timing.h"
 
 namespace edvr {
 namespace {
 
-// Vehicle-scene frames after which the panel's return means a NEW on-foot
-// session rather than the same one continuing. Ten seconds at 90 Hz: the
-// shortest ship leg between landings is minutes and a boarding animation
-// alone is tens of seconds, while every same-session interruption is either
-// shorter or is not vehicle scene at all -- a camera stint is in-camera
-// (excluded by the counter's own condition) and a map or menu is idle, not
-// scene. Measured need: at every observed second landing the game had reset
-// its camera view to 0 while EDVR held or counted the old one (6ay), so the
-// count must restart at the game's own reset point to stay anchored.
-constexpr uint32_t kNewFootSessionFrames = 900;
+// EVERY THRESHOLD BELOW IS A DURATION, so it is milliseconds. See timing.h for
+// why: these were frame counts, and each one silently meant something different
+// at 72Hz, 90Hz and 120Hz -- the three rates this mod has to work at. The
+// counters themselves stay in frames where a frame is the natural unit (a
+// one-frame panel dropout is a hitch whatever the rate); only the tests that
+// ask "how long" read the clock.
+
+// Vehicle-scene TIME after which the panel's return means a NEW on-foot
+// session rather than the same one continuing. Ten seconds: the shortest ship
+// leg between landings is minutes and a boarding animation alone is tens of
+// seconds, while every same-session interruption is either shorter or is not
+// vehicle scene at all -- a camera stint is in-camera (excluded by the
+// counter's own condition) and a map or menu is idle, not scene. Measured
+// need: at every observed second landing the game had reset its camera view to
+// 0 while EDVR held or counted the old one (6ay), so the count must restart at
+// the game's own reset point to stay anchored.
+constexpr uint64_t kNewFootSessionMs = 10000;
 
 // How long the journal's Disembark may stand in for a stale Status.json.
 // Measured flag lag after the event: ~5.8 s (session 1, 10:57:06->10:57:12)
 // and <=6.7 s (session 2, 11:02:21->11:02:28), so ten seconds covers the
 // airlock animation with margin while staying far below a real ship leg.
 // The grace usually ends earlier anyway -- at the first on-foot sample.
-constexpr uint32_t kFootGraceFrames = 900;
+//
+// This is the one that most needed a clock. As 900 frames it was 7.5 seconds
+// at 120Hz, against a measured worst case of 6.7 -- eight hundred milliseconds
+// of margin on a number whose whole justification was "with margin". A player
+// on a 120Hz headset and a slightly slower airlock lost the entry outright.
+constexpr uint64_t kFootGraceMs = 10000;
 
-// The KEYLESS entry window. The keyed window (head_offset_enter_window, 60)
-// is paced by a keypress, which is instant; the keyless confirmation is
-// paced by Status.json -- the poll interval plus the game's own ~1 Hz write
-// cadence. Measured arrivals after the panel stopped: +53 frames (11:00:34,
-// latched) and +90 frames (11:27:10, forfeited by the 60-frame window while
-// the player stood in the camera with the read alive on view 2). 240 covers
-// poll + write with margin. The boarding hazard this window brushes is
-// bounded the same way it always was: a wrong latch dies at the next
-// not-on-foot sample, one poll later.
-constexpr uint32_t kKeylessEnterWindow = 240;
+// The KEYLESS entry window. The keyed window (head_offset_enter_window) is
+// paced by a keypress, which is instant; the keyless confirmation is paced by
+// Status.json -- the poll interval plus the game's own ~1 Hz write cadence.
+// Measured arrivals after the panel stopped: +53 frames (11:00:34, latched)
+// and +90 frames (11:27:10, forfeited by the then 60-frame window while the
+// player stood in the camera with the read alive on view 2). Both measurements
+// are at 90Hz, so ~590ms and ~1000ms. 2.7 seconds covers poll + write with
+// margin at any rate. The boarding hazard this window brushes is bounded the
+// same way it always was: a wrong latch dies at the next not-on-foot sample,
+// one poll later.
+constexpr uint64_t kKeylessEnterMs = 2700;
+
+// Neither panel nor scene for this long: a menu, a loading screen, or a mode
+// change we cannot see. Was 300 frames, which a 1790fps loading screen passed
+// in 170ms -- the exact case it was written to sit through.
+constexpr uint64_t kIdleDropMs = 3300;
+
+// A panel run that has been gone this long is over, rather than interrupted.
+// Was 90 frames, described as "still generous for a stutter": a claim about
+// milliseconds, and 750ms of it at 120Hz.
+//
+// BRACKETED FROM BOTH SIDES BY MEASUREMENT, and the bracket is narrow enough
+// that the old 90 frames only fitted at 90Hz:
+//   - it must be LONGER than 1000 ms, because the keyless path waits on
+//     Status.json and the slowest measured sample landed 1000 ms after the
+//     panel stopped (11:27:10). On-foot credit dying first makes the keyless
+//     entry window unusable however wide that window is;
+//   - it must be SHORTER than about 1333 ms, because the same credit is what
+//     let boarding a ship and pressing the camera key "within about three
+//     seconds" arm the ON-FOOT offset in a cockpit -- the outcome this gate
+//     exists to prevent, and the one the ship-vanity fixture pins.
+// 1150 sits in the middle of that. At 90Hz the old value was 1000 ms, which
+// is not inside the bracket but exactly on its floor: the keyless fixture
+// passed by nine hundredths of a millisecond of accumulated rounding.
+constexpr uint64_t kPanelRunOverMs = 1150;
+
+// How often the in-camera heartbeat may repeat. Diagnostics only.
+constexpr uint64_t kHeartbeatMs = 6700;
 
 // One instance, file-local. The gate is per-process by nature -- there is one
 // player in one mode -- and keeping it out of the render hooks' State is what
@@ -76,6 +117,18 @@ struct Gate {
     bool     gateSyncRefusedNoted = false;
     uint32_t gateFrameNo = 0;            // the frame Frame() last ran for
     uint32_t gateLastFootReset = 0;      // when a new-session reset last fired
+
+    // STAMPS FOR THE DURATION TESTS, each paired with the frame counter above
+    // it rather than replacing it. Both are wanted: the counters answer "how
+    // many frames" for the debounces and for the log lines, which are read
+    // against frame-indexed fixtures, and these answer "how long" for the
+    // thresholds that were durations all along. A stamp of 0 means the run it
+    // measures is not in progress, which elapsedMs() reads as "not yet".
+    uint64_t panelStoppedMs = 0;         // when gateSincePanel started counting
+    uint64_t awaySceneMs = 0;            // when gateAwayScene started counting
+    uint64_t idleMs = 0;                 // when gateIdleFrames started counting
+    uint64_t lastFootResetMs = 0;        // when a new-session reset last fired
+    uint64_t heartbeatMs = 0;            // when the in-camera heartbeat last spoke
     // The game's live on-foot word (Status.json via the journal watcher).
     bool     liveOnFootKnown = false;
     bool     liveOnFoot = false;
@@ -92,6 +145,7 @@ struct Gate {
     bool     liveOnFootSeenThisFoot = false;
     bool     footGraceJournal = false;   // Disembark declared, flag not yet true
     uint32_t footGraceFrame = 0;         // when that declaration landed
+    uint64_t footGraceMs = 0;            // ...and the same, on the clock
     bool     gateKeylessOn = false;      // advanced.keyless_camera (parked)
     bool     gateNoConsumerNoted = false;
     uint32_t gateIntentAge = 0;          // frames since the key was pressed
@@ -217,16 +271,24 @@ void headOffsetGateNewFootSession(const char* source, bool journalSaysSo) {
     if (journalSaysSo) {
         g.footGraceJournal = true;
         g.footGraceFrame = g.gateFrameNo ? g.gateFrameNo : 1;
+        g.footGraceMs = stampMs();
     }
     // ONE BOUNDARY, POSSIBLY TWO DETECTORS. The journal's Disembark and the
-    // panel-return heuristic both mark the same landing, seconds apart --
+    // panel-return heuristic both mark the same landing, SECONDS apart --
     // whichever speaks first does the work and the other stands down, so the
     // log carries one line per landing rather than an echo.
-    if (g.gateLastFootReset != 0 &&
-        g.gateFrameNo - g.gateLastFootReset < 900) {
-        return;
+    //
+    // "Seconds apart" is why this is a clock and not the 900 frames it was:
+    // the two detectors are separated by how long the game takes to animate an
+    // airlock, which does not speed up on a 120Hz headset. At 120Hz the old
+    // dedupe closed after 7.5s and the second detector's echo got through as a
+    // fresh landing, resetting the view index a second time.
+    if (elapsedMs(g.lastFootResetMs, kNewFootSessionMs)) {
+        g.lastFootResetMs = 0;   // the window has passed; this is real news
     }
+    if (g.lastFootResetMs != 0) return;
     g.gateLastFootReset = g.gateFrameNo ? g.gateFrameNo : 1;
+    g.lastFootResetMs = stampMs();
     g.gateViewIndex = 0;
     g.gateBridgeStarted = false;   // any held view belongs to the old session
     g.liveOnFootSeenThisFoot = false;   // this session's flag not yet observed
@@ -373,13 +435,16 @@ void headOffsetGateFrame(uint32_t frameNo, uint32_t panelDraws, uint32_t eyeDraw
         // This is the HEURISTIC detector for that boundary; the journal's
         // Disembark (wired in device_hook) is the authoritative one and
         // usually speaks first. Both call the same reset, which dedupes.
-        if (g.gateAwayScene >= kNewFootSessionFrames) {
+        if (elapsedMs(g.awaySceneMs, kNewFootSessionMs)) {
             headOffsetGateNewFootSession(
                 "the on-foot screen returned after a ship or vehicle leg");
         }
         g.gateAwayScene = 0;
+        g.awaySceneMs = 0;
         g.gateSincePanel = 0;
+        g.panelStoppedMs = 0;
         g.gateIdleFrames = 0;
+        g.idleMs = 0;
         if (g.gatePanelRun < 10000) ++g.gatePanelRun;
         // The panel overrules the key, but NOT immediately -- and that
         // "not immediately" is the whole bug.
@@ -453,7 +518,11 @@ void headOffsetGateFrame(uint32_t frameNo, uint32_t panelDraws, uint32_t eyeDraw
         // The moment the panel stopped, in Status samples: keyless arming
         // requires a FRESHER on-foot sample than this, so a stale second of
         // "on foot" cannot arm the offset into a boarding animation.
-        if (g.gateSincePanel == 1) g.sampleAtPanelStop = g.liveSample;
+        // Stamped on the same edge, for the tests that ask how long ago.
+        if (g.gateSincePanel == 1) {
+            g.sampleAtPanelStop = g.liveSample;
+            g.panelStoppedMs = stampMs();
+        }
         // The window is TIGHT, and measured rather than chosen.
         //
         // Both real entries logged "the flat panel stopped 2 frame(s) ago".
@@ -539,7 +608,7 @@ void headOffsetGateFrame(uint32_t frameNo, uint32_t panelDraws, uint32_t eyeDraw
             g.liveSample > g.sampleAtPanelStop;
         const bool graceActive =
             g.footGraceJournal && !g.liveOnFootSeenThisFoot &&
-            g.gateFrameNo - g.footGraceFrame < kFootGraceFrames;
+            !elapsedMs(g.footGraceMs, kFootGraceMs);
         const bool autoIntent = g.gateKeylessOn && !g.gateKeyBound &&
                                 (statusFresh || graceActive);
         if (autoIntent && !g.autoIntentNoted) {
@@ -568,12 +637,13 @@ void headOffsetGateFrame(uint32_t frameNo, uint32_t panelDraws, uint32_t eyeDraw
         const bool panelGoneAWhile = g.gateSincePanel >= 8;
         const bool entryAsked =
             (intentOk && timingOk) ||
-            (autoIntent && g.gateSincePanel <= kKeylessEnterWindow);
+            (autoIntent && !elapsedMs(g.panelStoppedMs, kKeylessEnterMs));
         if (!g.gateInCamera && entryAsked && panelGoneAWhile &&
             sceneNow && g.gatePanelRun > 30) {
             g.gateInCamera = true;
             ++g.gateCameraEnters;
             g.gateSinceEnter = 0;
+            g.heartbeatMs = stampMs();
             Log::get().note(
                 "on-foot external camera: the flat panel stopped %u frame(s) ago "
                 "after %u settled frames, and %u draws are reaching the eye "
@@ -611,17 +681,27 @@ void headOffsetGateFrame(uint32_t frameNo, uint32_t panelDraws, uint32_t eyeDraw
         // than carry it into whatever comes back, because the one thing
         // worse than the offset not applying is it applying in the cockpit.
         if (!sceneNow) {
-            if (++g.gateIdleFrames > 300 && g.gateInCamera) {
+            ++g.gateIdleFrames;
+            if (g.gateIdleFrames == 1) g.idleMs = stampMs();
+            // Timed, not counted. A loading screen is the headline case for
+            // this branch and it is precisely where frames stop tracking
+            // time: 300 of them went by in 170ms at the measured 1790fps, so
+            // the latch was dropped almost the instant a load began rather
+            // than after the deliberate pause this was written to wait out.
+            if (elapsedMs(g.idleMs, kIdleDropMs) && g.gateInCamera) {
                 g.gateInCamera = false;
                 g.gateExternal = false;
                 ++g.gateExits;
                 edvr::setExternalCameraOnFoot(false);
                 Log::get().note("head offset OFF: neither the panel nor a drawn "
-                                "scene for %u frames, so the latch is being "
-                                "dropped rather than guessed.", g.gateIdleFrames);
+                                "scene for %u frames over %llu ms, so the latch "
+                                "is being dropped rather than guessed.",
+                                g.gateIdleFrames,
+                                static_cast<unsigned long long>(nowMs() - g.idleMs));
             }
         } else {
             g.gateIdleFrames = 0;
+            g.idleMs = 0;
             // Vehicle time: a full scene, no panel, and not the camera. This
             // is what accrues toward the new-session boundary at the panelNow
             // block -- a camera stint is excluded by gateInCamera, and a map
@@ -629,6 +709,7 @@ void headOffsetGateFrame(uint32_t frameNo, uint32_t panelDraws, uint32_t eyeDraw
             // count.
             if (!g.gateInCamera && g.gateAwayScene < 1000000) {
                 ++g.gateAwayScene;
+                if (g.gateAwayScene == 1) g.awaySceneMs = stampMs();
             }
         }
 
@@ -651,8 +732,13 @@ void headOffsetGateFrame(uint32_t frameNo, uint32_t panelDraws, uint32_t eyeDraw
         // The transition logging alone cannot answer why the latch is stuck:
         // it says when the state changed and nothing about the frames in
         // between. This is what a future discriminator would be built from.
-        if (g.gateExternal && (g.gateSinceEnter % 600) == 0 &&
-            g.gateSinceEnter > 0) {
+        // Stamped at entry rather than zeroed, so the first heartbeat lands one
+        // interval IN rather than on the entry frame itself -- the old
+        // `gateSinceEnter % 600` skipped 0 for the same reason, and a zeroed
+        // stamp would print a "still on" line immediately under "ON".
+        if (g.gateExternal && g.gateSinceEnter > 0 &&
+            elapsedMs(g.heartbeatMs, kHeartbeatMs)) {
+            g.heartbeatMs = stampMs();
             Log::get().note("head offset still on: %u frames in, %u draws into "
                             "the eyes, %u frames since the panel.",
                             g.gateSinceEnter, eyeDraws,
@@ -711,9 +797,10 @@ void headOffsetGateFrame(uint32_t frameNo, uint32_t panelDraws, uint32_t eyeDraw
         // panelGoneAWhile above is now what does that job, for eight frames
         // rather than three hundred.
         //
-        // 90 frames is still generous for a stutter and far short of a mode
-        // change anybody could act on.
-        if (g.gateSincePanel > 90) g.gatePanelRun = 0;
+        // A second is still generous for a stutter and far short of a mode
+        // change anybody could act on. It was 90 frames, and "generous for a
+        // stutter" is a claim about milliseconds: 750 of them at 120Hz.
+        if (elapsedMs(g.panelStoppedMs, kPanelRunOverMs)) g.gatePanelRun = 0;
     }
     // The offset is armed from two SEPARATE facts, and keeping them apart
     // is what lets the view change matter.
@@ -891,6 +978,7 @@ void headOffsetGateFrame(uint32_t frameNo, uint32_t panelDraws, uint32_t eyeDraw
         if (wantOffset) {
             ++g.gateEnters;
             g.gateSinceEnter = 0;
+            g.heartbeatMs = stampMs();
             Log::get().note("head offset ON: on foot in the external camera, "
                             "view %d.", g.gateViewIndex);
             // The offset is applied in openvr_api.dll. If that half is not

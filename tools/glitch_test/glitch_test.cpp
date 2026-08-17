@@ -31,6 +31,7 @@
 
 #include "../../src/common/config.h"
 #include "../../src/common/frame_flag.h"
+#include "../../src/common/timing.h"
 #include "../../src/d3d11/glitch_frame.h"
 
 using namespace edvr;
@@ -82,10 +83,31 @@ struct Buffer {
 // gone to the headset. Sampling after the boundary would test a flag nobody
 // acts on -- and would have passed while the fix withheld nothing at all, which
 // is a mistake this module's own comments record being made.
+// A FAKE CLOCK, ADVANCED ONE FRAME PERIOD PER BOUNDARY.
+//
+// The burst governor's stand-down and the rebase cooldown are durations now
+// (src/common/timing.h), so a fixture that steps frames without time passing
+// would leave both permanently engaged and the detector permanently mute --
+// which is exactly what fourteen of these fixtures reported the moment the
+// conversion landed. Advancing here keeps the suite instant while making the
+// stand-downs expire on the schedule the detector actually uses.
+//
+// 90Hz, because every fixture in this file is a replay of a capture taken at
+// 90Hz and its frame indices are quoted from those logs. Rate-invariance is
+// asserted in gate_test, which owns scenarios rather than replays.
+uint64_t g_fakeUs = 0;
+uint64_t g_fakeMs = 0;
+uint64_t fakeClock() { return g_fakeMs; }
+void advanceOneFrame() {
+    g_fakeUs += 1000000ull / 90ull;
+    g_fakeMs = g_fakeUs / 1000ull;
+}
+
 bool frame(Buffer& b, float x, float y, float z, uint32_t eyeDraws = kEyeDraws) {
     b.setPos(x, y, z);
     glitchFrameObserve(b.f, kBytes, b.res);
     const bool marked = glitchFrameMarked();
+    advanceOneFrame();
     glitchFrameBoundary(eyeDraws);
     clearGlitchFrame();
     return marked;
@@ -157,6 +179,9 @@ bool writeIni(const std::wstring& dir, const char* body) {
 
 int main(int argc, char** argv) {
     setvbuf(stdout, nullptr, _IONBF, 0);
+    // See the note on advanceOneFrame: the detector's stand-downs are timed
+    // now, so the replays have to carry a clock alongside their frames.
+    edvr::g_clockForTest = &fakeClock;
     if (argc < 2) {
         printf("usage: glitch_test.exe <scratch dir>\n");
         return 2;
@@ -447,6 +472,7 @@ int main(int argc, char** argv) {
         b.setPos(x, 568000.0f, 0.0f);
         glitchFrameObserve(b.f, kBytes, b.res);          // the known separation
         const bool marked = glitchFrameMarked();
+        advanceOneFrame();
         glitchFrameBoundary(kEyeDraws);
         clearGlitchFrame();
         check("the verdict follows the camera the frame is judged on", !marked,
@@ -942,6 +968,7 @@ int main(int argc, char** argv) {
             b.setPos(r.x, r.y, r.z);
             glitchFrameObserve(b.f, kBytes, b.res);
             const bool marked = glitchFrameMarked();
+            advanceOneFrame();
             glitchFrameBoundary(r.eye);
             clearGlitchFrame();
             if (marked) ++withheld;
@@ -1017,6 +1044,7 @@ int main(int argc, char** argv) {
             b.setPos(r.x, r.y, r.z);
             glitchFrameObserve(b.f, kBytes, b.res);
             const bool marked = glitchFrameMarked();
+            advanceOneFrame();
             glitchFrameBoundary(r.eye);
             clearGlitchFrame();
             if (marked) ++withheld;
@@ -1067,6 +1095,7 @@ int main(int argc, char** argv) {
             b.setPos(r.x, r.y, r.z);
             glitchFrameObserve(b.f, kBytes, b.res);
             glitchFrameMarked();
+            advanceOneFrame();
             glitchFrameBoundary(r.eye);
             clearGlitchFrame();
         }
@@ -1106,7 +1135,8 @@ int main(int argc, char** argv) {
             b.setPos(x, 40000.0f + 900.0f * static_cast<float>(i), 0.0f);
             glitchFrameObserve(b.f, kBytes, b.res);
             if (glitchFrameMarked()) ++multi;
-            glitchFrameBoundary(kEyeDraws);
+            advanceOneFrame();
+        glitchFrameBoundary(kEyeDraws);
             clearGlitchFrame();
             settle(b, x, 4);
         }

@@ -14,6 +14,7 @@
 #include "elite_binds.h"
 #include "../common/log.h"
 #include "../common/proxy.h"
+#include "../common/timing.h"
 #include "../common/vtable_hook.h"
 #include "binding_shadow.h"
 #include "exposure_fix.h"
@@ -80,16 +81,22 @@ struct State {
     // applied, and a slow stat (below) notices within seconds.
     uint64_t bindsFingerprint = 0;
     uint64_t bindsPending = 0;       // a change waiting to hold for one beat
-    uint32_t bindsCheckIn = 450;
+    // When the bindings directory was last stat'd. Was a 450-frame countdown
+    // duplicating kBindsCheckFrames as a literal, so converting the constant
+    // alone would have left the FIRST interval on the old value.
+    uint64_t bindsCheckMs = 0;
     uint32_t lastJournalDisembarks = 0;
     uint32_t lastJournalEmbarks = 0;
     uint32_t lastCameraEnters = 0;
     uint64_t frameCounter = 0;
+    uint64_t configPollMs = 0;
+    uint64_t firstFrameMs = 0;   // for the crash sentinel's confirm window
 
     // Dump the camera history on every external-camera keypress. Diagnostic,
     // off by default: 900 lines a press.
     bool     dumpOnExternalCam = false;
-    uint32_t dumpCountdown = 0;
+    // When the delayed dump is due. 0 means none is armed.
+    uint64_t dumpDueMs = 0;
     uint32_t missedDumpNotes = 0;
     bool     threadNoted = false;
     // Frames to hold across an external-camera transition. 0 = off, and it stays
@@ -117,29 +124,48 @@ struct State {
     bool      sentinelConfirmed = false;
 };
 
-// Presented frames before the hooks are treated as having survived install.
+// How long the hooks must survive before install is treated as having worked.
 //
-// About six seconds of play, which is past the loading screen and into a drawn
-// scene. Long enough that the risky part -- the first frames through four
-// patched vtables -- is behind us, short enough that a player who quits normally
-// has confirmed long before, because a false trip costs them every fix for a
+// Six seconds of play, which is past the loading screen and into a drawn scene.
+// Long enough that the risky part -- the first frames through four patched
+// vtables -- is behind us, short enough that a player who quits normally has
+// confirmed long before, because a false trip costs them every fix for a
 // session and that is the cost this must not impose casually.
-constexpr uint32_t kSentinelConfirmFrames = 600;
+//
+// THIS ONE WAS BROKEN TWICE OVER as 600 presented frames. It was 8.3 seconds at
+// 72Hz and 5 at 120, and worse, presented frames are not paced by the display
+// during a loading screen -- the menu and loading screen present at about
+// 1800fps, so 600 of them went by in a third of a second and the sentinel
+// confirmed survival before the game had drawn anything at all. The window
+// that was supposed to cover the risky period closed before it started.
+constexpr uint64_t kSentinelConfirmMs = 6000;
 
 // Frames to wait after an external-camera keypress before dumping the history.
 //
-// About two seconds, which is comfortably past the mode change: the panel-to-
-// scene delay alone has been measured at 2 to 86 frames, and the flash being
-// chased is on the transition itself. The ring is 900 frames, so this still
-// leaves eight seconds of ordinary flight in front of the event to compare
-// against.
-constexpr uint32_t kDumpDelayFrames = 180;
+// Two seconds, which is comfortably past the mode change: the panel-to-scene
+// delay alone has been measured at 2 to 86 frames, and the flash being chased
+// is on the transition itself. The ring holds at least ten seconds at every
+// supported rate, so this still leaves eight seconds of ordinary flight in
+// front of the event to compare against.
+//
+// The openvr half's kPoseDumpDelayMs is held EQUAL to this, and the equality
+// still matters for the same reason it always did: the two logs are read side
+// by side. What changes is that they are now equal in a unit that means the
+// same thing on both -- as frame counts they were already equal, and already
+// meant 2.5 seconds on one headset and 1.5 on another while both logs said
+// "about two seconds".
+constexpr uint64_t kDumpDelayMs = 2000;
 
 // How often the Elite bindings directory is stat'd for changes: one listing
-// every ~5 seconds. Two consecutive stable sightings commit a change, so a
+// every five seconds. Two consecutive stable sightings commit a change, so a
 // rebind lands in ten seconds at the outside, and a directory Elite is
-// mid-writing is never parsed.
-constexpr uint32_t kBindsCheckFrames = 450;
+// mid-writing is never parsed. Both of those figures are seconds, which is why
+// this is no longer 450 frames -- as frames the "ten seconds at the outside"
+// was twelve and a half on a 72Hz headset.
+constexpr uint64_t kBindsCheckMs = 5000;
+
+// How often edvr.ini is re-read so live tuning takes effect. Once a second.
+constexpr uint64_t kConfigPollMs = 1000;
 
 // How many times a session to point out that a history-key press was ignored
 // because another window had focus. Three is enough to be noticed and few
@@ -195,8 +221,10 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
     // delete; putting it inside would mean a burst of faults anywhere in the
     // frame work stops the confirmation, the sentinel trips on the next launch,
     // and every fix switches itself off over something that never crashed.
+    ++g_state->framesSeen;
+    if (g_state->firstFrameMs == 0) g_state->firstFrameMs = stampMs();
     if (!g_state->sentinelConfirmed &&
-        ++g_state->framesSeen >= kSentinelConfirmFrames) {
+        elapsedMs(g_state->firstFrameMs, kSentinelConfirmMs)) {
         g_state->sentinelConfirmed = true;
         if (g_state->sentinel) g_state->sentinel->confirm();
     }
@@ -248,7 +276,7 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
         // reaction-time capture, the second is the one you read.
         if (g_state->dumpKey.pressed()) {
             dumpCameraRing("the history key");
-            g_state->dumpCountdown = kDumpDelayFrames;
+            g_state->dumpDueMs = nowMs() + kDumpDelayMs;
         }
         // THE PRESS THAT WENT NOWHERE, said out loud.
         //
@@ -277,8 +305,10 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
                 kMissedDumpNotes);
         }
         // The delayed dump, armed by either key.
-        if (g_state->dumpCountdown > 0 && --g_state->dumpCountdown == 0) {
-            dumpCameraRing("a key you pressed two seconds ago", kDumpDelayFrames);
+        if (g_state->dumpDueMs != 0 && nowMs() >= g_state->dumpDueMs) {
+            g_state->dumpDueMs = 0;
+            dumpCameraRing("a key you pressed two seconds ago",
+                           (uint32_t)(kDumpDelayMs / 1000));
         }
         // The player's Elite bindings, re-read when the game rewrites them.
         // Elite saves Options\Bindings the moment a rebind or preset switch
@@ -286,8 +316,9 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
         // hotkeys follow without a restart. The change must HOLD across two
         // checks before anything is re-read: an Apply writes several files,
         // and half a save is not a configuration.
-        if (--g_state->bindsCheckIn == 0) {
-            g_state->bindsCheckIn = kBindsCheckFrames;
+        if (g_state->bindsCheckMs == 0) g_state->bindsCheckMs = stampMs();
+        if (elapsedMs(g_state->bindsCheckMs, kBindsCheckMs)) {
+            g_state->bindsCheckMs = stampMs();
             if (Config::get().getBool("hotkey.read_game_bindings", true)) {
                 const uint64_t fp = eliteBindsFingerprint();
                 if (fp == g_state->bindsFingerprint) {
@@ -359,7 +390,7 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
             // the whole point: two seconds later the ring holds the press, the
             // mode change and the flash, with eight seconds of ordinary flight
             // in front of them for comparison.
-            if (g_state->dumpOnExternalCam) g_state->dumpCountdown = kDumpDelayFrames;
+            if (g_state->dumpOnExternalCam) g_state->dumpDueMs = nowMs() + kDumpDelayMs;
             // Hold the last good frame across the transition.
             //
             // Asked for on the PRESS, which is the earliest possible moment and
@@ -417,10 +448,15 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
         bindingFrameBoundary();
         exposureFixFrameBoundary();
         vScreenFrameBoundary();
-        // Polled rather than watched, about once a second at 90Hz. The user is
-        // wearing a headset and cannot see a text editor, so the settings that
-        // are worth tuning by feel have to take effect without a restart.
-        if ((++g_state->frameCounter % 90) == 0) vScreenRefreshConfig();
+        // Polled rather than watched, once a second. The user is wearing a
+        // headset and cannot see a text editor, so the settings that are worth
+        // tuning by feel have to take effect without a restart. Was every 90
+        // frames, which is once a second on exactly one of the three rates.
+        ++g_state->frameCounter;
+        if (elapsedMs(g_state->configPollMs, kConfigPollMs)) {
+            g_state->configPollMs = stampMs();
+            vScreenRefreshConfig();
+        }
     });
     return hr;
 }

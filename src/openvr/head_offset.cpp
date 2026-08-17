@@ -5,10 +5,17 @@
 #include "../common/config.h"
 #include "../common/frame_flag.h"
 #include "../common/log.h"
+#include "../common/timing.h"
 #include "pose_offset.h"
 
 namespace edvr {
 namespace {
+
+// How long nothing may report the player's mode before saying so. Forty
+// seconds -- the figure the note that documents this warning already used.
+// Was 3600 frames, which is fifty seconds at 72Hz and thirty at 120, and the
+// log line printed the raw 3600 at the reader as if it were meaningful.
+constexpr uint64_t kOrphanWarnMs = 40000;
 
 struct State {
     // In the OpenVR tracking frame: +x right, +y up, -z forward.
@@ -30,7 +37,7 @@ struct State {
     bool     activeNoted = false;
     bool     staleNoted = false;
     bool     orphanNoted = false;
-    uint32_t orphanFrames = 0;
+    uint64_t orphanMs = 0;
     uint32_t applied = 0;
 };
 
@@ -220,19 +227,21 @@ void headOffsetApply(vr::EVRCompositorError err,
     // installs is worse than no warning: it trains people to ignore the log.
     if (g.externalOnly && !gateOn && !g.orphanNoted &&
         !externalCameraEverPublished()) {
-        if (++g.orphanFrames > 3600) {
+        if (g.orphanMs == 0) g.orphanMs = stampMs();
+        if (elapsedMs(g.orphanMs, kOrphanWarnMs)) {
             g.orphanNoted = true;
             Log::get().note(
                 "head offset: configured (%+.2f right, %+.2f up, %+.2f forward) but "
-                "nothing has reported the player's mode for 3600 frames, so it has "
+                "nothing has reported the player's mode for %u seconds, so it has "
                 "not been applied once. Either d3d11.dll is not installed beside "
                 "the game, or fix.head_offset_gate = 0, or you have not been on "
                 "foot in the external camera yet.",
-                g.shown[0], g.shown[1], g.shown[2]);
+                g.shown[0], g.shown[1], g.shown[2],
+                (unsigned)(kOrphanWarnMs / 1000));
         }
     }
     if (!gateOn) return;
-    g.orphanFrames = 0;
+    g.orphanMs = 0;
 
     applyTo(renderPoses, renderCount);
     // gamePoses too, unless it is the same array. A caller that passes one

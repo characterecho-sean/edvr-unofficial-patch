@@ -1,4 +1,6 @@
 #include "compositor_hook.h"
+
+#include "../common/timing.h"
 #include "head_offset.h"
 
 #include <windows.h>
@@ -75,11 +77,24 @@ typedef vr::EVRCompositorError(*PFN_WaitGetPoses)(void* self,
                                                   vr::TrackedDevicePose_t* gamePoses,
                                                   uint32_t gameCount);
 
-// Frames between a diagnostic keypress and the delayed dump it arms. Held equal
-// to the d3d11 side's kDumpDelayFrames on purpose -- the two logs are read side
-// by side, and a different offset in each would mean subtracting a different
+// Time between a diagnostic keypress and the delayed dump it arms. Held equal
+// to the d3d11 side's kDumpDelayMs on purpose -- the two logs are read side by
+// side, and a different offset in each would mean subtracting a different
 // number from each before they could be compared at all.
-constexpr uint32_t kPoseDumpDelayFrames = 180;
+//
+// The equality argument survived the move to a clock; the VALUE is what needed
+// it. As 180 frames the two sides were equal in frames and therefore equal in
+// time as well, since both count the same frames -- but the "about two seconds"
+// both logs printed was 2.5 s at 72Hz and 1.5 at 120, so the label was wrong on
+// two of three headsets even though the correlation was right on all of them.
+constexpr uint64_t kPoseDumpDelayMs = 2000;
+
+// How often edvr.ini is re-read here. Twin of the d3d11 side's kConfigPollMs;
+// both were a bare 90-frame counter described as "about once a second".
+constexpr uint64_t kConfigPollMs = 1000;
+
+// How often the submitted eye size is re-read. See the note on eyeSizeNextMs.
+constexpr uint64_t kEyeSizeRecheckMs = 6000;
 
 struct State {
     VTableHook       compositorHook;
@@ -93,7 +108,7 @@ struct State {
 
     Sentinel* sentinel = nullptr;
 
-    uint32_t configPollCounter = 0;
+    uint64_t configPollMs = 0;
 
     bool     inert = false;        // hook installed but doing nothing
     bool     validated = false;
@@ -135,10 +150,15 @@ struct State {
     // of the session: Elite recreates its eye textures when SteamVR's render
     // resolution changes under it, and a value published once would then name a
     // texture that no longer exists -- which is worse than never publishing,
-    // since the reader is being asked to match against it. Every 600 submits is
-    // roughly every three seconds at 90Hz (two submits a frame) and costs one
-    // GetDesc.
-    uint32_t eyeSizeCountdown = 0;
+    // since the reader is being asked to match against it.
+    //
+    // Every six seconds, and it costs one GetDesc. The comment here used to say
+    // "every 600 submits ... roughly every three seconds at 90Hz (two submits a
+    // frame)", which stopped being true when the left-eye filter went in ahead
+    // of the decrement: only one submit per frame reaches it, so 600 was 600
+    // FRAMES, and the code and its comment disagreed by 2x. A clock removes the
+    // arithmetic that was getting it wrong.
+    uint64_t eyeSizeStampedMs = 0;
     uint32_t eyeSizeW = 0, eyeSizeH = 0;
     uint32_t holdFramesSeen = 0;
 
@@ -170,7 +190,15 @@ struct State {
         int32_t  result;
         uint8_t  valid;
     };
-    PoseEntry poseRing[900] = {};
+    // TEN SECONDS AT THE FASTEST SUPPORTED RATE, not 900 frames. The whole
+    // forensic argument for this ring is wall-clock -- "the window is ten
+    // seconds and a player presses the key a second or two after seeing
+    // something" -- and 900 frames delivered 7.5 s of it at 120Hz. Sized so
+    // ten seconds is the floor at every rate. Six bare 900s used to be spelled
+    // out at the wrap sites; they are this constant now, because the twin in
+    // glitch_frame had a name and this one did not.
+    static constexpr uint64_t kPoseRingFrames = 1200;
+    PoseEntry poseRing[kPoseRingFrames] = {};
     uint64_t  poseHead = 0;
     uint32_t  poseFrame = 0;
     float     poseStepNoteMm = 50.0f;
@@ -190,7 +218,7 @@ struct State {
     Hotkey    poseCamKey;
     bool      poseCamBound = false;
     bool      poseDumpOnCam = false;
-    uint32_t  poseDumpCountdown = 0;
+    uint64_t  poseDumpDueMs = 0;   // 0 = no delayed dump armed
 
     // Refused this session, so a SECOND compositor request does not sail past.
     //
@@ -296,10 +324,10 @@ void configurePoseRing(State* s) {
 // in EDVR behaves differently because of it.
 void dumpPoseRing(State* s, const char* trigger, uint32_t framesAfterPress) {
     if (!s || s->poseHead == 0) return;
-    const uint64_t have = s->poseHead < 900 ? s->poseHead : 900;
+    const uint64_t have = s->poseHead < State::kPoseRingFrames ? s->poseHead : State::kPoseRingFrames;
     const uint64_t first = s->poseHead - have;
     const int64_t freq = qpcFrequency();
-    const uint64_t newest = s->poseRing[(s->poseHead - 1) % 900].qpc;
+    const uint64_t newest = s->poseRing[(s->poseHead - 1) % State::kPoseRingFrames].qpc;
 
     Log::get().note(
         "--- headset pose history: %llu frames, oldest first, written on %s. "
@@ -329,7 +357,7 @@ void dumpPoseRing(State* s, const char* trigger, uint32_t framesAfterPress) {
     const float* prev = nullptr;
 
     for (uint64_t i = first; i < s->poseHead; ++i) {
-        const State::PoseEntry& e = s->poseRing[i % 900];
+        const State::PoseEntry& e = s->poseRing[i % State::kPoseRingFrames];
         float stepMm = 0.0f;
         if (prev) {
             float d2 = 0.0f;
@@ -378,7 +406,7 @@ void dumpPoseRing(State* s, const char* trigger, uint32_t framesAfterPress) {
             const float* before = nullptr;
             uint32_t seen = 0;
             for (uint64_t i = first; i < s->poseHead; ++i) {
-                const State::PoseEntry& e = s->poseRing[i % 900];
+                const State::PoseEntry& e = s->poseRing[i % State::kPoseRingFrames];
                 if (e.frame == lastStepFrame) { seen = 1; continue; }
                 if (!seen) { before = e.pos; continue; }
                 if (++seen > 11) break;
@@ -450,12 +478,20 @@ void noteEyeTextureSize(State* s, vr::EVREye eye, const vr::Texture_t* texture,
     // alternation looks like the render resolution moving. Left is arbitrary
     // and consistent, which is all this needs.
     if (eye != vr::Eye_Left) return;
-    if (s->eyeSizeCountdown) { --s->eyeSizeCountdown; return; }
+    // The FIRST read must happen immediately, which is why this is not a bare
+    // elapsedMs: a zero stamp means "never sampled", and elapsedMs answers
+    // false for that by design. The countdown this replaced started at zero
+    // meaning "due now", so reading the sentinel the other way round would
+    // have deferred the very first sample forever.
+    if (s->eyeSizeStampedMs != 0 &&
+        !elapsedMs(s->eyeSizeStampedMs, kEyeSizeRecheckMs)) {
+        return;
+    }
     // Re-armed HERE, before any of the early returns below. Setting it after
     // them meant the steady state -- size unchanged, the common case -- left
-    // it at zero, so every Submit from then on paid a guarded GetDesc: 180 a
-    // second, for a value the countdown exists to sample every three.
-    s->eyeSizeCountdown = 600;
+    // it unstamped, so every Submit from then on paid a guarded GetDesc: 180 a
+    // second, for a value this exists to sample every six.
+    s->eyeSizeStampedMs = stampMs();
 
     D3D11_TEXTURE2D_DESC desc = {};
     bool ok = false;
@@ -741,7 +777,7 @@ vr::EVRCompositorError hookedWaitGetPoses(void* self,
         guarded("poseRing/record", [&] {
             const vr::TrackedDevicePose_t& hmd =
                 renderPoses[vr::k_unTrackedDeviceIndex_Hmd];
-            State::PoseEntry& e = s->poseRing[s->poseHead % 900];
+            State::PoseEntry& e = s->poseRing[s->poseHead % State::kPoseRingFrames];
             e.qpc = static_cast<uint64_t>(qpcNow());
             e.frame = ++s->poseFrame;
             // Row-major 3x4: the translation is the last column.
@@ -771,16 +807,18 @@ vr::EVRCompositorError hookedWaitGetPoses(void* self,
     // sides and the question is answerable.
     if (s->poseKeyBound && s->poseDumpKey.pressed()) {
         dumpPoseRing(s, "the history key", 0);
-        s->poseDumpCountdown = kPoseDumpDelayFrames;
+        s->poseDumpDueMs = nowMs() + kPoseDumpDelayMs;
     }
     // The camera key arms the same delay, and did first: the ring holds the
     // frames BEFORE it is written, so taking it on the press would capture the
     // approach and none of the transition.
     if (s->poseCamBound && s->poseDumpOnCam && s->poseCamKey.pressed()) {
-        s->poseDumpCountdown = kPoseDumpDelayFrames;
+        s->poseDumpDueMs = nowMs() + kPoseDumpDelayMs;
     }
-    if (s->poseDumpCountdown > 0 && --s->poseDumpCountdown == 0) {
-        dumpPoseRing(s, "a key you pressed two seconds ago", kPoseDumpDelayFrames);
+    if (s->poseDumpDueMs != 0 && nowMs() >= s->poseDumpDueMs) {
+        s->poseDumpDueMs = 0;
+        dumpPoseRing(s, "a key you pressed two seconds ago",
+                     (uint32_t)(kPoseDumpDelayMs / 1000));
     }
 
     // The head offset, applied BEFORE the game sees the poses.
@@ -808,8 +846,8 @@ vr::EVRCompositorError hookedWaitGetPoses(void* self,
     //
     // Still cheap, and for the same reason as before: one GetFileAttributesEx,
     // and a full reparse only when the write time actually moved.
-    if (++s->configPollCounter >= 90) {
-        s->configPollCounter = 0;
+    if (elapsedMs(s->configPollMs, kConfigPollMs)) {
+        s->configPollMs = stampMs();
         if (Config::get().reloadIfChanged()) {
             Log::get().note("config reloaded");
             headOffsetConfigure();

@@ -269,7 +269,7 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     "%ROOT%\src\d3d11\head_offset_gate.cpp" "%ROOT%\src\common\config.cpp" ^
     "%ROOT%\src\common\log.cpp" "%ROOT%\src\common\frame_flag.cpp" ^
     "%ROOT%\src\d3d11\camera_view.cpp" "%ROOT%\src\common\guard.cpp" ^
-    "%ROOT%\src\common\proxy.cpp" ^
+    "%ROOT%\src\common\proxy.cpp" "%ROOT%\src\d3d11\journal_watch.cpp" ^
     /link /INCREMENTAL:NO kernel32.lib user32.lib version.lib
 if errorlevel 1 ( echo [edvr] ERROR: gate_test build failed & exit /b 1 )
 "%BUILD%\gate_test.exe" "%ROOT%" || (

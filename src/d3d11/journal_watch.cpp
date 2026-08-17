@@ -1,5 +1,7 @@
 #include "journal_watch.h"
 
+#include "../common/timing.h"
+
 #include <windows.h>
 
 #include <cstring>
@@ -11,17 +13,23 @@
 namespace edvr {
 namespace {
 
-// Halved from 90 on 2026-08-16: the keyless entry latch waits on this
-// cadence -- measured sample arrivals landed +53 and +90 frames after a
-// panel stop, against a 60-frame entry window -- and a 2 KB Status read
-// plus a bounded journal slice every half second costs nothing measurable.
-// The entry window was widened too; this cuts the latch latency the player
-// actually feels.
-constexpr uint32_t kPollFrames = 45;
+// Every half second. Halved from once a second on 2026-08-16: the keyless
+// entry latch waits on this cadence -- measured sample arrivals landed +53 and
+// +90 frames after a panel stop -- and a 2 KB Status read plus a bounded
+// journal slice at this rate costs nothing measurable.
+//
+// Was 45 frames, which is half a second at 90Hz and 0.63/0.38 at the other two.
+constexpr uint64_t kPollMs = 500;
 
-// Re-glob for a newer journal file every eighth poll (~12 s): a new part or a
-// relaunch appears within that, and directory listings are the expensive half.
+// Re-glob for a newer journal file every eighth poll: a new part or a relaunch
+// appears within that, and directory listings are the expensive half.
+//
+// The comment here used to say "~12 s", which was true when the poll was 90
+// frames and somebody assumed 60Hz. Nobody updated it when the poll was halved,
+// so it was wrong by 3x in a file whose whole subject is cadence. Derived from
+// the poll interval now, so it cannot drift again.
 constexpr uint32_t kReglobPolls = 8;
+constexpr uint64_t kReglobMs = kReglobPolls * kPollMs;   // 4 s
 
 // Consecutive file-op failures before the watcher retires for the session.
 constexpr uint32_t kMaxFaults = 8;
@@ -45,6 +53,8 @@ struct State {
     uint32_t     statusSamples = 0;   // successful Status.json parses
     uint32_t     frame = 0;
     uint32_t     polls = 0;
+    uint64_t     pollMs = 0;     // last poll
+    uint64_t     reglobMs = 0;   // last directory re-glob
     uint32_t     faults = 0;
     bool         faultsNoted = false;
     std::wstring dir;
@@ -257,13 +267,17 @@ void journalWatchConfigure() {
 void journalWatchTick() {
     State& s = g_s;
     if (!s.active) return;
-    if (++s.frame % kPollFrames != 0) return;
+    if (!elapsedMs(s.pollMs, kPollMs)) return;
+    s.pollMs = stampMs();
+    ++s.frame;
     ++s.polls;
 
     pollStatus();
 
     // Find or refresh the file being tailed.
-    if (s.handle == INVALID_HANDLE_VALUE || s.polls % kReglobPolls == 0) {
+    if (s.handle == INVALID_HANDLE_VALUE || s.reglobMs == 0 ||
+        elapsedMs(s.reglobMs, kReglobMs)) {
+        s.reglobMs = stampMs();
         const std::wstring newest = newestJournal();
         if (!newest.empty() && newest != s.file) {
             closeFile();

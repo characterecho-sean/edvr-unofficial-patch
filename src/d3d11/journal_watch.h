@@ -8,7 +8,7 @@
 // eat, 6ba), and where an ON-FOOT SESSION begins (Disembark -- the boundary
 // at which the game resets its external-camera view to 0, 6ay).
 //
-// READ ONLY, names only. The tail is polled about once a second, and the only
+// READ ONLY, names only. The tail is polled twice a second, and the only
 // thing parsed out of it is which event happened; no payload is kept. If the
 // folder cannot be found or the reads keep failing, this says so once and
 // stays off -- every consumer keeps its heuristic fallback, so a missing
@@ -23,7 +23,7 @@ namespace edvr {
 // says in the log what will be watched. Call once at install.
 void journalWatchConfigure();
 
-// Poll the tail. Call once per frame; it does file work about once a second
+// Poll the tail. Call once per frame; it does file work twice a second
 // and nothing at all when disabled or failed.
 void journalWatchTick();
 

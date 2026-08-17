@@ -28,6 +28,7 @@
 
 #include "../../src/common/config.h"
 #include "../../src/common/frame_flag.h"
+#include "../../src/common/timing.h"
 #include "../../src/common/log.h"
 // Header-only, so this adds no link dependency: the grouping is pure pointer
 // arithmetic and lives in the header precisely so it can be asserted here.
@@ -40,6 +41,34 @@ namespace {
 
 int g_bad = 0;
 uint32_t g_frame = 0;
+
+// A FAKE CLOCK, ADVANCED ONE FRAME PERIOD PER FRAME.
+//
+// The gate's thresholds are durations now (see src/common/timing.h), so a
+// fixture that steps frames without time passing would find every one of them
+// permanently unelapsed -- a gate that can never drop a latch, never end a
+// panel run, never close a grace window. The clock has to move with the
+// frames, and moving it HERE rather than sleeping keeps the suite as fast as
+// it was.
+//
+// The rate is a variable, not a constant, because that is the point: the same
+// scenarios run at 72, 90 and 120Hz and must reach the same verdicts. That is
+// the property the conversion exists to give, so it is the property the suite
+// asserts, rather than being taken on the strength of the arithmetic.
+uint64_t g_fakeMs = 0;
+uint32_t g_rateHz = 90;
+
+uint64_t fakeClock() { return g_fakeMs; }
+
+// One frame of wall clock at the current rate. Accumulated in microseconds so
+// that 72 and 120 do not drift: a whole-millisecond step would be 13ms at 72Hz
+// (13.9 real) and lose a second every four, which at these thresholds is the
+// difference between a fixture passing and failing.
+uint64_t g_fakeUs = 0;
+void advanceOneFrame() {
+    g_fakeUs += 1000000ull / g_rateHz;
+    g_fakeMs = g_fakeUs / 1000ull;
+}
 
 // The view the SHIPPED ini asks for, rather than a number written here.
 //
@@ -56,19 +85,46 @@ int g_otherView = 3;   // any view that is not the wanted one
 
 // A frame with the flat on-foot panel composited: first person.
 void panelFrame(uint32_t n = 1) {
-    for (uint32_t i = 0; i < n; ++i) headOffsetGateFrame(g_frame++, 4, 120);
+    for (uint32_t i = 0; i < n; ++i) {
+        advanceOneFrame();
+        headOffsetGateFrame(g_frame++, 4, 120);
+    }
 }
 
 // A frame with a full stereo scene and no panel: the external camera, the
 // cockpit, or anything else that draws the world into both eyes.
 void sceneFrame(uint32_t n = 1) {
-    for (uint32_t i = 0; i < n; ++i) headOffsetGateFrame(g_frame++, 0, 2500);
+    for (uint32_t i = 0; i < n; ++i) {
+        advanceOneFrame();
+        headOffsetGateFrame(g_frame++, 0, 2500);
+    }
 }
 
 // Neither: a menu, a loading screen, a mode change we cannot see.
 void idleFrame(uint32_t n = 1) {
-    for (uint32_t i = 0; i < n; ++i) headOffsetGateFrame(g_frame++, 0, 3);
+    for (uint32_t i = 0; i < n; ++i) {
+        advanceOneFrame();
+        headOffsetGateFrame(g_frame++, 0, 3);
+    }
 }
+
+// THE SAME THREE, IN MILLISECONDS.
+//
+// A fixture that says sceneFrame(90) because a measurement said "+90 frames"
+// has hidden a duration inside a frame count exactly the way the code used to,
+// and it fails at the other two rates for that reason and no other. Where a
+// scenario is about how LONG something lasted -- a status sample arriving on
+// the game's ~1 Hz cadence, a grace window expiring, a player taking three
+// seconds to press a key after boarding -- it says so here.
+//
+// Frame-count helpers are kept for the scenarios that really are about frames:
+// a two-frame settle, a single dropped panel composite.
+void panelFor(uint64_t ms) { const uint64_t t = g_fakeMs + ms;
+                             while (g_fakeMs < t) panelFrame(); }
+void sceneFor(uint64_t ms) { const uint64_t t = g_fakeMs + ms;
+                             while (g_fakeMs < t) sceneFrame(); }
+void idleFor(uint64_t ms)  { const uint64_t t = g_fakeMs + ms;
+                             while (g_fakeMs < t) idleFrame(); }
 
 bool offsetOn() { return externalCameraOnFoot(); }
 
@@ -266,28 +322,8 @@ int cameraRunChecks() {
     return bad;
 }
 
-}  // namespace
-
-int main(int argc, char** argv) {
-    // The real ini, so the scenarios run against the shipped defaults rather
-    // than against numbers this file made up. A test that invents its own
-    // configuration cannot tell you the configuration you ship is safe.
-    const std::string dir = argc > 1 ? argv[1] : ".";
-    Config::get().init(std::wstring(dir.begin(), dir.end()));
-
-    g_wantView = Config::get().getIntInRange("fix.head_offset_view", 2, -1, 63);
-    // A shipped -1 means "any view", which would make every view scenario below
-    // vacuous rather than failing -- so it is refused here. -1 is a legitimate
-    // thing for a USER to set; it is not a legitimate thing to ship, because it
-    // arms in the view that faces back at the commander.
-    if (g_wantView < 0) {
-        printf("  FAIL  edvr.ini ships fix.head_offset_view = %d (any view), so "
-               "the offset would arm in the front-facing view and every view "
-               "scenario here would pass without testing anything.\n", g_wantView);
-        return 1;
-    }
-    g_otherView = g_wantView > 0 ? g_wantView - 1 : g_wantView + 1;
-    printf("edvr gate frame-feed test -- edvr.ini wants view %d\n", g_wantView);
+// Every scenario, run at one refresh rate. See g_rateHz.
+void runScenarios() {
 
     // ---------------------------------------------------------------- arming
     //
@@ -530,7 +566,8 @@ int main(int argc, char** argv) {
     headOffsetGateSetView(g_wantView);
     headOffsetGateSetOnFootLive(true, true, 1);
     panelFrame(200);
-    sceneFrame(90);                           // in the camera, sample pending
+    sceneFor(1000);      // in the camera, sample pending: the measured +90
+                         // frames at 90Hz, said as the 1000 ms it actually was
     headOffsetGateSetOnFootLive(true, true, 2);   // the poll finally lands
     sceneFrame(12);
     check(true, "keyless: a fresh sample on the file's own schedule still "
@@ -627,7 +664,7 @@ int main(int argc, char** argv) {
     sceneFrame(2000);
     headOffsetGateNewFootSession("test: journal Disembark", true);
     headOffsetGateSetOnFootLive(true, false, 2);
-    sceneFrame(1000);                              // grace expires unconfirmed
+    sceneFor(11000);                               // grace expires unconfirmed
     panelFrame(60);
     sceneFrame(12);
     check(false, "keyless: the disembark grace expires and the old rule "
@@ -921,7 +958,10 @@ int main(int argc, char** argv) {
     begin(true);
     headOffsetGateSetView(g_wantView);
     panelFrame(200);                 // on foot
-    sceneFrame(120);                 // board the ship: a full scene, no panel
+    sceneFor(1333);                  // board the ship: a full scene, no panel.
+                                     // "within about three seconds" is the
+                                     // hazard; this is the 120 frames at 90Hz
+                                     // the fixture was written with, in ms.
     headOffsetGateKeyPressed();      // check the ship camera
     sceneFrame(20);
     check(false, "the ship vanity camera did not get the on-foot offset");
@@ -970,13 +1010,61 @@ int main(int argc, char** argv) {
     headOffsetGateReset();
 
     g_bad += cameraRunChecks();
+}
+
+}  // namespace
+
+int main(int argc, char** argv) {
+    // The real ini, so the scenarios run against the shipped defaults rather
+    // than against numbers this file made up. A test that invents its own
+    // configuration cannot tell you the configuration you ship is safe.
+    const std::string dir = argc > 1 ? argv[1] : ".";
+    Config::get().init(std::wstring(dir.begin(), dir.end()));
+
+    g_wantView = Config::get().getIntInRange("fix.head_offset_view", 2, -1, 63);
+    // A shipped -1 means "any view", which would make every view scenario below
+    // vacuous rather than failing -- so it is refused here. -1 is a legitimate
+    // thing for a USER to set; it is not a legitimate thing to ship, because it
+    // arms in the view that faces back at the commander.
+    if (g_wantView < 0) {
+        printf("  FAIL  edvr.ini ships fix.head_offset_view = %d (any view), so "
+               "the offset would arm in the front-facing view and every view "
+               "scenario here would pass without testing anything.\n", g_wantView);
+        return 1;
+    }
+    g_otherView = g_wantView > 0 ? g_wantView - 1 : g_wantView + 1;
+    printf("edvr gate frame-feed test -- edvr.ini wants view %d\n", g_wantView);
+
+    // THE SAME SCENARIOS AT ALL THREE SUPPORTED RATES.
+    //
+    // Elite in VR runs at 72, 90 or 120Hz depending on the headset, and until
+    // 2026-08-17 every threshold in the gate was a frame count -- so each of
+    // them silently meant a different duration at each rate, and this suite,
+    // which steps frames, could not have noticed. Running the whole body three
+    // times is what makes "rate-invariant" a tested claim rather than an
+    // argument about arithmetic: a regression that reintroduces a frame count
+    // fails here at 72 or 120 while still passing at 90.
+    edvr::g_clockForTest = &fakeClock;
+    const uint32_t rates[] = {72, 90, 120};
+    for (uint32_t hz : rates) {
+        const int before = g_bad;
+        const int checksBefore = g_checks;
+        g_rateHz = hz;
+        g_fakeUs = 0;
+        g_fakeMs = 0;
+        runScenarios();
+        printf("  %-4s  %d assertion(s) at %uHz\n",
+               g_bad == before ? "ok" : "FAIL", g_checks - checksBefore, hz);
+    }
+    edvr::g_clockForTest = nullptr;
 
     if (g_bad) {
         printf("\nGATE TEST FAILED (%d)\n", g_bad);
         return 1;
     }
-    printf("  ok    %d assertion(s): the offset arms only where it should, and "
-           "the view index survives the array being rebuilt\n", g_checks);
+    printf("  ok    %d assertion(s) total: the offset arms only where it "
+           "should, the view index survives the array being rebuilt, and every "
+           "verdict is identical at 72, 90 and 120Hz\n", g_checks);
     printf("\nGATE TEST PASSED\n");
     return 0;
 }

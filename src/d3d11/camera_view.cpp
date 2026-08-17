@@ -11,7 +11,9 @@
 #include "../common/config.h"
 #include "../common/guard.h"
 #include "../common/log.h"
+#include "../common/timing.h"
 #include "head_offset_gate.h"
+#include "journal_watch.h"
 
 namespace edvr {
 namespace {
@@ -33,11 +35,25 @@ constexpr uint64_t kMaxFaults = 4096;
 // means that address is gone, not that we were unlucky.
 constexpr uint64_t kMaxReadFaults = 8;
 
-// Four attempts, a minute apart. Enough to cover a slow load or a player who
-// reaches the surface late; few enough that a genuinely wrong anchor -- the
-// game-update case -- stops rather than walking the heap every minute forever.
+// Above this many draws into the eye textures in one frame, a scene is being
+// rendered rather than a menu -- the fallback for when the journal cannot be
+// read. See the measurement at its use in cameraViewTick: menu 20-22, gameplay
+// clearing 100 within seconds of loading in, session peaks 975 and 1074.
+constexpr uint32_t kMenuEyeDraws = 100;
+
+// Four attempts, forty seconds apart. Enough to cover a slow load or a player
+// who reaches the surface late; few enough that a genuinely wrong anchor -- the
+// game-update case -- stops rather than walking the heap forever.
+//
+// THE CLEAREST CASE IN THE CODEBASE for why durations are not frame counts.
+// This was 3600 frames, and the tree documented it three different ways: "a
+// minute apart" here, "forty seconds" in camera_view.h, and "about a minute"
+// in the line printed to the player. All three were written by someone
+// converting 3600 at whatever rate they had in mind -- 60, 90, 60 -- and none
+// of them was wrong about the frames or right about the time. Forty seconds is
+// the .h's figure, which matches 3600 at the 90Hz the feature was developed on.
 constexpr uint32_t kMaxAttempts = 4;
-constexpr uint32_t kRetryCooldown = 3600;
+constexpr uint64_t kRetryCooldownMs = 40000;
 
 // Rescans after the array has MOVED, which is a different budget from attempts
 // to find it in the first place. Re-finding is cheap to justify -- the array
@@ -58,7 +74,9 @@ constexpr uint32_t kMaxRescans = 64;
 // 6ad.8a: stride 0x18, no gaps, 19 of them). That structure is what tells the
 // array apart from unrelated objects of the same type scattered elsewhere.
 constexpr size_t kStride = 0x18;
-constexpr uint32_t kRescanCooldown = 240;
+// A few seconds before a rescan is allowed, so a move during a mode change is
+// not chased several times over. Was 240 frames: 3.3s at 72Hz, 2s at 120.
+constexpr uint64_t kRescanCooldownMs = 2700;
 
 // Empty slots the grouping will bridge rather than end a run on. The reasoning,
 // and the field evidence for it, is on cameraViewGroupRuns in the header.
@@ -73,17 +91,19 @@ constexpr size_t kMaxGap = 2;
 //
 // Three changes because one is noise and two is a coincidence between two
 // records; a player cycling presets produces three in a couple of seconds.
-// Polled every 15 frames -- six times a second is far faster than anybody
-// cycles, and thirty-two qword reads at that rate is nothing.
+// Polled six times a second -- far faster than anybody cycles, and thirty-two
+// qword reads at that rate is nothing. Was 15 frames, which is six times a
+// second only at 90Hz.
 constexpr size_t   kMaxCandidates = 32;
 constexpr uint32_t kChangesToCertify = 3;
-constexpr uint32_t kCandPollFrames = 15;
-// How close, in frames, a candidate's step must land to a witnessed press to
-// count as coincident. Two poll intervals: the write happens within a frame
-// of the press and the poll sees it at most one cadence later; thirty covers
-// that with slack while staying far below the seconds between a player's
-// deliberate presses.
-constexpr uint32_t kPressCoincidenceFrames = 30;
+constexpr uint64_t kCandPollMs = 170;
+// How close in TIME a candidate's step must land to a witnessed press to count
+// as coincident. Two poll intervals: the write happens within a frame of the
+// press and the poll sees it at most one cadence later; this covers that with
+// slack while staying far below the seconds between a player's deliberate
+// presses. Derived from the poll interval rather than restated, so the two
+// cannot drift apart the way the three descriptions of kRetryCooldown did.
+constexpr uint64_t kPressCoincidenceMs = 2 * kCandPollMs;
 // Places holding the array's address that are worth remembering. Sixty-four is
 // far more than a real pointer graph needs and cheap to re-read.
 constexpr size_t kMaxAnchorSites = 64;
@@ -98,7 +118,11 @@ constexpr size_t kMaxAnchorSites = 64;
 // only thing that had changed was that the records go briefly quiet while the
 // game rebuilds them. Two seconds of holding still is the difference between
 // riding that out and losing the feature for five minutes.
-constexpr uint32_t kMoveGrace = 120;
+//
+// Two seconds, stated as two seconds. As 120 frames it was one second at
+// 120Hz -- half the tolerance the sentence above argues for, on the headset
+// most likely to be running a busy planet scene in the first place.
+constexpr uint64_t kMoveGraceMs = 2000;
 
 // Pointer-hunt bounds. Hunts are re-run when the array is re-found at a NEW
 // base while a region list is still in hand; a session that keeps moving is
@@ -124,10 +148,16 @@ constexpr uint32_t kStepNotes = 16;
 // times in one day, twice on the developer's machine and once on a reporter's --
 // the same run rejected as "reads something else" and accepted a minute later.
 //
-// Ten seconds is longer than any mode change observed (25-86 frames, 6ac.6c)
-// and short enough that a run which is genuinely not the camera settings is not
-// watched for a meaningful part of a session.
-constexpr uint32_t kProbeWindow = 600;
+// Ten seconds is longer than any mode change observed (25-86 frames, 6ac.6c,
+// which is about a second) and short enough that a run which is genuinely not
+// the camera settings is not watched for a meaningful part of a session. Was
+// 600 frames, which is ten seconds only at 60Hz -- a rate this mod does not
+// support -- and 5 seconds at 120Hz.
+constexpr uint64_t kProbeWindowMs = 10000;
+
+// The short cooldown a provisional-expiry rescan drops to, overriding whatever
+// longer retry cooldown was left over. Was a bare 60 frames.
+constexpr uint64_t kShortCooldownMs = 670;
 
 struct Region {
     const uint8_t* base;
@@ -166,7 +196,9 @@ struct State {
     // this cannot become the guess between equals that the refusal exists to
     // prevent.
     const uint8_t* provisional = nullptr;
-    uint32_t  provisionalFrames = 0;
+    // Deadline rather than countdown: a countdown of frames expires in a
+    // different number of seconds on every headset.
+    uint64_t  provisionalUntilMs = 0;
 
     bool      scanning = false;
     bool      scanned = false;
@@ -179,7 +211,8 @@ struct State {
     // A scan that finds nothing usable is now an attempt, not a verdict.
     bool      usable = false;
     uint32_t  attempts = 0;
-    uint32_t  cooldown = 0;
+    // When the cooldown ends. 0 means no cooldown is running.
+    uint64_t  cooldownUntilMs = 0;
     bool      exhaustedNoted = false;
     std::vector<const uint8_t*> records;
 
@@ -189,12 +222,13 @@ struct State {
         CameraViewVote vote;
     };
     std::vector<Cand> cands;
-    uint32_t candPoll = 0;
+    uint64_t candPollMs = 0;
     // Press-coincidence certification (6aw's consequence): the tick clock,
-    // when the next-view key last fired against it, and whether such a key
-    // exists at all.
+    // when the next-view key last fired, and whether such a key exists at all.
+    // The tick is still frames -- it is a sequence number, not a duration --
+    // but the press coincidence it feeds is a window in time.
     uint32_t tick = 0;
-    uint32_t lastPressTick = 0;
+    uint64_t lastPressMs = 0;
     bool     pressWitness = false;
 
     // THE ANCHOR HUNT. Evidence gathering, and deliberately not yet acted on.
@@ -252,6 +286,10 @@ struct State {
     // Consecutive frames the chosen record has not read as a record. Reset by
     // any good read, so this counts one episode rather than a session's total.
     uint32_t  badReads = 0;
+    // When the current run of bad reads began. The count is kept because it is
+    // what the log reports and what the fixtures step; the decision is timed,
+    // because "two seconds of holding still" is the thing being argued for.
+    uint64_t  badReadsMs = 0;
     // Faults on the CURRENT record, reset whenever a new one is chosen.
     //
     // It never reset, and finishScan's own candidate probes charged it -- so
@@ -661,7 +699,7 @@ bool anchorRefind() {
         ordRec == nominated + g_s.ordinal * kStride;
     if (ordRec && gapless) {
         g_s.provisional = ordRec;
-        g_s.provisionalFrames = kProbeWindow;
+        g_s.provisionalUntilMs = nowMs() + kProbeWindowMs;
     }
     g_s.arrayBase = nominated;
     Log::get().note(
@@ -725,7 +763,7 @@ void finishScan() {
     }
 
     ++g_s.attempts;
-    g_s.cooldown = kRetryCooldown;
+    g_s.cooldownUntilMs = nowMs() + kRetryCooldownMs;
     g_s.chosen = nullptr;
     const char* retry =
         g_s.attempts < kMaxAttempts
@@ -914,13 +952,14 @@ void finishScan() {
         // The array's own base, which is what a pointer to it would hold.
         noteArrayBase(runs[candidates[0]].base);
         g_s.usable = true;
-        g_s.cooldown = 0;
+        g_s.cooldownUntilMs = 0;
         // The probes above charged the budget while deciding. They were reads of
         // OTHER runs, not of the record finally chosen, so they must not count
         // against it.
         g_s.readFaults = 0;
         g_s.readFaultsNoted = false;
         g_s.badReads = 0;
+        g_s.badReadsMs = 0;
         Log::get().note("camera view: tracking run %zu, ordinal %zu, which reads "
                         "%u -- a plausible view.",
                         candidates[0], g_s.ordinal, recordValue(g_s.chosen));
@@ -941,7 +980,7 @@ void finishScan() {
         if (longEnough.size() == 1) {
             const CameraViewRun& r = runs[longEnough[0]];
             g_s.provisional = r.base + g_s.ordinal * kStride;
-            g_s.provisionalFrames = kProbeWindow;
+            g_s.provisionalUntilMs = nowMs() + kProbeWindowMs;
 
             // AN EMPTY SLOT IS NOT A WRONG ANSWER, and must not cost an attempt.
             //
@@ -959,18 +998,20 @@ void finishScan() {
                     "camera view: run %zu is the right shape for ordinal %zu, but "
                     "that slot is EMPTY -- %zu of %zu slots hold a record, so the "
                     "array is here and the game has not filled it yet. This does "
-                    "not count as an attempt. Watching it for %u frames and "
+                    "not count as an attempt. Watching it for %u seconds and "
                     "scanning again after that.",
-                    longEnough[0], g_s.ordinal, r.present, r.slots, kProbeWindow);
+                    longEnough[0], g_s.ordinal, r.present, r.slots,
+                    (unsigned)(kProbeWindowMs / 1000));
                 return;
             }
 
             Log::get().note("camera view: run %zu is long enough for ordinal %zu "
                             "but did not read as a view just now. Watching it for "
-                            "%u frames before writing it off -- that slot holds "
+                            "%u seconds before writing it off -- that slot holds "
                             "something else while the game changes mode, and a "
                             "scan finishing at that moment is common.",
-                            longEnough[0], g_s.ordinal, kProbeWindow);
+                            longEnough[0], g_s.ordinal,
+                            (unsigned)(kProbeWindowMs / 1000));
             return;
         }
         Log::get().note("camera view: no run holds a plausible view at ordinal "
@@ -997,7 +1038,7 @@ void finishScan() {
     if (g_s.refinding) {
         if (g_s.attempts > 0) --g_s.attempts;
         g_s.needRescan = true;
-        g_s.cooldown = kRescanCooldown;
+        g_s.cooldownUntilMs = nowMs() + kRescanCooldownMs;
         Log::get().note(
             "camera view: the array is here (%zu record(s) at its usual base) "
             "but mid-rebuild. Scanning again in a few seconds rather than "
@@ -1039,7 +1080,7 @@ void cameraViewConfigure() {
 
 void cameraViewRequestScan() {
     if (!g_s.track || g_s.usable || g_s.scanning || !g_s.typePtr) return;
-    if (g_s.cooldown > 0) return;
+    if (g_s.cooldownUntilMs != 0 && nowMs() < g_s.cooldownUntilMs) return;
     // A rescan after a move does not spend the find-it-first-time budget.
     if (g_s.needRescan) {
         if (g_s.rescans >= kMaxRescans) return;
@@ -1065,7 +1106,7 @@ void cameraViewRequestScan() {
     g_s.scanning = true;
     g_s.chosen = nullptr;
     g_s.provisional = nullptr;   // a fresh search supersedes the old maybe
-    g_s.provisionalFrames = 0;
+    g_s.provisionalUntilMs = 0;
     g_s.readFaults = 0;          // a new search gets a fresh budget
     g_s.readFaultsNoted = false;
     g_s.records.clear();
@@ -1148,7 +1189,7 @@ bool cameraViewCertStep(CameraViewVote* c, uint32_t v, bool inCamera,
     return c->changes >= kChangesToCertify;
 }
 
-void cameraViewNotePress() { g_s.lastPressTick = g_s.tick ? g_s.tick : 1; }
+void cameraViewNotePress() { g_s.lastPressMs = stampMs(); }
 
 void cameraViewSetPressWitness(bool nextKeyBound) {
     g_s.pressWitness = nextKeyBound;
@@ -1161,7 +1202,8 @@ void cameraViewNudgeRescan() {
     // override, and the tick self-trigger picks it up.
     if (g_s.usable || g_s.scanning || !g_s.sawGameplay) return;
     g_s.needRescan = true;
-    if (g_s.cooldown > 60) g_s.cooldown = 60;
+    const uint64_t shortUntil = nowMs() + kShortCooldownMs;
+    if (g_s.cooldownUntilMs > shortUntil) g_s.cooldownUntilMs = shortUntil;
 }
 
 // Watch the candidates for one that behaves like a camera preset.
@@ -1173,13 +1215,13 @@ void cameraViewNudgeRescan() {
 // the head-offset gate and move somebody's viewpoint on the strength of it.
 void pollCandidates() {
     if (g_s.usable || g_s.cands.empty()) return;
-    if (++g_s.candPoll < kCandPollFrames) return;
-    g_s.candPoll = 0;
+    if (!elapsedMs(g_s.candPollMs, kCandPollMs)) return;
+    g_s.candPollMs = stampMs();
 
     const bool inCamera = headOffsetGateInCamera();
     const bool pressRecent =
-        g_s.lastPressTick != 0 &&
-        g_s.tick - g_s.lastPressTick <= kPressCoincidenceFrames;
+        g_s.lastPressMs != 0 &&
+        (nowMs() - g_s.lastPressMs) <= kPressCoincidenceMs;
 
     size_t qualified = 0, qualifiedAt = 0;
     for (size_t i = 0; i < g_s.cands.size(); ++i) {
@@ -1279,23 +1321,62 @@ void cameraViewTick(uint32_t eyeDraws) {
     //
     // The scan is triggered by the on-foot panel, which the main menu also
     // satisfies -- so somebody who launches and walks away can exhaust all four
-    // attempts on an empty heap and have none left when they start playing. A
-    // drawn scene is proof the game is past the menu: thousands of draws into
-    // the eye textures, against about twenty for the menu.
+    // attempts on an empty heap and have none left when they start playing.
+    //
+    // THE JOURNAL STATES THIS, so it is asked first. LoadGame is the game
+    // saying gameplay has started; inferring the same fact from how busy a
+    // frame looks is a proxy for it, and 6ba is the standing rule that where
+    // the journal speaks, the heuristic becomes the fallback for when it does
+    // not (disabled, folder not found, fault budget spent).
+    //
+    // THE FALLBACK THRESHOLD WAS WRONG, AND MEASURABLY SO. It read
+    // `eyeDraws > 1000` on the premise of "thousands of draws into the eye
+    // textures, against about twenty for the menu". The twenty is still right.
+    // The thousands were an artefact of counting targets that were not eye
+    // textures: once the submitted size is narrowed by its bounds (6bl), a
+    // whole session peaks at 975 on a Quest 3 and 1074 on a Pimax -- so 1000
+    // sits INSIDE the range it was meant to be far above, and on the Quest 3
+    // sawGameplay never latched at all. The refund and the rescan self-trigger
+    // were both dead there, silently.
+    //
+    // 100 is the measurement, not a margin picked to be safe. Menu-only
+    // sessions peak at 20 and 22 (2026-08-14 15:48, 2026-08-15 16:21, neither
+    // reaching LoadGame), and the flash detector's own validation measured the
+    // same 0-to-22 over 300 menu frames. Gameplay clears 100 even in sessions
+    // quit seconds after loading in (peaks of 119 and 126). It is the number
+    // glitch_frame already uses for "this frame rendered a scene", which is
+    // the same physical question; a third number for it would be a third
+    // thing to re-measure.
+    //
+    // Either signal may latch. The consequence of latching is a REFUND, and
+    // the failure being fixed is never latching at all, so the two sources are
+    // ORed rather than the journal being allowed to veto: a journal that is
+    // off, lagging its one-second poll, or that missed the event still leaves
+    // a working path, and each source is independently sound.
     pollCandidates();
 
-    if (!g_s.sawGameplay && eyeDraws > 1000) {
+    const bool journalSaysPlaying = journalWatchActive() && journalGameplay();
+    if (!g_s.sawGameplay && (journalSaysPlaying || eyeDraws > kMenuEyeDraws)) {
         g_s.sawGameplay = true;
+        // Which source said so, because they can disagree and the difference
+        // is diagnosable: the journal naming it means the boundary is exact,
+        // the draw count naming it means the journal was not available and a
+        // proxy was used. A log that does not distinguish them cannot answer
+        // "was the journal being read?" after the fact.
+        Log::get().note("camera view: the game is being played now (%s). "
+                        "Attempts made before this point searched a heap that "
+                        "was not populated yet.",
+                        journalSaysPlaying
+                            ? "the journal's LoadGame"
+                            : "no journal, so a drawn scene stood in for it");
         if (g_s.attempts > 0 && !g_s.usable) {
-            Log::get().note("camera view: the game is being played now, so the "
-                            "%u attempt(s) made before it was are being refunded "
-                            "-- those searched a heap that was not populated yet.",
-                            g_s.attempts);
+            Log::get().note("camera view: %u attempt(s) refunded.", g_s.attempts);
             g_s.attempts = 0;
-            g_s.cooldown = 0;
+            g_s.cooldownUntilMs = 0;
         }
     }
-    if (g_s.cooldown > 0) --g_s.cooldown;
+    // No per-frame decrement: a deadline does not need one, and the old
+    // countdown was the thing that made the cooldown headset-dependent.
 
     // The run the last scan could not make its mind up about, re-read.
     if (g_s.provisional && !g_s.usable && !g_s.scanning) {
@@ -1304,16 +1385,19 @@ void cameraViewTick(uint32_t eyeDraws) {
             g_s.chosen = g_s.provisional;
             noteArrayBase(g_s.provisional - g_s.ordinal * kStride);
             g_s.usable = true;
-            g_s.cooldown = 0;
+            g_s.cooldownUntilMs = 0;
             g_s.readFaults = 0;
             g_s.readFaultsNoted = false;
             g_s.badReads = 0;
+            g_s.badReadsMs = 0;
             g_s.provisional = nullptr;
-            g_s.provisionalFrames = 0;
+            g_s.provisionalUntilMs = 0;
             Log::get().note("camera view: that run reads %u now -- a plausible "
                             "view -- so it is being tracked after all. It was "
                             "mid-change when the scan sampled it.", v);
-        } else if (--g_s.provisionalFrames == 0) {
+        } else if (g_s.provisionalUntilMs != 0 &&
+                   nowMs() >= g_s.provisionalUntilMs) {
+            g_s.provisionalUntilMs = 0;
             g_s.provisional = nullptr;
             // ARM THE RESCAN THIS MESSAGE USED TO ONLY PROMISE. The empty-slot
             // branch refunds its attempt, and the refund zeroes the very
@@ -1328,10 +1412,11 @@ void cameraViewTick(uint32_t eyeDraws) {
             // FRESHER than the last rebuild -- the tail relocates repeatedly,
             // so only a prompt scan can hand it addresses worth watching.
             g_s.needRescan = true;
-            g_s.cooldown = kRescanCooldown;
+            g_s.cooldownUntilMs = nowMs() + kRescanCooldownMs;
             Log::get().note("camera view: that run never read as a view in %u "
-                            "frames, so it is not the camera settings after all. "
-                            "Scanning again in a few seconds.", kProbeWindow);
+                            "seconds, so it is not the camera settings after "
+                            "all. Scanning again in a few seconds.",
+                            (unsigned)(kProbeWindowMs / 1000));
         }
     }
 
@@ -1383,7 +1468,7 @@ int cameraViewCurrent() {
             "Recovering with a rescan; please report this log.");
         g_s.usable = false;
         g_s.needRescan = true;
-        g_s.cooldown = kRescanCooldown;
+        g_s.cooldownUntilMs = nowMs() + kRescanCooldownMs;
     }
     if (!g_s.usable || !g_s.chosen) return -1;
     const uint32_t v = recordValue(g_s.chosen);
@@ -1412,16 +1497,19 @@ int cameraViewCurrent() {
         // Explorer Cam while the trigger comes round again. So: report "do not
         // know" immediately, which takes the offset off and is the safe answer
         // either way, but keep the address and keep reading it.
-        if (++g_s.badReads < kMoveGrace) {
+        ++g_s.badReads;
+        if (g_s.badReads == 1) g_s.badReadsMs = stampMs();
+        if (!elapsedMs(g_s.badReadsMs, kMoveGraceMs)) {
             // Once per episode. lastView is cleared just below, so the next
             // frame of the same episode does not come back through here.
             if (g_s.lastView >= 0) {
                 Log::get().note("camera view: ordinal %zu stopped reading as a "
                                 "camera record. Holding the address for up to %u "
-                                "frames before concluding it has moved -- the "
+                                "seconds before concluding it has moved -- the "
                                 "records go quiet for a moment when the game "
                                 "rebuilds them, and the offset is off meanwhile.",
-                                g_s.ordinal, kMoveGrace);
+                                g_s.ordinal,
+                                (unsigned)(kMoveGraceMs / 1000));
             }
             g_s.lastView = -1;
             return -1;
@@ -1430,6 +1518,7 @@ int cameraViewCurrent() {
         // check proved this address is no longer a record of ours, which also
         // means a scan can tell the real one from garbage.
         g_s.badReads = 0;
+        g_s.badReadsMs = 0;
         g_s.usable = false;
         g_s.chosen = nullptr;
         // A remembered pointer may already name the new home: one guarded
@@ -1440,17 +1529,19 @@ int cameraViewCurrent() {
             return -1;
         }
         g_s.needRescan = true;
-        g_s.cooldown = kRescanCooldown;
+        g_s.cooldownUntilMs = nowMs() + kRescanCooldownMs;
         // Reported per MOVE, not once per session. failNoted latched on the
         // first one, so moves 2 through 17 announced nothing at all and the
         // last line anybody saw promised a retry that had already happened
         // fifteen times.
         Log::get().note("camera view: ordinal %zu has not read as a camera record "
-                        "for %u frames, so the game really has moved its camera "
-                        "settings (move %u). Scanning again to find where they "
-                        "went; the offset will not engage until it does. This is "
-                        "expected occasionally and is not a fault.",
-                        g_s.ordinal, kMoveGrace, g_s.rescans + 1);
+                        "for %u frames over %u seconds, so the game really has "
+                        "moved its camera settings (move %u). Scanning again to "
+                        "find where they went; the offset will not engage until "
+                        "it does. This is expected occasionally and is not a "
+                        "fault.",
+                        g_s.ordinal, g_s.badReads,
+                        (unsigned)(kMoveGraceMs / 1000), g_s.rescans + 1);
         g_s.lastView = -1;
         return -1;
     }
@@ -1462,6 +1553,7 @@ int cameraViewCurrent() {
                         "again after %u frame(s). It had not moved.",
                         g_s.ordinal, g_s.badReads);
         g_s.badReads = 0;
+        g_s.badReadsMs = 0;
     }
     if (out != g_s.lastView) {
         g_s.lastView = out;

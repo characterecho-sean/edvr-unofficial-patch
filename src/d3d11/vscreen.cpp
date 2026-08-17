@@ -21,6 +21,24 @@
 namespace edvr {
 namespace {
 
+// How often the totals line is written, and how long the starvation notice
+// waits before it will speak.
+//
+// STATED AS TIME so that 72Hz, 90Hz and 120Hz all behave the same. Elite in VR
+// runs at whichever of those the headset is set to, and a constant in frames
+// silently means a different duration at each -- the previous 1800 frames was
+// 25 seconds on a 72Hz Quest, 20 on a 90Hz headset and 15 on a 120Hz Pimax,
+// so the same session reported at three cadences depending on hardware.
+constexpr uint64_t kTotalsWindowMs = 20000;
+
+// A floor on frames actually drawn, which is a DIFFERENT claim from time
+// having passed: a game frozen on a shader compile satisfies the clock and has
+// drawn nothing, and the starvation notice would then blame the recogniser for
+// a game that never rendered. 300 is reached inside the window at 72Hz with an
+// order of magnitude to spare, so it constrains only the frozen case and never
+// the slow-headset one.
+constexpr uint32_t kMinFramesDrawn = 300;
+
 // ID3D11DeviceContext vtable indices.
 //
 // A frozen COM ABI: IUnknown occupies 0-2, ID3D11DeviceChild 3-6, and the
@@ -189,12 +207,42 @@ struct State {
     uint32_t voidThisFrame = 0;
     uint32_t voidFrameMin = 0xFFFFFFFFu;
     uint32_t voidFrameMax = 0;
-    // Largest eye-draw count seen. At 1920x1080 nothing but the composite is
-    // eye-sized and this stays at 2; if raising the panel scales intermediate
-    // targets past 2048 they get miscounted and this climbs, which is the
-    // suspected reason the distance fix dies above the stock resolution.
+    // Largest eye-draw count seen, for the whole session and for the current
+    // totals window. Both are needed and they answer different questions: the
+    // session peak says whether recognition EVER worked, the window peak says
+    // whether it is working NOW. Only the session one existed, which is why a
+    // session that recognised eye textures and then stopped -- the eye size
+    // changing under a mode switch, a wrapper reloading -- reported nothing at
+    // all. A monotonic maximum cannot fall, so it cannot report a loss.
+    //
+    // Both are counts of draws into targets that matched the eye size the
+    // headset published (6bl). Before that they counted anything at least
+    // 2048 square, which is why peaks in logs older than 0.7.3 run several
+    // times higher and are not comparable with these.
     uint32_t eyeDrawsMax = 0;
-    uint32_t totalsTick = 0;
+    uint32_t eyeDrawsWindowMax = 0;
+
+    // The totals window is TWENTY SECONDS, measured, not 1800 frames.
+    //
+    // It was a frame count described in the code as "twenty seconds at 90Hz",
+    // which it is on exactly one headset. A 72Hz Quest made it 25 seconds and
+    // a 120Hz Pimax 15, so the same session reported at different cadences
+    // depending on hardware and the windows could not be compared. Worse, the
+    // rate is not the headset's: a loading screen measured at 1790fps passes
+    // 1800 frames in a second, which is what let the starvation notice below
+    // fire during startup.
+    //
+    // Asking the runtime for its nominal refresh rate would answer a
+    // DIFFERENT question, and badly. Prop_DisplayFrequency_Float is an
+    // IVRSystem call, and IVRSystem is the one interface this project refuses
+    // to touch -- calling into IVRSystem_012 by vtable index crashed the game
+    // with a stack cookie failure, documented at the top of compositor_hook.
+    // The nominal rate would also not have caught the 1790fps loading screen,
+    // because the game was running FASTER than the display, nor a session
+    // running at half rate under reprojection. Frames counted against a clock
+    // measure what actually happened; the display's rating does not.
+    uint64_t windowStartMs = 0;
+    uint32_t windowStartFrame = 0;
     uint32_t panelMissW[8] = {}, panelMissH[8] = {};
     uint32_t panelMissCount = 0;
     uint64_t panelOverrides = 0;
@@ -231,6 +279,12 @@ struct State {
     uint32_t rtSeenCount = 0;
     uint64_t panelExclusions = 0;
     bool     starvationNoted = false;
+    bool     recognitionLostNoted = false;
+    // When the fixes were installed, for the starvation check. Frames are not
+    // a clock: a loading screen measured at 1790fps (see glitch_frame's
+    // validation note) passes 1800 frames in one second, so a frame count
+    // alone cannot say "long enough that this is not startup".
+    uint64_t installMs = 0;
 };
 
 State* g_state = nullptr;
@@ -960,6 +1014,9 @@ void vScreenFrameBoundary() {
     }
 
     if (s->eyeDrawsThisFrame > s->eyeDrawsMax) s->eyeDrawsMax = s->eyeDrawsThisFrame;
+    if (s->eyeDrawsThisFrame > s->eyeDrawsWindowMax) {
+        s->eyeDrawsWindowMax = s->eyeDrawsThisFrame;
+    }
 
     // What the headset is actually being given, if the other half is installed
     // and has validated. One interlocked read a frame.
@@ -1008,10 +1065,30 @@ void vScreenFrameBoundary() {
     // with could not distinguish the two causes, so this line names both and
     // prints the sizes it did see.
     //
-    // 1800 frames is the totals window -- twenty seconds at 90Hz. Menus and
-    // loading legitimately draw nothing eye-sized, so this waits out a window
-    // rather than firing at the first quiet frame.
-    if (!s->starvationNoted && s->frameNo >= 1800 && s->eyeDrawsMax == 0) {
+    // WAITING OUT A WINDOW MEANS TIME, NOT FRAMES. This read `frameNo >= 1800`
+    // on the stated premise that 1800 frames is "twenty seconds at 90Hz". At
+    // the three rates this mod has to work at that premise is wrong twice: 25
+    // seconds at 72Hz, 15 at 120. During a loading screen it is not even close
+    // -- the flash detector's validation note records one measured at 1790fps,
+    // which reaches 1800 frames in a second and legitimately draws nothing
+    // eye-sized while it does, which is how this notice fired during startup.
+    //
+    // So the duration is a duration. The frame floor stays, because "twenty
+    // seconds have passed" is not the same claim as "the game has been
+    // drawing" -- a frozen game satisfies the first and not the second -- but
+    // it is set low enough to be reached at 72Hz and every rate above it,
+    // rather than being a disguised second copy of the timeout.
+    const uint64_t nowMs = GetTickCount64();
+    const uint64_t windowMs = nowMs - s->windowStartMs;
+    const uint32_t windowFrames = s->frameNo - s->windowStartFrame;
+    const uint32_t windowFps =
+        windowMs ? static_cast<uint32_t>((windowFrames * 1000ull + windowMs / 2) / windowMs)
+                 : 0u;
+
+    const bool pastStartup =
+        (nowMs - s->installMs) >= kTotalsWindowMs && s->frameNo >= kMinFramesDrawn;
+
+    if (!s->starvationNoted && pastStartup && s->eyeDrawsMax == 0) {
         s->starvationNoted = true;
         char sizes[192];
         sizes[0] = '\0';
@@ -1022,7 +1099,7 @@ void vScreenFrameBoundary() {
             strncat_s(sizes, sizeof(sizes), one, _TRUNCATE);
         }
         Log::get().note(
-            "vScreen: NOT ONE eye-sized render target in %u frames. The black void, the "
+            "vScreen: NOT ONE eye-sized render target in %u frames over %u seconds. The black void, the "
             "panel distance, the transition flash fix and Explorer Cam all read that "
             "count, so all four are inert -- not broken, starved. They will say nothing "
             "further, which is why this line exists. Largest targets seen: %s. The panel "
@@ -1031,7 +1108,8 @@ void vScreenFrameBoundary() {
             "fix.vscreen_res_width/height (2880x1620 is safe, 1920x1080 is off). If none "
             "of them is, install openvr_api.dll as well so this side stops guessing at "
             "what your eye textures are.",
-            s->frameNo, s->rtSeenCount ? sizes : "none big enough to be one",
+            s->frameNo, static_cast<uint32_t>((nowMs - s->installMs) / 1000u),
+            s->rtSeenCount ? sizes : "none big enough to be one",
             s->panelW, s->panelH,
             static_cast<unsigned long long>(s->panelExclusions),
             s->eyeW ? "has published its size" : "has published nothing");
@@ -1050,29 +1128,57 @@ void vScreenFrameBoundary() {
     // process termination -- so anything logged there is never seen. That is why
     // this log has no shutdown lines at all, and why a totals line written there
     // produced nothing after a full session.
-    if (++s->totalsTick >= 1800) {
-        s->totalsTick = 0;
+    if (windowMs >= kTotalsWindowMs) {
         Log::get().note(
             "vScreen totals: panel distance applied %llu time(s), void cleared to black "
-            "%llu time(s) (%u-%u per frame over the last 1800), largest eye-draw count "
-            "%u. Two eyes a frame, so these should climb steadily; if they stop, the fix "
+            "%llu time(s) (%u-%u per frame over the last %u frames), largest eye-draw "
+            "count %u this window and %u this session. %u frames in %u ms is %u fps. "
+            "Two eyes a frame, so these should climb steadily; if they stop, the fix "
             "engaged once and then stopped matching. The per-frame void range should be "
             "a single number repeated -- a low end below the high end means some frames "
-            "in THIS window treated one eye and not the other. The eye-draw count is a "
-            "session peak and depends entirely on what you were doing: about 2 in HMD "
-            "Cinema Mode, tens to over a thousand on foot with the helmet HUD drawn, and "
-            "a few hundred in flight. It is NOT a fault indicator -- the flash detector "
-            "needs it above 100 to consider a frame at all.",
+            "in THIS window treated one eye and not the other. The eye-draw counts "
+            "depend entirely on what you were doing: about 2 in HMD Cinema Mode, tens to "
+            "hundreds on foot with the helmet HUD drawn, and a few hundred in flight. "
+            "They are NOT a fault indicator -- the flash detector needs the count above "
+            "100 to consider a frame at all. The fps is what the GAME produced, which is "
+            "not the headset's refresh rate: far above it on a loading screen, half of "
+            "it when the runtime is reprojecting.",
             static_cast<unsigned long long>(s->panelOverrides),
             static_cast<unsigned long long>(s->voidClears),
             s->voidFrameMin == 0xFFFFFFFFu ? 0u : s->voidFrameMin, s->voidFrameMax,
-            s->eyeDrawsMax);
+            windowFrames, s->eyeDrawsWindowMax, s->eyeDrawsMax,
+            windowFrames, static_cast<uint32_t>(windowMs), windowFps);
+
+        // A window that recognised NOTHING, after one that did.
+        //
+        // The session peak above cannot report this: a maximum never falls, so
+        // once anything has been recognised the number stays reassuring for the
+        // rest of the session even if recognition has since stopped dead. That
+        // is not hypothetical -- the eye textures are recreated across an
+        // external-camera or on-foot switch, and a size change there would
+        // starve every fix in this file while the peak kept reading fine.
+        if (!s->recognitionLostNoted && s->eyeDrawsMax > 0 &&
+            s->eyeDrawsWindowMax == 0) {
+            s->recognitionLostNoted = true;
+            Log::get().note(
+                "vScreen: eye textures were being recognised and now are not -- %u "
+                "frames in this window and not one eye-sized draw, against a session "
+                "peak of %u. The black void, the panel distance, the transition flash "
+                "fix and Explorer Cam all read that count, so all four have gone inert "
+                "as of this window. If you changed headset mode, resolution or "
+                "supersampling mid-session, the eye size changed with it. Said once.",
+                windowFrames, s->eyeDrawsMax);
+        }
+
         // Reset for the next window. A session-wide extreme never recovers: one
         // odd frame during a mode change pins the low end at 1 and every later
         // report then accuses the fix of a fault that stopped happening long
         // ago. The reader needs to know what is true now.
         s->voidFrameMin = 0xFFFFFFFFu;
         s->voidFrameMax = 0;
+        s->eyeDrawsWindowMax = 0;
+        s->windowStartMs = nowMs;
+        s->windowStartFrame = s->frameNo;
     }
 
     s->eyeDrawsLastFrame = s->eyeDrawsThisFrame;
@@ -1132,6 +1238,8 @@ void installVScreenFixes(ID3D11Device* device) {
     if (!ctx) return;
 
     g_state = new State();
+    g_state->installMs = GetTickCount64();
+    g_state->windowStartMs = g_state->installMs;
     g_state->blackVoid = wantVoid;
     g_state->distanceScale = scale;
     g_state->distanceEnabled = scale != 1.0f;

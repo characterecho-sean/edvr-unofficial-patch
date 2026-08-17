@@ -1,5 +1,7 @@
 #include "glitch_frame.h"
 
+#include "../common/timing.h"
+
 #include <windows.h>
 
 #include <cmath>
@@ -16,13 +18,20 @@ namespace {
 
 // Frames of camera history held in memory and written out only when asked.
 //
-// About ten seconds at 90Hz. Nothing is written to disk unless the dump key is
-// pressed, so the cost of keeping it is one 60-byte struct per frame.
-constexpr uint32_t kRingFrames = 900;
+// SIZED, not timed. A ring is a buffer, so it has to be a count -- but the
+// promise made about it everywhere ("the ten seconds before the fix gave up",
+// "the ten seconds of history") is a duration, and 900 frames delivered that
+// only at 90Hz: 12.5 seconds at 72 and 7.5 at 120. Sized for the fastest
+// supported rate instead, so ten seconds is the FLOOR at every rate rather
+// than the value at one of them. Nothing is written to disk unless the dump
+// key is pressed, so the cost is one 60-byte struct per frame -- 72KB.
+constexpr uint32_t kRingFrames = 1200;   // 10 s at 120Hz, 16.7 s at 72Hz
 
-// Frames to stand down for after deciding a jump was a change of reference
-// frame rather than a glitch.
-constexpr uint32_t kRebaseCooldown = 120;
+// How long to stand down for after deciding a jump was a change of reference
+// frame rather than a glitch. This is a window during which nothing can be
+// withheld -- a blind spot -- and the exposure it represents is wall-clock,
+// not frames. Was 120 frames: 1.67 s at 72Hz, 1.0 s at 120.
+constexpr uint64_t kRebaseCooldownMs = 1330;
 
 // The detector must never be able to withhold frames continuously. If more than
 // this fraction of a window is being withheld, whatever it is watching is not
@@ -117,7 +126,11 @@ constexpr uint32_t kValidateFrames = 300;
 // has ever carried it. The population that most needs a summary is exactly the
 // one whose game did not exit cleanly. vScreen has printed its totals on a timer
 // since long before anybody noticed this; this is the same answer.
-constexpr uint32_t kTotalsEvery = 1800;
+// Twenty seconds. This said, in its own comment, that it was copying vScreen's
+// timer -- and then used 1800 frames, which is the constant vScreen converted
+// to milliseconds precisely because it meant 25/20/15 seconds on the three
+// supported headsets. Now it really is the same answer.
+constexpr uint64_t kTotalsEveryMs = 20000;
 
 // Below this magnitude, a camera is not a WORLD camera and the frame carries no
 // reading at all.
@@ -244,13 +257,19 @@ constexpr uint32_t kDefaultDwellFrames = 20;
 // above what any single transition has ever cost (one or two) and far below the
 // eight-in-fifteen storm that prompted this. The cooldown is long enough to sit
 // out a storm and short enough that the next genuine event is still covered.
+// The window stays in FRAMES because it is a user-facing ini value
+// (advanced.transition_flash_burst_window, documented in frames with a
+// 10-600 range); reinterpreting it as milliseconds would silently change
+// every existing config. It is also the denominator of a rate, where the
+// frame is a defensible unit. The COOLDOWN is internal and is a duration --
+// "stand down for two seconds" -- so it becomes one.
 constexpr uint32_t kDefaultBurstLimit = 3;
 constexpr uint32_t kDefaultBurstWindow = 60;
-constexpr uint32_t kBurstCooldown = 180;
+constexpr uint64_t kBurstCooldownMs = 2000;
 constexpr uint32_t kBurstHistory = 16;
 // How often the stand-down may say so. Often enough that a governor which is
 // down for most of a session is visible; rarely enough not to paper the log.
-constexpr uint32_t kBurstNoteGap = 900;
+constexpr uint64_t kBurstNoteGapMs = 10000;
 
 // The trust bar's shape, pinned by the three measured cases.
 //
@@ -258,7 +277,11 @@ constexpr uint32_t kBurstNoteGap = 900;
 // the 568k cascade every 12.6 s -- both comfortably inside -- while the two low
 // wakes were minutes apart and cannot accumulate. Three rather than two because
 // two is what a pair of transitions produces.
-constexpr uint32_t kSepMarkWindow = 5400;
+//
+// Every number in that paragraph is seconds, and the constant was 5400 frames:
+// 45 seconds at 120Hz, which is only 3.6x the 12.6 s cascade cadence it has to
+// contain rather than the 4.8x the sixty was chosen to give.
+constexpr uint64_t kSepMarkWindowMs = 60000;
 constexpr uint32_t kSepMarksToCertify = 3;
 
 // Rule B's shape (1e step 3). A camera separating steadily from the view
@@ -422,7 +445,10 @@ struct State {
     bool     markedThisFrame = false;
     float    lastResid = 0.0f, lastTrip = 0.0f;
 
-    uint32_t cooldown = 0;
+    // The rebase stand-down, as a deadline. See kRebaseCooldownMs: this is a
+    // window in which nothing can be withheld, and how long that blind spot
+    // lasts is a wall-clock fact rather than a frame count.
+    uint64_t cooldownUntilMs = 0;
     uint32_t consecutive = 0;
 
     uint32_t frameNo = 0;
@@ -464,7 +490,7 @@ struct State {
         // refuses the third is what separates a co-moving pair from an event that
         // merely happens to repeat its size.
         uint32_t marks = 0;
-        uint32_t lastMarkFrame = 0;
+        uint64_t lastMarkMs = 0;
         bool     certified = false;
     };
     Separation seps[kSeparations] = {};
@@ -526,7 +552,7 @@ struct State {
     uint32_t   withheldHead = 0;
     uint32_t   burstLimit = kDefaultBurstLimit;
     uint32_t   burstWindow = kDefaultBurstWindow;
-    uint32_t   burstStandDown = 0;
+    uint64_t   burstStandDownUntilMs = 0;
     // What the separation memory is allowed to DO. 0 = off entirely, 1 = log
     // only (recognise and report, never excuse), 2 = act.
     //
@@ -544,7 +570,7 @@ struct State {
     // apart -- can never satisfy. That asymmetry is why they are trusted to act
     // and this is not.
     uint32_t   separationMode = 1;
-    uint32_t   burstNotedFrame = 0;
+    uint64_t   burstNotedMs = 0;
     uint32_t   lastLetThroughFrame = 0;
 
     uint32_t   suppressed = 0;
@@ -572,7 +598,7 @@ struct State {
     float      driftPct = kDefaultDriftPct;
     // Periodic totals: when they were last printed, and what they said. Printed
     // only when a counter has moved, so a quiet session stays quiet.
-    uint32_t   totalsAt = 0;
+    uint64_t   totalsAtMs = 0;
     uint32_t   totalsWithheld = 0;
     uint32_t   totalsSuppressed = 0;
     // Set by the detector, read by the boundary: this frame's jump matched a
@@ -617,6 +643,19 @@ struct State {
 // Reads of the game's mapped memory happen inside the caller's fault guard in
 // vscreen.cpp, so this file needs no budget of its own.
 State* g_state = nullptr;
+
+// The two stand-downs, asked as questions rather than read as counters.
+//
+// Both were `> 0` tests on per-frame countdowns. As deadlines they need a
+// predicate, and having one named place for each is what kept the conversion
+// honest: every site that used to decrement or compare now goes through these,
+// so none of them can quietly disagree about what "standing down" means.
+inline bool burstDown(const State* s) {
+    return s->burstStandDownUntilMs != 0 && nowMs() < s->burstStandDownUntilMs;
+}
+inline bool rebaseDown(const State* s) {
+    return s->cooldownUntilMs != 0 && nowMs() < s->cooldownUntilMs;
+}
 
 // The remembered magnitude matching `resid`, or -1.
 //
@@ -702,22 +741,23 @@ void recordSeparationMark(float resid) {
     // OUTSIDE THE WINDOW IS A RESTART, not an increment. Two low-wake
     // transitions minutes apart must never accumulate toward the same
     // certification -- that is the failure this whole bar exists to prevent.
-    if (e.marks > 0 && s->frameNo - e.lastMarkFrame <= kSepMarkWindow) {
+    if (e.marks > 0 && !elapsedMs(e.lastMarkMs, kSepMarkWindowMs)) {
         ++e.marks;
     } else {
         e.marks = 1;
     }
-    e.lastMarkFrame = s->frameNo;
+    e.lastMarkMs = stampMs();
     if (!e.certified && e.marks >= kSepMarksToCertify) {
         e.certified = true;
         Log::get().note(
             "transition flash: a separation of about %.0f world units has cost %u "
-            "frames within %u, so it is a fixed gap between two render passes "
+            "times within %u seconds, so it is a fixed gap between two render passes "
             "that MOVE WITH the view -- no fixed point to certify, no fixed "
             "radius either, which is why nothing else here catches it. Frames "
             "whose jump matches it are no longer withheld. A transition repeats "
             "its size too, but minutes apart, and cannot reach this.",
-            static_cast<double>(e.resid), e.marks, kSepMarkWindow);
+            static_cast<double>(e.resid), e.marks,
+            (unsigned)(kSepMarkWindowMs / 1000));
     }
 }
 
@@ -1031,10 +1071,10 @@ const char* letThroughReason(State* s, float resid) {
                "between two render passes rather than the view moving";
     if (s->driftSuppressedThisFrame)
         return "it continued a separation already being watched drifting wider";
-    if (s->burstStandDown > 0)
+    if (burstDown(s))
         return "the burst governor is standing down after spending its withhold "
                "budget, so nothing is withheld until it comes back";
-    if (s->cooldown > 0)
+    if (rebaseDown(s))
         return "the detector is still settling after a recent jump and will not "
                "judge again yet";
     if (s->consecutive >= s->maxConsecutive)
@@ -1614,13 +1654,13 @@ void glitchFrameObserve(const void* data, uint32_t bytes, const void* resource) 
             ++recentWithholds;
         }
     }
-    if (s->burstStandDown == 0 && recentWithholds >= s->burstLimit) {
-        s->burstStandDown = kBurstCooldown;
+    if (!burstDown(s) && recentWithholds >= s->burstLimit) {
+        s->burstStandDownUntilMs = nowMs() + kBurstCooldownMs;
         // Rate-limited, not once-only. It used to say this the first time and
         // stay silent for every later stand-down, so a governor that was down
         // most of a session looked like one that had fired once and recovered.
-        if (s->frameNo - s->burstNotedFrame >= kBurstNoteGap || s->burstNotedFrame == 0) {
-            s->burstNotedFrame = s->frameNo;
+        if (s->burstNotedMs == 0 || elapsedMs(s->burstNotedMs, kBurstNoteGapMs)) {
+            s->burstNotedMs = stampMs();
             Log::get().note(
                 "transition flash: %u frames withheld inside %u -- the whole "
                 "budget -- which costs about "
@@ -1630,13 +1670,13 @@ void glitchFrameObserve(const void* data, uint32_t bytes, const void* resource) 
                 "reaches this. If it keeps happening, something is producing a "
                 "storm of jumps and the camera history will show what.",
                 recentWithholds, s->burstWindow, recentWithholds * 80,
-                kBurstCooldown);
+                (unsigned)kBurstCooldownMs);
         }
     }
 
-    const bool willMark = jumped && !s->suppressedThisFrame && s->cooldown == 0 &&
+    const bool willMark = jumped && !s->suppressedThisFrame && !rebaseDown(s) &&
                           s->consecutive < s->maxConsecutive &&
-                          s->burstStandDown == 0;
+                          !burstDown(s);
     if (jumped && !willMark) {
         if (s->letThroughNotes < kLetThroughNotes &&
             s->frameNo - s->lastLetThroughFrame >= kLetThroughGap) {
@@ -1664,8 +1704,8 @@ void glitchFrameObserve(const void* data, uint32_t bytes, const void* resource) 
         : s->radiusSuppressedThisFrame     ? kVerdictShell
         : residualIsKnownSeparation(resid) ? kVerdictSeparation
         : s->driftSuppressedThisFrame      ? kVerdictDrift
-        : s->burstStandDown > 0            ? kVerdictBurst
-        : s->cooldown > 0                  ? kVerdictCooldown
+        : burstDown(s)                     ? kVerdictBurst
+        : rebaseDown(s)                    ? kVerdictCooldown
                                            : kVerdictConsecutive;
     if (willMark) {
         markGlitchFrame();
@@ -1685,8 +1725,8 @@ void glitchFrameObserve(const void* data, uint32_t bytes, const void* resource) 
                willMark ? 1 : 0, s->parkSuppressedThisFrame ? 1 : 0,
                s->radiusSuppressedThisFrame ? 1 : 0,
                residualIsKnownSeparation(resid) ? 1 : 0,
-               s->driftSuppressedThisFrame ? 1 : 0, s->burstStandDown,
-               s->cooldown, s->consecutive, s->maxConsecutive,
+               s->driftSuppressedThisFrame ? 1 : 0, burstDown(s) ? 1u : 0u,
+               rebaseDown(s) ? 1u : 0u, s->consecutive, s->maxConsecutive,
                static_cast<double>(s->driftHead),
                s->driftFrame ? s->frameNo - s->driftFrame : 0);
     }
@@ -1698,7 +1738,6 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
     if (!s || !s->observing) return;
 
     ++s->frameNo;
-    if (s->burstStandDown > 0) --s->burstStandDown;
 
     // OBSERVING BUT NOT ACTING. Record the frame and stop.
     //
@@ -1832,7 +1871,7 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
     // which is the state the flag was in when Submit read it. Counting it cannot
     // disagree with what happened.
     //
-    // endering is deliberately NOT part of the test any more. It is known only
+    // Rendering is deliberately NOT part of the test any more. It is known only
     // here, at the boundary, and the compositor has already acted by then -- so a
     // frame withheld during draws and later judged "not a rendered scene" WAS
     // withheld, and a counter that quietly drops it is lying in the same
@@ -1893,7 +1932,7 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
         // frame withheld" reads wasWithheld, here, once.
         s->withheldAt[s->withheldHead % kBurstHistory] = s->frameNo;
         ++s->withheldHead;
-        // Counted, not excluded: see the note above on endering.
+        // Counted, not excluded: see the note above on rendering.
         if (!rendering) ++s->withheldNotRendering;
         s->markedThisFrame = true;
         ++s->framesWithheld;
@@ -2003,7 +2042,7 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
         } else {
             // Stayed. The reference frame moved, so further jumps here are the
             // same event and withholding them buys nothing but judder.
-            s->cooldown = kRebaseCooldown;
+            s->cooldownUntilMs = nowMs() + kRebaseCooldownMs;
             s->camPrevValid = 0;
             // NOT recorded as a separation, deliberately, though it is a
             // repeating-magnitude memory sitting right here.
@@ -2023,7 +2062,7 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
                     "units off the old path), so that was a change of reference frame "
                     "rather than a bad frame. Standing down for %u frames instead of "
                     "withholding the rest of it.",
-                    back, kRebaseCooldown);
+                    back, (unsigned)kRebaseCooldownMs);
             }
         }
     } else if (s->jumpedThisFrame) {
@@ -2113,8 +2152,9 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
     // Gated on a counter having MOVED, so this says nothing at all through a
     // session where the fix never fires -- which is most of them, and which is
     // also the answer to "did it do anything": no line means no.
-    if (s->frameNo - s->totalsAt >= kTotalsEvery) {
-        s->totalsAt = s->frameNo;
+    if (s->totalsAtMs == 0) s->totalsAtMs = stampMs();
+    if (elapsedMs(s->totalsAtMs, kTotalsEveryMs)) {
+        s->totalsAtMs = stampMs();
         if (s->framesWithheld != s->totalsWithheld ||
             s->suppressed != s->totalsSuppressed) {
             const bool acted = glitchConsumerPresent();
@@ -2144,7 +2184,6 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
     }
 
     if (s->markedThisFrame) ++s->consecutive; else s->consecutive = 0;
-    if (s->cooldown > 0) --s->cooldown;
     s->markedThisFrame = false;
     s->jumpedThisFrame = false;
     s->suppressedThisFrame = false;
