@@ -4,11 +4,11 @@ Fixes for things that make Odyssey uncomfortable in a headset. Six fixes, two
 files, about three minutes — what each fix does is under
 [What it fixes](#what-it-fixes).
 
-> **Already running EDHM?** It installs itself as `d3d11.dll` too, and only one
-> file can have that name — don't overwrite it. See
+> **Already running EDHM or ReShade?** Both can run alongside EDVR. EDHM
+> installs itself as `d3d11.dll` too, and only one file can have that name —
+> don't overwrite it. See
 > [Running alongside other mods](#running-alongside-other-mods): one rename and
-> one setting. **ReShade currently cannot run alongside EDVR** — same section,
-> short explanation.
+> one setting. ReShade needs nothing at all as of 0.7.2.
 
 ## Install
 
@@ -20,9 +20,19 @@ transition flash fix and Explorer Cam.
 1. Close Elite Dangerous.
 2. Check there is no `d3d11.dll` already next to `EliteDangerous64.exe`. If
    there is, stop — see [Running alongside other mods](#running-alongside-other-mods).
-3. Copy `d3d11.dll` and `edvr.ini` into the folder containing
-   `EliteDangerous64.exe`, normally
-   `%LOCALAPPDATA%\Frontier_Developments\Products\elite-dangerous-odyssey-64`.
+3. Copy `d3d11.dll` and `edvr.ini` into **the folder containing
+   `EliteDangerous64.exe`**. Where that is depends on how you installed the
+   game — these are the ones people have reported:
+
+   | Install | Folder |
+   |---|---|
+   | Frontier launcher | `…\Frontier\EDLaunch\Products\elite-dangerous-odyssey-64` (often under `Program Files (x86)`, and not always on C:) |
+   | Steam | `…\steamapps\common\Elite Dangerous\Products\elite-dangerous-odyssey-64` |
+   | Epic | `…\Epic Games\EliteDangerous\Products\elite-dangerous-odyssey-64` |
+
+   If none of those match, find `EliteDangerous64.exe` yourself — that folder
+   is the answer, whatever its path. EDVR writes the folder it loaded from
+   into the first lines of its log, so you can always check afterwards.
 4. Start the game.
 
 Press **Scroll Lock** in game to toggle the brightness fix; at a star the
@@ -41,8 +51,11 @@ this name and EDVR needs that original kept:
 > in Frontier's launcher to restore the file, and redo the steps below.)
 
 1. Close Elite Dangerous.
-2. Go to
-   `%LOCALAPPDATA%\Frontier_Developments\Products\elite-dangerous-odyssey-64\Openvr\win64`.
+2. Find **the folder that already contains the game's own `openvr_api.dll`**.
+   Start from the `Openvr` folder next to `EliteDangerous64.exe`: on some
+   installs the file sits directly in `Openvr\`, on others in `Openvr\win64\`.
+   Whichever one holds it is the right folder — there is no single correct
+   path, so go by the file rather than the name.
 3. **Rename** the `openvr_api.dll` already there to `openvr_api_orig.dll`.
 4. Copy EDVR's `openvr_api.dll` (from the release's `openvr` folder) into its
    place.
@@ -66,8 +79,9 @@ history, which separates "detected and let through" from "never detected".
 
 ### Uninstall
 
-Delete `d3d11.dll` and `edvr.ini` from the game folder; in `Openvr\win64`,
-delete EDVR's `openvr_api.dll` and rename `openvr_api_orig.dll` back.
+Delete `d3d11.dll` and `edvr.ini` from the game folder; in whichever `Openvr`
+folder you used, delete EDVR's `openvr_api.dll` and rename
+`openvr_api_orig.dll` back.
 
 ## What it fixes
 
@@ -240,10 +254,25 @@ file won't load, EDVR says so in the log and carries on without it.
 is *EDVR's* file. To undo the pair cleanly: delete `d3d11.dll` and `edvr.ini`,
 rename `d3d11_edhm.dll` back, then run EDHM's uninstaller if wanted.
 
-**ReShade (not the VRToolKit variant) should "just work" (tm)**
+**ReShade** needs no configuration — install it the way ReShade tells you to
+(normally as `dxgi.dll`) and EDVR composes with it. Both mods' effects apply.
 
 <details>
-<summary>Why an earlier version of this crashed, if you hit that</summary>
+<summary>If you are on 0.7.1 or earlier and the game crashes on launch</summary>
+
+Update to 0.7.2. Before it, EDVR intercepted Direct3D calls by copying an
+object's method table and pointing *the object itself* at the copy — which
+quietly re-pointed objects ReShade owns and dispatches through, and the game
+crashed while EDVR was installing
+([#6](https://github.com/characterecho-sean/edvr-unofficial-patch/issues/6)).
+It presented as intermittent because EDVR's crash sentinel disables the
+Direct3D fixes on the launch after a crash, so it alternated. EDVR now swaps
+the individual method pointers where they already live and never touches the
+object.
+</details>
+
+<details>
+<summary>Why an earlier version of this crashed with EDHM, if you hit that</summary>
 
 The first attempt loaded the other mod during `DllMain`, where Windows holds the
 loader lock; loading a DLL that isn't already in memory runs *its* startup code

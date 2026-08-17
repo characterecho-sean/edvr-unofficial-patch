@@ -41,6 +41,18 @@ const KeyMap kKeyMap[] = {
     {"Numpad_Multiply", "MULTIPLY"}, {"Numpad_Divide", "DIVIDE"},
     {"Numpad_Add", "ADD"},       {"Numpad_Subtract", "SUBTRACT"},
     {"Numpad_Decimal", "DECIMAL"},
+    // Names Elite writes that this table could not express before, each one
+    // silently reported as "not on a keyboard key" (issue #8).
+    {"PrintScreen", "PRINTSCREEN"}, {"Apps", "APPS"},
+    {"Menu", "APPS"},
+    // Numpad Enter and the main Enter are ONE virtual key; the difference is
+    // an extended-key flag that GetAsyncKeyState does not report. Watching
+    // ENTER is the honest best we can do, and it does fire on the numpad one.
+    {"Numpad_Enter", "ENTER"},
+    // The extra key ISO keyboards have beside left shift (and on some
+    // layouts beside Enter). No character name fits it across layouts, so it
+    // goes through as the raw virtual-key code the ini syntax also accepts.
+    {"Oem102", "0xE2"},
     // Elite names the modifier keys as keys; as a MAIN binding they are not
     // meaningful to EDVR and translate to nothing.
 };
@@ -129,8 +141,14 @@ bool eliteBindsTranslateKey(const char* eliteKey, char* out, size_t outLen) {
 // tag, not a byte count: with a fixed span, an element missing its
 // Secondary borrowed the NEXT element's, which is how a controller-bound
 // on-foot camera read as the ship's F11.
+// rawKb receives the Elite key name of a KEYBOARD slot this build could not
+// translate. That distinction is the whole point: "no keyboard binding" and
+// "a keyboard binding EDVR cannot name" look identical from outside and want
+// opposite things from the player -- bind a keyboard key, versus tell us the
+// name so it can be added. Issue #8 was the second, reported as the first.
 bool parseElementIn(const std::string& text, const char* element, char* out,
-                    size_t outLen, bool* present) {
+                    size_t outLen, bool* present, char* rawKb, size_t rawKbLen) {
+    if (rawKb && rawKbLen) rawKb[0] = '\0';
     const size_t el = text.find(std::string("<") + element + ">");
     if (present) *present = el != std::string::npos;
     if (el == std::string::npos) return false;
@@ -144,8 +162,15 @@ bool parseElementIn(const std::string& text, const char* element, char* out,
         if (_stricmp(device.c_str(), "Keyboard") != 0) continue;
         if (!attrAfter(text, s, 160, "Key", &key)) continue;
         char keyName[32];
-        if (!eliteBindsTranslateKey(key.c_str(), keyName, sizeof(keyName)))
+        if (!eliteBindsTranslateKey(key.c_str(), keyName, sizeof(keyName))) {
+            // A keyboard slot we cannot name. Remember the first one so the
+            // caller can say which key it was instead of claiming there is
+            // none, and keep looking -- Secondary may still be expressible.
+            if (rawKb && rawKbLen && rawKb[0] == '\0') {
+                snprintf(rawKb, rawKbLen, "%s", key.c_str());
+            }
             continue;
+        }
         // Modifiers attached to this slot, before the element ends.
         std::string prefix;
         size_t m = s;
@@ -250,10 +275,22 @@ bool eliteBindsLookupDir(const wchar_t* dirC, const char* element, char* out,
         for (const char* wanted : {element, fallbackElement}) {
             if (!wanted) break;
             bool present = false;
-            if (parseElementIn(text, wanted, out, outLen, &present)) {
+            char rawKb[48] = {};
+            if (parseElementIn(text, wanted, out, outLen, &present, rawKb,
+                               sizeof(rawKb))) {
                 Log::get().note("bindings: %s read from %s: %s", wanted,
                                 c.utf8, out);
                 return true;
+            }
+            if (present && rawKb[0] != '\0') {
+                Log::get().note(
+                    "bindings: %s in %s IS on a keyboard key -- Elite calls it "
+                    "%s -- but this build has no name for that key, so it "
+                    "cannot be watched. Please report this line; meanwhile "
+                    "binding the action to an ordinary letter, F-key or arrow "
+                    "in Elite will work.",
+                    wanted, c.utf8, rawKb);
+                return false;
             }
             if (present) {
                 Log::get().note(

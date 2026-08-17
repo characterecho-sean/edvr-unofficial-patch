@@ -6,8 +6,9 @@ Six fixes for things that make Odyssey uncomfortable in a headset.
 
 ALREADY RUNNING EDHM OR RESHADE?
 
-They install themselves as d3d11.dll too, and only one file can have that name,
-so do not just overwrite theirs. See RUNNING ALONGSIDE OTHER MODS below - it
+Both work alongside EDVR. ReShade needs nothing at all as of 0.7.2 - install it
+normally (as dxgi.dll). EDHM installs itself as d3d11.dll, the same name EDVR
+uses, so do not just overwrite it: see RUNNING ALONGSIDE OTHER MODS below, which
 takes one rename and one setting.
 
 
@@ -96,12 +97,23 @@ INSTALL
    is, you have another mod installed - see RUNNING ALONGSIDE OTHER MODS below
    before going any further, or you will break it.
 
-3. Copy d3d11.dll and edvr.ini into the folder containing
-   EliteDangerous64.exe, normally:
+3. Copy d3d11.dll and edvr.ini into THE FOLDER CONTAINING
+   EliteDangerous64.exe. Where that is depends on how you installed the game.
+   The ones people have reported:
 
-   %LOCALAPPDATA%\Frontier_Developments\Products\elite-dangerous-odyssey-64
+     Frontier launcher
+       ...\Frontier\EDLaunch\Products\elite-dangerous-odyssey-64
+       (often under Program Files (x86), and not always on C:)
 
-   (Paste that into Explorer's address bar.)
+     Steam
+       ...\steamapps\common\Elite Dangerous\Products\elite-dangerous-odyssey-64
+
+     Epic
+       ...\Epic Games\EliteDangerous\Products\elite-dangerous-odyssey-64
+
+   If none of those match, search for EliteDangerous64.exe - whatever folder
+   holds it is the answer. EDVR writes the folder it loaded from into the first
+   lines of its log, so you can check afterwards.
 
 4. Start the game as usual.
 
@@ -116,7 +128,8 @@ you can also delete: the edvr_logs folder, edvr_breadcrumbs.txt, and
 edvr_FATAL.txt if one is there. All three sit next to EliteDangerous64.exe.
 
 If you also installed openvr_api.dll for the transition flash fix, delete it
-from Openvr\win64 and rename openvr_api_orig.dll back to openvr_api.dll.
+from whichever Openvr folder you put it in and rename openvr_api_orig.dll back
+to openvr_api.dll.
 
 Frontier's launcher may remove d3d11.dll by itself when it verifies the install.
 That is not a problem - it has simply uninstalled EDVR. Copy the file back.
@@ -124,8 +137,13 @@ That is not a problem - it has simply uninstalled EDVR. Copy the file back.
 
 RUNNING ALONGSIDE OTHER MODS
 
-EDHM and ReShade also install themselves as d3d11.dll, and only one file can
-have that name. To run both:
+ReShade: nothing to do. Install it the way ReShade tells you to, normally as
+dxgi.dll, and both mods' effects apply. (Before 0.7.2 this crashed the game on
+launch, sometimes only every other launch. If you are on an older build and see
+that, update.)
+
+EDHM installs itself as d3d11.dll, and only one file can have that name. To run
+both it and EDVR:
 
 1. Rename the other mod's d3d11.dll to something else, for example
    d3d11_edhm.dll, leaving it in the same folder.

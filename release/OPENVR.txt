@@ -26,11 +26,12 @@ INSTALL
 
 1. Close Elite Dangerous.
 
-2. Go to the game's OpenVR folder, normally:
+2. Find the folder that ALREADY CONTAINS the game's own openvr_api.dll.
 
-   %LOCALAPPDATA%\Frontier_Developments\Products\elite-dangerous-odyssey-64\Openvr\win64
-
-   Paste that into the Explorer address bar if you cannot find it.
+   Start from the Openvr folder next to EliteDangerous64.exe. On some installs
+   the file sits directly in Openvr\, on others in Openvr\win64\. Whichever one
+   holds it is the right folder -- go by where the file is, not by the path,
+   because it differs between Frontier-launcher, Steam and Epic installs.
 
 3. RENAME the openvr_api.dll already there to:
 
@@ -43,10 +44,11 @@ INSTALL
 
    EDVR watches two calls in it. One is the frame submission, where it can
    withhold a single bad frame from the headset (the transition flash fix).
-   The other is the call that reports where your head is: with the on-foot
-   stereo fix configured, EDVR adds your offset to that answer while you are
-   in the external camera, so the game moves its own camera. That fix does
-   nothing until you bind your own external-camera key in edvr.ini.
+   The other is the call that reports where your head is: EDVR adds your
+   offset to that answer while you are in the external camera, so the game
+   moves its own camera. That one needs your external-camera key, which EDVR
+   reads from your own Elite key bindings -- there is nothing to set for it,
+   as long as the camera is on a keyboard key.
 
 4. Copy the openvr_api.dll from THIS folder into that folder.
 

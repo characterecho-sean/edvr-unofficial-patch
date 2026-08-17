@@ -829,6 +829,25 @@ int hotkeyChecks() {
                    "to the ship element's keyboard key (%s)\n", v);
             ++bad;
         }
+        // Names Elite writes that used to be reported as "not on a keyboard
+        // key" (issue #8): a HOTAS user with a keyboard secondary was told
+        // there was no keyboard binding at all.
+        if (!edvr::eliteBindsTranslateKey("Key_PrintScreen", t, sizeof(t)) ||
+            edvr::virtualKeyFromName(t, &m) != VK_SNAPSHOT) {
+            printf("  FAIL  Key_PrintScreen did not translate\n");
+            ++bad;
+        }
+        if (!edvr::eliteBindsTranslateKey("Key_Numpad_Enter", t, sizeof(t)) ||
+            edvr::virtualKeyFromName(t, &m) != VK_RETURN) {
+            printf("  FAIL  Key_Numpad_Enter did not translate to ENTER\n");
+            ++bad;
+        }
+        if (!edvr::eliteBindsTranslateKey("Key_Oem102", t, sizeof(t)) ||
+            edvr::virtualKeyFromName(t, &m) != 0xE2) {
+            printf("  FAIL  Key_Oem102 did not translate to a raw VK\n");
+            ++bad;
+        }
+
         // With the Humanoid element entirely ABSENT (older formats), the
         // fallback element is the right answer.
         writeFile(L"Custom.4.2.binds",
