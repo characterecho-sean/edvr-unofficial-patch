@@ -162,6 +162,15 @@ int main(int argc, char** argv) {
             "inventory = no\r\n"
             "[fix]\r\n"             // repeated, as the shipped file does it
             "head_offset_view = 3\r\n"
+            // A STRAY KEYSTROKE, which strtol used to read as a deliberate
+            // setting. Found in a player ini as
+            // transition_flash_max_consecutive = 3w: it parsed to 3, which
+            // happens to equal the burst budget, so every excursion spent the
+            // whole budget and opened a two-second window in which nothing
+            // could be withheld. The flash the fix exists to hide came back,
+            // and the cause was one invisible character.
+            "head_offset_view_count = 4w\r\n"
+            "panel_distance_index = 12 or 13\r\n"
             "black_void = 0\r\n";   // duplicate: the later one must win
         if (!writeIni(scratch, kIni)) {
             fail("scratch ini", "could not write it");
@@ -172,6 +181,10 @@ int main(int argc, char** argv) {
             expectFloat("fix.panel_distance", 2.5f, "a ; comment is not part of the value");
             expectInt("fix.head_offset_view", 3,
                       "a BOM does not swallow the first section");
+            expectInt("fix.head_offset_view_count", -999999,
+                      "a trailing letter is refused, not silently truncated");
+            expectInt("fix.panel_distance_index", -999999,
+                      "...and so is a value with words after the number");
             expectBool("fix.black_void", false,
                        "a duplicate key takes the later value");
         }

@@ -1307,6 +1307,41 @@ void installGlitchFrameFix() {
         "advanced.transition_flash_burst_limit", kDefaultBurstLimit, 1, 30));
     s.burstWindow = static_cast<uint32_t>(cfg.getIntInRange(
         "advanced.transition_flash_burst_window", kDefaultBurstWindow, 10, 600));
+
+    // THESE TWO ARE COUPLED, and nothing said so until it cost a flight.
+    //
+    // max_consecutive caps how long ONE run of withholds can be. burst_limit
+    // is how many withholds inside burst_window spend the whole budget. If
+    // the cap is not SMALLER than the budget, a single capped run spends it
+    // by definition -- so every genuine transition, the thing the fix exists
+    // for, is immediately followed by a stand-down in which nothing can be
+    // withheld, and the rest of that same transition goes straight through.
+    //
+    // Measured 2026-08-17 on a Pimax at 72Hz, with max_consecutive at 3 and
+    // the budget at 3: three excursions in one session, each exactly 3 frames
+    // withheld, each followed by "the whole budget ... Standing down for 2000
+    // ms". The third stand-down began 1.84 s before the player pressed the
+    // history key, and a jump was let through 0.93 s before the press --
+    // inside the blind window, and inside reaction time. The shipped default
+    // of 2 against a budget of 3 does not do this; the player had the value
+    // uncommented, and a stray keystroke ("3w", which strtol read as 3) is
+    // what put it there.
+    //
+    // Said, not overridden. Both are deliberate escape hatches and a player
+    // who wants this shape may have it -- but they should be told what it
+    // costs rather than discovering it as a flash the fix was meant to hide.
+    if (s.maxConsecutive >= s.burstLimit) {
+        Log::get().note(
+            "transition_flash_max_consecutive = %u is not below "
+            "transition_flash_burst_limit = %u, so ONE run of withholds spends "
+            "the whole burst budget and every transition is followed by a "
+            "stand-down of %u ms in which nothing can be withheld -- including "
+            "the rest of that transition. If you are seeing a flash on a wake "
+            "drop or a landing, this is the first thing to change: leave "
+            "max_consecutive at its default of 2, or raise burst_limit above "
+            "it.",
+            s.maxConsecutive, s.burstLimit, (unsigned)kBurstCooldownMs);
+    }
     // A PERCENTAGE, like repeat_percent above and unlike the radius tolerance;
     // the ini says so beside it. 0 turns Rule B off -- the escape hatch if a
     // build ever produces genuine flashes that drift in lockstep with their

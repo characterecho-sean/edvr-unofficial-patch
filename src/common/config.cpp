@@ -239,10 +239,37 @@ void Config::set(const char* key, const char* value) {
     m_impl->values[k] = value;
 }
 
+// Does the whole value parse, or only a prefix of it?
+//
+// strtol stops at the first character it cannot use and, with a null end
+// pointer, says nothing about it. So "3w" reads as 3 and "2 or 3" reads as 2.
+// Found in the field: a stray keystroke had left
+// transition_flash_max_consecutive = 3w in a player's ini, which parsed to 3
+// -- and 3 happens to equal the burst budget, so every excursion spent the
+// whole budget and opened a two-second window where nothing could be
+// withheld. The typo was invisible; the flash was not.
+//
+// Trailing whitespace is fine. Anything else means the line does not say
+// what its author thought it said, and the default is the safer reading.
+static bool wholeValueParsed(const char* s, const char* end) {
+    if (end == s) return false;
+    while (*end == ' ' || *end == 0x09) ++end;
+    return *end == 0;
+}
+
 int Config::getInt(const char* key, int def) const {
     const std::string v = getString(key, "");
     if (v.empty()) return def;
-    return static_cast<int>(strtol(v.c_str(), nullptr, 0));
+    const char* s = v.c_str();
+    char* end = nullptr;
+    const long raw = strtol(s, &end, 0);
+    if (!wholeValueParsed(s, end)) {
+        Log::get().note("%s = \"%s\" is not a plain number; using %d. Everything "
+                        "after the digits was ignored before this, which made a "
+                        "typo read as a deliberate setting.", key, s, def);
+        return def;
+    }
+    return static_cast<int>(raw);
 }
 
 float Config::getFloat(const char* key, float def) const {
@@ -281,7 +308,7 @@ int Config::getIntInRange(const char* key, int def, int lo, int hi) const {
     const char* s = v.c_str();
     char* end = nullptr;
     const long raw = strtol(s, &end, 0);
-    if (end == s) {
+    if (!wholeValueParsed(s, end)) {
         Log::get().note("%s = \"%s\" is not a number; using %d.", key, s, def);
         return def;
     }
