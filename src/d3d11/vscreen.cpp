@@ -296,11 +296,22 @@ bool targetIsEyeSized(void* rtv) {
     bool out = info.a >= 2048 && info.b >= 2048;
     // Under the threshold and still an eye texture: the headset said so.
     //
-    // Half the headsets in use render an eye below 2048 on one axis, and for
-    // those this recogniser answered "no" to everything, all session, in
-    // silence. The threshold was never a fact about eye textures -- it was the
-    // best guess available to a module that could not see a Submit.
-    if (!out && s->eyeW && info.a == s->eyeW && info.b == s->eyeH) out = true;
+    // Most headsets in use render an eye below 2048 on at least one axis -- a
+    // Quest 3 through SteamVR is 1832x1920 or 1728x1824 at ordinary settings,
+    // and only reaches 2048 on both axes near or above its native panel -- and
+    // for those this recogniser answered "no" to everything, all session, in
+    // silence. The threshold was never a fact about eye textures. It was the
+    // best guess available to a module that could not see a Submit, and it
+    // encoded one desktop-class headset's dimensions as if they were universal.
+    //
+    // AT LEAST the eye size rather than exactly it. The submitted texture is
+    // the one the scene is drawn into on this build -- Elite reuses one per eye
+    // for the session -- but a build that renders larger and downsamples on the
+    // way out would fail an equality test, and failing it means going back to
+    // recognising nothing. Anything smaller than what the headset is handed
+    // cannot be an eye texture; anything at least that big might be, on the
+    // same terms the 2048 rule already admits shadow atlases.
+    if (!out && s->eyeW && info.a >= s->eyeW && info.b >= s->eyeH) out = true;
 
     // ...except the on-foot panel itself, once it has been raised.
     //

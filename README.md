@@ -308,7 +308,10 @@ on-foot panel. Two things defeated that guess, both silently:
 - **A panel raised to exactly your eye-texture size.** The panel exclusion
   then removed the eyes along with the panel. This is the one to suspect if
   you set `vscreen_res_width`/`_height` to `3840`/`2160`.
-- **Eye textures under 2048 on an axis**, which never qualified at all.
+- **Eye textures under 2048 on an axis**, which never qualified at all. This
+  is most headsets: a Quest 3 through SteamVR renders about 1832×1920 or
+  1728×1824 per eye at ordinary settings, and only clears 2048 on both axes
+  near or above its native panel resolution.
 
 From 0.7.3, `openvr_api.dll` reads the size of the texture the game actually
 submits and tells the graphics side, so it matches your real eye textures
