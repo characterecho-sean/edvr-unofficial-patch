@@ -1322,11 +1322,25 @@ void cameraViewTick(uint32_t eyeDraws) {
     // satisfies -- so somebody who launches and walks away can exhaust all four
     // attempts on an empty heap and have none left when they start playing.
     //
-    // THE JOURNAL STATES THIS, so it is asked first. LoadGame is the game
-    // saying gameplay has started; inferring the same fact from how busy a
-    // frame looks is a proxy for it, and 6ba is the standing rule that where
-    // the journal speaks, the heuristic becomes the fallback for when it does
-    // not (disabled, folder not found, fault budget spent).
+    // THE JOURNAL STATES THIS, and the draw count infers it. 6ba is the
+    // standing rule that where the journal speaks, the heuristic becomes the
+    // fallback for when it does not (disabled, folder not found, fault budget
+    // spent).
+    //
+    // BUT THE FALLBACK WINS IN PRACTICE, and saying otherwise here would be a
+    // comment describing a design rather than the code. Measured on both
+    // headsets 2026-08-17: the draw count latched 45 s before LoadGame on the
+    // Quest 3 and 25 s before it on the Pimax, because Elite renders a full
+    // scene while loading in and only writes LoadGame at the end of it. With
+    // an OR, the earlier signal always decides, so the journal is a backstop
+    // for a starved recogniser rather than the authority.
+    //
+    // That is accepted rather than fixed. What latching does is REFUND scan
+    // attempts, so being early costs at most the one or two attempts made in
+    // that window -- against a failure mode, never latching at all, that
+    // costs the feature for the session. Vetoing on an active-but-silent
+    // journal would trade a bounded cost for an unbounded one, which is the
+    // wrong direction for a signal whose job is to be permissive.
     //
     // THE FALLBACK THRESHOLD WAS WRONG, AND MEASURABLY SO. It read
     // `eyeDraws > 1000` on the premise of "thousands of draws into the eye
@@ -1362,12 +1376,22 @@ void cameraViewTick(uint32_t eyeDraws) {
         // the draw count naming it means the journal was not available and a
         // proxy was used. A log that does not distinguish them cannot answer
         // "was the journal being read?" after the fact.
+        // THREE CASES, NOT TWO. The first cut printed "no journal" whenever
+        // the draw count won, which was a plain misstatement: on both field
+        // runs the journal was being read perfectly well and simply had not
+        // reached LoadGame yet. A log line that names the wrong cause sends
+        // the next reader to check a folder that was never the problem.
         Log::get().note("camera view: the game is being played now (%s). "
                         "Attempts made before this point searched a heap that "
                         "was not populated yet.",
                         journalSaysPlaying
                             ? "the journal's LoadGame"
-                            : "no journal, so a drawn scene stood in for it");
+                            : journalWatchActive()
+                                  ? "a drawn scene, ahead of the journal -- "
+                                    "the game renders while it loads in and "
+                                    "writes LoadGame at the end of that"
+                                  : "no journal is being read, so a drawn "
+                                    "scene stood in for it");
         if (g_s.attempts > 0 && !g_s.usable) {
             Log::get().note("camera view: %u attempt(s) refunded.", g_s.attempts);
             g_s.attempts = 0;
