@@ -4,6 +4,13 @@ Fixes for things that make Odyssey uncomfortable in a headset. Six fixes, two
 files, about three minutes — what each fix does is under
 [What it fixes](#what-it-fixes).
 
+**Something not working?** [Open an
+issue](https://github.com/characterecho-sean/edvr-unofficial-patch/issues/new/choose)
+— that is the place a bug gets fixed, because you can attach the log, and the
+log is usually the whole answer. For everything else — setup questions,
+"is this normal", or just talking about it — there is a
+[Discord](https://discord.gg/hhDSxU4nX).
+
 > **Already running EDHM or ReShade?** Both can run alongside EDVR. EDHM
 > installs itself as `d3d11.dll` too, and only one file can have that name —
 > don't overwrite it. See
@@ -76,6 +83,19 @@ compositor version instead, the fix is off, the game runs normally, and that
 version string is worth reporting. If you see a flash anyway, press **Pause**
 straight after and send the logs — that writes the last ten seconds of viewpoint
 history, which separates "detected and let through" from "never detected".
+
+### Reporting a problem
+
+**Open an issue**, and attach `edvr_logs\` — both files if there are two. The
+log carries the build stamp, which fixes it were able to install, and what
+each one decided, so a report with it attached is usually diagnosable in one
+pass. Without it there is very little to go on. If the game will not start at
+all, `edvr_breadcrumbs.txt` next to `EliteDangerous64.exe` is written
+unbuffered and survives a crash that eats the log — send that.
+
+The [Discord](https://discord.gg/hhDSxU4nX) is good for setup questions and
+for "is this normal". Bugs still want an issue: chat loses attachments and
+the thread, and an issue is what remembers a problem long enough to fix it.
 
 ### Uninstall
 

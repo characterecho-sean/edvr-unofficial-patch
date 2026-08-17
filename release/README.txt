@@ -4,6 +4,19 @@ EDVR - an unofficial patch for Elite Dangerous: Odyssey in VR
 Six fixes for things that make Odyssey uncomfortable in a headset.
 
 
+SOMETHING NOT WORKING?
+
+Open an issue at github.com/characterecho-sean/edvr-unofficial-patch/issues and
+attach the edvr_logs folder. The log says which fixes installed and what each
+one decided, so a report with it attached is usually answerable in one pass;
+without it there is very little to go on. If the game will not start at all,
+send edvr_breadcrumbs.txt from next to EliteDangerous64.exe instead -- it is
+written unbuffered and survives a crash that eats the log.
+
+For setup questions, "is this normal", or just talking about it, there is a
+Discord: https://discord.gg/hhDSxU4nX
+
+
 ALREADY RUNNING EDHM OR RESHADE?
 
 Both work alongside EDVR. ReShade needs nothing at all as of 0.7.2 - install it

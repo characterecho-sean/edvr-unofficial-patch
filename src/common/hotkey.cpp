@@ -36,13 +36,22 @@ namespace edvr {
 //     -- the camera key is a TOGGLE, so a swallowed press inverts every press
 //     after it.
 //
-// The stray-key exposure that reopens is bounded by the gate rather than by
-// this check: intent alone arms nothing, because arming also needs the flat
-// panel to have stopped and a stereo scene to be drawing. A camera key
-// pressed in a browser while the on-foot screen is up changes nothing
-// visible. The residue is a press made elsewhere WHILE in the camera, which
-// drops the offset until pressed again -- recoverable and visible, which the
-// silent miss was not.
+// The stray-key exposure that reopens is bounded ON ENTRY by the gate rather
+// than by this check: intent alone arms nothing, because arming also needs
+// the flat panel to have stopped and a stereo scene to be drawing. A camera
+// key pressed in a browser while the on-foot screen is up changes nothing
+// visible.
+//
+// EXIT IS NOT BOUNDED THE SAME WAY, and the first version of this note got
+// that wrong by claiming a stray press was "recoverable by pressing again".
+// It is not, within one camera stay: the exit path needs no render evidence
+// at all, and gatePanelRun is zeroed after 90 panel-less frames, so pressing
+// again sets intent but cannot re-enter -- entry wants gatePanelRun > 30 and
+// only the flat panel returning rebuilds it. A genuine exit self-heals
+// because the panel does come back; a stray press while still in the camera
+// costs the offset for the rest of that stay. That is the real price of this
+// decision, it is larger than the price of the bug it replaces, and it is
+// worth fixing in the gate rather than papering over here.
 //
 // Controllers inherit the right answer for free: an adopted binding is
 // game-mirrored by definition, and neither XInput nor DirectInput has a
