@@ -768,6 +768,40 @@ void hookFactoryForDevice(ID3D11Device* device) {
     factory->Release();
 }
 
+void deviceHookNoteCleanExit() {
+    // REACHING THIS IS THE PROOF, and it is the only proof there is.
+    //
+    // An orderly exit is not a crash, whether or not the confirm window had
+    // elapsed. Without this a session that ends cleanly inside the first six
+    // seconds arms the next launch's refusal, and the player -- who did
+    // nothing wrong and saw no crash -- gets a run with every d3d11 fix
+    // switched off. Measured in the field on 2026-08-17: a 5-second session at
+    // 07:27 that installed everything, reached LoadGame and published the eye
+    // size, then a 09:53 launch that reported SENTINEL TRIPPED and rendered a
+    // grey void because the black-void fix never ran.
+    //
+    // This reasoning was already written, and already correct, on
+    // shutdownDeviceHooks -- which runs only from FreeLibrary. A game closing
+    // is process termination, a fact this codebase has recorded twice before
+    // (the totals lines that never printed, 6-guard). So the fix existed on the
+    // one path that never executes, which is worse than not existing: it reads
+    // as handled.
+    //
+    // WHY THIS DOES NOT EXCUSE A REAL CRASH. An unhandled access violation does
+    // not come here. The default handler terminates the process, and
+    // TerminateProcess delivers no DLL_PROCESS_DETACH -- so the hook crash this
+    // sentinel exists to catch still leaves the file behind, exactly as before.
+    // What changes is that a normal quit no longer looks the same as one.
+    //
+    // Safe on the termination path: one DeleteFileW, no allocation, no lock,
+    // no loader work. The branch that calls it already writes a breadcrumb.
+    if (!g_state) return;
+    if (g_state->sentinel && !g_state->sentinelConfirmed) {
+        g_state->sentinelConfirmed = true;
+        g_state->sentinel->confirm();
+    }
+}
+
 void shutdownDeviceHooks() {
     journalWatchShutdown();
     // Reverse of install order: vScreen's vtable copy was taken on top of the
@@ -777,13 +811,7 @@ void shutdownDeviceHooks() {
     shutdownVScreenFixes();
     shutdownExposureFix();
     if (!g_state) return;
-    // An orderly unload is not a crash, whether or not we got as far as the
-    // frame count that normally confirms. Without this, a session that ends
-    // cleanly inside the first six seconds would arm the next launch's refusal.
-    if (g_state->sentinel && !g_state->sentinelConfirmed) {
-        g_state->sentinelConfirmed = true;
-        g_state->sentinel->confirm();
-    }
+    deviceHookNoteCleanExit();
     g_state->factoryHook.uninstall();
     g_state->swapChainHook.uninstall();
     g_state->deviceHook.uninstall();

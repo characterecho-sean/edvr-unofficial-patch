@@ -15,6 +15,11 @@ namespace edvr {
 void hookDevice(ID3D11Device* device);
 void hookSwapChain(IDXGISwapChain* swapChain);
 void hookFactoryForDevice(ID3D11Device* device);
+// The process is exiting cleanly, so the crash sentinel must not be left
+// armed. Called from BOTH detach paths -- see the definition for why the
+// FreeLibrary one alone was not enough, and why a real crash still trips.
+void deviceHookNoteCleanExit();
+
 void shutdownDeviceHooks();
 
 }  // namespace edvr

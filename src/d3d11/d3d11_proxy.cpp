@@ -382,6 +382,10 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID reserved) {
             // lock. Do the minimum and leak the rest.
             if (reserved != nullptr) {
                 edvr::breadcrumb("gfx: process exit");
+                // Getting here at all means the game exited rather than
+                // died, so the sentinel comes down. One DeleteFileW, which
+                // is no more than the breadcrumb above already does.
+                edvr::deviceHookNoteCleanExit();
                 edvr::Log::get().detachDuringProcessExit();
             } else {
                 edvr::breadcrumb("gfx: FreeLibrary unload");

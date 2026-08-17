@@ -355,6 +355,10 @@ echo [edvr] === install-read check ===
 python "%ROOT%\tools\check_install_reads.py"
 if errorlevel 1 ( echo [edvr] ERROR: a config reader runs only on the reload path & exit /b 1 )
 
+echo [edvr] === exit-path check ===
+python "%ROOT%\tools\check_exit_paths.py"
+if errorlevel 1 ( echo [edvr] ERROR: cleanup that matters runs only on FreeLibrary & exit /b 1 )
+
 echo [edvr] === config contract ===
 where python >nul 2>&1
 if errorlevel 1 (
