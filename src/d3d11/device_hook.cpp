@@ -528,6 +528,13 @@ State& ensureState() {
         // file). Non-keyboard bindings skip with a log line, and the keys
         // FOLLOW the game's files: rebind in Elite mid-session and the stat
         // cadence in the frame path picks it up within seconds.
+        // These two mirror the GAME's own keys, so they are not filtered by
+        // which window has focus -- Elite acts on them unfocused, and EDVR
+        // disagreeing with the game is what a swallowed press costs. EDVR's
+        // own keys above (the exposure toggle, the history dump) keep the
+        // focus rule. See hotkey.h.
+        g_state->externalCamKey.setGameMirrored(true);
+        g_state->extCamNextKey.setGameMirrored(true);
         if (Config::get().getBool("hotkey.read_game_bindings", true)) {
             char b[48];
             if (eliteBindsLookup("PhotoCameraToggle_Humanoid", b, sizeof(b),

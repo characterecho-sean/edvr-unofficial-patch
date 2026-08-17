@@ -14,13 +14,39 @@ namespace edvr {
 
 // Does the foreground window belong to this process?
 //
-// GetAsyncKeyState is global: it reports the key whoever is typing, in whatever
-// application. Without this check, Scroll Lock pressed in a browser toggled the
-// brightness fix and Pause wrote a camera dump -- and VR users routinely have
-// another window focused while the headset keeps rendering, so this is the
-// normal case rather than an edge one.
+// GetAsyncKeyState is global: it reports the key whoever is typing, in
+// whatever application. Without this check, Scroll Lock pressed in a browser
+// toggled the brightness fix and Pause wrote a camera dump.
 //
-// Observation only, as before. Nothing is intercepted or withheld from the game.
+// THE CHECK IS NO LONGER APPLIED TO EVERY BINDING, and the line it is drawn
+// along is whose key it is (2026-08-16):
+//
+//   * EDVR's OWN controls -- the exposure toggle, the history dump -- keep
+//     it. The game does nothing with those keys, so there is no game state to
+//     stay in step with and a press typed elsewhere is pure noise.
+//
+//   * Bindings ADOPTED FROM ELITE'S OWN CONFIGURATION do not. There EDVR is
+//     mirroring the game's reading of a key, and Elite takes its input
+//     through DirectInput, which keeps delivering while its window is not
+//     foreground. Requiring focus made EDVR disagree with the game about
+//     which mode the player was in: measured 2026-08-16, a session where the
+//     camera key was pressed, the flat panel stopped, the stereo scene came
+//     up, and the gate sat at `intent=CLEAR, pressed not yet this session`
+//     while it watched the player cycle presets. Worse than losing one entry
+//     -- the camera key is a TOGGLE, so a swallowed press inverts every press
+//     after it.
+//
+// The stray-key exposure that reopens is bounded by the gate rather than by
+// this check: intent alone arms nothing, because arming also needs the flat
+// panel to have stopped and a stereo scene to be drawing. A camera key
+// pressed in a browser while the on-foot screen is up changes nothing
+// visible. The residue is a press made elsewhere WHILE in the camera, which
+// drops the offset until pressed again -- recoverable and visible, which the
+// silent miss was not.
+//
+// Controllers inherit the right answer for free: an adopted binding is
+// game-mirrored by definition, and neither XInput nor DirectInput has a
+// concept of focus to consult.
 static bool gameHasFocus() {
     HWND fg = GetForegroundWindow();
     if (!fg) return false;
@@ -109,8 +135,9 @@ void hotkeyResetBindings() { g_bindingCount = 0; }
 
 bool Hotkey::pressed() {
     if (m_vk == 0) return false;
+    // A game-mirrored binding is never filtered by focus; see the note above.
     return pressedWith((GetAsyncKeyState(m_vk) & 0x8000) != 0, heldMods(),
-                       gameHasFocus());
+                       m_gameMirrored || gameHasFocus());
 }
 
 bool Hotkey::pressedWith(bool keyDown, uint32_t held, bool focused) {
@@ -119,12 +146,11 @@ bool Hotkey::pressedWith(bool keyDown, uint32_t held, bool focused) {
     const bool fire = matches && focused;
     const bool edge = fire && !m_down;
 
-    // The same edge test, on the far side of the focus rule.
-    //
-    // A press that matched the binding and was thrown away only because another
-    // window had focus is recorded here so somebody can be told. It uses !m_down
-    // for the same reason the real edge does: one physical press, one report,
-    // not one a frame for as long as the key is held.
+    // A press that matched the binding and was thrown away only because
+    // another window had focus is recorded so somebody can be told. Only
+    // EDVR's own keys can reach this now -- a game-mirrored binding passes
+    // focused=true always -- and it uses !m_down for the same reason the real
+    // edge does: one physical press, one report.
     if (matches && !focused && !m_down) m_missedUnfocused = true;
 
     // m_down latches the RAW key, not whether this binding fired.

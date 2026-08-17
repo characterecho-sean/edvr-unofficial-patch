@@ -244,6 +244,9 @@ void configurePoseRing(State* s) {
                              "PhotoCameraToggle")) {
             s->poseCamKey.setBinding(b);
         }
+        // The game's key, not ours: no focus filter (see hotkey.h). The
+        // history key beside it is EDVR's own and keeps the filter.
+        s->poseCamKey.setGameMirrored(true);
         s->poseCamBound = s->poseCamKey.key() != 0;
     }
     s->poseDumpOnCam = cfg.getBool("advanced.dump_camera_on_external_cam", false);

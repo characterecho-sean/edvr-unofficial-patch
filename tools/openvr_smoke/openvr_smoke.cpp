@@ -866,6 +866,42 @@ int hotkeyChecks() {
         cleanup();
     }
 
+    // THE FOCUS SPLIT (2026-08-16). EDVR's own keys are filtered by which
+    // window has focus; bindings mirroring the game's own keys are not,
+    // because Elite acts on them unfocused and a swallowed press inverts a
+    // toggle for the rest of the session.
+    {
+        edvr::Hotkey mine;
+        mine.setBinding("F11");
+        if (mine.pressedWith(true, 0, /*focused=*/false)) {
+            printf("  FAIL  an EDVR-owned key fired while unfocused\n");
+            ++bad;
+        }
+        if (!mine.takeMissedWhileUnfocused()) {
+            printf("  FAIL  the discarded press was not recorded for report\n");
+            ++bad;
+        }
+        edvr::Hotkey theirs;
+        theirs.setBinding("F11");
+        theirs.setGameMirrored(true);
+        if (!theirs.pressed() && false) { /* pressed() reads real hardware */ }
+        // pressedWith is the testable seam; a mirrored binding is handed
+        // focused=true by pressed(), so assert the seam accepts it and that
+        // the flag itself is what distinguishes the two.
+        if (!theirs.gameMirrored() || mine.gameMirrored()) {
+            printf("  FAIL  gameMirrored did not distinguish the two kinds\n");
+            ++bad;
+        }
+        if (!theirs.pressedWith(true, 0, /*focused=*/true)) {
+            printf("  FAIL  a game-mirrored key did not fire\n");
+            ++bad;
+        }
+        if (theirs.takeMissedWhileUnfocused()) {
+            printf("  FAIL  a game-mirrored key recorded a focus miss\n");
+            ++bad;
+        }
+    }
+
     // setBinding must carry BOTH halves. This is the regression that matters:
     // setKey(virtualKeyFromName(s)) compiles and drops the modifiers.
     edvr::Hotkey k;

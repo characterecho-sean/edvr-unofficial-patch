@@ -33,6 +33,27 @@ public:
     // SPACE. That is a binding that fires when it should not, which is worse
     // than one that never fires, so there is one call that cannot do it.
     void setBinding(const char* name);
+
+    // Does this binding MIRROR A GAME ACTION, or is it EDVR's own control?
+    //
+    // EDVR's own keys (the exposure toggle, the history dump) are only
+    // meaningful while the player is in the game, and the game does nothing
+    // with them -- so they keep the foreground check, and a press typed in a
+    // browser is correctly ignored.
+    //
+    // A binding read from Elite's own configuration is the opposite case.
+    // EDVR is mirroring the game's reading of that key, and Elite takes input
+    // through DirectInput while unfocused, so the foreground check made the
+    // two disagree about which mode the player was in -- and on a toggle,
+    // one swallowed press inverts every press after it (measured 2026-08-16).
+    // Mirrored bindings therefore fire regardless of focus; the gate's own
+    // render-state conditions are what bound a stray press.
+    //
+    // Default false: a binding is EDVR's own until something says otherwise,
+    // so a new call site cannot pick up the permissive behaviour by accident.
+    void setGameMirrored(bool mirrored) { m_gameMirrored = mirrored; }
+    bool gameMirrored() const { return m_gameMirrored; }
+
     // Did a press get thrown away because another window had focus?
     //
     // True once per such press, cleared by reading. The focus rule is right --
@@ -72,6 +93,7 @@ private:
     uint32_t m_mods = 0;
     bool     m_down = false;
     bool     m_missedUnfocused = false;
+    bool     m_gameMirrored = false;
 };
 
 // Maps a config string to a virtual-key code, with optional modifiers.
