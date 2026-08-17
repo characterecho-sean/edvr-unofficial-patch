@@ -55,7 +55,7 @@ bool glitchFrameNeedsEyeDraws();
 // zero milliseconds means -- the history key dumps AT the press, the camera key
 // two seconds after it, and a reader who does not know which is subtracting a
 // reaction time from the wrong end.
-void dumpCameraRing(const char* trigger = nullptr, uint32_t framesAfterPress = 0);
+void dumpCameraRing(const char* trigger = nullptr, uint32_t msAfterPress = 0);
 
 // How many radii are currently certified as auxiliary render passes.
 //

@@ -322,7 +322,7 @@ void configurePoseRing(State* s) {
 // No threshold here decides anything. The step figure is a NOTE -- it names the
 // largest one-frame movement in the window so a reader can judge it, and nothing
 // in EDVR behaves differently because of it.
-void dumpPoseRing(State* s, const char* trigger, uint32_t framesAfterPress) {
+void dumpPoseRing(State* s, const char* trigger, uint32_t msAfterPress) {
     if (!s || s->poseHead == 0) return;
     const uint64_t have = s->poseHead < State::kPoseRingFrames ? s->poseHead : State::kPoseRingFrames;
     const uint64_t first = s->poseHead - have;
@@ -337,7 +337,7 @@ void dumpPoseRing(State* s, const char* trigger, uint32_t framesAfterPress) {
         "position the RUNTIME reported (before any EDVR offset), how far it "
         "moved since the frame before, and the tracking state. ---",
         static_cast<unsigned long long>(have), trigger,
-        framesAfterPress == 0
+        msAfterPress == 0
             ? "the moment you pressed"
             : "about two seconds AFTER the press, so the press is further back");
 
@@ -846,7 +846,7 @@ vr::EVRCompositorError hookedWaitGetPoses(void* self,
     //
     // Still cheap, and for the same reason as before: one GetFileAttributesEx,
     // and a full reparse only when the write time actually moved.
-    if (elapsedMs(s->configPollMs, kConfigPollMs)) {
+    if (dueMs(s->configPollMs, kConfigPollMs)) {
         s->configPollMs = stampMs();
         if (Config::get().reloadIfChanged()) {
             Log::get().note("config reloaded");

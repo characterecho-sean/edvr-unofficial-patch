@@ -14,6 +14,7 @@
 #include "../common/frame_flag.h"  // the eye-texture size, from the openvr half
 #include "../common/guard.h"
 #include "../common/log.h"
+#include "../common/timing.h"
 #include "../common/vtable_hook.h"
 #include "binding_shadow.h"
 #include "glitch_frame.h"
@@ -1078,15 +1079,15 @@ void vScreenFrameBoundary() {
     // drawing" -- a frozen game satisfies the first and not the second -- but
     // it is set low enough to be reached at 72Hz and every rate above it,
     // rather than being a disguised second copy of the timeout.
-    const uint64_t nowMs = GetTickCount64();
-    const uint64_t windowMs = nowMs - s->windowStartMs;
+    const uint64_t now = nowMs();
+    const uint64_t windowMs = now - s->windowStartMs;
     const uint32_t windowFrames = s->frameNo - s->windowStartFrame;
     const uint32_t windowFps =
         windowMs ? static_cast<uint32_t>((windowFrames * 1000ull + windowMs / 2) / windowMs)
                  : 0u;
 
     const bool pastStartup =
-        (nowMs - s->installMs) >= kTotalsWindowMs && s->frameNo >= kMinFramesDrawn;
+        (now - s->installMs) >= kTotalsWindowMs && s->frameNo >= kMinFramesDrawn;
 
     if (!s->starvationNoted && pastStartup && s->eyeDrawsMax == 0) {
         s->starvationNoted = true;
@@ -1108,7 +1109,7 @@ void vScreenFrameBoundary() {
             "fix.vscreen_res_width/height (2880x1620 is safe, 1920x1080 is off). If none "
             "of them is, install openvr_api.dll as well so this side stops guessing at "
             "what your eye textures are.",
-            s->frameNo, static_cast<uint32_t>((nowMs - s->installMs) / 1000u),
+            s->frameNo, static_cast<uint32_t>((now - s->installMs) / 1000u),
             s->rtSeenCount ? sizes : "none big enough to be one",
             s->panelW, s->panelH,
             static_cast<unsigned long long>(s->panelExclusions),
@@ -1177,7 +1178,7 @@ void vScreenFrameBoundary() {
         s->voidFrameMin = 0xFFFFFFFFu;
         s->voidFrameMax = 0;
         s->eyeDrawsWindowMax = 0;
-        s->windowStartMs = nowMs;
+        s->windowStartMs = now;
         s->windowStartFrame = s->frameNo;
     }
 
@@ -1238,7 +1239,7 @@ void installVScreenFixes(ID3D11Device* device) {
     if (!ctx) return;
 
     g_state = new State();
-    g_state->installMs = GetTickCount64();
+    g_state->installMs = stampMs();
     g_state->windowStartMs = g_state->installMs;
     g_state->blackVoid = wantVoid;
     g_state->distanceScale = scale;

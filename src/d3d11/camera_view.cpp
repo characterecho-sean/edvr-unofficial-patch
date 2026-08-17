@@ -223,11 +223,11 @@ struct State {
     };
     std::vector<Cand> cands;
     uint64_t candPollMs = 0;
-    // Press-coincidence certification (6aw's consequence): the tick clock,
-    // when the next-view key last fired, and whether such a key exists at all.
-    // The tick is still frames -- it is a sequence number, not a duration --
-    // but the press coincidence it feeds is a window in time.
-    uint32_t tick = 0;
+    // Press-coincidence certification (6aw's consequence): when the next-view
+    // key last fired, and whether such a key exists at all. A frame `tick`
+    // sat here too, which the coincidence test compared against; that test
+    // reads the clock now and nothing else ever read the tick, so it is gone
+    // rather than left being incremented for no reader.
     uint64_t lastPressMs = 0;
     bool     pressWitness = false;
 
@@ -1215,7 +1215,7 @@ void cameraViewNudgeRescan() {
 // the head-offset gate and move somebody's viewpoint on the strength of it.
 void pollCandidates() {
     if (g_s.usable || g_s.cands.empty()) return;
-    if (!elapsedMs(g_s.candPollMs, kCandPollMs)) return;
+    if (!dueMs(g_s.candPollMs, kCandPollMs)) return;
     g_s.candPollMs = stampMs();
 
     const bool inCamera = headOffsetGateInCamera();
@@ -1316,7 +1316,6 @@ void pollCandidates() {
     }
 }
 void cameraViewTick(uint32_t eyeDraws) {
-    ++g_s.tick;   // the clock press-coincidence is measured against
     // Attempts spent before the game was being played do not count.
     //
     // The scan is triggered by the on-foot panel, which the main menu also
@@ -1517,6 +1516,11 @@ int cameraViewCurrent() {
         // Not a latch: the array moved, so go and find it again. The anchor
         // check proved this address is no longer a record of ours, which also
         // means a scan can tell the real one from garbage.
+        // Read out BEFORE the reset below, because the line at the end of
+        // this branch reports them. Clearing first made it print "for 0
+        // frames" on every move -- the counter it was added to carry.
+        const uint32_t badFrames = g_s.badReads;
+        const uint64_t badMs = g_s.badReadsMs ? nowMs() - g_s.badReadsMs : 0;
         g_s.badReads = 0;
         g_s.badReadsMs = 0;
         g_s.usable = false;
@@ -1535,13 +1539,13 @@ int cameraViewCurrent() {
         // last line anybody saw promised a retry that had already happened
         // fifteen times.
         Log::get().note("camera view: ordinal %zu has not read as a camera record "
-                        "for %u frames over %u seconds, so the game really has "
+                        "for %u frames over %llu ms, so the game really has "
                         "moved its camera settings (move %u). Scanning again to "
                         "find where they went; the offset will not engage until "
                         "it does. This is expected occasionally and is not a "
                         "fault.",
-                        g_s.ordinal, g_s.badReads,
-                        (unsigned)(kMoveGraceMs / 1000), g_s.rescans + 1);
+                        g_s.ordinal, badFrames,
+                        (unsigned long long)badMs, g_s.rescans + 1);
         g_s.lastView = -1;
         return -1;
     }

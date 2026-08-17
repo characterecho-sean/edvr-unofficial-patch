@@ -750,8 +750,9 @@ void recordSeparationMark(float resid) {
     if (!e.certified && e.marks >= kSepMarksToCertify) {
         e.certified = true;
         Log::get().note(
-            "transition flash: a separation of about %.0f world units has cost %u "
-            "times within %u seconds, so it is a fixed gap between two render passes "
+            "transition flash: a separation of about %.0f world units has cost a "
+            "frame %u times within %u seconds, so it is a fixed gap between two "
+            "render passes "
             "that MOVE WITH the view -- no fixed point to certify, no fixed "
             "radius either, which is why nothing else here catches it. Frames "
             "whose jump matches it are no longer withheld. A transition repeats "
@@ -1659,13 +1660,13 @@ void glitchFrameObserve(const void* data, uint32_t bytes, const void* resource) 
         // Rate-limited, not once-only. It used to say this the first time and
         // stay silent for every later stand-down, so a governor that was down
         // most of a session looked like one that had fired once and recovered.
-        if (s->burstNotedMs == 0 || elapsedMs(s->burstNotedMs, kBurstNoteGapMs)) {
+        if (dueMs(s->burstNotedMs, kBurstNoteGapMs)) {
             s->burstNotedMs = stampMs();
             Log::get().note(
                 "transition flash: %u frames withheld inside %u -- the whole "
                 "budget -- which costs about "
                 "%u ms of stall, more than the flash being hidden. Standing down "
-                "for %u frames. This is the fix refusing to be worse than the "
+                "for %u ms. This is the fix refusing to be worse than the "
                 "problem; a single transition costs one or two frames and never "
                 "reaches this. If it keeps happening, something is producing a "
                 "storm of jumps and the camera history will show what.",
@@ -2060,7 +2061,7 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
                 Log::get().note(
                     "transition flash: the camera did not return after a jump (%.0f "
                     "units off the old path), so that was a change of reference frame "
-                    "rather than a bad frame. Standing down for %u frames instead of "
+                    "rather than a bad frame. Standing down for %u ms instead of "
                     "withholding the rest of it.",
                     back, (unsigned)kRebaseCooldownMs);
             }
@@ -2152,8 +2153,7 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
     // Gated on a counter having MOVED, so this says nothing at all through a
     // session where the fix never fires -- which is most of them, and which is
     // also the answer to "did it do anything": no line means no.
-    if (s->totalsAtMs == 0) s->totalsAtMs = stampMs();
-    if (elapsedMs(s->totalsAtMs, kTotalsEveryMs)) {
+    if (dueMs(s->totalsAtMs, kTotalsEveryMs)) {
         s->totalsAtMs = stampMs();
         if (s->framesWithheld != s->totalsWithheld ||
             s->suppressed != s->totalsSuppressed) {
@@ -2194,7 +2194,7 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
     s->verdictThisFrame = kVerdictQuiet;
 }
 
-void dumpCameraRing(const char* trigger, uint32_t framesAfterPress) {
+void dumpCameraRing(const char* trigger, uint32_t msAfterPress) {
     State* s = g_state;
     if (!s) return;
     if (!s->observing) {
@@ -2217,18 +2217,22 @@ void dumpCameraRing(const char* trigger, uint32_t framesAfterPress) {
 
     // Where zero is, spelled out rather than left to be guessed.
     //
+    // In MILLISECONDS since the delay became one. It was frames, and passing
+    // the converted delay straight in printed "2 frames AFTER the press" for
+    // what is two seconds -- the exact off-by-two-seconds this paragraph
+    // exists to prevent, introduced by the change meant to make it right.
+    //
     // Two capture paths reach here and they have DIFFERENT zero points: the
     // immediate dump is written AT the press, the delayed one about two seconds
     // after it. Same columns, same units, and a reader who assumes the wrong one
     // is out by two seconds -- in the direction that hides the event, because it
     // pushes the moment being looked for off the end of the ring.
     char zero[160];
-    if (framesAfterPress > 0) {
+    if (msAfterPress > 0) {
         snprintf(zero, sizeof(zero),
-                 "%u frames AFTER the press -- roughly two seconds, so the press "
-                 "itself is further back and what you reacted to further back "
-                 "still",
-                 framesAfterPress);
+                 "%u ms AFTER the press, so the press itself is further back "
+                 "and what you reacted to further back still",
+                 msAfterPress);
     } else {
         snprintf(zero, sizeof(zero), "the moment you pressed");
     }

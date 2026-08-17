@@ -93,7 +93,7 @@ struct State {
     uint64_t firstFrameMs = 0;   // for the crash sentinel's confirm window
 
     // Dump the camera history on every external-camera keypress. Diagnostic,
-    // off by default: 900 lines a press.
+    // off by default: one line per frame of the ring, every press.
     bool     dumpOnExternalCam = false;
     // When the delayed dump is due. 0 means none is armed.
     uint64_t dumpDueMs = 0;
@@ -316,8 +316,7 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
         // hotkeys follow without a restart. The change must HOLD across two
         // checks before anything is re-read: an Apply writes several files,
         // and half a save is not a configuration.
-        if (g_state->bindsCheckMs == 0) g_state->bindsCheckMs = stampMs();
-        if (elapsedMs(g_state->bindsCheckMs, kBindsCheckMs)) {
+        if (dueMs(g_state->bindsCheckMs, kBindsCheckMs)) {
             g_state->bindsCheckMs = stampMs();
             if (Config::get().getBool("hotkey.read_game_bindings", true)) {
                 const uint64_t fp = eliteBindsFingerprint();
@@ -448,12 +447,13 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
         bindingFrameBoundary();
         exposureFixFrameBoundary();
         vScreenFrameBoundary();
-        // Polled rather than watched, once a second. The user is wearing a
+        // Polled rather than watched, twice a second by the journal watcher
+        // and once a second here. The user is wearing a
         // headset and cannot see a text editor, so the settings that are worth
         // tuning by feel have to take effect without a restart. Was every 90
         // frames, which is once a second on exactly one of the three rates.
         ++g_state->frameCounter;
-        if (elapsedMs(g_state->configPollMs, kConfigPollMs)) {
+        if (dueMs(g_state->configPollMs, kConfigPollMs)) {
             g_state->configPollMs = stampMs();
             vScreenRefreshConfig();
         }

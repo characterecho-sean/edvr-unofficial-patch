@@ -51,8 +51,6 @@ struct State {
     bool         onFootKnown = false;
     bool         onFoot = false;
     uint32_t     statusSamples = 0;   // successful Status.json parses
-    uint32_t     frame = 0;
-    uint32_t     polls = 0;
     uint64_t     pollMs = 0;     // last poll
     uint64_t     reglobMs = 0;   // last directory re-glob
     uint32_t     faults = 0;
@@ -267,16 +265,17 @@ void journalWatchConfigure() {
 void journalWatchTick() {
     State& s = g_s;
     if (!s.active) return;
-    if (!elapsedMs(s.pollMs, kPollMs)) return;
+    // dueMs, not elapsedMs: the counter this replaced started at 0 meaning
+    // "poll on the first frame", and a stamp of 0 read as "never due" would
+    // have retired the watcher before it ever ran -- silently, because the
+    // only write to the stamp is the line below, inside the branch it gates.
+    if (!dueMs(s.pollMs, kPollMs)) return;
     s.pollMs = stampMs();
-    ++s.frame;
-    ++s.polls;
 
     pollStatus();
 
     // Find or refresh the file being tailed.
-    if (s.handle == INVALID_HANDLE_VALUE || s.reglobMs == 0 ||
-        elapsedMs(s.reglobMs, kReglobMs)) {
+    if (s.handle == INVALID_HANDLE_VALUE || dueMs(s.reglobMs, kReglobMs)) {
         s.reglobMs = stampMs();
         const std::wstring newest = newestJournal();
         if (!newest.empty() && newest != s.file) {

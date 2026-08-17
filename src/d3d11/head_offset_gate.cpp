@@ -92,7 +92,7 @@ struct Gate {
     uint32_t gateAwayScene = 0;
     bool     gateExternal = false;       // the latch itself
     uint32_t gateSinceEnter = 0;         // frames since the latch was set
-    uint32_t gateEnterWindow = 60;       // frames after the panel stops
+    uint64_t gateEnterWindowMs = 670;    // after the panel stops
     uint32_t gateNearMisses = 0;         // rejected candidates, logged
     bool     gateIntent = false;
     bool     gateHaveKey = false;      // a press has been seen
@@ -116,7 +116,6 @@ struct Gate {
     bool     gateBridgeStarted = false;  // once per contiguous unreadable run
     bool     gateSyncRefusedNoted = false;
     uint32_t gateFrameNo = 0;            // the frame Frame() last ran for
-    uint32_t gateLastFootReset = 0;      // when a new-session reset last fired
 
     // STAMPS FOR THE DURATION TESTS, each paired with the frame counter above
     // it rather than replacing it. Both are wanted: the counters answer "how
@@ -149,7 +148,8 @@ struct Gate {
     bool     gateKeylessOn = false;      // advanced.keyless_camera (parked)
     bool     gateNoConsumerNoted = false;
     uint32_t gateIntentAge = 0;          // frames since the key was pressed
-    uint32_t gateIntentGrace = 180;      // frames a press gets to take effect
+    uint64_t gateIntentMs = 0;           // ...and when, on the clock
+    uint64_t gateIntentGraceMs = 2000;   // how long a press gets to take effect
     bool     gateInCamera = false;       // in the camera, whatever the view
     uint32_t gateEnters = 0, gateExits = 0;
     // Camera entries (the gateInCamera latch), distinct from gateEnters which
@@ -205,10 +205,17 @@ void headOffsetGateConfigure() {
     // Without a key bound it is still the only thing standing between the gate
     // and every other way of leaving the panel, which is why it is not simply
     // removed.
-    g.gateEnterWindow = static_cast<uint32_t>(
-        cfg.getIntInRange("fix.head_offset_enter_window", 60, 0, 100000));
-    g.gateIntentGrace = static_cast<uint32_t>(
-        cfg.getIntInRange("fix.head_offset_intent_grace", 180, 0, 100000));
+    // MILLISECONDS, AND RENAMED TO SAY SO. These two are the SHIPPED entry
+    // path -- the keyless one is parked -- so leaving them in frames would
+    // have left the default route rate-dependent while the parked one was
+    // fixed. The names carry _ms rather than the values being reinterpreted,
+    // because a user who had written 60 into the old key meant 60 frames and
+    // silently reading it as 60 ms would give them a twentieth of the window
+    // they asked for. An old key is simply not read; the new one defaults.
+    g.gateEnterWindowMs = static_cast<uint64_t>(
+        cfg.getIntInRange("fix.head_offset_enter_window_ms", 670, 0, 100000));
+    g.gateIntentGraceMs = static_cast<uint64_t>(
+        cfg.getIntInRange("fix.head_offset_intent_grace_ms", 2000, 0, 100000));
     g.gateWantView = cfg.getIntInRange("fix.head_offset_view", 2, -1, 63);
     g.gateViewCount = cfg.getIntInRange("fix.head_offset_view_count", 6, 0, 64);
     g.gateBridgeOn = cfg.getBool("fix.head_offset_view_bridge", true);
@@ -287,7 +294,6 @@ void headOffsetGateNewFootSession(const char* source, bool journalSaysSo) {
         g.lastFootResetMs = 0;   // the window has passed; this is real news
     }
     if (g.lastFootResetMs != 0) return;
-    g.gateLastFootReset = g.gateFrameNo ? g.gateFrameNo : 1;
     g.lastFootResetMs = stampMs();
     g.gateViewIndex = 0;
     g.gateBridgeStarted = false;   // any held view belongs to the old session
@@ -339,6 +345,7 @@ void headOffsetGateKeyPressed() {
     // the toggle, and a CLEAR that leaves a stale age behind poisons the SET
     // that follows it, which is exactly what happened here.
     g.gateIntentAge = 0;
+    g.gateIntentMs = stampMs();
     // The view count is NOT reset here, and that is a correction.
     //
     // It was, on the assumption that the camera opens on its first view every
@@ -486,15 +493,17 @@ void headOffsetGateFrame(uint32_t frameNo, uint32_t panelDraws, uint32_t eyeDraw
             // grace period, which is luck, not a rule.
             g.gateIntent = false;
             g.gateIntentAge = 0;
+            g.gateIntentMs = 0;
             ++g.gateExits;
             edvr::setExternalCameraOnFoot(false);
             Log::get().note("head offset OFF: the flat panel is back, so this is "
                             "on-foot first person again (%u frame(s) in the "
                             "external camera).", g.gateSinceEnter);
-        } else if (g.gateIntent && g.gateIntentAge > g.gateIntentGrace) {
+        } else if (g.gateIntent && elapsedMs(g.gateIntentMs, g.gateIntentGraceMs)) {
             const uint32_t age = g.gateIntentAge;  // reported, then reset
             g.gateIntent = false;
             g.gateIntentAge = 0;
+            g.gateIntentMs = 0;
             Log::get().note("external camera intent cleared: the flat panel is "
                             "still up %u frames after the key, so that press did "
                             "not enter the camera.", age);
@@ -619,8 +628,8 @@ void headOffsetGateFrame(uint32_t frameNo, uint32_t panelDraws, uint32_t eyeDraw
                 "camera will be detected from that instead. A keyboard "
                 "binding in Elite still gives the crispest entries.");
         }
-        const bool timingOk = g.gateSincePanel <= g.gateEnterWindow ||
-                              g.gateIntentAge <= g.gateIntentGrace;
+        const bool timingOk = !elapsedMs(g.panelStoppedMs, g.gateEnterWindowMs) ||
+                              !elapsedMs(g.gateIntentMs, g.gateIntentGraceMs);
         // The panel must have been gone for a WHILE, not for one frame.
         //
         // sincePanel >= 1 satisfied the window, so a single dropped panel frame
@@ -771,9 +780,10 @@ void headOffsetGateFrame(uint32_t frameNo, uint32_t panelDraws, uint32_t eyeDraw
             ++g.gateNearMisses;
             Log::get().note(
                 "head offset NOT armed: panelRun=%u (needs >30), sincePanel=%u "
-                "(needs >=8, window %u), eyeDraws=%u (needs >50), intent=%s, "
+                "(needs >=8, window %u ms), eyeDraws=%u (needs >50), intent=%s, "
                 "key %s, pressed %s, view=%d (wants %d).",
-                g.gatePanelRun, g.gateSincePanel, g.gateEnterWindow, eyeDraws,
+                g.gatePanelRun, g.gateSincePanel,
+                (uint32_t)g.gateEnterWindowMs, eyeDraws,
                 g.gateIntent ? "set" : "CLEAR",
                 g.gateKeyBound
                     ? "BOUND"
@@ -1044,7 +1054,7 @@ void headOffsetGateFrame(uint32_t frameNo, uint32_t panelDraws, uint32_t eyeDraw
     // press had failed.
     if (g.gateIntent && !g.gateInCamera) {
         ++g.gateIntentAge;
-        if (g.gateIntentAge > g.gateIntentGrace) {
+        if (elapsedMs(g.gateIntentMs, g.gateIntentGraceMs)) {
             g.gateIntent = false;
             // WHICH KIND of failure, on the line that reports it.
             //
@@ -1071,6 +1081,7 @@ void headOffsetGateFrame(uint32_t frameNo, uint32_t panelDraws, uint32_t eyeDraw
                                   "eye-draw count stuck at 0 means the recogniser is "
                                   "matching nothing, and this is downstream of that.");
             g.gateIntentAge = 0;
+            g.gateIntentMs = 0;
         }
     }
 }

@@ -62,8 +62,9 @@ uint64_t fakeClock() { return g_fakeMs; }
 
 // One frame of wall clock at the current rate. Accumulated in microseconds so
 // that 72 and 120 do not drift: a whole-millisecond step would be 13ms at 72Hz
-// (13.9 real) and lose a second every four, which at these thresholds is the
-// difference between a fixture passing and failing.
+// against 13.888 real, losing a second every sixteen, which across fixtures
+// that run thousands of frames is the difference between passing and failing.
+// The microsecond accumulator leaves 0.006% instead.
 uint64_t g_fakeUs = 0;
 void advanceOneFrame() {
     g_fakeUs += 1000000ull / g_rateHz;
@@ -319,6 +320,56 @@ int cameraRunChecks() {
 
     if (bad == 0)
         printf("  ok    a rebuilt slot does not cost the array its ordinal\n");
+    return bad;
+}
+
+// THE SENTINEL, PINNED.
+//
+// elapsedMs and dueMs differ only in what they answer for a stamp of 0, and
+// that difference silently disabled four subsystems in one review: the
+// journal watcher, config reloading in both DLLs, and the camera-view
+// candidate poll. Each had been a countdown initialised to 0 meaning "due
+// now"; each became elapsedMs, which answers false for 0; and because the
+// only write to each stamp was inside the branch it gated, none of them ever
+// ran again. Nothing crashed and no log line changed -- the features just
+// were not there.
+//
+// So the two are asserted apart here. Anyone who "simplifies" one into the
+// other, or makes elapsedMs treat 0 as the epoch, fails this rather than
+// shipping four dead subsystems.
+int timingChecks() {
+    int bad = 0;
+    const uint64_t saveMs = g_fakeMs;
+    edvr::g_clockForTest = &fakeClock;
+    g_fakeMs = 5000;
+
+    if (edvr::elapsedMs(0, 100)) {
+        printf("  FAIL  elapsedMs(0, ...) must be false\n");
+        ++bad;
+    }
+    if (!edvr::dueMs(0, 100)) {
+        printf("  FAIL  dueMs(0, ...) must be true\n");
+        ++bad;
+    }
+    if (edvr::elapsedMs(4950, 100) || edvr::dueMs(4950, 100)) {
+        printf("  FAIL  50 ms into a 100 ms window, neither should fire\n");
+        ++bad;
+    }
+    if (!edvr::elapsedMs(4900, 100) || !edvr::dueMs(4900, 100)) {
+        printf("  FAIL  exactly at the window, both should fire\n");
+        ++bad;
+    }
+    // stampMs never hands back the sentinel, or the run it marks would read
+    // as one that never started.
+    g_fakeMs = 0;
+    if (edvr::stampMs() == 0) {
+        printf("  FAIL  stampMs() returned 0, which means never started\n");
+        ++bad;
+    }
+
+    g_fakeMs = saveMs;
+    if (bad == 0)
+        printf("  ok    elapsedMs and dueMs disagree about 0, as they must\n");
     return bad;
 }
 
@@ -1045,6 +1096,7 @@ int main(int argc, char** argv) {
     // argument about arithmetic: a regression that reintroduces a frame count
     // fails here at 72 or 120 while still passing at 90.
     edvr::g_clockForTest = &fakeClock;
+    g_bad += timingChecks();
     const uint32_t rates[] = {72, 90, 120};
     for (uint32_t hz : rates) {
         const int before = g_bad;

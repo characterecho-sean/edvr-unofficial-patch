@@ -51,7 +51,10 @@ namespace edvr {
 // fixture assert the same outcome at 72, 90 and 120Hz.
 inline uint64_t (*g_clockForTest)() = nullptr;
 
-// Monotonic milliseconds. The only clock this project reads.
+// Monotonic milliseconds. The only clock this project reads -- calling
+// GetTickCount64 directly anywhere else puts that site beyond the reach of
+// the test override, which is how vscreen's totals window spent a review
+// cycle as the one converted duration no fixture could drive.
 inline uint64_t nowMs() {
     return g_clockForTest ? g_clockForTest() : GetTickCount64();
 }
@@ -68,14 +71,33 @@ inline uint64_t stampMs() {
     return t ? t : 1;
 }
 
-// Has `ms` passed since the stamp `since`?
+// TWO QUESTIONS, AND PICKING THE WRONG ONE FAILS SILENTLY.
 //
-// A `since` of 0 means "not started", and answers false however long it has
-// been. That is the safe direction for every caller here: a stopwatch nobody
-// started has not run out, whereas treating 0 as the epoch would fire every
-// duration-gated branch on the first frame of the session.
+// Both take a stamp of 0 to mean "never started" and differ only in what they
+// answer for it, which is the entire difficulty: a stopwatch that has not been
+// started is not the same thing as a cadence whose first tick is due.
+//
+// This distinction cost four subsystems in review. Converting a countdown
+// initialised to 0 -- where 0 meant "due now" -- into elapsedMs() inverted it
+// into "never due", and because the only place each stamp got written was
+// inside the branch it gated, the branch was unreachable for the life of the
+// process. It took out the journal watcher, both DLLs' config reloading, and
+// the camera-view candidate poll, and nothing failed loudly: they simply never
+// ran. When converting a counter, ask what its INITIAL value meant.
+//
+//   elapsedMs -- "has this run lasted `ms`?" Answers FALSE when not started.
+//                For stopwatches: a grace window, a stand-down, an idle run.
+//                Pair it with an explicit stamp on the edge that starts the run.
+//
+//   dueMs     -- "is this due again?" Answers TRUE when never started.
+//                For cadences: polls, reloads, heartbeats -- anything whose
+//                first tick should happen at once. Stamp it in the body.
 inline bool elapsedMs(uint64_t since, uint64_t ms) {
     return since != 0 && (nowMs() - since) >= ms;
+}
+
+inline bool dueMs(uint64_t since, uint64_t every) {
+    return since == 0 || (nowMs() - since) >= every;
 }
 
 // The standard headset rates, for the harnesses that assert rate-invariance and
