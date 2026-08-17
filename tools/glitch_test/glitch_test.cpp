@@ -1461,6 +1461,66 @@ int main(int argc, char** argv) {
         installGlitchFrameFix();
     }
 
+    // --- R. THE LOW WAKE DROP: a 13.5-unit camera is not a world camera ----
+    //
+    // Field capture, Pimax at 72Hz, 2026-08-17, and the same camera an hour
+    // earlier in a second session. In supercruise the tracked camera climbs
+    // smoothly through the low thousands; at the drop it reads
+    // (+6.05 +11.85 +2.50), magnitude 13.54.
+    //
+    // The world-camera floor was 10, so 13.54 cleared it and the frame counted
+    // as a reading. Composing it against the previous world camera at 4,214
+    // produced a phantom jump of 4,201 -- the number in the log -- and three
+    // frames were withheld on it. Withheld frames hold the PREVIOUS image, so
+    // at 72Hz that is 42 ms of supercruise pasted over the moment of the drop:
+    // the fix generating the artifact it exists to remove.
+    //
+    // This is the case the floor was written for. It was a hair too low.
+    // A PAIRED CONTROL, because the assertion "nothing was withheld" passes just
+    // as happily when the detector is switched off. The two halves run the same
+    // shape and differ only in the magnitude of the camera landed on: 13.54,
+    // which must be ignored, and 4,358, which must not.
+    //
+    // The separation memory is turned OFF for both. installGlitchFrameFix keeps
+    // a `static State`, so this block inherits every separation, shell and park
+    // the seventeen fixtures above it certified -- and the first version of this
+    // control was silently excused by one of them, which read as "raising the
+    // floor broke the detector". Fixtures here are not isolated; anything
+    // asserting a jump IS caught has to say which rules it is asking about.
+    auto wakeDrop = [&](float lx, float ly, float lz, const char* sep) {
+        Config::get().set("advanced.transition_flash_separation", sep);
+        Config::get().set("advanced.transition_flash_max_consecutive", "3");
+        installGlitchFrameFix();
+        Buffer r;
+        float wx = 2000.0f, wy = 2200.0f, wz = 430.0f;
+        for (uint32_t i = 0; i < 400; ++i) {   // supercruise, climbing smoothly
+            wx += 3.2f; wy += 3.5f; wz += 0.7f;
+            frame(r, wx, wy, wz);
+        }
+        uint32_t withheld = 0;
+        for (uint32_t i = 0; i < 12; ++i) {    // the drop, and the frames after
+            if (frame(r, lx, ly, lz)) ++withheld;
+        }
+        return withheld;
+    };
+    {
+        const uint32_t low = wakeDrop(6.05f, 11.85f, 2.50f, "off");
+        check("R: a 13.5-unit camera at a wake drop withholds nothing", low == 0,
+              std::to_string(low) + " frame(s) withheld on a camera below the "
+              "world floor -- each one holds the previous image over the drop, "
+              "which is the flash the player reports");
+
+        const uint32_t high = wakeDrop(-3000.0f, -3000.0f, -1000.0f, "off");
+        check("R: ...and the same shape onto a 4,358-unit camera still is",
+              high > 0,
+              "the floor is now high enough to switch the detector off, which "
+              "buys silence rather than correctness");
+
+        Config::get().set("advanced.transition_flash_separation", "act");
+        Config::get().set("advanced.transition_flash_max_consecutive", "2");
+        installGlitchFrameFix();
+    }
+
     clearGlitchFrame();
     shutdownGlitchFrameFix();
 

@@ -152,10 +152,39 @@ constexpr uint64_t kTotalsEveryMs = 20000;
 // from (+0 +0 -0). The first of those is the frame a player reported seeing a
 // flash on, in a log that ends 89 ms later.
 //
-// Ten units. Not a tuned number: it sits two decades above the head-space
-// magnitudes it must exclude and nearly three below the smallest world camera
-// ever recorded, in a gap four decades wide.
-constexpr float kWorldCameraFloor2 = 10.0f * 10.0f;
+// THE GAP WAS NOT EMPTY. Ten units was chosen because it "sits two decades
+// above the head-space magnitudes it must exclude and nearly three below the
+// smallest world camera ever recorded, in a gap four decades wide" -- and the
+// arithmetic was right. The claim that nothing lives in the gap was not.
+//
+// Measured 2026-08-17, Pimax at 72Hz, twice in two sessions: a camera at
+// (+6.05 +11.85 +2.50), magnitude 13.54, and the same one at 13.53 an hour
+// earlier. Thirty-five per cent above the floor, so it read as a world
+// camera. The previous world camera was at 4,214 units, so the composition
+// of the two produced a phantom jump of 4,201 -- which is the figure in the
+// log -- at the exact frame of a low-wake drop. Three frames were withheld
+// on it (the max_consecutive cap), which at 72Hz is 42 ms of the previous
+// image held over the moment of the drop. That IS the flash being reported:
+// not a bad frame getting through, but good frames being withheld.
+//
+// It is pass composition, exactly as the paragraph above describes -- the
+// jump is "the distance from the previous frame's world camera" to something
+// that is not a world camera. The floor was simply a hair too low to catch
+// this one.
+//
+// 250 is the log-midpoint of the two numbers that now bracket it: 13.54, the
+// largest non-world camera ever measured, and 5,012, the smallest genuine
+// world camera ever measured (6v records 9,967 and 136,405; the field has
+// 5,012 / 7,600 / 568,000). Eighteen times above the first and twenty below
+// the second. Head space at 0.09 is untouched either way.
+//
+// Widening this can only ever REDUCE what the detector judges, so the risk
+// it carries is a genuine flash whose auxiliary camera sits between 10 and
+// 250 units. Nothing measured in any session is in that band -- which was
+// also true of 10 to 5,012 until this session, so the honest statement is
+// that the band is empty as far as anything has looked.
+constexpr float kWorldCameraFloor = 250.0f;
+constexpr float kWorldCameraFloor2 = kWorldCameraFloor * kWorldCameraFloor;
 
 // THE SECOND INVARIANT: a camera orbiting at a fixed radius.
 //
