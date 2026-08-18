@@ -105,8 +105,24 @@ if not exist "%BUILD%" mkdir "%BUILD%"
 if not exist "%GEN%" mkdir "%GEN%"
 if not exist "%OBJ%" mkdir "%OBJ%"
 
+REM The version baked into both DLLs, printed in the second line of every log.
+REM
+REM `git describe` rather than a hand-maintained constant, because the constant
+REM would be wrong exactly when it matters: isolating which release a field log
+REM came from used to mean correlating the link stamp against tag dates by hand
+REM (done during the 2026-08-18 OpenXR Toolkit triage, twenty minutes for a
+REM fact the DLL always knew). A clean tag prints as v0.7.3; a dev build names
+REM itself v0.7.3-2-g650d8a9 and uncommitted changes append -dirty, so a log
+REM from a build that was never a release SAYS so instead of impersonating one.
+REM No git or no repo (a source-zip build) falls back to "unknown" and the
+REM build carries on -- versioning must never be the reason a build fails.
+set "EDVR_VER=unknown"
+for /f "delims=" %%v in ('git -C "%ROOT%" describe --tags --always --dirty 2^>nul') do set "EDVR_VER=%%v"
+echo [edvr] version %EDVR_VER%
+
 set CFLAGS=/nologo /c /O2 /MT /std:c++17 /EHsc /W4 /GR- ^
  /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE ^
+ /DEDVR_VERSION_STRING=\"%EDVR_VER%\" ^
  /I"%GEN%"
 
 echo.

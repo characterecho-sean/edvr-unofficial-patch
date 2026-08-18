@@ -1,5 +1,12 @@
 #include "log.h"
 
+// Set by build.bat from `git describe` for the two shipped DLLs. The test
+// binaries that link this file compile without the define, and the fallback
+// says what it is rather than impersonating a release.
+#ifndef EDVR_VERSION_STRING
+#define EDVR_VERSION_STRING "unversioned test build"
+#endif
+
 #include <windows.h>
 
 #include <atomic>
@@ -124,8 +131,14 @@ bool Log::open(const std::wstring& dir, const wchar_t* tag) {
 
     m_open = true;
     note("EDVR log -- unofficial VR fixes for Elite Dangerous: Odyssey");
+    // The version names the git tag the DLL was built from, straight from
+    // `git describe` at build time (see build.bat). It exists because the link
+    // stamp alone cannot answer "which release is this" without correlating
+    // hex against tag dates by hand -- which is what triaging a field log used
+    // to start with. A -N-g or -dirty suffix means a dev build and says so.
     // TimeDateStamp is seconds since 1970 UTC unless a reproducible-build flag
-    // replaced it with a hash; the hex is the identity either way.
+    // replaced it with a hash; the hex is the exact identity either way, and
+    // it stays printed because two builds of one tag are still two builds.
     const uint32_t stamp = moduleLinkStamp();
     if (stamp != 0) {
         ULARGE_INTEGER t;
@@ -136,13 +149,15 @@ bool Log::open(const std::wstring& dir, const wchar_t* tag) {
         ft.dwHighDateTime = t.HighPart;
         SYSTEMTIME bs{};
         if (FileTimeToSystemTime(&ft, &bs)) {
-            note("build %08X -- this DLL was linked %04u-%02u-%02u "
+            note("version %s (build %08X) -- this DLL was linked %04u-%02u-%02u "
                  "%02u:%02u:%02u UTC",
-                 stamp, bs.wYear, bs.wMonth, bs.wDay, bs.wHour, bs.wMinute,
-                 bs.wSecond);
+                 EDVR_VERSION_STRING, stamp, bs.wYear, bs.wMonth, bs.wDay,
+                 bs.wHour, bs.wMinute, bs.wSecond);
         } else {
-            note("build %08X", stamp);
+            note("version %s (build %08X)", EDVR_VERSION_STRING, stamp);
         }
+    } else {
+        note("version %s", EDVR_VERSION_STRING);
     }
     note("If you are reporting a problem, paste this whole file.");
     return true;

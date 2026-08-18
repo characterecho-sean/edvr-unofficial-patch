@@ -40,8 +40,8 @@ body:
     id: build
     attributes:
       label: Which EDVR build
-      description: The second line of any EDVR log. Copy it whole — the linked timestamp is what actually identifies the build.
-      placeholder: "build 6A820743 -- this DLL was linked 2026-08-16 18:53:55 UTC"
+      description: The second line of any EDVR log. Copy it whole — the version names the release, and the linked timestamp pins the exact build of it.
+      placeholder: "version v0.7.3 (build 6A836A32) -- this DLL was linked 2026-08-17 20:08:18 UTC"
     validations:
       required: true
 
