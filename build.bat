@@ -60,8 +60,22 @@ if defined OPENVR_EXPLICIT (
 )
 
 REM Where the game keeps its own copy, if --openvr was not given.
+REM
+REM The RENAMED ORIGINAL first: on an installed rig, Openvr\win64\
+REM openvr_api.dll IS the EDVR proxy from the last install, and generating
+REM the export table from our own proxy builds a proxy of a proxy -- the
+REM .def names our extra exports twice and the linker aliases one to a
+REM forwarding thunk (measured 2026-08-18; gen_exports.py now refuses such
+REM a source outright). openvr_api_orig.dll is the true runtime whenever
+REM the install steps have run, and absent before them, where the unrenamed
+REM openvr_api.dll is still genuine.
 if not defined OPENVR_SRC (
-    set "OPENVR_SRC=%LOCALAPPDATA%\Frontier_Developments\Products\elite-dangerous-odyssey-64\Openvr\win64\openvr_api.dll"
+    set "OPENVR_GAMEDIR=%LOCALAPPDATA%\Frontier_Developments\Products\elite-dangerous-odyssey-64\Openvr\win64"
+    if exist "!OPENVR_GAMEDIR!\openvr_api_orig.dll" (
+        set "OPENVR_SRC=!OPENVR_GAMEDIR!\openvr_api_orig.dll"
+    ) else (
+        set "OPENVR_SRC=!OPENVR_GAMEDIR!\openvr_api.dll"
+    )
 )
 if not exist "%OPENVR_SRC%" (
     if exist "%ROOT%\reference\openvr_api.dll" set "OPENVR_SRC=%ROOT%\reference\openvr_api.dll"
@@ -167,7 +181,8 @@ REM bumps a refcount; openvr_api_orig.dll is mapped by nothing, so loading it
 REM there runs its DllMain under the loader lock.
 python "%ROOT%\tools\gen_exports.py" --source "%OPENVR_SRC%" ^
     --tag openvr --out "%GEN%" --wrap VR_GetGenericInterface --lazy ^
-    --extra-export edvr_selftest_system_hook
+    --extra-export edvr_selftest_system_hook ^
+    --extra-export edvr_selftest_cull_guard
 if errorlevel 1 ( echo [edvr] ERROR: openvr export generation failed & exit /b 1 )
 
 REM The lazy shim MUST carry unwind info.

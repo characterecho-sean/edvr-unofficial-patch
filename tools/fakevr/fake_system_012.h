@@ -52,18 +52,26 @@ inline void expectedRaw(int32_t eye, float out[4]) {
     out[3] = 1.0f;
 }
 
-// GetProjectionMatrix encodes every argument it received:
-//   m[0][0] = 0.78 + eye     m[1][3] = nearZ
-//   m[2][0] = farZ           m[2][1] = projType
-//   m[3][2] = -1, m[3][3] = 0 (the projection shape the probe validates)
+// GetProjectionMatrix is built by the SAME tangent formula the real runtime
+// uses (verified against EVIDENCE 4.2's live values), because the cull
+// guard's receiver checks that formula before it will edit anything -- a
+// fake that shaped its matrix differently would test the refusal path
+// instead of the edit path. Arguments still round-trip: the tangents encode
+// the eye, near/far land in the z terms, and projType is echoed in m[3][1],
+// an element the formula leaves zero and the guard never touches.
 inline M44 expectedMatrix(int32_t eye, float nearZ, float farZ, int32_t projType) {
+    float t[4];
+    expectedRaw(eye, t);
+    const float du = t[1] - t[0], dv = t[3] - t[2];
     M44 r{};
-    r.m[0][0] = 0.78f + static_cast<float>(eye);
-    r.m[1][1] = 0.79f;
-    r.m[1][3] = nearZ;
-    r.m[2][0] = farZ;
-    r.m[2][1] = static_cast<float>(projType);
+    r.m[0][0] = 2.0f / du;
+    r.m[0][2] = (t[1] + t[0]) / du;
+    r.m[1][1] = 2.0f / dv;
+    r.m[1][2] = (t[3] + t[2]) / dv;
+    r.m[2][2] = -farZ / (farZ - nearZ);
+    r.m[2][3] = -(farZ * nearZ) / (farZ - nearZ);
     r.m[3][2] = -1.0f;
+    r.m[3][1] = static_cast<float>(projType);
     return r;
 }
 

@@ -41,6 +41,12 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # nothing, which is the hardest failure to attribute from a log.
 READERS = [
     ('headOffsetConfigure', os.path.join('src', 'openvr', 'compositor_hook.cpp')),
+    # The cull guard's mode and margin (fix.cull_guard*): tuned from inside a
+    # headset, so the reload call is the feature; the install call is the
+    # lesson above. Its OWN install site is in system_hook.cpp, which this
+    # checker cannot see across files -- the compositor-install call stands
+    # in, and is a real read.
+    ('systemHookConfigure', os.path.join('src', 'openvr', 'compositor_hook.cpp')),
 ]
 
 

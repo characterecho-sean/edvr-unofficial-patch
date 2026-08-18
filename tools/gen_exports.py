@@ -284,6 +284,28 @@ def main() -> int:
 
     wrapped = set(args.wrap)
     named = [(n, o, f) for (n, o, f) in exports if n]
+
+    # A source that exports edvr_* symbols IS an EDVR proxy, not the runtime
+    # it stands in for. Generating from it builds a proxy of our own proxy:
+    # the thunk table inherits our extra exports as if they were the real
+    # DLL's, the .def then names them twice, and the linker's "first
+    # specification wins" quietly aliases a C++ implementation to a
+    # forwarding thunk -- measured 2026-08-18, when a rebuild after an
+    # install picked up the installed proxy as its source and the smoke
+    # test's selftest export answered with the do-nothing stub. The fix is
+    # the source, not the symptom: point --openvr at the game's renamed
+    # original (openvr_api_orig.dll), which build.bat now prefers by itself.
+    ours = sorted(n for (n, _, _) in named if n.startswith("edvr_"))
+    if ours:
+        print(
+            "gen_exports: ERROR: %s exports %s -- that is an EDVR proxy, not "
+            "the real DLL. Use the game's renamed original "
+            "(openvr_api_orig.dll), or pass --openvr with the true runtime "
+            "DLL." % (args.source, ", ".join(ours)),
+            file=sys.stderr,
+        )
+        return 1
+
     ordinal_only = [(n, o, f) for (n, o, f) in exports if not n]
     thunked = [(n, o, f) for (n, o, f) in named if n not in wrapped]
 

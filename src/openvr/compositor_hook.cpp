@@ -686,8 +686,25 @@ vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
     // Before any decision about this frame, and unconditional on all of them:
     // it is an observation about the texture's shape, and the half that needs
     // it is starved without it whether or not this frame is withheld.
+    //
+    // BOTH notes see the game's ORIGINAL bounds, and the order with the crop
+    // below is load-bearing: the d3d11 half matches eye textures by the size
+    // noteEyeTextureSize publishes, and the render target has not changed
+    // size just because the compositor will sample less of it.
     noteEyeTextureSize(s, eye, texture, bounds);
     noteSubmitBounds(s, eye, bounds);
+
+    // The cull guard's submit-side half: when the projection lie is live,
+    // the compositor must sample only the region holding the TRUE frustum
+    // out of the wider-rendered image. Computed once and used by EVERY
+    // submit path below -- forwarding a withheld frame's substitute with
+    // uncropped bounds would zoom one frame, which is exactly the kind of
+    // one-frame artifact this project exists to remove.
+    vr::VRTextureBounds_t croppedBounds;
+    const vr::VRTextureBounds_t* effBounds = bounds;
+    if (systemHookCropBounds(eye, bounds, &croppedBounds)) {
+        effBounds = &croppedBounds;
+    }
 
     // The frame the d3d11 side marked as drawn from the wrong viewpoint: do not
     // pass it on. SteamVR reprojects the previous frame, exactly as it does for
@@ -759,7 +776,7 @@ vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
             }
             vr::Texture_t sub = *texture;
             sub.handle = shadow;
-            return s->realSubmit(self, eye, &sub, bounds, flags);
+            return s->realSubmit(self, eye, &sub, effBounds, flags);
         }
         if (s->notesLeft > 0) {
             --s->notesLeft;
@@ -777,7 +794,7 @@ vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
 
     {
         const vr::EVRCompositorError result =
-            s->realSubmit(self, eye, texture, bounds, flags);
+            s->realSubmit(self, eye, texture, effBounds, flags);
         // This frame was FORWARDED and accepted, so it becomes the copy a
         // later withhold can hand over. After realSubmit on purpose: the copy
         // is queued on the immediate context behind this frame's rendering,
@@ -929,6 +946,9 @@ vr::EVRCompositorError hookedWaitGetPoses(void* self,
             Log::get().note("config reloaded");
             headOffsetConfigure();
             configurePoseRing(s);
+            // The cull guard's margin is tuned from inside a headset, so its
+            // keys are live; mode changes take effect at the next boundary.
+            systemHookConfigure();
         }
         // The liveness pass, same cadence and same reason as the d3d11 half:
         // in-place patches sit on a table other tools can write, and under
@@ -959,11 +979,12 @@ vr::EVRCompositorError hookedWaitGetPoses(void* self,
         }
     }
 
-    // The system observation's deferred reporting rides the frame boundary,
-    // like everything else here: its own hooks may be called rarely (or, for
-    // all we know yet, once at startup), so they cannot be trusted to drive
-    // their own log cadence.
-    systemHookPeriodic();
+    // The system hook's frame boundary: the cull guard's lie switches on and
+    // off HERE, after the game is released from WaitGetPoses and before it
+    // queries this frame's projections -- the one point where every answer
+    // in the coming frame, and the submit crop at its end, can be made to
+    // tell one story. Deferred log emission rides along.
+    systemHookFrameBoundary();
 
     return result;
 }
@@ -1161,6 +1182,10 @@ void* interceptInterface(void* iface, const char* interfaceVersion) {
     // from install and from reload.
     headOffsetConfigure();
     resubmitShadowConfigure();
+    // The cull guard's twin of the same rule (its own install already read
+    // config -- the system interface arrives first -- but this path is the
+    // one check_install_reads.py can see, and a second read is free).
+    systemHookConfigure();
 
     return iface;
 }
