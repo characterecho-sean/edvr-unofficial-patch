@@ -1521,6 +1521,184 @@ int main(int argc, char** argv) {
         installGlitchFrameFix();
     }
 
+    // --- 10. The churn instrument (spec §1g) --------------------------------
+    //
+    // The cull guard's wider frustum admits more render passes and the
+    // recognition machinery churns with the margin -- 6bp measured 29
+    // recognitions at guard-off against 3,277 at half margin, 36 withheld.
+    // Whether that cost is this table THRASHING (H1) or genuine novelty (H2)
+    // decides between two different fixes, so the instrument ships first and
+    // the mechanism waits for a field session. These cells pin the
+    // instrument itself: the channel round-trips, the attribution splits
+    // move only while the lie is LIVE (stage 2, not stage 1), and the
+    // eviction and relearn counters count exactly the thing they claim.
+    // Nothing here asserts a decision change, because the instrument must
+    // not make one.
+    //
+    // The ring's per-frame guard stamp is read through the same guardPacked
+    // reading the splits are derived from, so the splits pin that path; the
+    // stamp's printf itself runs only in a dump, which logging-off tests do
+    // not exercise. The shell-side eviction counter mirrors the separation
+    // counter's tested shape; there is no measured 64-slot shell eviction to
+    // replay, and staging one synthetically would take thousands of frames
+    // to say nothing a code read does not -- stated here rather than tested
+    // silently.
+    {
+        // The channel: silence, both stages, the clamps, and off again.
+        check("cull channel: silence reads as guard-off",
+              cullGuardStatePacked() == 0,
+              "something published before the guard ever did");
+        announceCullGuardState(1, 1.0607f, 1.0f);
+        CullGuardState g = decodeCullGuardState(cullGuardStatePacked());
+        check("cull channel: stage 1 round-trips",
+              g.stage == 1 && g.hPerMille == 61 && g.vPerMille == 0,
+              "stage " + std::to_string(g.stage) + ", h " +
+                  std::to_string(g.hPerMille) + ", v " +
+                  std::to_string(g.vPerMille) + " -- expected 1/61/0");
+        announceCullGuardState(2, 1.25f, 1.10f);
+        g = decodeCullGuardState(cullGuardStatePacked());
+        check("cull channel: stage 2 round-trips",
+              g.stage == 2 && g.hPerMille == 250 && g.vPerMille == 100,
+              "stage " + std::to_string(g.stage) + ", h " +
+                  std::to_string(g.hPerMille) + ", v " +
+                  std::to_string(g.vPerMille) + " -- expected 2/250/100");
+        // Saturation clamps to the honest edge, never to zero: a margin too
+        // large to represent must still stamp as a live margin, and a factor
+        // below 1 (or NaN) as no widening.
+        announceCullGuardState(7, 200.0f, 0.5f);
+        g = decodeCullGuardState(cullGuardStatePacked());
+        check("cull channel: clamps saturate, not lie",
+              g.stage == 2 && g.hPerMille == 4095 && g.vPerMille == 0,
+              "stage " + std::to_string(g.stage) + ", h " +
+                  std::to_string(g.hPerMille) + ", v " +
+                  std::to_string(g.vPerMille) + " -- expected 2/4095/0");
+        announceCullGuardState(0, 1.0f, 1.0f);
+        check("cull channel: off clears to silence",
+              cullGuardStatePacked() == 0,
+              "stage 0 must be indistinguishable from nobody publishing");
+    }
+    // A FRESH BUFFER AND A FRESH, SMALL TRACK for the remaining cells, and
+    // the reason is a trap the first draft of this section fell straight
+    // into. The suite's main track sits near two million units by now, so
+    // resuming it after R's buffers is a "jump" of that whole displacement
+    // -- and R's own buffer switches (at max_consecutive = 3) had already
+    // put three marks on switch-sized magnitudes, CERTIFYING one. Every
+    // frame of the resumed track then matched a certified separation and
+    // was suppressed, and a suppressed frame deliberately contributes
+    // nothing -- no mark, no rebase, no track entry -- so the track never
+    // rebuilt and every later assertion drowned in suppressions. A fixture
+    // lives with the game's semantics, so this one enters the way a session
+    // does: one bounded switch (two marks at the default consecutive cap),
+    // a rebase, four hundred quiet frames, and a canary that fails loudly
+    // if the wedge ever comes back.
+    Buffer m;
+    float mx = 1000.0f;
+    settle(m, mx, 400);
+    {
+        uint32_t canary = 0;
+        for (uint32_t i = 0; i < 50; ++i) {
+            mx += 30.0f;
+            if (frame(m, mx, 0.0f, 0.0f)) ++canary;
+        }
+        check("churn cells: the fresh track settles clean", canary == 0,
+              std::to_string(canary) +
+                  " of 50 settled frames withheld -- the track never rebuilt "
+                  "after the buffer switch, so nothing below can be trusted");
+    }
+    {
+        // The attribution splits. Same detector, same shapes; the only thing
+        // varied is what the channel says, so any counter movement is the
+        // attribution and not the behaviour.
+        const GlitchFrameChurnStats s0 = glitchFrameChurnStats();
+        const bool offMarked = oneFrameExcursion(m, mx, 21000.0f);
+        const GlitchFrameChurnStats s1 = glitchFrameChurnStats();
+        check("splits: a guard-off withhold is not counted under the guard",
+              offMarked && s1.withheldGuardLive == s0.withheldGuardLive,
+              offMarked ? "withheldGuardLive moved with the guard off"
+                        : "the control excursion was not withheld at all, so "
+                          "the assertion is vacuous");
+
+        announceCullGuardState(2, 1.061f, 1.0f);
+        settle(m, mx, 200);
+        const bool liveMarked = oneFrameExcursion(m, mx, 26000.0f);
+        const GlitchFrameChurnStats s2 = glitchFrameChurnStats();
+        check("splits: a withhold under the live lie is counted",
+              liveMarked && s2.withheldGuardLive == s1.withheldGuardLive + 1,
+              liveMarked ? "withheldGuardLive did not move under stage 2"
+                         : "the guarded excursion was not withheld at all");
+
+        // Recognitions under the lie: the fixture-5 cascade shape, certified
+        // by its third mark, suppressing from the fourth flip on.
+        cascadeFlips(m, mx, 30000.0f, 40);
+        const GlitchFrameChurnStats s3 = glitchFrameChurnStats();
+        check("splits: recognitions under the live lie are counted",
+              s3.suppressedGuardLive >= s2.suppressedGuardLive + 8,
+              std::to_string(s3.suppressedGuardLive - s2.suppressedGuardLive) +
+                  " recognitions counted under the guard; the cascade should "
+                  "have supplied about ten");
+
+        // Stage 1 is supersampling only -- the frustum is still the truth,
+        // so nothing is tallied under the guard.
+        announceCullGuardState(1, 1.25f, 1.0f);
+        settle(m, mx, 200);
+        const bool stage1Marked = oneFrameExcursion(m, mx, 44000.0f);
+        const GlitchFrameChurnStats s4 = glitchFrameChurnStats();
+        check("splits: stage 1 does not count as the guard",
+              stage1Marked && s4.withheldGuardLive == s3.withheldGuardLive,
+              stage1Marked ? "a stage-1 withhold was tallied as guard-live"
+                           : "the stage-1 excursion was not withheld at all");
+        announceCullGuardState(0, 1.0f, 1.0f);
+    }
+    {
+        // The learning-cost counters, guard-off on purpose: the tax exists
+        // whatever the guard is doing -- the channel only attributes it.
+        //
+        // Twenty distinct magnitudes, each 17% above the last -- outside the
+        // 2% match window and the 10% drift band -- every one novel to the
+        // sixteen-slot table: the first sixteen-and-change learn, the rest
+        // evict live entries. Then the FIRST magnitude returns. The table
+        // has forgotten it, so it is withheld again -- and the relearn
+        // counter is what makes that second payment visible, which is the
+        // H1 number the field session reads.
+        settle(m, mx, 200);
+        const GlitchFrameChurnStats before = glitchFrameChurnStats();
+        float mag = 50000.0f;
+        const float firstMag = mag;
+        uint32_t stormWithheld = 0;
+        for (uint32_t i = 0; i < 20; ++i) {
+            if (oneFrameExcursion(m, mx, mag)) ++stormWithheld;
+            settle(m, mx, 30);       // outlives the drift chain's 8-frame gap
+            mag *= 1.17f;
+        }
+        const GlitchFrameChurnStats mid = glitchFrameChurnStats();
+        check("churn: every novel magnitude paid its frame and was learned",
+              stormWithheld == 20 && mid.sepInsertions >= before.sepInsertions + 20,
+              std::to_string(stormWithheld) + " of 20 withheld, " +
+                  std::to_string(mid.sepInsertions - before.sepInsertions) +
+                  " insertions counted");
+        check("churn: a population past sixteen slots evicts live entries",
+              mid.sepEvictedLive >= before.sepEvictedLive + 4,
+              std::to_string(mid.sepEvictedLive - before.sepEvictedLive) +
+                  " live evictions; twenty in-window magnitudes against "
+                  "sixteen slots must lose some");
+        check("churn: distinct novelty is NOT counted as relearning",
+              mid.sepRelearned == before.sepRelearned,
+              std::to_string(mid.sepRelearned - before.sepRelearned) +
+                  " relearns counted for magnitudes never seen before");
+
+        const bool relearnMarked = oneFrameExcursion(m, mx, firstMag);
+        const GlitchFrameChurnStats after = glitchFrameChurnStats();
+        check("churn: an evicted magnitude returning is withheld again and "
+              "counted as a relearn",
+              relearnMarked && after.sepRelearned == mid.sepRelearned + 1,
+              relearnMarked
+                  ? std::to_string(after.sepRelearned - mid.sepRelearned) +
+                        " relearns counted -- expected exactly 1"
+                  : "the returning magnitude was not withheld, so the table "
+                    "still knew it and nothing was relearned");
+        settle(m, mx, 200);
+    }
+
     clearGlitchFrame();
     shutdownGlitchFrameFix();
 

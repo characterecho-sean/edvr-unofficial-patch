@@ -180,7 +180,14 @@ at `fraction_h = 0.5`, with 36 withheld frames felt as judder before its
 own burst governor contained it. At the tuned 0.25 the churn sits below
 feel. A detector that ignores cameras whose passes exist only in the
 cropped margin — which the player can never see — is the proper fix, and
-is recorded as open work.
+is recorded as open work. The measurement for it ships first, per that
+fix's own discipline: the flash detector now stamps its camera history
+with the margin that was live at each frame, splits its running totals
+under the guard, and prints what it has learned when the history is
+dumped — so one staircase flight, dumped at each step, decides whether
+the churn is a memory-capacity problem or genuine novelty, and which
+mechanism that licenses. No detection behaviour changes with the
+instrumentation.
 
 ### Why the submit side is this elaborate
 

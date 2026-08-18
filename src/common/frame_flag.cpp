@@ -70,6 +70,18 @@ struct Shared {
     // nobody has published, which is a state the reader must handle: the openvr
     // proxy is optional and this is written only after its hook validates.
     volatile LONG eyeSize;
+    // cullGuard  the cull guard's stage and margin, packed as
+    //            (stage << 24) | (hPerMille << 12) | vPerMille, written by
+    //            openvr_api.dll at its stage transitions
+    //
+    // The second openvr -> d3d11 field, and eyeSize's disciplines carry over
+    // whole: one packed word so no reader tears a pair, zero is "no answer"
+    // and must be read as guard-off, and a mismatched build pair is made
+    // inert by the mapping version rather than subtly wrong by the layout.
+    // What it exists for -- attribution of detector churn to the guard's
+    // margin, never a decision -- is documented at the header declaration
+    // and in SPEC-FLASH-FALSE-POSITIVES §1g.
+    volatile LONG cullGuard;
 };
 
 // Per PROCESS, not per logon session.
@@ -86,11 +98,11 @@ struct Shared {
 // The name is built once, at first use. The two DLLs are in the same process,
 // so the channel between them is unaffected.
 //
-// _v6 because the struct changed again -- eyeSize was added. _v5 was
-// holdFrames, _v4 externalCamStamp, _v3 the field before that. A mismatched pair
-// from different builds must not agree on a layout they disagree about, and a
-// d3d11.dll writing a sixth field into a five-field mapping made by an older
-// openvr_api.dll would write past the end of it.
+// _v7 because the struct changed again -- cullGuard was added. _v6 was
+// eyeSize, _v5 holdFrames, _v4 externalCamStamp, _v3 the field before that. A
+// mismatched pair from different builds must not agree on a layout they
+// disagree about, and a d3d11.dll writing a seventh field into a six-field
+// mapping made by an older openvr_api.dll would write past the end of it.
 //
 // The version bump matters more for these later fields than for the early ones.
 // An old openvr_api.dll paired with a new d3d11.dll would find no stamp at all,
@@ -98,15 +110,16 @@ struct Shared {
 // reverse pairing would have a new reader trusting a stamp nobody writes.
 // Separate mappings make both pairings inert instead of subtly wrong.
 //
-// eyeSize is built to survive that pairing on its own as well: an unmatched
-// reader sees 0, which every caller is required to read as "no answer" and fall
-// back on. Mismatched halves therefore behave exactly like a session with no
-// openvr proxy installed, which is a supported configuration and not a fault.
+// eyeSize and cullGuard are built to survive that pairing on their own as
+// well: an unmatched reader sees 0, which every caller is required to read as
+// "no answer" and fall back on. Mismatched halves therefore behave exactly
+// like a session with no openvr proxy installed, which is a supported
+// configuration and not a fault.
 const wchar_t* mappingName() {
     static wchar_t name[64];
     static bool built = false;
     if (!built) {
-        _snwprintf_s(name, _TRUNCATE, L"Local\\edvr_glitch_frame_v6_%lu",
+        _snwprintf_s(name, _TRUNCATE, L"Local\\edvr_glitch_frame_v7_%lu",
                      GetCurrentProcessId());
         built = true;
     }
@@ -213,6 +226,38 @@ bool eyeTextureSize(uint32_t* width, uint32_t* height) {
     if (width) *width = v >> 16;
     if (height) *height = v & 0xFFFFu;
     return true;
+}
+
+void announceCullGuardState(uint32_t stage, float factorH, float factorV) {
+    Shared* s = map();
+    if (!s) return;
+    // Stage 0 clears the whole word: "off" and "no answer" are deliberately
+    // the same value, because every reader must treat them identically.
+    if (stage == 0) {
+        InterlockedExchange(&s->cullGuard, 0);
+        return;
+    }
+    // Clamped rather than refused, unlike eyeSize's packing check, and the
+    // difference is what the field is FOR. A refused eye size would make an
+    // equality test miss real targets; this is attribution, where a margin
+    // saturated at +409.5% still names the right frames, while a refusal
+    // would stamp a live guard as "off" -- a lie in the data the channel
+    // exists to make honest.
+    auto perMille = [](float factor) -> uint32_t {
+        if (!(factor > 1.0f)) return 0;                    // NaN lands here too
+        const float pm = (factor - 1.0f) * 1000.0f + 0.5f;
+        if (pm >= 4095.0f) return 4095u;
+        return static_cast<uint32_t>(pm);
+    };
+    const uint32_t packed = ((stage > 2 ? 2u : stage) << 24) |
+                            (perMille(factorH) << 12) | perMille(factorV);
+    InterlockedExchange(&s->cullGuard, static_cast<LONG>(packed));
+}
+
+uint32_t cullGuardStatePacked() {
+    Shared* s = map();
+    if (!s) return 0;
+    return static_cast<uint32_t>(InterlockedCompareExchange(&s->cullGuard, 0, 0));
 }
 
 bool takeSubmitHoldFrame() {
