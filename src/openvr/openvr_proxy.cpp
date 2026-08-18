@@ -14,6 +14,7 @@
 // code, and nothing survives deleting this DLL.
 #include <windows.h>
 
+#include <cstring>  // strncmp, for the interface suppression prefixes
 #include <string>
 
 #include "../common/config.h"
@@ -190,6 +191,70 @@ void ensureInitialised() {
     InitOnceExecuteOnce(&g_initOnce, initOnceCallback, nullptr, nullptr);
 }
 
+// Is this interface one the ini says to refuse without asking the runtime?
+//
+// This exists for chaining OpenComposite (advanced.real_openvr_dll):
+// OpenComposite raises a FATAL message box for any interface it does not
+// implement, and the request that trips it need not come from the game --
+// measured 2026-08-18 on a Pimax rig, something injected into the process
+// asked for IVROverlay_028 right after compositor init and the process died
+// before the log's first flush, while a Frontier-launcher install running
+// the same OpenComposite never asks for IVROverlay at all. Refusing here
+// answers with what a real runtime says about a version it predates --
+// interface not found -- which every OpenVR client already has to handle,
+// and which an overlay under OpenComposite would have to live with anyway,
+// since OpenComposite has no dashboard to put an overlay in.
+//
+// Comma-separated PREFIXES, so "IVROverlay" covers _028 and whatever version
+// next season's software asks for. Empty by default: behind real SteamVR
+// there is nothing to shield, and refusing an interface the runtime HAS
+// would be a lie with a config key.
+bool interfaceSuppressed(const char* interfaceVersion) {
+    if (!interfaceVersion) return false;
+    const std::string list =
+        edvr::Config::get().getString("advanced.suppress_interfaces", "");
+    if (list.empty()) return false;
+    size_t pos = 0;
+    while (pos < list.size()) {
+        size_t end = list.find(',', pos);
+        if (end == std::string::npos) end = list.size();
+        size_t a = pos, b = end;
+        while (a < b && list[a] == ' ') ++a;
+        while (b > a && list[b - 1] == ' ') --b;
+        if (b > a && strncmp(interfaceVersion, list.c_str() + a, b - a) == 0) {
+            return true;
+        }
+        pos = end + 1;
+    }
+    return false;
+}
+
+// Say which interfaces were refused, once each. A requester that retries in
+// a loop would otherwise write the same line at whatever rate it retries,
+// and eight distinct names is more than a session has ever asked for.
+void noteSuppressedInterface(const char* name) {
+    static char seen[8][64] = {};
+    for (auto& s : seen) {
+        if (s[0] && strncmp(s, name, sizeof(s) - 1) == 0) return;  // already said
+        if (!s[0]) {
+            strncpy_s(s, name, _TRUNCATE);
+            edvr::Log::get().note(
+                "VR_GetGenericInterface(\"%s\") REFUSED by "
+                "advanced.suppress_interfaces -- answered 'interface not found' "
+                "without asking the real runtime. This is the shield for "
+                "chaining OpenComposite, which raises a fatal dialog for "
+                "interfaces it does not implement. Whoever asked must handle "
+                "the refusal, because it is the same answer real SteamVR gives "
+                "for versions it predates. Said once per interface.",
+                name);
+            return;
+        }
+    }
+    // Table full: a ninth distinct refused name is beyond anything measured,
+    // and a requester retrying in a loop must not fill the log -- quiet is
+    // the right failure for the bookkeeping, not for the refusal itself.
+}
+
 void shutdown() {
     edvr::shutdownCompositorHook();
     edvr::Log::get().note("EDVR openvr proxy detaching");
@@ -211,6 +276,15 @@ extern "C" void* __cdecl edvr_impl_VR_GetGenericInterface(const char* interfaceV
         return nullptr;
     }
     ensureInitialised();
+
+    // BEFORE the real call, which is the whole point: the runtime we shield
+    // against answers a request it does not like with a fatal dialog, so the
+    // request must never reach it. See interfaceSuppressed.
+    if (interfaceSuppressed(interfaceVersion)) {
+        noteSuppressedInterface(interfaceVersion);
+        if (error) *error = 105;  // VRInitError_Init_InterfaceNotFound
+        return nullptr;
+    }
 
     void* iface = g_realGetGenericInterface(interfaceVersion, error);
     if (!iface || !interfaceVersion) return iface;
