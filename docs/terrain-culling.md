@@ -161,12 +161,26 @@ frustum above renders about 48% more pixels. Two knobs cut it.
 `cull_guard_fraction_h` / `_v` cover only part of each axis's shortfall —
 live-tunable, so the staircase described in `edvr.ini` finds the cheapest
 value that still keeps the edges clean, and the log's `cull guard margins`
-line names what each step leaves uncovered (halving both fractions costs
-about 23% instead). And `cull_guard_headsets` gates the whole guard to
-listed FOV signatures — the log prints each headset's, like `94x99` — so a
-rig that swaps headsets pays only on the headset its owner listed, with no
-config edits at swap time; unlisted headsets run observation only, at no
-cost.
+line names what each step leaves uncovered. On the Quest 3 frustum the
+staircase settled at **`fraction_h = 0.25`, `fraction_v = 0` — about 6%
+extra pixels** — with the edges still clean: the vertical margin proved
+entirely unnecessary (matching the tracker's sides-only reports), and the
+outermost ~4.4° horizontal either genuinely needs no cover or is not
+resolvable through the lens edge. And `cull_guard_headsets` gates the whole
+guard to listed FOV signatures — the log prints each headset's, like
+`94x99` — so a rig that swaps headsets pays only on the headset its owner
+listed, with no config edits at swap time; unlisted headsets run
+observation only, at no cost.
+
+One measured side effect of LARGE margins, recorded so its judder is not
+misattributed: the wider frustum admits more near-surface shadow and
+auxiliary passes, and the transition-flash fix's recognition machinery
+churns proportionally — 29 learned separations at guard-off against 3,277
+at `fraction_h = 0.5`, with 36 withheld frames felt as judder before its
+own burst governor contained it. At the tuned 0.25 the churn sits below
+feel. A detector that ignores cameras whose passes exist only in the
+cropped margin — which the player can never see — is the proper fix, and
+is recorded as open work.
 
 ### Why the submit side is this elaborate
 
