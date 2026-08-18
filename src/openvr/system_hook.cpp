@@ -147,11 +147,32 @@ struct State {
     bool      receiverInstalled = false;  // slot 1 = member receiver, not asm
     bool      restartNoted = false;       // "enable needs a restart", said once
     bool      guardInert = false;         // formula or shape failed; truth only
-    bool      lieLive = false;            // flips ONLY at frame boundaries
+
+    // THE TWO-STAGE GO-LIVE. Both field failures of this guard were the
+    // transport (OpenComposite over VDXR) mishandling a submission shape the
+    // session had not served before -- narrowed bounds first, then a
+    // cropped texture whose aspect differed from the canonical size. So the
+    // guard never changes what the transport sees: stage 1 lies about
+    // GetRecommendedRenderTargetSize so the game rebuilds its targets
+    // BIGGER (to the transport that is an ordinary supersampling change,
+    // proven handled in the field), and only when both eyes' submissions
+    // arrive at the inflated size does stage 2 start the projection lie --
+    // whose crop then lands, snapped, at EXACTLY the canonical size the
+    // session established. Submissions never change shape at the moment the
+    // lie begins, and the resolution cost of the first design disappears:
+    // the margin is rendered in NEW pixels, not carved out of the old ones.
+    uint8_t   stage = 0;                  // 0 off, 1 size-only, 2 full
+    bool      lieLive = false;            // stage 2, kept as the hot-path flag
     bool      liePending = false;         // prerequisites met, awaiting boundary
     uint64_t  liePendingSinceMs = 0;
+    uint64_t  stage1SinceMs = 0;
+    bool      stage1WaitNoted = false;
+    float     sizeFactorH = 1.0f, sizeFactorV = 1.0f;
+    uint32_t  trueSizeW = 0, trueSizeH = 0;    // last truth from slot 0
+    uint32_t  submittedW[2] = {}, submittedH[2] = {};
+    uint32_t  canonicalW[2] = {}, canonicalH[2] = {};  // crop snap target
     uint64_t  lastBoundaryMs = 0;         // 0 = no boundary driver seen
-    uint32_t  cropsApplied = 0;           // eye-submits cropped
+    uint32_t  cropsApplied = 0;           // eye-submits cropped (bounds mode)
     bool      matrixFormulaOk[2] = {};
     bool      matrixChecked[2] = {};
     bool      receiverFirstLogged = false;
@@ -243,9 +264,21 @@ void hookedGetRecommendedRenderTargetSize(void* self, uint32_t* w, uint32_t* h) 
     State* s = g_state;
     if (!s || s->inert || self != s->ownerIface || !w || !h) return;
     guarded("sysHook/size", [&] {
+        s->trueSizeW = *w;
+        s->trueSizeH = *h;
         s->sizeW = *w;
         s->sizeH = *h;
         s->sizeDirty = true;
+        // Stage 1 and up: the game is asked for targets big enough that the
+        // wide render keeps the session's pixels-per-degree. The runtime
+        // itself is never told anything -- only the game's answer changes,
+        // and the game treats it exactly like a supersampling change.
+        if (s->stage >= 1 && !s->guardInert) {
+            *w = static_cast<uint32_t>(
+                lroundf(static_cast<float>(*w) * s->sizeFactorH));
+            *h = static_cast<uint32_t>(
+                lroundf(static_cast<float>(*h) * s->sizeFactorV));
+        }
     });
     systemHookPeriodic();
 }
@@ -566,23 +599,109 @@ bool cropFractions(const State* s, int eye, float out[4]) {
     return true;
 }
 
-// The lie goes live (or dies) HERE and only here, so one frame's raw
-// answers, matrix answers and submit crop agree. Callers: the frame
-// boundary, and periodic's fallback for boundary-less processes.
+// Stage transitions happen HERE and only here, at the frame boundary (or
+// periodic's fallback for boundary-less processes), so one frame's raw
+// answers, matrix answers, target-size answers and submit handling always
+// agree.
 void promoteOrDemote(State* s) {
-    if (s->lieLive &&
+    // Demotion wins, from any stage. The game re-reads the true target size
+    // within a frame and rebuilds its targets back; to the transport that is
+    // one ordinary full-texture resize, the event the field has proven it
+    // handles.
+    if (s->stage > 0 &&
         (s->guardInert || s->modeRequested == GuardMode::Off)) {
+        const bool wasLive = s->lieLive;
+        s->stage = 0;
         s->lieLive = false;
         s->liePending = false;
+        s->stage1WaitNoted = false;
         Log::get().note(
-            "cull guard OFF%s: the game sees true projections again from this "
-            "frame.",
-            s->guardInert ? " (inert)" : "");
+            "cull guard OFF%s: the game sees true projections%s and its "
+            "normal target size again from this frame.",
+            s->guardInert ? " (inert)" : "",
+            wasLive ? ", full submissions" : "");
         return;
     }
-    if (!s->lieLive && s->liePending && !s->guardInert &&
+
+    // Stage 0 -> 1: start asking for bigger render targets. Projections stay
+    // TRUE; the game simply supersamples while it adopts.
+    if (s->stage == 0 && s->liePending && !s->guardInert &&
         s->modeRequested != GuardMode::Off) {
         s->liePending = false;
+        const float duT = s->trueRaw[0][1] - s->trueRaw[0][0];
+        const float dvT = s->trueRaw[0][3] - s->trueRaw[0][2];
+        const float duL = s->lied[0][1] - s->lied[0][0];
+        const float dvL = s->lied[0][3] - s->lied[0][2];
+        if (duT < 1e-4f || dvT < 1e-4f || duL < duT || dvL < dvT) {
+            s->guardInert = true;
+            Log::get().note(
+                "cull guard INERT: the widened spans are degenerate "
+                "(u %g->%g, v %g->%g). Report this log.",
+                duT, duL, dvT, dvL);
+            return;
+        }
+        s->sizeFactorH = duL / duT;
+        s->sizeFactorV = dvL / dvT;
+        s->stage = 1;
+        s->stage1SinceMs = stampMs();
+        Log::get().note(
+            "cull guard stage 1 (%s): asking the game for %.0f%% x %.0f%% "
+            "larger render targets, so the wider frustum keeps this "
+            "session's pixels-per-degree. Projections stay true until both "
+            "eyes submit at the new size -- the runtime never sees a "
+            "submission shape this session has not already served.",
+            modeName(s->modeRequested), (s->sizeFactorH - 1.0f) * 100.0f,
+            (s->sizeFactorV - 1.0f) * 100.0f);
+        return;
+    }
+
+    // Stage 1 -> 2: the game has rebuilt its targets, so the lie can start
+    // and every crop lands at the canonical size the session established.
+    if (s->stage == 1) {
+        bool adopted = s->trueSizeW != 0;
+        for (int e = 0; e < 2 && adopted; ++e) {
+            const float needW =
+                static_cast<float>(s->trueSizeW) * s->sizeFactorH * 0.97f;
+            const float needH =
+                static_cast<float>(s->trueSizeH) * s->sizeFactorV * 0.97f;
+            if (static_cast<float>(s->submittedW[e]) < needW ||
+                static_cast<float>(s->submittedH[e]) < needH) {
+                adopted = false;
+            }
+        }
+        // Boundary-less processes (the test harness) have no submissions and
+        // no transport to protect; they go live with free-size crops.
+        const bool fallback = s->lastBoundaryMs == 0;
+        if (!adopted && !fallback) {
+            if (!s->stage1WaitNoted && elapsedMs(s->stage1SinceMs, 10000)) {
+                s->stage1WaitNoted = true;
+                Log::get().note(
+                    "cull guard: still at stage 1 after 10 s -- the game has "
+                    "not rebuilt its render targets at the larger size "
+                    "(submitting %ux%u / %ux%u, want about %ux%u). Everything "
+                    "runs normally meanwhile; if this is the guard's last "
+                    "line, report the log.",
+                    s->submittedW[0], s->submittedH[0], s->submittedW[1],
+                    s->submittedH[1],
+                    static_cast<unsigned>(
+                        lroundf(s->trueSizeW * s->sizeFactorH)),
+                    static_cast<unsigned>(
+                        lroundf(s->trueSizeH * s->sizeFactorV)));
+            }
+            return;
+        }
+        for (int e = 0; e < 2; ++e) {
+            if (adopted) {
+                s->canonicalW[e] = static_cast<uint32_t>(lroundf(
+                    static_cast<float>(s->submittedW[e]) / s->sizeFactorH));
+                s->canonicalH[e] = static_cast<uint32_t>(lroundf(
+                    static_cast<float>(s->submittedH[e]) / s->sizeFactorV));
+            } else {
+                s->canonicalW[e] = 0;
+                s->canonicalH[e] = 0;
+            }
+        }
+        s->stage = 2;
         s->lieLive = true;
         for (int eye = 0; eye < 2; ++eye) {
             const float* t = s->trueRaw[eye];
@@ -593,7 +712,7 @@ void promoteOrDemote(State* s) {
                 "cull guard LIVE (%s): %s eye true l=%+.4f r=%+.4f t=%+.4f "
                 "b=%+.4f -> reported l=%+.4f r=%+.4f t=%+.4f b=%+.4f (FOV "
                 "%.1fx%.1f -> %.1fx%.1f deg); submit keeps u %.3f..%.3f, "
-                "v %.3f..%.3f of the rendered image, by %s.",
+                "v %.3f..%.3f of the rendered image, by %s%s.",
                 modeName(s->modeRequested), eyeName(eye), t[0], t[1], t[2], t[3],
                 lie[0], lie[1], lie[2], lie[3],
                 degrees(t[0]) + degrees(t[1]), degrees(t[2]) + degrees(t[3]),
@@ -601,7 +720,10 @@ void promoteOrDemote(State* s) {
                 degrees(lie[2]) + degrees(lie[3]),
                 f[0], f[2], f[1], f[3],
                 s->submitCopy ? "copying that region into an EDVR texture"
-                              : "narrowing the submitted bounds");
+                              : "narrowing the submitted bounds",
+                s->canonicalW[eye]
+                    ? " -- submissions stay at the session's own size"
+                    : " (free-size crop, no transport to protect)");
         }
     }
 }
@@ -633,10 +755,14 @@ void systemHookPeriodic() {
             emitSummary(s);
             // The boundary-less fallback: a process with no compositor hook
             // (the test harness) has no frame boundary, so after two quiet
-            // seconds the promotion happens here instead. In the game the
-            // boundary fires every frame and this never runs.
-            if (s->liePending && !s->lieLive && s->lastBoundaryMs == 0 &&
-                elapsedMs(s->liePendingSinceMs, kBoundaryFallbackMs)) {
+            // seconds the staging advances here instead -- stage 1 on the
+            // first pass, stage 2 on the next (its no-transport fallback
+            // needs no further wait). In the game the boundary fires every
+            // frame and this never runs.
+            if (s->lastBoundaryMs == 0 && !s->lieLive &&
+                ((s->liePending &&
+                  elapsedMs(s->liePendingSinceMs, kBoundaryFallbackMs)) ||
+                 s->stage == 1)) {
                 promoteOrDemote(s);
             }
         });
@@ -732,6 +858,29 @@ void systemHookGuardStandDown(const char* why) {
         "boundary and the game sees true projections for the rest of the "
         "session. Please report this log.",
         why ? why : "a submit-side failure");
+}
+
+bool systemHookSizeProbeWanted() {
+    State* s = g_state;
+    return s && s->stage == 1 && !s->guardInert;
+}
+
+void systemHookNoteSubmittedSize(vr::EVREye eye, uint32_t w, uint32_t h) {
+    State* s = g_state;
+    if (!s || !w || !h) return;
+    const int e = (eye == vr::Eye_Left) ? 0 : 1;
+    s->submittedW[e] = w;
+    s->submittedH[e] = h;
+}
+
+bool systemHookCropTarget(vr::EVREye eye, uint32_t* w, uint32_t* h) {
+    State* s = g_state;
+    if (!s || !w || !h) return false;
+    const int e = (eye == vr::Eye_Left) ? 0 : 1;
+    if (!s->canonicalW[e] || !s->canonicalH[e]) return false;
+    *w = s->canonicalW[e];
+    *h = s->canonicalH[e];
+    return true;
 }
 
 bool systemHookCropBounds(vr::EVREye eye, const vr::VRTextureBounds_t* in,
