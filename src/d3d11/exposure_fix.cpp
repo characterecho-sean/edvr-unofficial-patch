@@ -13,6 +13,7 @@
 #include "../common/log.h"
 #include "../common/vtable_hook.h"
 #include "binding_shadow.h"
+#include "device_hook.h"  // contextHookModeFor
 
 namespace edvr {
 namespace {
@@ -490,7 +491,7 @@ void toggleExposureFix() {
 
 bool exposureFixEnabled() { return g_state && g_state->enabled; }
 
-void installExposureFix(ID3D11Device* device) {
+void installExposureFix(ID3D11Device* device, HookMode mode) {
     if (!device || g_state) return;
 
     Config& cfg = Config::get();
@@ -538,6 +539,11 @@ void installExposureFix(ID3D11Device* device) {
         g_state = nullptr;
         return;
     }
+
+    // The mechanism, decided once per device by the caller and shared with the
+    // vScreen hooks so the two never disagree about this one object. Between
+    // attach and the first replace, which is the only window setMode allows.
+    s.hook.setMode(mode);
 
     s.hook.replace(kSlotCSSetShader, &hookedCSSetShader,
                    reinterpret_cast<void**>(&s.realCSSetShader));

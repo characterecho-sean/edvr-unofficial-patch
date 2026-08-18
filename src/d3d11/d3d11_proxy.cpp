@@ -313,6 +313,66 @@ void reportLoopOnce() {
 
 }  // namespace
 
+namespace edvr {
+
+// The mechanism decision, made from the fact that actually settles safety:
+// whose CODE implements this context's methods?
+//
+// Not where the vtable ARRAY lives -- the first cut of this asked that, and a
+// Pimax + OpenComposite rig refuted it in a day (2026-08-18): D3D11 handed out
+// a context whose vtable array is on the heap while every entry points into
+// system32\d3d11.dll. The array-location probe called that a wrapper, chose
+// InPlace, and lost the 64-round war to the runtime re-pointing its own table
+// -- the exact failure CopyVptr exists to dodge, not taken because the probe
+// mislabelled the object.
+//
+// Entries pointing into g_systemModule (Windows' own d3d11.dll) mean the
+// runtime owns this object: CopyVptr is safe and immune. A ReShade wrapper's
+// entries point into ReShade's module, so they do NOT count here and the
+// object stays InPlace -- issue #6 avoided. A threshold, not all-or-nothing,
+// because a thin wrapper may forward some slots straight to d3d11.dll; a
+// clear majority in d3d11.dll is the runtime's own table.
+HookMode contextHookModeFor(ID3D11DeviceContext* ctx) {
+    if (!ctx || !g_systemModule) return HookMode::InPlace;
+    void** vt = nullptr;
+    if (!guarded("contextHookModeFor/read-vptr",
+                 [&] { vt = *reinterpret_cast<void***>(ctx); })) {
+        return HookMode::InPlace;
+    }
+    // Sample a generous prefix -- ID3D11DeviceContext has ~140 methods, and a
+    // wrapper that forwards a handful while intercepting the rest must not be
+    // read as the runtime's own.
+    constexpr size_t kSample = 96;
+    const size_t inSystem = edvr::vtableEntriesInModule(vt, kSample, g_systemModule);
+    const bool arrayInside = edvr::vtableInsideModule(vt, g_systemModule);
+
+    // A HIGH bar, not a bare majority, and the field data is why. A genuine
+    // runtime context samples 93-96 of 96 inside d3d11.dll -- essentially all
+    // of it (measured 2026-08-18 on the Pimax/OpenComposite/OpenXR-Toolkit
+    // rig). A real wrapper (ReShade) points ~every entry at its OWN module, so
+    // it samples near zero. The two populations sit at the opposite ends of
+    // the range with nothing legitimate in between, so the threshold belongs
+    // up near the runtime's own number, not at 50%: a hypothetical thin
+    // wrapper that forwarded MOST slots as raw d3d11.dll addresses while
+    // intercepting a few would clear a bare majority and get its vptr swapped
+    // -- issue #6 by another door. 75% keeps a 20-point margin below the
+    // runtime and a 65-point gap above any wrapper, and InPlace (the safe
+    // default) catches everything that does not clearly clear it.
+    const HookMode mode =
+        (inSystem * 4 >= kSample * 3) ? HookMode::CopyVptr : HookMode::InPlace;
+    Log::get().note(
+        "context hook mode: %s -- %zu of %zu sampled vtable entries are inside "
+        "Windows' d3d11.dll, and the vtable array itself is %s it. CopyVptr is "
+        "chosen when the runtime's own code backs the methods (immune to the "
+        "runtime re-pointing its shared table); InPlace when a wrapper owns "
+        "them (issue #6 safety).",
+        mode == HookMode::CopyVptr ? "CopyVptr" : "InPlace", inSystem, kSample,
+        arrayInside ? "inside" : "outside");
+    return mode;
+}
+
+}  // namespace edvr
+
 // Exported as D3D11CreateDevice / D3D11CreateDeviceAndSwapChain by the
 // generated .def. The edvr_impl_ prefix keeps our definitions from colliding
 // with the declarations in d3d11.h.

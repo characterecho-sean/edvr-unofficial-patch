@@ -10,7 +10,28 @@
 #include <d3d11.h>
 #include <dxgi.h>
 
+#include "../common/vtable_hook.h"  // HookMode
+
 namespace edvr {
+
+// Which hook mechanism the context fixes should use, decided from the
+// immediate context's vtable: does the runtime's own code back its methods
+// (CopyVptr, immune to the runtime re-pointing its shared table between
+// variants -- measured 2026-08-18) or does a wrapper like ReShade (InPlace,
+// because swapping a wrapper's object vptr is issue #6)?
+//
+// Defined in d3d11_proxy.cpp, which owns the system module handle. Returns
+// InPlace when the module or context is unavailable: the mode that never
+// breaks a stranger is the safe default.
+//
+// DECIDED ONCE PER DEVICE, in hookDevice, and passed to BOTH context
+// installers. It must not be computed twice: the probe samples live vtable
+// entries and the runtime re-points a few of them between two calls (measured
+// 96/96 one call, 93/96 the next in one session), so two independent
+// decisions could straddle the threshold and land on OPPOSITE modes for the
+// SAME context -- one swapping the vptr while the other patches the table it
+// just orphaned. Sharing one answer removes the straddle entirely.
+HookMode contextHookModeFor(ID3D11DeviceContext* ctx);
 
 void hookDevice(ID3D11Device* device);
 void hookSwapChain(IDXGISwapChain* swapChain);

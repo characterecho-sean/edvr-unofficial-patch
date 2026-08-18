@@ -17,6 +17,7 @@
 #include "../common/timing.h"
 #include "../common/vtable_hook.h"
 #include "binding_shadow.h"
+#include "device_hook.h"  // contextHookModeFor
 #include "glitch_frame.h"
 
 namespace edvr {
@@ -345,7 +346,6 @@ struct State {
     // full seconds of losses on a per-frame call is not a real interleaving.
     uint32_t thunkHits[kHitCount] = {};
     uint8_t  quietPasses[kHitCount] = {};
-    bool     everHit[kHitCount] = {};
     // Eye draws accumulated since the last reclaim pass -- the SCENE evidence
     // the exposure fix borrows for its own vouches. Its compute slots go
     // legitimately silent through loading screens (measured at 1790fps with
@@ -1064,22 +1064,40 @@ bool vScreenReclaimHooks() {
     State* s = g_state;
     if (!s) return false;
     // Turn the per-thunk call counters into the vouch list. A slot is vouched
-    // only when it has fired before (a call this game never makes cannot "go
-    // quiet") and has now been silent for kQuietPassesToVouch consecutive
-    // passes while Present kept driving this function -- which is the one
+    // when it has been silent for kQuietPassesToVouch consecutive passes WHILE
+    // THE SAME CONTEXT'S OTHER THUNKS WERE FIRING -- which is the one
     // combination a chainer cannot produce, since a chainer forwards the
-    // game's calls into our thunks and keeps the counter climbing.
+    // game's calls into our thunks and keeps its own slot's counter climbing.
+    //
+    // The gate used to be everHit -- "this slot fired at least once before" --
+    // and the field refuted it within a day: OpenXR Toolkit's layer loads
+    // with the process and re-points the draw slots BEFORE the game's first
+    // draw call, so the draw counters never fired, the vouch was structurally
+    // unearnable, and five slots stayed bypassed for the session with the
+    // detection lines dutifully pointing at them (measured 2026-08-18, both
+    // on the reporting user's rig and reproduced locally). Cross-slot
+    // liveness has no such birth window: Map, Unmap and the bind calls fire
+    // from the first frame of anything -- menus, loading screens, play --
+    // so "this context is dispatching through EDVR somewhere, and THIS slot
+    // alone is silent" is available from the very first pass, and it is
+    // still evidence a chainer cannot fake, because a chainer's forwarding
+    // IS traffic.
+    bool ctxAlive = false;
+    for (uint32_t i = 0; i < kHitCount; ++i) {
+        if (s->thunkHits[i] != 0) { ctxAlive = true; break; }
+    }
     size_t quiet[kHitCount];
     size_t n = 0;
     for (uint32_t i = 0; i < kHitCount; ++i) {
-        if (s->thunkHits[i] == 0) {
-            if (s->everHit[i] && s->quietPasses[i] < 255) ++s->quietPasses[i];
-        } else {
-            s->everHit[i] = true;
+        if (s->thunkHits[i] != 0) {
             s->quietPasses[i] = 0;
             s->thunkHits[i] = 0;
+        } else if (ctxAlive && s->quietPasses[i] < 255) {
+            // Silence only counts against a demonstrably-dispatching context.
+            // A minimized or frozen game freezes every streak with it.
+            ++s->quietPasses[i];
         }
-        if (s->everHit[i] && s->quietPasses[i] >= kQuietPassesToVouch) {
+        if (s->quietPasses[i] >= kQuietPassesToVouch) {
             quiet[n++] = kReclaimableSlots[i];
         }
     }
@@ -1383,7 +1401,7 @@ void vScreenFrameBoundary() {
     ++s->frameNo;
 }
 
-void installVScreenFixes(ID3D11Device* device) {
+void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     if (!device || g_state) return;
 
     Config& cfg = Config::get();
@@ -1446,6 +1464,11 @@ void installVScreenFixes(ID3D11Device* device) {
         return;
     }
 
+    // The mechanism, decided once per device by the caller and shared with the
+    // exposure hooks so the two agree about this one object. Between attach
+    // and the first replace, the only window setMode allows.
+    s.hook.setMode(mode);
+
     s.hook.replace(kSlotClearRenderTargetView, &hookedClearRtv,
                    reinterpret_cast<void**>(&s.realClearRtv));
     s.hook.replace(kSlotOMSetRenderTargets, &hookedOMSetRenderTargets,
@@ -1480,12 +1503,18 @@ void installVScreenFixes(ID3D11Device* device) {
     }
 
     Log::get().note("vScreen fixes installed: black void %s, panel distance %s, eye-draw "
-                    "counting %s",
+                    "counting %s, hooking %s",
                     s.blackVoid ? "on" : "off",
                     s.distanceEnabled ? "on" : "off (1.0)",
                     (s.distanceEnabled || s.countForFlashFix)
                         ? "on"
-                        : "OFF -- the transition flash fix cannot act without it");
+                        : "OFF -- the transition flash fix cannot act without it",
+                    s.hook.mode() == HookMode::CopyVptr
+                        ? "by private vtable copy (the context is the runtime's own, "
+                          "which re-points its shared table between modes -- a copy is "
+                          "immune)"
+                        : "in place (the context is a wrapper's, e.g. ReShade; reclaim "
+                          "watches for another tool re-pointing our slots)");
     ctx->Release();
 }
 

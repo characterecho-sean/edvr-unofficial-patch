@@ -1,22 +1,38 @@
-// COM vtable interception by patching entries in place.
+// COM vtable interception, by whichever of two mechanisms fits the table.
 //
-// We make the vtable page writable, exchange the few function pointers we
-// care about for our own, and put the protection back. The object's vptr is
-// never touched, so the object's identity survives and any mod that wraps
-// D3D11/OpenVR objects keeps dispatching through its own tables.
+// TWO MECHANISMS, ONE QUESTION. Both existed as sole mechanisms first, each
+// shipped, and each was refuted in the field by a rig the other would have
+// survived. The question that picks between them is: WHOSE MODULE OWNS THE
+// VTABLE THIS OBJECT DISPATCHES THROUGH?
 //
-// WHY NOT COPY-AND-SWAP-VPTR, WHICH THIS REPLACED
+//   CopyVptr -- copy the table into memory we own, patch the copy, point the
+//   OBJECT's vptr at it. Shipped alone through 0.7.1. Its virtue took three
+//   releases to even name: the D3D11 RUNTIME RE-POINTS ITS OWN STATIC TABLE
+//   ENTRIES between internal per-mode variants (measured 2026-08-18:
+//   draw/clear/dispatch slots re-pointed to system32\d3d11.dll internals when
+//   an OpenXR Toolkit install flipped the runtime's mode; the war for those
+//   slots was unwinnable because the opponent was the OS maintaining its own
+//   state). A private copy never notices any of that -- which is why 0.7.0
+//   "just worked" on the stack that broke 0.7.2+. Its vice was issue #6: on a
+//   rig where the object is a WRAPPER's proxy (ReShade as dxgi.dll), the
+//   table belongs to the wrapper, re-pointing the wrapper's object breaks the
+//   wrapper's own dispatch assumptions, and the game crashes at launch.
 //
-// The old mechanism copied the table and pointed the OBJECT at the copy.
-// Per-object, elegant, and structurally incompatible with wrapper mods: it
-// re-points an object somebody else owns and dispatches through. ReShade
-// installed as dxgi.dll wraps the device and context, so EDVR was attaching
-// to ReShade's proxies -- visible in every log as `exposure fix installed on
-// ... (149 methods)` against 302 without it -- and games crashed on launch
-// (issue #6). The crash looked random because the crash sentinel disables
-// the fixes on the following launch, so it alternated. Ordering cannot fix
-// it; going second is exactly the failure. tools/vtable_test reproduces the
-// collision, and those cells failed against the old mechanism first.
+//   InPlace -- make the table page writable and exchange the entries. Shipped
+//   as the sole mechanism in 0.7.2+ because it composes with wrappers (their
+//   object, their table, untouched identity). Its vice is the mirror image:
+//   the table is shared property, so anything else that writes it -- a later
+//   tool with clean-resolved forwards, or the RUNTIME ITSELF re-selecting
+//   variants -- silently bypasses us, which is what reclaim() below detects
+//   and, where evidence permits, heals.
+//
+// The pick: a table living inside the REAL implementation module's image
+// (the d3d11.dll we forward to) is the runtime's own -- CopyVptr, immune and
+// wrapper-safe because there is no wrapper. A table living anywhere else is
+// somebody's proxy class -- InPlace, because re-pointing their object is
+// issue #6. vtableInsideModule() is the probe; the POLICY stays with callers,
+// who know which module implements what they hooked. tools/vtable_test holds
+// both mechanisms' cells, each written to fail against the wrong one first.
 //
 // WHAT THE CHANGE COSTS THE CALLER: patching a vtable hooks EVERY object of
 // that class, not the one you attached to. Each hook body must therefore
@@ -61,6 +77,32 @@ size_t probeVTableLength(void** vtable, size_t maxEntries);
 // True if p points into committed, executable memory.
 bool isExecutableAddress(const void* p);
 
+// Does this vtable ARRAY live inside this module's mapped image? True where
+// the table is static read-only data in the module. NOT the mechanism probe
+// on its own -- D3D11 hands out per-object heap vtables whose array is on the
+// heap while its entries point into d3d11.dll, and that case must still take
+// CopyVptr. Use vtableEntriesInModule for the mechanism decision; this stays
+// for the unit test that documents the array-location fact.
+bool vtableInsideModule(void** vtable, void* moduleBase);
+
+// How many of the first `count` vtable entries point into this module's image.
+//
+// THE mechanism probe. It asks whose CODE implements the object's methods,
+// which is the fact that actually decides safety: entries in the runtime's
+// d3d11.dll mean the runtime owns this object and a vptr swap is safe and
+// immune to the runtime re-pointing its own table (2026-08-18); entries in a
+// wrapper's module (ReShade) mean swapping the object's vptr breaks the
+// wrapper, which is issue #6. Robust to where the vtable ARRAY happens to
+// live, which vtableInsideModule was not.
+size_t vtableEntriesInModule(void** vtable, size_t count, void* moduleBase);
+
+// Which mechanism a hook uses. Decided by the CALLER before replace(), from
+// vtableInsideModule() and knowledge of which module implements the object.
+enum class HookMode : uint32_t {
+    InPlace = 0,   // patch the shared table; reclaim() watches it
+    CopyVptr,      // private table copy; immune to table owners, no reclaim
+};
+
 class VTableHook {
 public:
     VTableHook() = default;
@@ -70,26 +112,46 @@ public:
     VTableHook& operator=(const VTableHook&) = delete;
 
     // Reads the object's vtable and sanity-checks it. maxEntries bounds how
-    // far the plausibility probe walks. Nothing is written here.
+    // far the plausibility probe walks; in CopyVptr mode it is also the copy
+    // window, deliberately over-wide (a copy truncated to the apparent method
+    // count breaks the moment the host calls a slot beyond it). Nothing is
+    // written here.
     bool attach(void* object, size_t maxEntries = 512);
+
+    // Selects the mechanism. Callable only between attach() and the first
+    // replace(): the two mechanisms stage differently, and switching after
+    // staging would mean patches recorded against a table that is no longer
+    // the one being modified. Defaults to InPlace, which is the mode that
+    // never breaks somebody else's object.
+    bool setMode(HookMode mode);
+    HookMode mode() const { return m_mode; }
 
     // Stages one slot. origOut receives what the slot holds NOW, which is
     // what the caller must forward to -- if another hook (ours or a foreign
     // one) already patched this slot, that is the entry we chain to, and the
     // chain is preserved in both directions by the polite uninstall below.
-    // Must be called before commit(). Refuses indices beyond the executable
-    // prefix, since those are not methods we have any reason to believe in.
+    // In CopyVptr mode "what the slot holds now" reads through the object's
+    // CURRENT vptr, so stacking two copy-mode hooks on one object chains
+    // exactly like stacking two in-place hooks on one table. Must be called
+    // before commit(). Refuses indices beyond the executable prefix, since
+    // those are not methods we have any reason to believe in.
     bool replace(size_t index, void* replacement, void** origOut);
 
-    // Writes every staged entry into the real vtable. All-or-nothing: a
-    // partial failure rolls back the slots already written, the same
-    // discipline vscreen_res uses for code patching.
+    // Applies the staged patches. InPlace: writes every staged entry into the
+    // shared table, all-or-nothing -- a partial failure rolls back the slots
+    // already written, the same discipline vscreen_res uses for code
+    // patching. CopyVptr: writes the patches into the private copy and swaps
+    // the object's vptr -- one aligned pointer store, which cannot be
+    // partial.
     bool commit();
 
-    // Restores each entry we wrote, but ONLY where it still holds our
-    // replacement. An entry someone patched after us belongs to them now;
+    // InPlace: restores each entry we wrote, but ONLY where it still holds
+    // our replacement. An entry someone patched after us belongs to them now;
     // restoring it would clobber their hook, which is the same composition
     // failure this class exists to stop, viewed from the other side.
+    // CopyVptr: restores the vptr this hook found at attach -- which, for
+    // stacked copy hooks, is the copy underneath, so unwinding in reverse
+    // install order peels the stack exactly as it was built.
     void uninstall();
 
     // Re-read every committed slot; re-patch the ones somebody re-pointed --
@@ -136,6 +198,16 @@ public:
     //
     // Returns how many slots were re-patched this pass. `name` labels the log
     // lines; the first reclaim explains itself, later ones report at doublings.
+    //
+    // CopyVptr mode returns 0 without looking: the private copy has no
+    // co-owners to misread and no shared table for the runtime or a
+    // clean-resolving tool to rewrite -- immunity is the mode's whole reason
+    // to exist, and a reclaim over it would be patrolling a wall nobody can
+    // reach. (A later tool that vtable-patches finds the copy through the
+    // object's vptr and chains through our thunks; one that swaps the vptr
+    // again stacks on top the way we stacked. Both compose without help --
+    // 0.7.0 and 0.7.1 shipped exactly this and the field never contradicted
+    // it.)
     size_t reclaim(const char* name, const size_t* quietSlots = nullptr,
                    size_t quietCount = 0);
 
@@ -177,6 +249,13 @@ private:
     std::vector<Patch> m_patches;
     size_t             m_execPrefix = 0;
     bool               m_committed = false;
+    HookMode           m_mode = HookMode::InPlace;
+    // CopyVptr state: the private table, and the vptr found at attach (what
+    // uninstall puts back). The vector must never reallocate after commit --
+    // the object's vptr points at its data -- so it is sized at attach and
+    // never touched again except by uninstall's clear.
+    std::vector<void*> m_copy;
+    bool               m_copyBreachNoted = false;  // the copy-mode breach line, said once
     // How many reclaim() passes found something to re-patch. Drives the log
     // cadence: the first explains, later ones report at doublings, so a tool
     // that re-hooks every second cannot fill the log while still being visible

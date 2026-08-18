@@ -20,10 +20,15 @@
 
 #include <cstdint>
 
+#include "../common/vtable_hook.h"  // HookMode
+
 namespace edvr {
 
-// Installs the hooks on the device's immediate context.
-void installExposureFix(ID3D11Device* device);
+// Installs the hooks on the device's immediate context, using the hook
+// mechanism the caller decided for this device -- shared with the vScreen
+// hooks so the two can never split modes on the one context object. See
+// device_hook.h.
+void installExposureFix(ID3D11Device* device, HookMode mode);
 
 // Records shader pointer -> bytecode hash, so a bound shader can be identified
 // when it is dispatched.

@@ -488,6 +488,186 @@ int main() {
         }
     }
 
+    // ===================================================================
+    // CopyVptr mode -- the mechanism that survives the table's OWNER
+    // rewriting its own entries, which is what the D3D11 runtime does and
+    // what no in-place patch can hold (2026-08-18).
+    // ===================================================================
+
+    // A fresh object whose vtable we treat as "the runtime's own": the cell
+    // will rewrite entries in THAT table directly, the way the runtime
+    // re-points its static table between internal modes, and prove a copy
+    // hook does not notice.
+    {
+        RealThing runtimeObj;
+        IThing* r = &runtimeObj;
+        void** realTable = *reinterpret_cast<void***>(&runtimeObj);
+        void*  realSlot0 = realTable[0];
+
+        VTableHook copy;
+        g_owner = &runtimeObj;
+        g_ownerHits = 0;
+        if (!copy.attach(&runtimeObj)) {
+            fail("attach for the copy-vptr cell", "attach refused");
+        } else {
+            check(copy.setMode(HookMode::CopyVptr),
+                  "setMode(CopyVptr) is accepted before staging",
+                  "the mode could not be selected");
+            copy.replace(0, reinterpret_cast<void*>(&thunkOne),
+                         reinterpret_cast<void**>(&g_realOne));
+            check(copy.commit(), "copy-vptr commit swaps the object's vptr",
+                  "commit failed");
+            check(*reinterpret_cast<void***>(&runtimeObj) != realTable,
+                  "the object now dispatches through our private copy",
+                  "the vptr was not swapped");
+            // RealThing::one() returns 1 (no wrapper +100 here), so the thunk
+            // chain is 1 + 1000.
+            check(r->one() == 1001, "our thunk fires through the copy",
+                  "the copy hook did not take effect");
+
+            // THE WHOLE POINT: the table OWNER re-points its own slot 0, the
+            // way the runtime re-selects a variant. An in-place hook would be
+            // silently bypassed here (that is the field bug). The copy never
+            // saw the write, because the object stopped dispatching through
+            // the real table the moment we swapped its vptr.
+            DWORD prot = 0;
+            VirtualProtect(&realTable[0], sizeof(void*), PAGE_READWRITE, &prot);
+            realTable[0] = reinterpret_cast<void*>(&toolkitOne);  // a "new variant"
+            DWORD ignored = 0;
+            VirtualProtect(&realTable[0], sizeof(void*), prot, &ignored);
+
+            g_ownerHits = 0;
+            check(r->one() == 1001,
+                  "the runtime re-pointing its OWN table does not bypass a copy hook",
+                  "the copy hook was bypassed by a table-owner rewrite -- this is "
+                  "the exact field failure CopyVptr exists to survive");
+            check(g_ownerHits == 1, "...our thunk still ran",
+                  "our thunk stopped running after the table rewrite");
+
+            // Restore the borrowed table before uninstall compares against it.
+            VirtualProtect(&realTable[0], sizeof(void*), PAGE_READWRITE, &prot);
+            realTable[0] = realSlot0;
+            VirtualProtect(&realTable[0], sizeof(void*), prot, &ignored);
+
+            check(copy.reclaim("copy-cell") == 0,
+                  "reclaim is a no-op in copy mode",
+                  "copy mode tried to reclaim a table it does not share");
+
+            copy.uninstall();
+            check(*reinterpret_cast<void***>(&runtimeObj) == realTable,
+                  "uninstall restores the object's original vptr",
+                  "the vptr was not restored");
+            check(r->one() == 1, "...and dispatch is stock again",
+                  "the thunk survived uninstall");
+        }
+    }
+
+    // Copy-mode uninstall is POLITE: if a later tool swapped the object's
+    // vptr on top of ours, uninstall must leave their vptr alone rather than
+    // restore over them (and must not free our copy their chain still runs
+    // through). Mirrors the in-place "leaves a later hooker's entry alone"
+    // cell, and guards the shutdown-order independence finding-1 added.
+    {
+        RealThing obj;
+        void** birthTable = *reinterpret_cast<void***>(&obj);
+
+        VTableHook copy;
+        g_owner = &obj;
+        copy.attach(&obj);
+        copy.setMode(HookMode::CopyVptr);
+        copy.replace(0, reinterpret_cast<void*>(&thunkOne),
+                     reinterpret_cast<void**>(&g_realOne));
+        copy.commit();
+        void** ourCopy = *reinterpret_cast<void***>(&obj);
+        check(ourCopy != birthTable, "copy hook took the object",
+              "the copy hook did not commit");
+
+        // A third party swaps the object's vptr to a table of their own.
+        static void* theirTable[8];
+        for (size_t i = 0; i < 8; ++i) theirTable[i] = birthTable[i];
+        theirTable[0] = reinterpret_cast<void*>(&toolkitOne);
+        g_toolkitClean = reinterpret_cast<PFN_One>(birthTable[0]);
+        *reinterpret_cast<void***>(&obj) = theirTable;
+
+        copy.uninstall();
+        check(*reinterpret_cast<void***>(&obj) == theirTable,
+              "copy uninstall leaves a later vptr-swapper alone",
+              "uninstall restored over a third party that swapped on top -- "
+              "the dangling-vptr hazard finding 1 closed");
+        // And dispatch through their table still works (our copy was leaked,
+        // not freed, so nothing they reference was pulled out).
+        IThing* o = &obj;
+        check(o->one() == 10001, "...and their table still dispatches",
+              "the third party's dispatch broke after our uninstall");
+        *reinterpret_cast<void***>(&obj) = birthTable;  // cleanup for later cells
+    }
+
+    // Copy hooks STACK: a second copy hook on an object already copy-hooked
+    // must chain through the first, and unwind in reverse. This is how the
+    // exposure and vScreen hooks coexist on one runtime-owned context.
+    {
+        RealThing obj;
+        IThing* o = &obj;
+        void** birthTable = *reinterpret_cast<void***>(&obj);
+
+        VTableHook lower, upper;
+        g_owner = &obj;
+        lower.attach(&obj);
+        lower.setMode(HookMode::CopyVptr);
+        lower.replace(0, reinterpret_cast<void*>(&thunkOne),
+                      reinterpret_cast<void**>(&g_realOne));
+        lower.commit();
+
+        upper.attach(&obj);              // reads the vptr the lower hook installed
+        upper.setMode(HookMode::CopyVptr);
+        upper.replace(0, reinterpret_cast<void*>(&thunkOneB),
+                      reinterpret_cast<void**>(&g_realOneB));
+        upper.commit();
+
+        g_ownerHits = 0;
+        g_bHits = 0;
+        // upper (thunkOneB, +2000) chains through lower (thunkOne, +1000)
+        // chaining through RealThing::one (1): 1 + 1000 + 2000.
+        check(o->one() == 3001, "two copy hooks stack, both run",
+              "the stacked copy chain does not run both");
+        check(g_ownerHits == 1 && g_bHits == 1, "...each exactly once",
+              "stacked copy hooks did not each fire once");
+
+        // Reverse-order unwind, the discipline the header promises.
+        upper.uninstall();
+        g_ownerHits = 0;
+        check(o->one() == 1001, "peeling the upper copy hook leaves the lower",
+              "uninstalling the upper copy hook broke the lower");
+        lower.uninstall();
+        check(*reinterpret_cast<void***>(&obj) == birthTable,
+              "peeling both restores the birth vptr",
+              "the copy stack did not unwind to the original");
+        check(o->one() == 1, "...and dispatch is stock",
+              "a copy hook survived the full unwind");
+    }
+
+    // The module probe that drives the whole decision: a vtable inside a
+    // module's image reads true, one on the heap reads false. The real
+    // callers probe the context against system32\d3d11.dll; here the test
+    // binary's own module stands in for "the implementation".
+    {
+        HMODULE self = GetModuleHandleW(nullptr);
+        RealThing stackObj;
+        void** heapTable = *reinterpret_cast<void***>(&stackObj);  // the C++ vtable, in THIS image
+        check(vtableInsideModule(heapTable, self),
+              "a vtable in the module image reads as inside it",
+              "the module probe missed a table in its own image");
+
+        void* farTable[8] = {};
+        for (auto& e : farTable) e = reinterpret_cast<void*>(&thunkOne);
+        check(!vtableInsideModule(farTable, self),
+              "a stack-allocated table reads as outside the module",
+              "the module probe claimed a stack table was in the image");
+        check(!vtableInsideModule(heapTable, nullptr),
+              "a null module base fails safe (false -> in-place)",
+              "the module probe did not fail safe on a null base");
+    }
+
     if (g_fails) {
         printf("\nVTABLE TEST FAILED (%d)\n", g_fails);
         return 1;

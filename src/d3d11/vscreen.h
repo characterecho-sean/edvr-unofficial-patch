@@ -19,12 +19,17 @@
 
 #include <cstdint>
 
+#include "../common/vtable_hook.h"  // HookMode
+
 struct ID3D11Device;
 struct ID3D11DeviceContext;
 
 namespace edvr {
 
-void installVScreenFixes(ID3D11Device* device);
+// Installs the context hooks using the mechanism the caller decided for this
+// device -- shared with the exposure hooks so the two never split modes on
+// the one context. See device_hook.h.
+void installVScreenFixes(ID3D11Device* device, HookMode mode);
 
 // The size the on-foot panel actually renders at, once that is settled.
 //

@@ -698,12 +698,26 @@ void hookDevice(ID3D11Device* device) {
     }
     s.device = device;
 
-    installExposureFix(device);
+    // The hook mechanism, decided ONCE from the immediate context and shared
+    // by both context installers so they cannot split modes on the one object
+    // (see device_hook.h). GetImmediateContext returns the same context each
+    // time, so this is that context; released right after, identity only.
+    HookMode ctxMode = HookMode::InPlace;
+    {
+        ID3D11DeviceContext* ctx = nullptr;
+        device->GetImmediateContext(&ctx);
+        if (ctx) {
+            ctxMode = contextHookModeFor(ctx);
+            ctx->Release();
+        }
+    }
+
+    installExposureFix(device, ctxMode);
     // Before the vScreen fixes, which ask it whether it needs the eye-draw
     // count. It installs no hooks of its own -- it is driven from vScreen's Map
     // and Unmap -- so nothing else depends on the order.
     installGlitchFrameFix();
-    installVScreenFixes(device);
+    installVScreenFixes(device, ctxMode);
 
     // The panel resolution, if asked for. Applied here because it has to land
     // before the game builds its render chain, and the device exists first.
