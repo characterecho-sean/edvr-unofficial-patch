@@ -215,12 +215,14 @@ way, because the LIVE lines plus the tangent lines are what distinguish
 
 ### Known limits, stated plainly
 
-As of this writing the guard has been field-verified on one rig and one
-path: Quest 3 over Virtual Desktop, through OpenComposite. The
-Pimax/PiOpenXR path runs the same machinery but has not flown with the
-guard live (its vertical frustum is already symmetric; only the horizontal
-would widen). Real SteamVR has not been measured at all — the observation
-half ran there long before the guard existed, but the guard itself has
-not. And the game's culler is being *covered*, not fixed: the tiles were
-always renderable, and the correct fix is one line of frustum arithmetic
-away from whoever owns the culler.
+The guard has been field-verified on both of this project's rigs, which
+are both OpenComposite paths: Quest 3 over Virtual Desktop (where the
+missing tiles reproduced, and are gone) and Pimax over PiOpenXR (where the
+guard runs clean and invisible — horizontal-only there, about 19% extra
+pixels, since that frustum's vertical is already symmetric; that rig never
+showed the tiles, so it verifies the machinery rather than the cure). Real
+SteamVR has not been measured at all — the observation half ran there long
+before the guard existed, but the guard itself has not. And the game's
+culler is being *covered*, not fixed: the tiles were always renderable,
+and the correct fix is one line of frustum arithmetic away from whoever
+owns the culler.
