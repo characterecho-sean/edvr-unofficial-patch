@@ -119,6 +119,16 @@ and does not send it, so SteamVR holds the previous frame for a moment instead.
 **Needs the second file.**
 *Details: [docs/transition-flash.md](docs/transition-flash.md).*
 
+**The missing terrain at the edges of view.** *Off by default.* Over planets,
+Elite culls terrain against a narrower frustum than it renders, so squares of
+ground at the edges of your view are simply not drawn — black tiles popping in
+and out as you look around. EDVR tells the game your headset shows more than
+it does and hands SteamVR only the part you really see, so those tiles get
+drawn. Costs GPU time (the extra margin is really rendered; sharpness is
+unchanged). `cull_guard = symmetric` under `[fix]`, set before launching.
+**Needs the second file.**
+*Details: [docs/terrain-culling.md](docs/terrain-culling.md).*
+
 **The grey haze around the on-foot screen.** On foot, the world is shown on a
 flat screen surrounded by dark grey — lit pixels on an OLED headset, so the
 screen floats in a glowing rectangle. This makes the surround properly black.
