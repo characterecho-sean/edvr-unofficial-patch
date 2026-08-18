@@ -66,6 +66,23 @@ void dumpCameraRing(const char* trigger = nullptr, uint32_t msAfterPress = 0);
 // One number, checked once, covers all of it.
 uint32_t glitchFrameCertifiedShells();
 
+// The churn instrument's counters (SPEC-FLASH-FALSE-POSITIVES §1g), one read.
+//
+// FOR TESTS, on the shell count's argument: the cells assert exact counts --
+// one live eviction, one relearn, splits that move only while the cull
+// guard's lie is live -- and probing those behaviourally would mean deriving
+// them back out of log text. In the field the same numbers are printed by the
+// ring dump and the totals line; nothing reads this there.
+struct GlitchFrameChurnStats {
+    uint32_t withheldGuardLive;      // withholds while the guard's lie was live
+    uint32_t suppressedGuardLive;    // recognitions while it was live
+    uint32_t sepInsertions;          // novel magnitudes learned
+    uint32_t sepEvictedLive;         // in-window entries evicted (knowledge lost)
+    uint32_t sepRelearned;           // insertions matching a recent eviction
+    uint32_t shellEvictedCertified;  // certified orbits/parks evicted in-window
+};
+GlitchFrameChurnStats glitchFrameChurnStats();
+
 void shutdownGlitchFrameFix();
 
 }  // namespace edvr

@@ -24,7 +24,7 @@ namespace {
 // only at 90Hz: 12.5 seconds at 72 and 7.5 at 120. Sized for the fastest
 // supported rate instead, so ten seconds is the FLOOR at every rate rather
 // than the value at one of them. Nothing is written to disk unless the dump
-// key is pressed, so the cost is one 60-byte struct per frame -- 72KB.
+// key is pressed, so the cost is one 40-byte struct per frame -- 48KB.
 constexpr uint32_t kRingFrames = 1200;   // 10 s at 120Hz, 16.7 s at 72Hz
 
 // How long to stand down for after deciding a jump was a change of reference
@@ -63,6 +63,20 @@ constexpr uint32_t kRunawayLimit = 40;      // 2% of the window
 // exactly repeating residual is what a fixed separation produces and what
 // genuine motion does not.
 constexpr uint32_t kSeparations = 16;
+
+// Evicted separation magnitudes remembered, so an insertion can be recognised
+// as a RELEARN -- the table paying a withheld frame twice for one lesson.
+//
+// THE CHURN INSTRUMENT (spec §1g, EVIDENCE 6bp). The cull guard's wider
+// frustum admits more near-surface passes and the recognition machinery
+// churns with the margin: 29 recognitions at guard-off against 3,277 at half
+// margin, 36 withheld. Whether that cost is this table THRASHING (more live
+// pairs than sixteen slots, the failure the shell table had at eight) or
+// genuine novelty (cascade geometry re-fitting continuously) decides between
+// two completely different fixes -- capacity against a new invariant -- so
+// the eviction memory exists to tell them apart in one field session, before
+// either is built. It feeds counters and the ring dump. It changes nothing.
+constexpr uint32_t kEvictedSeps = 32;
 
 // A magnitude counts as the same one within this fraction of itself.
 //
@@ -369,6 +383,16 @@ struct RingEntry {
     uint32_t eyeDraws;
     float    pos[3];
 
+    // THE CULL GUARD'S STATE while this frame was drawn, packed as the
+    // channel carries it (frame_flag.h), zero when the guard was off.
+    //
+    // Stamped so a staircase flight's dumps are self-describing: the margin
+    // is live-tunable, so one capture can span guard-off and two margins, and
+    // without the stamp nothing in the dump says which frames were which --
+    // the exact attribution the 6bp churn measurement had to reconstruct
+    // from log timestamps.
+    uint32_t guard;
+
     // WHAT THE DETECTOR DECIDED ABOUT THIS FRAME, carried on the frame itself.
     //
     // The reason a jump was let through used to be reported only as a sampled
@@ -601,6 +625,28 @@ struct State {
     uint32_t   separationMode = 1;
     uint64_t   burstNotedMs = 0;
     uint32_t   lastLetThroughFrame = 0;
+
+    // --- the churn instrument (spec §1g): attribution, never decision ---
+    // The channel reading for the frame being closed, taken once at the
+    // boundary; everything below keys on it or feeds the ring dump.
+    uint32_t   guardPacked = 0;
+    bool       guardLiveNoted = false;
+    uint32_t   withheldGuardLive = 0;
+    uint32_t   suppressedGuardLive = 0;
+    // The learning-cost counters: insertions are the tax being paid (each
+    // novel magnitude's first mark was a withheld frame), live evictions are
+    // knowledge lost while still current, relearns are the H1 number -- a
+    // frame paid twice for one lesson, which only a too-small table produces.
+    uint32_t   sepInsertions = 0;
+    uint32_t   sepEvictedLive = 0;
+    uint32_t   sepRelearned = 0;
+    uint32_t   shellEvictedCertified = 0;
+    struct EvictedSep {
+        float    resid = 0.0f;
+        uint32_t frame = 0;    // 0 = empty slot
+    };
+    EvictedSep evictedSeps[kEvictedSeps] = {};
+    uint32_t   evictedHead = 0;
 
     uint32_t   suppressed = 0;
     // Split, because which invariant did the work is the data that says whether
@@ -845,6 +891,32 @@ void recordResidual(float resid) {
         if (s->seps[i].hits == 0) { victim = i; break; }
         if (s->seps[i].lastSeen < s->seps[victim].lastSeen) victim = i;
     }
+    // The churn instrument (see kEvictedSeps). Counted BEFORE the victim is
+    // overwritten. An eviction only matters when the entry was still inside
+    // the window -- evicting a stale one loses nothing, since findSeparation
+    // had already stopped matching it. A same-frame false relearn cannot
+    // happen: an in-window victim within tolerance of `resid` would have been
+    // MATCHED above, and this path would never run.
+    ++s->sepInsertions;
+    if (s->seps[victim].hits > 0 &&
+        s->frameNo - s->seps[victim].lastSeen <= kRunawayWindow) {
+        ++s->sepEvictedLive;
+        State::EvictedSep& ev = s->evictedSeps[s->evictedHead % kEvictedSeps];
+        ev.resid = s->seps[victim].resid;
+        ev.frame = s->frameNo;
+        ++s->evictedHead;
+    }
+    {
+        const float tol = resid * (s->repeatPercent * 0.01f);
+        for (uint32_t i = 0; i < kEvictedSeps; ++i) {
+            const State::EvictedSep& ev = s->evictedSeps[i];
+            if (ev.frame != 0 && s->frameNo - ev.frame <= kRunawayWindow &&
+                fabsf(ev.resid - resid) <= tol) {
+                ++s->sepRelearned;
+                break;
+            }
+        }
+    }
     s->seps[victim] = State::Separation{};
     s->seps[victim].resid = resid;
     s->seps[victim].lastSeen = s->frameNo;
@@ -951,6 +1023,16 @@ void observeShell(const float* pos, float radius) {
         for (uint32_t i = 0; i < kShells; ++i) {
             if (s->shells[i].framesSeen == 0) { victim = i; break; }
             if (s->shells[i].lastSeen < s->shells[victim].lastSeen) victim = i;
+        }
+        // The churn instrument: a CERTIFIED entry evicted while still in the
+        // window is the "learned and lost and learned again" failure this
+        // table's own 8-to-64 history records, and whether 64 still thrashes
+        // at large cull-guard margins is one of the questions the counter
+        // answers. Uncertified evictions are the table working as intended.
+        if (s->shells[victim].framesSeen > 0 &&
+            s->frameNo - s->shells[victim].lastSeen <= kRunawayWindow &&
+            (s->shells[victim].certified || s->shells[victim].parked)) {
+            ++s->shellEvictedCertified;
         }
         s->shells[victim] = State::Shell{};
         s->shells[victim].radius = radius;
@@ -1804,6 +1886,28 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
 
     ++s->frameNo;
 
+    // The cull guard's state for the frame being closed, read once so the
+    // stamp, the split counters and the log all describe the same reading.
+    // The guard's stage transitions happen only at WaitGetPoses, before the
+    // game queries its projections -- so the value standing at Present is the
+    // value that governed everything this frame was drawn under. Zero is
+    // "off" and also "nobody publishing", identical on purpose (frame_flag.h).
+    s->guardPacked = cullGuardStatePacked();
+    if (!s->guardLiveNoted && decodeCullGuardState(s->guardPacked).stage == 2) {
+        s->guardLiveNoted = true;
+        const CullGuardState g = decodeCullGuardState(s->guardPacked);
+        Log::get().note(
+            "transition flash: the cull guard's wider frustum is live "
+            "(+%u.%u%% horizontal, +%u.%u%% vertical). A wider frustum admits "
+            "more render passes, so recognition churn may climb here; "
+            "camera-history lines now carry a cull= column and the running "
+            "totals attribute their counts to the guard, so that churn is "
+            "readable per margin. Bookkeeping only; no decision changes on "
+            "it.",
+            g.hPerMille / 10, g.hPerMille % 10, g.vPerMille / 10,
+            g.vPerMille % 10);
+    }
+
     // OBSERVING BUT NOT ACTING. Record the frame and stop.
     //
     // Everything past here validates, decides and withholds, and none of it has
@@ -1816,7 +1920,8 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
             e.qpc = static_cast<uint64_t>(qpcNow());
             e.frame = s->frameNo;
             e.eyeDraws = eyeDraws;
-        e.verdict = s->verdictThisFrame;
+            e.guard = s->guardPacked;
+            e.verdict = s->verdictThisFrame;
             for (uint32_t a = 0; a < 3; ++a) e.pos[a] = s->frameFarPos[a];
             ++s->ringHead;
         }
@@ -1904,7 +2009,8 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
             e.qpc = static_cast<uint64_t>(qpcNow());
             e.frame = s->frameNo;
             e.eyeDraws = eyeDraws;
-        e.verdict = s->verdictThisFrame;
+            e.guard = s->guardPacked;
+            e.verdict = s->verdictThisFrame;
             for (uint32_t a = 0; a < 3; ++a) e.pos[a] = s->frameFarPos[a];
             ++s->ringHead;
         }
@@ -1948,6 +2054,11 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
         // a separation that is suppressing correctly from ageing out of the
         // memory and firing all over again.
         ++s->suppressed;
+        // Attribution, not decision: how much of the recognition traffic
+        // arrives under the cull guard's wider frustum (spec §1g).
+        if (decodeCullGuardState(s->guardPacked).stage == 2) {
+            ++s->suppressedGuardLive;
+        }
         if (s->parkSuppressedThisFrame) {
             ++s->suppressedByPark;
             // Not recorded as a separation, for the same reason a radius
@@ -2003,6 +2114,9 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
         ++s->framesWithheld;
         ++s->windowWithheld;
         s->lastWithheldFrame = s->frameNo;
+        if (decodeCullGuardState(s->guardPacked).stage == 2) {
+            ++s->withheldGuardLive;
+        }
         // The first of a kind is always withheld -- it cannot be known to repeat
         // until it has. That is the cost of this approach and it is one frame per
         // novel magnitude, against one frame every three that it replaces.
@@ -2177,6 +2291,7 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
         e.qpc = static_cast<uint64_t>(qpcNow());
         e.frame = s->frameNo;
         e.eyeDraws = eyeDraws;
+        e.guard = s->guardPacked;
         e.verdict = s->verdictThisFrame;
         for (uint32_t a = 0; a < 3; ++a) e.pos[a] = s->frameFarPos[a];
         ++s->ringHead;
@@ -2222,6 +2337,17 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
         if (s->framesWithheld != s->totalsWithheld ||
             s->suppressed != s->totalsSuppressed) {
             const bool acted = glitchConsumerPresent();
+            // Present only in sessions the guard has been live in, so every
+            // other rig's totals line reads exactly as it always has.
+            char guardSplit[176] = "";
+            if (s->withheldGuardLive || s->suppressedGuardLive) {
+                snprintf(guardSplit, sizeof(guardSplit),
+                         " Of those, %u withheld and %u recognised happened "
+                         "while the cull guard's wider frustum was live -- the "
+                         "margin admits more render passes, and this is that "
+                         "cost being counted (docs/terrain-culling.md).",
+                         s->withheldGuardLive, s->suppressedGuardLive);
+            }
             Log::get().note(
                 "transition flash so far: %u frame(s) %s this session, and %u "
                 "more recognised as render-pass geometry and left alone -- %u by a "
@@ -2235,13 +2361,14 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
                 "made: roughly one per transition is it working. The others are "
                 "expected to be large near a planet surface and are not a fault -- "
                 "they are frames that would have been withheld before, and felt as "
-                "judder.",
+                "judder.%s",
                 s->framesWithheld, acted ? "withheld" : "detected but NOT withheld "
                                            "(openvr_api.dll is not installed)",
                 s->suppressed, s->suppressedBySeparation, s->suppressedByRadius,
                 s->suppressedByPark, s->suppressedByDrift,
                 s->framesWithheld - s->totalsWithheld,
-                s->suppressed - s->totalsSuppressed, s->withheldNotRendering);
+                s->suppressed - s->totalsSuppressed, s->withheldNotRendering,
+                guardSplit);
             s->totalsWithheld = s->framesWithheld;
             s->totalsSuppressed = s->suppressed;
         }
@@ -2319,9 +2446,25 @@ void dumpCameraRing(const char* trigger, uint32_t msAfterPress) {
             freq ? static_cast<double>(static_cast<int64_t>(newest - e.qpc)) * 1000.0 /
                        static_cast<double>(freq)
                  : 0.0;
-        Log::get().note("CAM %8.1fms f%-7u eye=%-5u pos=(%+.2f %+.2f %+.2f) %s",
+        // The cull guard's margin, only on frames it was doing something --
+        // a guard-off session's dump is byte-identical to what it always
+        // was, and a staircase flight's dump names the margin per frame,
+        // across live changes, which is the attribution 6bp had to
+        // reconstruct from log timestamps.
+        char cull[28] = "";
+        if (e.guard) {
+            const CullGuardState g = decodeCullGuardState(e.guard);
+            if (g.stage == 1) {
+                snprintf(cull, sizeof(cull), " cull=stage1");
+            } else {
+                snprintf(cull, sizeof(cull), " cull=+%u.%u%%/+%u.%u%%",
+                         g.hPerMille / 10, g.hPerMille % 10, g.vPerMille / 10,
+                         g.vPerMille % 10);
+            }
+        }
+        Log::get().note("CAM %8.1fms f%-7u eye=%-5u pos=(%+.2f %+.2f %+.2f)%s %s",
                         -msAgo, e.frame, e.eyeDraws, e.pos[0], e.pos[1], e.pos[2],
-                        ringVerdictName(e.verdict));
+                        cull, ringVerdictName(e.verdict));
     }
     // WAS ANY OF THIS OURS? The question every one of these dumps has been
     // opened to answer, worked out by hand every time.
@@ -2352,6 +2495,82 @@ void dumpCameraRing(const char* trigger, uint32_t msAfterPress) {
                 s->framesWithheld);
         }
     }
+    // WHAT THE DETECTOR HAS LEARNED, printed beside the history it learned it
+    // from (spec §1g). The note lines are a sample and the totals are counts;
+    // this is the CONTENTS -- which magnitudes and which landing geometry are
+    // doing the suppressing, and what the learning has cost. On a cull-guard
+    // staircase flight this is the per-step readout: dump at each margin and
+    // the tables name what that margin taught, which is the data the
+    // margin-aware-detector decision waits on.
+    {
+        uint32_t sepsInUse = 0;
+        for (uint32_t i = 0; i < kSeparations; ++i) {
+            if (s->seps[i].hits > 0) ++sepsInUse;
+        }
+        if (sepsInUse > 0) {
+            Log::get().note(
+                "--- learned separations: %u of %u slots in use. A separation "
+                "is a repeating jump size, the fixed gap between two render "
+                "passes; CERTIFIED means it has cost %u frames inside %u s and "
+                "may excuse matches. ---",
+                sepsInUse, kSeparations, kSepMarksToCertify,
+                (unsigned)(kSepMarkWindowMs / 1000));
+            for (uint32_t i = 0; i < kSeparations; ++i) {
+                const State::Separation& e = s->seps[i];
+                if (e.hits == 0) continue;
+                Log::get().note(
+                    "SEP ~%-9.0f hits=%-6u marks=%u%s  last seen %u frame(s) ago",
+                    static_cast<double>(e.resid), e.hits, e.marks,
+                    e.certified ? " CERTIFIED" : "",
+                    s->frameNo - e.lastSeen);
+            }
+        }
+        uint32_t shellsInUse = 0;
+        for (uint32_t i = 0; i < kShells; ++i) {
+            if (s->shells[i].framesSeen > 0) ++shellsInUse;
+        }
+        if (shellsInUse > 0) {
+            Log::get().note(
+                "--- landing geometry: %u of %u slots in use. ORBIT = one "
+                "distance, many bearings, never resting; PARK = one place, "
+                "never moving; DISQUALIFIED = the view itself was shown to "
+                "live there. ---",
+                shellsInUse, kShells);
+            for (uint32_t i = 0; i < kShells; ++i) {
+                const State::Shell& e = s->shells[i];
+                if (e.framesSeen == 0) continue;
+                if (e.parked) {
+                    Log::get().note(
+                        "SHL r=%-8.0f PARK at (%+.0f %+.0f %+.0f)  seen=%-5u "
+                        "last %u frame(s) ago",
+                        static_cast<double>(e.radius), e.certParkPos[0],
+                        e.certParkPos[1], e.certParkPos[2], e.framesSeen,
+                        s->frameNo - e.lastSeen);
+                } else {
+                    Log::get().note(
+                        "SHL r=%-8.0f %-12s seen=%-5u dirs=%-3u maxDwell=%-4u "
+                        "last %u frame(s) ago",
+                        static_cast<double>(e.radius),
+                        e.certified          ? "ORBIT"
+                        : e.dwellDisqualified ? "DISQUALIFIED"
+                                              : "gathering",
+                        e.framesSeen, e.distinctDirs, e.maxDwell,
+                        s->frameNo - e.lastSeen);
+                }
+            }
+        }
+        if (s->sepInsertions || s->shellEvictedCertified) {
+            Log::get().note(
+                "--- learning cost so far: %u separations learned (each novel "
+                "one's first mark was a withheld frame), %u evicted while "
+                "still current, %u RELEARNED after eviction (a frame paid "
+                "twice for one lesson -- the number that says the table is "
+                "too small), %u certified orbits/parks evicted while current. "
+                "---",
+                s->sepInsertions, s->sepEvictedLive, s->sepRelearned,
+                s->shellEvictedCertified);
+        }
+    }
     Log::get().note("--- end camera history ---");
 }
 
@@ -2374,6 +2593,19 @@ uint32_t glitchFrameCertifiedShells() {
         if (s->shells[i].certified) ++n;
     }
     return n;
+}
+
+GlitchFrameChurnStats glitchFrameChurnStats() {
+    GlitchFrameChurnStats out = {};
+    State* s = g_state;
+    if (!s) return out;
+    out.withheldGuardLive = s->withheldGuardLive;
+    out.suppressedGuardLive = s->suppressedGuardLive;
+    out.sepInsertions = s->sepInsertions;
+    out.sepEvictedLive = s->sepEvictedLive;
+    out.sepRelearned = s->sepRelearned;
+    out.shellEvictedCertified = s->shellEvictedCertified;
+    return out;
 }
 
 void shutdownGlitchFrameFix() {

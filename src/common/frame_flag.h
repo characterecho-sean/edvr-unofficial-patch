@@ -169,6 +169,54 @@ void announceEyeTextureSize(uint32_t width, uint32_t height);
 // it as evidence about any particular target.
 bool eyeTextureSize(uint32_t* width, uint32_t* height);
 
+// The cull guard's state, published by openvr_api.dll at its stage
+// transitions and read by d3d11.dll once per frame boundary.
+//
+// WHY THE DETECTOR NEEDS IT (SPEC-FLASH-FALSE-POSITIVES §1g, EVIDENCE 6bp):
+// the guard tells the game a wider frustum than the headset shows, the wider
+// frustum admits more near-surface render passes, and the transition-flash
+// detector's recognition machinery churns in proportion -- 29 recognitions at
+// guard-off against 3,277 at half margin, with the learning tax felt as
+// judder. Whether that churn is table thrash, genuine novelty, or an
+// identifiable camera population is exactly what nobody has measured, so this
+// channel carries ATTRIBUTION: the detector stamps its ring and splits its
+// counters by what the guard was doing, and changes no decision on it.
+//
+// The eyeSize disciplines apply unchanged. One packed value, so a reader
+// cannot catch half a pair. Zero means "no answer", and every reader must
+// treat it exactly like guard-off -- openvr_api.dll absent, its guard never
+// armed, or a mismatched build pair (the mapping version isolates those) all
+// look identical, and all of them are states in which no lie is being told.
+//
+// stage is 0 (off), 1 (the game is asked for BIGGER render targets but still
+// told true projections -- supersampling only), or 2 (the projection lie is
+// live). The factors are the per-axis span ratios lied/true, carried as
+// per-mille above 1.0 -- +6.1% renders as 61. Stage 1 is published
+// distinctly on purpose: it changes pixel count but not the reported
+// frustum, so detector churn moving at stage 1 alone would be a finding
+// about resolution-dependent pass composition, not noise.
+void announceCullGuardState(uint32_t stage, float factorH, float factorV);
+
+// The packed value as last published, or 0 for "no answer". Packing, also
+// relied on by decodeCullGuardState below: bits 25..24 stage, 23..12
+// horizontal per-mille, 11..0 vertical per-mille.
+uint32_t cullGuardStatePacked();
+
+// The unpacked reading. Header-only and pure, like SubmitPairLatch and for
+// the same reason: both halves and every test decode one way.
+struct CullGuardState {
+    uint32_t stage;      // 0 off, 1 size-only, 2 lie live
+    uint32_t hPerMille;  // (span ratio - 1) * 1000, horizontal
+    uint32_t vPerMille;
+};
+inline CullGuardState decodeCullGuardState(uint32_t packed) {
+    CullGuardState s;
+    s.stage = (packed >> 24) & 0x3u;
+    s.hPerMille = (packed >> 12) & 0xFFFu;
+    s.vPerMille = packed & 0xFFFu;
+    return s;
+}
+
 // ONE VERDICT PER FRAME, over a channel that carries no frame identity.
 //
 // The mark above is read once per eye, at each Submit, and it legitimately

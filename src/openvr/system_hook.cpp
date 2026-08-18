@@ -8,6 +8,7 @@
 #include <string>
 
 #include "../common/config.h"
+#include "../common/frame_flag.h"
 #include "../common/guard.h"
 #include "../common/log.h"
 #include "../common/timing.h"
@@ -686,6 +687,11 @@ void promoteOrDemote(State* s) {
         s->lieLive = false;
         s->liePending = false;
         s->stage1WaitNoted = false;
+        // Published at every stage transition, HERE and in the two promotions
+        // below, so the d3d11 half's churn attribution (frame_flag.h, spec
+        // §1g) always names the stage that governed the frame: transitions
+        // happen only at this boundary, before the game queries.
+        announceCullGuardState(0, 1.0f, 1.0f);
         if (restaging) {
             Log::get().note(
                 "cull guard re-staging: the margin or headset gate changed. "
@@ -722,6 +728,7 @@ void promoteOrDemote(State* s) {
         s->sizeFactorV = dvL / dvT;
         s->stage = 1;
         s->stage1SinceMs = stampMs();
+        announceCullGuardState(1, s->sizeFactorH, s->sizeFactorV);
         Log::get().note(
             "cull guard stage 1 (%s): asking the game for %.0f%% x %.0f%% "
             "larger render targets, so the wider frustum keeps this "
@@ -781,6 +788,7 @@ void promoteOrDemote(State* s) {
         }
         s->stage = 2;
         s->lieLive = true;
+        announceCullGuardState(2, s->sizeFactorH, s->sizeFactorV);
         for (int eye = 0; eye < 2; ++eye) {
             const float* t = s->trueRaw[eye];
             const float* lie = s->lied[eye];

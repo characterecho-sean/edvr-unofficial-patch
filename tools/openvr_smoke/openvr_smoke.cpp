@@ -530,6 +530,14 @@ int guardChild(const char* dir) {
         ++bad;
     }
 
+    // The churn-attribution channel (frame_flag, spec §1g) is silent before
+    // go-live: zero is "no answer" and the d3d11 half must read guard-off.
+    if (edvr::cullGuardStatePacked() != 0) {
+        printf("  FAIL  guard child: the cull channel published 0x%08X before "
+               "go-live\n", edvr::cullGuardStatePacked());
+        ++bad;
+    }
+
     // No compositor exists here, so no frame boundary ever fires; the
     // two-second fallback in periodic() is the promoter, and periodic runs
     // at the tail of the observed calls themselves. TWO warmup calls: the
@@ -624,6 +632,22 @@ int guardChild(const char* dir) {
             fabsf(f[2] - 1.0f) > 1e-5f || fabsf(f[1] - vTop) > 1e-4f) {
             printf("  FAIL  guard child: right eye crop fractions %g/%g/%g, "
                    "expected 0.2/%g/1\n", f[0], f[1], f[2], vTop);
+            ++bad;
+        }
+    }
+
+    // The channel after go-live, read across the real module boundary: the
+    // DLL's promoteOrDemote published, this exe reads the same per-process
+    // mapping -- which is exactly the d3d11 half's position. The u span
+    // widens 2.0 -> 2.5 (+250 per-mille) and the fractioned v span
+    // 2.0 -> 2.2 (+100 per-mille).
+    {
+        const uint32_t packed = edvr::cullGuardStatePacked();
+        const edvr::CullGuardState cg = edvr::decodeCullGuardState(packed);
+        if (cg.stage != 2 || cg.hPerMille != 250 || cg.vPerMille != 100) {
+            printf("  FAIL  guard child: the cull channel reads stage %u "
+                   "h %u v %u (0x%08X), expected 2/250/100\n",
+                   cg.stage, cg.hPerMille, cg.vPerMille, packed);
             ++bad;
         }
     }
