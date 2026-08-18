@@ -189,10 +189,10 @@ int systemHookChecks(const char* dir) {
             if (memcmp(&got, &want, sizeof(got)) != 0) {
                 printf("  FAIL  GetProjectionMatrix(eye %d, %g, %g, %d) came "
                        "back altered through the asm thunk (m00 %g want %g, "
-                       "m13 %g want %g, m20 %g want %g, m21 %g want %g)\n",
+                       "m02 %g want %g, m22 %g want %g, m31 %g want %g)\n",
                        eye, nearZ, farZ, projType, got.m[0][0], want.m[0][0],
-                       got.m[1][3], want.m[1][3], got.m[2][0], want.m[2][0],
-                       got.m[2][1], want.m[2][1]);
+                       got.m[0][2], want.m[0][2], got.m[2][2], want.m[2][2],
+                       got.m[3][1], want.m[3][1]);
                 ++bad;
             }
             fakevr::M34 gotE = sys->GetEyeToHeadTransform(eye);
@@ -272,6 +272,160 @@ int systemHookChecks(const char* dir) {
     if (bad == 0)
         printf("  ok    IVRSystem_012 observation forwards every call untouched\n");
     return bad;
+}
+
+// The cull guard, end to end, in a CHILD process with the guard armed.
+//
+// A child because the guard's whole design is install-time and one-way: the
+// mode is read when IVRSystem_012 is first requested (that decides whether
+// slot 1 gets the member-shaped receiver), the config is cached in the
+// installed state, and the parent's own checks above depend on the guard
+// being OFF (they assert truth passes through). One process cannot honestly
+// test both.
+//
+// What the child asserts, in order: truth BEFORE go-live; the symmetrized
+// tangents and the formula-rebuilt matrix AFTER the boundary-less fallback
+// promotes the lie; the crop fractions through the selftest export; and a
+// second object of the hooked class still receiving pure truth while the
+// lie is live for the game's own interface.
+int guardChild(const char* dir) {
+    wchar_t proxy[MAX_PATH];
+    _snwprintf_s(proxy, _TRUNCATE, L"%hs\\openvr_api.dll", dir);
+    HMODULE m = LoadLibraryW(proxy);
+    if (!m) { printf("  FAIL  guard child could not load the proxy\n"); return 10; }
+
+    typedef void*(__cdecl* PFN_GetGenericInterface)(const char*, int*);
+    typedef unsigned int(*PFN_Crop)(int, float*);
+    typedef void*(*PFN_FakePtr)(void);
+
+    auto getIface = reinterpret_cast<PFN_GetGenericInterface>(
+        GetProcAddress(m, "VR_GetGenericInterface"));
+    if (!getIface) { printf("  FAIL  guard child: no VR_GetGenericInterface\n"); return 11; }
+    int err = -1;
+    void* iface = getIface("IVRSystem_012", &err);
+    if (!iface) { printf("  FAIL  guard child: interface came back null\n"); return 12; }
+    auto* sys = static_cast<fakevr::ISystem012*>(iface);
+
+    int bad = 0;
+    float l = 0, r = 0, t = 0, b = 0, e[4];
+
+    // Before go-live: pure truth, both eyes (which is also what arms the
+    // lie -- it waits for both eyes' true tangents).
+    sys->GetProjectionRaw(0, &l, &r, &t, &b);
+    fakevr::expectedRaw(0, e);
+    if (l != e[0] || r != e[1] || t != e[2] || b != e[3]) {
+        printf("  FAIL  guard child: pre-live raw was not the truth "
+               "(%g/%g/%g/%g)\n", l, r, t, b);
+        ++bad;
+    }
+    sys->GetProjectionRaw(1, &l, &r, &t, &b);
+    fakevr::M44 got = sys->GetProjectionMatrix(0, 0.5f, 100.0f, 0);
+    fakevr::M44 want = fakevr::expectedMatrix(0, 0.5f, 100.0f, 0);
+    if (memcmp(&got, &want, sizeof(got)) != 0) {
+        printf("  FAIL  guard child: the matrix was edited before go-live "
+               "(m00 %g want %g)\n", got.m[0][0], want.m[0][0]);
+        ++bad;
+    }
+
+    // No compositor exists here, so no frame boundary ever fires; the
+    // two-second fallback in periodic() is the promoter, and periodic runs
+    // at the tail of the observed calls themselves.
+    Sleep(2300);
+    sys->GetProjectionRaw(0, &l, &r, &t, &b);  // promotion happens after this call
+
+    // After go-live: the symmetric lie. Left eye truth is l=-1.25 r=+0.75,
+    // so both eyes report +/-1.25 horizontally; vertical was already
+    // symmetric and must be untouched.
+    sys->GetProjectionRaw(0, &l, &r, &t, &b);
+    if (l != -1.25f || r != 1.25f || t != -1.0f || b != 1.0f) {
+        printf("  FAIL  guard child: left eye post-live raw is %g/%g/%g/%g, "
+               "expected -1.25/+1.25/-1/+1\n", l, r, t, b);
+        ++bad;
+    }
+    sys->GetProjectionRaw(1, &l, &r, &t, &b);
+    if (l != -1.25f || r != 1.25f) {
+        printf("  FAIL  guard child: right eye post-live raw is %g/%g, "
+               "expected -1.25/+1.25\n", l, r);
+        ++bad;
+    }
+
+    // The matrix, rebuilt from the lied tangents: m00 = 2/2.5, m02 = 0;
+    // the vertical and the z terms (from THIS call's near/far) untouched.
+    got = sys->GetProjectionMatrix(0, 0.5f, 100.0f, 0);
+    want = fakevr::expectedMatrix(0, 0.5f, 100.0f, 0);
+    if (fabsf(got.m[0][0] - 0.8f) > 1e-5f || fabsf(got.m[0][2]) > 1e-5f) {
+        printf("  FAIL  guard child: matrix not rebuilt from the lie "
+               "(m00 %g want 0.8, m02 %g want 0)\n", got.m[0][0], got.m[0][2]);
+        ++bad;
+    }
+    if (fabsf(got.m[1][1] - want.m[1][1]) > 1e-5f ||
+        fabsf(got.m[1][2] - want.m[1][2]) > 1e-5f) {
+        printf("  FAIL  guard child: an untouched vertical axis was edited "
+               "(m11 %g want %g)\n", got.m[1][1], want.m[1][1]);
+        ++bad;
+    }
+    if (fabsf(got.m[2][2] - want.m[2][2]) > 1e-5f ||
+        fabsf(got.m[2][3] - want.m[2][3]) > 1e-5f ||
+        got.m[3][1] != want.m[3][1] || got.m[3][2] != want.m[3][2]) {
+        printf("  FAIL  guard child: the z terms or the echo element were "
+               "disturbed (m22 %g want %g)\n", got.m[2][2], want.m[2][2]);
+        ++bad;
+    }
+
+    // The crop fractions the submit side will use. Left eye: the outer
+    // (left) edge is unchanged so the crop starts at 0 and keeps
+    // (0.75+1.25)/2.5 = 0.8 of the width; vertical untouched keeps all.
+    // Right eye mirrored: starts at 0.2, keeps to 1.
+    auto crop = reinterpret_cast<PFN_Crop>(
+        GetProcAddress(m, "edvr_selftest_cull_guard"));
+    if (!crop) {
+        printf("  FAIL  guard child: edvr_selftest_cull_guard not exported\n");
+        ++bad;
+    } else {
+        float f[4] = {};
+        if (crop(0, f) != 1u || fabsf(f[0]) > 1e-5f ||
+            fabsf(f[2] - 0.8f) > 1e-5f || fabsf(f[1]) > 1e-5f ||
+            fabsf(f[3] - 1.0f) > 1e-5f) {
+            printf("  FAIL  guard child: left eye crop fractions %g/%g/%g/%g, "
+                   "expected 0/0/0.8/1\n", f[0], f[1], f[2], f[3]);
+            ++bad;
+        }
+        if (crop(1, f) != 1u || fabsf(f[0] - 0.2f) > 1e-5f ||
+            fabsf(f[2] - 1.0f) > 1e-5f) {
+            printf("  FAIL  guard child: right eye crop fractions %g/%g, "
+                   "expected 0.2/1\n", f[0], f[2]);
+            ++bad;
+        }
+    }
+
+    // A second object of the hooked class, while the lie is live: pure
+    // truth. The lie is for the interface the game was handed, nobody else.
+    HMODULE fake = GetModuleHandleW(L"openvr_api_orig.dll");
+    auto secondPtr = fake ? reinterpret_cast<PFN_FakePtr>(
+                                GetProcAddress(fake, "VR_FakeSecondSystemPtr"))
+                          : nullptr;
+    if (!secondPtr) {
+        printf("  FAIL  guard child: no second fake object to test with\n");
+        ++bad;
+    } else {
+        auto* sys2 = static_cast<fakevr::ISystem012*>(secondPtr());
+        sys2->GetProjectionRaw(0, &l, &r, &t, &b);
+        fakevr::expectedRaw(0, e);
+        if (l != e[0] || r != e[1]) {
+            printf("  FAIL  guard child: a foreign object was lied to "
+                   "(%g/%g want %g/%g)\n", l, r, e[0], e[1]);
+            ++bad;
+        }
+        fakevr::M44 got2 = sys2->GetProjectionMatrix(1, 0.5f, 100.0f, 1);
+        fakevr::M44 want2 = fakevr::expectedMatrix(1, 0.5f, 100.0f, 1);
+        if (memcmp(&got2, &want2, sizeof(got2)) != 0) {
+            printf("  FAIL  guard child: a foreign object's matrix was edited "
+                   "(m00 %g want %g)\n", got2.m[0][0], want2.m[0][0]);
+            ++bad;
+        }
+    }
+
+    return bad == 0 ? 0 : 13;
 }
 
 // The crash sentinel's lifecycle, which is shared code with none of its own.
@@ -1256,6 +1410,7 @@ int sentinelChecks() {
 
 int main(int argc, char** argv) {
     if (argc >= 3 && strcmp(argv[2], "--fault-child") == 0) return faultChild(argv[1]);
+    if (argc >= 3 && strcmp(argv[2], "--guard-child") == 0) return guardChild(argv[1]);
 
     printf("edvr openvr smoke\n");
     if (argc < 2) {
@@ -1346,6 +1501,63 @@ int main(int argc, char** argv) {
     if (systemHookChecks(argv[1]) != 0) {
         printf("\nOPENVR SMOKE FAILED\n");
         return 1;
+    }
+
+    // The cull guard, in a child with the guard armed -- this parent's own
+    // proxy already installed with the guard off and cannot honestly re-run
+    // the install. The child directory is built fresh here: the same two
+    // DLLs, plus an edvr.ini that arms symmetric mode.
+    {
+        char dir2[MAX_PATH * 2];
+        snprintf(dir2, sizeof(dir2), "%s2", argv[1]);
+        CreateDirectoryA(dir2, nullptr);
+        char src[MAX_PATH * 2], dst[MAX_PATH * 2];
+        snprintf(src, sizeof(src), "%s\\openvr_api.dll", argv[1]);
+        snprintf(dst, sizeof(dst), "%s\\openvr_api.dll", dir2);
+        if (!CopyFileA(src, dst, FALSE)) return fail("could not stage the guard child's proxy");
+        snprintf(src, sizeof(src), "%s\\openvr_api_orig.dll", argv[1]);
+        snprintf(dst, sizeof(dst), "%s\\openvr_api_orig.dll", dir2);
+        if (!CopyFileA(src, dst, FALSE)) return fail("could not stage the guard child's stand-in");
+        snprintf(dst, sizeof(dst), "%s\\edvr.ini", dir2);
+        {
+            FILE* f = nullptr;
+            if (fopen_s(&f, dst, "w") != 0 || !f) {
+                return fail("could not write the guard child's edvr.ini");
+            }
+            fputs("[fix]\ncull_guard = symmetric\n", f);
+            fclose(f);
+        }
+        // A crashed previous child leaves its sentinel armed; the install
+        // must run every time in a test.
+        wchar_t armed[MAX_PATH];
+        _snwprintf_s(armed, _TRUNCATE, L"%hs\\edvr_logs\\system_hook.armed", dir2);
+        DeleteFileW(armed);
+
+        wchar_t self[MAX_PATH]{};
+        GetModuleFileNameW(nullptr, self, MAX_PATH);
+        wchar_t cmd[MAX_PATH * 2];
+        _snwprintf_s(cmd, _TRUNCATE, L"\"%s\" \"%hs\" --guard-child", self, dir2);
+        STARTUPINFOW si{};
+        si.cb = sizeof(si);
+        PROCESS_INFORMATION pi{};
+        if (!CreateProcessW(nullptr, cmd, nullptr, nullptr, FALSE, 0, nullptr,
+                            nullptr, &si, &pi)) {
+            return fail("could not start the guard child");
+        }
+        WaitForSingleObject(pi.hProcess, 30000);
+        DWORD code = 0xFFFFFFFF;
+        GetExitCodeProcess(pi.hProcess, &code);
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+        if (code != 0) {
+            printf("  FAIL  the guard child exited 0x%08lX -- the cull guard "
+                   "lied wrong, cropped wrong, or crashed (its FAIL lines are "
+                   "above)\n", code);
+            printf("\nOPENVR SMOKE FAILED\n");
+            return 1;
+        }
+        printf("  ok    cull guard: true first, symmetric lie after go-live, "
+               "matrix rebuilt, crop correct, strangers untouched\n");
     }
 
     // Shared code with no other coverage. Runs last because it touches nothing
