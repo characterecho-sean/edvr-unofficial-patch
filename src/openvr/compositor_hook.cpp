@@ -17,6 +17,7 @@
 #include "../common/log.h"
 #include "../common/proxy.h"  // breadcrumb(), EDVR_BREADCRUMB_ONCE
 #include "../common/vtable_hook.h"
+#include "guard_crop.h"
 #include "openvr_min.h"
 #include "resubmit_shadow.h"
 #include "system_hook.h"
@@ -695,16 +696,49 @@ vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
     noteSubmitBounds(s, eye, bounds);
 
     // The cull guard's submit-side half: when the projection lie is live,
-    // the compositor must sample only the region holding the TRUE frustum
-    // out of the wider-rendered image. Computed once and used by EVERY
-    // submit path below -- forwarding a withheld frame's substitute with
-    // uncropped bounds would zoom one frame, which is exactly the kind of
-    // one-frame artifact this project exists to remove.
+    // the compositor must be handed exactly the region holding the TRUE
+    // frustum out of the wider-rendered image. Two mechanisms (see
+    // guard_crop.h for why the copy is the default), and whichever runs, it
+    // is applied identically to EVERY submit path below -- forwarding a
+    // withheld frame's substitute unguarded would distort one frame, which
+    // is exactly the kind of one-frame artifact this project exists to
+    // remove.
+    //
+    // In copy mode the guard is applied where the SOURCE texture is finally
+    // known (the forward and withhold paths below), through applyCullGuard;
+    // in bounds mode narrowing the bounds once here covers both.
+    float guardFractions[4];
+    const bool guardLive = systemHookCropFractions(eye, guardFractions);
+    const bool guardCopies = guardLive && systemHookSubmitCopyMode();
     vr::VRTextureBounds_t croppedBounds;
     const vr::VRTextureBounds_t* effBounds = bounds;
-    if (systemHookCropBounds(eye, bounds, &croppedBounds)) {
+    if (guardLive && !guardCopies &&
+        systemHookCropBounds(eye, bounds, &croppedBounds)) {
         effBounds = &croppedBounds;
     }
+    // Applies the copy mechanism to whatever texture a path is about to
+    // submit. On failure the guard stands down and the ORIGINAL texture and
+    // bounds go through -- one wide-rendered frame displayed plainly, then
+    // truth from the next boundary; never a mismatched crop.
+    auto applyCullGuard = [&](vr::Texture_t* tex,
+                              const vr::VRTextureBounds_t** bnds,
+                              vr::VRTextureBounds_t* storage) {
+        if (!guardCopies) return;
+        if (tex->eType != vr::TextureType_DirectX) {
+            systemHookGuardStandDown("the game is not submitting DirectX "
+                                     "textures, which the copy path needs");
+            return;
+        }
+        void* out = guardCropCopy(eye == vr::Eye_Left ? 0u : 1u, tex->handle,
+                                  bounds, guardFractions, storage);
+        if (!out) {
+            systemHookGuardStandDown("the crop copy refused (its own log line "
+                                     "above says why)");
+            return;
+        }
+        tex->handle = out;
+        *bnds = storage;
+    };
 
     // The frame the d3d11 side marked as drawn from the wrong viewpoint: do not
     // pass it on. SteamVR reprojects the previous frame, exactly as it does for
@@ -776,7 +810,10 @@ vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
             }
             vr::Texture_t sub = *texture;
             sub.handle = shadow;
-            return s->realSubmit(self, eye, &sub, effBounds, flags);
+            const vr::VRTextureBounds_t* subBounds = effBounds;
+            vr::VRTextureBounds_t subStorage;
+            applyCullGuard(&sub, &subBounds, &subStorage);
+            return s->realSubmit(self, eye, &sub, subBounds, flags);
         }
         if (s->notesLeft > 0) {
             --s->notesLeft;
@@ -793,14 +830,19 @@ vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
     }
 
     {
+        vr::Texture_t fwd = *texture;
+        const vr::VRTextureBounds_t* fwdBounds = effBounds;
+        vr::VRTextureBounds_t fwdStorage;
+        applyCullGuard(&fwd, &fwdBounds, &fwdStorage);
         const vr::EVRCompositorError result =
-            s->realSubmit(self, eye, texture, effBounds, flags);
+            s->realSubmit(self, eye, &fwd, fwdBounds, flags);
         // This frame was FORWARDED and accepted, so it becomes the copy a
         // later withhold can hand over. After realSubmit on purpose: the copy
         // is queued on the immediate context behind this frame's rendering,
         // and ordering on the context is what guarantees the copy holds the
         // completed frame (the same reasoning the private build's luminance
-        // sampling rests on).
+        // sampling rests on). The GAME's texture, not the guard's crop: the
+        // shadow must hold the full frame so a withhold can crop it afresh.
         if (s->validated && result == 0 && texture &&
             texture->eType == vr::TextureType_DirectX && texture->handle) {
             resubmitShadowNoteForwarded(eye == vr::Eye_Left ? 0u : 1u,
