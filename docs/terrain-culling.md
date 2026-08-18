@@ -172,22 +172,27 @@ guard to listed FOV signatures — the log prints each headset's, like
 listed, with no config edits at swap time; unlisted headsets run
 observation only, at no cost.
 
-One measured side effect of LARGE margins, recorded so its judder is not
-misattributed: the wider frustum admits more near-surface shadow and
-auxiliary passes, and the transition-flash fix's recognition machinery
-churns proportionally — 29 learned separations at guard-off against 3,277
-at `fraction_h = 0.5`, with 36 withheld frames felt as judder before its
-own burst governor contained it. At the tuned 0.25 the churn sits below
-feel. A detector that ignores cameras whose passes exist only in the
-cropped margin — which the player can never see — is the proper fix, and
-is recorded as open work. The measurement for it ships first, per that
-fix's own discipline: the flash detector now stamps its camera history
-with the margin that was live at each frame, splits its running totals
-under the guard, and prints what it has learned when the history is
-dumped — so one staircase flight, dumped at each step, decides whether
-the churn is a memory-capacity problem or genuine novelty, and which
-mechanism that licenses. No detection behaviour changes with the
-instrumentation.
+One suspected side effect, measured and cleared the same day it was
+instrumented — recorded here because the first reading blamed the guard.
+An early tuning flight showed the transition-flash fix's recognition
+counters climbing with the margin (29 at guard-off against 3,277 at
+`fraction_h = 0.5`, with withheld frames felt as judder), and the obvious
+reading was that the wider frustum admits more near-surface render passes
+for the detector to learn. So the detector was taught to attribute before
+anything was changed: it stamps every camera-history frame with the
+margin that was live when it was drawn, splits its running totals under
+the guard, and prints its learned tables when the history is dumped. The
+staircase then re-flew with per-frame attribution, including a guard-OFF
+control window mid-flight, and the correlation inverted: the guard-off
+stretches carried the *highest* recognition rates of the day, and the
+camera populations doing the churning appear identically with the guard
+off. The churn belongs to low flight over terrain, not to the margin —
+the earlier numbers had confounded margin with flight profile. No
+margin-aware detection is needed: the flash fix certifies the recurring
+geometry within a few frames and excuses it from then on, its burst
+governor bounds any storm, and a withheld frame is resubmitted on time
+rather than stalled. The attribution stays in the build, so any future
+"is this the guard?" report answers itself from one history dump.
 
 ### Why the submit side is this elaborate
 
