@@ -31,6 +31,35 @@ constexpr size_t kSlotCSSetShader          = 69;
 constexpr size_t kSlotClearState           = 110;
 constexpr size_t kHighestSlotUsed          = 110;
 
+// The slots the reclaim pass may vouch for, and the evidence that is allowed
+// to earn it -- which is NOT vscreen's evidence, and the difference is the
+// point. vscreen's slots fire every presented frame, so silence-while-
+// presenting proves bypass there. These three are COMPUTE: this game runs
+// whole loading screens with Present at four figures and not one dispatch
+// (the give-up machinery below was rebuilt around exactly that measurement),
+// so silence-while-presenting proves nothing here, and a chainer that
+// composed politely during play would be adopted during the first hyperspace
+// jump -- the call loop, deferred rather than prevented. What CAN prove
+// bypass is silence while EYES ARE BEING DRAWN: the exposure pass is how
+// those eyes get tonemapped, and scene compute does not idle while scene
+// draws flow. So the quiet streak only advances on passes where vscreen
+// counted eye draws (plumbed through from its reclaim pass), and there is
+// deliberately no everHit precondition: with scene evidence in the gate, a
+// slot bypassed BEFORE its first dispatch -- the field timing, the toolkit
+// re-points at XR session init -- is still healable, where an everHit test
+// would have written it off for the session.
+// ClearState is absent: shared with vscreen, refused by reclaim on its own
+// grounds, and quiet for whole legitimate sessions besides.
+enum ReclaimHit : uint32_t {
+    kHitDispatch = 0,   // 41
+    kHitCsUavs,         // 68
+    kHitCsShader,       // 69
+    kHitCount
+};
+constexpr size_t kReclaimableSlots[kHitCount] = {kSlotDispatch, kSlotCSSetUAVs,
+                                                 kSlotCSSetShader};
+constexpr uint8_t kQuietPassesToVouch = 3;
+
 typedef void(STDMETHODCALLTYPE* PFN_SetShader)(ID3D11DeviceContext*, void*,
                                                ID3D11ClassInstance* const*, UINT);
 typedef void(STDMETHODCALLTYPE* PFN_Dispatch)(ID3D11DeviceContext*, UINT, UINT, UINT);
@@ -58,6 +87,16 @@ struct State {
     // the session -- silently inert, with the give-up notice blaming the game
     // for being stock. One module, one policy: keep the pointers, expire the
     // answers.
+
+    // Per-slot proof the hooked thunks are being CALLED, for the reclaim
+    // pass. Incremented before the foreign-context test, because raw
+    // invocation is the evidence, and a chainer forwarding the game's calls
+    // keeps them climbing -- which is exactly what makes its slot unsafe to
+    // take back. No everHit here, on purpose: the scene gate in
+    // exposureFixReclaimHooks replaces it, and does the one thing it could
+    // not -- heal a slot that was bypassed before its first call.
+    uint32_t thunkHits[kHitCount] = {};
+    uint8_t  quietPasses[kHitCount] = {};
 
     bool     enabled = false;
     uint64_t targetHash = 0;      // pinned by config, or learned by detection
@@ -227,6 +266,7 @@ inline bool foreignContext(ID3D11DeviceContext* self) {
 
 void STDMETHODCALLTYPE hookedCSSetShader(ID3D11DeviceContext* self, void* shader,
                                          ID3D11ClassInstance* const* inst, UINT n) {
+    ++g_state->thunkHits[kHitCsShader];
     if (foreignContext(self)) {
         g_state->realCSSetShader(self, shader, inst, n);
         return;
@@ -238,6 +278,7 @@ void STDMETHODCALLTYPE hookedCSSetShader(ID3D11DeviceContext* self, void* shader
 void STDMETHODCALLTYPE hookedCSSetUAVs(ID3D11DeviceContext* self, UINT start, UINT n,
                                        ID3D11UnorderedAccessView* const* uavs,
                                        const UINT* counts) {
+    ++g_state->thunkHits[kHitCsUavs];
     if (foreignContext(self)) {
         g_state->realCSSetUAVs(self, start, n, uavs, counts);
         return;
@@ -295,6 +336,7 @@ bool isExposureDispatch() {
 
 void STDMETHODCALLTYPE hookedDispatch(ID3D11DeviceContext* self, UINT x, UINT y, UINT z) {
     State* s = g_state;
+    ++s->thunkHits[kHitDispatch];
     if (foreignContext(self)) {
         s->realDispatch(self, x, y, z);
         return;
@@ -532,6 +574,33 @@ void installExposureFix(ID3D11Device* device) {
                     s.enabled ? "ON" : "off",
                     s.pinned ? "pinned by config" : "detected automatically");
     ctx->Release();
+}
+
+void exposureFixReclaimHooks(bool sceneRendered) {
+    State* s = g_state;
+    if (!s) return;
+    // The vouch list, gated on the SCENE and not the clock: a quiet pass
+    // advances the streak only when vscreen counted eye draws in the same
+    // window, because compute goes legitimately silent through loading
+    // screens while Present runs at four figures -- see the slot-table
+    // comment. Passes without scene evidence FREEZE the streak rather than
+    // reset it: a bypass does not un-bypass itself during a loading screen,
+    // and resetting would let every hyperspace jump hand the intruder three
+    // more free seconds.
+    size_t quiet[kHitCount];
+    size_t n = 0;
+    for (uint32_t i = 0; i < kHitCount; ++i) {
+        if (s->thunkHits[i] != 0) {
+            s->quietPasses[i] = 0;
+            s->thunkHits[i] = 0;
+        } else if (sceneRendered && s->quietPasses[i] < 255) {
+            ++s->quietPasses[i];
+        }
+        if (s->quietPasses[i] >= kQuietPassesToVouch) {
+            quiet[n++] = kReclaimableSlots[i];
+        }
+    }
+    s->hook.reclaim("exposure context", quiet, n);
 }
 
 void shutdownExposureFix() {

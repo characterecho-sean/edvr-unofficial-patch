@@ -110,6 +110,19 @@ struct State {
 
     uint64_t configPollMs = 0;
 
+    // Submit's call counter and quiet streak, for the reclaim pass -- the
+    // same chainer/bypasser evidence the d3d11 half keeps per thunk (see
+    // vScreenReclaimHooks and VTableHook::reclaim). Submit runs twice a frame
+    // whenever the game is in VR at all, so a multi-pass silence while
+    // WaitGetPoses keeps driving the pass is a starved hook, not a quiet
+    // session. WaitGetPoses itself is never vouched: it IS the pass driver,
+    // and if it dies the pass dies with it -- the same accepted blind spot as
+    // Present on the other side.
+    uint32_t submitHits = 0;
+    uint8_t  submitQuietPasses = 0;
+    bool     submitEverHit = false;
+    size_t   submitSlotUsed = 0;
+
     bool     inert = false;        // hook installed but doing nothing
     bool     validated = false;
     uint32_t submitCalls = 0;
@@ -572,6 +585,9 @@ vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
     EDVR_BREADCRUMB_ONCE("vr: hookedSubmit entered");
     State* s = g_state;
     if (!s || !s->realSubmit) return 0;
+    // Before the owner test, like the d3d11 counters: raw invocation is the
+    // reclaim evidence, whoever the caller was.
+    ++s->submitHits;
 
     // Not the interface we attached to: forward untouched. In-place patching
     // hooks the class, so a second compositor pointer reaches this thunk and
@@ -853,6 +869,33 @@ vr::EVRCompositorError hookedWaitGetPoses(void* self,
             headOffsetConfigure();
             configurePoseRing(s);
         }
+        // The liveness pass, same cadence and same reason as the d3d11 half:
+        // in-place patches sit on a table other tools can write, and under
+        // OpenComposite the compositor being hooked here IS another mod's
+        // object -- the environment where a second hooker is normal rather
+        // than exotic. Submit is vouched only on measured silence (see the
+        // State fields); WaitGetPoses is detection-only, and riding it has
+        // the same accepted blind spot as riding Present over there: a
+        // re-point of THIS slot kills the check with the hook. Sessions that
+        // went inert never reach here on purpose -- inert thunks are pure
+        // pass-throughs, and winning a slot back for one buys nothing.
+        {
+            size_t quiet[1];
+            size_t n = 0;
+            if (s->submitHits == 0) {
+                if (s->submitEverHit && s->submitQuietPasses < 255) {
+                    ++s->submitQuietPasses;
+                }
+            } else {
+                s->submitEverHit = true;
+                s->submitQuietPasses = 0;
+                s->submitHits = 0;
+            }
+            if (s->submitEverHit && s->submitQuietPasses >= 3) {
+                quiet[n++] = s->submitSlotUsed;
+            }
+            s->compositorHook.reclaim("openvr compositor", quiet, n);
+        }
     }
 
     return result;
@@ -1013,6 +1056,9 @@ void* interceptInterface(void* iface, const char* interfaceVersion) {
                              reinterpret_cast<void**>(&s.realSubmit));
     s.compositorHook.replace(posesSlot, reinterpret_cast<void*>(&hookedWaitGetPoses),
                              reinterpret_cast<void**>(&s.realWaitGetPoses));
+    // The reclaim pass needs the slot number Submit actually landed on --
+    // it is resolved per interface version above, not a constant.
+    s.submitSlotUsed = submitSlot;
     if (!s.compositorHook.commit()) {
         Log::get().note("compositor vtable commit failed; passing through");
         s.compositorHook.uninstall();

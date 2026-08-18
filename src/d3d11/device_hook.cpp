@@ -456,6 +456,41 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
         if (dueMs(g_state->configPollMs, kConfigPollMs)) {
             g_state->configPollMs = stampMs();
             vScreenRefreshConfig();
+            // The liveness pass, on the same once-a-second cadence. In-place
+            // patches are on a table other tools can write too, and one that
+            // installs after EDVR and resolves its "original" pointers from a
+            // clean vtable erases ours without a trace -- measured 2026-08-18:
+            // OpenXR Toolkit under OpenComposite re-pointed the draw,
+            // render-target-bind and dispatch slots at its XR session init, a
+            // few seconds after install, and four fixes starved silently while
+            // Map/Unmap kept arriving and made the log look half-alive.
+            //
+            // The three hooks here pass no vouch list, so they are DETECTION
+            // ONLY: their slots are rare calls (CreateComputeShader at asset
+            // loads, CreateSwapChain once) or the heartbeat itself (Present),
+            // and "quiet" is a normal state for all of them -- which is
+            // exactly the evidence a vouch must never be built on. A re-point
+            // of one of these gets a named log line instead of silence, and
+            // that is the whole improvement on offer for them; re-patching
+            // without call evidence risks looping a chainer, which is worse
+            // than the bypass it would heal. The context hooks below carry
+            // per-thunk counters and do vouch. See VTableHook::reclaim.
+            //
+            // This rides the swapchain hook's Present: if THAT slot is ever the
+            // one re-pointed, the heartbeat running this check dies with it.
+            // Accepted, not overlooked -- the field case left Present alone
+            // (the totals windows kept printing all session), and a watchdog
+            // thread for a hook that has never been hit is machinery this
+            // codebase would have to get right on every other axis too.
+            g_state->deviceHook.reclaim("d3d11 device");
+            g_state->swapChainHook.reclaim("game swapchain");
+            g_state->factoryHook.reclaim("dxgi factory");
+            // vScreen first: its return is the eye-draws-since-last-pass fact
+            // the exposure vouch is gated on, because compute silence during
+            // a loading screen is ordinary and only compute silence during a
+            // RENDERED SCENE is evidence of bypass.
+            const bool sceneRendered = vScreenReclaimHooks();
+            exposureFixReclaimHooks(sceneRendered);
         }
     });
     return hr;

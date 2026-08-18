@@ -73,6 +73,56 @@ constexpr size_t kSlotExecuteCommandList    = 58;
 constexpr size_t kSlotClearState            = 110;
 constexpr size_t kHighestSlotUsed           = 110;
 
+// The slots the reclaim pass may vouch for, and the order their call counters
+// are kept in. Vouching means: "this thunk has measurably stopped being
+// called, so whatever re-pointed its slot is a bypasser, not a chainer" --
+// see VTableHook::reclaim for why that distinction is the whole game.
+//
+// Deliberately NOT here, because a vouch is a claim that silence proves
+// bypass, and for these slots it does not:
+//   - ExecuteCommandList: never seen on this game. A quiet counter is its
+//     normal state, and vouching for a normally-quiet slot is how a chainer
+//     gets adopted during an ordinary lull.
+//   - ClearState: shared with the exposure fix, which reclaim refuses on its
+//     own grounds, and quiet for whole sessions besides.
+//   - DrawInstanced, DrawIndexedInstanced, OMSetRtvAndUav: scene-shaped
+//     calls with no in-tree proof they fire during every menu or loading
+//     stretch. A menu that issues no instanced draw for three seconds is
+//     ordinary, and a chainer on one of those slots during it would be
+//     mistaken for a bypasser -- the loop this whole design exists to
+//     refuse. They get the detection line instead of a heal; the cost is
+//     that a bypasser on them stays bypassed (instanced draws go uncounted,
+//     degrading the eye-draw peak under such a tool), which the log now at
+//     least SAYS.
+// Everything listed fires every presented frame in every mode this game has
+// been observed in -- menus draw, loading screens draw, and both bind
+// buffers and resources to do it -- which is what makes three silent seconds
+// evidence instead of idleness.
+enum ReclaimHit : uint32_t {
+    kHitVsCb = 0,   // 7
+    kHitPsSrv,      // 8
+    kHitDrawIndexed,// 12
+    kHitDraw,       // 13
+    kHitMap,        // 14
+    kHitUnmap,      // 15
+    kHitOmSet,      // 33
+    kHitClearRtv,   // 50
+    kHitCount
+};
+constexpr size_t kReclaimableSlots[kHitCount] = {
+    kSlotVSSetConstantBuffers, kSlotPSSetShaderResources, kSlotDrawIndexed,
+    kSlotDraw, kSlotMap, kSlotUnmap, kSlotOMSetRenderTargets,
+    kSlotClearRenderTargetView};
+
+// Quiet passes (about a second each) before a slot's silence is vouched to
+// reclaim. One pass can straddle the moment of the clobber itself; three in a
+// row of a call that otherwise fires every frame, while Present keeps
+// running, is a starved hook and not a quiet game. The residual -- a chainer
+// installing at the start of a genuine three-second lull in one of THESE
+// calls while frames still present -- has no observed instance in this game:
+// menus draw, loading screens draw, and the panel modes clear.
+constexpr uint8_t kQuietPassesToVouch = 3;
+
 typedef void(STDMETHODCALLTYPE* PFN_SetConstantBuffers)(ID3D11DeviceContext*, UINT, UINT,
                                                         ID3D11Buffer* const*);
 typedef void(STDMETHODCALLTYPE* PFN_SetShaderResources)(ID3D11DeviceContext*, UINT, UINT,
@@ -279,6 +329,31 @@ struct State {
     uint32_t rtSeenW[8] = {}, rtSeenH[8] = {};
     uint32_t rtSeenCount = 0;
     uint64_t panelExclusions = 0;
+    // How many times targetIsEyeSized was ASKED, regardless of its answer.
+    // Zero with the per-draw askers enabled means the draw hooks themselves
+    // never ran -- the bypass signature -- and zero with them disabled means
+    // the settings, not a fault. The starvation notice needs the difference:
+    // it accused a healthy exposure-only configuration of being hooked over,
+    // and solicited a bug report for it, before this existed.
+    uint32_t recogniserAsks = 0;
+    // Per-slot proof the hooked thunks are being CALLED, for the reclaim
+    // pass. Incremented at the top of each thunk, before the foreign-context
+    // test, because raw invocation is the evidence -- a chainer forwarding
+    // the game's calls keeps these climbing, and that is exactly what makes
+    // its slot unsafe to take back. Plain uint32 increments on hot paths;
+    // a lost increment under a race reads as slightly quieter, and three
+    // full seconds of losses on a per-frame call is not a real interleaving.
+    uint32_t thunkHits[kHitCount] = {};
+    uint8_t  quietPasses[kHitCount] = {};
+    bool     everHit[kHitCount] = {};
+    // Eye draws accumulated since the last reclaim pass -- the SCENE evidence
+    // the exposure fix borrows for its own vouches. Its compute slots go
+    // legitimately silent through loading screens (measured at 1790fps with
+    // no compute at all), so silence-while-presenting proves nothing there;
+    // silence while EYES ARE BEING DRAWN does, because the exposure pass is
+    // how those eyes get tonemapped. Accumulated at the frame boundary,
+    // consumed and zeroed by vScreenReclaimHooks.
+    uint32_t eyeDrawsSinceReclaim = 0;
     bool     starvationNoted = false;
     bool     recognitionLostNoted = false;
     // When the fixes were installed, for the starvation check. Frames are not
@@ -353,6 +428,10 @@ void noteUncountedTarget(State* s, uint32_t w, uint32_t h) {
 // callers must read a failed resolve as "do nothing" rather than as a verdict.
 bool targetIsEyeSized(void* rtv) {
     State* s = g_state;
+    // Counted before any early return: "was the question asked" is a
+    // different fact from "what was the answer", and the starvation notice
+    // needs the first one. A null rtv still counts -- the draw path asked.
+    ++s->recogniserAsks;
     if (!rtv) return false;
 
     ResourceInfo info;
@@ -659,6 +738,7 @@ void endPanelOverride(ID3D11DeviceContext* self) {
 void STDMETHODCALLTYPE hookedClearRtv(ID3D11DeviceContext* self,
                                       ID3D11RenderTargetView* rtv, const FLOAT c[4]) {
     State* s = g_state;
+    ++s->thunkHits[kHitClearRtv];
     if (foreignContext(self)) {
         s->realClearRtv(self, rtv, c);
         return;
@@ -681,6 +761,7 @@ void STDMETHODCALLTYPE hookedClearRtv(ID3D11DeviceContext* self,
 void STDMETHODCALLTYPE hookedOMSetRenderTargets(ID3D11DeviceContext* self, UINT n,
                                                 ID3D11RenderTargetView* const* rtvs,
                                                 ID3D11DepthStencilView* dsv) {
+    ++g_state->thunkHits[kHitOmSet];
     if (foreignContext(self)) {
         g_state->realOMSetRenderTargets(self, n, rtvs, dsv);
         return;
@@ -717,6 +798,7 @@ void STDMETHODCALLTYPE hookedOMSetRtvAndUav(ID3D11DeviceContext* self, UINT n,
 void STDMETHODCALLTYPE hookedPSSetShaderResources(ID3D11DeviceContext* self, UINT start,
                                                   UINT n,
                                                   ID3D11ShaderResourceView* const* srvs) {
+    ++g_state->thunkHits[kHitPsSrv];
     if (foreignContext(self)) {
         g_state->realPSSetShaderResources(self, start, n, srvs);
         return;
@@ -727,6 +809,7 @@ void STDMETHODCALLTYPE hookedPSSetShaderResources(ID3D11DeviceContext* self, UIN
 
 void STDMETHODCALLTYPE hookedVSSetConstantBuffers(ID3D11DeviceContext* self, UINT start,
                                                   UINT n, ID3D11Buffer* const* bufs) {
+    ++g_state->thunkHits[kHitVsCb];
     if (foreignContext(self)) {
         g_state->realVSSetConstantBuffers(self, start, n, bufs);
         return;
@@ -786,6 +869,7 @@ HRESULT STDMETHODCALLTYPE hookedMap(ID3D11DeviceContext* self, ID3D11Resource* r
                                     UINT sub, D3D11_MAP type, UINT flags,
                                     D3D11_MAPPED_SUBRESOURCE* mapped) {
     State* s = g_state;
+    ++s->thunkHits[kHitMap];
     if (foreignContext(self)) {
         return s->realMap(self, res, sub, type, flags, mapped);
     }
@@ -847,6 +931,7 @@ HRESULT STDMETHODCALLTYPE hookedMap(ID3D11DeviceContext* self, ID3D11Resource* r
 void STDMETHODCALLTYPE hookedUnmap(ID3D11DeviceContext* self, ID3D11Resource* res,
                                    UINT sub) {
     State* s = g_state;
+    ++s->thunkHits[kHitUnmap];
     if (foreignContext(self)) {
         s->realUnmap(self, res, sub);
         return;
@@ -874,12 +959,14 @@ void STDMETHODCALLTYPE hookedUnmap(ID3D11DeviceContext* self, ID3D11Resource* re
 }
 
 void STDMETHODCALLTYPE hookedDraw(ID3D11DeviceContext* self, UINT count, UINT start) {
+    ++g_state->thunkHits[kHitDraw];
     const bool on = beginPanelOverride(self);
     g_state->realDraw(self, count, start);
     if (on) endPanelOverride(self);
 }
 void STDMETHODCALLTYPE hookedDrawIndexed(ID3D11DeviceContext* self, UINT count,
                                          UINT startIndex, INT baseVertex) {
+    ++g_state->thunkHits[kHitDrawIndexed];
     const bool on = beginPanelOverride(self);
     g_state->realDrawIndexed(self, count, startIndex, baseVertex);
     if (on) endPanelOverride(self);
@@ -973,6 +1060,39 @@ void vScreenRefreshConfig() {
     }
 }
 
+bool vScreenReclaimHooks() {
+    State* s = g_state;
+    if (!s) return false;
+    // Turn the per-thunk call counters into the vouch list. A slot is vouched
+    // only when it has fired before (a call this game never makes cannot "go
+    // quiet") and has now been silent for kQuietPassesToVouch consecutive
+    // passes while Present kept driving this function -- which is the one
+    // combination a chainer cannot produce, since a chainer forwards the
+    // game's calls into our thunks and keeps the counter climbing.
+    size_t quiet[kHitCount];
+    size_t n = 0;
+    for (uint32_t i = 0; i < kHitCount; ++i) {
+        if (s->thunkHits[i] == 0) {
+            if (s->everHit[i] && s->quietPasses[i] < 255) ++s->quietPasses[i];
+        } else {
+            s->everHit[i] = true;
+            s->quietPasses[i] = 0;
+            s->thunkHits[i] = 0;
+        }
+        if (s->everHit[i] && s->quietPasses[i] >= kQuietPassesToVouch) {
+            quiet[n++] = kReclaimableSlots[i];
+        }
+    }
+    s->hook.reclaim("vScreen context", quiet, n);
+
+    // The scene evidence the exposure fix's vouches ride on, returned to the
+    // caller that runs both passes. Consumed here so one pass window means the
+    // same thing to both readers.
+    const bool sceneRendered = s->eyeDrawsSinceReclaim > 0;
+    s->eyeDrawsSinceReclaim = 0;
+    return sceneRendered;
+}
+
 void vScreenFrameBoundary() {
     State* s = g_state;
     if (!s) return;
@@ -1017,6 +1137,11 @@ void vScreenFrameBoundary() {
     if (s->eyeDrawsThisFrame > s->eyeDrawsMax) s->eyeDrawsMax = s->eyeDrawsThisFrame;
     if (s->eyeDrawsThisFrame > s->eyeDrawsWindowMax) {
         s->eyeDrawsWindowMax = s->eyeDrawsThisFrame;
+    }
+    // For the reclaim pass's scene evidence; see the field's comment. Saturate
+    // rather than wrap -- the consumer only asks "any at all".
+    if (s->eyeDrawsSinceReclaim < 0xFFFFFFFFu - s->eyeDrawsThisFrame) {
+        s->eyeDrawsSinceReclaim += s->eyeDrawsThisFrame;
     }
 
     // What the headset is actually being given, if the other half is installed
@@ -1099,21 +1224,71 @@ void vScreenFrameBoundary() {
                         s->rtSeenW[i], s->rtSeenH[i]);
             strncat_s(sizes, sizeof(sizes), one, _TRUNCATE);
         }
+        // Four starvations, four different next moves -- and the advice used
+        // to be one string that fit only one of them. A user with the openvr
+        // half installed and NOTHING seen was told to install what they had
+        // (measured 2026-08-18, and the real cause was another tool
+        // re-pointing the hooks themselves; the reclaim pass now exists for
+        // exactly that, so point the reader at its lines). The bypass verdict
+        // needs recogniserAsks, not the seen-counters: zero asks with the
+        // per-draw askers ON means the draw hooks never ran, while zero asks
+        // with them OFF is the settings -- and accusing a healthy
+        // exposure-only install of being hooked over, with a solicited bug
+        // report, is exactly the kind of lie this notice exists to end.
+        const bool perDrawAskers = s->distanceEnabled || s->countForFlashFix ||
+                                   headOffsetGateWantsPanel();
+        const char* advice;
+        if (!perDrawAskers) {
+            // Settled BEFORE the ask count is consulted: with every per-draw
+            // consumer off, a zero eye-draw peak is structural whatever the
+            // clear path asked -- a black-void-only session where voids WERE
+            // cleared still lands here, and its own totals line already says
+            // whether the clearing worked.
+            advice =
+                "Eye draws are only counted when a fix that needs them per "
+                "draw is on, and none is: the panel distance is at 1.0, the "
+                "flash detector is not counting, and the head-offset gate is "
+                "idle. The black void fix does not count draws -- the totals "
+                "lines say whether it is clearing. This zero is those "
+                "settings, not a fault.";
+        } else if (s->recogniserAsks == 0) {
+            advice =
+                "The recogniser was never even ASKED -- with fixes enabled "
+                "that ask on every draw, that means the draw and bind hooks "
+                "themselves are not running: another tool has re-pointed the "
+                "vtable entries EDVR patched (OpenXR Toolkit under "
+                "OpenComposite is a known one). EDVR checks once a second and "
+                "re-patches -- look for VTableHook lines near this one saying "
+                "so. If there are none, report this log.";
+        } else if (!s->eyeW) {
+            advice =
+                "If one of those sizes is your eye texture, that is the "
+                "collision -- change fix.vscreen_res_width/height (2880x1620 "
+                "is safe, 1920x1080 is off). If none of them is, install "
+                "openvr_api.dll as well so this side stops guessing at what "
+                "your eye textures are.";
+        } else {
+            advice =
+                "If one of those sizes is your eye texture, that is the "
+                "collision -- change fix.vscreen_res_width/height (2880x1620 "
+                "is safe, 1920x1080 is off). If none of them matches the "
+                "published size either, something between the game and the "
+                "headset is resizing the image -- an upscaler's input "
+                "resolution, or supersampling that moved mid-session. Report "
+                "this log so the recogniser can learn that layout.";
+        }
         Log::get().note(
             "vScreen: NOT ONE eye-sized render target in %u frames over %u seconds. The black void, the "
             "panel distance, the transition flash fix and Explorer Cam all read that "
             "count, so all four are inert -- not broken, starved. They will say nothing "
             "further, which is why this line exists. Largest targets seen: %s. The panel "
-            "is at %ux%u and its exclusion answered no %llu time(s); the headset %s. If "
-            "one of those sizes is your eye texture, that is the collision -- change "
-            "fix.vscreen_res_width/height (2880x1620 is safe, 1920x1080 is off). If none "
-            "of them is, install openvr_api.dll as well so this side stops guessing at "
-            "what your eye textures are.",
+            "is at %ux%u and its exclusion answered no %llu time(s); the headset %s. %s",
             s->frameNo, static_cast<uint32_t>((now - s->installMs) / 1000u),
             s->rtSeenCount ? sizes : "none big enough to be one",
             s->panelW, s->panelH,
             static_cast<unsigned long long>(s->panelExclusions),
-            s->eyeW ? "has published its size" : "has published nothing");
+            s->eyeW ? "has published its size" : "has published nothing",
+            advice);
     }
 
     // Frames that forced nothing are menus and loading screens, not asymmetry.

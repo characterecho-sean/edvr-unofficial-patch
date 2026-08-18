@@ -23,6 +23,28 @@
 // begin by checking that `self` is the object it was installed for and
 // forwarding untouched otherwise. That check is not optional -- deferred
 // contexts and a wrapper mod's internal objects reach the same table.
+//
+// AND ONE MORE COST, PAID IN THE FIELD BEFORE IT WAS UNDERSTOOD: the table is
+// shared property, so a tool that installs AFTER us can write the same slots.
+// If it chains -- captures what the slot holds and forwards to it -- both run.
+// The one that broke a user's session does not: OpenXR Toolkit (under
+// OpenComposite) resolves its "original" pointers from a clean vtable of its
+// own and then writes its hooks over whatever is in the live table. Measured
+// 2026-08-18: it re-pointed the draw, render-target-bind and dispatch slots a
+// few seconds after EDVR installed (its XR session init), every fix reading
+// those calls starved, and nothing anywhere said so -- while Map, Unmap and
+// ClearState, slots it does not touch, kept arriving and made the log look
+// half-alive. The copy-and-swap mechanism was immune to this by accident: its
+// private copy WAS the dispatch table, so a later hooker patched ours and
+// chained through us.
+//
+// reclaim() is the answer: re-read the patched slots, and where somebody has
+// re-pointed one, adopt their entry as the new forward target and re-patch on
+// top -- both tools run, in the order last-installed-first, which is the order
+// in-place patching always produces. Call it from a frame path, about once a
+// second -- and vouch only for slots whose thunks you have measured silent,
+// because a tool that CHAINS through us is also "not ours" in the slot, and
+// re-patching over a chainer builds a call loop. See the method comment.
 #pragma once
 
 #include <cstddef>
@@ -70,6 +92,53 @@ public:
     // failure this class exists to stop, viewed from the other side.
     void uninstall();
 
+    // Re-read every committed slot; re-patch the ones somebody re-pointed --
+    // but ONLY where the caller can vouch the slot's own thunk has gone quiet.
+    //
+    // Two kinds of tool write over an in-place patch, and they must not be
+    // treated alike. A CHAINER captured our thunk from the slot and forwards
+    // to it: our hook still runs, and adopting their entry as our forward
+    // would point the two hooks at each other -- an infinite call loop, found
+    // by the next Draw as a stack overflow. A BYPASSER resolved its forward
+    // from a clean table: our thunk stops running entirely, which is the
+    // OpenXR Toolkit failure this exists to heal. The two are told apart by
+    // the one fact the caller owns and this class cannot see: whether the
+    // slot's thunk is still being CALLED. A chainer keeps it firing; a
+    // bypasser starves it.
+    //
+    // So `quietSlots` lists the slots whose thunks the caller has measured
+    // silent long enough to rule idleness out (vscreen counts per-thunk calls
+    // and requires several consecutive quiet seconds while frames flow). Only
+    // those are eligible for adoption: the current entry becomes the new
+    // forward target (written through the SAME origOut the caller gave
+    // replace(), forward first, slot second -- a call mid-pass takes either
+    // the old path or the whole new chain, never half of one), and our thunk
+    // goes back on top. Both tools then run. A re-pointed slot NOT vouched
+    // for is reported once and left alone: chainers keep working, and the
+    // report is the evidence a starved-but-unvouched slot leaves behind.
+    //
+    // Also never touched, each for a reason it must keep:
+    //   - a slot whose current entry is another EDVR hook's replacement (the
+    //     two context hooks share ClearState) -- a healthy stack, not a
+    //     clobber; ownership is tracked at commit() in a registry local to
+    //     this file.
+    //   - a shared slot a third party re-pointed: either owner re-patching
+    //     alone would splice out the other. Reported and conceded.
+    //   - a slot re-pointed more than kMaxRepatchesPerSlot times: a re-checking
+    //     intruder would otherwise trade it back every second forever.
+    //     Conceded, loudly.
+    //
+    // The residual this buys instead of the loop: a chainer that installs at
+    // the START of a genuine multi-second lull in a slot with prior traffic
+    // can be mistaken for a bypasser and adopted. For the slots callers vouch
+    // for -- draw, bind and clear paths that fire every rendered frame -- a
+    // multi-second lull while frames present does not happen in this game.
+    //
+    // Returns how many slots were re-patched this pass. `name` labels the log
+    // lines; the first reclaim explains itself, later ones report at doublings.
+    size_t reclaim(const char* name, const size_t* quietSlots = nullptr,
+                   size_t quietCount = 0);
+
     bool     attached() const { return m_object != nullptr; }
     bool     committed() const { return m_committed; }
     size_t   entryCount() const { return m_execPrefix; }
@@ -84,6 +153,19 @@ private:
         size_t slot = 0;
         void*  replacement = nullptr;
         void*  original = nullptr;
+        // Where the caller keeps its forward pointer -- the address replace()
+        // was given, kept so reclaim() can re-point the forward when it adopts
+        // an intruder's entry. Null means replace() was called without one, and
+        // such a slot can never be reclaimed: re-patching it would drop the
+        // intruder from the chain instead of running in front of it.
+        void** origOut = nullptr;
+        // reclaim() bookkeeping. Counted per slot because the fight is per
+        // slot: one contested entry must not retire the others with it.
+        uint32_t repatches = 0;
+        bool     retired = false;      // conceded -- cap hit, or unreclaimable
+        bool     sharedNoted = false;  // the shared-slot report, said once
+        bool     foreignNoted = false; // the unvouched-foreign report, said once
+        bool     oddNoted = false;     // the non-executable-entry report, said once
     };
 
     // Writes one entry with the page temporarily writable. Returns false and
@@ -95,6 +177,11 @@ private:
     std::vector<Patch> m_patches;
     size_t             m_execPrefix = 0;
     bool               m_committed = false;
+    // How many reclaim() passes found something to re-patch. Drives the log
+    // cadence: the first explains, later ones report at doublings, so a tool
+    // that re-hooks every second cannot fill the log while still being visible
+    // AS a tool that re-hooks every second.
+    uint32_t           m_reclaimEvents = 0;
 };
 
 }  // namespace edvr

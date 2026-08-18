@@ -33,6 +33,18 @@ void registerShaderHash(void* shader, uint64_t hash);
 // only meaningful within a frame.
 void exposureFixFrameBoundary();
 
+// Called about once a second from the frame path: verify the context-vtable
+// entries this module patched still hold its thunks, and re-patch the ones
+// that were re-pointed AND whose own thunks have measurably stopped being
+// called WHILE A SCENE WAS RENDERING -- sceneRendered is vscreen's word that
+// eye draws flowed this pass, and without it compute silence proves nothing
+// (loading screens present at four figures with zero dispatches). The vouch
+// tells a bypasser from a chainer, per VTableHook::reclaim. The Dispatch hook
+// is this fix's only sight of the exposure pass, and a tool re-hooking it
+// over EDVR (OpenXR Toolkit under OpenComposite, in the field) leaves
+// detection finding nothing forever with nothing said.
+void exposureFixReclaimHooks(bool sceneRendered);
+
 // Runtime toggle, for comparing against stock behaviour without restarting.
 void toggleExposureFix();
 bool exposureFixEnabled();

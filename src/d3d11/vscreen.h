@@ -54,6 +54,22 @@ void vScreenRefreshConfig();
 // of one.
 void vScreenFrameBoundary();
 
+// Called about once a second from the frame path: verify the context-vtable
+// entries this module patched still hold its thunks, and re-patch the ones
+// that were re-pointed AND whose own thunks have measurably stopped being
+// called -- the vouch that tells a bypasser (re-patch, both run) from a
+// chainer (leave alone, or the chain loops). A bypasser doing exactly that --
+// OpenXR Toolkit under OpenComposite, resolving its "original" pointers from
+// a clean table -- is how every fix in this file went silent in the field
+// while the log looked half-alive. See VTableHook::reclaim.
+//
+// Returns whether any eye draws were counted since the previous pass -- the
+// scene evidence the exposure fix's own vouches require, because its compute
+// slots go legitimately silent through loading screens and silence there
+// proves nothing. False when this module is not installed, which correctly
+// leaves the exposure fix detection-only.
+bool vScreenReclaimHooks();
+
 // Did the ClearState and ExecuteCommandList hooks actually run?
 //
 // For the build check only. Their vtable slots were counted from declaration
