@@ -143,6 +143,21 @@ struct State {
     // an opt-in experiment.
     GuardMode modeRequested = GuardMode::Off;
     float     percent = 8.0f;
+    // How much of each axis's deficit symmetric mode actually covers: the
+    // short side is extended by fraction x (larger tangent - short tangent).
+    // 1.0 is the full symmetrization the verdict flight proved sufficient;
+    // the point of the knob is walking DOWN from sufficiency to the
+    // cheapest value that still keeps the edges clean, live, one flight.
+    float     fracH = 1.0f, fracV = 1.0f;
+    // Which headsets the guard arms for, as rounded-degree FOV signatures
+    // ("94x99"); empty = all. One shared ini serves rigs that swap headsets:
+    // the rig that shows the bug pays for the fix, the one that never did
+    // pays nothing, and nobody edits config at swap time.
+    uint32_t  gateSig[8][2] = {};
+    uint32_t  gateCount = 0;
+    bool      sigLogged = false;
+    bool      gateNoted = false;
+    bool      restage = false;            // margin changed mid-flight: redo 1->2
     bool      submitCopy = true;          // copy mechanism vs narrowed bounds
     bool      receiverInstalled = false;  // slot 1 = member receiver, not asm
     bool      restartNoted = false;       // "enable needs a restart", said once
@@ -228,14 +243,25 @@ const char* modeName(GuardMode m) {
 // mode or margin change flows without any cached state to invalidate.
 // Returns false (and the guard should stand down) if the result is not a
 // sane frustum.
-bool computeLied(GuardMode mode, float pct, const float t[4], float out[4]) {
+//
+// Symmetric mode extends only the SHORT side of each axis, by fraction x
+// its deficit against the larger tangent: fraction 1 reports a fully
+// symmetric frustum (the shape the verdict flight proved sufficient), 0
+// reports the truth for that axis, and anything between trades coverage of
+// the extreme outer degrees for rendered pixels. An axis that is already
+// symmetric has no deficit and costs nothing at any fraction -- which is
+// why the Pimax's vertical rode along free.
+bool computeLied(GuardMode mode, float pct, float fh, float fv,
+                 const float t[4], float out[4]) {
     if (mode == GuardMode::Symmetric) {
-        const float h = fabsf(t[0]) > fabsf(t[1]) ? fabsf(t[0]) : fabsf(t[1]);
-        const float v = fabsf(t[2]) > fabsf(t[3]) ? fabsf(t[2]) : fabsf(t[3]);
-        out[0] = -h;
-        out[1] = h;
-        out[2] = -v;
-        out[3] = v;
+        auto extend = [](float neg, float pos, float frac, float* outNeg,
+                         float* outPos) {
+            const float m = fabsf(neg) > fabsf(pos) ? fabsf(neg) : fabsf(pos);
+            *outNeg = neg - (fabsf(neg) < m ? frac * (m - fabsf(neg)) : 0.0f);
+            *outPos = pos + (fabsf(pos) < m ? frac * (m - fabsf(pos)) : 0.0f);
+        };
+        extend(t[0], t[1], fh, &out[0], &out[1]);
+        extend(t[2], t[3], fv, &out[2], &out[3]);
     } else {
         const float f = 1.0f + pct / 100.0f;
         for (int i = 0; i < 4; ++i) out[i] = t[i] * f;
@@ -243,7 +269,27 @@ bool computeLied(GuardMode mode, float pct, const float t[4], float out[4]) {
     for (int i = 0; i < 4; ++i) {
         if (!std::isfinite(out[i]) || fabsf(out[i]) > 20.0f) return false;
     }
-    return out[0] < out[1] && out[2] < out[3];
+    return out[0] < out[1] && out[2] < out[3] && out[0] <= t[0] &&
+           out[1] >= t[1] && out[2] <= t[2] && out[3] >= t[3];
+}
+
+// The rounded-degree FOV signature this headset reports, from eye 0's true
+// tangents -- "94x99" on the Quest 3 rig, "103x103" on the Pimax. Stable
+// per headset and runtime because it is a property of the optics.
+void fovSignature(const float t[4], uint32_t* w, uint32_t* h) {
+    *w = static_cast<uint32_t>(lroundf(degrees(t[0]) + degrees(t[1])));
+    *h = static_cast<uint32_t>(lroundf(degrees(t[2]) + degrees(t[3])));
+}
+
+bool gatePasses(const State* s) {
+    if (s->gateCount == 0) return true;
+    if (!s->trueSeen[0]) return false;
+    uint32_t w = 0, h = 0;
+    fovSignature(s->trueRaw[0], &w, &h);
+    for (uint32_t i = 0; i < s->gateCount; ++i) {
+        if (s->gateSig[i][0] == w && s->gateSig[i][1] == h) return true;
+    }
+    return false;
 }
 
 bool lieActiveFor(const State* s, int32_t eye) {
@@ -351,7 +397,8 @@ void hookedGetProjectionRaw(void* self, int32_t eye, float* l, float* r,
         if (s->modeRequested != GuardMode::Off && s->receiverInstalled &&
             !s->guardInert) {
             float lie[4];
-            if (!computeLied(s->modeRequested, s->percent, s->trueRaw[eye], lie)) {
+            if (!computeLied(s->modeRequested, s->percent, s->fracH, s->fracV,
+                             s->trueRaw[eye], lie)) {
                 s->guardInert = true;
                 Log::get().note(
                     "cull guard INERT: the %s-mode frustum derived from tangents "
@@ -361,7 +408,11 @@ void hookedGetProjectionRaw(void* self, int32_t eye, float* l, float* r,
                 return;
             }
             memcpy(s->lied[eye], lie, sizeof(lie));
-            if (!s->lieLive && !s->liePending && s->trueSeen[0] && s->trueSeen[1]) {
+            // Armed only from a standing start, and only for a headset the
+            // gate names (an empty gate names them all): a rig that swaps
+            // headsets pays for the fix exactly where its owner said to.
+            if (s->stage == 0 && !s->lieLive && !s->liePending &&
+                s->trueSeen[0] && s->trueSeen[1] && gatePasses(s)) {
                 s->liePending = true;
                 s->liePendingSinceMs = stampMs();
             }
@@ -621,19 +672,32 @@ void promoteOrDemote(State* s) {
     // Demotion wins, from any stage. The game re-reads the true target size
     // within a frame and rebuilds its targets back; to the transport that is
     // one ordinary full-texture resize, the event the field has proven it
-    // handles.
+    // handles. A margin or gate change demotes the same way and then re-arms
+    // organically -- the per-call arming logic re-runs the moment the raw
+    // thunk sees the new configuration, so a re-stage is a demotion plus
+    // nothing.
     if (s->stage > 0 &&
-        (s->guardInert || s->modeRequested == GuardMode::Off)) {
+        (s->guardInert || s->modeRequested == GuardMode::Off || s->restage)) {
+        const bool restaging =
+            s->restage && !s->guardInert && s->modeRequested != GuardMode::Off;
         const bool wasLive = s->lieLive;
+        s->restage = false;
         s->stage = 0;
         s->lieLive = false;
         s->liePending = false;
         s->stage1WaitNoted = false;
-        Log::get().note(
-            "cull guard OFF%s: the game sees true projections%s and its "
-            "normal target size again from this frame.",
-            s->guardInert ? " (inert)" : "",
-            wasLive ? ", full submissions" : "");
+        if (restaging) {
+            Log::get().note(
+                "cull guard re-staging: the margin or headset gate changed. "
+                "Truth for a moment, then the two stages run again with the "
+                "new numbers.");
+        } else {
+            Log::get().note(
+                "cull guard OFF%s: the game sees true projections%s and its "
+                "normal target size again from this frame.",
+                s->guardInert ? " (inert)" : "",
+                wasLive ? ", full submissions" : "");
+        }
         return;
     }
 
@@ -739,6 +803,25 @@ void promoteOrDemote(State* s) {
                     ? " -- submissions stay at the session's own size"
                     : " (free-size crop, no transport to protect)");
         }
+        // The tuning readout: what the current margin leaves uncovered under
+        // the centred-culler model the verdict flight supports. This is the
+        // number the fraction staircase walks against -- lower the fractions
+        // until the quads reappear, and the margin printed on the last clean
+        // step is what the culler actually needed.
+        {
+            const float* t = s->trueRaw[0];
+            const float* lie = s->lied[0];
+            const float mH = fabsf(t[0]) > fabsf(t[1]) ? fabsf(t[0]) : fabsf(t[1]);
+            const float mV = fabsf(t[2]) > fabsf(t[3]) ? fabsf(t[2]) : fabsf(t[3]);
+            const float coveredH = atanf((lie[1] - lie[0]) * 0.5f) * 57.29578f;
+            const float coveredV = atanf((lie[3] - lie[2]) * 0.5f) * 57.29578f;
+            Log::get().note(
+                "cull guard margins: if the culler centres the frustum, the "
+                "uncovered outer margin is about %.1f deg horizontal, %.1f "
+                "vertical (0.0 = fully covered; tune with "
+                "cull_guard_fraction_h/_v, live).",
+                degrees(mH) - coveredH, degrees(mV) - coveredV);
+        }
     }
 }
 
@@ -761,6 +844,28 @@ void systemHookPeriodic() {
 
     if (!s->inert) {
         guarded("sysHook/periodic", [&] {
+            // The signature line, once, whatever the gate says: it is what a
+            // user copies INTO cull_guard_headsets, so it must appear on the
+            // headset that is not yet listed.
+            if (!s->sigLogged && s->trueSeen[0] && s->trueSeen[1]) {
+                s->sigLogged = true;
+                uint32_t w = 0, h = 0;
+                fovSignature(s->trueRaw[0], &w, &h);
+                Log::get().note(
+                    "cull guard: this headset's signature is %ux%u (the value "
+                    "cull_guard_headsets matches on).",
+                    w, h);
+            }
+            if (!s->gateNoted && s->gateCount > 0 && s->trueSeen[0] &&
+                s->receiverInstalled && s->modeRequested != GuardMode::Off &&
+                !gatePasses(s)) {
+                s->gateNoted = true;
+                Log::get().note(
+                    "cull guard: armed, but this headset's signature is not in "
+                    "cull_guard_headsets -- observation only here, and the "
+                    "GPU pays nothing. Add the signature above to the list to "
+                    "enable it on this headset too.");
+            }
             emitValues(s);
             if (!s->receiverInstalled) {
                 logCaptureIfReady(s, kSlotMatrix, "GetProjectionMatrix");
@@ -813,6 +918,54 @@ void systemHookConfigure() {
     if (!std::isfinite(pct) || pct < 0.0f) pct = 0.0f;
     if (pct > 50.0f) pct = 50.0f;
 
+    // Written as two literal reads, not a helper taking the key: the config
+    // contract check finds keys by the literal string inside the read call,
+    // and a key passed through a parameter is invisible to it -- which it
+    // treats, correctly, as unread.
+    auto clampFrac = [](float f) {
+        if (!std::isfinite(f)) return 1.0f;
+        if (f < 0.0f) return 0.0f;
+        if (f > 1.0f) return 1.0f;
+        return f;
+    };
+    const float fh = clampFrac(cfg.getFloat("fix.cull_guard_fraction_h", 1.0f));
+    const float fv = clampFrac(cfg.getFloat("fix.cull_guard_fraction_v", 1.0f));
+
+    // The headset gate: comma-separated rounded-degree signatures ("94x99").
+    // Parsed only when the string changes; a token that does not parse is
+    // named once and skipped, never silently matched.
+    const std::string gates = cfg.getString("fix.cull_guard_headsets", "");
+    uint32_t gateSig[8][2] = {};
+    uint32_t gateCount = 0;
+    bool gateChanged = false;
+    {
+        static std::string lastGates;  // configure runs on one thread at a time
+        if (gates != lastGates) {
+            gateChanged = true;
+            lastGates = gates;
+        }
+        size_t pos = 0;
+        while (pos < gates.size() && gateCount < 8) {
+            size_t end = gates.find(',', pos);
+            if (end == std::string::npos) end = gates.size();
+            unsigned w = 0, h = 0;
+            const std::string tok = gates.substr(pos, end - pos);
+            if (sscanf_s(tok.c_str(), " %ux%u", &w, &h) == 2 && w > 10 &&
+                w < 360 && h > 10 && h < 360) {
+                gateSig[gateCount][0] = w;
+                gateSig[gateCount][1] = h;
+                ++gateCount;
+            } else if (gateChanged && !tok.empty() &&
+                       tok.find_first_not_of(' ') != std::string::npos) {
+                Log::get().note(
+                    "cull_guard_headsets: \"%s\" is not a WxH signature (the "
+                    "log prints each headset's, like 94x99). Skipped.",
+                    tok.c_str());
+            }
+            pos = end + 1;
+        }
+    }
+
     // "copy" unless the ini says bounds. Copy is the default because the
     // bounds mechanism was refuted in the field the day it flew: correct by
     // the OpenVR contract, ignored by OpenComposite over VDXR, experienced
@@ -821,10 +974,26 @@ void systemHookConfigure() {
     const bool copyMode = _stricmp(sub.c_str(), "bounds") != 0;
 
     const GuardMode before = s->modeRequested;
-    const float pctBefore = s->percent;
+    const bool lieParamsChanged =
+        before != mode ||
+        (mode == GuardMode::Percent && fabsf(s->percent - pct) > 0.01f) ||
+        (mode == GuardMode::Symmetric && (fabsf(s->fracH - fh) > 0.001f ||
+                                          fabsf(s->fracV - fv) > 0.001f)) ||
+        gateChanged;
     s->modeRequested = mode;
     s->percent = pct;
+    s->fracH = fh;
+    s->fracV = fv;
+    memcpy(s->gateSig, gateSig, sizeof(gateSig));
+    s->gateCount = gateCount;
+    if (gateChanged) s->gateNoted = false;  // the new list earns a new verdict
     s->submitCopy = copyMode;
+
+    // A live change of anything the lie is built from cannot be mutated into
+    // a running stage -- the target-size factors and the crop snap were
+    // computed from the OLD margin. Demote and let the stages re-run; to the
+    // transport that is one ordinary resize down and, seconds later, one up.
+    if (lieParamsChanged && s->stage > 0) s->restage = true;
 
     if (s->installed && mode != GuardMode::Off && !s->receiverInstalled &&
         !s->restartNoted) {
@@ -837,15 +1006,15 @@ void systemHookConfigure() {
             "changes until the game is restarted with this setting on.",
             modeName(mode));
     }
-    if (before != mode || (mode == GuardMode::Percent &&
-                           fabsf(pctBefore - pct) > 0.01f)) {
+    if (lieParamsChanged) {
         if (s->receiverInstalled || mode == GuardMode::Off) {
             Log::get().note(
-                "cull guard config: mode %s%s (was %s). Changes take effect at "
-                "the next frame boundary.",
+                "cull guard config: mode %s%s (was %s), margins h=%.2f v=%.2f, "
+                "%u headset signature(s) gated. Changes take effect at the "
+                "next frame boundary.",
                 modeName(mode),
                 mode == GuardMode::Percent ? " (see cull_guard_percent)" : "",
-                modeName(before));
+                modeName(before), fh, fv, gateCount);
         }
     }
 }
