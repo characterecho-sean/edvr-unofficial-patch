@@ -1,7 +1,7 @@
 # EDVR — an unofficial patch for Elite Dangerous: Odyssey in VR
 
-Fixes for things that make Odyssey uncomfortable in a headset. Six fixes, two
-files, about three minutes — what each fix does is under
+Fixes for things that make Odyssey uncomfortable in a headset. Seven fixes,
+two files, about three minutes — what each fix does is under
 [What it fixes](#what-it-fixes).
 
 **Something not working?** [Open an
@@ -122,11 +122,12 @@ and does not send it, so SteamVR holds the previous frame for a moment instead.
 **The missing terrain at the edges of view.** *Off by default.* Over planets,
 Elite culls terrain against a narrower frustum than it renders, so squares of
 ground at the edges of your view are simply not drawn — black tiles popping in
-and out as you look around. EDVR tells the game your headset shows more than
-it does and hands SteamVR only the part you really see, so those tiles get
-drawn. Costs GPU time (the extra margin is really rendered; sharpness is
-unchanged). `cull_guard = symmetric` under `[fix]`, set before launching.
-**Needs the second file.**
+and out as you look around (Frontier issue
+[72609](https://issues.frontierstore.net/issue-detail/72609)). EDVR tells the
+game your headset shows a little more than it does and hands SteamVR only the
+part you really see, so those tiles get drawn. Costs GPU time — about 6% at
+the values tested on a Quest 3. **Needs the second file.** Three settings:
+[The terrain fix](#the-terrain-fix-cull-guard).
 *Details: [docs/terrain-culling.md](docs/terrain-culling.md).*
 
 **The grey haze around the on-foot screen.** On foot, the world is shown on a
@@ -261,6 +262,58 @@ Its safeguards, because they are the reason to trust it:
   then finds nothing, says so in the log, and falls back to key counting.
   `camera_index_type_offset` can be corrected by hand without waiting for a
   build.
+
+## The terrain fix (cull guard)
+
+For Frontier issue
+[72609](https://issues.frontierstore.net/issue-detail/72609) — "Culling of
+planet surface in VR too aggressive", the black squares at the edges of view
+over planets. What was measured, why the fix works from outside the game, and
+what a fix inside it would look like:
+[docs/terrain-culling.md](docs/terrain-culling.md). It is off by default
+because it costs GPU time; enabling it is three settings in `edvr.ini`, and
+it needs [the second file](#the-second-file--openvr_apidll).
+
+1. **Turn it on, then restart the game** — this is the one cull-guard
+   setting that is not live:
+
+   ```
+   [fix]
+   cull_guard = symmetric
+   ```
+
+2. **Gate it to your headset** (recommended). The `vr` log prints your
+   headset's signature — `cull guard: this headset's signature is 94x99` —
+   copy that value in:
+
+   ```
+   cull_guard_headsets = 94x99
+   ```
+
+   The guard then runs only on that headset. On a rig that swaps headsets,
+   the other one pays nothing, with no ini edits at swap time.
+
+3. **Pick the margin.** Left alone the guard covers the full shortfall —
+   guaranteed wherever the fix works at all, and the most expensive (~48%
+   more rendered pixels on a Quest 3). The values tested on a Quest 3 keep
+   the edges clean at about **6%**:
+
+   ```
+   cull_guard_fraction_h = 0.25
+   cull_guard_fraction_v = 0
+   ```
+
+   Both are live — save the file mid-flight and the guard picks them up. If
+   black squares persist on your headset, raise `_h` in steps; the log's
+   `cull guard margins` line names what each step leaves uncovered.
+
+Working, the `vr` log says `cull guard stage 1`, then two `cull guard LIVE`
+lines. `cull guard INERT` means this runtime shapes its projections in a way
+the guard refuses to edit — the game runs normally, and that log is worth
+attaching to an issue. Field-verified on Quest 3 via Virtual Desktop (where
+the missing tiles reproduced, and are gone) and Pimax via PiOpenXR; real
+SteamVR is unmeasured so far, so a log from there is a useful report either
+way.
 
 ## Settings
 
@@ -401,11 +454,17 @@ the only action it can take is to not forward a call — or to hand SteamVR the
 game's own previous frame in its place: a copy EDVR keeps of the last frame it
 forwarded, always the game's content, never EDVR's.
 
-**Two fixes do more, and each is described in full:** the resolution fix
+**Three fixes do more, and each is described in full:** the resolution fix
 (below) rewrites twelve numbers in the game's code; Explorer Cam
-([above](#explorer-cam)) reads one number from the game's memory and changes the
-headset position the game is told about. Neither does anything until you
-configure it.
+([above](#explorer-cam)) reads one number from the game's memory and changes
+the headset position the game is told about; the cull guard
+([above](#the-terrain-fix-cull-guard)) changes the field of view the game is
+told the headset shows — the game then draws the wider view itself, and EDVR
+submits only the true region, copied from the game's own frame. It edits
+answers, never memory: the runtime and anything else asking always receive
+the truth, and it validates the runtime's projection against the shape it
+expects before changing anything, standing down loudly on a mismatch. None
+of the three does anything until you configure it.
 
 **The resolution fix, off by default,** rewrites the twelve numbers that are the
 width and height the game forces for the on-foot screen, in the places it does
