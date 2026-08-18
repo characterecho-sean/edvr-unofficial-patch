@@ -166,7 +166,8 @@ REM side can, because the system d3d11.dll is already mapped and the call only
 REM bumps a refcount; openvr_api_orig.dll is mapped by nothing, so loading it
 REM there runs its DllMain under the loader lock.
 python "%ROOT%\tools\gen_exports.py" --source "%OPENVR_SRC%" ^
-    --tag openvr --out "%GEN%" --wrap VR_GetGenericInterface --lazy
+    --tag openvr --out "%GEN%" --wrap VR_GetGenericInterface --lazy ^
+    --extra-export edvr_selftest_system_hook
 if errorlevel 1 ( echo [edvr] ERROR: openvr export generation failed & exit /b 1 )
 
 REM The lazy shim MUST carry unwind info.
@@ -192,6 +193,14 @@ if not exist "%OBJ%\openvr" mkdir "%OBJ%\openvr"
 ml64.exe /nologo /c /Fo"%OBJ%\openvr\thunks.obj" "%GEN%\edvr_thunks_openvr.asm" >nul
 if errorlevel 1 ( echo [edvr] ERROR: ml64 failed for openvr & exit /b 1 )
 
+REM Hand-written, unlike the generated thunks above: the two IVRSystem_012
+REM slots that return structs by value, observed by register-preserving
+REM tail-jump thunks because no C signature can receive both calling
+REM conventions (see system_thunks.asm). No rsp movement, so the unwind-info
+REM assertion on the generated shim deliberately does not apply here.
+ml64.exe /nologo /c /Fo"%OBJ%\openvr\systhunks.obj" "%ROOT%\src\openvr\system_thunks.asm" >nul
+if errorlevel 1 ( echo [edvr] ERROR: ml64 failed for system_thunks & exit /b 1 )
+
 cl.exe %CFLAGS% /Fo"%OBJ%\openvr"\ ^
     "%ROOT%\src\common\log.cpp" "%ROOT%\src\common\config.cpp" ^
     "%ROOT%\src\common\guard.cpp" "%ROOT%\src\common\vtable_hook.cpp" ^
@@ -199,7 +208,7 @@ cl.exe %CFLAGS% /Fo"%OBJ%\openvr"\ ^
     "%ROOT%\src\common\frame_flag.cpp" ^
     "%ROOT%\src\openvr\openvr_proxy.cpp" "%ROOT%\src\openvr\compositor_hook.cpp" ^
     "%ROOT%\src\openvr\head_offset.cpp" "%ROOT%\src\openvr\resubmit_shadow.cpp" ^
-    "%ROOT%\src\d3d11\elite_binds.cpp"
+    "%ROOT%\src\openvr\system_hook.cpp" "%ROOT%\src\d3d11\elite_binds.cpp"
 if errorlevel 1 ( echo [edvr] ERROR: openvr compile failed & exit /b 1 )
 
 link.exe /nologo /DLL /MACHINE:X64 /INCREMENTAL:NO ^

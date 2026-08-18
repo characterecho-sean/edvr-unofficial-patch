@@ -19,6 +19,7 @@
 #include "../common/vtable_hook.h"
 #include "openvr_min.h"
 #include "resubmit_shadow.h"
+#include "system_hook.h"
 
 namespace edvr {
 namespace {
@@ -174,6 +175,19 @@ struct State {
     uint64_t eyeSizeStampedMs = 0;
     uint32_t eyeSizeW = 0, eyeSizeH = 0;
     uint32_t holdFramesSeen = 0;
+
+    // The per-eye Submit bounds, logged on first sight and on change.
+    //
+    // Collected for the terrain-culling investigation (72609): any overscan
+    // compensation would work by narrowing exactly these bounds, so the fix's
+    // design needs their real orientation -- which half of the double-wide
+    // texture is which eye, and whether v runs backwards -- from the field
+    // rather than from assumption. noteEyeTextureSize beside this one reads
+    // the SPAN of the bounds; this records their placement and direction,
+    // which the span deliberately discards (fabsf).
+    float   boundsLogged[2][4] = {};   // per eye: uMin vMin uMax vMax
+    uint8_t boundsState[2] = {};       // 0 never seen, 1 logged null, 2 logged values
+    uint8_t boundsLinesLeft = 12;      // a pathological per-frame toggler stays bounded
 
     // THE POSE RING. Forensics, and only forensics.
     //
@@ -578,6 +592,52 @@ void noteEyeTextureSize(State* s, vr::EVREye eye, const vr::Texture_t* texture,
                : "");
 }
 
+// Where the game says each eye lives in the submitted texture. One line per
+// eye per distinct answer, because the values are design inputs, not events:
+// a session's worth of identical bounds is one line.
+void noteSubmitBounds(State* s, vr::EVREye eye, const vr::VRTextureBounds_t* bounds) {
+    if (!s->validated || s->boundsLinesLeft == 0) return;
+    const int e = (eye == vr::Eye_Left) ? 0 : 1;
+    const char* name = e == 0 ? "left" : "right";
+
+    if (!bounds) {
+        if (s->boundsState[e] == 1) return;
+        s->boundsState[e] = 1;
+        --s->boundsLinesLeft;
+        Log::get().note("Submit bounds (%s eye): null -- the whole texture is "
+                        "this eye", name);
+        return;
+    }
+
+    float v[4] = {};
+    if (!guarded("noteSubmitBounds/read", [&] {
+            v[0] = bounds->uMin;
+            v[1] = bounds->vMin;
+            v[2] = bounds->uMax;
+            v[3] = bounds->vMax;
+        })) {
+        return;
+    }
+    if (s->boundsState[e] == 2) {
+        bool moved = false;
+        for (int i = 0; i < 4; ++i) {
+            if (fabsf(v[i] - s->boundsLogged[e][i]) > 1e-4f) { moved = true; break; }
+        }
+        if (!moved) return;
+    }
+    const bool wasLogged = s->boundsState[e] == 2;
+    s->boundsState[e] = 2;
+    memcpy(s->boundsLogged[e], v, sizeof(v));
+    --s->boundsLinesLeft;
+    Log::get().note(
+        "Submit bounds (%s eye): u %.4f..%.4f, v %.4f..%.4f%s%s%s",
+        name, v[0], v[2], v[1], v[3],
+        v[0] > v[2] ? " (u runs BACKWARDS)" : "",
+        v[1] > v[3] ? " (v runs backwards: flipped origin, and OpenVR permits "
+                      "it)" : "",
+        wasLogged ? " -- CHANGED" : "");
+}
+
 vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
                                     const vr::Texture_t* texture,
                                     const vr::VRTextureBounds_t* bounds,
@@ -627,6 +687,7 @@ vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
     // it is an observation about the texture's shape, and the half that needs
     // it is starved without it whether or not this frame is withheld.
     noteEyeTextureSize(s, eye, texture, bounds);
+    noteSubmitBounds(s, eye, bounds);
 
     // The frame the d3d11 side marked as drawn from the wrong viewpoint: do not
     // pass it on. SteamVR reprojects the previous frame, exactly as it does for
@@ -898,6 +959,12 @@ vr::EVRCompositorError hookedWaitGetPoses(void* self,
         }
     }
 
+    // The system observation's deferred reporting rides the frame boundary,
+    // like everything else here: its own hooks may be called rarely (or, for
+    // all we know yet, once at startup), so they cannot be trusted to drive
+    // their own log cadence.
+    systemHookPeriodic();
+
     return result;
 }
 
@@ -911,6 +978,15 @@ void* interceptInterface(void* iface, const char* interfaceVersion) {
 
     if (!g_state) g_state = new State();
     State& s = *g_state;
+
+    // The system interface is observed, never modified -- see system_hook.cpp
+    // (the terrain-culling investigation, frontier issue 72609). Dispatched
+    // before the compositor test because both interfaces arrive through this
+    // one wrapper.
+    if (strncmp(interfaceVersion, "IVRSystem_", 10) == 0) {
+        maybeObserveSystemInterface(iface, interfaceVersion);
+        return iface;
+    }
 
     if (strncmp(interfaceVersion, "IVRCompositor_", 14) != 0) return iface;
     if (s.compositorHook.attached()) return iface;  // already hooked
