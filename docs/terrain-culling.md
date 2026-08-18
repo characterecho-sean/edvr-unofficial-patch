@@ -156,9 +156,17 @@ keeps the edges clean). It then:
    into an EDVR-owned texture at exactly the size the session had always
    submitted.
 
-The cost is GPU load, not sharpness: symmetric mode on the Quest 3 frustum
-above renders about 48% more pixels. Percent mode exists to buy most of the
-fix for less; the tuning has not been done yet.
+The cost is GPU load, not sharpness: full symmetric mode on the Quest 3
+frustum above renders about 48% more pixels. Two knobs cut it.
+`cull_guard_fraction_h` / `_v` cover only part of each axis's shortfall —
+live-tunable, so the staircase described in `edvr.ini` finds the cheapest
+value that still keeps the edges clean, and the log's `cull guard margins`
+line names what each step leaves uncovered (halving both fractions costs
+about 23% instead). And `cull_guard_headsets` gates the whole guard to
+listed FOV signatures — the log prints each headset's, like `94x99` — so a
+rig that swaps headsets pays only on the headset its owner listed, with no
+config edits at swap time; unlisted headsets run observation only, at no
+cost.
 
 ### Why the submit side is this elaborate
 
