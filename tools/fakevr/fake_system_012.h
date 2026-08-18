@@ -44,12 +44,18 @@ constexpr uint32_t kSizeW = 1456;
 constexpr uint32_t kSizeH = 1584;
 
 // GetProjectionRaw writes tangents derived from the eye so the two eyes are
-// distinguishable: left = {-1.25, 0.75, -1.0, 1.0}, right mirrored in u.
+// distinguishable: left = {-1.25, 0.75, -1.2, 0.8}, right mirrored in u.
+// The vertical is ASYMMETRIC on purpose: the guard's v-axis direction was
+// once inverted and every symmetric-vertical fixture waved it through --
+// the crop kept the wrong end of each column and the field saw forward
+// leans stretch the image vertically. With t != b, a flipped v mapping
+// changes the expected fractions and the expected symmetrized tangents,
+// and the smoke test catches it in a build.
 inline void expectedRaw(int32_t eye, float out[4]) {
     out[0] = eye == 0 ? -1.25f : -0.75f;
     out[1] = eye == 0 ? 0.75f : 1.25f;
-    out[2] = -1.0f;
-    out[3] = 1.0f;
+    out[2] = -1.2f;
+    out[3] = 0.8f;
 }
 
 // GetProjectionMatrix is built by the SAME tangent formula the real runtime

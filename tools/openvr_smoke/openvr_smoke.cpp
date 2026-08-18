@@ -542,24 +542,24 @@ int guardChild(const char* dir) {
 
     // Stage 2 implies the size lie too: the fake's 1456x1584 recommendation
     // is answered inflated by the symmetric factors (u span 2.0 -> 2.5 =
-    // 1.25x horizontal; v span unchanged).
+    // 1.25x; v span 2.0 -> 2.4 = 1.2x).
     {
         uint32_t w = 0, h = 0;
         sys->GetRecommendedRenderTargetSize(&w, &h);
-        if (w != 1820 || h != 1584) {
+        if (w != 1820 || h != 1901) {
             printf("  FAIL  guard child: inflated target size is %ux%u, "
-                   "expected 1820x1584\n", w, h);
+                   "expected 1820x1901\n", w, h);
             ++bad;
         }
     }
 
-    // After go-live: the symmetric lie. Left eye truth is l=-1.25 r=+0.75,
-    // so both eyes report +/-1.25 horizontally; vertical was already
-    // symmetric and must be untouched.
+    // After go-live: the symmetric lie. Left eye truth is l=-1.25 r=+0.75
+    // t=-1.2 b=+0.8, so both eyes report +/-1.25 horizontally and +/-1.2
+    // vertically.
     sys->GetProjectionRaw(0, &l, &r, &t, &b);
-    if (l != -1.25f || r != 1.25f || t != -1.0f || b != 1.0f) {
+    if (l != -1.25f || r != 1.25f || t != -1.2f || b != 1.2f) {
         printf("  FAIL  guard child: left eye post-live raw is %g/%g/%g/%g, "
-               "expected -1.25/+1.25/-1/+1\n", l, r, t, b);
+               "expected -1.25/+1.25/-1.2/+1.2\n", l, r, t, b);
         ++bad;
     }
     sys->GetProjectionRaw(1, &l, &r, &t, &b);
@@ -570,7 +570,8 @@ int guardChild(const char* dir) {
     }
 
     // The matrix, rebuilt from the lied tangents: m00 = 2/2.5, m02 = 0;
-    // the vertical and the z terms (from THIS call's near/far) untouched.
+    // vertical symmetrized too, m11 = 2/2.4, m12 = 0; the z terms (from
+    // THIS call's near/far) untouched.
     got = sys->GetProjectionMatrix(0, 0.5f, 100.0f, 0);
     want = fakevr::expectedMatrix(0, 0.5f, 100.0f, 0);
     if (fabsf(got.m[0][0] - 0.8f) > 1e-5f || fabsf(got.m[0][2]) > 1e-5f) {
@@ -578,10 +579,11 @@ int guardChild(const char* dir) {
                "(m00 %g want 0.8, m02 %g want 0)\n", got.m[0][0], got.m[0][2]);
         ++bad;
     }
-    if (fabsf(got.m[1][1] - want.m[1][1]) > 1e-5f ||
-        fabsf(got.m[1][2] - want.m[1][2]) > 1e-5f) {
-        printf("  FAIL  guard child: an untouched vertical axis was edited "
-               "(m11 %g want %g)\n", got.m[1][1], want.m[1][1]);
+    if (fabsf(got.m[1][1] - 2.0f / 2.4f) > 1e-5f ||
+        fabsf(got.m[1][2]) > 1e-5f) {
+        printf("  FAIL  guard child: the vertical was not symmetrized "
+               "(m11 %g want %g, m12 %g want 0)\n", got.m[1][1], 2.0f / 2.4f,
+               got.m[1][2]);
         ++bad;
     }
     if (fabsf(got.m[2][2] - want.m[2][2]) > 1e-5f ||
@@ -592,28 +594,34 @@ int guardChild(const char* dir) {
         ++bad;
     }
 
-    // The crop fractions the submit side will use. Left eye: the outer
-    // (left) edge is unchanged so the crop starts at 0 and keeps
-    // (0.75+1.25)/2.5 = 0.8 of the width; vertical untouched keeps all.
-    // Right eye mirrored: starts at 0.2, keeps to 1.
+    // The crop fractions the submit side will use. Left eye horizontal: the
+    // outer (left) edge is unchanged so u starts at 0 and keeps
+    // (0.75+1.25)/2.5 = 0.8. Vertical: v=0 is the B edge (the positive
+    // tangent -- the direction the field inverted once), so the top
+    // fraction is (b'-b)/span = (1.2-0.8)/2.4 = 1/6 and the bottom is
+    // (b'-t)/span = 2.4/2.4 = 1: the crop keeps the LOWER five sixths.
+    // Right eye mirrored in u: 0.2..1.
     auto crop = reinterpret_cast<PFN_Crop>(
         GetProcAddress(m, "edvr_selftest_cull_guard"));
     if (!crop) {
         printf("  FAIL  guard child: edvr_selftest_cull_guard not exported\n");
         ++bad;
     } else {
+        const float vTop = 0.4f / 2.4f;
         float f[4] = {};
         if (crop(0, f) != 1u || fabsf(f[0]) > 1e-5f ||
-            fabsf(f[2] - 0.8f) > 1e-5f || fabsf(f[1]) > 1e-5f ||
+            fabsf(f[2] - 0.8f) > 1e-5f || fabsf(f[1] - vTop) > 1e-5f ||
             fabsf(f[3] - 1.0f) > 1e-5f) {
             printf("  FAIL  guard child: left eye crop fractions %g/%g/%g/%g, "
-                   "expected 0/0/0.8/1\n", f[0], f[1], f[2], f[3]);
+                   "expected 0/%g/0.8/1 -- if the second value is 0 the "
+                   "v axis has been inverted again\n",
+                   f[0], f[1], f[2], f[3], vTop);
             ++bad;
         }
         if (crop(1, f) != 1u || fabsf(f[0] - 0.2f) > 1e-5f ||
-            fabsf(f[2] - 1.0f) > 1e-5f) {
-            printf("  FAIL  guard child: right eye crop fractions %g/%g, "
-                   "expected 0.2/1\n", f[0], f[2]);
+            fabsf(f[2] - 1.0f) > 1e-5f || fabsf(f[1] - vTop) > 1e-5f) {
+            printf("  FAIL  guard child: right eye crop fractions %g/%g/%g, "
+                   "expected 0.2/%g/1\n", f[0], f[1], f[2], vTop);
             ++bad;
         }
     }

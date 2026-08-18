@@ -587,15 +587,29 @@ void emitSummary(State* s) {
 // The crop fractions of the true frustum within the lied one, per axis.
 // Shared by the submit crop and the go-live report so what is logged is
 // what is done.
+//
+// THE AXIS DIRECTIONS ARE DERIVED, NOT ASSUMED, because one of them shipped
+// wrong. From the runtime's own matrix formula (field-verified against
+// EVIDENCE 4.2 to four decimals): the u=1 edge satisfies x/-z = (1+m02)/m00
+// = r, so u runs l -> r and the horizontal fractions measure from l. The
+// v=0 edge satisfies y/-z = (1+m12)/m11 = b -- NDC y=+1, which D3D11's
+// viewport transform puts at the TOP of the target, texture row 0 -- so v
+// runs b -> t and the vertical fractions measure from B, the POSITIVE
+// tangent. The first version measured them from t; every column kept the
+// wrong end of itself, the content sat ~11 degrees off the declared
+// vertical centre, and the compositor's positional reprojection turned
+// every forward lean into a vertical stretch (field, 2026-08-18). The
+// smoke fixture's vertical is asymmetric on purpose so that inversion can
+// never come back quietly.
 bool cropFractions(const State* s, int eye, float out[4]) {
     const float* t = s->trueRaw[eye];
     const float* lie = s->lied[eye];
     const float du = lie[1] - lie[0], dv = lie[3] - lie[2];
     if (du < 1e-4f || dv < 1e-4f) return false;
-    out[0] = (t[0] - lie[0]) / du;   // left
-    out[1] = (t[2] - lie[2]) / dv;   // top
+    out[0] = (t[0] - lie[0]) / du;   // left:   u=0 is the l' edge
+    out[1] = (lie[3] - t[3]) / dv;   // top:    v=0 is the b' edge
     out[2] = (t[1] - lie[0]) / du;   // right
-    out[3] = (t[3] - lie[2]) / dv;   // bottom
+    out[3] = (lie[3] - t[2]) / dv;   // bottom
     return true;
 }
 
