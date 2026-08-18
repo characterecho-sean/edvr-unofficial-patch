@@ -358,7 +358,7 @@ int guardCropChecks() {
     // block id 16+2 = 18.
     const float fr[4] = {0.25f, 0.5f, 0.75f, 1.0f};
     vr::VRTextureBounds_t ob{};
-    void* out = edvr::guardCropCopy(0, src, nullptr, fr, &ob);
+    void* out = edvr::guardCropCopy(0, src, nullptr, fr, 0, 0, &ob);
     if (!out) {
         printf("  FAIL  guardCropCopy refused a plain crop\n");
         ++bad;
@@ -383,9 +383,39 @@ int guardCropChecks() {
         }
         // Same shape again: the cached texture is reused, not recreated.
         vr::VRTextureBounds_t ob2{};
-        void* out2 = edvr::guardCropCopy(0, src, nullptr, fr, &ob2);
+        void* out2 = edvr::guardCropCopy(0, src, nullptr, fr, 0, 0, &ob2);
         if (out2 != out) {
             printf("  FAIL  an unchanged crop shape was not reused\n");
+            ++bad;
+        }
+    }
+
+    // The snap: the same fractions asked to land on 30x30 nudge the box a
+    // pixel inward per side and stay in the same source block; asked to
+    // land on 128x128 -- further than the 64px slack -- they refuse, which
+    // is the not-the-adopted-target case.
+    {
+        vr::VRTextureBounds_t obs{};
+        void* outs = edvr::guardCropCopy(0, src, nullptr, fr, 30, 30, &obs);
+        if (!outs) {
+            printf("  FAIL  the snap refused a 2px nudge\n");
+            ++bad;
+        } else {
+            D3D11_TEXTURE2D_DESC od{};
+            static_cast<ID3D11Texture2D*>(outs)->GetDesc(&od);
+            uint8_t v = 0;
+            if (od.Width != 30 || od.Height != 30) {
+                printf("  FAIL  snapped crop is %ux%u, expected 30x30\n",
+                       od.Width, od.Height);
+                ++bad;
+            } else if (!pixelAt(outs, 30, 30, &v) || v != 18) {
+                printf("  FAIL  snapped crop origin holds block %u, expected "
+                       "18\n", v);
+                ++bad;
+            }
+        }
+        if (edvr::guardCropCopy(0, src, nullptr, fr, 128, 128, &obs) != nullptr) {
+            printf("  FAIL  a snap far beyond the slack was not refused\n");
             ++bad;
         }
     }
@@ -397,7 +427,7 @@ int guardCropChecks() {
     {
         vr::VRTextureBounds_t flipped = {0.0f, 1.0f, 1.0f, 0.0f};
         vr::VRTextureBounds_t obf{};
-        void* outf = edvr::guardCropCopy(1, src, &flipped, fr, &obf);
+        void* outf = edvr::guardCropCopy(1, src, &flipped, fr, 0, 0, &obf);
         if (!outf) {
             printf("  FAIL  guardCropCopy refused a flipped-v crop\n");
             ++bad;
@@ -421,7 +451,7 @@ int guardCropChecks() {
     {
         const float fr2[4] = {0.25f, 0.5f, 0.5f, 1.0f};
         vr::VRTextureBounds_t ob3{};
-        void* out3 = edvr::guardCropCopy(0, src, nullptr, fr2, &ob3);
+        void* out3 = edvr::guardCropCopy(0, src, nullptr, fr2, 0, 0, &ob3);
         if (!out3) {
             printf("  FAIL  guardCropCopy refused the reshaped crop\n");
             ++bad;
@@ -502,9 +532,26 @@ int guardChild(const char* dir) {
 
     // No compositor exists here, so no frame boundary ever fires; the
     // two-second fallback in periodic() is the promoter, and periodic runs
-    // at the tail of the observed calls themselves.
+    // at the tail of the observed calls themselves. TWO warmup calls: the
+    // first advances to stage 1 (size lie), the next to stage 2 (the
+    // projection lie) -- each stage flip happens after the call's own
+    // values were already answered.
     Sleep(2300);
-    sys->GetProjectionRaw(0, &l, &r, &t, &b);  // promotion happens after this call
+    sys->GetProjectionRaw(0, &l, &r, &t, &b);  // -> stage 1 after this call
+    sys->GetProjectionRaw(0, &l, &r, &t, &b);  // -> stage 2 after this call
+
+    // Stage 2 implies the size lie too: the fake's 1456x1584 recommendation
+    // is answered inflated by the symmetric factors (u span 2.0 -> 2.5 =
+    // 1.25x horizontal; v span unchanged).
+    {
+        uint32_t w = 0, h = 0;
+        sys->GetRecommendedRenderTargetSize(&w, &h);
+        if (w != 1820 || h != 1584) {
+            printf("  FAIL  guard child: inflated target size is %ux%u, "
+                   "expected 1820x1584\n", w, h);
+            ++bad;
+        }
+    }
 
     // After go-live: the symmetric lie. Left eye truth is l=-1.25 r=+0.75,
     // so both eyes report +/-1.25 horizontally; vertical was already

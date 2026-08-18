@@ -66,6 +66,23 @@ bool systemHookCropBounds(vr::EVREye eye, const vr::VRTextureBounds_t* in,
 // boundary -- one mismatched frame at worst, instead of a session of them.
 void systemHookGuardStandDown(const char* why);
 
+// The size-adoption handshake for the guard's two-stage go-live. While the
+// guard is in stage 1 (render targets asked bigger, projections still true)
+// the compositor probes each submitted texture's size and reports it here;
+// stage 2 -- the actual lie and crop -- waits until both eyes' submissions
+// arrive at the inflated size, so the CROPPED submission always lands at
+// exactly the size the session already established. Both field failures
+// (ignored bounds, then the parallelogram) were the transport mishandling a
+// submission shape it had not served before; this guarantees it never sees
+// one.
+bool systemHookSizeProbeWanted();
+void systemHookNoteSubmittedSize(vr::EVREye eye, uint32_t w, uint32_t h);
+
+// The exact pixel size the crop must land on for this eye (the canonical
+// submission size frozen when stage 2 engaged), or false when no snap is
+// required (boundary-less test processes).
+bool systemHookCropTarget(vr::EVREye eye, uint32_t* w, uint32_t* h);
+
 void shutdownSystemHook();
 
 }  // namespace edvr

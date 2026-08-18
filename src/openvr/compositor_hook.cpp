@@ -695,6 +695,34 @@ vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
     noteEyeTextureSize(s, eye, texture, bounds);
     noteSubmitBounds(s, eye, bounds);
 
+    // The guard's stage-1 adoption probe: while the game is being asked for
+    // bigger render targets, report every submission's size so stage 2 can
+    // wait for both eyes to arrive at the new one. Per-submit GetDesc, but
+    // only during the transition -- stage 1 lasts seconds, and outside it
+    // this is one flag test.
+    if (systemHookSizeProbeWanted() && texture &&
+        texture->eType == vr::TextureType_DirectX && texture->handle) {
+        D3D11_TEXTURE2D_DESC pd{};
+        bool ok = false;
+        guarded("vr: size probe", [&] {
+            static_cast<ID3D11Texture2D*>(texture->handle)->GetDesc(&pd);
+            ok = true;
+        });
+        if (ok && pd.Width && pd.Height) {
+            float uSpan = 1.0f, vSpan = 1.0f;
+            if (bounds) {
+                const float u = fabsf(bounds->uMax - bounds->uMin);
+                const float v = fabsf(bounds->vMax - bounds->vMin);
+                if (u > 0.01f && u <= 1.0f) uSpan = u;
+                if (v > 0.01f && v <= 1.0f) vSpan = v;
+            }
+            systemHookNoteSubmittedSize(
+                eye,
+                static_cast<uint32_t>(pd.Width * uSpan + 0.5f),
+                static_cast<uint32_t>(pd.Height * vSpan + 0.5f));
+        }
+    }
+
     // The cull guard's submit-side half: when the projection lie is live,
     // the compositor must be handed exactly the region holding the TRUE
     // frustum out of the wider-rendered image. Two mechanisms (see
@@ -729,8 +757,11 @@ vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
                                      "textures, which the copy path needs");
             return;
         }
+        uint32_t snapW = 0, snapH = 0;
+        systemHookCropTarget(eye, &snapW, &snapH);
         void* out = guardCropCopy(eye == vr::Eye_Left ? 0u : 1u, tex->handle,
-                                  bounds, guardFractions, storage);
+                                  bounds, guardFractions, snapW, snapH,
+                                  storage);
         if (!out) {
             systemHookGuardStandDown("the crop copy refused (its own log line "
                                      "above says why)");

@@ -53,7 +53,8 @@ bool budgetSpent() {
 
 void* guardCropCopy(uint32_t eye, void* srcHandle,
                     const vr::VRTextureBounds_t* srcBounds,
-                    const float fractions[4], vr::VRTextureBounds_t* outBounds) {
+                    const float fractions[4], uint32_t snapW, uint32_t snapH,
+                    vr::VRTextureBounds_t* outBounds) {
     State& s = g_s;
     if (eye > 1 || !srcHandle || !fractions || !outBounds) return nullptr;
     if (budgetSpent()) return nullptr;
@@ -99,11 +100,34 @@ void* guardCropCopy(uint32_t eye, void* srcHandle,
         if (v > static_cast<long>(extent)) v = static_cast<long>(extent);
         return v;
     };
-    const long x0 = toPixel(cu0 < cu1 ? cu0 : cu1, sd.Width);
-    const long x1 = toPixel(cu0 < cu1 ? cu1 : cu0, sd.Width);
-    const long y0 = toPixel(cv0 < cv1 ? cv0 : cv1, sd.Height);
-    const long y1 = toPixel(cv0 < cv1 ? cv1 : cv0, sd.Height);
+    long x0 = toPixel(cu0 < cu1 ? cu0 : cu1, sd.Width);
+    long x1 = toPixel(cu0 < cu1 ? cu1 : cu0, sd.Width);
+    long y0 = toPixel(cv0 < cv1 ? cv0 : cv1, sd.Height);
+    long y1 = toPixel(cv0 < cv1 ? cv1 : cv0, sd.Height);
     if (x1 - x0 < 16 || y1 - y0 < 16) return nullptr;  // not a usable eye image
+
+    // The snap: land on the canonical size exactly, by nudging the fraction
+    // box inside the guard's own margin. A large disagreement means the
+    // source is not the adopted-size target this stage was promised --
+    // refuse rather than submit a shape the transport has never served,
+    // which is the failure class this whole mechanism exists to end.
+    auto snapAxis = [](long& a0, long& a1, uint32_t want, uint32_t extent) {
+        if (!want) return true;
+        const long excess = (a1 - a0) - static_cast<long>(want);
+        if (excess > 64 || excess < -64) return false;
+        a0 += excess / 2;
+        a1 = a0 + static_cast<long>(want);
+        if (a0 < 0) { a0 = 0; a1 = static_cast<long>(want); }
+        if (a1 > static_cast<long>(extent)) {
+            a1 = static_cast<long>(extent);
+            a0 = a1 - static_cast<long>(want);
+        }
+        return a0 >= 0;
+    };
+    if (!snapAxis(x0, x1, snapW, sd.Width) ||
+        !snapAxis(y0, y1, snapH, sd.Height)) {
+        return nullptr;
+    }
 
     const uint32_t cw = static_cast<uint32_t>(x1 - x0);
     const uint32_t ch = static_cast<uint32_t>(y1 - y0);
