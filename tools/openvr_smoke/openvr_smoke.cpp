@@ -32,6 +32,7 @@
 #include "../../src/common/frame_flag.h"
 #include "../../src/common/hotkey.h"
 #include "../../src/common/guard.h"
+#include "../../src/openvr/guard_crop.h"
 #include "../../src/openvr/resubmit_shadow.h"
 #include "../../src/d3d11/elite_binds.h"
 #include "../fakevr/fake_system_012.h"
@@ -271,6 +272,178 @@ int systemHookChecks(const char* dir) {
 
     if (bad == 0)
         printf("  ok    IVRSystem_012 observation forwards every call untouched\n");
+    return bad;
+}
+
+// The cull guard's copy mechanism, against a real device (WARP, like the
+// resubmit checks): region selection, flip preservation, cache reuse and
+// shape-change rebuild. The property under test is CONTENT -- the copy must
+// hold exactly the composed crop region -- because the field failure this
+// mechanism replaces was a region-interpretation bug in somebody else's
+// layer, and the fix must not trade it for one of ours.
+int guardCropChecks() {
+    int bad = 0;
+
+    ID3D11Device* dev = nullptr;
+    ID3D11DeviceContext* ctx = nullptr;
+    if (FAILED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0,
+                                 nullptr, 0, D3D11_SDK_VERSION, &dev, nullptr,
+                                 &ctx)) ||
+        !dev || !ctx) {
+        printf("  FAIL  could not create a WARP device for the crop checks\n");
+        return 1;
+    }
+
+    // 64x64, every 16px block stamped with its block id: pixel(x,y) =
+    // (x/16)*16 + y/16 in every channel, so any misplaced region shows as
+    // the wrong id at the copy's origin.
+    constexpr uint32_t kSide = 64;
+    std::vector<uint8_t> bytes(kSide * kSide * 4);
+    for (uint32_t y = 0; y < kSide; ++y) {
+        for (uint32_t x = 0; x < kSide; ++x) {
+            const uint8_t v = static_cast<uint8_t>((x / 16) * 16 + y / 16);
+            uint8_t* p = &bytes[(y * kSide + x) * 4];
+            p[0] = p[1] = p[2] = v;
+            p[3] = 0xFF;
+        }
+    }
+    D3D11_TEXTURE2D_DESC d{};
+    d.Width = kSide;
+    d.Height = kSide;
+    d.MipLevels = 1;
+    d.ArraySize = 1;
+    d.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    d.SampleDesc.Count = 1;
+    d.Usage = D3D11_USAGE_DEFAULT;
+    d.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    D3D11_SUBRESOURCE_DATA init{};
+    init.pSysMem = bytes.data();
+    init.SysMemPitch = kSide * 4;
+    ID3D11Texture2D* src = nullptr;
+    dev->CreateTexture2D(&d, &init, &src);
+    if (!src) {
+        printf("  FAIL  could not create the crop check's source texture\n");
+        ctx->Release();
+        dev->Release();
+        return 1;
+    }
+
+    auto pixelAt = [&](void* tex, uint32_t w, uint32_t h, uint8_t* out) {
+        D3D11_TEXTURE2D_DESC sdc{};
+        sdc.Width = w;
+        sdc.Height = h;
+        sdc.MipLevels = 1;
+        sdc.ArraySize = 1;
+        sdc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        sdc.SampleDesc.Count = 1;
+        sdc.Usage = D3D11_USAGE_STAGING;
+        sdc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        ID3D11Texture2D* staging = nullptr;
+        if (FAILED(dev->CreateTexture2D(&sdc, nullptr, &staging)) || !staging)
+            return false;
+        ctx->CopyResource(staging, static_cast<ID3D11Texture2D*>(tex));
+        D3D11_MAPPED_SUBRESOURCE map{};
+        bool ok = false;
+        if (SUCCEEDED(ctx->Map(staging, 0, D3D11_MAP_READ, 0, &map))) {
+            *out = static_cast<const uint8_t*>(map.pData)[0];
+            ctx->Unmap(staging, 0);
+            ok = true;
+        }
+        staging->Release();
+        return ok;
+    };
+
+    // Null bounds, fractions {0.25, 0.5, 0.75, 1.0}: pixel box x 16..48,
+    // y 32..64, so a 32x32 copy whose origin pixel is source(16,32) =
+    // block id 16+2 = 18.
+    const float fr[4] = {0.25f, 0.5f, 0.75f, 1.0f};
+    vr::VRTextureBounds_t ob{};
+    void* out = edvr::guardCropCopy(0, src, nullptr, fr, &ob);
+    if (!out) {
+        printf("  FAIL  guardCropCopy refused a plain crop\n");
+        ++bad;
+    } else {
+        D3D11_TEXTURE2D_DESC od{};
+        static_cast<ID3D11Texture2D*>(out)->GetDesc(&od);
+        if (od.Width != 32 || od.Height != 32) {
+            printf("  FAIL  crop copy is %ux%u, expected 32x32\n", od.Width,
+                   od.Height);
+            ++bad;
+        }
+        uint8_t v = 0;
+        if (!pixelAt(out, 32, 32, &v) || v != 18) {
+            printf("  FAIL  crop origin holds block %u, expected 18 -- the "
+                   "region landed in the wrong place\n", v);
+            ++bad;
+        }
+        if (ob.uMin != 0.0f || ob.uMax != 1.0f || ob.vMin != 0.0f ||
+            ob.vMax != 1.0f) {
+            printf("  FAIL  unflipped source produced flipped-out bounds\n");
+            ++bad;
+        }
+        // Same shape again: the cached texture is reused, not recreated.
+        vr::VRTextureBounds_t ob2{};
+        void* out2 = edvr::guardCropCopy(0, src, nullptr, fr, &ob2);
+        if (out2 != out) {
+            printf("  FAIL  an unchanged crop shape was not reused\n");
+            ++bad;
+        }
+    }
+
+    // Flipped v in the game's bounds: composed span runs 1->0, so the same
+    // fractions select from the OTHER end of v (top fraction 0.5 measured
+    // from v=1 downwards -> pixel y 0..32), and the out bounds must stay
+    // flipped. Origin pixel = source(16,0) = block 16.
+    {
+        vr::VRTextureBounds_t flipped = {0.0f, 1.0f, 1.0f, 0.0f};
+        vr::VRTextureBounds_t obf{};
+        void* outf = edvr::guardCropCopy(1, src, &flipped, fr, &obf);
+        if (!outf) {
+            printf("  FAIL  guardCropCopy refused a flipped-v crop\n");
+            ++bad;
+        } else {
+            uint8_t v = 0;
+            if (!pixelAt(outf, 32, 32, &v) || v != 16) {
+                printf("  FAIL  flipped crop origin holds block %u, expected "
+                       "16 -- the flip was not composed\n", v);
+                ++bad;
+            }
+            if (obf.vMin != 1.0f || obf.vMax != 0.0f) {
+                printf("  FAIL  a flipped submission lost its flip "
+                       "(v %g..%g)\n", obf.vMin, obf.vMax);
+                ++bad;
+            }
+        }
+    }
+
+    // A shape change rebuilds rather than reuses: half-width fractions give
+    // a 16-wide copy on eye 0.
+    {
+        const float fr2[4] = {0.25f, 0.5f, 0.5f, 1.0f};
+        vr::VRTextureBounds_t ob3{};
+        void* out3 = edvr::guardCropCopy(0, src, nullptr, fr2, &ob3);
+        if (!out3) {
+            printf("  FAIL  guardCropCopy refused the reshaped crop\n");
+            ++bad;
+        } else {
+            D3D11_TEXTURE2D_DESC od{};
+            static_cast<ID3D11Texture2D*>(out3)->GetDesc(&od);
+            if (od.Width != 16 || od.Height != 32) {
+                printf("  FAIL  reshaped crop is %ux%u, expected 16x32\n",
+                       od.Width, od.Height);
+                ++bad;
+            }
+        }
+    }
+
+    edvr::guardCropShutdown();
+    src->Release();
+    ctx->Release();
+    dev->Release();
+
+    if (bad == 0)
+        printf("  ok    the crop copy takes the right region, keeps flips, "
+               "and rebuilds on shape changes\n");
     return bad;
 }
 
@@ -1591,6 +1764,10 @@ int main(int argc, char** argv) {
         return 1;
     }
     if (resubmitChecks() != 0) {
+        printf("\nOPENVR SMOKE FAILED\n");
+        return 1;
+    }
+    if (guardCropChecks() != 0) {
         printf("\nOPENVR SMOKE FAILED\n");
         return 1;
     }

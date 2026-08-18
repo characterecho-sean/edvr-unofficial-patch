@@ -12,6 +12,7 @@
 #include "../common/log.h"
 #include "../common/timing.h"
 #include "../common/vtable_hook.h"
+#include "guard_crop.h"
 #include "openvr_min.h"
 
 // ---------------------------------------------------------------------------
@@ -142,6 +143,7 @@ struct State {
     // an opt-in experiment.
     GuardMode modeRequested = GuardMode::Off;
     float     percent = 8.0f;
+    bool      submitCopy = true;          // copy mechanism vs narrowed bounds
     bool      receiverInstalled = false;  // slot 1 = member receiver, not asm
     bool      restartNoted = false;       // "enable needs a restart", said once
     bool      guardInert = false;         // formula or shape failed; truth only
@@ -591,13 +593,15 @@ void promoteOrDemote(State* s) {
                 "cull guard LIVE (%s): %s eye true l=%+.4f r=%+.4f t=%+.4f "
                 "b=%+.4f -> reported l=%+.4f r=%+.4f t=%+.4f b=%+.4f (FOV "
                 "%.1fx%.1f -> %.1fx%.1f deg); submit keeps u %.3f..%.3f, "
-                "v %.3f..%.3f of the rendered image.",
+                "v %.3f..%.3f of the rendered image, by %s.",
                 modeName(s->modeRequested), eyeName(eye), t[0], t[1], t[2], t[3],
                 lie[0], lie[1], lie[2], lie[3],
                 degrees(t[0]) + degrees(t[1]), degrees(t[2]) + degrees(t[3]),
                 degrees(lie[0]) + degrees(lie[1]),
                 degrees(lie[2]) + degrees(lie[3]),
-                f[0], f[2], f[1], f[3]);
+                f[0], f[2], f[1], f[3],
+                s->submitCopy ? "copying that region into an EDVR texture"
+                              : "narrowing the submitted bounds");
         }
     }
 }
@@ -669,10 +673,18 @@ void systemHookConfigure() {
     if (!std::isfinite(pct) || pct < 0.0f) pct = 0.0f;
     if (pct > 50.0f) pct = 50.0f;
 
+    // "copy" unless the ini says bounds. Copy is the default because the
+    // bounds mechanism was refuted in the field the day it flew: correct by
+    // the OpenVR contract, ignored by OpenComposite over VDXR, experienced
+    // as the world distorting with every head turn. See guard_crop.h.
+    const std::string sub = cfg.getString("advanced.cull_guard_submit", "copy");
+    const bool copyMode = _stricmp(sub.c_str(), "bounds") != 0;
+
     const GuardMode before = s->modeRequested;
     const float pctBefore = s->percent;
     s->modeRequested = mode;
     s->percent = pct;
+    s->submitCopy = copyMode;
 
     if (s->installed && mode != GuardMode::Off && !s->receiverInstalled &&
         !s->restartNoted) {
@@ -696,6 +708,30 @@ void systemHookConfigure() {
                 modeName(before));
         }
     }
+}
+
+bool systemHookCropFractions(vr::EVREye eye, float out[4]) {
+    State* s = g_state;
+    if (!s || !out) return false;
+    const int e = (eye == vr::Eye_Left) ? 0 : 1;
+    if (!lieActiveFor(s, e)) return false;
+    return cropFractions(s, e, out);
+}
+
+bool systemHookSubmitCopyMode() {
+    State* s = g_state;
+    return s ? s->submitCopy : true;
+}
+
+void systemHookGuardStandDown(const char* why) {
+    State* s = g_state;
+    if (!s || s->guardInert) return;
+    s->guardInert = true;
+    Log::get().note(
+        "cull guard STANDING DOWN: %s. The lie ends at the next frame "
+        "boundary and the game sees true projections for the rest of the "
+        "session. Please report this log.",
+        why ? why : "a submit-side failure");
 }
 
 bool systemHookCropBounds(vr::EVREye eye, const vr::VRTextureBounds_t* in,
@@ -854,14 +890,16 @@ void shutdownSystemHook() {
     if (s->installed) {
         Log::get().note(
             "IVRSystem totals: size %u, projMatrix %u, projRaw %u, eyeToHead "
-            "%u calls%s; cull guard cropped %u eye-submits%s.",
+            "%u calls%s; cull guard cropped %u eye-submits by copy, %u by "
+            "narrowed bounds%s.",
             edvr_sysCounts[kSlotSize], edvr_sysCounts[kSlotMatrix],
             edvr_sysCounts[kSlotRaw], edvr_sysCounts[kSlotEyeToHead],
             s->inert ? " (observation went inert; counts kept running)" : "",
-            s->cropsApplied,
+            guardCropCopies(), s->cropsApplied,
             s->guardInert ? " (guard went INERT -- see the line above where)"
                           : "");
     }
+    guardCropShutdown();
     s->hook.uninstall();
     if (s->sentinel) s->sentinel->confirm();
 }

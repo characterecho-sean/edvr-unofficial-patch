@@ -38,16 +38,33 @@ void systemHookFrameBoundary();
 // calls themselves. Cheap when nothing changed.
 void systemHookPeriodic();
 
-// The submit-side half of the guard. When the lie is live for this eye,
-// writes the bounds the compositor should sample -- the caller's bounds (or
-// the whole texture, when null) narrowed to the region holding the TRUE
-// frustum -- into *out and returns true. Returns false when the guard is
-// off, not yet live, or inert; the caller then uses the original bounds
-// untouched. The observation notes in hookedSubmit must keep seeing the
-// ORIGINAL bounds either way: the d3d11 half matches eye textures by the
-// size those notes publish, and the render target has not changed size.
+// The submit-side half of the guard, in three pieces the compositor hook
+// composes. The observation notes in hookedSubmit must keep seeing the
+// ORIGINAL texture and bounds throughout: the d3d11 half matches eye
+// textures by the size those notes publish, and the game's render target
+// has not changed size.
+//
+// True when the lie is live for this eye, with out[4] = the crop fractions
+// {left, top, right, bottom} of the true frustum within the reported one.
+bool systemHookCropFractions(vr::EVREye eye, float out[4]);
+
+// True when the guard should crop by COPYING the region into an EDVR-owned
+// texture (guard_crop.h) -- the default, after narrowed bounds were ignored
+// by OpenComposite in the field (2026-08-18, hall of mirrors). False =
+// advanced.cull_guard_submit is "bounds": narrow the submitted bounds
+// instead, kept for runtimes whose bounds handling is known good.
+bool systemHookSubmitCopyMode();
+
+// Bounds mode's implementation: the caller's bounds (or the whole texture,
+// when null) narrowed to the region holding the TRUE frustum. Returns false
+// when the guard is not live; the caller then submits untouched.
 bool systemHookCropBounds(vr::EVREye eye, const vr::VRTextureBounds_t* in,
                           vr::VRTextureBounds_t* out);
+
+// The compositor hook's lever for a submit-side failure (the crop copy
+// refused): the guard goes inert LOUDLY and the lie ends at the next frame
+// boundary -- one mismatched frame at worst, instead of a session of them.
+void systemHookGuardStandDown(const char* why);
 
 void shutdownSystemHook();
 
