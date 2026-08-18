@@ -34,6 +34,7 @@
 #include "../../src/common/guard.h"
 #include "../../src/openvr/resubmit_shadow.h"
 #include "../../src/d3d11/elite_binds.h"
+#include "../fakevr/fake_system_012.h"
 
 namespace {
 
@@ -89,6 +90,188 @@ int faultChild(const char* dir) {
     // DllMain faulted. Not returning at all -- the process being killed -- is
     // the failure, and shows up as an exit code that is neither 0 nor 6.
     return v == 0 ? 0 : 6;
+}
+
+// The IVRSystem_012 observation hook, end to end, through the built proxy.
+//
+// The one real hazard in that hook is the calling-convention split on
+// struct-returning methods (EVIDENCE 6bo): the member and free conventions
+// disagree about where the hidden return pointer rides, a C receiver of
+// either shape corrupts a caller of the other, and the corruption is quiet --
+// values still round-trip while the object under them dies. So the two
+// struct-returning slots are observed by register-preserving asm thunks, and
+// THIS test is what holds that line: fakevr's stand-in is implemented with
+// ordinary C++ virtuals, every call below is a genuine member-convention call
+// site, and every argument and returned byte is asserted to cross the hook
+// unchanged. A convention regression in the thunks fails here, in a build,
+// instead of as a vanished headset mid-flight.
+//
+// Counts are asserted through the edvr_selftest_system_hook export, which
+// also proves the asm thunks actually fired rather than the calls having
+// slipped past an uninstalled hook.
+int systemHookChecks(const char* dir) {
+    int bad = 0;
+
+    // A crashed previous run leaves the sentinel armed, and the hook would
+    // rightly refuse this session -- in the game. A test must exercise the
+    // install every run, so start clean.
+    wchar_t armed[MAX_PATH];
+    _snwprintf_s(armed, _TRUNCATE, L"%hs\\edvr_logs\\system_hook.armed", dir);
+    DeleteFileW(armed);
+
+    typedef void*(__cdecl* PFN_GetGenericInterface)(const char*, int*);
+    typedef unsigned int(*PFN_Selftest)(void);
+    typedef void*(*PFN_FakePtr)(void);
+
+    auto getIface = reinterpret_cast<PFN_GetGenericInterface>(
+        GetProcAddress(g_loaded, "VR_GetGenericInterface"));
+    if (!getIface) {
+        printf("  FAIL  the proxy does not export VR_GetGenericInterface\n");
+        return 1;
+    }
+
+    int err = -1;
+    void* iface = getIface("IVRSystem_012", &err);
+    if (!iface) {
+        printf("  FAIL  IVRSystem_012 came back null through the proxy\n");
+        return 1;
+    }
+
+    HMODULE fake = GetModuleHandleW(L"openvr_api_orig.dll");
+    auto fakePtr = fake ? reinterpret_cast<PFN_FakePtr>(
+                              GetProcAddress(fake, "VR_FakeSystemPtr"))
+                        : nullptr;
+    if (!fakePtr) {
+        printf("  FAIL  the stand-in does not export VR_FakeSystemPtr\n");
+        return 1;
+    }
+    if (fakePtr() != iface) {
+        printf("  FAIL  the proxy returned %p for an interface at %p -- "
+               "in-place hooking must hand back the same object\n",
+               iface, fakePtr());
+        ++bad;
+    }
+
+    auto* sys = static_cast<fakevr::ISystem012*>(iface);
+
+    // Slot 0, the C thunk with out-pointers.
+    uint32_t w = 0, h = 0;
+    sys->GetRecommendedRenderTargetSize(&w, &h);
+    if (w != fakevr::kSizeW || h != fakevr::kSizeH) {
+        printf("  FAIL  GetRecommendedRenderTargetSize returned %ux%u through "
+               "the hook, expected %ux%u\n", w, h, fakevr::kSizeW, fakevr::kSizeH);
+        ++bad;
+    }
+
+    // Slot 2, the C thunk whose values the investigation lives on.
+    for (int32_t eye = 0; eye < 2; ++eye) {
+        float l = 0, r = 0, t = 0, b = 0, e[4];
+        sys->GetProjectionRaw(eye, &l, &r, &t, &b);
+        fakevr::expectedRaw(eye, e);
+        if (l != e[0] || r != e[1] || t != e[2] || b != e[3]) {
+            printf("  FAIL  GetProjectionRaw(eye %d) tangents %g/%g/%g/%g "
+                   "through the hook, expected %g/%g/%g/%g\n",
+                   eye, l, r, t, b, e[0], e[1], e[2], e[3]);
+            ++bad;
+        }
+    }
+
+    // Slots 1 and 4, the struct returns through the asm thunks. Distinct
+    // arguments per call so the stack positions get exercised too.
+    for (int pass = 0; pass < 2; ++pass) {
+        for (int32_t eye = 0; eye < 2; ++eye) {
+            const float nearZ = 0.1f + static_cast<float>(pass);
+            const float farZ = 1000.0f + static_cast<float>(eye) * 500.0f +
+                               static_cast<float>(pass);
+            const int32_t projType = pass;
+            fakevr::M44 got = sys->GetProjectionMatrix(eye, nearZ, farZ, projType);
+            fakevr::M44 want = fakevr::expectedMatrix(eye, nearZ, farZ, projType);
+            if (memcmp(&got, &want, sizeof(got)) != 0) {
+                printf("  FAIL  GetProjectionMatrix(eye %d, %g, %g, %d) came "
+                       "back altered through the asm thunk (m00 %g want %g, "
+                       "m13 %g want %g, m20 %g want %g, m21 %g want %g)\n",
+                       eye, nearZ, farZ, projType, got.m[0][0], want.m[0][0],
+                       got.m[1][3], want.m[1][3], got.m[2][0], want.m[2][0],
+                       got.m[2][1], want.m[2][1]);
+                ++bad;
+            }
+            fakevr::M34 gotE = sys->GetEyeToHeadTransform(eye);
+            fakevr::M34 wantE = fakevr::expectedEyeToHead(eye);
+            if (memcmp(&gotE, &wantE, sizeof(gotE)) != 0) {
+                printf("  FAIL  GetEyeToHeadTransform(eye %d) came back altered "
+                       "through the asm thunk (x %g want %g)\n",
+                       eye, gotE.m[0][3], wantE.m[0][3]);
+                ++bad;
+            }
+        }
+    }
+
+    // A SECOND object of the same class. In-place patching hooks the class,
+    // so these calls reach the same thunks with a self the hook was not
+    // installed for -- and must forward untouched all the same.
+    auto secondPtr = fake ? reinterpret_cast<PFN_FakePtr>(
+                                GetProcAddress(fake, "VR_FakeSecondSystemPtr"))
+                          : nullptr;
+    if (!secondPtr) {
+        printf("  FAIL  the stand-in does not export VR_FakeSecondSystemPtr\n");
+        ++bad;
+    } else {
+        auto* sys2 = static_cast<fakevr::ISystem012*>(secondPtr());
+        fakevr::M44 got = sys2->GetProjectionMatrix(1, 0.5f, 750.0f, 1);
+        fakevr::M44 want = fakevr::expectedMatrix(1, 0.5f, 750.0f, 1);
+        if (memcmp(&got, &want, sizeof(got)) != 0) {
+            printf("  FAIL  a second object of the hooked class did not get a "
+                   "clean forward (m00 %g want %g)\n", got.m[0][0], want.m[0][0]);
+            ++bad;
+        }
+        float l = 0, r = 0, t = 0, b = 0, e[4];
+        sys2->GetProjectionRaw(0, &l, &r, &t, &b);
+        fakevr::expectedRaw(0, e);
+        if (l != e[0] || r != e[1]) {
+            printf("  FAIL  a second object's GetProjectionRaw was disturbed "
+                   "(%g/%g want %g/%g)\n", l, r, e[0], e[1]);
+            ++bad;
+        }
+    }
+
+    // The hook's own account of itself: installed, validated by the tangent
+    // values above, not inert -- and the exact call counts, which is what
+    // proves the thunks fired.
+    auto selftest = reinterpret_cast<PFN_Selftest>(
+        GetProcAddress(g_loaded, "edvr_selftest_system_hook"));
+    if (!selftest) {
+        printf("  FAIL  edvr_selftest_system_hook is not exported\n");
+        ++bad;
+    } else {
+        const unsigned int v = selftest();
+        if ((v & 1u) == 0) {
+            printf("  FAIL  the observation hook reports not installed (0x%08X)\n", v);
+            ++bad;
+        }
+        if ((v & 2u) == 0) {
+            printf("  FAIL  the observation hook never validated the tangents "
+                   "it was fed (0x%08X)\n", v);
+            ++bad;
+        }
+        if ((v & 4u) != 0) {
+            printf("  FAIL  the observation hook went inert on sane values "
+                   "(0x%08X)\n", v);
+            ++bad;
+        }
+        const unsigned int matrixCalls = (v >> 8) & 0xFF;
+        const unsigned int eyeCalls = (v >> 16) & 0xFF;
+        const unsigned int rawCalls = (v >> 24) & 0xFF;
+        if (matrixCalls != 5 || eyeCalls != 4 || rawCalls != 3) {
+            printf("  FAIL  thunk call counts matrix=%u eyeToHead=%u raw=%u, "
+                   "expected 5/4/3 -- a call bypassed or double-counted\n",
+                   matrixCalls, eyeCalls, rawCalls);
+            ++bad;
+        }
+    }
+
+    if (bad == 0)
+        printf("  ok    IVRSystem_012 observation forwards every call untouched\n");
+    return bad;
 }
 
 // The crash sentinel's lifecycle, which is shared code with none of its own.
@@ -1156,6 +1339,13 @@ int main(int argc, char** argv) {
             return 1;
         }
         printf("  ok    a faulting real module degrades to stubs, process survives\n");
+    }
+
+    // After the fault child, which must see a process where the interface was
+    // never requested; this one requests it and drives the observation hook.
+    if (systemHookChecks(argv[1]) != 0) {
+        printf("\nOPENVR SMOKE FAILED\n");
+        return 1;
     }
 
     // Shared code with no other coverage. Runs last because it touches nothing

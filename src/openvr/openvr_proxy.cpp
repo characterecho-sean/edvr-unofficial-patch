@@ -23,6 +23,7 @@
 #include "../common/proxy.h"
 #include "compositor_hook.h"
 #include "openvr_min.h"
+#include "system_hook.h"
 
 extern "C" {
 // Provided by the generated assembly: one slot per thunked export.
@@ -256,6 +257,7 @@ void noteSuppressedInterface(const char* name) {
 }
 
 void shutdown() {
+    edvr::shutdownSystemHook();
     edvr::shutdownCompositorHook();
     edvr::Log::get().note("EDVR openvr proxy detaching");
     edvr::Log::get().close();
