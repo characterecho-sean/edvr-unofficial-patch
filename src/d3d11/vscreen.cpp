@@ -21,6 +21,7 @@
 #include "binding_shadow.h"
 #include "device_hook.h"  // contextHookModeFor
 #include "draw_census.h"
+#include "fov_probe.h"
 #include "glitch_frame.h"
 #include "holo_fix.h"
 #include "remlok_fix.h"
@@ -1100,7 +1101,12 @@ void STDMETHODCALLTYPE hookedUnmap(ID3D11DeviceContext* self, ID3D11Resource* re
     if (res == s->camResource && s->camData) {
         // Same rule as above: read before forwarding, because after the real
         // Unmap the memory is no longer ours to look at.
-        guardedBudget(g_cameraBudget, [&] { glitchFrameObserve(s->camData, s->camBytes, s->camResource); });
+        guardedBudget(g_cameraBudget, [&] {
+            glitchFrameObserve(s->camData, s->camBytes, s->camResource);
+            // The projection hunt reads the same bytes on its own clock;
+            // one tee, no second map.
+            fovProbeObserve(s->camData, s->camBytes);
+        });
         s->camResource = nullptr;
         s->camData = nullptr;
         s->camBytes = 0;
@@ -1353,6 +1359,7 @@ void vScreenRefreshConfig() {
     remlokConfigure(cfg);
     holoConfigure(cfg);
     witchstarConfigure(cfg);
+    fovProbeConfigure(cfg);
     // Every fix.head_offset_* key, on the reload path as well as the startup
     // one. A config reader on only one of the two is a specific repeatable bug
     // -- reload-only means the value stays its C++ initialiser for the whole
@@ -1768,6 +1775,7 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     remlokConfigure(cfg);
     holoConfigure(cfg);
     witchstarConfigure(cfg);
+    fovProbeConfigure(cfg);
     // installGlitchFrameFix is called before this, deliberately, so this is its
     // settled answer rather than a guess about config it has not read yet.
     g_state->countForFlashFix = glitchFrameNeedsEyeDraws();
