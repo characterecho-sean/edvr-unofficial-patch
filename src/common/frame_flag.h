@@ -169,6 +169,23 @@ void announceEyeTextureSize(uint32_t width, uint32_t height);
 // it as evidence about any particular target.
 bool eyeTextureSize(uint32_t* width, uint32_t* height);
 
+// The headset's true horizontal frustum, published by openvr_api.dll as it
+// observes GetProjectionRaw: the OUTER (temporal) and INNER (nasal) tangent
+// magnitudes of one eye. The eyes mirror on every headset measured, so one
+// pair describes both.
+//
+// WHY THIS IS A CHANNEL: the RemLok overlay fix places the helmet's edge
+// line at a chosen ANGLE from straight ahead, and the tuned fractions that
+// looked right on two different headsets turned out to be one angle wearing
+// two denominators (0.70 of a Quest 3's image and 0.60 of a Pimax's both
+// put the line within a degree of 46) -- the angle is the human constant,
+// the tangents are the per-headset denominator, and only the openvr half
+// can read them. Same discipline as eyeSize: packed into one word so a
+// reader cannot tear the pair, zero is "no answer", and a reader without an
+// answer falls back to the manual scale.
+void announceEyeTangents(float outerMag, float innerMag);
+bool eyeTangents(float* outerMag, float* innerMag);
+
 // The cull guard's state, published by openvr_api.dll at its stage
 // transitions and read by d3d11.dll once per frame boundary.
 //

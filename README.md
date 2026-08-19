@@ -137,9 +137,9 @@ overlay into each eye with no per-eye placement (Frontier issue
 [69074](https://issues.frontierstore.net/issue-detail/69074)). EDVR clips
 each eye to the line on its own outward side, which is what a real helmet
 looks like; `remlok_lines = hide` removes the lines entirely, `stock`
-restores the game's behaviour, and on a wide-FOV headset — where even the
-correct placement sits at the lens rim — `remlok_scale` pulls the lines
-inward to where you can see them. Field-verified on a Pimax via
+restores the game's behaviour, and because the game parks the lines at the
+lens rim, `remlok_line_angle` (default 46°) places them at a visible angle
+derived per headset from its real projection. Field-verified on a Pimax via
 OpenComposite; if any rig shows the lines back on the nose, `remlok_swap_eyes`
 in the ini is the one-line correction, and that log is worth an issue.
 *Details: [docs/remlok-lines.md](docs/remlok-lines.md).*

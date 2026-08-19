@@ -93,12 +93,18 @@ colour pipeline entirely, which is why its colour drifts from the palette
   rasterizer state is cloned once with scissoring enabled and restored
   immediately after the draw. Field-verified (Pimax via OpenComposite):
   one line per eye at the temples, nothing along the nose.
-- **`advanced.remlok_scale`** — on a wide-FOV headset even the corrected
-  placement is nearly invisible, because the image border *is* the lens rim
-  there. Below 1.0 the overlay draw runs in a centred, scaled-down
-  viewport, which renders the whole helmet frame slightly smaller and pulls
-  the edge lines inward to a visible angle. This is the external
-  approximation of the angular-space placement described below.
+- **`fix.remlok_line_angle`** (default 46°) — on a wide-FOV headset even the
+  corrected placement is nearly invisible, because the image border *is* the
+  lens rim there. This setting names the angle from straight ahead where the
+  line should sit; EDVR reads the headset's true tangents from its
+  `openvr_api.dll` half and derives the per-headset viewport scale that puts
+  the line there, running the overlay draw in a centred scaled-down
+  viewport. It is the external form of the angular-space placement described
+  below, and the default came from measurement: fractions tuned by eye on a
+  Quest 3 (0.70 of tangent 1.376) and a Pimax (0.60 of 1.529) agree on one
+  angle within a degree once the image's asymmetric centre is accounted for.
+  `advanced.remlok_scale` is the manual fallback when the second file is not
+  installed.
 - **`hide`** — the overlay draw is not forwarded at all.
 - **`stock`** — nothing is done.
 

@@ -4,7 +4,10 @@
 
 #include <d3d11.h>
 
+#include <cmath>
+
 #include "../common/config.h"
+#include "../common/frame_flag.h"
 #include "../common/log.h"
 #include "binding_shadow.h"
 
@@ -32,8 +35,19 @@ bool  g_swap = false;
 // from the image border -- on a wide-FOV headset the border is the lens rim,
 // where the game's own placement is invisible (measured on a Pimax: the
 // correctly-clipped temporal line could only be confirmed in the desktop
-// mirror). 1.0 keeps the game's placement.
+// mirror). 1.0 keeps the game's placement. The manual fallback; the angle
+// below is the real setting.
 float g_scale = 1.0f;
+
+// Where the line should SIT, in degrees from straight ahead -- the human
+// constant the scale was hiding. Tuned by eye on two headsets, the chosen
+// fractions agreed on one angle to within a degree once the asymmetric
+// image centre is accounted for: 0.70 of a Quest 3 (outer tangent 1.376)
+// and 0.60 of a Pimax (1.529) are both the line at ~46 degrees. The scale
+// that puts the line there is derived per headset from the true tangents
+// the openvr half publishes; 0 turns the derivation off and g_scale rules.
+float g_angleDeg = 46.0f;
+bool  g_derivedNoted = false;
 
 // Matched draws this frame: 0 is the left eye, 1 the right. Reset at the
 // frame boundary so one odd frame cannot invert the pair for the session.
@@ -138,6 +152,17 @@ void remlokConfigure(Config& cfg) {
     if (scale > 1.00f) scale = 1.00f;
     g_scale = scale;
 
+    float ang = cfg.getFloat("fix.remlok_line_angle", 46.0f);
+    // 0 is the documented off switch; anything else is clamped into the band
+    // where the line is neither in the middle of the view nor back at the
+    // rim this setting exists to escape.
+    if (ang != 0.0f) {
+        if (ang < 20.0f) ang = 20.0f;
+        if (ang > 60.0f) ang = 60.0f;
+    }
+    if (ang != g_angleDeg) g_derivedNoted = false;   // re-announce the derivation
+    g_angleDeg = ang;
+
     if (was != g_mode) {
         const char* names[] = {"stock", "outer", "hide"};
         Log::get().note("remlok lines: %s. The overlay is recognised by shape "
@@ -149,6 +174,54 @@ void remlokConfigure(Config& cfg) {
 }
 
 bool remlokWantsDraws() { return g_mode != Mode::kStock; }
+
+namespace {
+
+// The viewport scale that puts the overlay's edge line at g_angleDeg for
+// THIS headset, from the true tangents the openvr half publishes -- or the
+// manual g_scale when the angle is off or nobody has published (openvr half
+// absent, or its hook not yet validated).
+//
+// The drawn image spans tangents [-outer, +inner] with outward negative, so
+// its CENTRE sits (outer-inner)/2 outward of straight ahead -- a centred
+// viewport scale scales about that point, not about the gaze. The formula
+// is validated by the field tuning it replaced: 0.70 on a Quest 3 and 0.60
+// on a Pimax both land within a degree of 46 through it. When the cull
+// guard's lie is live the game renders a nasal-widened span and the submit
+// crop keeps the true region, which moves the image centre; the guard's
+// published per-mille span ratio recomputes it.
+float effectiveScale() {
+    float outer = 0.0f, inner = 0.0f;
+    if (g_angleDeg <= 0.0f || !eyeTangents(&outer, &inner)) return g_scale;
+
+    float innerEff = inner;
+    const CullGuardState cg = decodeCullGuardState(cullGuardStatePacked());
+    if (cg.stage == 2) {
+        const float span = (outer + inner) * (1.0f + cg.hPerMille / 1000.0f);
+        innerEff = span - outer;
+        if (innerEff > outer) innerEff = outer;
+    }
+    const float halfSpan = (outer + innerEff) * 0.5f;
+    const float centerOut = (outer - innerEff) * 0.5f;
+    if (halfSpan < 1e-3f) return g_scale;
+
+    const float target = tanf(g_angleDeg * 3.1415926535f / 180.0f);
+    float s = (target - centerOut) / halfSpan;
+    if (s < 0.50f) s = 0.50f;
+    if (s > 1.00f) s = 1.00f;
+    if (!g_derivedNoted) {
+        g_derivedNoted = true;
+        Log::get().note("remlok lines: this headset's outer tangent is %.3f "
+                        "(%.1f deg), so the %.0f-degree line means overlay "
+                        "scale %.2f. remlok_scale is not consulted while "
+                        "remlok_line_angle is set.",
+                        outer, atanf(outer) * 180.0f / 3.1415926535f,
+                        g_angleDeg, s);
+    }
+    return s;
+}
+
+}  // namespace
 
 RemlokAction remlokOnEyeDraw(char kind, uint32_t count, uint32_t instances) {
     if (g_mode == Mode::kStock) return RemlokAction::kNone;
@@ -200,20 +273,23 @@ void remlokScissorBegin(ID3D11DeviceContext* ctx) {
     g_savedRectCount = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
     ctx->RSGetScissorRects(&g_savedRectCount, g_savedRects);
 
-    // The substituted viewport, when a scale is set: the same centre,
-    // g_scale of the size. The fullscreen triangle renders the whole
+    // The substituted viewport, when a scale applies: the same centre, a
+    // fraction of the size -- derived from remlok_line_angle and this
+    // headset's true tangents when the openvr half has published them,
+    // remlok_scale otherwise. The fullscreen triangle renders the whole
     // overlay into it, which moves the edge lines inward from the image
     // border -- the border is the lens rim on a wide-FOV headset, and a
     // line drawn there is a line nobody sees. The undrawn margin ring is
     // territory the overlay used to cover; nothing else draws after it on
     // this target, so leaving it untouched is leaving the scene visible.
+    const float scale = effectiveScale();
     g_vpEngaged = false;
-    if (g_scale < 0.999f) {
+    if (scale < 0.999f) {
         g_savedVpCount = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
         ctx->RSGetViewports(&g_savedVpCount, g_savedVps);
         D3D11_VIEWPORT scaled = vp;
-        scaled.Width = vp.Width * g_scale;
-        scaled.Height = vp.Height * g_scale;
+        scaled.Width = vp.Width * scale;
+        scaled.Height = vp.Height * scale;
         scaled.TopLeftX = vp.TopLeftX + (vp.Width - scaled.Width) * 0.5f;
         scaled.TopLeftY = vp.TopLeftY + (vp.Height - scaled.Height) * 0.5f;
         ctx->RSSetViewports(1, &scaled);
@@ -250,7 +326,7 @@ void remlokScissorBegin(ID3D11DeviceContext* ctx) {
                         "along the nose. First applied to the %s eye, %ld of "
                         "%ld px kept, overlay scale %.2f.",
                         g_pendingRight ? "right" : "left", keep, w,
-                        g_scale);
+                        scale);
     }
 }
 

@@ -82,6 +82,15 @@ struct Shared {
     // margin, never a decision -- is documented at the header declaration
     // and in SPEC-FLASH-FALSE-POSITIVES §1g.
     volatile LONG cullGuard;
+    // eyeTangents  the true horizontal frustum of one eye, packed as
+    //              (outerMilli << 16) | innerMilli -- tangent magnitudes
+    //              times 1000 -- written by openvr_api.dll as it observes
+    //              GetProjectionRaw
+    //
+    // The third openvr -> d3d11 field, same disciplines. What it exists
+    // for -- deriving the per-headset overlay scale that puts the RemLok
+    // line at a chosen angle -- is documented at the header declaration.
+    volatile LONG eyeTangents;
 };
 
 // Per PROCESS, not per logon session.
@@ -98,11 +107,12 @@ struct Shared {
 // The name is built once, at first use. The two DLLs are in the same process,
 // so the channel between them is unaffected.
 //
-// _v7 because the struct changed again -- cullGuard was added. _v6 was
-// eyeSize, _v5 holdFrames, _v4 externalCamStamp, _v3 the field before that. A
-// mismatched pair from different builds must not agree on a layout they
-// disagree about, and a d3d11.dll writing a seventh field into a six-field
-// mapping made by an older openvr_api.dll would write past the end of it.
+// _v8 because the struct changed again -- eyeTangents was added. _v7 was
+// cullGuard, _v6 eyeSize, _v5 holdFrames, _v4 externalCamStamp, _v3 the field
+// before that. A mismatched pair from different builds must not agree on a
+// layout they disagree about, and a d3d11.dll writing an eighth field into a
+// seven-field mapping made by an older openvr_api.dll would write past the
+// end of it.
 //
 // The version bump matters more for these later fields than for the early ones.
 // An old openvr_api.dll paired with a new d3d11.dll would find no stamp at all,
@@ -119,7 +129,7 @@ const wchar_t* mappingName() {
     static wchar_t name[64];
     static bool built = false;
     if (!built) {
-        _snwprintf_s(name, _TRUNCATE, L"Local\\edvr_glitch_frame_v7_%lu",
+        _snwprintf_s(name, _TRUNCATE, L"Local\\edvr_glitch_frame_v8_%lu",
                      GetCurrentProcessId());
         built = true;
     }
@@ -258,6 +268,33 @@ uint32_t cullGuardStatePacked() {
     Shared* s = map();
     if (!s) return 0;
     return static_cast<uint32_t>(InterlockedCompareExchange(&s->cullGuard, 0, 0));
+}
+
+void announceEyeTangents(float outerMag, float innerMag) {
+    Shared* s = map();
+    if (!s) return;
+    // Refused rather than truncated, eyeSize's rule: a tangent that does not
+    // fit the packing is a value this was not written for. 65 covers a 89.1
+    // degree half-angle; no headset is within a factor of ten of it.
+    if (!(outerMag > 0.0f) || !(innerMag > 0.0f) || outerMag >= 65.0f ||
+        innerMag > outerMag) {
+        return;
+    }
+    const uint32_t o = static_cast<uint32_t>(outerMag * 1000.0f + 0.5f);
+    const uint32_t i = static_cast<uint32_t>(innerMag * 1000.0f + 0.5f);
+    InterlockedExchange(&s->eyeTangents,
+                        static_cast<LONG>((o << 16) | (i & 0xFFFFu)));
+}
+
+bool eyeTangents(float* outerMag, float* innerMag) {
+    Shared* s = map();
+    if (!s) return false;
+    const LONG packed = InterlockedCompareExchange(&s->eyeTangents, 0, 0);
+    if (!packed) return false;
+    const uint32_t v = static_cast<uint32_t>(packed);
+    if (outerMag) *outerMag = static_cast<float>(v >> 16) / 1000.0f;
+    if (innerMag) *innerMag = static_cast<float>(v & 0xFFFFu) / 1000.0f;
+    return true;
 }
 
 bool takeSubmitHoldFrame() {

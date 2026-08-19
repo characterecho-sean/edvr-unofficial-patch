@@ -598,6 +598,14 @@ void emitValues(State* s) {
         s->rawDirty[eye] = false;
         float v[4];
         memcpy(v, s->trueRaw[eye], sizeof(v));
+        // Publish the horizontal frustum for the RemLok angle derivation on
+        // every flush, not only the logged ones -- valueLinesLeft caps the
+        // LOG, and a reader downstream must not starve because the log went
+        // quiet. The eyes mirror, so whichever eye flushed carries the pair.
+        {
+            const float lm = fabsf(v[0]), rm = fabsf(v[1]);
+            announceEyeTangents(lm > rm ? lm : rm, lm > rm ? rm : lm);
+        }
         bool moved = !s->lastRawSeen[eye];
         for (int i = 0; i < 4 && !moved; ++i) {
             if (fabsf(v[i] - s->lastRaw[eye][i]) > 1e-4f) moved = true;
