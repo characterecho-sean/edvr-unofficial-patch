@@ -12,14 +12,21 @@ Written for frontier issue 69074 -- the RemLok helmet edge lines, drawn into
 the WRONG eyes -- where the fix needs those draws identified before anything
 can act on them.
 
-What identifies a draw across censuses (its SIGNATURE): the draw kind, vertex
-and instance counts, what the render target and depth view resolve to (size
-and format, not pointer), and what pixel-shader slots 0-3 resolve to. Pointer
-identities are deliberately excluded: the game recreates objects freely, and
-the constant buffer a draw uses is stable WITHIN a census but means nothing
-between two. Two eye textures share a size and format, so a per-eye overlay
-shows up as one signature with two draws per frame -- which is exactly the
-shape worth reporting.
+What identifies a draw across censuses (its SIGNATURE): the draw kind, the
+per-draw vertex or index count, what the render target and depth view resolve
+to (size and format, not pointer), and what pixel-shader slots 0-3 resolve
+to. Pointer identities are deliberately excluded: the game recreates objects
+freely, and the constant buffer a draw uses is stable WITHIN a census but
+means nothing between two. INSTANCE COUNTS are excluded too, and that was
+learned from the first field capture: Elite's HUD draws are instanced, and
+flipping life support off re-counted half of them (5 warning icons become
+15), flooding ADDED and REMOVED with the same draws wearing new instance
+counts. A signature names the draw; how many instances it ran is reported as
+data, and a steady signature whose instance count changed directionally lands
+in its own CHANGED section -- an effect drawn by an existing draw family
+gaining instances shows up there, not nowhere. Two eye textures share a size
+and format, so a per-eye overlay shows up as one signature with two draws per
+frame -- which is exactly the shape worth reporting.
 
 Usage:
   python tools/diff_draw_census.py <gfx-log> [<gfx-log2>] [--a N --b N]
@@ -98,7 +105,10 @@ def parse_dc_lines(lines, source):
             continue
         m = ID_TEX_RE.match(line)
         if m:
-            cur.ids[int(m.group(1))] = 'tex%sx%s fmt=%s' % (
+            # The same compact spelling the DLL emits INLINE when its intern
+            # table overflows, so a slot interned in one census and inline in
+            # the other still compares equal.
+            cur.ids[int(m.group(1))] = 'tex%sx%sf%s' % (
                 m.group(2), m.group(3), m.group(4))
             continue
         m = ID_BUF_RE.match(line)
@@ -125,12 +135,14 @@ def resolve(census, token):
         return token
     if token.startswith('@'):
         return census.ids.get(int(token[1:]), '?')
-    return '?'
+    # Inline-resolved by the DLL when its intern table was full: already the
+    # cross-census meaning ("tex512x64f28", "buf256").
+    return token
 
 
 def signature(census, draw):
-    _frame, _idx, kind, n, i, r, d, _c, slots = draw
-    return (kind, n, i, resolve(census, r), resolve(census, d),
+    _frame, _idx, kind, n, _i, r, d, _c, slots = draw
+    return (kind, n, resolve(census, r), resolve(census, d),
             tuple(resolve(census, s) for s in slots))
 
 
@@ -158,13 +170,24 @@ def steady(sigs, frames):
 def describe(sig):
     kind_names = {'D': 'Draw', 'I': 'DrawIndexed', 'N': 'DrawInstanced',
                   'X': 'DrawIndexedInstanced'}
-    kind, n, i, r, d, slots = sig
-    parts = ['%s n=%d i=%d' % (kind_names.get(kind, kind), n, i)]
+    kind, n, r, d, slots = sig
+    parts = ['%s n=%d' % (kind_names.get(kind, kind), n)]
     parts.append('target=%s' % r)
     parts.append('depth=%s' % ('none' if d == '-' else d))
     shown = [s for s in slots if s != '-']
     parts.append('samples=%s' % (','.join(shown) if shown else 'nothing'))
     return '  '.join(parts)
+
+
+def skip_spec(sig):
+    """What to put in advanced.census_skip to suppress this draw."""
+    return '%s:%d' % (sig[0], sig[1])
+
+
+def instance_totals(per, census):
+    """Per-frame sum of instance counts, in frame order."""
+    return [sum(d[4] for d in per.get(f, []))
+            for f in sorted(frames_seen(census))]
 
 
 def report_side(title, sigs_map, census, chosen):
@@ -177,16 +200,44 @@ def report_side(title, sigs_map, census, chosen):
             len(v) for v in sigs_map[s].values())):
         per = sigs_map[sig]
         counts = [len(per.get(f, [])) for f in sorted(frames_seen(census))]
+        totals = instance_totals(per, census)
         idxs = [d[1] for v in per.values() for d in v]
         rtvs = {}
         for v in per.values():
             for d in v:
                 rtvs[d[5]] = rtvs.get(d[5], 0) + 1
         print('  %s' % describe(sig))
-        print('    draws per frame: %s   eye-draw index range: %d-%d' % (
-            ','.join(map(str, counts)), min(idxs), max(idxs)))
-        print('    render targets hit: %s' % ', '.join(
-            '%s x%d' % (k, v) for k, v in sorted(rtvs.items())))
+        print('    draws per frame: %s   instances per frame: %s   '
+              'eye-draw index range: %d-%d' % (
+                  ','.join(map(str, counts)), ','.join(map(str, totals)),
+                  min(idxs), max(idxs)))
+        print('    render targets hit: %s   census_skip spec: %s' % (
+            ', '.join('%s x%d' % (k, v) for k, v in sorted(rtvs.items())),
+            skip_spec(sig)))
+
+
+def report_changed(a_sigs, b_sigs, a, b):
+    """Signatures steady in BOTH censuses whose instance volume moved in one
+    direction -- where an effect drawn by an existing draw family shows up."""
+    changed = []
+    for sig in steady(a_sigs, frames_seen(a)) & steady(b_sigs, frames_seen(b)):
+        at = instance_totals(a_sigs[sig], a)
+        bt = instance_totals(b_sigs[sig], b)
+        if min(bt) > max(at) or max(bt) < min(at):
+            changed.append((max(min(bt) - max(at), min(at) - max(bt)), sig,
+                            at, bt))
+    print()
+    print('CHANGED -- same draw in both, instance volume moved one way:')
+    if not changed:
+        print('  (none)')
+        return set()
+    for delta, sig, at, bt in sorted(changed, reverse=True)[:20]:
+        print('  %s' % describe(sig))
+        print('    instances per frame: %s -> %s (spec %s)' % (
+            ','.join(map(str, at)), ','.join(map(str, bt)), skip_spec(sig)))
+    if len(changed) > 20:
+        print('  (%d more not shown)' % (len(changed) - 20))
+    return {c[1] for c in changed}
 
 
 def diff(a, b):
@@ -199,33 +250,36 @@ def diff(a, b):
         if c.truncated:
             note.append('%d draws past the line cap' % c.truncated)
         if c.overflow:
-            note.append('%d bindings past the intern table' % c.overflow)
+            note.append('%d bindings resolved inline past the intern table'
+                        % c.overflow)
         print('census %d (%s, %s): %d frames, %d draws recorded%s' % (
             c.number, label, c.source, len(frames_seen(c)), len(c.draws),
-            ' -- INCOMPLETE: ' + ', '.join(note) if note else ''))
+            ' -- NOTE: ' + ', '.join(note) if note else ''))
 
     report_side('ADDED -- in every frame with the effect, never without it:',
                 b_sigs, b, added)
     report_side('REMOVED -- in every frame without the effect, never with it:',
                 a_sigs, a, removed)
-    if not added and not removed:
+    changed = report_changed(a_sigs, b_sigs, a, b)
+    if not added and not removed and not changed:
         print()
         print('No steady difference. Either the effect was not visible during '
               'the second census, or its draws land somewhere this census '
               'cannot see (a deferred context, or a target that is not an eye '
               'texture).')
-    return added, removed
+    return added, removed, changed
 
 
 def self_test():
     def dc(lines):
         return ['[12:00:00.000] %s' % l for l in lines]
 
-    eye = 'tex1832x1920 fmt=87'
-    # Baseline: scene draws, a HUD atlas draw, and one draw that will vanish.
+    eye = 'tex1832x1920f87'
+    # Baseline: an instanced scene draw (i=5, will grow), a HUD atlas draw,
+    # and one draw that will vanish.
     a = ['DC begin census=1 frames=3 frame=1000']
     for f in range(3):
-        a += ['DC %d #%d I n=5000 i=1 r=@0 d=@1 c=@2 s=@3,-,-,-' % (f, 1),
+        a += ['DC %d #%d I n=5000 i=5 r=@0 d=@1 c=@2 s=@3,-,-,-' % (f, 1),
               'DC %d #%d I n=6 i=1 r=@0 d=- c=@2 s=@4,-,-,-' % (f, 2),
               'DC %d #%d D n=3 i=1 r=@0 d=- c=@2 s=-,-,-,-' % (f, 3),
               'DC frame %d draws=3' % f]
@@ -234,16 +288,19 @@ def self_test():
           'DC id @4 tex 2048x2048 fmt=28',
           'DC end census=1 draws=9 lines=9 interned=5 overflow=0 truncated=0']
 
-    # Effect present: same scene and HUD (different cb ordinal on purpose --
-    # pointer identity must not defeat the match), the vanished draw gone, a
-    # steady two-per-frame overlay added, plus one-frame churn that must NOT
-    # be reported.
+    # Effect present: the scene draw re-counted (i=5 -> i=24: CHANGED, the
+    # first field capture's noise shape, and must NOT read as added), the HUD
+    # draw unchanged with a different cb ordinal (pointer identity must not
+    # defeat a match), the vanished draw gone, a steady two-per-frame overlay
+    # added -- one eye's line through the intern table and the other eye's
+    # sampled slot resolved INLINE, as a full table writes it, which must land
+    # in the same signature -- plus one-frame churn that must not be reported.
     b = ['DC begin census=2 frames=3 frame=2000']
     for f in range(3):
-        b += ['DC %d #%d I n=5000 i=1 r=@1 d=@2 c=@9 s=@3,-,-,-' % (f, 1),
+        b += ['DC %d #%d I n=5000 i=24 r=@1 d=@2 c=@9 s=@3,-,-,-' % (f, 1),
               'DC %d #%d I n=6 i=1 r=@1 d=- c=@9 s=@4,-,-,-' % (f, 2),
               'DC %d #%d D n=4 i=1 r=@1 d=- c=@9 s=@5,-,-,-' % (f, 610),
-              'DC %d #%d D n=4 i=1 r=@6 d=- c=@9 s=@5,-,-,-' % (f, 611)]
+              'DC %d #%d D n=4 i=1 r=@6 d=- c=@9 s=tex512x64f28,-,-,-' % (f, 611)]
         if f == 1:
             b += ['DC %d #99 I n=12 i=1 r=@1 d=- c=@9 s=@4,-,-,-' % f]
         b += ['DC frame %d draws=%d' % (f, 5 if f == 1 else 4)]
@@ -251,7 +308,7 @@ def self_test():
           'DC id @3 tex 4096x4096 fmt=98', 'DC id @4 tex 2048x2048 fmt=28',
           'DC id @5 tex 512x64 fmt=28', 'DC id @6 tex 1832x1920 fmt=87',
           'DC id @9 buf 256',
-          'DC end census=2 draws=13 lines=13 interned=7 overflow=0 truncated=0']
+          'DC end census=2 draws=13 lines=13 interned=7 overflow=1 truncated=0']
 
     # Through LINE_RE, exactly as a file would be read: the timestamp-prefix
     # regex is part of what is being tested, and stripping the prefix by hand
@@ -263,14 +320,26 @@ def self_test():
     if len(censuses) != 2:
         print('self-test: expected 2 censuses, parsed %d' % len(censuses))
         return 1
-    added, removed = diff(censuses[0], censuses[1])
-    want_added = {('D', 4, 1, eye, '-', ('tex512x64 fmt=28', '-', '-', '-'))}
-    want_removed = {('D', 3, 1, eye, '-', ('-', '-', '-', '-'))}
+    added, removed, changed = diff(censuses[0], censuses[1])
+    want_added = {('D', 4, eye, '-', ('tex512x64f28', '-', '-', '-'))}
+    want_removed = {('D', 3, eye, '-', ('-', '-', '-', '-'))}
+    want_changed = {('I', 5000, eye, 'tex1832x1920f45',
+                     ('tex4096x4096f98', '-', '-', '-'))}
     if added != want_added:
         print('self-test: ADDED mismatch: %r' % added)
         return 1
     if removed != want_removed:
         print('self-test: REMOVED mismatch: %r' % removed)
+        return 1
+    if changed != want_changed:
+        print('self-test: CHANGED mismatch: %r' % changed)
+        return 1
+    # The added overlay must be TWO draws a frame -- the interned form and the
+    # inline form merged -- or the normalisation is not actually normalising.
+    per = by_signature(censuses[1])[next(iter(want_added))]
+    if sorted(len(v) for v in per.values()) != [2, 2, 2]:
+        print('self-test: inline and interned tokens did not merge: %r' %
+              {f: len(v) for f, v in per.items()})
         return 1
     print()
     print('self-test: ok')

@@ -6,8 +6,10 @@
 
 #include <d3d11.h>
 
+#include <cctype>   // toupper, in the census-skip spec parser
 #include <cmath>
 #include <cstdio>   // _snprintf_s, for the sizes list in the starvation line
+#include <cstdlib>  // strtoul, same parser
 #include <cstring>
 
 #include "../common/config.h"
@@ -198,6 +200,20 @@ struct State {
     bool  distanceEnabled = false;
     float distanceScale = 1.0f;
     uint32_t distanceIndex = 47;
+
+    // The census suppression probe (issue 69074): eye-target draws matching a
+    // KIND:INDEXCOUNT spec are not forwarded while the spec is set. The census
+    // names candidate draws; this is how a person tells WHICH candidate is the
+    // effect being chased -- set a spec, look, clear it -- with the ini's
+    // one-second reload as the switch. A diagnostic, empty by default, and
+    // matched only past the eye-target test, so it cannot touch another
+    // context's work or a non-eye pass whatever the spec says.
+    struct SkipSpec { char kind; uint32_t n; };
+    SkipSpec  censusSkip[8] = {};
+    uint32_t  censusSkipCount = 0;
+    uint64_t  censusSkipped = 0;
+    uint64_t  censusSkippedReported = 0;
+    char      censusSkipSpec[96] = {};   // raw string, to log only on change
 
     // The bound views themselves live in binding_shadow, shared with the
     // exposure fix so the two cannot drift into opposite policies again. What
@@ -596,15 +612,21 @@ inline bool foreignContext(ID3D11DeviceContext* self) {
     return self != g_state->ownerCtx;
 }
 
-// kind, count and instances describe the draw for the census and nothing
-// else; every other consumer of this function is indifferent to them.
-bool beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
-                        UINT instances) {
+// What the thunk that intercepted a draw should do with it. kPanel means the
+// panel-distance override is bound and endPanelOverride must run after the
+// draw; kSkip means the draw is a census-probe match and must not be
+// forwarded at all.
+enum class DrawVerdict { kNone, kPanel, kSkip };
+
+// kind, count and instances describe the draw for the census and the census
+// probe; every other consumer of this function is indifferent to them.
+DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
+                               UINT instances) {
     State* s = g_state;
     // A draw on somebody else's context is not our panel and not an eye draw.
     // This one early return covers all four draw thunks, and it covers them
     // where the counting actually happens rather than four times over.
-    if (foreignContext(self)) return false;
+    if (foreignContext(self)) return DrawVerdict::kNone;
     // Counting eye draws is not part of the panel distance fix, even though it
     // happens here.
     //
@@ -632,22 +654,24 @@ bool beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     // The real fix is structural: counters this load-bearing belong in frame
     // state that features subscribe to, not inside one fix's fast path, so the
     // next feature cannot make this mistake a fourth time.
-    // The census is subscriber number four, added the way the paragraph above
-    // says the next one should not be. The structural fix -- counters in frame
-    // state that features subscribe to -- is still owed; until it lands, the
-    // census at least fails towards silence: unarmed (the permanent state) it
-    // adds nothing to this condition's answer, and the short-circuit means the
-    // call is not even made while any ordinary subscriber is on.
+    // The census and its skip probe are subscribers four and five, added the
+    // way the paragraph above says the next one should not be. The structural
+    // fix -- counters in frame state that features subscribe to -- is still
+    // owed; until it lands, both at least fail towards silence: unarmed and
+    // unset (the permanent state) they add nothing to this condition's
+    // answer, and the short-circuit means the census call is not even made
+    // while any ordinary subscriber is on.
     if (!s->distanceEnabled && !s->countForFlashFix &&
-        !headOffsetGateWantsPanel() && !drawCensusArmed()) {
-        return false;
+        !headOffsetGateWantsPanel() && s->censusSkipCount == 0 &&
+        !drawCensusArmed()) {
+        return DrawVerdict::kNone;
     }
     const uint32_t rtvGen = bindingGeneration(BindSlot::Rtv0);
     if (s->rtv0EyeGen != rtvGen) {
         s->rtv0Eye = targetIsEyeSized(bindingGet(BindSlot::Rtv0));
         s->rtv0EyeGen = rtvGen;
     }
-    if (!s->rtv0Eye) return false;
+    if (!s->rtv0Eye) return DrawVerdict::kNone;
     ++s->eyeDrawsThisFrame;
 
     // The census line for this draw, recorded while its bindings are certainly
@@ -655,6 +679,19 @@ bool beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     // one call and one bool.
     if (drawCensusArmed()) {
         drawCensusEyeDraw(kind, count, instances, s->eyeDrawsThisFrame);
+    }
+
+    // The suppression probe, after the census so a census taken while probing
+    // still records what the game SUBMITTED. Everything before this point is
+    // counting, which must see skipped draws too -- a probe that deflated the
+    // eye-draw count would stand the flash fix down as a side effect.
+    if (s->censusSkipCount) {
+        for (uint32_t i = 0; i < s->censusSkipCount; ++i) {
+            if (s->censusSkip[i].kind == kind && s->censusSkip[i].n == count) {
+                ++s->censusSkipped;
+                return DrawVerdict::kSkip;
+            }
+        }
     }
 
     // The head-offset gate's signal, recorded BEFORE the "does anything want to
@@ -672,7 +709,7 @@ bool beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     // wants it.
     if (headOffsetGateWantsPanel() && srv0IsPanelSized(s)) ++s->panelCompositeDraws;
 
-    if (!s->distanceEnabled) return false;
+    if (!s->distanceEnabled) return DrawVerdict::kNone;
 
     // An eye-sized target is not enough on its own: in the cockpit hundreds of
     // draws land in those textures and rebinding on all of them would corrupt
@@ -689,17 +726,17 @@ bool beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     // The composite reads the panel: a texture of exactly the size the game
     // forces for that view mode. HUD draws read glyph sheets and atlases, so
     // they are excluded however many of them there are.
-    if (!srv0IsPanelSized(s)) return false;
+    if (!srv0IsPanelSized(s)) return DrawVerdict::kNone;
 
     void* cb = bindingGet(BindSlot::VsCb0);
-    if (!cb) return false;
+    if (!cb) return DrawVerdict::kNone;
     if (!s->compositeCb) {
         // Learn it now; its contents arrive with the next write, so the override
         // starts a frame later rather than acting on data we do not have.
         s->compositeCb = cb;
-        return false;
+        return DrawVerdict::kNone;
     }
-    if (cb != s->compositeCb || s->shadowBytes == 0) return false;
+    if (cb != s->compositeCb || s->shadowBytes == 0) return DrawVerdict::kNone;
     // 64-bit, because the operands are not.
     //
     // panel_distance_index is read with strtol and cast to uint32_t, so a
@@ -709,13 +746,15 @@ bool beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     // the user to change this number if a game update moves the field, so it is
     // reachable from a documented, hand-edited setting -- and nothing here is
     // wrapped in guarded(), so it took the process down rather than degrading.
-    if (static_cast<uint64_t>(s->distanceIndex) * 4ull + 4ull > s->shadowBytes) return false;
+    if (static_cast<uint64_t>(s->distanceIndex) * 4ull + 4ull > s->shadowBytes) {
+        return DrawVerdict::kNone;
+    }
 
     const uint32_t bytes = s->shadowBytes;
     if (!s->ourCb || s->ourCbBytes != bytes) {
         ID3D11Device* dev = nullptr;
         self->GetDevice(&dev);
-        if (!dev) return false;
+        if (!dev) return DrawVerdict::kNone;
         if (s->ourCb) { s->ourCb->Release(); s->ourCb = nullptr; }
         D3D11_BUFFER_DESC bd{};
         bd.ByteWidth = bytes;
@@ -724,13 +763,13 @@ bool beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
         const HRESULT hr = dev->CreateBuffer(&bd, nullptr, &s->ourCb);
         dev->Release();
-        if (FAILED(hr) || !s->ourCb) { s->ourCb = nullptr; return false; }
+        if (FAILED(hr) || !s->ourCb) { s->ourCb = nullptr; return DrawVerdict::kNone; }
         s->ourCbBytes = bytes;
     }
 
     D3D11_MAPPED_SUBRESOURCE m{};
     if (FAILED(s->realMap(self, s->ourCb, 0, D3D11_MAP_WRITE_DISCARD, 0, &m)) || !m.pData) {
-        return false;
+        return DrawVerdict::kNone;
     }
     memcpy(m.pData, s->shadow, bytes);
     static_cast<float*>(m.pData)[s->distanceIndex] *= s->distanceScale;
@@ -741,7 +780,7 @@ bool beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     if (++s->panelOverrides == 1) {
         Log::get().note("vScreen: panel distance x%.3f applied", s->distanceScale);
     }
-    return true;
+    return DrawVerdict::kPanel;
 }
 
 void endPanelOverride(ID3D11DeviceContext* self) {
@@ -992,32 +1031,36 @@ void STDMETHODCALLTYPE hookedUnmap(ID3D11DeviceContext* self, ID3D11Resource* re
 
 void STDMETHODCALLTYPE hookedDraw(ID3D11DeviceContext* self, UINT count, UINT start) {
     ++g_state->thunkHits[kHitDraw];
-    const bool on = beginPanelOverride(self, 'D', count, 1);
-    g_state->realDraw(self, count, start);
-    if (on) endPanelOverride(self);
+    const DrawVerdict v = beginPanelOverride(self, 'D', count, 1);
+    if (v != DrawVerdict::kSkip) g_state->realDraw(self, count, start);
+    if (v == DrawVerdict::kPanel) endPanelOverride(self);
 }
 void STDMETHODCALLTYPE hookedDrawIndexed(ID3D11DeviceContext* self, UINT count,
                                          UINT startIndex, INT baseVertex) {
     ++g_state->thunkHits[kHitDrawIndexed];
-    const bool on = beginPanelOverride(self, 'I', count, 1);
-    g_state->realDrawIndexed(self, count, startIndex, baseVertex);
-    if (on) endPanelOverride(self);
+    const DrawVerdict v = beginPanelOverride(self, 'I', count, 1);
+    if (v != DrawVerdict::kSkip) g_state->realDrawIndexed(self, count, startIndex, baseVertex);
+    if (v == DrawVerdict::kPanel) endPanelOverride(self);
 }
 void STDMETHODCALLTYPE hookedDrawInstanced(ID3D11DeviceContext* self, UINT perInstance,
                                            UINT instances, UINT startVertex,
                                            UINT startInstance) {
-    const bool on = beginPanelOverride(self, 'N', perInstance, instances);
-    g_state->realDrawInstanced(self, perInstance, instances, startVertex, startInstance);
-    if (on) endPanelOverride(self);
+    const DrawVerdict v = beginPanelOverride(self, 'N', perInstance, instances);
+    if (v != DrawVerdict::kSkip) {
+        g_state->realDrawInstanced(self, perInstance, instances, startVertex, startInstance);
+    }
+    if (v == DrawVerdict::kPanel) endPanelOverride(self);
 }
 void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
                                                   UINT perInstance, UINT instances,
                                                   UINT startIndex, INT baseVertex,
                                                   UINT startInstance) {
-    const bool on = beginPanelOverride(self, 'X', perInstance, instances);
-    g_state->realDrawIndexedInstanced(self, perInstance, instances, startIndex, baseVertex,
-                                      startInstance);
-    if (on) endPanelOverride(self);
+    const DrawVerdict v = beginPanelOverride(self, 'X', perInstance, instances);
+    if (v != DrawVerdict::kSkip) {
+        g_state->realDrawIndexedInstanced(self, perInstance, instances, startIndex,
+                                          baseVertex, startInstance);
+    }
+    if (v == DrawVerdict::kPanel) endPanelOverride(self);
 }
 
 // Read panel_distance_index, refusing anything that cannot be a float index.
@@ -1062,6 +1105,70 @@ void vScreenSetPanelSize(uint32_t width, uint32_t height) {
     }
 }
 
+// advanced.census_skip: "X:15360, D:4" -- kind letter as the census logs it
+// ('D' Draw, 'I' DrawIndexed, 'N' DrawInstanced, 'X' DrawIndexedInstanced),
+// colon, the draw's index or vertex count. Parsed on the install path and the
+// reload path both; logged only when the string changes, saying exactly what
+// will be dropped, because a probe that skips draws in silence would be
+// indistinguishable from the effect being fixed.
+void readCensusSkip(Config& cfg, State* s) {
+    const std::string spec = cfg.getString("advanced.census_skip", "");
+    if (spec.length() >= sizeof(s->censusSkipSpec)) {
+        Log::get().note("census skip: the spec is longer than %u characters "
+                        "and was ignored.",
+                        static_cast<unsigned>(sizeof(s->censusSkipSpec)) - 1);
+        return;
+    }
+    if (spec == s->censusSkipSpec) return;
+    memcpy(s->censusSkipSpec, spec.c_str(), spec.length() + 1);
+
+    s->censusSkipCount = 0;
+    const char* p = spec.c_str();
+    while (*p && s->censusSkipCount < 8) {
+        while (*p == ' ' || *p == ',' || *p == '\t') ++p;
+        if (!*p) break;
+        const char kind = static_cast<char>(toupper(*p));
+        const bool known = kind == 'D' || kind == 'I' || kind == 'N' || kind == 'X';
+        if (!known || p[1] != ':') {
+            Log::get().note("census skip: \"%s\" is not KIND:COUNT with a kind "
+                            "the census uses (D, I, N, X); the whole spec is "
+                            "refused rather than half-applied.", p);
+            s->censusSkipCount = 0;
+            break;
+        }
+        char* end = nullptr;
+        const unsigned long n = strtoul(p + 2, &end, 10);
+        if (end == p + 2 || n == 0 || n > 0xFFFFFFFFul) {
+            Log::get().note("census skip: \"%s\" has no usable count; the whole "
+                            "spec is refused rather than half-applied.", p);
+            s->censusSkipCount = 0;
+            break;
+        }
+        s->censusSkip[s->censusSkipCount].kind = kind;
+        s->censusSkip[s->censusSkipCount].n = static_cast<uint32_t>(n);
+        ++s->censusSkipCount;
+        p = end;
+    }
+
+    if (s->censusSkipCount) {
+        char list[96];
+        int  at = 0;
+        for (uint32_t i = 0; i < s->censusSkipCount && at < 80; ++i) {
+            at += _snprintf_s(list + at, sizeof(list) - at, _TRUNCATE, "%s%c:%u",
+                              i ? ", " : "", s->censusSkip[i].kind,
+                              s->censusSkip[i].n);
+        }
+        Log::get().note("census skip ACTIVE: eye-target draws matching %s will "
+                        "NOT be drawn until this is cleared. A probe, not a "
+                        "fix: if the effect being chased vanishes, these are "
+                        "its draws.", list);
+    } else if (spec.empty() && s->censusSkipped) {
+        Log::get().note("census skip cleared: everything draws again "
+                        "(%llu draws were skipped while it was set).",
+                        static_cast<unsigned long long>(s->censusSkipped));
+    }
+}
+
 void vScreenRefreshConfig() {
     State* s = g_state;
     if (!s) return;
@@ -1077,6 +1184,7 @@ void vScreenRefreshConfig() {
     s->distanceEnabled = s->distanceScale != 1.0f;
     s->distanceIndex = readDistanceIndex(cfg);
     s->countForFlashFix = glitchFrameNeedsEyeDraws();
+    readCensusSkip(cfg, s);
     // Every fix.head_offset_* key, on the reload path as well as the startup
     // one. A config reader on only one of the two is a specific repeatable bug
     // -- reload-only means the value stays its C++ initialiser for the whole
@@ -1379,6 +1487,18 @@ void vScreenFrameBoundary() {
             windowFrames, s->eyeDrawsWindowMax, s->eyeDrawsMax,
             windowFrames, static_cast<uint32_t>(windowMs), windowFps);
 
+        // The suppression probe's accounting, its own line and only while it
+        // moved: a probe that says nothing while dropping draws would leave a
+        // session unexplainable from its log.
+        if (s->censusSkipped != s->censusSkippedReported) {
+            Log::get().note(
+                "census skip: %llu draw(s) dropped so far this session (spec "
+                "\"%s\"). Clear advanced.census_skip to stop.",
+                static_cast<unsigned long long>(s->censusSkipped),
+                s->censusSkipSpec);
+            s->censusSkippedReported = s->censusSkipped;
+        }
+
         // A window that recognised NOTHING, after one that did.
         //
         // The session peak above cannot report this: a maximum never falls, so
@@ -1474,6 +1594,7 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     g_state->distanceScale = scale;
     g_state->distanceEnabled = scale != 1.0f;
     g_state->distanceIndex = readDistanceIndex(cfg);
+    readCensusSkip(cfg, g_state);
     // installGlitchFrameFix is called before this, deliberately, so this is its
     // settled answer rather than a guess about config it has not read yet.
     g_state->countForFlashFix = glitchFrameNeedsEyeDraws();

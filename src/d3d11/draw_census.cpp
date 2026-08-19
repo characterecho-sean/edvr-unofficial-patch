@@ -18,10 +18,15 @@ constexpr uint32_t kCensusFrames = 3;
 // pointed at cannot eat the log; the end line says when it bit.
 constexpr uint32_t kMaxLines = 4096;
 
-// Distinct bound objects seen across one census. HUD-heavy frames bind a few
-// dozen textures; 160 leaves an order of magnitude of headroom, and overflow
-// degrades to an unresolved token rather than a lost line.
-constexpr uint32_t kMaxInterned = 160;
+// Distinct bound objects seen across one census. The first field capture
+// refuted the "a few dozen" estimate this started from: a cockpit census
+// interned 160 and missed 1216 more -- Elite runs hundreds of distinct
+// eye-sized views and per-state textures through three frames, and the
+// table filled before the LATE-frame render targets arrived, which cost the
+// exact draws the census existed to name. 512 covers what was measured with
+// three times over; past it, tokens degrade to inline resolution (below),
+// never to an unusable '?'.
+constexpr uint32_t kMaxInterned = 512;
 
 // Everything below runs on the render thread: the draw records come from the
 // immediate context's draw hooks (foreign contexts are filtered before the
@@ -69,12 +74,35 @@ int internOf(void* ptr, bool isView) {
     return static_cast<int>(g_tabCount++);
 }
 
-// "@3", "-" (not bound) or "?" (table full) into a caller's buffer.
-const char* idToken(int id, char* buf, size_t n) {
-    if (id == -1) return "-";
-    if (id == -2) return "?";
-    _snprintf_s(buf, n, _TRUNCATE, "@%d", id);
-    return buf;
+// The token a draw line carries for one bound object: "@N" while the table
+// has room, "-" for unbound -- and on a full table the resolved form INLINE
+// ("tex512x64f28", "buf256"), so a signature survives the overflow. The
+// first field capture wrote '?' instead, and the '?' landed on the late
+// render targets and half the sampled slots: the diff ran but could not
+// name what it found. Same compact spelling the diff tool normalises the
+// id table to, so a slot interned in one census and inline in the other
+// still compares equal. Constant buffers are not views and get no inline
+// form; measured, they intern within the first frames and never overflowed.
+const char* bindingToken(void* ptr, bool isView, char* buf, size_t n) {
+    if (!ptr) return "-";
+    const int id = internOf(ptr, isView);
+    if (id >= 0) {
+        _snprintf_s(buf, n, _TRUNCATE, "@%d", id);
+        return buf;
+    }
+    ResourceInfo info;
+    if (isView && bindingResolve(ptr, &info)) {
+        if (info.isTexture2D) {
+            _snprintf_s(buf, n, _TRUNCATE, "tex%ux%uf%u", info.a, info.b,
+                        info.fmt);
+            return buf;
+        }
+        if (info.isBuffer) {
+            _snprintf_s(buf, n, _TRUNCATE, "buf%u", info.a);
+            return buf;
+        }
+    }
+    return "?";
 }
 
 void dumpInternTable() {
@@ -126,14 +154,14 @@ void drawCensusEyeDraw(char kind, uint32_t count, uint32_t instances,
     if (g_lines >= kMaxLines) return;
     ++g_lines;
 
-    char rb[8], db[8], cb[8], s0b[8], s1b[8], s2b[8], s3b[8];
-    const char* r = idToken(internOf(bindingGet(BindSlot::Rtv0), true), rb, sizeof(rb));
-    const char* d = idToken(internOf(bindingGet(BindSlot::Dsv0), true), db, sizeof(db));
-    const char* c = idToken(internOf(bindingGet(BindSlot::VsCb0), false), cb, sizeof(cb));
-    const char* s0 = idToken(internOf(bindingGet(BindSlot::PsSrv0), true), s0b, sizeof(s0b));
-    const char* s1 = idToken(internOf(bindingGet(BindSlot::PsSrv1), true), s1b, sizeof(s1b));
-    const char* s2 = idToken(internOf(bindingGet(BindSlot::PsSrv2), true), s2b, sizeof(s2b));
-    const char* s3 = idToken(internOf(bindingGet(BindSlot::PsSrv3), true), s3b, sizeof(s3b));
+    char rb[24], db[24], cb[24], s0b[24], s1b[24], s2b[24], s3b[24];
+    const char* r = bindingToken(bindingGet(BindSlot::Rtv0), true, rb, sizeof(rb));
+    const char* d = bindingToken(bindingGet(BindSlot::Dsv0), true, db, sizeof(db));
+    const char* c = bindingToken(bindingGet(BindSlot::VsCb0), false, cb, sizeof(cb));
+    const char* s0 = bindingToken(bindingGet(BindSlot::PsSrv0), true, s0b, sizeof(s0b));
+    const char* s1 = bindingToken(bindingGet(BindSlot::PsSrv1), true, s1b, sizeof(s1b));
+    const char* s2 = bindingToken(bindingGet(BindSlot::PsSrv2), true, s2b, sizeof(s2b));
+    const char* s3 = bindingToken(bindingGet(BindSlot::PsSrv3), true, s3b, sizeof(s3b));
 
     Log::get().note("DC %u #%u %c n=%u i=%u r=%s d=%s c=%s s=%s,%s,%s,%s",
                     g_frameOrdinal, eyeDrawIndex, kind, count, instances, r, d, c,
