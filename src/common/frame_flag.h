@@ -186,6 +186,16 @@ bool eyeTextureSize(uint32_t* width, uint32_t* height);
 void announceEyeTangents(float outerMag, float innerMag);
 bool eyeTangents(float* outerMag, float* innerMag);
 
+// Where the ship's forward axis points in the CURRENT head frame, as
+// tangent-space offsets from straight ahead -- published by openvr_api.dll
+// every frame from the pose it is handed, read by d3d11.dll to counter-move
+// head-locked sprites so they hold a direction instead of riding the head.
+// (0,0) means "looking dead ahead" and is a legitimate value, so the packing
+// carries an always-set presence bit: a zero word is "nobody publishing",
+// never "centred".
+void announceHeadForward(float tx, float ty);
+bool headForward(float* tx, float* ty);
+
 // The cull guard's state, published by openvr_api.dll at its stage
 // transitions and read by d3d11.dll once per frame boundary.
 //

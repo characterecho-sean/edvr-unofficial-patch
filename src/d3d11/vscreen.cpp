@@ -24,6 +24,7 @@
 #include "glitch_frame.h"
 #include "holo_fix.h"
 #include "remlok_fix.h"
+#include "witchstar_fix.h"
 
 namespace edvr {
 namespace {
@@ -644,8 +645,11 @@ inline bool foreignContext(ID3D11DeviceContext* self) {
 // match, or the RemLok overlay in hide mode); kRemlok means the RemLok
 // overlay in outer mode -- forward it wrapped in remlokScissorBegin/End;
 // kHolo means the loading hologram composite -- forward it wrapped in
-// holoBegin/End, which substitutes its pattern texture for the draw.
-enum class DrawVerdict { kNone, kPanel, kSkip, kRemlok, kHolo };
+// holoBegin/End, which substitutes its pattern texture for the draw; and
+// kWitchstar the jump tunnel's star cluster -- forward it wrapped in
+// witchstarBegin/End, which shifts its viewport to hold the star's
+// direction under head rotation.
+enum class DrawVerdict { kNone, kPanel, kSkip, kRemlok, kHolo, kWitchstar };
 
 // kind, count and instances describe the draw for the census and the census
 // probe; every other consumer of this function is indifferent to them.
@@ -693,7 +697,7 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     if (!s->distanceEnabled && !s->countForFlashFix &&
         !headOffsetGateWantsPanel() && s->censusSkipCount == 0 &&
         s->censusSkipRangeCount == 0 && !remlokWantsDraws() &&
-        !holoWantsDraws() && !drawCensusArmed()) {
+        !holoWantsDraws() && !witchstarWantsDraws() && !drawCensusArmed()) {
         return DrawVerdict::kNone;
     }
     const uint32_t rtvGen = bindingGeneration(BindSlot::Rtv0);
@@ -760,6 +764,13 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     // The loading hologram's pattern fix, same placement for the same reason.
     if (holoWantsDraws() && holoOnEyeDraw(kind, count, instances)) {
         return DrawVerdict::kHolo;
+    }
+
+    // The witchspace star, called for EVERY eye draw while enabled -- its
+    // cluster is recognised as a contiguous run, and the run state needs to
+    // see the draws that break it, not only the ones that belong.
+    if (witchstarWantsDraws() && witchstarOnEyeDraw(kind, count, instances)) {
+        return DrawVerdict::kWitchstar;
     }
 
     // The head-offset gate's signal, recorded BEFORE the "does anything want to
@@ -1107,7 +1118,9 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     if (v == DrawVerdict::kSkip) return;
     if (v == DrawVerdict::kRemlok) remlokScissorBegin(self);
     if (v == DrawVerdict::kHolo) holoBegin(self);
+    if (v == DrawVerdict::kWitchstar) witchstarBegin(self);
     draw();
+    if (v == DrawVerdict::kWitchstar) witchstarEnd(self);
     if (v == DrawVerdict::kHolo) holoEnd(self);
     if (v == DrawVerdict::kRemlok) remlokScissorEnd(self);
 }
@@ -1339,6 +1352,7 @@ void vScreenRefreshConfig() {
     readCensusSkip(cfg, s);
     remlokConfigure(cfg);
     holoConfigure(cfg);
+    witchstarConfigure(cfg);
     // Every fix.head_offset_* key, on the reload path as well as the startup
     // one. A config reader on only one of the two is a specific repeatable bug
     // -- reload-only means the value stays its C++ initialiser for the whole
@@ -1413,6 +1427,7 @@ void vScreenFrameBoundary() {
     // here, a running one advances, a spent one writes its tables.
     drawCensusFrameBoundary(s->frameNo);
     remlokFrameBoundary();
+    witchstarFrameBoundary();
 
     // The per-frame invalidation lives in binding_shadow now, and device_hook
     // calls it once for both fixes. Doing it here as well would be harmless but
@@ -1752,6 +1767,7 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     readCensusSkip(cfg, g_state);
     remlokConfigure(cfg);
     holoConfigure(cfg);
+    witchstarConfigure(cfg);
     // installGlitchFrameFix is called before this, deliberately, so this is its
     // settled answer rather than a guess about config it has not read yet.
     g_state->countForFlashFix = glitchFrameNeedsEyeDraws();

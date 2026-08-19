@@ -91,6 +91,17 @@ struct Shared {
     // for -- deriving the per-headset overlay scale that puts the RemLok
     // line at a chosen angle -- is documented at the header declaration.
     volatile LONG eyeTangents;
+    // headForward  ship-forward in the current head frame, tangent-space,
+    //              packed as (1 << 31) | ((tx_milli + 16384) << 15) |
+    //              (ty_milli + 16384), each biased-15-bit, tangents times
+    //              1000 clamped to +/-3.0 -- written by openvr_api.dll
+    //              every frame from the pose it hands the game
+    //
+    // The fourth openvr -> d3d11 field. Biased rather than raw because
+    // straight-ahead is (0,0) and a legitimate publication, while a zero
+    // WORD must keep meaning "nobody publishing" -- the presence bit and
+    // the bias keep every published value nonzero.
+    volatile LONG headForward;
 };
 
 // Per PROCESS, not per logon session.
@@ -107,12 +118,12 @@ struct Shared {
 // The name is built once, at first use. The two DLLs are in the same process,
 // so the channel between them is unaffected.
 //
-// _v8 because the struct changed again -- eyeTangents was added. _v7 was
-// cullGuard, _v6 eyeSize, _v5 holdFrames, _v4 externalCamStamp, _v3 the field
-// before that. A mismatched pair from different builds must not agree on a
-// layout they disagree about, and a d3d11.dll writing an eighth field into a
-// seven-field mapping made by an older openvr_api.dll would write past the
-// end of it.
+// _v9 because the struct changed again -- headForward was added. _v8 was
+// eyeTangents, _v7 cullGuard, _v6 eyeSize, _v5 holdFrames, _v4
+// externalCamStamp, _v3 the field before that. A mismatched pair from
+// different builds must not agree on a layout they disagree about, and a
+// d3d11.dll writing a ninth field into an eight-field mapping made by an
+// older openvr_api.dll would write past the end of it.
 //
 // The version bump matters more for these later fields than for the early ones.
 // An old openvr_api.dll paired with a new d3d11.dll would find no stamp at all,
@@ -129,7 +140,7 @@ const wchar_t* mappingName() {
     static wchar_t name[64];
     static bool built = false;
     if (!built) {
-        _snwprintf_s(name, _TRUNCATE, L"Local\\edvr_glitch_frame_v8_%lu",
+        _snwprintf_s(name, _TRUNCATE, L"Local\\edvr_glitch_frame_v9_%lu",
                      GetCurrentProcessId());
         built = true;
     }
@@ -294,6 +305,33 @@ bool eyeTangents(float* outerMag, float* innerMag) {
     const uint32_t v = static_cast<uint32_t>(packed);
     if (outerMag) *outerMag = static_cast<float>(v >> 16) / 1000.0f;
     if (innerMag) *innerMag = static_cast<float>(v & 0xFFFFu) / 1000.0f;
+    return true;
+}
+
+void announceHeadForward(float tx, float ty) {
+    Shared* s = map();
+    if (!s) return;
+    // NaN fails every comparison, so it lands on the clamp bound rather
+    // than inside the packing as garbage.
+    auto biased = [](float t) -> uint32_t {
+        float c = t;
+        if (!(c > -3.0f)) c = -3.0f;
+        if (!(c < 3.0f)) c = 3.0f;
+        const int32_t milli = static_cast<int32_t>(c * 1000.0f);
+        return static_cast<uint32_t>(milli + 16384) & 0x7FFFu;
+    };
+    const uint32_t packed = 0x80000000u | (biased(tx) << 15) | biased(ty);
+    InterlockedExchange(&s->headForward, static_cast<LONG>(packed));
+}
+
+bool headForward(float* tx, float* ty) {
+    Shared* s = map();
+    if (!s) return false;
+    const LONG packed = InterlockedCompareExchange(&s->headForward, 0, 0);
+    if (!packed) return false;
+    const uint32_t v = static_cast<uint32_t>(packed);
+    if (tx) *tx = (static_cast<int32_t>((v >> 15) & 0x7FFFu) - 16384) / 1000.0f;
+    if (ty) *ty = (static_cast<int32_t>(v & 0x7FFFu) - 16384) / 1000.0f;
     return true;
 }
 

@@ -954,6 +954,22 @@ vr::EVRCompositorError hookedWaitGetPoses(void* self,
             e.result = static_cast<int32_t>(hmd.eTrackingResult);
             e.valid = hmd.bPoseIsValid ? 1u : 0u;
             ++s->poseHead;
+
+            // Ship-forward in the current head frame, for the sprite-pinning
+            // fix on the d3d11 side. World-forward is seated -Z; its
+            // head-local direction is R-transpose times that, which for a
+            // row-major rotation is the negated third ROW. Published every
+            // frame from the same raw pose the ring records -- before the
+            // head offset touches it, so Explorer Cam does not steer the
+            // pin. Rotation only, and that is correct: the pinned sprite
+            // stands for a star at infinity, and infinity has no parallax.
+            if (hmd.bPoseIsValid) {
+                const auto& m = hmd.mDeviceToAbsoluteTracking.m;
+                const float dx = -m[2][0], dy = -m[2][1];
+                float fwd = m[2][2];   // == -(d.z); 1 facing forward
+                if (fwd < 0.05f) fwd = 0.05f;
+                announceHeadForward(dx / fwd, dy / fwd);
+            }
         });
     }
 
