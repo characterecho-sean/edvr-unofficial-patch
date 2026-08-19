@@ -22,6 +22,7 @@
 #include "device_hook.h"  // contextHookModeFor
 #include "draw_census.h"
 #include "glitch_frame.h"
+#include "holo_fix.h"
 #include "remlok_fix.h"
 
 namespace edvr {
@@ -641,8 +642,10 @@ inline bool foreignContext(ID3D11DeviceContext* self) {
 // panel-distance override is bound and endPanelOverride must run after the
 // draw; kSkip means the draw must not be forwarded at all (a census-probe
 // match, or the RemLok overlay in hide mode); kRemlok means the RemLok
-// overlay in outer mode -- forward it wrapped in remlokScissorBegin/End.
-enum class DrawVerdict { kNone, kPanel, kSkip, kRemlok };
+// overlay in outer mode -- forward it wrapped in remlokScissorBegin/End;
+// kHolo means the loading hologram composite -- forward it wrapped in
+// holoBegin/End, which substitutes its pattern texture for the draw.
+enum class DrawVerdict { kNone, kPanel, kSkip, kRemlok, kHolo };
 
 // kind, count and instances describe the draw for the census and the census
 // probe; every other consumer of this function is indifferent to them.
@@ -690,7 +693,7 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     if (!s->distanceEnabled && !s->countForFlashFix &&
         !headOffsetGateWantsPanel() && s->censusSkipCount == 0 &&
         s->censusSkipRangeCount == 0 && !remlokWantsDraws() &&
-        !drawCensusArmed()) {
+        !holoWantsDraws() && !drawCensusArmed()) {
         return DrawVerdict::kNone;
     }
     const uint32_t rtvGen = bindingGeneration(BindSlot::Rtv0);
@@ -752,6 +755,11 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         const RemlokAction a = remlokOnEyeDraw(kind, count, instances);
         if (a == RemlokAction::kHide) return DrawVerdict::kSkip;
         if (a == RemlokAction::kScissor) return DrawVerdict::kRemlok;
+    }
+
+    // The loading hologram's pattern fix, same placement for the same reason.
+    if (holoWantsDraws() && holoOnEyeDraw(kind, count, instances)) {
+        return DrawVerdict::kHolo;
     }
 
     // The head-offset gate's signal, recorded BEFORE the "does anything want to
@@ -1089,36 +1097,44 @@ void STDMETHODCALLTYPE hookedUnmap(ID3D11DeviceContext* self, ID3D11Resource* re
     s->realUnmap(self, res, sub);
 }
 
+// The shared tail of all four draw thunks: run the wrapped fix's begin,
+// the real draw, the matching end. One function so the fifth verdict cannot
+// be added to three thunks and forgotten in the fourth -- kRemlok's plumbing
+// was pasted four times and this is the shape that stops the pattern.
+template <typename RealDraw>
+void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
+                        RealDraw&& draw) {
+    if (v == DrawVerdict::kSkip) return;
+    if (v == DrawVerdict::kRemlok) remlokScissorBegin(self);
+    if (v == DrawVerdict::kHolo) holoBegin(self);
+    draw();
+    if (v == DrawVerdict::kHolo) holoEnd(self);
+    if (v == DrawVerdict::kRemlok) remlokScissorEnd(self);
+}
+
 void STDMETHODCALLTYPE hookedDraw(ID3D11DeviceContext* self, UINT count, UINT start) {
     ++g_state->thunkHits[kHitDraw];
     const DrawVerdict v = beginPanelOverride(self, 'D', count, 1);
-    if (v != DrawVerdict::kSkip) {
-        if (v == DrawVerdict::kRemlok) remlokScissorBegin(self);
-        g_state->realDraw(self, count, start);
-        if (v == DrawVerdict::kRemlok) remlokScissorEnd(self);
-    }
+    forwardWithVerdict(self, v, [&] { g_state->realDraw(self, count, start); });
     if (v == DrawVerdict::kPanel) endPanelOverride(self);
 }
 void STDMETHODCALLTYPE hookedDrawIndexed(ID3D11DeviceContext* self, UINT count,
                                          UINT startIndex, INT baseVertex) {
     ++g_state->thunkHits[kHitDrawIndexed];
     const DrawVerdict v = beginPanelOverride(self, 'I', count, 1);
-    if (v != DrawVerdict::kSkip) {
-        if (v == DrawVerdict::kRemlok) remlokScissorBegin(self);
+    forwardWithVerdict(self, v, [&] {
         g_state->realDrawIndexed(self, count, startIndex, baseVertex);
-        if (v == DrawVerdict::kRemlok) remlokScissorEnd(self);
-    }
+    });
     if (v == DrawVerdict::kPanel) endPanelOverride(self);
 }
 void STDMETHODCALLTYPE hookedDrawInstanced(ID3D11DeviceContext* self, UINT perInstance,
                                            UINT instances, UINT startVertex,
                                            UINT startInstance) {
     const DrawVerdict v = beginPanelOverride(self, 'N', perInstance, instances);
-    if (v != DrawVerdict::kSkip) {
-        if (v == DrawVerdict::kRemlok) remlokScissorBegin(self);
-        g_state->realDrawInstanced(self, perInstance, instances, startVertex, startInstance);
-        if (v == DrawVerdict::kRemlok) remlokScissorEnd(self);
-    }
+    forwardWithVerdict(self, v, [&] {
+        g_state->realDrawInstanced(self, perInstance, instances, startVertex,
+                                   startInstance);
+    });
     if (v == DrawVerdict::kPanel) endPanelOverride(self);
 }
 void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
@@ -1126,12 +1142,10 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
                                                   UINT startIndex, INT baseVertex,
                                                   UINT startInstance) {
     const DrawVerdict v = beginPanelOverride(self, 'X', perInstance, instances);
-    if (v != DrawVerdict::kSkip) {
-        if (v == DrawVerdict::kRemlok) remlokScissorBegin(self);
+    forwardWithVerdict(self, v, [&] {
         g_state->realDrawIndexedInstanced(self, perInstance, instances, startIndex,
                                           baseVertex, startInstance);
-        if (v == DrawVerdict::kRemlok) remlokScissorEnd(self);
-    }
+    });
     if (v == DrawVerdict::kPanel) endPanelOverride(self);
 }
 
@@ -1324,6 +1338,7 @@ void vScreenRefreshConfig() {
     s->countForFlashFix = glitchFrameNeedsEyeDraws();
     readCensusSkip(cfg, s);
     remlokConfigure(cfg);
+    holoConfigure(cfg);
     // Every fix.head_offset_* key, on the reload path as well as the startup
     // one. A config reader on only one of the two is a specific repeatable bug
     // -- reload-only means the value stays its C++ initialiser for the whole
@@ -1736,6 +1751,7 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     g_state->distanceIndex = readDistanceIndex(cfg);
     readCensusSkip(cfg, g_state);
     remlokConfigure(cfg);
+    holoConfigure(cfg);
     // installGlitchFrameFix is called before this, deliberately, so this is its
     // settled answer rather than a guess about config it has not read yet.
     g_state->countForFlashFix = glitchFrameNeedsEyeDraws();
@@ -1869,6 +1885,7 @@ void shutdownVScreenFixes() {
         g_state->ourCb = nullptr;
     }
     remlokShutdown();
+    holoShutdown();
     g_state->hook.uninstall();
 }
 
