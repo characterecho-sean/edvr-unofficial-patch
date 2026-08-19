@@ -614,7 +614,32 @@ State& ensureState() {
         g_state->dumpKey.setBinding(Config::get().getString("hotkey.dump_camera", "PAUSE").c_str());
         // Empty default: the census is chased-bug instrumentation, and an
         // unbound key is how "off" is spelled for a hotkey.
-        g_state->censusKey.setBinding(Config::get().getString("hotkey.dump_draws", "").c_str());
+        //
+        // The bind is then SAID, because it failed silently once: dump_draws
+        // was set to CTRL+SCROLLLOCK, which parsed and registered cleanly --
+        // and the physical chord never arrived as Scroll Lock with Ctrl held
+        // (on the classic keyboard matrix Ctrl+ScrollLock is Break, exactly
+        // like Ctrl+Pause). Every path in EDVR stayed quiet: nothing matched,
+        // so not even the missed-while-unfocused note had anything to say,
+        // and the field session bought nothing. A diagnostic that can be
+        // dead must say what it is watching, in the log it exists to write.
+        {
+            const std::string b = Config::get().getString("hotkey.dump_draws", "");
+            g_state->censusKey.setBinding(b.c_str());
+            if (g_state->censusKey.key() != 0) {
+                Log::get().note(
+                    "hotkey: draw census key bound: %s (vk 0x%02X, mods 0x%X). "
+                    "Prefer a bare key here -- chords on the Pause/ScrollLock "
+                    "cluster can reach Windows as a different key entirely.",
+                    b.c_str(), g_state->censusKey.key(),
+                    g_state->censusKey.mods());
+            } else if (!b.empty()) {
+                Log::get().note(
+                    "hotkey: dump_draws is set but bound nothing (the line "
+                    "above says why), so the draw census cannot be armed this "
+                    "session.");
+            }
+        }
         // The camera keys come from the GAME's own key configuration, and
         // only from there (0.7.1 removed the ini overrides: two keys nobody
         // needed to set once adoption read the right element from the right
