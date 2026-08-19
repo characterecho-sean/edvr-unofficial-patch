@@ -2337,17 +2337,6 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
         if (s->framesWithheld != s->totalsWithheld ||
             s->suppressed != s->totalsSuppressed) {
             const bool acted = glitchConsumerPresent();
-            // Present only in sessions the guard has been live in, so every
-            // other rig's totals line reads exactly as it always has.
-            char guardSplit[176] = "";
-            if (s->withheldGuardLive || s->suppressedGuardLive) {
-                snprintf(guardSplit, sizeof(guardSplit),
-                         " Of those, %u withheld and %u recognised happened "
-                         "while the cull guard's wider frustum was live -- the "
-                         "margin admits more render passes, and this is that "
-                         "cost being counted (docs/terrain-culling.md).",
-                         s->withheldGuardLive, s->suppressedGuardLive);
-            }
             Log::get().note(
                 "transition flash so far: %u frame(s) %s this session, and %u "
                 "more recognised as render-pass geometry and left alone -- %u by a "
@@ -2361,14 +2350,26 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
                 "made: roughly one per transition is it working. The others are "
                 "expected to be large near a planet surface and are not a fault -- "
                 "they are frames that would have been withheld before, and felt as "
-                "judder.%s",
+                "judder.",
                 s->framesWithheld, acted ? "withheld" : "detected but NOT withheld "
                                            "(openvr_api.dll is not installed)",
                 s->suppressed, s->suppressedBySeparation, s->suppressedByRadius,
                 s->suppressedByPark, s->suppressedByDrift,
                 s->framesWithheld - s->totalsWithheld,
-                s->suppressed - s->totalsSuppressed, s->withheldNotRendering,
-                guardSplit);
+                s->suppressed - s->totalsSuppressed, s->withheldNotRendering);
+            // ITS OWN LINE, not a suffix of the paragraph above: appended
+            // there it pushed the note past the log's line buffer and every
+            // field log carried it truncated mid-word, which is worse than
+            // absent -- a sentence that ends in "(do" reads as a crash.
+            // Present only in sessions the guard has been live in, so every
+            // other rig's totals read exactly as they always have.
+            if (s->withheldGuardLive || s->suppressedGuardLive) {
+                Log::get().note(
+                    "transition flash, guard attribution: %u withheld / %u "
+                    "recognised under the cull guard's wider frustum "
+                    "(docs/terrain-culling.md).",
+                    s->withheldGuardLive, s->suppressedGuardLive);
+            }
             s->totalsWithheld = s->framesWithheld;
             s->totalsSuppressed = s->suppressed;
         }
