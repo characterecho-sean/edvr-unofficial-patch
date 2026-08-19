@@ -182,6 +182,15 @@ struct State {
     bool      liePending = false;         // prerequisites met, awaiting boundary
     uint64_t  liePendingSinceMs = 0;
     uint64_t  stage1SinceMs = 0;
+    // Submitted sizes as they stood when stage 1 began. Adoption requires
+    // the submissions to CHANGE from these, not merely to exceed the
+    // threshold: a re-stage to a SMALLER margin starts while the old,
+    // bigger targets are still flowing, and those satisfied any >= test
+    // instantly -- field log 2026-08-18 21:35:01, an 8 ms "adoption" that
+    // froze the canonical against targets the game was about to shrink,
+    // which the snap would later refuse as a mid-session stand-down.
+    uint32_t  preStageW[2] = {}, preStageH[2] = {};
+    bool      marginNoop = false;  // factors ~1.0: staging would never finish
     bool      stage1WaitNoted = false;
     float     sizeFactorH = 1.0f, sizeFactorV = 1.0f;
     uint32_t  trueSizeW = 0, trueSizeH = 0;    // last truth from slot 0
@@ -413,7 +422,8 @@ void hookedGetProjectionRaw(void* self, int32_t eye, float* l, float* r,
             // gate names (an empty gate names them all): a rig that swaps
             // headsets pays for the fix exactly where its owner said to.
             if (s->stage == 0 && !s->lieLive && !s->liePending &&
-                s->trueSeen[0] && s->trueSeen[1] && gatePasses(s)) {
+                !s->marginNoop && s->trueSeen[0] && s->trueSeen[1] &&
+                gatePasses(s)) {
                 s->liePending = true;
                 s->liePendingSinceMs = stampMs();
             }
@@ -726,17 +736,36 @@ void promoteOrDemote(State* s) {
         }
         s->sizeFactorH = duL / duT;
         s->sizeFactorV = dvL / dvT;
+        // A margin under about a percent asks the game to rebuild targets it
+        // will rebuild to the same size, so adoption's changed-size test
+        // could never pass and stage 1 would sit forever. It is also not a
+        // guard anyone can see. Idle instead, until the config changes.
+        if (s->sizeFactorH < 1.01f && s->sizeFactorV < 1.01f) {
+            s->marginNoop = true;
+            Log::get().note(
+                "cull guard idle: the configured margin widens the frustum "
+                "under 1%%, which protects nothing. Raise cull_guard_fraction_"
+                "h/_v (or cull_guard_percent) to arm it.");
+            return;
+        }
+        for (int e = 0; e < 2; ++e) {
+            s->preStageW[e] = s->submittedW[e];
+            s->preStageH[e] = s->submittedH[e];
+        }
         s->stage = 1;
         s->stage1SinceMs = stampMs();
         announceCullGuardState(1, s->sizeFactorH, s->sizeFactorV);
         Log::get().note(
             "cull guard stage 1 (%s): asking the game for %.0f%% x %.0f%% "
             "larger render targets, so the wider frustum keeps this "
-            "session's pixels-per-degree. Projections stay true until both "
-            "eyes submit at the new size -- the runtime never sees a "
-            "submission shape this session has not already served.",
+            "session's pixels-per-degree -- about %.0f%% more rendered "
+            "pixels while the guard is live (cull_guard_fraction_h/_v tune "
+            "this, live). Projections stay true until both eyes submit at "
+            "the new size -- the runtime never sees a submission shape this "
+            "session has not already served.",
             modeName(s->modeRequested), (s->sizeFactorH - 1.0f) * 100.0f,
-            (s->sizeFactorV - 1.0f) * 100.0f);
+            (s->sizeFactorV - 1.0f) * 100.0f,
+            (s->sizeFactorH * s->sizeFactorV - 1.0f) * 100.0f);
         return;
     }
 
@@ -751,6 +780,14 @@ void promoteOrDemote(State* s) {
                 static_cast<float>(s->trueSizeH) * s->sizeFactorV * 0.97f;
             if (static_cast<float>(s->submittedW[e]) < needW ||
                 static_cast<float>(s->submittedH[e]) < needH) {
+                adopted = false;
+            }
+            // The size must have MOVED since stage 1 began -- see preStageW.
+            // The threshold alone reads leftover bigger-than-needed targets
+            // (a re-stage down in margin) as instant adoption and freezes
+            // the canonical against a size the game is about to abandon.
+            if (s->submittedW[e] == s->preStageW[e] &&
+                s->submittedH[e] == s->preStageH[e]) {
                 adopted = false;
             }
         }
@@ -995,6 +1032,7 @@ void systemHookConfigure() {
     memcpy(s->gateSig, gateSig, sizeof(gateSig));
     s->gateCount = gateCount;
     if (gateChanged) s->gateNoted = false;  // the new list earns a new verdict
+    if (lieParamsChanged) s->marginNoop = false;  // a new margin earns a retry
     s->submitCopy = copyMode;
 
     // A live change of anything the lie is built from cannot be mutated into
