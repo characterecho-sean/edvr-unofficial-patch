@@ -208,7 +208,11 @@ struct State {
     // one-second reload as the switch. A diagnostic, empty by default, and
     // matched only past the eye-target test, so it cannot touch another
     // context's work or a non-eye pass whatever the spec says.
-    struct SkipSpec { char kind; uint32_t n; };
+    // srvW/srvH narrow a spec to draws whose PS slot 0 samples a texture of
+    // exactly that size ("N:3@1024x512"); 0 means any. Needed the day the
+    // hunted draw turned out to be a fullscreen triangle -- kind and count
+    // alone matched the tonemap chain, and skipping THAT freezes the eye.
+    struct SkipSpec { char kind; uint32_t n; uint32_t srvW; uint32_t srvH; };
     SkipSpec  censusSkip[8] = {};
     uint32_t  censusSkipCount = 0;
     // The bisection form of the same probe: skip eye draws by their POSITION
@@ -707,10 +711,24 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     // eye-draw count would stand the flash fix down as a side effect.
     if (s->censusSkipCount) {
         for (uint32_t i = 0; i < s->censusSkipCount; ++i) {
-            if (s->censusSkip[i].kind == kind && s->censusSkip[i].n == count) {
-                ++s->censusSkipped;
-                return DrawVerdict::kSkip;
+            if (s->censusSkip[i].kind != kind || s->censusSkip[i].n != count) {
+                continue;
             }
+            if (s->censusSkip[i].srvW) {
+                // The @WxH filter: resolve what PS slot 0 samples, on the
+                // rare draws that got past kind+count. Unmemoised on
+                // purpose: this runs only while a probe spec is set, for a
+                // handful of draws a frame, and a stale memo here would
+                // skip the wrong draw.
+                ResourceInfo info;
+                if (!bindingResolve(bindingGet(BindSlot::PsSrv0), &info) ||
+                    !info.isTexture2D || info.a != s->censusSkip[i].srvW ||
+                    info.b != s->censusSkip[i].srvH) {
+                    continue;
+                }
+            }
+            ++s->censusSkipped;
+            return DrawVerdict::kSkip;
         }
     }
     // The bisection form: this draw's position in the frame, against the
@@ -1198,22 +1216,40 @@ void readCensusSkip(Config& cfg, State* s) {
         const char kind = static_cast<char>(toupper(*p));
         const bool known = kind == 'D' || kind == 'I' || kind == 'N' || kind == 'X';
         if (!known || p[1] != ':') {
-            Log::get().note("census skip: \"%s\" is not KIND:COUNT with a kind "
-                            "the census uses (D, I, N, X); the whole spec is "
-                            "refused rather than half-applied.", p);
+            Log::get().note("census skip: \"%s\" is not KIND:COUNT[@WxH] with a "
+                            "kind the census uses (D, I, N, X); the whole spec "
+                            "is refused rather than half-applied.", p);
             s->censusSkipCount = 0;
             break;
         }
         char* end = nullptr;
         const unsigned long n = strtoul(p + 2, &end, 10);
-        if (end == p + 2 || n == 0 || n > 0xFFFFFFFFul) {
+        if (end == p + 2 || n == 0) {
             Log::get().note("census skip: \"%s\" has no usable count; the whole "
                             "spec is refused rather than half-applied.", p);
             s->censusSkipCount = 0;
             break;
         }
+        unsigned long sw = 0, sh = 0;
+        if (*end == '@') {
+            const char* q = end + 1;
+            sw = strtoul(q, &end, 10);
+            if (end != q && *end == 'x') {
+                q = end + 1;
+                sh = strtoul(q, &end, 10);
+            }
+            if (sw == 0 || sh == 0) {
+                Log::get().note("census skip: \"%s\" has an @ filter that is "
+                                "not @WIDTHxHEIGHT; the whole spec is refused "
+                                "rather than half-applied.", p);
+                s->censusSkipCount = 0;
+                break;
+            }
+        }
         s->censusSkip[s->censusSkipCount].kind = kind;
         s->censusSkip[s->censusSkipCount].n = static_cast<uint32_t>(n);
+        s->censusSkip[s->censusSkipCount].srvW = static_cast<uint32_t>(sw);
+        s->censusSkip[s->censusSkipCount].srvH = static_cast<uint32_t>(sh);
         ++s->censusSkipCount;
         p = end;
     }
@@ -1225,6 +1261,11 @@ void readCensusSkip(Config& cfg, State* s) {
             at += _snprintf_s(list + at, sizeof(list) - at, _TRUNCATE, "%s%c:%u",
                               i ? ", " : "", s->censusSkip[i].kind,
                               s->censusSkip[i].n);
+            if (s->censusSkip[i].srvW && at < 100) {
+                at += _snprintf_s(list + at, sizeof(list) - at, _TRUNCATE,
+                                  "@%ux%u", s->censusSkip[i].srvW,
+                                  s->censusSkip[i].srvH);
+            }
         }
         for (uint32_t i = 0; i < s->censusSkipRangeCount && at < 140; ++i) {
             at += _snprintf_s(list + at, sizeof(list) - at, _TRUNCATE,
