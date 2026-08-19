@@ -218,9 +218,19 @@ struct State {
     // never appears in the diff, and a burst-firing draw can fake steadiness
     // across a three-frame window. Position needs neither: whatever draws the
     // effect is SOMEWHERE in the frame's order, and halving the skipped range
-    // against a headset finds it in about eight looks. 0-0 is off.
-    uint32_t  censusSkipLo = 0;
-    uint32_t  censusSkipHi = 0;
+    // against a headset finds it in about eight looks.
+    //
+    // SEVERAL ranges, because one is not enough for an effect drawn more
+    // than once a frame -- and the second field round produced exactly that
+    // shape: three single ranges that together covered every position in the
+    // frame, and the lines survived each one. If the overlay is drawn twice
+    // (say, early as near-camera geometry and again late), any single range
+    // kills one instance while the other keeps the effect on screen in every
+    // test. Two ranges at once is what corners it: pin one instance's whole
+    // region skipped, bisect the other. Count 0 is off.
+    struct SkipRange { uint32_t lo; uint32_t hi; };
+    SkipRange censusSkipRange[4] = {};
+    uint32_t  censusSkipRangeCount = 0;
     uint64_t  censusSkipped = 0;
     uint64_t  censusSkippedReported = 0;
     char      censusSkipSpec[96] = {};   // raw spec+range, to log only on change
@@ -673,7 +683,7 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     // while any ordinary subscriber is on.
     if (!s->distanceEnabled && !s->countForFlashFix &&
         !headOffsetGateWantsPanel() && s->censusSkipCount == 0 &&
-        s->censusSkipHi == 0 && !drawCensusArmed()) {
+        s->censusSkipRangeCount == 0 && !drawCensusArmed()) {
         return DrawVerdict::kNone;
     }
     const uint32_t rtvGen = bindingGeneration(BindSlot::Rtv0);
@@ -704,13 +714,15 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         }
     }
     // The bisection form: this draw's position in the frame, against the
-    // configured range. eyeDrawsThisFrame counts BOTH eyes through one frame,
-    // so a range can land on one eye's pass -- which is a feature: an
+    // configured ranges. eyeDrawsThisFrame counts BOTH eyes through one
+    // frame, so a range can land on one eye's pass -- which is a feature: an
     // eye-swapped overlay probed per eye says which pass draws what.
-    if (s->censusSkipHi && s->eyeDrawsThisFrame >= s->censusSkipLo &&
-        s->eyeDrawsThisFrame <= s->censusSkipHi) {
-        ++s->censusSkipped;
-        return DrawVerdict::kSkip;
+    for (uint32_t i = 0; i < s->censusSkipRangeCount; ++i) {
+        if (s->eyeDrawsThisFrame >= s->censusSkipRange[i].lo &&
+            s->eyeDrawsThisFrame <= s->censusSkipRange[i].hi) {
+            ++s->censusSkipped;
+            return DrawVerdict::kSkip;
+        }
     }
 
     // The head-offset gate's signal, recorded BEFORE the "does anything want to
@@ -1145,19 +1157,36 @@ void readCensusSkip(Config& cfg, State* s) {
     if (both == s->censusSkipSpec) return;
     memcpy(s->censusSkipSpec, both.c_str(), both.length() + 1);
 
-    s->censusSkipLo = 0;
-    s->censusSkipHi = 0;
+    s->censusSkipRangeCount = 0;
     if (!range.empty()) {
-        char* end = nullptr;
-        const unsigned long lo = strtoul(range.c_str(), &end, 10);
-        unsigned long hi = 0;
-        if (end && *end == '-') hi = strtoul(end + 1, &end, 10);
-        if (lo >= 1 && hi >= lo && end && *end == '\0') {
-            s->censusSkipLo = static_cast<uint32_t>(lo);
-            s->censusSkipHi = static_cast<uint32_t>(hi);
-        } else {
+        const char* p = range.c_str();
+        bool ok = true;
+        while (*p && s->censusSkipRangeCount < 4) {
+            while (*p == ' ' || *p == ',' || *p == '\t') ++p;
+            if (!*p) break;
+            char* end = nullptr;
+            const unsigned long lo = strtoul(p, &end, 10);
+            unsigned long hi = 0;
+            if (end != p && *end == '-') {
+                p = end + 1;
+                hi = strtoul(p, &end, 10);
+            }
+            if (end == p || lo < 1 || hi < lo) { ok = false; break; }
+            s->censusSkipRange[s->censusSkipRangeCount].lo = static_cast<uint32_t>(lo);
+            s->censusSkipRange[s->censusSkipRangeCount].hi = static_cast<uint32_t>(hi);
+            ++s->censusSkipRangeCount;
+            p = end;
+        }
+        // Trailing text past four ranges is also a refusal: silently keeping
+        // three of five ranges would probe something other than what was
+        // asked.
+        while (*p == ' ' || *p == ',' || *p == '\t') ++p;
+        if (!ok || *p) {
             Log::get().note("census skip: range \"%s\" is not LOW-HIGH with "
-                            "1 <= LOW <= HIGH; refused.", range.c_str());
+                            "1 <= LOW <= HIGH, up to four separated by "
+                            "commas; the whole setting is refused rather "
+                            "than half-applied.", range.c_str());
+            s->censusSkipRangeCount = 0;
         }
     }
 
@@ -1189,18 +1218,19 @@ void readCensusSkip(Config& cfg, State* s) {
         p = end;
     }
 
-    if (s->censusSkipCount || s->censusSkipHi) {
-        char list[128];
+    if (s->censusSkipCount || s->censusSkipRangeCount) {
+        char list[160];
         int  at = 0;
         for (uint32_t i = 0; i < s->censusSkipCount && at < 80; ++i) {
             at += _snprintf_s(list + at, sizeof(list) - at, _TRUNCATE, "%s%c:%u",
                               i ? ", " : "", s->censusSkip[i].kind,
                               s->censusSkip[i].n);
         }
-        if (s->censusSkipHi) {
+        for (uint32_t i = 0; i < s->censusSkipRangeCount && at < 140; ++i) {
             at += _snprintf_s(list + at, sizeof(list) - at, _TRUNCATE,
-                              "%spositions %u-%u", at ? " and " : "",
-                              s->censusSkipLo, s->censusSkipHi);
+                              "%spositions %u-%u",
+                              at ? (i ? ", " : " and ") : "",
+                              s->censusSkipRange[i].lo, s->censusSkipRange[i].hi);
         }
         Log::get().note("census skip ACTIVE: eye-target draws matching %s will "
                         "NOT be drawn until this is cleared. A probe, not a "
