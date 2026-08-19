@@ -1,6 +1,6 @@
 # EDVR — an unofficial patch for Elite Dangerous: Odyssey in VR
 
-Fixes for things that make Odyssey uncomfortable in a headset. Seven fixes,
+Fixes for things that make Odyssey uncomfortable in a headset. Eight fixes,
 two files, about three minutes — what each fix does is under
 [What it fixes](#what-it-fixes).
 
@@ -129,6 +129,17 @@ part you really see, so those tiles get drawn. Costs GPU time — about 6% at
 the values tested on a Quest 3. **Needs the second file.** Three settings:
 [The terrain fix](#the-terrain-fix-cull-guard).
 *Details: [docs/terrain-culling.md](docs/terrain-culling.md).*
+
+**The RemLok helmet's edge lines hanging along your nose.** *Off by default
+until field-verified.* When the emergency helmet deploys, its faint edge
+lines end up in the middle of your view instead of at your temples — the
+game stamps the same both-edges overlay into each eye with no per-eye
+placement (Frontier issue
+[69074](https://issues.frontierstore.net/issue-detail/69074)). Set
+`remlok_lines = outer` and each eye keeps only the line on its own outward
+side, which is what a real helmet looks like; `hide` removes the lines
+entirely. Takes effect within a second of saving, no restart.
+*Details: [docs/remlok-lines.md](docs/remlok-lines.md).*
 
 **The grey haze around the on-foot screen.** On foot, the world is shown on a
 flat screen surrounded by dark grey — lit pixels on an OLED headset, so the
