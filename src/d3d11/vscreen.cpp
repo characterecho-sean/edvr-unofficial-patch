@@ -22,6 +22,7 @@
 #include "device_hook.h"  // contextHookModeFor
 #include "draw_census.h"
 #include "glitch_frame.h"
+#include "remlok_fix.h"
 
 namespace edvr {
 namespace {
@@ -638,9 +639,10 @@ inline bool foreignContext(ID3D11DeviceContext* self) {
 
 // What the thunk that intercepted a draw should do with it. kPanel means the
 // panel-distance override is bound and endPanelOverride must run after the
-// draw; kSkip means the draw is a census-probe match and must not be
-// forwarded at all.
-enum class DrawVerdict { kNone, kPanel, kSkip };
+// draw; kSkip means the draw must not be forwarded at all (a census-probe
+// match, or the RemLok overlay in hide mode); kRemlok means the RemLok
+// overlay in outer mode -- forward it wrapped in remlokScissorBegin/End.
+enum class DrawVerdict { kNone, kPanel, kSkip, kRemlok };
 
 // kind, count and instances describe the draw for the census and the census
 // probe; every other consumer of this function is indifferent to them.
@@ -687,7 +689,8 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     // while any ordinary subscriber is on.
     if (!s->distanceEnabled && !s->countForFlashFix &&
         !headOffsetGateWantsPanel() && s->censusSkipCount == 0 &&
-        s->censusSkipRangeCount == 0 && !drawCensusArmed()) {
+        s->censusSkipRangeCount == 0 && !remlokWantsDraws() &&
+        !drawCensusArmed()) {
         return DrawVerdict::kNone;
     }
     const uint32_t rtvGen = bindingGeneration(BindSlot::Rtv0);
@@ -741,6 +744,14 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
             ++s->censusSkipped;
             return DrawVerdict::kSkip;
         }
+    }
+
+    // The RemLok overlay fix, after the probes so a census taken while it
+    // runs still records the draw the game submitted.
+    if (remlokWantsDraws()) {
+        const RemlokAction a = remlokOnEyeDraw(kind, count, instances);
+        if (a == RemlokAction::kHide) return DrawVerdict::kSkip;
+        if (a == RemlokAction::kScissor) return DrawVerdict::kRemlok;
     }
 
     // The head-offset gate's signal, recorded BEFORE the "does anything want to
@@ -1081,14 +1092,22 @@ void STDMETHODCALLTYPE hookedUnmap(ID3D11DeviceContext* self, ID3D11Resource* re
 void STDMETHODCALLTYPE hookedDraw(ID3D11DeviceContext* self, UINT count, UINT start) {
     ++g_state->thunkHits[kHitDraw];
     const DrawVerdict v = beginPanelOverride(self, 'D', count, 1);
-    if (v != DrawVerdict::kSkip) g_state->realDraw(self, count, start);
+    if (v != DrawVerdict::kSkip) {
+        if (v == DrawVerdict::kRemlok) remlokScissorBegin(self);
+        g_state->realDraw(self, count, start);
+        if (v == DrawVerdict::kRemlok) remlokScissorEnd(self);
+    }
     if (v == DrawVerdict::kPanel) endPanelOverride(self);
 }
 void STDMETHODCALLTYPE hookedDrawIndexed(ID3D11DeviceContext* self, UINT count,
                                          UINT startIndex, INT baseVertex) {
     ++g_state->thunkHits[kHitDrawIndexed];
     const DrawVerdict v = beginPanelOverride(self, 'I', count, 1);
-    if (v != DrawVerdict::kSkip) g_state->realDrawIndexed(self, count, startIndex, baseVertex);
+    if (v != DrawVerdict::kSkip) {
+        if (v == DrawVerdict::kRemlok) remlokScissorBegin(self);
+        g_state->realDrawIndexed(self, count, startIndex, baseVertex);
+        if (v == DrawVerdict::kRemlok) remlokScissorEnd(self);
+    }
     if (v == DrawVerdict::kPanel) endPanelOverride(self);
 }
 void STDMETHODCALLTYPE hookedDrawInstanced(ID3D11DeviceContext* self, UINT perInstance,
@@ -1096,7 +1115,9 @@ void STDMETHODCALLTYPE hookedDrawInstanced(ID3D11DeviceContext* self, UINT perIn
                                            UINT startInstance) {
     const DrawVerdict v = beginPanelOverride(self, 'N', perInstance, instances);
     if (v != DrawVerdict::kSkip) {
+        if (v == DrawVerdict::kRemlok) remlokScissorBegin(self);
         g_state->realDrawInstanced(self, perInstance, instances, startVertex, startInstance);
+        if (v == DrawVerdict::kRemlok) remlokScissorEnd(self);
     }
     if (v == DrawVerdict::kPanel) endPanelOverride(self);
 }
@@ -1106,8 +1127,10 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
                                                   UINT startInstance) {
     const DrawVerdict v = beginPanelOverride(self, 'X', perInstance, instances);
     if (v != DrawVerdict::kSkip) {
+        if (v == DrawVerdict::kRemlok) remlokScissorBegin(self);
         g_state->realDrawIndexedInstanced(self, perInstance, instances, startIndex,
                                           baseVertex, startInstance);
+        if (v == DrawVerdict::kRemlok) remlokScissorEnd(self);
     }
     if (v == DrawVerdict::kPanel) endPanelOverride(self);
 }
@@ -1300,6 +1323,7 @@ void vScreenRefreshConfig() {
     s->distanceIndex = readDistanceIndex(cfg);
     s->countForFlashFix = glitchFrameNeedsEyeDraws();
     readCensusSkip(cfg, s);
+    remlokConfigure(cfg);
     // Every fix.head_offset_* key, on the reload path as well as the startup
     // one. A config reader on only one of the two is a specific repeatable bug
     // -- reload-only means the value stays its C++ initialiser for the whole
@@ -1373,6 +1397,7 @@ void vScreenFrameBoundary() {
     // Before this frame's counters are read or reset: a pending census starts
     // here, a running one advances, a spent one writes its tables.
     drawCensusFrameBoundary(s->frameNo);
+    remlokFrameBoundary();
 
     // The per-frame invalidation lives in binding_shadow now, and device_hook
     // calls it once for both fixes. Doing it here as well would be harmless but
@@ -1710,6 +1735,7 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     g_state->distanceEnabled = scale != 1.0f;
     g_state->distanceIndex = readDistanceIndex(cfg);
     readCensusSkip(cfg, g_state);
+    remlokConfigure(cfg);
     // installGlitchFrameFix is called before this, deliberately, so this is its
     // settled answer rather than a guess about config it has not read yet.
     g_state->countForFlashFix = glitchFrameNeedsEyeDraws();
@@ -1842,6 +1868,7 @@ void shutdownVScreenFixes() {
         g_state->ourCb->Release();
         g_state->ourCb = nullptr;
     }
+    remlokShutdown();
     g_state->hook.uninstall();
 }
 
