@@ -7,6 +7,7 @@
 #include "../common/config.h"
 #include "../common/frame_flag.h"
 #include "../common/log.h"
+#include "../common/timing.h"
 #include "binding_shadow.h"
 
 namespace edvr {
@@ -26,6 +27,14 @@ constexpr uint32_t kArmIndexCount = 100;
 bool g_pinned = false;
 bool g_flipX = false;
 bool g_flipY = false;
+// Compensation gain. 1.0 is the geometric answer -- pixels-per-tangent
+// times the head-forward tangents SHOULD hold a direction exactly -- and
+// the first field flight said the star still tracked the gaze under both
+// signs, which is the signature of a magnitude or timing error rather
+// than a sign error. Live-tuned to find the truth: the gain that pins by
+// eye measures the real relationship, and if NO gain pins, the problem is
+// the pose's timing, not its scale.
+float g_gain = 1.0f;
 
 // The run state: inside a star cluster, and how many clusters this frame
 // has ended (0 while the first -- left eye -- is open).
@@ -37,6 +46,7 @@ UINT                   g_savedVpCount = 0;
 D3D11_VIEWPORT         g_savedVps[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE] = {};
 
 uint64_t g_applied = 0;
+uint64_t g_lastDiagMs = 0;
 
 bool isFamily(char kind, ResourceInfo* atlasOut) {
     if (kind != kKind) return false;
@@ -73,6 +83,10 @@ void witchstarConfigure(Config& cfg) {
     }
     g_flipX = cfg.getBool("advanced.witchstar_flip_x", false);
     g_flipY = cfg.getBool("advanced.witchstar_flip_y", false);
+    float gain = cfg.getFloat("advanced.witchstar_gain", 1.0f);
+    if (gain < 0.0f) gain = 0.0f;
+    if (gain > 3.0f) gain = 3.0f;
+    g_gain = gain;
 
     if (was != g_pinned) {
         Log::get().note("witchstar: %s. The jump tunnel's destination star is "
@@ -127,8 +141,8 @@ void witchstarBegin(ID3D11DeviceContext* ctx) {
     // percent, which is beneath notice for a glow sprite, so one number
     // serves both axes.
     const float pxPerTan = vp.Width / span;
-    float sx = tx * pxPerTan;
-    float sy = -ty * pxPerTan;   // +y is up in the head frame, down on screen
+    float sx = tx * pxPerTan * g_gain;
+    float sy = -ty * pxPerTan * g_gain;   // +y up in the head frame, down on screen
     if (g_flipX) sx = -sx;
     if (g_flipY) sy = -sy;
     // A star more than a viewport off-axis is out of view; the clamp only
@@ -148,14 +162,22 @@ void witchstarBegin(ID3D11DeviceContext* ctx) {
     ctx->RSSetViewports(1, &shifted);
     g_engaged = true;
 
-    if (++g_applied == 1) {
-        Log::get().note("witchstar: pinned engaged -- the destination star "
-                        "now holds the ship's forward axis. First shift "
-                        "%+.0f,%+.0f px (head-forward tangents %+.3f,%+.3f). "
-                        "If the star moves WITH your head twice as fast "
-                        "instead of holding still, set witchstar_flip_x=1 "
-                        "(and _y for vertical) under [advanced].",
-                        sx, sy, tx, ty);
+    // Telemetry while engaged, throttled to one line every two seconds: the
+    // tangents are what the pose said, the shift is what was done with
+    // them, and a reader with the headset on says what actually happened.
+    // The three theories -- wrong sign, wrong scale, stale pose -- each
+    // print a different relationship here.
+    ++g_applied;
+    const uint64_t now = nowMs();
+    if (g_applied == 1 || now - g_lastDiagMs >= 2000) {
+        g_lastDiagMs = now;
+        Log::get().note("witchstar: shift %+.0f,%+.0f px from tangents "
+                        "%+.3f,%+.3f (gain %.2f, flips %d/%d, %.0f px/tan). "
+                        "Tune witchstar_gain live until the star holds "
+                        "still; if no gain does, the pose's timing is the "
+                        "suspect, not its scale.",
+                        sx, sy, tx, ty, g_gain, g_flipX ? 1 : 0,
+                        g_flipY ? 1 : 0, pxPerTan * g_gain);
     }
 }
 
