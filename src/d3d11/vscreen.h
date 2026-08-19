@@ -26,6 +26,24 @@ struct ID3D11DeviceContext;
 
 namespace edvr {
 
+// Above this many draws into the eye textures in one frame, a SCENE is being
+// rendered rather than a menu.
+//
+// Measured, not chosen: menu-only sessions peak at 20 and 22 (2026-08-14
+// 15:48, 2026-08-15 16:21, neither reaching LoadGame) and the flash detector's
+// own validation saw 0-to-22 over 300 menu frames, while gameplay clears 100
+// even in sessions quit seconds after loading in (peaks of 119 and 126)
+// against session peaks of 975 on a Quest 3 and 1074 on a Pimax.
+//
+// It lives HERE because the count is this module's -- it is incremented in
+// beginPanelOverride and handed out at the frame boundary -- and because the
+// alternative is a fourth copy of one measurement. camera_view kept its own
+// (kMenuEyeDraws) and its comment already said what that costs: "a third
+// number for it would be a third thing to re-measure". glitch_frame's
+// minEyeDraws is deliberately still its own, being a per-fix tunable rather
+// than this fact.
+constexpr uint32_t kSceneEyeDraws = 100;
+
 // Installs the context hooks using the mechanism the caller decided for this
 // device -- shared with the exposure hooks so the two never split modes on
 // the one context. See device_hook.h.

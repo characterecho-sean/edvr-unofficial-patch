@@ -24,6 +24,7 @@
 #include "fov_probe.h"
 #include "glitch_frame.h"
 #include "holo_fix.h"
+#include "journal_watch.h"  // gameplay started, for the low-peak notice
 #include "remlok_fix.h"
 #include "witchstar_fix.h"
 
@@ -400,6 +401,13 @@ struct State {
     // consumed and zeroed by vScreenReclaimHooks.
     uint32_t eyeDrawsSinceReclaim = 0;
     bool     starvationNoted = false;
+    bool     lowPeakNoted = false;
+    // When the journal first said gameplay had started, 0 until it does. The
+    // low-peak notice is timed off this rather than off install, because
+    // "twenty seconds since the DLL loaded" and "twenty seconds of the game
+    // actually being played" are different claims and only the second one
+    // makes a low peak mean anything.
+    uint64_t gameplayMs = 0;
     bool     recognitionLostNoted = false;
     // When the fixes were installed, for the starvation check. Frames are not
     // a clock: a loading screen measured at 1790fps (see glitch_frame's
@@ -452,6 +460,19 @@ void noteUncountedTarget(State* s, uint32_t w, uint32_t h) {
     s->rtSeenW[s->rtSeenCount] = w;
     s->rtSeenH[s->rtSeenCount] = h;
     ++s->rtSeenCount;
+}
+
+// The list above, as text. Two notices need it now -- the starvation one and
+// the low-peak one below it -- and the second was written only because the
+// first could not fire, so the sizes had better read identically in both.
+void formatSeenSizes(State* s, char* out, size_t bytes) {
+    out[0] = '\0';
+    for (uint32_t i = 0; i < s->rtSeenCount; ++i) {
+        char one[32];
+        _snprintf_s(one, sizeof(one), _TRUNCATE, "%s%ux%u", i ? ", " : "",
+                    s->rtSeenW[i], s->rtSeenH[i]);
+        strncat_s(out, bytes, one, _TRUNCATE);
+    }
 }
 
 // Is this render target one of the two textures sent to the headset?
@@ -1553,16 +1574,16 @@ void vScreenFrameBoundary() {
     const bool pastStartup =
         (now - s->installMs) >= kTotalsWindowMs && s->frameNo >= kMinFramesDrawn;
 
+    // When gameplay started, by the only source that is not downstream of the
+    // counter this file owns. See the low-peak notice below for why that
+    // matters; false while the watcher is off or the folder was not found,
+    // which correctly leaves that notice silent rather than guessing.
+    if (!s->gameplayMs && journalGameplay()) s->gameplayMs = now;
+
     if (!s->starvationNoted && pastStartup && s->eyeDrawsMax == 0) {
         s->starvationNoted = true;
         char sizes[192];
-        sizes[0] = '\0';
-        for (uint32_t i = 0; i < s->rtSeenCount; ++i) {
-            char one[32];
-            _snprintf_s(one, sizeof(one), _TRUNCATE, "%s%ux%u", i ? ", " : "",
-                        s->rtSeenW[i], s->rtSeenH[i]);
-            strncat_s(sizes, sizeof(sizes), one, _TRUNCATE);
-        }
+        formatSeenSizes(s, sizes, sizeof(sizes));
         // Four starvations, four different next moves -- and the advice used
         // to be one string that fit only one of them. A user with the openvr
         // half installed and NOTHING seen was told to install what they had
@@ -1628,6 +1649,62 @@ void vScreenFrameBoundary() {
             static_cast<unsigned long long>(s->panelExclusions),
             s->eyeW ? "has published its size" : "has published nothing",
             advice);
+    }
+
+    // RECOGNISED, BUT NOWHERE NEAR ENOUGH: the starvation notice's blind spot.
+    //
+    // That notice needs a session peak of EXACTLY ZERO, and two field reports
+    // (2026-08-19, one Steam install, two sessions) arrived just above it: an
+    // eye-draw peak of 18 and 20 for whole sessions of real play, against the
+    // 975 and 1074 measured here on a Quest 3 and a Pimax. Twenty is what a
+    // session that never reaches LoadGame produces. So every fix that reads
+    // the count was inert -- the gate needs 50, the flash detector 100 -- and
+    // the recogniser reported itself healthy, because it had recognised
+    // something. The list of sizes it REJECTED, which is the answer, was
+    // collected all along and printed only in the zero case.
+    //
+    // WHY THE JOURNAL AND NOT THE COUNT decides that gameplay is happening:
+    // every other gameplay signal in the DLL is downstream of this counter,
+    // so asking one of them here would be asking the broken thing whether it
+    // is broken. camera_view's own latch is the case in point -- it ORs the
+    // journal with the draw count, and on both of those field sessions the
+    // journal had to carry it, which is itself in the logs.
+    //
+    // WHY A LOW PEAK AFTER LOADGAME IS DIAGNOSTIC AT ALL, given that the
+    // count legitimately depends on what the player is doing: the load-in
+    // renders a full scene before the journal writes LoadGame -- measured at
+    // 45 s ahead on the Quest 3 and 25 s on the Pimax -- and a session peak
+    // never falls. So on a healthy rig the peak has already passed this mark
+    // before gameplay is announced, whatever the player then does, including
+    // spending the entire session on foot in first person where the world
+    // goes to the panel and the eyes see almost nothing.
+    //
+    // One totals window of gameplay before it speaks, so a player who quits
+    // to the menu the instant they load in is not accused of anything.
+    if (!s->lowPeakNoted && s->eyeDrawsMax > 0 && s->gameplayMs &&
+        (now - s->gameplayMs) >= kTotalsWindowMs &&
+        s->eyeDrawsMax <= kSceneEyeDraws) {
+        s->lowPeakNoted = true;
+        char sizes[192];
+        formatSeenSizes(s, sizes, sizeof(sizes));
+        Log::get().note(
+            "vScreen: eye-sized render targets ARE being recognised, but the busiest "
+            "frame this session had only %u draw(s) into one -- and gameplay has been "
+            "running for %u seconds. Anything above %u means a scene is being drawn; a "
+            "menu peaks at about 20, and the sessions measured for these numbers peaked "
+            "at 975 and 1074. So the world is being drawn somewhere that is not an eye "
+            "texture, and only the last few passes land on one. Consequences, all "
+            "silent until now: Explorer Cam cannot arm (it needs more than 50 in a "
+            "frame), the transition flash fix cannot withhold anything (100), and the "
+            "camera scan loses its own gameplay signal. Render targets seen and NOT "
+            "counted: %s. One eye is %ux%u and the panel is %ux%u. If none of those "
+            "sizes is your eye texture, something between the game and the headset is "
+            "rendering at another resolution -- supersampling, an upscaler, or a "
+            "wrapper -- and this log is worth reporting with that setting named.",
+            s->eyeDrawsMax,
+            static_cast<uint32_t>((now - s->gameplayMs) / 1000u), kSceneEyeDraws,
+            s->rtSeenCount ? sizes : "none big enough to be one",
+            s->eyeW, s->eyeH, s->panelW, s->panelH);
     }
 
     // Frames that forced nothing are menus and loading screens, not asymmetry.

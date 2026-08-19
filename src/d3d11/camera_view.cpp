@@ -14,6 +14,7 @@
 #include "../common/timing.h"
 #include "head_offset_gate.h"
 #include "journal_watch.h"
+#include "vscreen.h"  // kSceneEyeDraws -- the count is vScreen's
 
 namespace edvr {
 namespace {
@@ -35,11 +36,11 @@ constexpr uint64_t kMaxFaults = 4096;
 // means that address is gone, not that we were unlucky.
 constexpr uint64_t kMaxReadFaults = 8;
 
-// Above this many draws into the eye textures in one frame, a scene is being
-// rendered rather than a menu -- the fallback for when the journal cannot be
-// read. See the measurement at its use in cameraViewTick: menu 20-22, gameplay
-// clearing 100 within seconds of loading in, session peaks 975 and 1074.
-constexpr uint32_t kMenuEyeDraws = 100;
+// The scene-versus-menu draw count -- the fallback for when the journal cannot
+// be read -- is vScreen's, because the count itself is. It was a local copy
+// here (kMenuEyeDraws) and the comment on it already named the cost of that:
+// a third thing to re-measure. See kSceneEyeDraws in vscreen.h for the
+// measurement, and cameraViewTick below for what it decides.
 
 // Four attempts, forty seconds apart. Enough to cover a slow load or a player
 // who reaches the surface late; few enough that a genuinely wrong anchor -- the
@@ -1369,7 +1370,7 @@ void cameraViewTick(uint32_t eyeDraws) {
     pollCandidates();
 
     const bool journalSaysPlaying = journalWatchActive() && journalGameplay();
-    if (!g_s.sawGameplay && (journalSaysPlaying || eyeDraws > kMenuEyeDraws)) {
+    if (!g_s.sawGameplay && (journalSaysPlaying || eyeDraws > kSceneEyeDraws)) {
         g_s.sawGameplay = true;
         // Which source said so, because they can disagree and the difference
         // is diagnosable: the journal naming it means the boundary is exact,
