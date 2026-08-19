@@ -130,15 +130,18 @@ the values tested on a Quest 3. **Needs the second file.** Three settings:
 [The terrain fix](#the-terrain-fix-cull-guard).
 *Details: [docs/terrain-culling.md](docs/terrain-culling.md).*
 
-**The RemLok helmet's edge lines hanging along your nose.** *Off by default
-until field-verified.* When the emergency helmet deploys, its faint edge
-lines end up in the middle of your view instead of at your temples — the
-game stamps the same both-edges overlay into each eye with no per-eye
-placement (Frontier issue
-[69074](https://issues.frontierstore.net/issue-detail/69074)). Set
-`remlok_lines = outer` and each eye keeps only the line on its own outward
-side, which is what a real helmet looks like; `hide` removes the lines
-entirely. Takes effect within a second of saving, no restart.
+**The RemLok helmet's edge lines hanging along your nose.** When the
+emergency helmet deploys, its faint edge lines end up in the middle of your
+view instead of at your temples — the game stamps the same both-edges
+overlay into each eye with no per-eye placement (Frontier issue
+[69074](https://issues.frontierstore.net/issue-detail/69074)). EDVR clips
+each eye to the line on its own outward side, which is what a real helmet
+looks like; `remlok_lines = hide` removes the lines entirely, `stock`
+restores the game's behaviour, and on a wide-FOV headset — where even the
+correct placement sits at the lens rim — `remlok_scale` pulls the lines
+inward to where you can see them. Field-verified on a Pimax via
+OpenComposite; if any rig shows the lines back on the nose, `remlok_swap_eyes`
+in the ini is the one-line correction, and that log is worth an issue.
 *Details: [docs/remlok-lines.md](docs/remlok-lines.md).*
 
 **The grey haze around the on-foot screen.** On foot, the world is shown on a

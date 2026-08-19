@@ -84,17 +84,23 @@ colour pipeline entirely, which is why its colour drifts from the palette
 
 `fix.remlok_lines` in `edvr.ini`, live within a second of saving:
 
-- **`outer`** — the overlay draw runs inside a substituted scissor rectangle:
-  each eye keeps the fraction of the overlay nearest its own temple
-  (`advanced.remlok_keep_fraction`, default 0.55) and the nasal remainder is
-  clipped. Each eye then shows one line, at its outer edge — which is what a
-  real helmet looks like, since your nose hides the inner edge. The draw, its
-  texture and its constants are untouched; the game's rasterizer state is
-  cloned once with scissoring enabled and restored immediately after the
-  draw.
+- **`outer`** (the default) — the overlay draw runs inside a substituted
+  scissor rectangle: each eye keeps the fraction of the overlay nearest its
+  own temple (`advanced.remlok_keep_fraction`, default 0.55) and the nasal
+  remainder is clipped. Each eye then shows one line, at its outer edge —
+  which is what a real helmet looks like, since your nose hides the inner
+  edge. The draw, its texture and its constants are untouched; the game's
+  rasterizer state is cloned once with scissoring enabled and restored
+  immediately after the draw. Field-verified (Pimax via OpenComposite):
+  one line per eye at the temples, nothing along the nose.
+- **`advanced.remlok_scale`** — on a wide-FOV headset even the corrected
+  placement is nearly invisible, because the image border *is* the lens rim
+  there. Below 1.0 the overlay draw runs in a centred, scaled-down
+  viewport, which renders the whole helmet frame slightly smaller and pulls
+  the edge lines inward to a visible angle. This is the external
+  approximation of the angular-space placement described below.
 - **`hide`** — the overlay draw is not forwarded at all.
-- **`stock`** — nothing is done. This is the default until `outer` has been
-  verified in the field.
+- **`stock`** — nothing is done.
 
 Which eye is which is taken from draw order within the frame (the left eye's
 final pass draws first on every build measured), reset every frame, with

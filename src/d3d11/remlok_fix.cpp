@@ -27,6 +27,13 @@ enum class Mode : uint32_t { kStock, kOuter, kHide };
 Mode  g_mode = Mode::kStock;
 float g_keep = 0.55f;
 bool  g_swap = false;
+// Scale of the substituted viewport for the overlay draw, centred. Below 1
+// the whole helmet frame renders smaller, which pulls the edge lines INWARD
+// from the image border -- on a wide-FOV headset the border is the lens rim,
+// where the game's own placement is invisible (measured on a Pimax: the
+// correctly-clipped temporal line could only be confirmed in the desktop
+// mirror). 1.0 keeps the game's placement.
+float g_scale = 1.0f;
 
 // Matched draws this frame: 0 is the left eye, 1 the right. Reset at the
 // frame boundary so one odd frame cannot invert the pair for the session.
@@ -41,11 +48,14 @@ ID3D11RasterizerState* g_clone = nullptr;
 bool g_cloneSourceIsDefault = false;
 
 // What begin set, for end to put back. engaged is the contract between the
-// two: end restores exactly when begin says it changed something.
+// two: end restores exactly what begin says it changed.
 bool                   g_engaged = false;
+bool                   g_vpEngaged = false;
 ID3D11RasterizerState* g_savedRS = nullptr;
 UINT                   g_savedRectCount = 0;
 D3D11_RECT             g_savedRects[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE] = {};
+UINT                   g_savedVpCount = 0;
+D3D11_VIEWPORT         g_savedVps[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE] = {};
 
 uint64_t g_applied = 0;
 uint64_t g_hidden = 0;
@@ -120,6 +130,14 @@ void remlokConfigure(Config& cfg) {
     g_keep = keep;
     g_swap = cfg.getBool("advanced.remlok_swap_eyes", false);
 
+    float scale = cfg.getFloat("advanced.remlok_scale", 1.0f);
+    // Below half the helmet frame shrinks into a porthole; above 1 would
+    // push the lines further into the lens rim, the opposite of the knob's
+    // reason to exist.
+    if (scale < 0.50f) scale = 0.50f;
+    if (scale > 1.00f) scale = 1.00f;
+    g_scale = scale;
+
     if (was != g_mode) {
         const char* names[] = {"stock", "outer", "hide"};
         Log::get().note("remlok lines: %s. The overlay is recognised by shape "
@@ -182,10 +200,31 @@ void remlokScissorBegin(ID3D11DeviceContext* ctx) {
     g_savedRectCount = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
     ctx->RSGetScissorRects(&g_savedRectCount, g_savedRects);
 
+    // The substituted viewport, when a scale is set: the same centre,
+    // g_scale of the size. The fullscreen triangle renders the whole
+    // overlay into it, which moves the edge lines inward from the image
+    // border -- the border is the lens rim on a wide-FOV headset, and a
+    // line drawn there is a line nobody sees. The undrawn margin ring is
+    // territory the overlay used to cover; nothing else draws after it on
+    // this target, so leaving it untouched is leaving the scene visible.
+    g_vpEngaged = false;
+    if (g_scale < 0.999f) {
+        g_savedVpCount = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
+        ctx->RSGetViewports(&g_savedVpCount, g_savedVps);
+        D3D11_VIEWPORT scaled = vp;
+        scaled.Width = vp.Width * g_scale;
+        scaled.Height = vp.Height * g_scale;
+        scaled.TopLeftX = vp.TopLeftX + (vp.Width - scaled.Width) * 0.5f;
+        scaled.TopLeftY = vp.TopLeftY + (vp.Height - scaled.Height) * 0.5f;
+        ctx->RSSetViewports(1, &scaled);
+        g_vpEngaged = true;
+        vp = scaled;   // the scissor below clips against what is drawn
+    }
+
     // Each eye keeps the g_keep fraction nearest its own temple: the left
-    // eye's rectangle starts at the viewport's left edge, the right eye's
-    // ends at its right edge. What is clipped is the nasal remainder, where
-    // the wrong-side line sat.
+    // eye's rectangle starts at the (possibly scaled) viewport's left edge,
+    // the right eye's ends at its right edge. What is clipped is the nasal
+    // remainder, where the wrong-side line sat.
     const LONG x0 = static_cast<LONG>(vp.TopLeftX);
     const LONG y0 = static_cast<LONG>(vp.TopLeftY);
     const LONG w = static_cast<LONG>(vp.Width);
@@ -209,8 +248,9 @@ void remlokScissorBegin(ID3D11DeviceContext* ctx) {
         Log::get().note("remlok lines: outer mode engaged -- each eye now "
                         "keeps the line at its own temple and loses the one "
                         "along the nose. First applied to the %s eye, %ld of "
-                        "%ld px kept.",
-                        g_pendingRight ? "right" : "left", keep, w);
+                        "%ld px kept, overlay scale %.2f.",
+                        g_pendingRight ? "right" : "left", keep, w,
+                        g_scale);
     }
 }
 
@@ -224,6 +264,11 @@ void remlokScissorEnd(ID3D11DeviceContext* ctx) {
     }
     ctx->RSSetScissorRects(g_savedRectCount,
                            g_savedRectCount ? g_savedRects : nullptr);
+    if (g_vpEngaged) {
+        g_vpEngaged = false;
+        ctx->RSSetViewports(g_savedVpCount,
+                            g_savedVpCount ? g_savedVps : nullptr);
+    }
 }
 
 void remlokFrameBoundary() { g_matchesThisFrame = 0; }
