@@ -52,6 +52,15 @@ struct State {
     // resolves with neither, which is what the expiry in the accessor is
     // for. Zero means not armed.
     uint64_t     jumpArmedMs = 0;
+    // Status Flags bit 30, the FSD jump itself. StartJump fires at the
+    // COUNTDOWN, five seconds before any tunnel exists, and the field found
+    // the difference immediately: the forming-wormhole sprite is the same
+    // family, world-anchored, and was being pinned on the pad. The flag is
+    // what narrows the window to the tunnel; `known` is false when Status
+    // lacks the field, and the accessor then falls back to a countdown-
+    // length delay after StartJump.
+    bool         fsdJumpKnown = false;
+    bool         fsdJumpLive = false;
     // Live Flags2 from Status.json: OnFoot is bit 0. `onFootKnown` is false
     // whenever the file lacks a Flags2 field, which is exactly the menu and
     // shutdown states -- Status then carries only "Flags":0.
@@ -159,9 +168,10 @@ void scanRange(const char* p, uint32_t n) {
 }
 
 // Status.json, reread whole on the same cadence: it is a few hundred bytes,
-// rewritten by the game about once a second. The single fact taken from it is
-// Flags2's OnFoot bit; a file without a Flags2 field -- the menu, shutdown --
-// answers "not known", and callers fall back to keys.
+// rewritten by the game about once a second. Two facts are taken from it:
+// Flags2's OnFoot bit, and Flags' FSD-jump bit (30). A file without the
+// field -- the menu, shutdown -- answers "not known", and callers fall back
+// to keys and delays respectively.
 void pollStatus() {
     const std::wstring path = g_s.dir + L"\\Status.json";
     HANDLE f = CreateFileW(path.c_str(), GENERIC_READ,
@@ -171,7 +181,9 @@ void pollStatus() {
                            nullptr);
     bool parsed = false;
     bool sawFlags2 = false;
+    bool sawFlags = false;
     uint32_t flags2 = 0;
+    uint32_t flags = 0;
     if (f != INVALID_HANDLE_VALUE) {
         char buf[2048];
         DWORD got = 0;
@@ -183,6 +195,13 @@ void pollStatus() {
                 sawFlags2 = true;
                 flags2 = static_cast<uint32_t>(strtoul(p + 9, nullptr, 10));
             }
+            // "Flags2" contains "Flags" as a substring, so the plain field
+            // is found by requiring the quote to close right after it.
+            const char* q = strstr(buf, "\"Flags\":");
+            if (q) {
+                sawFlags = true;
+                flags = static_cast<uint32_t>(strtoul(q + 8, nullptr, 10));
+            }
         }
         CloseHandle(f);
     }
@@ -191,8 +210,15 @@ void pollStatus() {
         ++g_s.statusSamples;
         g_s.onFootKnown = sawFlags2;
         g_s.onFoot = sawFlags2 && (flags2 & 0x01u) != 0;
+        // Bit 30 of Flags: the FSD jump itself -- the tunnel, not the
+        // countdown before it. The distinction is what scopes the witchspace
+        // star fix off the forming-wormhole phase, where the game still
+        // positions the same sprite family correctly in the world.
+        g_s.fsdJumpKnown = sawFlags;
+        g_s.fsdJumpLive = sawFlags && (flags & 0x40000000u) != 0;
     } else if (++g_s.statusMisses >= 3) {
         g_s.onFootKnown = false;
+        g_s.fsdJumpKnown = false;
     }
 }
 
@@ -367,7 +393,14 @@ bool journalInJumpTunnel() {
         g_s.jumpArmedMs = 0;
         return false;
     }
-    return true;
+    // Inside the armed window, the tunnel itself: the Status flag when the
+    // game publishes it (about one-second granularity, plenty for an
+    // effect that lasts tens of seconds), a countdown-length delay when it
+    // does not. StartJump fires at the countdown, and the five seconds
+    // before the tunnel are normal space with the same sprite family
+    // drawn correctly -- the phase the field caught being pinned.
+    if (g_s.fsdJumpKnown) return g_s.fsdJumpLive;
+    return stampMs() - g_s.jumpArmedMs > 5500;
 }
 bool journalOnFootKnown() { return g_s.active && g_s.onFootKnown; }
 bool journalOnFoot() { return g_s.onFoot; }
