@@ -74,6 +74,18 @@ constexpr uint64_t kIdleDropMs = 3300;
 // passed by nine hundredths of a millisecond of accumulated rounding.
 constexpr uint64_t kPanelRunOverMs = 1150;
 
+// Draws into the eye textures in one frame, above which the world is being
+// rendered in stereo rather than composited from the flat panel. Lower than
+// vScreen's kSceneEyeDraws, and deliberately: that one separates gameplay
+// from a MENU across a whole session, while this one has to be cleared by a
+// single frame of a camera the player has just entered.
+//
+// Named rather than written three times. The rejection line below quotes it
+// back to the reader, and a message that disagrees with the test it describes
+// is worse than no message -- this is the same drift class as the ini
+// defaults that did not match the code's.
+constexpr uint32_t kSceneDraws = 50;
+
 // How often the in-camera heartbeat may repeat. Diagnostics only.
 constexpr uint64_t kHeartbeatMs = 6700;
 
@@ -94,6 +106,14 @@ struct Gate {
     uint32_t gateSinceEnter = 0;         // frames since the latch was set
     uint64_t gateEnterWindowMs = 670;    // after the panel stops
     uint32_t gateNearMisses = 0;         // rejected candidates, logged
+    // The busiest frame of the CURRENT panel-less gap.
+    //
+    // The arm test wants ONE frame above the scene threshold, so the number
+    // that decides it is the gap's peak, not whatever the last frame happened
+    // to carry. Reported by the rejection line below: "it never got close" and
+    // "it got there and something else failed" are different bugs, and a
+    // single frame's value cannot tell them apart.
+    uint32_t gapEyeDraws = 0;
     bool     gateIntent = false;
     bool     gateHaveKey = false;      // a press has been seen
     bool     gateKeyBound = false;     // a key is CONFIGURED, pressed or not
@@ -406,7 +426,7 @@ void headOffsetGateFrame(uint32_t frameNo, uint32_t panelDraws, uint32_t eyeDraw
     }
 
     const bool panelNow = panelDraws > 0;
-    const bool sceneNow = eyeDraws > 50;
+    const bool sceneNow = eyeDraws > kSceneDraws;
 
     // Say the panel is being counted, once, and how long it took to start.
     //
@@ -452,6 +472,10 @@ void headOffsetGateFrame(uint32_t frameNo, uint32_t panelDraws, uint32_t eyeDraw
         g.panelStoppedMs = 0;
         g.gateIdleFrames = 0;
         g.idleMs = 0;
+        // The gap's peak belongs to the gap. Carrying it across the panel's
+        // return would report the last camera stay's number against the next
+        // entry, which is the one thing a diagnostic must never do.
+        g.gapEyeDraws = 0;
         if (g.gatePanelRun < 10000) ++g.gatePanelRun;
         // The panel overrules the key, but NOT immediately -- and that
         // "not immediately" is the whole bug.
@@ -524,6 +548,7 @@ void headOffsetGateFrame(uint32_t frameNo, uint32_t panelDraws, uint32_t eyeDraw
                         g.gateSinceEnter);
     } else {
         ++g.gateSincePanel;
+        if (eyeDraws > g.gapEyeDraws) g.gapEyeDraws = eyeDraws;
         // The moment the panel stopped, in Status samples: keyless arming
         // requires a FRESHER on-foot sample than this, so a stale second of
         // "on foot" cannot arm the offset into a boarding animation.
@@ -753,50 +778,6 @@ void headOffsetGateFrame(uint32_t frameNo, uint32_t panelDraws, uint32_t eyeDraw
                             g.gateSinceEnter, eyeDraws,
                             g.gateSincePanel);
         }
-        // Say when a candidate was REJECTED, and by which number.
-        //
-        // Without this a gate that never opens is indistinguishable from a
-        // gate that is never asked, which is the whole difficulty of this
-        // feature: entering the external camera, boarding the ship and
-        // leaving Cinema Mode all look like "the panel stopped and a scene
-        // appeared", and only the numbers separate them. These lines are
-        // what a real discriminator would be built from.
-        // EVERY condition, every time it declines, for the first 20.
-        //
-        // This used to fire only when no key was bound, which suppressed it
-        // in exactly the configuration being debugged -- so the last flight
-        // produced a gate that did not arm and NOTHING saying which test
-        // failed. Three sessions have now been spent inferring the answer
-        // from notes that do not carry the numbers.
-        //
-        // Printing all four values costs one line per rejection and removes
-        // the guessing entirely: whichever one reads false is the bug.
-        // Only once the panel has been seen enough to matter. The
-        // budget was spent at frame 3062 last time -- during startup,
-        // with panelRun=0 and no key yet pressed -- so by the moment
-        // being debugged there were no lines left.
-        if (!g.gateInCamera && sceneNow && g.gatePanelRun > 30 &&
-            g.gateNearMisses < 20) {
-            ++g.gateNearMisses;
-            Log::get().note(
-                "head offset NOT armed: panelRun=%u (needs >30), sincePanel=%u "
-                "(needs >=8, window %u ms), eyeDraws=%u (needs >50), intent=%s, "
-                "key %s, pressed %s, view=%d (wants %d).",
-                g.gatePanelRun, g.gateSincePanel,
-                (uint32_t)g.gateEnterWindowMs, eyeDraws,
-                g.gateIntent ? "set" : "CLEAR",
-                g.gateKeyBound
-                    ? "BOUND"
-                    : (g.gateKeylessOn && g.liveOnFootKnown
-                           ? "not bound (keyless: the game's on-foot status "
-                             "stands in)"
-                           : "NOT BOUND -- no keyboard camera key found in "
-                             "your Elite bindings; bind one in Elite and it "
-                             "is picked up within seconds"),
-                g.gateHaveKey ? "yes" : "not yet this session",
-                g.gateViewIndex, g.gateWantView);
-        }
-
         // Too long since the panel for this to be a transition FROM it.
         // On-foot credit dies with the panel, not 300 frames later.
         //
@@ -810,7 +791,90 @@ void headOffsetGateFrame(uint32_t frameNo, uint32_t panelDraws, uint32_t eyeDraw
         // A second is still generous for a stutter and far short of a mode
         // change anybody could act on. It was 90 frames, and "generous for a
         // stutter" is a claim about milliseconds: 750 of them at 120Hz.
-        if (elapsedMs(g.panelStoppedMs, kPanelRunOverMs)) g.gatePanelRun = 0;
+        if (elapsedMs(g.panelStoppedMs, kPanelRunOverMs)) {
+            // Say when an entry was REJECTED, and by which number.
+            //
+            // Without this a gate that never opens is indistinguishable from
+            // a gate that is never asked, which is the whole difficulty of
+            // this feature: entering the external camera, boarding the ship
+            // and leaving Cinema Mode all look like "the panel stopped and a
+            // scene appeared", and only the numbers separate them. These
+            // lines are what a real discriminator would be built from.
+            //
+            // This used to fire only when no key was bound, which suppressed
+            // it in exactly the configuration being debugged -- so that
+            // flight produced a gate that did not arm and NOTHING saying
+            // which test failed. Printing all the values costs one line and
+            // removes the guessing: whichever one reads short is the bug.
+            //
+            // IT ALSO USED TO SIT BEHIND sceneNow, WHICH IS THE ONE
+            // CONDITION MOST LIKELY TO BE THE CULPRIT. Two field sessions
+            // (2026-08-19, a Steam install chaining EDHM and a dxgi.dll
+            // wrapper) had eye-draw counts that never passed 20 all session
+            // -- menu magnitude, against the 975 and 1074 session peaks
+            // measured on the two headsets here -- so the gate could not arm
+            // however the player pressed, and the line written to say so was
+            // gated on the very test that was failing. Both logs went out
+            // with no line naming eyeDraws at all, and the answer had to be
+            // inferred from the vScreen totals three modules away. A
+            // diagnostic must not require the thing it diagnoses.
+            //
+            // ONCE PER GAP, AT THE MOMENT THE CHANCE IS LOST, rather than
+            // once per frame. Dropping sceneNow without this would have
+            // spent the whole 20-line budget in a fifth of a second the
+            // first time the panel stopped -- 20 consecutive frames at
+            // 90Hz -- which is the same silence by a different route. Here
+            // the on-foot credit has just expired: the arm test wants
+            // panelRun > 30 and this line runs on the frame before it is
+            // zeroed, so it fires exactly when the entry window closes
+            // unarmed, and at most once for each. gateHaveKey keeps it out
+            // of startup, where a budget was spent at frame 3062 last time
+            // with panelRun=0 and no key yet pressed.
+            //
+            // WHAT THIS GIVES UP: a gap shorter than the credit never gets
+            // here at all, so sincePanel is always past its own floor by the
+            // time the line prints and can no longer be the number that reads
+            // short. That case is the one-frame hitch, which cannot be an
+            // entry anyway -- the mode change alone is 25 to 86 frames
+            // (6ac.6c) -- and a press left hanging by one already has its own
+            // line from the panel branch above.
+            if (g.gatePanelRun > 30 && !g.gateInCamera && g.gateHaveKey &&
+                g.gateNearMisses < 20) {
+                ++g.gateNearMisses;
+                Log::get().note(
+                    "head offset NOT armed and the entry window has now "
+                    "closed: panelRun=%u (needs >30), sincePanel=%u (needs "
+                    ">=8, window %u ms), eyeDraws peaked at %u in this gap "
+                    "(needs >%u), intent=%s, key %s, pressed %s, view=%d "
+                    "(wants %d). Whichever of those reads short is why the "
+                    "camera did not take.%s",
+                    g.gatePanelRun, g.gateSincePanel,
+                    (uint32_t)g.gateEnterWindowMs, g.gapEyeDraws, kSceneDraws,
+                    g.gateIntent ? "set" : "CLEAR",
+                    g.gateKeyBound
+                        ? "BOUND"
+                        : (g.gateKeylessOn && g.liveOnFootKnown
+                               ? "not bound (keyless: the game's on-foot "
+                                 "status stands in)"
+                               : "NOT BOUND -- no keyboard camera key found "
+                                 "in your Elite bindings; bind one in Elite "
+                                 "and it is picked up within seconds"),
+                    g.gateHaveKey ? "yes" : "not yet this session",
+                    g.gateViewIndex, g.gateWantView,
+                    // Only where the count IS the short one. Printed always,
+                    // it explained an intent that had expired as a graphics
+                    // problem, which is a log line telling the reader the
+                    // wrong module to go and look at.
+                    g.gapEyeDraws <= kSceneDraws
+                        ? " That peak is the short one here, and it is not "
+                          "something you did: it means the world is not being "
+                          "drawn into anything the size of an eye texture. The "
+                          "vScreen totals in this log carry the same number for "
+                          "the whole session."
+                        : "");
+            }
+            g.gatePanelRun = 0;
+        }
     }
     // The offset is armed from two SEPARATE facts, and keeping them apart
     // is what lets the view change matter.

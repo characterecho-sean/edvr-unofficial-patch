@@ -101,6 +101,29 @@ void sceneFrame(uint32_t n = 1) {
     }
 }
 
+// THE SAME TWO ON A RIG WHERE THE RECOGNISER IS BARELY SEEING ANYTHING.
+//
+// Not an invented shape: a Steam install running EDHM and a dxgi.dll wrapper
+// reported eye-draw peaks of 18 and 20 for whole sessions of real play
+// (2026-08-19, two logs), against 975 and 1074 measured here. The panel is
+// still recognised and the void still clears twice a frame -- eye-sized
+// targets exist -- but the world is drawn into something else and only a
+// dozen passes a frame land on an eye texture. Everything the gate reads
+// except the draw count is intact, which is exactly what makes it hard to
+// see from a log.
+void starvedPanelFrame(uint32_t n = 1) {
+    for (uint32_t i = 0; i < n; ++i) {
+        advanceOneFrame();
+        headOffsetGateFrame(g_frame++, 4, 12);
+    }
+}
+void starvedSceneFrame(uint32_t n = 1) {
+    for (uint32_t i = 0; i < n; ++i) {
+        advanceOneFrame();
+        headOffsetGateFrame(g_frame++, 0, 12);
+    }
+}
+
 // Neither: a menu, a loading screen, a mode change we cannot see.
 void idleFrame(uint32_t n = 1) {
     for (uint32_t i = 0; i < n; ++i) {
@@ -122,6 +145,10 @@ void idleFrame(uint32_t n = 1) {
 // a two-frame settle, a single dropped panel composite.
 void panelFor(uint64_t ms) { const uint64_t t = g_fakeMs + ms;
                              while (g_fakeMs < t) panelFrame(); }
+void starvedPanelFor(uint64_t ms) { const uint64_t t = g_fakeMs + ms;
+                                    while (g_fakeMs < t) starvedPanelFrame(); }
+void starvedSceneFor(uint64_t ms) { const uint64_t t = g_fakeMs + ms;
+                                    while (g_fakeMs < t) starvedSceneFrame(); }
 void sceneFor(uint64_t ms) { const uint64_t t = g_fakeMs + ms;
                              while (g_fakeMs < t) sceneFrame(); }
 void idleFor(uint64_t ms)  { const uint64_t t = g_fakeMs + ms;
@@ -427,6 +454,40 @@ void runScenarios() {
     headOffsetGateSetView(g_wantView);        // the game says view 1
     enterCamera();
     check(true, "entering the camera on the wanted view");
+
+    // A STARVED EYE-DRAW COUNT, WHICH IS A REAL ENTRY THE GATE CANNOT SEE.
+    //
+    // The field case of 2026-08-19: the player pressed their bound key on the
+    // wanted view, the flat panel genuinely stopped for twenty-six seconds
+    // while they sat in the camera, and the panel came back when they pressed
+    // again -- all of it in the log. The gate did not arm, because sceneNow
+    // wants more than 50 draws into an eye texture in one frame and that rig
+    // never produced 20 in a whole session.
+    //
+    // The assertion records TODAY's behaviour, not a desired one. Arming here
+    // would mean arming on evidence the gate has no way to tell from boarding
+    // a ship, which is the failure this whole module exists to prevent -- so
+    // the count is not something to loosen. What the session cost instead was
+    // the DIAGNOSIS: the line that names the four numbers used to sit behind
+    // sceneNow, so the one failure it was written for was the one it could not
+    // report. That line now fires from the panel-run expiry, which this
+    // sequence reaches, and where a fix for the starvation itself belongs is
+    // in the recogniser (vscreen.cpp), not here.
+    begin(true);
+    headOffsetGateSetView(g_wantView);
+    starvedPanelFor(3000);
+    headOffsetGateKeyPressed();
+    starvedPanelFrame(2);            // the game takes a few frames to change mode
+    starvedSceneFor(4000);
+    check(false, "a real entry whose eye-draw count never reaches the gate's floor");
+
+    // ...and the entry that follows a NORMAL count still works, on the same
+    // gate, so nothing above has been made permanently suspicious.
+    panelFor(1000);
+    headOffsetGateKeyPressed();
+    panelFrame(2);
+    sceneFrame(12);
+    check(true, "a countable entry right after a starved one");
 
     // ------------------------------------------------------------------ views
     //
