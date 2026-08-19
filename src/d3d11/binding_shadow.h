@@ -47,9 +47,20 @@ namespace edvr {
 
 // Which slot a caller is asking about. One generation counter each, so binding a
 // compute UAV does not invalidate vscreen's answer about a render target.
+//
+// PsSrv1..3 and Dsv0 exist for the draw census (draw_census.h), which
+// fingerprints a draw by everything it reads and writes -- an overlay is
+// often the draw with no depth bound and a mask texture in a later SRV slot.
+// No fix derives answers from them. PsSrv1..3 must stay contiguous after
+// PsSrv0: the PSSetShaderResources hook records slot i by offsetting from
+// PsSrv0.
 enum class BindSlot : uint32_t {
     Rtv0 = 0,      // OM render target slot 0
-    PsSrv0,        // pixel shader resource slot 0
+    Dsv0,          // OM depth-stencil view
+    PsSrv0,        // pixel shader resource slots 0..3
+    PsSrv1,
+    PsSrv2,
+    PsSrv3,
     VsCb0,         // vertex shader constant buffer slot 0
     Cs,            // the bound compute shader
     CsUav0,        // compute UAV slots 0..3
@@ -65,6 +76,9 @@ struct ResourceInfo {
     bool     isTexture2D = false;
     uint32_t a = 0;   // texture width, or buffer byte width
     uint32_t b = 0;   // texture height, or buffer structure stride
+    uint32_t fmt = 0; // DXGI_FORMAT for a texture, 0 for a buffer. Size alone
+                      // cannot tell two same-shaped textures apart in a census
+                      // line, and the format is free: the desc is in hand.
 };
 
 // The pointer last seen bound to a slot, or nullptr.

@@ -17,6 +17,7 @@
 #include "../common/timing.h"
 #include "../common/vtable_hook.h"
 #include "binding_shadow.h"
+#include "draw_census.h"
 #include "exposure_fix.h"
 #include "vscreen.h"
 #include "glitch_frame.h"
@@ -63,6 +64,9 @@ struct State {
 
     Hotkey toggleKey;
     Hotkey dumpKey;
+    // The draw census key (issue 69074 instrumentation). Unbound by default;
+    // the census costs nothing until this is both bound and pressed.
+    Hotkey censusKey;
     // The external camera key, and only that one.
     //
     // A keypress is not a heuristic, and it is the whole reason this feature can
@@ -98,6 +102,7 @@ struct State {
     // When the delayed dump is due. 0 means none is armed.
     uint64_t dumpDueMs = 0;
     uint32_t missedDumpNotes = 0;
+    uint32_t missedCensusNotes = 0;
     bool     threadNoted = false;
     // Frames to hold across an external-camera transition. 0 = off, and it stays
     // there: see the note beside the setting in edvr.ini.
@@ -309,6 +314,20 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
             g_state->dumpDueMs = 0;
             dumpCameraRing("a key you pressed two seconds ago",
                            (uint32_t)(kDumpDelayMs / 1000));
+        }
+        // The draw census key (issue 69074). Same silent-failure shape as the
+        // history key, same cure: a diagnostic keypress that another window
+        // swallowed must say so, because the log it failed to write is the
+        // place anyone would look for the reason.
+        if (g_state->censusKey.pressed()) drawCensusRequest();
+        if (g_state->missedCensusNotes < kMissedDumpNotes &&
+            g_state->censusKey.takeMissedWhileUnfocused()) {
+            ++g_state->missedCensusNotes;
+            Log::get().note(
+                "the draw census key was pressed, but another window had "
+                "focus, so nothing was captured. Click on the game window and "
+                "press it again. Said at most %u times a session.",
+                kMissedDumpNotes);
         }
         // The player's Elite bindings, re-read when the game rewrites them.
         // Elite saves Options\Bindings the moment a rebind or preset switch
@@ -593,6 +612,9 @@ State& ensureState() {
         g_state = new State();
         g_state->toggleKey.setBinding(Config::get().getString("hotkey.toggle_exposure", "SCROLLLOCK").c_str());
         g_state->dumpKey.setBinding(Config::get().getString("hotkey.dump_camera", "PAUSE").c_str());
+        // Empty default: the census is chased-bug instrumentation, and an
+        // unbound key is how "off" is spelled for a hotkey.
+        g_state->censusKey.setBinding(Config::get().getString("hotkey.dump_draws", "").c_str());
         // The camera keys come from the GAME's own key configuration, and
         // only from there (0.7.1 removed the ini overrides: two keys nobody
         // needed to set once adoption read the right element from the right

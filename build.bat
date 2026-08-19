@@ -161,7 +161,7 @@ cl.exe %CFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "%ROOT%\src\d3d11\glitch_frame.cpp" "%ROOT%\src\d3d11\vscreen_res.cpp" ^
     "%ROOT%\src\d3d11\binding_shadow.cpp" "%ROOT%\src\d3d11\head_offset_gate.cpp" ^
     "%ROOT%\src\d3d11\camera_view.cpp" "%ROOT%\src\d3d11\journal_watch.cpp" ^
-    "%ROOT%\src\d3d11\elite_binds.cpp"
+    "%ROOT%\src\d3d11\elite_binds.cpp" "%ROOT%\src\d3d11\draw_census.cpp"
 if errorlevel 1 ( echo [edvr] ERROR: compile failed & exit /b 1 )
 
 link.exe /nologo /DLL /MACHINE:X64 /INCREMENTAL:NO ^
@@ -400,6 +400,15 @@ if errorlevel 1 ( echo [edvr] ERROR: a config reader runs only on the reload pat
 echo [edvr] === exit-path check ===
 python "%ROOT%\tools\check_exit_paths.py"
 if errorlevel 1 ( echo [edvr] ERROR: cleanup that matters runs only on FreeLibrary & exit /b 1 )
+
+echo [edvr] === draw census diff self-test ===
+REM The tool that reads the census a field session paid for. A parser that
+REM drifts from the DC line format fails HERE, not in the ten minutes after a
+REM user finally reproduced the effect being chased.
+python "%ROOT%\tools\diff_draw_census.py" --self-test || (
+    echo [edvr] ERROR: the census diff tool failed its own test
+    exit /b 1
+)
 
 echo [edvr] === config contract ===
 where python >nul 2>&1

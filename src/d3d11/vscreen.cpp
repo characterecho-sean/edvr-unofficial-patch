@@ -18,6 +18,7 @@
 #include "../common/vtable_hook.h"
 #include "binding_shadow.h"
 #include "device_hook.h"  // contextHookModeFor
+#include "draw_census.h"
 #include "glitch_frame.h"
 
 namespace edvr {
@@ -595,7 +596,10 @@ inline bool foreignContext(ID3D11DeviceContext* self) {
     return self != g_state->ownerCtx;
 }
 
-bool beginPanelOverride(ID3D11DeviceContext* self) {
+// kind, count and instances describe the draw for the census and nothing
+// else; every other consumer of this function is indifferent to them.
+bool beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
+                        UINT instances) {
     State* s = g_state;
     // A draw on somebody else's context is not our panel and not an eye draw.
     // This one early return covers all four draw thunks, and it covers them
@@ -628,8 +632,14 @@ bool beginPanelOverride(ID3D11DeviceContext* self) {
     // The real fix is structural: counters this load-bearing belong in frame
     // state that features subscribe to, not inside one fix's fast path, so the
     // next feature cannot make this mistake a fourth time.
+    // The census is subscriber number four, added the way the paragraph above
+    // says the next one should not be. The structural fix -- counters in frame
+    // state that features subscribe to -- is still owed; until it lands, the
+    // census at least fails towards silence: unarmed (the permanent state) it
+    // adds nothing to this condition's answer, and the short-circuit means the
+    // call is not even made while any ordinary subscriber is on.
     if (!s->distanceEnabled && !s->countForFlashFix &&
-        !headOffsetGateWantsPanel()) {
+        !headOffsetGateWantsPanel() && !drawCensusArmed()) {
         return false;
     }
     const uint32_t rtvGen = bindingGeneration(BindSlot::Rtv0);
@@ -639,6 +649,13 @@ bool beginPanelOverride(ID3D11DeviceContext* self) {
     }
     if (!s->rtv0Eye) return false;
     ++s->eyeDrawsThisFrame;
+
+    // The census line for this draw, recorded while its bindings are certainly
+    // the ones it will run with. Armed is rare and brief; the cost of asking is
+    // one call and one bool.
+    if (drawCensusArmed()) {
+        drawCensusEyeDraw(kind, count, instances, s->eyeDrawsThisFrame);
+    }
 
     // The head-offset gate's signal, recorded BEFORE the "does anything want to
     // act" test below, and NOT conditional on the distance fix.
@@ -770,6 +787,7 @@ void STDMETHODCALLTYPE hookedOMSetRenderTargets(ID3D11DeviceContext* self, UINT 
     // address after a rebind is not evidence of an identical view. bindingSet
     // bumps the generation either way.
     bindingSet(BindSlot::Rtv0, (n && rtvs) ? rtvs[0] : nullptr);
+    bindingSet(BindSlot::Dsv0, dsv);
     g_state->realOMSetRenderTargets(self, n, rtvs, dsv);
 }
 
@@ -791,6 +809,7 @@ void STDMETHODCALLTYPE hookedOMSetRtvAndUav(ID3D11DeviceContext* self, UINT n,
     constexpr UINT kKeepRenderTargetsUnchanged = 0xFFFFFFFFu;
     if (n != kKeepRenderTargetsUnchanged) {
         bindingSet(BindSlot::Rtv0, (n && rtvs) ? rtvs[0] : nullptr);
+        bindingSet(BindSlot::Dsv0, dsv);
     }
     g_state->realOMSetRtvAndUav(self, n, rtvs, dsv, uavStart, uavCount, uavs, counts);
 }
@@ -803,7 +822,20 @@ void STDMETHODCALLTYPE hookedPSSetShaderResources(ID3D11DeviceContext* self, UIN
         g_state->realPSSetShaderResources(self, start, n, srvs);
         return;
     }
-    if (start == 0 && n && srvs) bindingSet(BindSlot::PsSrv0, srvs[0]);
+    // Slots 0..3, not just 0: the census fingerprints a draw by everything it
+    // samples, and a mask or gradient in a later slot is often what tells one
+    // overlay from another. Recording a slot the call did not cover would
+    // invent an unbind, so only [start, start+n) is touched. PsSrv1..3 are
+    // contiguous after PsSrv0 by binding_shadow.h's contract.
+    if (srvs) {
+        for (UINT i = 0; i < n; ++i) {
+            const UINT slot = start + i;
+            if (slot >= 4) break;
+            bindingSet(static_cast<BindSlot>(
+                           static_cast<uint32_t>(BindSlot::PsSrv0) + slot),
+                       srvs[i]);
+        }
+    }
     g_state->realPSSetShaderResources(self, start, n, srvs);
 }
 
@@ -960,21 +992,21 @@ void STDMETHODCALLTYPE hookedUnmap(ID3D11DeviceContext* self, ID3D11Resource* re
 
 void STDMETHODCALLTYPE hookedDraw(ID3D11DeviceContext* self, UINT count, UINT start) {
     ++g_state->thunkHits[kHitDraw];
-    const bool on = beginPanelOverride(self);
+    const bool on = beginPanelOverride(self, 'D', count, 1);
     g_state->realDraw(self, count, start);
     if (on) endPanelOverride(self);
 }
 void STDMETHODCALLTYPE hookedDrawIndexed(ID3D11DeviceContext* self, UINT count,
                                          UINT startIndex, INT baseVertex) {
     ++g_state->thunkHits[kHitDrawIndexed];
-    const bool on = beginPanelOverride(self);
+    const bool on = beginPanelOverride(self, 'I', count, 1);
     g_state->realDrawIndexed(self, count, startIndex, baseVertex);
     if (on) endPanelOverride(self);
 }
 void STDMETHODCALLTYPE hookedDrawInstanced(ID3D11DeviceContext* self, UINT perInstance,
                                            UINT instances, UINT startVertex,
                                            UINT startInstance) {
-    const bool on = beginPanelOverride(self);
+    const bool on = beginPanelOverride(self, 'N', perInstance, instances);
     g_state->realDrawInstanced(self, perInstance, instances, startVertex, startInstance);
     if (on) endPanelOverride(self);
 }
@@ -982,7 +1014,7 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
                                                   UINT perInstance, UINT instances,
                                                   UINT startIndex, INT baseVertex,
                                                   UINT startInstance) {
-    const bool on = beginPanelOverride(self);
+    const bool on = beginPanelOverride(self, 'X', perInstance, instances);
     g_state->realDrawIndexedInstanced(self, perInstance, instances, startIndex, baseVertex,
                                       startInstance);
     if (on) endPanelOverride(self);
@@ -1114,6 +1146,10 @@ bool vScreenReclaimHooks() {
 void vScreenFrameBoundary() {
     State* s = g_state;
     if (!s) return;
+
+    // Before this frame's counters are read or reset: a pending census starts
+    // here, a running one advances, a spent one writes its tables.
+    drawCensusFrameBoundary(s->frameNo);
 
     // The per-frame invalidation lives in binding_shadow now, and device_hook
     // calls it once for both fixes. Doing it here as well would be harmless but

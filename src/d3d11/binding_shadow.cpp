@@ -86,6 +86,7 @@ bool bindingResolve(void* view, ResourceInfo* out) {
             out->isTexture2D = true;
             out->a = d.Width;
             out->b = d.Height;
+            out->fmt = static_cast<uint32_t>(d.Format);
             ok = true;
         }
         res->Release();
