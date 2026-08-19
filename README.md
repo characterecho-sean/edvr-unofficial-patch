@@ -1,6 +1,6 @@
 # EDVR — an unofficial patch for Elite Dangerous: Odyssey in VR
 
-Fixes for things that make Odyssey uncomfortable in a headset. Eight fixes,
+Fixes for things that make Odyssey uncomfortable in a headset. Nine fixes,
 two files, about three minutes — what each fix does is under
 [What it fixes](#what-it-fixes).
 
@@ -143,6 +143,14 @@ derived per headset from its real projection. Field-verified on a Pimax via
 OpenComposite; if any rig shows the lines back on the nose, `remlok_swap_eyes`
 in the ini is the one-line correction, and that log is worth an issue.
 *Details: [docs/remlok-lines.md](docs/remlok-lines.md).*
+
+**The loading screen's shimmering ship.** The spinning ship hologram carries
+a faint, low-res, head-locked pattern inside its silhouette — the hologram
+is synthesized from the model's depth, and its scan pattern is sampled in
+*screen* space, which a monitor can never show moving but a headset always
+does. Nauseating if you focus on it. EDVR holds the pattern still for
+exactly that one draw per eye; `holo_pattern = stock` restores the game's
+behaviour. *Details: [docs/loading-hologram.md](docs/loading-hologram.md).*
 
 **The grey haze around the on-foot screen.** On foot, the world is shown on a
 flat screen surrounded by dark grey — lit pixels on an OLED headset, so the

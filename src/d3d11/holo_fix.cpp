@@ -89,7 +89,10 @@ ID3D11ShaderResourceView* uniformSrv(ID3D11DeviceContext* ctx) {
 
 void holoConfigure(Config& cfg) {
     const bool was = g_steady;
-    const std::string m = cfg.getString("fix.holo_pattern", "stock");
+    // steady by default since the field verification (2026-08-19): shimmer
+    // gone, ship normal, level 255 correct first try -- which also proved
+    // the shader multiplies the term, so identity is white.
+    const std::string m = cfg.getString("fix.holo_pattern", "steady");
     if (m == "stock") {
         g_steady = false;
     } else if (m == "steady") {

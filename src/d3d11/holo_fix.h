@@ -20,8 +20,9 @@
 // pattern -- with a uniform 1x1 texture, and put the game's texture back
 // immediately after. The modulation term becomes a constant, the hologram
 // renders steady, and nothing else changes. The uniform's level is
-// live-tunable because the right constant depends on how the shader uses the
-// term, and that is a thing to iterate against a headset at ini speed.
+// live-tunable because the right constant depends on how the shader uses
+// the term; the field verification (2026-08-19) found 255 correct first
+// try, proving the shader multiplies -- steady is the default since.
 #pragma once
 
 #include <cstdint>
