@@ -9,6 +9,7 @@
 #include "../common/log.h"
 #include "../common/timing.h"
 #include "binding_shadow.h"
+#include "journal_watch.h"
 
 namespace edvr {
 namespace {
@@ -95,6 +96,11 @@ void witchstarConfigure(Config& cfg) {
                         g_pinned ? "held to the ship's forward axis while the "
                                    "head turns"
                                  : "the game's own (head-locked in VR)");
+        if (g_pinned && !journalWatchActive()) {
+            Log::get().note("witchstar: pinned is scoped to jumps by the "
+                            "game's journal, and journal_watch is off or "
+                            "failed -- so it will never engage this session.");
+        }
     }
 }
 
@@ -102,6 +108,16 @@ bool witchstarWantsDraws() { return g_pinned; }
 
 bool witchstarOnEyeDraw(char kind, uint32_t count, uint32_t /*instances*/) {
     if (!g_pinned) return false;
+    // Only while the journal says a jump tunnel is plausibly on screen. The
+    // family this matcher recognises also draws a sun's flare in ordinary
+    // space -- where the game positions it correctly and the pin is pure
+    // error, measured as the flare counter-moving while parked at a star.
+    // Outside the window the run state idles empty, so there is nothing to
+    // break.
+    if (!journalInJumpTunnel()) {
+        g_inStarRun = false;
+        return false;
+    }
 
     if (!isFamily(kind, nullptr)) {
         // Anything else breaks a run. Counting the ends is what tells the

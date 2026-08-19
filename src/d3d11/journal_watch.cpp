@@ -45,6 +45,13 @@ struct State {
     bool         gameplay = false;
     uint32_t     disembarks = 0;
     uint32_t     embarks = 0;
+    // When a jump tunnel MAY be on screen: armed at StartJump, cleared by
+    // the event that resolves it (FSDJump for hyperspace, SupercruiseEntry
+    // for the other branch -- StartJump fires for both, and telling them
+    // apart by NAME keeps the names-only posture). A cancelled charge
+    // resolves with neither, which is what the expiry in the accessor is
+    // for. Zero means not armed.
+    uint64_t     jumpArmedMs = 0;
     // Live Flags2 from Status.json: OnFoot is bit 0. `onFootKnown` is false
     // whenever the file lacks a Flags2 field, which is exactly the menu and
     // shutdown states -- Status then carries only "Flags":0.
@@ -122,9 +129,19 @@ void onEvent(const char* name, uint32_t len) {
         // The game is leaving. Gameplay ends with it; a relaunch gets a new
         // journal and a fresh LoadGame.
         g_s.gameplay = false;
+        g_s.jumpArmedMs = 0;
+    } else if (len == 9 && memcmp(name, "StartJump", 9) == 0) {
+        g_s.jumpArmedMs = stampMs();
+    } else if (len == 7 && memcmp(name, "FSDJump", 7) == 0) {
+        // Hyperspace arrival: the tunnel is over.
+        g_s.jumpArmedMs = 0;
+    } else if (len == 16 && memcmp(name, "SupercruiseEntry", 16) == 0) {
+        // StartJump's other branch: this was a supercruise transition, not a
+        // hyperspace tunnel.
+        g_s.jumpArmedMs = 0;
     }
     // Embark / Touchdown / Liftoff are recognised by name here should a
-    // consumer ever need them; today the two above carry the feature.
+    // consumer ever need them; today the ones above carry the features.
 }
 
 const char kEventTok[] = "\"event\":\"";
@@ -256,10 +273,12 @@ void journalWatchConfigure() {
         return;
     }
     g_s.active = true;
-    Log::get().note("journal: watching the game's own event stream for two "
+    Log::get().note("journal: watching the game's own event stream for the "
                     "boundaries it states outright -- gameplay starting "
-                    "(LoadGame) and on-foot sessions beginning (Disembark). "
-                    "Event names only; nothing else is read or kept.");
+                    "(LoadGame), on-foot sessions beginning (Disembark), and "
+                    "jumps (StartJump, resolved by FSDJump or "
+                    "SupercruiseEntry) for the witchspace star fix. Event "
+                    "names only; nothing else is read or kept.");
 }
 
 void journalWatchTick() {
@@ -336,6 +355,20 @@ bool journalWatchActive() { return g_s.active; }
 bool journalGameplay() { return g_s.gameplay; }
 uint32_t journalDisembarks() { return g_s.disembarks; }
 uint32_t journalEmbarks() { return g_s.embarks; }
+
+bool journalInJumpTunnel() {
+    if (!g_s.jumpArmedMs) return false;
+    // A cancelled hyperspace charge emits no resolving event, so an armed
+    // state that outlives any real tunnel expires on its own. Real tunnels
+    // run 10-25 seconds after a ~5 second countdown; 45 covers them with
+    // room, and bounds how long a cancelled charge could mis-scope a
+    // consumer to well under a minute.
+    if (stampMs() - g_s.jumpArmedMs > 45000) {
+        g_s.jumpArmedMs = 0;
+        return false;
+    }
+    return true;
+}
 bool journalOnFootKnown() { return g_s.active && g_s.onFootKnown; }
 bool journalOnFoot() { return g_s.onFoot; }
 uint32_t journalStatusSamples() { return g_s.statusSamples; }

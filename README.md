@@ -263,9 +263,11 @@ Two things the other fixes do not:
   skips the game's code, and never writes.
 - **It reads event names from the game's journal** — the documented file Elite
   writes for third-party tools in Saved Games — to know when gameplay has
-  started and when you step onto your feet, which is where the game resets its
-  camera view. Names only (`LoadGame`, `Disembark`); no other content is read
-  or kept, and `d3d11.journal_watch = 0` turns it off entirely.
+  started, when you step onto your feet (where the game resets its camera
+  view), and when a jump begins and resolves (which scopes the witchspace
+  star fix to actual jump tunnels). Names only (`LoadGame`, `Disembark`,
+  `StartJump`, `FSDJump`, `SupercruiseEntry`); no other content is read or
+  kept, and `d3d11.journal_watch = 0` turns it off entirely.
 
 Its safeguards, because they are the reason to trust it:
 

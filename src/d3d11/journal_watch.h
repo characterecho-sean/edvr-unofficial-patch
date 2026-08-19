@@ -63,6 +63,15 @@ bool journalOnFoot();
 // boarding animation.
 uint32_t journalStatusSamples();
 
+// Is a jump tunnel plausibly on screen? Armed by StartJump, cleared by the
+// event that resolves it -- FSDJump for hyperspace, SupercruiseEntry for
+// the branch that never grows a tunnel -- and expiring on its own after a
+// cancelled charge, which resolves with neither. Scopes the witchspace
+// star fix: the same sprite family draws a sun's flare in ordinary space,
+// where the game places it correctly and a pin would be pure error
+// (measured 2026-08-19: the flare counter-moving at a star).
+bool journalInJumpTunnel();
+
 void journalWatchShutdown();
 
 }  // namespace edvr
