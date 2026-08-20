@@ -52,17 +52,22 @@ bool     g_dumpedFull = false;
 uint64_t g_lastSampleMs = 0;
 uint32_t g_lines = 0;
 
-// The family roster: every DISTINCT binding signature that matched, logged
-// once. The first roster keyed on index count and flooded the log to its
-// cap in seconds -- the corona fans RE-TESSELLATE, so their counts vary
-// per frame and are not an identity. What is stable is where the data
-// comes from: the vertex streams and VS resources. The roster keys on
-// those, logs when a NEW one appears, and hard-caps its lines besides.
+// The family roster: every DISTINCT data shape that matched, logged once.
+// The first roster keyed on index count -- but the corona fans
+// RE-TESSELLATE, so counts vary per frame. The second keyed on the bound
+// buffer pointers -- but the engine rotates its buffers, so pointers churn
+// too, and all 24 slots filled with copies of two members inside two
+// seconds. What the churn itself proved stable is the SHAPE of the data:
+// sizes and strides held constant across every churned pointer. The
+// roster keys on shape, logs when a NEW one appears, and hard-caps its
+// lines besides.
 struct RosterKey {
-    void*    vb0;
-    void*    vb1;
+    uint32_t vb0Bytes;
+    uint32_t stride0;
+    uint32_t vb1Bytes;
     uint32_t stride1;
-    void*    srv0;
+    uint32_t srvBytes;
+    uint32_t srvStride;
 };
 RosterKey g_roster[24];
 uint32_t  g_rosterCount = 0;
@@ -114,7 +119,7 @@ bool cbPeekEnabled() { return g_enabled; }
 void* cbPeekTarget() { return g_target; }
 
 void cbPeekOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
-                     uint32_t /*instances*/) {
+                     uint32_t instances) {
     if (!g_enabled || g_target || !ctx || kind != kKind ||
         count < kMinIndices) {
         return;
@@ -142,33 +147,44 @@ void cbPeekOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
     if (roster) {
         ID3D11ShaderResourceView* srv0 = nullptr;
         ctx->VSGetShaderResources(0, 1, &srv0);
-        RosterKey key{vbs[0], vbs[1], strides[1], srv0};
+        RosterKey key{};
+        key.stride0 = strides[0];
+        key.stride1 = strides[1];
+        ResourceInfo info;
+        if (vbs[0] && bindingResolveResource(vbs[0], &info)) {
+            key.vb0Bytes = info.a;
+        }
+        if (vbs[1] && bindingResolveResource(vbs[1], &info)) {
+            key.vb1Bytes = info.a;
+        }
+        bool srvIsBuf = false;
+        if (srv0 && bindingResolve(srv0, &info)) {
+            key.srvBytes = info.a;
+            key.srvStride = info.b;
+            srvIsBuf = info.isBuffer;
+        }
         bool seen = false;
         for (uint32_t i = 0; i < g_rosterCount && !seen; ++i) {
-            seen = g_roster[i].vb0 == key.vb0 && g_roster[i].vb1 == key.vb1 &&
-                   g_roster[i].stride1 == key.stride1 &&
-                   g_roster[i].srv0 == key.srv0;
+            seen = memcmp(&g_roster[i], &key, sizeof(key)) == 0;
         }
         if (!seen && g_rosterCount < 24 && g_rosterLines < kRosterMaxLines) {
             g_roster[g_rosterCount++] = key;
             ++g_rosterLines;
             char desc[200];
-            int at = _snprintf_s(desc, sizeof(desc), _TRUNCATE, "n=%u", count);
-            for (int i = 0; i < 2; ++i) {
-                ResourceInfo info;
-                if (vbs[i] && bindingResolveResource(vbs[i], &info)) {
-                    at += _snprintf_s(desc + at, sizeof(desc) - at, _TRUNCATE,
-                                      " vb%d=%uB/sd%u", i, info.a, strides[i]);
-                }
+            int at = _snprintf_s(desc, sizeof(desc), _TRUNCATE, "n=%u i=%u",
+                                 count, instances);
+            if (key.vb0Bytes) {
+                at += _snprintf_s(desc + at, sizeof(desc) - at, _TRUNCATE,
+                                  " vb0=%uB/sd%u", key.vb0Bytes, key.stride0);
             }
-            if (srv0) {
-                ResourceInfo info;
-                if (bindingResolve(srv0, &info)) {
-                    at += _snprintf_s(desc + at, sizeof(desc) - at, _TRUNCATE,
-                                      " vssrv0=%s%u/%u",
-                                      info.isBuffer ? "buf" : "tex", info.a,
-                                      info.b);
-                }
+            if (key.vb1Bytes) {
+                at += _snprintf_s(desc + at, sizeof(desc) - at, _TRUNCATE,
+                                  " vb1=%uB/sd%u", key.vb1Bytes, key.stride1);
+            }
+            if (key.srvBytes) {
+                at += _snprintf_s(desc + at, sizeof(desc) - at, _TRUNCATE,
+                                  " vssrv0=%s%u/%u", srvIsBuf ? "buf" : "tex",
+                                  key.srvBytes, key.srvStride);
             }
             Log::get().note("cb peek roster: %s", desc);
         }
