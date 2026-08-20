@@ -2045,11 +2045,25 @@ void vScreenFrameBoundary() {
             "texture, and only the last few passes land on one. Consequences, all "
             "silent until now: Explorer Cam cannot arm (it needs more than 50 in a "
             "frame), the transition flash fix cannot withhold anything (100), and the "
-            "camera scan loses its own gameplay signal. Render targets seen and NOT "
-            "counted: %s. One eye is %ux%u and the panel is %ux%u. %s "
-            "Report this log with your supersampling, upscaler and mod list named.",
+            "camera scan loses its own gameplay signal. The sizes it saw are on the "
+            "next line.",
             s->eyeDrawsMax,
-            static_cast<uint32_t>((now - s->gameplayMs) / 1000u), kSceneEyeDraws,
+            static_cast<uint32_t>((now - s->gameplayMs) / 1000u), kSceneEyeDraws);
+        // TWO LINES, BECAUSE ONE WOULD BE TRUNCATED BY THE WORST CASE OF ITS
+        // OWN CONTENTS.
+        //
+        // note() formats into 1200 bytes and marks anything longer
+        // "...[truncated]". This notice carries two variable-length lists --
+        // eight render-target sizes and a sentence explaining what stopped a
+        // promotion -- and at their caps the single line measured 1228, so the
+        // reader would have lost the tail. The tail is where the sizes and the
+        // instruction to report live, i.e. the entire reason for the line. A
+        // diagnostic whose length depends on how bad the case is must not get
+        // shorter as the case gets worse.
+        Log::get().note(
+            "vScreen: render targets seen and NOT counted: %s. One eye is %ux%u and "
+            "the panel is %ux%u. %s Report this log with your supersampling, "
+            "upscaler and mod list named.",
             s->rtSeenCount ? sizes : "none big enough to be one",
             s->eyeW, s->eyeH, s->panelW, s->panelH, why);
     }
