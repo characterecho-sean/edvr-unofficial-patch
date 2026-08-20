@@ -49,6 +49,12 @@ constexpr uint64_t kTotalsWindowMs = 20000;
 // the slow-headset one.
 constexpr uint32_t kMinFramesDrawn = 300;
 
+// Render targets watched at once while looking for where the world is drawn.
+// The measured session offered seven distinct sizes over its whole run and
+// only three of those were ever big enough to reach the table; eight leaves
+// room without turning a per-draw walk into anything worth measuring.
+constexpr uint32_t kCandidates = 8;
+
 // ID3D11DeviceContext vtable indices.
 //
 // A frozen COM ABI: IUnknown occupies 0-2, ID3D11DeviceChild 3-6, and the
@@ -374,18 +380,29 @@ struct State {
     // it hands the headset -- a render scale, from the game's own setting or
     // from an upscaler in the chain. 0 until measured; see adoptRenderSize.
     uint32_t renderW = 0, renderH = 0;
-    // Targets that are the eye's shape at a scale, and how many draws the
-    // busiest single frame put into each. Shape says which are worth
-    // watching; this count is what promotes one, because a post-process
-    // buffer shares the shape and never takes the scene's draws. Four is
-    // three more than any measured session has offered.
-    struct RenderCandidate {
+    // Every render target big enough to hold a world that the exact test
+    // turned down, and how many draws the busiest single frame put into each.
+    // The draw count is what promotes one -- a post-process buffer shares the
+    // eye's shape and never takes the scene's draws -- and `shaped` decides
+    // WHAT it may be promoted to: only a target of the eye's own shape at a
+    // scale is safe to treat AS an eye texture, because the fixes that draw
+    // into one would then draw into it.
+    struct SceneCandidate {
         uint32_t w = 0, h = 0;
+        bool     shaped = false;  // the eye's shape at a plausible scale
         uint32_t thisFrame = 0;   // draws so far in the frame being counted
         uint32_t bestFrame = 0;   // ...and the most any one frame has had
     };
-    RenderCandidate cands[4];
+    SceneCandidate cands[kCandidates];
     uint32_t candCount = 0;
+    // The target promoted to answer "is a scene being rendered this frame",
+    // when the published size cannot. Equal to renderW/H where the shape
+    // confirmed it; otherwise a target that is NOT treated as an eye texture
+    // and only ever contributes its count. 0 when the published size is
+    // doing its job, which is every ordinary rig.
+    uint32_t sceneW = 0, sceneH = 0;
+    uint32_t sceneDrawsThisFrame = 0;
+    bool     sceneSourceNoted = false;
     bool     renderAuto = true;        // advanced.eye_render_size
     bool     renderOffNoted = false;
     bool     renderPinned = false;   // the size came from the ini, not a measurement
@@ -492,17 +509,27 @@ bool near2(uint32_t a, uint32_t b) { return (a > b ? a - b : b - a) <= 2u; }
 // Remember an eye-SHAPED target the exact test turned down, and count this
 // draw into it. Promotion happens at the frame boundary and needs a count no
 // post-process buffer produces; see adoptRenderSize.
-void noteRenderCandidate(State* s, uint32_t w, uint32_t h) {
-    if (!eyeShapedAtScale(w, h, s->eyeW, s->eyeH)) return;
+void noteSceneCandidate(State* s, uint32_t w, uint32_t h) {
+    // Anything big enough to hold a rendered world. NOT filtered by shape:
+    // shape decides what may be TREATED as an eye texture, and that is a
+    // separate question from where the frame's work went -- see the promotion
+    // at the frame boundary. The panel and everything 16:9 never arrives here
+    // at all; targetIsEyeSized answers those before this is reached, which is
+    // what keeps a menu -- drawn into the panel, hundreds of draws deep --
+    // from reading as a scene.
+    if (w < 512 || h < 512) return;
     for (uint32_t i = 0; i < s->candCount; ++i) {
         if (s->cands[i].w == w && s->cands[i].h == h) {
             ++s->cands[i].thisFrame;
+            // The frame's scene count, for the target promoted to carry it.
+            if (w == s->sceneW && h == s->sceneH) ++s->sceneDrawsThisFrame;
             return;
         }
     }
-    if (s->candCount >= 4) return;
+    if (s->candCount >= kCandidates) return;
     s->cands[s->candCount].w = w;
     s->cands[s->candCount].h = h;
+    s->cands[s->candCount].shaped = eyeShapedAtScale(w, h, s->eyeW, s->eyeH);
     s->cands[s->candCount].thisFrame = 1;
     ++s->candCount;
 }
@@ -544,6 +571,7 @@ void readEyeRenderSize(Config& cfg, State* s) {
         s->renderAuto = false;
         s->renderPinned = false;
         s->renderW = s->renderH = 0;
+        s->sceneW = s->sceneH = 0;
         return;
     }
     unsigned w = 0, h = 0;
@@ -553,6 +581,8 @@ void readEyeRenderSize(Config& cfg, State* s) {
         if (s->renderW != w || s->renderH != h) {
             s->renderW = w;
             s->renderH = h;
+            s->sceneW = w;
+            s->sceneH = h;
             Log::get().note(
                 "vScreen: advanced.eye_render_size pins the size this rig "
                 "renders an eye at to %ux%u, so nothing is measured. Clear it "
@@ -679,11 +709,6 @@ bool targetIsEyeSized(void* rtv) {
         // actual 1456x1560 eye textures went uncounted and the void stayed
         // grey.
         out = false;
-        // ...but if it is the eye's own shape at a render scale, remember it.
-        // That is the one wrong answer this test can give and not know about:
-        // the world drawn at 77% and scaled up on the way out is still the
-        // world, and saying no to it costs every fix here at once.
-        noteRenderCandidate(s, info.a, info.b);
     } else {
         // Nobody published: openvr_api.dll is not installed, or its hook has
         // not validated yet. Fall back to the old guess, which is all this
@@ -700,7 +725,18 @@ bool targetIsEyeSized(void* rtv) {
         }
     }
 
-    if (!out) noteUncountedTarget(s, info.a, info.b);
+    // EVERY target this test turned down is a place the world might be going.
+    //
+    // Both branches, deliberately. The published size being absent is not a
+    // reason to stop looking for where the scene is drawn -- a rig with no
+    // openvr_api.dll installed AND a render scale falls through the 2048
+    // guess as well, and it was the branch this nomination originally sat in
+    // that made it unreachable there. Shape needs a published size; the draw
+    // count does not.
+    if (!out) {
+        noteSceneCandidate(s, info.a, info.b);
+        noteUncountedTarget(s, info.a, info.b);
+    }
     return out;
 }
 
@@ -1807,18 +1843,31 @@ void vScreenFrameBoundary() {
         }
         s->cands[i].thisFrame = 0;
     }
-    if (s->renderAuto && !s->renderW && pastStartup &&
+    if (s->renderAuto && !s->sceneW && pastStartup &&
         s->eyeDrawsMax <= kSceneEyeDraws) {
-        uint32_t best = 0, bestIdx = 0;
+        // The busiest of each kind. A target of the eye's shape can be
+        // promoted all the way; anything else can only carry the count, so
+        // the two are found separately rather than by ranking them together
+        // -- a shape-confirmed target with fewer draws is still the better
+        // answer than a busier one nothing corroborates.
+        uint32_t best = 0, bestIdx = 0, bestShaped = 0, bestShapedIdx = 0;
         for (uint32_t i = 0; i < s->candCount; ++i) {
             if (s->cands[i].bestFrame > best) {
                 best = s->cands[i].bestFrame;
                 bestIdx = i;
             }
+            if (s->cands[i].shaped && s->cands[i].bestFrame > bestShaped) {
+                bestShaped = s->cands[i].bestFrame;
+                bestShapedIdx = i;
+            }
         }
-        if (best > kSceneEyeDraws) {
+        if (bestShaped > kSceneEyeDraws) {
+            best = bestShaped;
+            bestIdx = bestShapedIdx;
             s->renderW = s->cands[bestIdx].w;
             s->renderH = s->cands[bestIdx].h;
+            s->sceneW = s->renderW;
+            s->sceneH = s->renderH;
             const uint32_t pct = static_cast<uint32_t>(
                 (static_cast<uint64_t>(s->renderW) * 100u + s->eyeW / 2u) / s->eyeW);
             Log::get().note(
@@ -1835,6 +1884,53 @@ void vScreenFrameBoundary() {
                 "set advanced.eye_render_size = off under [advanced] in edvr.ini and "
                 "report this log.",
                 s->renderW, s->renderH, s->eyeW, s->eyeH, pct, best, s->eyeDrawsMax);
+        } else if (best > kSceneEyeDraws) {
+            // THE SAME EVIDENCE, WITHOUT THE CORROBORATION, so it buys less.
+            //
+            // The busiest target in the frame is where the world went,
+            // whatever its shape -- one texture holding both eyes, a
+            // non-uniform scale, a layout nobody here has seen. That answers
+            // "is a scene being rendered", which is the only thing Explorer
+            // Cam, the transition flash detector and the camera scan ever
+            // wanted from this count, so they get it.
+            //
+            // It does NOT make the target an eye texture. The black void, the
+            // RemLok lines, the loading hologram and the witchspace star
+            // WRITE to what they match, and a target that only dominance
+            // vouches for could be a shadow atlas on a frame with a light-
+            // heavy pass. Guessing wrong there is visible in a headset;
+            // guessing wrong about the count is not. So the two adoptions are
+            // different promotions, and this is the smaller one.
+            s->sceneW = s->cands[bestIdx].w;
+            s->sceneH = s->cands[bestIdx].h;
+            char handed[96];
+            // The headset's own size, where there is one to name. Without the
+            // openvr half there is not, and printing "not the 0x0" would be a
+            // line that reads as a bug in the line itself.
+            if (s->eyeW) {
+                _snprintf_s(handed, sizeof(handed), _TRUNCATE,
+                            "not the %ux%u the headset is handed, and not that shape "
+                            "at any scale either",
+                            s->eyeW, s->eyeH);
+            } else {
+                _snprintf_s(handed, sizeof(handed), _TRUNCATE,
+                            "and nothing has published what the headset is handed, so "
+                            "there is no shape to check it against -- install "
+                            "openvr_api.dll as well and this gets a second opinion");
+            }
+            Log::get().note(
+                "vScreen: the busiest render target on this rig is %ux%u -- %s. "
+                "One frame put %u draws into it while the submitted size peaked at %u "
+                "for the whole session, so that is where the world is being drawn. It "
+                "is now counted as the scene, which is what Explorer Cam, the "
+                "transition flash detector and the camera scan actually ask about, and "
+                "all three work again. It is NOT treated as an eye texture: the fixes "
+                "that draw into one -- the black void, the RemLok lines, the loading "
+                "hologram, the witchspace star -- need the real thing and stay off "
+                "rather than write to a target only its draw count vouches for. A "
+                "layout that reaches this line is one EDVR should learn to name, so "
+                "this log is worth reporting.",
+                s->sceneW, s->sceneH, handed, best, s->eyeDrawsMax);
         }
     }
 
@@ -1872,7 +1968,7 @@ void vScreenFrameBoundary() {
     // world is drawn at a render scale now says so in its own line, with the
     // answer in it; this one is for the case that is still unexplained, which
     // is the only case a reader has to do anything about.
-    if (!s->lowPeakNoted && s->eyeDrawsMax > 0 && !s->renderW && s->gameplayMs &&
+    if (!s->lowPeakNoted && s->eyeDrawsMax > 0 && !s->sceneW && s->gameplayMs &&
         (now - s->gameplayMs) >= kTotalsWindowMs &&
         s->eyeDrawsMax <= kSceneEyeDraws) {
         s->lowPeakNoted = true;
@@ -1945,6 +2041,22 @@ void vScreenFrameBoundary() {
             s->censusSkippedReported = s->censusSkipped;
         }
 
+        // WHERE THE COUNT COMES FROM, on a rig where it is not the eye
+        // textures. The totals line above reports eye-sized draws, and on a
+        // promoted rig that number stays small and alarming for the whole
+        // session while everything is in fact working -- so the line that
+        // would otherwise read as a fault says which target is carrying it.
+        if (s->sceneW && !s->sceneSourceNoted) {
+            s->sceneSourceNoted = true;
+            Log::get().note(
+                "vScreen: the eye-draw counts above are draws into the %ux%u eye "
+                "textures. On this rig the scene is drawn into %ux%u, so a small "
+                "number there is expected and is not the fix going quiet -- what "
+                "Explorer Cam, the transition flash detector and the camera scan read "
+                "is the two added together. Said once.",
+                s->eyeW, s->eyeH, s->sceneW, s->sceneH);
+        }
+
         // A window that recognised NOTHING, after one that did.
         //
         // The session peak above cannot report this: a maximum never falls, so
@@ -1977,13 +2089,24 @@ void vScreenFrameBoundary() {
         s->windowStartFrame = s->frameNo;
     }
 
+    // WHAT "A SCENE IS BEING RENDERED" IS COUNTED FROM, for the three
+    // features that ask only that and do not care which texture it landed in.
+    //
+    // Draws into the eye textures, plus draws into a target promoted to carry
+    // the count when the eye textures are not where the world goes. The
+    // second term is 0 on every rig whose game renders into what it submits,
+    // so this is the same number it has always been there -- which matters,
+    // because the thresholds these three turn on (20 for a menu, past 100 for
+    // gameplay) were measured against it and a quietly redefined counter
+    // would move all three at once with nothing saying so.
+    const uint32_t sceneDraws = s->eyeDrawsThisFrame + s->sceneDrawsThisFrame;
     s->eyeDrawsLastFrame = s->eyeDrawsThisFrame;
     // The flash detector needs the count for the frame that just ended, to tell
     // a rendered scene from a menu. It has to be told before the counter resets.
-    glitchFrameBoundary(s->eyeDrawsLastFrame);
+    glitchFrameBoundary(sceneDraws);
     // The gate decides on the counts for the frame that just ended, so it is
     // told before they reset -- same rule as the flash detector above.
-    headOffsetGateFrame(s->frameNo, s->panelCompositeDraws, s->eyeDrawsThisFrame);
+    headOffsetGateFrame(s->frameNo, s->panelCompositeDraws, sceneDraws);
     // The first frame the flat panel is seen is the earliest moment the game is
     // known to be loaded AND the player known to be on foot, which is what the
     // scan needs. At startup the process holds a fraction of the memory it
@@ -1996,10 +2119,11 @@ void vScreenFrameBoundary() {
     // It was in device_hook, which does not have them -- and the tick needs the
     // eye-draw count to tell "the game is being played" from "the main menu is
     // on screen", which is what stops a menu-dweller burning every attempt.
-    cameraViewTick(s->eyeDrawsThisFrame);
+    cameraViewTick(sceneDraws);
     if (headOffsetGatePanelSettled()) cameraViewRequestScan();
     s->panelCompositeDraws = 0;
     s->eyeDrawsThisFrame = 0;
+    s->sceneDrawsThisFrame = 0;
     ++s->frameNo;
 }
 
