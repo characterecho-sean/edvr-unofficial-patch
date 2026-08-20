@@ -765,7 +765,7 @@ bool isFlatGrey(const FLOAT c[4]) {
 // The panel is whatever size the game forces for that view mode -- 1920x1080 by
 // default, or the raised size when the resolution fix is on. Nothing else an
 // eye-sized draw samples has exactly those dimensions.
-bool srv0IsPanelSized(State* s) {
+bool srv0IsPanelSized(State* s, char kind, uint32_t count) {
     void* srv = bindingGet(BindSlot::PsSrv0);
     if (!srv) return false;
 
@@ -794,6 +794,18 @@ bool srv0IsPanelSized(State* s) {
     // "Once" means once per distinct size, up to eight, which is what the table
     // below enforces. A panelMissNoted flag used to appear in this condition; it
     // was never assigned anywhere, so it said nothing about anything.
+    //
+    // The draw's SHAPE is named too, and that is not decoration. Read as an
+    // answer to "what is the other eye reading", these lines do not answer it:
+    // this runs for EVERY eye-sized draw whose slot 0 is not the panel, so a
+    // cockpit session fills its eight entries with glyph sheets and 1x1
+    // scratch textures long before a composite is reached -- which is exactly
+    // what the field logs hold (16x16, 1x1, 0x0, 512x512). A composite is a
+    // handful of vertices; sixty thousand is the helmet. Without the count
+    // there is no way to tell them apart afterwards, and the curved-screen
+    // design (docs/screen-curvature.md) was written expecting these lines to
+    // settle its fifth unknown. They cannot on their own; with the count they
+    // narrow it, and the census settles it.
     if (!out && s->panelMissCount < 8) {
         bool known = false;
         for (uint32_t i = 0; i < s->panelMissCount; ++i) {
@@ -804,9 +816,11 @@ bool srv0IsPanelSized(State* s) {
             s->panelMissH[s->panelMissCount] = lastH;
             ++s->panelMissCount;
             Log::get().note("vScreen: an eye-sized draw sampled %ux%u, which is not the "
-                            "panel (%ux%u), so it was left alone. If a mode corrects only "
-                            "one eye, this is what the other one is reading.",
-                            lastW, lastH, w, h);
+                            "panel (%ux%u), so it was left alone. The draw was %c with "
+                            "%u vertices or indices. If a mode corrects only one eye, the "
+                            "other one is reading one of these -- the composite-shaped "
+                            "one, a handful of vertices rather than thousands.",
+                            lastW, lastH, w, h, kind, count);
         }
     }
 
@@ -916,7 +930,7 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     // the ones it will run with. Armed is rare and brief; the cost of asking is
     // one call and one bool.
     if (drawCensusArmed()) {
-        drawCensusEyeDraw(kind, count, instances, s->eyeDrawsThisFrame);
+        drawCensusEyeDraw(self, kind, count, instances, s->eyeDrawsThisFrame);
     }
 
     // The suppression probe, after the census so a census taken while probing
@@ -990,7 +1004,9 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     // and again below is one resolve per draw, not two. It is skipped entirely
     // when the gate is off, because the answer costs a GetDesc and nothing
     // wants it.
-    if (headOffsetGateWantsPanel() && srv0IsPanelSized(s)) ++s->panelCompositeDraws;
+    if (headOffsetGateWantsPanel() && srv0IsPanelSized(s, kind, count)) {
+        ++s->panelCompositeDraws;
+    }
 
     if (!s->distanceEnabled) return DrawVerdict::kNone;
 
@@ -1009,7 +1025,7 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     // The composite reads the panel: a texture of exactly the size the game
     // forces for that view mode. HUD draws read glyph sheets and atlases, so
     // they are excluded however many of them there are.
-    if (!srv0IsPanelSized(s)) return DrawVerdict::kNone;
+    if (!srv0IsPanelSized(s, kind, count)) return DrawVerdict::kNone;
 
     void* cb = bindingGet(BindSlot::VsCb0);
     if (!cb) return DrawVerdict::kNone;
