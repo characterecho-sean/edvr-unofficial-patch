@@ -3,6 +3,7 @@
 #include <windows.h>
 
 #include <cstdio>
+#include <cstring>  // strncmp, to tell a probing site from a D3D one
 
 #include "log.h"
 #include "proxy.h"  // breadcrumb(), the last-resort channel
@@ -80,17 +81,41 @@ int guardFilter(unsigned long code, const char* site) {
     // A reporter reads the first clause and stops, so the first clause is the
     // verdict now and the bookkeeping follows it. The word FAULT is kept
     // because logs are grepped for it and older reports quote it.
+    //
+    // TWO THINGS THIS LINE MUST NOT OVERCLAIM, both of which it did first time
+    // and both of which are the same error it exists to correct -- a sentence
+    // asserting something the code never checked.
+    //
+    // The first is WHOSE fault is routine. Faulting on memory the game is free
+    // to release is by design at the nine camera_view sites, which walk
+    // gigabytes of a live heap looking for an array. It is not by design at
+    // resubmit/copy, guardCrop/device or any of the other D3D sites, where a
+    // fault means something handed us a resource that was not what it claimed.
+    // Telling the reader of one that the other is routine is how a real report
+    // gets talked out of being filed.
+    const bool scanSite = strncmp(key, "camera_view/", 12) == 0;
+    // The second is what a fault COSTS. For a read probe, abandoning it costs
+    // the read. For a copy abandoned part-way, the destination holds whatever
+    // got there first and is submitted anyway, so "the rest of that one
+    // operation and nothing else" -- which this line used to promise -- is
+    // more than the machinery guarantees. What is true everywhere is that the
+    // operation was abandoned and the process carried on; the PR's own body
+    // drew that line correctly and the log line now matches it.
     Log::get().note("FAULT ABSORBED exception=0x%08lX site=%s. THIS DID NOT CRASH "
                     "THE GAME. EDVR touched an address that was not there, its own "
                     "handler caught it, and the process carried on -- what the fault "
-                    "cost is the rest of that one operation and nothing else. A few "
-                    "of these are routine: probing memory the game is free to release "
-                    "faults by design, and the camera scan walks gigabytes of it. "
-                    "What would be worth reporting is a total below that keeps "
-                    "doubling, or a FEATURE-DISABLED line. Further faults at this "
-                    "site are counted rather than logged; the running total is "
-                    "restated as it doubles, so a hard exit cannot eat it.",
-                    code, key);
+                    "cost is that one operation, abandoned. %sWhat would be worth "
+                    "reporting is a total below that keeps doubling, or a "
+                    "FEATURE-DISABLED line. Further faults at this site are counted "
+                    "rather than logged; the running total is restated as it doubles, "
+                    "so a hard exit cannot eat it.",
+                    code, key,
+                    scanSite
+                        ? "A few of these are routine at this site: it probes memory "
+                          "the game is free to release, and the camera scan walks "
+                          "gigabytes of it. "
+                        : "This site does NOT fault by design -- it is not one of the "
+                          "memory probes -- so even a couple here are worth a report. ");
     return EXCEPTION_EXECUTE_HANDLER;
 }
 
