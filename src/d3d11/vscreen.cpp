@@ -370,6 +370,27 @@ struct State {
     bool     collisionNoted = false;
     bool     sixteenNineEyeNoted = false;
 
+    // THE SIZE THIS RIG ACTUALLY RENDERS AN EYE AT, where that is not the size
+    // it hands the headset -- a render scale, from the game's own setting or
+    // from an upscaler in the chain. 0 until measured; see adoptRenderSize.
+    uint32_t renderW = 0, renderH = 0;
+    // Targets that are the eye's shape at a scale, and how many draws the
+    // busiest single frame put into each. Shape says which are worth
+    // watching; this count is what promotes one, because a post-process
+    // buffer shares the shape and never takes the scene's draws. Four is
+    // three more than any measured session has offered.
+    struct RenderCandidate {
+        uint32_t w = 0, h = 0;
+        uint32_t thisFrame = 0;   // draws so far in the frame being counted
+        uint32_t bestFrame = 0;   // ...and the most any one frame has had
+    };
+    RenderCandidate cands[4];
+    uint32_t candCount = 0;
+    bool     renderAuto = true;        // advanced.eye_render_size
+    bool     renderOffNoted = false;
+    bool     renderPinned = false;   // the size came from the ini, not a measurement
+    bool     renderBadNoted = false;
+
     // Render targets that were looked at and NOT counted, and how many times
     // the panel exclusion was the reason. Diagnosis only: a recogniser that
     // never says yes is otherwise indistinguishable from a game that never drew.
@@ -462,6 +483,96 @@ void noteUncountedTarget(State* s, uint32_t w, uint32_t h) {
     ++s->rtSeenCount;
 }
 
+// A tolerance of two pixels, not equality -- see the note where the published
+// size is compared. File-local because three answers now need the same one:
+// the exact test, the measured render size, and vScreenIsEyeSized for the
+// fixes that identify their draw by a depth buffer.
+bool near2(uint32_t a, uint32_t b) { return (a > b ? a - b : b - a) <= 2u; }
+
+// Remember an eye-SHAPED target the exact test turned down, and count this
+// draw into it. Promotion happens at the frame boundary and needs a count no
+// post-process buffer produces; see adoptRenderSize.
+void noteRenderCandidate(State* s, uint32_t w, uint32_t h) {
+    if (!eyeShapedAtScale(w, h, s->eyeW, s->eyeH)) return;
+    for (uint32_t i = 0; i < s->candCount; ++i) {
+        if (s->cands[i].w == w && s->cands[i].h == h) {
+            ++s->cands[i].thisFrame;
+            return;
+        }
+    }
+    if (s->candCount >= 4) return;
+    s->cands[s->candCount].w = w;
+    s->cands[s->candCount].h = h;
+    s->cands[s->candCount].thisFrame = 1;
+    ++s->candCount;
+}
+
+// advanced.eye_render_size: empty measures it, "off" refuses to, WxH pins it.
+//
+// A detector that cannot be turned off is a detector the field cannot work
+// around. Promotion changes which draws four fixes ACT on, not merely what
+// gets counted, so a wrong answer here is a wrong pass being scissored or
+// substituted -- the one failure mode worth a key. Read on both the install
+// and the reload path, like every other setting in this file, because a
+// reader on only one of the two is its own repeatable bug.
+void readEyeRenderSize(Config& cfg, State* s) {
+    const std::string v = cfg.getString("advanced.eye_render_size", "");
+    if (v.empty()) {
+        // Clearing a PIN puts the measurement back, rather than leaving the
+        // pinned value standing for the rest of the session -- which is a
+        // setting that cannot be undone without a restart, and reads from the
+        // headset exactly like the fix being broken.
+        if (s->renderPinned) {
+            s->renderPinned = false;
+            s->renderW = s->renderH = 0;
+        }
+        s->renderAuto = true;
+        return;
+    }
+    if (v == "off" || v == "0") {
+        if (!s->renderOffNoted) {
+            s->renderOffNoted = true;
+            // Said even when nothing had been adopted yet: "why did it never
+            // measure one" is a question this line has to be able to answer
+            // from the log alone.
+            Log::get().note(
+                "vScreen: advanced.eye_render_size = off, so only the size the "
+                "headset published counts as an eye texture and no render "
+                "scale will be measured.%s",
+                s->renderW ? " The size measured earlier is dropped." : "");
+        }
+        s->renderAuto = false;
+        s->renderPinned = false;
+        s->renderW = s->renderH = 0;
+        return;
+    }
+    unsigned w = 0, h = 0;
+    if (sscanf_s(v.c_str(), "%ux%u", &w, &h) == 2 && w && h) {
+        s->renderAuto = false;
+        s->renderPinned = true;
+        if (s->renderW != w || s->renderH != h) {
+            s->renderW = w;
+            s->renderH = h;
+            Log::get().note(
+                "vScreen: advanced.eye_render_size pins the size this rig "
+                "renders an eye at to %ux%u, so nothing is measured. Clear it "
+                "to go back to measuring, or set it to off to count only what "
+                "the headset published.",
+                w, h);
+        }
+        return;
+    }
+    if (!s->renderBadNoted) {
+        s->renderBadNoted = true;
+        Log::get().note(
+            "vScreen: advanced.eye_render_size = \"%s\" is not a size, \"off\" "
+            "or empty, so it is being ignored and the render size measured as "
+            "usual. The form is WIDTHxHEIGHT, e.g. 1626x1774.",
+            v.c_str());
+    }
+    s->renderAuto = true;
+}
+
 // The list above, as text. Two notices need it now -- the starvation one and
 // the low-peak one below it -- and the second was written only because the
 // first could not fire, so the sizes had better read identically in both.
@@ -517,10 +628,8 @@ bool targetIsEyeSized(void* rtv) {
     // fraction of a texture width rounded to an integer, so bounds that are
     // not exactly one half (an inset, a guard band) land a pixel out and an
     // equality test would then match nothing at all -- silently, which is the
-    // failure this whole change exists to end.
-    const auto near2 = [](uint32_t a, uint32_t b) {
-        return (a > b ? a - b : b - a) <= 2u;
-    };
+    // failure this whole change exists to end. (near2 is file-local now; the
+    // measured render size and vScreenIsEyeSized need the same tolerance.)
     if (s->eyeW && near2(info.a, s->eyeW) && near2(info.b, s->eyeH)) {
         // ...unless it is ALSO exactly the panel, which is the one genuinely
         // ambiguous case: two textures of one size cannot be told apart by
@@ -543,6 +652,14 @@ bool targetIsEyeSized(void* rtv) {
         return true;
     }
 
+    // The size this rig turned out to render an eye at, once it has been
+    // measured. It is only ever set when the published size was matching
+    // almost nothing, so this can add a second answer but never replace the
+    // first: a rig that renders into what it submits never gets here.
+    if (s->renderW && near2(info.a, s->renderW) && near2(info.b, s->renderH)) {
+        return true;
+    }
+
     // The panel, by SHAPE. 16:9 is what Elite's flat panel is at every size
     // it can be set to, and a per-eye target is square-ish on every headset
     // measured here (Quest 3 1456x1560, Pimax 4184x4132, Index 1440x1600,
@@ -562,6 +679,11 @@ bool targetIsEyeSized(void* rtv) {
         // actual 1456x1560 eye textures went uncounted and the void stayed
         // grey.
         out = false;
+        // ...but if it is the eye's own shape at a render scale, remember it.
+        // That is the one wrong answer this test can give and not know about:
+        // the world drawn at 77% and scaled up on the way out is still the
+        // world, and saying no to it costs every fix here at once.
+        noteRenderCandidate(s, info.a, info.b);
     } else {
         // Nobody published: openvr_api.dll is not installed, or its hook has
         // not validated yet. Fall back to the old guess, which is all this
@@ -1361,6 +1483,14 @@ void readCensusSkip(Config& cfg, State* s) {
     }
 }
 
+bool vScreenIsEyeSized(uint32_t w, uint32_t h) {
+    State* s = g_state;
+    if (!s || !w || !h) return false;
+    if (s->eyeW && near2(w, s->eyeW) && near2(h, s->eyeH)) return true;
+    if (s->renderW && near2(w, s->renderW) && near2(h, s->renderH)) return true;
+    return false;
+}
+
 void vScreenRefreshConfig() {
     State* s = g_state;
     if (!s) return;
@@ -1376,6 +1506,7 @@ void vScreenRefreshConfig() {
     s->distanceEnabled = s->distanceScale != 1.0f;
     s->distanceIndex = readDistanceIndex(cfg);
     s->countForFlashFix = glitchFrameNeedsEyeDraws();
+    readEyeRenderSize(cfg, s);
     readCensusSkip(cfg, s);
     remlokConfigure(cfg);
     holoConfigure(cfg);
@@ -1651,6 +1782,62 @@ void vScreenFrameBoundary() {
             advice);
     }
 
+    // ROLL THE SHAPE CANDIDATES, AND PROMOTE ONE IF THE DRAWS SAY SO.
+    //
+    // What promotes a candidate is not its shape -- a half-resolution
+    // post-process buffer is the eye's shape too -- but the number of draws
+    // one frame put into it. Nothing except the scene draws into a single
+    // target more than kSceneEyeDraws times in a frame; that is the same
+    // measurement three other features already turn on, and it is why this
+    // needs no new number of its own.
+    //
+    // GUARDED SO IT CANNOT FIRE ON A HEALTHY RIG. The published size must
+    // have been starved for the whole session so far (pastStartup, and a peak
+    // that has never reached scene levels), which on a rig that renders into
+    // what it submits is false within seconds of the load-in. So this can add
+    // an answer where there was none; it cannot take one away.
+    //
+    // Once per session. If the scale changes mid-session the adopted size
+    // stops matching and the log's totals say so in the usual way -- the
+    // player's next launch measures it again, which is the same deal the
+    // published size gets.
+    for (uint32_t i = 0; i < s->candCount; ++i) {
+        if (s->cands[i].thisFrame > s->cands[i].bestFrame) {
+            s->cands[i].bestFrame = s->cands[i].thisFrame;
+        }
+        s->cands[i].thisFrame = 0;
+    }
+    if (s->renderAuto && !s->renderW && pastStartup &&
+        s->eyeDrawsMax <= kSceneEyeDraws) {
+        uint32_t best = 0, bestIdx = 0;
+        for (uint32_t i = 0; i < s->candCount; ++i) {
+            if (s->cands[i].bestFrame > best) {
+                best = s->cands[i].bestFrame;
+                bestIdx = i;
+            }
+        }
+        if (best > kSceneEyeDraws) {
+            s->renderW = s->cands[bestIdx].w;
+            s->renderH = s->cands[bestIdx].h;
+            const uint32_t pct = static_cast<uint32_t>(
+                (static_cast<uint64_t>(s->renderW) * 100u + s->eyeW / 2u) / s->eyeW);
+            Log::get().note(
+                "vScreen: the world on this rig is rendered at %ux%u and scaled into "
+                "the %ux%u the headset is handed -- %u%% of the width, which is what "
+                "supersampling away from 1.0 and every upscaler in the chain do (FSR "
+                "and NIS at their \"ultra quality\" are exactly this). MEASURED, not "
+                "guessed: it is the eye's own shape to within a percent, and one frame "
+                "put %u draws into it while the submitted size peaked at %u for the "
+                "whole session. It now counts as an eye texture as well, which is what "
+                "feeds the black void, Explorer Cam, the transition flash detector, the "
+                "RemLok lines, the loading hologram and the witchspace star -- all of "
+                "them inert until this line. If something now lands on the wrong pass, "
+                "set advanced.eye_render_size = off under [advanced] in edvr.ini and "
+                "report this log.",
+                s->renderW, s->renderH, s->eyeW, s->eyeH, pct, best, s->eyeDrawsMax);
+        }
+    }
+
     // RECOGNISED, BUT NOWHERE NEAR ENOUGH: the starvation notice's blind spot.
     //
     // That notice needs a session peak of EXACTLY ZERO, and two field reports
@@ -1681,7 +1868,11 @@ void vScreenFrameBoundary() {
     //
     // One totals window of gameplay before it speaks, so a player who quits
     // to the menu the instant they load in is not accused of anything.
-    if (!s->lowPeakNoted && s->eyeDrawsMax > 0 && s->gameplayMs &&
+    // ...and only where the promotion above could NOT explain it. A rig whose
+    // world is drawn at a render scale now says so in its own line, with the
+    // answer in it; this one is for the case that is still unexplained, which
+    // is the only case a reader has to do anything about.
+    if (!s->lowPeakNoted && s->eyeDrawsMax > 0 && !s->renderW && s->gameplayMs &&
         (now - s->gameplayMs) >= kTotalsWindowMs &&
         s->eyeDrawsMax <= kSceneEyeDraws) {
         s->lowPeakNoted = true;
@@ -1697,10 +1888,11 @@ void vScreenFrameBoundary() {
             "silent until now: Explorer Cam cannot arm (it needs more than 50 in a "
             "frame), the transition flash fix cannot withhold anything (100), and the "
             "camera scan loses its own gameplay signal. Render targets seen and NOT "
-            "counted: %s. One eye is %ux%u and the panel is %ux%u. If none of those "
-            "sizes is your eye texture, something between the game and the headset is "
-            "rendering at another resolution -- supersampling, an upscaler, or a "
-            "wrapper -- and this log is worth reporting with that setting named.",
+            "counted: %s. One eye is %ux%u and the panel is %ux%u. None of those is "
+            "the eye's shape at a render scale -- that case is recognised and adopted "
+            "on its own line, so this is the harder one: something between the game "
+            "and the headset is changing the image in a way this cannot follow. "
+            "Report this log with your supersampling, upscaler and mod list named.",
             s->eyeDrawsMax,
             static_cast<uint32_t>((now - s->gameplayMs) / 1000u), kSceneEyeDraws,
             s->rtSeenCount ? sizes : "none big enough to be one",
@@ -1848,6 +2040,7 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     g_state->distanceScale = scale;
     g_state->distanceEnabled = scale != 1.0f;
     g_state->distanceIndex = readDistanceIndex(cfg);
+    readEyeRenderSize(cfg, g_state);
     readCensusSkip(cfg, g_state);
     remlokConfigure(cfg);
     holoConfigure(cfg);

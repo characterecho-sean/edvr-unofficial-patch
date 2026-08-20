@@ -34,6 +34,10 @@
 // arithmetic and lives in the header precisely so it can be asserted here.
 #include "../../src/d3d11/camera_view.h"
 #include "../../src/d3d11/head_offset_gate.h"
+// Same reason: eyeShapedAtScale is the recogniser rule that decides whether
+// the gate is fed at all, and it is inline in the header so this file can
+// assert it against the sizes a real rig produced.
+#include "../../src/d3d11/vscreen.h"
 
 using namespace edvr;
 
@@ -209,6 +213,60 @@ void enterCamera() {
 // same type, and the picking is pure address arithmetic -- so it is testable
 // here, without a game, and it is where the first user-reported bug was.
 //
+// ------------------------------------------------- what counts as an eye
+//
+// The third thing the gate depends on and does not own: whether a draw is
+// going into an eye texture at all. It cannot arm if the count it reads is
+// starved, and on 2026-08-19 a rig starved it by rendering the world at a
+// scale -- 1626x1774 into a 2112x2304 the headset was handed. eyeShapedAtScale
+// is the rule that recognises that case, and it is a shape test with a
+// tolerance, which is exactly the kind of thing that drifts.
+//
+// Every size below is from that session's own log, so this is the real list a
+// real rig offered: one of them is the world and six are not.
+int eyeShapeChecks() {
+    struct Case { uint32_t w, h; bool want; const char* what; };
+    const uint32_t eyeW = 2112, eyeH = 2304;
+    const Case cases[] = {
+        {1626, 1774, true,  "the world, rendered at 77% and scaled up (the field case)"},
+        {2048, 2048, false, "a square atlas, 9% off the eye's shape"},
+        {1024, 1024, false, "a smaller square, same 9%"},
+        {1920, 1080, false, "16:9 -- the panel's stock size"},
+        {1791, 1007, false, "16:9 again, at an odd size"},
+        {1280,  768, false, "5:3"},
+        {1024,  512, false, "2:1"},
+        // The bounds themselves, which the list above does not reach.
+        {2112, 2304, true,  "the published size, which the exact test takes first"},
+        // The band's edges, named as edges. 40% and 250% are IN, because a
+        // comment that says "40% to 250%" is read as inclusive by whoever
+        // changes this next, and a boundary nobody asserts is a boundary that
+        // moves.
+        { 845,  922, true,  "the eye's shape at exactly 40% -- the bottom of the band"},
+        {5280, 5760, true,  "the eye's shape at exactly 250% -- the top of it"},
+        { 803,  875, false, "the eye's shape at 38% -- under the band"},
+        {5491, 5990, false, "the eye's shape at 260% -- over it"},
+        {   0,    0, false, "nothing"},
+    };
+    int bad = 0;
+    for (const Case& c : cases) {
+        const bool got = eyeShapedAtScale(c.w, c.h, eyeW, eyeH);
+        ++g_checks;
+        if (got == c.want) continue;
+        printf("  FAIL  %ux%u %s -- eyeShapedAtScale said %s\n", c.w, c.h, c.what,
+               got ? "yes" : "no");
+        ++bad;
+    }
+    // A headset that has published nothing yet cannot answer this, and must
+    // not answer it by dividing by zero.
+    ++g_checks;
+    if (eyeShapedAtScale(1626, 1774, 0, 0)) {
+        printf("  FAIL  eyeShapedAtScale answered yes with no published eye size\n");
+        ++bad;
+    }
+    if (!bad) printf("  ok    the world at a render scale is an eye; six other shapes are not\n");
+    return bad;
+}
+
 // These are not invented shapes. The first is the exact layout from issue #2,
 // which cost that player Explorer Cam for the last twenty-four minutes of a
 // session; the rest are the neighbouring cases that a fix for it must not break.
@@ -1122,6 +1180,7 @@ void runScenarios() {
     headOffsetGateReset();
 
     g_bad += cameraRunChecks();
+    g_bad += eyeShapeChecks();
 }
 
 }  // namespace

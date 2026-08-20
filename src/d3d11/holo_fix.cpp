@@ -5,9 +5,9 @@
 #include <d3d11.h>
 
 #include "../common/config.h"
-#include "../common/frame_flag.h"
 #include "../common/log.h"
 #include "binding_shadow.h"
+#include "vscreen.h"  // vScreenIsEyeSized
 
 namespace edvr {
 namespace {
@@ -134,11 +134,14 @@ bool holoOnEyeDraw(char kind, uint32_t count, uint32_t instances) {
     // Slot 0 must be the eye-sized depth resolve -- the discriminator that
     // separates the hologram composite from an atlas-sampling HUD quad that
     // happens to carry a 256x256 in slot 1.
-    uint32_t eyeW = 0, eyeH = 0;
-    if (!eyeTextureSize(&eyeW, &eyeH)) return false;
+    // Eye-sized by vScreen's answer, not by an equality against the
+    // published size. On a rig with a render scale the world -- and so
+    // this depth resolve -- is a fraction of the size the headset is
+    // handed, and an equality there matched nothing at all: this fix was
+    // silently off for the whole of that session (2026-08-19).
     ResourceInfo depth;
     if (!bindingResolve(bindingGet(BindSlot::PsSrv0), &depth) ||
-        !depth.isTexture2D || depth.a != eyeW || depth.b != eyeH) {
+        !depth.isTexture2D || !vScreenIsEyeSized(depth.a, depth.b)) {
         return false;
     }
     return true;

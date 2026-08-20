@@ -10,6 +10,7 @@
 #include "../common/timing.h"
 #include "binding_shadow.h"
 #include "journal_watch.h"
+#include "vscreen.h"  // vScreenIsEyeSized
 
 namespace edvr {
 namespace {
@@ -57,11 +58,14 @@ bool isFamily(char kind, ResourceInfo* atlasOut) {
         atlas.fmt != kAtlasFmt) {
         return false;
     }
-    uint32_t eyeW = 0, eyeH = 0;
-    if (!eyeTextureSize(&eyeW, &eyeH)) return false;
+    // Eye-sized by vScreen's answer, not by an equality against the
+    // published size. On a rig with a render scale the world -- and so
+    // this depth resolve -- is a fraction of the size the headset is
+    // handed, and an equality there matched nothing at all: this fix was
+    // silently off for the whole of that session (2026-08-19).
     ResourceInfo depth;
     if (!bindingResolve(bindingGet(BindSlot::PsSrv0), &depth) ||
-        !depth.isTexture2D || depth.a != eyeW || depth.b != eyeH) {
+        !depth.isTexture2D || !vScreenIsEyeSized(depth.a, depth.b)) {
         return false;
     }
     if (atlasOut) *atlasOut = atlas;

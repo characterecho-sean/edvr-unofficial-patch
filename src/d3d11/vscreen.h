@@ -44,6 +44,56 @@ namespace edvr {
 // than this fact.
 constexpr uint32_t kSceneEyeDraws = 100;
 
+// Is WxH the eye texture's own SHAPE at a plausible render scale?
+//
+// The size the headset is handed is not always the size the world is drawn
+// at. Field-measured 2026-08-19 on a Steam install: the runtime published
+// 2112x2304 an eye, the game submitted that, and every scene draw went into
+// 1626x1774 -- the same shape to within 0.01%, at 77% of the width, scaled up
+// on the way out. That is what supersampling below 1.0 and every upscaler
+// (FSR and NIS "ultra quality" are exactly this 1.3x) do. The exact-size test
+// matched only the handful of final passes, so the eye-draw count read 18 for
+// a whole session and EVERY fix keyed to it was inert: Explorer Cam, the
+// transition flash detector, the RemLok lines, the loading hologram and the
+// witchspace star.
+//
+// Shape and scale only, which is deliberately not enough on its own -- a
+// half-resolution post-process buffer is also the eye's shape. It says which
+// targets are WORTH WATCHING; what promotes one is the draw count measured
+// into it (see vscreen.cpp), because nothing but the scene draws hundreds of
+// times into one target in one frame.
+//
+// Integer arithmetic on purpose: this is asserted from a test that links
+// nothing, the same reason camera_view's grouping lives in a header.
+inline bool eyeShapedAtScale(uint32_t w, uint32_t h, uint32_t eyeW, uint32_t eyeH) {
+    if (!w || !h || !eyeW || !eyeH) return false;
+    // Aspect, cross-multiplied rather than divided: within about 1%, which
+    // the field case cleared by a factor of a hundred (0.01%) and which every
+    // other target in that session's list missed by 9% or more.
+    const uint64_t a = static_cast<uint64_t>(w) * eyeH;
+    const uint64_t b = static_cast<uint64_t>(h) * eyeW;
+    const uint64_t hi = a > b ? a : b;
+    const uint64_t lo = a > b ? b : a;
+    if (hi - lo > hi / 100) return false;
+    // ...and a scale somebody would actually render at: 40% to 250% of the
+    // submitted width. Both ends matter -- supersampling ABOVE 1.0 renders
+    // large and resolves down, which starves the count the same way.
+    if (static_cast<uint64_t>(w) * 5 < static_cast<uint64_t>(eyeW) * 2) return false;
+    if (static_cast<uint64_t>(w) * 2 > static_cast<uint64_t>(eyeW) * 5) return false;
+    return true;
+}
+
+// Is a target of this size one the headset is shown -- either the size the
+// runtime published, or the size this rig turned out to render an eye at?
+//
+// The second half is why this exists as a shared answer instead of three
+// copies of `== eyeW && == eyeH`. holo_fix and witchstar_fix identify their
+// draw by an eye-sized DEPTH buffer, and on a rig with a render scale that
+// buffer is the scaled size, so both fixes silently matched nothing.
+// Answers false when nothing has been published and nothing measured, which
+// is the same "disable yourself" answer those two already acted on.
+bool vScreenIsEyeSized(uint32_t w, uint32_t h);
+
 // Installs the context hooks using the mechanism the caller decided for this
 // device -- shared with the exposure hooks so the two never split modes on
 // the one context. See device_hook.h.
