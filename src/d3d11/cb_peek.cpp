@@ -15,14 +15,15 @@
 namespace edvr {
 namespace {
 
-// The sprite family, as every capture since the witchspace census has
-// resolved it: DrawIndexedInstanced, PS slot 0 the eye-sized depth resolve,
-// PS slot 1 the 1024x1024 fmt-99 atlas. Any index count -- the sun flare is
-// the family's n=6 members, the corona its large fans.
+// The sprite family, as the SUN-scene census resolved it (2026-08-20; the
+// first matcher required the witchspace corona's 1024x1024 fmt-99 atlas in
+// slot 1, and a whole sweep captured nothing because the sun flare samples
+// OTHER textures -- a 1024x512 streak atlas, 32x32 sparkles): kind X, the
+// eye-sized depth resolve in PS slot 0, any TEXTURE in slot 1 (excluding
+// the buffer-fed text meshes that share the pass), and a large-ish index
+// count (the flare candidates run 576 and 600; HUD widgets run 6-36).
 constexpr char     kKind = 'X';
-constexpr uint32_t kAtlasW = 1024;
-constexpr uint32_t kAtlasH = 1024;
-constexpr uint32_t kAtlasFmt = 99;
+constexpr uint32_t kMinIndices = 64;
 
 constexpr uint32_t kMaxBytes = 8192;
 constexpr uint32_t kMaxFloats = kMaxBytes / 4;
@@ -60,13 +61,17 @@ bool cbPeekEnabled() { return g_enabled; }
 
 void* cbPeekTarget() { return g_target; }
 
-void cbPeekOnEyeDraw(char kind, uint32_t /*count*/, uint32_t /*instances*/) {
-    if (!g_enabled || kind != kKind) return;
+void cbPeekOnEyeDraw(char kind, uint32_t count, uint32_t /*instances*/) {
+    if (!g_enabled || g_target || kind != kKind || count < kMinIndices) {
+        // Learned ONCE per enable-cycle: two flare candidates share the sun
+        // frame, and relearning on every different pointer interleaved two
+        // buffers' dumps. Toggle cb_peek off and on to hunt the next one.
+        return;
+    }
 
     ResourceInfo atlas;
     if (!bindingResolve(bindingGet(BindSlot::PsSrv1), &atlas) ||
-        !atlas.isTexture2D || atlas.a != kAtlasW || atlas.b != kAtlasH ||
-        atlas.fmt != kAtlasFmt) {
+        !atlas.isTexture2D) {
         return;
     }
     uint32_t eyeW = 0, eyeH = 0;
@@ -78,16 +83,17 @@ void cbPeekOnEyeDraw(char kind, uint32_t /*count*/, uint32_t /*instances*/) {
     }
 
     void* cb = bindingGet(BindSlot::VsCb0);
-    if (!cb || cb == g_target) return;
+    if (!cb) return;
     g_target = cb;
     g_dumpedFull = false;
     ResourceInfo info;
     const bool resolved = bindingResolveResource(cb, &info) && info.isBuffer;
     g_targetBytes = resolved ? info.a : 0;
-    Log::get().note("cb peek: sprite draw's vertex constants learned -- "
-                    "buffer %u bytes. The next write dumps it in full; "
-                    "after that, only the floats that change.",
-                    g_targetBytes);
+    Log::get().note("cb peek: learned the vertex constants of a matched draw "
+                    "-- n=%u, slot1 tex %ux%u fmt=%u, buffer %u bytes. The "
+                    "next write dumps it in full; after that, only the floats "
+                    "that change.",
+                    count, atlas.a, atlas.b, atlas.fmt, g_targetBytes);
 }
 
 void cbPeekCapture(const void* data, uint32_t bytes) {
