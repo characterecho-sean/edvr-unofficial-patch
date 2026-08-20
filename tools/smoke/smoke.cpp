@@ -266,6 +266,66 @@ int main(int argc, char** argv) {
         }
     }
 
+    // THE SCENE COUNTER COUNTS DRAWS, NOT RENDER-TARGET REBINDS.
+    //
+    // The recogniser's verdict is cached against the binding generation, so a
+    // counter written inside it sees one call per rebind however many draws
+    // follow. That shipped, and the field found it: the rig it was written
+    // for named the right target in its own log and promoted nothing, because
+    // a bar written in draws was being tested against a number of rebinds.
+    // The difference is invisible in a log and obvious here -- bind once,
+    // draw a known number of times, ask for the number back.
+    //
+    // 1626x1774 is that rig's real scene target. Nothing about the test needs
+    // it to be that size, but a number from a session beats an invented one.
+    {
+        const UINT kW = 1626, kH = 1774, kDraws = 150;
+        D3D11_TEXTURE2D_DESC td{};
+        td.Width = kW; td.Height = kH; td.MipLevels = 1; td.ArraySize = 1;
+        td.Format = DXGI_FORMAT_R8G8B8A8_UNORM; td.SampleDesc.Count = 1;
+        td.Usage = D3D11_USAGE_DEFAULT; td.BindFlags = D3D11_BIND_RENDER_TARGET;
+        ID3D11Texture2D* tex = nullptr;
+        ID3D11RenderTargetView* rtv = nullptr;
+        if (SUCCEEDED(device->CreateTexture2D(&td, nullptr, &tex)) && tex &&
+            SUCCEEDED(device->CreateRenderTargetView(tex, nullptr, &rtv)) && rtv) {
+            ctx->OMSetRenderTargets(1, &rtv, nullptr);
+            // Empty draws: the hook runs before the call is forwarded, so the
+            // runtime rejecting them for want of a pipeline costs nothing.
+            for (UINT i = 0; i < kDraws; ++i) ctx->Draw(0, 0);
+            ID3D11RenderTargetView* none = nullptr;
+            ctx->OMSetRenderTargets(1, &none, nullptr);
+
+            typedef unsigned int (*PFN_SceneDraws)(unsigned int, unsigned int);
+            PFN_SceneDraws sceneDraws = reinterpret_cast<PFN_SceneDraws>(
+                GetProcAddress(mod, "edvr_selftest_scene_draws"));
+            if (!sceneDraws) {
+                printf("  FAIL  edvr_selftest_scene_draws is not exported\n");
+                rc = 1;
+            } else {
+                const unsigned int got = sceneDraws(kW, kH);
+                if (got == kDraws) {
+                    printf("  ok    the scene counter counted %u draws into one "
+                           "target, not the rebinds\n", got);
+                } else if (got <= 2) {
+                    printf("  FAIL  the scene counter read %u after %u draws into one "
+                           "target\n", got, kDraws);
+                    printf("        That is the rebind count. A promotion bar written "
+                           "in draws can never be reached.\n");
+                    rc = 1;
+                } else {
+                    printf("  FAIL  the scene counter read %u after %u draws\n", got,
+                           kDraws);
+                    rc = 1;
+                }
+            }
+        } else {
+            printf("  FAIL  could not make a render target for the scene counter\n");
+            rc = 1;
+        }
+        if (rtv) rtv->Release();
+        if (tex) tex->Release();
+    }
+
     ctx->Release();
     device->Release();
 

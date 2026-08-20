@@ -144,7 +144,8 @@ echo [edvr] === d3d11.dll ===
 python "%ROOT%\tools\gen_exports.py" --source "%SystemRoot%\System32\d3d11.dll" ^
     --tag d3d11 --out "%GEN%" ^
     --wrap D3D11CreateDevice --wrap D3D11CreateDeviceAndSwapChain ^
-    --extra-export edvr_selftest_hooks
+    --extra-export edvr_selftest_hooks ^
+    --extra-export edvr_selftest_scene_draws
 if errorlevel 1 ( echo [edvr] ERROR: export generation failed & exit /b 1 )
 
 if not exist "%OBJ%\d3d11" mkdir "%OBJ%\d3d11"

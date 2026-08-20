@@ -151,6 +151,11 @@ bool vScreenReclaimHooks();
 // still works cannot catch a miscount: every plausible off-by-one lands on a
 // method the test never invokes.
 bool vScreenHooksSawClearState();
+
+// Draws counted into a render target of this size, for the build check.
+// smoke issues a known number into one and asks for it back, which is the
+// only way to tell a per-draw counter from a per-binding one.
+uint32_t vScreenSceneCandidateDraws(uint32_t w, uint32_t h);
 bool vScreenHooksSawExecuteCommandList();
 
 void shutdownVScreenFixes();

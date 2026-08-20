@@ -256,6 +256,9 @@ struct State {
     // generation it was derived at.
     bool     rtv0Eye = false;
     uint32_t rtv0EyeGen = 0;
+    // Which scene candidate the bound target is, resolved with rtv0Eye and
+    // valid for the same binding generation. -1 for none.
+    int      rtv0Cand = -1;
     bool     psSrv0Panel = false;
     uint32_t psSrv0PanelGen = 0;
 
@@ -509,7 +512,7 @@ bool near2(uint32_t a, uint32_t b) { return (a > b ? a - b : b - a) <= 2u; }
 // Remember an eye-SHAPED target the exact test turned down, and count this
 // draw into it. Promotion happens at the frame boundary and needs a count no
 // post-process buffer produces; see adoptRenderSize.
-void noteSceneCandidate(State* s, uint32_t w, uint32_t h) {
+int noteSceneCandidate(State* s, uint32_t w, uint32_t h) {
     // Anything big enough to hold a rendered world. NOT filtered by shape:
     // shape decides what may be TREATED as an eye texture, and that is a
     // separate question from where the frame's work went -- see the promotion
@@ -517,21 +520,28 @@ void noteSceneCandidate(State* s, uint32_t w, uint32_t h) {
     // at all; targetIsEyeSized answers those before this is reached, which is
     // what keeps a menu -- drawn into the panel, hundreds of draws deep --
     // from reading as a scene.
-    if (w < 512 || h < 512) return;
+    //
+    // IT RETURNS AN INDEX AND COUNTS NOTHING, which is the correction that
+    // made the whole mechanism work. Counting here counted RENDER TARGET
+    // REBINDS: this function is reached from targetIsEyeSized, whose answer
+    // is cached against the binding generation, so a frame drawing five
+    // hundred times into one target called it once. The promotion bar is a
+    // DRAW count, and the candidate never got within two orders of magnitude
+    // of it -- field-proven on the first session to run this code
+    // (2026-08-19), which found the right target, listed it in its own
+    // notice, and promoted nothing. The caller owns the counting now, on the
+    // draw path, beside the eye-draw counter it has to be comparable with.
+    if (w < 512 || h < 512) return -1;
     for (uint32_t i = 0; i < s->candCount; ++i) {
-        if (s->cands[i].w == w && s->cands[i].h == h) {
-            ++s->cands[i].thisFrame;
-            // The frame's scene count, for the target promoted to carry it.
-            if (w == s->sceneW && h == s->sceneH) ++s->sceneDrawsThisFrame;
-            return;
-        }
+        if (s->cands[i].w == w && s->cands[i].h == h) return static_cast<int>(i);
     }
-    if (s->candCount >= kCandidates) return;
-    s->cands[s->candCount].w = w;
-    s->cands[s->candCount].h = h;
-    s->cands[s->candCount].shaped = eyeShapedAtScale(w, h, s->eyeW, s->eyeH);
-    s->cands[s->candCount].thisFrame = 1;
+    if (s->candCount >= kCandidates) return -1;
+    const uint32_t i = s->candCount;
+    s->cands[i].w = w;
+    s->cands[i].h = h;
+    s->cands[i].shaped = eyeShapedAtScale(w, h, s->eyeW, s->eyeH);
     ++s->candCount;
+    return static_cast<int>(i);
 }
 
 // advanced.eye_render_size: empty measures it, "off" refuses to, WxH pins it.
@@ -633,7 +643,7 @@ void formatSeenSizes(State* s, char* out, size_t bytes) {
 // Resolved through binding_shadow, which owns the guard and the budget. A view
 // that can no longer be resolved answers "no" -- see the note there about why
 // callers must read a failed resolve as "do nothing" rather than as a verdict.
-bool targetIsEyeSized(void* rtv) {
+bool targetIsEyeSized(void* rtv, int* candOut = nullptr) {
     State* s = g_state;
     // Counted before any early return: "was the question asked" is a
     // different fact from "what was the answer", and the starvation notice
@@ -734,7 +744,8 @@ bool targetIsEyeSized(void* rtv) {
     // that made it unreachable there. Shape needs a published size; the draw
     // count does not.
     if (!out) {
-        noteSceneCandidate(s, info.a, info.b);
+        const int cand = noteSceneCandidate(s, info.a, info.b);
+        if (candOut) *candOut = cand;
         noteUncountedTarget(s, info.a, info.b);
     }
     return out;
@@ -882,10 +893,23 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     }
     const uint32_t rtvGen = bindingGeneration(BindSlot::Rtv0);
     if (s->rtv0EyeGen != rtvGen) {
-        s->rtv0Eye = targetIsEyeSized(bindingGet(BindSlot::Rtv0));
+        s->rtv0Cand = -1;
+        s->rtv0Eye = targetIsEyeSized(bindingGet(BindSlot::Rtv0), &s->rtv0Cand);
         s->rtv0EyeGen = rtvGen;
     }
-    if (!s->rtv0Eye) return DrawVerdict::kNone;
+    if (!s->rtv0Eye) {
+        // NOT an eye texture -- but it is still a DRAW, and where the draws
+        // are going is the entire question when the eye textures are getting
+        // almost none. Counted here rather than inside the recogniser,
+        // because the recogniser's answer is cached per binding and a count
+        // taken in there measures rebinds; see noteSceneCandidate.
+        if (s->rtv0Cand >= 0) {
+            State::SceneCandidate& c = s->cands[s->rtv0Cand];
+            ++c.thisFrame;
+            if (c.w == s->sceneW && c.h == s->sceneH) ++s->sceneDrawsThisFrame;
+        }
+        return DrawVerdict::kNone;
+    }
     ++s->eyeDrawsThisFrame;
 
     // The census line for this draw, recorded while its bindings are certainly
@@ -1974,6 +1998,44 @@ void vScreenFrameBoundary() {
         s->lowPeakNoted = true;
         char sizes[192];
         formatSeenSizes(s, sizes, sizeof(sizes));
+        // WHY NOTHING WAS PROMOTED, from the measurement rather than from an
+        // assumption about it. The first version of this line asserted that
+        // none of the sizes was the eye's shape at a scale -- and the field
+        // session it was written for listed 1626x1774, which is exactly that
+        // shape, while a counting bug kept it from ever clearing the bar. A
+        // diagnostic that states a reason it did not check is worse than one
+        // that states none: it sent the reader looking for an exotic layout
+        // when the answer was a promotion that nearly happened.
+        char why[256];
+        uint32_t shapedBest = 0, shapedIdx = 0;
+        bool haveShaped = false;
+        for (uint32_t i = 0; i < s->candCount; ++i) {
+            if (s->cands[i].shaped && (!haveShaped || s->cands[i].bestFrame > shapedBest)) {
+                haveShaped = true;
+                shapedBest = s->cands[i].bestFrame;
+                shapedIdx = i;
+            }
+        }
+        uint32_t anyBest = 0;
+        for (uint32_t i = 0; i < s->candCount; ++i) {
+            if (s->cands[i].bestFrame > anyBest) anyBest = s->cands[i].bestFrame;
+        }
+        if (haveShaped) {
+            _snprintf_s(why, sizeof(why), _TRUNCATE,
+                        "%ux%u IS your eye textures' shape at a render scale, which is "
+                        "the case this adapts to -- but the busiest frame put only %u "
+                        "draw(s) into it, short of the %u that would prove the world "
+                        "is drawn there, so nothing was adopted.",
+                        s->cands[shapedIdx].w, s->cands[shapedIdx].h, shapedBest,
+                        kSceneEyeDraws);
+        } else {
+            _snprintf_s(why, sizeof(why), _TRUNCATE,
+                        "None of them is your eye textures' shape at a render scale, "
+                        "and the busiest of them took only %u draw(s) in a frame -- so "
+                        "neither the shape nor the draws identify where the world is "
+                        "going, which is the harder case.",
+                        anyBest);
+        }
         Log::get().note(
             "vScreen: eye-sized render targets ARE being recognised, but the busiest "
             "frame this session had only %u draw(s) into one -- and gameplay has been "
@@ -1984,15 +2046,12 @@ void vScreenFrameBoundary() {
             "silent until now: Explorer Cam cannot arm (it needs more than 50 in a "
             "frame), the transition flash fix cannot withhold anything (100), and the "
             "camera scan loses its own gameplay signal. Render targets seen and NOT "
-            "counted: %s. One eye is %ux%u and the panel is %ux%u. None of those is "
-            "the eye's shape at a render scale -- that case is recognised and adopted "
-            "on its own line, so this is the harder one: something between the game "
-            "and the headset is changing the image in a way this cannot follow. "
+            "counted: %s. One eye is %ux%u and the panel is %ux%u. %s "
             "Report this log with your supersampling, upscaler and mod list named.",
             s->eyeDrawsMax,
             static_cast<uint32_t>((now - s->gameplayMs) / 1000u), kSceneEyeDraws,
             s->rtSeenCount ? sizes : "none big enough to be one",
-            s->eyeW, s->eyeH, s->panelW, s->panelH);
+            s->eyeW, s->eyeH, s->panelW, s->panelH, why);
     }
 
     // Frames that forced nothing are menus and loading screens, not asymmetry.
@@ -2251,6 +2310,21 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
 }
 
 bool vScreenHooksSawClearState() { return g_state && g_state->sawClearState; }
+
+uint32_t vScreenSceneCandidateDraws(uint32_t w, uint32_t h) {
+    State* s = g_state;
+    if (!s) return 0;
+    for (uint32_t i = 0; i < s->candCount; ++i) {
+        if (s->cands[i].w == w && s->cands[i].h == h) {
+            // The frame in progress OR the best completed one, whichever is
+            // larger: smoke never presents, so no frame boundary ever rolls
+            // thisFrame into bestFrame.
+            return s->cands[i].thisFrame > s->cands[i].bestFrame ? s->cands[i].thisFrame
+                                                                 : s->cands[i].bestFrame;
+        }
+    }
+    return 0;
+}
 bool vScreenHooksSawExecuteCommandList() {
     return g_state && g_state->sawExecuteCommandList;
 }
@@ -2269,6 +2343,17 @@ bool vScreenHooksSawExecuteCommandList() {
 // this. Nothing in the game imports it.
 //
 // bit 0 = ClearState hook ran, bit 1 = ExecuteCommandList hook ran.
+// The second build-check export, for the counting bug that reached the field.
+//
+// A candidate's draws were once counted inside the recogniser, whose answer is
+// cached per render-target binding -- so the number measured REBINDS, sat at a
+// handful, and never cleared a bar written in draws. Nothing in a log says
+// which of the two a counter is counting; only issuing N draws into one target
+// and asking for the number back does. See noteSceneCandidate.
+extern "C" unsigned int edvr_selftest_scene_draws(unsigned int w, unsigned int h) {
+    return edvr::vScreenSceneCandidateDraws(w, h);
+}
+
 extern "C" unsigned int edvr_selftest_hooks() {
     unsigned int bits = 0;
     if (edvr::vScreenHooksSawClearState()) bits |= 1u;
