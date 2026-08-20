@@ -19,6 +19,7 @@
 #include "../common/timing.h"
 #include "../common/vtable_hook.h"
 #include "binding_shadow.h"
+#include "cb_peek.h"
 #include "device_hook.h"  // contextHookModeFor
 #include "draw_census.h"
 #include "fov_probe.h"
@@ -282,6 +283,14 @@ struct State {
     void*    camResource = nullptr;
     void*    camData = nullptr;
     uint32_t camBytes = 0;
+
+    // A third mapped-buffer shadow, for the constant-buffer peek. Separate
+    // from the two above for the reason they are separate from each other:
+    // any pair of these buffers can be mapped at the same time, and sharing
+    // a slot lets whichever unmaps second overwrite the other's record.
+    void*    peekResource = nullptr;
+    void*    peekData = nullptr;
+    uint32_t peekBytes = 0;
 
     uint32_t eyeDrawsThisFrame = 0;
     uint32_t eyeDrawsLastFrame = 0;
@@ -902,7 +911,8 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     if (!s->distanceEnabled && !s->countForFlashFix &&
         !headOffsetGateWantsPanel() && s->censusSkipCount == 0 &&
         s->censusSkipRangeCount == 0 && !remlokWantsDraws() &&
-        !holoWantsDraws() && !witchstarWantsDraws() && !drawCensusArmed()) {
+        !holoWantsDraws() && !witchstarWantsDraws() && !cbPeekEnabled() &&
+        !drawCensusArmed()) {
         return DrawVerdict::kNone;
     }
     const uint32_t rtvGen = bindingGeneration(BindSlot::Rtv0);
@@ -990,6 +1000,11 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     if (witchstarWantsDraws() && witchstarOnEyeDraw(kind, count, instances)) {
         return DrawVerdict::kWitchstar;
     }
+
+    // The constant-buffer peek: observation only, learning which buffer the
+    // sprite family's vertex stage reads so the Map/Unmap tee below can dump
+    // its contents.
+    if (cbPeekEnabled()) cbPeekOnEyeDraw(kind, count, instances);
 
     // The head-offset gate's signal, recorded BEFORE the "does anything want to
     // act" test below, and NOT conditional on the distance fix.
@@ -1295,6 +1310,23 @@ HRESULT STDMETHODCALLTYPE hookedMap(ID3D11DeviceContext* self, ID3D11Resource* r
             }
         }
     }
+    // The peek target, independent of the chain above on purpose: the buffer
+    // the sprite family reads may BE the composite's or the camera's, and a
+    // peek must not steal either shadow's slot. Pointer compare only; the
+    // resolve happened at learn time.
+    if (SUCCEEDED(hr) && mapped && sub == 0 && cbPeekEnabled() &&
+        res == cbPeekTarget()) {
+        s->peekResource = res;
+        s->peekData = mapped->pData;
+        s->peekBytes = 0;
+        D3D11_RESOURCE_DIMENSION dim = D3D11_RESOURCE_DIMENSION_UNKNOWN;
+        res->GetType(&dim);
+        if (dim == D3D11_RESOURCE_DIMENSION_BUFFER) {
+            D3D11_BUFFER_DESC d{};
+            static_cast<ID3D11Buffer*>(res)->GetDesc(&d);
+            s->peekBytes = d.ByteWidth;
+        }
+    }
     return hr;
 }
 
@@ -1329,6 +1361,16 @@ void STDMETHODCALLTYPE hookedUnmap(ID3D11DeviceContext* self, ID3D11Resource* re
         s->camResource = nullptr;
         s->camData = nullptr;
         s->camBytes = 0;
+    }
+    if (res == s->peekResource && s->peekData) {
+        // Same rule again, same budget as the camera read: both are reads of
+        // a buffer the game just wrote, and a fault in one means neither can
+        // be trusted this session.
+        guardedBudget(g_cameraBudget,
+                      [&] { cbPeekCapture(s->peekData, s->peekBytes); });
+        s->peekResource = nullptr;
+        s->peekData = nullptr;
+        s->peekBytes = 0;
     }
     s->realUnmap(self, res, sub);
 }
@@ -1588,6 +1630,7 @@ void vScreenRefreshConfig() {
     holoConfigure(cfg);
     witchstarConfigure(cfg);
     fovProbeConfigure(cfg);
+    cbPeekConfigure(cfg);
     // Every fix.head_offset_* key, on the reload path as well as the startup
     // one. A config reader on only one of the two is a specific repeatable bug
     // -- reload-only means the value stays its C++ initialiser for the whole
@@ -2259,6 +2302,7 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     holoConfigure(cfg);
     witchstarConfigure(cfg);
     fovProbeConfigure(cfg);
+    cbPeekConfigure(cfg);
     // installGlitchFrameFix is called before this, deliberately, so this is its
     // settled answer rather than a guess about config it has not read yet.
     g_state->countForFlashFix = glitchFrameNeedsEyeDraws();
