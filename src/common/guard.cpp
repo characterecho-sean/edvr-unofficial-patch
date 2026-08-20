@@ -56,7 +56,7 @@ int guardFilter(unsigned long code, const char* site) {
             // lines however bad it gets, and makes runaway visible AS runaway.
             if ((g_sites[i].count & (g_sites[i].count - 1)) == 0) {
                 Log::get().note("FAULT TOTAL site=%s: %llu absorbed so far this "
-                                "session.", key,
+                                "session -- still caught, still not a crash.", key,
                                 (unsigned long long)g_sites[i].count);
             }
             return EXCEPTION_EXECUTE_HANDLER;   // already reported once
@@ -65,7 +65,29 @@ int guardFilter(unsigned long code, const char* site) {
     if (g_siteCount < kMaxSites) {
         g_sites[g_siteCount++] = {key, 1};
     }
-    Log::get().note("FAULT exception=0x%08lX site=%s. Further faults at this "
+    // SAY THE OUTCOME, NOT JUST THE EVENT.
+    //
+    // This line used to open with "FAULT exception=0xC0000005" and then talk
+    // only about its own bookkeeping, so the one thing a reader wants to know
+    // -- did this kill the game? -- was the one thing it did not say. Issue
+    // #13 was filed as "CTD / Access Violation" on the strength of it: the
+    // reporter pasted a run of these, every one absorbed exactly as designed,
+    // and the scan they came from succeeded four lines later in the same log.
+    // The real fault that session was a starved draw recogniser three modules
+    // away, which this line's alarm drew attention away from rather than
+    // towards.
+    //
+    // A reporter reads the first clause and stops, so the first clause is the
+    // verdict now and the bookkeeping follows it. The word FAULT is kept
+    // because logs are grepped for it and older reports quote it.
+    Log::get().note("FAULT ABSORBED exception=0x%08lX site=%s. THIS DID NOT CRASH "
+                    "THE GAME. EDVR touched an address that was not there, its own "
+                    "handler caught it, and the process carried on -- what the fault "
+                    "cost is the rest of that one operation and nothing else. A few "
+                    "of these are routine: probing memory the game is free to release "
+                    "faults by design, and the camera scan walks gigabytes of it. "
+                    "What would be worth reporting is a total below that keeps "
+                    "doubling, or a FEATURE-DISABLED line. Further faults at this "
                     "site are counted rather than logged; the running total is "
                     "restated as it doubles, so a hard exit cannot eat it.",
                     code, key);
@@ -75,7 +97,8 @@ int guardFilter(unsigned long code, const char* site) {
 void reportFaultSites() {
     for (unsigned i = 0; i < g_siteCount; ++i) {
         if (g_sites[i].count > 1) {
-            Log::get().note("FAULT TOTAL site=%s: %llu absorbed this session.",
+            Log::get().note("FAULT TOTAL site=%s: %llu absorbed this session -- "
+                            "all of them caught; none of them crashed the game.",
                             g_sites[i].site,
                             (unsigned long long)g_sites[i].count);
         }
