@@ -257,9 +257,16 @@ struct State {
     struct SkipRange { uint32_t lo; uint32_t hi; };
     SkipRange censusSkipRange[4] = {};
     uint32_t  censusSkipRangeCount = 0;
+    // The offscreen form: glare and bloom are BUILT in offscreen buffers
+    // and fused onto the eye by a pass that cannot be skipped without
+    // freezing the image; the builders can. A size names a buffer.
+    struct OffSkip { uint32_t w; uint32_t h; };
+    OffSkip   censusSkipOff[4] = {};
+    uint32_t  censusSkipOffCount = 0;
     uint64_t  censusSkipped = 0;
     uint64_t  censusSkippedReported = 0;
-    char      censusSkipSpec[96] = {};   // raw spec+range, to log only on change
+    char      censusSkipSpec[144] = {};  // raw spec+range+offscreen, to log
+                                         // only on change
 
     // The bound views themselves live in binding_shadow, shared with the
     // exposure fix so the two cannot drift into opposite policies again. What
@@ -931,9 +938,9 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     // while any ordinary subscriber is on.
     if (!s->distanceEnabled && !s->countForFlashFix &&
         !headOffsetGateWantsPanel() && s->censusSkipCount == 0 &&
-        s->censusSkipRangeCount == 0 && !remlokWantsDraws() &&
-        !holoWantsDraws() && !witchstarWantsDraws() && !cbPeekEnabled() &&
-        !billboardWantsDraws() && !drawCensusArmed()) {
+        s->censusSkipRangeCount == 0 && s->censusSkipOffCount == 0 &&
+        !remlokWantsDraws() && !holoWantsDraws() && !witchstarWantsDraws() &&
+        !cbPeekEnabled() && !billboardWantsDraws() && !drawCensusArmed()) {
         return DrawVerdict::kNone;
     }
     const uint32_t rtvGen = bindingGeneration(BindSlot::Rtv0);
@@ -952,6 +959,22 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
             State::SceneCandidate& c = s->cands[s->rtv0Cand];
             ++c.thisFrame;
             if (c.w == s->sceneW && c.h == s->sceneH) ++s->sceneDrawsThisFrame;
+        }
+        // The offscreen probe: skip draws INTO a buffer named by its size.
+        // Resolved only while a spec is set -- the @ filters' unmemoised
+        // discipline. The counting above must see skipped draws too.
+        if (s->censusSkipOffCount) {
+            ResourceInfo info;
+            if (bindingResolve(bindingGet(BindSlot::Rtv0), &info) &&
+                info.isTexture2D) {
+                for (uint32_t i = 0; i < s->censusSkipOffCount; ++i) {
+                    if (info.a == s->censusSkipOff[i].w &&
+                        info.b == s->censusSkipOff[i].h) {
+                        ++s->censusSkipped;
+                        return DrawVerdict::kSkip;
+                    }
+                }
+            }
         }
         return DrawVerdict::kNone;
     }
@@ -1552,7 +1575,8 @@ void vScreenSetPanelSize(uint32_t width, uint32_t height) {
 void readCensusSkip(Config& cfg, State* s) {
     const std::string spec = cfg.getString("advanced.census_skip", "");
     const std::string range = cfg.getString("advanced.census_skip_range", "");
-    const std::string both = spec + "|" + range;
+    const std::string off = cfg.getString("advanced.census_skip_offscreen", "");
+    const std::string both = spec + "|" + range + "|" + off;
     if (both.length() >= sizeof(s->censusSkipSpec)) {
         Log::get().note("census skip: the spec is longer than %u characters "
                         "and was ignored.",
@@ -1561,6 +1585,35 @@ void readCensusSkip(Config& cfg, State* s) {
     }
     if (both == s->censusSkipSpec) return;
     memcpy(s->censusSkipSpec, both.c_str(), both.length() + 1);
+
+    s->censusSkipOffCount = 0;
+    if (!off.empty()) {
+        const char* p = off.c_str();
+        bool ok = true;
+        while (*p && s->censusSkipOffCount < 4) {
+            while (*p == ' ' || *p == ',' || *p == '\t') ++p;
+            if (!*p) break;
+            char* end = nullptr;
+            const unsigned long w = strtoul(p, &end, 10);
+            unsigned long h = 0;
+            if (end != p && (*end == 'x' || *end == 'X')) {
+                const char* q = end + 1;
+                h = strtoul(q, &end, 10);
+            }
+            if (end == p || w == 0 || h == 0) { ok = false; break; }
+            s->censusSkipOff[s->censusSkipOffCount].w = static_cast<uint32_t>(w);
+            s->censusSkipOff[s->censusSkipOffCount].h = static_cast<uint32_t>(h);
+            ++s->censusSkipOffCount;
+            p = end;
+        }
+        while (*p == ' ' || *p == ',' || *p == '\t') ++p;
+        if (!ok || *p) {
+            Log::get().note("census skip: offscreen \"%s\" is not WIDTHxHEIGHT, "
+                            "up to four separated by commas; the whole setting "
+                            "is refused rather than half-applied.", off.c_str());
+            s->censusSkipOffCount = 0;
+        }
+    }
 
     s->censusSkipRangeCount = 0;
     if (!range.empty()) {
@@ -1666,8 +1719,9 @@ void readCensusSkip(Config& cfg, State* s) {
         p = end;
     }
 
-    if (s->censusSkipCount || s->censusSkipRangeCount) {
-        char list[160];
+    if (s->censusSkipCount || s->censusSkipRangeCount ||
+        s->censusSkipOffCount) {
+        char list[200];
         int  at = 0;
         for (uint32_t i = 0; i < s->censusSkipCount && at < 80; ++i) {
             at += _snprintf_s(list + at, sizeof(list) - at, _TRUNCATE, "%s%c:%u",
@@ -1692,11 +1746,18 @@ void readCensusSkip(Config& cfg, State* s) {
                               at ? (i ? ", " : " and ") : "",
                               s->censusSkipRange[i].lo, s->censusSkipRange[i].hi);
         }
-        Log::get().note("census skip ACTIVE: eye-target draws matching %s will "
+        for (uint32_t i = 0; i < s->censusSkipOffCount && at < 180; ++i) {
+            at += _snprintf_s(list + at, sizeof(list) - at, _TRUNCATE,
+                              "%soffscreen target %ux%u",
+                              at ? (i ? ", " : " and ") : "",
+                              s->censusSkipOff[i].w, s->censusSkipOff[i].h);
+        }
+        Log::get().note("census skip ACTIVE: draws matching %s will "
                         "NOT be drawn until this is cleared. A probe, not a "
                         "fix: if the effect being chased vanishes, these are "
                         "its draws.", list);
-    } else if (spec.empty() && range.empty() && s->censusSkipped) {
+    } else if (spec.empty() && range.empty() && off.empty() &&
+               s->censusSkipped) {
         Log::get().note("census skip cleared: everything draws again "
                         "(%llu draws were skipped while it was set).",
                         static_cast<unsigned long long>(s->censusSkipped));
