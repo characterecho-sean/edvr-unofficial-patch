@@ -44,8 +44,13 @@ import sys
 
 LINE_RE = re.compile(r'^\[\d{2}:\d{2}:\d{2}\.\d{3}\] (DC .*)$')
 BEGIN_RE = re.compile(r'^DC begin census=(\d+) frames=(\d+) frame=(\d+)$')
+# The IA/VS tail is optional: the DLL leaves it off when its probe faulted or
+# its budget is spent, and censuses captured before the tail existed have none
+# at all. Both must keep parsing -- a tool that rejects an old log cannot read
+# the sessions already paid for.
 DRAW_RE = re.compile(r'^DC (\d+) #(\d+) ([A-Z]) n=(\d+) i=(\d+) '
-                     r'r=(\S+) d=(\S+) c=(\S+) s=(\S+),(\S+),(\S+),(\S+)$')
+                     r'r=(\S+) d=(\S+) c=(\S+) s=(\S+),(\S+),(\S+),(\S+)'
+                     r'(?: vs=(\S+) vb=(\S+) sd=(\d+) of=(\d+) tp=(\d+))?$')
 FRAME_RE = re.compile(r'^DC frame (\d+) draws=(\d+)$')
 ID_TEX_RE = re.compile(r'^DC id @(\d+) tex (\d+)x(\d+) fmt=(\d+)$')
 ID_BUF_RE = re.compile(r'^DC id @(\d+) buf (\d+)$')
@@ -93,11 +98,18 @@ def parse_dc_lines(lines, source):
             continue
         m = DRAW_RE.match(line)
         if m:
+            # The tail's five groups are all-or-nothing; sd/of/tp arrive as
+            # numbers because they are the half of it that means the same
+            # thing in two different censuses.
+            ia = None
+            if m.group(13) is not None:
+                ia = (m.group(13), m.group(14), int(m.group(15)),
+                      int(m.group(16)), int(m.group(17)))
             cur.draws.append((int(m.group(1)), int(m.group(2)), m.group(3),
                               int(m.group(4)), int(m.group(5)), m.group(6),
                               m.group(7), m.group(8),
                               (m.group(9), m.group(10), m.group(11),
-                               m.group(12))))
+                               m.group(12)), ia))
             continue
         m = FRAME_RE.match(line)
         if m:
@@ -141,9 +153,17 @@ def resolve(census, token):
 
 
 def signature(census, draw):
-    _frame, _idx, kind, n, _i, r, d, _c, slots = draw
+    _frame, _idx, kind, n, _i, r, d, _c, slots, ia = draw
+    # The constant buffer is left out because a pointer ordinal means nothing
+    # across two censuses -- the same buffer interns as @2 in one and @9 in the
+    # other, and a signature built on that never matches. The IA tail splits on
+    # the same line: vs and vb are pointers and stay out for that reason, while
+    # the stride and the topology are numbers that mean the same thing in both,
+    # and a draw that changed either really is a different draw.
+    stride = ia[2] if ia else None
+    topology = ia[4] if ia else None
     return (kind, n, resolve(census, r), resolve(census, d),
-            tuple(resolve(census, s) for s in slots))
+            tuple(resolve(census, s) for s in slots), stride, topology)
 
 
 def by_signature(census):
@@ -170,12 +190,19 @@ def steady(sigs, frames):
 def describe(sig):
     kind_names = {'D': 'Draw', 'I': 'DrawIndexed', 'N': 'DrawInstanced',
                   'X': 'DrawIndexedInstanced'}
-    kind, n, r, d, slots = sig
+    topo_names = {0: 'undefined', 1: 'points', 2: 'lines', 3: 'linestrip',
+                  4: 'trilist', 5: 'tristrip'}
+    kind, n, r, d, slots, stride, topology = sig
     parts = ['%s n=%d' % (kind_names.get(kind, kind), n)]
     parts.append('target=%s' % r)
     parts.append('depth=%s' % ('none' if d == '-' else d))
     shown = [s for s in slots if s != '-']
     parts.append('samples=%s' % (','.join(shown) if shown else 'nothing'))
+    # Only when the census carried an IA tail. A census that did not is not a
+    # census whose draws had no vertex buffer, and must not read as one.
+    if topology is not None:
+        parts.append('topology=%s' % topo_names.get(topology, topology))
+        parts.append('stride=%s' % ('no vertex buffer' if stride == 0 else stride))
     return '  '.join(parts)
 
 
@@ -277,16 +304,22 @@ def self_test():
     eye = 'tex1832x1920f87'
     # Baseline: an instanced scene draw (i=5, will grow), a HUD atlas draw,
     # and one draw that will vanish.
+    #
+    # The scene draw carries an IA/VS tail and the other two do not, on
+    # purpose: a census recorded before the tail existed, or one whose IA
+    # probe spent its budget partway, holds exactly this mixture, and both
+    # halves have to survive the same parse.
     a = ['DC begin census=1 frames=3 frame=1000']
     for f in range(3):
-        a += ['DC %d #%d I n=5000 i=5 r=@0 d=@1 c=@2 s=@3,-,-,-' % (f, 1),
+        a += ['DC %d #%d I n=5000 i=5 r=@0 d=@1 c=@2 s=@3,-,-,- '
+              'vs=@7 vb=@8 sd=32 of=0 tp=4' % (f, 1),
               'DC %d #%d I n=6 i=1 r=@0 d=- c=@2 s=@4,-,-,-' % (f, 2),
               'DC %d #%d D n=3 i=1 r=@0 d=- c=@2 s=-,-,-,-' % (f, 3),
               'DC frame %d draws=3' % f]
     a += ['DC id @0 tex 1832x1920 fmt=87', 'DC id @1 tex 1832x1920 fmt=45',
           'DC id @2 buf 256', 'DC id @3 tex 4096x4096 fmt=98',
-          'DC id @4 tex 2048x2048 fmt=28',
-          'DC end census=1 draws=9 lines=9 interned=5 overflow=0 truncated=0']
+          'DC id @4 tex 2048x2048 fmt=28', 'DC id @7 ?', 'DC id @8 buf 96',
+          'DC end census=1 draws=9 lines=9 interned=7 overflow=0 truncated=0']
 
     # Effect present: the scene draw re-counted (i=5 -> i=24: CHANGED, the
     # first field capture's noise shape, and must NOT read as added), the HUD
@@ -295,20 +328,30 @@ def self_test():
     # added -- one eye's line through the intern table and the other eye's
     # sampled slot resolved INLINE, as a full table writes it, which must land
     # in the same signature -- plus one-frame churn that must not be reported.
+    #
+    # The two overlay draws carry DIFFERENT vs ordinals for the same effect,
+    # which must not split them either: a shader pointer is no more comparable
+    # across two censuses than a constant buffer pointer is. Both have no
+    # vertex buffer and a strip topology -- the shape of a pass that
+    # synthesises its corners in the shader, which is the case the curved
+    # screen work has to be able to recognise.
     b = ['DC begin census=2 frames=3 frame=2000']
     for f in range(3):
-        b += ['DC %d #%d I n=5000 i=24 r=@1 d=@2 c=@9 s=@3,-,-,-' % (f, 1),
+        b += ['DC %d #%d I n=5000 i=24 r=@1 d=@2 c=@9 s=@3,-,-,- '
+              'vs=@7 vb=@8 sd=32 of=0 tp=4' % (f, 1),
               'DC %d #%d I n=6 i=1 r=@1 d=- c=@9 s=@4,-,-,-' % (f, 2),
-              'DC %d #%d D n=4 i=1 r=@1 d=- c=@9 s=@5,-,-,-' % (f, 610),
-              'DC %d #%d D n=4 i=1 r=@6 d=- c=@9 s=tex512x64f28,-,-,-' % (f, 611)]
+              'DC %d #%d D n=4 i=1 r=@1 d=- c=@9 s=@5,-,-,- '
+              'vs=@7 vb=- sd=0 of=0 tp=5' % (f, 610),
+              'DC %d #%d D n=4 i=1 r=@6 d=- c=@9 s=tex512x64f28,-,-,- '
+              'vs=@10 vb=- sd=0 of=0 tp=5' % (f, 611)]
         if f == 1:
             b += ['DC %d #99 I n=12 i=1 r=@1 d=- c=@9 s=@4,-,-,-' % f]
         b += ['DC frame %d draws=%d' % (f, 5 if f == 1 else 4)]
     b += ['DC id @1 tex 1832x1920 fmt=87', 'DC id @2 tex 1832x1920 fmt=45',
           'DC id @3 tex 4096x4096 fmt=98', 'DC id @4 tex 2048x2048 fmt=28',
           'DC id @5 tex 512x64 fmt=28', 'DC id @6 tex 1832x1920 fmt=87',
-          'DC id @9 buf 256',
-          'DC end census=2 draws=13 lines=13 interned=7 overflow=1 truncated=0']
+          'DC id @9 buf 256', 'DC id @7 ?', 'DC id @8 buf 96', 'DC id @10 ?',
+          'DC end census=2 draws=13 lines=13 interned=10 overflow=1 truncated=0']
 
     # Through LINE_RE, exactly as a file would be read: the timestamp-prefix
     # regex is part of what is being tested, and stripping the prefix by hand
@@ -321,10 +364,13 @@ def self_test():
         print('self-test: expected 2 censuses, parsed %d' % len(censuses))
         return 1
     added, removed, changed = diff(censuses[0], censuses[1])
-    want_added = {('D', 4, eye, '-', ('tex512x64f28', '-', '-', '-'))}
-    want_removed = {('D', 3, eye, '-', ('-', '-', '-', '-'))}
+    # The trailing pair is (stride, topology): filled in where the line had a
+    # tail, None where it did not. None is "not measured" and must never
+    # collapse into 0, which is "measured, and nothing was bound".
+    want_added = {('D', 4, eye, '-', ('tex512x64f28', '-', '-', '-'), 0, 5)}
+    want_removed = {('D', 3, eye, '-', ('-', '-', '-', '-'), None, None)}
     want_changed = {('I', 5000, eye, 'tex1832x1920f45',
-                     ('tex4096x4096f98', '-', '-', '-'))}
+                     ('tex4096x4096f98', '-', '-', '-'), 32, 4)}
     if added != want_added:
         print('self-test: ADDED mismatch: %r' % added)
         return 1

@@ -2,6 +2,11 @@
 
 #include <cstdio>   // _snprintf_s: the sampled-slot list is built before logging
 
+#include <windows.h>
+
+#include <d3d11.h>
+
+#include "../common/guard.h"
 #include "../common/log.h"
 #include "binding_shadow.h"
 
@@ -32,11 +37,27 @@ constexpr uint32_t kMaxInterned = 512;
 // immediate context's draw hooks (foreign contexts are filtered before the
 // census is consulted), and both the arming hotkey and the frame boundary
 // live in the Present path. No locks, and none are missing.
+
+// How a bound object can be asked what it is. Views resolve through
+// GetResource; resources answer for themselves; a shader answers nothing and
+// is worth only its identity.
+enum class Kind {
+    kView,      // render targets, depth, sampled textures
+    kResource,  // constant and vertex buffers, held directly
+    kOpaque,    // shaders
+};
+
 struct Interned {
     void*        ptr = nullptr;
     ResourceInfo info;
     bool         resolved = false;
 };
+
+bool resolveByKind(void* ptr, Kind kind, ResourceInfo* out) {
+    if (kind == Kind::kView) return bindingResolve(ptr, out);
+    if (kind == Kind::kResource) return bindingResolveResource(ptr, out);
+    return false;
+}
 
 bool     g_pending = false;      // key pressed, waiting for a frame edge
 uint32_t g_framesLeft = 0;       // frames still to record; >0 means capturing
@@ -55,7 +76,7 @@ uint32_t g_tabCount = 0;
 // resolving at dump time would probe pointers three frames stale, which is
 // the exact crash class binding_shadow exists to contain. -1 is "not bound",
 // -2 is "table full".
-int internOf(void* ptr, bool isView) {
+int internOf(void* ptr, Kind kind) {
     if (!ptr) return -1;
     for (uint32_t i = 0; i < g_tabCount; ++i) {
         if (g_tab[i].ptr == ptr) return static_cast<int>(i);
@@ -66,11 +87,14 @@ int internOf(void* ptr, bool isView) {
     }
     Interned& e = g_tab[g_tabCount];
     e.ptr = ptr;
-    // Constant buffers are not views: bindingResolve casts to ID3D11View and
-    // asks GetResource, which on a buffer is a different method entirely.
-    // Their identity still groups draws; their contents are not the census's
-    // business.
-    e.resolved = isView && bindingResolve(ptr, &e.info);
+    // Buffers used to be interned by identity alone, because the only resolver
+    // was the view one and handing it a buffer reaches GetType through a
+    // GetResource-shaped signature. bindingResolveResource is that dance with
+    // the first step left out, so a constant buffer now dumps its byte width --
+    // the one fact the panel composite's transform is described by ("at most
+    // 512 bytes"), and one that used to cost a separate probe to learn.
+    // Contents are still not the census's business.
+    e.resolved = resolveByKind(ptr, kind, &e.info);
     return static_cast<int>(g_tabCount++);
 }
 
@@ -81,17 +105,18 @@ int internOf(void* ptr, bool isView) {
 // render targets and half the sampled slots: the diff ran but could not
 // name what it found. Same compact spelling the diff tool normalises the
 // id table to, so a slot interned in one census and inline in the other
-// still compares equal. Constant buffers are not views and get no inline
-// form; measured, they intern within the first frames and never overflowed.
-const char* bindingToken(void* ptr, bool isView, char* buf, size_t n) {
+// still compares equal. Shaders have no inline form, having nothing to
+// resolve; measured, buffers intern within the first frames and never
+// overflowed.
+const char* bindingToken(void* ptr, Kind kind, char* buf, size_t n) {
     if (!ptr) return "-";
-    const int id = internOf(ptr, isView);
+    const int id = internOf(ptr, kind);
     if (id >= 0) {
         _snprintf_s(buf, n, _TRUNCATE, "@%d", id);
         return buf;
     }
     ResourceInfo info;
-    if (isView && bindingResolve(ptr, &info)) {
+    if (resolveByKind(ptr, kind, &info)) {
         if (info.isTexture2D) {
             _snprintf_s(buf, n, _TRUNCATE, "tex%ux%uf%u", info.a, info.b,
                         info.fmt);
@@ -103,6 +128,56 @@ const char* bindingToken(void* ptr, bool isView, char* buf, size_t n) {
         }
     }
     return "?";
+}
+
+// The input-assembler and vertex-shader state behind one draw, read straight
+// off the context.
+//
+// Its own budget, not binding_shadow's: a fault here means the IA cannot be
+// read, which must not also stop render targets and sampled textures from
+// resolving -- those are what every other token on a census line depends on,
+// and what the census was built for.
+//
+// IAGetVertexBuffers and VSGetShader AddRef what they hand back, and both are
+// released before this returns. The pointers survive as identities only: the
+// context still holds its own reference to anything it has bound, which is
+// what makes comparing them afterwards sound. A fault between a Get and its
+// Release leaks one reference -- the same bargain bindingResolve documents,
+// for the same C2712 reason, capped the same way.
+struct DrawState {
+    bool     ok = false;      // false leaves the tokens off the line entirely,
+                              // which reads as "not measured", not as "none"
+    void*    vs = nullptr;
+    void*    vb = nullptr;
+    uint32_t stride = 0;
+    uint32_t offset = 0;
+    uint32_t topology = 0;    // D3D11_PRIMITIVE_TOPOLOGY: 4 is a triangle list,
+                              // 5 a strip -- how a quad announces itself
+};
+
+FaultBudget g_iaBudget("drawCensus.drawState", 5);
+
+void readDrawState(ID3D11DeviceContext* ctx, DrawState* out) {
+    if (!ctx) return;
+    guardedBudget(g_iaBudget, [&] {
+        ID3D11VertexShader* vs = nullptr;
+        ctx->VSGetShader(&vs, nullptr, nullptr);
+        out->vs = vs;
+        if (vs) vs->Release();
+
+        ID3D11Buffer* vb = nullptr;
+        UINT stride = 0, offset = 0;
+        ctx->IAGetVertexBuffers(0, 1, &vb, &stride, &offset);
+        out->vb = vb;
+        out->stride = stride;
+        out->offset = offset;
+        if (vb) vb->Release();
+
+        D3D11_PRIMITIVE_TOPOLOGY topo = D3D11_PRIMITIVE_TOPOLOGY_UNDEFINED;
+        ctx->IAGetPrimitiveTopology(&topo);
+        out->topology = static_cast<uint32_t>(topo);
+        out->ok = true;
+    });
 }
 
 void dumpInternTable() {
@@ -146,8 +221,8 @@ void drawCensusRequest() {
                     kCensusFrames);
 }
 
-void drawCensusEyeDraw(char kind, uint32_t count, uint32_t instances,
-                       uint32_t eyeDrawIndex) {
+void drawCensusEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
+                       uint32_t instances, uint32_t eyeDrawIndex) {
     if (g_framesLeft == 0) return;   // pending counts draws only once started
     ++g_draws;
     ++g_drawsThisFrame;
@@ -155,17 +230,38 @@ void drawCensusEyeDraw(char kind, uint32_t count, uint32_t instances,
     ++g_lines;
 
     char rb[24], db[24], cb[24], s0b[24], s1b[24], s2b[24], s3b[24];
-    const char* r = bindingToken(bindingGet(BindSlot::Rtv0), true, rb, sizeof(rb));
-    const char* d = bindingToken(bindingGet(BindSlot::Dsv0), true, db, sizeof(db));
-    const char* c = bindingToken(bindingGet(BindSlot::VsCb0), false, cb, sizeof(cb));
-    const char* s0 = bindingToken(bindingGet(BindSlot::PsSrv0), true, s0b, sizeof(s0b));
-    const char* s1 = bindingToken(bindingGet(BindSlot::PsSrv1), true, s1b, sizeof(s1b));
-    const char* s2 = bindingToken(bindingGet(BindSlot::PsSrv2), true, s2b, sizeof(s2b));
-    const char* s3 = bindingToken(bindingGet(BindSlot::PsSrv3), true, s3b, sizeof(s3b));
+    const char* r = bindingToken(bindingGet(BindSlot::Rtv0), Kind::kView, rb, sizeof(rb));
+    const char* d = bindingToken(bindingGet(BindSlot::Dsv0), Kind::kView, db, sizeof(db));
+    const char* c = bindingToken(bindingGet(BindSlot::VsCb0), Kind::kResource, cb,
+                                 sizeof(cb));
+    const char* s0 = bindingToken(bindingGet(BindSlot::PsSrv0), Kind::kView, s0b, sizeof(s0b));
+    const char* s1 = bindingToken(bindingGet(BindSlot::PsSrv1), Kind::kView, s1b, sizeof(s1b));
+    const char* s2 = bindingToken(bindingGet(BindSlot::PsSrv2), Kind::kView, s2b, sizeof(s2b));
+    const char* s3 = bindingToken(bindingGet(BindSlot::PsSrv3), Kind::kView, s3b, sizeof(s3b));
 
-    Log::get().note("DC %u #%u %c n=%u i=%u r=%s d=%s c=%s s=%s,%s,%s,%s",
+    // The IA/VS tail, present only when the probe answered. Absent means the
+    // budget is spent or the read faulted -- never "nothing was bound", which
+    // has its own spelling ("-").
+    // 128, not the 80 this started at. Every token bindingToken writes is
+    // capped at 23 characters by its own buffer, and two of those plus three
+    // ten-digit numbers and their labels is 97 -- so 80 truncated its own
+    // worst case, silently, in exactly the shape a stride of 4294967295 would
+    // have arrived in. Sized from the caps rather than from what buffers
+    // "realistically" hold.
+    char tail[128] = "";
+    DrawState st;
+    readDrawState(ctx, &st);
+    if (st.ok) {
+        char vsb[24], vbb[24];
+        _snprintf_s(tail, sizeof(tail), _TRUNCATE, " vs=%s vb=%s sd=%u of=%u tp=%u",
+                    bindingToken(st.vs, Kind::kOpaque, vsb, sizeof(vsb)),
+                    bindingToken(st.vb, Kind::kResource, vbb, sizeof(vbb)),
+                    st.stride, st.offset, st.topology);
+    }
+
+    Log::get().note("DC %u #%u %c n=%u i=%u r=%s d=%s c=%s s=%s,%s,%s,%s%s",
                     g_frameOrdinal, eyeDrawIndex, kind, count, instances, r, d, c,
-                    s0, s1, s2, s3);
+                    s0, s1, s2, s3, tail);
 }
 
 void drawCensusFrameBoundary(uint32_t frameNo) {

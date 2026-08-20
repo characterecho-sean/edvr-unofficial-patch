@@ -23,6 +23,8 @@
 
 #include <cstdint>
 
+struct ID3D11DeviceContext;
+
 namespace edvr {
 
 // Is a census pending or capturing? Read on the draw path; it is what keeps
@@ -42,8 +44,32 @@ void drawCensusRequest();
 // count, instances is 1 for the non-instanced kinds. eyeDrawIndex is
 // vscreen's running count for this frame, so a line can be placed within the
 // frame it came from.
-void drawCensusEyeDraw(char kind, uint32_t count, uint32_t instances,
-                       uint32_t eyeDrawIndex);
+//
+// ctx is the immediate context the draw is about to run on -- vscreen has
+// already established that it is ours -- and it is here for the input
+// assembler.
+//
+// WHY THE CONTEXT AND NOT THE SHADOW
+//
+// Everything else on a census line comes from binding_shadow, because
+// something in the tree hooks the call that sets it. Nothing hooks
+// IASetVertexBuffers, IASetPrimitiveTopology or VSSetShader, and hooking them
+// to answer a question asked for three frames a session would put two more
+// patched vtable entries on the hot path -- two more slots for the D3D runtime
+// to re-point out from under us, which is the failure that cost the 0.7.x
+// line a 64-round war. IAGet*/VSGetShader read the same state with no patch
+// at all, and cost nothing when no census is running, which is almost always.
+//
+// What they buy: the curved-screen work (docs/screen-curvature.md) turns on
+// whether the panel composite draws a real vertex buffer in a local space --
+// substitutable, cheap -- or synthesises its corners in the shader, which
+// would mean reverse-engineering the transform. The stride and topology
+// settle it. The vertex shader's identity settles a second question the same
+// session: whether HMD Cinema Mode's two composite draws share a shader, and
+// so whether recognising by shader would catch the eye that today's
+// panel-sized-SRV test misses.
+void drawCensusEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
+                       uint32_t instances, uint32_t eyeDrawIndex);
 
 // The frame edge, from vScreenFrameBoundary: starts a pending census, advances
 // a running one, finishes a spent one. frameNo is vscreen's frame counter,

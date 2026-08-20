@@ -109,4 +109,25 @@ void bindingFrameBoundary();
 // must treat false as "do nothing", never as "no".
 bool bindingResolve(void* view, ResourceInfo* out);
 
+// Resolve a RESOURCE held directly -- a buffer or a texture that arrived as
+// itself rather than through a view.
+//
+// bindingResolve's first step is ID3D11View::GetResource, which is vtable slot
+// 7 on a view and ID3D11Resource::GetType on everything else. Handing it a
+// vertex buffer therefore writes a four-byte enum through an eight-byte out
+// pointer and then dereferences whatever that left behind -- the same class of
+// mistake as the GetDesc one the comment below records, arrived at from the
+// other end. The census reads IA state straight off the context, where vertex
+// buffers come back as ID3D11Buffer* and never as views, so it needs this
+// dance with that first step left out. It lives here for the reason the whole
+// file exists: the alternative is a sixth hand-written copy.
+//
+// Same contract as bindingResolve -- false means "not knowable", never "no" --
+// but its OWN fault budget, deliberately. A view pointer reached a hook that
+// saw it bound; a resource pointer can be a speculative probe of something
+// only ever held as an identity. Five faults in the speculation must not stop
+// views resolving, because a view that stops resolving is the panel distance
+// fix silently standing down.
+bool bindingResolveResource(void* resource, ResourceInfo* out);
+
 }  // namespace edvr
