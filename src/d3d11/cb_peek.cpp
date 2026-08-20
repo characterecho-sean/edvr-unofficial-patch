@@ -79,7 +79,70 @@ constexpr uint32_t kRosterMaxLines = 32;
 // threshold; a flare's array is not.
 uint32_t g_wantMinBytes = 0;
 
+// Pool mode: the fan members keep their records inside a shared vertex
+// buffer over a hundred megabytes wide. The Map tee cannot shadow that --
+// the pool's head is not the draw's slice -- so the peek GPU-copies the
+// slice at the draw's own stream offset into a small staging buffer and
+// reads it back a tick later, when the copy has certainly executed.
+// Never a tee target: g_target stays null and the sampling happens here.
+constexpr uint32_t kSliceBytes = 16384;
+constexpr uint64_t kPoolTickMs = 1100;   // clears the capture's 1000ms gate
+constexpr uint64_t kReadbackLagMs = 50;  // a few frames, so the Map on the
+                                         // immediate context finds the copy
+                                         // done instead of stalling for it
+ID3D11Buffer* g_staging = nullptr;       // owned; released on disable
+bool     g_pendingCopy = false;
+uint64_t g_copyMs = 0;
+uint64_t g_poolLastMs = 0;
+uint32_t g_copiedBytes = 0;
+bool     g_poolAnnounced = false;
+
 static float g_last[kMaxFloats];
+
+void poolSample(ID3D11DeviceContext* ctx, ID3D11Buffer* pool,
+                uint32_t poolBytes, uint32_t offset, uint32_t stride,
+                uint32_t count) {
+    const uint64_t now = nowMs();
+    if (g_pendingCopy && g_staging && now - g_copyMs >= kReadbackLagMs) {
+        D3D11_MAPPED_SUBRESOURCE m{};
+        if (SUCCEEDED(ctx->Map(g_staging, 0, D3D11_MAP_READ, 0, &m))) {
+            cbPeekCapture(m.pData, g_copiedBytes);
+            ctx->Unmap(g_staging, 0);
+        }
+        g_pendingCopy = false;
+    }
+    if (now - g_poolLastMs < kPoolTickMs) return;
+    g_poolLastMs = now;
+    if (!g_staging) {
+        ID3D11Device* dev = nullptr;
+        ctx->GetDevice(&dev);
+        if (!dev) return;
+        D3D11_BUFFER_DESC bd{};
+        bd.ByteWidth = kSliceBytes;
+        bd.Usage = D3D11_USAGE_STAGING;
+        bd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        dev->CreateBuffer(&bd, nullptr, &g_staging);
+        dev->Release();
+        if (!g_staging) return;
+    }
+    if (offset >= poolBytes) return;
+    uint32_t window = poolBytes - offset;
+    if (window > kSliceBytes) window = kSliceBytes;
+    D3D11_BOX box{offset, 0, 0, offset + window, 1, 1};
+    ctx->CopySubresourceRegion(g_staging, 0, 0, 0, 0, pool, 0, &box);
+    g_copiedBytes = window;
+    g_copyMs = now;
+    g_pendingCopy = true;
+    if (!g_poolAnnounced) {
+        g_poolAnnounced = true;
+        Log::get().note("cb peek: pool mode -- the matched draw's records "
+                        "ride a %u MB shared buffer no tee can shadow. "
+                        "Sampling a %u-byte slice at the draw's own stream "
+                        "offset (%u, stride %u, n=%u this frame), GPU-copied "
+                        "and read back a tick later.",
+                        poolBytes >> 20, window, offset, stride, count);
+    }
+}
 
 }  // namespace
 
@@ -97,6 +160,9 @@ void cbPeekConfigure(Config& cfg) {
         g_lines = 0;
         g_rosterCount = 0;
         g_rosterLines = 0;
+        g_pendingCopy = false;
+        g_poolLastMs = 0;
+        g_poolAnnounced = false;
         if (g_wantN || g_wantMinBytes) {
             Log::get().note("cb peek: ON, aimed -- n=%u, min data bytes %u "
                             "(zero means unconstrained). Park at the star "
@@ -111,7 +177,15 @@ void cbPeekConfigure(Config& cfg) {
                             "toggle off and on, then run the sweep.");
         }
     }
-    if (!g_enabled && was) g_target = nullptr;
+    if (!g_enabled && was) {
+        g_target = nullptr;
+        g_pendingCopy = false;
+        g_poolAnnounced = false;
+        if (g_staging) {
+            g_staging->Release();
+            g_staging = nullptr;
+        }
+    }
 }
 
 bool cbPeekEnabled() { return g_enabled; }
@@ -216,6 +290,19 @@ void cbPeekOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
     if (vbs[1]) {
         ResourceInfo info;
         if (bindingResolveResource(vbs[1], &info) && info.isBuffer) {
+            if (info.a > kMaxBytes) {
+                // Pool-backed: this draw's records ARE the pool stream, so
+                // no fallback source applies -- either the aim wants it and
+                // it is sampled in place, or this is not the aimed member.
+                if (!g_wantMinBytes || info.a >= g_wantMinBytes) {
+                    poolSample(ctx, vbs[1], info.a, offsets[1], strides[1],
+                               count);
+                }
+                for (int i = 0; i < 2; ++i) {
+                    if (vbs[i]) vbs[i]->Release();
+                }
+                return;
+            }
             resource = vbs[1];
             rbytes = info.a;
             rstride = strides[1];

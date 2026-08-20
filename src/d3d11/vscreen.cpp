@@ -225,7 +225,16 @@ struct State {
     // exactly that size ("N:3@1024x512"); 0 means any. Needed the day the
     // hunted draw turned out to be a fullscreen triangle -- kind and count
     // alone matched the tonemap chain, and skipping THAT freezes the eye.
-    struct SkipSpec { char kind; uint32_t n; uint32_t srvW; uint32_t srvH; };
+    struct SkipSpec {
+        char kind;
+        uint32_t n;
+        uint32_t nHi;   // 0 = exact count; else n..nHi inclusive, for the
+                        // members whose counts re-tessellate per frame
+        uint32_t srvW;
+        uint32_t srvH;
+        bool eyeSrv;    // "@eye": PS slot 0 must sample the eye-sized depth
+                        // -- the sprite-family test, headset-independent
+    };
     SkipSpec  censusSkip[8] = {};
     uint32_t  censusSkipCount = 0;
     // The bisection form of the same probe: skip eye draws by their POSITION
@@ -961,10 +970,26 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     // eye-draw count would stand the flash fix down as a side effect.
     if (s->censusSkipCount) {
         for (uint32_t i = 0; i < s->censusSkipCount; ++i) {
-            if (s->censusSkip[i].kind != kind || s->censusSkip[i].n != count) {
+            const bool countHit =
+                s->censusSkip[i].nHi
+                    ? count >= s->censusSkip[i].n &&
+                          count <= s->censusSkip[i].nHi
+                    : count == s->censusSkip[i].n;
+            if (s->censusSkip[i].kind != kind || !countHit) {
                 continue;
             }
-            if (s->censusSkip[i].srvW) {
+            if (s->censusSkip[i].eyeSrv) {
+                // The @eye filter: PS slot 0 must sample the eye-sized
+                // depth -- the same test that defines the sprite family,
+                // valid on any headset without knowing its numbers.
+                uint32_t eyeW = 0, eyeH = 0;
+                ResourceInfo info;
+                if (!eyeTextureSize(&eyeW, &eyeH) ||
+                    !bindingResolve(bindingGet(BindSlot::PsSrv0), &info) ||
+                    !info.isTexture2D || info.a != eyeW || info.b != eyeH) {
+                    continue;
+                }
+            } else if (s->censusSkip[i].srvW) {
                 // The @WxH filter: resolve what PS slot 0 samples, on the
                 // rare draws that got past kind+count. Unmemoised on
                 // purpose: this runs only while a probe spec is set, for a
@@ -1514,7 +1539,11 @@ void vScreenSetPanelSize(uint32_t width, uint32_t height) {
 
 // advanced.census_skip: "X:15360, D:4" -- kind letter as the census logs it
 // ('D' Draw, 'I' DrawIndexed, 'N' DrawInstanced, 'X' DrawIndexedInstanced),
-// colon, the draw's index or vertex count. advanced.census_skip_range:
+// colon, the draw's index or vertex count -- or a COUNT RANGE "X:4000-9000"
+// for members whose counts re-tessellate. "@WxH" filters on what PS slot 0
+// samples; "@eye" is the sprite-family form of the same filter (PS slot 0
+// samples the eye-sized depth), correct on any headset without knowing its
+// numbers. advanced.census_skip_range:
 // "350-500" -- eye-draw positions, inclusive, the bisection probe. Both are
 // parsed on the install path and the reload path; logged only when the
 // combined string changes, saying exactly what will be dropped, because a
@@ -1588,26 +1617,51 @@ void readCensusSkip(Config& cfg, State* s) {
             s->censusSkipCount = 0;
             break;
         }
-        unsigned long sw = 0, sh = 0;
-        if (*end == '@') {
+        // An optional -HIGH makes the count a range -- the fan members
+        // re-tessellate, so no exact count can name them.
+        unsigned long nHi = 0;
+        if (*end == '-') {
             const char* q = end + 1;
-            sw = strtoul(q, &end, 10);
-            if (end != q && *end == 'x') {
-                q = end + 1;
-                sh = strtoul(q, &end, 10);
-            }
-            if (sw == 0 || sh == 0) {
-                Log::get().note("census skip: \"%s\" has an @ filter that is "
-                                "not @WIDTHxHEIGHT; the whole spec is refused "
-                                "rather than half-applied.", p);
+            nHi = strtoul(q, &end, 10);
+            if (end == q || nHi < n) {
+                Log::get().note("census skip: \"%s\" has a count range that "
+                                "is not LOW-HIGH with LOW <= HIGH; the whole "
+                                "spec is refused rather than half-applied.", p);
                 s->censusSkipCount = 0;
                 break;
             }
         }
+        unsigned long sw = 0, sh = 0;
+        bool eyeSrv = false;
+        if (*end == '@') {
+            if ((end[1] == 'e' || end[1] == 'E') &&
+                (end[2] == 'y' || end[2] == 'Y') &&
+                (end[3] == 'e' || end[3] == 'E')) {
+                eyeSrv = true;
+                end += 4;
+            } else {
+                const char* q = end + 1;
+                sw = strtoul(q, &end, 10);
+                if (end != q && *end == 'x') {
+                    q = end + 1;
+                    sh = strtoul(q, &end, 10);
+                }
+                if (sw == 0 || sh == 0) {
+                    Log::get().note("census skip: \"%s\" has an @ filter that "
+                                    "is not @WIDTHxHEIGHT or @eye; the whole "
+                                    "spec is refused rather than "
+                                    "half-applied.", p);
+                    s->censusSkipCount = 0;
+                    break;
+                }
+            }
+        }
         s->censusSkip[s->censusSkipCount].kind = kind;
         s->censusSkip[s->censusSkipCount].n = static_cast<uint32_t>(n);
+        s->censusSkip[s->censusSkipCount].nHi = static_cast<uint32_t>(nHi);
         s->censusSkip[s->censusSkipCount].srvW = static_cast<uint32_t>(sw);
         s->censusSkip[s->censusSkipCount].srvH = static_cast<uint32_t>(sh);
+        s->censusSkip[s->censusSkipCount].eyeSrv = eyeSrv;
         ++s->censusSkipCount;
         p = end;
     }
@@ -1619,7 +1673,14 @@ void readCensusSkip(Config& cfg, State* s) {
             at += _snprintf_s(list + at, sizeof(list) - at, _TRUNCATE, "%s%c:%u",
                               i ? ", " : "", s->censusSkip[i].kind,
                               s->censusSkip[i].n);
-            if (s->censusSkip[i].srvW && at < 100) {
+            if (s->censusSkip[i].nHi && at < 90) {
+                at += _snprintf_s(list + at, sizeof(list) - at, _TRUNCATE,
+                                  "-%u", s->censusSkip[i].nHi);
+            }
+            if (s->censusSkip[i].eyeSrv && at < 100) {
+                at += _snprintf_s(list + at, sizeof(list) - at, _TRUNCATE,
+                                  "@eye");
+            } else if (s->censusSkip[i].srvW && at < 100) {
                 at += _snprintf_s(list + at, sizeof(list) - at, _TRUNCATE,
                                   "@%ux%u", s->censusSkip[i].srvW,
                                   s->censusSkip[i].srvH);
