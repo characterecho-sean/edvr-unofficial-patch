@@ -18,6 +18,7 @@
 #include "../common/log.h"
 #include "../common/timing.h"
 #include "../common/vtable_hook.h"
+#include "billboard_fix.h"
 #include "binding_shadow.h"
 #include "cb_peek.h"
 #include "device_hook.h"  // contextHookModeFor
@@ -291,6 +292,13 @@ struct State {
     void*    peekResource = nullptr;
     void*    peekData = nullptr;
     uint32_t peekBytes = 0;
+
+    // And a fourth, for the billboard fix's per-write capture of the sprite
+    // constants. Same separation argument; the peek and the fix can watch
+    // the SAME buffer at the same time, and each keeps its own record.
+    void*    bbResource = nullptr;
+    void*    bbData = nullptr;
+    uint32_t bbBytes = 0;
 
     uint32_t eyeDrawsThisFrame = 0;
     uint32_t eyeDrawsLastFrame = 0;
@@ -859,11 +867,15 @@ inline bool foreignContext(ID3D11DeviceContext* self) {
 // match, or the RemLok overlay in hide mode); kRemlok means the RemLok
 // overlay in outer mode -- forward it wrapped in remlokScissorBegin/End;
 // kHolo means the loading hologram composite -- forward it wrapped in
-// holoBegin/End, which substitutes its pattern texture for the draw; and
+// holoBegin/End, which substitutes its pattern texture for the draw;
 // kWitchstar the jump tunnel's star cluster -- forward it wrapped in
 // witchstarBegin/End, which shifts its viewport to hold the star's
-// direction under head rotation.
-enum class DrawVerdict { kNone, kPanel, kSkip, kRemlok, kHolo, kWitchstar };
+// direction under head rotation; kBillboard a flare or corona sprite whose
+// freshly-written constants passed the billboard shape check -- forward it
+// wrapped in billboardBegin/End, which substitutes a world-stable basis.
+enum class DrawVerdict {
+    kNone, kPanel, kSkip, kRemlok, kHolo, kWitchstar, kBillboard
+};
 
 // kind, count and instances describe the draw for the census and the census
 // probe; every other consumer of this function is indifferent to them.
@@ -912,7 +924,7 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         !headOffsetGateWantsPanel() && s->censusSkipCount == 0 &&
         s->censusSkipRangeCount == 0 && !remlokWantsDraws() &&
         !holoWantsDraws() && !witchstarWantsDraws() && !cbPeekEnabled() &&
-        !drawCensusArmed()) {
+        !billboardWantsDraws() && !drawCensusArmed()) {
         return DrawVerdict::kNone;
     }
     const uint32_t rtvGen = bindingGeneration(BindSlot::Rtv0);
@@ -1005,6 +1017,13 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     // sprite family's vertex stage reads so the Map/Unmap tee below can dump
     // its contents.
     if (cbPeekEnabled()) cbPeekOnEyeDraw(kind, count, instances);
+
+    // The billboard orientation fix: a matched sprite draw whose captured
+    // constants passed the shape check gets a world-stable basis.
+    if (billboardWantsDraws() &&
+        billboardOnEyeDraw(kind, count, instances)) {
+        return DrawVerdict::kBillboard;
+    }
 
     // The head-offset gate's signal, recorded BEFORE the "does anything want to
     // act" test below, and NOT conditional on the distance fix.
@@ -1327,6 +1346,19 @@ HRESULT STDMETHODCALLTYPE hookedMap(ID3D11DeviceContext* self, ID3D11Resource* r
             s->peekBytes = d.ByteWidth;
         }
     }
+    // The billboard fix's target, the same way and for the same reasons.
+    if (SUCCEEDED(hr) && mapped && sub == 0 && res == billboardTarget()) {
+        s->bbResource = res;
+        s->bbData = mapped->pData;
+        s->bbBytes = 0;
+        D3D11_RESOURCE_DIMENSION dim = D3D11_RESOURCE_DIMENSION_UNKNOWN;
+        res->GetType(&dim);
+        if (dim == D3D11_RESOURCE_DIMENSION_BUFFER) {
+            D3D11_BUFFER_DESC d{};
+            static_cast<ID3D11Buffer*>(res)->GetDesc(&d);
+            s->bbBytes = d.ByteWidth;
+        }
+    }
     return hr;
 }
 
@@ -1372,6 +1404,13 @@ void STDMETHODCALLTYPE hookedUnmap(ID3D11DeviceContext* self, ID3D11Resource* re
         s->peekData = nullptr;
         s->peekBytes = 0;
     }
+    if (res == s->bbResource && s->bbData) {
+        guardedBudget(g_cameraBudget,
+                      [&] { billboardCapture(s->bbData, s->bbBytes); });
+        s->bbResource = nullptr;
+        s->bbData = nullptr;
+        s->bbBytes = 0;
+    }
     s->realUnmap(self, res, sub);
 }
 
@@ -1386,7 +1425,9 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     if (v == DrawVerdict::kRemlok) remlokScissorBegin(self);
     if (v == DrawVerdict::kHolo) holoBegin(self);
     if (v == DrawVerdict::kWitchstar) witchstarBegin(self);
+    if (v == DrawVerdict::kBillboard) billboardBegin(self);
     draw();
+    if (v == DrawVerdict::kBillboard) billboardEnd(self);
     if (v == DrawVerdict::kWitchstar) witchstarEnd(self);
     if (v == DrawVerdict::kHolo) holoEnd(self);
     if (v == DrawVerdict::kRemlok) remlokScissorEnd(self);
@@ -1631,6 +1672,7 @@ void vScreenRefreshConfig() {
     witchstarConfigure(cfg);
     fovProbeConfigure(cfg);
     cbPeekConfigure(cfg);
+    billboardConfigure(cfg);
     // Every fix.head_offset_* key, on the reload path as well as the startup
     // one. A config reader on only one of the two is a specific repeatable bug
     // -- reload-only means the value stays its C++ initialiser for the whole
@@ -2303,6 +2345,7 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     witchstarConfigure(cfg);
     fovProbeConfigure(cfg);
     cbPeekConfigure(cfg);
+    billboardConfigure(cfg);
     // installGlitchFrameFix is called before this, deliberately, so this is its
     // settled answer rather than a guess about config it has not read yet.
     g_state->countForFlashFix = glitchFrameNeedsEyeDraws();
@@ -2463,6 +2506,7 @@ void shutdownVScreenFixes() {
     }
     remlokShutdown();
     holoShutdown();
+    billboardShutdown();
     g_state->hook.uninstall();
 }
 
