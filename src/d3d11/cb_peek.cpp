@@ -204,17 +204,28 @@ void cbPeekOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
     }
 
     // The candidate data source, most-likely first: the second vertex
-    // stream, then a VS-SRV buffer, then the constant buffer. The min-bytes
+    // stream, then a VS-SRV buffer, then the FIRST stream (the roster
+    // showed members whose records ride stream 0 per-vertex, wide strides
+    // and no other data bound), then the constant buffer. The min-bytes
     // aim applies to whichever is chosen.
     void*    resource = nullptr;
     uint32_t rbytes = 0;
     uint32_t rstride = 0;
+    void*    vb0raw = nullptr;
+    uint32_t vb0bytes = 0;
     if (vbs[1]) {
         ResourceInfo info;
         if (bindingResolveResource(vbs[1], &info) && info.isBuffer) {
             resource = vbs[1];
             rbytes = info.a;
             rstride = strides[1];
+        }
+    }
+    if (vbs[0]) {
+        ResourceInfo info;
+        if (bindingResolveResource(vbs[0], &info) && info.isBuffer) {
+            vb0raw = vbs[0];
+            vb0bytes = info.a;
         }
     }
     for (int i = 0; i < 2; ++i) {
@@ -247,6 +258,12 @@ void cbPeekOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
             }
             srvs[i]->Release();
         }
+    }
+    if (!resource && vb0raw) {
+        resource = vb0raw;
+        rbytes = vb0bytes;
+        rstride = strides[0];
+        source = "IA-stream-0";
     }
     if (!resource) {
         void* cb = bindingGet(BindSlot::VsCb0);
