@@ -1,10 +1,15 @@
 # Curving the on-foot screen: what it would take
 
-*A design exploration, written from reading the code. Nothing in it is
-implemented, and nothing in it has been run against the game. Claims about
+*A design exploration, written from reading the code. Claims about
 EDVR cite the source; claims about the game's composite draw are labelled
 believed or measured, and the ones that can only be settled in a live
 session are collected in one list near the end, labelled as such.*
+
+*The bend is not implemented and has never been run against the game.
+Phase 0 — the measuring — is under way, and the section at the foot of
+this file ("Phase 0, in progress") records what it has found so far,
+including one premise above that turned out to be wrong. Read that
+section before acting on this one.*
 
 The ask, from users: Virtual Desktop shows its virtual screen as an
 optionally curved surface — a cylindrical bend toward the viewer, so the
@@ -357,3 +362,97 @@ itself even if the bend never ships. The case against is that the
 decisive facts (the vertex buffer, the second Cinema draw) are
 unmeasured, which is exactly why the phases put the measuring first and
 the geometry last.
+
+---
+
+## Phase 0, in progress
+
+*Everything above this line is the design as first written. Everything
+below is what happened when it met the logs.*
+
+### The `panelMiss` lines cannot answer unknown 5
+
+Phase 0's first step was to read what the shipped instrument had already
+written. 339 field logs hold the note, and it does not say what the
+design assumed it says.
+
+The note fires inside `srv0IsPanelSized`, which runs for **every**
+eye-sized draw whose slot 0 is not the panel — the helmet HUD, glyph
+sheets, post-process scratch. It records the first eight distinct
+sampled sizes of a session and then stops. So a session fills its eight
+slots long before a composite is reached, and what the logs actually
+hold is the shape of the cockpit:
+
+    512x512   1920x1080   16x16   0x0   1x1   128x128   4184x4132   3285x1847
+
+Those are not candidates for what the second Cinema eye reads. They are
+whatever the frame happened to sample first. The line was written to
+answer this question and never could: it has no way to tell a composite
+from a HUD quad, because it never saw the draw's shape.
+
+It does now — the note names the draw's kind and vertex count, so a
+composite (a handful of vertices) is separable by reading from the
+helmet (thousands). That narrows unknown 5. What settles it is the
+census.
+
+### What the census now records
+
+The design asked for the census line to gain two IA tokens. It has
+gained four, read straight off the context with `IAGet*`/`VSGetShader`
+while a census is armed — no new hooks, nothing on the hot path,
+nothing further for the D3D runtime to re-point:
+
+    ... s=@4,-,-,-  vs=@7 vb=@8 sd=32 of=0 tp=4
+                    |     |     |     |    `- D3D11_PRIMITIVE_TOPOLOGY
+                    |     |     |     `- byte offset into the buffer
+                    |     |     `- vertex stride; 0 means no vertex buffer
+                    |     `- the vertex buffer's identity, with its byte
+                    |        width in the id table at the end
+                    `- the vertex shader's identity
+
+`c=`, the transform buffer, now resolves to its byte width in that id
+table too, rather than staying an opaque ordinal — so a census states
+the composite constant buffer's real size instead of leaving "at most
+512 bytes" an inference.
+
+Absent tokens mean *not measured* (the probe faulted, or its budget is
+spent), never *nothing was bound*, which has its own spelling, `-`.
+
+### How to capture it
+
+The instrument is in the build; it needs one session. Two censuses, read
+directly rather than diffed — `diff_draw_census.py` isolates an effect
+that toggles, and this is not one.
+
+1. Bind the census key, in the **game directory's** `edvr.ini` (not the
+   repo's; that is not the copy the game reads), under `[hotkey]`:
+
+       dump_draws = NUMLOCK
+
+   A bare key: chords on the Pause/ScrollLock cluster reach Windows as
+   Break and never fire. The log says what the key bound, so check there.
+
+2. **On foot**, standing still, panel up: press it once. Three whole
+   frames record.
+
+3. **HMD Cinema Mode**, the same, once more.
+
+4. Send the log.
+
+### What the two censuses settle
+
+Read the lines whose `s=` slot 0 is the panel's size — those are the
+composite draws the distance fix already recognises — and then the lines
+around them.
+
+| Question | Where the answer is | What it decides |
+|---|---|---|
+| Unknown 1: does the composite read a real vertex buffer? | `sd=` on a composite line | Non-zero, with a small `vb` byte width, and **Path A** is open. `sd=0` with `vb=-` and the shader synthesises its corners, which is **Path B** |
+| Which vertex format | `sd=` with `tp=` | Sizes the capture Phase 2 needs, and says whether the quad is a list (`tp=4`) or a strip (`tp=5`) |
+| Unknown 4: is the composite's depth load-bearing? | `d=` on a composite line | `-` means nothing drawn afterwards can depend on the panel's depth, and the bend cannot disturb what is not there |
+| Unknown 5: do Cinema Mode's two composite draws share a shader? | `vs=` on both eyes' lines in the Cinema census | The same ordinal, and recognising by shader catches the eye the SRV test misses — **Phase 1 is the fix**. Different, and the second draw is something else, to be identified before curvature can be whole |
+| One transform buffer or two | `c=` on both eyes' lines | Whether the shadow the distance fix keeps belongs to one buffer or two |
+
+Two of those choose between Path A and Path B; one decides whether Phase
+1 is worth shipping on its own. None can be settled from a desk, which
+is why nothing past this point is written yet.
