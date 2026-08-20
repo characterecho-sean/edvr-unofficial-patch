@@ -42,6 +42,8 @@ constexpr uint32_t kFirstDumpFloats = 64;
 constexpr uint32_t kDeltaPerLine = 16;
 
 bool     g_enabled = false;
+uint32_t g_wantN = 0;              // cb_peek_n: learn only this index count;
+                                   // 0 keeps first-match-wins
 void*    g_target = nullptr;       // the buffer RESOURCE, raw pointer,
                                    // compared at Map and never dereferenced
 uint32_t g_targetBytes = 0;
@@ -50,6 +52,14 @@ bool     g_dumpedFull = false;
 uint64_t g_lastSampleMs = 0;
 uint32_t g_lines = 0;
 
+// The family roster: every DISTINCT index count that matched, logged once
+// with its vertex-stage bindings. Three wrong first-matches in one evening
+// -- a corona particle system's constants, a stale leftover buffer, a
+// static row of marker sprites -- earned the menu: see what the family
+// contains, THEN aim cb_peek_n at the member being chased.
+uint32_t g_rosterN[16];
+uint32_t g_rosterCount = 0;
+
 static float g_last[kMaxFloats];
 
 }  // namespace
@@ -57,17 +67,25 @@ static float g_last[kMaxFloats];
 void cbPeekConfigure(Config& cfg) {
     const bool was = g_enabled;
     g_enabled = cfg.getBool("advanced.cb_peek", false);
+    const int wantN = cfg.getIntInRange("advanced.cb_peek_n", 0, 0, 10000000);
+    g_wantN = static_cast<uint32_t>(wantN);
     if (g_enabled && !was) {
         g_target = nullptr;
         g_dumpedFull = false;
         g_lines = 0;
-        Log::get().note("cb peek: ON -- the matched sprite draw's VERTEX-"
-                        "STAGE data source (constant buffer, or the "
-                        "structured buffer behind an 8-byte-vertex sprite "
-                        "pipeline) will be learned and its writes dumped. "
-                        "Park at a star; hold each of: straight, roll left, "
-                        "straight, yaw the sun off-centre, straight, pitch "
-                        "up, straight -- a few seconds each.");
+        g_rosterCount = 0;
+        if (g_wantN) {
+            Log::get().note("cb peek: ON, aimed at family draws with n=%u. "
+                            "Park at the star and run the sweep: straight, "
+                            "roll, straight, yaw off-centre, straight, "
+                            "pitch, straight.", g_wantN);
+        } else {
+            Log::get().note("cb peek: ON, roster mode -- every distinct "
+                            "matched draw logs its shape and vertex-stage "
+                            "buffers once. Read the roster, set cb_peek_n "
+                            "to the member being chased, toggle off and on, "
+                            "then run the sweep.");
+        }
     }
     if (!g_enabled && was) g_target = nullptr;
 }
@@ -90,6 +108,35 @@ void cbPeekOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
         !depth.isTexture2D || depth.a != eyeW || depth.b != eyeH) {
         return;
     }
+
+    // With cb_peek_n unset this is roster mode: name every distinct family
+    // member once and learn nothing, so the next enable can be aimed.
+    if (!g_wantN) {
+        for (uint32_t i = 0; i < g_rosterCount; ++i) {
+            if (g_rosterN[i] == count) return;
+        }
+        if (g_rosterCount < 16) g_rosterN[g_rosterCount++] = count;
+        ID3D11ShaderResourceView* srvs[8] = {};
+        ctx->VSGetShaderResources(0, 8, srvs);
+        char slots[160];
+        int  at = 0;
+        for (int i = 0; i < 8; ++i) {
+            if (!srvs[i]) continue;
+            ResourceInfo info;
+            if (bindingResolve(srvs[i], &info) && at < 130) {
+                at += _snprintf_s(slots + at, sizeof(slots) - at, _TRUNCATE,
+                                  "%s[%d]=%s%u/%u", at ? " " : "", i,
+                                  info.isBuffer ? "buf" : "tex", info.a,
+                                  info.b);
+            }
+            srvs[i]->Release();
+        }
+        if (at == 0) _snprintf_s(slots, sizeof(slots), _TRUNCATE, "(none)");
+        Log::get().note("cb peek roster: family draw n=%u, VS: %s", count,
+                        slots);
+        return;
+    }
+    if (count != g_wantN) return;
 
     // Ask the context what the vertex stage is actually reading -- the
     // census's own pattern for IA state. Straight Get calls on unhooked
