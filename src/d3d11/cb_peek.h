@@ -26,6 +26,8 @@
 
 #include <cstdint>
 
+struct ID3D11DeviceContext;
+
 namespace edvr {
 
 class Config;
@@ -36,9 +38,15 @@ bool cbPeekEnabled();
 
 // Every eye draw while enabled: matches the sprite family (the flare and
 // corona material -- DrawIndexedInstanced, eye-sized depth in PS slot 0,
-// the 1024x1024 atlas in slot 1) and learns the vertex-stage constant
-// buffer the matched draw carries.
-void cbPeekOnEyeDraw(char kind, uint32_t count, uint32_t instances);
+// 64+ indices) and learns the matched draw's vertex-stage DATA SOURCE.
+// The IA tails proved the flare draws bind no vertex constants at all --
+// 8-byte corner vertices, per-sprite records in a structured buffer read
+// by the vertex shader -- so the peek asks the context directly for the
+// VS shader resources (the census's own pattern for IA state), watches
+// the first that is a buffer, and falls back to the constant buffer for
+// sprite systems that still use one.
+void cbPeekOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
+                     uint32_t instances);
 
 // The buffer being watched, or null. Compared by the Map hook, never
 // dereferenced there.

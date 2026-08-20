@@ -1016,7 +1016,7 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     // The constant-buffer peek: observation only, learning which buffer the
     // sprite family's vertex stage reads so the Map/Unmap tee below can dump
     // its contents.
-    if (cbPeekEnabled()) cbPeekOnEyeDraw(kind, count, instances);
+    if (cbPeekEnabled()) cbPeekOnEyeDraw(self, kind, count, instances);
 
     // The billboard orientation fix: a matched sprite draw whose captured
     // constants passed the shape check gets a world-stable basis.
