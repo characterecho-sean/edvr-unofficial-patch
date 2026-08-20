@@ -52,13 +52,27 @@ bool     g_dumpedFull = false;
 uint64_t g_lastSampleMs = 0;
 uint32_t g_lines = 0;
 
-// The family roster: every DISTINCT index count that matched, logged once
-// with its vertex-stage bindings. Three wrong first-matches in one evening
-// -- a corona particle system's constants, a stale leftover buffer, a
-// static row of marker sprites -- earned the menu: see what the family
-// contains, THEN aim cb_peek_n at the member being chased.
-uint32_t g_rosterN[16];
-uint32_t g_rosterCount = 0;
+// The family roster: every DISTINCT binding signature that matched, logged
+// once. The first roster keyed on index count and flooded the log to its
+// cap in seconds -- the corona fans RE-TESSELLATE, so their counts vary
+// per frame and are not an identity. What is stable is where the data
+// comes from: the vertex streams and VS resources. The roster keys on
+// those, logs when a NEW one appears, and hard-caps its lines besides.
+struct RosterKey {
+    void*    vb0;
+    void*    vb1;
+    uint32_t stride1;
+    void*    srv0;
+};
+RosterKey g_roster[24];
+uint32_t  g_rosterCount = 0;
+uint32_t  g_rosterLines = 0;
+constexpr uint32_t kRosterMaxLines = 32;
+
+// The aim: learn the first matched draw whose candidate data buffer is at
+// least this big. The 768-byte marker row is excluded by any real
+// threshold; a flare's array is not.
+uint32_t g_wantMinBytes = 0;
 
 static float g_last[kMaxFloats];
 
@@ -69,22 +83,27 @@ void cbPeekConfigure(Config& cfg) {
     g_enabled = cfg.getBool("advanced.cb_peek", false);
     const int wantN = cfg.getIntInRange("advanced.cb_peek_n", 0, 0, 10000000);
     g_wantN = static_cast<uint32_t>(wantN);
+    const int minB = cfg.getIntInRange("advanced.cb_peek_min_bytes", 0, 0,
+                                       100000000);
+    g_wantMinBytes = static_cast<uint32_t>(minB);
     if (g_enabled && !was) {
         g_target = nullptr;
         g_dumpedFull = false;
         g_lines = 0;
         g_rosterCount = 0;
-        if (g_wantN) {
-            Log::get().note("cb peek: ON, aimed at family draws with n=%u. "
-                            "Park at the star and run the sweep: straight, "
-                            "roll, straight, yaw off-centre, straight, "
-                            "pitch, straight.", g_wantN);
+        g_rosterLines = 0;
+        if (g_wantN || g_wantMinBytes) {
+            Log::get().note("cb peek: ON, aimed -- n=%u, min data bytes %u "
+                            "(zero means unconstrained). Park at the star "
+                            "and run the sweep: straight, roll, straight, "
+                            "yaw off-centre, straight, pitch, straight.",
+                            g_wantN, g_wantMinBytes);
         } else {
             Log::get().note("cb peek: ON, roster mode -- every distinct "
-                            "matched draw logs its shape and vertex-stage "
-                            "buffers once. Read the roster, set cb_peek_n "
-                            "to the member being chased, toggle off and on, "
-                            "then run the sweep.");
+                            "matched binding signature logs once, including "
+                            "the IA vertex streams. Read the roster, set "
+                            "cb_peek_min_bytes (or cb_peek_n) to aim, "
+                            "toggle off and on, then run the sweep.");
         }
     }
     if (!g_enabled && was) g_target = nullptr;
@@ -109,96 +128,131 @@ void cbPeekOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
         return;
     }
 
-    // With cb_peek_n unset this is roster mode: name every distinct family
-    // member once and learn nothing, so the next enable can be aimed.
-    if (!g_wantN) {
-        for (uint32_t i = 0; i < g_rosterCount; ++i) {
-            if (g_rosterN[i] == count) return;
+    // The IA vertex streams, asked of the context the same way. Slot 1 is
+    // where an instanced sprite pipeline keeps its per-sprite records --
+    // the stream the census tail (slot 0) and the VS-resource query both
+    // structurally cannot see, and the only channel left that can be
+    // feeding sprites whose draws bind no constants and no VS resources.
+    ID3D11Buffer* vbs[2] = {};
+    UINT strides[2] = {};
+    UINT offsets[2] = {};
+    ctx->IAGetVertexBuffers(0, 2, vbs, strides, offsets);
+
+    const bool roster = !g_wantN && !g_wantMinBytes;
+    if (roster) {
+        ID3D11ShaderResourceView* srv0 = nullptr;
+        ctx->VSGetShaderResources(0, 1, &srv0);
+        RosterKey key{vbs[0], vbs[1], strides[1], srv0};
+        bool seen = false;
+        for (uint32_t i = 0; i < g_rosterCount && !seen; ++i) {
+            seen = g_roster[i].vb0 == key.vb0 && g_roster[i].vb1 == key.vb1 &&
+                   g_roster[i].stride1 == key.stride1 &&
+                   g_roster[i].srv0 == key.srv0;
         }
-        if (g_rosterCount < 16) g_rosterN[g_rosterCount++] = count;
+        if (!seen && g_rosterCount < 24 && g_rosterLines < kRosterMaxLines) {
+            g_roster[g_rosterCount++] = key;
+            ++g_rosterLines;
+            char desc[200];
+            int at = _snprintf_s(desc, sizeof(desc), _TRUNCATE, "n=%u", count);
+            for (int i = 0; i < 2; ++i) {
+                ResourceInfo info;
+                if (vbs[i] && bindingResolveResource(vbs[i], &info)) {
+                    at += _snprintf_s(desc + at, sizeof(desc) - at, _TRUNCATE,
+                                      " vb%d=%uB/sd%u", i, info.a, strides[i]);
+                }
+            }
+            if (srv0) {
+                ResourceInfo info;
+                if (bindingResolve(srv0, &info)) {
+                    at += _snprintf_s(desc + at, sizeof(desc) - at, _TRUNCATE,
+                                      " vssrv0=%s%u/%u",
+                                      info.isBuffer ? "buf" : "tex", info.a,
+                                      info.b);
+                }
+            }
+            Log::get().note("cb peek roster: %s", desc);
+        }
+        if (srv0) srv0->Release();
+        for (int i = 0; i < 2; ++i) {
+            if (vbs[i]) vbs[i]->Release();
+        }
+        return;
+    }
+
+    // Aimed: n filter first when set.
+    if (g_wantN && count != g_wantN) {
+        for (int i = 0; i < 2; ++i) {
+            if (vbs[i]) vbs[i]->Release();
+        }
+        return;
+    }
+
+    // The candidate data source, most-likely first: the second vertex
+    // stream, then a VS-SRV buffer, then the constant buffer. The min-bytes
+    // aim applies to whichever is chosen.
+    void*    resource = nullptr;
+    uint32_t rbytes = 0;
+    uint32_t rstride = 0;
+    if (vbs[1]) {
+        ResourceInfo info;
+        if (bindingResolveResource(vbs[1], &info) && info.isBuffer) {
+            resource = vbs[1];
+            rbytes = info.a;
+            rstride = strides[1];
+        }
+    }
+    for (int i = 0; i < 2; ++i) {
+        if (vbs[i]) vbs[i]->Release();   // raw pointer kept, reference not
+    }
+
+    const char* source = "IA-stream-1";
+
+    // No second vertex stream: the VS-SRV path (the marker-row class),
+    // then the constant buffer -- the peek serves every sprite pipeline
+    // the family turns out to contain.
+    if (!resource) {
         ID3D11ShaderResourceView* srvs[8] = {};
         ctx->VSGetShaderResources(0, 8, srvs);
-        char slots[160];
-        int  at = 0;
         for (int i = 0; i < 8; ++i) {
             if (!srvs[i]) continue;
             ResourceInfo info;
-            if (bindingResolve(srvs[i], &info) && at < 130) {
-                at += _snprintf_s(slots + at, sizeof(slots) - at, _TRUNCATE,
-                                  "%s[%d]=%s%u/%u", at ? " " : "", i,
-                                  info.isBuffer ? "buf" : "tex", info.a,
-                                  info.b);
-            }
-            srvs[i]->Release();
-        }
-        if (at == 0) _snprintf_s(slots, sizeof(slots), _TRUNCATE, "(none)");
-        Log::get().note("cb peek roster: family draw n=%u, VS: %s", count,
-                        slots);
-        return;
-    }
-    if (count != g_wantN) return;
-
-    // Ask the context what the vertex stage is actually reading -- the
-    // census's own pattern for IA state. Straight Get calls on unhooked
-    // slots; every returned view carries a reference to release.
-    ID3D11ShaderResourceView* srvs[8] = {};
-    ctx->VSGetShaderResources(0, 8, srvs);
-    int   chosen = -1;
-    void* resource = nullptr;
-    ResourceInfo chosenInfo;
-    char  slotDesc[160];
-    int   at = 0;
-    for (int i = 0; i < 8; ++i) {
-        if (!srvs[i]) continue;
-        ResourceInfo info;
-        if (bindingResolve(srvs[i], &info) && at < 130) {
-            at += _snprintf_s(slotDesc + at, sizeof(slotDesc) - at, _TRUNCATE,
-                              "%s[%d]=%s%u%s", at ? " " : "", i,
-                              info.isBuffer ? "buf" : "tex", info.a,
-                              info.isBuffer && info.b ? "s" : "");
-            if (chosen < 0 && info.isBuffer) {
-                chosen = i;
-                chosenInfo = info;
+            if (!resource && bindingResolve(srvs[i], &info) && info.isBuffer) {
                 ID3D11Resource* res = nullptr;
                 srvs[i]->GetResource(&res);
                 if (res) {
                     resource = res;   // raw pointer kept; reference dropped.
                                       // The Map hook GetTypes before GetDesc,
                                       // the compositeCb discipline.
+                    rbytes = info.a;
+                    rstride = info.b;
+                    source = "VS-SRV";
                     res->Release();
                 }
             }
+            srvs[i]->Release();
         }
-        srvs[i]->Release();
     }
-    if (at == 0) _snprintf_s(slotDesc, sizeof(slotDesc), _TRUNCATE, "(none)");
-
-    // Fall back to the constant-buffer path for draws that have one -- the
-    // v2 behaviour, kept because OTHER sprite systems may still be
-    // CB-driven and the peek serves them all.
     if (!resource) {
-        resource = bindingGet(BindSlot::VsCb0);
-        if (resource) {
-            ResourceInfo info;
-            if (bindingResolveResource(resource, &info) && info.isBuffer) {
-                chosenInfo = info;
-            } else {
-                resource = nullptr;
-            }
+        void* cb = bindingGet(BindSlot::VsCb0);
+        ResourceInfo info;
+        if (cb && bindingResolveResource(cb, &info) && info.isBuffer) {
+            resource = cb;
+            rbytes = info.a;
+            rstride = info.b;
+            source = "VS-CB";
         }
     }
     if (!resource) return;
+    if (g_wantMinBytes && rbytes < g_wantMinBytes) return;
 
     g_target = resource;
-    g_targetBytes = chosenInfo.a;
-    g_targetStride = chosenInfo.b;
+    g_targetBytes = rbytes;
+    g_targetStride = rstride;
     g_dumpedFull = false;
-    Log::get().note("cb peek: learned the vertex-stage data of a matched "
-                    "draw (n=%u). VS resources: %s. Watching %s slot %d -- "
-                    "%u bytes, structure stride %u. The next write dumps "
-                    "its head; after that, only what changes.",
-                    count, slotDesc, chosen >= 0 ? "VS-SRV" : "VS-CB",
-                    chosen, g_targetBytes, g_targetStride);
+    Log::get().note("cb peek: learned the sprite data of a matched draw "
+                    "(n=%u) -- %s, %u bytes, stride %u. The next write "
+                    "dumps its head; after that, only what changes.",
+                    count, source, g_targetBytes, g_targetStride);
 }
 
 void cbPeekCapture(const void* data, uint32_t bytes) {
