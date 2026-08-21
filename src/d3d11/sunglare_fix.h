@@ -26,4 +26,9 @@ SunglareAction sunglareOnEyeDraw(char kind, uint32_t count,
                                  uint32_t instances);
 uint32_t sunglareKeep();
 
+// The train's identity test, exported for the constant-buffer peek: the
+// steer needs to read the 208-byte CB of exactly these draws, and two
+// matchers for one family is how the witchstar era learned wrong things.
+bool sunglareIsGlareTrain(char kind, uint32_t count, uint32_t instances);
+
 }  // namespace edvr

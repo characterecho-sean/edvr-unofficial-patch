@@ -30,7 +30,9 @@ uint32_t g_keep = 0;
 uint64_t g_skipped = 0;
 uint64_t g_clamped = 0;
 
-bool isGlareTrain(char kind, uint32_t count, uint32_t instances) {
+}  // namespace
+
+bool sunglareIsGlareTrain(char kind, uint32_t count, uint32_t instances) {
     if (kind != kKind || count != kVerts || instances < 2) return false;
     ResourceInfo s0, s1;
     if (!bindingResolve(bindingGet(BindSlot::PsSrv0), &s0) ||
@@ -45,8 +47,6 @@ bool isGlareTrain(char kind, uint32_t count, uint32_t instances) {
     }
     return true;
 }
-
-}  // namespace
 
 void sunglareConfigure(Config& cfg) {
     const Mode was = g_mode;
@@ -93,7 +93,8 @@ bool sunglareWantsDraws() { return g_mode != Mode::kStock; }
 
 SunglareAction sunglareOnEyeDraw(char kind, uint32_t count,
                                  uint32_t instances) {
-    if (g_mode == Mode::kStock || !isGlareTrain(kind, count, instances)) {
+    if (g_mode == Mode::kStock ||
+        !sunglareIsGlareTrain(kind, count, instances)) {
         return SunglareAction::kStock;
     }
     if (g_mode == Mode::kOff) {

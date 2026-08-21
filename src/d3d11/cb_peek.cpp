@@ -13,6 +13,7 @@
 #include "../common/log.h"
 #include "../common/timing.h"
 #include "binding_shadow.h"
+#include "sunglare_fix.h"
 
 namespace edvr {
 namespace {
@@ -42,6 +43,10 @@ constexpr uint32_t kFirstDumpFloats = 64;
 constexpr uint32_t kDeltaPerLine = 16;
 
 bool     g_enabled = false;
+bool     g_glare = false;          // cb_peek_glare: match the sun-glare
+                                   // element train instead of the sprite
+                                   // family, and learn its VS constants --
+                                   // the steer's decode instrument
 uint32_t g_wantN = 0;              // cb_peek_n: learn only this index count;
                                    // 0 keeps first-match-wins
 void*    g_target = nullptr;       // the buffer RESOURCE, raw pointer,
@@ -149,11 +154,22 @@ void poolSample(ID3D11DeviceContext* ctx, ID3D11Buffer* pool,
 void cbPeekConfigure(Config& cfg) {
     const bool was = g_enabled;
     g_enabled = cfg.getBool("advanced.cb_peek", false);
+    g_glare = cfg.getBool("advanced.cb_peek_glare", false);
     const int wantN = cfg.getIntInRange("advanced.cb_peek_n", 0, 0, 10000000);
     g_wantN = static_cast<uint32_t>(wantN);
     const int minB = cfg.getIntInRange("advanced.cb_peek_min_bytes", 0, 0,
                                        100000000);
     g_wantMinBytes = static_cast<uint32_t>(minB);
+    if (g_enabled && g_glare && !was) {
+        g_target = nullptr;
+        g_dumpedFull = false;
+        g_lines = 0;
+        Log::get().note("cb peek: ON, glare mode -- learning the sun-glare "
+                        "element train's vertex constants. Park at the star "
+                        "and run the sweep: straight, roll, straight, yaw "
+                        "off-centre, straight, pitch, straight.");
+        return;
+    }
     if (g_enabled && !was) {
         g_target = nullptr;
         g_dumpedFull = false;
@@ -194,10 +210,30 @@ void* cbPeekTarget() { return g_target; }
 
 void cbPeekOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
                      uint32_t instances) {
-    if (!g_enabled || g_target || !ctx || kind != kKind ||
-        count < kMinIndices) {
+    if (!g_enabled || g_target || !ctx) return;
+
+    // Glare mode: one matcher for the train, shared with the fix itself,
+    // and the learn is always the vertex-stage constants -- the 208-byte
+    // buffer the steer will eventually rewrite.
+    if (g_glare) {
+        if (!sunglareIsGlareTrain(kind, count, instances)) return;
+        void* cb = bindingGet(BindSlot::VsCb0);
+        ResourceInfo info;
+        if (!cb || !bindingResolveResource(cb, &info) || !info.isBuffer) {
+            return;
+        }
+        g_target = cb;
+        g_targetBytes = info.a;
+        g_targetStride = info.b;
+        g_dumpedFull = false;
+        Log::get().note("cb peek: learned the glare train's constants "
+                        "(i=%u) -- VS-CB, %u bytes. The next write dumps "
+                        "its head; after that, only what changes.",
+                        instances, g_targetBytes);
         return;
     }
+
+    if (kind != kKind || count < kMinIndices) return;
 
     uint32_t eyeW = 0, eyeH = 0;
     if (!eyeTextureSize(&eyeW, &eyeH)) return;
