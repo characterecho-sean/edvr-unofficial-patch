@@ -148,6 +148,28 @@ struct State {
     uint64_t       peekLastMs = 0;
     uint32_t       peekLines = 0;
 
+    // The damper. The peek's sweep decoded the 8-byte state buffer: float
+    // [0] a constant luminance floor (-9.9658 in every sample), float [1]
+    // the adaptation value in log2 stops -- and a four-stop swing under
+    // an ordinary head pitch at a star, because the metering runs on the
+    // head-tracked view and the simulated pupils land on top of the real
+    // ones. Each frame the freshly computed value is read back (an 8-byte
+    // ping-pong copy, one frame of lag a slow signal never notices), a
+    // slow mean tracks where it lives, and mean + (1-k)(v - mean) is
+    // written over the game's state for both eyes. The game's own
+    // adaptation loop then runs FROM the damped value -- swing compressed
+    // by k, genuine scene changes still drifting the mean over seconds.
+    float          dampK = 0;             // fix.exposure_damping, 0..1
+    ID3D11Buffer*  dampStaging[2] = {};   // owned; the ping-pong pair
+    int            dampCur = 0;
+    bool           dampPrevValid = false;
+    bool           dampHaveMean = false;
+    float          dampMean = 0;
+    float          dampFloor = 0;
+    uint64_t       dampWrites = 0;
+    uint64_t       dampWritesAtNote = 0;
+    uint64_t       dampLastNoteMs = 0;
+
     std::unordered_map<void*, uint64_t> shaderHashes;
     CRITICAL_SECTION lock{};
     bool lockReady = false;
@@ -162,6 +184,16 @@ constexpr uint64_t kPeekTickMs = 1000;
 constexpr uint64_t kPeekLagMs = 50;
 constexpr uint32_t kPeekMaxLines = 400;
 constexpr uint32_t kPeekMaxBytes = 256;
+
+// The damper's constants. The state buffer as measured: exactly two
+// floats. The mean's blend is per frame (~90 of them a second), so 0.003
+// is a time constant of a few seconds -- station-to-space transitions
+// still adapt, head flicks do not. The sanity band rejects a buffer that
+// stops looking like the measured one, and the fix stands aside.
+constexpr uint32_t kDampBytes = 8;
+constexpr float    kDampMeanAlpha = 0.003f;
+constexpr float    kDampSaneLo = -30.0f;
+constexpr float    kDampSaneHi = 30.0f;
 
 // Frames to wait before reporting that detection found nothing. Long enough to
 // cover menus and loading, where the pass legitimately does not run.
@@ -334,6 +366,97 @@ void exposurePeek(ID3D11DeviceContext* ctx) {
     }
 }
 
+// One damping step, run right after the second eye's dispatch with the
+// pass's UAVs still bound: consume last frame's readback, filter, write
+// the damped state over both eyes, and queue this frame's readback.
+void exposureDamp(ID3D11DeviceContext* ctx,
+                  ID3D11UnorderedAccessView* firstEye0) {
+    State* s = g_state;
+
+    ID3D11UnorderedAccessView* view =
+        static_cast<ID3D11UnorderedAccessView*>(bindingGet(uavSlot(0)));
+    if (!view || !firstEye0) return;
+    ResourceInfo info;
+    if (!bindingResolve(view, &info) || !info.isBuffer ||
+        info.a != kDampBytes) {
+        return;   // not the measured 8-byte state; stand aside entirely
+    }
+
+    if (!s->dampStaging[0]) {
+        ID3D11Device* dev = nullptr;
+        ctx->GetDevice(&dev);
+        if (!dev) return;
+        D3D11_BUFFER_DESC bd{};
+        bd.ByteWidth = kDampBytes;
+        bd.Usage = D3D11_USAGE_STAGING;
+        bd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        dev->CreateBuffer(&bd, nullptr, &s->dampStaging[0]);
+        dev->CreateBuffer(&bd, nullptr, &s->dampStaging[1]);
+        dev->Release();
+        if (!s->dampStaging[0] || !s->dampStaging[1]) return;
+    }
+
+    ID3D11Resource* resB = nullptr;
+    view->GetResource(&resB);
+    ID3D11Resource* resA = nullptr;
+    firstEye0->GetResource(&resA);
+
+    // Queue this frame's readback FIRST, before the damped write below
+    // lands on the same buffer -- what the staging captures is the game's
+    // own freshly computed value, so the filter runs on the measurement
+    // and never chews its own output.
+    const int prev = s->dampCur ^ 1;
+    if (resB) {
+        ctx->CopyResource(s->dampStaging[s->dampCur], resB);
+        s->dampCur ^= 1;
+    } else {
+        if (resA) resA->Release();
+        return;
+    }
+    if (s->dampPrevValid) {
+        D3D11_MAPPED_SUBRESOURCE m{};
+        if (SUCCEEDED(ctx->Map(s->dampStaging[prev], 0, D3D11_MAP_READ, 0,
+                               &m)) &&
+            m.pData) {
+            float f[2];
+            memcpy(f, m.pData, sizeof(f));
+            ctx->Unmap(s->dampStaging[prev], 0);
+            if (f[1] > kDampSaneLo && f[1] < kDampSaneHi) {
+                if (!s->dampHaveMean) {
+                    s->dampMean = f[1];
+                    s->dampHaveMean = true;
+                }
+                s->dampMean += kDampMeanAlpha * (f[1] - s->dampMean);
+                s->dampFloor = f[0];
+                const float damped =
+                    s->dampMean + (1.0f - s->dampK) * (f[1] - s->dampMean);
+                const float out[2] = {s->dampFloor, damped};
+                if (resA) ctx->UpdateSubresource(resA, 0, nullptr, out,
+                                                 0, 0);
+                if (resB && resB != resA)
+                    ctx->UpdateSubresource(resB, 0, nullptr, out, 0, 0);
+                ++s->dampWrites;
+                const uint64_t now = nowMs();
+                if (s->dampWrites == 1 ||
+                    now - s->dampLastNoteMs >= 5000) {
+                    Log::get().note(
+                        "exposure damping: %llu write(s) since last note, "
+                        "k=%.2f, value %.3f, mean %.3f.",
+                        static_cast<unsigned long long>(
+                            s->dampWrites - s->dampWritesAtNote),
+                        s->dampK, f[1], s->dampMean);
+                    s->dampLastNoteMs = now;
+                    s->dampWritesAtNote = s->dampWrites;
+                }
+            }
+        }
+    }
+
+    s->dampPrevValid = true;
+    if (resA) resA->Release();
+    if (resB) resB->Release();
+}
+
 // Does the bound UAV set look like per-eye exposure state?
 //
 // Slot 0 is a small structured buffer holding the luminance range; slot 1 is a
@@ -499,6 +622,7 @@ void STDMETHODCALLTYPE hookedDispatch(ID3D11DeviceContext* self, UINT x, UINT y,
             }
             shareExposure(self, s->firstEye, second);
             if (s->peek) exposurePeek(self);
+            if (s->dampK > 0.0f) exposureDamp(self, s->firstEye[0]);
         }
     });
 }
@@ -529,6 +653,26 @@ void exposureConfigure(Config& cfg) {
             s->peekBytes[i] = 0;
         }
         s->peekPending = false;
+    }
+
+    const float wasK = s->dampK;
+    float k = cfg.getFloat("fix.exposure_damping", 0.0f);
+    if (k < 0.0f) k = 0.0f;
+    if (k > 1.0f) k = 1.0f;
+    s->dampK = k;
+    if (s->dampK != wasK) {
+        if (s->dampK > 0.0f) {
+            Log::get().note("exposure damping: ON, k=%.2f -- the adaptation "
+                            "swing is compressed to %.0f%% about a slow "
+                            "running mean. 0 restores stock; 1 holds the "
+                            "mean outright.",
+                            s->dampK, (1.0f - s->dampK) * 100.0f);
+        } else {
+            Log::get().note("exposure damping: off; the game's adaptation "
+                            "is stock from the next frame.");
+            s->dampPrevValid = false;
+            s->dampHaveMean = false;
+        }
     }
 }
 
@@ -748,6 +892,12 @@ void shutdownExposureFix() {
         if (g_state->peekStaging[i]) {
             g_state->peekStaging[i]->Release();
             g_state->peekStaging[i] = nullptr;
+        }
+    }
+    for (int i = 0; i < 2; ++i) {
+        if (g_state->dampStaging[i]) {
+            g_state->dampStaging[i]->Release();
+            g_state->dampStaging[i] = nullptr;
         }
     }
     g_state->hook.uninstall();
