@@ -172,6 +172,11 @@ struct State {
     uint64_t       dampSeedMs = 0;        // when the means were (re)seeded
     uint64_t       dampDevSinceMs = 0;    // 0 = gain currently inside band
     uint64_t       dampSnaps = 0;
+    void*          dampLastStrip = nullptr;  // identity only, never
+                                             // dereferenced: the strip
+                                             // must be the SAME texture
+                                             // object two frames running
+                                             // before the damper acts
     uint64_t       dampStepMs = 0;        // wall clock of the last step --
                                           // the blend is dt/tau, so the
                                           // mean's speed survives
@@ -222,6 +227,15 @@ constexpr float    kSnapDeviation = 0.25f;
 constexpr uint64_t kSnapAfterMs = 1500;
 constexpr uint64_t kFastSeedMs = 3000;
 constexpr float    kFastSeedBoost = 10.0f;
+
+// The menu lesson (Q3 launch, 2026-08-21): menus run MULTIPLE passes of
+// the exposure shape, so "the second dispatch's strip" is not reliably
+// an eye there -- the damper read a zero-gain UI strip and faithfully
+// wrote zero gain over the real eyes, which IS the blowout it was
+// blamed for. Every measured eye gain sits far above this floor; a
+// reading at or below it is some other instance, and the damper stands
+// aside rather than propagate it.
+constexpr float    kDampGainFloor = 0.5f;
 
 // Frames to wait before reporting that detection found nothing. Long enough to
 // cover menus and loading, where the pass legitimately does not run.
@@ -535,6 +549,19 @@ void exposureDamp(ID3D11DeviceContext* ctx,
         return;   // not the measured strip; stand aside entirely
     }
 
+    // Identity gate: act only when this frame's strip is the SAME texture
+    // object as last frame's. Gameplay is identity-stable and settles in
+    // one frame; a menu alternating several same-shaped instances keeps
+    // failing this test and the damper stays stood down for as long as
+    // the alternation lasts. The pending readback dies with the change --
+    // it was copied from whatever the previous instance was.
+    if (resB != s->dampLastStrip) {
+        s->dampLastStrip = resB;
+        s->dampPrevValid = false;
+        resB->Release();
+        return;
+    }
+
     if (!s->dampStaging[0]) {
         ID3D11Device* dev = nullptr;
         ctx->GetDevice(&dev);
@@ -576,7 +603,7 @@ void exposureDamp(ID3D11DeviceContext* ctx,
             memcpy(raw, m.pData, sizeof(raw));
             ctx->Unmap(s->dampStaging[prev], 0);
 
-            bool sane = true;
+            bool sane = raw[kDampGainTexel] > kDampGainFloor;
             for (uint32_t i = 0; i < kStripW; ++i) {
                 if (!(raw[i] >= -1e6f && raw[i] <= 1e6f)) sane = false;
             }
