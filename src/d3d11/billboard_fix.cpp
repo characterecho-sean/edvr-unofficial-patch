@@ -28,6 +28,7 @@ constexpr uint32_t kMinIndices = 64;
 // structure draws untouched.
 constexpr uint32_t kDrawnRight = 16;   // [16..18], magnitude = sprite scale
 constexpr uint32_t kDrawnUp = 20;      // [20..22]
+constexpr uint32_t kDrawnFwd = 28;     // [28..30], unit, tracks the view
 constexpr uint32_t kWorldRight = 36;   // [36..38]
 constexpr uint32_t kWorldUp = 40;      // [40..42], (0,1,0) in every capture
 constexpr uint32_t kMinFloats = 47;    // the layout's last consulted float
@@ -275,16 +276,39 @@ void billboardBegin(ID3D11DeviceContext* ctx) {
             f[kDrawnUp + i] *= 0.1f;
         }
     } else {
-        // Orientation from the world frame the write itself carries, scale
-        // from the drawn basis it came with. The starburst then rotates
-        // only when its OWN frame does -- the sun moving relative to the
-        // ship -- and never with the head.
-        const float* wr = f + kWorldRight;
+        // The horizon-locked billboard. The first steady formula anchored
+        // right and up to the world rows DIRECTLY -- and the elements
+        // vanished, which proved two things at once: the shader consumes
+        // these floats (the first positive engagement this machinery ever
+        // had), and a plane facing world-Z is edge-on to almost every
+        // viewpoint. The plane must keep FACING the camera to be seen at
+        // all; what must stop following the head is only the rotation IN
+        // that plane. So: keep the write's own forward, build right from
+        // world-up cross forward, up from forward cross right. Under roll
+        // the forward is unchanged and nothing spins; under yaw the
+        // element turns to keep facing, which is what a billboard is.
+        const float* fwd = f + kDrawnFwd;
         const float* wu = f + kWorldUp;
-        const float lwr = len3(wr), lwu = len3(wu);
+        const float lf = len3(fwd), lwu = len3(wu);
+        float fn[3], un[3], r[3], u[3];
         for (int i = 0; i < 3; ++i) {
-            f[kDrawnRight + i] = wr[i] / lwr * s;
-            f[kDrawnUp + i] = wu[i] / lwu * s;
+            fn[i] = fwd[i] / lf;
+            un[i] = wu[i] / lwu;
+        }
+        r[0] = un[1] * fn[2] - un[2] * fn[1];
+        r[1] = un[2] * fn[0] - un[0] * fn[2];
+        r[2] = un[0] * fn[1] - un[1] * fn[0];
+        const float lr = len3(r);
+        if (lr > 0.05f) {   // fwd nearly parallel to world-up: leave the
+                            // write alone rather than divide by nothing
+            for (int i = 0; i < 3; ++i) r[i] /= lr;
+            u[0] = fn[1] * r[2] - fn[2] * r[1];
+            u[1] = fn[2] * r[0] - fn[0] * r[2];
+            u[2] = fn[0] * r[1] - fn[1] * r[0];
+            for (int i = 0; i < 3; ++i) {
+                f[kDrawnRight + i] = r[i] * s;
+                f[kDrawnUp + i] = u[i] * s;
+            }
         }
     }
     ctx->Unmap(g_ourCb, 0);
