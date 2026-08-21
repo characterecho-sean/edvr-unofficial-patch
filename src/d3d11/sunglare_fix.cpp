@@ -303,31 +303,49 @@ void sunglareBegin(ID3D11DeviceContext* ctx) {
         return;   // this draw goes stock; the capture needs a round trip
     }
 
-    // The roll, measured from the shadowed camera rows and TOUCHING
-    // nothing: project world-up into the right/up plane; its in-plane
-    // angle from the up row is how far the head has rolled the frame.
+    // The angle, measured from the shadowed camera rows and TOUCHING
+    // nothing. World-up expressed in VIEW space is simply the y-column
+    // of the head-basis rows: (sh[17], sh[21], sh[29]). Its x and y
+    // components are the roll -- the original formula -- but a sprite
+    // off the view axis twists with the projection too, which the G
+    // star taught as a corona that held under roll and turned under
+    // yaw. The general form projects world-up perpendicular to the
+    // SUN'S direction first; the second matrix's translation is the
+    // sun's view position, and when it reads degenerate the centre
+    // formula stands in.
     uint32_t nf = 0;
     const float* sh = billboardShadowFloats(&nf);
-    if (!sh || nf < 43) return;
+    if (!sh || nf < 48) return;
     const float* r0 = sh + 16;
     const float* u0 = sh + 20;
-    const float* wu = sh + 40;
-    float rn[3], un[3], wn[3];
-    float lr = 0, lu = 0, lw = 0;
+    float lr = 0, lu = 0;
     for (int i = 0; i < 3; ++i) {
         lr += r0[i] * r0[i];
         lu += u0[i] * u0[i];
-        lw += wu[i] * wu[i];
     }
-    lr = sqrtf(lr); lu = sqrtf(lu); lw = sqrtf(lw);
-    if (lr < 1e-6f || lu < 1e-6f || lw < 1e-6f) return;
-    for (int i = 0; i < 3; ++i) {
-        rn[i] = r0[i] / lr;
-        un[i] = u0[i] / lu;
-        wn[i] = wu[i] / lw;
+    lr = sqrtf(lr); lu = sqrtf(lu);
+    if (lr < 1e-6f || lu < 1e-6f) return;
+    float wuv[3] = {sh[17], sh[21], sh[29]};
+    const float lwv = sqrtf(wuv[0] * wuv[0] + wuv[1] * wuv[1] +
+                            wuv[2] * wuv[2]);
+    if (lwv < 1e-6f) return;
+    for (int i = 0; i < 3; ++i) wuv[i] /= lwv;
+
+    float a = wuv[0];
+    float b = wuv[1];
+    const float sp[3] = {sh[39], sh[43], sh[47]};
+    const float spl =
+        sqrtf(sp[0] * sp[0] + sp[1] * sp[1] + sp[2] * sp[2]);
+    if (spl > 1e-3f) {
+        const float d[3] = {sp[0] / spl, sp[1] / spl, sp[2] / spl};
+        const float wd = wuv[0] * d[0] + wuv[1] * d[1] + wuv[2] * d[2];
+        const float px = wuv[0] - d[0] * wd;
+        const float py = wuv[1] - d[1] * wd;
+        if (px * px + py * py > 0.0025f) {
+            a = px;
+            b = py;
+        }
     }
-    const float a = wn[0] * rn[0] + wn[1] * rn[1] + wn[2] * rn[2];
-    const float b = wn[0] * un[0] + wn[1] * un[1] + wn[2] * un[2];
     const float n = sqrtf(a * a + b * b);
     // Near the zenith the horizon is undefined: world-up leaves the view
     // plane, the projection shrinks, and the measured angle turns to
@@ -406,10 +424,14 @@ void sunglareBegin(ID3D11DeviceContext* ctx) {
     const uint64_t now = nowMs();
     if (g_applied == 1 || now - g_lastNoteMs >= 2000) {
         Log::get().note("sun glare steady: %llu counter-rotation(s) since "
-                        "last note, current angle %.1f deg.",
+                        "last note, angle %.1f deg (centre-only %.1f, sun "
+                        "dist %.3g) -- if yaw still turns the corona, these "
+                        "two angles say whether the sun-position floats are "
+                        "the right ones.",
                         static_cast<unsigned long long>(g_applied -
                                                         g_appliedAtNote),
-                        atan2f(s, c) * 57.2958f);
+                        atan2f(s, c) * 57.2958f,
+                        -atan2f(wuv[0], wuv[1]) * 57.2958f, spl);
         g_lastNoteMs = now;
         g_appliedAtNote = g_applied;
     }
