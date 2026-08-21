@@ -160,12 +160,17 @@ struct State {
     // adaptation loop then runs FROM the damped value -- swing compressed
     // by k, genuine scene changes still drifting the mean over seconds.
     float          dampK = 0;             // fix.exposure_damping, 0..1
+    float          dampTau = 45.0f;       // fix.exposure_damping_tau, secs
     ID3D11Buffer*  dampStaging[2] = {};   // owned; the ping-pong pair
     int            dampCur = 0;
     bool           dampPrevValid = false;
     bool           dampHaveMean = false;
     float          dampMean = 0;
     float          dampFloor = 0;
+    uint64_t       dampStepMs = 0;        // wall clock of the last step --
+                                          // the blend is dt/tau, so the
+                                          // mean's speed survives
+                                          // reprojection halving the rate
     uint64_t       dampWrites = 0;
     uint64_t       dampWritesAtNote = 0;
     uint64_t       dampLastNoteMs = 0;
@@ -191,7 +196,6 @@ constexpr uint32_t kPeekMaxBytes = 256;
 // still adapt, head flicks do not. The sanity band rejects a buffer that
 // stops looking like the measured one, and the fix stands aside.
 constexpr uint32_t kDampBytes = 8;
-constexpr float    kDampMeanAlpha = 0.003f;
 constexpr float    kDampSaneLo = -30.0f;
 constexpr float    kDampSaneHi = 30.0f;
 
@@ -422,11 +426,25 @@ void exposureDamp(ID3D11DeviceContext* ctx,
             memcpy(f, m.pData, sizeof(f));
             ctx->Unmap(s->dampStaging[prev], 0);
             if (f[1] > kDampSaneLo && f[1] < kDampSaneHi) {
+                const uint64_t now = nowMs();
                 if (!s->dampHaveMean) {
                     s->dampMean = f[1];
                     s->dampHaveMean = true;
+                    s->dampStepMs = now;
                 }
-                s->dampMean += kDampMeanAlpha * (f[1] - s->dampMean);
+                // The mean's blend is wall-clock over tau. The first
+                // field trial hardcoded a few-second constant -- the same
+                // duration as a held head pose, so the mean chased every
+                // pitch and the damper could not hide what its own
+                // reference was doing. tau lives in config now, because
+                // head transients and genuine scene changes overlap in
+                // time and the right constant is a field question.
+                float alpha =
+                    static_cast<float>(now - s->dampStepMs) / 1000.0f /
+                    s->dampTau;
+                if (alpha > 0.2f) alpha = 0.2f;
+                s->dampStepMs = now;
+                s->dampMean += alpha * (f[1] - s->dampMean);
                 s->dampFloor = f[0];
                 const float damped =
                     s->dampMean + (1.0f - s->dampK) * (f[1] - s->dampMean);
@@ -660,6 +678,10 @@ void exposureConfigure(Config& cfg) {
     if (k < 0.0f) k = 0.0f;
     if (k > 1.0f) k = 1.0f;
     s->dampK = k;
+    float tau = cfg.getFloat("fix.exposure_damping_tau", 45.0f);
+    if (tau < 1.0f) tau = 1.0f;
+    if (tau > 600.0f) tau = 600.0f;
+    s->dampTau = tau;
     if (s->dampK != wasK) {
         if (s->dampK > 0.0f) {
             Log::get().note("exposure damping: ON, k=%.2f -- the adaptation "
