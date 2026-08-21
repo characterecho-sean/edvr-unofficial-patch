@@ -28,6 +28,7 @@
 #include "holo_fix.h"
 #include "journal_watch.h"  // gameplay started, for the low-peak notice
 #include "remlok_fix.h"
+#include "sunglare_fix.h"
 #include "witchstar_fix.h"
 
 namespace edvr {
@@ -901,8 +902,13 @@ inline bool foreignContext(ID3D11DeviceContext* self) {
 // direction under head rotation; kBillboard a flare or corona sprite whose
 // freshly-written constants passed the billboard shape check -- forward it
 // wrapped in billboardBegin/End, which substitutes a world-stable basis.
+// kGlareClamp is DrawInstanced-only: the sun-glare element train drawn
+// with its instance count clamped to sunglareKeep() -- SV_InstanceID
+// restarts at zero per call, so a prefix is the only subset that keeps
+// every element's identity.
 enum class DrawVerdict {
-    kNone, kPanel, kSkip, kRemlok, kHolo, kWitchstar, kBillboard
+    kNone, kPanel, kSkip, kRemlok, kHolo, kWitchstar, kBillboard,
+    kGlareClamp
 };
 
 // kind, count and instances describe the draw for the census and the census
@@ -952,7 +958,8 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         !headOffsetGateWantsPanel() && s->censusSkipCount == 0 &&
         s->censusSkipRangeCount == 0 && s->censusSkipOffCount == 0 &&
         !remlokWantsDraws() && !holoWantsDraws() && !witchstarWantsDraws() &&
-        !cbPeekEnabled() && !billboardWantsDraws() && !drawCensusArmed()) {
+        !sunglareWantsDraws() && !cbPeekEnabled() && !billboardWantsDraws() &&
+        !drawCensusArmed()) {
         return DrawVerdict::kNone;
     }
     const uint32_t rtvGen = bindingGeneration(BindSlot::Rtv0);
@@ -1079,6 +1086,13 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     // see the draws that break it, not only the ones that belong.
     if (witchstarWantsDraws() && witchstarOnEyeDraw(kind, count, instances)) {
         return DrawVerdict::kWitchstar;
+    }
+
+    // The sun-glare element train: off skips it, first:K clamps it.
+    if (sunglareWantsDraws()) {
+        const SunglareAction a = sunglareOnEyeDraw(kind, count, instances);
+        if (a == SunglareAction::kSkip) return DrawVerdict::kSkip;
+        if (a == SunglareAction::kClamp) return DrawVerdict::kGlareClamp;
     }
 
     // The constant-buffer peek: observation only, learning which buffer the
@@ -1520,8 +1534,15 @@ void STDMETHODCALLTYPE hookedDrawInstanced(ID3D11DeviceContext* self, UINT perIn
                                            UINT instances, UINT startVertex,
                                            UINT startInstance) {
     const DrawVerdict v = beginPanelOverride(self, 'N', perInstance, instances);
+    // kGlareClamp only ever comes back for this thunk -- the glare train is
+    // DrawInstanced -- so the clamp lives here rather than in the shared
+    // tail, where three other thunks could never receive it.
+    const UINT drawn = v == DrawVerdict::kGlareClamp
+                           ? (instances < sunglareKeep() ? instances
+                                                         : sunglareKeep())
+                           : instances;
     forwardWithVerdict(self, v, [&] {
-        g_state->realDrawInstanced(self, perInstance, instances, startVertex,
+        g_state->realDrawInstanced(self, perInstance, drawn, startVertex,
                                    startInstance);
     });
     if (v == DrawVerdict::kPanel) endPanelOverride(self);
@@ -1840,6 +1861,7 @@ void vScreenRefreshConfig() {
     remlokConfigure(cfg);
     holoConfigure(cfg);
     witchstarConfigure(cfg);
+    sunglareConfigure(cfg);
     fovProbeConfigure(cfg);
     cbPeekConfigure(cfg);
     billboardConfigure(cfg);
@@ -2513,6 +2535,7 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     remlokConfigure(cfg);
     holoConfigure(cfg);
     witchstarConfigure(cfg);
+    sunglareConfigure(cfg);
     fovProbeConfigure(cfg);
     cbPeekConfigure(cfg);
     billboardConfigure(cfg);
