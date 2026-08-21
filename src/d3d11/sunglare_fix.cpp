@@ -34,6 +34,8 @@ Mode     g_mode = Mode::kStock;
 uint32_t g_keep = 0;
 bool     g_steady = false;
 int      g_steadyMode = 0;   // 0 off, 1 counter-rotate, 2 fixed-30 test
+float    g_theta = 0;        // low-passed counter-rotation angle
+bool     g_thetaValid = false;
 uint64_t g_skipped = 0;
 uint64_t g_clamped = 0;
 
@@ -108,6 +110,7 @@ void releaseSteadyObjects() {
     }
     g_haveCorners = false;
     g_cornerPending = false;
+    g_thetaValid = false;
 }
 
 // One-time capture of the game's corner buffer: it is created with initial
@@ -316,14 +319,33 @@ void sunglareBegin(ID3D11DeviceContext* ctx) {
     const float a = wn[0] * rn[0] + wn[1] * rn[1] + wn[2] * rn[2];
     const float b = wn[0] * un[0] + wn[1] * un[1] + wn[2] * un[2];
     const float n = sqrtf(a * a + b * b);
-    if (n < 0.05f) return;   // looking along world-up; no defined horizon
+    // Near the zenith the horizon is undefined: world-up leaves the view
+    // plane, the projection shrinks, and the measured angle turns to
+    // noise -- which the field found as a BREATHING corona when pitching
+    // up (and only up; pitching down moves AWAY from the pole, which is
+    // the asymmetry that named this bug). The correction fades smoothly
+    // to stock over the approach instead of jittering or snapping, and
+    // the angle is low-passed besides.
+    if (n < 0.05f) {
+        g_thetaValid = false;
+        return;
+    }
     // The sign, settled in the field: the fixed-angle diagnostic proved
     // the shader consumes the rotation (a 30-degree spec tilted the beam
     // 30 degrees), which convicted the original positive sign -- the
     // elements were being rotated WITH the head, a doubled spin that
     // reads as "still rolls". The counter-rotation is the negative.
-    float c = b / n;
-    float s = -a / n;
+    float theta = atan2f(-a, b);
+    float w = (n - 0.05f) / 0.25f;
+    if (w > 1.0f) w = 1.0f;
+    theta *= w;
+    if (g_thetaValid && fabsf(theta - g_theta) < 1.5708f) {
+        theta = g_theta + 0.25f * (theta - g_theta);
+    }
+    g_theta = theta;
+    g_thetaValid = true;
+    float c = cosf(theta);
+    float s = sinf(theta);
     if (g_steadyMode == 2) {   // the fixed-angle diagnostic
         c = 0.86603f;
         s = 0.5f;
