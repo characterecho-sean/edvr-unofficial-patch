@@ -39,6 +39,16 @@ float    g_recenter = 0;     // fix.sun_glare_recenter: corner-translation
                              // gain that pushes the elements back onto
                              // the star against the flare placement slide
 uint64_t g_lastSeenMs = 0;   // when the train last drew
+
+// The eye-pair logger, the eye-sync approach's measurement: the train
+// draws once per eye, alternating, so two consecutive matched draws are
+// the two eyes' CBs -- log both sides' candidate fields and the diff
+// names what the eyes actually disagree about, BEFORE anything is
+// synced. Capped per session; re-toggle steady for another run.
+uint64_t g_pairLastMs = 0;
+int      g_pairState = 0;    // 0 idle, 1 log-as-A, 2 log-as-B
+uint32_t g_pairsLogged = 0;
+constexpr uint32_t kPairMax = 24;
 float    g_theta = 0;        // low-passed counter-rotation angle
 bool     g_thetaValid = false;
 uint64_t g_skipped = 0;
@@ -246,6 +256,11 @@ void sunglareConfigure(Config& cfg) {
                             g_steady ? "counter-rotated"
                                      : "no longer rotated");
         }
+        if (g_steady) {
+            g_pairsLogged = 0;   // each steady rising edge buys a fresh
+                                 // eye-pair budget
+            g_pairState = 0;
+        }
         if (!g_steady) releaseSteadyObjects();
     }
     const float wasRecenter = g_recenter;
@@ -356,6 +371,34 @@ void sunglareBegin(ID3D11DeviceContext* ctx) {
     // centre formula by 33. The centre formula remains the fallback for
     // degenerate reads, and the telemetry prints both so any future
     // divergence names itself.
+    // The eye-pair log, before anything else touches the values.
+    const uint64_t nowPair = nowMs();
+    if (g_pairsLogged < kPairMax && g_pairState == 0 &&
+        nowPair - g_pairLastMs >= 3000) {
+        g_pairState = 1;
+    }
+    if (g_pairState >= 1) {
+        Log::get().note(
+            "glare eye-pair %c: sp=(%.6g %.6g %.6g) f0=(%.4g %.4g %.4g "
+            "%.4g) f4=(%.4g %.4g %.4g %.4g) f8=(%.4g %.4g %.4g %.4g) "
+            "f12=(%.4g %.4g %.4g %.4g)",
+            g_pairState == 1 ? 'A' : 'B', sh[19], sh[23], sh[31], sh[0],
+            sh[1], sh[2], sh[3], sh[4], sh[5], sh[6], sh[7], sh[8], sh[9],
+            sh[10], sh[11], sh[12], sh[13], sh[14], sh[15]);
+        if (g_pairState == 2) {
+            g_pairState = 0;
+            g_pairLastMs = nowPair;
+            ++g_pairsLogged;
+            if (g_pairsLogged == kPairMax) {
+                Log::get().note("glare eye-pair: session budget spent; "
+                                "toggle sun_glare_steady off and on for "
+                                "another run.");
+            }
+        } else {
+            g_pairState = 2;
+        }
+    }
+
     float a = wuv[0];
     float b = wuv[1];
     bool sunAnchored = false;
