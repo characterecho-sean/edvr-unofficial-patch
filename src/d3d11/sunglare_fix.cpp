@@ -43,11 +43,46 @@ uint64_t g_clamped = 0;
 // CORNER STREAM: six 8-byte two-float corners, expanded around the
 // element's centre by the shader. Rotate the corners, the art
 // counter-rotates, and nothing else in the pipeline can tell.
+// The corner verts are FLOAT16x4 -- eight bytes is four halfs, (x, y,
+// u, v) -- which the first engagement discovered the hard way: rotating
+// the bytes as float32 pairs scrambled half bit-patterns into screen-
+// spanning streaks. The capture's "0.00781" was 0x3C000000: two halfs
+// (0.0, 1.0) wearing a float's clothes.
 constexpr uint32_t kCornerBytes = 48;
-constexpr uint32_t kCornerFloats = kCornerBytes / 4;
+constexpr uint32_t kCornerHalfs = kCornerBytes / 2;
+constexpr uint32_t kCornerVerts = 6;
 constexpr uint64_t kReadbackLagMs = 50;
 
-float          g_corners[kCornerFloats];
+uint16_t       g_corners[kCornerHalfs];
+
+float halfToFloat(uint16_t h) {
+    const uint32_t sign = (h & 0x8000u) << 16;
+    const uint32_t exp = (h >> 10) & 0x1Fu;
+    const uint32_t man = h & 0x3FFu;
+    uint32_t bits;
+    if (exp == 0) {
+        bits = sign;             // denormals flush to signed zero; corner
+                                 // geometry never lives there
+    } else if (exp == 31) {
+        bits = sign | 0x7F800000u | (man << 13);
+    } else {
+        bits = sign | ((exp + 112u) << 23) | (man << 13);
+    }
+    float f;
+    memcpy(&f, &bits, 4);
+    return f;
+}
+
+uint16_t floatToHalf(float f) {
+    uint32_t bits;
+    memcpy(&bits, &f, 4);
+    const uint16_t sign = static_cast<uint16_t>((bits >> 16) & 0x8000u);
+    const int32_t exp = static_cast<int32_t>((bits >> 23) & 0xFFu) - 112;
+    const uint32_t man = bits & 0x7FFFFFu;
+    if (exp <= 0) return sign;                       // flush tiny to zero
+    if (exp >= 31) return sign | 0x7BFFu;            // clamp to max half
+    return static_cast<uint16_t>(sign | (exp << 10) | (man >> 13));
+}
 bool           g_haveCorners = false;
 ID3D11Buffer*  g_cornerStaging = nullptr;   // owned
 bool           g_cornerPending = false;
@@ -99,12 +134,19 @@ void captureCorners(ID3D11DeviceContext* ctx) {
                 ctx->Unmap(g_cornerStaging, 0);
                 g_haveCorners = true;
                 g_cornerPending = false;
-                Log::get().note("sun glare steady: corner stream captured "
-                                "(%.3g %.3g / %.3g %.3g / %.3g %.3g ...). "
-                                "The counter-rotation engages from the next "
-                                "matched draw.",
-                                g_corners[0], g_corners[1], g_corners[2],
-                                g_corners[3], g_corners[4], g_corners[5]);
+                Log::get().note("sun glare steady: corner stream captured, "
+                                "FLOAT16x4 decode: v0 pos(%.3g %.3g) "
+                                "uv(%.3g %.3g), v1 pos(%.3g %.3g), v2 "
+                                "pos(%.3g %.3g). The counter-rotation "
+                                "engages from the next matched draw.",
+                                halfToFloat(g_corners[0]),
+                                halfToFloat(g_corners[1]),
+                                halfToFloat(g_corners[2]),
+                                halfToFloat(g_corners[3]),
+                                halfToFloat(g_corners[4]),
+                                halfToFloat(g_corners[5]),
+                                halfToFloat(g_corners[8]),
+                                halfToFloat(g_corners[9]));
             }
         }
         vb->Release();
@@ -285,12 +327,28 @@ void sunglareBegin(ID3D11DeviceContext* ctx) {
         !m.pData) {
         return;
     }
-    float* out = static_cast<float*>(m.pData);
-    for (uint32_t v = 0; v < kCornerFloats; v += 2) {
-        const float x = g_corners[v];
-        const float y = g_corners[v + 1];
-        out[v] = c * x - s * y;
-        out[v + 1] = s * x + c * y;
+    // Rotate the half-precision positions about their own centroid -- the
+    // corners span 0..1, not plus-minus a half, so an origin rotation
+    // would swing the quad in an orbit instead of spinning it in place.
+    // The uv halfs ride across untouched: each vertex keeps its texel,
+    // so the art turns rigidly with the geometry.
+    uint16_t* out = static_cast<uint16_t*>(m.pData);
+    memcpy(out, g_corners, kCornerBytes);
+    float cx = 0, cy = 0;
+    float px[kCornerVerts], py[kCornerVerts];
+    for (uint32_t v = 0; v < kCornerVerts; ++v) {
+        px[v] = halfToFloat(g_corners[v * 4]);
+        py[v] = halfToFloat(g_corners[v * 4 + 1]);
+        cx += px[v];
+        cy += py[v];
+    }
+    cx /= kCornerVerts;
+    cy /= kCornerVerts;
+    for (uint32_t v = 0; v < kCornerVerts; ++v) {
+        const float x = px[v] - cx;
+        const float y = py[v] - cy;
+        out[v * 4] = floatToHalf(cx + c * x - s * y);
+        out[v * 4 + 1] = floatToHalf(cy + s * x + c * y);
     }
     ctx->Unmap(g_ourVb, 0);
 
