@@ -135,9 +135,9 @@ void captureCorners(ID3D11DeviceContext* ctx) {
                 g_haveCorners = true;
                 g_cornerPending = false;
                 Log::get().note("sun glare steady: corner stream captured, "
-                                "FLOAT16x4 decode: v0 pos(%.3g %.3g) "
-                                "uv(%.3g %.3g), v1 pos(%.3g %.3g), v2 "
-                                "pos(%.3g %.3g). The counter-rotation "
+                                "FLOAT16x4 decode: v0 uv(%.3g %.3g) "
+                                "corner(%.3g %.3g), v1 uv(%.3g %.3g), v2 "
+                                "uv(%.3g %.3g). The counter-rotation "
                                 "engages from the next matched draw.",
                                 halfToFloat(g_corners[0]),
                                 halfToFloat(g_corners[1]),
@@ -327,28 +327,20 @@ void sunglareBegin(ID3D11DeviceContext* ctx) {
         !m.pData) {
         return;
     }
-    // Rotate the half-precision positions about their own centroid -- the
-    // corners span 0..1, not plus-minus a half, so an origin rotation
-    // would swing the quad in an orbit instead of spinning it in place.
-    // The uv halfs ride across untouched: each vertex keeps its texel,
-    // so the art turns rigidly with the geometry.
+    // The vertex layout, as the first engagement taught it: halfs 0-1 are
+    // the TEXTURE coordinate (0..1) and halfs 2-3 the corner expansion
+    // direction (plus-minus one, centred on the element). Rotating the
+    // first pair rotated the sampling inside a head-locked quad and
+    // dragged neighbouring atlas art into view; the geometry lives in the
+    // second pair, already origin-centred, so the rotation is a plain
+    // origin spin and the texels ride untouched.
     uint16_t* out = static_cast<uint16_t*>(m.pData);
     memcpy(out, g_corners, kCornerBytes);
-    float cx = 0, cy = 0;
-    float px[kCornerVerts], py[kCornerVerts];
     for (uint32_t v = 0; v < kCornerVerts; ++v) {
-        px[v] = halfToFloat(g_corners[v * 4]);
-        py[v] = halfToFloat(g_corners[v * 4 + 1]);
-        cx += px[v];
-        cy += py[v];
-    }
-    cx /= kCornerVerts;
-    cy /= kCornerVerts;
-    for (uint32_t v = 0; v < kCornerVerts; ++v) {
-        const float x = px[v] - cx;
-        const float y = py[v] - cy;
-        out[v * 4] = floatToHalf(cx + c * x - s * y);
-        out[v * 4 + 1] = floatToHalf(cy + s * x + c * y);
+        const float x = halfToFloat(g_corners[v * 4 + 2]);
+        const float y = halfToFloat(g_corners[v * 4 + 3]);
+        out[v * 4 + 2] = floatToHalf(c * x - s * y);
+        out[v * 4 + 3] = floatToHalf(s * x + c * y);
     }
     ctx->Unmap(g_ourVb, 0);
 
