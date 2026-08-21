@@ -317,8 +317,13 @@ void sunglareBegin(ID3D11DeviceContext* ctx) {
     const float b = wn[0] * un[0] + wn[1] * un[1] + wn[2] * un[2];
     const float n = sqrtf(a * a + b * b);
     if (n < 0.05f) return;   // looking along world-up; no defined horizon
+    // The sign, settled in the field: the fixed-angle diagnostic proved
+    // the shader consumes the rotation (a 30-degree spec tilted the beam
+    // 30 degrees), which convicted the original positive sign -- the
+    // elements were being rotated WITH the head, a doubled spin that
+    // reads as "still rolls". The counter-rotation is the negative.
     float c = b / n;
-    float s = a / n;
+    float s = -a / n;
     if (g_steadyMode == 2) {   // the fixed-angle diagnostic
         c = 0.86603f;
         s = 0.5f;
