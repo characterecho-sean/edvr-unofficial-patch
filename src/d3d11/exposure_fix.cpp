@@ -143,6 +143,9 @@ struct State {
     bool           peek = false;
     ID3D11Buffer*  peekStaging[4] = {};   // owned; per UAV slot, buffers only
     uint32_t       peekBytes[4] = {};
+    ID3D11Texture2D* peekStripStaging = nullptr;   // owned; the strip
+    uint32_t       peekStripW = 0;
+    uint32_t       peekStripFmt = 0;
     bool           peekPending = false;
     uint64_t       peekCopyMs = 0;
     uint64_t       peekLastMs = 0;
@@ -287,6 +290,9 @@ void shareExposure(ID3D11DeviceContext* ctx, ID3D11UnorderedAccessView* const* f
     }
 }
 
+void exposurePeekStrip(ID3D11DeviceContext* ctx, char* line, int* at,
+                       size_t lineSize);
+
 // The peek: consume last tick's staging copies, then queue this tick's.
 // Runs right after the second eye's dispatch, with the pass's UAVs still
 // bound and shared -- what is read here is what the tonemap reads.
@@ -318,6 +324,7 @@ void exposurePeek(ID3D11DeviceContext* ctx) {
             at += _snprintf_s(line + at, sizeof(line) - at, _TRUNCATE, "]");
             ctx->Unmap(s->peekStaging[slot], 0);
         }
+        exposurePeekStrip(ctx, line, &at, sizeof(line));
         s->peekPending = false;
         if (at) {
             ++s->peekLines;
@@ -368,6 +375,113 @@ void exposurePeek(ID3D11DeviceContext* ctx) {
             s->peekCopyMs = now;
         }
     }
+}
+
+// Half-precision decode for the strip's texels, local and tiny -- the
+// corner-stream capture in sunglare_fix carries its own copy for the
+// same reason: a shared header for twenty lines buys a dependency.
+float expHalfToFloat(uint16_t h) {
+    const uint32_t sign = (h & 0x8000u) << 16;
+    const uint32_t exp = (h >> 10) & 0x1Fu;
+    const uint32_t man = h & 0x3FFu;
+    uint32_t bits;
+    if (exp == 0) bits = sign;
+    else if (exp == 31) bits = sign | 0x7F800000u | (man << 13);
+    else bits = sign | ((exp + 112u) << 23) | (man << 13);
+    float f;
+    memcpy(&f, &bits, 4);
+    return f;
+}
+
+// Dump the strip texture's texels, decoded by format. The state-buffer
+// damper measured beta of roughly one -- the game re-adapts from any
+// written state within a frame, so holding the STATE cannot hold the
+// IMAGE. What the tonemap actually reads is this strip, written by the
+// pass as pure output; the damper's next form rewrites texels here, and
+// this dump is how the sweep names which texel carries the exposure.
+void exposurePeekStrip(ID3D11DeviceContext* ctx, char* line, int* at,
+                       size_t lineSize) {
+    State* s = g_state;
+    ID3D11UnorderedAccessView* view =
+        static_cast<ID3D11UnorderedAccessView*>(bindingGet(uavSlot(1)));
+    if (!view) return;
+    ID3D11Resource* res = nullptr;
+    view->GetResource(&res);
+    if (!res) return;
+    D3D11_RESOURCE_DIMENSION dim = D3D11_RESOURCE_DIMENSION_UNKNOWN;
+    res->GetType(&dim);
+    if (dim != D3D11_RESOURCE_DIMENSION_TEXTURE2D) {
+        res->Release();
+        return;
+    }
+    D3D11_TEXTURE2D_DESC td{};
+    static_cast<ID3D11Texture2D*>(res)->GetDesc(&td);
+    if (td.Height != 1 || td.Width == 0 || td.Width > 64) {
+        res->Release();
+        return;
+    }
+    if (s->peekStripStaging &&
+        (s->peekStripW != td.Width ||
+         s->peekStripFmt != static_cast<uint32_t>(td.Format))) {
+        s->peekStripStaging->Release();
+        s->peekStripStaging = nullptr;
+    }
+    if (!s->peekStripStaging) {
+        ID3D11Device* dev = nullptr;
+        ctx->GetDevice(&dev);
+        if (!dev) {
+            res->Release();
+            return;
+        }
+        D3D11_TEXTURE2D_DESC sd = td;
+        sd.Usage = D3D11_USAGE_STAGING;
+        sd.BindFlags = 0;
+        sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        sd.MiscFlags = 0;
+        dev->CreateTexture2D(&sd, nullptr, &s->peekStripStaging);
+        dev->Release();
+        if (!s->peekStripStaging) {
+            res->Release();
+            return;
+        }
+        s->peekStripW = td.Width;
+        s->peekStripFmt = static_cast<uint32_t>(td.Format);
+        Log::get().note("exposure peek: strip is %ux1 fmt=%u.", td.Width,
+                        s->peekStripFmt);
+    }
+    // The strip is tiny and this runs on the peek's one-second cadence:
+    // copy and read back immediately, accepting the one stall a second.
+    ctx->CopyResource(s->peekStripStaging, res);
+    res->Release();
+    D3D11_MAPPED_SUBRESOURCE m{};
+    if (FAILED(ctx->Map(s->peekStripStaging, 0, D3D11_MAP_READ, 0, &m)) ||
+        !m.pData) {
+        return;
+    }
+    *at += _snprintf_s(line + *at, lineSize - *at, _TRUNCATE, "%sstrip[",
+                       *at ? "  " : "");
+    const uint32_t fmt = s->peekStripFmt;
+    const uint32_t w = s->peekStripW;
+    for (uint32_t x = 0; x < w && *at < 420; ++x) {
+        float v0 = 0;
+        if (fmt == 41 || fmt == 39) {          // R32_FLOAT / R32_TYPELESS
+            v0 = static_cast<const float*>(m.pData)[x];
+        } else if (fmt == 10 || fmt == 9) {    // RGBA16F: first channel
+            v0 = expHalfToFloat(
+                reinterpret_cast<const uint16_t*>(m.pData)[x * 4]);
+        } else if (fmt == 2 || fmt == 1) {     // RGBA32F: first channel
+            v0 = static_cast<const float*>(m.pData)[x * 4];
+        } else if (fmt == 54 || fmt == 53) {   // R16_FLOAT
+            v0 = expHalfToFloat(
+                reinterpret_cast<const uint16_t*>(m.pData)[x]);
+        } else {
+            v0 = static_cast<const float*>(m.pData)[x];   // best effort
+        }
+        *at += _snprintf_s(line + *at, lineSize - *at, _TRUNCATE, "%s%.5g",
+                           x ? " " : "", static_cast<double>(v0));
+    }
+    *at += _snprintf_s(line + *at, lineSize - *at, _TRUNCATE, "]");
+    ctx->Unmap(s->peekStripStaging, 0);
 }
 
 // One damping step, run right after the second eye's dispatch with the
@@ -669,6 +783,10 @@ void exposureConfigure(Config& cfg) {
             }
             s->peekBytes[i] = 0;
         }
+        if (s->peekStripStaging) {
+            s->peekStripStaging->Release();
+            s->peekStripStaging = nullptr;
+        }
         s->peekPending = false;
     }
 
@@ -920,6 +1038,10 @@ void shutdownExposureFix() {
             g_state->dampStaging[i]->Release();
             g_state->dampStaging[i] = nullptr;
         }
+    }
+    if (g_state->peekStripStaging) {
+        g_state->peekStripStaging->Release();
+        g_state->peekStripStaging = nullptr;
     }
     g_state->hook.uninstall();
     if (g_state->lockReady) {
