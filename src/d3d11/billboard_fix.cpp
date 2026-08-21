@@ -217,6 +217,12 @@ bool billboardOnEyeDraw(char kind, uint32_t count, uint32_t /*instances*/) {
     return true;
 }
 
+const float* billboardShadowFloats(uint32_t* count) {
+    if (!g_shadowValid) return nullptr;
+    if (count) *count = g_shadowBytes / 4;
+    return reinterpret_cast<const float*>(g_shadow);
+}
+
 void* billboardTarget() {
     return g_mode != Mode::kStock || g_glareWatch ? g_target : nullptr;
 }

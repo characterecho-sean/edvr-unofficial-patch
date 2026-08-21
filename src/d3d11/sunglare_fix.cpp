@@ -2,10 +2,14 @@
 
 #include <windows.h>
 
+#include <d3d11.h>
+
+#include <cmath>
 #include <cstring>
 
 #include "../common/config.h"
 #include "../common/log.h"
+#include "../common/timing.h"
 #include "billboard_fix.h"
 #include "binding_shadow.h"
 
@@ -31,6 +35,102 @@ uint32_t g_keep = 0;
 bool     g_steady = false;
 uint64_t g_skipped = 0;
 uint64_t g_clamped = 0;
+
+// The steady actuator. The camera-block rows are the VIEW MATRIX --
+// position flows through them, so both CB replacement formulas displaced
+// the elements per eye, and the CB is now measurement only. What spins
+// the stamp about its own centre without touching its position is the
+// CORNER STREAM: six 8-byte two-float corners, expanded around the
+// element's centre by the shader. Rotate the corners, the art
+// counter-rotates, and nothing else in the pipeline can tell.
+constexpr uint32_t kCornerBytes = 48;
+constexpr uint32_t kCornerFloats = kCornerBytes / 4;
+constexpr uint64_t kReadbackLagMs = 50;
+
+float          g_corners[kCornerFloats];
+bool           g_haveCorners = false;
+ID3D11Buffer*  g_cornerStaging = nullptr;   // owned
+bool           g_cornerPending = false;
+uint64_t       g_cornerCopyMs = 0;
+ID3D11Buffer*  g_ourVb = nullptr;           // owned; the rotated corners
+ID3D11Buffer*  g_savedVb = nullptr;         // the game's, held across one draw
+UINT           g_savedStride = 0;
+UINT           g_savedOffset = 0;
+bool           g_engaged = false;
+uint64_t       g_applied = 0;
+uint64_t       g_appliedAtNote = 0;
+uint64_t       g_lastNoteMs = 0;
+
+void releaseSteadyObjects() {
+    if (g_cornerStaging) {
+        g_cornerStaging->Release();
+        g_cornerStaging = nullptr;
+    }
+    if (g_ourVb) {
+        g_ourVb->Release();
+        g_ourVb = nullptr;
+    }
+    g_haveCorners = false;
+    g_cornerPending = false;
+}
+
+// One-time capture of the game's corner buffer: it is created with initial
+// data and never mapped, so no tee can see it -- a staging copy at the
+// draw, read back a few frames later, is the only window. Runs while the
+// corners are still unknown; the fix stands aside until they are.
+void captureCorners(ID3D11DeviceContext* ctx) {
+    ID3D11Buffer* vb = nullptr;
+    UINT stride = 0, offset = 0;
+    ctx->IAGetVertexBuffers(0, 1, &vb, &stride, &offset);
+    if (!vb) return;
+    ResourceInfo info;
+    if (!bindingResolveResource(vb, &info) || !info.isBuffer ||
+        info.a != kCornerBytes) {
+        vb->Release();
+        return;   // not the 48-byte dedicated corner buffer; stand aside
+    }
+    const uint64_t now = nowMs();
+    if (g_cornerPending) {
+        if (now - g_cornerCopyMs >= kReadbackLagMs && g_cornerStaging) {
+            D3D11_MAPPED_SUBRESOURCE m{};
+            if (SUCCEEDED(ctx->Map(g_cornerStaging, 0, D3D11_MAP_READ, 0,
+                                   &m))) {
+                memcpy(g_corners, m.pData, kCornerBytes);
+                ctx->Unmap(g_cornerStaging, 0);
+                g_haveCorners = true;
+                g_cornerPending = false;
+                Log::get().note("sun glare steady: corner stream captured "
+                                "(%.3g %.3g / %.3g %.3g / %.3g %.3g ...). "
+                                "The counter-rotation engages from the next "
+                                "matched draw.",
+                                g_corners[0], g_corners[1], g_corners[2],
+                                g_corners[3], g_corners[4], g_corners[5]);
+            }
+        }
+        vb->Release();
+        return;
+    }
+    if (!g_cornerStaging) {
+        ID3D11Device* dev = nullptr;
+        ctx->GetDevice(&dev);
+        if (dev) {
+            D3D11_BUFFER_DESC bd{};
+            bd.ByteWidth = kCornerBytes;
+            bd.Usage = D3D11_USAGE_STAGING;
+            bd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+            dev->CreateBuffer(&bd, nullptr, &g_cornerStaging);
+            dev->Release();
+        }
+        if (!g_cornerStaging) {
+            vb->Release();
+            return;
+        }
+    }
+    ctx->CopyResource(g_cornerStaging, vb);
+    g_cornerCopyMs = now;
+    g_cornerPending = true;
+    vb->Release();
+}
 
 }  // namespace
 
@@ -78,12 +178,14 @@ void sunglareConfigure(Config& cfg) {
     g_steady = cfg.getBool("fix.sun_glare_steady", false);
     billboardGlareWatch(g_steady);
     if (g_steady != wasSteady) {
-        Log::get().note("sun glare steady: %s -- the train's drawn basis is "
-                        "%s per write from the world rows its own constants "
-                        "carry. Orientation stops following the head; scale, "
-                        "position and everything else stay the game's.",
+        Log::get().note("sun glare steady: %s -- the corner stream is %s "
+                        "per draw by the head's roll, measured from the "
+                        "camera rows the train's own constants carry. The "
+                        "stamp counter-rotates about its centre; position, "
+                        "scale and the constants themselves are untouched.",
                         g_steady ? "ON" : "off",
-                        g_steady ? "rebuilt" : "no longer rebuilt");
+                        g_steady ? "counter-rotated" : "no longer rotated");
+        if (!g_steady) releaseSteadyObjects();
     }
     if (g_mode != was || (g_mode == Mode::kFirst && g_keep != wasKeep)) {
         if (g_mode == Mode::kOff) {
@@ -126,5 +228,99 @@ SunglareAction sunglareOnEyeDraw(char kind, uint32_t count,
 }
 
 uint32_t sunglareKeep() { return g_keep; }
+
+void sunglareBegin(ID3D11DeviceContext* ctx) {
+    g_engaged = false;
+    if (!g_steady || !ctx) return;
+    if (!g_haveCorners) {
+        captureCorners(ctx);
+        return;   // this draw goes stock; the capture needs a round trip
+    }
+
+    // The roll, measured from the shadowed camera rows and TOUCHING
+    // nothing: project world-up into the right/up plane; its in-plane
+    // angle from the up row is how far the head has rolled the frame.
+    uint32_t nf = 0;
+    const float* sh = billboardShadowFloats(&nf);
+    if (!sh || nf < 43) return;
+    const float* r0 = sh + 16;
+    const float* u0 = sh + 20;
+    const float* wu = sh + 40;
+    float rn[3], un[3], wn[3];
+    float lr = 0, lu = 0, lw = 0;
+    for (int i = 0; i < 3; ++i) {
+        lr += r0[i] * r0[i];
+        lu += u0[i] * u0[i];
+        lw += wu[i] * wu[i];
+    }
+    lr = sqrtf(lr); lu = sqrtf(lu); lw = sqrtf(lw);
+    if (lr < 1e-6f || lu < 1e-6f || lw < 1e-6f) return;
+    for (int i = 0; i < 3; ++i) {
+        rn[i] = r0[i] / lr;
+        un[i] = u0[i] / lu;
+        wn[i] = wu[i] / lw;
+    }
+    const float a = wn[0] * rn[0] + wn[1] * rn[1] + wn[2] * rn[2];
+    const float b = wn[0] * un[0] + wn[1] * un[1] + wn[2] * un[2];
+    const float n = sqrtf(a * a + b * b);
+    if (n < 0.05f) return;   // looking along world-up; no defined horizon
+    const float c = b / n;
+    const float s = a / n;
+
+    if (!g_ourVb) {
+        ID3D11Device* dev = nullptr;
+        ctx->GetDevice(&dev);
+        if (!dev) return;
+        D3D11_BUFFER_DESC bd{};
+        bd.ByteWidth = kCornerBytes;
+        bd.Usage = D3D11_USAGE_DYNAMIC;
+        bd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+        bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+        dev->CreateBuffer(&bd, nullptr, &g_ourVb);
+        dev->Release();
+        if (!g_ourVb) return;
+    }
+    D3D11_MAPPED_SUBRESOURCE m{};
+    if (FAILED(ctx->Map(g_ourVb, 0, D3D11_MAP_WRITE_DISCARD, 0, &m)) ||
+        !m.pData) {
+        return;
+    }
+    float* out = static_cast<float*>(m.pData);
+    for (uint32_t v = 0; v < kCornerFloats; v += 2) {
+        const float x = g_corners[v];
+        const float y = g_corners[v + 1];
+        out[v] = c * x - s * y;
+        out[v + 1] = s * x + c * y;
+    }
+    ctx->Unmap(g_ourVb, 0);
+
+    ctx->IAGetVertexBuffers(0, 1, &g_savedVb, &g_savedStride, &g_savedOffset);
+    UINT stride = 8, offset = 0;
+    ID3D11Buffer* ours = g_ourVb;
+    ctx->IASetVertexBuffers(0, 1, &ours, &stride, &offset);
+    g_engaged = true;
+
+    ++g_applied;
+    const uint64_t now = nowMs();
+    if (g_applied == 1 || now - g_lastNoteMs >= 2000) {
+        Log::get().note("sun glare steady: %llu counter-rotation(s) since "
+                        "last note, current angle %.1f deg.",
+                        static_cast<unsigned long long>(g_applied -
+                                                        g_appliedAtNote),
+                        atan2f(s, c) * 57.2958f);
+        g_lastNoteMs = now;
+        g_appliedAtNote = g_applied;
+    }
+}
+
+void sunglareEnd(ID3D11DeviceContext* ctx) {
+    if (!g_engaged || !ctx) return;
+    ctx->IASetVertexBuffers(0, 1, &g_savedVb, &g_savedStride, &g_savedOffset);
+    if (g_savedVb) {
+        g_savedVb->Release();
+        g_savedVb = nullptr;
+    }
+    g_engaged = false;
+}
 
 }  // namespace edvr

@@ -912,7 +912,7 @@ inline bool foreignContext(ID3D11DeviceContext* self) {
 // every element's identity.
 enum class DrawVerdict {
     kNone, kPanel, kSkip, kRemlok, kHolo, kWitchstar, kBillboard,
-    kGlareClamp
+    kGlareClamp, kGlareSteady
 };
 
 // kind, count and instances describe the draw for the census and the census
@@ -1105,17 +1105,18 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     if (cbPeekEnabled()) cbPeekOnEyeDraw(self, kind, count, instances);
 
     // The sun-glare element train: off skips it, first:K clamps it, and
-    // steady wraps whatever survives in the borrowed billboard
-    // substitution. Clamp and steady compose -- the clamp count rides
-    // glareClamp to the DrawInstanced thunk regardless of which verdict
-    // carries the draw there.
+    // steady wraps whatever survives in the corner counter-rotation. The
+    // billboard loan is measurement now -- its shadow supplies the roll,
+    // its buffer is never substituted for these draws. Clamp and steady
+    // compose: the clamp count rides glareClamp to the DrawInstanced
+    // thunk regardless of which verdict carries the draw there.
     if (sunglareWantsDraws()) {
         const SunglareAction a = sunglareOnEyeDraw(kind, count, instances);
         if (a == SunglareAction::kSkip) return DrawVerdict::kSkip;
         if (a != SunglareAction::kStock) {
             if (a == SunglareAction::kClamp) s->glareClamp = sunglareKeep();
             if (sunglareSteady() && billboardOnGlareDraw(count, instances)) {
-                return DrawVerdict::kBillboard;
+                return DrawVerdict::kGlareSteady;
             }
             if (s->glareClamp) return DrawVerdict::kGlareClamp;
         }
@@ -1529,7 +1530,9 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     if (v == DrawVerdict::kHolo) holoBegin(self);
     if (v == DrawVerdict::kWitchstar) witchstarBegin(self);
     if (v == DrawVerdict::kBillboard) billboardBegin(self);
+    if (v == DrawVerdict::kGlareSteady) sunglareBegin(self);
     draw();
+    if (v == DrawVerdict::kGlareSteady) sunglareEnd(self);
     if (v == DrawVerdict::kBillboard) billboardEnd(self);
     if (v == DrawVerdict::kWitchstar) witchstarEnd(self);
     if (v == DrawVerdict::kHolo) holoEnd(self);

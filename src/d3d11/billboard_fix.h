@@ -55,6 +55,13 @@ bool billboardOnEyeDraw(char kind, uint32_t count, uint32_t instances);
 void billboardGlareWatch(bool on);
 bool billboardOnGlareDraw(uint32_t count, uint32_t instances);
 
+// The shadowed write's floats, for a borrower that only MEASURES: the
+// glare steer reads the head's roll out of the camera rows and touches
+// nothing -- both replacement formulas displaced the elements per eye,
+// because the rows are the view matrix and position flows through them.
+// Null until a write has been captured for the current target.
+const float* billboardShadowFloats(uint32_t* count);
+
 // The buffer whose writes the Map/Unmap tee should capture, or null.
 // Compared by the Map hook, never dereferenced there.
 void* billboardTarget();

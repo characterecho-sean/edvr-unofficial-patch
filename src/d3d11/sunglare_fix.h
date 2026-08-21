@@ -2,6 +2,8 @@
 
 #include <cstdint>
 
+struct ID3D11DeviceContext;
+
 namespace edvr {
 
 class Config;
@@ -28,6 +30,12 @@ bool sunglareSteady();
 SunglareAction sunglareOnEyeDraw(char kind, uint32_t count,
                                  uint32_t instances);
 uint32_t sunglareKeep();
+
+// The steady wrap around a matched train draw: rotate the shared corner
+// stream by the head's roll (measured, never written, from the camera
+// rows), bind the rotated copy for this one draw, restore after.
+void sunglareBegin(ID3D11DeviceContext* ctx);
+void sunglareEnd(ID3D11DeviceContext* ctx);
 
 // The train's identity test, exported for the constant-buffer peek: the
 // steer needs to read the 208-byte CB of exactly these draws, and two
