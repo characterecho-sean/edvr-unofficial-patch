@@ -15,6 +15,7 @@
 #include "../common/vtable_hook.h"
 #include "binding_shadow.h"
 #include "device_hook.h"  // contextHookModeFor
+#include "sunglare_fix.h"  // sunglareLastSeenMs, the damper's sun scope
 
 namespace edvr {
 namespace {
@@ -246,6 +247,14 @@ constexpr float    kDampGainFloor = 0.5f;
 // flicker. Gameplay holds one identity for hours; a menu shuffle never
 // survives two seconds.
 constexpr uint64_t kDampSettleMs = 2000;
+
+// The sun scope: the damper acts only while the glare train has drawn
+// within this window. The breathing it exists for happens AT a star;
+// with no sun around, stock adaptation is the correct behaviour, and
+// menus never see the damper at all -- which retires the whole family
+// of pass-instance ambiguities the menu kept teaching, one flicker at
+// a time.
+constexpr uint64_t kDampSunWindowMs = 5000;
 
 // Frames to wait before reporting that detection found nothing. Long enough to
 // cover menus and loading, where the pass legitimately does not run.
@@ -537,6 +546,17 @@ void exposurePeekStrip(ID3D11DeviceContext* ctx, char* line, int* at,
 void exposureDamp(ID3D11DeviceContext* ctx,
                   ID3D11UnorderedAccessView* firstEyeStrip) {
     State* s = g_state;
+
+    // The sun scope, checked first: no glare train in the last few
+    // seconds means no sun worth holding for, and the damper does not
+    // touch anything. The pending readback is dropped rather than kept
+    // -- resuming later re-settles from scratch.
+    const uint64_t seen = sunglareLastSeenMs();
+    if (seen == 0 || nowMs() - seen > kDampSunWindowMs) {
+        s->dampPrevValid = false;
+        s->dampLastStrip = nullptr;
+        return;
+    }
 
     ID3D11UnorderedAccessView* view =
         static_cast<ID3D11UnorderedAccessView*>(bindingGet(uavSlot(1)));
@@ -1026,6 +1046,8 @@ void toggleExposureFix() {
 }
 
 bool exposureFixEnabled() { return g_state && g_state->enabled; }
+
+bool exposureDampingActive() { return g_state && g_state->dampK > 0.0f; }
 
 void installExposureFix(ID3D11Device* device, HookMode mode) {
     if (!device || g_state) return;

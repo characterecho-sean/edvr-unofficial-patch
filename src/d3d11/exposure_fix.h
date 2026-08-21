@@ -62,6 +62,11 @@ void exposureFixReclaimHooks(bool sceneRendered);
 void toggleExposureFix();
 bool exposureFixEnabled();
 
+// Whether the damper is configured on -- sunglare's matcher keeps running
+// while it is, because the train's last-seen stamp is what scopes the
+// damper to the sun.
+bool exposureDampingActive();
+
 void shutdownExposureFix();
 
 }  // namespace edvr

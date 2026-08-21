@@ -12,6 +12,7 @@
 #include "../common/timing.h"
 #include "billboard_fix.h"
 #include "binding_shadow.h"
+#include "exposure_fix.h"  // exposureDampingActive
 
 namespace edvr {
 namespace {
@@ -34,6 +35,7 @@ Mode     g_mode = Mode::kStock;
 uint32_t g_keep = 0;
 bool     g_steady = false;
 int      g_steadyMode = 0;   // 0 off, 1 counter-rotate, 2 fixed-30 test
+uint64_t g_lastSeenMs = 0;   // when the train last drew
 float    g_theta = 0;        // low-passed counter-rotation angle
 bool     g_thetaValid = false;
 uint64_t g_skipped = 0;
@@ -260,9 +262,16 @@ void sunglareConfigure(Config& cfg) {
     }
 }
 
-bool sunglareWantsDraws() { return g_mode != Mode::kStock || g_steady; }
+// The damper rides along: while it is configured on, the train matcher
+// must keep running even with the glare fix itself stock, because the
+// last-seen stamp is what scopes the damper to the sun.
+bool sunglareWantsDraws() {
+    return g_mode != Mode::kStock || g_steady || exposureDampingActive();
+}
 
 bool sunglareSteady() { return g_steady; }
+
+uint64_t sunglareLastSeenMs() { return g_lastSeenMs; }
 
 SunglareAction sunglareOnEyeDraw(char kind, uint32_t count,
                                  uint32_t instances) {
@@ -270,6 +279,7 @@ SunglareAction sunglareOnEyeDraw(char kind, uint32_t count,
         !sunglareIsGlareTrain(kind, count, instances)) {
         return SunglareAction::kStock;
     }
+    g_lastSeenMs = nowMs();
     if (g_mode == Mode::kOff) {
         ++g_skipped;
         return SunglareAction::kSkip;

@@ -42,4 +42,11 @@ void sunglareEnd(ID3D11DeviceContext* ctx);
 // matchers for one family is how the witchstar era learned wrong things.
 bool sunglareIsGlareTrain(char kind, uint32_t count, uint32_t instances);
 
+// When the train last drew, in nowMs() time; 0 = never this session.
+// The exposure damper scopes itself to this: adaptation is held only
+// while a sun's glare is actually around -- which is the situation the
+// damper was built for -- and everywhere else (menus, stations, on
+// foot) the game runs stock without needing gates at all.
+uint64_t sunglareLastSeenMs();
+
 }  // namespace edvr
