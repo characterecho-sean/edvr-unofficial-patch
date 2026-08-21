@@ -35,6 +35,9 @@ Mode     g_mode = Mode::kStock;
 uint32_t g_keep = 0;
 bool     g_steady = false;
 int      g_steadyMode = 0;   // 0 off, 1 counter-rotate, 2 fixed-30 test
+float    g_recenter = 0;     // fix.sun_glare_recenter: corner-translation
+                             // gain that pushes the elements back onto
+                             // the star against the flare placement slide
 uint64_t g_lastSeenMs = 0;   // when the train last drew
 float    g_theta = 0;        // low-passed counter-rotation angle
 bool     g_thetaValid = false;
@@ -245,6 +248,19 @@ void sunglareConfigure(Config& cfg) {
         }
         if (!g_steady) releaseSteadyObjects();
     }
+    const float wasRecenter = g_recenter;
+    float rc = cfg.getFloat("fix.sun_glare_recenter", 0.0f);
+    if (rc < -4.0f) rc = -4.0f;
+    if (rc > 4.0f) rc = 4.0f;
+    g_recenter = rc;
+    if (g_recenter != wasRecenter) {
+        Log::get().note("sun glare recenter: gain %.2f -- the kept glare "
+                        "elements are pushed back toward the star's true "
+                        "direction against the flare placement slide. Tune "
+                        "live at a bright star, sun held well off-centre: "
+                        "the right gain glues the smudge to the star; the "
+                        "wrong sign doubles the slide.", g_recenter);
+    }
     if (g_mode != was || (g_mode == Mode::kFirst && g_keep != wasKeep)) {
         if (g_mode == Mode::kOff) {
             Log::get().note("sun glare: OFF -- the screen-space glare "
@@ -418,14 +434,27 @@ void sunglareBegin(ID3D11DeviceContext* ctx) {
     // first pair rotated the sampling inside a head-locked quad and
     // dragged neighbouring atlas art into view; the geometry lives in the
     // second pair, already origin-centred, so the rotation is a plain
-    // origin spin and the texels ride untouched.
+    // origin spin and the texels ride untouched. The recenter term rides
+    // the same pair: a uniform translation of all six corners shifts the
+    // whole quad, per eye, back toward the star's true direction against
+    // the flare placement slide -- gain configured, because the slide
+    // factor is the game's secret and the corner-to-screen scale is the
+    // instance's.
+    float tx = 0, ty = 0;
+    if (g_recenter != 0.0f && sunAnchored) {
+        const float sp[3] = {sh[19], sh[23], sh[31]};
+        if (fabsf(sp[2]) > 1e-3f) {
+            tx = g_recenter * (sp[0] / fabsf(sp[2]));
+            ty = g_recenter * (sp[1] / fabsf(sp[2]));
+        }
+    }
     uint16_t* out = static_cast<uint16_t*>(m.pData);
     memcpy(out, g_corners, kCornerBytes);
     for (uint32_t v = 0; v < kCornerVerts; ++v) {
         const float x = halfToFloat(g_corners[v * 4 + 2]);
         const float y = halfToFloat(g_corners[v * 4 + 3]);
-        out[v * 4 + 2] = floatToHalf(c * x - s * y);
-        out[v * 4 + 3] = floatToHalf(s * x + c * y);
+        out[v * 4 + 2] = floatToHalf(c * x - s * y + tx);
+        out[v * 4 + 3] = floatToHalf(s * x + c * y + ty);
     }
     ctx->Unmap(g_ourVb, 0);
 
