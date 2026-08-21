@@ -331,17 +331,19 @@ void sunglareBegin(ID3D11DeviceContext* ctx) {
     if (lwv < 1e-6f) return;
     for (int i = 0; i < 3; ++i) wuv[i] /= lwv;
 
-    // APPLIED angle: the centre formula, the one the field verified.
-    // The first sun-anchored candidate ([39/43/47]) was convicted by its
-    // own telemetry -- "sun dist" grew linearly forever (an accumulator,
-    // not a position) and the angle it implied twisted the corona 55
-    // degrees at a centred sun, which un-fixed roll. The second
-    // candidate ([19/23/31]) is now LOGGED, never applied, until the
-    // field shows it behaving like a position: small off-axis angles
-    // near centre, stable while parked.
-    const float a = wuv[0];
-    const float b = wuv[1];
-    float candA = 0, candB = 0, candDist = 0;
+    // APPLIED angle: world-up projected perpendicular to the SUN'S view
+    // direction, from the position triplet [19/23/31] -- promoted on
+    // field evidence after its predecessor ([39/43/47]) turned out to be
+    // an accumulator: distance rock-stable while parked, angle equal to
+    // the centre formula with the sun centred (delta ~1.5 deg), and
+    // stable within ~4 deg across a 30-degree yaw that twisted the
+    // centre formula by 33. The centre formula remains the fallback for
+    // degenerate reads, and the telemetry prints both so any future
+    // divergence names itself.
+    float a = wuv[0];
+    float b = wuv[1];
+    bool sunAnchored = false;
+    float candDist = 0;
     {
         const float sp[3] = {sh[19], sh[23], sh[31]};
         candDist = sqrtf(sp[0] * sp[0] + sp[1] * sp[1] + sp[2] * sp[2]);
@@ -350,8 +352,13 @@ void sunglareBegin(ID3D11DeviceContext* ctx) {
                                 sp[2] / candDist};
             const float wd =
                 wuv[0] * d[0] + wuv[1] * d[1] + wuv[2] * d[2];
-            candA = wuv[0] - d[0] * wd;
-            candB = wuv[1] - d[1] * wd;
+            const float px = wuv[0] - d[0] * wd;
+            const float py = wuv[1] - d[1] * wd;
+            if (px * px + py * py > 0.0025f) {
+                a = px;
+                b = py;
+                sunAnchored = true;
+            }
         }
     }
     const float n = sqrtf(a * a + b * b);
@@ -432,18 +439,13 @@ void sunglareBegin(ID3D11DeviceContext* ctx) {
     const uint64_t now = nowMs();
     if (g_applied == 1 || now - g_lastNoteMs >= 2000) {
         Log::get().note("sun glare steady: %llu counter-rotation(s) since "
-                        "last note, angle %.1f deg; candidate [19/23/31] "
-                        "would say %.1f at dist %.3g (logged only, never "
-                        "applied -- a real sun position reads small angle "
-                        "deltas near centre and a stable distance parked).",
+                        "last note, angle %.1f deg (%s, sun dist %.3g; "
+                        "centre formula would say %.1f).",
                         static_cast<unsigned long long>(g_applied -
                                                         g_appliedAtNote),
                         atan2f(s, c) * 57.2958f,
-                        candDist > 1e-3f &&
-                                candA * candA + candB * candB > 0.0025f
-                            ? -atan2f(candA, candB) * 57.2958f
-                            : 0.0f,
-                        candDist);
+                        sunAnchored ? "sun-anchored" : "centre fallback",
+                        candDist, -atan2f(wuv[0], wuv[1]) * 57.2958f);
         g_lastNoteMs = now;
         g_appliedAtNote = g_applied;
     }
