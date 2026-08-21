@@ -169,6 +169,9 @@ struct State {
     bool           dampPrevValid = false;
     bool           dampHaveMean = false;
     float          dampMean[6] = {};      // per-texel slow means
+    uint64_t       dampSeedMs = 0;        // when the means were (re)seeded
+    uint64_t       dampDevSinceMs = 0;    // 0 = gain currently inside band
+    uint64_t       dampSnaps = 0;
     uint64_t       dampStepMs = 0;        // wall clock of the last step --
                                           // the blend is dt/tau, so the
                                           // mean's speed survives
@@ -204,6 +207,21 @@ constexpr uint32_t kStripW = 6;
 constexpr uint32_t kStripFmtA = 39;  // R32_TYPELESS
 constexpr uint32_t kStripFmtB = 41;  // R32_FLOAT
 constexpr uint32_t kDampRawTexel = 5;
+constexpr uint32_t kDampGainTexel = 2;
+
+// The transient-versus-sustained discriminator. A head pose swings the
+// gain briefly and returns; a real scene change -- the menu hangar on
+// launch, a station slot, a jump -- moves it far and KEEPS it there. A
+// gain more than a quarter away from the mean continuously for a second
+// and a half snaps the means to reality; the launch that taught this
+// held the hangar blown out for most of a minute, because the mean had
+// seeded from the game's arbitrary pre-adapted first frame and tau is
+// deliberately glacial. A fast-blend window right after seeding covers
+// the same first seconds.
+constexpr float    kSnapDeviation = 0.25f;
+constexpr uint64_t kSnapAfterMs = 1500;
+constexpr uint64_t kFastSeedMs = 3000;
+constexpr float    kFastSeedBoost = 10.0f;
 
 // Frames to wait before reporting that detection found nothing. Long enough to
 // cover menus and loading, where the pass legitimately does not run.
@@ -568,14 +586,45 @@ void exposureDamp(ID3D11DeviceContext* ctx,
                     memcpy(s->dampMean, raw, sizeof(raw));
                     s->dampHaveMean = true;
                     s->dampStepMs = now;
+                    s->dampSeedMs = now;
+                    s->dampDevSinceMs = 0;
+                }
+                // The scene-change snap: gain far from the mean and
+                // STAYING far means the scene itself moved, and holding
+                // the old mean would hold the wrong brightness -- the
+                // launch hangar stayed blown out until this existed.
+                const float dev =
+                    fabsf(raw[kDampGainTexel] - s->dampMean[kDampGainTexel]);
+                const float ref = fabsf(s->dampMean[kDampGainTexel]);
+                if (dev > kSnapDeviation * (ref > 1.0f ? ref : 1.0f)) {
+                    if (s->dampDevSinceMs == 0) s->dampDevSinceMs = now;
+                    if (now - s->dampDevSinceMs >= kSnapAfterMs) {
+                        memcpy(s->dampMean, raw, sizeof(raw));
+                        s->dampSeedMs = now;
+                        s->dampDevSinceMs = 0;
+                        ++s->dampSnaps;
+                        Log::get().note("exposure damping: scene change -- "
+                                        "means snapped to the new scene "
+                                        "(gain %.1f, snap %llu).",
+                                        raw[kDampGainTexel],
+                                        static_cast<unsigned long long>(
+                                            s->dampSnaps));
+                    }
+                } else {
+                    s->dampDevSinceMs = 0;
                 }
                 // The mean's blend is wall-clock over tau -- a
                 // few-second constant matched a held head pose and the
                 // mean chased every pitch, which was the first field
-                // trial's leak.
+                // trial's leak. Right after a seed or a snap the blend
+                // runs boosted, so the first seconds of a new scene
+                // settle at stock-like speed.
                 float alpha =
                     static_cast<float>(now - s->dampStepMs) / 1000.0f /
                     s->dampTau;
+                if (now - s->dampSeedMs < kFastSeedMs) {
+                    alpha *= kFastSeedBoost;
+                }
                 if (alpha > 0.2f) alpha = 0.2f;
                 s->dampStepMs = now;
 
