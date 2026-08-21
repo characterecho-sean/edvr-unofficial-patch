@@ -454,7 +454,6 @@ void exposureDamp(ID3D11DeviceContext* ctx,
                 if (resB && resB != resA)
                     ctx->UpdateSubresource(resB, 0, nullptr, out, 0, 0);
                 ++s->dampWrites;
-                const uint64_t now = nowMs();
                 if (s->dampWrites == 1 ||
                     now - s->dampLastNoteMs >= 5000) {
                     Log::get().note(
