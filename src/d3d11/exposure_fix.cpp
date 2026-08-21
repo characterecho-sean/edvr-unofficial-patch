@@ -175,8 +175,10 @@ struct State {
     void*          dampLastStrip = nullptr;  // identity only, never
                                              // dereferenced: the strip
                                              // must be the SAME texture
-                                             // object two frames running
-                                             // before the damper acts
+                                             // object, settled for
+                                             // kDampSettleMs, before the
+                                             // damper acts
+    uint64_t       dampStableSinceMs = 0;
     uint64_t       dampStepMs = 0;        // wall clock of the last step --
                                           // the blend is dt/tau, so the
                                           // mean's speed survives
@@ -236,6 +238,14 @@ constexpr float    kFastSeedBoost = 10.0f;
 // reading at or below it is some other instance, and the damper stands
 // aside rather than propagate it.
 constexpr float    kDampGainFloor = 0.5f;
+
+// How long the strip's identity must hold before the damper's FIRST
+// write. Two frames was not enough: the Q3 menu's pass sequence is
+// QUASI-stable -- the same strip for a handful of frames, then a
+// shuffle -- so intermittent writes slipped through as a left-eye
+// flicker. Gameplay holds one identity for hours; a menu shuffle never
+// survives two seconds.
+constexpr uint64_t kDampSettleMs = 2000;
 
 // Frames to wait before reporting that detection found nothing. Long enough to
 // cover menus and loading, where the pass legitimately does not run.
@@ -550,13 +560,21 @@ void exposureDamp(ID3D11DeviceContext* ctx,
     }
 
     // Identity gate: act only when this frame's strip is the SAME texture
-    // object as last frame's. Gameplay is identity-stable and settles in
-    // one frame; a menu alternating several same-shaped instances keeps
-    // failing this test and the damper stays stood down for as long as
-    // the alternation lasts. The pending readback dies with the change --
-    // it was copied from whatever the previous instance was.
+    // object it has been for kDampSettleMs. Gameplay holds one identity
+    // for hours and settles once; a menu shuffling several same-shaped
+    // instances -- even quasi-stably, which is what got past the
+    // two-frame version of this gate as a left-eye flicker -- never
+    // survives the settle. The pending readback dies with any change; it
+    // was copied from whatever the previous instance was.
+    const uint64_t nowGate = nowMs();
     if (resB != s->dampLastStrip) {
         s->dampLastStrip = resB;
+        s->dampStableSinceMs = nowGate;
+        s->dampPrevValid = false;
+        resB->Release();
+        return;
+    }
+    if (nowGate - s->dampStableSinceMs < kDampSettleMs) {
         s->dampPrevValid = false;
         resB->Release();
         return;
