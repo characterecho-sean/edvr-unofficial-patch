@@ -234,9 +234,17 @@ struct State {
         // "N:3@eye@160x560" requires slot 0 eye-sized AND slot 1 exactly
         // 160x560. The chain exists because the frame's tail is full of
         // fullscreen quads whose slot 0 all looks the same -- what tells a
-        // glare pass from the compositor it hides beside is a LATER slot.
-        // w == 0 and eye == false leaves a slot unfiltered.
-        struct SrvFilter { uint32_t w; uint32_t h; bool eye; };
+        // glare pass from the compositor it hides beside is a LATER slot,
+        // and sometimes the tell is that a slot is EMPTY: "@none" requires
+        // nothing bound there ("N:3@eye@eye@none" is the two-input pass,
+        // where the compositor carries a third), and "@any" accepts
+        // whatever is there, holding the position for a later term.
+        struct SrvFilter {
+            enum Mode : uint8_t { kOff, kSize, kEye, kNone, kAny };
+            Mode mode;
+            uint32_t w;
+            uint32_t h;
+        };
         SrvFilter srv[4];
     };
     SkipSpec  censusSkip[8] = {};
@@ -1014,16 +1022,21 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
             bool srvOk = true;
             for (int f = 0; f < 4 && srvOk; ++f) {
                 const State::SkipSpec::SrvFilter& sf = s->censusSkip[i].srv[f];
-                if (!sf.w && !sf.eye) continue;
+                typedef State::SkipSpec::SrvFilter SF;
+                if (sf.mode == SF::kOff || sf.mode == SF::kAny) continue;
                 const BindSlot slot = static_cast<BindSlot>(
                     static_cast<uint32_t>(BindSlot::PsSrv0) + f);
+                void* bound = bindingGet(slot);
+                if (sf.mode == SF::kNone) {
+                    srvOk = bound == nullptr;
+                    continue;
+                }
                 ResourceInfo info;
-                if (!bindingResolve(bindingGet(slot), &info) ||
-                    !info.isTexture2D) {
+                if (!bindingResolve(bound, &info) || !info.isTexture2D) {
                     srvOk = false;
                     break;
                 }
-                if (sf.eye) {
+                if (sf.mode == SF::kEye) {
                     uint32_t eyeW = 0, eyeH = 0;
                     srvOk = eyeTextureSize(&eyeW, &eyeH) && info.a == eyeW &&
                             info.b == eyeH;
@@ -1696,10 +1709,19 @@ void readCensusSkip(Config& cfg, State* s) {
         State::SkipSpec::SrvFilter srv[4] = {};
         bool srvBad = false;
         for (int f = 0; f < 4 && *end == '@'; ++f) {
-            if ((end[1] == 'e' || end[1] == 'E') &&
-                (end[2] == 'y' || end[2] == 'Y') &&
-                (end[3] == 'e' || end[3] == 'E')) {
-                srv[f].eye = true;
+            typedef State::SkipSpec::SrvFilter SF;
+            if (_strnicmp(end + 1, "eye", 3) == 0) {
+                srv[f].mode = SF::kEye;
+                end += 4;
+                continue;
+            }
+            if (_strnicmp(end + 1, "none", 4) == 0) {
+                srv[f].mode = SF::kNone;
+                end += 5;
+                continue;
+            }
+            if (_strnicmp(end + 1, "any", 3) == 0) {
+                srv[f].mode = SF::kAny;
                 end += 4;
                 continue;
             }
@@ -1714,14 +1736,15 @@ void readCensusSkip(Config& cfg, State* s) {
                 srvBad = true;
                 break;
             }
+            srv[f].mode = SF::kSize;
             srv[f].w = static_cast<uint32_t>(sw);
             srv[f].h = static_cast<uint32_t>(sh);
         }
         if (srvBad || *end == '@') {
             Log::get().note("census skip: \"%s\" has an @ filter chain that "
-                            "is not up to four @WIDTHxHEIGHT or @eye terms "
-                            "(slots 0-3 in order); the whole spec is refused "
-                            "rather than half-applied.", p);
+                            "is not up to four @WIDTHxHEIGHT, @eye, @none or "
+                            "@any terms (slots 0-3 in order); the whole spec "
+                            "is refused rather than half-applied.", p);
             s->censusSkipCount = 0;
             break;
         }
@@ -1749,10 +1772,17 @@ void readCensusSkip(Config& cfg, State* s) {
             }
             for (int f = 0; f < 4 && at < 120; ++f) {
                 const State::SkipSpec::SrvFilter& sf = s->censusSkip[i].srv[f];
-                if (sf.eye) {
+                typedef State::SkipSpec::SrvFilter SF;
+                if (sf.mode == SF::kEye) {
                     at += _snprintf_s(list + at, sizeof(list) - at, _TRUNCATE,
                                       "@eye");
-                } else if (sf.w) {
+                } else if (sf.mode == SF::kNone) {
+                    at += _snprintf_s(list + at, sizeof(list) - at, _TRUNCATE,
+                                      "@none");
+                } else if (sf.mode == SF::kAny) {
+                    at += _snprintf_s(list + at, sizeof(list) - at, _TRUNCATE,
+                                      "@any");
+                } else if (sf.mode == SF::kSize) {
                     at += _snprintf_s(list + at, sizeof(list) - at, _TRUNCATE,
                                       "@%ux%u", sf.w, sf.h);
                 }
