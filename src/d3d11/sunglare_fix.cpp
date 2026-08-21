@@ -33,6 +33,7 @@ enum class Mode { kStock, kOff, kFirst };
 Mode     g_mode = Mode::kStock;
 uint32_t g_keep = 0;
 bool     g_steady = false;
+int      g_steadyMode = 0;   // 0 off, 1 counter-rotate, 2 fixed-30 test
 uint64_t g_skipped = 0;
 uint64_t g_clamped = 0;
 
@@ -216,17 +217,27 @@ void sunglareConfigure(Config& cfg) {
                         "staying stock.", v.c_str());
         g_mode = Mode::kStock;
     }
-    const bool wasSteady = g_steady;
-    g_steady = cfg.getBool("fix.sun_glare_steady", false);
+    const int wasSteady = g_steadyMode;
+    g_steadyMode = cfg.getIntInRange("fix.sun_glare_steady", 0, 0, 2);
+    g_steady = g_steadyMode != 0;
     billboardGlareWatch(g_steady);
-    if (g_steady != wasSteady) {
-        Log::get().note("sun glare steady: %s -- the corner stream is %s "
-                        "per draw by the head's roll, measured from the "
-                        "camera rows the train's own constants carry. The "
-                        "stamp counter-rotates about its centre; position, "
-                        "scale and the constants themselves are untouched.",
-                        g_steady ? "ON" : "off",
-                        g_steady ? "counter-rotated" : "no longer rotated");
+    if (g_steadyMode != wasSteady) {
+        if (g_steadyMode == 2) {
+            Log::get().note("sun glare steady: FIXED-ANGLE DIAGNOSTIC -- "
+                            "the corner directions are rotated a constant "
+                            "30 degrees. Elements visibly tilted proves the "
+                            "shader consumes the rotation; elements "
+                            "unchanged proves it reconstructs the corners "
+                            "and the actuator must move to the uv pair.");
+        } else {
+            Log::get().note("sun glare steady: %s -- the corner stream is "
+                            "%s per draw by the head's roll, measured from "
+                            "the camera rows the train's own constants "
+                            "carry.",
+                            g_steady ? "ON" : "off",
+                            g_steady ? "counter-rotated"
+                                     : "no longer rotated");
+        }
         if (!g_steady) releaseSteadyObjects();
     }
     if (g_mode != was || (g_mode == Mode::kFirst && g_keep != wasKeep)) {
@@ -306,8 +317,12 @@ void sunglareBegin(ID3D11DeviceContext* ctx) {
     const float b = wn[0] * un[0] + wn[1] * un[1] + wn[2] * un[2];
     const float n = sqrtf(a * a + b * b);
     if (n < 0.05f) return;   // looking along world-up; no defined horizon
-    const float c = b / n;
-    const float s = a / n;
+    float c = b / n;
+    float s = a / n;
+    if (g_steadyMode == 2) {   // the fixed-angle diagnostic
+        c = 0.86603f;
+        s = 0.5f;
+    }
 
     if (!g_ourVb) {
         ID3D11Device* dev = nullptr;
