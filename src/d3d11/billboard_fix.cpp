@@ -57,6 +57,8 @@ ID3D11Buffer* g_ourCb = nullptr;
 uint32_t      g_ourCbBytes = 0;
 
 bool                g_engaged = false;
+bool                g_glareWatch = false;   // sun_glare_steady borrows the
+                                            // machinery; see below
 uint64_t            g_applied = 0;
 uint64_t            g_rejected = 0;
 uint64_t            g_retargets = 0;
@@ -128,6 +130,46 @@ void billboardConfigure(Config& cfg) {
 
 bool billboardWantsDraws() { return g_mode != Mode::kStock; }
 
+// The glare-steady loan: sun_glare_steady borrows this module's whole
+// shadow-and-substitute machinery -- the glare train writes the SAME
+// 208-byte camera-standard layout the family matcher was built for, and
+// the sweep of 2026-08-21 showed its rows pass shapeOk exactly. Only the
+// MATCHING differs, and that already happened in sunglare_fix; this entry
+// point is the family path minus the family test.
+void billboardGlareWatch(bool on) {
+    if (g_glareWatch != on) {
+        g_glareWatch = on;
+        if (!on && g_mode == Mode::kStock) {
+            g_target = nullptr;
+            g_shadowValid = false;
+        }
+    }
+}
+
+bool billboardOnGlareDraw(uint32_t count, uint32_t /*instances*/) {
+    if (!g_glareWatch) return false;
+    void* cb = bindingGet(BindSlot::VsCb0);
+    if (!cb) return false;
+    if (cb != g_target) {
+        g_target = cb;
+        g_shadowValid = false;
+        ++g_retargets;
+        if (!g_learnNoted) {
+            g_learnNoted = true;
+            Log::get().note("billboard: watching the glare train's constants "
+                            "(first matched draw n=%u).", count);
+        }
+        return false;   // nothing captured for this buffer yet
+    }
+    if (!g_shadowValid) return false;
+    const float* f = reinterpret_cast<const float*>(g_shadow);
+    if (!shapeOk(f, g_shadowBytes / 4)) {
+        ++g_rejected;
+        return false;
+    }
+    return true;
+}
+
 bool billboardOnEyeDraw(char kind, uint32_t count, uint32_t /*instances*/) {
     if (g_mode == Mode::kStock || kind != kKind || count < kMinIndices) {
         return false;
@@ -175,11 +217,12 @@ bool billboardOnEyeDraw(char kind, uint32_t count, uint32_t /*instances*/) {
 }
 
 void* billboardTarget() {
-    return g_mode != Mode::kStock ? g_target : nullptr;
+    return g_mode != Mode::kStock || g_glareWatch ? g_target : nullptr;
 }
 
 void billboardCapture(const void* data, uint32_t bytes) {
-    if (g_mode == Mode::kStock || !data || bytes < (kMinFloats + 1) * 4) {
+    if ((g_mode == Mode::kStock && !g_glareWatch) || !data ||
+        bytes < (kMinFloats + 1) * 4) {
         g_shadowValid = false;
         return;
     }

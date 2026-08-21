@@ -6,6 +6,7 @@
 
 #include "../common/config.h"
 #include "../common/log.h"
+#include "billboard_fix.h"
 #include "binding_shadow.h"
 
 namespace edvr {
@@ -27,6 +28,7 @@ enum class Mode { kStock, kOff, kFirst };
 
 Mode     g_mode = Mode::kStock;
 uint32_t g_keep = 0;
+bool     g_steady = false;
 uint64_t g_skipped = 0;
 uint64_t g_clamped = 0;
 
@@ -72,6 +74,17 @@ void sunglareConfigure(Config& cfg) {
                         "staying stock.", v.c_str());
         g_mode = Mode::kStock;
     }
+    const bool wasSteady = g_steady;
+    g_steady = cfg.getBool("fix.sun_glare_steady", false);
+    billboardGlareWatch(g_steady);
+    if (g_steady != wasSteady) {
+        Log::get().note("sun glare steady: %s -- the train's drawn basis is "
+                        "%s per write from the world rows its own constants "
+                        "carry. Orientation stops following the head; scale, "
+                        "position and everything else stay the game's.",
+                        g_steady ? "ON" : "off",
+                        g_steady ? "rebuilt" : "no longer rebuilt");
+    }
     if (g_mode != was || (g_mode == Mode::kFirst && g_keep != wasKeep)) {
         if (g_mode == Mode::kOff) {
             Log::get().note("sun glare: OFF -- the screen-space glare "
@@ -89,11 +102,13 @@ void sunglareConfigure(Config& cfg) {
     }
 }
 
-bool sunglareWantsDraws() { return g_mode != Mode::kStock; }
+bool sunglareWantsDraws() { return g_mode != Mode::kStock || g_steady; }
+
+bool sunglareSteady() { return g_steady; }
 
 SunglareAction sunglareOnEyeDraw(char kind, uint32_t count,
                                  uint32_t instances) {
-    if (g_mode == Mode::kStock ||
+    if (!sunglareWantsDraws() ||
         !sunglareIsGlareTrain(kind, count, instances)) {
         return SunglareAction::kStock;
     }
@@ -101,9 +116,13 @@ SunglareAction sunglareOnEyeDraw(char kind, uint32_t count,
         ++g_skipped;
         return SunglareAction::kSkip;
     }
-    if (instances <= g_keep) return SunglareAction::kStock;
-    ++g_clamped;
-    return SunglareAction::kClamp;
+    if (g_mode == Mode::kFirst && instances > g_keep) {
+        ++g_clamped;
+        return SunglareAction::kClamp;
+    }
+    // Matched, not skipped, not clamped -- kMatch tells the caller a train
+    // draw is happening, which is all the steady path needs to know.
+    return SunglareAction::kMatch;
 }
 
 uint32_t sunglareKeep() { return g_keep; }

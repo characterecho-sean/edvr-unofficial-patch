@@ -47,6 +47,14 @@ bool billboardWantsDraws();
 // then wraps the draw in billboardBegin/End.
 bool billboardOnEyeDraw(char kind, uint32_t count, uint32_t instances);
 
+// The glare-steady loan: sun_glare_steady borrows this module's shadow
+// and substitution wholesale -- the glare train writes the same 208-byte
+// camera-standard layout. The matching already happened in sunglare_fix;
+// this is the family path minus the family test. billboardGlareWatch
+// arms the tee while the borrower is configured on.
+void billboardGlareWatch(bool on);
+bool billboardOnGlareDraw(uint32_t count, uint32_t instances);
+
 // The buffer whose writes the Map/Unmap tee should capture, or null.
 // Compared by the Map hook, never dereferenced there.
 void* billboardTarget();

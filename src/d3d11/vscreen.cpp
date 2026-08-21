@@ -276,6 +276,10 @@ struct State {
     struct OffSkip { uint32_t w; uint32_t h; };
     OffSkip   censusSkipOff[4] = {};
     uint32_t  censusSkipOffCount = 0;
+    // Set per glare-train draw by beginPanelOverride, consumed by the
+    // DrawInstanced thunk in the same call stack: the first:K clamp,
+    // composable with the steady verdict. 0 = no clamp this draw.
+    uint32_t  glareClamp = 0;
     uint64_t  censusSkipped = 0;
     uint64_t  censusSkippedReported = 0;
     char      censusSkipSpec[144] = {};  // raw spec+range+offscreen, to log
@@ -919,6 +923,12 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     // A draw on somebody else's context is not our panel and not an eye draw.
     // This one early return covers all four draw thunks, and it covers them
     // where the counting actually happens rather than four times over.
+    // The glare clamp is per-draw state consumed by the DrawInstanced thunk
+    // after this function returns; reset FIRST -- before even the foreign-
+    // context return -- because every early return would otherwise leave the
+    // previous train draw's clamp armed for whatever instanced draw comes
+    // next.
+    s->glareClamp = 0;
     if (foreignContext(self)) return DrawVerdict::kNone;
     // Counting eye draws is not part of the panel distance fix, even though it
     // happens here.
@@ -1088,17 +1098,28 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         return DrawVerdict::kWitchstar;
     }
 
-    // The sun-glare element train: off skips it, first:K clamps it.
+    // The constant-buffer peek BEFORE the glare verdict, the census's rule
+    // again: observation must see the draws an intervention is about to
+    // eat, or the steer's decode instrument starves the moment the fix it
+    // serves is switched on.
+    if (cbPeekEnabled()) cbPeekOnEyeDraw(self, kind, count, instances);
+
+    // The sun-glare element train: off skips it, first:K clamps it, and
+    // steady wraps whatever survives in the borrowed billboard
+    // substitution. Clamp and steady compose -- the clamp count rides
+    // glareClamp to the DrawInstanced thunk regardless of which verdict
+    // carries the draw there.
     if (sunglareWantsDraws()) {
         const SunglareAction a = sunglareOnEyeDraw(kind, count, instances);
         if (a == SunglareAction::kSkip) return DrawVerdict::kSkip;
-        if (a == SunglareAction::kClamp) return DrawVerdict::kGlareClamp;
+        if (a != SunglareAction::kStock) {
+            if (a == SunglareAction::kClamp) s->glareClamp = sunglareKeep();
+            if (sunglareSteady() && billboardOnGlareDraw(count, instances)) {
+                return DrawVerdict::kBillboard;
+            }
+            if (s->glareClamp) return DrawVerdict::kGlareClamp;
+        }
     }
-
-    // The constant-buffer peek: observation only, learning which buffer the
-    // sprite family's vertex stage reads so the Map/Unmap tee below can dump
-    // its contents.
-    if (cbPeekEnabled()) cbPeekOnEyeDraw(self, kind, count, instances);
 
     // The billboard orientation fix: a matched sprite draw whose captured
     // constants passed the shape check gets a world-stable basis.
@@ -1534,12 +1555,13 @@ void STDMETHODCALLTYPE hookedDrawInstanced(ID3D11DeviceContext* self, UINT perIn
                                            UINT instances, UINT startVertex,
                                            UINT startInstance) {
     const DrawVerdict v = beginPanelOverride(self, 'N', perInstance, instances);
-    // kGlareClamp only ever comes back for this thunk -- the glare train is
-    // DrawInstanced -- so the clamp lives here rather than in the shared
-    // tail, where three other thunks could never receive it.
-    const UINT drawn = v == DrawVerdict::kGlareClamp
-                           ? (instances < sunglareKeep() ? instances
-                                                         : sunglareKeep())
+    // The glare clamp only ever applies in this thunk -- the train is
+    // DrawInstanced -- so it lives here rather than in the shared tail,
+    // where three other thunks could never receive it. glareClamp rather
+    // than the verdict, because clamp composes with the steady
+    // substitution, whose draws arrive under kBillboard.
+    const UINT drawn = g_state->glareClamp && g_state->glareClamp < instances
+                           ? g_state->glareClamp
                            : instances;
     forwardWithVerdict(self, v, [&] {
         g_state->realDrawInstanced(self, perInstance, drawn, startVertex,

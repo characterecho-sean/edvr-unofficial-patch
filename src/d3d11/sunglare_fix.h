@@ -18,10 +18,13 @@ class Config;
 // restarts at zero per draw call, so a prefix is the only subset that
 // keeps every element's identity; the mapping run walks K to name each
 // instance, and the kept set is whatever prefix survives the walk.
-enum class SunglareAction { kStock, kSkip, kClamp };
+// kMatch: a train draw with nothing to skip or clamp -- the steady path
+// still needs to know it happened.
+enum class SunglareAction { kStock, kSkip, kClamp, kMatch };
 
 void sunglareConfigure(Config& cfg);
 bool sunglareWantsDraws();
+bool sunglareSteady();
 SunglareAction sunglareOnEyeDraw(char kind, uint32_t count,
                                  uint32_t instances);
 uint32_t sunglareKeep();
