@@ -164,12 +164,11 @@ struct State {
     // by k, genuine scene changes still drifting the mean over seconds.
     float          dampK = 0;             // fix.exposure_damping, 0..1
     float          dampTau = 45.0f;       // fix.exposure_damping_tau, secs
-    ID3D11Buffer*  dampStaging[2] = {};   // owned; the ping-pong pair
+    ID3D11Texture2D* dampStaging[2] = {}; // owned; strip ping-pong pair
     int            dampCur = 0;
     bool           dampPrevValid = false;
     bool           dampHaveMean = false;
-    float          dampMean = 0;
-    float          dampFloor = 0;
+    float          dampMean[6] = {};      // per-texel slow means
     uint64_t       dampStepMs = 0;        // wall clock of the last step --
                                           // the blend is dt/tau, so the
                                           // mean's speed survives
@@ -193,14 +192,18 @@ constexpr uint64_t kPeekLagMs = 50;
 constexpr uint32_t kPeekMaxLines = 400;
 constexpr uint32_t kPeekMaxBytes = 256;
 
-// The damper's constants. The state buffer as measured: exactly two
-// floats. The mean's blend is per frame (~90 of them a second), so 0.003
-// is a time constant of a few seconds -- station-to-space transitions
-// still adapt, head flicks do not. The sanity band rejects a buffer that
-// stops looking like the measured one, and the fix stands aside.
-constexpr uint32_t kDampBytes = 8;
-constexpr float    kDampSaneLo = -30.0f;
-constexpr float    kDampSaneHi = 30.0f;
+// The damper's constants. The strip as measured 2026-08-21: 6x1, R32
+// float, texels [raw luminance, smoothed luminance, gain, gain again,
+// curve, direct-sun term]. Texels 0-4 are damped; texel 5 passes raw --
+// it is the sun-occlusion intensity the glare cards read, and holding it
+// would leave glare shining through cockpit struts. The state-buffer
+// damper this replaces measured beta of ~1: the game re-derives its
+// state within a frame, so only the strip -- pure output, read by the
+// tonemaps at frame end -- can hold the image.
+constexpr uint32_t kStripW = 6;
+constexpr uint32_t kStripFmtA = 39;  // R32_TYPELESS
+constexpr uint32_t kStripFmtB = 41;  // R32_FLOAT
+constexpr uint32_t kDampRawTexel = 5;
 
 // Frames to wait before reporting that detection found nothing. Long enough to
 // cover menus and loading, where the pass legitimately does not run.
@@ -485,97 +488,122 @@ void exposurePeekStrip(ID3D11DeviceContext* ctx, char* line, int* at,
 }
 
 // One damping step, run right after the second eye's dispatch with the
-// pass's UAVs still bound: consume last frame's readback, filter, write
-// the damped state over both eyes, and queue this frame's readback.
+// pass's UAVs still bound and share_exposure's copy already landed:
+// queue this frame's strip readback, consume last frame's, filter, and
+// write the damped strip over both eyes' copies -- after the passes,
+// before the tonemaps at frame end that read it.
 void exposureDamp(ID3D11DeviceContext* ctx,
-                  ID3D11UnorderedAccessView* firstEye0) {
+                  ID3D11UnorderedAccessView* firstEyeStrip) {
     State* s = g_state;
 
     ID3D11UnorderedAccessView* view =
-        static_cast<ID3D11UnorderedAccessView*>(bindingGet(uavSlot(0)));
-    if (!view || !firstEye0) return;
-    ResourceInfo info;
-    if (!bindingResolve(view, &info) || !info.isBuffer ||
-        info.a != kDampBytes) {
-        return;   // not the measured 8-byte state; stand aside entirely
+        static_cast<ID3D11UnorderedAccessView*>(bindingGet(uavSlot(1)));
+    if (!view || !firstEyeStrip) return;
+    ID3D11Resource* resB = nullptr;
+    view->GetResource(&resB);
+    if (!resB) return;
+    D3D11_RESOURCE_DIMENSION dim = D3D11_RESOURCE_DIMENSION_UNKNOWN;
+    resB->GetType(&dim);
+    if (dim != D3D11_RESOURCE_DIMENSION_TEXTURE2D) {
+        resB->Release();
+        return;
+    }
+    D3D11_TEXTURE2D_DESC td{};
+    static_cast<ID3D11Texture2D*>(resB)->GetDesc(&td);
+    const uint32_t fmt = static_cast<uint32_t>(td.Format);
+    if (td.Width != kStripW || td.Height != 1 ||
+        (fmt != kStripFmtA && fmt != kStripFmtB)) {
+        resB->Release();
+        return;   // not the measured strip; stand aside entirely
     }
 
     if (!s->dampStaging[0]) {
         ID3D11Device* dev = nullptr;
         ctx->GetDevice(&dev);
-        if (!dev) return;
-        D3D11_BUFFER_DESC bd{};
-        bd.ByteWidth = kDampBytes;
-        bd.Usage = D3D11_USAGE_STAGING;
-        bd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-        dev->CreateBuffer(&bd, nullptr, &s->dampStaging[0]);
-        dev->CreateBuffer(&bd, nullptr, &s->dampStaging[1]);
+        if (!dev) {
+            resB->Release();
+            return;
+        }
+        D3D11_TEXTURE2D_DESC sd = td;
+        sd.Usage = D3D11_USAGE_STAGING;
+        sd.BindFlags = 0;
+        sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        sd.MiscFlags = 0;
+        dev->CreateTexture2D(&sd, nullptr, &s->dampStaging[0]);
+        dev->CreateTexture2D(&sd, nullptr, &s->dampStaging[1]);
         dev->Release();
-        if (!s->dampStaging[0] || !s->dampStaging[1]) return;
+        if (!s->dampStaging[0] || !s->dampStaging[1]) {
+            resB->Release();
+            return;
+        }
     }
 
-    ID3D11Resource* resB = nullptr;
-    view->GetResource(&resB);
     ID3D11Resource* resA = nullptr;
-    firstEye0->GetResource(&resA);
+    firstEyeStrip->GetResource(&resA);
 
     // Queue this frame's readback FIRST, before the damped write below
-    // lands on the same buffer -- what the staging captures is the game's
-    // own freshly computed value, so the filter runs on the measurement
+    // lands on the same texture -- the staging captures the game's own
+    // freshly derived parameters, so the filter runs on the measurement
     // and never chews its own output.
     const int prev = s->dampCur ^ 1;
-    if (resB) {
-        ctx->CopyResource(s->dampStaging[s->dampCur], resB);
-        s->dampCur ^= 1;
-    } else {
-        if (resA) resA->Release();
-        return;
-    }
+    ctx->CopyResource(s->dampStaging[s->dampCur], resB);
+    s->dampCur ^= 1;
+
     if (s->dampPrevValid) {
         D3D11_MAPPED_SUBRESOURCE m{};
         if (SUCCEEDED(ctx->Map(s->dampStaging[prev], 0, D3D11_MAP_READ, 0,
                                &m)) &&
             m.pData) {
-            float f[2];
-            memcpy(f, m.pData, sizeof(f));
+            float raw[kStripW];
+            memcpy(raw, m.pData, sizeof(raw));
             ctx->Unmap(s->dampStaging[prev], 0);
-            if (f[1] > kDampSaneLo && f[1] < kDampSaneHi) {
+
+            bool sane = true;
+            for (uint32_t i = 0; i < kStripW; ++i) {
+                if (!(raw[i] >= -1e6f && raw[i] <= 1e6f)) sane = false;
+            }
+            if (sane) {
                 const uint64_t now = nowMs();
                 if (!s->dampHaveMean) {
-                    s->dampMean = f[1];
+                    memcpy(s->dampMean, raw, sizeof(raw));
                     s->dampHaveMean = true;
                     s->dampStepMs = now;
                 }
-                // The mean's blend is wall-clock over tau. The first
-                // field trial hardcoded a few-second constant -- the same
-                // duration as a held head pose, so the mean chased every
-                // pitch and the damper could not hide what its own
-                // reference was doing. tau lives in config now, because
-                // head transients and genuine scene changes overlap in
-                // time and the right constant is a field question.
+                // The mean's blend is wall-clock over tau -- a
+                // few-second constant matched a held head pose and the
+                // mean chased every pitch, which was the first field
+                // trial's leak.
                 float alpha =
                     static_cast<float>(now - s->dampStepMs) / 1000.0f /
                     s->dampTau;
                 if (alpha > 0.2f) alpha = 0.2f;
                 s->dampStepMs = now;
-                s->dampMean += alpha * (f[1] - s->dampMean);
-                s->dampFloor = f[0];
-                const float damped =
-                    s->dampMean + (1.0f - s->dampK) * (f[1] - s->dampMean);
-                const float out[2] = {s->dampFloor, damped};
-                if (resA) ctx->UpdateSubresource(resA, 0, nullptr, out,
-                                                 0, 0);
-                if (resB && resB != resA)
-                    ctx->UpdateSubresource(resB, 0, nullptr, out, 0, 0);
+
+                float out[kStripW];
+                for (uint32_t i = 0; i < kStripW; ++i) {
+                    s->dampMean[i] += alpha * (raw[i] - s->dampMean[i]);
+                    out[i] = i == kDampRawTexel
+                                 ? raw[i]
+                                 : s->dampMean[i] +
+                                       (1.0f - s->dampK) *
+                                           (raw[i] - s->dampMean[i]);
+                }
+                const UINT pitch = kStripW * 4;
+                if (resA) {
+                    ctx->UpdateSubresource(resA, 0, nullptr, out, pitch, 0);
+                }
+                if (resB != resA) {
+                    ctx->UpdateSubresource(resB, 0, nullptr, out, pitch, 0);
+                }
                 ++s->dampWrites;
                 if (s->dampWrites == 1 ||
                     now - s->dampLastNoteMs >= 5000) {
                     Log::get().note(
                         "exposure damping: %llu write(s) since last note, "
-                        "k=%.2f, value %.3f, mean %.3f.",
+                        "k=%.2f, gain %.1f, gain mean %.1f.",
                         static_cast<unsigned long long>(
                             s->dampWrites - s->dampWritesAtNote),
-                        s->dampK, f[1], s->dampMean);
+                        s->dampK, raw[2], s->dampMean[2]);
                     s->dampLastNoteMs = now;
                     s->dampWritesAtNote = s->dampWrites;
                 }
@@ -585,7 +613,7 @@ void exposureDamp(ID3D11DeviceContext* ctx,
 
     s->dampPrevValid = true;
     if (resA) resA->Release();
-    if (resB) resB->Release();
+    resB->Release();
 }
 
 // Does the bound UAV set look like per-eye exposure state?
@@ -753,7 +781,7 @@ void STDMETHODCALLTYPE hookedDispatch(ID3D11DeviceContext* self, UINT x, UINT y,
             }
             shareExposure(self, s->firstEye, second);
             if (s->peek) exposurePeek(self);
-            if (s->dampK > 0.0f) exposureDamp(self, s->firstEye[0]);
+            if (s->dampK > 0.0f) exposureDamp(self, s->firstEye[1]);
         }
     });
 }
