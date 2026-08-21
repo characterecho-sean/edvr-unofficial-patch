@@ -28,6 +28,7 @@
 #include "holo_fix.h"
 #include "journal_watch.h"  // gameplay started, for the low-peak notice
 #include "remlok_fix.h"
+#include "exposure_fix.h"
 #include "sunglare_fix.h"
 #include "witchstar_fix.h"
 
@@ -1887,6 +1888,7 @@ void vScreenRefreshConfig() {
     holoConfigure(cfg);
     witchstarConfigure(cfg);
     sunglareConfigure(cfg);
+    exposureConfigure(cfg);
     fovProbeConfigure(cfg);
     cbPeekConfigure(cfg);
     billboardConfigure(cfg);
@@ -2561,6 +2563,7 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     holoConfigure(cfg);
     witchstarConfigure(cfg);
     sunglareConfigure(cfg);
+    exposureConfigure(cfg);
     fovProbeConfigure(cfg);
     cbPeekConfigure(cfg);
     billboardConfigure(cfg);

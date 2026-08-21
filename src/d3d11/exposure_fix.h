@@ -24,11 +24,19 @@
 
 namespace edvr {
 
+class Config;
+
 // Installs the hooks on the device's immediate context, using the hook
 // mechanism the caller decided for this device -- shared with the vScreen
 // hooks so the two can never split modes on the one context object. See
 // device_hook.h.
 void installExposureFix(ID3D11Device* device, HookMode mode);
+
+// Reads advanced.exposure_peek -- the damping workstream's measurement
+// instrument: log the exposure pass's output buffers once a second so a
+// head-pitch sweep can name the float the breathing lives in. Called on
+// the install path (by installExposureFix itself) and the reload path.
+void exposureConfigure(Config& cfg);
 
 // Records shader pointer -> bytecode hash, so a bound shader can be identified
 // when it is dispatched.

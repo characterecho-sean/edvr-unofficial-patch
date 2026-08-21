@@ -11,6 +11,7 @@
 #include "../common/config.h"
 #include "../common/guard.h"
 #include "../common/log.h"
+#include "../common/timing.h"
 #include "../common/vtable_hook.h"
 #include "binding_shadow.h"
 #include "device_hook.h"  // contextHookModeFor
@@ -134,6 +135,19 @@ struct State {
     uint64_t applied = 0;
     bool     rejected = false;
 
+    // The exposure peek (the damping workstream's measurement instrument):
+    // once a second, staging-copy the pass's output buffers and log their
+    // floats. The breathing the field sees under head pitch lives in one
+    // of these values; the sweep names WHICH, and the damper then knows
+    // what to hold. Read-only -- the same discipline as every peek.
+    bool           peek = false;
+    ID3D11Buffer*  peekStaging[4] = {};   // owned; per UAV slot, buffers only
+    uint32_t       peekBytes[4] = {};
+    bool           peekPending = false;
+    uint64_t       peekCopyMs = 0;
+    uint64_t       peekLastMs = 0;
+    uint32_t       peekLines = 0;
+
     std::unordered_map<void*, uint64_t> shaderHashes;
     CRITICAL_SECTION lock{};
     bool lockReady = false;
@@ -142,6 +156,12 @@ struct State {
 // Consecutive frames a detected candidate must run exactly twice before the
 // fix acts on it.
 constexpr uint32_t kConfirmFrames = 5;
+
+// The peek's cadence, readback lag, and line budget.
+constexpr uint64_t kPeekTickMs = 1000;
+constexpr uint64_t kPeekLagMs = 50;
+constexpr uint32_t kPeekMaxLines = 400;
+constexpr uint32_t kPeekMaxBytes = 256;
 
 // Frames to wait before reporting that detection found nothing. Long enough to
 // cover menus and loading, where the pass legitimately does not run.
@@ -227,6 +247,89 @@ void shareExposure(ID3D11DeviceContext* ctx, ID3D11UnorderedAccessView* const* f
             Log::get().note("exposure fix ACTIVE: sharing %u slot(s) %s each frame",
                             copied,
                             s->copyBtoA ? "second eye -> first" : "first eye -> second");
+        }
+    }
+}
+
+// The peek: consume last tick's staging copies, then queue this tick's.
+// Runs right after the second eye's dispatch, with the pass's UAVs still
+// bound and shared -- what is read here is what the tonemap reads.
+void exposurePeek(ID3D11DeviceContext* ctx) {
+    State* s = g_state;
+    if (s->peekLines >= kPeekMaxLines) return;
+    const uint64_t now = nowMs();
+
+    if (s->peekPending && now - s->peekCopyMs >= kPeekLagMs) {
+        char line[480];
+        int at = 0;
+        for (uint32_t slot = 0; slot < 4 && at < 400; ++slot) {
+            if (!s->peekStaging[slot]) continue;
+            D3D11_MAPPED_SUBRESOURCE m{};
+            if (FAILED(ctx->Map(s->peekStaging[slot], 0, D3D11_MAP_READ, 0,
+                                &m)) ||
+                !m.pData) {
+                continue;
+            }
+            const float* f = static_cast<const float*>(m.pData);
+            const uint32_t n = s->peekBytes[slot] / 4;
+            at += _snprintf_s(line + at, sizeof(line) - at, _TRUNCATE,
+                              "%su%u[", at ? "  " : "", slot);
+            for (uint32_t i = 0; i < n && i < 12 && at < 440; ++i) {
+                at += _snprintf_s(line + at, sizeof(line) - at, _TRUNCATE,
+                                  "%s%.5g", i ? " " : "",
+                                  static_cast<double>(f[i]));
+            }
+            at += _snprintf_s(line + at, sizeof(line) - at, _TRUNCATE, "]");
+            ctx->Unmap(s->peekStaging[slot], 0);
+        }
+        s->peekPending = false;
+        if (at) {
+            ++s->peekLines;
+            Log::get().note("EXP %s", line);
+            if (s->peekLines == kPeekMaxLines) {
+                Log::get().note("exposure peek: line budget spent; set "
+                                "exposure_peek = 0 and back to 1 for more.");
+            }
+        }
+    }
+
+    if (now - s->peekLastMs < kPeekTickMs) return;
+    s->peekLastMs = now;
+
+    for (uint32_t slot = 0; slot < 4; ++slot) {
+        ID3D11UnorderedAccessView* view =
+            static_cast<ID3D11UnorderedAccessView*>(bindingGet(uavSlot(slot)));
+        if (!view) continue;
+        ResourceInfo info;
+        if (!bindingResolve(view, &info) || !info.isBuffer ||
+            info.a == 0 || info.a > kPeekMaxBytes) {
+            continue;   // buffers only; the strip texture's turn comes if
+                        // the buffers hold nothing that moves
+        }
+        if (s->peekStaging[slot] && s->peekBytes[slot] != info.a) {
+            s->peekStaging[slot]->Release();
+            s->peekStaging[slot] = nullptr;
+        }
+        if (!s->peekStaging[slot]) {
+            ID3D11Device* dev = nullptr;
+            ctx->GetDevice(&dev);
+            if (!dev) continue;
+            D3D11_BUFFER_DESC bd{};
+            bd.ByteWidth = info.a;
+            bd.Usage = D3D11_USAGE_STAGING;
+            bd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+            dev->CreateBuffer(&bd, nullptr, &s->peekStaging[slot]);
+            dev->Release();
+            if (!s->peekStaging[slot]) continue;
+            s->peekBytes[slot] = info.a;
+        }
+        ID3D11Resource* res = nullptr;
+        view->GetResource(&res);
+        if (res) {
+            ctx->CopyResource(s->peekStaging[slot], res);
+            res->Release();
+            s->peekPending = true;
+            s->peekCopyMs = now;
         }
     }
 }
@@ -395,11 +498,39 @@ void STDMETHODCALLTYPE hookedDispatch(ID3D11DeviceContext* self, UINT x, UINT y,
                                 static_cast<unsigned long long>(hashOf(bindingGet(BindSlot::Cs))));
             }
             shareExposure(self, s->firstEye, second);
+            if (s->peek) exposurePeek(self);
         }
     });
 }
 
 }  // namespace
+
+void exposureConfigure(Config& cfg) {
+    State* s = g_state;
+    if (!s) return;
+    const bool was = s->peek;
+    s->peek = cfg.getBool("advanced.exposure_peek", false);
+    if (s->peek && !was) {
+        s->peekLines = 0;
+        s->peekLastMs = 0;
+        s->peekPending = false;
+        Log::get().note("exposure peek: ON -- the exposure pass's output "
+                        "buffers log once a second. Park at the star, hold "
+                        "still, then pitch up, centre, pitch down, centre, "
+                        "~4s each; the float that tracks the brightness "
+                        "swing is the one the damper will hold.");
+    }
+    if (!s->peek && was) {
+        for (uint32_t i = 0; i < 4; ++i) {
+            if (s->peekStaging[i]) {
+                s->peekStaging[i]->Release();
+                s->peekStaging[i] = nullptr;
+            }
+            s->peekBytes[i] = 0;
+        }
+        s->peekPending = false;
+    }
+}
 
 void registerShaderHash(void* shader, uint64_t hash) {
     if (!g_state || !shader || !g_state->lockReady) return;
@@ -579,6 +710,7 @@ void installExposureFix(ID3D11Device* device, HookMode mode) {
                     static_cast<void*>(ctx), s.hook.executablePrefix(),
                     s.enabled ? "ON" : "off",
                     s.pinned ? "pinned by config" : "detected automatically");
+    exposureConfigure(cfg);
     ctx->Release();
 }
 
@@ -612,6 +744,12 @@ void exposureFixReclaimHooks(bool sceneRendered) {
 void shutdownExposureFix() {
     if (!g_state) return;
     g_state->enabled = false;
+    for (uint32_t i = 0; i < 4; ++i) {
+        if (g_state->peekStaging[i]) {
+            g_state->peekStaging[i]->Release();
+            g_state->peekStaging[i] = nullptr;
+        }
+    }
     g_state->hook.uninstall();
     if (g_state->lockReady) {
         DeleteCriticalSection(&g_state->lock);
