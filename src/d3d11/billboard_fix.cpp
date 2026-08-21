@@ -276,38 +276,41 @@ void billboardBegin(ID3D11DeviceContext* ctx) {
             f[kDrawnUp + i] *= 0.1f;
         }
     } else {
-        // The horizon-locked billboard. The first steady formula anchored
-        // right and up to the world rows DIRECTLY -- and the elements
-        // vanished, which proved two things at once: the shader consumes
-        // these floats (the first positive engagement this machinery ever
-        // had), and a plane facing world-Z is edge-on to almost every
-        // viewpoint. The plane must keep FACING the camera to be seen at
-        // all; what must stop following the head is only the rotation IN
-        // that plane. So: keep the write's own forward, build right from
-        // world-up cross forward, up from forward cross right. Under roll
-        // the forward is unchanged and nothing spins; under yaw the
-        // element turns to keep facing, which is what a billboard is.
-        const float* fwd = f + kDrawnFwd;
+        // In-plane roll removal, the third steady formula and the first
+        // derived from field failures rather than theory. Full replacement
+        // taught two lessons: anchoring to the world rows builds an
+        // edge-on plane (elements vanish), and even a camera-facing
+        // rebuild displaces the elements PER EYE -- the drawn rows encode
+        // each eye's projection mapping, not orientation alone, and rows
+        // built from scratch lose it. So the steer must TRANSFORM the
+        // write's own rows, never replace them: rotate right and up
+        // within their own plane until up aligns with the world-up's
+        // projection into that plane. A linear mix of the original rows
+        // preserves their span, their magnitudes, and whatever projective
+        // role they carry per eye; the only thing removed is the spin.
+        // A level head yields a near-identity mix; under roll, the mix is
+        // exactly the counter-rotation.
+        const float* r0 = f + kDrawnRight;
+        const float* u0 = f + kDrawnUp;
         const float* wu = f + kWorldUp;
-        const float lf = len3(fwd), lwu = len3(wu);
-        float fn[3], un[3], r[3], u[3];
+        const float lr0 = len3(r0), lu0 = len3(u0), lwu = len3(wu);
+        float rn[3], un[3], wn[3];
         for (int i = 0; i < 3; ++i) {
-            fn[i] = fwd[i] / lf;
-            un[i] = wu[i] / lwu;
+            rn[i] = r0[i] / lr0;
+            un[i] = u0[i] / lu0;
+            wn[i] = wu[i] / lwu;
         }
-        r[0] = un[1] * fn[2] - un[2] * fn[1];
-        r[1] = un[2] * fn[0] - un[0] * fn[2];
-        r[2] = un[0] * fn[1] - un[1] * fn[0];
-        const float lr = len3(r);
-        if (lr > 0.05f) {   // fwd nearly parallel to world-up: leave the
-                            // write alone rather than divide by nothing
-            for (int i = 0; i < 3; ++i) r[i] /= lr;
-            u[0] = fn[1] * r[2] - fn[2] * r[1];
-            u[1] = fn[2] * r[0] - fn[0] * r[2];
-            u[2] = fn[0] * r[1] - fn[1] * r[0];
+        const float a = dot3(wn, rn);
+        const float b = dot3(wn, un);
+        const float n = sqrtf(a * a + b * b);
+        if (n > 0.05f) {   // world-up nearly out of the plane (looking
+                           // straight up or down): draw untouched rather
+                           // than divide by nothing
             for (int i = 0; i < 3; ++i) {
-                f[kDrawnRight + i] = r[i] * s;
-                f[kDrawnUp + i] = u[i] * s;
+                const float upT = (a * rn[i] + b * un[i]) / n;
+                const float rtT = (b * rn[i] - a * un[i]) / n;
+                f[kDrawnRight + i] = rtT * lr0;
+                f[kDrawnUp + i] = upT * lu0;
             }
         }
     }
