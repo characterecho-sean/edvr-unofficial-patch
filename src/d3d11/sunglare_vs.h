@@ -124,12 +124,23 @@ VSOut main(VSIn i) {
         sincos(i.p3.w, sr, cr);
         float3 rr = r * cr + u * sr;
         float3 uu = u * cr - r * sr;
-        // NDC half-extent -> world half-extent at the element's depth:
-        // d(ndc)/d(world-offset) along the right row is |row|/w.
-        float toWorld = cw / max(length(cb0[4].xyz), 1e-4);
-        float2 half2 = baseSize * i.uvc.zw;
+        // The quad-size law, taken from the flat path at zero
+        // eccentricity: v3.xy times v2.xy, x aspect-divided, the t7.w
+        // mode scale kept. The first world build fed it baseSize -- the
+        // CENTRE-offset scale, not the quad size -- and the disc drew
+        // sub-pixel small, which the field read as not drawn at all.
+        float2 halfNdc = i.p2.xy * i.p1.xy;
+        halfNdc.x = halfNdc.x / cb1[91].z;
+        if (i.t7.w > 0.0) halfNdc = halfNdc * cb1[91].w;
+        float2 half2 = halfNdc * i.uvc.zw;
+        // NDC half-extent -> world half-extent at the element's depth,
+        // PER AXIS: d(ndc)/d(world-offset) along each row is |row|/w,
+        // and the rows' magnitudes differ by the aspect.
+        float toWorldX = cw / max(length(cb0[4].xyz), 1e-4);
+        float toWorldY = cw / max(length(cb0[5].xyz), 1e-4);
         float3 wpos = i.pos.xyz
-                    + (rr * half2.x + uu * half2.y) * toWorld;
+                    + rr * (half2.x * toWorldX)
+                    + uu * (half2.y * toWorldY);
         float4 WP = float4(wpos, 1.0);
         float px = dot(cb0[4], WP);
         float py = dot(cb0[5], WP);
