@@ -26,16 +26,23 @@ namespace edvr {
 constexpr const char kSunglareWorldVS[] = R"HLSL(
 cbuffer CB0 : register(b0) { float4 cb0[8]; };
 cbuffer CB1 : register(b1) { float4 cb1[333]; };
-// The true scene-camera rows, supplied by the swap at a slot it owns.
-// The glare system's own camera (cb0) clamps at forty-five degrees of
-// head-look; past the clamp its constants no longer know where the
-// star is, and the disc used to clip out at a clean line. tValid.x
-// gates the substitution so a stale feed falls back to cb0 exactly.
+// The swap's own constants at a slot it owns. The field data closed
+// the case the other way round from every theory before it: the glare
+// CB's ROWS follow the head completely -- no camera clamp -- and what
+// freezes past forty-five degrees is i.pos itself, computed CPU-side
+// in the game's head-look frame. The glare world's origin sits on the
+// sun, so the swap is handed the per-draw camera position (solved from
+// the rows) and the true camera-to-sun direction (-normalize(cam)),
+// and rebuilds the element on that ray. The row-substitution fields
+// stay for compatibility but tValid.x is now always 0: the game's own
+// rows are the true ones.
 cbuffer CBT : register(b2) {
     float4 tRow4;
     float4 tRow5;
     float4 tRow7;
-    float4 tValid;
+    float4 tValid;    // x: substitute rows (retired), y: sun solve live
+    float4 tSun;      // xyz = true camera-to-sun direction, this draw
+    float4 tCam;      // xyz = camera position in the glare frame
 };
 Texture2D t0 : register(t0);
 SamplerState s0 : register(s0);
@@ -69,9 +76,32 @@ VSOut main(VSIn i) {
     o.t3.xy = i.t5.xy * float2(0.0625, 0.125)
             + i.uvc.xy * i.t5.zw * float2(0.0625, 0.125);
 
-    // The element centre through the game's own rows -- and through the
-    // TRUE rows beside them. The element's world position is valid at
-    // every head angle; only the clamped camera stops being.
+    // The anchor weights: 1,1 means "sit on the element" -- those are
+    // the world-path elements. Anything else is a slider and keeps the
+    // original flat behaviour.
+    bool worldPath = i.p3.x > 0.999 && i.p3.y > 0.999;
+#ifdef ALLWORLD
+    worldPath = true;
+#endif
+#ifdef ALLFLAT
+    worldPath = false;
+#endif
+
+    // The element position, REBUILT. i.pos is computed CPU-side in the
+    // game's head-look frame and goes stale past the clamp -- the one
+    // stale input left. The sun is the glare world's origin, so the
+    // true camera-to-sun ray is fully known per draw; keep the game's
+    // own element distance (the flare stack's depths) and re-aim it.
+    // Inside the clamp this reduces to i.pos exactly.
+    bool haveSun = tValid.y > 0.5;
+    float3 rel = i.pos.xyz - tCam.xyz;
+    float3 epos = (worldPath && haveSun)
+        ? tCam.xyz + tSun.xyz * max(length(rel), 1.0)
+        : i.pos.xyz;
+
+    // The element centre through the game's own rows: once with the
+    // game's position (the flat path, verbatim) and once with the
+    // rebuilt position (the world path's centre, taps and depth).
     float4 P = float4(i.pos.xyz, 1.0);
     float cx = dot(cb0[4], P);
     float cy = dot(cb0[5], P);
@@ -80,9 +110,10 @@ VSOut main(VSIn i) {
     float4 row4 = haveTrue ? tRow4 : cb0[4];
     float4 row5 = haveTrue ? tRow5 : cb0[5];
     float4 row7 = haveTrue ? tRow7 : cb0[7];
-    float tcx = dot(row4, P);
-    float tcy = dot(row5, P);
-    float tcw = dot(row7, P);
+    float4 PT = float4(epos, 1.0);
+    float tcx = dot(row4, PT);
+    float tcy = dot(row5, PT);
+    float tcw = dot(row7, PT);
 
     // Occlusion reference depth, verbatim.
     float depthRef = (i.pos.w < 0.5) ? cw : max(cw - i.pos.w, 0.0);
@@ -116,25 +147,14 @@ VSOut main(VSIn i) {
     if (i.t7.w > 0.0) szFlat = float2(szFlat.x, szFlat.y) * cb1[91].w;
     float2 szWorld = i.p1.xy * baseSize;
 
-    // The anchor weights: 1,1 means "sit on the element" -- those are
-    // the world-path elements. Anything else is a slider and keeps the
-    // original flat behaviour.
-    bool worldPath = i.p3.x > 0.999 && i.p3.y > 0.999;
-#ifdef ALLWORLD
-    worldPath = true;
-#endif
-#ifdef ALLFLAT
-    worldPath = false;
-#endif
-
     // ---- position ----
     float4 svpos;
     float2 psPos;
     if (worldPath) {
         // The world-anchored billboard: right/up perpendicular to the
-        // element's own direction, world-up anchored, the element's own
+        // true camera-to-sun ray, world-up anchored, the element's own
         // rotation kept, each vertex projected with a REAL w.
-        float3 d = normalize(i.pos.xyz);
+        float3 d = haveSun ? tSun.xyz : normalize(i.pos.xyz);
         float3 wu = float3(0.0, 1.0, 0.0);
         float3 r = cross(wu, d);
         float rl = length(r);
@@ -159,7 +179,7 @@ VSOut main(VSIn i) {
         // aspect.
         float toWorldX = tcw / max(length(row4.xyz), 1e-4);
         float toWorldY = tcw / max(length(row5.xyz), 1e-4);
-        float3 wpos = i.pos.xyz
+        float3 wpos = epos
                     + rr * (half2.x * toWorldX)
                     + uu * (half2.y * toWorldY);
         float4 WP = float4(wpos, 1.0);

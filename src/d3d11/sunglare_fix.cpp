@@ -99,16 +99,21 @@ float                g_worldEccMax = -1e9f;
 float                g_trueRows[16] = {};
 bool                 g_trueRowsValid = false;
 uint64_t             g_trueRowsMs = 0;
-// The true head-tracked VIEW matrix (3x4 rows from scene-block offset
-// 932) and the extracted per-eye PROJECTION rows. P is calibrated
-// whenever the glare camera and the true camera agree -- inside the
-// clamp -- as P = clampedClipRows x V-inverse; past the clamp the last
-// P holds and trueClip = P x V_true stays exact.
+// The true head-tracked camera POSE (3x4 rows from scene-block offset
+// 932), kept for the alignment telemetry -- the reading that finally
+// closed the case: the glare CB's rows follow the head COMPLETELY
+// (align 1.0, cf identical to tf through a full sweep). There is no
+// camera clamp in the constants, so no calibrated projection to hold;
+// what goes stale past the clamp is the game's CPU-computed element
+// position, and that is fixed per draw from the rows alone.
 float                g_trueView[12] = {};
 bool                 g_trueViewValid = false;
 uint64_t             g_trueViewMs = 0;
-float                g_projRows[12] = {};
-bool                 g_projValid = false;
+float                g_camDist = 0.0f;   // |camera| in the glare frame,
+                                         // from the per-draw solve; the
+                                         // sun sits at the origin, so
+                                         // this is the sun distance
+bool                 g_sunSolveOk = false;
 bool                 g_camDumped = false;
 int                  g_camDumpShot = 0;
 uint64_t             g_camDumpMs = 0;
@@ -622,13 +627,13 @@ void sunglareBegin(ID3D11DeviceContext* ctx) {
                     }
                 }
                 Log::get().note("glare world: %llu draw(s)/s, ecc tan "
-                                "%.2f..%.2f, align %.4f P%s cf=(%.2f %.2f "
-                                "%.2f) tf=(%.2f %.2f %.2f).",
+                                "%.2f..%.2f, align %.4f S%s d=%.1f "
+                                "cf=(%.2f %.2f %.2f) tf=(%.2f %.2f %.2f).",
                                 static_cast<unsigned long long>(
                                     g_worldDraws - g_worldDrawsAtNote),
                                 g_worldEccMin, g_worldEccMax, align,
-                                g_projValid ? "OK" : "--", cf[0], cf[1],
-                                cf[2], tf[0], tf[1], tf[2]);
+                                g_sunSolveOk ? "OK" : "--", g_camDist,
+                                cf[0], cf[1], cf[2], tf[0], tf[1], tf[2]);
                 g_worldNoteMs = now;
                 g_worldDrawsAtNote = g_worldDraws;
                 g_worldEccMin = 1e9f;
@@ -651,7 +656,7 @@ void sunglareBegin(ID3D11DeviceContext* ctx) {
                 ctx->GetDevice(&dev);
                 if (dev) {
                     D3D11_BUFFER_DESC bd{};
-                    bd.ByteWidth = 64;
+                    bd.ByteWidth = 96;
                     bd.Usage = D3D11_USAGE_DYNAMIC;
                     bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
                     bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
@@ -659,90 +664,76 @@ void sunglareBegin(ID3D11DeviceContext* ctx) {
                     dev->Release();
                 }
             }
-            // Calibrate the projection whenever the glare camera and the
-            // true camera agree (inside the clamp): P_i = R x row_i.xyz
-            // with w adjusted by the translation, from clipRows = P x V.
+            // The per-draw camera solve -- what the whole b2 arc
+            // collapsed into once the field data spoke. The rows follow
+            // the head completely (align 1.0, cf identical to tf through
+            // a full sweep): no camera clamp, nothing to calibrate. The
+            // stale quantity is the game's CPU-computed element position,
+            // and the glare world's origin sits ON the sun (the row w
+            // components projected the visual sun through every session
+            // of eccentricity telemetry). For any perspective projection
+            // the fourth column is zero in x, y and w, so the camera
+            // position annihilates those rows -- dot(row.xyz, cam) =
+            // -row.w -- and cam solves from this draw's own constants.
+            // True sun direction = -normalize(cam). Per draw, per eye,
+            // nothing latched, nothing to go stale.
             uint32_t nsh = 0;
             const float* sh = billboardShadowFloats(&nsh);
-            const bool vFresh =
-                g_trueViewValid && nowMs() - g_trueViewMs < 100;
-            if (sh && nsh >= 32 && vFresh) {
-                const float* fc = sh + 28;   // clamped forward row xyz
-                const float lv = sqrtf(fc[0] * fc[0] + fc[1] * fc[1] +
-                                       fc[2] * fc[2]);
-                // The stored matrix is the camera POSE (view-to-world;
-                // metre-scale translation column gave it away), so the
-                // forward is COLUMN two.
-                const float v2[3] = {g_trueView[2], g_trueView[6],
-                                     g_trueView[10]};
-                if (lv > 1e-4f) {
-                    const float align =
-                        (fc[0] * v2[0] + fc[1] * v2[1] + fc[2] * v2[2]) /
-                        lv;
-                    if (align > 0.9995f) {
-                        // world = R^T (view - t): P_i.xyz = R * c_i.xyz,
-                        // P_i.w = c_i.w + dot(P_i.xyz, t) with the sign
-                        // from view = R*world + t  =>  world-row form
-                        // c_i . world = P_i . (view,1).
-                        static const int kRowOff[3] = {16, 20, 28};
-                        for (int r = 0; r < 3; ++r) {
-                            const float* c = sh + kRowOff[r];
-                            float* p = g_projRows + r * 4;
-                            // POSE convention: world = R*view + t, so
-                            // clip_i = (c_i . R) . view + c_i.t + c_i.w:
-                            // P_i.xyz = c_i-row times R = dots with the
-                            // COLUMNS, P_i.w = c_i.w + dot(c_i.xyz, t).
-                            p[0] = c[0] * g_trueView[0] +
-                                   c[1] * g_trueView[4] +
-                                   c[2] * g_trueView[8];
-                            p[1] = c[0] * g_trueView[1] +
-                                   c[1] * g_trueView[5] +
-                                   c[2] * g_trueView[9];
-                            p[2] = c[0] * g_trueView[2] +
-                                   c[1] * g_trueView[6] +
-                                   c[2] * g_trueView[10];
-                            p[3] = c[3] + (c[0] * g_trueView[3] +
-                                           c[1] * g_trueView[7] +
-                                           c[2] * g_trueView[11]);
-                        }
-                        g_projValid = true;
+            float cam[3] = {};
+            float sunDir[3] = {};
+            bool sunOk = false;
+            if (sh && nsh >= 32) {
+                const float* r4 = sh + 16;
+                const float* r5 = sh + 20;
+                const float* r7 = sh + 28;
+                const float det =
+                    r4[0] * (r5[1] * r7[2] - r5[2] * r7[1]) -
+                    r4[1] * (r5[0] * r7[2] - r5[2] * r7[0]) +
+                    r4[2] * (r5[0] * r7[1] - r5[1] * r7[0]);
+                if (fabsf(det) > 1e-9f) {
+                    const float x = -r4[3], y = -r5[3], z = -r7[3];
+                    const float inv = 1.0f / det;
+                    cam[0] = inv * (x * (r5[1] * r7[2] - r5[2] * r7[1]) -
+                                    r4[1] * (y * r7[2] - r5[2] * z) +
+                                    r4[2] * (y * r7[1] - r5[1] * z));
+                    cam[1] = inv * (r4[0] * (y * r7[2] - r5[2] * z) -
+                                    x * (r5[0] * r7[2] - r5[2] * r7[0]) +
+                                    r4[2] * (r5[0] * z - y * r7[0]));
+                    cam[2] = inv * (r4[0] * (r5[1] * z - y * r7[1]) -
+                                    r4[1] * (r5[0] * z - y * r7[0]) +
+                                    x * (r5[0] * r7[1] - r5[1] * r7[0]));
+                    const float lc = sqrtf(cam[0] * cam[0] +
+                                           cam[1] * cam[1] +
+                                           cam[2] * cam[2]);
+                    if (lc > 1e-3f) {
+                        sunDir[0] = -cam[0] / lc;
+                        sunDir[1] = -cam[1] / lc;
+                        sunDir[2] = -cam[2] / lc;
+                        g_camDist = lc;
+                        sunOk = true;
                     }
                 }
             }
+            g_sunSolveOk = sunOk;
 
             if (g_trueCb) {
-                // trueClip = P x V, freshly composed each draw; valid
-                // only when both halves are.
-                float rows[12] = {};
-                bool okRows = false;
-                if (g_projValid && vFresh) {
-                    // POSE convention: view = R^T (world - t), so the
-                    // composed row is P_i times R^T -- dots with the
-                    // ROWS -- and the w folds the translation back out.
-                    // At the calibration instant this reduces to the
-                    // clamped rows identically.
-                    for (int r = 0; r < 3; ++r) {
-                        const float* p = g_projRows + r * 4;
-                        float* o = rows + r * 4;
-                        for (int c = 0; c < 3; ++c) {
-                            o[c] = p[0] * g_trueView[c * 4 + 0] +
-                                   p[1] * g_trueView[c * 4 + 1] +
-                                   p[2] * g_trueView[c * 4 + 2];
-                        }
-                        o[3] = p[3] - (o[0] * g_trueView[3] +
-                                       o[1] * g_trueView[7] +
-                                       o[2] * g_trueView[11]);
-                    }
-                    okRows = true;
-                }
                 D3D11_MAPPED_SUBRESOURCE m{};
                 if (SUCCEEDED(ctx->Map(g_trueCb, 0, D3D11_MAP_WRITE_DISCARD,
                                        0, &m)) &&
                     m.pData) {
                     float* f = static_cast<float*>(m.pData);
-                    memcpy(f, rows, 48);
-                    f[12] = okRows ? 1.0f : 0.0f;
-                    f[13] = f[14] = f[15] = 0.0f;
+                    memset(f, 0, 48);            // row substitution retired
+                    f[12] = 0.0f;                // tValid.x: rows are honest
+                    f[13] = sunOk ? 1.0f : 0.0f; // tValid.y: sun solve live
+                    f[14] = f[15] = 0.0f;
+                    f[16] = sunDir[0];           // tSun
+                    f[17] = sunDir[1];
+                    f[18] = sunDir[2];
+                    f[19] = 0.0f;
+                    f[20] = cam[0];              // tCam
+                    f[21] = cam[1];
+                    f[22] = cam[2];
+                    f[23] = 0.0f;
                     ctx->Unmap(g_trueCb, 0);
                     ctx->VSGetConstantBuffers(2, 1, &g_savedCb2);
                     ID3D11Buffer* ours = g_trueCb;
