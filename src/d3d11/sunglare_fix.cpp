@@ -606,11 +606,29 @@ void sunglareBegin(ID3D11DeviceContext* ctx) {
             }
             const uint64_t now = nowMs();
             if (now - g_worldNoteMs >= 1000) {
+                float align = -2.0f;
+                float cf[3] = {}, tf[3] = {};
+                if (sh && nf >= 32 && g_trueViewValid) {
+                    const float* c = sh + 28;
+                    const float lc = sqrtf(c[0] * c[0] + c[1] * c[1] +
+                                           c[2] * c[2]);
+                    if (lc > 1e-4f) {
+                        for (int k = 0; k < 3; ++k) {
+                            cf[k] = c[k] / lc;
+                            tf[k] = g_trueView[8 + k];
+                        }
+                        align = cf[0] * tf[0] + cf[1] * tf[1] +
+                                cf[2] * tf[2];
+                    }
+                }
                 Log::get().note("glare world: %llu draw(s)/s, ecc tan "
-                                "%.2f..%.2f.",
+                                "%.2f..%.2f, align %.4f P%s cf=(%.2f %.2f "
+                                "%.2f) tf=(%.2f %.2f %.2f).",
                                 static_cast<unsigned long long>(
                                     g_worldDraws - g_worldDrawsAtNote),
-                                g_worldEccMin, g_worldEccMax);
+                                g_worldEccMin, g_worldEccMax, align,
+                                g_projValid ? "OK" : "--", cf[0], cf[1],
+                                cf[2], tf[0], tf[1], tf[2]);
                 g_worldNoteMs = now;
                 g_worldDrawsAtNote = g_worldDraws;
                 g_worldEccMin = 1e9f;
