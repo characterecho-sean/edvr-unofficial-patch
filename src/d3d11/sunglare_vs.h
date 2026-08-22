@@ -182,6 +182,12 @@ VSOut main(VSIn i) {
     float2 texel = 1.0 / cb1[332].xy;
     float2 c01 = ndc * 0.5 + 0.5;
     float2 cTap = float2(c01.x, 1.0 - c01.y);
+    // Clamp the whole tap window inside the depth texture: at high
+    // eccentricity the sun sits at the very edge, the taps straddle
+    // outside, and the clamped garbage flipped the gate with tiny head
+    // motions -- a disc flashing on and off at forty-five degrees.
+    // Testing the nearest valid depth is approximate but stable.
+    cTap = clamp(cTap, 3.0 * texel, 1.0 - 3.0 * texel);
     float vis = 0.0;
     [unroll]
     for (int ty = -2; ty <= 2; ++ty) {
