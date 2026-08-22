@@ -581,14 +581,36 @@ void sunglareBegin(ID3D11DeviceContext* ctx) {
     // corrected. The pair-mean reference this replaces fixed only the
     // small inter-eye ratio and left the mono foreshortening whole.
     // Clamped: past ~76 degrees the quad would grow without bound.
+    // Two corrections, decomposed by what the field taught separately:
+    // the DIFFERENTIAL term equalizes this eye to the pair mean, always
+    // at full strength -- eye agreement is exact geometry, and its
+    // absence was the binocular blur -- and the MONO term corrects the
+    // flat-plane foreshortening (the edge-on disc), computed from the
+    // PAIR-MEAN eccentricity identically for both eyes so it can never
+    // reintroduce a mismatch, scaled by the knob because the game bakes
+    // an unknown partial correction of its own.
     float m00 = 1, m01 = 0, m11 = 1;
     if (g_eyeshape != 0.0f && sunAnchored) {
-        float sec2 = 1.0f + eccT * eccT;
-        if (sec2 > 16.0f) sec2 = 16.0f;
-        float sr = sec2;
-        float st = sqrtf(sec2);
-        sr = 1.0f + g_eyeshape * (sr - 1.0f);
-        st = 1.0f + g_eyeshape * (st - 1.0f);
+        float tOther = eccT;
+        if (g_spOtherValid && nowPair - g_spOtherMs < 50) {
+            const float pzo = fabsf(g_spOther[2]);
+            const float pxyo = sqrtf(g_spOther[0] * g_spOther[0] +
+                                     g_spOther[1] * g_spOther[1]);
+            if (pzo > 1e-3f) tOther = pxyo / pzo;
+        }
+        const float tm = 0.5f * (eccT + tOther);
+        float sec2e = 1.0f + eccT * eccT;
+        float sec2m = 1.0f + tm * tm;
+        if (sec2e > 16.0f) sec2e = 16.0f;
+        if (sec2m > 16.0f) sec2m = 16.0f;
+        const float sec1e = sqrtf(sec2e);
+        const float sec1m = sqrtf(sec2m);
+        const float srDiff = sec2e / sec2m;
+        const float stDiff = sec1e / sec1m;
+        const float srMono = 1.0f + g_eyeshape * (sec2m - 1.0f);
+        const float stMono = 1.0f + g_eyeshape * (sec1m - 1.0f);
+        const float sr = srDiff * srMono;
+        const float st = stDiff * stMono;
         if (eccT > 1e-4f) {
             m00 = sr * eccRx * eccRx + st * eccRy * eccRy;
             m01 = (sr - st) * eccRx * eccRy;
