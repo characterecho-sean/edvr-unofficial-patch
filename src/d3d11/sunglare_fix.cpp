@@ -100,7 +100,8 @@ float                g_trueRows[16] = {};
 bool                 g_trueRowsValid = false;
 uint64_t             g_trueRowsMs = 0;
 bool                 g_camDumped = false;
-bool                 g_camDumpWritten = false;
+int                  g_camDumpShot = 0;
+uint64_t             g_camDumpMs = 0;
 ID3D11Buffer*        g_trueCb = nullptr;      // owned; bound at b2
 ID3D11Buffer*        g_savedCb2 = nullptr;    // the game's, across a draw
 bool                 g_cb2Engaged = false;
@@ -514,27 +515,32 @@ void* sunglareSceneCbTarget() {
 // clamped rows -- nearly equal at level head -- so the true camera's
 // offset names itself. Written once per session while world mode is on.
 void sunglareSceneDump(const void* data, uint32_t bytes) {
-    // Gated on a glare draw having happened: the first session's dump
-    // fired during loading and captured a block of identity matrices --
-    // the camera slots only hold a real camera once a scene is up, and
-    // a glare draw proves both the scene and the star.
-    if (!g_world || g_camDumpWritten || g_lastSeenMs == 0 || !data ||
+    // Two shots per session, both gated on a glare draw having happened
+    // (the loading-state block is identity matrices wall to wall). Shot
+    // one lands at the star with the head level; shot two eight seconds
+    // later with the head held past the clamp -- the camera offset that
+    // FOLLOWED the head between the shots is the true one, the offset
+    // frozen at forty-five degrees is the head-look camera. Level-head
+    // dumps alone cannot tell them apart, which shot one proved.
+    if (!g_world || g_camDumpShot >= 2 || g_lastSeenMs == 0 || !data ||
         bytes < 1024) {
         return;
     }
-    g_camDumpWritten = true;
+    const uint64_t now = nowMs();
+    if (g_camDumpShot == 1 && now - g_camDumpMs < 8000) return;
+    ++g_camDumpShot;
+    g_camDumpMs = now;
     wchar_t path[MAX_PATH];
-    _snwprintf_s(path, _TRUNCATE, L"%s\\scenecb.bin",
-                 Config::get().logDir().c_str());
+    _snwprintf_s(path, _TRUNCATE, L"%s\\scenecb%d.bin",
+                 Config::get().logDir().c_str(), g_camDumpShot);
     HANDLE h = CreateFileW(path, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
                            FILE_ATTRIBUTE_NORMAL, nullptr);
     if (h == INVALID_HANDLE_VALUE) return;
     DWORD written = 0;
     WriteFile(h, data, bytes, &written, nullptr);
     CloseHandle(h);
-    Log::get().note("scene constants dumped: %u bytes to scenecb.bin -- "
-                    "the true camera's offset gets named desk-side.",
-                    bytes);
+    Log::get().note("scene constants shot %d dumped (%u bytes).",
+                    g_camDumpShot, bytes);
 }
 
 void sunglareSceneRows(const void* data, uint32_t bytes) {
