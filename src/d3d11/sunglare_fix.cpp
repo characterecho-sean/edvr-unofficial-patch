@@ -5,6 +5,7 @@
 #include <d3d11.h>
 
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 
 #include "../common/config.h"
@@ -110,10 +111,22 @@ float                g_trueView[12] = {};
 bool                 g_trueViewValid = false;
 uint64_t             g_trueViewMs = 0;
 float                g_camDist = 0.0f;   // |camera| in the glare frame,
-                                         // from the per-draw solve; the
-                                         // sun sits at the origin, so
-                                         // this is the sun distance
+                                         // from the per-draw solve. NOT
+                                         // the sun distance: the field
+                                         // showed the origin is Elite's
+                                         // drifting floating-origin
+                                         // anchor (re-anchored at the
+                                         // ship every ~25s, then ~190
+                                         // units/s away), not the sun.
 bool                 g_sunSolveOk = false;
+float                g_solvedCam[3] = {};
+// The camera-block census: the glare CB is 208 bytes and the shader
+// only reads rows 4..7 (floats 16..31). The sun's own position or
+// direction is somewhere in the rest; a few timed prints of the
+// unmapped floats, with a head turn between them, separate the
+// head-locked from the world-locked candidates.
+int                  g_blockShots = 0;
+uint64_t             g_blockShotMs = 0;
 bool                 g_camDumped = false;
 int                  g_camDumpShot = 0;
 uint64_t             g_camDumpMs = 0;
@@ -638,6 +651,33 @@ void sunglareBegin(ID3D11DeviceContext* ctx) {
                 g_worldDrawsAtNote = g_worldDraws;
                 g_worldEccMin = 1e9f;
                 g_worldEccMax = -1e9f;
+
+                // The camera-block census, six shots five seconds
+                // apart: every float the shader does NOT read, plus the
+                // solved camera. A unit triplet at the sun's angle is a
+                // direction; a triplet that lands on the sun after
+                // subtracting cam is a position; anything that moves
+                // with the head between shots is view-space.
+                if (sh && nf >= 52 && g_blockShots < 6 &&
+                    now - g_blockShotMs >= 5000) {
+                    ++g_blockShots;
+                    g_blockShotMs = now;
+                    char line[640];
+                    int o = 0;
+                    for (int k = 0; k < 16 && o < 600; ++k)
+                        o += snprintf(line + o, sizeof(line) - o, "%s%.3f",
+                                      k ? " " : "", sh[k]);
+                    Log::get().note("glare camblock %d f00..f15: %s",
+                                    g_blockShots, line);
+                    o = 0;
+                    for (int k = 32; k < 52 && o < 600; ++k)
+                        o += snprintf(line + o, sizeof(line) - o, "%s%.3f",
+                                      k > 32 ? " " : "", sh[k]);
+                    Log::get().note("glare camblock %d f32..f51: %s "
+                                    "cam=(%.1f %.1f %.1f)",
+                                    g_blockShots, line, g_solvedCam[0],
+                                    g_solvedCam[1], g_solvedCam[2]);
+                }
             }
         }
         const int v = g_world - 1;
@@ -710,6 +750,9 @@ void sunglareBegin(ID3D11DeviceContext* ctx) {
                         sunDir[1] = -cam[1] / lc;
                         sunDir[2] = -cam[2] / lc;
                         g_camDist = lc;
+                        g_solvedCam[0] = cam[0];
+                        g_solvedCam[1] = cam[1];
+                        g_solvedCam[2] = cam[2];
                         sunOk = true;
                     }
                 }
@@ -724,7 +767,15 @@ void sunglareBegin(ID3D11DeviceContext* ctx) {
                     float* f = static_cast<float*>(m.pData);
                     memset(f, 0, 48);            // row substitution retired
                     f[12] = 0.0f;                // tValid.x: rows are honest
-                    f[13] = sunOk ? 1.0f : 0.0f; // tValid.y: sun solve live
+                    // tValid.y HELD AT ZERO: the camera solve is proven
+                    // (d tracks the floating-origin sawtooth exactly,
+                    // resetting to the pose-translation magnitude at
+                    // each re-anchor) but the origin it points at is the
+                    // game's drifting world anchor, NOT the sun -- the
+                    // rebuild pinned the disc to the view axis. Stays
+                    // dark until the sun's own triplet is identified in
+                    // the camera block.
+                    f[13] = 0.0f;
                     f[14] = f[15] = 0.0f;
                     f[16] = sunDir[0];           // tSun
                     f[17] = sunDir[1];
