@@ -514,7 +514,14 @@ void* sunglareSceneCbTarget() {
 // clamped rows -- nearly equal at level head -- so the true camera's
 // offset names itself. Written once per session while world mode is on.
 void sunglareSceneDump(const void* data, uint32_t bytes) {
-    if (!g_world || g_camDumpWritten || !data || bytes < 1024) return;
+    // Gated on a glare draw having happened: the first session's dump
+    // fired during loading and captured a block of identity matrices --
+    // the camera slots only hold a real camera once a scene is up, and
+    // a glare draw proves both the scene and the star.
+    if (!g_world || g_camDumpWritten || g_lastSeenMs == 0 || !data ||
+        bytes < 1024) {
+        return;
+    }
     g_camDumpWritten = true;
     wchar_t path[MAX_PATH];
     _snwprintf_s(path, _TRUNCATE, L"%s\\scenecb.bin",
