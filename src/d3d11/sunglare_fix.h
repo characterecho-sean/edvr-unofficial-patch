@@ -27,6 +27,7 @@ enum class SunglareAction { kStock, kSkip, kClamp, kMatch };
 void sunglareConfigure(Config& cfg);
 bool sunglareWantsDraws();
 bool sunglareSteady();
+bool sunglareWorldActive();
 SunglareAction sunglareOnEyeDraw(char kind, uint32_t count,
                                  uint32_t instances);
 uint32_t sunglareKeep();

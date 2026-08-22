@@ -12,7 +12,8 @@
 #include "../common/timing.h"
 #include "billboard_fix.h"
 #include "binding_shadow.h"
-#include "exposure_fix.h"  // exposureDampingActive
+#include "exposure_fix.h"  // exposureDampingActive, lookupShaderHash
+#include "sunglare_vs.h"
 
 namespace edvr {
 namespace {
@@ -64,6 +65,68 @@ int      g_pairState = 0;    // 0 idle, 1 log-as-A, 2 log-as-B
 uint32_t g_pairsLogged = 0;
 constexpr uint32_t kPairMax = 24;
 bool     g_shadersNoted = false;
+
+// The shader swap. Compiled once per session through d3dcompiler_47
+// (present on every Windows 10/11); any failure logs once and stands
+// the swap down for the session -- the game then draws stock, which is
+// the house's failure posture everywhere.
+bool                 g_world = false;      // fix.sun_glare_world
+ID3D11VertexShader*  g_worldVs = nullptr;  // owned
+bool                 g_worldTried = false;
+ID3D11VertexShader*  g_savedVs = nullptr;  // the game's, across one draw
+bool                 g_worldEngaged = false;
+
+typedef HRESULT(WINAPI* PFN_D3DCompile)(const void*, SIZE_T, const char*,
+                                        const void*, void*, const char*,
+                                        const char*, UINT, UINT, void**);
+
+void buildWorldShader(ID3D11DeviceContext* ctx) {
+    g_worldTried = true;
+    HMODULE mod = LoadLibraryW(L"d3dcompiler_47.dll");
+    if (!mod) {
+        Log::get().note("sun glare world: d3dcompiler_47.dll not found; "
+                        "the swap stands down and the game draws stock.");
+        return;
+    }
+    PFN_D3DCompile compile = reinterpret_cast<PFN_D3DCompile>(
+        GetProcAddress(mod, "D3DCompile"));
+    if (!compile) return;
+    void* blob = nullptr;     // ID3DBlob*
+    void* errors = nullptr;
+    const HRESULT hr = compile(kSunglareWorldVS, sizeof(kSunglareWorldVS) - 1,
+                               "sunglare_world_vs", nullptr, nullptr, "main",
+                               "vs_5_0", 0, 0, &blob);
+    // ID3DBlob vtable: 0-2 IUnknown, 3 GetBufferPointer, 4 GetBufferSize.
+    struct BlobVtbl {
+        void* iunknown[3];
+        void*(__stdcall* GetBufferPointer)(void*);
+        SIZE_T(__stdcall* GetBufferSize)(void*);
+    };
+    if (FAILED(hr) || !blob) {
+        Log::get().note("sun glare world: shader compile failed (0x%08X); "
+                        "the swap stands down and the game draws stock.",
+                        static_cast<unsigned>(hr));
+        (void)errors;
+        return;
+    }
+    BlobVtbl* vt = *reinterpret_cast<BlobVtbl**>(blob);
+    const void* bytes = vt->GetBufferPointer(blob);
+    const SIZE_T len = vt->GetBufferSize(blob);
+    ID3D11Device* dev = nullptr;
+    ctx->GetDevice(&dev);
+    if (dev) {
+        dev->CreateVertexShader(bytes, len, nullptr, &g_worldVs);
+        dev->Release();
+    }
+    // Release the blob through IUnknown::Release (slot 2).
+    typedef ULONG(__stdcall * PFN_Release)(void*);
+    reinterpret_cast<PFN_Release>(
+        (*reinterpret_cast<void***>(blob))[2])(blob);
+    Log::get().note("sun glare world: replacement vertex shader %s -- the "
+                    "glare renders as a true world-anchored billboard%s.",
+                    g_worldVs ? "COMPILED" : "creation FAILED",
+                    g_worldVs ? "" : "; the game draws stock");
+}
 float    g_theta = 0;        // low-passed counter-rotation angle
 bool     g_thetaValid = false;
 uint64_t g_skipped = 0;
@@ -283,6 +346,15 @@ void sunglareConfigure(Config& cfg) {
     if (rc < -4.0f) rc = -4.0f;
     if (rc > 4.0f) rc = 4.0f;
     g_recenter = rc;
+    const bool wasWorld = g_world;
+    g_world = cfg.getBool("fix.sun_glare_world", false);
+    if (g_world != wasWorld) {
+        Log::get().note("sun glare world: %s -- the train's vertex shader "
+                        "is %s by the world-anchored replacement, written "
+                        "against the dumped original (vs 94D5C556DFD6D705).",
+                        g_world ? "ON" : "off",
+                        g_world ? "substituted" : "no longer substituted");
+    }
     const float wasEyeshape = g_eyeshape;
     float es = cfg.getFloat("fix.sun_glare_eyeshape", 0.0f);
     if (es < 0.0f) es = 0.0f;
@@ -324,10 +396,13 @@ void sunglareConfigure(Config& cfg) {
 // must keep running even with the glare fix itself stock, because the
 // last-seen stamp is what scopes the damper to the sun.
 bool sunglareWantsDraws() {
-    return g_mode != Mode::kStock || g_steady || exposureDampingActive();
+    return g_mode != Mode::kStock || g_steady || g_world ||
+           exposureDampingActive();
 }
 
 bool sunglareSteady() { return g_steady; }
+
+bool sunglareWorldActive() { return g_world; }
 
 uint64_t sunglareLastSeenMs() { return g_lastSeenMs; }
 
@@ -355,7 +430,24 @@ uint32_t sunglareKeep() { return g_keep; }
 
 void sunglareBegin(ID3D11DeviceContext* ctx) {
     g_engaged = false;
-    if (!g_steady || !ctx) return;
+    g_worldEngaged = false;
+    if (!ctx) return;
+
+    // The shader swap outranks the corner machinery: with the world
+    // shader in, position, orientation, facing and per-eye agreement
+    // are all computed correctly inside the pipeline, and the corner
+    // stream stays the game's own.
+    if (g_world) {
+        if (!g_worldTried) buildWorldShader(ctx);
+        if (g_worldVs) {
+            ctx->VSGetShader(&g_savedVs, nullptr, nullptr);
+            ctx->VSSetShader(g_worldVs, nullptr, 0);
+            g_worldEngaged = true;
+        }
+        return;
+    }
+
+    if (!g_steady) return;
 
     // The shader-swap arc's identification, once per session: which
     // vertex and pixel shader the train binds. With glare_shader_dump
@@ -672,7 +764,17 @@ void sunglareBegin(ID3D11DeviceContext* ctx) {
 }
 
 void sunglareEnd(ID3D11DeviceContext* ctx) {
-    if (!g_engaged || !ctx) return;
+    if (!ctx) return;
+    if (g_worldEngaged) {
+        ctx->VSSetShader(g_savedVs, nullptr, 0);
+        if (g_savedVs) {
+            g_savedVs->Release();
+            g_savedVs = nullptr;
+        }
+        g_worldEngaged = false;
+        return;
+    }
+    if (!g_engaged) return;
     ctx->IASetVertexBuffers(0, 1, &g_savedVb, &g_savedStride, &g_savedOffset);
     if (g_savedVb) {
         g_savedVb->Release();
