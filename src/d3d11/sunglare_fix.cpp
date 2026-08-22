@@ -147,7 +147,9 @@ float                g_streamCf[3] = {};     // camera forward at the last
                                              // began -- the death is
                                              // head-angle-driven, so the
                                              // trigger must be too
-constexpr uint32_t   kStreamDumpBytes = 384;
+constexpr uint32_t   kStreamDumpBytes = 2688;   // 21 records of 128B --
+                                                // enough to classify a
+                                                // whole i20 train
 // This draw's DrawInstanced window (set by the thunk) and the
 // per-second roster of distinct windows. The record buffer multiplexes
 // several trains at different instance offsets: the buffer HEAD the
@@ -458,6 +460,25 @@ void dumpInstanceStreams(ID3D11DeviceContext* ctx) {
                                   k > 48 ? " " : "", f[k]);
                 Log::get().note("glare stream slot %u f48..: %s", slot,
                                 line);
+            }
+            // The whole-train classification, one line: per record, the
+            // selection class the shader will assign -- 'a' anchored
+            // (kept in curated mode), 'x' anchored-but-axis-locked (a
+            // beam; collapsed), 's' slider (collapsed) -- plus the
+            // record's atlas tile x, the element's identity.
+            if (stride >= 64) {
+                const int recs = static_cast<int>(n / 128);
+                o = 0;
+                for (int k = 0; k < recs && k < 21 && o < 600; ++k) {
+                    const float* r = f + k * 32;
+                    const bool anch = r[12] > 0.999f && r[13] > 0.999f;
+                    const char c = anch ? (r[19] > 0.0f ? 'x' : 'a')
+                                        : 's';
+                    o += snprintf(line + o, sizeof(line) - o, "%s%c%.0f",
+                                  k ? " " : "", c, r[20]);
+                }
+                if (recs > 0)
+                    Log::get().note("glare stream classes: %s", line);
             }
             ctx->Unmap(g_streamStaging, 0);
         }
@@ -1027,7 +1048,16 @@ void sunglareBegin(ID3D11DeviceContext* ctx) {
                     // dark until the sun's own triplet is identified in
                     // the camera block.
                     f[13] = 0.0f;
-                    f[14] = f[15] = 0.0f;
+                    // tValid.z: element SELECTION. The record list is
+                    // dynamic and reorders with the head-look camera,
+                    // so the prefix clamp is retired under the world
+                    // shader; a curated sun_glare (first:K) becomes
+                    // "keep the anchored, non-axis-locked elements" --
+                    // the corona and smudge class -- selected per
+                    // RECORD in the shader, immune to reordering.
+                    // stock keeps every element (the vivid mode).
+                    f[14] = (g_mode == Mode::kFirst) ? 1.0f : 0.0f;
+                    f[15] = 0.0f;
                     f[16] = sunDir[0];           // tSun
                     f[17] = sunDir[1];
                     f[18] = sunDir[2];

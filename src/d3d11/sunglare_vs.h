@@ -79,13 +79,24 @@ VSOut main(VSIn i) {
     // The anchor weights: 1,1 means "sit on the element" -- those are
     // the world-path elements. Anything else is a slider and keeps the
     // original flat behaviour.
-    bool worldPath = i.p3.x > 0.999 && i.p3.y > 0.999;
+    bool anchored = i.p3.x > 0.999 && i.p3.y > 0.999;
+    bool worldPath = anchored;
 #ifdef ALLWORLD
     worldPath = true;
 #endif
 #ifdef ALLFLAT
     worldPath = false;
 #endif
+
+    // Element SELECTION by record, not by instance index. The game's
+    // record list is dynamic: elements enter and REORDER with its
+    // head-look camera (the forty-five-degree disappearing disc was a
+    // prefix clamp faithfully drawing a reordered slot). tValid.z asks
+    // for the curated set: anchored, non-axis-locked elements -- the
+    // corona and smudge class; beams (axis-locked) and the lens-flare
+    // sliders collapse. Selection is identity-proof under any reorder
+    // because it reads what the record IS.
+    bool selected = tValid.z > 0.5 ? (anchored && i.t4.w <= 0.0) : true;
 
     // The element position, REBUILT. i.pos is computed CPU-side in the
     // game's head-look frame and goes stale past the clamp -- the one
@@ -267,6 +278,9 @@ VSOut main(VSIn i) {
         svpos = float4(0.0, 0.0, 0.0, 0.0);
     }
 #endif
+    // Selection is not the occlusion gate: an unselected element stays
+    // collapsed even under NOGATE diagnostics.
+    if (!selected) svpos = float4(0.0, 0.0, 0.0, 0.0);
     o.pos = svpos;
     o.t1.rgb = visFrac * i.col;
     o.t1.a = i.t4.x;

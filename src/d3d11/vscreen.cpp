@@ -1144,6 +1144,15 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
             // but its telemetry reads the sun position out of it, so the
             // target-follow side effect still runs (return value moot).
             if (sunglareWorldActive()) {
+                // NO prefix clamp under the world shader. The record
+                // list is DYNAMIC -- elements enter and reorder with
+                // the game's head-look camera (the roster: i15 becomes
+                // i20 as the head crosses ~45 degrees), so "the first
+                // K" names different ELEMENTS frame to frame; that
+                // reorder crossing slot 0 was the whole disappearing-
+                // disc mystery. The shader selects by what each record
+                // IS instead; every instance must reach it.
+                s->glareClamp = 0;
                 billboardOnGlareDraw(count, instances);
                 return DrawVerdict::kGlareSteady;
             }
