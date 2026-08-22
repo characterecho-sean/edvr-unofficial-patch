@@ -9,3 +9,5 @@ edvr_breadcrumbs.txt
 
 # Claude Code's working directory: agent worktrees, local settings, transcripts.
 .claude/
+
+build - Copy/
