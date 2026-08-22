@@ -494,28 +494,41 @@ SunglareAction sunglareOnEyeDraw(char kind, uint32_t count,
 
 uint32_t sunglareKeep() { return g_keep; }
 
-void sunglareCameraRows(const void* data, uint32_t bytes) {
+// The scene-CB follow: any big eye-target draw's 208-byte constants are
+// the engine-standard camera block carrying that eye's TRUE view rows --
+// the flash detector's 5376-byte buffer was the wrong well (its head is
+// zeros; my first grab fed the shader nothing). The cockpit geometry
+// draws before each eye's glare, so the last scene write before a glare
+// draw is that same eye's true camera.
+void* g_sceneCbTarget = nullptr;
+
+void sunglareSceneCb(void* cb) { g_sceneCbTarget = cb; }
+
+void* sunglareSceneCbTarget() {
+    return g_world ? g_sceneCbTarget : nullptr;
+}
+
+void sunglareSceneRows(const void* data, uint32_t bytes) {
     if (!g_world || !data || bytes < 128) return;
-    // The first capture logs the buffer's head so the real row offsets
-    // identify themselves -- the assumption that the scene camera keeps
-    // its rows where the glare camera does killed the disc everywhere,
-    // and this line is how the actual layout gets named.
-    if (!g_camDumped) {
-        g_camDumped = true;
-        const float* f = static_cast<const float*>(data);
-        Log::get().note("scene cam CB: %u bytes.", bytes);
-        for (int base = 0; base < 48; base += 8) {
-            Log::get().note("scene cam [%2d] %.4g %.4g %.4g %.4g  %.4g "
-                            "%.4g %.4g %.4g",
-                            base, f[base], f[base + 1], f[base + 2],
-                            f[base + 3], f[base + 4], f[base + 5],
-                            f[base + 6], f[base + 7]);
-        }
-    }
-    memcpy(g_trueRows, static_cast<const float*>(data) + 16,
-           sizeof(g_trueRows));
+    const float* f = static_cast<const float*>(data);
+    // The rows-shape gate, so a non-camera 208-byte block cannot poison
+    // the feed: two finite basis rows of sane magnitude and a near-unit
+    // forward row -- the structure every capture of this layout showed.
+    const float l4 = sqrtf(f[16] * f[16] + f[17] * f[17] + f[18] * f[18]);
+    const float l5 = sqrtf(f[20] * f[20] + f[21] * f[21] + f[22] * f[22]);
+    const float l7 = sqrtf(f[28] * f[28] + f[29] * f[29] + f[30] * f[30]);
+    if (!(l4 > 0.05f && l4 < 20.0f)) return;
+    if (!(l5 > 0.05f && l5 < 20.0f)) return;
+    if (!(l7 > 0.5f && l7 < 2.0f)) return;
+    memcpy(g_trueRows, f + 16, sizeof(g_trueRows));
     g_trueRowsValid = true;
     g_trueRowsMs = nowMs();
+    if (!g_camDumped) {
+        g_camDumped = true;
+        Log::get().note("scene camera rows captured (|r|=%.3f |u|=%.3f "
+                        "|f|=%.3f) -- the true-view feed is live.",
+                        l4, l5, l7);
+    }
 }
 
 void sunglareBegin(ID3D11DeviceContext* ctx) {

@@ -330,6 +330,13 @@ struct State {
     // And a fourth, for the billboard fix's per-write capture of the sprite
     // constants. Same separation argument; the peek and the fix can watch
     // the SAME buffer at the same time, and each keeps its own record.
+    // And a fifth, the world shader's true-camera feed: the scene CB
+    // nominated at the last big eye draw.
+    void*    sceneCbResource = nullptr;
+    void*    sceneCbData = nullptr;
+    uint32_t sceneCbBytes = 0;
+    void*    sceneCbNominated = nullptr;   // resolve-once cache
+
     void*    bbResource = nullptr;
     void*    bbData = nullptr;
     uint32_t bbBytes = 0;
@@ -1010,6 +1017,23 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     }
     ++s->eyeDrawsThisFrame;
 
+    // Nominate the scene camera for the world shader: a big eye-target
+    // draw's 208-byte constants are the engine-standard camera block
+    // with THIS eye's true rows -- the head-look clamp never touches
+    // them. Pointer-cached so the resolve runs once per change, not per
+    // draw.
+    if (sunglareWorldActive() && count > 10000) {
+        void* cb = bindingGet(BindSlot::VsCb0);
+        if (cb && cb != s->sceneCbNominated) {
+            ResourceInfo info;
+            if (bindingResolveResource(cb, &info) && info.isBuffer &&
+                info.a == 208) {
+                s->sceneCbNominated = cb;
+                sunglareSceneCb(cb);
+            }
+        }
+    }
+
     // The census line for this draw, recorded while its bindings are certainly
     // the ones it will run with. Armed is rare and brief; the cost of asking is
     // one call and one bool.
@@ -1471,6 +1495,21 @@ HRESULT STDMETHODCALLTYPE hookedMap(ID3D11DeviceContext* self, ID3D11Resource* r
             s->bbBytes = d.ByteWidth;
         }
     }
+    // The world shader's true-camera feed: the scene CB vscreen
+    // nominated at the last big eye draw, same discipline again.
+    if (SUCCEEDED(hr) && mapped && sub == 0 &&
+        res == sunglareSceneCbTarget()) {
+        s->sceneCbResource = res;
+        s->sceneCbData = mapped->pData;
+        s->sceneCbBytes = 0;
+        D3D11_RESOURCE_DIMENSION dim = D3D11_RESOURCE_DIMENSION_UNKNOWN;
+        res->GetType(&dim);
+        if (dim == D3D11_RESOURCE_DIMENSION_BUFFER) {
+            D3D11_BUFFER_DESC d{};
+            static_cast<ID3D11Buffer*>(res)->GetDesc(&d);
+            s->sceneCbBytes = d.ByteWidth;
+        }
+    }
     return hr;
 }
 
@@ -1501,8 +1540,6 @@ void STDMETHODCALLTYPE hookedUnmap(ID3D11DeviceContext* self, ID3D11Resource* re
             // The projection hunt reads the same bytes on its own clock;
             // one tee, no second map.
             fovProbeObserve(s->camData, s->camBytes);
-            // The world shader's true-camera feed; same tee, same rule.
-            sunglareCameraRows(s->camData, s->camBytes);
         });
         s->camResource = nullptr;
         s->camData = nullptr;
@@ -1517,6 +1554,14 @@ void STDMETHODCALLTYPE hookedUnmap(ID3D11DeviceContext* self, ID3D11Resource* re
         s->peekResource = nullptr;
         s->peekData = nullptr;
         s->peekBytes = 0;
+    }
+    if (res == s->sceneCbResource && s->sceneCbData) {
+        guardedBudget(g_cameraBudget, [&] {
+            sunglareSceneRows(s->sceneCbData, s->sceneCbBytes);
+        });
+        s->sceneCbResource = nullptr;
+        s->sceneCbData = nullptr;
+        s->sceneCbBytes = 0;
     }
     if (res == s->bbResource && s->bbData) {
         guardedBudget(g_cameraBudget,
