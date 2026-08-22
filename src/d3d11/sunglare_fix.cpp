@@ -35,9 +35,18 @@ Mode     g_mode = Mode::kStock;
 uint32_t g_keep = 0;
 bool     g_steady = false;
 int      g_steadyMode = 0;   // 0 off, 1 counter-rotate, 2 fixed-30 test
-float    g_recenter = 0;     // fix.sun_glare_recenter: corner-translation
-                             // gain that pushes the elements back onto
-                             // the star against the flare placement slide
+float    g_recenter = 0;     // fix.sun_glare_recenter, REPURPOSED after
+                             // the eye-pair measurement: the eye-sync
+                             // gain. Each eye's elements shift by half
+                             // the inter-eye sun-position difference
+                             // toward the pair mean -- anti-symmetric, so
+                             // the lateral position stays stock and only
+                             // the disparity (the depth artifact)
+                             // collapses.
+float    g_spOther[3] = {};  // the OTHER eye's sun position, one matched
+                             // draw ago -- the train alternates eyes
+bool     g_spOtherValid = false;
+uint64_t g_spOtherMs = 0;
 uint64_t g_lastSeenMs = 0;   // when the train last drew
 
 // The eye-pair logger, the eye-sync approach's measurement: the train
@@ -484,12 +493,28 @@ void sunglareBegin(ID3D11DeviceContext* ctx) {
     // factor is the game's secret and the corner-to-screen scale is the
     // instance's.
     float tx = 0, ty = 0;
-    if (g_recenter != 0.0f && sunAnchored) {
-        const float sp[3] = {sh[19], sh[23], sh[31]};
-        if (fabsf(sp[2]) > 1e-3f) {
-            tx = g_recenter * (sp[0] / fabsf(sp[2]));
-            ty = g_recenter * (sp[1] / fabsf(sp[2]));
+    {
+        const float spNow[3] = {sh[19], sh[23], sh[31]};
+        // The eye-sync term. The eye-pair measurement showed the two
+        // eyes' sun positions differ by an 11-degree horizontal offset
+        // -- each eye's position is relative to its own optical axis,
+        // frustum asymmetry baked in -- so the flare slide computes
+        // differently per eye, and that disagreement IS the depth
+        // artifact. Each eye shifts by half the difference toward the
+        // pair mean: anti-symmetric, so the lateral position stays
+        // stock and only the disparity collapses. The gain is tuned in
+        // the field because the corner-to-screen scale is the
+        // instance's secret; the correct value is where the tilt dies.
+        if (g_recenter != 0.0f && sunAnchored && g_spOtherValid &&
+            nowPair - g_spOtherMs < 50 && fabsf(spNow[2]) > 1e-3f) {
+            const float dx = (spNow[0] - g_spOther[0]) * 0.5f;
+            const float dy = (spNow[1] - g_spOther[1]) * 0.5f;
+            tx = -g_recenter * dx / fabsf(spNow[2]);
+            ty = -g_recenter * dy / fabsf(spNow[2]);
         }
+        memcpy(g_spOther, spNow, sizeof(spNow));
+        g_spOtherValid = true;
+        g_spOtherMs = nowPair;
     }
     uint16_t* out = static_cast<uint16_t*>(m.pData);
     memcpy(out, g_corners, kCornerBytes);
