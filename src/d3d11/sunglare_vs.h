@@ -100,6 +100,12 @@ VSOut main(VSIn i) {
     // the world-path elements. Anything else is a slider and keeps the
     // original flat behaviour.
     bool worldPath = i.p3.x > 0.999 && i.p3.y > 0.999;
+#ifdef ALLWORLD
+    worldPath = true;
+#endif
+#ifdef ALLFLAT
+    worldPath = false;
+#endif
 
     // ---- position ----
     float4 svpos;
@@ -158,28 +164,37 @@ VSOut main(VSIn i) {
     }
 
     // ---- the 25-tap visibility test, at the element centre ----
+    // The taps sample the PER-EYE depth at eye-normalized coordinates
+    // with a flipped Y -- ndc*0.5+0.5, NO viewport remap. The first
+    // port remapped into target space, read the wrong depth, and the
+    // gate collapsed every quad: the disc vanished entirely.
     float2 texel = 1.0 / cb1[332].xy;
     float2 c01 = ndc * 0.5 + 0.5;
-    float2 cTex = vpSize * c01 + vpMin;
+    float2 cTap = float2(c01.x, 1.0 - c01.y);
     float vis = 0.0;
     [unroll]
     for (int ty = -2; ty <= 2; ++ty) {
         [unroll]
         for (int tx = -2; tx <= 2; ++tx) {
-            float2 uv = cTex + float2(tx, ty) * texel;
+            float2 uv = cTap + float2(tx, ty) * texel;
             float dep = t0.SampleLevel(s0, uv, 0.0).x;
             vis += (depthRef < dep) ? 1.0 : 0.0;
         }
     }
     float visFrac = vis * 0.04;
+#ifdef NOGATE
+    visFrac = 1.0;
+#endif
 
     // Gate and outputs, verbatim: the original collapses the quad to
     // degenerate unless MORE THAN a quarter-tap of the sun is visible
     // (count > 0.25 -- one tap of twenty-five suffices), and behind the
     // camera counts as hidden.
+#ifndef NOGATE
     if (vis <= 0.25 || cw <= 0.0) {
         svpos = float4(0.0, 0.0, 0.0, 0.0);
     }
+#endif
     o.pos = svpos;
     o.t1.rgb = visFrac * i.col;
     o.t1.a = i.t4.x;

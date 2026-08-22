@@ -71,9 +71,14 @@ bool     g_shadersNoted = false;
 // (present on every Windows 10/11); any failure logs once and stands
 // the swap down for the session -- the game then draws stock, which is
 // the house's failure posture everywhere.
-bool                 g_world = false;      // fix.sun_glare_world
-ID3D11VertexShader*  g_worldVs = nullptr;  // owned
-bool                 g_worldTried = false;
+// fix.sun_glare_world selects a compiled VARIANT, so in-shader
+// bisection happens live from the ini without a rebuild: 1 = normal,
+// 2 = visibility gate bypassed, 3 = every element world-anchored,
+// 4 = every element on the ported flat path.
+constexpr int kWorldVariants = 4;
+int                  g_world = 0;
+ID3D11VertexShader*  g_worldVs[kWorldVariants] = {};   // owned, lazy
+bool                 g_worldTried[kWorldVariants] = {};
 ID3D11VertexShader*  g_savedVs = nullptr;  // the game's, across one draw
 bool                 g_worldEngaged = false;
 
@@ -105,7 +110,9 @@ void blobRelease(void* blob) {
 
 FaultBudget g_worldBudget("sunglareWorld", 3);
 
-void buildWorldShaderInner(ID3D11DeviceContext* ctx) {
+struct ShaderMacro { const char* name; const char* def; };
+
+void buildWorldShaderInner(ID3D11DeviceContext* ctx, int variant) {
     HMODULE mod = LoadLibraryW(L"d3dcompiler_47.dll");
     if (!mod) {
         Log::get().note("sun glare world: d3dcompiler_47.dll not found; "
@@ -115,10 +122,16 @@ void buildWorldShaderInner(ID3D11DeviceContext* ctx) {
     PFN_D3DCompile compile = reinterpret_cast<PFN_D3DCompile>(
         GetProcAddress(mod, "D3DCompile"));
     if (!compile) return;
+    ShaderMacro macros[3] = {};
+    int m = 0;
+    if (variant == 2) macros[m++] = {"NOGATE", "1"};
+    if (variant == 3) macros[m++] = {"ALLWORLD", "1"};
+    if (variant == 4) macros[m++] = {"ALLFLAT", "1"};
     void* blob = nullptr;
     void* errors = nullptr;
     const HRESULT hr = compile(kSunglareWorldVS, sizeof(kSunglareWorldVS) - 1,
-                               "sunglare_world_vs", nullptr, nullptr, "main",
+                               "sunglare_world_vs",
+                               m ? macros : nullptr, nullptr, "main",
                                "vs_5_0", 0, 0, &blob, &errors);
     if (errors) {
         if (FAILED(hr)) {
@@ -137,19 +150,19 @@ void buildWorldShaderInner(ID3D11DeviceContext* ctx) {
     ctx->GetDevice(&dev);
     if (dev) {
         dev->CreateVertexShader(blobPtr(blob), blobSize(blob), nullptr,
-                                &g_worldVs);
+                                &g_worldVs[variant - 1]);
         dev->Release();
     }
     blobRelease(blob);
-    Log::get().note("sun glare world: replacement vertex shader %s -- the "
-                    "glare renders as a true world-anchored billboard%s.",
-                    g_worldVs ? "COMPILED" : "creation FAILED",
-                    g_worldVs ? "" : "; the game draws stock");
+    Log::get().note("sun glare world: variant %d %s.", variant,
+                    g_worldVs[variant - 1] ? "COMPILED"
+                                           : "creation FAILED; stock");
 }
 
-void buildWorldShader(ID3D11DeviceContext* ctx) {
-    g_worldTried = true;
-    guardedBudget(g_worldBudget, [&] { buildWorldShaderInner(ctx); });
+void buildWorldShader(ID3D11DeviceContext* ctx, int variant) {
+    g_worldTried[variant - 1] = true;
+    guardedBudget(g_worldBudget,
+                  [&] { buildWorldShaderInner(ctx, variant); });
 }
 float    g_theta = 0;        // low-passed counter-rotation angle
 bool     g_thetaValid = false;
@@ -370,14 +383,18 @@ void sunglareConfigure(Config& cfg) {
     if (rc < -4.0f) rc = -4.0f;
     if (rc > 4.0f) rc = 4.0f;
     g_recenter = rc;
-    const bool wasWorld = g_world;
-    g_world = cfg.getBool("fix.sun_glare_world", false);
+    const int wasWorld = g_world;
+    g_world = cfg.getIntInRange("fix.sun_glare_world", 0, 0, kWorldVariants);
     if (g_world != wasWorld) {
+        static const char* kVariantNames[] = {
+            "off", "normal", "GATE BYPASSED (diagnostic)",
+            "ALL ELEMENTS WORLD-ANCHORED (diagnostic)",
+            "ALL ELEMENTS FLAT (diagnostic)"};
         Log::get().note("sun glare world: %s -- the train's vertex shader "
-                        "is %s by the world-anchored replacement, written "
-                        "against the dumped original (vs 94D5C556DFD6D705).",
-                        g_world ? "ON" : "off",
-                        g_world ? "substituted" : "no longer substituted");
+                        "is %s the world-anchored replacement (written "
+                        "against the dumped vs 94D5C556DFD6D705).",
+                        kVariantNames[g_world],
+                        g_world ? "substituted with" : "no longer");
     }
     const float wasEyeshape = g_eyeshape;
     float es = cfg.getFloat("fix.sun_glare_eyeshape", 0.0f);
@@ -426,7 +443,7 @@ bool sunglareWantsDraws() {
 
 bool sunglareSteady() { return g_steady; }
 
-bool sunglareWorldActive() { return g_world; }
+bool sunglareWorldActive() { return g_world != 0; }
 
 uint64_t sunglareLastSeenMs() { return g_lastSeenMs; }
 
@@ -462,10 +479,11 @@ void sunglareBegin(ID3D11DeviceContext* ctx) {
     // are all computed correctly inside the pipeline, and the corner
     // stream stays the game's own.
     if (g_world) {
-        if (!g_worldTried) buildWorldShader(ctx);
-        if (g_worldVs) {
+        const int v = g_world - 1;
+        if (!g_worldTried[v]) buildWorldShader(ctx, g_world);
+        if (g_worldVs[v]) {
             ctx->VSGetShader(&g_savedVs, nullptr, nullptr);
-            ctx->VSSetShader(g_worldVs, nullptr, 0);
+            ctx->VSSetShader(g_worldVs[v], nullptr, 0);
             g_worldEngaged = true;
         }
         return;
