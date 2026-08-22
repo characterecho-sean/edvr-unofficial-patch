@@ -99,6 +99,7 @@ float                g_worldEccMax = -1e9f;
 float                g_trueRows[16] = {};
 bool                 g_trueRowsValid = false;
 uint64_t             g_trueRowsMs = 0;
+bool                 g_camDumped = false;
 ID3D11Buffer*        g_trueCb = nullptr;      // owned; bound at b2
 ID3D11Buffer*        g_savedCb2 = nullptr;    // the game's, across a draw
 bool                 g_cb2Engaged = false;
@@ -495,6 +496,22 @@ uint32_t sunglareKeep() { return g_keep; }
 
 void sunglareCameraRows(const void* data, uint32_t bytes) {
     if (!g_world || !data || bytes < 128) return;
+    // The first capture logs the buffer's head so the real row offsets
+    // identify themselves -- the assumption that the scene camera keeps
+    // its rows where the glare camera does killed the disc everywhere,
+    // and this line is how the actual layout gets named.
+    if (!g_camDumped) {
+        g_camDumped = true;
+        const float* f = static_cast<const float*>(data);
+        Log::get().note("scene cam CB: %u bytes.", bytes);
+        for (int base = 0; base < 48; base += 8) {
+            Log::get().note("scene cam [%2d] %.4g %.4g %.4g %.4g  %.4g "
+                            "%.4g %.4g %.4g",
+                            base, f[base], f[base + 1], f[base + 2],
+                            f[base + 3], f[base + 4], f[base + 5],
+                            f[base + 6], f[base + 7]);
+        }
+    }
     memcpy(g_trueRows, static_cast<const float*>(data) + 16,
            sizeof(g_trueRows));
     g_trueRowsValid = true;
