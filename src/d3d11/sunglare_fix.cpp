@@ -570,21 +570,23 @@ void sunglareBegin(ID3D11DeviceContext* ctx) {
     // disparity gradient that read as a tilting, breathing disc
     // collapses. Pure geometry from this eye's own sun direction; the
     // strength knob exists in case the game already half-compensates.
+    // The foreshortening pre-compensation, referenced to ON-AXIS -- the
+    // field description that fixed the reference: at ninety degrees of
+    // eccentricity the disc appeared edge-on, because the game draws it
+    // flat in the projection plane, tilted away from the line of sight
+    // by exactly the eccentricity. Radial sec-squared (the plane's own
+    // magnification) times the facing correction; tangential sec. The
+    // disc then subtends the same round patch wherever the head points,
+    // and the eyes agree automatically because each is exactly
+    // corrected. The pair-mean reference this replaces fixed only the
+    // small inter-eye ratio and left the mono foreshortening whole.
+    // Clamped: past ~76 degrees the quad would grow without bound.
     float m00 = 1, m01 = 0, m11 = 1;
     if (g_eyeshape != 0.0f && sunAnchored) {
-        const float t = eccT;
-        float tOther = t;
-        if (g_spOtherValid && nowPair - g_spOtherMs < 50) {
-            const float pzo = fabsf(g_spOther[2]);
-            const float pxyo = sqrtf(g_spOther[0] * g_spOther[0] +
-                                     g_spOther[1] * g_spOther[1]);
-            if (pzo > 1e-3f) tOther = pxyo / pzo;
-        }
-        const float tm = 0.5f * (t + tOther);
-        const float sec2 = 1.0f + t * t;
-        const float sec2m = 1.0f + tm * tm;
-        float sr = sec2 / sec2m;
-        float st = sqrtf(sec2) / sqrtf(sec2m);
+        float sec2 = 1.0f + eccT * eccT;
+        if (sec2 > 16.0f) sec2 = 16.0f;
+        float sr = sec2;
+        float st = sqrtf(sec2);
         sr = 1.0f + g_eyeshape * (sr - 1.0f);
         st = 1.0f + g_eyeshape * (st - 1.0f);
         if (eccT > 1e-4f) {
