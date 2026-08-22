@@ -87,6 +87,22 @@ uint64_t             g_worldNoteMs = 0;
 float                g_worldEccMin = 1e9f;
 float                g_worldEccMax = -1e9f;
 
+// The true camera rows, captured from the SCENE camera constants the
+// transition-flash tee already observes -- because the glare system is
+// fed the game's internal head-look camera, which CLAMPS at 45 degrees
+// from ship-forward: past the clamp the glare CB simply does not know
+// where the star is, and no shader logic can recover information its
+// constants lack. The scene camera knows. Rows 4, 5 and 7 of the same
+// engine-standard layout, latest write wins (the frame interleaves per
+// eye, scene block before glare block, so the latest write is this
+// eye's).
+float                g_trueRows[16] = {};
+bool                 g_trueRowsValid = false;
+uint64_t             g_trueRowsMs = 0;
+ID3D11Buffer*        g_trueCb = nullptr;      // owned; bound at b2
+ID3D11Buffer*        g_savedCb2 = nullptr;    // the game's, across a draw
+bool                 g_cb2Engaged = false;
+
 // The FULL eleven-parameter signature. The first field build declared
 // ten -- no ppErrorMsgs -- so D3DCompile wrote its error-blob pointer
 // through whatever garbage sat in the eleventh slot, and the game
@@ -477,6 +493,14 @@ SunglareAction sunglareOnEyeDraw(char kind, uint32_t count,
 
 uint32_t sunglareKeep() { return g_keep; }
 
+void sunglareCameraRows(const void* data, uint32_t bytes) {
+    if (!g_world || !data || bytes < 128) return;
+    memcpy(g_trueRows, static_cast<const float*>(data) + 16,
+           sizeof(g_trueRows));
+    g_trueRowsValid = true;
+    g_trueRowsMs = nowMs();
+}
+
 void sunglareBegin(ID3D11DeviceContext* ctx) {
     g_engaged = false;
     g_worldEngaged = false;
@@ -523,6 +547,44 @@ void sunglareBegin(ID3D11DeviceContext* ctx) {
             ctx->VSGetShader(&g_savedVs, nullptr, nullptr);
             ctx->VSSetShader(g_worldVs[v], nullptr, 0);
             g_worldEngaged = true;
+
+            // The true-camera constants at b2: rows 4, 5 and 7 of the
+            // scene camera, plus a validity flag the shader reads --
+            // stale or absent rows fall back to the clamped cb0 rows,
+            // which is exactly the pre-b2 behaviour.
+            if (!g_trueCb) {
+                ID3D11Device* dev = nullptr;
+                ctx->GetDevice(&dev);
+                if (dev) {
+                    D3D11_BUFFER_DESC bd{};
+                    bd.ByteWidth = 64;
+                    bd.Usage = D3D11_USAGE_DYNAMIC;
+                    bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+                    bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+                    dev->CreateBuffer(&bd, nullptr, &g_trueCb);
+                    dev->Release();
+                }
+            }
+            if (g_trueCb) {
+                const bool fresh =
+                    g_trueRowsValid && nowMs() - g_trueRowsMs < 100;
+                D3D11_MAPPED_SUBRESOURCE m{};
+                if (SUCCEEDED(ctx->Map(g_trueCb, 0, D3D11_MAP_WRITE_DISCARD,
+                                       0, &m)) &&
+                    m.pData) {
+                    float* f = static_cast<float*>(m.pData);
+                    memcpy(f, g_trueRows, 16);            // row 4
+                    memcpy(f + 4, g_trueRows + 4, 16);    // row 5
+                    memcpy(f + 8, g_trueRows + 12, 16);   // row 7
+                    f[12] = fresh ? 1.0f : 0.0f;
+                    f[13] = f[14] = f[15] = 0.0f;
+                    ctx->Unmap(g_trueCb, 0);
+                    ctx->VSGetConstantBuffers(2, 1, &g_savedCb2);
+                    ID3D11Buffer* ours = g_trueCb;
+                    ctx->VSSetConstantBuffers(2, 1, &ours);
+                    g_cb2Engaged = true;
+                }
+            }
         }
         return;
     }
@@ -850,6 +912,14 @@ void sunglareEnd(ID3D11DeviceContext* ctx) {
         if (g_savedVs) {
             g_savedVs->Release();
             g_savedVs = nullptr;
+        }
+        if (g_cb2Engaged) {
+            ctx->VSSetConstantBuffers(2, 1, &g_savedCb2);
+            if (g_savedCb2) {
+                g_savedCb2->Release();
+                g_savedCb2 = nullptr;
+            }
+            g_cb2Engaged = false;
         }
         g_worldEngaged = false;
         return;

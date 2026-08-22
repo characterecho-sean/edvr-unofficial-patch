@@ -1501,6 +1501,8 @@ void STDMETHODCALLTYPE hookedUnmap(ID3D11DeviceContext* self, ID3D11Resource* re
             // The projection hunt reads the same bytes on its own clock;
             // one tee, no second map.
             fovProbeObserve(s->camData, s->camBytes);
+            // The world shader's true-camera feed; same tee, same rule.
+            sunglareCameraRows(s->camData, s->camBytes);
         });
         s->camResource = nullptr;
         s->camData = nullptr;

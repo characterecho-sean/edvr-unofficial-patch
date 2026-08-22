@@ -38,6 +38,14 @@ uint32_t sunglareKeep();
 void sunglareBegin(ID3D11DeviceContext* ctx);
 void sunglareEnd(ID3D11DeviceContext* ctx);
 
+// The true scene-camera constants, fed from vscreen's camera tee: the
+// glare system runs on the game's head-look camera, which clamps at 45
+// degrees from ship-forward, so past the clamp its constants no longer
+// know where the star is. The scene camera always knows; the world
+// shader projects through these rows instead, via a constants slot the
+// swap owns.
+void sunglareCameraRows(const void* data, uint32_t bytes);
+
 // The train's identity test, exported for the constant-buffer peek: the
 // steer needs to read the 208-byte CB of exactly these draws, and two
 // matchers for one family is how the witchstar era learned wrong things.

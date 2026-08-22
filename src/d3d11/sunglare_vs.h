@@ -26,6 +26,17 @@ namespace edvr {
 constexpr const char kSunglareWorldVS[] = R"HLSL(
 cbuffer CB0 : register(b0) { float4 cb0[8]; };
 cbuffer CB1 : register(b1) { float4 cb1[333]; };
+// The true scene-camera rows, supplied by the swap at a slot it owns.
+// The glare system's own camera (cb0) clamps at forty-five degrees of
+// head-look; past the clamp its constants no longer know where the
+// star is, and the disc used to clip out at a clean line. tValid.x
+// gates the substitution so a stale feed falls back to cb0 exactly.
+cbuffer CBT : register(b2) {
+    float4 tRow4;
+    float4 tRow5;
+    float4 tRow7;
+    float4 tValid;
+};
 Texture2D t0 : register(t0);
 SamplerState s0 : register(s0);
 
@@ -58,11 +69,20 @@ VSOut main(VSIn i) {
     o.t3.xy = i.t5.xy * float2(0.0625, 0.125)
             + i.uvc.xy * i.t5.zw * float2(0.0625, 0.125);
 
-    // The element centre through the game's own rows.
+    // The element centre through the game's own rows -- and through the
+    // TRUE rows beside them. The element's world position is valid at
+    // every head angle; only the clamped camera stops being.
     float4 P = float4(i.pos.xyz, 1.0);
     float cx = dot(cb0[4], P);
     float cy = dot(cb0[5], P);
     float cw = dot(cb0[7], P);
+    bool haveTrue = tValid.x > 0.5;
+    float4 row4 = haveTrue ? tRow4 : cb0[4];
+    float4 row5 = haveTrue ? tRow5 : cb0[5];
+    float4 row7 = haveTrue ? tRow7 : cb0[7];
+    float tcx = dot(row4, P);
+    float tcy = dot(row5, P);
+    float tcw = dot(row7, P);
 
     // Occlusion reference depth, verbatim.
     float depthRef = (i.pos.w < 0.5) ? cw : max(cw - i.pos.w, 0.0);
@@ -134,17 +154,18 @@ VSOut main(VSIn i) {
         if (i.t7.w > 0.0) halfNdc = halfNdc * cb1[91].w;
         float2 half2 = halfNdc * i.uvc.zw;
         // NDC half-extent -> world half-extent at the element's depth,
-        // PER AXIS: d(ndc)/d(world-offset) along each row is |row|/w,
-        // and the rows' magnitudes differ by the aspect.
-        float toWorldX = cw / max(length(cb0[4].xyz), 1e-4);
-        float toWorldY = cw / max(length(cb0[5].xyz), 1e-4);
+        // PER AXIS through the TRUE rows: d(ndc)/d(world-offset) along
+        // each row is |row|/w, and the rows' magnitudes differ by the
+        // aspect.
+        float toWorldX = tcw / max(length(row4.xyz), 1e-4);
+        float toWorldY = tcw / max(length(row5.xyz), 1e-4);
         float3 wpos = i.pos.xyz
                     + rr * (half2.x * toWorldX)
                     + uu * (half2.y * toWorldY);
         float4 WP = float4(wpos, 1.0);
-        float px = dot(cb0[4], WP);
-        float py = dot(cb0[5], WP);
-        float pw = dot(cb0[7], WP);
+        float px = dot(row4, WP);
+        float py = dot(row5, WP);
+        float pw = dot(row7, WP);
         svpos = float4(px, py, 0.0, pw);
         psPos = float2(px, py) / pw;
     } else {
@@ -179,8 +200,16 @@ VSOut main(VSIn i) {
     // with a flipped Y -- ndc*0.5+0.5, NO viewport remap. The first
     // port remapped into target space, read the wrong depth, and the
     // gate collapsed every quad: the disc vanished entirely.
+    // World-path taps aim at the TRUE view's sun position -- the depth
+    // texture is the true view's, so a clamped-camera tap centre would
+    // test the wrong pixels the moment the head passes the clamp.
+    float2 tNdc = float2(tcx, tcy) / max(tcw, 1e-4);
+    float2 tapNdc = worldPath ? tNdc : ndc;
+    float depthRefUsed = worldPath
+        ? ((i.pos.w < 0.5) ? tcw : max(tcw - i.pos.w, 0.0))
+        : depthRef;
     float2 texel = 1.0 / cb1[332].xy;
-    float2 c01 = ndc * 0.5 + 0.5;
+    float2 c01 = tapNdc * 0.5 + 0.5;
     float2 cTap = float2(c01.x, 1.0 - c01.y);
     // Clamp the whole tap window inside the depth texture: at high
     // eccentricity the sun sits at the very edge, the taps straddle
@@ -195,7 +224,7 @@ VSOut main(VSIn i) {
         for (int tx = -2; tx <= 2; ++tx) {
             float2 uv = cTap + float2(tx, ty) * texel;
             float dep = t0.SampleLevel(s0, uv, 0.0).x;
-            vis += (depthRef < dep) ? 1.0 : 0.0;
+            vis += (depthRefUsed < dep) ? 1.0 : 0.0;
         }
     }
     float visFrac = vis * 0.04;
@@ -204,7 +233,7 @@ VSOut main(VSIn i) {
     // inside this eye's view -- beyond, the tap window has clamped to
     // the texture edge and is testing nothing; visibility blends to
     // shown there so the test cannot flicker the disc.
-    float ecc2 = length(ndc);
+    float ecc2 = length(tapNdc);
     float edge = smoothstep(0.8, 1.2, ecc2);
     visFrac = lerp(visFrac, max(visFrac, 1.0), edge);
 #ifdef NOGATE
@@ -214,7 +243,7 @@ VSOut main(VSIn i) {
     // Gate, verbatim in spirit: collapse the quad only when the tested
     // visibility is nothing AND the edge blend is not holding it up.
 #ifndef NOGATE
-    if (visFrac <= 0.01 || cw <= 0.0) {
+    if (visFrac <= 0.01 || (worldPath ? tcw : cw) <= 0.0) {
         svpos = float4(0.0, 0.0, 0.0, 0.0);
     }
 #endif
