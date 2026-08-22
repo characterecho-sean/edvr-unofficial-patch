@@ -199,16 +199,25 @@ VSOut main(VSIn i) {
         }
     }
     float visFrac = vis * 0.04;
+
+    // The occlusion test is only meaningful while the sun sits well
+    // inside this eye's view -- beyond, the tap window has clamped to
+    // the texture edge and is testing nothing. The field named the
+    // right rule: keep the disc up while the star is in frame. Inside
+    // the reliable zone the depth test governs (struts still occlude);
+    // past it, visibility blends to shown, and the frustum clips the
+    // quad naturally once the star truly leaves the view.
+    float ecc2 = length(ndc);
+    float edge = smoothstep(0.8, 1.2, ecc2);
+    visFrac = lerp(visFrac, max(visFrac, 1.0), edge);
 #ifdef NOGATE
     visFrac = 1.0;
 #endif
 
-    // Gate and outputs, verbatim: the original collapses the quad to
-    // degenerate unless MORE THAN a quarter-tap of the sun is visible
-    // (count > 0.25 -- one tap of twenty-five suffices), and behind the
-    // camera counts as hidden.
+    // Gate, verbatim in spirit: collapse the quad only when the tested
+    // visibility is nothing AND the edge blend is not holding it up.
 #ifndef NOGATE
-    if (vis <= 0.25 || cw <= 0.0) {
+    if (visFrac <= 0.01 || cw <= 0.0) {
         svpos = float4(0.0, 0.0, 0.0, 0.0);
     }
 #endif
