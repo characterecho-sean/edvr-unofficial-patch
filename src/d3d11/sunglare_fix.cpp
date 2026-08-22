@@ -148,6 +148,18 @@ float                g_streamCf[3] = {};     // camera forward at the last
                                              // head-angle-driven, so the
                                              // trigger must be too
 constexpr uint32_t   kStreamDumpBytes = 384;
+// This draw's DrawInstanced window (set by the thunk) and the
+// per-second roster of distinct windows. The record buffer multiplexes
+// several trains at different instance offsets: the buffer HEAD the
+// first dumps read was whichever train wrote last, and the visible
+// disc's own records were never certainly sampled. The roster names
+// every window per second -- a train vanishing from it at the death
+// line is the culprit naming itself.
+uint32_t             g_drawInst = 0;
+uint32_t             g_drawStart = 0;
+struct TrainSlot { uint32_t start; uint32_t inst; uint32_t hits; };
+TrainSlot            g_trains[8] = {};
+int                  g_trainCount = 0;
 bool                 g_camDumped = false;
 int                  g_camDumpShot = 0;
 uint64_t             g_camDumpMs = 0;
@@ -411,9 +423,19 @@ void dumpInstanceStreams(ID3D11DeviceContext* ctx) {
         if (!vb) continue;
         D3D11_BUFFER_DESC bd{};
         vb->GetDesc(&bd);
-        const uint32_t n = bd.ByteWidth < kStreamDumpBytes ? bd.ByteWidth
-                                                           : kStreamDumpBytes;
-        D3D11_BOX box{0, 0, 0, n, 1, 1};
+        // Per-instance streams (big strides) are read at THIS DRAW's
+        // instance window, not the buffer head -- the trains share one
+        // buffer at different offsets, and the head is whichever train
+        // wrote last. Per-vertex streams (the 8-byte corners) have no
+        // instance window; they stay at zero.
+        uint32_t base = 0;
+        if (stride >= 64) {
+            base = off + g_drawStart * stride;
+            if (base >= bd.ByteWidth) base = 0;
+        }
+        uint32_t n = bd.ByteWidth - base;
+        if (n > kStreamDumpBytes) n = kStreamDumpBytes;
+        D3D11_BOX box{base, 0, 0, base + n, 1, 1};
         ctx->CopySubresourceRegion(g_streamStaging, 0, 0, 0, 0, vb, 0, &box);
         D3D11_MAPPED_SUBRESOURCE m{};
         if (SUCCEEDED(ctx->Map(g_streamStaging, 0, D3D11_MAP_READ, 0, &m)) &&
@@ -426,8 +448,9 @@ void dumpInstanceStreams(ID3D11DeviceContext* ctx) {
                 o += snprintf(line + o, sizeof(line) - o, "%s%.4g",
                               k ? " " : "", f[k]);
             Log::get().note("glare stream slot %u stride=%u off=%u bytes=%u"
-                            " f0..: %s",
-                            slot, stride, off, bd.ByteWidth, line);
+                            " draw s=%u i=%u base=%u f0..: %s",
+                            slot, stride, off, bd.ByteWidth, g_drawStart,
+                            g_drawInst, base, line);
             if (count > 48) {
                 o = 0;
                 for (int k = 48; k < count && k < 96 && o < 600; ++k)
@@ -677,6 +700,11 @@ void sunglareSceneRows(const void* data, uint32_t bytes) {
     }
 }
 
+void sunglareDrawArgs(uint32_t instances, uint32_t startInstance) {
+    g_drawInst = instances;
+    g_drawStart = startInstance;
+}
+
 void sunglareBegin(ID3D11DeviceContext* ctx) {
     g_engaged = false;
     g_worldEngaged = false;
@@ -692,6 +720,21 @@ void sunglareBegin(ID3D11DeviceContext* ctx) {
         // its side -- draws stopping = the game culled upstream; draws
         // continuing = our shader killed them.
         ++g_worldDraws;
+        {
+            bool found = false;
+            for (int i = 0; i < g_trainCount; ++i) {
+                if (g_trains[i].start == g_drawStart &&
+                    g_trains[i].inst == g_drawInst) {
+                    ++g_trains[i].hits;
+                    found = true;
+                    break;
+                }
+            }
+            if (!found && g_trainCount < 8) {
+                g_trains[g_trainCount] = {g_drawStart, g_drawInst, 1};
+                ++g_trainCount;
+            }
+        }
         {
             uint32_t nf = 0;
             const float* sh = billboardShadowFloats(&nf);
@@ -748,6 +791,21 @@ void sunglareBegin(ID3D11DeviceContext* ctx) {
                 g_worldDrawsAtNote = g_worldDraws;
                 g_worldEccMin = 1e9f;
                 g_worldEccMax = -1e9f;
+
+                // The train roster: every distinct DrawInstanced
+                // (start, count) window seen this second, with hits.
+                {
+                    char tr[200];
+                    int to = 0;
+                    for (int i = 0; i < g_trainCount && to < 160; ++i)
+                        to += snprintf(tr + to, sizeof(tr) - to,
+                                       "%s[s%u i%u x%u]", i ? " " : "",
+                                       g_trains[i].start, g_trains[i].inst,
+                                       g_trains[i].hits);
+                    Log::get().note("glare trains: %s",
+                                    g_trainCount ? tr : "(none)");
+                    g_trainCount = 0;
+                }
 
                 // THE BUFFER IDENTITY CHECK -- the adversarial review's
                 // softest joint. Every CPU-side conclusion in this arc

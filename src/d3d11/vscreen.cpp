@@ -1619,6 +1619,10 @@ void STDMETHODCALLTYPE hookedDrawInstanced(ID3D11DeviceContext* self, UINT perIn
                                            UINT instances, UINT startVertex,
                                            UINT startInstance) {
     const DrawVerdict v = beginPanelOverride(self, 'N', perInstance, instances);
+    // The draw's instance window, for the glare telemetry: the trains
+    // share one record buffer at different offsets, and which train a
+    // draw carries is only knowable from (start, count).
+    if (v == DrawVerdict::kGlareSteady) sunglareDrawArgs(instances, startInstance);
     // The glare clamp only ever applies in this thunk -- the train is
     // DrawInstanced -- so it lives here rather than in the shared tail,
     // where three other thunks could never receive it. glareClamp rather

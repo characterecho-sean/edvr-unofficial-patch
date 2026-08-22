@@ -38,6 +38,13 @@ uint32_t sunglareKeep();
 void sunglareBegin(ID3D11DeviceContext* ctx);
 void sunglareEnd(ID3D11DeviceContext* ctx);
 
+// This draw's DrawInstanced window, set by the thunk before the begin:
+// the 2026-08-22 sweep pass showed the instance buffer multiplexes
+// SEVERAL glare trains at different instance offsets, so telemetry must
+// name each draw's own (start, count) window rather than the buffer
+// head.
+void sunglareDrawArgs(uint32_t instances, uint32_t startInstance);
+
 // The true scene-camera feed: the glare system runs on the game's
 // head-look camera, which clamps at 45 degrees from ship-forward, so
 // past the clamp its constants no longer know where the star is. Every
