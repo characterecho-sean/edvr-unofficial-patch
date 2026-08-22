@@ -99,6 +99,16 @@ float                g_worldEccMax = -1e9f;
 float                g_trueRows[16] = {};
 bool                 g_trueRowsValid = false;
 uint64_t             g_trueRowsMs = 0;
+// The true head-tracked VIEW matrix (3x4 rows from scene-block offset
+// 932) and the extracted per-eye PROJECTION rows. P is calibrated
+// whenever the glare camera and the true camera agree -- inside the
+// clamp -- as P = clampedClipRows x V-inverse; past the clamp the last
+// P holds and trueClip = P x V_true stays exact.
+float                g_trueView[12] = {};
+bool                 g_trueViewValid = false;
+uint64_t             g_trueViewMs = 0;
+float                g_projRows[12] = {};
+bool                 g_projValid = false;
 bool                 g_camDumped = false;
 int                  g_camDumpShot = 0;
 uint64_t             g_camDumpMs = 0;
@@ -544,25 +554,26 @@ void sunglareSceneDump(const void* data, uint32_t bytes) {
 }
 
 void sunglareSceneRows(const void* data, uint32_t bytes) {
-    if (!g_world || !data || bytes < 128) return;
-    const float* f = static_cast<const float*>(data);
-    // The rows-shape gate, so a non-camera 208-byte block cannot poison
-    // the feed: two finite basis rows of sane magnitude and a near-unit
-    // forward row -- the structure every capture of this layout showed.
-    const float l4 = sqrtf(f[16] * f[16] + f[17] * f[17] + f[18] * f[18]);
-    const float l5 = sqrtf(f[20] * f[20] + f[21] * f[21] + f[22] * f[22]);
-    const float l7 = sqrtf(f[28] * f[28] + f[29] * f[29] + f[30] * f[30]);
-    if (!(l4 > 0.05f && l4 < 20.0f)) return;
-    if (!(l5 > 0.05f && l5 < 20.0f)) return;
-    if (!(l7 > 0.5f && l7 < 2.0f)) return;
-    memcpy(g_trueRows, f + 16, sizeof(g_trueRows));
-    g_trueRowsValid = true;
-    g_trueRowsMs = nowMs();
+    // The TRUE head-tracked view matrix lives at float offset 932 of
+    // the big scene block -- named by the two-shot dump: this camera
+    // turned the full 150 degrees with the head while the glare
+    // camera's constants froze at the clamp. Three 3x4 rows, rotation
+    // plus translation; validated as near-unit orthogonal before use.
+    if (!g_world || !data || bytes < (944 * 4)) return;
+    const float* f = static_cast<const float*>(data) + 932;
+    const float l0 = sqrtf(f[0] * f[0] + f[1] * f[1] + f[2] * f[2]);
+    const float l1 = sqrtf(f[4] * f[4] + f[5] * f[5] + f[6] * f[6]);
+    const float l2 = sqrtf(f[8] * f[8] + f[9] * f[9] + f[10] * f[10]);
+    if (!(l0 > 0.9f && l0 < 1.1f)) return;
+    if (!(l1 > 0.9f && l1 < 1.1f)) return;
+    if (!(l2 > 0.9f && l2 < 1.1f)) return;
+    memcpy(g_trueView, f, sizeof(g_trueView));
+    g_trueViewValid = true;
+    g_trueViewMs = nowMs();
     if (!g_camDumped) {
         g_camDumped = true;
-        Log::get().note("scene camera rows captured (|r|=%.3f |u|=%.3f "
-                        "|f|=%.3f) -- the true-view feed is live.",
-                        l4, l5, l7);
+        Log::get().note("true view matrix live (offset 932; |rows| %.3f "
+                        "%.3f %.3f).", l0, l1, l2);
     }
 }
 
@@ -630,18 +641,81 @@ void sunglareBegin(ID3D11DeviceContext* ctx) {
                     dev->Release();
                 }
             }
+            // Calibrate the projection whenever the glare camera and the
+            // true camera agree (inside the clamp): P_i = R x row_i.xyz
+            // with w adjusted by the translation, from clipRows = P x V.
+            uint32_t nsh = 0;
+            const float* sh = billboardShadowFloats(&nsh);
+            const bool vFresh =
+                g_trueViewValid && nowMs() - g_trueViewMs < 100;
+            if (sh && nsh >= 32 && vFresh) {
+                const float* fc = sh + 28;   // clamped forward row xyz
+                const float lv = sqrtf(fc[0] * fc[0] + fc[1] * fc[1] +
+                                       fc[2] * fc[2]);
+                const float* v2 = g_trueView + 8;
+                if (lv > 1e-4f) {
+                    const float align =
+                        (fc[0] * v2[0] + fc[1] * v2[1] + fc[2] * v2[2]) /
+                        lv;
+                    if (align > 0.9995f) {
+                        // world = R^T (view - t): P_i.xyz = R * c_i.xyz,
+                        // P_i.w = c_i.w + dot(P_i.xyz, t) with the sign
+                        // from view = R*world + t  =>  world-row form
+                        // c_i . world = P_i . (view,1).
+                        static const int kRowOff[3] = {16, 20, 28};
+                        for (int r = 0; r < 3; ++r) {
+                            const float* c = sh + kRowOff[r];
+                            float* p = g_projRows + r * 4;
+                            // P_i.xyz = R * c_i.xyz (R rows = the view
+                            // rows' xyz), from clipRow.world = P_i.view
+                            // with view = R*world + t.
+                            p[0] = g_trueView[0] * c[0] +
+                                   g_trueView[1] * c[1] +
+                                   g_trueView[2] * c[2];
+                            p[1] = g_trueView[4] * c[0] +
+                                   g_trueView[5] * c[1] +
+                                   g_trueView[6] * c[2];
+                            p[2] = g_trueView[8] * c[0] +
+                                   g_trueView[9] * c[1] +
+                                   g_trueView[10] * c[2];
+                            const float tx = g_trueView[3];
+                            const float ty = g_trueView[7];
+                            const float tz = g_trueView[11];
+                            p[3] = c[3] - (p[0] * tx + p[1] * ty +
+                                           p[2] * tz);
+                        }
+                        g_projValid = true;
+                    }
+                }
+            }
+
             if (g_trueCb) {
-                const bool fresh =
-                    g_trueRowsValid && nowMs() - g_trueRowsMs < 100;
+                // trueClip = P x V, freshly composed each draw; valid
+                // only when both halves are.
+                float rows[12] = {};
+                bool okRows = false;
+                if (g_projValid && vFresh) {
+                    for (int r = 0; r < 3; ++r) {
+                        const float* p = g_projRows + r * 4;
+                        float* o = rows + r * 4;
+                        for (int c = 0; c < 3; ++c) {
+                            o[c] = p[0] * g_trueView[0 + c] +
+                                   p[1] * g_trueView[4 + c] +
+                                   p[2] * g_trueView[8 + c];
+                        }
+                        o[3] = p[0] * g_trueView[3] +
+                               p[1] * g_trueView[7] +
+                               p[2] * g_trueView[11] + p[3];
+                    }
+                    okRows = true;
+                }
                 D3D11_MAPPED_SUBRESOURCE m{};
                 if (SUCCEEDED(ctx->Map(g_trueCb, 0, D3D11_MAP_WRITE_DISCARD,
                                        0, &m)) &&
                     m.pData) {
                     float* f = static_cast<float*>(m.pData);
-                    memcpy(f, g_trueRows, 16);            // row 4
-                    memcpy(f + 4, g_trueRows + 4, 16);    // row 5
-                    memcpy(f + 8, g_trueRows + 12, 16);   // row 7
-                    f[12] = fresh ? 1.0f : 0.0f;
+                    memcpy(f, rows, 48);
+                    f[12] = okRows ? 1.0f : 0.0f;
                     f[13] = f[14] = f[15] = 0.0f;
                     ctx->Unmap(g_trueCb, 0);
                     ctx->VSGetConstantBuffers(2, 1, &g_savedCb2);

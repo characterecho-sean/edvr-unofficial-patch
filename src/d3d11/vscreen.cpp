@@ -1543,6 +1543,9 @@ void STDMETHODCALLTYPE hookedUnmap(ID3D11DeviceContext* self, ID3D11Resource* re
             // The world shader's desk-side offset hunt: one whole-buffer
             // dump of the big scene block per session.
             sunglareSceneDump(s->camData, s->camBytes);
+            // And the live feed: the true view matrix at offset 932 of
+            // the same block, named by the two-shot dump.
+            sunglareSceneRows(s->camData, s->camBytes);
         });
         s->camResource = nullptr;
         s->camData = nullptr;
