@@ -81,6 +81,11 @@ ID3D11VertexShader*  g_worldVs[kWorldVariants] = {};   // owned, lazy
 bool                 g_worldTried[kWorldVariants] = {};
 ID3D11VertexShader*  g_savedVs = nullptr;  // the game's, across one draw
 bool                 g_worldEngaged = false;
+uint64_t             g_worldDraws = 0;
+uint64_t             g_worldDrawsAtNote = 0;
+uint64_t             g_worldNoteMs = 0;
+float                g_worldEccMin = 1e9f;
+float                g_worldEccMax = -1e9f;
 
 // The FULL eleven-parameter signature. The first field build declared
 // ten -- no ppErrorMsgs -- so D3DCompile wrote its error-blob pointer
@@ -396,6 +401,9 @@ void sunglareConfigure(Config& cfg) {
                         kVariantNames[g_world],
                         g_world ? "substituted with" : "no longer");
     }
+    // The billboard loan's tee arms for world mode too: the telemetry
+    // reads the sun position out of the shadowed CB.
+    billboardGlareWatch(g_steady || g_world != 0);
     const float wasEyeshape = g_eyeshape;
     float es = cfg.getFloat("fix.sun_glare_eyeshape", 0.0f);
     if (es < 0.0f) es = 0.0f;
@@ -479,6 +487,36 @@ void sunglareBegin(ID3D11DeviceContext* ctx) {
     // are all computed correctly inside the pipeline, and the corner
     // stream stays the game's own.
     if (g_world) {
+        // The cutoff telemetry: matched draws per second and the
+        // eccentricity range the CB reports, so a disappearance names
+        // its side -- draws stopping = the game culled upstream; draws
+        // continuing = our shader killed them.
+        ++g_worldDraws;
+        {
+            uint32_t nf = 0;
+            const float* sh = billboardShadowFloats(&nf);
+            if (sh && nf >= 32) {
+                const float pz = fabsf(sh[31]);
+                const float pxy = sqrtf(sh[19] * sh[19] + sh[23] * sh[23]);
+                if (pz > 1e-3f) {
+                    const float t = pxy / pz;
+                    if (t < g_worldEccMin) g_worldEccMin = t;
+                    if (t > g_worldEccMax) g_worldEccMax = t;
+                }
+            }
+            const uint64_t now = nowMs();
+            if (now - g_worldNoteMs >= 1000) {
+                Log::get().note("glare world: %llu draw(s)/s, ecc tan "
+                                "%.2f..%.2f.",
+                                static_cast<unsigned long long>(
+                                    g_worldDraws - g_worldDrawsAtNote),
+                                g_worldEccMin, g_worldEccMax);
+                g_worldNoteMs = now;
+                g_worldDrawsAtNote = g_worldDraws;
+                g_worldEccMin = 1e9f;
+                g_worldEccMax = -1e9f;
+            }
+        }
         const int v = g_world - 1;
         if (!g_worldTried[v]) buildWorldShader(ctx, g_world);
         if (g_worldVs[v]) {

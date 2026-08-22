@@ -202,11 +202,8 @@ VSOut main(VSIn i) {
 
     // The occlusion test is only meaningful while the sun sits well
     // inside this eye's view -- beyond, the tap window has clamped to
-    // the texture edge and is testing nothing. The field named the
-    // right rule: keep the disc up while the star is in frame. Inside
-    // the reliable zone the depth test governs (struts still occlude);
-    // past it, visibility blends to shown, and the frustum clips the
-    // quad naturally once the star truly leaves the view.
+    // the texture edge and is testing nothing; visibility blends to
+    // shown there so the test cannot flicker the disc.
     float ecc2 = length(ndc);
     float edge = smoothstep(0.8, 1.2, ecc2);
     visFrac = lerp(visFrac, max(visFrac, 1.0), edge);

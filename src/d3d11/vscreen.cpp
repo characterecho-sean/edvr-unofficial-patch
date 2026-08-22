@@ -1116,9 +1116,13 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         if (a == SunglareAction::kSkip) return DrawVerdict::kSkip;
         if (a != SunglareAction::kStock) {
             if (a == SunglareAction::kClamp) s->glareClamp = sunglareKeep();
-            // The world shader needs no billboard shadow -- it computes
-            // everything from the draw's own constants in the pipeline.
-            if (sunglareWorldActive()) return DrawVerdict::kGlareSteady;
+            // The world shader needs no billboard shadow to RENDER --
+            // but its telemetry reads the sun position out of it, so the
+            // target-follow side effect still runs (return value moot).
+            if (sunglareWorldActive()) {
+                billboardOnGlareDraw(count, instances);
+                return DrawVerdict::kGlareSteady;
+            }
             if (sunglareSteady() && billboardOnGlareDraw(count, instances)) {
                 return DrawVerdict::kGlareSteady;
             }
