@@ -1540,6 +1540,9 @@ void STDMETHODCALLTYPE hookedUnmap(ID3D11DeviceContext* self, ID3D11Resource* re
             // The projection hunt reads the same bytes on its own clock;
             // one tee, no second map.
             fovProbeObserve(s->camData, s->camBytes);
+            // The world shader's desk-side offset hunt: one whole-buffer
+            // dump of the big scene block per session.
+            sunglareSceneDump(s->camData, s->camBytes);
         });
         s->camResource = nullptr;
         s->camData = nullptr;

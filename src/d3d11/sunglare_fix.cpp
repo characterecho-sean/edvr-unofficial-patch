@@ -100,6 +100,7 @@ float                g_trueRows[16] = {};
 bool                 g_trueRowsValid = false;
 uint64_t             g_trueRowsMs = 0;
 bool                 g_camDumped = false;
+bool                 g_camDumpWritten = false;
 ID3D11Buffer*        g_trueCb = nullptr;      // owned; bound at b2
 ID3D11Buffer*        g_savedCb2 = nullptr;    // the game's, across a draw
 bool                 g_cb2Engaged = false;
@@ -506,6 +507,27 @@ void sunglareSceneCb(void* cb) { g_sceneCbTarget = cb; }
 
 void* sunglareSceneCbTarget() {
     return g_world ? g_sceneCbTarget : nullptr;
+}
+
+// One whole-buffer binary dump of the big scene-constants block (the
+// glare shader's own cb1, by size), to be matched desk-side against the
+// clamped rows -- nearly equal at level head -- so the true camera's
+// offset names itself. Written once per session while world mode is on.
+void sunglareSceneDump(const void* data, uint32_t bytes) {
+    if (!g_world || g_camDumpWritten || !data || bytes < 1024) return;
+    g_camDumpWritten = true;
+    wchar_t path[MAX_PATH];
+    _snwprintf_s(path, _TRUNCATE, L"%s\\scenecb.bin",
+                 Config::get().logDir().c_str());
+    HANDLE h = CreateFileW(path, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                           FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return;
+    DWORD written = 0;
+    WriteFile(h, data, bytes, &written, nullptr);
+    CloseHandle(h);
+    Log::get().note("scene constants dumped: %u bytes to scenecb.bin -- "
+                    "the true camera's offset gets named desk-side.",
+                    bytes);
 }
 
 void sunglareSceneRows(const void* data, uint32_t bytes) {

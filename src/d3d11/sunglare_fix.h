@@ -50,6 +50,7 @@ void sunglareEnd(ID3D11DeviceContext* ctx);
 void  sunglareSceneCb(void* cb);
 void* sunglareSceneCbTarget();
 void  sunglareSceneRows(const void* data, uint32_t bytes);
+void  sunglareSceneDump(const void* data, uint32_t bytes);
 
 // The train's identity test, exported for the constant-buffer peek: the
 // steer needs to read the 208-byte CB of exactly these draws, and two
