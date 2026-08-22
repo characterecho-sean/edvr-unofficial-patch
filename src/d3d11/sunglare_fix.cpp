@@ -8,6 +8,7 @@
 #include <cstring>
 
 #include "../common/config.h"
+#include "../common/guard.h"
 #include "../common/log.h"
 #include "../common/timing.h"
 #include "billboard_fix.h"
@@ -76,12 +77,35 @@ bool                 g_worldTried = false;
 ID3D11VertexShader*  g_savedVs = nullptr;  // the game's, across one draw
 bool                 g_worldEngaged = false;
 
+// The FULL eleven-parameter signature. The first field build declared
+// ten -- no ppErrorMsgs -- so D3DCompile wrote its error-blob pointer
+// through whatever garbage sat in the eleventh slot, and the game
+// crashed at the first matched draw. The project's first crash, bought
+// by an FFI signature nobody proof-read. The HLSL itself desk-compiles
+// clean; the game is never again the compiler's first audience.
 typedef HRESULT(WINAPI* PFN_D3DCompile)(const void*, SIZE_T, const char*,
                                         const void*, void*, const char*,
-                                        const char*, UINT, UINT, void**);
+                                        const char*, UINT, UINT, void**,
+                                        void**);
 
-void buildWorldShader(ID3D11DeviceContext* ctx) {
-    g_worldTried = true;
+// ID3DBlob vtable through raw COM: 0-2 IUnknown, 3 GetBufferPointer,
+// 4 GetBufferSize.
+void* blobPtr(void* blob) {
+    typedef void*(STDMETHODCALLTYPE * Fn)(void*);
+    return reinterpret_cast<Fn>((*reinterpret_cast<void***>(blob))[3])(blob);
+}
+SIZE_T blobSize(void* blob) {
+    typedef SIZE_T(STDMETHODCALLTYPE * Fn)(void*);
+    return reinterpret_cast<Fn>((*reinterpret_cast<void***>(blob))[4])(blob);
+}
+void blobRelease(void* blob) {
+    typedef ULONG(STDMETHODCALLTYPE * Fn)(void*);
+    reinterpret_cast<Fn>((*reinterpret_cast<void***>(blob))[2])(blob);
+}
+
+FaultBudget g_worldBudget("sunglareWorld", 3);
+
+void buildWorldShaderInner(ID3D11DeviceContext* ctx) {
     HMODULE mod = LoadLibraryW(L"d3dcompiler_47.dll");
     if (!mod) {
         Log::get().note("sun glare world: d3dcompiler_47.dll not found; "
@@ -91,41 +115,41 @@ void buildWorldShader(ID3D11DeviceContext* ctx) {
     PFN_D3DCompile compile = reinterpret_cast<PFN_D3DCompile>(
         GetProcAddress(mod, "D3DCompile"));
     if (!compile) return;
-    void* blob = nullptr;     // ID3DBlob*
+    void* blob = nullptr;
     void* errors = nullptr;
     const HRESULT hr = compile(kSunglareWorldVS, sizeof(kSunglareWorldVS) - 1,
                                "sunglare_world_vs", nullptr, nullptr, "main",
-                               "vs_5_0", 0, 0, &blob);
-    // ID3DBlob vtable: 0-2 IUnknown, 3 GetBufferPointer, 4 GetBufferSize.
-    struct BlobVtbl {
-        void* iunknown[3];
-        void*(__stdcall* GetBufferPointer)(void*);
-        SIZE_T(__stdcall* GetBufferSize)(void*);
-    };
+                               "vs_5_0", 0, 0, &blob, &errors);
+    if (errors) {
+        if (FAILED(hr)) {
+            Log::get().note("sun glare world: compile errors: %.300s",
+                            static_cast<const char*>(blobPtr(errors)));
+        }
+        blobRelease(errors);
+    }
     if (FAILED(hr) || !blob) {
         Log::get().note("sun glare world: shader compile failed (0x%08X); "
                         "the swap stands down and the game draws stock.",
                         static_cast<unsigned>(hr));
-        (void)errors;
         return;
     }
-    BlobVtbl* vt = *reinterpret_cast<BlobVtbl**>(blob);
-    const void* bytes = vt->GetBufferPointer(blob);
-    const SIZE_T len = vt->GetBufferSize(blob);
     ID3D11Device* dev = nullptr;
     ctx->GetDevice(&dev);
     if (dev) {
-        dev->CreateVertexShader(bytes, len, nullptr, &g_worldVs);
+        dev->CreateVertexShader(blobPtr(blob), blobSize(blob), nullptr,
+                                &g_worldVs);
         dev->Release();
     }
-    // Release the blob through IUnknown::Release (slot 2).
-    typedef ULONG(__stdcall * PFN_Release)(void*);
-    reinterpret_cast<PFN_Release>(
-        (*reinterpret_cast<void***>(blob))[2])(blob);
+    blobRelease(blob);
     Log::get().note("sun glare world: replacement vertex shader %s -- the "
                     "glare renders as a true world-anchored billboard%s.",
                     g_worldVs ? "COMPILED" : "creation FAILED",
                     g_worldVs ? "" : "; the game draws stock");
+}
+
+void buildWorldShader(ID3D11DeviceContext* ctx) {
+    g_worldTried = true;
+    guardedBudget(g_worldBudget, [&] { buildWorldShaderInner(ctx); });
 }
 float    g_theta = 0;        // low-passed counter-rotation angle
 bool     g_thetaValid = false;
