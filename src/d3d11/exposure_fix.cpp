@@ -902,6 +902,8 @@ void STDMETHODCALLTYPE hookedDispatch(ID3D11DeviceContext* self, UINT x, UINT y,
 
 }  // namespace
 
+uint64_t lookupShaderHash(void* shader) { return hashOf(shader); }
+
 void exposureConfigure(Config& cfg) {
     State* s = g_state;
     if (!s) return;

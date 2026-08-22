@@ -28,6 +28,8 @@ namespace {
 
 // Frozen COM ABI. IUnknown occupies 0-2; the interface methods follow in
 // declaration order. Each index is still range-checked before use.
+constexpr size_t kDevCreateVertexShader  = 12;
+constexpr size_t kDevCreatePixelShader   = 15;
 constexpr size_t kDevCreateComputeShader = 18;
 constexpr size_t kSwapPresent            = 8;
 constexpr size_t kFactoryCreateSwapChain = 10;
@@ -58,6 +60,15 @@ struct State {
     void*           factory = nullptr;
 
     PFN_CreateShader realCreateCS = nullptr;
+    PFN_CreateShader realCreateVS = nullptr;
+    PFN_CreateShader realCreatePS = nullptr;
+    // The shader-swap arc's dump mode: while armed, every vertex and pixel
+    // shader blob the game creates is written to <logdir>\shaders by hash,
+    // and the glare draw logs which two hashes it binds -- the pair to
+    // disassemble. Diagnostic; costs file writes on the streaming threads.
+    bool         shaderDump = false;
+    std::wstring shaderDumpDir;
+    bool         shaderDumpDirMade = false;
     PFN_Present      realPresent = nullptr;
     PFN_CreateSwapChain        realCreateSwapChain = nullptr;
     PFN_CreateSwapChainForHwnd realCreateSwapChainForHwnd = nullptr;
@@ -193,6 +204,61 @@ void readoptGameBindings();
 // which does not tell anyone that the heartbeat is gone.
 FaultBudget g_createBudget("deviceHook.createShader", 8);
 FaultBudget g_frameBudget("deviceHook.frameBoundary", 8);
+
+// Write one shader blob to the dump directory, named by its hash. Runs on
+// the game's asset-streaming threads while armed; CreateDirectory once,
+// CreateFile per blob, and a blob that already exists is skipped so a
+// session's repeated creates cost one write each.
+void dumpShaderBlob(const wchar_t* prefix, uint64_t hash, const void* bytecode,
+                    SIZE_T len) {
+    State* s = g_state;
+    if (!s->shaderDumpDirMade) {
+        s->shaderDumpDirMade = true;
+        CreateDirectoryW(s->shaderDumpDir.c_str(), nullptr);
+    }
+    wchar_t path[MAX_PATH];
+    _snwprintf_s(path, _TRUNCATE, L"%s\\%s_%016llX.dxbc",
+                 s->shaderDumpDir.c_str(), prefix,
+                 static_cast<unsigned long long>(hash));
+    HANDLE h = CreateFileW(path, GENERIC_WRITE, 0, nullptr, CREATE_NEW,
+                           FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return;   // exists already, or unwritable
+    DWORD written = 0;
+    WriteFile(h, bytecode, static_cast<DWORD>(len), &written, nullptr);
+    CloseHandle(h);
+}
+
+HRESULT STDMETHODCALLTYPE hookedCreateVS(ID3D11Device* self, const void* bytecode,
+                                         SIZE_T len, ID3D11ClassLinkage* linkage,
+                                         void** out) {
+    if (self != g_state->device) {
+        return g_state->realCreateVS(self, bytecode, len, linkage, out);
+    }
+    const HRESULT hr = g_state->realCreateVS(self, bytecode, len, linkage, out);
+    guardedBudget(g_createBudget, [&] {
+        if (FAILED(hr) || !bytecode || len == 0 || !out || !*out) return;
+        const uint64_t hash = fnv1a64(bytecode, len);
+        registerShaderHash(*out, hash);
+        if (g_state->shaderDump) dumpShaderBlob(L"vs", hash, bytecode, len);
+    });
+    return hr;
+}
+
+HRESULT STDMETHODCALLTYPE hookedCreatePS(ID3D11Device* self, const void* bytecode,
+                                         SIZE_T len, ID3D11ClassLinkage* linkage,
+                                         void** out) {
+    if (self != g_state->device) {
+        return g_state->realCreatePS(self, bytecode, len, linkage, out);
+    }
+    const HRESULT hr = g_state->realCreatePS(self, bytecode, len, linkage, out);
+    guardedBudget(g_createBudget, [&] {
+        if (FAILED(hr) || !bytecode || len == 0 || !out || !*out) return;
+        const uint64_t hash = fnv1a64(bytecode, len);
+        registerShaderHash(*out, hash);
+        if (g_state->shaderDump) dumpShaderBlob(L"ps", hash, bytecode, len);
+    });
+    return hr;
+}
 
 HRESULT STDMETHODCALLTYPE hookedCreateCS(ID3D11Device* self, const void* bytecode,
                                          SIZE_T len, ID3D11ClassLinkage* linkage,
@@ -733,6 +799,20 @@ void hookDevice(ID3D11Device* device) {
     }
     breadcrumb("gfx: arming d3d11 hooks");
 
+    s.shaderDump = sentinelCfg.getBool("advanced.glare_shader_dump", false);
+    s.shaderDumpDir = sentinelCfg.logDir() + L"\\shaders";
+    if (s.shaderDump) {
+        Log::get().note("shader dump ARMED: every vertex and pixel shader "
+                        "the game creates is written to edvr_logs\\shaders "
+                        "by hash. Park at a star with sun_glare_steady on; "
+                        "the log names the glare train's pair. Set "
+                        "glare_shader_dump = 0 afterwards -- this costs "
+                        "file writes during loading.");
+    }
+    s.deviceHook.replace(kDevCreateVertexShader, &hookedCreateVS,
+                         reinterpret_cast<void**>(&s.realCreateVS));
+    s.deviceHook.replace(kDevCreatePixelShader, &hookedCreatePS,
+                         reinterpret_cast<void**>(&s.realCreatePS));
     s.deviceHook.replace(kDevCreateComputeShader, &hookedCreateCS,
                          reinterpret_cast<void**>(&s.realCreateCS));
     if (!s.deviceHook.commit()) {

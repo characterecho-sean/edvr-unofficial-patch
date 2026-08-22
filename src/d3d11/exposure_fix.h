@@ -42,6 +42,11 @@ void exposureConfigure(Config& cfg);
 // when it is dispatched.
 void registerShaderHash(void* shader, uint64_t hash);
 
+// The reverse lookup, for any module that holds a shader object and wants
+// its bytecode hash -- the shader-swap arc identifies the glare train's
+// vertex and pixel shaders this way. 0 if never registered.
+uint64_t lookupShaderHash(void* shader);
+
 // Called once per frame from Present. The pairing of first and second eye is
 // only meaningful within a frame.
 void exposureFixFrameBoundary();

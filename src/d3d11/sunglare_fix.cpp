@@ -63,6 +63,7 @@ uint64_t g_pairLastMs = 0;
 int      g_pairState = 0;    // 0 idle, 1 log-as-A, 2 log-as-B
 uint32_t g_pairsLogged = 0;
 constexpr uint32_t kPairMax = 24;
+bool     g_shadersNoted = false;
 float    g_theta = 0;        // low-passed counter-rotation angle
 bool     g_thetaValid = false;
 uint64_t g_skipped = 0;
@@ -355,6 +356,23 @@ uint32_t sunglareKeep() { return g_keep; }
 void sunglareBegin(ID3D11DeviceContext* ctx) {
     g_engaged = false;
     if (!g_steady || !ctx) return;
+
+    // The shader-swap arc's identification, once per session: which
+    // vertex and pixel shader the train binds. With glare_shader_dump
+    // armed their blobs are already on disk under these hashes.
+    if (!g_shadersNoted) {
+        g_shadersNoted = true;
+        ID3D11VertexShader* vs = nullptr;
+        ID3D11PixelShader* ps = nullptr;
+        ctx->VSGetShader(&vs, nullptr, nullptr);
+        ctx->PSGetShader(&ps, nullptr, nullptr);
+        Log::get().note("glare train shaders: vs=%016llX ps=%016llX (blobs "
+                        "in edvr_logs\\shaders when glare_shader_dump=1).",
+                        static_cast<unsigned long long>(lookupShaderHash(vs)),
+                        static_cast<unsigned long long>(lookupShaderHash(ps)));
+        if (vs) vs->Release();
+        if (ps) ps->Release();
+    }
     if (!g_haveCorners) {
         captureCorners(ctx);
         return;   // this draw goes stock; the capture needs a round trip
