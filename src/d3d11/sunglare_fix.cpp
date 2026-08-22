@@ -137,8 +137,16 @@ float                g_blockCf[3] = {};   // camera forward at the last
 // bound IA slot go to the log; the death moment ends up bracketed by
 // dumps and the stale attribute names itself offline.
 ID3D11Buffer*        g_streamStaging = nullptr;
-int                  g_streamDumps = 0;
+int                  g_streamDumps = 0;      // idle-tick budget spent
+int                  g_streamTurnDumps = 0;  // head-turn budget spent
 uint64_t             g_streamDumpMs = 0;
+float                g_streamCf[3] = {};     // camera forward at the last
+                                             // dump; the 2026-08-22 pass
+                                             // burned its whole timer
+                                             // budget before the sweeps
+                                             // began -- the death is
+                                             // head-angle-driven, so the
+                                             // trigger must be too
 constexpr uint32_t   kStreamDumpBytes = 384;
 bool                 g_camDumped = false;
 int                  g_camDumpShot = 0;
@@ -753,24 +761,29 @@ void sunglareBegin(ID3D11DeviceContext* ctx) {
                     ctx->VSGetConstantBuffers(0, 1, &rb0);
                     D3D11_BUFFER_DESC b0d{};
                     if (rb0) rb0->GetDesc(&b0d);
+                    // Viewport and scissor beside it: with the constants
+                    // and (soon) the streams proven honest, raster state
+                    // is the one remaining door a clean disappearance
+                    // line could walk through.
+                    UINT nvp = 1;
+                    D3D11_VIEWPORT vp{};
+                    ctx->RSGetViewports(&nvp, &vp);
+                    UINT nsc = 1;
+                    D3D11_RECT sc{};
+                    ctx->RSGetScissorRects(&nsc, &sc);
                     Log::get().note(
                         "glare b0 identity: runtime=%p mirror=%p "
-                        "b0_bytes=%u usage=%u shadow_floats=%u %s",
+                        "b0_bytes=%u usage=%u shadow_floats=%u %s "
+                        "vp=(%.0f %.0f %.0fx%.0f) sc=(%ld %ld %ld %ld)",
                         static_cast<void*>(rb0), billboardTarget(),
                         b0d.ByteWidth, static_cast<unsigned>(b0d.Usage),
                         nf,
                         static_cast<void*>(rb0) == billboardTarget()
                             ? "MATCH"
-                            : "MISMATCH");
+                            : "MISMATCH",
+                        vp.TopLeftX, vp.TopLeftY, vp.Width, vp.Height,
+                        sc.left, sc.top, sc.right, sc.bottom);
                     if (rb0) rb0->Release();
-                }
-
-                // The instance-stream discovery dump, every other
-                // second on a budget of thirty.
-                if (g_streamDumps < 30 && now - g_streamDumpMs >= 2000) {
-                    ++g_streamDumps;
-                    g_streamDumpMs = now;
-                    dumpInstanceStreams(ctx);
                 }
 
                 // The camera-block census: every float the shader does
@@ -811,6 +824,52 @@ void sunglareBegin(ID3D11DeviceContext* ctx) {
                                     "cam=(%.1f %.1f %.1f)",
                                     g_blockShots, line, g_solvedCam[0],
                                     g_solvedCam[1], g_solvedCam[2]);
+                }
+            }
+
+            // The instance-stream dump triggers, PER DRAW: a slow idle
+            // tick, plus a HEAD-TURN trigger (~3 degrees since the last
+            // dump, at most ~2.5Hz). The first pass burned its whole
+            // timer budget before the sweeps began -- the death line is
+            // crossed by turning the head, so the coverage follows the
+            // turn. A sweep through the line now yields a dump every
+            // few degrees, bracketing whichever attribute dies.
+            {
+                bool fire = false;
+                if (g_streamDumps < 10 && now - g_streamDumpMs >= 2000) {
+                    ++g_streamDumps;
+                    fire = true;
+                }
+                if (!fire && g_streamTurnDumps < 60 &&
+                    now - g_streamDumpMs >= 400 && sh && nf >= 32) {
+                    const float* fc = sh + 28;
+                    const float l = sqrtf(fc[0] * fc[0] + fc[1] * fc[1] +
+                                          fc[2] * fc[2]);
+                    if (l > 1e-4f) {
+                        const float dp =
+                            (fc[0] * g_streamCf[0] + fc[1] * g_streamCf[1] +
+                             fc[2] * g_streamCf[2]) /
+                            l;
+                        if (dp < 0.9986f) {
+                            ++g_streamTurnDumps;
+                            fire = true;
+                        }
+                    }
+                }
+                if (fire) {
+                    g_streamDumpMs = now;
+                    if (sh && nf >= 32) {
+                        const float* fc = sh + 28;
+                        const float l = sqrtf(fc[0] * fc[0] +
+                                              fc[1] * fc[1] +
+                                              fc[2] * fc[2]);
+                        if (l > 1e-4f) {
+                            g_streamCf[0] = fc[0] / l;
+                            g_streamCf[1] = fc[1] / l;
+                            g_streamCf[2] = fc[2] / l;
+                        }
+                    }
+                    dumpInstanceStreams(ctx);
                 }
             }
         }
