@@ -47,6 +47,11 @@ float    g_spOther[3] = {};  // the OTHER eye's sun position, one matched
                              // draw ago -- the train alternates eyes
 bool     g_spOtherValid = false;
 uint64_t g_spOtherMs = 0;
+float    g_eyeshape = 0;     // fix.sun_glare_eyeshape: strength of the
+                             // per-eye anisotropic corner compensation
+                             // that equalizes the angular patch the two
+                             // eyes' quads subtend -- the disparity
+                             // GRADIENT the uniform knob could not touch
 uint64_t g_lastSeenMs = 0;   // when the train last drew
 
 // The eye-pair logger, the eye-sync approach's measurement: the train
@@ -277,6 +282,18 @@ void sunglareConfigure(Config& cfg) {
     if (rc < -4.0f) rc = -4.0f;
     if (rc > 4.0f) rc = 4.0f;
     g_recenter = rc;
+    const float wasEyeshape = g_eyeshape;
+    float es = cfg.getFloat("fix.sun_glare_eyeshape", 0.0f);
+    if (es < 0.0f) es = 0.0f;
+    if (es > 2.0f) es = 2.0f;
+    g_eyeshape = es;
+    if (g_eyeshape != wasEyeshape) {
+        Log::get().note("sun glare eyeshape: strength %.2f -- each eye's "
+                        "glare quad is reshaped so both subtend the same "
+                        "angular patch (geometric, from each eye's own sun "
+                        "direction; 1 = the full sec-squared answer).",
+                        g_eyeshape);
+    }
     if (g_recenter != wasRecenter) {
         Log::get().note("sun glare recenter: gain %.2f -- the kept glare "
                         "elements are pushed back toward the star's true "
@@ -516,13 +533,56 @@ void sunglareBegin(ID3D11DeviceContext* ctx) {
         g_spOtherValid = true;
         g_spOtherMs = nowPair;
     }
+    // The per-eye anisotropic compensation. A fixed plane-size quad
+    // subtends an angular patch that shrinks with eccentricity --
+    // cos-squared radially, cos tangentially -- and each eye carries its
+    // own eccentricity because each eye's axis is its own. The 2x2
+    // reshapes this eye's quad toward the angular patch of the PAIR MEAN
+    // eccentricity: both eyes then subtend the same patch, and the
+    // disparity gradient that read as a tilting, breathing disc
+    // collapses. Pure geometry from this eye's own sun direction; the
+    // strength knob exists in case the game already half-compensates.
+    float m00 = 1, m01 = 0, m11 = 1;
+    if (g_eyeshape != 0.0f && sunAnchored) {
+        const float pz = fabsf(sh[31]);
+        const float pxy =
+            sqrtf(sh[19] * sh[19] + sh[23] * sh[23]);
+        if (pz > 1e-3f) {
+            const float t = pxy / pz;
+            float tOther = t;
+            if (g_spOtherValid && nowPair - g_spOtherMs < 50) {
+                const float pzo = fabsf(g_spOther[2]);
+                const float pxyo = sqrtf(g_spOther[0] * g_spOther[0] +
+                                         g_spOther[1] * g_spOther[1]);
+                if (pzo > 1e-3f) tOther = pxyo / pzo;
+            }
+            const float tm = 0.5f * (t + tOther);
+            const float sec2 = 1.0f + t * t;
+            const float sec2m = 1.0f + tm * tm;
+            float sr = sec2 / sec2m;
+            float st = sqrtf(sec2) / sqrtf(sec2m);
+            sr = 1.0f + g_eyeshape * (sr - 1.0f);
+            st = 1.0f + g_eyeshape * (st - 1.0f);
+            if (pxy > 1e-3f) {
+                const float rx = sh[19] / pxy;
+                const float ry = sh[23] / pxy;
+                m00 = sr * rx * rx + st * ry * ry;
+                m01 = (sr - st) * rx * ry;
+                m11 = sr * ry * ry + st * rx * rx;
+            } else {
+                m00 = m11 = 0.5f * (sr + st);
+            }
+        }
+    }
     uint16_t* out = static_cast<uint16_t*>(m.pData);
     memcpy(out, g_corners, kCornerBytes);
     for (uint32_t v = 0; v < kCornerVerts; ++v) {
         const float x = halfToFloat(g_corners[v * 4 + 2]);
         const float y = halfToFloat(g_corners[v * 4 + 3]);
-        out[v * 4 + 2] = floatToHalf(c * x - s * y + tx);
-        out[v * 4 + 3] = floatToHalf(s * x + c * y + ty);
+        const float xr = c * x - s * y;
+        const float yr = s * x + c * y;
+        out[v * 4 + 2] = floatToHalf(m00 * xr + m01 * yr + tx);
+        out[v * 4 + 3] = floatToHalf(m01 * xr + m11 * yr + ty);
     }
     ctx->Unmap(g_ourVb, 0);
 
