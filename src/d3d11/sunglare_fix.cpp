@@ -425,13 +425,27 @@ void sunglareBegin(ID3D11DeviceContext* ctx) {
         }
     }
 
+    // The eccentricity geometry, computed once: this eye's sun direction,
+    // its tangent-plane stretch, and the radial direction on screen. The
+    // angle uses it to express world-up in the DRAWN frame; the corner
+    // block below uses it to equalize the eyes' angular patches.
     float a = wuv[0];
     float b = wuv[1];
     bool sunAnchored = false;
     float candDist = 0;
+    float eccT = 0, eccRx = 1, eccRy = 0;
     {
         const float sp[3] = {sh[19], sh[23], sh[31]};
         candDist = sqrtf(sp[0] * sp[0] + sp[1] * sp[1] + sp[2] * sp[2]);
+        const float pz = fabsf(sp[2]);
+        const float pxy = sqrtf(sp[0] * sp[0] + sp[1] * sp[1]);
+        if (pz > 1e-3f) {
+            eccT = pxy / pz;
+            if (pxy > 1e-3f) {
+                eccRx = sp[0] / pxy;
+                eccRy = sp[1] / pxy;
+            }
+        }
         if (candDist > 1e-3f) {
             const float d[3] = {sp[0] / candDist, sp[1] / candDist,
                                 sp[2] / candDist};
@@ -445,6 +459,20 @@ void sunglareBegin(ID3D11DeviceContext* ctx) {
                 sunAnchored = true;
             }
         }
+    }
+    // Express the reference in the drawn (plane) frame: the projection's
+    // local stretch scales the radial component by sec-theta relative to
+    // the tangential, and that scaling ROTATES any direction that is
+    // neither -- the residual the field saw as the disc spinning about
+    // the star's axis under yaw, after everything else held. Blended by
+    // the eyeshape strength: the same geometry, the same knob.
+    if (sunAnchored && g_eyeshape != 0.0f && eccT > 1e-4f) {
+        const float sec1 = sqrtf(1.0f + eccT * eccT);
+        const float secEff = 1.0f + g_eyeshape * (sec1 - 1.0f);
+        const float ar = (a * eccRx + b * eccRy) * secEff;
+        const float at = -a * eccRy + b * eccRx;
+        a = ar * eccRx - at * eccRy;
+        b = ar * eccRy + at * eccRx;
     }
     const float n = sqrtf(a * a + b * b);
     // Near the zenith the horizon is undefined: world-up leaves the view
@@ -544,34 +572,27 @@ void sunglareBegin(ID3D11DeviceContext* ctx) {
     // strength knob exists in case the game already half-compensates.
     float m00 = 1, m01 = 0, m11 = 1;
     if (g_eyeshape != 0.0f && sunAnchored) {
-        const float pz = fabsf(sh[31]);
-        const float pxy =
-            sqrtf(sh[19] * sh[19] + sh[23] * sh[23]);
-        if (pz > 1e-3f) {
-            const float t = pxy / pz;
-            float tOther = t;
-            if (g_spOtherValid && nowPair - g_spOtherMs < 50) {
-                const float pzo = fabsf(g_spOther[2]);
-                const float pxyo = sqrtf(g_spOther[0] * g_spOther[0] +
-                                         g_spOther[1] * g_spOther[1]);
-                if (pzo > 1e-3f) tOther = pxyo / pzo;
-            }
-            const float tm = 0.5f * (t + tOther);
-            const float sec2 = 1.0f + t * t;
-            const float sec2m = 1.0f + tm * tm;
-            float sr = sec2 / sec2m;
-            float st = sqrtf(sec2) / sqrtf(sec2m);
-            sr = 1.0f + g_eyeshape * (sr - 1.0f);
-            st = 1.0f + g_eyeshape * (st - 1.0f);
-            if (pxy > 1e-3f) {
-                const float rx = sh[19] / pxy;
-                const float ry = sh[23] / pxy;
-                m00 = sr * rx * rx + st * ry * ry;
-                m01 = (sr - st) * rx * ry;
-                m11 = sr * ry * ry + st * rx * rx;
-            } else {
-                m00 = m11 = 0.5f * (sr + st);
-            }
+        const float t = eccT;
+        float tOther = t;
+        if (g_spOtherValid && nowPair - g_spOtherMs < 50) {
+            const float pzo = fabsf(g_spOther[2]);
+            const float pxyo = sqrtf(g_spOther[0] * g_spOther[0] +
+                                     g_spOther[1] * g_spOther[1]);
+            if (pzo > 1e-3f) tOther = pxyo / pzo;
+        }
+        const float tm = 0.5f * (t + tOther);
+        const float sec2 = 1.0f + t * t;
+        const float sec2m = 1.0f + tm * tm;
+        float sr = sec2 / sec2m;
+        float st = sqrtf(sec2) / sqrtf(sec2m);
+        sr = 1.0f + g_eyeshape * (sr - 1.0f);
+        st = 1.0f + g_eyeshape * (st - 1.0f);
+        if (eccT > 1e-4f) {
+            m00 = sr * eccRx * eccRx + st * eccRy * eccRy;
+            m01 = (sr - st) * eccRx * eccRy;
+            m11 = sr * eccRy * eccRy + st * eccRx * eccRx;
+        } else {
+            m00 = m11 = 0.5f * (sr + st);
         }
     }
     uint16_t* out = static_cast<uint16_t*>(m.pData);
