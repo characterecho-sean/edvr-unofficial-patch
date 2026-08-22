@@ -62,6 +62,11 @@ bool billboardOnGlareDraw(uint32_t count, uint32_t instances);
 // Null until a write has been captured for the current target.
 const float* billboardShadowFloats(uint32_t* count);
 
+// Milliseconds since the shadow content last updated (~0 if none). A
+// fresh-looking shadow of the WRONG buffer stays fresh forever; the age
+// alone cannot prove identity, but a stale one disproves it.
+uint64_t billboardShadowAgeMs();
+
 // The buffer whose writes the Map/Unmap tee should capture, or null.
 // Compared by the Map hook, never dereferenced there.
 void* billboardTarget();

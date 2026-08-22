@@ -127,6 +127,19 @@ float                g_solvedCam[3] = {};
 // head-locked from the world-locked candidates.
 int                  g_blockShots = 0;
 uint64_t             g_blockShotMs = 0;
+float                g_blockCf[3] = {};   // camera forward at the last
+                                          // shot; the next fires on a
+                                          // real head turn, not a timer
+// The instance-stream discovery dump: the adversarial review showed the
+// disappearance line could live in ANY of the per-instance attributes
+// (position v1, the size chain, or the alpha at t4.x) and none has ever
+// been observed directly. Every two seconds, the first bytes of every
+// bound IA slot go to the log; the death moment ends up bracketed by
+// dumps and the stale attribute names itself offline.
+ID3D11Buffer*        g_streamStaging = nullptr;
+int                  g_streamDumps = 0;
+uint64_t             g_streamDumpMs = 0;
+constexpr uint32_t   kStreamDumpBytes = 384;
 bool                 g_camDumped = false;
 int                  g_camDumpShot = 0;
 uint64_t             g_camDumpMs = 0;
@@ -286,6 +299,10 @@ void releaseSteadyObjects() {
         g_cornerStaging->Release();
         g_cornerStaging = nullptr;
     }
+    if (g_streamStaging) {
+        g_streamStaging->Release();
+        g_streamStaging = nullptr;
+    }
     if (g_ourVb) {
         g_ourVb->Release();
         g_ourVb = nullptr;
@@ -358,6 +375,63 @@ void captureCorners(ID3D11DeviceContext* ctx) {
     g_cornerCopyMs = now;
     g_cornerPending = true;
     vb->Release();
+}
+
+// The instance-stream discovery dump. Blocking Map straight after the
+// copy -- a deliberate pipeline sync, acceptable at half a hertz on a
+// diagnostic budget of thirty. Everything the glare draw feeds its
+// vertex shader flows through these slots; the constants have been
+// interrogated for weeks while the streams were never once looked at.
+void dumpInstanceStreams(ID3D11DeviceContext* ctx) {
+    if (!g_streamStaging) {
+        ID3D11Device* dev = nullptr;
+        ctx->GetDevice(&dev);
+        if (dev) {
+            D3D11_BUFFER_DESC bd{};
+            bd.ByteWidth = kStreamDumpBytes;
+            bd.Usage = D3D11_USAGE_STAGING;
+            bd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+            dev->CreateBuffer(&bd, nullptr, &g_streamStaging);
+            dev->Release();
+        }
+        if (!g_streamStaging) return;
+    }
+    for (UINT slot = 0; slot < 8; ++slot) {
+        ID3D11Buffer* vb = nullptr;
+        UINT stride = 0, off = 0;
+        ctx->IAGetVertexBuffers(slot, 1, &vb, &stride, &off);
+        if (!vb) continue;
+        D3D11_BUFFER_DESC bd{};
+        vb->GetDesc(&bd);
+        const uint32_t n = bd.ByteWidth < kStreamDumpBytes ? bd.ByteWidth
+                                                           : kStreamDumpBytes;
+        D3D11_BOX box{0, 0, 0, n, 1, 1};
+        ctx->CopySubresourceRegion(g_streamStaging, 0, 0, 0, 0, vb, 0, &box);
+        D3D11_MAPPED_SUBRESOURCE m{};
+        if (SUCCEEDED(ctx->Map(g_streamStaging, 0, D3D11_MAP_READ, 0, &m)) &&
+            m.pData) {
+            const float* f = static_cast<const float*>(m.pData);
+            const int count = static_cast<int>(n / 4);
+            char line[640];
+            int o = 0;
+            for (int k = 0; k < count && k < 48 && o < 600; ++k)
+                o += snprintf(line + o, sizeof(line) - o, "%s%.4g",
+                              k ? " " : "", f[k]);
+            Log::get().note("glare stream slot %u stride=%u off=%u bytes=%u"
+                            " f0..: %s",
+                            slot, stride, off, bd.ByteWidth, line);
+            if (count > 48) {
+                o = 0;
+                for (int k = 48; k < count && k < 96 && o < 600; ++k)
+                    o += snprintf(line + o, sizeof(line) - o, "%s%.4g",
+                                  k > 48 ? " " : "", f[k]);
+                Log::get().note("glare stream slot %u f48..: %s", slot,
+                                line);
+            }
+            ctx->Unmap(g_streamStaging, 0);
+        }
+        vb->Release();
+    }
 }
 
 }  // namespace
@@ -639,29 +713,89 @@ void sunglareBegin(ID3D11DeviceContext* ctx) {
                                 cf[2] * tf[2];
                     }
                 }
+                // The SIGNED projected origin -- (w4/w7, w5/w7) -- so
+                // "pinned vs tracking under head motion" is measured,
+                // not inferred from the sign-blind eccentricity
+                // aggregate that misled the clamp arc. And the shadow's
+                // age: a stale shadow disproves buffer identity on its
+                // own.
+                float onx = 0.0f, ony = 0.0f;
+                if (sh && nf >= 32 && fabsf(sh[31]) > 1e-4f) {
+                    onx = sh[19] / sh[31];
+                    ony = sh[23] / sh[31];
+                }
+                const uint64_t age = billboardShadowAgeMs();
                 Log::get().note("glare world: %llu draw(s)/s, ecc tan "
                                 "%.2f..%.2f, align %.4f S%s d=%.1f "
-                                "cf=(%.2f %.2f %.2f) tf=(%.2f %.2f %.2f).",
+                                "org=(%.2f %.2f) age=%llu cf=(%.2f %.2f "
+                                "%.2f) tf=(%.2f %.2f %.2f).",
                                 static_cast<unsigned long long>(
                                     g_worldDraws - g_worldDrawsAtNote),
                                 g_worldEccMin, g_worldEccMax, align,
                                 g_sunSolveOk ? "OK" : "--", g_camDist,
+                                onx, ony,
+                                static_cast<unsigned long long>(age),
                                 cf[0], cf[1], cf[2], tf[0], tf[1], tf[2]);
                 g_worldNoteMs = now;
                 g_worldDrawsAtNote = g_worldDraws;
                 g_worldEccMin = 1e9f;
                 g_worldEccMax = -1e9f;
 
-                // The camera-block census, six shots five seconds
-                // apart: every float the shader does NOT read, plus the
-                // solved camera. A unit triplet at the sun's angle is a
-                // direction; a triplet that lands on the sun after
-                // subtracting cam is a position; anything that moves
-                // with the head between shots is view-space.
-                if (sh && nf >= 52 && g_blockShots < 6 &&
-                    now - g_blockShotMs >= 5000) {
+                // THE BUFFER IDENTITY CHECK -- the adversarial review's
+                // softest joint. Every CPU-side conclusion in this arc
+                // rides the assumption that the tee'd shadow is the very
+                // buffer bound at b0 of this draw. The mirror only sees
+                // plain VSSetConstantBuffers; the runtime's own answer
+                // is the authority. A MISMATCH here voids the honest-
+                // rows reading and restores the clamp theory whole.
+                {
+                    ID3D11Buffer* rb0 = nullptr;
+                    ctx->VSGetConstantBuffers(0, 1, &rb0);
+                    D3D11_BUFFER_DESC b0d{};
+                    if (rb0) rb0->GetDesc(&b0d);
+                    Log::get().note(
+                        "glare b0 identity: runtime=%p mirror=%p "
+                        "b0_bytes=%u usage=%u shadow_floats=%u %s",
+                        static_cast<void*>(rb0), billboardTarget(),
+                        b0d.ByteWidth, static_cast<unsigned>(b0d.Usage),
+                        nf,
+                        static_cast<void*>(rb0) == billboardTarget()
+                            ? "MATCH"
+                            : "MISMATCH");
+                    if (rb0) rb0->Release();
+                }
+
+                // The instance-stream discovery dump, every other
+                // second on a budget of thirty.
+                if (g_streamDumps < 30 && now - g_streamDumpMs >= 2000) {
+                    ++g_streamDumps;
+                    g_streamDumpMs = now;
+                    dumpInstanceStreams(ctx);
+                }
+
+                // The camera-block census: every float the shader does
+                // NOT read, plus the solved camera. A unit triplet at
+                // the sun's angle is a direction; a triplet that lands
+                // on the sun after subtracting cam is a position;
+                // anything that moves with the head between shots is
+                // view-space. Shots fire on an actual HEAD TURN (~11
+                // degrees since the last), not a timer -- the review
+                // showed a timer burns the budget while the headset
+                // sits on the desk.
+                bool turned = align > -1.5f;
+                if (turned && g_blockShots > 0) {
+                    const float dp = cf[0] * g_blockCf[0] +
+                                     cf[1] * g_blockCf[1] +
+                                     cf[2] * g_blockCf[2];
+                    turned = dp < 0.98f;
+                }
+                if (sh && nf >= 52 && g_blockShots < 8 && turned &&
+                    now - g_blockShotMs >= 2000) {
                     ++g_blockShots;
                     g_blockShotMs = now;
+                    g_blockCf[0] = cf[0];
+                    g_blockCf[1] = cf[1];
+                    g_blockCf[2] = cf[2];
                     char line[640];
                     int o = 0;
                     for (int k = 0; k < 16 && o < 600; ++k)

@@ -51,6 +51,9 @@ void*    g_target = nullptr;
 uint8_t  g_shadow[kShadowBytes];
 uint32_t g_shadowBytes = 0;
 bool     g_shadowValid = false;
+uint64_t g_shadowMs = 0;    // when the shadow content last updated -- a
+                            // perfectly fresh-LOOKING shadow of the wrong
+                            // buffer is the failure mode this exposes
 
 // Our substitute, panel-distance style: created at the game's buffer size,
 // filled per substitution.
@@ -237,6 +240,12 @@ void billboardCapture(const void* data, uint32_t bytes) {
     memcpy(g_shadow, data, bytes);
     g_shadowBytes = bytes;
     g_shadowValid = true;
+    g_shadowMs = nowMs();
+}
+
+uint64_t billboardShadowAgeMs() {
+    if (!g_shadowValid || g_shadowMs == 0) return ~0ull;
+    return nowMs() - g_shadowMs;
 }
 
 void billboardBegin(ID3D11DeviceContext* ctx) {
