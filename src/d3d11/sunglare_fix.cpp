@@ -615,7 +615,7 @@ void sunglareBegin(ID3D11DeviceContext* ctx) {
                     if (lc > 1e-4f) {
                         for (int k = 0; k < 3; ++k) {
                             cf[k] = c[k] / lc;
-                            tf[k] = g_trueView[8 + k];
+                            tf[k] = g_trueView[k * 4 + 2];   // column 2
                         }
                         align = cf[0] * tf[0] + cf[1] * tf[1] +
                                 cf[2] * tf[2];
@@ -670,7 +670,11 @@ void sunglareBegin(ID3D11DeviceContext* ctx) {
                 const float* fc = sh + 28;   // clamped forward row xyz
                 const float lv = sqrtf(fc[0] * fc[0] + fc[1] * fc[1] +
                                        fc[2] * fc[2]);
-                const float* v2 = g_trueView + 8;
+                // The stored matrix is the camera POSE (view-to-world;
+                // metre-scale translation column gave it away), so the
+                // forward is COLUMN two.
+                const float v2[3] = {g_trueView[2], g_trueView[6],
+                                     g_trueView[10]};
                 if (lv > 1e-4f) {
                     const float align =
                         (fc[0] * v2[0] + fc[1] * v2[1] + fc[2] * v2[2]) /
@@ -684,23 +688,22 @@ void sunglareBegin(ID3D11DeviceContext* ctx) {
                         for (int r = 0; r < 3; ++r) {
                             const float* c = sh + kRowOff[r];
                             float* p = g_projRows + r * 4;
-                            // P_i.xyz = R * c_i.xyz (R rows = the view
-                            // rows' xyz), from clipRow.world = P_i.view
-                            // with view = R*world + t.
-                            p[0] = g_trueView[0] * c[0] +
-                                   g_trueView[1] * c[1] +
-                                   g_trueView[2] * c[2];
-                            p[1] = g_trueView[4] * c[0] +
-                                   g_trueView[5] * c[1] +
-                                   g_trueView[6] * c[2];
-                            p[2] = g_trueView[8] * c[0] +
-                                   g_trueView[9] * c[1] +
-                                   g_trueView[10] * c[2];
-                            const float tx = g_trueView[3];
-                            const float ty = g_trueView[7];
-                            const float tz = g_trueView[11];
-                            p[3] = c[3] - (p[0] * tx + p[1] * ty +
-                                           p[2] * tz);
+                            // POSE convention: world = R*view + t, so
+                            // clip_i = (c_i . R) . view + c_i.t + c_i.w:
+                            // P_i.xyz = c_i-row times R = dots with the
+                            // COLUMNS, P_i.w = c_i.w + dot(c_i.xyz, t).
+                            p[0] = c[0] * g_trueView[0] +
+                                   c[1] * g_trueView[4] +
+                                   c[2] * g_trueView[8];
+                            p[1] = c[0] * g_trueView[1] +
+                                   c[1] * g_trueView[5] +
+                                   c[2] * g_trueView[9];
+                            p[2] = c[0] * g_trueView[2] +
+                                   c[1] * g_trueView[6] +
+                                   c[2] * g_trueView[10];
+                            p[3] = c[3] + (c[0] * g_trueView[3] +
+                                           c[1] * g_trueView[7] +
+                                           c[2] * g_trueView[11]);
                         }
                         g_projValid = true;
                     }
@@ -713,17 +716,22 @@ void sunglareBegin(ID3D11DeviceContext* ctx) {
                 float rows[12] = {};
                 bool okRows = false;
                 if (g_projValid && vFresh) {
+                    // POSE convention: view = R^T (world - t), so the
+                    // composed row is P_i times R^T -- dots with the
+                    // ROWS -- and the w folds the translation back out.
+                    // At the calibration instant this reduces to the
+                    // clamped rows identically.
                     for (int r = 0; r < 3; ++r) {
                         const float* p = g_projRows + r * 4;
                         float* o = rows + r * 4;
                         for (int c = 0; c < 3; ++c) {
-                            o[c] = p[0] * g_trueView[0 + c] +
-                                   p[1] * g_trueView[4 + c] +
-                                   p[2] * g_trueView[8 + c];
+                            o[c] = p[0] * g_trueView[c * 4 + 0] +
+                                   p[1] * g_trueView[c * 4 + 1] +
+                                   p[2] * g_trueView[c * 4 + 2];
                         }
-                        o[3] = p[0] * g_trueView[3] +
-                               p[1] * g_trueView[7] +
-                               p[2] * g_trueView[11] + p[3];
+                        o[3] = p[3] - (o[0] * g_trueView[3] +
+                                       o[1] * g_trueView[7] +
+                                       o[2] * g_trueView[11]);
                     }
                     okRows = true;
                 }
