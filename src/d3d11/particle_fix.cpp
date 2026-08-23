@@ -3,6 +3,7 @@
 #include <windows.h>
 
 #include <d3d11.h>
+#include <d3d11_1.h>   // VSGetConstantBuffers1: the per-draw bind offset
 
 #include <cmath>
 #include <cstdio>
@@ -68,6 +69,38 @@ ID3D11Buffer* g_staging = nullptr;
 uint32_t      g_stagingBytes = 0;
 
 FaultBudget g_budget("particle.probe", 5);
+
+// The offset-aware view of a constant-buffer bind. D3D11.1 lets a game
+// bind ONE buffer to many draws, each reading a different slice via a
+// first-constant offset, and the plain VSGetConstantBuffers cannot see
+// that offset -- it returns the buffer and nothing else. Reading the
+// wrong slice is the leading suspect for the field result where aiming
+// each draw at its emitter made the smoke disappear: every draw would
+// have been aimed with whichever emitter happened to sit at offset zero.
+ID3D11DeviceContext1* g_ctx1 = nullptr;
+bool                  g_ctx1Tried = false;
+
+ID3D11DeviceContext1* context1(ID3D11DeviceContext* ctx) {
+    if (!g_ctx1Tried) {
+        g_ctx1Tried = true;
+        ctx->QueryInterface(__uuidof(ID3D11DeviceContext1),
+                            reinterpret_cast<void**>(&g_ctx1));
+    }
+    return g_ctx1;
+}
+
+// The first constant (in 16-byte registers) this draw reads slot `slot`
+// from. Zero when the runtime has no offset to report, which is also the
+// right answer for a plainly bound buffer.
+uint32_t bindOffsetRegs(ID3D11DeviceContext* ctx, UINT slot) {
+    ID3D11DeviceContext1* c1 = context1(ctx);
+    if (!c1) return 0;
+    ID3D11Buffer* b = nullptr;
+    UINT first = 0, num = 0;
+    c1->VSGetConstantBuffers1(slot, 1, &b, &first, &num);
+    if (b) b->Release();
+    return static_cast<uint32_t>(first);
+}
 
 // Is this draw the particle billboard? By shader hash and nothing else:
 // the geyser hunt established that kind, count, stride and every sampler
@@ -266,7 +299,10 @@ bool     g_learnNoted = false;
 // tee does not have yet.
 bool     g_faceEmitter = false;
 void*    g_target0 = nullptr;
-uint8_t  g_shadow0[1024];
+// Sized for a RING buffer, not one object's constants: if the
+// emitter's matrix is reached by per-draw offset, the whole ring
+// has to be in hand to index into it.
+uint8_t  g_shadow0[65536];
 uint32_t g_shadow0Bytes = 0;
 bool     g_shadow0Valid = false;
 uint64_t g_facingUsed = 0;
@@ -365,6 +401,15 @@ bool particleOnDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
         if (cb0 != g_target0) {
             g_target0 = cb0;
             g_shadow0Valid = false;
+            D3D11_BUFFER_DESC bd{};
+            cb0->GetDesc(&bd);
+            Log::get().note(
+                "particle billboard: the emitter's constants live in a %u-byte "
+                "buffer, and this draw reads it from register %u. A large "
+                "buffer with a moving offset is a ring the draws share -- "
+                "which is why aiming from its start pointed every plume with "
+                "one emitter's direction.",
+                bd.ByteWidth, bindOffsetRegs(ctx, 0));
         }
         cb0->Release();
     }
@@ -420,7 +465,12 @@ void particleBegin(ID3D11DeviceContext* ctx) {
         // view yawed. Per emitter, the residual error is only the plume's
         // own angular width instead of its angular distance off centre.
         if (g_faceEmitter && g_shadow0Valid) {
-            const float* e = reinterpret_cast<const float*>(g_shadow0);
+            // At THIS draw's slice of the buffer, not at its start.
+            const uint32_t off = bindOffsetRegs(ctx, 0);
+            const uint32_t need = (off + 12) * 16;
+            if (need > g_shadow0Bytes) return;
+            const float* e =
+                reinterpret_cast<const float*>(g_shadow0) + off * 4;
             const float ex = e[9 * 4 + 3], ey = e[10 * 4 + 3],
                         ez = e[11 * 4 + 3];
             const float len = sqrtf(ex * ex + ey * ey + ez * ez);
