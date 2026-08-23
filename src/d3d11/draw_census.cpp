@@ -9,6 +9,7 @@
 #include "../common/guard.h"
 #include "../common/log.h"
 #include "binding_shadow.h"
+#include "exposure_fix.h"   // lookupShaderHash: the shader hash registry
 
 namespace edvr {
 namespace {
@@ -248,13 +249,23 @@ void drawCensusEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
     // worst case, silently, in exactly the shape a stride of 4294967295 would
     // have arrived in. Sized from the caps rather than from what buffers
     // "realistically" hold.
-    char tail[128] = "";
+    char tail[160] = "";
     DrawState st;
     readDrawState(ctx, &st);
     if (st.ok) {
+        // The shader's content hash beside its pointer token. The pointer
+        // is per-session noise the differ rightly ignores; the HASH is
+        // stable across sessions and is the one key that cannot collide
+        // between two draws running different code -- the geyser hunt
+        // (2026-08-23) found particle plumes and rock meshes sharing the
+        // entire size-level signature, separable by nothing the census
+        // recorded. vh=0 means the shader was created before the hooks
+        // went in.
         char vsb[24], vbb[24];
-        _snprintf_s(tail, sizeof(tail), _TRUNCATE, " vs=%s vb=%s sd=%u of=%u tp=%u",
+        _snprintf_s(tail, sizeof(tail), _TRUNCATE,
+                    " vs=%s vh=%016llX vb=%s sd=%u of=%u tp=%u",
                     bindingToken(st.vs, Kind::kOpaque, vsb, sizeof(vsb)),
+                    static_cast<unsigned long long>(lookupShaderHash(st.vs)),
                     bindingToken(st.vb, Kind::kResource, vbb, sizeof(vbb)),
                     st.stride, st.offset, st.topology);
     }
