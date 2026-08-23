@@ -1,4 +1,4 @@
-#include "cb_peek.h"
+﻿#include "cb_peek.h"
 
 #include <windows.h>
 
@@ -153,13 +153,11 @@ void poolSample(ID3D11DeviceContext* ctx, ID3D11Buffer* pool,
 
 void cbPeekConfigure(Config& cfg) {
     const bool was = g_enabled;
-    g_enabled = cfg.getBool("advanced.cb_peek", false);
-    g_glare = cfg.getBool("advanced.cb_peek_glare", false);
-    const int wantN = cfg.getIntInRange("advanced.cb_peek_n", 0, 0, 10000000);
+    g_enabled = false;   // retired instrument: the decode arcs it served are closed
+    g_glare = false;
+    const int wantN = 0;
     g_wantN = static_cast<uint32_t>(wantN);
-    const int minB = cfg.getIntInRange("advanced.cb_peek_min_bytes", 0, 0,
-                                       100000000);
-    g_wantMinBytes = static_cast<uint32_t>(minB);
+    g_wantMinBytes = 0;
     if (g_enabled && g_glare && !was) {
         g_target = nullptr;
         g_dumpedFull = false;

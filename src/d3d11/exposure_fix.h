@@ -1,4 +1,4 @@
-// Shares one auto-exposure result between the two eyes.
+﻿// Shares one auto-exposure result between the two eyes.
 //
 // Elite Dangerous computes auto-exposure separately for each eye. Because the
 // eyes are a few centimetres apart, a bright source can be visible to one and
@@ -32,7 +32,7 @@ class Config;
 // device_hook.h.
 void installExposureFix(ID3D11Device* device, HookMode mode);
 
-// Reads advanced.exposure_peek -- the damping workstream's measurement
+// Retired instrument (no key read; always off) -- the damping workstream's measurement
 // instrument: log the exposure pass's output buffers once a second so a
 // head-pitch sweep can name the float the breathing lives in. Called on
 // the install path (by installExposureFix itself) and the reload path.

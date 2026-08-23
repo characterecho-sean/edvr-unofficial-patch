@@ -1,6 +1,6 @@
 # EDVR — an unofficial patch for Elite Dangerous: Odyssey in VR
 
-Fixes for things that make Odyssey uncomfortable in a headset. Nine fixes,
+Fixes for things that make Odyssey uncomfortable in a headset. Eleven fixes,
 two files, about three minutes — what each fix does is under
 [What it fixes](#what-it-fixes).
 
@@ -152,12 +152,31 @@ does. Nauseating if you focus on it. EDVR holds the pattern still for
 exactly that one draw per eye; `holo_pattern = stock` restores the game's
 behaviour. *Details: [docs/loading-hologram.md](docs/loading-hologram.md).*
 
+**The sun's glare riding your head.** *Off by default — try it.* A star's
+whole glare — corona, veiling smudge, light beams, rays, lens flare — is
+drawn flat on your view like a camera overlay: it rolls when you roll your
+head, the beams stay pinned horizontal to your face, and the disc tilts and
+breathes as you look around. `sun_glare = realistic` anchors the glow a real
+eye would see (corona and smudge) in the world, steady under every head
+motion and identical in both eyes, and removes the camera artifacts;
+`vivid` keeps everything — beams world-locked, the lens flare still sliding
+across your view — the movie-camera look without the head coupling. Works
+on every star, witchspace arrivals included. Live: swap modes mid-flight
+and compare. *Details: [docs/sun-glare.md](docs/sun-glare.md).*
+
+**The on-foot screen being flat.** *Off by default.* `panel_curvature`
+bends the on-foot / HMD Cinema Mode screen toward you, the way Virtual
+Desktop curves its virtual display — the edges come nearer instead of
+falling away. `0.3`, paired with `panel_distance = 0.7`, is a comfortable
+on-foot starting point; both are live.
+*Details: [docs/screen-curvature.md](docs/screen-curvature.md).*
+
 **The grey haze around the on-foot screen.** On foot, the world is shown on a
 flat screen surrounded by dark grey — lit pixels on an OLED headset, so the
 screen floats in a glowing rectangle. This makes the surround properly black.
 
 **The on-foot screen's distance.** Fixed by the game; adjustable here. The stock
-distance is the default because it is about right.
+distance is the default; `0.7` with the curve above is the tested pairing.
 
 **The on-foot screen's resolution.** *Off by default.* Elite renders that screen
 at 1920x1080 regardless of headset, which is why on-foot text looks soft. This
@@ -264,10 +283,9 @@ Two things the other fixes do not:
 - **It reads event names from the game's journal** — the documented file Elite
   writes for third-party tools in Saved Games — to know when gameplay has
   started, when you step onto your feet (where the game resets its camera
-  view), and when a jump begins and resolves (which scopes the witchspace
-  star fix to actual jump tunnels). Names only (`LoadGame`, `Disembark`,
-  `StartJump`, `FSDJump`, `SupercruiseEntry`); no other content is read or
-  kept, and `d3d11.journal_watch = 0` turns it off entirely.
+  view), and when a jump begins and resolves. Names only (`LoadGame`,
+  `Disembark`, `StartJump`, `FSDJump`, `SupercruiseEntry`); no other content
+  is read or kept, and `d3d11.journal_watch = 0` turns it off entirely.
 
 Its safeguards, because they are the reason to trust it:
 

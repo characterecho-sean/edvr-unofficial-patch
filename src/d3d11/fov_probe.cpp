@@ -1,4 +1,4 @@
-#include "fov_probe.h"
+﻿#include "fov_probe.h"
 
 #include <windows.h>
 
@@ -44,7 +44,7 @@ bool   g_haveLast = false;
 
 void fovProbeConfigure(Config& cfg) {
     const bool was = g_enabled;
-    g_enabled = cfg.getBool("advanced.fov_probe", false);
+    g_enabled = false;   // retired instrument: the witchspace arc it served is closed
     if (g_enabled && !was) {
         Log::get().note("fov probe: ON -- during jump tunnels, the scene "
                         "camera buffer's floats are sampled twice a second "

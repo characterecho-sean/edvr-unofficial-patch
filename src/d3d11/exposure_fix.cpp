@@ -1,4 +1,4 @@
-#include "exposure_fix.h"
+﻿#include "exposure_fix.h"
 
 #include <windows.h>
 
@@ -908,7 +908,7 @@ void exposureConfigure(Config& cfg) {
     State* s = g_state;
     if (!s) return;
     const bool was = s->peek;
-    s->peek = cfg.getBool("advanced.exposure_peek", false);
+    s->peek = false;   // retired instrument: the damping arc it served is closed
     if (s->peek && !was) {
         s->peekLines = 0;
         s->peekLastMs = 0;

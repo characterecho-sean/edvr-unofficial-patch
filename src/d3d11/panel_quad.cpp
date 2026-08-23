@@ -1,4 +1,4 @@
-#include "panel_quad.h"
+﻿#include "panel_quad.h"
 
 #include <windows.h>
 
@@ -413,7 +413,7 @@ void queueCopy(ID3D11DeviceContext* ctx) {
 }  // namespace
 
 void panelQuadConfigure(Config& cfg) {
-    const bool on = cfg.getBool("advanced.panel_quad_dump", false);
+    const bool on = false;   // retired instrument: the capture is done and in the docs
     // Edge-triggered, not level-triggered. The ini is re-read whenever its
     // write time moves, so a level-triggered arm would take a fresh capture
     // every time an unrelated key was edited -- and the second capture would

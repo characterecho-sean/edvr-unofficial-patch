@@ -1,4 +1,4 @@
-// Reading the four vertices the on-foot panel is drawn on.
+﻿// Reading the four vertices the on-foot panel is drawn on.
 //
 // WHY THIS EXISTS
 //
@@ -33,7 +33,7 @@ namespace edvr {
 
 class Config;
 
-// Reads advanced.panel_quad_dump. Both config paths, live -- and turning it
+// Retired instrument (no key read; always off) -- its capture is in the docs, and turning it
 // off and on again arms a second capture, which is the only way to ask for
 // one in a different mode without restarting.
 void panelQuadConfigure(Config& cfg);

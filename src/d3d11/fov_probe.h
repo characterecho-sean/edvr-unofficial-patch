@@ -1,4 +1,4 @@
-// Finding the game's own projection terms, by watching which floats ramp.
+﻿// Finding the game's own projection terms, by watching which floats ramp.
 //
 // WHY: the witchspace star pin converts head rotation to pixels through the
 // HEADSET's projection, and the field measured that being wrong by about a
@@ -29,7 +29,7 @@ namespace edvr {
 
 class Config;
 
-// Reads advanced.fov_probe. Both config paths, live.
+// Retired instrument (no keys read; always off): the witchspace arc is closed.
 void fovProbeConfigure(Config& cfg);
 
 // The camera buffer's contents, as the game just wrote them -- called from

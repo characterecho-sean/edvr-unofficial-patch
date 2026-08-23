@@ -1,4 +1,4 @@
-#include "panel_curve.h"
+﻿#include "panel_curve.h"
 
 #include <windows.h>
 
@@ -439,7 +439,7 @@ void panelCurveConfigure(Config& cfg) {
     g_zGainCfg = cfg.getFloat("advanced.panel_curvature_z_gain", 0.0f);
     if (g_zGainCfg < 0.0f || g_zGainCfg > 10000.0f) g_zGainCfg = 0.0f;
     const float wasZ = g_zTest;
-    g_zTest = cfg.getFloat("advanced.panel_curvature_z_test", 0.0f);
+    g_zTest = 0.0f;   // retired probe: z reaches the screen, measured and documented
     if (g_zTest < -2.0f || g_zTest > 2.0f) g_zTest = 0.0f;
     if (g_zTest != wasZ && g_zTest != 0.0f) {
         Log::get().note(

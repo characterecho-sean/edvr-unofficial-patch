@@ -1,4 +1,4 @@
-// Reading the constants behind the spinning sprites.
+﻿// Reading the constants behind the spinning sprites.
 //
 // THE CLASS (field-confirmed 2026-08-19 on the sun flare, loiterable at any
 // star): world-positioned billboard sprites whose ORIENTATION follows the
@@ -32,7 +32,7 @@ namespace edvr {
 
 class Config;
 
-// Reads advanced.cb_peek. Both config paths, live.
+// Retired instrument (no keys read; always off): the decode arcs are closed.
 void cbPeekConfigure(Config& cfg);
 bool cbPeekEnabled();
 
