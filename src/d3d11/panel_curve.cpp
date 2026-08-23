@@ -5,10 +5,13 @@
 #include <d3d11.h>
 
 #include <cmath>
+#include <cstring>
 
 #include "../common/config.h"
 #include "../common/guard.h"
 #include "../common/log.h"
+#include "../common/timing.h"
+#include "binding_shadow.h"
 
 namespace edvr {
 namespace {
@@ -37,6 +40,13 @@ constexpr float kMaxCurvature = 1.0f;
 
 constexpr float kPi = 3.14159265358979323846f;
 
+// Reading the panel's SIZE uses the same staging dance the quad capture does,
+// and for the same reasons: a few frames before the map so the copy has run
+// and the render thread is not stalled waiting for it, and a size cap that
+// refuses anything too big to be this draw's own small buffer.
+constexpr uint64_t kReadbackLagMs = 50;
+constexpr uint32_t kMaxBytes = 4096;
+
 float    g_curvature = 0.0f;
 int      g_segments = kDefaultSegments;
 int      g_sign = 1;              // +1 or -1: which way z goes. See below.
@@ -59,6 +69,45 @@ int      g_sign = 1;              // +1 or -1: which way z goes. See below.
 // geometry substitution can ever curve this screen -- which is worth knowing
 // before another line is written toward it.
 float    g_zTest = 0.0f;
+
+// THE GAIN, and why the bend needs one at all.
+//
+// The composite's vertex shader, disassembled 2026-08-23 from the blob the
+// game creates (vs_5C36AF051B98B9F1, the only one carrying a SIZE input):
+//
+//     mul r0.xy, v0.xyxx, v2.xyxx      POSITION.xy * SIZE.xy
+//     mov r0.z,  v0.z                  POSITION.z, and nothing else
+//
+// x and y are scaled to the panel's model size by a per-draw SIZE input. z
+// is passed through raw. Everything after that is an honest projective
+// transform -- cb0[9..11] to world, cb1[270..273] to clip -- so z does reach
+// the screen, which is what the field probe measured.
+//
+// But it reaches it in the WRONG UNITS. A bend of 0.44 local units at
+// curvature 0.3 displaces the edges by 0.44 model units against a panel
+// whose half-width is size.x model units. If size.x is tens, that is a
+// percent or two of depth: real, correct, and invisible in stereo -- while
+// the arc-length narrowing in x rides the scaled basis and shows at full
+// strength. Exactly the field's report of a squish with no bend.
+//
+// So the bend is expressed in the same units as the width it bends by
+// multiplying z by size.x. That is read from the game's own SIZE buffer
+// rather than guessed, and overridable when the reading is not available.
+float    g_zGainCfg = 0.0f;      // advanced key; 0 means "use what was read"
+float    g_sizeX = 0.0f;         // read from the game's SIZE buffer
+bool     g_sizeLearned = false;
+void*    g_sizeSrc = nullptr;    // which buffer it was read from, so a panel
+                                 // of a different size relearns
+ID3D11Buffer* g_sizeStaging = nullptr;
+uint32_t g_sizeStagingBytes = 0;
+bool     g_sizePending = false;
+uint64_t g_sizeCopyMs = 0;
+bool     g_sizeNoted = false;
+
+float activeGain() {
+    if (g_zGainCfg > 0.0f) return g_zGainCfg;
+    return g_sizeLearned && g_sizeX > 0.0f ? g_sizeX : 0.0f;
+}
 bool     g_stoodDown = false;     // a fault took the feature out for good
 
 ID3D11Buffer* g_vb = nullptr;
@@ -70,6 +119,7 @@ float         g_builtCurvature = -1.0f;
 int           g_builtSegments = -1;
 int           g_builtSign = 0;
 float         g_builtZTest = 0.0f;
+float         g_builtGain = -1.0f;
 
 uint64_t g_substitutions = 0;
 
@@ -132,7 +182,7 @@ constexpr float kTowardViewer = -1.0f;
 // theatre curve. As c approaches zero this degenerates to x' = x and z' = 0,
 // which is why c = 0 is both the off switch and the identity test rather
 // than a special case in the code.
-void bend(float x, float c, int sign, float* xOut, float* zOut) {
+void bend(float x, float c, int sign, float gain, float* xOut, float* zOut) {
     if (c <= 0.0f) {
         *xOut = x;
         *zOut = 0.0f;
@@ -141,7 +191,130 @@ void bend(float x, float c, int sign, float* xOut, float* zOut) {
     const float k = kPi * c;
     const float theta = k * x;
     *xOut = sinf(theta) / k;
-    *zOut = kTowardViewer * static_cast<float>(sign) * (1.0f - cosf(theta)) / k;
+    // Gained into the panel's own model units; see activeGain above.
+    *zOut = kTowardViewer * static_cast<float>(sign) * gain *
+            (1.0f - cosf(theta)) / k;
+}
+
+// Learn size.x from the game's own SIZE buffer.
+//
+// SIZE arrives at input register 2 and cannot fit the 20-byte stride slot 0
+// carries, so it rides another vertex buffer slot -- one the substitution
+// never touches and never should. This finds it, copies it, and reads the
+// first float2 a few frames later, the same staging dance the quad capture
+// uses and for the same reason: mapping a copy in the frame it was queued
+// stalls the render thread.
+//
+// Returns whether the gain is ready. Until it is, the caller forwards the
+// game's own draw -- a flat screen while a comfort feature settles, never a
+// broken one.
+bool learnSize(ID3D11DeviceContext* ctx) {
+    if (g_zGainCfg > 0.0f) return true;   // the override needs nothing read
+
+    if (g_sizePending) {
+        if (!g_sizeStaging || nowMs() - g_sizeCopyMs < kReadbackLagMs) return false;
+        D3D11_MAPPED_SUBRESOURCE m{};
+        if (SUCCEEDED(ctx->Map(g_sizeStaging, 0, D3D11_MAP_READ, 0, &m)) && m.pData) {
+            float sz[2] = {0.0f, 0.0f};
+            memcpy(sz, m.pData, sizeof(sz));
+            ctx->Unmap(g_sizeStaging, 0);
+            if (sz[0] > 0.0f) {
+                g_sizeX = sz[0];
+                g_sizeLearned = true;
+                Log::get().note(
+                    "panel curvature: the panel's SIZE is %.3f x %.3f in model "
+                    "units, read from the buffer the composite's shader scales its "
+                    "x and y by. The bend's depth is gained by %.3f so it is "
+                    "expressed in the same units as the width it bends -- without "
+                    "that it is correct and invisible, which is what the first "
+                    "flights saw.",
+                    sz[0], sz[1], sz[0]);
+            } else {
+                Log::get().note(
+                    "panel curvature: the SIZE buffer read back %.3f x %.3f, which "
+                    "cannot be a panel size. The bend needs a gain in model units "
+                    "and there is none to be had, so it stands down. Set "
+                    "advanced.panel_curvature_z_gain to supply one by hand.",
+                    sz[0], sz[1]);
+                g_stoodDown = true;
+            }
+        }
+        g_sizePending = false;
+        return g_sizeLearned;
+    }
+    if (g_sizeLearned) return true;
+
+    // Slots 1..3: the first bound one, preferring a float2 stride, which is
+    // what a two-component SIZE is.
+    ID3D11Buffer* vbs[3] = {nullptr, nullptr, nullptr};
+    UINT strides[3] = {0, 0, 0}, offsets[3] = {0, 0, 0};
+    ctx->IAGetVertexBuffers(1, 3, vbs, strides, offsets);
+    int pick = -1;
+    for (int i = 0; i < 3; ++i) {
+        if (vbs[i] && strides[i] == 8) { pick = i; break; }
+    }
+    if (pick < 0) {
+        for (int i = 0; i < 3; ++i) {
+            if (vbs[i]) { pick = i; break; }
+        }
+    }
+    if (pick < 0) {
+        if (!g_sizeNoted) {
+            g_sizeNoted = true;
+            Log::get().note(
+                "panel curvature: nothing is bound to vertex slots 1..3, so the "
+                "panel's SIZE cannot be read and the bend has no gain to put it in "
+                "model units. Standing down. advanced.panel_curvature_z_gain "
+                "supplies one by hand if this build binds it elsewhere.");
+            g_stoodDown = true;
+        }
+        return false;
+    }
+
+    ResourceInfo info;
+    const bool known = bindingResolveResource(vbs[pick], &info) && info.isBuffer;
+    const uint32_t bytes = known ? info.a : 0;
+    if (bytes >= 8 && bytes <= kMaxBytes) {
+        if (g_sizeStaging && g_sizeStagingBytes != bytes) {
+            g_sizeStaging->Release();
+            g_sizeStaging = nullptr;
+            g_sizeStagingBytes = 0;
+        }
+        if (!g_sizeStaging) {
+            ID3D11Device* dev = nullptr;
+            ctx->GetDevice(&dev);
+            if (dev) {
+                D3D11_BUFFER_DESC bd{};
+                bd.ByteWidth = bytes;
+                bd.Usage = D3D11_USAGE_STAGING;
+                bd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+                dev->CreateBuffer(&bd, nullptr, &g_sizeStaging);
+                dev->Release();
+                if (g_sizeStaging) g_sizeStagingBytes = bytes;
+            }
+        }
+        if (g_sizeStaging) {
+            // The stream offset is deliberately ignored: this reads the buffer's
+            // first record, and a SIZE buffer that needed an offset would be a
+            // pooled one, which the size cap above has already refused.
+            ctx->CopyResource(g_sizeStaging, vbs[pick]);
+            g_sizeSrc = vbs[pick];
+            g_sizeCopyMs = nowMs();
+            g_sizePending = true;
+            if (!g_sizeNoted) {
+                g_sizeNoted = true;
+                Log::get().note(
+                    "panel curvature: reading the panel's SIZE from vertex slot %d "
+                    "(%u bytes, stride %u). The bend has to be gained into model "
+                    "units and this is where the game keeps them.",
+                    pick + 1, bytes, strides[pick]);
+            }
+        }
+    }
+    for (int i = 0; i < 3; ++i) {
+        if (vbs[i]) vbs[i]->Release();
+    }
+    return false;
 }
 
 // Build the strip. Returns false if anything failed, which the caller turns
@@ -163,7 +336,7 @@ bool build(ID3D11DeviceContext* ctx) {
         // the bend moves where a column is, never which texel it shows.
         const float x = -1.0f + 2.0f * static_cast<float>(i) / static_cast<float>(n);
         float bx = 0.0f, bz = 0.0f;
-        bend(x, g_curvature, g_sign, &bx, &bz);
+        bend(x, g_curvature, g_sign, activeGain(), &bx, &bz);
         const float u = (x + 1.0f) * 0.5f;
 
         // Bottom row first, then the top -- the game's own ordering, which is
@@ -228,6 +401,7 @@ bool build(ID3D11DeviceContext* ctx) {
     g_builtSegments = g_segments;
     g_builtSign = g_sign;
     g_builtZTest = g_zTest;
+    g_builtGain = activeGain();
     Log::get().note(
         "panel curvature: built a %d-column strip -- %u vertices, %u indices -- at "
         "curvature %.3f, depth sign %+d, z probe %+.3f. At curvature 0, 1 column "
@@ -262,6 +436,8 @@ void panelCurveConfigure(Config& cfg) {
     // update ever flips the handedness of the panel's transform. See
     // kTowardViewer for what was measured and how.
     g_sign = cfg.getIntInRange("advanced.panel_curvature_sign", 1, -1, 1) < 0 ? -1 : 1;
+    g_zGainCfg = cfg.getFloat("advanced.panel_curvature_z_gain", 0.0f);
+    if (g_zGainCfg < 0.0f || g_zGainCfg > 10000.0f) g_zGainCfg = 0.0f;
     const float wasZ = g_zTest;
     g_zTest = cfg.getFloat("advanced.panel_curvature_z_test", 0.0f);
     if (g_zTest < -2.0f || g_zTest > 2.0f) g_zTest = 0.0f;
@@ -329,9 +505,10 @@ bool panelCurveSubstitute(ID3D11DeviceContext* ctx, PanelCurveDrawFn draw) {
 
     bool substituted = false;
     const bool ok = guardedBudget(g_budget, [&] {
+        if (!learnSize(ctx)) return;
         if (!g_vb || !g_ib || g_builtCurvature != g_curvature ||
             g_builtSegments != g_segments || g_builtSign != g_sign ||
-            g_builtZTest != g_zTest) {
+            g_builtZTest != g_zTest || g_builtGain != activeGain()) {
             if (!build(ctx)) return;
         }
 
@@ -400,6 +577,11 @@ void panelCurveShutdown() {
     g_saveHeld = false;
     if (g_savedVb) { g_savedVb->Release(); g_savedVb = nullptr; }
     if (g_savedIb) { g_savedIb->Release(); g_savedIb = nullptr; }
+    if (g_sizeStaging) {
+        g_sizeStaging->Release();
+        g_sizeStaging = nullptr;
+        g_sizeStagingBytes = 0;
+    }
     if (g_vb) { g_vb->Release(); g_vb = nullptr; }
     if (g_ib) { g_ib->Release(); g_ib = nullptr; }
     g_indexCount = 0;
