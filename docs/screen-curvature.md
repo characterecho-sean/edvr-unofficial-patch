@@ -560,6 +560,47 @@ them, and the two differ only by the sign of z'. It should be exposed
 rather than baked, so the flight that finds it does not also need a
 rebuild.
 
+### The winding, measured
+
+Second capture, same build line:
+
+    indices 0,3,1, 0,2,3   (6, 16-bit, a dedicated 12-byte buffer at offset 0)
+    rasterizer cull = back, front face is clockwise
+
+Culling is on, so winding matters. Both triangles — (v0, v3, v1) and
+(v0, v2, v3) — are clockwise in the local x-right, y-up frame, which
+agrees with the clockwise front face. D3D decides facing in screen space
+after the transform, not here, but that is exactly why this does not
+need to be reasoned about: our grid goes through the *same* transform,
+so matching the local winding is sufficient and sufficient absolutely.
+
+Read as a pattern rather than as six numbers, with BL/BR/TL/TR for the
+corners the vertices actually sit at:
+
+    0,3,1  =  BL, TR, BR
+    0,2,3  =  BL, TL, TR
+
+**Generate every grid quad with that same pattern and the winding is
+correct by construction**, with no cross products anywhere in the build.
+
+That yields a free and unusually strong staging of the risk. Number the
+strip bottom row first, `bottom_i = i` and `top_i = (N+1) + i` for
+i in 0..N, which is the game's own ordering; then at **N = 1 the grid is
+byte-identical to the game's own quad and index buffer**. So the
+pixel-identity bar splits into three tests that fail separately:
+
+| | What it proves | What a failure means |
+|---|---|---|
+| **N = 1, c = 0** | The substitution MECHANISM: IA save/restore, the swallowed draw, the draw-call shape | Nothing about geometry — the buffers are the same bytes the game had |
+| **N = 64, c = 0** | The grid GENERATOR: more triangles, same image | The strip numbering, the UV mapping or the winding |
+| **c > 0** | The bend, and the sign of z | Comfort tuning, or the coin flip |
+
+Three separable failure modes instead of one ambiguous black screen,
+which is worth more than the hour it costs to stage them.
+
+Sixteen-bit indices are not a constraint to design around: N = 64 needs
+130 vertices and 384 indices, 768 bytes.
+
 ### What the two censuses settle
 
 Read the lines whose `s=` slot 0 is the panel's size — those are the
