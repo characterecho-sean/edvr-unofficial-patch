@@ -237,12 +237,40 @@ and then snapped to it. That is a flash the fix created rather than one it hid,
 and it is what a 2026-08-23 field report was about.
 
 So a run only continues while it stays put. The distance from the first withheld
-frame of a run to the second, across the six runs in that session: 0, 0, 15, 44,
-123 — and 10,114 at the hyperspace entry. Two orders of magnitude, with the odd
-one out being the bug. The threshold is `transition_flash_units`, not a number of
-its own: "the second frame is itself a jump away from the first" is the question
-the detector already asks of every frame, asked between two withholds instead of
-against a prediction.
+frame of a run to the second, across all seven runs in that session:
+
+| run | distance |
+|---|---|
+| f17777→78, f19089→90 | 0 — two frames at a byte-identical position |
+| f20501→02 | 15 |
+| f21664→65 | 44 |
+| f21380→81 | 123 |
+| **f22066→67** | **10,114** — hyperspace entry |
+| **f23100→01** | **13,261** — hyperspace arrival, thirteen seconds later |
+
+Two orders of magnitude between the classes, and both members of the upper one
+are the reported bug — the two ends of the same jump, each costing a good frame.
+The rule fires on two runs in seven.
+
+The threshold is **`transition_flash_run_units`**, its own setting. It was
+`transition_flash_units` in the first version of this, on the argument that "the
+second frame is itself a jump away from the first" is the question the detector
+already asks of every frame — which is still the right way to think about it, but
+the two knobs pull opposite ways. Raising `transition_flash_units` withholds
+*less*; raising this one withholds *more*, because runs continue more readily.
+The advice a few lines up, to raise `transition_flash_units` when far more frames
+are being withheld than you made jumps, would have been half wrong.
+
+It is a fixed floor rather than the speed-scaled trip, and the argument against
+that is worth recording because it is not weak: `trip` scales with speed
+precisely because a camera legitimately gains thousands of units per frame during
+a jump, so at supercruise speeds two samples of the *same* wrong viewpoint could
+exceed a fixed 2,000 through ordinary motion alone — which is where the flash
+lives. Against it: all seven runs above come from frames stepping 10 to 40 units,
+so there is no measurement of the fast case either way, and a speed-scaled radius
+would switch the rule off during exactly the transitions it exists for. The floor
+ships, the knob is separate so it can be moved, and this paragraph is here for
+whoever gets the measurement.
 
 Letting that frame through also means something is now known a frame earlier —
 the view has moved — so the change of reference frame is declared there rather

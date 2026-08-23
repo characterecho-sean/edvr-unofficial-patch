@@ -1041,8 +1041,10 @@ int main(int argc, char** argv) {
     //
     // The genuine flash twelve frames later is the assertion. It was withheld
     // before the run rule, let through by the first version of it, and is
-    // withheld again now that a moved-on frame defers the resolve by one frame
-    // like a marked one does.
+    // withheld again now that the stand-down a moved-on frame arms is only
+    // PROVISIONAL: this frame declares it, the frame after revokes it because
+    // the view came home. Deferring the resolve a frame was tried instead and
+    // is not what the code does -- see the boundary, which records why.
     settle(b, x, 150);
     {
         x += 30.0f;
@@ -1060,6 +1062,46 @@ int main(int argc, char** argv) {
                   (later ? "" : "a genuine flash twelve frames later was let "
                                 "through -- the rebase cooldown was armed by a "
                                 "render pass, which is the whole regression"));
+        settle(b, x, 150);
+    }
+
+    // --- 7m2. THE ANCHOR IS THE CAMERA THE VERDICT WAS TAKEN ON ------------
+    //
+    // A frame carries several cameras and the decision is re-taken on each new
+    // furthest one, so for an ordinary frame "the candidate that marked" and
+    // "the frame's furthest camera" are the same value -- review measured that,
+    // and an earlier version of this fixture would have passed either way.
+    //
+    // They diverge in exactly one place, and it is fixture 7d's measured shape:
+    // the watched offset stops holding a camera and reports |pos| of 1.03e26.
+    // That is finite, so it takes the furthest slot -- and then its residual is
+    // infinite and the decision bails at the isfinite gate without re-deciding.
+    // The mark that stands was taken on a real camera; the frame's furthest is
+    // garbage. Anchor the run to the garbage and every continuation is 1e26
+    // away, so the second frame of a genuine two-frame glitch is let through.
+    settle(b, x, 150);
+    {
+        // Frame one: a real bad camera marks, then the buffer stops being one.
+        x += 30.0f;
+        b.setPos(x, 19000.0f, -7000.0f);
+        glitchFrameObserve(b.f, kBytes, b.res);
+        const bool first = glitchFrameMarked();
+        b.setPos(x, 1.03e26f, 0.0f);          // finite, furthest, unjudgeable
+        glitchFrameObserve(b.f, kBytes, b.res);
+        advanceOneFrame();
+        glitchFrameBoundary(kEyeDraws);
+        clearGlitchFrame();
+
+        // Frame two: the SAME bad viewpoint, a hundred-odd units on.
+        x += 30.0f;
+        const bool second = frame(b, x, 19120.0f, -7000.0f);
+        check("a run anchors on the camera it judged, not the frame's furthest",
+              first && second,
+              std::string(first ? "" : "the first frame was not withheld, so this "
+                                       "cell is vacuous. ") +
+                  (second ? "" : "the run was anchored to a 1e26 garbage camera, so "
+                                 "the second frame of a two-frame glitch 120 units "
+                                 "away read as a change of reference frame"));
         settle(b, x, 150);
     }
 

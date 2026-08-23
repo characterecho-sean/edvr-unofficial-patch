@@ -763,17 +763,30 @@ struct State {
     // time indefinitely and still call itself one place. "One wrong viewpoint
     // sampled twice" is a claim about the run, so the run is what it measures.
     float      runAnchorPos[3] = {};
+    // How far the last judged continuation sat from that anchor -- the number
+    // runStillSamePlace decided on, kept so the log can print the quantity the
+    // rule measured rather than one that merely correlates with it. Valid only
+    // where the rule ran, which is `consecutive` non-zero.
+    float      lastRunSpread = 0.0f;
     // The candidate the decision was actually taken on, promoted to the anchor
     // at the boundary if the frame really was withheld.
     //
-    // NOT frameFarPos, and the difference is a real miss found in review. A
-    // frame carries several cameras and the verdict is re-taken on each new
-    // furthest one; frameFarPos at the boundary is whichever came last, which
-    // may be a pass that arrived after the mark stood. Anchoring to it measured
-    // the run against a camera the decision was never taken on -- demonstrated
-    // with a later pass 50,000 units out turning the next frame of the SAME bad
-    // viewpoint, 116 units away, into a moved-on. This is the driftLanding
-    // hazard, and it matters more here because this one decides.
+    // NARROWER THAN IT LOOKS, and the first version of this comment claimed far
+    // more than the code delivers. A later candidate that reaches the decision
+    // at all is by construction the frame's furthest, so it re-decides and
+    // markedPos tracks frameFarPos: for an ordinary multi-camera frame the two
+    // are the same value and anchoring to either is identical. Review measured
+    // that directly -- the "later pass 50,000 units out" case this was written
+    // for behaves the same both ways.
+    //
+    // The one place they diverge is a candidate that becomes the frame's
+    // furthest and then BAILS before re-deciding, which is exactly the garbage
+    // camera fixture 7d replays: |pos| of 1.03e26 is finite, so it takes the
+    // furthest slot, and then the residual is infinite and the function returns
+    // at the isfinite gate. frameFarPos ends the frame holding 1e26; the mark
+    // that stands was taken on a real camera. Anchoring a run to 1e26 makes
+    // every continuation a moved-on, so the second frame of a genuine two-frame
+    // glitch is let through -- measured, and pinned by the fixture below.
     float      markedPos[3] = {};
     uint32_t   suppressedBySeparation = 0;
     uint32_t   suppressedByDrift = 0;
@@ -858,7 +871,7 @@ inline bool rebaseDown(const State* s) {
 //
 // True when no run is open, so a first withhold is never gated by it -- the
 // rule bounds a CONTINUATION and has nothing to say about a beginning.
-inline bool runStillSamePlace(const State* s, const float* pos) {
+inline bool runStillSamePlace(State* s, const float* pos) {
     if (s->consecutive == 0) return true;
     float d2 = 0.0f;
     for (uint32_t a = 0; a < 3; ++a) {
@@ -871,6 +884,7 @@ inline bool runStillSamePlace(const State* s, const float* pos) {
     // NO, which lets the frame through -- the safe direction, and the same one
     // the residual's own finiteness check takes.
     const float d = sqrtf(d2);
+    s->lastRunSpread = d;
     return std::isfinite(d) && d <= s->runUnits;
 }
 
@@ -1679,7 +1693,12 @@ void installGlitchFrameFix() {
     // it silently answered false. Its four neighbours all check this.
     if (!std::isfinite(s.jumpMin) || s.jumpMin <= 0.0f || s.bufferBytes == 0) {
         s.enabled = false;
-        Log::get().note("transition flash fix off: threshold or buffer size is zero.");
+        Log::get().note(
+            "transition flash fix off: transition_flash_units is %.1f, which is not "
+            "a usable threshold, or the camera buffer size is zero. (It used to say "
+            "\"is zero\" for both, which is a confusing thing to be told about a "
+            "typo that produced a NaN.)",
+            static_cast<double>(s.jumpMin));
         return;
     }
     // Three floats have to fit at that offset, inside that buffer.
@@ -2448,6 +2467,35 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
         // home. The revoke restores exactly what the Returned branch below
         // restores, because it IS that branch's finding, arrived at one frame
         // late.
+        //
+        // THREE LIMITS, reasoned in review and not measured, written down here
+        // rather than lost. None is a regression -- the first two predate the
+        // run rule and the third is bounded -- but each is where this would be
+        // wrong if it is wrong:
+        //
+        //  1. The revoke overrules a measurement with a weaker test. The run
+        //     rule measured a concrete distance between two samples; `back`
+        //     against `lastTrip` is a two-step extrapolation against a bound
+        //     that can be tens of thousands at speed, and it is allowed to
+        //     discard that. A rebase whose next frame reports a pass 500 units
+        //     past the old extrapolation revokes wrongly and the detector then
+        //     spends a frame or two chasing the new reference frame -- measured
+        //     at 2 of the following 12, which 33a6f06 also gives, so it is the
+        //     inherited Returned-branch hazard rather than a new one. Gating
+        //     the revoke on lastRunSpread would address it and needs a field
+        //     measurement first.
+        //  2. The revoke splices camPrev2 across a THREE-frame gap (the bad
+        //     frame and the moved-on frame are both skipped) where the Returned
+        //     branch it mirrors spans two, so `speed` reads about 3x real for
+        //     one frame and `trip` with it. Negligible at 30 units a frame --
+        //     60 units of prediction error against a 2,000 floor -- and worth
+        //     re-reading at supercruise speeds.
+        //  3. If the confirming frame carries no world camera the chain falls
+        //     through and the provisional persists, while preJumpPrev and
+        //     lastTrip stay frozen and the view keeps moving -- so `back` grows
+        //     with the gap and a view that came home during it reads as
+        //     confirmed. That errs toward keeping a stand-down rather than
+        //     losing one, and the stand-down is bounded anyway.
         s->rebaseProvisional = false;
         float back = 0.0f;
         for (uint32_t a = 0; a < 3; ++a) {
@@ -2457,6 +2505,11 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
             back += e * e;
         }
         back = sqrtf(back);
+        // isfinite is redundant -- NaN and infinity both fail `<=` -- and the
+        // Stayed branch below does without it. Kept because this branch can
+        // reach here on a frame that was never judged, so `back` is the only
+        // thing standing between a 1e26 buffer and a revoked stand-down, and a
+        // reader should not have to re-derive that the comparison saves it.
         if (std::isfinite(back) && back <= s->lastTrip) {
             // It came home. The excursion was one frame after all and the
             // pre-jump path is still the right one, so give back the stand-down
@@ -2476,6 +2529,27 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
                 s->camPrev[a] = s->frameFarPos[a];
             }
             if (s->camPrevValid < 2) ++s->camPrevValid;
+            // Charged here, where the stand-down has actually been spent.
+            //
+            // The distance is lastRunSpread -- what runStillSamePlace measured
+            // between this run's anchor and the frame it let through -- and not
+            // lastResid, which is that frame's distance from the PREDICTION.
+            // They are different numbers with no fixed relation: 21,693 against
+            // 8,590 on one fixture, 10,114 against 13,497 in the field. Only
+            // one of them is comparable to transition_flash_run_units, which is
+            // the setting a reader reaches for on seeing this line.
+            if (s->rebaseNotesLeft > 0) {
+                --s->rebaseNotesLeft;
+                Log::get().note(
+                    "transition flash: the frame after a withheld one was %.0f units "
+                    "from where the run started, and the frame after that did not "
+                    "come back -- so the view changed reference frame rather than "
+                    "sitting on one bad frame. It was let through instead of holding "
+                    "the old picture over the change, and nothing is withheld for "
+                    "%u ms while the path rebuilds. Compare the distance against "
+                    "transition_flash_run_units.",
+                    static_cast<double>(s->lastRunSpread), (unsigned)kRebaseCooldownMs);
+            }
         }
     } else if (s->awaitingReturn && s->verdictThisFrame == kVerdictMovedOn) {
         // THE RUN RULE HAS ALREADY ANSWERED THIS -- provisionally.
@@ -2488,16 +2562,14 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
         s->rebaseProvisional = true;
         s->cooldownUntilMs = nowMs() + kRebaseCooldownMs;
         s->camPrevValid = 0;
-        if (s->rebaseNotesLeft > 0) {
-            --s->rebaseNotesLeft;
-            Log::get().note(
-                "transition flash: the frame after a withheld one was %.0f units "
-                "from it, so the view has changed reference frame rather than "
-                "sitting on one bad frame. Letting it through instead of holding "
-                "the old picture over the change, and standing down for %u ms "
-                "unless the next frame shows the view coming back.",
-                static_cast<double>(s->lastResid), (unsigned)kRebaseCooldownMs);
-        }
+        // NOTHING IS LOGGED HERE. The line belongs to the confirmation, and
+        // putting it here spent the rebase budget on stand-downs that were
+        // taken back one frame later: measured in review at twelve of the forty
+        // lines in a single probe, every one announcing 1330 ms that never
+        // happened. kRebaseNotes exists because "each costs 120 frames during
+        // which nothing can be withheld" -- a revoked one costs zero and
+        // crowds out the ones that do, which is the exact failure that comment
+        // records having already happened once.
     } else if (s->awaitingReturn && s->frameFarMag2 >= 0.0f) {
         s->awaitingReturn = false;
         float back = 0.0f;
@@ -2642,7 +2714,10 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
                 "%u by a camera parked in one place, %u by a separation drifting "
                 "wider "
                 "(%u and %u since the last of these lines; %u were withheld on a "
-                "frame the eye-draw gate did not call a rendered scene). Compare "
+                "frame the eye-draw gate did not call a rendered scene; %u more "
+                "were the frame after a withheld one, let through because the view "
+                "had moved to a new reference frame rather than sat on one bad "
+                "frame -- see transition_flash_run_units). Compare "
                 "the first "
                 "number against how many jumps, drops and map closes you have "
                 "made: roughly one per transition is it working. The others are "
@@ -2654,7 +2729,8 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
                 s->suppressed, s->suppressedBySeparation, s->suppressedByRadius,
                 s->suppressedByPark, s->suppressedByDrift,
                 s->framesWithheld - s->totalsWithheld,
-                s->suppressed - s->totalsSuppressed, s->withheldNotRendering);
+                s->suppressed - s->totalsSuppressed, s->withheldNotRendering,
+                s->letThroughMovedOn);
             // ITS OWN LINE, not a suffix of the paragraph above: appended
             // there it pushed the note past the log's line buffer and every
             // field log carried it truncated mid-word, which is worse than
