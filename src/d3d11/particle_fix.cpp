@@ -246,6 +246,21 @@ uint64_t g_appliedAtNote = 0;
 uint64_t g_noteMs = 0;
 bool     g_learnNoted = false;
 
+// The emitter's constants, shadowed per draw. Elite renders in
+// CAMERA-RELATIVE world space -- the shader's own near-fade takes
+// dot(forward, position) with no camera term, which is only a depth if
+// positions are already relative to the eye -- so cb0[9..11]'s
+// translation column is the vector from the viewer to the plume, and
+// normalising it is the direction the quads should face. Measured at a
+// geyser field: two emitters at (312.1, 37.2, -294.3) and (43.1, -47.0,
+// 19.5), each steady while the view moved around them.
+void*    g_target0 = nullptr;
+uint8_t  g_shadow0[1024];
+uint32_t g_shadow0Bytes = 0;
+bool     g_shadow0Valid = false;
+uint64_t g_facingUsed = 0;
+float    g_lastFacing[3] = {};
+
 ID3D11Buffer* g_ourCb = nullptr;
 uint32_t      g_ourBytes = 0;
 ID3D11Buffer* g_savedCb = nullptr;
@@ -271,6 +286,21 @@ bool shapeOk(const float* f, uint32_t floats) {
 }  // namespace
 
 bool particleSteady() { return g_mode == Mode::kSteady; }
+
+void* particleTargetCb0() {
+    return g_mode == Mode::kSteady ? g_target0 : nullptr;
+}
+
+void particleCaptureCb0(const void* data, uint32_t bytes) {
+    if (g_mode != Mode::kSteady || !data || bytes < 12 * 16 ||
+        bytes > sizeof(g_shadow0)) {
+        g_shadow0Valid = false;
+        return;
+    }
+    memcpy(g_shadow0, data, bytes);
+    g_shadow0Bytes = bytes;
+    g_shadow0Valid = true;
+}
 
 void* particleTarget() {
     return g_mode == Mode::kSteady ? g_target : nullptr;
@@ -314,6 +344,20 @@ bool particleOnDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
         return false;
     }
     cb->Release();
+
+    // The emitter buffer, learned the same way. Its absence is not a
+    // refusal: without it the substitution still removes the roll, which
+    // is most of the artifact -- it only loses the per-emitter facing.
+    ID3D11Buffer* cb0 = nullptr;
+    ctx->VSGetConstantBuffers(0, 1, &cb0);
+    if (cb0) {
+        if (cb0 != g_target0) {
+            g_target0 = cb0;
+            g_shadow0Valid = false;
+        }
+        cb0->Release();
+    }
+
     if (!g_shadowValid) return false;
     return shapeOk(reinterpret_cast<const float*>(g_shadow), g_shadowBytes / 4);
 }
@@ -356,6 +400,29 @@ void particleBegin(ID3D11DeviceContext* ctx) {
         f[278 * 4 + 0] = 0.0f;
         f[278 * 4 + 1] = 1.0f;
         f[278 * 4 + 2] = 0.0f;
+
+        // And the facing, when the emitter's own constants are in hand:
+        // point the quads AT the viewer rather than along the view axis.
+        // Sharing one view-aligned normal across a whole draw is what
+        // made a plume off to the side look foreshortened, and made the
+        // foreshortening change -- read as the sprite rotating -- as the
+        // view yawed. Per emitter, the residual error is only the plume's
+        // own angular width instead of its angular distance off centre.
+        if (g_shadow0Valid) {
+            const float* e = reinterpret_cast<const float*>(g_shadow0);
+            const float ex = e[9 * 4 + 3], ey = e[10 * 4 + 3],
+                        ez = e[11 * 4 + 3];
+            const float len = sqrtf(ex * ex + ey * ey + ez * ez);
+            if (len > 1.0f) {
+                f[279 * 4 + 0] = ex / len;
+                f[279 * 4 + 1] = ey / len;
+                f[279 * 4 + 2] = ez / len;
+                g_lastFacing[0] = ex / len;
+                g_lastFacing[1] = ey / len;
+                g_lastFacing[2] = ez / len;
+                ++g_facingUsed;
+            }
+        }
         ctx->Unmap(g_ourCb, 0);
 
         ctx->VSGetConstantBuffers(1, 1, &g_savedCb);
@@ -378,9 +445,13 @@ void particleEnd(ID3D11DeviceContext* ctx) {
     if (now - g_noteMs >= 10000) {
         Log::get().note(
             "particle billboard: steady -- %llu substitution(s) in the last "
-            "ten seconds. The plume's quads are held upright in the world "
-            "instead of rolling with the view.",
-            static_cast<unsigned long long>(g_applied - g_appliedAtNote));
+            "ten seconds, %llu of them aimed at their own emitter, the last "
+            "at (%.3f %.3f %.3f). Quads held upright in the world, and "
+            "facing the viewer rather than the view axis.",
+            static_cast<unsigned long long>(g_applied - g_appliedAtNote),
+            static_cast<unsigned long long>(g_facingUsed),
+            g_lastFacing[0], g_lastFacing[1], g_lastFacing[2]);
+        g_facingUsed = 0;
         g_noteMs = now;
         g_appliedAtNote = g_applied;
     }
@@ -410,6 +481,8 @@ void particleConfigure(Config& cfg) {
         } else {
             g_target = nullptr;
             g_shadowValid = false;
+            g_target0 = nullptr;
+            g_shadow0Valid = false;
             Log::get().note("particle billboard: stock.");
         }
     }
@@ -472,6 +545,8 @@ void particleShutdown() {
     g_engaged = false;
     g_target = nullptr;
     g_shadowValid = false;
+    g_target0 = nullptr;
+    g_shadow0Valid = false;
     if (g_staging) {
         g_staging->Release();
         g_staging = nullptr;

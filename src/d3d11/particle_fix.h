@@ -47,6 +47,13 @@ void particleEnd(ID3D11DeviceContext* ctx);
 void* particleTarget();
 void particleCapture(const void* data, uint32_t bytes);
 
+// The emitter's own constants, tee'd the same way. cb0[9..11] is its
+// model matrix and the translation column is where the plume sits
+// relative to the camera, which is what points the billboards AT the
+// viewer instead of along the view axis.
+void* particleTargetCb0();
+void particleCaptureCb0(const void* data, uint32_t bytes);
+
 // Whether anything here wants to see draws at all -- false is free.
 bool particleWantsDraws();
 
