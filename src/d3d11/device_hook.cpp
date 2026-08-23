@@ -294,6 +294,10 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
         return g_state->realPresent(self, syncInterval, flags);
     }
     const HRESULT hr = g_state->realPresent(self, syncInterval, flags);
+    // The frame boundary reached us AND the runtime came back -- the pair the
+    // openvr half gets from "vr: hookedSubmit entered". Placed after the real
+    // call rather than before it so the crumb also clears the runtime.
+    EDVR_BREADCRUMB_ONCE("gfx: first Present returned");
 
     // OUTSIDE the fault budget, and that is the point. Confirming is a file
     // delete; putting it inside would mean a burst of faults anywhere in the
@@ -305,6 +309,12 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
         elapsedMs(g_state->firstFrameMs, kSentinelConfirmMs)) {
         g_state->sentinelConfirmed = true;
         if (g_state->sentinel) g_state->sentinel->confirm();
+        // A CLOCK, not just a state. Reaching this proves the process survived
+        // kSentinelConfirmMs of frames -- the bound that otherwise has to be
+        // inferred from the sentinel's absence on the NEXT launch, which is
+        // only sound if nobody emptied edvr_logs in between. In #15 somebody
+        // may well have, and the inference carried the whole timing estimate.
+        breadcrumb("gfx: sentinel confirmed");
     }
 
     // The other half of 1f's gate. See the note at hookedSubmit.
@@ -585,6 +595,10 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
             exposureFixReclaimHooks(sceneRendered);
         }
     });
+    // Past the whole frame body, so "first Present returned" with no "first
+    // frame work done" after it puts the death inside our own frame work
+    // rather than in the runtime or the game.
+    EDVR_BREADCRUMB_ONCE("gfx: first frame work done");
     return hr;
 }
 
@@ -804,6 +818,23 @@ void hookDevice(ID3D11Device* device) {
         Log::get().note("NOTE: the crash sentinel could not be written, so a crash in "
                         "these hooks will not disable them next launch.");
     }
+    // THE TRAIL USED TO END HERE, AND THAT WAS THE WHOLE PROBLEM.
+    //
+    // Everything past this line -- the first vtable write, the context probe,
+    // three fix installs, the resolution patch, the Present hook and every
+    // frame -- reported only to the log, which is flushed by a 250 ms thread
+    // and loses its tail to a TerminateProcess. Issue #15 died somewhere in
+    // that stretch on three consecutive launches and left six breadcrumb
+    // lines, none of them past this one, so the stage could not be named.
+    //
+    // The openvr half has had first-frame crumbs since it was written
+    // (vr: hookedSubmit entered, vr: submit thread). A d3d11-only install had
+    // none at all, which is exactly the install that reported the crash.
+    //
+    // What follows is one crumb per irreversible step. They cost a CreateFile
+    // and a WriteFile each, once, at startup; the two on the frame path are
+    // one-shot. Same rule the FAULT totals already follow: a diagnostic that
+    // a hard exit can eat is not a diagnostic.
     breadcrumb("gfx: arming d3d11 hooks");
 
     s.shaderDump = sentinelCfg.getBool("advanced.glare_shader_dump", false);
@@ -831,6 +862,7 @@ void hookDevice(ID3D11Device* device) {
         return;
     }
     s.device = device;
+    breadcrumb("gfx: device hooks committed");
 
     // The hook mechanism, decided ONCE from the immediate context and shared
     // by both context installers so they cannot split modes on the one object
@@ -846,12 +878,21 @@ void hookDevice(ID3D11Device* device) {
         }
     }
 
+    // The mode itself, unbuffered. It is the variable that separated the two
+    // v0.9.2 rigs in #15 -- one healthy on InPlace, one dying on CopyVptr --
+    // and it was reaching the log only, where a truncated tail loses it.
+    breadcrumb(ctxMode == HookMode::CopyVptr ? "gfx: context mode CopyVptr"
+                                             : "gfx: context mode InPlace");
+
     installExposureFix(device, ctxMode);
+    breadcrumb("gfx: exposure fix installed");
     // Before the vScreen fixes, which ask it whether it needs the eye-draw
     // count. It installs no hooks of its own -- it is driven from vScreen's Map
     // and Unmap -- so nothing else depends on the order.
     installGlitchFrameFix();
+    breadcrumb("gfx: flash fix installed");
     installVScreenFixes(device, ctxMode);
+    breadcrumb("gfx: vscreen fixes installed");
 
     // The panel resolution, if asked for. Applied here because it has to land
     // before the game builds its render chain, and the device exists first.
@@ -874,7 +915,13 @@ void hookDevice(ID3D11Device* device) {
         // the patch is not asked for or refuses.
         const uint32_t kStockW = 1920, kStockH = 1080;
 
+        // Bracketed rather than reported once, because this is the only thing
+        // in the DLL that writes to the game's CODE. "starting" with no "done"
+        // after it is a different failure from every other step here, and the
+        // unbuffered file is the only place that distinction survives.
+        if (w && h) breadcrumb("gfx: resolution patch starting");
         const bool applied = (w && h) && applyVScreenModeResolution(w, h);
+        if (w && h) breadcrumb("gfx: resolution patch done");
 
         // Tell vScreen what the panel ACTUALLY renders at, from the outcome
         // rather than the request. This return value used to be discarded, and
@@ -885,6 +932,7 @@ void hookDevice(ID3D11Device* device) {
         vScreenSetPanelSize(applied ? w : kStockW, applied ? h : kStockH);
     }
     hookFactoryForDevice(device);
+    breadcrumb("gfx: device hook path complete");
 }
 
 void hookSwapChain(IDXGISwapChain* swapChain) {
@@ -904,6 +952,7 @@ void hookSwapChain(IDXGISwapChain* swapChain) {
         return;
     }
     s.swapChain = swapChain;
+    breadcrumb("gfx: Present hooked");
     Log::get().note("Present hook installed");
 }
 
