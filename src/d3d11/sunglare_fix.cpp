@@ -471,20 +471,24 @@ void dumpInstanceStreams(ID3D11DeviceContext* ctx) {
                                 line);
             }
             // The whole-train classification, one line: per record, the
-            // selection class the shader will assign -- 'a' anchored
-            // (kept in curated mode), 'x' anchored-but-axis-locked (a
-            // beam; collapsed), 's' slider (collapsed) -- plus the
-            // record's atlas tile x, the element's identity.
+            // selection class -- 'a' anchored, 'x' axis-locked (beam),
+            // 's' slider -- plus tile x, the slide length (t7.z at
+            // f29, the routing input itself) and the base-size source
+            // p1.z (f6): every quantity the vivid routing rides, per
+            // record, straight from the data the draw consumed.
             if (stride >= 64) {
                 const int recs = static_cast<int>(n / 128);
                 o = 0;
                 for (int k = 0; k < recs && k < 21 && o < 600; ++k) {
                     const float* r = f + k * 32;
                     const bool anch = r[12] > 0.999f && r[13] > 0.999f;
-                    const char c = anch ? (r[19] > 0.0f ? 'x' : 'a')
-                                        : 's';
-                    o += snprintf(line + o, sizeof(line) - o, "%s%c%.0f",
-                                  k ? " " : "", c, r[20]);
+                    const bool sld = r[29] >= 6.0f;
+                    const char c = sld ? 's'
+                                       : (anch ? (r[19] > 0.0f ? 'x' : 'a')
+                                               : 'w');
+                    o += snprintf(line + o, sizeof(line) - o,
+                                  "%s%c%.0f/%.2g/%.2g", k ? " " : "", c,
+                                  r[20], r[29], r[6]);
                 }
                 if (recs > 0)
                     Log::get().note("glare stream classes: %s", line);
@@ -550,9 +554,10 @@ void sunglareConfigure(Config& cfg) {
     // The corner-rotation steady path and its eyeshape/recenter levers
     // are superseded by the world shader and no longer configurable.
     g_steady = false;
-    // The billboard loan's tee stays armed for world mode: the
-    // telemetry and the per-draw camera solve read the shadowed CB.
-    billboardGlareWatch(g_world != 0);
+    // The billboard loan's tee stays armed for world mode and for the
+    // probe: the telemetry and the per-draw camera solve read the
+    // shadowed CB.
+    billboardGlareWatch(g_world != 0 || g_probe);
     if (legacy && (g_mode != was || g_world != wasWorld)) {
         Log::get().note("sun glare: legacy value \"%s\" accepted (%s). The "
                         "shipped modes are stock, realistic and vivid.",
@@ -587,8 +592,10 @@ void sunglareConfigure(Config& cfg) {
 // must keep running even with the glare fix itself stock, because the
 // last-seen stamp is what scopes the damper to the sun.
 bool sunglareWantsDraws() {
-    return g_mode != Mode::kStock || exposureDampingActive();
+    return g_mode != Mode::kStock || exposureDampingActive() || g_probe;
 }
+
+bool sunglareProbeActive() { return g_probe; }
 
 bool sunglareSteady() { return g_steady; }
 
@@ -702,8 +709,10 @@ void sunglareBegin(ID3D11DeviceContext* ctx) {
     // The shader swap outranks the corner machinery: with the world
     // shader in, position, orientation, facing and per-eye agreement
     // are all computed correctly inside the pipeline, and the corner
-    // stream stays the game's own.
-    if (g_world) {
+    // stream stays the game's own. The probe instruments run in EVERY
+    // mode -- including stock, where the draws go untouched -- so a
+    // stock-vs-mode record diff is one hot swap apart.
+    if (g_world || g_probe) {
         // The cutoff telemetry: matched draws per second and the
         // eccentricity range the CB reports, so a disappearance names
         // its side -- draws stopping = the game culled upstream; draws
@@ -920,6 +929,7 @@ void sunglareBegin(ID3D11DeviceContext* ctx) {
                 }
             }
         }
+        if (!g_world) return;   // probe-only: instruments ran, draw stock
         const int v = g_world - 1;
         if (!g_worldTried[v]) buildWorldShader(ctx, g_world);
         if (g_worldVs[v]) {

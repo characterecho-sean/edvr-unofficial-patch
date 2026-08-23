@@ -28,6 +28,9 @@ void sunglareConfigure(Config& cfg);
 bool sunglareWantsDraws();
 bool sunglareSteady();
 bool sunglareWorldActive();
+// advanced.sun_glare_probe: the debug instruments run in EVERY mode,
+// stock included, so a stock-vs-mode record diff is one hot swap apart.
+bool sunglareProbeActive();
 SunglareAction sunglareOnEyeDraw(char kind, uint32_t count,
                                  uint32_t instances);
 uint32_t sunglareKeep();

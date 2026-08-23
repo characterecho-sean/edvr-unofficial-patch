@@ -1143,7 +1143,7 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
             // The world shader needs no billboard shadow to RENDER --
             // but its telemetry reads the sun position out of it, so the
             // target-follow side effect still runs (return value moot).
-            if (sunglareWorldActive()) {
+            if (sunglareWorldActive() || sunglareProbeActive()) {
                 // NO prefix clamp under the world shader. The record
                 // list is DYNAMIC -- elements enter and reorder with
                 // the game's head-look camera (the roster: i15 becomes
