@@ -11,6 +11,8 @@
 #include "../common/config.h"
 #include "../common/guard.h"
 #include "../common/log.h"
+#include <string>
+
 #include "../common/timing.h"
 #include "exposure_fix.h"   // lookupShaderHash
 
@@ -38,6 +40,23 @@ constexpr uint32_t kNeedBytes = (kFirstReg + kRegs) * 16;
 constexpr uint64_t kReadbackLagMs = 50;
 constexpr uint64_t kSampleMs = 1000;
 
+// The fix. steady replaces the basis's up vector with WORLD UP for the
+// matched draw, turning a fully camera-locked billboard into a
+// cylindrical one: still facing you, but with the smoke column held
+// vertical in the world. Measured 2026-08-23: with the view level the
+// game's own up reads (0.056, 0.981, 0.185) -- already world up to within
+// the view's pitch -- so at a level view this substitution is a no-op,
+// and everything it changes is roll and pitch coupling.
+//
+// Why a constant substitution is safe here when it was not for the sun
+// glare: that buffer's rows were a VIEW MATRIX, and the elements' screen
+// positions flowed through them, so every rewrite displaced them per eye.
+// These are pure direction vectors used for nothing but the billboard
+// basis -- position arrives separately through cb0[9..11] -- and cb1[277]
+// holds a camera right the shader never even reads. [278] is the whole of
+// the change.
+enum class Mode { kStock, kSteady };
+Mode     g_mode = Mode::kStock;
 bool     g_probe = false;
 bool     g_pending = false;
 uint64_t g_copyMs = 0;
@@ -152,9 +171,188 @@ void queueCopy(ID3D11DeviceContext* ctx) {
     cb->Release();
 }
 
+// The shadow of the game's cb1, kept by the Map/Unmap tee, and our own
+// buffer built from it. The contents cannot be read at the draw -- a
+// dynamic buffer the GPU owns is write-only from here -- so the only way
+// to substitute is to watch the game write it, which is the mechanism the
+// panel distance fix has used since 0.3.
+constexpr uint32_t kMaxShadow = 8192;
+void*    g_target = nullptr;
+uint8_t  g_shadow[kMaxShadow];
+uint32_t g_shadowBytes = 0;
+bool     g_shadowValid = false;
+uint64_t g_applied = 0;
+uint64_t g_appliedAtNote = 0;
+uint64_t g_noteMs = 0;
+bool     g_learnNoted = false;
+
+ID3D11Buffer* g_ourCb = nullptr;
+uint32_t      g_ourBytes = 0;
+ID3D11Buffer* g_savedCb = nullptr;
+bool          g_engaged = false;
+
+FaultBudget g_subBudget("particle.substitute", 5);
+
+// Is the shadow shaped like the camera block this fix understands? Both
+// basis vectors must be unit length; anything else is a buffer that is
+// not what we think it is, and substituting into it would be writing a
+// guess into the game's pipeline.
+bool shapeOk(const float* f, uint32_t floats) {
+    if (floats < (kFirstReg + kRegs) * 4) return false;
+    const float* up = f + 278 * 4;
+    const float* fwd = f + 279 * 4;
+    const float lu = sqrtf(up[0] * up[0] + up[1] * up[1] + up[2] * up[2]);
+    const float lf = sqrtf(fwd[0] * fwd[0] + fwd[1] * fwd[1] + fwd[2] * fwd[2]);
+    if (lu < 0.9f || lu > 1.1f) return false;
+    if (lf < 0.9f || lf > 1.1f) return false;
+    return true;
+}
+
 }  // namespace
 
+bool particleSteady() { return g_mode == Mode::kSteady; }
+
+void* particleTarget() {
+    return g_mode == Mode::kSteady ? g_target : nullptr;
+}
+
+void particleCapture(const void* data, uint32_t bytes) {
+    if (g_mode != Mode::kSteady || !data || bytes < 64 || bytes > kMaxShadow) {
+        g_shadowValid = false;
+        return;
+    }
+    memcpy(g_shadow, data, bytes);
+    g_shadowBytes = bytes;
+    g_shadowValid = true;
+}
+
+bool particleOnDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
+                    uint32_t instances) {
+    if (g_mode != Mode::kSteady || !ctx) return false;
+    if (kind != 'X' && kind != 'N') return false;
+    if (instances == 0 || count < 6) return false;
+    if (!isPlumeDraw(ctx)) return false;
+
+    // Follow the buffer the game binds for these draws. Learning it here
+    // rather than assuming means a build that moves the block simply never
+    // matches, instead of substituting into the wrong buffer.
+    ID3D11Buffer* cb = nullptr;
+    ctx->VSGetConstantBuffers(1, 1, &cb);
+    if (!cb) return false;
+    if (cb != g_target) {
+        g_target = cb;
+        g_shadowValid = false;
+        if (!g_learnNoted) {
+            g_learnNoted = true;
+            Log::get().note(
+                "particle billboard: watching the plume shader's constants "
+                "at slot 1. The next write the game makes there is what the "
+                "substitution is built from; until then these draws go "
+                "through untouched.");
+        }
+        cb->Release();
+        return false;
+    }
+    cb->Release();
+    if (!g_shadowValid) return false;
+    return shapeOk(reinterpret_cast<const float*>(g_shadow), g_shadowBytes / 4);
+}
+
+void particleBegin(ID3D11DeviceContext* ctx) {
+    g_engaged = false;
+    if (!ctx || !g_shadowValid) return;
+    guardedBudget(g_subBudget, [&] {
+        if (g_ourCb && g_ourBytes != g_shadowBytes) {
+            g_ourCb->Release();
+            g_ourCb = nullptr;
+            g_ourBytes = 0;
+        }
+        if (!g_ourCb) {
+            ID3D11Device* dev = nullptr;
+            ctx->GetDevice(&dev);
+            if (!dev) return;
+            D3D11_BUFFER_DESC bd{};
+            bd.ByteWidth = g_shadowBytes;
+            bd.Usage = D3D11_USAGE_DYNAMIC;
+            bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+            bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+            dev->CreateBuffer(&bd, nullptr, &g_ourCb);
+            dev->Release();
+            if (!g_ourCb) return;
+            g_ourBytes = g_shadowBytes;
+        }
+        D3D11_MAPPED_SUBRESOURCE m{};
+        if (FAILED(ctx->Map(g_ourCb, 0, D3D11_MAP_WRITE_DISCARD, 0, &m)) ||
+            !m.pData) {
+            return;
+        }
+        memcpy(m.pData, g_shadow, g_shadowBytes);
+        // The whole substitution: the basis's up becomes world up. The
+        // shader then builds right = cross(worldUp, forward) -- horizontal
+        // in the world -- and up = cross(forward, right), so the quad still
+        // faces the camera while its roll stops following the view. The w
+        // is left as the game wrote it: only the direction is ours.
+        float* f = static_cast<float*>(m.pData);
+        f[278 * 4 + 0] = 0.0f;
+        f[278 * 4 + 1] = 1.0f;
+        f[278 * 4 + 2] = 0.0f;
+        ctx->Unmap(g_ourCb, 0);
+
+        ctx->VSGetConstantBuffers(1, 1, &g_savedCb);
+        ID3D11Buffer* ours = g_ourCb;
+        ctx->VSSetConstantBuffers(1, 1, &ours);
+        g_engaged = true;
+        ++g_applied;
+    });
+}
+
+void particleEnd(ID3D11DeviceContext* ctx) {
+    if (!g_engaged || !ctx) return;
+    g_engaged = false;
+    ctx->VSSetConstantBuffers(1, 1, &g_savedCb);
+    if (g_savedCb) {
+        g_savedCb->Release();
+        g_savedCb = nullptr;
+    }
+    const uint64_t now = nowMs();
+    if (now - g_noteMs >= 10000) {
+        Log::get().note(
+            "particle billboard: steady -- %llu substitution(s) in the last "
+            "ten seconds. The plume's quads are held upright in the world "
+            "instead of rolling with the view.",
+            static_cast<unsigned long long>(g_applied - g_appliedAtNote));
+        g_noteMs = now;
+        g_appliedAtNote = g_applied;
+    }
+}
+
 void particleConfigure(Config& cfg) {
+    const Mode wasMode = g_mode;
+    const std::string m = cfg.getString("fix.particle_billboard", "stock");
+    if (m == "steady") {
+        g_mode = Mode::kSteady;
+    } else {
+        if (m != "stock") {
+            Log::get().note("particle billboard: that is not stock or "
+                            "steady; running stock.");
+        }
+        g_mode = Mode::kStock;
+    }
+    if (g_mode != wasMode) {
+        if (g_mode == Mode::kSteady) {
+            g_learnNoted = false;
+            Log::get().note(
+                "particle billboard: STEADY -- smoke and steam quads are "
+                "built against world up instead of the view's up, so they "
+                "face you without rolling when you tilt your head or swing "
+                "the camera. Read from the game's own shader: "
+                "docs/particle-billboards.md.");
+        } else {
+            g_target = nullptr;
+            g_shadowValid = false;
+            Log::get().note("particle billboard: stock.");
+        }
+    }
     const bool was = g_probe;
     g_probe = cfg.getBool("advanced.particle_probe", false);
     if (g_probe != was) {
@@ -171,7 +369,9 @@ void particleConfigure(Config& cfg) {
     }
 }
 
-bool particleWantsDraws() { return g_probe; }
+bool particleWantsDraws() {
+    return g_probe || g_mode == Mode::kSteady;
+}
 
 void particleOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
                        uint32_t instances) {
@@ -198,6 +398,18 @@ void particleOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
 }
 
 void particleShutdown() {
+    if (g_ourCb) {
+        g_ourCb->Release();
+        g_ourCb = nullptr;
+    }
+    g_ourBytes = 0;
+    if (g_savedCb) {
+        g_savedCb->Release();
+        g_savedCb = nullptr;
+    }
+    g_engaged = false;
+    g_target = nullptr;
+    g_shadowValid = false;
     if (g_staging) {
         g_staging->Release();
         g_staging = nullptr;

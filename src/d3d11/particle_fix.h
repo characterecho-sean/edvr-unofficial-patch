@@ -26,8 +26,26 @@ namespace edvr {
 
 class Config;
 
-// Reads advanced.particle_probe. Live on save.
+// Reads fix.particle_billboard (stock | steady) and
+// advanced.particle_probe. Both live on save.
 void particleConfigure(Config& cfg);
+
+// Whether the substitution is on -- the draw chain asks before matching.
+bool particleSteady();
+
+// The matched draw, for the verdict chain: this draw is a particle
+// billboard AND a substitute is ready to bind.
+bool particleOnDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
+                    uint32_t instances);
+
+// Bind the substituted constants for one draw, and put the game's back.
+// End is safe to call when Begin did nothing.
+void particleBegin(ID3D11DeviceContext* ctx);
+void particleEnd(ID3D11DeviceContext* ctx);
+
+// The Map/Unmap tee: the buffer whose writes to shadow, and the write.
+void* particleTarget();
+void particleCapture(const void* data, uint32_t bytes);
 
 // Whether anything here wants to see draws at all -- false is free.
 bool particleWantsDraws();

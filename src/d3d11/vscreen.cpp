@@ -268,6 +268,10 @@ struct State {
         // hands over the bytecode to read.
         uint64_t vsHash;
     };
+    // The particle billboards' constant-buffer tee, mirroring bb* below.
+    void*     partResource = nullptr;
+    void*     partData = nullptr;
+    uint32_t  partBytes = 0;
     SkipSpec  censusSkip[8] = {};
     uint32_t  censusSkipCount = 0;
     // The bisection form of the same probe: skip eye draws by their POSITION
@@ -948,7 +952,7 @@ inline bool foreignContext(ID3D11DeviceContext* self) {
 // every element's identity.
 enum class DrawVerdict {
     kNone, kPanel, kSkip, kRemlok, kHolo, kWitchstar, kBillboard,
-    kGlareClamp, kGlareSteady
+    kGlareClamp, kGlareSteady, kParticle
 };
 
 // kind, count and instances describe the draw for the census and the census
@@ -1021,6 +1025,13 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     // swim when the mouse turns as well as when the head does, and a fix
     // that only reached the stereo view would leave half the bug standing.
     particleOnEyeDraw(self, kind, count, instances);
+
+    // The particle billboards, before the eye gate for the same reason the
+    // probe is: on foot they draw into the panel, and a fix that only ran
+    // for the stereo view would leave the flat view swimming.
+    if (particleSteady() && particleOnDraw(self, kind, count, instances)) {
+        return DrawVerdict::kParticle;
+    }
 
     const uint32_t rtvGen = bindingGeneration(BindSlot::Rtv0);
     if (s->rtv0EyeGen != rtvGen) {
@@ -1590,6 +1601,20 @@ HRESULT STDMETHODCALLTYPE hookedMap(ID3D11DeviceContext* self, ID3D11Resource* r
             s->bbBytes = d.ByteWidth;
         }
     }
+    // The particle billboards' constants, same discipline again: the
+    // basis vectors cannot be read at the draw, so the write is watched.
+    if (SUCCEEDED(hr) && mapped && sub == 0 && res == particleTarget()) {
+        s->partResource = res;
+        s->partData = mapped->pData;
+        s->partBytes = 0;
+        D3D11_RESOURCE_DIMENSION dim = D3D11_RESOURCE_DIMENSION_UNKNOWN;
+        res->GetType(&dim);
+        if (dim == D3D11_RESOURCE_DIMENSION_BUFFER) {
+            D3D11_BUFFER_DESC d{};
+            static_cast<ID3D11Buffer*>(res)->GetDesc(&d);
+            s->partBytes = d.ByteWidth;
+        }
+    }
     // The world shader's true-camera feed: the scene CB vscreen
     // nominated at the last big eye draw, same discipline again.
     if (SUCCEEDED(hr) && mapped && sub == 0 &&
@@ -1664,6 +1689,13 @@ void STDMETHODCALLTYPE hookedUnmap(ID3D11DeviceContext* self, ID3D11Resource* re
         s->sceneCbData = nullptr;
         s->sceneCbBytes = 0;
     }
+    if (res == s->partResource && s->partData) {
+        guardedBudget(g_cameraBudget,
+                      [&] { particleCapture(s->partData, s->partBytes); });
+        s->partResource = nullptr;
+        s->partData = nullptr;
+        s->partBytes = 0;
+    }
     if (res == s->bbResource && s->bbData) {
         guardedBudget(g_cameraBudget,
                       [&] { billboardCapture(s->bbData, s->bbBytes); });
@@ -1702,7 +1734,9 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     if (v == DrawVerdict::kWitchstar) witchstarBegin(self);
     if (v == DrawVerdict::kBillboard) billboardBegin(self);
     if (v == DrawVerdict::kGlareSteady) sunglareBegin(self);
+    if (v == DrawVerdict::kParticle) particleBegin(self);
     draw();
+    if (v == DrawVerdict::kParticle) particleEnd(self);
     if (v == DrawVerdict::kGlareSteady) sunglareEnd(self);
     if (v == DrawVerdict::kBillboard) billboardEnd(self);
     if (v == DrawVerdict::kWitchstar) witchstarEnd(self);
