@@ -254,6 +254,17 @@ bool     g_learnNoted = false;
 // normalising it is the direction the quads should face. Measured at a
 // geyser field: two emitters at (312.1, 37.2, -294.3) and (43.1, -47.0,
 // 19.5), each steady while the view moved around them.
+// The per-emitter facing is OFF by default, and that is a field result
+// rather than caution: aiming each draw at its own emitter made the smoke
+// disappear entirely (2026-08-23) while the roll fix beside it was
+// verified good. The direction computed sensibly -- about forty degrees
+// off the view axis, right for a plume below and to the side -- so the
+// arithmetic is not what failed. The open suspect is freshness: if Elite
+// binds one constant buffer at per-draw OFFSETS rather than remapping it,
+// the shadow holds some other emitter's matrix and most quads end up
+// aimed edge-on. Confirming that needs the offset-aware bind hook the
+// tee does not have yet.
+bool     g_faceEmitter = false;
 void*    g_target0 = nullptr;
 uint8_t  g_shadow0[1024];
 uint32_t g_shadow0Bytes = 0;
@@ -408,7 +419,7 @@ void particleBegin(ID3D11DeviceContext* ctx) {
         // foreshortening change -- read as the sprite rotating -- as the
         // view yawed. Per emitter, the residual error is only the plume's
         // own angular width instead of its angular distance off centre.
-        if (g_shadow0Valid) {
+        if (g_faceEmitter && g_shadow0Valid) {
             const float* e = reinterpret_cast<const float*>(g_shadow0);
             const float ex = e[9 * 4 + 3], ey = e[10 * 4 + 3],
                         ez = e[11 * 4 + 3];
@@ -446,8 +457,8 @@ void particleEnd(ID3D11DeviceContext* ctx) {
         Log::get().note(
             "particle billboard: steady -- %llu substitution(s) in the last "
             "ten seconds, %llu of them aimed at their own emitter, the last "
-            "at (%.3f %.3f %.3f). Quads held upright in the world, and "
-            "facing the viewer rather than the view axis.",
+            "at (%.3f %.3f %.3f). Quads are held upright in the world; the "
+            "aiming is off unless particle_face_emitter is set.",
             static_cast<unsigned long long>(g_applied - g_appliedAtNote),
             static_cast<unsigned long long>(g_facingUsed),
             g_lastFacing[0], g_lastFacing[1], g_lastFacing[2]);
@@ -486,6 +497,7 @@ void particleConfigure(Config& cfg) {
             Log::get().note("particle billboard: stock.");
         }
     }
+    g_faceEmitter = cfg.getBool("advanced.particle_face_emitter", false);
     const bool was = g_probe;
     g_probe = cfg.getBool("advanced.particle_probe", false);
     if (g_probe != was) {
