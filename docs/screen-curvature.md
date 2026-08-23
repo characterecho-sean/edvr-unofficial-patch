@@ -6,10 +6,13 @@ believed or measured, and the ones that can only be settled in a live
 session are collected in one list near the end, labelled as such.*
 
 *The bend is not implemented and has never been run against the game.
-Phase 0 — the measuring — is under way, and the section at the foot of
-this file ("Phase 0, in progress") records what it has found so far,
-including one premise above that turned out to be wrong. Read that
-section before acting on this one.*
+**Phase 0 — the measuring — is DONE, flown 2026-08-23**, and it moved the
+work: Path A is confirmed open, Path B is dead, and Phase 1 has fallen
+off the critical path because the half-recognition it existed to fix
+does not occur. Two premises in the body below are refuted by it. The
+section at the foot of this file ("Phase 0: what the measuring
+found") holds the measurements and what remains — read it before acting on anything
+above.*
 
 The ask, from users: Virtual Desktop shows its virtual screen as an
 optionally curved surface — a cylindrical bend toward the viewer, so the
@@ -47,6 +50,8 @@ The short version of the whole document:
   one eye, which is worse than not shipping. And a substituted draw
   touches far more pipeline state than a substituted constant buffer, so
   the save/restore discipline grows accordingly.
+  **(Measured 2026-08-23: the first half of this is wrong. Both eyes
+  sample the panel, in both modes. See "What came back".)**
 
 ---
 
@@ -365,7 +370,7 @@ the geometry last.
 
 ---
 
-## Phase 0, in progress
+## Phase 0: what the measuring found
 
 *Everything above this line is the design as first written. Everything
 below is what happened when it met the logs.*
@@ -438,6 +443,74 @@ that toggles, and this is not one.
 3. **HMD Cinema Mode**, the same, once more.
 
 4. Send the log.
+
+### What came back
+
+Flown 2026-08-23, build `v0.9.2-80-g4c5e1a5`. Census 1 at 08:01:25, eight
+seconds after a disembark brought the flat panel up — **on foot**.
+Census 2 at 08:02:22, in the steady two-draw regime — **HMD Cinema
+Mode**. Three frames each.
+
+**The two censuses are byte-for-byte identical**, and each frame of each
+holds exactly two draws:
+
+    DC 0 #1 X n=6 i=1 r=@0 d=- c=@1 s=@2,-,-,- vs=@4 vb=@3 sd=20 of=0 tp=4
+    DC 0 #2 X n=6 i=1 r=@5 d=- c=@1 s=@2,-,-,- vs=@4 vb=@3 sd=20 of=0 tp=4
+
+    DC id @0 tex 4340x4284 fmt=27     left eye
+    DC id @5 tex 4340x4284 fmt=27     right eye
+    DC id @2 tex 5120x2880 fmt=27     the panel (vscreen_res raised)
+    DC id @1 buf 208                  the transform
+    DC id @3 buf 80                   the quad
+    DC id @4 ?                        the vertex shader
+
+Every unknown Phase 0 was meant to settle, settled:
+
+| | Answer | |
+|---|---|---|
+| **1. Does the composite read a real vertex buffer?** | **Yes.** An 80-byte buffer at stride 20, offset 0 — exactly **four vertices**, drawn as six indices in a triangle list. A dedicated quad, not a slice of a pooled buffer. | **Path A is open** |
+| **The vertex format** | Stride 20 = 12 + 8, which is `float3` position plus `float2` UV and essentially nothing else. Not yet read, but the whole buffer is 80 bytes | Sizes the Phase 2 capture |
+| **4. Is the composite's depth load-bearing?** | **No.** `d=-`: no depth-stencil view is bound at the composite, in either mode | Nothing drawn afterwards can depend on the panel's depth, so a per-vertex displacement has nothing to disturb |
+| **5. Does Cinema Mode recognise only one eye?** | **No — the premise was wrong.** Both draws sample `@2`, the panel, into two different eye-sized targets, in **both** modes. Today's panel-sized-SRV test catches both eyes | **Prerequisite 1 falls away, and with it Phase 1** |
+| **One transform buffer or two?** | **One**, 208 bytes, bound to both draws. The eyes differ by what is written into it between them, not by which buffer they read | The distance fix's shadow is one buffer's, and `panel_distance_index` 47 lands at byte 188 of 208 — inside, with room |
+
+Two consequences worth stating plainly, because they shrink the work:
+
+- **Path B is dead.** The transform never has to be understood, no
+  shader has to be authored, and the build gains no `fxc` step. The
+  game's vertex shader transforms our bent vertices exactly as it
+  transforms its own flat ones.
+- **Phase 1 is no longer on the path.** It existed to fix a
+  half-recognition that does not occur, and to enable a shader-identity
+  recogniser that is not needed. Recognition as shipped is sufficient
+  for curvature in both modes.
+
+One observation kept for later, not acted on: at 07:47:24, during
+startup, the `panelMiss` note recorded a **composite-shaped** draw —
+`X` with 6 indices, the composite's exact signature — sampling
+1920x1080 while the panel was 5120x2880. That is a composite reading the
+stock panel size in some earlier mode (menu or loading), not the on-foot
+or Cinema one, and it is the closest thing in the log to the
+half-recognition the design feared. It is also the note earning its new
+vertex count: without it that line is indistinguishable from the seven
+others beside it.
+
+### What Phase 2 needs now
+
+Smaller than the design assumed, and it starts with one more
+measurement rather than a leap:
+
+1. **Read the quad.** `CopyResource` the 80-byte vertex buffer to a
+   staging buffer at a recognised composite, map it a few frames later,
+   and log four vertices of five floats. Confirms the format outright
+   and hands over the exact corners and UVs the grid has to reproduce.
+   80 bytes is a trivial capture.
+2. **Build the grid** in that format, flat, and substitute it: save
+   VB/IB/topology with `IAGet*`, bind ours, issue
+   `DrawIndexedInstanced(indices, 1, 0, 0, 0)`, restore, and swallow the
+   game's draw through the existing `kSkip` plumbing.
+3. **Hold it to the pixel-identity bar at c = 0** before any bend is
+   attempted, exactly as the design says.
 
 ### What the two censuses settle
 
