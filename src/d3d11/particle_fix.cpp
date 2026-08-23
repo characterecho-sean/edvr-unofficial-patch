@@ -108,6 +108,66 @@ void readBack(ID3D11DeviceContext* ctx) {
     g_pending = false;
 }
 
+ID3D11Buffer* g_cb0Staging = nullptr;
+uint32_t      g_cb0StagingBytes = 0;
+bool          g_cb0Pending = false;
+
+// cb0[9..11] is the emitter's model matrix: the shader sends every
+// particle position through it, so its translation column -- the .w of
+// each row -- is where the emitter itself sits in the world. With the
+// camera position from cb1[276] beside it, that is everything a
+// per-emitter facing direction needs, and both are constants EDVR can
+// already substitute. Logged to confirm before anything is built on it.
+void readBackCb0(ID3D11DeviceContext* ctx) {
+    D3D11_MAPPED_SUBRESOURCE m{};
+    if (FAILED(ctx->Map(g_cb0Staging, 0, D3D11_MAP_READ, 0, &m)) || !m.pData) {
+        g_cb0Pending = false;
+        return;
+    }
+    const float* f = static_cast<const float*>(m.pData);
+    const float ex = f[9 * 4 + 3], ey = f[10 * 4 + 3], ez = f[11 * 4 + 3];
+    ctx->Unmap(g_cb0Staging, 0);
+    Log::get().note(
+        "particle probe: emitter at (%.1f %.1f %.1f) from cb0[9..11].w -- if "
+        "this differs between the geysers in view and holds still while you "
+        "look around, it is the per-emitter position a facing direction is "
+        "built from.",
+        ex, ey, ez);
+    g_cb0Pending = false;
+}
+
+void queueCopyCb0(ID3D11DeviceContext* ctx) {
+    ID3D11Buffer* cb = nullptr;
+    ctx->VSGetConstantBuffers(0, 1, &cb);
+    if (!cb) return;
+    D3D11_BUFFER_DESC bd{};
+    cb->GetDesc(&bd);
+    if (bd.ByteWidth < 12 * 16) { cb->Release(); return; }
+    if (g_cb0Staging && g_cb0StagingBytes != bd.ByteWidth) {
+        g_cb0Staging->Release();
+        g_cb0Staging = nullptr;
+        g_cb0StagingBytes = 0;
+    }
+    if (!g_cb0Staging) {
+        ID3D11Device* dev = nullptr;
+        ctx->GetDevice(&dev);
+        if (dev) {
+            D3D11_BUFFER_DESC sd{};
+            sd.ByteWidth = bd.ByteWidth;
+            sd.Usage = D3D11_USAGE_STAGING;
+            sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+            dev->CreateBuffer(&sd, nullptr, &g_cb0Staging);
+            dev->Release();
+            if (g_cb0Staging) g_cb0StagingBytes = bd.ByteWidth;
+        }
+    }
+    if (g_cb0Staging) {
+        ctx->CopyResource(g_cb0Staging, cb);
+        g_cb0Pending = true;
+    }
+    cb->Release();
+}
+
 void queueCopy(ID3D11DeviceContext* ctx) {
     ID3D11Buffer* cb = nullptr;
     ctx->VSGetConstantBuffers(1, 1, &cb);
@@ -385,6 +445,7 @@ void particleOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
         if (g_pending) {
             if (g_staging && nowMs() - g_copyMs >= kReadbackLagMs) {
                 readBack(ctx);
+                if (g_cb0Pending && g_cb0Staging) readBackCb0(ctx);
             }
             return;
         }
@@ -394,6 +455,7 @@ void particleOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
         ++g_seen;
         g_lastMs = now;
         queueCopy(ctx);
+        queueCopyCb0(ctx);
     });
 }
 
@@ -414,6 +476,12 @@ void particleShutdown() {
         g_staging->Release();
         g_staging = nullptr;
     }
+    if (g_cb0Staging) {
+        g_cb0Staging->Release();
+        g_cb0Staging = nullptr;
+    }
+    g_cb0StagingBytes = 0;
+    g_cb0Pending = false;
     g_stagingBytes = 0;
     g_pending = false;
 }
