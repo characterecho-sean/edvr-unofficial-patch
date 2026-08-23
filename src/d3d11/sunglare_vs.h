@@ -76,11 +76,17 @@ VSOut main(VSIn i) {
     o.t3.xy = i.t5.xy * float2(0.0625, 0.125)
             + i.uvc.xy * i.t5.zw * float2(0.0625, 0.125);
 
-    // The anchor weights: 1,1 means "sit on the element" -- those are
-    // the world-path elements. Anything else is a slider and keeps the
-    // original flat behaviour.
+    // The anchor weights: 1,1 means the element sits at the anchor --
+    // but the LENS-FLARE GHOSTS carry (1,1) too: their slide lives in
+    // t7 (unit screen direction times slide length), applied on top of
+    // the anchor. Field data splits the classes by two decades of
+    // length -- anchored elements 0.05..0.8, ghosts 7..160 -- so the
+    // slide length is the discriminator. A ghost routed down the world
+    // path lands stacked ON the sun, hidden under the corona: exactly
+    // vivid mode's missing lens flare (field, 2026-08-23).
     bool anchored = i.p3.x > 0.999 && i.p3.y > 0.999;
-    bool worldPath = anchored;
+    bool slider = i.t7.z >= 6.0;
+    bool worldPath = anchored && !slider;
 #ifdef ALLWORLD
     worldPath = true;
 #endif
@@ -92,11 +98,14 @@ VSOut main(VSIn i) {
     // record list is dynamic: elements enter and REORDER with its
     // head-look camera (the forty-five-degree disappearing disc was a
     // prefix clamp faithfully drawing a reordered slot). tValid.z asks
-    // for the curated set: anchored, non-axis-locked elements -- the
-    // corona and smudge class; beams (axis-locked) and the lens-flare
-    // sliders collapse. Selection is identity-proof under any reorder
-    // because it reads what the record IS.
-    bool selected = tValid.z > 0.5 ? (anchored && i.t4.w <= 0.0) : true;
+    // for the curated set: anchored, non-sliding, non-axis-locked
+    // elements -- the corona and smudge class; beams (axis-locked) and
+    // the lens-flare ghosts (sliders) collapse. Selection is
+    // identity-proof under any reorder because it reads what the
+    // record IS.
+    bool selected = tValid.z > 0.5
+        ? (anchored && !slider && i.t4.w <= 0.0)
+        : true;
 
     // The element position, REBUILT. i.pos is computed CPU-side in the
     // game's head-look frame and goes stale past the clamp -- the one
@@ -208,8 +217,13 @@ VSOut main(VSIn i) {
         float2 anchor01 = ndc * 0.5 + 0.5;
         float2 anchorPx = vpSize * anchor01 + vpMin;
         float2 anchorNdc = anchorPx * 2.0 - 1.0;
-        float2 slid = (1.0 - i.p3.xy) * i.t7.xy * i.t7.z + anchorNdc;
-        float2 pos2 = baseSize * i.t7.xy * i.t7.z * i.p3.xy * 2.0 + slid;
+        // The slide length, capped: past the game's own head-look
+        // comfort zone its ghost lengths explode (7..30 in normal
+        // viewing, 160+ observed at high head angles) -- the cap keeps
+        // a wild ghost bounded instead of smearing across the sky.
+        float t7len = min(i.t7.z, 60.0);
+        float2 slid = (1.0 - i.p3.xy) * i.t7.xy * t7len + anchorNdc;
+        float2 pos2 = baseSize * i.t7.xy * t7len * i.p3.xy * 2.0 + slid;
         float2 axis = pos2 - anchorNdc;
         float al = length(axis);
         axis = (al > 1e-5) ? axis / al : float2(1.0, 0.0);
