@@ -186,8 +186,14 @@ VSOut main(VSIn i) {
         float rl = length(r);
         if (rl < 0.05) { r = float3(1.0, 0.0, 0.0); } else { r /= rl; }
         float3 u = cross(d, r);
+        // The element's own rotation -- except for axis-locked
+        // elements (the beams): stock re-aims those per frame to stay
+        // screen-horizontal, so their rotation field is head-coupled
+        // and a world-locked beam must ignore it. The plain world
+        // basis is already horizon-referenced (right = world-up cross
+        // direction): that IS the locked horizontal bar.
         float sr, cr;
-        sincos(i.p3.w, sr, cr);
+        sincos(axisLocked ? 0.0 : i.p3.w, sr, cr);
         float3 rr = r * cr + u * sr;
         float3 uu = u * cr - r * sr;
         // The quad-size law, taken from the flat path at zero
