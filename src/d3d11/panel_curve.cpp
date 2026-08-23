@@ -126,10 +126,30 @@ ID3D11Buffer* g_cbStaging = nullptr;
 uint32_t g_cbStagingBytes = 0;
 bool     g_cbPending = false;
 
+// SIZE.x is not the visual width on every runtime -- but SIZE.y times the
+// content aspect is. Measured across the two rigs (2026-08-23):
+//
+//     OpenComposite   SIZE 35.556 x 20.000     x/y = 1.778 = 16:9
+//     native SteamVR  SIZE 20.254 x 20.000     x/y = 1.013
+//
+// The SteamVR x/y is EXACTLY the headset's FOV tangent ratio (2.5617
+// horizontal over 2.5296 vertical on the measured rig): on that runtime
+// the game folds the FOV shape into SIZE.x and the remaining width scale
+// lives further down the pipeline, where no single buffer read finds it.
+// The world matrix was the first suspect and measured UNIFORM (ratio
+// 1.000), which killed the theory and left the invariant: SIZE.y is
+// 20.000 exactly on both rigs, and the panel's content is 16:9 by
+// construction (the resolution keys accept 16:9 only). The visual
+// half-width in model units is therefore SIZE.y * aspect on every
+// runtime -- 35.556 on both -- which on OpenComposite is numerically
+// identical to the SIZE.x the field already verified.
+constexpr float kPanelAspect = 16.0f / 9.0f;
+float    g_sizeY = 0.0f;
+
 float activeGain() {
     if (g_zGainCfg > 0.0f) return g_zGainCfg;
-    if (!(g_sizeLearned && g_sizeX > 0.0f)) return 0.0f;
-    return g_sizeX * (g_basisLearned ? g_basisRatio : 1.0f);
+    if (!(g_sizeLearned && g_sizeY > 0.0f)) return 0.0f;
+    return g_sizeY * kPanelAspect * (g_basisLearned ? g_basisRatio : 1.0f);
 }
 bool     g_stoodDown = false;     // a fault took the feature out for good
 
@@ -277,16 +297,17 @@ bool learnSize(ID3D11DeviceContext* ctx) {
             float sz[2] = {0.0f, 0.0f};
             memcpy(sz, m.pData, sizeof(sz));
             ctx->Unmap(g_sizeStaging, 0);
-            if (sz[0] > 0.0f) {
+            if (sz[0] > 0.0f && sz[1] > 0.0f) {
                 g_sizeX = sz[0];
+                g_sizeY = sz[1];
                 g_sizeLearned = true;
                 Log::get().note(
                     "panel curvature: the panel's SIZE is %.3f x %.3f in model "
                     "units, read from the buffer the composite's shader scales its "
-                    "x and y by. The bend's depth is gained by %.3f (SIZE.x times "
-                    "the world-basis ratio %.3f) so it is expressed in the same "
-                    "units as the width it bends -- without that it is correct "
-                    "and invisible, which is what the first flights saw.",
+                    "x and y by. The bend's depth is gained by %.3f -- SIZE.y "
+                    "times the 16:9 content aspect times the world-basis ratio "
+                    "%.3f -- the visual half-width, which SIZE.x is not on every "
+                    "runtime (it carries the FOV shape on native SteamVR).",
                     sz[0], sz[1], activeGain(), g_basisLearned ? g_basisRatio : 1.0f);
             } else {
                 Log::get().note(
