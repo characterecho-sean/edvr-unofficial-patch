@@ -21,6 +21,7 @@
 #include "billboard_fix.h"
 #include "binding_shadow.h"
 #include "cb_peek.h"
+#include "panel_curve.h"
 #include "panel_quad.h"
 #include "device_hook.h"  // contextHookModeFor
 #include "draw_census.h"
@@ -301,6 +302,15 @@ struct State {
 
     // The panel's transform, as the game last wrote it. Captured from the Unmap
     // the game wrote it through, so reading it costs nothing.
+    // Set by beginPanelOverride when this draw's geometry is to be replaced by
+    // the curved strip, consumed by forwardWithVerdict. A flag rather than a
+    // DrawVerdict because it COMPOSES with one: the panel distance fix
+    // substitutes the constant buffer for this same draw and returns kPanel,
+    // and the substituted transform has to serve the substituted mesh. Cleared
+    // at the top of every beginPanelOverride, so it can never outlive the draw
+    // that set it.
+    bool     curveThisDraw = false;
+
     void*    compositeCb = nullptr;
     uint8_t  shadow[512] = {};
     uint32_t shadowBytes = 0;
@@ -939,6 +949,9 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     // next.
     s->glareClamp = 0;
     if (foreignContext(self)) return DrawVerdict::kNone;
+    // Cleared before anything can set it, on every draw, so a substitution
+    // can never be attributed to a draw that did not ask for one.
+    s->curveThisDraw = false;
     // Counting eye draws is not part of the panel distance fix, even though it
     // happens here.
     //
@@ -978,7 +991,7 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         s->censusSkipRangeCount == 0 && s->censusSkipOffCount == 0 &&
         !remlokWantsDraws() && !holoWantsDraws() && !witchstarWantsDraws() &&
         !sunglareWantsDraws() && !cbPeekEnabled() && !billboardWantsDraws() &&
-        !drawCensusArmed() && !panelQuadWants()) {
+        !drawCensusArmed() && !panelQuadWants() && !panelCurveWants()) {
         return DrawVerdict::kNone;
     }
     const uint32_t rtvGen = bindingGeneration(BindSlot::Rtv0);
@@ -1203,6 +1216,20 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     // and again below is one resolve, not two.
     if (panelQuadWants() && srv0IsPanelSized(s, kind, count)) {
         panelQuadOnComposite(self);
+    }
+
+    // The curved screen, recognised here and acted on in forwardWithVerdict.
+    //
+    // ABOVE the distanceEnabled return for the same reason the capture above
+    // it is: panel_distance sits at its shipped 1.0 on most rigs, everything
+    // below that return is unreachable there, and a comfort feature that
+    // silently required an unrelated comfort feature to be switched on first
+    // would be this file's sixth instance of that bug.
+    //
+    // It sets a flag instead of returning a verdict because it has to compose
+    // with the distance fix, which returns kPanel for this very draw.
+    if (panelCurveWants() && srv0IsPanelSized(s, kind, count)) {
+        s->curveThisDraw = true;
     }
 
     if (!s->distanceEnabled) return DrawVerdict::kNone;
@@ -1613,7 +1640,22 @@ void STDMETHODCALLTYPE hookedUnmap(ID3D11DeviceContext* self, ID3D11Resource* re
 template <typename RealDraw>
 void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
                         RealDraw&& draw) {
-    if (v == DrawVerdict::kSkip) return;
+    if (v == DrawVerdict::kSkip) {
+        // A skipped draw is not drawn at all, so there is nothing to replace.
+        // Clearing here rather than trusting the next draw to do it keeps the
+        // flag's lifetime inside the one call that set it.
+        g_state->curveThisDraw = false;
+        return;
+    }
+    // The geometry substitution, which SWALLOWS the game's draw when it
+    // succeeds and forwards it untouched when it does not -- so a failure
+    // here is a flat screen, never a missing one.
+    if (g_state->curveThisDraw) {
+        g_state->curveThisDraw = false;
+        if (panelCurveSubstitute(self, g_state->realDrawIndexedInstanced)) {
+            return;
+        }
+    }
     if (v == DrawVerdict::kRemlok) remlokScissorBegin(self);
     if (v == DrawVerdict::kHolo) holoBegin(self);
     if (v == DrawVerdict::kWitchstar) witchstarBegin(self);
@@ -1983,6 +2025,7 @@ void vScreenRefreshConfig() {
     fovProbeConfigure(cfg);
     cbPeekConfigure(cfg);
     panelQuadConfigure(cfg);
+    panelCurveConfigure(cfg);
     billboardConfigure(cfg);
     // Every fix.head_offset_* key, on the reload path as well as the startup
     // one. A config reader on only one of the two is a specific repeatable bug
@@ -2659,6 +2702,7 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     fovProbeConfigure(cfg);
     cbPeekConfigure(cfg);
     panelQuadConfigure(cfg);
+    panelCurveConfigure(cfg);
     billboardConfigure(cfg);
     // installGlitchFrameFix is called before this, deliberately, so this is its
     // settled answer rather than a guess about config it has not read yet.
@@ -2815,6 +2859,7 @@ void shutdownVScreenFixes() {
 
     g_state->distanceEnabled = false;
     panelQuadShutdown();
+    panelCurveShutdown();
     if (g_state->ourCb) {
         g_state->ourCb->Release();
         g_state->ourCb = nullptr;
