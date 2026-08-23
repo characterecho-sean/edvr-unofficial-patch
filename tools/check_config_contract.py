@@ -42,7 +42,8 @@ EARLY_RE = re.compile(r'readConfigStringEarly\s*\([^,]+,[^,]+,\s*"([^"]+)"', re.
 
 # A section we know about followed by a dotted name, anywhere in a string. Used
 # to catch key names mentioned in log text that nothing actually reads.
-SECTIONS = ('fix', 'advanced', 'hotkey', 'log', 'openvr', 'd3d11', 'luminance')
+SECTIONS = ('fix', 'advanced', 'hotkey', 'log', 'openvr', 'd3d11',
+            'experimental', 'luminance')
 MENTION_RE = re.compile(r'"[^"]*\b((?:%s)\.[a-z0-9_]+)' % '|'.join(SECTIONS))
 
 
@@ -95,11 +96,18 @@ def keys_mentioned():
     return found
 
 
-def keys_documented():
+def keys_documented(duplicate_sections=None):
     """Keys edvr.ini defines, as {key: line number}. Commented-out keys count as
-    documented -- a template line is how a user learns the name."""
+    documented -- a template line is how a user learns the name.
+
+    Each section header must appear exactly once: the shipped ini once grew
+    three [fix] blocks and two [advanced] blocks by accretion, and a reader
+    scanning for a key stopped at the first block and missed the rest. Repeats
+    are collected into duplicate_sections (a list of (name, line)) when given.
+    """
     found = {}
     section = ''
+    seen_sections = {}
     if not os.path.exists(INI):
         return found
     with open(INI, encoding='utf-8', errors='replace') as f:
@@ -108,6 +116,9 @@ def keys_documented():
             m = re.match(r'^\[([^\]]+)\]', line)
             if m:
                 section = m.group(1).strip()
+                if section in seen_sections and duplicate_sections is not None:
+                    duplicate_sections.append((section, i, seen_sections[section]))
+                seen_sections.setdefault(section, i)
                 continue
             # "# key = value" counts, but "# some prose = here" must not, so a
             # commented line only counts when it looks exactly like a setting.
@@ -125,10 +136,18 @@ def keys_documented():
 def main():
     quiet = '--quiet' in sys.argv
     read = keys_read()
-    doc = keys_documented()
+    dup_sections = []
+    doc = keys_documented(dup_sections)
     mentioned = keys_mentioned()
 
     problems = []
+
+    for name, line, first in dup_sections:
+        problems.append(
+            'SECTION [%s] APPEARS TWICE in edvr.ini (line %d; first at line %d)\n'
+            '    One section per name: a reader scanning for a key stops at the\n'
+            '    first block and misses everything in the second.'
+            % (name, line, first))
 
     for key in sorted(read):
         if key not in doc:

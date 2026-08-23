@@ -101,35 +101,15 @@ bool shapeOk(const float* f, uint32_t floats) {
 
 }  // namespace
 
-void billboardConfigure(Config& cfg) {
-    const Mode was = g_mode;
-    const std::string m = cfg.getString("fix.billboard", "stock");
-    if (m == "stock") {
-        g_mode = Mode::kStock;
-    } else if (m == "steady") {
-        g_mode = Mode::kSteady;
-    } else if (m == "probe") {
-        g_mode = Mode::kProbe;
-    } else {
-        g_mode = Mode::kStock;
-        Log::get().note("billboard \"%s\" is not stock, steady or probe; "
-                        "running stock.", m.c_str());
-    }
-    if (was != g_mode) {
-        const char* names[] = {"stock", "steady", "probe"};
-        Log::get().note("billboard: %s.%s",
-                        names[static_cast<uint32_t>(g_mode)],
-                        g_mode == Mode::kProbe
-                            ? " DIAGNOSTIC: matched sprites draw at a tenth "
-                              "of their size. Whatever shrinks is consuming "
-                              "the substituted constants; whatever ignores "
-                              "this is not."
-                            : "");
-        if (g_mode == Mode::kStock) {
-            g_target = nullptr;
-            g_shadowValid = false;
-        }
-    }
+void billboardConfigure(Config& /*cfg*/) {
+    // RETIRED as a user fix 2026-08-23: the sprite family this targeted
+    // turned out not to read the constants it substitutes (the probe of
+    // 2026-08-20 -- 900 subs/s, nothing shrank), and the suns it was
+    // reaching for are handled by fix.sun_glare's shader swap. What
+    // remains in service is the shadow-and-substitute machinery below,
+    // loaned to the glare fix as its constants tee (billboardGlareWatch).
+    // No keys are read.
+    g_mode = Mode::kStock;
 }
 
 bool billboardWantsDraws() { return g_mode != Mode::kStock; }

@@ -36,7 +36,9 @@ namespace edvr {
 
 class Config;
 
-// Reads fix.billboard (stock | steady). Both config paths, live.
+// Retired as a user fix (no keys read; always stock). The module stays
+// for its shadow machinery, loaned to the sun-glare fix as its
+// constants tee.
 void billboardConfigure(Config& cfg);
 bool billboardWantsDraws();
 

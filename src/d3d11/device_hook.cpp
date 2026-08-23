@@ -1,4 +1,4 @@
-#include "device_hook.h"
+﻿#include "device_hook.h"
 
 #include <windows.h>
 
@@ -330,7 +330,7 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
         g_state->dumpOnExternalCam =
             Config::get().getBool("advanced.dump_camera_on_external_cam", false);
         g_state->holdFramesOnExternalCam = static_cast<uint32_t>(
-            Config::get().getIntInRange("advanced.hold_frames_on_external_cam", 0, 0, 120));
+            Config::get().getIntInRange("experimental.hold_frames_on_external_cam", 0, 0, 120));
 
         // The history key dumps TWICE: now, and again two seconds from now.
         //
@@ -740,7 +740,7 @@ State& ensureState() {
         g_state->dumpOnExternalCam =
             Config::get().getBool("advanced.dump_camera_on_external_cam", false);
         g_state->holdFramesOnExternalCam = static_cast<uint32_t>(
-            Config::get().getIntInRange("advanced.hold_frames_on_external_cam", 0, 0, 120));
+            Config::get().getIntInRange("experimental.hold_frames_on_external_cam", 0, 0, 120));
         // A CONFIGURED key, not a pressed one. The gate refuses to arm without
         // this, so a fresh install with nothing bound is genuinely inert rather
         // than falling back to a heuristic that cannot tell the external camera

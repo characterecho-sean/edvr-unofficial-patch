@@ -165,7 +165,7 @@ struct Gate {
     bool     footGraceJournal = false;   // Disembark declared, flag not yet true
     uint32_t footGraceFrame = 0;         // when that declaration landed
     uint64_t footGraceMs = 0;            // ...and the same, on the clock
-    bool     gateKeylessOn = false;      // advanced.keyless_camera (parked)
+    bool     gateKeylessOn = false;      // experimental.keyless_camera (parked)
     bool     gateNoConsumerNoted = false;
     uint32_t gateIntentAge = 0;          // frames since the key was pressed
     uint64_t gateIntentMs = 0;           // ...and when, on the clock
@@ -247,7 +247,7 @@ void headOffsetGateConfigure() {
     // player cycled the real one, and certification honestly refused all
     // the way down. Keyed mode counts presses and is immune. The machinery
     // stays for the controller-support work, behind this flag.
-    g.gateKeylessOn = cfg.getBool("advanced.keyless_camera", false);
+    g.gateKeylessOn = cfg.getBool("experimental.keyless_camera", false);
     // The "you have not bound the view key" warning does NOT live here.
     //
     // It did, and it was wrong the moment a build could read the view from
