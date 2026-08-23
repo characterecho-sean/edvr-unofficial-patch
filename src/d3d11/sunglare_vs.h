@@ -161,6 +161,7 @@ VSOut main(VSIn i) {
     // ---- position ----
     float4 svpos;
     float2 psPos;
+    float2 worldHalf = float2(0.0, 0.0);
     if (worldPath) {
         // The world-anchored billboard: right/up perpendicular to the
         // true camera-to-sun ray, world-up anchored, the element's own
@@ -183,6 +184,7 @@ VSOut main(VSIn i) {
         float2 halfNdc = i.p2.xy * i.p1.xy;
         halfNdc.x = halfNdc.x / cb1[91].z;
         if (i.t7.w > 0.0) halfNdc = halfNdc * cb1[91].w;
+        worldHalf = halfNdc;
         float2 half2 = halfNdc * i.uvc.zw;
         // NDC half-extent -> world half-extent at the element's depth,
         // PER AXIS through the TRUE rows: d(ndc)/d(world-offset) along
@@ -282,7 +284,25 @@ VSOut main(VSIn i) {
     // collapsed even under NOGATE diagnostics.
     if (!selected) svpos = float4(0.0, 0.0, 0.0, 0.0);
     o.pos = svpos;
-    o.t1.rgb = visFrac * i.col;
+
+    // The graceful frame-edge exit the stock eccentricity-shrink used
+    // to provide. A world-anchored disc holds constant angular size, so
+    // without this it rides at full brightness until the quad falls
+    // entirely outside ONE eye's frustum and the clipper removes it
+    // whole -- a binary pop in that eye while the other still shows it
+    // (field, 2026-08-22; the per-eye eccentricity split runs ~8
+    // degrees out there). Fade the glow on the frame-edge approach,
+    // per axis because the frustum is a box, finishing before the quad
+    // can fully clip; both eyes run the same continuous ramp, so they
+    // can only ever differ softly, which is also what a real lens
+    // does with a source leaving its field.
+    float edgeFade = 1.0;
+    if (worldPath) {
+        float m = max(worldHalf.x, max(worldHalf.y, 1e-3));
+        float eccAxis = max(abs(tapNdc.x), abs(tapNdc.y));
+        edgeFade = 1.0 - smoothstep(1.0, 1.0 + 0.8 * m, eccAxis);
+    }
+    o.t1.rgb = visFrac * i.col * edgeFade;
     o.t1.a = i.t4.x;
     o.t2 = i.t4.z;
 
