@@ -88,12 +88,23 @@ void restoreSaved(ID3D11DeviceContext* ctx) {
     if (g_savedIb) { g_savedIb->Release(); g_savedIb = nullptr; }
 }
 
+// Which way +z points in the panel's local space. MEASURED 2026-08-23, and
+// the last thing about this geometry that reading it could not settle.
+//
+// It came back AWAY from the viewer: at curvature 0.3 the screen receded
+// instead of wrapping. So the bend is computed against +z, which is what
+// makes panel_curvature_sign = 1 -- the default -- mean the direction the
+// feature is actually named for. The setting survives as an escape hatch in
+// the idiom of panel_distance_index: a documented number to change if a game
+// update moves the fact underneath it.
+constexpr float kTowardViewer = -1.0f;
+
 // The bend, in the space the capture measured rather than the space the
 // design was first written in.
 //
 //   theta = pi * c * x                x in -1..1, the local coordinate
 //   x'    = sin(theta) / (pi * c)     arc length preserved
-//   z'    = (1 - cos(theta)) / (pi * c)
+//   z'    = -(1 - cos(theta)) / (pi * c)    negative: see kTowardViewer
 //
 // The radius is 1/(pi*c) because the arc has to keep the flat quad's local
 // width of 2, which is what makes the image the same size whether it is bent
@@ -110,7 +121,7 @@ void bend(float x, float c, int sign, float* xOut, float* zOut) {
     const float k = kPi * c;
     const float theta = k * x;
     *xOut = sinf(theta) / k;
-    *zOut = static_cast<float>(sign) * (1.0f - cosf(theta)) / k;
+    *zOut = kTowardViewer * static_cast<float>(sign) * (1.0f - cosf(theta)) / k;
 }
 
 // Build the strip. Returns false if anything failed, which the caller turns
@@ -221,12 +232,29 @@ void panelCurveConfigure(Config& cfg) {
     g_curvature = c;
     g_segments = cfg.getIntInRange("advanced.panel_curvature_segments",
                                    kDefaultSegments, kMinSegments, kMaxSegments);
-    // Which way the bend goes. The captures settled everything about the
-    // composite's geometry EXCEPT whether +z in its local space points toward
-    // the viewer or away, and nothing short of wearing the headset can say.
-    // So it is a setting rather than a constant: if the screen bows away from
-    // you, flip this, and no rebuild is needed to find out.
+    // Which way the bend goes. 1 is toward the viewer and is correct on the
+    // build this was measured against; -1 is the escape hatch if a game
+    // update ever flips the handedness of the panel's transform. See
+    // kTowardViewer for what was measured and how.
     g_sign = cfg.getIntInRange("advanced.panel_curvature_sign", 1, -1, 1) < 0 ? -1 : 1;
+
+    // A strip of N columns has N-1 INTERIOR vertex columns, and the whole
+    // bend lives in those: the two edges receive the SAME z whatever the
+    // curvature, because cos is even. So at one column there is no curve at
+    // all -- the quad stays flat and merely moves in depth and narrows in x,
+    // which looks exactly like the screen receding and reads as the bend
+    // going the wrong way. That cost the first flight, and the log said
+    // nothing because nothing was wrong.
+    if (g_curvature > 0.0f && g_segments < 8) {
+        Log::get().note(
+            "panel curvature: %d column%s is too few to bend anything. The curve "
+            "lives in the INTERIOR vertex columns and %d columns has %d of them; "
+            "the two edges always get the same depth, because cos is even. So the "
+            "screen will stay FLAT and merely move away and narrow, which looks "
+            "like it receding rather than curving. Raise "
+            "advanced.panel_curvature_segments to 64 to see the bend.",
+            g_segments, g_segments == 1 ? "" : "s", g_segments, g_segments - 1);
+    }
 
     if (g_curvature != wasCurve || g_segments != wasSeg || g_sign != wasSign) {
         if (g_curvature > 0.0f) {
@@ -295,9 +323,10 @@ bool panelCurveSubstitute(ID3D11DeviceContext* ctx, PanelCurveDrawFn draw) {
             Log::get().note(
                 "panel curvature: substituting the panel's quad for a %d-column "
                 "strip at curvature %.3f. If the screen is black from here, the "
-                "winding is inverted; if it is flat, the bend is being cancelled "
-                "by the transform; if it bows AWAY from you, flip "
-                "advanced.panel_curvature_sign.",
+                "winding is inverted; if it is flat with several columns, the bend "
+                "is being cancelled by the transform; if it bows AWAY from you, "
+                "this build's handedness differs from the one this was measured "
+                "on and advanced.panel_curvature_sign = -1 is the fix.",
                 g_segments, g_curvature);
         }
     });
