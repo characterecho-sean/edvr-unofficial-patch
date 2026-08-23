@@ -31,6 +31,7 @@
 #include "journal_watch.h"  // gameplay started, for the low-peak notice
 #include "remlok_fix.h"
 #include "exposure_fix.h"
+#include "particle_fix.h"
 #include "sunglare_fix.h"
 #include "witchstar_fix.h"
 
@@ -1007,7 +1008,8 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         s->censusSkipRangeCount == 0 && s->censusSkipOffCount == 0 &&
         !remlokWantsDraws() && !holoWantsDraws() && !witchstarWantsDraws() &&
         !sunglareWantsDraws() && !cbPeekEnabled() && !billboardWantsDraws() &&
-        !drawCensusArmed() && !panelQuadWants() && !panelCurveWants()) {
+        !drawCensusArmed() && !panelQuadWants() && !panelCurveWants() &&
+        !particleWantsDraws()) {
         return DrawVerdict::kNone;
     }
     const uint32_t rtvGen = bindingGeneration(BindSlot::Rtv0);
@@ -1178,6 +1180,7 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     // its buffer is never substituted for these draws. Clamp and steady
     // compose: the clamp count rides glareClamp to the DrawInstanced
     // thunk regardless of which verdict carries the draw there.
+    particleOnEyeDraw(self, kind, count, instances);
     if (sunglareWantsDraws()) {
         const SunglareAction a = sunglareOnEyeDraw(kind, count, instances);
         if (a == SunglareAction::kSkip) return DrawVerdict::kSkip;
@@ -2079,6 +2082,7 @@ void vScreenRefreshConfig() {
     cbPeekConfigure(cfg);
     panelQuadConfigure(cfg);
     panelCurveConfigure(cfg);
+    particleConfigure(cfg);
     billboardConfigure(cfg);
     // Every fix.head_offset_* key, on the reload path as well as the startup
     // one. A config reader on only one of the two is a specific repeatable bug
@@ -2756,6 +2760,7 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     cbPeekConfigure(cfg);
     panelQuadConfigure(cfg);
     panelCurveConfigure(cfg);
+    particleConfigure(cfg);
     billboardConfigure(cfg);
     // installGlitchFrameFix is called before this, deliberately, so this is its
     // settled answer rather than a guess about config it has not read yet.
@@ -2913,6 +2918,7 @@ void shutdownVScreenFixes() {
     g_state->distanceEnabled = false;
     panelQuadShutdown();
     panelCurveShutdown();
+    particleShutdown();
     if (g_state->ourCb) {
         g_state->ourCb->Release();
         g_state->ourCb = nullptr;
