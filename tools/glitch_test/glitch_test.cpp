@@ -945,6 +945,83 @@ int main(int argc, char** argv) {
         settle(b, x, 150);
     }
 
+    // --- 7l. A bad frame, then a CHANGE OF REFERENCE FRAME -----------------
+    //
+    // The hyperspace shape, field-measured 2026-08-23 and the reason this rule
+    // exists. Three frames, three coordinate spaces: normal space, one frame
+    // drawn from nowhere in particular, then witchspace -- and the third of
+    // those is a perfectly good frame. f22065 / f22066 / f22067 in that log,
+    // with f22068 continuing f22067 by 73 units, which is what proves it good.
+    //
+    // The old run rule withheld both. A withheld frame is replaced with a copy
+    // of the last one forwarded -- normal space -- so the player was held on
+    // the pre-jump image for one frame AFTER the game had cut to the tunnel,
+    // then snapped. That is the flash they reported, and it was the fix's.
+    //
+    // Both halves are asserted. "The second is let through" alone would pass on
+    // a detector that had stopped withholding anything at all.
+    settle(b, x, 150);
+    {
+        x += 30.0f;
+        const bool bad = frame(b, x, 15300.0f, -8150.0f);
+        x += 30.0f;
+        const bool firstGood = frame(b, x, 1370.0f, 8480.0f);
+        check("the bad frame before a rebase is still withheld", bad,
+              "nothing was withheld at all, so the cell below is vacuous");
+        check("...and the first frame of the new reference frame is not",
+              !firstGood,
+              "the run continued into a frame 21,693 units from the one before "
+              "it -- that is a rebase, not one bad frame sampled twice, and "
+              "holding the old picture across it IS the flash");
+        // It settles there rather than being chased. The rebase is declared on
+        // the let-through frame now instead of one frame later, so the stand-
+        // down starts earlier and the frames after it are quiet.
+        uint32_t after = 0;
+        for (uint32_t i = 0; i < 20; ++i) {
+            x += 30.0f;
+            if (frame(b, x, 1370.0f + 30.0f * static_cast<float>(i),
+                      8480.0f + 12.0f * static_cast<float>(i))) ++after;
+        }
+        check("...and the frames after it are quiet", after == 0,
+              std::to_string(after) + " of 20 withheld after the reference "
+              "frame moved");
+        settle(b, x, 150);
+    }
+
+    // AND THE RADIUS IS THE JUMP THRESHOLD, either side of it.
+    //
+    // transition_flash_units, not a number of its own: "the second frame is
+    // itself a jump away from the first" is the question the detector already
+    // asks of every frame, asked between two withholds. The measured runs sat
+    // at 0, 0, 15, 44 and 123 units; the rebase sat at 10,114. These two cells
+    // pin the edge rather than the gap, because the gap is where a future
+    // tightening would be argued for and the edge is what would move.
+    settle(b, x, 150);
+    {
+        x += 30.0f;
+        const bool a1 = frame(b, x, 31000.0f, -14000.0f);
+        x += 30.0f;
+        const bool a2 = frame(b, x, 32900.0f, -14000.0f);   // 1,900 away
+        check("a run whose second frame stays inside the threshold is withheld",
+              a1 && a2,
+              std::string(a1 ? "" : "the first frame was not withheld, so this "
+                                    "cell is vacuous. ") +
+                  (a2 ? "" : "a two-frame glitch lost its second frame -- that "
+                             "is the flash max_consecutive exists to cover"));
+        settle(b, x, 150);
+    }
+    {
+        x += 30.0f;
+        const bool b1 = frame(b, x, 37000.0f, -19000.0f);
+        x += 30.0f;
+        const bool b2 = frame(b, x, 39100.0f, -19000.0f);   // 2,100 away
+        check("...and one that steps outside it is not", b1 && !b2,
+              std::string(b1 ? "" : "the first frame was not withheld, so this "
+                                    "cell is vacuous. ") +
+                  (b2 ? "the run continued past the threshold" : ""));
+        settle(b, x, 150);
+    }
+
     // --- 8. The field replay ----------------------------------------------
     //
     // Not a shape derived from the field: the field itself. These are the

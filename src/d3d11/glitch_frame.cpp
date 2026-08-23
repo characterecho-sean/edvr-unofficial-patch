@@ -33,6 +33,59 @@ constexpr uint32_t kRingFrames = 1200;   // 10 s at 120Hz, 16.7 s at 72Hz
 // not frames. Was 120 frames: 1.67 s at 72Hz, 1.0 s at 120.
 constexpr uint64_t kRebaseCooldownMs = 1330;
 
+// How far the second frame of a run may sit from the first and still be the
+// same bad frame. The predicate is runStillSamePlace; this is why it exists
+// and where its threshold comes from.
+//
+// A RUN IS ONE WRONG VIEWPOINT SAMPLED TWICE, NOT TWO DIFFERENT PLACES. The
+// prediction is deliberately kept across a withhold (see the long note at the
+// jumpedThisFrame branch) so that a glitch lasting two frames is catchable at
+// all -- and the cost of keeping it is that the frame AFTER a withhold is
+// judged against a path the view may have already left for good. At a genuine
+// change of reference frame it has: the first frame of the new frame of
+// reference is a perfectly good frame that reads thousands of units off the
+// dead path, and max_consecutive spends its second withhold hiding it.
+//
+// The did-it-come-back test exists for exactly that and cannot help, because
+// it is explicitly deferred while the run is still marking. So the rebase is
+// recognised one frame too late, every time, and the run always costs one good
+// frame. Everywhere that frame looks like its neighbours this is invisible.
+// Where the picture changes -- hyperspace entry -- the player is held on the
+// old image one frame past the cut and then snapped to the new one, which is a
+// flash the fix created rather than one it hid.
+//
+// Measured 2026-08-23, one session, the distance from the first withheld frame
+// of a run to the second, across all six runs the ring covers:
+//
+//   f17777->78      0      two frames at a byte-identical position
+//   f19089->90      0      the same
+//   f20501->02     15
+//   f21664->65     44
+//   f21380->81    123
+//   f22066->67 10,114      hyperspace entry: the bad frame, then witchspace
+//
+// Two orders of magnitude, and the odd one out is the reported bug. f22067 was
+// good -- f22068 continues it by 73 units and f22070 by another 32, ordinary
+// flight steps -- and it was withheld anyway.
+//
+// THE THRESHOLD IS jumpMin, not a number of its own. "The second frame is
+// itself a jump away from the first" is the same question the detector already
+// asks of every frame, asked between two withholds instead of against a
+// prediction, and it inherits transition_flash_units so a rig that has retuned
+// what counts as a jump retunes this with it. The fixed floor rather than the
+// speed-scaled trip: a run's second frame is the same wrong place regardless of
+// how fast the view was travelling before it, and letting speed inflate this
+// would switch the rule off during exactly the fast transitions it is for.
+//
+// SCOPE, stated because the measurements above invite a wider claim. This
+// catches a bad frame followed by a rebase. It does NOT catch a rebase with no
+// bad frame in front of it -- f21380->81 steps 123 units and stays a run --
+// because at the moment of decision those two frames are indistinguishable
+// from a glitch that holds still. Tightening the radius toward a hundred would
+// reach them and would trade a measured fix for an unmeasured regression in
+// the two-frame class max_consecutive exists for, which is not a trade this
+// has evidence for.
+
 // The detector must never be able to withhold frames continuously. If more than
 // this fraction of a window is being withheld, whatever it is watching is not
 // the thing it was built for, and it switches itself off for the session.
@@ -422,6 +475,7 @@ enum RingVerdict : uint8_t {
     kVerdictBurst,           // the governor stood the fix down: see kDefaultBurstLimit
     kVerdictWithheldSepWould,// withheld, and the separation memory would have excused it
     kVerdictDrift,           // the drift chain's camera, one step further out (Rule B)
+    kVerdictMovedOn,         // the run's next frame is somewhere else: a rebase
 };
 
 const char* ringVerdictName(uint8_t v) {
@@ -435,6 +489,8 @@ const char* ringVerdictName(uint8_t v) {
         case kVerdictDrift:       return "let through: a separation drifting wider";
         case kVerdictCooldown:    return "let through: still settling";
         case kVerdictConsecutive: return "let through: too many in a row";
+        case kVerdictMovedOn:
+            return "let through: the run moved on, so the view has rebased";
         case kVerdictBurst:       return "let through: the burst governor stood down";
         default:                  return "";
     }
@@ -657,6 +713,12 @@ struct State {
     // The frame of the most recent withhold, so a history dump can say whether
     // anything in it was ours. See dumpCameraRing.
     uint32_t   lastWithheldFrame = 0;
+    // ...and WHERE it was, so the frame after a withhold can be asked whether
+    // it is still the same wrong place rather than the first frame of a new
+    // one. See runStillSamePlace. Read only while `consecutive` is non-zero --
+    // this file's single answer to "was the previous frame withheld" -- so
+    // there is no second flag here to drift out of step with it.
+    float      lastWithheldPos[3] = {};
     uint32_t   suppressedBySeparation = 0;
     uint32_t   suppressedByDrift = 0;
     bool       radiusSuppressedThisFrame = false;
@@ -730,6 +792,27 @@ inline bool burstDown(const State* s) {
 }
 inline bool rebaseDown(const State* s) {
     return s->cooldownUntilMs != 0 && nowMs() < s->cooldownUntilMs;
+}
+// The run's own question, asked the same way: is this still the same bad frame,
+// or has the view moved on? The measurement is beside kRebaseCooldownMs, with
+// the six runs it was taken from.
+//
+// True when no run is open, so a first withhold is never gated by it -- the
+// rule bounds a CONTINUATION and has nothing to say about a beginning.
+inline bool runStillSamePlace(const State* s, const float* pos) {
+    if (s->consecutive == 0) return true;
+    float d2 = 0.0f;
+    for (uint32_t a = 0; a < 3; ++a) {
+        const float e = pos[a] - s->lastWithheldPos[a];
+        d2 += e * e;
+    }
+    // Through sqrtf and isfinite, like the residual it is a sibling of, rather
+    // than comparing squares: positions of 1e26 have been measured in the field
+    // and their squares are not representable. A non-finite distance answers
+    // NO, which lets the frame through -- the safe direction, and the same one
+    // the residual's own finiteness check takes.
+    const float d = sqrtf(d2);
+    return std::isfinite(d) && d <= s->jumpMin;
 }
 
 // The remembered magnitude matching `resid`, or -1.
@@ -1192,6 +1275,11 @@ const char* letThroughReason(State* s, float resid) {
     if (s->consecutive >= s->maxConsecutive)
         return "the frames before it were already withheld and withholding more "
                "in a row would be judder";
+    if (s->consecutive > 0)
+        return "the frame before it was withheld and this one is somewhere else "
+               "again, so the view has changed reference frame rather than stuck "
+               "on one bad frame -- holding the old picture over the change is "
+               "what a player sees as the flash";
     return "nothing suppressed it and no counter blocked it, which should not be "
            "possible here -- please report this line";
 }
@@ -1327,11 +1415,14 @@ void installGlitchFrameFix() {
     // documented as a cap on a run, so 0 reads as "no runs allowed", not as
     // "disable the feature". Anyone who wants it off has fix.transition_flash.
     //
-    // The cap is also unreachable above 1 in practice: a marked frame resets the
-    // camera history, so the next frame cannot be evaluated and a run of two
-    // never forms. The knob is kept because it bounds a future detector that
-    // could produce runs, and because removing a documented setting is worse
-    // than one that is quietly generous.
+    // This used to add that the cap was "unreachable above 1 in practice",
+    // because a marked frame reset the camera history and a run of two could
+    // never form. Keeping the prediction across a withhold (see the
+    // jumpedThisFrame branch) made runs of two the ordinary case: one field
+    // session on 2026-08-23 produced six of them in three minutes, every one
+    // reaching the cap exactly. The claim is left here struck through rather
+    // than deleted because it is the sentence somebody tuning this will find
+    // first, and believing it would make the run rules look like dead code.
     const int maxConsec = cfg.getInt("advanced.transition_flash_max_consecutive", 2);
     if (maxConsec < 1) {
         s.maxConsecutive = 1;
@@ -1823,6 +1914,7 @@ void glitchFrameObserve(const void* data, uint32_t bytes, const void* resource) 
 
     const bool willMark = jumped && !s->suppressedThisFrame && !rebaseDown(s) &&
                           s->consecutive < s->maxConsecutive &&
+                          runStillSamePlace(s, pos) &&
                           !burstDown(s);
     if (jumped && !willMark) {
         if (s->letThroughNotes < kLetThroughNotes &&
@@ -1853,7 +1945,8 @@ void glitchFrameObserve(const void* data, uint32_t bytes, const void* resource) 
         : s->driftSuppressedThisFrame      ? kVerdictDrift
         : burstDown(s)                     ? kVerdictBurst
         : rebaseDown(s)                    ? kVerdictCooldown
-                                           : kVerdictConsecutive;
+        : s->consecutive >= s->maxConsecutive ? kVerdictConsecutive
+                                           : kVerdictMovedOn;
     if (willMark) {
         markGlitchFrame();
     } else {
@@ -2114,6 +2207,10 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
         ++s->framesWithheld;
         ++s->windowWithheld;
         s->lastWithheldFrame = s->frameNo;
+        // WHERE it was, read from the same frameFarPos the decision was taken
+        // on, at the same place the frame number is recorded. Both answers to
+        // "the last withheld frame" are written together or not at all.
+        for (uint32_t a = 0; a < 3; ++a) s->lastWithheldPos[a] = s->frameFarPos[a];
         if (decodeCullGuardState(s->guardPacked).stage == 2) {
             ++s->withheldGuardLive;
         }

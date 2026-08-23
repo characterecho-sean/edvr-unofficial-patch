@@ -221,6 +221,36 @@ There is still a hard cap of two catches in a row, the burst governor above,
 and the guard that switches the whole thing off if it ever starts firing
 continuously.
 
+**A run has to stay in one place.** Keeping the prediction across a withhold is
+what makes a two-frame glitch catchable, and it costs this: the frame *after* a
+withhold is judged against a path the view may have already left for good. At a
+genuine change of reference frame it has. The first frame of the new frame of
+reference is a perfectly good frame reading thousands of units off a dead path,
+and the second withhold is spent hiding it. The did-it-come-back test exists for
+exactly that and cannot help, because it is deferred while the run is still
+marking — so the rebase is recognised one frame too late, every time.
+
+Almost everywhere that extra frame looks like its neighbours and nobody sees it.
+At hyperspace entry the picture changes completely between them, so the player is
+held on the pre-jump image for one frame *after* the game has cut to the tunnel
+and then snapped to it. That is a flash the fix created rather than one it hid,
+and it is what a 2026-08-23 field report was about.
+
+So a run only continues while it stays put. The distance from the first withheld
+frame of a run to the second, across the six runs in that session: 0, 0, 15, 44,
+123 — and 10,114 at the hyperspace entry. Two orders of magnitude, with the odd
+one out being the bug. The threshold is `transition_flash_units`, not a number of
+its own: "the second frame is itself a jump away from the first" is the question
+the detector already asks of every frame, asked between two withholds instead of
+against a prediction.
+
+The scope is worth stating, because the numbers invite a wider claim. This
+catches a bad frame followed by a rebase. It does not catch a rebase with no bad
+frame in front of it — the 123-unit run is one of those, and at the moment of
+decision its two frames are indistinguishable from a glitch holding still.
+Tightening the radius to reach them would trade a measured fix for an unmeasured
+regression in the class the cap exists for.
+
 **Both eyes of a frame now get the same answer.** The decision is taken once, at
 whichever eye the game submits first, and the second eye follows it. Previously
 each eye read the flag independently and the flag can legitimately change while a
