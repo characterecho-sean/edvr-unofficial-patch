@@ -53,6 +53,24 @@ uint32_t      g_bytes = 0;           // what was copied
 uint32_t      g_stride = 0;
 uint32_t      g_offset = 0;
 
+// The index buffer and the cull state, which between them decide WINDING.
+//
+// The vertices cannot say it. The four corners arrive bottom-left,
+// bottom-right, top-left, top-right -- a strip's order -- but the draw is a
+// six-index triangle LIST, so which way each triangle turns lives in the
+// index buffer and nowhere else. A grid generated the other way round is
+// culled entirely and the screen goes black: a loud failure, but still a
+// flight spent finding it. The cull state decides whether it matters at all,
+// since a composite drawn with culling off does not care.
+ID3D11Buffer* g_ibStaging = nullptr;   // owned
+uint32_t      g_ibStagingBytes = 0;
+uint32_t      g_ibBytes = 0;           // 0 when there was none to copy
+uint32_t      g_ibFmt = 0;             // DXGI_FORMAT: 57 is R16_UINT, 42 R32
+uint32_t      g_ibOffset = 0;
+uint32_t      g_cullMode = 0;          // D3D11_CULL_MODE: 1 none, 2 front, 3 back
+bool          g_frontCCW = false;
+bool          g_rsDefault = false;     // no state object bound: D3D's defaults
+
 FaultBudget g_budget("panelQuad.capture", 5);
 
 // One vertex's floats as text, and the same bytes as hex.
@@ -168,6 +186,54 @@ void readBack(ID3D11DeviceContext* ctx) {
         }
         describeLayout(data, g_stride, count);
         ctx->Unmap(g_staging, 0);
+
+        // Winding, which the vertices cannot say on their own.
+        if (g_ibBytes && g_ibStaging) {
+            D3D11_MAPPED_SUBRESOURCE im{};
+            if (SUCCEEDED(ctx->Map(g_ibStaging, 0, D3D11_MAP_READ, 0, &im)) && im.pData) {
+                const unsigned char* ib = static_cast<const unsigned char*>(im.pData);
+                const bool wide = g_ibFmt == 42;   // R32_UINT; 57 is R16_UINT
+                const uint32_t n = g_ibBytes / (wide ? 4u : 2u);
+                char idx[128] = "";
+                uint32_t o = 0;
+                for (uint32_t i = 0; i < n && i < 12; ++i) {
+                    uint32_t v = 0;
+                    if (wide) {
+                        memcpy(&v, ib + i * 4, 4);
+                    } else {
+                        unsigned short h = 0;
+                        memcpy(&h, ib + i * 2, 2);
+                        v = h;
+                    }
+                    const int w = _snprintf_s(idx + o, sizeof(idx) - o, _TRUNCATE,
+                                              "%s%u", o ? "," : "", v);
+                    if (w < 0) break;
+                    o += static_cast<uint32_t>(w);
+                }
+                Log::get().note(
+                    "panel quad: indices %s (%u of them, %u-bit, buffer %u bytes at "
+                    "offset %u). The grid's triangles have to turn the same way as "
+                    "these two do.",
+                    idx, n, wide ? 32u : 16u, g_ibBytes, g_ibOffset);
+                ctx->Unmap(g_ibStaging, 0);
+            }
+        } else {
+            Log::get().note(
+                "panel quad: the index buffer was not readable -- none bound, or too "
+                "large to be this draw's own -- so the winding is not known from here. "
+                "The c = 0 substitution test settles it instead: the wrong winding "
+                "renders nothing at all, which is unmistakable.");
+        }
+
+        const char* cull = g_cullMode == 1 ? "none"
+                         : g_cullMode == 2 ? "front"
+                                           : "back";
+        Log::get().note(
+            "panel quad: rasterizer cull = %s, front face is %s%s. Cull none would "
+            "mean winding cannot matter at all; anything else and the grid has to "
+            "match the indices above.",
+            cull, g_frontCCW ? "counter-clockwise" : "clockwise",
+            g_rsDefault ? " (no state object bound, so these are D3D's defaults)" : "");
     });
     // One capture per arming, whether it parsed or not. A diagnostic that
     // keeps firing is one somebody turns off before reading it.
@@ -246,6 +312,71 @@ void queueCopy(ID3D11DeviceContext* ctx) {
         g_bytes = bytes;
         g_stride = stride;
         g_offset = offset;
+
+        // The index buffer, same treatment. Failing to get it is not fatal --
+        // the vertices are the point, and the c = 0 test can settle winding on
+        // its own -- so every exit below leaves g_ibBytes at zero and the
+        // capture carries on.
+        g_ibBytes = 0;
+        ID3D11Buffer* ib = nullptr;
+        DXGI_FORMAT ibFmt = DXGI_FORMAT_UNKNOWN;
+        UINT ibOffset = 0;
+        ctx->IAGetIndexBuffer(&ib, &ibFmt, &ibOffset);
+        if (ib) {
+            ResourceInfo ii;
+            const bool iknown = bindingResolveResource(ib, &ii) && ii.isBuffer;
+            // Small enough to be this draw's own. Locating a slice inside a
+            // pooled index buffer would need the draw's startIndex, which is
+            // not plumbed here and does not need to be: a quad with its own
+            // eighty-byte vertex buffer does not share an index buffer.
+            if (iknown && ii.a && ii.a <= kMaxBytes) {
+                if (g_ibStaging && g_ibStagingBytes != ii.a) {
+                    g_ibStaging->Release();
+                    g_ibStaging = nullptr;
+                    g_ibStagingBytes = 0;
+                }
+                if (!g_ibStaging) {
+                    ID3D11Device* dev = nullptr;
+                    ctx->GetDevice(&dev);
+                    if (dev) {
+                        D3D11_BUFFER_DESC bd{};
+                        bd.ByteWidth = ii.a;
+                        bd.Usage = D3D11_USAGE_STAGING;
+                        bd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+                        dev->CreateBuffer(&bd, nullptr, &g_ibStaging);
+                        dev->Release();
+                        if (g_ibStaging) g_ibStagingBytes = ii.a;
+                    }
+                }
+                if (g_ibStaging) {
+                    ctx->CopyResource(g_ibStaging, ib);
+                    g_ibBytes = ii.a;
+                    g_ibFmt = static_cast<uint32_t>(ibFmt);
+                    g_ibOffset = ibOffset;
+                }
+            }
+            ib->Release();
+        }
+
+        // The cull state. No state object bound means D3D's documented
+        // defaults -- back-face culling, clockwise front faces -- and the log
+        // says which of the two it is reporting rather than leaving the reader
+        // to assume.
+        ID3D11RasterizerState* rs = nullptr;
+        ctx->RSGetState(&rs);
+        if (rs) {
+            D3D11_RASTERIZER_DESC rd{};
+            rs->GetDesc(&rd);
+            g_cullMode = static_cast<uint32_t>(rd.CullMode);
+            g_frontCCW = rd.FrontCounterClockwise != FALSE;
+            g_rsDefault = false;
+            rs->Release();
+        } else {
+            g_cullMode = static_cast<uint32_t>(D3D11_CULL_BACK);
+            g_frontCCW = false;
+            g_rsDefault = true;
+        }
+
         g_copyMs = nowMs();
         g_pending = true;
     });
@@ -294,7 +425,12 @@ void panelQuadShutdown() {
         g_staging->Release();
         g_staging = nullptr;
     }
+    if (g_ibStaging) {
+        g_ibStaging->Release();
+        g_ibStaging = nullptr;
+    }
     g_stagingBytes = 0;
+    g_ibStagingBytes = 0;
     g_wanted = false;
     g_pending = false;
     g_lastOn = false;

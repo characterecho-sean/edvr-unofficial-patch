@@ -500,17 +500,65 @@ others beside it.
 Smaller than the design assumed, and it starts with one more
 measurement rather than a leap:
 
-1. **Read the quad.** `CopyResource` the 80-byte vertex buffer to a
-   staging buffer at a recognised composite, map it a few frames later,
-   and log four vertices of five floats. Confirms the format outright
-   and hands over the exact corners and UVs the grid has to reproduce.
-   80 bytes is a trivial capture.
+1. ~~**Read the quad.**~~ **DONE, flown 2026-08-23** — see below.
 2. **Build the grid** in that format, flat, and substitute it: save
    VB/IB/topology with `IAGet*`, bind ours, issue
    `DrawIndexedInstanced(indices, 1, 0, 0, 0)`, restore, and swallow the
    game's draw through the existing `kSkip` plumbing.
 3. **Hold it to the pixel-identity bar at c = 0** before any bend is
    attempted, exactly as the design says.
+
+### The quad, measured
+
+`advanced.panel_quad_dump`, build `v0.9.2-84-gee68f15`, on foot:
+
+    v0  (-1, -1, 0)  uv (0, 1)        v1  ( 1, -1, 0)  uv (1, 1)
+    v2  (-1,  1, 0)  uv (0, 0)        v3  ( 1,  1, 0)  uv (1, 0)
+
+`float3` position + `float2` UV at stride 20, exactly as the stride
+implied. Every check passed: UVs inside 0..1, all four positions in one
+plane at z = 0, two distinct x and two distinct y.
+
+**It is the canonical unit quad**, not a screen-sized one and not a
+clip-space blit. That matters more than it looks: the corners are at
+plus and minus one, so the 208-byte constant buffer is what sizes the
+screen, places it at its distance and projects it per eye — which is why
+scaling one float in that buffer moves the panel, and why the two eyes
+can share one vertex buffer and one shader and still come out in stereo.
+A bend applied to these coordinates is a bend in the panel's own space,
+carried through the game's transform untouched. That is unknown 2
+answered by construction rather than by argument.
+
+The UVs settle the orientation the stride never could: **v = 0 at
+y = +1**, so V falls as Y rises — the D3D convention. A grid built the
+other way renders the screen upside down.
+
+### The bend, in the space it will actually be computed in
+
+The design's formula is written for u across 0..1; the measured space is
+x across -1..1, so it restates as, for curvature *c* and each vertex:
+
+    theta = pi * c * x                 x in -1..1, the local coordinate
+    x'    = sin(theta) / (pi * c)      arc length preserved
+    z'    = (1 - cos(theta)) / (pi * c)
+    y, u, v unchanged
+
+Radius *r* = 1/(pi·c), because the arc must keep the flat quad's local
+width of 2. At x = +/-1 the sweep is 2·pi·c — 36 degrees at c = 0.1, as
+the design says. As c approaches 0 the whole thing degenerates to
+x' = x, z' = 0, which is why c = 0 can be the off switch and the
+pixel-identity test at the same time.
+
+The grid is a **strip, not a mesh**: the bend is constant along y, so
+N columns need 2(N+1) vertices and 6N indices. At the design's N = 64
+that is 130 vertices — the number it estimated, arrived at from the
+other direction.
+
+**One unknown left, and it is a coin flip:** whether +z in this space
+points toward the viewer or away. Nothing measured so far distinguishes
+them, and the two differ only by the sign of z'. It should be exposed
+rather than baked, so the flight that finds it does not also need a
+rebuild.
 
 ### What the two censuses settle
 
