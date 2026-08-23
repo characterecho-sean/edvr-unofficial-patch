@@ -91,7 +91,12 @@ VSOut main(VSIn i) {
     bool anchored = i.p3.x > 0.999 && i.p3.y > 0.999;
     bool axisLocked = i.t4.w > 0.0;
     bool slides = i.p1.z > 0.001 || i.p1.w > 0.001;
-    bool worldPath = (anchored && !slides) || axisLocked;
+    // The light bars ride the slides class too, but a bar is not a
+    // ghost: extreme-aspect quads (the beams and streaks; ghosts are
+    // round) get world-locked with the rest of the physical set --
+    // "keep the bar but lock it; only the lens flare moves."
+    bool beamShaped = i.p1.x > 4.0 * i.p1.y || i.p1.y > 4.0 * i.p1.x;
+    bool worldPath = (anchored && !slides) || axisLocked || beamShaped;
 #ifdef ALLWORLD
     worldPath = true;
 #endif
@@ -186,14 +191,13 @@ VSOut main(VSIn i) {
         float rl = length(r);
         if (rl < 0.05) { r = float3(1.0, 0.0, 0.0); } else { r /= rl; }
         float3 u = cross(d, r);
-        // The element's own rotation -- except for axis-locked
-        // elements (the beams): stock re-aims those per frame to stay
-        // screen-horizontal, so their rotation field is head-coupled
-        // and a world-locked beam must ignore it. The plain world
-        // basis is already horizon-referenced (right = world-up cross
-        // direction): that IS the locked horizontal bar.
+        // The element's own rotation, applied as-is: the bar rendered
+        // horizontal and locked through this very path in the earlier
+        // routing era, which proves the rotation fields are static
+        // data, not head-coupled (the moving vertical bar was the
+        // flat path's 90-degree basis bug, since fixed).
         float sr, cr;
-        sincos(axisLocked ? 0.0 : i.p3.w, sr, cr);
+        sincos(i.p3.w, sr, cr);
         float3 rr = r * cr + u * sr;
         float3 uu = u * cr - r * sr;
         // The quad-size law, taken from the flat path at zero
@@ -240,12 +244,18 @@ VSOut main(VSIn i) {
         axis = (al > 1e-5) ? axis / al : float2(1.0, 0.0);
         float2 perp = float2(axis.x, -axis.y);
         if (length(perp) < 0.9 || i.t4.w <= 0.0) perp = float2(1.0, 0.0);
+        // The element basis, re-derived instruction-for-instruction
+        // from the original (r6/r7 in the disassembly): bx = perp
+        // rotated by +p3.w, by = its perpendicular. The first port
+        // swapped sin and cos in bx's first component -- a basis
+        // rotated 90 degrees at zero rotation. Round ghosts hid it;
+        // the first BAR through this path rendered vertical.
         float sr, cr;
         sincos(i.p3.w, sr, cr);
-        float2 bx = float2(dot(float2(perp.x, -perp.y), float2(sr, cr)),
-                           dot(float2(perp.x, -perp.y), float2(cr, -sr)));
-        float2 by = float2(dot(float2(perp.y, perp.x), float2(sr, cr)),
-                           dot(float2(perp.y, perp.x), float2(cr, -sr)));
+        float2 bx = float2(perp.x * cr - perp.y * sr,
+                           perp.y * cr + perp.x * sr);
+        float2 by = float2(-perp.x * sr - perp.y * cr,
+                           -perp.y * sr + perp.x * cr);
         float2 h = szFlat * i.uvc.zw;
         float2 off = float2(dot(h, bx), dot(h, by));
         float2 p = pos2 + off;

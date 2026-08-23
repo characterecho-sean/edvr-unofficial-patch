@@ -483,14 +483,22 @@ void dumpInstanceStreams(ID3D11DeviceContext* ctx) {
                     const float* r = f + k * 32;
                     const bool anch = r[12] > 0.999f && r[13] > 0.999f;
                     const bool sld = r[6] > 0.001f || r[7] > 0.001f;
-                    // Mirrors the shader's routing: 'x' beams (world-
-                    // pinned), 's' sliders (flat), 'a' anchored
-                    // (world), 'w' weights-slider (flat).
+                    const bool bar = r[4] > 4.0f * r[5] ||
+                                     r[5] > 4.0f * r[4];
+                    // Mirrors the shader's routing: 'x' axis-locked
+                    // and 'b' bar-shaped (world-pinned), 's' sliders
+                    // (flat), 'a' anchored (world), 'w' weights-slider
+                    // (flat). Fields: tile / t7.z / p1.z / aspect.
                     const char c = r[19] > 0.0f ? 'x'
-                                   : (sld ? 's' : (anch ? 'a' : 'w'));
+                                   : (bar ? 'b'
+                                          : (sld ? 's'
+                                                 : (anch ? 'a' : 'w')));
+                    const float asp =
+                        r[5] > 1e-6f ? r[4] / r[5] : 0.0f;
                     o += snprintf(line + o, sizeof(line) - o,
-                                  "%s%c%.0f/%.2g/%.2g", k ? " " : "", c,
-                                  r[20], r[29], r[6]);
+                                  "%s%c%.0f/%.2g/%.2g/%.2g",
+                                  k ? " " : "", c, r[20], r[29], r[6],
+                                  asp);
                 }
                 if (recs > 0)
                     Log::get().note("glare stream classes: %s", line);
