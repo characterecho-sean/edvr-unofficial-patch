@@ -601,6 +601,38 @@ which is worth more than the hour it costs to stage them.
 Sixteen-bit indices are not a constraint to design around: N = 64 needs
 130 vertices and 384 indices, 768 bytes.
 
+### Phase 2 in the field
+
+**Stage 1 passed, 2026-08-23** (`v0.9.2-87-g7040290`). A 1-column strip
+at curvature 0 substituted for the game's quad, and the screen looked
+exactly as it always has. The buffers are the game's own bytes at that
+setting, so what this proves is the **mechanism**: the IA save and
+restore, the swallowed draw, the substituted draw's shape, and the
+composition with everything else on that path. Nothing about geometry is
+in it, which is the point of running it separately.
+
+**The sign, called the same flight, by accident.** Curvature was raised
+to 0.1 and then 0.3 with the segment count still at 1, and the screen
+receded. That is not a bend and could not have been: a strip of N columns
+has N-1 **interior** vertex columns and the whole curve lives in those,
+because the two edges receive the same z whatever the curvature — cos is
+even. At one column the quad stays flat and merely translates in depth
+and narrows in x.
+
+It was still a clean experiment, just not the one it looked like: a pure
+translation in z isolates the sign and nothing else. **+z in the panel's
+local space points AWAY from the viewer.** The bend is now computed
+against it, so `panel_curvature_sign = 1` — the default — means toward,
+and the setting survives only as an escape hatch for a game update that
+moves the fact.
+
+The code now says so before a flight can waste itself on it: curvature
+on below eight columns logs how many interior columns there actually
+are, and the ini warns against lowering the count rather than leaving it
+to read as a cheap way to bend harder.
+
+**Stages 2 and 3 are outstanding. Nobody has yet seen the bend.**
+
 ### What the two censuses settle
 
 Read the lines whose `s=` slot 0 is the panel's size — those are the
