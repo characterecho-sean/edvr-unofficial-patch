@@ -76,17 +76,22 @@ VSOut main(VSIn i) {
     o.t3.xy = i.t5.xy * float2(0.0625, 0.125)
             + i.uvc.xy * i.t5.zw * float2(0.0625, 0.125);
 
-    // The anchor weights: 1,1 means the element sits at the anchor --
-    // but the LENS-FLARE GHOSTS carry (1,1) too: their slide lives in
-    // t7 (unit screen direction times slide length), applied on top of
-    // the anchor. Field data splits the classes by two decades of
-    // length -- anchored elements 0.05..0.8, ghosts 7..160 -- so the
-    // slide length is the discriminator. A ghost routed down the world
-    // path lands stacked ON the sun, hidden under the corona: exactly
-    // vivid mode's missing lens flare (field, 2026-08-23).
+    // Which elements SLIDE in stock. The anchor weights alone do not
+    // say: the lens-flare ghosts carry (1,1) too, and their offset is
+    // baseSize * t7.xy * t7.z * 2 with baseSize = drive * p1.zw. The
+    // per-record ground truth (probe pass, 2026-08-23) splits it
+    // clean: corona and smudge carry p1.zw = 0 -- structurally unable
+    // to slide -- while the ghost stack carries 1 with a ladder of
+    // drive fractions spreading the trail. t7.z is a GLOBAL flare
+    // scale, identical across records and fading with look angle (a
+    // first routing keyed on it and no record ever crossed the
+    // threshold: vivid drew no flare at all). Beams (axis-locked)
+    // would slide by this test but belong to the world path -- pinned
+    // is the whole point of vivid.
     bool anchored = i.p3.x > 0.999 && i.p3.y > 0.999;
-    bool slider = i.t7.z >= 6.0;
-    bool worldPath = anchored && !slider;
+    bool axisLocked = i.t4.w > 0.0;
+    bool slides = i.p1.z > 0.001 || i.p1.w > 0.001;
+    bool worldPath = (anchored && !slides) || axisLocked;
 #ifdef ALLWORLD
     worldPath = true;
 #endif
@@ -104,7 +109,7 @@ VSOut main(VSIn i) {
     // identity-proof under any reorder because it reads what the
     // record IS.
     bool selected = tValid.z > 0.5
-        ? (anchored && !slider && i.t4.w <= 0.0)
+        ? (anchored && !slides && !axisLocked)
         : true;
 
     // The element position, REBUILT. i.pos is computed CPU-side in the

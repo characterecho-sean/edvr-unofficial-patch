@@ -482,10 +482,12 @@ void dumpInstanceStreams(ID3D11DeviceContext* ctx) {
                 for (int k = 0; k < recs && k < 21 && o < 600; ++k) {
                     const float* r = f + k * 32;
                     const bool anch = r[12] > 0.999f && r[13] > 0.999f;
-                    const bool sld = r[29] >= 6.0f;
-                    const char c = sld ? 's'
-                                       : (anch ? (r[19] > 0.0f ? 'x' : 'a')
-                                               : 'w');
+                    const bool sld = r[6] > 0.001f || r[7] > 0.001f;
+                    // Mirrors the shader's routing: 'x' beams (world-
+                    // pinned), 's' sliders (flat), 'a' anchored
+                    // (world), 'w' weights-slider (flat).
+                    const char c = r[19] > 0.0f ? 'x'
+                                   : (sld ? 's' : (anch ? 'a' : 'w'));
                     o += snprintf(line + o, sizeof(line) - o,
                                   "%s%c%.0f/%.2g/%.2g", k ? " " : "", c,
                                   r[20], r[29], r[6]);
