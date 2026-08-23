@@ -104,9 +104,32 @@ bool     g_sizePending = false;
 uint64_t g_sizeCopyMs = 0;
 bool     g_sizeNoted = false;
 
+// AND THE WORLD BASIS RATIO, because SIZE alone is not the width scale on
+// every runtime. Measured 2026-08-23: the same 16:9 panel reads SIZE
+// 35.556 x 20.000 through OpenComposite and 20.261 x 20.000 -- nearly
+// SQUARE -- through native SteamVR. The game parks the content aspect in
+// a different home per projection shape: when SIZE does not carry it, the
+// world transform (cb0 rows 9..11, the block whose float 47 is the
+// distance the panel fix scales) does, in its x basis column. A depth
+// gained by SIZE.x alone is then ~1.75x too small against the visual
+// width: the arc-length x compression lands at full strength while the
+// edges barely come nearer -- the field's "curls at either end and looks
+// squashed there" on SteamVR, while OpenComposite looked right.
+//
+// The gain that is correct on both is SIZE.x times |world x basis| /
+// |world z basis| -- world displacement per local x over world
+// displacement per local z. On a rig whose world matrix is uniform the
+// ratio is 1 and this reduces to the shipped behaviour.
+float    g_basisRatio = 1.0f;
+bool     g_basisLearned = false;
+ID3D11Buffer* g_cbStaging = nullptr;
+uint32_t g_cbStagingBytes = 0;
+bool     g_cbPending = false;
+
 float activeGain() {
     if (g_zGainCfg > 0.0f) return g_zGainCfg;
-    return g_sizeLearned && g_sizeX > 0.0f ? g_sizeX : 0.0f;
+    if (!(g_sizeLearned && g_sizeX > 0.0f)) return 0.0f;
+    return g_sizeX * (g_basisLearned ? g_basisRatio : 1.0f);
 }
 bool     g_stoodDown = false;     // a fault took the feature out for good
 
@@ -213,6 +236,42 @@ bool learnSize(ID3D11DeviceContext* ctx) {
 
     if (g_sizePending) {
         if (!g_sizeStaging || nowMs() - g_sizeCopyMs < kReadbackLagMs) return false;
+        // The world basis first, so the SIZE note below can report the
+        // gain that will actually be used. A failed or degenerate basis
+        // read leaves the ratio at 1 -- the shipped behaviour -- rather
+        // than standing anything down: SIZE alone was field-correct on
+        // one runtime of two.
+        if (g_cbPending && g_cbStaging) {
+            D3D11_MAPPED_SUBRESOURCE cm{};
+            if (SUCCEEDED(ctx->Map(g_cbStaging, 0, D3D11_MAP_READ, 0, &cm)) &&
+                cm.pData) {
+                if (g_cbStagingBytes >= 47 * 4 + 4) {
+                    const float* f = static_cast<const float*>(cm.pData);
+                    const float x0 = f[36], x1 = f[40], x2 = f[44];
+                    const float z0 = f[38], z1 = f[42], z2 = f[46];
+                    const float lx = sqrtf(x0 * x0 + x1 * x1 + x2 * x2);
+                    const float lz = sqrtf(z0 * z0 + z1 * z1 + z2 * z2);
+                    if (lx > 1e-4f && lz > 1e-4f) {
+                        float r = lx / lz;
+                        if (r < 0.2f) r = 0.2f;
+                        if (r > 5.0f) r = 5.0f;
+                        g_basisRatio = r;
+                        g_basisLearned = true;
+                        Log::get().note(
+                            "panel curvature: the panel's world transform scales "
+                            "x by %.3f and z by %.3f (cb0 rows 9..11), so the "
+                            "depth gain carries their ratio %.3f. On this runtime "
+                            "the game parks part of the width scale here rather "
+                            "than in SIZE -- without the ratio the bend crumples "
+                            "at the edges instead of curving (the SteamVR-vs-"
+                            "OpenComposite report).",
+                            lx, lz, r);
+                    }
+                }
+                ctx->Unmap(g_cbStaging, 0);
+            }
+            g_cbPending = false;
+        }
         D3D11_MAPPED_SUBRESOURCE m{};
         if (SUCCEEDED(ctx->Map(g_sizeStaging, 0, D3D11_MAP_READ, 0, &m)) && m.pData) {
             float sz[2] = {0.0f, 0.0f};
@@ -224,11 +283,11 @@ bool learnSize(ID3D11DeviceContext* ctx) {
                 Log::get().note(
                     "panel curvature: the panel's SIZE is %.3f x %.3f in model "
                     "units, read from the buffer the composite's shader scales its "
-                    "x and y by. The bend's depth is gained by %.3f so it is "
-                    "expressed in the same units as the width it bends -- without "
-                    "that it is correct and invisible, which is what the first "
-                    "flights saw.",
-                    sz[0], sz[1], sz[0]);
+                    "x and y by. The bend's depth is gained by %.3f (SIZE.x times "
+                    "the world-basis ratio %.3f) so it is expressed in the same "
+                    "units as the width it bends -- without that it is correct "
+                    "and invisible, which is what the first flights saw.",
+                    sz[0], sz[1], activeGain(), g_basisLearned ? g_basisRatio : 1.0f);
             } else {
                 Log::get().note(
                     "panel curvature: the SIZE buffer read back %.3f x %.3f, which "
@@ -308,6 +367,46 @@ bool learnSize(ID3D11DeviceContext* ctx) {
                     "(%u bytes, stride %u). The bend has to be gained into model "
                     "units and this is where the game keeps them.",
                     pick + 1, bytes, strides[pick]);
+            }
+
+            // The world transform rides the same readback: the composite's
+            // cb0 (the 208-byte block whose float 47 is the panel's
+            // distance) holds rows 9..11, and the ratio of its x and z
+            // basis magnitudes is the part of the gain SIZE does not
+            // carry on every runtime. Best-effort: a failed read leaves
+            // the ratio at 1, the shipped behaviour.
+            ID3D11Buffer* cb = nullptr;
+            ctx->VSGetConstantBuffers(0, 1, &cb);
+            if (cb) {
+                ResourceInfo ci;
+                const bool cknown =
+                    bindingResolveResource(cb, &ci) && ci.isBuffer;
+                const uint32_t cbytes = cknown ? ci.a : 0;
+                if (cbytes >= 47 * 4 + 4 && cbytes <= kMaxBytes) {
+                    if (g_cbStaging && g_cbStagingBytes != cbytes) {
+                        g_cbStaging->Release();
+                        g_cbStaging = nullptr;
+                        g_cbStagingBytes = 0;
+                    }
+                    if (!g_cbStaging) {
+                        ID3D11Device* dev = nullptr;
+                        ctx->GetDevice(&dev);
+                        if (dev) {
+                            D3D11_BUFFER_DESC bd{};
+                            bd.ByteWidth = cbytes;
+                            bd.Usage = D3D11_USAGE_STAGING;
+                            bd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+                            dev->CreateBuffer(&bd, nullptr, &g_cbStaging);
+                            dev->Release();
+                            if (g_cbStaging) g_cbStagingBytes = cbytes;
+                        }
+                    }
+                    if (g_cbStaging) {
+                        ctx->CopyResource(g_cbStaging, cb);
+                        g_cbPending = true;
+                    }
+                }
+                cb->Release();
             }
         }
     }
@@ -581,6 +680,12 @@ void panelCurveShutdown() {
         g_sizeStaging->Release();
         g_sizeStaging = nullptr;
         g_sizeStagingBytes = 0;
+    }
+    if (g_cbStaging) {
+        g_cbStaging->Release();
+        g_cbStaging = nullptr;
+        g_cbStagingBytes = 0;
+        g_cbPending = false;
     }
     if (g_vb) { g_vb->Release(); g_vb = nullptr; }
     if (g_ib) { g_ib->Release(); g_ib = nullptr; }
