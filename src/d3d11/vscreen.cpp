@@ -21,6 +21,7 @@
 #include "billboard_fix.h"
 #include "binding_shadow.h"
 #include "cb_peek.h"
+#include "panel_quad.h"
 #include "device_hook.h"  // contextHookModeFor
 #include "draw_census.h"
 #include "fov_probe.h"
@@ -977,7 +978,7 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         s->censusSkipRangeCount == 0 && s->censusSkipOffCount == 0 &&
         !remlokWantsDraws() && !holoWantsDraws() && !witchstarWantsDraws() &&
         !sunglareWantsDraws() && !cbPeekEnabled() && !billboardWantsDraws() &&
-        !drawCensusArmed()) {
+        !drawCensusArmed() && !panelQuadWants()) {
         return DrawVerdict::kNone;
     }
     const uint32_t rtvGen = bindingGeneration(BindSlot::Rtv0);
@@ -1185,6 +1186,23 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     // wants it.
     if (headOffsetGateWantsPanel() && srv0IsPanelSized(s, kind, count)) {
         ++s->panelCompositeDraws;
+    }
+
+    // The quad capture, and deliberately ABOVE the distanceEnabled return.
+    //
+    // It needs the composite recognised, which is exactly what the next few
+    // lines do -- but panel_distance sits at its shipped default of 1.0 on
+    // most rigs, including the one that flew the census, so everything below
+    // that return is unreachable there. Putting the capture under it would
+    // make an instrument for the curved screen silently require an unrelated
+    // comfort setting to be turned on first. That is the starvation this
+    // function's own comment block is about, and it has cost this file five
+    // separate bugs; the capture is not going to be the sixth.
+    //
+    // srv0IsPanelSized memoises against the binding generation, so asking here
+    // and again below is one resolve, not two.
+    if (panelQuadWants() && srv0IsPanelSized(s, kind, count)) {
+        panelQuadOnComposite(self);
     }
 
     if (!s->distanceEnabled) return DrawVerdict::kNone;
@@ -1964,6 +1982,7 @@ void vScreenRefreshConfig() {
     exposureConfigure(cfg);
     fovProbeConfigure(cfg);
     cbPeekConfigure(cfg);
+    panelQuadConfigure(cfg);
     billboardConfigure(cfg);
     // Every fix.head_offset_* key, on the reload path as well as the startup
     // one. A config reader on only one of the two is a specific repeatable bug
@@ -2639,6 +2658,7 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     exposureConfigure(cfg);
     fovProbeConfigure(cfg);
     cbPeekConfigure(cfg);
+    panelQuadConfigure(cfg);
     billboardConfigure(cfg);
     // installGlitchFrameFix is called before this, deliberately, so this is its
     // settled answer rather than a guess about config it has not read yet.
@@ -2794,6 +2814,7 @@ void shutdownVScreenFixes() {
                     g_state->eyeDrawsMax);
 
     g_state->distanceEnabled = false;
+    panelQuadShutdown();
     if (g_state->ourCb) {
         g_state->ourCb->Release();
         g_state->ourCb = nullptr;
