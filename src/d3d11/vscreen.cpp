@@ -250,6 +250,22 @@ struct State {
             uint32_t h;
         };
         SrvFilter srv[4];
+        // The VERTEX SHADER's content hash, as the census logs it in vh=.
+        // 0 = any shader; otherwise only draws running exactly that code
+        // are skipped. Written "vs:4435F2E50020E7F3", alone or after a
+        // kind:count ("X:1-99999 vs:..." is not needed -- the hash alone
+        // is the strongest term there is).
+        //
+        // It exists because size-level signatures COLLIDE. The geyser
+        // plume hunt (2026-08-23) found smoke particles and rock meshes
+        // sharing kind, count range, stride and every sampler size: a
+        // probe narrow enough to be safe matched nothing, and one broad
+        // enough to catch the plume deleted the terrain. Two draws
+        // running different code cannot share a hash, so this is the one
+        // term that always separates them -- and the hash names the blob
+        // on disk when glare_shader_dump was on, so a confirmed skip
+        // hands over the bytecode to read.
+        uint64_t vsHash;
     };
     SkipSpec  censusSkip[8] = {};
     uint32_t  censusSkipCount = 0;
@@ -1061,6 +1077,19 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     // eye-draw count would stand the flash fix down as a side effect.
     if (s->censusSkipCount) {
         for (uint32_t i = 0; i < s->censusSkipCount; ++i) {
+            // A vs:HASH rule carries no kind and no count: it matches on
+            // the shader alone, which is the whole point of it. Reading
+            // the bound shader costs a VSGetShader per candidate draw and
+            // happens only while a probe spec is set.
+            if (s->censusSkip[i].vsHash) {
+                ID3D11VertexShader* vs = nullptr;
+                self->VSGetShader(&vs, nullptr, nullptr);
+                const uint64_t h = lookupShaderHash(vs);
+                if (vs) vs->Release();
+                if (h != s->censusSkip[i].vsHash) continue;
+                ++s->censusSkipped;
+                return DrawVerdict::kSkip;
+            }
             const bool countHit =
                 s->censusSkip[i].nHi
                     ? count >= s->censusSkip[i].n &&
@@ -1855,6 +1884,30 @@ void readCensusSkip(Config& cfg, State* s) {
     while (*p && s->censusSkipCount < 8) {
         while (*p == ' ' || *p == ',' || *p == '\t') ++p;
         if (!*p) break;
+        // "vs:HASH" -- a whole term on its own, matching every draw that
+        // runs that vertex shader whatever its kind, count or samplers.
+        // The census logs the hash as vh=; the strongest term there is,
+        // and the only one two colliding pipelines cannot both satisfy.
+        if ((p[0] == 'v' || p[0] == 'V') && (p[1] == 's' || p[1] == 'S') &&
+            p[2] == ':') {
+            char* vend = nullptr;
+            const unsigned long long h = _strtoui64(p + 3, &vend, 16);
+            if (vend == p + 3 || h == 0) {
+                Log::get().note("census skip: \"%s\" is not vs:HASH with the "
+                                "16-digit hex the census logs as vh=; the "
+                                "whole spec is refused rather than "
+                                "half-applied.", p);
+                s->censusSkipCount = 0;
+                break;
+            }
+            State::SkipSpec& sk = s->censusSkip[s->censusSkipCount];
+            sk = State::SkipSpec{};
+            sk.kind = 0;          // any kind
+            sk.vsHash = static_cast<uint64_t>(h);
+            ++s->censusSkipCount;
+            p = vend;
+            continue;
+        }
         const char kind = static_cast<char>(toupper(*p));
         const bool known = kind == 'D' || kind == 'I' || kind == 'N' || kind == 'X';
         if (!known || p[1] != ':') {
