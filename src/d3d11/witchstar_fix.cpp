@@ -74,38 +74,13 @@ bool isFamily(char kind, ResourceInfo* atlasOut) {
 
 }  // namespace
 
-void witchstarConfigure(Config& cfg) {
-    const bool was = g_pinned;
-    const std::string m = cfg.getString("fix.witchstar", "stock");
-    if (m == "stock") {
-        g_pinned = false;
-    } else if (m == "pinned") {
-        g_pinned = true;
-    } else {
-        g_pinned = false;
-        Log::get().note("witchstar \"%s\" is not stock or pinned; running "
-                        "stock.", m.c_str());
-    }
-    g_flipX = cfg.getBool("advanced.witchstar_flip_x", false);
-    g_flipY = cfg.getBool("advanced.witchstar_flip_y", false);
-    float gain = cfg.getFloat("advanced.witchstar_gain", 1.0f);
-    if (gain < 0.0f) gain = 0.0f;
-    if (gain > 3.0f) gain = 3.0f;
-    g_gain = gain;
-
-    if (was != g_pinned) {
-        Log::get().note("witchstar: %s. The jump tunnel's destination star is "
-                        "%s.",
-                        g_pinned ? "pinned" : "stock",
-                        g_pinned ? "held to the ship's forward axis while the "
-                                   "head turns"
-                                 : "the game's own (head-locked in VR)");
-        if (g_pinned && !journalWatchActive()) {
-            Log::get().note("witchstar: pinned is scoped to jumps by the "
-                            "game's journal, and journal_watch is off or "
-                            "failed -- so it will never engage this session.");
-        }
-    }
+void witchstarConfigure(Config& /*cfg*/) {
+    // RETIRED 2026-08-22, superseded by fix.sun_glare: the jump
+    // tunnel's destination corona rides the same glare element train
+    // as ordinary suns (field-verified 2026-08-21), so the sun-glare
+    // modes cover witchspace and the viewport-shift mechanism never
+    // engages. No keys are read; the machinery stays for reference.
+    g_pinned = false;
 }
 
 bool witchstarWantsDraws() { return g_pinned; }

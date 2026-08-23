@@ -32,7 +32,12 @@ constexpr uint32_t kSheetW = 2048;
 constexpr uint32_t kSheetH = 1024;
 constexpr uint32_t kSheetFmt = 98;
 
-enum class Mode { kStock, kOff, kFirst };
+// The shipped surface: one key, three modes. realistic = the record-
+// selected anchored elements, world-drawn (corona and smudge class,
+// static in the world); vivid = every element, anchored ones world-
+// pinned, the lens-flare sliders keeping their stock camera slide.
+// kOff survives as a legacy spelling (hide the whole train).
+enum class Mode { kStock, kOff, kRealistic, kVivid };
 
 Mode     g_mode = Mode::kStock;
 uint32_t g_keep = 0;
@@ -78,6 +83,10 @@ bool     g_shadersNoted = false;
 // 4 = every element on the ported flat path.
 constexpr int kWorldVariants = 4;
 int                  g_world = 0;
+bool                 g_probe = false;   // the debug instrument switch:
+                                        // telemetry, identity line,
+                                        // census and stream dumps all
+                                        // sit behind it, default silent
 ID3D11VertexShader*  g_worldVs[kWorldVariants] = {};   // owned, lazy
 bool                 g_worldTried[kWorldVariants] = {};
 ID3D11VertexShader*  g_savedVs = nullptr;  // the game's, across one draw
@@ -506,108 +515,68 @@ bool sunglareIsGlareTrain(char kind, uint32_t count, uint32_t instances) {
 
 void sunglareConfigure(Config& cfg) {
     const Mode was = g_mode;
-    const uint32_t wasKeep = g_keep;
     const std::string v = cfg.getString("fix.sun_glare", "stock");
+    bool legacy = false;
     if (v == "stock") {
         g_mode = Mode::kStock;
+    } else if (v == "realistic") {
+        g_mode = Mode::kRealistic;
+    } else if (v == "vivid") {
+        g_mode = Mode::kVivid;
     } else if (v == "off") {
-        g_mode = Mode::kOff;
+        g_mode = Mode::kOff;         // legacy spelling, kept working
+        legacy = true;
     } else if (v.compare(0, 6, "first:") == 0) {
-        char* end = nullptr;
-        const unsigned long k = strtoul(v.c_str() + 6, &end, 10);
-        if (end == v.c_str() + 6 || *end || k < 1 || k > 32) {
-            Log::get().note("sun glare: \"%s\" is not stock, off or first:K "
-                            "with K 1..32; staying stock.", v.c_str());
-            g_mode = Mode::kStock;
-        } else {
-            g_mode = Mode::kFirst;
-            g_keep = static_cast<uint32_t>(k);
-        }
+        g_mode = Mode::kRealistic;   // the debug arc's clamp; the record
+        legacy = true;               // selection is its successor
     } else {
-        Log::get().note("sun glare: \"%s\" is not stock, off or first:K; "
-                        "staying stock.", v.c_str());
+        Log::get().note("sun glare: \"%s\" is not stock, realistic or "
+                        "vivid; staying stock.", v.c_str());
         g_mode = Mode::kStock;
     }
-    const int wasSteady = g_steadyMode;
-    g_steadyMode = cfg.getIntInRange("fix.sun_glare_steady", 0, 0, 2);
-    g_steady = g_steadyMode != 0;
-    billboardGlareWatch(g_steady);
-    if (g_steadyMode != wasSteady) {
-        if (g_steadyMode == 2) {
-            Log::get().note("sun glare steady: FIXED-ANGLE DIAGNOSTIC -- "
-                            "the corner directions are rotated a constant "
-                            "30 degrees. Elements visibly tilted proves the "
-                            "shader consumes the rotation; elements "
-                            "unchanged proves it reconstructs the corners "
-                            "and the actuator must move to the uv pair.");
-        } else {
-            Log::get().note("sun glare steady: %s -- the corner stream is "
-                            "%s per draw by the head's roll, measured from "
-                            "the camera rows the train's own constants "
-                            "carry.",
-                            g_steady ? "ON" : "off",
-                            g_steady ? "counter-rotated"
-                                     : "no longer rotated");
-        }
-        if (g_steady) {
-            g_pairsLogged = 0;   // each steady rising edge buys a fresh
-                                 // eye-pair budget
-            g_pairState = 0;
-        }
-        if (!g_steady) releaseSteadyObjects();
-    }
-    const float wasRecenter = g_recenter;
-    float rc = cfg.getFloat("fix.sun_glare_recenter", 0.0f);
-    if (rc < -4.0f) rc = -4.0f;
-    if (rc > 4.0f) rc = 4.0f;
-    g_recenter = rc;
+    // Both modes ride the world-anchored shader; the variant is a live
+    // in-shader diagnostic override kept from the debug arc (2 = gate
+    // bypassed, 3 = all elements world-anchored, 4 = all flat).
+    const int variant =
+        cfg.getIntInRange("advanced.sun_glare_variant", 0, 0, kWorldVariants);
     const int wasWorld = g_world;
-    g_world = cfg.getIntInRange("fix.sun_glare_world", 0, 0, kWorldVariants);
-    if (g_world != wasWorld) {
-        static const char* kVariantNames[] = {
-            "off", "normal", "GATE BYPASSED (diagnostic)",
-            "ALL ELEMENTS WORLD-ANCHORED (diagnostic)",
-            "ALL ELEMENTS FLAT (diagnostic)"};
-        Log::get().note("sun glare world: %s -- the train's vertex shader "
-                        "is %s the world-anchored replacement (written "
-                        "against the dumped vs 94D5C556DFD6D705).",
-                        kVariantNames[g_world],
-                        g_world ? "substituted with" : "no longer");
+    g_world = (g_mode == Mode::kRealistic || g_mode == Mode::kVivid)
+                  ? (variant ? variant : 1)
+                  : 0;
+    // The debug instruments (per-second telemetry, b0 identity line,
+    // camera-block census, instance-stream dumps) behind one switch,
+    // default silent: a shipped log should carry findings, not vitals.
+    g_probe = cfg.getBool("advanced.sun_glare_probe", false);
+    // The corner-rotation steady path and its eyeshape/recenter levers
+    // are superseded by the world shader and no longer configurable.
+    g_steady = false;
+    // The billboard loan's tee stays armed for world mode: the
+    // telemetry and the per-draw camera solve read the shadowed CB.
+    billboardGlareWatch(g_world != 0);
+    if (legacy && (g_mode != was || g_world != wasWorld)) {
+        Log::get().note("sun glare: legacy value \"%s\" accepted (%s). The "
+                        "shipped modes are stock, realistic and vivid.",
+                        v.c_str(),
+                        g_mode == Mode::kOff ? "train hidden"
+                                             : "treated as realistic");
     }
-    // The billboard loan's tee arms for world mode too: the telemetry
-    // reads the sun position out of the shadowed CB.
-    billboardGlareWatch(g_steady || g_world != 0);
-    const float wasEyeshape = g_eyeshape;
-    float es = cfg.getFloat("fix.sun_glare_eyeshape", 0.0f);
-    if (es < 0.0f) es = 0.0f;
-    if (es > 2.0f) es = 2.0f;
-    g_eyeshape = es;
-    if (g_eyeshape != wasEyeshape) {
-        Log::get().note("sun glare eyeshape: strength %.2f -- each eye's "
-                        "glare quad is reshaped so both subtend the same "
-                        "angular patch (geometric, from each eye's own sun "
-                        "direction; 1 = the full sec-squared answer).",
-                        g_eyeshape);
-    }
-    if (g_recenter != wasRecenter) {
-        Log::get().note("sun glare recenter: gain %.2f -- the kept glare "
-                        "elements are pushed back toward the star's true "
-                        "direction against the flare placement slide. Tune "
-                        "live at a bright star, sun held well off-centre: "
-                        "the right gain glues the smudge to the star; the "
-                        "wrong sign doubles the slide.", g_recenter);
-    }
-    if (g_mode != was || (g_mode == Mode::kFirst && g_keep != wasKeep)) {
+    if (g_mode != was) {
         if (g_mode == Mode::kOff) {
-            Log::get().note("sun glare: OFF -- the screen-space glare "
-                            "element train (both beams, corona flare, "
-                            "smudge, rays) is not drawn. The star's own "
-                            "disc is a different draw and is untouched.");
-        } else if (g_mode == Mode::kFirst) {
-            Log::get().note("sun glare: drawing only the FIRST %u "
-                            "instance(s) of the glare element train -- the "
-                            "mapping walk. Step K and note what appears.",
-                            g_keep);
+            Log::get().note("sun glare: OFF -- the glare element train "
+                            "(corona, smudge, beams, rays, flare) is not "
+                            "drawn. The star's own disc is a different "
+                            "draw and is untouched.");
+        } else if (g_mode == Mode::kRealistic) {
+            Log::get().note("sun glare: REALISTIC -- anchored elements "
+                            "(corona and smudge class) drawn world-locked "
+                            "by the replacement vertex shader; beams, rays "
+                            "and lens-flare sliders removed. Selection is "
+                            "by record, immune to the game's head-look "
+                            "element reordering.");
+        } else if (g_mode == Mode::kVivid) {
+            Log::get().note("sun glare: VIVID -- every element drawn; "
+                            "anchored ones world-locked, the lens-flare "
+                            "sliders keeping their stock camera slide.");
         } else {
             Log::get().note("sun glare: stock.");
         }
@@ -618,8 +587,7 @@ void sunglareConfigure(Config& cfg) {
 // must keep running even with the glare fix itself stock, because the
 // last-seen stamp is what scopes the damper to the sun.
 bool sunglareWantsDraws() {
-    return g_mode != Mode::kStock || g_steady || g_world ||
-           exposureDampingActive();
+    return g_mode != Mode::kStock || exposureDampingActive();
 }
 
 bool sunglareSteady() { return g_steady; }
@@ -639,12 +607,11 @@ SunglareAction sunglareOnEyeDraw(char kind, uint32_t count,
         ++g_skipped;
         return SunglareAction::kSkip;
     }
-    if (g_mode == Mode::kFirst && instances > g_keep) {
-        ++g_clamped;
-        return SunglareAction::kClamp;
-    }
-    // Matched, not skipped, not clamped -- kMatch tells the caller a train
-    // draw is happening, which is all the steady path needs to know.
+    // Matched and not skipped -- kMatch tells the caller a train draw
+    // is happening. The first:K clamp is retired: the game's element
+    // list reorders with its head-look camera, so a positional prefix
+    // named different elements as the head turned; the world shader
+    // selects by record instead.
     return SunglareAction::kMatch;
 }
 
@@ -676,7 +643,8 @@ void sunglareSceneDump(const void* data, uint32_t bytes) {
     // FOLLOWED the head between the shots is the true one, the offset
     // frozen at forty-five degrees is the head-look camera. Level-head
     // dumps alone cannot tell them apart, which shot one proved.
-    if (!g_world || g_camDumpShot >= 2 || g_lastSeenMs == 0 || !data ||
+    if (!g_probe || !g_world || g_camDumpShot >= 2 || g_lastSeenMs == 0 ||
+        !data ||
         bytes < 1024) {
         return;
     }
@@ -741,7 +709,7 @@ void sunglareBegin(ID3D11DeviceContext* ctx) {
         // its side -- draws stopping = the game culled upstream; draws
         // continuing = our shader killed them.
         ++g_worldDraws;
-        {
+        if (g_probe) {
             bool found = false;
             for (int i = 0; i < g_trainCount; ++i) {
                 if (g_trains[i].start == g_drawStart &&
@@ -756,7 +724,7 @@ void sunglareBegin(ID3D11DeviceContext* ctx) {
                 ++g_trainCount;
             }
         }
-        {
+        if (g_probe) {
             uint32_t nf = 0;
             const float* sh = billboardShadowFloats(&nf);
             if (sh && nf >= 32) {
@@ -1048,15 +1016,12 @@ void sunglareBegin(ID3D11DeviceContext* ctx) {
                     // dark until the sun's own triplet is identified in
                     // the camera block.
                     f[13] = 0.0f;
-                    // tValid.z: element SELECTION. The record list is
-                    // dynamic and reorders with the head-look camera,
-                    // so the prefix clamp is retired under the world
-                    // shader; a curated sun_glare (first:K) becomes
-                    // "keep the anchored, non-axis-locked elements" --
-                    // the corona and smudge class -- selected per
-                    // RECORD in the shader, immune to reordering.
-                    // stock keeps every element (the vivid mode).
-                    f[14] = (g_mode == Mode::kFirst) ? 1.0f : 0.0f;
+                    // tValid.z: element SELECTION. realistic keeps the
+                    // anchored, non-axis-locked elements -- the corona
+                    // and smudge class -- selected per RECORD in the
+                    // shader, immune to the game's head-look element
+                    // reordering. vivid keeps every element.
+                    f[14] = (g_mode == Mode::kRealistic) ? 1.0f : 0.0f;
                     f[15] = 0.0f;
                     f[16] = sunDir[0];           // tSun
                     f[17] = sunDir[1];
