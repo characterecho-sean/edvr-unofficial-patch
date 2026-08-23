@@ -1,5 +1,7 @@
 ﻿#include "device_hook.h"
 
+#include "shader_sig.h"
+
 #include <windows.h>
 
 #include <dxgi1_2.h>
@@ -239,6 +241,11 @@ HRESULT STDMETHODCALLTYPE hookedCreateVS(ID3D11Device* self, const void* bytecod
         if (FAILED(hr) || !bytecode || len == 0 || !out || !*out) return;
         const uint64_t hash = fnv1a64(bytecode, len);
         registerShaderHash(*out, hash);
+        // ...and its INPUT SIGNATURE, which is a different question from its
+        // identity: whether the panel composite's shader reads the z of the
+        // vertices it is handed decides whether the curved screen is possible
+        // at all. See shader_sig.h.
+        shaderSigRegister(*out, bytecode, static_cast<size_t>(len));
         if (g_state->shaderDump) dumpShaderBlob(L"vs", hash, bytecode, len);
     });
     return hr;

@@ -13,6 +13,7 @@
 #include "../common/log.h"
 #include "../common/timing.h"
 #include "binding_shadow.h"
+#include "shader_sig.h"
 
 namespace edvr {
 namespace {
@@ -186,6 +187,33 @@ void readBack(ID3D11DeviceContext* ctx) {
         }
         describeLayout(data, g_stride, count);
         ctx->Unmap(g_staging, 0);
+
+        // What the shader actually READS of all that.
+        //
+        // The vertex data cannot say it: a third float that is 0.0 in all four
+        // corners is what an unused field looks like as much as a flat one, and
+        // that ambiguity sent the curvature work chasing a failure that was not
+        // there. The DXBC input signature settles it -- used=xyz means the z a
+        // substituted mesh writes is consumed, used=xy means it never could be.
+        ID3D11VertexShader* vs = nullptr;
+        ctx->VSGetShader(&vs, nullptr, nullptr);
+        if (vs) {
+            const char* sig = shaderSigOf(vs);
+            vs->Release();
+            if (sig) {
+                Log::get().note(
+                    "panel quad: the composite's vertex shader reads %s. What "
+                    "matters is the POSITION entry: used=xyz means a substituted "
+                    "mesh's z reaches the screen, used=xy means no geometry "
+                    "substitution could ever bend it.",
+                    sig);
+            } else {
+                Log::get().note(
+                    "panel quad: the composite's vertex shader was created before "
+                    "the hooks went in, or its signature would not parse, so what "
+                    "it reads is not known from here.");
+            }
+        }
 
         // Winding, which the vertices cannot say on their own.
         if (g_ibBytes && g_ibStaging) {
