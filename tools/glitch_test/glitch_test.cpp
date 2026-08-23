@@ -973,9 +973,11 @@ int main(int argc, char** argv) {
               "the run continued into a frame 21,693 units from the one before "
               "it -- that is a rebase, not one bad frame sampled twice, and "
               "holding the old picture across it IS the flash");
-        // It settles there rather than being chased. The rebase is declared on
-        // the let-through frame now instead of one frame later, so the stand-
-        // down starts earlier and the frames after it are quiet.
+        // It settles there rather than being chased. This one passes with the
+        // rule reverted too -- review checked -- and it is kept as what it
+        // actually guards: that the rebase is still DECLARED, so the detector
+        // does not spend the next twenty frames chasing the new reference
+        // frame. The cells below are the ones that discriminate.
         uint32_t after = 0;
         for (uint32_t i = 0; i < 20; ++i) {
             x += 30.0f;
@@ -1019,6 +1021,72 @@ int main(int argc, char** argv) {
               std::string(b1 ? "" : "the first frame was not withheld, so this "
                                     "cell is vacuous. ") +
                   (b2 ? "the run continued past the threshold" : ""));
+        settle(b, x, 150);
+    }
+
+    // --- 7m. A HEAVIER PASS AFTER A WITHHOLD IS NOT A REBASE ---------------
+    //
+    // The regression the first version of the run rule shipped with, found in
+    // adversarial review and reproduced here so it cannot come back.
+    //
+    // Letting the second frame of a run through is the point -- but it also
+    // moved that frame out of the "still in the same glitch" branch and into
+    // the one that measures whether the view came back. So the resolve was
+    // taken ON the frame the rule had just called somewhere else. When that
+    // frame is a rebase the answer is right by accident; when it is a heavier
+    // render pass reporting a further camera, the resolve reads "the camera did
+    // not return" about a view that never moved, and arms a 1330 ms window in
+    // which nothing can be withheld. One good frame saved, most of a second and
+    // a half of the fix bought with it.
+    //
+    // The genuine flash twelve frames later is the assertion. It was withheld
+    // before the run rule, let through by the first version of it, and is
+    // withheld again now that a moved-on frame defers the resolve by one frame
+    // like a marked one does.
+    settle(b, x, 150);
+    {
+        x += 30.0f;
+        const bool bad = frame(b, x, 12500.0f, 0.0f);        // a real bad frame
+        x += 30.0f;
+        frame(b, x, 0.0f, 61000.0f);                         // a heavier pass
+        x += 30.0f;
+        frame(b, x, 0.0f, 0.0f);                             // back on the path
+        for (uint32_t i = 0; i < 12; ++i) { x += 30.0f; frame(b, x, 0.0f, 0.0f); }
+        const bool later = oneFrameExcursion(b, x, 27500.0f);
+        check("a pass outlier after a withhold does not stand the fix down",
+              bad && later,
+              std::string(bad ? "" : "the first bad frame was not withheld, so "
+                                     "this cell is vacuous. ") +
+                  (later ? "" : "a genuine flash twelve frames later was let "
+                                "through -- the rebase cooldown was armed by a "
+                                "render pass, which is the whole regression"));
+        settle(b, x, 150);
+    }
+
+    // --- 7n. THE RUN IS ANCHORED, NOT CHAINED ------------------------------
+    //
+    // At the shipped max_consecutive of 2 there is no difference. Above it
+    // there is: measuring each frame against the one before it bounds a STEP,
+    // so a run could walk 1,900 units at a time for as long as the cap allows
+    // and still call itself one place -- 3,800 of travel inside a 2,000
+    // threshold, which is not what "one wrong viewpoint sampled twice" means.
+    // Anchoring to the frame that opened the run is what makes the claim true.
+    settle(b, x, 150);
+    {
+        Config::get().set("advanced.transition_flash_max_consecutive", "3");
+        installGlitchFrameFix();
+        settle(b, x, 60);
+        uint32_t walked = 0;
+        x += 30.0f; if (frame(b, x, 25000.0f, 0.0f)) ++walked;   //     0 from anchor
+        x += 30.0f; if (frame(b, x, 26900.0f, 0.0f)) ++walked;   // 1,900 from anchor
+        x += 30.0f; if (frame(b, x, 28800.0f, 0.0f)) ++walked;   // 3,800 from anchor
+        check("a run cannot walk past the threshold one step at a time",
+              walked == 2,
+              std::to_string(walked) + " of 3 withheld at max_consecutive = 3 -- "
+              "expected 2, the third being 3,800 units from where the run "
+              "started");
+        Config::get().set("advanced.transition_flash_max_consecutive", "2");
+        installGlitchFrameFix();
         settle(b, x, 150);
     }
 

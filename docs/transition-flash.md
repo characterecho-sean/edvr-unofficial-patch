@@ -244,12 +244,49 @@ its own: "the second frame is itself a jump away from the first" is the question
 the detector already asks of every frame, asked between two withholds instead of
 against a prediction.
 
-The scope is worth stating, because the numbers invite a wider claim. This
-catches a bad frame followed by a rebase. It does not catch a rebase with no bad
-frame in front of it — the 123-unit run is one of those, and at the moment of
-decision its two frames are indistinguishable from a glitch holding still.
-Tightening the radius to reach them would trade a measured fix for an unmeasured
-regression in the class the cap exists for.
+Letting that frame through also means something is now known a frame earlier —
+the view has moved — so the change of reference frame is declared there rather
+than waiting for the run to hit its cap. **Declared, and then confirmed.** One
+frame is not enough evidence: when the frame really is the new reference frame
+the conclusion is right, but when it is a heavier render pass reporting a
+further camera it is wrong, and being wrong costs the 1330 ms stand-down in
+which nothing can be withheld. So the stand-down is armed provisionally and the
+next frame either confirms it or takes it back, restoring the path and the
+stand-down together. Adversarial review found the unconfirmed version letting a
+genuine flash through twelve frames after a pass outlier, which the code before
+any of this caught.
+
+Two cheaper answers were tried against measured data first and both lost.
+Deferring the resolve by a frame, the way a withheld frame defers it, clears the
+run counter in the gap — so the next frame is judged against the dead path with
+a fresh run's budget and is withheld in place of the one that was saved: three
+frames instead of two, a good frame still held, just a different one. Rebuilding
+the path without arming the stand-down took the recorded planet-surface cascade
+from two withheld frames to four; the stand-down is not a belt-and-braces
+companion to rebuilding the path, it is what covers the rebuild, and in a
+cascade the rebuild straddles the alternation and poisons the prediction it is
+rebuilding. With the confirmation in place that same replay costs **one** frame,
+against two before any of this.
+
+The scope is worth stating, because the numbers invite a wider claim, and the
+trade runs in both directions.
+
+It does not catch a rebase with no bad frame in front of it — the 123-unit run
+is one of those, and at the moment of decision its two frames are
+indistinguishable from a glitch holding still.
+
+And it can cost the two-frame class. The signal is the furthest camera, and this
+module's own evidence is that which camera that is moves with the pass mix
+rather than with the view: a phantom jump of 4,201 units was measured from pure
+pass composition. So two frames at the *same* wrong viewpoint can report
+positions thousands of units apart, and this rule would let the second one
+through. Set against that, there is no measured example of a genuine two-frame
+glitch anywhere — the class rests on one player's description, and the section
+below attributes that exact symptom to the external camera, where it happens
+identically with the fix switched off. The honest statement is that a measured
+fix is being traded against an unmeasured class, in the direction the evidence
+points, and that the trade would look different the moment somebody captures
+one.
 
 **Both eyes of a frame now get the same answer.** The decision is taken once, at
 whichever eye the game submits first, and the second eye follows it. Previously

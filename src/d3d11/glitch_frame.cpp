@@ -55,36 +55,63 @@ constexpr uint64_t kRebaseCooldownMs = 1330;
 // flash the fix created rather than one it hid.
 //
 // Measured 2026-08-23, one session, the distance from the first withheld frame
-// of a run to the second, across all six runs the ring covers:
+// of a run to the second, across all SEVEN runs in it -- three from the ring
+// dumps, three from `was drawn from` lines, and the last from neither:
 //
 //   f17777->78      0      two frames at a byte-identical position
 //   f19089->90      0      the same
 //   f20501->02     15
 //   f21664->65     44
 //   f21380->81    123
-//   f22066->67 10,114      hyperspace entry: the bad frame, then witchspace
+//   f22066->67 10,114      hyperspace ENTRY: the bad frame, then witchspace
+//   f23100->01 13,261      hyperspace ARRIVAL, thirteen seconds later
 //
-// Two orders of magnitude, and the odd one out is the reported bug. f22067 was
-// good -- f22068 continues it by 73 units and f22070 by another 32, ordinary
-// flight steps -- and it was withheld anyway.
+// Two orders of magnitude between the classes, and both members of the upper
+// one are the reported bug -- the two ends of the same jump, each costing a
+// good frame. An earlier draft of this note said six runs and one outlier,
+// which made the evidence look tidier than it is: the rule fires on two runs in
+// seven, not one in six. f22067 was good -- f22068 continues it by 73 units and
+// f22070 by another 32, ordinary flight steps -- and it was withheld anyway.
 //
-// THE THRESHOLD IS jumpMin, not a number of its own. "The second frame is
-// itself a jump away from the first" is the same question the detector already
-// asks of every frame, asked between two withholds instead of against a
-// prediction, and it inherits transition_flash_units so a rig that has retuned
-// what counts as a jump retunes this with it. The fixed floor rather than the
-// speed-scaled trip: a run's second frame is the same wrong place regardless of
-// how fast the view was travelling before it, and letting speed inflate this
-// would switch the rule off during exactly the fast transitions it is for.
+// THE THRESHOLD IS ITS OWN SETTING, transition_flash_run_units. It was
+// jumpMin for one commit, on the argument that "the second frame is itself a
+// jump away from the first" is the question the detector already asks of every
+// frame -- which is true, and still the right way to think about it, but the
+// two knobs pull opposite ways. Raising jumpMin withholds LESS; raising this
+// withholds MORE, because runs continue more readily. The shipped ini tells a
+// player to raise transition_flash_units when too much is being withheld, and
+// that advice would have been half wrong.
 //
-// SCOPE, stated because the measurements above invite a wider claim. This
-// catches a bad frame followed by a rebase. It does NOT catch a rebase with no
-// bad frame in front of it -- f21380->81 steps 123 units and stays a run --
-// because at the moment of decision those two frames are indistinguishable
-// from a glitch that holds still. Tightening the radius toward a hundred would
-// reach them and would trade a measured fix for an unmeasured regression in
-// the two-frame class max_consecutive exists for, which is not a trade this
-// has evidence for.
+// A FIXED FLOOR RATHER THAN THE SPEED-SCALED TRIP, and the argument against is
+// worth recording because it is not weak. `trip` scales with speed precisely
+// because "during a jump the camera legitimately gains thousands of units per
+// frame", so at supercruise speeds two samples of the SAME wrong viewpoint
+// could exceed a fixed 2,000 through ordinary motion alone -- which is where
+// the flash lives. Against that: all seven runs above come from frames stepping
+// 10 to 40 units, so there is no measurement of the fast case either way, and a
+// speed-scaled radius would switch the rule off during exactly the transitions
+// it exists for. The floor ships, the knob is separate so it can be moved, and
+// this paragraph is here for whoever gets the measurement.
+//
+// SCOPE, stated because the measurements above invite a wider claim, and the
+// trade runs in both directions.
+//
+// It does NOT catch a rebase with no bad frame in front of it -- f21380->81
+// steps 123 units and stays a run -- because at the moment of decision those
+// two frames are indistinguishable from a glitch that holds still.
+//
+// And it can cost the two-frame class. The signal is the furthest camera, and
+// this file's own evidence is that which camera that is moves with the pass
+// mix, not with the view: kWorldCameraFloor records a phantom jump of 4,201
+// units produced by pure pass composition. So two frames at the SAME wrong
+// viewpoint can report positions thousands of units apart, and this rule would
+// let the second one through. Set against that, there is no measured example of
+// a genuine two-frame glitch anywhere in this repo -- the class rests on one
+// player's description, and docs/transition-flash.md attributes that exact
+// symptom to the external camera, where it happens identically with the fix
+// switched off. So the honest statement is that a measured fix is being traded
+// against an unmeasured class, in the direction the evidence points, and that
+// the trade would look different the moment somebody captures one.
 
 // The detector must never be able to withhold frames continuously. If more than
 // this fraction of a window is being withheld, whatever it is watching is not
@@ -531,6 +558,14 @@ struct State {
     uint32_t posOffset = 1100;     // in floats
 
     float    jumpMin = 2000.0f;    // absolute floor, world units
+    // How far a run may spread and still be one place. Its own setting rather
+    // than jumpMin, and review is why: the two pull in OPPOSITE directions.
+    // Raising jumpMin makes the detector less willing to call something a jump
+    // -- fewer first frames withheld -- while raising this makes a run more
+    // willing to continue, which is more frames withheld. The shipped ini tells
+    // a player to raise transition_flash_units when too much is being withheld;
+    // sharing the number would have made that advice half wrong.
+    float    runUnits = 2000.0f;   // world units
     float    jumpFactor = 8.0f;    // or this multiple of the current speed
     uint32_t maxConsecutive = 2;
     uint32_t minEyeDraws = 100;
@@ -545,6 +580,9 @@ struct State {
     float    preJumpPrev[3] = {};
     float    preJumpPrev2[3] = {};
     bool     awaitingReturn = false;
+    // A rebase declared on one frame's evidence, waiting for the next frame to
+    // confirm or revoke it. See the moved-on branch at the boundary.
+    bool     rebaseProvisional = false;
 
     // This frame's furthest-from-origin camera.
     float    frameFarPos[3] = {};
@@ -713,14 +751,35 @@ struct State {
     // The frame of the most recent withhold, so a history dump can say whether
     // anything in it was ours. See dumpCameraRing.
     uint32_t   lastWithheldFrame = 0;
-    // ...and WHERE it was, so the frame after a withhold can be asked whether
-    // it is still the same wrong place rather than the first frame of a new
-    // one. See runStillSamePlace. Read only while `consecutive` is non-zero --
-    // this file's single answer to "was the previous frame withheld" -- so
-    // there is no second flag here to drift out of step with it.
-    float      lastWithheldPos[3] = {};
+    // Where the run STARTED, so every later frame of it can be asked whether it
+    // is still the same wrong place. See runStillSamePlace. Read only while
+    // `consecutive` is non-zero -- this file's single answer to "was the
+    // previous frame withheld" -- so there is no second flag here to drift out
+    // of step with it.
+    //
+    // The run's FIRST frame, not its previous one, and at max_consecutive = 2
+    // those are the same thing. Above 2 they are not: chaining each frame to
+    // the one before it bounds a STEP, so a run could walk 1,900 units at a
+    // time indefinitely and still call itself one place. "One wrong viewpoint
+    // sampled twice" is a claim about the run, so the run is what it measures.
+    float      runAnchorPos[3] = {};
+    // The candidate the decision was actually taken on, promoted to the anchor
+    // at the boundary if the frame really was withheld.
+    //
+    // NOT frameFarPos, and the difference is a real miss found in review. A
+    // frame carries several cameras and the verdict is re-taken on each new
+    // furthest one; frameFarPos at the boundary is whichever came last, which
+    // may be a pass that arrived after the mark stood. Anchoring to it measured
+    // the run against a camera the decision was never taken on -- demonstrated
+    // with a later pass 50,000 units out turning the next frame of the SAME bad
+    // viewpoint, 116 units away, into a moved-on. This is the driftLanding
+    // hazard, and it matters more here because this one decides.
+    float      markedPos[3] = {};
     uint32_t   suppressedBySeparation = 0;
     uint32_t   suppressedByDrift = 0;
+    // Frames let through because the run moved on. Its own counter: these are
+    // not recognitions and must not be reported as any invariant's work.
+    uint32_t   letThroughMovedOn = 0;
     bool       radiusSuppressedThisFrame = false;
     bool       parkSuppressedThisFrame = false;
     bool       driftSuppressedThisFrame = false;
@@ -803,7 +862,7 @@ inline bool runStillSamePlace(const State* s, const float* pos) {
     if (s->consecutive == 0) return true;
     float d2 = 0.0f;
     for (uint32_t a = 0; a < 3; ++a) {
-        const float e = pos[a] - s->lastWithheldPos[a];
+        const float e = pos[a] - s->runAnchorPos[a];
         d2 += e * e;
     }
     // Through sqrtf and isfinite, like the residual it is a sibling of, rather
@@ -812,7 +871,7 @@ inline bool runStillSamePlace(const State* s, const float* pos) {
     // NO, which lets the frame through -- the safe direction, and the same one
     // the residual's own finiteness check takes.
     const float d = sqrtf(d2);
-    return std::isfinite(d) && d <= s->jumpMin;
+    return std::isfinite(d) && d <= s->runUnits;
 }
 
 // The remembered magnitude matching `resid`, or -1.
@@ -1397,6 +1456,22 @@ void installGlitchFrameFix() {
     static State s;
     g_state = &s;
 
+    // The run state, cleared because arming cannot inherit one.
+    //
+    // The State is static and every early return in the boundary skips the tail
+    // that resets these, so a session that stood the fix down mid-run left
+    // `consecutive` frozen non-zero. That was harmless while the counter only
+    // fed a cap -- 1 < 2 still withheld -- and stopped being harmless the
+    // moment runStillSamePlace started reading it: review demonstrated a brand
+    // new FIRST bad frame let through, with the log explaining that the frame
+    // before it had been withheld when no such frame existed. One call in the
+    // field, twenty in the test suite, and the suite is where it showed.
+    s.consecutive = 0;
+    s.markedThisFrame = false;
+    s.awaitingReturn = false;
+    s.rebaseProvisional = false;
+    for (uint32_t a = 0; a < 3; ++a) s.runAnchorPos[a] = s.markedPos[a] = 0.0f;
+
     Config& cfg = Config::get();
     // The switch is a choice and lives in [fix]; the three numbers below it are
     // tuning and live in [advanced], which is where edvr.ini documents them.
@@ -1409,6 +1484,22 @@ void installGlitchFrameFix() {
     s.enabled = cfg.getBool("fix.transition_flash", true);
     s.jumpMin = cfg.getFloat("advanced.transition_flash_units", 2000.0f);
     s.jumpFactor = cfg.getFloat("advanced.transition_flash_speed_factor", 8.0f);
+    // Clamped like repeat_percent and drift_pct beside it, and unlike jumpMin
+    // used to be. 0 is a real setting -- it ends every run at one frame, which
+    // is what a rig that never wants a second withhold would ask for.
+    const float runUnits = cfg.getFloat("advanced.transition_flash_run_units", 2000.0f);
+    if (!std::isfinite(runUnits) || runUnits < 0.0f || runUnits > 1.0e9f) {
+        Log::get().note(
+            "transition_flash_run_units = %.1f is not a usable distance, so %.0f is "
+            "being used. It is how far the second and later frames of a run may sit "
+            "from the frame that opened it and still count as the same bad frame; "
+            "beyond it the view has changed reference frame and holding the old "
+            "picture across the change is itself a flash.",
+            static_cast<double>(runUnits), 2000.0);
+        s.runUnits = 2000.0f;
+    } else {
+        s.runUnits = runUnits;
+    }
     // 0 would mean "never withhold anything" -- `consecutive < 0` is never true
     // -- while the log went on saying the fix was armed and then ACTIVE. That is
     // a switch disguised as a limit, and an accidental one: the value is
@@ -1583,7 +1674,10 @@ void installGlitchFrameFix() {
         }
         return;
     }
-    if (s.jumpMin <= 0.0f || s.bufferBytes == 0) {
+    // isfinite, and its absence was a real hole: NaN passes `<= 0.0f`, the fix
+    // armed reporting "Threshold nan world units", and every comparison against
+    // it silently answered false. Its four neighbours all check this.
+    if (!std::isfinite(s.jumpMin) || s.jumpMin <= 0.0f || s.bufferBytes == 0) {
         s.enabled = false;
         Log::get().note("transition flash fix off: threshold or buffer size is zero.");
         return;
@@ -1945,9 +2039,15 @@ void glitchFrameObserve(const void* data, uint32_t bytes, const void* resource) 
         : s->driftSuppressedThisFrame      ? kVerdictDrift
         : burstDown(s)                     ? kVerdictBurst
         : rebaseDown(s)                    ? kVerdictCooldown
-        : s->consecutive >= s->maxConsecutive ? kVerdictConsecutive
-                                           : kVerdictMovedOn;
+        : s->consecutive > 0 && s->consecutive < s->maxConsecutive
+                                           ? kVerdictMovedOn
+                                           : kVerdictConsecutive;
     if (willMark) {
+        // The candidate this verdict was taken on. Overwritten by each later
+        // candidate that also marks, so what survives is the one standing when
+        // Submit reads the flag -- the same "whatever stands is the verdict"
+        // rule the mark itself follows.
+        for (uint32_t a = 0; a < 3; ++a) s->markedPos[a] = pos[a];
         markGlitchFrame();
     } else {
         // Withdraw, do not clear: a further candidate later in the same frame
@@ -2142,7 +2242,23 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
     // direction as before. It is counted separately instead, below.
     const bool wasWithheld = s->verdictThisFrame == kVerdictWithheld ||
                              s->verdictThisFrame == kVerdictWithheldSepWould;
-    if (s->verdictThisFrame != kVerdictQuiet && !wasWithheld) {
+    if (s->verdictThisFrame == kVerdictMovedOn) {
+        // NOT "recognised as render-pass geometry and left alone", which is
+        // what ++suppressed and the totals line both mean. A moved-on frame is
+        // a good frame at a new reference point; nothing recognised it and no
+        // invariant excused it.
+        //
+        // And emphatically NOT recordResidual. The Stayed branch below refuses
+        // to feed rebase magnitudes to the separation memory, because they sit
+        // inside the band genuine transitions live in (2,297 to 12,477) and
+        // teaching the suppressor one of them is teaching it to ignore a real
+        // flash of that size later. A moved-on frame is a rebase frame by
+        // construction, so it falls under exactly that refusal -- and the
+        // catch-all `else` below would have fed it in for free, without even
+        // the withheld frame that usually pays for a lesson.
+        ++s->letThroughMovedOn;
+        unmarkGlitchFrame();
+    } else if (s->verdictThisFrame != kVerdictQuiet && !wasWithheld) {
         // Recorded again, not merely counted: refreshing the entry is what stops
         // a separation that is suppressing correctly from ageing out of the
         // memory and firing all over again.
@@ -2207,10 +2323,12 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
         ++s->framesWithheld;
         ++s->windowWithheld;
         s->lastWithheldFrame = s->frameNo;
-        // WHERE it was, read from the same frameFarPos the decision was taken
-        // on, at the same place the frame number is recorded. Both answers to
-        // "the last withheld frame" are written together or not at all.
-        for (uint32_t a = 0; a < 3; ++a) s->lastWithheldPos[a] = s->frameFarPos[a];
+        // The anchor is set by the frame that OPENS a run and then left alone.
+        // `consecutive` is still the pre-frame count here -- the tail below is
+        // what increments it -- so zero means this withhold is the first.
+        if (s->consecutive == 0) {
+            for (uint32_t a = 0; a < 3; ++a) s->runAnchorPos[a] = s->markedPos[a];
+        }
         if (decodeCullGuardState(s->guardPacked).stage == 2) {
             ++s->withheldGuardLive;
         }
@@ -2297,6 +2415,89 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
         // how long a glitch is allowed to be; the branch below ends it as soon
         // as a frame is NOT withheld, either because it came back or because the
         // run hit its cap.
+    } else if (s->rebaseProvisional && s->frameFarMag2 >= 0.0f) {
+        // THE CONFIRMATION. A rebase was declared one frame ago on one frame's
+        // evidence; this is the frame that says whether it was true.
+        //
+        // Why it has to be asked at all: the moved-on branch below concludes
+        // "the view has changed reference frame" from a single sample, because
+        // that is all runStillSamePlace measures. When the frame really is the
+        // new reference frame -- hyperspace -- the conclusion is right. When it
+        // is a heavier render pass reporting a further camera it is wrong, and
+        // being wrong there costs a 1330 ms window in which nothing can be
+        // withheld. Review demonstrated exactly that: a genuine flash twelve
+        // frames after a pass outlier, let through, where the code before the
+        // run rule caught it.
+        //
+        // Two cheaper answers were tried first and both failed on measured
+        // data, which is why this is worth its state:
+        //
+        //   Deferring the resolve a frame, the way a marked frame defers it,
+        //   clears `consecutive` in the gap -- so the NEXT frame is judged
+        //   against the dead pre-jump path with a fresh run's budget and is
+        //   withheld in this one's place. Three frames instead of two, and a
+        //   good frame still held, just a different one.
+        //
+        //   Rebuilding the track without arming the stand-down took the field
+        //   cascade replay from two withheld frames to four. The stand-down is
+        //   not belt-and-braces beside camPrevValid = 0; it is what covers the
+        //   rebuild, and in a cascade the rebuild straddles the alternation and
+        //   poisons the prediction it is rebuilding.
+        //
+        // So: declare it, and take it back one frame later if the view came
+        // home. The revoke restores exactly what the Returned branch below
+        // restores, because it IS that branch's finding, arrived at one frame
+        // late.
+        s->rebaseProvisional = false;
+        float back = 0.0f;
+        for (uint32_t a = 0; a < 3; ++a) {
+            const float pred =
+                s->preJumpPrev[a] + 2.0f * (s->preJumpPrev[a] - s->preJumpPrev2[a]);
+            const float e = s->frameFarPos[a] - pred;
+            back += e * e;
+        }
+        back = sqrtf(back);
+        if (std::isfinite(back) && back <= s->lastTrip) {
+            // It came home. The excursion was one frame after all and the
+            // pre-jump path is still the right one, so give back the stand-down
+            // and the track together -- a half-revoked rebase would leave the
+            // detector mute on a path it has just decided to trust.
+            s->cooldownUntilMs = 0;
+            for (uint32_t a = 0; a < 3; ++a) {
+                s->camPrev2[a] = s->preJumpPrev[a];
+                s->camPrev[a] = s->frameFarPos[a];
+            }
+            s->camPrevValid = 2;
+        } else {
+            // Confirmed. Carry on rebuilding under the stand-down, exactly as
+            // the Stayed branch below leaves things.
+            for (uint32_t a = 0; a < 3; ++a) {
+                s->camPrev2[a] = s->camPrev[a];
+                s->camPrev[a] = s->frameFarPos[a];
+            }
+            if (s->camPrevValid < 2) ++s->camPrevValid;
+        }
+    } else if (s->awaitingReturn && s->verdictThisFrame == kVerdictMovedOn) {
+        // THE RUN RULE HAS ALREADY ANSWERED THIS -- provisionally.
+        //
+        // runStillSamePlace let this frame through because it is somewhere
+        // else, which is the same conclusion the Stayed branch below reaches,
+        // one frame earlier and from a rule that measured it. Take it, with
+        // everything that branch does, and mark it for the confirmation above.
+        s->awaitingReturn = false;
+        s->rebaseProvisional = true;
+        s->cooldownUntilMs = nowMs() + kRebaseCooldownMs;
+        s->camPrevValid = 0;
+        if (s->rebaseNotesLeft > 0) {
+            --s->rebaseNotesLeft;
+            Log::get().note(
+                "transition flash: the frame after a withheld one was %.0f units "
+                "from it, so the view has changed reference frame rather than "
+                "sitting on one bad frame. Letting it through instead of holding "
+                "the old picture over the change, and standing down for %u ms "
+                "unless the next frame shows the view coming back.",
+                static_cast<double>(s->lastResid), (unsigned)kRebaseCooldownMs);
+        }
     } else if (s->awaitingReturn && s->frameFarMag2 >= 0.0f) {
         s->awaitingReturn = false;
         float back = 0.0f;
