@@ -1012,6 +1012,16 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         !particleWantsDraws()) {
         return DrawVerdict::kNone;
     }
+
+    // The particle probe sits ABOVE the eye-texture gate on purpose. On
+    // foot the world -- plumes included -- is drawn into the PANEL, which
+    // is deliberately not counted as an eye texture, so anything below the
+    // gate never sees a single particle draw in flat mode. The billboards
+    // take their basis from the game camera either way, which is why they
+    // swim when the mouse turns as well as when the head does, and a fix
+    // that only reached the stereo view would leave half the bug standing.
+    particleOnEyeDraw(self, kind, count, instances);
+
     const uint32_t rtvGen = bindingGeneration(BindSlot::Rtv0);
     if (s->rtv0EyeGen != rtvGen) {
         s->rtv0Cand = -1;
@@ -1180,7 +1190,6 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     // its buffer is never substituted for these draws. Clamp and steady
     // compose: the clamp count rides glareClamp to the DrawInstanced
     // thunk regardless of which verdict carries the draw there.
-    particleOnEyeDraw(self, kind, count, instances);
     if (sunglareWantsDraws()) {
         const SunglareAction a = sunglareOnEyeDraw(kind, count, instances);
         if (a == SunglareAction::kSkip) return DrawVerdict::kSkip;
