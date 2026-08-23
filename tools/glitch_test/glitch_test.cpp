@@ -198,6 +198,13 @@ int main(int argc, char** argv) {
         "transition_flash_units = 2000\r\n"
         "transition_flash_speed_factor = 8.0\r\n"
         "transition_flash_max_consecutive = 2\r\n"
+        // STATED, not inherited. Its default coincides with
+        // transition_flash_units' default AND with Config::getFloat's
+        // missing-key fallback, so every edge cell below would pin the number
+        // 2000 arriving by any of three routes. Review measured that: renaming
+        // the key at the read site left the entire suite green. The cell that
+        // sets a non-default value is what actually proves it is read.
+        "transition_flash_run_units = 2000\r\n"
         // The suite below was written against a separation memory that ACTS and
         // against no burst governor, and it still tests those mechanisms -- so it
         // states them rather than inheriting whatever the shipped default becomes.
@@ -990,14 +997,17 @@ int main(int argc, char** argv) {
         settle(b, x, 150);
     }
 
-    // AND THE RADIUS IS THE JUMP THRESHOLD, either side of it.
+    // AND THE RADIUS HAS ITS OWN THRESHOLD, either side of it.
     //
-    // transition_flash_units, not a number of its own: "the second frame is
-    // itself a jump away from the first" is the question the detector already
-    // asks of every frame, asked between two withholds. The measured runs sat
-    // at 0, 0, 15, 44 and 123 units; the rebase sat at 10,114. These two cells
-    // pin the edge rather than the gap, because the gap is where a future
-    // tightening would be argued for and the edge is what would move.
+    // transition_flash_run_units, NOT transition_flash_units -- an earlier
+    // draft of this comment said the opposite and survived the commit that made
+    // it false. The two pull opposite ways: raising the jump threshold withholds
+    // less, raising the run radius withholds more, so a tuner who reads this
+    // fixture and reaches for the wrong knob makes their problem worse. The
+    // measured runs sat at 0, 0, 15, 44 and 123 units; the two rebases sat at
+    // 10,114 and 13,261. These cells pin the edge rather than the gap, because
+    // the gap is where a future tightening would be argued for and the edge is
+    // what would move.
     settle(b, x, 150);
     {
         x += 30.0f;
@@ -1021,6 +1031,59 @@ int main(int argc, char** argv) {
               std::string(b1 ? "" : "the first frame was not withheld, so this "
                                     "cell is vacuous. ") +
                   (b2 ? "the run continued past the threshold" : ""));
+        settle(b, x, 150);
+    }
+
+    // --- 7o. THE SETTING IS READ, AND ITS ZERO MEANS WHAT THE INI SAYS -----
+    //
+    // Both halves exist because the suite could not see this key. Its default
+    // is 2000, which is also transition_flash_units' default and also what
+    // Config hands back for a key that is not there -- so the edge cells above
+    // would have passed against a typo'd key name, a reversion to sharing
+    // jumpMin, or the setting being dropped entirely. Review measured exactly
+    // that: renaming the key at the read site left the whole suite green.
+    settle(b, x, 150);
+    {
+        Config::get().set("advanced.transition_flash_run_units", "500");
+        installGlitchFrameFix();
+        settle(b, x, 60);
+        // 900 apart: inside the shipped 2,000, outside a configured 500.
+        x += 30.0f;
+        const bool a1 = frame(b, x, 33000.0f, -21000.0f);
+        x += 30.0f;
+        const bool a2 = frame(b, x, 33900.0f, -21000.0f);
+        check("a non-default run radius is actually read", a1 && !a2,
+              std::string(a1 ? "" : "the first frame was not withheld, so this "
+                                    "cell is vacuous. ") +
+                  (a2 ? "a 900-unit continuation was withheld under a 500-unit "
+                        "radius -- the setting is not reaching the rule"
+                      : ""));
+        settle(b, x, 150);
+    }
+    {
+        // ZERO ENDS EVERY RUN AT ONE FRAME, which is what edvr.ini promises.
+        // `d <= runUnits` accepted d == 0, so a byte-identical repeat -- two of
+        // the seven measured runs, the class the table leads with -- still
+        // continued. Negative values clamp back to the default, so before this
+        // no value of the knob delivered the documented behaviour.
+        Config::get().set("advanced.transition_flash_run_units", "0");
+        installGlitchFrameFix();
+        settle(b, x, 60);
+        x += 30.0f;
+        const bool z1 = frame(b, x, 36000.0f, -24000.0f);
+        b.setPos(x, 36000.0f, -24000.0f);          // byte-identical repeat
+        glitchFrameObserve(b.f, kBytes, b.res);
+        const bool z2 = glitchFrameMarked();
+        advanceOneFrame();
+        glitchFrameBoundary(kEyeDraws);
+        clearGlitchFrame();
+        check("run_units = 0 ends a run at one frame, even on an identical repeat",
+              z1 && !z2,
+              std::string(z1 ? "" : "the first frame was not withheld, so this "
+                                    "cell is vacuous. ") +
+                  (z2 ? "a zero radius still continued the run" : ""));
+        Config::get().set("advanced.transition_flash_run_units", "2000");
+        installGlitchFrameFix();
         settle(b, x, 150);
     }
 

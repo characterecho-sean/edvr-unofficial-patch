@@ -294,7 +294,12 @@ from two withheld frames to four; the stand-down is not a belt-and-braces
 companion to rebuilding the path, it is what covers the rebuild, and in a
 cascade the rebuild straddles the alternation and poisons the prediction it is
 rebuilding. With the confirmation in place that same replay costs **one** frame,
-against two before any of this.
+against **two** for the detector this replaces — holding the fixtures constant, so
+that the detector is the only thing varying. Run each tree against its own suite
+instead and the before-number is three: the fixtures added here learn separations
+and certify parks ahead of the replay, and it inherits them. Both comparisons are
+honest and they answer different questions; the two is the one that isolates this
+change.
 
 The scope is worth stating, because the numbers invite a wider claim, and the
 trade runs in both directions.

@@ -583,6 +583,23 @@ struct State {
     // A rebase declared on one frame's evidence, waiting for the next frame to
     // confirm or revoke it. See the moved-on branch at the boundary.
     bool     rebaseProvisional = false;
+    // The run rule refused this frame -- RECORDED where the refusal happens,
+    // not rebuilt afterwards by eliminating everything else.
+    //
+    // It was rebuilt, in the verdict ladder, and the ladder disagreed with the
+    // decision: the separation arm above it asks residualIsKnownSeparation
+    // WITHOUT the mode gate, so under transition_flash_separation = log or off
+    // a refused continuation whose magnitude happened to be a certified
+    // separation was labelled kVerdictSeparation. The declare branch keys on
+    // this fact, so it never fired; the frame fell through to the legacy
+    // resolve, armed 1330 ms with no provisional to revoke it, and was fed to
+    // recordResidual -- the one thing the declare branch's own comment says
+    // must never happen to a rebase-band magnitude. Measured in review.
+    //
+    // This file has now had a predicate evaluated in two places drift four
+    // times. The rule is the same each time and it is written at the withheld
+    // counter: the fact belongs where it is decided.
+    bool     movedOnThisFrame = false;
 
     // This frame's furthest-from-origin camera.
     float    frameFarPos[3] = {};
@@ -793,6 +810,7 @@ struct State {
     // Frames let through because the run moved on. Its own counter: these are
     // not recognitions and must not be reported as any invariant's work.
     uint32_t   letThroughMovedOn = 0;
+    uint32_t   totalsMovedOn = 0;   // its value at the last totals line
     bool       radiusSuppressedThisFrame = false;
     bool       parkSuppressedThisFrame = false;
     bool       driftSuppressedThisFrame = false;
@@ -867,10 +885,30 @@ inline bool rebaseDown(const State* s) {
 }
 // The run's own question, asked the same way: is this still the same bad frame,
 // or has the view moved on? The measurement is beside kRebaseCooldownMs, with
-// the six runs it was taken from.
+// the seven runs it was taken from.
 //
 // True when no run is open, so a first withhold is never gated by it -- the
 // rule bounds a CONTINUATION and has nothing to say about a beginning.
+// How far a position sits from the two-step extrapolation of the pre-jump path.
+//
+// ONE COPY. The confirmation and the Returned/Stayed resolve ask the same
+// question of the same stored path, and writing it twice had already produced
+// two spellings -- one guarding isfinite, one not -- before the ink was dry.
+// The branch above queues two more edits to this computation; each would
+// otherwise have to be mirrored by hand into a copy the editor may not know
+// exists. This file's own history has a predicate evaluated in two places
+// drifting four times.
+inline float backFromPreJumpPath(const State* s, const float* pos) {
+    float back = 0.0f;
+    for (uint32_t a = 0; a < 3; ++a) {
+        const float pred =
+            s->preJumpPrev[a] + 2.0f * (s->preJumpPrev[a] - s->preJumpPrev2[a]);
+        const float e = pos[a] - pred;
+        back += e * e;
+    }
+    return sqrtf(back);
+}
+
 inline bool runStillSamePlace(State* s, const float* pos) {
     if (s->consecutive == 0) return true;
     float d2 = 0.0f;
@@ -885,7 +923,13 @@ inline bool runStillSamePlace(State* s, const float* pos) {
     // the residual's own finiteness check takes.
     const float d = sqrtf(d2);
     s->lastRunSpread = d;
-    return std::isfinite(d) && d <= s->runUnits;
+    // STRICTLY less. `d <= runUnits` let a byte-identical repeat continue a run
+    // at runUnits = 0, which is the one thing the setting is documented to
+    // forbid -- and byte-identical is not exotic: it is two of the seven runs
+    // in the table above, the class it leads with. Negative values clamp back
+    // to the default, so with `<=` no value of the knob delivered what the ini
+    // promises.
+    return std::isfinite(d) && d < s->runUnits;
 }
 
 // The remembered magnitude matching `resid`, or -1.
@@ -1348,7 +1392,7 @@ const char* letThroughReason(State* s, float resid) {
     if (s->consecutive >= s->maxConsecutive)
         return "the frames before it were already withheld and withholding more "
                "in a row would be judder";
-    if (s->consecutive > 0)
+    if (s->movedOnThisFrame)
         return "the frame before it was withheld and this one is somewhere else "
                "again, so the view has changed reference frame rather than stuck "
                "on one bad frame -- holding the old picture over the change is "
@@ -1483,6 +1527,20 @@ void installGlitchFrameFix() {
     s.consecutive = 0;
     s.markedThisFrame = false;
     s.awaitingReturn = false;
+    s.movedOnThisFrame = false;
+    // The stand-down goes with it, but ONLY the provisional half.
+    //
+    // A provisional rebase and its stand-down are armed together, so
+    // clearing the flag alone would convert a revocable 1330 ms window into
+    // a permanent one -- the revoke path needs the flag to find it. Fixture
+    // 7n arms exactly that pair one statement before it re-installs.
+    //
+    // Conditional rather than unconditional, and the churn cells are why: a
+    // blanket `cooldownUntilMs = 0` here also wipes stand-downs the legacy
+    // Stayed path armed, which changes which frames a re-install can
+    // withhold and cost the relearn cell its eviction. An install must not
+    // inherit a HALF-armed rebase; it has no business rewriting a whole one.
+    if (s.rebaseProvisional) s.cooldownUntilMs = 0;
     s.rebaseProvisional = false;
     for (uint32_t a = 0; a < 3; ++a) s.runAnchorPos[a] = s.markedPos[a] = 0.0f;
 
@@ -1498,6 +1556,21 @@ void installGlitchFrameFix() {
     s.enabled = cfg.getBool("fix.transition_flash", true);
     s.jumpMin = cfg.getFloat("advanced.transition_flash_units", 2000.0f);
     s.jumpFactor = cfg.getFloat("advanced.transition_flash_speed_factor", 8.0f);
+    // Checked for the same reason jumpMin is, and it was missed when jumpMin
+    // was hardened -- the comment there claiming "its four neighbours all check
+    // this" was true of the four it named and not of the one read on the line
+    // above. transition_flash_speed_factor = 1e40 parses to infinity, `trip`
+    // goes infinite with it, `resid > trip` is false forever, and the fix arms,
+    // reports ACTIVE and withholds nothing for the whole session.
+    if (!std::isfinite(s.jumpFactor) || s.jumpFactor < 0.0f) {
+        Log::get().note(
+            "transition_flash_speed_factor = %.1f is not a usable multiple, so 8.0 is "
+            "being used. It is how many times the current speed a jump must exceed "
+            "when that is larger than transition_flash_units; an infinite one puts "
+            "the threshold out of reach and nothing is ever withheld.",
+            static_cast<double>(s.jumpFactor));
+        s.jumpFactor = 8.0f;
+    }
     // Clamped like repeat_percent and drift_pct beside it, and unlike jumpMin
     // used to be. 0 is a real setting -- it ends every run at one frame, which
     // is what a rig that never wants a second withhold would ask for.
@@ -2028,10 +2101,18 @@ void glitchFrameObserve(const void* data, uint32_t bytes, const void* resource) 
         }
     }
 
+    // The run rule's own answer, taken once and used by both the decision and
+    // the fact recorded beside it.
+    const bool runMovedOn = jumped && !runStillSamePlace(s, pos);
     const bool willMark = jumped && !s->suppressedThisFrame && !rebaseDown(s) &&
                           s->consecutive < s->maxConsecutive &&
-                          runStillSamePlace(s, pos) &&
+                          !runMovedOn &&
                           !burstDown(s);
+    // ...and the run rule is what ACTUALLY refused it, rather than merely
+    // having an opinion while something else did the refusing. Everything in
+    // this conjunction is a thing that would have blocked the mark anyway.
+    s->movedOnThisFrame = runMovedOn && !s->suppressedThisFrame && !rebaseDown(s) &&
+                          s->consecutive < s->maxConsecutive && !burstDown(s);
     if (jumped && !willMark) {
         if (s->letThroughNotes < kLetThroughNotes &&
             s->frameNo - s->lastLetThroughFrame >= kLetThroughGap) {
@@ -2050,19 +2131,25 @@ void glitchFrameObserve(const void* data, uint32_t bytes, const void* resource) 
 
     // The verdict, recorded on the frame rather than sampled into the log.
     // Same order as the tests above, so the name matches the branch.
+    // ORDER NOTE. Everything from park downwards is a reason the mark was
+    // refused, tested in the order the decision tests them. movedOnThisFrame
+    // sits above all of them rather than in its place at the bottom, because
+    // it is exclusive with every one of them by construction -- its own
+    // conjunction says so -- while the separation arm below is NOT gated on
+    // separationMode and would otherwise shadow it in log and off modes. Read
+    // it as "the decision already told us", not as a priority.
     s->verdictThisFrame =
         !jumped                            ? kVerdictQuiet
         : willMark ? (s->separationMode >= 1 && residualIsRecognisedSeparation(resid)
                           ? kVerdictWithheldSepWould
                           : kVerdictWithheld)
+        : s->movedOnThisFrame              ? kVerdictMovedOn
         : s->parkSuppressedThisFrame       ? kVerdictPark
         : s->radiusSuppressedThisFrame     ? kVerdictShell
         : residualIsKnownSeparation(resid) ? kVerdictSeparation
         : s->driftSuppressedThisFrame      ? kVerdictDrift
         : burstDown(s)                     ? kVerdictBurst
         : rebaseDown(s)                    ? kVerdictCooldown
-        : s->consecutive > 0 && s->consecutive < s->maxConsecutive
-                                           ? kVerdictMovedOn
                                            : kVerdictConsecutive;
     if (willMark) {
         // The candidate this verdict was taken on. Overwritten by each later
@@ -2264,7 +2351,7 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
     // direction as before. It is counted separately instead, below.
     const bool wasWithheld = s->verdictThisFrame == kVerdictWithheld ||
                              s->verdictThisFrame == kVerdictWithheldSepWould;
-    if (s->verdictThisFrame == kVerdictMovedOn) {
+    if (s->movedOnThisFrame) {
         // NOT "recognised as render-pass geometry and left alone", which is
         // what ++suppressed and the totals line both mean. A moved-on frame is
         // a good frame at a new reference point; nothing recognised it and no
@@ -2499,20 +2586,30 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
         //     with the gap and a view that came home during it reads as
         //     confirmed. That errs toward keeping a stand-down rather than
         //     losing one, and the stand-down is bounded anyway.
+        //  4. THE CONFIRMING FRAME IS BLIND, and at max_consecutive above 2
+        //     that IS a regression -- the sentence that used to stand here
+        //     said none of these was, and it was wrong. Declaring zeroes
+        //     camPrevValid a frame earlier than the old machine did, so
+        //     glitchFrameObserve bails at its camPrevValid gate and a genuine
+        //     flash landing on that frame is shown; measured in review at
+        //     max_consecutive = 3, where the old code withheld it as the run's
+        //     third frame. At the shipped 2 there is no difference: the old
+        //     code let that same frame through on the consecutive cap, so the
+        //     blind window starts on the same frame either way.
+        //
+        //     It is inherent rather than an oversight. The frame is blind
+        //     because the stand-down is armed and the path is being rebuilt,
+        //     and limit 2 above records what happens when the rebuild is not
+        //     covered. Withholding it instead is the good-frame hold this whole
+        //     change exists to remove. So: one frame, on a knob nothing ships
+        //     at, traded for the frame the run rule saves on every rebase.
         s->rebaseProvisional = false;
-        float back = 0.0f;
-        for (uint32_t a = 0; a < 3; ++a) {
-            const float pred =
-                s->preJumpPrev[a] + 2.0f * (s->preJumpPrev[a] - s->preJumpPrev2[a]);
-            const float e = s->frameFarPos[a] - pred;
-            back += e * e;
-        }
-        back = sqrtf(back);
+        const float back = backFromPreJumpPath(s, s->frameFarPos);
         // isfinite is redundant -- NaN and infinity both fail `<=` -- and the
-        // Stayed branch below does without it. Kept because this branch can
-        // reach here on a frame that was never judged, so `back` is the only
-        // thing standing between a 1e26 buffer and a revoked stand-down, and a
-        // reader should not have to re-derive that the comparison saves it.
+        // resolve below does without it. Kept because this branch can reach
+        // here on a frame that was never judged, so `back` is the only thing
+        // standing between a 1e26 buffer and a revoked stand-down, and a reader
+        // should not have to re-derive that the comparison saves it.
         if (std::isfinite(back) && back <= s->lastTrip) {
             // It came home. The excursion was one frame after all and the
             // pre-jump path is still the right one, so give back the stand-down
@@ -2525,8 +2622,15 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
             }
             s->camPrevValid = 2;
         } else {
-            // Confirmed. Carry on rebuilding under the stand-down, exactly as
-            // the Stayed branch below leaves things.
+            // Confirmed. Carry on rebuilding under the stand-down.
+            //
+            // NOT "exactly as the Stayed branch leaves things", which is what
+            // this used to say and is wrong in the detail that matters: Stayed
+            // writes nothing into camPrev and leaves camPrevValid at 0, while
+            // this advances the track by one and leaves it at 1. Stayed has
+            // just decided from the frame it is looking at; this one decided a
+            // frame ago and that frame is already spent, so the rebuild is one
+            // step further along.
             for (uint32_t a = 0; a < 3; ++a) {
                 s->camPrev2[a] = s->camPrev[a];
                 s->camPrev[a] = s->frameFarPos[a];
@@ -2554,7 +2658,7 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
                     static_cast<double>(s->lastRunSpread), (unsigned)kRebaseCooldownMs);
             }
         }
-    } else if (s->awaitingReturn && s->verdictThisFrame == kVerdictMovedOn) {
+    } else if (s->awaitingReturn && s->movedOnThisFrame) {
         // THE RUN RULE HAS ALREADY ANSWERED THIS -- provisionally.
         //
         // runStillSamePlace let this frame through because it is somewhere
@@ -2575,14 +2679,7 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
         // records having already happened once.
     } else if (s->awaitingReturn && s->frameFarMag2 >= 0.0f) {
         s->awaitingReturn = false;
-        float back = 0.0f;
-        for (uint32_t a = 0; a < 3; ++a) {
-            const float pred =
-                s->preJumpPrev[a] + 2.0f * (s->preJumpPrev[a] - s->preJumpPrev2[a]);
-            const float e = s->frameFarPos[a] - pred;
-            back += e * e;
-        }
-        back = sqrtf(back);
+        const float back = backFromPreJumpPath(s, s->frameFarPos);
         if (back <= s->lastTrip) {
             // Returned. A one-frame excursion, so the pre-jump path is still the
             // right one and detection carries on immediately.
@@ -2707,8 +2804,13 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
     // also the answer to "did it do anything": no line means no.
     if (dueMs(s->totalsAtMs, kTotalsEveryMs)) {
         s->totalsAtMs = stampMs();
+        // The moved-on counter joins the gate, or a session in which the run
+        // rule is the ONLY thing that happened prints nothing and reads as a
+        // session where the fix never fired. That is the question this line
+        // exists to answer.
         if (s->framesWithheld != s->totalsWithheld ||
-            s->suppressed != s->totalsSuppressed) {
+            s->suppressed != s->totalsSuppressed ||
+            s->letThroughMovedOn != s->totalsMovedOn) {
             const bool acted = glitchConsumerPresent();
             Log::get().note(
                 "transition flash so far: %u frame(s) %s this session, and %u "
@@ -2749,12 +2851,14 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
             }
             s->totalsWithheld = s->framesWithheld;
             s->totalsSuppressed = s->suppressed;
+            s->totalsMovedOn = s->letThroughMovedOn;
         }
     }
 
     if (s->markedThisFrame) ++s->consecutive; else s->consecutive = 0;
     s->markedThisFrame = false;
     s->jumpedThisFrame = false;
+    s->movedOnThisFrame = false;
     s->suppressedThisFrame = false;
     s->radiusSuppressedThisFrame = false;
     s->parkSuppressedThisFrame = false;
