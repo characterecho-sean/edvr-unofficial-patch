@@ -1693,12 +1693,15 @@ void installGlitchFrameFix() {
     // it silently answered false. Its four neighbours all check this.
     if (!std::isfinite(s.jumpMin) || s.jumpMin <= 0.0f || s.bufferBytes == 0) {
         s.enabled = false;
+        // The threshold is echoed rather than described as zero. It used to say
+        // "threshold or buffer size is zero" for both causes, and the isfinite
+        // check above added a third -- being told you set something to zero is
+        // not much help when what you actually typed produced a NaN.
         Log::get().note(
-            "transition flash fix off: transition_flash_units is %.1f, which is not "
-            "a usable threshold, or the camera buffer size is zero. (It used to say "
-            "\"is zero\" for both, which is a confusing thing to be told about a "
-            "typo that produced a NaN.)",
-            static_cast<double>(s.jumpMin));
+            "transition flash fix off: transition_flash_units is %.1f and the camera "
+            "buffer is %u bytes. One of those is unusable -- the threshold must be a "
+            "positive number and the buffer size must not be zero.",
+            static_cast<double>(s.jumpMin), s.bufferBytes);
         return;
     }
     // Three floats have to fit at that offset, inside that buffer.
