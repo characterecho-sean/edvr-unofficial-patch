@@ -92,6 +92,11 @@ constexpr size_t kSlotClearRenderTargetView = 50;
 // ExecuteCommandList is the same story: a command list carries its own state,
 // and unless RestoreContextState is TRUE the context comes back cleared.
 constexpr size_t kSlotExecuteCommandList    = 58;
+// The two copy slots, hooked for the draw census only (draw_census.h explains
+// why a census that records only draws could not see the FSS picture at all).
+// They forward unconditionally and record nothing unless a census is running.
+constexpr size_t kSlotCopySubresourceRegion = 46;
+constexpr size_t kSlotCopyResource          = 47;
 constexpr size_t kSlotClearState            = 110;
 constexpr size_t kHighestSlotUsed           = 110;
 
@@ -107,6 +112,9 @@ constexpr size_t kHighestSlotUsed           = 110;
 //     gets adopted during an ordinary lull.
 //   - ClearState: shared with the exposure fix, which reclaim refuses on its
 //     own grounds, and quiet for whole sessions besides.
+//   - CopyResource, CopySubresourceRegion: a frame that copies nothing is
+//     entirely ordinary -- these carry a diagnostic and no fix, so silence
+//     on them is never evidence of anything.
 //   - DrawInstanced, DrawIndexedInstanced, OMSetRtvAndUav: scene-shaped
 //     calls with no in-tree proof they fire during every menu or loading
 //     stretch. A menu that issues no instanced draw for three seconds is
@@ -166,6 +174,11 @@ typedef void(STDMETHODCALLTYPE* PFN_ClearRtv)(ID3D11DeviceContext*,
 typedef void(STDMETHODCALLTYPE* PFN_OMSetRtvAndUav)(
     ID3D11DeviceContext*, UINT, ID3D11RenderTargetView* const*, ID3D11DepthStencilView*,
     UINT, UINT, ID3D11UnorderedAccessView* const*, const UINT*);
+typedef void(STDMETHODCALLTYPE* PFN_CopyResource)(ID3D11DeviceContext*,
+                                                  ID3D11Resource*, ID3D11Resource*);
+typedef void(STDMETHODCALLTYPE* PFN_CopySubresourceRegion)(
+    ID3D11DeviceContext*, ID3D11Resource*, UINT, UINT, UINT, UINT, ID3D11Resource*,
+    UINT, const D3D11_BOX*);
 typedef void(STDMETHODCALLTYPE* PFN_ClearState)(ID3D11DeviceContext*);
 typedef void(STDMETHODCALLTYPE* PFN_ExecuteCommandList)(ID3D11DeviceContext*,
                                                         ID3D11CommandList*, BOOL);
@@ -194,6 +207,8 @@ struct State {
     PFN_OMSetRenderTargets   realOMSetRenderTargets = nullptr;
     PFN_OMSetRtvAndUav       realOMSetRtvAndUav = nullptr;
     PFN_ClearRtv             realClearRtv = nullptr;
+    PFN_CopyResource         realCopyResource = nullptr;
+    PFN_CopySubresourceRegion realCopySubresourceRegion = nullptr;
     PFN_ClearState           realClearState = nullptr;
     PFN_ExecuteCommandList   realExecuteCommandList = nullptr;
     bool sawClearState = false;
@@ -509,6 +524,31 @@ struct State {
     // never says yes is otherwise indistinguishable from a game that never drew.
     uint32_t rtSeenW[8] = {}, rtSeenH[8] = {};
     uint32_t rtSeenCount = 0;
+
+    // WHAT WE TURN AWAY, counted (2026-08-24).
+    //
+    // foreignContext() has always declined other contexts SILENTLY, which
+    // makes this module's instruments one-sided: they say what was accepted
+    // and nothing at all about what was refused. That cost a whole session on
+    // the FSS ring split -- every eye draw the census could see was suppressed
+    // for six seconds (122,040 draws) and the headset did not change, proving
+    // the scanner is drawn somewhere else entirely, with no way to tell
+    // whether "somewhere else" was another context or another device.
+    //
+    // Eight contexts, because a game with more than a couple is doing
+    // something this note should be rewritten for. The type is recorded
+    // because immediate-vs-deferred is the whole question: a second IMMEDIATE
+    // context means a second device or a second renderer, where a deferred one
+    // means command lists we would see replayed at ExecuteCommandList.
+    struct ForeignCtx {
+        void*    ctx = nullptr;
+        uint32_t type = 0xFFFFFFFFu;   // D3D11_DEVICE_CONTEXT_TYPE
+        uint64_t draws = 0;
+    };
+    ForeignCtx foreign[8];
+    uint32_t   foreignCount = 0;
+    uint64_t   foreignDraws = 0;
+    uint64_t   foreignDrawsAtLastReport = 0;
     uint64_t panelExclusions = 0;
     // How many times targetIsEyeSized was ASKED, regardless of its answer.
     // Zero with the per-draw askers enabled means the draw hooks themselves
@@ -937,6 +977,26 @@ inline bool foreignContext(ID3D11DeviceContext* self) {
     return self != g_state->ownerCtx;
 }
 
+// Record a draw we are about to decline. Cheap by construction: a linear scan
+// of at most eight entries, and GetType is asked ONCE per context rather than
+// per draw -- it is a virtual call, and this path can be thousands of draws a
+// frame, which is exactly the case this exists to discover.
+void noteForeignDraw(ID3D11DeviceContext* self) {
+    State* s = g_state;
+    ++s->foreignDraws;
+    for (uint32_t i = 0; i < s->foreignCount; ++i) {
+        if (s->foreign[i].ctx == self) {
+            ++s->foreign[i].draws;
+            return;
+        }
+    }
+    if (s->foreignCount >= 8) return;
+    State::ForeignCtx& f = s->foreign[s->foreignCount++];
+    f.ctx = self;
+    f.draws = 1;
+    f.type = static_cast<uint32_t>(self->GetType());
+}
+
 // What the thunk that intercepted a draw should do with it. kPanel means the
 // panel-distance override is bound and endPanelOverride must run after the
 // draw; kSkip means the draw must not be forwarded at all (a census-probe
@@ -972,7 +1032,10 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     // previous train draw's clamp armed for whatever instanced draw comes
     // next.
     s->glareClamp = 0;
-    if (foreignContext(self)) return DrawVerdict::kNone;
+    if (foreignContext(self)) {
+        noteForeignDraw(self);
+        return DrawVerdict::kNone;
+    }
     // Cleared before anything can set it, on every draw, so a substitution
     // can never be attributed to a draw that did not ask for one.
     s->curveThisDraw = false;
@@ -1052,6 +1115,19 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
             State::SceneCandidate& c = s->cands[s->rtv0Cand];
             ++c.thisFrame;
             if (c.w == s->sceneW && c.h == s->sceneH) ++s->sceneDrawsThisFrame;
+        }
+        // The census line for a draw that did NOT land in an eye texture,
+        // recorded only when advanced.census_offscreen asked for it. Before
+        // the skip probe below, for the same reason the eye form is: a census
+        // taken while probing must record what the game SUBMITTED.
+        //
+        // This is what an effect built offscreen and composited in looks like
+        // from here, and until 2026-08-24 it looked like nothing at all -- an
+        // FSS census showed 220 eye draws a frame while every body the player
+        // could see was being assembled somewhere this function had already
+        // returned from.
+        if (drawCensusWantsOffscreen() && drawCensusArmed()) {
+            drawCensusOffDraw(self, kind, count, instances);
         }
         // The offscreen probe: skip draws INTO a buffer named by its size.
         // Resolved only while a spec is set -- the @ filters' unmemoised
@@ -1766,6 +1842,34 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     if (v == DrawVerdict::kWitchstar) witchstarEnd(self);
     if (v == DrawVerdict::kHolo) holoEnd(self);
     if (v == DrawVerdict::kRemlok) remlokScissorEnd(self);
+}
+
+// The copy thunks. Instrument only: they forward every call untouched and
+// record nothing unless a census is running, which is almost always.
+//
+// Not gated on the context being ours before FORWARDING -- forwarding is
+// unconditional and must be, because these hooks patch the class and a
+// deferred context or another tool's object reaches them too. Only the
+// RECORDING is ours to gate, and the census is armed by a keypress in a
+// session that is by definition the one being measured.
+void STDMETHODCALLTYPE hookedCopyResource(ID3D11DeviceContext* self,
+                                          ID3D11Resource* dst, ID3D11Resource* src) {
+    if (drawCensusArmed() && !foreignContext(self)) {
+        drawCensusCopy('R', dst, 0, 0, 0, src, 0, false, 0, 0, 0, 0);
+    }
+    g_state->realCopyResource(self, dst, src);
+}
+
+void STDMETHODCALLTYPE hookedCopySubresourceRegion(
+    ID3D11DeviceContext* self, ID3D11Resource* dst, UINT dstSub, UINT dstX, UINT dstY,
+    UINT dstZ, ID3D11Resource* src, UINT srcSub, const D3D11_BOX* box) {
+    if (drawCensusArmed() && !foreignContext(self)) {
+        drawCensusCopy('S', dst, dstSub, dstX, dstY, src, srcSub, box != nullptr,
+                       box ? box->left : 0, box ? box->top : 0,
+                       box ? box->right : 0, box ? box->bottom : 0);
+    }
+    g_state->realCopySubresourceRegion(self, dst, dstSub, dstX, dstY, dstZ, src, srcSub,
+                                       box);
 }
 
 void STDMETHODCALLTYPE hookedDraw(ID3D11DeviceContext* self, UINT count, UINT start) {
@@ -2681,6 +2785,36 @@ void vScreenFrameBoundary() {
             windowFrames, s->eyeDrawsWindowMax, s->eyeDrawsMax,
             windowFrames, static_cast<uint32_t>(windowMs), windowFps);
 
+        // What we DECLINED, its own line and only while it moved.
+        //
+        // The counterpart to every number above: those say what reached the
+        // fixes, this says what never did. A context here doing thousands of
+        // draws a frame means the game renders through something EDVR is not
+        // installed on -- which is not a fault by itself (deferred contexts
+        // and other tools' devices are ordinary) but IS the first thing to
+        // read when a fix cannot find the draws it was written for.
+        if (s->foreignDraws != s->foreignDrawsAtLastReport) {
+            char list[240] = "";
+            int at = 0;
+            for (uint32_t i = 0; i < s->foreignCount && at < 200; ++i) {
+                const char* kind = s->foreign[i].type == 0   ? "immediate"
+                                   : s->foreign[i].type == 1 ? "deferred"
+                                                             : "unknown";
+                at += _snprintf_s(list + at, sizeof(list) - at, _TRUNCATE,
+                                  "%s%p %s %llu draw(s)", at ? ", " : "",
+                                  s->foreign[i].ctx, kind,
+                                  static_cast<unsigned long long>(s->foreign[i].draws));
+            }
+            Log::get().note(
+                "vScreen declined: %llu draw(s) on %u context(s) that are not the one "
+                "the fixes installed on -- %s. EDVR hooks the FIRST D3D11 device only, "
+                "so a busy IMMEDIATE context here is a second device or a second "
+                "renderer, and every fix in this file is blind to it. A deferred one is "
+                "ordinary: its work is seen when the command list is replayed.",
+                static_cast<unsigned long long>(s->foreignDraws), s->foreignCount, list);
+            s->foreignDrawsAtLastReport = s->foreignDraws;
+        }
+
         // The suppression probe's accounting, its own line and only while it
         // moved: a probe that says nothing while dropping draws would leave a
         // session unexplainable from its log.
@@ -2874,6 +3008,10 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
                    reinterpret_cast<void**>(&s.realPSSetShaderResources));
     s.hook.replace(kSlotVSSetConstantBuffers, &hookedVSSetConstantBuffers,
                    reinterpret_cast<void**>(&s.realVSSetConstantBuffers));
+    s.hook.replace(kSlotCopyResource, &hookedCopyResource,
+                   reinterpret_cast<void**>(&s.realCopyResource));
+    s.hook.replace(kSlotCopySubresourceRegion, &hookedCopySubresourceRegion,
+                   reinterpret_cast<void**>(&s.realCopySubresourceRegion));
     s.hook.replace(kSlotMap, &hookedMap, reinterpret_cast<void**>(&s.realMap));
     s.hook.replace(kSlotUnmap, &hookedUnmap, reinterpret_cast<void**>(&s.realUnmap));
     s.hook.replace(kSlotDraw, &hookedDraw, reinterpret_cast<void**>(&s.realDraw));

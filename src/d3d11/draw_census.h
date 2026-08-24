@@ -71,6 +71,63 @@ void drawCensusRequest();
 void drawCensusEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
                        uint32_t instances, uint32_t eyeDrawIndex);
 
+// Is the census also recording draws that land OUTSIDE the eye textures?
+// Read once when a census starts, never on the draw path.
+//
+// WHY THIS EXISTS (2026-08-24, the FSS ring split)
+//
+// A census of an FSS view came back with 220 draws a frame, and skipping
+// every one of the two largest families -- 68 draws an eye each, 136 a frame,
+// millions over a session -- removed nothing visible. The bodies the player
+// is looking at are not drawn into the eye textures at all: they are built in
+// an offscreen target and composited in, and the eye-sized gate this module
+// has always had made them invisible to the one instrument that could name
+// them. The gate was right for issue 69074, which was about an overlay
+// stamped into the eyes; it is wrong for anything rendered before the
+// composite.
+//
+// OFF BY DEFAULT, and deliberately. A full scene is thousands of draws a
+// frame where an FSS view is hundreds, and three frames of that would spend
+// the line cap on the way past. Turned on only when the question is "where
+// is this drawn", which is exactly when the extra volume is the answer.
+bool drawCensusWantsOffscreen();
+
+// One draw that reached a target which is NOT an eye texture, recorded only
+// while a census is running AND advanced.census_offscreen is set. Same
+// bindings, same shader identity, same line shape as the eye form -- the
+// target is on the line as r=, so the interned table names its size, which
+// is the whole point of recording these.
+//
+// Logged as "DCO" rather than "DC" so tools/diff_draw_census.py keeps seeing
+// exactly the draw population it was written against.
+void drawCensusOffDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
+                       uint32_t instances);
+
+// One CopyResource ('R') or CopySubresourceRegion ('S'), recorded while a
+// census is running. Logged as "DCC".
+//
+// WHY COPIES ARE ON A CENSUS AT ALL (2026-08-24, the FSS ring split)
+//
+// Every draw that reached the eye textures during an FSS view turned out to
+// be INVISIBLE: skipping both 68-draw quad families removed nothing, skipping
+// the one mesh removed nothing, and binding flat magenta over eleven thousand
+// matched draws changed not one pixel. The picture the player sees is not
+// drawn into the eye textures -- it is copied there from the offscreen
+// targets the bodies are tiled into. A census that records only draws
+// therefore cannot see the image at all, which is how three probes in a row
+// came back empty while the instrument insisted it was working.
+//
+// dstX/dstY and the source box are the point for a TILED blit: which region
+// moved is what separates "the whole image was copied once" from "tiles are
+// landing one at a time", and if the two eyes' copies differ in count or
+// region then the split has been measured rather than inferred.
+//
+// box values are meaningless when hasBox is false (CopyResource copies the
+// whole resource) and must not be read.
+void drawCensusCopy(char kind, void* dst, uint32_t dstSub, uint32_t dstX,
+                    uint32_t dstY, void* src, uint32_t srcSub, bool hasBox,
+                    uint32_t left, uint32_t top, uint32_t right, uint32_t bottom);
+
 // The frame edge, from vScreenFrameBoundary: starts a pending census, advances
 // a running one, finishes a spent one. frameNo is vscreen's frame counter,
 // logged so a census can be lined up against the rest of the log.

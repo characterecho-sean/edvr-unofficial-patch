@@ -763,7 +763,32 @@ State& ensureState() {
 void hookDevice(ID3D11Device* device) {
     if (!device) return;
     State& s = ensureState();
-    if (s.device) return;
+    if (s.device) {
+        // SAID OUT LOUD, once per extra device (2026-08-24).
+        //
+        // Hooking only the first device is deliberate -- it is the one the game
+        // renders through, and the vtable is patched per CLASS so a second
+        // device's contexts reach the thunks anyway and are declined there. But
+        // the decision was invisible: a session where the interesting rendering
+        // happened on a LATER device looked exactly like a session where the
+        // fixes simply found nothing, and there was no line anywhere to tell
+        // the two apart. That cost a full session on the FSS ring split.
+        //
+        // Paired with vScreen's "declined" line: this says another device
+        // exists, that one says whether anything is actually drawn on it.
+        static uint32_t extra = 0;
+        if (++extra <= 4) {
+            D3D_FEATURE_LEVEL fl = device->GetFeatureLevel();
+            Log::get().note(
+                "a SECOND D3D11 device (%p, featureLevel=0x%04X) was created; EDVR "
+                "hooks the first one only (%p) and this one is not hooked. Ordinary "
+                "for a capability probe or another tool. If the game renders through "
+                "it, every fix in d3d11.dll is blind to that rendering -- the "
+                "\"vScreen declined\" line says whether it draws. Said at most 4 times.",
+                (void*)device, static_cast<unsigned>(fl), (void*)s.device);
+        }
+        return;
+    }
 
     Config& sentinelCfg = Config::get();
     if (!s.sentinel) {

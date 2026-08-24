@@ -6,6 +6,7 @@
 
 #include <d3d11.h>
 
+#include "../common/config.h"
 #include "../common/guard.h"
 #include "../common/log.h"
 #include "binding_shadow.h"
@@ -62,6 +63,11 @@ bool resolveByKind(void* ptr, Kind kind, ResourceInfo* out) {
 
 bool     g_pending = false;      // key pressed, waiting for a frame edge
 uint32_t g_framesLeft = 0;       // frames still to record; >0 means capturing
+bool     g_offscreen = false;    // record non-eye draws too, latched at start
+uint32_t g_offThisFrame = 0;     // offscreen draws this frame, for the line index
+uint32_t g_offDraws = 0;         // offscreen draws this census, for the end line
+uint32_t g_copiesThisFrame = 0;  // copies this frame, for the line index
+uint32_t g_copies = 0;           // copies this census, for the end line
 uint32_t g_censusNo = 0;         // numbers the begin/end lines, so the diff
                                  // tool can pair "absent" with "present"
 uint32_t g_frameOrdinal = 0;     // 0-based frame within the running census
@@ -199,9 +205,10 @@ void dumpInternTable() {
 
 void finish() {
     dumpInternTable();
-    Log::get().note("DC end census=%u draws=%u lines=%u interned=%u overflow=%u "
-                    "truncated=%u",
-                    g_censusNo, g_draws, g_lines, g_tabCount, g_overflow,
+    Log::get().note("DC end census=%u draws=%u off=%u copies=%u lines=%u "
+                    "interned=%u overflow=%u truncated=%u",
+                    g_censusNo, g_draws, g_offDraws, g_copies, g_lines, g_tabCount,
+                    g_overflow,
                     g_draws > g_lines ? g_draws - g_lines : 0);
 }
 
@@ -222,11 +229,11 @@ void drawCensusRequest() {
                     kCensusFrames);
 }
 
-void drawCensusEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
-                       uint32_t instances, uint32_t eyeDrawIndex) {
-    if (g_framesLeft == 0) return;   // pending counts draws only once started
-    ++g_draws;
-    ++g_drawsThisFrame;
+// The shared body. The only thing the two entry points disagree about is the
+// tag and the index; every binding read below is identical, which is the
+// reason an offscreen line can be read with the same eyes as an eye line.
+static void recordDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
+                       uint32_t instances, const char* tag, uint32_t index) {
     if (g_lines >= kMaxLines) return;
     ++g_lines;
 
@@ -270,15 +277,62 @@ void drawCensusEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
                     st.stride, st.offset, st.topology);
     }
 
-    Log::get().note("DC %u #%u %c n=%u i=%u r=%s d=%s c=%s s=%s,%s,%s,%s%s",
-                    g_frameOrdinal, eyeDrawIndex, kind, count, instances, r, d, c,
+    Log::get().note("%s %u #%u %c n=%u i=%u r=%s d=%s c=%s s=%s,%s,%s,%s%s",
+                    tag, g_frameOrdinal, index, kind, count, instances, r, d, c,
                     s0, s1, s2, s3, tail);
+}
+
+void drawCensusEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
+                       uint32_t instances, uint32_t eyeDrawIndex) {
+    if (g_framesLeft == 0) return;   // pending counts draws only once started
+    ++g_draws;
+    ++g_drawsThisFrame;
+    recordDraw(ctx, kind, count, instances, "DC", eyeDrawIndex);
+}
+
+bool drawCensusWantsOffscreen() { return g_offscreen; }
+
+void drawCensusOffDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
+                       uint32_t instances) {
+    if (g_framesLeft == 0 || !g_offscreen) return;
+    ++g_offDraws;
+    recordDraw(ctx, kind, count, instances, "DCO", g_offThisFrame++);
+}
+
+void drawCensusCopy(char kind, void* dst, uint32_t dstSub, uint32_t dstX,
+                    uint32_t dstY, void* src, uint32_t srcSub, bool hasBox,
+                    uint32_t left, uint32_t top, uint32_t right, uint32_t bottom) {
+    if (g_framesLeft == 0) return;
+    ++g_copies;
+    ++g_copiesThisFrame;
+    if (g_lines >= kMaxLines) return;
+    ++g_lines;
+
+    // Resources, not views: both arguments arrive as ID3D11Resource*, which is
+    // the case bindingToken's kResource form exists for. Handing them to the
+    // view form would run GetResource on something that is not a view -- the
+    // mistake binding_shadow.h documents at length.
+    char db[24], sb[24];
+    const char* d = bindingToken(dst, Kind::kResource, db, sizeof(db));
+    const char* s = bindingToken(src, Kind::kResource, sb, sizeof(sb));
+
+    char box[64] = "";
+    if (hasBox) {
+        _snprintf_s(box, sizeof(box), _TRUNCATE, " box=%u,%u-%u,%u", left, top,
+                    right, bottom);
+    }
+    Log::get().note("DCC %u #%u %c dst=%s sub=%u at=%u,%u src=%s sub=%u%s",
+                    g_frameOrdinal, g_copiesThisFrame - 1, kind, d, dstSub, dstX,
+                    dstY, s, srcSub, box);
 }
 
 void drawCensusFrameBoundary(uint32_t frameNo) {
     if (g_framesLeft > 0) {
-        Log::get().note("DC frame %u draws=%u", g_frameOrdinal, g_drawsThisFrame);
+        Log::get().note("DC frame %u draws=%u off=%u copies=%u", g_frameOrdinal,
+                        g_drawsThisFrame, g_offThisFrame, g_copiesThisFrame);
         g_drawsThisFrame = 0;
+        g_offThisFrame = 0;
+        g_copiesThisFrame = 0;
         ++g_frameOrdinal;
         if (--g_framesLeft == 0) finish();
     }
@@ -292,9 +346,18 @@ void drawCensusFrameBoundary(uint32_t frameNo) {
         g_lines = 0;
         g_overflow = 0;
         g_tabCount = 0;
+        g_offThisFrame = 0;
+        g_offDraws = 0;
+        g_copiesThisFrame = 0;
+        g_copies = 0;
+        // Latched here, not read per draw: a census must record one
+        // configuration throughout, and the draw path is the last place that
+        // should touch a settings map.
+        g_offscreen = Config::get().getBool("advanced.census_offscreen", false);
         for (Interned& e : g_tab) e = Interned();
-        Log::get().note("DC begin census=%u frames=%u frame=%u", g_censusNo,
-                        kCensusFrames, frameNo);
+        Log::get().note("DC begin census=%u frames=%u frame=%u offscreen=%s",
+                        g_censusNo, kCensusFrames, frameNo,
+                        g_offscreen ? "yes" : "no");
     }
 }
 
