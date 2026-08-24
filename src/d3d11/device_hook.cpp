@@ -772,10 +772,50 @@ State& ensureState() {
     return *g_state;
 }
 
+// THE MASTER SWITCH: load, forward, and install NOTHING.
+//
+// One question needs this and no other setting can ask it: is a problem caused
+// by what EDVR HOOKS, or by EDVR being PRESENT? Those are different faults
+// with the same apparent cure, and every way of investigating them so far
+// tests both at once. Turning every fix off does not separate them --
+// panel_hooks_always keeps the render hooks installed on purpose, and
+// share_exposure only makes the exposure fix inert while its context hook
+// goes in regardless. Deleting d3d11.dll answers neither, because it removes
+// the presence along with the hooks.
+//
+// Presence is a real suspect, not a hypothetical one. A d3d11.dll in the game
+// folder is FIRST in the DLL search order, so anything in the process that
+// loads "d3d11.dll" by name gets this proxy instead of the system copy -- the
+// chained-proxy path a few hundred lines up exists because that happens in the
+// field. Issue #15 reproduces on every release from v0.4.0 to v0.10.1 on a rig
+// whose game dies during VR start-up, thirteen seconds after these hooks are
+// finished, and nothing in the ini could tell the two causes apart.
+//
+// Checked at each of the three entry points rather than at the one caller that
+// reaches them today. A switch whose whole job is to prove nothing was
+// installed must not depend on the call graph keeping the shape it has.
+bool refuseHooks() {
+    if (Config::get().getBool("advanced.install_hooks", true)) return false;
+    static volatile long said = 0;
+    if (InterlockedExchange(&said, 1) == 0) {
+        breadcrumb("gfx: hooks NOT installed (advanced.install_hooks = 0)");
+        Log::get().note(
+            "advanced.install_hooks = 0: NO hooks are being installed this "
+            "session -- no device, context, swapchain or DXGI factory hook, no "
+            "resolution patch, and every fix off with them. The game renders "
+            "exactly as it would with d3d11.dll deleted, except that this DLL "
+            "is still in the folder and still being loaded. If a problem "
+            "survives this, it is not caused by anything EDVR hooks. Set it "
+            "back to 1 when the test is over; nothing works while it is 0.");
+    }
+    return true;
+}
+
 }  // namespace
 
 void hookDevice(ID3D11Device* device) {
     if (!device) return;
+    if (refuseHooks()) return;
     State& s = ensureState();
     if (s.device) return;
 
@@ -937,6 +977,7 @@ void hookDevice(ID3D11Device* device) {
 
 void hookSwapChain(IDXGISwapChain* swapChain) {
     if (!swapChain) return;
+    if (refuseHooks()) return;
     State& s = ensureState();
     if (s.swapChain) return;
 
@@ -958,6 +999,7 @@ void hookSwapChain(IDXGISwapChain* swapChain) {
 
 void hookFactoryForDevice(ID3D11Device* device) {
     if (!device) return;
+    if (refuseHooks()) return;
     State& s = ensureState();
     if (s.factoryHook.attached()) return;
 
