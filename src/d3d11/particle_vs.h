@@ -121,17 +121,36 @@ VSOut main(VSIn i) {
     }
     float3 basisUp = (pCam.w > 0.5) ? pUp.xyz : cb1[278].xyz;
 
-    r0.xyz = cross(basisUp, faceAxis);
-    r0.w = dot(r0.xyz, r0.xyz);
-    r0.xyz = r0.xyz * rsqrt(r0.w);
-    r0.w = dot(r0.xyz, r0.xyz);
-    // The game's own degenerate guard, kept: when the two vectors are
-    // parallel the cross collapses and it falls back to a fixed axis.
-    r3.xyz = float3(cb1[279].y, 0.0, 0.0);
-    r0.xyz = (r0.w != 0.0) ? r0.xyz : r3.xyz;
+    // The cross, guarded for real. The game never needed this: its two
+    // vectors are the camera's own up and forward, which cannot be
+    // parallel. Ours can -- faceAxis points at THIS particle, and a
+    // particle directly overhead or underfoot lines up with world up
+    // exactly. There the cross collapses, rsqrt(0) is infinity, and
+    // zero times infinity is a NaN that propagates into the vertex
+    // position: one particle becomes a triangle with no finite corner,
+    // which the rasteriser is free to smear across the frame. That is
+    // what took the terrain out.
+    //
+    // The game's own guard cannot help, because it tests the NaN with
+    // (x != 0), and a NaN compares unequal to everything -- so it keeps
+    // the NaN it meant to reject. Testing the LENGTH before dividing is
+    // the version that works.
+    float3 bRight = cross(basisUp, faceAxis);
+    float bLen2 = dot(bRight, bRight);
+    if (bLen2 < 1e-8) {
+        // Straight up or straight down: any perpendicular will do, and
+        // the roll it implies is unobservable on a quad this symmetric.
+        bRight = cross(float3(0.0, 0.0, 1.0), faceAxis);
+        bLen2 = dot(bRight, bRight);
+        if (bLen2 < 1e-8) {
+            bRight = float3(1.0, 0.0, 0.0);
+            bLen2 = 1.0;
+        }
+    }
+    r0.xyz = bRight * rsqrt(bLen2);
 
     r3.xyz = cross(faceAxis, r0.xyz);
-    r0.w = dot(r3.xyz, r3.xyz);
+    r0.w = max(dot(r3.xyz, r3.xyz), 1e-12);
     r3.xyz = r3.xyz * rsqrt(r0.w);
 
     // ---- the near fade, verbatim: still measured along the true view
