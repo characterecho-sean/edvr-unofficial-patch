@@ -69,7 +69,55 @@ integer:
 Mode 0 is the head-coupled case. Velocity-aligned particles (the streaks)
 already reference their own direction and are not the problem.
 
-## The fix
+## The fix, as shipped
+
+**A replacement vertex shader, swapped in for exactly this draw** --
+`fix.particle_billboard = steady`. It is a MECHANICAL TRANSCRIPTION of
+the game's own shader (register for register, all eleven outputs) with
+one change: the billboard basis is built per VERTEX, aiming at the
+viewer, instead of once per draw from the camera's plane.
+
+    face  = normalize(particlePosition - viewerPosition)
+    right = normalize(cross(worldUp, face))
+    up    = cross(face, right)
+
+The viewer's position is solved CPU-side from the game's own clip rows
+(the camera annihilates the x, y and w rows of any projective
+transform), which lands it in the same space the particles are
+transformed into rather than one we assumed. It reads as the origin,
+confirming Elite renders these camera-relative.
+
+Verified at the desk before it ever ran: input signature identical to
+the original, output signature identical, and an instruction mix that
+matches (dp4 3/3, mad 29/29, mul 33/33, rsq 10/10, sincos 1/1). That
+check is why the transcription style was chosen -- a semantic rewrite
+would have to re-derive eleven outputs feeding a pixel shader we do not
+control, and could only be trusted, not checked.
+
+Field-verified 2026-08-23: roll gone, yaw rotation gone, smoke lit and
+animated normally.
+
+### The NaN that took the terrain with it
+
+The first swap build removed the plumes' rotation and the terrain. The
+cause is a degenerate case the original can never reach: its basis comes
+from the camera's own up and forward, which are never parallel, while
+ours aims at each particle -- and a particle directly overhead lines up
+with world up exactly. The cross collapses, `rsqrt(0)` is infinity,
+`0 * infinity` is NaN, and one NaN vertex is a triangle with no finite
+corner for the rasteriser to smear across the frame.
+
+The game HAS a guard there, and transcribing it faithfully reproduced
+its flaw: it tests `(x != 0)`, and a NaN compares unequal to everything,
+so it keeps the NaN it means to reject. Harmless in the original because
+the case never arises; fatal in ours. Test the LENGTH before dividing,
+with a fallback axis for straight up.
+
+The same trap is latent in any constant-substitution version of this fix
+(world up in place of the camera's up degenerates when the VIEW points
+straight up), which is one more reason the shader is the right home.
+
+## The earlier approach, and why it was not enough
 
 **Substitute `cb1[278]` — the basis's up vector — with WORLD UP, for
 exactly this draw.** Then:
@@ -110,6 +158,16 @@ else about this design changes. The alternative outcome worth watching for
 is that `cb1` is shared with draws that must keep the camera basis — in
 which case the substitution stays scoped to the matched draw anyway, which
 it already is.
+
+## Dead ends worth not repeating
+
+- **Aiming per DRAW instead of per particle.** There is no emitter
+  position in these constants: cb0 is 208 bytes bound at register 0 --
+  the engine-standard camera block -- and the translation column that
+  looked like an emitter position is the accumulator the sun-glare arc
+  already convicted. Aiming down it put every quad edge-on.
+- **A shared ring buffer.** Suspected when the above failed; measured
+  false in one log line (208 bytes, offset 0).
 
 ## Open
 
