@@ -31,6 +31,7 @@
 #include "journal_watch.h"  // gameplay started, for the low-peak notice
 #include "remlok_fix.h"
 #include "exposure_fix.h"
+#include "particle_fix.h"
 #include "sunglare_fix.h"
 #include "witchstar_fix.h"
 
@@ -250,7 +251,30 @@ struct State {
             uint32_t h;
         };
         SrvFilter srv[4];
+        // The VERTEX SHADER's content hash, as the census logs it in vh=.
+        // 0 = any shader; otherwise only draws running exactly that code
+        // are skipped. Written "vs:4435F2E50020E7F3", alone or after a
+        // kind:count ("X:1-99999 vs:..." is not needed -- the hash alone
+        // is the strongest term there is).
+        //
+        // It exists because size-level signatures COLLIDE. The geyser
+        // plume hunt (2026-08-23) found smoke particles and rock meshes
+        // sharing kind, count range, stride and every sampler size: a
+        // probe narrow enough to be safe matched nothing, and one broad
+        // enough to catch the plume deleted the terrain. Two draws
+        // running different code cannot share a hash, so this is the one
+        // term that always separates them -- and the hash names the blob
+        // on disk when glare_shader_dump was on, so a confirmed skip
+        // hands over the bytecode to read.
+        uint64_t vsHash;
     };
+    // The particle billboards' constant-buffer tee, mirroring bb* below.
+    void*     partResource = nullptr;
+    void*     partData = nullptr;
+    uint32_t  partBytes = 0;
+    void*     part0Resource = nullptr;
+    void*     part0Data = nullptr;
+    uint32_t  part0Bytes = 0;
     SkipSpec  censusSkip[8] = {};
     uint32_t  censusSkipCount = 0;
     // The bisection form of the same probe: skip eye draws by their POSITION
@@ -931,7 +955,7 @@ inline bool foreignContext(ID3D11DeviceContext* self) {
 // every element's identity.
 enum class DrawVerdict {
     kNone, kPanel, kSkip, kRemlok, kHolo, kWitchstar, kBillboard,
-    kGlareClamp, kGlareSteady
+    kGlareClamp, kGlareSteady, kParticle
 };
 
 // kind, count and instances describe the draw for the census and the census
@@ -991,9 +1015,27 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         s->censusSkipRangeCount == 0 && s->censusSkipOffCount == 0 &&
         !remlokWantsDraws() && !holoWantsDraws() && !witchstarWantsDraws() &&
         !sunglareWantsDraws() && !cbPeekEnabled() && !billboardWantsDraws() &&
-        !drawCensusArmed() && !panelQuadWants() && !panelCurveWants()) {
+        !drawCensusArmed() && !panelQuadWants() && !panelCurveWants() &&
+        !particleWantsDraws()) {
         return DrawVerdict::kNone;
     }
+
+    // The particle probe sits ABOVE the eye-texture gate on purpose. On
+    // foot the world -- plumes included -- is drawn into the PANEL, which
+    // is deliberately not counted as an eye texture, so anything below the
+    // gate never sees a single particle draw in flat mode. The billboards
+    // take their basis from the game camera either way, which is why they
+    // swim when the mouse turns as well as when the head does, and a fix
+    // that only reached the stereo view would leave half the bug standing.
+    particleOnEyeDraw(self, kind, count, instances);
+
+    // The particle billboards, before the eye gate for the same reason the
+    // probe is: on foot they draw into the panel, and a fix that only ran
+    // for the stereo view would leave the flat view swimming.
+    if (particleSteady() && particleOnDraw(self, kind, count, instances)) {
+        return DrawVerdict::kParticle;
+    }
+
     const uint32_t rtvGen = bindingGeneration(BindSlot::Rtv0);
     if (s->rtv0EyeGen != rtvGen) {
         s->rtv0Cand = -1;
@@ -1061,6 +1103,19 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     // eye-draw count would stand the flash fix down as a side effect.
     if (s->censusSkipCount) {
         for (uint32_t i = 0; i < s->censusSkipCount; ++i) {
+            // A vs:HASH rule carries no kind and no count: it matches on
+            // the shader alone, which is the whole point of it. Reading
+            // the bound shader costs a VSGetShader per candidate draw and
+            // happens only while a probe spec is set.
+            if (s->censusSkip[i].vsHash) {
+                ID3D11VertexShader* vs = nullptr;
+                self->VSGetShader(&vs, nullptr, nullptr);
+                const uint64_t h = lookupShaderHash(vs);
+                if (vs) vs->Release();
+                if (h != s->censusSkip[i].vsHash) continue;
+                ++s->censusSkipped;
+                return DrawVerdict::kSkip;
+            }
             const bool countHit =
                 s->censusSkip[i].nHi
                     ? count >= s->censusSkip[i].n &&
@@ -1549,6 +1604,34 @@ HRESULT STDMETHODCALLTYPE hookedMap(ID3D11DeviceContext* self, ID3D11Resource* r
             s->bbBytes = d.ByteWidth;
         }
     }
+    // The particle billboards' constants, same discipline again: the
+    // basis vectors cannot be read at the draw, so the write is watched.
+    if (SUCCEEDED(hr) && mapped && sub == 0 && res == particleTarget()) {
+        s->partResource = res;
+        s->partData = mapped->pData;
+        s->partBytes = 0;
+        D3D11_RESOURCE_DIMENSION dim = D3D11_RESOURCE_DIMENSION_UNKNOWN;
+        res->GetType(&dim);
+        if (dim == D3D11_RESOURCE_DIMENSION_BUFFER) {
+            D3D11_BUFFER_DESC d{};
+            static_cast<ID3D11Buffer*>(res)->GetDesc(&d);
+            s->partBytes = d.ByteWidth;
+        }
+    }
+    // The emitter's constants for the same fix, so the billboards can be
+    // aimed at their own plume rather than along the view axis.
+    if (SUCCEEDED(hr) && mapped && sub == 0 && res == particleTargetCb0()) {
+        s->part0Resource = res;
+        s->part0Data = mapped->pData;
+        s->part0Bytes = 0;
+        D3D11_RESOURCE_DIMENSION dim = D3D11_RESOURCE_DIMENSION_UNKNOWN;
+        res->GetType(&dim);
+        if (dim == D3D11_RESOURCE_DIMENSION_BUFFER) {
+            D3D11_BUFFER_DESC d{};
+            static_cast<ID3D11Buffer*>(res)->GetDesc(&d);
+            s->part0Bytes = d.ByteWidth;
+        }
+    }
     // The world shader's true-camera feed: the scene CB vscreen
     // nominated at the last big eye draw, same discipline again.
     if (SUCCEEDED(hr) && mapped && sub == 0 &&
@@ -1623,6 +1706,20 @@ void STDMETHODCALLTYPE hookedUnmap(ID3D11DeviceContext* self, ID3D11Resource* re
         s->sceneCbData = nullptr;
         s->sceneCbBytes = 0;
     }
+    if (res == s->part0Resource && s->part0Data) {
+        guardedBudget(g_cameraBudget,
+                      [&] { particleCaptureCb0(s->part0Data, s->part0Bytes); });
+        s->part0Resource = nullptr;
+        s->part0Data = nullptr;
+        s->part0Bytes = 0;
+    }
+    if (res == s->partResource && s->partData) {
+        guardedBudget(g_cameraBudget,
+                      [&] { particleCapture(s->partData, s->partBytes); });
+        s->partResource = nullptr;
+        s->partData = nullptr;
+        s->partBytes = 0;
+    }
     if (res == s->bbResource && s->bbData) {
         guardedBudget(g_cameraBudget,
                       [&] { billboardCapture(s->bbData, s->bbBytes); });
@@ -1661,7 +1758,9 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     if (v == DrawVerdict::kWitchstar) witchstarBegin(self);
     if (v == DrawVerdict::kBillboard) billboardBegin(self);
     if (v == DrawVerdict::kGlareSteady) sunglareBegin(self);
+    if (v == DrawVerdict::kParticle) particleBegin(self);
     draw();
+    if (v == DrawVerdict::kParticle) particleEnd(self);
     if (v == DrawVerdict::kGlareSteady) sunglareEnd(self);
     if (v == DrawVerdict::kBillboard) billboardEnd(self);
     if (v == DrawVerdict::kWitchstar) witchstarEnd(self);
@@ -1855,6 +1954,30 @@ void readCensusSkip(Config& cfg, State* s) {
     while (*p && s->censusSkipCount < 8) {
         while (*p == ' ' || *p == ',' || *p == '\t') ++p;
         if (!*p) break;
+        // "vs:HASH" -- a whole term on its own, matching every draw that
+        // runs that vertex shader whatever its kind, count or samplers.
+        // The census logs the hash as vh=; the strongest term there is,
+        // and the only one two colliding pipelines cannot both satisfy.
+        if ((p[0] == 'v' || p[0] == 'V') && (p[1] == 's' || p[1] == 'S') &&
+            p[2] == ':') {
+            char* vend = nullptr;
+            const unsigned long long h = _strtoui64(p + 3, &vend, 16);
+            if (vend == p + 3 || h == 0) {
+                Log::get().note("census skip: \"%s\" is not vs:HASH with the "
+                                "16-digit hex the census logs as vh=; the "
+                                "whole spec is refused rather than "
+                                "half-applied.", p);
+                s->censusSkipCount = 0;
+                break;
+            }
+            State::SkipSpec& sk = s->censusSkip[s->censusSkipCount];
+            sk = State::SkipSpec{};
+            sk.kind = 0;          // any kind
+            sk.vsHash = static_cast<uint64_t>(h);
+            ++s->censusSkipCount;
+            p = vend;
+            continue;
+        }
         const char kind = static_cast<char>(toupper(*p));
         const bool known = kind == 'D' || kind == 'I' || kind == 'N' || kind == 'X';
         if (!known || p[1] != ':') {
@@ -2026,6 +2149,7 @@ void vScreenRefreshConfig() {
     cbPeekConfigure(cfg);
     panelQuadConfigure(cfg);
     panelCurveConfigure(cfg);
+    particleConfigure(cfg);
     billboardConfigure(cfg);
     // Every fix.head_offset_* key, on the reload path as well as the startup
     // one. A config reader on only one of the two is a specific repeatable bug
@@ -2703,6 +2827,7 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     cbPeekConfigure(cfg);
     panelQuadConfigure(cfg);
     panelCurveConfigure(cfg);
+    particleConfigure(cfg);
     billboardConfigure(cfg);
     // installGlitchFrameFix is called before this, deliberately, so this is its
     // settled answer rather than a guess about config it has not read yet.
@@ -2860,6 +2985,7 @@ void shutdownVScreenFixes() {
     g_state->distanceEnabled = false;
     panelQuadShutdown();
     panelCurveShutdown();
+    particleShutdown();
     if (g_state->ourCb) {
         g_state->ourCb->Release();
         g_state->ourCb = nullptr;

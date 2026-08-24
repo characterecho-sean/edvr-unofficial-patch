@@ -50,7 +50,8 @@ BEGIN_RE = re.compile(r'^DC begin census=(\d+) frames=(\d+) frame=(\d+)$')
 # the sessions already paid for.
 DRAW_RE = re.compile(r'^DC (\d+) #(\d+) ([A-Z]) n=(\d+) i=(\d+) '
                      r'r=(\S+) d=(\S+) c=(\S+) s=(\S+),(\S+),(\S+),(\S+)'
-                     r'(?: vs=(\S+) vb=(\S+) sd=(\d+) of=(\d+) tp=(\d+))?$')
+                     r'(?: vs=(\S+)(?: vh=([0-9A-Fa-f]+))? vb=(\S+) '
+                     r'sd=(\d+) of=(\d+) tp=(\d+))?$')
 FRAME_RE = re.compile(r'^DC frame (\d+) draws=(\d+)$')
 ID_TEX_RE = re.compile(r'^DC id @(\d+) tex (\d+)x(\d+) fmt=(\d+)$')
 ID_BUF_RE = re.compile(r'^DC id @(\d+) buf (\d+)$')
@@ -98,13 +99,19 @@ def parse_dc_lines(lines, source):
             continue
         m = DRAW_RE.match(line)
         if m:
-            # The tail's five groups are all-or-nothing; sd/of/tp arrive as
-            # numbers because they are the half of it that means the same
-            # thing in two different censuses.
+            # The tail's groups are all-or-nothing apart from vh, which
+            # newer DLLs add; sd/of/tp arrive as numbers because they are
+            # the half of it that means the same thing in two different
+            # censuses. The shader HASH is the other cross-census half --
+            # a content identity, unlike the vs pointer beside it -- and
+            # rides at the end of the tuple so the older indices hold.
             ia = None
             if m.group(13) is not None:
-                ia = (m.group(13), m.group(14), int(m.group(15)),
-                      int(m.group(16)), int(m.group(17)))
+                vh = m.group(14)
+                if vh is not None and set(vh) == {'0'}:
+                    vh = None   # unregistered shader: no identity to key on
+                ia = (m.group(13), m.group(15), int(m.group(16)),
+                      int(m.group(17)), int(m.group(18)), vh)
             cur.draws.append((int(m.group(1)), int(m.group(2)), m.group(3),
                               int(m.group(4)), int(m.group(5)), m.group(6),
                               m.group(7), m.group(8),
@@ -162,8 +169,9 @@ def signature(census, draw):
     # and a draw that changed either really is a different draw.
     stride = ia[2] if ia else None
     topology = ia[4] if ia else None
+    vh = ia[5] if ia and len(ia) > 5 else None
     return (kind, n, resolve(census, r), resolve(census, d),
-            tuple(resolve(census, s) for s in slots), stride, topology)
+            tuple(resolve(census, s) for s in slots), stride, topology, vh)
 
 
 def by_signature(census):
@@ -192,7 +200,7 @@ def describe(sig):
                   'X': 'DrawIndexedInstanced'}
     topo_names = {0: 'undefined', 1: 'points', 2: 'lines', 3: 'linestrip',
                   4: 'trilist', 5: 'tristrip'}
-    kind, n, r, d, slots, stride, topology = sig
+    kind, n, r, d, slots, stride, topology, vh = sig
     parts = ['%s n=%d' % (kind_names.get(kind, kind), n)]
     parts.append('target=%s' % r)
     parts.append('depth=%s' % ('none' if d == '-' else d))
@@ -203,6 +211,11 @@ def describe(sig):
     if topology is not None:
         parts.append('topology=%s' % topo_names.get(topology, topology))
         parts.append('stride=%s' % ('no vertex buffer' if stride == 0 else stride))
+    if vh is not None:
+        # The vertex shader's content hash: the one key two draws running
+        # different code cannot share, and the blob's file name under
+        # edvr_logs\shaders when glare_shader_dump was on.
+        parts.append('vshader=%s' % vh)
     return '  '.join(parts)
 
 
@@ -364,13 +377,15 @@ def self_test():
         print('self-test: expected 2 censuses, parsed %d' % len(censuses))
         return 1
     added, removed, changed = diff(censuses[0], censuses[1])
-    # The trailing pair is (stride, topology): filled in where the line had a
-    # tail, None where it did not. None is "not measured" and must never
-    # collapse into 0, which is "measured, and nothing was bound".
-    want_added = {('D', 4, eye, '-', ('tex512x64f28', '-', '-', '-'), 0, 5)}
-    want_removed = {('D', 3, eye, '-', ('-', '-', '-', '-'), None, None)}
+    # The trailing triple is (stride, topology, vshader hash): filled in where
+    # the line had a tail, None where it did not. None is "not measured" and
+    # must never collapse into 0, which is "measured, and nothing was bound";
+    # the hash is None for old logs and for shaders created before the hooks.
+    want_added = {('D', 4, eye, '-', ('tex512x64f28', '-', '-', '-'), 0, 5,
+                   None)}
+    want_removed = {('D', 3, eye, '-', ('-', '-', '-', '-'), None, None, None)}
     want_changed = {('I', 5000, eye, 'tex1832x1920f45',
-                     ('tex4096x4096f98', '-', '-', '-'), 32, 4)}
+                     ('tex4096x4096f98', '-', '-', '-'), 32, 4, None)}
     if added != want_added:
         print('self-test: ADDED mismatch: %r' % added)
         return 1
