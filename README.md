@@ -152,26 +152,27 @@ does. Nauseating if you focus on it. EDVR holds the pattern still for
 exactly that one draw per eye; `holo_pattern = stock` restores the game's
 behaviour. *Details: [docs/loading-hologram.md](docs/loading-hologram.md).*
 
-**The sun's glare riding your head.** *Off by default — try it.* A star's
+**The sun's glare riding your head.** *On by default (`vivid`).* A star's
 whole glare — corona, veiling smudge, light beams, rays, lens flare — is
 drawn flat on your view like a camera overlay: it rolls when you roll your
 head, the beams stay pinned horizontal to your face, and the disc tilts and
-breathes as you look around. `sun_glare = realistic` anchors the glow a real
-eye would see (corona and smudge) in the world, steady under every head
-motion and identical in both eyes, and removes the camera artifacts;
-`vivid` keeps everything — beams world-locked, the lens flare still sliding
-across your view — the movie-camera look without the head coupling. Works
-on every star, witchspace arrivals included. Live: swap modes mid-flight
+breathes as you look around. `vivid` (the default) keeps everything — beams
+world-locked, the lens flare still sliding across your view — the
+movie-camera look without the head coupling; `realistic` anchors only the
+glow a real eye would see (corona and smudge) and removes the camera
+artifacts; `sun_glare = stock` restores the game's behaviour. Works on
+every star, witchspace arrivals included. Live: swap modes mid-flight
 and compare. *Details: [docs/sun-glare.md](docs/sun-glare.md).*
 
-**Smoke and steam swimming as you look around.** *Off by default.* Geyser
+**Smoke and steam swimming as you look around.** *On by default (`steady`).* Geyser
 plumes, and particle effects like them, are drawn as flat cards all sharing
 one orientation taken from the camera — so in a headset the whole plume
 rolls when you tilt your head, and appears to rotate about its own axis as
-you look past it. `particle_billboard = steady` gives each particle its own
+you look past it. `steady` (the default) gives each particle its own
 orientation, aimed at you and referenced to the world, so a plume stands
 still like the volume of smoke it is meant to be. It also settles the
-swimming you can see on a flat screen when you swing the mouse.
+swimming you can see on a flat screen when you swing the mouse;
+`particle_billboard = stock` restores the game's behaviour.
 *Details: [docs/particle-billboards.md](docs/particle-billboards.md).*
 
 **The on-foot screen being flat.** *Off by default.* `panel_curvature`

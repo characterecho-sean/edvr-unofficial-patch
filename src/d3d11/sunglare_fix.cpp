@@ -529,7 +529,7 @@ bool sunglareIsGlareTrain(char kind, uint32_t count, uint32_t instances) {
 
 void sunglareConfigure(Config& cfg) {
     const Mode was = g_mode;
-    const std::string v = cfg.getString("fix.sun_glare", "stock");
+    const std::string v = cfg.getString("fix.sun_glare", "vivid");
     bool legacy = false;
     if (v == "stock") {
         g_mode = Mode::kStock;

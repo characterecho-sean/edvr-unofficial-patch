@@ -569,7 +569,7 @@ void particleEnd(ID3D11DeviceContext* ctx) {
 
 void particleConfigure(Config& cfg) {
     const Mode wasMode = g_mode;
-    const std::string m = cfg.getString("fix.particle_billboard", "stock");
+    const std::string m = cfg.getString("fix.particle_billboard", "steady");
     if (m == "steady") {
         g_mode = Mode::kSteady;
     } else {
