@@ -1,175 +1,162 @@
-# Particle plumes rotate with your head — the find and the fix
+# Smoke and steam swim with the camera in VR
 
-*Written 2026-08-23. The plume shader was identified by live probe, its
-mechanism read from its own bytecode (`docs/particle-vs.asm`), and the
-fix built, desk-verified and field-verified the same day.*
+*Written to accompany a Frontier issue report; no tracker number yet.
+Companion write-ups in this folder cover the sun's glare (sun-glare.md),
+the RemLok overlay (remlok-lines.md), terrain culling (terrain-culling.md)
+and the loading hologram (loading-hologram.md), which share the
+measurement method used here.*
+
+This is a write-up of how Odyssey orients its particle billboards, why that
+construction — correct on a monitor — makes plumes of smoke and steam swim
+and rotate in a headset, and what EDVR does about it from outside the game.
+It is written for whoever might fix it properly, inside the engine, where
+the whole fix is one vector per vertex.
+
+**Short version: every particle quad in a draw is built from a single basis
+taken from the camera's own up and forward vectors.** The quads are
+therefore all parallel to the screen plane rather than each facing the
+viewer. On a monitor that is the standard, invisible approximation. In VR it
+produces two artifacts at once: the whole plume **rolls when you tilt your
+head**, and because each quad's normal points along the view axis rather
+than at your eye, a plume off to one side is drawn **foreshortened — and the
+foreshortening changes as you look around**, which reads as the smoke
+rotating about its own axis. The same construction is visible on a flat
+screen too, as smoke that swims when you swing the mouse.
+
+---
 
 ## The symptom
 
-Standing at a geyser field on foot in stereoscopic view (Explorer Cam), the
-smoke plumes rotate with the headset — the same head-coupled orientation
-disease the sun's corona had, in a completely different pipeline.
+Stand at a geyser field on foot — in VR, and ideally in stereo (the external
+camera) where depth is real. Then:
 
-## Identification: what it took
+- **Tilt your head.** The plume rolls with you, as if painted on your visor.
+- **Look past it, or swing the camera.** The plume appears to rotate about
+  its own vertical axis and flatten, most obviously when it sits away from
+  the centre of your view.
+- **On a monitor**, the same thing shows as smoke swimming as the camera
+  turns; it is far easier to ignore there, which is presumably why it has
+  survived.
 
-The plume could not be found by the differential census, and that failure
-is worth recording because it will recur:
+Geysers are the clearest case because their plumes are large, tall and
+close. The same construction is used by other particle effects.
 
-- **Differencing failed.** A geyser field has many vents. "No plume" for the
-  one you are watching is never "no plume" in the frame, so the family
-  appeared with byte-identical counts (429 draws, 2577 instances) in both
-  captures. Nothing to subtract.
-- **Size signatures collided.** Smoke and rock and terrain all draw
-  instanced, with 8-byte corner vertices, sampling the same exposure strip
-  and same-sized atlases. A `census_skip` narrow enough to be safe matched
-  nothing; one broad enough to catch a plume **deleted the terrain**.
+## What is actually happening
 
-What broke it open was recording, per draw, the **vertex shader's content
-hash** — the one key two draws running different code cannot share (see
-`census_skip`'s `vs:HASH` term, added the same day). With hashes in the
-census, families could be named and skipped one at a time, live, without a
-restart. Six probes mapped the field:
+Everything below was measured through a `d3d11.dll` proxy that can log a
+census of the game's draw calls, identify a draw by the content hash of the
+shader it runs, suppress a draw, and substitute a shader for one draw. No
+game file, game memory or game code is modified at any point. The game's own
+vertex shader for the effect was captured and disassembled, and the
+description below is read from that bytecode rather than inferred.
 
-| Shader | What it draws |
-|---|---|
-| `72BDD292154158AD` | terrain (4-byte heightfield verts, colour + 2 normal maps) |
-| `ACE405F428C17EF6` | terrain depth prepass (same counts, no samplers) |
-| `4435F2E50020E7F3` | generic packed-vertex meshes — rocks and props |
-| `8B589D25B2A0ADDC` | populous but invisible when skipped |
-| `B7790CBFC6554097` | the water/steam volume — a true 3D mesh, correctly projected |
-| **`EB787F983BC1F5A3`** | **the plume** |
+**The plume is one instanced draw per emitter**, whose vertex shader takes a
+per-particle record: position, direction, dimensions, an axis, an alignment
+mode, brightness, colour, and a flipbook atlas chain (`UVSCURRENTDIFFUSE` /
+`UVSNEXTDIFFUSE` / `TEXBLENDDIFFUSE` / `ATLASINDICESDIFFUSE`) that animates
+the smoke.
 
-## The mechanism, from the bytecode
+**The billboard basis is built once, from the camera.** In the shader:
 
-The plume shader's input signature is a textbook particle billboard:
-`POSITION`, `DIRECTION`, `DIMENSIONS`, `AXIS`, `ALIGNBLENDBRIGHT`,
-`BRIGHTNESS`, `VERTEXALPHA`, a flipbook atlas chain
-(`UVSCURRENTDIFFUSE` / `UVSNEXTDIFFUSE` / `TEXBLENDDIFFUSE` /
-`ATLASINDICESDIFFUSE`) and `COLOUR`.
+    right = normalize(cross(cameraUp, cameraForward))
+    up    = normalize(cross(cameraForward, right))
 
-The particle's world position comes from `cb0[9..11]` — the world transform,
-untouched by any of this. The quad's ORIENTATION is built from two vectors
-in the other constant buffer:
+Both vectors come from the shared scene constants — `cameraForward` is
+corroborated by its second use, as the depth term feeding the near-fade.
+Every particle in the draw then expands its quad along that one basis:
 
-    r0 = normalize(cross(cb1[278], cb1[279]))    // "right"
-    r3 = normalize(cross(cb1[279], r0))          // "up"
+    corner = particlePosition + right * halfWidth + up * halfHeight
 
-`cb1[279]` is the camera's view direction — corroborated by its second use,
-`dp3(cb1[279], worldPos)`, which is the depth-along-view term feeding the
-near-fade. `cb1[278]` is the camera's up. So the billboard basis is the
-CAMERA basis, and in a headset the camera is your head: roll your head and
-the whole basis rolls, so every particle quad rolls with it.
+So the quad's normal is the camera's view direction, identical for every
+particle in the frame. That is the whole bug:
 
-There is also an alignment switch — `ALIGNBLENDBRIGHT.x * 255`, read as an
-integer:
+- the basis contains the camera's **roll**, so in a headset the plume is
+  rigidly coupled to head tilt;
+- the normal is the **view axis** rather than the direction to the particle,
+  so anything off-centre is foreshortened by its eccentricity angle, and
+  that angle changes as you look around.
 
-    if (mode == 0)  facing = cb1[279]            // camera-facing
-    else            facing = normalize(worldFromLocal(DIRECTION))  // velocity-aligned
+There is also an alignment switch in the shader — velocity-aligned and
+axis-aligned modes exist and reference the particle's own direction. Those
+are fine. It is the camera-facing mode that carries the artifact.
 
-Mode 0 is the head-coupled case. Velocity-aligned particles (the streaks)
-already reference their own direction and are not the problem.
+## What EDVR does about it, from outside
 
-## The fix, as shipped
+`fix.particle_billboard` in `edvr.ini`, hot-reloadable:
 
-**A replacement vertex shader, swapped in for exactly this draw** --
-`fix.particle_billboard = steady`. It is a MECHANICAL TRANSCRIPTION of
-the game's own shader (register for register, all eleven outputs) with
-one change: the billboard basis is built per VERTEX, aiming at the
-viewer, instead of once per draw from the camera's plane.
+- **`steady`** — a replacement vertex shader is substituted for exactly this
+  draw. It is a transcription of the game's own — same inputs, same eleven
+  outputs, same atlas, fades, spin and alignment modes — with one change:
+  the basis is rebuilt **per vertex**, aimed at the viewer.
 
-    face  = normalize(particlePosition - viewerPosition)
-    right = normalize(cross(worldUp, face))
-    up    = cross(face, right)
+      face  = normalize(particlePosition - viewerPosition)
+      right = normalize(cross(worldUp, face))
+      up    = cross(face, right)
 
-The viewer's position is solved CPU-side from the game's own clip rows
-(the camera annihilates the x, y and w rows of any projective
-transform), which lands it in the same space the particles are
-transformed into rather than one we assumed. It reads as the origin,
-confirming Elite renders these camera-relative.
+  The plume then behaves as a real volume does: it does not roll with the
+  head, and it does not turn as you look past it.
+- **`stock`** — nothing is done.
 
-Verified at the desk before it ever ran: input signature identical to
-the original, output signature identical, and an instruction mix that
-matches (dp4 3/3, mad 29/29, mul 33/33, rsq 10/10, sincos 1/1). That
-check is why the transcription style was chosen -- a semantic rewrite
-would have to re-derive eleven outputs feeding a pixel shader we do not
-control, and could only be trusted, not checked.
+The draw is recognised by the **content hash of its vertex shader**, not by
+its size or vertex count — in this scene those collide exactly with the
+terrain and prop pipelines. The substitution fails soft: any compile or
+lookup failure leaves the game drawing its own shader.
 
-Field-verified 2026-08-23: roll gone, yaw rotation gone, smoke lit and
-animated normally.
+## What a fix inside the game would look like
 
-### The NaN that took the terrain with it
+The engine already has everything required; this is a construction choice,
+not a data problem.
 
-The first swap build removed the plumes' rotation and the terrain. The
-cause is a degenerate case the original can never reach: its basis comes
-from the camera's own up and forward, which are never parallel, while
-ours aims at each particle -- and a particle directly overhead lines up
-with world up exactly. The cross collapses, `rsqrt(0)` is infinity,
-`0 * infinity` is NaN, and one NaN vertex is a triangle with no finite
-corner for the rasteriser to smear across the frame.
+1. **Build the basis per particle, not per draw.** For the camera-facing
+   mode, use the direction from the eye to the particle rather than the
+   camera's forward vector. That single change removes the eccentricity
+   foreshortening, and it is correct on a monitor too — it is what
+   "camera-facing" is usually taken to mean.
+2. **Reference the up vector to the world, not the camera.** For plumes that
+   rise, a world-referenced up is both more correct and immune to head roll.
+   (Purely spherical billboards work too; the world-up variant keeps a
+   rising column looking like a rising column.)
+3. **Mind the degenerate case.** Any such basis collapses when the facing
+   direction is parallel to the reference up — a particle directly overhead
+   or underfoot. The existing guard tests a squared length with `!=`
+   **after** a reciprocal square root, which cannot reject the NaN that case
+   produces, because a NaN compares unequal to everything. Test the length
+   **before** dividing. (EDVR hit exactly this while building the fix: one
+   NaN vertex becomes a triangle with no finite corner, and the rasteriser
+   is free to smear it across the frame.)
+4. **A cheaper middle ground:** if per-particle facing is too costly in the
+   hot path, computing the basis per *emitter* rather than per draw removes
+   most of the error, since a plume subtends far less angle than the view
+   does.
 
-The game HAS a guard there, and transcribing it faithfully reproduced
-its flaw: it tests `(x != 0)`, and a NaN compares unequal to everything,
-so it keeps the NaN it means to reject. Harmless in the original because
-the case never arises; fatal in ours. Test the LENGTH before dividing,
-with a fallback axis for straight up.
+Reproduction for verification is cheap: stand at any geyser field in VR and
+tilt your head — the plume tilts with you. In a GPU capture the effect is
+the instanced draw whose vertex shader takes `ALIGNBLENDBRIGHT` and a
+flipbook atlas chain.
 
-The same trap is latent in any constant-substitution version of this fix
-(world up in place of the camera's up degenerates when the VIEW points
-straight up), which is one more reason the shader is the right home.
+---
 
-## The earlier approach, and why it was not enough
+## Appendix: how the draw was identified
 
-**Substitute `cb1[278]` — the basis's up vector — with WORLD UP, for
-exactly this draw.** Then:
+Recorded because both standard methods failed, and will fail again on
+anything similar.
 
-    right = normalize(cross(worldUp, viewDir))   // horizontal in the world
-    up    = normalize(cross(viewDir, right))     // world-vertical
+- **Differential census failed.** Capturing one frame set with the effect
+  and one without relies on the effect being absent. A geyser field always
+  has *some* vent erupting, so the family appeared with byte-identical
+  counts in both captures — nothing to subtract.
+- **Size-level signatures collided.** Smoke, rock and terrain all draw
+  instanced, with the same vertex stride, sampling same-sized textures and
+  the same exposure strip. A suppression probe narrow enough to be safe
+  matched nothing; one broad enough to catch the plume removed the terrain.
+- **The shader's content hash separated them in one pass.** Recording it per
+  draw, and letting a suppression probe key on it, made it possible to
+  switch whole families off one at a time, live, without a restart. Six
+  probes named terrain, its depth prepass, the generic mesh pipeline (rocks
+  and props), the water/steam volume mesh — ordinary, correctly projected 3D
+  geometry — and finally the plume.
 
-The quads still face the camera (which is correct, and what makes a plume
-read as volumetric from any angle), but their roll is referenced to the
-world instead of to your head. Rolling your head no longer rolls the plume.
-This is precisely the correction that fixed the sun's corona, applied one
-buffer up the pipeline.
-
-Properties that make this the right first attempt:
-
-- **Three floats changed.** Position, size, colour, atlas, fades, lighting
-  and the velocity-aligned path are all untouched.
-- **The shader is unchanged** — no reimplementation of a 6 KB shader with
-  flipbook atlases and lighting, unlike the sun-glare swap.
-- **Degeneracy looked handled** by the game's own fallback branch. It is
-  not: that branch tests `(x != 0)` and cannot reject a NaN. See above.
-- **Recognition is by shader hash**, which the census-skip work proved
-  reliable and which cannot collide with terrain or props.
-
-Mechanism: shadow `cb1` through the Map/Unmap tee and bind a substituted
-copy for the matched draw — the panel-distance pattern, with the
-save/restore discipline `panel_curve.cpp` documents.
-
-## What the measurement said
-
-`cb1[276..279]` logged at a matched draw over a head sweep: `[276]` is
-the camera position, `[277]` right, `[278]` up, `[279]` forward, the
-three bases unit length. With the view level `[278]` reads
-(0.056, 0.981, 0.185) -- world up to within the view's pitch -- and it
-swings to (0.563, 0.606, 0.562) and beyond as the view rolls and
-pitches. That is the coupling, measured rather than inferred.
-
-## Dead ends worth not repeating
-
-- **Aiming per DRAW instead of per particle.** There is no emitter
-  position in these constants: cb0 is 208 bytes bound at register 0 --
-  the engine-standard camera block -- and the translation column that
-  looked like an emitter position is the accumulator the sun-glare arc
-  already convicted. Aiming down it put every quad edge-on.
-- **A shared ring buffer.** Suspected when the above failed; measured
-  false in one log line (208 bytes, offset 0).
-
-## Open
-
-- Whether the water/steam mesh (`B7790CBFC6554097`) also needs anything: it
-  is properly projected 3D geometry, so it should be world-correct already
-  — worth confirming by eye once the smoke is fixed.
-- Whether other particle systems in the game share `EB787F983BC1F5A3`
-  (ship thrusters, explosions, atmospheric effects). If they do, the fix
-  reaches them for free; the same hash is the recognition either way.
+The replacement shader was written as a *mechanical transcription* of the
+original rather than a reimplementation, so that it could be checked rather
+than trusted: its input signature, output signature and instruction mix were
+compared against the game's own before it was ever run.

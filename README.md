@@ -1,6 +1,6 @@
 # EDVR — an unofficial patch for Elite Dangerous: Odyssey in VR
 
-Fixes for things that make Odyssey uncomfortable in a headset. Eleven fixes,
+Fixes for things that make Odyssey uncomfortable in a headset. Twelve fixes,
 two files, about three minutes — what each fix does is under
 [What it fixes](#what-it-fixes).
 
@@ -163,6 +163,16 @@ motion and identical in both eyes, and removes the camera artifacts;
 across your view — the movie-camera look without the head coupling. Works
 on every star, witchspace arrivals included. Live: swap modes mid-flight
 and compare. *Details: [docs/sun-glare.md](docs/sun-glare.md).*
+
+**Smoke and steam swimming as you look around.** *Off by default.* Geyser
+plumes, and particle effects like them, are drawn as flat cards all sharing
+one orientation taken from the camera — so in a headset the whole plume
+rolls when you tilt your head, and appears to rotate about its own axis as
+you look past it. `particle_billboard = steady` gives each particle its own
+orientation, aimed at you and referenced to the world, so a plume stands
+still like the volume of smoke it is meant to be. It also settles the
+swimming you can see on a flat screen when you swing the mouse.
+*Details: [docs/particle-billboards.md](docs/particle-billboards.md).*
 
 **The on-foot screen being flat.** *Off by default.* `panel_curvature`
 bends the on-foot / HMD Cinema Mode screen toward you, the way Virtual
