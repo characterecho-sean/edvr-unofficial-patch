@@ -1,8 +1,8 @@
-# Particle plumes rotate with your head — the find, and the fix design
+# Particle plumes rotate with your head — the find and the fix
 
-*Written 2026-08-23, immediately after identification. The plume shader is
-found and its rotation mechanism is read from its own bytecode
-(`docs/particle-vs.asm`). The fix is designed, not yet built.*
+*Written 2026-08-23. The plume shader was identified by live probe, its
+mechanism read from its own bytecode (`docs/particle-vs.asm`), and the
+fix built, desk-verified and field-verified the same day.*
 
 ## The symptom
 
@@ -137,9 +137,8 @@ Properties that make this the right first attempt:
   and the velocity-aligned path are all untouched.
 - **The shader is unchanged** — no reimplementation of a 6 KB shader with
   flipbook atlases and lighting, unlike the sun-glare swap.
-- **Degeneracy is already handled** by the game: when the cross product
-  collapses (looking straight along the substituted axis) the shader has a
-  fallback branch, so looking straight up cannot produce NaNs.
+- **Degeneracy looked handled** by the game's own fallback branch. It is
+  not: that branch tests `(x != 0)` and cannot reject a NaN. See above.
 - **Recognition is by shader hash**, which the census-skip work proved
   reliable and which cannot collide with terrain or props.
 
@@ -147,17 +146,14 @@ Mechanism: shadow `cb1` through the Map/Unmap tee and bind a substituted
 copy for the matched draw — the panel-distance pattern, with the
 save/restore discipline `panel_curve.cpp` documents.
 
-## Before building: one measurement
+## What the measurement said
 
-`cb1[278]` is inferred to be the camera up from the algebra, not yet
-observed. Log `cb1[276..279]` at a matched draw over a head sweep: the
-vector that tracks head ROLL is the one to replace, and its neighbour that
-tracks head DIRECTION is `[279]` (already corroborated by the fade term).
-If the roles are swapped, the substitution moves one register and nothing
-else about this design changes. The alternative outcome worth watching for
-is that `cb1` is shared with draws that must keep the camera basis — in
-which case the substitution stays scoped to the matched draw anyway, which
-it already is.
+`cb1[276..279]` logged at a matched draw over a head sweep: `[276]` is
+the camera position, `[277]` right, `[278]` up, `[279]` forward, the
+three bases unit length. With the view level `[278]` reads
+(0.056, 0.981, 0.185) -- world up to within the view's pitch -- and it
+swings to (0.563, 0.606, 0.562) and beyond as the view rolls and
+pitches. That is the coupling, measured rather than inferred.
 
 ## Dead ends worth not repeating
 
