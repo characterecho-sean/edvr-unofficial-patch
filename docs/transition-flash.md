@@ -217,9 +217,40 @@ frame spent the detector's shot early and the real flash was shown. Some share o
 "detected and let through" reports is likely to have been that. The recognition
 rules above exist to keep those shots loaded.
 
-There is still a hard cap of two catches in a row, the burst governor above,
-and the guard that switches the whole thing off if it ever starts firing
-continuously.
+There is a hard cap on catches in a row, the burst governor above, and the
+guard that switches the whole thing off if it ever starts firing continuously.
+
+**The cap is one, and it was two until 2026-08-24.** That reversal retires the
+only number in this fix that was never chosen against a measurement.
+
+Two came from a player's description — "below the planet surface for a frame or
+two before being positioned correctly" — and a good deal of machinery was built
+to make a run of two reachable at all, because a marked frame used to discard the
+prediction so the frame after a withhold could not be judged. **That class has
+still never been captured.** Not in any session, in any log here; and the section
+below attributes that exact symptom to the external camera, where it happens
+identically with the fix switched off.
+
+What has been captured, repeatedly, is the second withhold landing on a *good*
+frame. Five runs across two field sessions:
+
+| run | frames apart | what it was |
+|---|---|---|
+| f17777→78 | 0 units | a resampled camera, sampled twice |
+| f19089→90 | 0 | the same |
+| f15610→11 | 0 | a low wake drop — **reported as a flash** |
+| f22066→67 | 10,114 | hyperspace entry — **reported as a flash** |
+| f23100→01 | 13,261 | hyperspace arrival |
+
+Every one of those held a good picture across a scene change, which is the
+artefact this fix exists to hide, manufactured by the fix. Against that, the
+two-frame class is a sentence in a bug report.
+
+The asymmetry is the whole argument. A second withhold buys nothing when the
+first frame was the entire glitch, and costs a held frame every time the jump was
+a camera *arriving* rather than a view *leaving*. One withhold is the insurance;
+two is a bet. `transition_flash_max_consecutive` keeps its full range for whoever
+captures the other class and needs it back.
 
 **Both eyes of a frame now get the same answer.** The decision is taken once, at
 whichever eye the game submits first, and the second eye follows it. Previously

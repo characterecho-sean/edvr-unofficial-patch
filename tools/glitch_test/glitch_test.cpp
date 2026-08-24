@@ -906,10 +906,17 @@ int main(int argc, char** argv) {
     // correctly" -- a player describing the flash that survived every fix so
     // far. One frame withheld, the second shown, and the flash remains.
     //
-    // transition_flash_max_consecutive has shipped at 2 since the beginning and
-    // has never once been reachable: a marked frame discarded the prediction, so
-    // the frame after a withhold could not be judged at all. This file's own
-    // comment on the setting said so.
+    // transition_flash_max_consecutive shipped at 2 from the beginning and was
+    // never once reachable: a marked frame discarded the prediction, so the
+    // frame after a withhold could not be judged at all. This file's own comment
+    // on the setting said so.
+    //
+    // THE DEFAULT IS 1 NOW (2026-08-24) and this fixture keeps its 2, because
+    // the suite states the value it tests rather than inheriting it. What it
+    // pins is that a run of two is REACHABLE for anyone who sets it -- the
+    // knob's whole reason for surviving. The cell below pins what the shipped
+    // default does instead, and cell Z pins that the default is what the ini
+    // says it is.
     settle(b, x, 150);
     {
         uint32_t caught = 0;
@@ -925,6 +932,32 @@ int main(int argc, char** argv) {
               "withhold is not being judged at all");
         check("...and the frame it returns on is not", !third,
               "the run ran past the excursion");
+        settle(b, x, 150);
+    }
+
+    // AND AT THE SHIPPED CAP OF ONE, the second frame is shown.
+    //
+    // This is the change of 2026-08-24, stated as behaviour rather than as a
+    // number. The same excursion the cell above withholds twice is withheld
+    // once here, and the frame after it -- which in five measured field runs
+    // was a good frame being held over a scene change -- reaches the headset.
+    settle(b, x, 150);
+    {
+        Config::get().set("advanced.transition_flash_max_consecutive", "1");
+        installGlitchFrameFix();
+        settle(b, x, 60);
+        uint32_t caught = 0;
+        x += 30.0f;
+        if (frame(b, x, 24000.0f, -11000.0f)) ++caught;
+        x += 30.0f;
+        const bool second = frame(b, x, 24500.0f, -11200.0f);
+        if (second) ++caught;
+        check("at the shipped cap of one, a two-frame excursion costs one frame",
+              caught == 1 && !second,
+              std::to_string(caught) + " withheld -- expected exactly 1, and the "
+              "second frame must reach the headset");
+        Config::get().set("advanced.transition_flash_max_consecutive", "2");
+        installGlitchFrameFix();
         settle(b, x, 150);
     }
 
@@ -1697,6 +1730,48 @@ int main(int argc, char** argv) {
                   : "the returning magnitude was not withheld, so the table "
                     "still knew it and nothing was relearned");
         settle(m, mx, 200);
+    }
+
+    // --- Z. THE SHIPPED DEFAULT, from an ini that does not state it ---------
+    //
+    // LAST, DELIBERATELY. It re-initialises Config from an ini with the key
+    // ABSENT, which is the only way to read what the code falls back to, and
+    // that would disturb anything after it -- so nothing is.
+    //
+    // It exists because a default is exactly the kind of thing that regresses
+    // in silence. The suite states max_consecutive in kIni, so every cell above
+    // would pass unchanged if the fallback were edited back to 2, or to 7. The
+    // sibling lesson is transition_flash_run_units, where renaming the key at
+    // the read site left a whole suite green.
+    {
+        static const char kDefaultIni[] =
+            "[fix]\r\n"
+            "transition_flash = 1\r\n"
+            "[advanced]\r\n"
+            "camera_buffer_bytes = 5376\r\n"
+            "camera_buffer_offset = 1100\r\n"
+            "[log]\r\n"
+            "enabled = 0\r\n";
+        const std::wstring dflt = widen(argv[1]) + L"\\defaults";
+        if (!writeIni(dflt, kDefaultIni)) {
+            check("Z: could not write the defaults ini", false, "");
+        } else {
+            Config::get().init(dflt);
+            installGlitchFrameFix();
+            Buffer d;
+            float dx = 5000.0f;
+            settle(d, dx, 400);
+            uint32_t caught = 0;
+            dx += 30.0f;
+            if (frame(d, dx, 28000.0f, -13000.0f)) ++caught;
+            dx += 30.0f;
+            const bool second = frame(d, dx, 28400.0f, -13300.0f);
+            if (second) ++caught;
+            check("Z: the shipped default caps a run at one frame",
+                  caught == 1 && !second,
+                  std::to_string(caught) + " withheld with the key absent -- the "
+                  "default is not 1; edvr.ini documents 1 and the code must agree");
+        }
     }
 
     clearGlitchFrame();
