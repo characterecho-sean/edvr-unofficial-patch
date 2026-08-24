@@ -16,6 +16,8 @@
 
 #include "../common/timing.h"
 #include "exposure_fix.h"   // lookupShaderHash
+#include "particle_vs.h"
+#include "shader_swap.h"
 
 namespace edvr {
 namespace {
@@ -314,10 +316,61 @@ bool     g_shadow0Valid = false;
 uint64_t g_facingUsed = 0;
 float    g_lastFacing[3] = {};
 
-ID3D11Buffer* g_ourCb = nullptr;
-uint32_t      g_ourBytes = 0;
-ID3D11Buffer* g_savedCb = nullptr;
-bool          g_engaged = false;
+// THE SWAP. The constant substitution that came before this could remove
+// the roll -- world up in place of the camera's -- but never the
+// foreshortening, because facing the viewer is a per-PARTICLE direction
+// and a constant is per-draw. So the draw gets a different vertex shader
+// instead: a transcription of the game's own, with the basis rebuilt per
+// vertex. See particle_vs.h.
+//
+// The buffer copy the substitution needed every draw -- 5376 bytes,
+// mapped and filled -- is gone with it. What remains per draw is a shader
+// swap and a 32-byte constant write.
+ID3D11VertexShader* g_ourVs = nullptr;
+bool                g_vsTried = false;
+ID3D11VertexShader* g_savedVs = nullptr;
+ID3D11Buffer*       g_ourCb = nullptr;     // b3: viewer position, world up
+ID3D11Buffer*       g_savedCb3 = nullptr;
+bool                g_engaged = false;
+
+// The viewer's position in the space the particles are transformed into,
+// solved from the game's own clip rows. For any projective transform the
+// camera annihilates the x, y and w rows -- dot(row, cam) = -row.w -- so
+// three rows and a 3x3 solve give it, exactly the identity the sun-glare
+// arc used to find the camera behind the glare train.
+float g_cam[3] = {};
+bool  g_camOk = false;
+
+void solveCamera() {
+    g_camOk = false;
+    if (!g_shadowValid || g_shadowBytes < 274 * 16) return;
+    const float* f = reinterpret_cast<const float*>(g_shadow);
+    const float* c0 = f + 270 * 4;   // the x contribution
+    const float* c1 = f + 271 * 4;   // y
+    const float* c2 = f + 272 * 4;   // z
+    const float* t  = f + 273 * 4;   // translation
+    // Rows of the 3x3, one per clip component that the camera kills.
+    const float a[3][3] = {{c0[0], c1[0], c2[0]},
+                           {c0[1], c1[1], c2[1]},
+                           {c0[3], c1[3], c2[3]}};
+    const float b[3] = {-t[0], -t[1], -t[3]};
+    const float det =
+        a[0][0] * (a[1][1] * a[2][2] - a[1][2] * a[2][1]) -
+        a[0][1] * (a[1][0] * a[2][2] - a[1][2] * a[2][0]) +
+        a[0][2] * (a[1][0] * a[2][1] - a[1][1] * a[2][0]);
+    if (fabsf(det) < 1e-12f) return;
+    const float inv = 1.0f / det;
+    g_cam[0] = inv * (b[0] * (a[1][1] * a[2][2] - a[1][2] * a[2][1]) -
+                      a[0][1] * (b[1] * a[2][2] - a[1][2] * b[2]) +
+                      a[0][2] * (b[1] * a[2][1] - a[1][1] * b[2]));
+    g_cam[1] = inv * (a[0][0] * (b[1] * a[2][2] - a[1][2] * b[2]) -
+                      b[0] * (a[1][0] * a[2][2] - a[1][2] * a[2][0]) +
+                      a[0][2] * (a[1][0] * b[2] - b[1] * a[2][0]));
+    g_cam[2] = inv * (a[0][0] * (a[1][1] * b[2] - b[1] * a[2][1]) -
+                      a[0][1] * (a[1][0] * b[2] - b[1] * a[2][0]) +
+                      b[0] * (a[1][0] * a[2][1] - a[1][1] * a[2][0]));
+    g_camOk = true;
+}
 
 FaultBudget g_subBudget("particle.substitute", 5);
 
@@ -326,6 +379,7 @@ FaultBudget g_subBudget("particle.substitute", 5);
 // not what we think it is, and substituting into it would be writing a
 // guess into the game's pipeline.
 bool shapeOk(const float* f, uint32_t floats) {
+    if (floats < 274 * 4) return false;
     if (floats < (kFirstReg + kRegs) * 4) return false;
     const float* up = f + 278 * 4;
     const float* fwd = f + 279 * 4;
@@ -428,99 +482,88 @@ void particleBegin(ID3D11DeviceContext* ctx) {
     g_engaged = false;
     if (!ctx || !g_shadowValid) return;
     guardedBudget(g_subBudget, [&] {
-        if (g_ourCb && g_ourBytes != g_shadowBytes) {
-            g_ourCb->Release();
-            g_ourCb = nullptr;
-            g_ourBytes = 0;
+        if (!g_vsTried) {
+            g_vsTried = true;
+            g_ourVs = shaderSwapCompileVs(
+                ctx, kParticleWorldVS, sizeof(kParticleWorldVS) - 1, "main",
+                "particle_vs", nullptr, "particle billboard");
         }
+        if (!g_ourVs) return;   // compile failed: the game draws stock
+
         if (!g_ourCb) {
             ID3D11Device* dev = nullptr;
             ctx->GetDevice(&dev);
             if (!dev) return;
             D3D11_BUFFER_DESC bd{};
-            bd.ByteWidth = g_shadowBytes;
+            bd.ByteWidth = 32;
             bd.Usage = D3D11_USAGE_DYNAMIC;
             bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
             bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
             dev->CreateBuffer(&bd, nullptr, &g_ourCb);
             dev->Release();
             if (!g_ourCb) return;
-            g_ourBytes = g_shadowBytes;
         }
+
+        solveCamera();
         D3D11_MAPPED_SUBRESOURCE m{};
         if (FAILED(ctx->Map(g_ourCb, 0, D3D11_MAP_WRITE_DISCARD, 0, &m)) ||
             !m.pData) {
             return;
         }
-        memcpy(m.pData, g_shadow, g_shadowBytes);
-        // The whole substitution: the basis's up becomes world up. The
-        // shader then builds right = cross(worldUp, forward) -- horizontal
-        // in the world -- and up = cross(forward, right), so the quad still
-        // faces the camera while its roll stops following the view. The w
-        // is left as the game wrote it: only the direction is ours.
         float* f = static_cast<float*>(m.pData);
-        f[278 * 4 + 0] = 0.0f;
-        f[278 * 4 + 1] = 1.0f;
-        f[278 * 4 + 2] = 0.0f;
-
-        // And the facing, when the emitter's own constants are in hand:
-        // point the quads AT the viewer rather than along the view axis.
-        // Sharing one view-aligned normal across a whole draw is what
-        // made a plume off to the side look foreshortened, and made the
-        // foreshortening change -- read as the sprite rotating -- as the
-        // view yawed. Per emitter, the residual error is only the plume's
-        // own angular width instead of its angular distance off centre.
-        if (g_faceEmitter && g_shadow0Valid) {
-            // At THIS draw's slice of the buffer, not at its start.
-            const uint32_t off = bindOffsetRegs(ctx, 0);
-            const uint32_t need = (off + 12) * 16;
-            if (need > g_shadow0Bytes) return;
-            const float* e =
-                reinterpret_cast<const float*>(g_shadow0) + off * 4;
-            const float ex = e[9 * 4 + 3], ey = e[10 * 4 + 3],
-                        ez = e[11 * 4 + 3];
-            const float len = sqrtf(ex * ex + ey * ey + ez * ez);
-            if (len > 1.0f) {
-                f[279 * 4 + 0] = ex / len;
-                f[279 * 4 + 1] = ey / len;
-                f[279 * 4 + 2] = ez / len;
-                g_lastFacing[0] = ex / len;
-                g_lastFacing[1] = ey / len;
-                g_lastFacing[2] = ez / len;
-                ++g_facingUsed;
-            }
-        }
+        f[0] = g_cam[0];
+        f[1] = g_cam[1];
+        f[2] = g_cam[2];
+        // The flag the shader reads: without a solved viewer position it
+        // keeps the game's own camera-plane basis rather than aiming at
+        // a point nobody measured.
+        f[3] = g_camOk ? 1.0f : 0.0f;
+        f[4] = 0.0f;
+        f[5] = 1.0f;
+        f[6] = 0.0f;
+        f[7] = 0.0f;
         ctx->Unmap(g_ourCb, 0);
 
-        ctx->VSGetConstantBuffers(1, 1, &g_savedCb);
+        ctx->VSGetShader(&g_savedVs, nullptr, nullptr);
+        ctx->VSGetConstantBuffers(3, 1, &g_savedCb3);
         ID3D11Buffer* ours = g_ourCb;
-        ctx->VSSetConstantBuffers(1, 1, &ours);
+        ctx->VSSetConstantBuffers(3, 1, &ours);
+        ctx->VSSetShader(g_ourVs, nullptr, 0);
         g_engaged = true;
         ++g_applied;
+        if (g_camOk) ++g_facingUsed;
+        g_lastFacing[0] = g_cam[0];
+        g_lastFacing[1] = g_cam[1];
+        g_lastFacing[2] = g_cam[2];
     });
 }
 
 void particleEnd(ID3D11DeviceContext* ctx) {
     if (!g_engaged || !ctx) return;
     g_engaged = false;
-    ctx->VSSetConstantBuffers(1, 1, &g_savedCb);
-    if (g_savedCb) {
-        g_savedCb->Release();
-        g_savedCb = nullptr;
+    ctx->VSSetShader(g_savedVs, nullptr, 0);
+    if (g_savedVs) {
+        g_savedVs->Release();
+        g_savedVs = nullptr;
+    }
+    ctx->VSSetConstantBuffers(3, 1, &g_savedCb3);
+    if (g_savedCb3) {
+        g_savedCb3->Release();
+        g_savedCb3 = nullptr;
     }
     const uint64_t now = nowMs();
     if (now - g_noteMs >= 10000) {
         Log::get().note(
-            "particle billboard: steady -- %llu substitution(s) in the last "
-            "ten seconds, %llu of them aimed at their own emitter, the last "
-            "at (%.3f %.3f %.3f). Quads are held upright in the world; the "
-            "aiming is off unless particle_face_emitter is set.",
+            "particle billboard: steady -- %llu draw(s) in the last ten "
+            "seconds through the replacement shader, %llu of them with a "
+            "solved viewer at (%.1f %.1f %.1f). Each quad now faces the "
+            "viewer instead of the view axis.",
             static_cast<unsigned long long>(g_applied - g_appliedAtNote),
             static_cast<unsigned long long>(g_facingUsed),
             g_lastFacing[0], g_lastFacing[1], g_lastFacing[2]);
-        g_facingUsed = 0;
         g_noteMs = now;
         g_appliedAtNote = g_applied;
+        g_facingUsed = 0;
     }
 }
 
@@ -601,14 +644,22 @@ void particleOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
 }
 
 void particleShutdown() {
+    if (g_ourVs) {
+        g_ourVs->Release();
+        g_ourVs = nullptr;
+    }
+    g_vsTried = false;
     if (g_ourCb) {
         g_ourCb->Release();
         g_ourCb = nullptr;
     }
-    g_ourBytes = 0;
-    if (g_savedCb) {
-        g_savedCb->Release();
-        g_savedCb = nullptr;
+    if (g_savedVs) {
+        g_savedVs->Release();
+        g_savedVs = nullptr;
+    }
+    if (g_savedCb3) {
+        g_savedCb3->Release();
+        g_savedCb3 = nullptr;
     }
     g_engaged = false;
     g_target = nullptr;
