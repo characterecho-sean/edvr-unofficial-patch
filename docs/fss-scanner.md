@@ -449,18 +449,62 @@ all.
 - The `vScreen declined` totals line, and a note when a **second D3D11 device**
   is created and not hooked (EDVR hooks the first device only).
 
+## Round four: the black squares, and the per-eye tile stack
+
+Flown 2026-08-25 (log `edvr_gfx_20260825_140928`, five captures — four at
+stock geometry, one inflated). The field first: `fss_res` is confirmed
+sharper and confirmed INNOCENT — the black squares appear at stock
+resolution too. And the report sharpened into its final shape: the right
+eye's inner-radius-outward sweep is the reveal working as designed; the
+left eye showing BLACK 16-pixel squares within the ring AT ALL is the
+defect. (Outlined squares animating in both eyes during the
+pixelated-to-sharp resolve are symmetric and almost certainly the game's
+own scan-tile art.)
+
+What the extended captures measured:
+
+- **Every paired eye draw samples identical resources in ALL EIGHT
+  recorded slots** (the x= extension). The per-eye state does not enter
+  through sampler identities 0–7.
+- **The tile stack exists and is per-eye**: twice per frame, once per eye,
+  `9347F8FC2DCE0248` (34,34,16 groups → a 543x536 f60 map) feeds
+  `22786F6DE290C577` (272,268 groups → an **eye-sized R16_UINT surface
+  written one thread-group per 16x16 tile**) — the black squares' exact
+  granularity, refreshed before both composites. Alongside:
+  `E65498AE6C2C9F1B` writing THREE 272x268 f62 maps each frame, and two
+  shaders (`074CB657FDBD43E6`, `76BFC737F1F8CB83`) writing a 101 MB pool —
+  the moving-offset record class this game keeps using.
+- The consumer is therefore in a channel still unrecorded: PS slots 8+,
+  another shader stage's SRVs, or per-draw offsets into the pool carried
+  in constants b1+ (the DCW watch read b0 only).
+
+## The live probe: `advanced.census_skip_dispatch`
+
+Built 2026-08-25: compute dispatches named by hash (the census's ch=) are
+not forwarded while the spec is set — the draw skips' completing half, for
+a system only compute touches. Localiser and positive control in one: park
+at a building ring, skip one candidate at a time, and the shader whose
+absence changes the squares names the system. The scene may look very
+wrong while a spec is set; that is the probe working. Candidates in order:
+`22786F6DE290C577`, `9347F8FC2DCE0248`, `E65498AE6C2C9F1B`,
+`074CB657FDBD43E6`, `76BFC737F1F8CB83`.
+
+Once the system is named, the fix shape is the one this arc has been
+converging on all along: equalise eye B's copy of the identified per-eye
+product to eye A's (one CopyResource per frame, or a substitution at its
+consumer), preceded by the positive control the deleted fss_eye_sync
+experiment skipped.
+
 ## Open
 
-- The `fss_res` A/B flight: zoom the ringed body with `fix.fss_res = 1` —
-  the body should be visibly sharper (Finding 2's fix landing), and the
-  ring split lives or dies with the aliasing story. The log receipts to
-  look for: "fss res: a 2170x2142 body-layer texture was created at
-  4340x4284" and the viewport-scaled notes.
-- If the split survives full resolution: one monocular re-test with the
-  eye order deliberately reversed, before any further instrument.
+- The dispatch probe flight, one hash at a time, squares watched.
+- If no candidate moves the squares: extend the census to PS slots 8-15
+  and non-PS stages, or record b1+ constants — in that order.
 - `experimental.submit_snapshot` stays available but proven unnecessary
   for this bug; its copies cost nothing extra (the flash resubmit makes
   them anyway).
+- The flash detector still withholds a couple of frames at every fresh
+  FSS zoom (the body camera until parked-certification) — its own arc.
 - The flash detector trips on the FSS body camera at every fresh zoom
   (~9,880 units, withheld until "parked" certification) — a hitch on
   exactly the transition being scanned. Its own arc.

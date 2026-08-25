@@ -3,6 +3,7 @@
 #include <windows.h>
 
 #include <cstdlib>
+#include <cstring>
 #include <string>
 #include <iterator>
 #include <unordered_map>
@@ -110,6 +111,20 @@ struct State {
     bool     pinned = false;      // true if the hash came from config
     uint32_t copyMask = 0xF;
     bool     copyBtoA = false;
+
+    // The dispatch-skip probe (advanced.census_skip_dispatch): compute
+    // shaders named by content hash are NOT forwarded while the spec is set.
+    // The census_skip idea completed -- draws could be probed by hash since
+    // the geyser hunt, but the FSS black-square stack turned out to be built
+    // by COMPUTE (a per-eye 16x16-tile uint mask), and a system with no
+    // draw to skip needs its dispatches skippable to be localised live.
+    // Empty is off and the only shipped state; each firing is counted and
+    // the first is said aloud.
+    uint64_t dispatchSkip[4] = {};
+    uint32_t dispatchSkipCount = 0;
+    uint64_t dispatchSkipped = 0;
+    bool     dispatchSkipNoted = false;
+    char     dispatchSkipSpec[96] = {};   // raw spec, to log only on change
 
     // Shape detection.
     //
@@ -855,6 +870,28 @@ void STDMETHODCALLTYPE hookedDispatch(ID3D11DeviceContext* self, UINT x, UINT y,
     // and no capture before 2026-08-25 could have seen it.
     if (drawCensusArmed()) drawCensusDispatch(x, y, z);
 
+    // The dispatch-skip probe, after the census record (a census taken
+    // while probing must record what the game SUBMITTED -- the draw skips'
+    // rule) and before anything else acts. A skipped dispatch still proves
+    // the game is rendering a scene, so the flag is set on the way out.
+    if (s->dispatchSkipCount) {
+        const uint64_t h = hashOf(bindingGet(BindSlot::Cs));
+        for (uint32_t i = 0; i < s->dispatchSkipCount; ++i) {
+            if (s->dispatchSkip[i] == h) {
+                ++s->dispatchSkipped;
+                s->computeThisFrame = true;
+                if (!s->dispatchSkipNoted) {
+                    s->dispatchSkipNoted = true;
+                    Log::get().note(
+                        "dispatch skip: first hit -- ch=%016llX not "
+                        "forwarded; counting silently from here.",
+                        static_cast<unsigned long long>(h));
+                }
+                return;
+            }
+        }
+    }
+
     // Classification runs INSIDE the guard.
     //
     // It was called here, bare, one line above the guarded region it feeds.
@@ -945,6 +982,60 @@ void exposureConfigure(Config& cfg) {
             s->peekStripStaging = nullptr;
         }
         s->peekPending = false;
+    }
+
+    // The dispatch-skip probe's spec: up to four 16-digit hex hashes (the
+    // census's ch= column), comma separated; "ch:" prefixes tolerated since
+    // that is how the column spells them. Refused whole on any parse doubt,
+    // the census_skip discipline.
+    {
+        const std::string spec =
+            cfg.getString("advanced.census_skip_dispatch", "");
+        if (spec.length() < sizeof(s->dispatchSkipSpec) &&
+            spec != s->dispatchSkipSpec) {
+            memcpy(s->dispatchSkipSpec, spec.c_str(), spec.length() + 1);
+            s->dispatchSkipCount = 0;
+            s->dispatchSkipNoted = false;
+            const char* p = spec.c_str();
+            bool ok = true;
+            while (*p && s->dispatchSkipCount < 4) {
+                while (*p == ' ' || *p == ',' || *p == '\t') ++p;
+                if (!*p) break;
+                if ((p[0] == 'c' || p[0] == 'C') && (p[1] == 'h' || p[1] == 'H') &&
+                    p[2] == ':') {
+                    p += 3;
+                }
+                char* end = nullptr;
+                const unsigned long long h = _strtoui64(p, &end, 16);
+                if (end == p || h == 0) {
+                    ok = false;
+                    break;
+                }
+                s->dispatchSkip[s->dispatchSkipCount++] = h;
+                p = end;
+            }
+            while (*p == ' ' || *p == ',' || *p == '\t') ++p;
+            if (!ok || *p) {
+                Log::get().note(
+                    "dispatch skip: \"%s\" is not up to four 16-digit hex "
+                    "hashes (the census's ch= column); the whole spec is "
+                    "refused rather than half-applied.",
+                    spec.c_str());
+                s->dispatchSkipCount = 0;
+            } else if (s->dispatchSkipCount) {
+                Log::get().note(
+                    "dispatch skip ARMED: %u compute shader(s) will NOT be "
+                    "forwarded while this is set. The scene may look very "
+                    "wrong -- that is the probe working. Clear the setting "
+                    "to restore.",
+                    s->dispatchSkipCount);
+            } else {
+                Log::get().note(
+                    "dispatch skip: cleared (%llu dispatch(es) were skipped "
+                    "while it was set).",
+                    static_cast<unsigned long long>(s->dispatchSkipped));
+            }
+        }
     }
 
     const float wasK = s->dampK;
