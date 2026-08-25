@@ -43,21 +43,38 @@ import re
 import sys
 
 LINE_RE = re.compile(r'^\[\d{2}:\d{2}:\d{2}\.\d{3}\] (DC .*)$')
-BEGIN_RE = re.compile(r'^DC begin census=(\d+) frames=(\d+) frame=(\d+)$')
+# Every census regex tolerates ADDITIVE trailing fields, and that is a scar,
+# not generosity: the DLL grew off=/copies= on its frame and end lines and
+# offscreen= on its begin line (2026-08-24, the FSS hunt) while these
+# anchors still demanded the old text, so a current log parsed as ZERO
+# censuses -- and the self-test stayed green because it synthesised its own
+# old-format lines instead of the emitter's. The self-test now carries one
+# census in each format; a field that changes MEANING still has to fail
+# here, but a field that is merely NEW must not cost a session again.
+BEGIN_RE = re.compile(r'^DC begin census=(\d+) frames=(\d+) frame=(\d+)'
+                      r'(?: \S+=\S+)*$')
 # The IA/VS tail is optional: the DLL leaves it off when its probe faulted or
 # its budget is spent, and censuses captured before the tail existed have none
 # at all. Both must keep parsing -- a tool that rejects an old log cannot read
-# the sessions already paid for.
+# the sessions already paid for. q= is the shared event ordinal (draws,
+# copies, dispatches, one counter); positional, per-capture, and so no part
+# of a signature.
 DRAW_RE = re.compile(r'^DC (\d+) #(\d+) ([A-Z]) n=(\d+) i=(\d+) '
                      r'r=(\S+) d=(\S+) c=(\S+) s=(\S+),(\S+),(\S+),(\S+)'
                      r'(?: vs=(\S+)(?: vh=([0-9A-Fa-f]+))? vb=(\S+) '
-                     r'sd=(\d+) of=(\d+) tp=(\d+))?$')
-FRAME_RE = re.compile(r'^DC frame (\d+) draws=(\d+)$')
-ID_TEX_RE = re.compile(r'^DC id @(\d+) tex (\d+)x(\d+) fmt=(\d+)$')
-ID_BUF_RE = re.compile(r'^DC id @(\d+) buf (\d+)$')
+                     r'sd=(\d+) of=(\d+) tp=(\d+))?(?: q=\d+)?$')
+FRAME_RE = re.compile(r'^DC frame (\d+) draws=(\d+)(?: \S+=\d+)*$')
+# res= is the underlying resource's identity -- what connects an SRV @id to
+# an RTV @id over the same texture WITHIN one census. Parsed past here
+# because it is per-session noise BETWEEN censuses, exactly like the pointer
+# ordinals the signature already excludes.
+ID_TEX_RE = re.compile(r'^DC id @(\d+) tex (\d+)x(\d+) fmt=(\d+)'
+                       r'(?: res=\S+)?$')
+ID_BUF_RE = re.compile(r'^DC id @(\d+) buf (\d+)(?: res=\S+)?$')
 ID_UNK_RE = re.compile(r'^DC id @(\d+) \?$')
-END_RE = re.compile(r'^DC end census=(\d+) draws=(\d+) lines=(\d+) '
-                    r'interned=(\d+) overflow=(\d+) truncated=(\d+)$')
+END_RE = re.compile(r'^DC end census=(\d+) draws=(\d+)(?: \S+=\d+)*? '
+                    r'lines=(\d+) interned=(\d+) overflow=(\d+) '
+                    r'truncated=(\d+)$')
 
 
 class Census(object):
@@ -348,23 +365,38 @@ def self_test():
     # vertex buffer and a strip topology -- the shape of a pass that
     # synthesises its corners in the shader, which is the case the curved
     # screen work has to be able to recognise.
-    b = ['DC begin census=2 frames=3 frame=2000']
+    #
+    # This census is written in the CURRENT emitter's format -- offscreen= on
+    # the begin line, q= on draw lines, off=/copies=/disp= on the frame and
+    # end lines, res= on id lines -- while census a above stays in the
+    # pre-2026-08-24 format. The pairing is the point: the DLL once grew its
+    # lines while the anchored regexes here demanded the old text, a current
+    # log parsed as zero censuses, and this self-test stayed green because
+    # every line in it was the OLD format. Both vintages must parse, from one
+    # test, forever.
+    b = ['DC begin census=2 frames=3 frame=2000 offscreen=yes']
     for f in range(3):
         b += ['DC %d #%d I n=5000 i=24 r=@1 d=@2 c=@9 s=@3,-,-,- '
-              'vs=@7 vb=@8 sd=32 of=0 tp=4' % (f, 1),
-              'DC %d #%d I n=6 i=1 r=@1 d=- c=@9 s=@4,-,-,-' % (f, 2),
+              'vs=@7 vb=@8 sd=32 of=0 tp=4 q=0' % (f, 1),
+              'DC %d #%d I n=6 i=1 r=@1 d=- c=@9 s=@4,-,-,- q=1' % (f, 2),
               'DC %d #%d D n=4 i=1 r=@1 d=- c=@9 s=@5,-,-,- '
-              'vs=@7 vb=- sd=0 of=0 tp=5' % (f, 610),
+              'vs=@7 vb=- sd=0 of=0 tp=5 q=2' % (f, 610),
               'DC %d #%d D n=4 i=1 r=@6 d=- c=@9 s=tex512x64f28,-,-,- '
-              'vs=@10 vb=- sd=0 of=0 tp=5' % (f, 611)]
+              'vs=@10 vb=- sd=0 of=0 tp=5 q=3' % (f, 611)]
         if f == 1:
-            b += ['DC %d #99 I n=12 i=1 r=@1 d=- c=@9 s=@4,-,-,-' % f]
-        b += ['DC frame %d draws=%d' % (f, 5 if f == 1 else 4)]
-    b += ['DC id @1 tex 1832x1920 fmt=87', 'DC id @2 tex 1832x1920 fmt=45',
-          'DC id @3 tex 4096x4096 fmt=98', 'DC id @4 tex 2048x2048 fmt=28',
-          'DC id @5 tex 512x64 fmt=28', 'DC id @6 tex 1832x1920 fmt=87',
-          'DC id @9 buf 256', 'DC id @7 ?', 'DC id @8 buf 96', 'DC id @10 ?',
-          'DC end census=2 draws=13 lines=13 interned=10 overflow=1 truncated=0']
+            b += ['DC %d #99 I n=12 i=1 r=@1 d=- c=@9 s=@4,-,-,- q=4' % f]
+        b += ['DC frame %d draws=%d off=0 copies=2 disp=1' % (
+            f, 5 if f == 1 else 4)]
+    b += ['DC id @1 tex 1832x1920 fmt=87 res=000001B2C3D40000',
+          'DC id @2 tex 1832x1920 fmt=45 res=000001B2C3D48000',
+          'DC id @3 tex 4096x4096 fmt=98 res=000001B2C3D50000',
+          'DC id @4 tex 2048x2048 fmt=28 res=000001B2C3D58000',
+          'DC id @5 tex 512x64 fmt=28 res=000001B2C3D60000',
+          'DC id @6 tex 1832x1920 fmt=87 res=000001B2C3D68000',
+          'DC id @9 buf 256 res=000001B2C3D70000', 'DC id @7 ?',
+          'DC id @8 buf 96 res=000001B2C3D78000', 'DC id @10 ?',
+          'DC end census=2 draws=13 off=0 copies=6 disp=3 lines=13 '
+          'interned=10 overflow=1 truncated=0']
 
     # Through LINE_RE, exactly as a file would be read: the timestamp-prefix
     # regex is part of what is being tested, and stripping the prefix by hand
