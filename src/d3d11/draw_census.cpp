@@ -417,9 +417,41 @@ static void recordDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
                     st.stride, st.offset, st.topology);
     }
 
-    Log::get().note("%s %u #%u %c n=%u i=%u r=%s d=%s c=%s s=%s,%s,%s,%s%s q=%u",
+    // PS slots 4-7, read straight off the context the way the IA tail is.
+    //
+    // WHY (2026-08-25, the black squares): the census has only ever recorded
+    // sampler slots 0-3, so every "the composites' inputs are identical"
+    // claim this hunt produced was a claim about FOUR slots. The FSS reveal
+    // then turned out to be TILED and PER-EYE -- black squares filling in,
+    // seen in one eye and not the other -- and a per-eye tile map bound at
+    // t4 or above was invisible to every capture this file ever made, while
+    // the DCX lines were recording the per-eye compute chain that builds
+    // one. Absent tokens mean the probe did not answer, never "nothing
+    // bound", exactly as the IA tail spells it.
+    char xt[112] = "";
+    if (st.ok) {
+        ID3D11ShaderResourceView* xs[4] = {};
+        bool got = false;
+        guardedBudget(g_iaBudget, [&] {
+            ctx->PSGetShaderResources(4, 4, reinterpret_cast<ID3D11ShaderResourceView**>(xs));
+            got = true;
+        });
+        if (got) {
+            char x0b[24], x1b[24], x2b[24], x3b[24];
+            _snprintf_s(xt, sizeof(xt), _TRUNCATE, " x=%s,%s,%s,%s",
+                        bindingToken(xs[0], Kind::kView, x0b, sizeof(x0b)),
+                        bindingToken(xs[1], Kind::kView, x1b, sizeof(x1b)),
+                        bindingToken(xs[2], Kind::kView, x2b, sizeof(x2b)),
+                        bindingToken(xs[3], Kind::kView, x3b, sizeof(x3b)));
+        }
+        for (ID3D11ShaderResourceView* v : xs) {
+            if (v) v->Release();
+        }
+    }
+
+    Log::get().note("%s %u #%u %c n=%u i=%u r=%s d=%s c=%s s=%s,%s,%s,%s%s%s q=%u",
                     tag, g_frameOrdinal, index, kind, count, instances, r, d, c,
-                    s0, s1, s2, s3, tail, q);
+                    s0, s1, s2, s3, tail, xt, q);
 
     // The CB watch, after the draw's own line so a DCW dump always follows
     // the draw it belongs to. Any recorded draw can match -- DC for the FSS

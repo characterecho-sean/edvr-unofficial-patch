@@ -62,7 +62,8 @@ BEGIN_RE = re.compile(r'^DC begin census=(\d+) frames=(\d+) frame=(\d+)'
 DRAW_RE = re.compile(r'^DC (\d+) #(\d+) ([A-Z]) n=(\d+) i=(\d+) '
                      r'r=(\S+) d=(\S+) c=(\S+) s=(\S+),(\S+),(\S+),(\S+)'
                      r'(?: vs=(\S+)(?: vh=([0-9A-Fa-f]+))? vb=(\S+) '
-                     r'sd=(\d+) of=(\d+) tp=(\d+))?(?: q=\d+)?$')
+                     r'sd=(\d+) of=(\d+) tp=(\d+))?'
+                     r'(?: x=\S+(?:,\S+){3})?(?: q=\d+)?$')
 FRAME_RE = re.compile(r'^DC frame (\d+) draws=(\d+)(?: \S+=\d+)*$')
 # res= is the underlying resource's identity -- what connects an SRV @id to
 # an RTV @id over the same texture WITHIN one census. Parsed past here
@@ -377,7 +378,7 @@ def self_test():
     b = ['DC begin census=2 frames=3 frame=2000 offscreen=yes']
     for f in range(3):
         b += ['DC %d #%d I n=5000 i=24 r=@1 d=@2 c=@9 s=@3,-,-,- '
-              'vs=@7 vb=@8 sd=32 of=0 tp=4 q=0' % (f, 1),
+              'vs=@7 vb=@8 sd=32 of=0 tp=4 x=@4,-,-,- q=0' % (f, 1),
               'DC %d #%d I n=6 i=1 r=@1 d=- c=@9 s=@4,-,-,- q=1' % (f, 2),
               'DC %d #%d D n=4 i=1 r=@1 d=- c=@9 s=@5,-,-,- '
               'vs=@7 vb=- sd=0 of=0 tp=5 q=2' % (f, 610),
