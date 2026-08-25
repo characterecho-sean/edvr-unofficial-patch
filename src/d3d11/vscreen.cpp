@@ -25,6 +25,7 @@
 #include "panel_quad.h"
 #include "device_hook.h"  // contextHookModeFor
 #include "draw_census.h"
+#include "fss_panel.h"
 #include "fss_res.h"
 #include "fss_scan.h"
 #include "fov_probe.h"
@@ -1097,7 +1098,10 @@ enum class DrawVerdict {
     kGlareClamp, kGlareSteady, kParticle,
     // The FSS scan dissolve held uniform (fss_scan.h): a body-layer draw
     // binding the 16x16 matrix, forwarded wrapped in fssScanBegin/End.
-    kFssScan
+    kFssScan,
+    // The FSS panel composite pair (fss_panel.h): forwarded through the
+    // replacement vertex shaders, wrapped in fssPanelBegin/End.
+    kFssPanel
 };
 
 // kind, count and instances describe the draw for the census and the census
@@ -1159,6 +1163,7 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         !headOffsetGateWantsPanel() && s->censusSkipCount == 0 &&
         s->censusSkipRangeCount == 0 && s->censusSkipOffCount == 0 &&
         s->censusAutoW == 0 && !fssResActive() && !fssScanWantsDraws() &&
+        !fssPanelWantsDraws() &&
         !remlokWantsDraws() && !holoWantsDraws() && !witchstarWantsDraws() &&
         !sunglareWantsDraws() && !cbPeekEnabled() && !billboardWantsDraws() &&
         !drawCensusArmed() && !panelQuadWants() && !panelCurveWants() &&
@@ -1426,6 +1431,14 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     // The loading hologram's pattern fix, same placement for the same reason.
     if (holoWantsDraws() && holoOnEyeDraw(kind, count, instances)) {
         return DrawVerdict::kHolo;
+    }
+
+    // The FSS panel composite pair, recognised by vertex-shader hash after
+    // the cheap kind/count gate. A holo-true draw can never be one of these
+    // -- different shaders -- so the order between the two is taste.
+    if (fssPanelWantsDraws() &&
+        fssPanelOnEyeDraw(self, kind, count, instances)) {
+        return DrawVerdict::kFssPanel;
     }
 
     // The witchspace star, called for EVERY eye draw while enabled -- its
@@ -2008,6 +2021,7 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     }
     if (v == DrawVerdict::kRemlok) remlokScissorBegin(self);
     if (v == DrawVerdict::kFssScan) fssScanBegin(self);
+    if (v == DrawVerdict::kFssPanel) fssPanelBegin(self);
     if (v == DrawVerdict::kHolo) holoBegin(self);
     if (v == DrawVerdict::kWitchstar) witchstarBegin(self);
     if (v == DrawVerdict::kBillboard) billboardBegin(self);
@@ -2019,6 +2033,7 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     if (v == DrawVerdict::kBillboard) billboardEnd(self);
     if (v == DrawVerdict::kWitchstar) witchstarEnd(self);
     if (v == DrawVerdict::kHolo) holoEnd(self);
+    if (v == DrawVerdict::kFssPanel) fssPanelEnd(self);
     if (v == DrawVerdict::kFssScan) fssScanEnd(self);
     if (v == DrawVerdict::kRemlok) remlokScissorEnd(self);
 }
@@ -2552,6 +2567,7 @@ void vScreenRefreshConfig() {
     remlokConfigure(cfg);
     holoConfigure(cfg);
     fssScanConfigure(cfg);
+    fssPanelConfigure(cfg);
     witchstarConfigure(cfg);
     sunglareConfigure(cfg);
     exposureConfigure(cfg);
@@ -3261,6 +3277,7 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     remlokConfigure(cfg);
     holoConfigure(cfg);
     fssScanConfigure(cfg);
+    fssPanelConfigure(cfg);
     witchstarConfigure(cfg);
     sunglareConfigure(cfg);
     exposureConfigure(cfg);
@@ -3444,6 +3461,7 @@ void shutdownVScreenFixes() {
     remlokShutdown();
     holoShutdown();
     fssScanShutdown();
+    fssPanelShutdown();
     billboardShutdown();
     g_state->hook.uninstall();
 }

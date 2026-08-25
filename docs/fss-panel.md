@@ -50,19 +50,24 @@ half-eye layer and its own dedicated composite, per the scanner doc.)
 
 ## The feature ladder
 
-1. **Recognition.** The composite pair is identifiable by vertex-shader
-   hash plus a chrome-class texture at PS slot 1 (ratio-of-panel sizing,
-   any headset). Cheap; everything below stands on it.
-2. **Panel distance for the FSS.** The quad's placement lives in instance
+1. **Recognition — BUILT 2026-08-25.** The composite pair is matched by
+   vertex-shader content hash behind a cheap X/6-index/1-instance gate
+   (fss_panel.cpp); a game update that rebuilds the shaders leaves the fix
+   inert with a log line rather than wrong.
+2. **Panel distance for the FSS — BUILT 2026-08-25 (`fix.fss_panel_distance`,
+   0 = inherit `panel_distance`).** The quad's placement lives in instance
    data, not in a substitutable constant buffer — but the shader is
-   camera-relative, so a REPLACEMENT VERTEX SHADER that scales the
-   camera-relative position by the existing `panel_distance` factor before
-   projection gives the on-foot feature exactly, through the paved
-   shader_swap road (the particle and sun-glare fixes transcribed shaders
-   of this same family, packed inputs and all). Both shaders need the
-   treatment — prepass and color pass must agree or the depth test eats
-   the quad. B018 is small (position-only) and is the natural first
-   transcription.
+   camera-relative, so REPLACEMENT VERTEX SHADERS (fss_panel_vs.h,
+   mechanical transcriptions of both, desk-compiled with input and output
+   signatures verified identical to the originals) scale the
+   camera-relative position before projection: the screen moves along the
+   line of sight, angular size unchanged. Both shaders swap together —
+   prepass and colour pass must agree or the depth test eats the quad —
+   and a factor change recompiles the pair through shader_swap. The one
+   deliberate simplification: the original rotates its tangent and normal
+   through zxy/yzx-permuted copies of the quaternion formula and
+   un-permutes at the consumers; the permutations cancel, verified by
+   tracing every swizzle, so the transcription rotates them straight.
 3. **Chrome resolution.** Undo the 213/320 derate by creating the chrome
    surfaces at full panel size. The fss_res machinery is the template, but
    generalised: per-texture scale factors (320/213 is not the x2 the body
@@ -70,8 +75,7 @@ half-eye layer and its own dedicated composite, per the scanner doc.)
    families.
 4. **Curvature.** A six-vertex quad cannot bend; curvature needs geometry
    substitution (the panel_curve strip) driven through the transcribed
-   shader's placement math. Parked until 2 lands and proves the
-   transcription.
+   shader's placement math — which step 2's transcription now provides.
 
 ## Standing notes
 
