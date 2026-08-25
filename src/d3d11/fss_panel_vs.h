@@ -9,16 +9,24 @@
 // control. A transcription can be checked instead of trusted: compile it,
 // disassemble it, compare.
 //
-// ONE thing is changed in each, and it is the feature:
+// ONE thing is changed in each, and it is the feature -- in CLIP SPACE,
+// which the first field flight taught the hard way. v1 scaled the world
+// position, assuming cb1[275] was the eye; it is Elite's world-rebase
+// origin, near the camera but not at it, and scaling toward a point that
+// is not the projection centre translates the quad on screen (the screen
+// slid up and left, 2026-08-25). v2 scales where the geometry is exact by
+// construction: for any point, the ray from the eye is fixed in NDC, and
+// the point at fraction k of the eye distance has clip coordinates
 //
-//     world = rotate(q, vertex) * scale + (instancePos - cb1[275].xyz)
-//     world *= EDVR_FSS_DIST;                            // <- added
-//     o = viewproj * world
+//     clip' = (k*C.x, k*C.y, b + k*(C.z - b), k*C.w)
 //
-// The pipeline is camera-relative (cb1[275] is the eye), so scaling the
-// final position moves the scanner's screen along the line of sight:
-// depth changes, angular size does not -- the panel comes closer without
-// growing. EDVR_FSS_DIST arrives as a compile-time macro and the pair is
+// where C is the stock clip position and b is the clip z at the eye
+// itself -- recovered from the fused view-projection rows alone, because
+// the projection's w row is the view depth: the z row equals s times the
+// w row plus (0,0,0,b), so b = zrow.w - s*wrow.w with s read off any
+// component pair. NDC x and y are C.x/C.w exactly, per eye, at every k:
+// the screen moves along each eye's own line of sight and nowhere else.
+// EDVR_FSS_DIST arrives as a compile-time macro and the pair is
 // recompiled when the setting moves; both shaders carry the same factor
 // or the depth prepass and the colour pass disagree and the quad eats
 // itself.
@@ -106,6 +114,24 @@ float3 edvrQuatRotate(float4 q, float3 p) {
     return r;
 }
 
+// The distance move, in clip space (see the header comment): scale x, y
+// and w by k, and z about its value at the eye, which the fused rows
+// yield as b = zrow.w - s*wrow.w with s = zrow/wrow on the largest
+// w-row component.
+float4 edvrClipAtDistance(float4 c, float4 zrow, float4 wrow, float k) {
+    float3 aw = abs(wrow.xyz);
+    float s;
+    if (aw.x >= aw.y && aw.x >= aw.z) {
+        s = zrow.x / wrow.x;
+    } else if (aw.y >= aw.z) {
+        s = zrow.y / wrow.y;
+    } else {
+        s = zrow.z / wrow.z;
+    }
+    float b = zrow.w - s * wrow.w;
+    return float4(k * c.x, k * c.y, b + k * (c.z - b), k * c.w);
+}
+
 // The four-bone blend: up to four (index, weight) byte pairs, weights in
 // 1/255ths, rows accumulated then applied. Returns the blended 3x4.
 void edvrBlendBones(uint boneBase, uint idxPacked, uint wtPacked,
@@ -151,15 +177,15 @@ float4 main(VSIn i) : SV_POSITION {
     float4 q = edvrDecodeQuat(inst.quatXY, inst.quatZW);
     float3 world = edvrQuatRotate(q, p) * inst.scale + camRel;
 
-    world *= EDVR_FSS_DIST;   // EDVR: the panel distance, the one change
-
     float4 w4 = float4(world, 1.0);
     float4 o;
     o.x = dot(cb0[4], w4);
     o.y = dot(cb0[5], w4);
     o.z = dot(cb0[6], w4);
     o.w = dot(cb0[7], w4);
-    return o;
+    // EDVR: the panel distance, the one change -- in clip space, so each
+    // eye's angular position is untouched by construction.
+    return edvrClipAtDistance(o, cb0[6], cb0[7], EDVR_FSS_DIST);
 }
 )HLSL";
 
@@ -253,8 +279,6 @@ VSOut main(VSIn i) {
     float3 wt = edvrQuatRotate(q, t);
     float3 wn = edvrQuatRotate(q, n);
 
-    world *= EDVR_FSS_DIST;   // EDVR: the panel distance, the one change
-
     float4 w4 = float4(world, 1.0);
     o.o2.x = dot(cb0[9],  w4);
     o.o2.y = dot(cb0[10], w4);
@@ -263,6 +287,9 @@ VSOut main(VSIn i) {
     o.o5.y = dot(cb0[5], w4);
     o.o5.z = dot(cb0[6], w4);
     o.o5.w = dot(cb0[7], w4);
+    // EDVR: the panel distance, the one change -- clip space only; the
+    // world-space outputs above stay exactly stock.
+    o.o5 = edvrClipAtDistance(o.o5, cb0[6], cb0[7], EDVR_FSS_DIST);
     o.o3.x = dot(wn, cb0[9].xyz);
     o.o3.y = dot(wn, cb0[10].xyz);
     o.o3.z = dot(wn, cb0[11].xyz);

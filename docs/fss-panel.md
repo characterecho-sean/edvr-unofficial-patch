@@ -68,6 +68,17 @@ half-eye layer and its own dedicated composite, per the scanner doc.)
    through zxy/yzx-permuted copies of the quaternion formula and
    un-permutes at the consumers; the permutations cancel, verified by
    tracing every swizzle, so the transcription rotates them straight.
+
+   Two field lessons, same day. First: the pair's hashes name the engine's
+   GENERAL world-quad pipeline — the loading screen's text quad moved too
+   — so recognition is gated on the scanner's body layer having drawn
+   within two frames. Second: v1 scaled the world position, assuming
+   cb1[275] was the eye; it is the world-rebase origin, near the camera
+   but not at it, and the screen slid up-left. v2 scales in CLIP space —
+   clip' = (kx, ky, b + k(z−b), kw) with b the clip-z at the eye,
+   recovered from the fused rows (b = zrow.w − s·wrow.w, s = zrow/wrow) —
+   which preserves each eye's angular position by construction and leaves
+   every world-space output stock.
 3. **Chrome resolution.** Undo the 213/320 derate by creating the chrome
    surfaces at full panel size. The fss_res machinery is the template, but
    generalised: per-texture scale factors (320/213 is not the x2 the body
