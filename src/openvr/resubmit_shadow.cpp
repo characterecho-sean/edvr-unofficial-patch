@@ -23,6 +23,7 @@ constexpr uint32_t kMaxFaults = 8;
 
 struct State {
     bool enabled = true;
+    bool snapshot = false;   // experimental.submit_snapshot; live-reloaded
     ID3D11Texture2D*     shadow[2] = {};
     D3D11_TEXTURE2D_DESC desc[2] = {};
     bool                 valid[2] = {};
@@ -79,17 +80,34 @@ bool budgetSpent() {
 void resubmitShadowConfigure() {
     g_s.enabled =
         Config::get().getBool("advanced.transition_flash_resubmit", true);
+    const bool was = g_s.snapshot;
+    g_s.snapshot =
+        Config::get().getBool("experimental.submit_snapshot", false);
+    // Said on every flip, because the flip IS the experiment: the player is
+    // in a headset watching a ring build, and this line is their receipt
+    // that the edit took.
+    if (g_s.snapshot != was) {
+        Log::get().note(
+            g_s.snapshot
+                ? "submit snapshot ON: every forwarded frame is delivered to "
+                  "the compositor as a per-eye copy taken at Submit, so both "
+                  "eyes' content is latched at the same point in the frame."
+                : "submit snapshot OFF: live eye textures are submitted, as "
+                  "stock EDVR does.");
+    }
 }
 
-void resubmitShadowNoteForwarded(uint32_t eye, void* d3d11Texture) {
+bool resubmitShadowSnapshotWanted() { return g_s.snapshot; }
+
+bool resubmitShadowNoteForwarded(uint32_t eye, void* d3d11Texture) {
     State& s = g_s;
-    if (!s.enabled || eye > 1 || !d3d11Texture) return;
-    if (budgetSpent()) return;
+    if ((!s.enabled && !s.snapshot) || eye > 1 || !d3d11Texture) return false;
+    if (budgetSpent()) return false;
 
     D3D11_TEXTURE2D_DESC d{};
     if (!descOf(d3d11Texture, &d)) {
         ++s.faults;
-        return;
+        return false;
     }
 
     // Release-before-recreate on any shape change -- the ourCb lifecycle at
@@ -108,7 +126,7 @@ void resubmitShadowNoteForwarded(uint32_t eye, void* d3d11Texture) {
         });
         if (!dev) {
             ++s.faults;
-            return;
+            return false;
         }
         ID3D11Texture2D* made = nullptr;
         const HRESULT hr = dev->CreateTexture2D(&d, nullptr, &made);
@@ -122,7 +140,7 @@ void resubmitShadowNoteForwarded(uint32_t eye, void* d3d11Texture) {
                     "succeeds. Said once; the totals line carries the count.",
                     d.Width, d.Height, static_cast<unsigned long>(hr));
             }
-            return;
+            return false;
         }
         s.shadow[eye] = made;
         s.desc[eye] = d;
@@ -134,11 +152,11 @@ void resubmitShadowNoteForwarded(uint32_t eye, void* d3d11Texture) {
     // across frames would add nothing but a shutdown ordering problem.
     ID3D11Device* dev = nullptr;
     s.shadow[eye]->GetDevice(&dev);
-    if (!dev) return;
+    if (!dev) return false;
     ID3D11DeviceContext* ctx = nullptr;
     dev->GetImmediateContext(&ctx);
+    bool copied = false;
     if (ctx) {
-        bool copied = false;
         guarded("resubmit/copy", [&] {
             ctx->CopyResource(s.shadow[eye],
                               static_cast<ID3D11Texture2D*>(d3d11Texture));
@@ -152,6 +170,13 @@ void resubmitShadowNoteForwarded(uint32_t eye, void* d3d11Texture) {
         ctx->Release();
     }
     dev->Release();
+    return copied;
+}
+
+void* resubmitShadowCurrent(uint32_t eye) {
+    State& s = g_s;
+    if (eye > 1 || !s.valid[eye]) return nullptr;
+    return s.shadow[eye];
 }
 
 void* resubmitShadowForWithhold(uint32_t eye, void* liveD3d11Texture) {

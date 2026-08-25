@@ -244,19 +244,56 @@ serving many draws through a moving offset.
 every recorded draw running that vertex shader dumps `DCW` lines: the
 current contents of its VS b0 and PS b0 — refreshed CPU-side from the
 Map/Unmap and UpdateSubresource tees, so a dump is exactly the bytes the
-GPU reads for that draw — with the draw's q. For the FSS: watch
-`953C8123AD8DC13B` (the composite), fly the same zoom, and diff eye A's
-dump against eye B's within each frame:
+GPU reads for that draw — with the draw's q.
 
-- **A field differs and steps monotonically during the build** → the split
-  is measured and named, and the fix is the panel-distance mechanism
-  applied here: capture the first eye's write, hand the second eye's
-  composite the same bytes (or the same field), one draw per frame, FSS
-  only.
-- **The dumps are identical** → the game side is closed end to end, and
-  the hunt moves to the openvr half with per-Submit content hashes. Not
-  expected: something makes the eyes differ, and everything else is now
-  measured equal.
+### Round three: the constants are clean too, and the game side is CLOSED
+
+Flown 2026-08-25 (log `edvr_gfx_20260825_125743`), 59 frame-pairs of DCW
+dumps across two zooms. The composite binds **no pixel-stage b0 at all**;
+its 208-byte VS block was rewritten between the two eye passes every frame,
+and the diff of eye A's bytes against eye B's says the rewrite is exactly
+what it should be:
+
+- f[16..19] — one matrix row plus translation, the ±35-unit eye offset —
+  differs every frame: the per-eye placement transform.
+- f[39], f[43], f[47] — the same offset expressed in two more spaces.
+- A handful of frames differ at 1e-7 in shared fields: float jitter from
+  recomputing the same pose, not content.
+- **Nothing else, ever.** No reveal field, no progress scalar, nothing
+  steps across the build, and the eye order never swaps (first composite
+  is the +35 eye in 59 of 59 frames).
+
+With round two this closes the game side end to end: both eyes composite
+the same completed body texture through correct per-eye transforms, every
+frame, all the way through the build. **The split the headset shows is not
+in what the game renders. What no CPU-side capture can see is WHEN the
+compositor samples each eye's texture** — Elite reuses one texture per eye
+with no fence, the second eye's GPU work is issued last, and under build
+load (the streaming burst is exactly that) the compositor can catch eye A
+finished and eye B still drawing: one eye persistently a frame ahead,
+monocularly real, needing the build and a headset. Every part of the
+report, one channel left.
+
+### The candidate fix: snapshot submission
+
+`experimental.submit_snapshot = 1` (2026-08-25, openvr side, live-
+reloadable). Every forwarded frame is delivered to the compositor as a
+per-eye COPY taken at Submit — the same copies the transition-flash
+resubmit already makes every frame, now handed over instead of the live
+textures. The two copies are enqueued back to back behind the frame's
+rendering, so whatever the compositor's timing, both eyes' delivered
+content is latched at the same point: split staleness becomes symmetric
+staleness, the pair latch's CONSISTENT-LATE-BEATS-SPLIT rule applied to
+pixels. Any refusal (shape change, fault, budget) falls through to the
+live texture for that eye-submit, exactly as stock.
+
+The in-headset A/B is the test: zoom a ringed body with it on, flip it off
+mid-session (the ini is live; the log acknowledges each flip), zoom again.
+Split gone with it on and back with it off → mechanism confirmed, fix
+ships. Split unchanged → the presentation channel closes too, and what
+remains is the report's procedure (a sequential monocular check during an
+evolving build sees different build moments in each eye by construction —
+worth one deliberate re-test with the eye order reversed).
 
 The half-resolution fix (Finding 2) is unblocked either way: the writer
 inventory came back all-draws (no copies land in the body target), so the
@@ -371,9 +408,9 @@ all.
 
 ## Open
 
-- The CB-watch flight: same zoom with `census_cb_watch = 953C8123AD8DC13B`,
-  then diff the per-eye DCW dumps. The equalizer fix's exact shape follows
-  from which field steps.
+- The snapshot A/B flight: zoom with `submit_snapshot = 1`, flip it off
+  mid-session, zoom again. The one in-headset observation left that
+  decides the whole arc.
 - The resolution fix against `2170x2142` is not built — but round two
   unblocked it: the body target takes only draws, so inflation plus a
   viewport scale is the whole job.

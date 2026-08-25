@@ -864,6 +864,31 @@ vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
         vr::Texture_t fwd = *texture;
         const vr::VRTextureBounds_t* fwdBounds = effBounds;
         vr::VRTextureBounds_t fwdStorage;
+        // Snapshot submission (experimental.submit_snapshot): refresh this
+        // eye's copy NOW -- the CopyResource lands on the immediate context
+        // behind everything this frame drew -- and hand the compositor the
+        // copy instead of the live texture. Elite reuses one texture per eye
+        // with no fence, so the compositor's read races the GPU per eye and
+        // can catch the first eye finished while the second is still
+        // drawing; two copies enqueued back to back here are latched at the
+        // same point instead. Only on a copy that landed THIS call: a stale
+        // copy for one eye is the asymmetry this mode exists to remove, so
+        // any refusal falls through to the live texture, both eyes alike.
+        //
+        // BEFORE the cull guard on purpose: in copy mode the guard crops
+        // from fwd.handle, and cropping from the snapshot keeps the one
+        // latch point.
+        bool snapped = false;
+        const uint32_t eyeIdx = eye == vr::Eye_Left ? 0u : 1u;
+        if (s->validated && resubmitShadowSnapshotWanted() && texture &&
+            texture->eType == vr::TextureType_DirectX && texture->handle &&
+            resubmitShadowNoteForwarded(eyeIdx, texture->handle)) {
+            void* snap = resubmitShadowCurrent(eyeIdx);
+            if (snap) {
+                fwd.handle = snap;
+                snapped = true;
+            }
+        }
         applyCullGuard(&fwd, &fwdBounds, &fwdStorage);
         const vr::EVRCompositorError result =
             s->realSubmit(self, eye, &fwd, fwdBounds, flags);
@@ -874,10 +899,17 @@ vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
         // completed frame (the same reasoning the private build's luminance
         // sampling rests on). The GAME's texture, not the guard's crop: the
         // shadow must hold the full frame so a withhold can crop it afresh.
-        if (s->validated && result == 0 && texture &&
+        //
+        // In snapshot mode the refresh already happened above, pre-submit,
+        // and doing it again would be a second copy of the same frame. The
+        // one semantic shift snapshot mode accepts: its refresh is not gated
+        // on realSubmit succeeding, so a rejected submit can leave the
+        // shadow holding a completed frame the compositor never showed --
+        // still a rendered frame, and a later withhold handing it over is
+        // indistinguishable from the classic case in a headset.
+        if (!snapped && s->validated && result == 0 && texture &&
             texture->eType == vr::TextureType_DirectX && texture->handle) {
-            resubmitShadowNoteForwarded(eye == vr::Eye_Left ? 0u : 1u,
-                                        texture->handle);
+            resubmitShadowNoteForwarded(eyeIdx, texture->handle);
         }
         return result;
     }
@@ -1038,6 +1070,9 @@ vr::EVRCompositorError hookedWaitGetPoses(void* self,
             // The cull guard's margin is tuned from inside a headset, so its
             // keys are live; mode changes take effect at the next boundary.
             systemHookConfigure();
+            // The snapshot toggle is an in-headset A/B experiment, so it is
+            // live too; the flip logs its own receipt.
+            resubmitShadowConfigure();
         }
         // The liveness pass, same cadence and same reason as the d3d11 half:
         // in-place patches sit on a table other tools can write, and under

@@ -26,15 +26,45 @@
 
 namespace edvr {
 
-// Reads advanced.transition_flash_resubmit. Call where the other openvr-side
-// config reads happen (install), before the first Submit.
+// Reads advanced.transition_flash_resubmit and experimental.submit_snapshot.
+// Call where the other openvr-side config reads happen -- install AND the
+// reload poll: the snapshot mode is an in-headset A/B experiment, and a
+// toggle that costs a relaunch per look is not an experiment anyone runs
+// twice.
 void resubmitShadowConfigure();
+
+// Does the forward path want every frame submitted as a snapshot?
+//
+// WHY (2026-08-25, the FSS ring split, round three). The game side measured
+// symmetric at every level: both eyes composite the same body texture, no
+// writes land between their reads, and the composite's constants differ
+// only as per-eye camera placement (the DCW dumps). What no capture can see
+// from the CPU is WHEN the compositor samples each eye's texture -- Elite
+// reuses one texture per eye with no fence, the second eye's GPU work is
+// issued last, and under build load the compositor can catch eye A finished
+// and eye B still drawing: one eye persistently a frame ahead, monocularly
+// real, exactly the report. Submitting a per-frame COPY of each eye latches
+// both eyes' delivered content at the same point in the frame: whatever the
+// compositor's timing, it reads completed copies enqueued back to back --
+// split staleness becomes symmetric staleness, which is the pair latch's
+// own CONSISTENT-LATE-BEATS-SPLIT rule applied to pixels.
+bool resubmitShadowSnapshotWanted();
 
 // After a Submit that was actually FORWARDED (TextureType_DirectX only):
 // refresh this eye's copy from the submitted texture. The copy is queued
 // after the game's rendering of that frame, so its contents are the
-// completed frame. eye is 0 (left) or 1 (right).
-void resubmitShadowNoteForwarded(uint32_t eye, void* d3d11Texture);
+// completed frame. eye is 0 (left) or 1 (right). Returns true when the copy
+// landed THIS call -- the snapshot path submits the copy only on a fresh
+// refresh, because handing the compositor a stale copy for one eye is the
+// exact asymmetry the mode exists to remove.
+bool resubmitShadowNoteForwarded(uint32_t eye, void* d3d11Texture);
+
+// The current copy, for snapshot submission. No counters, no shape probe --
+// the caller uses it immediately after a true NoteForwarded, which just
+// rebuilt the copy at the live shape. Null when there is none, and the
+// caller submits the live texture exactly as before: the mode must never be
+// worse than its absence.
+void* resubmitShadowCurrent(uint32_t eye);
 
 // On a withheld frame: the texture to submit in place of the live one, or
 // nullptr when classic withholding must happen this frame. NEVER copies --
