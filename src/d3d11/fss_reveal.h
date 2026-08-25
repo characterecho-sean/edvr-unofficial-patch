@@ -42,11 +42,14 @@ void fssRevealConfigure(Config& cfg);
 // One bool for the draw path's early-out set and the body-frame gate.
 bool fssRevealWantsDraws();
 
-// The Map/Unmap tee, called from vscreen's hooks while steady: the scene
-// block's writes keep the shadow current, so the snapshot at eye A's draw
-// is exactly the bytes eye A read.
+// The Map/Unmap and UpdateSubresource tees, called from vscreen's hooks
+// while steady: the scene block's writes keep the shadow current, so the
+// snapshot at eye A's draw is exactly the bytes eye A read. Both paths,
+// because the first flight proved assumptions about which one a buffer
+// uses cost whole sessions.
 void fssRevealNoteMap(void* resource, void* data);
 void fssRevealNoteUnmap(void* resource);
+void fssRevealNoteUpdate(void* resource, const void* data);
 
 // Called for eye draws behind the body-frame gate: matches the composite
 // (N n=6 i=1 + vh 953C8123AD8DC13B). True wraps the draw in Begin/End.

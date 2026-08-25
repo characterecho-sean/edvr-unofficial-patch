@@ -2140,6 +2140,9 @@ void STDMETHODCALLTYPE hookedUpdateSubresource(ID3D11DeviceContext* self,
         // the boxless whole-buffer update this call almost always is.
         drawCensusCbNoteUpdate(dst, data, 0);
     }
+    if (fssRevealWantsDraws() && !foreignContext(self)) {
+        fssRevealNoteUpdate(dst, data);
+    }
     g_state->realUpdateSubresource(self, dst, dstSub, box, data, rowPitch,
                                    depthPitch);
 }
