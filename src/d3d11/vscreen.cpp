@@ -1682,6 +1682,12 @@ HRESULT STDMETHODCALLTYPE hookedMap(ID3D11DeviceContext* self, ID3D11Resource* r
         return s->realMap(self, res, sub, type, flags, mapped);
     }
     const HRESULT hr = s->realMap(self, res, sub, type, flags, mapped);
+    // The census CB watch's half of the tee: while a census runs, it needs
+    // the mapped pointer of any buffer it is watching. One bool call when no
+    // census runs, two pointer compares inside when one does.
+    if (drawCensusArmed() && SUCCEEDED(hr) && mapped && mapped->pData) {
+        drawCensusCbNoteMap(res, mapped->pData);
+    }
     // Only the one buffer we care about, so this is a pointer compare on a very
     // hot path and nothing more.
     if (SUCCEEDED(hr) && mapped && sub == 0 && res == s->compositeCb) {
@@ -1817,6 +1823,10 @@ void STDMETHODCALLTYPE hookedUnmap(ID3D11DeviceContext* self, ID3D11Resource* re
         s->realUnmap(self, res, sub);
         return;
     }
+    // The census CB watch reads the write BEFORE the real Unmap, exactly as
+    // the tees below do and for the same reason: after it, the memory is no
+    // longer ours to look at.
+    if (drawCensusArmed()) drawCensusCbNoteUnmap(res);
     // Read before forwarding: after the real Unmap the memory is no longer ours
     // to look at.
     if (res == s->mappedResource && s->mappedData) {
@@ -1968,6 +1978,11 @@ void STDMETHODCALLTYPE hookedUpdateSubresource(ID3D11DeviceContext* self,
                        nullptr, 0, box != nullptr,
                        box ? box->left : 0, box ? box->top : 0,
                        box ? box->right : 0, box ? box->bottom : 0);
+        // A watched constant buffer written through this path instead of
+        // Map: the whole write is in hand, so the CB watch takes it here.
+        // 0 bytes means "up to the buffer's own size", which is right for
+        // the boxless whole-buffer update this call almost always is.
+        drawCensusCbNoteUpdate(dst, data, 0);
     }
     g_state->realUpdateSubresource(self, dst, dstSub, box, data, rowPitch,
                                    depthPitch);

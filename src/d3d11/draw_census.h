@@ -181,6 +181,37 @@ void drawCensusResolve(void* dst, uint32_t dstSub, void* src, uint32_t srcSub,
 // census runs.
 void drawCensusDispatch(uint32_t x, uint32_t y, uint32_t z);
 
+// The constant-buffer watch (2026-08-25, the FSS ring split, round two).
+//
+// The build-phase captures closed the texture channel: both eye composites
+// sample the same four resources and nothing writes any of them between the
+// two reads, sixty frames measured. What the census could NOT see is the one
+// input that is per-eye by construction: the CONTENTS of the constant
+// buffers the composite binds. Both eyes bind the same 208-byte object
+// (c=@70), which therefore must be rewritten between the passes -- and a
+// scan-reveal progress value stepping per WRITE rather than per FRAME would
+// show eye B a more-revealed body every frame of the build. That is the
+// last game-side channel, and this instrument reads it.
+//
+// advanced.census_cb_watch names a vertex-shader hash (the census's vh=).
+// While a census runs, every eye draw running that shader dumps a DCW line:
+// the current CPU-side shadow of its VS b0 and PS b0 contents -- refreshed
+// from the Map/Unmap tee, so the dump is exactly the bytes the GPU will
+// read for that draw -- with the draw's q, so eye A's dump and eye B's dump
+// pair off within the frame. Two dumps per eye per frame; the offline diff
+// names the stepping field, or proves the constants identical and closes
+// the game side entirely.
+
+// Map/Unmap tee, called from vscreen's hooks while a census is armed. Note
+// the mapped pointer at Map; at Unmap -- BEFORE the real Unmap, while the
+// memory is still the game's live write -- the census copies the watched
+// buffer's bytes into its shadow.
+void drawCensusCbNoteMap(void* resource, void* data);
+void drawCensusCbNoteUnmap(void* resource);
+
+// UpdateSubresource form of the same tee: the whole write is in hand.
+void drawCensusCbNoteUpdate(void* resource, const void* data, uint32_t bytes);
+
 // The frame edge, from vScreenFrameBoundary: starts a pending census, advances
 // a running one, finishes a spent one. frameNo is vscreen's frame counter,
 // logged so a census can be lined up against the rest of the log.
