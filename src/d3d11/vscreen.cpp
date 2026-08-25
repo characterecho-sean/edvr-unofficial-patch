@@ -26,6 +26,7 @@
 #include "device_hook.h"  // contextHookModeFor
 #include "draw_census.h"
 #include "fss_res.h"
+#include "fss_scan.h"
 #include "fov_probe.h"
 #include "glitch_frame.h"
 #include "holo_fix.h"
@@ -255,6 +256,10 @@ struct State {
     // session that never opens the scanner never pays it.
     uint32_t rtv0ResGen = 0;
     void*    rtv0Res = nullptr;
+    // Is the bound offscreen target the FSS body layer? Cached per binding
+    // generation for the scan-dissolve fix's gate.
+    uint32_t fssScanGen = 0;
+    bool     fssScanBody = false;
     bool sawClearState = false;
     bool sawExecuteCommandList = false;
 
@@ -1089,7 +1094,10 @@ void noteForeignDraw(ID3D11DeviceContext* self) {
 // every element's identity.
 enum class DrawVerdict {
     kNone, kPanel, kSkip, kRemlok, kHolo, kWitchstar, kBillboard,
-    kGlareClamp, kGlareSteady, kParticle
+    kGlareClamp, kGlareSteady, kParticle,
+    // The FSS scan dissolve held uniform (fss_scan.h): a body-layer draw
+    // binding the 16x16 matrix, forwarded wrapped in fssScanBegin/End.
+    kFssScan
 };
 
 // kind, count and instances describe the draw for the census and the census
@@ -1150,7 +1158,7 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     if (!s->distanceEnabled && !s->countForFlashFix &&
         !headOffsetGateWantsPanel() && s->censusSkipCount == 0 &&
         s->censusSkipRangeCount == 0 && s->censusSkipOffCount == 0 &&
-        s->censusAutoW == 0 && !fssResActive() &&
+        s->censusAutoW == 0 && !fssResActive() && !fssScanWantsDraws() &&
         !remlokWantsDraws() && !holoWantsDraws() && !witchstarWantsDraws() &&
         !sunglareWantsDraws() && !cbPeekEnabled() && !billboardWantsDraws() &&
         !drawCensusArmed() && !panelQuadWants() && !panelCurveWants() &&
@@ -1274,6 +1282,34 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
                         return DrawVerdict::kSkip;
                     }
                 }
+            }
+        }
+        // The scan-dissolve fix, after the probes for the probes' usual
+        // reason. Gated on the target being the BODY LAYER -- eye/2-sized,
+        // or one of fss_res's inflated textures -- cached per binding
+        // generation, so the slot scan runs for a handful of scanner draws
+        // and for nothing else in the game.
+        if (fssScanWantsDraws()) {
+            if (s->fssScanGen != rtvGen) {
+                s->fssScanGen = rtvGen;
+                s->fssScanBody = false;
+                ResourceInfo info;
+                if (bindingResolve(bindingGet(BindSlot::Rtv0), &info) &&
+                    info.isTexture2D) {
+                    if (fssResIsInflated(info.resource)) {
+                        s->fssScanBody = true;
+                    } else {
+                        uint32_t ew = 0, eh = 0;
+                        if (eyeTextureSize(&ew, &eh) &&
+                            (info.a == ew / 2 || info.a == (ew + 1) / 2) &&
+                            (info.b == eh / 2 || info.b == (eh + 1) / 2)) {
+                            s->fssScanBody = true;
+                        }
+                    }
+                }
+            }
+            if (s->fssScanBody && fssScanOnBodyDraw()) {
+                return DrawVerdict::kFssScan;
             }
         }
         return DrawVerdict::kNone;
@@ -1971,6 +2007,7 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
         }
     }
     if (v == DrawVerdict::kRemlok) remlokScissorBegin(self);
+    if (v == DrawVerdict::kFssScan) fssScanBegin(self);
     if (v == DrawVerdict::kHolo) holoBegin(self);
     if (v == DrawVerdict::kWitchstar) witchstarBegin(self);
     if (v == DrawVerdict::kBillboard) billboardBegin(self);
@@ -1982,6 +2019,7 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     if (v == DrawVerdict::kBillboard) billboardEnd(self);
     if (v == DrawVerdict::kWitchstar) witchstarEnd(self);
     if (v == DrawVerdict::kHolo) holoEnd(self);
+    if (v == DrawVerdict::kFssScan) fssScanEnd(self);
     if (v == DrawVerdict::kRemlok) remlokScissorEnd(self);
 }
 
@@ -2513,6 +2551,7 @@ void vScreenRefreshConfig() {
     fssResConfigure(cfg);
     remlokConfigure(cfg);
     holoConfigure(cfg);
+    fssScanConfigure(cfg);
     witchstarConfigure(cfg);
     sunglareConfigure(cfg);
     exposureConfigure(cfg);
@@ -3221,6 +3260,7 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     readCensusSkip(cfg, g_state);
     remlokConfigure(cfg);
     holoConfigure(cfg);
+    fssScanConfigure(cfg);
     witchstarConfigure(cfg);
     sunglareConfigure(cfg);
     exposureConfigure(cfg);
@@ -3403,6 +3443,7 @@ void shutdownVScreenFixes() {
     }
     remlokShutdown();
     holoShutdown();
+    fssScanShutdown();
     billboardShutdown();
     g_state->hook.uninstall();
 }
