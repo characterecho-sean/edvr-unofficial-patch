@@ -429,11 +429,14 @@ static void recordDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
     // one. Absent tokens mean the probe did not answer, never "nothing
     // bound", exactly as the IA tail spells it.
     char xt[112] = "";
+    char pt[32] = "";
     if (st.ok) {
         ID3D11ShaderResourceView* xs[4] = {};
+        ID3D11PixelShader* ps = nullptr;
         bool got = false;
         guardedBudget(g_iaBudget, [&] {
             ctx->PSGetShaderResources(4, 4, reinterpret_cast<ID3D11ShaderResourceView**>(xs));
+            ctx->PSGetShader(&ps, nullptr, nullptr);
             got = true;
         });
         if (got) {
@@ -443,15 +446,22 @@ static void recordDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
                         bindingToken(xs[1], Kind::kView, x1b, sizeof(x1b)),
                         bindingToken(xs[2], Kind::kView, x2b, sizeof(x2b)),
                         bindingToken(xs[3], Kind::kView, x3b, sizeof(x3b)));
+            // The PIXEL shader's content hash beside the vertex one -- the
+            // FSS mask hunt needed the composite's PS named and the census
+            // had only ever recorded half the pipeline. ph=0 is a shader
+            // created before the hooks, exactly like vh.
+            _snprintf_s(pt, sizeof(pt), _TRUNCATE, " ph=%016llX",
+                        static_cast<unsigned long long>(lookupShaderHash(ps)));
         }
         for (ID3D11ShaderResourceView* v : xs) {
             if (v) v->Release();
         }
+        if (ps) ps->Release();
     }
 
-    Log::get().note("%s %u #%u %c n=%u i=%u r=%s d=%s c=%s s=%s,%s,%s,%s%s%s q=%u",
+    Log::get().note("%s %u #%u %c n=%u i=%u r=%s d=%s c=%s s=%s,%s,%s,%s%s%s%s q=%u",
                     tag, g_frameOrdinal, index, kind, count, instances, r, d, c,
-                    s0, s1, s2, s3, tail, xt, q);
+                    s0, s1, s2, s3, tail, xt, pt, q);
 
     // The CB watch, after the draw's own line so a DCW dump always follows
     // the draw it belongs to. Any recorded draw can match -- DC for the FSS
