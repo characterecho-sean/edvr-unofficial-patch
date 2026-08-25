@@ -18,12 +18,26 @@ namespace {
 // Three frames: enough that "present in every frame of one census and no
 // frame of the other" separates a steady overlay from frame-to-frame churn,
 // while two censuses stay near one percent of the default 4 MB log cap.
+//
+// The DEFAULT, no longer the law: advanced.census_frames raises it to 30 for
+// a capture that has to span a progressive build (the FSS body takes longer
+// than three frames to tile in, and the interesting frames are all of them).
+// Read at census start, clamped, so one census records one configuration.
 constexpr uint32_t kCensusFrames = 3;
+constexpr uint32_t kCensusFramesMax = 30;
 
 // A frame on foot has been measured at 1174 eye draws, so three frames can
 // legitimately want ~3500 lines. The cap exists so a mode this was never
 // pointed at cannot eat the log; the end line says when it bit.
+//
+// Also a default now (advanced.census_lines), because the cap and the frame
+// count have to move together: 30 offscreen frames under a 4096-line cap
+// records the first eleven and silently drops the tail, which in a BUILD
+// capture is the half where the build finishes. The ceiling keeps a typo
+// from spending the whole 4 MB log; at ~140 bytes a line, 16384 lines is
+// about 2.3 MB, paid only on the sessions that ask for it.
 constexpr uint32_t kMaxLines = 4096;
+constexpr uint32_t kMaxLinesCeiling = 16384;
 
 // Distinct bound objects seen across one census. The first field capture
 // refuted the "a few dozen" estimate this started from: a cockpit census
@@ -62,12 +76,23 @@ bool resolveByKind(void* ptr, Kind kind, ResourceInfo* out) {
 }
 
 bool     g_pending = false;      // key pressed, waiting for a frame edge
+bool     g_forceOffscreen = false; // the auto arm's rider: this census records
+                                 // offscreen draws whatever the ini says,
+                                 // because it exists to watch an offscreen build
 uint32_t g_framesLeft = 0;       // frames still to record; >0 means capturing
+uint32_t g_framesWanted = kCensusFrames;  // this census's length, from config
+uint32_t g_maxLines = kMaxLines; // this census's line cap, from config
 bool     g_offscreen = false;    // record non-eye draws too, latched at start
 uint32_t g_offThisFrame = 0;     // offscreen draws this frame, for the line index
 uint32_t g_offDraws = 0;         // offscreen draws this census, for the end line
 uint32_t g_copiesThisFrame = 0;  // copies this frame, for the line index
 uint32_t g_copies = 0;           // copies this census, for the end line
+uint32_t g_dispThisFrame = 0;    // dispatches this frame, for the line index
+uint32_t g_dispatches = 0;       // dispatches this census, for the end line
+uint32_t g_seq = 0;              // ONE ordinal across every recorded event in
+                                 // a frame -- the q= token. The per-kind
+                                 // indexes above cannot say whether a copy
+                                 // landed between two draws; this can.
 uint32_t g_censusNo = 0;         // numbers the begin/end lines, so the diff
                                  // tool can pair "absent" with "present"
 uint32_t g_frameOrdinal = 0;     // 0-based frame within the running census
@@ -188,15 +213,22 @@ void readDrawState(ID3D11DeviceContext* ctx, DrawState* out) {
 }
 
 void dumpInternTable() {
+    // res= is the underlying resource's identity, and it is the column the FSS
+    // hunt was missing: an SRV and an RTV over the SAME texture intern as two
+    // different @ids, and until two id lines could show one res value there
+    // was no way to say "the target the body is drawn into IS the texture the
+    // composites sample" from a log. Per-session noise across censuses, which
+    // is why the diff tool parses past it and keys on nothing in it.
     for (uint32_t i = 0; i < g_tabCount; ++i) {
         const Interned& e = g_tab[i];
         if (!e.resolved) {
             Log::get().note("DC id @%u ?", i);
         } else if (e.info.isTexture2D) {
-            Log::get().note("DC id @%u tex %ux%u fmt=%u", i, e.info.a, e.info.b,
-                            e.info.fmt);
+            Log::get().note("DC id @%u tex %ux%u fmt=%u res=%p", i, e.info.a,
+                            e.info.b, e.info.fmt, e.info.resource);
         } else if (e.info.isBuffer) {
-            Log::get().note("DC id @%u buf %u", i, e.info.a);
+            Log::get().note("DC id @%u buf %u res=%p", i, e.info.a,
+                            e.info.resource);
         } else {
             Log::get().note("DC id @%u ?", i);
         }
@@ -205,10 +237,10 @@ void dumpInternTable() {
 
 void finish() {
     dumpInternTable();
-    Log::get().note("DC end census=%u draws=%u off=%u copies=%u lines=%u "
-                    "interned=%u overflow=%u truncated=%u",
-                    g_censusNo, g_draws, g_offDraws, g_copies, g_lines, g_tabCount,
-                    g_overflow,
+    Log::get().note("DC end census=%u draws=%u off=%u copies=%u disp=%u "
+                    "lines=%u interned=%u overflow=%u truncated=%u",
+                    g_censusNo, g_draws, g_offDraws, g_copies, g_dispatches,
+                    g_lines, g_tabCount, g_overflow,
                     g_draws > g_lines ? g_draws - g_lines : 0);
 }
 
@@ -223,10 +255,20 @@ void drawCensusRequest() {
         return;
     }
     g_pending = true;
-    Log::get().note("DC: census armed -- the next %u whole frames of eye-texture "
+    Log::get().note("DC: census armed -- the next whole frames of eye-texture "
                     "draws will be logged. Diff two of these with "
-                    "tools/diff_draw_census.py.",
-                    kCensusFrames);
+                    "tools/diff_draw_census.py.");
+}
+
+void drawCensusAutoRequest() {
+    // Silent when armed: the caller is a per-draw trigger, and the ordinary
+    // case -- the build keeps drawing while its own census runs -- must not
+    // write a line per draw.
+    if (drawCensusArmed()) return;
+    g_pending = true;
+    g_forceOffscreen = true;
+    // The caller logs WHY (the size that tripped it); this side owns only the
+    // census mechanics, which the begin line below reports as it always has.
 }
 
 // The shared body. The only thing the two entry points disagree about is the
@@ -234,7 +276,11 @@ void drawCensusRequest() {
 // reason an offscreen line can be read with the same eyes as an eye line.
 static void recordDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
                        uint32_t instances, const char* tag, uint32_t index) {
-    if (g_lines >= kMaxLines) return;
+    // The shared ordinal advances for every event that ARRIVES, before the
+    // line cap -- a capped census keeps truthful q values on whatever lines
+    // it does write, instead of renumbering the survivors.
+    const uint32_t q = g_seq++;
+    if (g_lines >= g_maxLines) return;
     ++g_lines;
 
     char rb[24], db[24], cb[24], s0b[24], s1b[24], s2b[24], s3b[24];
@@ -277,9 +323,9 @@ static void recordDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
                     st.stride, st.offset, st.topology);
     }
 
-    Log::get().note("%s %u #%u %c n=%u i=%u r=%s d=%s c=%s s=%s,%s,%s,%s%s",
+    Log::get().note("%s %u #%u %c n=%u i=%u r=%s d=%s c=%s s=%s,%s,%s,%s%s q=%u",
                     tag, g_frameOrdinal, index, kind, count, instances, r, d, c,
-                    s0, s1, s2, s3, tail);
+                    s0, s1, s2, s3, tail, q);
 }
 
 void drawCensusEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
@@ -305,7 +351,8 @@ void drawCensusCopy(char kind, void* dst, uint32_t dstSub, uint32_t dstX,
     if (g_framesLeft == 0) return;
     ++g_copies;
     ++g_copiesThisFrame;
-    if (g_lines >= kMaxLines) return;
+    const uint32_t q = g_seq++;
+    if (g_lines >= g_maxLines) return;
     ++g_lines;
 
     // Resources, not views: both arguments arrive as ID3D11Resource*, which is
@@ -321,25 +368,79 @@ void drawCensusCopy(char kind, void* dst, uint32_t dstSub, uint32_t dstX,
         _snprintf_s(box, sizeof(box), _TRUNCATE, " box=%u,%u-%u,%u", left, top,
                     right, bottom);
     }
-    Log::get().note("DCC %u #%u %c dst=%s sub=%u at=%u,%u src=%s sub=%u%s",
+    Log::get().note("DCC %u #%u %c dst=%s sub=%u at=%u,%u src=%s sub=%u%s q=%u",
                     g_frameOrdinal, g_copiesThisFrame - 1, kind, d, dstSub, dstX,
-                    dstY, s, srcSub, box);
+                    dstY, s, srcSub, box, q);
+}
+
+void drawCensusResolve(void* dst, uint32_t dstSub, void* src, uint32_t srcSub,
+                       uint32_t fmt) {
+    if (g_framesLeft == 0) return;
+    ++g_copies;
+    ++g_copiesThisFrame;
+    const uint32_t q = g_seq++;
+    if (g_lines >= g_maxLines) return;
+    ++g_lines;
+
+    char db[24], sb[24];
+    const char* d = bindingToken(dst, Kind::kResource, db, sizeof(db));
+    const char* s = bindingToken(src, Kind::kResource, sb, sizeof(sb));
+    Log::get().note("DCC %u #%u V dst=%s sub=%u at=0,0 src=%s sub=%u fmt=%u q=%u",
+                    g_frameOrdinal, g_copiesThisFrame - 1, d, dstSub, s, srcSub,
+                    fmt, q);
+}
+
+void drawCensusDispatch(uint32_t x, uint32_t y, uint32_t z) {
+    if (g_framesLeft == 0) return;
+    ++g_dispatches;
+    ++g_dispThisFrame;
+    const uint32_t q = g_seq++;
+    if (g_lines >= g_maxLines) return;
+    ++g_lines;
+
+    // What this dispatch can WRITE: UAV slots 0-3, from the shadow the
+    // exposure fix's CSSetUnorderedAccessViews hook has always maintained.
+    // UAVs are views, so the kView form applies. The compute shader itself is
+    // named by content hash, same as vh= on a draw line, so a writer found
+    // here can be pinned or skipped by the tools that already exist.
+    char u0b[24], u1b[24], u2b[24], u3b[24];
+    const char* u0 = bindingToken(bindingGet(BindSlot::CsUav0), Kind::kView, u0b, sizeof(u0b));
+    const char* u1 = bindingToken(bindingGet(BindSlot::CsUav1), Kind::kView, u1b, sizeof(u1b));
+    const char* u2 = bindingToken(bindingGet(BindSlot::CsUav2), Kind::kView, u2b, sizeof(u2b));
+    const char* u3 = bindingToken(bindingGet(BindSlot::CsUav3), Kind::kView, u3b, sizeof(u3b));
+    Log::get().note("DCX %u #%u n=%u,%u,%u ch=%016llX u=%s,%s,%s,%s q=%u",
+                    g_frameOrdinal, g_dispThisFrame - 1, x, y, z,
+                    static_cast<unsigned long long>(
+                        lookupShaderHash(bindingGet(BindSlot::Cs))),
+                    u0, u1, u2, u3, q);
 }
 
 void drawCensusFrameBoundary(uint32_t frameNo) {
     if (g_framesLeft > 0) {
-        Log::get().note("DC frame %u draws=%u off=%u copies=%u", g_frameOrdinal,
-                        g_drawsThisFrame, g_offThisFrame, g_copiesThisFrame);
+        Log::get().note("DC frame %u draws=%u off=%u copies=%u disp=%u",
+                        g_frameOrdinal, g_drawsThisFrame, g_offThisFrame,
+                        g_copiesThisFrame, g_dispThisFrame);
         g_drawsThisFrame = 0;
         g_offThisFrame = 0;
         g_copiesThisFrame = 0;
+        g_dispThisFrame = 0;
+        g_seq = 0;
         ++g_frameOrdinal;
         if (--g_framesLeft == 0) finish();
     }
     if (g_pending) {
         g_pending = false;
         ++g_censusNo;
-        g_framesLeft = kCensusFrames;
+        // Latched here, not read per draw: a census must record one
+        // configuration throughout, and the draw path is the last place that
+        // should touch a settings map.
+        g_framesWanted = static_cast<uint32_t>(Config::get().getIntInRange(
+            "advanced.census_frames", static_cast<int>(kCensusFrames), 1,
+            static_cast<int>(kCensusFramesMax)));
+        g_maxLines = static_cast<uint32_t>(Config::get().getIntInRange(
+            "advanced.census_lines", static_cast<int>(kMaxLines), 256,
+            static_cast<int>(kMaxLinesCeiling)));
+        g_framesLeft = g_framesWanted;
         g_frameOrdinal = 0;
         g_draws = 0;
         g_drawsThisFrame = 0;
@@ -350,13 +451,18 @@ void drawCensusFrameBoundary(uint32_t frameNo) {
         g_offDraws = 0;
         g_copiesThisFrame = 0;
         g_copies = 0;
-        // Latched here, not read per draw: a census must record one
-        // configuration throughout, and the draw path is the last place that
-        // should touch a settings map.
-        g_offscreen = Config::get().getBool("advanced.census_offscreen", false);
+        g_dispThisFrame = 0;
+        g_dispatches = 0;
+        g_seq = 0;
+        // The auto arm's rider wins over the ini: a census fired at an
+        // offscreen build that recorded no offscreen draws is the exact
+        // capture this module already wasted a day on once.
+        g_offscreen = Config::get().getBool("advanced.census_offscreen", false) ||
+                      g_forceOffscreen;
+        g_forceOffscreen = false;
         for (Interned& e : g_tab) e = Interned();
         Log::get().note("DC begin census=%u frames=%u frame=%u offscreen=%s",
-                        g_censusNo, kCensusFrames, frameNo,
+                        g_censusNo, g_framesWanted, frameNo,
                         g_offscreen ? "yes" : "no");
     }
 }

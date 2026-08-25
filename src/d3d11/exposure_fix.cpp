@@ -15,6 +15,10 @@
 #include "../common/vtable_hook.h"
 #include "binding_shadow.h"
 #include "device_hook.h"  // contextHookModeFor
+#include "draw_census.h"  // drawCensusDispatch: the census records compute
+                          // writers through THIS module's Dispatch hook,
+                          // because slot 41 is already ours and a second
+                          // patch on it would be a second thing to reclaim
 #include "sunglare_fix.h"  // sunglareLastSeenMs, the damper's sun scope
 
 namespace edvr {
@@ -841,6 +845,15 @@ void STDMETHODCALLTYPE hookedDispatch(ID3D11DeviceContext* self, UINT x, UINT y,
         s->realDispatch(self, x, y, z);
         return;
     }
+
+    // The census's view of compute, recorded before the forward the way the
+    // draw hooks record before theirs, so the q= ordinals across draws,
+    // copies and dispatches share one timeline. One bool call per dispatch
+    // when no census runs, which is almost always -- the same bargain every
+    // other census hook strikes. Recording, not classification: this line
+    // exists because the FSS body could legally be built by a compute writer
+    // and no capture before 2026-08-25 could have seen it.
+    if (drawCensusArmed()) drawCensusDispatch(x, y, z);
 
     // Classification runs INSIDE the guard.
     //

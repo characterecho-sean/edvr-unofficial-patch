@@ -79,6 +79,14 @@ struct ResourceInfo {
     uint32_t fmt = 0; // DXGI_FORMAT for a texture, 0 for a buffer. Size alone
                       // cannot tell two same-shaped textures apart in a census
                       // line, and the format is free: the desc is in hand.
+    // The underlying ID3D11Resource*, as an IDENTITY only -- compared, never
+    // dereferenced by any consumer, and no reference is held on it (the same
+    // bargain ownerCtx documents). It exists because the census interns VIEWS,
+    // and an SRV and an RTV over the same texture interned as two unrelated
+    // @ids with the same size: the FSS hunt could not connect the target the
+    // body was DRAWN into with the texture the eye composites SAMPLED, which
+    // is the exact question "do the eyes read what was just written" turns on.
+    void*    resource = nullptr;
 };
 
 // The pointer last seen bound to a slot, or nullptr.

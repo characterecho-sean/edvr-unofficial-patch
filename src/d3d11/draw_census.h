@@ -19,6 +19,14 @@
 //
 // It records only when armed. Unarmed, the entire module is one bool read per
 // eye draw.
+//
+// EVERY recorded line carries q=N, one shared per-frame ordinal across draws,
+// copies, resolves, updates and dispatches. The per-kind # indexes count
+// within their own kind, so nothing about them says whether a copy landed
+// between two draws -- and "did anything write the body texture between the
+// two eye composites" is precisely the FSS question. Log line order happens
+// to preserve it today; q makes it explicit, greppable, and safe against a
+// second thread ever contributing lines.
 #pragma once
 
 #include <cstdint>
@@ -37,6 +45,21 @@ bool drawCensusArmed();
 // A press while armed is refused with a note rather than restarting the
 // capture.
 void drawCensusRequest();
+
+// The automatic arm, for builds too brief to catch by hand (2026-08-25, the
+// FSS ring split). The FSS body "tiles in" over the first frames after a
+// zoom, and those frames are the only ones the bug exists in: a keypress
+// census armed by reaction lands twenty frames late at 90Hz and captures the
+// settled state, which is how every prior capture measured an ordering the
+// build phase was never proven to share. vscreen calls this when a draw
+// first lands in a target of the size named by advanced.census_auto after a
+// quiet spell; the census that follows records offscreen draws REGARDLESS of
+// advanced.census_offscreen, because a capture aimed at an offscreen build
+// that did not record offscreen draws is the field session wasted.
+//
+// Refused silently while a census is armed or running -- the caller fires on
+// a per-draw path and must not be able to spam the log.
+void drawCensusAutoRequest();
 
 // One draw that reached an eye texture, called between the bindings being
 // read and the draw being forwarded. kind: 'D' Draw, 'I' DrawIndexed,
@@ -124,9 +147,39 @@ void drawCensusOffDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
 //
 // box values are meaningless when hasBox is false (CopyResource copies the
 // whole resource) and must not be read.
+//
+// Also carries kind 'U' for UpdateSubresource -- the CPU-upload path a
+// streamed tile build classically arrives through -- with src null (the
+// source is CPU memory, which has no token) and the box as the destination
+// region.
 void drawCensusCopy(char kind, void* dst, uint32_t dstSub, uint32_t dstX,
                     uint32_t dstY, void* src, uint32_t srcSub, bool hasBox,
                     uint32_t left, uint32_t top, uint32_t right, uint32_t bottom);
+
+// One ResolveSubresource, recorded while a census is running. Logged as a
+// "DCC" line with kind 'V' and the resolve format on the end.
+//
+// WHY (2026-08-25, the FSS ring split). The settled-state captures showed
+// the body drawn into one target (@79 in the recorded session) while both
+// eye composites sampled another (@38), and nothing the census recorded
+// connects the two: no copy between them appeared, and ResolveSubresource --
+// the one call that moves an MSAA render into a sampleable texture -- was
+// not hooked at all. If that transfer runs BETWEEN the two eye composites,
+// the second eye samples a newer body than the first every frame of the
+// build, which is exactly the reported split. This line is how that either
+// becomes a measurement or dies.
+void drawCensusResolve(void* dst, uint32_t dstSub, void* src, uint32_t srcSub,
+                       uint32_t fmt);
+
+// One compute Dispatch, recorded while a census is running. Logged as "DCX"
+// with the bound compute shader's content hash and what UAV slots 0-3
+// resolve to -- the destinations a compute writer would write.
+//
+// The hook itself is the exposure fix's, which has always owned slot 41;
+// this is only the recording, so a census can finally see the third way a
+// texture changes without a draw. Costs one armed-check per dispatch when no
+// census runs.
+void drawCensusDispatch(uint32_t x, uint32_t y, uint32_t z);
 
 // The frame edge, from vScreenFrameBoundary: starts a pending census, advances
 // a running one, finishes a spent one. frameNo is vscreen's frame counter,

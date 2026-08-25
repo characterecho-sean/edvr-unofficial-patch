@@ -110,6 +110,11 @@ bool bindingResolve(void* view, ResourceInfo* out) {
         static_cast<ID3D11View*>(view)->GetResource(&res);
         if (!res) return;
         ok = describeResource(res, out);
+        // Identity only, recorded before the Release on purpose: the pointer
+        // is what connects a view to the resource behind it, and the context
+        // still holds its own reference to anything reachable through a live
+        // binding. Nothing dereferences this.
+        out->resource = res;
         res->Release();
     });
     // A fault between GetResource and this Release leaks one reference. That is
@@ -132,6 +137,7 @@ bool bindingResolveResource(void* resource, ResourceInfo* out) {
         // with. That also means this one has no leak to document -- the
         // bargain the view resolver strikes above does not arise here.
         ok = describeResource(static_cast<ID3D11Resource*>(resource), out);
+        out->resource = resource;
     });
     return ok;
 }

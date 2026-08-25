@@ -62,6 +62,16 @@ constexpr uint32_t kMinFramesDrawn = 300;
 // room without turning a per-draw walk into anything worth measuring.
 constexpr uint32_t kCandidates = 8;
 
+// The auto-armed census's quiet spell and firing cap. Two seconds of no
+// draws into the watched size separates "a new build just started" from "the
+// settled body redraws every frame" -- the FSS body target goes fully quiet
+// between zooms, and while zoomed it is hit every frame, so this fires once
+// per zoom-in and not again. The cap bounds a session where the size matches
+// something busier than expected; each firing already costs a begin/end pair
+// and up to census_lines of log.
+constexpr uint32_t kCensusAutoQuietFrames = 120;
+constexpr uint32_t kCensusAutoFireCap = 8;
+
 // ID3D11DeviceContext vtable indices.
 //
 // A frozen COM ABI: IUnknown occupies 0-2, ID3D11DeviceChild 3-6, and the
@@ -97,6 +107,17 @@ constexpr size_t kSlotExecuteCommandList    = 58;
 // They forward unconditionally and record nothing unless a census is running.
 constexpr size_t kSlotCopySubresourceRegion = 46;
 constexpr size_t kSlotCopyResource          = 47;
+// The two remaining ways a texture changes without a draw or a copy, hooked
+// on the same census-only terms (2026-08-25, the FSS ring split). The FSS
+// captures showed the body drawn into one target while both eye composites
+// sampled another, with NO recorded event connecting them -- and these are
+// exactly the calls the census could not see: UpdateSubresource is the CPU
+// tile-upload path, ResolveSubresource is the only way an MSAA render
+// becomes a sampleable texture. If either lands between the two composites
+// during the build, the eyes genuinely read different content, which is what
+// the headset reports and what every draws-only capture was blind to.
+constexpr size_t kSlotUpdateSubresource     = 48;
+constexpr size_t kSlotResolveSubresource    = 57;
 constexpr size_t kSlotClearState            = 110;
 constexpr size_t kHighestSlotUsed           = 110;
 
@@ -112,9 +133,10 @@ constexpr size_t kHighestSlotUsed           = 110;
 //     gets adopted during an ordinary lull.
 //   - ClearState: shared with the exposure fix, which reclaim refuses on its
 //     own grounds, and quiet for whole sessions besides.
-//   - CopyResource, CopySubresourceRegion: a frame that copies nothing is
-//     entirely ordinary -- these carry a diagnostic and no fix, so silence
-//     on them is never evidence of anything.
+//   - CopyResource, CopySubresourceRegion, UpdateSubresource,
+//     ResolveSubresource: a frame that copies, uploads or resolves nothing
+//     is entirely ordinary -- these carry a diagnostic and no fix, so
+//     silence on them is never evidence of anything.
 //   - DrawInstanced, DrawIndexedInstanced, OMSetRtvAndUav: scene-shaped
 //     calls with no in-tree proof they fire during every menu or loading
 //     stretch. A menu that issues no instanced draw for three seconds is
@@ -179,6 +201,12 @@ typedef void(STDMETHODCALLTYPE* PFN_CopyResource)(ID3D11DeviceContext*,
 typedef void(STDMETHODCALLTYPE* PFN_CopySubresourceRegion)(
     ID3D11DeviceContext*, ID3D11Resource*, UINT, UINT, UINT, UINT, ID3D11Resource*,
     UINT, const D3D11_BOX*);
+typedef void(STDMETHODCALLTYPE* PFN_UpdateSubresource)(
+    ID3D11DeviceContext*, ID3D11Resource*, UINT, const D3D11_BOX*, const void*,
+    UINT, UINT);
+typedef void(STDMETHODCALLTYPE* PFN_ResolveSubresource)(
+    ID3D11DeviceContext*, ID3D11Resource*, UINT, ID3D11Resource*, UINT,
+    DXGI_FORMAT);
 typedef void(STDMETHODCALLTYPE* PFN_ClearState)(ID3D11DeviceContext*);
 typedef void(STDMETHODCALLTYPE* PFN_ExecuteCommandList)(ID3D11DeviceContext*,
                                                         ID3D11CommandList*, BOOL);
@@ -209,6 +237,8 @@ struct State {
     PFN_ClearRtv             realClearRtv = nullptr;
     PFN_CopyResource         realCopyResource = nullptr;
     PFN_CopySubresourceRegion realCopySubresourceRegion = nullptr;
+    PFN_UpdateSubresource    realUpdateSubresource = nullptr;
+    PFN_ResolveSubresource   realResolveSubresource = nullptr;
     PFN_ClearState           realClearState = nullptr;
     PFN_ExecuteCommandList   realExecuteCommandList = nullptr;
     bool sawClearState = false;
@@ -324,8 +354,27 @@ struct State {
     uint32_t  glareClamp = 0;
     uint64_t  censusSkipped = 0;
     uint64_t  censusSkippedReported = 0;
-    char      censusSkipSpec[144] = {};  // raw spec+range+offscreen, to log
-                                         // only on change
+    // The auto-armed census (advanced.census_auto = WxH): arm a capture the
+    // moment a draw lands in an offscreen target of exactly this size after a
+    // quiet spell. It exists because the FSS body's build phase -- the only
+    // frames its bug exists in -- lasts less time than a human takes to react
+    // to seeing it start: a keypress census records the settled state, and
+    // every settled-state capture "confirmed" an ordering the build was never
+    // proven to share. Zero width is off, and off is the shipped state.
+    //
+    // The quiet spell matters: while the FSS stays zoomed the body redraws
+    // every frame, so requiring silence first means one census per zoom-in,
+    // not one per keypress-worth of luck. Match is cached per RTV generation
+    // (the rtv0Eye pattern) so the cost while set is one resolve per rebind,
+    // not per draw.
+    uint32_t  censusAutoW = 0;
+    uint32_t  censusAutoH = 0;
+    uint32_t  censusAutoGen = 0;     // generation censusAutoMatch was derived at
+    bool      censusAutoMatch = false;
+    uint32_t  censusAutoLastHitFrame = 0;  // frameNo of the last matching draw
+    uint32_t  censusAutoFired = 0;         // capped; each firing is a log line
+    char      censusSkipSpec[192] = {};  // raw spec+range+offscreen+auto, to
+                                         // log only on change
 
     // The bound views themselves live in binding_shadow, shared with the
     // exposure fix so the two cannot drift into opposite policies again. What
@@ -1076,6 +1125,7 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     if (!s->distanceEnabled && !s->countForFlashFix &&
         !headOffsetGateWantsPanel() && s->censusSkipCount == 0 &&
         s->censusSkipRangeCount == 0 && s->censusSkipOffCount == 0 &&
+        s->censusAutoW == 0 &&
         !remlokWantsDraws() && !holoWantsDraws() && !witchstarWantsDraws() &&
         !sunglareWantsDraws() && !cbPeekEnabled() && !billboardWantsDraws() &&
         !drawCensusArmed() && !panelQuadWants() && !panelCurveWants() &&
@@ -1128,6 +1178,39 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         // returned from.
         if (drawCensusWantsOffscreen() && drawCensusArmed()) {
             drawCensusOffDraw(self, kind, count, instances);
+        }
+        // The auto arm's trigger: a draw into the watched size after a quiet
+        // spell means a build just started, and the frames worth recording
+        // are the ones about to happen. Cached per binding generation (the
+        // rtv0Eye pattern above), so the cost while set is one resolve per
+        // rebind rather than per draw -- and nothing at all while the
+        // setting is empty, which is the shipped state.
+        if (s->censusAutoW) {
+            if (s->censusAutoGen != rtvGen) {
+                s->censusAutoGen = rtvGen;
+                ResourceInfo info;
+                s->censusAutoMatch =
+                    bindingResolve(bindingGet(BindSlot::Rtv0), &info) &&
+                    info.isTexture2D && info.a == s->censusAutoW &&
+                    info.b == s->censusAutoH;
+            }
+            if (s->censusAutoMatch) {
+                const uint32_t quiet = s->frameNo - s->censusAutoLastHitFrame;
+                if (!drawCensusArmed() && quiet >= kCensusAutoQuietFrames &&
+                    s->censusAutoFired < kCensusAutoFireCap) {
+                    ++s->censusAutoFired;
+                    drawCensusAutoRequest();
+                    Log::get().note(
+                        "census auto: a draw landed in a %ux%u target after "
+                        "%u quiet frames -- census armed (%u of %u this "
+                        "session). It starts at the next frame edge and "
+                        "records offscreen draws regardless of "
+                        "census_offscreen.",
+                        s->censusAutoW, s->censusAutoH, quiet,
+                        s->censusAutoFired, kCensusAutoFireCap);
+                }
+                s->censusAutoLastHitFrame = s->frameNo;
+            }
         }
         // The offscreen probe: skip draws INTO a buffer named by its size.
         // Resolved only while a spec is set -- the @ filters' unmemoised
@@ -1872,6 +1955,39 @@ void STDMETHODCALLTYPE hookedCopySubresourceRegion(
                                        box);
 }
 
+// The CPU-upload path, recorded as kind 'U' with the destination box and no
+// source token (the source is game memory). This is the call a streamed tile
+// build classically arrives through, and it was invisible to every FSS
+// capture taken before 2026-08-25.
+void STDMETHODCALLTYPE hookedUpdateSubresource(ID3D11DeviceContext* self,
+                                               ID3D11Resource* dst, UINT dstSub,
+                                               const D3D11_BOX* box, const void* data,
+                                               UINT rowPitch, UINT depthPitch) {
+    if (drawCensusArmed() && !foreignContext(self)) {
+        drawCensusCopy('U', dst, dstSub, box ? box->left : 0, box ? box->top : 0,
+                       nullptr, 0, box != nullptr,
+                       box ? box->left : 0, box ? box->top : 0,
+                       box ? box->right : 0, box ? box->bottom : 0);
+    }
+    g_state->realUpdateSubresource(self, dst, dstSub, box, data, rowPitch,
+                                   depthPitch);
+}
+
+// The MSAA resolve, recorded as kind 'V'. The one call that turns a
+// multisampled render target into the texture a composite can sample -- if
+// the FSS body target and the composite's source are two resources, this is
+// the likeliest bridge, and WHERE it lands relative to the two eye
+// composites (the q= ordinal) is the entire question.
+void STDMETHODCALLTYPE hookedResolveSubresource(ID3D11DeviceContext* self,
+                                                ID3D11Resource* dst, UINT dstSub,
+                                                ID3D11Resource* src, UINT srcSub,
+                                                DXGI_FORMAT fmt) {
+    if (drawCensusArmed() && !foreignContext(self)) {
+        drawCensusResolve(dst, dstSub, src, srcSub, static_cast<uint32_t>(fmt));
+    }
+    g_state->realResolveSubresource(self, dst, dstSub, src, srcSub, fmt);
+}
+
 void STDMETHODCALLTYPE hookedDraw(ID3D11DeviceContext* self, UINT count, UINT start) {
     ++g_state->thunkHits[kHitDraw];
     const DrawVerdict v = beginPanelOverride(self, 'D', count, 1);
@@ -1981,7 +2097,8 @@ void readCensusSkip(Config& cfg, State* s) {
     const std::string spec = cfg.getString("advanced.census_skip", "");
     const std::string range = cfg.getString("advanced.census_skip_range", "");
     const std::string off = cfg.getString("advanced.census_skip_offscreen", "");
-    const std::string both = spec + "|" + range + "|" + off;
+    const std::string autoSpec = cfg.getString("advanced.census_auto", "");
+    const std::string both = spec + "|" + range + "|" + off + "|" + autoSpec;
     if (both.length() >= sizeof(s->censusSkipSpec)) {
         Log::get().note("census skip: the spec is longer than %u characters "
                         "and was ignored.",
@@ -1990,6 +2107,40 @@ void readCensusSkip(Config& cfg, State* s) {
     }
     if (both == s->censusSkipSpec) return;
     memcpy(s->censusSkipSpec, both.c_str(), both.length() + 1);
+
+    s->censusAutoW = 0;
+    s->censusAutoH = 0;
+    if (!autoSpec.empty()) {
+        const char* ap = autoSpec.c_str();
+        char* aend = nullptr;
+        const unsigned long w = strtoul(ap, &aend, 10);
+        unsigned long h = 0;
+        if (aend != ap && (*aend == 'x' || *aend == 'X')) {
+            const char* aq = aend + 1;
+            h = strtoul(aq, &aend, 10);
+        }
+        while (*aend == ' ' || *aend == '\t') ++aend;
+        if (aend == ap || w == 0 || h == 0 || *aend) {
+            Log::get().note("census auto: \"%s\" is not one WIDTHxHEIGHT; the "
+                            "setting is refused rather than half-applied.",
+                            autoSpec.c_str());
+        } else {
+            s->censusAutoW = static_cast<uint32_t>(w);
+            s->censusAutoH = static_cast<uint32_t>(h);
+            // An edited spec is a fresh request: the per-session firing cap
+            // restarts, so re-setting the value is how a player asks for
+            // more captures without a relaunch.
+            s->censusAutoFired = 0;
+            s->censusAutoGen = 0;
+            Log::get().note(
+                "census auto ARMED: the first draw into a %ux%u offscreen "
+                "target after a quiet spell will arm a census by itself, as "
+                "if the key were pressed. For the FSS: set this before "
+                "zooming onto the body, and the capture catches the build "
+                "frames a keypress always misses.",
+                s->censusAutoW, s->censusAutoH);
+        }
+    }
 
     s->censusSkipOffCount = 0;
     if (!off.empty()) {
@@ -3012,6 +3163,10 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
                    reinterpret_cast<void**>(&s.realCopyResource));
     s.hook.replace(kSlotCopySubresourceRegion, &hookedCopySubresourceRegion,
                    reinterpret_cast<void**>(&s.realCopySubresourceRegion));
+    s.hook.replace(kSlotUpdateSubresource, &hookedUpdateSubresource,
+                   reinterpret_cast<void**>(&s.realUpdateSubresource));
+    s.hook.replace(kSlotResolveSubresource, &hookedResolveSubresource,
+                   reinterpret_cast<void**>(&s.realResolveSubresource));
     s.hook.replace(kSlotMap, &hookedMap, reinterpret_cast<void**>(&s.realMap));
     s.hook.replace(kSlotUnmap, &hookedUnmap, reinterpret_cast<void**>(&s.realUnmap));
     s.hook.replace(kSlotDraw, &hookedDraw, reinterpret_cast<void**>(&s.realDraw));
