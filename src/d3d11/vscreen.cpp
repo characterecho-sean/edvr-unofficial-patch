@@ -26,6 +26,7 @@
 #include "device_hook.h"  // contextHookModeFor
 #include "draw_census.h"
 #include "fss_panel.h"
+#include "fss_probe.h"
 #include "fss_res.h"
 #include "fss_scan.h"
 #include "fov_probe.h"
@@ -1108,7 +1109,10 @@ enum class DrawVerdict {
     kFssScan,
     // The FSS panel composite pair (fss_panel.h): forwarded through the
     // replacement vertex shaders, wrapped in fssPanelBegin/End.
-    kFssPanel
+    kFssPanel,
+    // The body composite with one sampler slot held flat (fss_probe.h),
+    // wrapped in fssProbeBegin/End. A diagnostic, not a fix.
+    kFssProbe
 };
 
 // kind, count and instances describe the draw for the census and the census
@@ -1170,7 +1174,7 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         !headOffsetGateWantsPanel() && s->censusSkipCount == 0 &&
         s->censusSkipRangeCount == 0 && s->censusSkipOffCount == 0 &&
         s->censusAutoW == 0 && !fssResActive() && !fssScanWantsDraws() &&
-        !fssPanelWantsDraws() &&
+        !fssPanelWantsDraws() && !fssProbeWants() &&
         !remlokWantsDraws() && !holoWantsDraws() && !witchstarWantsDraws() &&
         !sunglareWantsDraws() && !cbPeekEnabled() && !billboardWantsDraws() &&
         !drawCensusArmed() && !panelQuadWants() && !panelCurveWants() &&
@@ -1301,7 +1305,7 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         // eye/2-sized, or one of fss_res's inflated textures? Cached per
         // binding generation, so the resolve runs for a handful of scanner
         // draws and for nothing else in the game.
-        if (fssScanWantsDraws() || fssPanelWantsDraws()) {
+        if (fssScanWantsDraws() || fssPanelWantsDraws() || fssProbeWants()) {
             if (s->fssScanGen != rtvGen) {
                 s->fssScanGen = rtvGen;
                 s->fssScanBody = false;
@@ -1457,6 +1461,16 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         s->frameNo - s->fssBodyFrame <= 2 &&
         fssPanelOnEyeDraw(self, kind, count, instances)) {
         return DrawVerdict::kFssPanel;
+    }
+
+    // The composite-input probe (round 9a), behind the same body-frame
+    // gate for the same reason the panel fix wears it: 953C's hash names a
+    // shader, not the scanner, and an hour-old lesson says the difference
+    // is a loading screen's text quad.
+    if (fssProbeWants() && s->fssBodyFrame != 0 &&
+        s->frameNo - s->fssBodyFrame <= 2 &&
+        fssProbeOnEyeDraw(self, kind, count, instances)) {
+        return DrawVerdict::kFssProbe;
     }
 
     // The witchspace star, called for EVERY eye draw while enabled -- its
@@ -2040,6 +2054,7 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     if (v == DrawVerdict::kRemlok) remlokScissorBegin(self);
     if (v == DrawVerdict::kFssScan) fssScanBegin(self);
     if (v == DrawVerdict::kFssPanel) fssPanelBegin(self);
+    if (v == DrawVerdict::kFssProbe) fssProbeBegin(self);
     if (v == DrawVerdict::kHolo) holoBegin(self);
     if (v == DrawVerdict::kWitchstar) witchstarBegin(self);
     if (v == DrawVerdict::kBillboard) billboardBegin(self);
@@ -2051,6 +2066,7 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     if (v == DrawVerdict::kBillboard) billboardEnd(self);
     if (v == DrawVerdict::kWitchstar) witchstarEnd(self);
     if (v == DrawVerdict::kHolo) holoEnd(self);
+    if (v == DrawVerdict::kFssProbe) fssProbeEnd(self);
     if (v == DrawVerdict::kFssPanel) fssPanelEnd(self);
     if (v == DrawVerdict::kFssScan) fssScanEnd(self);
     if (v == DrawVerdict::kRemlok) remlokScissorEnd(self);
@@ -2586,6 +2602,7 @@ void vScreenRefreshConfig() {
     holoConfigure(cfg);
     fssScanConfigure(cfg);
     fssPanelConfigure(cfg);
+    fssProbeConfigure(cfg);
     witchstarConfigure(cfg);
     sunglareConfigure(cfg);
     exposureConfigure(cfg);
@@ -3296,6 +3313,7 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     holoConfigure(cfg);
     fssScanConfigure(cfg);
     fssPanelConfigure(cfg);
+    fssProbeConfigure(cfg);
     witchstarConfigure(cfg);
     sunglareConfigure(cfg);
     exposureConfigure(cfg);
@@ -3480,6 +3498,7 @@ void shutdownVScreenFixes() {
     holoShutdown();
     fssScanShutdown();
     fssPanelShutdown();
+    fssProbeShutdown();
     billboardShutdown();
     g_state->hook.uninstall();
 }
