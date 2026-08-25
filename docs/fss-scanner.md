@@ -188,30 +188,79 @@ solid. The log should show "census auto: a draw landed in a 2170x2142 target
 …" followed by a 30-frame census. Do it twice (leave the FSS, wait a few
 seconds, zoom again) for a second capture free. Send the gfx log.
 
-### What the capture decides
+### Round two: the capture came back, and the texture channel is CLOSED
 
-Read the two eye-composite draws (the two DC lines whose `s=` includes the
-body resource and whose targets are the two eyes) and every DCC/DCX line
-whose dst shares their `res=` identity:
+Flown 2026-08-25 (log `edvr_gfx_20260825_103005`). The auto-arm fired on
+both zooms — thirty build frames each, q-clocked, with copies, uploads,
+resolves and dispatches all visible. The measurements:
 
-- **Writes land between the two composites** → the split is measured, the
-  writer path is named, and the fix is mechanical: EDVR snapshots the body
-  texture at the first composite of the pair and hands the snapshot to the
-  second (one half-res copy per frame, only while the scanner is up — the
-  same substitution machinery the panel and magenta probes already use).
-  Both eyes then read identical content by construction, whatever the game
-  does in between.
-- **No writes between them, but the build's draws land differently than the
-  settled state** (e.g. the body redraws inside each eye block during the
-  build) → same conclusion by another door, same fix shape.
-- **Nothing between them and identical build ordering** → the content story
-  is genuinely dead, the split is presentation-side after all, and the next
-  instrument belongs on the openvr half (per-Submit content hashes). Not
-  expected, given the monocular report.
+- **The body target IS the composite's source.** `res=` identity: the RTV
+  the six body draws render into and the SRV both composites sample carry
+  one resource pointer. There was never a copy or resolve to find between
+  "@79" and "@38" — they were two views of one texture, which the old
+  census had no way to say.
+- **The body renders complete before either eye reads it.** Per frame, on
+  the q clock: six body draws (q=106–111 in the recorded frame), then eye
+  A's composite (q=112), then eye B's (q=137). The first capture's "issued
+  after both eye blocks" was the same position read without the cycle —
+  end of frame N is start of frame N+1.
+- **Zero writes to any composite input between the two reads.** The watch
+  covered all four sampled resources (the 6x1 strip, the 135x133 and
+  542x535 downsample pyramid, the 2170x2142 body) across 60 frames, both
+  zooms: nothing. The pyramid rebuild, the strip copies, and both
+  per-eye exposure dispatches (`F1FB2EEFB662F3AA`, q=146/157) all land
+  after composite B; next frame's composites read them settled.
+- **The "tiling in" is not geometry and not body-target writes.** The six
+  draws carry identical index counts (36864, 5334×2, 15360, 5334×2) from
+  the first captured frame to the last, both zooms. What distinguishes the
+  first zoom is a burst of 2,986 copies — texture streaming into the
+  families the body render samples. The visible build is the body's INPUT
+  textures arriving (plus any shader-side reveal), re-rendered fresh each
+  frame — identically for both eyes.
+- **EDVR's withholds are pair-symmetric in practice, not just by design.**
+  The vr log shows every withheld frame replaced for eye 0 and eye 1
+  together, same millisecond, consecutive counters. And notably: the flash
+  detector trips ON the FSS zoom itself — the body-render camera sits
+  ~9,880 units out and reads as a teleport until "parked" certification
+  catches it, costing a few reprojected frames per zoom-in. A judder lead
+  worth its own arc, but it cannot split the eyes.
 
-The half-resolution fix (Finding 2) waits on the same capture: the writer
-inventory says whether the target can be inflated without breaking a tiled
-build (draws scale with a viewport; copies with pixel offsets do not).
+**What is left is the one input the census never recorded: constant-buffer
+CONTENTS.** Both composites bind the *same* 208-byte object at VS b0
+(`c=@70` — the engine's camera block, bound by body draws and UI draws
+alike), which is therefore rewritten between the two eye passes through
+Map/Unmap the census cannot see; pixel-stage buffers were not recorded at
+all. A scan-reveal progress value that advances per *write* rather than per
+*frame* would compose eye B a more-revealed body every frame of the build —
+the reported split exactly, through a channel every capture so far was
+blind to. This is also the mechanism class this game keeps exhibiting: the
+exposure pass runs "once per eye, first eye then second", RemLok draws into
+per-eye passes from shared state, and the particle ring showed one buffer
+serving many draws through a moving offset.
+
+### The third instrument: the CB watch
+
+`advanced.census_cb_watch = <vh hash>` (2026-08-25). While a census runs,
+every recorded draw running that vertex shader dumps `DCW` lines: the
+current contents of its VS b0 and PS b0 — refreshed CPU-side from the
+Map/Unmap and UpdateSubresource tees, so a dump is exactly the bytes the
+GPU reads for that draw — with the draw's q. For the FSS: watch
+`953C8123AD8DC13B` (the composite), fly the same zoom, and diff eye A's
+dump against eye B's within each frame:
+
+- **A field differs and steps monotonically during the build** → the split
+  is measured and named, and the fix is the panel-distance mechanism
+  applied here: capture the first eye's write, hand the second eye's
+  composite the same bytes (or the same field), one draw per frame, FSS
+  only.
+- **The dumps are identical** → the game side is closed end to end, and
+  the hunt moves to the openvr half with per-Submit content hashes. Not
+  expected: something makes the eyes differ, and everything else is now
+  measured equal.
+
+The half-resolution fix (Finding 2) is unblocked either way: the writer
+inventory came back all-draws (no copies land in the body target), so the
+target can be inflated with a viewport scale and nothing else to adjust.
 
 ## The layers, as measured
 
@@ -314,19 +363,28 @@ all.
 - `advanced.census_frames`, `advanced.census_lines`,
   `advanced.census_auto = WxH` — long censuses, and the self-arming capture
   for builds too brief to catch by hand (2026-08-25).
+- `advanced.census_cb_watch = <vh>` — DCW dumps of a watched draw's b0
+  constant contents, VS and PS, at the draw, from the Map/Unmap tee
+  (2026-08-25).
 - The `vScreen declined` totals line, and a note when a **second D3D11 device**
   is created and not hooked (EDVR hooks the first device only).
 
 ## Open
 
-- The build-phase capture itself: fly the field procedure above and read the
-  q= interleave. Everything downstream — the equalizer fix, the resolution
-  fix — is sequenced behind it.
-- The resolution fix against `2170x2142` is not built.
-- Nothing writes the `272x268` tile maps that any hooked path can see; the
-  census still does not record `GenerateMips`, `ClearUnorderedAccessView*`,
-  or the contents of command lists (`ExecuteCommandList` is seen, its
-  interior is not).
-- The census still records constant-buffer objects rather than contents.
-  `Map`/`Unmap` are already hooked, so recording CB contents is cheap and
-  would have shortened this hunt considerably.
+- The CB-watch flight: same zoom with `census_cb_watch = 953C8123AD8DC13B`,
+  then diff the per-eye DCW dumps. The equalizer fix's exact shape follows
+  from which field steps.
+- The resolution fix against `2170x2142` is not built — but round two
+  unblocked it: the body target takes only draws, so inflation plus a
+  viewport scale is the whole job.
+- The flash detector trips on the FSS body camera at every fresh zoom
+  (~9,880 units, withheld until "parked" certification) — a hitch on
+  exactly the transition being scanned. Its own arc.
+- The census still does not record `GenerateMips`,
+  `ClearUnorderedAccessView*`, or the contents of command lists
+  (`ExecuteCommandList` is seen, its interior is not). The 272x268 tile
+  maps are now known to be written by compute (`22786F6DE290C577`, visible
+  as DCX) — the 2026-08-24 mystery of "nothing writes them" is resolved by
+  the dispatch recording.
+- The CB watch reads b0 only. A reveal value living in a later CB slot
+  would need the watch widened — one more slot pair, same tee.
