@@ -27,6 +27,7 @@
 #include "draw_census.h"
 #include "fss_panel.h"
 #include "fss_probe.h"
+#include "fss_reveal.h"
 #include "fss_res.h"
 #include "fss_scan.h"
 #include "fov_probe.h"
@@ -1112,7 +1113,11 @@ enum class DrawVerdict {
     kFssPanel,
     // The body composite with one sampler slot held flat (fss_probe.h),
     // wrapped in fssProbeBegin/End. A diagnostic, not a fix.
-    kFssProbe
+    kFssProbe,
+    // The body composite pair evaluated at one dissolve moment
+    // (fss_reveal.h): eye B drawn with eye A's scene constants, wrapped
+    // in fssRevealBegin/End.
+    kFssReveal
 };
 
 // kind, count and instances describe the draw for the census and the census
@@ -1174,7 +1179,7 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         !headOffsetGateWantsPanel() && s->censusSkipCount == 0 &&
         s->censusSkipRangeCount == 0 && s->censusSkipOffCount == 0 &&
         s->censusAutoW == 0 && !fssResActive() && !fssScanWantsDraws() &&
-        !fssPanelWantsDraws() && !fssProbeWants() &&
+        !fssPanelWantsDraws() && !fssProbeWants() && !fssRevealWantsDraws() &&
         !remlokWantsDraws() && !holoWantsDraws() && !witchstarWantsDraws() &&
         !sunglareWantsDraws() && !cbPeekEnabled() && !billboardWantsDraws() &&
         !drawCensusArmed() && !panelQuadWants() && !panelCurveWants() &&
@@ -1305,7 +1310,8 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         // eye/2-sized, or one of fss_res's inflated textures? Cached per
         // binding generation, so the resolve runs for a handful of scanner
         // draws and for nothing else in the game.
-        if (fssScanWantsDraws() || fssPanelWantsDraws() || fssProbeWants()) {
+        if (fssScanWantsDraws() || fssPanelWantsDraws() || fssProbeWants() ||
+            fssRevealWantsDraws()) {
             if (s->fssScanGen != rtvGen) {
                 s->fssScanGen = rtvGen;
                 s->fssScanBody = false;
@@ -1471,6 +1477,14 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         s->frameNo - s->fssBodyFrame <= 2 &&
         fssProbeOnEyeDraw(self, kind, count, instances)) {
         return DrawVerdict::kFssProbe;
+    }
+
+    // The reveal sync, after the probe so a probing session sees the true
+    // draw. Same gate, same recognition shape.
+    if (fssRevealWantsDraws() && s->fssBodyFrame != 0 &&
+        s->frameNo - s->fssBodyFrame <= 2 &&
+        fssRevealOnEyeDraw(self, kind, count, instances)) {
+        return DrawVerdict::kFssReveal;
     }
 
     // The witchspace star, called for EVERY eye draw while enabled -- its
@@ -1817,6 +1831,10 @@ HRESULT STDMETHODCALLTYPE hookedMap(ID3D11DeviceContext* self, ID3D11Resource* r
     if (drawCensusArmed() && SUCCEEDED(hr) && mapped && mapped->pData) {
         drawCensusCbNoteMap(res, mapped->pData);
     }
+    // The reveal sync's shadow of the scene block, same tee, its own gate.
+    if (fssRevealWantsDraws() && SUCCEEDED(hr) && mapped && mapped->pData) {
+        fssRevealNoteMap(res, mapped->pData);
+    }
     // Only the one buffer we care about, so this is a pointer compare on a very
     // hot path and nothing more.
     if (SUCCEEDED(hr) && mapped && sub == 0 && res == s->compositeCb) {
@@ -1956,6 +1974,7 @@ void STDMETHODCALLTYPE hookedUnmap(ID3D11DeviceContext* self, ID3D11Resource* re
     // the tees below do and for the same reason: after it, the memory is no
     // longer ours to look at.
     if (drawCensusArmed()) drawCensusCbNoteUnmap(res);
+    if (fssRevealWantsDraws()) fssRevealNoteUnmap(res);
     // Read before forwarding: after the real Unmap the memory is no longer ours
     // to look at.
     if (res == s->mappedResource && s->mappedData) {
@@ -2055,6 +2074,7 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     if (v == DrawVerdict::kFssScan) fssScanBegin(self);
     if (v == DrawVerdict::kFssPanel) fssPanelBegin(self);
     if (v == DrawVerdict::kFssProbe) fssProbeBegin(self);
+    if (v == DrawVerdict::kFssReveal) fssRevealBegin(self);
     if (v == DrawVerdict::kHolo) holoBegin(self);
     if (v == DrawVerdict::kWitchstar) witchstarBegin(self);
     if (v == DrawVerdict::kBillboard) billboardBegin(self);
@@ -2066,6 +2086,7 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     if (v == DrawVerdict::kBillboard) billboardEnd(self);
     if (v == DrawVerdict::kWitchstar) witchstarEnd(self);
     if (v == DrawVerdict::kHolo) holoEnd(self);
+    if (v == DrawVerdict::kFssReveal) fssRevealEnd(self);
     if (v == DrawVerdict::kFssProbe) fssProbeEnd(self);
     if (v == DrawVerdict::kFssPanel) fssPanelEnd(self);
     if (v == DrawVerdict::kFssScan) fssScanEnd(self);
@@ -2603,6 +2624,7 @@ void vScreenRefreshConfig() {
     fssScanConfigure(cfg);
     fssPanelConfigure(cfg);
     fssProbeConfigure(cfg);
+    fssRevealConfigure(cfg);
     witchstarConfigure(cfg);
     sunglareConfigure(cfg);
     exposureConfigure(cfg);
@@ -2685,6 +2707,7 @@ void vScreenFrameBoundary() {
     // Before this frame's counters are read or reset: a pending census starts
     // here, a running one advances, a spent one writes its tables.
     drawCensusFrameBoundary(s->frameNo);
+    fssRevealFrameBoundary();
     remlokFrameBoundary();
     witchstarFrameBoundary();
 
@@ -3314,6 +3337,7 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     fssScanConfigure(cfg);
     fssPanelConfigure(cfg);
     fssProbeConfigure(cfg);
+    fssRevealConfigure(cfg);
     witchstarConfigure(cfg);
     sunglareConfigure(cfg);
     exposureConfigure(cfg);
@@ -3499,6 +3523,7 @@ void shutdownVScreenFixes() {
     fssScanShutdown();
     fssPanelShutdown();
     fssProbeShutdown();
+    fssRevealShutdown();
     billboardShutdown();
     g_state->hook.uninstall();
 }

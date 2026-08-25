@@ -1,0 +1,66 @@
+// The FSS reveal, evaluated at one moment for both eyes.
+//
+// THE MECHANISM (docs/fss-composite-ps.asm, closed 2026-08-25 after ten
+// instrumented rounds): the body composite's pixel shader is an ordered
+// dissolve -- a reveal PROGRESS value in the 5,328-byte scene block at PS
+// b1 (cb1[119]) is compared against each cell's own luminance-plus-noise
+// threshold; unrevealed cells show the previous layer, in-transition
+// cells get the outlined border, and a stage index selects the layer
+// pair. Nothing in that math is per-eye: the quad UVs, the textures and
+// the thresholds are identical in both eyes. The one thing that CAN
+// differ is the b1 CONTENTS at each eye's draw -- the block is rewritten
+// between the two composites, and a progress value evaluated per WRITE
+// steps between them, so every cell whose threshold falls inside the step
+// is revealed in one eye and not the other: black squares in exactly one
+// eye, only while the animation runs, converging when it saturates, mono
+// in cinema mode. The channel was invisible to every earlier capture
+// because the composite has no PS b0 and nothing ever recorded PS b1.
+//
+// THE FIX is the exposure fix's idea at the constant-buffer level: the
+// first eye's composite draw has its PS b1 contents shadowed (from the
+// Map/Unmap tee vscreen already owns), and the second eye's composite is
+// drawn with those exact bytes in an EDVR-owned buffer, restored after
+// the draw. Both eyes then evaluate the dissolve at the same moment.
+// Whichever moment wins, the SPLIT is gone -- both eyes show the
+// animation the way the flat screen does.
+//
+// fix.fss_reveal_sync = stock | steady. Stock by default until the field
+// look; free when stock. Recognition rides the body-frame gate and the
+// composite's vertex hash, the fss_probe pattern exactly.
+#pragma once
+
+#include <cstdint>
+
+struct ID3D11DeviceContext;
+
+namespace edvr {
+
+class Config;
+
+void fssRevealConfigure(Config& cfg);
+
+// One bool for the draw path's early-out set and the body-frame gate.
+bool fssRevealWantsDraws();
+
+// The Map/Unmap tee, called from vscreen's hooks while steady: the scene
+// block's writes keep the shadow current, so the snapshot at eye A's draw
+// is exactly the bytes eye A read.
+void fssRevealNoteMap(void* resource, void* data);
+void fssRevealNoteUnmap(void* resource);
+
+// Called for eye draws behind the body-frame gate: matches the composite
+// (N n=6 i=1 + vh 953C8123AD8DC13B). True wraps the draw in Begin/End.
+bool fssRevealOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
+                        uint32_t instances);
+
+// Occurrence 1: learn the PS b1 buffer and snapshot its shadow.
+// Occurrence 2: substitute the snapshot, restore after the draw.
+void fssRevealBegin(ID3D11DeviceContext* ctx);
+void fssRevealEnd(ID3D11DeviceContext* ctx);
+
+// Per-frame occurrence reset, from vScreenFrameBoundary.
+void fssRevealFrameBoundary();
+
+void fssRevealShutdown();
+
+}  // namespace edvr

@@ -165,6 +165,7 @@ cl.exe %CFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "%ROOT%\src\d3d11\elite_binds.cpp" "%ROOT%\src\d3d11\draw_census.cpp" ^
     "%ROOT%\src\d3d11\fss_res.cpp" "%ROOT%\src\d3d11\fss_scan.cpp" ^
     "%ROOT%\src\d3d11\fss_panel.cpp" "%ROOT%\src\d3d11\fss_probe.cpp" ^
+    "%ROOT%\src\d3d11\fss_reveal.cpp" ^
     "%ROOT%\src\d3d11\panel_quad.cpp" "%ROOT%\src\d3d11\panel_curve.cpp" ^
     "%ROOT%\src\d3d11\shader_sig.cpp" ^
     "%ROOT%\src\d3d11\remlok_fix.cpp" "%ROOT%\src\d3d11\holo_fix.cpp" ^
