@@ -478,33 +478,88 @@ What the extended captures measured:
   another shader stage's SRVs, or per-draw offsets into the pool carried
   in constants b1+ (the DCW watch read b0 only).
 
-## The live probe: `advanced.census_skip_dispatch`
+## Round five: the dispatch probe, and what it taught about probing
 
-Built 2026-08-25: compute dispatches named by hash (the census's ch=) are
-not forwarded while the spec is set — the draw skips' completing half, for
-a system only compute touches. Localiser and positive control in one: park
-at a building ring, skip one candidate at a time, and the shader whose
-absence changes the squares names the system. The scene may look very
-wrong while a spec is set; that is the probe working. Candidates in order:
-`22786F6DE290C577`, `9347F8FC2DCE0248`, `E65498AE6C2C9F1B`,
-`074CB657FDBD43E6`, `76BFC737F1F8CB83`.
+`advanced.census_skip_dispatch` (2026-08-25): compute dispatches named by
+hash are not forwarded while the spec is set — the draw skips' completing
+half. `HASH:N` narrows it to the Nth occurrence per frame (one eye of a
+per-eye pair); `experimental.dispatch_pair_sync = HASH[:r]` copies the
+first occurrence's UAV0 over the second's, probe and equaliser in one.
 
-Once the system is named, the fix shape is the one this arc has been
-converging on all along: equalise eye B's copy of the identified per-eye
-product to eye A's (one CopyResource per frame, or a substitution at its
-consumer), preceded by the positive control the deleted fss_eye_sync
-experiment skipped.
+The first probe flight produced five nulls and one lesson, and the log
+voided the nulls: the session's only zoom preceded every skip window, and
+the squares exist only during a build — every skip probed a settled body
+with nothing left to change. *A probe against a transient must bracket the
+transient: set the spec, THEN trigger the build.* The flight still paid:
+four of the five candidates can be skipped for thousands of dispatches
+without visibly harming the settled scene, and `E65498AE6C2C9F1B` cannot
+be skipped at all — it runs at the top of every frame and the engine
+stalls presentation waiting on something derived from it (recovered on
+clearing the spec). It is struck from every candidate list.
+
+## Round six: cinema mode, and what the squares turned out to be
+
+The probe redo never needed to fly. Two field observations and two
+measurements closed it:
+
+1. **The black squares appear in HMD Cinema Mode** — a mono pipeline, one
+   render, both eyes shown the same panel. The squares are born in the
+   single render, not in per-eye machinery.
+2. **They replay on every re-zoom.** The four back-to-back phase-A
+   captures carry identical, flat copy traffic (544/544/540/540 — no
+   cold-streaming burst), and the squares showed on each. They are not
+   asset arrival.
+3. **The streaming moves whole mips, not tiles** — 64 of 544 copies carry
+   boxes at all. Sixteen-pixel black squares cannot be missing content
+   tiles; sixteen pixels is the granularity of the game's tile
+   classification systems and of its scan-effect art.
+4. The outlined squares animating in both eyes during the resolve are
+   unambiguously styled scan art — the same visual family.
+
+**Conclusion: the black squares are, with high confidence, part of the
+game's designed scan-resolve tile animation**, playing in the mono body
+layer and composited identically to both eyes.
+
+## Where that leaves the original report
+
+Five instrument rounds measured every objective channel between the game
+and the two eyes, and all of them came back symmetric:
+
+- the body texture: one resource, rendered before both composites, zero
+  writes between the reads (round two);
+- the composite constants: pure per-eye camera placement, no reveal
+  field, stable eye order (round three, the DCW dumps);
+- the delivery: pair-latched withholds in practice, and a snapshot-
+  submission A/B/A that changed nothing (the null that closed it);
+- the sampled inputs: identical resources in all eight recorded slots
+  (round four);
+- the squares themselves: mono-origin, designed (round six).
+
+What remains is the stimulus itself: a rapid, high-contrast, tile-
+granular animation playing on a ZERO-DISPARITY mono plane inside a stereo
+scene — the hardest case binocular fusion has. Day one's misfusion
+explanation died, correctly, for being asserted without evidence; it
+survives at the end because five rounds of evidence eliminated everything
+else and named the exact stimulus. The percept is real; the pixels are
+the same in both eyes.
+
+What EDVR ships from this arc: **`fix.fss_res`** — the body at full eye
+resolution, field-confirmed sharper, which softens the whole effect by
+giving the animation four times the pixels — plus the instrument suite
+(q=, res=, x=, DCC U/V, DCX, DCW, census_auto, census_frames/lines,
+census_skip_dispatch with :N, dispatch_pair_sync, submit_snapshot), every
+piece of which the next hunt inherits.
 
 ## Open
 
-- The dispatch probe flight, one hash at a time, squares watched.
-- If no candidate moves the squares: extend the census to PS slots 8-15
-  and non-PS stages, or record b1+ constants — in that order.
-- `experimental.submit_snapshot` stays available but proven unnecessary
-  for this bug; its copies cost nothing extra (the flash resubmit makes
-  them anyway).
-- The flash detector still withholds a couple of frames at every fresh
-  FSS zoom (the body camera until parked-certification) — its own arc.
+- The flash detector withholds a couple of frames at every fresh FSS zoom
+  (the body camera until parked-certification) — a real hitch on exactly
+  this transition, and its own arc.
+- If the per-eye percept ever needs revisiting: the deliberate monocular
+  re-test with eye order reversed, done on a body whose animation is
+  mid-flight, is the observation that would reopen it.
+- `fix.fss_res` is still opt-in; promoting it to a shipped default is a
+  release-train decision (cost: 4x the pixels for one layer, FSS only).
 - The flash detector trips on the FSS body camera at every fresh zoom
   (~9,880 units, withheld until "parked" certification) — a hitch on
   exactly the transition being scanned. Its own arc.

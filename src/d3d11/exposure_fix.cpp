@@ -121,10 +121,33 @@ struct State {
     // Empty is off and the only shipped state; each firing is counted and
     // the first is said aloud.
     uint64_t dispatchSkip[4] = {};
+    uint8_t  dispatchSkipOcc[4] = {};     // 0 = every occurrence; N = only the
+                                          // Nth per frame ("HASH:2" = the
+                                          // second eye's dispatch alone)
+    uint8_t  dispatchOccSeen[4] = {};     // per-frame occurrence counters
     uint32_t dispatchSkipCount = 0;
     uint64_t dispatchSkipped = 0;
     bool     dispatchSkipNoted = false;
     char     dispatchSkipSpec[96] = {};   // raw spec, to log only on change
+
+    // The pair-sync experiment (experimental.dispatch_pair_sync): for one
+    // compute shader that runs twice a frame -- once per eye, the exposure
+    // pass's own signature -- copy the FIRST occurrence's UAV0 resource over
+    // the SECOND's after it runs, so both eyes read identical data. Built
+    // 2026-08-25 for the FSS black squares: the per-eye 16x16-tile masks are
+    // measured (ch=22786F6DE290C577 and its 543x536 feeder), their consumer
+    // is not, and equalising the products decides their relevance and IS the
+    // fix if they are. ":r" reverses the copy (first gets the second's), for
+    // when the healthy eye turns out to be the second one.
+    uint64_t pairSyncHash = 0;
+    bool     pairSyncReverse = false;
+    uint8_t  pairSyncSeen = 0;            // occurrences this frame
+    void*    pairSyncFirstUav = nullptr;  // occurrence 1's UAV0 view -- the
+                                          // firstEye[] bargain: identity held
+                                          // within the frame, resolved at use
+    uint64_t pairSyncCopies = 0;
+    bool     pairSyncNoted = false;
+    char     pairSyncSpec[48] = {};
 
     // Shape detection.
     //
@@ -877,18 +900,66 @@ void STDMETHODCALLTYPE hookedDispatch(ID3D11DeviceContext* self, UINT x, UINT y,
     if (s->dispatchSkipCount) {
         const uint64_t h = hashOf(bindingGet(BindSlot::Cs));
         for (uint32_t i = 0; i < s->dispatchSkipCount; ++i) {
-            if (s->dispatchSkip[i] == h) {
+            if (s->dispatchSkip[i] != h) continue;
+            const uint8_t seen = ++s->dispatchOccSeen[i];
+            if (s->dispatchSkipOcc[i] == 0 || s->dispatchSkipOcc[i] == seen) {
                 ++s->dispatchSkipped;
                 s->computeThisFrame = true;
                 if (!s->dispatchSkipNoted) {
                     s->dispatchSkipNoted = true;
                     Log::get().note(
-                        "dispatch skip: first hit -- ch=%016llX not "
-                        "forwarded; counting silently from here.",
-                        static_cast<unsigned long long>(h));
+                        "dispatch skip: first hit -- ch=%016llX occurrence "
+                        "%u not forwarded; counting silently from here.",
+                        static_cast<unsigned long long>(h), seen);
                 }
                 return;
             }
+            break;   // matched hash, untargeted occurrence: forward normally
+        }
+    }
+
+    // The pair-sync experiment: occurrence 1 of the named shader lends its
+    // UAV0; occurrence 2 runs its own dispatch and is then overwritten by a
+    // CopyResource from the first -- both eyes read one eye's product. The
+    // view pointer is held across the frame on the firstEye[] bargain: the
+    // context keeps its own reference to anything bound, the boundary
+    // clears it, and the resolve happens under the guard.
+    if (s->pairSyncHash && hashOf(bindingGet(BindSlot::Cs)) == s->pairSyncHash) {
+        ++s->pairSyncSeen;
+        if (s->pairSyncSeen == 1) {
+            s->pairSyncFirstUav = bindingGet(BindSlot::CsUav0);
+        } else if (s->pairSyncSeen == 2 && s->pairSyncFirstUav) {
+            void* secondUav = bindingGet(BindSlot::CsUav0);
+            s->computeThisFrame = true;
+            s->realDispatch(self, x, y, z);
+            guardedBudget(g_budget, [&] {
+                ID3D11Resource* a = nullptr;
+                ID3D11Resource* b = nullptr;
+                static_cast<ID3D11UnorderedAccessView*>(s->pairSyncFirstUav)
+                    ->GetResource(&a);
+                if (secondUav) {
+                    static_cast<ID3D11UnorderedAccessView*>(secondUav)
+                        ->GetResource(&b);
+                }
+                if (a && b && a != b) {
+                    if (s->pairSyncReverse) {
+                        self->CopyResource(a, b);
+                    } else {
+                        self->CopyResource(b, a);
+                    }
+                    ++s->pairSyncCopies;
+                    if (!s->pairSyncNoted) {
+                        s->pairSyncNoted = true;
+                        Log::get().note(
+                            "dispatch pair sync: first copy made -- the two "
+                            "occurrences' UAV0 resources are distinct and "
+                            "one now mirrors the other, every frame.");
+                    }
+                }
+                if (a) a->Release();
+                if (b) b->Release();
+            });
+            return;   // forwarded above
         }
     }
 
@@ -1011,6 +1082,20 @@ void exposureConfigure(Config& cfg) {
                     ok = false;
                     break;
                 }
+                // ":N" narrows the skip to the Nth occurrence per frame --
+                // "HASH:2" is the second eye's dispatch alone, which is how
+                // a per-eye pair gets probed one eye at a time.
+                uint8_t occ = 0;
+                if (*end == ':') {
+                    const char* oq = end + 1;
+                    const unsigned long o = strtoul(oq, &end, 10);
+                    if (end == oq || o == 0 || o > 9) {
+                        ok = false;
+                        break;
+                    }
+                    occ = static_cast<uint8_t>(o);
+                }
+                s->dispatchSkipOcc[s->dispatchSkipCount] = occ;
                 s->dispatchSkip[s->dispatchSkipCount++] = h;
                 p = end;
             }
@@ -1025,15 +1110,63 @@ void exposureConfigure(Config& cfg) {
             } else if (s->dispatchSkipCount) {
                 Log::get().note(
                     "dispatch skip ARMED: %u compute shader(s) will NOT be "
-                    "forwarded while this is set. The scene may look very "
-                    "wrong -- that is the probe working. Clear the setting "
-                    "to restore.",
-                    s->dispatchSkipCount);
+                    "forwarded while this is set (%llu skipped under earlier "
+                    "specs this session). The scene may look very wrong -- "
+                    "that is the probe working. Clear the setting to restore.",
+                    s->dispatchSkipCount,
+                    static_cast<unsigned long long>(s->dispatchSkipped));
             } else {
                 Log::get().note(
                     "dispatch skip: cleared (%llu dispatch(es) were skipped "
                     "while it was set).",
                     static_cast<unsigned long long>(s->dispatchSkipped));
+            }
+        }
+    }
+
+    // The pair-sync experiment's spec: one hash, ":r" to reverse the copy.
+    {
+        const std::string spec =
+            cfg.getString("experimental.dispatch_pair_sync", "");
+        if (spec.length() < sizeof(s->pairSyncSpec) &&
+            spec != s->pairSyncSpec) {
+            memcpy(s->pairSyncSpec, spec.c_str(), spec.length() + 1);
+            const uint64_t hadCopies = s->pairSyncCopies;
+            s->pairSyncHash = 0;
+            s->pairSyncReverse = false;
+            s->pairSyncNoted = false;
+            if (!spec.empty()) {
+                char* end = nullptr;
+                const unsigned long long h =
+                    _strtoui64(spec.c_str(), &end, 16);
+                bool ok = end != spec.c_str() && h != 0;
+                if (ok && *end == ':') {
+                    ok = (end[1] == 'r' || end[1] == 'R') && end[2] == '\0';
+                    if (ok) s->pairSyncReverse = true;
+                } else if (ok && *end != '\0') {
+                    ok = false;
+                }
+                if (!ok) {
+                    Log::get().note(
+                        "dispatch pair sync: \"%s\" is not one 16-digit hex "
+                        "hash with an optional :r; refused.",
+                        spec.c_str());
+                } else {
+                    s->pairSyncHash = h;
+                    Log::get().note(
+                        "dispatch pair sync ARMED: ch=%016llX runs per eye, "
+                        "and the %s occurrence's UAV0 is copied over the "
+                        "%s's each frame -- both eyes read one eye's data. "
+                        "Clear the setting to restore.",
+                        static_cast<unsigned long long>(h),
+                        s->pairSyncReverse ? "SECOND" : "FIRST",
+                        s->pairSyncReverse ? "first" : "second");
+                }
+            } else {
+                Log::get().note(
+                    "dispatch pair sync: cleared (%llu copies were made "
+                    "while it was set).",
+                    static_cast<unsigned long long>(hadCopies));
             }
         }
     }
@@ -1082,6 +1215,11 @@ void exposureFixFrameBoundary() {
     }
     s->seenThisFrame = 0;
     for (uint32_t i = 0; i < 4; ++i) s->firstEye[i] = nullptr;
+    // The probe and the pair sync count occurrences per frame; the lent UAV
+    // pointer dies at the boundary exactly as firstEye[] does.
+    for (uint32_t i = 0; i < 4; ++i) s->dispatchOccSeen[i] = 0;
+    s->pairSyncSeen = 0;
+    s->pairSyncFirstUav = nullptr;
 
     // Forget what was bound, once a frame.
     //
