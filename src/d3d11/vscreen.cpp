@@ -25,6 +25,7 @@
 #include "panel_quad.h"
 #include "device_hook.h"  // contextHookModeFor
 #include "draw_census.h"
+#include "fss_res.h"
 #include "fov_probe.h"
 #include "glitch_frame.h"
 #include "holo_fix.h"
@@ -118,6 +119,11 @@ constexpr size_t kSlotCopyResource          = 47;
 // the headset reports and what every draws-only capture was blind to.
 constexpr size_t kSlotUpdateSubresource     = 48;
 constexpr size_t kSlotResolveSubresource    = 57;
+// The FSS resolution fix's half: a viewport of exactly the body layer's
+// requested (half) size, set while an inflated target is bound, is scaled
+// to fill what was actually allocated. SDK-verified 2026-08-25 alongside
+// the two above.
+constexpr size_t kSlotRSSetViewports        = 44;
 constexpr size_t kSlotClearState            = 110;
 constexpr size_t kHighestSlotUsed           = 110;
 
@@ -204,6 +210,8 @@ typedef void(STDMETHODCALLTYPE* PFN_CopySubresourceRegion)(
 typedef void(STDMETHODCALLTYPE* PFN_UpdateSubresource)(
     ID3D11DeviceContext*, ID3D11Resource*, UINT, const D3D11_BOX*, const void*,
     UINT, UINT);
+typedef void(STDMETHODCALLTYPE* PFN_RSSetViewports)(ID3D11DeviceContext*, UINT,
+                                                    const D3D11_VIEWPORT*);
 typedef void(STDMETHODCALLTYPE* PFN_ResolveSubresource)(
     ID3D11DeviceContext*, ID3D11Resource*, UINT, ID3D11Resource*, UINT,
     DXGI_FORMAT);
@@ -239,8 +247,14 @@ struct State {
     PFN_CopySubresourceRegion realCopySubresourceRegion = nullptr;
     PFN_UpdateSubresource    realUpdateSubresource = nullptr;
     PFN_ResolveSubresource   realResolveSubresource = nullptr;
+    PFN_RSSetViewports       realRSSetViewports = nullptr;
     PFN_ClearState           realClearState = nullptr;
     PFN_ExecuteCommandList   realExecuteCommandList = nullptr;
+    // The bound target's underlying resource, cached per binding generation
+    // for the FSS viewport paths -- resolved only while fssResActive(), so a
+    // session that never opens the scanner never pays it.
+    uint32_t rtv0ResGen = 0;
+    void*    rtv0Res = nullptr;
     bool sawClearState = false;
     bool sawExecuteCommandList = false;
 
@@ -836,6 +850,12 @@ bool targetIsEyeSized(void* rtv, int* candOut = nullptr) {
     ResourceInfo info;
     if (!bindingResolve(rtv, &info) || !info.isTexture2D) return false;
 
+    // The FSS body layer at full resolution is now EXACTLY eye-sized -- the
+    // collision the panel-size exclusion below documents, arriving by a new
+    // door. Excluded by IDENTITY, which size cannot do: the inflated
+    // textures are tracked by pointer from their creation.
+    if (fssResIsInflated(info.resource)) return false;
+
     // ORDER MATTERS, and getting it wrong is a regression rather than a miss.
     //
     // What the headset was actually handed is a FACT; everything below it is
@@ -1026,6 +1046,11 @@ inline bool foreignContext(ID3D11DeviceContext* self) {
     return self != g_state->ownerCtx;
 }
 
+// Defined with the hooks below; the draw path's fss backstop runs first in
+// the file.
+void* currentRtv0Resource(State* s);
+bool viewportIs(const D3D11_VIEWPORT& v, uint32_t w, uint32_t h);
+
 // Record a draw we are about to decline. Cheap by construction: a linear scan
 // of at most eight entries, and GetType is asked ONCE per context rather than
 // per draw -- it is a virtual call, and this path can be thousands of draws a
@@ -1125,7 +1150,7 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     if (!s->distanceEnabled && !s->countForFlashFix &&
         !headOffsetGateWantsPanel() && s->censusSkipCount == 0 &&
         s->censusSkipRangeCount == 0 && s->censusSkipOffCount == 0 &&
-        s->censusAutoW == 0 &&
+        s->censusAutoW == 0 && !fssResActive() &&
         !remlokWantsDraws() && !holoWantsDraws() && !witchstarWantsDraws() &&
         !sunglareWantsDraws() && !cbPeekEnabled() && !billboardWantsDraws() &&
         !drawCensusArmed() && !panelQuadWants() && !panelCurveWants() &&
@@ -1178,6 +1203,29 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         // returned from.
         if (drawCensusWantsOffscreen() && drawCensusArmed()) {
             drawCensusOffDraw(self, kind, count, instances);
+        }
+        // The resolution fix's draw-time backstop: if the game set the body
+        // layer's half-size viewport BEFORE binding the target, the set-time
+        // hook had nothing to match against and this draw would land in the
+        // bottom-left quarter of the inflated texture. Only draws into a
+        // tracked texture pay the viewport read -- six a frame in the FSS,
+        // none anywhere else.
+        if (fssResActive()) {
+            void* res = currentRtv0Resource(s);
+            uint32_t ow = 0, oh = 0;
+            if (res && fssResOrigSize(res, &ow, &oh)) {
+                UINT nvp = 1;
+                D3D11_VIEWPORT vp{};
+                self->RSGetViewports(&nvp, &vp);
+                if (nvp >= 1 && viewportIs(vp, ow, oh)) {
+                    vp.TopLeftX *= 2.0f;
+                    vp.TopLeftY *= 2.0f;
+                    vp.Width *= 2.0f;
+                    vp.Height *= 2.0f;
+                    s->realRSSetViewports(self, 1, &vp);
+                    fssResNoteViewportScaled(true);
+                }
+            }
         }
         // The auto arm's trigger: a draw into the watched size after a quiet
         // spell means a build just started, and the frames worth recording
@@ -2003,6 +2051,58 @@ void STDMETHODCALLTYPE hookedResolveSubresource(ID3D11DeviceContext* self,
     g_state->realResolveSubresource(self, dst, dstSub, src, srcSub, fmt);
 }
 
+// --- the FSS resolution fix's viewport half (fss_res.h) ---------------------
+
+// The bound render target's RESOURCE, cached per binding generation -- the
+// rtv0Eye pattern. Resolved only from the fss paths, which gate on
+// fssResActive(), so a session that never opens the scanner never pays it.
+void* currentRtv0Resource(State* s) {
+    const uint32_t gen = bindingGeneration(BindSlot::Rtv0);
+    if (s->rtv0ResGen != gen) {
+        s->rtv0ResGen = gen;
+        ResourceInfo info;
+        s->rtv0Res = bindingResolve(bindingGet(BindSlot::Rtv0), &info) &&
+                             info.isTexture2D
+                         ? info.resource
+                         : nullptr;
+    }
+    return s->rtv0Res;
+}
+
+// Half a pixel of tolerance: the game writes integral viewport floats, and
+// an equality test on floats is how a fix stops matching without a line
+// anywhere saying so.
+bool viewportIs(const D3D11_VIEWPORT& v, uint32_t w, uint32_t h) {
+    return v.Width > w - 0.5f && v.Width < w + 0.5f && v.Height > h - 0.5f &&
+           v.Height < h + 0.5f;
+}
+
+// NOT in the reclaim vouch list, deliberately: this slot carries an
+// experimental fix, and a tool re-pointing it costs that fix alone -- the
+// fss res notes going quiet in the log is the diagnosis. Vouching would
+// mean per-thunk hit counters this hook does not keep.
+void STDMETHODCALLTYPE hookedRSSetViewports(ID3D11DeviceContext* self, UINT n,
+                                            const D3D11_VIEWPORT* vps) {
+    State* s = g_state;
+    if (foreignContext(self) || n != 1 || !vps || !fssResActive()) {
+        s->realRSSetViewports(self, n, vps);
+        return;
+    }
+    uint32_t ow = 0, oh = 0;
+    void* res = currentRtv0Resource(s);
+    if (res && fssResOrigSize(res, &ow, &oh) && viewportIs(vps[0], ow, oh)) {
+        D3D11_VIEWPORT v = vps[0];
+        v.TopLeftX *= 2.0f;
+        v.TopLeftY *= 2.0f;
+        v.Width *= 2.0f;
+        v.Height *= 2.0f;
+        s->realRSSetViewports(self, 1, &v);
+        fssResNoteViewportScaled(false);
+        return;
+    }
+    s->realRSSetViewports(self, n, vps);
+}
+
 void STDMETHODCALLTYPE hookedDraw(ID3D11DeviceContext* self, UINT count, UINT start) {
     ++g_state->thunkHits[kHitDraw];
     const DrawVerdict v = beginPanelOverride(self, 'D', count, 1);
@@ -2410,6 +2510,7 @@ void vScreenRefreshConfig() {
     s->countForFlashFix = glitchFrameNeedsEyeDraws();
     readEyeRenderSize(cfg, s);
     readCensusSkip(cfg, s);
+    fssResConfigure(cfg);
     remlokConfigure(cfg);
     holoConfigure(cfg);
     witchstarConfigure(cfg);
@@ -3182,6 +3283,8 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
                    reinterpret_cast<void**>(&s.realUpdateSubresource));
     s.hook.replace(kSlotResolveSubresource, &hookedResolveSubresource,
                    reinterpret_cast<void**>(&s.realResolveSubresource));
+    s.hook.replace(kSlotRSSetViewports, &hookedRSSetViewports,
+                   reinterpret_cast<void**>(&s.realRSSetViewports));
     s.hook.replace(kSlotMap, &hookedMap, reinterpret_cast<void**>(&s.realMap));
     s.hook.replace(kSlotUnmap, &hookedUnmap, reinterpret_cast<void**>(&s.realUnmap));
     s.hook.replace(kSlotDraw, &hookedDraw, reinterpret_cast<void**>(&s.realDraw));

@@ -12,6 +12,7 @@
 #include "../common/hotkey.h"
 #include "head_offset_gate.h"
 #include "camera_view.h"
+#include "fss_res.h"
 #include "journal_watch.h"
 #include "elite_binds.h"
 #include "../common/log.h"
@@ -30,6 +31,10 @@ namespace {
 
 // Frozen COM ABI. IUnknown occupies 0-2; the interface methods follow in
 // declaration order. Each index is still range-checked before use.
+// CreateTexture2D verified against the SDK's ID3D11DeviceVtbl on 2026-08-25,
+// the same check the context slots got: a miscount here would silently hook
+// CreateTexture1D or CreateTexture3D.
+constexpr size_t kDevCreateTexture2D     = 5;
 constexpr size_t kDevCreateVertexShader  = 12;
 constexpr size_t kDevCreatePixelShader   = 15;
 constexpr size_t kDevCreateComputeShader = 18;
@@ -39,6 +44,9 @@ constexpr size_t kFactory2CreateSwapChainForHwnd = 15;
 
 typedef HRESULT(STDMETHODCALLTYPE* PFN_CreateShader)(ID3D11Device*, const void*, SIZE_T,
                                                      ID3D11ClassLinkage*, void**);
+typedef HRESULT(STDMETHODCALLTYPE* PFN_CreateTexture2D)(
+    ID3D11Device*, const D3D11_TEXTURE2D_DESC*, const D3D11_SUBRESOURCE_DATA*,
+    ID3D11Texture2D**);
 typedef HRESULT(STDMETHODCALLTYPE* PFN_Present)(IDXGISwapChain*, UINT, UINT);
 typedef HRESULT(STDMETHODCALLTYPE* PFN_CreateSwapChain)(IDXGIFactory*, IUnknown*,
                                                         DXGI_SWAP_CHAIN_DESC*,
@@ -64,6 +72,7 @@ struct State {
     PFN_CreateShader realCreateCS = nullptr;
     PFN_CreateShader realCreateVS = nullptr;
     PFN_CreateShader realCreatePS = nullptr;
+    PFN_CreateTexture2D realCreateTexture2D = nullptr;
     // The shader-swap arc's dump mode: while armed, every vertex and pixel
     // shader blob the game creates is written to <logdir>\shaders by hash,
     // and the glare draw logs which two hashes it binds -- the pair to
@@ -264,6 +273,39 @@ HRESULT STDMETHODCALLTYPE hookedCreatePS(ID3D11Device* self, const void* bytecod
         registerShaderHash(*out, hash);
         if (g_state->shaderDump) dumpShaderBlob(L"ps", hash, bytecode, len);
     });
+    return hr;
+}
+
+// The FSS body layer's resolution (fss_res.h). The match, the doubling and
+// the refusal rules all live in that module; this hook only carries descs
+// to it and created textures back. One bool per create when the fix is off.
+HRESULT STDMETHODCALLTYPE hookedCreateTexture2D(ID3D11Device* self,
+                                                const D3D11_TEXTURE2D_DESC* desc,
+                                                const D3D11_SUBRESOURCE_DATA* init,
+                                                ID3D11Texture2D** out) {
+    if (self != g_state->device || !desc || !fssResWantsCreates()) {
+        return g_state->realCreateTexture2D(self, desc, init, out);
+    }
+    D3D11_TEXTURE2D_DESC d = *desc;
+    bool inflated = false;
+    guardedBudget(g_createBudget, [&] {
+        inflated = fssResMaybeInflate(&d, init != nullptr);
+    });
+    if (!inflated) {
+        return g_state->realCreateTexture2D(self, desc, init, out);
+    }
+    const HRESULT hr = g_state->realCreateTexture2D(self, &d, init, out);
+    if (FAILED(hr)) {
+        // The inflated create failed -- out of memory is the realistic way.
+        // The game must still get its texture: fall back to the size it
+        // asked for, untracked, exactly as if the fix were off.
+        return g_state->realCreateTexture2D(self, desc, init, out);
+    }
+    if (out && *out) {
+        guardedBudget(g_createBudget, [&] {
+            fssResNoteCreated(*out, desc->Width, desc->Height);
+        });
+    }
     return hr;
 }
 
@@ -847,6 +889,11 @@ void hookDevice(ID3D11Device* device) {
                          reinterpret_cast<void**>(&s.realCreatePS));
     s.deviceHook.replace(kDevCreateComputeShader, &hookedCreateCS,
                          reinterpret_cast<void**>(&s.realCreateCS));
+    s.deviceHook.replace(kDevCreateTexture2D, &hookedCreateTexture2D,
+                         reinterpret_cast<void**>(&s.realCreateTexture2D));
+    // Before the first create can arrive: the FSS resolution fix's flag is
+    // read here for install and on vScreen's reload path for live flips.
+    fssResConfigure(sentinelCfg);
     if (!s.deviceHook.commit()) {
         s.deviceHook.uninstall();
         // Nothing was patched, so there is nothing to be protecting against.

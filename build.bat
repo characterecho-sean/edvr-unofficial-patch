@@ -163,6 +163,7 @@ cl.exe %CFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "%ROOT%\src\d3d11\binding_shadow.cpp" "%ROOT%\src\d3d11\head_offset_gate.cpp" ^
     "%ROOT%\src\d3d11\camera_view.cpp" "%ROOT%\src\d3d11\journal_watch.cpp" ^
     "%ROOT%\src\d3d11\elite_binds.cpp" "%ROOT%\src\d3d11\draw_census.cpp" ^
+    "%ROOT%\src\d3d11\fss_res.cpp" ^
     "%ROOT%\src\d3d11\panel_quad.cpp" "%ROOT%\src\d3d11\panel_curve.cpp" ^
     "%ROOT%\src\d3d11\shader_sig.cpp" ^
     "%ROOT%\src\d3d11\remlok_fix.cpp" "%ROOT%\src\d3d11\holo_fix.cpp" ^

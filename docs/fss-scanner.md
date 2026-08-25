@@ -287,17 +287,60 @@ staleness, the pair latch's CONSISTENT-LATE-BEATS-SPLIT rule applied to
 pixels. Any refusal (shape change, fault, budget) falls through to the
 live texture for that eye-submit, exactly as stock.
 
-The in-headset A/B is the test: zoom a ringed body with it on, flip it off
-mid-session (the ini is live; the log acknowledges each flip), zoom again.
-Split gone with it on and back with it off → mechanism confirmed, fix
-ships. Split unchanged → the presentation channel closes too, and what
-remains is the report's procedure (a sequential monocular check during an
-evolving build sees different build moments in each eye by construction —
-worth one deliberate re-test with the eye order reversed).
+**Flown 2026-08-25 (log `edvr_gfx_20260825_133008`): NULL.** A full A/B/A —
+ON at startup, OFF at 13:32:30, ON again at 13:33:25, receipts in the vr
+log, no shadow faults, and the same copies visibly correct through fifteen
+withholds — and the split did not move. The delivery channel is closed with
+the other two.
 
-The half-resolution fix (Finding 2) is unblocked either way: the writer
-inventory came back all-draws (no copies land in the body target), so the
-target can be inflated with a viewport scale and nothing else to adjust.
+### Where every measurement converges: the resample
+
+What survives all three rounds AND the snapshot null is not a channel that
+delivers different content — it is the one legitimate per-eye operation in
+the whole pipeline: **each eye resamples the same half-resolution mono
+image through its own placement transform** (the ±35 row the DCW dumps
+measured). A ring seen near edge-on is a feature a fraction of a pixel
+thick in a 2170-wide image; two sample grids that differ by a per-eye
+homography catch and miss its pixels DIFFERENTLY — segments present in one
+eye and absent in the other. Monocularly real. Worst exactly while the
+ring is faint and partial (the streaming build), converging as it
+saturates — "one eye still filling while the other is already solid".
+Needs the ring (thin), needs the build (low contrast), needs the headset
+(two resamples), immune to latching (content identical by construction).
+It is also Finding 2 wearing the report's clothes: the pixelated sprite
+and the ring split are one under-resolution with two symptoms.
+
+## The fix: `fix.fss_res` — the body layer at full eye resolution
+
+Built 2026-08-25, off by default. Three identity-tracked moves:
+
+1. **CreateTexture2D**: a single-mip, non-MSAA render-target or depth
+   texture asked for at exactly eye/2 per axis is created at double the
+   requested size. The auto-census's own trigger measured that NOTHING
+   else ever draws at that size — it waited 15,654 frames of menus,
+   flight and supercruise for the first such draw.
+2. **RSSetViewports**: a viewport of exactly the requested half size, set
+   while an inflated texture is bound, is scaled ×2 — plus a draw-time
+   backstop for a viewport set before the bind. Receipts logged, counted.
+3. **The eye test**: the inflated textures are now exactly eye-sized and
+   are excluded by identity — the panel-size collision, solved the same
+   way.
+
+The composite needs nothing: it samples through normalized UVs and simply
+receives a sharper image. Round two's writer inventory (draws only, no
+copies, no compute, no resolves into the body target) is what makes the
+whole fix this small. Cost: 4× the pixels for one offscreen layer, only
+while zoomed. Live — a flip applies at the next zoom, because the textures
+are created per zoom.
+
+The A/B doubles as the ring-split test: at full resolution the ring has
+four times the pixels, and the per-eye grids agree about a feature two
+pixels wide where they disagreed about one. Sharper body either way; if
+the split dies with it, the aliasing story is confirmed. If the split
+survives full resolution, what remains is the observation procedure — a
+sequential monocular check during an evolving build sees different build
+moments in each eye by construction, so the decisive re-test is one
+deliberate check with the eye order reversed.
 
 ## The layers, as measured
 
@@ -408,12 +451,16 @@ all.
 
 ## Open
 
-- The snapshot A/B flight: zoom with `submit_snapshot = 1`, flip it off
-  mid-session, zoom again. The one in-headset observation left that
-  decides the whole arc.
-- The resolution fix against `2170x2142` is not built — but round two
-  unblocked it: the body target takes only draws, so inflation plus a
-  viewport scale is the whole job.
+- The `fss_res` A/B flight: zoom the ringed body with `fix.fss_res = 1` —
+  the body should be visibly sharper (Finding 2's fix landing), and the
+  ring split lives or dies with the aliasing story. The log receipts to
+  look for: "fss res: a 2170x2142 body-layer texture was created at
+  4340x4284" and the viewport-scaled notes.
+- If the split survives full resolution: one monocular re-test with the
+  eye order deliberately reversed, before any further instrument.
+- `experimental.submit_snapshot` stays available but proven unnecessary
+  for this bug; its copies cost nothing extra (the flash resubmit makes
+  them anyway).
 - The flash detector trips on the FSS body camera at every fresh zoom
   (~9,880 units, withheld until "parked" certification) — a hitch on
   exactly the transition being scanned. Its own arc.
