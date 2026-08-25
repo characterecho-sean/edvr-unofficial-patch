@@ -258,9 +258,16 @@ struct State {
     uint32_t rtv0ResGen = 0;
     void*    rtv0Res = nullptr;
     // Is the bound offscreen target the FSS body layer? Cached per binding
-    // generation for the scan-dissolve fix's gate.
+    // generation for the scan-dissolve fix's gate and the panel fix's
+    // mode gate.
     uint32_t fssScanGen = 0;
     bool     fssScanBody = false;
+    // The last frame a draw landed in the body layer -- the fact "the FSS
+    // is open NOW". The panel fix's shader pair is the engine's GENERAL
+    // world-quad pipeline, and recognising it by hash alone moved the
+    // loading screen's text quad on 2026-08-25; drawing the scanner's
+    // body is the one thing only the scanner does.
+    uint32_t fssBodyFrame = 0;
     bool sawClearState = false;
     bool sawExecuteCommandList = false;
 
@@ -1289,12 +1296,12 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
                 }
             }
         }
-        // The scan-dissolve fix, after the probes for the probes' usual
-        // reason. Gated on the target being the BODY LAYER -- eye/2-sized,
-        // or one of fss_res's inflated textures -- cached per binding
-        // generation, so the slot scan runs for a handful of scanner draws
-        // and for nothing else in the game.
-        if (fssScanWantsDraws()) {
+        // The body-layer gate, shared by the scan-dissolve fix and the
+        // panel fix's mode stamp: is the bound target the BODY LAYER --
+        // eye/2-sized, or one of fss_res's inflated textures? Cached per
+        // binding generation, so the resolve runs for a handful of scanner
+        // draws and for nothing else in the game.
+        if (fssScanWantsDraws() || fssPanelWantsDraws()) {
             if (s->fssScanGen != rtvGen) {
                 s->fssScanGen = rtvGen;
                 s->fssScanBody = false;
@@ -1313,8 +1320,15 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
                     }
                 }
             }
-            if (s->fssScanBody && fssScanOnBodyDraw()) {
-                return DrawVerdict::kFssScan;
+            if (s->fssScanBody) {
+                // The scanner is drawing its body THIS frame -- the fact
+                // the panel fix's recognition is gated on. The body draws
+                // land before the eye composites in the frame, so the
+                // stamp is fresh by the time the composites ask.
+                s->fssBodyFrame = s->frameNo;
+                if (fssScanWantsDraws() && fssScanOnBodyDraw()) {
+                    return DrawVerdict::kFssScan;
+                }
             }
         }
         return DrawVerdict::kNone;
@@ -1434,9 +1448,13 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     }
 
     // The FSS panel composite pair, recognised by vertex-shader hash after
-    // the cheap kind/count gate. A holo-true draw can never be one of these
-    // -- different shaders -- so the order between the two is taste.
-    if (fssPanelWantsDraws() &&
+    // the cheap kind/count gate -- and ONLY while the scanner's body layer
+    // drew within the last two frames. The hash names the engine's general
+    // world-quad pipeline, not the scanner: on 2026-08-25 the hash alone
+    // also matched the loading screen's text quad and moved it. The body
+    // layer is the one thing only the scanner draws.
+    if (fssPanelWantsDraws() && s->fssBodyFrame != 0 &&
+        s->frameNo - s->fssBodyFrame <= 2 &&
         fssPanelOnEyeDraw(self, kind, count, instances)) {
         return DrawVerdict::kFssPanel;
     }

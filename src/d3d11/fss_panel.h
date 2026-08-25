@@ -23,6 +23,14 @@
 // stock. Hash-pinned recognition means a game update that rebuilds these
 // shaders leaves the fix silently inert -- the totals note says when it
 // never engaged, which is that case's name.
+//
+// THE HASH IS NOT THE SCANNER (field, 2026-08-25, one session old): this
+// pair is the engine's general world-quad pipeline, and matching it by
+// hash alone moved the LOADING SCREEN's text quad. vscreen therefore
+// gates the recognition on the scanner's body layer having drawn within
+// the last two frames -- drawing that layer is the one thing only the
+// scanner does -- and this module's OnEyeDraw is never consulted outside
+// that window.
 #pragma once
 
 #include <cstdint>
