@@ -38,8 +38,25 @@ constexpr uint32_t kCbSlots = 4;
 // 2 = "first" (second eye receives, first lends), 3 = "depth" (nothing is
 // fed; every matched draw in BOTH eyes runs with depth and stencil tests
 // off -- the round-19 constants feed was engaged-and-null, and per-eye
-// depth/stencil culling is the last per-draw channel these draws own).
+// depth/stencil culling is the last per-draw channel these draws own),
+// 4 = "mask255" / 5 = "mask0": the FIX ARMS. The eye-image dump and the
+// stock-install control settled the arc: the black-square dissolve is
+// painted into BOTH eyes by the ring quad from its reveal MASK at PS
+// slot 3, and the crisp-vs-smooth eye split is born below the game.
+// Substituting a flat fully-revealed mask at exactly those draws removes
+// the black-square phase in both eyes and leaves the progressive
+// sharpening (which lives in the ring's scene render) untouched. Which
+// byte means "revealed" depends on the shader's compare direction --
+// fss_scan_level's lesson -- so both polarities ship and one look names
+// the right one.
 uint8_t g_mode = 0;
+
+// The flat mask, built to the displaced view's size on first engage.
+ID3D11Texture2D*          g_maskTex = nullptr;
+ID3D11ShaderResourceView* g_maskSrv = nullptr;
+uint32_t g_maskW = 0, g_maskH = 0;
+uint8_t  g_maskByte = 0;
+bool     g_maskFailedNoted = false;
 
 ID3D11DepthStencilState* g_noDepth = nullptr;
 ID3D11DepthStencilState* g_savedDepth = nullptr;
@@ -115,16 +132,29 @@ void fssRingConfigure(Config& cfg) {
         mode = 2;
     } else if (m == "depth") {
         mode = 3;
+    } else if (m == "mask255") {
+        mode = 4;
+    } else if (m == "mask0") {
+        mode = 5;
     } else {
-        Log::get().note("fss_ring_feed \"%s\" is not stock, second or first; "
-                        "running stock.", m.c_str());
+        Log::get().note("fss_ring_feed \"%s\" is not stock, second, first, "
+                        "depth, mask255 or mask0; running stock.", m.c_str());
     }
     if (mode == g_mode) return;
     g_mode = mode;
     g_engagedNoted = false;
     g_learnNoted = false;
     releaseLearned();
-    if (g_mode == 3) {
+    if (g_mode >= 4) {
+        Log::get().note(
+            "fss ring ARMED: the ring quad's reveal mask (PS slot 3) is "
+            "replaced with flat %u for exactly those draws, both eyes -- "
+            "every cell reads as one reveal state. If the ring appears "
+            "WHOLE (no black squares) this polarity is the fix; if it "
+            "VANISHES or never resolves, flip to the other. Clear to "
+            "restore.",
+            g_mode == 4 ? 255u : 0u);
+    } else if (g_mode == 3) {
         Log::get().note(
             "fss ring ARMED: every ring-family draw runs with depth and "
             "stencil tests OFF, both eyes. Squares dying here means the "
@@ -173,6 +203,14 @@ bool fssRingOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
         if (g_mode == 3) {
             // Depth mode: no learning, no feeding; every matched draw in
             // both eyes gets the no-test state in Begin/End.
+            g_pendingFam = f;
+            g_pendingJ = j;
+            return true;
+        }
+        if (g_mode >= 4) {
+            // Mask mode: only the ring quad samples the mask; the other
+            // families pass through untouched.
+            if (f != 0) return false;
             g_pendingFam = f;
             g_pendingJ = j;
             return true;
@@ -244,6 +282,106 @@ void fssRingBegin(ID3D11DeviceContext* ctx) {
     g_engaged = false;
     g_depthEngaged = false;
     if (!ctx || !g_mode) return;
+    if (g_mode >= 4) {
+        guardedBudget(g_budget, [&] {
+            // Size the flat mask to whatever the game bound at slot 3.
+            ID3D11ShaderResourceView* cur = nullptr;
+            ctx->PSGetShaderResources(3, 1, &cur);
+            uint32_t w = 0, h = 0;
+            if (cur) {
+                ID3D11Resource* res = nullptr;
+                cur->GetResource(&res);
+                if (res) {
+                    ID3D11Texture2D* tex = nullptr;
+                    res->QueryInterface(__uuidof(ID3D11Texture2D),
+                                        reinterpret_cast<void**>(&tex));
+                    if (tex) {
+                        D3D11_TEXTURE2D_DESC td{};
+                        tex->GetDesc(&td);
+                        w = td.Width;
+                        h = td.Height;
+                        tex->Release();
+                    }
+                    res->Release();
+                }
+            }
+            const uint8_t want = g_mode == 4 ? 0xFF : 0x00;
+            if (!w || !h) {
+                if (cur) cur->Release();
+                return;
+            }
+            if (!g_maskSrv || g_maskW != w || g_maskH != h ||
+                g_maskByte != want) {
+                if (g_maskSrv) {
+                    g_maskSrv->Release();
+                    g_maskSrv = nullptr;
+                }
+                if (g_maskTex) {
+                    g_maskTex->Release();
+                    g_maskTex = nullptr;
+                }
+                ID3D11Device* dev = nullptr;
+                ctx->GetDevice(&dev);
+                if (dev) {
+                    std::string fill(static_cast<size_t>(w) * h,
+                                     static_cast<char>(want));
+                    D3D11_TEXTURE2D_DESC td{};
+                    td.Width = w;
+                    td.Height = h;
+                    td.MipLevels = 1;
+                    td.ArraySize = 1;
+                    td.Format = DXGI_FORMAT_R8_UNORM;
+                    td.SampleDesc.Count = 1;
+                    td.Usage = D3D11_USAGE_IMMUTABLE;
+                    td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+                    D3D11_SUBRESOURCE_DATA init{};
+                    init.pSysMem = fill.data();
+                    init.SysMemPitch = w;
+                    HRESULT hr = dev->CreateTexture2D(&td, &init, &g_maskTex);
+                    if (SUCCEEDED(hr) && g_maskTex) {
+                        hr = dev->CreateShaderResourceView(g_maskTex, nullptr,
+                                                           &g_maskSrv);
+                    }
+                    dev->Release();
+                    if (FAILED(hr) || !g_maskSrv) {
+                        if (g_maskTex) {
+                            g_maskTex->Release();
+                            g_maskTex = nullptr;
+                        }
+                        if (!g_maskFailedNoted) {
+                            g_maskFailedNoted = true;
+                            Log::get().note(
+                                "fss ring: could not create the %ux%u flat "
+                                "mask (hr=0x%08X); the ring draws stock.",
+                                w, h, static_cast<unsigned>(hr));
+                        }
+                        if (cur) cur->Release();
+                        return;
+                    }
+                    g_maskW = w;
+                    g_maskH = h;
+                    g_maskByte = want;
+                }
+            }
+            if (!g_maskSrv) {
+                if (cur) cur->Release();
+                return;
+            }
+            g_displaced[3] = cur;   // keep the Get's ref; may be null
+            ID3D11ShaderResourceView* sub = g_maskSrv;
+            ctx->PSSetShaderResources(3, 1, &sub);
+            g_engaged = true;
+            ++g_applied;
+            if (!g_engagedNoted) {
+                g_engagedNoted = true;
+                Log::get().note(
+                    "fss ring: engaged -- the ring quad's reveal mask is "
+                    "flat %u for exactly those draws, restored after each.",
+                    g_maskByte);
+            }
+        });
+        return;
+    }
     if (g_mode == 3) {
         guardedBudget(g_budget, [&] {
             if (!g_noDepth) {
@@ -295,6 +433,15 @@ void fssRingBegin(ID3D11DeviceContext* ctx) {
 }
 
 void fssRingEnd(ID3D11DeviceContext* ctx) {
+    if (g_engaged && ctx && g_mode >= 4) {
+        g_engaged = false;
+        ctx->PSSetShaderResources(3, 1, &g_displaced[3]);
+        if (g_displaced[3]) {
+            g_displaced[3]->Release();
+            g_displaced[3] = nullptr;
+        }
+        return;
+    }
     if (g_depthEngaged && ctx) {
         g_depthEngaged = false;
         ctx->OMSetDepthStencilState(g_savedDepth, g_savedStencilRef);
@@ -331,6 +478,14 @@ void fssRingShutdown() {
     if (g_noDepth) {
         g_noDepth->Release();
         g_noDepth = nullptr;
+    }
+    if (g_maskSrv) {
+        g_maskSrv->Release();
+        g_maskSrv = nullptr;
+    }
+    if (g_maskTex) {
+        g_maskTex->Release();
+        g_maskTex = nullptr;
     }
 }
 
