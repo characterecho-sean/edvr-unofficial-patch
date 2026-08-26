@@ -634,6 +634,11 @@ void fssDumpDispatchPost(ID3D11DeviceContext* ctx) {
         const uint64_t h = lookupShaderHash(cs);
         if (cs) cs->Release();
         if (h == kOutputHash) {
+            static bool s_matchNoted = false;
+            if (!s_matchNoted && seriesLive) {
+                s_matchNoted = true;
+                Log::get().note("fss series: first output dispatch matched.");
+            }
             const uint8_t occ = ++g_occOut;
             if (occ > kEyes) return;
             ID3D11UnorderedAccessView* uav = nullptr;
@@ -647,7 +652,22 @@ void fssDumpDispatchPost(ID3D11DeviceContext* ctx) {
                     // composites draw before the reconstruction in every
                     // frame, so a zero count here means a non-FSS frame.
                     if (seriesLive && g_occComp != 0) {
+                        static bool s_capNoted = false;
+                        if (!s_capNoted) {
+                            s_capNoted = true;
+                            Log::get().note("fss series: capturing.");
+                        }
                         seriesCapture(ctx, res, occ - 1);
+                    } else if (seriesLive) {
+                        static bool s_blockNoted = false;
+                        if (!s_blockNoted) {
+                            s_blockNoted = true;
+                            Log::get().note(
+                                "fss series: output dispatch seen but no "
+                                "composite counted this frame -- the "
+                                "scanner gate never opened for the series. "
+                                "Said once.");
+                        }
                     }
                     res->Release();
                 }
