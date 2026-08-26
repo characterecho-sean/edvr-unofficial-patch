@@ -605,6 +605,11 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
 HRESULT STDMETHODCALLTYPE hookedCreateSwapChain(IDXGIFactory* self, IUnknown* device,
                                                 DXGI_SWAP_CHAIN_DESC* desc,
                                                 IDXGISwapChain** out) {
+    // Numbered and unbuffered, like the device-create census in the proxy:
+    // a swapchain born in the death window is currently invisible, and where
+    // the game presents is what every Present-driven instrument hangs off.
+    static volatile long s_calls = 0;
+    breadcrumbCounted(&s_calls, "gfx: factory CreateSwapChain");
     const HRESULT hr = g_state->realCreateSwapChain(self, device, desc, out);
     // Only swapchains from the factory we attached to are the game's. A
     // wrapper mod makes its own through a factory sharing this vtable, and
@@ -620,6 +625,8 @@ HRESULT STDMETHODCALLTYPE hookedCreateSwapChainForHwnd(
     IDXGIFactory2* self, IUnknown* device, HWND hwnd, const DXGI_SWAP_CHAIN_DESC1* desc,
     const DXGI_SWAP_CHAIN_FULLSCREEN_DESC* fs, IDXGIOutput* restrictTo,
     IDXGISwapChain1** out) {
+    static volatile long s_calls = 0;
+    breadcrumbCounted(&s_calls, "gfx: factory CreateSwapChainForHwnd");
     const HRESULT hr =
         g_state->realCreateSwapChainForHwnd(self, device, hwnd, desc, fs, restrictTo, out);
     if (SUCCEEDED(hr) && out && *out &&
@@ -979,7 +986,19 @@ void hookSwapChain(IDXGISwapChain* swapChain) {
     if (!swapChain) return;
     if (refuseHooks()) return;
     State& s = ensureState();
-    if (s.swapChain) return;
+    if (s.swapChain) {
+        // A swapchain we are NOT following, said once where a hard exit
+        // cannot eat it. The frame boundary, the sentinel clock and every
+        // Present-driven instrument stay on the FIRST chain -- so if the
+        // game moves its presentation to a new one, all of them go quiet
+        // while the process lives, which reads as a stall or a death from
+        // the log. Issue #15's Present gaps are exactly that ambiguity.
+        if (swapChain != s.swapChain) {
+            EDVR_BREADCRUMB_ONCE(
+                "gfx: another swapchain exists; frame work stays on the first");
+        }
+        return;
+    }
 
     if (!s.swapChainHook.attach(swapChain) ||
         s.swapChainHook.executablePrefix() <= kSwapPresent) {
