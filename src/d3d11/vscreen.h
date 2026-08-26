@@ -127,12 +127,6 @@ void vScreenRefreshConfig();
 // of one.
 void vScreenFrameBoundary();
 
-// The FSS arrival-mono fix's two questions, answered for the glitch-frame
-// side at its jump verdict: how many mono frames the config asks for
-// (0 = off), and whether the scanner's chrome drew within the last few
-// frames -- "the player is in the scanner" at the moment a jump lands.
-int  vScreenFssArrivalMono();
-bool vScreenFssChromeRecent();
 
 // Called about once a second from the frame path: verify the context-vtable
 // entries this module patched still hold its thunks, and re-patch the ones

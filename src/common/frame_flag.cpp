@@ -93,6 +93,12 @@ struct Shared {
     // sits at optical infinity, so the right eye's image is correct for
     // both during that window; holdFrames' disciplines carry over whole.
     volatile LONG fssMonoFrames;
+    // fssChromeStamp  bumped by d3d11 on every frame that draws the
+    //                 scanner's chrome -- externalCamStamp's discipline:
+    //                 a counter, compared with !=, staleness judged by
+    //                 the reader against its own frame count. The eye
+    //                 heal's gate.
+    volatile LONG fssChromeStamp;
     // cullGuard  the cull guard's stage and margin, packed as
     //            (stage << 24) | (hPerMille << 12) | vPerMille, written by
     //            openvr_api.dll at its stage transitions
@@ -141,8 +147,8 @@ struct Shared {
 // The name is built once, at first use. The two DLLs are in the same process,
 // so the channel between them is unaffected.
 //
-// _v11 because the struct changed again -- fssMonoFrames was added. _v10
-// was submitTex. _v9 was
+// _v12 because the struct changed again -- fssChromeStamp was added. _v11
+// was fssMonoFrames, _v10 submitTex. _v9 was
 // headForward. _v8 was
 // eyeTangents, _v7 cullGuard, _v6 eyeSize, _v5 holdFrames, _v4
 // externalCamStamp, _v3 the field before that. A mismatched pair from
@@ -165,7 +171,7 @@ const wchar_t* mappingName() {
     static wchar_t name[64];
     static bool built = false;
     if (!built) {
-        _snwprintf_s(name, _TRUNCATE, L"Local\\edvr_glitch_frame_v11_%lu",
+        _snwprintf_s(name, _TRUNCATE, L"Local\\edvr_glitch_frame_v12_%lu",
                      GetCurrentProcessId());
         built = true;
     }
@@ -186,6 +192,16 @@ Shared* map() {
 }
 
 }  // namespace
+
+void bumpFssChromeStamp() {
+    Shared* s = map();
+    if (s) ++s->fssChromeStamp;
+}
+
+LONG fssChromeStampValue() {
+    Shared* s = map();
+    return s ? s->fssChromeStamp : 0;
+}
 
 void setFssMonoFrames(int n) {
     Shared* s = map();

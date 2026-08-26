@@ -62,6 +62,12 @@ void setFssMonoFrames(int n);
 int  fssMonoRemaining();
 void decFssMonoFrames();
 
+// The scanner-chrome stamp: bumped by d3d11 on every frame the scanner's
+// screen is drawn; the openvr half judges staleness against its own frame
+// count. The eye heal's gate.
+void bumpFssChromeStamp();
+long fssChromeStampValue();
+
 // Announced by openvr_api.dll once its hook is validated, and read by d3d11.dll.
 //
 // The two halves install separately and the openvr one is optional, so d3d11 can

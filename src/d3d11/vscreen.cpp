@@ -291,7 +291,7 @@ struct State {
     // The chrome tracker's stamp and the arrival-mono frame count, read
     // by the glitch-frame side at its jump verdict.
     uint32_t fssChromeFrame = 0;
-    int      fssArrivalMonoN = 0;
+    int      fssHealOn = 0;
     bool sawClearState = false;
     bool sawExecuteCommandList = false;
 
@@ -1164,14 +1164,41 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     // moment the zoom's camera jump lands, and the body-layer gate opens
     // ten frames too late. Cheap gate first, hash second, config off =
     // free.
-    if (s->fssArrivalMonoN > 0 && kind == 'X' && count == 6) {
+    if (s->fssHealOn && kind == 'X' && count == 6) {
         guardedBudget(g_panelCbBudget, [&] {
             ID3D11VertexShader* vs = nullptr;
             self->VSGetShader(&vs, nullptr, nullptr);
             const uint64_t h = lookupShaderHash(vs);
             if (vs) vs->Release();
-            if (h == 0xA888D51024D9798Eull || h == 0xB018D143700AB803ull) {
-                s->fssChromeFrame = s->frameNo;
+            if (h != 0xA888D51024D9798Eull && h != 0xB018D143700AB803ull) {
+                return;
+            }
+            // The hash names the engine's GENERAL world-quad pipeline --
+            // the round-9 lesson, relearned in the field when the first
+            // tracker fired outside the scanner. What only the scanner
+            // does is sample its big chrome surface at slot 1: panel-
+            // scaled, well over UI size, never eye-sized.
+            ID3D11ShaderResourceView* srv = nullptr;
+            self->PSGetShaderResources(1, 1, &srv);
+            if (!srv) return;
+            ID3D11Resource* res = nullptr;
+            srv->GetResource(&res);
+            srv->Release();
+            if (!res) return;
+            ID3D11Texture2D* tex = nullptr;
+            res->QueryInterface(__uuidof(ID3D11Texture2D),
+                                reinterpret_cast<void**>(&tex));
+            res->Release();
+            if (!tex) return;
+            D3D11_TEXTURE2D_DESC td{};
+            tex->GetDesc(&td);
+            tex->Release();
+            if (td.Width >= 2000 && td.Height >= 1000 &&
+                td.Height < td.Width) {
+                if (s->fssChromeFrame != s->frameNo) {
+                    s->fssChromeFrame = s->frameNo;
+                    bumpFssChromeStamp();
+                }
             }
         });
     }
@@ -2735,18 +2762,15 @@ void vScreenRefreshConfig() {
     fssRingConfigure(cfg);
     fssDumpConfigure(cfg);
     {
-        int n = cfg.getInt("fix.fss_arrival_mono", 0);
-        if (n < 0) n = 0;
-        if (n > 60) n = 60;
-        if (s->fssArrivalMonoN != n) {
-            s->fssArrivalMonoN = n;
+        int n = cfg.getInt("fix.fss_eye_heal", 0) ? 1 : 0;
+        if (s->fssHealOn != n) {
+            s->fssHealOn = n;
             Log::get().note(
-                n ? "fss arrival mono: armed -- a camera jump with the "
-                    "scanner up makes the next %d frames submit the right "
-                    "eye's image for both (the measured left-eye "
-                    "unresolved-tile window)."
-                  : "fss arrival mono: off.",
-                n);
+                n ? "fss eye heal: armed -- while the scanner is up, the "
+                    "left eye's hard-black pixels are filled from the "
+                    "right eye's image at the infinity shift, per pixel, "
+                    "stereo untouched."
+                  : "fss eye heal: off.");
         }
     }
     witchstarConfigure(cfg);
@@ -2822,22 +2846,6 @@ bool vScreenReclaimHooks() {
     const bool sceneRendered = s->eyeDrawsSinceReclaim > 0;
     s->eyeDrawsSinceReclaim = 0;
     return sceneRendered;
-}
-
-namespace {
-int fssMonoProviderThunk() { return vScreenFssArrivalMono(); }
-bool fssChromeProviderThunk() { return vScreenFssChromeRecent(); }
-}  // namespace
-
-int vScreenFssArrivalMono() {
-    State* s = g_state;
-    return s ? s->fssArrivalMonoN : 0;
-}
-
-bool vScreenFssChromeRecent() {
-    State* s = g_state;
-    return s && s->fssChromeFrame != 0 &&
-           s->frameNo - s->fssChromeFrame <= 5;
 }
 
 void vScreenFrameBoundary() {
@@ -3529,18 +3537,15 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     fssRingConfigure(cfg);
     fssDumpConfigure(cfg);
     {
-        int n = cfg.getInt("fix.fss_arrival_mono", 0);
-        if (n < 0) n = 0;
-        if (n > 60) n = 60;
-        if (g_state->fssArrivalMonoN != n) {
-            g_state->fssArrivalMonoN = n;
+        int n = cfg.getInt("fix.fss_eye_heal", 0) ? 1 : 0;
+        if (g_state->fssHealOn != n) {
+            g_state->fssHealOn = n;
             Log::get().note(
-                n ? "fss arrival mono: armed -- a camera jump with the "
-                    "scanner up makes the next %d frames submit the right "
-                    "eye's image for both (the measured left-eye "
-                    "unresolved-tile window)."
-                  : "fss arrival mono: off.",
-                n);
+                n ? "fss eye heal: armed -- while the scanner is up, the "
+                    "left eye's hard-black pixels are filled from the "
+                    "right eye's image at the infinity shift, per pixel, "
+                    "stereo untouched."
+                  : "fss eye heal: off.");
         }
     }
     witchstarConfigure(cfg);
@@ -3616,8 +3621,6 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
                    reinterpret_cast<void**>(&s.realRSSetViewports));
     s.hook.replace(kSlotMap, &hookedMap, reinterpret_cast<void**>(&s.realMap));
     s.hook.replace(kSlotUnmap, &hookedUnmap, reinterpret_cast<void**>(&s.realUnmap));
-    glitchFrameSetFssMonoProviders(&fssMonoProviderThunk,
-                                   &fssChromeProviderThunk);
     s.hook.replace(kSlotDraw, &hookedDraw, reinterpret_cast<void**>(&s.realDraw));
     s.hook.replace(kSlotDrawIndexed, &hookedDrawIndexed,
                    reinterpret_cast<void**>(&s.realDrawIndexed));

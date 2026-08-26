@@ -73,6 +73,7 @@ typedef vr::EVRCompositorError(*PFN_Submit)(void* self, vr::EVREye eye,
                                             const vr::VRTextureBounds_t* bounds,
                                             vr::EVRSubmitFlags flags);
 
+typedef void* (*PFN_EdvrFssHeal)(void*, void*, float, float);
 typedef vr::EVRCompositorError(*PFN_WaitGetPoses)(void* self,
                                                   vr::TrackedDevicePose_t* renderPoses,
                                                   uint32_t renderCount,
@@ -171,6 +172,14 @@ struct State {
     uint32_t pace_splits = 0;
     uint32_t pace_quiet = 0;
     bool     pace_splitNoted = false;
+
+    // The eye heal's plumbing: the config gate, the chrome-stamp
+    // staleness tracker, and the lazily-resolved healer export.
+    int  fssHealOn = 0;
+    LONG healChromeStamp = 0;
+    uint32_t healChromeSeen = 0;
+    PFN_EdvrFssHeal healFn = nullptr;
+    bool healFnTried = false;
 
     // This frame is inside a hold the player asked for by pressing their
     // external-camera key. Taken at WaitGetPoses, which is the frame boundary,
@@ -685,13 +694,41 @@ vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
     // the measured defect lives. The measured defect: the left image
     // carries hard-black unresolved tiles during the zoom arrival that
     // the right does not (16 vs 2, docs/fss-scanner.md round 33).
-    if (eye == vr::Eye_Left && fssMonoRemaining() > 0 && texture &&
+    if (eye == vr::Eye_Left && s->fssHealOn && texture &&
         texture->eType == vr::TextureType_DirectX) {
-        void* rt = submittedTexture(1);
-        if (rt) {
-            vr::Texture_t sub = *texture;
-            sub.handle = rt;
-            return s->realSubmit(self, eye, &sub, bounds, flags);
+        const LONG stamp = fssChromeStampValue();
+        if (stamp != s->healChromeStamp) {
+            s->healChromeStamp = stamp;
+            s->healChromeSeen = s->pace_boundaryNo;
+        }
+        const bool chromeRecent =
+            s->healChromeSeen != 0 &&
+            s->pace_boundaryNo - s->healChromeSeen <= 10;
+        if (chromeRecent) {
+            if (!s->healFn && !s->healFnTried) {
+                s->healFnTried = true;
+                HMODULE m = GetModuleHandleW(L"d3d11.dll");
+                if (m) {
+                    s->healFn = reinterpret_cast<PFN_EdvrFssHeal>(
+                        GetProcAddress(m, "edvrFssHealLeft"));
+                }
+                Log::get().note(s->healFn
+                                    ? "fss eye heal: the d3d11 half is "
+                                      "linked."
+                                    : "fss eye heal: d3d11.dll exports no "
+                                      "healer (mismatched pair?); the "
+                                      "heal stands down.");
+            }
+            float outer = 0.0f, inner = 0.0f;
+            void* rt = submittedTexture(1);
+            if (s->healFn && rt && eyeTangents(&outer, &inner)) {
+                void* healed = s->healFn(texture->handle, rt, outer, inner);
+                if (healed) {
+                    vr::Texture_t sub = *texture;
+                    sub.handle = healed;
+                    return s->realSubmit(self, eye, &sub, bounds, flags);
+                }
+            }
         }
     }
 
@@ -1018,8 +1055,6 @@ vr::EVRCompositorError hookedWaitGetPoses(void* self,
 
     if (s->inert) return result;
 
-    decFssMonoFrames();
-
     // The pair-timing boundary: frame cadence, and the burst summary.
     {
         ++s->pace_boundaryNo;
@@ -1293,6 +1328,7 @@ void* interceptInterface(void* iface, const char* interfaceVersion) {
         }
     }
 
+    s.fssHealOn = cfg.getInt("fix.fss_eye_heal", 0) ? 1 : 0;
     const int submitOverride = cfg.getInt("advanced.submit_index", -1);
     const int posesOverride = cfg.getInt("advanced.waitgetposes_index", -1);
     if (submitOverride >= 0 && posesOverride >= 0) {

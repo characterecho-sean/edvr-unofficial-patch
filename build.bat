@@ -145,7 +145,8 @@ python "%ROOT%\tools\gen_exports.py" --source "%SystemRoot%\System32\d3d11.dll" 
     --tag d3d11 --out "%GEN%" ^
     --wrap D3D11CreateDevice --wrap D3D11CreateDeviceAndSwapChain ^
     --extra-export edvr_selftest_hooks ^
-    --extra-export edvr_selftest_scene_draws
+    --extra-export edvr_selftest_scene_draws ^
+    --extra-export edvrFssHealLeft
 if errorlevel 1 ( echo [edvr] ERROR: export generation failed & exit /b 1 )
 
 if not exist "%OBJ%\d3d11" mkdir "%OBJ%\d3d11"
@@ -166,7 +167,7 @@ cl.exe %CFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "%ROOT%\src\d3d11\fss_res.cpp" "%ROOT%\src\d3d11\fss_scan.cpp" ^
     "%ROOT%\src\d3d11\fss_panel.cpp" "%ROOT%\src\d3d11\fss_probe.cpp" ^
     "%ROOT%\src\d3d11\fss_reveal.cpp" "%ROOT%\src\d3d11\fss_ring.cpp" ^
-    "%ROOT%\src\d3d11\fss_dump.cpp" ^
+    "%ROOT%\src\d3d11\fss_dump.cpp" "%ROOT%\src\d3d11\fss_heal.cpp" ^
     "%ROOT%\src\d3d11\panel_quad.cpp" "%ROOT%\src\d3d11\panel_curve.cpp" ^
     "%ROOT%\src\d3d11\shader_sig.cpp" ^
     "%ROOT%\src\d3d11\remlok_fix.cpp" "%ROOT%\src\d3d11\holo_fix.cpp" ^

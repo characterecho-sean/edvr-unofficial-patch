@@ -1876,22 +1876,6 @@ void glitchFrameObserve(const void* data, uint32_t bytes, const void* resource) 
     // answered through registered providers so the standalone glitch test
     // (which links this file without vscreen) still builds; unregistered
     // means off, which is also the shipped default.
-    if (jumped && g_fssMonoFramesProvider && g_fssChromeRecentProvider) {
-        const int monoN = g_fssMonoFramesProvider();
-        if (monoN > 0 && g_fssChromeRecentProvider()) {
-            setFssMonoFrames(monoN);
-            static bool s_monoNoted = false;
-            if (!s_monoNoted) {
-                s_monoNoted = true;
-                Log::get().note(
-                    "fss arrival mono: a jump landed with the scanner up "
-                    "-- the next %d frames submit the right eye's image "
-                    "for both. Said once; counting silently from here.",
-                    monoN);
-            }
-        }
-    }
-
     if (willMark) {
         markGlitchFrame();
     } else {
