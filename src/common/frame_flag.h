@@ -68,6 +68,11 @@ void decFssMonoFrames();
 void bumpFssChromeStamp();
 long fssChromeStampValue();
 
+// The scanner-BODY stamp: bumped by d3d11 on every frame the fully-zoomed
+// body layer draws. The theater's gate -- the final zoom, and only it.
+void bumpFssBodyStamp();
+long fssBodyStampValue();
+
 // A camera-jump latch WITHIN d3d11.dll (plain process state, not the
 // mapping): the glitch detector notes every world-camera jump; the
 // arrival census takes the latch at the frame boundary. Lives here so

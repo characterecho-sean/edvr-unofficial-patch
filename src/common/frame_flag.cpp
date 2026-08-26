@@ -99,6 +99,11 @@ struct Shared {
     //                 the reader against its own frame count. The eye
     //                 heal's gate.
     volatile LONG fssChromeStamp;
+    // fssBodyStamp  bumped by d3d11 on every frame the scanner's BODY
+    //               layer draws -- the fully-zoomed state, the theater's
+    //               gate. The chrome stamp covers the whole scanner; this
+    //               one only the final zoom.
+    volatile LONG fssBodyStamp;
     // cullGuard  the cull guard's stage and margin, packed as
     //            (stage << 24) | (hPerMille << 12) | vPerMille, written by
     //            openvr_api.dll at its stage transitions
@@ -147,8 +152,8 @@ struct Shared {
 // The name is built once, at first use. The two DLLs are in the same process,
 // so the channel between them is unaffected.
 //
-// _v12 because the struct changed again -- fssChromeStamp was added. _v11
-// was fssMonoFrames, _v10 submitTex. _v9 was
+// _v13 because the struct changed again -- fssBodyStamp was added. _v12
+// was fssChromeStamp, _v11 fssMonoFrames, _v10 submitTex. _v9 was
 // headForward. _v8 was
 // eyeTangents, _v7 cullGuard, _v6 eyeSize, _v5 holdFrames, _v4
 // externalCamStamp, _v3 the field before that. A mismatched pair from
@@ -171,7 +176,7 @@ const wchar_t* mappingName() {
     static wchar_t name[64];
     static bool built = false;
     if (!built) {
-        _snwprintf_s(name, _TRUNCATE, L"Local\\edvr_glitch_frame_v12_%lu",
+        _snwprintf_s(name, _TRUNCATE, L"Local\\edvr_glitch_frame_v13_%lu",
                      GetCurrentProcessId());
         built = true;
     }
@@ -200,6 +205,16 @@ volatile LONG g_worldJump = 0;
 void noteWorldJump() { InterlockedExchange(&g_worldJump, 1); }
 
 bool takeWorldJump() { return InterlockedExchange(&g_worldJump, 0) != 0; }
+
+void bumpFssBodyStamp() {
+    Shared* s = map();
+    if (s) ++s->fssBodyStamp;
+}
+
+LONG fssBodyStampValue() {
+    Shared* s = map();
+    return s ? s->fssBodyStamp : 0;
+}
 
 void bumpFssChromeStamp() {
     Shared* s = map();

@@ -74,6 +74,8 @@ typedef vr::EVRCompositorError(*PFN_Submit)(void* self, vr::EVREye eye,
                                             vr::EVRSubmitFlags flags);
 
 typedef void* (*PFN_EdvrFssHeal)(void*, void*, float, float, int);
+typedef void* (*PFN_EdvrFssTheater)(void*, int, float, float, const float*,
+                                    float);
 typedef vr::EVRCompositorError(*PFN_WaitGetPoses)(void* self,
                                                   vr::TrackedDevicePose_t* renderPoses,
                                                   uint32_t renderCount,
@@ -180,6 +182,17 @@ struct State {
     uint32_t healChromeSeen = 0;
     PFN_EdvrFssHeal healFn = nullptr;
     bool healFnTried = false;
+
+    // The theater: distance from config (0 = off), the body-stamp
+    // staleness tracker, the frozen pose fed to the game while the zoom
+    // is up, and the lazily-resolved renderer export.
+    float theaterDist = 0.0f;
+    LONG theaterBodyStamp = 0;
+    uint32_t theaterBodySeen = 0;
+    bool theaterFrozen = false;
+    vr::HmdMatrix34_t theaterFreeze = {};
+    PFN_EdvrFssTheater theaterFn = nullptr;
+    bool theaterFnTried = false;
 
     // This frame is inside a hold the player asked for by pressing their
     // external-camera key. Taken at WaitGetPoses, which is the frame boundary,
@@ -694,6 +707,41 @@ vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
     // the measured defect lives. The measured defect: the left image
     // carries hard-black unresolved tiles during the zoom arrival that
     // the right does not (16 vs 2, docs/fss-scanner.md round 33).
+    // The theater, before the heal: while the zoomed body is up, both
+    // eyes submit EDVR's own rendering of the right eye's image as a
+    // panel. One rendering, two displays -- no per-eye artifact can
+    // exist, which supersedes the heal for exactly these frames.
+    if (s->theaterDist > 0.0f && s->theaterFrozen && texture &&
+        texture->eType == vr::TextureType_DirectX) {
+        if (!s->theaterFn && !s->theaterFnTried) {
+            s->theaterFnTried = true;
+            HMODULE m = GetModuleHandleW(L"d3d11.dll");
+            if (m) {
+                s->theaterFn = reinterpret_cast<PFN_EdvrFssTheater>(
+                    GetProcAddress(m, "edvrFssTheater"));
+            }
+            Log::get().note(s->theaterFn
+                                ? "fss theater: the d3d11 half is linked."
+                                : "fss theater: d3d11.dll exports no "
+                                  "renderer (mismatched pair?); the "
+                                  "theater stands down.");
+        }
+        float outer = 0.0f, inner = 0.0f;
+        void* content = eye == vr::Eye_Right ? texture->handle
+                                             : submittedTexture(1);
+        if (s->theaterFn && content && eyeTangents(&outer, &inner)) {
+            static const float kIdentity[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+            void* drawn = s->theaterFn(
+                content, eye == vr::Eye_Left ? 0 : 1, outer, inner,
+                kIdentity, s->theaterDist);
+            if (drawn) {
+                vr::Texture_t sub = *texture;
+                sub.handle = drawn;
+                return s->realSubmit(self, eye, &sub, bounds, flags);
+            }
+        }
+    }
+
     if (((eye == vr::Eye_Left && s->fssHealOn == 1) ||
          (eye == vr::Eye_Right && s->fssHealOn == 2)) &&
         texture && texture->eType == vr::TextureType_DirectX) {
@@ -1209,6 +1257,43 @@ vr::EVRCompositorError hookedWaitGetPoses(void* self,
     // the install-time config read -- so this build ran every session with
     // the offsets still zero and did nothing at all. One file, one call, is
     // what makes that failure impossible rather than merely unlikely.
+    // The theater's pose freeze: while the fully-zoomed body is up, the
+    // game renders from the pose of the zoom's first frame -- its view
+    // holds still, and the compositor's own reprojection (which assumes
+    // the app rendered at the pose it was handed) world-locks the panel
+    // against the real head for free. Velocities zeroed so nothing
+    // extrapolates.
+    {
+        const LONG bs = fssBodyStampValue();
+        if (bs != s->theaterBodyStamp) {
+            s->theaterBodyStamp = bs;
+            s->theaterBodySeen = s->pace_boundaryNo;
+        }
+        const bool bodyActive =
+            s->theaterDist > 0.0f && s->theaterBodySeen != 0 &&
+            s->pace_boundaryNo - s->theaterBodySeen <= 5;
+        if (bodyActive && renderCount > 0 && renderPoses) {
+            if (!s->theaterFrozen) {
+                s->theaterFrozen = true;
+                s->theaterFreeze = renderPoses[0].mDeviceToAbsoluteTracking;
+            }
+            renderPoses[0].mDeviceToAbsoluteTracking = s->theaterFreeze;
+            for (int k = 0; k < 3; ++k) {
+                renderPoses[0].vVelocity.v[k] = 0.0f;
+                renderPoses[0].vAngularVelocity.v[k] = 0.0f;
+            }
+            if (gameCount > 0 && gamePoses) {
+                gamePoses[0].mDeviceToAbsoluteTracking = s->theaterFreeze;
+                for (int k = 0; k < 3; ++k) {
+                    gamePoses[0].vVelocity.v[k] = 0.0f;
+                    gamePoses[0].vAngularVelocity.v[k] = 0.0f;
+                }
+            }
+        } else if (!bodyActive) {
+            s->theaterFrozen = false;
+        }
+    }
+
     headOffsetApply(result, renderPoses, renderCount, gamePoses, gameCount);
 
     // The config reload poll, BACK, and the reason it was removed is the
@@ -1243,6 +1328,14 @@ vr::EVRCompositorError hookedWaitGetPoses(void* self,
                 if (s->fssHealOn != hm) {
                     s->fssHealOn = hm;
                     Log::get().note("fss eye heal: mode %d.", hm);
+                }
+                float td = Config::get().getFloat("fix.fss_theater", 0.0f);
+                if (td < 0.0f || td > 10.0f) td = 0.0f;
+                if (td != s->theaterDist) {
+                    s->theaterDist = td;
+                    Log::get().note("fss theater: distance %.1f m%s.",
+                                    static_cast<double>(td),
+                                    td > 0.0f ? "" : " (off)");
                 }
             }
         }
@@ -1350,6 +1443,9 @@ void* interceptInterface(void* iface, const char* interfaceVersion) {
         int hm = cfg.getInt("fix.fss_eye_heal", 0);
         if (hm < 0 || hm > 2) hm = 0;
         s.fssHealOn = hm;
+        float td = cfg.getFloat("fix.fss_theater", 0.0f);
+        if (td < 0.0f || td > 10.0f) td = 0.0f;
+        s.theaterDist = td;
     }
     const int submitOverride = cfg.getInt("advanced.submit_index", -1);
     const int posesOverride = cfg.getInt("advanced.waitgetposes_index", -1);

@@ -293,6 +293,8 @@ struct State {
     uint32_t fssChromeFrame = 0;
     int      fssHealOn = 0;
     int      censusFssJump = 0;
+    int      fssTheaterOn = 0;
+    uint32_t fssBodyStampFrame = 0;
     bool sawClearState = false;
     bool sawExecuteCommandList = false;
 
@@ -1416,6 +1418,12 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
                 // land before the eye composites in the frame, so the
                 // stamp is fresh by the time the composites ask.
                 s->fssBodyFrame = s->frameNo;
+                // The theater's gate signal: only the final zoom draws
+                // the body layer. Bumped once per frame at most.
+                if (s->fssTheaterOn && s->fssBodyStampFrame != s->frameNo) {
+                    s->fssBodyStampFrame = s->frameNo;
+                    bumpFssBodyStamp();
+                }
                 if (fssScanWantsDraws() && fssScanOnBodyDraw()) {
                     return DrawVerdict::kFssScan;
                 }
@@ -2764,6 +2772,7 @@ void vScreenRefreshConfig() {
     fssDumpConfigure(cfg);
     {
         s->censusFssJump = cfg.getInt("advanced.census_fss_jump", 0) ? 1 : 0;
+        s->fssTheaterOn = cfg.getFloat("fix.fss_theater", 0.0f) > 0.0f;
         int n = cfg.getInt("fix.fss_eye_heal", 0);
         if (n < 0 || n > 2) n = 0;
         if (s->fssHealOn != n) {
@@ -3552,6 +3561,8 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     {
         g_state->censusFssJump =
             cfg.getInt("advanced.census_fss_jump", 0) ? 1 : 0;
+        g_state->fssTheaterOn =
+            cfg.getFloat("fix.fss_theater", 0.0f) > 0.0f;
         int n = cfg.getInt("fix.fss_eye_heal", 0);
         if (n < 0 || n > 2) n = 0;
         if (g_state->fssHealOn != n) {
