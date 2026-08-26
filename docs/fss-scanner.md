@@ -518,7 +518,8 @@ measurements closed it:
 
 **Conclusion: the black squares are, with high confidence, part of the
 game's designed scan-resolve tile animation**, playing in the mono body
-layer and composited identically to both eyes.
+layer and composited identically to both eyes. *(Superseded — the
+monocular re-test and rounds seven through thirteen, below.)*
 
 ## Where that leaves the original report
 
@@ -549,6 +550,64 @@ giving the animation four times the pixels — plus the instrument suite
 (q=, res=, x=, DCC U/V, DCX, DCW, census_auto, census_frames/lines,
 census_skip_dispatch with :N, dispatch_pair_sync, submit_snapshot), every
 piece of which the next hunt inherits.
+
+## Rounds seven through thirteen: the split is real, the composite is innocent
+
+The monocular re-test round six asked for was done: viewed one eye at a
+time, **the left eye shows black squares filling in and the right eye a
+smooth inner-to-outer reveal, and it never swaps sides.** A percept
+cannot survive a monocular observation; the split is in the pixels, and
+the second conclusion gave the way the first one had to.
+
+Six probe rounds then eliminated the composite draw itself, every one
+with an engaged receipt in the log:
+
+- **Slot probes** (`advanced.fss_composite_probe = SLOT:COLOUR`): each of
+  the four sampled layers held flat magenta/black/white for exactly the
+  composite's draws. Every layer is visible in both eyes; none carries a
+  per-eye difference. (`black:2` blanked the whole body in BOTH eyes —
+  slot 2 is the planet's visible base; a lead that went nowhere, twice.)
+- **Constant sync** (`fix.fss_reveal_sync = steady`): the second eye's
+  composite drawn with a byte snapshot of the first eye's PS b1 scene
+  block — the dissolve's progress values forced identical. Engaged, null.
+- **Depth off** (`fss_composite_probe = depth`): the composite drawn with
+  depth test disabled — per-eye depth culling. Engaged, null.
+- **Opaque** (`fss_composite_probe = blend`): the composite drawn with
+  blending off — per-eye destination showing through dark output.
+  Engaged, null.
+- The composite's PS disassembly contains **no discard** — every covered
+  pixel writes.
+
+Identical inputs (res-proven), identical constants (forced), no depth, no
+blend, no discard: **the two composite draws are byte-equivalent. The
+squares are not painted by the composite.** They are painted after it, by
+something the draw census cannot see — and re-mining the round-four
+capture with that question found it.
+
+**The per-eye temporal reconstruction pipeline**, every frame, in q=
+order: `E65498AE6C2C9F1B` writes three 272x268 R8_UINT tile maps; copies
+assemble a 544x268 stereo map; `22786F6DE290C577` runs **once per eye**
+expanding them to two full-eye 4340x4284 R8 masks (@74/@97) — one thread
+group per 16x16 tile, the squares' exact granularity; the two composites
+draw; a full-eye HDR copy follows **each** composite (per-eye history
+snapshots); then per eye, `E861F611375E7ECC` writes a 5426x5356 f11
+**temporal accumulator** (@235/@240) and `B74273EC13F7CD59` writes the
+5426x5356 f24 output — the reconstruction that upscales 4340 to the
+submitted 5426. No recorded draw ever samples the masks or accumulators:
+the consumers are compute, which is why eleven rounds of draw-side
+instruments could not see the writer.
+
+The elimination already run maps onto that pipeline: the wholesale 2278
+skip and the 2278 pair-sync both flew and nulled — **the masks are
+exonerated**. The one per-eye state never touched is the **accumulator**:
+if the left eye's history holds black at freshly-changed tiles while the
+right's holds converged content, the reconstruction paints black squares
+in exactly one eye, filling in as accumulation converges — the field
+report, verbatim. Round thirteen is the staged-and-never-flown arm from
+the freeze-aborted batch: `dispatch_pair_sync = E861F611375E7ECC:r`
+(both eyes keep one accumulator). Squares dying in the left eye convicts
+its history; squares growing into the right under the un-reversed
+direction confirms the mapping.
 
 ## Open
 
