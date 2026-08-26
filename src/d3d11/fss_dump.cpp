@@ -629,35 +629,40 @@ void fssDumpDispatchPost(ID3D11DeviceContext* ctx) {
     const bool seriesLive = g_seriesWant != 0 && !g_seriesDone;
     if ((!g_dumping && !seriesLive) || !ctx) return;
     guardedBudget(g_budget, [&] {
-        ID3D11ComputeShader* cs = nullptr;
-        ctx->CSGetShader(&cs, nullptr, nullptr);
-        const uint64_t h = lookupShaderHash(cs);
-        if (cs) cs->Release();
-        // Self-diagnosis, three calls' worth: the 32b notes never printed,
-        // so either this body never runs or the hash never matches -- the
-        // first few raw values decide which.
+        // The output pass is matched by SHAPE, not hash: the 32c probe
+        // showed the learned hash never appearing -- shader variants move
+        // with graphics settings and headsets, but "the dispatch writing
+        // an eye-scale R10G10B10A2 texture" is the pack pass on any rig.
+        ID3D11UnorderedAccessView* uav = nullptr;
+        ctx->CSGetUnorderedAccessViews(0, 1, &uav);
+        if (!uav) return;
+        ID3D11Resource* res = nullptr;
+        uav->GetResource(&res);
+        uav->Release();
+        if (!res) return;
+        bool isOutput = false;
         {
-            static int s_first = 0;
-            if (s_first < 3) {
-                ++s_first;
-                Log::get().note("fss series: post call %d sees ch=%016llX",
-                                s_first, static_cast<unsigned long long>(h));
+            ID3D11Texture2D* tex = nullptr;
+            res->QueryInterface(__uuidof(ID3D11Texture2D),
+                                reinterpret_cast<void**>(&tex));
+            if (tex) {
+                D3D11_TEXTURE2D_DESC td{};
+                tex->GetDesc(&td);
+                isOutput = td.Width >= 3000 &&
+                           td.Format == DXGI_FORMAT_R10G10B10A2_UNORM;
+                tex->Release();
             }
         }
-        if (h == kOutputHash) {
+        if (isOutput) {
             static bool s_matchNoted = false;
             if (!s_matchNoted && seriesLive) {
                 s_matchNoted = true;
-                Log::get().note("fss series: first output dispatch matched.");
+                Log::get().note("fss series: first output dispatch matched "
+                                "(by shape).");
             }
             const uint8_t occ = ++g_occOut;
-            if (occ > kEyes) return;
-            ID3D11UnorderedAccessView* uav = nullptr;
-            ctx->CSGetUnorderedAccessViews(0, 1, &uav);
-            if (uav) {
-                ID3D11Resource* res = nullptr;
-                uav->GetResource(&res);
-                if (res) {
+            if (occ <= kEyes) {
+                {
                     if (g_dumping) captureResource(ctx, res, 8, occ - 1);
                     // The series gates on the scanner itself: the body
                     // composites draw before the reconstruction in every
@@ -680,11 +685,10 @@ void fssDumpDispatchPost(ID3D11DeviceContext* ctx) {
                                 "Said once.");
                         }
                     }
-                    res->Release();
                 }
-                uav->Release();
             }
         }
+        res->Release();
     });
 }
 
