@@ -29,8 +29,9 @@ cbuffer P : register(b0) {
     float4 m0;     // delta rotation rows (current-head -> frozen-head);
     float4 m1;     // the rows' .w = this eye's ray origin in frozen-head
     float4 m2;     // space, translation and eye offset folded in
-    float4 misc;   // x = screen center x (m), y = half width along the
-                   // surface, z = half height, w = curve (0 flat)
+    float4 misc;   // x = vertical band (fraction of the texture's height
+                   // the screen shows, centre-cropped), y = half width
+                   // along the surface, z = half height, w = curve
 }
 [numthreads(16, 16, 1)]
 void main(uint3 id : SV_DispatchThreadID) {
@@ -65,16 +66,18 @@ void main(uint3 id : SV_DispatchThreadID) {
             if (t > 0) {
                 float3 hit = org + t * df;
                 float th = atan2(hit.x, zc - hit.z);
-                pu = (th * R - misc.x + misc.y) / (2.0 * misc.y);
-                pv = 1.0 - (hit.y + misc.z) / (2.0 * misc.z);
+                pu = (th * R + misc.y) / (2.0 * misc.y);
+                pv = 0.5 + (0.5 - (hit.y + misc.z) / (2.0 * misc.z)) *
+                               misc.x;
             }
         }
     } else if (df.z < -1e-4) {
         float t = (-tans.w - org.z) / df.z;
         if (t > 0) {
             float3 hit = org + t * df;
-            pu = (hit.x - misc.x + misc.y) / (2.0 * misc.y);
-            pv = 1.0 - (hit.y + misc.z) / (2.0 * misc.z);
+            pu = (hit.x + misc.y) / (2.0 * misc.y);
+            pv = 0.5 + (0.5 - (hit.y + misc.z) / (2.0 * misc.z)) *
+                           misc.x;
         }
     }
     if (pu >= 0 && pu <= 1 && pv >= 0 && pv <= 1) {
@@ -120,7 +123,8 @@ void failOnce(const char* what) {
 }
 
 void* theaterInner(void* contentTex, int eye, float outerMag, float innerMag,
-                   const float* xf, float dist, float scale, float curve) {
+                   const float* xf, float dist, float scale, float curve,
+                   float aspect) {
     ID3D11Texture2D* ct = nullptr;
     static_cast<IUnknown*>(contentTex)
         ->QueryInterface(__uuidof(ID3D11Texture2D),
@@ -249,19 +253,30 @@ void* theaterInner(void* contentTex, int eye, float outerMag, float innerMag,
             (outerMag + innerMag) * 0.5f *
             (static_cast<float>(cd.Height) / static_cast<float>(cd.Width));
         // The screen's half-extents: the content's native angular span
-        // at the chosen distance, times the user's scale. Centred on the
-        // gaze the scanner was entered with (the frozen pose's forward),
-        // like the on-foot screen -- there is no game image to seam-match
-        // against any more, the whole mode is ours.
+        // at the chosen distance, times the user's scale. The eye capture
+        // is nearly SQUARE (the VR frustum is), which the field read as
+        // "more vertical than horizontal" -- so the aspect knob makes the
+        // screen widescreen and centre-crops the content's height to
+        // match, undistorted: full width kept, the top and bottom of the
+        // square frustum (mostly void) trimmed. band is the fraction of
+        // the texture's height shown; aspect 0 = the native square.
         const float halfW = dist * (outerMag + innerMag) * 0.5f * scale;
-        const float halfH = halfW * (static_cast<float>(cd.Height) /
-                                     static_cast<float>(cd.Width));
+        const float nativeHalfH =
+            halfW * (static_cast<float>(cd.Height) /
+                     static_cast<float>(cd.Width));
+        float halfH = nativeHalfH;
+        float band = 1.0f;
+        if (aspect > 0.01f) {
+            halfH = halfW / aspect;
+            if (halfH > nativeHalfH) halfH = nativeHalfH;
+            band = halfH / nativeHalfH;
+        }
         float cbData[20] = {
             lt, rt, vt, dist,
             xf[0], xf[1], xf[2], xf[9],
             xf[3], xf[4], xf[5], xf[10],
             xf[6], xf[7], xf[8], xf[11],
-            0.0f, halfW, halfH, curve,
+            band, halfW, halfH, curve,
         };
         D3D11_MAPPED_SUBRESOURCE m{};
         if (SUCCEEDED(ctx->Map(g_cb, 0, D3D11_MAP_WRITE_DISCARD, 0, &m)) &&
@@ -315,10 +330,11 @@ void* theaterInner(void* contentTex, int eye, float outerMag, float innerMag,
             Log::get().note(
                 "fss theater: engaged -- the zoomed scanner is a single "
                 "rendering shown to both eyes as a screen at %.1f m "
-                "(scale %.2f, curve %.2f). One render, two displays: no "
-                "per-eye artifact can exist.",
+                "(scale %.2f, curve %.2f, aspect %.2f). One render, two "
+                "displays: no per-eye artifact can exist.",
                 static_cast<double>(dist), static_cast<double>(scale),
-                static_cast<double>(curve));
+                static_cast<double>(curve),
+                static_cast<double>(aspect));
         }
         result = g_out[eye];
     }
@@ -354,12 +370,13 @@ extern "C" __declspec(dllexport) void* edvrFssTheater(void* contentTex,
                                                       const float* xf,
                                                       float dist,
                                                       float scale,
-                                                      float curve) {
+                                                      float curve,
+                                                      float aspect) {
     if (!contentTex || !xf || eye < 0 || eye > 1) return nullptr;
     void* out = nullptr;
     edvr::guardedBudget(edvr::g_budget, [&] {
         out = edvr::theaterInner(contentTex, eye, outerMag, innerMag, xf,
-                                 dist, scale, curve);
+                                 dist, scale, curve, aspect);
     });
     return out;
 }

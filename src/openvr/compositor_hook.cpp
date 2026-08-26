@@ -75,7 +75,7 @@ typedef vr::EVRCompositorError(*PFN_Submit)(void* self, vr::EVREye eye,
 
 typedef void* (*PFN_EdvrFssHeal)(void*, void*, float, float, int);
 typedef void* (*PFN_EdvrFssTheater)(void*, int, float, float, const float*,
-                                    float, float, float);
+                                    float, float, float, float);
 
 constexpr float kTheaterHalfIpd = 0.0315f;
 
@@ -211,6 +211,7 @@ struct State {
     float theaterDist = 0.0f;
     float theaterScale = 1.0f;
     float theaterCurve = 0.0f;
+    float theaterAspect = 1.78f;
     LONG theaterStamp = 0;
     uint32_t theaterSeen = 0;
     bool theaterFrozen = false;
@@ -802,7 +803,8 @@ vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
                          xf);
             void* drawn = s->theaterFn(
                 content, eye == vr::Eye_Left ? 0 : 1, outer, inner,
-                xf, s->theaterDist, s->theaterScale, s->theaterCurve);
+                xf, s->theaterDist, s->theaterScale, s->theaterCurve,
+                s->theaterAspect);
             if (drawn) {
                 vr::Texture_t sub = *texture;
                 sub.handle = drawn;
@@ -1431,6 +1433,15 @@ vr::EVRCompositorError hookedWaitGetPoses(void* self,
                     Log::get().note("fss theater: curve %.2f.",
                                     static_cast<double>(tc));
                 }
+                float ta =
+                    Config::get().getFloat("fix.fss_theater_aspect", 1.78f);
+                if (ta != 0.0f && (ta < 1.0f || ta > 3.0f)) ta = 1.78f;
+                if (ta != s->theaterAspect) {
+                    s->theaterAspect = ta;
+                    Log::get().note("fss theater: aspect %.2f%s.",
+                                    static_cast<double>(ta),
+                                    ta == 0.0f ? " (native)" : "");
+                }
             }
         }
         // The liveness pass, same cadence and same reason as the d3d11 half:
@@ -1546,6 +1557,9 @@ void* interceptInterface(void* iface, const char* interfaceVersion) {
         float tc = cfg.getFloat("fix.fss_theater_curve", 0.0f);
         if (tc < 0.0f || tc > 0.9f) tc = 0.0f;
         s.theaterCurve = tc;
+        float ta = cfg.getFloat("fix.fss_theater_aspect", 1.78f);
+        if (ta != 0.0f && (ta < 1.0f || ta > 3.0f)) ta = 1.78f;
+        s.theaterAspect = ta;
         if (td > 0.0f) {
             Log::get().note(
                 "fss theater: armed -- the scanner's fully-zoomed view "

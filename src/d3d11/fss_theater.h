@@ -49,9 +49,12 @@ extern "C" {
 // Returns the theater-rendered texture for this eye, or null = stock.
 // scale: fraction of the content's native angular width (the on-foot
 // screen's idea of size). curve: 0 flat, up to 0.9 wrapped on a cylinder
-// whose arc centre sits at the screen distance.
+// whose arc centre sits at the screen distance. aspect: the screen's
+// width:height (the eye capture is square; the content centre-crops
+// vertically, undistorted, to fill the shape); 0 = the native square.
 __declspec(dllexport) void* edvrFssTheater(void* contentTex, int eye,
                                            float outerMag, float innerMag,
                                            const float* xf, float dist,
-                                           float scale, float curve);
+                                           float scale, float curve,
+                                           float aspect);
 }
