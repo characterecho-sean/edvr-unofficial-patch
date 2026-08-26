@@ -10,6 +10,7 @@
 
 #include "../common/config.h"
 #include "../common/guard.h"
+#include "../common/frame_flag.h"
 #include "../common/log.h"
 #include "exposure_fix.h"   // lookupShaderHash
 #include "shader_swap.h"    // shaderSwapCompileCs: the series reducer
@@ -112,6 +113,7 @@ void main(uint3 id : SV_DispatchThreadID) {
 )HLSL";
 
 constexpr uint32_t kSeriesMax = 48;   // atlas height 335*48 fits 16384
+uint32_t g_seriesFmt[2] = {};         // the source format, for the manifest
 uint32_t g_seriesWant = 0;            // frames from the key; 0 = off
 bool     g_seriesDone = false;
 uint32_t g_seriesCount[2] = {};
@@ -144,6 +146,7 @@ void seriesCapture(ID3D11DeviceContext* ctx, ID3D11Resource* res,
     tex->Release();
     const uint32_t tw = (td.Width + 15) / 16;
     const uint32_t th = (td.Height + 15) / 16;
+    g_seriesFmt[eye] = static_cast<uint32_t>(td.Format);
 
     ID3D11Device* dev = nullptr;
     ctx->GetDevice(&dev);
@@ -295,8 +298,9 @@ void seriesWrite(ID3D11DeviceContext* ctx) {
                 }
                 fclose(f);
                 Log::get().note(
-                    "FSSSERIES eye=%d tw=%u th=%u frames=%u file=%s", e,
-                    g_seriesTw, g_seriesTh, g_seriesCount[e], path);
+                    "FSSSERIES eye=%d tw=%u th=%u frames=%u srcfmt=%u "
+                    "file=%s", e, g_seriesTw, g_seriesTh, g_seriesCount[e],
+                    g_seriesFmt[e], path);
             }
             ctx->Unmap(stage, 0);
         }
@@ -691,27 +695,6 @@ void fssDumpDispatchPost(ID3D11DeviceContext* ctx) {
             if (occ <= kEyes) {
                 {
                     if (g_dumping) captureResource(ctx, res, 8, occ - 1);
-                    // The series gates on the scanner itself: the body
-                    // composites draw before the reconstruction in every
-                    // frame, so a zero count here means a non-FSS frame.
-                    if (seriesLive && g_occComp != 0) {
-                        static bool s_capNoted = false;
-                        if (!s_capNoted) {
-                            s_capNoted = true;
-                            Log::get().note("fss series: capturing.");
-                        }
-                        seriesCapture(ctx, res, occ - 1);
-                    } else if (seriesLive) {
-                        static bool s_blockNoted = false;
-                        if (!s_blockNoted) {
-                            s_blockNoted = true;
-                            Log::get().note(
-                                "fss series: output dispatch seen but no "
-                                "composite counted this frame -- the "
-                                "scanner gate never opened for the series. "
-                                "Said once.");
-                        }
-                    }
                 }
             }
         }
@@ -720,6 +703,43 @@ void fssDumpDispatchPost(ID3D11DeviceContext* ctx) {
 }
 
 void fssDumpFrameBoundary(ID3D11DeviceContext* ctx) {
+    // The series feeds from the SUBMITTED pair, published through the
+    // shared mapping by the openvr half at each Submit -- the one
+    // identity that survives pipeline reshapes, headset swaps and shader
+    // re-specialisation, with eye slots named by the Submit call itself.
+    // Gated on the scanner (the composite counted this frame).
+    if (g_seriesWant && !g_seriesDone && ctx && g_occComp != 0) {
+        guardedBudget(g_budget, [&] {
+            static bool s_feedNoted = false;
+            for (int e = 0; e < 2; ++e) {
+                void* pub = submittedTexture(e);
+                if (!pub) {
+                    static bool s_noPubNoted = false;
+                    if (!s_noPubNoted) {
+                        s_noPubNoted = true;
+                        Log::get().note(
+                            "fss series: no submitted texture published "
+                            "for eye %d -- openvr half absent or "
+                            "mismatched. Said once.", e);
+                    }
+                    continue;
+                }
+                if (!s_feedNoted) {
+                    s_feedNoted = true;
+                    Log::get().note("fss series: capturing the submitted "
+                                    "pair.");
+                }
+                ID3D11Resource* res = nullptr;
+                static_cast<IUnknown*>(pub)->QueryInterface(
+                    __uuidof(ID3D11Resource),
+                    reinterpret_cast<void**>(&res));
+                if (res) {
+                    seriesCapture(ctx, res, e);
+                    res->Release();
+                }
+            }
+        });
+    }
     if (g_seriesWant && !g_seriesDone && ctx &&
         g_seriesCount[0] >= g_seriesWant && g_seriesCount[1] >= g_seriesWant) {
         guardedBudget(g_budget, [&] { seriesWrite(ctx); });

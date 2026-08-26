@@ -45,6 +45,14 @@ void unmarkGlitchFrame();
 // single detection would suppress every frame that followed.
 void clearGlitchFrame();
 
+// The submitted eye textures, one slot per eye (0 left, 1 right), raw
+// ID3D11Texture2D pointers valid within this process. Written by
+// openvr_api.dll at each Submit; read by d3d11.dll's FSS series at the
+// frame boundary. Null means nobody has published (no openvr proxy, or a
+// mismatched pair), and readers fall back exactly as if unhooked.
+void publishSubmitTexture(int eye, void* texture);
+void* submittedTexture(int eye);
+
 // Announced by openvr_api.dll once its hook is validated, and read by d3d11.dll.
 //
 // The two halves install separately and the openvr one is optional, so d3d11 can

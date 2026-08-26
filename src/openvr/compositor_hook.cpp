@@ -679,6 +679,16 @@ vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
     }
     if (s->inert) return s->realSubmit(self, eye, texture, bounds, flags);
 
+    // Publish the submitted texture for the d3d11 half's FSS series: the
+    // one point that knows EXACTLY what reaches the headset, on any
+    // pipeline shape. DirectX handles only; anything else publishes null.
+    if (texture) {
+        publishSubmitTexture(eye == vr::Eye_Left ? 0 : 1,
+                             texture->eType == vr::TextureType_DirectX
+                                 ? texture->handle
+                                 : nullptr);
+    }
+
     // The pair-timing stamp: which boundary interval each eye's submit
     // landed in, and when. A pair split across intervals is the one-eye
     // stale-frame mechanism, counted.

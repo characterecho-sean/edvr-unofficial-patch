@@ -70,6 +70,18 @@ struct Shared {
     // nobody has published, which is a state the reader must handle: the openvr
     // proxy is optional and this is written only after its hook validates.
     volatile LONG eyeSize;
+    // submitTex  the two textures most recently handed to Submit, one slot
+    //            per eye, written by openvr_api.dll at each Submit
+    //
+    // The third openvr -> d3d11 field family. The FSS series needs to
+    // measure EXACTLY what reaches the headset, and the d3d11 half owns
+    // every tool for doing that (compute reduction, staging, the log) but
+    // was reduced to guessing WHICH texture is submitted -- a guess that
+    // broke twice in one day when the pipeline reshaped. Raw pointers are
+    // valid across the two halves because they are one process; a 64-bit
+    // aligned volatile store is atomic on x64, so no reader tears one.
+    // Zero is "nobody has published", the eyeSize discipline.
+    volatile LONG64 submitTex[2];
     // cullGuard  the cull guard's stage and margin, packed as
     //            (stage << 24) | (hPerMille << 12) | vPerMille, written by
     //            openvr_api.dll at its stage transitions
@@ -118,7 +130,8 @@ struct Shared {
 // The name is built once, at first use. The two DLLs are in the same process,
 // so the channel between them is unaffected.
 //
-// _v9 because the struct changed again -- headForward was added. _v8 was
+// _v10 because the struct changed again -- submitTex was added. _v9 was
+// headForward. _v8 was
 // eyeTangents, _v7 cullGuard, _v6 eyeSize, _v5 holdFrames, _v4
 // externalCamStamp, _v3 the field before that. A mismatched pair from
 // different builds must not agree on a layout they disagree about, and a
@@ -140,7 +153,7 @@ const wchar_t* mappingName() {
     static wchar_t name[64];
     static bool built = false;
     if (!built) {
-        _snwprintf_s(name, _TRUNCATE, L"Local\\edvr_glitch_frame_v9_%lu",
+        _snwprintf_s(name, _TRUNCATE, L"Local\\edvr_glitch_frame_v10_%lu",
                      GetCurrentProcessId());
         built = true;
     }
@@ -161,6 +174,18 @@ Shared* map() {
 }
 
 }  // namespace
+
+void publishSubmitTexture(int eye, void* texture) {
+    Shared* s = map();
+    if (!s || eye < 0 || eye > 1) return;
+    s->submitTex[eye] = reinterpret_cast<LONG64>(texture);
+}
+
+void* submittedTexture(int eye) {
+    Shared* s = map();
+    if (!s || eye < 0 || eye > 1) return nullptr;
+    return reinterpret_cast<void*>(s->submitTex[eye]);
+}
 
 void markGlitchFrame() {
     Shared* s = map();
