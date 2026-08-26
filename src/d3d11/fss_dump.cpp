@@ -37,8 +37,13 @@ const char* const kTags[kCheckpoints] = {"pre-ring",  "post-ring",
 uint32_t g_dumpFrame = 0;      // N from the key; 0 = off
 uint32_t g_bodyFrames = 0;     // distinct frames with matched draws
 uint32_t g_lastFrameNo = 0;
-bool     g_dumping = false;    // this frame is the dump frame
+bool     g_dumping = false;    // this frame is a dump frame
 bool     g_done = false;       // one dump per arming
+// TWO consecutive frames per dump (round 26): the scan art FLICKERS frame
+// to frame while real content holds still, so the difference between the
+// passes is an art map the single-frame hole counter never was -- ring
+// shadows and space stay put, squares blink.
+uint32_t g_dumpPass = 0;
 
 struct Slot {
     ID3D11Texture2D* staging = nullptr;
@@ -195,7 +200,7 @@ void captureRemembered(ID3D11DeviceContext* ctx, ID3D11Resource* res,
     tex->Release();
 }
 
-void writeOut(ID3D11DeviceContext* ctx) {
+void writeOut(ID3D11DeviceContext* ctx, uint32_t pass) {
     CreateDirectoryA("edvr_logs", nullptr);
     CreateDirectoryA("edvr_logs\\dumps", nullptr);
     for (uint32_t c = 0; c < kCheckpoints; ++c) {
@@ -211,8 +216,8 @@ void writeOut(ID3D11DeviceContext* ctx) {
             }
             char path[128];
             _snprintf_s(path, sizeof(path), _TRUNCATE,
-                        "edvr_logs\\dumps\\fssdump_c%u_%s_eye%u.bin", c,
-                        kTags[c], e);
+                        "edvr_logs\\dumps\\fssdump_p%u_c%u_%s_eye%u.bin",
+                        pass, c, kTags[c], e);
             FILE* f = nullptr;
             fopen_s(&f, path, "wb");
             if (f) {
@@ -223,10 +228,10 @@ void writeOut(ID3D11DeviceContext* ctx) {
                 }
                 fclose(f);
                 Log::get().note(
-                    "FSSDUMP c=%u tag=%s eye=%u w=%u h=%u fmt=%u pitch=%u "
-                    "res=%p file=%s",
-                    c, kTags[c], e, s.w, s.h, s.fmt, m.RowPitch, s.srcPtr,
-                    path);
+                    "FSSDUMP p=%u c=%u tag=%s eye=%u w=%u h=%u fmt=%u "
+                    "pitch=%u res=%p file=%s",
+                    pass, c, kTags[c], e, s.w, s.h, s.fmt, m.RowPitch,
+                    s.srcPtr, path);
             } else {
                 Log::get().note("fss dump: could not open %s.", path);
             }
@@ -251,14 +256,17 @@ void fssDumpConfigure(Config& cfg) {
     g_lastFrameNo = 0;
     g_dumping = false;
     g_done = false;
+    g_dumpPass = 0;
     g_armedNoted = false;
     if (g_dumpFrame) {
         Log::get().note(
-            "fss dump ARMED: on body frame %u after this note, both eyes "
-            "are captured around the ring quad, the composite, the tonemap "
-            "and at frame end (HDR and LDR) -- fourteen raw images in "
-            "edvr_logs\\dumps\\, one hitch, one dump per arm. Zoom a "
-            "ringed body and let the build play.",
+            "fss dump ARMED: on body frame %u after this note and again "
+            "the frame after, both eyes are captured around the ring quad, "
+            "the composite, the tonemap and at frame end (HDR and LDR) -- "
+            "28 raw images in edvr_logs\\dumps\\, two hitches, one dump "
+            "per arm. Tiles that BLINK between the passes are the scan art; "
+            "tiles that hold are content. Zoom a ringed body and let the "
+            "build play.",
             g_dumpFrame);
     }
 }
@@ -330,7 +338,11 @@ void fssDumpFrameBoundary(ID3D11DeviceContext* ctx) {
                 captureRemembered(ctx, g_eyeTex[e], 5, e);
                 captureRemembered(ctx, g_ldrTex[e], 6, e);
             }
-            writeOut(ctx);
+            writeOut(ctx, g_dumpPass);
+            if (g_dumpPass == 0) {
+                g_dumpPass = 1;   // the very next frame is pass two
+                return;
+            }
             g_dumping = false;
             g_done = true;
             releaseAll();
