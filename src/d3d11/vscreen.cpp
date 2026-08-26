@@ -32,6 +32,7 @@
 #include "fss_ring.h"
 #include "fss_res.h"
 #include "fss_scan.h"
+#include "fss_theater.h"  // the warm-up; the theater itself runs at submit
 #include "fov_probe.h"
 #include "glitch_frame.h"
 #include "holo_fix.h"
@@ -1397,6 +1398,11 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         if (s->fssTheaterOn || fssScanWantsDraws() || fssPanelWantsDraws() ||
             fssProbeWants() || fssRevealWantsDraws() ||
             fssRingWantsDraws() || fssDumpWantsDraws()) {
+            // Warmed here because this is the first draw-path site the
+            // theater owns: the compile lands on some menu frame at
+            // session start instead of stalling the submit thread 142 ms
+            // at the first zoom (measured 2026-08-26).
+            if (s->fssTheaterOn) fssTheaterWarm(self);
             if (s->fssScanGen != rtvGen) {
                 s->fssScanGen = rtvGen;
                 s->fssScanBody = false;

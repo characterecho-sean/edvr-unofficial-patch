@@ -26,10 +26,10 @@ RWTexture2D<float4> O : register(u0);
 cbuffer P : register(b0) {
     float4 tans;   // x = left-extent tan, y = right-extent tan,
                    // z = vertical half tan, w = panel distance
-    float4 m0;     // delta rotation rows: current-head -> frozen-head
-    float4 m1;
-    float4 m2;
-    float4 misc;   // x = eye offset (m), y = panel half w, z = half h
+    float4 m0;     // delta rotation rows (current-head -> frozen-head);
+    float4 m1;     // the rows' .w = this eye's ray origin in frozen-head
+    float4 m2;     // space, translation and eye offset folded in
+    float4 misc;   // x = panel center x (m), y = panel half w, z = half h
 }
 [numthreads(16, 16, 1)]
 void main(uint3 id : SV_DispatchThreadID) {
@@ -46,11 +46,11 @@ void main(uint3 id : SV_DispatchThreadID) {
     float3 df = float3(dot(m0.xyz, dv), dot(m1.xyz, dv), dot(m2.xyz, dv));
     float4 outc = float4(0, 0, 0, 1);
     if (df.z < -1e-4) {
-        float3 org = float3(misc.x, 0, 0);
+        float3 org = float3(m0.w, m1.w, m2.w);
         float t = (-tans.w - org.z) / df.z;
         if (t > 0) {
             float3 hit = org + t * df;
-            float pu = (hit.x + misc.y) / (2.0 * misc.y);
+            float pu = (hit.x - misc.x + misc.y) / (2.0 * misc.y);
             float pv = 1.0 - (hit.y + misc.z) / (2.0 * misc.z);
             if (pu >= 0 && pu <= 1 && pv >= 0 && pv <= 1) {
                 outc = float4(C.SampleLevel(S0, float2(pu, pv), 0).rgb, 1);
@@ -96,8 +96,10 @@ void failOnce(const char* what) {
     }
 }
 
+constexpr float kTheaterHalfIpd = 0.0315f;
+
 void* theaterInner(void* contentTex, int eye, float outerMag, float innerMag,
-                   const float* delta, float dist) {
+                   const float* xf, float dist) {
     ID3D11Texture2D* ct = nullptr;
     static_cast<IUnknown*>(contentTex)
         ->QueryInterface(__uuidof(ID3D11Texture2D),
@@ -227,13 +229,20 @@ void* theaterInner(void* contentTex, int eye, float outerMag, float innerMag,
             (static_cast<float>(cd.Height) / static_cast<float>(cd.Width));
         const float halfW = dist * (outerMag + innerMag) * 0.5f;
         const float halfH = dist * vt;
-        const float eyeOff = (eye == 0 ? -1.0f : 1.0f) * 0.0315f;
+        // The panel sits exactly on the captured (right) eye's own
+        // asymmetric frustum -- centre offset by the frustum asymmetry
+        // plus that eye's lateral offset -- so at the freeze moment the
+        // right eye sees its own image pixel-aligned and the swap-in is
+        // invisible; the left eye sees the same panel from its own
+        // origin, which IS the stereo of a screen at this distance.
+        const float panelX =
+            kTheaterHalfIpd + dist * (outerMag - innerMag) * 0.5f;
         float cbData[20] = {
             lt, rt, vt, dist,
-            delta[0], delta[1], delta[2], 0.0f,
-            delta[3], delta[4], delta[5], 0.0f,
-            delta[6], delta[7], delta[8], 0.0f,
-            eyeOff, halfW, halfH, 0.0f,
+            xf[0], xf[1], xf[2], xf[9],
+            xf[3], xf[4], xf[5], xf[10],
+            xf[6], xf[7], xf[8], xf[11],
+            panelX, halfW, halfH, 0.0f,
         };
         D3D11_MAPPED_SUBRESOURCE m{};
         if (SUCCEEDED(ctx->Map(g_cb, 0, D3D11_MAP_WRITE_DISCARD, 0, &m)) &&
@@ -301,18 +310,32 @@ void* theaterInner(void* contentTex, int eye, float outerMag, float innerMag,
 }
 
 }  // namespace
+
+void fssTheaterWarm(ID3D11DeviceContext* ctx) {
+    if (g_cs || g_csTried) return;
+    g_csTried = true;
+    g_cs = shaderSwapCompileCs(ctx, kTheaterCsHlsl, sizeof(kTheaterCsHlsl) - 1,
+                               "main", "fss_theater_cs", nullptr,
+                               "fss theater");
+    if (g_cs) {
+        Log::get().note(
+            "fss theater: shader warmed at session start -- the first "
+            "engage pays no compile.");
+    }
+}
+
 }  // namespace edvr
 
 extern "C" __declspec(dllexport) void* edvrFssTheater(void* contentTex,
                                                       int eye,
                                                       float outerMag,
                                                       float innerMag,
-                                                      const float* delta,
+                                                      const float* xf,
                                                       float dist) {
-    if (!contentTex || !delta || eye < 0 || eye > 1) return nullptr;
+    if (!contentTex || !xf || eye < 0 || eye > 1) return nullptr;
     void* out = nullptr;
     edvr::guardedBudget(edvr::g_budget, [&] {
-        out = edvr::theaterInner(contentTex, eye, outerMag, innerMag, delta,
+        out = edvr::theaterInner(contentTex, eye, outerMag, innerMag, xf,
                                  dist);
     });
     return out;

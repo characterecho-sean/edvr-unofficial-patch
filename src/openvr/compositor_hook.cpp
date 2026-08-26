@@ -76,6 +76,28 @@ typedef vr::EVRCompositorError(*PFN_Submit)(void* self, vr::EVREye eye,
 typedef void* (*PFN_EdvrFssHeal)(void*, void*, float, float, int);
 typedef void* (*PFN_EdvrFssTheater)(void*, int, float, float, const float*,
                                     float);
+
+constexpr float kTheaterHalfIpd = 0.0315f;
+
+// The theater's world lock, computed at submit: a row-major 3x3 taking
+// current-head vectors into frozen-head space (D = Rf^T * Rc), then this
+// eye's ray origin in frozen-head space (head translation since the
+// freeze, plus the eye's lateral offset, both rotated in). 12 floats.
+void theaterXform(const vr::HmdMatrix34_t& f, const vr::HmdMatrix34_t& c,
+                  float ex, float* xf) {
+    for (int i = 0; i < 3; ++i) {
+        for (int j = 0; j < 3; ++j) {
+            xf[i * 3 + j] = f.m[0][i] * c.m[0][j] + f.m[1][i] * c.m[1][j] +
+                            f.m[2][i] * c.m[2][j];
+        }
+    }
+    const float dt[3] = {c.m[0][3] - f.m[0][3], c.m[1][3] - f.m[1][3],
+                         c.m[2][3] - f.m[2][3]};
+    for (int i = 0; i < 3; ++i) {
+        xf[9 + i] = f.m[0][i] * dt[0] + f.m[1][i] * dt[1] +
+                    f.m[2][i] * dt[2] + xf[i * 3] * ex;
+    }
+}
 typedef vr::EVRCompositorError(*PFN_WaitGetPoses)(void* self,
                                                   vr::TrackedDevicePose_t* renderPoses,
                                                   uint32_t renderCount,
@@ -191,6 +213,8 @@ struct State {
     uint32_t theaterBodySeen = 0;
     bool theaterFrozen = false;
     vr::HmdMatrix34_t theaterFreeze = {};
+    vr::HmdMatrix34_t theaterRealPose = {};
+    bool theaterRealValid = false;
     PFN_EdvrFssTheater theaterFn = nullptr;
     bool theaterFnTried = false;
     void* theaterContent = nullptr;
@@ -712,6 +736,21 @@ vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
     // eyes submit EDVR's own rendering of the right eye's image as a
     // panel. One rendering, two displays -- no per-eye artifact can
     // exist, which supersedes the heal for exactly these frames.
+    // Same-frame engage: the body stamp is bumped at the body layer's
+    // draws, which land before the eye submits in the frame -- so the
+    // FIRST zoomed frame can already go out as the panel. Waiting for the
+    // next pose boundary showed a flash of the stock arrival first
+    // (16:58:37 flight: the squares, then the swap).
+    if (s->theaterDist > 0.0f && !s->theaterFrozen && s->theaterRealValid &&
+        texture && texture->eType == vr::TextureType_DirectX) {
+        const LONG bs = fssBodyStampValue();
+        if (bs != s->theaterBodyStamp) {
+            s->theaterBodyStamp = bs;
+            s->theaterBodySeen = s->pace_boundaryNo;
+            s->theaterFreeze = s->theaterRealPose;
+            s->theaterFrozen = true;
+        }
+    }
     if (s->theaterDist > 0.0f && s->theaterFrozen && texture &&
         texture->eType == vr::TextureType_DirectX) {
         if (!s->theaterFn && !s->theaterFnTried) {
@@ -742,10 +781,18 @@ vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
                                         : texture->handle;
         }
         if (s->theaterFn && content && eyeTangents(&outer, &inner)) {
-            static const float kIdentity[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+            // The anchor is ours (see theaterXform): the compositor
+            // reprojects against the live pose it handed out, not the
+            // frozen pose the game was fed, so identity here rode the
+            // head on the first flight.
+            float xf[12];
+            theaterXform(s->theaterFreeze, s->theaterRealPose,
+                         (eye == vr::Eye_Left ? -1.0f : 1.0f) *
+                             kTheaterHalfIpd,
+                         xf);
             void* drawn = s->theaterFn(
                 content, eye == vr::Eye_Left ? 0 : 1, outer, inner,
-                kIdentity, s->theaterDist);
+                xf, s->theaterDist);
             if (drawn) {
                 vr::Texture_t sub = *texture;
                 sub.handle = drawn;
@@ -1284,6 +1331,14 @@ vr::EVRCompositorError hookedWaitGetPoses(void* self,
         const bool bodyActive =
             s->theaterDist > 0.0f && s->theaterBodySeen != 0 &&
             s->pace_boundaryNo - s->theaterBodySeen <= 5;
+        if (renderCount > 0 && renderPoses) {
+            // The REAL head pose, saved before any freeze overwrite: the
+            // submit-side world lock is the difference between this and
+            // the frozen pose, and the same-frame engage at Submit needs
+            // the pose the game actually rendered this frame with.
+            s->theaterRealPose = renderPoses[0].mDeviceToAbsoluteTracking;
+            s->theaterRealValid = true;
+        }
         if (bodyActive && renderCount > 0 && renderPoses) {
             if (!s->theaterFrozen) {
                 s->theaterFrozen = true;

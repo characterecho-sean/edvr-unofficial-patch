@@ -23,15 +23,31 @@
 
 #include <cstdint>
 
+struct ID3D11DeviceContext;
+
+namespace edvr {
+// Compile the panel shader ahead of need. The first engage otherwise pays
+// D3DCompile on the submit path -- 142 ms measured 2026-08-26, which is
+// most of a squares arrival watched at stock. Any draw-path site may call
+// this every draw; only the first call does work.
+void fssTheaterWarm(ID3D11DeviceContext* ctx);
+}  // namespace edvr
+
 extern "C" {
 // contentTex: the right eye's submitted texture (ID3D11Texture2D*).
 // eye: 0 left, 1 right (chooses the frustum orientation and eye offset).
 // outerMag/innerMag: horizontal frustum tangent magnitudes.
-// delta: row-major 3x3 rotation taking current-head vectors into
-// frozen-head space (the head's look-around since the zoom began).
+// xf: 12 floats -- a row-major 3x3 rotation taking current-head vectors
+// into frozen-head space (the head's look-around since the zoom began),
+// then this eye's ray origin in frozen-head space (head translation and
+// the eye's lateral offset folded in). The world lock is carried entirely
+// here: OpenComposite attributes the render to the live pose it handed
+// out, not the frozen pose the game was fed, so the compositor cannot
+// reproject the difference for us (the 2026-08-26 first flight's panel
+// rode the head).
 // dist: panel distance in meters.
 // Returns the theater-rendered texture for this eye, or null = stock.
 __declspec(dllexport) void* edvrFssTheater(void* contentTex, int eye,
                                            float outerMag, float innerMag,
-                                           const float* delta, float dist);
+                                           const float* xf, float dist);
 }
