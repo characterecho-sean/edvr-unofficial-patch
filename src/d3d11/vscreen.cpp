@@ -28,6 +28,7 @@
 #include "fss_panel.h"
 #include "fss_probe.h"
 #include "fss_reveal.h"
+#include "fss_dump.h"
 #include "fss_ring.h"
 #include "fss_res.h"
 #include "fss_scan.h"
@@ -1135,7 +1136,8 @@ enum class DrawVerdict {
     // (fss_reveal.h): eye B drawn with eye A's scene constants, wrapped
     // in fssRevealBegin/End.
     kFssReveal,
-    kFssRing
+    kFssRing,
+    kFssDump
 };
 
 // kind, count and instances describe the draw for the census and the census
@@ -1205,7 +1207,7 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         s->censusSkipRangeCount == 0 && s->censusSkipOffCount == 0 &&
         s->censusAutoW == 0 && !fssResActive() && !fssScanWantsDraws() &&
         !fssPanelWantsDraws() && !fssProbeWants() && !fssRevealWantsDraws() &&
-        !fssRingWantsDraws() &&
+        !fssRingWantsDraws() && !fssDumpWantsDraws() &&
         !remlokWantsDraws() && !holoWantsDraws() && !witchstarWantsDraws() &&
         !sunglareWantsDraws() && !cbPeekEnabled() && !billboardWantsDraws() &&
         !drawCensusArmed() && !panelQuadWants() && !panelCurveWants() &&
@@ -1337,7 +1339,8 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         // binding generation, so the resolve runs for a handful of scanner
         // draws and for nothing else in the game.
         if (fssScanWantsDraws() || fssPanelWantsDraws() || fssProbeWants() ||
-            fssRevealWantsDraws() || fssRingWantsDraws()) {
+            fssRevealWantsDraws() || fssRingWantsDraws() ||
+            fssDumpWantsDraws()) {
             if (s->fssScanGen != rtvGen) {
                 s->fssScanGen = rtvGen;
                 s->fssScanBody = false;
@@ -1511,6 +1514,14 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         s->frameNo - s->fssBodyFrame <= 2 &&
         fssRevealOnEyeDraw(self, kind, count, instances)) {
         return DrawVerdict::kFssReveal;
+    }
+
+    // The eye-image dump (round twenty), before the ring feed so a dump
+    // session records the natural state -- run one at a time.
+    if (fssDumpWantsDraws() && s->fssBodyFrame != 0 &&
+        s->frameNo - s->fssBodyFrame <= 2 &&
+        fssDumpOnEyeDraw(self, kind, count, instances)) {
+        return DrawVerdict::kFssDump;
     }
 
     // The ring cross-feed (round eighteen), the same gate and shape: the
@@ -2111,6 +2122,7 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     if (v == DrawVerdict::kFssProbe) fssProbeBegin(self);
     if (v == DrawVerdict::kFssReveal) fssRevealBegin(self);
     if (v == DrawVerdict::kFssRing) fssRingBegin(self);
+    if (v == DrawVerdict::kFssDump) fssDumpBegin(self);
     if (v == DrawVerdict::kHolo) holoBegin(self);
     if (v == DrawVerdict::kWitchstar) witchstarBegin(self);
     if (v == DrawVerdict::kBillboard) billboardBegin(self);
@@ -2124,6 +2136,7 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     if (v == DrawVerdict::kHolo) holoEnd(self);
     if (v == DrawVerdict::kFssReveal) fssRevealEnd(self);
     if (v == DrawVerdict::kFssRing) fssRingEnd(self);
+    if (v == DrawVerdict::kFssDump) fssDumpEnd(self);
     if (v == DrawVerdict::kFssProbe) fssProbeEnd(self);
     if (v == DrawVerdict::kFssPanel) fssPanelEnd(self);
     if (v == DrawVerdict::kFssScan) fssScanEnd(self);
@@ -2697,6 +2710,7 @@ void vScreenRefreshConfig() {
     fssProbeConfigure(cfg);
     fssRevealConfigure(cfg);
     fssRingConfigure(cfg);
+    fssDumpConfigure(cfg);
     witchstarConfigure(cfg);
     sunglareConfigure(cfg);
     exposureConfigure(cfg);
@@ -2781,6 +2795,7 @@ void vScreenFrameBoundary() {
     drawCensusFrameBoundary(s->frameNo);
     fssRevealFrameBoundary();
     fssRingFrameBoundary();
+    fssDumpFrameBoundary(s->ownerCtx);
     remlokFrameBoundary();
     witchstarFrameBoundary();
 
@@ -3412,6 +3427,7 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     fssProbeConfigure(cfg);
     fssRevealConfigure(cfg);
     fssRingConfigure(cfg);
+    fssDumpConfigure(cfg);
     witchstarConfigure(cfg);
     sunglareConfigure(cfg);
     exposureConfigure(cfg);
@@ -3606,6 +3622,7 @@ void shutdownVScreenFixes() {
     fssProbeShutdown();
     fssRevealShutdown();
     fssRingShutdown();
+    fssDumpShutdown();
     billboardShutdown();
     g_state->hook.uninstall();
 }

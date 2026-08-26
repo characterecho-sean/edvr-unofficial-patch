@@ -35,8 +35,16 @@ constexpr uint32_t kSlots = 8;
 constexpr uint32_t kCbSlots = 4;
 
 // 0 = stock, 1 = "second" (first eye receives, second lends),
-// 2 = "first" (second eye receives, first lends).
+// 2 = "first" (second eye receives, first lends), 3 = "depth" (nothing is
+// fed; every matched draw in BOTH eyes runs with depth and stencil tests
+// off -- the round-19 constants feed was engaged-and-null, and per-eye
+// depth/stencil culling is the last per-draw channel these draws own).
 uint8_t g_mode = 0;
+
+ID3D11DepthStencilState* g_noDepth = nullptr;
+ID3D11DepthStencilState* g_savedDepth = nullptr;
+UINT                     g_savedStencilRef = 0;
+bool                     g_depthEngaged = false;
 
 // The learned SRV sets, AddRef-held across frames: [family][j][slot], where
 // j is the occurrence index within the lending eye.
@@ -105,6 +113,8 @@ void fssRingConfigure(Config& cfg) {
         mode = 1;
     } else if (m == "first") {
         mode = 2;
+    } else if (m == "depth") {
+        mode = 3;
     } else {
         Log::get().note("fss_ring_feed \"%s\" is not stock, second or first; "
                         "running stock.", m.c_str());
@@ -114,7 +124,13 @@ void fssRingConfigure(Config& cfg) {
     g_engagedNoted = false;
     g_learnNoted = false;
     releaseLearned();
-    if (g_mode) {
+    if (g_mode == 3) {
+        Log::get().note(
+            "fss ring ARMED: every ring-family draw runs with depth and "
+            "stencil tests OFF, both eyes. Squares dying here means the "
+            "left eye's squares are ring pixels CULLED by per-eye "
+            "depth/stencil content. Clear to restore.");
+    } else if (g_mode) {
         Log::get().note(
             "fss ring ARMED: the %s eye's ring draws run with the %s eye's "
             "sampled inputs AND pixel-stage constants, restored after every "
@@ -154,6 +170,13 @@ bool fssRingOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
         if (occ > 2 * k) return false;   // unexpected extra: leave alone
         const uint8_t eye = static_cast<uint8_t>((occ - 1) / k);
         const uint8_t j = static_cast<uint8_t>((occ - 1) % k);
+        if (g_mode == 3) {
+            // Depth mode: no learning, no feeding; every matched draw in
+            // both eyes gets the no-test state in Begin/End.
+            g_pendingFam = f;
+            g_pendingJ = j;
+            return true;
+        }
         const uint8_t lender = (g_mode == 1) ? 1 : 0;
         if (eye == lender) {
             // Learn, inline: a read costs nothing the draw can notice.
@@ -219,7 +242,32 @@ bool fssRingOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
 
 void fssRingBegin(ID3D11DeviceContext* ctx) {
     g_engaged = false;
+    g_depthEngaged = false;
     if (!ctx || !g_mode) return;
+    if (g_mode == 3) {
+        guardedBudget(g_budget, [&] {
+            if (!g_noDepth) {
+                ID3D11Device* dev = nullptr;
+                ctx->GetDevice(&dev);
+                if (!dev) return;
+                D3D11_DEPTH_STENCIL_DESC dd{};   // depth off, stencil off
+                dev->CreateDepthStencilState(&dd, &g_noDepth);
+                dev->Release();
+                if (!g_noDepth) return;
+            }
+            ctx->OMGetDepthStencilState(&g_savedDepth, &g_savedStencilRef);
+            ctx->OMSetDepthStencilState(g_noDepth, 0);
+            g_depthEngaged = true;
+            ++g_applied;
+            if (!g_engagedNoted) {
+                g_engagedNoted = true;
+                Log::get().note("fss ring: engaged -- ring-family draws are "
+                                "running with depth and stencil off, "
+                                "restored after each.");
+            }
+        });
+        return;
+    }
     guardedBudget(g_budget, [&] {
         ctx->PSGetShaderResources(0, kSlots, g_displaced);
         ID3D11ShaderResourceView* feed[kSlots];
@@ -247,6 +295,15 @@ void fssRingBegin(ID3D11DeviceContext* ctx) {
 }
 
 void fssRingEnd(ID3D11DeviceContext* ctx) {
+    if (g_depthEngaged && ctx) {
+        g_depthEngaged = false;
+        ctx->OMSetDepthStencilState(g_savedDepth, g_savedStencilRef);
+        if (g_savedDepth) {
+            g_savedDepth->Release();
+            g_savedDepth = nullptr;
+        }
+        return;
+    }
     if (!g_engaged || !ctx) return;
     g_engaged = false;
     ctx->PSSetShaderResources(0, kSlots, g_displaced);
@@ -269,6 +326,12 @@ void fssRingFrameBoundary() {
     for (uint32_t f = 0; f < kFamilyCount; ++f) g_occ[f] = 0;
 }
 
-void fssRingShutdown() { releaseLearned(); }
+void fssRingShutdown() {
+    releaseLearned();
+    if (g_noDepth) {
+        g_noDepth->Release();
+        g_noDepth = nullptr;
+    }
+}
 
 }  // namespace edvr
