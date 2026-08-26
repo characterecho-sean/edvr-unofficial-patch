@@ -99,8 +99,8 @@ uint32_t g_seq = 0;              // ONE ordinal across every recorded event in
 // VS b0 and PS b0. The shadow is refreshed by the Map/Unmap tee and dumped
 // at each watched draw, so a dump is the bytes the GPU reads for THAT draw.
 constexpr uint32_t kCbShadowBytes = 256;
-constexpr uint32_t kCbDumpCap = 256;   // dumps per census; 2 stages x 2 eyes
-                                       // x 30 frames = 120 in the FSS run
+constexpr uint32_t kCbDumpCap = 512;   // dumps per census; four watch slots
+                                       // x 2 eyes x 30 frames in the FSS run
 struct CbWatch {
     void*    buf = nullptr;     // the buffer object, identity only
     void*    mapped = nullptr;  // its pData between Map and Unmap
@@ -109,7 +109,12 @@ struct CbWatch {
     uint8_t  shadow[kCbShadowBytes];
 };
 uint64_t g_cbWatchHash = 0;      // latched at census begin; 0 = off
-CbWatch  g_cbWatch[2];           // [0] = VS b0, [1] = PS b0
+uint64_t g_cbWatchHash2 = 0;     // optional second hash (comma-separated)
+CbWatch  g_cbWatch[4];           // [0] = VS b0, [1] = PS b0,
+                                 // [2] = CS b0, [3] = CS b1 (dispatches --
+                                 // round 21: the reconstruction pair share
+                                 // ONE 80-byte cb OBJECT and the per-eye
+                                 // rewrite idiom is the engine's own)
 uint32_t g_cbDumps = 0;
 FaultBudget g_cbBudget("drawCensus.cbWatch", 5);
 
@@ -248,8 +253,9 @@ void cbWatchRegister(uint32_t slot, void* buf) {
     if (buf && bindingResolveResource(buf, &info) && info.isBuffer) {
         w.bytes = info.a < kCbShadowBytes ? info.a : kCbShadowBytes;
     }
+    static const char kSlotLetter[4] = {'v', 'p', 'x', 'y'};
     char tok[24];
-    Log::get().note("DCW register %c cb=%s bytes=%u", slot == 0 ? 'v' : 'p',
+    Log::get().note("DCW register %c cb=%s bytes=%u", kSlotLetter[slot & 3],
                     bindingToken(buf, Kind::kResource, tok, sizeof(tok)),
                     w.bytes);
 }
@@ -262,10 +268,11 @@ void cbWatchDump(uint32_t slot, uint32_t q) {
     CbWatch& w = g_cbWatch[slot];
     if (!w.buf || g_cbDumps >= kCbDumpCap) return;
     ++g_cbDumps;
+    static const char kSlotLetter[4] = {'v', 'p', 'x', 'y'};
     char tok[24];
     if (!w.valid) {
         Log::get().note("DCW %u q=%u %c cb=%s unwritten", g_frameOrdinal, q,
-                        slot == 0 ? 'v' : 'p',
+                        kSlotLetter[slot & 3],
                         bindingToken(w.buf, Kind::kResource, tok, sizeof(tok)));
         return;
     }
@@ -281,7 +288,7 @@ void cbWatchDump(uint32_t slot, uint32_t q) {
     }
     fl[at] = '\0';
     Log::get().note("DCW %u q=%u %c cb=%s b=%u h=%016llX f=%s", g_frameOrdinal,
-                    q, slot == 0 ? 'v' : 'p',
+                    q, kSlotLetter[slot & 3],
                     bindingToken(w.buf, Kind::kResource, tok, sizeof(tok)),
                     w.bytes,
                     static_cast<unsigned long long>(fnv1a64(w.shadow, w.bytes)),
@@ -302,6 +309,27 @@ void cbWatchOnDraw(ID3D11DeviceContext* ctx, uint32_t q) {
     });
     cbWatchDump(0, q);
     cbWatchDump(1, q);
+}
+
+// A dispatch running a watched shader: the compute stage's b0 and b1,
+// learned and dumped exactly the way the draw form does its stages. Round
+// 21 of the black squares: the eye-image dump proved the squares SYMMETRIC
+// in the eye textures, so the split is born in the per-eye reconstruction
+// dispatches -- whose 80-byte constant block is one shared OBJECT for both
+// eyes, the rewrite-per-eye idiom the exposure fix was built around. These
+// dumps are the bytes each eye's dispatch actually read.
+void cbWatchOnDispatch(ID3D11DeviceContext* ctx, uint32_t q) {
+    guardedBudget(g_cbBudget, [&] {
+        ID3D11Buffer* cb[2] = {};
+        ctx->CSGetConstantBuffers(0, 2, cb);
+        cbWatchRegister(2, cb[0]);
+        cbWatchRegister(3, cb[1]);
+        for (ID3D11Buffer* b : cb) {
+            if (b) b->Release();
+        }
+    });
+    cbWatchDump(2, q);
+    cbWatchDump(3, q);
 }
 
 void dumpInternTable() {
@@ -466,7 +494,10 @@ static void recordDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
     // The CB watch, after the draw's own line so a DCW dump always follows
     // the draw it belongs to. Any recorded draw can match -- DC for the FSS
     // composite, DCO if a future hunt watches an offscreen builder.
-    if (g_cbWatchHash && vh == g_cbWatchHash) cbWatchOnDraw(ctx, q);
+    if ((g_cbWatchHash && vh == g_cbWatchHash) ||
+        (g_cbWatchHash2 && vh == g_cbWatchHash2)) {
+        cbWatchOnDraw(ctx, q);
+    }
 }
 
 void drawCensusEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
@@ -783,6 +814,13 @@ void drawCensusDispatch(ID3D11DeviceContext* ctx, uint32_t x, uint32_t y,
         g_frameOrdinal, g_dispThisFrame - 1, x, y, z,
         static_cast<unsigned long long>(ch), ut[0], ut[1], ut[2], ut[3],
         ut[4], ut[5], ut[6], ut[7], st, cbt, tail, q);
+
+    // The compute CB watch, after the dispatch's own line the way the draw
+    // form follows its draw.
+    if (ch && ((g_cbWatchHash && ch == g_cbWatchHash) ||
+               (g_cbWatchHash2 && ch == g_cbWatchHash2))) {
+        cbWatchOnDispatch(ctx, q);
+    }
 }
 
 void drawCensusFrameBoundary(uint32_t frameNo) {
@@ -838,7 +876,11 @@ void drawCensusFrameBoundary(uint32_t frameNo) {
         {
             const std::string cw =
                 Config::get().getString("advanced.census_cb_watch", "");
-            g_cbWatchHash = cw.empty() ? 0 : _strtoui64(cw.c_str(), nullptr, 16);
+            char* end = nullptr;
+            g_cbWatchHash =
+                cw.empty() ? 0 : _strtoui64(cw.c_str(), &end, 16);
+            g_cbWatchHash2 =
+                (end && *end == ',') ? _strtoui64(end + 1, nullptr, 16) : 0;
         }
         g_cbDumps = 0;
         for (Interned& e : g_tab) e = Interned();
