@@ -30,9 +30,22 @@ void main(uint3 id : SV_DispatchThreadID) {
         int rx = int(id.x) - int(round(p.x));
         uint rw, rh;
         R.GetDimensions(rw, rh);
-        if (rx >= 0 && rx < int(rw) && id.y < rh) {
-            float4 r = R[uint2(uint(rx), id.y)];
-            if (dot(r.rgb, float3(0.299, 0.587, 0.114)) > 0.02) o = r;
+        if (rx >= 0 && rx < int(rw)) {
+            // The horizontal shift is exact only for a perfectly
+            // symmetric vertical frustum; the field measured ~16px of
+            // vertical offset on a canted headset, enough to land an
+            // edge tile's counterpart in dark space. Three taps cover
+            // it; the first lit one wins.
+            const int dys[3] = {0, -16, 16};
+            [unroll] for (int i = 0; i < 3; ++i) {
+                int ry = int(id.y) + dys[i];
+                if (ry < 0 || ry >= int(rh)) continue;
+                float4 r = R[uint2(uint(rx), uint(ry))];
+                if (dot(r.rgb, float3(0.299, 0.587, 0.114)) > 0.008) {
+                    o = r;
+                    break;
+                }
+            }
         }
     }
     O[id.xy] = o;
