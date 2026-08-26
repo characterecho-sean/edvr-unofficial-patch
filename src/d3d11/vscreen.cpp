@@ -2764,7 +2764,8 @@ void vScreenRefreshConfig() {
     fssDumpConfigure(cfg);
     {
         s->censusFssJump = cfg.getInt("advanced.census_fss_jump", 0) ? 1 : 0;
-        int n = cfg.getInt("fix.fss_eye_heal", 0) ? 1 : 0;
+        int n = cfg.getInt("fix.fss_eye_heal", 0);
+        if (n < 0 || n > 2) n = 0;
         if (s->fssHealOn != n) {
             s->fssHealOn = n;
             Log::get().note(
@@ -3551,7 +3552,8 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     {
         g_state->censusFssJump =
             cfg.getInt("advanced.census_fss_jump", 0) ? 1 : 0;
-        int n = cfg.getInt("fix.fss_eye_heal", 0) ? 1 : 0;
+        int n = cfg.getInt("fix.fss_eye_heal", 0);
+        if (n < 0 || n > 2) n = 0;
         if (g_state->fssHealOn != n) {
             g_state->fssHealOn = n;
             Log::get().note(

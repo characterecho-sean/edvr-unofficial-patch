@@ -73,7 +73,7 @@ typedef vr::EVRCompositorError(*PFN_Submit)(void* self, vr::EVREye eye,
                                             const vr::VRTextureBounds_t* bounds,
                                             vr::EVRSubmitFlags flags);
 
-typedef void* (*PFN_EdvrFssHeal)(void*, void*, float, float);
+typedef void* (*PFN_EdvrFssHeal)(void*, void*, float, float, int);
 typedef vr::EVRCompositorError(*PFN_WaitGetPoses)(void* self,
                                                   vr::TrackedDevicePose_t* renderPoses,
                                                   uint32_t renderCount,
@@ -694,8 +694,9 @@ vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
     // the measured defect lives. The measured defect: the left image
     // carries hard-black unresolved tiles during the zoom arrival that
     // the right does not (16 vs 2, docs/fss-scanner.md round 33).
-    if (eye == vr::Eye_Left && s->fssHealOn && texture &&
-        texture->eType == vr::TextureType_DirectX) {
+    if (((eye == vr::Eye_Left && s->fssHealOn == 1) ||
+         (eye == vr::Eye_Right && s->fssHealOn == 2)) &&
+        texture && texture->eType == vr::TextureType_DirectX) {
         const LONG stamp = fssChromeStampValue();
         if (stamp != s->healChromeStamp) {
             s->healChromeStamp = stamp;
@@ -720,9 +721,15 @@ vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
                                       "heal stands down.");
             }
             float outer = 0.0f, inner = 0.0f;
-            void* rt = submittedTexture(1);
-            if (s->healFn && rt && eyeTangents(&outer, &inner)) {
-                void* healed = s->healFn(texture->handle, rt, outer, inner);
+            // Mode 1 runs at the left submit against last frame's right;
+            // mode 2 runs at the right submit against THIS frame's left
+            // (the left submits first), no staleness at all.
+            void* other = submittedTexture(s->fssHealOn == 1 ? 1 : 0);
+            if (s->healFn && other && eyeTangents(&outer, &inner)) {
+                void* healed =
+                    s->fssHealOn == 1
+                        ? s->healFn(texture->handle, other, outer, inner, 1)
+                        : s->healFn(other, texture->handle, outer, inner, 2);
                 if (healed) {
                     vr::Texture_t sub = *texture;
                     sub.handle = healed;
@@ -1328,7 +1335,11 @@ void* interceptInterface(void* iface, const char* interfaceVersion) {
         }
     }
 
-    s.fssHealOn = cfg.getInt("fix.fss_eye_heal", 0) ? 1 : 0;
+    {
+        int hm = cfg.getInt("fix.fss_eye_heal", 0);
+        if (hm < 0 || hm > 2) hm = 0;
+        s.fssHealOn = hm;
+    }
     const int submitOverride = cfg.getInt("advanced.submit_index", -1);
     const int posesOverride = cfg.getInt("advanced.waitgetposes_index", -1);
     if (submitOverride >= 0 && posesOverride >= 0) {

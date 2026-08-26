@@ -28,6 +28,11 @@ extern "C" {
 // outerMag/innerMag: the eye frustum tangent magnitudes from the bridge.
 // Returns our healed ID3D11Texture2D* to submit for the left eye, or
 // null to submit the original.
+// mode 1: fill the left's gated blacks from the right (no squares in
+// either eye). mode 2: stamp the left's gated blacks into the right
+// (squares in both eyes, the flat screen's look). The returned texture is
+// what the MODE'S TARGET eye should submit: left for mode 1, right for 2.
 __declspec(dllexport) void* edvrFssHealLeft(void* leftTex, void* rightTex,
-                                            float outerMag, float innerMag);
+                                            float outerMag, float innerMag,
+                                            int mode);
 }
