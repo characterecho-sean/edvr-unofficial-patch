@@ -642,6 +642,58 @@ restored to empty after. If the squares survive, the flip side
 direction heals names the good state; the healing arm is the fix's shape
 (gated, shipped as a fix key) if Frontier's own binding is the bug.
 
+## Rounds fourteen through thirty-one: the hunt below the game, and the ending
+
+The short version of eighteen further rounds: every layer between the ring
+draws and the headset panels was instrumented, forced identical, or
+pixel-dumped, and the black squares survived all of it -- because the
+question was wrong. The arc's ending, in the field's own words: the
+squares are the game's intended scan-resolve animation of its PRIMARY
+view, and the anomaly is that the second eye shows a smoothed variant.
+
+What the long road measured, for whoever walks near it again:
+
+- The census gained: what dispatches read (CS SRVs/CBs), DispatchIndirect
+  and indirect draws, CopyStructureCount, foreign-context work, eight UAV
+  slots, and the hard lesson that tokens interned PER VIEW so one resource
+  could wear two ids (@36==@115 proved it; pointer-keyed joins are the
+  law now).
+- The FSS frame is fully mapped: per-eye ring G-buffer (budgeted tile
+  subsets per frame over a cleared target -- the 50/50 arrive/vanish
+  oscillation in the two-pass dumps), the ring quad's three black
+  mechanisms (flag bit 4, the cb2[46] fade, the t3 illumination-map
+  exposure), the segment mesh's vertex-driven fade, the GPU-driven tile
+  passes behind DispatchIndirect, the tonemap/LDR chain, and the
+  reconstruction pair (E861 accumulate -> B742 pack, alias-closed by
+  pointer).
+- Every mechanism was neutralized -- transcribed shaders through the new
+  ps/cs compile paths, GPU-side constant patches, an injected compute
+  hold -- with receipts, and the VISIBLE squares survived every one:
+  they are painted into BOTH submitted eye images equally (measured
+  three times: early build, mid build, strict-black, clustered), and the
+  flat screen shows them too, because the flat screen mirrors the
+  primary view.
+- The percept asymmetry (left crisp, right smooth) reproduces on a stock
+  install, across OpenComposite AND SteamVR-via-Steam-Link, on two
+  headsets. It is the engine's own presentation of its second eye, below
+  every lever a proxy DLL owns; the mono-submit probe (both eyes shown
+  one image) moved the squares into both eyes, proving the display chain
+  faithful.
+
+What ships from the arc: `fix.fss_res` (the body at full eye resolution,
+field-confirmed sharper), the transcription/compile machinery
+(shaderSwapCompilePs/Cs), the ring shader disassemblies
+(docs/fss-ring-ps.asm, docs/fss-ring-mesh-ps.asm, docs/fss-chrome-ps.asm),
+the checkpointed eye-image dump with two-pass blink analysis, the frame
+pacing log, and a census that can no longer be lied to by omission.
+`fss_ring_feed` stays stock: its arms are probe-grade history, kept for
+the next hunt.
+
+The evidence package here -- stock reproduction on two stacks, symmetric
+submitted images, the monocular field reports -- is a complete Frontier
+bug report waiting to be filed: the second eye's FSS scan animation does
+not match the primary view's.
+
 ## Open
 
 - The flash detector withholds a couple of frames at every fresh FSS zoom
