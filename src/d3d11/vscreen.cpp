@@ -2796,6 +2796,52 @@ void vScreenFrameBoundary() {
     fssRevealFrameBoundary();
     fssRingFrameBoundary();
     fssDumpFrameBoundary(s->ownerCtx);
+
+    // FSS frame pacing (round 31): the left-only squares are now measured
+    // to be runtime-side (both submitted images carry the flicker equally),
+    // and every vendor's frame-synthesis system -- ASW, motion
+    // reprojection, smart smoothing -- engages only when the app misses
+    // refresh. Whether the BUILD misses refresh is therefore the theory's
+    // premise, and this measures it from our own clock: frame-to-frame
+    // deltas while the body-frame gate is warm, one summary line when the
+    // scanner goes quiet. Log-only, no keys.
+    {
+        static LARGE_INTEGER lastQpc = {};
+        static uint32_t frames = 0, slow = 0;
+        static double sumMs = 0.0, maxMs = 0.0;
+        const bool inFss =
+            s->fssBodyFrame != 0 && s->frameNo - s->fssBodyFrame <= 2;
+        LARGE_INTEGER now, freq;
+        QueryPerformanceCounter(&now);
+        QueryPerformanceFrequency(&freq);
+        if (inFss) {
+            if (lastQpc.QuadPart) {
+                const double ms = (now.QuadPart - lastQpc.QuadPart) * 1000.0 /
+                                  static_cast<double>(freq.QuadPart);
+                if (ms < 500.0) {   // ignore pauses/loads
+                    ++frames;
+                    sumMs += ms;
+                    if (ms > maxMs) maxMs = ms;
+                    if (ms > 13.0) ++slow;   // ~90Hz budget with margin
+                }
+            }
+            lastQpc = now;
+        } else {
+            if (frames >= 30) {
+                Log::get().note(
+                    "fss pacing: %u frames, avg %.2f ms, max %.2f ms, %u "
+                    "frames over 13 ms (%.0f%%). A frame-synthesis system "
+                    "engages exactly when frames run long.",
+                    frames, sumMs / frames, maxMs, slow,
+                    100.0 * slow / frames);
+            }
+            frames = 0;
+            slow = 0;
+            sumMs = 0.0;
+            maxMs = 0.0;
+            lastQpc.QuadPart = 0;
+        }
+    }
     remlokFrameBoundary();
     witchstarFrameBoundary();
 
