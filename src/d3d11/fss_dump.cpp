@@ -633,6 +633,17 @@ void fssDumpDispatchPost(ID3D11DeviceContext* ctx) {
         ctx->CSGetShader(&cs, nullptr, nullptr);
         const uint64_t h = lookupShaderHash(cs);
         if (cs) cs->Release();
+        // Self-diagnosis, three calls' worth: the 32b notes never printed,
+        // so either this body never runs or the hash never matches -- the
+        // first few raw values decide which.
+        {
+            static int s_first = 0;
+            if (s_first < 3) {
+                ++s_first;
+                Log::get().note("fss series: post call %d sees ch=%016llX",
+                                s_first, static_cast<unsigned long long>(h));
+            }
+        }
         if (h == kOutputHash) {
             static bool s_matchNoted = false;
             if (!s_matchNoted && seriesLive) {
