@@ -75,6 +75,11 @@ ID3D11ComputeShader*       g_cs = nullptr;
 bool                       g_csTried = false;
 ID3D11Texture2D*           g_out[2] = {};
 ID3D11UnorderedAccessView* g_outUav[2] = {};
+// The copy-through pair: when the submitted texture refuses a shader view
+// (the series capture met the same refusal), the content is copied into
+// this own samplable texture instead.
+ID3D11Texture2D*           g_copy = nullptr;
+ID3D11ShaderResourceView*  g_copySrv = nullptr;
 uint32_t g_outW = 0, g_outH = 0;
 ID3D11Buffer*       g_cb = nullptr;
 ID3D11SamplerState* g_samp = nullptr;
@@ -123,6 +128,8 @@ void* theaterInner(void* contentTex, int eye, float outerMag, float innerMag,
             if (g_outUav[e]) { g_outUav[e]->Release(); g_outUav[e] = nullptr; }
             if (g_out[e]) { g_out[e]->Release(); g_out[e] = nullptr; }
         }
+        if (g_copySrv) { g_copySrv->Release(); g_copySrv = nullptr; }
+        if (g_copy) { g_copy->Release(); g_copy = nullptr; }
         for (int e = 0; e < 2 && ok; ++e) {
             D3D11_TEXTURE2D_DESC od = cd;
             od.Format = typed;
@@ -173,8 +180,38 @@ void* theaterInner(void* contentTex, int eye, float outerMag, float innerMag,
         vd.Format = typed;
         vd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
         vd.Texture2D.MipLevels = 1;
-        ok = (cd.BindFlags & D3D11_BIND_SHADER_RESOURCE) &&
-             SUCCEEDED(dev->CreateShaderResourceView(ct, &vd, &cs));
+        if (!(cd.BindFlags & D3D11_BIND_SHADER_RESOURCE) ||
+            FAILED(dev->CreateShaderResourceView(ct, &vd, &cs))) {
+            cs = nullptr;
+            if (!g_copy) {
+                D3D11_TEXTURE2D_DESC pd = cd;
+                pd.Format = typed;
+                pd.Usage = D3D11_USAGE_DEFAULT;
+                pd.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+                pd.CPUAccessFlags = 0;
+                pd.MiscFlags = 0;
+                pd.MipLevels = 1;
+                pd.SampleDesc.Count = 1;
+                pd.SampleDesc.Quality = 0;
+                if (FAILED(dev->CreateTexture2D(&pd, nullptr, &g_copy)) ||
+                    FAILED(dev->CreateShaderResourceView(g_copy, &vd,
+                                                         &g_copySrv))) {
+                    if (g_copy) { g_copy->Release(); g_copy = nullptr; }
+                    g_copySrv = nullptr;
+                }
+            }
+            if (g_copy && g_copySrv) {
+                if (cd.SampleDesc.Count > 1) {
+                    ctx->ResolveSubresource(g_copy, 0, ct, 0, typed);
+                } else {
+                    ctx->CopySubresourceRegion(g_copy, 0, 0, 0, 0, ct, 0,
+                                               nullptr);
+                }
+                g_copySrv->AddRef();
+                cs = g_copySrv;
+            }
+        }
+        ok = cs != nullptr;
         if (!ok) failOnce("the content texture refuses a shader view");
     }
 
