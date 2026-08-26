@@ -1459,6 +1459,12 @@ void* interceptInterface(void* iface, const char* interfaceVersion) {
         float td = cfg.getFloat("fix.fss_theater", 0.0f);
         if (td < 0.0f || td > 10.0f) td = 0.0f;
         s.theaterDist = td;
+        if (td > 0.0f) {
+            Log::get().note(
+                "fss theater: armed at %.1f m -- the final zoom becomes one "
+                "rendering shown to both eyes once the body stamp arrives.",
+                static_cast<double>(td));
+        }
     }
     const int submitOverride = cfg.getInt("advanced.submit_index", -1);
     const int posesOverride = cfg.getInt("advanced.waitgetposes_index", -1);

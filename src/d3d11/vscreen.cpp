@@ -1391,9 +1391,12 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         // eye/2-sized, or one of fss_res's inflated textures? Cached per
         // binding generation, so the resolve runs for a handful of scanner
         // draws and for nothing else in the game.
-        if (fssScanWantsDraws() || fssPanelWantsDraws() || fssProbeWants() ||
-            fssRevealWantsDraws() || fssRingWantsDraws() ||
-            fssDumpWantsDraws()) {
+        // The theater is in this list on its own feet: on 2026-08-26 it
+        // rode the gate implicitly and died silently the first flight all
+        // six neighbours were off.
+        if (s->fssTheaterOn || fssScanWantsDraws() || fssPanelWantsDraws() ||
+            fssProbeWants() || fssRevealWantsDraws() ||
+            fssRingWantsDraws() || fssDumpWantsDraws()) {
             if (s->fssScanGen != rtvGen) {
                 s->fssScanGen = rtvGen;
                 s->fssScanBody = false;
@@ -1421,8 +1424,14 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
                 // The theater's gate signal: only the final zoom draws
                 // the body layer. Bumped once per frame at most.
                 if (s->fssTheaterOn && s->fssBodyStampFrame != s->frameNo) {
+                    const bool first = s->fssBodyStampFrame == 0;
                     s->fssBodyStampFrame = s->frameNo;
                     bumpFssBodyStamp();
+                    if (first) {
+                        Log::get().note(
+                            "fss theater: the body layer is up -- the stamp "
+                            "is flowing to the vr half.");
+                    }
                 }
                 if (fssScanWantsDraws() && fssScanOnBodyDraw()) {
                     return DrawVerdict::kFssScan;
