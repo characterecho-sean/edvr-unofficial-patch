@@ -149,6 +149,28 @@ struct State {
     bool     pairSyncNoted = false;
     char     pairSyncSpec[48] = {};
 
+    // The CS b1 equaliser (experimental.dispatch_cb1_lend / _strip): round
+    // fifteen of the FSS black squares. The round-fourteen census caught the
+    // first hard per-eye difference of the whole hunt -- the mask builder
+    // (ch=22786F6DE290C577) dispatches with CS b1 BOUND for one eye (a
+    // 480-byte parameter block) and UNBOUND for the other, 30/30 frames; an
+    // unbound constant buffer reads as zeros, so one eye's masks are built
+    // with default parameters. Lend: a dispatch of the named shader that
+    // arrives with b1 empty is given the buffer the same shader most
+    // recently ran WITH (learned bound, AddRef held), restored to empty
+    // after. Strip: a dispatch arriving with b1 bound runs without it,
+    // restored after. One of the two makes the eyes match; which one heals
+    // is the answer.
+    uint64_t       cb1LendHash = 0;
+    uint64_t       cb1StripHash = 0;
+    ID3D11Buffer*  cb1Remembered = nullptr;
+    uint64_t       cb1Lent = 0;
+    uint64_t       cb1Stripped = 0;
+    bool           cb1LendNoted = false;
+    bool           cb1StripNoted = false;
+    char           cb1LendSpec[48] = {};
+    char           cb1StripSpec[48] = {};
+
     // Shape detection.
     //
     // A bytecode hash identifies one compiled shader and changes whenever the
@@ -918,6 +940,66 @@ void STDMETHODCALLTYPE hookedDispatch(ID3D11DeviceContext* self, UINT x, UINT y,
         }
     }
 
+    // The CS b1 equaliser, before pair-sync so the two cannot both act on
+    // one dispatch (arm one at a time; this one wins ties). The census above
+    // records the game's OWN bindings -- engagement is receipted by the
+    // lent/stripped notes, not by census tokens.
+    if (s->cb1LendHash || s->cb1StripHash) {
+        const uint64_t h = hashOf(bindingGet(BindSlot::Cs));
+        if (h && (h == s->cb1LendHash || h == s->cb1StripHash)) {
+            s->computeThisFrame = true;
+            bool handled = false;
+            guardedBudget(g_budget, [&] {
+                ID3D11Buffer* b = nullptr;
+                self->CSGetConstantBuffers(1, 1, &b);
+                if (b) {
+                    if (h == s->cb1LendHash && s->cb1Remembered != b) {
+                        // Learn the newest bound buffer; the ref from
+                        // CSGetConstantBuffers transfers to the remembered
+                        // slot, alive across frames on AddRef's bargain.
+                        if (s->cb1Remembered) s->cb1Remembered->Release();
+                        s->cb1Remembered = b;
+                        b = nullptr;
+                    } else if (h == s->cb1StripHash) {
+                        ID3D11Buffer* none = nullptr;
+                        self->CSSetConstantBuffers(1, 1, &none);
+                        handled = true;
+                        s->realDispatch(self, x, y, z);
+                        self->CSSetConstantBuffers(1, 1, &b);
+                        ++s->cb1Stripped;
+                        if (!s->cb1StripNoted) {
+                            s->cb1StripNoted = true;
+                            Log::get().note(
+                                "dispatch cb1 strip: engaged -- ch=%016llX "
+                                "now runs with CS b1 EMPTY wherever the game "
+                                "bound one, restored after each dispatch.",
+                                static_cast<unsigned long long>(h));
+                        }
+                    }
+                } else if (h == s->cb1LendHash && s->cb1Remembered) {
+                    ID3D11Buffer* lend = s->cb1Remembered;
+                    self->CSSetConstantBuffers(1, 1, &lend);
+                    handled = true;
+                    s->realDispatch(self, x, y, z);
+                    ID3D11Buffer* none = nullptr;
+                    self->CSSetConstantBuffers(1, 1, &none);
+                    ++s->cb1Lent;
+                    if (!s->cb1LendNoted) {
+                        s->cb1LendNoted = true;
+                        Log::get().note(
+                            "dispatch cb1 lend: engaged -- ch=%016llX "
+                            "arrived with CS b1 EMPTY and now runs with the "
+                            "buffer it last ran bound WITH, restored to "
+                            "empty after each dispatch.",
+                            static_cast<unsigned long long>(h));
+                    }
+                }
+                if (b) b->Release();
+            });
+            if (handled) return;
+        }
+    }
+
     // The pair-sync experiment: occurrence 1 of the named shader lends its
     // UAV0; occurrence 2 runs its own dispatch and is then overwritten by a
     // CopyResource from the first -- both eyes read one eye's product. The
@@ -1168,6 +1250,60 @@ void exposureConfigure(Config& cfg) {
                     "while it was set).",
                     static_cast<unsigned long long>(hadCopies));
             }
+        }
+    }
+
+    // The CS b1 equaliser's specs: one hash each, no suffixes.
+    {
+        const std::string lendSpec =
+            cfg.getString("experimental.dispatch_cb1_lend", "");
+        const std::string stripSpec =
+            cfg.getString("experimental.dispatch_cb1_strip", "");
+        struct Arm {
+            const char*        key;
+            const std::string* got;
+            char*              spec;
+            size_t             specLen;
+            uint64_t*          hash;
+            bool*              noted;
+            const char*        verb;
+        } arms[] = {
+            {"dispatch_cb1_lend", &lendSpec, s->cb1LendSpec,
+             sizeof(s->cb1LendSpec), &s->cb1LendHash, &s->cb1LendNoted,
+             "an EMPTY CS b1 filled with the buffer it last ran bound with"},
+            {"dispatch_cb1_strip", &stripSpec, s->cb1StripSpec,
+             sizeof(s->cb1StripSpec), &s->cb1StripHash, &s->cb1StripNoted,
+             "a BOUND CS b1 emptied"},
+        };
+        for (Arm& a : arms) {
+            const std::string& spec = *a.got;
+            if (spec.length() >= a.specLen || spec == a.spec) continue;
+            memcpy(a.spec, spec.c_str(), spec.length() + 1);
+            *a.hash = 0;
+            *a.noted = false;
+            if (spec.empty()) {
+                Log::get().note("%s: cleared.", a.key);
+                continue;
+            }
+            char* end = nullptr;
+            const unsigned long long h = _strtoui64(spec.c_str(), &end, 16);
+            if (end == spec.c_str() || h == 0 || *end != '\0') {
+                Log::get().note("%s: \"%s\" is not one 16-digit hex hash; "
+                                "refused.", a.key, spec.c_str());
+                continue;
+            }
+            *a.hash = h;
+            Log::get().note(
+                "dispatch cb1 ARMED: ch=%016llX dispatches with %s, restored "
+                "after every dispatch. Round fifteen: the mask builder runs "
+                "b1-bound for one eye and b1-empty for the other, and "
+                "whichever equalisation heals the squares names the good "
+                "state. Clear the setting to restore.",
+                static_cast<unsigned long long>(h), a.verb);
+        }
+        if (!s->cb1LendHash && s->cb1Remembered) {
+            s->cb1Remembered->Release();
+            s->cb1Remembered = nullptr;
         }
     }
 
@@ -1430,6 +1566,10 @@ void shutdownExposureFix() {
     if (g_state->peekStripStaging) {
         g_state->peekStripStaging->Release();
         g_state->peekStripStaging = nullptr;
+    }
+    if (g_state->cb1Remembered) {
+        g_state->cb1Remembered->Release();
+        g_state->cb1Remembered = nullptr;
     }
     g_state->hook.uninstall();
     if (g_state->lockReady) {
