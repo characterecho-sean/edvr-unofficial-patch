@@ -1234,6 +1234,17 @@ vr::EVRCompositorError hookedWaitGetPoses(void* self,
             // The snapshot toggle is an in-headset A/B experiment, so it is
             // live too; the flip logs its own receipt.
             resubmitShadowConfigure();
+            // The eye-heal mode is an in-headset A/B between two fix
+            // philosophies (fill the left vs stamp the right); flipping it
+            // mid-session is exactly how it gets judged.
+            {
+                int hm = Config::get().getInt("fix.fss_eye_heal", 0);
+                if (hm < 0 || hm > 2) hm = 0;
+                if (s->fssHealOn != hm) {
+                    s->fssHealOn = hm;
+                    Log::get().note("fss eye heal: mode %d.", hm);
+                }
+            }
         }
         // The liveness pass, same cadence and same reason as the d3d11 half:
         // in-place patches sit on a table other tools can write, and under
