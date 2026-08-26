@@ -570,7 +570,8 @@ void drawCensusCbNoteUpdate(void* resource, const void* data, uint32_t bytes) {
 }
 
 void drawCensusDispatch(ID3D11DeviceContext* ctx, uint32_t x, uint32_t y,
-                        uint32_t z) {
+                        uint32_t z, bool foreignCtx, void* indirectArgs,
+                        uint32_t indirectOff) {
     if (g_framesLeft == 0) return;
     ++g_dispatches;
     ++g_dispThisFrame;
@@ -578,16 +579,19 @@ void drawCensusDispatch(ID3D11DeviceContext* ctx, uint32_t x, uint32_t y,
     if (g_lines >= g_maxLines) return;
     ++g_lines;
 
-    // What this dispatch can WRITE: UAV slots 0-3, from the shadow the
-    // exposure fix's CSSetUnorderedAccessViews hook has always maintained.
-    // UAVs are views, so the kView form applies. The compute shader itself is
-    // named by content hash, same as vh= on a draw line, so a writer found
-    // here can be pinned or skipped by the tools that already exist.
-    char u0b[24], u1b[24], u2b[24], u3b[24];
-    const char* u0 = bindingToken(bindingGet(BindSlot::CsUav0), Kind::kView, u0b, sizeof(u0b));
-    const char* u1 = bindingToken(bindingGet(BindSlot::CsUav1), Kind::kView, u1b, sizeof(u1b));
-    const char* u2 = bindingToken(bindingGet(BindSlot::CsUav2), Kind::kView, u2b, sizeof(u2b));
-    const char* u3 = bindingToken(bindingGet(BindSlot::CsUav3), Kind::kView, u3b, sizeof(u3b));
+    // What this dispatch can WRITE: UAV slots 0-7, read straight off the
+    // context. This used the CsUav0-3 shadow until round sixteen of the
+    // black squares measured a reconstruction chain whose middle was
+    // invisible -- E861's outputs had no recorded reader and B742's inputs
+    // no recorded writer -- and three blind spots explained it together:
+    // dispatches on DEFERRED contexts (which reach these thunks and were
+    // passed through unrecorded), DispatchIndirect (never hooked), and UAV
+    // slots 4-7 (never shadowed). Direct reads close the third and work on
+    // any context, which closes the first; the shadow only ever knew the
+    // immediate one.
+    char ub[8][24];
+    const char* ut[8];
+    for (int i = 0; i < 8; ++i) ut[i] = "-";
 
     // What it READS: CS SRVs 0-7 and CS b0-b1, straight off the context the
     // way a draw line's x= tail is taken.
@@ -602,18 +606,28 @@ void drawCensusDispatch(ID3D11DeviceContext* ctx, uint32_t x, uint32_t y,
     // "nothing bound", the x= tail's spelling exactly.
     char st[232] = "";
     char cbt[64] = "";
+    uint64_t ch = 0;
     if (ctx) {
+        ID3D11UnorderedAccessView* uv[8] = {};
         ID3D11ShaderResourceView* sr[8] = {};
         ID3D11Buffer* cb[2] = {};
+        ID3D11ComputeShader* cs = nullptr;
         bool got = false;
         guardedBudget(g_iaBudget, [&] {
+            ctx->CSGetUnorderedAccessViews(0, 8,
+                reinterpret_cast<ID3D11UnorderedAccessView**>(uv));
             ctx->CSGetShaderResources(0, 8,
                 reinterpret_cast<ID3D11ShaderResourceView**>(sr));
             ctx->CSGetConstantBuffers(0, 2,
                 reinterpret_cast<ID3D11Buffer**>(cb));
+            ctx->CSGetShader(&cs, nullptr, nullptr);
             got = true;
         });
         if (got) {
+            ch = lookupShaderHash(cs);
+            for (int i = 0; i < 8; ++i) {
+                ut[i] = bindingToken(uv[i], Kind::kView, ub[i], sizeof(ub[i]));
+            }
             char sb[8][24];
             const char* tk[8];
             for (int i = 0; i < 8; ++i) {
@@ -627,18 +641,36 @@ void drawCensusDispatch(ID3D11DeviceContext* ctx, uint32_t x, uint32_t y,
                         bindingToken(cb[0], Kind::kResource, c0b, sizeof(c0b)),
                         bindingToken(cb[1], Kind::kResource, c1b, sizeof(c1b)));
         }
+        for (ID3D11UnorderedAccessView* v : uv) {
+            if (v) v->Release();
+        }
         for (ID3D11ShaderResourceView* v : sr) {
             if (v) v->Release();
         }
         for (ID3D11Buffer* b : cb) {
             if (b) b->Release();
         }
+        if (cs) cs->Release();
     }
-    Log::get().note("DCX %u #%u n=%u,%u,%u ch=%016llX u=%s,%s,%s,%s%s%s q=%u",
-                    g_frameOrdinal, g_dispThisFrame - 1, x, y, z,
-                    static_cast<unsigned long long>(
-                        lookupShaderHash(bindingGet(BindSlot::Cs))),
-                    u0, u1, u2, u3, st, cbt, q);
+
+    // The provenance tail: t=f for a deferred/foreign context (the q= is the
+    // moment the call was RECORDED into its command list, not played back),
+    // t=i for DispatchIndirect (group counts live GPU-side; n= is 0,0,0 and
+    // args= names the argument buffer and byte offset), t=fi for both.
+    char tail[64] = "";
+    if (indirectArgs) {
+        char ab[24];
+        _snprintf_s(tail, sizeof(tail), _TRUNCATE, " args=%s+%u t=%si",
+                    bindingToken(indirectArgs, Kind::kResource, ab, sizeof(ab)),
+                    indirectOff, foreignCtx ? "f" : "");
+    } else if (foreignCtx) {
+        _snprintf_s(tail, sizeof(tail), _TRUNCATE, " t=f");
+    }
+    Log::get().note(
+        "DCX %u #%u n=%u,%u,%u ch=%016llX u=%s,%s,%s,%s,%s,%s,%s,%s%s%s%s q=%u",
+        g_frameOrdinal, g_dispThisFrame - 1, x, y, z,
+        static_cast<unsigned long long>(ch), ut[0], ut[1], ut[2], ut[3],
+        ut[4], ut[5], ut[6], ut[7], st, cbt, tail, q);
 }
 
 void drawCensusFrameBoundary(uint32_t frameNo) {

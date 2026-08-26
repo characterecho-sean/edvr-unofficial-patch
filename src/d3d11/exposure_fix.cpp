@@ -32,6 +32,7 @@ namespace {
 // documented rather than guessed, and are still range-checked against the
 // probed vtable before use.
 constexpr size_t kSlotDispatch             = 41;
+constexpr size_t kSlotDispatchIndirect     = 42;
 constexpr size_t kSlotCSSetUAVs            = 68;
 constexpr size_t kSlotCSSetShader          = 69;
 // Drops every binding without naming any of them, which is why the shadows
@@ -71,6 +72,8 @@ constexpr uint8_t kQuietPassesToVouch = 3;
 typedef void(STDMETHODCALLTYPE* PFN_SetShader)(ID3D11DeviceContext*, void*,
                                                ID3D11ClassInstance* const*, UINT);
 typedef void(STDMETHODCALLTYPE* PFN_Dispatch)(ID3D11DeviceContext*, UINT, UINT, UINT);
+typedef void(STDMETHODCALLTYPE* PFN_DispatchIndirect)(ID3D11DeviceContext*,
+                                                      ID3D11Buffer*, UINT);
 typedef void(STDMETHODCALLTYPE* PFN_CSSetUAVs)(ID3D11DeviceContext*, UINT, UINT,
                                                ID3D11UnorderedAccessView* const*,
                                                const UINT*);
@@ -85,6 +88,7 @@ struct State {
     ID3D11DeviceContext* ownerCtx = nullptr;
     PFN_SetShader realCSSetShader = nullptr;
     PFN_Dispatch  realDispatch = nullptr;
+    PFN_DispatchIndirect realDispatchIndirect = nullptr;
     PFN_CSSetUAVs realCSSetUAVs = nullptr;
     PFN_ClearState realClearState = nullptr;
 
@@ -898,10 +902,34 @@ bool isExposureDispatch() {
     return match;
 }
 
+// Record-only: the census names GPU-driven compute (group counts live in
+// the argument buffer, so n= cannot be known CPU-side), and everything else
+// -- skips, syncs, the exposure pass itself -- stays Dispatch-only. Hooked
+// at all because round sixteen of the black squares proved a reconstruction
+// chain ran passes no census line ever showed, and DispatchIndirect was one
+// of the three ways that could be true.
+void STDMETHODCALLTYPE hookedDispatchIndirect(ID3D11DeviceContext* self,
+                                              ID3D11Buffer* args, UINT off) {
+    State* s = g_state;
+    if (drawCensusArmed()) {
+        drawCensusDispatch(self, 0, 0, 0, foreignContext(self), args, off);
+    }
+    if (!foreignContext(self)) s->computeThisFrame = true;
+    s->realDispatchIndirect(self, args, off);
+}
+
 void STDMETHODCALLTYPE hookedDispatch(ID3D11DeviceContext* self, UINT x, UINT y, UINT z) {
     State* s = g_state;
     ++s->thunkHits[kHitDispatch];
     if (foreignContext(self)) {
+        // Recorded, then passed straight through. Deferred contexts reach
+        // this thunk (in-place patching hooks the class), and until round
+        // sixteen of the black squares they were passed through UNRECORDED
+        // -- which is exactly where that hunt's invisible reconstruction
+        // middle could hide. Every read the census makes is off `self`, so
+        // the record is honest for any context; only the fixes and probes
+        // below stay owner-only.
+        if (drawCensusArmed()) drawCensusDispatch(self, x, y, z, true, nullptr, 0);
         s->realDispatch(self, x, y, z);
         return;
     }
@@ -913,7 +941,7 @@ void STDMETHODCALLTYPE hookedDispatch(ID3D11DeviceContext* self, UINT x, UINT y,
     // other census hook strikes. Recording, not classification: this line
     // exists because the FSS body could legally be built by a compute writer
     // and no capture before 2026-08-25 could have seen it.
-    if (drawCensusArmed()) drawCensusDispatch(self, x, y, z);
+    if (drawCensusArmed()) drawCensusDispatch(self, x, y, z, false, nullptr, 0);
 
     // The dispatch-skip probe, after the census record (a census taken
     // while probing must record what the game SUBMITTED -- the draw skips'
@@ -1489,6 +1517,8 @@ void installExposureFix(ID3D11Device* device, HookMode mode) {
                    reinterpret_cast<void**>(&s.realCSSetUAVs));
     s.hook.replace(kSlotDispatch, &hookedDispatch,
                    reinterpret_cast<void**>(&s.realDispatch));
+    s.hook.replace(kSlotDispatchIndirect, &hookedDispatchIndirect,
+                   reinterpret_cast<void**>(&s.realDispatchIndirect));
     s.hook.replace(kSlotClearState, &hookedClearState,
                    reinterpret_cast<void**>(&s.realClearState));
 

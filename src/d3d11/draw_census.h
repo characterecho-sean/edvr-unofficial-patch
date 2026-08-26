@@ -179,8 +179,12 @@ void drawCensusResolve(void* dst, uint32_t dstSub, void* src, uint32_t srcSub,
 // this is only the recording, so a census can finally see the third way a
 // texture changes without a draw. Costs one armed-check per dispatch when no
 // census runs.
+// foreignCtx marks a deferred/foreign context (recorded at build time, not
+// playback); indirectArgs non-null marks DispatchIndirect, with n= unset and
+// the argument buffer named instead.
 void drawCensusDispatch(ID3D11DeviceContext* ctx, uint32_t x, uint32_t y,
-                        uint32_t z);
+                        uint32_t z, bool foreignCtx, void* indirectArgs,
+                        uint32_t indirectOff);
 
 // The constant-buffer watch (2026-08-25, the FSS ring split, round two).
 //
