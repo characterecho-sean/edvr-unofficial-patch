@@ -17,6 +17,7 @@
 #include "binding_shadow.h"
 #include "device_hook.h"  // contextHookModeFor
 #include "draw_census.h"  // drawCensusDispatch: the census records compute
+#include "fss_dump.h"     // the reconstruction bracket, round 30
                           // writers through THIS module's Dispatch hook,
                           // because slot 41 is already ours and a second
                           // patch on it would be a second thing to reclaim
@@ -1091,7 +1092,9 @@ void STDMETHODCALLTYPE hookedDispatch(ID3D11DeviceContext* self, UINT x, UINT y,
     // loading screens do not count -- see the frame counter at the boundary.
     s->computeThisFrame = true;
 
+    if (fssDumpWantsDraws()) fssDumpDispatchPre(self);
     s->realDispatch(self, x, y, z);
+    if (fssDumpWantsDraws()) fssDumpDispatchPost(self);
     if (!isTarget) return;
 
     guardedBudget(g_budget, [&] {

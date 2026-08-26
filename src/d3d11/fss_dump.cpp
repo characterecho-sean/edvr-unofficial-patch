@@ -24,15 +24,25 @@ constexpr uint64_t kCompositeHash = 0x953C8123AD8DC13Bull;
 // panel quads have drawn over it. Holes appearing between c4 and c6 name
 // the LDR interval; holes already at c4 name the tonemap's input.
 constexpr uint64_t kTonemapHash   = 0x2D78DC3FD2C0C543ull;
+// The reconstruction pair (round 30): the mono-submit probe proved the
+// submitted images DIFFER -- occurrence 1 (the left eye) carries the
+// squares, occurrence 2 does not -- so the dump now brackets the last
+// interval: each eye's accumulate input before the dispatch and the
+// packed output after it.
+constexpr uint64_t kAccumHash  = 0xE861F611375E7ECCull;
+constexpr uint64_t kOutputHash = 0xB74273EC13F7CD59ull;
 
 // Checkpoint layout: [checkpoint][eye]. c0/c1 = before/after the ring quad
 // (HDR), c2/c3 = before/after the composite (HDR), c4 = after the tonemap
-// (LDR), c5 = frame end HDR, c6 = frame end LDR.
-constexpr uint32_t kCheckpoints = 7;
+// (LDR), c5 = frame end HDR, c6 = frame end LDR, c7 = the accumulate
+// dispatch's input as read (per eye), c8 = the packed output as written
+// (per eye) -- the submitted texture.
+constexpr uint32_t kCheckpoints = 9;
 constexpr uint32_t kEyes = 2;
 const char* const kTags[kCheckpoints] = {"pre-ring",  "post-ring",
                                          "pre-comp",  "post-comp",
-                                         "post-tone", "end-hdr", "end-ldr"};
+                                         "post-tone", "end-hdr", "end-ldr",
+                                         "recon-in",  "recon-out"};
 
 uint32_t g_dumpFrame = 0;      // N from the key; 0 = off
 uint32_t g_bodyFrames = 0;     // distinct frames with matched draws
@@ -62,6 +72,8 @@ ID3D11Resource* g_ldrTex[kEyes] = {};
 uint8_t g_occRing = 0;
 uint8_t g_occComp = 0;
 uint8_t g_occTone = 0;
+uint8_t g_occAccum = 0;
+uint8_t g_occOut = 0;
 
 // The pending action chosen in OnEyeDraw, taken in Begin/End.
 // kind: 0 = ring quad (c0/c1), 1 = composite (c2/c3), 2 = tonemap (c4 at
@@ -200,6 +212,18 @@ void captureRemembered(ID3D11DeviceContext* ctx, ID3D11Resource* res,
     tex->Release();
 }
 
+// Bytes per texel by DXGI format: the reconstruction surfaces are 64-bit
+// (fmt 10/11, R16G16B16A16); everything else this dump touches is 32-bit.
+uint32_t texelBytes(uint32_t fmt) {
+    return (fmt == 10 || fmt == 11) ? 8u : 4u;
+}
+
+// Capture an arbitrary resource (not the bound RTV) into a checkpoint.
+void captureResource(ID3D11DeviceContext* ctx, ID3D11Resource* res,
+                     uint32_t c, uint32_t e) {
+    if (res) captureRemembered(ctx, res, c, e);
+}
+
 void writeOut(ID3D11DeviceContext* ctx, uint32_t pass) {
     CreateDirectoryA("edvr_logs", nullptr);
     CreateDirectoryA("edvr_logs\\dumps", nullptr);
@@ -222,8 +246,10 @@ void writeOut(ID3D11DeviceContext* ctx, uint32_t pass) {
             fopen_s(&f, path, "wb");
             if (f) {
                 const uint8_t* row = static_cast<const uint8_t*>(m.pData);
+                const size_t bpr =
+                    static_cast<size_t>(s.w) * texelBytes(s.fmt);
                 for (uint32_t y = 0; y < s.h; ++y) {
-                    fwrite(row, 1, static_cast<size_t>(s.w) * 4, f);
+                    fwrite(row, 1, bpr, f);
                     row += m.RowPitch;
                 }
                 fclose(f);
@@ -324,11 +350,66 @@ void fssDumpEnd(ID3D11DeviceContext* ctx) {
     });
 }
 
+// Called around every owner-context Dispatch while a dump is armed: the
+// reconstruction runs as compute, and its input can only be read before
+// the dispatch, its output only after.
+void fssDumpDispatchPre(ID3D11DeviceContext* ctx) {
+    if (!g_dumping || !ctx) return;
+    guardedBudget(g_budget, [&] {
+        ID3D11ComputeShader* cs = nullptr;
+        ctx->CSGetShader(&cs, nullptr, nullptr);
+        const uint64_t h = lookupShaderHash(cs);
+        if (cs) cs->Release();
+        if (h == kAccumHash) {
+            const uint8_t occ = ++g_occAccum;
+            if (occ > kEyes) return;
+            ID3D11ShaderResourceView* srv = nullptr;
+            ctx->CSGetShaderResources(0, 1, &srv);
+            if (srv) {
+                ID3D11Resource* res = nullptr;
+                srv->GetResource(&res);
+                if (res) {
+                    captureResource(ctx, res, 7, occ - 1);
+                    res->Release();
+                }
+                srv->Release();
+            }
+        }
+    });
+}
+
+void fssDumpDispatchPost(ID3D11DeviceContext* ctx) {
+    if (!g_dumping || !ctx) return;
+    guardedBudget(g_budget, [&] {
+        ID3D11ComputeShader* cs = nullptr;
+        ctx->CSGetShader(&cs, nullptr, nullptr);
+        const uint64_t h = lookupShaderHash(cs);
+        if (cs) cs->Release();
+        if (h == kOutputHash) {
+            const uint8_t occ = ++g_occOut;
+            if (occ > kEyes) return;
+            ID3D11UnorderedAccessView* uav = nullptr;
+            ctx->CSGetUnorderedAccessViews(0, 1, &uav);
+            if (uav) {
+                ID3D11Resource* res = nullptr;
+                uav->GetResource(&res);
+                if (res) {
+                    captureResource(ctx, res, 8, occ - 1);
+                    res->Release();
+                }
+                uav->Release();
+            }
+        }
+    });
+}
+
 void fssDumpFrameBoundary(ID3D11DeviceContext* ctx) {
     const bool sawBody = g_occRing != 0 || g_occComp != 0;
     g_occRing = 0;
     g_occComp = 0;
     g_occTone = 0;
+    g_occAccum = 0;
+    g_occOut = 0;
     if (!fssDumpWantsDraws() || !ctx) return;
     guardedBudget(g_budget, [&] {
         if (g_dumping) {

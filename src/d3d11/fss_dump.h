@@ -41,6 +41,12 @@ bool fssDumpOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
 void fssDumpBegin(ID3D11DeviceContext* ctx);
 void fssDumpEnd(ID3D11DeviceContext* ctx);
 
+// Around every owner-context Dispatch while a dump is armed: the
+// reconstruction runs as compute -- input readable only before the
+// dispatch, output only after.
+void fssDumpDispatchPre(ID3D11DeviceContext* ctx);
+void fssDumpDispatchPost(ID3D11DeviceContext* ctx);
+
 // Frame boundary, with the owner context: counts body frames, takes the
 // frame-end checkpoint on the dump frame, then maps and writes everything.
 void fssDumpFrameBoundary(ID3D11DeviceContext* ctx);
