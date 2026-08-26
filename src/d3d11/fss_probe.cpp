@@ -43,6 +43,11 @@ bool       g_depthMode = false;   // "depth": disable the depth test for the
                                   // composite instead of touching a slot --
                                   // the one per-eye input (the depth buffer)
                                   // no slot probe can reach
+bool       g_blendMode = false;   // "blend": draw the composite OPAQUE -- if
+                                  // it normally blends with the eye's
+                                  // existing content, the DESTINATION is a
+                                  // per-eye input wherever the source is
+                                  // dark or translucent
 uint32_t   g_slot = 0;
 ProbeColor g_color = ProbeColor::kMagenta;
 char       g_spec[48] = {};
@@ -52,6 +57,13 @@ ID3D11DepthStencilState* g_noDepth = nullptr;
 ID3D11DepthStencilState* g_savedDepth = nullptr;
 UINT                     g_savedStencilRef = 0;
 bool                     g_depthEngaged = false;
+
+// The opaque state for blend mode, created once.
+ID3D11BlendState* g_noBlend = nullptr;
+ID3D11BlendState* g_savedBlend = nullptr;
+FLOAT             g_savedBlendFactor[4] = {};
+UINT              g_savedSampleMask = 0;
+bool              g_blendEngaged = false;
 
 // The substitute, rebuilt when the displaced texture's size or the asked
 // colour changes. Full-size, not 1x1: a Load() with texel coordinates
@@ -134,7 +146,19 @@ void fssProbeConfigure(Config& cfg) {
     const uint64_t had = g_applied;
     g_armed = false;
     g_depthMode = false;
+    g_blendMode = false;
     g_engagedNoted = false;
+    if (spec == "blend") {
+        g_armed = true;
+        g_blendMode = true;
+        Log::get().note(
+            "fss probe ARMED: the body composite draws OPAQUE, no blending. "
+            "If it normally blends with the eye's existing content, the "
+            "DESTINATION is a per-eye input wherever the composite's own "
+            "output is dark -- and one-eye squares that die here were the "
+            "backdrop showing through. Clear the setting to restore.");
+        return;
+    }
     if (spec == "depth") {
         g_armed = true;
         g_depthMode = true;
@@ -203,7 +227,36 @@ bool fssProbeOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
 void fssProbeBegin(ID3D11DeviceContext* ctx) {
     g_engaged = false;
     g_depthEngaged = false;
+    g_blendEngaged = false;
     if (!ctx || !g_armed) return;
+    if (g_blendMode) {
+        guardedBudget(g_budget, [&] {
+            if (!g_noBlend) {
+                ID3D11Device* dev = nullptr;
+                ctx->GetDevice(&dev);
+                if (!dev) return;
+                D3D11_BLEND_DESC bd{};
+                bd.RenderTarget[0].BlendEnable = FALSE;
+                bd.RenderTarget[0].RenderTargetWriteMask =
+                    D3D11_COLOR_WRITE_ENABLE_ALL;
+                dev->CreateBlendState(&bd, &g_noBlend);
+                dev->Release();
+                if (!g_noBlend) return;
+            }
+            ctx->OMGetBlendState(&g_savedBlend, g_savedBlendFactor,
+                                 &g_savedSampleMask);
+            const FLOAT f[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+            ctx->OMSetBlendState(g_noBlend, f, 0xFFFFFFFFu);
+            g_blendEngaged = true;
+            ++g_applied;
+            if (!g_engagedNoted) {
+                g_engagedNoted = true;
+                Log::get().note("fss probe: engaged -- the composite draws "
+                                "opaque, restored after every draw.");
+            }
+        });
+        return;
+    }
     if (g_depthMode) {
         guardedBudget(g_budget, [&] {
             if (!g_noDepth) {
@@ -268,6 +321,15 @@ void fssProbeBegin(ID3D11DeviceContext* ctx) {
 }
 
 void fssProbeEnd(ID3D11DeviceContext* ctx) {
+    if (g_blendEngaged && ctx) {
+        g_blendEngaged = false;
+        ctx->OMSetBlendState(g_savedBlend, g_savedBlendFactor,
+                             g_savedSampleMask);
+        if (g_savedBlend) {
+            g_savedBlend->Release();
+            g_savedBlend = nullptr;
+        }
+    }
     if (g_depthEngaged && ctx) {
         g_depthEngaged = false;
         ctx->OMSetDepthStencilState(g_savedDepth, g_savedStencilRef);
@@ -297,6 +359,10 @@ void fssProbeShutdown() {
     if (g_noDepth) {
         g_noDepth->Release();
         g_noDepth = nullptr;
+    }
+    if (g_noBlend) {
+        g_noBlend->Release();
+        g_noBlend = nullptr;
     }
 }
 
