@@ -1168,7 +1168,8 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     // moment the zoom's camera jump lands, and the body-layer gate opens
     // ten frames too late. Cheap gate first, hash second, config off =
     // free.
-    if ((s->fssHealOn || s->censusFssJump) && kind == 'X' && count == 6) {
+    if ((s->fssHealOn || s->censusFssJump || s->fssTheaterOn) &&
+        kind == 'X' && count == 6) {
         guardedBudget(g_panelCbBudget, [&] {
             ID3D11VertexShader* vs = nullptr;
             self->VSGetShader(&vs, nullptr, nullptr);

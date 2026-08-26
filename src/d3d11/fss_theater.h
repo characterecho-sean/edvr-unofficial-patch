@@ -47,7 +47,11 @@ extern "C" {
 // rode the head).
 // dist: panel distance in meters.
 // Returns the theater-rendered texture for this eye, or null = stock.
+// scale: fraction of the content's native angular width (the on-foot
+// screen's idea of size). curve: 0 flat, up to 0.9 wrapped on a cylinder
+// whose arc centre sits at the screen distance.
 __declspec(dllexport) void* edvrFssTheater(void* contentTex, int eye,
                                            float outerMag, float innerMag,
-                                           const float* xf, float dist);
+                                           const float* xf, float dist,
+                                           float scale, float curve);
 }

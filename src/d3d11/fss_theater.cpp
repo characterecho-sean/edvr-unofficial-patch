@@ -29,7 +29,8 @@ cbuffer P : register(b0) {
     float4 m0;     // delta rotation rows (current-head -> frozen-head);
     float4 m1;     // the rows' .w = this eye's ray origin in frozen-head
     float4 m2;     // space, translation and eye offset folded in
-    float4 misc;   // x = panel center x (m), y = panel half w, z = half h
+    float4 misc;   // x = screen center x (m), y = half width along the
+                   // surface, z = half height, w = curve (0 flat)
 }
 [numthreads(16, 16, 1)]
 void main(uint3 id : SV_DispatchThreadID) {
@@ -44,18 +45,40 @@ void main(uint3 id : SV_DispatchThreadID) {
     float ty = lerp(tans.z, -tans.z, v);
     float3 dv = float3(tx, ty, -1.0);
     float3 df = float3(dot(m0.xyz, dv), dot(m1.xyz, dv), dot(m2.xyz, dv));
+    float3 org = float3(m0.w, m1.w, m2.w);
     float4 outc = float4(0, 0, 0, 1);
-    if (df.z < -1e-4) {
-        float3 org = float3(m0.w, m1.w, m2.w);
+    float pu = -1.0, pv = -1.0;
+    if (misc.w > 0.005) {
+        // Curved screen: a vertical cylinder of radius dist/curve whose
+        // arc centre sits at the screen distance; u runs along the arc so
+        // the content keeps its width. The viewer is always inside the
+        // cylinder (zc < R), so the ray's forward intersection is the +
+        // root of the quadratic.
+        float R = tans.w / misc.w;
+        float zc = R - tans.w;
+        float a = df.x * df.x + df.z * df.z;
+        float b = 2.0 * (org.x * df.x + (org.z - zc) * df.z);
+        float c = org.x * org.x + (org.z - zc) * (org.z - zc) - R * R;
+        float disc = b * b - 4.0 * a * c;
+        if (disc > 0 && a > 1e-8) {
+            float t = (-b + sqrt(disc)) / (2.0 * a);
+            if (t > 0) {
+                float3 hit = org + t * df;
+                float th = atan2(hit.x, zc - hit.z);
+                pu = (th * R - misc.x + misc.y) / (2.0 * misc.y);
+                pv = 1.0 - (hit.y + misc.z) / (2.0 * misc.z);
+            }
+        }
+    } else if (df.z < -1e-4) {
         float t = (-tans.w - org.z) / df.z;
         if (t > 0) {
             float3 hit = org + t * df;
-            float pu = (hit.x - misc.x + misc.y) / (2.0 * misc.y);
-            float pv = 1.0 - (hit.y + misc.z) / (2.0 * misc.z);
-            if (pu >= 0 && pu <= 1 && pv >= 0 && pv <= 1) {
-                outc = float4(C.SampleLevel(S0, float2(pu, pv), 0).rgb, 1);
-            }
+            pu = (hit.x - misc.x + misc.y) / (2.0 * misc.y);
+            pv = 1.0 - (hit.y + misc.z) / (2.0 * misc.z);
         }
+    }
+    if (pu >= 0 && pu <= 1 && pv >= 0 && pv <= 1) {
+        outc = float4(C.SampleLevel(S0, float2(pu, pv), 0).rgb, 1);
     }
     O[id.xy] = outc;
 }
@@ -96,10 +119,8 @@ void failOnce(const char* what) {
     }
 }
 
-constexpr float kTheaterHalfIpd = 0.0315f;
-
 void* theaterInner(void* contentTex, int eye, float outerMag, float innerMag,
-                   const float* xf, float dist) {
+                   const float* xf, float dist, float scale, float curve) {
     ID3D11Texture2D* ct = nullptr;
     static_cast<IUnknown*>(contentTex)
         ->QueryInterface(__uuidof(ID3D11Texture2D),
@@ -227,22 +248,20 @@ void* theaterInner(void* contentTex, int eye, float outerMag, float innerMag,
         const float vt =
             (outerMag + innerMag) * 0.5f *
             (static_cast<float>(cd.Height) / static_cast<float>(cd.Width));
-        const float halfW = dist * (outerMag + innerMag) * 0.5f;
-        const float halfH = dist * vt;
-        // The panel sits exactly on the captured (right) eye's own
-        // asymmetric frustum -- centre offset by the frustum asymmetry
-        // plus that eye's lateral offset -- so at the freeze moment the
-        // right eye sees its own image pixel-aligned and the swap-in is
-        // invisible; the left eye sees the same panel from its own
-        // origin, which IS the stereo of a screen at this distance.
-        const float panelX =
-            kTheaterHalfIpd + dist * (outerMag - innerMag) * 0.5f;
+        // The screen's half-extents: the content's native angular span
+        // at the chosen distance, times the user's scale. Centred on the
+        // gaze the scanner was entered with (the frozen pose's forward),
+        // like the on-foot screen -- there is no game image to seam-match
+        // against any more, the whole mode is ours.
+        const float halfW = dist * (outerMag + innerMag) * 0.5f * scale;
+        const float halfH = halfW * (static_cast<float>(cd.Height) /
+                                     static_cast<float>(cd.Width));
         float cbData[20] = {
             lt, rt, vt, dist,
             xf[0], xf[1], xf[2], xf[9],
             xf[3], xf[4], xf[5], xf[10],
             xf[6], xf[7], xf[8], xf[11],
-            panelX, halfW, halfH, 0.0f,
+            0.0f, halfW, halfH, curve,
         };
         D3D11_MAPPED_SUBRESOURCE m{};
         if (SUCCEEDED(ctx->Map(g_cb, 0, D3D11_MAP_WRITE_DISCARD, 0, &m)) &&
@@ -294,10 +313,12 @@ void* theaterInner(void* contentTex, int eye, float outerMag, float innerMag,
         if (!g_engagedNoted) {
             g_engagedNoted = true;
             Log::get().note(
-                "fss theater: engaged -- the zoomed scanner is a single "
-                "rendering shown to both eyes as a panel at %.1f m. One "
-                "render, two displays: no per-eye artifact can exist.",
-                static_cast<double>(dist));
+                "fss theater: engaged -- the scanner is a single rendering "
+                "shown to both eyes as a screen at %.1f m (scale %.2f, "
+                "curve %.2f). One render, two displays: no per-eye "
+                "artifact can exist.",
+                static_cast<double>(dist), static_cast<double>(scale),
+                static_cast<double>(curve));
         }
         result = g_out[eye];
     }
@@ -331,12 +352,14 @@ extern "C" __declspec(dllexport) void* edvrFssTheater(void* contentTex,
                                                       float outerMag,
                                                       float innerMag,
                                                       const float* xf,
-                                                      float dist) {
+                                                      float dist,
+                                                      float scale,
+                                                      float curve) {
     if (!contentTex || !xf || eye < 0 || eye > 1) return nullptr;
     void* out = nullptr;
     edvr::guardedBudget(edvr::g_budget, [&] {
         out = edvr::theaterInner(contentTex, eye, outerMag, innerMag, xf,
-                                 dist);
+                                 dist, scale, curve);
     });
     return out;
 }

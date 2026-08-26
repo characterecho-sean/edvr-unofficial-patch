@@ -75,7 +75,7 @@ typedef vr::EVRCompositorError(*PFN_Submit)(void* self, vr::EVREye eye,
 
 typedef void* (*PFN_EdvrFssHeal)(void*, void*, float, float, int);
 typedef void* (*PFN_EdvrFssTheater)(void*, int, float, float, const float*,
-                                    float);
+                                    float, float, float);
 
 constexpr float kTheaterHalfIpd = 0.0315f;
 
@@ -209,8 +209,10 @@ struct State {
     // staleness tracker, the frozen pose fed to the game while the zoom
     // is up, and the lazily-resolved renderer export.
     float theaterDist = 0.0f;
-    LONG theaterBodyStamp = 0;
-    uint32_t theaterBodySeen = 0;
+    float theaterScale = 1.0f;
+    float theaterCurve = 0.0f;
+    LONG theaterStamp = 0;
+    uint32_t theaterSeen = 0;
     bool theaterFrozen = false;
     vr::HmdMatrix34_t theaterFreeze = {};
     vr::HmdMatrix34_t theaterRealPose = {};
@@ -736,17 +738,21 @@ vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
     // eyes submit EDVR's own rendering of the right eye's image as a
     // panel. One rendering, two displays -- no per-eye artifact can
     // exist, which supersedes the heal for exactly these frames.
-    // Same-frame engage: the body stamp is bumped at the body layer's
-    // draws, which land before the eye submits in the frame -- so the
-    // FIRST zoomed frame can already go out as the panel. Waiting for the
-    // next pose boundary showed a flash of the stock arrival first
-    // (16:58:37 flight: the squares, then the swap).
+    // Same-frame engage on the CHROME stamp -- the scanner's screen
+    // composite, drawn from the scanner's first frame to its last. The
+    // theater covers the WHOLE mode (the field's 2026-08-26 direction):
+    // gating on the final zoom's body layer left the ~10 arrival frames
+    // stock, and the squares live exactly there. Inside the mode before
+    // any zoom exists, there is no seam for the eye to catch. The stamp
+    // is bumped at the chrome draws, which land before the frame's own
+    // eye submits, so the scanner's first frame already goes out as the
+    // screen.
     if (s->theaterDist > 0.0f && !s->theaterFrozen && s->theaterRealValid &&
         texture && texture->eType == vr::TextureType_DirectX) {
-        const LONG bs = fssBodyStampValue();
-        if (bs != s->theaterBodyStamp) {
-            s->theaterBodyStamp = bs;
-            s->theaterBodySeen = s->pace_boundaryNo;
+        const LONG bs = fssChromeStampValue();
+        if (bs != s->theaterStamp) {
+            s->theaterStamp = bs;
+            s->theaterSeen = s->pace_boundaryNo;
             s->theaterFreeze = s->theaterRealPose;
             s->theaterFrozen = true;
         }
@@ -792,7 +798,7 @@ vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
                          xf);
             void* drawn = s->theaterFn(
                 content, eye == vr::Eye_Left ? 0 : 1, outer, inner,
-                xf, s->theaterDist);
+                xf, s->theaterDist, s->theaterScale, s->theaterCurve);
             if (drawn) {
                 vr::Texture_t sub = *texture;
                 sub.handle = drawn;
@@ -1323,14 +1329,14 @@ vr::EVRCompositorError hookedWaitGetPoses(void* self,
     // against the real head for free. Velocities zeroed so nothing
     // extrapolates.
     {
-        const LONG bs = fssBodyStampValue();
-        if (bs != s->theaterBodyStamp) {
-            s->theaterBodyStamp = bs;
-            s->theaterBodySeen = s->pace_boundaryNo;
+        const LONG bs = fssChromeStampValue();
+        if (bs != s->theaterStamp) {
+            s->theaterStamp = bs;
+            s->theaterSeen = s->pace_boundaryNo;
         }
         const bool bodyActive =
-            s->theaterDist > 0.0f && s->theaterBodySeen != 0 &&
-            s->pace_boundaryNo - s->theaterBodySeen <= 5;
+            s->theaterDist > 0.0f && s->theaterSeen != 0 &&
+            s->pace_boundaryNo - s->theaterSeen <= 5;
         if (renderCount > 0 && renderPoses) {
             // The REAL head pose, saved before any freeze overwrite: the
             // submit-side world lock is the difference between this and
@@ -1404,6 +1410,22 @@ vr::EVRCompositorError hookedWaitGetPoses(void* self,
                     Log::get().note("fss theater: distance %.1f m%s.",
                                     static_cast<double>(td),
                                     td > 0.0f ? "" : " (off)");
+                }
+                float ts =
+                    Config::get().getFloat("fix.fss_theater_scale", 1.0f);
+                if (ts < 0.2f || ts > 1.5f) ts = 1.0f;
+                if (ts != s->theaterScale) {
+                    s->theaterScale = ts;
+                    Log::get().note("fss theater: scale %.2f.",
+                                    static_cast<double>(ts));
+                }
+                float tc =
+                    Config::get().getFloat("fix.fss_theater_curve", 0.0f);
+                if (tc < 0.0f || tc > 0.9f) tc = 0.0f;
+                if (tc != s->theaterCurve) {
+                    s->theaterCurve = tc;
+                    Log::get().note("fss theater: curve %.2f.",
+                                    static_cast<double>(tc));
                 }
             }
         }
@@ -1514,11 +1536,19 @@ void* interceptInterface(void* iface, const char* interfaceVersion) {
         float td = cfg.getFloat("fix.fss_theater", 0.0f);
         if (td < 0.0f || td > 10.0f) td = 0.0f;
         s.theaterDist = td;
+        float ts = cfg.getFloat("fix.fss_theater_scale", 1.0f);
+        if (ts < 0.2f || ts > 1.5f) ts = 1.0f;
+        s.theaterScale = ts;
+        float tc = cfg.getFloat("fix.fss_theater_curve", 0.0f);
+        if (tc < 0.0f || tc > 0.9f) tc = 0.0f;
+        s.theaterCurve = tc;
         if (td > 0.0f) {
             Log::get().note(
-                "fss theater: armed at %.1f m -- the final zoom becomes one "
-                "rendering shown to both eyes once the body stamp arrives.",
-                static_cast<double>(td));
+                "fss theater: armed -- the WHOLE scanner becomes one "
+                "rendering shown to both eyes as a screen at %.1f m, scale "
+                "%.2f, curve %.2f, from the moment its chrome is up.",
+                static_cast<double>(td), static_cast<double>(ts),
+                static_cast<double>(tc));
         }
     }
     const int submitOverride = cfg.getInt("advanced.submit_index", -1);
