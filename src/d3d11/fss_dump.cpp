@@ -653,6 +653,33 @@ void fssDumpDispatchPost(ID3D11DeviceContext* ctx) {
                 tex->Release();
             }
         }
+        // Pipeline reconnaissance: during scanner frames, name the first
+        // several dispatch outputs outright -- the reconstruction stopped
+        // appearing between two same-day sessions, and what runs INSTEAD
+        // is the question.
+        if (seriesLive && g_occComp != 0) {
+            static int s_seen = 0;
+            if (s_seen < 8) {
+                ID3D11Texture2D* dtex = nullptr;
+                res->QueryInterface(__uuidof(ID3D11Texture2D),
+                                    reinterpret_cast<void**>(&dtex));
+                if (dtex) {
+                    D3D11_TEXTURE2D_DESC dd{};
+                    dtex->GetDesc(&dd);
+                    ID3D11ComputeShader* dcs = nullptr;
+                    ctx->CSGetShader(&dcs, nullptr, nullptr);
+                    const uint64_t dh = lookupShaderHash(dcs);
+                    if (dcs) dcs->Release();
+                    ++s_seen;
+                    Log::get().note(
+                        "fss series: scanner dispatch %d writes %ux%u "
+                        "fmt=%u ch=%016llX", s_seen, dd.Width, dd.Height,
+                        static_cast<unsigned>(dd.Format),
+                        static_cast<unsigned long long>(dh));
+                    dtex->Release();
+                }
+            }
+        }
         if (isOutput) {
             static bool s_matchNoted = false;
             if (!s_matchNoted && seriesLive) {
