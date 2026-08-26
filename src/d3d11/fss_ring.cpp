@@ -157,6 +157,172 @@ PsOut main(PsIn i) {
 }
 )HLSL";
 
+// The G-buffer hold, clean's fourth half (round 28). The two-pass blink
+// dump measured the surviving squares as OSCILLATION: the offscreen ring
+// G-buffer renders a budgeted tile subset per frame over a cleared
+// target, so the tiles not in this frame's budget sample as zero --
+// normal 0, light 0, a black square -- at a different subset each frame.
+// No shader patch can paint data that is not bound. This pass gives the
+// quad a HELD copy instead: each frame a small compute kernel keeps the
+// current texel where it is valid and last frame's where it collapsed,
+// ping-ponged per eye, and the quad (slot 0) and mesh (slot 1) sample
+// the held copy. Compute-stage injection touches no graphics state.
+constexpr char kHoldCsHlsl[] = R"HLSL(
+Texture2D<float4> cur  : register(t0);
+Texture2D<float4> prev : register(t1);
+RWTexture2D<float4> outt : register(u0);
+[numthreads(16, 16, 1)]
+void main(uint3 id : SV_DispatchThreadID) {
+    uint w, h;
+    cur.GetDimensions(w, h);
+    if (id.x >= w || id.y >= h) return;
+    float4 c = cur[id.xy];
+    float4 p = prev[id.xy];
+    bool valid = dot(abs(c.xyz), 1.0.xxx) > 0.02;
+    outt[id.xy] = valid ? c : p;
+}
+)HLSL";
+
+ID3D11ComputeShader* g_holdCs = nullptr;
+bool                 g_holdTried = false;
+ID3D11Texture2D*          g_holdTex[2][2] = {};   // [eye][pingpong]
+ID3D11ShaderResourceView* g_holdSrv[2][2] = {};
+ID3D11UnorderedAccessView* g_holdUav[2][2] = {};
+uint32_t g_holdW = 0, g_holdH = 0;
+uint8_t  g_holdPhase[2] = {};
+bool     g_holdFailedNoted = false;
+uint32_t g_pendingEyeIdx = 0;
+ID3D11ShaderResourceView* g_displacedHold = nullptr;
+int      g_holdSlot = -1;
+
+void releaseHold() {
+    for (int e = 0; e < 2; ++e) {
+        for (int i = 0; i < 2; ++i) {
+            if (g_holdUav[e][i]) { g_holdUav[e][i]->Release(); g_holdUav[e][i] = nullptr; }
+            if (g_holdSrv[e][i]) { g_holdSrv[e][i]->Release(); g_holdSrv[e][i] = nullptr; }
+            if (g_holdTex[e][i]) { g_holdTex[e][i]->Release(); g_holdTex[e][i] = nullptr; }
+        }
+    }
+    g_holdW = 0;
+    g_holdH = 0;
+}
+
+// Run the hold kernel over the texture behind `srv`, returning the held
+// SRV to bind in its place -- or null, meaning bind stock.
+ID3D11ShaderResourceView* holdAdvance(ID3D11DeviceContext* ctx,
+                                      ID3D11ShaderResourceView* srv,
+                                      uint32_t eye) {
+    if (!srv || eye > 1) return nullptr;
+    ID3D11Resource* res = nullptr;
+    srv->GetResource(&res);
+    if (!res) return nullptr;
+    ID3D11Texture2D* tex = nullptr;
+    res->QueryInterface(__uuidof(ID3D11Texture2D),
+                        reinterpret_cast<void**>(&tex));
+    res->Release();
+    if (!tex) return nullptr;
+    D3D11_TEXTURE2D_DESC td{};
+    tex->GetDesc(&td);
+    tex->Release();
+
+    if (!g_holdTex[0][0] || g_holdW != td.Width || g_holdH != td.Height) {
+        releaseHold();
+        ID3D11Device* dev = nullptr;
+        ctx->GetDevice(&dev);
+        if (!dev) return nullptr;
+        UINT support = 0;
+        dev->CheckFormatSupport(DXGI_FORMAT_R10G10B10A2_UNORM, &support);
+        if (!(support & D3D11_FORMAT_SUPPORT_TYPED_UNORDERED_ACCESS_VIEW)) {
+            if (!g_holdFailedNoted) {
+                g_holdFailedNoted = true;
+                Log::get().note("fss ring: this GPU has no typed UAV store "
+                                "for R10G10B10A2; the hold stands down.");
+            }
+            dev->Release();
+            return nullptr;
+        }
+        bool ok = true;
+        for (int e = 0; e < 2 && ok; ++e) {
+            for (int i = 0; i < 2 && ok; ++i) {
+                D3D11_TEXTURE2D_DESC hd{};
+                hd.Width = td.Width;
+                hd.Height = td.Height;
+                hd.MipLevels = 1;
+                hd.ArraySize = 1;
+                hd.Format = DXGI_FORMAT_R10G10B10A2_UNORM;
+                hd.SampleDesc.Count = 1;
+                hd.Usage = D3D11_USAGE_DEFAULT;
+                hd.BindFlags = D3D11_BIND_SHADER_RESOURCE |
+                               D3D11_BIND_UNORDERED_ACCESS;
+                ok = SUCCEEDED(dev->CreateTexture2D(&hd, nullptr,
+                                                    &g_holdTex[e][i])) &&
+                     SUCCEEDED(dev->CreateShaderResourceView(
+                         g_holdTex[e][i], nullptr, &g_holdSrv[e][i])) &&
+                     SUCCEEDED(dev->CreateUnorderedAccessView(
+                         g_holdTex[e][i], nullptr, &g_holdUav[e][i]));
+            }
+        }
+        dev->Release();
+        if (!ok) {
+            releaseHold();
+            if (!g_holdFailedNoted) {
+                g_holdFailedNoted = true;
+                Log::get().note("fss ring: hold textures failed; the hold "
+                                "stands down.");
+            }
+            return nullptr;
+        }
+        g_holdW = td.Width;
+        g_holdH = td.Height;
+    }
+
+    if (!g_holdCs && !g_holdTried) {
+        g_holdTried = true;
+        g_holdCs = shaderSwapCompileCs(ctx, kHoldCsHlsl,
+                                       sizeof(kHoldCsHlsl) - 1, "main",
+                                       "fss_ring_hold_cs", nullptr,
+                                       "fss ring hold");
+    }
+    if (!g_holdCs) return nullptr;
+
+    const uint8_t cur = g_holdPhase[eye];
+    const uint8_t nxt = cur ^ 1;
+
+    // Save the CS stage we touch, run the kernel, restore. Compute state
+    // is disjoint from every graphics stage, which is what makes an
+    // injected pass here safe where a draw would not be.
+    ID3D11ComputeShader* savedCs = nullptr;
+    ID3D11ShaderResourceView* savedSrv[2] = {};
+    ID3D11UnorderedAccessView* savedUav = nullptr;
+    ctx->CSGetShader(&savedCs, nullptr, nullptr);
+    ctx->CSGetShaderResources(0, 2, savedSrv);
+    ctx->CSGetUnorderedAccessViews(0, 1, &savedUav);
+
+    ID3D11ShaderResourceView* ins[2] = {srv, g_holdSrv[eye][cur]};
+    ID3D11UnorderedAccessView* out = g_holdUav[eye][nxt];
+    UINT keep = 0;
+    ctx->CSSetShader(g_holdCs, nullptr, 0);
+    ctx->CSSetShaderResources(0, 2, ins);
+    ctx->CSSetUnorderedAccessViews(0, 1, &out, &keep);
+    ctx->Dispatch((g_holdW + 15) / 16, (g_holdH + 15) / 16, 1);
+
+    ID3D11ShaderResourceView* nullSrv[2] = {};
+    ID3D11UnorderedAccessView* nullUav = nullptr;
+    ctx->CSSetShaderResources(0, 2, nullSrv);
+    ctx->CSSetUnorderedAccessViews(0, 1, &nullUav, &keep);
+    ctx->CSSetShader(savedCs, nullptr, 0);
+    ctx->CSSetShaderResources(0, 2, savedSrv);
+    ctx->CSSetUnorderedAccessViews(0, 1, &savedUav, &keep);
+    if (savedCs) savedCs->Release();
+    for (ID3D11ShaderResourceView* v : savedSrv) {
+        if (v) v->Release();
+    }
+    if (savedUav) savedUav->Release();
+
+    g_holdPhase[eye] = nxt;
+    return g_holdSrv[eye][nxt];
+}
+
 ID3D11PixelShader* g_cleanPs = nullptr;
 bool               g_cleanTried = false;
 ID3D11PixelShader* g_savedPs = nullptr;
@@ -354,6 +520,7 @@ bool fssRingOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
             if (g_mode == 6 ? f > 1 : f != 0) return false;
             g_pendingFam = f;
             g_pendingJ = j;
+            g_pendingEyeIdx = eye;
             return true;
         }
         const uint8_t lender = (g_mode == 1) ? 1 : 0;
@@ -488,6 +655,30 @@ void fssRingBegin(ID3D11DeviceContext* ctx) {
                     }
                 }
                 if (gameCb) gameCb->Release();
+            }
+
+            // The G-buffer hold: advance at the quad (the eye's first ring
+            // draw), reuse at the mesh. Slot 0 carries the G-buffer on the
+            // quad, slot 1 on the mesh.
+            g_holdSlot = -1;
+            g_displacedHold = nullptr;
+            {
+                const int slot = g_pendingFam == 0 ? 0 : 1;
+                ID3D11ShaderResourceView* curSrv = nullptr;
+                ctx->PSGetShaderResources(slot, 1, &curSrv);
+                ID3D11ShaderResourceView* held =
+                    g_pendingFam == 0
+                        ? holdAdvance(ctx, curSrv, g_pendingEyeIdx)
+                        : (g_holdW ? g_holdSrv[g_pendingEyeIdx]
+                                              [g_holdPhase[g_pendingEyeIdx]]
+                                   : nullptr);
+                if (held) {
+                    g_displacedHold = curSrv;   // keep the Get's ref
+                    curSrv = nullptr;
+                    ctx->PSSetShaderResources(slot, 1, &held);
+                    g_holdSlot = slot;
+                }
+                if (curSrv) curSrv->Release();
             }
 
             // The cleaned shader, for the quad alone (bit-4 lives there).
@@ -669,7 +860,16 @@ void fssRingBegin(ID3D11DeviceContext* ctx) {
 }
 
 void fssRingEnd(ID3D11DeviceContext* ctx) {
-    if ((g_psEngaged || g_cbEngaged) && ctx && g_mode == 6) {
+    if ((g_psEngaged || g_cbEngaged || g_holdSlot >= 0) && ctx &&
+        g_mode == 6) {
+        if (g_holdSlot >= 0) {
+            ctx->PSSetShaderResources(g_holdSlot, 1, &g_displacedHold);
+            if (g_displacedHold) {
+                g_displacedHold->Release();
+                g_displacedHold = nullptr;
+            }
+            g_holdSlot = -1;
+        }
         if (g_psEngaged) {
             g_psEngaged = false;
             ctx->PSSetShader(g_savedPs, nullptr, 0);
@@ -762,6 +962,11 @@ void fssRingShutdown() {
     if (g_patchedCb) {
         g_patchedCb->Release();
         g_patchedCb = nullptr;
+    }
+    releaseHold();
+    if (g_holdCs) {
+        g_holdCs->Release();
+        g_holdCs = nullptr;
     }
 }
 

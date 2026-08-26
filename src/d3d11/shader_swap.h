@@ -26,6 +26,7 @@
 struct ID3D11DeviceContext;
 struct ID3D11VertexShader;
 struct ID3D11PixelShader;
+struct ID3D11ComputeShader;
 
 namespace edvr {
 
@@ -53,6 +54,13 @@ ID3D11VertexShader* shaderSwapCompileVs(ID3D11DeviceContext* ctx,
 
 // The pixel form: ps_5_0, CreatePixelShader, the same contract -- null
 // means draw stock, every failure named in the log.
+// The compute form: cs_5_0, CreateComputeShader, same contract.
+ID3D11ComputeShader* shaderSwapCompileCs(ID3D11DeviceContext* ctx,
+                                         const char* hlsl, size_t hlslLen,
+                                         const char* entry, const char* name,
+                                         const SwapMacro* macros,
+                                         const char* who);
+
 ID3D11PixelShader* shaderSwapCompilePs(ID3D11DeviceContext* ctx,
                                        const char* hlsl, size_t hlslLen,
                                        const char* entry, const char* name,
