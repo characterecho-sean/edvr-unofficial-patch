@@ -292,6 +292,7 @@ struct State {
     // by the glitch-frame side at its jump verdict.
     uint32_t fssChromeFrame = 0;
     int      fssHealOn = 0;
+    int      censusFssJump = 0;
     bool sawClearState = false;
     bool sawExecuteCommandList = false;
 
@@ -1164,7 +1165,7 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     // moment the zoom's camera jump lands, and the body-layer gate opens
     // ten frames too late. Cheap gate first, hash second, config off =
     // free.
-    if (s->fssHealOn && kind == 'X' && count == 6) {
+    if ((s->fssHealOn || s->censusFssJump) && kind == 'X' && count == 6) {
         guardedBudget(g_panelCbBudget, [&] {
             ID3D11VertexShader* vs = nullptr;
             self->VSGetShader(&vs, nullptr, nullptr);
@@ -2762,6 +2763,7 @@ void vScreenRefreshConfig() {
     fssRingConfigure(cfg);
     fssDumpConfigure(cfg);
     {
+        s->censusFssJump = cfg.getInt("advanced.census_fss_jump", 0) ? 1 : 0;
         int n = cfg.getInt("fix.fss_eye_heal", 0) ? 1 : 0;
         if (s->fssHealOn != n) {
             s->fssHealOn = n;
@@ -2851,6 +2853,16 @@ bool vScreenReclaimHooks() {
 void vScreenFrameBoundary() {
     State* s = g_state;
     if (!s) return;
+
+    // The ARRIVAL census (advanced.census_fss_jump): a world-camera jump
+    // while the scanner's chrome is up is a zoom's first frame, and the
+    // window where the left eye's reveal-gated blacks live -- the frames
+    // every body-target-triggered census starts too late to see. One
+    // census per latch, the standard auto-arm machinery.
+    if (s->censusFssJump && takeWorldJump() &&
+        s->fssChromeFrame != 0 && s->frameNo - s->fssChromeFrame <= 5) {
+        drawCensusAutoRequest();
+    }
 
     // Before this frame's counters are read or reset: a pending census starts
     // here, a running one advances, a spent one writes its tables.
@@ -3537,6 +3549,8 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     fssRingConfigure(cfg);
     fssDumpConfigure(cfg);
     {
+        g_state->censusFssJump =
+            cfg.getInt("advanced.census_fss_jump", 0) ? 1 : 0;
         int n = cfg.getInt("fix.fss_eye_heal", 0) ? 1 : 0;
         if (g_state->fssHealOn != n) {
             g_state->fssHealOn = n;

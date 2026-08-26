@@ -68,6 +68,13 @@ void decFssMonoFrames();
 void bumpFssChromeStamp();
 long fssChromeStampValue();
 
+// A camera-jump latch WITHIN d3d11.dll (plain process state, not the
+// mapping): the glitch detector notes every world-camera jump; the
+// arrival census takes the latch at the frame boundary. Lives here so
+// the standalone glitch test, which links this file, resolves it.
+void noteWorldJump();
+bool takeWorldJump();
+
 // Announced by openvr_api.dll once its hook is validated, and read by d3d11.dll.
 //
 // The two halves install separately and the openvr one is optional, so d3d11 can

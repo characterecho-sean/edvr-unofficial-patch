@@ -193,6 +193,14 @@ Shared* map() {
 
 }  // namespace
 
+namespace {
+volatile LONG g_worldJump = 0;
+}  // namespace
+
+void noteWorldJump() { InterlockedExchange(&g_worldJump, 1); }
+
+bool takeWorldJump() { return InterlockedExchange(&g_worldJump, 0) != 0; }
+
 void bumpFssChromeStamp() {
     Shared* s = map();
     if (s) ++s->fssChromeStamp;

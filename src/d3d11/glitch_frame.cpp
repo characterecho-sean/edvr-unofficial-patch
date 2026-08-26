@@ -1876,6 +1876,8 @@ void glitchFrameObserve(const void* data, uint32_t bytes, const void* resource) 
     // answered through registered providers so the standalone glitch test
     // (which links this file without vscreen) still builds; unregistered
     // means off, which is also the shipped default.
+    if (jumped) noteWorldJump();
+
     if (willMark) {
         markGlitchFrame();
     } else {
