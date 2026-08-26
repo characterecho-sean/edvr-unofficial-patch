@@ -738,18 +738,22 @@ vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
     // eyes submit EDVR's own rendering of the right eye's image as a
     // panel. One rendering, two displays -- no per-eye artifact can
     // exist, which supersedes the heal for exactly these frames.
-    // Same-frame engage on the CHROME stamp -- the scanner's screen
-    // composite, drawn from the scanner's first frame to its last. The
-    // theater covers the WHOLE mode (the field's 2026-08-26 direction):
-    // gating on the final zoom's body layer left the ~10 arrival frames
-    // stock, and the squares live exactly there. Inside the mode before
-    // any zoom exists, there is no seam for the eye to catch. The stamp
-    // is bumped at the chrome draws, which land before the frame's own
-    // eye submits, so the scanner's first frame already goes out as the
-    // screen.
+    // Same-frame engage on the BODY stamp -- the fully-zoomed body
+    // layer, the one thing only the scanner draws (the round-9 lesson).
+    // The whole-mode chrome gate was flown 2026-08-26 and swallowed the
+    // loading screen's tooltips (the chrome pipeline hash lives there
+    // too, round 34's incident as an engage instead of a nudge) and cost
+    // the flat mirror its normal view for the entire scanner session.
+    // The field chose the void: once the final zoom is up the world is
+    // black anyway, so the screen swaps in there and browsing stays
+    // native everywhere a person or a mirror can look. The ~10 arrival
+    // frames before the body layer are the mirror heal's job (mode 2:
+    // both eyes see the squares, binocularly consistent). The stamp is
+    // bumped at the body draws, before the frame's own eye submits, so
+    // the void's first frame already goes out as the screen.
     if (s->theaterDist > 0.0f && !s->theaterFrozen && s->theaterRealValid &&
         texture && texture->eType == vr::TextureType_DirectX) {
-        const LONG bs = fssChromeStampValue();
+        const LONG bs = fssBodyStampValue();
         if (bs != s->theaterStamp) {
             s->theaterStamp = bs;
             s->theaterSeen = s->pace_boundaryNo;
@@ -1329,7 +1333,7 @@ vr::EVRCompositorError hookedWaitGetPoses(void* self,
     // against the real head for free. Velocities zeroed so nothing
     // extrapolates.
     {
-        const LONG bs = fssChromeStampValue();
+        const LONG bs = fssBodyStampValue();
         if (bs != s->theaterStamp) {
             s->theaterStamp = bs;
             s->theaterSeen = s->pace_boundaryNo;
@@ -1544,9 +1548,10 @@ void* interceptInterface(void* iface, const char* interfaceVersion) {
         s.theaterCurve = tc;
         if (td > 0.0f) {
             Log::get().note(
-                "fss theater: armed -- the WHOLE scanner becomes one "
-                "rendering shown to both eyes as a screen at %.1f m, scale "
-                "%.2f, curve %.2f, from the moment its chrome is up.",
+                "fss theater: armed -- the scanner's fully-zoomed view "
+                "becomes one rendering shown to both eyes as a screen at "
+                "%.1f m, scale %.2f, curve %.2f, while the body layer "
+                "draws. Browsing stays native.",
                 static_cast<double>(td), static_cast<double>(ts),
                 static_cast<double>(tc));
         }

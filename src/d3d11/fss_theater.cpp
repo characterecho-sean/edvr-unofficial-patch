@@ -313,10 +313,10 @@ void* theaterInner(void* contentTex, int eye, float outerMag, float innerMag,
         if (!g_engagedNoted) {
             g_engagedNoted = true;
             Log::get().note(
-                "fss theater: engaged -- the scanner is a single rendering "
-                "shown to both eyes as a screen at %.1f m (scale %.2f, "
-                "curve %.2f). One render, two displays: no per-eye "
-                "artifact can exist.",
+                "fss theater: engaged -- the zoomed scanner is a single "
+                "rendering shown to both eyes as a screen at %.1f m "
+                "(scale %.2f, curve %.2f). One render, two displays: no "
+                "per-eye artifact can exist.",
                 static_cast<double>(dist), static_cast<double>(scale),
                 static_cast<double>(curve));
         }
