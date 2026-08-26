@@ -32,6 +32,7 @@ constexpr uint32_t kFamilyCount =
     static_cast<uint32_t>(sizeof(kFamilies) / sizeof(kFamilies[0]));
 constexpr uint32_t kMaxPerEye = 2;
 constexpr uint32_t kSlots = 8;
+constexpr uint32_t kCbSlots = 4;
 
 // 0 = stock, 1 = "second" (first eye receives, second lends),
 // 2 = "first" (second eye receives, first lends).
@@ -41,6 +42,17 @@ uint8_t g_mode = 0;
 // j is the occurrence index within the lending eye.
 ID3D11ShaderResourceView* g_learned[kFamilyCount][kMaxPerEye][kSlots] = {};
 bool g_learnedValid[kFamilyCount][kMaxPerEye] = {};
+
+// The lender's PS constant contents, captured by GPU CopyResource at its
+// draws into EDVR-owned buffers -- the command stream orders the copy
+// against the draw, so the bytes are exactly the ones the lender read. The
+// round-18 texture feed alone came back null: the ring quad's pixel shader
+// runs its own ordered dissolve, and a per-eye PROGRESS in its constants is
+// the composite's cb1[119] story one shader over. Objects would not do --
+// the game may rewrite one buffer between the eyes' draws.
+ID3D11Buffer* g_cbCopy[kFamilyCount][kMaxPerEye][kCbSlots] = {};
+uint32_t      g_cbCopyBytes[kFamilyCount][kMaxPerEye][kCbSlots] = {};
+bool          g_cbValid[kFamilyCount][kMaxPerEye][kCbSlots] = {};
 
 // Per-frame occurrence counters, and the pending apply between OnEyeDraw
 // and Begin (the draw path is single-threaded; the pattern every fss module
@@ -52,6 +64,7 @@ uint32_t g_pendingJ = 0;
 // Begin/End state: the displaced live views, to restore.
 bool                      g_engaged = false;
 ID3D11ShaderResourceView* g_displaced[kSlots] = {};
+ID3D11Buffer*             g_displacedCb[kCbSlots] = {};
 
 uint64_t g_applied = 0;
 bool     g_engagedNoted = false;
@@ -69,6 +82,14 @@ void releaseLearned() {
                 }
             }
             g_learnedValid[f][j] = false;
+            for (uint32_t s = 0; s < kCbSlots; ++s) {
+                if (g_cbCopy[f][j][s]) {
+                    g_cbCopy[f][j][s]->Release();
+                    g_cbCopy[f][j][s] = nullptr;
+                }
+                g_cbCopyBytes[f][j][s] = 0;
+                g_cbValid[f][j][s] = false;
+            }
         }
     }
 }
@@ -96,10 +117,11 @@ void fssRingConfigure(Config& cfg) {
     if (g_mode) {
         Log::get().note(
             "fss ring ARMED: the %s eye's ring draws run with the %s eye's "
-            "sampled inputs, restored after every draw. The zoomed body sits "
-            "at optical infinity, so one eye's imagery is correct for both "
-            "-- if the black squares die, the lagging per-eye input set is "
-            "measured and this is the fix's shape. Clear to restore.",
+            "sampled inputs AND pixel-stage constants, restored after every "
+            "draw. The zoomed body sits at optical infinity, so one eye's "
+            "imagery is correct for both -- if the black squares die, the "
+            "lagging per-eye state is measured and this is the fix's shape. "
+            "Clear to restore.",
             g_mode == 1 ? "FIRST" : "SECOND", g_mode == 1 ? "SECOND" : "FIRST");
     } else {
         Log::get().note("fss ring: stock; each eye's ring draws read their "
@@ -142,6 +164,41 @@ bool fssRingOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
                     if (g_learned[f][j][s]) g_learned[f][j][s]->Release();
                     g_learned[f][j][s] = live[s];   // keep the Get's ref
                 }
+                // The constants, by content: snapshot each bound PS buffer
+                // into an EDVR copy on the GPU timeline, sized on demand.
+                ID3D11Buffer* cbs[kCbSlots] = {};
+                ctx->PSGetConstantBuffers(0, kCbSlots, cbs);
+                for (uint32_t s = 0; s < kCbSlots; ++s) {
+                    g_cbValid[f][j][s] = false;
+                    if (!cbs[s]) continue;
+                    D3D11_BUFFER_DESC bd{};
+                    cbs[s]->GetDesc(&bd);
+                    if (!g_cbCopy[f][j][s] ||
+                        g_cbCopyBytes[f][j][s] != bd.ByteWidth) {
+                        if (g_cbCopy[f][j][s]) {
+                            g_cbCopy[f][j][s]->Release();
+                            g_cbCopy[f][j][s] = nullptr;
+                        }
+                        ID3D11Device* dev = nullptr;
+                        ctx->GetDevice(&dev);
+                        if (dev) {
+                            D3D11_BUFFER_DESC nd{};
+                            nd.ByteWidth = bd.ByteWidth;
+                            nd.Usage = D3D11_USAGE_DEFAULT;
+                            nd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+                            dev->CreateBuffer(&nd, nullptr,
+                                              &g_cbCopy[f][j][s]);
+                            dev->Release();
+                        }
+                        g_cbCopyBytes[f][j][s] =
+                            g_cbCopy[f][j][s] ? bd.ByteWidth : 0;
+                    }
+                    if (g_cbCopy[f][j][s]) {
+                        ctx->CopyResource(g_cbCopy[f][j][s], cbs[s]);
+                        g_cbValid[f][j][s] = true;
+                    }
+                    cbs[s]->Release();
+                }
                 g_learnedValid[f][j] = true;
                 if (!g_learnNoted) {
                     g_learnNoted = true;
@@ -170,6 +227,14 @@ void fssRingBegin(ID3D11DeviceContext* ctx) {
             feed[s] = g_learned[g_pendingFam][g_pendingJ][s];
         }
         ctx->PSSetShaderResources(0, kSlots, feed);
+        ctx->PSGetConstantBuffers(0, kCbSlots, g_displacedCb);
+        ID3D11Buffer* cfeed[kCbSlots];
+        for (uint32_t s = 0; s < kCbSlots; ++s) {
+            cfeed[s] = g_cbValid[g_pendingFam][g_pendingJ][s]
+                           ? g_cbCopy[g_pendingFam][g_pendingJ][s]
+                           : g_displacedCb[s];
+        }
+        ctx->PSSetConstantBuffers(0, kCbSlots, cfeed);
         g_engaged = true;
         ++g_applied;
         if (!g_engagedNoted) {
@@ -189,6 +254,13 @@ void fssRingEnd(ID3D11DeviceContext* ctx) {
         if (g_displaced[s]) {
             g_displaced[s]->Release();
             g_displaced[s] = nullptr;
+        }
+    }
+    ctx->PSSetConstantBuffers(0, kCbSlots, g_displacedCb);
+    for (uint32_t s = 0; s < kCbSlots; ++s) {
+        if (g_displacedCb[s]) {
+            g_displacedCb[s]->Release();
+            g_displacedCb[s] = nullptr;
         }
     }
 }
