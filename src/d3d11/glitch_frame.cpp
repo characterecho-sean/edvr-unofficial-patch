@@ -2,6 +2,19 @@
 
 #include "../common/timing.h"
 
+namespace edvr {
+// The arrival-mono fix's questions, registered by vscreen at install so
+// the standalone glitch test can link this file alone.
+namespace {
+int  (*g_fssMonoFramesProvider)() = nullptr;
+bool (*g_fssChromeRecentProvider)() = nullptr;
+}  // namespace
+void glitchFrameSetFssMonoProviders(int (*frames)(), bool (*chrome)()) {
+    g_fssMonoFramesProvider = frames;
+    g_fssChromeRecentProvider = chrome;
+}
+}  // namespace edvr
+
 #include <windows.h>
 
 #include <cmath>
@@ -10,6 +23,7 @@
 #include <string>
 
 #include "../common/config.h"
+#include "../common/frame_flag.h"
 #include "../common/frame_flag.h"
 #include "../common/log.h"
 
@@ -1854,6 +1868,30 @@ void glitchFrameObserve(const void* data, uint32_t bytes, const void* resource) 
         : burstDown(s)                     ? kVerdictBurst
         : rebaseDown(s)                    ? kVerdictCooldown
                                            : kVerdictConsecutive;
+    // The FSS arrival-mono trigger (fix.fss_arrival_mono): a camera jump
+    // while the scanner's screen is up is the zoom's start -- the exact
+    // moment the left eye's unresolved-tile window begins. Any verdict
+    // counts: the first zooms are withheld, later ones separation-
+    // recognised, and the window exists either way. The two questions are
+    // answered through registered providers so the standalone glitch test
+    // (which links this file without vscreen) still builds; unregistered
+    // means off, which is also the shipped default.
+    if (jumped && g_fssMonoFramesProvider && g_fssChromeRecentProvider) {
+        const int monoN = g_fssMonoFramesProvider();
+        if (monoN > 0 && g_fssChromeRecentProvider()) {
+            setFssMonoFrames(monoN);
+            static bool s_monoNoted = false;
+            if (!s_monoNoted) {
+                s_monoNoted = true;
+                Log::get().note(
+                    "fss arrival mono: a jump landed with the scanner up "
+                    "-- the next %d frames submit the right eye's image "
+                    "for both. Said once; counting silently from here.",
+                    monoN);
+            }
+        }
+    }
+
     if (willMark) {
         markGlitchFrame();
     } else {

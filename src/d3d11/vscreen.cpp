@@ -288,6 +288,10 @@ struct State {
     // loading screen's text quad on 2026-08-25; drawing the scanner's
     // body is the one thing only the scanner does.
     uint32_t fssBodyFrame = 0;
+    // The chrome tracker's stamp and the arrival-mono frame count, read
+    // by the glitch-frame side at its jump verdict.
+    uint32_t fssChromeFrame = 0;
+    int      fssArrivalMonoN = 0;
     bool sawClearState = false;
     bool sawExecuteCommandList = false;
 
@@ -1153,6 +1157,25 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     // context return -- because every early return would otherwise leave the
     // previous train draw's clamp armed for whatever instanced draw comes
     // next.
+    // The FSS chrome tracker (fix.fss_arrival_mono): the scanner's screen
+    // is composited by two known world-quad pipelines every frame it is
+    // open -- including BEFORE a zoom, which is the whole point: the
+    // arrival-mono trigger needs "the player is in the scanner" at the
+    // moment the zoom's camera jump lands, and the body-layer gate opens
+    // ten frames too late. Cheap gate first, hash second, config off =
+    // free.
+    if (s->fssArrivalMonoN > 0 && kind == 'X' && count == 6) {
+        guardedBudget(g_panelCbBudget, [&] {
+            ID3D11VertexShader* vs = nullptr;
+            self->VSGetShader(&vs, nullptr, nullptr);
+            const uint64_t h = lookupShaderHash(vs);
+            if (vs) vs->Release();
+            if (h == 0xA888D51024D9798Eull || h == 0xB018D143700AB803ull) {
+                s->fssChromeFrame = s->frameNo;
+            }
+        });
+    }
+
     s->glareClamp = 0;
     if (foreignContext(self)) {
         noteForeignDraw(self);
@@ -2711,6 +2734,21 @@ void vScreenRefreshConfig() {
     fssRevealConfigure(cfg);
     fssRingConfigure(cfg);
     fssDumpConfigure(cfg);
+    {
+        int n = cfg.getInt("fix.fss_arrival_mono", 0);
+        if (n < 0) n = 0;
+        if (n > 60) n = 60;
+        if (s->fssArrivalMonoN != n) {
+            s->fssArrivalMonoN = n;
+            Log::get().note(
+                n ? "fss arrival mono: armed -- a camera jump with the "
+                    "scanner up makes the next %d frames submit the right "
+                    "eye's image for both (the measured left-eye "
+                    "unresolved-tile window)."
+                  : "fss arrival mono: off.",
+                n);
+        }
+    }
     witchstarConfigure(cfg);
     sunglareConfigure(cfg);
     exposureConfigure(cfg);
@@ -2784,6 +2822,22 @@ bool vScreenReclaimHooks() {
     const bool sceneRendered = s->eyeDrawsSinceReclaim > 0;
     s->eyeDrawsSinceReclaim = 0;
     return sceneRendered;
+}
+
+namespace {
+int fssMonoProviderThunk() { return vScreenFssArrivalMono(); }
+bool fssChromeProviderThunk() { return vScreenFssChromeRecent(); }
+}  // namespace
+
+int vScreenFssArrivalMono() {
+    State* s = g_state;
+    return s ? s->fssArrivalMonoN : 0;
+}
+
+bool vScreenFssChromeRecent() {
+    State* s = g_state;
+    return s && s->fssChromeFrame != 0 &&
+           s->frameNo - s->fssChromeFrame <= 5;
 }
 
 void vScreenFrameBoundary() {
@@ -3474,6 +3528,21 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     fssRevealConfigure(cfg);
     fssRingConfigure(cfg);
     fssDumpConfigure(cfg);
+    {
+        int n = cfg.getInt("fix.fss_arrival_mono", 0);
+        if (n < 0) n = 0;
+        if (n > 60) n = 60;
+        if (g_state->fssArrivalMonoN != n) {
+            g_state->fssArrivalMonoN = n;
+            Log::get().note(
+                n ? "fss arrival mono: armed -- a camera jump with the "
+                    "scanner up makes the next %d frames submit the right "
+                    "eye's image for both (the measured left-eye "
+                    "unresolved-tile window)."
+                  : "fss arrival mono: off.",
+                n);
+        }
+    }
     witchstarConfigure(cfg);
     sunglareConfigure(cfg);
     exposureConfigure(cfg);
@@ -3547,6 +3616,8 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
                    reinterpret_cast<void**>(&s.realRSSetViewports));
     s.hook.replace(kSlotMap, &hookedMap, reinterpret_cast<void**>(&s.realMap));
     s.hook.replace(kSlotUnmap, &hookedUnmap, reinterpret_cast<void**>(&s.realUnmap));
+    glitchFrameSetFssMonoProviders(&fssMonoProviderThunk,
+                                   &fssChromeProviderThunk);
     s.hook.replace(kSlotDraw, &hookedDraw, reinterpret_cast<void**>(&s.realDraw));
     s.hook.replace(kSlotDrawIndexed, &hookedDrawIndexed,
                    reinterpret_cast<void**>(&s.realDrawIndexed));

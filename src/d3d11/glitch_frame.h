@@ -18,6 +18,12 @@
 // already filled and writes nothing to it. No game code is modified.
 #pragma once
 
+namespace edvr {
+// Registered by vscreen at install: the arrival-mono frame count (0 = off)
+// and whether the scanner's chrome drew recently. Unregistered = off.
+void glitchFrameSetFssMonoProviders(int (*frames)(), bool (*chrome)());
+}  // namespace edvr
+
 #include <cstdint>
 
 namespace edvr {

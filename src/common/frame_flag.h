@@ -53,6 +53,15 @@ void clearGlitchFrame();
 void publishSubmitTexture(int eye, void* texture);
 void* submittedTexture(int eye);
 
+// The FSS arrival-mono window: d3d11 sets the frame count when a camera
+// jump lands while the scanner's screen is up; the openvr half submits
+// the right eye's texture for both eyes while it counts down (one
+// decrement per frame, its own call so the reader cannot double-count a
+// frame with two submits).
+void setFssMonoFrames(int n);
+int  fssMonoRemaining();
+void decFssMonoFrames();
+
 // Announced by openvr_api.dll once its hook is validated, and read by d3d11.dll.
 //
 // The two halves install separately and the openvr one is optional, so d3d11 can

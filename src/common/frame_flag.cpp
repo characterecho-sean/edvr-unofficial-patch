@@ -82,6 +82,17 @@ struct Shared {
     // aligned volatile store is atomic on x64, so no reader tears one.
     // Zero is "nobody has published", the eyeSize discipline.
     volatile LONG64 submitTex[2];
+    // fssMonoFrames  frames the openvr half should submit the RIGHT eye's
+    //                texture for BOTH eyes, counting down, set by d3d11
+    //                when a camera jump lands while the Full System
+    //                Scanner's screen is up
+    //
+    // The measured defect (docs/fss-scanner.md, round 33): for ~10 frames
+    // of the zoom arrival the LEFT submitted image carries hard-black
+    // unresolved tiles the right does not (16 vs 2 measured). The body
+    // sits at optical infinity, so the right eye's image is correct for
+    // both during that window; holdFrames' disciplines carry over whole.
+    volatile LONG fssMonoFrames;
     // cullGuard  the cull guard's stage and margin, packed as
     //            (stage << 24) | (hPerMille << 12) | vPerMille, written by
     //            openvr_api.dll at its stage transitions
@@ -130,7 +141,8 @@ struct Shared {
 // The name is built once, at first use. The two DLLs are in the same process,
 // so the channel between them is unaffected.
 //
-// _v10 because the struct changed again -- submitTex was added. _v9 was
+// _v11 because the struct changed again -- fssMonoFrames was added. _v10
+// was submitTex. _v9 was
 // headForward. _v8 was
 // eyeTangents, _v7 cullGuard, _v6 eyeSize, _v5 holdFrames, _v4
 // externalCamStamp, _v3 the field before that. A mismatched pair from
@@ -153,7 +165,7 @@ const wchar_t* mappingName() {
     static wchar_t name[64];
     static bool built = false;
     if (!built) {
-        _snwprintf_s(name, _TRUNCATE, L"Local\\edvr_glitch_frame_v10_%lu",
+        _snwprintf_s(name, _TRUNCATE, L"Local\\edvr_glitch_frame_v11_%lu",
                      GetCurrentProcessId());
         built = true;
     }
@@ -174,6 +186,24 @@ Shared* map() {
 }
 
 }  // namespace
+
+void setFssMonoFrames(int n) {
+    Shared* s = map();
+    if (!s || n < 0 || n > 60) return;
+    // Extend, never shorten: two jumps in quick succession keep the
+    // longer window.
+    if (n > s->fssMonoFrames) s->fssMonoFrames = n;
+}
+
+int fssMonoRemaining() {
+    Shared* s = map();
+    return s ? s->fssMonoFrames : 0;
+}
+
+void decFssMonoFrames() {
+    Shared* s = map();
+    if (s && s->fssMonoFrames > 0) --s->fssMonoFrames;
+}
 
 void publishSubmitTexture(int eye, void* texture) {
     Shared* s = map();

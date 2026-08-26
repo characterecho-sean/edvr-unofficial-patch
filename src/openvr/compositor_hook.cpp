@@ -679,6 +679,22 @@ vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
     }
     if (s->inert) return s->realSubmit(self, eye, texture, bounds, flags);
 
+    // The FSS arrival-mono substitution (fix.fss_arrival_mono): while the
+    // window counts down, the LEFT eye submits the RIGHT eye's texture --
+    // published last frame, one frame stale, at optical infinity where
+    // the measured defect lives. The measured defect: the left image
+    // carries hard-black unresolved tiles during the zoom arrival that
+    // the right does not (16 vs 2, docs/fss-scanner.md round 33).
+    if (eye == vr::Eye_Left && fssMonoRemaining() > 0 && texture &&
+        texture->eType == vr::TextureType_DirectX) {
+        void* rt = submittedTexture(1);
+        if (rt) {
+            vr::Texture_t sub = *texture;
+            sub.handle = rt;
+            return s->realSubmit(self, eye, &sub, bounds, flags);
+        }
+    }
+
     // Publish the submitted texture for the d3d11 half's FSS series: the
     // one point that knows EXACTLY what reaches the headset, on any
     // pipeline shape. DirectX handles only; anything else publishes null.
@@ -1001,6 +1017,8 @@ vr::EVRCompositorError hookedWaitGetPoses(void* self,
         s->realWaitGetPoses(self, renderPoses, renderCount, gamePoses, gameCount);
 
     if (s->inert) return result;
+
+    decFssMonoFrames();
 
     // The pair-timing boundary: frame cadence, and the burst summary.
     {
