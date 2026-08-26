@@ -48,6 +48,26 @@ void main(uint3 id : SV_DispatchThreadID) {
         }
     }
     if (blk) {
+        // And only at SQUARE scale: the gated tiles are 16 pixels, so a
+        // region still black ten pixels out in every direction is panel
+        // background or open space, not a square -- and near-field UI
+        // pasted at the infinity disparity is what doubles.
+        int2 c2 = int2(id.xy);
+        int2 far4[4] = {int2(-10, 0), int2(10, 0), int2(0, -10), int2(0, 10)};
+        bool anyFarLit = false;
+        [unroll] for (int k2 = 0; k2 < 4; ++k2) {
+            int2 q2 = c2 + far4[k2];
+            if (q2.x < 0 || q2.y < 0 || q2.x >= int(w) || q2.y >= int(h)) {
+                continue;
+            }
+            if (dot(L[uint2(q2)].rgb, float3(0.299, 0.587, 0.114)) >= 0.004) {
+                anyFarLit = true;
+                break;
+            }
+        }
+        blk = anyFarLit;
+    }
+    if (blk) {
         int rx = int(id.x) - int(round(p.x));
         uint rw, rh;
         R.GetDimensions(rw, rh);
