@@ -26,7 +26,28 @@ void main(uint3 id : SV_DispatchThreadID) {
     if (id.x >= w || id.y >= h) return;
     float4 l = L[id.xy];
     float4 o = l;
-    if (dot(l.rgb, float3(0.299, 0.587, 0.114)) < 0.004) {
+    // Heal only the INTERIOR of a black region: the gated tiles are
+    // 16-pixel solid squares, while the UI layer's blacks (bracket
+    // interiors, text gaps) are thin -- and pasting shifted content into
+    // near-field UI at the infinity disparity reads as doubling, the
+    // field's exact words. A pixel must be black together with its
+    // 2-pixel cross neighborhood; thin features never qualify.
+    bool blk = dot(l.rgb, float3(0.299, 0.587, 0.114)) < 0.004;
+    if (blk) {
+        int2 c = int2(id.xy);
+        int2 offs[4] = {int2(-2, 0), int2(2, 0), int2(0, -2), int2(0, 2)};
+        [unroll] for (int k = 0; k < 4; ++k) {
+            int2 q = c + offs[k];
+            if (q.x < 0 || q.y < 0 || q.x >= int(w) || q.y >= int(h)) {
+                continue;
+            }
+            if (dot(L[uint2(q)].rgb, float3(0.299, 0.587, 0.114)) >= 0.004) {
+                blk = false;
+                break;
+            }
+        }
+    }
+    if (blk) {
         int rx = int(id.x) - int(round(p.x));
         uint rw, rh;
         R.GetDimensions(rw, rh);
