@@ -114,6 +114,18 @@ void main(uint3 id : SV_DispatchThreadID) {
 
 constexpr uint32_t kSeriesMax = 48;   // atlas height 335*48 fits 16384
 uint32_t g_seriesFmt[2] = {};         // the source format, for the manifest
+// The series is a RING: the first post-gate capture (round 33c) proved the
+// post-composite frames steady in both eyes, and the field says the
+// squares appear AS the zoom arrives -- before the composite exists to
+// gate on. So the submitted pair is folded EVERY frame while armed, the
+// ring wrapping until the scanner gate first opens; the window then keeps
+// its pre-gate tail, runs kSeriesPostGate more frames, and writes with
+// the gate position in the manifest.
+constexpr uint32_t kSeriesPostGate = 20;
+uint32_t g_seriesGateSlice = ~0u;     // ring slice at gate-open; ~0 = not yet
+uint32_t g_seriesRing = 0;            // next slice to write (wraps)
+uint32_t g_seriesTotal = 0;           // total captures per eye (min of both)
+uint32_t g_seriesAfter = 0;           // frames captured since gate-open
 ID3D11Texture2D*          g_seriesCopy[2] = {};      // copy-through fallback
 ID3D11ShaderResourceView* g_seriesCopySrv[2] = {};
 
@@ -154,7 +166,7 @@ void seriesRelease() {
 
 void seriesCapture(ID3D11DeviceContext* ctx, ID3D11Resource* res,
                    uint32_t eye) {
-    if (eye > 1 || g_seriesCount[eye] >= g_seriesWant) return;
+    if (eye > 1) return;
     ID3D11Texture2D* tex = nullptr;
     res->QueryInterface(__uuidof(ID3D11Texture2D),
                         reinterpret_cast<void**>(&tex));
@@ -283,8 +295,8 @@ void seriesCapture(ID3D11DeviceContext* ctx, ID3D11Resource* res,
     D3D11_MAPPED_SUBRESOURCE m{};
     if (SUCCEEDED(ctx->Map(g_seriesCb, 0, D3D11_MAP_WRITE_DISCARD, 0, &m)) &&
         m.pData) {
-        uint32_t vals[4] = {g_seriesCount[eye] * g_seriesTh, g_seriesTw,
-                            g_seriesTh, 0};
+        uint32_t vals[4] = {(g_seriesRing % g_seriesWant) * g_seriesTh,
+                            g_seriesTw, g_seriesTh, 0};
         memcpy(m.pData, vals, sizeof(vals));
         ctx->Unmap(g_seriesCb, 0);
     } else {
@@ -360,8 +372,9 @@ void seriesWrite(ID3D11DeviceContext* ctx) {
                 fclose(f);
                 Log::get().note(
                     "FSSSERIES eye=%d tw=%u th=%u frames=%u srcfmt=%u "
-                    "file=%s", e, g_seriesTw, g_seriesTh, g_seriesCount[e],
-                    g_seriesFmt[e], path);
+                    "ringstart=%u gate=%u file=%s", e, g_seriesTw,
+                    g_seriesTh, g_seriesWant, g_seriesFmt[e],
+                    g_seriesRing % g_seriesWant, g_seriesGateSlice, path);
             }
             ctx->Unmap(stage, 0);
         }
@@ -571,6 +584,10 @@ void fssDumpConfigure(Config& cfg) {
             g_seriesWant = want;
             g_seriesDone = false;
             g_seriesTried = false;
+            g_seriesGateSlice = ~0u;
+            g_seriesRing = 0;
+            g_seriesTotal = 0;
+            g_seriesAfter = 0;
             seriesRelease();
             if (g_seriesWant) {
                 Log::get().note(
@@ -765,13 +782,18 @@ void fssDumpDispatchPost(ID3D11DeviceContext* ctx) {
 
 void fssDumpFrameBoundary(ID3D11DeviceContext* ctx) {
     // The series feeds from the SUBMITTED pair, published through the
-    // shared mapping by the openvr half at each Submit -- the one
-    // identity that survives pipeline reshapes, headset swaps and shader
-    // re-specialisation, with eye slots named by the Submit call itself.
-    // Gated on the scanner (the composite counted this frame).
-    if (g_seriesWant && !g_seriesDone && ctx && g_occComp != 0) {
+    // shared mapping by the openvr half at each Submit. A rolling ring:
+    // every frame while armed, the gate position marked when the scanner
+    // first draws, the window closed kSeriesPostGate frames later.
+    if (g_seriesWant && !g_seriesDone && ctx) {
         guardedBudget(g_budget, [&] {
             static bool s_feedNoted = false;
+            if (g_seriesGateSlice == ~0u && g_occComp != 0) {
+                g_seriesGateSlice = g_seriesRing % (g_seriesWant ? g_seriesWant : 1);
+                Log::get().note("fss series: scanner gate opened at ring "
+                                "slice %u (total %u captured).",
+                                g_seriesGateSlice, g_seriesTotal);
+            }
             for (int e = 0; e < 2; ++e) {
                 void* pub = submittedTexture(e);
                 if (!pub) {
@@ -799,10 +821,14 @@ void fssDumpFrameBoundary(ID3D11DeviceContext* ctx) {
                     res->Release();
                 }
             }
+            ++g_seriesRing;
+            ++g_seriesTotal;
+            if (g_seriesGateSlice != ~0u) ++g_seriesAfter;
         });
     }
     if (g_seriesWant && !g_seriesDone && ctx &&
-        g_seriesCount[0] >= g_seriesWant && g_seriesCount[1] >= g_seriesWant) {
+        g_seriesGateSlice != ~0u && g_seriesAfter >= kSeriesPostGate &&
+        g_seriesTotal >= g_seriesWant) {
         guardedBudget(g_budget, [&] { seriesWrite(ctx); });
         g_seriesDone = true;
         seriesRelease();
