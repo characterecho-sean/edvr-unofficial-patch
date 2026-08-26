@@ -39,9 +39,19 @@ uint32_t packedColor(ProbeColor c) {
 }
 
 bool       g_armed = false;
+bool       g_depthMode = false;   // "depth": disable the depth test for the
+                                  // composite instead of touching a slot --
+                                  // the one per-eye input (the depth buffer)
+                                  // no slot probe can reach
 uint32_t   g_slot = 0;
 ProbeColor g_color = ProbeColor::kMagenta;
 char       g_spec[48] = {};
+
+// The no-test state for depth mode, created once.
+ID3D11DepthStencilState* g_noDepth = nullptr;
+ID3D11DepthStencilState* g_savedDepth = nullptr;
+UINT                     g_savedStencilRef = 0;
+bool                     g_depthEngaged = false;
 
 // The substitute, rebuilt when the displaced texture's size or the asked
 // colour changes. Full-size, not 1x1: a Load() with texel coordinates
@@ -123,7 +133,19 @@ void fssProbeConfigure(Config& cfg) {
     const bool wasArmed = g_armed;
     const uint64_t had = g_applied;
     g_armed = false;
+    g_depthMode = false;
     g_engagedNoted = false;
+    if (spec == "depth") {
+        g_armed = true;
+        g_depthMode = true;
+        Log::get().note(
+            "fss probe ARMED: the body composite draws with its DEPTH TEST "
+            "OFF. The depth buffer is the one per-eye input no slot probe "
+            "reaches -- if the one-eye squares vanish under this, they are "
+            "composite pixels being CULLED by per-eye depth content, not "
+            "painted by anything. Clear the setting to restore.");
+        return;
+    }
     if (!spec.empty()) {
         bool ok = spec.length() >= 3 && spec[0] >= '0' && spec[0] <= '3' &&
                   spec[1] == ':';
@@ -180,7 +202,34 @@ bool fssProbeOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
 
 void fssProbeBegin(ID3D11DeviceContext* ctx) {
     g_engaged = false;
+    g_depthEngaged = false;
     if (!ctx || !g_armed) return;
+    if (g_depthMode) {
+        guardedBudget(g_budget, [&] {
+            if (!g_noDepth) {
+                ID3D11Device* dev = nullptr;
+                ctx->GetDevice(&dev);
+                if (!dev) return;
+                D3D11_DEPTH_STENCIL_DESC dd{};
+                dd.DepthEnable = FALSE;
+                dd.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ZERO;
+                dd.DepthFunc = D3D11_COMPARISON_ALWAYS;
+                dev->CreateDepthStencilState(&dd, &g_noDepth);
+                dev->Release();
+                if (!g_noDepth) return;
+            }
+            ctx->OMGetDepthStencilState(&g_savedDepth, &g_savedStencilRef);
+            ctx->OMSetDepthStencilState(g_noDepth, 0);
+            g_depthEngaged = true;
+            ++g_applied;
+            if (!g_engagedNoted) {
+                g_engagedNoted = true;
+                Log::get().note("fss probe: engaged -- the composite's depth "
+                                "test is off, restored after every draw.");
+            }
+        });
+        return;
+    }
     guardedBudget(g_budget, [&] {
         const BindSlot slot = static_cast<BindSlot>(
             static_cast<uint32_t>(BindSlot::PsSrv0) + g_slot);
@@ -219,6 +268,14 @@ void fssProbeBegin(ID3D11DeviceContext* ctx) {
 }
 
 void fssProbeEnd(ID3D11DeviceContext* ctx) {
+    if (g_depthEngaged && ctx) {
+        g_depthEngaged = false;
+        ctx->OMSetDepthStencilState(g_savedDepth, g_savedStencilRef);
+        if (g_savedDepth) {
+            g_savedDepth->Release();
+            g_savedDepth = nullptr;
+        }
+    }
     if (!g_engaged || !ctx) return;
     g_engaged = false;
     ID3D11ShaderResourceView* orig = g_displaced;
@@ -237,6 +294,10 @@ void fssProbeShutdown() {
     }
     g_texW = 0;
     g_texH = 0;
+    if (g_noDepth) {
+        g_noDepth->Release();
+        g_noDepth = nullptr;
+    }
 }
 
 }  // namespace edvr
