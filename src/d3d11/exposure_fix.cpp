@@ -891,7 +891,7 @@ void STDMETHODCALLTYPE hookedDispatch(ID3D11DeviceContext* self, UINT x, UINT y,
     // other census hook strikes. Recording, not classification: this line
     // exists because the FSS body could legally be built by a compute writer
     // and no capture before 2026-08-25 could have seen it.
-    if (drawCensusArmed()) drawCensusDispatch(x, y, z);
+    if (drawCensusArmed()) drawCensusDispatch(self, x, y, z);
 
     // The dispatch-skip probe, after the census record (a census taken
     // while probing must record what the game SUBMITTED -- the draw skips'

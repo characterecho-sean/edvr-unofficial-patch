@@ -569,7 +569,8 @@ void drawCensusCbNoteUpdate(void* resource, const void* data, uint32_t bytes) {
     }
 }
 
-void drawCensusDispatch(uint32_t x, uint32_t y, uint32_t z) {
+void drawCensusDispatch(ID3D11DeviceContext* ctx, uint32_t x, uint32_t y,
+                        uint32_t z) {
     if (g_framesLeft == 0) return;
     ++g_dispatches;
     ++g_dispThisFrame;
@@ -587,11 +588,57 @@ void drawCensusDispatch(uint32_t x, uint32_t y, uint32_t z) {
     const char* u1 = bindingToken(bindingGet(BindSlot::CsUav1), Kind::kView, u1b, sizeof(u1b));
     const char* u2 = bindingToken(bindingGet(BindSlot::CsUav2), Kind::kView, u2b, sizeof(u2b));
     const char* u3 = bindingToken(bindingGet(BindSlot::CsUav3), Kind::kView, u3b, sizeof(u3b));
-    Log::get().note("DCX %u #%u n=%u,%u,%u ch=%016llX u=%s,%s,%s,%s q=%u",
+
+    // What it READS: CS SRVs 0-7 and CS b0-b1, straight off the context the
+    // way a draw line's x= tail is taken.
+    //
+    // WHY (2026-08-25, the black squares, round fourteen): twelve rounds
+    // proved the two eye composites byte-equivalent, and the per-eye temporal
+    // reconstruction (E861F611375E7ECC + B74273EC13F7CD59) became the last
+    // writer standing -- with its masks and its accumulator BOTH exonerated
+    // by pair-sync nulls. The divergence therefore rides its per-frame
+    // INPUTS, and those are CS SRVs: the one binding class no census line
+    // ever carried. Absent tokens mean the probe did not answer, never
+    // "nothing bound", the x= tail's spelling exactly.
+    char st[232] = "";
+    char cbt[64] = "";
+    if (ctx) {
+        ID3D11ShaderResourceView* sr[8] = {};
+        ID3D11Buffer* cb[2] = {};
+        bool got = false;
+        guardedBudget(g_iaBudget, [&] {
+            ctx->CSGetShaderResources(0, 8,
+                reinterpret_cast<ID3D11ShaderResourceView**>(sr));
+            ctx->CSGetConstantBuffers(0, 2,
+                reinterpret_cast<ID3D11Buffer**>(cb));
+            got = true;
+        });
+        if (got) {
+            char sb[8][24];
+            const char* tk[8];
+            for (int i = 0; i < 8; ++i) {
+                tk[i] = bindingToken(sr[i], Kind::kView, sb[i], sizeof(sb[i]));
+            }
+            _snprintf_s(st, sizeof(st), _TRUNCATE,
+                        " s=%s,%s,%s,%s,%s,%s,%s,%s", tk[0], tk[1], tk[2],
+                        tk[3], tk[4], tk[5], tk[6], tk[7]);
+            char c0b[24], c1b[24];
+            _snprintf_s(cbt, sizeof(cbt), _TRUNCATE, " cb=%s,%s",
+                        bindingToken(cb[0], Kind::kResource, c0b, sizeof(c0b)),
+                        bindingToken(cb[1], Kind::kResource, c1b, sizeof(c1b)));
+        }
+        for (ID3D11ShaderResourceView* v : sr) {
+            if (v) v->Release();
+        }
+        for (ID3D11Buffer* b : cb) {
+            if (b) b->Release();
+        }
+    }
+    Log::get().note("DCX %u #%u n=%u,%u,%u ch=%016llX u=%s,%s,%s,%s%s%s q=%u",
                     g_frameOrdinal, g_dispThisFrame - 1, x, y, z,
                     static_cast<unsigned long long>(
                         lookupShaderHash(bindingGet(BindSlot::Cs))),
-                    u0, u1, u2, u3, q);
+                    u0, u1, u2, u3, st, cbt, q);
 }
 
 void drawCensusFrameBoundary(uint32_t frameNo) {
