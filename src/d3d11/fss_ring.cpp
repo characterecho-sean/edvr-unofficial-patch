@@ -143,8 +143,12 @@ PsOut main(PsIn i) {
     float3 col = (diffuse * atten + spec) * c[40].xyz;
     float3 aux = dif * c[40].xyz;
 
-    float lum = dot(t3.Load(int3(p, 0)).xyz, c[44].xyz);
-    float scale = (c[36].x * (blackFlag - lum) + lum) * c[36].y;
+    // Stock: lum = dot(t3.Load(p).xyz, c[44].xyz) -- t3 is the per-eye
+    // illumination map the game fills tile by tile across the build, and
+    // scale = lerp(lum, blackFlag, c[36].x) * c[36].y collapses unfilled
+    // tiles to black. The ring's CONTENT (t1) is complete from the first
+    // frame; only this map staggers in. Full illumination, always:
+    float scale = c[36].y;
 
     PsOut o;
     o.c0 = scale * col * c[0].x;
