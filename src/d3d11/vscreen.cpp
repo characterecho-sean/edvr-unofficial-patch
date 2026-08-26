@@ -112,6 +112,15 @@ constexpr size_t kSlotExecuteCommandList    = 58;
 // They forward unconditionally and record nothing unless a census is running.
 constexpr size_t kSlotCopySubresourceRegion = 46;
 constexpr size_t kSlotCopyResource          = 47;
+// The GPU-driven draw pair and the call that arms indirect argument buffers,
+// hooked on the same census-only terms (2026-08-25, round seventeen of the
+// FSS black squares). The round-sixteen capture showed per-eye ring sources
+// no recorded event ever wrote and argument buffers no recorded event ever
+// filled; indirect draws and CopyStructureCount are exactly the classes the
+// census could not see. Record-only, forward always.
+constexpr size_t kSlotDrawIndexedInstancedIndirect = 39;
+constexpr size_t kSlotDrawInstancedIndirect        = 40;
+constexpr size_t kSlotCopyStructureCount           = 49;
 // The two remaining ways a texture changes without a draw or a copy, hooked
 // on the same census-only terms (2026-08-25, the FSS ring split). The FSS
 // captures showed the body drawn into one target while both eye composites
@@ -220,6 +229,10 @@ typedef void(STDMETHODCALLTYPE* PFN_ResolveSubresource)(
     ID3D11DeviceContext*, ID3D11Resource*, UINT, ID3D11Resource*, UINT,
     DXGI_FORMAT);
 typedef void(STDMETHODCALLTYPE* PFN_ClearState)(ID3D11DeviceContext*);
+typedef void(STDMETHODCALLTYPE* PFN_DrawIndirectArgs)(ID3D11DeviceContext*,
+                                                      ID3D11Buffer*, UINT);
+typedef void(STDMETHODCALLTYPE* PFN_CopyStructureCount)(
+    ID3D11DeviceContext*, ID3D11Buffer*, UINT, ID3D11UnorderedAccessView*);
 typedef void(STDMETHODCALLTYPE* PFN_ExecuteCommandList)(ID3D11DeviceContext*,
                                                         ID3D11CommandList*, BOOL);
 
@@ -248,6 +261,9 @@ struct State {
     PFN_OMSetRtvAndUav       realOMSetRtvAndUav = nullptr;
     PFN_ClearRtv             realClearRtv = nullptr;
     PFN_CopyResource         realCopyResource = nullptr;
+    PFN_DrawIndirectArgs     realDrawIndexedInstancedIndirect = nullptr;
+    PFN_DrawIndirectArgs     realDrawInstancedIndirect = nullptr;
+    PFN_CopyStructureCount   realCopyStructureCount = nullptr;
     PFN_CopySubresourceRegion realCopySubresourceRegion = nullptr;
     PFN_UpdateSubresource    realUpdateSubresource = nullptr;
     PFN_ResolveSubresource   realResolveSubresource = nullptr;
@@ -1136,6 +1152,13 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     s->glareClamp = 0;
     if (foreignContext(self)) {
         noteForeignDraw(self);
+        // Round seventeen: recorded before the decline, every token read
+        // off the calling context -- the owner shadow cannot describe a
+        // deferred context's bindings, and draws recorded here were the
+        // last draw class no census had ever carried.
+        if (drawCensusArmed()) {
+            drawCensusDrawDirect(self, kind, count, instances, true, nullptr, 0);
+        }
         return DrawVerdict::kNone;
     }
     // Cleared before anything can set it, on every draw, so a substitution
@@ -2103,19 +2126,48 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
 // session that is by definition the one being measured.
 void STDMETHODCALLTYPE hookedCopyResource(ID3D11DeviceContext* self,
                                           ID3D11Resource* dst, ID3D11Resource* src) {
-    if (drawCensusArmed() && !foreignContext(self)) {
-        drawCensusCopy('R', dst, 0, 0, 0, src, 0, false, 0, 0, 0, 0);
+    if (drawCensusArmed()) {
+        drawCensusCopy('R', dst, 0, 0, 0, src, 0, false, 0, 0, 0, 0,
+                       foreignContext(self));
     }
     g_state->realCopyResource(self, dst, src);
+}
+
+// The GPU-driven draws, record-only: the argument buffer holds the counts,
+// so n=0 i=0 and args= names the buffer instead. Kind 'Z' indexed, 'Y' not.
+void STDMETHODCALLTYPE hookedDrawIndexedInstancedIndirect(
+    ID3D11DeviceContext* self, ID3D11Buffer* args, UINT off) {
+    if (drawCensusArmed()) {
+        drawCensusDrawDirect(self, 'Z', 0, 0, foreignContext(self), args, off);
+    }
+    g_state->realDrawIndexedInstancedIndirect(self, args, off);
+}
+
+void STDMETHODCALLTYPE hookedDrawInstancedIndirect(ID3D11DeviceContext* self,
+                                                   ID3D11Buffer* args, UINT off) {
+    if (drawCensusArmed()) {
+        drawCensusDrawDirect(self, 'Y', 0, 0, foreignContext(self), args, off);
+    }
+    g_state->realDrawInstancedIndirect(self, args, off);
+}
+
+void STDMETHODCALLTYPE hookedCopyStructureCount(ID3D11DeviceContext* self,
+                                                ID3D11Buffer* dst, UINT off,
+                                                ID3D11UnorderedAccessView* src) {
+    if (drawCensusArmed()) {
+        drawCensusStructCount(dst, off, src, foreignContext(self));
+    }
+    g_state->realCopyStructureCount(self, dst, off, src);
 }
 
 void STDMETHODCALLTYPE hookedCopySubresourceRegion(
     ID3D11DeviceContext* self, ID3D11Resource* dst, UINT dstSub, UINT dstX, UINT dstY,
     UINT dstZ, ID3D11Resource* src, UINT srcSub, const D3D11_BOX* box) {
-    if (drawCensusArmed() && !foreignContext(self)) {
+    if (drawCensusArmed()) {
         drawCensusCopy('S', dst, dstSub, dstX, dstY, src, srcSub, box != nullptr,
                        box ? box->left : 0, box ? box->top : 0,
-                       box ? box->right : 0, box ? box->bottom : 0);
+                       box ? box->right : 0, box ? box->bottom : 0,
+                       foreignContext(self));
     }
     g_state->realCopySubresourceRegion(self, dst, dstSub, dstX, dstY, dstZ, src, srcSub,
                                        box);
@@ -2129,16 +2181,18 @@ void STDMETHODCALLTYPE hookedUpdateSubresource(ID3D11DeviceContext* self,
                                                ID3D11Resource* dst, UINT dstSub,
                                                const D3D11_BOX* box, const void* data,
                                                UINT rowPitch, UINT depthPitch) {
-    if (drawCensusArmed() && !foreignContext(self)) {
+    if (drawCensusArmed()) {
         drawCensusCopy('U', dst, dstSub, box ? box->left : 0, box ? box->top : 0,
                        nullptr, 0, box != nullptr,
                        box ? box->left : 0, box ? box->top : 0,
-                       box ? box->right : 0, box ? box->bottom : 0);
+                       box ? box->right : 0, box ? box->bottom : 0,
+                       foreignContext(self));
         // A watched constant buffer written through this path instead of
         // Map: the whole write is in hand, so the CB watch takes it here.
         // 0 bytes means "up to the buffer's own size", which is right for
         // the boxless whole-buffer update this call almost always is.
-        drawCensusCbNoteUpdate(dst, data, 0);
+        // Owner-context only: the watch shadows the owner's buffers.
+        if (!foreignContext(self)) drawCensusCbNoteUpdate(dst, data, 0);
     }
     if (fssRevealWantsDraws() && !foreignContext(self)) {
         fssRevealNoteUpdate(dst, data);
@@ -2156,7 +2210,7 @@ void STDMETHODCALLTYPE hookedResolveSubresource(ID3D11DeviceContext* self,
                                                 ID3D11Resource* dst, UINT dstSub,
                                                 ID3D11Resource* src, UINT srcSub,
                                                 DXGI_FORMAT fmt) {
-    if (drawCensusArmed() && !foreignContext(self)) {
+    if (drawCensusArmed()) {
         drawCensusResolve(dst, dstSub, src, srcSub, static_cast<uint32_t>(fmt));
     }
     g_state->realResolveSubresource(self, dst, dstSub, src, srcSub, fmt);
@@ -3397,6 +3451,13 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
                    reinterpret_cast<void**>(&s.realVSSetConstantBuffers));
     s.hook.replace(kSlotCopyResource, &hookedCopyResource,
                    reinterpret_cast<void**>(&s.realCopyResource));
+    s.hook.replace(kSlotDrawIndexedInstancedIndirect,
+                   &hookedDrawIndexedInstancedIndirect,
+                   reinterpret_cast<void**>(&s.realDrawIndexedInstancedIndirect));
+    s.hook.replace(kSlotDrawInstancedIndirect, &hookedDrawInstancedIndirect,
+                   reinterpret_cast<void**>(&s.realDrawInstancedIndirect));
+    s.hook.replace(kSlotCopyStructureCount, &hookedCopyStructureCount,
+                   reinterpret_cast<void**>(&s.realCopyStructureCount));
     s.hook.replace(kSlotCopySubresourceRegion, &hookedCopySubresourceRegion,
                    reinterpret_cast<void**>(&s.realCopySubresourceRegion));
     s.hook.replace(kSlotUpdateSubresource, &hookedUpdateSubresource,

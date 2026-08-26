@@ -486,9 +486,121 @@ void drawCensusOffDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
     recordDraw(ctx, kind, count, instances, "DCO", g_offThisFrame++);
 }
 
+// The direct-read draw record: every token off the calling context, no
+// shadow. Round seventeen of the black squares: the ring draws read per-eye
+// surfaces NOTHING recorded ever wrote, and the remaining writer classes
+// were exactly the ones the census never carried -- indirect draws (slots
+// 39/40, GPU-driven like the DispatchIndirect middle round sixteen caught),
+// and draws on deferred contexts, whose bindings the owner-context shadow
+// can never describe. This function records both, with the same t=/args=
+// provenance tails the dispatch line grew.
+void drawCensusDrawDirect(ID3D11DeviceContext* ctx, char kind, uint32_t count,
+                          uint32_t instances, bool foreignCtx,
+                          void* indirectArgs, uint32_t indirectOff) {
+    if (g_framesLeft == 0 || !ctx) return;
+    ++g_draws;
+    ++g_drawsThisFrame;
+    const uint32_t q = g_seq++;
+    if (g_lines >= g_maxLines) return;
+    ++g_lines;
+
+    ID3D11RenderTargetView* rtv = nullptr;
+    ID3D11DepthStencilView* dsv = nullptr;
+    ID3D11Buffer* cb0 = nullptr;
+    ID3D11ShaderResourceView* sr[8] = {};
+    ID3D11PixelShader* ps = nullptr;
+    bool got = false;
+    guardedBudget(g_iaBudget, [&] {
+        ctx->OMGetRenderTargets(1, &rtv, &dsv);
+        ctx->VSGetConstantBuffers(0, 1, &cb0);
+        ctx->PSGetShaderResources(0, 8,
+            reinterpret_cast<ID3D11ShaderResourceView**>(sr));
+        ctx->PSGetShader(&ps, nullptr, nullptr);
+        got = true;
+    });
+
+    char rb[24] = "-", db[24] = "-", cb[24] = "-";
+    char sb[8][24];
+    const char* st[8];
+    for (int i = 0; i < 8; ++i) st[i] = "-";
+    char pt[32] = "";
+    const char* r = "-";
+    const char* d = "-";
+    const char* c = "-";
+    if (got) {
+        r = bindingToken(rtv, Kind::kView, rb, sizeof(rb));
+        d = bindingToken(dsv, Kind::kView, db, sizeof(db));
+        c = bindingToken(cb0, Kind::kResource, cb, sizeof(cb));
+        for (int i = 0; i < 8; ++i) {
+            st[i] = bindingToken(sr[i], Kind::kView, sb[i], sizeof(sb[i]));
+        }
+        _snprintf_s(pt, sizeof(pt), _TRUNCATE, " ph=%016llX",
+                    static_cast<unsigned long long>(lookupShaderHash(ps)));
+    }
+
+    char tail[160] = "";
+    DrawState dst2;
+    readDrawState(ctx, &dst2);
+    if (dst2.ok) {
+        char vsb[24], vbb[24];
+        _snprintf_s(tail, sizeof(tail), _TRUNCATE,
+                    " vs=%s vh=%016llX vb=%s sd=%u of=%u tp=%u",
+                    bindingToken(dst2.vs, Kind::kOpaque, vsb, sizeof(vsb)),
+                    static_cast<unsigned long long>(lookupShaderHash(dst2.vs)),
+                    bindingToken(dst2.vb, Kind::kResource, vbb, sizeof(vbb)),
+                    dst2.stride, dst2.offset, dst2.topology);
+    }
+
+    char prov[64] = "";
+    if (indirectArgs) {
+        char ab[24];
+        _snprintf_s(prov, sizeof(prov), _TRUNCATE, " args=%s+%u t=%si",
+                    bindingToken(indirectArgs, Kind::kResource, ab, sizeof(ab)),
+                    indirectOff, foreignCtx ? "f" : "");
+    } else if (foreignCtx) {
+        _snprintf_s(prov, sizeof(prov), _TRUNCATE, " t=f");
+    }
+
+    Log::get().note(
+        "DC %u #%u %c n=%u i=%u r=%s d=%s c=%s s=%s,%s,%s,%s%s x=%s,%s,%s,%s%s%s q=%u",
+        g_frameOrdinal, g_drawsThisFrame - 1, kind, count, instances, r, d, c,
+        st[0], st[1], st[2], st[3], tail, st[4], st[5], st[6], st[7], pt, prov,
+        q);
+
+    if (rtv) rtv->Release();
+    if (dsv) dsv->Release();
+    if (cb0) cb0->Release();
+    for (ID3D11ShaderResourceView* v : sr) {
+        if (v) v->Release();
+    }
+    if (ps) ps->Release();
+}
+
+void drawCensusStructCount(void* dst, uint32_t dstOff, void* srcView,
+                           bool foreignCtx) {
+    if (g_framesLeft == 0) return;
+    ++g_copies;
+    ++g_copiesThisFrame;
+    const uint32_t q = g_seq++;
+    if (g_lines >= g_maxLines) return;
+    ++g_lines;
+    // The one call that moves a GPU-side element count into an argument
+    // buffer -- the write that arms every DrawIndirect/DispatchIndirect
+    // consumer, and the round-seventeen answer to "nothing writes the
+    // args". dst is a resource, src is a UAV: the tokens say which list
+    // fed which argument buffer.
+    char db[24], sb[24];
+    Log::get().note("DCS %u #%u dst=%s off=%u src=%s%s q=%u",
+                    g_frameOrdinal, g_copiesThisFrame - 1,
+                    bindingToken(dst, Kind::kResource, db, sizeof(db)), dstOff,
+                    bindingToken(srcView, Kind::kView, sb, sizeof(sb)),
+                    foreignCtx ? " t=f" : "", q);
+}
+
 void drawCensusCopy(char kind, void* dst, uint32_t dstSub, uint32_t dstX,
                     uint32_t dstY, void* src, uint32_t srcSub, bool hasBox,
-                    uint32_t left, uint32_t top, uint32_t right, uint32_t bottom) {
+                    uint32_t left, uint32_t top, uint32_t right, uint32_t bottom,
+                    bool foreignCtx) {
     if (g_framesLeft == 0) return;
     ++g_copies;
     ++g_copiesThisFrame;
@@ -509,9 +621,9 @@ void drawCensusCopy(char kind, void* dst, uint32_t dstSub, uint32_t dstX,
         _snprintf_s(box, sizeof(box), _TRUNCATE, " box=%u,%u-%u,%u", left, top,
                     right, bottom);
     }
-    Log::get().note("DCC %u #%u %c dst=%s sub=%u at=%u,%u src=%s sub=%u%s q=%u",
+    Log::get().note("DCC %u #%u %c dst=%s sub=%u at=%u,%u src=%s sub=%u%s%s q=%u",
                     g_frameOrdinal, g_copiesThisFrame - 1, kind, d, dstSub, dstX,
-                    dstY, s, srcSub, box, q);
+                    dstY, s, srcSub, box, foreignCtx ? " t=f" : "", q);
 }
 
 void drawCensusResolve(void* dst, uint32_t dstSub, void* src, uint32_t srcSub,

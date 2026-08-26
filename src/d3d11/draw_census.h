@@ -154,7 +154,26 @@ void drawCensusOffDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
 // region.
 void drawCensusCopy(char kind, void* dst, uint32_t dstSub, uint32_t dstX,
                     uint32_t dstY, void* src, uint32_t srcSub, bool hasBox,
-                    uint32_t left, uint32_t top, uint32_t right, uint32_t bottom);
+                    uint32_t left, uint32_t top, uint32_t right, uint32_t bottom,
+                    bool foreignCtx = false);
+
+// One draw recorded entirely by DIRECT reads off the calling context -- the
+// form for draws the owner-context binding shadow cannot describe: draws on
+// deferred/foreign contexts (t=f) and the GPU-driven indirect draws (kind
+// 'Y' DrawInstancedIndirect / 'Z' DrawIndexedInstancedIndirect, n=0 i=0,
+// args= naming the argument buffer). Round seventeen: the ring draws read
+// per-eye surfaces nothing recorded ever wrote, and these were the two draw
+// classes no census line had ever carried.
+void drawCensusDrawDirect(ID3D11DeviceContext* ctx, char kind, uint32_t count,
+                          uint32_t instances, bool foreignCtx,
+                          void* indirectArgs, uint32_t indirectOff);
+
+// One CopyStructureCount, logged as "DCS": the call that moves a GPU-side
+// element count into an argument buffer -- the write that arms every
+// indirect consumer, and the only writer class that could feed the
+// round-sixteen argument buffers nothing else touched.
+void drawCensusStructCount(void* dst, uint32_t dstOff, void* srcView,
+                           bool foreignCtx);
 
 // One ResolveSubresource, recorded while a census is running. Logged as a
 // "DCC" line with kind 'V' and the resolve format on the end.
