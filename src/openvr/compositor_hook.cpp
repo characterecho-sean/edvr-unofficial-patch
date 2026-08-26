@@ -151,6 +151,27 @@ struct State {
     // shared, so this file and its private fork cannot drift on it.
     SubmitPairLatch pairLatch;
 
+    // Submit-pair timing (round 32 of the FSS squares). The pixel domain is
+    // measured symmetric -- both submitted eyes carry the same one-frame
+    // square flashes -- so the one-eye-crisp percept must ride TIMING: a
+    // pair whose two submits straddle a frame boundary displays one eye's
+    // frame for extra vsyncs. The field clue: the hitch follows the
+    // squares. Log-only; a summary after every burst of long frames, and a
+    // once-plus-count note when a pair actually splits.
+    LARGE_INTEGER pace_lastBoundary = {};
+    uint32_t pace_boundaryNo = 0;
+    LARGE_INTEGER pace_eyeQpc[2] = {};
+    uint32_t pace_eyeBoundary[2] = {};
+    uint32_t pace_frames = 0;
+    uint32_t pace_long = 0;
+    double   pace_maxMs = 0.0;
+    double   pace_maxGapMs = 0.0;
+    double   pace_sumGapMs = 0.0;
+    uint32_t pace_gaps = 0;
+    uint32_t pace_splits = 0;
+    uint32_t pace_quiet = 0;
+    bool     pace_splitNoted = false;
+
     // This frame is inside a hold the player asked for by pressing their
     // external-camera key. Taken at WaitGetPoses, which is the frame boundary,
     // so it applies to the NEXT frame's submits -- the same place and the same
@@ -658,6 +679,39 @@ vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
     }
     if (s->inert) return s->realSubmit(self, eye, texture, bounds, flags);
 
+    // The pair-timing stamp: which boundary interval each eye's submit
+    // landed in, and when. A pair split across intervals is the one-eye
+    // stale-frame mechanism, counted.
+    {
+        const unsigned pe = eye == vr::Eye_Left ? 0u : 1u;
+        QueryPerformanceCounter(&s->pace_eyeQpc[pe]);
+        s->pace_eyeBoundary[pe] = s->pace_boundaryNo;
+        if (pe == 1 && s->pace_eyeQpc[0].QuadPart) {
+            LARGE_INTEGER pf;
+            QueryPerformanceFrequency(&pf);
+            const double gap =
+                (s->pace_eyeQpc[1].QuadPart - s->pace_eyeQpc[0].QuadPart) *
+                1000.0 / static_cast<double>(pf.QuadPart);
+            if (gap >= 0.0 && gap < 100.0) {
+                ++s->pace_gaps;
+                s->pace_sumGapMs += gap;
+                if (gap > s->pace_maxGapMs) s->pace_maxGapMs = gap;
+            }
+            if (s->pace_eyeBoundary[0] != s->pace_eyeBoundary[1]) {
+                ++s->pace_splits;
+                if (!s->pace_splitNoted) {
+                    s->pace_splitNoted = true;
+                    Log::get().note(
+                        "vr pacing: SPLIT PAIR -- the two eyes' submits "
+                        "straddled a frame boundary (left in interval %u, "
+                        "right in %u). One eye displays a stale frame when "
+                        "this happens; counting silently from here.",
+                        s->pace_eyeBoundary[0], s->pace_eyeBoundary[1]);
+                }
+            }
+        }
+    }
+
     // Validate before doing anything else. A hook on the wrong slot fails here
     // and goes inert instead of interfering with the headset.
     if (!s->validated) {
@@ -937,6 +991,43 @@ vr::EVRCompositorError hookedWaitGetPoses(void* self,
         s->realWaitGetPoses(self, renderPoses, renderCount, gamePoses, gameCount);
 
     if (s->inert) return result;
+
+    // The pair-timing boundary: frame cadence, and the burst summary.
+    {
+        ++s->pace_boundaryNo;
+        LARGE_INTEGER now, pf;
+        QueryPerformanceCounter(&now);
+        QueryPerformanceFrequency(&pf);
+        if (s->pace_lastBoundary.QuadPart) {
+            const double ms = (now.QuadPart - s->pace_lastBoundary.QuadPart) *
+                              1000.0 / static_cast<double>(pf.QuadPart);
+            if (ms < 500.0) {
+                ++s->pace_frames;
+                if (ms > s->pace_maxMs) s->pace_maxMs = ms;
+                if (ms > 13.0) {
+                    ++s->pace_long;
+                    s->pace_quiet = 0;
+                } else if (s->pace_long && ++s->pace_quiet >= 180) {
+                    Log::get().note(
+                        "vr pacing: burst over -- %u frames, %u long "
+                        "(>13 ms, max %.2f ms), submit pair gap avg "
+                        "%.3f ms max %.3f ms, %u SPLIT pairs.",
+                        s->pace_frames, s->pace_long, s->pace_maxMs,
+                        s->pace_gaps ? s->pace_sumGapMs / s->pace_gaps : 0.0,
+                        s->pace_maxGapMs, s->pace_splits);
+                    s->pace_frames = 0;
+                    s->pace_long = 0;
+                    s->pace_maxMs = 0.0;
+                    s->pace_maxGapMs = 0.0;
+                    s->pace_sumGapMs = 0.0;
+                    s->pace_gaps = 0;
+                    s->pace_splits = 0;
+                    s->pace_quiet = 0;
+                }
+            }
+        }
+        s->pace_lastBoundary = now;
+    }
 
     if (renderCount > vr::k_unMaxTrackedDeviceCount ||
         gameCount > vr::k_unMaxTrackedDeviceCount) {

@@ -12,6 +12,7 @@
 #include "../common/guard.h"
 #include "../common/log.h"
 #include "exposure_fix.h"   // lookupShaderHash
+#include "shader_swap.h"    // shaderSwapCompileCs: the series reducer
 
 namespace edvr {
 namespace {
@@ -83,6 +84,228 @@ uint32_t g_pendingEye = 0;
 
 uint64_t g_copies = 0;
 bool     g_armedNoted = false;
+
+// The eye SERIES (round 32, the field's own design: "take maybe 30
+// snapshots once we zoom and diff between left and right"). Full frames
+// at that count would be gigabytes and stalls; a tiny GPU reduce is
+// neither: at every packed-output dispatch, one compute pass folds the
+// submitted eye image into a 16-pixel tile-luminance row of a small
+// atlas -- N consecutive frames, both eyes, ~14 MB total, no readback
+// until the end. The offline diff then has the one thing every two-frame
+// dump lacked: the per-eye CADENCE of the flashes across the whole
+// window the eye actually watches.
+constexpr char kSeriesCsHlsl[] = R"HLSL(
+Texture2D<float4> src : register(t0);
+RWTexture2D<float> outt : register(u0);
+cbuffer P : register(b0) { uint4 off; }   // x = yOffset, y = tw, z = th
+[numthreads(8, 8, 1)]
+void main(uint3 id : SV_DispatchThreadID) {
+    if (id.x >= off.y || id.y >= off.z) return;
+    float s = 0;
+    for (uint j = 0; j < 16; ++j)
+        for (uint i = 0; i < 16; ++i) {
+            float4 c = src.Load(int3(id.x * 16 + i, id.y * 16 + j, 0));
+            s += dot(c.rgb, float3(0.299, 0.587, 0.114));
+        }
+    outt[uint2(id.x, off.x + id.y)] = s / 256.0;
+}
+)HLSL";
+
+constexpr uint32_t kSeriesMax = 48;   // atlas height 335*48 fits 16384
+uint32_t g_seriesWant = 0;            // frames from the key; 0 = off
+bool     g_seriesDone = false;
+uint32_t g_seriesCount[2] = {};
+uint32_t g_seriesTw = 0, g_seriesTh = 0;
+ID3D11ComputeShader*       g_seriesCs = nullptr;
+bool                       g_seriesTried = false;
+ID3D11Texture2D*           g_seriesAtlas[2] = {};
+ID3D11UnorderedAccessView* g_seriesUav[2] = {};
+ID3D11Buffer*              g_seriesCb = nullptr;
+bool                       g_seriesFailedNoted = false;
+
+void seriesRelease() {
+    for (int e = 0; e < 2; ++e) {
+        if (g_seriesUav[e]) { g_seriesUav[e]->Release(); g_seriesUav[e] = nullptr; }
+        if (g_seriesAtlas[e]) { g_seriesAtlas[e]->Release(); g_seriesAtlas[e] = nullptr; }
+    }
+    if (g_seriesCb) { g_seriesCb->Release(); g_seriesCb = nullptr; }
+    g_seriesCount[0] = g_seriesCount[1] = 0;
+}
+
+void seriesCapture(ID3D11DeviceContext* ctx, ID3D11Resource* res,
+                   uint32_t eye) {
+    if (eye > 1 || g_seriesCount[eye] >= g_seriesWant) return;
+    ID3D11Texture2D* tex = nullptr;
+    res->QueryInterface(__uuidof(ID3D11Texture2D),
+                        reinterpret_cast<void**>(&tex));
+    if (!tex) return;
+    D3D11_TEXTURE2D_DESC td{};
+    tex->GetDesc(&td);
+    tex->Release();
+    const uint32_t tw = (td.Width + 15) / 16;
+    const uint32_t th = (td.Height + 15) / 16;
+
+    ID3D11Device* dev = nullptr;
+    ctx->GetDevice(&dev);
+    if (!dev) return;
+
+    if (!g_seriesAtlas[0] || g_seriesTw != tw || g_seriesTh != th) {
+        seriesRelease();
+        bool ok = true;
+        for (int e = 0; e < 2 && ok; ++e) {
+            D3D11_TEXTURE2D_DESC ad{};
+            ad.Width = tw;
+            ad.Height = th * g_seriesWant;
+            ad.MipLevels = 1;
+            ad.ArraySize = 1;
+            ad.Format = DXGI_FORMAT_R32_FLOAT;
+            ad.SampleDesc.Count = 1;
+            ad.Usage = D3D11_USAGE_DEFAULT;
+            ad.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
+            ok = SUCCEEDED(dev->CreateTexture2D(&ad, nullptr,
+                                                &g_seriesAtlas[e])) &&
+                 SUCCEEDED(dev->CreateUnorderedAccessView(
+                     g_seriesAtlas[e], nullptr, &g_seriesUav[e]));
+        }
+        if (ok && !g_seriesCb) {
+            D3D11_BUFFER_DESC bd{};
+            bd.ByteWidth = 16;
+            bd.Usage = D3D11_USAGE_DYNAMIC;
+            bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+            bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+            ok = SUCCEEDED(dev->CreateBuffer(&bd, nullptr, &g_seriesCb));
+        }
+        if (!ok) {
+            seriesRelease();
+            if (!g_seriesFailedNoted) {
+                g_seriesFailedNoted = true;
+                Log::get().note("fss series: atlas creation failed; the "
+                                "series stands down.");
+            }
+            dev->Release();
+            return;
+        }
+        g_seriesTw = tw;
+        g_seriesTh = th;
+    }
+
+    if (!g_seriesCs && !g_seriesTried) {
+        g_seriesTried = true;
+        g_seriesCs = shaderSwapCompileCs(ctx, kSeriesCsHlsl,
+                                         sizeof(kSeriesCsHlsl) - 1, "main",
+                                         "fss_series_cs", nullptr,
+                                         "fss series");
+    }
+    if (!g_seriesCs) {
+        dev->Release();
+        return;
+    }
+
+    // The source needs an SRV; the submitted texture carries the shader-
+    // resource bind (delivery samples it). A refusal stands the series
+    // down with a note rather than faulting.
+    ID3D11ShaderResourceView* srcSrv = nullptr;
+    if (FAILED(dev->CreateShaderResourceView(res, nullptr, &srcSrv))) {
+        if (!g_seriesFailedNoted) {
+            g_seriesFailedNoted = true;
+            Log::get().note("fss series: the submitted texture refuses an "
+                            "SRV; the series stands down.");
+        }
+        dev->Release();
+        return;
+    }
+    dev->Release();
+
+    D3D11_MAPPED_SUBRESOURCE m{};
+    if (SUCCEEDED(ctx->Map(g_seriesCb, 0, D3D11_MAP_WRITE_DISCARD, 0, &m)) &&
+        m.pData) {
+        uint32_t vals[4] = {g_seriesCount[eye] * g_seriesTh, g_seriesTw,
+                            g_seriesTh, 0};
+        memcpy(m.pData, vals, sizeof(vals));
+        ctx->Unmap(g_seriesCb, 0);
+    } else {
+        srcSrv->Release();
+        return;
+    }
+
+    ID3D11ComputeShader* savedCs = nullptr;
+    ID3D11ShaderResourceView* savedSrv = nullptr;
+    ID3D11UnorderedAccessView* savedUav = nullptr;
+    ID3D11Buffer* savedCb = nullptr;
+    ctx->CSGetShader(&savedCs, nullptr, nullptr);
+    ctx->CSGetShaderResources(0, 1, &savedSrv);
+    ctx->CSGetUnorderedAccessViews(0, 1, &savedUav);
+    ctx->CSGetConstantBuffers(0, 1, &savedCb);
+
+    UINT keep = 0;
+    ctx->CSSetShader(g_seriesCs, nullptr, 0);
+    ctx->CSSetShaderResources(0, 1, &srcSrv);
+    ctx->CSSetUnorderedAccessViews(0, 1, &g_seriesUav[eye], &keep);
+    ctx->CSSetConstantBuffers(0, 1, &g_seriesCb);
+    ctx->Dispatch((g_seriesTw + 7) / 8, (g_seriesTh + 7) / 8, 1);
+
+    ID3D11ShaderResourceView* nullSrv = nullptr;
+    ID3D11UnorderedAccessView* nullUav = nullptr;
+    ctx->CSSetShaderResources(0, 1, &nullSrv);
+    ctx->CSSetUnorderedAccessViews(0, 1, &nullUav, &keep);
+    ctx->CSSetShader(savedCs, nullptr, 0);
+    ctx->CSSetShaderResources(0, 1, &savedSrv);
+    ctx->CSSetUnorderedAccessViews(0, 1, &savedUav, &keep);
+    ctx->CSSetConstantBuffers(0, 1, &savedCb);
+    if (savedCs) savedCs->Release();
+    if (savedSrv) savedSrv->Release();
+    if (savedUav) savedUav->Release();
+    if (savedCb) savedCb->Release();
+    srcSrv->Release();
+
+    ++g_seriesCount[eye];
+}
+
+void seriesWrite(ID3D11DeviceContext* ctx) {
+    CreateDirectoryA("edvr_logs", nullptr);
+    CreateDirectoryA("edvr_logs\\dumps", nullptr);
+    ID3D11Device* dev = nullptr;
+    ctx->GetDevice(&dev);
+    if (!dev) return;
+    for (int e = 0; e < 2; ++e) {
+        if (!g_seriesAtlas[e]) continue;
+        D3D11_TEXTURE2D_DESC td{};
+        g_seriesAtlas[e]->GetDesc(&td);
+        D3D11_TEXTURE2D_DESC sd = td;
+        sd.Usage = D3D11_USAGE_STAGING;
+        sd.BindFlags = 0;
+        sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        ID3D11Texture2D* stage = nullptr;
+        if (FAILED(dev->CreateTexture2D(&sd, nullptr, &stage)) || !stage) {
+            continue;
+        }
+        ctx->CopyResource(stage, g_seriesAtlas[e]);
+        D3D11_MAPPED_SUBRESOURCE m{};
+        if (SUCCEEDED(ctx->Map(stage, 0, D3D11_MAP_READ, 0, &m)) && m.pData) {
+            char path[128];
+            _snprintf_s(path, sizeof(path), _TRUNCATE,
+                        "edvr_logs\\dumps\\fssseries_eye%d.bin", e);
+            FILE* f = nullptr;
+            fopen_s(&f, path, "wb");
+            if (f) {
+                const uint8_t* row = static_cast<const uint8_t*>(m.pData);
+                for (uint32_t y = 0; y < td.Height; ++y) {
+                    fwrite(row, 1, static_cast<size_t>(td.Width) * 4, f);
+                    row += m.RowPitch;
+                }
+                fclose(f);
+                Log::get().note(
+                    "FSSSERIES eye=%d tw=%u th=%u frames=%u file=%s", e,
+                    g_seriesTw, g_seriesTh, g_seriesCount[e], path);
+            }
+            ctx->Unmap(stage, 0);
+        }
+        stage->Release();
+    }
+    dev->Release();
+    Log::get().note("fss series: complete. Re-arming needs the key cleared "
+                    "and set again.");
+}
 
 FaultBudget g_budget("fssDump", 8);
 
@@ -274,6 +497,28 @@ void writeOut(ID3D11DeviceContext* ctx, uint32_t pass) {
 }  // namespace
 
 void fssDumpConfigure(Config& cfg) {
+    {
+        int n = cfg.getInt("advanced.fss_eye_series", 0);
+        if (n < 0) n = 0;
+        if (n > static_cast<int>(kSeriesMax)) n = kSeriesMax;
+        const uint32_t want = static_cast<uint32_t>(n);
+        if (want != g_seriesWant) {
+            g_seriesWant = want;
+            g_seriesDone = false;
+            g_seriesTried = false;
+            seriesRelease();
+            if (g_seriesWant) {
+                Log::get().note(
+                    "fss series ARMED: from the first scanner frame, every "
+                    "submitted eye image is folded to a 16-pixel tile "
+                    "luminance row -- %u consecutive frames, both eyes, "
+                    "written to edvr_logs\\dumps\\fssseries_eye*.bin "
+                    "when the count fills. No hitches; the per-eye flash "
+                    "CADENCE is the measurement.",
+                    g_seriesWant);
+            }
+        }
+    }
     const int n = cfg.getInt("advanced.fss_eye_dump", 0);
     const uint32_t want = n > 0 ? static_cast<uint32_t>(n) : 0;
     if (want == g_dumpFrame) return;
@@ -297,7 +542,9 @@ void fssDumpConfigure(Config& cfg) {
     }
 }
 
-bool fssDumpWantsDraws() { return g_dumpFrame != 0 && !g_done; }
+bool fssDumpWantsDraws() {
+    return (g_dumpFrame != 0 && !g_done) || (g_seriesWant != 0 && !g_seriesDone);
+}
 
 bool fssDumpOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
                       uint32_t instances) {
@@ -379,7 +626,8 @@ void fssDumpDispatchPre(ID3D11DeviceContext* ctx) {
 }
 
 void fssDumpDispatchPost(ID3D11DeviceContext* ctx) {
-    if (!g_dumping || !ctx) return;
+    const bool seriesLive = g_seriesWant != 0 && !g_seriesDone;
+    if ((!g_dumping && !seriesLive) || !ctx) return;
     guardedBudget(g_budget, [&] {
         ID3D11ComputeShader* cs = nullptr;
         ctx->CSGetShader(&cs, nullptr, nullptr);
@@ -394,7 +642,13 @@ void fssDumpDispatchPost(ID3D11DeviceContext* ctx) {
                 ID3D11Resource* res = nullptr;
                 uav->GetResource(&res);
                 if (res) {
-                    captureResource(ctx, res, 8, occ - 1);
+                    if (g_dumping) captureResource(ctx, res, 8, occ - 1);
+                    // The series gates on the scanner itself: the body
+                    // composites draw before the reconstruction in every
+                    // frame, so a zero count here means a non-FSS frame.
+                    if (seriesLive && g_occComp != 0) {
+                        seriesCapture(ctx, res, occ - 1);
+                    }
                     res->Release();
                 }
                 uav->Release();
@@ -404,6 +658,12 @@ void fssDumpDispatchPost(ID3D11DeviceContext* ctx) {
 }
 
 void fssDumpFrameBoundary(ID3D11DeviceContext* ctx) {
+    if (g_seriesWant && !g_seriesDone && ctx &&
+        g_seriesCount[0] >= g_seriesWant && g_seriesCount[1] >= g_seriesWant) {
+        guardedBudget(g_budget, [&] { seriesWrite(ctx); });
+        g_seriesDone = true;
+        seriesRelease();
+    }
     const bool sawBody = g_occRing != 0 || g_occComp != 0;
     g_occRing = 0;
     g_occComp = 0;
@@ -440,6 +700,13 @@ void fssDumpFrameBoundary(ID3D11DeviceContext* ctx) {
     });
 }
 
-void fssDumpShutdown() { releaseAll(); }
+void fssDumpShutdown() {
+    releaseAll();
+    seriesRelease();
+    if (g_seriesCs) {
+        g_seriesCs->Release();
+        g_seriesCs = nullptr;
+    }
+}
 
 }  // namespace edvr
