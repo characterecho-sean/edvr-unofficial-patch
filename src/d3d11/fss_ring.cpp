@@ -10,6 +10,7 @@
 #include "../common/guard.h"
 #include "../common/log.h"
 #include "exposure_fix.h"   // lookupShaderHash
+#include "shader_swap.h"    // shaderSwapCompilePs: the paved compile path
 
 namespace edvr {
 namespace {
@@ -50,6 +51,112 @@ constexpr uint32_t kCbSlots = 4;
 // fss_scan_level's lesson -- so both polarities ship and one look names
 // the right one.
 uint8_t g_mode = 0;
+
+// Mode 6 = "clean": the surgical fix. The ring quad's own pixel shader,
+// transcribed from docs/fss-ring-ps.asm with the flag byte's bit 4 -- the
+// dissolve's hard-black unrevealed state, THE black squares -- treated as
+// never set. The soft fade and every lighting term are unchanged; the
+// desk-compile matches the stock output signature exactly. Compiled once
+// at first engage on the paved shader_swap path; null means draw stock.
+constexpr char kCleanPsHlsl[] = R"HLSL(
+// The FSS ring quad's pixel shader (ps 7CECABDE34FFBE9E), transcribed
+// mechanically from docs/fss-ring-ps.asm with ONE semantic change: the
+// flag byte's bit 4 -- the dissolve's hard-black "unrevealed" state, which
+// collapses the exposure lerp to zero and paints the black squares -- is
+// treated as never set. The soft cb2[46] fade-in and every lighting term
+// are transcribed unchanged.
+
+Texture2D<float4> t0 : register(t0);   // x = ao, yz = packed normal
+Texture2D<float4> t1 : register(t1);   // rgb = albedo, a*255 = flag byte
+Texture2D<float4> t2 : register(t2);   // material (loaded .yzxw)
+Texture2D<float4> t3 : register(t3);   // illumination
+cbuffer CB2 : register(b2) { float4 c[47]; }
+
+struct PsIn {
+    float2 uv   : TEXCOORD0;
+    float3 view : TEXCOORD1;
+};
+struct PsOut {
+    float3 c0 : SV_Target0;
+    float  c1 : SV_Target1;
+};
+
+PsOut main(PsIn i) {
+    float2 fp = floor(i.uv * c[1].xy);
+    uint2  lim = uint2(c[1].xy + float2(-1.0, -1.0));
+    uint2  p = min(lim, uint2(fp));
+
+    float4 alb = t1.Load(int3(p, 0));
+    uint flags = (uint)(alb.w * 255.0 + 0.5);
+
+    float3 na = t0.Load(int3(p, 0)).xyz;
+    float2 n2 = na.yz * 4.0 - 2.0;
+    float  d2 = dot(n2, n2);
+    float  tz = sqrt(max(1.0 - d2 * 0.25, 0.0));
+    float3 ns = normalize(float3(n2 * tz, d2 * 0.5 - 1.0));
+    float3 N = ns.x * c[2].xyz + ns.y * c[3].xyz + ns.z * c[4].xyz;
+    float  ao = clamp(na.x, 0.05, 1.0);
+
+    float4 mat = t2.Load(int3(p, 0)).yzxw;
+
+    float atten, attenS;
+    if (flags & 128u) {
+        atten = 1.0;
+        attenS = 1.0;
+    } else {
+        if (flags & 64u) mat.xy = mat.zz;
+        float fade = 1.0 - mat.w;
+        atten  = 1.0 - fade * c[46].x;
+        attenS = 1.0 - fade * c[46].y;
+    }
+
+    float3 V = normalize(i.view);
+
+    // Stock: float blackFlag = (flags & 4u) ? 0.0 : 1.0;  -- THE SQUARES.
+    const float blackFlag = 1.0;
+
+    if (((flags & 32u) != 0u) && dot(-c[42].xyz, N) < 0.0) N = -N;
+
+    float3 H = normalize(-V - c[42].xyz);
+    float NdL = saturate(dot(N, -c[42].xyz));
+    float NdV = saturate(dot(N, -V));
+    float NdH = saturate(dot(N, H));
+
+    float  dif = NdL * 0.318310;
+    float3 diffuse = alb.xyz * dif;
+
+    float ao2 = ao * ao;
+    float ao4 = ao2 * ao2;
+    float den = min((NdH * ao4 - NdH) * NdH + 1.000001, 1.0);
+    den = den * den * 3.141592;
+    float D = ao4 / den;
+
+    float fh = 1.0 - abs(dot(-c[42].xyz, H));
+    float f2 = fh * fh;
+    float fres = fh * (f2 * f2);
+    float3 F = mat.zxy + (1.0 - mat.zxy) * fres;
+
+    float visL = NdL * (2.0 - ao2) + ao2;
+    float visV = NdV * (2.0 - ao2) + ao2;
+    float3 spec = (D / (visL * visV)) * F * NdL * attenS;
+
+    float3 col = (diffuse * atten + spec) * c[40].xyz;
+    float3 aux = dif * c[40].xyz;
+
+    float lum = dot(t3.Load(int3(p, 0)).xyz, c[44].xyz);
+    float scale = (c[36].x * (blackFlag - lum) + lum) * c[36].y;
+
+    PsOut o;
+    o.c0 = scale * col * c[0].x;
+    o.c1 = dot(scale * aux, float3(0.308600, 0.609400, 0.082000)) * c[0].x;
+    return o;
+}
+)HLSL";
+
+ID3D11PixelShader* g_cleanPs = nullptr;
+bool               g_cleanTried = false;
+ID3D11PixelShader* g_savedPs = nullptr;
+bool               g_psEngaged = false;
 
 // The flat mask, built to the displaced view's size on first engage.
 ID3D11Texture2D*          g_maskTex = nullptr;
@@ -136,16 +243,27 @@ void fssRingConfigure(Config& cfg) {
         mode = 4;
     } else if (m == "mask0") {
         mode = 5;
+    } else if (m == "clean") {
+        mode = 6;
     } else {
         Log::get().note("fss_ring_feed \"%s\" is not stock, second, first, "
-                        "depth, mask255 or mask0; running stock.", m.c_str());
+                        "depth, mask255, mask0 or clean; running stock.",
+                        m.c_str());
     }
     if (mode == g_mode) return;
     g_mode = mode;
     g_engagedNoted = false;
     g_learnNoted = false;
     releaseLearned();
-    if (g_mode >= 4) {
+    if (g_mode == 6) {
+        Log::get().note(
+            "fss ring ARMED: the ring quad draws through EDVR's transcribed "
+            "pixel shader with the dissolve's hard-black state removed -- "
+            "the flag that painted the black squares is ignored, the soft "
+            "fade and the lighting are the game's own. Compiles at the "
+            "first zoom; a compile failure is logged and the game draws "
+            "stock. Clear to restore.");
+    } else if (g_mode >= 4) {
         Log::get().note(
             "fss ring ARMED: the ring quad's reveal mask (PS slot 3) is "
             "replaced with flat %u for exactly those draws, both eyes -- "
@@ -208,8 +326,8 @@ bool fssRingOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
             return true;
         }
         if (g_mode >= 4) {
-            // Mask mode: only the ring quad samples the mask; the other
-            // families pass through untouched.
+            // Mask and clean modes: only the ring quad carries the hard-
+            // black flag path; the other families pass through untouched.
             if (f != 0) return false;
             g_pendingFam = f;
             g_pendingJ = j;
@@ -281,7 +399,30 @@ bool fssRingOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
 void fssRingBegin(ID3D11DeviceContext* ctx) {
     g_engaged = false;
     g_depthEngaged = false;
+    g_psEngaged = false;
     if (!ctx || !g_mode) return;
+    if (g_mode == 6) {
+        guardedBudget(g_budget, [&] {
+            if (!g_cleanPs && !g_cleanTried) {
+                g_cleanTried = true;
+                g_cleanPs = shaderSwapCompilePs(
+                    ctx, kCleanPsHlsl, sizeof(kCleanPsHlsl) - 1, "main",
+                    "fss_ring_clean_ps", nullptr, "fss ring clean");
+            }
+            if (!g_cleanPs) return;
+            ctx->PSGetShader(&g_savedPs, nullptr, nullptr);
+            ctx->PSSetShader(g_cleanPs, nullptr, 0);
+            g_psEngaged = true;
+            ++g_applied;
+            if (!g_engagedNoted) {
+                g_engagedNoted = true;
+                Log::get().note(
+                    "fss ring: engaged -- the ring quad is drawing through "
+                    "the cleaned shader, restored after each draw.");
+            }
+        });
+        return;
+    }
     if (g_mode >= 4) {
         guardedBudget(g_budget, [&] {
             // Size the flat mask to whatever the game bound at slot 3.
@@ -433,6 +574,15 @@ void fssRingBegin(ID3D11DeviceContext* ctx) {
 }
 
 void fssRingEnd(ID3D11DeviceContext* ctx) {
+    if (g_psEngaged && ctx) {
+        g_psEngaged = false;
+        ctx->PSSetShader(g_savedPs, nullptr, 0);
+        if (g_savedPs) {
+            g_savedPs->Release();
+            g_savedPs = nullptr;
+        }
+        return;
+    }
     if (g_engaged && ctx && g_mode >= 4) {
         g_engaged = false;
         ctx->PSSetShaderResources(3, 1, &g_displaced[3]);
@@ -486,6 +636,10 @@ void fssRingShutdown() {
     if (g_maskTex) {
         g_maskTex->Release();
         g_maskTex = nullptr;
+    }
+    if (g_cleanPs) {
+        g_cleanPs->Release();
+        g_cleanPs = nullptr;
     }
 }
 

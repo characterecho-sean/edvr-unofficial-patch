@@ -87,7 +87,70 @@ void compileInner(ID3D11DeviceContext* ctx, const char* hlsl, size_t hlslLen,
                     *out ? "compiled" : "creation FAILED; drawing stock");
 }
 
+// The pixel form, compiled against ps_5_0 and created as a pixel shader.
+// One function rather than a templated pair: the two bodies differ in the
+// target string and the Create call, and the geyser lesson says FFI-shaped
+// code is proof-read line by line, not generated.
+void compileInnerPs(ID3D11DeviceContext* ctx, const char* hlsl,
+                    size_t hlslLen, const char* entry, const char* name,
+                    const SwapMacro* macros, const char* who,
+                    ID3D11PixelShader** out) {
+    HMODULE mod = LoadLibraryW(L"d3dcompiler_47.dll");
+    if (!mod) {
+        Log::get().note("%s: d3dcompiler_47.dll not found; the swap stands "
+                        "down and the game draws stock.", who);
+        return;
+    }
+    PFN_D3DCompile compile =
+        reinterpret_cast<PFN_D3DCompile>(GetProcAddress(mod, "D3DCompile"));
+    if (!compile) {
+        Log::get().note("%s: d3dcompiler_47.dll has no D3DCompile; the swap "
+                        "stands down and the game draws stock.", who);
+        return;
+    }
+
+    void* blob = nullptr;
+    void* errors = nullptr;
+    const HRESULT hr = compile(hlsl, hlslLen, name, macros, nullptr, entry,
+                               "ps_5_0", 0, 0, &blob, &errors);
+    if (errors) {
+        Log::get().note("%s: shader compiler said: %.400s", who,
+                        static_cast<const char*>(blobPtr(errors)));
+        blobRelease(errors);
+    }
+    if (FAILED(hr) || !blob) {
+        Log::get().note("%s: shader compile failed (0x%08X); the swap stands "
+                        "down and the game draws stock.", who,
+                        static_cast<unsigned>(hr));
+        if (blob) blobRelease(blob);
+        return;
+    }
+
+    ID3D11Device* dev = nullptr;
+    ctx->GetDevice(&dev);
+    if (dev) {
+        dev->CreatePixelShader(blobPtr(blob), blobSize(blob), nullptr, out);
+        dev->Release();
+    }
+    blobRelease(blob);
+    Log::get().note("%s: replacement pixel shader %s.", who,
+                    *out ? "compiled" : "creation FAILED; drawing stock");
+}
+
 }  // namespace
+
+ID3D11PixelShader* shaderSwapCompilePs(ID3D11DeviceContext* ctx,
+                                       const char* hlsl, size_t hlslLen,
+                                       const char* entry, const char* name,
+                                       const SwapMacro* macros,
+                                       const char* who) {
+    if (!ctx || !hlsl || !hlslLen) return nullptr;
+    ID3D11PixelShader* out = nullptr;
+    guardedBudget(g_budget, [&] {
+        compileInnerPs(ctx, hlsl, hlslLen, entry, name, macros, who, &out);
+    });
+    return out;
+}
 
 ID3D11VertexShader* shaderSwapCompileVs(ID3D11DeviceContext* ctx,
                                         const char* hlsl, size_t hlslLen,
