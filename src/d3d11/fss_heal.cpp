@@ -82,10 +82,29 @@ void main(uint3 id : SV_DispatchThreadID) {
                 int ry = int(id.y) + dys[i];
                 if (ry < 0 || ry >= int(rh)) continue;
                 float4 r = R[uint2(uint(rx), uint(ry))];
-                if (dot(r.rgb, float3(0.299, 0.587, 0.114)) > 0.008) {
-                    o = r;
-                    break;
+                if (dot(r.rgb, float3(0.299, 0.587, 0.114)) <= 0.008) {
+                    continue;
                 }
+                // The region gate, from the field's menu-text report: the
+                // squares live on the BRIGHT body, while every mis-heal so
+                // far hit dark-background surfaces (menus, panel chrome).
+                // The fill's surroundings in the right eye must be
+                // genuinely bright content, not sparse marks on darkness.
+                float m = 0.0;
+                [unroll] for (int j = 0; j < 4; ++j) {
+                    int2 offs2[4] = {int2(-12, -12), int2(12, -12),
+                                     int2(-12, 12), int2(12, 12)};
+                    int2 q2 = int2(rx, ry) + offs2[j];
+                    if (q2.x >= 0 && q2.y >= 0 && q2.x < int(rw) &&
+                        q2.y < int(rh)) {
+                        m += dot(R[uint2(q2)].rgb,
+                                 float3(0.299, 0.587, 0.114));
+                    }
+                }
+                if (m > 0.20) {
+                    o = r;
+                }
+                break;
             }
         }
     }
