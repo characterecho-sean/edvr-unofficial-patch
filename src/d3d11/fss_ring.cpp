@@ -158,6 +158,23 @@ bool               g_cleanTried = false;
 ID3D11PixelShader* g_savedPs = nullptr;
 bool               g_psEngaged = false;
 
+// The fade patch, clean mode's second half. Both ring shaders darken
+// unrevealed pixels through atten = 1 - (1 - fade) * cb2[46].xy -- the
+// QUAD alongside its bit-4 hard black, the MESH as its only black path
+// (docs/fss-ring-mesh-ps.asm) -- so a fade value of zero paints the
+// squares even with bit 4 gone. Zeroing cb2[46].xy forces atten to 1 in
+// both shaders without touching either's lighting: the game's b2 is
+// GPU-copied into an EDVR buffer, vector 46's xy is overwritten from an
+// 8-byte zero buffer by region copy, and the copy is bound for exactly
+// the matched draws. No CPU readback, no stalls, restored per draw.
+constexpr uint32_t kFadeVecOffset = 46 * 16;
+ID3D11Buffer* g_zeroBuf = nullptr;      // 8 bytes of zeros
+ID3D11Buffer* g_patchedCb = nullptr;    // sized to the game's b2
+uint32_t      g_patchedBytes = 0;
+ID3D11Buffer* g_savedCb2 = nullptr;
+bool          g_cbEngaged = false;
+bool          g_fadeFailedNoted = false;
+
 // The flat mask, built to the displaced view's size on first engage.
 ID3D11Texture2D*          g_maskTex = nullptr;
 ID3D11ShaderResourceView* g_maskSrv = nullptr;
@@ -326,9 +343,11 @@ bool fssRingOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
             return true;
         }
         if (g_mode >= 4) {
-            // Mask and clean modes: only the ring quad carries the hard-
-            // black flag path; the other families pass through untouched.
-            if (f != 0) return false;
+            // Mask modes touch only the quad. Clean covers the quad (bit-4
+            // shader plus fade patch) and the mesh (fade patch alone --
+            // docs/fss-ring-mesh-ps.asm has no bit-4 path); the f60 mask
+            // writer passes through untouched.
+            if (g_mode == 6 ? f > 1 : f != 0) return false;
             g_pendingFam = f;
             g_pendingJ = j;
             return true;
@@ -403,22 +422,94 @@ void fssRingBegin(ID3D11DeviceContext* ctx) {
     if (!ctx || !g_mode) return;
     if (g_mode == 6) {
         guardedBudget(g_budget, [&] {
-            if (!g_cleanPs && !g_cleanTried) {
-                g_cleanTried = true;
-                g_cleanPs = shaderSwapCompilePs(
-                    ctx, kCleanPsHlsl, sizeof(kCleanPsHlsl) - 1, "main",
-                    "fss_ring_clean_ps", nullptr, "fss ring clean");
+            // The fade patch, for quad and mesh alike.
+            ID3D11Buffer* gameCb = nullptr;
+            ctx->PSGetConstantBuffers(2, 1, &gameCb);
+            if (gameCb) {
+                D3D11_BUFFER_DESC bd{};
+                gameCb->GetDesc(&bd);
+                if (bd.ByteWidth >= kFadeVecOffset + 8) {
+                    ID3D11Device* dev = nullptr;
+                    if (!g_zeroBuf || !g_patchedCb ||
+                        g_patchedBytes != bd.ByteWidth) {
+                        if (g_patchedCb) {
+                            g_patchedCb->Release();
+                            g_patchedCb = nullptr;
+                        }
+                        ctx->GetDevice(&dev);
+                        if (dev) {
+                            if (!g_zeroBuf) {
+                                const uint32_t zeros[4] = {};
+                                D3D11_BUFFER_DESC zd{};
+                                zd.ByteWidth = 16;
+                                zd.Usage = D3D11_USAGE_IMMUTABLE;
+                                zd.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+                                D3D11_SUBRESOURCE_DATA zi{};
+                                zi.pSysMem = zeros;
+                                dev->CreateBuffer(&zd, &zi, &g_zeroBuf);
+                            }
+                            D3D11_BUFFER_DESC pd{};
+                            pd.ByteWidth = bd.ByteWidth;
+                            pd.Usage = D3D11_USAGE_DEFAULT;
+                            pd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+                            dev->CreateBuffer(&pd, nullptr, &g_patchedCb);
+                            dev->Release();
+                            g_patchedBytes = g_patchedCb ? bd.ByteWidth : 0;
+                            if ((!g_zeroBuf || !g_patchedCb) &&
+                                !g_fadeFailedNoted) {
+                                g_fadeFailedNoted = true;
+                                Log::get().note(
+                                    "fss ring: fade-patch buffers failed; "
+                                    "the fade stays stock.");
+                            }
+                        }
+                    }
+                    if (g_zeroBuf && g_patchedCb) {
+                        ctx->CopyResource(g_patchedCb, gameCb);
+                        D3D11_BOX box{};
+                        box.left = 0;
+                        box.right = 8;
+                        box.top = 0;
+                        box.bottom = 1;
+                        box.front = 0;
+                        box.back = 1;
+                        ctx->CopySubresourceRegion(g_patchedCb, 0,
+                                                   kFadeVecOffset, 0, 0,
+                                                   g_zeroBuf, 0, &box);
+                        g_savedCb2 = gameCb;   // keep the Get's ref
+                        gameCb = nullptr;
+                        ID3D11Buffer* ours = g_patchedCb;
+                        ctx->PSSetConstantBuffers(2, 1, &ours);
+                        g_cbEngaged = true;
+                    }
+                }
+                if (gameCb) gameCb->Release();
             }
-            if (!g_cleanPs) return;
-            ctx->PSGetShader(&g_savedPs, nullptr, nullptr);
-            ctx->PSSetShader(g_cleanPs, nullptr, 0);
-            g_psEngaged = true;
-            ++g_applied;
-            if (!g_engagedNoted) {
-                g_engagedNoted = true;
-                Log::get().note(
-                    "fss ring: engaged -- the ring quad is drawing through "
-                    "the cleaned shader, restored after each draw.");
+
+            // The cleaned shader, for the quad alone (bit-4 lives there).
+            if (g_pendingFam == 0) {
+                if (!g_cleanPs && !g_cleanTried) {
+                    g_cleanTried = true;
+                    g_cleanPs = shaderSwapCompilePs(
+                        ctx, kCleanPsHlsl, sizeof(kCleanPsHlsl) - 1, "main",
+                        "fss_ring_clean_ps", nullptr, "fss ring clean");
+                }
+                if (g_cleanPs) {
+                    ctx->PSGetShader(&g_savedPs, nullptr, nullptr);
+                    ctx->PSSetShader(g_cleanPs, nullptr, 0);
+                    g_psEngaged = true;
+                }
+            }
+            if (g_psEngaged || g_cbEngaged) {
+                ++g_applied;
+                if (!g_engagedNoted) {
+                    g_engagedNoted = true;
+                    Log::get().note(
+                        "fss ring: engaged -- quad and mesh draw with the "
+                        "fade zeroed%s, restored after each draw.",
+                        g_psEngaged ? " and the quad through the cleaned "
+                                      "shader" : "");
+                }
             }
         });
         return;
@@ -574,6 +665,25 @@ void fssRingBegin(ID3D11DeviceContext* ctx) {
 }
 
 void fssRingEnd(ID3D11DeviceContext* ctx) {
+    if ((g_psEngaged || g_cbEngaged) && ctx && g_mode == 6) {
+        if (g_psEngaged) {
+            g_psEngaged = false;
+            ctx->PSSetShader(g_savedPs, nullptr, 0);
+            if (g_savedPs) {
+                g_savedPs->Release();
+                g_savedPs = nullptr;
+            }
+        }
+        if (g_cbEngaged) {
+            g_cbEngaged = false;
+            ctx->PSSetConstantBuffers(2, 1, &g_savedCb2);
+            if (g_savedCb2) {
+                g_savedCb2->Release();
+                g_savedCb2 = nullptr;
+            }
+        }
+        return;
+    }
     if (g_psEngaged && ctx) {
         g_psEngaged = false;
         ctx->PSSetShader(g_savedPs, nullptr, 0);
@@ -640,6 +750,14 @@ void fssRingShutdown() {
     if (g_cleanPs) {
         g_cleanPs->Release();
         g_cleanPs = nullptr;
+    }
+    if (g_zeroBuf) {
+        g_zeroBuf->Release();
+        g_zeroBuf = nullptr;
+    }
+    if (g_patchedCb) {
+        g_patchedCb->Release();
+        g_patchedCb = nullptr;
     }
 }
 
