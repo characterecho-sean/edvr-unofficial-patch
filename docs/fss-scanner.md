@@ -609,6 +609,39 @@ the freeze-aborted batch: `dispatch_pair_sync = E861F611375E7ECC:r`
 its history; squares growing into the right under the un-reversed
 direction confirms the mapping.
 
+## Round fourteen: the first hard asymmetry — a constant buffer bound for one eye
+
+The accumulator pair-sync (`E861F611375E7ECC:r`) came back engaged-and-null
+(receipts: ARMED and first-copy lines), which with the mask nulls means the
+left eye REGENERATES its squares every frame from per-frame inputs — no
+carried state involved. And the post-composite draw sequences are fully
+paired across all 30 captured frames: the draw side is exhausted outright.
+
+So round fourteen taught the census the one binding class it never carried:
+what a dispatch READS. DCX lines gained `s=` (CS SRVs 0–7) and `cb=` (CS
+b0–b1), and one auto-census flight measured, 30/30 frames:
+
+- `E861`/`B742` (accumulate + output): symmetric end to end — per-eye
+  3-deep input rings, one shared 80-byte cb.
+- `E654` (tile maps): symmetric.
+- **`22786F6DE290C577` (the mask builder): CS b0 per-eye as expected — and
+  CS b1 BOUND for one occurrence (a 480-byte parameter block) and UNBOUND
+  for the other.** An unbound constant buffer reads as zeros: one eye's
+  per-pixel masks are built with default parameters every frame. This is
+  the first hard per-eye difference in bound state the hunt has measured,
+  it sits at exactly the pass whose output granularity is the squares, and
+  it explains why syncing the mask OUTPUTS never healed anything — the
+  divergence re-enters through the parameters each frame.
+
+## Round fifteen (armed): equalise b1, both directions
+
+`experimental.dispatch_cb1_lend = 22786F6DE290C577` — a dispatch arriving
+with b1 empty runs with the buffer the same shader last ran bound with,
+restored to empty after. If the squares survive, the flip side
+(`dispatch_cb1_strip`) runs the bound eye parameterless instead. Whichever
+direction heals names the good state; the healing arm is the fix's shape
+(gated, shipped as a fix key) if Frontier's own binding is the bug.
+
 ## Open
 
 - The flash detector withholds a couple of frames at every fresh FSS zoom
