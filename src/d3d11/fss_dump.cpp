@@ -114,6 +114,22 @@ void main(uint3 id : SV_DispatchThreadID) {
 
 constexpr uint32_t kSeriesMax = 48;   // atlas height 335*48 fits 16384
 uint32_t g_seriesFmt[2] = {};         // the source format, for the manifest
+ID3D11Texture2D*          g_seriesCopy[2] = {};      // copy-through fallback
+ID3D11ShaderResourceView* g_seriesCopySrv[2] = {};
+
+// The typed twin of a typeless family, for viewing a submitted texture the
+// game created typeless. Unknown families return UNKNOWN and the caller
+// stands down with a note rather than guessing.
+DXGI_FORMAT seriesTypedOf(DXGI_FORMAT f) {
+    switch (f) {
+        case DXGI_FORMAT_R8G8B8A8_TYPELESS:    return DXGI_FORMAT_R8G8B8A8_UNORM;
+        case DXGI_FORMAT_R10G10B10A2_TYPELESS: return DXGI_FORMAT_R10G10B10A2_UNORM;
+        case DXGI_FORMAT_R16G16B16A16_TYPELESS: return DXGI_FORMAT_R16G16B16A16_UNORM;
+        case DXGI_FORMAT_B8G8R8A8_TYPELESS:    return DXGI_FORMAT_B8G8R8A8_UNORM;
+        case DXGI_FORMAT_R32_TYPELESS:         return DXGI_FORMAT_R32_FLOAT;
+        default:                               return f;   // already typed
+    }
+}
 uint32_t g_seriesWant = 0;            // frames from the key; 0 = off
 bool     g_seriesDone = false;
 uint32_t g_seriesCount[2] = {};
@@ -129,6 +145,8 @@ void seriesRelease() {
     for (int e = 0; e < 2; ++e) {
         if (g_seriesUav[e]) { g_seriesUav[e]->Release(); g_seriesUav[e] = nullptr; }
         if (g_seriesAtlas[e]) { g_seriesAtlas[e]->Release(); g_seriesAtlas[e] = nullptr; }
+        if (g_seriesCopySrv[e]) { g_seriesCopySrv[e]->Release(); g_seriesCopySrv[e] = nullptr; }
+        if (g_seriesCopy[e]) { g_seriesCopy[e]->Release(); g_seriesCopy[e] = nullptr; }
     }
     if (g_seriesCb) { g_seriesCb->Release(); g_seriesCb = nullptr; }
     g_seriesCount[0] = g_seriesCount[1] = 0;
@@ -204,19 +222,62 @@ void seriesCapture(ID3D11DeviceContext* ctx, ID3D11Resource* res,
         return;
     }
 
-    // The source needs an SRV; the submitted texture carries the shader-
-    // resource bind (delivery samples it). A refusal stands the series
-    // down with a note rather than faulting.
+    // The source needs an SRV. The submitted texture may be TYPELESS (a
+    // default desc refuses those) or lack the shader-resource bind
+    // entirely; an explicit typed view covers the first, and a
+    // copy-through texture of our own covers the second.
     ID3D11ShaderResourceView* srcSrv = nullptr;
-    if (FAILED(dev->CreateShaderResourceView(res, nullptr, &srcSrv))) {
-        if (!g_seriesFailedNoted) {
-            g_seriesFailedNoted = true;
-            Log::get().note("fss series: the submitted texture refuses an "
-                            "SRV; the series stands down.");
+    const DXGI_FORMAT typed = seriesTypedOf(td.Format);
+    {
+        D3D11_SHADER_RESOURCE_VIEW_DESC vd{};
+        vd.Format = typed;
+        vd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+        vd.Texture2D.MipLevels = 1;
+        if (td.BindFlags & D3D11_BIND_SHADER_RESOURCE) {
+            dev->CreateShaderResourceView(res, &vd, &srcSrv);
         }
-        dev->Release();
-        return;
     }
+    bool viaCopy = false;
+    if (!srcSrv) {
+        if (!g_seriesCopy[eye]) {
+            D3D11_TEXTURE2D_DESC cd = td;
+            cd.Format = typed;
+            cd.Usage = D3D11_USAGE_DEFAULT;
+            cd.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+            cd.CPUAccessFlags = 0;
+            cd.MiscFlags = 0;
+            cd.MipLevels = 1;
+            if (FAILED(dev->CreateTexture2D(&cd, nullptr,
+                                            &g_seriesCopy[eye])) ||
+                FAILED(dev->CreateShaderResourceView(
+                    g_seriesCopy[eye], nullptr, &g_seriesCopySrv[eye]))) {
+                if (g_seriesCopy[eye]) {
+                    g_seriesCopy[eye]->Release();
+                    g_seriesCopy[eye] = nullptr;
+                }
+                if (!g_seriesFailedNoted) {
+                    g_seriesFailedNoted = true;
+                    Log::get().note("fss series: neither a typed view nor "
+                                    "a copy-through works (fmt %u); the "
+                                    "series stands down.",
+                                    static_cast<unsigned>(td.Format));
+                }
+                dev->Release();
+                return;
+            }
+        }
+        ctx->CopyResource(g_seriesCopy[eye], res);
+        srcSrv = g_seriesCopySrv[eye];
+        srcSrv->AddRef();
+        viaCopy = true;
+        static bool s_copyNoted = false;
+        if (!s_copyNoted) {
+            s_copyNoted = true;
+            Log::get().note("fss series: reading the submitted pair through "
+                            "a copy (source has no shader bind).");
+        }
+    }
+    (void)viaCopy;
     dev->Release();
 
     D3D11_MAPPED_SUBRESOURCE m{};
