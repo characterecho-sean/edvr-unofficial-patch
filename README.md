@@ -9,7 +9,7 @@ issue](https://github.com/characterecho-sean/edvr-unofficial-patch/issues/new/ch
 — that is the place a bug gets fixed, because you can attach the log, and the
 log is usually the whole answer. For everything else — setup questions,
 "is this normal", or just talking about it — there is a
-[Discord](https://discord.gg/hhDSxU4nX).
+[Discord](https://discord.gg/ynkdf6Gdua).
 
 EDVR is free and stays free. If it saved you an evening,
 [tips are welcome](https://ko-fi.com/seancharacterecho) — they pay for nothing
@@ -88,9 +88,10 @@ difference is immediate.
 
 ### The second file — `openvr_api.dll`
 
-Needed by the transition flash fix and Explorer Cam; the other four fixes work
-without it. It installs differently, because the game already ships a file with
-this name and EDVR needs that original kept:
+The transition flash fix and Explorer Cam are applied here. It is part of the
+patch rather than an extra: an install without it is one where those two fixes
+are quietly absent. It installs differently from the first file, because the
+game already ships a file with this name and EDVR needs that original kept:
 
 > **Do not overwrite or delete the game's `openvr_api.dll`. Rename it.** EDVR
 > loads the renamed original and passes every call through to it. If the
@@ -119,8 +120,8 @@ engaged.
 
 ### Checking it worked
 
-Logs appear in `edvr_logs\` next to the game. With the second file installed, a
-second log with `vr` in the name says
+Logs appear in `edvr_logs\` next to the game. There are two of them; the second,
+with `vr` in the name, says
 `compositor hook installed on IVRCompositor_014`. If it reports an unknown
 compositor version instead, the fix is off, the game runs normally, and that
 version string is worth reporting. If you see a flash anyway, press **Pause**
@@ -136,7 +137,7 @@ pass. Without it there is very little to go on. If the game will not start at
 all, `edvr_breadcrumbs.txt` next to `EliteDangerous64.exe` is written
 unbuffered and survives a crash that eats the log — send that.
 
-The [Discord](https://discord.gg/hhDSxU4nX) is good for setup questions and
+The [Discord](https://discord.gg/ynkdf6Gdua) is good for setup questions and
 for "is this normal". Bugs still want an issue: chat loses attachments and
 the thread, and an issue is what remembers a problem long enough to fix it.
 
@@ -165,7 +166,6 @@ star, which is correct. *Details: [docs/eye-brightness.md](docs/eye-brightness.m
 transition, Elite draws a single frame from the wrong viewpoint. On a monitor it
 is a blink; in a headset it reads as the world lurching. EDVR spots that frame
 and does not send it, so SteamVR holds the previous frame for a moment instead.
-**Needs the second file.**
 *Details: [docs/transition-flash.md](docs/transition-flash.md).*
 
 **The missing terrain at the edges of view.** *Off by default.* Over planets,
@@ -175,7 +175,7 @@ and out as you look around (Frontier issue
 [72609](https://issues.frontierstore.net/issue-detail/72609)). EDVR tells the
 game your headset shows a little more than it does and hands SteamVR only the
 part you really see, so those tiles get drawn. Costs GPU time — about 6% at
-the values tested on a Quest 3. **Needs the second file.** Three settings:
+the values tested on a Quest 3. Three settings:
 [The terrain fix](#the-terrain-fix-cull-guard).
 *Details: [docs/terrain-culling.md](docs/terrain-culling.md).*
 
@@ -282,11 +282,7 @@ player observes, and no gameplay data read or written.
 
 ### Setting it up
 
-1. **Install the second file** if you have not — [Install](#install) above.
-   Explorer Cam is applied in `openvr_api.dll`; without it nothing below has any
-   effect.
-
-2. **Hotkeys: nothing to do.** EDVR reads your external-camera and
+1. **Hotkeys: nothing to do.** EDVR reads your external-camera and
    next-camera-view keys straight from your Elite key configuration — the
    *on-foot* camera binding, which Elite keeps separate from the ship's.
    If they are on keyboard keys, you are done: the log's first lines name
@@ -305,11 +301,11 @@ player observes, and no gameplay data read or written.
    it in Elite (Options → Controls) for now — EDVR watches the keyboard, and
    controller support is planned.
 
-3. Get on foot, open the camera, and cycle to **Commander Right Shoulder** —
+2. Get on foot, open the camera, and cycle to **Commander Right Shoulder** —
    two presses from the view the camera opens on. That is the preset the
    offset replaces; every other preset keeps its normal framing.
 
-4. Tune the offsets with the headset on; they reload about once a second:
+3. Tune the offsets with the headset on; they reload about once a second:
 
    ```
    head_offset_right   = -0.25   + is to your commander's right
@@ -373,8 +369,7 @@ planet surface in VR too aggressive", the black squares at the edges of view
 over planets. What was measured, why the fix works from outside the game, and
 what a fix inside it would look like:
 [docs/terrain-culling.md](docs/terrain-culling.md). It is off by default
-because it costs GPU time; enabling it is three settings in `edvr.ini`, and
-it needs [the second file](#the-second-file--openvr_apidll).
+because it costs GPU time; enabling it is three settings in `edvr.ini`.
 
 1. **Turn it on, then restart the game** — this is the one cull-guard
    setting that is not live:
@@ -548,8 +543,8 @@ is not a fault, it has simply uninstalled EDVR. Copy the file back.
 ## What it does and does not do
 
 It loads alongside the game as a `d3d11.dll` proxy, forwarding every call to
-Windows' real `d3d11.dll`; the optional `openvr_api.dll` proxy forwards every
-call to the game's own copy.
+Windows' real `d3d11.dll`; the `openvr_api.dll` proxy forwards every call to the
+game's own copy.
 
 **Most of the fixes never touch the game.** They change how frames are drawn
 from outside it: four small copies per frame so both eyes share an exposure

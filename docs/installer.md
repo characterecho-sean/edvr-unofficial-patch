@@ -180,7 +180,7 @@ edvr-installer.exe --uninstall [--dir D] [--remove-settings]
 edvr-installer.exe --help
 ```
 
-`--no-d3d11`, `--no-openvr` and `--replace-settings` do what they say. Without
+`--replace-settings` does what it says. Without
 `--dir` it finds the installs itself and refuses to guess when there is more
 than one. `--dry-run` prints the plan and touches nothing. It is a GUI-subsystem
 program, so a command-line run borrows the calling console; run it with
@@ -190,8 +190,11 @@ program, so a command-line run borrows the calling console; run it with
 
 `build.bat` builds it after both DLLs, embedding whatever they are at that
 moment. `tools/gen_installer_rc.py` generates the resource script (and the icon)
-so a build without the game's `openvr_api.dll` ships an installer that says so,
-rather than failing to link. The linker's own manifest is turned off with
+so a build without the game's `openvr_api.dll` still produces an installer --
+one that says in its report that it is a development build carrying half the
+patch. `package.bat` refuses to make a release out of it: which halves get
+installed is not a choice, and it was one note in a build log away from being
+shipped by accident. The linker's own manifest is turned off with
 `/MANIFEST:NO` — two `RT_MANIFEST` resources in one image is a program Windows
 refuses to start.
 

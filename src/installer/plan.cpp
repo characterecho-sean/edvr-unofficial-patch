@@ -196,7 +196,7 @@ Plan planInstall(const Survey& s, const Options& o, const PayloadInfo& p) {
     // ------------------------------------------------------------------
     // d3d11.dll -- the fixes. One name, and every mod in this space wants it.
     // ------------------------------------------------------------------
-    if (o.installD3d11 && p.haveD3d11) {
+    if (p.haveD3d11) {
         const std::wstring dst = joinPath(s.game.dir, kD3d11);
         const DllInfo& cur = s.d3d11;
 
@@ -298,7 +298,7 @@ Plan planInstall(const Survey& s, const Options& o, const PayloadInfo& p) {
     // openvr_api.dll -- the transition flash fix and Explorer Cam. This one
     // REPLACES a file the game owns, so the original has to survive the swap.
     // ------------------------------------------------------------------
-    if (o.installOpenvr && p.haveOpenvr) {
+    if (p.haveOpenvr) {
         if (!s.haveOpenvrDir) {
             plan.problems.push_back(
                 "Could not find the game's own openvr_api.dll (looked in Openvr\\win64, Openvr, "
@@ -419,6 +419,17 @@ Plan planInstall(const Survey& s, const Options& o, const PayloadInfo& p) {
                     "renamed. Send the log or ask on Discord before going further.");
             }
         }
+    }
+
+    if (!p.haveOpenvr) {
+        // Not a choice the user made -- a build made without the game's own
+        // openvr_api.dll to generate an export table from. package.bat refuses
+        // to ship one, so this can only be a developer build, and it says so
+        // rather than quietly installing half a patch.
+        plan.problems.push_back(
+            "This installer was built without EDVR's openvr_api.dll, so the transition flash fix "
+            "and Explorer Cam are not in it. That is a development build; a release always carries "
+            "both files.");
     }
 
     // ------------------------------------------------------------------

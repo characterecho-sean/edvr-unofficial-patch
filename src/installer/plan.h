@@ -62,8 +62,11 @@ struct Survey {
 Survey surveyTarget(const GameInstall& game);
 
 struct Options {
-    bool installD3d11 = true;
-    bool installOpenvr = true;
+    // Which halves to install is not a choice. Both files are the patch: the
+    // transition flash fix and Explorer Cam live in openvr_api.dll, and an
+    // install with only one of them is a support thread waiting to happen --
+    // the log says a fix stood down, and the person reading it has no idea they
+    // opted out of it. What this installer carries is what it installs.
     bool keepSettings = true;   // merge the existing edvr.ini rather than replace it
     bool repair = false;        // rewrite our files even when they look right
     bool removeSettings = false;  // uninstall: delete edvr.ini too

@@ -21,8 +21,6 @@ struct AppArgs {
 
     Act          action = Act::None;
     std::wstring dir;                    // --dir, the game folder
-    bool         d3d11 = true;           // --no-d3d11
-    bool         openvr = true;          // --no-openvr
     bool         keepSettings = true;    // --replace-settings
     bool         removeSettings = false; // --remove-settings (uninstall)
     bool         dryRun = false;         // --dry-run

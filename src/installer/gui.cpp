@@ -34,8 +34,6 @@ namespace {
 enum : int {
     kIdCombo = 1001,
     kIdBrowse = 1002,
-    kIdChkD3d11 = 1010,
-    kIdChkOpenvr = 1011,
     kIdChkKeep = 1012,
     kIdInstall = 1020,
     kIdRepair = 1021,
@@ -43,6 +41,7 @@ enum : int {
     kIdClose = 1023,
     kIdReport = 1030,
     kIdKofi = 1040,
+    kIdDiscord = 1041,
     kIdTabInstall = 1050,
     kIdTabSettings = 1051,
 };
@@ -50,12 +49,13 @@ enum : int {
 const UINT kMsgFirstScan = WM_APP + 1;
 
 const wchar_t* kTipUrl = L"https://ko-fi.com/seancharacterecho";
+const wchar_t* kDiscordUrl = L"https://discord.gg/ynkdf6Gdua";
 const wchar_t* kTipText = L"EDVR is free. If it saved you an evening, you can";
 
 // The client area and every control position below are in 96-dpi units, scaled
 // once at layout time.
 const int kClientWidth = 720;
-const int kClientHeight = 664;
+const int kClientHeight = 652;
 const int kMargin = 24;
 const int kCardPad = 20;
 
@@ -80,8 +80,6 @@ struct Gui {
     HWND window = nullptr;
     HWND combo = nullptr;
     HWND report = nullptr;
-    HWND chkD3d11 = nullptr;
-    HWND chkOpenvr = nullptr;
     HWND chkKeep = nullptr;
     HWND install = nullptr;
     HWND repair = nullptr;
@@ -89,6 +87,7 @@ struct Gui {
     HWND tabInstall = nullptr;
     HWND tabSettings = nullptr;
     HWND tip = nullptr;
+    HWND discord = nullptr;
     UINT dpi = 96;
 
     std::vector<Place>      places;
@@ -108,6 +107,33 @@ int dp(int v) { return ui::dp(v, g.dpi); }
 
 void setText(HWND control, const std::string& utf8) {
     SetWindowTextW(control, fromUtf8(utf8).c_str());
+}
+
+// An edit control with WS_VSCROLL shows its scrollbar whether or not there is
+// anything to scroll, and an empty pane with a full-height scrollbar down the
+// side of it looks like a text box from 2003. Shown only when the text really
+// is taller than the pane.
+void updateReportScrollbar() {
+    if (!g.report) return;
+    RECT client{};
+    GetClientRect(g.report, &client);
+
+    HDC dc = GetDC(g.report);
+    HFONT previous = static_cast<HFONT>(SelectObject(dc, ui::fonts().body));
+    TEXTMETRICW metrics{};
+    GetTextMetricsW(dc, &metrics);
+    SelectObject(dc, previous);
+    ReleaseDC(g.report, dc);
+
+    const int lineHeight = metrics.tmHeight > 0 ? metrics.tmHeight : 1;
+    const int visible = (client.bottom - client.top) / lineHeight;
+    const int lines = static_cast<int>(SendMessageW(g.report, EM_GETLINECOUNT, 0, 0));
+    ShowScrollBar(g.report, SB_VERT, lines > visible ? TRUE : FALSE);
+}
+
+void setReport(const std::string& utf8) {
+    setText(g.report, utf8);
+    updateReportScrollbar();
 }
 
 // ---------------------------------------------------------------------------
@@ -146,7 +172,7 @@ void applyLayout() {
         HDC dc = GetDC(g.window);
         const int prefix = ui::textWidth(dc, kTipText, ui::fonts().caption);
         ReleaseDC(g.window, dc);
-        MoveWindow(g.tip, dp(kMargin) + prefix + dp(5), dp(627), dp(76), dp(20), TRUE);
+        MoveWindow(g.tip, dp(kMargin) + prefix + dp(5), dp(621), dp(76), dp(20), TRUE);
     }
     InvalidateRect(g.window, nullptr, TRUE);
 }
@@ -302,20 +328,23 @@ void paintInstallScreen(HDC dc) {
         y += 22;
     }
 
-    RECT actions{dp(kMargin), dp(316), dp(kClientWidth - kMargin), dp(452)};
+    RECT actions{dp(kMargin), dp(316), dp(kClientWidth - kMargin), dp(438)};
     ui::paintCard(dc, actions, g.dpi);
 
-    RECT what{dp(kMargin + kCardPad), dp(330), dp(kClientWidth - kMargin - kCardPad), dp(350)};
-    ui::drawText(dc, L"What to install", what, f.heading, t.text, DT_LEFT | DT_SINGLELINE);
+    RECT reassure{dp(kMargin + kCardPad), dp(408), dp(kClientWidth - kMargin - kCardPad), dp(428)};
+    ui::drawText(dc,
+                 L"Nothing is changed until you confirm it, and every file replaced is copied "
+                 L"into edvr_backup\\ first.",
+                 reassure, f.caption, t.subtext, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
 
-    RECT report{dp(kMargin), dp(464), dp(kClientWidth - kMargin), dp(618)};
+    RECT report{dp(kMargin), dp(450), dp(kClientWidth - kMargin), dp(612)};
     ui::paintCard(dc, report, g.dpi);
 }
 
 void paintSettingsScreen(HDC dc) {
     const ui::Theme& t = ui::theme();
     const ui::Fonts& f = ui::fonts();
-    RECT card{dp(kMargin), dp(84), dp(kClientWidth - kMargin), dp(618)};
+    RECT card{dp(kMargin), dp(84), dp(kClientWidth - kMargin), dp(612)};
     ui::paintCard(dc, card, g.dpi);
 
     RECT heading{dp(kMargin + kCardPad), dp(104), dp(kClientWidth - kMargin - kCardPad), dp(126)};
@@ -358,7 +387,7 @@ void paintWindow(HWND window) {
     else
         paintSettingsScreen(dc);
 
-    RECT tip{dp(kMargin), dp(628), dp(kClientWidth - kMargin), dp(648)};
+    RECT tip{dp(kMargin), dp(622), dp(kClientWidth - kMargin), dp(642)};
     ui::drawText(dc, kTipText, tip, f.caption, t.subtext, DT_LEFT | DT_SINGLELINE);
 
     BitBlt(screenDc, 0, 0, client.right, client.bottom, dc, 0, 0, SRCCOPY);
@@ -431,7 +460,7 @@ void scanForInstalls() {
 
     if (g.installs.empty()) {
         g.haveSurvey = false;
-        setText(g.report,
+        setReport(
                 "No Elite Dangerous install was found.\r\n\r\n"
                 "Press Browse and point at the folder that holds EliteDangerous64.exe. For a "
                 "Frontier launcher install that is usually a folder ending in\r\n"
@@ -518,8 +547,6 @@ void runAction(AppArgs::Act action) {
     AppArgs args = g.args;
     args.action = action;
     args.dir = g.survey.game.dir;
-    args.d3d11 = ui::checkboxChecked(g.chkD3d11);
-    args.openvr = ui::checkboxChecked(g.chkOpenvr);
     args.keepSettings = ui::checkboxChecked(g.chkKeep);
     args.removeSettings = false;
 
@@ -529,7 +556,7 @@ void runAction(AppArgs::Act action) {
                           ? planUninstall(g.survey, options)
                           : planInstall(g.survey, options, payload);
 
-    setText(g.report, planReport(plan));
+    setReport(planReport(plan));
 
     if (plan.blocked || plan.nothingToDo) {
         MessageBoxW(g.window, fromUtf8(planSummary(plan)).c_str(), L"EDVR installer",
@@ -580,7 +607,7 @@ void runAction(AppArgs::Act action) {
         if (result.rolledBack)
             text += "Everything this run had changed was put back, so the folder is as it was.\r\n";
     }
-    setText(g.report, text);
+    setReport(text);
 
     MessageBoxW(g.window,
                 result.ok ? L"Done.\n\nStart Elite Dangerous. What EDVR managed to install is "
@@ -625,24 +652,19 @@ void createControls(HWND window) {
                                  f.body);
     place(browse, 568, 128, 108, 30, Screen::Install);
 
-    g.chkD3d11 = ui::makeCheckbox(window, L"The fixes  (d3d11.dll)", kIdChkD3d11, true, f.body);
-    g.chkOpenvr = ui::makeCheckbox(window, L"Transition flash fix and Explorer Cam", kIdChkOpenvr,
-                                   true, f.body);
     g.chkKeep = ui::makeCheckbox(window, L"Keep the settings I have changed", kIdChkKeep, true,
                                  f.body);
-    place(g.chkD3d11, kMargin + kCardPad, 358, 300, 24, Screen::Install);
-    place(g.chkOpenvr, 340, 358, 336, 24, Screen::Install);
-    place(g.chkKeep, kMargin + kCardPad, 386, 400, 24, Screen::Install);
+    place(g.chkKeep, kMargin + kCardPad, 334, 420, 24, Screen::Install);
 
     g.install = ui::makeButton(window, L"Install", kIdInstall, ui::ButtonStyle::Primary, f.body);
     g.repair = ui::makeButton(window, L"Repair", kIdRepair, ui::ButtonStyle::Secondary, f.body);
     g.uninstall = ui::makeButton(window, L"Uninstall", kIdUninstall, ui::ButtonStyle::Secondary,
                                  f.body);
     HWND close = ui::makeButton(window, L"Close", kIdClose, ui::ButtonStyle::Secondary, f.body);
-    place(g.install, kMargin + kCardPad, 418, 124, 34, Screen::Install);
-    place(g.repair, 172, 418, 104, 34, Screen::Install);
-    place(g.uninstall, 284, 418, 104, 34, Screen::Install);
-    place(close, 572, 418, 104, 34, Screen::Install, true);
+    place(g.install, kMargin + kCardPad, 366, 124, 34, Screen::Install);
+    place(g.repair, 172, 366, 104, 34, Screen::Install);
+    place(g.uninstall, 284, 366, 104, 34, Screen::Install);
+    place(close, 572, 366, 104, 34, Screen::Install, true);
 
     g.report = CreateWindowExW(0, L"EDIT", L"",
                                WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE | ES_READONLY, 0,
@@ -650,10 +672,14 @@ void createControls(HWND window) {
                                reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdReport)), nullptr,
                                nullptr);
     SendMessageW(g.report, WM_SETFONT, reinterpret_cast<WPARAM>(f.body), TRUE);
-    place(g.report, kMargin + kCardPad - 4, 478, 636, 126, Screen::Install);
+    place(g.report, kMargin + kCardPad - 4, 464, 636, 134, Screen::Install);
 
     g.tip = ui::makeButton(window, L"leave a tip", kIdKofi, ui::ButtonStyle::Link, f.caption);
-    place(g.tip, kMargin, 627, 76, 20, Screen::Install, true);  // x fixed up in applyLayout
+    place(g.tip, kMargin, 621, 76, 20, Screen::Install, true);  // x fixed up in applyLayout
+
+    g.discord = ui::makeButton(window, L"Ask on Discord", kIdDiscord, ui::ButtonStyle::Link,
+                               f.caption);
+    place(g.discord, kClientWidth - kMargin - 110, 621, 110, 20, Screen::Install, true);
 
     // Dark mode does not reach the native controls on its own. These two theme
     // names are what File Explorer uses for exactly this, and on a light theme
@@ -663,16 +689,12 @@ void createControls(HWND window) {
         SetWindowTheme(g.report, L"DarkMode_Explorer", nullptr);
     }
 
-    setText(g.report,
-            "Install    puts EDVR in, or updates it, keeping the settings you have changed.\r\n"
-            "Repair     for after another mod's installer has overwritten EDVR's files.\r\n"
-            "Uninstall  takes EDVR out and renames back everything it renamed.\r\n"
-            "\r\n"
-            "Whichever you press, what it is about to do appears here first, and it asks before "
-            "touching anything. Every file it replaces is copied into edvr_backup\\ first.\r\n"
-            "\r\n"
-            "Close Elite Dangerous before installing: Windows will not let anything replace a file "
-            "the game has open.");
+    // Deliberately not an explanation of what Install, Repair and Uninstall do.
+    // A first reader of this window already knows, and the pane is where the
+    // plan goes -- filling it with a lecture beforehand made the one thing it
+    // is for look like more of the same text. (Field feedback, on the first
+    // build anybody but its author had seen.)
+    setReport("What each button is about to do appears here, before anything is changed.");
 
     showScreen(Screen::Install);
     sizeWindowToLayout();
@@ -737,8 +759,9 @@ LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
                 case kIdKofi:
                     ShellExecuteW(window, L"open", kTipUrl, nullptr, nullptr, SW_SHOWNORMAL);
                     return 0;
-                case kIdChkD3d11:
-                case kIdChkOpenvr:
+                case kIdDiscord:
+                    ShellExecuteW(window, L"open", kDiscordUrl, nullptr, nullptr, SW_SHOWNORMAL);
+                    return 0;
                 case kIdChkKeep:
                     ui::toggleCheckbox(reinterpret_cast<HWND>(lparam));
                     return 0;

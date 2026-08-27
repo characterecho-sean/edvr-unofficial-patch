@@ -72,20 +72,26 @@ if exist "%ROOT%\build\edvr-installer.exe" (
     echo [edvr] NOTE: no build\edvr-installer.exe -- packaging without the installer.
 )
 
-REM Optional, and shipped only if it was built. It is the half of the transition
-REM flash fix that can actually withhold a frame, but it installs differently
-REM from d3d11.dll -- it replaces a file the game owns rather than adding one --
-REM so it goes in its own folder with its own instructions rather than loose in
-REM the root where it could be copied in by reflex.
-if exist "%ROOT%\build\openvr_api.dll" (
-    mkdir "%STAGE%\openvr" 2>nul
-    copy /Y "%ROOT%\build\openvr_api.dll" "%STAGE%\openvr\openvr_api.dll" >nul
-    copy /Y "%ROOT%\release\OPENVR.txt"   "%STAGE%\openvr\READ-ME-FIRST.txt" >nul
-    echo [edvr] included openvr_api.dll ^(transition flash fix^)
-) else (
-    echo [edvr] NOTE: no build\openvr_api.dll -- packaging without the transition
-    echo        flash fix. Run build.bat with the game installed to include it.
+REM Both files, always. openvr_api.dll used to be optional here -- shipped when
+REM it happened to be built, skipped with a note when it was not -- and that
+REM note was the only thing standing between a partial build and a release. A
+REM zip without it installs a patch whose transition flash fix can detect and
+REM log but never withhold a frame, and whose Explorer Cam does nothing at all,
+REM with no way for the person running it to tell.
+REM
+REM It still goes in its own folder with its own instructions rather than loose
+REM in the root, because it REPLACES a file the game owns rather than adding
+REM one, and loose next to d3d11.dll it would be copied in by reflex.
+if not exist "%ROOT%\build\openvr_api.dll" (
+    echo [edvr] ERROR: build\openvr_api.dll is missing, and it is not optional.
+    echo        It can only be built where the game's own openvr_api.dll is
+    echo        available to generate an export table from: run build.bat on a
+    echo        machine with Elite installed, or pass --openvr ^<path^>.
+    exit /b 1
 )
+mkdir "%STAGE%\openvr" 2>nul
+copy /Y "%ROOT%\build\openvr_api.dll" "%STAGE%\openvr\openvr_api.dll" >nul
+copy /Y "%ROOT%\release\OPENVR.txt"   "%STAGE%\openvr\READ-ME-FIRST.txt" >nul
 
 echo [edvr] staged:
 dir /b /s "%STAGE%"

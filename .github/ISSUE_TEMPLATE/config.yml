@@ -4,5 +4,5 @@ contact_links:
     url: https://github.com/characterecho-sean/edvr-unofficial-patch/blob/main/README.md
     about: The README covers what each fix does, what it reads, and every setting in edvr.ini. Worth a look before opening an issue.
   - name: Chat, setup help, or "is this normal?"
-    url: https://discord.gg/hhDSxU4nX
+    url: https://discord.gg/ynkdf6Gdua
     about: Discord is the place for setup questions and general talk. For anything broken, open an issue instead so you can attach the log -- that is usually the whole answer.

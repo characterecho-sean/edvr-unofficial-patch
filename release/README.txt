@@ -14,7 +14,7 @@ send edvr_breadcrumbs.txt from next to EliteDangerous64.exe instead -- it is
 written unbuffered and survives a crash that eats the log.
 
 For setup questions, "is this normal", or just talking about it, there is a
-Discord: https://discord.gg/hhDSxU4nX
+Discord: https://discord.gg/ynkdf6Gdua
 
 EDVR is free and stays free. If it saved you an evening, tips are welcome:
 https://ko-fi.com/seancharacterecho
@@ -74,10 +74,11 @@ visual system reads it as the world lurching. EDVR spots that frame and does not
 send it to your headset, so SteamVR holds the previous frame for a moment
 instead, exactly as it does whenever a game misses a frame.
 
-This one needs a second file installed, and it installs differently from the
-rest - see the openvr folder in this download, which has its own instructions.
-Explorer Cam needs that same file. Without it the other fixes work normally,
-this one can only detect and log, and Explorer Cam does nothing at all.
+This fix and Explorer Cam are applied in the second file, openvr_api.dll, which
+installs differently from the rest - see the openvr folder in this download,
+which has its own instructions. The installer does it for you. An install
+without that file is one where this fix can only detect and log, and Explorer
+Cam does nothing at all.
 
 The on-foot screen's sharpness. OFF by default - read this bit before turning
 it on.
@@ -240,11 +241,7 @@ looking at it in 3D.
 
 SETTING IT UP
 
-1. Install openvr_api.dll if you have not - see the openvr folder in this
-   download and its READ-ME-FIRST.txt. Explorer Cam is applied in that file;
-   without it nothing below has any effect.
-
-2. Hotkeys: nothing to do. EDVR reads your external-camera and
+1. Hotkeys: nothing to do. EDVR reads your external-camera and
    next-camera-view keys straight from your Elite key configuration - the
    ON-FOOT camera binding, which Elite keeps separate from the ship's. If
    they are on keyboard keys, you are done: the log's first lines name the
@@ -263,13 +260,13 @@ SETTING IT UP
    it in Elite (Options > Controls) for now - EDVR watches the keyboard,
    and controller support is planned.
 
-3. Get on foot, open the camera, and cycle to COMMANDER RIGHT SHOULDER -
+2. Get on foot, open the camera, and cycle to COMMANDER RIGHT SHOULDER -
    two presses from the view the camera opens on. That is the preset the
    offset replaces, and you cycle to it each time you want the 3D view.
    Every other preset keeps its normal framing; fix.head_offset_view picks
    a different one if you would rather give that one up.
 
-4. Tune these three with the headset on. They reload about once a second, so
+3. Tune these three with the headset on. They reload about once a second, so
    you do not need to restart:
 
        head_offset_right   = -0.25   + is to your commander's right

@@ -44,8 +44,6 @@ std::string usageText() {
            "  --dir <path>         the folder holding EliteDangerous64.exe. Without it, the\r\n"
            "                       installer finds your installs itself and uses the only one.\r\n"
            "  --dry-run            say what would happen; touch nothing.\r\n"
-           "  --no-d3d11           leave the fixes half alone.\r\n"
-           "  --no-openvr          leave the transition flash / Explorer Cam half alone.\r\n"
            "  --replace-settings   overwrite edvr.ini instead of keeping your values.\r\n"
            "  --remove-settings    with --uninstall, delete edvr.ini too.\r\n"
            "  --help               this.\r\n";
@@ -76,10 +74,6 @@ AppArgs parseArgs(int argc, wchar_t** argv) {
             a.dir = arg.substr(6);
         else if (arg == L"--dry-run")
             a.dryRun = true;
-        else if (arg == L"--no-d3d11")
-            a.d3d11 = false;
-        else if (arg == L"--no-openvr")
-            a.openvr = false;
         else if (arg == L"--replace-settings")
             a.keepSettings = false;
         else if (arg == L"--remove-settings")
@@ -98,8 +92,6 @@ AppArgs parseArgs(int argc, wchar_t** argv) {
 
 Options optionsFor(const AppArgs& args, bool repair) {
     Options o;
-    o.installD3d11 = args.d3d11;
-    o.installOpenvr = args.openvr;
     o.keepSettings = args.keepSettings;
     o.removeSettings = args.removeSettings;
     o.repair = repair;
@@ -188,8 +180,6 @@ bool relaunchElevated(const AppArgs& args) {
         case AppArgs::Act::None: break;
     }
     if (!args.dir.empty()) cmd += L"--dir \"" + args.dir + L"\" ";
-    if (!args.d3d11) cmd += L"--no-d3d11 ";
-    if (!args.openvr) cmd += L"--no-openvr ";
     if (!args.keepSettings) cmd += L"--replace-settings ";
     if (args.removeSettings) cmd += L"--remove-settings ";
     if (args.dryRun) cmd += L"--dry-run ";

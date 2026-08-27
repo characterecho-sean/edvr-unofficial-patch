@@ -551,15 +551,19 @@ static void testPlanner() {
         check(plan.blocked && plan.steps.empty(), "nothing is planned while the game is running");
     }
 
-    {   // Only one half asked for.
+    {   // A build made without EDVR's openvr_api.dll. Not a choice anybody can
+        // make from the window any more -- both files are the patch -- so it
+        // can only be a developer build, and it has to say so rather than
+        // quietly installing half of one. package.bat refuses to ship it.
         Survey s = baseSurvey(dir);
-        Options half = options;
-        half.installOpenvr = false;
-        const Plan plan = planInstall(s, half, payload);
+        PayloadInfo halfBuild = payload;
+        halfBuild.haveOpenvr = false;
+        const Plan plan = planInstall(s, options, halfBuild);
         check(!hasStep(plan, Action::Rename, L"openvr_api.dll", L"openvr_api_orig.dll"),
-              "the VR half is left alone when it is not wanted");
+              "a build without the VR half does not touch the game's runtime");
         check(hasStep(plan, Action::WritePayload, nullptr, L"d3d11.dll"),
-              "and the fixes still install");
+              "the fixes still install");
+        check(notesMention(plan, "development build"), "and the report says the build is partial");
     }
 
     {   // Uninstall, with a chained mod and the original runtime in place.
