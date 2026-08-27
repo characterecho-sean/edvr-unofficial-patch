@@ -180,6 +180,23 @@ fss_eye_heal = 1
 real_dll =
 ```
 
+**Only `[fix]` is shown.** `[advanced]` and `[experimental]` are safety valves
+and developer instruments — the log names one when it wants you to change it,
+and that is the only way anybody should arrive at them; a list that offers them
+invites changing things nobody asked you to change. The remaining sections
+(`[hotkey]`, `[log]`, `[openvr]`, `[d3d11]`) are plumbing named after the halves
+of EDVR that read them. A `ui:` line outside `[fix]` is a build error, so the
+rule cannot drift by accident.
+
+**Every row says when it takes effect.** Most settings are live — EDVR re-reads
+`edvr.ini` about once a second — and the four that are not are marked *restart
+the game*: `share_exposure`, `transition_flash`, and the two `vscreen_res_*`
+sizes. That fact is not a fourth list either: it comes from what the comment
+block in `edvr.ini` already says ("Live." or the sentence naming a restart), and
+a setting whose prose says neither fails the build. Somebody who changes a
+setting and sees nothing happen otherwise has no way to tell a fix that needs a
+restart from one that is not working.
+
 **A setting that is live in `edvr.ini` must have one of those lines, or the
 build fails.** Uncommenting a key is what promoting a fix to shipped-on looks
 like, and a fix that ships on but never appears in the settings window is

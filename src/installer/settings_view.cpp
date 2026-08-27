@@ -205,6 +205,13 @@ RECT valueRect(const List* list, const RowGeometry& geo) {
     return r;
 }
 
+COLORREF mix(COLORREF a, COLORREF b, int percentB) {
+    const int r = (GetRValue(a) * (100 - percentB) + GetRValue(b) * percentB) / 100;
+    const int g = (GetGValue(a) * (100 - percentB) + GetGValue(b) * percentB) / 100;
+    const int bl = (GetBValue(a) * (100 - percentB) + GetBValue(b) * percentB) / 100;
+    return RGB(r, g, bl);
+}
+
 bool isOn(const std::string& value) {
     return value == "1" || value == "true" || value == "yes" || value == "on";
 }
@@ -218,8 +225,27 @@ void paintRow(const List* list, HDC dc, const RECT& rowRect, const SettingRow& r
     const ui::Fonts& f = ui::fonts();
     const RowGeometry geo = geometryFor(list, rowRect);
 
-    ui::drawText(dc, fromUtf8(row.def->label), geo.label, f.bodyBold, t.text,
+    RECT labelRect = geo.label;
+    ui::drawText(dc, fromUtf8(row.def->label), labelRect, f.bodyBold, t.text,
                  DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+
+    // Only the ones that need a restart are marked. Every other row is live,
+    // which the line above the list says once -- twenty rows each carrying a
+    // "live" badge would say it twenty times and mean less each time.
+    if (row.def->needsRestart) {
+        const std::wstring mark = L"restart the game";
+        const int width = ui::textWidth(dc, mark, f.caption) + dp(list, 16);
+        const int labelWidth = ui::textWidth(dc, fromUtf8(row.def->label), f.bodyBold);
+        RECT badge{labelRect.left + labelWidth + dp(list, 10), labelRect.top + dp(list, 2),
+                   labelRect.left + labelWidth + dp(list, 10) + width,
+                   labelRect.bottom + dp(list, 1)};
+        if (badge.right < labelRect.right) {
+            ui::fillRounded(dc, badge, (badge.bottom - badge.top) / 2,
+                            mix(t.cardBg, t.warn, 18));
+            ui::drawText(dc, mark, badge, f.caption, t.warn,
+                         DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        }
+    }
     RECT description = geo.description;
     ui::drawText(dc, fromUtf8(row.def->summary), description, f.caption, t.subtext,
                  DT_LEFT | DT_WORDBREAK | DT_END_ELLIPSIS);

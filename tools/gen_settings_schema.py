@@ -35,9 +35,15 @@ who does not read ini files, and nothing else in the build would notice: the
 game reads it, the log names it, and the window that is supposed to expose it
 simply does not. That is a build failure here.
 
-Commented-out expert settings are not required to have one. Annotate them and
-they appear in the window under "expert"; leave them and they stay where they
-are, which is the right default for a developer instrument.
+Only [fix] is exposed. [advanced] and [experimental] are safety valves and
+developer instruments -- the log names one when it wants you to change it, and
+that is the only way anybody should arrive at them -- and the remaining sections
+are plumbing named after the halves of EDVR that read them. A ui: line outside
+[fix] is an error, so the rule cannot drift by accident.
+
+Commented-out expert settings inside [fix] are not required to have one.
+Annotate one and it appears; leave it and it stays where it is, which is the
+right default for a developer instrument.
 
 Usage:
   python tools/gen_settings_schema.py --root <repo> --out <gen dir>
@@ -48,6 +54,19 @@ import argparse
 import os
 import re
 import sys
+
+# The window shows [fix] and nothing else.
+#
+# [advanced] and [experimental] are safety valves and developer instruments --
+# the log names one when it wants you to change it, and that is the only way
+# anybody should arrive at them. Offering them in a list invites changing things
+# nobody asked you to change, and turns a support thread into a guessing game.
+# The remaining sections ([hotkey], [log], [openvr], [d3d11]) are plumbing named
+# after the halves of EDVR that read them, not fixes somebody came here to turn
+# on. Explorer Cam's own switches live in [fix] and are exposed; the metre
+# offsets it is tuned with are not, because tuning them means wearing the
+# headset and watching, which is what the ini's hot reload is for.
+EXPOSED_SECTIONS = ('fix',)
 
 READ_RE = re.compile(
     r'get(Bool|Int|Float|String)([A-Za-z]*)\s*\(\s*"([^"]+)"\s*,\s*([^;]*?)\)', re.S)
@@ -114,6 +133,7 @@ class Setting(object):
         self.restart = False
         self.range_lo = None
         self.range_hi = None
+        self.applies = None   # 'live' or 'restart'
         self.hidden = False
         self.annotated = False
         self.line = 0
@@ -216,7 +236,28 @@ def apply_annotation(setting, text):
                 setting.range_lo = bounds[0].strip()
                 setting.range_hi = bounds[1].strip()
         elif lower == 'restart':
-            setting.restart = True
+            setting.applies = 'restart'
+        elif lower == 'live':
+            setting.applies = 'live'
+
+
+def when_it_applies(setting):
+    """live or restart, read out of the prose the setting already carries.
+
+    edvr.ini has said "Live." or "Needs a game restart" at the end of a comment
+    block since long before there was a window to show it in, so that is where
+    this comes from rather than from a fourth thing to keep in step. The
+    annotation can say `| live` or `| restart` where the prose does not, and
+    wins where both do.
+    """
+    if setting.applies:
+        return setting.applies
+    text = setting.description.lower()
+    if 'restart' in text:
+        return 'restart'
+    if re.search(r'\blive\b', text):
+        return 'live'
+    return None
 
 
 def summarise(description):
@@ -272,7 +313,22 @@ def main():
     settings = parse_ini(ini_path)
 
     # ---- the enforcement --------------------------------------------------
-    missing = [s for s in settings if s.live and not s.annotated]
+    stray = [s for s in settings if s.annotated and s.section not in EXPOSED_SECTIONS]
+    if stray:
+        print('gen_settings_schema: ERROR: only [%s] settings appear in the window.'
+              % ']/['.join(EXPOSED_SECTIONS))
+        print()
+        print('[advanced] and [experimental] are safety valves and developer instruments:')
+        print('a window that offers them invites people to change things the log is')
+        print('supposed to send them to, and turns a support thread into a guessing game.')
+        print('The other sections are plumbing rather than fixes. Remove the ui: line:')
+        print()
+        for s in stray:
+            print('  edvr.ini:%d  %s.%s' % (s.line, s.section, s.key))
+        return 1
+
+    missing = [s for s in settings
+               if s.live and s.section in EXPOSED_SECTIONS and not s.annotated]
     if missing:
         print('gen_settings_schema: ERROR: %d live setting(s) are not in the settings window.'
               % len(missing))
@@ -290,7 +346,7 @@ def main():
         return 1
 
     unknown = [s for s in settings
-               if s.annotated and not s.hidden
+               if s.annotated and not s.hidden and s.section in EXPOSED_SECTIONS
                and '%s.%s' % (s.section, s.key) not in code]
     if unknown:
         for s in unknown:
@@ -298,12 +354,30 @@ def main():
                   'in src/ reads it.' % (s.section, s.key))
         return 1
 
-    exposed = [s for s in settings if s.annotated and not s.hidden]
+    exposed = [s for s in settings
+               if s.annotated and not s.hidden and s.section in EXPOSED_SECTIONS]
+
+    silent = [s for s in exposed if when_it_applies(s) is None]
+    if silent:
+        print('gen_settings_schema: ERROR: %d setting(s) do not say when they take effect.'
+              % len(silent))
+        print()
+        print('Somebody who changes a setting and sees nothing happen has no way to tell')
+        print('a fix that needs a game restart from one that is simply not working. End')
+        print('the comment block with "Live." or with the sentence that says a restart is')
+        print('needed -- or put `| live` or `| restart` on the ui: line.')
+        print()
+        for s in silent:
+            print('  edvr.ini:%d  %s.%s' % (s.line, s.section, s.key))
+        return 1
 
     if args.check or not args.out:
-        print('gen_settings_schema: %d settings exposed, %d live, %d hidden by request'
-              % (len(exposed), len([s for s in settings if s.live]),
-                 len([s for s in settings if s.hidden])))
+        restarts = len([s for s in exposed if when_it_applies(s) == 'restart'])
+        print('gen_settings_schema: %d exposed, %d of them needing a game restart; '
+              '%d live in [%s]'
+              % (len(exposed), restarts,
+                 len([s for s in settings if s.live and s.section in EXPOSED_SECTIONS]),
+                 ']/['.join(EXPOSED_SECTIONS)))
         return 0
 
     rows = []
@@ -320,7 +394,8 @@ def main():
         shipped = s.value
         recommended = s.recommended if s.recommended is not None else shipped
         rows.append(
-            '    {%s, %s, %s, %s, %s,\n     SettingKind::%s, %s, %s,\n     %s, %s, %d, %s, %s},' % (
+            '    {%s, %s, %s, %s, %s,\n     SettingKind::%s, %s, %s,\n'
+            '     %s, %s, %d, %s, %s, %s},' % (
                 c_string(s.section), c_string(s.key), c_string(s.label),
                 c_string(summarise(s.description)), c_string(s.description),
                 {'toggle': 'Toggle', 'number': 'Number', 'text': 'Text',
@@ -328,7 +403,8 @@ def main():
                 c_string(shipped), c_string(recommended),
                 c_string(lo or ''), c_string(hi or ''), precision,
                 c_string('|'.join(s.choices)),
-                'true' if s.live else 'false'))
+                'true' if s.live else 'false',
+                'true' if when_it_applies(s) == 'restart' else 'false'))
 
     os.makedirs(args.out, exist_ok=True)
     out_path = os.path.join(args.out, 'settings_schema.inc')

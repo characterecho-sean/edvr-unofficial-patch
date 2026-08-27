@@ -35,6 +35,11 @@ struct SettingDef {
     int         precision;    // decimals to show for a number
     const char* choices;      // "vivid|realistic|stock", empty for other kinds
     bool        live;         // shipped uncommented
+    // Whether the game has to be restarted for a change to it, taken from what
+    // edvr.ini's own comment block says. Somebody who changes a setting and
+    // sees nothing happen cannot otherwise tell a fix that needs a restart from
+    // one that is not working.
+    bool        needsRestart;
 };
 
 struct Choice {

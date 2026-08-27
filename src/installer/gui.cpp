@@ -360,8 +360,8 @@ void paintSettingsScreen(HDC dc) {
     RECT note{dp(kMargin + kCardPad), dp(124), dp(kClientWidth - kMargin - kCardPad), dp(142)};
     const std::wstring where =
         g.settings.loaded()
-            ? L"Written straight into edvr.ini. Most settings are live: the game picks a change "
-              L"up within a second."
+            ? L"Written straight into edvr.ini and live within a second. The few that need a "
+              L"game restart are marked."
             : L"Pick an install on the Install tab first.";
     ui::drawText(dc, where, note, f.caption, t.subtext, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
 
