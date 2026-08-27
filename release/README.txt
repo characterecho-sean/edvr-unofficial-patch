@@ -16,6 +16,9 @@ written unbuffered and survives a crash that eats the log.
 For setup questions, "is this normal", or just talking about it, there is a
 Discord: https://discord.gg/hhDSxU4nX
 
+EDVR is free and stays free. If it saved you an evening, tips are welcome:
+https://ko-fi.com/seancharacterecho
+
 
 ALREADY RUNNING EDHM OR RESHADE?
 
@@ -104,6 +107,24 @@ of it.)
 
 INSTALL
 
+Run edvr-installer.exe, in this folder. It carries both DLLs and edvr.ini
+inside it, finds your install (Frontier launcher, Steam or Epic), puts each
+file where it goes, and gets the two steps right that manual installs get
+wrong: it RENAMES the game's openvr_api.dll rather than overwriting it, and if
+another mod already holds the d3d11.dll name it renames that aside and points
+EDVR at it so both keep working. It shows you what it is about to do first, and
+copies every file it replaces into edvr_backup\.
+
+Run it again after downloading a new version and it updates in place, keeping
+the settings you have changed in edvr.ini. It also has Repair, for when another
+mod's installer overwrites EDVR's files, and Uninstall, which puts back
+everything it renamed.
+
+Windows will say the program is unrecognised, because it is unsigned: More info
+-> Run anyway. The release notes carry its SHA-256.
+
+The rest of this section is the same install done by hand.
+
 1. Close Elite Dangerous.
 
 2. Check there is no d3d11.dll already next to EliteDangerous64.exe. If there
@@ -135,6 +156,10 @@ eye dimmed and press it; the difference is immediate.
 
 
 UNINSTALL
+
+Run edvr-installer.exe and press Uninstall: it removes EDVR's files, renames
+the game's openvr_api.dll back, and puts any mod that was chained behind EDVR
+back under its own name. By hand:
 
 Delete d3d11.dll and edvr.ini. That is the whole of it, apart from three things
 you can also delete: the edvr_logs folder, edvr_breadcrumbs.txt, and

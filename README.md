@@ -11,13 +11,54 @@ log is usually the whole answer. For everything else — setup questions,
 "is this normal", or just talking about it — there is a
 [Discord](https://discord.gg/hhDSxU4nX).
 
+EDVR is free and stays free. If it saved you an evening,
+[tips are welcome](https://ko-fi.com/seancharacterecho) — they pay for nothing
+you get here, which is the point.
+
 > **Already running EDHM or ReShade?** Both can run alongside EDVR. EDHM
 > installs itself as `d3d11.dll` too, and only one file can have that name —
-> don't overwrite it. See
-> [Running alongside other mods](#running-alongside-other-mods): one rename and
-> one setting. ReShade needs nothing at all as of 0.7.2.
+> don't overwrite it. The installer handles this for you; by hand it is one
+> rename and one setting, under
+> [Running alongside other mods](#running-alongside-other-mods). ReShade needs
+> nothing at all as of 0.7.2.
 
 ## Install
+
+**Run `edvr-installer.exe`** from the release. One file, nothing to extract,
+nothing to put in the right folder — it carries both DLLs and `edvr.ini` inside
+it and does the whole install:
+
+- **Finds the game.** Frontier launcher, Steam or Epic, on whichever drive —
+  it asks each launcher where it put the game rather than guessing paths, and
+  confirms every answer by finding `EliteDangerous64.exe`. Or point it at a
+  folder yourself.
+- **Keeps your settings.** Updating never overwrites `edvr.ini`: it writes the
+  new version's file with your values put back into it, so new settings and
+  changed defaults arrive and nothing you tuned is lost. It says which is which
+  afterwards.
+- **Renames the game's `openvr_api.dll` instead of overwriting it**, which is
+  the step most manual installs get wrong — and it can tell the game's own copy
+  from EDVR's by reading the file, so it will not rename the wrong one.
+- **Leaves other mods working.** If EDHM (or anything else) is already
+  installed as `d3d11.dll`, it renames that aside, takes the name, and sets
+  `advanced.real_dll` so EDVR passes every call through to it.
+- **Repair**, for when another mod's installer overwrites EDVR's files — a
+  common one is EDHM's uninstaller running `del d3d11.dll`, which after an EDVR
+  install is *ours*. Repair puts both back, side by side.
+- **Uninstall**, which renames back everything it renamed.
+
+It shows you exactly what it is about to do and waits for a yes, and every file
+it replaces is copied into `edvr_backup\` first. It needs administrator rights
+only if the game is under `Program Files`, and asks at that point rather than up
+front. It has no network access at all — it installs what it carries. *What it
+decides and why: [docs/installer.md](docs/installer.md).*
+
+Windows will say the program is unrecognised, because it is unsigned: **More
+info → Run anyway**. Every release lists the installer's SHA-256, which is the
+only provenance an unsigned binary can offer.
+
+<details>
+<summary><b>Or install the two files by hand</b> — the same thing, done yourself</summary>
 
 Two files. The first enables most of the fixes; the second is needed by the
 transition flash fix and Explorer Cam.
@@ -74,6 +115,8 @@ Skipping it leaves the flash fix able to detect and log only, and **Explorer Cam
 doing nothing at all** — EDVR says so in the log the first time it would have
 engaged.
 
+</details>
+
 ### Checking it worked
 
 Logs appear in `edvr_logs\` next to the game. With the second file installed, a
@@ -99,8 +142,14 @@ the thread, and an issue is what remembers a problem long enough to fix it.
 
 ### Uninstall
 
-Delete `d3d11.dll` and `edvr.ini` from the game folder; in whichever `Openvr`
-folder you used, delete EDVR's `openvr_api.dll` and rename
+Run `edvr-installer.exe` and press **Uninstall**. It removes EDVR's files,
+renames the game's `openvr_api.dll` back, and — if another mod was chained
+behind EDVR — puts that mod back under its own name, which is the step a manual
+uninstall usually forgets. Your `edvr.ini` is left alone unless you ask for it
+to go, so reinstalling finds your settings again.
+
+By hand: delete `d3d11.dll` and `edvr.ini` from the game folder; in whichever
+`Openvr` folder you used, delete EDVR's `openvr_api.dll` and rename
 `openvr_api_orig.dll` back.
 
 ## What it fixes
@@ -376,6 +425,10 @@ while the game runs; the rest need a restart.
 
 ## Running alongside other mods
 
+**The installer does all of this for you** — it recognises what is in the
+`d3d11.dll` slot, renames it, and writes the setting. What follows is the same
+procedure by hand, and what the installer will tell you it did.
+
 **EDHM** also installs as `d3d11.dll`. To run both:
 
 1. **Rename** EDHM's `d3d11.dll` — say `d3d11_edhm.dll` — leaving it in place.
@@ -388,7 +441,9 @@ file won't load, EDVR says so in the log and carries on without it.
 
 **One catch with EDHM:** its uninstaller runs `del d3d11.dll`, which after this
 is *EDVR's* file. To undo the pair cleanly: delete `d3d11.dll` and `edvr.ini`,
-rename `d3d11_edhm.dll` back, then run EDHM's uninstaller if wanted.
+rename `d3d11_edhm.dll` back, then run EDHM's uninstaller if wanted. (The
+installer's **Repair** recognises the aftermath of this — EDVR gone, EDHM still
+parked under the renamed file — and puts both back.)
 
 **ReShade** needs no configuration — install it the way ReShade tells you to
 (normally as `dxgi.dll`) and EDVR composes with it. Both mods' effects apply.

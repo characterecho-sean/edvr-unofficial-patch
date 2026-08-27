@@ -62,6 +62,16 @@ copy /Y "%ROOT%\edvr.ini"           "%STAGE%\edvr.ini"    >nul
 copy /Y "%ROOT%\release\README.txt" "%STAGE%\README.txt"  >nul
 copy /Y "%ROOT%\LICENSE"            "%STAGE%\LICENSE.txt" >nul
 
+REM The installer, inside the zip as well as beside it. It carries these same
+REM files as resources, so the copy in the zip is redundant by design: whoever
+REM opens the archive can run the installer OR follow the manual steps, and
+REM neither path needs the other.
+if exist "%ROOT%\build\edvr-installer.exe" (
+    copy /Y "%ROOT%\build\edvr-installer.exe" "%STAGE%\edvr-installer.exe" >nul
+) else (
+    echo [edvr] NOTE: no build\edvr-installer.exe -- packaging without the installer.
+)
+
 REM Optional, and shipped only if it was built. It is the half of the transition
 REM flash fix that can actually withhold a frame, but it installs differently
 REM from d3d11.dll -- it replaces a file the game owns rather than adding one --
@@ -84,13 +94,32 @@ powershell -NoProfile -Command ^
   "Compress-Archive -Path '%STAGE%\*' -DestinationPath '%ZIP%' -Force"
 if errorlevel 1 ( echo [edvr] ERROR: zip failed & exit /b 1 )
 
+
+REM And on its own, which is the download most people should be given: one
+REM executable, nothing to extract, nothing to put in the right folder.
+if exist "%ROOT%\build\edvr-installer.exe" (
+    copy /Y "%ROOT%\build\edvr-installer.exe" "%ROOT%\dist\edvr-installer-%VER%.exe" >nul
+)
+
 echo.
 echo [edvr] wrote %ZIP%
 for %%F in ("%ZIP%") do echo        %%~zF bytes
 powershell -NoProfile -Command ^
   "'       SHA-256 ' + (Get-FileHash '%ZIP%' -Algorithm SHA256).Hash"
+
+if exist "%ROOT%\dist\edvr-installer-%VER%.exe" (
+    echo.
+    echo [edvr] wrote %ROOT%\dist\edvr-installer-%VER%.exe
+    for %%F in ("%ROOT%\dist\edvr-installer-%VER%.exe") do echo        %%~zF bytes
+    powershell -NoProfile -Command ^
+      "'       SHA-256 ' + (Get-FileHash '%ROOT%\dist\edvr-installer-%VER%.exe' -Algorithm SHA256).Hash"
+)
 echo.
 echo [edvr] Before publishing, check the archive holds only the files listed
 echo        above and no logs, shader dumps or game binaries. In particular it
 echo        must not contain the game's own openvr_api.dll -- only ours.
+echo        Publish BOTH: the .exe for people who want one download, and the
+echo        .zip for people who would rather see the files. Say the SHA-256 of
+echo        the exe in the release notes -- it is unsigned, so a hash somebody
+echo        can check is the only provenance on offer.
 exit /b 0

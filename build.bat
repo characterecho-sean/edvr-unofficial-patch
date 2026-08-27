@@ -259,6 +259,79 @@ echo        Pass --openvr ^<path^> to build it. Everything except the
 echo        transition flash fix works without it.
 :openvr_done
 
+echo.
+echo [edvr] === edvr-installer.exe ===
+REM One executable carrying d3d11.dll, edvr.ini and -- when this build has it --
+REM openvr_api.dll, as resources.
+REM
+REM Built AFTER both DLLs, because it embeds whatever they are at this moment.
+REM A build that skipped the openvr half above produces an installer that says
+REM so in its window rather than one that fails to link: the .rc is generated,
+REM and the missing file is simply not named in it.
+REM
+REM /MANIFEST:NO is not optional. link.exe embeds a manifest of its own by
+REM default, and our .rc already puts one at resource 1 -- two RT_MANIFEST
+REM resources in one image, which Windows refuses to start at all: "the
+REM side-by-side configuration is incorrect", before a line of our code runs.
+REM It links and packages perfectly happily.
+if not exist "%OBJ%\installer" mkdir "%OBJ%\installer"
+python "%ROOT%\tools\gen_installer_rc.py" --root "%ROOT%" --build "%BUILD%" ^
+    --out "%GEN%" --version "%EDVR_VER%"
+if errorlevel 1 ( echo [edvr] ERROR: installer resource generation failed & exit /b 1 )
+
+rc.exe /nologo /fo "%OBJ%\installer\payload.res" "%GEN%\payload.rc"
+if errorlevel 1 ( echo [edvr] ERROR: rc.exe failed on the installer resources & exit /b 1 )
+
+set INSTALLER_SRC="%ROOT%\src\installer\main.cpp" "%ROOT%\src\installer\gui.cpp" ^
+    "%ROOT%\src\installer\ui.cpp" ^
+    "%ROOT%\src\installer\app.cpp" "%ROOT%\src\installer\plan.cpp" ^
+    "%ROOT%\src\installer\apply.cpp" "%ROOT%\src\installer\detect.cpp" ^
+    "%ROOT%\src\installer\probe.cpp" "%ROOT%\src\installer\iniedit.cpp" ^
+    "%ROOT%\src\installer\state.cpp" "%ROOT%\src\installer\payload.cpp"
+set INSTALLER_LIBS=user32.lib gdi32.lib gdiplus.lib dwmapi.lib uxtheme.lib ^
+    shell32.lib ole32.lib comctl32.lib advapi32.lib version.lib bcrypt.lib kernel32.lib
+
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /GR- /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE ^
+    /DEDVR_VERSION_STRING=\"%EDVR_VER%\" ^
+    /Fo"%OBJ%\installer"\ /Fe"%BUILD%\edvr-installer.exe" ^
+    %INSTALLER_SRC% "%OBJ%\installer\payload.res" ^
+    /link /INCREMENTAL:NO /SUBSYSTEM:WINDOWS /MANIFEST:NO %INSTALLER_LIBS%
+if errorlevel 1 ( echo [edvr] ERROR: installer build failed & exit /b 1 )
+echo [edvr] built %BUILD%\edvr-installer.exe
+
+REM Does it START? Not a formality: a manifest Windows cannot parse, a missing
+REM import, the wrong subsystem -- each of these produces an executable that
+REM links without a murmur and dies before main(), with a dialog the build never
+REM sees. --help reads nothing and writes nothing.
+"%BUILD%\edvr-installer.exe" --help >nul || (
+    echo [edvr] ERROR: the installer will not run. If Windows called it a
+    echo        side-by-side configuration problem, the manifest is the suspect.
+    exit /b 1
+)
+
+echo [edvr] === installer_test.exe ===
+REM The planner over folders that are hard to arrange on a real machine: EDHM
+REM already in the d3d11.dll slot, another mod's installer having overwritten
+REM ours, a game update that put the stock openvr_api.dll back, an original
+REM runtime lost to a double rename -- and the edvr.ini merge, which is the one
+REM piece whose failure silently discards settings somebody tuned in a headset.
+if not exist "%OBJ%\insttest" mkdir "%OBJ%\insttest"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /GR- /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE ^
+    /Fo"%OBJ%\insttest"\ /Fe"%BUILD%\installer_test.exe" ^
+    "%ROOT%\tools\installer_test\installer_test.cpp" ^
+    "%ROOT%\src\installer\plan.cpp" "%ROOT%\src\installer\apply.cpp" ^
+    "%ROOT%\src\installer\detect.cpp" "%ROOT%\src\installer\probe.cpp" ^
+    "%ROOT%\src\installer\iniedit.cpp" "%ROOT%\src\installer\state.cpp" ^
+    /link /INCREMENTAL:NO %INSTALLER_LIBS%
+if errorlevel 1 ( echo [edvr] ERROR: installer_test build failed & exit /b 1 )
+"%BUILD%\installer_test.exe" "%ROOT%" "%BUILD%\insttest_scratch" || (
+    echo [edvr] ERROR: the installer failed its own tests
+    exit /b 1
+)
+
+
 REM Gated with `||`, not `if errorlevel 1`.
 REM
 REM `if errorlevel N` means "exit code >= N", and a process killed by an access
@@ -444,6 +517,10 @@ echo        EliteDangerous64.exe, and build\openvr_api.dll into
 echo        Openvr\win64, replacing the game's file of that name --
 echo        the original must already be renamed openvr_api_orig.dll.
 echo        The two halves do NOT go in the same place. See README.md.
+echo.
+echo [edvr] Or hand somebody build\edvr-installer.exe: it carries the two
+echo        DLLs and edvr.ini, finds Steam, Epic and Frontier installs,
+echo        keeps their edvr.ini settings and repairs a clobbered install.
 echo.
 echo [edvr] To check the build without the game:
 echo        build\smoke.exe build\d3d11.dll
