@@ -1642,7 +1642,7 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     if (fssRevealWantsDraws() &&
         ((s->fssBodyFrame != 0 && s->frameNo - s->fssBodyFrame <= 2) ||
          (deviceHookFssModeLatch() && s->fssJumpFrame != 0 &&
-          s->frameNo - s->fssJumpFrame <= 30)) &&
+          s->frameNo - s->fssJumpFrame <= 600)) &&
         fssRevealOnEyeDraw(self, kind, count, instances)) {
         if (s->fssArrivalOpen) ++s->fssArrivalRecogs;
         return DrawVerdict::kFssReveal;
@@ -2986,9 +2986,15 @@ void vScreenFrameBoundary() {
     // composite recognitions it carried. Zero while squares showed would
     // prove the arriving content flows through a different draw.
     {
+        // 600 frames, not 30 (round 48c): the zoom TRANSIT takes ~3
+        // seconds and the squares appear at its ARRIVAL -- a 30-frame
+        // window covered the departure and expired mid-flight, so every
+        // window-scoped intervention ran before the squares existed. A
+        // long window is free: the heal's hard-black fill is a no-op
+        // over the void it mostly sees.
         const bool open =
-            s->fssJumpFrame != 0 && s->frameNo - s->fssJumpFrame <= 30 &&
-            deviceHookFssModeLatch() && fssRevealWantsDraws();
+            s->fssJumpFrame != 0 && s->frameNo - s->fssJumpFrame <= 600 &&
+            deviceHookFssModeLatch();
         if (open) bumpFssArrivalStamp();
         if (open && !s->fssArrivalOpen) {
             s->fssArrivalRecogs = 0;
