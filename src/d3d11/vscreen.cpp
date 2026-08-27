@@ -2958,9 +2958,13 @@ void vScreenFrameBoundary() {
     // every body-target-triggered census starts too late to see. One
     // census per latch, the standard auto-arm machinery.
     if (takeWorldJump()) {
-        // The zoom-start marker, consumed once and shared: the reveal's
-        // arrival window and the census trigger both key on it.
-        s->fssJumpFrame = s->frameNo;
+        // The zoom-start marker, consumed once and shared -- and taken
+        // ONLY on the game's own word that the scanner is open (round
+        // 48d): world jumps fire on supercruise drops and hyperspace
+        // too, and a stale marker plus an ignored FSS keypress opened
+        // the window in the COCKPIT, where hard-black is everywhere --
+        // the field's flicker.
+        if (journalFssFocus()) s->fssJumpFrame = s->frameNo;
         if (s->censusFssJump && s->fssChromeFrame != 0 &&
             s->frameNo - s->fssChromeFrame <= 5) {
             drawCensusAutoRequest();
@@ -2994,7 +2998,7 @@ void vScreenFrameBoundary() {
         // over the void it mostly sees.
         const bool open =
             s->fssJumpFrame != 0 && s->frameNo - s->fssJumpFrame <= 600 &&
-            deviceHookFssModeLatch();
+            journalFssFocus();
         if (open) bumpFssArrivalStamp();
         if (open && !s->fssArrivalOpen) {
             s->fssArrivalRecogs = 0;
