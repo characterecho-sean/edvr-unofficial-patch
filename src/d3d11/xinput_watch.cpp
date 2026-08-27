@@ -109,6 +109,12 @@ bool held(const XINPUT_STATE& st, const XinputBinding& b) {
 
 bool xinputTranslate(const char* eliteKey, XinputBinding* out) {
     if (!eliteKey || !out) return false;
+    // Axis bindings carry a direction prefix ("Pos_GamePad_RTrigger");
+    // the trigger threshold reads the positive direction either way.
+    if (_strnicmp(eliteKey, "Pos_", 4) == 0 ||
+        _strnicmp(eliteKey, "Neg_", 4) == 0) {
+        eliteKey += 4;
+    }
     for (const PadMap& m : kPadMap) {
         if (_stricmp(eliteKey, m.elite) == 0) {
             out->buttons = m.buttons;

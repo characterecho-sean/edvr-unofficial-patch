@@ -910,7 +910,7 @@ State& ensureState() {
                 Log::get().note("hotkey: the FSS quit key adopted from "
                                 "your Elite bindings: %s", b);
             }
-            if (eliteBindsLookup("ExplorationFSSZoomStepIn", b,
+            if (eliteBindsLookup("ExplorationFSSMiniZoomIn", b,
                                  sizeof(b))) {
                 g_state->fssZoomStepKey.setBinding(b);
                 Log::get().note("hotkey: the FSS stepped-zoom key adopted "
@@ -938,7 +938,7 @@ State& ensureState() {
                                     "your gamepad: %s.", pk);
                 }
                 g_state->fssZoomStepPad = XinputBinding{};
-                if (eliteBindsLookupPad("ExplorationFSSZoomStepIn", pk,
+                if (eliteBindsLookupPad("ExplorationFSSMiniZoomIn", pk,
                                         sizeof(pk)) &&
                     xinputTranslate(pk, &g_state->fssZoomStepPad)) {
                     Log::get().note("hotkey: the FSS stepped zoom is also "
