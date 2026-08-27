@@ -1212,36 +1212,36 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
                 if (s->fssChromeFrame != s->frameNo) {
                     s->fssChromeFrame = s->frameNo;
                     bumpFssChromeStamp();
-                    // The FIRST matched composite of the frame is the
-                    // left eye's screen (the eyes draw left-first, the
-                    // screen pair before the scenery) -- the one whose
-                    // constants the rect must come from.
-                    if (s->fssTheaterOn) fssPanelRectOnComposite(self);
                 }
                 fssPanelProbeOnComposite(self);
             }
         });
-        // The scanner's OFF-screen chrome pieces -- the neon frame around
-        // the player, the survey's side quads -- draw through this same
-        // pipeline AFTER the screen pair. While the cinema screen is up
-        // they are scenery behind it: skipping them keeps them out of the
-        // captured eye, which is what cleans the crop's top edge. The
-        // first four matched draws are the screen pair for both eyes.
+        // The theater's per-draw pipeline (round 45f): every matched
+        // composite is handed to the rect deriver with its own draw args
+        // and its ordinal within the frame; once per engage the deriver
+        // classifies the whole family -- camera-centred records are the
+        // SCREEN (their union is the crop), far-out rotated records are
+        // scenery (the neon frame) and their ordinals land in a skip
+        // mask. Until a derivation publishes, nothing is skipped and the
+        // centred band crops -- both fail-safe.
         if (chromeMatched && s->fssTheaterOn && deviceHookFssModeLatch()) {
             if (s->fssChromeSkipFrame != s->frameNo) {
                 s->fssChromeSkipFrame = s->frameNo;
                 s->fssChromeSkipCount = 0;
             }
-            ++s->fssChromeSkipCount;
-            if (s->fssChromeSkipCount > 4) {
+            const uint32_t ord = s->fssChromeSkipCount++;
+            fssPanelRectOnComposite(self, ord,
+                                    fssPanelProbeStartInstance(),
+                                    fssPanelProbeBaseVertex());
+            const uint32_t mask = fssPanelRectSkipMask();
+            if (ord < 32 && ((mask >> ord) & 1u)) {
                 if (!s->fssChromeSkipNoted) {
                     s->fssChromeSkipNoted = true;
                     Log::get().note(
-                        "fss theater: the scanner's off-screen chrome "
-                        "pieces (the neon frame) are skipped while the "
-                        "screen is up -- the first four matched draws are "
-                        "the screen pair, the rest are scenery. Said "
-                        "once.");
+                        "fss theater: the derivation classified the "
+                        "scanner's scenery quads (mask 0x%X) and they are "
+                        "skipped while the screen is up. Said once.",
+                        mask);
                 }
                 ++s->fssChromeSkipped;
                 return DrawVerdict::kSkip;

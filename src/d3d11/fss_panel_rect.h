@@ -1,21 +1,26 @@
 // The scanner screen's rectangle in the eye, derived per engage.
 //
-// THE MEASUREMENT (2026-08-27, probe flights 1-5, docs in the ledger):
-// the FSS's visible screen is a camera-centred quad pair -- the display
-// at +-131.176 x +-71.874 model units, 156.114 ahead, and its frame at
-// +-164.700 x +-92.655, 180 ahead: 16:9 to four digits, identity
-// orientation, record position zero, the world-rebase origin centimetres
-// from the camera. The only session-varying input is the fused per-eye
-// view-projection at the composite's cb0 rows 4..7 -- and while the
-// theater is engaged the game renders from a FROZEN pose, so those rows
-// are constant for the whole engagement.
+// THE MEASUREMENTS (probe flights 1-5 and the crop flights, 2026-08-27):
+// the scanner draws SEVERAL quads through one pipeline on one atlas --
+// the display, its outer frame, UI boxes, and scenery pieces around the
+// player (the neon frame). The records churn per frame, their indices
+// are fetched from the slot-0 instance stream, and only same-frame data
+// coheres. The screen family is camera-centred (record position ~zero);
+// the scenery is not (sub-metre positions, rotated). The eye pair draws
+// each quad back-to-back, and which eye is first is NOT assumed: the
+// left eye is identified by its projection (the screen's centre lands
+// nasal of image centre only in the left eye).
 //
-// THE DERIVER: at the first recognised chrome composite of an engage
-// (the theater's mode latch open), stage-copy cb0, read it back a few
-// draws later, project the frame's four corners on the CPU, and publish
-// the rect through the bridge for the theater's crop. One derivation per
-// engage; the latch closing resets it. Every failure publishes nothing
-// and the theater falls back to its centred-band crop.
+// THE DERIVER, once per engage: across one frame it captures every
+// matched draw's own instance entry and vertex window (same-frame, at
+// that draw), cb0 for BOTH eyes of the first pair, the cb1 rebase row,
+// and the whole record pool. Three frames later it decodes each quad,
+// classifies screen family versus scenery, projects the family's
+// perspective-normalised union through the LEFT eye's rows, fit-shrinks,
+// and publishes the corners for the renderer's homography -- and hands
+// vscreen a per-ordinal skip mask so the scenery draws are dropped while
+// the cinema screen is up. Every failure publishes nothing: the theater
+// keeps its centred band and no draw is skipped.
 #pragma once
 
 #include <cstdint>
@@ -24,10 +29,16 @@ struct ID3D11DeviceContext;
 
 namespace edvr {
 
-// Called at a recognised chrome composite (the tracker's matched branch)
-// while fix.fss_theater is armed. Runs the stage/readback/derive state
-// machine; free once the engage's rect is published.
-void fssPanelRectOnComposite(ID3D11DeviceContext* ctx);
+// Called at EVERY recognised chrome composite while fix.fss_theater is
+// armed and the mode latch is open. ordinal counts matched draws within
+// the frame (0-based); startInstance/baseVertex are the draw's own.
+void fssPanelRectOnComposite(ID3D11DeviceContext* ctx, uint32_t ordinal,
+                             uint32_t startInstance, int32_t baseVertex);
+
+// The per-ordinal draw policy the derivation produced: bit i set means
+// matched draw ordinal i is SCENERY and should be skipped while the
+// screen is up. 0 until a derivation lands (skip nothing).
+uint32_t fssPanelRectSkipMask();
 
 void fssPanelRectShutdown();
 

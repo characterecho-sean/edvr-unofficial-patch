@@ -185,6 +185,7 @@ void fssPanelProbeDrawArgs(uint32_t startIndex, int32_t baseVertex,
 }
 
 uint32_t fssPanelProbeStartInstance() { return g_argStartInstance; }
+int32_t fssPanelProbeBaseVertex() { return g_argBaseVertex; }
 
 void fssPanelProbeOnComposite(ID3D11DeviceContext* ctx) {
     if (!fssPanelProbeWants() || !ctx) return;
