@@ -45,6 +45,8 @@ bool g_published = false;
 bool g_failNoted = false;
 uint32_t g_derives = 0;
 uint32_t g_skipMask = 0;
+float g_pickU[2] = {};
+bool g_pickLeftIsA = true;
 
 FaultBudget g_budget("fssPanelRect", 8);
 
@@ -468,17 +470,20 @@ void fssPanelRectOnComposite(ID3D11DeviceContext* ctx, uint32_t ordinal,
                 const bool pa = project(rowsA, centre, &ua, &va);
                 const bool pb =
                     rowsB ? project(rowsB, centre, &ub, &vb) : false;
-                // The left eye pushes world-centre content nasal: u >
-                // 0.5. Prefer whichever eye satisfies that; note when
-                // neither or both do.
-                if (pa && ua >= 0.5f) {
-                    rows = rowsA;
-                } else if (pb && ub >= 0.5f) {
-                    rows = rowsB;
+                // For the SAME far point the left eye's u is always the
+                // larger (its temporal side is left, so content sits
+                // nasal-shifted right). Absolute thresholds collapse
+                // under head yaw -- the 45f flight's lesson -- so the
+                // pick is relative, pose-proof.
+                if (pa && pb) {
+                    rows = ua >= ub ? rowsA : rowsB;
                 } else if (pb) {
-                    rows = ub > ua ? rowsB : rowsA;
+                    rows = rowsB;
                 }
                 ok = pa || pb;
+                g_pickU[0] = ua;
+                g_pickU[1] = ub;
+                g_pickLeftIsA = rows == rowsA;
             }
             if (ok) {
                 const float cx[5] = {uMinX, uMaxX, uMaxX, uMinX, 0.0f};
@@ -494,27 +499,16 @@ void fssPanelRectOnComposite(ID3D11DeviceContext* ctx, uint32_t ordinal,
                     ok = project(rows, p, &cu[i], &cv[i]);
                 }
                 if (ok) {
-                    float f = 0.998f;
+                    // TRUE corners, unshrunken: a quad that overhangs the
+                    // rendered eye keeps its real shape, and the renderer
+                    // blacks the never-rendered strip per pixel -- the
+                    // 45f fit-shrink warped the whole mapping to hide a
+                    // sliver, which read as the screen angling away.
                     for (int i = 0; i < 4; ++i) {
-                        const float du = cu[i] - cu[4];
-                        const float dv = cv[i] - cv[4];
-                        if (du > 0 && (0.998f - cu[4]) / du < f) {
-                            f = (0.998f - cu[4]) / du;
-                        }
-                        if (du < 0 && (0.002f - cu[4]) / du < f) {
-                            f = (0.002f - cu[4]) / du;
-                        }
-                        if (dv > 0 && (0.998f - cv[4]) / dv < f) {
-                            f = (0.998f - cv[4]) / dv;
-                        }
-                        if (dv < 0 && (0.002f - cv[4]) / dv < f) {
-                            f = (0.002f - cv[4]) / dv;
-                        }
-                    }
-                    ok = f > 0.5f;
-                    for (int i = 0; i < 4 && ok; ++i) {
-                        corners[i * 2 + 0] = cu[4] + (cu[i] - cu[4]) * f;
-                        corners[i * 2 + 1] = cv[4] + (cv[i] - cv[4]) * f;
+                        corners[i * 2 + 0] = cu[i];
+                        corners[i * 2 + 1] = cv[i];
+                        ok = ok && cu[i] > -0.5f && cu[i] < 1.5f &&
+                             cv[i] > -0.5f && cv[i] < 1.5f;
                     }
                     ok = ok && corners[2] - corners[0] > 0.2f &&
                          corners[7] - corners[1] > 0.1f;
@@ -522,6 +516,7 @@ void fssPanelRectOnComposite(ID3D11DeviceContext* ctx, uint32_t ordinal,
             }
         }
 
+        const uint32_t ordCount = g_ordCount;
         releaseAll();
 
         if (ok) {
@@ -531,10 +526,14 @@ void fssPanelRectOnComposite(ID3D11DeviceContext* ctx, uint32_t ordinal,
             ++g_derives;
             Log::get().note(
                 "fss panel rect: LIVE union of the screen family -- %u "
-                "quads, %u screen, scenery mask 0x%X; TL (%.4f,%.4f) TR "
+                "quads, %u screen, scenery mask 0x%X; eye pick uA=%.3f "
+                "uB=%.3f -> %s; TL (%.4f,%.4f) TR "
                 "(%.4f,%.4f) BR (%.4f,%.4f) BL (%.4f,%.4f) (%u this "
                 "session).",
-                g_ordCount, screenCount, mask,
+                ordCount, screenCount, mask,
+                static_cast<double>(g_pickU[0]),
+                static_cast<double>(g_pickU[1]),
+                g_pickLeftIsA ? "A(first)" : "B(second)",
                 static_cast<double>(corners[0]),
                 static_cast<double>(corners[1]),
                 static_cast<double>(corners[2]),

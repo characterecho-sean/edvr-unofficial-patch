@@ -95,6 +95,13 @@ void main(uint3 id : SV_DispatchThreadID) {
             float den = hB.z * sx + hB.w * sy + 1.0;
             pu = (hA.x * sx + hA.y * sy + hA.z) / den;
             pv = (hA.w * sx + hB.x * sy + hB.y) / den;
+            // A corner past the rendered eye means this strip was never
+            // drawn: honest black, not a clamped smear or a warped
+            // mapping.
+            if (pu < 0.0 || pu > 1.0 || pv < 0.0 || pv > 1.0) {
+                O[id.xy] = float4(0, 0, 0, 1);
+                return;
+            }
         } else {
             pu = su;
             pv = 0.5 + (0.5 - sv) * misc.x;
