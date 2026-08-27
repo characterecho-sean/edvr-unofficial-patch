@@ -73,6 +73,13 @@ long fssChromeStampValue();
 void bumpFssBodyStamp();
 long fssBodyStampValue();
 
+// The scanner screen's rectangle in the eye (u0,v0,u1,v1), derived by
+// d3d11 once per theater engage and cropped to by the openvr half. seq
+// is 0 until the first publish and bumps on every one.
+void publishFssPanelRect(float u0, float v0, float u1, float v1);
+long fssPanelRectSeqValue();
+bool readFssPanelRect(float* out4);
+
 // A camera-jump latch WITHIN d3d11.dll (plain process state, not the
 // mapping): the glitch detector notes every world-camera jump; the
 // arrival census takes the latch at the frame boundary. Lives here so

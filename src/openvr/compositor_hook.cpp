@@ -75,7 +75,8 @@ typedef vr::EVRCompositorError(*PFN_Submit)(void* self, vr::EVREye eye,
 
 typedef void* (*PFN_EdvrFssHeal)(void*, void*, float, float, int);
 typedef void* (*PFN_EdvrFssTheater)(void*, int, float, float, const float*,
-                                    float, float, float, float);
+                                    float, float, float, float,
+                                    const float*);
 
 constexpr float kTheaterHalfIpd = 0.0315f;
 
@@ -212,6 +213,9 @@ struct State {
     float theaterScale = 1.0f;
     float theaterCurve = 0.0f;
     float theaterAspect = 1.78f;
+    float theaterRect[4] = {};
+    bool  theaterRectValid = false;
+    LONG  theaterRectSeq = 0;
     LONG theaterStamp = 0;
     uint32_t theaterSeen = 0;
     bool theaterFrozen = false;
@@ -792,6 +796,16 @@ vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
             content = s->theaterContent ? s->theaterContent
                                         : texture->handle;
         }
+        // The engage's derived screen rectangle, adopted when the d3d11
+        // half publishes a new one; dropped at unfreeze so a stale rect
+        // never crops a later engage.
+        {
+            const LONG rs = fssPanelRectSeqValue();
+            if (rs != s->theaterRectSeq) {
+                s->theaterRectSeq = rs;
+                s->theaterRectValid = readFssPanelRect(s->theaterRect);
+            }
+        }
         if (s->theaterFn && content && eyeTangents(&outer, &inner)) {
             // The anchor is ours (see theaterXform): the compositor
             // reprojects against the live pose it handed out, not the
@@ -805,7 +819,8 @@ vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
             void* drawn = s->theaterFn(
                 content, eye == vr::Eye_Left ? 0 : 1, outer, inner,
                 xf, s->theaterDist, s->theaterScale, s->theaterCurve,
-                s->theaterAspect);
+                s->theaterAspect,
+                s->theaterRectValid ? s->theaterRect : nullptr);
             if (drawn) {
                 vr::Texture_t sub = *texture;
                 sub.handle = drawn;
@@ -1372,6 +1387,7 @@ vr::EVRCompositorError hookedWaitGetPoses(void* self,
         } else if (!bodyActive) {
             s->theaterFrozen = false;
             s->theaterContent = nullptr;
+            s->theaterRectValid = false;
         }
     }
 

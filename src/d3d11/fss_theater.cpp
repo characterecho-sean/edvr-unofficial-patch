@@ -32,6 +32,9 @@ cbuffer P : register(b0) {
     float4 misc;   // x = vertical band (fraction of the texture's height
                    // the screen shows, centre-cropped), y = half width
                    // along the surface, z = half height, w = curve
+    float4 rect;   // the scanner screen's own rectangle in the content
+                   // (u0,v0,u1,v1); z > x means valid and it replaces
+                   // the centred band
 }
 [numthreads(16, 16, 1)]
 void main(uint3 id : SV_DispatchThreadID) {
@@ -48,7 +51,7 @@ void main(uint3 id : SV_DispatchThreadID) {
     float3 df = float3(dot(m0.xyz, dv), dot(m1.xyz, dv), dot(m2.xyz, dv));
     float3 org = float3(m0.w, m1.w, m2.w);
     float4 outc = float4(0, 0, 0, 1);
-    float pu = -1.0, pv = -1.0;
+    float su = -1.0, sv = -1.0;
     if (misc.w > 0.005) {
         // Curved screen: a vertical cylinder of radius dist/curve whose
         // arc centre sits at the screen distance; u runs along the arc so
@@ -66,21 +69,31 @@ void main(uint3 id : SV_DispatchThreadID) {
             if (t > 0) {
                 float3 hit = org + t * df;
                 float th = atan2(hit.x, zc - hit.z);
-                pu = (th * R + misc.y) / (2.0 * misc.y);
-                pv = 0.5 + (0.5 - (hit.y + misc.z) / (2.0 * misc.z)) *
-                               misc.x;
+                su = (th * R + misc.y) / (2.0 * misc.y);
+                sv = (hit.y + misc.z) / (2.0 * misc.z);
             }
         }
     } else if (df.z < -1e-4) {
         float t = (-tans.w - org.z) / df.z;
         if (t > 0) {
             float3 hit = org + t * df;
-            pu = (hit.x + misc.y) / (2.0 * misc.y);
-            pv = 0.5 + (0.5 - (hit.y + misc.z) / (2.0 * misc.z)) *
-                           misc.x;
+            su = (hit.x + misc.y) / (2.0 * misc.y);
+            sv = (hit.y + misc.z) / (2.0 * misc.z);
         }
     }
-    if (pu >= 0 && pu <= 1 && pv >= 0 && pv <= 1) {
+    if (su >= 0 && su <= 1 && sv >= 0 && sv <= 1) {
+        // Screen fractions -> content coordinates: the derived rectangle
+        // of the scanner's own screen when the bridge supplied one, the
+        // centred band otherwise. sv runs bottom-up in space, v runs
+        // top-down in the texture.
+        float pu, pv;
+        if (rect.z > rect.x) {
+            pu = lerp(rect.x, rect.z, su);
+            pv = lerp(rect.y, rect.w, 1.0 - sv);
+        } else {
+            pu = su;
+            pv = 0.5 + (0.5 - sv) * misc.x;
+        }
         outc = float4(C.SampleLevel(S0, float2(pu, pv), 0).rgb, 1);
     }
     O[id.xy] = outc;
@@ -124,7 +137,7 @@ void failOnce(const char* what) {
 
 void* theaterInner(void* contentTex, int eye, float outerMag, float innerMag,
                    const float* xf, float dist, float scale, float curve,
-                   float aspect) {
+                   float aspect, const float* rect) {
     ID3D11Texture2D* ct = nullptr;
     static_cast<IUnknown*>(contentTex)
         ->QueryInterface(__uuidof(ID3D11Texture2D),
@@ -176,7 +189,7 @@ void* theaterInner(void* contentTex, int eye, float outerMag, float innerMag,
     }
     if (ok && !g_cb) {
         D3D11_BUFFER_DESC bd{};
-        bd.ByteWidth = 80;
+        bd.ByteWidth = 96;
         bd.Usage = D3D11_USAGE_DYNAMIC;
         bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
         bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
@@ -271,12 +284,14 @@ void* theaterInner(void* contentTex, int eye, float outerMag, float innerMag,
             if (halfH > nativeHalfH) halfH = nativeHalfH;
             band = halfH / nativeHalfH;
         }
-        float cbData[20] = {
+        float cbData[24] = {
             lt, rt, vt, dist,
             xf[0], xf[1], xf[2], xf[9],
             xf[3], xf[4], xf[5], xf[10],
             xf[6], xf[7], xf[8], xf[11],
             band, halfW, halfH, curve,
+            rect ? rect[0] : 0.0f, rect ? rect[1] : 0.0f,
+            rect ? rect[2] : -1.0f, rect ? rect[3] : 0.0f,
         };
         D3D11_MAPPED_SUBRESOURCE m{};
         if (SUCCEEDED(ctx->Map(g_cb, 0, D3D11_MAP_WRITE_DISCARD, 0, &m)) &&
@@ -371,12 +386,13 @@ extern "C" __declspec(dllexport) void* edvrFssTheater(void* contentTex,
                                                       float dist,
                                                       float scale,
                                                       float curve,
-                                                      float aspect) {
+                                                      float aspect,
+                                                      const float* rect) {
     if (!contentTex || !xf || eye < 0 || eye > 1) return nullptr;
     void* out = nullptr;
     edvr::guardedBudget(edvr::g_budget, [&] {
         out = edvr::theaterInner(contentTex, eye, outerMag, innerMag, xf,
-                                 dist, scale, curve, aspect);
+                                 dist, scale, curve, aspect, rect);
     });
     return out;
 }

@@ -172,6 +172,7 @@ cl.exe %CFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "%ROOT%\src\d3d11\fss_theater.cpp" ^
     "%ROOT%\src\d3d11\xinput_watch.cpp" ^
     "%ROOT%\src\d3d11\fss_panel_probe.cpp" ^
+    "%ROOT%\src\d3d11\fss_panel_rect.cpp" ^
     "%ROOT%\src\d3d11\panel_quad.cpp" "%ROOT%\src\d3d11\panel_curve.cpp" ^
     "%ROOT%\src\d3d11\shader_sig.cpp" ^
     "%ROOT%\src\d3d11\remlok_fix.cpp" "%ROOT%\src\d3d11\holo_fix.cpp" ^

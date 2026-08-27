@@ -52,9 +52,12 @@ extern "C" {
 // whose arc centre sits at the screen distance. aspect: the screen's
 // width:height (the eye capture is square; the content centre-crops
 // vertically, undistorted, to fill the shape); 0 = the native square.
+// rect: the scanner screen's own rectangle in the content (u0,v0,u1,v1),
+// derived per engage by fss_panel_rect; null falls back to the centred
+// aspect band.
 __declspec(dllexport) void* edvrFssTheater(void* contentTex, int eye,
                                            float outerMag, float innerMag,
                                            const float* xf, float dist,
                                            float scale, float curve,
-                                           float aspect);
+                                           float aspect, const float* rect);
 }

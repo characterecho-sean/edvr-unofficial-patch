@@ -104,6 +104,12 @@ struct Shared {
     //               gate. The chrome stamp covers the whole scanner; this
     //               one only the final zoom.
     volatile LONG fssBodyStamp;
+    // The scanner screen's rectangle in the (left) eye, derived by d3d11
+    // once per theater engage from the composite's own constants; the
+    // openvr half crops the cinema screen's content to it. seq bumps per
+    // publish; 0 means never published.
+    volatile LONG fssPanelRectSeq;
+    float         fssPanelRect[4];
     // cullGuard  the cull guard's stage and margin, packed as
     //            (stage << 24) | (hPerMille << 12) | vPerMille, written by
     //            openvr_api.dll at its stage transitions
@@ -152,8 +158,9 @@ struct Shared {
 // The name is built once, at first use. The two DLLs are in the same process,
 // so the channel between them is unaffected.
 //
-// _v13 because the struct changed again -- fssBodyStamp was added. _v12
-// was fssChromeStamp, _v11 fssMonoFrames, _v10 submitTex. _v9 was
+// _v14 because the struct changed again -- the panel rect was added. _v13
+// was fssBodyStamp, _v12 fssChromeStamp, _v11 fssMonoFrames, _v10
+// submitTex. _v9 was
 // headForward. _v8 was
 // eyeTangents, _v7 cullGuard, _v6 eyeSize, _v5 holdFrames, _v4
 // externalCamStamp, _v3 the field before that. A mismatched pair from
@@ -176,7 +183,7 @@ const wchar_t* mappingName() {
     static wchar_t name[64];
     static bool built = false;
     if (!built) {
-        _snwprintf_s(name, _TRUNCATE, L"Local\\edvr_glitch_frame_v13_%lu",
+        _snwprintf_s(name, _TRUNCATE, L"Local\\edvr_glitch_frame_v14_%lu",
                      GetCurrentProcessId());
         built = true;
     }
@@ -205,6 +212,28 @@ volatile LONG g_worldJump = 0;
 void noteWorldJump() { InterlockedExchange(&g_worldJump, 1); }
 
 bool takeWorldJump() { return InterlockedExchange(&g_worldJump, 0) != 0; }
+
+void publishFssPanelRect(float u0, float v0, float u1, float v1) {
+    Shared* s = map();
+    if (!s) return;
+    s->fssPanelRect[0] = u0;
+    s->fssPanelRect[1] = v0;
+    s->fssPanelRect[2] = u1;
+    s->fssPanelRect[3] = v1;
+    InterlockedIncrement(&s->fssPanelRectSeq);
+}
+
+long fssPanelRectSeqValue() {
+    Shared* s = map();
+    return s ? s->fssPanelRectSeq : 0;
+}
+
+bool readFssPanelRect(float* out4) {
+    Shared* s = map();
+    if (!s || !out4 || s->fssPanelRectSeq == 0) return false;
+    for (int i = 0; i < 4; ++i) out4[i] = s->fssPanelRect[i];
+    return true;
+}
 
 void bumpFssBodyStamp() {
     Shared* s = map();

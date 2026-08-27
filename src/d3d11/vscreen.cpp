@@ -28,6 +28,7 @@
 #include "fss_panel.h"
 #include "fss_probe.h"
 #include "fss_panel_probe.h"
+#include "fss_panel_rect.h"
 #include "fss_reveal.h"
 #include "fss_dump.h"
 #include "fss_ring.h"
@@ -1169,7 +1170,8 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     // moment the zoom's camera jump lands, and the body-layer gate opens
     // ten frames too late. Cheap gate first, hash second, config off =
     // free.
-    if ((s->fssHealOn || s->censusFssJump || fssPanelProbeWants()) &&
+    if ((s->fssHealOn || s->censusFssJump || fssPanelProbeWants() ||
+         s->fssTheaterOn) &&
         kind == 'X' && count == 6) {
         guardedBudget(g_panelCbBudget, [&] {
             ID3D11VertexShader* vs = nullptr;
@@ -1206,6 +1208,7 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
                     bumpFssChromeStamp();
                 }
                 fssPanelProbeOnComposite(self);
+                if (s->fssTheaterOn) fssPanelRectOnComposite(self);
             }
         });
     }
@@ -3812,6 +3815,7 @@ void shutdownVScreenFixes() {
     fssPanelShutdown();
     fssProbeShutdown();
     fssPanelProbeShutdown();
+    fssPanelRectShutdown();
     fssRevealShutdown();
     fssRingShutdown();
     fssDumpShutdown();
