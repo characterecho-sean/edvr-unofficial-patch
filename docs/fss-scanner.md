@@ -13,7 +13,7 @@ because it was expensive and the lessons are reusable.
 > **STATUS: SOLVED, field-verified 2026-08-27.** The black squares are
 > ring-only, appear during the ~10-frame zoom-arrival window in the
 > primary eye's submitted image, and are healed by the shipping pair
-> `fix.fss_eye_heal = 1` + `fix.fss_reveal_sync = lockstep`. The final
+> `fix.fss_eye_heal = 1` + `fix.fss_reveal_sync = on`. The final
 > mechanism and the fix are in the chapters from round thirty-three
 > onward; the vendor-facing writeup is
 > [frontier-fss-bug-report.md](frontier-fss-bug-report.md). Everything
@@ -833,8 +833,8 @@ no amortized layer and arrives whole in both eyes.
 The shipping state, both repo-ini defaults:
 
 - `fix.fss_eye_heal = 1` — the arrival window's fill, scoped as above.
-- `fix.fss_reveal_sync = lockstep` — the composite-drawn resolve held
-  byte-identical.
+- `fix.fss_reveal_sync = on` — the composite-drawn resolve held
+  byte-identical (the campaign's "lockstep" mechanism).
 
 The campaign's scaffolding was removed once the fix stood alone (the
 survey probe, the press census, the pair-sync's indirect extensions,

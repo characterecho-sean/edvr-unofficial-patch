@@ -92,27 +92,32 @@ FaultBudget g_budget("fssReveal", 8);
 
 void fssRevealConfigure(Config& cfg) {
     const bool wasSteady = g_steady;
-    const std::string m = cfg.getString("fix.fss_reveal_sync", "stock");
-    if (m == "stock") {
+    // High-level values: on | off | steady (developer instrument). The
+    // mechanism's campaign names -- "lockstep" and "stock" -- survive as
+    // silent aliases for inis written while they were the words.
+    const std::string m = cfg.getString("fix.fss_reveal_sync", "off");
+    const bool on = m == "on" || m == "lockstep";
+    if (m == "off" || m == "stock") {
         g_steady = false;
     } else if (m == "steady") {
         g_steady = true;
-    } else if (m == "lockstep") {
+    } else if (on) {
         g_steady = false;
         g_lockstep = true;
     } else {
         g_steady = false;
-        Log::get().note("fss_reveal_sync \"%s\" is not stock, steady or "
-                        "lockstep; running stock.", m.c_str());
+        Log::get().note("fss_reveal_sync \"%s\" is not on, off or steady; "
+                        "running off.", m.c_str());
     }
-    if (m != "lockstep") g_lockstep = false;
+    if (!on) g_lockstep = false;
     static bool s_wasLockstep = false;
     const bool lockFlip = s_wasLockstep != g_lockstep;
     s_wasLockstep = g_lockstep;
     if (wasSteady != g_steady || lockFlip) {
         Log::get().note(
             g_lockstep
-                ? "fss reveal: lockstep. The second eye's composite reads "
+                ? "fss reveal: ON (the lockstep mechanism). The second "
+                  "eye's composite reads "
                   "byte-identical copies of the first eye's textures and "
                   "scene constants -- the two panels cannot differ, and "
                   "both show the resolve animation the flat screen shows, "
@@ -123,7 +128,7 @@ void fssRevealConfigure(Config& cfg) {
                   "evaluated at the same moment for both -- the per-eye "
                   "square split cannot survive it if the stepping progress "
                   "is its cause."
-                : "fss reveal: stock; each eye's composite reads the scene "
+                : "fss reveal: off; each eye's composite reads the scene "
                   "constants as the game last wrote them.");
         // A mode flip invalidates learned state; relearn from scratch.
         g_sceneCb = nullptr;

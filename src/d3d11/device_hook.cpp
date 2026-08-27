@@ -683,8 +683,10 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
             vScreenRefreshConfig();
             g_state->fssTheaterWanted =
                 Config::get().getFloat("fix.fss_theater", 0.0f) > 0.0f ||
-                Config::get().getString("fix.fss_reveal_sync", "stock") !=
-                    "stock" ||
+                (Config::get().getString("fix.fss_reveal_sync", "off") !=
+                     "off" &&
+                 Config::get().getString("fix.fss_reveal_sync", "off") !=
+                     "stock") ||
                 Config::get().getInt("fix.fss_eye_heal", 0) != 0;
             journalWatchSetEagerStatus(g_state->fssTheaterWanted);
             // The liveness pass, on the same once-a-second cadence. In-place
@@ -960,8 +962,10 @@ State& ensureState() {
         journalWatchConfigure();
         g_state->fssTheaterWanted =
             Config::get().getFloat("fix.fss_theater", 0.0f) > 0.0f ||
-            Config::get().getString("fix.fss_reveal_sync", "stock") !=
-                "stock" ||
+            (Config::get().getString("fix.fss_reveal_sync", "off") !=
+                 "off" &&
+             Config::get().getString("fix.fss_reveal_sync", "off") !=
+                 "stock") ||
             Config::get().getInt("fix.fss_eye_heal", 0) != 0;
         journalWatchSetEagerStatus(g_state->fssTheaterWanted);
         g_state->dumpOnExternalCam =
