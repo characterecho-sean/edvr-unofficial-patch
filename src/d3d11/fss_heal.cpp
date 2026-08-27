@@ -22,6 +22,10 @@ cbuffer P : register(b0) {
     float4 p;   // p.x = dx pixels; p.yz = screen AABB min (u,v);
     float4 q;   // p.w,q.x = AABB max -- packed: yz=min, w+q.x=max
 }
+// Wireframe blue: the blue channel meaningfully ahead of red. Floorless,
+// so dim antialiased edges are caught; red-relative, so neutral and warm
+// content (ring, body, white bloom) is not.
+bool isWire(float4 c) { return c.b > c.r * 1.35 + 0.02; }
 [numthreads(16, 16, 1)]
 void main(uint3 id : SV_DispatchThreadID) {
     uint w, h;
@@ -58,16 +62,26 @@ void main(uint3 id : SV_DispatchThreadID) {
             // The neon wireframe lives in PLAYER space, not at the
             // body's optical infinity -- its right-eye pixels are the
             // wrong disparity for this shift, and stamping them paints
-            // offset twins of the blue lines (the field's report,
-            // twice). Blue dominance names them: scanner content is
-            // grey/tan/white (b ~ r); the wireframe is saturated
-            // cyan-blue (b >> r). A vetoed source keeps the left's
-            // black -- worst case a square stays unhealed where an arc
-            // crosses it, which is the stock look, not a new artifact.
-            // (Known cost: strongly blue-dominant body content -- a
-            // Neptune-blue gas giant -- can trip the veto and keep its
-            // squares; preferred over ever painting the wireframe.)
-            bool wire = rp.b > 0.10 && rp.b > 1.6 * rp.r;
+            // offset twins of the blue lines (the field's report, three
+            // times now). During the zoom TRANSIT the source region is
+            // void plus wireframe and nothing else, so every visible
+            // fill in those ~3 s is contamination by definition. Round
+            // 49's veto (b > 0.10 and b > 1.6r) let two tails through:
+            // dim antialiased bar edges under the 0.10 floor, and
+            // bloom-brightened cores whose lifted red defeats the
+            // ratio. The test is now floorless and red-relative, and a
+            // core that blooms to near-white is caught by its GLOW: the
+            // four axis neighbours at 4 px are tested too -- a bar is
+            // thinner than 8 px, so some neighbour is always still
+            // blue. A vetoed source keeps the left's black -- the stock
+            // look, never a new artifact. (Known cost: strongly
+            // blue-dominant body content can keep its squares;
+            // preferred over ever painting the wireframe.)
+            bool wire = isWire(rp) ||
+                        isWire(R[uint2(min(uint(rx) + 4u, rw - 1u), id.y)]) ||
+                        isWire(R[uint2(uint(max(rx - 4, 0)), id.y)]) ||
+                        isWire(R[uint2(uint(rx), min(id.y + 4u, rh - 1u))]) ||
+                        isWire(R[uint2(uint(rx), uint(max(int(id.y) - 4, 0)))]);
             if (!wire) o = rp;
         }
     }
