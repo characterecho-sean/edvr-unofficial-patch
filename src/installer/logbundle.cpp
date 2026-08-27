@@ -3,6 +3,8 @@
 #include <windows.h>
 #include <shlobj.h>
 
+#include <new>
+
 #include <algorithm>
 #include <vector>
 
@@ -51,9 +53,16 @@ void put32(std::vector<unsigned char>& out, unsigned long value) {
 // MS-DOS date and time, which is what a zip entry carries.
 void dosStamp(const FILETIME& fileTime, unsigned* dosTime, unsigned* dosDate) {
     SYSTEMTIME utc{}, local{};
-    FileTimeToSystemTime(&fileTime, &utc);
-    SystemTimeToTzSpecificLocalTime(nullptr, &utc, &local);
+    // Unchecked, these leave `local` zeroed, and month 0 / day 0 is a date some
+    // zip tools refuse outright. 1980-01-01 is the oldest a zip can express and
+    // is obviously a fallback rather than a real time.
+    if (!FileTimeToSystemTime(&fileTime, &utc) ||
+        !SystemTimeToTzSpecificLocalTime(nullptr, &utc, &local)) {
+        local = SYSTEMTIME{};
+    }
     if (local.wYear < 1980) local.wYear = 1980;
+    if (local.wMonth < 1 || local.wMonth > 12) local.wMonth = 1;
+    if (local.wDay < 1 || local.wDay > 31) local.wDay = 1;
     *dosTime = (local.wHour << 11) | (local.wMinute << 5) | (local.wSecond / 2);
     *dosDate = ((local.wYear - 1980) << 9) | (local.wMonth << 5) | local.wDay;
 }
@@ -152,11 +161,13 @@ std::wstring desktopFolder() {
 }
 
 bool writeZip(const std::wstring& zipPath, const std::vector<std::wstring>& files,
-              const std::vector<std::wstring>& names, std::string* error) {
+              const std::vector<std::wstring>& names, std::string* error,
+              std::vector<std::wstring>* skippedOut) {
     if (files.size() != names.size()) {
         if (error) *error = "internal: zip file list and name list differ in length";
         return false;
     }
+    std::vector<std::wstring> skipped;
 
     std::vector<unsigned char> zip;
     struct Entry {
@@ -166,13 +177,29 @@ bool writeZip(const std::wstring& zipPath, const std::vector<std::wstring>& file
         unsigned long offset = 0;
         unsigned dosTime = 0;
         unsigned dosDate = 0;
+        unsigned flags = 0;
     };
     std::vector<Entry> entries;
 
     for (size_t i = 0; i < files.size(); ++i) {
         std::vector<unsigned char> data;
         FILETIME written{};
-        if (!readWhole(files[i], &data, &written)) continue;  // vanished mid-run: skip it
+        if (!readWhole(files[i], &data, &written)) {
+            // The likeliest reason is a log the game is still writing to, which
+            // is exactly when somebody presses Save logs. Say which file, rather
+            // than handing over a bundle that is quietly missing one.
+            skipped.push_back(leafOf(files[i]));
+            continue;
+        }
+
+        // Stored entries, 32-bit offsets, no ZIP64. Logs are small and capped,
+        // but a bundle that crossed 4 GB would produce a silently corrupt
+        // archive rather than an error, and a corrupt archive attached to a bug
+        // report is worse than no archive.
+        if (zip.size() + data.size() > 0xF0000000ull) {
+            if (error) *error = "these logs are too large to package (over 4 GB)";
+            return false;
+        }
 
         Entry entry;
         entry.name = toUtf8(names[i]);
@@ -181,9 +208,19 @@ bool writeZip(const std::wstring& zipPath, const std::vector<std::wstring>& file
         entry.offset = static_cast<unsigned long>(zip.size());
         dosStamp(written, &entry.dosTime, &entry.dosDate);
 
+        // Bit 11 says the name is UTF-8. Without it a name outside ASCII is
+        // decoded as CP437 by most tools; with it, correctly. Set only when it
+        // is needed, so ordinary bundles stay byte-identical to before.
+        bool asciiName = true;
+        for (char c : entry.name) {
+            if (static_cast<unsigned char>(c) > 0x7F) asciiName = false;
+        }
+        const unsigned flags = asciiName ? 0u : 0x0800u;
+        entry.flags = flags;
+
         put32(zip, 0x04034b50);            // local file header
         put16(zip, 20);                    // version needed
-        put16(zip, 0);                     // flags
+        put16(zip, flags);                 // flags
         put16(zip, 0);                     // method: stored
         put16(zip, entry.dosTime);
         put16(zip, entry.dosDate);
@@ -198,6 +235,7 @@ bool writeZip(const std::wstring& zipPath, const std::vector<std::wstring>& file
         entries.push_back(entry);
     }
 
+    if (skippedOut) *skippedOut = skipped;
     if (entries.empty()) {
         if (error) *error = "there was nothing to collect";
         return false;
@@ -208,8 +246,8 @@ bool writeZip(const std::wstring& zipPath, const std::vector<std::wstring>& file
         put32(zip, 0x02014b50);            // central directory header
         put16(zip, 20);                    // version made by
         put16(zip, 20);                    // version needed
-        put16(zip, 0);
-        put16(zip, 0);
+        put16(zip, entry.flags);
+        put16(zip, 0);                     // method: stored
         put16(zip, entry.dosTime);
         put16(zip, entry.dosDate);
         put32(zip, entry.crc);
@@ -257,7 +295,7 @@ bool writeZip(const std::wstring& zipPath, const std::vector<std::wstring>& file
     return true;
 }
 
-LogBundle collectLogs(const std::wstring& gameDir, const std::wstring& outDir) {
+LogBundle collectLogs(const std::wstring& gameDir, const std::wstring& outDir) try {
     LogBundle bundle;
     if (gameDir.empty()) {
         bundle.error = "No game folder chosen.";
@@ -351,12 +389,24 @@ LogBundle collectLogs(const std::wstring& gameDir, const std::wstring& outDir) {
         bundle.included.push_back(found.name);
     }
     std::string error;
-    if (!writeZip(bundle.zipPath, files, names, &error)) {
+    std::vector<std::wstring> skipped;
+    if (!writeZip(bundle.zipPath, files, names, &error, &skipped)) {
         bundle.error = "Could not write " + toUtf8(bundle.zipPath) + ": " + error;
         return bundle;
     }
+    for (const std::wstring& name : skipped) {
+        bundle.notes.push_back(toUtf8(name) +
+                               " could not be read and is not in the zip -- it is probably still "
+                               "being written to.");
+    }
     bundle.ok = true;
     return bundle;
+} catch (const std::bad_alloc&) {
+    // The whole archive is assembled in memory. Several large logs on a machine
+    // already short of it should say so, not disappear.
+    LogBundle failed;
+    failed.error = "Ran out of memory collecting the logs. Close the game and try again.";
+    return failed;
 }
 
 }  // namespace edvr::installer

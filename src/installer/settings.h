@@ -103,6 +103,8 @@ private:
     void refreshRows();
 
     bool                   m_loaded = false;
+    bool                   m_backedUp = false;  // one copy per session, before the first change
+    std::wstring           m_gameDir;
     std::wstring           m_iniPath;
     std::string            m_text;   // the file as it stands
     std::vector<SettingRow> m_rows;

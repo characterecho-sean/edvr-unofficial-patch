@@ -731,8 +731,11 @@ void createControls(HWND window) {
                                  f.body);
     place(browse, 568, 88, 108, 30, Screen::Install, true);
 
-    g.chkKeep = ui::makeCheckbox(window, L"Keep the settings I have changed", kIdChkKeep, true,
-                                 f.body);
+    // Seeded from the command line, because the elevated relaunch carries
+     // --replace-settings and this checkbox is what runAction reads. Defaulting
+     // it to checked threw that flag away without a word.
+    g.chkKeep = ui::makeCheckbox(window, L"Keep the settings I have changed", kIdChkKeep,
+                                 g.args.keepSettings, f.body);
     place(g.chkKeep, kMargin + kCardPad, 330, 420, 24, Screen::Install);
 
     g.install = ui::makeButton(window, L"Install", kIdInstall, ui::ButtonStyle::Primary, f.body);

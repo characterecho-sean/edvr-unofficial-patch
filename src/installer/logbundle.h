@@ -40,7 +40,10 @@ std::wstring desktopFolder();
 // A zip of `files`, stored (not deflated): logs are small, every tool opens a
 // stored zip, and this way the installer carries no compression library.
 // `names` are the entry names, one per file.
+// `skippedOut`, if given, receives the files that could not be read -- a log the
+// game still has open, most likely, which is exactly when this gets pressed.
 bool writeZip(const std::wstring& zipPath, const std::vector<std::wstring>& files,
-              const std::vector<std::wstring>& names, std::string* error);
+              const std::vector<std::wstring>& names, std::string* error,
+              std::vector<std::wstring>* skippedOut = nullptr);
 
 }  // namespace edvr::installer

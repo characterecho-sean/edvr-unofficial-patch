@@ -195,12 +195,15 @@ Plan planInstall(const Survey& s, const Options& o, const PayloadInfo& p) {
         body.push_back(st);
         wantBackupDir = true;
     };
-    auto rename = [&](const std::wstring& from, const std::wstring& to, const std::string& why) {
+    auto rename = [&](const std::wstring& from, const std::wstring& to, const std::string& why,
+                      const std::string& expectSha = std::string()) {
         Step st;
         st.action = Action::Rename;
         st.from = from;
         st.to = to;
         st.why = why;
+        st.expectSha = expectSha;
+        st.required = true;   // a rename with nothing to rename is a stale plan
         body.push_back(st);
         changed = true;
     };
@@ -227,6 +230,10 @@ Plan planInstall(const Survey& s, const Options& o, const PayloadInfo& p) {
         st.from = from;
         st.to = to;
         st.why = why;
+        // This one is a restore, not a backup: if the file it reads has gone,
+        // skipping it quietly would reinstall the proxy over nothing and call
+        // the result a success.
+        st.required = true;
         body.push_back(st);
         changed = true;
     };
@@ -281,15 +288,46 @@ Plan planInstall(const Survey& s, const Options& o, const PayloadInfo& p) {
                 // still parked there. Keep the newcomer (it is the newer build
                 // of the same mod) and put the old one in the backup folder,
                 // where nothing can mistake it for live.
-                backup(chainPath, "the older " + modSay + " copy already parked here");
+                const std::wstring parkedMod = modNameOf(*existing);
+                const bool sameMod = !modName.empty() && parkedMod == modName;
+                backup(chainPath, sameMod
+                                      ? "the older " + modSay + " copy already parked here"
+                                      : "the file already parked under that name");
+                if (!sameMod) {
+                    plan.problems.push_back(
+                        "There was already a " + say(chainLeaf) +
+                        " here and it is not the same mod as the one in the d3d11.dll slot. It "
+                        "has been copied into the backup folder and replaced, so check that "
+                        "folder before deleting anything.");
+                }
             }
             backup(dst, "the " + modSay + " d3d11.dll found in EDVR's place");
-            rename(dst, chainPath, "moves " + modSay + " aside, keeping it installed");
+            rename(dst, chainPath, "moves " + modSay + " aside, keeping it installed",
+                   cur.sha256);
             writePayload("d3d11", dst, "installs EDVR's d3d11.dll in its place");
 
             forced.emplace_back("advanced.real_dll", say(chainLeaf));
             next.chainTarget = chainLeaf;
             next.chainMod = modName;
+
+            // EDVR passes calls through ONE other mod. If it was already
+            // chained to a different one, that one is still on disk under a
+            // name nothing loads -- and saying nothing about it is how
+            // somebody's EDHM quietly stops working after installing ReShade.
+            if (!s.state.chainTarget.empty() &&
+                _wcsicmp(s.state.chainTarget.c_str(), chainLeaf.c_str()) != 0) {
+                const DllInfo* previous = siblingNamed(s.otherD3d11, s.state.chainTarget);
+                if (previous && previous->kind != DllKind::Absent) {
+                    plan.problems.push_back(
+                        "EDVR was passing calls through " + say(s.state.chainTarget) +
+                        (s.state.chainMod.empty() ? std::string()
+                                                  : " (" + say(s.state.chainMod) + ")") +
+                        ", and now passes them through " + modSay +
+                        " instead -- EDVR can only chain to one. The older one is still in the "
+                        "folder but nothing loads it. If you want that one back, set "
+                        "advanced.real_dll to it by hand.");
+                }
+            }
             next.d3d11Installed = true;
             next.d3d11Sha = p.d3d11Sha;
 
@@ -372,8 +410,15 @@ Plan planInstall(const Survey& s, const Options& o, const PayloadInfo& p) {
                         "current one is kept as the original and EDVR is reinstalled in front of "
                         "it.");
                 }
+                if (!cur.is64) {
+                    plan.problems.push_back(
+                        "The openvr_api.dll being renamed aside is 32-bit, which the 64-bit game "
+                        "cannot have been loading. Check what put it there before starting the "
+                        "game.");
+                }
                 backup(dst, "the game's own openvr_api.dll, before it is renamed");
-                rename(dst, origPath, "keeps the game's original as " + say(origName));
+                rename(dst, origPath, "keeps the game's original as " + say(origName),
+                       cur.sha256);
                 writePayload("openvr", dst, "installs EDVR's openvr_api.dll");
                 next.openvrOrigSha = cur.sha256;
                 next.openvrOrigName = origName;
@@ -594,20 +639,35 @@ Plan planUninstall(const Survey& s, const Options& o) {
         body.push_back(st);
         wantBackupDir = true;
     };
-    auto remove = [&](const std::wstring& path, const std::string& why) {
+    auto remove = [&](const std::wstring& path, const std::string& why,
+                      const std::string& expectSha = std::string()) {
         Step st;
         st.action = Action::Delete;
         st.from = path;
         st.why = why;
+        st.expectSha = expectSha;   // do not delete a file that changed under us
         body.push_back(st);
         changed = true;
     };
-    auto rename = [&](const std::wstring& from, const std::wstring& to, const std::string& why) {
+    auto rename = [&](const std::wstring& from, const std::wstring& to, const std::string& why,
+                      const std::string& expectSha = std::string()) {
         Step st;
         st.action = Action::Rename;
         st.from = from;
         st.to = to;
         st.why = why;
+        st.expectSha = expectSha;
+        st.required = true;
+        body.push_back(st);
+        changed = true;
+    };
+    auto restore = [&](const std::wstring& from, const std::wstring& to, const std::string& why) {
+        Step st;
+        st.action = Action::Backup;  // a copy: the backup folder keeps its copy
+        st.from = from;
+        st.to = to;
+        st.why = why;
+        st.required = true;
         body.push_back(st);
         changed = true;
     };
@@ -616,7 +676,7 @@ Plan planUninstall(const Survey& s, const Options& o) {
     const std::wstring d3d11Path = joinPath(s.game.dir, kD3d11);
     if (s.d3d11.kind == DllKind::Edvr) {
         backup(d3d11Path, "EDVR's d3d11.dll");
-        remove(d3d11Path, "removes EDVR's d3d11.dll");
+        remove(d3d11Path, "removes EDVR's d3d11.dll", s.d3d11.sha256);
 
         // Whatever we moved aside goes back under the name it had. Without
         // this, uninstalling EDVR silently uninstalls the other mod too: its
@@ -629,7 +689,8 @@ Plan planUninstall(const Survey& s, const Options& o) {
             rename(target->path, d3d11Path,
                    "puts " + (s.state.chainMod.empty() ? std::string("the other mod")
                                                        : say(s.state.chainMod)) +
-                       " back under its own name");
+                       " back under its own name",
+                   target->sha256);
             plan.notes.push_back("Removing EDVR's d3d11.dll and restoring " + say(chain) +
                                  " as d3d11.dll.");
         } else {
@@ -654,17 +715,35 @@ Plan planUninstall(const Survey& s, const Options& o) {
         if (origName.empty()) origName = kOpenvrOrig;
         const std::wstring origPath = joinPath(s.game.openvrDir, origName);
         if (s.openvrCurrent.kind == DllKind::Edvr) {
-            backup(dst, "EDVR's openvr_api.dll");
-            remove(dst, "removes EDVR's openvr_api.dll");
             if (s.openvrOrig.kind == DllKind::OpenVrRuntime) {
-                rename(origPath, dst, "puts the game's own openvr_api.dll back");
+                backup(dst, "EDVR's openvr_api.dll");
+                remove(dst, "removes EDVR's openvr_api.dll", s.openvrCurrent.sha256);
+                rename(origPath, dst, "puts the game's own openvr_api.dll back",
+                       s.openvrOrig.sha256);
                 plan.notes.push_back(
                     "Removing EDVR's openvr_api.dll and renaming the game's original back.");
+            } else if (!s.openvrOrigInBackups.empty()) {
+                // The renamed original is gone, but this installer kept a copy
+                // of it before it ever renamed anything. Uninstalling from that
+                // copy is a great deal better than sending somebody to their
+                // launcher's file verification.
+                const std::wstring& copy = s.openvrOrigInBackups.front();
+                backup(dst, "EDVR's openvr_api.dll");
+                restore(copy, dst, "puts the game's own openvr_api.dll back from an EDVR backup");
+                plan.notes.push_back(
+                    "The renamed original is missing, so the game's own openvr_api.dll is being "
+                    "restored from the backup this installer made before it first renamed it.");
             } else {
+                // Deleting ours here would leave NO openvr_api.dll at all --
+                // worse than leaving EDVR installed, and done in the name of
+                // removing it. The file stays until there is something to put
+                // in its place.
                 plan.problems.push_back(
-                    "EDVR's openvr_api.dll has been removed, but the game's original was not found "
-                    "to put back. Verify or repair the game files in your launcher -- that "
-                    "restores it.");
+                    "EDVR's openvr_api.dll has been left in place: the game's original is not "
+                    "there to put back, and no backup of it was found, so removing ours would "
+                    "leave that folder with no openvr_api.dll at all. Verify or repair the game "
+                    "files in your launcher -- that restores the original -- and then uninstall "
+                    "again.");
             }
         } else if (s.openvrCurrent.kind == DllKind::OpenVrRuntime &&
                    s.openvrOrig.kind == DllKind::OpenVrRuntime) {

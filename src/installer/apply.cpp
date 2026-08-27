@@ -2,6 +2,8 @@
 
 #include <windows.h>
 
+#include "probe.h"
+
 #include <cstdio>
 
 namespace edvr::installer {
@@ -127,6 +129,33 @@ ApplyResult applyPlan(const Plan& plan, const PayloadProvider& payload) {
         return result;
     }
 
+    // ---- nothing is touched until the folder still matches the plan ----
+    //
+    // The plan was worked out, shown, and then waited on a confirmation dialog
+    // for as long as somebody took to read it. In that window another
+    // installer can run, a game update can land, or a second copy of this
+    // window can do the whole job -- and executing the stale plan then renames
+    // EDVR's own proxy on top of the game's original. Checked here, before the
+    // first step, so a stale plan does nothing at all rather than half of
+    // something.
+    for (const Step& step : plan.steps) {
+        if (step.from.empty()) continue;
+        const bool there = fileExists(step.from);
+        if (!there && (step.required || !step.expectSha.empty())) {
+            result.error = "The folder changed while this was waiting to be confirmed: " +
+                           toUtf8(leafOf(step.from)) +
+                           " is not there any more. Nothing was done -- look at it again.";
+            return result;
+        }
+        if (there && !step.expectSha.empty() && sha256File(step.from) != step.expectSha) {
+            result.error = "The folder changed while this was waiting to be confirmed: " +
+                           toUtf8(leafOf(step.from)) +
+                           " is not the file this plan was made for. Nothing was done -- close "
+                           "any other installer window and look at it again.";
+            return result;
+        }
+    }
+
     std::vector<Undo> undo;
     DWORD err = 0;
     bool overwrote = false;   // a file was replaced, which no undo can reverse
@@ -153,7 +182,10 @@ ApplyResult applyPlan(const Plan& plan, const PayloadProvider& payload) {
             case Action::Backup: {
                 const size_t slash = step.to.find_last_of(L"\\/");
                 if (slash != std::wstring::npos) ensureDirTree(step.to.substr(0, slash), &undo);
-                if (!fileExists(step.from)) break;  // nothing there: not an error
+                if (!fileExists(step.from)) {
+                    if (step.required) fail(step.from, ERROR_FILE_NOT_FOUND);
+                    break;  // an optional source that is not there is not an error
+                }
                 clearReadOnly(step.to);
                 if (!CopyFileW(step.from.c_str(), step.to.c_str(), FALSE)) {
                     fail(step.to, GetLastError());
@@ -168,7 +200,10 @@ ApplyResult applyPlan(const Plan& plan, const PayloadProvider& payload) {
                 break;
             }
             case Action::Rename: {
-                if (!fileExists(step.from)) break;
+                if (!fileExists(step.from)) {
+                    if (step.required) fail(step.from, ERROR_FILE_NOT_FOUND);
+                    break;
+                }
                 clearReadOnly(step.from);
                 clearReadOnly(step.to);
                 if (!MoveFileExW(step.from.c_str(), step.to.c_str(), MOVEFILE_REPLACE_EXISTING)) {

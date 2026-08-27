@@ -4,21 +4,52 @@
 
 #include "detect.h"
 #include "iniedit.h"
+#include "state.h"
 
 namespace edvr::installer {
 namespace {
 
 #include "settings_schema.inc"  // generated: kSettings[]
 
+// Written beside the file and moved into place.
+//
+// This one rewrites the WHOLE of somebody's edvr.ini on every toggle, and the
+// game re-reads that file about once a second. Truncating it first meant a
+// failed write left an empty or half-written settings file with no backup
+// anywhere -- and a poll landing in the gap read a 0-byte ini and dropped every
+// setting to its compiled default until the next reload.
+bool ensureBackupDir(const std::wstring& path) {
+    if (dirExists(path)) return true;
+    const size_t slash = path.find_last_of(L"\/");
+    if (slash != std::wstring::npos) {
+        const std::wstring parent = path.substr(0, slash);
+        if (!dirExists(parent) && !CreateDirectoryW(parent.c_str(), nullptr) &&
+            GetLastError() != ERROR_ALREADY_EXISTS) {
+            return false;
+        }
+    }
+    return CreateDirectoryW(path.c_str(), nullptr) != 0 ||
+           (GetLastError() == ERROR_ALREADY_EXISTS && dirExists(path));
+}
+
 bool writeWhole(const std::wstring& path, const std::string& text) {
-    HANDLE f = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+    const std::wstring temp = path + L".edvrnew";
+    HANDLE f = CreateFileW(temp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
                            FILE_ATTRIBUTE_NORMAL, nullptr);
     if (f == INVALID_HANDLE_VALUE) return false;
     DWORD written = 0;
     const BOOL ok = WriteFile(f, text.data(), static_cast<DWORD>(text.size()), &written, nullptr);
     FlushFileBuffers(f);
     CloseHandle(f);
-    return ok && written == text.size();
+    if (!ok || written != text.size()) {
+        DeleteFileW(temp.c_str());
+        return false;
+    }
+    if (!MoveFileExW(temp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING)) {
+        DeleteFileW(temp.c_str());
+        return false;
+    }
+    return true;
 }
 
 }  // namespace
@@ -145,6 +176,8 @@ const std::vector<SettingDef>& settingDefs() {
 }
 
 bool SettingsModel::load(const std::wstring& gameDir) {
+    m_gameDir = gameDir;
+    m_backedUp = false;
     m_iniPath = joinPath(gameDir, L"edvr.ini");
     m_text = readTextFile(m_iniPath);
     m_loaded = true;
@@ -186,6 +219,19 @@ bool SettingsModel::set(size_t index, const std::string& value) {
         m_error = "edvr.ini is not there yet -- install EDVR into this folder first.";
         return false;
     }
+    // One copy of the file as it was when this window opened, before the first
+    // change of the session. The install path backs edvr.ini up; changing a
+    // setting did not, and a settings screen is exactly where somebody changes
+    // several things and then wants the one they had.
+    if (!m_backedUp) {
+        const std::wstring backupDir =
+            joinPath(backupRootPath(m_gameDir), L"settings-" + timestampName());
+        if (ensureBackupDir(backupDir)) {
+            CopyFileW(m_iniPath.c_str(), joinPath(backupDir, L"edvr.ini").c_str(), FALSE);
+        }
+        m_backedUp = true;   // tried once; a failure here must not block editing
+    }
+
     MergeReport report;
     const std::string updated = mergeIni(source, source, &source, {{dotted, value}}, &report);
 

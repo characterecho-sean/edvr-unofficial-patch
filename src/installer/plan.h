@@ -94,6 +94,20 @@ struct Step {
     std::string  item;  // "d3d11" | "openvr" for WritePayload
     std::string  text;  // for WriteText
     std::string  why;   // shown to the user, one line
+
+    // What `from` was when the plan was made.
+    //
+    // A plan is worked out, shown, and then sits in front of a confirmation
+    // dialog for as long as somebody takes to read it -- during which another
+    // installer can run, a game update can land, or a second copy of this
+    // window can do the whole job. Executing a stale plan is how the game's
+    // original runtime gets renamed on top of itself. Checked before anything
+    // is touched; a mismatch refuses the whole run rather than doing half of
+    // it.
+    std::string  expectSha;
+    // `from` must exist. Without this a source that has gone is skipped in
+    // silence, and a run that restored nothing reports success.
+    bool         required = false;
 };
 
 struct Plan {

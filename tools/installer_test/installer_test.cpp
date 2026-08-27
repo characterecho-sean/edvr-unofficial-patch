@@ -25,6 +25,7 @@
 
 #include "../../src/installer/apply.h"
 #include "../../src/installer/plan.h"
+#include "../../src/installer/probe.h"
 #include "../../src/installer/logbundle.h"
 #include "../../src/installer/settings.h"
 
@@ -654,6 +655,53 @@ static void testPlanner() {
               "a plain filename is honoured, which is the point of the setting");
     }
 
+
+    {   // Uninstalling when the game's original is gone must not delete the
+        // only openvr_api.dll in the folder -- that leaves VR unable to start,
+        // in the name of removing the thing that was making it work.
+        Survey s = baseSurvey(dir);
+        s.d3d11 = fakeDll(DllKind::Edvr, joinPath(dir, L"d3d11.dll"), payload.d3d11Sha);
+        s.openvrCurrent = fakeDll(DllKind::Edvr, joinPath(s.game.openvrDir, L"openvr_api.dll"),
+                                  payload.openvrSha);
+        s.openvrOrig = fakeDll(DllKind::Absent,
+                               joinPath(s.game.openvrDir, L"openvr_api_orig.dll"), "");
+        const Plan plan = planUninstall(s, options);
+        check(!hasStep(plan, Action::Delete, L"openvr_api.dll", nullptr),
+              "uninstall leaves ours in place when there is nothing to put back");
+        check(notesMention(plan, "no openvr_api.dll at all"), "and says why");
+
+        // ...unless one of our own backups has the original, which is exactly
+        // what that folder is for.
+        Survey withBackup = s;
+        withBackup.openvrOrigInBackups.push_back(
+            joinPath(dir, L"edvr_backup\\20260101-000000\\openvr_api.dll"));
+        const Plan recovered = planUninstall(withBackup, options);
+        // Copied OVER ours rather than deleting first: the folder is never
+        // without an openvr_api.dll, not even for the moment between two steps.
+        check(hasStep(recovered, Action::Backup, L"openvr_api.dll", L"openvr_api.dll"),
+              "with a backup to hand, the game's own file is restored from it");
+        check(!hasStep(recovered, Action::Delete, L"openvr_api.dll", nullptr),
+              "and ours is replaced in place, never deleted first");
+    }
+
+    {   // A second mod taking the d3d11.dll slot means EDVR chains to the new
+        // one -- and the old one is still on disk, loaded by nothing. Saying
+        // nothing about that is how somebody's EDHM quietly stops working.
+        Survey s = baseSurvey(dir);
+        s.d3d11 = fakeDll(DllKind::D3d11Provider, joinPath(dir, L"d3d11.dll"), "reshade-sha",
+                          L"ReShade");
+        s.otherD3d11.push_back(fakeDll(DllKind::D3d11Provider, joinPath(dir, L"d3d11_edhm.dll"),
+                                       "edhm-sha", L"3Dmigoto"));
+        s.state.present = true;
+        s.state.d3d11Installed = true;
+        s.state.chainTarget = L"d3d11_edhm.dll";
+        s.state.chainMod = L"EDHM";
+        const Plan plan = planInstall(s, options, payload);
+        check(notesMention(plan, "can only chain to one"),
+              "dropping a previous chain target is reported, not silent");
+        check(notesMention(plan, "d3d11_edhm.dll"), "and the report names the one left behind");
+    }
+
     {   // The game is running.
         Survey s = baseSurvey(dir);
         s.gameRunning = true;
@@ -732,11 +780,17 @@ static PayloadProvider provider(bool failOpenvr) {
     };
 }
 
+// The hashes here are the REAL ones, taken off the files just written.
+//
+// applyPlan checks, before it touches anything, that the files are still the
+// ones the plan was made for -- so a survey carrying invented hashes describes
+// a folder that does not exist, and the run is refused. Which is the check
+// doing its job; this is how a test says "and the folder really is like that".
 static Survey scratchSurvey(const std::wstring& gameDir) {
     Survey s = baseSurvey(gameDir);
     s.d3d11 = fakeDll(DllKind::Absent, joinPath(gameDir, L"d3d11.dll"), "");
-    s.openvrCurrent =
-        fakeDll(DllKind::OpenVrRuntime, joinPath(s.game.openvrDir, L"openvr_api.dll"), "game-vr");
+    const std::wstring runtime = joinPath(s.game.openvrDir, L"openvr_api.dll");
+    s.openvrCurrent = fakeDll(DllKind::OpenVrRuntime, runtime, sha256File(runtime));
     return s;
 }
 
@@ -797,16 +851,71 @@ static void testApply(const std::wstring& scratch) {
               "and the file this run had already written is gone again");
     }
 
+
+    {   // The folder changing between the plan and the yes. Another installer
+        // window, a game update, a second copy of this one -- executing the
+        // stale plan is how the game's original gets renamed onto itself.
+        layOutScratchGame(gameDir);
+        const Survey s = scratchSurvey(gameDir);
+        const Plan plan = planInstall(s, options, payload);
+
+        // Somebody else replaces the runtime after the plan was made.
+        writeAll(joinPath(gameDir, L"Openvr\\win64\\openvr_api.dll"), "SOMEBODY-ELSES-FILE");
+
+        const ApplyResult stale = applyPlan(plan, provider(false));
+        check(!stale.ok, "a plan made for a folder that has since changed is refused");
+        check(stale.done.empty(), "and nothing at all was done");
+        expectEq(readAll(joinPath(gameDir, L"Openvr\\win64\\openvr_api.dll")),
+                 "SOMEBODY-ELSES-FILE", "the file that changed is left exactly as it was");
+        check(!fileExists(joinPath(gameDir, L"d3d11.dll")),
+              "and no half-install was left behind");
+    }
+
+    {   // A failure after a file has been replaced. The backups are the only
+        // way back, so the rollback must not take them with it -- and the
+        // result must not claim the folder is as it was.
+        layOutScratchGame(gameDir);
+        Survey s = scratchSurvey(gameDir);
+        check(applyPlan(planInstall(s, options, payload), provider(false)).ok, "installed once");
+
+        // A file where the record directory has to go: every step succeeds
+        // until the record is written.
+        removeTree(joinPath(gameDir, L"edvr_install"));
+        writeAll(joinPath(gameDir, L"edvr_install"), "not a directory");
+
+        PayloadInfo newer = payload;
+        newer.d3d11Sha = "dddd-newer";
+        Survey again = scratchSurvey(gameDir);
+        const std::wstring ours = joinPath(gameDir, L"d3d11.dll");
+        again.d3d11 = fakeDll(DllKind::Edvr, ours, sha256File(ours));
+        const std::wstring vr = joinPath(gameDir, L"Openvr\\win64\\openvr_api.dll");
+        const std::wstring orig = joinPath(gameDir, L"Openvr\\win64\\openvr_api_orig.dll");
+        again.openvrCurrent = fakeDll(DllKind::Edvr, vr, sha256File(vr));
+        again.openvrOrig = fakeDll(DllKind::OpenVrRuntime, orig, sha256File(orig));
+        again.iniPresent = true;
+        again.iniText = readAll(joinPath(gameDir, L"edvr.ini"));
+
+        Options second = options;
+        second.backupStamp = L"20260827-121500";
+        second.repair = true;   // force the writes even though little changed
+        const ApplyResult result = applyPlan(planInstall(again, second, newer), provider(false));
+        check(!result.ok, "a run that cannot finish fails");
+        check(fileExists(joinPath(gameDir, L"edvr_backup\\20260827-121500\\d3d11.dll")),
+              "the backups it took are still there afterwards");
+        check(result.overwrote, "and it admits a file had already been replaced");
+    }
+
     {   // Install, then uninstall, and the folder should be as it started.
         layOutScratchGame(gameDir);
         Survey s = scratchSurvey(gameDir);
         check(applyPlan(planInstall(s, options, payload), provider(false)).ok, "installed");
 
-        s.d3d11 = fakeDll(DllKind::Edvr, joinPath(gameDir, L"d3d11.dll"), payload.d3d11Sha);
-        s.openvrCurrent = fakeDll(DllKind::Edvr, joinPath(s.game.openvrDir, L"openvr_api.dll"),
-                                  payload.openvrSha);
-        s.openvrOrig = fakeDll(DllKind::OpenVrRuntime,
-                               joinPath(s.game.openvrDir, L"openvr_api_orig.dll"), "game-vr");
+        const std::wstring ourD3d11 = joinPath(gameDir, L"d3d11.dll");
+        const std::wstring ourVr = joinPath(s.game.openvrDir, L"openvr_api.dll");
+        const std::wstring theirVr = joinPath(s.game.openvrDir, L"openvr_api_orig.dll");
+        s.d3d11 = fakeDll(DllKind::Edvr, ourD3d11, sha256File(ourD3d11));
+        s.openvrCurrent = fakeDll(DllKind::Edvr, ourVr, sha256File(ourVr));
+        s.openvrOrig = fakeDll(DllKind::OpenVrRuntime, theirVr, sha256File(theirVr));
         s.iniPresent = true;
         s.iniText = readAll(joinPath(gameDir, L"edvr.ini"));
         s.state = readState(gameDir);

@@ -44,7 +44,13 @@ EARLY_RE = re.compile(r'readConfigStringEarly\s*\([^,]+,[^,]+,\s*"([^"]+)"', re.
 # to catch key names mentioned in log text that nothing actually reads.
 SECTIONS = ('fix', 'advanced', 'hotkey', 'log', 'openvr', 'd3d11',
             'experimental', 'luminance')
-MENTION_RE = re.compile(r'"[^"]*\b((?:%s)\.[a-z0-9_]+)' % '|'.join(SECTIONS))
+# A dotted name INSIDE a string literal. The literals are pulled out first and
+# searched separately, because scanning the raw line let a match start at a
+# CLOSING quote and run on into the C++ after it: a line reading
+# `remove(path, "removes EDVR's d3d11.dll", s.d3d11.sha256)` was reported as
+# naming a setting called d3d11.sha256 in a message.
+STRING_RE = re.compile(r'"(?:[^"\\]|\\.)*"')
+MENTION_RE = re.compile(r'\b((?:%s)\.[a-z0-9_]+)' % '|'.join(SECTIONS))
 
 
 def source_files():
@@ -88,7 +94,10 @@ def keys_mentioned():
                     continue
                 # Skip the read itself; we only want prose mentions.
                 stripped = READ_RE.sub('', EARLY_RE.sub('', line))
-                for key in MENTION_RE.findall(stripped):
+                mentioned = []
+                for literal in STRING_RE.findall(stripped):
+                    mentioned.extend(MENTION_RE.findall(literal))
+                for key in mentioned:
                     # "d3d11.dll", "log.h" -- a filename, not a setting.
                     if key.rsplit('.', 1)[-1] in ('dll', 'h', 'cpp', 'ini', 'txt', 'exe'):
                         continue

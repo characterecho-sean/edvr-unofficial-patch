@@ -234,13 +234,33 @@ line.
 ## Doing it safely
 
 - **Nothing happens without a yes.** The plan is worked out in full, shown, and
-  confirmed before a file moves.
+  confirmed before a file moves. Both confirmations default to *No*, because
+  Install is the window's default push button and two stray Return presses at a
+  window that has just taken focus should not be able to modify a game folder.
+- **A stale plan does nothing.** The plan records what each file was when it was
+  made; if any of them changed while the confirmation was open — another
+  installer ran, a game update landed, a second copy of this window did the job
+  — the run is refused before the first step rather than executed against a
+  folder it no longer describes.
+- **Names that come from `edvr.ini` are checked to be names.**
+  `advanced.real_openvr_dll` ends up as a rename destination, and a value with a
+  path in it would move the game's runtime somewhere else entirely while the
+  report said otherwise. Anything that is not a plain sibling filename falls back
+  to the default.
 - **Everything replaced is copied into `edvr_backup\<timestamp>\` first.** That
   is also what makes a lost `openvr_api_orig.dll` recoverable later.
 - **A failed step rolls the run back.** Each step records its own undo; the
   hazard being defended against is a failure between "rename the game's
   `openvr_api.dll` away" and "write ours", which would leave the folder with no
-  `openvr_api.dll` at all.
+  `openvr_api.dll` at all. Renames come back; a file that was *replaced* cannot,
+  so the rollback never deletes the backups it took and the report distinguishes
+  "the folder is as it was" from "what could be undone was undone". Writes go to
+  a temp file and are moved into place, so a failure part-way cannot leave a
+  truncated DLL where a working one was.
+- **Uninstall never leaves the folder without an `openvr_api.dll`.** If the
+  game's original is missing it is restored from an EDVR backup, and if there is
+  no backup either, ours stays where it is with an explanation — removing it
+  would be worse than leaving it.
 - **The install record is written last**, so a run interrupted half way leaves
   the previous one, which still describes the folder better than a half-true new
   one.
