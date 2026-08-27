@@ -26,86 +26,21 @@ void main(uint3 id : SV_DispatchThreadID) {
     if (id.x >= w || id.y >= h) return;
     float4 l = L[id.xy];
     float4 o = l;
-    // Heal only the INTERIOR of a black region: the gated tiles are
-    // 16-pixel solid squares, while the UI layer's blacks (bracket
-    // interiors, text gaps) are thin -- and pasting shifted content into
-    // near-field UI at the infinity disparity reads as doubling, the
-    // field's exact words. A pixel must be black together with its
-    // 2-pixel cross neighborhood; thin features never qualify.
-    bool blk = dot(l.rgb, float3(0.299, 0.587, 0.114)) < 0.004;
-    if (blk) {
-        int2 c = int2(id.xy);
-        int2 offs[4] = {int2(-2, 0), int2(2, 0), int2(0, -2), int2(0, 2)};
-        [unroll] for (int k = 0; k < 4; ++k) {
-            int2 q = c + offs[k];
-            if (q.x < 0 || q.y < 0 || q.x >= int(w) || q.y >= int(h)) {
-                continue;
-            }
-            if (dot(L[uint2(q)].rgb, float3(0.299, 0.587, 0.114)) >= 0.004) {
-                blk = false;
-                break;
-            }
-        }
-    }
-    if (blk) {
-        // And only at SQUARE scale: the gated tiles are 16 pixels, so a
-        // region still black ten pixels out in every direction is panel
-        // background or open space, not a square -- and near-field UI
-        // pasted at the infinity disparity is what doubles.
-        int2 c2 = int2(id.xy);
-        int2 far4[4] = {int2(-10, 0), int2(10, 0), int2(0, -10), int2(0, 10)};
-        bool anyFarLit = false;
-        [unroll] for (int k2 = 0; k2 < 4; ++k2) {
-            int2 q2 = c2 + far4[k2];
-            if (q2.x < 0 || q2.y < 0 || q2.x >= int(w) || q2.y >= int(h)) {
-                continue;
-            }
-            if (dot(L[uint2(q2)].rgb, float3(0.299, 0.587, 0.114)) >= 0.004) {
-                anyFarLit = true;
-                break;
-            }
-        }
-        blk = anyFarLit;
-    }
-    if (blk) {
+    // Round 48b, the WINDOW-ERA classifier: one test. The heal now exists
+    // only inside the zoom-press arrival window -- body at optical
+    // infinity, virtually no UI -- so the v5 gate stack (interior,
+    // square-scale, right-lit, bright-region) that protected menus in
+    // its always-on life is pure fill-suppression here: it left the
+    // squares over DIM ring content black and speckled tile boundaries.
+    // A hard-black left pixel takes the right's pixel at the infinity
+    // shift, whatever it is: filling space-black with space-black is a
+    // no-op, and bright chrome is never hard-black.
+    if (dot(l.rgb, float3(0.299, 0.587, 0.114)) < 0.004) {
         int rx = int(id.x) - int(round(p.x));
         uint rw, rh;
         R.GetDimensions(rw, rh);
         if (rx >= 0 && rx < int(rw)) {
-            // The horizontal shift is exact only for a perfectly
-            // symmetric vertical frustum; the field measured ~16px of
-            // vertical offset on a canted headset, enough to land an
-            // edge tile's counterpart in dark space. Three taps cover
-            // it; the first lit one wins.
-            const int dys[3] = {0, -16, 16};
-            [unroll] for (int i = 0; i < 3; ++i) {
-                int ry = int(id.y) + dys[i];
-                if (ry < 0 || ry >= int(rh)) continue;
-                float4 r = R[uint2(uint(rx), uint(ry))];
-                if (dot(r.rgb, float3(0.299, 0.587, 0.114)) <= 0.008) {
-                    continue;
-                }
-                // The region gate, from the field's menu-text report: the
-                // squares live on the BRIGHT body, while every mis-heal so
-                // far hit dark-background surfaces (menus, panel chrome).
-                // The fill's surroundings in the right eye must be
-                // genuinely bright content, not sparse marks on darkness.
-                float m = 0.0;
-                [unroll] for (int j = 0; j < 4; ++j) {
-                    int2 offs2[4] = {int2(-12, -12), int2(12, -12),
-                                     int2(-12, 12), int2(12, 12)};
-                    int2 q2 = int2(rx, ry) + offs2[j];
-                    if (q2.x >= 0 && q2.y >= 0 && q2.x < int(rw) &&
-                        q2.y < int(rh)) {
-                        m += dot(R[uint2(q2)].rgb,
-                                 float3(0.299, 0.587, 0.114));
-                    }
-                }
-                if (m > 0.20) {
-                    o = r;
-                }
-                break;
-            }
+            o = R[uint2(uint(rx), id.y)];
         }
     }
     O[id.xy] = o;
