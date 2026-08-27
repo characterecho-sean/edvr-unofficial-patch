@@ -41,7 +41,6 @@ enum : int {
     kIdInstall = 1020,
     kIdRepair = 1021,
     kIdUninstall = 1022,
-    kIdClose = 1023,
     kIdCollectLogs = 1024,
     kIdReport = 1030,
     kIdKofi = 1040,
@@ -742,14 +741,15 @@ void createControls(HWND window) {
     g.repair = ui::makeButton(window, L"Repair", kIdRepair, ui::ButtonStyle::Secondary, f.body);
     g.uninstall = ui::makeButton(window, L"Uninstall", kIdUninstall, ui::ButtonStyle::Secondary,
                                  f.body);
-    HWND close = ui::makeButton(window, L"Close", kIdClose, ui::ButtonStyle::Secondary, f.body);
     g.collectLogs = ui::makeButton(window, L"Save logs", kIdCollectLogs,
                                    ui::ButtonStyle::Secondary, f.body);
     place(g.install, kMargin + kCardPad, 362, 124, 34, Screen::Install);
     place(g.repair, 172, 362, 104, 34, Screen::Install);
     place(g.uninstall, 284, 362, 104, 34, Screen::Install);
     place(g.collectLogs, 396, 362, 116, 34, Screen::Install);
-    place(close, 572, 362, 104, 34, Screen::Install, true);
+    // No Close button: it was the one control at list height marked
+    // both-screens, so it painted through the settings page -- and the
+    // window's own close box already does the job.
 
     g.search = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | ES_AUTOHSCROLL, 0, 0,
                                10, 10, window,
@@ -858,7 +858,6 @@ LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
                 case kIdInstall: runAction(AppArgs::Act::Install); return 0;
                 case kIdRepair: runAction(AppArgs::Act::Repair); return 0;
                 case kIdUninstall: runAction(AppArgs::Act::Uninstall); return 0;
-                case kIdClose: PostMessageW(window, WM_CLOSE, 0, 0); return 0;
                 case kIdCollectLogs: saveLogs(); return 0;
                 case kIdTabInstall: showScreen(Screen::Install); return 0;
                 case kIdTabSettings: showScreen(Screen::Settings); return 0;
