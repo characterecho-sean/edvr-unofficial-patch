@@ -27,6 +27,7 @@
 #include "draw_census.h"
 #include "fss_panel.h"
 #include "fss_probe.h"
+#include "fss_panel_probe.h"
 #include "fss_reveal.h"
 #include "fss_dump.h"
 #include "fss_ring.h"
@@ -1168,7 +1169,8 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     // moment the zoom's camera jump lands, and the body-layer gate opens
     // ten frames too late. Cheap gate first, hash second, config off =
     // free.
-    if ((s->fssHealOn || s->censusFssJump) && kind == 'X' && count == 6) {
+    if ((s->fssHealOn || s->censusFssJump || fssPanelProbeWants()) &&
+        kind == 'X' && count == 6) {
         guardedBudget(g_panelCbBudget, [&] {
             ID3D11VertexShader* vs = nullptr;
             self->VSGetShader(&vs, nullptr, nullptr);
@@ -1203,6 +1205,7 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
                     s->fssChromeFrame = s->frameNo;
                     bumpFssChromeStamp();
                 }
+                fssPanelProbeOnComposite(self);
             }
         });
     }
@@ -2416,6 +2419,12 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
                                                   UINT perInstance, UINT instances,
                                                   UINT startIndex, INT baseVertex,
                                                   UINT startInstance) {
+    // The panel probe's capture runs INSIDE beginPanelOverride (the
+    // chrome tracker's matched branch), so its draw-args stash must land
+    // before the call. Armed one session at a time; free otherwise.
+    if (fssPanelProbeWants()) {
+        fssPanelProbeDrawArgs(startIndex, baseVertex, startInstance);
+    }
     const DrawVerdict v = beginPanelOverride(self, 'X', perInstance, instances);
     forwardWithVerdict(self, v, [&] {
         g_state->realDrawIndexedInstanced(self, perInstance, instances, startIndex,
@@ -2789,6 +2798,7 @@ void vScreenRefreshConfig() {
     fssPanelConfigure(cfg);
     fssProbeConfigure(cfg);
     fssRevealConfigure(cfg);
+    fssPanelProbeConfigure(cfg);
     fssRingConfigure(cfg);
     fssDumpConfigure(cfg);
     {
@@ -3589,6 +3599,7 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     fssPanelConfigure(cfg);
     fssProbeConfigure(cfg);
     fssRevealConfigure(cfg);
+    fssPanelProbeConfigure(cfg);
     fssRingConfigure(cfg);
     fssDumpConfigure(cfg);
     {
@@ -3800,6 +3811,7 @@ void shutdownVScreenFixes() {
     fssScanShutdown();
     fssPanelShutdown();
     fssProbeShutdown();
+    fssPanelProbeShutdown();
     fssRevealShutdown();
     fssRingShutdown();
     fssDumpShutdown();
