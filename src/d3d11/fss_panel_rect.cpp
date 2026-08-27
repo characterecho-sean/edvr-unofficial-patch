@@ -22,6 +22,7 @@ constexpr uint32_t kMaxOrd = 12;
 struct Ord {
     uint32_t startInstance = 0;
     int32_t  baseVertex = 0;
+    void*    rtPtr = nullptr;   // which eye's target this draw painted
     ID3D11Buffer* stVerts = nullptr;
 };
 
@@ -49,6 +50,23 @@ float g_pickU[2] = {};
 bool g_pickLeftIsA = true;
 
 FaultBudget g_budget("fssPanelRect", 8);
+
+// The render target's resource pointer: the two eyes paint two distinct
+// textures, and THAT -- not draw order -- is what tells them apart. The
+// 45h flight's uA == uB was the lesson: each quad draws twice per eye
+// (depth prepass + colour pass), so ordinals 0 and 1 are the SAME eye.
+void* rtResource(ID3D11DeviceContext* ctx) {
+    ID3D11RenderTargetView* rtv = nullptr;
+    ctx->OMGetRenderTargets(1, &rtv, nullptr);
+    if (!rtv) return nullptr;
+    ID3D11Resource* res = nullptr;
+    rtv->GetResource(&res);
+    rtv->Release();
+    if (!res) return nullptr;
+    void* p = res;
+    res->Release();
+    return p;
+}
 
 void releaseAll() {
     for (Ord& o : g_ord) {
@@ -196,6 +214,7 @@ void fssPanelRectOnComposite(ID3D11DeviceContext* ctx, uint32_t ordinal,
                 Ord& o = g_ord[ordinal];
                 o.startInstance = startInstance;
                 o.baseVertex = baseVertex;
+                o.rtPtr = rtResource(ctx);
                 ID3D11Buffer* pool = nullptr;
                 UINT stride = 0, off = 0;
                 ctx->IAGetVertexBuffers(1, 1, &pool, &stride, &off);
@@ -207,7 +226,10 @@ void fssPanelRectOnComposite(ID3D11DeviceContext* ctx, uint32_t ordinal,
                         4 * (stride ? stride : 40u));
                     pool->Release();
                 }
-                if (ordinal == 1 && !g_stCb0B) {
+                // The OTHER eye's constants: the first draw painting a
+                // DIFFERENT target than ordinal 0's. Draw order cannot
+                // say this -- prepass and colour pass share an eye.
+                if (!g_stCb0B && o.rtPtr && o.rtPtr != g_ord[0].rtPtr) {
                     ID3D11Buffer* cb0 = nullptr;
                     ctx->VSGetConstantBuffers(0, 1, &cb0);
                     if (cb0) {
@@ -235,6 +257,7 @@ void fssPanelRectOnComposite(ID3D11DeviceContext* ctx, uint32_t ordinal,
             releaseAll();
             g_ord[0].startInstance = startInstance;
             g_ord[0].baseVertex = baseVertex;
+            g_ord[0].rtPtr = rtResource(ctx);
             g_ordCount = 1;
             bool queued = true;
 
@@ -358,6 +381,16 @@ void fssPanelRectOnComposite(ID3D11DeviceContext* ctx, uint32_t ordinal,
         uint32_t screenCount = 0;
         for (uint32_t i = 0; ok && i < g_ordCount && i < kMaxOrd; ++i) {
             Quad& qd = quads[i];
+            // A quad draws twice per eye (prepass + colour): count each
+            // instance entry once for the family and the union.
+            bool dup = false;
+            for (uint32_t k = 0; k < i; ++k) {
+                if (g_ord[k].startInstance == g_ord[i].startInstance) {
+                    dup = true;
+                    break;
+                }
+            }
+            if (dup) continue;
             const uint32_t win =
                 g_vb0Offset + g_ord[i].startInstance * g_vb0Stride;
             if (win + 4 > g_vb0Bytes) continue;
