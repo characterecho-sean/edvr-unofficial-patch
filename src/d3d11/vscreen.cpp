@@ -296,6 +296,7 @@ struct State {
     uint32_t fssChromeFrame = 0;
     int      fssHealOn = 0;
     int      censusFssJump = 0;
+    int      censusFssPress = 0;
     int      fssTheaterOn = 0;
     uint32_t fssBodyStampFrame = 0;
     uint32_t fssJumpFrame = 0;   // the zoom-start camera jump, for the
@@ -2857,6 +2858,8 @@ void vScreenRefreshConfig() {
     fssDumpConfigure(cfg);
     {
         s->censusFssJump = cfg.getInt("advanced.census_fss_jump", 0) ? 1 : 0;
+        s->censusFssPress =
+            cfg.getInt("advanced.census_fss_press", 0) ? 1 : 0;
         s->fssTheaterOn = cfg.getFloat("fix.fss_theater", 0.0f) > 0.0f;
         int n = cfg.getInt("fix.fss_eye_heal", 0);
         if (n < 0 || n > 2) n = 0;
@@ -2972,6 +2975,12 @@ void vScreenFrameBoundary() {
                 "fss arrival: zoom press at frame %u -- the reveal's "
                 "window is open. Said at most 4 times.", s->frameNo);
         }
+        // The press census (round 46e): the level-3 arrival window shows
+        // ZERO composite recognitions while the squares show, so the
+        // arriving content has an unknown writer -- possibly dispatches
+        // into the eye. The census names every draw and dispatch of the
+        // window's frames.
+        if (s->censusFssPress) drawCensusAutoRequest();
     }
     // The arrival window's receipt: when it closes, say how many
     // composite recognitions it carried. Zero while squares showed would
@@ -3693,6 +3702,8 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     {
         g_state->censusFssJump =
             cfg.getInt("advanced.census_fss_jump", 0) ? 1 : 0;
+        g_state->censusFssPress =
+            cfg.getInt("advanced.census_fss_press", 0) ? 1 : 0;
         g_state->fssTheaterOn =
             cfg.getFloat("fix.fss_theater", 0.0f) > 0.0f;
         int n = cfg.getInt("fix.fss_eye_heal", 0);
