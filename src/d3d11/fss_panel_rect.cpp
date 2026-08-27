@@ -43,6 +43,8 @@ uint32_t g_vb0Bytes = 0;
 int  g_countdown = -1;    // frames until readback (counted at ordinal 0)
 bool g_capturing = false; // this frame's draws are being windowed
 bool g_published = false;
+LONG g_lastRedo = 0;      // the servo's request counter, consumed
+uint32_t g_retry = 0;     // capture frames rejected for missing quads
 bool g_failNoted = false;
 uint32_t g_derives = 0;
 uint32_t g_skipMask = 0;
@@ -201,7 +203,16 @@ void fssPanelRectOnComposite(ID3D11DeviceContext* ctx, uint32_t ordinal,
         releaseAll();
         return;
     }
-    if (g_published) return;
+    if (g_published) {
+        // The servo asked for a fresh derivation against its nudged pose.
+        const LONG redo = fssPanelRectRedoValue();
+        if (redo != g_lastRedo) {
+            g_lastRedo = redo;
+            g_published = false;
+        } else {
+            return;
+        }
+    }
 
     guardedBudget(g_budget, [&] {
         ID3D11Device* dev = nullptr;
@@ -446,6 +457,15 @@ void fssPanelRectOnComposite(ID3D11DeviceContext* ctx, uint32_t ordinal,
         if (vb0all) ctx->Unmap(g_stVb0, 0);
         if (t33all) ctx->Unmap(g_stT33, 0);
 
+        // The union is honest only when the capture frame held at least
+        // TWO distinct family quads -- the display AND the frame whose
+        // extra height carries the top UI boxes (the field's screenshot:
+        // a display-only frame cut them). Retry on later frames; after
+        // enough of them, one quad is what the mode has and it ships.
+        if (ok && screenCount == 1 && g_retry < 45) {
+            ++g_retry;
+            return;   // idle again next frame
+        }
         ok = ok && screenCount >= 1;
 
         // The screen family's union, perspective-normalised to the

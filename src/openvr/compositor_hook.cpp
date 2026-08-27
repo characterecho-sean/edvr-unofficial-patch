@@ -80,6 +80,9 @@ typedef void* (*PFN_EdvrFssTheater)(void*, void*, int, float, float,
 
 constexpr float kTheaterHalfIpd = 0.0315f;
 
+struct State;
+void theaterCenterServo(State* s);
+
 // The theater's world lock, computed at submit: a row-major 3x3 taking
 // current-head vectors into frozen-head space (D = Rf^T * Rc), then this
 // eye's ray origin in frozen-head space (head translation since the
@@ -215,6 +218,14 @@ struct State {
     float theaterAspect = 1.78f;
     float theaterRect[16] = {};
     void* theaterContentR = nullptr;
+    // The centring servo (the field's own idea: capture the panel with
+    // the headset looking at it dead square). Signs are learned, because
+    // the game's HMD-to-scanner-camera mapping is nobody's documented
+    // convention.
+    uint32_t theaterCenterStep = 0;
+    bool     theaterCenterDone = false;
+    float    theaterCenterSign[3] = {1.0f, 1.0f, 1.0f};
+    float    theaterCenterLast[3] = {};
     bool  theaterRectValid = false;
     LONG  theaterRectSeq = 0;
     LONG theaterStamp = 0;
@@ -715,6 +726,112 @@ void noteSubmitBounds(State* s, vr::EVREye eye, const vr::VRTextureBounds_t* bou
         wasLogged ? " -- CHANGED" : "");
 }
 
+// The centring servo: rotate the FROZEN pose so the scanner's screen
+// lands dead centre and level in the eye -- the field's own framing,
+// "capture the panel telling the game the headset is completely square
+// looking at it". The mapping from an HMD rotation to the screen's
+// motion in the image runs through the game's own camera code, so each
+// axis's SIGN is learned: if a step grows its error, the sign flips and
+// the next step corrects the other way. Convergence typically lands in
+// two or three derivations, each a few frames.
+void theaterCenterServo(State* s) {
+    const float* c = s->theaterRect;   // the LEFT eye's corners
+    const float uC = (c[0] + c[2] + c[4] + c[6]) * 0.25f;
+    const float vC = (c[1] + c[3] + c[5] + c[7]) * 0.25f;
+    float om = 0.0f, im = 0.0f;
+    if (!eyeTangents(&om, &im)) return;
+    uint32_t ew = 0, eh = 0;
+    if (!eyeTextureSize(&ew, &eh) || !ew || !eh) return;
+    const float vt = (om + im) * 0.5f *
+                     (static_cast<float>(eh) / static_cast<float>(ew));
+    // Image offsets -> angles. Left eye horizontal tangent runs -om..+im.
+    const float tH = -om + uC * (om + im);
+    const float tV = vt - vC * (2.0f * vt);
+    const float yawErr = atanf(tH);
+    const float pitchErr = atanf(tV);
+    // The top edge's slope in tangent space is the roll.
+    const float du = (c[2] - c[0]) * (om + im);
+    const float dv = (c[3] - c[1]) * (2.0f * vt);
+    const float rollErr = du != 0.0f ? atanf(dv / du) : 0.0f;
+
+    const float kDone = 0.006f;   // ~a third of a degree
+    if (fabsf(yawErr) < kDone && fabsf(pitchErr) < kDone &&
+        fabsf(rollErr) < kDone) {
+        s->theaterCenterDone = true;
+        Log::get().note(
+            "fss theater: centred after %u step(s) -- the screen is "
+            "square-on to the captured pose (residual yaw %.3f pitch "
+            "%.3f roll %.3f deg).",
+            s->theaterCenterStep,
+            static_cast<double>(yawErr * 57.2958f),
+            static_cast<double>(pitchErr * 57.2958f),
+            static_cast<double>(rollErr * 57.2958f));
+        return;
+    }
+    if (s->theaterCenterStep >= 5) {
+        s->theaterCenterDone = true;
+        Log::get().note(
+            "fss theater: centring stopped after %u steps with residual "
+            "yaw %.3f pitch %.3f roll %.3f deg -- shipping what it has.",
+            s->theaterCenterStep,
+            static_cast<double>(yawErr * 57.2958f),
+            static_cast<double>(pitchErr * 57.2958f),
+            static_cast<double>(rollErr * 57.2958f));
+        return;
+    }
+    // Sign learning: an axis whose error GREW after the last step was
+    // being pushed the wrong way.
+    const float errs[3] = {yawErr, pitchErr, rollErr};
+    if (s->theaterCenterStep > 0) {
+        for (int a = 0; a < 3; ++a) {
+            if (fabsf(errs[a]) >
+                fabsf(s->theaterCenterLast[a]) + 0.002f) {
+                s->theaterCenterSign[a] = -s->theaterCenterSign[a];
+            }
+        }
+    }
+    for (int a = 0; a < 3; ++a) s->theaterCenterLast[a] = errs[a];
+
+    const float yaw = s->theaterCenterSign[0] * yawErr;
+    const float pitch = s->theaterCenterSign[1] * pitchErr;
+    const float roll = s->theaterCenterSign[2] * rollErr;
+    // Small-angle local rotation, post-multiplied so it turns about the
+    // device's own axes (OpenVR device: +X right, +Y up, -Z forward).
+    const float cy = cosf(yaw), sy = sinf(yaw);
+    const float cp = cosf(pitch), sp = sinf(pitch);
+    const float cr = cosf(roll), sr = sinf(roll);
+    float d[3][3] = {
+        {cy * cr + sy * sp * sr, -cy * sr + sy * sp * cr, sy * cp},
+        {cp * sr, cp * cr, -sp},
+        {-sy * cr + cy * sp * sr, sy * sr + cy * sp * cr, cy * cp},
+    };
+    vr::HmdMatrix34_t& f = s->theaterFreeze;
+    float r0[3][3];
+    for (int i = 0; i < 3; ++i) {
+        for (int j = 0; j < 3; ++j) {
+            r0[i][j] = f.m[i][0] * d[0][j] + f.m[i][1] * d[1][j] +
+                       f.m[i][2] * d[2][j];
+        }
+    }
+    for (int i = 0; i < 3; ++i) {
+        for (int j = 0; j < 3; ++j) {
+            f.m[i][j] = r0[i][j];
+        }
+    }
+    ++s->theaterCenterStep;
+    s->theaterRectValid = false;   // stale against the nudged pose
+    bumpFssPanelRectRedo();
+    Log::get().note(
+        "fss theater: centring step %u -- err yaw %.3f pitch %.3f roll "
+        "%.3f deg, signs %+.0f/%+.0f/%+.0f.",
+        s->theaterCenterStep, static_cast<double>(yawErr * 57.2958f),
+        static_cast<double>(pitchErr * 57.2958f),
+        static_cast<double>(rollErr * 57.2958f),
+        static_cast<double>(s->theaterCenterSign[0]),
+        static_cast<double>(s->theaterCenterSign[1]),
+        static_cast<double>(s->theaterCenterSign[2]));
+}
+
 vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
                                     const vr::Texture_t* texture,
                                     const vr::VRTextureBounds_t* bounds,
@@ -810,6 +927,10 @@ vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
             if (rs != s->theaterRectSeq) {
                 s->theaterRectSeq = rs;
                 s->theaterRectValid = readFssPanelRect(s->theaterRect);
+                if (s->theaterRectValid && !s->theaterCenterDone &&
+                    eye == vr::Eye_Left) {
+                    theaterCenterServo(s);
+                }
             }
         }
         if (s->theaterFn && content && eyeTangents(&outer, &inner)) {
@@ -1396,6 +1517,11 @@ vr::EVRCompositorError hookedWaitGetPoses(void* self,
             s->theaterContent = nullptr;
             s->theaterContentR = nullptr;
             s->theaterRectValid = false;
+            s->theaterCenterStep = 0;
+            s->theaterCenterDone = false;
+            s->theaterCenterLast[0] = 0.0f;
+            s->theaterCenterLast[1] = 0.0f;
+            s->theaterCenterLast[2] = 0.0f;
         }
     }
 

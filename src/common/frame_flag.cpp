@@ -109,6 +109,9 @@ struct Shared {
     // openvr half crops the cinema screen's content to it. seq bumps per
     // publish; 0 means never published.
     volatile LONG fssPanelRectSeq;
+    // The centring servo's re-derive request: the openvr half nudges the
+    // frozen pose toward square-on and asks for a fresh derivation.
+    volatile LONG fssPanelRectRedo;
     float         fssPanelRect[16];  // corner UVs TL,TR,BR,BL as (u,v):
                                      // [0..7] the LEFT eye's, [8..15] the
                                      // RIGHT eye's -- the renderer
@@ -162,8 +165,8 @@ struct Shared {
 // The name is built once, at first use. The two DLLs are in the same process,
 // so the channel between them is unaffected.
 //
-// _v16 because the panel rect carries BOTH eyes' corner sets for the
-// nose-mask stitch. _v15 was one eye's corners, _v14 the 4-float rect,
+// _v17 because the centring servo's redo counter joined the panel rect.
+// _v16 carried both eyes' corner sets for the nose-mask stitch. _v15 was one eye's corners, _v14 the 4-float rect,
 // _v13 fssBodyStamp, _v12 fssChromeStamp, _v11 fssMonoFrames, _v10
 // submitTex. _v9 was
 // headForward. _v8 was
@@ -188,7 +191,7 @@ const wchar_t* mappingName() {
     static wchar_t name[64];
     static bool built = false;
     if (!built) {
-        _snwprintf_s(name, _TRUNCATE, L"Local\\edvr_glitch_frame_v16_%lu",
+        _snwprintf_s(name, _TRUNCATE, L"Local\\edvr_glitch_frame_v17_%lu",
                      GetCurrentProcessId());
         built = true;
     }
@@ -228,6 +231,16 @@ void publishFssPanelRect(const float* corners16) {
 long fssPanelRectSeqValue() {
     Shared* s = map();
     return s ? s->fssPanelRectSeq : 0;
+}
+
+void bumpFssPanelRectRedo() {
+    Shared* s = map();
+    if (s) InterlockedIncrement(&s->fssPanelRectRedo);
+}
+
+long fssPanelRectRedoValue() {
+    Shared* s = map();
+    return s ? s->fssPanelRectRedo : 0;
 }
 
 bool readFssPanelRect(float* out16) {

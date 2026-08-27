@@ -82,6 +82,11 @@ void publishFssPanelRect(const float* corners16);   // both eyes, L then R
 long fssPanelRectSeqValue();
 bool readFssPanelRect(float* out16);
 
+// The centring servo: the openvr half rotates the frozen pose toward
+// square-on and bumps this to request a fresh derivation.
+void bumpFssPanelRectRedo();
+long fssPanelRectRedoValue();
+
 // A camera-jump latch WITHIN d3d11.dll (plain process state, not the
 // mapping): the glitch detector notes every world-camera jump; the
 // arrival census takes the latch at the frame boundary. Lives here so
