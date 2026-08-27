@@ -140,6 +140,55 @@ versions reads as an edit — and the report says so rather than pretending it w
 a three-way merge. In that mode it does **not** infer deletions: a setting your
 older file never had must arrive live, not commented out.
 
+## The settings screen
+
+The second tab is every EDVR setting, with what it does, the value it ships
+with, and the range it will accept — edited there instead of in Notepad.
+Changes are written straight into `edvr.ini`, keeping its layout and comments,
+and the game re-reads that file about once a second, so there is no Apply
+button: the change is live by the time the mouse is up.
+
+**The table is generated, not written.** `tools/gen_settings_schema.py` builds
+it from the two places the facts already live:
+
+- the **accessor call** in the code gives the type, the declared range and the
+  compiled default (`getIntInRange("fix.head_offset_view", 2, -1, 63)`);
+- the **comment block** above the key in `edvr.ini` gives the explanation, and
+  its first sentence becomes the one-line summary in the row.
+
+Writing that down a third time in C++ would be a fourth list to forget to
+update — which is the failure `tools/check_config_contract.py` exists to catch
+between the other two.
+
+What neither source can know is added by hand, on one annotation line above the
+key: what to call the setting in a list, which value is recommended (usually the
+default, sometimes a tested pairing like a 0.3 curve with a 0.7 distance), the
+choices where the value is a word, and the bounds where they are documented in
+prose rather than declared in code.
+
+```ini
+# ui: On-foot screen curve | recommended 0.3 | range 0..1
+panel_curvature = 0.0
+
+# ui: Sun glare | choices vivid, realistic, stock
+sun_glare = vivid
+
+# ui: Scanner: heal the black squares | choices 1=on, 2=both eyes, 0=off
+fss_eye_heal = 1
+
+# ui: hidden -- the installer sets this when it chains another mod
+real_dll =
+```
+
+**A setting that is live in `edvr.ini` must have one of those lines, or the
+build fails.** Uncommenting a key is what promoting a fix to shipped-on looks
+like, and a fix that ships on but never appears in the settings window is
+invisible to everybody who does not edit ini files — while nothing else in the
+build notices, because the game reads it, the log names it, and only the window
+that was supposed to expose it is silent. `hidden` is a valid answer, with a
+reason; forgetting is not. Commented-out expert settings are exempt: annotate
+one and it appears, leave it and it stays where it is.
+
 ## Doing it safely
 
 - **Nothing happens without a yes.** The plan is worked out in full, shown, and

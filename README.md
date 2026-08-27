@@ -46,6 +46,10 @@ it and does the whole install:
   common one is EDHM's uninstaller running `del d3d11.dll`, which after an EDVR
   install is *ours*. Repair puts both back, side by side.
 - **Uninstall**, which renames back everything it renamed.
+- **A settings screen.** Every setting, with what it does, the value it ships
+  with and the range it accepts, instead of a text editor. Changes go straight
+  into `edvr.ini` — the game re-reads that file about once a second, so most of
+  them are live while you watch.
 
 It shows you exactly what it is about to do and waits for a yes, and every file
 it replaces is copied into `edvr_backup\` first. It needs administrator rights

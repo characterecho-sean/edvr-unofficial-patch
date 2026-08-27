@@ -25,6 +25,7 @@
 
 #include "../../src/installer/apply.h"
 #include "../../src/installer/plan.h"
+#include "../../src/installer/settings.h"
 
 using namespace edvr::installer;
 
@@ -785,6 +786,75 @@ static void testProbe(const std::wstring& scratch) {
              "an unrecognised mod still gets a name of its own");
 }
 
+// ---------------------------------------------------------------------------
+// the settings window's write path
+// ---------------------------------------------------------------------------
+
+static void testSettings(const std::wstring& root, const std::wstring& scratch) {
+    printf("\nsettings\n");
+
+    const std::wstring dir = joinPath(scratch, L"settings");
+    removeTree(dir);
+    makeTree(dir);
+    const std::string shipped = readAll(joinPath(root, L"edvr.ini"));
+    if (shipped.empty()) {
+        fail("read the repository edvr.ini", "not found");
+        return;
+    }
+    writeAll(joinPath(dir, L"edvr.ini"), shipped);
+
+    SettingsModel model;
+    model.load(dir);
+    check(!model.rows().empty(), "the generated schema has settings in it");
+
+    size_t toggle = SIZE_MAX;
+    size_t choice = SIZE_MAX;
+    for (size_t i = 0; i < model.rows().size(); ++i) {
+        const std::string key = model.rows()[i].def->key;
+        if (key == "black_void") toggle = i;
+        if (key == "sun_glare") choice = i;
+    }
+    if (toggle == SIZE_MAX || choice == SIZE_MAX) {
+        fail("find the settings to exercise", "black_void or sun_glare is not exposed");
+        return;
+    }
+    expectEq(model.rows()[toggle].value, "1", "a toggle reads its shipped value");
+    check(model.rows()[toggle].isRecommended, "and starts at the recommended value");
+
+    check(model.set(toggle, "0"), "writing a toggle succeeds", model.lastError());
+    const std::string after = readAll(joinPath(dir, L"edvr.ini"));
+    expectEq(iniValue(after, "fix.black_void"), "0", "the new value is in the file");
+    check(!model.rows()[toggle].isRecommended,
+          "and the row now says it is away from the recommended value");
+
+    // The property that matters: writing one setting moves nothing else. This
+    // file is somebody's tuning, and a settings window that rewrites values it
+    // was not asked about is worse than no settings window.
+    int drifted = 0;
+    for (const SettingRow& row : model.rows()) {
+        const std::string dotted = std::string(row.def->section) + "." + row.def->key;
+        if (dotted == "fix.black_void") continue;
+        if (iniValue(after, dotted, "<absent>") != iniValue(shipped, dotted, "<absent>")) ++drifted;
+    }
+    check(drifted == 0, "no other setting changed");
+    check(after.size() == shipped.size(),
+          "the file is the same size: one character replaced, no reformatting");
+    check(after.find("# Make the space around the on-foot screen pure black") != std::string::npos,
+          "the comments are still there");
+
+    check(model.set(choice, "realistic"), "writing a choice succeeds", model.lastError());
+    expectEq(iniValue(readAll(joinPath(dir, L"edvr.ini")), "fix.sun_glare"), "realistic",
+             "the choice landed");
+
+    // Every exposed setting must be readable from the shipped file, or the
+    // window would show "(not set)" for something the game is using.
+    int unreadable = 0;
+    for (const SettingRow& row : model.rows()) {
+        if (row.value.empty() && std::string(row.def->shipped) != "") ++unreadable;
+    }
+    check(unreadable == 0, "every exposed setting has a value to show");
+}
+
 static void testState() {
     printf("\nthe install record\n");
     InstallState state;
@@ -824,6 +894,7 @@ int wmain(int argc, wchar_t** argv) {
     testPlanner();
     testApply(scratch);
     testProbe(scratch);
+    testSettings(root, scratch);
     testState();
 
     printf("\n%s\n", g_fails == 0 ? "installer_test: all good" : "installer_test: FAILURES");

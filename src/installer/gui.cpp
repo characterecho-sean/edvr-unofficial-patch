@@ -23,6 +23,8 @@
 #include "app.h"
 #include "apply.h"
 #include "payload.h"
+#include "settings.h"
+#include "settings_view.h"
 #include "ui.h"
 
 #pragma comment(lib, "comctl32.lib")
@@ -44,6 +46,8 @@ enum : int {
     kIdDiscord = 1041,
     kIdTabInstall = 1050,
     kIdTabSettings = 1051,
+    kIdSearch = 1060,
+    kIdSettingsList = 1061,
 };
 
 const UINT kMsgFirstScan = WM_APP + 1;
@@ -88,6 +92,9 @@ struct Gui {
     HWND tabSettings = nullptr;
     HWND tip = nullptr;
     HWND discord = nullptr;
+    HWND search = nullptr;
+    HWND settingsList = nullptr;
+    SettingsModel settings;
     UINT dpi = 96;
 
     std::vector<Place>      places;
@@ -347,14 +354,23 @@ void paintSettingsScreen(HDC dc) {
     RECT card{dp(kMargin), dp(84), dp(kClientWidth - kMargin), dp(612)};
     ui::paintCard(dc, card, g.dpi);
 
-    RECT heading{dp(kMargin + kCardPad), dp(104), dp(kClientWidth - kMargin - kCardPad), dp(126)};
+    RECT heading{dp(kMargin + kCardPad), dp(100), dp(kClientWidth - kMargin - kCardPad), dp(122)};
     ui::drawText(dc, L"Settings", heading, f.heading, t.text, DT_LEFT | DT_SINGLELINE);
 
-    RECT body{dp(kMargin + kCardPad), dp(134), dp(kClientWidth - kMargin - kCardPad), dp(260)};
-    ui::drawText(dc,
-                 L"Every EDVR setting, with what it does and the value that is recommended, "
-                 L"edited here instead of in Notepad.\r\n\r\nNot in this build yet.",
-                 body, f.body, t.subtext, DT_LEFT | DT_WORDBREAK);
+    RECT note{dp(kMargin + kCardPad), dp(124), dp(kClientWidth - kMargin - kCardPad), dp(142)};
+    const std::wstring where =
+        g.settings.loaded()
+            ? L"Written straight into edvr.ini. Most settings are live: the game picks a change "
+              L"up within a second."
+            : L"Pick an install on the Install tab first.";
+    ui::drawText(dc, where, note, f.caption, t.subtext, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+
+    // The search box is a real edit control with its 3D border taken off, so
+    // the frame around it is drawn here to match everything else.
+    RECT search{dp(kMargin + kCardPad) - dp(6), dp(150), dp(kMargin + kCardPad) + dp(326),
+                dp(182)};
+    ui::fillRounded(dc, search, dp(6), t.control);
+    ui::strokeRounded(dc, search, dp(6), t.controlBorder);
 }
 
 void paintWindow(HWND window) {
@@ -430,6 +446,8 @@ void selectInstall(size_t index) {
     }
     g.survey = surveyTarget(g.installs[index]);
     g.haveSurvey = true;
+    g.settings.load(g.survey.game.dir);
+    settingsListSetModel(g.settingsList, &g.settings);
     showSurvey();
 }
 
@@ -666,6 +684,17 @@ void createControls(HWND window) {
     place(g.uninstall, 284, 366, 104, 34, Screen::Install);
     place(close, 572, 366, 104, 34, Screen::Install, true);
 
+    g.search = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | ES_AUTOHSCROLL, 0, 0,
+                               10, 10, window,
+                               reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdSearch)), nullptr,
+                               nullptr);
+    SendMessageW(g.search, WM_SETFONT, reinterpret_cast<WPARAM>(f.body), TRUE);
+    SendMessageW(g.search, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"Search settings"));
+    place(g.search, kMargin + kCardPad, 152, 320, 28, Screen::Settings);
+
+    g.settingsList = createSettingsList(window, kIdSettingsList, g.dpi);
+    place(g.settingsList, kMargin + 2, 192, kClientWidth - 2 * kMargin - 4, 416, Screen::Settings);
+
     g.report = CreateWindowExW(0, L"EDIT", L"",
                                WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE | ES_READONLY, 0,
                                0, 10, 10, window,
@@ -687,6 +716,8 @@ void createControls(HWND window) {
     if (ui::theme().dark) {
         SetWindowTheme(g.combo, L"DarkMode_CFD", nullptr);
         SetWindowTheme(g.report, L"DarkMode_Explorer", nullptr);
+        SetWindowTheme(g.search, L"DarkMode_CFD", nullptr);
+        SetWindowTheme(g.settingsList, L"DarkMode_Explorer", nullptr);
     }
 
     // Deliberately not an explanation of what Install, Repair and Uninstall do.
@@ -708,6 +739,7 @@ void rescale(HWND window, UINT dpi, const RECT* suggested) {
         SendMessageW(p.hwnd, WM_SETFONT, reinterpret_cast<WPARAM>(f.body), TRUE);
     }
     SendMessageW(g.report, WM_SETFONT, reinterpret_cast<WPARAM>(f.body), TRUE);
+    settingsListRescale(g.settingsList, dpi);
     applyLayout();
     if (suggested) {
         SetWindowPos(window, nullptr, suggested->left, suggested->top,
@@ -742,6 +774,12 @@ LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
         case WM_COMMAND: {
             const int id = LOWORD(wparam);
             const int code = HIWORD(wparam);
+            if (id == kIdSearch && code == EN_CHANGE) {
+                wchar_t buffer[256]{};
+                GetWindowTextW(g.search, buffer, 256);
+                settingsListSetFilter(g.settingsList, buffer);
+                return 0;
+            }
             if (id == kIdCombo && code == CBN_SELCHANGE) {
                 const LRESULT index = SendMessageW(g.combo, CB_GETCURSEL, 0, 0);
                 if (index != CB_ERR) selectInstall(static_cast<size_t>(index));
@@ -773,19 +811,23 @@ LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
         case WM_CTLCOLORSTATIC:
         case WM_CTLCOLORLISTBOX: {
             // The report pane sits inside a card and has to be the same colour
-            // as it, or it reads as a sunken 1990s text box.
+            // as it, or it reads as a sunken 1990s text box. The search box sits
+            // inside a frame painted behind it, and takes that frame's fill.
             HDC dc = reinterpret_cast<HDC>(wparam);
             const ui::Theme& t = ui::theme();
+            const bool isSearch = reinterpret_cast<HWND>(lparam) == g.search;
+            const COLORREF fill = isSearch ? t.control : t.cardBg;
             SetTextColor(dc, t.text);
-            SetBkColor(dc, t.cardBg);
-            static HBRUSH brush = nullptr;
-            static COLORREF brushColour = 0;
-            if (!brush || brushColour != t.cardBg) {
-                if (brush) DeleteObject(brush);
-                brush = CreateSolidBrush(t.cardBg);
-                brushColour = t.cardBg;
+            SetBkColor(dc, fill);
+            static HBRUSH brushes[2] = {nullptr, nullptr};
+            static COLORREF colours[2] = {0, 0};
+            const int slot = isSearch ? 1 : 0;
+            if (!brushes[slot] || colours[slot] != fill) {
+                if (brushes[slot]) DeleteObject(brushes[slot]);
+                brushes[slot] = CreateSolidBrush(fill);
+                colours[slot] = fill;
             }
-            return reinterpret_cast<LRESULT>(brush);
+            return reinterpret_cast<LRESULT>(brushes[slot]);
         }
 
         case WM_SETTINGCHANGE:

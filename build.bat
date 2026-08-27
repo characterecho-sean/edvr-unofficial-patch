@@ -278,11 +278,27 @@ python "%ROOT%\tools\gen_installer_rc.py" --root "%ROOT%" --build "%BUILD%" ^
     --out "%GEN%" --version "%EDVR_VER%"
 if errorlevel 1 ( echo [edvr] ERROR: installer resource generation failed & exit /b 1 )
 
+REM The settings window's contents, generated from edvr.ini and the accessor
+REM calls in src\ -- and the gate that keeps it complete.
+REM
+REM A setting that is uncommented in edvr.ini is one this build ships ON. If it
+REM is not also reachable from the settings window, it is invisible to everybody
+REM who does not edit ini files, and nothing else in the build would notice: the
+REM game reads it, the log names it, and the window that is supposed to expose
+REM it simply does not. One annotation line above the key is what this asks for,
+REM and it fails the build until it is there.
+python "%ROOT%\tools\gen_settings_schema.py" --root "%ROOT%" --out "%GEN%"
+if errorlevel 1 (
+    echo [edvr] ERROR: the settings schema is incomplete ^(see above^)
+    exit /b 1
+)
+
 rc.exe /nologo /fo "%OBJ%\installer\payload.res" "%GEN%\payload.rc"
 if errorlevel 1 ( echo [edvr] ERROR: rc.exe failed on the installer resources & exit /b 1 )
 
 set INSTALLER_SRC="%ROOT%\src\installer\main.cpp" "%ROOT%\src\installer\gui.cpp" ^
-    "%ROOT%\src\installer\ui.cpp" ^
+    "%ROOT%\src\installer\ui.cpp" "%ROOT%\src\installer\settings.cpp" ^
+    "%ROOT%\src\installer\settings_view.cpp" ^
     "%ROOT%\src\installer\app.cpp" "%ROOT%\src\installer\plan.cpp" ^
     "%ROOT%\src\installer\apply.cpp" "%ROOT%\src\installer\detect.cpp" ^
     "%ROOT%\src\installer\probe.cpp" "%ROOT%\src\installer\iniedit.cpp" ^
@@ -291,7 +307,7 @@ set INSTALLER_LIBS=user32.lib gdi32.lib gdiplus.lib dwmapi.lib uxtheme.lib ^
     shell32.lib ole32.lib comctl32.lib advapi32.lib version.lib bcrypt.lib kernel32.lib
 
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /GR- /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
-    /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE ^
+    /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /I"%GEN%" ^
     /DEDVR_VERSION_STRING=\"%EDVR_VER%\" ^
     /Fo"%OBJ%\installer"\ /Fe"%BUILD%\edvr-installer.exe" ^
     %INSTALLER_SRC% "%OBJ%\installer\payload.res" ^
@@ -317,12 +333,13 @@ REM runtime lost to a double rename -- and the edvr.ini merge, which is the one
 REM piece whose failure silently discards settings somebody tuned in a headset.
 if not exist "%OBJ%\insttest" mkdir "%OBJ%\insttest"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /GR- /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
-    /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE ^
+    /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /I"%GEN%" ^
     /Fo"%OBJ%\insttest"\ /Fe"%BUILD%\installer_test.exe" ^
     "%ROOT%\tools\installer_test\installer_test.cpp" ^
     "%ROOT%\src\installer\plan.cpp" "%ROOT%\src\installer\apply.cpp" ^
     "%ROOT%\src\installer\detect.cpp" "%ROOT%\src\installer\probe.cpp" ^
     "%ROOT%\src\installer\iniedit.cpp" "%ROOT%\src\installer\state.cpp" ^
+    "%ROOT%\src\installer\settings.cpp" ^
     /link /INCREMENTAL:NO %INSTALLER_LIBS%
 if errorlevel 1 ( echo [edvr] ERROR: installer_test build failed & exit /b 1 )
 "%BUILD%\installer_test.exe" "%ROOT%" "%BUILD%\insttest_scratch" || (
