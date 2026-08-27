@@ -66,6 +66,18 @@ struct State {
     // shutdown states -- Status then carries only "Flags":0.
     bool         onFootKnown = false;
     bool         onFoot = false;
+    // GuiFocus from Status.json: 9 is the Full System Scanner. The game
+    // states the MODE outright -- entry and exit by any path (keybind,
+    // ESC, an interdiction yanking the player out of supercruise) all
+    // land here, which no keypress watcher can promise. Supercruise is
+    // Flags bit 4, read to qualify FSS-key presses (the key does nothing
+    // outside supercruise).
+    bool         fssFocusKnown = false;
+    bool         fssFocus = false;
+    bool         supercruiseKnown = false;
+    bool         supercruise = false;
+    uint64_t     statusMs = 0;   // Status.json's own clock
+    bool         eagerStatus = false;
     uint32_t     statusSamples = 0;   // successful Status.json parses
     uint64_t     pollMs = 0;     // last poll
     uint64_t     reglobMs = 0;   // last directory re-glob
@@ -182,8 +194,10 @@ void pollStatus() {
     bool parsed = false;
     bool sawFlags2 = false;
     bool sawFlags = false;
+    bool sawGui = false;
     uint32_t flags2 = 0;
     uint32_t flags = 0;
+    uint32_t gui = 0;
     if (f != INVALID_HANDLE_VALUE) {
         char buf[2048];
         DWORD got = 0;
@@ -202,6 +216,11 @@ void pollStatus() {
                 sawFlags = true;
                 flags = static_cast<uint32_t>(strtoul(q + 8, nullptr, 10));
             }
+            const char* g = strstr(buf, "\"GuiFocus\":");
+            if (g) {
+                sawGui = true;
+                gui = static_cast<uint32_t>(strtoul(g + 11, nullptr, 10));
+            }
         }
         CloseHandle(f);
     }
@@ -216,9 +235,22 @@ void pollStatus() {
         // positions the same sprite family correctly in the world.
         g_s.fsdJumpKnown = sawFlags;
         g_s.fsdJumpLive = sawFlags && (flags & 0x40000000u) != 0;
+        g_s.supercruiseKnown = sawFlags;
+        g_s.supercruise = sawFlags && (flags & 0x10u) != 0;
+        const bool fss = sawGui && gui == 9;
+        if (fss != g_s.fssFocus) {
+            Log::get().note(fss ? "status: GuiFocus 9 -- the game says the "
+                                  "player is in the Full System Scanner."
+                                : "status: the game says FSS focus ended.");
+        }
+        g_s.fssFocusKnown = sawGui;
+        g_s.fssFocus = fss;
     } else if (++g_s.statusMisses >= 3) {
         g_s.onFootKnown = false;
         g_s.fsdJumpKnown = false;
+        g_s.fssFocusKnown = false;
+        g_s.fssFocus = false;
+        g_s.supercruiseKnown = false;
     }
 }
 
@@ -314,10 +346,18 @@ void journalWatchTick() {
     // "poll on the first frame", and a stamp of 0 read as "never due" would
     // have retired the watcher before it ever ran -- silently, because the
     // only write to the stamp is the line below, inside the branch it gates.
+    // Status.json rides its own clock: ~1 KB reread, normally on the
+    // journal's cadence, but at 100 ms when a consumer asked for low
+    // latency (the FSS theater's mode gate -- a screen that engages a
+    // second late is a screen the player watched arrive).
+    constexpr uint64_t kStatusEagerMs = 100;
+    if (dueMs(s.statusMs, s.eagerStatus ? kStatusEagerMs : kPollMs)) {
+        s.statusMs = stampMs();
+        pollStatus();
+    }
+
     if (!dueMs(s.pollMs, kPollMs)) return;
     s.pollMs = stampMs();
-
-    pollStatus();
 
     // Find or refresh the file being tailed.
     if (s.handle == INVALID_HANDLE_VALUE || dueMs(s.reglobMs, kReglobMs)) {
@@ -378,6 +418,15 @@ retire:
 }
 
 bool journalWatchActive() { return g_s.active; }
+
+void journalWatchSetEagerStatus(bool eager) { g_s.eagerStatus = eager; }
+
+bool journalFssFocusKnown() { return g_s.active && g_s.fssFocusKnown; }
+bool journalFssFocus() { return g_s.active && g_s.fssFocus; }
+bool journalSupercruiseKnown() {
+    return g_s.active && g_s.supercruiseKnown;
+}
+bool journalSupercruise() { return g_s.active && g_s.supercruise; }
 bool journalGameplay() { return g_s.gameplay; }
 uint32_t journalDisembarks() { return g_s.disembarks; }
 uint32_t journalEmbarks() { return g_s.embarks; }

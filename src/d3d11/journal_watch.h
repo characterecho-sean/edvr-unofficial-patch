@@ -32,6 +32,23 @@ void journalWatchTick();
 // back to heuristics.
 bool journalWatchActive();
 
+// Reread Status.json every 100 ms instead of the journal's ~500 ms while
+// true. The FSS theater's mode gate asks for this: its authority signal
+// should not lag the player by half a second more than it must.
+void journalWatchSetEagerStatus(bool eager);
+
+// Status.json's GuiFocus is 9: the player is in the Full System Scanner
+// RIGHT NOW. The game states the mode outright, so entry and exit by any
+// path -- keybind, ESC, an interdiction -- all land here within a poll.
+// Known is false whenever the watcher is off or the field is absent
+// (menus, shutdown).
+bool journalFssFocusKnown();
+bool journalFssFocus();
+
+// Flags bit 4: supercruise, where the FSS keys actually do something.
+bool journalSupercruiseKnown();
+bool journalSupercruise();
+
 // Has gameplay started in the CURRENT game process (LoadGame seen in the
 // live journal)? Menu time answers false, which is what gates the hotkeys:
 // a next-view press in a menu is somebody navigating a menu.

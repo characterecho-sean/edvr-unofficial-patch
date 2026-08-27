@@ -2895,6 +2895,18 @@ void vScreenFrameBoundary() {
         drawCensusAutoRequest();
     }
 
+    // The theater's MODE gate (round 44): device_hook's latch -- the
+    // player's own FSS keys for frame-exact edges, the game's GuiFocus
+    // as the authority underneath. While open, the stamp flows and the
+    // vr half keeps the screen up. Structurally immune to the loading
+    // screen the chrome recognition was not: nothing here reads pixels.
+    // The body-draw bump below remains as a subsumed second voice.
+    if (s->fssTheaterOn && deviceHookFssModeLatch() &&
+        s->fssBodyStampFrame != s->frameNo) {
+        s->fssBodyStampFrame = s->frameNo;
+        bumpFssBodyStamp();
+    }
+
     // Before this frame's counters are read or reset: a pending census starts
     // here, a running one advances, a spent one writes its tables.
     drawCensusFrameBoundary(s->frameNo);

@@ -41,6 +41,12 @@ void hookFactoryForDevice(ID3D11Device* device);
 // FreeLibrary one alone was not enough, and why a real crash still trips.
 void deviceHookNoteCleanExit();
 
+// The FSS theater's mode latch: true while the player is (believed to
+// be) in the Full System Scanner -- keyed by their own FSS bindings for
+// frame-exact edges, reconciled against the game's GuiFocus. vscreen's
+// frame boundary turns this into the theater's stamp.
+bool deviceHookFssModeLatch();
+
 void shutdownDeviceHooks();
 
 }  // namespace edvr

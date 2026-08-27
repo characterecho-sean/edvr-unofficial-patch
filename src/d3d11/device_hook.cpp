@@ -14,6 +14,7 @@
 #include "camera_view.h"
 #include "fss_res.h"
 #include "journal_watch.h"
+#include "xinput_watch.h"
 #include "elite_binds.h"
 #include "../common/log.h"
 #include "../common/proxy.h"
@@ -101,6 +102,19 @@ struct State {
     // to keep in step, in exchange for nothing a working install uses.
     Hotkey externalCamKey;
     Hotkey extCamNextKey;
+    // The player's own FSS enter/quit keys, adopted from their Elite
+    // bindings like the camera keys above; they give the theater's mode
+    // latch its frame-exact edges.
+    Hotkey fssEnterKey;
+    Hotkey fssQuitKey;
+    XinputBinding fssEnterPad;
+    XinputBinding fssQuitPad;
+    bool     fssTheaterWanted = false;
+    bool     fssModeLatch = false;
+    bool     fssLatchByKey = false;
+    uint64_t fssLatchMs = 0;
+    uint64_t fssQuitMs = 0;
+    uint32_t fssLatchNotes = 0;
     // Both camera hotkeys come from the GAME's bindings files and follow
     // them live (0.7.1 removed the ini overrides outright) -- Elite
     // rewrites Options\Bindings the moment a rebind or preset switch is
@@ -564,6 +578,67 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
             cameraViewNotePress();
             headOffsetGateViewBumped();
         }
+        // The FSS theater's mode latch: the player's own FSS keys give
+        // frame-exact edges -- press enter and the screen is up THIS
+        // frame, press quit and it is gone. Underneath, the game's
+        // GuiFocus is the authority that heals every path a key cannot
+        // see: a press the game ignored (not in supercruise), an exit by
+        // ESC or an interdiction, an entry from a UI, an unbound or
+        // non-keyboard key. A key engage carries a grace while the
+        // status file catches up; once the game confirms the mode, its
+        // word alone ends it. A quit press suppresses the focus engage
+        // until the game agrees the mode ended, so stale status cannot
+        // re-open a screen the player just closed.
+        if (g_state->fssTheaterWanted) {
+            xinputWatchTick();
+            const bool wasLatched = g_state->fssModeLatch;
+            bool byKey = false;
+            // Evaluate BOTH watchers every frame -- pressed() keeps edge
+            // state, and a short-circuited call would miss its edge.
+            bool enterPressed = g_state->fssEnterKey.pressed();
+            if (xinputPressed(g_state->fssEnterPad)) enterPressed = true;
+            bool quitPressed = g_state->fssQuitKey.pressed();
+            if (xinputPressed(g_state->fssQuitPad)) quitPressed = true;
+            if (keysMeanGame && enterPressed &&
+                (!journalSupercruiseKnown() || journalSupercruise())) {
+                g_state->fssModeLatch = true;
+                g_state->fssLatchByKey = true;
+                g_state->fssLatchMs = stampMs();
+                byKey = true;
+            }
+            if (keysMeanGame && quitPressed) {
+                g_state->fssModeLatch = false;
+                g_state->fssQuitMs = stampMs();
+                byKey = true;
+            }
+            if (journalFssFocus()) {
+                const bool quitRecent =
+                    g_state->fssQuitMs != 0 &&
+                    stampMs() - g_state->fssQuitMs < 3000;
+                if (!g_state->fssModeLatch && !quitRecent) {
+                    g_state->fssModeLatch = true;
+                }
+                if (g_state->fssModeLatch) g_state->fssLatchByKey = false;
+            } else {
+                g_state->fssQuitMs = 0;
+                if (g_state->fssModeLatch && journalFssFocusKnown()) {
+                    const bool grace =
+                        g_state->fssLatchByKey &&
+                        stampMs() - g_state->fssLatchMs < 4000;
+                    if (!grace) g_state->fssModeLatch = false;
+                }
+            }
+            if (wasLatched != g_state->fssModeLatch &&
+                g_state->fssLatchNotes < 6) {
+                ++g_state->fssLatchNotes;
+                Log::get().note(
+                    g_state->fssModeLatch
+                        ? "fss theater: mode latch OPEN (%s)."
+                        : "fss theater: mode latch closed (%s). Said at "
+                          "most 6 times.",
+                    byKey ? "your FSS key" : "the game's GuiFocus");
+            }
+        }
         // Reading the view the game is actually on, and telling the gate.
         //
         // The keypress count above stays as the fallback, for when this cannot
@@ -590,6 +665,9 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
         if (dueMs(g_state->configPollMs, kConfigPollMs)) {
             g_state->configPollMs = stampMs();
             vScreenRefreshConfig();
+            g_state->fssTheaterWanted =
+                Config::get().getFloat("fix.fss_theater", 0.0f) > 0.0f;
+            journalWatchSetEagerStatus(g_state->fssTheaterWanted);
             // The liveness pass, on the same once-a-second cadence. In-place
             // patches are on a table other tools can write too, and one that
             // installs after EDVR and resolves its "original" pointers from a
@@ -708,6 +786,27 @@ void readoptGameBindings() {
                 "no longer on a keyboard key, so the old key is no longer "
                 "watched.");
         }
+    }
+    {
+        char fb[48];
+        if (eliteBindsLookup("ExplorationFSSEnter", fb, sizeof(fb))) {
+            g_state->fssEnterKey.setBinding(fb);
+        } else {
+            g_state->fssEnterKey.setBinding("");
+        }
+        if (eliteBindsLookup("ExplorationFSSQuit", fb, sizeof(fb))) {
+            g_state->fssQuitKey.setBinding(fb);
+        } else {
+            g_state->fssQuitKey.setBinding("");
+        }
+        g_state->fssEnterPad = XinputBinding{};
+        if (eliteBindsLookupPad("ExplorationFSSEnter", fb, sizeof(fb))) {
+            xinputTranslate(fb, &g_state->fssEnterPad);
+        }
+        g_state->fssQuitPad = XinputBinding{};
+        if (eliteBindsLookupPad("ExplorationFSSQuit", fb, sizeof(fb))) {
+            xinputTranslate(fb, &g_state->fssQuitPad);
+        }
         headOffsetGateSetNextKeyBound(g_state->extCamNextKey.key() != 0);
         cameraViewSetPressWitness(g_state->extCamNextKey.key() != 0);
     }
@@ -768,6 +867,8 @@ State& ensureState() {
         // focus rule. See hotkey.h.
         g_state->externalCamKey.setGameMirrored(true);
         g_state->extCamNextKey.setGameMirrored(true);
+        g_state->fssEnterKey.setGameMirrored(true);
+        g_state->fssQuitKey.setGameMirrored(true);
         if (Config::get().getBool("hotkey.read_game_bindings", true)) {
             char b[48];
             if (eliteBindsLookup("PhotoCameraToggle_Humanoid", b, sizeof(b),
@@ -781,11 +882,41 @@ State& ensureState() {
                 Log::get().note("hotkey: external_camera_next adopted from "
                                 "your Elite bindings: %s", b);
             }
+            if (eliteBindsLookup("ExplorationFSSEnter", b, sizeof(b))) {
+                g_state->fssEnterKey.setBinding(b);
+                Log::get().note("hotkey: the FSS enter key adopted from "
+                                "your Elite bindings: %s", b);
+            }
+            if (eliteBindsLookup("ExplorationFSSQuit", b, sizeof(b))) {
+                g_state->fssQuitKey.setBinding(b);
+                Log::get().note("hotkey: the FSS quit key adopted from "
+                                "your Elite bindings: %s", b);
+            }
+            {
+                char pk[40];
+                g_state->fssEnterPad = XinputBinding{};
+                if (eliteBindsLookupPad("ExplorationFSSEnter", pk,
+                                        sizeof(pk)) &&
+                    xinputTranslate(pk, &g_state->fssEnterPad)) {
+                    Log::get().note("hotkey: the FSS enter key is also on "
+                                    "your gamepad: %s.", pk);
+                }
+                g_state->fssQuitPad = XinputBinding{};
+                if (eliteBindsLookupPad("ExplorationFSSQuit", pk,
+                                        sizeof(pk)) &&
+                    xinputTranslate(pk, &g_state->fssQuitPad)) {
+                    Log::get().note("hotkey: the FSS quit key is also on "
+                                    "your gamepad: %s.", pk);
+                }
+            }
             g_state->bindsFingerprint = eliteBindsFingerprint();
         }
         headOffsetGateSetNextKeyBound(g_state->extCamNextKey.key() != 0);
         cameraViewSetPressWitness(g_state->extCamNextKey.key() != 0);
         journalWatchConfigure();
+        g_state->fssTheaterWanted =
+            Config::get().getFloat("fix.fss_theater", 0.0f) > 0.0f;
+        journalWatchSetEagerStatus(g_state->fssTheaterWanted);
         g_state->dumpOnExternalCam =
             Config::get().getBool("advanced.dump_camera_on_external_cam", false);
         g_state->holdFramesOnExternalCam = static_cast<uint32_t>(
@@ -1021,6 +1152,10 @@ void hookFactoryForDevice(ID3D11Device* device) {
 
     if (factory2) factory2->Release();
     factory->Release();
+}
+
+bool deviceHookFssModeLatch() {
+    return g_state != nullptr && g_state->fssModeLatch;
 }
 
 void deviceHookNoteCleanExit() {

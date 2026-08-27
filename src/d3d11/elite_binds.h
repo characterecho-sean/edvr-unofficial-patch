@@ -35,6 +35,15 @@ namespace edvr {
 bool eliteBindsLookup(const char* element, char* out, size_t outLen,
                       const char* fallbackElement = nullptr);
 
+// The GamePad form: returns the raw Elite key name (e.g. "GamePad_Back")
+// of a Primary or Secondary slot bound to the XInput pad, for the
+// xinput watcher to translate. A slot carrying a Modifier chord is
+// skipped -- watching half a chord would fire on a bare button the game
+// ignores. Same preset/file selection rules as the keyboard lookup.
+bool eliteBindsLookupPad(const char* element, char* out, size_t outLen);
+bool eliteBindsLookupPadDir(const wchar_t* dir, const char* element,
+                            char* out, size_t outLen);
+
 // The same lookup against an explicit bindings directory, exposed for the
 // smoke test -- the selection rules (newest maintained file wins; stale
 // previous-format presets lose) earned a harness the day a January relic

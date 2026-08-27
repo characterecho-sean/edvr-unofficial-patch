@@ -199,6 +199,111 @@ bool parseElementIn(const std::string& text, const char* element, char* out,
     return false;
 }
 
+// The GamePad slots of one element: the raw Elite key name, no
+// translation (the xinput watcher owns that table). A slot with a
+// Modifier chord is skipped.
+bool parsePadIn(const std::string& text, const char* element, char* out,
+                size_t outLen, bool* present) {
+    const size_t el = text.find(std::string("<") + element + ">");
+    if (present) *present = el != std::string::npos;
+    if (el == std::string::npos) return false;
+    size_t end = text.find(std::string("</") + element + ">", el);
+    if (end == std::string::npos) end = el + 600;
+    for (const char* slot : {"<Primary ", "<Secondary "}) {
+        const size_t s = text.find(slot, el);
+        if (s == std::string::npos || s > end) continue;
+        std::string device, key;
+        if (!attrAfter(text, s, 120, "Device", &device)) continue;
+        if (_stricmp(device.c_str(), "GamePad") != 0) continue;
+        if (!attrAfter(text, s, 160, "Key", &key)) continue;
+        // A chord on this slot: the Modifier sits between this slot's tag
+        // and the next slot (or the element's end).
+        size_t slotEnd = end;
+        for (const char* other : {"<Primary ", "<Secondary "}) {
+            const size_t o = text.find(other, s + 1);
+            if (o != std::string::npos && o < slotEnd) slotEnd = o;
+        }
+        const size_t mod = text.find("<Modifier ", s);
+        if (mod != std::string::npos && mod < slotEnd) continue;
+        snprintf(out, outLen, "%s", key.c_str());
+        return true;
+    }
+    return false;
+}
+
+// The walk MIRRORS eliteBindsLookupDir below -- preset names, newest
+// maintained file wins, first file containing the element answers alone.
+// A selection-rule fix must land in both.
+bool eliteBindsLookupPadDir(const wchar_t* dirC, const char* element,
+                            char* out, size_t outLen) {
+    if (!dirC || !dirC[0] || !element || !out || outLen == 0) return false;
+    const std::wstring dir(dirC);
+    std::string presets;
+    if (!readWholeFile(dir + L"\\StartPreset.4.start", &presets) &&
+        !readWholeFile(dir + L"\\StartPreset.start", &presets)) {
+        return false;
+    }
+    std::vector<std::string> names;
+    {
+        size_t start = 0;
+        while (start < presets.size()) {
+            size_t end = presets.find_first_of("\r\n", start);
+            if (end == std::string::npos) end = presets.size();
+            if (end > start) names.push_back(presets.substr(start, end - start));
+            start = presets.find_first_not_of("\r\n", end);
+            if (start == std::string::npos) break;
+        }
+    }
+    struct Cand {
+        std::wstring name;
+        char utf8[MAX_PATH];
+        FILETIME wt;
+    };
+    std::vector<Cand> cands;
+    WIN32_FIND_DATAW fd{};
+    HANDLE find = FindFirstFileW((dir + L"\\*.binds").c_str(), &fd);
+    if (find == INVALID_HANDLE_VALUE) return false;
+    do {
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+        Cand c;
+        WideCharToMultiByte(CP_UTF8, 0, fd.cFileName, -1, c.utf8,
+                            sizeof(c.utf8), nullptr, nullptr);
+        bool active = names.empty();
+        for (const std::string& n : names) {
+            if (_strnicmp(c.utf8, n.c_str(), n.size()) == 0 &&
+                c.utf8[n.size()] == '.') {
+                active = true;
+                break;
+            }
+        }
+        if (!active) continue;
+        c.name = fd.cFileName;
+        c.wt = fd.ftLastWriteTime;
+        cands.push_back(c);
+    } while (FindNextFileW(find, &fd));
+    FindClose(find);
+    std::sort(cands.begin(), cands.end(), [](const Cand& a, const Cand& b) {
+        return CompareFileTime(&a.wt, &b.wt) > 0;
+    });
+    for (const Cand& c : cands) {
+        std::string text;
+        if (!readWholeFile(dir + L"\\" + c.name, &text)) continue;
+        bool present = false;
+        if (parsePadIn(text, element, out, outLen, &present)) {
+            Log::get().note("bindings: %s gamepad slot read from %s: %s",
+                            element, c.utf8, out);
+            return true;
+        }
+        if (present) return false;   // element answered: no pad slot
+    }
+    return false;
+}
+
+bool eliteBindsLookupPad(const char* element, char* out, size_t outLen) {
+    return eliteBindsLookupPadDir(bindingsDir().c_str(), element, out,
+                                  outLen);
+}
+
 bool eliteBindsLookupDir(const wchar_t* dirC, const char* element, char* out,
                          size_t outLen, const char* fallbackElement) {
     if (!dirC || !dirC[0] || !element || !out || outLen == 0) return false;

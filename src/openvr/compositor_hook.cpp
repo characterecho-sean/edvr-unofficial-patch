@@ -778,14 +778,15 @@ vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
                                   "theater stands down.");
         }
         float outer = 0.0f, inner = 0.0f;
-        // Both eyes of a pair render from the SAME right-eye capture: the
-        // left (which submits first) latches the published pointer, the
-        // right reuses the latch. Whether the game reuses one texture per
-        // eye or round-robins a chain, the panel's content cannot differ
-        // between the eyes -- not even by a frame.
+        // Both eyes of a pair render from the SAME capture -- and the
+        // capture is the LEFT eye, THIS frame's own submit: the image the
+        // flat screen shows, resolve animation and all, exactly as the
+        // game intends it flat. The left submits first and latches its
+        // own handle; the right reuses the latch. One content, two
+        // displays, zero staleness.
         void* content = nullptr;
         if (eye == vr::Eye_Left) {
-            content = submittedTexture(1);
+            content = texture->handle;
             s->theaterContent = content;
         } else {
             content = s->theaterContent ? s->theaterContent
