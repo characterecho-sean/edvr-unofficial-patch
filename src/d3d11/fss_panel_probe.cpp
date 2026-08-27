@@ -29,21 +29,42 @@ ID3D11Buffer* g_stRecAt = nullptr;   // the window at the DRAW's record
 ID3D11Buffer* g_stCb = nullptr;
 ID3D11Buffer* g_stCb2 = nullptr;
 ID3D11Buffer* g_stVb = nullptr;
-// The per-instance stream (VB slot 1): instData is indexed by a value
-// FETCHED FROM IT (instData[i.inst.x], offset by startInstance) -- the
-// v2 flight proved startInstance*336 lands on zeros. Phase B decodes
-// inst.x from this window, then chases it into t33.
-ID3D11Buffer* g_stVb1 = nullptr;
+// v6, THE SURVEY (v5 verified the whole addressing chain -- inst.x=2,
+// FirstElement=0, stride 336 -- and still read a zeroed record: scale 0
+// is a DEGENERATE quad, four corners collapsed to a point, invisible.
+// The first matched draw is a hidden UI element; the FSS screen is MANY
+// world-quads on the same atlas and the visible panel is a later one).
+// So: snapshot the WHOLE t33 pool and the WHOLE instance stream in one
+// frame, list every matched draw's startInstance, dump the buffers as
+// binaries, and decode offline where the visible quad identifies itself
+// by its sane scale.
+ID3D11Buffer* g_stVb1 = nullptr;     // whole instance stream (vb slot 0)
 uint32_t g_vb1Stride = 0, g_vb1Offset = 0, g_vb1SrcBytes = 0;
 uint32_t g_vb1WinOffset = 0;
-ID3D11Buffer* g_t33 = nullptr;       // kept alive for the phase-B chase
-uint32_t g_t33First = 0;             // the SRV's FirstElement: the game
-                                     // sub-allocates records mid-buffer,
-                                     // which is why raw element 2 read as
-                                     // zeros on the v4 flight
+ID3D11Buffer* g_t33 = nullptr;
+uint32_t g_t33First = 0;
 uint32_t g_t33Stride = 0;
 uint32_t g_instX = 0;
 uint32_t g_recAtOffset = 0;
+ID3D11Buffer* g_stT33All = nullptr;  // the whole record pool
+uint32_t g_t33AllBytes = 0;
+constexpr uint32_t kMaxSurvey = 24;
+uint32_t g_surveyStart[kMaxSurvey];
+uint32_t g_surveyCount = 0;
+
+bool writeDump(const char* name, const void* data, uint32_t bytes) {
+    CreateDirectoryA("edvr_logs", nullptr);
+    CreateDirectoryA("edvr_logs\\dumps", nullptr);
+    char path[MAX_PATH];
+    snprintf(path, sizeof(path), "edvr_logs\\dumps\\%s", name);
+    HANDLE h = CreateFileA(path, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                           FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    DWORD written = 0;
+    WriteFile(h, data, bytes, &written, nullptr);
+    CloseHandle(h);
+    return written == bytes;
+}
 uint32_t g_recSrcBytes = 0, g_vbSrcBytes = 0, g_vbStride = 0, g_vbOffset = 0;
 uint32_t g_chromeW = 0, g_chromeH = 0, g_rtW = 0, g_rtH = 0;
 uint32_t g_argStartIndex = 0, g_argStartInstance = 0;
@@ -149,10 +170,66 @@ void fssPanelProbeOnComposite(ID3D11DeviceContext* ctx) {
 
     guardedBudget(g_budget, [&] {
         if (g_copiedAtCountdown > 0) {
+            if (g_surveyCount < kMaxSurvey) {
+                g_surveyStart[g_surveyCount++] = g_argStartInstance;
+            }
             --g_copiedAtCountdown;
             return;
         }
         if (g_copiedAtCountdown == 0 && g_phase == 1) {
+            // v6: dump the whole pools as binaries and the survey table.
+            g_spent = true;
+            g_copiedAtCountdown = -1;
+            g_phase = 0;
+            Log::get().note(
+                "fss panel probe: SURVEY -- %u matched draws; vb0 stride=%u "
+                "offset=%u whole=%u bytes; t33 FirstElement=%u stride=%u "
+                "whole=%u bytes; chrome %ux%u; eye %ux%u; cb0 follows.",
+                g_surveyCount, g_vb1Stride, g_vb1Offset, g_vb1SrcBytes,
+                g_t33First, g_t33Stride, g_t33AllBytes, g_chromeW, g_chromeH,
+                g_rtW, g_rtH);
+            {
+                char line[200];
+                int w = snprintf(line, sizeof(line),
+                                 "fss panel probe: startInstances:");
+                for (uint32_t i = 0; i < g_surveyCount; ++i) {
+                    w += snprintf(line + w, sizeof(line) - w, " %u",
+                                  g_surveyStart[i]);
+                }
+                Log::get().note("%s", line);
+            }
+            for (ID3D11Buffer** st : {&g_stVb1, &g_stT33All}) {
+                if (!*st) continue;
+                D3D11_MAPPED_SUBRESOURCE m{};
+                if (SUCCEEDED(ctx->Map(*st, 0, D3D11_MAP_READ, 0, &m)) &&
+                    m.pData) {
+                    D3D11_BUFFER_DESC d{};
+                    (*st)->GetDesc(&d);
+                    const char* name = *st == g_stVb1
+                                           ? "panel_probe_vb0.bin"
+                                           : "panel_probe_t33.bin";
+                    const bool ok = writeDump(name, m.pData, d.ByteWidth);
+                    Log::get().note("fss panel probe: %s -- %u bytes %s.",
+                                    name, d.ByteWidth,
+                                    ok ? "written to edvr_logs\\dumps"
+                                       : "COULD NOT BE WRITTEN");
+                    ctx->Unmap(*st, 0);
+                }
+                (*st)->Release();
+                *st = nullptr;
+            }
+            logBuffer(ctx, "cb0", g_stCb, kCbBytes);
+            logBuffer(ctx, "cb2", g_stCb2, 128);
+            if (g_stRec) { g_stRec->Release(); g_stRec = nullptr; }
+            if (g_stCb) { g_stCb->Release(); g_stCb = nullptr; }
+            if (g_stCb2) { g_stCb2->Release(); g_stCb2 = nullptr; }
+            if (g_stVb) { g_stVb->Release(); g_stVb = nullptr; }
+            if (g_t33) { g_t33->Release(); g_t33 = nullptr; }
+            Log::get().note("fss panel probe: capture complete; standing "
+                            "down for the session.");
+            return;
+        }
+        if (false && g_copiedAtCountdown == 0 && g_phase == 1) {
             // Phase B: the first copies have executed. Decode inst.x from
             // the per-instance stream window and chase it into t33 --
             // queued NOW, read at the next countdown.
@@ -239,7 +316,6 @@ void fssPanelProbeOnComposite(ID3D11DeviceContext* ctx) {
             }
             if (buf) {
                 D3D11_SHADER_RESOURCE_VIEW_DESC vd{};
-                // srv was released above; re-fetch the view for its desc.
                 ID3D11ShaderResourceView* srv2 = nullptr;
                 ctx->VSGetShaderResources(33, 1, &srv2);
                 g_t33First = 0;
@@ -257,10 +333,11 @@ void fssPanelProbeOnComposite(ID3D11DeviceContext* ctx) {
                 buf->GetDesc(&bd);
                 g_t33Stride = bd.StructureByteStride ? bd.StructureByteStride
                                                      : 336u;
-                g_stRec = copyRange(ctx, dev, buf, g_t33First * g_t33Stride,
-                                    kRecBytes, &g_recSrcBytes);
-                // Kept alive: phase B chases inst.x into this buffer.
-                g_t33 = buf;
+                // The WHOLE pool, one staging copy.
+                g_t33AllBytes = bd.ByteWidth;
+                g_stT33All = makeStaging(dev, bd.ByteWidth);
+                if (g_stT33All) ctx->CopyResource(g_stT33All, buf);
+                buf->Release();
             }
         }
 
@@ -285,19 +362,19 @@ void fssPanelProbeOnComposite(ID3D11DeviceContext* ctx) {
             g_stVb = copyHead(ctx, dev, vb, kVbBytes, &g_vbSrcBytes);
             vb->Release();
         }
-        // The per-instance stream is SLOT 0 (uint2 inst, stride 8 -- the
-        // v3 flight's 40-byte slot 1 is the packed vertex pool that
-        // baseVertex indexes). The window this draw's fetch reads:
-        // startInstance * stride in, plus the bound offset.
+        // The WHOLE instance stream (slot 0, uint2 inst per entry).
         ID3D11Buffer* vb1 = nullptr;
         ctx->IAGetVertexBuffers(0, 1, &vb1, &g_vb1Stride, &g_vb1Offset);
         if (vb1) {
-            g_vb1WinOffset =
-                g_vb1Offset + g_argStartInstance * g_vb1Stride;
-            g_stVb1 = copyRange(ctx, dev, vb1, g_vb1WinOffset, 64,
-                                &g_vb1SrcBytes);
+            D3D11_BUFFER_DESC bd{};
+            vb1->GetDesc(&bd);
+            g_vb1SrcBytes = bd.ByteWidth;
+            g_stVb1 = makeStaging(dev, bd.ByteWidth);
+            if (g_stVb1) ctx->CopyResource(g_stVb1, vb1);
             vb1->Release();
         }
+        g_surveyCount = 0;
+        g_surveyStart[g_surveyCount++] = g_argStartInstance;
 
         ID3D11RenderTargetView* rtv = nullptr;
         ctx->OMGetRenderTargets(1, &rtv, nullptr);
@@ -343,11 +420,15 @@ void fssPanelProbeOnComposite(ID3D11DeviceContext* ctx) {
 
         dev->Release();
         g_phase = 1;
-        g_copiedAtCountdown = 3;   // read back three composites later
+        g_copiedAtCountdown = 20;   // keep surveying ~a frame or two
     });
 }
 
+void fssPanelProbeShutdownExtra() {
+    if (g_stT33All) { g_stT33All->Release(); g_stT33All = nullptr; }
+}
 void fssPanelProbeShutdown() {
+    fssPanelProbeShutdownExtra();
     if (g_stRec) { g_stRec->Release(); g_stRec = nullptr; }
     if (g_stRecAt) { g_stRecAt->Release(); g_stRecAt = nullptr; }
     if (g_stCb) { g_stCb->Release(); g_stCb = nullptr; }
