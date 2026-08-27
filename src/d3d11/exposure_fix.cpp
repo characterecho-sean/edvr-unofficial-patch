@@ -153,6 +153,16 @@ struct State {
                                       // view-dependent, and at the FSS
                                       // zoom the scene is the body at
                                       // optical infinity
+    // The reverse direction's snapshot (round 47e): the per-eye chains
+    // INTERLEAVE -- the first eye's consumers read its product between
+    // the two dispatches, so a copy after occurrence 2 arrives too late.
+    // Reverse therefore means: snapshot occurrence 2's product when it
+    // is made, and overwrite occurrence 1's product right after ITS OWN
+    // dispatch next frame, before its consumers run. One frame stale on
+    // a 90 fps temporal output; the accumulator loop untouched.
+    ID3D11Texture2D* pairSyncSnap = nullptr;
+    uint32_t pairSyncSnapW = 0, pairSyncSnapH = 0;
+    bool     pairSyncSnapValid = false;
     uint8_t  pairSyncSeen = 0;            // occurrences this frame
     void*    pairSyncFirstRes[2] = {};    // occurrence 1's UAV0/UAV1
                                           // RESOURCES (the indirect path:
@@ -913,6 +923,61 @@ bool isExposureDispatch() {
     return match;
 }
 
+// One shifted (or plain) copy into dst from src, slot-0 image semantics:
+// eye-scale 2D only when shifting, dstIsLeft picks the shift direction
+// (left content sits dx right of the right eye's at optical infinity).
+void pairSyncShiftedCopy(ID3D11DeviceContext* self, ID3D11Resource* dst,
+                         ID3D11Resource* src, bool dstIsLeft, bool haveTan,
+                         float om, float im, State* s) {
+    bool done = false;
+    if (s->pairSyncShift && haveTan) {
+        ID3D11Texture2D* dt = nullptr;
+        dst->QueryInterface(__uuidof(ID3D11Texture2D),
+                            reinterpret_cast<void**>(&dt));
+        if (dt) {
+            D3D11_TEXTURE2D_DESC dd{};
+            dt->GetDesc(&dd);
+            dt->Release();
+            if (dd.Width >= 2000) {
+                const uint32_t dx = static_cast<uint32_t>(
+                    dd.Width * (om - im) / (om + im) + 0.5f);
+                D3D11_BOX box{};
+                box.front = 0;
+                box.back = 1;
+                box.top = 0;
+                box.bottom = dd.Height;
+                UINT dstX = 0;
+                if (dstIsLeft) {
+                    box.left = 0;
+                    box.right = dd.Width - dx;
+                    dstX = dx;
+                } else {
+                    box.left = dx;
+                    box.right = dd.Width;
+                    dstX = 0;
+                }
+                self->CopySubresourceRegion(dst, 0, dstX, 0, 0, src, 0,
+                                            &box);
+                done = true;
+                ++s->pairSyncCopies;
+            }
+        }
+        if (!done) return;   // shift mode never plain-copies non-images
+    }
+    if (!done) {
+        self->CopyResource(dst, src);
+        ++s->pairSyncCopies;
+    }
+    if (!s->pairSyncNoted) {
+        s->pairSyncNoted = true;
+        Log::get().note(
+            "dispatch pair sync: first copy made (INDIRECT path%s%s) -- "
+            "FSS-gated, every scanner frame from here.",
+            s->pairSyncShift ? ", infinity-shifted" : "",
+            s->pairSyncReverse ? ", previous-frame reverse" : "");
+    }
+}
+
 // Record-only: the census names GPU-driven compute (group counts live in
 // the argument buffer, so n= cannot be known CPU-side), and everything else
 // -- skips, syncs, the exposure pass itself -- stays Dispatch-only. Hooked
@@ -941,6 +1006,30 @@ void STDMETHODCALLTYPE hookedDispatchIndirect(ID3D11DeviceContext* self,
         // constant shift aligns the eyes -- is this experiment's ground.
         ++s->pairSyncSeen;
         if (s->pairSyncSeen == 1) {
+            if (s->pairSyncReverse) {
+                // Reverse: the first (square-carrying) eye's product is
+                // overwritten with LAST frame's snapshot of the second
+                // eye's, right after its own dispatch and BEFORE its
+                // consumers run -- the interleave lesson.
+                s->realDispatchIndirect(self, args, off);
+                guardedBudget(g_budget, [&] {
+                    if (!s->pairSyncSnapValid || !s->pairSyncSnap) return;
+                    float om = 0.0f, im = 0.0f;
+                    if (!eyeTangents(&om, &im)) return;
+                    ID3D11UnorderedAccessView* u0 = nullptr;
+                    self->CSGetUnorderedAccessViews(0, 1, &u0);
+                    if (!u0) return;
+                    ID3D11Resource* r = nullptr;
+                    u0->GetResource(&r);
+                    u0->Release();
+                    if (r) {
+                        pairSyncShiftedCopy(self, r, s->pairSyncSnap, true,
+                                            true, om, im, s);
+                        r->Release();
+                    }
+                });
+                return;
+            }
             guardedBudget(g_budget, [&] {
                 ID3D11UnorderedAccessView* u[2] = {};
                 self->CSGetUnorderedAccessViews(0, 2, u);
@@ -957,92 +1046,82 @@ void STDMETHODCALLTYPE hookedDispatchIndirect(ID3D11DeviceContext* self,
                     }
                 }
             });
-        } else if (s->pairSyncSeen == 2 &&
-                   (s->pairSyncFirstRes[0] || s->pairSyncFirstRes[1])) {
+        } else if (s->pairSyncSeen == 2) {
             s->realDispatchIndirect(self, args, off);
-            guardedBudget(g_budget, [&] {
-                float om = 0.0f, im = 0.0f;
-                const bool haveTan = eyeTangents(&om, &im);
-                ID3D11UnorderedAccessView* u[2] = {};
-                self->CSGetUnorderedAccessViews(0, 2, u);
-                for (int i = 0; i < 2; ++i) {
-                    if (!u[i]) continue;
+            if (s->pairSyncReverse) {
+                // Reverse, previous-frame semantics: snapshot THIS (the
+                // second, clean) eye's slot-0 product for next frame's
+                // occurrence 1. Nothing of this frame is modified.
+                guardedBudget(g_budget, [&] {
+                    ID3D11UnorderedAccessView* u0 = nullptr;
+                    self->CSGetUnorderedAccessViews(0, 1, &u0);
+                    if (!u0) return;
                     ID3D11Resource* r = nullptr;
-                    u[i]->GetResource(&r);
-                    ID3D11Resource* first = static_cast<ID3D11Resource*>(
-                        s->pairSyncFirstRes[i]);
-                    if (r && first && r != first) {
-                        ID3D11Resource* dst =
-                            s->pairSyncReverse ? first : r;
-                        ID3D11Resource* src =
-                            s->pairSyncReverse ? r : first;
-                        bool done = false;
-                        if (s->pairSyncShift && haveTan) {
-                            // Shifted copy for eye-scale images only: at
-                            // optical infinity the eyes differ by dx =
-                            // W*(outer-inner)/(outer+inner) -- the heal's
-                            // formula, applied at the clean pre-UI layer.
-                            ID3D11Texture2D* dt = nullptr;
-                            dst->QueryInterface(
-                                __uuidof(ID3D11Texture2D),
-                                reinterpret_cast<void**>(&dt));
-                            if (dt) {
-                                D3D11_TEXTURE2D_DESC dd{};
-                                dt->GetDesc(&dd);
-                                dt->Release();
-                                if (dd.Width >= 2000) {
-                                    const uint32_t dx =
-                                        static_cast<uint32_t>(
-                                            dd.Width * (om - im) /
-                                                (om + im) +
-                                            0.5f);
-                                    // Left content sits dx RIGHT of the
-                                    // right eye's; occurrence 1 is left.
-                                    const bool dstIsLeft = dst == first;
-                                    D3D11_BOX box{};
-                                    box.front = 0;
-                                    box.back = 1;
-                                    box.top = 0;
-                                    box.bottom = dd.Height;
-                                    UINT dstX = 0;
-                                    if (dstIsLeft) {
-                                        box.left = 0;
-                                        box.right = dd.Width - dx;
-                                        dstX = dx;
-                                    } else {
-                                        box.left = dx;
-                                        box.right = dd.Width;
-                                        dstX = 0;
-                                    }
-                                    self->CopySubresourceRegion(
-                                        dst, 0, dstX, 0, 0, src, 0, &box);
-                                    done = true;
-                                } else {
-                                    // Not an eye-scale image: in shift
-                                    // mode, leave it alone entirely.
-                                    done = true;
-                                }
+                    u0->GetResource(&r);
+                    u0->Release();
+                    if (!r) return;
+                    ID3D11Texture2D* tex = nullptr;
+                    r->QueryInterface(__uuidof(ID3D11Texture2D),
+                                      reinterpret_cast<void**>(&tex));
+                    r->Release();
+                    if (!tex) return;
+                    D3D11_TEXTURE2D_DESC d{};
+                    tex->GetDesc(&d);
+                    if (d.Width >= 2000 && d.SampleDesc.Count == 1) {
+                        if (!s->pairSyncSnap ||
+                            s->pairSyncSnapW != d.Width ||
+                            s->pairSyncSnapH != d.Height) {
+                            if (s->pairSyncSnap) {
+                                s->pairSyncSnap->Release();
+                                s->pairSyncSnap = nullptr;
                             }
+                            D3D11_TEXTURE2D_DESC sd = d;
+                            sd.Usage = D3D11_USAGE_DEFAULT;
+                            sd.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+                            sd.CPUAccessFlags = 0;
+                            sd.MiscFlags = 0;
+                            sd.MipLevels = 1;
+                            ID3D11Device* dev = nullptr;
+                            self->GetDevice(&dev);
+                            if (dev) {
+                                dev->CreateTexture2D(&sd, nullptr,
+                                                     &s->pairSyncSnap);
+                                dev->Release();
+                            }
+                            s->pairSyncSnapW = d.Width;
+                            s->pairSyncSnapH = d.Height;
+                            s->pairSyncSnapValid = false;
                         }
-                        if (!done) {
-                            self->CopyResource(dst, src);
-                        }
-                        ++s->pairSyncCopies;
-                        if (!s->pairSyncNoted) {
-                            s->pairSyncNoted = true;
-                            Log::get().note(
-                                "dispatch pair sync: first copy made "
-                                "(INDIRECT path, UAV slot %d%s) -- FSS-"
-                                "gated, every scanner frame from here.",
-                                i,
-                                s->pairSyncShift ? ", infinity-shifted"
-                                                 : "");
+                        if (s->pairSyncSnap) {
+                            self->CopySubresourceRegion(
+                                s->pairSyncSnap, 0, 0, 0, 0, tex, 0,
+                                nullptr);
+                            s->pairSyncSnapValid = true;
                         }
                     }
+                    tex->Release();
+                });
+            } else {
+                // Forward: the second eye's product is overwritten from
+                // the first's, after it runs and before its consumers.
+                guardedBudget(g_budget, [&] {
+                    float om = 0.0f, im = 0.0f;
+                    const bool haveTan = eyeTangents(&om, &im);
+                    ID3D11UnorderedAccessView* u0 = nullptr;
+                    self->CSGetUnorderedAccessViews(0, 1, &u0);
+                    if (!u0) return;
+                    ID3D11Resource* r = nullptr;
+                    u0->GetResource(&r);
+                    u0->Release();
+                    ID3D11Resource* first = static_cast<ID3D11Resource*>(
+                        s->pairSyncFirstRes[0]);
+                    if (r && first && r != first) {
+                        pairSyncShiftedCopy(self, r, first, false, haveTan,
+                                            om, im, s);
+                    }
                     if (r) r->Release();
-                    u[i]->Release();
-                }
-            });
+                });
+            }
             return;
         }
     }
