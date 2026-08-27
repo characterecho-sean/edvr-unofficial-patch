@@ -27,7 +27,6 @@
 #include "draw_census.h"
 #include "fss_panel.h"
 #include "fss_probe.h"
-#include "fss_panel_probe.h"
 #include "fss_panel_rect.h"
 #include "fss_reveal.h"
 #include "fss_dump.h"
@@ -296,7 +295,6 @@ struct State {
     uint32_t fssChromeFrame = 0;
     int      fssHealOn = 0;
     int      censusFssJump = 0;
-    int      censusFssPress = 0;
     int      fssTheaterOn = 0;
     uint32_t fssBodyStampFrame = 0;
     uint32_t fssJumpFrame = 0;   // the zoom-start camera jump, for the
@@ -1181,8 +1179,7 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     // moment the zoom's camera jump lands, and the body-layer gate opens
     // ten frames too late. Cheap gate first, hash second, config off =
     // free.
-    if ((s->fssHealOn || s->censusFssJump || fssPanelProbeWants() ||
-         s->fssTheaterOn) &&
+    if ((s->fssHealOn || s->censusFssJump || s->fssTheaterOn) &&
         kind == 'X' && count == 6) {
         bool chromeMatched = false;
         guardedBudget(g_panelCbBudget, [&] {
@@ -1220,7 +1217,6 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
                     s->fssChromeFrame = s->frameNo;
                     bumpFssChromeStamp();
                 }
-                fssPanelProbeOnComposite(self);
             }
         });
         // The theater's per-draw pipeline (round 45f): every matched
@@ -1239,8 +1235,8 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
             }
             const uint32_t ord = s->fssChromeSkipCount++;
             fssPanelRectOnComposite(self, ord,
-                                    fssPanelProbeStartInstance(),
-                                    fssPanelProbeBaseVertex());
+                                    fssPanelRectStartInstance(),
+                                    fssPanelRectBaseVertex());
             const uint32_t mask = fssPanelRectSkipMask();
             if (ord < 32 && ((mask >> ord) & 1u)) {
                 if (!s->fssChromeSkipNoted) {
@@ -2451,12 +2447,6 @@ void STDMETHODCALLTYPE hookedDrawInstanced(ID3D11DeviceContext* self, UINT perIn
     // share one record buffer at different offsets, and which train a
     // draw carries is only knowable from (start, count).
     if (v == DrawVerdict::kGlareSteady) sunglareDrawArgs(instances, startInstance);
-    // The reveal redraw's re-issue needs this draw's true arguments and
-    // the real function -- the shared begin/end tail never sees either.
-    if (v == DrawVerdict::kFssReveal) {
-        fssRevealDrawArgs(startVertex, startInstance,
-                          g_state->realDrawInstanced);
-    }
     // The glare clamp only ever applies in this thunk -- the train is
     // DrawInstanced -- so it lives here rather than in the shared tail,
     // where three other thunks could never receive it. glareClamp rather
@@ -2475,11 +2465,11 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
                                                   UINT perInstance, UINT instances,
                                                   UINT startIndex, INT baseVertex,
                                                   UINT startInstance) {
-    // The panel probe's capture runs INSIDE beginPanelOverride (the
+    // The rect deriver's capture runs INSIDE beginPanelOverride (the
     // chrome tracker's matched branch), so its draw-args stash must land
-    // before the call. Armed one session at a time; free otherwise.
-    if (fssPanelProbeWants() || g_state->fssTheaterOn) {
-        fssPanelProbeDrawArgs(startIndex, baseVertex, startInstance);
+    // before the call.
+    if (g_state->fssTheaterOn || g_state->fssHealOn) {
+        fssPanelRectDrawArgs(startIndex, baseVertex, startInstance);
     }
     const DrawVerdict v = beginPanelOverride(self, 'X', perInstance, instances);
     forwardWithVerdict(self, v, [&] {
@@ -2854,13 +2844,10 @@ void vScreenRefreshConfig() {
     fssPanelConfigure(cfg);
     fssProbeConfigure(cfg);
     fssRevealConfigure(cfg);
-    fssPanelProbeConfigure(cfg);
     fssRingConfigure(cfg);
     fssDumpConfigure(cfg);
     {
         s->censusFssJump = cfg.getInt("advanced.census_fss_jump", 0) ? 1 : 0;
-        s->censusFssPress =
-            cfg.getInt("advanced.census_fss_press", 0) ? 1 : 0;
         s->fssTheaterOn = cfg.getFloat("fix.fss_theater", 0.0f) > 0.0f;
         int n = cfg.getInt("fix.fss_eye_heal", 0);
         if (n < 0 || n > 2) n = 0;
@@ -2980,12 +2967,7 @@ void vScreenFrameBoundary() {
                 "fss arrival: zoom press at frame %u -- the reveal's "
                 "window is open. Said at most 4 times.", s->frameNo);
         }
-        // The press census (round 46e): the level-3 arrival window shows
-        // ZERO composite recognitions while the squares show, so the
-        // arriving content has an unknown writer -- possibly dispatches
-        // into the eye. The census names every draw and dispatch of the
-        // window's frames.
-        if (s->censusFssPress) drawCensusAutoRequest();
+
     }
     // The arrival window's receipt: when it closes, say how many
     // composite recognitions it carried. Zero while squares showed would
@@ -3708,14 +3690,11 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     fssPanelConfigure(cfg);
     fssProbeConfigure(cfg);
     fssRevealConfigure(cfg);
-    fssPanelProbeConfigure(cfg);
     fssRingConfigure(cfg);
     fssDumpConfigure(cfg);
     {
         g_state->censusFssJump =
             cfg.getInt("advanced.census_fss_jump", 0) ? 1 : 0;
-        g_state->censusFssPress =
-            cfg.getInt("advanced.census_fss_press", 0) ? 1 : 0;
         g_state->fssTheaterOn =
             cfg.getFloat("fix.fss_theater", 0.0f) > 0.0f;
         int n = cfg.getInt("fix.fss_eye_heal", 0);
@@ -3922,7 +3901,6 @@ void shutdownVScreenFixes() {
     fssScanShutdown();
     fssPanelShutdown();
     fssProbeShutdown();
-    fssPanelProbeShutdown();
     fssPanelRectShutdown();
     fssRevealShutdown();
     fssRingShutdown();
