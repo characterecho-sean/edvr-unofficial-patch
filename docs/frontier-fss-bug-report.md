@@ -15,8 +15,9 @@ hard-black (0.000-luma) 16×16-pixel tiles that are shown to **one eye only**
 both rigs tested). The other eye receives the same content with those tiles
 already lit. For roughly the first ten frames after the zoom transit lands
 (~100 ms), the two eyes therefore disagree: one eye sees black squares
-scattered over the body and its ring, the other sees the finished image. The
-tiles then resolve in unison and the eyes agree again.
+scattered over the ring, the other sees the finished image. The tiles then
+resolve in unison and the eyes agree again. The artifact is specific to
+ringed bodies: a body without a ring arrives clean, every time.
 
 Because each eye is shown *different* content in the same screen region, the
 result is binocular rivalry rather than a subtle artifact — the squares
@@ -33,10 +34,10 @@ eye while the other eye already has them.
 ## Steps to reproduce
 
 1. Stock installation, no mods, VR enabled (HMD headphones mode).
-2. Fly to any system with a ringed planet (rings make it most visible, but
-   any bright body shows it).
+2. Fly to any system with a ringed planet. A ring is required -- bodies
+   without rings never show the artifact.
 3. Open the FSS, tune to the body, and zoom in to the fully-zoomed body view.
-4. Watch the body/ring during the moment the zoom arrives, with either eye
+4. Watch the ring during the moment the zoom arrives, with either eye
    closed and then the other (or through the per-eye mirror).
 
 **Expected:** both eyes receive the same resolve state; whatever dissolve
@@ -98,6 +99,12 @@ order:
    leading eye has already filled. Once both eyes' accumulation is warm the
    images converge and stay converged.
 
+   The confinement to ringed bodies fits this shape: the ring is the
+   temporally amortized content — its offscreen buffers are rendered as a
+   budgeted subset of 16×16 tiles per frame — so only ring pixels ever have
+   not-yet-reached tiles to expose. A ring-less body has no amortized layer
+   and arrives whole in both eyes.
+
 Internal shader/bytecode identifiers, full census logs, and the per-eye
 capture series are available on request.
 
@@ -119,7 +126,8 @@ Any one of these would eliminate the visible defect:
 ## Impact note
 
 The FSS is one of the most-used exploration screens, and VR players hit this
-on every body they zoom. The per-eye disagreement (rather than the squares
+on every ringed body they zoom — exactly the bodies exploration players zoom
+most. The per-eye disagreement (rather than the squares
 themselves) is what players report: it defeats stereo fusion in the center of
 the view exactly where they are looking. A fix here would close out a large
 share of the long-running VR complaints about the scanner.
