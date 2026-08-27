@@ -20,7 +20,7 @@ namespace {
 // setting to its compiled default until the next reload.
 bool ensureBackupDir(const std::wstring& path) {
     if (dirExists(path)) return true;
-    const size_t slash = path.find_last_of(L"\/");
+    const size_t slash = path.find_last_of(L"\\/");
     if (slash != std::wstring::npos) {
         const std::wstring parent = path.substr(0, slash);
         if (!dirExists(parent) && !CreateDirectoryW(parent.c_str(), nullptr) &&

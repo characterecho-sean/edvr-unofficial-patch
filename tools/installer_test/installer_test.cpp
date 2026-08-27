@@ -632,7 +632,7 @@ static void testPlanner() {
         // runtime out of the folder and over another mod, while the report
         // said "the game's own copy is renamed openvr_api_orig.dll".
         Survey s = baseSurvey(dir);
-        s.openvrOrigName = L".." + std::wstring(L"") + L"\..\d3d11.dll";
+        s.openvrOrigName = L"..\\..\\d3d11.dll";   // out of the folder, onto another mod
         const Plan plan = planInstall(s, options, payload);
         check(hasStep(plan, Action::Rename, L"openvr_api.dll", L"openvr_api_orig.dll"),
               "a path in real_openvr_dll is refused back to the default name");
@@ -641,6 +641,13 @@ static void testPlanner() {
                   "and no step points outside the game folder");
             break;
         }
+
+        // A separator on its own, with no "..", is refused for the same reason.
+        Survey nested = baseSurvey(dir);
+        nested.openvrOrigName = L"sub\\somewhere.dll";
+        const Plan nestedPlan = planInstall(nested, options, payload);
+        check(hasStep(nestedPlan, Action::Rename, L"openvr_api.dll", L"openvr_api_orig.dll"),
+              "and so is a name with a folder in it");
 
         Survey self = baseSurvey(dir);
         self.openvrOrigName = L"openvr_api.dll";   // the file it stands in for
