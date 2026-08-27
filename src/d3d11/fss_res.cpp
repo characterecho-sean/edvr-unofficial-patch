@@ -51,7 +51,7 @@ State g_s;
 
 void fssResConfigure(Config& cfg) {
     const bool was = g_s.enabled;
-    g_s.enabled = cfg.getBool("fix.fss_res", false);
+    g_s.enabled = cfg.getBool("experimental.fss_res", false);
     if (g_s.enabled && !was && !g_s.announced) {
         g_s.announced = true;
         Log::get().note(

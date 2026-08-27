@@ -276,7 +276,7 @@ person 3D** — the flat screen stays flat — and it does not try.
 **It replaces one camera preset: Commander Right Shoulder.** On that preset the
 camera sits at your commander's head instead of the preset's usual framing;
 cycle to it for the 3D view, off it for normal framing. Every other preset is
-untouched. `fix.head_offset_view` selects a different preset to give up instead.
+untouched. `advanced.head_offset_view` selects a different preset to give up instead.
 
 ### It gives you no capability you do not already have
 

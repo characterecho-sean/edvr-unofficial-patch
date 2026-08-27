@@ -311,24 +311,27 @@ COLORREF colourFor(Tone tone) {
 // painting
 // ---------------------------------------------------------------------------
 
+// The install picker and the folder it names sit above both screens: the
+// settings being edited are the settings of whichever install is selected, and
+// a Settings tab that does not say which folder it is writing to is asking to
+// be used on the wrong one.
+void paintInstallPicker(HDC dc) {
+    const ui::Theme& t = ui::theme();
+    const ui::Fonts& f = ui::fonts();
+    if (g.statusPath.empty()) return;
+    RECT path{dp(kMargin), dp(122), dp(kClientWidth - kMargin), dp(140)};
+    ui::drawText(dc, g.statusPath, path, f.caption, t.subtext,
+                 DT_LEFT | DT_SINGLELINE | DT_PATH_ELLIPSIS);
+}
+
 void paintInstallScreen(HDC dc) {
     const ui::Theme& t = ui::theme();
     const ui::Fonts& f = ui::fonts();
 
-    RECT card{dp(kMargin), dp(84), dp(kClientWidth - kMargin), dp(304)};
+    RECT card{dp(kMargin), dp(150), dp(kClientWidth - kMargin), dp(300)};
     ui::paintCard(dc, card, g.dpi);
 
-    RECT heading{dp(kMargin + kCardPad), dp(100), dp(kClientWidth - kMargin - kCardPad), dp(122)};
-    ui::drawText(dc, L"Where Elite Dangerous is", heading, f.heading, t.text,
-                 DT_LEFT | DT_SINGLELINE);
-
-    if (!g.statusPath.empty()) {
-        RECT path{dp(kMargin + kCardPad), dp(163), dp(kClientWidth - kMargin - kCardPad), dp(181)};
-        ui::drawText(dc, g.statusPath, path, f.caption, t.subtext,
-                     DT_LEFT | DT_SINGLELINE | DT_PATH_ELLIPSIS);
-    }
-
-    int y = 196;
+    int y = 166;
     for (const StatusRow& row : g.status) {
         const int centre = dp(y + 10);
         ui::fillCircle(dc, dp(kMargin + kCardPad + 5), centre, dp(4), colourFor(row.tone));
@@ -344,40 +347,40 @@ void paintInstallScreen(HDC dc) {
         y += 22;
     }
 
-    RECT actions{dp(kMargin), dp(316), dp(kClientWidth - kMargin), dp(438)};
+    RECT actions{dp(kMargin), dp(312), dp(kClientWidth - kMargin), dp(434)};
     ui::paintCard(dc, actions, g.dpi);
 
-    RECT reassure{dp(kMargin + kCardPad), dp(408), dp(kClientWidth - kMargin - kCardPad), dp(428)};
+    RECT reassure{dp(kMargin + kCardPad), dp(404), dp(kClientWidth - kMargin - kCardPad), dp(424)};
     ui::drawText(dc,
                  L"Nothing is changed until you confirm it, and every file replaced is copied "
                  L"into edvr_backup\\ first.",
                  reassure, f.caption, t.subtext, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
 
-    RECT report{dp(kMargin), dp(450), dp(kClientWidth - kMargin), dp(612)};
+    RECT report{dp(kMargin), dp(446), dp(kClientWidth - kMargin), dp(612)};
     ui::paintCard(dc, report, g.dpi);
 }
 
 void paintSettingsScreen(HDC dc) {
     const ui::Theme& t = ui::theme();
     const ui::Fonts& f = ui::fonts();
-    RECT card{dp(kMargin), dp(84), dp(kClientWidth - kMargin), dp(612)};
+    RECT card{dp(kMargin), dp(150), dp(kClientWidth - kMargin), dp(612)};
     ui::paintCard(dc, card, g.dpi);
 
-    RECT heading{dp(kMargin + kCardPad), dp(100), dp(kClientWidth - kMargin - kCardPad), dp(122)};
+    RECT heading{dp(kMargin + kCardPad), dp(166), dp(kClientWidth - kMargin - kCardPad), dp(188)};
     ui::drawText(dc, L"Settings", heading, f.heading, t.text, DT_LEFT | DT_SINGLELINE);
 
-    RECT note{dp(kMargin + kCardPad), dp(124), dp(kClientWidth - kMargin - kCardPad), dp(142)};
+    RECT note{dp(kMargin + kCardPad), dp(190), dp(kClientWidth - kMargin - kCardPad), dp(208)};
     const std::wstring where =
         g.settings.loaded()
-            ? L"Written straight into edvr.ini and live within a second. The few that need a "
-              L"game restart are marked."
-            : L"Pick an install on the Install tab first.";
+            ? L"Written into the edvr.ini of the install above, and live within a second. The "
+              L"few that need a game restart are marked."
+            : L"Pick an install above first.";
     ui::drawText(dc, where, note, f.caption, t.subtext, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
 
     // The search box is a real edit control with its 3D border taken off, so
     // the frame around it is drawn here to match everything else.
-    RECT search{dp(kMargin + kCardPad) - dp(6), dp(150), dp(kMargin + kCardPad) + dp(326),
-                dp(182)};
+    RECT search{dp(kMargin + kCardPad) - dp(6), dp(214), dp(kMargin + kCardPad) + dp(326),
+                dp(246)};
     ui::fillRounded(dc, search, dp(6), t.control);
     ui::strokeRounded(dc, search, dp(6), t.controlBorder);
 }
@@ -407,6 +410,7 @@ void paintWindow(HWND window) {
     RECT sub{dp(kMargin), dp(52), dp(kClientWidth - kMargin), dp(70)};
     ui::drawText(dc, subtitle, sub, f.caption, t.subtext, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
 
+    paintInstallPicker(dc);
     if (g.screen == Screen::Install)
         paintInstallScreen(dc);
     else
@@ -601,8 +605,14 @@ void runAction(AppArgs::Act action) {
                           : action == AppArgs::Act::Repair  ? L"About to repair this install:"
                                                             : L"About to install EDVR:";
     if (!args.autorun) {
+        // No is the default button, deliberately. Install is this window's
+        // default push button, so Return reaches it -- and if the confirmation
+        // took Return as yes, two stray keystrokes at a window that had just
+        // taken the foreground would be enough to modify a game folder. That
+        // is not hypothetical: it happened twice during development, to a real
+        // install, while windows were being opened for screenshots.
         const int answer = MessageBoxW(g.window, confirmText(plan, verb).c_str(), L"EDVR installer",
-                                       MB_YESNO | MB_ICONQUESTION);
+                                       MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2);
         if (answer != IDYES) return;
     }
 
@@ -611,7 +621,7 @@ void runAction(AppArgs::Act action) {
             g.window,
             L"This game folder can only be written to by an administrator (it is usually under "
             L"Program Files).\n\nRestart the installer with administrator rights and carry on?",
-            L"EDVR installer", MB_YESNO | MB_ICONQUESTION);
+            L"EDVR installer", MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2);
         if (answer != IDYES) return;
         AppArgs elevated = args;
         elevated.autorun = true;
@@ -636,8 +646,14 @@ void runAction(AppArgs::Act action) {
                 "edvr_logs\\ next to the game.\r\n";
     } else {
         text += "\r\n" + result.error + "\r\n";
-        if (result.rolledBack)
+        if (result.rolledBack && !result.overwrote) {
             text += "Everything this run had changed was put back, so the folder is as it was.\r\n";
+        } else if (result.rolledBack) {
+            text += "What could be undone was undone -- anything renamed is back under its own "
+                    "name. One or more files had already been replaced by then, and replaced "
+                    "bytes cannot be un-replaced: the copies taken before the run are in "
+                    "edvr_backup\\.\r\n";
+        }
     }
     setReport(text);
 
@@ -709,15 +725,15 @@ void createControls(HWND window) {
                               reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdCombo)), nullptr,
                               nullptr);
     SendMessageW(g.combo, WM_SETFONT, reinterpret_cast<WPARAM>(f.body), TRUE);
-    place(g.combo, kMargin + kCardPad, 128, 512, 30, Screen::Install);
+    place(g.combo, kMargin, 88, 512, 30, Screen::Install, true);
 
     HWND browse = ui::makeButton(window, L"Browse...", kIdBrowse, ui::ButtonStyle::Secondary,
                                  f.body);
-    place(browse, 568, 128, 108, 30, Screen::Install);
+    place(browse, 568, 88, 108, 30, Screen::Install, true);
 
     g.chkKeep = ui::makeCheckbox(window, L"Keep the settings I have changed", kIdChkKeep, true,
                                  f.body);
-    place(g.chkKeep, kMargin + kCardPad, 334, 420, 24, Screen::Install);
+    place(g.chkKeep, kMargin + kCardPad, 330, 420, 24, Screen::Install);
 
     g.install = ui::makeButton(window, L"Install", kIdInstall, ui::ButtonStyle::Primary, f.body);
     g.repair = ui::makeButton(window, L"Repair", kIdRepair, ui::ButtonStyle::Secondary, f.body);
@@ -726,11 +742,11 @@ void createControls(HWND window) {
     HWND close = ui::makeButton(window, L"Close", kIdClose, ui::ButtonStyle::Secondary, f.body);
     g.collectLogs = ui::makeButton(window, L"Save logs", kIdCollectLogs,
                                    ui::ButtonStyle::Secondary, f.body);
-    place(g.install, kMargin + kCardPad, 366, 124, 34, Screen::Install);
-    place(g.repair, 172, 366, 104, 34, Screen::Install);
-    place(g.uninstall, 284, 366, 104, 34, Screen::Install);
-    place(g.collectLogs, 396, 366, 116, 34, Screen::Install);
-    place(close, 572, 366, 104, 34, Screen::Install, true);
+    place(g.install, kMargin + kCardPad, 362, 124, 34, Screen::Install);
+    place(g.repair, 172, 362, 104, 34, Screen::Install);
+    place(g.uninstall, 284, 362, 104, 34, Screen::Install);
+    place(g.collectLogs, 396, 362, 116, 34, Screen::Install);
+    place(close, 572, 362, 104, 34, Screen::Install, true);
 
     g.search = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | ES_AUTOHSCROLL, 0, 0,
                                10, 10, window,
@@ -738,10 +754,10 @@ void createControls(HWND window) {
                                nullptr);
     SendMessageW(g.search, WM_SETFONT, reinterpret_cast<WPARAM>(f.body), TRUE);
     SendMessageW(g.search, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"Search settings"));
-    place(g.search, kMargin + kCardPad, 152, 320, 28, Screen::Settings);
+    place(g.search, kMargin + kCardPad, 216, 320, 28, Screen::Settings);
 
     g.settingsList = createSettingsList(window, kIdSettingsList, g.dpi);
-    place(g.settingsList, kMargin + 2, 192, kClientWidth - 2 * kMargin - 4, 416, Screen::Settings);
+    place(g.settingsList, kMargin + 2, 256, kClientWidth - 2 * kMargin - 4, 350, Screen::Settings);
 
     g.report = CreateWindowExW(0, L"EDIT", L"",
                                WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE | ES_READONLY, 0,
@@ -749,7 +765,7 @@ void createControls(HWND window) {
                                reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdReport)), nullptr,
                                nullptr);
     SendMessageW(g.report, WM_SETFONT, reinterpret_cast<WPARAM>(f.body), TRUE);
-    place(g.report, kMargin + kCardPad - 4, 464, 636, 134, Screen::Install);
+    place(g.report, kMargin + kCardPad - 4, 460, 636, 140, Screen::Install);
 
     g.tip = ui::makeButton(window, L"leave a tip", kIdKofi, ui::ButtonStyle::Link, f.caption);
     place(g.tip, kMargin, 621, 76, 20, Screen::Install, true);  // x fixed up in applyLayout

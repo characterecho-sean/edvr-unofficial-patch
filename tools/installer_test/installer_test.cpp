@@ -270,6 +270,83 @@ static void testMerge() {
              "a setting their old file never had arrives at its default");
     expectEq(iniValue(caughtUp, "fix.exposure_damping"), "0.5", "and their value is still kept");
 
+
+    // A setting that moved section. The section is part of the key, so a move
+    // renames it -- and a tuned value would be stranded under a name nothing
+    // reads. The new file says where it came from, and the value follows.
+    MergeReport moveReport;
+    const std::string movedNext =
+        "[fix]\r\n"
+        "share_exposure = 1\r\n"
+        "\r\n"
+        "[experimental]\r\n"
+        "# moved-from: fix.exposure_damping\r\n"
+        "#exposure_damping = 0\r\n";
+    const std::string movedUser =
+        "[fix]\r\n"
+        "share_exposure = 1\r\n"
+        "exposure_damping = 0.7\r\n";
+    const std::string movedOut = mergeIni(movedNext, movedUser, nullptr, {}, &moveReport);
+    expectEq(iniValue(movedOut, "experimental.exposure_damping"), "0.7",
+             "a tuned value follows its setting to a new section");
+    expectEq(iniValue(movedOut, "fix.exposure_damping", "<absent>"), "<absent>",
+             "and is not left behind under the old name");
+    check(moveReport.followed.size() == 1, "the move is reported");
+    check(moveReport.retired.empty(), "and not also reported as retired");
+
+    // Somebody who already set the NEW key wins over the old one.
+    MergeReport bothReport;
+    const std::string bothUser =
+        "[fix]\r\n"
+        "exposure_damping = 0.7\r\n"
+        "\r\n"
+        "[experimental]\r\n"
+        "exposure_damping = 0.4\r\n";
+    const std::string bothOut = mergeIni(movedNext, bothUser, nullptr, {}, &bothReport);
+    expectEq(iniValue(bothOut, "experimental.exposure_damping"), "0.4",
+             "a value already under the new name is not overwritten by the old one");
+
+
+    // A comment can never unset a live value. config.cpp skips any line
+    // starting with # before it looks for a key, so this file reads
+    // black_void = 0 -- and a merge that let the commented copy below it win
+    // decided the user had DELETED the setting, commented the live line out,
+    // and handed them the compiled default instead. Their value, reversed.
+    MergeReport shadowReport;
+    const std::string shadowNext =
+        "[fix]\r\n"
+        "black_void = 1\r\n";
+    const std::string shadowUser =
+        "[fix]\r\n"
+        "black_void = 0\r\n"
+        "#black_void = 1\r\n";
+    const std::string shadowOut = mergeIni(shadowNext, shadowUser, &shadowNext, {}, &shadowReport);
+    expectEq(iniValue(shadowOut, "fix.black_void"), "0",
+             "a commented copy below a live line does not unset it");
+    check(shadowReport.removed.empty(), "and is not reported as a deletion");
+
+    // A key config.cpp would read must survive the merge even if it is not
+    // spelled the way this file's own keys are. Dropping it lost a setting the
+    // game was using, with nothing in the report to say so.
+    MergeReport oddReport;
+    const std::string oddUser =
+        "[fix]\r\n"
+        "black_void = 1\r\n"
+        "my+key = 7\r\n";
+    const std::string oddOut = mergeIni(shadowNext, oddUser, &shadowNext, {}, &oddReport);
+    expectEq(iniValue(oddOut, "fix.my+key"), "7", "an unusual key is carried, not dropped");
+    check(!oddReport.carried.empty(), "and the report says it was carried");
+
+    // Prose is still prose: the test above must not have made every comment
+    // containing '=' into a setting.
+    MergeReport proseGuard;
+    const std::string proseNext2 =
+        "[fix]\r\n"
+        "# 0.3, paired with panel_distance = 0.7, is a comfortable pairing\r\n"
+        "panel_curvature = 0\r\n";
+    expectEq(mergeIni(proseNext2, proseNext2, &proseNext2, {}, &proseGuard), proseNext2,
+             "a comment containing = is still left as prose");
+
     // The identity that makes the whole thing trustworthy: merging a file with
     // itself changes nothing at all.
     MergeReport quiet;
@@ -546,6 +623,35 @@ static void testPlanner() {
         check(hasStep(plan, Action::WritePayload, nullptr, L"d3d11.dll"),
               "the fixes install without the VR half");
         check(!plan.problems.empty(), "and the missing half is reported");
+    }
+
+
+    {   // advanced.real_openvr_dll is a NAME, and a hand-edited edvr.ini can
+        // put anything in it. A value with a path in it would move the game's
+        // runtime out of the folder and over another mod, while the report
+        // said "the game's own copy is renamed openvr_api_orig.dll".
+        Survey s = baseSurvey(dir);
+        s.openvrOrigName = L".." + std::wstring(L"") + L"\..\d3d11.dll";
+        const Plan plan = planInstall(s, options, payload);
+        check(hasStep(plan, Action::Rename, L"openvr_api.dll", L"openvr_api_orig.dll"),
+              "a path in real_openvr_dll is refused back to the default name");
+        for (const Step& step : plan.steps) {
+            check(step.to.find(L"..") == std::wstring::npos,
+                  "and no step points outside the game folder");
+            break;
+        }
+
+        Survey self = baseSurvey(dir);
+        self.openvrOrigName = L"openvr_api.dll";   // the file it stands in for
+        const Plan selfPlan = planInstall(self, options, payload);
+        check(hasStep(selfPlan, Action::Rename, L"openvr_api.dll", L"openvr_api_orig.dll"),
+              "and so is naming the file it is supposed to replace");
+
+        Survey custom = baseSurvey(dir);
+        custom.openvrOrigName = L"openvr_api_stock.dll";  // a legitimate hand install
+        const Plan customPlan = planInstall(custom, options, payload);
+        check(hasStep(customPlan, Action::Rename, L"openvr_api.dll", L"openvr_api_stock.dll"),
+              "a plain filename is honoured, which is the point of the setting");
     }
 
     {   // The game is running.

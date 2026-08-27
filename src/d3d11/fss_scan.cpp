@@ -91,7 +91,7 @@ ID3D11ShaderResourceView* uniformSrv(ID3D11DeviceContext* ctx) {
 
 void fssScanConfigure(Config& cfg) {
     const bool was = g_steady;
-    const std::string m = cfg.getString("fix.fss_scan", "stock");
+    const std::string m = cfg.getString("experimental.fss_scan", "stock");
     if (m == "stock") {
         g_steady = false;
     } else if (m == "steady") {

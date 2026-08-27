@@ -1192,13 +1192,13 @@ int main(int argc, char** argv) {
     const std::string dir = argc > 1 ? argv[1] : ".";
     Config::get().init(std::wstring(dir.begin(), dir.end()));
 
-    g_wantView = Config::get().getIntInRange("fix.head_offset_view", 2, -1, 63);
+    g_wantView = Config::get().getIntInRange("advanced.head_offset_view", 2, -1, 63);
     // A shipped -1 means "any view", which would make every view scenario below
     // vacuous rather than failing -- so it is refused here. -1 is a legitimate
     // thing for a USER to set; it is not a legitimate thing to ship, because it
     // arms in the view that faces back at the commander.
     if (g_wantView < 0) {
-        printf("  FAIL  edvr.ini ships fix.head_offset_view = %d (any view), so "
+        printf("  FAIL  edvr.ini ships advanced.head_offset_view = %d (any view), so "
                "the offset would arm in the front-facing view and every view "
                "scenario here would pass without testing anything.\n", g_wantView);
         return 1;

@@ -236,7 +236,7 @@ void headOffsetGateConfigure() {
         cfg.getIntInRange("fix.head_offset_enter_window_ms", 670, 0, 100000));
     g.gateIntentGraceMs = static_cast<uint64_t>(
         cfg.getIntInRange("fix.head_offset_intent_grace_ms", 2000, 0, 100000));
-    g.gateWantView = cfg.getIntInRange("fix.head_offset_view", 2, -1, 63);
+    g.gateWantView = cfg.getIntInRange("advanced.head_offset_view", 2, -1, 63);
     g.gateViewCount = cfg.getIntInRange("fix.head_offset_view_count", 6, 0, 64);
     g.gateBridgeOn = cfg.getBool("fix.head_offset_view_bridge", true);
     // KEYLESS ENTRY IS PARKED, default off (product decision 2026-08-16).
@@ -1030,7 +1030,7 @@ void headOffsetGateFrame(uint32_t frameNo, uint32_t panelDraws, uint32_t eyeDraw
             "many attempts it made. After a game update, "
             "d3d11.camera_index_type_offset no longer points at the right "
             "thing and needs re-measuring.\n"
-            "  fix.head_offset_view = -1 applies the offset in every camera "
+            "  advanced.head_offset_view = -1 applies the offset in every camera "
             "preset, including the one that faces back at you.",
             g.gateWantView, g.gateViewIndex);
     }
@@ -1076,7 +1076,7 @@ void headOffsetGateFrame(uint32_t frameNo, uint32_t panelDraws, uint32_t eyeDraw
         } else {
             ++g.gateExits;
             Log::get().note("head offset OFF: camera view is %d and the offset "
-                            "is for view %d (fix.head_offset_view). Still in "
+                            "is for view %d (advanced.head_offset_view). Still in "
                             "the camera.", g.gateViewIndex, g.gateWantView);
         }
     }

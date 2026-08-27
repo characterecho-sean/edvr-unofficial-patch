@@ -49,7 +49,11 @@ struct Survey {
 
     bool    haveOpenvrDir = false;
     DllInfo openvrCurrent;  // <openvr>\openvr_api.dll
-    DllInfo openvrOrig;     // <openvr>\openvr_api_orig.dll
+    DllInfo openvrOrig;     // the renamed original, whatever it is called
+    // Normally openvr_api_orig.dll, but advanced.real_openvr_dll lets a manual
+    // install choose any name, and a folder set up that way must not be read
+    // as one where the original was lost.
+    std::wstring openvrOrigName;
 
     // A genuine OpenVR runtime found in one of our own backup folders, newest
     // first. This is what makes "the original was lost" recoverable rather than

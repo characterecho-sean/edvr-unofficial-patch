@@ -101,7 +101,7 @@ void headOffsetConfigure() {
     //
     // The rule "code defaults must equal ini defaults" exists because a partial
     // ini otherwise behaves unlike the file somebody is reading -- and for
-    // fix.head_offset_view that was dangerous, because the code's -1 armed in
+    // advanced.head_offset_view that was dangerous, because the code's -1 armed in
     // every camera view while the file said one. The direction of the error is
     // what matters. Here, zero means "do not move anybody", so a missing or
     // partial ini leaves the game exactly as it was. Matching the file instead

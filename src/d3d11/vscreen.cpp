@@ -2848,8 +2848,12 @@ void vScreenRefreshConfig() {
     fssDumpConfigure(cfg);
     {
         s->censusFssJump = cfg.getInt("advanced.census_fss_jump", 0) ? 1 : 0;
-        s->fssTheaterOn = cfg.getFloat("fix.fss_theater", 0.0f) > 0.0f;
-        int n = cfg.getInt("fix.fss_eye_heal", 0);
+        s->fssTheaterOn = cfg.getFloat("experimental.fss_theater", 0.0f) > 0.0f;
+        // Defaulted to 1 because the key moved to [experimental] and now ships
+        // commented out: this default is what everybody runs. Moving a setting out
+        // of [fix] is a decision about where it is configured, not a decision to
+        // turn the fix off.
+        int n = cfg.getInt("experimental.fss_eye_heal", 1);
         if (n < 0 || n > 2) n = 0;
         if (s->fssHealOn != n) {
             s->fssHealOn = n;
@@ -3696,8 +3700,8 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
         g_state->censusFssJump =
             cfg.getInt("advanced.census_fss_jump", 0) ? 1 : 0;
         g_state->fssTheaterOn =
-            cfg.getFloat("fix.fss_theater", 0.0f) > 0.0f;
-        int n = cfg.getInt("fix.fss_eye_heal", 0);
+            cfg.getFloat("experimental.fss_theater", 0.0f) > 0.0f;
+        int n = cfg.getInt("experimental.fss_eye_heal", 1);
         if (n < 0 || n > 2) n = 0;
         if (g_state->fssHealOn != n) {
             g_state->fssHealOn = n;

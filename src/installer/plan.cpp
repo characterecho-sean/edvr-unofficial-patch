@@ -50,6 +50,26 @@ const DllInfo* siblingNamed(const std::vector<DllInfo>& siblings, const std::wst
     return nullptr;
 }
 
+// A filename out of edvr.ini, accepted only if it really is one.
+//
+// Values read from that file reach MoveFileEx as destinations, and edvr.ini is
+// a text file people edit. A value carrying a path separator, a drive, a "..",
+// or the name of the very file it stands in for is not a rename target; it is
+// a way to move the game's own runtime somewhere else entirely and be told the
+// install succeeded. Refused values fall back to the built-in name, which is
+// what an install that never touched the setting uses anyway.
+std::wstring safeSiblingName(const std::wstring& value, const std::wstring& mustNotEqual) {
+    if (value.empty()) return std::wstring();
+    if (value.find_first_of(L"\\/:*?\"<>|") != std::wstring::npos) return std::wstring();
+    if (value == L"." || value == L".." || value.find(L"..") != std::wstring::npos)
+        return std::wstring();
+    if (_wcsicmp(value.c_str(), mustNotEqual.c_str()) == 0) return std::wstring();
+    // A rename target that is not a DLL is a typo, not a plan.
+    if (value.size() < 5 || _wcsicmp(value.c_str() + value.size() - 4, L".dll") != 0)
+        return std::wstring();
+    return value;
+}
+
 // The Openvr folder as it is written into the install record: relative to the
 // game folder, because that is the shape the record can hold safely.
 std::wstring relativeOpenvr(const std::wstring& gameDir, const std::wstring& openvrDir) {
@@ -85,7 +105,25 @@ Survey surveyTarget(const GameInstall& game) {
     if (!s.game.openvrDir.empty()) {
         s.haveOpenvrDir = true;
         s.openvrCurrent = probeDll(joinPath(s.game.openvrDir, kOpenvr));
-        s.openvrOrig = probeDll(joinPath(s.game.openvrDir, kOpenvrOrig));
+
+        // What the original was renamed to. openvr_api_orig.dll is what the
+        // README says and what this installer writes, but advanced.
+        // real_openvr_dll accepts any name, and somebody who installed by hand
+        // may have used one. Looking only for the default name would read that
+        // folder as "the original is missing" -- the one diagnosis that sends
+        // people to verify their game files for no reason.
+        //
+        // It is a NAME, and this checks that, because the value ends up as a
+        // rename destination. A value with a path in it -- "..\\..\\d3d11.dll",
+        // by accident or otherwise -- would move the game's runtime out of the
+        // folder and over another mod, and the report would call it "the game's
+        // own copy is renamed openvr_api_orig.dll" while it happened. Anything
+        // that is not a plain filename is refused back to the default.
+        s.openvrOrigName = safeSiblingName(fromUtf8(iniValue(s.iniText,
+                                                             "advanced.real_openvr_dll")),
+                                           kOpenvr);
+        if (s.openvrOrigName.empty()) s.openvrOrigName = kOpenvrOrig;
+        s.openvrOrig = probeDll(joinPath(s.game.openvrDir, s.openvrOrigName));
     }
 
     // Backups this installer made, newest first. The only thing looked for is
@@ -307,7 +345,11 @@ Plan planInstall(const Survey& s, const Options& o, const PayloadInfo& p) {
         } else {
             const std::wstring dir = s.game.openvrDir;
             const std::wstring dst = joinPath(dir, kOpenvr);
-            const std::wstring origPath = joinPath(dir, kOpenvrOrig);
+            // The name this folder uses for the original, which is the default
+            // unless a hand install chose another and said so in edvr.ini.
+            std::wstring origName = safeSiblingName(s.openvrOrigName, kOpenvr);
+            if (origName.empty()) origName = kOpenvrOrig;
+            const std::wstring origPath = joinPath(dir, origName);
             const DllInfo& cur = s.openvrCurrent;
             const DllInfo& orig = s.openvrOrig;
 
@@ -331,10 +373,10 @@ Plan planInstall(const Survey& s, const Options& o, const PayloadInfo& p) {
                         "it.");
                 }
                 backup(dst, "the game's own openvr_api.dll, before it is renamed");
-                rename(dst, origPath, "keeps the game's original as openvr_api_orig.dll");
+                rename(dst, origPath, "keeps the game's original as " + say(origName));
                 writePayload("openvr", dst, "installs EDVR's openvr_api.dll");
                 next.openvrOrigSha = cur.sha256;
-                next.openvrOrigName = kOpenvrOrig;
+                next.openvrOrigName = origName;
                 next.openvrInstalled = true;
                 next.openvrSha = p.openvrSha;
                 if (!origIsRuntime) {
@@ -365,7 +407,7 @@ Plan planInstall(const Survey& s, const Options& o, const PayloadInfo& p) {
                                                "Explorer Cam).");
                 }
                 next.openvrOrigSha = orig.sha256;
-                next.openvrOrigName = kOpenvrOrig;
+                next.openvrOrigName = origName;
                 next.openvrInstalled = true;
                 next.openvrSha = p.openvrSha;
             } else if (curIsOurs) {
@@ -386,7 +428,7 @@ Plan planInstall(const Survey& s, const Options& o, const PayloadInfo& p) {
                         "The game's original openvr_api.dll was missing, which stops VR from "
                         "starting at all. It has been restored from the backup this installer made "
                         "at " + say(stamp) + ", and EDVR reinstalled in front of it.");
-                    next.openvrOrigName = kOpenvrOrig;
+                    next.openvrOrigName = origName;
                     next.openvrInstalled = true;
                     next.openvrSha = p.openvrSha;
                 } else {
@@ -404,7 +446,7 @@ Plan planInstall(const Survey& s, const Options& o, const PayloadInfo& p) {
                     "openvr_api.dll had gone missing while the game's original was still safely "
                     "renamed. Reinstalled.");
                 next.openvrOrigSha = orig.sha256;
-                next.openvrOrigName = kOpenvrOrig;
+                next.openvrOrigName = origName;
                 next.openvrInstalled = true;
                 next.openvrSha = p.openvrSha;
             } else if (cur.kind == DllKind::Absent) {
@@ -579,8 +621,9 @@ Plan planUninstall(const Survey& s, const Options& o) {
         // Whatever we moved aside goes back under the name it had. Without
         // this, uninstalling EDVR silently uninstalls the other mod too: its
         // file is still on disk but under a name nothing loads.
-        std::wstring chain = s.state.chainTarget;
-        if (chain.empty()) chain = fromUtf8(iniValue(s.iniText, "advanced.real_dll"));
+        std::wstring chain = safeSiblingName(s.state.chainTarget, kD3d11);
+        if (chain.empty())
+            chain = safeSiblingName(fromUtf8(iniValue(s.iniText, "advanced.real_dll")), kD3d11);
         const DllInfo* target = chain.empty() ? nullptr : siblingNamed(s.otherD3d11, chain);
         if (target && target->kind != DllKind::Absent) {
             rename(target->path, d3d11Path,
@@ -607,7 +650,9 @@ Plan planUninstall(const Survey& s, const Options& o) {
     // ---- openvr -------------------------------------------------------
     if (s.haveOpenvrDir) {
         const std::wstring dst = joinPath(s.game.openvrDir, kOpenvr);
-        const std::wstring origPath = joinPath(s.game.openvrDir, kOpenvrOrig);
+        std::wstring origName = safeSiblingName(s.openvrOrigName, kOpenvr);
+        if (origName.empty()) origName = kOpenvrOrig;
+        const std::wstring origPath = joinPath(s.game.openvrDir, origName);
         if (s.openvrCurrent.kind == DllKind::Edvr) {
             backup(dst, "EDVR's openvr_api.dll");
             remove(dst, "removes EDVR's openvr_api.dll");

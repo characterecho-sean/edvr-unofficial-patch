@@ -100,7 +100,7 @@ void fssPanelConfigure(Config& cfg) {
     const bool  was = g_enabled;
     const float wasFactor = g_factor;
 
-    float f = cfg.getFloat("fix.fss_panel_distance", 0.0f);
+    float f = cfg.getFloat("experimental.fss_panel_distance", 0.0f);
     if (f == 0.0f) {
         // Inherit the on-foot panel's distance: one setting, two screens.
         f = cfg.getFloat("fix.panel_distance", 1.0f);
@@ -121,7 +121,7 @@ void fssPanelConfigure(Config& cfg) {
                 : "fss panel: stock distance; the scanner's screen is the "
                   "game's own.",
             g_factor,
-            cfg.getFloat("fix.fss_panel_distance", 0.0f) == 0.0f
+            cfg.getFloat("experimental.fss_panel_distance", 0.0f) == 0.0f
                 ? "inherited from panel_distance"
                 : "fss_panel_distance");
     }

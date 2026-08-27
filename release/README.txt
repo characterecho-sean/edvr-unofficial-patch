@@ -227,7 +227,7 @@ preset the camera sits at your commander's head instead of where the preset
 normally puts it. That is the whole feature, and it does mean the preset stops
 doing its usual job - cycle to it for the 3D view, cycle off it for the normal
 framing. Every other preset is untouched and keeps its usual position, so
-nothing you already use for screenshots changes. fix.head_offset_view selects
+nothing you already use for screenshots changes. advanced.head_offset_view selects
 which preset is replaced if you would rather give up a different one.
 
 IT GIVES YOU NO CAPABILITY YOU DO NOT ALREADY HAVE. The external camera is
@@ -267,7 +267,7 @@ SETTING IT UP
 2. Get on foot, open the camera, and cycle to COMMANDER RIGHT SHOULDER -
    two presses from the view the camera opens on. That is the preset the
    offset replaces, and you cycle to it each time you want the 3D view.
-   Every other preset keeps its normal framing; fix.head_offset_view picks
+   Every other preset keeps its normal framing; advanced.head_offset_view picks
    a different one if you would rather give that one up.
 
 3. Tune these three with the headset on. They reload about once a second, so

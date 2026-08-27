@@ -682,12 +682,12 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
             g_state->configPollMs = stampMs();
             vScreenRefreshConfig();
             g_state->fssTheaterWanted =
-                Config::get().getFloat("fix.fss_theater", 0.0f) > 0.0f ||
+                Config::get().getFloat("experimental.fss_theater", 0.0f) > 0.0f ||
                 (Config::get().getString("fix.fss_reveal_sync", "off") !=
                      "off" &&
                  Config::get().getString("fix.fss_reveal_sync", "off") !=
                      "stock") ||
-                Config::get().getInt("fix.fss_eye_heal", 0) != 0;
+                Config::get().getInt("experimental.fss_eye_heal", 1) != 0;
             journalWatchSetEagerStatus(g_state->fssTheaterWanted);
             // The liveness pass, on the same once-a-second cadence. In-place
             // patches are on a table other tools can write too, and one that
@@ -961,12 +961,12 @@ State& ensureState() {
         cameraViewSetPressWitness(g_state->extCamNextKey.key() != 0);
         journalWatchConfigure();
         g_state->fssTheaterWanted =
-            Config::get().getFloat("fix.fss_theater", 0.0f) > 0.0f ||
+            Config::get().getFloat("experimental.fss_theater", 0.0f) > 0.0f ||
             (Config::get().getString("fix.fss_reveal_sync", "off") !=
                  "off" &&
              Config::get().getString("fix.fss_reveal_sync", "off") !=
                  "stock") ||
-            Config::get().getInt("fix.fss_eye_heal", 0) != 0;
+            Config::get().getInt("experimental.fss_eye_heal", 1) != 0;
         journalWatchSetEagerStatus(g_state->fssTheaterWanted);
         g_state->dumpOnExternalCam =
             Config::get().getBool("advanced.dump_camera_on_external_cam", false);

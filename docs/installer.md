@@ -152,7 +152,7 @@ button: the change is live by the time the mouse is up.
 it from the two places the facts already live:
 
 - the **accessor call** in the code gives the type, the declared range and the
-  compiled default (`getIntInRange("fix.head_offset_view", 2, -1, 63)`);
+  compiled default (`getIntInRange("fix.remlok_line_angle", 46, 20, 60)`);
 - the **comment block** above the key in `edvr.ini` gives the explanation, and
   its first sentence becomes the one-line summary in the row.
 

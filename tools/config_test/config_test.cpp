@@ -133,7 +133,11 @@ int main(int argc, char** argv) {
     // This is the claim that a repeated section header is not a parse error
     // and does not silently discard everything after it.
     expectBool("fix.head_offset_gate", true, "a key under a REPEATED [fix] reads");
-    expectInt("fix.head_offset_view", 2, "...including the preset it applies to");
+    // The preset it applies to moved to [advanced] and ships commented out,
+    // so the shipped file must NOT define it -- the compiled default is the
+    // one in force. -999999 is this file's "the key is not there" sentinel.
+    expectInt("advanced.head_offset_view", -999999,
+              "...and the preset it applies to is an expert setting now, not shipped live");
     expectBool("hotkey.read_game_bindings", true,
                "a key under a repeated [hotkey] reads");
 

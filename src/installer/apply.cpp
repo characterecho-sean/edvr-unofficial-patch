@@ -34,8 +34,17 @@ std::string errorText(DWORD err) {
     return out;
 }
 
+// Written beside the target and moved into place.
+//
+// CREATE_ALWAYS on the target truncates it before the first byte is written, so
+// a failure halfway -- disk full, the network drive going away, antivirus
+// taking the handle -- leaves a truncated DLL where a working one was, and the
+// rollback below has nothing to put back because the file "already existed".
+// Writing a temp file first means the target is either the old bytes or all of
+// the new ones.
 bool writeWholeFile(const std::wstring& path, const void* data, size_t size, DWORD* err) {
-    HANDLE f = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+    const std::wstring temp = path + L".edvrnew";
+    HANDLE f = CreateFileW(temp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
                            FILE_ATTRIBUTE_NORMAL, nullptr);
     if (f == INVALID_HANDLE_VALUE) {
         *err = GetLastError();
@@ -48,7 +57,9 @@ bool writeWholeFile(const std::wstring& path, const void* data, size_t size, DWO
         DWORD written = 0;
         if (!WriteFile(f, p, chunk, &written, nullptr) || written == 0) {
             *err = GetLastError();
+            if (*err == 0) *err = ERROR_WRITE_FAULT;  // a short write is still a failure
             CloseHandle(f);
+            DeleteFileW(temp.c_str());
             return false;
         }
         p += written;
@@ -60,6 +71,12 @@ bool writeWholeFile(const std::wstring& path, const void* data, size_t size, DWO
     // suspect the installer.
     FlushFileBuffers(f);
     CloseHandle(f);
+
+    if (!MoveFileExW(temp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING)) {
+        *err = GetLastError();
+        DeleteFileW(temp.c_str());
+        return false;
+    }
     return true;
 }
 
@@ -83,7 +100,10 @@ bool ensureDirTree(const std::wstring& path, std::vector<Undo>* undo) {
         if (undo) undo->push_back({Undo::Kind::RemoveDir, path, std::wstring()});
         return true;
     }
-    return GetLastError() == ERROR_ALREADY_EXISTS;
+    // ERROR_ALREADY_EXISTS is also what a FILE of that name gives back, and
+    // treating that as success meant the run carried on and failed several
+    // steps later -- after the DLLs had been replaced.
+    return GetLastError() == ERROR_ALREADY_EXISTS && dirExists(path);
 }
 
 }  // namespace
@@ -109,9 +129,15 @@ ApplyResult applyPlan(const Plan& plan, const PayloadProvider& payload) {
 
     std::vector<Undo> undo;
     DWORD err = 0;
+    bool overwrote = false;   // a file was replaced, which no undo can reverse
     std::wstring failedAt;
 
+    bool failed = false;
     auto fail = [&](const std::wstring& what, DWORD code) {
+        // Keyed off a flag, not off err: a Windows call can fail with a last
+        // error of zero, and testing the code alone let the loop carry on and
+        // report the whole run as a success.
+        failed = true;
         err = code;
         failedAt = what;
     };
@@ -132,7 +158,10 @@ ApplyResult applyPlan(const Plan& plan, const PayloadProvider& payload) {
                 if (!CopyFileW(step.from.c_str(), step.to.c_str(), FALSE)) {
                     fail(step.to, GetLastError());
                 } else {
-                    undo.push_back({Undo::Kind::DeleteFile, step.to, std::wstring()});
+                    // Deliberately no undo. A backup is the only way back from a
+                    // step that overwrote something, and a rollback that tidies
+                    // the backups away takes that with it. They cost a few
+                    // megabytes and they are the whole safety net.
                     result.done.push_back("copied " + toUtf8(leafOf(step.from)) + " -> " +
                                           toUtf8(step.to));
                 }
@@ -163,7 +192,10 @@ ApplyResult applyPlan(const Plan& plan, const PayloadProvider& payload) {
                 if (!writeWholeFile(step.to, data, size, &err)) {
                     fail(step.to, err);
                 } else {
-                    if (!existed) undo.push_back({Undo::Kind::DeleteFile, step.to, std::wstring()});
+                    if (!existed)
+                        undo.push_back({Undo::Kind::DeleteFile, step.to, std::wstring()});
+                    else
+                        overwrote = true;  // no undo for this: the old bytes are gone
                     result.done.push_back("wrote " + toUtf8(leafOf(step.to)));
                 }
                 break;
@@ -174,7 +206,10 @@ ApplyResult applyPlan(const Plan& plan, const PayloadProvider& payload) {
                 if (!writeWholeFile(step.to, step.text.data(), step.text.size(), &err)) {
                     fail(step.to, err);
                 } else {
-                    if (!existed) undo.push_back({Undo::Kind::DeleteFile, step.to, std::wstring()});
+                    if (!existed)
+                        undo.push_back({Undo::Kind::DeleteFile, step.to, std::wstring()});
+                    else
+                        overwrote = true;
                     result.done.push_back("wrote " + toUtf8(leafOf(step.to)));
                 }
                 break;
@@ -192,10 +227,10 @@ ApplyResult applyPlan(const Plan& plan, const PayloadProvider& payload) {
                 break;
             }
         }
-        if (err != 0) break;
+        if (failed) break;
     }
 
-    if (err == 0) {
+    if (!failed) {
         result.ok = true;
         return result;
     }
@@ -222,7 +257,12 @@ ApplyResult applyPlan(const Plan& plan, const PayloadProvider& payload) {
                 break;
         }
     }
+    // Whether "put back" is the truth depends on what the run had already
+    // done: a rename can be reversed, a file that was written over cannot.
+    // Claiming a full restore when a DLL was replaced is worse than saying
+    // nothing, because it stops somebody looking in edvr_backup\.
     result.rolledBack = true;
+    result.overwrote = overwrote;
     return result;
 }
 

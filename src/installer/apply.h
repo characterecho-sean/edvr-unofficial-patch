@@ -27,6 +27,11 @@ struct ApplyResult {
     bool ok = false;
     bool needsElevation = false;  // a write was refused; the same run as admin would work
     bool rolledBack = false;
+    // A file was replaced before the failure. Renames come back; replaced bytes
+    // do not, so a run that overwrote something cannot be called fully undone
+    // -- the copy in edvr_backup\ is the way back, and saying otherwise stops
+    // anybody looking there.
+    bool overwrote = false;
     std::vector<std::string> done;   // one line per completed step, for the report
     std::string error;               // empty when ok
 };

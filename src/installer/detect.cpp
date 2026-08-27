@@ -39,8 +39,11 @@ std::string readTextFileImpl(const std::wstring& path, size_t limit = 4u << 20) 
     DWORD read = 0;
     const BOOL ok = ReadFile(f, &text[0], static_cast<DWORD>(text.size()), &read, nullptr);
     CloseHandle(f);
-    if (!ok) return std::string();
-    text.resize(read);
+    // A short read is a failure, not a shorter file. config.cpp refuses one for
+    // the same reason and records what it cost: a truncated ini looks exactly
+    // like a file somebody deleted settings from, and the merge would write
+    // that reading back to disk as though they had.
+    if (!ok || read < text.size()) return std::string();
     return text;
 }
 

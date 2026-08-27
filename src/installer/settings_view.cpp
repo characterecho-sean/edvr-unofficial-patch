@@ -65,15 +65,14 @@ bool matches(const SettingRow& row, const std::wstring& needle) {
     return hay.find(needle) != std::wstring::npos;
 }
 
-// The ini's section names are addresses, not headings: [d3d11] tells a reader
-// which half of EDVR reads the setting, which is not what somebody scrolling a
-// list wants to know.
-std::wstring sectionTitle(const std::string& section) {
+// edvr.ini's own headings -- "The on-foot screen", "The Full System Scanner"
+// -- are what the window shows. A setting with no heading above it falls back
+// to its section name, which is an address rather than a heading, but is
+// better than an untitled run of rows.
+std::wstring headingFor(const SettingDef& def) {
+    if (def.group && *def.group) return fromUtf8(def.group);
+    const std::string section = def.section;
     if (section == "fix") return L"The fixes";
-    if (section == "hotkey") return L"Keys";
-    if (section == "log") return L"Log";
-    if (section == "openvr") return L"Explorer Cam viewpoint";
-    if (section == "d3d11") return L"What EDVR reads from the game";
     if (section == "advanced") return L"Advanced";
     return fromUtf8(section);
 }
@@ -83,17 +82,20 @@ void rebuildItems(List* list) {
     if (!list->model) return;
 
     const std::wstring needle = lower(list->filter);
-    std::string section;
+    std::wstring heading;
+    bool haveHeading = false;
     int y = kPad;
 
     const std::vector<SettingRow>& rows = list->model->rows();
     for (size_t i = 0; i < rows.size(); ++i) {
         if (!matches(rows[i], needle)) continue;
-        if (rows[i].def->section != section) {
-            section = rows[i].def->section;
+        const std::wstring wanted = headingFor(*rows[i].def);
+        if (!haveHeading || wanted != heading) {
+            heading = wanted;
+            haveHeading = true;
             Item header;
             header.kind = ItemKind::Header;
-            header.title = sectionTitle(section);
+            header.title = heading;
             header.y = y;
             header.height = kHeaderHeight;
             list->items.push_back(header);

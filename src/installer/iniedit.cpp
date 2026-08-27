@@ -42,7 +42,16 @@ bool isKeyToken(const std::string& s) {
     if (s.empty() || s.size() > 96) return false;
     for (char c : s) {
         const unsigned char u = static_cast<unsigned char>(c);
-        if (!(isalnum(u) || c == '_' || c == '.' || c == '-')) return false;
+        // Anything config.cpp would accept: it takes whatever is left of the
+        // '=' after trimming, so a key with an accent in it is a key as far as
+        // the game is concerned. Refusing it here meant the line was filed as
+        // prose and silently dropped from the merged file -- a setting the game
+        // was reading, gone without a word in the report.
+        //
+        // Whitespace is still refused, and that is the point of this test: it
+        // is what keeps a comment line like "0.3, paired with panel_distance =
+        // 0.7, is comfortable" from being read as a setting.
+        if (isspace(u) || c == '#' || c == ';' || c == '[' || c == ']') return false;
     }
     return true;
 }
@@ -97,7 +106,13 @@ std::string rewriteValue(const std::string& line, const std::string& newValue, b
     if (spacing.empty()) spacing = " ";
 
     const std::string rest = tail.substr(v);
-    const std::string stripped = stripInlineComment(rest);
+    // stripInlineComment starts at index 1, since a value may legitimately
+    // begin with # or ;. On a line whose value is EMPTY the comment is the
+    // whole remainder, starting at index 0, so it has to be spotted here or
+    // rewriting that line throws the comment away.
+    const std::string stripped =
+        (!rest.empty() && (rest[0] == '#' || rest[0] == ';')) ? std::string()
+                                                             : stripInlineComment(rest);
     std::string comment;
     if (stripped.size() < rest.size()) comment = rest.substr(stripped.size());
 
@@ -131,16 +146,53 @@ Effective effectiveOf(const IniDoc& doc, const std::string& section, const std::
         if (!sameKey(l.section, section) || !sameKey(l.key, key)) continue;
         e.known = true;
         if (l.kind == LineKind::Key) {
+            // Last LIVE line wins, exactly as config.cpp's map assignment does.
             e.present = true;
             e.value = l.value;
-        } else {
-            // A later commented line un-sets what an earlier live one set, the
-            // same way the reader would see it: the live line is simply gone.
-            e.present = false;
-            e.value.clear();
         }
+        // A commented line is not a value. config.cpp skips any line starting
+        // with # or ; before it looks for a key, so a commented copy below a
+        // live one changes nothing about what the game reads -- and letting it
+        // clear the value here dropped the user's setting on the floor:
+        //     black_void = 0
+        //     #black_void = 1
+        // read as "they deleted black_void", and the merge commented the live
+        // line out. It is only evidence that the KEY exists, which is what
+        // `known` is for.
     }
     return e;
+}
+
+}  // namespace
+
+namespace {
+
+// "# moved-from: fix.exposure_damping" above a key, in the NEW file: where this
+// setting used to live. Read as a map from the old dotted name to the new one.
+std::map<std::string, std::pair<std::string, std::string>> movedKeys(const IniDoc& doc) {
+    std::map<std::string, std::pair<std::string, std::string>> out;
+    std::string pending;
+    for (const IniLine& line : doc.lines) {
+        if (line.kind == LineKind::Comment) {
+            const std::string body = trim(line.text);
+            size_t at = 0;
+            while (at < body.size() && (body[at] == '#' || body[at] == ';')) ++at;
+            const std::string text = trim(body.substr(at));
+            if (lower(text).rfind("moved-from:", 0) == 0) {
+                pending = trim(text.substr(strlen("moved-from:")));
+            }
+            continue;
+        }
+        if (line.kind == LineKind::Blank || line.kind == LineKind::Section) {
+            pending.clear();
+            continue;
+        }
+        if (!pending.empty()) {
+            out[lower(pending)] = {line.section, line.key};
+            pending.clear();
+        }
+    }
+    return out;
 }
 
 }  // namespace
@@ -253,6 +305,7 @@ std::string mergeIni(const std::string& next, const std::string& user, const std
     MergeReport& rep = report ? *report : local;
 
     IniDoc nextDoc = iniParse(next);
+    const std::map<std::string, std::pair<std::string, std::string>> moved = movedKeys(nextDoc);
     const IniDoc userDoc = iniParse(user);
     const IniDoc baseDoc = iniParse(base ? *base : next);
     rep.twoWay = (base == nullptr);
@@ -323,6 +376,34 @@ std::string mergeIni(const std::string& next, const std::string& user, const std
         const bool changedByUser = (u.present != b.present) || (u.present && u.value != b.value);
 
         if (!n.known) {
+            // The setting may have MOVED rather than gone: the new file says so
+            // above its new key, and the value follows it there instead of
+            // being stranded under a name nothing reads.
+            const auto move = moved.find(lower(dotted));
+            if (u.present && move != moved.end()) {
+                const std::string& newSection = move->second.first;
+                const std::string& newKey = move->second.second;
+                const Effective already = effectiveOf(userDoc, newSection, newKey);
+                if (!already.present) {  // an explicit new-key value wins
+                    size_t target = std::string::npos;
+                    for (size_t i = 0; i < nextDoc.lines.size(); ++i) {
+                        const IniLine& l = nextDoc.lines[i];
+                        if ((l.kind == LineKind::Key || l.kind == LineKind::CommentedKey) &&
+                            sameKey(l.section, newSection) && sameKey(l.key, newKey)) {
+                            target = i;
+                        }
+                    }
+                    if (target != std::string::npos) {
+                        replacements[target] =
+                            rewriteValue(nextDoc.lines[target].text, u.value,
+                                         nextDoc.lines[target].kind == LineKind::CommentedKey);
+                        rep.followed.push_back(dotted + " = " + u.value + "  ->  " +
+                                               dottedName(newSection, newKey));
+                        continue;
+                    }
+                }
+            }
+
             // This version has no such setting. Their value is kept, in its
             // section, with a note -- silently dropping a line somebody put
             // there is how a support thread starts.

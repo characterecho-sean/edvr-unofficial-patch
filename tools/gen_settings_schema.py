@@ -72,6 +72,10 @@ READ_RE = re.compile(
     r'get(Bool|Int|Float|String)([A-Za-z]*)\s*\(\s*"([^"]+)"\s*,\s*([^;]*?)\)', re.S)
 KEY_RE = re.compile(r'^([A-Za-z0-9_.-]+)\s*=\s*(.*)$')
 UI_RE = re.compile(r'^ui\s*:\s*(.*)$', re.I)
+# A heading in edvr.ini: a rule, the title, a rule. The heading a person
+# reads in the file is the heading the window shows, so there is no second
+# list of group names to keep in step with this one.
+RULE_RE = re.compile(r'^-{10,}$')
 
 
 def source_files(src):
@@ -134,6 +138,7 @@ class Setting(object):
         self.range_lo = None
         self.range_hi = None
         self.applies = None   # 'live' or 'restart'
+        self.group = ''
         self.percent = False
         self.hidden = False
         self.annotated = False
@@ -148,6 +153,8 @@ def parse_ini(path):
 
     settings = []
     section = ''
+    group = ''
+    expectTitle = None
     prose = []          # comment lines since the last key or blank run
     annotation = None
 
@@ -161,6 +168,7 @@ def parse_ini(path):
             close = line.find(']')
             if close > 0:
                 section = line[1:close]
+            group = ''
             prose = []
             annotation = None
             continue
@@ -171,6 +179,18 @@ def parse_ini(path):
         is_key = bool(m) and (not commented or ' ' not in m.group(1))
 
         if commented and not is_key:
+            # A heading is rule / title / rule. None means "not in one", True
+            # means "opening rule seen, the next comment is the title", False
+            # means "title taken, waiting for the closing rule". Toggling a
+            # single flag instead re-armed on the closing rule and ate the
+            # first line of the next setting's explanation as a heading.
+            if RULE_RE.match(body):
+                expectTitle = True if expectTitle is None else None
+                continue
+            if expectTitle:
+                group = body
+                expectTitle = False   # the closing rule is still to come
+                continue
             ui = UI_RE.match(body)
             if ui:
                 annotation = ui.group(1).strip()
@@ -192,6 +212,7 @@ def parse_ini(path):
             # and _height, the three head-offset axes -- with one comment block
             # above the first. The others are not undocumented; they share it.
             s.description = settings[-1].description
+        s.group = group
         s.line = index + 1
         if annotation is not None:
             s.annotated = True
@@ -462,7 +483,7 @@ def main():
         recommended = s.recommended if s.recommended is not None else shipped
         rows.append(
             '    {%s, %s, %s, %s, %s,\n     SettingKind::%s, %s, %s,\n'
-            '     %s, %s, %d, %s, %s, %s, %s},' % (
+            '     %s, %s, %d, %s, %s, %s, %s, %s},' % (
                 c_string(s.section), c_string(s.key), c_string(s.label),
                 c_string(summarise(s.description)), c_string(s.description),
                 {'toggle': 'Toggle', 'number': 'Number', 'text': 'Text',
@@ -472,7 +493,8 @@ def main():
                 c_string('|'.join(s.choices)),
                 'true' if s.live else 'false',
                 'true' if when_it_applies(s) == 'restart' else 'false',
-                'true' if s.percent else 'false'))
+                'true' if s.percent else 'false',
+                c_string(s.group)))
 
     os.makedirs(args.out, exist_ok=True)
     out_path = os.path.join(args.out, 'settings_schema.inc')

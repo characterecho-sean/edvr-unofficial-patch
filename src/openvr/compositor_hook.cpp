@@ -1666,13 +1666,13 @@ vr::EVRCompositorError hookedWaitGetPoses(void* self,
             // philosophies (fill the left vs stamp the right); flipping it
             // mid-session is exactly how it gets judged.
             {
-                int hm = Config::get().getInt("fix.fss_eye_heal", 0);
+                int hm = Config::get().getInt("experimental.fss_eye_heal", 1);
                 if (hm < 0 || hm > 2) hm = 0;
                 if (s->fssHealOn != hm) {
                     s->fssHealOn = hm;
                     Log::get().note("fss eye heal: mode %d.", hm);
                 }
-                float td = Config::get().getFloat("fix.fss_theater", 0.0f);
+                float td = Config::get().getFloat("experimental.fss_theater", 0.0f);
                 if (td < 0.0f || td > 10.0f) td = 0.0f;
                 if (td != s->theaterDist) {
                     s->theaterDist = td;
@@ -1681,7 +1681,7 @@ vr::EVRCompositorError hookedWaitGetPoses(void* self,
                                     td > 0.0f ? "" : " (off)");
                 }
                 float ts =
-                    Config::get().getFloat("fix.fss_theater_scale", 1.0f);
+                    Config::get().getFloat("experimental.fss_theater_scale", 1.0f);
                 if (ts < 0.2f || ts > 1.5f) ts = 1.0f;
                 if (ts != s->theaterScale) {
                     s->theaterScale = ts;
@@ -1689,7 +1689,7 @@ vr::EVRCompositorError hookedWaitGetPoses(void* self,
                                     static_cast<double>(ts));
                 }
                 float tc =
-                    Config::get().getFloat("fix.fss_theater_curve", 0.0f);
+                    Config::get().getFloat("experimental.fss_theater_curve", 0.0f);
                 if (tc < 0.0f || tc > 0.9f) tc = 0.0f;
                 if (tc != s->theaterCurve) {
                     s->theaterCurve = tc;
@@ -1697,7 +1697,7 @@ vr::EVRCompositorError hookedWaitGetPoses(void* self,
                                     static_cast<double>(tc));
                 }
                 float ta =
-                    Config::get().getFloat("fix.fss_theater_aspect", 1.78f);
+                    Config::get().getFloat("experimental.fss_theater_aspect", 1.78f);
                 if (ta != 0.0f && (ta < 1.0f || ta > 3.0f)) ta = 1.78f;
                 if (ta != s->theaterAspect) {
                     s->theaterAspect = ta;
@@ -1808,19 +1808,19 @@ void* interceptInterface(void* iface, const char* interfaceVersion) {
     }
 
     {
-        int hm = cfg.getInt("fix.fss_eye_heal", 0);
+        int hm = cfg.getInt("experimental.fss_eye_heal", 1);
         if (hm < 0 || hm > 2) hm = 0;
         s.fssHealOn = hm;
-        float td = cfg.getFloat("fix.fss_theater", 0.0f);
+        float td = cfg.getFloat("experimental.fss_theater", 0.0f);
         if (td < 0.0f || td > 10.0f) td = 0.0f;
         s.theaterDist = td;
-        float ts = cfg.getFloat("fix.fss_theater_scale", 1.0f);
+        float ts = cfg.getFloat("experimental.fss_theater_scale", 1.0f);
         if (ts < 0.2f || ts > 1.5f) ts = 1.0f;
         s.theaterScale = ts;
-        float tc = cfg.getFloat("fix.fss_theater_curve", 0.0f);
+        float tc = cfg.getFloat("experimental.fss_theater_curve", 0.0f);
         if (tc < 0.0f || tc > 0.9f) tc = 0.0f;
         s.theaterCurve = tc;
-        float ta = cfg.getFloat("fix.fss_theater_aspect", 1.78f);
+        float ta = cfg.getFloat("experimental.fss_theater_aspect", 1.78f);
         if (ta != 0.0f && (ta < 1.0f || ta > 3.0f)) ta = 1.78f;
         s.theaterAspect = ta;
         if (td > 0.0f) {

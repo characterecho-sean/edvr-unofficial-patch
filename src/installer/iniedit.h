@@ -72,6 +72,7 @@ IniDoc iniParse(const std::string& text);
 std::string dottedName(const std::string& section, const std::string& key);
 
 struct MergeReport {
+    std::vector<std::string> followed;  // a value that followed its setting to a new key
     std::vector<std::string> kept;     // your value, carried into the new file
     std::vector<std::string> adopted;  // a default that changed, and you had not touched it
     std::vector<std::string> retired;  // your value for a setting this version dropped
@@ -81,6 +82,18 @@ struct MergeReport {
     bool twoWay = false;               // no base copy: compared against the new defaults
 };
 
+// Settings move between sections as the project changes its mind about what is
+// a fix and what is an instrument, and the section is part of the key -- so a
+// move renames it. Without help, a user's tuned value is left behind under a
+// name nothing reads any more.
+//
+// The new file says where a setting used to live, on its own line above the
+// key, which is documentation for whoever is reading the ini as well as
+// instructions for this merge:
+//
+//     # moved-from: fix.exposure_damping
+//     #exposure_damping = 0
+//
 // `base` is the shipped default of the version currently installed, or nullptr.
 // `forced` is dotted key -> value, applied last and always winning.
 std::string mergeIni(const std::string& next, const std::string& user, const std::string* base,

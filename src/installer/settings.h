@@ -44,6 +44,9 @@ struct SettingDef {
     // thirty percent of a full circle; "0.3" in a list is a puzzle, and "0 to
     // 1" beside it reads as a switch.
     bool        percent;
+    // The heading this setting sits under, taken from edvr.ini's own headings
+    // so the file and the window group things the same way.
+    const char* group;
 };
 
 struct Choice {

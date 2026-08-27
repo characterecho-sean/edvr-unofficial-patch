@@ -150,6 +150,7 @@ std::string planReport(const Plan& plan) {
     out += bullets("\r\n  Settings kept from your edvr.ini:", plan.merge.kept);
     out += bullets("  New defaults adopted (you had not changed these):", plan.merge.adopted);
     out += bullets("  Set by the installer:", plan.merge.forced);
+    out += bullets("  Followed a setting that moved, and still applies:", plan.merge.followed);
     out += bullets("  Carried over, no longer used by this version:", plan.merge.retired);
     out += bullets("  Carried over, not an EDVR setting:", plan.merge.carried);
     out += bullets("  Lines you had removed, left commented out:", plan.merge.removed);
@@ -270,7 +271,12 @@ int runConsole(const AppArgs& args) {
     for (const std::string& line : result.done) writeOut("  " + line + "\r\n");
     if (!result.ok) {
         writeOut("\r\n" + result.error + "\r\n");
-        if (result.rolledBack) writeOut("Everything this run had changed was put back.\r\n");
+        if (result.rolledBack && !result.overwrote) {
+            writeOut("Everything this run had changed was put back.\r\n");
+        } else if (result.rolledBack) {
+            writeOut("What could be undone was undone; files already replaced are in "
+                     "edvr_backup.\r\n");
+        }
         return 1;
     }
     writeOut("\r\nDone.\r\n");
