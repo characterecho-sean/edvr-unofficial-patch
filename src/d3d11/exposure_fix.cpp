@@ -16,6 +16,7 @@
 #include "../common/vtable_hook.h"
 #include "binding_shadow.h"
 #include "device_hook.h"  // contextHookModeFor
+#include "../common/frame_flag.h"  // eyeTangents, for the infinity shift
 #include "draw_census.h"  // drawCensusDispatch: the census records compute
 #include "fss_dump.h"     // the reconstruction bracket, round 30
                           // writers through THIS module's Dispatch hook,
@@ -146,6 +147,12 @@ struct State {
     // when the healthy eye turns out to be the second one.
     uint64_t pairSyncHash = 0;
     bool     pairSyncReverse = false;
+    bool     pairSyncShift = false;   // :s -- shift the copy by the
+                                      // infinity disparity (eye-scale 2D
+                                      // slots only): the products are
+                                      // view-dependent, and at the FSS
+                                      // zoom the scene is the body at
+                                      // optical infinity
     uint8_t  pairSyncSeen = 0;            // occurrences this frame
     void*    pairSyncFirstRes[2] = {};    // occurrence 1's UAV0/UAV1
                                           // RESOURCES (the indirect path:
@@ -926,8 +933,12 @@ void STDMETHODCALLTYPE hookedDispatchIndirect(ID3D11DeviceContext* self,
     // sync armed and matched nothing). Occurrence 1's UAV resources are
     // remembered; occurrence 2 runs and is then overwritten from the
     // first, BOTH slots -- both eyes read one eye's products.
-    if (s->pairSyncHash &&
+    if (s->pairSyncHash && deviceHookFssModeLatch() &&
         hashOf(bindingGet(BindSlot::Cs)) == s->pairSyncHash) {
+        // Gated on the FSS mode latch: the reconstruction runs GAME-WIDE
+        // (the field saw the mirror ghosting the COCKPIT), and only the
+        // scanner's zoom -- the body at optical infinity, where a
+        // constant shift aligns the eyes -- is this experiment's ground.
         ++s->pairSyncSeen;
         if (s->pairSyncSeen == 1) {
             guardedBudget(g_budget, [&] {
@@ -950,6 +961,8 @@ void STDMETHODCALLTYPE hookedDispatchIndirect(ID3D11DeviceContext* self,
                    (s->pairSyncFirstRes[0] || s->pairSyncFirstRes[1])) {
             s->realDispatchIndirect(self, args, off);
             guardedBudget(g_budget, [&] {
+                float om = 0.0f, im = 0.0f;
+                const bool haveTan = eyeTangents(&om, &im);
                 ID3D11UnorderedAccessView* u[2] = {};
                 self->CSGetUnorderedAccessViews(0, 2, u);
                 for (int i = 0; i < 2; ++i) {
@@ -959,20 +972,71 @@ void STDMETHODCALLTYPE hookedDispatchIndirect(ID3D11DeviceContext* self,
                     ID3D11Resource* first = static_cast<ID3D11Resource*>(
                         s->pairSyncFirstRes[i]);
                     if (r && first && r != first) {
-                        if (s->pairSyncReverse) {
-                            self->CopyResource(first, r);
-                        } else {
-                            self->CopyResource(r, first);
+                        ID3D11Resource* dst =
+                            s->pairSyncReverse ? first : r;
+                        ID3D11Resource* src =
+                            s->pairSyncReverse ? r : first;
+                        bool done = false;
+                        if (s->pairSyncShift && haveTan) {
+                            // Shifted copy for eye-scale images only: at
+                            // optical infinity the eyes differ by dx =
+                            // W*(outer-inner)/(outer+inner) -- the heal's
+                            // formula, applied at the clean pre-UI layer.
+                            ID3D11Texture2D* dt = nullptr;
+                            dst->QueryInterface(
+                                __uuidof(ID3D11Texture2D),
+                                reinterpret_cast<void**>(&dt));
+                            if (dt) {
+                                D3D11_TEXTURE2D_DESC dd{};
+                                dt->GetDesc(&dd);
+                                dt->Release();
+                                if (dd.Width >= 2000) {
+                                    const uint32_t dx =
+                                        static_cast<uint32_t>(
+                                            dd.Width * (om - im) /
+                                                (om + im) +
+                                            0.5f);
+                                    // Left content sits dx RIGHT of the
+                                    // right eye's; occurrence 1 is left.
+                                    const bool dstIsLeft = dst == first;
+                                    D3D11_BOX box{};
+                                    box.front = 0;
+                                    box.back = 1;
+                                    box.top = 0;
+                                    box.bottom = dd.Height;
+                                    UINT dstX = 0;
+                                    if (dstIsLeft) {
+                                        box.left = 0;
+                                        box.right = dd.Width - dx;
+                                        dstX = dx;
+                                    } else {
+                                        box.left = dx;
+                                        box.right = dd.Width;
+                                        dstX = 0;
+                                    }
+                                    self->CopySubresourceRegion(
+                                        dst, 0, dstX, 0, 0, src, 0, &box);
+                                    done = true;
+                                } else {
+                                    // Not an eye-scale image: in shift
+                                    // mode, leave it alone entirely.
+                                    done = true;
+                                }
+                            }
+                        }
+                        if (!done) {
+                            self->CopyResource(dst, src);
                         }
                         ++s->pairSyncCopies;
                         if (!s->pairSyncNoted) {
                             s->pairSyncNoted = true;
                             Log::get().note(
                                 "dispatch pair sync: first copy made "
-                                "(INDIRECT path, UAV slot %d) -- the two "
-                                "occurrences' resources are distinct and "
-                                "one now mirrors the other, every frame.",
-                                i);
+                                "(INDIRECT path, UAV slot %d%s) -- FSS-"
+                                "gated, every scanner frame from here.",
+                                i,
+                                s->pairSyncShift ? ", infinity-shifted"
+                                                 : "");
                         }
                     }
                     if (r) r->Release();
@@ -1102,7 +1166,8 @@ void STDMETHODCALLTYPE hookedDispatch(ID3D11DeviceContext* self, UINT x, UINT y,
     // view pointer is held across the frame on the firstEye[] bargain: the
     // context keeps its own reference to anything bound, the boundary
     // clears it, and the resolve happens under the guard.
-    if (s->pairSyncHash && hashOf(bindingGet(BindSlot::Cs)) == s->pairSyncHash) {
+    if (s->pairSyncHash && deviceHookFssModeLatch() &&
+        hashOf(bindingGet(BindSlot::Cs)) == s->pairSyncHash) {
         ++s->pairSyncSeen;
         if (s->pairSyncSeen == 1) {
             s->pairSyncFirstUav = bindingGet(BindSlot::CsUav0);
@@ -1321,15 +1386,25 @@ void exposureConfigure(Config& cfg) {
                     _strtoui64(spec.c_str(), &end, 16);
                 bool ok = end != spec.c_str() && h != 0;
                 if (ok && *end == ':') {
-                    ok = (end[1] == 'r' || end[1] == 'R') && end[2] == '\0';
-                    if (ok) s->pairSyncReverse = true;
+                    // Flag characters after the colon: r reverses, s
+                    // shifts by the infinity disparity.
+                    s->pairSyncShift = false;
+                    for (const char* f = end + 1; ok && *f; ++f) {
+                        if (*f == 'r' || *f == 'R') {
+                            s->pairSyncReverse = true;
+                        } else if (*f == 's' || *f == 'S') {
+                            s->pairSyncShift = true;
+                        } else {
+                            ok = false;
+                        }
+                    }
                 } else if (ok && *end != '\0') {
                     ok = false;
                 }
                 if (!ok) {
                     Log::get().note(
                         "dispatch pair sync: \"%s\" is not one 16-digit hex "
-                        "hash with an optional :r; refused.",
+                        "hash with optional :r/:s flags; refused.",
                         spec.c_str());
                 } else {
                     s->pairSyncHash = h;
