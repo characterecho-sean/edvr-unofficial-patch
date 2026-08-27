@@ -683,7 +683,7 @@ What the long road measured, for whoever walks near it again:
 What ships from the arc: `fix.fss_res` (the body at full eye resolution,
 field-confirmed sharper), the transcription/compile machinery
 (shaderSwapCompilePs/Cs), the ring shader disassemblies
-(docs/fss-ring-ps.asm, docs/fss-ring-mesh-ps.asm, docs/fss-chrome-ps.asm),
+(docs/shaders/fss-ring-ps.asm, docs/shaders/fss-ring-mesh-ps.asm, docs/shaders/fss-chrome-ps.asm),
 the checkpointed eye-image dump with two-pass blink analysis, the frame
 pacing log, and a census that can no longer be lied to by omission.
 `fss_ring_feed` stays stock: its arms are probe-grade history, kept for

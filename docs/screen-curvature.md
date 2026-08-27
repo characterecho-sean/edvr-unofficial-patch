@@ -41,7 +41,7 @@ the game, overridable if an update moves it).
 Everything below was measured through the `d3d11.dll` proxy — a draw
 census, a one-shot capture of the composite's vertex and index buffers, a
 DXBC input-signature reader, and finally the composite's own vertex shader
-dumped and disassembled (`docs/composite-vs.asm`). No game file or game code
+dumped and disassembled (`docs/shaders/composite-vs.asm`). No game file or game code
 is modified.
 
 Every frame on foot and in HMD Cinema Mode, the game composites the

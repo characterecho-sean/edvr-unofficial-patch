@@ -1,7 +1,7 @@
 // The replacement vertex shader for Elite's particle billboards.
 //
 // Written against the disassembly of the game's own vs EB787F983BC1F5A3
-// (dumped 2026-08-23, kept at docs/particle-vs.asm), and written as a
+// (dumped 2026-08-23, kept at docs/shaders/particle-vs.asm), and written as a
 // MECHANICAL TRANSCRIPTION of it: register for register, instruction for
 // instruction, with the same eleven outputs feeding a pixel shader we do
 // not control. That style is deliberate. A semantic rewrite would have to

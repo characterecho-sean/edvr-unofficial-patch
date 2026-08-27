@@ -1,6 +1,6 @@
 // The FSS reveal, evaluated at one moment for both eyes.
 //
-// THE MECHANISM (docs/fss-composite-ps.asm, closed 2026-08-25 after ten
+// THE MECHANISM (docs/shaders/fss-composite-ps.asm, closed 2026-08-25 after ten
 // instrumented rounds): the body composite's pixel shader is an ordered
 // dissolve -- a reveal PROGRESS value in the 5,328-byte scene block at PS
 // b1 (cb1[119]) is compared against each cell's own luminance-plus-noise
