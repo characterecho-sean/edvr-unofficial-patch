@@ -54,7 +54,21 @@ void main(uint3 id : SV_DispatchThreadID) {
         uint rw, rh;
         R.GetDimensions(rw, rh);
         if (rx >= 0 && rx < int(rw)) {
-            o = R[uint2(uint(rx), id.y)];
+            float4 rp = R[uint2(uint(rx), id.y)];
+            // The neon wireframe lives in PLAYER space, not at the
+            // body's optical infinity -- its right-eye pixels are the
+            // wrong disparity for this shift, and stamping them paints
+            // offset twins of the blue lines (the field's report,
+            // twice). Blue dominance names them: scanner content is
+            // grey/tan/white (b ~ r); the wireframe is saturated
+            // cyan-blue (b >> r). A vetoed source keeps the left's
+            // black -- worst case a square stays unhealed where an arc
+            // crosses it, which is the stock look, not a new artifact.
+            // (Known cost: strongly blue-dominant body content -- a
+            // Neptune-blue gas giant -- can trip the veto and keep its
+            // squares; preferred over ever painting the wireframe.)
+            bool wire = rp.b > 0.10 && rp.b > 1.6 * rp.r;
+            if (!wire) o = rp;
         }
     }
     O[id.xy] = o;

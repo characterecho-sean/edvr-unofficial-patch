@@ -211,6 +211,7 @@ struct State {
     uint32_t healArrivalSeen = 0;
     LONG  healRectSeq = 0;
     bool  healRectValid = false;
+    bool  healNoted = false;
     float healRect[4] = {};   // left-eye AABB, scaled to the display quad
     PFN_EdvrFssHeal healFn = nullptr;
     bool healFnTried = false;
@@ -1040,12 +1041,26 @@ vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
                     }
                     const float cu = (u0 + u1) * 0.5f;
                     const float cv = (v0 + v1) * 0.5f;
-                    const float kSx = 0.92f;   // frame -> display, x
-                    const float kSy = 0.89f;   // frame -> display, y
+                    // frame -> display, measured from the quads
+                    // themselves: display half-extents 131.176 x 71.874
+                    // over frame 164.700 x 92.655. The 0.92/0.89 that
+                    // shipped first left a band of FRAME inside the heal
+                    // region -- the band the neon arcs cross -- and arc
+                    // exclusion was pose luck (regression flight
+                    // 2026-08-27 13:30).
+                    const float kSx = 131.176f / 164.700f;   // 0.7965
+                    const float kSy = 71.874f / 92.655f;     // 0.7757
                     s->healRect[0] = cu + (u0 - cu) * kSx;
                     s->healRect[1] = cv + (v0 - cv) * kSy;
                     s->healRect[2] = cu + (u1 - cu) * kSx;
                     s->healRect[3] = cv + (v1 - cv) * kSy;
+                    Log::get().note(
+                        "fss eye heal: screen rect adopted -- left-eye "
+                        "AABB (%.3f,%.3f)-(%.3f,%.3f), shrunk to the "
+                        "display quad's extent; the fill exists only "
+                        "inside it.",
+                        s->healRect[0], s->healRect[1], s->healRect[2],
+                        s->healRect[3]);
                 }
             }
         }
@@ -1085,6 +1100,14 @@ vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
                         : s->healFn(other, texture->handle, outer, inner, 2,
                                     s->healRectValid ? s->healRect : nullptr);
                 if (healed) {
+                    if (!s->healNoted) {
+                        s->healNoted = true;
+                        Log::get().note(
+                            "fss eye heal: engaged (mode %d) -- healed "
+                            "frames now submit, scoped to the adopted "
+                            "screen rect, wireframe-blue sources vetoed.",
+                            s->fssHealOn);
+                    }
                     vr::Texture_t sub = *texture;
                     sub.handle = healed;
                     return s->realSubmit(self, eye, &sub, bounds, flags);
