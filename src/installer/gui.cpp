@@ -184,6 +184,12 @@ void applyLayout() {
         ReleaseDC(g.window, dc);
         MoveWindow(g.tip, dp(kMargin) + prefix + dp(5), dp(621), dp(76), dp(20), TRUE);
     }
+
+    // Whether the report needs a scrollbar depends on how tall it is, and it
+    // only just got its height. Asked before this, the answer was taken from
+    // the 10x10 box every control is created at, so a one-line report came up
+    // with a full-height scrollbar beside it.
+    updateReportScrollbar();
     InvalidateRect(g.window, nullptr, TRUE);
 }
 
