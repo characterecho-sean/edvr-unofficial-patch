@@ -100,7 +100,13 @@ void fssPanelConfigure(Config& cfg) {
     const bool  was = g_enabled;
     const float wasFactor = g_factor;
 
-    float f = cfg.getFloat("experimental.fss_panel_distance", 0.0f);
+    // Stock by default. Inheriting panel_distance when the key is ABSENT
+    // was flown by accident (2026-08-27: the [fix]->[experimental] move
+    // left live inis' stock pins unread) and moved the whole scanner UI
+    // for anyone with a customised on-foot distance -- the off-centre-arc
+    // behaviour that kept this key pinned all campaign. Inherit is now
+    // opt-in: an explicit 0.
+    float f = cfg.getFloat("experimental.fss_panel_distance", 1.0f);
     if (f == 0.0f) {
         // Inherit the on-foot panel's distance: one setting, two screens.
         f = cfg.getFloat("fix.panel_distance", 1.0f);
