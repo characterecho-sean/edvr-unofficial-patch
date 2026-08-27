@@ -50,6 +50,10 @@ it and does the whole install:
   with and the range it accepts, instead of a text editor. Changes go straight
   into `edvr.ini` — the game re-reads that file about once a second, so most of
   them are live while you watch.
+- **Save logs**, which puts the last session's logs, the breadcrumb file, any
+  fatal note and your settings into one zip on your Desktop — everything
+  [Reporting a problem](#reporting-a-problem) asks for, from the right session,
+  in one file to attach.
 
 It shows you exactly what it is about to do and waits for a yes, and every file
 it replaces is copied into `edvr_backup\` first. It needs administrator rights
@@ -134,12 +138,17 @@ history, which separates "detected and let through" from "never detected".
 
 ### Reporting a problem
 
-**Open an issue**, and attach `edvr_logs\` — both files if there are two. The
-log carries the build stamp, which fixes it were able to install, and what
-each one decided, so a report with it attached is usually diagnosable in one
-pass. Without it there is very little to go on. If the game will not start at
-all, `edvr_breadcrumbs.txt` next to `EliteDangerous64.exe` is written
-unbuffered and survives a crash that eats the log — send that.
+**Run `edvr-installer.exe` and press Save logs.** It writes one zip to your
+Desktop with the last session's two logs, `edvr_breadcrumbs.txt`, any
+`edvr_FATAL.txt` and your `edvr.ini` — everything below, from the right
+session, in one file to attach. Then **open an issue** with it.
+
+By hand: attach `edvr_logs\` — both files if there are two. The log carries the
+build stamp, which fixes it were able to install, and what each one decided, so
+a report with it attached is usually diagnosable in one pass. Without it there
+is very little to go on. If the game will not start at all,
+`edvr_breadcrumbs.txt` next to `EliteDangerous64.exe` is written unbuffered and
+survives a crash that eats the log — send that.
 
 The [Discord](https://discord.gg/ynkdf6Gdua) is good for setup questions and
 for "is this normal". Bugs still want an issue: chat loses attachments and

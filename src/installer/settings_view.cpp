@@ -284,7 +284,7 @@ void paintRow(const List* list, HDC dc, const RECT& rowRect, const SettingRow& r
             text.left += dp(list, 8);
             text.right -= dp(list, 8);
             const std::wstring shown =
-                row.value.empty() ? std::wstring(L"(not set)") : fromUtf8(row.value);
+                row.value.empty() ? std::wstring(L"(not set)") : row.shown();
             ui::drawText(dc, shown, text, f.body,
                          row.value.empty() ? t.muted : t.text,
                          DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
@@ -308,14 +308,14 @@ void paintRow(const List* list, HDC dc, const RECT& rowRect, const SettingRow& r
                          DT_RIGHT | DT_SINGLELINE | DT_END_ELLIPSIS);
         } else {
             const std::wstring label =
-                L"use " + fromUtf8(row.def->recommended) + L"   \x00b7   " + helper;
+                L"use " + row.shownRecommended() + L"   \x00b7   " + helper;
             ui::drawText(dc, label, line, f.caption, t.accent,
                          DT_RIGHT | DT_SINGLELINE | DT_END_ELLIPSIS);
         }
     } else if (!row.isRecommended) {
         // A toggle away from its default still deserves the way back.
         RECT line = geo.recommended;
-        ui::drawText(dc, L"use " + fromUtf8(row.def->recommended), line, f.caption, t.accent,
+        ui::drawText(dc, L"use " + row.shownRecommended(), line, f.caption, t.accent,
                      DT_RIGHT | DT_SINGLELINE);
     }
 }
@@ -391,8 +391,12 @@ void commitEdit(List* list) {
     GetWindowTextW(list->edit, buffer, 512);
     const size_t row = list->editingRow;
     list->editingRow = SIZE_MAX;  // before applying: the write repaints
-    const std::string wanted = toUtf8(buffer);
-    if (list->model && wanted != list->model->rows()[row].value) applyValue(list, row, wanted);
+    if (!list->model) return;
+    std::string wanted;
+    // "30", "30%" and "0.3" all mean the same on a percentage setting, and
+    // anything that is not a number at all is dropped rather than written.
+    if (!list->model->rows()[row].parseTyped(buffer, &wanted)) return;
+    if (wanted != list->model->rows()[row].value) applyValue(list, row, wanted);
 }
 
 LRESULT CALLBACK editProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam, UINT_PTR,
@@ -436,7 +440,7 @@ void beginEdit(List* list, size_t rowIndex, const RECT& box) {
         SetWindowSubclass(list->edit, editProc, 1, reinterpret_cast<DWORD_PTR>(list));
     }
     SendMessageW(list->edit, WM_SETFONT, reinterpret_cast<WPARAM>(ui::fonts().body), TRUE);
-    const std::wstring value = fromUtf8(list->model->rows()[rowIndex].value);
+    const std::wstring value = list->model->rows()[rowIndex].shown();
     SetWindowTextW(list->edit, value.c_str());
     MoveWindow(list->edit, box.left + dp(list, 6), box.top + dp(list, 4),
                (box.right - box.left) - dp(list, 12), (box.bottom - box.top) - dp(list, 8), TRUE);

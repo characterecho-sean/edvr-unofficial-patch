@@ -17,7 +17,7 @@
 namespace edvr::installer {
 
 struct AppArgs {
-    enum class Act { None, Install, Repair, Uninstall };
+    enum class Act { None, Install, Repair, Uninstall, CollectLogs };
 
     Act          action = Act::None;
     std::wstring dir;                    // --dir, the game folder

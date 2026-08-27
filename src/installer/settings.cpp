@@ -51,11 +51,89 @@ std::vector<Choice> splitChoices(const char* packed) {
     return out;
 }
 
+namespace {
+
+// A number as somebody would write it: no trailing zeros, no ".0" on a whole
+// one, and never scientific notation for the small values these settings use.
+std::string tidyNumber(double value, int decimals) {
+    char buffer[64];
+    sprintf_s(buffer, "%.*f", decimals, value);
+    std::string text = buffer;
+    if (text.find('.') != std::string::npos) {
+        while (!text.empty() && text.back() == '0') text.pop_back();
+        if (!text.empty() && text.back() == '.') text.pop_back();
+    }
+    return text.empty() ? "0" : text;
+}
+
+bool asNumber(const std::string& text, double* out) {
+    if (text.empty()) return false;
+    char* end = nullptr;
+    const double value = strtod(text.c_str(), &end);
+    if (end == text.c_str()) return false;
+    while (end && *end == ' ') ++end;
+    if (end && *end != '\0' && *end != '%') return false;
+    *out = value;
+    return true;
+}
+
+// 0, 0.0 and 0.00 are one value, and a row that calls a file saying "0.70"
+// different from a recommendation of "0.7" is wrong about the only thing it
+// was asked to know.
+bool sameValue(const SettingDef& def, const std::string& a, const std::string& b) {
+    if (a == b) return true;
+    if (def.kind != SettingKind::Number) return false;
+    double left = 0, right = 0;
+    if (!asNumber(a, &left) || !asNumber(b, &right)) return false;
+    const double difference = left > right ? left - right : right - left;
+    return difference < 1e-9;
+}
+
+// The file's text, in the terms the window uses.
+std::wstring showValue(const SettingDef& def, const std::string& fileValue) {
+    if (!def.percent) return fromUtf8(fileValue);
+    double value = 0;
+    if (!asNumber(fileValue, &value)) return fromUtf8(fileValue);
+    return fromUtf8(tidyNumber(value * 100.0, 1)) + L"%";
+}
+
+}  // namespace
+
+std::wstring SettingRow::shown() const {
+    return def ? showValue(*def, value) : std::wstring();
+}
+
+std::wstring SettingRow::shownRecommended() const {
+    return def ? showValue(*def, def->recommended) : std::wstring();
+}
+
+bool SettingRow::parseTyped(const std::wstring& typed, std::string* fileValue) const {
+    if (!def) return false;
+    const std::string text = toUtf8(typed);
+    if (def->kind == SettingKind::Text) {
+        *fileValue = text;
+        return true;
+    }
+    double value = 0;
+    if (!asNumber(text, &value)) return false;
+    // "30", "30%" and "0.3" all mean the same thing on a percentage setting.
+    // The last of those is what the file already holds, so a value that is
+    // already a fraction is left alone rather than turned into 0.003.
+    if (def->percent) {
+        const bool typedAsFraction = text.find('%') == std::string::npos && value > 0.0 &&
+                                     value <= 1.0 && text.find('.') != std::string::npos;
+        if (!typedAsFraction) value /= 100.0;
+    }
+    *fileValue = tidyNumber(value, def->percent ? 4 : (def->precision > 0 ? 4 : 0));
+    return true;
+}
+
 std::wstring SettingRow::helper() const {
     if (!def || def->kind == SettingKind::Toggle) return std::wstring();
-    std::wstring text = L"default " + fromUtf8(*def->shipped ? def->shipped : "(empty)");
+    std::wstring text = L"default ";
+    text += *def->shipped ? showValue(*def, def->shipped) : std::wstring(L"(empty)");
     if (*def->lo && *def->hi) {
-        text += L"  \x00b7  " + fromUtf8(def->lo) + L" to " + fromUtf8(def->hi);
+        text += L"  \x00b7  " + showValue(*def, def->lo) + L" to " + showValue(*def, def->hi);
     }
     return text;
 }
@@ -87,8 +165,8 @@ void SettingsModel::refreshRows() {
         // it is what the game will use.
         const std::string dotted = std::string(def.section) + "." + def.key;
         row.value = iniValue(m_text, dotted, def.shipped);
-        row.isRecommended = row.value == def.recommended;
-        row.isShipped = row.value == def.shipped;
+        row.isRecommended = sameValue(def, row.value, def.recommended);
+        row.isShipped = sameValue(def, row.value, def.shipped);
         m_rows.push_back(row);
     }
 }

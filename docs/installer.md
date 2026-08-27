@@ -206,6 +206,31 @@ that was supposed to expose it is silent. `hidden` is a valid answer, with a
 reason; forgetting is not. Commented-out expert settings are exempt: annotate
 one and it appears, leave it and it stays where it is.
 
+## Save logs
+
+**Save logs** writes one zip to the Desktop: the most recent session's logs,
+`edvr_breadcrumbs.txt`, any `edvr_FATAL.txt`, `edvr.ini` and the install record.
+That is the list [Reporting a problem](../README.md#reporting-a-problem) asks
+for — four things in three folders, named in a paragraph somebody reads while
+annoyed — collected by the program that is already open and already knows which
+folder the game is in and where `log.dir` moved the logs to.
+
+*Most recent session* is meant literally. EDVR names its logs
+`edvr_<gfx|vr>_YYYYMMDD_HHMMSS.log` and writes two a few seconds apart at each
+launch, so the newest stamp and everything within three minutes of it is one
+session; older sessions are left out, because an attachment with six launches in
+it is harder to read, not more informative. The stamp is taken from the **name**
+rather than the write time, since copying a folder, restoring a backup or
+unpacking somebody else's zip rewrites write times — all things that happen to a
+folder on its way into a bug report.
+
+The zip is written by hand (stored, not deflated) rather than by linking a
+compression library or shelling out to PowerShell: logs are small, every tool
+opens a stored zip, and the installer stays one file with nothing behind it.
+It is the one action that stays available while the game is running, which is
+exactly when somebody wants it. `--collect-logs` does the same from the command
+line.
+
 ## Doing it safely
 
 - **Nothing happens without a yes.** The plan is worked out in full, shown, and
@@ -243,6 +268,7 @@ scriptable.
 edvr-installer.exe --install [--dir D] [--dry-run]
 edvr-installer.exe --repair [--dir D]
 edvr-installer.exe --uninstall [--dir D] [--remove-settings]
+edvr-installer.exe --collect-logs [--dir D]
 edvr-installer.exe --help
 ```
 

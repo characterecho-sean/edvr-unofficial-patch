@@ -134,6 +134,7 @@ class Setting(object):
         self.range_lo = None
         self.range_hi = None
         self.applies = None   # 'live' or 'restart'
+        self.percent = False
         self.hidden = False
         self.annotated = False
         self.line = 0
@@ -235,6 +236,13 @@ def apply_annotation(setting, text):
             if len(bounds) == 2:
                 setting.range_lo = bounds[0].strip()
                 setting.range_hi = bounds[1].strip()
+        elif lower == 'percent':
+            # The file holds a fraction because that is what the shader wants;
+            # the window shows a percentage because that is what the number
+            # means. panel_curvature = 0.3 is thirty percent of a full circle,
+            # and reading it as "0.3 of something" is a puzzle nobody should
+            # have to solve in a settings list.
+            setting.percent = True
         elif lower == 'restart':
             setting.applies = 'restart'
         elif lower == 'live':
@@ -294,6 +302,30 @@ def summarise(description):
     if len(text) <= 200:
         return text
     return text[:197].rsplit(' ', 1)[0] + '...'
+
+
+def looks_like_a_switch(lo, hi):
+    """Bounds a reader would take for two states: whole numbers, one apart."""
+    if not lo or not hi:
+        return False
+    try:
+        low, high = float(lo), float(hi)
+    except ValueError:
+        return False
+    return low == int(low) and high == int(high) and (high - low) <= 1.0
+
+
+def decimal(text):
+    """A bound written so it cannot be mistaken for a switch.
+
+    Bounds are read out of prose and out of accessor calls, where "0..1" is a
+    perfectly ordinary way to write the range of a fraction. In a window, next
+    to a box you type into, "0 to 1" reads as two states -- so a setting the
+    game treats as continuous shows continuous bounds.
+    """
+    if not text:
+        return text
+    return text if '.' in text else text + '.0'
 
 
 def c_string(text):
@@ -357,6 +389,30 @@ def main():
     exposed = [s for s in settings
                if s.annotated and not s.hidden and s.section in EXPOSED_SECTIONS]
 
+    # A whole-number setting bounded 0 to 1 has two states, and a text box is
+    # the wrong way to offer two states. Either it should be read with getBool
+    # -- which makes it a switch here automatically -- or its values mean
+    # something a switch cannot say, and it wants `choices 1=..., 0=...`.
+    disguised = []
+    for s in exposed:
+        dotted = '%s.%s' % (s.section, s.key)
+        if dotted not in code or s.choices:
+            continue
+        kind, _default, lo, hi, precision = code[dotted]
+        if kind == 'number' and precision == 0 and (lo, hi) == ('0', '1'):
+            disguised.append(s)
+    if disguised:
+        print('gen_settings_schema: ERROR: %d setting(s) are a switch wearing a text box.'
+              % len(disguised))
+        print()
+        print('A whole number bounded 0 to 1 has two states. Read it with getBool so the')
+        print('window shows a switch, or say what the numbers mean with')
+        print('`choices 1=on, 0=off` on the ui: line.')
+        print()
+        for s in disguised:
+            print('  edvr.ini:%d  %s.%s' % (s.line, s.section, s.key))
+        return 1
+
     silent = [s for s in exposed if when_it_applies(s) is None]
     if silent:
         print('gen_settings_schema: ERROR: %d setting(s) do not say when they take effect.'
@@ -387,6 +443,17 @@ def main():
         # A range the code declares wins: it is the one that is enforced.
         if lo is None and s.range_lo is not None:
             lo, hi = s.range_lo, s.range_hi
+
+        # "0 to 1" beside a text box reads as on and off, and the settings
+        # bounded that way are continuous -- 0.3 is the value that matters on a
+        # curve. Their bounds say so.
+        #
+        # Only for that case, though: a line angle bounded 0 to 60 is not going
+        # to be mistaken for a switch, and "0.0 to 60.0" would be decimals
+        # nobody needs on a whole number of degrees.
+        if precision > 0 and looks_like_a_switch(lo, hi):
+            lo = decimal(lo)
+            hi = decimal(hi)
         if s.choices:
             kind = 'choice'
         # The ini's own value is the shipped default, and it is the one the
@@ -395,7 +462,7 @@ def main():
         recommended = s.recommended if s.recommended is not None else shipped
         rows.append(
             '    {%s, %s, %s, %s, %s,\n     SettingKind::%s, %s, %s,\n'
-            '     %s, %s, %d, %s, %s, %s},' % (
+            '     %s, %s, %d, %s, %s, %s, %s},' % (
                 c_string(s.section), c_string(s.key), c_string(s.label),
                 c_string(summarise(s.description)), c_string(s.description),
                 {'toggle': 'Toggle', 'number': 'Number', 'text': 'Text',
@@ -404,7 +471,8 @@ def main():
                 c_string(lo or ''), c_string(hi or ''), precision,
                 c_string('|'.join(s.choices)),
                 'true' if s.live else 'false',
-                'true' if when_it_applies(s) == 'restart' else 'false'))
+                'true' if when_it_applies(s) == 'restart' else 'false',
+                'true' if s.percent else 'false'))
 
     os.makedirs(args.out, exist_ok=True)
     out_path = os.path.join(args.out, 'settings_schema.inc')

@@ -298,7 +298,7 @@ if errorlevel 1 ( echo [edvr] ERROR: rc.exe failed on the installer resources & 
 
 set INSTALLER_SRC="%ROOT%\src\installer\main.cpp" "%ROOT%\src\installer\gui.cpp" ^
     "%ROOT%\src\installer\ui.cpp" "%ROOT%\src\installer\settings.cpp" ^
-    "%ROOT%\src\installer\settings_view.cpp" ^
+    "%ROOT%\src\installer\settings_view.cpp" "%ROOT%\src\installer\logbundle.cpp" ^
     "%ROOT%\src\installer\app.cpp" "%ROOT%\src\installer\plan.cpp" ^
     "%ROOT%\src\installer\apply.cpp" "%ROOT%\src\installer\detect.cpp" ^
     "%ROOT%\src\installer\probe.cpp" "%ROOT%\src\installer\iniedit.cpp" ^
@@ -339,7 +339,7 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /GR- /DWIN32_LEAN_AND_MEAN /DNOMINMA
     "%ROOT%\src\installer\plan.cpp" "%ROOT%\src\installer\apply.cpp" ^
     "%ROOT%\src\installer\detect.cpp" "%ROOT%\src\installer\probe.cpp" ^
     "%ROOT%\src\installer\iniedit.cpp" "%ROOT%\src\installer\state.cpp" ^
-    "%ROOT%\src\installer\settings.cpp" ^
+    "%ROOT%\src\installer\settings.cpp" "%ROOT%\src\installer\logbundle.cpp" ^
     /link /INCREMENTAL:NO %INSTALLER_LIBS%
 if errorlevel 1 ( echo [edvr] ERROR: installer_test build failed & exit /b 1 )
 "%BUILD%\installer_test.exe" "%ROOT%" "%BUILD%\insttest_scratch" || (

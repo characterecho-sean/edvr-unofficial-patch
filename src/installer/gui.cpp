@@ -22,6 +22,7 @@
 
 #include "app.h"
 #include "apply.h"
+#include "logbundle.h"
 #include "payload.h"
 #include "settings.h"
 #include "settings_view.h"
@@ -41,6 +42,7 @@ enum : int {
     kIdRepair = 1021,
     kIdUninstall = 1022,
     kIdClose = 1023,
+    kIdCollectLogs = 1024,
     kIdReport = 1030,
     kIdKofi = 1040,
     kIdDiscord = 1041,
@@ -88,6 +90,7 @@ struct Gui {
     HWND install = nullptr;
     HWND repair = nullptr;
     HWND uninstall = nullptr;
+    HWND collectLogs = nullptr;
     HWND tabInstall = nullptr;
     HWND tabSettings = nullptr;
     HWND tip = nullptr;
@@ -423,6 +426,7 @@ void showSurvey() {
         EnableWindow(g.install, FALSE);
         EnableWindow(g.repair, FALSE);
         EnableWindow(g.uninstall, FALSE);
+        EnableWindow(g.collectLogs, FALSE);
         InvalidateRect(g.window, nullptr, TRUE);
         return;
     }
@@ -431,6 +435,10 @@ void showSurvey() {
     EnableWindow(g.install, !running);
     EnableWindow(g.repair, !running);
     EnableWindow(g.uninstall, !running);
+    // Collecting logs reads files and writes a zip somewhere else entirely, so
+    // it is the one action that stays available while the game is running --
+    // which is exactly when somebody wants it.
+    EnableWindow(g.collectLogs, TRUE);
 
     const bool installed = g.survey.d3d11.kind == DllKind::Edvr ||
                            g.survey.openvrCurrent.kind == DllKind::Edvr || g.survey.state.present;
@@ -637,6 +645,37 @@ void runAction(AppArgs::Act action) {
     showSurvey();
 }
 
+// One zip on the Desktop with the logs, the breadcrumbs, any fatal note, the
+// settings file and the install record -- the four things the README asks a
+// reporter to attach, from three different folders, chosen from the right
+// session.
+void saveLogs() {
+    if (!g.haveSurvey) return;
+    const LogBundle bundle = collectLogs(g.survey.game.dir, desktopFolder());
+
+    std::string text;
+    if (bundle.ok) {
+        text = "Saved " + toUtf8(bundle.zipPath) + "\r\n\r\nIt contains:\r\n";
+        for (const std::wstring& name : bundle.included) text += "  " + toUtf8(name) + "\r\n";
+        if (!bundle.notes.empty()) {
+            text += "\r\n";
+            for (const std::string& note : bundle.notes) text += "  " + note + "\r\n";
+        }
+        text += "\r\nAttach it to a GitHub issue, or drop it on Discord. It holds EDVR's own "
+                "logs and settings and nothing else.\r\n";
+    } else {
+        text = bundle.error + "\r\n";
+        for (const std::string& note : bundle.notes) text += "  " + note + "\r\n";
+    }
+    setReport(text);
+
+    MessageBoxW(g.window,
+                bundle.ok ? (L"Saved to your Desktop:\n\n" + leafOf(bundle.zipPath) +
+                             L"\n\nAttach it to a GitHub issue or drop it on Discord.")
+                                .c_str()
+                          : fromUtf8(bundle.error).c_str(),
+                L"EDVR installer", MB_OK | (bundle.ok ? MB_ICONINFORMATION : MB_ICONWARNING));
+}
 void showScreen(Screen screen) {
     g.screen = screen;
     ui::setButtonStyle(g.tabInstall,
@@ -679,9 +718,12 @@ void createControls(HWND window) {
     g.uninstall = ui::makeButton(window, L"Uninstall", kIdUninstall, ui::ButtonStyle::Secondary,
                                  f.body);
     HWND close = ui::makeButton(window, L"Close", kIdClose, ui::ButtonStyle::Secondary, f.body);
+    g.collectLogs = ui::makeButton(window, L"Save logs", kIdCollectLogs,
+                                   ui::ButtonStyle::Secondary, f.body);
     place(g.install, kMargin + kCardPad, 366, 124, 34, Screen::Install);
     place(g.repair, 172, 366, 104, 34, Screen::Install);
     place(g.uninstall, 284, 366, 104, 34, Screen::Install);
+    place(g.collectLogs, 396, 366, 116, 34, Screen::Install);
     place(close, 572, 366, 104, 34, Screen::Install, true);
 
     g.search = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | ES_AUTOHSCROLL, 0, 0,
@@ -792,6 +834,7 @@ LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
                 case kIdRepair: runAction(AppArgs::Act::Repair); return 0;
                 case kIdUninstall: runAction(AppArgs::Act::Uninstall); return 0;
                 case kIdClose: PostMessageW(window, WM_CLOSE, 0, 0); return 0;
+                case kIdCollectLogs: saveLogs(); return 0;
                 case kIdTabInstall: showScreen(Screen::Install); return 0;
                 case kIdTabSettings: showScreen(Screen::Settings); return 0;
                 case kIdKofi:

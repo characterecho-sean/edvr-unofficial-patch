@@ -40,6 +40,10 @@ struct SettingDef {
     // sees nothing happen cannot otherwise tell a fix that needs a restart from
     // one that is not working.
     bool        needsRestart;
+    // Shown as a percentage, stored as a fraction. panel_curvature = 0.3 is
+    // thirty percent of a full circle; "0.3" in a list is a puzzle, and "0 to
+    // 1" beside it reads as a switch.
+    bool        percent;
 };
 
 struct Choice {
@@ -58,6 +62,17 @@ struct SettingRow {
     // on and off need no explaining, and a row of them repeating "default on"
     // is noise.
     std::wstring helper() const;
+
+    // The current value as the window shows it, and the recommended one in the
+    // same terms -- percentages where the setting is one, the file's own text
+    // everywhere else.
+    std::wstring shown() const;
+    std::wstring shownRecommended() const;
+
+    // Turn what somebody typed into what belongs in the file: "30", "30%" and
+    // "0.3" all mean 0.3 on a percentage setting. Returns false if it is not a
+    // number at all, and the edit is then dropped rather than written.
+    bool parseTyped(const std::wstring& typed, std::string* fileValue) const;
 };
 
 // Every setting, in the order the ini defines them, grouped by section.

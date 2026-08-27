@@ -25,6 +25,7 @@
 
 #include "../../src/installer/apply.h"
 #include "../../src/installer/plan.h"
+#include "../../src/installer/logbundle.h"
 #include "../../src/installer/settings.h"
 
 using namespace edvr::installer;
@@ -330,17 +331,19 @@ static void testShippedIni(const std::wstring& root) {
     expectEq(mergeIni(shipped, shipped, &shipped, {}, &report), shipped,
              "the real edvr.ini merges with itself unchanged");
 
-    // A user file made from the real one, with the settings a real report
-    // would name.
+    // A user file made from the real one, tuned the way somebody in a headset
+    // tunes it: the on-foot screen pulled closer, which is the pairing the
+    // README documents with a 0.3 curve.
     std::string user = shipped;
-    const size_t damp = user.find("exposure_damping = 0");
-    if (damp != std::string::npos)
-        user.replace(damp, strlen("exposure_damping = 0"), "exposure_damping = 0.7");
+    const size_t distance = user.find("panel_distance = 1.0");
+    check(distance != std::string::npos, "the shipped ini still has the setting this tunes");
+    if (distance != std::string::npos)
+        user.replace(distance, strlen("panel_distance = 1.0"), "panel_distance = 0.7");
 
     MergeReport real;
     const std::string merged =
         mergeIni(shipped, user, &shipped, {{"advanced.real_dll", "d3d11_edhm.dll"}}, &real);
-    expectEq(iniValue(merged, "fix.exposure_damping"), "0.7",
+    expectEq(iniValue(merged, "fix.panel_distance"), "0.7",
              "a real tuned value survives a real merge");
     expectEq(iniValue(merged, "advanced.real_dll"), "d3d11_edhm.dll",
              "chaining is written into the real file");
@@ -855,6 +858,109 @@ static void testSettings(const std::wstring& root, const std::wstring& scratch) 
     check(unreadable == 0, "every exposed setting has a value to show");
 }
 
+// ---------------------------------------------------------------------------
+// the log bundle
+// ---------------------------------------------------------------------------
+
+// The entry names in a zip, read back out of its central directory. Enough of
+// a reader to prove the writer produced something a reader can open.
+static std::vector<std::string> zipEntryNames(const std::wstring& path) {
+    std::vector<std::string> names;
+    const std::string data = readAll(path);
+    if (data.size() < 22) return names;
+
+    // "PK" then two bytes: 05 06 ends the central directory, 01 02 heads an
+    // entry in it. Compared byte by byte rather than against a string literal,
+    // because those two bytes are not printable characters.
+    auto signature = [&](size_t at, unsigned char third, unsigned char fourth) {
+        return at + 4 <= data.size() && data[at] == 0x50 && data[at + 1] == 0x4B &&
+               static_cast<unsigned char>(data[at + 2]) == third &&
+               static_cast<unsigned char>(data[at + 3]) == fourth;
+    };
+
+    size_t eocd = std::string::npos;
+    for (size_t i = data.size() - 22; i + 1 > 0; --i) {
+        if (signature(i, 5, 6)) {
+            eocd = i;
+            break;
+        }
+        if (i == 0) break;
+    }
+    if (eocd == std::string::npos) return names;
+
+    auto read16 = [&](size_t at) {
+        return static_cast<unsigned>(static_cast<unsigned char>(data[at])) |
+               (static_cast<unsigned>(static_cast<unsigned char>(data[at + 1])) << 8);
+    };
+    auto read32 = [&](size_t at) {
+        return static_cast<unsigned long>(read16(at)) |
+               (static_cast<unsigned long>(read16(at + 2)) << 16);
+    };
+
+    const unsigned count = read16(eocd + 10);
+    size_t at = static_cast<size_t>(read32(eocd + 16));
+    for (unsigned i = 0; i < count && at + 46 <= data.size(); ++i) {
+        if (!signature(at, 1, 2)) break;
+        const unsigned nameLength = read16(at + 28);
+        const unsigned extra = read16(at + 30);
+        const unsigned comment = read16(at + 32);
+        names.push_back(data.substr(at + 46, nameLength));
+        at += 46 + nameLength + extra + comment;
+    }
+    return names;
+}
+
+static bool bundleHas(const std::vector<std::string>& names, const char* wanted) {
+    for (const std::string& name : names) {
+        if (name == wanted) return true;
+    }
+    return false;
+}
+
+static void testLogBundle(const std::wstring& scratch) {
+    printf("\nthe log bundle\n");
+
+    const std::wstring dir = joinPath(scratch, L"logs");
+    removeTree(dir);
+    makeTree(joinPath(dir, L"edvr_logs"));
+    writeAll(joinPath(dir, L"EliteDangerous64.exe"), "not really the game");
+    writeAll(joinPath(dir, L"edvr.ini"), "[fix]\r\nshare_exposure = 1\r\n");
+    writeAll(joinPath(dir, L"edvr_breadcrumbs.txt"), "d3d11 attached");
+    writeAll(joinPath(dir, L"edvr_FATAL.txt"), "could not load the real openvr");
+
+    // Two sessions: an old pair and a new pair. Only the new pair belongs in
+    // the zip -- an attachment with six launches in it is harder to read, not
+    // more informative.
+    const std::wstring logs = joinPath(dir, L"edvr_logs");
+    writeAll(joinPath(logs, L"edvr_gfx_20260101_100000.log"), "an old session");
+    writeAll(joinPath(logs, L"edvr_vr_20260101_100003.log"), "an old session");
+    Sleep(1100);  // the newest-file test is by write time, so they must differ
+    writeAll(joinPath(logs, L"edvr_gfx_20260827_140000.log"), "the session that matters");
+    writeAll(joinPath(logs, L"edvr_vr_20260827_140003.log"), "the session that matters");
+
+    const LogBundle bundle = collectLogs(dir, scratch);
+    check(bundle.ok, "the bundle is written", bundle.error);
+    if (!bundle.ok) return;
+    check(fileExists(bundle.zipPath), "the zip is on disk");
+
+    const std::vector<std::string> names = zipEntryNames(bundle.zipPath);
+    check(!names.empty(), "the zip has a readable central directory");
+    check(bundleHas(names, "edvr_gfx_20260827_140000.log"), "the newest session's gfx log is in");
+    check(bundleHas(names, "edvr_vr_20260827_140003.log"), "and its vr log");
+    check(!bundleHas(names, "edvr_gfx_20260101_100000.log"),
+          "the previous session is left out");
+    check(bundleHas(names, "edvr_breadcrumbs.txt"), "the breadcrumbs are in");
+    check(bundleHas(names, "edvr_FATAL.txt"), "the fatal note is in");
+    check(bundleHas(names, "edvr.ini"), "the settings file is in");
+
+    // A folder with nothing to collect says so rather than writing an empty zip.
+    const std::wstring bare = joinPath(scratch, L"barelogs");
+    removeTree(bare);
+    makeTree(bare);
+    const LogBundle nothing = collectLogs(bare, scratch);
+    check(!nothing.ok, "a folder with no logs and no settings collects nothing");
+}
+
 static void testState() {
     printf("\nthe install record\n");
     InstallState state;
@@ -895,6 +1001,7 @@ int wmain(int argc, wchar_t** argv) {
     testApply(scratch);
     testProbe(scratch);
     testSettings(root, scratch);
+    testLogBundle(scratch);
     testState();
 
     printf("\n%s\n", g_fails == 0 ? "installer_test: all good" : "installer_test: FAILURES");

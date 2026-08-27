@@ -232,8 +232,8 @@ struct State {
     // written over the game's state for both eyes. The game's own
     // adaptation loop then runs FROM the damped value -- swing compressed
     // by k, genuine scene changes still drifting the mean over seconds.
-    float          dampK = 0;             // fix.exposure_damping, 0..1
-    float          dampTau = 45.0f;       // fix.exposure_damping_tau, secs
+    float          dampK = 0;             // experimental.exposure_damping, 0..1
+    float          dampTau = 45.0f;       // experimental.exposure_damping_tau, secs
     ID3D11Texture2D* dampStaging[2] = {}; // owned; strip ping-pong pair
     int            dampCur = 0;
     bool           dampPrevValid = false;
@@ -1341,11 +1341,11 @@ void exposureConfigure(Config& cfg) {
     }
 
     const float wasK = s->dampK;
-    float k = cfg.getFloat("fix.exposure_damping", 0.0f);
+    float k = cfg.getFloat("experimental.exposure_damping", 0.0f);
     if (k < 0.0f) k = 0.0f;
     if (k > 1.0f) k = 1.0f;
     s->dampK = k;
-    float tau = cfg.getFloat("fix.exposure_damping_tau", 45.0f);
+    float tau = cfg.getFloat("experimental.exposure_damping_tau", 45.0f);
     if (tau < 1.0f) tau = 1.0f;
     if (tau > 600.0f) tau = 600.0f;
     s->dampTau = tau;

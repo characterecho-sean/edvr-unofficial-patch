@@ -5,6 +5,7 @@
 #include <cstdio>
 
 #include "apply.h"
+#include "logbundle.h"
 #include "payload.h"
 
 namespace edvr::installer {
@@ -40,6 +41,7 @@ std::string usageText() {
            "  edvr-installer.exe --install [--dir D]    install or update\r\n"
            "  edvr-installer.exe --repair  [--dir D]    put a clobbered install back together\r\n"
            "  edvr-installer.exe --uninstall [--dir D]  remove EDVR, restoring what it replaced\r\n"
+           "  edvr-installer.exe --collect-logs         zip the latest logs onto the Desktop\r\n"
            "\r\n"
            "  --dir <path>         the folder holding EliteDangerous64.exe. Without it, the\r\n"
            "                       installer finds your installs itself and uses the only one.\r\n"
@@ -68,6 +70,8 @@ AppArgs parseArgs(int argc, wchar_t** argv) {
             a.action = AppArgs::Act::Repair;
         else if (arg == L"--uninstall")
             a.action = AppArgs::Act::Uninstall;
+        else if (arg == L"--collect-logs")
+            a.action = AppArgs::Act::CollectLogs;
         else if (arg == L"--dir")
             next(&a.dir);
         else if (arg.rfind(L"--dir=", 0) == 0)
@@ -177,6 +181,9 @@ bool relaunchElevated(const AppArgs& args) {
         case AppArgs::Act::Install: cmd += L"--install "; break;
         case AppArgs::Act::Repair: cmd += L"--repair "; break;
         case AppArgs::Act::Uninstall: cmd += L"--uninstall "; break;
+        // Collecting logs never needs elevation: it reads, and writes to the
+        // Desktop.
+        case AppArgs::Act::CollectLogs:
         case AppArgs::Act::None: break;
     }
     if (!args.dir.empty()) cmd += L"--dir \"" + args.dir + L"\" ";
@@ -232,6 +239,18 @@ int runConsole(const AppArgs& args) {
     writeOut(statusReport(survey, payload) + "\r\n");
 
     if (args.action == AppArgs::Act::None) return 0;
+
+    if (args.action == AppArgs::Act::CollectLogs) {
+        const LogBundle bundle = collectLogs(survey.game.dir, desktopFolder());
+        for (const std::string& note : bundle.notes) writeOut("  " + note + "\r\n");
+        if (!bundle.ok) {
+            writeOut(bundle.error + "\r\n");
+            return 1;
+        }
+        writeOut("\r\nSaved " + toUtf8(bundle.zipPath) + "\r\n");
+        for (const std::wstring& name : bundle.included) writeOut("  " + toUtf8(name) + "\r\n");
+        return 0;
+    }
 
     const Options options = optionsFor(args, args.action == AppArgs::Act::Repair);
     const Plan plan = args.action == AppArgs::Act::Uninstall ? planUninstall(survey, options)
