@@ -29,6 +29,79 @@ constexpr uint32_t kSceneBlockMin = 333 * 16;
 constexpr uint32_t kSceneBlockMax = 8192;
 
 bool g_steady = false;
+bool g_redraw = false;
+
+// ---- The redraw capture: everything occurrence 1's draw needs to be
+// re-issued after occurrence 2, taken at occurrence 1 so the per-eye
+// values (target, viewport, transforms, geometry) are ITS OWN while the
+// shared textures and scene block are read live -- late -- at re-issue.
+ID3D11RenderTargetView* g_capRtv = nullptr;
+ID3D11DepthStencilView* g_capDsv = nullptr;
+D3D11_VIEWPORT g_capVp[4] = {};
+UINT           g_capVpCount = 0;
+UINT g_capStride[2] = {}, g_capOffset[2] = {};
+bool g_capVbUsed[2] = {};
+bool g_capCbUsed[4] = {};
+bool g_capValid = false;
+uint32_t g_capStartVertex = 0, g_capStartInstance = 0;
+uint32_t g_capCount = 0, g_capInstances = 0;
+
+// Own DEFAULT-usage copies of the geometry and VS-constant buffers --
+// CopyResource at occurrence 1 freezes their bytes at that draw's
+// moment, which is the whole point: those buffers are REUSED and their
+// contents step to the second eye's values before the re-issue.
+ID3D11Buffer* g_vbCopy[2] = {};
+UINT          g_vbCopySize[2] = {};
+ID3D11Buffer* g_cbCopy[4] = {};
+UINT          g_cbCopySize[4] = {};
+
+// The thunk's stash: the composite's true draw arguments and the real
+// DrawInstanced, refreshed at every matched draw.
+uint32_t g_argStartVertex = 0, g_argStartInstance = 0;
+FssRevealRealDraw g_realDraw = nullptr;
+
+uint64_t g_redrawn = 0;
+bool     g_redrawNoted = false;
+bool     g_copyFailNoted = false;
+
+void releaseCapture() {
+    if (g_capRtv) { g_capRtv->Release(); g_capRtv = nullptr; }
+    if (g_capDsv) { g_capDsv->Release(); g_capDsv = nullptr; }
+    g_capValid = false;
+}
+
+// Size-matched DEFAULT copy of a game buffer, CopyResource'd NOW.
+bool copyBufferNow(ID3D11DeviceContext* ctx, ID3D11Buffer* src,
+                   ID3D11Buffer** copy, UINT* copySize, UINT bindFlag) {
+    D3D11_BUFFER_DESC d{};
+    src->GetDesc(&d);
+    if (!*copy || *copySize != d.ByteWidth) {
+        if (*copy) { (*copy)->Release(); *copy = nullptr; }
+        *copySize = 0;
+        ID3D11Device* dev = nullptr;
+        ctx->GetDevice(&dev);
+        if (!dev) return false;
+        D3D11_BUFFER_DESC cd{};
+        cd.ByteWidth = d.ByteWidth;
+        cd.Usage = D3D11_USAGE_DEFAULT;
+        cd.BindFlags = bindFlag;
+        dev->CreateBuffer(&cd, nullptr, copy);
+        dev->Release();
+        if (!*copy) {
+            if (!g_copyFailNoted) {
+                g_copyFailNoted = true;
+                Log::get().note(
+                    "fss reveal: a %u-byte buffer copy could not be "
+                    "created; the redraw stands down. Said once.",
+                    d.ByteWidth);
+            }
+            return false;
+        }
+        *copySize = d.ByteWidth;
+    }
+    ctx->CopyResource(*copy, src);
+    return true;
+}
 
 // The PS b1 buffer object, learned at the first matched draw, and the
 // live shadow of its contents fed by the Map/Unmap and UpdateSubresource
@@ -67,20 +140,33 @@ FaultBudget g_budget("fssReveal", 8);
 }  // namespace
 
 void fssRevealConfigure(Config& cfg) {
-    const bool was = g_steady;
+    const bool wasSteady = g_steady;
+    const bool wasRedraw = g_redraw;
     const std::string m = cfg.getString("fix.fss_reveal_sync", "stock");
     if (m == "stock") {
         g_steady = false;
+        g_redraw = false;
     } else if (m == "steady") {
         g_steady = true;
+        g_redraw = false;
+    } else if (m == "redraw") {
+        g_steady = false;
+        g_redraw = true;
     } else {
         g_steady = false;
-        Log::get().note("fss_reveal_sync \"%s\" is not stock or steady; "
-                        "running stock.", m.c_str());
+        g_redraw = false;
+        Log::get().note("fss_reveal_sync \"%s\" is not stock, steady or "
+                        "redraw; running stock.", m.c_str());
     }
-    if (was != g_steady) {
+    if (wasSteady != g_steady || wasRedraw != g_redraw) {
         Log::get().note(
-            g_steady
+            g_redraw
+                ? "fss reveal: redraw. The first eye's composite is "
+                  "re-issued after the second eye's -- its own transforms "
+                  "and geometry, the CURRENT textures and scene block -- "
+                  "so both eyes paste the same content state and the "
+                  "producer can no longer step between them."
+            : g_steady
                 ? "fss reveal: steady. Both eyes' composites are drawn with "
                   "ONE snapshot of the scene constants, so the dissolve is "
                   "evaluated at the same moment for both -- the per-eye "
@@ -92,10 +178,18 @@ void fssRevealConfigure(Config& cfg) {
         g_sceneCb = nullptr;
         g_shadowValid = false;
         g_snapshotValid = false;
+        releaseCapture();
     }
 }
 
-bool fssRevealWantsDraws() { return g_steady; }
+bool fssRevealWantsDraws() { return g_steady || g_redraw; }
+
+void fssRevealDrawArgs(uint32_t startVertex, uint32_t startInstance,
+                       FssRevealRealDraw realDraw) {
+    g_argStartVertex = startVertex;
+    g_argStartInstance = startInstance;
+    g_realDraw = realDraw;
+}
 
 void fssRevealNoteMap(void* resource, void* data) {
     if (!g_steady || resource != g_sceneCb) return;
@@ -123,7 +217,8 @@ void fssRevealNoteUpdate(void* resource, const void* data) {
 
 bool fssRevealOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
                         uint32_t instances) {
-    if (!g_steady || kind != 'N' || count != 6 || instances != 1 || !ctx) {
+    if ((!g_steady && !g_redraw) || kind != 'N' || count != 6 ||
+        instances != 1 || !ctx) {
         return false;
     }
     uint64_t h = 0;
@@ -138,9 +233,55 @@ bool fssRevealOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
 
 void fssRevealBegin(ID3D11DeviceContext* ctx) {
     g_engaged = false;
-    if (!ctx || !g_steady) return;
+    if (!ctx || (!g_steady && !g_redraw)) return;
     guardedBudget(g_budget, [&] {
         ++g_occurrence;
+
+        if (g_redraw) {
+            if (g_occurrence != 1) return;   // eye B draws stock; End re-issues
+            // Occurrence 1, redraw: capture THIS draw whole. The copies
+            // freeze the per-eye bytes (transforms, quad) at this
+            // instant; the target and viewport are objects and safe to
+            // hold. Textures and the scene block are NOT captured -- the
+            // re-issue reads them live, which is the fix.
+            releaseCapture();
+            ctx->OMGetRenderTargets(1, &g_capRtv, &g_capDsv);
+            g_capVpCount = 4;
+            ctx->RSGetViewports(&g_capVpCount, g_capVp);
+            if (g_capVpCount > 4) g_capVpCount = 4;
+            ID3D11Buffer* vb[2] = {};
+            ctx->IAGetVertexBuffers(0, 2, vb, g_capStride, g_capOffset);
+            bool ok = g_capRtv != nullptr && g_realDraw != nullptr;
+            for (int i = 0; i < 2; ++i) {
+                g_capVbUsed[i] = false;
+                if (vb[i]) {
+                    g_capVbUsed[i] = ok && copyBufferNow(
+                        ctx, vb[i], &g_vbCopy[i], &g_vbCopySize[i],
+                        D3D11_BIND_VERTEX_BUFFER);
+                    ok = ok && g_capVbUsed[i];
+                    vb[i]->Release();
+                }
+            }
+            ID3D11Buffer* cb[4] = {};
+            ctx->VSGetConstantBuffers(0, 4, cb);
+            for (int i = 0; i < 4; ++i) {
+                g_capCbUsed[i] = false;
+                if (cb[i]) {
+                    g_capCbUsed[i] = ok && copyBufferNow(
+                        ctx, cb[i], &g_cbCopy[i], &g_cbCopySize[i],
+                        D3D11_BIND_CONSTANT_BUFFER);
+                    ok = ok && g_capCbUsed[i];
+                    cb[i]->Release();
+                }
+            }
+            g_capStartVertex = g_argStartVertex;
+            g_capStartInstance = g_argStartInstance;
+            g_capCount = 6;
+            g_capInstances = 1;
+            g_capValid = ok;
+            if (!ok) releaseCapture();
+            return;   // eye A draws stock, always
+        }
 
         if (g_occurrence == 1) {
             // Learn (or confirm) the scene block: the buffer at PS b1 of
@@ -250,6 +391,72 @@ void fssRevealBegin(ID3D11DeviceContext* ctx) {
 }
 
 void fssRevealEnd(ID3D11DeviceContext* ctx) {
+    // The redraw's re-issue: occurrence 2's draw has just completed, the
+    // shared textures and scene block now hold the state that eye read --
+    // repaint occurrence 1's eye with exactly that, from its own captured
+    // transforms and geometry. Only the touched bindings are saved and
+    // restored; everything else still carries occurrence 2's own state,
+    // which is both correct and exactly what the re-issue wants.
+    if (g_redraw && ctx && g_occurrence == 2 && g_capValid && g_realDraw) {
+        guardedBudget(g_budget, [&] {
+            ID3D11RenderTargetView* curRtv = nullptr;
+            ID3D11DepthStencilView* curDsv = nullptr;
+            ctx->OMGetRenderTargets(1, &curRtv, &curDsv);
+            UINT curVpCount = 4;
+            D3D11_VIEWPORT curVp[4] = {};
+            ctx->RSGetViewports(&curVpCount, curVp);
+            if (curVpCount > 4) curVpCount = 4;
+            ID3D11Buffer* curVb[2] = {};
+            UINT curStride[2] = {}, curOff[2] = {};
+            ctx->IAGetVertexBuffers(0, 2, curVb, curStride, curOff);
+            ID3D11Buffer* curCb[4] = {};
+            ctx->VSGetConstantBuffers(0, 4, curCb);
+
+            ctx->OMSetRenderTargets(1, &g_capRtv, g_capDsv);
+            if (g_capVpCount) ctx->RSSetViewports(g_capVpCount, g_capVp);
+            ID3D11Buffer* vbSet[2] = {
+                g_capVbUsed[0] ? g_vbCopy[0] : nullptr,
+                g_capVbUsed[1] ? g_vbCopy[1] : nullptr,
+            };
+            ctx->IASetVertexBuffers(0, 2, vbSet, g_capStride, g_capOffset);
+            ID3D11Buffer* cbSet[4] = {
+                g_capCbUsed[0] ? g_cbCopy[0] : nullptr,
+                g_capCbUsed[1] ? g_cbCopy[1] : nullptr,
+                g_capCbUsed[2] ? g_cbCopy[2] : nullptr,
+                g_capCbUsed[3] ? g_cbCopy[3] : nullptr,
+            };
+            ctx->VSSetConstantBuffers(0, 4, cbSet);
+
+            g_realDraw(ctx, g_capCount, g_capInstances, g_capStartVertex,
+                       g_capStartInstance);
+
+            ctx->OMSetRenderTargets(1, &curRtv, curDsv);
+            if (curVpCount) ctx->RSSetViewports(curVpCount, curVp);
+            ctx->IASetVertexBuffers(0, 2, curVb, curStride, curOff);
+            ctx->VSSetConstantBuffers(0, 4, curCb);
+            if (curRtv) curRtv->Release();
+            if (curDsv) curDsv->Release();
+            for (int i = 0; i < 2; ++i) {
+                if (curVb[i]) curVb[i]->Release();
+            }
+            for (int i = 0; i < 4; ++i) {
+                if (curCb[i]) curCb[i]->Release();
+            }
+
+            ++g_redrawn;
+            if (!g_redrawNoted) {
+                g_redrawNoted = true;
+                Log::get().note(
+                    "fss reveal: redraw engaged -- the first eye's "
+                    "composite is re-issued after the second's, its own "
+                    "transforms with the current content, %ux%u-ish quad "
+                    "at start %u. Both eyes now paste one content state.",
+                    g_capCount, g_capInstances, g_capStartVertex);
+            }
+        });
+        releaseCapture();
+    }
+
     if (!g_engaged || !ctx) return;
     g_engaged = false;
     ctx->PSSetConstantBuffers(1, 1, &g_displaced);
@@ -259,12 +466,24 @@ void fssRevealEnd(ID3D11DeviceContext* ctx) {
     }
 }
 
-void fssRevealFrameBoundary() { g_occurrence = 0; }
+void fssRevealFrameBoundary() {
+    g_occurrence = 0;
+    // A frame that matched once but never twice (cinema-mode mono, a
+    // stand-down mid-pair) must not leak its capture into the next.
+    if (g_capValid) releaseCapture();
+}
 
 void fssRevealShutdown() {
     if (g_ourCb) {
         g_ourCb->Release();
         g_ourCb = nullptr;
+    }
+    releaseCapture();
+    for (int i = 0; i < 2; ++i) {
+        if (g_vbCopy[i]) { g_vbCopy[i]->Release(); g_vbCopy[i] = nullptr; }
+    }
+    for (int i = 0; i < 4; ++i) {
+        if (g_cbCopy[i]) { g_cbCopy[i]->Release(); g_cbCopy[i] = nullptr; }
     }
 }
 

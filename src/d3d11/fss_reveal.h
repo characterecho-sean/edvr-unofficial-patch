@@ -24,9 +24,22 @@
 // Whichever moment wins, the SPLIT is gone -- both eyes show the
 // animation the way the flat screen does.
 //
-// fix.fss_reveal_sync = stock | steady. Stock by default until the field
-// look; free when stock. Recognition rides the body-frame gate and the
-// composite's vertex hash, the fss_probe pattern exactly.
+// THE SECOND CHANNEL (2026-08-26, the Toolkit-off steady flight): steady
+// engaged with receipts and the squares survived a clean pipeline -- so
+// the constants are unified and the eyes still differ, and the only
+// remaining stepper is the CONTENT of the shared input textures between
+// the two draws. The first eye composites the earlier fill state (black
+// tiles), the second the later one. redraw is the fix for that channel:
+// the first eye's composite draws stock and its draw is CAPTURED -- eye
+// target, viewport, geometry buffers and VS constants copied at that
+// instant -- then RE-ISSUED immediately after the second eye's
+// composite, when the shared textures and scene block hold the late
+// state both eyes should show. Its own transforms, the current content:
+// both eyes paste the same fill state, whichever eye draws first.
+//
+// fix.fss_reveal_sync = stock | steady | redraw. Stock by default until
+// the field look; free when stock. Recognition rides the body-frame gate
+// and the composite's vertex hash, the fss_probe pattern exactly.
 #pragma once
 
 #include <cstdint>
@@ -56,10 +69,22 @@ void fssRevealNoteUpdate(void* resource, const void* data);
 bool fssRevealOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
                         uint32_t instances);
 
-// Occurrence 1: learn the PS b1 buffer and snapshot its shadow.
-// Occurrence 2: substitute the snapshot, restore after the draw.
+// Occurrence 1: steady learns the PS b1 buffer and snapshots its shadow;
+// redraw captures the draw's target, viewport, geometry and VS constants.
+// Occurrence 2: steady substitutes the snapshot, restored after the
+// draw; redraw re-issues occurrence 1's draw after this one completes.
 void fssRevealBegin(ID3D11DeviceContext* ctx);
 void fssRevealEnd(ID3D11DeviceContext* ctx);
+
+// The composite's DrawInstanced arguments and the REAL draw pointer,
+// stashed by the DrawInstanced thunk when the verdict is kFssReveal --
+// the begin/end wrap never sees them, and the redraw's re-issue must
+// call the real function (calling the context re-enters our own hook).
+typedef void(__stdcall* FssRevealRealDraw)(ID3D11DeviceContext*,
+                                           unsigned int, unsigned int,
+                                           unsigned int, unsigned int);
+void fssRevealDrawArgs(uint32_t startVertex, uint32_t startInstance,
+                       FssRevealRealDraw realDraw);
 
 // Per-frame occurrence reset, from vScreenFrameBoundary.
 void fssRevealFrameBoundary();

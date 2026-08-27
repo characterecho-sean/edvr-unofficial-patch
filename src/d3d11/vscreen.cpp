@@ -2392,6 +2392,12 @@ void STDMETHODCALLTYPE hookedDrawInstanced(ID3D11DeviceContext* self, UINT perIn
     // share one record buffer at different offsets, and which train a
     // draw carries is only knowable from (start, count).
     if (v == DrawVerdict::kGlareSteady) sunglareDrawArgs(instances, startInstance);
+    // The reveal redraw's re-issue needs this draw's true arguments and
+    // the real function -- the shared begin/end tail never sees either.
+    if (v == DrawVerdict::kFssReveal) {
+        fssRevealDrawArgs(startVertex, startInstance,
+                          g_state->realDrawInstanced);
+    }
     // The glare clamp only ever applies in this thunk -- the train is
     // DrawInstanced -- so it lives here rather than in the shared tail,
     // where three other thunks could never receive it. glareClamp rather
