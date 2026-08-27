@@ -224,8 +224,11 @@ struct State {
     // convention.
     uint32_t theaterCenterStep = 0;
     bool     theaterCenterDone = false;
-    float    theaterCenterSign[3] = {1.0f, 1.0f, 1.0f};
     float    theaterCenterLast[3] = {};
+    float    theaterCenterGain[3] = {};
+    vr::HmdMatrix34_t theaterFreezeOrig = {};
+    vr::HmdMatrix34_t theaterFreezeBest = {};
+    float    theaterCenterBestErr = 1e9f;
     bool  theaterRectValid = false;
     LONG  theaterRectSeq = 0;
     LONG theaterStamp = 0;
@@ -744,59 +747,91 @@ void theaterCenterServo(State* s) {
     if (!eyeTextureSize(&ew, &eh) || !ew || !eh) return;
     const float vt = (om + im) * 0.5f *
                      (static_cast<float>(eh) / static_cast<float>(ew));
-    // Image offsets -> angles. Left eye horizontal tangent runs -om..+im.
+    // Head-forward is NOT image centre in an asymmetric frustum: the
+    // error is the centre's TANGENT, which is zero exactly when the
+    // screen is square-on to the head.
     const float tH = -om + uC * (om + im);
     const float tV = vt - vC * (2.0f * vt);
     const float yawErr = atanf(tH);
     const float pitchErr = atanf(tV);
-    // The top edge's slope in tangent space is the roll.
     const float du = (c[2] - c[0]) * (om + im);
     const float dv = (c[3] - c[1]) * (2.0f * vt);
     const float rollErr = du != 0.0f ? atanf(dv / du) : 0.0f;
+    const float errs[3] = {yawErr, pitchErr, rollErr};
+    const float total =
+        fabsf(yawErr) + fabsf(pitchErr) + fabsf(rollErr);
+
+    // Track the best iterate; a failed run restores it, never ships a
+    // pose worse than it started with (the divergence flight's lesson:
+    // yaw walked -3.5 to -9.9 to +8.3 degrees and the last one shipped).
+    if (total < s->theaterCenterBestErr) {
+        s->theaterCenterBestErr = total;
+        s->theaterFreezeBest = s->theaterFreeze;
+    }
 
     const float kDone = 0.006f;   // ~a third of a degree
     if (fabsf(yawErr) < kDone && fabsf(pitchErr) < kDone &&
         fabsf(rollErr) < kDone) {
         s->theaterCenterDone = true;
         Log::get().note(
-            "fss theater: centred after %u step(s) -- the screen is "
-            "square-on to the captured pose (residual yaw %.3f pitch "
-            "%.3f roll %.3f deg).",
+            "fss theater: centred after %u step(s) -- residual yaw %.3f "
+            "pitch %.3f roll %.3f deg.",
             s->theaterCenterStep,
             static_cast<double>(yawErr * 57.2958f),
             static_cast<double>(pitchErr * 57.2958f),
             static_cast<double>(rollErr * 57.2958f));
         return;
     }
-    if (s->theaterCenterStep >= 5) {
+    if (s->theaterCenterStep >= 4) {
         s->theaterCenterDone = true;
+        s->theaterFreeze = s->theaterCenterBestErr < total
+                               ? s->theaterFreezeBest
+                               : s->theaterFreeze;
+        bumpFssPanelRectRedo();   // re-derive against the restored pose
         Log::get().note(
-            "fss theater: centring stopped after %u steps with residual "
-            "yaw %.3f pitch %.3f roll %.3f deg -- shipping what it has.",
+            "fss theater: centring stopped after %u steps; the BEST pose "
+            "of the run is restored (its error %.3f deg total vs %.3f "
+            "now).",
             s->theaterCenterStep,
-            static_cast<double>(yawErr * 57.2958f),
-            static_cast<double>(pitchErr * 57.2958f),
-            static_cast<double>(rollErr * 57.2958f));
+            static_cast<double>(s->theaterCenterBestErr * 57.2958f),
+            static_cast<double>(total * 57.2958f));
         return;
     }
-    // Sign learning: an axis whose error GREW after the last step was
-    // being pushed the wrong way.
-    const float errs[3] = {yawErr, pitchErr, rollErr};
-    if (s->theaterCenterStep > 0) {
-        for (int a = 0; a < 3; ++a) {
-            if (fabsf(errs[a]) >
-                fabsf(s->theaterCenterLast[a]) + 0.002f) {
-                s->theaterCenterSign[a] = -s->theaterCenterSign[a];
+
+    float yaw, pitch, roll;
+    if (s->theaterCenterStep == 0) {
+        // The probe: a known small nudge per axis. The next measurement
+        // yields each axis's true gain AND sign in one move -- the
+        // uncalibrated full-error steps of the first field run fed an
+        // amplifying mapping and diverged.
+        s->theaterFreezeOrig = s->theaterFreeze;
+        yaw = 0.008727f;    // 0.5 deg
+        pitch = 0.006109f;  // 0.35 deg
+        roll = 0.006981f;   // 0.4 deg
+        s->theaterCenterGain[0] = yaw;
+        s->theaterCenterGain[1] = pitch;
+        s->theaterCenterGain[2] = roll;
+    } else {
+        if (s->theaterCenterStep == 1) {
+            for (int a = 0; a < 3; ++a) {
+                const float dErr = errs[a] - s->theaterCenterLast[a];
+                float g = dErr / s->theaterCenterGain[a];
+                if (fabsf(g) < 0.2f) g = g < 0 ? -0.2f : 0.2f;
+                if (fabsf(g) > 6.0f) g = g < 0 ? -6.0f : 6.0f;
+                s->theaterCenterGain[a] = g;
             }
+        }
+        yaw = -errs[0] / s->theaterCenterGain[0] * 0.9f;
+        pitch = -errs[1] / s->theaterCenterGain[1] * 0.9f;
+        roll = -errs[2] / s->theaterCenterGain[2] * 0.9f;
+        const float kMaxStep = 0.12f;   // ~7 deg, sanity
+        for (float* v : {&yaw, &pitch, &roll}) {
+            if (*v > kMaxStep) *v = kMaxStep;
+            if (*v < -kMaxStep) *v = -kMaxStep;
         }
     }
     for (int a = 0; a < 3; ++a) s->theaterCenterLast[a] = errs[a];
 
-    const float yaw = s->theaterCenterSign[0] * yawErr;
-    const float pitch = s->theaterCenterSign[1] * pitchErr;
-    const float roll = s->theaterCenterSign[2] * rollErr;
-    // Small-angle local rotation, post-multiplied so it turns about the
-    // device's own axes (OpenVR device: +X right, +Y up, -Z forward).
     const float cy = cosf(yaw), sy = sinf(yaw);
     const float cp = cosf(pitch), sp = sinf(pitch);
     const float cr = cosf(roll), sr = sinf(roll);
@@ -807,29 +842,27 @@ void theaterCenterServo(State* s) {
     };
     vr::HmdMatrix34_t& f = s->theaterFreeze;
     float r0[3][3];
-    for (int i = 0; i < 3; ++i) {
-        for (int j = 0; j < 3; ++j) {
-            r0[i][j] = f.m[i][0] * d[0][j] + f.m[i][1] * d[1][j] +
-                       f.m[i][2] * d[2][j];
+    for (int i2 = 0; i2 < 3; ++i2) {
+        for (int j2 = 0; j2 < 3; ++j2) {
+            r0[i2][j2] = f.m[i2][0] * d[0][j2] + f.m[i2][1] * d[1][j2] +
+                         f.m[i2][2] * d[2][j2];
         }
     }
-    for (int i = 0; i < 3; ++i) {
-        for (int j = 0; j < 3; ++j) {
-            f.m[i][j] = r0[i][j];
+    for (int i2 = 0; i2 < 3; ++i2) {
+        for (int j2 = 0; j2 < 3; ++j2) {
+            f.m[i2][j2] = r0[i2][j2];
         }
     }
     ++s->theaterCenterStep;
-    s->theaterRectValid = false;   // stale against the nudged pose
+    s->theaterRectValid = false;
     bumpFssPanelRectRedo();
     Log::get().note(
         "fss theater: centring step %u -- err yaw %.3f pitch %.3f roll "
-        "%.3f deg, signs %+.0f/%+.0f/%+.0f.",
+        "%.3f deg%s.",
         s->theaterCenterStep, static_cast<double>(yawErr * 57.2958f),
         static_cast<double>(pitchErr * 57.2958f),
         static_cast<double>(rollErr * 57.2958f),
-        static_cast<double>(s->theaterCenterSign[0]),
-        static_cast<double>(s->theaterCenterSign[1]),
-        static_cast<double>(s->theaterCenterSign[2]));
+        s->theaterCenterStep == 1 ? " (the probe)" : " (calibrated)");
 }
 
 vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
@@ -1519,9 +1552,7 @@ vr::EVRCompositorError hookedWaitGetPoses(void* self,
             s->theaterRectValid = false;
             s->theaterCenterStep = 0;
             s->theaterCenterDone = false;
-            s->theaterCenterLast[0] = 0.0f;
-            s->theaterCenterLast[1] = 0.0f;
-            s->theaterCenterLast[2] = 0.0f;
+            s->theaterCenterBestErr = 1e9f;
         }
     }
 
