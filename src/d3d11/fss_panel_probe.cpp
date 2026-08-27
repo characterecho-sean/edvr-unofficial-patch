@@ -37,6 +37,11 @@ ID3D11Buffer* g_stVb1 = nullptr;
 uint32_t g_vb1Stride = 0, g_vb1Offset = 0, g_vb1SrcBytes = 0;
 uint32_t g_vb1WinOffset = 0;
 ID3D11Buffer* g_t33 = nullptr;       // kept alive for the phase-B chase
+uint32_t g_t33First = 0;             // the SRV's FirstElement: the game
+                                     // sub-allocates records mid-buffer,
+                                     // which is why raw element 2 read as
+                                     // zeros on the v4 flight
+uint32_t g_t33Stride = 0;
 uint32_t g_instX = 0;
 uint32_t g_recAtOffset = 0;
 uint32_t g_recSrcBytes = 0, g_vbSrcBytes = 0, g_vbStride = 0, g_vbOffset = 0;
@@ -179,7 +184,7 @@ void fssPanelProbeOnComposite(ID3D11DeviceContext* ctx) {
                 ID3D11Device* dev = nullptr;
                 ctx->GetDevice(&dev);
                 if (dev) {
-                    g_recAtOffset = g_instX * 336u;
+                    g_recAtOffset = (g_t33First + g_instX) * g_t33Stride;
                     uint32_t dummy = 0;
                     g_stRecAt = copyRange(ctx, dev, g_t33, g_recAtOffset,
                                           kRecBytes, &dummy);
@@ -189,8 +194,9 @@ void fssPanelProbeOnComposite(ID3D11DeviceContext* ctx) {
                 g_t33 = nullptr;
             }
             Log::get().note(
-                "fss panel probe: inst.x = %u -> chasing t33 record at "
-                "byte %u.", g_instX, g_recAtOffset);
+                "fss panel probe: inst.x = %u, view FirstElement = %u, "
+                "stride %u -> chasing t33 record at byte %u.",
+                g_instX, g_t33First, g_t33Stride, g_recAtOffset);
             g_phase = 2;
             g_copiedAtCountdown = 3;
             return;
@@ -232,7 +238,27 @@ void fssPanelProbeOnComposite(ID3D11DeviceContext* ctx) {
                 res->Release();
             }
             if (buf) {
-                g_stRec = copyHead(ctx, dev, buf, kRecBytes, &g_recSrcBytes);
+                D3D11_SHADER_RESOURCE_VIEW_DESC vd{};
+                // srv was released above; re-fetch the view for its desc.
+                ID3D11ShaderResourceView* srv2 = nullptr;
+                ctx->VSGetShaderResources(33, 1, &srv2);
+                g_t33First = 0;
+                if (srv2) {
+                    srv2->GetDesc(&vd);
+                    if (vd.ViewDimension == D3D11_SRV_DIMENSION_BUFFER) {
+                        g_t33First = vd.Buffer.FirstElement;
+                    } else if (vd.ViewDimension ==
+                               D3D11_SRV_DIMENSION_BUFFEREX) {
+                        g_t33First = vd.BufferEx.FirstElement;
+                    }
+                    srv2->Release();
+                }
+                D3D11_BUFFER_DESC bd{};
+                buf->GetDesc(&bd);
+                g_t33Stride = bd.StructureByteStride ? bd.StructureByteStride
+                                                     : 336u;
+                g_stRec = copyRange(ctx, dev, buf, g_t33First * g_t33Stride,
+                                    kRecBytes, &g_recSrcBytes);
                 // Kept alive: phase B chases inst.x into this buffer.
                 g_t33 = buf;
             }
