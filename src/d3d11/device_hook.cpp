@@ -107,8 +107,13 @@ struct State {
     // latch its frame-exact edges.
     Hotkey fssEnterKey;
     Hotkey fssQuitKey;
+    Hotkey fssZoomStepKey;
+    Hotkey fssZoomKey;
     XinputBinding fssEnterPad;
     XinputBinding fssQuitPad;
+    XinputBinding fssZoomStepPad;
+    XinputBinding fssZoomPad;
+    bool fssZoomPressPending = false;
     bool     fssTheaterWanted = false;
     bool     fssModeLatch = false;
     bool     fssLatchByKey = false;
@@ -611,6 +616,17 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
                 g_state->fssQuitMs = stampMs();
                 byKey = true;
             }
+            // The zoom press: the earliest arrival marker there is --
+            // ahead of the camera jump, ahead of any render signal. The
+            // squares appear the frame the zoom begins (the field's own
+            // timing), so the reveal's window must open no later.
+            bool zoomPressed = g_state->fssZoomStepKey.pressed();
+            if (g_state->fssZoomKey.pressed()) zoomPressed = true;
+            if (xinputPressed(g_state->fssZoomStepPad)) zoomPressed = true;
+            if (xinputPressed(g_state->fssZoomPad)) zoomPressed = true;
+            if (zoomPressed && g_state->fssModeLatch) {
+                g_state->fssZoomPressPending = true;
+            }
             if (journalFssFocus()) {
                 const bool quitRecent =
                     g_state->fssQuitMs != 0 &&
@@ -666,7 +682,9 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
             g_state->configPollMs = stampMs();
             vScreenRefreshConfig();
             g_state->fssTheaterWanted =
-                Config::get().getFloat("fix.fss_theater", 0.0f) > 0.0f;
+                Config::get().getFloat("fix.fss_theater", 0.0f) > 0.0f ||
+                Config::get().getString("fix.fss_reveal_sync", "stock") !=
+                    "stock";
             journalWatchSetEagerStatus(g_state->fssTheaterWanted);
             // The liveness pass, on the same once-a-second cadence. In-place
             // patches are on a table other tools can write too, and one that
@@ -892,6 +910,17 @@ State& ensureState() {
                 Log::get().note("hotkey: the FSS quit key adopted from "
                                 "your Elite bindings: %s", b);
             }
+            if (eliteBindsLookup("ExplorationFSSZoomStepIn", b,
+                                 sizeof(b))) {
+                g_state->fssZoomStepKey.setBinding(b);
+                Log::get().note("hotkey: the FSS stepped-zoom key adopted "
+                                "from your Elite bindings: %s", b);
+            }
+            if (eliteBindsLookup("ExplorationFSSZoomIn", b, sizeof(b))) {
+                g_state->fssZoomKey.setBinding(b);
+                Log::get().note("hotkey: the FSS zoom key adopted from "
+                                "your Elite bindings: %s", b);
+            }
             {
                 char pk[40];
                 g_state->fssEnterPad = XinputBinding{};
@@ -908,6 +937,20 @@ State& ensureState() {
                     Log::get().note("hotkey: the FSS quit key is also on "
                                     "your gamepad: %s.", pk);
                 }
+                g_state->fssZoomStepPad = XinputBinding{};
+                if (eliteBindsLookupPad("ExplorationFSSZoomStepIn", pk,
+                                        sizeof(pk)) &&
+                    xinputTranslate(pk, &g_state->fssZoomStepPad)) {
+                    Log::get().note("hotkey: the FSS stepped zoom is also "
+                                    "on your gamepad: %s.", pk);
+                }
+                g_state->fssZoomPad = XinputBinding{};
+                if (eliteBindsLookupPad("ExplorationFSSZoomIn", pk,
+                                        sizeof(pk)) &&
+                    xinputTranslate(pk, &g_state->fssZoomPad)) {
+                    Log::get().note("hotkey: the FSS zoom is also on your "
+                                    "gamepad: %s.", pk);
+                }
             }
             g_state->bindsFingerprint = eliteBindsFingerprint();
         }
@@ -915,7 +958,9 @@ State& ensureState() {
         cameraViewSetPressWitness(g_state->extCamNextKey.key() != 0);
         journalWatchConfigure();
         g_state->fssTheaterWanted =
-            Config::get().getFloat("fix.fss_theater", 0.0f) > 0.0f;
+            Config::get().getFloat("fix.fss_theater", 0.0f) > 0.0f ||
+            Config::get().getString("fix.fss_reveal_sync", "stock") !=
+                "stock";
         journalWatchSetEagerStatus(g_state->fssTheaterWanted);
         g_state->dumpOnExternalCam =
             Config::get().getBool("advanced.dump_camera_on_external_cam", false);
@@ -1156,6 +1201,12 @@ void hookFactoryForDevice(ID3D11Device* device) {
 
 bool deviceHookFssModeLatch() {
     return g_state != nullptr && g_state->fssModeLatch;
+}
+
+bool deviceHookTakeFssZoomPress() {
+    if (!g_state || !g_state->fssZoomPressPending) return false;
+    g_state->fssZoomPressPending = false;
+    return true;
 }
 
 void deviceHookNoteCleanExit() {

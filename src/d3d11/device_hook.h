@@ -47,6 +47,11 @@ void deviceHookNoteCleanExit();
 // frame boundary turns this into the theater's stamp.
 bool deviceHookFssModeLatch();
 
+// A zoom press was seen since the last take (stepped or held, keyboard
+// or pad, only while the mode latch is open): the arrival window's
+// earliest marker. Consumed on read.
+bool deviceHookTakeFssZoomPress();
+
 void shutdownDeviceHooks();
 
 }  // namespace edvr

@@ -300,6 +300,10 @@ struct State {
     uint32_t fssBodyStampFrame = 0;
     uint32_t fssJumpFrame = 0;   // the zoom-start camera jump, for the
                                  // reveal's arrival window
+    bool     fssArrivalOpen = false;
+    uint32_t fssArrivalRecogs = 0;
+    uint32_t fssArrivalWindows = 0;
+    uint32_t fssArrivalNotes = 0;
     uint32_t fssChromeSkipFrame = 0;
     uint32_t fssChromeSkipCount = 0;
     uint64_t fssChromeSkipped = 0;
@@ -1639,6 +1643,7 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
          (deviceHookFssModeLatch() && s->fssJumpFrame != 0 &&
           s->frameNo - s->fssJumpFrame <= 30)) &&
         fssRevealOnEyeDraw(self, kind, count, instances)) {
+        if (s->fssArrivalOpen) ++s->fssArrivalRecogs;
         return DrawVerdict::kFssReveal;
     }
 
@@ -2957,6 +2962,35 @@ void vScreenFrameBoundary() {
             s->frameNo - s->fssChromeFrame <= 5) {
             drawCensusAutoRequest();
         }
+    }
+    if (deviceHookTakeFssZoomPress()) {
+        // Earlier than the jump: the player's own zoom button.
+        s->fssJumpFrame = s->frameNo;
+        if (s->fssArrivalNotes < 4) {
+            ++s->fssArrivalNotes;
+            Log::get().note(
+                "fss arrival: zoom press at frame %u -- the reveal's "
+                "window is open. Said at most 4 times.", s->frameNo);
+        }
+    }
+    // The arrival window's receipt: when it closes, say how many
+    // composite recognitions it carried. Zero while squares showed would
+    // prove the arriving content flows through a different draw.
+    {
+        const bool open =
+            s->fssJumpFrame != 0 && s->frameNo - s->fssJumpFrame <= 30 &&
+            deviceHookFssModeLatch() && fssRevealWantsDraws();
+        if (open && !s->fssArrivalOpen) {
+            s->fssArrivalRecogs = 0;
+        } else if (!open && s->fssArrivalOpen &&
+                   s->fssArrivalWindows < 4) {
+            ++s->fssArrivalWindows;
+            Log::get().note(
+                "fss arrival: window closed -- %u composite "
+                "recognition(s) inside it. Said at most 4 times.",
+                s->fssArrivalRecogs);
+        }
+        s->fssArrivalOpen = open;
     }
 
     // The theater's MODE gate (round 44): device_hook's latch -- the
