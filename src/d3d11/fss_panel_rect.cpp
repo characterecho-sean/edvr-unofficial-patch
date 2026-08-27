@@ -14,6 +14,21 @@
 
 namespace edvr {
 namespace {
+uint32_t g_argStartIndex2 = 0, g_argStartInstance2 = 0;
+int32_t g_argBaseVertex2 = 0;
+}  // namespace
+void fssPanelRectDrawArgs(uint32_t startIndex, int32_t baseVertex,
+                          uint32_t startInstance) {
+    g_argStartIndex2 = startIndex;
+    g_argBaseVertex2 = baseVertex;
+    g_argStartInstance2 = startInstance;
+}
+uint32_t fssPanelRectStartInstance() { return g_argStartInstance2; }
+int32_t fssPanelRectBaseVertex() { return g_argBaseVertex2; }
+}  // namespace edvr
+
+namespace edvr {
+namespace {
 
 constexpr uint32_t kMaxOrd = 12;
 

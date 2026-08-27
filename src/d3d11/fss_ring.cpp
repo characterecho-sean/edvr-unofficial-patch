@@ -53,14 +53,14 @@ constexpr uint32_t kCbSlots = 4;
 uint8_t g_mode = 0;
 
 // Mode 6 = "clean": the surgical fix. The ring quad's own pixel shader,
-// transcribed from docs/fss-ring-ps.asm with the flag byte's bit 4 -- the
+// transcribed from docs/shaders/fss-ring-ps.asm with the flag byte's bit 4 -- the
 // dissolve's hard-black unrevealed state, THE black squares -- treated as
 // never set. The soft fade and every lighting term are unchanged; the
 // desk-compile matches the stock output signature exactly. Compiled once
 // at first engage on the paved shader_swap path; null means draw stock.
 constexpr char kCleanPsHlsl[] = R"HLSL(
 // The FSS ring quad's pixel shader (ps 7CECABDE34FFBE9E), transcribed
-// mechanically from docs/fss-ring-ps.asm with ONE semantic change: the
+// mechanically from docs/shaders/fss-ring-ps.asm with ONE semantic change: the
 // flag byte's bit 4 -- the dissolve's hard-black "unrevealed" state, which
 // collapses the exposure lerp to zero and paints the black squares -- is
 // treated as never set. The soft cb2[46] fade-in and every lighting term
@@ -331,7 +331,7 @@ bool               g_psEngaged = false;
 // The fade patch, clean mode's second half. Both ring shaders darken
 // unrevealed pixels through atten = 1 - (1 - fade) * cb2[46].xy -- the
 // QUAD alongside its bit-4 hard black, the MESH as its only black path
-// (docs/fss-ring-mesh-ps.asm) -- so a fade value of zero paints the
+// (docs/shaders/fss-ring-mesh-ps.asm) -- so a fade value of zero paints the
 // squares even with bit 4 gone. Zeroing cb2[46].xy forces atten to 1 in
 // both shaders without touching either's lighting: the game's b2 is
 // GPU-copied into an EDVR buffer, vector 46's xy is overwritten from an
@@ -515,7 +515,7 @@ bool fssRingOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
         if (g_mode >= 4) {
             // Mask modes touch only the quad. Clean covers the quad (bit-4
             // shader plus fade patch) and the mesh (fade patch alone --
-            // docs/fss-ring-mesh-ps.asm has no bit-4 path); the f60 mask
+            // docs/shaders/fss-ring-mesh-ps.asm has no bit-4 path); the f60 mask
             // writer passes through untouched.
             if (g_mode == 6 ? f > 1 : f != 0) return false;
             g_pendingFam = f;

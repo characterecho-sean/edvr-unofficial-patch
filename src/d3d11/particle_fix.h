@@ -10,7 +10,7 @@
 // near-fade's depth term); cb1[278] is its up. A camera basis in a headset
 // is a HEAD basis, so head roll rolls every particle quad -- the geyser
 // plumes rotating with the headset. Read from the game's own bytecode:
-// docs/particle-vs.asm, with the whole story in docs/particle-billboards.md.
+// docs/shaders/particle-vs.asm, with the whole story in docs/particle-billboards.md.
 //
 // The probe logs those registers at a matched draw so the inference above
 // can be confirmed by measurement before anything is substituted -- which

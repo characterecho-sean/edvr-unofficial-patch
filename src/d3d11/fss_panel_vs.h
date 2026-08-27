@@ -3,7 +3,7 @@
 // Written against the disassemblies of the game's own vs
 // B018D143700AB803 (the position-only depth prepass) and vs
 // A888D51024D9798E (the textured pass) -- dumped 2026-08-25, kept at
-// docs/fss-panel-vs.asm -- and written as MECHANICAL TRANSCRIPTIONS of
+// docs/shaders/fss-panel-vs.asm -- and written as MECHANICAL TRANSCRIPTIONS of
 // them, the particle billboard's discipline (particle_vs.h): register for
 // register, swizzle for swizzle, feeding a pixel shader we do not
 // control. A transcription can be checked instead of trusted: compile it,

@@ -25,7 +25,7 @@ color surfaces composite, two UI strata. Slot 1 is the whole reason the
 on-foot machinery never engaged: the panel recognition tests slot 0.
 
 **The vertex pipeline is Elite's general instanced-mesh path** — the
-disassembly (docs/fss-panel-vs.asm) reads, in order: packed-uint vertex
+disassembly (docs/shaders/fss-panel-vs.asm) reads, in order: packed-uint vertex
 decode (two position encodings, 1/127 normal decode, 1/32768 UVs), a
 per-instance record fetched from a structured buffer at t33 (stride 336:
 flags, position at byte 16, orientation quaternion, uniform scale), an

@@ -10,6 +10,16 @@ reopens the part of the conclusion the field then contradicted, and records
 what was built to decide it. The process of the first day is kept at the end
 because it was expensive and the lessons are reusable.
 
+> **STATUS: SOLVED, field-verified 2026-08-27.** The black squares are
+> ring-only, appear during the ~10-frame zoom-arrival window in the
+> primary eye's submitted image, and are healed by the shipping pair
+> `fix.fss_eye_heal = 1` + `fix.fss_reveal_sync = on`. The final
+> mechanism and the fix are in the chapters from round thirty-three
+> onward; the vendor-facing writeup is
+> [frontier-fss-bug-report.md](frontier-fss-bug-report.md). Everything
+> between here and there is the road, kept because its receipts and
+> retractions are the reusable part.
+
 ## Finding 1: the zoomed body is rendered MONO
 
 **In VR, the Full System Scanner renders the zoomed body once, into a single
@@ -650,6 +660,9 @@ pixel-dumped, and the black squares survived all of it -- because the
 question was wrong. The arc's ending, in the field's own words: the
 squares are the game's intended scan-resolve animation of its PRIMARY
 view, and the anomaly is that the second eye shows a smoothed variant.
+*(Superseded -- round thirty-three's arrival measurement, below,
+inverted this: the primary eye carries a genuine defect the second eye
+does not.)*
 
 What the long road measured, for whoever walks near it again:
 
@@ -683,30 +696,166 @@ What the long road measured, for whoever walks near it again:
 What ships from the arc: `fix.fss_res` (the body at full eye resolution,
 field-confirmed sharper), the transcription/compile machinery
 (shaderSwapCompilePs/Cs), the ring shader disassemblies
-(docs/fss-ring-ps.asm, docs/fss-ring-mesh-ps.asm, docs/fss-chrome-ps.asm),
+(docs/shaders/fss-ring-ps.asm, docs/shaders/fss-ring-mesh-ps.asm, docs/shaders/fss-chrome-ps.asm),
 the checkpointed eye-image dump with two-pass blink analysis, the frame
 pacing log, and a census that can no longer be lied to by omission.
 `fss_ring_feed` stays stock: its arms are probe-grade history, kept for
 the next hunt.
 
 The evidence package here -- stock reproduction on two stacks, symmetric
-submitted images, the monocular field reports -- is a complete Frontier
-bug report waiting to be filed: the second eye's FSS scan animation does
-not match the primary view's.
+submitted images, the monocular field reports -- read at the time like a
+complete Frontier bug report: the second eye's FSS scan animation does
+not match the primary view's. *(Superseded -- the next chapter's
+measurement flipped which eye carries the defect, and the report that
+was eventually filed says the opposite.)*
+
+## Round thirty-three: the arrival window, measured
+
+The instrument that ended the stalemate was the smallest one: a per-frame
+tile-luminance series over both **submitted** eye textures, folded on the
+GPU into ~14 MB of atlases so it could run every scanner frame without
+hitching. It caught what every earlier capture had missed by aiming at
+the wrong moment:
+
+**For roughly ten frames at each zoom's ARRIVAL — before the body-layer
+gate opens — the primary (left) submitted image carries hard-black
+(0.000-luma) not-yet-resolved tiles the right does not: 16 versus 2 on
+the worst frame, resolving in unison when the gate opens.** Every earlier
+symmetric dump had measured the build proper, after arrival; the squares
+live in the arrival, and the arrival had never been captured.
+
+That one measurement inverted the round-thirty-one ending. The right
+eye's smooth reveal is not a smoothed variant of the primary view — it
+is the correct image, and the primary view briefly shows tiles its
+amortized renderer has not reached yet. The flat screen mirrors the
+primary view, so flat players see the same tiles; on a monitor they read
+as part of the dissolve art, which is why the defect survived flat QA
+for years.
+
+Two corrections landed with it. First, the eye images ARE genuinely
+different at arrival — the round-30b "both submitted images equal"
+reading was true of the build but not of the arrival window. Second,
+mid-campaign the OpenXR Toolkit was found enabled and disabled: the
+E861/B742 "reconstruction" pair that rounds 13-21 had hunted was almost
+certainly the Toolkit's scaler (it vanished from sessions with the
+Toolkit off), and the squares survive without it. The arrival content's
+real producer, measured Toolkit-off by a census armed on the player's
+own zoom press, is the game's own GPU-driven amortized tile renderer:
+`DispatchIndirect` compute (`5998146D464F5C0E` + `EB0245DE0BB23BB6`),
+per-eye argument buffers and tile lists, one thread group per 16x16
+tile, per-frame history copies — and **zero body-composite draws in the
+arrival frames**. The entire draw-level campaign had been structurally
+blind to the frames that matter.
+
+## Rounds thirty-four through forty-four: the roads not shipped
+
+Kept short, because each closed cleanly:
+
+- **Arrival mono** (submit the right's image to both eyes for the
+  window) worked mechanically and was rejected on comfort grounds: "the
+  eyes must not see a difference" cuts both ways — a stereo scene going
+  flat for 10 frames is itself a difference.
+- **The heal, first attempt** (fill the left's hard-black pixels from
+  the right at the optical-infinity shift) removed the squares — the
+  only intervention that ever had — but its classifier misfired on menu
+  text and dim ring content through four gate revisions, and was
+  retired to await better scoping.
+- **The theater** (rounds 40-44): the whole scanner as a world-anchored
+  virtual screen showing the flat renderer's image — built through five
+  versions (screen-in-space, whole-mode, void-only, panel-rect crop
+  with homography rectification and a dual-eye nose-shadow stitch, a
+  probe-calibrated centering servo) and **parked as a feature**
+  (`fss_theater = 0`), superseded for the bug by the heal. Its
+  panel-rect deriver survives in the shipping fix as the heal's spatial
+  scope.
+- **Cinema-mode automation**: the game's own HMD Cinema mode
+  (`StereoscopicMode 5`) was investigated as a lever. The game writes
+  its settings file on menu-apply but never re-reads it mid-session;
+  the only trigger is the game's own menu code, and injection was
+  declined on principle (a proxy shims, it does not patch). The field
+  A/B then made it moot: cinema mode still shows the VR-variant FSS —
+  the flat renderer's extras are gated on HMD-session-active, not
+  presentation mode.
+
+## Rounds forty-five through forty-eight: the pair that shipped
+
+The composite-level channel closed first. `steady` re-flown Toolkit-off
+with clean receipts: engaged, null — the constants alone are not the
+composite's split. `redraw` (re-issue the first eye's composite after
+the second's, its own transforms with the late content) bought the
+frame-order fact that retired it: the game draws the first eye's UI
+BETWEEN the two body composites, so any late repaint buries that UI —
+there is no safe moment. `lockstep` inverted the direction — the second
+eye's composite drawn reading byte-identical CopyResource'd copies of
+the first eye's four input textures and its scene block — and round
+forty-six gave it the verdict: the composite-drawn resolve is identical
+in both eyes, fused, fully native stereo. That is half the fix.
+
+The arrival half could not be fixed at the dispatch layer. The surgery
+ladder closed structural: overwriting the accumulator poisons the
+temporal feedback (artifacts, cockpit bleed as history decays);
+overwriting the resolve output arrives pre-consumed (the per-eye chains
+INTERLEAVE — the first eye's consumers read between the two
+dispatches); the previous-frame reverse still artifacts. The loop
+defends itself, so the only safe layer is the submitted image — and the
+heal came back with the scoping it had lacked:
+
+- **One test, no gates** (v6): a left pixel under 0.004 luma takes the
+  right eye's pixel at the infinity shift, dx = W(outer-inner) /
+  (outer+inner) ≈ 1053 px at 5424 wide, computed from the headset's own
+  published eye tangents. Every added cleverness (bright-region taps,
+  interior gates) had only vetoed real fills and speckled.
+- **The window is the arrival, 600 frames from the player's own zoom
+  press** — the killer timing insight: the zoom TRANSIT takes ~3
+  seconds and the squares appear at its arrival; every earlier
+  30-frame window had covered only the departure. The press is read
+  from the player's adopted Elite binds (keyboard and XInput pad), the
+  window is journal-gated on `GuiFocus 9` so a stale jump or an
+  ignored keypress can never open it in the cockpit.
+- **Only inside the screen's own rectangle**: the theater's panel-rect
+  deriver publishes the scanner screen's corners per engage; the fill
+  exists only inside that AABB. Unscoped, the heal had doubled the
+  near-field neon frame's lines — content at sub-metre depth where the
+  infinity disparity is the wrong shift.
+
+Field-verified 2026-08-27: no squares, no artifacts, stereo intact.
+
+## The ring, and the shipping state
+
+A field fact sharpened the whole story after the fix landed: **the
+black tiles only ever appear on ringed bodies — no ring, no bug.** It
+fits the mechanism exactly: the ring is the temporally amortized
+content (its offscreen buffers render as a budgeted subset of 16x16
+tiles per frame — the round-27 oscillation measurement), so only ring
+pixels ever have not-yet-reached tiles to expose. A ring-less body has
+no amortized layer and arrives whole in both eyes.
+
+The shipping state, both repo-ini defaults:
+
+- `fix.fss_eye_heal = 1` — the arrival window's fill, scoped as above.
+- `fix.fss_reveal_sync = on` — the composite-drawn resolve held
+  byte-identical (the campaign's "lockstep" mechanism).
+
+The campaign's scaffolding was removed once the fix stood alone (the
+survey probe, the press census, the pair-sync's indirect extensions,
+the redraw mode); the instruments that earn their keep stay. The
+vendor-facing report — stock repro on two stacks, the ring-only fact,
+the mechanism, three fix directions — is
+[frontier-fss-bug-report.md](frontier-fss-bug-report.md).
 
 ## Open
 
-- The flash detector withholds a couple of frames at every fresh FSS zoom
-  (the body camera until parked-certification) — a real hitch on exactly
-  this transition, and its own arc.
-- If the per-eye percept ever needs revisiting: the deliberate monocular
-  re-test with eye order reversed, done on a body whose animation is
-  mid-flight, is the observation that would reopen it.
+- Re-verify the pair with the OpenXR Toolkit ON: the fix was proven
+  Toolkit-off; the Toolkit's scaler re-makes per-eye content downstream
+  and deserves one confirmation flight.
+- The theater is parked, not dead ("2.0 to return"): the virtual-screen
+  treatment, the homography stitch and the centering servo are whole in
+  the code behind `fss_theater = 0`.
+- The flash detector withholds a couple of frames at every fresh FSS
+  zoom (the body camera at ~9,880 units until parked-certification) — a
+  real hitch on exactly this transition, and its own arc.
 - `fix.fss_res` is still opt-in; promoting it to a shipped default is a
   release-train decision (cost: 4x the pixels for one layer, FSS only).
-- The flash detector trips on the FSS body camera at every fresh zoom
-  (~9,880 units, withheld until "parked" certification) — a hitch on
-  exactly the transition being scanned. Its own arc.
 - The census still does not record `GenerateMips`,
   `ClearUnorderedAccessView*`, or the contents of command lists
   (`ExecuteCommandList` is seen, its interior is not). The 272x268 tile
