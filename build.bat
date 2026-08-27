@@ -140,6 +140,11 @@ set CFLAGS=/nologo /c /O2 /MT /std:c++17 /EHsc /W4 /GR- ^
  /I"%GEN%"
 
 echo.
+REM The runtime config audit data: known keys + the moved-from map,
+REM generated from the same sources the late contract check verifies.
+python "%ROOT%\tools\check_config_contract.py" --quiet --emit "%GEN%\config_contract_gen.h"
+if errorlevel 1 ( echo [edvr] ERROR: contract header generation failed & exit /b 1 )
+
 echo [edvr] === d3d11.dll ===
 python "%ROOT%\tools\gen_exports.py" --source "%SystemRoot%\System32\d3d11.dll" ^
     --tag d3d11 --out "%GEN%" ^
@@ -156,6 +161,7 @@ if errorlevel 1 ( echo [edvr] ERROR: ml64 failed & exit /b 1 )
 
 cl.exe %CFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "%ROOT%\src\common\log.cpp" "%ROOT%\src\common\config.cpp" ^
+    "%ROOT%\src\common\config_audit.cpp" ^
     "%ROOT%\src\common\guard.cpp" "%ROOT%\src\common\vtable_hook.cpp" ^
     "%ROOT%\src\common\hotkey.cpp" "%ROOT%\src\common\proxy.cpp" ^
     "%ROOT%\src\common\frame_flag.cpp" ^
@@ -234,6 +240,7 @@ if errorlevel 1 ( echo [edvr] ERROR: ml64 failed for system_thunks & exit /b 1 )
 
 cl.exe %CFLAGS% /Fo"%OBJ%\openvr"\ ^
     "%ROOT%\src\common\log.cpp" "%ROOT%\src\common\config.cpp" ^
+    "%ROOT%\src\common\config_audit.cpp" ^
     "%ROOT%\src\common\guard.cpp" "%ROOT%\src\common\vtable_hook.cpp" ^
     "%ROOT%\src\common\hotkey.cpp" "%ROOT%\src\common\proxy.cpp" ^
     "%ROOT%\src\common\frame_flag.cpp" ^

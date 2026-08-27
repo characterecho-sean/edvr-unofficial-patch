@@ -31,6 +31,19 @@ public:
     int         getIntInRange(const char* key, int def, int lo, int hi) const;
     std::string getString(const char* key, const char* def) const;
 
+    // The config audit's data: every key this build reads or documents
+    // (lowercase), and the moved-from map ({old, new} dotted names) parsed at
+    // build time from edvr.ini's own annotations. Registered by
+    // config_audit.cpp -- compiled into the DLLs only -- at static init, so
+    // every parse can (a) read a moved key from its OLD location when the new
+    // one is absent (hand-copied DLLs meet old-layout inis all the time; that
+    // exact meeting shifted the whole scanner UI on 2026-08-27), and (b) name
+    // any line the build does not read, instead of ignoring it silently.
+    // Binaries that never register run without the audit, nothing else
+    // changes. Tests register small fixture tables of their own.
+    void setAuditTables(const char* const* knownLower, size_t knownCount,
+                        const char* const (*movedOldNew)[2], size_t movedCount);
+
     // Set a value in memory, without touching the file.
     //
     // For tests, which need to ask what a module does when a setting CHANGES --
@@ -48,6 +61,8 @@ public:
 private:
     Config() = default;
     void parse();
+    void auditResolve(void* parsedMap);
+    void auditFlush() const;
 
     struct Impl;
     Impl*        m_impl = nullptr;

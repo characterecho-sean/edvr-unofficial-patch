@@ -2,8 +2,10 @@
 
 #include <windows.h>
 
+#include <cctype>
 #include <cstdlib>
 #include <map>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -13,7 +15,37 @@ namespace edvr {
 
 struct Config::Impl {
     std::map<std::string, std::string> values;
+    // The config audit's session memory: findings queued until the log can
+    // take them (the first parse runs before Log::open), and a set of what
+    // has already been said so a reload does not repeat it.
+    std::vector<std::string> auditPending;
+    std::set<std::string>    auditNoted;
 };
+
+namespace {
+// Registered by config_audit.cpp (DLLs) or by a test; null means no audit.
+const char* const*        g_auditKnown = nullptr;
+size_t                    g_auditKnownCount = 0;
+const char* const (*g_auditMoved)[2] = nullptr;
+size_t                    g_auditMovedCount = 0;
+
+std::string lowered(const std::string& s) {
+    std::string out = s;
+    for (char& c : out) {
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    return out;
+}
+}  // namespace
+
+void Config::setAuditTables(const char* const* knownLower, size_t knownCount,
+                            const char* const (*movedOldNew)[2],
+                            size_t movedCount) {
+    g_auditKnown = knownLower;
+    g_auditKnownCount = knownCount;
+    g_auditMoved = movedOldNew;
+    g_auditMovedCount = movedCount;
+}
 
 Config& Config::get() {
     static Config instance;
@@ -178,9 +210,14 @@ void Config::parse() {
         trim(val);
         if (key.empty()) continue;
         // Section-qualified keys, so [openvr] hook_compositor reads as
-        // "openvr.hook_compositor". Bare "a.b = c" also works.
-        parsed[section.empty() ? key : section + "." + key] = val;
+        // "openvr.hook_compositor". Bare "a.b = c" also works. Lowercased,
+        // matching the installer's merge: every key this build reads is
+        // lowercase, so a hand-typed "FSS_Res = 1" used to be filed under a
+        // spelling nothing looks up -- a line that does nothing and looks
+        // right.
+        parsed[lowered(section.empty() ? key : section + "." + key)] = val;
     }
+    auditResolve(&parsed);
     m_impl->values.swap(parsed);
     // Stamped only now, on the success path.
     //
@@ -190,6 +227,72 @@ void Config::parse() {
     // edit was never picked up for the rest of the session. The size-check bail
     // above already avoided this; the read path did not.
     if (haveInfo) m_lastWrite = info.ftLastWriteTime;
+    auditFlush();
+}
+
+// The parsed file against the registered tables: moved keys resolved, dead
+// lines named. Findings are queued -- the first parse runs before the log
+// opens -- and each is said once per session, so a live reload does not
+// repeat them.
+void Config::auditResolve(void* parsedMap) {
+    if (!g_auditKnown || !m_impl) return;
+    auto& parsed = *static_cast<std::map<std::string, std::string>*>(parsedMap);
+
+    std::set<std::string> movedOld;
+    for (size_t i = 0; i < g_auditMovedCount; ++i) {
+        const std::string oldK = g_auditMoved[i][0];
+        const std::string newK = g_auditMoved[i][1];
+        movedOld.insert(oldK);
+        auto o = parsed.find(oldK);
+        if (o == parsed.end()) continue;
+        auto n = parsed.find(newK);
+        if (n == parsed.end()) {
+            // The old-layout line still works: its value is read as the new
+            // key this session, and the log says how to make that permanent.
+            parsed[newK] = o->second;
+            if (m_impl->auditNoted.insert("mv:" + oldK).second) {
+                m_impl->auditPending.push_back(
+                    "edvr.ini: " + oldK + " has moved to " + newK +
+                    " -- your value (" + o->second + ") is being read from "
+                    "the old line this session. The installer's update "
+                    "migrates the file, or move the line yourself.");
+            }
+        } else if (n->second != o->second) {
+            if (m_impl->auditNoted.insert("mv2:" + oldK).second) {
+                m_impl->auditPending.push_back(
+                    "edvr.ini: both " + oldK + " and " + newK + " are set, "
+                    "with different values. The new name wins (" + n->second +
+                    "); delete the old line.");
+            }
+        }
+    }
+
+    std::set<std::string> known;
+    for (size_t i = 0; i < g_auditKnownCount; ++i) known.insert(g_auditKnown[i]);
+    std::string dead;
+    int deadCount = 0;
+    for (const auto& kv : parsed) {
+        if (known.count(kv.first) || movedOld.count(kv.first)) continue;
+        if (!m_impl->auditNoted.insert("uk:" + kv.first).second) continue;
+        if (!dead.empty()) dead += ", ";
+        if (deadCount < 8) dead += kv.first;
+        ++deadCount;
+    }
+    if (deadCount) {
+        if (deadCount > 8) dead += ", ...";
+        m_impl->auditPending.push_back(
+            "edvr.ini: " + std::to_string(deadCount) +
+            " line(s) name settings this build does not read: " + dead +
+            ". A typo or a retired setting -- those lines do nothing.");
+    }
+}
+
+void Config::auditFlush() const {
+    if (!m_impl || m_impl->auditPending.empty() || !Log::get().isOpen()) return;
+    for (const std::string& s : m_impl->auditPending) {
+        Log::get().note("%s", s.c_str());
+    }
+    m_impl->auditPending.clear();
 }
 
 bool Config::reloadIfChanged() {
@@ -202,6 +305,9 @@ bool Config::reloadIfChanged() {
 
 std::string Config::getString(const char* key, const char* def) const {
     if (!m_impl) return def ? def : "";
+    // The audit's findings wait here for the log: the first parse runs before
+    // Log::open, and the first config read after it opens is soon enough.
+    auditFlush();
     auto it = m_impl->values.find(key);
     if (it != m_impl->values.end()) return it->second;
     return std::string(def ? def : "");

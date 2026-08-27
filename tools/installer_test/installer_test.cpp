@@ -427,6 +427,33 @@ static void testShippedIni(const std::wstring& root) {
              "chaining is written into the real file");
     check(merged.size() > shipped.size() - 64,
           "the merged file is still the whole documented ini, not a stripped one");
+
+    // The 2026-08-27 field scenario, against the REAL shipped file: a rig
+    // whose ini predates the [fix] -> [experimental] move, with the two
+    // values whose loss actually regressed in a headset -- the scanner
+    // panel's stock-distance pin and the full-resolution body. Hand-installed
+    // (no base copy), which is exactly the rig the move strands.
+    const std::string oldLayout =
+        "[fix]\r\n"
+        "fss_panel_distance = 1.0\r\n"
+        "fss_res = 1\r\n"
+        "fss_eye_sync = stock\r\n"   // a key that never existed: carried, not eaten
+        "[advanced]\r\n"
+        "cull_guard_percent = 20.0\r\n";
+    MergeReport moveRep;
+    const std::string migrated = mergeIni(shipped, oldLayout, nullptr, {}, &moveRep);
+    expectEq(iniValue(migrated, "experimental.fss_panel_distance"), "1.0",
+             "the scanner panel's stock pin follows the section move");
+    expectEq(iniValue(migrated, "experimental.fss_res"), "1",
+             "the full-res body follows the section move");
+    expectEq(iniValue(migrated, "fix.fss_panel_distance"), "",
+             "nothing is left under the old name for the reader to shadow");
+    expectEq(iniValue(migrated, "advanced.cull_guard_percent"), "20.0",
+             "an unmoved tuned value still lands in its own section");
+    check(iniValue(migrated, "fix.fss_eye_sync") == "stock",
+          "a key this version never shipped is carried, with its note");
+    check(moveRep.followed.size() >= 2,
+          "the report says the values followed their settings");
 }
 
 // ---------------------------------------------------------------------------

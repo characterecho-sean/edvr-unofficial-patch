@@ -192,6 +192,47 @@ int main(int argc, char** argv) {
             expectBool("fix.black_void", false,
                        "a duplicate key takes the later value");
         }
+
+        // --- the config audit: moved keys and case, over fixture tables ---
+        //
+        // The DLLs register generated tables (config_audit.cpp); here small
+        // fixture tables prove the mechanics without depending on which keys
+        // happen to be moved this release. The scenario is 2026-08-27's
+        // field bug exactly: new DLLs hand-copied over an old-layout ini,
+        // where the value the user pinned sat under a section nothing read
+        // any more -- and the compiled default (inherit) moved the whole
+        // scanner UI.
+        static const char* kKnown[] = {"fix.alpha", "experimental.beta"};
+        static const char* kMoved[][2] = {{"fix.beta", "experimental.beta"}};
+        Config::get().setAuditTables(kKnown, 2, kMoved, 1);
+        static const char kAuditIni[] =
+            "[fix]\r\n"
+            "beta = 7\r\n"          // the old-layout line: must follow the move
+            "AlPhA = 3\r\n"         // case-typo: used to be filed unfindably
+            "mystery = 9\r\n";      // a key nothing reads: named, not eaten
+        if (!writeIni(scratch, kAuditIni)) {
+            fail("audit scratch ini", "could not write it");
+        } else {
+            Config::get().init(scratch);
+            expectInt("experimental.beta", 7,
+                      "an old-layout value is read through the moved-from map");
+            expectInt("fix.alpha", 3, "keys are matched case-insensitively");
+            expectInt("fix.mystery", 9,
+                      "an unknown key still reads (it is named in the log)");
+        }
+        static const char kBothIni[] =
+            "[fix]\r\n"
+            "beta = 7\r\n"
+            "[experimental]\r\n"
+            "beta = 5\r\n";
+        if (!writeIni(scratch, kBothIni)) {
+            fail("audit both-set ini", "could not write it");
+        } else {
+            Config::get().init(scratch);
+            expectInt("experimental.beta", 5,
+                      "when old and new are both set, the new name wins");
+        }
+        Config::get().setAuditTables(nullptr, 0, nullptr, 0);
     }
 
     if (g_fails) {
