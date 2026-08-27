@@ -298,6 +298,8 @@ struct State {
     int      censusFssJump = 0;
     int      fssTheaterOn = 0;
     uint32_t fssBodyStampFrame = 0;
+    uint32_t fssJumpFrame = 0;   // the zoom-start camera jump, for the
+                                 // reveal's arrival window
     uint32_t fssChromeSkipFrame = 0;
     uint32_t fssChromeSkipCount = 0;
     uint64_t fssChromeSkipped = 0;
@@ -1626,8 +1628,16 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
 
     // The reveal sync, after the probe so a probing session sees the true
     // draw. Same gate, same recognition shape.
-    if (fssRevealWantsDraws() && s->fssBodyFrame != 0 &&
-        s->frameNo - s->fssBodyFrame <= 2 &&
+    // The reveal's gate covers the ARRIVAL as well as the void: the
+    // 2026-08-27 lockstep flight engaged byte-identical and the squares
+    // survived -- because the body gate opens at the arrival's END, and
+    // the squares live in the ~10 frames before it. The mode latch keeps
+    // the widened window inside the scanner (the loading screen draws
+    // none of this), and the zoom-start jump bounds it.
+    if (fssRevealWantsDraws() &&
+        ((s->fssBodyFrame != 0 && s->frameNo - s->fssBodyFrame <= 2) ||
+         (deviceHookFssModeLatch() && s->fssJumpFrame != 0 &&
+          s->frameNo - s->fssJumpFrame <= 30)) &&
         fssRevealOnEyeDraw(self, kind, count, instances)) {
         return DrawVerdict::kFssReveal;
     }
@@ -2939,9 +2949,14 @@ void vScreenFrameBoundary() {
     // window where the left eye's reveal-gated blacks live -- the frames
     // every body-target-triggered census starts too late to see. One
     // census per latch, the standard auto-arm machinery.
-    if (s->censusFssJump && takeWorldJump() &&
-        s->fssChromeFrame != 0 && s->frameNo - s->fssChromeFrame <= 5) {
-        drawCensusAutoRequest();
+    if (takeWorldJump()) {
+        // The zoom-start marker, consumed once and shared: the reveal's
+        // arrival window and the census trigger both key on it.
+        s->fssJumpFrame = s->frameNo;
+        if (s->censusFssJump && s->fssChromeFrame != 0 &&
+            s->frameNo - s->fssChromeFrame <= 5) {
+            drawCensusAutoRequest();
+        }
     }
 
     // The theater's MODE gate (round 44): device_hook's latch -- the
