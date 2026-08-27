@@ -25,8 +25,11 @@ constexpr uint32_t kCbBytes = 192;     // cb0[12]
 constexpr uint32_t kVbBytes = 256;
 
 ID3D11Buffer* g_stRec = nullptr;
+ID3D11Buffer* g_stRecAt = nullptr;   // the window at the DRAW's record
 ID3D11Buffer* g_stCb = nullptr;
+ID3D11Buffer* g_stCb2 = nullptr;
 ID3D11Buffer* g_stVb = nullptr;
+uint32_t g_recAtOffset = 0;
 uint32_t g_recSrcBytes = 0, g_vbSrcBytes = 0, g_vbStride = 0, g_vbOffset = 0;
 uint32_t g_chromeW = 0, g_chromeH = 0, g_rtW = 0, g_rtH = 0;
 uint32_t g_argStartIndex = 0, g_argStartInstance = 0;
@@ -46,18 +49,25 @@ ID3D11Buffer* makeStaging(ID3D11Device* dev, uint32_t bytes) {
     return b;
 }
 
-// Box-copy the head of src into a fresh staging buffer.
-ID3D11Buffer* copyHead(ID3D11DeviceContext* ctx, ID3D11Device* dev,
-                       ID3D11Buffer* src, uint32_t want, uint32_t* srcBytes) {
+// Box-copy a range of src into a fresh staging buffer.
+ID3D11Buffer* copyRange(ID3D11DeviceContext* ctx, ID3D11Device* dev,
+                        ID3D11Buffer* src, uint32_t offset, uint32_t want,
+                        uint32_t* srcBytes) {
     D3D11_BUFFER_DESC sd{};
     src->GetDesc(&sd);
     *srcBytes = sd.ByteWidth;
-    const uint32_t n = sd.ByteWidth < want ? sd.ByteWidth : want;
+    if (offset >= sd.ByteWidth) return nullptr;
+    const uint32_t avail = sd.ByteWidth - offset;
+    const uint32_t n = avail < want ? avail : want;
     ID3D11Buffer* st = makeStaging(dev, n);
     if (!st) return nullptr;
-    D3D11_BOX box{0, 0, 0, n, 1, 1};
+    D3D11_BOX box{offset, 0, 0, offset + n, 1, 1};
     ctx->CopySubresourceRegion(st, 0, 0, 0, 0, src, 0, &box);
     return st;
+}
+ID3D11Buffer* copyHead(ID3D11DeviceContext* ctx, ID3D11Device* dev,
+                       ID3D11Buffer* src, uint32_t want, uint32_t* srcBytes) {
+    return copyRange(ctx, dev, src, 0, want, srcBytes);
 }
 
 void logBuffer(ID3D11DeviceContext* ctx, const char* name, ID3D11Buffer* st,
@@ -138,10 +148,17 @@ void fssPanelProbeOnComposite(ID3D11DeviceContext* ctx) {
                 g_argStartIndex, g_argBaseVertex, g_argStartInstance,
                 g_vbStride, g_vbOffset, g_chromeW, g_chromeH, g_rtW, g_rtH);
             logBuffer(ctx, "t33 record head", g_stRec, g_recSrcBytes);
+            Log::get().note("fss panel probe: t33 window at byte %u "
+                            "(record %u x 336):",
+                            g_recAtOffset, g_argStartInstance);
+            logBuffer(ctx, "t33 record at draw", g_stRecAt, g_recSrcBytes);
             logBuffer(ctx, "cb0", g_stCb, kCbBytes);
+            logBuffer(ctx, "cb2", g_stCb2, 128);
             logBuffer(ctx, "vertex head", g_stVb, g_vbSrcBytes);
             if (g_stRec) { g_stRec->Release(); g_stRec = nullptr; }
+            if (g_stRecAt) { g_stRecAt->Release(); g_stRecAt = nullptr; }
             if (g_stCb) { g_stCb->Release(); g_stCb = nullptr; }
+            if (g_stCb2) { g_stCb2->Release(); g_stCb2 = nullptr; }
             if (g_stVb) { g_stVb->Release(); g_stVb = nullptr; }
             Log::get().note("fss panel probe: capture complete; standing "
                             "down for the session.");
@@ -167,6 +184,13 @@ void fssPanelProbeOnComposite(ID3D11DeviceContext* ctx) {
             }
             if (buf) {
                 g_stRec = copyHead(ctx, dev, buf, kRecBytes, &g_recSrcBytes);
+                // The window the DRAW actually reads: startInstance
+                // records in. The head alone missed it on the first
+                // flight (startInstance was 56).
+                g_recAtOffset = g_argStartInstance * 336u;
+                uint32_t dummy = 0;
+                g_stRecAt = copyRange(ctx, dev, buf, g_recAtOffset,
+                                      kRecBytes, &dummy);
                 buf->Release();
             }
         }
@@ -177,6 +201,13 @@ void fssPanelProbeOnComposite(ID3D11DeviceContext* ctx) {
             uint32_t src = 0;
             g_stCb = copyHead(ctx, dev, cb, kCbBytes, &src);
             cb->Release();
+        }
+        ID3D11Buffer* cb2 = nullptr;
+        ctx->VSGetConstantBuffers(2, 1, &cb2);
+        if (cb2) {
+            uint32_t src = 0;
+            g_stCb2 = copyHead(ctx, dev, cb2, 128, &src);
+            cb2->Release();
         }
 
         ID3D11Buffer* vb = nullptr;
@@ -235,7 +266,9 @@ void fssPanelProbeOnComposite(ID3D11DeviceContext* ctx) {
 
 void fssPanelProbeShutdown() {
     if (g_stRec) { g_stRec->Release(); g_stRec = nullptr; }
+    if (g_stRecAt) { g_stRecAt->Release(); g_stRecAt = nullptr; }
     if (g_stCb) { g_stCb->Release(); g_stCb = nullptr; }
+    if (g_stCb2) { g_stCb2->Release(); g_stCb2 = nullptr; }
     if (g_stVb) { g_stVb->Release(); g_stVb = nullptr; }
 }
 
