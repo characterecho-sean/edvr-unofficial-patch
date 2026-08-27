@@ -159,7 +159,7 @@ void fssPanelProbeOnComposite(ID3D11DeviceContext* ctx) {
                 g_argStartIndex, g_argBaseVertex, g_argStartInstance,
                 g_vbStride, g_vbOffset, g_vb1Stride, g_vb1Offset,
                 g_vb1WinOffset, g_chromeW, g_chromeH, g_rtW, g_rtH);
-            logBuffer(ctx, "vb1 (instance stream) window", g_stVb1,
+            logBuffer(ctx, "vb0 (instance stream) window", g_stVb1,
                       g_vb1SrcBytes);
             g_instX = 0;
             if (g_stVb1) {
@@ -259,10 +259,12 @@ void fssPanelProbeOnComposite(ID3D11DeviceContext* ctx) {
             g_stVb = copyHead(ctx, dev, vb, kVbBytes, &g_vbSrcBytes);
             vb->Release();
         }
-        // The per-instance stream: the window this draw's fetch reads,
-        // startInstance * stride in (plus the bound offset).
+        // The per-instance stream is SLOT 0 (uint2 inst, stride 8 -- the
+        // v3 flight's 40-byte slot 1 is the packed vertex pool that
+        // baseVertex indexes). The window this draw's fetch reads:
+        // startInstance * stride in, plus the bound offset.
         ID3D11Buffer* vb1 = nullptr;
-        ctx->IAGetVertexBuffers(1, 1, &vb1, &g_vb1Stride, &g_vb1Offset);
+        ctx->IAGetVertexBuffers(0, 1, &vb1, &g_vb1Stride, &g_vb1Offset);
         if (vb1) {
             g_vb1WinOffset =
                 g_vb1Offset + g_argStartInstance * g_vb1Stride;
