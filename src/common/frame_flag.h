@@ -87,6 +87,11 @@ bool readFssPanelRect(float* out16);
 void bumpFssPanelRectRedo();
 long fssPanelRectRedoValue();
 
+// The zoom-press arrival window, one bump per open frame: the squares'
+// ~10 frames, and the only frames the window-scoped heal touches.
+void bumpFssArrivalStamp();
+long fssArrivalStampValue();
+
 // A camera-jump latch WITHIN d3d11.dll (plain process state, not the
 // mapping): the glitch detector notes every world-camera jump; the
 // arrival census takes the latch at the frame boundary. Lives here so

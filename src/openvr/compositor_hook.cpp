@@ -206,6 +206,8 @@ struct State {
     int  fssHealOn = 0;
     LONG healChromeStamp = 0;
     uint32_t healChromeSeen = 0;
+    LONG healArrivalStamp = 0;
+    uint32_t healArrivalSeen = 0;
     PFN_EdvrFssHeal healFn = nullptr;
     bool healFnTried = false;
 
@@ -990,7 +992,23 @@ vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
         }
     }
 
-    if (((eye == vr::Eye_Left && s->fssHealOn == 1) ||
+    // Round 48: the heal is scoped to the ARRIVAL WINDOW -- the
+    // zoom-press frames where the squares live and the content is the
+    // body at optical infinity. Its old life as an always-on classifier
+    // died to UI false positives (mode 1 was DOA in the field); inside
+    // this window there is almost no UI to maul.
+    bool healWindow = false;
+    if (s->fssHealOn) {
+        const LONG as = fssArrivalStampValue();
+        if (as != s->healArrivalStamp) {
+            s->healArrivalStamp = as;
+            s->healArrivalSeen = s->pace_boundaryNo;
+        }
+        healWindow = s->healArrivalSeen != 0 &&
+                     s->pace_boundaryNo - s->healArrivalSeen <= 3;
+    }
+    if (healWindow &&
+        ((eye == vr::Eye_Left && s->fssHealOn == 1) ||
          (eye == vr::Eye_Right && s->fssHealOn == 2)) &&
         texture && texture->eType == vr::TextureType_DirectX) {
         const LONG stamp = fssChromeStampValue();

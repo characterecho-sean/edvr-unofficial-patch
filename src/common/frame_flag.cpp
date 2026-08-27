@@ -112,6 +112,9 @@ struct Shared {
     // The centring servo's re-derive request: the openvr half nudges the
     // frozen pose toward square-on and asks for a fresh derivation.
     volatile LONG fssPanelRectRedo;
+    // The arrival stamp: bumped by d3d11 each frame the zoom-press
+    // window is open. The heal scopes itself to exactly these frames.
+    volatile LONG fssArrivalStamp;
     float         fssPanelRect[16];  // corner UVs TL,TR,BR,BL as (u,v):
                                      // [0..7] the LEFT eye's, [8..15] the
                                      // RIGHT eye's -- the renderer
@@ -165,7 +168,8 @@ struct Shared {
 // The name is built once, at first use. The two DLLs are in the same process,
 // so the channel between them is unaffected.
 //
-// _v17 because the centring servo's redo counter joined the panel rect.
+// _v18 because the arrival stamp joined for the window-scoped heal. _v17
+// added the centring servo's redo counter.
 // _v16 carried both eyes' corner sets for the nose-mask stitch. _v15 was one eye's corners, _v14 the 4-float rect,
 // _v13 fssBodyStamp, _v12 fssChromeStamp, _v11 fssMonoFrames, _v10
 // submitTex. _v9 was
@@ -191,7 +195,7 @@ const wchar_t* mappingName() {
     static wchar_t name[64];
     static bool built = false;
     if (!built) {
-        _snwprintf_s(name, _TRUNCATE, L"Local\\edvr_glitch_frame_v17_%lu",
+        _snwprintf_s(name, _TRUNCATE, L"Local\\edvr_glitch_frame_v18_%lu",
                      GetCurrentProcessId());
         built = true;
     }
@@ -231,6 +235,16 @@ void publishFssPanelRect(const float* corners16) {
 long fssPanelRectSeqValue() {
     Shared* s = map();
     return s ? s->fssPanelRectSeq : 0;
+}
+
+void bumpFssArrivalStamp() {
+    Shared* s = map();
+    if (s) InterlockedIncrement(&s->fssArrivalStamp);
+}
+
+long fssArrivalStampValue() {
+    Shared* s = map();
+    return s ? s->fssArrivalStamp : 0;
 }
 
 void bumpFssPanelRectRedo() {

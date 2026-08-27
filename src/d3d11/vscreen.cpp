@@ -2989,6 +2989,7 @@ void vScreenFrameBoundary() {
         const bool open =
             s->fssJumpFrame != 0 && s->frameNo - s->fssJumpFrame <= 30 &&
             deviceHookFssModeLatch() && fssRevealWantsDraws();
+        if (open) bumpFssArrivalStamp();
         if (open && !s->fssArrivalOpen) {
             s->fssArrivalRecogs = 0;
         } else if (!open && s->fssArrivalOpen &&
