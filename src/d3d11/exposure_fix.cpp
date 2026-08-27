@@ -147,6 +147,9 @@ struct State {
     uint64_t pairSyncHash = 0;
     bool     pairSyncReverse = false;
     uint8_t  pairSyncSeen = 0;            // occurrences this frame
+    void*    pairSyncFirstRes[2] = {};    // occurrence 1's UAV0/UAV1
+                                          // RESOURCES (the indirect path:
+                                          // the reconstruction binds two)
     void*    pairSyncFirstUav = nullptr;  // occurrence 1's UAV0 view -- the
                                           // firstEye[] bargain: identity held
                                           // within the frame, resolved at use
@@ -916,6 +919,70 @@ void STDMETHODCALLTYPE hookedDispatchIndirect(ID3D11DeviceContext* self,
         drawCensusDispatch(self, 0, 0, 0, foreignContext(self), args, off);
     }
     if (!foreignContext(self)) s->computeThisFrame = true;
+
+    // The pair-sync, extended to the INDIRECT path (round 47: the
+    // reconstruction dispatches -- 5998146D and kin -- arrive as
+    // DispatchIndirect with two UAVs bound, so the round-8 Dispatch-only
+    // sync armed and matched nothing). Occurrence 1's UAV resources are
+    // remembered; occurrence 2 runs and is then overwritten from the
+    // first, BOTH slots -- both eyes read one eye's products.
+    if (s->pairSyncHash &&
+        hashOf(bindingGet(BindSlot::Cs)) == s->pairSyncHash) {
+        ++s->pairSyncSeen;
+        if (s->pairSyncSeen == 1) {
+            guardedBudget(g_budget, [&] {
+                ID3D11UnorderedAccessView* u[2] = {};
+                self->CSGetUnorderedAccessViews(0, 2, u);
+                for (int i = 0; i < 2; ++i) {
+                    s->pairSyncFirstRes[i] = nullptr;
+                    if (u[i]) {
+                        ID3D11Resource* r = nullptr;
+                        u[i]->GetResource(&r);
+                        if (r) {
+                            s->pairSyncFirstRes[i] = r;
+                            r->Release();   // the binding keeps it alive
+                        }
+                        u[i]->Release();
+                    }
+                }
+            });
+        } else if (s->pairSyncSeen == 2 &&
+                   (s->pairSyncFirstRes[0] || s->pairSyncFirstRes[1])) {
+            s->realDispatchIndirect(self, args, off);
+            guardedBudget(g_budget, [&] {
+                ID3D11UnorderedAccessView* u[2] = {};
+                self->CSGetUnorderedAccessViews(0, 2, u);
+                for (int i = 0; i < 2; ++i) {
+                    if (!u[i]) continue;
+                    ID3D11Resource* r = nullptr;
+                    u[i]->GetResource(&r);
+                    ID3D11Resource* first = static_cast<ID3D11Resource*>(
+                        s->pairSyncFirstRes[i]);
+                    if (r && first && r != first) {
+                        if (s->pairSyncReverse) {
+                            self->CopyResource(first, r);
+                        } else {
+                            self->CopyResource(r, first);
+                        }
+                        ++s->pairSyncCopies;
+                        if (!s->pairSyncNoted) {
+                            s->pairSyncNoted = true;
+                            Log::get().note(
+                                "dispatch pair sync: first copy made "
+                                "(INDIRECT path, UAV slot %d) -- the two "
+                                "occurrences' resources are distinct and "
+                                "one now mirrors the other, every frame.",
+                                i);
+                        }
+                    }
+                    if (r) r->Release();
+                    u[i]->Release();
+                }
+            });
+            return;
+        }
+    }
+
     s->realDispatchIndirect(self, args, off);
 }
 
@@ -1386,6 +1453,8 @@ void exposureFixFrameBoundary() {
     // pointer dies at the boundary exactly as firstEye[] does.
     for (uint32_t i = 0; i < 4; ++i) s->dispatchOccSeen[i] = 0;
     s->pairSyncSeen = 0;
+    s->pairSyncFirstRes[0] = nullptr;
+    s->pairSyncFirstRes[1] = nullptr;
     s->pairSyncFirstUav = nullptr;
 
     // Forget what was bound, once a frame.
