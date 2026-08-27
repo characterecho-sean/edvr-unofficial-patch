@@ -52,6 +52,26 @@ constexpr uint32_t kMaxSurvey = 24;
 uint32_t g_surveyStart[kMaxSurvey];
 uint32_t g_surveyCount = 0;
 
+// v7: the two inputs the survey could not name -- each distinct draw's
+// MODEL CORNERS (a window into the packed vertex pool at baseVertex, and
+// the index window that says which four of them the six indices use) and
+// cb1's tail rows (275 is the world-rebase origin that makes record
+// positions camera-relative). Captured for the first few DISTINCT quads.
+constexpr uint32_t kMaxQuads = 4;
+struct QuadCap {
+    uint32_t startInstance = 0;
+    uint32_t startIndex = 0;
+    int32_t  baseVertex = 0;
+    ID3D11Buffer* stVerts = nullptr;   // vertex pool @ baseVertex*stride
+    ID3D11Buffer* stIdx = nullptr;     // index buffer @ startIndex*size
+    uint32_t vertsOffset = 0, idxOffset = 0, idxFormatBytes = 0;
+    uint32_t poolStride = 0;
+};
+QuadCap g_quads[kMaxQuads];
+uint32_t g_quadCount = 0;
+ID3D11Buffer* g_stCb1Tail = nullptr;   // cb1 rows 268..276 (144 bytes)
+uint32_t g_cb1TailOffset = 0, g_cb1Bytes = 0;
+
 bool writeDump(const char* name, const void* data, uint32_t bytes) {
     CreateDirectoryA("edvr_logs", nullptr);
     CreateDirectoryA("edvr_logs\\dumps", nullptr);
@@ -173,6 +193,54 @@ void fssPanelProbeOnComposite(ID3D11DeviceContext* ctx) {
             if (g_surveyCount < kMaxSurvey) {
                 g_surveyStart[g_surveyCount++] = g_argStartInstance;
             }
+            // A distinct quad not yet windowed: take its vertex and index
+            // windows now, same-frame with the pool snapshot.
+            bool seen = false;
+            for (uint32_t i = 0; i < g_quadCount; ++i) {
+                if (g_quads[i].startInstance == g_argStartInstance) {
+                    seen = true;
+                    break;
+                }
+            }
+            if (!seen && g_quadCount < kMaxQuads) {
+                ID3D11Device* dev = nullptr;
+                ctx->GetDevice(&dev);
+                if (dev) {
+                    QuadCap& q = g_quads[g_quadCount];
+                    q.startInstance = g_argStartInstance;
+                    q.startIndex = g_argStartIndex;
+                    q.baseVertex = g_argBaseVertex;
+                    ID3D11Buffer* pool = nullptr;
+                    UINT stride = 0, off = 0;
+                    ctx->IAGetVertexBuffers(1, 1, &pool, &stride, &off);
+                    if (pool) {
+                        q.poolStride = stride;
+                        q.vertsOffset =
+                            off + static_cast<uint32_t>(q.baseVertex) *
+                                      stride;
+                        uint32_t dummy = 0;
+                        q.stVerts = copyRange(ctx, dev, pool, q.vertsOffset,
+                                              8 * stride, &dummy);
+                        pool->Release();
+                    }
+                    ID3D11Buffer* ib = nullptr;
+                    DXGI_FORMAT fmt = DXGI_FORMAT_UNKNOWN;
+                    UINT ibOff = 0;
+                    ctx->IAGetIndexBuffer(&ib, &fmt, &ibOff);
+                    if (ib) {
+                        q.idxFormatBytes =
+                            fmt == DXGI_FORMAT_R32_UINT ? 4u : 2u;
+                        q.idxOffset =
+                            ibOff + q.startIndex * q.idxFormatBytes;
+                        uint32_t dummy = 0;
+                        q.stIdx = copyRange(ctx, dev, ib, q.idxOffset,
+                                            12 * q.idxFormatBytes, &dummy);
+                        ib->Release();
+                    }
+                    ++g_quadCount;
+                    dev->Release();
+                }
+            }
             --g_copiedAtCountdown;
             return;
         }
@@ -197,6 +265,27 @@ void fssPanelProbeOnComposite(ID3D11DeviceContext* ctx) {
                                   g_surveyStart[i]);
                 }
                 Log::get().note("%s", line);
+            }
+            for (uint32_t i = 0; i < g_quadCount; ++i) {
+                QuadCap& q = g_quads[i];
+                Log::get().note(
+                    "fss panel probe: quad %u -- startInstance=%u "
+                    "startIndex=%u baseVertex=%d poolStride=%u "
+                    "vertsAt=%u idxAt=%u idx%u:",
+                    i, q.startInstance, q.startIndex, q.baseVertex,
+                    q.poolStride, q.vertsOffset, q.idxOffset,
+                    q.idxFormatBytes * 8);
+                logBuffer(ctx, "  indices", q.stIdx, 0);
+                logBuffer(ctx, "  vertices", q.stVerts, 0);
+                if (q.stIdx) { q.stIdx->Release(); q.stIdx = nullptr; }
+                if (q.stVerts) { q.stVerts->Release(); q.stVerts = nullptr; }
+            }
+            g_quadCount = 0;
+            logBuffer(ctx, "cb1 tail (rows 268..276)", g_stCb1Tail,
+                      g_cb1Bytes);
+            if (g_stCb1Tail) {
+                g_stCb1Tail->Release();
+                g_stCb1Tail = nullptr;
             }
             for (ID3D11Buffer** st : {&g_stVb1, &g_stT33All}) {
                 if (!*st) continue;
@@ -375,6 +464,16 @@ void fssPanelProbeOnComposite(ID3D11DeviceContext* ctx) {
         }
         g_surveyCount = 0;
         g_surveyStart[g_surveyCount++] = g_argStartInstance;
+        g_quadCount = 0;
+        // cb1's tail: row 275 is the rebase origin. One window.
+        ID3D11Buffer* cb1 = nullptr;
+        ctx->VSGetConstantBuffers(1, 1, &cb1);
+        if (cb1) {
+            g_cb1TailOffset = 268u * 16u;
+            g_stCb1Tail = copyRange(ctx, dev, cb1, g_cb1TailOffset, 144,
+                                    &g_cb1Bytes);
+            cb1->Release();
+        }
 
         ID3D11RenderTargetView* rtv = nullptr;
         ctx->OMGetRenderTargets(1, &rtv, nullptr);
@@ -426,6 +525,11 @@ void fssPanelProbeOnComposite(ID3D11DeviceContext* ctx) {
 
 void fssPanelProbeShutdownExtra() {
     if (g_stT33All) { g_stT33All->Release(); g_stT33All = nullptr; }
+    if (g_stCb1Tail) { g_stCb1Tail->Release(); g_stCb1Tail = nullptr; }
+    for (QuadCap& q : g_quads) {
+        if (q.stIdx) { q.stIdx->Release(); q.stIdx = nullptr; }
+        if (q.stVerts) { q.stVerts->Release(); q.stVerts = nullptr; }
+    }
 }
 void fssPanelProbeShutdown() {
     fssPanelProbeShutdownExtra();
