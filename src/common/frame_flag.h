@@ -78,9 +78,9 @@ long fssBodyStampValue();
 // openvr half hands them to the renderer, which rectifies the quad
 // through a square-to-quad homography: the content arrives level and
 // fully framed whatever the screen's tilt or the head's pose at engage.
-void publishFssPanelRect(const float* corners8);
+void publishFssPanelRect(const float* corners16);   // both eyes, L then R
 long fssPanelRectSeqValue();
-bool readFssPanelRect(float* out8);
+bool readFssPanelRect(float* out16);
 
 // A camera-jump latch WITHIN d3d11.dll (plain process state, not the
 // mapping): the glitch detector notes every world-camera jump; the

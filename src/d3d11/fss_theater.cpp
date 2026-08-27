@@ -21,6 +21,7 @@ namespace {
 // only head-look reveals the screen.
 constexpr char kTheaterCsHlsl[] = R"HLSL(
 Texture2D<float4> C : register(t0);
+Texture2D<float4> C2 : register(t1);   // the RIGHT eye, for the stitch
 SamplerState S0 : register(s0);
 RWTexture2D<float4> O : register(u0);
 cbuffer P : register(b0) {
@@ -33,9 +34,14 @@ cbuffer P : register(b0) {
                    // the screen shows, centre-cropped), y = half width
                    // along the surface, z = half height, w = curve
     float4 hA;     // square->quad homography for the scanner screen's
-    float4 hB;     // quad: pu=(hA.x sx + hA.y sy + hA.z)/den, pv=(hA.w sx
-                   // + hB.x sy + hB.y)/den, den=hB.z sx + hB.w sy + 1.
-                   // All-zero hA = no quad; the centred band applies.
+    float4 hB;     // quad in the LEFT eye: pu=(hA.x sx + hA.y sy +
+                   // hA.z)/den, pv=(hA.w sx + hB.x sy + hB.y)/den,
+                   // den=hB.z sx + hB.w sy + 1. All-zero hA = no quad;
+                   // the centred band applies.
+    float4 hA2;    // the RIGHT eye's homography. Where valid, the panel's
+    float4 hB2;    // right half samples the right eye instead -- each eye
+                   // is clean on its temporal side, so the nose-mask
+                   // cutouts never reach the screen. All-zero = left only.
 }
 [numthreads(16, 16, 1)]
 void main(uint3 id : SV_DispatchThreadID) {
@@ -92,16 +98,35 @@ void main(uint3 id : SV_DispatchThreadID) {
         if (hA.x != 0.0 || hA.y != 0.0 || hA.z != 0.0) {
             float sx = su;
             float sy = 1.0 - sv;
-            float den = hB.z * sx + hB.w * sy + 1.0;
-            pu = (hA.x * sx + hA.y * sy + hA.z) / den;
-            pv = (hA.w * sx + hB.x * sy + hB.y) / den;
-            // A corner past the rendered eye means this strip was never
-            // drawn: honest black, not a clamped smear or a warped
-            // mapping.
+            // The stitch: the panel's left half from the left eye, right
+            // half from the right eye when its homography is valid --
+            // each eye clean on its temporal side, so the nasal
+            // hidden-area cutouts (the nose shadow) never reach the
+            // screen. The screen sits at optical-far depth, so the two
+            // eyes' images agree at the seam.
+            bool useR = sx >= 0.5 &&
+                        (hA2.x != 0.0 || hA2.y != 0.0 || hA2.z != 0.0);
+            float den, s2;
+            if (useR) {
+                den = hB2.z * sx + hB2.w * sy + 1.0;
+                pu = (hA2.x * sx + hA2.y * sy + hA2.z) / den;
+                pv = (hA2.w * sx + hB2.x * sy + hB2.y) / den;
+            } else {
+                den = hB.z * sx + hB.w * sy + 1.0;
+                pu = (hA.x * sx + hA.y * sy + hA.z) / den;
+                pv = (hA.w * sx + hB.x * sy + hB.y) / den;
+            }
+            // A sample past the rendered eye means this strip was never
+            // drawn: honest black, not a clamped smear.
             if (pu < 0.0 || pu > 1.0 || pv < 0.0 || pv > 1.0) {
                 O[id.xy] = float4(0, 0, 0, 1);
                 return;
             }
+            outc = useR
+                       ? float4(C2.SampleLevel(S0, float2(pu, pv), 0).rgb, 1)
+                       : float4(C.SampleLevel(S0, float2(pu, pv), 0).rgb, 1);
+            O[id.xy] = outc;
+            return;
         } else {
             pu = su;
             pv = 0.5 + (0.5 - sv) * misc.x;
@@ -126,11 +151,11 @@ ID3D11ComputeShader*       g_cs = nullptr;
 bool                       g_csTried = false;
 ID3D11Texture2D*           g_out[2] = {};
 ID3D11UnorderedAccessView* g_outUav[2] = {};
-// The copy-through pair: when the submitted texture refuses a shader view
-// (the series capture met the same refusal), the content is copied into
-// this own samplable texture instead.
-ID3D11Texture2D*           g_copy = nullptr;
-ID3D11ShaderResourceView*  g_copySrv = nullptr;
+// The copy-through pairs (one per content eye): when a submitted texture
+// refuses a shader view (the series capture met the same refusal), the
+// content is copied into an own samplable texture instead.
+ID3D11Texture2D*           g_copy[2] = {};
+ID3D11ShaderResourceView*  g_copySrv[2] = {};
 uint32_t g_outW = 0, g_outH = 0;
 ID3D11Buffer*       g_cb = nullptr;
 ID3D11SamplerState* g_samp = nullptr;
@@ -147,7 +172,56 @@ void failOnce(const char* what) {
     }
 }
 
-void* theaterInner(void* contentTex, int eye, float outerMag, float innerMag,
+// One content texture -> a shader view, direct or through the slot's
+// copy. Returns null when neither path serves.
+ID3D11ShaderResourceView* contentView(ID3D11DeviceContext* ctx,
+                                      ID3D11Device* dev,
+                                      ID3D11Texture2D* ct, int slot) {
+    D3D11_TEXTURE2D_DESC cd{};
+    ct->GetDesc(&cd);
+    const DXGI_FORMAT typed = theaterTypedOf(cd.Format);
+    D3D11_SHADER_RESOURCE_VIEW_DESC vd{};
+    vd.Format = typed;
+    vd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+    vd.Texture2D.MipLevels = 1;
+    ID3D11ShaderResourceView* srv = nullptr;
+    if ((cd.BindFlags & D3D11_BIND_SHADER_RESOURCE) &&
+        SUCCEEDED(dev->CreateShaderResourceView(ct, &vd, &srv))) {
+        return srv;
+    }
+    if (!g_copy[slot]) {
+        D3D11_TEXTURE2D_DESC pd = cd;
+        pd.Format = typed;
+        pd.Usage = D3D11_USAGE_DEFAULT;
+        pd.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        pd.CPUAccessFlags = 0;
+        pd.MiscFlags = 0;
+        pd.MipLevels = 1;
+        pd.SampleDesc.Count = 1;
+        pd.SampleDesc.Quality = 0;
+        if (FAILED(dev->CreateTexture2D(&pd, nullptr, &g_copy[slot])) ||
+            FAILED(dev->CreateShaderResourceView(g_copy[slot], &vd,
+                                                 &g_copySrv[slot]))) {
+            if (g_copy[slot]) {
+                g_copy[slot]->Release();
+                g_copy[slot] = nullptr;
+            }
+            g_copySrv[slot] = nullptr;
+            return nullptr;
+        }
+    }
+    if (cd.SampleDesc.Count > 1) {
+        ctx->ResolveSubresource(g_copy[slot], 0, ct, 0, typed);
+    } else {
+        ctx->CopySubresourceRegion(g_copy[slot], 0, 0, 0, 0, ct, 0,
+                                   nullptr);
+    }
+    g_copySrv[slot]->AddRef();
+    return g_copySrv[slot];
+}
+
+void* theaterInner(void* contentTex, void* contentTexR, int eye,
+                   float outerMag, float innerMag,
                    const float* xf, float dist, float scale, float curve,
                    float aspect, const float* rect) {
     ID3D11Texture2D* ct = nullptr;
@@ -180,8 +254,16 @@ void* theaterInner(void* contentTex, int eye, float outerMag, float innerMag,
             if (g_outUav[e]) { g_outUav[e]->Release(); g_outUav[e] = nullptr; }
             if (g_out[e]) { g_out[e]->Release(); g_out[e] = nullptr; }
         }
-        if (g_copySrv) { g_copySrv->Release(); g_copySrv = nullptr; }
-        if (g_copy) { g_copy->Release(); g_copy = nullptr; }
+        for (int e2 = 0; e2 < 2; ++e2) {
+            if (g_copySrv[e2]) {
+                g_copySrv[e2]->Release();
+                g_copySrv[e2] = nullptr;
+            }
+            if (g_copy[e2]) {
+                g_copy[e2]->Release();
+                g_copy[e2] = nullptr;
+            }
+        }
         for (int e = 0; e < 2 && ok; ++e) {
             D3D11_TEXTURE2D_DESC od = cd;
             od.Format = typed;
@@ -201,7 +283,7 @@ void* theaterInner(void* contentTex, int eye, float outerMag, float innerMag,
     }
     if (ok && !g_cb) {
         D3D11_BUFFER_DESC bd{};
-        bd.ByteWidth = 112;
+        bd.ByteWidth = 144;
         bd.Usage = D3D11_USAGE_DYNAMIC;
         bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
         bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
@@ -227,44 +309,23 @@ void* theaterInner(void* contentTex, int eye, float outerMag, float innerMag,
     ok = ok && g_cs != nullptr;
 
     ID3D11ShaderResourceView* cs = nullptr;
+    ID3D11ShaderResourceView* cs2 = nullptr;
     if (ok) {
-        D3D11_SHADER_RESOURCE_VIEW_DESC vd{};
-        vd.Format = typed;
-        vd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
-        vd.Texture2D.MipLevels = 1;
-        if (!(cd.BindFlags & D3D11_BIND_SHADER_RESOURCE) ||
-            FAILED(dev->CreateShaderResourceView(ct, &vd, &cs))) {
-            cs = nullptr;
-            if (!g_copy) {
-                D3D11_TEXTURE2D_DESC pd = cd;
-                pd.Format = typed;
-                pd.Usage = D3D11_USAGE_DEFAULT;
-                pd.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-                pd.CPUAccessFlags = 0;
-                pd.MiscFlags = 0;
-                pd.MipLevels = 1;
-                pd.SampleDesc.Count = 1;
-                pd.SampleDesc.Quality = 0;
-                if (FAILED(dev->CreateTexture2D(&pd, nullptr, &g_copy)) ||
-                    FAILED(dev->CreateShaderResourceView(g_copy, &vd,
-                                                         &g_copySrv))) {
-                    if (g_copy) { g_copy->Release(); g_copy = nullptr; }
-                    g_copySrv = nullptr;
-                }
-            }
-            if (g_copy && g_copySrv) {
-                if (cd.SampleDesc.Count > 1) {
-                    ctx->ResolveSubresource(g_copy, 0, ct, 0, typed);
-                } else {
-                    ctx->CopySubresourceRegion(g_copy, 0, 0, 0, 0, ct, 0,
-                                               nullptr);
-                }
-                g_copySrv->AddRef();
-                cs = g_copySrv;
-            }
-        }
+        cs = contentView(ctx, dev, ct, 0);
         ok = cs != nullptr;
         if (!ok) failOnce("the content texture refuses a shader view");
+    }
+    if (ok && contentTexR && rect) {
+        // The right eye, when supplied and a stitch rect exists. Its
+        // failure is not the theater's: the left eye alone still draws.
+        ID3D11Texture2D* ctR = nullptr;
+        static_cast<IUnknown*>(contentTexR)
+            ->QueryInterface(__uuidof(ID3D11Texture2D),
+                             reinterpret_cast<void**>(&ctR));
+        if (ctR) {
+            cs2 = contentView(ctx, dev, ctR, 1);
+            ctR->Release();
+        }
     }
 
     if (ok) {
@@ -299,12 +360,12 @@ void* theaterInner(void* contentTex, int eye, float outerMag, float innerMag,
         // The square->quad homography (Heckbert's closed form) from unit
         // screen coordinates (TL origin, y down) to the derived corner
         // UVs. All-zero when no quad was supplied.
-        float hA[4] = {}, hB[4] = {};
-        if (rect) {
-            const float x0 = rect[0], y0 = rect[1];   // TL
-            const float x1 = rect[2], y1 = rect[3];   // TR
-            const float x2 = rect[4], y2 = rect[5];   // BR
-            const float x3 = rect[6], y3 = rect[7];   // BL
+        float hA[4] = {}, hB[4] = {}, hA2[4] = {}, hB2[4] = {};
+        auto homography = [](const float* c8, float* a, float* b) {
+            const float x0 = c8[0], y0 = c8[1];   // TL
+            const float x1 = c8[2], y1 = c8[3];   // TR
+            const float x2 = c8[4], y2 = c8[5];   // BR
+            const float x3 = c8[6], y3 = c8[7];   // BL
             const float sx = x0 - x1 + x2 - x3;
             const float sy = y0 - y1 + y2 - y3;
             float g = 0.0f, h = 0.0f;
@@ -315,16 +376,27 @@ void* theaterInner(void* contentTex, int eye, float outerMag, float innerMag,
                 g = (sx * dy2 - sy * dx2) / den;
                 h = (dx1 * sy - dy1 * sx) / den;
             }
-            hA[0] = x1 - x0 + g * x1;
-            hA[1] = x3 - x0 + h * x3;
-            hA[2] = x0;
-            hA[3] = y1 - y0 + g * y1;
-            hB[0] = y3 - y0 + h * y3;
-            hB[1] = y0;
-            hB[2] = g;
-            hB[3] = h;
+            a[0] = x1 - x0 + g * x1;
+            a[1] = x3 - x0 + h * x3;
+            a[2] = x0;
+            a[3] = y1 - y0 + g * y1;
+            b[0] = y3 - y0 + h * y3;
+            b[1] = y0;
+            b[2] = g;
+            b[3] = h;
+        };
+        if (rect) {
+            homography(rect, hA, hB);
+            // The right eye's set: all-zero corners mean unavailable, and
+            // the stitch needs a view to sample.
+            bool haveR = cs2 != nullptr;
+            for (int i = 8; i < 16 && haveR; ++i) {
+                if (rect[i] != 0.0f) break;
+                if (i == 15) haveR = false;
+            }
+            if (haveR) homography(rect + 8, hA2, hB2);
         }
-        float cbData[28] = {
+        float cbData[36] = {
             lt, rt, vt, dist,
             xf[0], xf[1], xf[2], xf[9],
             xf[3], xf[4], xf[5], xf[10],
@@ -332,6 +404,8 @@ void* theaterInner(void* contentTex, int eye, float outerMag, float innerMag,
             band, halfW, halfH, curve,
             hA[0], hA[1], hA[2], hA[3],
             hB[0], hB[1], hB[2], hB[3],
+            hA2[0], hA2[1], hA2[2], hA2[3],
+            hB2[0], hB2[1], hB2[2], hB2[3],
         };
         D3D11_MAPPED_SUBRESOURCE m{};
         if (SUCCEEDED(ctx->Map(g_cb, 0, D3D11_MAP_WRITE_DISCARD, 0, &m)) &&
@@ -346,35 +420,38 @@ void* theaterInner(void* contentTex, int eye, float outerMag, float innerMag,
     void* result = nullptr;
     if (ok) {
         ID3D11ComputeShader* savedCs = nullptr;
-        ID3D11ShaderResourceView* savedSrv = nullptr;
+        ID3D11ShaderResourceView* savedSrv[2] = {};
         ID3D11UnorderedAccessView* savedUav = nullptr;
         ID3D11Buffer* savedCb = nullptr;
         ID3D11SamplerState* savedSamp = nullptr;
         ctx->CSGetShader(&savedCs, nullptr, nullptr);
-        ctx->CSGetShaderResources(0, 1, &savedSrv);
+        ctx->CSGetShaderResources(0, 2, savedSrv);
         ctx->CSGetUnorderedAccessViews(0, 1, &savedUav);
         ctx->CSGetConstantBuffers(0, 1, &savedCb);
         ctx->CSGetSamplers(0, 1, &savedSamp);
 
         UINT keep = 0;
+        ID3D11ShaderResourceView* setSrv[2] = {cs, cs2 ? cs2 : cs};
         ctx->CSSetShader(g_cs, nullptr, 0);
-        ctx->CSSetShaderResources(0, 1, &cs);
+        ctx->CSSetShaderResources(0, 2, setSrv);
         ctx->CSSetUnorderedAccessViews(0, 1, &g_outUav[eye], &keep);
         ctx->CSSetConstantBuffers(0, 1, &g_cb);
         ctx->CSSetSamplers(0, 1, &g_samp);
         ctx->Dispatch((g_outW + 15) / 16, (g_outH + 15) / 16, 1);
 
-        ID3D11ShaderResourceView* nullSrv = nullptr;
+        ID3D11ShaderResourceView* nullSrv[2] = {};
         ID3D11UnorderedAccessView* nullUav = nullptr;
-        ctx->CSSetShaderResources(0, 1, &nullSrv);
+        ctx->CSSetShaderResources(0, 2, nullSrv);
         ctx->CSSetUnorderedAccessViews(0, 1, &nullUav, &keep);
         ctx->CSSetShader(savedCs, nullptr, 0);
-        ctx->CSSetShaderResources(0, 1, &savedSrv);
+        ctx->CSSetShaderResources(0, 2, savedSrv);
         ctx->CSSetUnorderedAccessViews(0, 1, &savedUav, &keep);
         ctx->CSSetConstantBuffers(0, 1, &savedCb);
         ctx->CSSetSamplers(0, 1, &savedSamp);
         if (savedCs) savedCs->Release();
-        if (savedSrv) savedSrv->Release();
+        for (int s2i = 0; s2i < 2; ++s2i) {
+            if (savedSrv[s2i]) savedSrv[s2i]->Release();
+        }
         if (savedUav) savedUav->Release();
         if (savedCb) savedCb->Release();
         if (savedSamp) savedSamp->Release();
@@ -395,6 +472,7 @@ void* theaterInner(void* contentTex, int eye, float outerMag, float innerMag,
     }
 
     if (cs) cs->Release();
+    if (cs2) cs2->Release();
     ctx->Release();
     dev->Release();
     ct->Release();
@@ -419,6 +497,7 @@ void fssTheaterWarm(ID3D11DeviceContext* ctx) {
 }  // namespace edvr
 
 extern "C" __declspec(dllexport) void* edvrFssTheater(void* contentTex,
+                                                      void* contentTexR,
                                                       int eye,
                                                       float outerMag,
                                                       float innerMag,
@@ -431,8 +510,9 @@ extern "C" __declspec(dllexport) void* edvrFssTheater(void* contentTex,
     if (!contentTex || !xf || eye < 0 || eye > 1) return nullptr;
     void* out = nullptr;
     edvr::guardedBudget(edvr::g_budget, [&] {
-        out = edvr::theaterInner(contentTex, eye, outerMag, innerMag, xf,
-                                 dist, scale, curve, aspect, rect);
+        out = edvr::theaterInner(contentTex, contentTexR, eye, outerMag,
+                                 innerMag, xf, dist, scale, curve, aspect,
+                                 rect);
     });
     return out;
 }

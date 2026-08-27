@@ -419,7 +419,7 @@ void fssPanelRectOnComposite(ID3D11DeviceContext* ctx, uint32_t ordinal,
         // farthest family z, projected through the LEFT eye's rows --
         // identified by where the family centre lands (nasal of image
         // centre only in the left eye).
-        float corners[8] = {};
+        float corners[16] = {};
         uint32_t mask = 0;
         if (ok) {
             float refZ = 0.0f, refScale = 1.0f;
@@ -448,6 +448,13 @@ void fssPanelRectOnComposite(ID3D11DeviceContext* ctx, uint32_t ordinal,
                 const float nMaxX = qd.maxX * qd.scale * norm;
                 const float nMinY = qd.minY * qd.scale * norm;
                 const float nMaxY = qd.maxY * qd.scale * norm;
+                // An oversized member is the translucent BACKDROP sheet,
+                // not the screen (the field's screenshot showed sky above
+                // the screen inside the crop): drawn, but not framed.
+                if (nMaxX - nMinX > 2.2f * 164.7f ||
+                    nMaxY - nMinY > 2.2f * 92.655f) {
+                    continue;
+                }
                 if (first || nMinX < uMinX) uMinX = nMinX;
                 if (first || nMaxX > uMaxX) uMaxX = nMaxX;
                 if (first || nMinY < uMinY) uMinY = nMinY;
@@ -459,7 +466,8 @@ void fssPanelRectOnComposite(ID3D11DeviceContext* ctx, uint32_t ordinal,
             const float* rowsA = reinterpret_cast<const float*>(cb0A + 64);
             const float* rowsB =
                 haveB ? reinterpret_cast<const float*>(cb0B + 64) : nullptr;
-            const float* rows = rowsA;
+            const float* rowsL = rowsA;
+            const float* rowsR = rowsB;
             if (ok) {
                 float cw[3];
                 quatRotate(refQ, 0.0f, 0.0f, refZ, &cw[0], &cw[1], &cw[2]);
@@ -471,39 +479,40 @@ void fssPanelRectOnComposite(ID3D11DeviceContext* ctx, uint32_t ordinal,
                 const bool pb =
                     rowsB ? project(rowsB, centre, &ub, &vb) : false;
                 // For the SAME far point the left eye's u is always the
-                // larger (its temporal side is left, so content sits
-                // nasal-shifted right). Absolute thresholds collapse
-                // under head yaw -- the 45f flight's lesson -- so the
-                // pick is relative, pose-proof.
+                // larger. Relative, pose-proof (the 45f lesson). Both
+                // eyes' sets are published: the renderer stitches, each
+                // eye clean on its temporal side (the nose-mask fix).
                 if (pa && pb) {
-                    rows = ua >= ub ? rowsA : rowsB;
+                    rowsL = ua >= ub ? rowsA : rowsB;
+                    rowsR = ua >= ub ? rowsB : rowsA;
                 } else if (pb) {
-                    rows = rowsB;
+                    rowsL = rowsB;
+                    rowsR = nullptr;
+                } else {
+                    rowsR = nullptr;
                 }
                 ok = pa || pb;
                 g_pickU[0] = ua;
                 g_pickU[1] = ub;
-                g_pickLeftIsA = rows == rowsA;
+                g_pickLeftIsA = rowsL == rowsA;
             }
             if (ok) {
                 const float cx[5] = {uMinX, uMaxX, uMaxX, uMinX, 0.0f};
                 const float cy[5] = {uMaxY, uMaxY, uMinY, uMinY, 0.0f};
-                float cu[5], cv[5];
-                for (int i = 0; i < 5 && ok; ++i) {
+                float w5[5][3];
+                for (int i = 0; i < 5; ++i) {
                     float w[3];
                     quatRotate(refQ, cx[i], cy[i], refZ, &w[0], &w[1],
                                &w[2]);
-                    const float p[3] = {w[0] + refPos[0] - rebase[0],
-                                        w[1] + refPos[1] - rebase[1],
-                                        w[2] + refPos[2] - rebase[2]};
-                    ok = project(rows, p, &cu[i], &cv[i]);
+                    w5[i][0] = w[0] + refPos[0] - rebase[0];
+                    w5[i][1] = w[1] + refPos[1] - rebase[1];
+                    w5[i][2] = w[2] + refPos[2] - rebase[2];
+                }
+                float cu[5], cv[5];
+                for (int i = 0; i < 5 && ok; ++i) {
+                    ok = project(rowsL, w5[i], &cu[i], &cv[i]);
                 }
                 if (ok) {
-                    // TRUE corners, unshrunken: a quad that overhangs the
-                    // rendered eye keeps its real shape, and the renderer
-                    // blacks the never-rendered strip per pixel -- the
-                    // 45f fit-shrink warped the whole mapping to hide a
-                    // sliver, which read as the screen angling away.
                     for (int i = 0; i < 4; ++i) {
                         corners[i * 2 + 0] = cu[i];
                         corners[i * 2 + 1] = cv[i];
@@ -512,6 +521,21 @@ void fssPanelRectOnComposite(ID3D11DeviceContext* ctx, uint32_t ordinal,
                     }
                     ok = ok && corners[2] - corners[0] > 0.2f &&
                          corners[7] - corners[1] > 0.1f;
+                }
+                // The RIGHT eye's set, zeroed when unavailable -- the
+                // renderer then samples the left eye alone.
+                if (ok && rowsR) {
+                    bool okR = true;
+                    float ru[4], rv[4];
+                    for (int i = 0; i < 4 && okR; ++i) {
+                        okR = project(rowsR, w5[i], &ru[i], &rv[i]);
+                    }
+                    if (okR) {
+                        for (int i = 0; i < 4; ++i) {
+                            corners[8 + i * 2 + 0] = ru[i];
+                            corners[8 + i * 2 + 1] = rv[i];
+                        }
+                    }
                 }
             }
         }

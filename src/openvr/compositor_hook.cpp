@@ -74,9 +74,9 @@ typedef vr::EVRCompositorError(*PFN_Submit)(void* self, vr::EVREye eye,
                                             vr::EVRSubmitFlags flags);
 
 typedef void* (*PFN_EdvrFssHeal)(void*, void*, float, float, int);
-typedef void* (*PFN_EdvrFssTheater)(void*, int, float, float, const float*,
-                                    float, float, float, float,
-                                    const float*);
+typedef void* (*PFN_EdvrFssTheater)(void*, void*, int, float, float,
+                                    const float*, float, float, float,
+                                    float, const float*);
 
 constexpr float kTheaterHalfIpd = 0.0315f;
 
@@ -213,7 +213,8 @@ struct State {
     float theaterScale = 1.0f;
     float theaterCurve = 0.0f;
     float theaterAspect = 1.78f;
-    float theaterRect[8] = {};
+    float theaterRect[16] = {};
+    void* theaterContentR = nullptr;
     bool  theaterRectValid = false;
     LONG  theaterRectSeq = 0;
     LONG theaterStamp = 0;
@@ -795,6 +796,11 @@ vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
         } else {
             content = s->theaterContent ? s->theaterContent
                                         : texture->handle;
+            // The right eye's own image, for the nose-mask stitch: its
+            // temporal side is clean exactly where the left eye's nasal
+            // mask bites. One frame stale at the left draw; the screen
+            // sits at optical-far depth, where that is nothing.
+            s->theaterContentR = texture->handle;
         }
         // The engage's derived screen rectangle, adopted when the d3d11
         // half publishes a new one; dropped at unfreeze so a stale rect
@@ -817,7 +823,8 @@ vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
                              kTheaterHalfIpd,
                          xf);
             void* drawn = s->theaterFn(
-                content, eye == vr::Eye_Left ? 0 : 1, outer, inner,
+                content, s->theaterContentR,
+                eye == vr::Eye_Left ? 0 : 1, outer, inner,
                 xf, s->theaterDist, s->theaterScale, s->theaterCurve,
                 s->theaterAspect,
                 s->theaterRectValid ? s->theaterRect : nullptr);
@@ -1387,6 +1394,7 @@ vr::EVRCompositorError hookedWaitGetPoses(void* self,
         } else if (!bodyActive) {
             s->theaterFrozen = false;
             s->theaterContent = nullptr;
+            s->theaterContentR = nullptr;
             s->theaterRectValid = false;
         }
     }
