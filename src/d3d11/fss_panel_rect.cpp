@@ -18,9 +18,13 @@ namespace {
 // corners +-kHalfW x +-kHalfH at z = kDist, identity orientation, origin
 // position. The rebase origin (centimetres) and the quaternion's
 // quantisation tilt (sub-degree) are ignored on purpose.
-constexpr float kHalfW = 164.700f;
-constexpr float kHalfH = 92.655f;
-constexpr float kDist = 180.000f;
+// The DISPLAY quad, not the outer frame (the field saw the bezel's edge
+// inside the first crop), pulled in by a hair so the screen's quantised
+// tilt cannot leak a sliver of edge.
+constexpr float kInset = 0.99f;
+constexpr float kHalfW = 131.176f * kInset;
+constexpr float kHalfH = 71.874f * kInset;
+constexpr float kDist = 156.114f;
 
 ID3D11Buffer* g_stCb = nullptr;
 int  g_countdown = -1;      // >=0: copies queued, counting down to readback

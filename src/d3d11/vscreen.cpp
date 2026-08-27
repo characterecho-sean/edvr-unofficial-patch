@@ -298,6 +298,10 @@ struct State {
     int      censusFssJump = 0;
     int      fssTheaterOn = 0;
     uint32_t fssBodyStampFrame = 0;
+    uint32_t fssChromeSkipFrame = 0;
+    uint32_t fssChromeSkipCount = 0;
+    uint64_t fssChromeSkipped = 0;
+    bool     fssChromeSkipNoted = false;
     bool sawClearState = false;
     bool sawExecuteCommandList = false;
 
@@ -1173,6 +1177,7 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     if ((s->fssHealOn || s->censusFssJump || fssPanelProbeWants() ||
          s->fssTheaterOn) &&
         kind == 'X' && count == 6) {
+        bool chromeMatched = false;
         guardedBudget(g_panelCbBudget, [&] {
             ID3D11VertexShader* vs = nullptr;
             self->VSGetShader(&vs, nullptr, nullptr);
@@ -1203,14 +1208,45 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
             tex->Release();
             if (td.Width >= 2000 && td.Height >= 1000 &&
                 td.Height < td.Width) {
+                chromeMatched = true;
                 if (s->fssChromeFrame != s->frameNo) {
                     s->fssChromeFrame = s->frameNo;
                     bumpFssChromeStamp();
+                    // The FIRST matched composite of the frame is the
+                    // left eye's screen (the eyes draw left-first, the
+                    // screen pair before the scenery) -- the one whose
+                    // constants the rect must come from.
+                    if (s->fssTheaterOn) fssPanelRectOnComposite(self);
                 }
                 fssPanelProbeOnComposite(self);
-                if (s->fssTheaterOn) fssPanelRectOnComposite(self);
             }
         });
+        // The scanner's OFF-screen chrome pieces -- the neon frame around
+        // the player, the survey's side quads -- draw through this same
+        // pipeline AFTER the screen pair. While the cinema screen is up
+        // they are scenery behind it: skipping them keeps them out of the
+        // captured eye, which is what cleans the crop's top edge. The
+        // first four matched draws are the screen pair for both eyes.
+        if (chromeMatched && s->fssTheaterOn && deviceHookFssModeLatch()) {
+            if (s->fssChromeSkipFrame != s->frameNo) {
+                s->fssChromeSkipFrame = s->frameNo;
+                s->fssChromeSkipCount = 0;
+            }
+            ++s->fssChromeSkipCount;
+            if (s->fssChromeSkipCount > 4) {
+                if (!s->fssChromeSkipNoted) {
+                    s->fssChromeSkipNoted = true;
+                    Log::get().note(
+                        "fss theater: the scanner's off-screen chrome "
+                        "pieces (the neon frame) are skipped while the "
+                        "screen is up -- the first four matched draws are "
+                        "the screen pair, the rest are scenery. Said "
+                        "once.");
+                }
+                ++s->fssChromeSkipped;
+                return DrawVerdict::kSkip;
+            }
+        }
     }
 
     s->glareClamp = 0;
