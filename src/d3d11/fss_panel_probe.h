@@ -40,6 +40,10 @@ bool fssPanelProbeWants();
 void fssPanelProbeDrawArgs(uint32_t startIndex, int32_t baseVertex,
                            uint32_t startInstance);
 
+// The latest stashed startInstance -- the rect deriver reads the
+// instance-stream window of the very draw it captures with.
+uint32_t fssPanelProbeStartInstance();
+
 // Called at a recognised chrome composite (inside the tracker's matched
 // branch). Copies on the first call, reads back and logs a few frames
 // later, then stands down.

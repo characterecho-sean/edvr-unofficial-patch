@@ -2461,7 +2461,7 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
     // The panel probe's capture runs INSIDE beginPanelOverride (the
     // chrome tracker's matched branch), so its draw-args stash must land
     // before the call. Armed one session at a time; free otherwise.
-    if (fssPanelProbeWants()) {
+    if (fssPanelProbeWants() || g_state->fssTheaterOn) {
         fssPanelProbeDrawArgs(startIndex, baseVertex, startInstance);
     }
     const DrawVerdict v = beginPanelOverride(self, 'X', perInstance, instances);

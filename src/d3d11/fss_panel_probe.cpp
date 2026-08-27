@@ -184,6 +184,8 @@ void fssPanelProbeDrawArgs(uint32_t startIndex, int32_t baseVertex,
     g_argStartInstance = startInstance;
 }
 
+uint32_t fssPanelProbeStartInstance() { return g_argStartInstance; }
+
 void fssPanelProbeOnComposite(ID3D11DeviceContext* ctx) {
     if (!fssPanelProbeWants() || !ctx) return;
     if (!deviceHookFssModeLatch()) return;   // never the loading screen
