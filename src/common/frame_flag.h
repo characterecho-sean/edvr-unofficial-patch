@@ -73,12 +73,14 @@ long fssChromeStampValue();
 void bumpFssBodyStamp();
 long fssBodyStampValue();
 
-// The scanner screen's rectangle in the eye (u0,v0,u1,v1), derived by
-// d3d11 once per theater engage and cropped to by the openvr half. seq
-// is 0 until the first publish and bumps on every one.
-void publishFssPanelRect(float u0, float v0, float u1, float v1);
+// The scanner screen's PROJECTED CORNERS in the eye -- TL,TR,BR,BL as
+// (u,v) pairs, 8 floats -- derived by d3d11 once per theater engage. The
+// openvr half hands them to the renderer, which rectifies the quad
+// through a square-to-quad homography: the content arrives level and
+// fully framed whatever the screen's tilt or the head's pose at engage.
+void publishFssPanelRect(const float* corners8);
 long fssPanelRectSeqValue();
-bool readFssPanelRect(float* out4);
+bool readFssPanelRect(float* out8);
 
 // A camera-jump latch WITHIN d3d11.dll (plain process state, not the
 // mapping): the glitch detector notes every world-camera jump; the

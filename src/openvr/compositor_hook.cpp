@@ -213,7 +213,7 @@ struct State {
     float theaterScale = 1.0f;
     float theaterCurve = 0.0f;
     float theaterAspect = 1.78f;
-    float theaterRect[4] = {};
+    float theaterRect[8] = {};
     bool  theaterRectValid = false;
     LONG  theaterRectSeq = 0;
     LONG theaterStamp = 0;

@@ -32,9 +32,10 @@ cbuffer P : register(b0) {
     float4 misc;   // x = vertical band (fraction of the texture's height
                    // the screen shows, centre-cropped), y = half width
                    // along the surface, z = half height, w = curve
-    float4 rect;   // the scanner screen's own rectangle in the content
-                   // (u0,v0,u1,v1); z > x means valid and it replaces
-                   // the centred band
+    float4 hA;     // square->quad homography for the scanner screen's
+    float4 hB;     // quad: pu=(hA.x sx + hA.y sy + hA.z)/den, pv=(hA.w sx
+                   // + hB.x sy + hB.y)/den, den=hB.z sx + hB.w sy + 1.
+                   // All-zero hA = no quad; the centred band applies.
 }
 [numthreads(16, 16, 1)]
 void main(uint3 id : SV_DispatchThreadID) {
@@ -82,14 +83,18 @@ void main(uint3 id : SV_DispatchThreadID) {
         }
     }
     if (su >= 0 && su <= 1 && sv >= 0 && sv <= 1) {
-        // Screen fractions -> content coordinates: the derived rectangle
-        // of the scanner's own screen when the bridge supplied one, the
-        // centred band otherwise. sv runs bottom-up in space, v runs
-        // top-down in the texture.
+        // Screen fractions -> content coordinates. With a derived quad,
+        // the square->quad homography rectifies the scanner's screen --
+        // level and fully framed whatever its tilt or the head's pose at
+        // engage; otherwise the centred band. sv runs bottom-up in
+        // space; the homography's sy runs top-down like the texture.
         float pu, pv;
-        if (rect.z > rect.x) {
-            pu = lerp(rect.x, rect.z, su);
-            pv = lerp(rect.y, rect.w, 1.0 - sv);
+        if (hA.x != 0.0 || hA.y != 0.0 || hA.z != 0.0) {
+            float sx = su;
+            float sy = 1.0 - sv;
+            float den = hB.z * sx + hB.w * sy + 1.0;
+            pu = (hA.x * sx + hA.y * sy + hA.z) / den;
+            pv = (hA.w * sx + hB.x * sy + hB.y) / den;
         } else {
             pu = su;
             pv = 0.5 + (0.5 - sv) * misc.x;
@@ -189,7 +194,7 @@ void* theaterInner(void* contentTex, int eye, float outerMag, float innerMag,
     }
     if (ok && !g_cb) {
         D3D11_BUFFER_DESC bd{};
-        bd.ByteWidth = 96;
+        bd.ByteWidth = 112;
         bd.Usage = D3D11_USAGE_DYNAMIC;
         bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
         bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
@@ -284,14 +289,42 @@ void* theaterInner(void* contentTex, int eye, float outerMag, float innerMag,
             if (halfH > nativeHalfH) halfH = nativeHalfH;
             band = halfH / nativeHalfH;
         }
-        float cbData[24] = {
+        // The square->quad homography (Heckbert's closed form) from unit
+        // screen coordinates (TL origin, y down) to the derived corner
+        // UVs. All-zero when no quad was supplied.
+        float hA[4] = {}, hB[4] = {};
+        if (rect) {
+            const float x0 = rect[0], y0 = rect[1];   // TL
+            const float x1 = rect[2], y1 = rect[3];   // TR
+            const float x2 = rect[4], y2 = rect[5];   // BR
+            const float x3 = rect[6], y3 = rect[7];   // BL
+            const float sx = x0 - x1 + x2 - x3;
+            const float sy = y0 - y1 + y2 - y3;
+            float g = 0.0f, h = 0.0f;
+            const float dx1 = x1 - x2, dx2 = x3 - x2;
+            const float dy1 = y1 - y2, dy2 = y3 - y2;
+            const float den = dx1 * dy2 - dx2 * dy1;
+            if (den != 0.0f && (sx != 0.0f || sy != 0.0f)) {
+                g = (sx * dy2 - sy * dx2) / den;
+                h = (dx1 * sy - dy1 * sx) / den;
+            }
+            hA[0] = x1 - x0 + g * x1;
+            hA[1] = x3 - x0 + h * x3;
+            hA[2] = x0;
+            hA[3] = y1 - y0 + g * y1;
+            hB[0] = y3 - y0 + h * y3;
+            hB[1] = y0;
+            hB[2] = g;
+            hB[3] = h;
+        }
+        float cbData[28] = {
             lt, rt, vt, dist,
             xf[0], xf[1], xf[2], xf[9],
             xf[3], xf[4], xf[5], xf[10],
             xf[6], xf[7], xf[8], xf[11],
             band, halfW, halfH, curve,
-            rect ? rect[0] : 0.0f, rect ? rect[1] : 0.0f,
-            rect ? rect[2] : -1.0f, rect ? rect[3] : 0.0f,
+            hA[0], hA[1], hA[2], hA[3],
+            hB[0], hB[1], hB[2], hB[3],
         };
         D3D11_MAPPED_SUBRESOURCE m{};
         if (SUCCEEDED(ctx->Map(g_cb, 0, D3D11_MAP_WRITE_DISCARD, 0, &m)) &&

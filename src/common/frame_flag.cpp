@@ -109,7 +109,7 @@ struct Shared {
     // openvr half crops the cinema screen's content to it. seq bumps per
     // publish; 0 means never published.
     volatile LONG fssPanelRectSeq;
-    float         fssPanelRect[4];
+    float         fssPanelRect[8];   // corner UVs: TL,TR,BR,BL as (u,v)
     // cullGuard  the cull guard's stage and margin, packed as
     //            (stage << 24) | (hPerMille << 12) | vPerMille, written by
     //            openvr_api.dll at its stage transitions
@@ -158,9 +158,9 @@ struct Shared {
 // The name is built once, at first use. The two DLLs are in the same process,
 // so the channel between them is unaffected.
 //
-// _v14 because the struct changed again -- the panel rect was added. _v13
-// was fssBodyStamp, _v12 fssChromeStamp, _v11 fssMonoFrames, _v10
-// submitTex. _v9 was
+// _v15 because the panel rect grew to four corners (a rectified quad, not
+// a box). _v14 was the 4-float rect, _v13 fssBodyStamp, _v12
+// fssChromeStamp, _v11 fssMonoFrames, _v10 submitTex. _v9 was
 // headForward. _v8 was
 // eyeTangents, _v7 cullGuard, _v6 eyeSize, _v5 holdFrames, _v4
 // externalCamStamp, _v3 the field before that. A mismatched pair from
@@ -183,7 +183,7 @@ const wchar_t* mappingName() {
     static wchar_t name[64];
     static bool built = false;
     if (!built) {
-        _snwprintf_s(name, _TRUNCATE, L"Local\\edvr_glitch_frame_v14_%lu",
+        _snwprintf_s(name, _TRUNCATE, L"Local\\edvr_glitch_frame_v15_%lu",
                      GetCurrentProcessId());
         built = true;
     }
@@ -213,13 +213,10 @@ void noteWorldJump() { InterlockedExchange(&g_worldJump, 1); }
 
 bool takeWorldJump() { return InterlockedExchange(&g_worldJump, 0) != 0; }
 
-void publishFssPanelRect(float u0, float v0, float u1, float v1) {
+void publishFssPanelRect(const float* corners8) {
     Shared* s = map();
-    if (!s) return;
-    s->fssPanelRect[0] = u0;
-    s->fssPanelRect[1] = v0;
-    s->fssPanelRect[2] = u1;
-    s->fssPanelRect[3] = v1;
+    if (!s || !corners8) return;
+    for (int i = 0; i < 8; ++i) s->fssPanelRect[i] = corners8[i];
     InterlockedIncrement(&s->fssPanelRectSeq);
 }
 
@@ -228,10 +225,10 @@ long fssPanelRectSeqValue() {
     return s ? s->fssPanelRectSeq : 0;
 }
 
-bool readFssPanelRect(float* out4) {
+bool readFssPanelRect(float* out8) {
     Shared* s = map();
-    if (!s || !out4 || s->fssPanelRectSeq == 0) return false;
-    for (int i = 0; i < 4; ++i) out4[i] = s->fssPanelRect[i];
+    if (!s || !out8 || s->fssPanelRectSeq == 0) return false;
+    for (int i = 0; i < 8; ++i) out8[i] = s->fssPanelRect[i];
     return true;
 }
 

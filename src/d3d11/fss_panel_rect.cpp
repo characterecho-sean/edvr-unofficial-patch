@@ -18,13 +18,36 @@ namespace {
 // corners +-kHalfW x +-kHalfH at z = kDist, identity orientation, origin
 // position. The rebase origin (centimetres) and the quaternion's
 // quantisation tilt (sub-degree) are ignored on purpose.
-// The DISPLAY quad, not the outer frame (the field saw the bezel's edge
-// inside the first crop), pulled in by a hair so the screen's quantised
-// tilt cannot leak a sliver of edge.
-constexpr float kInset = 0.99f;
-constexpr float kHalfW = 131.176f * kInset;
-constexpr float kHalfH = 71.874f * kInset;
-constexpr float kDist = 156.114f;
+// The OUTER frame quad: the display-only crop cut the UI boxes painted
+// between the display and the frame extents (field, third flight). The
+// black-strip lesson rides in fitShrink below, and the tilt in the quat.
+constexpr float kHalfW = 164.700f;
+constexpr float kHalfH = 92.655f;
+constexpr float kDist = 180.000f;
+
+// The record's orientation as the GAME decodes it: raw 0x7FFF/0xFFFF
+// through the engine's own asymmetric unorm scale -- NOT identity, and
+// not normalised. This ~3-degree compound tilt is why the screen leaned
+// in the axis-aligned crop; projecting with the same numbers the shader
+// uses puts our corners exactly on the drawn quad.
+constexpr float kQx = 0.015777f;
+constexpr float kQy = 0.015777f;
+constexpr float kQz = 0.015777f;
+constexpr float kQw = 1.031585f;
+
+// p' = (2w^2 - 1) p + 2 (q.p) q + 2 w (q x p), the game's expansion,
+// unnormalised on purpose.
+void quatRotate(float px, float py, float pz, float* ox, float* oy,
+                float* oz) {
+    const float cxv = kQy * pz - py * kQz;
+    const float cyv = kQz * px - pz * kQx;
+    const float czv = kQx * py - px * kQy;
+    const float d = kQx * px + kQy * py + kQz * pz;
+    const float t = kQw * (kQw + kQw);
+    *ox = t * px - px + d * (kQx + kQx) + cxv * (kQw + kQw);
+    *oy = t * py - py + d * (kQy + kQy) + cyv * (kQw + kQw);
+    *oz = t * pz - pz + d * (kQz + kQz) + czv * (kQw + kQw);
+}
 
 ID3D11Buffer* g_stCb = nullptr;
 int  g_countdown = -1;      // >=0: copies queued, counting down to readback
@@ -70,12 +93,19 @@ void fssPanelRectOnComposite(ID3D11DeviceContext* ctx) {
                 g_stCb = nullptr;
             }
             if (!got) return;
-            const float cx[4] = {kHalfW, kHalfW, -kHalfW, -kHalfW};
-            const float cy[4] = {kHalfH, -kHalfH, -kHalfH, kHalfH};
-            float u0 = 2.0f, u1 = -1.0f, v0 = 2.0f, v1 = -1.0f;
+            // Corner order TL,TR,BR,BL in model space (+y up).
+            const float cx[4] = {-kHalfW, kHalfW, kHalfW, -kHalfW};
+            const float cy[4] = {kHalfH, kHalfH, -kHalfH, -kHalfH};
+            float cu[5], cv[5];   // 4 corners + the centre
             bool ok = true;
-            for (int i = 0; i < 4 && ok; ++i) {
-                const float p[4] = {cx[i], cy[i], kDist, 1.0f};
+            for (int i = 0; i < 5 && ok; ++i) {
+                float wx, wy, wz;
+                if (i < 4) {
+                    quatRotate(cx[i], cy[i], kDist, &wx, &wy, &wz);
+                } else {
+                    quatRotate(0.0f, 0.0f, kDist, &wx, &wy, &wz);
+                }
+                const float p[4] = {wx, wy, wz, 1.0f};
                 float clip[4];
                 for (int r = 0; r < 4; ++r) {
                     clip[r] = rows[r * 4 + 0] * p[0] +
@@ -86,29 +116,53 @@ void fssPanelRectOnComposite(ID3D11DeviceContext* ctx) {
                     ok = false;   // a corner behind the eye: not our screen
                     break;
                 }
-                const float u = (clip[0] / clip[3] + 1.0f) * 0.5f;
-                const float v = (1.0f - clip[1] / clip[3]) * 0.5f;
-                if (u < u0) u0 = u;
-                if (u > u1) u1 = u;
-                if (v < v0) v0 = v;
-                if (v > v1) v1 = v;
+                cu[i] = (clip[0] / clip[3] + 1.0f) * 0.5f;
+                cv[i] = (1.0f - clip[1] / clip[3]) * 0.5f;
             }
-            // Sanity: a plausible screen spans a real fraction of the eye
-            // and overlaps it. Anything else publishes nothing.
-            ok = ok && u1 - u0 > 0.2f && u1 - u0 < 1.6f &&
-                 v1 - v0 > 0.1f && v1 - v0 < 1.2f && u1 > 0.05f &&
-                 u0 < 0.95f && v1 > 0.05f && v0 < 0.95f;
+            float corners[8] = {};
             if (ok) {
-                publishFssPanelRect(u0, v0, u1, v1);
+                // Shrink about the projected centre until every corner
+                // sits inside the rendered eye -- content past the edge
+                // was never drawn, and sampling it was the 45b black
+                // strip on the right.
+                float f = 0.998f;
+                for (int i = 0; i < 4; ++i) {
+                    const float du = cu[i] - cu[4];
+                    const float dv = cv[i] - cv[4];
+                    if (du > 0) f = f < (0.998f - cu[4]) / du ? f : (0.998f - cu[4]) / du;
+                    if (du < 0) f = f < (0.002f - cu[4]) / du ? f : (0.002f - cu[4]) / du;
+                    if (dv > 0) f = f < (0.998f - cv[4]) / dv ? f : (0.998f - cv[4]) / dv;
+                    if (dv < 0) f = f < (0.002f - cv[4]) / dv ? f : (0.002f - cv[4]) / dv;
+                }
+                ok = f > 0.5f;   // needing to halve the screen is not a screen
+                for (int i = 0; i < 4 && ok; ++i) {
+                    corners[i * 2 + 0] = cu[4] + (cu[i] - cu[4]) * f;
+                    corners[i * 2 + 1] = cv[4] + (cv[i] - cv[4]) * f;
+                }
+            }
+            if (ok) {
+                // Spans still plausible after the fit.
+                const float w1 = corners[2] - corners[0];
+                const float h1 = corners[7] - corners[1];
+                ok = w1 > 0.2f && h1 > 0.1f;
+            }
+            if (ok) {
+                publishFssPanelRect(corners);
                 g_published = true;
                 ++g_derives;
                 Log::get().note(
-                    "fss panel rect: derived for this engage -- u "
-                    "[%.4f..%.4f] v [%.4f..%.4f] (%u this session). The "
-                    "cinema screen crops to exactly the scanner's screen.",
-                    static_cast<double>(u0), static_cast<double>(u1),
-                    static_cast<double>(v0), static_cast<double>(v1),
-                    g_derives);
+                    "fss panel rect: corners derived for this engage -- TL "
+                    "(%.4f,%.4f) TR (%.4f,%.4f) BR (%.4f,%.4f) BL "
+                    "(%.4f,%.4f) (%u this session). The cinema screen "
+                    "rectifies the scanner's screen quad.",
+                    static_cast<double>(corners[0]),
+                    static_cast<double>(corners[1]),
+                    static_cast<double>(corners[2]),
+                    static_cast<double>(corners[3]),
+                    static_cast<double>(corners[4]),
+                    static_cast<double>(corners[5]),
+                    static_cast<double>(corners[6]),
+                    static_cast<double>(corners[7]), g_derives);
             } else if (!g_failNoted) {
                 g_failNoted = true;
                 Log::get().note(
