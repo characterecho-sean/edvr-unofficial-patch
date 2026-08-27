@@ -30,6 +30,30 @@ constexpr uint32_t kSceneBlockMax = 8192;
 
 bool g_steady = false;
 bool g_redraw = false;
+bool g_lockstep = false;
+
+// ---- The lockstep copies: occurrence 1's four content textures, frozen
+// at its draw so occurrence 2 reads the same bytes. Recreated whenever a
+// source's description changes (fss_res remakes the body layer per
+// zoom). A slot the copy machinery cannot serve stands the whole
+// substitution down for the frame -- half a lockstep is a new split.
+ID3D11Texture2D*          g_lsTex[4] = {};
+ID3D11ShaderResourceView* g_lsView[4] = {};
+D3D11_TEXTURE2D_DESC      g_lsDesc[4] = {};
+bool                      g_lsHave[4] = {};
+ID3D11ShaderResourceView* g_lsDisplaced[4] = {};
+bool     g_lsBound = false;
+uint64_t g_lsApplied = 0;
+bool     g_lsNoted = false;
+bool     g_lsFailNoted = false;
+
+void lsRelease() {
+    for (int i = 0; i < 4; ++i) {
+        if (g_lsView[i]) { g_lsView[i]->Release(); g_lsView[i] = nullptr; }
+        if (g_lsTex[i]) { g_lsTex[i]->Release(); g_lsTex[i] = nullptr; }
+        g_lsHave[i] = false;
+    }
+}
 
 // ---- The redraw capture: everything occurrence 1's draw needs to be
 // re-issued after occurrence 2, taken at occurrence 1 so the per-eye
@@ -152,15 +176,29 @@ void fssRevealConfigure(Config& cfg) {
     } else if (m == "redraw") {
         g_steady = false;
         g_redraw = true;
+    } else if (m == "lockstep") {
+        g_steady = false;
+        g_redraw = false;
+        g_lockstep = true;
     } else {
         g_steady = false;
         g_redraw = false;
-        Log::get().note("fss_reveal_sync \"%s\" is not stock, steady or "
-                        "redraw; running stock.", m.c_str());
+        Log::get().note("fss_reveal_sync \"%s\" is not stock, steady, "
+                        "redraw or lockstep; running stock.", m.c_str());
     }
-    if (wasSteady != g_steady || wasRedraw != g_redraw) {
+    if (m != "lockstep") g_lockstep = false;
+    static bool s_wasLockstep = false;
+    const bool lockFlip = s_wasLockstep != g_lockstep;
+    s_wasLockstep = g_lockstep;
+    if (wasSteady != g_steady || wasRedraw != g_redraw || lockFlip) {
         Log::get().note(
-            g_redraw
+            g_lockstep
+                ? "fss reveal: lockstep. The second eye's composite reads "
+                  "byte-identical copies of the first eye's textures and "
+                  "scene constants -- the two panels cannot differ, and "
+                  "both show the resolve animation the flat screen shows, "
+                  "binocularly fused."
+            : g_redraw
                 ? "fss reveal: redraw. The first eye's composite is "
                   "re-issued after the second eye's -- its own transforms "
                   "and geometry, the CURRENT textures and scene block -- "
@@ -179,10 +217,11 @@ void fssRevealConfigure(Config& cfg) {
         g_shadowValid = false;
         g_snapshotValid = false;
         releaseCapture();
+        lsRelease();
     }
 }
 
-bool fssRevealWantsDraws() { return g_steady || g_redraw; }
+bool fssRevealWantsDraws() { return g_steady || g_redraw || g_lockstep; }
 
 void fssRevealDrawArgs(uint32_t startVertex, uint32_t startInstance,
                        FssRevealRealDraw realDraw) {
@@ -192,12 +231,14 @@ void fssRevealDrawArgs(uint32_t startVertex, uint32_t startInstance,
 }
 
 void fssRevealNoteMap(void* resource, void* data) {
-    if (!g_steady || resource != g_sceneCb) return;
+    if ((!g_steady && !g_lockstep) || resource != g_sceneCb) return;
     g_mapped = data;
 }
 
 void fssRevealNoteUnmap(void* resource) {
-    if (!g_steady || resource != g_sceneCb || !g_mapped) return;
+    if ((!g_steady && !g_lockstep) || resource != g_sceneCb || !g_mapped) {
+        return;
+    }
     void* src = g_mapped;
     g_mapped = nullptr;
     if (!g_sceneCbBytes) return;
@@ -208,7 +249,10 @@ void fssRevealNoteUnmap(void* resource) {
 }
 
 void fssRevealNoteUpdate(void* resource, const void* data) {
-    if (!g_steady || resource != g_sceneCb || !data || !g_sceneCbBytes) return;
+    if ((!g_steady && !g_lockstep) || resource != g_sceneCb || !data ||
+        !g_sceneCbBytes) {
+        return;
+    }
     guardedBudget(g_budget, [&] {
         memcpy(g_shadow, data, g_sceneCbBytes);
         g_shadowValid = true;
@@ -217,8 +261,8 @@ void fssRevealNoteUpdate(void* resource, const void* data) {
 
 bool fssRevealOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
                         uint32_t instances) {
-    if ((!g_steady && !g_redraw) || kind != 'N' || count != 6 ||
-        instances != 1 || !ctx) {
+    if ((!g_steady && !g_redraw && !g_lockstep) || kind != 'N' ||
+        count != 6 || instances != 1 || !ctx) {
         return false;
     }
     uint64_t h = 0;
@@ -233,7 +277,8 @@ bool fssRevealOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
 
 void fssRevealBegin(ID3D11DeviceContext* ctx) {
     g_engaged = false;
-    if (!ctx || (!g_steady && !g_redraw)) return;
+    g_lsBound = false;
+    if (!ctx || (!g_steady && !g_redraw && !g_lockstep)) return;
     guardedBudget(g_budget, [&] {
         ++g_occurrence;
 
@@ -335,10 +380,119 @@ void fssRevealBegin(ID3D11DeviceContext* ctx) {
                         "sync cannot engage. Said once.");
                 }
             }
+            if (g_lockstep) {
+                // Freeze THIS draw's four content textures. All four or
+                // none: a partial freeze is a new per-eye split.
+                ID3D11ShaderResourceView* srv[4] = {};
+                ctx->PSGetShaderResources(0, 4, srv);
+                ID3D11Device* dev = nullptr;
+                ctx->GetDevice(&dev);
+                bool all = dev != nullptr;
+                for (int i = 0; i < 4 && all; ++i) {
+                    g_lsHave[i] = false;
+                    if (!srv[i]) continue;   // an unbound slot stays unbound
+                    ID3D11Resource* res = nullptr;
+                    srv[i]->GetResource(&res);
+                    ID3D11Texture2D* tex = nullptr;
+                    if (res) {
+                        res->QueryInterface(__uuidof(ID3D11Texture2D),
+                                            reinterpret_cast<void**>(&tex));
+                        res->Release();
+                    }
+                    if (!tex) { all = false; break; }
+                    D3D11_TEXTURE2D_DESC d{};
+                    tex->GetDesc(&d);
+                    if (d.SampleDesc.Count != 1) {
+                        tex->Release();
+                        all = false;
+                        break;
+                    }
+                    if (!g_lsTex[i] ||
+                        memcmp(&d, &g_lsDesc[i], sizeof(d)) != 0) {
+                        if (g_lsView[i]) {
+                            g_lsView[i]->Release();
+                            g_lsView[i] = nullptr;
+                        }
+                        if (g_lsTex[i]) {
+                            g_lsTex[i]->Release();
+                            g_lsTex[i] = nullptr;
+                        }
+                        D3D11_TEXTURE2D_DESC cd = d;
+                        cd.Usage = D3D11_USAGE_DEFAULT;
+                        cd.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+                        cd.CPUAccessFlags = 0;
+                        cd.MiscFlags = 0;
+                        D3D11_SHADER_RESOURCE_VIEW_DESC vd{};
+                        srv[i]->GetDesc(&vd);
+                        if (FAILED(dev->CreateTexture2D(&cd, nullptr,
+                                                        &g_lsTex[i])) ||
+                            FAILED(dev->CreateShaderResourceView(
+                                g_lsTex[i], &vd, &g_lsView[i]))) {
+                            if (g_lsTex[i]) {
+                                g_lsTex[i]->Release();
+                                g_lsTex[i] = nullptr;
+                            }
+                            g_lsView[i] = nullptr;
+                            tex->Release();
+                            all = false;
+                            break;
+                        }
+                        g_lsDesc[i] = d;
+                    }
+                    ctx->CopyResource(g_lsTex[i], tex);
+                    tex->Release();
+                    g_lsHave[i] = true;
+                }
+                if (dev) dev->Release();
+                for (int i = 0; i < 4; ++i) {
+                    if (srv[i]) srv[i]->Release();
+                }
+                if (!all) {
+                    for (int i = 0; i < 4; ++i) g_lsHave[i] = false;
+                    if (!g_lsFailNoted) {
+                        g_lsFailNoted = true;
+                        Log::get().note(
+                            "fss reveal: a lockstep input could not be "
+                            "copied (unbindable or multisampled); the "
+                            "second eye draws stock. Said once.");
+                    }
+                }
+            }
             return;   // eye A draws stock, always
         }
 
-        if (g_occurrence != 2 || !g_snapshotValid || !g_sceneCbBytes) return;
+        if (g_occurrence != 2) return;
+
+        if (g_lockstep) {
+            // The frozen inputs, if occurrence 1 produced a full set. The
+            // b1 substitution below completes the byte-identical read.
+            bool any = false;
+            for (int i = 0; i < 4; ++i) {
+                if (g_lsHave[i]) { any = true; break; }
+            }
+            if (any) {
+                ctx->PSGetShaderResources(0, 4, g_lsDisplaced);
+                ID3D11ShaderResourceView* set[4] = {
+                    g_lsHave[0] ? g_lsView[0] : g_lsDisplaced[0],
+                    g_lsHave[1] ? g_lsView[1] : g_lsDisplaced[1],
+                    g_lsHave[2] ? g_lsView[2] : g_lsDisplaced[2],
+                    g_lsHave[3] ? g_lsView[3] : g_lsDisplaced[3],
+                };
+                ctx->PSSetShaderResources(0, 4, set);
+                g_lsBound = true;
+                ++g_lsApplied;
+                if (!g_lsNoted) {
+                    g_lsNoted = true;
+                    Log::get().note(
+                        "fss reveal: lockstep engaged -- the second eye's "
+                        "composite reads byte-identical copies of the "
+                        "first eye's four inputs and its scene constants. "
+                        "The two panels cannot differ.");
+                }
+            }
+        }
+
+        if (!g_snapshotValid || !g_sceneCbBytes) return;
 
         if (!g_ourCb || g_ourCbBytes != g_sceneCbBytes) {
             if (g_ourCb) {
@@ -457,6 +611,16 @@ void fssRevealEnd(ID3D11DeviceContext* ctx) {
         releaseCapture();
     }
 
+    if (g_lsBound && ctx) {
+        g_lsBound = false;
+        ctx->PSSetShaderResources(0, 4, g_lsDisplaced);
+        for (int i = 0; i < 4; ++i) {
+            if (g_lsDisplaced[i]) {
+                g_lsDisplaced[i]->Release();
+                g_lsDisplaced[i] = nullptr;
+            }
+        }
+    }
     if (!g_engaged || !ctx) return;
     g_engaged = false;
     ctx->PSSetConstantBuffers(1, 1, &g_displaced);
@@ -479,6 +643,7 @@ void fssRevealShutdown() {
         g_ourCb = nullptr;
     }
     releaseCapture();
+    lsRelease();
     for (int i = 0; i < 2; ++i) {
         if (g_vbCopy[i]) { g_vbCopy[i]->Release(); g_vbCopy[i] = nullptr; }
     }

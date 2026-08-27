@@ -37,9 +37,21 @@
 // state both eyes should show. Its own transforms, the current content:
 // both eyes paste the same fill state, whichever eye draws first.
 //
-// fix.fss_reveal_sync = stock | steady | redraw. Stock by default until
-// the field look; free when stock. Recognition rides the body-frame gate
-// and the composite's vertex hash, the fss_probe pattern exactly.
+// THE FRAME-ORDER VERDICT (redraw's flight, 2026-08-26): the game draws
+// the first eye's UI BETWEEN the two body composites, so a late repaint
+// of the first eye buries its UI -- there is no moment that is both
+// after the content fills and before that UI. lockstep inverts the
+// direction: occurrence 1's INPUTS are frozen -- the four content
+// textures CopyResource'd at its draw, the scene block snapshotted --
+// and occurrence 2 is drawn reading those byte-identical copies. The two
+// panels then CANNOT differ, by construction: both show the resolve
+// animation the flat screen has always shown, binocularly fused. No
+// extra draw, no UI interaction, no ordering assumptions.
+//
+// fix.fss_reveal_sync = stock | steady | redraw | lockstep. Stock by
+// default until the field look; free when stock. Recognition rides the
+// body-frame gate and the composite's vertex hash, the fss_probe
+// pattern exactly.
 #pragma once
 
 #include <cstdint>
