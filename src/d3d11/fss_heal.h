@@ -32,7 +32,10 @@ extern "C" {
 // either eye). mode 2: stamp the left's gated blacks into the right
 // (squares in both eyes, the flat screen's look). The returned texture is
 // what the MODE'S TARGET eye should submit: left for mode 1, right for 2.
+// rect: the scanner screen's AABB in the left eye (u0,v0,u1,v1) -- the
+// fill exists only inside it, which is what keeps the near-field neon
+// frame's surroundings untouched. Null stands the fill down.
 __declspec(dllexport) void* edvrFssHealLeft(void* leftTex, void* rightTex,
                                             float outerMag, float innerMag,
-                                            int mode);
+                                            int mode, const float* rect);
 }

@@ -73,7 +73,8 @@ typedef vr::EVRCompositorError(*PFN_Submit)(void* self, vr::EVREye eye,
                                             const vr::VRTextureBounds_t* bounds,
                                             vr::EVRSubmitFlags flags);
 
-typedef void* (*PFN_EdvrFssHeal)(void*, void*, float, float, int);
+typedef void* (*PFN_EdvrFssHeal)(void*, void*, float, float, int,
+                                 const float*);
 typedef void* (*PFN_EdvrFssTheater)(void*, void*, int, float, float,
                                     const float*, float, float, float,
                                     float, const float*);
@@ -208,6 +209,9 @@ struct State {
     uint32_t healChromeSeen = 0;
     LONG healArrivalStamp = 0;
     uint32_t healArrivalSeen = 0;
+    LONG  healRectSeq = 0;
+    bool  healRectValid = false;
+    float healRect[4] = {};   // left-eye AABB, scaled to the display quad
     PFN_EdvrFssHeal healFn = nullptr;
     bool healFnTried = false;
 
@@ -1011,6 +1015,40 @@ vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
         ((eye == vr::Eye_Left && s->fssHealOn == 1) ||
          (eye == vr::Eye_Right && s->fssHealOn == 2)) &&
         texture && texture->eType == vr::TextureType_DirectX) {
+        // The screen's rectangle in the left eye (round 48e): the fill
+        // exists only INSIDE it. The neon frame lives around the screen
+        // at sub-metre depth, where the infinity shift is the wrong
+        // disparity -- filling beside its lines painted offset twins
+        // (the field's duplicated blue lines). The published union is
+        // the outer frame; scaling toward the display quad's extent
+        // excludes the band the arcs cross.
+        {
+            const LONG rs = fssPanelRectSeqValue();
+            if (rs != s->healRectSeq) {
+                s->healRectSeq = rs;
+                float c[16];
+                s->healRectValid = readFssPanelRect(c);
+                if (s->healRectValid) {
+                    float u0 = 2.0f, u1 = -1.0f, v0 = 2.0f, v1 = -1.0f;
+                    for (int i = 0; i < 4; ++i) {
+                        const float u = c[i * 2 + 0];
+                        const float v = c[i * 2 + 1];
+                        if (u < u0) u0 = u;
+                        if (u > u1) u1 = u;
+                        if (v < v0) v0 = v;
+                        if (v > v1) v1 = v;
+                    }
+                    const float cu = (u0 + u1) * 0.5f;
+                    const float cv = (v0 + v1) * 0.5f;
+                    const float kSx = 0.92f;   // frame -> display, x
+                    const float kSy = 0.89f;   // frame -> display, y
+                    s->healRect[0] = cu + (u0 - cu) * kSx;
+                    s->healRect[1] = cv + (v0 - cv) * kSy;
+                    s->healRect[2] = cu + (u1 - cu) * kSx;
+                    s->healRect[3] = cv + (v1 - cv) * kSy;
+                }
+            }
+        }
         const LONG stamp = fssChromeStampValue();
         if (stamp != s->healChromeStamp) {
             s->healChromeStamp = stamp;
@@ -1042,8 +1080,10 @@ vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
             if (s->healFn && other && eyeTangents(&outer, &inner)) {
                 void* healed =
                     s->fssHealOn == 1
-                        ? s->healFn(texture->handle, other, outer, inner, 1)
-                        : s->healFn(other, texture->handle, outer, inner, 2);
+                        ? s->healFn(texture->handle, other, outer, inner, 1,
+                                    s->healRectValid ? s->healRect : nullptr)
+                        : s->healFn(other, texture->handle, outer, inner, 2,
+                                    s->healRectValid ? s->healRect : nullptr);
                 if (healed) {
                     vr::Texture_t sub = *texture;
                     sub.handle = healed;

@@ -18,7 +18,10 @@ constexpr char kHealCsHlsl[] = R"HLSL(
 Texture2D<float4> L : register(t0);
 Texture2D<float4> R : register(t1);
 RWTexture2D<float4> O : register(u0);
-cbuffer P : register(b0) { float4 p; }   // p.x = dx pixels (left minus right)
+cbuffer P : register(b0) {
+    float4 p;   // p.x = dx pixels; p.yz = screen AABB min (u,v);
+    float4 q;   // p.w,q.x = AABB max -- packed: yz=min, w+q.x=max
+}
 [numthreads(16, 16, 1)]
 void main(uint3 id : SV_DispatchThreadID) {
     uint w, h;
@@ -26,6 +29,17 @@ void main(uint3 id : SV_DispatchThreadID) {
     if (id.x >= w || id.y >= h) return;
     float4 l = L[id.xy];
     float4 o = l;
+    // Round 48e, the SPATIAL scope: the fill exists only inside the
+    // scanner screen's rectangle -- the squares live on the body inside
+    // it, the near-field neon frame lives around it, and filling beside
+    // the neon at the infinity disparity painted offset twins.
+    float u = (id.x + 0.5) / w;
+    float v = (id.y + 0.5) / h;
+    bool inScreen = u >= p.y && u <= p.w && v >= p.z && v <= q.x;
+    if (!inScreen) {
+        O[id.xy] = o;
+        return;
+    }
     // Round 48b, the WINDOW-ERA classifier: one test. The heal now exists
     // only inside the zoom-press arrival window -- body at optical
     // infinity, virtually no UI -- so the v5 gate stack (interior,
@@ -150,7 +164,7 @@ void failOnce(const char* what) {
 }
 
 void* healInner(void* leftTex, void* rightTex, float outerMag,
-                float innerMag, int mode) {
+                float innerMag, int mode, const float* rect) {
     ID3D11Texture2D* lt = nullptr;
     ID3D11Texture2D* rt = nullptr;
     static_cast<IUnknown*>(leftTex)->QueryInterface(
@@ -206,7 +220,7 @@ void* healInner(void* leftTex, void* rightTex, float outerMag,
     }
     if (ok && !g_cb) {
         D3D11_BUFFER_DESC bd{};
-        bd.ByteWidth = 16;
+        bd.ByteWidth = 32;
         bd.Usage = D3D11_USAGE_DYNAMIC;
         bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
         bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
@@ -257,7 +271,16 @@ void* healInner(void* leftTex, void* rightTex, float outerMag,
         D3D11_MAPPED_SUBRESOURCE m{};
         if (SUCCEEDED(ctx->Map(g_cb, 0, D3D11_MAP_WRITE_DISCARD, 0, &m)) &&
             m.pData) {
-            float vals[4] = {dx, 0, 0, 0};
+            // p.yzw + q: the screen's AABB in texture UV -- the fill
+            // exists only inside it (round 48e: the near-field neon frame
+            // doubled when its surroundings were filled at the infinity
+            // disparity). No rect = a degenerate box = no fill.
+            float vals[8] = {dx,
+                             rect ? rect[0] : 2.0f,
+                             rect ? rect[1] : 2.0f,
+                             rect ? rect[2] : -1.0f,
+                             rect ? rect[3] : -1.0f,
+                             0, 0, 0};
             memcpy(m.pData, vals, sizeof(vals));
             ctx->Unmap(g_cb, 0);
         } else {
@@ -332,11 +355,13 @@ extern "C" __declspec(dllexport) void* edvrFssHealLeft(void* leftTex,
                                                        void* rightTex,
                                                        float outerMag,
                                                        float innerMag,
-                                                       int mode) {
+                                                       int mode,
+                                                       const float* rect) {
     if (!leftTex || !rightTex) return nullptr;
     void* out = nullptr;
     edvr::guardedBudget(edvr::g_budget, [&] {
-        out = edvr::healInner(leftTex, rightTex, outerMag, innerMag, mode);
+        out = edvr::healInner(leftTex, rightTex, outerMag, innerMag, mode,
+                              rect);
     });
     return out;
 }

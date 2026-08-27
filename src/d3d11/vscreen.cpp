@@ -1231,7 +1231,8 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         // scenery (the neon frame) and their ordinals land in a skip
         // mask. Until a derivation publishes, nothing is skipped and the
         // centred band crops -- both fail-safe.
-        if (chromeMatched && s->fssTheaterOn && deviceHookFssModeLatch()) {
+        if (chromeMatched && (s->fssTheaterOn || s->fssHealOn) &&
+            deviceHookFssModeLatch()) {
             if (s->fssChromeSkipFrame != s->frameNo) {
                 s->fssChromeSkipFrame = s->frameNo;
                 s->fssChromeSkipCount = 0;
