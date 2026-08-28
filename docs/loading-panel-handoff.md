@@ -162,20 +162,25 @@ constants (VS b2, 48 bytes)** -- all GPU-timeline copies. A collection
 whose frame moved mid-capture is discarded. This is the answer to the
 1-3-6-11-9-12 instability: transitional frames can no longer be measured.
 
-**Classify by colour, verify by matrix -- per QUAD.** The **scrim** is a
-standalone 30-index panel, dark (all channels < 0x40), translucent (alpha
-< 0xF0), whose element maps to >= 90% of clip space in both axes. The
-**box** is hunted across **every quad of every captured solid, batches
-included**: each quad's own first vertex gives its colour and element
-byte, its own matrix gives its footprint, and the largest dark opaque quad
-landing between 2% and 80% of the view in both axes is the modal's
-backing. A classification that fails its own footprint refuses. The white
-letterbox and the coloured batch content fail the darkness test and are
-never touched. No scrim, no boxed quad, no table, mixed tables, or an
-index past the 64 KB window: **stock, with a log line saying why**, one
-line per panel (colour, element, mapped px rect) and, on a failed box
-hunt, the three largest dark opaque quads with where their matrices put
-them -- so a wrong threshold names itself in one flight.
+**Classify by what a quad RENDERS, verify by matrix -- per QUAD.** The
+**scrim** is a standalone 30-index panel, dark (all channels < 0x40),
+translucent (alpha < 0xF0), whose element maps to >= 90% of clip space in
+both axes. The **box** is hunted across **every quad of every captured
+solid, batches included** -- and by **estimated rendered colour**, not
+vertex colour: flight 5 proved the batches' vertices are colour-neutral
+(the only dark opaque vertices anywhere belong to the full-view sheet),
+because a quad's look is `vertexColour x paramA + paramB` from its
+element's offsets 64/80. The classifier replays the two shaders'
+arithmetic (colour source and fade byte by the cb2 flags, the mad, the
+two alpha modulations) over the captured table, cb2 and vertices, and
+takes the largest quad that lands between 2% and 80% of the view in both
+axes AND estimates dark (every channel <= 0.25) and covering (alpha >=
+0.90). Blend state is not modelled; this is a classifier, not a renderer.
+No scrim, no such quad, no table, mixed tables, or an index past the
+64 KB window: **stock, with a log line saying why**, one line per panel,
+plus the three largest BOXED quads and the three largest DARK-COVERING
+quads with their vertex colour, estimate and mapped px rect -- one of the
+two lists names the side a wrong threshold is on.
 
 **Substitute the element index.** At the scrim's position (trusted only
 while the frame matches the measured sequence draw by draw), the draw is
@@ -247,7 +252,10 @@ refused: every viewport full, every scissor off, which forced the shader
 read that found the real mechanism); 11:56 (sixth, element model with a
 panel-level box hunt -- refused correctly: all three standalone panels
 ride element 0 at full view, which proved the backing is a batch quad and
-sent the hunt per-quad).
+sent the hunt per-quad); 12:04 (per-quad hunt by VERTEX colour -- refused,
+and its top-3 dump showed the only dark opaque vertices in the frame are
+the full-view sheet's: batch quads are colour-neutral and styled by their
+element params, which moved the classifier to estimated rendered colour).
 
 ## What must not regress
 

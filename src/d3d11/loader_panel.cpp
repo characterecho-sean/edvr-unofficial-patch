@@ -42,12 +42,21 @@ constexpr uint32_t kIdx2Off = 16;   // COLOUR2.x byte within the vertex
 constexpr uint32_t kFlagIdx2 = 0x8000;
 constexpr uint32_t kFlagIdx1 = 0x4000;
 
-// The panel fill's RGBA8 colour at byte offset 8 tells the roles apart,
-// measured across flights: the scrim is black at alpha 0x66, the box black
-// at 0xFF, the letterbox white. Dark means every channel below this; opaque
-// means alpha at least this.
+// The panel fill's RGBA8 colour at byte offset 8 tells the STANDALONE
+// panels apart, measured across flights: the scrim is black at alpha 0x66,
+// the letterbox white. Dark means every channel below this; opaque means
+// alpha at least this.
 constexpr uint32_t kDarkMax = 0x40;
 constexpr uint32_t kOpaqueMin = 0xF0;
+
+// Batch quads are colour-neutral in their vertices (flight 5: the only
+// dark opaque VERTICES anywhere belong to the full-view sheet); their look
+// comes from the element params the pixel shader applies. The box hunt
+// therefore classifies by ESTIMATED RENDERED colour: dark means every
+// estimated channel at or below this, covering means estimated alpha at
+// least this.
+constexpr float kEstDark = 0.25f;
+constexpr float kEstCover = 0.90f;
 
 // A matrix that maps a panel's fill across at least this fraction of clip
 // space is a full-view element; at most the box fraction in both axes is a
@@ -684,6 +693,64 @@ void analyze(ID3D11DeviceContext* ctx) {
         memcpy(out8, tbl + off, 32);
         return true;
     };
+    // The element's styling params at offsets 64 and 80 -- what the pixel
+    // shader multiplies and adds to the vertex colour. Flight 5 proved the
+    // batches' vertices are colour-neutral (the only dark opaque VERTICES
+    // in the frame are the full-view sheet's); the backing's black lives
+    // here, so the hunt has to render-estimate, not read vertex bytes.
+    auto elemParams = [&](uint32_t index, float* outA4, float* outB4) -> bool {
+        const uint64_t off =
+            static_cast<uint64_t>(g_srvFirstElem + index) * kElemStride;
+        if (off + 96 > g_srvCopied) return false;
+        memcpy(outA4, tbl + off + 64, 16);
+        memcpy(outB4, tbl + off + 80, 16);
+        return true;
+    };
+    float cb2col0[4];
+    memcpy(cb2col0, static_cast<const uint8_t*>(mc.pData), 16);
+    // What a quad ROUGHLY renders as, replayed from the two shaders'
+    // disassembly (docs/shaders/ui-widget-vs.asm, ui-widget-ps.asm): the
+    // VS picks the colour source and the fade byte by cb2[2].x flags, the
+    // PS runs colour * elemA + elemB and two alpha modulations. Blend
+    // state is not modelled; this is a classifier, not a renderer.
+    auto estimate = [&](int64_t vtxOff, const float* eA, const float* eB,
+                        float* out4) {
+        float col[4] = {0, 0, 0, 0};
+        if (flags & 0x4) {
+            uint32_t c;
+            memcpy(&c, vbBase + vtxOff + 8, sizeof(c));
+            col[0] = static_cast<float>(c & 0xFF) / 255.0f;
+            col[1] = static_cast<float>((c >> 8) & 0xFF) / 255.0f;
+            col[2] = static_cast<float>((c >> 16) & 0xFF) / 255.0f;
+            col[3] = static_cast<float>((c >> 24) & 0xFF) / 255.0f;
+        } else if (flags & 0x2) {
+            memcpy(col, cb2col0, 16);
+        }
+        for (int i = 0; i < 4; ++i) {
+            const float c = (flags & 0x1) ? 1.0f : col[i];
+            out4[i] = c * eA[i] + eB[i];
+        }
+        if (flags & 0x80) {
+            float fade = 0.0f;
+            if (flags & 0x2000) {
+                fade = static_cast<float>(vbBase[vtxOff + 15]) / 255.0f;
+            } else if (flags & 0x8000) {
+                fade = static_cast<float>(vbBase[vtxOff + 19]) / 255.0f;
+            }
+            out4[3] *= fade;
+        }
+        if (flags & 0x10000) {
+            for (int i = 0; i < 4; ++i) {
+                out4[i] = out4[3] * (out4[i] - 1.0f) + 1.0f;
+            }
+        }
+        if (flags & 0x20000) {
+            for (int i = 0; i < 3; ++i) out4[i] *= out4[3];
+        }
+        for (int i = 0; i < 4; ++i) {
+            if (out4[i] < 0.0f) out4[i] = 0.0f;
+        }
+    };
 
     const uint32_t surfW =
         g_capCount ? g_capSeq[g_caps[0].seqPos].w : 0;
@@ -772,23 +839,40 @@ void analyze(ID3D11DeviceContext* ctx) {
         return;
     }
 
-    // The box: a dark OPAQUE quad -- anywhere, batches included -- whose
-    // own element maps it to a boxed rect. Flight 4 proved the standalone
-    // panels all ride the full-view element; the modal's backing is a quad
-    // inside a batch, indexed to its own matrix, which is exactly what the
-    // per-vertex element byte is FOR. Every quad is tried through its own
-    // matrix; the largest boxed dark-opaque footprint is the modal.
+    // The box: a quad -- anywhere, batches included -- whose own element
+    // maps it to a boxed rect AND whose ESTIMATED RENDERED colour is dark
+    // and covering. Flight 4 proved the standalone panels all ride the
+    // full-view element; flight 5 proved no batch vertex is dark -- the
+    // backing's black is applied by its element's params, so the test runs
+    // the pixel shader's own arithmetic over the captured data.
     const SeqEnt scrimDims = g_capSeq[g_caps[scrimCap[0]].seqPos];
     int boxDraw = -1;
     int64_t boxOff = -1;
     uint32_t boxRgba = 0;
+    float boxEst[4] = {0, 0, 0, 0};
     float boxAreaPx = 0.0f;
     Foot boxFoot{};
-    // The three largest dark-opaque quads regardless of boxedness, so a
-    // refusal names what the thresholds turned away.
-    struct DarkCand { float area = -1.0f; Foot f{}; uint32_t rgba = 0;
-                      uint32_t draw = 0; };
-    DarkCand top[3];
+    // Refusal diagnostics: the largest BOXED quads whatever they render as,
+    // and the largest dark-covering quads whatever their footprint -- one
+    // of the two lists names the side the thresholds got wrong.
+    struct Cand {
+        float area = -1.0f;
+        Foot f{};
+        uint32_t rgba = 0;
+        float est[4] = {0, 0, 0, 0};
+        uint32_t draw = 0;
+        uint32_t count = 0;
+    };
+    Cand topBoxed[3], topDark[3];
+    auto push = [](Cand* list, const Cand& c) {
+        for (int t = 0; t < 3; ++t) {
+            if (c.area > list[t].area) {
+                for (int s = 2; s > t; --s) list[s] = list[s - 1];
+                list[t] = c;
+                break;
+            }
+        }
+    };
     for (uint32_t d = 0; d < g_capCount; ++d) {
         const CapDraw& cd = g_caps[d];
         const SeqEnt& se = g_capSeq[cd.seqPos];
@@ -798,37 +882,39 @@ void analyze(ID3D11DeviceContext* ctx) {
             const int64_t off = qoff[d][q];
             const Rect& r = qrect[d][q];
             if (off < 0 || !r.valid() || g_capStride < 20) continue;
-            uint32_t c;
-            memcpy(&c, vbBase + off + 8, sizeof(c));
-            const uint32_t cr = c & 0xFF, cg = (c >> 8) & 0xFF,
-                           cb = (c >> 16) & 0xFF, ca = (c >> 24) & 0xFF;
-            if (cr >= kDarkMax || cg >= kDarkMax || cb >= kDarkMax ||
-                ca < kOpaqueMin) {
-                continue;
-            }
-            float rows[8];
-            if (!elemRows(liveIdxAt(off), rows)) continue;
+            const uint32_t li = liveIdxAt(off);
+            float rows[8], eA[4], eB[4];
+            if (!elemRows(li, rows) || !elemParams(li, eA, eB)) continue;
             const Foot f = footprint(rows, r);
             if (!f.valid) continue;
             const float covX = f.cx1 - f.cx0, covY = f.cy1 - f.cy0;
             if (covX <= 0.0f || covY <= 0.0f) continue;
             const float areaPx = covX * covY;
-            for (int t = 0; t < 3; ++t) {
-                if (areaPx > top[t].area) {
-                    for (int s = 2; s > t; --s) top[s] = top[s - 1];
-                    top[t] = DarkCand{areaPx, f, c, cd.seqPos};
-                    break;
-                }
-            }
+            uint32_t c;
+            memcpy(&c, vbBase + off + 8, sizeof(c));
+            float est[4];
+            estimate(off, eA, eB, est);
+            const bool darkCover = est[0] <= kEstDark && est[1] <= kEstDark &&
+                                   est[2] <= kEstDark && est[3] >= kEstCover;
             const bool boxed =
                 covX <= 2.0f * kBoxFraction && covY <= 2.0f * kBoxFraction &&
                 covX >= 2.0f * kMinBoxFraction &&
                 covY >= 2.0f * kMinBoxFraction;
-            if (boxed && areaPx > boxAreaPx) {
+            Cand cand;
+            cand.area = areaPx;
+            cand.f = f;
+            cand.rgba = c;
+            memcpy(cand.est, est, sizeof(est));
+            cand.draw = cd.seqPos;
+            cand.count = cd.count;
+            if (boxed) push(topBoxed, cand);
+            if (darkCover) push(topDark, cand);
+            if (boxed && darkCover && areaPx > boxAreaPx) {
                 boxAreaPx = areaPx;
                 boxDraw = static_cast<int>(d);
                 boxOff = off;
                 boxRgba = c;
+                memcpy(boxEst, est, sizeof(est));
                 boxFoot = f;
             }
         }
@@ -836,17 +922,25 @@ void analyze(ID3D11DeviceContext* ctx) {
 
     if (boxDraw < 0) {
         dumpSolids();
-        for (int t = 0; t < 3; ++t) {
-            if (top[t].area <= 0.0f) break;
-            Log::get().note("  dark opaque quad at draw %u, rgba %08X, maps "
-                            "to px %.0f,%.0f %.0fx%.0f",
-                            top[t].draw, top[t].rgba,
-                            (top[t].f.cx0 * 0.5f + 0.5f) * surfW,
-                            (0.5f - top[t].f.cy1 * 0.5f) * surfH,
-                            (top[t].f.cx1 - top[t].f.cx0) * 0.5f * surfW,
-                            (top[t].f.cy1 - top[t].f.cy0) * 0.5f * surfH);
+        const struct { const char* name; const Cand* list; } lists[2] = {
+            {"boxed", topBoxed}, {"dark covering", topDark}};
+        for (const auto& L : lists) {
+            for (int t = 0; t < 3; ++t) {
+                const Cand& c = L.list[t];
+                if (c.area <= 0.0f) break;
+                Log::get().note(
+                    "  %s quad in the %u-index draw at %u, rgba %08X, "
+                    "renders ~%.2f,%.2f,%.2f,%.2f, maps to px %.0f,%.0f "
+                    "%.0fx%.0f",
+                    L.name, c.count, c.draw, c.rgba,
+                    c.est[0], c.est[1], c.est[2], c.est[3],
+                    (c.f.cx0 * 0.5f + 0.5f) * surfW,
+                    (0.5f - c.f.cy1 * 0.5f) * surfH,
+                    (c.f.cx1 - c.f.cx0) * 0.5f * surfW,
+                    (c.f.cy1 - c.f.cy0) * 0.5f * surfH);
+            }
         }
-        recordNone("no dark opaque quad's element maps to a boxed rect");
+        recordNone("no boxed quad renders dark and covering");
         unmapAll();
         return;
     }
@@ -946,14 +1040,15 @@ void analyze(ID3D11DeviceContext* ctx) {
             "loading panel: FIT -- measurement %u from %u solids of %u "
             "interface draws. The scrim at draw %u (rgba %08X, element %u) "
             "is re-issued as element %u -- the box, a quad of the %u-index "
-            "draw at position %u (rgba %08X), whose matrix lands at "
-            "%.0f,%.0f %.0fx%.0f px of %ux%u. The matrix stays the game's "
-            "own, read live each frame; the box and its text are "
-            "untouched.%s",
+            "draw at position %u (rgba %08X, renders "
+            "~%.2f,%.2f,%.2f,%.2f), whose matrix lands at %.0f,%.0f "
+            "%.0fx%.0f px of %ux%u. The matrix stays the game's own, read "
+            "live each frame; the box and its text are untouched.%s",
             g_measurements, g_capCount, g_capSeqLen,
             scrimPos[0], rgba[scrimCap[0]], liveIdx(scrimCap[0]),
             liveIdxAt(boxOff),
             g_caps[boxDraw].count, g_caps[boxDraw].seqPos, boxRgba,
+            boxEst[0], boxEst[1], boxEst[2], boxEst[3],
             boxPx.x0, boxPx.y0, boxPx.w(), boxPx.h(), surfW, surfH,
             scrims > 1 ? " More than one scrim was found; each is re-issued."
                        : "");
