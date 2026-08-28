@@ -40,6 +40,7 @@
 #include "glitch_frame.h"
 #include "holo_fix.h"
 #include "journal_watch.h"  // gameplay started, for the low-peak notice
+#include "loader_panel.h"
 #include "quad_probe.h"
 #include "remlok_fix.h"
 #include "scrim_fix.h"
@@ -50,12 +51,6 @@
 
 namespace edvr {
 namespace {
-
-// The loading dialog's bordered panel: one fill plus four edge strips, six
-// indices each. Measured by the quad probe on 2026-08-28 -- the capture
-// showed exactly that shape, a full-surface fill inset by fifteen units
-// inside four strips fifteen and twenty-seven units thick.
-constexpr uint32_t g_panelIndices = 30;
 
 // How often the totals line is written, and how long the starvation notice
 // waits before it will speak.
@@ -1237,10 +1232,10 @@ enum class DrawVerdict {
     // census_skip_quad). Swallows the game's draw and makes up to two of its
     // own, so it must not be combined with anything that also draws.
     kQuadSkip,
-    // The loading panel re-issued from scaled geometry (quad_probe.h).
-    // Swallows the game's draw when the geometry is built, forwards it
-    // untouched when it is not.
-    kPanelScale,
+    // The loader dialog's backing, re-issued at the dialog's own measured
+    // size (loader_panel.h). Swallows the game's draw once a measurement has
+    // produced geometry, and forwards it untouched until then.
+    kLoaderPanel,
     // The loader dialog's dimming wash (scrim_fix.h), held uniform for
     // the one draw that composites the interface.
     kScrim,
@@ -1404,7 +1399,7 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         !sunglareWantsDraws() && !cbPeekEnabled() && !billboardWantsDraws() &&
         !drawCensusArmed() && !panelQuadWants() && !panelCurveWants() &&
         !particleWantsDraws() && !backdropWantsDraws() &&
-        !scrimWantsDraws() && !quadProbeWants() && !quadScaleWants()) {
+        !scrimWantsDraws() && !quadProbeWants() && !loaderPanelWants()) {
         return DrawVerdict::kNone;
     }
 
@@ -1555,15 +1550,23 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
                                 s->qsStartIndex, s->qsBaseVertex);
             }
         }
-        // The loading panel, drawn at a fraction of its own size. Same draw
-        // the probe captures, and the probe's capture is what it is built
-        // from -- so it arms the capture itself and draws stock until the
-        // geometry exists, which is a few frames.
-        if (quadScaleWants() && kind == 'X' && count == g_panelIndices) {
+        // The loader dialog's backing. Every draw into an interface-sized
+        // surface is offered, because the measurement needs the DIALOG's
+        // draws as much as the panel's -- the panel is sized to them.
+        //
+        // Gated to loader-shaped frames: the main menu is a rendered hangar
+        // with a dark layer of its own, a different one, and nothing here
+        // should reach it. kSceneEyeDraws is that boundary already measured
+        // for this module. Last frame's count, because this one is still
+        // being counted.
+        if (loaderPanelWants() && s->eyeDrawsLastFrame < kSceneEyeDraws) {
             ResourceInfo info;
             if (bindingResolve(bindingGet(BindSlot::Rtv0), &info) &&
-                info.isTexture2D && info.a >= 1024 && info.b >= 512) {
-                return DrawVerdict::kPanelScale;
+                info.isTexture2D && info.a >= 1024 && info.b >= 512 &&
+                loaderPanelOnDraw(self, kind, count, instances,
+                                  s->qsStartIndex, s->qsBaseVertex,
+                                  info.a, info.b)) {
+                return DrawVerdict::kLoaderPanel;
             }
         }
         // The sub-draw probe: same target test as the offscreen skip above,
@@ -2420,11 +2423,11 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     // The sub-draw probe, which also SWALLOWS the game's draw -- it re-issues
     // the surviving index ranges itself. Before the curve substitution
     // because both swallow, and two swallows would draw the quads twice.
-    // The scaled panel, which swallows the draw only when it succeeds.
-    if (v == DrawVerdict::kPanelScale) {
-        if (quadScaleSubstitute(self, g_state->realDrawIndexedInstanced,
-                                g_state->qsInstances,
-                                g_state->qsStartInstance)) {
+    // The resized panel, which swallows the draw only when it succeeds.
+    if (v == DrawVerdict::kLoaderPanel) {
+        if (loaderPanelSubstitute(self, g_state->realDrawIndexedInstanced,
+                                  g_state->qsInstances,
+                                  g_state->qsStartInstance)) {
             return;
         }
         draw();
@@ -2755,7 +2758,7 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
     }
     // The sub-draw probe re-issues this draw from the verdict path, which
     // never sees these arguments. Stashed only while armed.
-    if (g_state->quadSkipArmed || quadProbeWants() || quadScaleWants()) {
+    if (g_state->quadSkipArmed || quadProbeWants() || loaderPanelWants()) {
         g_state->qsIndexCount = perInstance;
         g_state->qsInstances = instances;
         g_state->qsStartIndex = startIndex;
@@ -3245,6 +3248,7 @@ void vScreenRefreshConfig() {
     holoConfigure(cfg);
     scrimConfigure(cfg);
     quadProbeConfigure(cfg);
+    loaderPanelConfigure(cfg);
     backdropConfigure(cfg);
     fssScanConfigure(cfg);
     fssPanelConfigure(cfg);
@@ -3349,7 +3353,10 @@ void vScreenFrameBoundary() {
     // The quad probe's readback: a capture taken a few frames ago is decoded
     // here, where the copy has certainly executed and mapping cannot stall
     // the render thread mid-frame.
-    if (g_state && g_state->ownerCtx) quadProbeTick(g_state->ownerCtx);
+    if (g_state && g_state->ownerCtx) {
+        quadProbeTick(g_state->ownerCtx);
+        loaderPanelTick(g_state->ownerCtx);
+    }
     State* s = g_state;
     if (!s) return;
 
@@ -4101,6 +4108,7 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     holoConfigure(cfg);
     scrimConfigure(cfg);
     quadProbeConfigure(cfg);
+    loaderPanelConfigure(cfg);
     backdropConfigure(cfg);
     fssScanConfigure(cfg);
     fssPanelConfigure(cfg);
@@ -4315,6 +4323,7 @@ void shutdownVScreenFixes() {
     holoShutdown();
     scrimShutdown();
     quadProbeShutdown();
+    loaderPanelShutdown();
     backdropShutdown();
     fssScanShutdown();
     fssPanelShutdown();

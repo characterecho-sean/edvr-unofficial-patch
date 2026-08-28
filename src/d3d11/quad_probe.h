@@ -63,38 +63,6 @@ bool quadProbeOnDraw(ID3D11DeviceContext* ctx, uint32_t targetW,
 // it and log the rectangles. Cheap when nothing is pending.
 void quadProbeTick(ID3D11DeviceContext* ctx);
 
-// THE FIX the probe made possible: draw the panel SMALLER.
-//
-// The captured vertices are copied verbatim and only their POSITIONS are
-// rewritten -- scaled toward the set's own centre. Everything else in the
-// 24-byte vertex, colour included, travels through untouched, so nothing
-// about the format beyond "position is a float2 at offset 0" has to be
-// understood. That is the whole reason this is small: the alternative was
-// decoding a colour encoding nobody needs to know.
-//
-// The panel scales as a unit -- fill and all four border strips -- so it
-// stays a properly proportioned bordered panel rather than a cropped one,
-// which is what a scissor could never give. And because the factor is a
-// RATIO, one number serves both of the loader's dialogs without either
-// one's size being known.
-//
-// Reads fix.loading_panel_scale: 0 is off and stock, otherwise the fraction
-// of its own size the panel is drawn at. The idiom panel_curvature uses.
-bool quadScaleWants();
-
-// Swallow the matched draw and re-issue it from our own buffers. Returns
-// false having done nothing when the geometry is not built yet -- the
-// capture takes a few frames -- and the caller then draws stock.
-// Plain types, not UINT/INT: this header is included where <windows.h> may
-// not have been, and a typedef that needs it is a build break waiting for the
-// next includer.
-typedef void(__stdcall* PfnDrawIndexedInstanced)(ID3D11DeviceContext*,
-                                                 unsigned int, unsigned int,
-                                                 unsigned int, int,
-                                                 unsigned int);
-bool quadScaleSubstitute(ID3D11DeviceContext* ctx, PfnDrawIndexedInstanced draw,
-                         uint32_t instances, uint32_t startInstance);
-
 void quadProbeShutdown();
 
 }  // namespace edvr
