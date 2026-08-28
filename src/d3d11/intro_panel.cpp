@@ -7,6 +7,8 @@
 #include <cmath>
 #include <cstring>
 
+#include <string>
+
 #include "../common/config.h"
 #include "../common/guard.h"
 #include "../common/log.h"
@@ -31,6 +33,35 @@ constexpr uint32_t kMaxSlots = 2;
 // for the same reason: long enough that the map never stalls the render
 // thread, short enough to retire within a blink.
 constexpr uint32_t kSettleFrames = 4;
+
+// The splash's own half-width in NDC, measured 2026-08-28 from its constants
+// and its vertices in ONE frame: 1.0440 across, 0.5934 tall, both eyes
+// agreeing to four decimals. It spans the whole view and overspills about
+// four percent, so a movie matched to it is clipped at the edges exactly as
+// the splash is.
+//
+// The WIDTH only; the height follows, because both quads are 16:9 and the
+// movie's pixel-to-NDC scale is near-isotropic (1/2712 by 1/2678). Deriving
+// the scale from either axis gave 5.53 and 5.52 -- that agreement is the
+// cross-check that says the decode is right, not a coincidence.
+//
+// Kept as a FRACTION OF THE VIEW rather than as the scale itself. The movie's
+// panel is a fixed 512x288 PIXELS, so how much of the view it covers depends
+// on the eye's resolution, and the multiple that matches the splash is a
+// different number on a different headset; deriving it at runtime from the
+// panel's own constants survives that. What does not survive is the premise
+// -- that the splash fills the view -- which was measured on one rig with one
+// field of view, and is the thing to re-measure if this looks wrong on
+// somebody else's.
+constexpr float kSplashHalfWidthNdc = 1.0440f;
+
+// 5.5 is what matching the splash takes here; 8 leaves room for a headset
+// where the same match needs more.
+constexpr float kMaxSize = 8.0f;
+
+// Set when fix.intro_video_size names the splash rather than a number.
+bool  g_matchSplash = false;
+float g_engagedScale = 1.0f;
 
 FaultBudget g_budget("introPanel", 4);
 
@@ -97,11 +128,28 @@ void releaseSlot(Slot& s) {
 }  // namespace
 
 void introPanelConfigure(Config& cfg) {
-    const float was = g_size;
-    g_size = cfg.getFloat("fix.intro_video_size", 1.0f);
-    if (g_size < 1.0f) g_size = 1.0f;
-    if (g_size > 4.0f) g_size = 4.0f;
-    if (g_size == was) return;
+    const float wasSize = g_size;
+    const bool  wasMatch = g_matchSplash;
+    const std::string v = cfg.getString("fix.intro_video_size", "stock");
+    g_matchSplash = (v == "splash");
+    if (g_matchSplash) {
+        g_size = 0.0f;   // derived at readback, from the panel's own numbers
+    } else {
+        g_size = static_cast<float>(atof(v.c_str()));
+        if (g_size < 1.0f) g_size = 1.0f;   // "stock" and anything unparsed
+        if (g_size > kMaxSize) g_size = kMaxSize;
+    }
+    if (g_size == wasSize && g_matchSplash == wasMatch) return;
+    if (g_matchSplash) {
+        Log::get().note(
+            "intro video size: SPLASH. The launch movie's panel is grown until "
+            "it covers what the splash after it covers -- derived from the "
+            "game's own numbers on this rig rather than a fixed multiple, so "
+            "the cut from movie to splash keeps its size. It stays "
+            "head-locked, which the splash is not, so the two still will not "
+            "agree while you are looking away (docs\\intro-video.md).");
+        return;
+    }
     if (g_size == 1.0f) {
         Log::get().note("intro video size: stock. The launch movie's panel is "
                         "left at the game's own size.");
@@ -115,7 +163,9 @@ void introPanelConfigure(Config& cfg) {
         static_cast<double>(g_size));
 }
 
-bool introPanelWants() { return g_size != 1.0f && !g_retired && !g_refused; }
+bool introPanelWants() {
+    return (g_matchSplash || g_size != 1.0f) && !g_retired && !g_refused;
+}
 
 void introPanelNoteFill(uint32_t targetW, uint32_t targetH) {
     g_fillW = targetW;
@@ -155,7 +205,7 @@ bool introPanelOnComposite(ID3D11DeviceContext* ctx, char kind, uint32_t count,
                 Log::get().note(
                     "intro video size: engaged -- the movie's panel is drawn "
                     "x%.2f its own size. Said once.",
-                    static_cast<double>(g_size));
+                    static_cast<double>(g_engagedScale));
             }
             cb->Release();
             return;
@@ -248,10 +298,30 @@ void introPanelTick(ID3D11DeviceContext* ctx, bool sceneFrame) {
             ID3D11Device* dev = nullptr;
             ctx->GetDevice(&dev);
             if (!dev) return;
+            // Named as a number, the scale IS the number. Named as the
+            // splash, it is derived here -- the first point at which the
+            // panel's own half-width in NDC is known: f[0] is its half-size
+            // in pixels and f[4] the pixels-to-NDC term, so their product is
+            // the fraction of the view one half of it covers on this rig.
+            float scale = g_size;
+            if (g_matchSplash) {
+                const float halfNdc = f[0] * fabsf(f[4]);
+                scale = halfNdc > 1e-6f ? kSplashHalfWidthNdc / halfNdc : 1.0f;
+                if (scale < 1.0f) scale = 1.0f;
+                if (scale > kMaxSize) scale = kMaxSize;
+                Log::get().note(
+                    "intro video size: this panel covers %.4f of the view's "
+                    "half-width and the splash covers %.4f, so matching it is "
+                    "x%.2f here.",
+                    static_cast<double>(halfNdc),
+                    static_cast<double>(kSplashHalfWidthNdc),
+                    static_cast<double>(scale));
+            }
+            g_engagedScale = scale;
             float out[kCbFloats];
             memcpy(out, f, sizeof(out));
-            out[0] = f[0] * g_size;
-            out[1] = f[1] * g_size;
+            out[0] = f[0] * scale;
+            out[1] = f[1] * scale;
             D3D11_BUFFER_DESC bd{};
             bd.ByteWidth = kCbBytes;
             bd.Usage = D3D11_USAGE_IMMUTABLE;
