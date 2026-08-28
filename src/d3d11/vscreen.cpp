@@ -41,6 +41,7 @@
 #include "holo_fix.h"
 #include "journal_watch.h"  // gameplay started, for the low-peak notice
 #include "remlok_fix.h"
+#include "scrim_fix.h"
 #include "exposure_fix.h"
 #include "particle_fix.h"
 #include "sunglare_fix.h"
@@ -435,6 +436,17 @@ struct State {
     // not one per keypress-worth of luck. Match is cached per RTV generation
     // (the rtv0Eye pattern) so the cost while set is one resolve per rebind,
     // not per draw.
+    // The clear probe (advanced.clear_probe): name a target by size and the
+    // colour every ClearRenderTargetView gives it is logged, a few times.
+    //
+    // It exists because the loading screen's dim wash survived deleting every
+    // draw into its buffer -- 13,754 of them -- which means it is not drawn.
+    // A wash that is not drawn is the buffer's CLEAR, and a clear cannot be
+    // found by any draw census, however the spec is written. This is the
+    // instrument that was missing.
+    uint32_t  clearProbeW = 0;
+    uint32_t  clearProbeH = 0;
+    uint32_t  clearProbeSeen = 0;
     uint32_t  censusAutoW = 0;
     uint32_t  censusAutoH = 0;
     uint32_t  censusAutoGen = 0;     // generation censusAutoMatch was derived at
@@ -1159,6 +1171,9 @@ enum class DrawVerdict {
     kFssReveal,
     kFssRing,
     kFssDump,
+    // The loader dialog's dimming wash (scrim_fix.h), held uniform for
+    // the one draw that composites the interface.
+    kScrim,
     // The menu backdrop blit (backdrop_fix.h): the still it samples is
     // substituted for a debanded copy of itself, wrapped in
     // backdropBegin/End.
@@ -1317,7 +1332,8 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         !remlokWantsDraws() && !holoWantsDraws() && !witchstarWantsDraws() &&
         !sunglareWantsDraws() && !cbPeekEnabled() && !billboardWantsDraws() &&
         !drawCensusArmed() && !panelQuadWants() && !panelCurveWants() &&
-        !particleWantsDraws() && !backdropWantsDraws()) {
+        !particleWantsDraws() && !backdropWantsDraws() &&
+        !scrimWantsDraws()) {
         return DrawVerdict::kNone;
     }
 
@@ -1627,6 +1643,11 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         return DrawVerdict::kHolo;
     }
 
+    // The loader dialog's dimming wash, recognised by what it samples.
+    if (scrimWantsDraws() && scrimOnEyeDraw(kind, count, instances)) {
+        return DrawVerdict::kScrim;
+    }
+
     // The menu backdrop's COMPOSITE -- the eye-side half of backdrop_fix.
     // The offscreen half above substitutes the still for the blit; this one
     // substitutes it for the quad that lifts the blit's target into the eye,
@@ -1885,6 +1906,20 @@ void STDMETHODCALLTYPE hookedClearRtv(ID3D11DeviceContext* self,
     if (foreignContext(self)) {
         s->realClearRtv(self, rtv, c);
         return;
+    }
+    // The clear probe, before the void fix so it reports what the GAME asked
+    // for rather than what EDVR left. Costs one size compare while armed and
+    // nothing at all while the setting is empty, which is the shipped state.
+    if (s->clearProbeW && rtv && c && s->clearProbeSeen < 8) {
+        ResourceInfo info{};
+        if (bindingResolve(rtv, &info) && info.isTexture2D &&
+            info.a == s->clearProbeW && info.b == s->clearProbeH) {
+            ++s->clearProbeSeen;
+            Log::get().note("clear probe: %ux%u cleared to r=%.4f g=%.4f "
+                            "b=%.4f a=%.4f (%u of 8)",
+                            info.a, info.b, c[0], c[1], c[2], c[3],
+                            s->clearProbeSeen);
+        }
     }
     // Cheap test first: four float compares, and only a match pays to resolve
     // the target.
@@ -2285,6 +2320,7 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     if (v == DrawVerdict::kFssRing) fssRingBegin(self);
     if (v == DrawVerdict::kFssDump) fssDumpBegin(self);
     if (v == DrawVerdict::kHolo) holoBegin(self);
+    if (v == DrawVerdict::kScrim) scrimBegin(self);
     if (v == DrawVerdict::kWitchstar) witchstarBegin(self);
     if (v == DrawVerdict::kBillboard) billboardBegin(self);
     if (v == DrawVerdict::kGlareSteady) sunglareBegin(self);
@@ -2296,6 +2332,7 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     if (v == DrawVerdict::kGlareSteady) sunglareEnd(self);
     if (v == DrawVerdict::kBillboard) billboardEnd(self);
     if (v == DrawVerdict::kWitchstar) witchstarEnd(self);
+    if (v == DrawVerdict::kScrim) scrimEnd(self);
     if (v == DrawVerdict::kHolo) holoEnd(self);
     if (v == DrawVerdict::kFssReveal) fssRevealEnd(self);
     if (v == DrawVerdict::kFssRing) fssRingEnd(self);
@@ -2584,6 +2621,39 @@ void readCensusSkip(Config& cfg, State* s) {
     if (both == s->censusSkipSpec) return;
     memcpy(s->censusSkipSpec, both.c_str(), both.length() + 1);
 
+    const std::string clearSpec = cfg.getString("advanced.clear_probe", "");
+    {
+        uint32_t w = 0, h = 0;
+        if (!clearSpec.empty()) {
+            const char* cp = clearSpec.c_str();
+            char* cend = nullptr;
+            const unsigned long cw = strtoul(cp, &cend, 10);
+            unsigned long ch = 0;
+            if (cend != cp && (*cend == 'x' || *cend == 'X')) {
+                const char* cq = cend + 1;
+                ch = strtoul(cq, &cend, 10);
+            }
+            while (*cend == ' ' || *cend == '	') ++cend;
+            if (cend == cp || cw == 0 || ch == 0 || *cend) {
+                Log::get().note("clear probe: \"%s\" is not one WIDTHxHEIGHT; "
+                                "refused rather than half-applied.",
+                                clearSpec.c_str());
+            } else {
+                w = static_cast<uint32_t>(cw);
+                h = static_cast<uint32_t>(ch);
+            }
+        }
+        if (w != s->clearProbeW || h != s->clearProbeH) {
+            s->clearProbeW = w;
+            s->clearProbeH = h;
+            s->clearProbeSeen = 0;
+            if (w) {
+                Log::get().note("clear probe ARMED on %ux%u: the next few "
+                                "clears of a target that size will be logged "
+                                "with their colour. Nothing is changed.", w, h);
+            }
+        }
+    }
 
     s->censusAutoW = 0;
     s->censusAutoH = 0;
@@ -2875,6 +2945,7 @@ void vScreenRefreshConfig() {
     fssResConfigure(cfg);
     remlokConfigure(cfg);
     holoConfigure(cfg);
+    scrimConfigure(cfg);
     backdropConfigure(cfg);
     fssScanConfigure(cfg);
     fssPanelConfigure(cfg);
@@ -3725,6 +3796,7 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     readCensusSkip(cfg, g_state);
     remlokConfigure(cfg);
     holoConfigure(cfg);
+    scrimConfigure(cfg);
     backdropConfigure(cfg);
     fssScanConfigure(cfg);
     fssPanelConfigure(cfg);
@@ -3937,6 +4009,7 @@ void shutdownVScreenFixes() {
     }
     remlokShutdown();
     holoShutdown();
+    scrimShutdown();
     backdropShutdown();
     fssScanShutdown();
     fssPanelShutdown();
