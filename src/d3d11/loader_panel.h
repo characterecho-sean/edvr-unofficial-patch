@@ -120,10 +120,13 @@ typedef void(__stdcall* PfnDrawIndexedInstanced)(ID3D11DeviceContext*,
 bool loaderPanelSubstitute(ID3D11DeviceContext* ctx, PfnDrawIndexedInstanced draw,
                            uint32_t instances, uint32_t startInstance);
 
-// Once per frame: close the frame's composition record, arm or validate a
-// collection, retire a settled measurement into built geometry. Cheap when
-// nothing is pending.
-void loaderPanelTick(ID3D11DeviceContext* ctx);
+// Once per frame: close the frame's composition record, arm or poll a
+// collection, maintain the withhold chain. sceneFrame is the caller's
+// scene boundary (eye draws cleared kSceneEyeDraws last frame): the first
+// such frame means the intro is over, and this module retires for the
+// session -- the documented scope, enforced. Cheap when nothing is
+// pending.
+void loaderPanelTick(ID3D11DeviceContext* ctx, bool sceneFrame);
 
 void loaderPanelShutdown();
 

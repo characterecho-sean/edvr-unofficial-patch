@@ -195,10 +195,20 @@ with DO_NOT_WAIT (verdict typically lands in 1-2 frames), and the
 verified scrim is withheld BY ORDINAL -- the k-th panel of its surface in
 the frame, k=0 in every measurement to date -- every frame, through
 fade-in, percent ticks and the dialog switch, with no composition
-matching at all. The chain lives while panels keep arriving (one hiccup
-frame forgiven; menu frames carry no panels, so it cannot outlive the
-loader), re-verifies about every two seconds, and stands down the moment
-re-verification stops finding the scrim. The scrim first appears in a
+matching at all. The chain's END is the intro's end, not a gap count:
+flights 9 and 10 proved gap length is no signal (a 2-frame grace flashed
+the scrim at every modal; 300 frames still died inside the several-second
+white-text-to-first-modal gap -- silently, which is why every stand-down
+now logs). The first rendered-scene frame (the kSceneEyeDraws boundary
+the draw hook already gates on, passed into the tick) retires the module
+for the session, engaged or not -- which is also what enforces the
+documented intro-only scope against any in-game screen that happens to be
+loader-shaped. Within the intro, gaps of any length ride through; a
+return from a real gap (>= 30 frames) re-verifies immediately with the
+withhold carrying across, scattered single-frame panel skips (the
+interface's habit -- flight 10 counted 18 of them in seven seconds) ride
+free, and the periodic ~2s re-verification stands the chain down the
+moment the scrim stops classifying. The scrim first appears in a
 white-text-over-scrim phase BEFORE the modals -- field-confirmed already
 transparent there under the withhold -- so by the time a dialog pops the
 swallow has been live for seconds. After a few refusals, arming falls
@@ -258,8 +268,13 @@ hologram's exact Elite orange and emptied the dark-covering list); 12:40
 (textured draws included -- refused: still nothing dark and boxed, all
 blends plain src-alpha, which with the field's screenshot forced the
 eye-level conclusion); ~12:55 (THE WITHHOLD ENGAGED -- field: "almost
-perfect now", scrim briefly visible at first, which the immediate-measure
-ordinal chain above removes).
+perfect now", scrim briefly visible at first: the stability gate's cost);
+~13:05 (ordinal chain, 2-frame grace -- field: flash at EVERY modal, the
+inter-dialog gaps); 13:19 (300-frame grace -- field: perfect except one
+flash after the white text, before the first modal: the several-second
+gap there out-lasted the grace SILENTLY, and 18 silent re-measures in 7s
+exposed the interface's scattered panel-skip frames -- both fixed by the
+scene-retirement chain above).
 
 ## What must not regress
 

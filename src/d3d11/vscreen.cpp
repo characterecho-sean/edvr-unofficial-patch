@@ -3361,7 +3361,10 @@ void vScreenFrameBoundary() {
     // the render thread mid-frame.
     if (g_state && g_state->ownerCtx) {
         quadProbeTick(g_state->ownerCtx);
-        loaderPanelTick(g_state->ownerCtx);
+        // The scene flag retires the loader fix when the intro ends: the
+        // same boundary the draw hook gates on, read at the frame edge.
+        loaderPanelTick(g_state->ownerCtx,
+                        g_state->eyeDrawsLastFrame >= kSceneEyeDraws);
     }
     State* s = g_state;
     if (!s) return;

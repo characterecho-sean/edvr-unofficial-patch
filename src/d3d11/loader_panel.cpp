@@ -79,17 +79,20 @@ constexpr uint32_t kCb2Bytes = 48;
 // is done in a frame or two.
 constexpr uint32_t kSettleDeadline = 6;
 
-// The withhold rides a CHAIN of panel-bearing frames and re-verifies its
-// classification about every two seconds of them. The grace is GENEROUS:
-// the field saw the scrim flash at every new modal when it was two frames,
-// because the loader leaves short panel-less gaps between its dialogs.
-// Seconds of gap are safe to forgive -- gameplay never reaches this code
-// (the scene gate stops the draw hook), the census shows menu frames carry
-// no panels, and a panel returning after ANY gap triggers an immediate
-// re-verification, so even a wrong resumption is corrected within a few
-// frames.
+// The withhold rides a CHAIN of panel-bearing frames, re-verifies its
+// classification about every two seconds of them, and re-verifies on a
+// panel's return from a REAL gap. No frame-counted grace ends the chain
+// any more: a 2-frame grace flashed the scrim at every modal (the loader
+// leaves gaps between dialogs), a 300-frame grace still died inside the
+// several-second white-text-to-first-modal gap and flashed there -- gap
+// length is simply not the signal. The chain ends when the INTRO ends: the
+// first rendered-scene frame retires this module for the session, which is
+// also what pins the fix to its documented scope. Short flickers (the
+// interface skips panel draws on some frames) ride through without
+// re-verifying; only a gap of kGapReverify frames or more asks for a fresh
+// look on return, with the withhold carrying through it.
 constexpr uint32_t kReverifyFrames = 120;
-constexpr uint32_t kChainGrace = 300;
+constexpr uint32_t kGapReverify = 30;
 
 // After this many consecutive refusals, arming goes back to requiring two
 // identical frames -- so a panel-bearing screen that is NOT the loader
@@ -180,9 +183,13 @@ bool     g_chainOn = false;
 uint32_t g_chainW = 0, g_chainH = 0;
 uint32_t g_chainOrd[kMaxScrims];
 uint32_t g_chainOrdCount = 0;
-uint32_t g_chainMissed = 0;      // consecutive panel-less frames
+uint32_t g_chainMissed = 0;      // consecutive panel-less frames (gap size)
+uint32_t g_dimsMiss = 0;         // frames with panels only at OTHER dims
 uint32_t g_reverifyAt = 0;
 uint32_t g_measurements = 0;
+bool     g_retired = false;      // a rendered scene arrived: the intro is
+                                 // over and this module is done for the
+                                 // session, engaged or not
 
 void failOnce(const char* why) {
     static bool noted = false;
@@ -211,6 +218,7 @@ void chainOff() {
     g_chainOn = false;
     g_chainOrdCount = 0;
     g_chainMissed = 0;
+    g_dimsMiss = 0;
     g_reverifyAt = 0;
 }
 
@@ -218,6 +226,7 @@ void resetMeasured() {
     chainOff();
     g_measuredHash = 0;
     g_refuseStreak = 0;
+    g_retired = false;
 }
 
 void resetFrameAcc() {
@@ -754,7 +763,7 @@ bool tryAnalyze(ID3D11DeviceContext* ctx, bool allowWait) {
 
 }  // namespace
 
-void loaderPanelTick(ID3D11DeviceContext* ctx) {
+void loaderPanelTick(ID3D11DeviceContext* ctx, bool sceneFrame) {
     ++g_frame;
     if (!g_on) {
         if (g_ibStage || g_vbStage || g_collecting) dropPending();
@@ -762,6 +771,21 @@ void loaderPanelTick(ID3D11DeviceContext* ctx) {
         resetFrameAcc();
         g_liveHash = 0;
         return;
+    }
+
+    // A rendered scene means the intro is over: the withhold retires for
+    // the session, engaged or not, which is what pins fix.loading_panel to
+    // its documented scope -- an in-game screen that happens to be
+    // loader-shaped can never arm it.
+    if (sceneFrame && !g_retired) {
+        g_retired = true;
+        if (g_chainOn || g_measurements) {
+            Log::get().note("loading panel: a rendered scene arrived -- the "
+                            "intro is over and the withhold retires for this "
+                            "session.");
+        }
+        chainOff();
+        dropPending();
     }
 
     const uint32_t finishedHash = g_seqLen ? g_hashAcc : 0;
@@ -802,20 +826,30 @@ void loaderPanelTick(ID3D11DeviceContext* ctx) {
         }
     }
 
-    // Chain maintenance: the withhold lives exactly as long as panels keep
-    // arriving (one hiccup frame forgiven), and re-verifies periodically. A
-    // frame with no interface draws at all counts as panel-less too -- the
-    // chain must not sleep through a screen change and wake on an unrelated
-    // panel later.
+    // Chain maintenance. Gaps of any length ride through -- the chain's end
+    // is the scene retirement above, not a gap count. A return from a REAL
+    // gap re-verifies immediately (the withhold carrying through it); the
+    // interface's habit of skipping panel draws on scattered frames does
+    // not, or the loader would re-capture 4 MB every half second. Panels
+    // arriving only at OTHER dims for a stretch mean the surface was
+    // rebuilt (a settings change): stand down and re-measure.
     if (g_chainOn) {
         if (!g_frameChainPanel) {
-            if (++g_chainMissed >= kChainGrace) {
-                chainOff();
+            ++g_chainMissed;
+            if (g_frameAnyPanel) {
+                if (++g_dimsMiss >= 2) {
+                    chainOff();
+                    Log::get().note("loading panel: the panels moved to a "
+                                    "different surface; re-measuring.");
+                }
+            } else {
+                g_dimsMiss = 0;
             }
         } else {
-            const bool returned = g_chainMissed != 0;
+            const bool realGap = g_chainMissed >= kGapReverify;
             g_chainMissed = 0;
-            if ((returned || g_frame >= g_reverifyAt) && !g_collecting &&
+            g_dimsMiss = 0;
+            if ((realGap || g_frame >= g_reverifyAt) && !g_collecting &&
                 !g_settleFrom) {
                 dropPending();
                 g_collecting = true;
@@ -827,9 +861,9 @@ void loaderPanelTick(ID3D11DeviceContext* ctx) {
     // no verdict already standing for its exact shape. After a few
     // refusals, arming requires two identical frames, so a panel-bearing
     // screen that is not the loader cannot re-trigger a 4 MB capture every
-    // frame of its animation.
-    if (!g_chainOn && !g_collecting && !g_settleFrom && g_frameAnyPanel &&
-        finishedHash != g_measuredHash) {
+    // frame of its animation. Never after retirement.
+    if (!g_retired && !g_chainOn && !g_collecting && !g_settleFrom &&
+        g_frameAnyPanel && finishedHash != g_measuredHash) {
         if (g_refuseStreak < kRefuseCool || finishedHash == g_liveHash) {
             dropPending();
             g_collecting = true;
