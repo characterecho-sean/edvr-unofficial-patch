@@ -138,6 +138,22 @@ struct CbWatch {
 };
 uint64_t g_cbWatchHash = 0;      // latched at census begin; 0 = off
 uint64_t g_cbWatchHash2 = 0;     // optional second hash (comma-separated)
+
+// Which constant-buffer SLOT the watch reads, latched with the hash.
+//
+// It was b0 and only b0, and twice now that has been the wrong buffer. The
+// loading wash's pixel shader reads b2 (docs/loading-scrim.md records the
+// dump instrument being unable to reach it), and the intro movie's panel is
+// placed by a scale and a transform in the VERTEX shader's b2 --
+// EF103A7CB4A8369A, read from its own disassembly, docs/intro-video.md.
+// Both times the census reported "no constant buffer" for a draw whose
+// entire behaviour was in one, because the column only ever looked at slot
+// zero.
+//
+// 0 keeps the old path exactly: the b0 shadow, which something in the tree
+// already hooks. A non-zero slot is read off the context at the draw, the
+// same IA-state pattern the PS side has always used.
+uint32_t g_cbWatchSlot = 0;
 CbWatch  g_cbWatch[4];           // [0] = VS b0, [1] = PS b0,
                                  // [2] = CS b0, [3] = CS b1 (dispatches --
                                  // round 21: the reconstruction pair share
@@ -328,10 +344,23 @@ void cbWatchDump(uint32_t slot, uint32_t q) {
 // -- nothing hooks PSSetConstantBuffers, and two COM calls on the handful of
 // watched draws a frame is the whole cost.
 void cbWatchOnDraw(ID3D11DeviceContext* ctx, uint32_t q) {
-    cbWatchRegister(0, bindingGet(BindSlot::VsCb0));
+    if (g_cbWatchSlot == 0) {
+        cbWatchRegister(0, bindingGet(BindSlot::VsCb0));
+    } else {
+        // Nothing hooks VSSetConstantBuffers past b0, so a watched slot is
+        // asked of the context at the draw -- the pattern the PS side below
+        // has always used, and paid only on the handful of matched draws a
+        // frame.
+        guardedBudget(g_cbBudget, [&] {
+            ID3D11Buffer* vb = nullptr;
+            ctx->VSGetConstantBuffers(g_cbWatchSlot, 1, &vb);
+            cbWatchRegister(0, vb);
+            if (vb) vb->Release();
+        });
+    }
     guardedBudget(g_cbBudget, [&] {
         ID3D11Buffer* pb = nullptr;
-        ctx->PSGetConstantBuffers(0, 1, &pb);
+        ctx->PSGetConstantBuffers(g_cbWatchSlot, 1, &pb);
         cbWatchRegister(1, pb);
         if (pb) pb->Release();
     });
@@ -957,6 +986,8 @@ void drawCensusFrameBoundary(uint32_t frameNo) {
                 cw.empty() ? 0 : _strtoui64(cw.c_str(), &end, 16);
             g_cbWatchHash2 =
                 (end && *end == ',') ? _strtoui64(end + 1, nullptr, 16) : 0;
+            g_cbWatchSlot = static_cast<uint32_t>(Config::get().getIntInRange(
+                "advanced.census_cb_slot", 0, 0, 13));
         }
         g_cbDumps = 0;
         for (Interned& e : g_tab) e = Interned();
@@ -965,8 +996,10 @@ void drawCensusFrameBoundary(uint32_t frameNo) {
                         g_offscreen ? "yes" : "no");
         if (g_cbWatchHash) {
             Log::get().note("DCW watching vs=%016llX -- every recorded draw "
-                            "running that shader dumps its b0 constants",
-                            static_cast<unsigned long long>(g_cbWatchHash));
+                            "running that shader dumps its b%u constants "
+                            "(vertex and pixel stage)",
+                            static_cast<unsigned long long>(g_cbWatchHash),
+                            g_cbWatchSlot);
         }
     }
 }

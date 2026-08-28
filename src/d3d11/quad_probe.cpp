@@ -505,19 +505,33 @@ void quadProbeTick(ID3D11DeviceContext* ctx) {
             for (uint32_t q = 0; q < quads; ++q) {
                 float lo[2] = {1e30f, 1e30f};
                 float hi[2] = {-1e30f, -1e30f};
-                // The float2 AFTER the position, ranged the same way.
+                // Every float AFTER the first two, ranged across the quad --
+                // labelled by BYTE OFFSET and nothing else.
                 //
-                // On every layout this has met it is the texture coordinate,
-                // and its RANGE is the measurement the first-vertex hex dump
-                // could never give. The intro movie is the case that forced
-                // it: both its stages draw full-screen quads -- position
-                // -1..1, viewport the whole target -- and the picture is
-                // still small and surrounded by black, which only a uv span
-                // reaching outside 0..1 explains. One corner's bytes cannot
-                // say that; two corners can.
-                float uvLo[2] = {1e30f, 1e30f};
-                float uvHi[2] = {-1e30f, -1e30f};
-                const bool haveUv = stride >= 16;
+                // The first cut of this called offsets 8 and 12 "uv", which
+                // is what the layouts it had met used, and reported
+                // "uv 0..0, 0..1" for the intro composite. That draw's
+                // vertex declaration is POSITION.xyz then TEXCOORD.xy, so
+                // the pair printed was (position.z, texcoord.x) and the
+                // reading was nonsense dressed as a measurement -- a probe
+                // cannot know a layout it was not told. Offsets are facts;
+                // meanings are the reader's, with the shader's input
+                // signature beside them.
+                //
+                // Ranges rather than one vertex's bytes because a span is
+                // what says whether a quad covers its source or a part of
+                // it, which one corner never could.
+                constexpr uint32_t kMaxFloatSlots = 4;
+                float fLo[kMaxFloatSlots], fHi[kMaxFloatSlots];
+                for (uint32_t i = 0; i < kMaxFloatSlots; ++i) {
+                    fLo[i] = 1e30f;
+                    fHi[i] = -1e30f;
+                }
+                const uint32_t nFloats =
+                    stride > 8 ? ((stride - 8) / 4 < kMaxFloatSlots
+                                      ? (stride - 8) / 4
+                                      : kMaxFloatSlots)
+                               : 0;
                 int64_t firstOff = -1;
                 bool bad = false;
                 for (uint32_t k = 0; k < vertsPerQuad; ++k) {
@@ -550,13 +564,11 @@ void quadProbeTick(ID3D11DeviceContext* ctx) {
                         if (p[c] < lo[c]) lo[c] = p[c];
                         if (p[c] > hi[c]) hi[c] = p[c];
                     }
-                    if (haveUv) {
-                        float t[2];
-                        memcpy(t, vb + off + 8, sizeof(t));
-                        for (int c = 0; c < 2; ++c) {
-                            if (t[c] < uvLo[c]) uvLo[c] = t[c];
-                            if (t[c] > uvHi[c]) uvHi[c] = t[c];
-                        }
+                    for (uint32_t i = 0; i < nFloats; ++i) {
+                        float t;
+                        memcpy(&t, vb + off + 8 + i * 4, sizeof(t));
+                        if (t < fLo[i]) fLo[i] = t;
+                        if (t > fHi[i]) fHi[i] = t;
                     }
                 }
                 if (bad) {
@@ -576,17 +588,22 @@ void quadProbeTick(ID3D11DeviceContext* ctx) {
                                  vb[firstOff + 8 + t]);
                     }
                 }
-                char uvs[96] = "";
-                if (haveUv) {
-                    snprintf(uvs, sizeof(uvs),
-                             "  uv %.4f..%.4f, %.4f..%.4f (span %.4f x %.4f)",
-                             uvLo[0], uvHi[0], uvLo[1], uvHi[1],
-                             uvHi[0] - uvLo[0], uvHi[1] - uvLo[1]);
+                char fs[160];
+                int fn = 0;
+                fs[0] = '\0';
+                for (uint32_t i = 0; i < nFloats; ++i) {
+                    const int room = static_cast<int>(sizeof(fs)) - fn;
+                    if (room < 32) break;
+                    const int wrote =
+                        snprintf(fs + fn, static_cast<size_t>(room),
+                                 "  +%u %.4f..%.4f", 8 + i * 4, fLo[i], fHi[i]);
+                    if (wrote < 0) break;
+                    fn += wrote;
                 }
                 Log::get().note("    quad %u: x %.3f..%.3f  y %.3f..%.3f  "
-                                "(w %.3f h %.3f)%s  +%s",
+                                "(w %.3f h %.3f)%s  hex+%s",
                                 q, lo[0], hi[0], lo[1], hi[1],
-                                hi[0] - lo[0], hi[1] - lo[1], uvs, tail);
+                                hi[0] - lo[0], hi[1] - lo[1], fs, tail);
             }
         }
         for (uint32_t i = 0; i < g_vbCount; ++i) {

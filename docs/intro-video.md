@@ -50,6 +50,31 @@ whole eye in both cases, so what has to be matched is not where the panel is
 but **how much of the 1920x1080 surface each one fills**. Measured for both,
 never invented for either.
 
+## The sequence after the movie (field, 2026-08-28)
+
+There is no pause to work with, which every plan on this page had assumed
+there was:
+
+> There's no menu to sit at, it automatically drops into the splash, then
+> some loading modals and then the main menu
+
+So the states run **movie → splash → loading modals → main menu**, with the
+splash lasting a few seconds before the modals cover it. That is what "the
+same virtual panel the splash occupies" names: the screen immediately after
+the movie, not the main menu behind everything later.
+
+Two consequences. A capture aimed at "the splash" has a window of seconds
+and cannot be arranged by asking the player to hold still somewhere; it has
+to be placed on the clock. And a capture that lands late measures the MAIN
+MENU's composite, which is only the same thing if the game does not rewrite
+the composite between those states -- which is exactly what is being
+measured, so it cannot be assumed on the way in.
+
+The loading modals in that window are the other workstream's subject
+(`docs/loading-panel-handoff.md`, whose scope note reads "the intro only").
+Both fixes live in the same few seconds of the startup and neither should
+be read from a log without the other in mind.
+
 ## What the movie is (measured, from the install)
 
 `Products\elite-dangerous-odyssey-64\Movies\` holds ten Matroska/WebM files.
@@ -244,6 +269,61 @@ screenshot shows and is the natural way to fit 16:9 into a 103°x103° view
 without distorting it. That is a hypothesis with a hole in it until the span
 is read; the probe now reports it (`uv A..B, C..D (span W x H)`).
 
+## Flight 5, and the answer: the panel is placed by VS cb2
+
+The uv span came back as `0.0000..0.0000, 0.0000..1.0000` -- a u that does
+not vary, which no working blit can have. The reading was wrong, and the way
+it was wrong is the finding: **the probe was told a layout it had guessed.**
+The composite's own input signature, from its disassembly
+(`docs/shaders/intro-composite-vs.asm`):
+
+```
+// POSITION   0   xyz    register 0
+// TEXCOORD   0   xy     register 1
+```
+
+`POSITION` is **xyz**, so the 20-byte vertex is position at offset 0..11 and
+texcoord at **12**, not 8. The pair the probe printed as "uv" was
+`(position.z, texcoord.x)`: z is 0 on every vertex, u runs 0..1. A plain
+unit quad with a plain 0..1 blit, misread through offsets nobody had
+checked against the shader. The probe now labels those columns by byte
+offset alone (`+8`, `+12`, `+16`) and leaves the meaning to whoever has the
+signature in front of them.
+
+**And the shader says where the placement lives.** The whole vertex program:
+
+```
+mov  o0.xy, v1.xyxx                    ; texcoord straight through
+mul  r0.xy, v0.xyxx, cb2[0].xyxx       ; SCALE the unit quad
+mul  r1.xyzw, r0.yyyy, cb2[2].xyzw
+mad  r0.xyzw, r0.xxxx, cb2[1].xyzw, r1.xyzw
+mad  r0.xyzw, v0.zzzz, cb2[3].xyzw, r0.xyzw
+add  o1.xyzw, r0.xyzw, cb2[4].xyzw     ; TRANSLATE
+```
+
+and the pixel shader (`docs/shaders/intro-composite-ps.asm`) is one
+instruction -- `sample(t0, uv)` -- with no fit, no letterbox, no border
+term.
+
+So the chain is: a unit quad, scaled by `cb2[0].xy`, put through the matrix
+in `cb2[1..3]`, translated by `cb2[4]`, and sampled 1:1. **Nothing else in
+it can make the picture small or put it anywhere. The panel's size and
+position are entirely in the vertex shader's constant buffer 2**, and every
+"full-screen, nothing to move" reading on this page was true of the
+vertices and blind to the transform that scales them.
+
+That also retires the uv hypothesis and the sampler-border story with it.
+
+**Why four flights missed it.** The census's `c=` column reads **b0**, and
+so does `census_cb_watch`. This draw's transform is in **b2**. The census
+therefore reported `c=-` -- no constant buffer -- for a draw whose entire
+behaviour is one, and every model built on that line inherited the error.
+`docs/loading-scrim.md` had already written the same sentence about the same
+blind spot for a different shader: *"the DCW instrument dumps b0, and this
+shader reads b2, so the tint has not been measured."* It was a known gap,
+recorded, and not closed until it cost a second workstream.
+`advanced.census_cb_slot` closes it.
+
 ## The other symptom: facing the wrong way at the cut
 
 Reported after the flight:
@@ -352,6 +432,42 @@ start vertex where an indexed draw passes baseVertex.
 
 ## The flight plan from here
 
+**Flight 6 — the transform, in both states.** The mechanism is settled; what
+is left is two sets of numbers.
+
+```ini
+[advanced]
+census_cb_watch = EF103A7CB4A8369A
+census_cb_slot  = 2
+census_at_ms    = 12000,40000
+census_frames   = 2
+quad_probe      =
+```
+
+Two censuses: one mid-movie, one after the splash has arrived. Each dumps
+the composite's `cb2` for both eyes, per draw, as `DCW` lines. `cb2[0].xy`
+is the scale and `cb2[4]` the translation, so the two dumps say outright
+whether the game moves this panel between the movie and the splash, and by
+how much.
+
+The times are chosen from the measured startup: the handover lands between
+6.4 s and 8.6 s depending on the run, the movie is about twenty seconds, and
+the splash follows it immediately. 12 s is comfortably inside playback;
+40 s is past the movie and into the splash-and-modals stretch. Neither needs
+the player to hold still anywhere, which is what the last three attempts all
+foundered on.
+
+**Then the fix**, and it is now a known shape: substitute `cb2` for exactly
+the movie's two composite draws, with the values the splash uses. That is
+`panel_distance`'s own mechanism -- a composite's constants swapped for one
+draw and restored after -- pointed at a different slot and a different draw.
+The ordering problem (the movie plays first, so the splash's numbers have
+not been seen yet) is unchanged and is decided by what flight 6 returns: a
+derivable relationship, a value learned and kept, or a rule read off the two.
+
+The superseded plan, kept because its reasoning was sound and its target
+was wrong:
+
 **Flight 5 — the uv span, for the movie and for the splash.**
 
 Two launches, or one and a re-arm. The movie's:
@@ -434,11 +550,20 @@ Both count frames the same way `DC` lines do — `intro probe: frame N` and
 
 ## Status
 
-Measured 2026-08-28 across two flights. Established: the movie's path, the
-freeze, the unreachability of phase A, and — flight 3 — that the composite
-covers the whole eye, so the picture's size is decided inside its 1920x1080
-source and not by the panel's own geometry. Remaining: where it sits inside
-that surface, for the movie and for the splash, which flight 4 reads with a
-probe that could not have been aimed at it before today. Plus the
-facing-the-wrong-way symptom, which has no measurement of its own yet. No
-fix written.
+Measured 2026-08-28 across five flights, and the mechanism is now closed by
+reading rather than flying.
+
+**Established.** The movie is three YUV planes converted into a per-eye
+1920x1080 surface and put in front of each eye by a unit quad whose scale,
+orientation and position come entirely from **vertex constant buffer 2**;
+its pixel shader is a single `sample`. The freeze is one frame of 2.7 s and
+is the VR handover itself. Phase A submits nothing to the headset and is
+unreachable from here — censused at 3.0 s and drawing literally nothing.
+The surround is already black.
+
+**Remaining.** The contents of `cb2` in the movie's state and in the
+splash's — two dumps, flight 6, no waiting required. Then the fix is
+`panel_distance`'s own mechanism aimed at a different slot. Plus the
+facing-the-wrong-way symptom, which still has no measurement of its own.
+
+No fix written.
