@@ -111,6 +111,11 @@ constexpr uint32_t kStuckFrames = 600;
 // measure-discard loop re-copying a 4 MB buffer every third frame.
 constexpr uint32_t kMaxDropStreak = 3;
 
+// Entries per refusal-diagnostic list. Six, because flight 6's top three
+// were saturated by the loading screen's wide bars and side panels and a
+// backing-sized quad never surfaced.
+constexpr int kCands = 6;
+
 FaultBudget g_budget("loaderPanel", 6);
 
 bool g_on = false;
@@ -147,7 +152,14 @@ struct CapDraw {
     uint32_t ibOffset = 0;   // bytes into the index staging buffer
     int      baseVertex = 0;
     bool     i16 = false;    // this draw's own index format
+    bool     textured = false;  // PS slot 0 bound -- text, or a masked quad
     void*    vsSrv = nullptr;   // identity of VS t0 at the draw, not held
+    // Blend state at the draw, for the dumps: the one stage of the look the
+    // estimator does not model, and the difference between a faint white
+    // bar and a darkening one.
+    bool     blendOn = false;
+    uint8_t  srcBlend = 0;
+    uint8_t  dstBlend = 0;
 };
 
 // One scrim's substitute: its own 30 vertices with the element-index bytes
@@ -331,13 +343,15 @@ bool loaderPanelOnDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
         }
     }
 
-    // Collection: capture this draw if the frame is the armed one and the
-    // draw is a solid quad batch -- text reads a texture and is content by
-    // definition; the panels this module cares about read none. A qualifying
-    // draw that cannot be captured -- capacity, an overlong frame -- poisons
-    // the collection: a verdict from a subset could miss the box.
+    // Collection: capture every quad-batch draw, TEXTURED INCLUDED -- the
+    // hunt judges each quad by its own matrix and estimate, so text cannot
+    // pollute anything, and flight 6 proved no untextured quad renders the
+    // modal's backing: if it is an atlas-masked black quad, it lives in a
+    // textured draw. A qualifying draw that cannot be captured -- capacity,
+    // an overlong frame -- poisons the collection: a verdict from a subset
+    // could miss the box.
     if (g_collecting) {
-        const bool qualifies = !textured && count % kIndicesPerQuad == 0;
+        const bool qualifies = count % kIndicesPerQuad == 0;
         if (qualifies && p < kMaxSeq && g_capCount < kMaxCaptures) {
             bool stored = false;
             guardedBudget(g_budget, [&] {
@@ -405,11 +419,28 @@ bool loaderPanelOnDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
                         cd.ibOffset = g_ibFill;
                         cd.baseVertex = baseVertex;
                         cd.i16 = idxSize == 2u;
-                        // The widget table and flags, at the first panel of
-                        // the frame -- the same GPU-timeline copy discipline
-                        // as the vertex buffer. Later panels record only the
-                        // view's identity, so a mixed-table frame can refuse.
-                        if (count == kPanelIndices) {
+                        cd.textured = textured;
+                        ID3D11BlendState* bs = nullptr;
+                        FLOAT bf[4];
+                        UINT bmask = 0;
+                        ctx->OMGetBlendState(&bs, bf, &bmask);
+                        if (bs) {
+                            D3D11_BLEND_DESC bd2;
+                            bs->GetDesc(&bd2);
+                            cd.blendOn =
+                                bd2.RenderTarget[0].BlendEnable != FALSE;
+                            cd.srcBlend = static_cast<uint8_t>(
+                                bd2.RenderTarget[0].SrcBlend);
+                            cd.dstBlend = static_cast<uint8_t>(
+                                bd2.RenderTarget[0].DestBlend);
+                            bs->Release();
+                        }
+                        // The widget table and flags, at the first solid
+                        // panel of the frame -- the same GPU-timeline copy
+                        // discipline as the vertex buffer. Later panels
+                        // record only the view's identity, so a mixed-table
+                        // frame can refuse.
+                        if (count == kPanelIndices && !textured) {
                             ID3D11ShaderResourceView* srv = nullptr;
                             ctx->VSGetShaderResources(0, 1, &srv);
                             if (srv) {
@@ -814,7 +845,7 @@ void analyze(ID3D11DeviceContext* ctx) {
     uint32_t scrims = 0;
     for (uint32_t d = 0; d < g_capCount; ++d) {
         const CapDraw& cd = g_caps[d];
-        if (cd.count != kPanelIndices || !known[d]) continue;
+        if (cd.count != kPanelIndices || cd.textured || !known[d]) continue;
         const uint32_t c = rgba[d];
         const uint32_t r = c & 0xFF, gch = (c >> 8) & 0xFF,
                        b = (c >> 16) & 0xFF, a = (c >> 24) & 0xFF;
@@ -862,12 +893,16 @@ void analyze(ID3D11DeviceContext* ctx) {
         float est[4] = {0, 0, 0, 0};
         uint32_t draw = 0;
         uint32_t count = 0;
+        bool textured = false;
+        bool blendOn = false;
+        uint8_t srcBlend = 0;
+        uint8_t dstBlend = 0;
     };
-    Cand topBoxed[3], topDark[3];
+    Cand topBoxed[kCands], topDark[kCands];
     auto push = [](Cand* list, const Cand& c) {
-        for (int t = 0; t < 3; ++t) {
+        for (int t = 0; t < kCands; ++t) {
             if (c.area > list[t].area) {
-                for (int s = 2; s > t; --s) list[s] = list[s - 1];
+                for (int s = kCands - 1; s > t; --s) list[s] = list[s - 1];
                 list[t] = c;
                 break;
             }
@@ -907,6 +942,10 @@ void analyze(ID3D11DeviceContext* ctx) {
             memcpy(cand.est, est, sizeof(est));
             cand.draw = cd.seqPos;
             cand.count = cd.count;
+            cand.textured = cd.textured;
+            cand.blendOn = cd.blendOn;
+            cand.srcBlend = cd.srcBlend;
+            cand.dstBlend = cd.dstBlend;
             if (boxed) push(topBoxed, cand);
             if (darkCover) push(topDark, cand);
             if (boxed && darkCover && areaPx > boxAreaPx) {
@@ -925,14 +964,17 @@ void analyze(ID3D11DeviceContext* ctx) {
         const struct { const char* name; const Cand* list; } lists[2] = {
             {"boxed", topBoxed}, {"dark covering", topDark}};
         for (const auto& L : lists) {
-            for (int t = 0; t < 3; ++t) {
+            for (int t = 0; t < kCands; ++t) {
                 const Cand& c = L.list[t];
                 if (c.area <= 0.0f) break;
                 Log::get().note(
-                    "  %s quad in the %u-index draw at %u, rgba %08X, "
-                    "renders ~%.2f,%.2f,%.2f,%.2f, maps to px %.0f,%.0f "
-                    "%.0fx%.0f",
-                    L.name, c.count, c.draw, c.rgba,
+                    "  %s quad in the %u-index draw at %u [%s, blend "
+                    "%s %u*%u], rgba %08X, renders ~%.2f,%.2f,%.2f,%.2f, "
+                    "maps to px %.0f,%.0f %.0fx%.0f",
+                    L.name, c.count, c.draw,
+                    c.textured ? "tex" : "solid",
+                    c.blendOn ? "on" : "off", c.srcBlend, c.dstBlend,
+                    c.rgba,
                     c.est[0], c.est[1], c.est[2], c.est[3],
                     (c.f.cx0 * 0.5f + 0.5f) * surfW,
                     (0.5f - c.f.cy1 * 0.5f) * surfH,

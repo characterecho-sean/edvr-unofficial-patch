@@ -255,7 +255,17 @@ ride element 0 at full view, which proved the backing is a batch quad and
 sent the hunt per-quad); 12:04 (per-quad hunt by VERTEX colour -- refused,
 and its top-3 dump showed the only dark opaque vertices in the frame are
 the full-view sheet's: batch quads are colour-neutral and styled by their
-element params, which moved the classifier to estimated rendered colour).
+element params, which moved the classifier to estimated rendered colour);
+12:25 (estimated-colour hunt over untextured quads -- refused, and its
+candidate lists finally showed the landscape: the ORANGE MODAL is a batch
+element, 611x1235 px, estimating exactly Elite orange ~1.00,0.44,0.08,
+which vouches for the estimator -- while the dark-covering list was EMPTY,
+so the black backing is in none of the untextured draws. The one excluded
+population was TEXTURED draws: an atlas-masked black quad is textured by
+construction, so the capture now takes textured draws too, judges their
+quads the same way, and the diagnostic lists grew to six entries with
+texture and blend-state tags -- blend being the one un-modelled stage that
+could make a light quad darken the screen).
 
 ## What must not regress
 
