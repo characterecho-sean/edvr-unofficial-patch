@@ -143,6 +143,12 @@ void updateReportScrollbar() {
 void setReport(const std::string& utf8) {
     setText(g.report, utf8);
     updateReportScrollbar();
+    // Scrolled to the END: outcomes are appended below the plan, and the
+    // pane is the only place they are said now -- the freshest line must
+    // be the visible one.
+    const LRESULT len = SendMessageW(g.report, WM_GETTEXTLENGTH, 0, 0);
+    SendMessageW(g.report, EM_SETSEL, static_cast<WPARAM>(len), static_cast<LPARAM>(len));
+    SendMessageW(g.report, EM_SCROLLCARET, 0, 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -593,9 +599,11 @@ void runAction(AppArgs::Act action) {
 
     setReport(planReport(plan));
 
+    // Outcomes land in the report pane, not a message box: the pane is
+    // right there, it scrolls to the freshest line, and it can be read
+    // again after the fact. Only QUESTIONS get a box from here on.
     if (plan.blocked || plan.nothingToDo) {
-        MessageBoxW(g.window, fromUtf8(planSummary(plan)).c_str(), L"EDVR installer",
-                    MB_OK | (plan.blocked ? MB_ICONWARNING : MB_ICONINFORMATION));
+        setReport(planReport(plan) + "\r\n----\r\n" + planSummary(plan) + "\r\n");
         showSurvey();
         return;
     }
@@ -627,10 +635,9 @@ void runAction(AppArgs::Act action) {
         if (relaunchElevated(elevated)) {
             PostMessageW(g.window, WM_CLOSE, 0, 0);
         } else {
-            MessageBoxW(g.window,
-                        L"Windows would not start the installer with administrator rights, so "
-                        L"nothing was changed.",
-                        L"EDVR installer", MB_OK | MB_ICONWARNING);
+            setReport(planReport(plan) +
+                      "\r\n----\r\nWindows would not start the installer with "
+                      "administrator rights, so nothing was changed.\r\n");
         }
         return;
     }
@@ -655,12 +662,6 @@ void runAction(AppArgs::Act action) {
         }
     }
     setReport(text);
-
-    MessageBoxW(g.window,
-                result.ok ? L"Done.\n\nStart Elite Dangerous. What EDVR managed to install is "
-                            L"written into edvr_logs\\ next to the game."
-                          : fromUtf8(result.error).c_str(),
-                L"EDVR installer", MB_OK | (result.ok ? MB_ICONINFORMATION : MB_ICONERROR));
 
     g.survey = surveyTarget(g.survey.game);
     showSurvey();
@@ -689,13 +690,6 @@ void saveLogs() {
         for (const std::string& note : bundle.notes) text += "  " + note + "\r\n";
     }
     setReport(text);
-
-    MessageBoxW(g.window,
-                bundle.ok ? (L"Saved to your Desktop:\n\n" + leafOf(bundle.zipPath) +
-                             L"\n\nAttach it to a GitHub issue or drop it on Discord.")
-                                .c_str()
-                          : fromUtf8(bundle.error).c_str(),
-                L"EDVR installer", MB_OK | (bundle.ok ? MB_ICONINFORMATION : MB_ICONWARNING));
 }
 void showScreen(Screen screen) {
     g.screen = screen;
