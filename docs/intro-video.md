@@ -201,6 +201,49 @@ harder: movie and splash already share one panel — the full-screen composite
 each one fills. That is an inner rectangle to match, not a placement in
 space to invent.
 
+## Flight 4: the fill is full-screen too, and that explains nothing
+
+`quad_probe = 1920x1080:N:4:1200`, the draw that fills the composite's
+source:
+
+```
+quad probe: 2 occurrence(s) of N:4 into 1920x1080, over 1 distinct vertex buffer(s)
+  occurrence 0: startVertex 0, stride 16, buffer 0, viewport 0,0 1920x1080, scissor off
+    quad 0: x -1.000..1.000  y -1.000..1.000  (w 2.000 h 2.000)  +0000803F00000000
+  occurrence 1: identical
+```
+
+Stride 16 and one shared vertex buffer identify it as the YUV-to-RGB fill
+for both eyes -- and the *one* buffer is itself a measurement, since the
+composites carry one each; the per-buffer capture built after flight 3 is
+what can tell those two cases apart at all.
+
+**It covers the whole surface.** Full viewport, vertices ±1, no scissor. No
+sub-rect, no letterbox, no viewport trick.
+
+So both measured stages are full-screen: the fill covers the whole
+1920x1080, and the composite covers the whole eye. A 16:9 movie blitted
+across a near-square eye should be stretched and enormous. **It is neither**,
+which the field's screenshot settles: a small 16:9 picture, correct aspect,
+in a field of pure black, and -- confirmed in the headset -- centred, and
+staying centred as the head moves. (The mirror window shows it off-centre;
+that is the mirror fitting a near-square eye texture into a 16:9 window, not
+what the player sees.)
+
+Two things follow. **The black void half of the request already holds**
+during the movie: the surround is black, measured and seen. And **the size
+comes from somewhere neither capture has read.**
+
+The one number never taken is the **uv range**. The probe reported the
+*position* extent across a quad's four vertices but only the *first*
+vertex's trailing bytes -- so for both draws exactly one corner's texture
+coordinate is known and the span is not. If the composite samples its
+1920x1080 source with uvs reaching outside 0..1 against a black border, the
+picture shrinks inside the eye and sits in black, which is what the
+screenshot shows and is the natural way to fit 16:9 into a 103°x103° view
+without distorting it. That is a hypothesis with a hole in it until the span
+is read; the probe now reports it (`uv A..B, C..D (span W x H)`).
+
 ## The other symptom: facing the wrong way at the cut
 
 Reported after the flight:
@@ -257,6 +300,24 @@ copied range"*: those draws bind the 32 KB stride-8 buffer, which was never
 copied at all, and were being read at the wrong stride into the wrong
 buffer. They now decode correctly or say why not.
 
+**`intro_probe`'s per-frame times are quantized to nothing.** `nowMs()` is
+`GetTickCount64`, resolution about 15.6 ms, which is right for the 2719 ms
+freeze it was built to measure (0.6% error) and useless for a frame delta:
+at these rates it can only ever print 0 or ~16. The startup phase actually
+runs at **178 fps**, measured by frame COUNT over a twenty-second window.
+Its "16 ms" lines were read as 62 fps when flight 4's skip was chosen, and
+that is why the capture landed nineteen seconds early, mid-movie, instead of
+on the splash. The freeze numbers stand; the per-frame ones must not be read
+as frame times, and the page says so where they appear.
+
+**A frame count cannot express "after the movie" at all.** The rate swings
+from 178 fps during playback to about 13 at the menu, so any skip large
+enough to clear a twenty-second movie leaves the player waiting minutes at
+the menu for the remainder to trickle past. `common/timing.h` states this
+rule -- if it answers "how long", it is milliseconds -- and `census_at_ms`
+had already learned it. `advanced.quad_probe_at_ms` is the same lesson
+applied here, composed with the skip so both must be satisfied.
+
 **And it refused four-vertex draws outright** — `COUNT` had to be a multiple
 of six. That rule was about interpreting indices as quads and had no
 business applying to the non-indexed kinds, where a four-vertex triangle
@@ -291,34 +352,40 @@ start vertex where an indexed draw passes baseVertex.
 
 ## The flight plan from here
 
-**Flight 4 — where the picture sits inside the surface, in BOTH states.**
+**Flight 5 — the uv span, for the movie and for the splash.**
+
+Two launches, or one and a re-arm. The movie's:
 
 ```ini
 [advanced]
-quad_probe = 1920x1080:N:4:1200
-census_at_ms = 4000
+quad_probe = 5424x5356:X:6:120
+quad_probe_at_ms = 0
 intro_probe = 0
 ```
 
-The target is no longer the composite — flight 3 settled that one and it has
-nothing in it. It is the draw that FILLS the composite's source: a
-four-vertex `N` into the 1920x1080 surface, one per eye, from the three YUV
-planes. The capture logs its viewport, its scissor and its four vertices,
-which between them say whether the picture occupies the whole surface or a
-rectangle inside it, and by which mechanism.
+and the splash's, on the same composite after the movie has ended:
 
-The skip count is the trick that gets **both** states from one launch.
-Matching frames accrue at ~62 fps from the handover at 6.4 s, and the movie
-runs about twenty seconds; `1200` is therefore about nineteen seconds of
-them, so the capture lands *after* the movie — at the menu, on the splash,
-which reaches the eyes through the same surface and the same composite.
-Flight 3 tried to get the second state by re-arming the probe live while the
-player waited at the menu, and lost it when the session ended first; a skip
-count needs nobody to wait.
+```ini
+quad_probe = 5424x5356:X:6:60
+quad_probe_at_ms = 45000
+```
 
-That leaves the movie's own state to a second launch with a small skip
-(`:120`, two seconds into playback), or to a re-arm, whichever is
-convenient. Two numbers, and the fix has what it needs.
+The target is the **composite** again, not the fill — flight 4 settled the
+fill and it is full-surface, so whatever shrinks the picture is on the side
+that READS the surface. Its uv span is the number, and the probe now
+reports it.
+
+`quad_probe_at_ms` is what makes the splash reachable without anybody
+waiting. Flight 3 tried a live re-arm at the menu and lost the session
+first; flight 4 tried a frame count and landed nineteen seconds early
+because the rate was 178 fps, not the 62 the clock's resolution had implied.
+45 seconds is comfortably past a twenty-second movie that starts around
+six, and the small skip after it just avoids the first frame of the menu.
+
+If the two spans differ, the difference is the fix. If they are the same,
+the picture is not sized here at all and the next place to look is the
+composite's pixel shader — dumpable with `glare_shader_dump = 1`, which
+would make it a reading exercise rather than another flight.
 
 **Then the fix.** Its shape depends on which mechanism flight 4 names —
 a viewport is substituted at `RSSetViewports`, four vertices are rewritten

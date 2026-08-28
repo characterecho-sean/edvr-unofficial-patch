@@ -68,6 +68,13 @@ class Config;
 // It plays the same role there that baseVertex plays for an indexed draw --
 // what a vertex's index is offset by -- and vscreen's non-indexed thunks
 // stash it for exactly this.
+//
+// Also reads advanced.quad_probe_at_ms: no capture before that many
+// milliseconds into the session, composed with the frame skip so both must
+// be satisfied. The skip counts MATCHING FRAMES, which cannot express "after
+// the intro movie" when the rate swings from 178 fps to 13 between the movie
+// and the menu behind it -- a flight was spent proving that. See
+// common/timing.h, which states the rule this obeys.
 void quadProbeConfigure(Config& cfg);
 
 // Is a capture still wanted? False once one has been taken, which keeps this

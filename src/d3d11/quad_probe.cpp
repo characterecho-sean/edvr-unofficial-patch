@@ -12,6 +12,7 @@
 #include "../common/config.h"
 #include "../common/guard.h"
 #include "../common/log.h"
+#include "../common/timing.h"  // the wall-clock gate
 
 namespace edvr {
 namespace {
@@ -68,6 +69,27 @@ uint32_t g_wantN = 0;
 uint32_t g_wantSkip = 0;
 uint32_t g_skipLeft = 0;
 uint32_t g_lastSkipFrame = 0;
+
+// advanced.quad_probe_at_ms: no capture before this many milliseconds after
+// the probe's first frame. 0 is off, and off is the shipped state.
+//
+// WHY A CLOCK AS WELL AS A FRAME COUNT. The skip above counts MATCHING
+// FRAMES, which is the right unit for "let the fade-in finish" and the wrong
+// one for "wait until the intro movie is over". Measured on the field rig:
+// the movie plays at 178 fps and the menu behind it runs at 13, so a skip
+// large enough to clear a twenty-second movie leaves the player sitting at
+// the menu for minutes while the last few hundred frames trickle past. A
+// flight was spent on exactly that -- 1200 frames was meant to land after
+// the movie and landed nineteen seconds early, because the estimate came
+// from per-frame deltas that GetTickCount64's 15.6 ms resolution had already
+// destroyed.
+//
+// common/timing.h states the rule this key exists to obey: if it answers
+// "how long", it is milliseconds. The two compose -- both have to be
+// satisfied -- so "two seconds of steady frames, but not before the movie
+// ends" is expressible, and neither alone could say it.
+uint32_t g_wantAtMs = 0;
+uint64_t g_firstTickMs = 0;
 bool     g_taken = false;          // one capture per session; re-arm by
                                    // setting the spec off and on again
 
@@ -194,25 +216,36 @@ void quadProbeConfigure(Config& cfg) {
             skip = static_cast<uint32_t>(pskip);
         }
     }
+    const uint32_t atMs = static_cast<uint32_t>(cfg.getIntInRange(
+        "advanced.quad_probe_at_ms", 0, 0, 3600000));
+
     const bool armed = w != 0;
     // A re-armed probe is a fresh request: turning it off and on again is how
-    // a second capture is asked for without a relaunch.
+    // a second capture is asked for without a relaunch. The clock gate counts
+    // as part of the request, so moving it alone also asks again.
     if (armed && (w != g_wantW || h != g_wantH || kind != g_wantKind ||
-                  n != g_wantN || skip != g_wantSkip)) {
+                  n != g_wantN || skip != g_wantSkip || atMs != g_wantAtMs)) {
         g_taken = false;
         g_skipLeft = skip;
         g_lastSkipFrame = 0;
     }
     g_wantW = w; g_wantH = h; g_wantKind = kind; g_wantN = n;
     g_wantSkip = skip;
+    g_wantAtMs = atMs;
     if (armed && !g_armed) {
+        char when[128] = "";
+        if (atMs) {
+            snprintf(when, sizeof(when),
+                     " and not before %u ms into the session", atMs);
+        }
         Log::get().note("quad probe ARMED on %c:%u draws into a %ux%u target: "
-                        "after letting %u matching frame(s) pass, the first "
+                        "after letting %u matching frame(s) pass%s, the first "
                         "frame containing one has EVERY such draw copied, and "
-                        "each occurrence's quads are logged with the bytes "
-                        "past the position. Nothing is changed. Set the spec "
-                        "off and on again for another capture.",
-                        kind, n, w, h, skip);
+                        "each occurrence's quads are logged with their extent, "
+                        "uv span and the bytes past the position. Nothing is "
+                        "changed. Set the spec off and on again for another "
+                        "capture.",
+                        kind, n, w, h, skip, when);
     }
     g_armed = armed;
 }
@@ -225,6 +258,12 @@ bool quadProbeOnDraw(ID3D11DeviceContext* ctx, uint32_t targetW,
     if (!g_armed || g_taken || g_pendingFrame || !ctx) return false;
     if (targetW != g_wantW || targetH != g_wantH) return false;
     if (kind != g_wantKind || count != g_wantN) return false;
+
+    // The clock gate, BEFORE the frame skip: while it holds the probe is
+    // simply not looking, so matching frames must not be spent against the
+    // skip either. The two are meant to compose as "this long in, and then
+    // that many steady frames", not to race each other.
+    if (g_wantAtMs && !elapsedMs(g_firstTickMs, g_wantAtMs)) return false;
 
     // Skipped frames pass whole: one decrement per frame that contains a
     // match, however many matches it holds -- INCLUDING the frame that
@@ -371,6 +410,10 @@ bool quadProbeOnDraw(ID3D11DeviceContext* ctx, uint32_t targetW,
 
 void quadProbeTick(ID3D11DeviceContext* ctx) {
     ++g_frame;
+    // The clock gate's zero. Stamped at the first frame this module sees, so
+    // "30 s in" means the same thing however long the loader took to reach
+    // the first frame -- the same origin census_at_ms uses.
+    if (!g_firstTickMs) g_firstTickMs = stampMs();
     // The capture frame ended: close the window and let the copies settle.
     if (g_windowOpen && g_frame > g_windowFrame) {
         g_windowOpen = false;
@@ -462,6 +505,19 @@ void quadProbeTick(ID3D11DeviceContext* ctx) {
             for (uint32_t q = 0; q < quads; ++q) {
                 float lo[2] = {1e30f, 1e30f};
                 float hi[2] = {-1e30f, -1e30f};
+                // The float2 AFTER the position, ranged the same way.
+                //
+                // On every layout this has met it is the texture coordinate,
+                // and its RANGE is the measurement the first-vertex hex dump
+                // could never give. The intro movie is the case that forced
+                // it: both its stages draw full-screen quads -- position
+                // -1..1, viewport the whole target -- and the picture is
+                // still small and surrounded by black, which only a uv span
+                // reaching outside 0..1 explains. One corner's bytes cannot
+                // say that; two corners can.
+                float uvLo[2] = {1e30f, 1e30f};
+                float uvHi[2] = {-1e30f, -1e30f};
+                const bool haveUv = stride >= 16;
                 int64_t firstOff = -1;
                 bool bad = false;
                 for (uint32_t k = 0; k < vertsPerQuad; ++k) {
@@ -494,6 +550,14 @@ void quadProbeTick(ID3D11DeviceContext* ctx) {
                         if (p[c] < lo[c]) lo[c] = p[c];
                         if (p[c] > hi[c]) hi[c] = p[c];
                     }
+                    if (haveUv) {
+                        float t[2];
+                        memcpy(t, vb + off + 8, sizeof(t));
+                        for (int c = 0; c < 2; ++c) {
+                            if (t[c] < uvLo[c]) uvLo[c] = t[c];
+                            if (t[c] > uvHi[c]) uvHi[c] = t[c];
+                        }
+                    }
                 }
                 if (bad) {
                     Log::get().note("    quad %u: a vertex landed outside the "
@@ -512,10 +576,17 @@ void quadProbeTick(ID3D11DeviceContext* ctx) {
                                  vb[firstOff + 8 + t]);
                     }
                 }
+                char uvs[96] = "";
+                if (haveUv) {
+                    snprintf(uvs, sizeof(uvs),
+                             "  uv %.4f..%.4f, %.4f..%.4f (span %.4f x %.4f)",
+                             uvLo[0], uvHi[0], uvLo[1], uvHi[1],
+                             uvHi[0] - uvLo[0], uvHi[1] - uvLo[1]);
+                }
                 Log::get().note("    quad %u: x %.3f..%.3f  y %.3f..%.3f  "
-                                "(w %.3f h %.3f)  +%s",
+                                "(w %.3f h %.3f)%s  +%s",
                                 q, lo[0], hi[0], lo[1], hi[1],
-                                hi[0] - lo[0], hi[1] - lo[1], tail);
+                                hi[0] - lo[0], hi[1] - lo[1], uvs, tail);
             }
         }
         for (uint32_t i = 0; i < g_vbCount; ++i) {
