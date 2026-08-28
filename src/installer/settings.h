@@ -114,4 +114,14 @@ private:
 // Split "a|b|c", each optionally "value=label".
 std::vector<Choice> splitChoices(const char* packed);
 
+// The on-foot screen's standard 16:9 ladder, for the settings window's
+// resolution dropdown (vscreen_res_width x vscreen_res_height presented as
+// ONE control). "Custom" is any pair matching none of these; the raw
+// width and height rows then show beneath the dropdown.
+struct ResolutionPreset {
+    const char* w;
+    const char* h;
+};
+const std::vector<ResolutionPreset>& vscreenPresets();
+
 }  // namespace edvr::installer

@@ -12,6 +12,7 @@
 // view are the two things a hand-rolled widget gets subtly wrong -- keyboard
 // selection, mouse wheel, text selection for copying into a bug report.
 #include <windows.h>
+#include <windowsx.h>
 #include <commctrl.h>
 #include <shellapi.h>
 #include <shlobj.h>
@@ -60,7 +61,7 @@ const wchar_t* kTipText = L"EDVR is free. If it saved you an evening, you can";
 // The client area and every control position below are in 96-dpi units, scaled
 // once at layout time.
 const int kClientWidth = 720;
-const int kClientHeight = 652;
+const int kClientHeight = 688;
 const int kMargin = 24;
 const int kCardPad = 20;
 
@@ -108,6 +109,8 @@ struct Gui {
     bool                     haveSurvey = false;
     Screen                   screen = Screen::Install;
     AppArgs                  args;
+    bool                     reportDrag = false;   // slim-scrollbar drag state
+    int                      reportDragOffset = 0;
 };
 
 Gui g;
@@ -118,31 +121,62 @@ void setText(HWND control, const std::string& utf8) {
     SetWindowTextW(control, fromUtf8(utf8).c_str());
 }
 
-// An edit control with WS_VSCROLL shows its scrollbar whether or not there is
-// anything to scroll, and an empty pane with a full-height scrollbar down the
-// side of it looks like a text box from 2003. Shown only when the text really
-// is taller than the pane.
-void updateReportScrollbar() {
-    if (!g.report) return;
+// The report keeps no native scrollbar (an EDIT's bar is the one piece of
+// stock chrome the drawn look could not restyle); the parent paints the
+// same slim thumb the settings list uses, in the report card's right
+// gutter, and drives the EDIT by lines when it is dragged.
+const RECT kReportCard{kMargin, 482, kClientWidth - kMargin, 648};
+
+RECT reportCardRect() {
+    return RECT{dp(kReportCard.left), dp(kReportCard.top), dp(kReportCard.right),
+                dp(kReportCard.bottom)};
+}
+
+int reportLineHeight() { return ui::textHeightPx(ui::fonts().body); }
+
+// content/page/pos of the report in device pixels, for the slim thumb.
+void reportScrollState(int* content, int* page, int* pos) {
     RECT client{};
     GetClientRect(g.report, &client);
+    const int lineHeight = reportLineHeight();
+    *content = static_cast<int>(SendMessageW(g.report, EM_GETLINECOUNT, 0, 0)) * lineHeight;
+    *page = client.bottom - client.top;
+    *pos = static_cast<int>(SendMessageW(g.report, EM_GETFIRSTVISIBLELINE, 0, 0)) * lineHeight;
+}
 
-    HDC dc = GetDC(g.report);
-    HFONT previous = static_cast<HFONT>(SelectObject(dc, ui::fonts().body));
-    TEXTMETRICW metrics{};
-    GetTextMetricsW(dc, &metrics);
-    SelectObject(dc, previous);
-    ReleaseDC(g.report, dc);
+void invalidateReportGutter() {
+    const RECT card = reportCardRect();
+    const RECT gutter{card.right - dp(12), card.top, card.right, card.bottom};
+    InvalidateRect(g.window, &gutter, FALSE);
+}
 
-    const int lineHeight = metrics.tmHeight > 0 ? metrics.tmHeight : 1;
-    const int visible = (client.bottom - client.top) / lineHeight;
-    const int lines = static_cast<int>(SendMessageW(g.report, EM_GETLINECOUNT, 0, 0));
-    ShowScrollBar(g.report, SB_VERT, lines > visible ? TRUE : FALSE);
+// The EDIT scrolls itself on wheel, keys and selection drags; the thumb is
+// painted by the parent and has to follow.
+LRESULT CALLBACK reportProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam,
+                            UINT_PTR /*id*/, DWORD_PTR /*data*/) {
+    const LRESULT out = DefSubclassProc(hwnd, message, wparam, lparam);
+    switch (message) {
+        case WM_MOUSEWHEEL:
+        case WM_KEYDOWN:
+        case WM_MOUSEMOVE:
+        case WM_TIMER:   // the EDIT's own drag-select autoscroll
+            invalidateReportGutter();
+            break;
+        default:
+            break;
+    }
+    return out;
 }
 
 void setReport(const std::string& utf8) {
     setText(g.report, utf8);
-    updateReportScrollbar();
+    // Scrolled to the END: outcomes are appended below the plan, and the
+    // pane is the only place they are said now -- the freshest line must
+    // be the visible one.
+    const LRESULT len = SendMessageW(g.report, WM_GETTEXTLENGTH, 0, 0);
+    SendMessageW(g.report, EM_SETSEL, static_cast<WPARAM>(len), static_cast<LPARAM>(len));
+    SendMessageW(g.report, EM_SCROLLCARET, 0, 0);
+    invalidateReportGutter();
 }
 
 // ---------------------------------------------------------------------------
@@ -181,14 +215,38 @@ void applyLayout() {
         HDC dc = GetDC(g.window);
         const int prefix = ui::textWidth(dc, kTipText, ui::fonts().caption);
         ReleaseDC(g.window, dc);
-        MoveWindow(g.tip, dp(kMargin) + prefix + dp(5), dp(621), dp(76), dp(20), TRUE);
+        MoveWindow(g.tip, dp(kMargin) + prefix + dp(5), dp(657), dp(76), dp(20), TRUE);
     }
 
-    // Whether the report needs a scrollbar depends on how tall it is, and it
-    // only just got its height. Asked before this, the answer was taken from
-    // the 10x10 box every control is created at, so a one-line report came up
-    // with a full-height scrollbar beside it.
-    updateReportScrollbar();
+    // A combo's field height is its item height plus its own frame, not
+    // what MoveWindow asked for. The frame is measured and the item height
+    // set to land the field at exactly the 30 units the Browse button
+    // beside it gets; the text centres itself within the item.
+    if (g.combo) {
+        SendMessageW(g.combo, CB_SETITEMHEIGHT, 0, dp(24));  // dropdown rows
+        SendMessageW(g.combo, CB_SETITEMHEIGHT, static_cast<WPARAM>(-1), dp(22));
+        RECT rc{};
+        GetWindowRect(g.combo, &rc);
+        const int frame = (rc.bottom - rc.top) - dp(22);
+        const int fieldItem = dp(30) - frame;
+        if (fieldItem > 0) {
+            SendMessageW(g.combo, CB_SETITEMHEIGHT, static_cast<WPARAM>(-1), fieldItem);
+        }
+    }
+
+    // Single-line EDITs draw their text at the top of the control, so the
+    // search box is sized to its text and centred within the frame painted
+    // around it (250..282 in design units) instead of filling the frame with
+    // the text riding high -- the same treatment the settings list gives its
+    // inline value editor.
+    if (g.search) {
+        const int textH = ui::textHeightPx(ui::fonts().body);
+        const int frameTop = dp(250);
+        const int frameH = dp(282) - frameTop;
+        const int y = frameTop + (frameH > textH ? (frameH - textH) / 2 : 0);
+        MoveWindow(g.search, dp(kMargin + kCardPad), y, dp(320), textH, TRUE);
+    }
+
     InvalidateRect(g.window, nullptr, TRUE);
 }
 
@@ -310,10 +368,10 @@ COLORREF colourFor(Tone tone) {
 // painting
 // ---------------------------------------------------------------------------
 
-// The install picker and the folder it names sit above both screens: the
-// settings being edited are the settings of whichever install is selected, and
-// a Settings tab that does not say which folder it is writing to is asking to
-// be used on the wrong one.
+// The install picker and the folder it names sit above both screens -- and
+// above the TABS: the settings being edited are the settings of whichever
+// install is selected, and a Settings tab that does not say which folder it
+// is writing to is asking to be used on the wrong one.
 void paintInstallPicker(HDC dc) {
     const ui::Theme& t = ui::theme();
     const ui::Fonts& f = ui::fonts();
@@ -327,10 +385,10 @@ void paintInstallScreen(HDC dc) {
     const ui::Theme& t = ui::theme();
     const ui::Fonts& f = ui::fonts();
 
-    RECT card{dp(kMargin), dp(150), dp(kClientWidth - kMargin), dp(300)};
+    RECT card{dp(kMargin), dp(186), dp(kClientWidth - kMargin), dp(336)};
     ui::paintCard(dc, card, g.dpi);
 
-    int y = 166;
+    int y = 202;
     for (const StatusRow& row : g.status) {
         const int centre = dp(y + 10);
         ui::fillCircle(dc, dp(kMargin + kCardPad + 5), centre, dp(4), colourFor(row.tone));
@@ -346,29 +404,35 @@ void paintInstallScreen(HDC dc) {
         y += 22;
     }
 
-    RECT actions{dp(kMargin), dp(312), dp(kClientWidth - kMargin), dp(434)};
+    RECT actions{dp(kMargin), dp(348), dp(kClientWidth - kMargin), dp(470)};
     ui::paintCard(dc, actions, g.dpi);
 
-    RECT reassure{dp(kMargin + kCardPad), dp(404), dp(kClientWidth - kMargin - kCardPad), dp(424)};
+    RECT reassure{dp(kMargin + kCardPad), dp(440), dp(kClientWidth - kMargin - kCardPad), dp(460)};
     ui::drawText(dc,
                  L"Nothing is changed until you confirm it, and every file replaced is copied "
                  L"into edvr_backup\\ first.",
                  reassure, f.caption, t.subtext, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
 
-    RECT report{dp(kMargin), dp(446), dp(kClientWidth - kMargin), dp(612)};
+    const RECT report = reportCardRect();
     ui::paintCard(dc, report, g.dpi);
+
+    if (g.report) {
+        int content = 0, page = 0, pos = 0;
+        reportScrollState(&content, &page, &pos);
+        ui::drawSlimScrollbar(dc, report, content, page, pos, g.dpi, g.reportDrag);
+    }
 }
 
 void paintSettingsScreen(HDC dc) {
     const ui::Theme& t = ui::theme();
     const ui::Fonts& f = ui::fonts();
-    RECT card{dp(kMargin), dp(150), dp(kClientWidth - kMargin), dp(612)};
+    RECT card{dp(kMargin), dp(186), dp(kClientWidth - kMargin), dp(648)};
     ui::paintCard(dc, card, g.dpi);
 
-    RECT heading{dp(kMargin + kCardPad), dp(166), dp(kClientWidth - kMargin - kCardPad), dp(188)};
-    ui::drawText(dc, L"Settings", heading, f.heading, t.text, DT_LEFT | DT_SINGLELINE);
-
-    RECT note{dp(kMargin + kCardPad), dp(190), dp(kClientWidth - kMargin - kCardPad), dp(208)};
+    // No "Settings" heading inside the card: the active tab above already
+    // says it, and a heading repeating a tab is the same redundancy the
+    // Setup tab was renamed to avoid. The note carries the useful part.
+    RECT note{dp(kMargin + kCardPad), dp(202), dp(kClientWidth - kMargin - kCardPad), dp(222)};
     const std::wstring where =
         g.settings.loaded()
             ? L"Written into the edvr.ini of the install above, and live within a second. The "
@@ -378,8 +442,8 @@ void paintSettingsScreen(HDC dc) {
 
     // The search box is a real edit control with its 3D border taken off, so
     // the frame around it is drawn here to match everything else.
-    RECT search{dp(kMargin + kCardPad) - dp(6), dp(214), dp(kMargin + kCardPad) + dp(326),
-                dp(246)};
+    RECT search{dp(kMargin + kCardPad) - dp(6), dp(250), dp(kMargin + kCardPad) + dp(326),
+                dp(282)};
     ui::fillRounded(dc, search, dp(6), t.control);
     ui::strokeRounded(dc, search, dp(6), t.controlBorder);
 }
@@ -415,7 +479,7 @@ void paintWindow(HWND window) {
     else
         paintSettingsScreen(dc);
 
-    RECT tip{dp(kMargin), dp(622), dp(kClientWidth - kMargin), dp(642)};
+    RECT tip{dp(kMargin), dp(658), dp(kClientWidth - kMargin), dp(678)};
     ui::drawText(dc, kTipText, tip, f.caption, t.subtext, DT_LEFT | DT_SINGLELINE);
 
     BitBlt(screenDc, 0, 0, client.right, client.bottom, dc, 0, 0, SRCCOPY);
@@ -593,9 +657,11 @@ void runAction(AppArgs::Act action) {
 
     setReport(planReport(plan));
 
+    // Outcomes land in the report pane, not a message box: the pane is
+    // right there, it scrolls to the freshest line, and it can be read
+    // again after the fact. Only QUESTIONS get a box from here on.
     if (plan.blocked || plan.nothingToDo) {
-        MessageBoxW(g.window, fromUtf8(planSummary(plan)).c_str(), L"EDVR installer",
-                    MB_OK | (plan.blocked ? MB_ICONWARNING : MB_ICONINFORMATION));
+        setReport(planReport(plan) + "\r\n----\r\n" + planSummary(plan) + "\r\n");
         showSurvey();
         return;
     }
@@ -627,10 +693,9 @@ void runAction(AppArgs::Act action) {
         if (relaunchElevated(elevated)) {
             PostMessageW(g.window, WM_CLOSE, 0, 0);
         } else {
-            MessageBoxW(g.window,
-                        L"Windows would not start the installer with administrator rights, so "
-                        L"nothing was changed.",
-                        L"EDVR installer", MB_OK | MB_ICONWARNING);
+            setReport(planReport(plan) +
+                      "\r\n----\r\nWindows would not start the installer with "
+                      "administrator rights, so nothing was changed.\r\n");
         }
         return;
     }
@@ -655,12 +720,6 @@ void runAction(AppArgs::Act action) {
         }
     }
     setReport(text);
-
-    MessageBoxW(g.window,
-                result.ok ? L"Done.\n\nStart Elite Dangerous. What EDVR managed to install is "
-                            L"written into edvr_logs\\ next to the game."
-                          : fromUtf8(result.error).c_str(),
-                L"EDVR installer", MB_OK | (result.ok ? MB_ICONINFORMATION : MB_ICONERROR));
 
     g.survey = surveyTarget(g.survey.game);
     showSurvey();
@@ -689,13 +748,6 @@ void saveLogs() {
         for (const std::string& note : bundle.notes) text += "  " + note + "\r\n";
     }
     setReport(text);
-
-    MessageBoxW(g.window,
-                bundle.ok ? (L"Saved to your Desktop:\n\n" + leafOf(bundle.zipPath) +
-                             L"\n\nAttach it to a GitHub issue or drop it on Discord.")
-                                .c_str()
-                          : fromUtf8(bundle.error).c_str(),
-                L"EDVR installer", MB_OK | (bundle.ok ? MB_ICONINFORMATION : MB_ICONWARNING));
 }
 void showScreen(Screen screen) {
     g.screen = screen;
@@ -711,15 +763,26 @@ void createControls(HWND window) {
     ui::buildFonts(g.dpi);
     const ui::Fonts& f = ui::fonts();
 
-    g.tabInstall = ui::makeButton(window, L"Install", kIdTabInstall, ui::ButtonStyle::TabActive,
+    // The tabs sit UNDER the install picker, not beside the title: the
+    // screens are two views of whichever install is selected above, and the
+    // reading order should say so. "Setup" rather than "Install", so the tab
+    // names the screen and only the button names the action.
+    g.tabInstall = ui::makeButton(window, L"Setup", kIdTabInstall, ui::ButtonStyle::TabActive,
                                   f.body);
     g.tabSettings = ui::makeButton(window, L"Settings", kIdTabSettings, ui::ButtonStyle::Tab,
                                    f.body);
-    place(g.tabInstall, 528, 22, 84, 30, Screen::Install, true);
-    place(g.tabSettings, 616, 22, 92, 30, Screen::Install, true);
+    place(g.tabInstall, kMargin, 146, 84, 30, Screen::Install, true);
+    place(g.tabSettings, kMargin + 92, 146, 92, 30, Screen::Install, true);
 
+    // Still a real combo -- keyboard selection and the wheel are the two
+    // things a hand-rolled dropdown gets subtly wrong -- but owner-drawn,
+    // so the field and the list are painted in the house font and colours,
+    // and its field height is converged on the Browse button's in
+    // applyLayout (a combo sizes itself from its item height, not from
+    // MoveWindow).
     g.combo = CreateWindowExW(0, L"COMBOBOX", L"",
-                              WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL | CBS_DROPDOWNLIST,
+                              WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL | CBS_DROPDOWNLIST |
+                                  CBS_OWNERDRAWFIXED | CBS_HASSTRINGS,
                               0, 0, 10, 10, window,
                               reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdCombo)), nullptr,
                               nullptr);
@@ -735,7 +798,7 @@ void createControls(HWND window) {
      // it to checked threw that flag away without a word.
     g.chkKeep = ui::makeCheckbox(window, L"Keep the settings I have changed", kIdChkKeep,
                                  g.args.keepSettings, f.body);
-    place(g.chkKeep, kMargin + kCardPad, 330, 420, 24, Screen::Install);
+    place(g.chkKeep, kMargin + kCardPad, 366, 420, 24, Screen::Install);
 
     g.install = ui::makeButton(window, L"Install", kIdInstall, ui::ButtonStyle::Primary, f.body);
     g.repair = ui::makeButton(window, L"Repair", kIdRepair, ui::ButtonStyle::Secondary, f.body);
@@ -743,10 +806,10 @@ void createControls(HWND window) {
                                  f.body);
     g.collectLogs = ui::makeButton(window, L"Save logs", kIdCollectLogs,
                                    ui::ButtonStyle::Secondary, f.body);
-    place(g.install, kMargin + kCardPad, 362, 124, 34, Screen::Install);
-    place(g.repair, 172, 362, 104, 34, Screen::Install);
-    place(g.uninstall, 284, 362, 104, 34, Screen::Install);
-    place(g.collectLogs, 396, 362, 116, 34, Screen::Install);
+    place(g.install, kMargin + kCardPad, 398, 124, 34, Screen::Install);
+    place(g.repair, 172, 398, 104, 34, Screen::Install);
+    place(g.uninstall, 284, 398, 104, 34, Screen::Install);
+    place(g.collectLogs, 396, 398, 116, 34, Screen::Install);
     // No Close button: it was the one control at list height marked
     // both-screens, so it painted through the settings page -- and the
     // window's own close box already does the job.
@@ -757,25 +820,26 @@ void createControls(HWND window) {
                                nullptr);
     SendMessageW(g.search, WM_SETFONT, reinterpret_cast<WPARAM>(f.body), TRUE);
     SendMessageW(g.search, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"Search settings"));
-    place(g.search, kMargin + kCardPad, 216, 320, 28, Screen::Settings);
+    place(g.search, kMargin + kCardPad, 252, 320, 28, Screen::Settings);
 
     g.settingsList = createSettingsList(window, kIdSettingsList, g.dpi);
-    place(g.settingsList, kMargin + 2, 256, kClientWidth - 2 * kMargin - 4, 350, Screen::Settings);
+    place(g.settingsList, kMargin + 2, 292, kClientWidth - 2 * kMargin - 4, 350, Screen::Settings);
 
     g.report = CreateWindowExW(0, L"EDIT", L"",
-                               WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE | ES_READONLY, 0,
+                               WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_READONLY, 0,
                                0, 10, 10, window,
                                reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdReport)), nullptr,
                                nullptr);
     SendMessageW(g.report, WM_SETFONT, reinterpret_cast<WPARAM>(f.body), TRUE);
-    place(g.report, kMargin + kCardPad - 4, 460, 636, 140, Screen::Install);
+    SetWindowSubclass(g.report, reportProc, 1, 0);
+    place(g.report, kMargin + kCardPad - 4, 496, 636, 140, Screen::Install);
 
     g.tip = ui::makeButton(window, L"leave a tip", kIdKofi, ui::ButtonStyle::Link, f.caption);
-    place(g.tip, kMargin, 621, 76, 20, Screen::Install, true);  // x fixed up in applyLayout
+    place(g.tip, kMargin, 657, 76, 20, Screen::Install, true);  // x fixed up in applyLayout
 
     g.discord = ui::makeButton(window, L"Ask on Discord", kIdDiscord, ui::ButtonStyle::Link,
                                f.caption);
-    place(g.discord, kClientWidth - kMargin - 110, 621, 110, 20, Screen::Install, true);
+    place(g.discord, kClientWidth - kMargin - 110, 657, 110, 20, Screen::Install, true);
 
     // Dark mode does not reach the native controls on its own. These two theme
     // names are what File Explorer uses for exactly this, and on a light theme
@@ -834,7 +898,20 @@ LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
 
         case WM_DRAWITEM: {
             const DRAWITEMSTRUCT* item = reinterpret_cast<const DRAWITEMSTRUCT*>(lparam);
+            if (item->CtlID == kIdCombo) {
+                ui::drawComboItem(item, g.dpi);
+                return TRUE;
+            }
             if (ui::drawOwnerDrawn(item, g.dpi)) return TRUE;
+            break;
+        }
+
+        case WM_MEASUREITEM: {
+            MEASUREITEMSTRUCT* measure = reinterpret_cast<MEASUREITEMSTRUCT*>(lparam);
+            if (measure->CtlID == kIdCombo) {
+                measure->itemHeight = static_cast<UINT>(dp(24));
+                return TRUE;
+            }
             break;
         }
 
@@ -873,6 +950,52 @@ LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
                 default: return 0;
             }
         }
+
+        // The report card's slim scrollbar is parent territory (the EDIT
+        // keeps no bar of its own): a press in the right gutter grabs or
+        // jumps the thumb, and the drag drives the EDIT by whole lines.
+        case WM_LBUTTONDOWN: {
+            if (g.screen != Screen::Install || !g.report) break;
+            const int x = GET_X_LPARAM(lparam);
+            const int y = GET_Y_LPARAM(lparam);
+            const RECT card = reportCardRect();
+            if (x < card.right - dp(12) || x >= card.right || y < card.top || y >= card.bottom)
+                break;
+            int content = 0, page = 0, pos = 0;
+            reportScrollState(&content, &page, &pos);
+            const RECT thumb = ui::slimThumb(card, content, page, pos, g.dpi);
+            if (thumb.right <= thumb.left) break;
+            if (y >= thumb.top && y < thumb.bottom) {
+                g.reportDragOffset = y - thumb.top;
+            } else {
+                g.reportDragOffset = (thumb.bottom - thumb.top) / 2;
+            }
+            g.reportDrag = true;
+            SetCapture(window);
+            // fall through to the move handler's math via a synthetic move
+        }
+            [[fallthrough]];
+        case WM_MOUSEMOVE: {
+            if (!g.reportDrag) break;
+            int content = 0, page = 0, pos = 0;
+            reportScrollState(&content, &page, &pos);
+            const int wanted =
+                ui::slimPosFromThumbTop(reportCardRect(), content, page,
+                                        GET_Y_LPARAM(lparam) - g.reportDragOffset, g.dpi);
+            const int lineHeight = reportLineHeight();
+            const int delta = wanted / lineHeight - pos / lineHeight;
+            if (delta != 0) SendMessageW(g.report, EM_LINESCROLL, 0, delta);
+            invalidateReportGutter();
+            return 0;
+        }
+        case WM_LBUTTONUP:
+        case WM_CAPTURECHANGED:
+            if (g.reportDrag) {
+                g.reportDrag = false;
+                if (message == WM_LBUTTONUP) ReleaseCapture();
+                invalidateReportGutter();
+            }
+            break;
 
         case WM_CTLCOLOREDIT:
         case WM_CTLCOLORSTATIC:

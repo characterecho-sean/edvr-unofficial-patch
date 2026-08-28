@@ -77,6 +77,26 @@ void strokeRounded(HDC dc, RECT rect, int radius, COLORREF stroke, int inset = 0
 void fillCircle(HDC dc, int centreX, int centreY, int radius, COLORREF fill);
 void fillRect(HDC dc, RECT rect, COLORREF fill);
 
+// The slim overlay scrollbar every scrolling pane shares: no track chrome,
+// one rounded thumb hugging the pane's right edge, in the card language.
+// Geometry, painting and the drag inverse live together so a hit test can
+// never drift from what was drawn. All heights are device pixels; an empty
+// rect comes back when nothing scrolls.
+RECT slimThumb(const RECT& pane, int contentPx, int pagePx, int posPx, UINT dpi);
+int  slimPosFromThumbTop(const RECT& pane, int contentPx, int pagePx, int thumbTopY, UINT dpi);
+void drawSlimScrollbar(HDC dc, const RECT& pane, int contentPx, int pagePx, int posPx, UINT dpi,
+                       bool active);
+
+// A font's line height in device pixels, for sizing single-line EDITs to
+// their text: an EDIT draws text at the top of its client area, so vertical
+// centring means sizing the control to the text and centring the control.
+int textHeightPx(HFONT font);
+
+// One combo look for every real COMBOBOX in the app (the install picker,
+// the settings window's resolution dropdown): field and list rows in the
+// house font and colours. The OS keeps the frame and the drop arrow.
+void drawComboItem(const DRAWITEMSTRUCT* item, UINT dpi);
+
 // Text, with the DPI-correct font and no background fill.
 void drawText(HDC dc, const std::wstring& text, RECT rect, HFONT font, COLORREF colour,
               UINT format);
