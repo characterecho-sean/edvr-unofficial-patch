@@ -11,6 +11,7 @@
 #include "../common/config.h"
 #include "../common/guard.h"
 #include "../common/log.h"
+#include "../common/timing.h"  // the startup schedule's clock
 #include "binding_shadow.h"
 #include "exposure_fix.h"   // lookupShaderHash: the shader hash registry
 
@@ -50,6 +51,25 @@ constexpr uint32_t kMaxLinesCeiling = 16384;
 // three times over; past it, tokens degrade to inline resolution (below),
 // never to an unusable '?'.
 constexpr uint32_t kMaxInterned = 512;
+
+// The startup schedule (advanced.census_at_ms). At most eight moments, each
+// naming milliseconds after this session's FIRST frame edge.
+//
+// WHY A CLOCK AND NOT A KEY OR A SIZE. The three arms that existed before it
+// all need something known in advance: a hand on the census key, a journal
+// event, or the size of a target somebody has already censused. The startup
+// sequence has none. The intro movie's flat phase, the freeze and the
+// head-locked phase are all over before a human can react, the first two
+// happen before one eye's size has been published to this half at all, and
+// census_auto's "two quiet seconds" never arrive for a target that is drawn
+// into from the very first frame. A wall clock needs no prior model, which
+// during a startup is the whole point (docs/intro-video.md).
+//
+// Not frames: a loading screen has been measured at 1790 fps and a menu at
+// 13, so the same frame number is a different moment on every rig and in
+// every session. See common/timing.h -- this is that rule, applied to the
+// one instrument that most wants to break it.
+constexpr uint32_t kMaxSchedule = 8;
 
 // Everything below runs on the render thread: the draw records come from the
 // immediate context's draw hooks (foreign contexts are filtered before the
@@ -91,6 +111,14 @@ uint32_t g_copiesThisFrame = 0;  // copies this frame, for the line index
 uint32_t g_copies = 0;           // copies this census, for the end line
 uint32_t g_dispThisFrame = 0;    // dispatches this frame, for the line index
 uint32_t g_dispatches = 0;       // dispatches this census, for the end line
+// The startup schedule, read once at the first frame edge -- these are
+// moments in THIS session's startup, and re-reading them later would either
+// re-fire everything already spent or move a deadline the session has passed.
+uint64_t g_scheduleMs[kMaxSchedule] = {0};
+uint32_t g_scheduleCount = 0;
+uint32_t g_scheduleFired = 0;    // a bitmask over the entries above
+uint64_t g_firstFrameMs = 0;     // stamped at the first frame edge
+bool     g_scheduleRead = false;
 uint32_t g_seq = 0;              // ONE ordinal across every recorded event in
                                  // a frame -- the q= token. The per-kind
                                  // indexes above cannot say whether a copy
@@ -823,7 +851,55 @@ void drawCensusDispatch(ID3D11DeviceContext* ctx, uint32_t x, uint32_t y,
     }
 }
 
+// advanced.census_at_ms: arm a census at named moments after the session's
+// first frame. Read once, fired at most once per entry, and never while
+// another census is running -- an entry that comes due mid-census simply
+// stays due, and fires at the first frame edge after that census ends. The
+// line says the moment it actually landed at, not the one it asked for.
+static void runCensusSchedule(uint32_t frameNo) {
+    if (!g_scheduleRead) {
+        g_scheduleRead = true;
+        g_firstFrameMs = stampMs();
+        const std::string spec =
+            Config::get().getString("advanced.census_at_ms", "");
+        const char* p = spec.c_str();
+        while (*p && g_scheduleCount < kMaxSchedule) {
+            char* end = nullptr;
+            const unsigned long v = strtoul(p, &end, 10);
+            if (end == p) break;
+            g_scheduleMs[g_scheduleCount++] = static_cast<uint64_t>(v);
+            p = end;
+            while (*p == ',' || *p == ' ') ++p;
+        }
+        if (g_scheduleCount) {
+            Log::get().note(
+                "DC: advanced.census_at_ms holds %u moment(s) -- a census is "
+                "armed at each of them, measured from this first frame edge, "
+                "recording offscreen draws regardless of census_offscreen. "
+                "For the startup sequence, which no keypress can reach.",
+                g_scheduleCount);
+        }
+    }
+    if (!g_scheduleCount || drawCensusArmed()) return;
+    const uint64_t elapsed = nowMs() - g_firstFrameMs;
+    for (uint32_t i = 0; i < g_scheduleCount; ++i) {
+        if (g_scheduleFired & (1u << i)) continue;
+        if (elapsed < g_scheduleMs[i]) continue;
+        g_scheduleFired |= (1u << i);
+        g_pending = true;
+        g_forceOffscreen = true;
+        Log::get().note(
+            "DC: census armed by advanced.census_at_ms entry %u of %u -- it "
+            "asked for %llu ms and landed at %llu ms, frame %u.",
+            i + 1, g_scheduleCount,
+            static_cast<unsigned long long>(g_scheduleMs[i]),
+            static_cast<unsigned long long>(elapsed), frameNo);
+        return;
+    }
+}
+
 void drawCensusFrameBoundary(uint32_t frameNo) {
+    runCensusSchedule(frameNo);
     if (g_framesLeft > 0) {
         Log::get().note("DC frame %u draws=%u off=%u copies=%u disp=%u",
                         g_frameOrdinal, g_drawsThisFrame, g_offThisFrame,

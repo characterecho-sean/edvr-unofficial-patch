@@ -39,6 +39,7 @@
 #include "fov_probe.h"
 #include "glitch_frame.h"
 #include "holo_fix.h"
+#include "intro_probe.h"
 #include "journal_watch.h"  // gameplay started, for the low-peak notice
 #include "loader_panel.h"
 #include "quad_probe.h"
@@ -522,6 +523,15 @@ struct State {
     // Which scene candidate the bound target is, resolved with rtv0Eye and
     // valid for the same binding generation. -1 for none.
     int      rtv0Cand = -1;
+    // The bound target's SIZE, derived on the same generation, for the intro
+    // probe (intro_probe.h). Its whole question is which target the frame's
+    // draws land in, so it is the one subscriber that needs the size of every
+    // target and not just of the eye-shaped ones. Cached rather than resolved
+    // per draw, the rtv0Eye pattern above, and never derived while the probe
+    // is off.
+    uint32_t rtv0W = 0;
+    uint32_t rtv0H = 0;
+    uint32_t rtv0SizeGen = 0;
     bool     psSrv0Panel = false;
     uint32_t psSrv0PanelGen = 0;
 
@@ -1399,7 +1409,8 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         !sunglareWantsDraws() && !cbPeekEnabled() && !billboardWantsDraws() &&
         !drawCensusArmed() && !panelQuadWants() && !panelCurveWants() &&
         !particleWantsDraws() && !backdropWantsDraws() &&
-        !scrimWantsDraws() && !quadProbeWants() && !loaderPanelWants()) {
+        !scrimWantsDraws() && !quadProbeWants() && !loaderPanelWants() &&
+        !introProbeWants()) {
         return DrawVerdict::kNone;
     }
 
@@ -1424,6 +1435,27 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         s->rtv0Cand = -1;
         s->rtv0Eye = targetIsEyeSized(bindingGet(BindSlot::Rtv0), &s->rtv0Cand);
         s->rtv0EyeGen = rtvGen;
+    }
+    // The intro probe, ABOVE the eye gate and deliberately. Its subject is the
+    // startup sequence, and for the whole of the sequence's first phase there
+    // is no eye texture to be on the right side of a gate about: one eye's
+    // size arrives from the openvr half at the compositor's first Submit,
+    // seconds after the movie has already played flat. A probe below the gate
+    // would record nothing until after the thing it is measuring.
+    if (introProbeWants()) {
+        if (s->rtv0SizeGen != rtvGen) {
+            s->rtv0SizeGen = rtvGen;
+            ResourceInfo info;
+            if (bindingResolve(bindingGet(BindSlot::Rtv0), &info) &&
+                info.isTexture2D) {
+                s->rtv0W = info.a;
+                s->rtv0H = info.b;
+            } else {
+                s->rtv0W = 0;
+                s->rtv0H = 0;
+            }
+        }
+        introProbeOnDraw(s->rtv0W, s->rtv0H, s->rtv0Eye);
     }
     if (!s->rtv0Eye) {
         // NOT an eye texture -- but it is still a DRAW, and where the draws
@@ -2041,6 +2073,16 @@ void STDMETHODCALLTYPE hookedClearRtv(ID3D11DeviceContext* self,
                             "b=%.4f a=%.4f (%u of 8)",
                             info.a, info.b, c[0], c[1], c[2], c[3],
                             s->clearProbeSeen);
+        }
+    }
+    // The intro probe, also before the void fix and for the same reason: the
+    // question it is asked is whether the startup's void is already
+    // grey-to-black material, and a colour read after the substitution would
+    // answer it with EDVR's own answer.
+    if (introProbeWants() && rtv && c) {
+        ResourceInfo info{};
+        if (bindingResolve(rtv, &info) && info.isTexture2D) {
+            introProbeOnClear(info.a, info.b, c);
         }
     }
     // Cheap test first: four float compares, and only a match pays to resolve
@@ -3254,6 +3296,7 @@ void vScreenRefreshConfig() {
     scrimConfigure(cfg);
     quadProbeConfigure(cfg);
     loaderPanelConfigure(cfg);
+    introProbeConfigure(cfg);
     backdropConfigure(cfg);
     fssScanConfigure(cfg);
     fssPanelConfigure(cfg);
@@ -3364,6 +3407,11 @@ void vScreenFrameBoundary() {
     }
     State* s = g_state;
     if (!s) return;
+
+    // The intro probe's frame edge, first: it closes the frame's composition
+    // and its timing, and both are about the frame that has just ENDED rather
+    // than about anything decided below.
+    introProbeFrameBoundary(s->frameNo);
 
     // The ARRIVAL census (advanced.census_fss_jump): a world-camera jump
     // while the scanner's chrome is up is a zoom's first frame, and the
@@ -4114,6 +4162,7 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     scrimConfigure(cfg);
     quadProbeConfigure(cfg);
     loaderPanelConfigure(cfg);
+    introProbeConfigure(cfg);
     backdropConfigure(cfg);
     fssScanConfigure(cfg);
     fssPanelConfigure(cfg);
