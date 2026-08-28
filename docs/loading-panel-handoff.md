@@ -86,12 +86,19 @@ frame. This is the trap the "one batched call" conclusion fell into.
 
 **The box is X:30-tied.** Narrowing `census_skip_offscreen` to `X:30` alone
 removed the scrim *and* the dialog's backing. If the backing lived only in
-the 648- or 2508-index batches it would have survived that. Best model: the
-box is a second X:30 -- the same bordered-panel widget at modal size, orange
-strips on the tall dialog, dark strips on the shader one. The occurrence
-probe confirms or refutes this in one flight; if it refutes it, the backing
-is a quad inside one of the batches, and the fix built below handles that
-case too.
+the 648- or 2508-index batches it would have survived that.
+
+**Multi-occurrence CONFIRMED by census** (session 11:02, 2026-08-28, census
+1 at frame 4659, a loading dialog -- 8 eye draws): the interface surface
+(4259x2395, the 4 MB buffer) receives **THREE X:30 draws per frame**, at
+frame positions #1, #2 and #4, in both censused frames. All three share
+vertex shader `vh=666EF0C4C616F67E`, pixel shader `ph=C0C4E6413DF14E9A`,
+stride 24, topology 4, no constants, no textures -- signature-identical,
+separable only by position, which is exactly what every skip-probe test
+could never show. Three rather than two likely means backdrop + box fill +
+box border as separate panels; the occurrence probe names them by extent
+and colour. The fix below handles any split by construction: full-surface
+occurrences collapse, modal-sized ones join the target.
 
 **The loader animates.** The third attempt's one-frame collections caught 1,
 3, 6, 11, 9, 12 draws on six consecutive tries: fade-in and progress
@@ -173,13 +180,14 @@ it before reading signatures out of a single capture.
 
 ## The flight plan
 
-1. **Probe flight** (settles the model): `advanced.quad_probe =
+1. **Probe flight** (names the occurrences): `advanced.quad_probe =
    4259x2395:X:30` -- substitute the rig's own surface size from a census if
-   render scale changed. Expect **two occurrences**: one spanning
-   ~65529x65529, one modal-sized, with different hex tails (translucent
-   backdrop vs solid black box; on the tall dialog, orange in the border
-   strips' bytes). One occurrence only means the box rides inside a batch:
-   re-probe `X:648`, then `X:2508`, and look for the modal-sized quad.
+   render scale changed. The census has already counted **three occurrences
+   per frame**; expect the probe to log all three with extents and hex
+   tails (translucent backdrop vs solid black box; on the tall dialog,
+   orange in the border strips' bytes). The probe captures the first
+   matching frame -- likely the first dialog; re-arm (spec off, then on)
+   for the second.
 2. **Fit flight**: `fix.loading_panel = fit`, watch both intro dialogs.
    Expect the backdrop snapped to each modal, the black backing and orange
    border untouched, a brief full-size backdrop during fade-in (measurement
