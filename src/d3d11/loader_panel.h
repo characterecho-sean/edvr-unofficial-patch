@@ -24,7 +24,18 @@
 // own matrix footprint -- the scrim's maps to the full view, the box's to
 // the modal's rect, the exact rect the field wants the scrim collapsed to.
 //
-// THE MECHANISM.
+// WHERE THE BOX ACTUALLY IS, settled by seven flights and one screenshot.
+// The dialog's solid black backing is NOT in the interface surface at all:
+// every quad of every interface draw was captured, matrix-verified and
+// colour-estimated across three hunt generations, and nothing there
+// renders a dark boxed rect. The eye-level census shows where it lives --
+// each eye's frame ends with a textured quad, a constant-buffered quad
+// with depth (stride-8 vertices: a positioned rect), and then the
+// 5760-index composite that lifts the interface in. The backing is an
+// EYE-LEVEL layer under that composite, kin to the menu's dark layer that
+// famously survived emptying the interface buffer.
+//
+// THE MECHANISM, which that discovery makes almost embarrassingly small.
 //
 //   Measure: when the loader's frame composition -- the sequence of draw
 //   shapes into the interface surface -- holds identical for two
@@ -32,37 +43,30 @@
 //   draw's indices (the shared vertex buffer once), plus the widget table
 //   (VS t0) and the flag constants (VS b2), all GPU-timeline copies.
 //
-//   Classify: panels by colour, then VERIFY through the same matrices the
-//   shader will use -- the translucent panel's element must map to the
-//   full view, the opaque one's to a boxed rect. A classification that
-//   fails its own footprint refuses, with each panel's element and mapped
-//   px rect in the log.
+//   Classify: the scrim is the standalone panel that is dark, translucent,
+//   and whose element maps its fill to the full view -- verified through
+//   the same matrix the shader will use, so a misclassification cannot
+//   survive its own footprint.
 //
-//   Substitute: the scrim's 30 vertices verbatim, with ONLY the two
-//   element-index bytes rewritten to the box's. The game's own shader then
-//   reads the BOX'S matrix from the live table, this frame and every
-//   frame: the modal can move, resize or animate and the scrim follows,
-//   because nothing about its placement is ever stored here. Positions are
-//   trusted only while the frame matches the measured sequence draw by
-//   draw; any divergence runs stock until the next stable window.
+//   Withhold: the scrim's draw is swallowed and NOTHING is drawn in its
+//   place. Inside the box, 40% black over the backing's opaque black was
+//   invisible -- withholding is pixel-identical to a perfect collapse
+//   there. Outside the box, the tint was the defect, and now does not
+//   exist. The backing itself lives at eye level and is untouched by
+//   construction. Positions are trusted only while the frame matches the
+//   measured sequence draw by draw; any divergence runs stock until the
+//   next stable window.
 //
 // EVERY failure -- no stable window, no table bound, mixed tables, no
-// translucent full-view element, no boxed opaque element, an index beyond
-// the captured window -- draws stock and says why in the log, once per
-// measured shape. Stock is the game's own full-view scrim: safe, just big.
+// dark translucent full-view element -- draws stock and says why in the
+// log, once per measured shape. Stock is the game's own full-view scrim:
+// safe, just big.
 //
-// KNOWN RISK, accepted until a flight rules on it: if the game reallocates
-// element slots frame to frame within one stable dialog (the sun-glare
-// hunt met exactly that in the 3D HUD), a captured index would point at a
-// different element later. A static dialog most likely keeps its slots;
-// wrongness would be immediately visible and immediately reported by the
-// engage line's element numbers.
-//
-// WHAT IT DOES NOT DO. It does not remove the scrim -- inside the box's
-// rect it still composites exactly as the game intended, under the box. It
-// does not touch the frosted wash layered over the whole view, which is
-// fix.loading_dim's job (docs/loading-scrim.md) and a different mechanism
-// entirely.
+// WHAT IT DOES NOT DO. It does not touch the dialog's backing, border or
+// text -- the backing is an eye-level draw this module never sees, and the
+// content draws are forwarded bit-identically. It does not touch the
+// frosted wash layered over the whole view, which is fix.loading_dim's
+// job (docs/loading-scrim.md) and a different mechanism entirely.
 //
 // SCOPE. The intro only. The main menu is a rendered hangar with a dark
 // layer of its own -- a different one, which survived emptying this very
@@ -70,9 +74,9 @@
 // boundary already measured for this module: menu-shaped frames peak around
 // twenty draws, a rendered scene clears a hundred.
 //
-// STATUS: rebuilt 2026-08-28 on the element-index model, read from the
-// shader itself rather than guessed; awaiting the confirming flight.
-// docs/loading-panel-handoff.md carries the full evidence trail.
+// STATUS: final form 2026-08-28 -- the withhold -- after seven flights and
+// a screenshot placed the backing at eye level; awaiting the confirming
+// flight. docs/loading-panel-handoff.md carries the full evidence trail.
 #pragma once
 
 #include <cstdint>

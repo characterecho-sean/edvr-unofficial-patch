@@ -4,7 +4,6 @@
 
 #include <d3d11.h>
 
-#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -22,54 +21,31 @@ namespace {
 constexpr uint32_t kIndicesPerQuad = 6;
 
 // The bordered-panel widget: one fill plus four border strips. The scrim,
-// the box and the loading screen's letterbox are all this one widget.
+// the invisible full-view sheet and the letterbox are all this one widget.
 constexpr uint32_t kPanelIndices = 30;
 
 // HOW THE WIDGET IS PLACED, from vs 666EF0C4C616F67E's own disassembly
-// (docs/shaders/ui-widget-vs.asm). Every panel's vertices span one
-// normalized space (about +/-32765); the vertex shader reads a PER-ELEMENT
-// 4x4 matrix from a STRUCTURED BUFFER at VS t0, stride 160, and transforms
-// the position with it -- offsets 64 and 80 of the same element feed the
-// pixel shader its styling. The element is chosen by a BYTE IN THE VERTEX:
-// round(255 * COLOUR1.x) or round(255 * COLOUR2.x) -- offsets 12 and 16 of
-// the 24-byte vertex -- selected by flag bits 0x4000/0x8000 in cb2[2].x.
-// Three flights of rasterizer-state models died before this was read:
-// viewports and scissors are full-surface on every draw, and no vertex is
-// modal-sized; the matrix is the ONLY thing that differs.
+// (docs/shaders/ui-widget-vs.asm): a per-element 4x4 matrix in a structured
+// buffer at VS t0, stride 160, selected by a byte carried in the vertex --
+// offset 12 or 16 of the 24-byte vertex, chosen by flag bits 0x4000/0x8000
+// in VS cb2[2].x. The scrim's identity rests on this: its element must map
+// its fill to the full view, read through the same table the shader reads.
 constexpr uint32_t kElemStride = 160;
-constexpr uint32_t kIdx1Off = 12;   // COLOUR1.x byte within the vertex
-constexpr uint32_t kIdx2Off = 16;   // COLOUR2.x byte within the vertex
+constexpr uint32_t kIdx1Off = 12;
+constexpr uint32_t kIdx2Off = 16;
 constexpr uint32_t kFlagIdx2 = 0x8000;
 constexpr uint32_t kFlagIdx1 = 0x4000;
 
-// The panel fill's RGBA8 colour at byte offset 8 tells the STANDALONE
-// panels apart, measured across flights: the scrim is black at alpha 0x66,
-// the letterbox white. Dark means every channel below this; opaque means
-// alpha at least this.
+// The scrim's fill colour, RGBA8 at vertex byte offset 8, measured across
+// seven flights: black at alpha 0x66 -- dark in every channel below the
+// dark bound, translucent below the opaque bound. The other panels fail
+// one or the other: the full-view sheet is opaque, the letterbox white.
 constexpr uint32_t kDarkMax = 0x40;
 constexpr uint32_t kOpaqueMin = 0xF0;
 
-// Batch quads are colour-neutral in their vertices (flight 5: the only
-// dark opaque VERTICES anywhere belong to the full-view sheet); their look
-// comes from the element params the pixel shader applies. The box hunt
-// therefore classifies by ESTIMATED RENDERED colour: dark means every
-// estimated channel at or below this, covering means estimated alpha at
-// least this.
-constexpr float kEstDark = 0.25f;
-constexpr float kEstCover = 0.90f;
-
 // A matrix that maps a panel's fill across at least this fraction of clip
-// space is a full-view element; at most the box fraction in both axes is a
-// modal, and below the floor it is a tick mark or a stray pip that must
-// not become "the box". Clip space spans 2.0 across.
+// space (which spans 2.0) is a full-view element.
 constexpr float kFullFraction = 0.90f;
-constexpr float kBoxFraction = 0.80f;
-constexpr float kMinBoxFraction = 0.02f;
-
-// Engage lines after the fourth are logged only when the box moved; the
-// shader-prep dialog re-measures on every percent tick and the box holds
-// still through all of them.
-constexpr float kRelogFraction = 0.01f;
 
 // Frame-composition record: draw shapes per frame, and captured draws per
 // measurement. The measured loader frame held about a dozen draws; these
@@ -77,7 +53,7 @@ constexpr float kRelogFraction = 0.01f;
 constexpr uint32_t kMaxSeq = 48;
 constexpr uint32_t kMaxCaptures = 24;
 
-// Scrim positions substituted per measurement. The evidence says one; a
+// Scrim positions withheld per measurement. The evidence says one; a
 // second translucent full-view panel would get the same treatment.
 constexpr uint32_t kMaxScrims = 4;
 
@@ -110,11 +86,6 @@ constexpr uint32_t kStuckFrames = 600;
 // before the same shape is recorded as unmeasurable. Guards against a
 // measure-discard loop re-copying a 4 MB buffer every third frame.
 constexpr uint32_t kMaxDropStreak = 3;
-
-// Entries per refusal-diagnostic list. Six, because flight 6's top three
-// were saturated by the loading screen's wide bars and side panels and a
-// backing-sized quad never surfaced.
-constexpr int kCands = 6;
 
 FaultBudget g_budget("loaderPanel", 6);
 
@@ -152,24 +123,7 @@ struct CapDraw {
     uint32_t ibOffset = 0;   // bytes into the index staging buffer
     int      baseVertex = 0;
     bool     i16 = false;    // this draw's own index format
-    bool     textured = false;  // PS slot 0 bound -- text, or a masked quad
     void*    vsSrv = nullptr;   // identity of VS t0 at the draw, not held
-    // Blend state at the draw, for the dumps: the one stage of the look the
-    // estimator does not model, and the difference between a faint white
-    // bar and a darkening one.
-    bool     blendOn = false;
-    uint8_t  srcBlend = 0;
-    uint8_t  dstBlend = 0;
-};
-
-// One scrim's substitute: its own 30 vertices with the element-index bytes
-// rewritten to the box's, so the game's shader places it with the box's own
-// live matrix. Keyed by position in the measured frame sequence.
-struct Built {
-    uint32_t pos = 0;
-    uint32_t indices = 0;
-    ID3D11Buffer* vb = nullptr;
-    ID3D11Buffer* ib = nullptr;
 };
 
 // --- the current frame's composition -------------------------------------
@@ -178,7 +132,7 @@ uint32_t g_seqLen = 0;
 SeqEnt   g_seq[kMaxSeq];
 uint32_t g_hashAcc = 2166136261u;
 bool     g_prefixOk = true;   // does this frame still match the measured one?
-int      g_subSlot = -1;      // set by OnDraw for the Substitute that follows
+bool     g_subArm = false;    // set by OnDraw for the Substitute that follows
 
 // The last COMPLETED frame's hash; two consecutive equal hashes are the
 // stability that arms a collection.
@@ -204,21 +158,21 @@ uint32_t      g_ibFill = 0;
 uint32_t      g_capStride = 0;
 uint32_t      g_capVertexBytes = 0;
 uint32_t      g_srvCopied = 0;       // bytes of the table in staging
-uint32_t      g_srvByteWidth = 0;    // the table's full size
 uint32_t      g_srvFirstElem = 0;    // the view's element offset
 bool          g_cb2Copied = false;
 SeqEnt        g_capSeq[kMaxSeq]; // the collection frame's composition
 uint32_t      g_capSeqLen = 0;
 
-// --- the measured result --------------------------------------------------
+// --- the measured result: scrim positions to withhold ---------------------
 uint32_t g_measuredHash = 0;     // shape this verdict belongs to; 0 = none
 uint32_t g_measuredLen = 0;
 SeqEnt   g_measuredSeq[kMaxSeq];
-Built    g_built[kMaxScrims];
-uint32_t g_builtCount = 0;
-uint32_t g_builtStride = 0;
+bool     g_haveRoles = false;
+uint32_t g_scrimPos[kMaxScrims];
+uint32_t g_scrimCount = 0;
 uint32_t g_measurements = 0;
-Rect     g_lastBox;   // box px rect, for the engage log's moved-or-not test
+uint32_t g_lastScrimPos = 0xFFFFFFFFu;   // engage-log rate limiting
+uint32_t g_lastScrimCount = 0;
 
 void failOnce(const char* why) {
     static bool noted = false;
@@ -236,7 +190,6 @@ void dropPending() {
     g_capDropped = 0;
     g_ibFill = 0;
     g_srvCopied = 0;
-    g_srvByteWidth = 0;
     g_srvFirstElem = 0;
     g_cb2Copied = false;
     g_capSeqLen = 0;
@@ -244,17 +197,9 @@ void dropPending() {
     g_collecting = false;
 }
 
-void dropBuilt() {
-    for (uint32_t i = 0; i < g_builtCount; ++i) {
-        if (g_built[i].vb) g_built[i].vb->Release();
-        if (g_built[i].ib) g_built[i].ib->Release();
-        g_built[i] = Built{};
-    }
-    g_builtCount = 0;
-}
-
 void resetMeasured() {
-    dropBuilt();
+    g_haveRoles = false;
+    g_scrimCount = 0;
     g_measuredHash = 0;
     g_measuredLen = 0;
 }
@@ -263,14 +208,15 @@ void resetFrameAcc() {
     g_seqLen = 0;
     g_hashAcc = 2166136261u;
     g_prefixOk = true;
-    g_subSlot = -1;
+    g_subArm = false;
 }
 
-// A verdict for a shape that yielded nothing to substitute. Recording the
+// A verdict for a shape that yielded nothing to withhold. Recording the
 // hash is what stops the same shape being re-measured -- and re-copying a
 // 4 MB buffer -- every stable window until the dialog changes.
 void recordNone(const char* why) {
-    dropBuilt();
+    g_haveRoles = false;
+    g_scrimCount = 0;
     g_measuredHash = g_armedHash;
     g_measuredLen = g_capSeqLen;
     memcpy(g_measuredSeq, g_capSeq, sizeof(SeqEnt) * g_capSeqLen);
@@ -303,9 +249,9 @@ void loaderPanelConfigure(Config& cfg) {
             "loading panel: %s. The full-view scrim behind the loader's "
             "dialog is %s (docs/loading-panel-handoff.md).",
             g_on ? "FIT" : "stock",
-            g_on ? "re-issued as the dialog box's own widget element, so the "
-                   "game's own table places it exactly where the box sits; "
-                   "the box and its text are untouched"
+            g_on ? "withheld -- the dialog's own black backing, an eye-level "
+                   "layer, already carries the box, so no tint reaches "
+                   "anything beyond it"
                  : "the game's own");
     }
 }
@@ -335,7 +281,7 @@ bool loaderPanelOnDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
         g_prefixOk = false;
     }
 
-    // Substitution is positional, and a position only means anything while
+    // Withholding is positional, and a position only means anything while
     // the frame has matched the measured sequence at every step so far.
     if (g_measuredLen) {
         if (p >= g_measuredLen || !g_measuredSeq[p].same(count, targetW, targetH)) {
@@ -343,15 +289,12 @@ bool loaderPanelOnDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
         }
     }
 
-    // Collection: capture every quad-batch draw, TEXTURED INCLUDED -- the
-    // hunt judges each quad by its own matrix and estimate, so text cannot
-    // pollute anything, and flight 6 proved no untextured quad renders the
-    // modal's backing: if it is an atlas-masked black quad, it lives in a
-    // textured draw. A qualifying draw that cannot be captured -- capacity,
-    // an overlong frame -- poisons the collection: a verdict from a subset
-    // could miss the box.
+    // Collection: capture this draw if the frame is the armed one and the
+    // draw is a solid quad batch -- text reads a texture; the panels this
+    // module classifies read none. A qualifying draw that cannot be
+    // captured -- capacity, an overlong frame -- poisons the collection.
     if (g_collecting) {
-        const bool qualifies = count % kIndicesPerQuad == 0;
+        const bool qualifies = !textured && count % kIndicesPerQuad == 0;
         if (qualifies && p < kMaxSeq && g_capCount < kMaxCaptures) {
             bool stored = false;
             guardedBudget(g_budget, [&] {
@@ -419,28 +362,11 @@ bool loaderPanelOnDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
                         cd.ibOffset = g_ibFill;
                         cd.baseVertex = baseVertex;
                         cd.i16 = idxSize == 2u;
-                        cd.textured = textured;
-                        ID3D11BlendState* bs = nullptr;
-                        FLOAT bf[4];
-                        UINT bmask = 0;
-                        ctx->OMGetBlendState(&bs, bf, &bmask);
-                        if (bs) {
-                            D3D11_BLEND_DESC bd2;
-                            bs->GetDesc(&bd2);
-                            cd.blendOn =
-                                bd2.RenderTarget[0].BlendEnable != FALSE;
-                            cd.srcBlend = static_cast<uint8_t>(
-                                bd2.RenderTarget[0].SrcBlend);
-                            cd.dstBlend = static_cast<uint8_t>(
-                                bd2.RenderTarget[0].DestBlend);
-                            bs->Release();
-                        }
-                        // The widget table and flags, at the first solid
-                        // panel of the frame -- the same GPU-timeline copy
-                        // discipline as the vertex buffer. Later panels
-                        // record only the view's identity, so a mixed-table
-                        // frame can refuse.
-                        if (count == kPanelIndices && !textured) {
+                        // The widget table and flags, at the first panel of
+                        // the frame -- the same GPU-timeline copy discipline
+                        // as the vertex buffer. Later panels record only the
+                        // view's identity, so a mixed-table frame can refuse.
+                        if (count == kPanelIndices) {
                             ID3D11ShaderResourceView* srv = nullptr;
                             ctx->VSGetShaderResources(0, 1, &srv);
                             if (srv) {
@@ -484,7 +410,6 @@ bool loaderPanelOnDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
                                                     g_srvStage, 0, 0, 0, 0,
                                                     tbl, 0, &tb);
                                                 g_srvCopied = sd.ByteWidth;
-                                                g_srvByteWidth = td.ByteWidth;
                                             }
                                         }
                                         res->Release();
@@ -529,13 +454,13 @@ bool loaderPanelOnDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
         }
     }
 
-    // The substitution decision. Only a position the measurement marked as a
+    // The withhold decision. Only a position the measurement marked as the
     // scrim, and only while this frame still matches the measured one.
-    g_subSlot = -1;
-    if (g_prefixOk && g_builtCount) {
-        for (uint32_t i = 0; i < g_builtCount; ++i) {
-            if (g_built[i].pos == p && g_built[i].vb && g_built[i].ib) {
-                g_subSlot = static_cast<int>(i);
+    g_subArm = false;
+    if (g_haveRoles && g_prefixOk) {
+        for (uint32_t i = 0; i < g_scrimCount; ++i) {
+            if (g_scrimPos[i] == p) {
+                g_subArm = true;
                 return true;
             }
         }
@@ -545,39 +470,17 @@ bool loaderPanelOnDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
 
 bool loaderPanelSubstitute(ID3D11DeviceContext* ctx, PfnDrawIndexedInstanced draw,
                            uint32_t instances, uint32_t startInstance) {
-    if (!ctx || !draw || g_subSlot < 0 ||
-        static_cast<uint32_t>(g_subSlot) >= g_builtCount) {
-        return false;
-    }
-    const Built& b = g_built[g_subSlot];
-    g_subSlot = -1;
-    if (!b.vb || !b.ib || b.indices == 0) return false;
-    bool done = false;
-    guardedBudget(g_budget, [&] {
-        // The scrim's own vertices with only the element-index bytes
-        // changed, drawn through the game's own pipeline: the shader reads
-        // the BOX's matrix from the live widget table, this frame and every
-        // frame, so nothing here can go stale.
-        ID3D11Buffer* savedVb = nullptr;
-        UINT savedStride = 0, savedOff = 0;
-        ctx->IAGetVertexBuffers(0, 1, &savedVb, &savedStride, &savedOff);
-        ID3D11Buffer* savedIb = nullptr;
-        DXGI_FORMAT savedFmt = DXGI_FORMAT_UNKNOWN;
-        UINT savedIbOff = 0;
-        ctx->IAGetIndexBuffer(&savedIb, &savedFmt, &savedIbOff);
-
-        const UINT stride = g_builtStride, zero = 0;
-        ID3D11Buffer* vb = b.vb;
-        ctx->IASetVertexBuffers(0, 1, &vb, &stride, &zero);
-        ctx->IASetIndexBuffer(b.ib, DXGI_FORMAT_R16_UINT, 0);
-        draw(ctx, b.indices, instances, 0, 0, startInstance);
-        ctx->IASetVertexBuffers(0, 1, &savedVb, &savedStride, &savedOff);
-        ctx->IASetIndexBuffer(savedIb, savedFmt, savedIbOff);
-        if (savedVb) savedVb->Release();
-        if (savedIb) savedIb->Release();
-        done = true;
-    });
-    return done;
+    // The substitute for the scrim is NOTHING: the dialog's black backing is
+    // an eye-level layer the interface surface never held, so inside the box
+    // the scrim was invisible and outside it it was the defect. Withholding
+    // the draw is pixel-identical to a perfect collapse onto an opaque box.
+    (void)ctx;
+    (void)draw;
+    (void)instances;
+    (void)startInstance;
+    if (!g_subArm) return false;
+    g_subArm = false;
+    return true;
 }
 
 namespace {
@@ -586,7 +489,7 @@ namespace {
 // evaluate x' = r0.x*x + r0.y*y + r0.w and y' likewise at the fill's four
 // corners (z is 0 and w is 1 in this vertex layout).
 struct Foot {
-    float cx0, cx1, cy0, cy1;   // clip-space extents
+    float cx0, cx1, cy0, cy1;
     bool valid = false;
 };
 
@@ -611,10 +514,9 @@ Foot footprint(const float* elem, const Rect& fill) {
     return f;
 }
 
-// Retire a settled capture into a verdict: which position is the translucent
-// scrim, which element is the opaque box, and the scrim rebuilt as the box's
-// element. Runs on the render thread inside the caller's budget guard; every
-// exit that is not a verdict records the shape so it is not re-measured.
+// Retire a settled capture into a verdict: which positions are the scrim.
+// Runs on the render thread inside the caller's budget guard; every exit
+// records the shape so it is not re-measured.
 void analyze(ID3D11DeviceContext* ctx) {
     if (!g_srvStage || !g_srvCopied) {
         recordNone("no widget table was bound at the panels' draws");
@@ -648,23 +550,16 @@ void analyze(ID3D11DeviceContext* ctx) {
         ctx->Unmap(g_ibStage, 0);
     };
 
-    // Per captured draw: every quad's bounds in its own units and its first
-    // vertex's offset -- a BATCH is not one placement, each quad carries its
-    // own element index and rides its own matrix, which flight 4 proved by
-    // elimination (every standalone panel maps full-view; the modal's
-    // backing can only be a batch quad). The draw-level fill/colour summary
-    // is kept for the panels.
-    std::vector<std::vector<Rect>> qrect(g_capCount);
-    std::vector<std::vector<int64_t>> qoff(g_capCount);
+    // Per captured panel: the fill quad's bounds, the RGBA8 at offset 8,
+    // and the element-index bytes at offsets 12 and 16.
     std::vector<Rect> fill(g_capCount);
     std::vector<uint32_t> rgba(g_capCount, 0);
     std::vector<uint8_t> idx1(g_capCount, 0), idx2(g_capCount, 0);
     std::vector<bool> known(g_capCount, false);
     for (uint32_t d = 0; d < g_capCount; ++d) {
         const CapDraw& cd = g_caps[d];
+        if (cd.count != kPanelIndices) continue;
         const uint32_t n = cd.count / kIndicesPerQuad;
-        qrect[d].resize(n);
-        qoff[d].assign(n, -1);
         float bestArea = -1.0f;
         int64_t bestOff = -1;
         for (uint32_t q = 0; q < n; ++q) {
@@ -686,8 +581,6 @@ void analyze(ID3D11DeviceContext* ctx) {
                 memcpy(pos, vbBase + off, sizeof(pos));
                 r.add(pos[0], pos[1]);
             }
-            qrect[d][q] = r;
-            qoff[d][q] = firstOff;
             if (r.valid() && r.area() > bestArea) {
                 bestArea = r.area();
                 fill[d] = r;
@@ -710,13 +603,6 @@ void analyze(ID3D11DeviceContext* ctx) {
         if (flags & kFlagIdx1) return idx1[d];
         return 0;
     };
-    // The same selection from a raw vertex, for quads inside batches.
-    auto liveIdxAt = [&](int64_t off) -> uint32_t {
-        if (flags & kFlagIdx2) return vbBase[off + kIdx2Off];
-        if (flags & kFlagIdx1) return vbBase[off + kIdx1Off];
-        return 0;
-    };
-    // A panel element's matrix rows (x and y), or null past the window.
     auto elemRows = [&](uint32_t index, float* out8) -> bool {
         const uint64_t off =
             static_cast<uint64_t>(g_srvFirstElem + index) * kElemStride;
@@ -724,100 +610,15 @@ void analyze(ID3D11DeviceContext* ctx) {
         memcpy(out8, tbl + off, 32);
         return true;
     };
-    // The element's styling params at offsets 64 and 80 -- what the pixel
-    // shader multiplies and adds to the vertex colour. Flight 5 proved the
-    // batches' vertices are colour-neutral (the only dark opaque VERTICES
-    // in the frame are the full-view sheet's); the backing's black lives
-    // here, so the hunt has to render-estimate, not read vertex bytes.
-    auto elemParams = [&](uint32_t index, float* outA4, float* outB4) -> bool {
-        const uint64_t off =
-            static_cast<uint64_t>(g_srvFirstElem + index) * kElemStride;
-        if (off + 96 > g_srvCopied) return false;
-        memcpy(outA4, tbl + off + 64, 16);
-        memcpy(outB4, tbl + off + 80, 16);
-        return true;
-    };
-    float cb2col0[4];
-    memcpy(cb2col0, static_cast<const uint8_t*>(mc.pData), 16);
-    // What a quad ROUGHLY renders as, replayed from the two shaders'
-    // disassembly (docs/shaders/ui-widget-vs.asm, ui-widget-ps.asm): the
-    // VS picks the colour source and the fade byte by cb2[2].x flags, the
-    // PS runs colour * elemA + elemB and two alpha modulations. Blend
-    // state is not modelled; this is a classifier, not a renderer.
-    auto estimate = [&](int64_t vtxOff, const float* eA, const float* eB,
-                        float* out4) {
-        float col[4] = {0, 0, 0, 0};
-        if (flags & 0x4) {
-            uint32_t c;
-            memcpy(&c, vbBase + vtxOff + 8, sizeof(c));
-            col[0] = static_cast<float>(c & 0xFF) / 255.0f;
-            col[1] = static_cast<float>((c >> 8) & 0xFF) / 255.0f;
-            col[2] = static_cast<float>((c >> 16) & 0xFF) / 255.0f;
-            col[3] = static_cast<float>((c >> 24) & 0xFF) / 255.0f;
-        } else if (flags & 0x2) {
-            memcpy(col, cb2col0, 16);
-        }
-        for (int i = 0; i < 4; ++i) {
-            const float c = (flags & 0x1) ? 1.0f : col[i];
-            out4[i] = c * eA[i] + eB[i];
-        }
-        if (flags & 0x80) {
-            float fade = 0.0f;
-            if (flags & 0x2000) {
-                fade = static_cast<float>(vbBase[vtxOff + 15]) / 255.0f;
-            } else if (flags & 0x8000) {
-                fade = static_cast<float>(vbBase[vtxOff + 19]) / 255.0f;
-            }
-            out4[3] *= fade;
-        }
-        if (flags & 0x10000) {
-            for (int i = 0; i < 4; ++i) {
-                out4[i] = out4[3] * (out4[i] - 1.0f) + 1.0f;
-            }
-        }
-        if (flags & 0x20000) {
-            for (int i = 0; i < 3; ++i) out4[i] *= out4[3];
-        }
-        for (int i = 0; i < 4; ++i) {
-            if (out4[i] < 0.0f) out4[i] = 0.0f;
-        }
-    };
 
-    const uint32_t surfW =
-        g_capCount ? g_capSeq[g_caps[0].seqPos].w : 0;
-    const uint32_t surfH =
-        g_capCount ? g_capSeq[g_caps[0].seqPos].h : 0;
-
-    // When a verdict refuses, name every solid it saw, and for panels the
-    // element it selects and where that element's matrix puts it.
-    auto dumpSolids = [&] {
+    // When a verdict refuses, name every panel it saw.
+    auto dumpPanels = [&] {
         for (uint32_t d = 0; d < g_capCount && d < 10; ++d) {
             const CapDraw& cd = g_caps[d];
-            if (cd.count != kPanelIndices || !known[d]) {
-                Log::get().note("  solid %u: %u indices at draw %u, rgba %08X",
-                                d, cd.count, cd.seqPos,
-                                known[d] ? rgba[d] : 0u);
-                continue;
-            }
-            const uint32_t li = liveIdx(d);
-            float rows[8];
-            char where[96];
-            if (elemRows(li, rows)) {
-                const Foot f = footprint(rows, fill[d]);
-                snprintf(where, sizeof(where),
-                         "px %.0f,%.0f %.0fx%.0f",
-                         (f.cx0 * 0.5f + 0.5f) * surfW,
-                         (0.5f - f.cy1 * 0.5f) * surfH,
-                         (f.cx1 - f.cx0) * 0.5f * surfW,
-                         (f.cy1 - f.cy0) * 0.5f * surfH);
-            } else {
-                snprintf(where, sizeof(where),
-                         "element beyond the %u-byte window", g_srvCopied);
-            }
-            Log::get().note("  solid %u: panel at draw %u, rgba %08X, "
-                            "element %u (bytes %u/%u), %s",
-                            d, cd.seqPos, rgba[d], li, idx1[d], idx2[d],
-                            where);
+            if (cd.count != kPanelIndices || !known[d]) continue;
+            Log::get().note("  panel at draw %u, rgba %08X, element %u "
+                            "(bytes %u/%u)",
+                            cd.seqPos, rgba[d], liveIdx(d), idx1[d], idx2[d]);
         }
     };
 
@@ -830,22 +631,22 @@ void analyze(ID3D11DeviceContext* ctx) {
         else if (g_caps[d].vsSrv != srv0) mixed = true;
     }
     if (mixed) {
-        dumpSolids();
+        dumpPanels();
         recordNone("the 30-index panels read different widget tables");
         unmapAll();
         return;
     }
 
-    // The scrim: a standalone 30-index panel, dark and translucent, whose
-    // element maps to the full view. Verified through the same matrix the
-    // shader will use, so a misclassification cannot survive its own
+    // The scrim: a standalone panel, dark and translucent, whose element
+    // maps its fill to the full view -- verified through the same matrix
+    // the shader will use, so a misclassification cannot survive its own
     // footprint.
     uint32_t scrimPos[kMaxScrims];
-    uint32_t scrimCap[kMaxScrims];
     uint32_t scrims = 0;
+    uint32_t scrimRgba = 0, scrimElem = 0;
     for (uint32_t d = 0; d < g_capCount; ++d) {
         const CapDraw& cd = g_caps[d];
-        if (cd.count != kPanelIndices || cd.textured || !known[d]) continue;
+        if (cd.count != kPanelIndices || !known[d]) continue;
         const uint32_t c = rgba[d];
         const uint32_t r = c & 0xFF, gch = (c >> 8) & 0xFF,
                        b = (c >> 16) & 0xFF, a = (c >> 24) & 0xFF;
@@ -855,247 +656,50 @@ void analyze(ID3D11DeviceContext* ctx) {
         if (!elemRows(liveIdx(d), rows)) continue;
         const Foot f = footprint(rows, fill[d]);
         if (!f.valid) continue;
-        const float covX = f.cx1 - f.cx0, covY = f.cy1 - f.cy0;
-        if (covX >= 2.0f * kFullFraction && covY >= 2.0f * kFullFraction &&
-            scrims < kMaxScrims) {
-            scrimPos[scrims] = cd.seqPos;
-            scrimCap[scrims] = d;
-            ++scrims;
+        if (f.cx1 - f.cx0 >= 2.0f * kFullFraction &&
+            f.cy1 - f.cy0 >= 2.0f * kFullFraction && scrims < kMaxScrims) {
+            if (scrims == 0) {
+                scrimRgba = c;
+                scrimElem = liveIdx(d);
+            }
+            scrimPos[scrims++] = cd.seqPos;
         }
     }
+    unmapAll();
+
     if (scrims == 0) {
-        dumpSolids();
+        dumpPanels();
         recordNone("no dark translucent panel maps to the full view");
-        unmapAll();
         return;
     }
 
-    // The box: a quad -- anywhere, batches included -- whose own element
-    // maps it to a boxed rect AND whose ESTIMATED RENDERED colour is dark
-    // and covering. Flight 4 proved the standalone panels all ride the
-    // full-view element; flight 5 proved no batch vertex is dark -- the
-    // backing's black is applied by its element's params, so the test runs
-    // the pixel shader's own arithmetic over the captured data.
-    const SeqEnt scrimDims = g_capSeq[g_caps[scrimCap[0]].seqPos];
-    int boxDraw = -1;
-    int64_t boxOff = -1;
-    uint32_t boxRgba = 0;
-    float boxEst[4] = {0, 0, 0, 0};
-    float boxAreaPx = 0.0f;
-    Foot boxFoot{};
-    // Refusal diagnostics: the largest BOXED quads whatever they render as,
-    // and the largest dark-covering quads whatever their footprint -- one
-    // of the two lists names the side the thresholds got wrong.
-    struct Cand {
-        float area = -1.0f;
-        Foot f{};
-        uint32_t rgba = 0;
-        float est[4] = {0, 0, 0, 0};
-        uint32_t draw = 0;
-        uint32_t count = 0;
-        bool textured = false;
-        bool blendOn = false;
-        uint8_t srcBlend = 0;
-        uint8_t dstBlend = 0;
-    };
-    Cand topBoxed[kCands], topDark[kCands];
-    auto push = [](Cand* list, const Cand& c) {
-        for (int t = 0; t < kCands; ++t) {
-            if (c.area > list[t].area) {
-                for (int s = kCands - 1; s > t; --s) list[s] = list[s - 1];
-                list[t] = c;
-                break;
-            }
-        }
-    };
-    for (uint32_t d = 0; d < g_capCount; ++d) {
-        const CapDraw& cd = g_caps[d];
-        const SeqEnt& se = g_capSeq[cd.seqPos];
-        if (se.w != scrimDims.w || se.h != scrimDims.h) continue;
-        const uint32_t n = cd.count / kIndicesPerQuad;
-        for (uint32_t q = 0; q < n; ++q) {
-            const int64_t off = qoff[d][q];
-            const Rect& r = qrect[d][q];
-            if (off < 0 || !r.valid() || g_capStride < 20) continue;
-            const uint32_t li = liveIdxAt(off);
-            float rows[8], eA[4], eB[4];
-            if (!elemRows(li, rows) || !elemParams(li, eA, eB)) continue;
-            const Foot f = footprint(rows, r);
-            if (!f.valid) continue;
-            const float covX = f.cx1 - f.cx0, covY = f.cy1 - f.cy0;
-            if (covX <= 0.0f || covY <= 0.0f) continue;
-            const float areaPx = covX * covY;
-            uint32_t c;
-            memcpy(&c, vbBase + off + 8, sizeof(c));
-            float est[4];
-            estimate(off, eA, eB, est);
-            const bool darkCover = est[0] <= kEstDark && est[1] <= kEstDark &&
-                                   est[2] <= kEstDark && est[3] >= kEstCover;
-            const bool boxed =
-                covX <= 2.0f * kBoxFraction && covY <= 2.0f * kBoxFraction &&
-                covX >= 2.0f * kMinBoxFraction &&
-                covY >= 2.0f * kMinBoxFraction;
-            Cand cand;
-            cand.area = areaPx;
-            cand.f = f;
-            cand.rgba = c;
-            memcpy(cand.est, est, sizeof(est));
-            cand.draw = cd.seqPos;
-            cand.count = cd.count;
-            cand.textured = cd.textured;
-            cand.blendOn = cd.blendOn;
-            cand.srcBlend = cd.srcBlend;
-            cand.dstBlend = cd.dstBlend;
-            if (boxed) push(topBoxed, cand);
-            if (darkCover) push(topDark, cand);
-            if (boxed && darkCover && areaPx > boxAreaPx) {
-                boxAreaPx = areaPx;
-                boxDraw = static_cast<int>(d);
-                boxOff = off;
-                boxRgba = c;
-                memcpy(boxEst, est, sizeof(est));
-                boxFoot = f;
-            }
-        }
-    }
-
-    if (boxDraw < 0) {
-        dumpSolids();
-        const struct { const char* name; const Cand* list; } lists[2] = {
-            {"boxed", topBoxed}, {"dark covering", topDark}};
-        for (const auto& L : lists) {
-            for (int t = 0; t < kCands; ++t) {
-                const Cand& c = L.list[t];
-                if (c.area <= 0.0f) break;
-                Log::get().note(
-                    "  %s quad in the %u-index draw at %u [%s, blend "
-                    "%s %u*%u], rgba %08X, renders ~%.2f,%.2f,%.2f,%.2f, "
-                    "maps to px %.0f,%.0f %.0fx%.0f",
-                    L.name, c.count, c.draw,
-                    c.textured ? "tex" : "solid",
-                    c.blendOn ? "on" : "off", c.srcBlend, c.dstBlend,
-                    c.rgba,
-                    c.est[0], c.est[1], c.est[2], c.est[3],
-                    (c.f.cx0 * 0.5f + 0.5f) * surfW,
-                    (0.5f - c.f.cy1 * 0.5f) * surfH,
-                    (c.f.cx1 - c.f.cx0) * 0.5f * surfW,
-                    (c.f.cy1 - c.f.cy0) * 0.5f * surfH);
-            }
-        }
-        recordNone("no boxed quad renders dark and covering");
-        unmapAll();
-        return;
-    }
-
-    // Build each scrim's substitute: its 30 vertices verbatim, with only the
-    // element-index bytes at offsets 12 and 16 replaced by the box's. The
-    // matrix itself stays in the game's table and is read live every frame.
-    ID3D11Device* dev = nullptr;
-    ctx->GetDevice(&dev);
-    if (!dev) {
-        unmapAll();
-        failOnce("the device was unreachable at build time");
-        return;
-    }
-    dropBuilt();
-    const uint8_t boxIdx1 = vbBase[boxOff + kIdx1Off];
-    const uint8_t boxIdx2 = vbBase[boxOff + kIdx2Off];
-    bool buildFailed = false;
-    for (uint32_t s = 0; s < scrims && !buildFailed; ++s) {
-        const CapDraw& cd = g_caps[scrimCap[s]];
-        std::vector<uint8_t> verts(static_cast<size_t>(cd.count) * g_capStride);
-        std::vector<uint16_t> idx(cd.count);
-        bool ok = true;
-        for (uint32_t k = 0; k < cd.count && ok; ++k) {
-            const uint8_t* ip = ibBase + cd.ibOffset + k * (cd.i16 ? 2 : 4);
-            uint32_t vi = cd.i16 ? *reinterpret_cast<const uint16_t*>(ip)
-                                 : *reinterpret_cast<const uint32_t*>(ip);
-            const int64_t v = static_cast<int64_t>(vi) + cd.baseVertex;
-            const int64_t off = v * g_capStride;
-            if (v < 0 ||
-                off + g_capStride > static_cast<int64_t>(g_capVertexBytes)) {
-                ok = false;
-                break;
-            }
-            uint8_t* dst = &verts[static_cast<size_t>(k) * g_capStride];
-            memcpy(dst, vbBase + off, g_capStride);
-            dst[kIdx1Off] = boxIdx1;
-            dst[kIdx2Off] = boxIdx2;
-            idx[k] = static_cast<uint16_t>(k);
-        }
-        if (!ok) {
-            buildFailed = true;
-            break;
-        }
-        D3D11_BUFFER_DESC bd{};
-        D3D11_SUBRESOURCE_DATA sr{};
-        bd.Usage = D3D11_USAGE_IMMUTABLE;
-        bd.ByteWidth = static_cast<UINT>(verts.size());
-        bd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
-        sr.pSysMem = verts.data();
-        Built& b = g_built[g_builtCount];
-        bool made = SUCCEEDED(dev->CreateBuffer(&bd, &sr, &b.vb));
-        bd.ByteWidth = static_cast<UINT>(idx.size() * 2);
-        bd.BindFlags = D3D11_BIND_INDEX_BUFFER;
-        sr.pSysMem = idx.data();
-        made = made && SUCCEEDED(dev->CreateBuffer(&bd, &sr, &b.ib));
-        if (!made) {
-            if (b.vb) { b.vb->Release(); b.vb = nullptr; }
-            if (b.ib) { b.ib->Release(); b.ib = nullptr; }
-            buildFailed = true;
-            break;
-        }
-        b.pos = scrimPos[s];
-        b.indices = cd.count;
-        ++g_builtCount;
-    }
-    dev->Release();
-
-    if (buildFailed || g_builtCount == 0) {
-        dropBuilt();
-        recordNone("the substitute vertices could not be built");
-        unmapAll();
-        return;
-    }
-    g_builtStride = g_capStride;
+    memcpy(g_scrimPos, scrimPos, sizeof(uint32_t) * scrims);
+    g_scrimCount = scrims;
+    g_haveRoles = true;
     g_measuredHash = g_armedHash;
     g_measuredLen = g_capSeqLen;
     memcpy(g_measuredSeq, g_capSeq, sizeof(SeqEnt) * g_capSeqLen);
     ++g_measurements;
 
     // The engage line, rate-limited: after the first few, log again only
-    // when the box moved -- the percent text re-measures constantly and the
-    // box holds still through it.
-    Rect boxPx;
-    boxPx.add((boxFoot.cx0 * 0.5f + 0.5f) * surfW,
-              (0.5f - boxFoot.cy1 * 0.5f) * surfH);
-    boxPx.add((boxFoot.cx1 * 0.5f + 0.5f) * surfW,
-              (0.5f - boxFoot.cy0 * 0.5f) * surfH);
+    // when the scrim moved position -- the percent text re-measures on
+    // every tick and the scrim holds still through all of them.
     const bool moved =
-        fabsf(boxPx.x0 - g_lastBox.x0) > surfW * kRelogFraction ||
-        fabsf(boxPx.x1 - g_lastBox.x1) > surfW * kRelogFraction ||
-        fabsf(boxPx.y0 - g_lastBox.y0) > surfH * kRelogFraction ||
-        fabsf(boxPx.y1 - g_lastBox.y1) > surfH * kRelogFraction;
-    g_lastBox = boxPx;
+        scrimPos[0] != g_lastScrimPos || scrims != g_lastScrimCount;
+    g_lastScrimPos = scrimPos[0];
+    g_lastScrimCount = scrims;
     if (g_measurements <= 4 || moved) {
         Log::get().note(
             "loading panel: FIT -- measurement %u from %u solids of %u "
-            "interface draws. The scrim at draw %u (rgba %08X, element %u) "
-            "is re-issued as element %u -- the box, a quad of the %u-index "
-            "draw at position %u (rgba %08X, renders "
-            "~%.2f,%.2f,%.2f,%.2f), whose matrix lands at %.0f,%.0f "
-            "%.0fx%.0f px of %ux%u. The matrix stays the game's own, read "
-            "live each frame; the box and its text are untouched.%s",
+            "interface draws. The scrim at draw %u (rgba %08X, element %u, "
+            "full-view by its own matrix) is withheld; the dialog's black "
+            "backing is the game's own eye-level layer and stays, so the "
+            "box keeps its ground and nothing beyond it is tinted.%s",
             g_measurements, g_capCount, g_capSeqLen,
-            scrimPos[0], rgba[scrimCap[0]], liveIdx(scrimCap[0]),
-            liveIdxAt(boxOff),
-            g_caps[boxDraw].count, g_caps[boxDraw].seqPos, boxRgba,
-            boxEst[0], boxEst[1], boxEst[2], boxEst[3],
-            boxPx.x0, boxPx.y0, boxPx.w(), boxPx.h(), surfW, surfH,
-            scrims > 1 ? " More than one scrim was found; each is re-issued."
+            scrimPos[0], scrimRgba, scrimElem,
+            scrims > 1 ? " More than one scrim was found; each is withheld."
                        : "");
     }
-    unmapAll();
 }
 
 }  // namespace

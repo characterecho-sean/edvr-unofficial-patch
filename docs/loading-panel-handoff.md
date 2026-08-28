@@ -55,22 +55,38 @@ measured "nothing differs": vertices, viewports and scissors ARE identical
 -- the census tracks PS textures and b0 only, and the discriminating state
 was a VS structured buffer indexed per vertex.
 
-**Flight 4 (11:56) placed every piece.** The matrix-verified dumps show
+**Flight 4 (11:56) placed the panels.** The matrix-verified dumps show
 all three standalone X:30 panels riding **element 0, the full-view
 matrix**: the scrim maps to `0,0 4258x2394`, the opaque black panel to
 `2,3 4254x2388` (a full-view layer with a hairline inset -- NOT the
 modal's backing; whatever its job, it does not read as black on screen),
-the letterbox's centre to `115,437 4029x1522`. **The modal's backing is
-therefore a quad INSIDE one of the batches** (the 2508/648-index draws),
-carrying its own element byte -- which is precisely what a per-vertex
-index is FOR: one draw, hundreds of quads, each placed by its own matrix.
-A batch is not one placement, and any draw-level summary of one is
-meaningless.
+the letterbox's centre to `115,437 4029x1522`.
 
-The roles, confirmed by colour across flights: the scrim's fill is RGBA8
-`00 00 00 66` at offset 8 -- black at 40%, the ugly wash itself; the
-modal backing is black at alpha `FF` (a batch quad); the letterbox is
-white (its "uv floats" were its element params all along).
+**Flights 5-7 then proved the backing is NOWHERE in the interface
+surface.** Per-quad hunts by vertex colour, by estimated rendered colour
+(replaying both shaders' arithmetic -- validated when it named the ship
+hologram's region in exact Elite orange), and finally with textured draws
+included, mapped every quad of every draw: wide translucent white text
+bars, the hologram's tall panels, glyphs -- and nothing, at any
+granularity, renders a dark boxed rect. All blend states are plain
+src-alpha (5*6), so nothing light darkens the view either.
+
+**The field's screenshot plus the eye-level census close the case.** The
+PREPARING SHADERS box on screen is a sharp black rectangle (~27% x 20% of
+the view, wider than tall) that matches no interface quad. The 11:02
+census's EYE-level lines show each eye's frame ending with: a textured
+single quad, then a single quad with a CONSTANT BUFFER and depth bound
+(stride-8 vertices -- a positioned rect), then the 5760-index composite
+that lifts the interface in (the wash shader `9107E72C...`). **The black
+backing is an eye-level quad drawn beneath the interface composite** --
+the same stage as the menu's dark layer that survived emptying the
+interface buffer. Seven interface-surface architectures could never have
+found it, by construction. (If a true collapse is ever wanted, the rect
+is reachable: that eye draw's b0 -- census `c=@136`, dumpable with
+`census_cb_watch = A888D51024D9798E` -- or its stride-8 vertex buffer.)
+
+The scrim itself, confirmed across every flight: RGBA8 `00 00 00 66` at
+vertex offset 8 -- black at 40% -- on element 0, the full-view matrix.
 
 Earlier wrong turns, kept because each was manufactured by an instrument's
 semantics: the skip probes match every draw sharing a signature, so scrim
@@ -162,55 +178,34 @@ constants (VS b2, 48 bytes)** -- all GPU-timeline copies. A collection
 whose frame moved mid-capture is discarded. This is the answer to the
 1-3-6-11-9-12 instability: transitional frames can no longer be measured.
 
-**Classify by what a quad RENDERS, verify by matrix -- per QUAD.** The
-**scrim** is a standalone 30-index panel, dark (all channels < 0x40),
-translucent (alpha < 0xF0), whose element maps to >= 90% of clip space in
-both axes. The **box** is hunted across **every quad of every captured
-solid, batches included** -- and by **estimated rendered colour**, not
-vertex colour: flight 5 proved the batches' vertices are colour-neutral
-(the only dark opaque vertices anywhere belong to the full-view sheet),
-because a quad's look is `vertexColour x paramA + paramB` from its
-element's offsets 64/80. The classifier replays the two shaders'
-arithmetic (colour source and fade byte by the cb2 flags, the mad, the
-two alpha modulations) over the captured table, cb2 and vertices, and
-takes the largest quad that lands between 2% and 80% of the view in both
-axes AND estimates dark (every channel <= 0.25) and covering (alpha >=
-0.90). Blend state is not modelled; this is a classifier, not a renderer.
-No scrim, no such quad, no table, mixed tables, or an index past the
-64 KB window: **stock, with a log line saying why**, one line per panel,
-plus the three largest BOXED quads and the three largest DARK-COVERING
-quads with their vertex colour, estimate and mapped px rect -- one of the
-two lists names the side a wrong threshold is on.
+**Classify the scrim, verify by matrix.** The **scrim** is a standalone
+30-index panel, dark (all channels < 0x40), translucent (alpha < 0xF0),
+whose element maps its fill to >= 90% of clip space in both axes --
+verified through the same table the shader reads, so a misclassification
+cannot survive its own footprint. No box hunt exists any more: the box is
+not in this surface.
 
-**Substitute the element index.** At the scrim's position (trusted only
-while the frame matches the measured sequence draw by draw), the draw is
-swallowed and re-issued from a 30-vertex copy that differs in exactly two
-bytes per vertex: the element-index bytes now name the BOX's element. The
-game's own shader then places the scrim with the box's matrix -- read from
-the game's live table this frame and every frame, so nothing about the
-modal's position is ever stored on our side and nothing can go stale. The
-scrim keeps its own colours; it inherits the box's styling params, which
-only shows where it shows at all -- under the box. A dialog switch runs
-stock for the handful of frames a fresh measurement takes (two stable +
-one capture + four settle).
-
-**Known risk, accepted until a flight rules:** if the game reallocates
-table slots frame to frame within one stable dialog (the sun-glare hunt
-met exactly that in the 3D HUD), the captured index would drift off the
-box's element. A static dialog most likely keeps its slots; drift would be
-immediately visible, and the engage line's element numbers name it.
+**Withhold.** At the scrim's position (trusted only while the frame
+matches the measured sequence draw by draw), the draw is swallowed and
+nothing is drawn in its place. Inside the box, 40% black over the
+backing's opaque black was invisible -- withholding is pixel-identical to
+a perfect collapse there. Outside the box, the tint was the defect, and
+now does not exist. The backing lives at eye level and is untouched by
+construction; the border and text are forwarded bit-identically. A dialog
+switch runs stock for the handful of frames a fresh measurement takes
+(two stable + one capture + four settle).
 
 **Log lines to look for** (`edvr_logs`):
 
-* `loading panel: FIT -- measurement N from S solids of D interface draws.
-  The scrim at draw P (rgba 66000000, element E) is re-issued as element
-  B -- the box, a quad of the 2508-index draw at position Q (rgba
-  FF000000), whose matrix lands at X,Y WxH px of WxH.` -- the engage line.
-  After the first four, it logs again only when the box moved; the percent
-  text re-measures constantly and the box holds still.
-* `loading panel: measured N draw(s) and drew no conclusion -- REASON.` --
-  every no-verdict, preceded by one `solid k: ...` line per captured draw
-  with colour, element bytes, and the px rect its element maps to.
+* `loading panel: FIT -- measurement N from S solids of D interface
+  draws. The scrim at draw P (rgba 66000000, element 0, full-view by its
+  own matrix) is withheld; the dialog's black backing is the game's own
+  eye-level layer and stays...` -- the engage line. After the first four,
+  it logs again only when the scrim's position moved; the percent text
+  re-measures constantly and the scrim holds still.
+* `loading panel: measured N draw(s) and drew no conclusion -- REASON.`
+  -- every no-verdict, preceded by one `panel ...` line per captured
+  panel with colour and element bytes.
 * `loading panel: the loader's draws have not held still for two
   consecutive frames in 600 frames` -- continuous animation; the fix is
   standing down correctly.
@@ -232,40 +227,27 @@ it before reading signatures out of a single capture.
 ## The flight plan
 
 1. Keys as already armed: `fix.loading_panel = fit` +
-   `advanced.quad_probe = 4259x2395:X:30:120` (surface size moves with
-   render scale; the probe's mid-frame skip bug is fixed, so it now shows
-   ALL occurrences of its frame, the scrim included). Watch both intro
-   dialogs. Expect the scrim snapped to each modal, box and border
-   untouched, brief full-view scrim during fade-in (measurement gating),
-   and the engage line naming both elements and the box's px rect.
-2. If the scrim drifts or jumps mid-dialog, that is the slot-reallocation
-   risk above -- the engage/refusal lines carry the element numbers that
-   prove it, and the next mechanism is a per-frame index re-read rather
-   than a captured one.
-3. On success, flip the shipped default to `fit` in a release commit.
+   `advanced.quad_probe = 4259x2395:X:30:120`. Watch both intro dialogs.
+   Expect: no tint anywhere beyond the dialogs, the black box and the
+   orange border exactly as the game draws them, a brief full-view scrim
+   during fade-in (measurement gating), and the engage line naming the
+   withheld scrim. The screen should look like the screenshot, minus the
+   dimming of the splash art.
+2. On success, flip the shipped default to `fit` in a release commit, and
+   consider retiring the probe key from the ini.
 
-Flights already flown, all safe (never engaged): 11:11 (fourth
-architecture, union rule -- refused, union spanned the surface); 11:27
-(seeded growth -- refused the same way; its dumps plus the steady-state
-probe killed vertex-space measurement); 11:42 (fifth, viewport model --
-refused: every viewport full, every scissor off, which forced the shader
-read that found the real mechanism); 11:56 (sixth, element model with a
-panel-level box hunt -- refused correctly: all three standalone panels
-ride element 0 at full view, which proved the backing is a batch quad and
-sent the hunt per-quad); 12:04 (per-quad hunt by VERTEX colour -- refused,
-and its top-3 dump showed the only dark opaque vertices in the frame are
-the full-view sheet's: batch quads are colour-neutral and styled by their
-element params, which moved the classifier to estimated rendered colour);
-12:25 (estimated-colour hunt over untextured quads -- refused, and its
-candidate lists finally showed the landscape: the ORANGE MODAL is a batch
-element, 611x1235 px, estimating exactly Elite orange ~1.00,0.44,0.08,
-which vouches for the estimator -- while the dark-covering list was EMPTY,
-so the black backing is in none of the untextured draws. The one excluded
-population was TEXTURED draws: an atlas-masked black quad is textured by
-construction, so the capture now takes textured draws too, judges their
-quads the same way, and the diagnostic lists grew to six entries with
-texture and blend-state tags -- blend being the one un-modelled stage that
-could make a light quad darken the screen).
+Flights already flown, all safe (never engaged): 11:11 (union rule --
+refused, union spanned the surface); 11:27 (seeded growth -- refused;
+killed vertex-space measurement); 11:42 (viewport model -- refused: every
+viewport full, every scissor off; forced the shader read that found the
+element mechanism); 11:56 (element model, panel-level hunt -- refused:
+all standalone panels ride element 0 at full view); 12:04 (per-quad hunt
+by vertex colour -- refused: batch vertices are colour-neutral); 12:25
+(estimated rendered colour -- refused, but validated the estimator on the
+hologram's exact Elite orange and emptied the dark-covering list); 12:40
+(textured draws included -- refused: still nothing dark and boxed, all
+blends plain src-alpha, which with the field's screenshot forced the
+eye-level conclusion above).
 
 ## What must not regress
 
@@ -276,13 +258,15 @@ its 16x16 BC1 multiplier texture -- shares nothing with the panel path.
 ## A note on scale
 
 This is a dark rectangle behind a dialog that shows for a few seconds. It
-has cost a dozen field flights and six architectures, and every dead one
+cost a dozen field flights and seven architectures, and every dead one
 died of a measurement its instruments could not take: signature-blind
 skips, a first-frame probe, unions over incomparable spaces, rasterizer
-state that never varied. The sixth is the first read out of the shader
-itself -- the element index in the vertex, the matrix in the table -- and
-it explains every byte measured across every flight, including the two
-architectures' worth of "nothing differs". It fails toward stock with its
-evidence in the log, and its substitute is two bytes per vertex riding the
-game's own live data. Worth doing properly or not at all; this, finally,
-is the properly.
+state that never varied, colour that lived in a table, and finally a box
+that was never in the surface being searched. What the search bought is
+exact knowledge of Elite's widget system -- the element table, the vertex
+index, the styling params, all committed under docs/shaders/ -- and a
+final mechanism whose whole action is to NOT draw one draw, gated by that
+knowledge until it is beyond doubt. The scrim's collapse and the scrim's
+absence are the same pixels on an opaque box; the game already draws
+everything the field wanted kept. Worth doing properly or not at all;
+the properly turned out to be almost nothing, known for certain.
