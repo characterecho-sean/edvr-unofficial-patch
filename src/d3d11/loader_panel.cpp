@@ -51,9 +51,11 @@ constexpr uint32_t kOpaqueMin = 0xF0;
 
 // A matrix that maps a panel's fill across at least this fraction of clip
 // space is a full-view element; at most the box fraction in both axes is a
-// modal. Clip space spans 2.0 across.
+// modal, and below the floor it is a tick mark or a stray pip that must
+// not become "the box". Clip space spans 2.0 across.
 constexpr float kFullFraction = 0.90f;
 constexpr float kBoxFraction = 0.80f;
+constexpr float kMinBoxFraction = 0.02f;
 
 // Engage lines after the fourth are logged only when the box moved; the
 // shader-prep dialog re-measures on every percent tick and the box holds
@@ -606,8 +608,14 @@ void analyze(ID3D11DeviceContext* ctx) {
         ctx->Unmap(g_ibStage, 0);
     };
 
-    // Per captured draw: the fill quad's bounds in its own units, the RGBA8
-    // at offset 8, and the element-index bytes at offsets 12 and 16.
+    // Per captured draw: every quad's bounds in its own units and its first
+    // vertex's offset -- a BATCH is not one placement, each quad carries its
+    // own element index and rides its own matrix, which flight 4 proved by
+    // elimination (every standalone panel maps full-view; the modal's
+    // backing can only be a batch quad). The draw-level fill/colour summary
+    // is kept for the panels.
+    std::vector<std::vector<Rect>> qrect(g_capCount);
+    std::vector<std::vector<int64_t>> qoff(g_capCount);
     std::vector<Rect> fill(g_capCount);
     std::vector<uint32_t> rgba(g_capCount, 0);
     std::vector<uint8_t> idx1(g_capCount, 0), idx2(g_capCount, 0);
@@ -615,6 +623,8 @@ void analyze(ID3D11DeviceContext* ctx) {
     for (uint32_t d = 0; d < g_capCount; ++d) {
         const CapDraw& cd = g_caps[d];
         const uint32_t n = cd.count / kIndicesPerQuad;
+        qrect[d].resize(n);
+        qoff[d].assign(n, -1);
         float bestArea = -1.0f;
         int64_t bestOff = -1;
         for (uint32_t q = 0; q < n; ++q) {
@@ -636,6 +646,8 @@ void analyze(ID3D11DeviceContext* ctx) {
                 memcpy(pos, vbBase + off, sizeof(pos));
                 r.add(pos[0], pos[1]);
             }
+            qrect[d][q] = r;
+            qoff[d][q] = firstOff;
             if (r.valid() && r.area() > bestArea) {
                 bestArea = r.area();
                 fill[d] = r;
@@ -656,6 +668,12 @@ void analyze(ID3D11DeviceContext* ctx) {
     auto liveIdx = [&](uint32_t d) -> uint32_t {
         if (flags & kFlagIdx2) return idx2[d];
         if (flags & kFlagIdx1) return idx1[d];
+        return 0;
+    };
+    // The same selection from a raw vertex, for quads inside batches.
+    auto liveIdxAt = [&](int64_t off) -> uint32_t {
+        if (flags & kFlagIdx2) return vbBase[off + kIdx2Off];
+        if (flags & kFlagIdx1) return vbBase[off + kIdx1Off];
         return 0;
     };
     // A panel element's matrix rows (x and y), or null past the window.
@@ -720,16 +738,13 @@ void analyze(ID3D11DeviceContext* ctx) {
         return;
     }
 
-    // Roles: the scrim is dark and translucent; the box is dark and opaque
-    // with a matrix that lands it on a fraction of the surface. Both checks
-    // run through the SAME matrices the shader will use, so a
-    // misclassification cannot survive its own footprint.
+    // The scrim: a standalone 30-index panel, dark and translucent, whose
+    // element maps to the full view. Verified through the same matrix the
+    // shader will use, so a misclassification cannot survive its own
+    // footprint.
     uint32_t scrimPos[kMaxScrims];
     uint32_t scrimCap[kMaxScrims];
     uint32_t scrims = 0;
-    int boxCap = -1;
-    float boxAreaPx = 0.0f;
-    Foot boxFoot{};
     for (uint32_t d = 0; d < g_capCount; ++d) {
         const CapDraw& cd = g_caps[d];
         if (cd.count != kPanelIndices || !known[d]) continue;
@@ -737,40 +752,101 @@ void analyze(ID3D11DeviceContext* ctx) {
         const uint32_t r = c & 0xFF, gch = (c >> 8) & 0xFF,
                        b = (c >> 16) & 0xFF, a = (c >> 24) & 0xFF;
         if (r >= kDarkMax || gch >= kDarkMax || b >= kDarkMax) continue;
+        if (a >= kOpaqueMin) continue;
         float rows[8];
         if (!elemRows(liveIdx(d), rows)) continue;
         const Foot f = footprint(rows, fill[d]);
         if (!f.valid) continue;
         const float covX = f.cx1 - f.cx0, covY = f.cy1 - f.cy0;
-        if (a < kOpaqueMin) {
-            // The scrim's own element must be a full-view mapping, or the
-            // colour test caught something new.
-            if (covX >= 2.0f * kFullFraction && covY >= 2.0f * kFullFraction &&
-                scrims < kMaxScrims) {
-                scrimPos[scrims] = cd.seqPos;
-                scrimCap[scrims] = d;
-                ++scrims;
-            }
-        } else if (covX <= 2.0f * kBoxFraction && covY <= 2.0f * kBoxFraction &&
-                   covX > 0.0f && covY > 0.0f) {
-            const float areaPx = covX * covY;
-            if (areaPx > boxAreaPx) {
-                boxAreaPx = areaPx;
-                boxCap = static_cast<int>(d);
-                boxFoot = f;
-            }
+        if (covX >= 2.0f * kFullFraction && covY >= 2.0f * kFullFraction &&
+            scrims < kMaxScrims) {
+            scrimPos[scrims] = cd.seqPos;
+            scrimCap[scrims] = d;
+            ++scrims;
         }
     }
-
     if (scrims == 0) {
         dumpSolids();
         recordNone("no dark translucent panel maps to the full view");
         unmapAll();
         return;
     }
-    if (boxCap < 0) {
+
+    // The box: a dark OPAQUE quad -- anywhere, batches included -- whose
+    // own element maps it to a boxed rect. Flight 4 proved the standalone
+    // panels all ride the full-view element; the modal's backing is a quad
+    // inside a batch, indexed to its own matrix, which is exactly what the
+    // per-vertex element byte is FOR. Every quad is tried through its own
+    // matrix; the largest boxed dark-opaque footprint is the modal.
+    const SeqEnt scrimDims = g_capSeq[g_caps[scrimCap[0]].seqPos];
+    int boxDraw = -1;
+    int64_t boxOff = -1;
+    uint32_t boxRgba = 0;
+    float boxAreaPx = 0.0f;
+    Foot boxFoot{};
+    // The three largest dark-opaque quads regardless of boxedness, so a
+    // refusal names what the thresholds turned away.
+    struct DarkCand { float area = -1.0f; Foot f{}; uint32_t rgba = 0;
+                      uint32_t draw = 0; };
+    DarkCand top[3];
+    for (uint32_t d = 0; d < g_capCount; ++d) {
+        const CapDraw& cd = g_caps[d];
+        const SeqEnt& se = g_capSeq[cd.seqPos];
+        if (se.w != scrimDims.w || se.h != scrimDims.h) continue;
+        const uint32_t n = cd.count / kIndicesPerQuad;
+        for (uint32_t q = 0; q < n; ++q) {
+            const int64_t off = qoff[d][q];
+            const Rect& r = qrect[d][q];
+            if (off < 0 || !r.valid() || g_capStride < 20) continue;
+            uint32_t c;
+            memcpy(&c, vbBase + off + 8, sizeof(c));
+            const uint32_t cr = c & 0xFF, cg = (c >> 8) & 0xFF,
+                           cb = (c >> 16) & 0xFF, ca = (c >> 24) & 0xFF;
+            if (cr >= kDarkMax || cg >= kDarkMax || cb >= kDarkMax ||
+                ca < kOpaqueMin) {
+                continue;
+            }
+            float rows[8];
+            if (!elemRows(liveIdxAt(off), rows)) continue;
+            const Foot f = footprint(rows, r);
+            if (!f.valid) continue;
+            const float covX = f.cx1 - f.cx0, covY = f.cy1 - f.cy0;
+            if (covX <= 0.0f || covY <= 0.0f) continue;
+            const float areaPx = covX * covY;
+            for (int t = 0; t < 3; ++t) {
+                if (areaPx > top[t].area) {
+                    for (int s = 2; s > t; --s) top[s] = top[s - 1];
+                    top[t] = DarkCand{areaPx, f, c, cd.seqPos};
+                    break;
+                }
+            }
+            const bool boxed =
+                covX <= 2.0f * kBoxFraction && covY <= 2.0f * kBoxFraction &&
+                covX >= 2.0f * kMinBoxFraction &&
+                covY >= 2.0f * kMinBoxFraction;
+            if (boxed && areaPx > boxAreaPx) {
+                boxAreaPx = areaPx;
+                boxDraw = static_cast<int>(d);
+                boxOff = off;
+                boxRgba = c;
+                boxFoot = f;
+            }
+        }
+    }
+
+    if (boxDraw < 0) {
         dumpSolids();
-        recordNone("no dark opaque panel's element maps to a boxed rect");
+        for (int t = 0; t < 3; ++t) {
+            if (top[t].area <= 0.0f) break;
+            Log::get().note("  dark opaque quad at draw %u, rgba %08X, maps "
+                            "to px %.0f,%.0f %.0fx%.0f",
+                            top[t].draw, top[t].rgba,
+                            (top[t].f.cx0 * 0.5f + 0.5f) * surfW,
+                            (0.5f - top[t].f.cy1 * 0.5f) * surfH,
+                            (top[t].f.cx1 - top[t].f.cx0) * 0.5f * surfW,
+                            (top[t].f.cy1 - top[t].f.cy0) * 0.5f * surfH);
+        }
+        recordNone("no dark opaque quad's element maps to a boxed rect");
         unmapAll();
         return;
     }
@@ -786,7 +862,8 @@ void analyze(ID3D11DeviceContext* ctx) {
         return;
     }
     dropBuilt();
-    const uint8_t boxIdx1 = idx1[boxCap], boxIdx2 = idx2[boxCap];
+    const uint8_t boxIdx1 = vbBase[boxOff + kIdx1Off];
+    const uint8_t boxIdx2 = vbBase[boxOff + kIdx2Off];
     bool buildFailed = false;
     for (uint32_t s = 0; s < scrims && !buildFailed; ++s) {
         const CapDraw& cd = g_caps[scrimCap[s]];
@@ -868,14 +945,15 @@ void analyze(ID3D11DeviceContext* ctx) {
         Log::get().note(
             "loading panel: FIT -- measurement %u from %u solids of %u "
             "interface draws. The scrim at draw %u (rgba %08X, element %u) "
-            "is re-issued as element %u -- the box at draw %u (rgba %08X), "
-            "whose matrix lands at %.0f,%.0f %.0fx%.0f px of %ux%u. The "
-            "matrix stays the game's own, read live each frame; the box and "
-            "its text are untouched.%s",
+            "is re-issued as element %u -- the box, a quad of the %u-index "
+            "draw at position %u (rgba %08X), whose matrix lands at "
+            "%.0f,%.0f %.0fx%.0f px of %ux%u. The matrix stays the game's "
+            "own, read live each frame; the box and its text are "
+            "untouched.%s",
             g_measurements, g_capCount, g_capSeqLen,
             scrimPos[0], rgba[scrimCap[0]], liveIdx(scrimCap[0]),
-            liveIdx(static_cast<uint32_t>(boxCap)),
-            g_caps[boxCap].seqPos, rgba[boxCap],
+            liveIdxAt(boxOff),
+            g_caps[boxDraw].count, g_caps[boxDraw].seqPos, boxRgba,
             boxPx.x0, boxPx.y0, boxPx.w(), boxPx.h(), surfW, surfH,
             scrims > 1 ? " More than one scrim was found; each is re-issued."
                        : "");

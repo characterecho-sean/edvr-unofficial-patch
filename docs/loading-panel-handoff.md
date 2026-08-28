@@ -55,10 +55,22 @@ measured "nothing differs": vertices, viewports and scissors ARE identical
 -- the census tracks PS textures and b0 only, and the discriminating state
 was a VS structured buffer indexed per vertex.
 
+**Flight 4 (11:56) placed every piece.** The matrix-verified dumps show
+all three standalone X:30 panels riding **element 0, the full-view
+matrix**: the scrim maps to `0,0 4258x2394`, the opaque black panel to
+`2,3 4254x2388` (a full-view layer with a hairline inset -- NOT the
+modal's backing; whatever its job, it does not read as black on screen),
+the letterbox's centre to `115,437 4029x1522`. **The modal's backing is
+therefore a quad INSIDE one of the batches** (the 2508/648-index draws),
+carrying its own element byte -- which is precisely what a per-vertex
+index is FOR: one draw, hundreds of quads, each placed by its own matrix.
+A batch is not one placement, and any draw-level summary of one is
+meaningless.
+
 The roles, confirmed by colour across flights: the scrim's fill is RGBA8
-`00 00 00 66` at offset 8 -- black at 40%, the ugly wash itself; the box
-is black at alpha `FF`; the letterbox is white (its "uv floats" were its
-element params all along).
+`00 00 00 66` at offset 8 -- black at 40%, the ugly wash itself; the
+modal backing is black at alpha `FF` (a batch quad); the letterbox is
+white (its "uv floats" were its element params all along).
 
 Earlier wrong turns, kept because each was manufactured by an instrument's
 semantics: the skip probes match every draw sharing a signature, so scrim
@@ -150,17 +162,20 @@ constants (VS b2, 48 bytes)** -- all GPU-timeline copies. A collection
 whose frame moved mid-capture is discarded. This is the answer to the
 1-3-6-11-9-12 instability: transitional frames can no longer be measured.
 
-**Classify by colour, verify by matrix.** Among the captured 30-index
-panels: the **scrim** is dark (all channels < 0x40) and translucent (alpha
-< 0xF0); the **box** is dark and opaque. Each candidate's element index is
-decoded exactly as the shader does (byte 12 or 16 per the cb2 flags), its
-matrix is read from the captured table, and its fill's footprint is
-computed through it: the scrim's element must map to >= 90% of clip space
-in both axes, the box's to <= 80%. A classification that fails its own
-footprint refuses. The white letterbox fails the darkness test and is
-never touched. No scrim, no box, no table, mixed tables, or an index past
-the 64 KB window: **stock, with a log line saying why and one line per
-solid** -- colour, element index, and the px rect its matrix lands on.
+**Classify by colour, verify by matrix -- per QUAD.** The **scrim** is a
+standalone 30-index panel, dark (all channels < 0x40), translucent (alpha
+< 0xF0), whose element maps to >= 90% of clip space in both axes. The
+**box** is hunted across **every quad of every captured solid, batches
+included**: each quad's own first vertex gives its colour and element
+byte, its own matrix gives its footprint, and the largest dark opaque quad
+landing between 2% and 80% of the view in both axes is the modal's
+backing. A classification that fails its own footprint refuses. The white
+letterbox and the coloured batch content fail the darkness test and are
+never touched. No scrim, no boxed quad, no table, mixed tables, or an
+index past the 64 KB window: **stock, with a log line saying why**, one
+line per panel (colour, element, mapped px rect) and, on a failed box
+hunt, the three largest dark opaque quads with where their matrices put
+them -- so a wrong threshold names itself in one flight.
 
 **Substitute the element index.** At the scrim's position (trusted only
 while the frame matches the measured sequence draw by draw), the draw is
@@ -184,10 +199,10 @@ immediately visible, and the engage line's element numbers name it.
 
 * `loading panel: FIT -- measurement N from S solids of D interface draws.
   The scrim at draw P (rgba 66000000, element E) is re-issued as element
-  B -- the box at draw Q (rgba FF000000), whose matrix lands at X,Y WxH px
-  of WxH.` -- the engage line. After the first four, it logs again only
-  when the box moved; the percent text re-measures constantly and the box
-  holds still.
+  B -- the box, a quad of the 2508-index draw at position Q (rgba
+  FF000000), whose matrix lands at X,Y WxH px of WxH.` -- the engage line.
+  After the first four, it logs again only when the box moved; the percent
+  text re-measures constantly and the box holds still.
 * `loading panel: measured N draw(s) and drew no conclusion -- REASON.` --
   every no-verdict, preceded by one `solid k: ...` line per captured draw
   with colour, element bytes, and the px rect its element maps to.
@@ -229,7 +244,10 @@ architecture, union rule -- refused, union spanned the surface); 11:27
 (seeded growth -- refused the same way; its dumps plus the steady-state
 probe killed vertex-space measurement); 11:42 (fifth, viewport model --
 refused: every viewport full, every scissor off, which forced the shader
-read that found the real mechanism).
+read that found the real mechanism); 11:56 (sixth, element model with a
+panel-level box hunt -- refused correctly: all three standalone panels
+ride element 0 at full view, which proved the backing is a batch quad and
+sent the hunt per-quad).
 
 ## What must not regress
 
