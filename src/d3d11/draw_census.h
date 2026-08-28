@@ -236,6 +236,13 @@ void drawCensusCbNoteUnmap(void* resource);
 // UpdateSubresource form of the same tee: the whole write is in hand.
 void drawCensusCbNoteUpdate(void* resource, const void* data, uint32_t bytes);
 
+// The readback tick, from vScreenFrameBoundary with the owner context.
+// A watched constant buffer the write tee never saw is copied on the GPU
+// instead (see draw_census.cpp, kMaxCbReads); this is where the copy is
+// mapped and logged, a few frames after it was queued. Free when nothing
+// is pending, which is almost always.
+void drawCensusTick(ID3D11DeviceContext* ctx);
+
 // The frame edge, from vScreenFrameBoundary: starts a pending census, advances
 // a running one, finishes a spent one. frameNo is vscreen's frame counter,
 // logged so a census can be lined up against the rest of the log.

@@ -3423,6 +3423,7 @@ void vScreenFrameBoundary() {
     // the render thread mid-frame.
     if (g_state && g_state->ownerCtx) {
         quadProbeTick(g_state->ownerCtx);
+        drawCensusTick(g_state->ownerCtx);
         // The scene flag retires the loader fix when the intro ends: the
         // same boundary the draw hook gates on, read at the frame edge.
         loaderPanelTick(g_state->ownerCtx,

@@ -154,6 +154,40 @@ uint64_t g_cbWatchHash2 = 0;     // optional second hash (comma-separated)
 // already hooks. A non-zero slot is read off the context at the draw, the
 // same IA-state pattern the PS side has always used.
 uint32_t g_cbWatchSlot = 0;
+
+// The DIRECT read, for a buffer the write tee never sees.
+//
+// The watch shadow is filled from the game's own writes -- the Map/Unmap tee
+// and the UpdateSubresource tee, both wired. That is exactly right when the
+// question is "what bytes will THIS draw read", and useless when the buffer
+// is not written during the window: the dump says "unwritten" and the census
+// is spent. The intro movie's panel transform is such a buffer -- two
+// 80-byte objects, one per eye, holding the scale and translation the
+// composite is placed by, written before any census could arm and reused
+// thereafter (docs/intro-video.md).
+//
+// So: when a dump would say "unwritten", copy the buffer on the GPU instead
+// and read it back once the copy has certainly executed. The copy-settle-map
+// shape is panel_quad's and quad_probe's, and the settle is why this needs a
+// tick of its own -- the census is two frames long and the readback lands
+// after it, which the line says.
+//
+// The write tee stays primary: it is per-DRAW exact, and a copy is not.
+constexpr uint32_t kMaxCbReads = 4;
+constexpr uint32_t kCbReadSettle = 4;
+
+struct CbRead {
+    void*         buf = nullptr;
+    ID3D11Buffer* stage = nullptr;
+    uint32_t      bytes = 0;
+    uint32_t      q = 0;
+    uint32_t      ordinal = 0;
+    char          letter = 'v';
+    uint32_t      dueFrame = 0;   // vscreen's frame counter, not the census's
+};
+CbRead   g_cbRead[kMaxCbReads];
+uint32_t g_cbReadCount = 0;
+uint32_t g_lastFrameNo = 0;
 CbWatch  g_cbWatch[4];           // [0] = VS b0, [1] = PS b0,
                                  // [2] = CS b0, [3] = CS b1 (dispatches --
                                  // round 21: the reconstruction pair share
@@ -308,16 +342,60 @@ void cbWatchRegister(uint32_t slot, void* buf) {
 // floats on one line -- 52 of them for the 208-byte camera block -- because
 // the offline diff pairs lines by (frame, stage) and splitting a dump across
 // lines is how half a buffer gets compared against the wrong eye.
-void cbWatchDump(uint32_t slot, uint32_t q) {
+// Queue a GPU copy of a watched buffer the tee has not seen written, to be
+// read back and logged a few frames from now. One per distinct buffer per
+// census; the two eyes' objects are distinct, so both are caught.
+void cbReadQueue(ID3D11DeviceContext* ctx, uint32_t slot, uint32_t q,
+                 char letter) {
+    CbWatch& w = g_cbWatch[slot];
+    if (!ctx || !w.buf || !w.bytes || g_cbReadCount >= kMaxCbReads) return;
+    for (uint32_t i = 0; i < g_cbReadCount; ++i) {
+        if (g_cbRead[i].buf == w.buf) return;
+    }
+    guardedBudget(g_cbBudget, [&] {
+        ID3D11Device* dev = nullptr;
+        ctx->GetDevice(&dev);
+        if (!dev) return;
+        D3D11_BUFFER_DESC sd{};
+        sd.Usage = D3D11_USAGE_STAGING;
+        sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        sd.ByteWidth = w.bytes;
+        ID3D11Buffer* stage = nullptr;
+        if (SUCCEEDED(dev->CreateBuffer(&sd, nullptr, &stage)) && stage) {
+            D3D11_BOX box{};
+            box.right = sd.ByteWidth;
+            box.bottom = 1;
+            box.back = 1;
+            ctx->CopySubresourceRegion(stage, 0, 0, 0, 0,
+                                       static_cast<ID3D11Resource*>(w.buf), 0,
+                                       &box);
+            CbRead& r = g_cbRead[g_cbReadCount++];
+            r.buf = w.buf;
+            r.stage = stage;
+            r.bytes = sd.ByteWidth;
+            r.q = q;
+            r.ordinal = g_frameOrdinal;
+            r.letter = letter;
+            r.dueFrame = g_lastFrameNo + kCbReadSettle;
+        }
+        dev->Release();
+    });
+}
+
+void cbWatchDump(ID3D11DeviceContext* ctx, uint32_t slot, uint32_t q) {
     CbWatch& w = g_cbWatch[slot];
     if (!w.buf || g_cbDumps >= kCbDumpCap) return;
     ++g_cbDumps;
     static const char kSlotLetter[4] = {'v', 'p', 'x', 'y'};
     char tok[24];
     if (!w.valid) {
-        Log::get().note("DCW %u q=%u %c cb=%s unwritten", g_frameOrdinal, q,
-                        kSlotLetter[slot & 3],
-                        bindingToken(w.buf, Kind::kResource, tok, sizeof(tok)));
+        Log::get().note("DCW %u q=%u %c cb=%s unwritten -- not written while "
+                        "this census ran; reading it directly instead, a DCW "
+                        "read line follows in %u frames.",
+                        g_frameOrdinal, q, kSlotLetter[slot & 3],
+                        bindingToken(w.buf, Kind::kResource, tok, sizeof(tok)),
+                        kCbReadSettle);
+        cbReadQueue(ctx, slot, q, kSlotLetter[slot & 3]);
         return;
     }
     const uint32_t nf = w.bytes / 4;
@@ -364,8 +442,8 @@ void cbWatchOnDraw(ID3D11DeviceContext* ctx, uint32_t q) {
         cbWatchRegister(1, pb);
         if (pb) pb->Release();
     });
-    cbWatchDump(0, q);
-    cbWatchDump(1, q);
+    cbWatchDump(ctx, 0, q);
+    cbWatchDump(ctx, 1, q);
 }
 
 // A dispatch running a watched shader: the compute stage's b0 and b1,
@@ -385,8 +463,8 @@ void cbWatchOnDispatch(ID3D11DeviceContext* ctx, uint32_t q) {
             if (b) b->Release();
         }
     });
-    cbWatchDump(2, q);
-    cbWatchDump(3, q);
+    cbWatchDump(ctx, 2, q);
+    cbWatchDump(ctx, 3, q);
 }
 
 void dumpInternTable() {
@@ -927,7 +1005,58 @@ static void runCensusSchedule(uint32_t frameNo) {
     }
 }
 
+void drawCensusTick(ID3D11DeviceContext* ctx) {
+    if (!g_cbReadCount || !ctx) return;
+    uint32_t left = 0;
+    for (uint32_t i = 0; i < g_cbReadCount; ++i) {
+        CbRead& r = g_cbRead[i];
+        if (!r.stage) continue;
+        if (g_lastFrameNo < r.dueFrame) {
+            ++left;
+            continue;
+        }
+        guardedBudget(g_cbBudget, [&] {
+            D3D11_MAPPED_SUBRESOURCE m{};
+            if (FAILED(ctx->Map(r.stage, 0, D3D11_MAP_READ, 0, &m)) || !m.pData) {
+                Log::get().note("DCW read q=%u %c -- the copy could not be "
+                                "mapped.", r.q, r.letter);
+                return;
+            }
+            const float* f = static_cast<const float*>(m.pData);
+            const uint32_t nf = r.bytes / 4;
+            char fl[1000];
+            size_t at = 0;
+            for (uint32_t k = 0; k < nf && at + 16 < sizeof(fl); ++k) {
+                const int n = _snprintf_s(fl + at, sizeof(fl) - at, _TRUNCATE,
+                                          " %.6g", static_cast<double>(f[k]));
+                if (n < 0) break;
+                at += static_cast<size_t>(n);
+            }
+            fl[at] = '\0';
+            char tok[24];
+            Log::get().note(
+                "DCW read %u q=%u %c cb=%s b=%u h=%016llX f=%s -- copied off "
+                "the GPU, not from a write; these are the buffer's contents, "
+                "not necessarily what that one draw read.",
+                r.ordinal, r.q, r.letter,
+                bindingToken(r.buf, Kind::kResource, tok, sizeof(tok)), r.bytes,
+                static_cast<unsigned long long>(fnv1a64(m.pData, r.bytes)), fl);
+            ctx->Unmap(r.stage, 0);
+        });
+        r.stage->Release();
+        r.stage = nullptr;
+    }
+    if (!left) {
+        for (CbRead& r : g_cbRead) {
+            if (r.stage) r.stage->Release();
+            r = CbRead();
+        }
+        g_cbReadCount = 0;
+    }
+}
+
 void drawCensusFrameBoundary(uint32_t frameNo) {
+    g_lastFrameNo = frameNo;
     runCensusSchedule(frameNo);
     if (g_framesLeft > 0) {
         Log::get().note("DC frame %u draws=%u off=%u copies=%u disp=%u",

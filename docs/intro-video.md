@@ -324,6 +324,50 @@ shader reads b2, so the tint has not been measured."* It was a known gap,
 recorded, and not closed until it cost a second workstream.
 `advanced.census_cb_slot` closes it.
 
+## Flight 6: the right buffers, unreadable — and the splash's real window
+
+The watch found exactly what the shader predicted:
+
+```
+DCW register v cb=@127 bytes=80
+DCW register v cb=@138 bytes=80
+```
+
+**Two 80-byte vertex constant buffers, one per eye** — and 80 bytes is
+precisely `cb2[0..4]`, the five float4s the disassembly declares. The
+instrument is pointed at the right thing.
+
+Every dump then said **`unwritten`**. Both write tees are wired — Map/Unmap
+and UpdateSubresource, checked — so the conclusion is not that the census
+missed a write but that **there was no write to miss**: the game fills these
+buffers before any census can arm and reuses them. A write tee is the wrong
+shape of instrument for a buffer that is written once.
+
+So the watch gained a direct read: when a dump would say "unwritten", the
+buffer is copied on the GPU and read back four frames later as a `DCW read`
+line. Copy-settle-map, the shape `panel_quad` and `quad_probe` already use.
+The write tee stays primary because it is per-DRAW exact and a copy is not;
+the read is the fallback, and its line says which it is.
+
+**And the second census missed the splash entirely.** It asked for 40 s and
+landed at 40 s — into a *rendered scene*, 364 draws and 483 offscreen, where
+the composite never runs. This session's own markers say why:
+
+| t | marker |
+|---|---|
+| 12.0 s | census 1 — mid-movie, composite present, buffers found |
+| 24.2 s | `menu backdrop: SMOOTH` — the first still appears: **the splash arrives** |
+| 28.3 s | `loading dim: OFF engaged` — the loader modals start |
+| 28.9 s | `loading panel: FIT -- measurement 1` — modals up |
+| **40.5 s** | `loading panel: a rendered scene arrived -- the intro is over` |
+| 40.0 s | census 2 — landed on that boundary, in the main menu |
+
+The splash window is **24 s to 40 s**, sixteen seconds wide, and 40 was the
+one moment in it that does not work. The loader panel's own scene-boundary
+line is an independent marker for the end of it, which is worth remembering:
+the two workstreams are measuring the same stretch and can date each other's
+captures.
+
 ## The other symptom: facing the wrong way at the cut
 
 Reported after the flight:
@@ -439,7 +483,7 @@ is left is two sets of numbers.
 [advanced]
 census_cb_watch = EF103A7CB4A8369A
 census_cb_slot  = 2
-census_at_ms    = 12000,40000
+census_at_ms    = 12000,28000,34000
 census_frames   = 2
 quad_probe      =
 ```
@@ -450,12 +494,15 @@ is the scale and `cb2[4]` the translation, so the two dumps say outright
 whether the game moves this panel between the movie and the splash, and by
 how much.
 
-The times are chosen from the measured startup: the handover lands between
-6.4 s and 8.6 s depending on the run, the movie is about twenty seconds, and
-the splash follows it immediately. 12 s is comfortably inside playback;
-40 s is past the movie and into the splash-and-modals stretch. Neither needs
-the player to hold still anywhere, which is what the last three attempts all
-foundered on.
+The times come from the measured startup rather than from an estimate. The
+handover lands between 6.4 s and 8.6 s depending on the run; the movie is
+about twenty seconds; the splash then holds from about 24 s until the
+rendered menu arrives at about 40 s. 12 s is comfortably inside playback,
+and 28 and 34 both sit inside the splash window with room on either side --
+two shots at it, because the boundaries move by a second or two between
+runs and flight 6 lost its second census by landing exactly on one. Nothing
+here needs the player to hold still anywhere, which is what the three
+attempts before it foundered on.
 
 **Then the fix**, and it is now a known shape: substitute `cb2` for exactly
 the movie's two composite draws, with the values the splash uses. That is
