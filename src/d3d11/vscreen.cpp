@@ -40,6 +40,7 @@
 #include "glitch_frame.h"
 #include "holo_fix.h"
 #include "journal_watch.h"  // gameplay started, for the low-peak notice
+#include "quad_probe.h"
 #include "remlok_fix.h"
 #include "scrim_fix.h"
 #include "exposure_fix.h"
@@ -49,6 +50,12 @@
 
 namespace edvr {
 namespace {
+
+// The loading dialog's bordered panel: one fill plus four edge strips, six
+// indices each. Measured by the quad probe on 2026-08-28 -- the capture
+// showed exactly that shape, a full-surface fill inset by fifteen units
+// inside four strips fifteen and twenty-seven units thick.
+constexpr uint32_t g_panelIndices = 30;
 
 // How often the totals line is written, and how long the starvation notice
 // waits before it will speak.
@@ -414,8 +421,63 @@ struct State {
     // The offscreen form: glare and bloom are BUILT in offscreen buffers
     // and fused onto the eye by a pass that cannot be skipped without
     // freezing the image; the builders can. A size names a buffer.
-    struct OffSkip { uint32_t w; uint32_t h; };
+    //
+    // A size alone is all-or-nothing, and the loading scrim showed why that
+    // is not enough: emptying the interface buffer took the dialog's dark
+    // rectangle AND the dialog with it, which answers "is it in there" and
+    // nothing else. Eight draws build that buffer, three of them textureless
+    // fills, and the question was which one. So an entry may carry a DRAW
+    // SPEC as well -- "4259x2395:X:2508" is "of the draws into that buffer,
+    // only the indexed-instanced ones with 2508 indices". kind 0 means the
+    // whole buffer, exactly as before.
+    //
+    // Deliberately not the @-filter grammar census_skip uses: these draws are
+    // matched before any SRV is resolved, and borrowing the symbol would
+    // promise a filter that is not applied here.
+    struct OffSkip { uint32_t w; uint32_t h; char kind; uint32_t n; };
     OffSkip   censusSkipOff[4] = {};
+    // The SUB-DRAW probe, and the wall that made it necessary.
+    //
+    // Elite batches its solid UI rectangles: the loading dialog's dark scrim
+    // and the dialog's own black panel are quads in the SAME textureless
+    // draw. Skipping the draw takes both -- field-confirmed on a five-quad
+    // call, which is where draw-level suppression runs out.
+    //
+    // So this omits a RANGE OF QUADS from one matched draw and re-issues the
+    // rest: the indices before the range as one call, the indices after it as
+    // another. Six indices to a quad, the topology the census reports for
+    // this family (trilist). Bisecting the range names which rectangle is
+    // which without a shader or a constant in sight.
+    struct QuadSkip {
+        uint32_t w, h;      // the offscreen target
+        char     kind;      // draw kind, as the census spells it
+        uint32_t n;         // index count that identifies the batch
+        uint32_t lo, hi;    // quads to omit, inclusive
+    };
+    QuadSkip  quadSkip = {};
+    bool      quadSkipArmed = false;
+    // CLIP rather than omit. The field asked the better question: the loading
+    // dialog's dark rectangle is not unwanted, it is the wrong SIZE -- it
+    // spans the view when it only needs to sit behind the dialog. Omitting it
+    // takes the dialog's own backing with it (quad 0 is one rectangle, and
+    // dropping it removed both), so shrinking beats removing.
+    //
+    // A SCISSOR does that without touching geometry: the quad is drawn
+    // clipped to a centred box, so no vertex format has to be learned and no
+    // buffer substituted. remlok_fix established the mechanism -- clone the
+    // rasterizer state with ScissorEnable, set the rect, restore both after.
+    // Zero means "omit", which is what quadSkip did on its own.
+    float     quadClipW = 0.0f;   // fraction of the target, 0 = omit
+    float     quadClipH = 0.0f;
+    ID3D11RasterizerState* quadClipRs = nullptr;
+    // The matched draw's own arguments, stashed by the thunk because the
+    // verdict path cannot see them. Only written while armed.
+    UINT      qsIndexCount = 0;
+    UINT      qsInstances = 0;
+    UINT      qsStartIndex = 0;
+    INT       qsBaseVertex = 0;
+    UINT      qsStartInstance = 0;
+    uint64_t  quadSkipHits = 0;
     uint32_t  censusSkipOffCount = 0;
     // Set per glare-train draw by beginPanelOverride, consumed by the
     // DrawInstanced thunk in the same call stack: the first:K clamp,
@@ -1171,6 +1233,14 @@ enum class DrawVerdict {
     kFssReveal,
     kFssRing,
     kFssDump,
+    // A batched draw re-issued without some of its quads (advanced.
+    // census_skip_quad). Swallows the game's draw and makes up to two of its
+    // own, so it must not be combined with anything that also draws.
+    kQuadSkip,
+    // The loading panel re-issued from scaled geometry (quad_probe.h).
+    // Swallows the game's draw when the geometry is built, forwards it
+    // untouched when it is not.
+    kPanelScale,
     // The loader dialog's dimming wash (scrim_fix.h), held uniform for
     // the one draw that composites the interface.
     kScrim,
@@ -1326,6 +1396,7 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     if (!s->distanceEnabled && !s->countForFlashFix &&
         !headOffsetGateWantsPanel() && s->censusSkipCount == 0 &&
         s->censusSkipRangeCount == 0 && s->censusSkipOffCount == 0 &&
+        !s->quadSkipArmed &&
         s->censusAutoW == 0 && !fssResActive() && !fssScanWantsDraws() &&
         !fssPanelWantsDraws() && !fssProbeWants() && !fssRevealWantsDraws() &&
         !fssRingWantsDraws() && !fssDumpWantsDraws() &&
@@ -1333,7 +1404,7 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         !sunglareWantsDraws() && !cbPeekEnabled() && !billboardWantsDraws() &&
         !drawCensusArmed() && !panelQuadWants() && !panelCurveWants() &&
         !particleWantsDraws() && !backdropWantsDraws() &&
-        !scrimWantsDraws()) {
+        !scrimWantsDraws() && !quadProbeWants() && !quadScaleWants()) {
         return DrawVerdict::kNone;
     }
 
@@ -1462,12 +1533,55 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
             if (bindingResolve(bindingGet(BindSlot::Rtv0), &info) &&
                 info.isTexture2D) {
                 for (uint32_t i = 0; i < s->censusSkipOffCount; ++i) {
-                    if (info.a == s->censusSkipOff[i].w &&
-                        info.b == s->censusSkipOff[i].h) {
-                        ++s->censusSkipped;
-                        return DrawVerdict::kSkip;
-                    }
+                    const State::OffSkip& o = s->censusSkipOff[i];
+                    if (info.a != o.w || info.b != o.h) continue;
+                    // kind 0 is the whole buffer, as this setting has always
+                    // meant; a spec narrows it to one draw shape.
+                    if (o.kind && (o.kind != kind || o.n != count)) continue;
+                    ++s->censusSkipped;
+                    return DrawVerdict::kSkip;
                 }
+            }
+        }
+        // The quad probe: read the rectangles this batched draw paints.
+        // Before the sub-draw probe, so a capture describes what the GAME
+        // submitted rather than what a clip left -- the ordering rule the
+        // census line above this block already states.
+        if (quadProbeWants()) {
+            ResourceInfo info;
+            if (bindingResolve(bindingGet(BindSlot::Rtv0), &info) &&
+                info.isTexture2D) {
+                quadProbeOnDraw(self, info.a, info.b, kind, count, instances,
+                                s->qsStartIndex, s->qsBaseVertex);
+            }
+        }
+        // The loading panel, drawn at a fraction of its own size. Same draw
+        // the probe captures, and the probe's capture is what it is built
+        // from -- so it arms the capture itself and draws stock until the
+        // geometry exists, which is a few frames.
+        if (quadScaleWants() && kind == 'X' && count == g_panelIndices) {
+            ResourceInfo info;
+            if (bindingResolve(bindingGet(BindSlot::Rtv0), &info) &&
+                info.isTexture2D && info.a >= 1024 && info.b >= 512) {
+                return DrawVerdict::kPanelScale;
+            }
+        }
+        // The sub-draw probe: same target test as the offscreen skip above,
+        // plus the draw's own shape, and it re-issues rather than drops.
+        //
+        // Gated to LOADER-SHAPED frames. The main menu is a rendered hangar
+        // with its own dark layer -- a different one, which survived emptying
+        // the interface buffer -- and this fix has no business reaching it.
+        // kSceneEyeDraws is that boundary already measured for this module:
+        // menu-only sessions peak around 20-22 draws, a rendered scene clears
+        // 100. Last frame's count, because this one is still being counted.
+        if (s->quadSkipArmed && s->eyeDrawsLastFrame < kSceneEyeDraws &&
+            kind == s->quadSkip.kind && count == s->quadSkip.n) {
+            ResourceInfo info;
+            if (bindingResolve(bindingGet(BindSlot::Rtv0), &info) &&
+                info.isTexture2D && info.a == s->quadSkip.w &&
+                info.b == s->quadSkip.h) {
+                return DrawVerdict::kQuadSkip;
             }
         }
         // The body-layer gate, shared by the scan-dissolve fix and the
@@ -2303,6 +2417,103 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
         g_state->curveThisDraw = false;
         return;
     }
+    // The sub-draw probe, which also SWALLOWS the game's draw -- it re-issues
+    // the surviving index ranges itself. Before the curve substitution
+    // because both swallow, and two swallows would draw the quads twice.
+    // The scaled panel, which swallows the draw only when it succeeds.
+    if (v == DrawVerdict::kPanelScale) {
+        if (quadScaleSubstitute(self, g_state->realDrawIndexedInstanced,
+                                g_state->qsInstances,
+                                g_state->qsStartInstance)) {
+            return;
+        }
+        draw();
+        return;
+    }
+    if (v == DrawVerdict::kQuadSkip) {
+        State* s = g_state;
+        const UINT total = s->qsIndexCount;
+        const UINT cut0 = s->quadSkip.lo * 6;
+        const UINT cut1 = (s->quadSkip.hi + 1) * 6;
+        ++s->quadSkipHits;
+        // ORDER IS THE GAME'S. These are painter's-order rectangles: the
+        // range is re-issued in its own place, not appended. Drawing the
+        // survivors first and the clipped range last put quad 0 -- which the
+        // game draws underneath everything -- ON TOP, and the field saw
+        // exactly that: the loader's black backing painted over the next
+        // dialog's face.
+        //
+        // 1. the quads before the range
+        if (cut0 > 0 && cut0 <= total) {
+            s->realDrawIndexedInstanced(self, cut0, s->qsInstances,
+                                        s->qsStartIndex, s->qsBaseVertex,
+                                        s->qsStartInstance);
+        }
+        // 2. the range itself: omitted at a zero size, otherwise drawn
+        //    clipped to a centred box. Everything the scissor path touches is
+        //    restored before moving on, including on the failure paths -- a
+        //    rasterizer state left behind would reach every later draw.
+        if (s->quadClipW > 0.0f && s->quadClipH > 0.0f && cut1 <= total &&
+            cut1 > cut0) {
+            UINT vpCount = 1;
+            D3D11_VIEWPORT vp{};
+            self->RSGetViewports(&vpCount, &vp);
+            ID3D11RasterizerState* saved = nullptr;
+            self->RSGetState(&saved);
+            // Built here rather than at config time: this is the first place
+            // a device context is in hand, and it is built once for the
+            // session. A failure leaves the pointer null and the range is
+            // omitted, which is the behaviour this probe had before.
+            if (!s->quadClipRs) {
+                ID3D11Device* dev = nullptr;
+                self->GetDevice(&dev);
+                if (dev) {
+                    D3D11_RASTERIZER_DESC rd{};
+                    rd.FillMode = D3D11_FILL_SOLID;
+                    rd.CullMode = D3D11_CULL_NONE;
+                    rd.DepthClipEnable = TRUE;
+                    rd.ScissorEnable = TRUE;
+                    if (FAILED(dev->CreateRasterizerState(&rd, &s->quadClipRs))) {
+                        s->quadClipRs = nullptr;
+                    }
+                    dev->Release();
+                }
+            }
+            if (vpCount >= 1 && vp.Width > 0.0f && s->quadClipRs) {
+                UINT savedCount =
+                    D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
+                D3D11_RECT savedRects[
+                    D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE] = {};
+                self->RSGetScissorRects(&savedCount, savedRects);
+
+                const float cx = vp.TopLeftX + vp.Width * 0.5f;
+                const float cy = vp.TopLeftY + vp.Height * 0.5f;
+                const float hw = vp.Width * s->quadClipW * 0.5f;
+                const float hh = vp.Height * s->quadClipH * 0.5f;
+                D3D11_RECT box;
+                box.left = static_cast<LONG>(cx - hw);
+                box.top = static_cast<LONG>(cy - hh);
+                box.right = static_cast<LONG>(cx + hw);
+                box.bottom = static_cast<LONG>(cy + hh);
+                self->RSSetScissorRects(1, &box);
+                self->RSSetState(s->quadClipRs);
+                s->realDrawIndexedInstanced(self, cut1 - cut0, s->qsInstances,
+                                            s->qsStartIndex + cut0,
+                                            s->qsBaseVertex,
+                                            s->qsStartInstance);
+                self->RSSetState(saved);
+                self->RSSetScissorRects(savedCount, savedRects);
+            }
+            if (saved) saved->Release();
+        }
+        // 3. the quads after the range
+        if (cut1 < total) {
+            s->realDrawIndexedInstanced(self, total - cut1, s->qsInstances,
+                                        s->qsStartIndex + cut1,
+                                        s->qsBaseVertex, s->qsStartInstance);
+        }
+        return;
+    }
     // The geometry substitution, which SWALLOWS the game's draw when it
     // succeeds and forwards it untouched when it does not -- so a failure
     // here is a flat screen, never a missing one.
@@ -2542,6 +2753,15 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
     if (g_state->fssTheaterOn || g_state->fssHealOn) {
         fssPanelRectDrawArgs(startIndex, baseVertex, startInstance);
     }
+    // The sub-draw probe re-issues this draw from the verdict path, which
+    // never sees these arguments. Stashed only while armed.
+    if (g_state->quadSkipArmed || quadProbeWants() || quadScaleWants()) {
+        g_state->qsIndexCount = perInstance;
+        g_state->qsInstances = instances;
+        g_state->qsStartIndex = startIndex;
+        g_state->qsBaseVertex = baseVertex;
+        g_state->qsStartInstance = startInstance;
+    }
     const DrawVerdict v = beginPanelOverride(self, 'X', perInstance, instances);
     forwardWithVerdict(self, v, [&] {
         g_state->realDrawIndexedInstanced(self, perInstance, instances, startIndex,
@@ -2689,6 +2909,62 @@ void readCensusSkip(Config& cfg, State* s) {
         }
     }
 
+    // advanced.census_skip_quad = WIDTHxHEIGHT:KIND:COUNT:LO[-HI]
+    const std::string quad = cfg.getString("advanced.census_skip_quad", "");
+    {
+        State::QuadSkip q = {};
+        bool armed = false;
+        if (!quad.empty()) {
+            const char* p = quad.c_str();
+            char* end = nullptr;
+            const unsigned long w = strtoul(p, &end, 10);
+            unsigned long h = 0, n = 0, lo = 0, hi = 0;
+            bool ok = (end != p) && (*end == 'x' || *end == 'X');
+            if (ok) { const char* q2 = end + 1; h = strtoul(q2, &end, 10); ok = end != q2; }
+            if (ok) ok = (*end == ':') && strchr("DINX", end[1]) && end[2] == ':';
+            char kind = ok ? end[1] : 0;
+            if (ok) { const char* q2 = end + 3; n = strtoul(q2, &end, 10); ok = end != q2; }
+            if (ok) ok = (*end == ':');
+            if (ok) { const char* q2 = end + 1; lo = strtoul(q2, &end, 10); ok = end != q2; }
+            hi = lo;
+            if (ok && *end == '-') { const char* q2 = end + 1; hi = strtoul(q2, &end, 10); ok = end != q2; }
+            while (*end == ' ' || *end == '	') ++end;
+            if (!ok || *end || w == 0 || h == 0 || n == 0 || hi < lo ||
+                (hi + 1) * 6 > n) {
+                Log::get().note(
+                    "census skip: quad \"%s\" is not WIDTHxHEIGHT:KIND:COUNT:LO"
+                    "[-HI] with the quad range inside the draw (six indices to "
+                    "a quad, so COUNT/6 of them); refused rather than "
+                    "half-applied.", quad.c_str());
+            } else {
+                q.w = static_cast<uint32_t>(w); q.h = static_cast<uint32_t>(h);
+                q.kind = kind; q.n = static_cast<uint32_t>(n);
+                q.lo = static_cast<uint32_t>(lo); q.hi = static_cast<uint32_t>(hi);
+                armed = true;
+            }
+        }
+        // 0 keeps the omit behaviour; anything positive clips instead.
+        const float cw = cfg.getFloat("advanced.census_clip_width", 0.0f);
+        const float ch = cfg.getFloat("advanced.census_clip_height", 0.0f);
+        s->quadClipW = (cw > 0.0f && cw <= 1.0f) ? cw : 0.0f;
+        s->quadClipH = (ch > 0.0f && ch <= 1.0f) ? ch : 0.0f;
+        const bool changed = armed != s->quadSkipArmed ||
+                             memcmp(&q, &s->quadSkip, sizeof(q)) != 0;
+        s->quadSkip = q;
+        s->quadSkipArmed = armed;
+        if (changed && armed) {
+            Log::get().note(
+                "census skip: SUB-DRAW probe armed -- the %c:%u draw into a "
+                "%ux%u target is re-issued without quads %u..%u of its %u. A "
+                "batched fill draws several rectangles in one call, so this "
+                "is how one of them is named without taking the rest.%s",
+                q.kind, q.n, q.w, q.h, q.lo, q.hi, q.n / 6,
+                (s->quadClipW > 0.0f && s->quadClipH > 0.0f)
+                    ? " Those quads are CLIPPED to a centred box, not omitted."
+                    : "");
+        }
+    }
+
     s->censusSkipOffCount = 0;
     if (!off.empty()) {
         const char* p = off.c_str();
@@ -2704,14 +2980,28 @@ void readCensusSkip(Config& cfg, State* s) {
                 h = strtoul(q, &end, 10);
             }
             if (end == p || w == 0 || h == 0) { ok = false; break; }
+            // Optional ":KIND:COUNT" -- narrow the entry to one draw shape.
+            char kind = 0;
+            unsigned long n = 0;
+            if (*end == ':') {
+                const char* k = end + 1;
+                if (!*k || !strchr("DINX", *k) || k[1] != ':') { ok = false; break; }
+                kind = *k;
+                const char* c = k + 2;
+                n = strtoul(c, &end, 10);
+                if (end == c) { ok = false; break; }
+            }
             s->censusSkipOff[s->censusSkipOffCount].w = static_cast<uint32_t>(w);
             s->censusSkipOff[s->censusSkipOffCount].h = static_cast<uint32_t>(h);
+            s->censusSkipOff[s->censusSkipOffCount].kind = kind;
+            s->censusSkipOff[s->censusSkipOffCount].n = static_cast<uint32_t>(n);
             ++s->censusSkipOffCount;
             p = end;
         }
         while (*p == ' ' || *p == ',' || *p == '\t') ++p;
         if (!ok || *p) {
-            Log::get().note("census skip: offscreen \"%s\" is not WIDTHxHEIGHT, "
+            Log::get().note("census skip: offscreen \"%s\" is not WIDTHxHEIGHT "
+                            "or WIDTHxHEIGHT:KIND:COUNT (kind D, I, N or X), "
                             "up to four separated by commas; the whole setting "
                             "is refused rather than half-applied.", off.c_str());
             s->censusSkipOffCount = 0;
@@ -2904,6 +3194,14 @@ void readCensusSkip(Config& cfg, State* s) {
                               "%soffscreen target %ux%u",
                               at ? (i ? ", " : " and ") : "",
                               s->censusSkipOff[i].w, s->censusSkipOff[i].h);
+            // A narrowed entry must SAY it is narrowed. An all-or-nothing
+            // probe and a one-draw probe read identically in the log
+            // otherwise, and the difference is the whole answer.
+            if (s->censusSkipOff[i].kind && at < 170) {
+                at += _snprintf_s(list + at, sizeof(list) - at, _TRUNCATE,
+                                  " (only %c:%u)", s->censusSkipOff[i].kind,
+                                  s->censusSkipOff[i].n);
+            }
         }
         Log::get().note("census skip ACTIVE: draws matching %s will "
                         "NOT be drawn until this is cleared. A probe, not a "
@@ -2946,6 +3244,7 @@ void vScreenRefreshConfig() {
     remlokConfigure(cfg);
     holoConfigure(cfg);
     scrimConfigure(cfg);
+    quadProbeConfigure(cfg);
     backdropConfigure(cfg);
     fssScanConfigure(cfg);
     fssPanelConfigure(cfg);
@@ -3047,6 +3346,10 @@ bool vScreenReclaimHooks() {
 }
 
 void vScreenFrameBoundary() {
+    // The quad probe's readback: a capture taken a few frames ago is decoded
+    // here, where the copy has certainly executed and mapping cannot stall
+    // the render thread mid-frame.
+    if (g_state && g_state->ownerCtx) quadProbeTick(g_state->ownerCtx);
     State* s = g_state;
     if (!s) return;
 
@@ -3797,6 +4100,7 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     remlokConfigure(cfg);
     holoConfigure(cfg);
     scrimConfigure(cfg);
+    quadProbeConfigure(cfg);
     backdropConfigure(cfg);
     fssScanConfigure(cfg);
     fssPanelConfigure(cfg);
@@ -4010,6 +4314,7 @@ void shutdownVScreenFixes() {
     remlokShutdown();
     holoShutdown();
     scrimShutdown();
+    quadProbeShutdown();
     backdropShutdown();
     fssScanShutdown();
     fssPanelShutdown();
