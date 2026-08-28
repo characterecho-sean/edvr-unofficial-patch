@@ -44,10 +44,17 @@ namespace edvr {
 class Config;
 
 // Reads advanced.quad_probe = WIDTHxHEIGHT:KIND:COUNT[:SKIPFRAMES] -- the
-// skip and clip specs' shape naming one draw signature into one offscreen
-// target, plus an optional count of matching frames to let pass before
-// capturing (the first matching frame is usually mid fade-in; 120 waits
-// about two seconds of them for steady state). Empty is off.
+// skip and clip specs' shape naming one draw signature into one target,
+// plus an optional count of matching frames to let pass before capturing
+// (the first matching frame is usually mid fade-in; 120 waits about two
+// seconds of them for steady state). Empty is off.
+//
+// ANY target, since 2026-08-28: this probe used to be offered only draws
+// that missed the eye textures, because the loader's widget panels are all
+// built in an interface surface. The intro movie's panel is not -- it is a
+// 6-index quad drawn straight into the eye, placed by four vertices and no
+// constant buffer (docs/intro-video.md) -- and a spec naming the eye's own
+// size used to match nothing, silently. It is now offered every draw.
 void quadProbeConfigure(Config& cfg);
 
 // Is a capture still wanted? False once one has been taken, which keeps this

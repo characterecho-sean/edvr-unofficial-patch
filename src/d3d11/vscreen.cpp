@@ -1458,6 +1458,29 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         }
         introProbeOnDraw(s->rtv0W, s->rtv0H, s->rtv0Eye);
     }
+    // The quad probe, ABOVE the eye gate since 2026-08-28.
+    //
+    // It lived in the offscreen branch because everything it had ever been
+    // aimed at -- the loader's widget panels -- is built in an interface
+    // surface. Then the intro flight named the draw that puts the intro
+    // movie in front of each eye: a 6-index quad (vh EF103A7CB4A8369A)
+    // straight INTO the eye texture, whose placement is not in a constant
+    // buffer at all but in the four vertices of its own 80-byte buffer.
+    // That is exactly the question this probe answers, and from inside the
+    // offscreen branch it could never have been asked -- a spec naming the
+    // eye's size matched nothing, silently.
+    //
+    // Still before every skip and re-issue below, which is the ordering rule
+    // that matters: a capture must describe what the GAME submitted rather
+    // than what a clip left.
+    if (quadProbeWants()) {
+        ResourceInfo info;
+        if (bindingResolve(bindingGet(BindSlot::Rtv0), &info) &&
+            info.isTexture2D) {
+            quadProbeOnDraw(self, info.a, info.b, kind, count, instances,
+                            s->qsStartIndex, s->qsBaseVertex);
+        }
+    }
     if (!s->rtv0Eye) {
         // NOT an eye texture -- but it is still a DRAW, and where the draws
         // are going is the entire question when the eye textures are getting
@@ -1569,18 +1592,6 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
                     ++s->censusSkipped;
                     return DrawVerdict::kSkip;
                 }
-            }
-        }
-        // The quad probe: read the rectangles this batched draw paints.
-        // Before the sub-draw probe, so a capture describes what the GAME
-        // submitted rather than what a clip left -- the ordering rule the
-        // census line above this block already states.
-        if (quadProbeWants()) {
-            ResourceInfo info;
-            if (bindingResolve(bindingGet(BindSlot::Rtv0), &info) &&
-                info.isTexture2D) {
-                quadProbeOnDraw(self, info.a, info.b, kind, count, instances,
-                                s->qsStartIndex, s->qsBaseVertex);
             }
         }
         // The loader dialog's backdrop. Every draw into an interface-sized

@@ -1,13 +1,11 @@
 # The intro movie
 
-Reported 2026-08-28. The model below is built from the game's own files and
-from field logs that already exist; **nothing has been flown at it, and no
-fix is written.** The loading-panel arc next door
-(`docs/loading-panel-handoff.md`) spent three architectures and a dozen
-flights on a fix built from an unmeasured model whose central conclusion its
-own instruments had manufactured. This page is the alternative: state the
-model, say which parts are measured and which are inference, and ask for the
-one flight that separates them.
+Reported 2026-08-28 and **measured the same day**, in one flight, on the field
+rig (Frontier launcher install, game build 330683, one eye 5424x5356, Pimax
+via OpenComposite). The model this page opened with was a hypothesis built
+from the install's own files and from old logs; the flight confirmed it,
+including the vertex shader. What follows is the measurement. No fix is
+written yet — one number is still missing, and it is named at the end.
 
 ## The defect, in the field's words
 
@@ -15,260 +13,210 @@ one flight that separates them.
 > window full resolution, but freezes for 1 or 2 seconds before continuing
 > the video in a small, headtrack locked video.
 
-And the wanted behaviour, in the same words:
+And, added after the flight, the observation that settles the first phase:
+
+> the game loads the video before I am dropped into the game world in VR
+> from the Pimax home space
+
+Wanted instead:
 
 > load correctly into a black void (the same one that shows up later after
 > the video plays or is skipped) and render the video correctly to a panel in
 > 3d space (like the splash screen it already renders in the void)
 
-Most players press Escape through the whole thing, which is why this has
-never been reported as a bug: it is skipped rather than endured.
-
-Three phases, and a fix has to answer all three.
-
-| phase | what the player gets | what is wanted |
-|---|---|---|
-| A | the movie at the mirror window's full resolution | a black void with the movie on a panel in it |
-| B | a freeze of one to two seconds | no freeze, or the void through it |
-| C | the movie continues, small and head-locked | the same panel, still |
+Most players press Escape through it, which is why this was never reported as
+a bug: it is skipped rather than endured.
 
 ## What the movie is (measured, from the install)
 
-Read straight off `Products\elite-dangerous-odyssey-64\Movies\` on the field
-rig, 2026-08-28. Every file is Matroska/WebM; the header of each gives the
-codec and size.
+`Products\elite-dangerous-odyssey-64\Movies\` holds ten Matroska/WebM files.
+Every one is **1920x1080**; the launch idents run about twenty seconds.
 
 | file | codec | pixels | length |
 |---|---|---|---|
-| `Ident_Frontier_EliteNeutral.webm` | VP8 | **1920x1080** | 20.3 s |
-| `Ident_Frontier_EliteHorizons.webm` | VP8 | **1920x1080** | 20.5 s |
-| `Ident_Frontier_Arena.webm` | VP8 | **1920x1080** | 18.5 s |
-| `intro_temp.webm` | VP9 | **1920x1080** | 20.3 s |
-| `FrontEnd0/1/A.webm` | VP8 | **1920x1080** | 90-95 s |
-| the rest (Salvation, Thargoid, Update 14) | VP8 | **1920x1080** | 63-199 s |
+| `Ident_Frontier_EliteNeutral.webm` | VP8 | 1920x1080 | 20.3 s |
+| `Ident_Frontier_EliteHorizons.webm` | VP8 | 1920x1080 | 20.5 s |
+| `Ident_Frontier_Arena.webm` | VP8 | 1920x1080 | 18.5 s |
+| `intro_temp.webm` | VP9 | 1920x1080 | 20.3 s |
+| `FrontEnd0/1/A.webm` | VP8 | 1920x1080 | 90-95 s |
+| Salvation, Thargoid, Update 14 | VP8 | 1920x1080 | 63-199 s |
 
-**All of them are 1920x1080**, and the launch idents are about twenty
-seconds -- the length the report describes.
+They are decoded by the DirectShow filters shipped beside the executable:
+`webmsplit64.dll`, `vp8decoder64.dll`, `vp9decoder64.dll`, and
+`dsfVorbisDecoder64.dll` for the audio. The frames therefore arrive on the
+CPU and reach the GPU as an upload, never as a draw's output — which is why
+the census finds them as *source textures* and nothing else.
 
-They are decoded by DirectShow filters shipped beside the executable:
-`webmsplit64.dll` (the splitter), `vp8decoder64.dll` and `vp9decoder64.dll`,
-`dsfVorbisDecoder64.dll` for the audio. So the frames arrive on the CPU, and
-reach the GPU through an upload -- `UpdateSubresource` or a mapped dynamic
-texture. Both are things a census records (`UpdateSubresource` is its 'U'
-line, and the Map/Unmap tee is already built), which matters: the movie's
-image will not appear as a draw's output anywhere.
+## The path the movie takes (measured, census 3, t = 12 s)
 
-`AppConfig.xml` on this rig sets the desktop window to **1280x720**, which
-is the "mirrored window full resolution" the report names.
-
-## What the startup does (measured, from field logs)
-
-From the 2026-08-27 17:42 session (Steam install, build 330683, one eye
-4848x4788). Nothing in that session was aimed at this; these are the lines
-it happened to write.
-
-| time | +s | event |
-|---|---|---|
-| 17:42:32.738 | 0.0 | the d3d11 proxy attaches |
-| 17:42:33.683 | 0.9 | the D3D11 device is created |
-| 17:42:33.780 | 1.0 | the Present hook is installed -- frames countable from here |
-| 17:42:35.898 | 3.2 | the openvr proxy attaches |
-| 17:42:35.901 | 3.2 | `GetRecommendedRenderTargetSize -> 4848x4788 per eye` |
-| 17:42:37.353 | 4.6 | `IVRCompositor_014` is asked for |
-| 17:42:37.394 | 4.7 | the first eye-sized draw: an `N` of 3 vertices sampling 4848x4788 |
-| 17:42:37.399 | 4.7 | **an eye-sized draw, `X` with 6 indices, sampling a 1920x1080 texture** |
-| 17:42:38.271 | 5.5 | the compositor hook validates -- both eyes have been submitted |
-| 17:42:38.347 | 5.6 | the openvr half tells the d3d11 half what one eye IS |
-| 17:42:53.742 | 21.0 | 5425 frames in 20047 ms -- **271 fps** through the startup |
-
-Three things fall out of that table.
-
-**There is a 3.7-second stretch (0.9 to 4.6) in which the game renders and
-the compositor has not been asked for.** Whatever is on the monitor then, the
-headset is not being handed it by Elite.
-
-**For that whole stretch this DLL does not know what an eye texture is.** One
-eye's size arrives from the openvr half at +5.6. Before it, every draw is
-"offscreen" as far as the d3d11 half is concerned, and every fix here that
-sits behind the eye-texture gate -- `fix.black_void` included -- is inert by
-construction.
-
-**271 fps.** A hand on a key lands hundreds of frames from where it meant to.
-Phases A and B cannot be caught by hand, and that is why the instruments
-below had to be built.
-
-## The 6-index quad, and what it probably is
-
-The `+4.7 s` line above is the interesting one, and it is not a one-off: the
-same line, in the same position, appears in **every** field log to hand where
-the on-foot resolution had been raised --
+Four draws a frame carry it, and the census names all four:
 
 ```
-vScreen: an eye-sized draw sampled 1920x1080, which is not the panel
-(5120x2880), so it was left alone. The draw was X with 6 vertices or indices.
+DCO  N n=4  r=@120 (1920x1080)  s=@121,@122,@123  vh=20F383BBAC05C031  ph=67A1C6A38826030A
+DCO  N n=4  r=@134 (1920x1080)  s=@121,@122,@123  vh=20F383BBAC05C031  ph=67A1C6A38826030A
+DC   X n=6  r=@82  (5424x5356)  s=@125 (= @120)   vh=EF103A7CB4A8369A  ph=DED8796049C7BB4A
+DC   X n=6  r=@118 (5424x5356)  s=@135 (= @134)   vh=EF103A7CB4A8369A  ph=DED8796049C7BB4A
 ```
 
--- at 11:08:58, 11:21:12, 11:33:54, 17:38:49, 17:03:21 and 17:42:37, always
-about five milliseconds after the first eye-sized draw of the session.
+**The three planes are the movie.** `@121` is 1920x1080 at format 60
+(`R8_UNORM`); `@122` and `@123` are 960x540 at the same format. Full-size
+luma, two half-size chroma planes: I420 / YUV 4:2:0, exactly what a VP8
+decoder emits. `ph=67A1C6A38826030A` is the YUV-to-RGB shader.
 
-That shape is already documented next door. `docs/menu-backdrop.md` measured
-the front end's chain:
+**The conversion runs twice, into two separate 1920x1080 surfaces, one per
+eye**, from the same three planes. The two eyes' movie content is therefore
+identical by construction — there is no stereo in it to break.
 
-```
-@130  1920x1080 BC1 (the menu still, static)
-  |   4-vertex trianglestrip, no depth
-  +-> @129  1920x1080 RGBA
-  +-> @141  1920x1080 RGBA
-        |   6-index quad, VS EF103A7CB4A8369A
-        +-> the two eye targets
-```
+**The panel is a 6-index quad, `vh=EF103A7CB4A8369A`** — the same vertex
+shader `menu-backdrop.md` measured for the front end's composite, which is
+what predicted this draw before the flight. One per eye, into the eye
+texture directly.
 
-**The hypothesis, stated as one:** the front end -- movie and menu still
-alike -- is composed into a 1920x1080 surface, and that surface is put in
-front of each eye by a 6-index quad. During the intro the surface holds a
-decoded WebM frame; at the menu it holds the BC1 still. Under that
-hypothesis the field's "small, head-locked video" IS this quad, and where it
-sits is a property of six vertices.
+**Its placement is in four vertices and nowhere else.** The quad draws from
+its **own 80-byte vertex buffer** (stride 20, four vertices — one buffer per
+eye, not the shared 4 MB widget pool the loader arc fought), and it binds
+**no constant buffer** (census `c=-`). Nothing about where it sits is in a
+transform to be substituted; it is those four vertices.
 
-Three things support it and none of them settles it: the movie is 1920x1080,
-the front-end surface is measured at 1920x1080, and a 6-index quad samples
-something 1920x1080 into each eye at the moment the intro is running. What
-would refute it: the quad turning out to sample a menu element that happens
-to be that size. The census in flight 2 answers this in one line.
+The rest of each eye's frame, in order: a full-eye blit from another
+5424x5356 texture (`vh=20F383BBAC05C031`) — this is the surround, and it is
+a **draw, not a clear** — then the movie panel, then one world-quad
+(`vh=A888D51024D9798E`, with depth, a 512x512 BC1 and a 532x317). Twenty
+eye draws a frame in total, thirty in the frame.
 
-## A coincidence worth testing before anything is built
+The desktop window is also fed from here: `vh=01C3B84C82172B56` blits both
+eye textures into the 2560x1440 swapchain.
 
-The panel-distance and curvature fixes recognise the on-foot screen as *an
-eye-sized draw whose first sampled texture is exactly the panel's size*
-(`srv0IsPanelSized`, `vscreen.cpp`). With `vscreen_res_width/_height` left at
-the stock 1920x1080, **the panel size and the front-end surface size are the
-same number** -- so the intro's composite is recognised as the panel, and
-`fix.panel_distance` and `fix.panel_curvature` should already act on it.
+## The startup, phase by phase (measured, `intro_probe`)
 
-The field logs are consistent with that: in the two sessions run at stock
-panel size, 1920x1080 is absent from the "not the panel" list that every
-other session carries, which is what "it WAS the panel" looks like from
-outside. Neither session had `panel_distance` on, so nothing acted -- the
-coincidence has never actually been exercised.
+Times are from the first frame edge; `*` marks an eye-sized target.
 
-Raising the on-foot resolution -- which the README recommends and which this
-rig runs at 5120x2880 -- breaks the coincidence, and the intro composite
-stops being recognised by anything.
+| t | what |
+|---|---|
+| 0.00 s | frame 0 — **0 draws** |
+| 1.20 s | frame 1 — **stalls 1203 ms** |
+| 1.2 → 3.16 s | ~2224 frames, still **zero draws**, about 1130 fps of nothing |
+| 3.16 s | first draws: `512x512 x1, 8x8 x1` |
+| 3.25 s | `2560x1440 x6, 640x360 x1, 320x180 x6` — the desktop window only |
+| 3.69 s | **stalls 281 ms**, then steady at `2560x1440 x10, 320x180 x3` |
+| **6.41 s** | frame 2357: **stalls 2719 ms**, and is the **first frame with a draw into an eye texture** |
+| 6.41 s + | steady: `5424x5356* x20, 2560x1440 x2, 1920x1080 x2, 678x669 x6` |
+| ~27.8 s | `4259x2395` joins — the loader's dialogs; the movie is over |
 
-**Flight 0, before any code.** Set `vscreen_res_width = 1920`,
-`vscreen_res_height = 1080`, `fix.panel_distance = 1.5`,
-`fix.panel_curvature = 0`, launch, and watch the intro without pressing
-Escape. `panel_distance` is live, so it can also be swung during the movie
-and watched. If the movie's rectangle moves, the hypothesis above is
-confirmed and half the mechanism a fix needs already exists and is field
-proven. It costs one launch and no build.
+**The freeze is one frame of 2719 ms, and it is the VR handover itself.** The
+compositor's first Submit lands about 13 ms after that frame's draws
+(openvr log, 13:44:49.654 against 13:44:49.638). The field's "1 or 2
+seconds" is 2.7.
+
+**Phase A never reaches the headset.** No eye-texture draw and no Submit
+before 6.41 s: for the first six and a half seconds Elite hands the
+compositor nothing, and the headset is showing the runtime's own scene. The
+field saw exactly this and said so — *Pimax home space, until I am dropped
+in*. Elite is rendering to its 2560x1440 window all the while, which is the
+"mirrored window full resolution" of the report.
+
+The consequence for a fix is hard and worth stating plainly: **EDVR cannot
+put a black void in phase A.** There is no Elite frame to modify, and the
+frame the headset *is* showing belongs to the runtime.
+
+## Two hypotheses this flight killed
+
+**`fix.panel_distance` cannot move this panel.** Before the flight the panel
+size and the front-end surface size coinciding at 1920x1080 looked like it
+might already work. It cannot: that fix substitutes the composite's
+transform constants, and this draw binds no constant buffer at all.
+
+**`fix.black_void` was never going to reach this.** The surround is a
+full-eye *blit*, not a clear. Making it black is a question about what that
+blit's source texture holds, not about a clear colour — and the clears the
+probe did record (an eye-sized target to black at a=0, and another to opaque
+white) are not it.
+
+## What the instruments learned about themselves
+
+**A census cannot be armed inside a stall.** `census_at_ms = 2000,5000,12000`
+fired at 2078 ms, **6407 ms** and 12000 ms. The middle one asked for 5 s and
+landed at 6.4 — the 2719 ms freeze contains no frame edges to arm on, so an
+entry that comes due inside one fires when the stall ends. Aiming inside
+phase A means asking for a time comfortably before it: 4000 ms lands there.
+
+**The composition digest records targets, not sources.** It is blind to the
+YUV planes wherever they are not being drawn into. So it cannot say whether
+the movie is already playing during phase A — see the open question below.
+
+**`quad_probe` could not see this draw at all** until 2026-08-28. It was
+offered only draws that missed the eye textures, because everything it had
+been aimed at is built in an interface surface. A spec naming the eye's own
+size matched nothing, silently. It is now offered every draw
+(`vscreen.cpp`, above the eye gate).
 
 ## What is still unmeasured
 
-1. **Whether phase A reaches the headset at all.** Nothing is submitted for
-   the first 4.6 seconds, so either the headset is showing SteamVR's own
-   void and the full-resolution movie the report describes is the one on the
-   monitor -- in which case phase A is not reachable from here, because EDVR
-   cannot submit frames the game never made -- or the game composites
-   full-view into the eye textures earlier than the log has ever recorded.
-2. **What the freeze is.** One long frame or a run of slow ones. A single
-   long frame at the +4.6 boundary is VR bring-up; a run is something else.
-   Nothing in any log to hand measures the game's frame times before VR
-   starts.
-3. **The geometry of the 6-index quad.** Its extent, its vertex format, the
-   space its positions are in. This is the number a substitution needs and
-   there is nothing to guess from.
-4. **What the surround is.** `black_void` reports "void cleared to black 0
-   time(s)" in every field log here, so in these sessions Elite never asked
-   for the flat grey clear that fix was built for. Whether the intro's
-   surround is a clear at all, and of what colour, is unrecorded.
-5. **Whether EDVR is party to the freeze.** The report describes stock
-   behaviour, but it has never been A/B'd. Renaming `d3d11.dll` aside for
-   one launch settles it and costs nothing.
+1. **The four vertices.** Their values, their space, and what the other 12
+   bytes of the 20-byte vertex hold. This is the only number a placement fix
+   needs, and `quad_probe` can now be aimed at it.
+2. **Whether the movie is already playing in phase A.** The ten draws a
+   frame into 2560x1440 between 3.7 s and 6.4 s are unidentified; the digest
+   cannot see source textures, so the YUV planes may or may not be in them.
+   One census at 4000 ms settles it. It changes nothing about the fix — phase
+   A is unreachable either way — but it decides whether the report's "plays,
+   then freezes, then continues" is one continuous movie or two things.
+3. **What the surround blit's source holds.** If it is already black, the
+   "black void" half of the request is satisfied from the handover onward and
+   only the panel needs work.
+4. **Whether EDVR is party to either stall.** Never A/B'd. Renaming
+   `d3d11.dll` aside for one launch settles it and costs nothing.
 
-## The instruments (both `[advanced]`, off by default, live)
+## The flight plan from here
 
-Built 2026-08-28 for this, because nothing here could be aimed at a startup:
-the census key is armed by hand at 271 fps, `census_auto` needs a target size
-somebody has already censused *and* two quiet seconds that a target drawn
-into from frame one never gets, and every draw-path fix sits behind an
-eye-texture gate that cannot answer for the first four and a half seconds.
+**Flight 3 — the geometry.**
 
-| key | does |
-|---|---|
-| `intro_probe = 1` | records the startup. Per frame: the draws counted by the target they land in, logged whenever that shape changes; every frame of 200 ms or more; every new clear colour, read *before* the black void fix substitutes; and the first frame that draws into an eye texture, called out on its own line. Changes nothing; stands down after three minutes or 96 lines. |
-| `census_at_ms = A,B,C` | arms a full draw census at named moments after the session's first frame -- up to eight, milliseconds. Each records offscreen draws whatever `census_offscreen` says. Read once, at the first frame. |
+```ini
+[advanced]
+quad_probe = 5424x5356:X:6
+```
 
-Milliseconds and not frames, deliberately: a loading screen has been measured
-at 1790 fps and a menu at 13, so one frame number is a different moment on
-every rig and in every session. `common/timing.h` is that rule, and this is
-the instrument that most wanted to break it.
+Two 6-index quads reach each eye and the probe is occurrence-aware, so it
+captures all four and logs each one's rectangle plus the bytes past the
+position. The movie's is the pair drawn from an **80-byte** vertex buffer at
+stride 20; the other pair (`vh=A888D51024D9798E`) is stride 8 out of a 32 KB
+buffer and has a constant buffer. They cannot be confused.
 
-Both count frames the same way `DC` lines do -- `intro probe: frame N` and
-`DC begin ... frame=N` are the same N -- so the timeline and the censuses
-inside it line up without arithmetic.
+Pair it with `census_at_ms = 4000` in the same launch to close open question
+2 at no extra cost.
 
-## The flight plan
+**Then the fix.** With the rectangle in hand it is a vertex rewrite of four
+vertices per eye — the smallest target this project has had. `panel_quad.cpp`
+and `loader_panel.cpp` both already re-issue a matched draw from rebuilt
+geometry, and the draw is recognised by shape and by what it samples (a
+6-index quad into an eye texture sampling a 1920x1080 surface whose own
+source is three R8 planes), not by a game version.
 
-**Flight 0 -- the free one.** The panel-size coincidence above. One launch,
-no build, and a yes tells the fix where to start.
-
-**Flight 1 -- the shape of the startup.** `advanced.intro_probe = 1`, launch,
-let the movie play to its end without pressing Escape, quit. Send the gfx log
-(it flushes on exit -- a live log reads 0 bytes).
-
-What each answer means:
-
-* composition lines with **no starred target**, then a stall line, then
-  starred ones: phase A is flat and unreachable from here; the fix covers B
-  and C.
-* **starred targets before the stall**: phase A is a draw in the eye
-  textures, and it has a geometry a fix can reach.
-* the stall line names the freeze -- how long, and where it sits relative to
-  the handover.
-* the clear lines say whether the intro's surround is a clear, and of what
-  colour. That decides whether "a black void" is a gate to widen or a draw to
-  suppress.
-
-**Flight 2 -- the movie's draws.** With flight 1's timeline in hand, set
-`advanced.census_at_ms` to two or three moments picked off it -- one inside
-phase A, one just after the stall, one well into phase C -- with
-`advanced.census_frames = 3`. `tools/diff_draw_census.py` diffs any two. The
-draw that carries the movie is the one whose sampled texture is rewritten
-every frame while its geometry does not move, and the 6-index quad above is
-either on that line or it is not.
-
-**Flight 3 -- the geometry.** `advanced.quad_probe` aimed at the signature
-flight 2 names, which reads the quad's rectangle out of the vertex buffer.
-
-Only then is there a fix to write.
-
-## What a fix could look like
-
-Sketched so flight 1 is read with the right questions in mind. Every line is
-contingent on the measurement.
-
-**The panel.** If the 6-index composite is the movie, placing it is the same
-problem the on-foot screen already solved: `panel_quad.cpp` and
-`panel_curve.cpp` rebuild that composite's geometry, `loader_panel.cpp`
-re-issues a matched draw from remapped vertices, and `srv0IsPanelSized` is
-one size comparison away from recognising the front-end surface as well as
-the panel. Head-locked or world-locked then becomes a choice rather than a
-limitation.
-
-**The void.** If the intro's surround is a flat clear of an eye-sized target,
-`fix.black_void` already knows what to do and has simply never been reaching
-this early. If it is drawn rather than cleared, it is a draw to name first.
-
-**The freeze** is the game bringing VR up, and nothing here makes that
-faster. What can change is what is on screen while it happens -- and only if
-phase A turns out to be reachable at all.
+**What the fix will not do:** phase A, and the freeze. Both are the game
+bringing VR up, before it has handed the compositor anything.
 
 **Not on the table: skipping the movie.** It is the game's content, the field
 asked to see it properly rather than to lose it, and a patch that presses
 Escape on somebody's behalf is a patch deciding what they get to watch.
 
+## The instruments (both `[advanced]`, off by default, live)
+
+| key | does |
+|---|---|
+| `intro_probe = 1` | records the startup. Per frame: draws counted by the target they land in, logged when that shape changes; every frame of 200 ms or more; every new clear colour, read *before* the black void fix substitutes; and the first frame that draws into an eye texture, called out on its own line. Changes nothing; stands down after three minutes or 96 lines. |
+| `census_at_ms = A,B,C` | arms a full draw census at named moments after the session's first frame — up to eight, milliseconds. Each records offscreen draws whatever `census_offscreen` says. Read once, at the first frame. An entry due inside a stall fires when the stall ends. |
+
+Milliseconds and not frames, deliberately: this session measured 1130 fps
+through the startup's empty phase and 60 through the movie, so one frame
+number is a different moment on every rig and in every session.
+`common/timing.h` is that rule, and this is the instrument that most wanted
+to break it.
+
+Both count frames the same way `DC` lines do — `intro probe: frame N` and
+`DC begin ... frame=N` are the same N.
+
 ## Status
 
-Model written, instruments built and building clean, nothing flown. Both keys
-are off in the shipped `edvr.ini` and free when off.
+Measured 2026-08-28 in one flight. The movie's path, the freeze and the
+unreachability of phase A are established. The panel's geometry is the
+remaining unknown and flight 3 reads it. No fix written.
