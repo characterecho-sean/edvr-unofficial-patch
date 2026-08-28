@@ -368,6 +368,31 @@ line is an independent marker for the end of it, which is worth remembering:
 the two workstreams are measuring the same stretch and can date each other's
 captures.
 
+## Stage one, built: fix.intro_video_size
+
+`src/d3d11/intro_panel.cpp`. Multiplies `cb2[0].xy` for the movie's two
+composite draws, so the panel grows about the point it already sits on --
+straight ahead, both eyes, aspect kept. 1.0 is stock and off; 4.0 is the
+ceiling. It does NOT move the panel into world space, so it stays
+head-locked and the cut to the splash still will not line up. That is
+stage two.
+
+Three things keep it off everything else:
+
+* the draw must be the six-index composite **sampling the surface the
+  movie was converted into in the same frame** -- the YUV fill draws
+  before it, so its marker is fresh;
+* the constants must READ as a screen-space placement -- `cb2[3]` all
+  zeros and `cb2[4].w` exactly 1. Anything world-placed, the splash and
+  the menu included, refuses by its own numbers, and the refusal stands
+  the fix down for the session with the numbers in the log;
+* the first rendered scene retires it, the scope rule `loader_panel.h`
+  already states.
+
+The constants are read by GPU copy, once per eye, not from the write tee
+-- valid because they are static, which flight 6 measured rather than
+assumed.
+
 ## The other symptom: facing the wrong way at the cut
 
 Reported after the flight:

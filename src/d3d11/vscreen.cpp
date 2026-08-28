@@ -40,6 +40,7 @@
 #include "fov_probe.h"
 #include "glitch_frame.h"
 #include "holo_fix.h"
+#include "intro_panel.h"
 #include "intro_probe.h"
 #include "journal_watch.h"  // gameplay started, for the low-peak notice
 #include "loader_panel.h"
@@ -1223,6 +1224,9 @@ void noteForeignDraw(ID3D11DeviceContext* self) {
 // every element's identity.
 enum class DrawVerdict {
     kNone, kPanel, kSkip, kRemlok, kHolo, kWitchstar, kBillboard,
+    // The intro movie's panel drawn with our constants at VS b2
+    // (intro_panel.h): forwarded normally, restored after.
+    kIntroPanel,
     kGlareClamp, kGlareSteady, kParticle,
     // The FSS scan dissolve held uniform (fss_scan.h): a body-layer draw
     // binding the 16x16 matrix, forwarded wrapped in fssScanBegin/End.
@@ -1411,7 +1415,7 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         !drawCensusArmed() && !panelQuadWants() && !panelCurveWants() &&
         !particleWantsDraws() && !backdropWantsDraws() &&
         !scrimWantsDraws() && !quadProbeWants() && !loaderPanelWants() &&
-        !introProbeWants()) {
+        !introProbeWants() && !introPanelWants()) {
         return DrawVerdict::kNone;
     }
 
@@ -1504,6 +1508,20 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         // returned from.
         if (drawCensusWantsOffscreen() && drawCensusArmed()) {
             drawCensusOffDraw(self, kind, count, instances);
+        }
+        // The intro movie's YUV-to-RGB fill: a four-vertex draw with all
+        // three planes bound, into the surface the composite reads. It is
+        // what tells this frame apart from the splash's, which uses the
+        // very same composite a few seconds later (intro_panel.h). The
+        // slot-1 and slot-2 tests are shadow reads, so the cost while the
+        // fix is off is nothing at all.
+        if (introPanelWants() && kind == 'N' && count == 4 &&
+            bindingGet(BindSlot::PsSrv1) && bindingGet(BindSlot::PsSrv2)) {
+            ResourceInfo info;
+            if (bindingResolve(bindingGet(BindSlot::Rtv0), &info) &&
+                info.isTexture2D) {
+                introPanelNoteFill(info.a, info.b);
+            }
         }
         // The menu backdrop (backdrop_fix.h), in the OFFSCREEN branch because
         // the blit it matches never lands in an eye texture -- the eye
@@ -1696,6 +1714,24 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         return DrawVerdict::kNone;
     }
     ++s->eyeDrawsThisFrame;
+
+    // The intro movie's panel (intro_panel.h). First thing in the eye
+    // branch, because it must see the composite before any other fix
+    // claims that draw -- and because a draw it matches is forwarded
+    // normally, so nothing below it is denied its turn on a frame this
+    // does not match. Recognised by shape and by sampling the surface
+    // the movie was converted into THIS frame; the constants are then
+    // checked for a screen-space placement before anything is bound, so
+    // the splash and the menu refuse it by their own numbers.
+    if (introPanelWants() && kind == 'X' && count == 6) {
+        ResourceInfo srv;
+        if (bindingResolve(bindingGet(BindSlot::PsSrv0), &srv) &&
+            srv.isTexture2D &&
+            introPanelOnComposite(self, kind, count, instances, srv.a,
+                                  srv.b)) {
+            return DrawVerdict::kIntroPanel;
+        }
+    }
 
     // Nominate the scene camera for the world shader: a big eye-target
     // draw's 208-byte constants are the engine-standard camera block
@@ -2838,6 +2874,7 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
                                           baseVertex, startInstance);
     });
     if (v == DrawVerdict::kPanel) endPanelOverride(self);
+    if (v == DrawVerdict::kIntroPanel) introPanelEndDraw(self);
 }
 
 // Read panel_distance_index, refusing anything that cannot be a float index.
@@ -3317,6 +3354,7 @@ void vScreenRefreshConfig() {
     quadProbeConfigure(cfg);
     loaderPanelConfigure(cfg);
     introProbeConfigure(cfg);
+    introPanelConfigure(cfg);
     backdropConfigure(cfg);
     fssScanConfigure(cfg);
     fssPanelConfigure(cfg);
@@ -3424,6 +3462,8 @@ void vScreenFrameBoundary() {
     if (g_state && g_state->ownerCtx) {
         quadProbeTick(g_state->ownerCtx);
         drawCensusTick(g_state->ownerCtx);
+        introPanelTick(g_state->ownerCtx,
+                       g_state->eyeDrawsLastFrame >= kSceneEyeDraws);
         // The scene flag retires the loader fix when the intro ends: the
         // same boundary the draw hook gates on, read at the frame edge.
         loaderPanelTick(g_state->ownerCtx,
@@ -4194,6 +4234,7 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     quadProbeConfigure(cfg);
     loaderPanelConfigure(cfg);
     introProbeConfigure(cfg);
+    introPanelConfigure(cfg);
     backdropConfigure(cfg);
     fssScanConfigure(cfg);
     fssPanelConfigure(cfg);
