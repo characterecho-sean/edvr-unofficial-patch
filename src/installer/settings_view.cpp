@@ -598,6 +598,13 @@ void openResolutionCombo(List* list, const RECT& box) {
                  fieldH > dp(list, 8) ? fieldH - dp(list, 8) : fieldH);
     MoveWindow(list->combo, box.left, box.top, box.right - box.left, fieldH + dp(list, 220),
                TRUE);
+    // The combo's own FIELD never shows: an empty window region clips it to
+    // zero pixels, so the painted box underneath stays the only field
+    // anybody sees and opening the list changes nothing above it. The
+    // dropdown is the combo's separate popup window, which a region on the
+    // combo does not touch -- so the list still drops, drawn our way, with
+    // the combo's native keyboard and wheel behaviour intact.
+    SetWindowRgn(list->combo, CreateRectRgn(0, 0, 0, 0), FALSE);
     ShowWindow(list->combo, SW_SHOW);
     SetFocus(list->combo);
     SendMessageW(list->combo, CB_SHOWDROPDOWN, TRUE, 0);
