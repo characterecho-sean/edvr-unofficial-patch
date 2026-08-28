@@ -95,4 +95,55 @@ bool journalInJumpTunnel();
 
 void journalWatchShutdown();
 
+// WHICH JOURNAL IS THIS SESSION'S, as a pure decision over times alone.
+//
+// Separated from the directory walk so it can be put in a table: the bug it
+// encodes was invisible by reading and cost a user three crashed sessions to
+// find (issue #19).
+//
+// WRITE TIME CANNOT TELL OUR JOURNAL FROM THE ONE THE LAST CRASH LEFT BEHIND.
+//
+// The watcher filtered on last-write time against notBefore, which is our start
+// minus thirty seconds of slack. That slack is not optional -- the journal for
+// this process is created around the moment the watcher arms, and the two clocks
+// are not promised to be ordered -- but it is also exactly wide enough to admit
+// the previous session's journal when that session ENDED inside it. A crash and
+// a quick relaunch is that case, and it is not hypothetical: in issue #19 the
+// game died and was restarted 15 and 19 seconds later, twice, and both times the
+// dead session's journal passed the test, won on write time, and was replayed
+// from the top. EDVR read the previous run's LoadGame and announced that
+// gameplay had started 0.1 seconds into a process still at the launcher. The
+// cold start in the same report -- no recent crash, nothing stale to find -- got
+// it right five minutes later, which is what a real LoadGame looks like.
+//
+// Creation time separates them and write time cannot. A dead session's journal
+// was created when THAT session started, which is however long it ran ago; ours
+// is created when the game launches, which is around now. So provenance outranks
+// recency: a file created since we started beats one merely written since,
+// whatever the write times say.
+//
+// The same thirty seconds of slack NARROWS the hole rather than closing it. What
+// a stale journal must now beat is the length of the session that wrote it, not
+// the gap between its crash and the relaunch -- so a run that died less than
+// thirty seconds after its own journal was created still slips through, and a
+// crash during startup in a three-mod D3D chain is exactly that shape. A much
+// smaller target than the old test, and not zero.
+//
+// The write-time test stays as a second tier rather than being replaced. If
+// creation times are unavailable or untrustworthy -- a filesystem that does not
+// keep them, a folder redirected somewhere exotic -- filtering on them alone
+// would find nothing, and the journal watcher would silently never arm. That is
+// the failure this project keeps meeting: a protection absent in exactly the
+// configuration nobody can diagnose from. A file that is merely live is still
+// adopted; the caller just refuses to treat its existing contents as ours.
+//
+// Times are FILETIME values as uint64. `count` entries, parallel arrays.
+// Returns the winner's index, or -1 when nothing is live enough to consider.
+struct JournalPick {
+    int  index = -1;   // -1: no candidate passed the write-time test
+    bool ours = false; // the winner was CREATED since notBefore
+};
+JournalPick journalPickNewest(const uint64_t* creation, const uint64_t* write,
+                              size_t count, uint64_t notBefore);
+
 }  // namespace edvr

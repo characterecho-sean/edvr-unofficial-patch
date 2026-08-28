@@ -79,6 +79,82 @@ constexpr size_t kStride = 0x18;
 // not chased several times over. Was 240 frames: 3.3s at 72Hz, 2s at 120.
 constexpr uint64_t kRescanCooldownMs = 2700;
 
+// THE FLAT COOLDOWN IS A FLOOR, AND NEAR A STATION IT BECAME THE RATE.
+//
+// kMaxRescans is documented above as bounding "the session's worst case at
+// about two minutes of scanning spread across hours", and that arithmetic
+// assumes rescans are paced by the array actually MOVING -- ten to thirty
+// seconds apart. They are not paced by that. A rescan that comes back
+// mid-rebuild re-arms on this cooldown alone, and near a station the array is
+// mid-rebuild continuously, so the next one fires the moment the cooldown ends.
+// Measured in issue #19: 2.7s cooldown plus a 1.5s walk is a rescan every 4.2
+// seconds, dead level, for seven minutes -- which spends all sixty-four on one
+// station visit and leaves the feature off for the twenty-five minutes of
+// session that followed. Not two minutes across hours; two minutes flat, then
+// nothing.
+//
+// So consecutive mid-rebuild answers back off. The FIRST one still retries in
+// 2.7 seconds, because a single genuine move is exactly what the rescan budget
+// is generous for and nothing about that case has changed. It is a run of them
+// -- the signature of a rebuild that is ongoing rather than finished -- that
+// doubles the wait. Cumulatively 4.2, 11.1, 23.4, 46.5, 91.2 seconds and so on,
+// so a seven-minute station visit is reached around the twelfth or thirteenth
+// rescan rather than the sixty-fourth, and the budget survives to serve the
+// moves it was sized for.
+//
+// THAT ARITHMETIC IS THE FLOOR AND NOT THE WHOLE STORY, because this feature's
+// own population defeats it: cameraViewNudgeRescan drops the cooldown to 670 ms
+// every time the player enters the external camera, deliberately, since cycling
+// past fresh candidates is what certifies one. Each nudged cycle still costs its
+// cooldown plus a walk, so restoring the old drain would take a camera entry
+// every three seconds sustained -- key-mashing, not play. Station photography at
+// ten to thirty entries in seven minutes lands two to three times above the
+// floor above, still far below sixty-four, and kMaxRescans bounds it either way.
+constexpr uint32_t kRebuildBackoffMax = 4;          // 2.7s -> 43.2s
+// A guard against a future edit to kRebuildBackoffMax, not the operative bound:
+// 2700 << 4 is 43.2s and already under this. Whichever of the two is lower is
+// the real ceiling, and it is deliberately the shift, because that is the one
+// the comment above does arithmetic with.
+constexpr uint64_t kRescanCooldownCapMs = 45000;
+
+// How long a run of mid-rebuild answers stays "the same episode".
+//
+// EXPIRING ON TIME RATHER THAN RESETTING AT EVERY EXIT, and the reason is that
+// the first version of this did the latter and was wrong within a day. A scan
+// leaves finishScan by five different paths -- found it, empty slot, one run
+// that read wrong, no run fits, mid-rebuild -- and two more sites certify a
+// candidate later (pollCandidates, the provisional re-read). Every one of those
+// except mid-rebuild ends the episode, so every one of them needed a reset, and
+// missing any left the counter standing: a station visit would push the run to
+// five, a certification twenty minutes later would leave it there, and the next
+// single genuine move -- the ordinary case this whole mechanism promises not to
+// touch -- would wait 43 seconds. That is the forty-second dead window the
+// rescan budget exists to prevent, reintroduced by the thing meant to protect
+// it.
+//
+// A list of sites to keep in sync is not a rule. Time is: an episode that has
+// gone quiet is over, however it ended, and no exit path has to know that. The
+// sites that can PROVE the episode ended still say so -- see the resets beside
+// each `usable = true` -- because a proof beats an inference and costs a line;
+// the timer is what covers the ones nobody remembers.
+//
+// MEASURED FROM WHEN THE RETRY WAS DUE, NOT FROM WHEN ITS ANSWER ARRIVED, and
+// that distinction is the whole correctness of the constant. The gap between
+// two mid-rebuild answers is the wait PLUS a heap walk, and the walk's length
+// is a user setting: camera_index_mb_per_frame is documented down to 1, and at
+// 8 MB/frame a 14 GB walk takes 20 seconds. Judged against answers, the margin
+// over the longest backoff (43.2s) was 16.8s, so anyone who lowered that
+// setting would have every episode expire, `shift` would never leave 0, and the
+// backoff would silently switch itself off -- the exact drain it exists to stop,
+// reintroduced by its own guard. Judged against the due time, the walk is out of
+// the comparison and this is a grace period for the walk alone.
+//
+// It is still not infinite: a walk longer than this expires the episode anyway,
+// which needs camera_index_mb_per_frame set very low indeed. That failure is
+// graceful -- the backoff stands down, kMaxRescans still bounds the session --
+// and it is stated rather than claimed away.
+constexpr uint64_t kRebuildEpisodeMs = 60000;
+
 // Empty slots the grouping will bridge rather than end a run on. The reasoning,
 // and the field evidence for it, is on cameraViewGroupRuns in the header.
 //
@@ -278,6 +354,20 @@ struct State {
     // still exists somewhere, and a scan is exactly the thing that finds it.
     bool      needRescan = false;
     uint32_t  rescans = 0;
+    // Consecutive rescans that came back mid-rebuild, and when the last one
+    // landed. The episode ends by going quiet rather than by being reset --
+    // see kRebuildEpisodeMs for why that is not the same thing. Drives the
+    // backoff described at kRebuildBackoffMax.
+    uint32_t  rebuildRuns = 0;
+    // When the last mid-rebuild retry was DUE, not when its answer came back.
+    // See kRebuildEpisodeMs: the difference is a heap walk whose length is a
+    // config value, and comparing against it made the guard setting-dependent.
+    uint64_t  rebuildDueMs = 0;
+    // Said once, when the rescan budget is gone. Without it the last word in
+    // the log is the mid-rebuild line's promise to scan "again in a few
+    // seconds", for a scan that is never going to happen -- the same silent
+    // give-up the attempts path already learned to announce.
+    bool      rescansNoted = false;
     // Whether the scan in flight is a RE-FIND (the array was had a moment ago)
     // rather than a first search. A re-find that comes back unusable retries
     // in seconds on the rescan budget; a first search that fails waits the
@@ -954,6 +1044,13 @@ void finishScan() {
         noteArrayBase(runs[candidates[0]].base);
         g_s.usable = true;
         g_s.cooldownUntilMs = 0;
+        // Finding it PROVES the rebuild episode ended; the timer only infers
+        // it, and only after a minute. Without this line a station episode that
+        // ends in a successful find leaves the run standing, and a single
+        // genuine move thirty seconds later waits 43 seconds -- the timer does
+        // not save it, because thirty seconds is not a minute. A proof is worth
+        // the line wherever one exists; kRebuildEpisodeMs covers the rest.
+        g_s.rebuildRuns = 0;
         // The probes above charged the budget while deciding. They were reads of
         // OTHER runs, not of the record finally chosen, so they must not count
         // against it.
@@ -1039,19 +1136,56 @@ void finishScan() {
     if (g_s.refinding) {
         if (g_s.attempts > 0) --g_s.attempts;
         g_s.needRescan = true;
-        g_s.cooldownUntilMs = nowMs() + kRescanCooldownMs;
+        // The whole decision is cameraViewRebuildBackoff, which is pure and
+        // has a table in gate_test. Nothing about it is judged here.
+        const CameraViewBackoff bo =
+            cameraViewRebuildBackoff(g_s.rebuildRuns, g_s.rebuildDueMs, nowMs());
+        const uint64_t wait = bo.waitMs;
+        g_s.rebuildRuns = bo.runs;
+        g_s.cooldownUntilMs = bo.dueMs;
+        // The episode's own clock. Deliberately NOT cooldownUntilMs, which
+        // cameraViewNudgeRescan lowers to 670 ms on a camera entry -- reading
+        // that back would shorten the grace by however much the player nudged.
+        g_s.rebuildDueMs = bo.dueMs;
+        // "NOT BEFORE", because this is a floor and not a schedule.
+        // cameraViewNudgeRescan lowers the cooldown to 670 ms when the player
+        // enters the external camera, and its guards are all false in exactly
+        // this state -- so a player who cycles cameras brings the next scan
+        // forward, and a line promising 43200 ms would be describing something
+        // that did not happen. Which is the failure the give-up line below was
+        // just added to fix; it is not worth reintroducing two hunks earlier.
         Log::get().note(
             "camera view: the array is here (%zu record(s) at its usual base) "
-            "but mid-rebuild. Scanning again in a few seconds rather than "
-            "spending a search attempt on a layout that will not be the layout "
-            "by then.",
-            g_s.records.size());
+            "but mid-rebuild. Not scanning again for %llu ms -- unless you "
+            "enter the external camera, which brings the next one forward to "
+            "about 0.7 s -- rather than spending a search attempt on a layout "
+            "that will not be the layout by then. Mid-rebuild answer %u in a "
+            "row, and the wait doubles "
+            "with them: a rebuild that is still going is not worth re-walking "
+            "the heap for at full rate. %u of %u rescans left.",
+            g_s.records.size(), (unsigned long long)wait, g_s.rebuildRuns,
+            kMaxRescans > g_s.rescans ? kMaxRescans - g_s.rescans : 0,
+            kMaxRescans);
         return;
     }
     Log::get().note("camera view:%s", retry);
 }
 
 }  // namespace
+
+CameraViewBackoff cameraViewRebuildBackoff(uint32_t runs, uint64_t dueMs,
+                                           uint64_t now) {
+    // An episode that has gone quiet is over, whichever path ended it --
+    // measured against when the retry was DUE, so that a slow heap walk is
+    // not mistaken for quiet. See kRebuildEpisodeMs.
+    if (dueMs != 0 && now > dueMs + kRebuildEpisodeMs) runs = 0;
+    // Doubling on the RUN, not on the total: the first mid-rebuild answer of
+    // an episode waits the flat cooldown, as it always did.
+    const uint32_t shift = runs < kRebuildBackoffMax ? runs : kRebuildBackoffMax;
+    uint64_t wait = kRescanCooldownMs << shift;
+    if (wait > kRescanCooldownCapMs) wait = kRescanCooldownCapMs;
+    return {runs + 1, wait, now + wait};
+}
 
 void cameraViewConfigure() {
     Config& cfg = Config::get();
@@ -1084,7 +1218,23 @@ void cameraViewRequestScan() {
     if (g_s.cooldownUntilMs != 0 && nowMs() < g_s.cooldownUntilMs) return;
     // A rescan after a move does not spend the find-it-first-time budget.
     if (g_s.needRescan) {
-        if (g_s.rescans >= kMaxRescans) return;
+        if (g_s.rescans >= kMaxRescans) {
+            // Once, so the log distinguishes "gave up" from "still waiting".
+            // The line before this one promised another scan in a few seconds,
+            // and without this that promise is the last thing anybody reads.
+            if (!g_s.rescansNoted) {
+                g_s.rescansNoted = true;
+                Log::get().note(
+                    "camera view: %u rescans used and the array was never caught "
+                    "in a settled state, so which camera preset you are on is "
+                    "unknown for the rest of this session. No further scan will "
+                    "run -- the earlier line promising one in a few seconds is "
+                    "superseded by this. Cycling cameras will not recover it; a "
+                    "relaunch will.",
+                    g_s.rescans);
+            }
+            return;
+        }
         ++g_s.rescans;
         g_s.needRescan = false;
         g_s.refinding = true;
@@ -1287,6 +1437,7 @@ void pollCandidates() {
         // so; not looking at all finds nothing and says nothing.
         noteArrayBase(g_s.records.empty() ? nullptr : g_s.records.front());
         g_s.usable = true;
+        g_s.rebuildRuns = 0;   // certified: the rebuild episode is provably over
         g_s.readFaults = 0;
         g_s.readFaultsNoted = false;
         const State::Cand& won = g_s.cands[qualifiedAt];
@@ -1410,6 +1561,7 @@ void cameraViewTick(uint32_t eyeDraws) {
             noteArrayBase(g_s.provisional - g_s.ordinal * kStride);
             g_s.usable = true;
             g_s.cooldownUntilMs = 0;
+            g_s.rebuildRuns = 0;   // the provisional held: episode provably over
             g_s.readFaults = 0;
             g_s.readFaultsNoted = false;
             g_s.badReads = 0;

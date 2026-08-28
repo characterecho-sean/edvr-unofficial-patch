@@ -62,6 +62,71 @@ void writeFatalNote(const std::wstring& dir, const wchar_t* text);
 // itself fail under loader lock. Safe to call before anything is initialised.
 void breadcrumb(const char* stage);
 
+// THE TRAIL STOPPED WHERE THE INTERESTING PART STARTS.
+//
+// Every crumb above is a loader-phase crumb. The last one a healthy session
+// writes is "vr: submit thread", about thirteen seconds in, and the next is
+// "gfx: process exit" however many hours later -- so a session that dies in
+// between leaves a trail identical to one that died the instant it finished
+// starting. Issue #19 is three such sessions: the logs end mid-heartbeat at 90
+// fps with no fault line, no FEATURE-DISABLED and no FATAL, and the breadcrumbs
+// place the death nowhere at all. A census over that reporter's whole file put
+// a third of their VR sessions in this state, which is a third of the evidence
+// arriving unreadable.
+//
+// The two calls below are what a crash needs to land somewhere.
+
+// One line every log.breadcrumb_heartbeat_seconds (30 by default, 0 to turn it
+// off), from the frame boundary. Costs an open/append/close at that cadence and
+// a clock read on the frames between.
+//
+// What it buys is the shape of the death, within a bound. A bare "no exit
+// crumb" says only that the process did not leave cleanly, at any point in a
+// three-hour session. Two consecutive heartbeats carry a frame count each, so
+// the trail dates the death to a half-minute window AND says whether the frames
+// were still arriving at rate -- which separates a crash from the slow starve,
+// and says it without needing the log at all, because breadcrumbs survive when
+// a log buffer does not.
+//
+// What it does NOT separate is a crash from a HANG: both stop the heartbeat and
+// the log at the same instant and look identical here. Read the eventual exit
+// -- or its absence -- for that.
+//
+// Interval is log.breadcrumb_heartbeat_seconds; 0 turns it off.
+void breadcrumbHeartbeat(uint64_t frameNo);
+
+// Names the exception, the faulting address and the module it lands in, on the
+// way out.
+//
+// This is the answer to the question issue #19 had to be sent to Event Viewer
+// for. The faulting module is the whole question in a three-mod D3D chain --
+// EDVR, EDHM and ReShade are all in this process, and "the game crashed" does
+// not distinguish them -- and a reporter should not have to know what Event
+// Viewer is to answer it.
+//
+// Chains to whatever filter was already installed, so the game's own crash
+// reporter still runs. Installed once, on the first export call.
+//
+// BEST EFFORT, AND THE LIMITS ARE WORTH KNOWING BEFORE TRUSTING A BLANK TRAIL.
+// SetUnhandledExceptionFilter is last-installed-wins, so anything that installs
+// after us -- the game, EDHM, ReShade -- silently takes the top of the chain and
+// this never runs. And EDVR's own faults on the frame path largely do not reach
+// it: guard.h wraps the hook bodies in __try and guardFilter absorbs them by
+// design, which is the whole point of that machinery. Not every line is inside
+// one -- hookedPresent's head, the thunks, DllMain and the log flusher thread
+// are not -- so what lands here is a fault nobody claimed: the game's, another
+// mod's, or one of ours from outside a guard.
+// A crash with no line from this is therefore evidence of very little; a crash
+// WITH one names the module, which is the question.
+void breadcrumbInstallCrashHandler();
+
+// Undoes the above. Must run on the FreeLibrary path: an unloaded module that
+// leaves its filter installed points the OS at freed address space, and the
+// next unhandled exception in the process dies with no report from anyone.
+// Only removes ours -- if another module installed on top, the chain is left
+// alone rather than having that one thrown away too.
+void breadcrumbRemoveCrashHandler();
+
 // Reads the host executable's FileVersion resource, e.g. "330683".
 //
 // Everything edvr asserts about this game was established against one build.

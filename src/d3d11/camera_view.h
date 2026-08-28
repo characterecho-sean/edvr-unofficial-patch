@@ -137,6 +137,29 @@ struct CameraViewVote {
     // narrower coincidence than the unanchored three-step bar tolerates.
     bool     anchored = false;
 };
+// The mid-rebuild retry decision, exposed as a pure function for the same
+// reason cameraViewCertStep is: every bug this arithmetic has had was a bug a
+// table could have caught, and it had no table.
+//
+// Three of them inside two review rounds, all in six lines. The run count was
+// reset at two of the seven paths that end an episode, so the backoff never
+// recovered and one ordinary array move waited 43 seconds. The expiry was
+// measured from when an answer ARRIVED rather than when the retry was DUE,
+// which made its margin depend on camera_index_mb_per_frame -- at 8 MB/frame
+// every episode expired and the backoff silently switched itself off. And the
+// cap constant could never bind. None of that is visible by reading; all of it
+// is one assertion each.
+//
+// `runs` and `dueMs` are the previous answer's; `nowMs` is this one's arrival.
+// The returned `dueMs` is carried into the next call, and is deliberately NOT
+// read back out of the live cooldown, which cameraViewNudgeRescan lowers.
+struct CameraViewBackoff {
+    uint32_t runs;     // consecutive mid-rebuild answers, this one included
+    uint64_t waitMs;   // how long before the next rescan may start
+    uint64_t dueMs;    // when that is -- carry it into the next call
+};
+CameraViewBackoff cameraViewRebuildBackoff(uint32_t runs, uint64_t dueMs, uint64_t nowMs);
+
 bool cameraViewCertStep(CameraViewVote* vote, uint32_t value, bool inCamera,
                         bool pressRecent, bool witnessed);
 

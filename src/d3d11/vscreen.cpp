@@ -17,6 +17,7 @@
 #include "../common/frame_flag.h"  // the eye-texture size, from the openvr half
 #include "../common/guard.h"
 #include "../common/log.h"
+#include "../common/proxy.h"  // breadcrumbHeartbeat, the steady-state trail
 #include "../common/timing.h"
 #include "../common/vtable_hook.h"
 #include "backdrop_fix.h"
@@ -3403,7 +3404,10 @@ void vScreenFrameBoundary() {
     // the render thread mid-frame.
     if (g_state && g_state->ownerCtx) {
         quadProbeTick(g_state->ownerCtx);
-        loaderPanelTick(g_state->ownerCtx);
+        // The scene flag retires the loader fix when the intro ends: the
+        // same boundary the draw hook gates on, read at the frame edge.
+        loaderPanelTick(g_state->ownerCtx,
+                        g_state->eyeDrawsLastFrame >= kSceneEyeDraws);
     }
     State* s = g_state;
     if (!s) return;
@@ -4116,6 +4120,13 @@ void vScreenFrameBoundary() {
     s->eyeDrawsThisFrame = 0;
     s->sceneDrawsThisFrame = 0;
     ++s->frameNo;
+
+    // The steady-state breadcrumb. Rate-limits itself to one line every
+    // log.breadcrumb_heartbeat_seconds (30 by default, 0 disables it); this
+    // call is a clock read and a compare on the frames between. It sits at
+    // the END of the boundary so the frame it reports is a frame that
+    // completed.
+    breadcrumbHeartbeat(s->frameNo);
 }
 
 void installVScreenFixes(ID3D11Device* device, HookMode mode) {
