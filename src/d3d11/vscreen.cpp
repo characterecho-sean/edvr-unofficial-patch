@@ -19,6 +19,7 @@
 #include "../common/log.h"
 #include "../common/timing.h"
 #include "../common/vtable_hook.h"
+#include "backdrop_fix.h"
 #include "billboard_fix.h"
 #include "binding_shadow.h"
 #include "cb_peek.h"
@@ -1157,7 +1158,11 @@ enum class DrawVerdict {
     // in fssRevealBegin/End.
     kFssReveal,
     kFssRing,
-    kFssDump
+    kFssDump,
+    // The menu backdrop blit (backdrop_fix.h): the still it samples is
+    // substituted for a debanded copy of itself, wrapped in
+    // backdropBegin/End.
+    kBackdrop
 };
 
 // kind, count and instances describe the draw for the census and the census
@@ -1312,7 +1317,7 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         !remlokWantsDraws() && !holoWantsDraws() && !witchstarWantsDraws() &&
         !sunglareWantsDraws() && !cbPeekEnabled() && !billboardWantsDraws() &&
         !drawCensusArmed() && !panelQuadWants() && !panelCurveWants() &&
-        !particleWantsDraws()) {
+        !particleWantsDraws() && !backdropWantsDraws()) {
         return DrawVerdict::kNone;
     }
 
@@ -1361,6 +1366,21 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         // returned from.
         if (drawCensusWantsOffscreen() && drawCensusArmed()) {
             drawCensusOffDraw(self, kind, count, instances);
+        }
+        // The menu backdrop (backdrop_fix.h), in the OFFSCREEN branch because
+        // the blit it matches never lands in an eye texture -- the eye
+        // composites sample its target later.
+        //
+        // BELOW the census line, and that position is the whole lesson. It
+        // first sat above the eye gate, so a matched draw returned before
+        // drawCensusOffDraw and the census stopped recording the one draw the
+        // investigation was about: the 06:16 capture showed no 16:9 BC1 at all
+        // while the fix was logging one a second earlier. The comment above
+        // this census call already said why -- a census taken while probing
+        // must record what the game SUBMITTED -- and the fix was written past
+        // it.
+        if (backdropOnDraw(self, kind, count, instances)) {
+            return DrawVerdict::kBackdrop;
         }
         // The resolution fix's draw-time backstop: if the game set the body
         // layer's half-size viewport BEFORE binding the target, the set-time
@@ -1605,6 +1625,17 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     // The loading hologram's pattern fix, same placement for the same reason.
     if (holoWantsDraws() && holoOnEyeDraw(kind, count, instances)) {
         return DrawVerdict::kHolo;
+    }
+
+    // The menu backdrop's COMPOSITE -- the eye-side half of backdrop_fix.
+    // The offscreen half above substitutes the still for the blit; this one
+    // substitutes it for the quad that lifts the blit's target into the eye,
+    // which is what actually bypasses the engine's downsample. Both wear the
+    // same verdict because both do the same thing: bind our bake into PS
+    // slot 0 for one draw and put the game's texture back after.
+    if (backdropWantsDraws() &&
+        backdropOnComposite(self, kind, count, instances)) {
+        return DrawVerdict::kBackdrop;
     }
 
     // The FSS panel composite pair, recognised by vertex-shader hash after
@@ -2258,7 +2289,9 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     if (v == DrawVerdict::kBillboard) billboardBegin(self);
     if (v == DrawVerdict::kGlareSteady) sunglareBegin(self);
     if (v == DrawVerdict::kParticle) particleBegin(self);
+    if (v == DrawVerdict::kBackdrop) backdropBegin(self);
     draw();
+    if (v == DrawVerdict::kBackdrop) backdropEnd(self);
     if (v == DrawVerdict::kParticle) particleEnd(self);
     if (v == DrawVerdict::kGlareSteady) sunglareEnd(self);
     if (v == DrawVerdict::kBillboard) billboardEnd(self);
@@ -2551,6 +2584,7 @@ void readCensusSkip(Config& cfg, State* s) {
     if (both == s->censusSkipSpec) return;
     memcpy(s->censusSkipSpec, both.c_str(), both.length() + 1);
 
+
     s->censusAutoW = 0;
     s->censusAutoH = 0;
     if (!autoSpec.empty()) {
@@ -2841,6 +2875,7 @@ void vScreenRefreshConfig() {
     fssResConfigure(cfg);
     remlokConfigure(cfg);
     holoConfigure(cfg);
+    backdropConfigure(cfg);
     fssScanConfigure(cfg);
     fssPanelConfigure(cfg);
     fssProbeConfigure(cfg);
@@ -3690,6 +3725,7 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     readCensusSkip(cfg, g_state);
     remlokConfigure(cfg);
     holoConfigure(cfg);
+    backdropConfigure(cfg);
     fssScanConfigure(cfg);
     fssPanelConfigure(cfg);
     fssProbeConfigure(cfg);
@@ -3901,6 +3937,7 @@ void shutdownVScreenFixes() {
     }
     remlokShutdown();
     holoShutdown();
+    backdropShutdown();
     fssScanShutdown();
     fssPanelShutdown();
     fssProbeShutdown();
