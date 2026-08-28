@@ -62,6 +62,13 @@ void writeFatalNote(const std::wstring& dir, const wchar_t* text);
 // itself fail under loader lock. Safe to call before anything is initialised.
 void breadcrumb(const char* stage);
 
+// breadcrumb(), numbered: "<stage> call N", for the Nth arrival at a call
+// site other components in the process can reach. Capped at nine per counter
+// -- the early arrivals and their ticks are the payload, and a caller in a
+// loop must not spend a file write per iteration. The caller owns the
+// counter, one per site, so two sites never share a numbering.
+void breadcrumbCounted(volatile long* counter, const char* stage);
+
 // Reads the host executable's FileVersion resource, e.g. "330683".
 //
 // Everything edvr asserts about this game was established against one build.

@@ -256,6 +256,47 @@ void noteSuppressedInterface(const char* name) {
     // the right failure for the bookkeeping, not for the refusal itself.
 }
 
+// The interface negotiation itself, in the unbuffered file, once per distinct
+// name.
+//
+// THE GAP THIS CLOSES. Between "vr: exports resolved" and "vr: arming
+// compositor hook" sits the whole of the runtime's start-up, and nothing was
+// ever written into it. Issue #15 died inside exactly that stretch: the gfx
+// half finished its hooks, the process ran on for thirteen more seconds, this
+// DLL loaded and resolved its exports, and then the trail ended -- with no vr
+// log at all, because the log opens inside the function below and a session
+// that dies first leaves no record of how far the negotiation got.
+//
+// Dropped BEFORE the real call AND before the early-out above it, so the two
+// failures that write no log whatsoever -- nothing to forward to, and a
+// runtime that never returns -- still name the interface being asked for.
+//
+// Once per distinct name, on the same reasoning as noteSuppressedInterface: a
+// caller that retries in a loop must not spend a file write per attempt. The
+// table is larger than that one because this records every interface asked
+// for rather than only the refused ones; a healthy session asks for four.
+void crumbInterfaceRequest(const char* name) {
+    static char seen[12][64] = {};
+    for (auto& s : seen) {
+        if (s[0] && strncmp(s, name, sizeof(s) - 1) == 0) return;  // already said
+        if (!s[0]) {
+            strncpy_s(s, name, _TRUNCATE);
+            // Built by hand rather than with a formatting call, which is
+            // breadcrumb's own rule about what it is allowed to touch.
+            const char kPrefix[] = "vr: interface ";
+            char line[96];
+            size_t n = 0;
+            for (const char* p = kPrefix; *p && n < sizeof(line) - 1; ++p) line[n++] = *p;
+            for (const char* p = s; *p && n < sizeof(line) - 1; ++p) line[n++] = *p;
+            line[n] = '\0';
+            edvr::breadcrumb(line);
+            return;
+        }
+    }
+    // Table full: a thirteenth distinct interface is past anything measured,
+    // and the crumbs that matter for placing a death are the early ones.
+}
+
 void shutdown() {
     edvr::shutdownSystemHook();
     edvr::shutdownCompositorHook();
@@ -273,6 +314,7 @@ extern "C" void* __cdecl edvr_impl_VR_GetGenericInterface(const char* interfaceV
     // has checked the ready flag on its behalf. It can legitimately be the first
     // export the game calls.
     edvr_lazyInit_openvr();
+    crumbInterfaceRequest(interfaceVersion ? interfaceVersion : "(null)");
     if (!g_realGetGenericInterface) {
         if (error) *error = 1;  // VRInitError_Unknown
         return nullptr;
@@ -289,6 +331,9 @@ extern "C" void* __cdecl edvr_impl_VR_GetGenericInterface(const char* interfaceV
     }
 
     void* iface = g_realGetGenericInterface(interfaceVersion, error);
+    // The runtime came back. Without this, a death inside its own lookup and a
+    // death just after it leave the same last crumb and cannot be told apart.
+    EDVR_BREADCRUMB_ONCE("vr: first interface returned");
     if (!iface || !interfaceVersion) return iface;
 
     void* result = iface;

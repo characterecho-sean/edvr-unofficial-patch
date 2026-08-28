@@ -81,6 +81,22 @@ bool gameBuildIsVerified() {
     return false;
 }
 
+void breadcrumbCounted(volatile long* counter, const char* stage) {
+    // Built by hand for breadcrumb()'s own reason: these sit on paths other
+    // components enter (vrclient's device creation runs through one), so no
+    // CRT formatting and no allocation.
+    const LONG n = InterlockedIncrement(counter);
+    if (n > 9 || !stage) return;
+    char line[192];
+    size_t k = 0;
+    while (*stage && k < sizeof(line) - 8) line[k++] = *stage++;
+    const char tail[] = " call ";
+    for (const char* p = tail; *p; ++p) line[k++] = *p;
+    line[k++] = static_cast<char>('0' + n);
+    line[k] = '\0';
+    breadcrumb(line);
+}
+
 void breadcrumb(const char* stage) {
     if (!stage) return;
 

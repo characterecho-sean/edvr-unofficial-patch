@@ -248,6 +248,32 @@ BOOL CALLBACK initOnceCallback(PINIT_ONCE, PVOID, PVOID*) {
             "against this machine's d3d11.dll with build.bat",
             g_missingExports, kExportCount);
     }
+
+    // THE EXPORT CENSUS, said once, because a field report cannot see the build
+    // output that says the same thing.
+    //
+    // Both numbers answer a question a log has been asked before. A proxy built
+    // against a different Windows than it runs on shows up as unresolved
+    // exports above; a host that imports d3d11 BY ORDINAL is only safe because
+    // gen_exports pins every export to the number the source DLL gave it, and
+    // for a long time it did not -- the .def named everything and pinned
+    // nothing, so ordinals were renumbered from 1 and an ordinal import reached
+    // the wrong function with the wrong signature. That failure is invisible
+    // from inside this DLL, so the fact that it cannot happen is worth stating.
+    //
+    // Counted from the table rather than from a generated constant: an entry
+    // GetProcAddress takes as an ordinal is one whose pointer is a small
+    // integer, which is the same test the loader applies.
+    size_t byOrdinal = 0;
+    for (size_t i = 0; i < kExportCount; ++i) {
+        if (reinterpret_cast<ULONG_PTR>(kExportNames[i]) <= 0xFFFF) ++byOrdinal;
+    }
+    edvr::Log::get().note(
+        "d3d11 exports: %zu forwarded, %zu of them nameless and resolved by "
+        "ordinal. Ordinals are pinned to the numbering of the d3d11.dll these "
+        "thunks were generated from, so an import by ordinal reaches the "
+        "function it asked for.",
+        kExportCount, byOrdinal);
     // Now, out from under the loader lock, is when another proxy can safely be
     // brought in.
     chainThroughOtherProxy(cfg);
@@ -381,6 +407,16 @@ extern "C" HRESULT WINAPI edvr_impl_D3D11CreateDevice(
     const D3D_FEATURE_LEVEL* featureLevels, UINT numFeatureLevels, UINT sdkVersion,
     ID3D11Device** ppDevice, D3D_FEATURE_LEVEL* pFeatureLevel,
     ID3D11DeviceContext** ppContext) {
+    // WHO CREATES DEVICES THROUGH US, in the unbuffered file. The loader
+    // hands this proxy to anything in the process that resolves "d3d11.dll"
+    // by name -- SteamVR's vrclient creates its own device when VR starts,
+    // which in issue #15 is exactly the window the process dies in. The log
+    // records the same event (logDeviceCreation) and lost it to the buffer
+    // tail every time; a crumb cannot be lost that way. Still written when
+    // advanced.install_hooks = 0, deliberately: in that configuration this
+    // is the only instrument left alive.
+    static volatile long s_calls = 0;
+    edvr::breadcrumbCounted(&s_calls, "gfx: D3D11CreateDevice");
     if (!g_realCreateDevice) return E_FAIL;
     ensureInitialised();
 
@@ -408,6 +444,9 @@ extern "C" HRESULT WINAPI edvr_impl_D3D11CreateDeviceAndSwapChain(
     const DXGI_SWAP_CHAIN_DESC* swapChainDesc, IDXGISwapChain** ppSwapChain,
     ID3D11Device** ppDevice, D3D_FEATURE_LEVEL* pFeatureLevel,
     ID3D11DeviceContext** ppContext) {
+    // Same census as D3D11CreateDevice above, its own counter and label.
+    static volatile long s_calls = 0;
+    edvr::breadcrumbCounted(&s_calls, "gfx: D3D11CreateDeviceAndSwapChain");
     if (!g_realCreateDeviceAndSwapChain) return E_FAIL;
     ensureInitialised();
 

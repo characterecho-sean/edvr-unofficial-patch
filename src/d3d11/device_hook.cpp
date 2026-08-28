@@ -356,6 +356,10 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
         return g_state->realPresent(self, syncInterval, flags);
     }
     const HRESULT hr = g_state->realPresent(self, syncInterval, flags);
+    // The frame boundary reached us AND the runtime came back -- the pair the
+    // openvr half gets from "vr: hookedSubmit entered". Placed after the real
+    // call rather than before it so the crumb also clears the runtime.
+    EDVR_BREADCRUMB_ONCE("gfx: first Present returned");
 
     // OUTSIDE the fault budget, and that is the point. Confirming is a file
     // delete; putting it inside would mean a burst of faults anywhere in the
@@ -367,6 +371,12 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
         elapsedMs(g_state->firstFrameMs, kSentinelConfirmMs)) {
         g_state->sentinelConfirmed = true;
         if (g_state->sentinel) g_state->sentinel->confirm();
+        // A CLOCK, not just a state. Reaching this proves the process survived
+        // kSentinelConfirmMs of frames -- the bound that otherwise has to be
+        // inferred from the sentinel's absence on the NEXT launch, which is
+        // only sound if nobody emptied edvr_logs in between. In #15 somebody
+        // may well have, and the inference carried the whole timing estimate.
+        breadcrumb("gfx: sentinel confirmed");
     }
 
     // The other half of 1f's gate. See the note at hookedSubmit.
@@ -723,12 +733,21 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
             exposureFixReclaimHooks(sceneRendered);
         }
     });
+    // Past the whole frame body, so "first Present returned" with no "first
+    // frame work done" after it puts the death inside our own frame work
+    // rather than in the runtime or the game.
+    EDVR_BREADCRUMB_ONCE("gfx: first frame work done");
     return hr;
 }
 
 HRESULT STDMETHODCALLTYPE hookedCreateSwapChain(IDXGIFactory* self, IUnknown* device,
                                                 DXGI_SWAP_CHAIN_DESC* desc,
                                                 IDXGISwapChain** out) {
+    // Numbered and unbuffered, like the device-create census in the proxy:
+    // a swapchain born in the death window is currently invisible, and where
+    // the game presents is what every Present-driven instrument hangs off.
+    static volatile long s_calls = 0;
+    breadcrumbCounted(&s_calls, "gfx: factory CreateSwapChain");
     const HRESULT hr = g_state->realCreateSwapChain(self, device, desc, out);
     // Only swapchains from the factory we attached to are the game's. A
     // wrapper mod makes its own through a factory sharing this vtable, and
@@ -744,6 +763,8 @@ HRESULT STDMETHODCALLTYPE hookedCreateSwapChainForHwnd(
     IDXGIFactory2* self, IUnknown* device, HWND hwnd, const DXGI_SWAP_CHAIN_DESC1* desc,
     const DXGI_SWAP_CHAIN_FULLSCREEN_DESC* fs, IDXGIOutput* restrictTo,
     IDXGISwapChain1** out) {
+    static volatile long s_calls = 0;
+    breadcrumbCounted(&s_calls, "gfx: factory CreateSwapChainForHwnd");
     const HRESULT hr =
         g_state->realCreateSwapChainForHwnd(self, device, hwnd, desc, fs, restrictTo, out);
     if (SUCCEEDED(hr) && out && *out &&
@@ -975,10 +996,50 @@ State& ensureState() {
     return *g_state;
 }
 
+// THE MASTER SWITCH: load, forward, and install NOTHING.
+//
+// One question needs this and no other setting can ask it: is a problem caused
+// by what EDVR HOOKS, or by EDVR being PRESENT? Those are different faults
+// with the same apparent cure, and every way of investigating them so far
+// tests both at once. Turning every fix off does not separate them --
+// panel_hooks_always keeps the render hooks installed on purpose, and
+// share_exposure only makes the exposure fix inert while its context hook
+// goes in regardless. Deleting d3d11.dll answers neither, because it removes
+// the presence along with the hooks.
+//
+// Presence is a real suspect, not a hypothetical one. A d3d11.dll in the game
+// folder is FIRST in the DLL search order, so anything in the process that
+// loads "d3d11.dll" by name gets this proxy instead of the system copy -- the
+// chained-proxy path a few hundred lines up exists because that happens in the
+// field. Issue #15 reproduces on every release from v0.4.0 to v0.10.1 on a rig
+// whose game dies during VR start-up, thirteen seconds after these hooks are
+// finished, and nothing in the ini could tell the two causes apart.
+//
+// Checked at each of the three entry points rather than at the one caller that
+// reaches them today. A switch whose whole job is to prove nothing was
+// installed must not depend on the call graph keeping the shape it has.
+bool refuseHooks() {
+    if (Config::get().getBool("advanced.install_hooks", true)) return false;
+    static volatile long said = 0;
+    if (InterlockedExchange(&said, 1) == 0) {
+        breadcrumb("gfx: hooks NOT installed (advanced.install_hooks = 0)");
+        Log::get().note(
+            "advanced.install_hooks = 0: NO hooks are being installed this "
+            "session -- no device, context, swapchain or DXGI factory hook, no "
+            "resolution patch, and every fix off with them. The game renders "
+            "exactly as it would with d3d11.dll deleted, except that this DLL "
+            "is still in the folder and still being loaded. If a problem "
+            "survives this, it is not caused by anything EDVR hooks. Set it "
+            "back to 1 when the test is over; nothing works while it is 0.");
+    }
+    return true;
+}
+
 }  // namespace
 
 void hookDevice(ID3D11Device* device) {
     if (!device) return;
+    if (refuseHooks()) return;
     State& s = ensureState();
     if (s.device) {
         // SAID OUT LOUD, once per extra device (2026-08-24).
@@ -1046,6 +1107,23 @@ void hookDevice(ID3D11Device* device) {
         Log::get().note("NOTE: the crash sentinel could not be written, so a crash in "
                         "these hooks will not disable them next launch.");
     }
+    // THE TRAIL USED TO END HERE, AND THAT WAS THE WHOLE PROBLEM.
+    //
+    // Everything past this line -- the first vtable write, the context probe,
+    // three fix installs, the resolution patch, the Present hook and every
+    // frame -- reported only to the log, which is flushed by a 250 ms thread
+    // and loses its tail to a TerminateProcess. Issue #15 died somewhere in
+    // that stretch on three consecutive launches and left six breadcrumb
+    // lines, none of them past this one, so the stage could not be named.
+    //
+    // The openvr half has had first-frame crumbs since it was written
+    // (vr: hookedSubmit entered, vr: submit thread). A d3d11-only install had
+    // none at all, which is exactly the install that reported the crash.
+    //
+    // What follows is one crumb per irreversible step. They cost a CreateFile
+    // and a WriteFile each, once, at startup; the two on the frame path are
+    // one-shot. Same rule the FAULT totals already follow: a diagnostic that
+    // a hard exit can eat is not a diagnostic.
     breadcrumb("gfx: arming d3d11 hooks");
 
     s.shaderDump = sentinelCfg.getBool("advanced.glare_shader_dump", false);
@@ -1078,6 +1156,7 @@ void hookDevice(ID3D11Device* device) {
         return;
     }
     s.device = device;
+    breadcrumb("gfx: device hooks committed");
 
     // The hook mechanism, decided ONCE from the immediate context and shared
     // by both context installers so they cannot split modes on the one object
@@ -1093,12 +1172,21 @@ void hookDevice(ID3D11Device* device) {
         }
     }
 
+    // The mode itself, unbuffered. It is the variable that separated the two
+    // v0.9.2 rigs in #15 -- one healthy on InPlace, one dying on CopyVptr --
+    // and it was reaching the log only, where a truncated tail loses it.
+    breadcrumb(ctxMode == HookMode::CopyVptr ? "gfx: context mode CopyVptr"
+                                             : "gfx: context mode InPlace");
+
     installExposureFix(device, ctxMode);
+    breadcrumb("gfx: exposure fix installed");
     // Before the vScreen fixes, which ask it whether it needs the eye-draw
     // count. It installs no hooks of its own -- it is driven from vScreen's Map
     // and Unmap -- so nothing else depends on the order.
     installGlitchFrameFix();
+    breadcrumb("gfx: flash fix installed");
     installVScreenFixes(device, ctxMode);
+    breadcrumb("gfx: vscreen fixes installed");
 
     // The panel resolution, if asked for. Applied here because it has to land
     // before the game builds its render chain, and the device exists first.
@@ -1121,7 +1209,13 @@ void hookDevice(ID3D11Device* device) {
         // the patch is not asked for or refuses.
         const uint32_t kStockW = 1920, kStockH = 1080;
 
+        // Bracketed rather than reported once, because this is the only thing
+        // in the DLL that writes to the game's CODE. "starting" with no "done"
+        // after it is a different failure from every other step here, and the
+        // unbuffered file is the only place that distinction survives.
+        if (w && h) breadcrumb("gfx: resolution patch starting");
         const bool applied = (w && h) && applyVScreenModeResolution(w, h);
+        if (w && h) breadcrumb("gfx: resolution patch done");
 
         // Tell vScreen what the panel ACTUALLY renders at, from the outcome
         // rather than the request. This return value used to be discarded, and
@@ -1132,12 +1226,26 @@ void hookDevice(ID3D11Device* device) {
         vScreenSetPanelSize(applied ? w : kStockW, applied ? h : kStockH);
     }
     hookFactoryForDevice(device);
+    breadcrumb("gfx: device hook path complete");
 }
 
 void hookSwapChain(IDXGISwapChain* swapChain) {
     if (!swapChain) return;
+    if (refuseHooks()) return;
     State& s = ensureState();
-    if (s.swapChain) return;
+    if (s.swapChain) {
+        // A swapchain we are NOT following, said once where a hard exit
+        // cannot eat it. The frame boundary, the sentinel clock and every
+        // Present-driven instrument stay on the FIRST chain -- so if the
+        // game moves its presentation to a new one, all of them go quiet
+        // while the process lives, which reads as a stall or a death from
+        // the log. Issue #15's Present gaps are exactly that ambiguity.
+        if (swapChain != s.swapChain) {
+            EDVR_BREADCRUMB_ONCE(
+                "gfx: another swapchain exists; frame work stays on the first");
+        }
+        return;
+    }
 
     if (!s.swapChainHook.attach(swapChain) ||
         s.swapChainHook.executablePrefix() <= kSwapPresent) {
@@ -1151,11 +1259,13 @@ void hookSwapChain(IDXGISwapChain* swapChain) {
         return;
     }
     s.swapChain = swapChain;
+    breadcrumb("gfx: Present hooked");
     Log::get().note("Present hook installed");
 }
 
 void hookFactoryForDevice(ID3D11Device* device) {
     if (!device) return;
+    if (refuseHooks()) return;
     State& s = ensureState();
     if (s.factoryHook.attached()) return;
 
