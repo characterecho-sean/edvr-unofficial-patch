@@ -27,6 +27,27 @@ Wanted instead:
 Most players press Escape through it, which is why this was never reported as
 a bug: it is skipped rather than endured.
 
+**And the constraint that decides the whole design**, from the field after
+the flight:
+
+> the video is supposed to tie into the splash screen that gets displayed
+> after it ends so it would be great if we played in the same virtual panel
+> the splash occupies
+
+This is not a comfort preference to be tuned by feel. The movie's last frame
+is meant to become the splash: if the two are drawn at different sizes or
+distances, the cut is broken however pleasant each one looks alone. **The
+target placement is therefore not a number anybody chooses — it is whatever
+the splash's own quad already uses.**
+
+That is reachable, because the two are the same draw. `menu-backdrop.md`
+measured the menu still arriving in the eyes as six-index quads through
+**`vh=EF103A7CB4A8369A`** from a 1920x1080 surface, which is the signature
+this flight found for the movie panel, exactly. Same shader, same source
+size, same shape of draw. Whether the two differ in their four vertices --
+and by how much -- is the one thing flight 3 has to answer, and it answers it
+by measuring both rather than by inventing either.
+
 ## What the movie is (measured, from the install)
 
 `Products\elite-dangerous-odyssey-64\Movies\` holds ten Matroska/WebM files.
@@ -169,28 +190,52 @@ size matched nothing, silently. It is now offered every draw
 
 ## The flight plan from here
 
-**Flight 3 — the geometry.**
+**Flight 3 — the geometry, in BOTH states.**
 
 ```ini
 [advanced]
-quad_probe = 5424x5356:X:6
+quad_probe = 5424x5356:X:6:120
+census_at_ms = 4000
+intro_probe = 0
 ```
 
 Two 6-index quads reach each eye and the probe is occurrence-aware, so it
 captures all four and logs each one's rectangle plus the bytes past the
 position. The movie's is the pair drawn from an **80-byte** vertex buffer at
 stride 20; the other pair (`vh=A888D51024D9798E`) is stride 8 out of a 32 KB
-buffer and has a constant buffer. They cannot be confused.
+buffer and binds a constant buffer. They cannot be confused.
 
-Pair it with `census_at_ms = 4000` in the same launch to close open question
-2 at no extra cost.
+`:120` matters. Without it the capture lands on the first matching frame,
+which is frame 2357 — the 2719 ms handover — the single least typical frame
+in the session. 120 matching frames is about two seconds at the ~62 fps this
+session measured through the movie, so the capture falls in steady playback.
+The `4000` census closes open question 2 in the same launch.
 
-**Then the fix.** With the rectangle in hand it is a vertex rewrite of four
-vertices per eye — the smallest target this project has had. `panel_quad.cpp`
-and `loader_panel.cpp` both already re-issue a matched draw from rebuilt
-geometry, and the draw is recognised by shape and by what it samples (a
-6-index quad into an eye texture sampling a 1920x1080 surface whose own
-source is three R8 planes), not by a game version.
+**Then re-arm for the splash.** The probe takes one capture per session and
+stands down; clearing the spec and setting it again asks for another. Since
+the ini is re-read about once a second, that can be done from outside the
+game while the player sits at the menu — no headset off, one launch, two
+captures: the movie's quad and the splash's, in the same session, on the
+same rig, at the same render scale. Those are the two rectangles the fix
+needs and the only two.
+
+**Then the fix.** With both rectangles in hand it is a rewrite of four
+vertices per eye, and the values written are **the splash's own**, not
+anybody's chosen placement — which is what makes the cut from movie to
+splash land. `panel_quad.cpp` and `loader_panel.cpp` both already re-issue a
+matched draw from rebuilt geometry, and the draw is recognised by shape and
+by what it samples (a 6-index quad into an eye texture sampling a 1920x1080
+surface whose own source is three R8 planes), not by a game version.
+
+One ordering problem to solve when it is written: **the movie plays before
+the splash does**, so the geometry to copy has not been seen yet when it is
+first needed. Three ways out, in order of preference, to be decided against
+the measurement rather than now — the two quads turn out to differ by
+something derivable (a scale the shader or the source size implies); or the
+splash's geometry is learned in one session and kept; or the movie's quad is
+rebuilt from the same rule the splash's follows, once that rule is read off
+two measured rectangles. If they turn out to be identical, the premise is
+wrong and this page says so.
 
 **What the fix will not do:** phase A, and the freeze. Both are the game
 bringing VR up, before it has handed the compositor anything.
