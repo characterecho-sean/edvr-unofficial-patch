@@ -80,10 +80,16 @@ constexpr uint32_t kCb2Bytes = 48;
 constexpr uint32_t kSettleDeadline = 6;
 
 // The withhold rides a CHAIN of panel-bearing frames and re-verifies its
-// classification about every two seconds of them. One panel-less frame is
-// forgiven (a hiccup); two in a row mean the dialogs are gone.
+// classification about every two seconds of them. The grace is GENEROUS:
+// the field saw the scrim flash at every new modal when it was two frames,
+// because the loader leaves short panel-less gaps between its dialogs.
+// Seconds of gap are safe to forgive -- gameplay never reaches this code
+// (the scene gate stops the draw hook), the census shows menu frames carry
+// no panels, and a panel returning after ANY gap triggers an immediate
+// re-verification, so even a wrong resumption is corrected within a few
+// frames.
 constexpr uint32_t kReverifyFrames = 120;
-constexpr uint32_t kChainGrace = 2;
+constexpr uint32_t kChainGrace = 300;
 
 // After this many consecutive refusals, arming goes back to requiring two
 // identical frames -- so a panel-bearing screen that is NOT the loader
@@ -807,8 +813,10 @@ void loaderPanelTick(ID3D11DeviceContext* ctx) {
                 chainOff();
             }
         } else {
+            const bool returned = g_chainMissed != 0;
             g_chainMissed = 0;
-            if (g_frame >= g_reverifyAt && !g_collecting && !g_settleFrom) {
+            if ((returned || g_frame >= g_reverifyAt) && !g_collecting &&
+                !g_settleFrom) {
                 dropPending();
                 g_collecting = true;
             }
