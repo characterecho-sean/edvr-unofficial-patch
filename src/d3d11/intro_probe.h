@@ -44,6 +44,13 @@
 //                line says what the GAME wanted, which is what decides
 //                whether the intro's void is already grey-to-black material.
 //
+// ONE DRAW CLASS IT DOES NOT COUNT: a draw the particle billboard fix has
+// matched and substituted returns from beginPanelOverride before this is
+// reached. That is the draw census's blind spot too, and being consistent
+// with the census matters more here than being complete -- these lines get
+// read beside DC lines from the same session. No particle draws during a
+// startup, which is what this is for.
+//
 // It changes nothing. It is off by default, free when off (the draw path
 // does not call in), and stands itself down after kWindowMs or kMaxLines so
 // a session left with it on does not grow a log all evening.
