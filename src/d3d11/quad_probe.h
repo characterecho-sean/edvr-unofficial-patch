@@ -1,36 +1,35 @@
-// Reading the rectangles a batched UI draw actually paints.
+// Reading the rectangles a batched UI draw actually paints -- every draw of
+// that shape in one frame, not just the first.
 //
 // WHY THIS EXISTS
 //
-// Elite draws its solid UI rectangles in batches: one call, one textureless
-// shader, several quads. The loading dialog's translucent wash and the
-// dialog's own solid black backing are both in such a call, and from outside
-// they are indistinguishable -- same shader, same target, same constants,
-// nothing in a draw census that separates one rectangle from another.
+// Elite draws its solid UI rectangles through one textureless shader into one
+// shared 4 MB vertex buffer, and a census names such draws only by signature:
+// kind, index count, target. Signatures COLLIDE. The loading screen's
+// full-view backdrop and the dialog's own box are both 30-index bordered
+// panels, and every signature-matched instrument -- the offscreen skip, the
+// sub-draw skip -- hits both at once. That co-disappearance was read for a
+// while as proof they were one batched call; it was two calls sharing a
+// signature, and the first build of this probe, which captured only the FIRST
+// match per session, could never have shown the second one.
 //
-// Everything tried without this measured nothing and cost a flight each:
-// dropping the whole draw takes the dialog with the wash; dropping quads by
-// index names them only by what disappears, and a verbal report of what
-// disappeared is ambiguous when two dark things overlap; clipping to a
-// hand-tuned box resizes whichever quad happens to be in the range, which
-// turned out to be the one worth keeping.
+// So: at the first frame containing a match, capture EVERY matching draw --
+// each draw's index range, the shared vertex buffer once -- and log, per
+// occurrence, its baseVertex, startIndex and each quad's rectangle. Two
+// occurrences with the same signature and different extents settle in one
+// flight what a week of skip probes could not.
 //
-// The positions are right there in the vertex buffer. Six indices to a quad
-// at topology 4, stride 24, position first -- so each quad's rectangle can be
-// read outright and the wash told from the backing by SIZE, which is the one
-// thing that actually distinguishes them.
+// Each quad's line also carries the REST of its first vertex as hex: the
+// stride is 24 and only the float2 position at offset 0 is understood, so
+// those sixteen bytes are where a colour, a UV or a per-element transform
+// would live. Two same-shaped draws that differ only there -- a translucent
+// backdrop against a solid black box -- differ in exactly those bytes.
 //
-// THE INSTRUMENT: at a matched draw, GPU-copy the index range and the vertex
-// buffer into staging; read them back a few frames later, when the copy has
-// certainly executed and mapping will not stall; log each quad's rectangle;
-// then stand down for the session. panel_quad.h established this shape for a
-// simpler case -- an 80-byte buffer and four vertices, no index resolution.
-//
-// WHAT IT ASSUMES, and how it tells you when it is wrong. Stride 24 with
-// float3 position at offset 0 is inferred from the census, not confirmed. The
-// log prints the raw floats beside the decoded rectangles: plausible
-// coordinates mean the layout is right, and garbage means it is not and the
-// offset needs moving rather than the fix needing rethinking.
+// THE INSTRUMENT: GPU-copy at the matched draws, read back a few frames
+// later when the copies have certainly executed and mapping will not stall,
+// log, stand down for the session. Setting the spec again -- off and back on
+// -- asks for another capture without a relaunch. panel_quad.h established
+// the copy-settle-map shape for a simpler case.
 //
 // Off by default, and free when off: nothing is created, nothing is copied,
 // and the draw path does not call in.
@@ -45,7 +44,7 @@ namespace edvr {
 class Config;
 
 // Reads advanced.quad_probe = WIDTHxHEIGHT:KIND:COUNT -- the same shape the
-// skip and clip specs take, naming one batched draw into one offscreen
+// skip and clip specs take, naming one draw signature into one offscreen
 // target. Empty is off.
 void quadProbeConfigure(Config& cfg);
 
@@ -53,14 +52,15 @@ void quadProbeConfigure(Config& cfg);
 // out of the draw path's condition for the rest of the session.
 bool quadProbeWants();
 
-// Does this draw match, and has the capture not been taken? The caller passes
-// the draw's own arguments because the verdict path cannot see them.
+// Does this draw match? Called per draw; the first match opens a one-frame
+// capture window and every match inside it is recorded as an occurrence.
 bool quadProbeOnDraw(ID3D11DeviceContext* ctx, uint32_t targetW,
                      uint32_t targetH, char kind, uint32_t count,
                      uint32_t instances, uint32_t startIndex, int baseVertex);
 
-// Once per frame: retire a capture whose copy has had time to execute, decode
-// it and log the rectangles. Cheap when nothing is pending.
+// Once per frame: close a capture window at its frame's edge, retire the
+// settled copies, decode and log every occurrence. Cheap when nothing is
+// pending.
 void quadProbeTick(ID3D11DeviceContext* ctx);
 
 void quadProbeShutdown();

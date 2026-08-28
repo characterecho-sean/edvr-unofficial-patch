@@ -4,6 +4,7 @@
 
 #include <d3d11.h>
 
+#include <cstdio>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -20,13 +21,25 @@ namespace {
 constexpr uint32_t kIndicesPerQuad = 6;
 
 // The vertex buffer these draws share is 4 MB and rewritten every frame, so
-// the copy has to be taken AT the matched draw. It is taken once per session.
+// the copy has to be taken AT the matched draws, once, in their own frame.
 constexpr uint32_t kMaxVertexBytes = 4u << 20;
 
-// Frames to let the copy execute before mapping. panel_quad's number: long
+// Matching draws recorded in the capture frame. The hunt that built this
+// found two; a frame with sixteen same-signature draws is a different
+// mystery, and the log says how many were left uncopied.
+constexpr uint32_t kMaxOccurrences = 16;
+
+// Index bytes the capture will hold across all occurrences.
+constexpr uint32_t kIbStageBytes = 64u << 10;
+
+// Frames to let the copies execute before mapping. panel_quad's number: long
 // enough that the map never stalls the render thread, short enough that a
 // capture is retired within a blink.
 constexpr uint32_t kSettleFrames = 4;
+
+// Hex bytes of a quad's first vertex printed after its rectangle: everything
+// past the float2 position, capped to keep a log line a log line.
+constexpr uint32_t kTailBytesMax = 32;
 
 FaultBudget g_budget("quadProbe", 4);
 
@@ -34,27 +47,45 @@ bool     g_armed = false;
 uint32_t g_wantW = 0, g_wantH = 0;
 char     g_wantKind = 0;
 uint32_t g_wantN = 0;
-bool     g_taken = false;          // one capture per session
-// The fix supplies its own capture criteria when no probe spec is set. Zero
-// target dimensions then mean "any offscreen surface big enough to be an
-// interface", because the fix must work on a rig whose surface is not the
-// size this was measured on -- that number moves with render scale.
+bool     g_taken = false;          // one capture per session; re-arm by
+                                   // setting the spec off and on again
+
+struct Occ {
+    uint32_t ibOffset = 0;         // bytes into the index staging buffer
+    int      baseVertex = 0;
+    uint32_t startIndex = 0;
+    uint32_t instances = 0;
+    DXGI_FORMAT ibFormat = DXGI_FORMAT_UNKNOWN;
+};
 
 ID3D11Buffer* g_ibStage = nullptr;
 ID3D11Buffer* g_vbStage = nullptr;
-uint32_t      g_pendingFrame = 0;  // 0 = nothing pending
+Occ           g_occ[kMaxOccurrences];
+uint32_t      g_occCount = 0;
+uint32_t      g_occDropped = 0;
+uint32_t      g_ibFill = 0;
+bool          g_windowOpen = false;   // the capture frame is still running
+uint32_t      g_windowFrame = 0;
+uint32_t      g_pendingFrame = 0;     // 0 = nothing settling
 uint32_t      g_frame = 0;
-uint32_t      g_capIndexCount = 0;
 uint32_t      g_capStride = 0;
 uint32_t      g_capVertexBytes = 0;
-int           g_capBaseVertex = 0;
-DXGI_FORMAT   g_capIbFormat = DXGI_FORMAT_UNKNOWN;
 
 void failOnce(const char* why) {
     static bool noted = false;
     if (noted) return;
     noted = true;
     Log::get().note("quad probe: %s. No capture this session.", why);
+}
+
+void dropCapture() {
+    if (g_ibStage) { g_ibStage->Release(); g_ibStage = nullptr; }
+    if (g_vbStage) { g_vbStage->Release(); g_vbStage = nullptr; }
+    g_occCount = 0;
+    g_occDropped = 0;
+    g_ibFill = 0;
+    g_windowOpen = false;
+    g_pendingFrame = 0;
 }
 
 }  // namespace
@@ -99,10 +130,12 @@ void quadProbeConfigure(Config& cfg) {
     }
     g_wantW = w; g_wantH = h; g_wantKind = kind; g_wantN = n;
     if (armed && !g_armed) {
-        Log::get().note("quad probe ARMED on the %c:%u draw into a %ux%u "
-                        "target: its %u quads will be copied once and their "
-                        "rectangles logged. Nothing is changed.",
-                        kind, n, w, h, n / kIndicesPerQuad);
+        Log::get().note("quad probe ARMED on %c:%u draws into a %ux%u target: "
+                        "the first frame containing one has EVERY such draw "
+                        "copied, and each occurrence's quads are logged with "
+                        "the bytes past the position. Nothing is changed. Set "
+                        "the spec off and on again for another capture.",
+                        kind, n, w, h);
     }
     g_armed = armed;
 }
@@ -112,10 +145,18 @@ bool quadProbeWants() { return g_armed && !g_taken; }
 bool quadProbeOnDraw(ID3D11DeviceContext* ctx, uint32_t targetW,
                      uint32_t targetH, char kind, uint32_t count,
                      uint32_t instances, uint32_t startIndex, int baseVertex) {
-    (void)instances;
     if (!g_armed || g_taken || g_pendingFrame || !ctx) return false;
     if (targetW != g_wantW || targetH != g_wantH) return false;
     if (kind != g_wantKind || count != g_wantN) return false;
+
+    // The capture window is the FIRST frame a match lands in. A match in a
+    // later frame indexes a rewritten buffer and cannot join this capture.
+    if (g_windowOpen && g_windowFrame != g_frame) return false;
+
+    if (g_occCount >= kMaxOccurrences) {
+        ++g_occDropped;
+        return false;
+    }
 
     bool started = false;
     guardedBudget(g_budget, [&] {
@@ -133,44 +174,66 @@ bool quadProbeOnDraw(ID3D11DeviceContext* ctx, uint32_t targetW,
             return;
         }
         const UINT idxSize = (ibFmt == DXGI_FORMAT_R16_UINT) ? 2u : 4u;
-
-        D3D11_BUFFER_DESC vd{};
-        vb->GetDesc(&vd);
-        const UINT vBytes = vd.ByteWidth > kMaxVertexBytes ? kMaxVertexBytes
-                                                           : vd.ByteWidth;
+        const UINT need = count * idxSize;
 
         ID3D11Device* dev = nullptr;
         ctx->GetDevice(&dev);
         if (dev) {
-            D3D11_BUFFER_DESC sd{};
-            sd.Usage = D3D11_USAGE_STAGING;
-            sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-            sd.ByteWidth = count * idxSize;
-            bool ok = SUCCEEDED(dev->CreateBuffer(&sd, nullptr, &g_ibStage));
-            sd.ByteWidth = vBytes;
-            ok = ok && SUCCEEDED(dev->CreateBuffer(&sd, nullptr, &g_vbStage));
-            if (ok) {
-                D3D11_BOX ibBox{};
-                ibBox.left = ibOff + startIndex * idxSize;
-                ibBox.right = ibBox.left + count * idxSize;
-                ibBox.bottom = 1; ibBox.back = 1;
-                ctx->CopySubresourceRegion(g_ibStage, 0, 0, 0, 0, ib, 0, &ibBox);
-                D3D11_BOX vbBox{};
-                vbBox.left = 0;
-                vbBox.right = vBytes;
-                vbBox.bottom = 1; vbBox.back = 1;
-                ctx->CopySubresourceRegion(g_vbStage, 0, 0, 0, 0, vb, 0, &vbBox);
-                g_capIndexCount = count;
-                g_capStride = stride;
-                g_capVertexBytes = vBytes;
-                g_capBaseVertex = baseVertex;
-                g_capIbFormat = ibFmt;
-                g_pendingFrame = g_frame + kSettleFrames;
+            bool ok = true;
+            if (!g_ibStage) {
+                D3D11_BUFFER_DESC sd{};
+                sd.Usage = D3D11_USAGE_STAGING;
+                sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+                sd.ByteWidth = kIbStageBytes;
+                ok = SUCCEEDED(dev->CreateBuffer(&sd, nullptr, &g_ibStage));
+            }
+            if (ok && !g_vbStage) {
+                D3D11_BUFFER_DESC vd{};
+                vb->GetDesc(&vd);
+                D3D11_BUFFER_DESC sd{};
+                sd.Usage = D3D11_USAGE_STAGING;
+                sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+                sd.ByteWidth = vd.ByteWidth > kMaxVertexBytes ? kMaxVertexBytes
+                                                              : vd.ByteWidth;
+                ok = SUCCEEDED(dev->CreateBuffer(&sd, nullptr, &g_vbStage));
+                if (ok) {
+                    // The whole buffer, once. Every occurrence this frame
+                    // indexes into it, and the game appends with no-overwrite
+                    // maps, so a copy queued at the first occurrence sees the
+                    // frame's writes by the time the GPU executes it.
+                    D3D11_BOX all{};
+                    all.right = sd.ByteWidth;
+                    all.bottom = 1; all.back = 1;
+                    ctx->CopySubresourceRegion(g_vbStage, 0, 0, 0, 0,
+                                               vb, 0, &all);
+                    g_capVertexBytes = sd.ByteWidth;
+                    g_capStride = stride;
+                }
+            }
+            if (ok && g_ibStage && g_vbStage && g_ibFill + need <= kIbStageBytes) {
+                D3D11_BOX box{};
+                box.left = ibOff + startIndex * idxSize;
+                box.right = box.left + need;
+                box.bottom = 1; box.back = 1;
+                ctx->CopySubresourceRegion(g_ibStage, 0, g_ibFill, 0, 0,
+                                           ib, 0, &box);
+                Occ& o = g_occ[g_occCount];
+                o.ibOffset = g_ibFill;
+                o.baseVertex = baseVertex;
+                o.startIndex = startIndex;
+                o.instances = instances;
+                o.ibFormat = ibFmt;
+                ++g_occCount;
+                g_ibFill += need;
+                g_windowOpen = true;
+                g_windowFrame = g_frame;
                 started = true;
+            } else if (ok) {
+                ++g_occDropped;
             } else {
                 failOnce("the staging buffers could not be created");
-                if (g_ibStage) { g_ibStage->Release(); g_ibStage = nullptr; }
-                if (g_vbStage) { g_vbStage->Release(); g_vbStage = nullptr; }
+                dropCapture();
+                g_taken = true;   // do not retry into the same failure
             }
             dev->Release();
         }
@@ -182,9 +245,15 @@ bool quadProbeOnDraw(ID3D11DeviceContext* ctx, uint32_t targetW,
 
 void quadProbeTick(ID3D11DeviceContext* ctx) {
     ++g_frame;
+    // The capture frame ended: close the window and let the copies settle.
+    if (g_windowOpen && g_frame > g_windowFrame) {
+        g_windowOpen = false;
+        g_taken = true;   // one window per session, whatever it yields
+        g_pendingFrame = g_occCount ? g_frame + kSettleFrames : 0;
+        if (!g_pendingFrame) dropCapture();
+    }
     if (!g_pendingFrame || g_frame < g_pendingFrame || !ctx) return;
     g_pendingFrame = 0;
-    g_taken = true;   // one attempt, whatever it yields
 
     guardedBudget(g_budget, [&] {
         D3D11_MAPPED_SUBRESOURCE mi{}, mv{};
@@ -197,60 +266,80 @@ void quadProbeTick(ID3D11DeviceContext* ctx) {
             failOnce("the vertex copy could not be mapped");
             return;
         }
+        const uint8_t* ibBase = static_cast<const uint8_t*>(mi.pData);
         const uint8_t* vb = static_cast<const uint8_t*>(mv.pData);
-        const uint32_t quads = g_capIndexCount / kIndicesPerQuad;
-        Log::get().note("quad probe: %u quads, stride %u, index format %s. "
-                        "Rectangles below are the raw vertex positions -- "
-                        "plausible numbers mean the layout guess (float3 at "
-                        "offset 0) is right.",
-                        quads, g_capStride,
-                        g_capIbFormat == DXGI_FORMAT_R16_UINT ? "R16" : "R32");
-        for (uint32_t q = 0; q < quads; ++q) {
-            float lo[3] = {1e30f, 1e30f, 1e30f};
-            float hi[3] = {-1e30f, -1e30f, -1e30f};
-            bool bad = false;
-            for (uint32_t k = 0; k < kIndicesPerQuad; ++k) {
-                const uint32_t at = q * kIndicesPerQuad + k;
-                uint32_t vi;
-                if (g_capIbFormat == DXGI_FORMAT_R16_UINT) {
-                    vi = static_cast<const uint16_t*>(mi.pData)[at];
-                } else {
-                    vi = static_cast<const uint32_t*>(mi.pData)[at];
+        const uint32_t quads = g_wantN / kIndicesPerQuad;
+        Log::get().note(
+            "quad probe: %u occurrence(s) of %c:%u into %ux%u in one frame%s, "
+            "stride %u. Rectangles are the raw float2 at offset 0; the hex "
+            "after each is the first vertex's remaining bytes -- colour, uv, "
+            "whatever the layout holds. Same-signature occurrences that "
+            "differ in extent are DIFFERENT rectangles sharing one widget.",
+            g_occCount, g_wantKind, g_wantN, g_wantW, g_wantH,
+            g_occDropped ? " (more matched than fit; the excess was not "
+                           "copied)" : "",
+            g_capStride);
+        for (uint32_t oi = 0; oi < g_occCount; ++oi) {
+            const Occ& o = g_occ[oi];
+            const bool i16 = o.ibFormat == DXGI_FORMAT_R16_UINT;
+            Log::get().note("  occurrence %u: baseVertex %d, startIndex %u, "
+                            "instances %u, index format %s",
+                            oi, o.baseVertex, o.startIndex, o.instances,
+                            i16 ? "R16" : "R32");
+            for (uint32_t q = 0; q < quads; ++q) {
+                float lo[2] = {1e30f, 1e30f};
+                float hi[2] = {-1e30f, -1e30f};
+                int64_t firstOff = -1;
+                bool bad = false;
+                for (uint32_t k = 0; k < kIndicesPerQuad; ++k) {
+                    const uint32_t at = q * kIndicesPerQuad + k;
+                    const uint8_t* ip = ibBase + o.ibOffset + at * (i16 ? 2 : 4);
+                    uint32_t vi = i16 ? *reinterpret_cast<const uint16_t*>(ip)
+                                      : *reinterpret_cast<const uint32_t*>(ip);
+                    const int64_t v = static_cast<int64_t>(vi) + o.baseVertex;
+                    const int64_t off = v * g_capStride;
+                    if (v < 0 ||
+                        off + g_capStride > static_cast<int64_t>(g_capVertexBytes)) {
+                        bad = true;
+                        break;
+                    }
+                    if (firstOff < 0) firstOff = off;
+                    float p[2];
+                    memcpy(p, vb + off, sizeof(p));
+                    for (int c = 0; c < 2; ++c) {
+                        if (p[c] < lo[c]) lo[c] = p[c];
+                        if (p[c] > hi[c]) hi[c] = p[c];
+                    }
                 }
-                const int64_t v = static_cast<int64_t>(vi) + g_capBaseVertex;
-                const int64_t off = v * g_capStride;
-                if (v < 0 || off + 12 > static_cast<int64_t>(g_capVertexBytes)) {
-                    bad = true;
-                    break;
+                if (bad) {
+                    Log::get().note("    quad %u: an index landed outside the "
+                                    "copied range -- baseVertex %d, stride %u.",
+                                    q, o.baseVertex, g_capStride);
+                    continue;
                 }
-                float p[3];
-                memcpy(p, vb + off, sizeof(p));
-                for (int c = 0; c < 3; ++c) {
-                    if (p[c] < lo[c]) lo[c] = p[c];
-                    if (p[c] > hi[c]) hi[c] = p[c];
+                char tail[kTailBytesMax * 2 + 1] = "";
+                if (firstOff >= 0 && g_capStride > 8) {
+                    uint32_t nTail = g_capStride - 8;
+                    if (nTail > kTailBytesMax) nTail = kTailBytesMax;
+                    for (uint32_t t = 0; t < nTail; ++t) {
+                        snprintf(tail + t * 2, 3, "%02X",
+                                 vb[firstOff + 8 + t]);
+                    }
                 }
+                Log::get().note("    quad %u: x %.3f..%.3f  y %.3f..%.3f  "
+                                "(w %.3f h %.3f)  +%s",
+                                q, lo[0], hi[0], lo[1], hi[1],
+                                hi[0] - lo[0], hi[1] - lo[1], tail);
             }
-            if (bad) {
-                Log::get().note("  quad %u: an index landed outside the copied "
-                                "range -- baseVertex %d, stride %u.",
-                                q, g_capBaseVertex, g_capStride);
-                continue;
-            }
-            Log::get().note("  quad %u: x %.3f..%.3f  y %.3f..%.3f  z %.3f..%.3f"
-                            "   (w %.3f h %.3f)",
-                            q, lo[0], hi[0], lo[1], hi[1], lo[2], hi[2],
-                            hi[0] - lo[0], hi[1] - lo[1]);
         }
         ctx->Unmap(g_vbStage, 0);
         ctx->Unmap(g_ibStage, 0);
     });
-    quadProbeShutdown();
+    dropCapture();
 }
 
 void quadProbeShutdown() {
-    if (g_ibStage) { g_ibStage->Release(); g_ibStage = nullptr; }
-    if (g_vbStage) { g_vbStage->Release(); g_vbStage = nullptr; }
-    g_pendingFrame = 0;
+    dropCapture();
 }
 
 }  // namespace edvr

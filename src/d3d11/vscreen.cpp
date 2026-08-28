@@ -1550,9 +1550,13 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
                                 s->qsStartIndex, s->qsBaseVertex);
             }
         }
-        // The loader dialog's backing. Every draw into an interface-sized
-        // surface is offered, because the measurement needs the DIALOG's
-        // draws as much as the panel's -- the panel is sized to them.
+        // The loader dialog's backdrop. Every draw into an interface-sized
+        // surface is offered, because the fix works by POSITION in the
+        // frame's draw sequence: it needs the whole composition to know
+        // which draw is the full-view backdrop and where the box it
+        // collapses onto is. A bound PS slot-0 texture marks the draw as
+        // text rather than a solid -- the measurement needs to know, and
+        // presence is enough, so nothing is resolved.
         //
         // Gated to loader-shaped frames: the main menu is a rendered hangar
         // with a dark layer of its own, a different one, and nothing here
@@ -1565,7 +1569,8 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
                 info.isTexture2D && info.a >= 1024 && info.b >= 512 &&
                 loaderPanelOnDraw(self, kind, count, instances,
                                   s->qsStartIndex, s->qsBaseVertex,
-                                  info.a, info.b)) {
+                                  info.a, info.b,
+                                  bindingGet(BindSlot::PsSrv0) != nullptr)) {
                 return DrawVerdict::kLoaderPanel;
             }
         }
