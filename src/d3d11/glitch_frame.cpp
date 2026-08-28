@@ -1341,12 +1341,39 @@ void installGlitchFrameFix() {
     // documented as a cap on a run, so 0 reads as "no runs allowed", not as
     // "disable the feature". Anyone who wants it off has fix.transition_flash.
     //
-    // The cap is also unreachable above 1 in practice: a marked frame resets the
-    // camera history, so the next frame cannot be evaluated and a run of two
-    // never forms. The knob is kept because it bounds a future detector that
-    // could produce runs, and because removing a documented setting is worse
-    // than one that is quietly generous.
-    const int maxConsec = cfg.getInt("advanced.transition_flash_max_consecutive", 2);
+    // ONE, AND IT SHIPPED AT TWO FROM THE BEGINNING. The reversal is worth its
+    // paragraph, because it retires the only setting in this file that was
+    // never chosen against a measurement.
+    //
+    // Two came from a player's description -- "below the planet surface for a
+    // frame or two before being positioned correctly" -- and the run rules were
+    // built to make a run of two reachable, because a marked frame used to
+    // discard the prediction and the second frame of a glitch could not be
+    // judged at all. That class has still never been captured. Not once, in any
+    // session, in any log this repo has: an adversarial review went looking and
+    // found that docs/transition-flash.md attributes that exact symptom to the
+    // external camera, where it happens identically with the fix switched off.
+    //
+    // What HAS been captured, repeatedly, is the second withhold landing on a
+    // GOOD frame. Five measured runs across two field sessions:
+    //
+    //   f17777->78   0 units apart   a resampled camera, sampled twice
+    //   f19089->90   0
+    //   f15610->11   0               low wake drop, 2026-08-24, reported as a flash
+    //   f22066->67   10,114          hyperspace entry, reported as a flash
+    //   f23100->01   13,261          hyperspace arrival
+    //
+    // Every one of those held a good picture over a scene change, which is the
+    // artefact this fix exists to hide, manufactured by the fix. Against that,
+    // the two-frame class is a sentence in a bug report.
+    //
+    // So the cap goes to the value the evidence supports and the knob stays, at
+    // its full range, for whoever captures the other class and needs it back.
+    // The asymmetry is the whole argument: a second withhold buys nothing when
+    // the first frame was the whole glitch, and costs a held frame every time
+    // the jump was a camera arriving rather than a view leaving. One withhold
+    // is the insurance; two is a bet.
+    const int maxConsec = cfg.getInt("advanced.transition_flash_max_consecutive", 1);
     if (maxConsec < 1) {
         s.maxConsecutive = 1;
         Log::get().note(
