@@ -526,4 +526,62 @@ bool drawOwnerDrawn(const DRAWITEMSTRUCT* item, UINT dpi) {
     return true;
 }
 
+RECT slimThumb(const RECT& pane, int contentPx, int pagePx, int posPx, UINT dpi) {
+    RECT none{0, 0, 0, 0};
+    if (pagePx <= 0 || contentPx <= pagePx) return none;
+    const int trackTop = pane.top + dp(3, dpi);
+    const int trackBottom = pane.bottom - dp(3, dpi);
+    const int track = trackBottom - trackTop;
+    if (track <= dp(24, dpi)) return none;
+
+    int thumb = static_cast<int>(static_cast<long long>(track) * pagePx / contentPx);
+    const int minThumb = dp(24, dpi);
+    if (thumb < minThumb) thumb = minThumb;
+    if (thumb > track) thumb = track;
+
+    const int range = contentPx - pagePx;
+    int pos = posPx < 0 ? 0 : (posPx > range ? range : posPx);
+    const int offset =
+        range > 0 ? static_cast<int>(static_cast<long long>(track - thumb) * pos / range) : 0;
+
+    RECT r;
+    r.right = pane.right - dp(3, dpi);
+    r.left = r.right - dp(5, dpi);
+    r.top = trackTop + offset;
+    r.bottom = r.top + thumb;
+    return r;
+}
+
+int slimPosFromThumbTop(const RECT& pane, int contentPx, int pagePx, int thumbTopY, UINT dpi) {
+    const RECT ref = slimThumb(pane, contentPx, pagePx, 0, dpi);
+    if (ref.right <= ref.left) return 0;
+    const int trackTop = pane.top + dp(3, dpi);
+    const int track = (pane.bottom - dp(3, dpi)) - trackTop;
+    const int thumb = ref.bottom - ref.top;
+    const int slack = track - thumb;
+    if (slack <= 0) return 0;
+    int offset = thumbTopY - trackTop;
+    if (offset < 0) offset = 0;
+    if (offset > slack) offset = slack;
+    return static_cast<int>(static_cast<long long>(contentPx - pagePx) * offset / slack);
+}
+
+void drawSlimScrollbar(HDC dc, const RECT& pane, int contentPx, int pagePx, int posPx, UINT dpi,
+                       bool active) {
+    const RECT thumb = slimThumb(pane, contentPx, pagePx, posPx, dpi);
+    if (thumb.right <= thumb.left) return;
+    const Theme& t = theme();
+    fillRounded(dc, thumb, dp(2, dpi), active ? t.subtext : t.controlBorder);
+}
+
+int textHeightPx(HFONT font) {
+    HDC dc = GetDC(nullptr);
+    HFONT previous = static_cast<HFONT>(SelectObject(dc, font));
+    TEXTMETRICW metrics{};
+    GetTextMetricsW(dc, &metrics);
+    SelectObject(dc, previous);
+    ReleaseDC(nullptr, dc);
+    return metrics.tmHeight > 0 ? metrics.tmHeight : 16;
+}
+
 }  // namespace edvr::installer::ui

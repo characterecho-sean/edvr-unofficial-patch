@@ -12,6 +12,7 @@
 // view are the two things a hand-rolled widget gets subtly wrong -- keyboard
 // selection, mouse wheel, text selection for copying into a bug report.
 #include <windows.h>
+#include <windowsx.h>
 #include <commctrl.h>
 #include <shellapi.h>
 #include <shlobj.h>
@@ -108,6 +109,8 @@ struct Gui {
     bool                     haveSurvey = false;
     Screen                   screen = Screen::Install;
     AppArgs                  args;
+    bool                     reportDrag = false;   // slim-scrollbar drag state
+    int                      reportDragOffset = 0;
 };
 
 Gui g;
@@ -118,37 +121,62 @@ void setText(HWND control, const std::string& utf8) {
     SetWindowTextW(control, fromUtf8(utf8).c_str());
 }
 
-// An edit control with WS_VSCROLL shows its scrollbar whether or not there is
-// anything to scroll, and an empty pane with a full-height scrollbar down the
-// side of it looks like a text box from 2003. Shown only when the text really
-// is taller than the pane.
-void updateReportScrollbar() {
-    if (!g.report) return;
+// The report keeps no native scrollbar (an EDIT's bar is the one piece of
+// stock chrome the drawn look could not restyle); the parent paints the
+// same slim thumb the settings list uses, in the report card's right
+// gutter, and drives the EDIT by lines when it is dragged.
+const RECT kReportCard{kMargin, 482, kClientWidth - kMargin, 648};
+
+RECT reportCardRect() {
+    return RECT{dp(kReportCard.left), dp(kReportCard.top), dp(kReportCard.right),
+                dp(kReportCard.bottom)};
+}
+
+int reportLineHeight() { return ui::textHeightPx(ui::fonts().body); }
+
+// content/page/pos of the report in device pixels, for the slim thumb.
+void reportScrollState(int* content, int* page, int* pos) {
     RECT client{};
     GetClientRect(g.report, &client);
+    const int lineHeight = reportLineHeight();
+    *content = static_cast<int>(SendMessageW(g.report, EM_GETLINECOUNT, 0, 0)) * lineHeight;
+    *page = client.bottom - client.top;
+    *pos = static_cast<int>(SendMessageW(g.report, EM_GETFIRSTVISIBLELINE, 0, 0)) * lineHeight;
+}
 
-    HDC dc = GetDC(g.report);
-    HFONT previous = static_cast<HFONT>(SelectObject(dc, ui::fonts().body));
-    TEXTMETRICW metrics{};
-    GetTextMetricsW(dc, &metrics);
-    SelectObject(dc, previous);
-    ReleaseDC(g.report, dc);
+void invalidateReportGutter() {
+    const RECT card = reportCardRect();
+    const RECT gutter{card.right - dp(12), card.top, card.right, card.bottom};
+    InvalidateRect(g.window, &gutter, FALSE);
+}
 
-    const int lineHeight = metrics.tmHeight > 0 ? metrics.tmHeight : 1;
-    const int visible = (client.bottom - client.top) / lineHeight;
-    const int lines = static_cast<int>(SendMessageW(g.report, EM_GETLINECOUNT, 0, 0));
-    ShowScrollBar(g.report, SB_VERT, lines > visible ? TRUE : FALSE);
+// The EDIT scrolls itself on wheel, keys and selection drags; the thumb is
+// painted by the parent and has to follow.
+LRESULT CALLBACK reportProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam,
+                            UINT_PTR /*id*/, DWORD_PTR /*data*/) {
+    const LRESULT out = DefSubclassProc(hwnd, message, wparam, lparam);
+    switch (message) {
+        case WM_MOUSEWHEEL:
+        case WM_KEYDOWN:
+        case WM_MOUSEMOVE:
+        case WM_TIMER:   // the EDIT's own drag-select autoscroll
+            invalidateReportGutter();
+            break;
+        default:
+            break;
+    }
+    return out;
 }
 
 void setReport(const std::string& utf8) {
     setText(g.report, utf8);
-    updateReportScrollbar();
     // Scrolled to the END: outcomes are appended below the plan, and the
     // pane is the only place they are said now -- the freshest line must
     // be the visible one.
     const LRESULT len = SendMessageW(g.report, WM_GETTEXTLENGTH, 0, 0);
     SendMessageW(g.report, EM_SETSEL, static_cast<WPARAM>(len), static_cast<LPARAM>(len));
     SendMessageW(g.report, EM_SCROLLCARET, 0, 0);
+    invalidateReportGutter();
 }
 
 // ---------------------------------------------------------------------------
@@ -190,11 +218,19 @@ void applyLayout() {
         MoveWindow(g.tip, dp(kMargin) + prefix + dp(5), dp(657), dp(76), dp(20), TRUE);
     }
 
-    // Whether the report needs a scrollbar depends on how tall it is, and it
-    // only just got its height. Asked before this, the answer was taken from
-    // the 10x10 box every control is created at, so a one-line report came up
-    // with a full-height scrollbar beside it.
-    updateReportScrollbar();
+    // Single-line EDITs draw their text at the top of the control, so the
+    // search box is sized to its text and centred within the frame painted
+    // around it (250..282 in design units) instead of filling the frame with
+    // the text riding high -- the same treatment the settings list gives its
+    // inline value editor.
+    if (g.search) {
+        const int textH = ui::textHeightPx(ui::fonts().body);
+        const int frameTop = dp(250);
+        const int frameH = dp(282) - frameTop;
+        const int y = frameTop + (frameH > textH ? (frameH - textH) / 2 : 0);
+        MoveWindow(g.search, dp(kMargin + kCardPad), y, dp(320), textH, TRUE);
+    }
+
     InvalidateRect(g.window, nullptr, TRUE);
 }
 
@@ -361,8 +397,14 @@ void paintInstallScreen(HDC dc) {
                  L"into edvr_backup\\ first.",
                  reassure, f.caption, t.subtext, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
 
-    RECT report{dp(kMargin), dp(482), dp(kClientWidth - kMargin), dp(648)};
+    const RECT report = reportCardRect();
     ui::paintCard(dc, report, g.dpi);
+
+    if (g.report) {
+        int content = 0, page = 0, pos = 0;
+        reportScrollState(&content, &page, &pos);
+        ui::drawSlimScrollbar(dc, report, content, page, pos, g.dpi, g.reportDrag);
+    }
 }
 
 void paintSettingsScreen(HDC dc) {
@@ -722,6 +764,11 @@ void createControls(HWND window) {
                               reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdCombo)), nullptr,
                               nullptr);
     SendMessageW(g.combo, WM_SETFONT, reinterpret_cast<WPARAM>(f.body), TRUE);
+    // The selection field's height is the item height plus the borders; set
+    // from the font so the text sits centred in the 30-unit row instead of
+    // wherever the stock metrics left it.
+    SendMessageW(g.combo, CB_SETITEMHEIGHT, static_cast<WPARAM>(-1),
+                 ui::textHeightPx(f.body) + dp(6));
     place(g.combo, kMargin, 88, 512, 30, Screen::Install, true);
 
     HWND browse = ui::makeButton(window, L"Browse...", kIdBrowse, ui::ButtonStyle::Secondary,
@@ -761,11 +808,12 @@ void createControls(HWND window) {
     place(g.settingsList, kMargin + 2, 292, kClientWidth - 2 * kMargin - 4, 350, Screen::Settings);
 
     g.report = CreateWindowExW(0, L"EDIT", L"",
-                               WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE | ES_READONLY, 0,
+                               WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_READONLY, 0,
                                0, 10, 10, window,
                                reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdReport)), nullptr,
                                nullptr);
     SendMessageW(g.report, WM_SETFONT, reinterpret_cast<WPARAM>(f.body), TRUE);
+    SetWindowSubclass(g.report, reportProc, 1, 0);
     place(g.report, kMargin + kCardPad - 4, 496, 636, 140, Screen::Install);
 
     g.tip = ui::makeButton(window, L"leave a tip", kIdKofi, ui::ButtonStyle::Link, f.caption);
@@ -871,6 +919,52 @@ LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
                 default: return 0;
             }
         }
+
+        // The report card's slim scrollbar is parent territory (the EDIT
+        // keeps no bar of its own): a press in the right gutter grabs or
+        // jumps the thumb, and the drag drives the EDIT by whole lines.
+        case WM_LBUTTONDOWN: {
+            if (g.screen != Screen::Install || !g.report) break;
+            const int x = GET_X_LPARAM(lparam);
+            const int y = GET_Y_LPARAM(lparam);
+            const RECT card = reportCardRect();
+            if (x < card.right - dp(12) || x >= card.right || y < card.top || y >= card.bottom)
+                break;
+            int content = 0, page = 0, pos = 0;
+            reportScrollState(&content, &page, &pos);
+            const RECT thumb = ui::slimThumb(card, content, page, pos, g.dpi);
+            if (thumb.right <= thumb.left) break;
+            if (y >= thumb.top && y < thumb.bottom) {
+                g.reportDragOffset = y - thumb.top;
+            } else {
+                g.reportDragOffset = (thumb.bottom - thumb.top) / 2;
+            }
+            g.reportDrag = true;
+            SetCapture(window);
+            // fall through to the move handler's math via a synthetic move
+        }
+            [[fallthrough]];
+        case WM_MOUSEMOVE: {
+            if (!g.reportDrag) break;
+            int content = 0, page = 0, pos = 0;
+            reportScrollState(&content, &page, &pos);
+            const int wanted =
+                ui::slimPosFromThumbTop(reportCardRect(), content, page,
+                                        GET_Y_LPARAM(lparam) - g.reportDragOffset, g.dpi);
+            const int lineHeight = reportLineHeight();
+            const int delta = wanted / lineHeight - pos / lineHeight;
+            if (delta != 0) SendMessageW(g.report, EM_LINESCROLL, 0, delta);
+            invalidateReportGutter();
+            return 0;
+        }
+        case WM_LBUTTONUP:
+        case WM_CAPTURECHANGED:
+            if (g.reportDrag) {
+                g.reportDrag = false;
+                if (message == WM_LBUTTONUP) ReleaseCapture();
+                invalidateReportGutter();
+            }
+            break;
 
         case WM_CTLCOLOREDIT:
         case WM_CTLCOLORSTATIC:

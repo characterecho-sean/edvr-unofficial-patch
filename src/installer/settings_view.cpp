@@ -45,6 +45,8 @@ struct List {
     std::wstring   filter;
     size_t         editingRow = SIZE_MAX;
     std::string    error;
+    bool           dragThumb = false;   // the slim scrollbar's drag state
+    int            dragOffset = 0;      // grab point within the thumb
 };
 
 List* listOf(HWND hwnd) {
@@ -112,21 +114,15 @@ void rebuildItems(List* list) {
     list->contentHeight = y + kPad;
 }
 
+// Clamps the position; the bar itself is the slim thumb paint() draws (the
+// native scrollbar was the one piece of stock chrome left on this window,
+// and it never matched the cards it sat beside).
 void updateScrollbar(List* list) {
     RECT client{};
     GetClientRect(list->hwnd, &client);
     const int page = client.bottom - client.top;
     const int content = dp(list, list->contentHeight);
-
-    SCROLLINFO info{};
-    info.cbSize = sizeof(info);
-    info.fMask = SIF_RANGE | SIF_PAGE | SIF_POS;
-    info.nMin = 0;
-    info.nMax = content > 0 ? content - 1 : 0;
-    info.nPage = static_cast<UINT>(page);
     list->scroll = std::max(0, std::min(list->scroll, std::max(0, content - page)));
-    info.nPos = list->scroll;
-    SetScrollInfo(list->hwnd, SB_VERT, &info, TRUE);
 }
 
 void commitEdit(List* list);
@@ -342,7 +338,7 @@ void paint(List* list) {
         empty.top += dp(list, kPad);
         ui::drawText(dc,
                      list->model ? L"Nothing matches that."
-                                 : L"Pick an install on the Install tab first.",
+                                 : L"Pick an install on the Setup tab first.",
                      empty, f.body, t.subtext, DT_LEFT | DT_WORDBREAK);
     }
 
@@ -363,6 +359,9 @@ void paint(List* list) {
             ui::fillRect(dc, line, t.cardBorder);
         }
     }
+
+    ui::drawSlimScrollbar(dc, client, dp(list, list->contentHeight), client.bottom, list->scroll,
+                          list->dpi, list->dragThumb);
 
     BitBlt(screen, 0, 0, client.right, client.bottom, dc, 0, 0, SRCCOPY);
     SelectObject(dc, previous);
@@ -444,8 +443,14 @@ void beginEdit(List* list, size_t rowIndex, const RECT& box) {
     SendMessageW(list->edit, WM_SETFONT, reinterpret_cast<WPARAM>(ui::fonts().body), TRUE);
     const std::wstring value = list->model->rows()[rowIndex].shown();
     SetWindowTextW(list->edit, value.c_str());
-    MoveWindow(list->edit, box.left + dp(list, 6), box.top + dp(list, 4),
-               (box.right - box.left) - dp(list, 12), (box.bottom - box.top) - dp(list, 8), TRUE);
+    // Sized to the text and centred in the value box: a single-line EDIT
+    // draws its text at the top of the control, so a control that fills
+    // the box shows the text riding high.
+    const int textH = ui::textHeightPx(ui::fonts().body);
+    const int boxH = box.bottom - box.top;
+    const int top = box.top + (boxH > textH ? (boxH - textH) / 2 : 0);
+    MoveWindow(list->edit, box.left + dp(list, 6), top,
+               (box.right - box.left) - dp(list, 12), textH, TRUE);
     ShowWindow(list->edit, SW_SHOW);
     SetFocus(list->edit);
     SendMessageW(list->edit, EM_SETSEL, 0, -1);
@@ -519,25 +524,6 @@ LRESULT CALLBACK listProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam)
                 updateScrollbar(list);
             }
             return 0;
-        case WM_VSCROLL: {
-            if (!list) break;
-            SCROLLINFO info{};
-            info.cbSize = sizeof(info);
-            info.fMask = SIF_ALL;
-            GetScrollInfo(hwnd, SB_VERT, &info);
-            int position = list->scroll;
-            switch (LOWORD(wparam)) {
-                case SB_LINEUP: position -= dp(list, 24); break;
-                case SB_LINEDOWN: position += dp(list, 24); break;
-                case SB_PAGEUP: position -= info.nPage; break;
-                case SB_PAGEDOWN: position += info.nPage; break;
-                case SB_THUMBTRACK:
-                case SB_THUMBPOSITION: position = info.nTrackPos; break;
-                default: break;
-            }
-            scrollTo(list, position);
-            return 0;
-        }
         case WM_MOUSEWHEEL: {
             if (!list) break;
             const int delta = GET_WHEEL_DELTA_WPARAM(wparam);
@@ -547,7 +533,50 @@ LRESULT CALLBACK listProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam)
         case WM_LBUTTONDOWN:
             if (list) {
                 SetFocus(hwnd);
-                onClick(list, GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam));
+                const int x = GET_X_LPARAM(lparam);
+                const int y = GET_Y_LPARAM(lparam);
+                RECT client{};
+                GetClientRect(hwnd, &client);
+                const int content = dp(list, list->contentHeight);
+                const RECT thumb = ui::slimThumb(client, content, client.bottom, list->scroll,
+                                                 list->dpi);
+                // The right gutter belongs to the slim scrollbar whenever
+                // there is one: on the thumb starts a drag, on the track
+                // jumps the thumb to the pointer.
+                if (thumb.right > thumb.left && x >= client.right - dp(list, 12)) {
+                    if (y >= thumb.top && y < thumb.bottom) {
+                        list->dragThumb = true;
+                        list->dragOffset = y - thumb.top;
+                    } else {
+                        const int half = (thumb.bottom - thumb.top) / 2;
+                        scrollTo(list, ui::slimPosFromThumbTop(client, content, client.bottom,
+                                                               y - half, list->dpi));
+                        list->dragThumb = true;
+                        list->dragOffset = half;
+                    }
+                    SetCapture(hwnd);
+                    InvalidateRect(hwnd, nullptr, TRUE);
+                    return 0;
+                }
+                onClick(list, x, y);
+            }
+            return 0;
+        case WM_MOUSEMOVE:
+            if (list && list->dragThumb) {
+                RECT client{};
+                GetClientRect(hwnd, &client);
+                const int content = dp(list, list->contentHeight);
+                scrollTo(list, ui::slimPosFromThumbTop(client, content, client.bottom,
+                                                       GET_Y_LPARAM(lparam) - list->dragOffset,
+                                                       list->dpi));
+            }
+            return 0;
+        case WM_LBUTTONUP:
+        case WM_CAPTURECHANGED:
+            if (list && list->dragThumb) {
+                list->dragThumb = false;
+                if (message == WM_LBUTTONUP) ReleaseCapture();
+                InvalidateRect(hwnd, nullptr, TRUE);
             }
             return 0;
         case WM_SETCURSOR:
@@ -592,7 +621,7 @@ HWND createSettingsList(HWND parent, int id, UINT dpi) {
         RegisterClassExW(&cls);
         registered = true;
     }
-    HWND hwnd = CreateWindowExW(0, kClassName, L"", WS_CHILD | WS_VSCROLL | WS_TABSTOP, 0, 0, 10,
+    HWND hwnd = CreateWindowExW(0, kClassName, L"", WS_CHILD | WS_TABSTOP, 0, 0, 10,
                                 10, parent, reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)),
                                 nullptr, nullptr);
     if (hwnd) {
