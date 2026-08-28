@@ -218,6 +218,22 @@ void applyLayout() {
         MoveWindow(g.tip, dp(kMargin) + prefix + dp(5), dp(657), dp(76), dp(20), TRUE);
     }
 
+    // A combo's field height is its item height plus its own frame, not
+    // what MoveWindow asked for. The frame is measured and the item height
+    // set to land the field at exactly the 30 units the Browse button
+    // beside it gets; the text centres itself within the item.
+    if (g.combo) {
+        SendMessageW(g.combo, CB_SETITEMHEIGHT, 0, dp(24));  // dropdown rows
+        SendMessageW(g.combo, CB_SETITEMHEIGHT, static_cast<WPARAM>(-1), dp(22));
+        RECT rc{};
+        GetWindowRect(g.combo, &rc);
+        const int frame = (rc.bottom - rc.top) - dp(22);
+        const int fieldItem = dp(30) - frame;
+        if (fieldItem > 0) {
+            SendMessageW(g.combo, CB_SETITEMHEIGHT, static_cast<WPARAM>(-1), fieldItem);
+        }
+    }
+
     // Single-line EDITs draw their text at the top of the control, so the
     // search box is sized to its text and centred within the frame painted
     // around it (250..282 in design units) instead of filling the frame with
@@ -733,6 +749,26 @@ void saveLogs() {
     }
     setReport(text);
 }
+// The install picker's pixels: field and list rows in the house font and
+// colours. The OS still owns the frame and the drop arrow (flat under the
+// dark theme); what was stock about it -- sunken text in a system font at
+// a system size -- is gone.
+void drawComboItem(const DRAWITEMSTRUCT* item) {
+    const ui::Theme& t = ui::theme();
+    const bool inField = (item->itemState & ODS_COMBOBOXEDIT) != 0;
+    const bool selected = (item->itemState & ODS_SELECTED) != 0;
+    const COLORREF bg = inField ? t.control : (selected ? t.controlHover : t.cardBg);
+    ui::fillRect(item->hDC, item->rcItem, bg);
+    if (item->itemID == static_cast<UINT>(-1)) return;
+    wchar_t text[512]{};
+    SendMessageW(item->hwndItem, CB_GETLBTEXT, item->itemID, reinterpret_cast<LPARAM>(text));
+    RECT rc = item->rcItem;
+    rc.left += dp(10);
+    rc.right -= dp(6);
+    ui::drawText(item->hDC, text, rc, ui::fonts().body, t.text,
+                 DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+}
+
 void showScreen(Screen screen) {
     g.screen = screen;
     ui::setButtonStyle(g.tabInstall,
@@ -758,17 +794,19 @@ void createControls(HWND window) {
     place(g.tabInstall, kMargin, 146, 84, 30, Screen::Install, true);
     place(g.tabSettings, kMargin + 92, 146, 92, 30, Screen::Install, true);
 
+    // Still a real combo -- keyboard selection and the wheel are the two
+    // things a hand-rolled dropdown gets subtly wrong -- but owner-drawn,
+    // so the field and the list are painted in the house font and colours,
+    // and its field height is converged on the Browse button's in
+    // applyLayout (a combo sizes itself from its item height, not from
+    // MoveWindow).
     g.combo = CreateWindowExW(0, L"COMBOBOX", L"",
-                              WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL | CBS_DROPDOWNLIST,
+                              WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL | CBS_DROPDOWNLIST |
+                                  CBS_OWNERDRAWFIXED | CBS_HASSTRINGS,
                               0, 0, 10, 10, window,
                               reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdCombo)), nullptr,
                               nullptr);
     SendMessageW(g.combo, WM_SETFONT, reinterpret_cast<WPARAM>(f.body), TRUE);
-    // The selection field's height is the item height plus the borders; set
-    // from the font so the text sits centred in the 30-unit row instead of
-    // wherever the stock metrics left it.
-    SendMessageW(g.combo, CB_SETITEMHEIGHT, static_cast<WPARAM>(-1),
-                 ui::textHeightPx(f.body) + dp(6));
     place(g.combo, kMargin, 88, 512, 30, Screen::Install, true);
 
     HWND browse = ui::makeButton(window, L"Browse...", kIdBrowse, ui::ButtonStyle::Secondary,
@@ -880,7 +918,20 @@ LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
 
         case WM_DRAWITEM: {
             const DRAWITEMSTRUCT* item = reinterpret_cast<const DRAWITEMSTRUCT*>(lparam);
+            if (item->CtlID == kIdCombo) {
+                drawComboItem(item);
+                return TRUE;
+            }
             if (ui::drawOwnerDrawn(item, g.dpi)) return TRUE;
+            break;
+        }
+
+        case WM_MEASUREITEM: {
+            MEASUREITEMSTRUCT* measure = reinterpret_cast<MEASUREITEMSTRUCT*>(lparam);
+            if (measure->CtlID == kIdCombo) {
+                measure->itemHeight = static_cast<UINT>(dp(24));
+                return TRUE;
+            }
             break;
         }
 
