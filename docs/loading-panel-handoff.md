@@ -70,9 +70,13 @@ quad 3: x -32765..-32750  y -32765..32764   (   15 x 65529)   left edge
 quad 4: x -32765..32764   y  32737..32764   (65529 x    27)   bottom edge
 ```
 
-Position is a `float2` at offset 0 -- the third float read as 1.5e23, which
-is garbage, consistent with a uv or colour living in the sixteen bytes after
-the position (the new probe dumps them; see below).
+Position is a `float2` at offset 0, and the first fit flight (11:11,
+2026-08-28) settled what follows it: an **RGBA8 colour at offset 8**. Every
+backdrop quad carries `00 00 00 66` there -- **black at alpha 0x66, 40%** --
+which is the ugly translucent scrim, measured. The twelve bytes after that
+hold a second dword (`000000FF` on the backdrop) and what looks like uv or
+stale pool data. A solid black box will read alpha `FF` at offset 8; the
+orange border will name its colour outright.
 
 **Other draws into the same surface**, from one loader frame:
 
@@ -127,16 +131,21 @@ settle. A collection whose frame moved mid-capture is discarded. This is the
 answer to the 1-3-6-11-9-12 instability: transitional frames can no longer
 be measured at all.
 
-**Classify, then union.** In the capture, any 30-index draw with a quad
-spanning >=80% of both the widest and tallest extents is a backdrop. The
-**target** is the union of every *other* solid's quads -- the box's own
-panel dominates that union when it exists; the bare backing rectangle is one
-of those quads when the box rides inside a batch. Full sheets and full-span
-strips stay out of the union, and text never enters it (textured draws are
-excluded at the draw hook), which makes the old text-run circularity
-impossible by construction. A union that is missing, sliver-sized (<2% of
+**Classify, then seed and grow.** In the capture, any 30-index draw with a
+quad spanning >=80% of both the widest and tallest extents is a backdrop.
+The **target** starts from a seed -- the box's own bordered panel when one
+draws, else the largest solid in any batch -- and grows by absorbing only
+quads that touch its neighbourhood (2% of the surface), a few passes, so the
+box's border strips and the bar inside it join while a badge in a far corner
+never does. Growth replaced a plain union after the first fit flight: the
+loading screen keeps 5-8 solids about, some in the corners, and the union of
+everything spanned the surface on every single measurement -- twenty
+refusals in twenty seconds, all reading "the union beside the backdrop spans
+the surface itself". Text never enters the pool at all (textured draws are
+excluded at the draw hook), which keeps the old text-run circularity
+impossible by construction. A target that is missing, sliver-sized (<2% of
 the backdrop), or surface-sized records a no-verdict: **stock, with a log
-line saying why**, once per dialog state.
+line saying why and one line per solid it saw**, once per dialog state.
 
 **Substitute by position.** The backdrop's *position in the frame sequence*
 is what gets substituted -- its own vertices, positions remapped linearly
@@ -153,13 +162,16 @@ measurement takes (two stable + one capture + four settle).
 **Log lines to look for** (`edvr_logs`):
 
 * `loading panel: FIT -- measurement N from S solids of D interface draws.
-  The backdrop at draw P spans WxH; the box on top of it measures WxH
-  (Q quads, anchored by ...)` -- the engage line; "anchored by the dialog's
-  own 30-index panel" vs "...largest solid in a 648-index batch" reports
-  which model the frame matched.
+  The backdrop at draw P spans WxH; the box on top of it seeded from ... and
+  grew to WxH at x .. y ..` -- the engage line; "seeded from the dialog's
+  own 30-index panel" vs "...the largest solid in a 648-index batch" reports
+  which model the frame matched. After the first four, it logs again only
+  when the box moved -- the percent text re-measures constantly and the box
+  holds still through it.
 * `loading panel: measured N draw(s) and drew no conclusion -- REASON.
   Stock for this dialog state; the next change re-measures.` -- every
-  no-verdict, including the scrim-alone state before the dialog arrives.
+  no-verdict, now preceded by one `solid k: ...` line per captured draw with
+  its extent, so a refusal names what it refused.
 * `loading panel: the loader's draws have not held still for two
   consecutive frames in 600 frames` -- continuous animation; the fix is
   standing down correctly.
@@ -181,19 +193,24 @@ it before reading signatures out of a single capture.
 ## The flight plan
 
 1. **Probe flight** (names the occurrences): `advanced.quad_probe =
-   4259x2395:X:30` -- substitute the rig's own surface size from a census if
-   render scale changed. The census has already counted **three occurrences
-   per frame**; expect the probe to log all three with extents and hex
-   tails (translucent backdrop vs solid black box; on the tall dialog,
-   orange in the border strips' bytes). The probe captures the first
-   matching frame -- likely the first dialog; re-arm (spec off, then on)
-   for the second.
+   4259x2395:X:30:120` -- substitute the rig's own surface size from a
+   census if render scale changed. The census has already counted **three
+   occurrences per frame** in steady state, and the first probe flight
+   (spec without the skip) proved why the skip matters: it fired on the
+   first matching frame, mid fade-in, and caught the backdrop alone --
+   alpha 0x66 black, all five quads full-surface. With 120 matching frames
+   skipped the capture lands ~2s into the dialog: expect all three
+   occurrences, the box's quads modal-sized with alpha `FF` at offset 8,
+   and the orange border naming its colour. Re-arm (spec off, then on) for
+   the second dialog.
 2. **Fit flight**: `fix.loading_panel = fit`, watch both intro dialogs.
    Expect the backdrop snapped to each modal, the black backing and orange
    border untouched, a brief full-size backdrop during fade-in (measurement
    gating), and the engage log line above. Any wrongness arrives with its
    own log line naming what was measured -- report the `loading panel:`
-   lines with the symptom.
+   lines with the symptom. The first fit flight (11:11, 2026-08-28) ended
+   here with every measurement refusing on the union rule; the seeded
+   growth above is that flight's lesson.
 3. On success, flip the shipped default to `fit` in a release commit.
 
 ## What must not regress

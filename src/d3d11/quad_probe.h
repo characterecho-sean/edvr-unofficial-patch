@@ -43,9 +43,11 @@ namespace edvr {
 
 class Config;
 
-// Reads advanced.quad_probe = WIDTHxHEIGHT:KIND:COUNT -- the same shape the
-// skip and clip specs take, naming one draw signature into one offscreen
-// target. Empty is off.
+// Reads advanced.quad_probe = WIDTHxHEIGHT:KIND:COUNT[:SKIPFRAMES] -- the
+// skip and clip specs' shape naming one draw signature into one offscreen
+// target, plus an optional count of matching frames to let pass before
+// capturing (the first matching frame is usually mid fade-in; 120 waits
+// about two seconds of them for steady state). Empty is off.
 void quadProbeConfigure(Config& cfg);
 
 // Is a capture still wanted? False once one has been taken, which keeps this

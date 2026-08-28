@@ -4,6 +4,7 @@
 
 #include <d3d11.h>
 
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -42,6 +43,21 @@ constexpr float kStripFraction = 0.80f;
 // tick, and collapsing a full-view panel onto it would be far worse than
 // stock.
 constexpr float kMinTargetFraction = 0.02f;
+
+// The box is assembled by GROWTH from a seed, not by union. The first
+// flight (2026-08-28, 11:11) captured 5-8 solids per loader frame and their
+// union spanned the surface every time: the loading screen keeps solid
+// elements in its corners, and a union of everything is the whole screen
+// even when each piece is small. So: seed on the box itself, then absorb
+// only quads that touch the seed's neighbourhood -- the box's border
+// strips and the bar inside it join; a badge in a far corner never does.
+constexpr float    kGrowMargin = 0.02f;
+constexpr uint32_t kGrowPasses = 4;
+
+// Engage lines after the fourth are logged only when the box actually
+// moved; the shader-prep dialog re-tessellates its percent text every tick
+// and each tick is a fresh measurement of the same box.
+constexpr float kRelogFraction = 0.01f;
 
 // Frame-composition record: draw shapes per frame, and captured draws per
 // measurement. The measured loader frame held about a dozen draws; these
@@ -167,6 +183,7 @@ Built    g_built[kMaxBuilt];
 uint32_t g_builtCount = 0;
 uint32_t g_builtStride = 0;
 uint32_t g_measurements = 0;
+Rect     g_lastTarget;   // for the engage log's moved-or-not test
 
 void failOnce(const char* why) {
     static bool noted = false;
@@ -504,13 +521,30 @@ void analyze(ID3D11DeviceContext* ctx) {
     // coordinate space; the backdrop's target names which.
     const SeqEnt anchor = g_capSeq[g_caps[firstBackdrop].seqPos];
 
-    // The target: the union of every other solid's quads in that space.
-    // The box's own panel dominates this union when it draws as one; the
-    // bare backing rectangle is one of these quads when it does not.
-    Rect target;
-    uint32_t contributors = 0, strips = 0, sheets = 0;
-    int biggest = -1;
-    float biggestArea = 0.0f;
+    // When a verdict refuses, name every solid it saw: the first flight's
+    // twenty identical refusals would have been one flight with this.
+    auto dumpSolids = [&] {
+        for (uint32_t d = 0; d < g_capCount && d < 10; ++d) {
+            const Rect& w = whole[d];
+            if (!w.valid()) continue;
+            Log::get().note("  solid %u: %u indices at draw %u, x %.0f..%.0f "
+                            "y %.0f..%.0f (%.0fx%.0f)%s",
+                            d, g_caps[d].count, g_caps[d].seqPos,
+                            w.x0, w.x1, w.y0, w.y1, w.w(), w.h(),
+                            isBackdrop[d] ? " -- backdrop" : "");
+        }
+    };
+
+    // Candidate quads for the box: solids in the backdrop's space that are
+    // neither full sheets nor full-span strips, from draws that are not
+    // backdrops themselves.
+    struct Cand {
+        Rect rect;
+        uint32_t cap;
+        bool used = false;
+    };
+    std::vector<Cand> cands;
+    uint32_t strips = 0, sheets = 0;
     for (uint32_t d = 0; d < g_capCount; ++d) {
         if (isBackdrop[d]) continue;
         const SeqEnt& se = g_capSeq[g_caps[d].seqPos];
@@ -529,32 +563,82 @@ void analyze(ID3D11DeviceContext* ctx) {
                 ++strips;
                 continue;
             }
-            target.add(r);
-            ++contributors;
-            if (r.area() > biggestArea) {
-                biggestArea = r.area();
-                biggest = static_cast<int>(d);
-            }
+            cands.push_back(Cand{r, d, false});
         }
     }
 
-    if (!target.valid() || contributors == 0) {
+    if (cands.empty()) {
         recordNone("the backdrop is the only solid drawn -- the dialog has "
                    "not arrived yet");
         ctx->Unmap(g_vbStage, 0);
         ctx->Unmap(g_ibStage, 0);
         return;
     }
-    if (target.w() < refW * kMinTargetFraction ||
+
+    // The seed: the box's own bordered panel when one draws (the strongest
+    // structural signal there is), else the largest solid in any batch.
+    Rect target;
+    int seedCap = -1;
+    bool seedIsPanel = false;
+    float seedArea = 0.0f;
+    for (uint32_t d = 0; d < g_capCount; ++d) {
+        if (isBackdrop[d] || g_caps[d].count != kPanelIndices) continue;
+        const SeqEnt& se = g_capSeq[g_caps[d].seqPos];
+        if (se.w != anchor.w || se.h != anchor.h) continue;
+        if (whole[d].valid() && whole[d].area() > seedArea) {
+            seedArea = whole[d].area();
+            seedCap = static_cast<int>(d);
+        }
+    }
+    if (seedCap >= 0) {
+        target = whole[seedCap];
+        seedIsPanel = true;
+    } else {
+        for (const Cand& c : cands) {
+            if (c.rect.area() > seedArea) {
+                seedArea = c.rect.area();
+                seedCap = static_cast<int>(c.cap);
+                target = c.rect;
+            }
+        }
+    }
+
+    // Growth: absorb candidates that touch the box's neighbourhood, so its
+    // border strips and the bar inside it join while a badge in a far
+    // corner stays out. A few passes, because a strip can bridge to the
+    // fill only after the fill has joined.
+    const float gx = refW * kGrowMargin, gy = refH * kGrowMargin;
+    uint32_t contributors = 0;
+    for (uint32_t pass = 0; pass < kGrowPasses; ++pass) {
+        bool grew = false;
+        for (Cand& c : cands) {
+            if (c.used) continue;
+            if (c.rect.x0 <= target.x1 + gx && c.rect.x1 >= target.x0 - gx &&
+                c.rect.y0 <= target.y1 + gy && c.rect.y1 >= target.y0 - gy) {
+                const Rect before = target;
+                target.add(c.rect);
+                c.used = true;
+                ++contributors;
+                grew = grew || target.w() != before.w() ||
+                       target.h() != before.h() || target.x0 != before.x0 ||
+                       target.y0 != before.y0;
+            }
+        }
+        if (!grew) break;
+    }
+
+    if (!target.valid() || target.w() < refW * kMinTargetFraction ||
         target.h() < refH * kMinTargetFraction) {
-        recordNone("the solids beside the backdrop span a sliver, not a box");
+        dumpSolids();
+        recordNone("the box seeded and grew to a sliver, not a dialog");
         ctx->Unmap(g_vbStage, 0);
         ctx->Unmap(g_ibStage, 0);
         return;
     }
     if (target.w() >= refW * kBackdropFraction &&
         target.h() >= refH * kBackdropFraction) {
-        recordNone("the union beside the backdrop spans the surface itself");
+        dumpSolids();
+        recordNone("the box grew until it spanned the surface itself");
         ctx->Unmap(g_vbStage, 0);
         ctx->Unmap(g_ibStage, 0);
         return;
@@ -649,33 +733,44 @@ void analyze(ID3D11DeviceContext* ctx) {
     memcpy(g_measuredSeq, g_capSeq, sizeof(SeqEnt) * g_capSeqLen);
     ++g_measurements;
 
-    // Name what the target was measured FROM, so a field report can validate
-    // the pick against what the headset shows.
-    char source[96];
-    if (biggest >= 0 && g_caps[biggest].count == kPanelIndices) {
-        snprintf(source, sizeof(source), "the dialog's own 30-index panel");
-    } else if (biggest >= 0) {
-        snprintf(source, sizeof(source),
-                 "the largest solid in a %u-index batch",
-                 g_caps[biggest].count);
-    } else {
-        snprintf(source, sizeof(source), "small solids only");
+    // Name what the box was seeded FROM, so a field report can validate the
+    // pick against what the headset shows. After the first few, log again
+    // only when the box moved: the shader-prep dialog re-measures on every
+    // percent tick and the box holds still through all of them.
+    const bool moved =
+        fabsf(target.x0 - g_lastTarget.x0) > refW * kRelogFraction ||
+        fabsf(target.x1 - g_lastTarget.x1) > refW * kRelogFraction ||
+        fabsf(target.y0 - g_lastTarget.y0) > refH * kRelogFraction ||
+        fabsf(target.y1 - g_lastTarget.y1) > refH * kRelogFraction;
+    g_lastTarget = target;
+    if (g_measurements <= 4 || moved) {
+        char source[96];
+        if (seedIsPanel) {
+            snprintf(source, sizeof(source),
+                     "the dialog's own 30-index panel");
+        } else {
+            snprintf(source, sizeof(source),
+                     "the largest solid in a %u-index batch",
+                     g_caps[seedCap].count);
+        }
+        const Rect& bdrop = whole[firstBackdrop];
+        Log::get().note(
+            "loading panel: FIT -- measurement %u from %u solids of %u "
+            "interface draws. The backdrop at draw %u spans %.0fx%.0f; the "
+            "box on top of it seeded from %s and grew to %.0fx%.0f at "
+            "x %.0f..%.0f y %.0f..%.0f (%u quads joined%s%s). The backdrop "
+            "is redrawn to those exact bounds; the box and its text are the "
+            "game's own draws, untouched.%s",
+            g_measurements, g_capCount, g_capSeqLen,
+            g_caps[firstBackdrop].seqPos, bdrop.w(), bdrop.h(),
+            source, target.w(), target.h(),
+            target.x0, target.x1, target.y0, target.y1, contributors,
+            strips ? ", full-span strips stayed out" : "",
+            sheets ? ", a full sheet in a batch stayed out" : "",
+            (backdrops > 1 || skippedBackdrops)
+                ? " More than one backdrop was found; each is collapsed."
+                : "");
     }
-    const Rect& bdrop = whole[firstBackdrop];
-    Log::get().note(
-        "loading panel: FIT -- measurement %u from %u solids of %u interface "
-        "draws. The backdrop at draw %u spans %.0fx%.0f; the box on top of it "
-        "measures %.0fx%.0f (%u quads, anchored by %s%s%s). The backdrop is "
-        "redrawn to those exact bounds; the box and its text are the game's "
-        "own draws, untouched.%s",
-        g_measurements, g_capCount, g_capSeqLen,
-        g_caps[firstBackdrop].seqPos, bdrop.w(), bdrop.h(),
-        target.w(), target.h(), contributors, source,
-        strips ? ", full-span strips excluded" : "",
-        sheets ? ", a full sheet in a batch excluded" : "",
-        (backdrops > 1 || skippedBackdrops)
-            ? " More than one backdrop was found; each is collapsed."
-            : "");
 }
 
 }  // namespace

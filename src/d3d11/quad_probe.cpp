@@ -47,6 +47,13 @@ bool     g_armed = false;
 uint32_t g_wantW = 0, g_wantH = 0;
 char     g_wantKind = 0;
 uint32_t g_wantN = 0;
+// Matching frames to let pass before capturing. The first frame containing
+// a match is usually a fade-in frame: the first flight of this armed at
+// launch and caught the backdrop alone, one occurrence of the three the
+// census had already counted in steady state.
+uint32_t g_wantSkip = 0;
+uint32_t g_skipLeft = 0;
+uint32_t g_lastSkipFrame = 0;
 bool     g_taken = false;          // one capture per session; re-arm by
                                    // setting the spec off and on again
 
@@ -93,13 +100,13 @@ void dropCapture() {
 void quadProbeConfigure(Config& cfg) {
     const std::string spec = cfg.getString("advanced.quad_probe", "");
 
-    uint32_t w = 0, h = 0, n = 0;
+    uint32_t w = 0, h = 0, n = 0, skip = 0;
     char kind = 0;
     if (!spec.empty()) {
         const char* p = spec.c_str();
         char* end = nullptr;
         const unsigned long pw = strtoul(p, &end, 10);
-        unsigned long ph = 0, pn = 0;
+        unsigned long ph = 0, pn = 0, pskip = 0;
         bool ok = (end != p) && (*end == 'x' || *end == 'X');
         if (ok) { const char* q = end + 1; ph = strtoul(q, &end, 10); ok = end != q; }
         if (ok) ok = (*end == ':') && strchr("DINX", end[1]) && end[2] == ':';
@@ -109,33 +116,47 @@ void quadProbeConfigure(Config& cfg) {
             pn = strtoul(q, &end, 10);
             ok = end != q;
         }
+        // The optional fourth field: matching frames to let pass first, so
+        // the capture describes steady state rather than the first fade-in
+        // frame the widget appears in.
+        if (ok && *end == ':') {
+            const char* q = end + 1;
+            pskip = strtoul(q, &end, 10);
+            ok = end != q;
+        }
         while (*end == ' ' || *end == '\t') ++end;
         if (!ok || *end || pw == 0 || ph == 0 || pn == 0 ||
             pn % kIndicesPerQuad != 0) {
-            Log::get().note("quad probe: \"%s\" is not WIDTHxHEIGHT:KIND:COUNT "
-                            "with COUNT a multiple of six; refused rather than "
+            Log::get().note("quad probe: \"%s\" is not "
+                            "WIDTHxHEIGHT:KIND:COUNT[:SKIPFRAMES] with COUNT "
+                            "a multiple of six; refused rather than "
                             "half-applied.", spec.c_str());
         } else {
             w = static_cast<uint32_t>(pw);
             h = static_cast<uint32_t>(ph);
             n = static_cast<uint32_t>(pn);
+            skip = static_cast<uint32_t>(pskip);
         }
     }
     const bool armed = w != 0;
     // A re-armed probe is a fresh request: turning it off and on again is how
     // a second capture is asked for without a relaunch.
     if (armed && (w != g_wantW || h != g_wantH || kind != g_wantKind ||
-                  n != g_wantN)) {
+                  n != g_wantN || skip != g_wantSkip)) {
         g_taken = false;
+        g_skipLeft = skip;
+        g_lastSkipFrame = 0;
     }
     g_wantW = w; g_wantH = h; g_wantKind = kind; g_wantN = n;
+    g_wantSkip = skip;
     if (armed && !g_armed) {
         Log::get().note("quad probe ARMED on %c:%u draws into a %ux%u target: "
-                        "the first frame containing one has EVERY such draw "
-                        "copied, and each occurrence's quads are logged with "
-                        "the bytes past the position. Nothing is changed. Set "
-                        "the spec off and on again for another capture.",
-                        kind, n, w, h);
+                        "after letting %u matching frame(s) pass, the first "
+                        "frame containing one has EVERY such draw copied, and "
+                        "each occurrence's quads are logged with the bytes "
+                        "past the position. Nothing is changed. Set the spec "
+                        "off and on again for another capture.",
+                        kind, n, w, h, skip);
     }
     g_armed = armed;
 }
@@ -148,6 +169,16 @@ bool quadProbeOnDraw(ID3D11DeviceContext* ctx, uint32_t targetW,
     if (!g_armed || g_taken || g_pendingFrame || !ctx) return false;
     if (targetW != g_wantW || targetH != g_wantH) return false;
     if (kind != g_wantKind || count != g_wantN) return false;
+
+    // Skipped frames pass whole: one decrement per frame that contains a
+    // match, however many matches it holds.
+    if (g_skipLeft) {
+        if (g_frame != g_lastSkipFrame) {
+            --g_skipLeft;
+            g_lastSkipFrame = g_frame;
+        }
+        return false;
+    }
 
     // The capture window is the FIRST frame a match lands in. A match in a
     // later frame indexes a rewritten buffer and cannot join this capture.
