@@ -180,7 +180,9 @@ bool quadProbeOnDraw(ID3D11DeviceContext* ctx, uint32_t targetW,
     if (kind != g_wantKind || count != g_wantN) return false;
 
     // Skipped frames pass whole: one decrement per frame that contains a
-    // match, however many matches it holds.
+    // match, however many matches it holds -- INCLUDING the frame that
+    // spends the last skip. Flights 2 and 3 opened the window mid-frame on
+    // that frame's later matches and never showed the first occurrence.
     if (g_skipLeft) {
         if (g_frame != g_lastSkipFrame) {
             --g_skipLeft;
@@ -188,6 +190,7 @@ bool quadProbeOnDraw(ID3D11DeviceContext* ctx, uint32_t targetW,
         }
         return false;
     }
+    if (g_lastSkipFrame && g_frame == g_lastSkipFrame) return false;
 
     // The capture window is the FIRST frame a match lands in. A match in a
     // later frame indexes a rewritten buffer and cannot join this capture.

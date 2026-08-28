@@ -7,56 +7,56 @@
 // (backdrop_fix.h) what it covers is worth seeing. The field's ideal, in
 // their words: collapse it to "the exact size and shape" of the modal.
 //
-// THE MODEL, measured across three flights on 2026-08-28. Elite's widget
-// system draws every solid panel as the SAME 30-index bordered quad set in
-// one normalized space (about +/-32765 across) and SIZES it with the
-// VIEWPORT: the frame holds several such panels whose vertices are
-// indistinguishable while the screen shows a full-view scrim, a modal-sized
-// box and a letterboxed frame. The roles are told apart by the two things
-// that do differ:
-//
-//   * COLOUR -- an RGBA8 at vertex byte offset 8. The scrim is black at
-//     alpha 0x66 (the 40% wash the field called ugly); the box is black at
-//     alpha 0xFF; the letterbox is white.
-//   * VIEWPORT -- the scrim's spans the surface; the box's is the modal's
-//     own screen rect, which is exactly the rect the field wants the scrim
-//     collapsed to.
-//
-// Three earlier architectures died before this was measured. A hand-tuned
-// ratio was rightly rejected in the field. A measured fit unioned "everything
-// else" and caught one line of text mid fade-in (913x568 against 65529x65529
-// -- the panel collapsed to a sliver), and its failure was misread as "the
-// panel IS the box" because every probe of the day matched draws by
-// signature and so hit scrim and box together. A seeded growth then found
-// that no solid's VERTICES are modal-sized at all -- vertex bounds are
-// per-viewport and comparing them across draws was never meaningful.
+// THE MODEL, measured across four flights on 2026-08-28 and read out of
+// vs 666EF0C4C616F67E's own disassembly (docs/shaders/ui-widget-vs.asm).
+// Elite's widget system draws every solid panel as the SAME 30-index
+// bordered quad set spanning one normalized space (about +/-32765), and
+// places it with a PER-ELEMENT 4x4 MATRIX read from a structured buffer at
+// VS t0 (stride 160; offsets 64/80 of the element feed the pixel shader
+// its styling). Each vertex selects its element with a BYTE packed in its
+// COLOUR attributes -- offset 12 or 16 of the 24-byte vertex, chosen by
+// flag bits 0x4000/0x8000 in VS cb2[2].x. That is why three rasterizer
+// architectures died measuring nothing: vertices, viewports and scissors
+// are identical on every panel -- full-space, full-surface, off -- and the
+// census never looked at VS resources at all. The roles are told apart by
+// colour (RGBA8 at vertex offset 8: the scrim is black at alpha 0x66, the
+// box black at 0xFF, the letterbox white) and CONFIRMED by each element's
+// own matrix footprint -- the scrim's maps to the full view, the box's to
+// the modal's rect, the exact rect the field wants the scrim collapsed to.
 //
 // THE MECHANISM.
 //
 //   Measure: when the loader's frame composition -- the sequence of draw
-//   shapes into the interface surface -- holds identical for two consecutive
-//   frames, capture one frame: every textureless quad-batch draw's indices
-//   (the shared vertex buffer once) for the colours, and each draw's
-//   viewport and scissor for the rects. Stability gating exists because the
-//   dialog fades in over many frames; the old code measured whichever
-//   transitional frame it woke in.
+//   shapes into the interface surface -- holds identical for two
+//   consecutive frames, capture one frame: every textureless quad-batch
+//   draw's indices (the shared vertex buffer once), plus the widget table
+//   (VS t0) and the flag constants (VS b2), all GPU-timeline copies.
 //
-//   Classify by position: the SCRIM is a 30-index panel, dark and
-//   translucent, with a full-surface viewport; the BOX is dark and opaque
-//   with a boxed viewport (or an enabled boxed scissor). Positions are
+//   Classify: panels by colour, then VERIFY through the same matrices the
+//   shader will use -- the translucent panel's element must map to the
+//   full view, the opaque one's to a boxed rect. A classification that
+//   fails its own footprint refuses, with each panel's element and mapped
+//   px rect in the log.
+//
+//   Substitute: the scrim's 30 vertices verbatim, with ONLY the two
+//   element-index bytes rewritten to the box's. The game's own shader then
+//   reads the BOX'S matrix from the live table, this frame and every
+//   frame: the modal can move, resize or animate and the scrim follows,
+//   because nothing about its placement is ever stored here. Positions are
 //   trusted only while the frame matches the measured sequence draw by
 //   draw; any divergence runs stock until the next stable window.
 //
-//   Substitute: the scrim's own draw call is re-issued THROUGH THE BOX'S
-//   VIEWPORT, read fresh at the box's draw every frame. The widget system
-//   itself then sizes the scrim into the modal's rect -- no geometry is
-//   built, no vertex is touched, and the box, its border and its text are
-//   the game's own draws, forwarded bit-identically.
+// EVERY failure -- no stable window, no table bound, mixed tables, no
+// translucent full-view element, no boxed opaque element, an index beyond
+// the captured window -- draws stock and says why in the log, once per
+// measured shape. Stock is the game's own full-view scrim: safe, just big.
 //
-// EVERY failure -- no stable window, no translucent full-view panel, no
-// boxed opaque panel, a stale box rect -- draws stock and says why in the
-// log, once per measured shape, naming each solid it saw with its colour
-// and rects. Stock is the game's own full-view scrim: safe, just big.
+// KNOWN RISK, accepted until a flight rules on it: if the game reallocates
+// element slots frame to frame within one stable dialog (the sun-glare
+// hunt met exactly that in the 3D HUD), a captured index would point at a
+// different element later. A static dialog most likely keeps its slots;
+// wrongness would be immediately visible and immediately reported by the
+// engage line's element numbers.
 //
 // WHAT IT DOES NOT DO. It does not remove the scrim -- inside the box's
 // rect it still composites exactly as the game intended, under the box. It
@@ -70,8 +70,8 @@
 // boundary already measured for this module: menu-shaped frames peak around
 // twenty draws, a rendered scene clears a hundred.
 //
-// STATUS: rebuilt 2026-08-28 on the viewport model, third architecture of
-// the day; awaiting the flight that confirms the box's viewport is boxed.
+// STATUS: rebuilt 2026-08-28 on the element-index model, read from the
+// shader itself rather than guessed; awaiting the confirming flight.
 // docs/loading-panel-handoff.md carries the full evidence trail.
 #pragma once
 

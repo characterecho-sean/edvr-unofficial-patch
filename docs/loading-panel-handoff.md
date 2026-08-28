@@ -1,9 +1,10 @@
 # The loading dialog's oversized backdrop
 
-Fifth architecture (the viewport model), built 2026-08-28 after two flights
-of the fourth, NOT yet flown. Everything measured here came from the field
-rig (Frontier launcher install, game build 330683, eye textures 5424x5356)
-on 2026-08-28; everything else says what it is.
+Sixth architecture (the element-index model), built 2026-08-28 after four
+flights, NOT yet flown -- and the first one READ FROM THE SHADER rather
+than inferred from disappearances. Everything measured here came from the
+field rig (Frontier launcher install, game build 330683, eye textures
+5424x5356) on 2026-08-28; everything else says what it is.
 
 ## The defect, stated exactly
 
@@ -26,38 +27,47 @@ of the oversized backdrop:
 * A taller dialog **bounded in the orange UI colour**, about the same width,
   extending further above and below.
 
-## The model: the viewport is the widget rect
+## The model: the element index in the vertex, the matrix in a table
 
-Elite draws every solid panel -- scrim, box, letterbox -- as the SAME
-30-index bordered widget (fill plus four strips) in one normalized space of
-about +/-32765 across, and **sizes it with the viewport**. Flight 2 (11:27,
-2026-08-28) proved this by exhaustion: its steady-state probe caught two
-X:30 occurrences whose vertices BOTH span the full space -- one solid black
-(alpha `FF`, strips 46/109 thick), one white with uv floats, a letterbox --
-while the fix's refusal dumps show a third full-space X:30 every frame and
-**no modal-sized solid anywhere in any vertex buffer**. The screen shows a
-modal-sized box; the vertices never do; the only per-draw state left that
-can place it is the rasterizer's -- viewport (which SCALES the widget into
-a rect) or scissor (which crops to one). Two corollaries:
+Flight 3 (11:42, 2026-08-28) refuted the viewport model completely: every
+solid's viewport is the full surface (`0,0 4259x2395`) and every scissor is
+off, on every draw, both dialogs. That left exactly one unread place, and
+the answer was already on disk -- `edvr_logs\shaders` holds
+`vs_666EF0C4C616F67E.dxbc` from an earlier `glare_shader_dump` session,
+and its disassembly (now `docs/shaders/ui-widget-vs.asm`, with the pixel
+shader beside it) names the whole mechanism:
 
-* **Vertex bounds must never be compared across draws.** Each draw's
-  coordinates are normalized to its own viewport. The doc's oldest open
-  question -- "do these draws share one coordinate space?" -- is answered:
-  no, and every bounds-union across draws (attempts 3 and 4) was arithmetic
-  on incommensurable numbers.
-* **The roles are told apart by colour + viewport, not geometry.** The
-  scrim's fill carries RGBA8 `00 00 00 66` at vertex offset 8 -- black at
-  40% -- with a full-surface viewport. The box is black at alpha `FF` with
-  the modal's own rect as its viewport. The letterbox is white; ignored.
+* every panel's vertices span one normalized space (about +/-32765);
+* the vertex shader reads a **per-element 4x4 matrix from a structured
+  buffer at VS t0, stride 160** (`ld_structured` at offsets 0/16/32/48;
+  offsets 64/80 feed the pixel shader the element's styling params), and
+  transforms the position with it;
+* the element is selected by a **byte carried in the vertex itself**:
+  `round(255 * COLOUR1.x)` or `round(255 * COLOUR2.x)` -- bytes 12 and 16
+  of the 24-byte vertex -- chosen by flag bits 0x4000/0x8000 in VS
+  `cb2[2].x`.
+
+So the 24-byte vertex reads: `float2` position, RGBA8 colour (offset 8),
+two more RGBA8 attributes whose `.x` bytes are element indices (offsets 12
+and 16), and an unused trailing dword. One widget, one buffer, many
+panels, each placed by its element's matrix. This is why five instruments
+measured "nothing differs": vertices, viewports and scissors ARE identical
+-- the census tracks PS textures and b0 only, and the discriminating state
+was a VS structured buffer indexed per vertex.
+
+The roles, confirmed by colour across flights: the scrim's fill is RGBA8
+`00 00 00 66` at offset 8 -- black at 40%, the ugly wash itself; the box
+is black at alpha `FF`; the letterbox is white (its "uv floats" were its
+element params all along).
 
 Earlier wrong turns, kept because each was manufactured by an instrument's
 semantics: the skip probes match every draw sharing a signature, so scrim
 and box always vanished together ("one batched call" -- refuted by the
-census counting three X:30s per frame at positions #1/#2/#4); the original
-one-shot probe only ever sampled the first occurrence, mid fade-in ("the
-panel IS the box"); and the vertex-space unions of attempts 3 and 4 caught
-text runs and corner solids respectively, because they were unions over
-incompatible spaces.
+census counting three X:30s per frame); the original one-shot probe only
+ever sampled the first occurrence, mid fade-in ("the panel IS the box");
+the vertex-space unions of attempts 3 and 4 were arithmetic over spaces
+that were never comparable; and the viewport model of attempt 5 guessed
+the right kind of mechanism in the wrong pipeline stage.
 
 ## What is established (field-measured)
 
@@ -134,44 +144,53 @@ Default remains `stock` until field-verified.
 interface surface are recorded as a sequence of shapes (kind, index count,
 target size). Only when two consecutive frames record the *identical*
 sequence does the next frame get captured: every textureless quad-batch
-draw's indices (the shared vertex buffer once) for the colours, plus each
-draw's **viewport, scissor and scissor-enable** for the rects. A collection
+draw's indices (the shared vertex buffer once), plus the **widget table
+(VS t0, first 64 KB, with the view's FirstElement)** and the **flag
+constants (VS b2, 48 bytes)** -- all GPU-timeline copies. A collection
 whose frame moved mid-capture is discarded. This is the answer to the
 1-3-6-11-9-12 instability: transitional frames can no longer be measured.
 
-**Classify by colour and viewport.** Among the captured 30-index panels:
-the **scrim** is dark (all channels < 0x40), translucent (alpha < 0xF0),
-with a viewport >= 90% of the surface in both axes; the **box** is dark,
-opaque, with a viewport <= 80% in both axes -- or, if its viewport is full,
-an enabled scissor that is boxed, in which case the scissor rect is the
-modal. The white letterbox fails the darkness test and is never touched.
-No scrim, or no box, records a no-verdict: **stock, with a log line saying
-why and one line per solid** -- extent in its own units, RGBA8, viewport,
-scissor -- so a wrong threshold names itself in one flight.
+**Classify by colour, verify by matrix.** Among the captured 30-index
+panels: the **scrim** is dark (all channels < 0x40) and translucent (alpha
+< 0xF0); the **box** is dark and opaque. Each candidate's element index is
+decoded exactly as the shader does (byte 12 or 16 per the cb2 flags), its
+matrix is read from the captured table, and its fill's footprint is
+computed through it: the scrim's element must map to >= 90% of clip space
+in both axes, the box's to <= 80%. A classification that fails its own
+footprint refuses. The white letterbox fails the darkness test and is
+never touched. No scrim, no box, no table, mixed tables, or an index past
+the 64 KB window: **stock, with a log line saying why and one line per
+solid** -- colour, element index, and the px rect its matrix lands on.
 
-**Substitute through the box's viewport.** At the scrim's position (trusted
-only while the frame matches the measured sequence draw by draw), the
-game's own draw call is swallowed and re-issued with one change: the
-viewport is the box's, read fresh **at the box's own draw every frame**, so
-the modal never has to be assumed static. No geometry is built and no
-vertex is touched -- the widget system itself sizes the scrim into the
-modal's rect, borders scaling exactly as the box's own do. Inside the box
-the scrim composites exactly as stock (invisible under the opaque box, and
-unchanged under a translucent one); outside it, it no longer exists. The
-box rect goes stale after 2 frames without the box drawing -- stock. A
-dialog switch runs stock for the handful of frames a fresh measurement
-takes (two stable + one capture + four settle).
+**Substitute the element index.** At the scrim's position (trusted only
+while the frame matches the measured sequence draw by draw), the draw is
+swallowed and re-issued from a 30-vertex copy that differs in exactly two
+bytes per vertex: the element-index bytes now name the BOX's element. The
+game's own shader then places the scrim with the box's matrix -- read from
+the game's live table this frame and every frame, so nothing about the
+modal's position is ever stored on our side and nothing can go stale. The
+scrim keeps its own colours; it inherits the box's styling params, which
+only shows where it shows at all -- under the box. A dialog switch runs
+stock for the handful of frames a fresh measurement takes (two stable +
+one capture + four settle).
+
+**Known risk, accepted until a flight rules:** if the game reallocates
+table slots frame to frame within one stable dialog (the sun-glare hunt
+met exactly that in the 3D HUD), the captured index would drift off the
+box's element. A static dialog most likely keeps its slots; drift would be
+immediately visible, and the engage line's element numbers name it.
 
 **Log lines to look for** (`edvr_logs`):
 
 * `loading panel: FIT -- measurement N from S solids of D interface draws.
-  The scrim at draw P (rgba 66000000) is redrawn through the box's
-  viewport; the box at draw Q (rgba FF000000) sits at X,Y WxH px of WxH.`
-  -- the engage line. After the first four, it logs again only when the box
-  moved; the percent text re-measures constantly and the box holds still.
+  The scrim at draw P (rgba 66000000, element E) is re-issued as element
+  B -- the box at draw Q (rgba FF000000), whose matrix lands at X,Y WxH px
+  of WxH.` -- the engage line. After the first four, it logs again only
+  when the box moved; the percent text re-measures constantly and the box
+  holds still.
 * `loading panel: measured N draw(s) and drew no conclusion -- REASON.` --
   every no-verdict, preceded by one `solid k: ...` line per captured draw
-  with extent, colour, viewport and scissor.
+  with colour, element bytes, and the px rect its element maps to.
 * `loading panel: the loader's draws have not held still for two
   consecutive frames in 600 frames` -- continuous animation; the fix is
   standing down correctly.
@@ -192,27 +211,25 @@ it before reading signatures out of a single capture.
 
 ## The flight plan
 
-One flight answers everything, because the probe and the fix now read the
-same state:
-
-1. `advanced.quad_probe = 4259x2395:X:30:120` (surface size moves with
-   render scale) + `fix.loading_panel = fit`. The probe logs every X:30
-   occurrence ~2s into the first dialog **with its viewport and scissor**:
-   the model predicts the opaque-black occurrence carries the modal's rect
-   in one of them and the scrim's carries the full surface. If instead every
-   occurrence's viewport AND scissor are full-surface, the model is wrong,
-   the fix will have refused with dumps saying so, and the sizing lives in
-   the one place left unread -- the pixel shader's b2 constants.
-2. Watch both intro dialogs. Expect the scrim snapped to each modal, box
-   and border untouched, brief full-view scrim during fade-in (measurement
-   gating). The engage and refusal lines above carry everything worth
-   pasting back.
+1. Keys as already armed: `fix.loading_panel = fit` +
+   `advanced.quad_probe = 4259x2395:X:30:120` (surface size moves with
+   render scale; the probe's mid-frame skip bug is fixed, so it now shows
+   ALL occurrences of its frame, the scrim included). Watch both intro
+   dialogs. Expect the scrim snapped to each modal, box and border
+   untouched, brief full-view scrim during fade-in (measurement gating),
+   and the engage line naming both elements and the box's px rect.
+2. If the scrim drifts or jumps mid-dialog, that is the slot-reallocation
+   risk above -- the engage/refusal lines carry the element numbers that
+   prove it, and the next mechanism is a per-frame index re-read rather
+   than a captured one.
 3. On success, flip the shipped default to `fit` in a release commit.
 
-Flights already flown: 11:11 (fourth architecture, union rule -- every
-measurement refused, union spanned the surface); 11:27 (seeded growth --
-same refusal, and its dumps plus the steady-state probe delivered the
-viewport model above).
+Flights already flown, all safe (never engaged): 11:11 (fourth
+architecture, union rule -- refused, union spanned the surface); 11:27
+(seeded growth -- refused the same way; its dumps plus the steady-state
+probe killed vertex-space measurement); 11:42 (fifth, viewport model --
+refused: every viewport full, every scissor off, which forced the shader
+read that found the real mechanism).
 
 ## What must not regress
 
@@ -223,10 +240,13 @@ its 16x16 BC1 multiplier texture -- shares nothing with the panel path.
 ## A note on scale
 
 This is a dark rectangle behind a dialog that shows for a few seconds. It
-has cost a dozen field flights and five architectures, and each dead one
-died of a measurement its own instruments could not take: signature-blind
-skips, a first-frame probe, unions over per-viewport spaces. The fifth is
-the first whose mechanism -- the viewport is the widget rect -- explains
-every byte measured so far, fails toward stock with its reasons and its
-evidence in the log, and needs exactly one flight to confirm or refute.
-Worth doing properly or not at all; this is the properly.
+has cost a dozen field flights and six architectures, and every dead one
+died of a measurement its instruments could not take: signature-blind
+skips, a first-frame probe, unions over incomparable spaces, rasterizer
+state that never varied. The sixth is the first read out of the shader
+itself -- the element index in the vertex, the matrix in the table -- and
+it explains every byte measured across every flight, including the two
+architectures' worth of "nothing differs". It fails toward stock with its
+evidence in the log, and its substitute is two bytes per vertex riding the
+game's own live data. Worth doing properly or not at all; this, finally,
+is the properly.
