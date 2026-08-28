@@ -185,11 +185,16 @@ verified through the same table the shader reads, so a misclassification
 cannot survive its own footprint. No box hunt exists any more: the box is
 not in this surface.
 
-**Withhold by ordinal, from the first frames.** Flight 8 engaged and the
-field reported it near-perfect, with the scrim visible briefly at first
--- that was the stability gate plus the fixed settle, machinery inherited
-from the positional architectures that the withhold does not need. Now:
-the FIRST panel-bearing frame is captured immediately (classification is
+**Withhold by ordinal, from the very first frame.** Flight 8 engaged and
+the field reported it near-perfect, with the scrim visible briefly at
+first -- that was the stability gate plus the fixed settle, machinery
+inherited from the positional architectures that the withhold does not
+need. Now: until the session's first verdict, the frame's FIRST panel is
+withheld ON SPECULATION -- nine flights of measurement say that draw is
+always the scrim, so the blip is zero rather than brief, and a refusing
+verdict would simply end speculation and return the panel after a couple
+of hidden frames, in a case no measurement has ever produced. Meanwhile
+the first panel-bearing frame is captured immediately (classification is
 frame-local; a mid-fade frame is a valid sample), the copies are polled
 with DO_NOT_WAIT (verdict typically lands in 1-2 frames), and the
 verified scrim is withheld BY ORDINAL -- the k-th panel of its surface in

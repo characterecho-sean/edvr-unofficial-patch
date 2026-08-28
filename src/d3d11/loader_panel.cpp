@@ -147,6 +147,7 @@ uint32_t g_hashAcc = 2166136261u;
 uint32_t g_panelOrdinal = 0;     // chain-dims 30-index draws seen this frame
 bool     g_frameAnyPanel = false;
 bool     g_frameChainPanel = false;
+bool     g_frameFirstPanelDone = false;  // the frame's first panel has passed
 bool     g_subArm = false;       // set by OnDraw for the Substitute call
 
 // The last COMPLETED frame's hash, for the refusal cooldown's stability
@@ -191,6 +192,15 @@ bool     g_retired = false;      // a rendered scene arrived: the intro is
                                  // over and this module is done for the
                                  // session, engaged or not
 
+// Until the session's FIRST verdict, the first panel of each frame is
+// withheld SPECULATIVELY: nine flights of measurement say that draw is
+// always the scrim, so hiding it for the two or three frames
+// classification takes is what makes the blip zero instead of brief. A
+// verdict either hands over to the chain (speculation was right) or, on a
+// refusal, ends speculation and the panel returns -- a few hidden frames
+// of one panel, in a case no measurement has ever produced.
+bool     g_specDone = false;
+
 void failOnce(const char* why) {
     static bool noted = false;
     if (noted) return;
@@ -227,6 +237,7 @@ void resetMeasured() {
     g_measuredHash = 0;
     g_refuseStreak = 0;
     g_retired = false;
+    g_specDone = false;
 }
 
 void resetFrameAcc() {
@@ -235,6 +246,7 @@ void resetFrameAcc() {
     g_panelOrdinal = 0;
     g_frameAnyPanel = false;
     g_frameChainPanel = false;
+    g_frameFirstPanelDone = false;
     g_subArm = false;
 }
 
@@ -243,6 +255,7 @@ void resetFrameAcc() {
 void recordNone(const char* why) {
     g_measuredHash = g_armedHash;
     ++g_refuseStreak;
+    g_specDone = true;   // a verdict exists; speculation is over
     Log::get().note("loading panel: measured %u draw(s) and drew no "
                     "conclusion -- %s. Stock for this state; a changed one "
                     "re-measures.",
@@ -301,8 +314,11 @@ bool loaderPanelOnDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
     }
 
     uint32_t ord = 0xFFFFFFFFu;
+    bool firstPanel = false;
     if (count == kPanelIndices) {
         g_frameAnyPanel = true;
+        firstPanel = !g_frameFirstPanelDone;
+        g_frameFirstPanelDone = true;
         if (g_chainOn && targetW == g_chainW && targetH == g_chainH) {
             g_frameChainPanel = true;
             ord = g_panelOrdinal++;
@@ -485,6 +501,13 @@ bool loaderPanelOnDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
                 return true;
             }
         }
+    }
+    // Before the session's first verdict: the frame's first panel is
+    // withheld on speculation, so the scrim never shows even while the
+    // measurement that will confirm it is still in flight.
+    if (!g_specDone && !g_chainOn && !g_retired && firstPanel) {
+        g_subArm = true;
+        return true;
     }
     return false;
 }
@@ -823,6 +846,9 @@ void loaderPanelTick(ID3D11DeviceContext* ctx, bool sceneFrame) {
         if (consumed || allowWait) {
             g_settleFrom = 0;
             dropPending();
+            // Whatever the outcome -- engage, refusal, or a failure -- a
+            // verdict has been rendered: speculation must not outlive it.
+            g_specDone = true;
         }
     }
 
