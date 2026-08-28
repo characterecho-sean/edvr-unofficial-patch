@@ -2768,8 +2768,14 @@ void STDMETHODCALLTYPE hookedRSSetViewports(ID3D11DeviceContext* self, UINT n,
     s->realRSSetViewports(self, n, vps);
 }
 
+// The non-indexed kinds' start vertex, stashed into the same slot the
+// indexed thunks use for baseVertex -- it plays the same role, being what a
+// vertex's index is offset by. The quad probe reads it (quad_probe.h); it
+// was reading whatever the last INDEXED draw had left there, which for a
+// spec aimed at a 4-vertex draw would have been a silently wrong rectangle.
 void STDMETHODCALLTYPE hookedDraw(ID3D11DeviceContext* self, UINT count, UINT start) {
     ++g_state->thunkHits[kHitDraw];
+    if (quadProbeWants()) g_state->qsBaseVertex = static_cast<INT>(start);
     const DrawVerdict v = beginPanelOverride(self, 'D', count, 1);
     forwardWithVerdict(self, v, [&] { g_state->realDraw(self, count, start); });
     if (v == DrawVerdict::kPanel) endPanelOverride(self);
@@ -2786,6 +2792,8 @@ void STDMETHODCALLTYPE hookedDrawIndexed(ID3D11DeviceContext* self, UINT count,
 void STDMETHODCALLTYPE hookedDrawInstanced(ID3D11DeviceContext* self, UINT perInstance,
                                            UINT instances, UINT startVertex,
                                            UINT startInstance) {
+    // See hookedDraw: the start vertex, before the call that reads it.
+    if (quadProbeWants()) g_state->qsBaseVertex = static_cast<INT>(startVertex);
     const DrawVerdict v = beginPanelOverride(self, 'N', perInstance, instances);
     // The draw's instance window, for the glare telemetry: the trains
     // share one record buffer at different offsets, and which train a

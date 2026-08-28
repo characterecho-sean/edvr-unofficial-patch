@@ -17,8 +17,22 @@ namespace edvr {
 namespace {
 
 // Six indices to a quad at topology 4, which the census reports for this
-// family. Anything not a multiple of six is not this shape and is refused.
+// family. Anything not a multiple of six is not this shape and is refused --
+// for the INDEXED kinds. See kStripQuadVerts.
 constexpr uint32_t kIndicesPerQuad = 6;
+
+// A four-vertex triangle strip is also a quad, and the non-indexed kinds
+// draw them: no index buffer, vertices at startVertex + 0..3.
+//
+// Refused until 2026-08-28, when the intro flight needed exactly this. The
+// movie's own composite turned out to be a full-screen quad with nothing in
+// it to move (docs/intro-video.md), which puts the question on the draw that
+// FILLS its 1920x1080 source -- an N of four vertices. A probe that could
+// not be aimed at that shape could not ask where the picture inside the
+// surface actually sits.
+constexpr uint32_t kStripQuadVerts = 4;
+
+bool kindIsIndexed(char k) { return k == 'I' || k == 'X'; }
 
 // The vertex buffer these draws share is 4 MB and rewritten every frame, so
 // the copy has to be taken AT the matched draws, once, in their own frame.
@@ -57,11 +71,34 @@ uint32_t g_lastSkipFrame = 0;
 bool     g_taken = false;          // one capture per session; re-arm by
                                    // setting the spec off and on again
 
+// Distinct vertex buffers one capture may hold.
+//
+// It used to hold ONE, copied at the first occurrence, and every later
+// occurrence was decoded out of it whatever buffer it had actually bound.
+// That was right for the widget panels this began with -- they all share a
+// single 4 MB pool -- and silently wrong the first time it met draws that do
+// not. The intro flight is the case: the two eyes' movie composites carry
+// one 80-byte buffer EACH, so occurrence 1 was decoded from occurrence 0's
+// bytes and reported geometry identical to it by construction. An
+// instrument agreeing with itself reads exactly like a measurement.
+//
+// Slots are keyed by the bound buffer, so the shared-pool case still costs
+// one copy however many occurrences index it.
+constexpr uint32_t kMaxVbSlots = 8;
+
+struct VbSlot {
+    void*         key = nullptr;    // the ID3D11Buffer the draw had bound
+    ID3D11Buffer* stage = nullptr;
+    uint32_t      stride = 0;
+    uint32_t      bytes = 0;
+};
+
 struct Occ {
     uint32_t ibOffset = 0;         // bytes into the index staging buffer
-    int      baseVertex = 0;
+    int      baseVertex = 0;       // non-indexed kinds: the start vertex
     uint32_t startIndex = 0;
     uint32_t instances = 0;
+    int      vbSlot = -1;          // -1: its buffer did not fit the capture
     DXGI_FORMAT ibFormat = DXGI_FORMAT_UNKNOWN;
     // The rasterizer state live at the draw. Flight 2 proved the widget
     // system sizes these panels with the VIEWPORT -- identical full-space
@@ -75,7 +112,8 @@ struct Occ {
 };
 
 ID3D11Buffer* g_ibStage = nullptr;
-ID3D11Buffer* g_vbStage = nullptr;
+VbSlot        g_vb[kMaxVbSlots];
+uint32_t      g_vbCount = 0;
 Occ           g_occ[kMaxOccurrences];
 uint32_t      g_occCount = 0;
 uint32_t      g_occDropped = 0;
@@ -84,8 +122,6 @@ bool          g_windowOpen = false;   // the capture frame is still running
 uint32_t      g_windowFrame = 0;
 uint32_t      g_pendingFrame = 0;     // 0 = nothing settling
 uint32_t      g_frame = 0;
-uint32_t      g_capStride = 0;
-uint32_t      g_capVertexBytes = 0;
 
 void failOnce(const char* why) {
     static bool noted = false;
@@ -96,7 +132,11 @@ void failOnce(const char* why) {
 
 void dropCapture() {
     if (g_ibStage) { g_ibStage->Release(); g_ibStage = nullptr; }
-    if (g_vbStage) { g_vbStage->Release(); g_vbStage = nullptr; }
+    for (VbSlot& s : g_vb) {
+        if (s.stage) s.stage->Release();
+        s = VbSlot();
+    }
+    g_vbCount = 0;
     g_occCount = 0;
     g_occDropped = 0;
     g_ibFill = 0;
@@ -134,12 +174,19 @@ void quadProbeConfigure(Config& cfg) {
             ok = end != q;
         }
         while (*end == ' ' || *end == '\t') ++end;
-        if (!ok || *end || pw == 0 || ph == 0 || pn == 0 ||
-            pn % kIndicesPerQuad != 0) {
+        // COUNT means indices for the indexed kinds (six to a quad) and
+        // VERTICES for the non-indexed ones, where the only shape this
+        // decodes is the four-vertex strip quad.
+        const bool countOk =
+            ok && pn != 0 &&
+            (kindIsIndexed(kind) ? (pn % kIndicesPerQuad == 0)
+                                 : (pn == kStripQuadVerts));
+        if (!ok || *end || pw == 0 || ph == 0 || !countOk) {
             Log::get().note("quad probe: \"%s\" is not "
                             "WIDTHxHEIGHT:KIND:COUNT[:SKIPFRAMES] with COUNT "
-                            "a multiple of six; refused rather than "
-                            "half-applied.", spec.c_str());
+                            "a multiple of six for I and X, or exactly %u for "
+                            "D and N; refused rather than half-applied.",
+                            spec.c_str(), kStripQuadVerts);
         } else {
             w = static_cast<uint32_t>(pw);
             h = static_cast<uint32_t>(ph);
@@ -201,36 +248,51 @@ bool quadProbeOnDraw(ID3D11DeviceContext* ctx, uint32_t targetW,
         return false;
     }
 
+    const bool indexed = kindIsIndexed(kind);
+
     bool started = false;
     guardedBudget(g_budget, [&] {
         ID3D11Buffer* ib = nullptr;
         DXGI_FORMAT ibFmt = DXGI_FORMAT_UNKNOWN;
         UINT ibOff = 0;
-        ctx->IAGetIndexBuffer(&ib, &ibFmt, &ibOff);
+        // Asked for only when it can matter: a non-indexed draw may legally
+        // have a stale index buffer bound, and reading one would put a
+        // meaningless format on the log line.
+        if (indexed) ctx->IAGetIndexBuffer(&ib, &ibFmt, &ibOff);
         ID3D11Buffer* vb = nullptr;
         UINT stride = 0, vbOff = 0;
         ctx->IAGetVertexBuffers(0, 1, &vb, &stride, &vbOff);
-        if (!ib || !vb || stride == 0) {
+        if ((indexed && !ib) || !vb || stride == 0) {
             if (ib) ib->Release();
             if (vb) vb->Release();
-            failOnce("the draw had no index or vertex buffer bound");
+            failOnce(indexed ? "the draw had no index or vertex buffer bound"
+                             : "the draw had no vertex buffer bound");
             return;
         }
         const UINT idxSize = (ibFmt == DXGI_FORMAT_R16_UINT) ? 2u : 4u;
-        const UINT need = count * idxSize;
+        const UINT need = indexed ? count * idxSize : 0u;
 
         ID3D11Device* dev = nullptr;
         ctx->GetDevice(&dev);
         if (dev) {
             bool ok = true;
-            if (!g_ibStage) {
+            if (indexed && !g_ibStage) {
                 D3D11_BUFFER_DESC sd{};
                 sd.Usage = D3D11_USAGE_STAGING;
                 sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
                 sd.ByteWidth = kIbStageBytes;
                 ok = SUCCEEDED(dev->CreateBuffer(&sd, nullptr, &g_ibStage));
             }
-            if (ok && !g_vbStage) {
+            // This draw's vertex buffer, by identity. A second occurrence
+            // that bound the SAME buffer joins the copy already queued for
+            // it; one that bound a different buffer gets its own slot. See
+            // kMaxVbSlots for what the single shared copy cost.
+            int slot = -1;
+            for (uint32_t i = 0; ok && i < g_vbCount; ++i) {
+                if (g_vb[i].key == vb) { slot = static_cast<int>(i); break; }
+            }
+            if (ok && slot < 0 && g_vbCount < kMaxVbSlots) {
+                VbSlot& s = g_vb[g_vbCount];
                 D3D11_BUFFER_DESC vd{};
                 vb->GetDesc(&vd);
                 D3D11_BUFFER_DESC sd{};
@@ -238,34 +300,40 @@ bool quadProbeOnDraw(ID3D11DeviceContext* ctx, uint32_t targetW,
                 sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
                 sd.ByteWidth = vd.ByteWidth > kMaxVertexBytes ? kMaxVertexBytes
                                                               : vd.ByteWidth;
-                ok = SUCCEEDED(dev->CreateBuffer(&sd, nullptr, &g_vbStage));
+                ok = SUCCEEDED(dev->CreateBuffer(&sd, nullptr, &s.stage));
                 if (ok) {
-                    // The whole buffer, once. Every occurrence this frame
-                    // indexes into it, and the game appends with no-overwrite
-                    // maps, so a copy queued at the first occurrence sees the
-                    // frame's writes by the time the GPU executes it.
+                    // The whole buffer, once per buffer. Every occurrence
+                    // that indexes it does so this frame, and the game
+                    // appends with no-overwrite maps, so a copy queued at the
+                    // first of them sees the frame's writes by the time the
+                    // GPU executes it.
                     D3D11_BOX all{};
                     all.right = sd.ByteWidth;
                     all.bottom = 1; all.back = 1;
-                    ctx->CopySubresourceRegion(g_vbStage, 0, 0, 0, 0,
-                                               vb, 0, &all);
-                    g_capVertexBytes = sd.ByteWidth;
-                    g_capStride = stride;
+                    ctx->CopySubresourceRegion(s.stage, 0, 0, 0, 0, vb, 0, &all);
+                    s.key = vb;
+                    s.bytes = sd.ByteWidth;
+                    s.stride = stride;
+                    slot = static_cast<int>(g_vbCount++);
                 }
             }
-            if (ok && g_ibStage && g_vbStage && g_ibFill + need <= kIbStageBytes) {
-                D3D11_BOX box{};
-                box.left = ibOff + startIndex * idxSize;
-                box.right = box.left + need;
-                box.bottom = 1; box.back = 1;
-                ctx->CopySubresourceRegion(g_ibStage, 0, g_ibFill, 0, 0,
-                                           ib, 0, &box);
+            if (ok && (!indexed || g_ibStage) &&
+                g_ibFill + need <= kIbStageBytes) {
+                if (indexed) {
+                    D3D11_BOX box{};
+                    box.left = ibOff + startIndex * idxSize;
+                    box.right = box.left + need;
+                    box.bottom = 1; box.back = 1;
+                    ctx->CopySubresourceRegion(g_ibStage, 0, g_ibFill, 0, 0,
+                                               ib, 0, &box);
+                }
                 Occ& o = g_occ[g_occCount];
                 o = Occ{};
                 o.ibOffset = g_ibFill;
                 o.baseVertex = baseVertex;
                 o.startIndex = startIndex;
                 o.instances = instances;
+                o.vbSlot = slot;
                 o.ibFormat = ibFmt;
                 UINT nv = 1;
                 ctx->RSGetViewports(&nv, &o.vp);
@@ -295,7 +363,7 @@ bool quadProbeOnDraw(ID3D11DeviceContext* ctx, uint32_t targetW,
             }
             dev->Release();
         }
-        ib->Release();
+        if (ib) ib->Release();   // null for the non-indexed kinds
         vb->Release();
     });
     return started;
@@ -313,30 +381,52 @@ void quadProbeTick(ID3D11DeviceContext* ctx) {
     if (!g_pendingFrame || g_frame < g_pendingFrame || !ctx) return;
     g_pendingFrame = 0;
 
+    const bool indexed = kindIsIndexed(g_wantKind);
+
     guardedBudget(g_budget, [&] {
-        D3D11_MAPPED_SUBRESOURCE mi{}, mv{};
-        if (FAILED(ctx->Map(g_ibStage, 0, D3D11_MAP_READ, 0, &mi)) || !mi.pData) {
-            failOnce("the index copy could not be mapped");
+        D3D11_MAPPED_SUBRESOURCE mi{};
+        const uint8_t* ibBase = nullptr;
+        if (indexed) {
+            if (FAILED(ctx->Map(g_ibStage, 0, D3D11_MAP_READ, 0, &mi)) ||
+                !mi.pData) {
+                failOnce("the index copy could not be mapped");
+                return;
+            }
+            ibBase = static_cast<const uint8_t*>(mi.pData);
+        }
+        // Every buffer this capture holds, mapped for the decode. A slot
+        // that will not map is left null and the occurrences using it say
+        // so rather than being decoded out of somebody else's bytes.
+        const uint8_t* vbData[kMaxVbSlots] = {nullptr};
+        uint32_t mapped = 0;
+        for (uint32_t i = 0; i < g_vbCount; ++i) {
+            D3D11_MAPPED_SUBRESOURCE mv{};
+            if (g_vb[i].stage &&
+                SUCCEEDED(ctx->Map(g_vb[i].stage, 0, D3D11_MAP_READ, 0, &mv)) &&
+                mv.pData) {
+                vbData[i] = static_cast<const uint8_t*>(mv.pData);
+                ++mapped;
+            }
+        }
+        if (!mapped) {
+            if (ibBase) ctx->Unmap(g_ibStage, 0);
+            failOnce("no vertex copy could be mapped");
             return;
         }
-        if (FAILED(ctx->Map(g_vbStage, 0, D3D11_MAP_READ, 0, &mv)) || !mv.pData) {
-            ctx->Unmap(g_ibStage, 0);
-            failOnce("the vertex copy could not be mapped");
-            return;
-        }
-        const uint8_t* ibBase = static_cast<const uint8_t*>(mi.pData);
-        const uint8_t* vb = static_cast<const uint8_t*>(mv.pData);
-        const uint32_t quads = g_wantN / kIndicesPerQuad;
+        const uint32_t quads = indexed ? g_wantN / kIndicesPerQuad : 1u;
+        const uint32_t vertsPerQuad = indexed ? kIndicesPerQuad : kStripQuadVerts;
         Log::get().note(
             "quad probe: %u occurrence(s) of %c:%u into %ux%u in one frame%s, "
-            "stride %u. Rectangles are the raw float2 at offset 0; the hex "
-            "after each is the first vertex's remaining bytes -- colour, uv, "
-            "whatever the layout holds. Same-signature occurrences that "
-            "differ in extent are DIFFERENT rectangles sharing one widget.",
+            "over %u distinct vertex buffer(s). Rectangles are the raw float2 "
+            "at offset 0; the hex after each is the first vertex's remaining "
+            "bytes -- colour, uv, whatever the layout holds. Same-signature "
+            "occurrences that differ in extent are DIFFERENT rectangles "
+            "sharing one widget; occurrences on different buffers were each "
+            "read from their own.",
             g_occCount, g_wantKind, g_wantN, g_wantW, g_wantH,
             g_occDropped ? " (more matched than fit; the excess was not "
                            "copied)" : "",
-            g_capStride);
+            g_vbCount);
         for (uint32_t oi = 0; oi < g_occCount; ++oi) {
             const Occ& o = g_occ[oi];
             const bool i16 = o.ibFormat == DXGI_FORMAT_R16_UINT;
@@ -352,24 +442,48 @@ void quadProbeTick(ID3D11DeviceContext* ctx) {
                          o.sc.left, o.sc.top, o.sc.right, o.sc.bottom,
                          o.scEnabled ? "on" : "off");
             }
-            Log::get().note("  occurrence %u: baseVertex %d, startIndex %u, "
-                            "instances %u, index format %s, %s%s",
-                            oi, o.baseVertex, o.startIndex, o.instances,
-                            i16 ? "R16" : "R32", vps, scs);
+            const uint8_t* vb =
+                (o.vbSlot >= 0) ? vbData[o.vbSlot] : nullptr;
+            const uint32_t stride = (o.vbSlot >= 0) ? g_vb[o.vbSlot].stride : 0;
+            const uint32_t vbBytes = (o.vbSlot >= 0) ? g_vb[o.vbSlot].bytes : 0;
+            Log::get().note("  occurrence %u: %s %d, startIndex %u, "
+                            "instances %u, index format %s, stride %u, "
+                            "buffer %d, %s%s",
+                            oi, indexed ? "baseVertex" : "startVertex",
+                            o.baseVertex, o.startIndex, o.instances,
+                            indexed ? (i16 ? "R16" : "R32") : "none",
+                            stride, o.vbSlot, vps, scs);
+            if (!vb || !stride) {
+                Log::get().note("    its vertex buffer was not captured -- "
+                                "more distinct buffers than the capture "
+                                "holds, or the copy would not map.");
+                continue;
+            }
             for (uint32_t q = 0; q < quads; ++q) {
                 float lo[2] = {1e30f, 1e30f};
                 float hi[2] = {-1e30f, -1e30f};
                 int64_t firstOff = -1;
                 bool bad = false;
-                for (uint32_t k = 0; k < kIndicesPerQuad; ++k) {
-                    const uint32_t at = q * kIndicesPerQuad + k;
-                    const uint8_t* ip = ibBase + o.ibOffset + at * (i16 ? 2 : 4);
-                    uint32_t vi = i16 ? *reinterpret_cast<const uint16_t*>(ip)
-                                      : *reinterpret_cast<const uint32_t*>(ip);
-                    const int64_t v = static_cast<int64_t>(vi) + o.baseVertex;
-                    const int64_t off = v * g_capStride;
+                for (uint32_t k = 0; k < vertsPerQuad; ++k) {
+                    int64_t v;
+                    if (indexed) {
+                        const uint32_t at = q * kIndicesPerQuad + k;
+                        const uint8_t* ip =
+                            ibBase + o.ibOffset + at * (i16 ? 2 : 4);
+                        const uint32_t vi =
+                            i16 ? *reinterpret_cast<const uint16_t*>(ip)
+                                : *reinterpret_cast<const uint32_t*>(ip);
+                        v = static_cast<int64_t>(vi) + o.baseVertex;
+                    } else {
+                        // No index buffer: the strip's vertices are
+                        // consecutive from the draw's start vertex, which
+                        // the caller passes in baseVertex -- it plays the
+                        // same role there that it does for an indexed draw.
+                        v = static_cast<int64_t>(o.baseVertex) + k;
+                    }
+                    const int64_t off = v * stride;
                     if (v < 0 ||
-                        off + g_capStride > static_cast<int64_t>(g_capVertexBytes)) {
+                        off + stride > static_cast<int64_t>(vbBytes)) {
                         bad = true;
                         break;
                     }
@@ -382,14 +496,16 @@ void quadProbeTick(ID3D11DeviceContext* ctx) {
                     }
                 }
                 if (bad) {
-                    Log::get().note("    quad %u: an index landed outside the "
-                                    "copied range -- baseVertex %d, stride %u.",
-                                    q, o.baseVertex, g_capStride);
+                    Log::get().note("    quad %u: a vertex landed outside the "
+                                    "copied range -- %s %d, stride %u, %u "
+                                    "bytes copied.",
+                                    q, indexed ? "baseVertex" : "startVertex",
+                                    o.baseVertex, stride, vbBytes);
                     continue;
                 }
                 char tail[kTailBytesMax * 2 + 1] = "";
-                if (firstOff >= 0 && g_capStride > 8) {
-                    uint32_t nTail = g_capStride - 8;
+                if (firstOff >= 0 && stride > 8) {
+                    uint32_t nTail = stride - 8;
                     if (nTail > kTailBytesMax) nTail = kTailBytesMax;
                     for (uint32_t t = 0; t < nTail; ++t) {
                         snprintf(tail + t * 2, 3, "%02X",
@@ -402,8 +518,10 @@ void quadProbeTick(ID3D11DeviceContext* ctx) {
                                 hi[0] - lo[0], hi[1] - lo[1], tail);
             }
         }
-        ctx->Unmap(g_vbStage, 0);
-        ctx->Unmap(g_ibStage, 0);
+        for (uint32_t i = 0; i < g_vbCount; ++i) {
+            if (vbData[i]) ctx->Unmap(g_vb[i].stage, 0);
+        }
+        if (ibBase) ctx->Unmap(g_ibStage, 0);
     });
     dropCapture();
 }

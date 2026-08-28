@@ -52,9 +52,22 @@ class Config;
 // ANY target, since 2026-08-28: this probe used to be offered only draws
 // that missed the eye textures, because the loader's widget panels are all
 // built in an interface surface. The intro movie's panel is not -- it is a
-// 6-index quad drawn straight into the eye, placed by four vertices and no
-// constant buffer (docs/intro-video.md) -- and a spec naming the eye's own
-// size used to match nothing, silently. It is now offered every draw.
+// 6-index quad drawn straight into the eye (docs/intro-video.md) -- and a
+// spec naming the eye's own size used to match nothing, silently. It is now
+// offered every draw.
+//
+// COUNT means indices for I and X, six to a quad, and VERTICES for D and N,
+// where the only shape decoded is the four-vertex strip quad. The
+// non-indexed kinds were refused outright until the intro flight needed
+// them: the movie's composite turned out to be a full-screen quad with
+// nothing in it to move, which puts the question on the draw that FILLS its
+// source surface -- an N of four vertices, a shape this could not be aimed
+// at.
+//
+// For those kinds the caller passes the draw's START VERTEX in baseVertex.
+// It plays the same role there that baseVertex plays for an indexed draw --
+// what a vertex's index is offset by -- and vscreen's non-indexed thunks
+// stash it for exactly this.
 void quadProbeConfigure(Config& cfg);
 
 // Is a capture still wanted? False once one has been taken, which keeps this
