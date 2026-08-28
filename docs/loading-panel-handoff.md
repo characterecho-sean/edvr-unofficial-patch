@@ -1,8 +1,9 @@
 # The loading dialog's oversized backdrop
 
-Fourth architecture, built 2026-08-28 and NOT yet flown. Everything measured
-here came from the field rig (Frontier launcher install, game build 330683,
-eye textures 5424x5356) on 2026-08-28; everything else says what it is.
+Fifth architecture (the viewport model), built 2026-08-28 after two flights
+of the fourth, NOT yet flown. Everything measured here came from the field
+rig (Frontier launcher install, game build 330683, eye textures 5424x5356)
+on 2026-08-28; everything else says what it is.
 
 ## The defect, stated exactly
 
@@ -25,35 +26,38 @@ of the oversized backdrop:
 * A taller dialog **bounded in the orange UI colour**, about the same width,
   extending further above and below.
 
-## The model, corrected
+## The model: the viewport is the widget rect
 
-The frame holds **two kinds of dark rectangle**, and the third attempt died
-of conflating them:
+Elite draws every solid panel -- scrim, box, letterbox -- as the SAME
+30-index bordered widget (fill plus four strips) in one normalized space of
+about +/-32765 across, and **sizes it with the viewport**. Flight 2 (11:27,
+2026-08-28) proved this by exhaustion: its steady-state probe caught two
+X:30 occurrences whose vertices BOTH span the full space -- one solid black
+(alpha `FF`, strips 46/109 thick), one white with uv floats, a letterbox --
+while the fix's refusal dumps show a third full-space X:30 every frame and
+**no modal-sized solid anywhere in any vertex buffer**. The screen shows a
+modal-sized box; the vertices never do; the only per-draw state left that
+can place it is the rasterizer's -- viewport (which SCALES the widget into
+a rect) or scissor (which crops to one). Two corollaries:
 
-* the **backdrop**: a five-quad bordered panel -- fill plus four edge strips,
-  30 indices -- spanning the whole coordinate space. The thing to shrink.
-* the **box**: the modal the player sees, drawn after the backdrop. Its
-  black backing and orange border are game draws that already have exactly
-  the bounds the field wants the backdrop collapsed to.
+* **Vertex bounds must never be compared across draws.** Each draw's
+  coordinates are normalized to its own viewport. The doc's oldest open
+  question -- "do these draws share one coordinate space?" -- is answered:
+  no, and every bounds-union across draws (attempts 3 and 4) was arithmetic
+  on incommensurable numbers.
+* **The roles are told apart by colour + viewport, not geometry.** The
+  scrim's fill carries RGBA8 `00 00 00 66` at vertex offset 8 -- black at
+  40% -- with a full-surface viewport. The box is black at alpha `FF` with
+  the modal's own rect as its viewport. The letterbox is white; ignored.
 
-For a while the record said the opposite -- "the panel IS the dialog's box,
-there is no separate box to fit to". That conclusion came from instruments
-whose semantics guaranteed it:
-
-* `census_skip_offscreen = ...:X:30` and `census_skip_quad` match **every**
-  draw sharing a signature. Two X:30 draws -- backdrop and box -- vanish
-  together under either. Their co-disappearance proved sharing a signature,
-  not being one call.
-* the original `quad_probe` captured **only the first match per session**.
-  The backdrop draws first (painter's order), so the probe's five
-  full-surface quads describe the backdrop, and said nothing about any later
-  X:30.
-* the arithmetic was against one-call all along: 30 indices is exactly five
-  quads, and the probe showed all five spanning the surface. One 30-index
-  call cannot also contain a modal-sized box; there is no room in it.
-
-Both instruments are now occurrence-aware or replaced (below), so one flight
-settles what the skip probes structurally could not.
+Earlier wrong turns, kept because each was manufactured by an instrument's
+semantics: the skip probes match every draw sharing a signature, so scrim
+and box always vanished together ("one batched call" -- refuted by the
+census counting three X:30s per frame at positions #1/#2/#4); the original
+one-shot probe only ever sampled the first occurrence, mid fade-in ("the
+panel IS the box"); and the vertex-space unions of attempts 3 and 4 caught
+text runs and corner solids respectively, because they were unions over
+incompatible spaces.
 
 ## What is established (field-measured)
 
@@ -99,10 +103,14 @@ frame positions #1, #2 and #4, in both censused frames. All three share
 vertex shader `vh=666EF0C4C616F67E`, pixel shader `ph=C0C4E6413DF14E9A`,
 stride 24, topology 4, no constants, no textures -- signature-identical,
 separable only by position, which is exactly what every skip-probe test
-could never show. Three rather than two likely means backdrop + box fill +
-box border as separate panels; the occurrence probe names them by extent
-and colour. The fix below handles any split by construction: full-surface
-occurrences collapse, modal-sized ones join the target.
+could never show.
+
+**Flight 2 named the three** (11:27, steady-state probe + refusal dumps):
+the alpha-0x66 scrim, an opaque black panel (alpha `FF`, strips 46/109),
+and a white letterboxed frame carrying uv floats -- and every one of them
+spans the full +/-32765 space in its vertices. The modal-sized rect exists
+on screen and nowhere in any vertex buffer, which is what forced the
+viewport model above.
 
 **The loader animates.** The third attempt's one-frame collections caught 1,
 3, 6, 11, 9, 12 draws on six consecutive tries: fade-in and progress
@@ -126,52 +134,44 @@ Default remains `stock` until field-verified.
 interface surface are recorded as a sequence of shapes (kind, index count,
 target size). Only when two consecutive frames record the *identical*
 sequence does the next frame get captured: every textureless quad-batch
-draw's indices plus the shared vertex buffer, GPU-copied, read back after a
-settle. A collection whose frame moved mid-capture is discarded. This is the
-answer to the 1-3-6-11-9-12 instability: transitional frames can no longer
-be measured at all.
+draw's indices (the shared vertex buffer once) for the colours, plus each
+draw's **viewport, scissor and scissor-enable** for the rects. A collection
+whose frame moved mid-capture is discarded. This is the answer to the
+1-3-6-11-9-12 instability: transitional frames can no longer be measured.
 
-**Classify, then seed and grow.** In the capture, any 30-index draw with a
-quad spanning >=80% of both the widest and tallest extents is a backdrop.
-The **target** starts from a seed -- the box's own bordered panel when one
-draws, else the largest solid in any batch -- and grows by absorbing only
-quads that touch its neighbourhood (2% of the surface), a few passes, so the
-box's border strips and the bar inside it join while a badge in a far corner
-never does. Growth replaced a plain union after the first fit flight: the
-loading screen keeps 5-8 solids about, some in the corners, and the union of
-everything spanned the surface on every single measurement -- twenty
-refusals in twenty seconds, all reading "the union beside the backdrop spans
-the surface itself". Text never enters the pool at all (textured draws are
-excluded at the draw hook), which keeps the old text-run circularity
-impossible by construction. A target that is missing, sliver-sized (<2% of
-the backdrop), or surface-sized records a no-verdict: **stock, with a log
-line saying why and one line per solid it saw**, once per dialog state.
+**Classify by colour and viewport.** Among the captured 30-index panels:
+the **scrim** is dark (all channels < 0x40), translucent (alpha < 0xF0),
+with a viewport >= 90% of the surface in both axes; the **box** is dark,
+opaque, with a viewport <= 80% in both axes -- or, if its viewport is full,
+an enabled scissor that is boxed, in which case the scissor rect is the
+modal. The white letterbox fails the darkness test and is never touched.
+No scrim, or no box, records a no-verdict: **stock, with a log line saying
+why and one line per solid** -- extent in its own units, RGBA8, viewport,
+scissor -- so a wrong threshold names itself in one flight.
 
-**Substitute by position.** The backdrop's *position in the frame sequence*
-is what gets substituted -- its own vertices, positions remapped linearly
-onto the target bounds, colour and the rest of the 24-byte vertex untouched,
-exact bounds, no margin. Substitution at a position is valid only while the
-current frame matches the measured sequence at every position up to it; the
-moment composition diverges (animation ticks, dialog change), later draws
-run stock and the next stable window re-measures. The box's own draw is
-never substituted -- the third attempt substituted **every** X:30 once it
-had geometry, which would have erased the very box the field pointed at. A
-dialog switch shows the previous target for the handful of frames a fresh
-measurement takes (two stable + one capture + four settle).
+**Substitute through the box's viewport.** At the scrim's position (trusted
+only while the frame matches the measured sequence draw by draw), the
+game's own draw call is swallowed and re-issued with one change: the
+viewport is the box's, read fresh **at the box's own draw every frame**, so
+the modal never has to be assumed static. No geometry is built and no
+vertex is touched -- the widget system itself sizes the scrim into the
+modal's rect, borders scaling exactly as the box's own do. Inside the box
+the scrim composites exactly as stock (invisible under the opaque box, and
+unchanged under a translucent one); outside it, it no longer exists. The
+box rect goes stale after 2 frames without the box drawing -- stock. A
+dialog switch runs stock for the handful of frames a fresh measurement
+takes (two stable + one capture + four settle).
 
 **Log lines to look for** (`edvr_logs`):
 
 * `loading panel: FIT -- measurement N from S solids of D interface draws.
-  The backdrop at draw P spans WxH; the box on top of it seeded from ... and
-  grew to WxH at x .. y ..` -- the engage line; "seeded from the dialog's
-  own 30-index panel" vs "...the largest solid in a 648-index batch" reports
-  which model the frame matched. After the first four, it logs again only
-  when the box moved -- the percent text re-measures constantly and the box
-  holds still through it.
-* `loading panel: measured N draw(s) and drew no conclusion -- REASON.
-  Stock for this dialog state; the next change re-measures.` -- every
-  no-verdict, now preceded by one `solid k: ...` line per captured draw with
-  its extent, so a refusal names what it refused.
+  The scrim at draw P (rgba 66000000) is redrawn through the box's
+  viewport; the box at draw Q (rgba FF000000) sits at X,Y WxH px of WxH.`
+  -- the engage line. After the first four, it logs again only when the box
+  moved; the percent text re-measures constantly and the box holds still.
+* `loading panel: measured N draw(s) and drew no conclusion -- REASON.` --
+  every no-verdict, preceded by one `solid k: ...` line per captured draw
+  with extent, colour, viewport and scissor.
 * `loading panel: the loader's draws have not held still for two
   consecutive frames in 600 frames` -- continuous animation; the fix is
   standing down correctly.
@@ -180,7 +180,7 @@ measurement takes (two stable + one capture + four settle).
 
 | key | does |
 |---|---|
-| `quad_probe = WxH:KIND:COUNT` | **occurrence-aware since 2026-08-28**: the first frame containing a match has EVERY matching draw copied; each occurrence logs baseVertex, startIndex, and per-quad rectangles plus the vertex bytes past the position as hex. Re-set the value for another capture. |
+| `quad_probe = WxH:KIND:COUNT[:SKIPFRAMES]` | **occurrence-aware since 2026-08-28**: after SKIPFRAMES matching frames pass (fade-in insurance), the next frame containing a match has EVERY matching draw copied; each occurrence logs baseVertex, startIndex, **viewport, scissor**, and per-quad rectangles plus the vertex bytes past the position as hex. Re-set the value for another capture. |
 | `census_skip_offscreen = WxH[:KIND:COUNT]` | drops draws into a surface -- **every** draw matching the spec, all occurrences |
 | `census_skip_quad = WxH:KIND:COUNT:LO[-HI]` | re-issues matching draws without a quad range -- again every occurrence |
 | `census_clip_width/height` | clips that range to a centred box instead |
@@ -192,26 +192,27 @@ it before reading signatures out of a single capture.
 
 ## The flight plan
 
-1. **Probe flight** (names the occurrences): `advanced.quad_probe =
-   4259x2395:X:30:120` -- substitute the rig's own surface size from a
-   census if render scale changed. The census has already counted **three
-   occurrences per frame** in steady state, and the first probe flight
-   (spec without the skip) proved why the skip matters: it fired on the
-   first matching frame, mid fade-in, and caught the backdrop alone --
-   alpha 0x66 black, all five quads full-surface. With 120 matching frames
-   skipped the capture lands ~2s into the dialog: expect all three
-   occurrences, the box's quads modal-sized with alpha `FF` at offset 8,
-   and the orange border naming its colour. Re-arm (spec off, then on) for
-   the second dialog.
-2. **Fit flight**: `fix.loading_panel = fit`, watch both intro dialogs.
-   Expect the backdrop snapped to each modal, the black backing and orange
-   border untouched, a brief full-size backdrop during fade-in (measurement
-   gating), and the engage log line above. Any wrongness arrives with its
-   own log line naming what was measured -- report the `loading panel:`
-   lines with the symptom. The first fit flight (11:11, 2026-08-28) ended
-   here with every measurement refusing on the union rule; the seeded
-   growth above is that flight's lesson.
+One flight answers everything, because the probe and the fix now read the
+same state:
+
+1. `advanced.quad_probe = 4259x2395:X:30:120` (surface size moves with
+   render scale) + `fix.loading_panel = fit`. The probe logs every X:30
+   occurrence ~2s into the first dialog **with its viewport and scissor**:
+   the model predicts the opaque-black occurrence carries the modal's rect
+   in one of them and the scrim's carries the full surface. If instead every
+   occurrence's viewport AND scissor are full-surface, the model is wrong,
+   the fix will have refused with dumps saying so, and the sizing lives in
+   the one place left unread -- the pixel shader's b2 constants.
+2. Watch both intro dialogs. Expect the scrim snapped to each modal, box
+   and border untouched, brief full-view scrim during fade-in (measurement
+   gating). The engage and refusal lines above carry everything worth
+   pasting back.
 3. On success, flip the shipped default to `fit` in a release commit.
+
+Flights already flown: 11:11 (fourth architecture, union rule -- every
+measurement refused, union spanned the surface); 11:27 (seeded growth --
+same refusal, and its dumps plus the steady-state probe delivered the
+viewport model above).
 
 ## What must not regress
 
@@ -222,9 +223,10 @@ its 16x16 BC1 multiplier texture -- shares nothing with the panel path.
 ## A note on scale
 
 This is a dark rectangle behind a dialog that shows for a few seconds. It
-has cost about a dozen field flights and three architectures, and the third
-architecture's central conclusion was manufactured by its own instruments'
-matching rules. The fourth is built on the field's observation that the box
-exists, fails toward stock with its reasons in the log, and asks one probe
-flight to confirm the model before anyone trusts it. Worth doing properly
-or not at all; this is the properly.
+has cost a dozen field flights and five architectures, and each dead one
+died of a measurement its own instruments could not take: signature-blind
+skips, a first-frame probe, unions over per-viewport spaces. The fifth is
+the first whose mechanism -- the viewport is the widget rect -- explains
+every byte measured so far, fails toward stock with its reasons and its
+evidence in the log, and needs exactly one flight to confirm or refute.
+Worth doing properly or not at all; this is the properly.

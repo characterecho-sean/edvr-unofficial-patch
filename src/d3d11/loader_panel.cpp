@@ -21,42 +21,30 @@ namespace {
 // this whole family.
 constexpr uint32_t kIndicesPerQuad = 6;
 
-// The bordered-panel widget: one fill plus four border strips. Both the
-// backdrop and (when the box draws as its own panel) the box are this shape.
-// Measured 2026-08-28.
+// The bordered-panel widget: one fill plus four border strips. The scrim,
+// the box and the loading screen's letterbox are all this one widget.
 constexpr uint32_t kPanelIndices = 30;
 
-// A quad covering this fraction of both the widest and the tallest extent in
-// the capture is a backdrop sheet, not content. Applied per QUAD: the
-// backdrop's border strips are full-span in one axis only and are excluded
-// from the target by the strip rule below instead.
-constexpr float kBackdropFraction = 0.80f;
+// The widget system draws every panel in one normalized coordinate space
+// (about +/-32765 across) and SIZES it with the VIEWPORT: flight 2
+// (2026-08-28, 11:27) showed three 30-index panels whose vertices all span
+// the full space while the screen shows one full-view scrim and one
+// modal-sized box. Vertex bounds therefore mean nothing across draws; the
+// viewport is the widget rect. A viewport at least this fraction of the
+// surface is "full view"; at most the sub fraction in both axes is "a box".
+constexpr float kVpFullFraction = 0.90f;
+constexpr float kVpSubFraction = 0.80f;
 
-// A quad spanning this fraction of the reference in EITHER axis is an
-// edge-riding strip or a separator, not part of the box: it must not drag
-// the target out to the surface's edge the way the old union of "everything
-// else" let one line of text drag it to a sliver.
-constexpr float kStripFraction = 0.80f;
+// The panel fill's RGBA8 colour at byte offset 8 is the role's other half,
+// also measured in flight: the scrim is black at alpha 0x66, the box black
+// at 0xFF, the letterbox white. Dark means every channel below this; opaque
+// means alpha at least this.
+constexpr uint32_t kDarkMax = 0x40;
+constexpr uint32_t kOpaqueMin = 0xF0;
 
-// The target must be at least this fraction of the backdrop in both axes.
-// Below it, the "content" beside the backdrop was a cursor dot or a stray
-// tick, and collapsing a full-view panel onto it would be far worse than
-// stock.
-constexpr float kMinTargetFraction = 0.02f;
-
-// The box is assembled by GROWTH from a seed, not by union. The first
-// flight (2026-08-28, 11:11) captured 5-8 solids per loader frame and their
-// union spanned the surface every time: the loading screen keeps solid
-// elements in its corners, and a union of everything is the whole screen
-// even when each piece is small. So: seed on the box itself, then absorb
-// only quads that touch the seed's neighbourhood -- the box's border
-// strips and the bar inside it join; a badge in a far corner never does.
-constexpr float    kGrowMargin = 0.02f;
-constexpr uint32_t kGrowPasses = 4;
-
-// Engage lines after the fourth are logged only when the box actually
-// moved; the shader-prep dialog re-tessellates its percent text every tick
-// and each tick is a fresh measurement of the same box.
+// Engage lines after the fourth are logged only when the box moved; the
+// shader-prep dialog re-measures on every percent tick and the box holds
+// still through all of them.
 constexpr float kRelogFraction = 0.01f;
 
 // Frame-composition record: draw shapes per frame, and captured draws per
@@ -65,9 +53,9 @@ constexpr float kRelogFraction = 0.01f;
 constexpr uint32_t kMaxSeq = 48;
 constexpr uint32_t kMaxCaptures = 24;
 
-// Backdrops substituted per frame. The evidence says one; a second
-// full-surface panel would be another backdrop and gets the same treatment.
-constexpr uint32_t kMaxBuilt = 4;
+// Scrim positions substituted per measurement. The evidence says one; a
+// second translucent full-view panel would get the same treatment.
+constexpr uint32_t kMaxScrims = 4;
 
 // Index bytes one measurement will hold. The loader's draws totalled about
 // 3,600 indices; 64 KB is far above that and still trivial.
@@ -80,6 +68,11 @@ constexpr uint32_t kVbStageCap = 8u << 20;
 // Frames to let the copies execute before mapping, so the map never stalls
 // the render thread. panel_quad's number.
 constexpr uint32_t kSettleFrames = 4;
+
+// The box's rect is re-read at its own draw every frame; the scrim draws
+// EARLIER in the frame, so it rides the rect from at most this many frames
+// back. Staler than that means the box stopped drawing -- stock.
+constexpr uint32_t kBoxFreshFrames = 2;
 
 // Wanting a measurement this long without ever seeing two identical frames
 // is worth one log line: it means the loader is animating continuously and
@@ -125,22 +118,20 @@ struct SeqEnt {
     }
 };
 
-// One draw collected into the pending measurement.
+// One draw collected into the pending measurement: its indices (the vertex
+// buffer is copied once for all of them) and the rasterizer state that was
+// live at the draw -- the viewport is where the widget rect actually lives.
 struct CapDraw {
     uint32_t seqPos = 0;
     uint32_t count = 0;
     uint32_t ibOffset = 0;   // bytes into the index staging buffer
     int      baseVertex = 0;
     bool     i16 = false;    // this draw's own index format
-};
-
-// One backdrop's collapsed geometry, keyed by its position in the measured
-// frame sequence.
-struct Built {
-    uint32_t pos = 0;
-    uint32_t indices = 0;
-    ID3D11Buffer* vb = nullptr;
-    ID3D11Buffer* ib = nullptr;
+    D3D11_VIEWPORT vp = {};
+    bool     vpKnown = false;
+    D3D11_RECT sc = {};
+    bool     scKnown = false;
+    bool     scEnabled = false;
 };
 
 // --- the current frame's composition -------------------------------------
@@ -149,7 +140,14 @@ uint32_t g_seqLen = 0;
 SeqEnt   g_seq[kMaxSeq];
 uint32_t g_hashAcc = 2166136261u;
 bool     g_prefixOk = true;   // does this frame still match the measured one?
-int      g_subSlot = -1;      // set by OnDraw for the Substitute that follows
+
+// The pending substitution, stashed by OnDraw for the Substitute call that
+// immediately follows: the game's own draw arguments, re-issued through the
+// box's viewport.
+bool     g_subArm = false;
+uint32_t g_subCount = 0;
+uint32_t g_subStartIndex = 0;
+int      g_subBaseVertex = 0;
 
 // The last COMPLETED frame's hash; two consecutive equal hashes are the
 // stability that arms a collection.
@@ -175,15 +173,23 @@ uint32_t      g_capVertexBytes = 0;
 SeqEnt        g_capSeq[kMaxSeq]; // the collection frame's composition
 uint32_t      g_capSeqLen = 0;
 
-// --- the measured result --------------------------------------------------
+// --- the measured result: roles by position ------------------------------
 uint32_t g_measuredHash = 0;     // shape this verdict belongs to; 0 = none
 uint32_t g_measuredLen = 0;
 SeqEnt   g_measuredSeq[kMaxSeq];
-Built    g_built[kMaxBuilt];
-uint32_t g_builtCount = 0;
-uint32_t g_builtStride = 0;
+bool     g_haveRoles = false;
+uint32_t g_scrimPos[kMaxScrims];
+uint32_t g_scrimCount = 0;
+uint32_t g_boxPos = 0;
+bool     g_boxFromScissor = false;  // the box rect lives in its scissor,
+                                    // not its viewport
 uint32_t g_measurements = 0;
-Rect     g_lastTarget;   // for the engage log's moved-or-not test
+
+// --- the box's live rect, re-read at its draw every valid frame ----------
+float    g_boxX = 0, g_boxY = 0, g_boxW = 0, g_boxH = 0;
+float    g_boxMinZ = 0, g_boxMaxZ = 1;
+uint32_t g_boxStamp = 0;   // g_frame when last read; 0 = never
+Rect     g_lastBox;        // for the engage log's moved-or-not test
 
 void failOnce(const char* why) {
     static bool noted = false;
@@ -203,17 +209,14 @@ void dropPending() {
     g_collecting = false;
 }
 
-void dropBuilt() {
-    for (uint32_t i = 0; i < g_builtCount; ++i) {
-        if (g_built[i].vb) g_built[i].vb->Release();
-        if (g_built[i].ib) g_built[i].ib->Release();
-        g_built[i] = Built{};
-    }
-    g_builtCount = 0;
+void resetRoles() {
+    g_haveRoles = false;
+    g_scrimCount = 0;
+    g_boxStamp = 0;
 }
 
 void resetMeasured() {
-    dropBuilt();
+    resetRoles();
     g_measuredHash = 0;
     g_measuredLen = 0;
 }
@@ -222,14 +225,14 @@ void resetFrameAcc() {
     g_seqLen = 0;
     g_hashAcc = 2166136261u;
     g_prefixOk = true;
-    g_subSlot = -1;
+    g_subArm = false;
 }
 
 // A verdict for a shape that yielded nothing to substitute. Recording the
 // hash is what stops the same shape being re-measured -- and re-copying a
 // 4 MB buffer -- every stable window until the dialog changes.
 void recordNone(const char* why) {
-    dropBuilt();
+    resetRoles();
     g_measuredHash = g_armedHash;
     g_measuredLen = g_capSeqLen;
     memcpy(g_measuredSeq, g_capSeq, sizeof(SeqEnt) * g_capSeqLen);
@@ -259,11 +262,12 @@ void loaderPanelConfigure(Config& cfg) {
             resetMeasured();
         }
         Log::get().note(
-            "loading panel: %s. The full-view panel behind the loader's "
+            "loading panel: %s. The full-view scrim behind the loader's "
             "dialog is %s (docs/loading-panel-handoff.md).",
             g_on ? "FIT" : "stock",
-            g_on ? "collapsed onto the dialog's own box, measured from the "
-                   "game's draws; the box and its text are untouched"
+            g_on ? "redrawn through the dialog box's own viewport, so it "
+                   "sits exactly where the box sits; the box and its text "
+                   "are untouched"
                  : "the game's own");
     }
 }
@@ -303,9 +307,9 @@ bool loaderPanelOnDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
 
     // Collection: capture this draw if the frame is the armed one and the
     // draw is a solid quad batch -- text reads a texture and is content by
-    // definition; the box and the backdrop read none. A qualifying draw that
-    // cannot be captured -- capacity, an overlong frame -- poisons the
-    // collection: a verdict from a subset could put the box outside it.
+    // definition; the panels this module cares about read none. A qualifying
+    // draw that cannot be captured -- capacity, an overlong frame -- poisons
+    // the collection: a verdict from a subset could miss the box.
     if (g_collecting) {
         const bool qualifies = !textured && count % kIndicesPerQuad == 0;
         if (qualifies && p < kMaxSeq && g_capCount < kMaxCaptures) {
@@ -368,11 +372,28 @@ bool loaderPanelOnDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
                         box.bottom = 1; box.back = 1;
                         ctx->CopySubresourceRegion(g_ibStage, 0, g_ibFill, 0, 0,
                                                    ib, 0, &box);
-                        g_caps[g_capCount].seqPos = p;
-                        g_caps[g_capCount].count = count;
-                        g_caps[g_capCount].ibOffset = g_ibFill;
-                        g_caps[g_capCount].baseVertex = baseVertex;
-                        g_caps[g_capCount].i16 = idxSize == 2u;
+                        CapDraw& cd = g_caps[g_capCount];
+                        cd = CapDraw{};
+                        cd.seqPos = p;
+                        cd.count = count;
+                        cd.ibOffset = g_ibFill;
+                        cd.baseVertex = baseVertex;
+                        cd.i16 = idxSize == 2u;
+                        // The rasterizer state, where the widget rect lives.
+                        UINT nv = 1;
+                        ctx->RSGetViewports(&nv, &cd.vp);
+                        cd.vpKnown = nv >= 1;
+                        UINT ns = 1;
+                        ctx->RSGetScissorRects(&ns, &cd.sc);
+                        cd.scKnown = ns >= 1;
+                        ID3D11RasterizerState* rs = nullptr;
+                        ctx->RSGetState(&rs);
+                        if (rs) {
+                            D3D11_RASTERIZER_DESC rd;
+                            rs->GetDesc(&rd);
+                            cd.scEnabled = rd.ScissorEnable != FALSE;
+                            rs->Release();
+                        }
                         ++g_capCount;
                         g_ibFill += need;
                         stored = true;
@@ -388,14 +409,49 @@ bool loaderPanelOnDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
         }
     }
 
-    // The substitution decision. Only a position the measurement marked as a
-    // backdrop, and only while this frame still matches the measured one.
-    g_subSlot = -1;
-    if (g_prefixOk && g_builtCount) {
-        for (uint32_t i = 0; i < g_builtCount; ++i) {
-            if (g_built[i].pos == p && g_built[i].vb && g_built[i].ib) {
-                g_subSlot = static_cast<int>(i);
-                return true;
+    // The roles, played by position while the frame matches the measurement.
+    g_subArm = false;
+    if (g_haveRoles && g_prefixOk) {
+        if (p == g_boxPos) {
+            // Re-read the box's rect at its own draw, every frame: the
+            // modal never has to be assumed static.
+            bool got = false;
+            if (g_boxFromScissor) {
+                UINT ns = 1;
+                D3D11_RECT rc;
+                ctx->RSGetScissorRects(&ns, &rc);
+                if (ns >= 1 && rc.right > rc.left && rc.bottom > rc.top) {
+                    g_boxX = static_cast<float>(rc.left);
+                    g_boxY = static_cast<float>(rc.top);
+                    g_boxW = static_cast<float>(rc.right - rc.left);
+                    g_boxH = static_cast<float>(rc.bottom - rc.top);
+                    got = true;
+                }
+            } else {
+                UINT nv = 1;
+                D3D11_VIEWPORT vp;
+                ctx->RSGetViewports(&nv, &vp);
+                if (nv >= 1 && vp.Width > 0 && vp.Height > 0) {
+                    g_boxX = vp.TopLeftX;
+                    g_boxY = vp.TopLeftY;
+                    g_boxW = vp.Width;
+                    g_boxH = vp.Height;
+                    g_boxMinZ = vp.MinDepth;
+                    g_boxMaxZ = vp.MaxDepth;
+                    got = true;
+                }
+            }
+            if (got) g_boxStamp = g_frame;
+        } else if (g_boxStamp &&
+                   g_frame - g_boxStamp <= kBoxFreshFrames) {
+            for (uint32_t i = 0; i < g_scrimCount; ++i) {
+                if (g_scrimPos[i] == p) {
+                    g_subArm = true;
+                    g_subCount = count;
+                    g_subStartIndex = startIndex;
+                    g_subBaseVertex = baseVertex;
+                    return true;
+                }
             }
         }
     }
@@ -404,35 +460,29 @@ bool loaderPanelOnDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
 
 bool loaderPanelSubstitute(ID3D11DeviceContext* ctx, PfnDrawIndexedInstanced draw,
                            uint32_t instances, uint32_t startInstance) {
-    if (!ctx || !draw || g_subSlot < 0 ||
-        static_cast<uint32_t>(g_subSlot) >= g_builtCount) {
-        return false;
-    }
-    const Built& b = g_built[g_subSlot];
-    g_subSlot = -1;
-    if (!b.vb || !b.ib || b.indices == 0) return false;
+    if (!ctx || !draw || !g_subArm) return false;
+    g_subArm = false;
     bool done = false;
     guardedBudget(g_budget, [&] {
-        // Save what the game had bound and put all of it back. Our vertices
-        // are byte-identical in format to its own, so the input layout it
-        // already set serves both.
-        ID3D11Buffer* savedVb = nullptr;
-        UINT savedStride = 0, savedOff = 0;
-        ctx->IAGetVertexBuffers(0, 1, &savedVb, &savedStride, &savedOff);
-        ID3D11Buffer* savedIb = nullptr;
-        DXGI_FORMAT savedFmt = DXGI_FORMAT_UNKNOWN;
-        UINT savedIbOff = 0;
-        ctx->IAGetIndexBuffer(&savedIb, &savedFmt, &savedIbOff);
-
-        const UINT stride = g_builtStride, zero = 0;
-        ID3D11Buffer* vb = b.vb;
-        ctx->IASetVertexBuffers(0, 1, &vb, &stride, &zero);
-        ctx->IASetIndexBuffer(b.ib, DXGI_FORMAT_R16_UINT, 0);
-        draw(ctx, b.indices, instances, 0, 0, startInstance);
-        ctx->IASetVertexBuffers(0, 1, &savedVb, &savedStride, &savedOff);
-        ctx->IASetIndexBuffer(savedIb, savedFmt, savedIbOff);
-        if (savedVb) savedVb->Release();
-        if (savedIb) savedIb->Release();
+        // The game's own draw, re-issued through the box's viewport: the
+        // widget system sizes panels with the viewport, so this renders the
+        // scrim exactly into the box's rect -- geometry, colours and blend
+        // untouched, no buffers of ours anywhere.
+        UINT nv = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
+        D3D11_VIEWPORT saved[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE];
+        ctx->RSGetViewports(&nv, saved);
+        if (nv == 0) return;   // no viewport state to restore into: stock
+        D3D11_VIEWPORT vp;
+        vp.TopLeftX = g_boxX;
+        vp.TopLeftY = g_boxY;
+        vp.Width = g_boxW;
+        vp.Height = g_boxH;
+        vp.MinDepth = g_boxFromScissor ? saved[0].MinDepth : g_boxMinZ;
+        vp.MaxDepth = g_boxFromScissor ? saved[0].MaxDepth : g_boxMaxZ;
+        ctx->RSSetViewports(1, &vp);
+        draw(ctx, g_subCount, instances, g_subStartIndex, g_subBaseVertex,
+             startInstance);
+        ctx->RSSetViewports(nv, saved);
         done = true;
     });
     return done;
@@ -440,10 +490,10 @@ bool loaderPanelSubstitute(ID3D11DeviceContext* ctx, PfnDrawIndexedInstanced dra
 
 namespace {
 
-// Retire a settled capture into a verdict: classify backdrops, take the
-// union of the box's solids, build the collapsed geometry. Runs on the
-// render thread inside the caller's budget guard; every exit that is not a
-// build records the shape so it is not re-measured.
+// Retire a settled capture into roles: which position is the translucent
+// full-view scrim, which is the opaque boxed panel it should ride. Runs on
+// the render thread inside the caller's budget guard; every exit that is
+// not a verdict records the shape so it is not re-measured.
 void analyze(ID3D11DeviceContext* ctx) {
     D3D11_MAPPED_SUBRESOURCE mi{}, mv{};
     if (FAILED(ctx->Map(g_ibStage, 0, D3D11_MAP_READ, 0, &mi)) || !mi.pData ||
@@ -455,16 +505,21 @@ void analyze(ID3D11DeviceContext* ctx) {
     const uint8_t* ibBase = static_cast<const uint8_t*>(mi.pData);
     const uint8_t* vbBase = static_cast<const uint8_t*>(mv.pData);
 
-    // Every captured draw's quads, and the whole capture's reference extent.
-    std::vector<std::vector<Rect>> quads(g_capCount);
+    // Per captured draw: quad bounds (in the draw's OWN normalized space --
+    // flight 2 proved these spaces are per-viewport and must never be
+    // compared across draws), and the fill's RGBA8 at byte offset 8.
     std::vector<Rect> whole(g_capCount);
-    float refW = 0.0f, refH = 0.0f;
+    std::vector<uint32_t> rgba(g_capCount, 0);
+    std::vector<bool> rgbaKnown(g_capCount, false);
     for (uint32_t d = 0; d < g_capCount; ++d) {
         const CapDraw& cd = g_caps[d];
         const uint32_t n = cd.count / kIndicesPerQuad;
-        quads[d].resize(n);
+        Rect fill;
+        float fillArea = -1.0f;
+        int64_t fillVertOff = -1;
         for (uint32_t q = 0; q < n; ++q) {
-            Rect& r = quads[d][q];
+            Rect r;
+            int64_t firstOff = -1;
             for (uint32_t k = 0; k < kIndicesPerQuad; ++k) {
                 const uint32_t at = q * kIndicesPerQuad + k;
                 const uint8_t* ip = ibBase + cd.ibOffset + at * (cd.i16 ? 2 : 4);
@@ -472,304 +527,167 @@ void analyze(ID3D11DeviceContext* ctx) {
                                      : *reinterpret_cast<const uint32_t*>(ip);
                 const int64_t v = static_cast<int64_t>(vi) + cd.baseVertex;
                 const int64_t off = v * g_capStride;
-                if (v < 0 || off + 8 > static_cast<int64_t>(g_capVertexBytes)) {
+                if (v < 0 ||
+                    off + g_capStride > static_cast<int64_t>(g_capVertexBytes)) {
                     continue;
                 }
+                if (firstOff < 0) firstOff = off;
                 float pos[2];
                 memcpy(pos, vbBase + off, sizeof(pos));
                 r.add(pos[0], pos[1]);
             }
             if (r.valid()) {
                 whole[d].add(r);
-                if (r.w() > refW) refW = r.w();
-                if (r.h() > refH) refH = r.h();
+                if (r.area() > fillArea) {
+                    fillArea = r.area();
+                    fill = r;
+                    fillVertOff = firstOff;
+                }
             }
+        }
+        if (fillVertOff >= 0 && g_capStride >= 12) {
+            uint32_t c;
+            memcpy(&c, vbBase + fillVertOff + 8, sizeof(c));
+            rgba[d] = c;
+            rgbaKnown[d] = true;
         }
     }
 
-    if (refW <= 0.0f || refH <= 0.0f) {
-        recordNone("no quad in the capture decoded to a rectangle");
-        ctx->Unmap(g_vbStage, 0);
-        ctx->Unmap(g_ibStage, 0);
-        return;
-    }
-
-    // The backdrops: 30-index panels with a sheet spanning the capture.
-    bool isBackdrop[kMaxCaptures] = {};
-    int firstBackdrop = -1;
-    uint32_t backdrops = 0;
-    for (uint32_t d = 0; d < g_capCount; ++d) {
-        if (g_caps[d].count != kPanelIndices) continue;
-        for (const Rect& r : quads[d]) {
-            if (r.valid() && r.w() >= refW * kBackdropFraction &&
-                r.h() >= refH * kBackdropFraction) {
-                isBackdrop[d] = true;
-                ++backdrops;
-                if (firstBackdrop < 0) firstBackdrop = static_cast<int>(d);
-                break;
-            }
-        }
-    }
-    if (firstBackdrop < 0) {
-        recordNone("no full-surface 30-index panel is in this frame");
-        ctx->Unmap(g_vbStage, 0);
-        ctx->Unmap(g_ibStage, 0);
-        return;
-    }
-
-    // All bounds comparisons only mean anything inside one surface's
-    // coordinate space; the backdrop's target names which.
-    const SeqEnt anchor = g_capSeq[g_caps[firstBackdrop].seqPos];
-
-    // When a verdict refuses, name every solid it saw: the first flight's
-    // twenty identical refusals would have been one flight with this.
+    // When a verdict refuses, name every solid it saw -- extent in its own
+    // space, colour, and the rasterizer rects that actually place it.
     auto dumpSolids = [&] {
         for (uint32_t d = 0; d < g_capCount && d < 10; ++d) {
+            const CapDraw& cd = g_caps[d];
             const Rect& w = whole[d];
-            if (!w.valid()) continue;
-            Log::get().note("  solid %u: %u indices at draw %u, x %.0f..%.0f "
-                            "y %.0f..%.0f (%.0fx%.0f)%s",
-                            d, g_caps[d].count, g_caps[d].seqPos,
-                            w.x0, w.x1, w.y0, w.y1, w.w(), w.h(),
-                            isBackdrop[d] ? " -- backdrop" : "");
+            char vps[64] = "vp ?";
+            if (cd.vpKnown) {
+                snprintf(vps, sizeof(vps), "vp %.0f,%.0f %.0fx%.0f",
+                         cd.vp.TopLeftX, cd.vp.TopLeftY, cd.vp.Width,
+                         cd.vp.Height);
+            }
+            char scs[80] = "";
+            if (cd.scKnown) {
+                snprintf(scs, sizeof(scs), ", scissor %ld,%ld-%ld,%ld %s",
+                         cd.sc.left, cd.sc.top, cd.sc.right, cd.sc.bottom,
+                         cd.scEnabled ? "on" : "off");
+            }
+            Log::get().note("  solid %u: %u indices at draw %u, "
+                            "%.0fx%.0f own-units, rgba %08X, %s%s",
+                            d, cd.count, cd.seqPos,
+                            w.valid() ? w.w() : 0.0f,
+                            w.valid() ? w.h() : 0.0f,
+                            rgbaKnown[d] ? rgba[d] : 0u, vps, scs);
         }
     };
 
-    // Candidate quads for the box: solids in the backdrop's space that are
-    // neither full sheets nor full-span strips, from draws that are not
-    // backdrops themselves.
-    struct Cand {
-        Rect rect;
-        uint32_t cap;
-        bool used = false;
-    };
-    std::vector<Cand> cands;
-    uint32_t strips = 0, sheets = 0;
+    // Roles. The scrim: a 30-index panel, dark and translucent, whose
+    // viewport is the whole surface. The box: dark and opaque, drawn
+    // through a viewport (or an enabled scissor) that is a fraction of it.
+    g_scrimCount = 0;
+    int scrimCap0 = -1;
+    int boxCap = -1;
+    bool boxFromScissor = false;
+    float boxArea = 0.0f;
     for (uint32_t d = 0; d < g_capCount; ++d) {
-        if (isBackdrop[d]) continue;
-        const SeqEnt& se = g_capSeq[g_caps[d].seqPos];
-        if (se.w != anchor.w || se.h != anchor.h) continue;
-        for (const Rect& r : quads[d]) {
-            if (!r.valid()) continue;
-            if (r.w() >= refW * kBackdropFraction &&
-                r.h() >= refH * kBackdropFraction) {
-                // A full sheet inside a batch cannot be substituted away by
-                // this mechanism and must not become "content" either.
-                ++sheets;
-                continue;
-            }
-            if (r.w() >= refW * kStripFraction ||
-                r.h() >= refH * kStripFraction) {
-                ++strips;
-                continue;
-            }
-            cands.push_back(Cand{r, d, false});
-        }
-    }
-
-    if (cands.empty()) {
-        recordNone("the backdrop is the only solid drawn -- the dialog has "
-                   "not arrived yet");
-        ctx->Unmap(g_vbStage, 0);
-        ctx->Unmap(g_ibStage, 0);
-        return;
-    }
-
-    // The seed: the box's own bordered panel when one draws (the strongest
-    // structural signal there is), else the largest solid in any batch.
-    Rect target;
-    int seedCap = -1;
-    bool seedIsPanel = false;
-    float seedArea = 0.0f;
-    for (uint32_t d = 0; d < g_capCount; ++d) {
-        if (isBackdrop[d] || g_caps[d].count != kPanelIndices) continue;
-        const SeqEnt& se = g_capSeq[g_caps[d].seqPos];
-        if (se.w != anchor.w || se.h != anchor.h) continue;
-        if (whole[d].valid() && whole[d].area() > seedArea) {
-            seedArea = whole[d].area();
-            seedCap = static_cast<int>(d);
-        }
-    }
-    if (seedCap >= 0) {
-        target = whole[seedCap];
-        seedIsPanel = true;
-    } else {
-        for (const Cand& c : cands) {
-            if (c.rect.area() > seedArea) {
-                seedArea = c.rect.area();
-                seedCap = static_cast<int>(c.cap);
-                target = c.rect;
-            }
-        }
-    }
-
-    // Growth: absorb candidates that touch the box's neighbourhood, so its
-    // border strips and the bar inside it join while a badge in a far
-    // corner stays out. A few passes, because a strip can bridge to the
-    // fill only after the fill has joined.
-    const float gx = refW * kGrowMargin, gy = refH * kGrowMargin;
-    uint32_t contributors = 0;
-    for (uint32_t pass = 0; pass < kGrowPasses; ++pass) {
-        bool grew = false;
-        for (Cand& c : cands) {
-            if (c.used) continue;
-            if (c.rect.x0 <= target.x1 + gx && c.rect.x1 >= target.x0 - gx &&
-                c.rect.y0 <= target.y1 + gy && c.rect.y1 >= target.y0 - gy) {
-                const Rect before = target;
-                target.add(c.rect);
-                c.used = true;
-                ++contributors;
-                grew = grew || target.w() != before.w() ||
-                       target.h() != before.h() || target.x0 != before.x0 ||
-                       target.y0 != before.y0;
-            }
-        }
-        if (!grew) break;
-    }
-
-    if (!target.valid() || target.w() < refW * kMinTargetFraction ||
-        target.h() < refH * kMinTargetFraction) {
-        dumpSolids();
-        recordNone("the box seeded and grew to a sliver, not a dialog");
-        ctx->Unmap(g_vbStage, 0);
-        ctx->Unmap(g_ibStage, 0);
-        return;
-    }
-    if (target.w() >= refW * kBackdropFraction &&
-        target.h() >= refH * kBackdropFraction) {
-        dumpSolids();
-        recordNone("the box grew until it spanned the surface itself");
-        ctx->Unmap(g_vbStage, 0);
-        ctx->Unmap(g_ibStage, 0);
-        return;
-    }
-
-    // Build each backdrop's collapsed twin: its own vertices verbatim,
-    // positions mapped linearly from its bounds onto the target. Only the
-    // float2 at offset 0 changes, so colour and everything else in the
-    // 24-byte vertex survives and no encoding has to be understood.
-    ID3D11Device* dev = nullptr;
-    ctx->GetDevice(&dev);
-    if (!dev) {
-        ctx->Unmap(g_vbStage, 0);
-        ctx->Unmap(g_ibStage, 0);
-        failOnce("the device was unreachable at build time");
-        return;
-    }
-    dropBuilt();
-    bool buildFailed = false;
-    uint32_t skippedBackdrops = 0;
-    for (uint32_t d = 0; d < g_capCount && !buildFailed; ++d) {
-        if (!isBackdrop[d]) continue;
-        if (g_builtCount >= kMaxBuilt) {
-            ++skippedBackdrops;
-            continue;
-        }
         const CapDraw& cd = g_caps[d];
-        const Rect& own = whole[d];
-        if (!own.valid() || own.w() <= 0.0f || own.h() <= 0.0f) {
-            ++skippedBackdrops;
+        if (cd.count != kPanelIndices || !rgbaKnown[d] || !cd.vpKnown) {
             continue;
         }
-        std::vector<uint8_t> verts(static_cast<size_t>(cd.count) * g_capStride);
-        std::vector<uint16_t> idx(cd.count);
-        bool ok = true;
-        for (uint32_t k = 0; k < cd.count && ok; ++k) {
-            const uint8_t* ip = ibBase + cd.ibOffset + k * (cd.i16 ? 2 : 4);
-            uint32_t vi = cd.i16 ? *reinterpret_cast<const uint16_t*>(ip)
-                                 : *reinterpret_cast<const uint32_t*>(ip);
-            const int64_t v = static_cast<int64_t>(vi) + cd.baseVertex;
-            const int64_t off = v * g_capStride;
-            if (v < 0 ||
-                off + g_capStride > static_cast<int64_t>(g_capVertexBytes)) {
-                ok = false;
-                break;
+        const SeqEnt& se = g_capSeq[cd.seqPos];
+        const float sw = static_cast<float>(se.w);
+        const float sh = static_cast<float>(se.h);
+        const uint32_t c = rgba[d];
+        const uint32_t r = c & 0xFF, g = (c >> 8) & 0xFF, b = (c >> 16) & 0xFF;
+        const uint32_t a = (c >> 24) & 0xFF;
+        const bool dark = r < kDarkMax && g < kDarkMax && b < kDarkMax;
+        if (!dark) continue;
+        const bool vpFull = cd.vp.Width >= sw * kVpFullFraction &&
+                            cd.vp.Height >= sh * kVpFullFraction;
+        const bool vpSub = cd.vp.Width <= sw * kVpSubFraction &&
+                           cd.vp.Height <= sh * kVpSubFraction &&
+                           cd.vp.Width > 0 && cd.vp.Height > 0;
+        const bool scSub =
+            cd.scEnabled && cd.scKnown &&
+            static_cast<float>(cd.sc.right - cd.sc.left) <= sw * kVpSubFraction &&
+            static_cast<float>(cd.sc.bottom - cd.sc.top) <= sh * kVpSubFraction &&
+            cd.sc.right > cd.sc.left && cd.sc.bottom > cd.sc.top;
+        if (a < kOpaqueMin && vpFull) {
+            if (g_scrimCount < kMaxScrims) {
+                if (scrimCap0 < 0) scrimCap0 = static_cast<int>(d);
+                g_scrimPos[g_scrimCount++] = cd.seqPos;
             }
-            uint8_t* dst = &verts[static_cast<size_t>(k) * g_capStride];
-            memcpy(dst, vbBase + off, g_capStride);
-            float* pos = reinterpret_cast<float*>(dst);
-            pos[0] = target.x0 + (pos[0] - own.x0) / own.w() * target.w();
-            pos[1] = target.y0 + (pos[1] - own.y0) / own.h() * target.h();
-            idx[k] = static_cast<uint16_t>(k);
+        } else if (a >= kOpaqueMin && (vpSub || (vpFull && scSub))) {
+            const float area = vpSub
+                ? cd.vp.Width * cd.vp.Height
+                : static_cast<float>(cd.sc.right - cd.sc.left) *
+                      static_cast<float>(cd.sc.bottom - cd.sc.top);
+            if (area > boxArea) {
+                boxArea = area;
+                boxCap = static_cast<int>(d);
+                boxFromScissor = !vpSub;
+            }
         }
-        if (!ok) {
-            buildFailed = true;
-            break;
-        }
-        D3D11_BUFFER_DESC bd{};
-        D3D11_SUBRESOURCE_DATA sr{};
-        bd.Usage = D3D11_USAGE_IMMUTABLE;
-        bd.ByteWidth = static_cast<UINT>(verts.size());
-        bd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
-        sr.pSysMem = verts.data();
-        Built& b = g_built[g_builtCount];
-        bool made = SUCCEEDED(dev->CreateBuffer(&bd, &sr, &b.vb));
-        bd.ByteWidth = static_cast<UINT>(idx.size() * 2);
-        bd.BindFlags = D3D11_BIND_INDEX_BUFFER;
-        sr.pSysMem = idx.data();
-        made = made && SUCCEEDED(dev->CreateBuffer(&bd, &sr, &b.ib));
-        if (!made) {
-            if (b.vb) { b.vb->Release(); b.vb = nullptr; }
-            if (b.ib) { b.ib->Release(); b.ib = nullptr; }
-            buildFailed = true;
-            break;
-        }
-        b.pos = cd.seqPos;
-        b.indices = cd.count;
-        ++g_builtCount;
     }
-    dev->Release();
+
     ctx->Unmap(g_vbStage, 0);
     ctx->Unmap(g_ibStage, 0);
 
-    if (buildFailed || g_builtCount == 0) {
-        dropBuilt();
-        recordNone("the collapsed geometry could not be built");
+    if (g_scrimCount == 0) {
+        dumpSolids();
+        recordNone("no dark translucent full-view 30-index panel is in this "
+                   "frame");
         return;
     }
-    g_builtStride = g_capStride;
+    if (boxCap < 0) {
+        dumpSolids();
+        recordNone("no dark opaque 30-index panel rides a boxed viewport or "
+                   "scissor -- the modal's rect is not where this looks");
+        return;
+    }
+
+    g_boxPos = g_caps[boxCap].seqPos;
+    g_boxFromScissor = boxFromScissor;
+    g_boxStamp = 0;   // the rect is read live at the box's next draw
+    g_haveRoles = true;
     g_measuredHash = g_armedHash;
     g_measuredLen = g_capSeqLen;
     memcpy(g_measuredSeq, g_capSeq, sizeof(SeqEnt) * g_capSeqLen);
     ++g_measurements;
 
-    // Name what the box was seeded FROM, so a field report can validate the
-    // pick against what the headset shows. After the first few, log again
-    // only when the box moved: the shader-prep dialog re-measures on every
-    // percent tick and the box holds still through all of them.
+    // The engage line, rate-limited: after the first few, log again only
+    // when the box moved -- the percent text re-measures constantly and the
+    // box holds still through it.
+    const CapDraw& bc = g_caps[boxCap];
+    Rect boxNow;
+    if (boxFromScissor) {
+        boxNow.add(static_cast<float>(bc.sc.left), static_cast<float>(bc.sc.top));
+        boxNow.add(static_cast<float>(bc.sc.right), static_cast<float>(bc.sc.bottom));
+    } else {
+        boxNow.add(bc.vp.TopLeftX, bc.vp.TopLeftY);
+        boxNow.add(bc.vp.TopLeftX + bc.vp.Width, bc.vp.TopLeftY + bc.vp.Height);
+    }
+    const float sw = static_cast<float>(g_capSeq[bc.seqPos].w);
+    const float sh = static_cast<float>(g_capSeq[bc.seqPos].h);
     const bool moved =
-        fabsf(target.x0 - g_lastTarget.x0) > refW * kRelogFraction ||
-        fabsf(target.x1 - g_lastTarget.x1) > refW * kRelogFraction ||
-        fabsf(target.y0 - g_lastTarget.y0) > refH * kRelogFraction ||
-        fabsf(target.y1 - g_lastTarget.y1) > refH * kRelogFraction;
-    g_lastTarget = target;
+        fabsf(boxNow.x0 - g_lastBox.x0) > sw * kRelogFraction ||
+        fabsf(boxNow.x1 - g_lastBox.x1) > sw * kRelogFraction ||
+        fabsf(boxNow.y0 - g_lastBox.y0) > sh * kRelogFraction ||
+        fabsf(boxNow.y1 - g_lastBox.y1) > sh * kRelogFraction;
+    g_lastBox = boxNow;
     if (g_measurements <= 4 || moved) {
-        char source[96];
-        if (seedIsPanel) {
-            snprintf(source, sizeof(source),
-                     "the dialog's own 30-index panel");
-        } else {
-            snprintf(source, sizeof(source),
-                     "the largest solid in a %u-index batch",
-                     g_caps[seedCap].count);
-        }
-        const Rect& bdrop = whole[firstBackdrop];
         Log::get().note(
             "loading panel: FIT -- measurement %u from %u solids of %u "
-            "interface draws. The backdrop at draw %u spans %.0fx%.0f; the "
-            "box on top of it seeded from %s and grew to %.0fx%.0f at "
-            "x %.0f..%.0f y %.0f..%.0f (%u quads joined%s%s). The backdrop "
-            "is redrawn to those exact bounds; the box and its text are the "
-            "game's own draws, untouched.%s",
+            "interface draws. The scrim at draw %u (rgba %08X) is redrawn "
+            "through the box's %s; the box at draw %u (rgba %08X) sits at "
+            "%.0f,%.0f %.0fx%.0f px of %.0fx%.0f. The box, its border and "
+            "its text are the game's own draws, untouched.%s",
             g_measurements, g_capCount, g_capSeqLen,
-            g_caps[firstBackdrop].seqPos, bdrop.w(), bdrop.h(),
-            source, target.w(), target.h(),
-            target.x0, target.x1, target.y0, target.y1, contributors,
-            strips ? ", full-span strips stayed out" : "",
-            sheets ? ", a full sheet in a batch stayed out" : "",
-            (backdrops > 1 || skippedBackdrops)
-                ? " More than one backdrop was found; each is collapsed."
-                : "");
+            g_scrimPos[0], scrimCap0 >= 0 ? rgba[scrimCap0] : 0u,
+            g_boxFromScissor ? "scissor rect" : "viewport",
+            g_boxPos, rgba[boxCap],
+            boxNow.x0, boxNow.y0, boxNow.w(), boxNow.h(), sw, sh,
+            g_scrimCount > 1 ? " More than one scrim was found; each rides "
+                               "the same box." : "");
     }
 }
 

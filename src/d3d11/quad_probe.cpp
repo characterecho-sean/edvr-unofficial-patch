@@ -63,6 +63,15 @@ struct Occ {
     uint32_t startIndex = 0;
     uint32_t instances = 0;
     DXGI_FORMAT ibFormat = DXGI_FORMAT_UNKNOWN;
+    // The rasterizer state live at the draw. Flight 2 proved the widget
+    // system sizes these panels with the VIEWPORT -- identical full-space
+    // vertices, different screen rects -- so the rect an occurrence renders
+    // into is here, not in the buffers.
+    D3D11_VIEWPORT vp = {};
+    bool     vpKnown = false;
+    D3D11_RECT sc = {};
+    bool     scKnown = false;
+    bool     scEnabled = false;
 };
 
 ID3D11Buffer* g_ibStage = nullptr;
@@ -249,11 +258,26 @@ bool quadProbeOnDraw(ID3D11DeviceContext* ctx, uint32_t targetW,
                 ctx->CopySubresourceRegion(g_ibStage, 0, g_ibFill, 0, 0,
                                            ib, 0, &box);
                 Occ& o = g_occ[g_occCount];
+                o = Occ{};
                 o.ibOffset = g_ibFill;
                 o.baseVertex = baseVertex;
                 o.startIndex = startIndex;
                 o.instances = instances;
                 o.ibFormat = ibFmt;
+                UINT nv = 1;
+                ctx->RSGetViewports(&nv, &o.vp);
+                o.vpKnown = nv >= 1;
+                UINT ns = 1;
+                ctx->RSGetScissorRects(&ns, &o.sc);
+                o.scKnown = ns >= 1;
+                ID3D11RasterizerState* rs = nullptr;
+                ctx->RSGetState(&rs);
+                if (rs) {
+                    D3D11_RASTERIZER_DESC rd;
+                    rs->GetDesc(&rd);
+                    o.scEnabled = rd.ScissorEnable != FALSE;
+                    rs->Release();
+                }
                 ++g_occCount;
                 g_ibFill += need;
                 g_windowOpen = true;
@@ -313,10 +337,22 @@ void quadProbeTick(ID3D11DeviceContext* ctx) {
         for (uint32_t oi = 0; oi < g_occCount; ++oi) {
             const Occ& o = g_occ[oi];
             const bool i16 = o.ibFormat == DXGI_FORMAT_R16_UINT;
+            char vps[64] = "viewport ?";
+            if (o.vpKnown) {
+                snprintf(vps, sizeof(vps), "viewport %.0f,%.0f %.0fx%.0f",
+                         o.vp.TopLeftX, o.vp.TopLeftY, o.vp.Width,
+                         o.vp.Height);
+            }
+            char scs[80] = "";
+            if (o.scKnown) {
+                snprintf(scs, sizeof(scs), ", scissor %ld,%ld-%ld,%ld %s",
+                         o.sc.left, o.sc.top, o.sc.right, o.sc.bottom,
+                         o.scEnabled ? "on" : "off");
+            }
             Log::get().note("  occurrence %u: baseVertex %d, startIndex %u, "
-                            "instances %u, index format %s",
+                            "instances %u, index format %s, %s%s",
                             oi, o.baseVertex, o.startIndex, o.instances,
-                            i16 ? "R16" : "R32");
+                            i16 ? "R16" : "R32", vps, scs);
             for (uint32_t q = 0; q < quads; ++q) {
                 float lo[2] = {1e30f, 1e30f};
                 float hi[2] = {-1e30f, -1e30f};
