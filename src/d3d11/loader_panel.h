@@ -37,25 +37,33 @@
 //
 // THE MECHANISM, which that discovery makes almost embarrassingly small.
 //
-//   Measure: when the loader's frame composition -- the sequence of draw
-//   shapes into the interface surface -- holds identical for two
-//   consecutive frames, capture one frame: every textureless quad-batch
-//   draw's indices (the shared vertex buffer once), plus the widget table
-//   (VS t0) and the flag constants (VS b2), all GPU-timeline copies.
+//   Measure IMMEDIATELY: the first frame that shows a 30-index panel is
+//   captured -- every textureless quad-batch draw's indices (the shared
+//   vertex buffer once), plus the widget table (VS t0) and the flag
+//   constants (VS b2), all GPU-timeline copies, polled with DO_NOT_WAIT
+//   so the verdict lands a frame or two later. No stability wait: the
+//   classification is frame-local, so a mid-fade frame is a valid sample,
+//   and the field's report that the scrim showed briefly at first was the
+//   old stability gate's cost, not a necessity. The scrim appears first
+//   in a text-over-scrim phase BEFORE the dialogs, so the withhold is
+//   normally live before any modal exists.
 //
 //   Classify: the scrim is the standalone panel that is dark, translucent,
 //   and whose element maps its fill to the full view -- verified through
 //   the same matrix the shader will use, so a misclassification cannot
 //   survive its own footprint.
 //
-//   Withhold: the scrim's draw is swallowed and NOTHING is drawn in its
-//   place. Inside the box, 40% black over the backing's opaque black was
-//   invisible -- withholding is pixel-identical to a perfect collapse
-//   there. Outside the box, the tint was the defect, and now does not
-//   exist. The backing itself lives at eye level and is untouched by
-//   construction. Positions are trusted only while the frame matches the
-//   measured sequence draw by draw; any divergence runs stock until the
-//   next stable window.
+//   Withhold BY ORDINAL: the verified scrim is the k-th panel of its
+//   surface in the frame (k = 0 in every measurement to date), an
+//   identity that is frame-local and immune to the text churn that broke
+//   positional matching. It is swallowed every frame -- fade-in, percent
+//   ticks and the dialog switch included -- for as long as panels keep
+//   arriving (one hiccup frame forgiven; the census shows menu frames
+//   carry no panels, so the chain cannot outlive the loader), and the
+//   classification is re-verified about every two seconds. Inside the
+//   box, 40% black over the backing's opaque black was invisible --
+//   withholding is pixel-identical to a perfect collapse there. Outside
+//   the box, the tint was the defect, and now does not exist.
 //
 // EVERY failure -- no stable window, no table bound, mixed tables, no
 // dark translucent full-view element -- draws stock and says why in the

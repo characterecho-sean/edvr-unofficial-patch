@@ -185,15 +185,25 @@ verified through the same table the shader reads, so a misclassification
 cannot survive its own footprint. No box hunt exists any more: the box is
 not in this surface.
 
-**Withhold.** At the scrim's position (trusted only while the frame
-matches the measured sequence draw by draw), the draw is swallowed and
-nothing is drawn in its place. Inside the box, 40% black over the
-backing's opaque black was invisible -- withholding is pixel-identical to
-a perfect collapse there. Outside the box, the tint was the defect, and
-now does not exist. The backing lives at eye level and is untouched by
-construction; the border and text are forwarded bit-identically. A dialog
-switch runs stock for the handful of frames a fresh measurement takes
-(two stable + one capture + four settle).
+**Withhold by ordinal, from the first frames.** Flight 8 engaged and the
+field reported it near-perfect, with the scrim visible briefly at first
+-- that was the stability gate plus the fixed settle, machinery inherited
+from the positional architectures that the withhold does not need. Now:
+the FIRST panel-bearing frame is captured immediately (classification is
+frame-local; a mid-fade frame is a valid sample), the copies are polled
+with DO_NOT_WAIT (verdict typically lands in 1-2 frames), and the
+verified scrim is withheld BY ORDINAL -- the k-th panel of its surface in
+the frame, k=0 in every measurement to date -- every frame, through
+fade-in, percent ticks and the dialog switch, with no composition
+matching at all. The chain lives while panels keep arriving (one hiccup
+frame forgiven; menu frames carry no panels, so it cannot outlive the
+loader), re-verifies about every two seconds, and stands down the moment
+re-verification stops finding the scrim. The scrim first appears in a
+white-text-over-scrim phase BEFORE the modals -- field-confirmed already
+transparent there under the withhold -- so by the time a dialog pops the
+swallow has been live for seconds. After a few refusals, arming falls
+back to requiring two identical frames, so a panel-bearing screen that is
+not the loader cannot re-trigger a 4 MB capture per animation frame.
 
 **Log lines to look for** (`edvr_logs`):
 
@@ -236,18 +246,20 @@ it before reading signatures out of a single capture.
 2. On success, flip the shipped default to `fit` in a release commit, and
    consider retiring the probe key from the ini.
 
-Flights already flown, all safe (never engaged): 11:11 (union rule --
-refused, union spanned the surface); 11:27 (seeded growth -- refused;
-killed vertex-space measurement); 11:42 (viewport model -- refused: every
-viewport full, every scissor off; forced the shader read that found the
-element mechanism); 11:56 (element model, panel-level hunt -- refused:
-all standalone panels ride element 0 at full view); 12:04 (per-quad hunt
-by vertex colour -- refused: batch vertices are colour-neutral); 12:25
+Flights already flown: 11:11 (union rule -- refused, union spanned the
+surface); 11:27 (seeded growth -- refused; killed vertex-space
+measurement); 11:42 (viewport model -- refused: every viewport full,
+every scissor off; forced the shader read that found the element
+mechanism); 11:56 (element model, panel-level hunt -- refused: all
+standalone panels ride element 0 at full view); 12:04 (per-quad hunt by
+vertex colour -- refused: batch vertices are colour-neutral); 12:25
 (estimated rendered colour -- refused, but validated the estimator on the
 hologram's exact Elite orange and emptied the dark-covering list); 12:40
 (textured draws included -- refused: still nothing dark and boxed, all
 blends plain src-alpha, which with the field's screenshot forced the
-eye-level conclusion above).
+eye-level conclusion); ~12:55 (THE WITHHOLD ENGAGED -- field: "almost
+perfect now", scrim briefly visible at first, which the immediate-measure
+ordinal chain above removes).
 
 ## What must not regress
 

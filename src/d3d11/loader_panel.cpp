@@ -37,7 +37,7 @@ constexpr uint32_t kFlagIdx2 = 0x8000;
 constexpr uint32_t kFlagIdx1 = 0x4000;
 
 // The scrim's fill colour, RGBA8 at vertex byte offset 8, measured across
-// seven flights: black at alpha 0x66 -- dark in every channel below the
+// eight flights: black at alpha 0x66 -- dark in every channel below the
 // dark bound, translucent below the opaque bound. The other panels fail
 // one or the other: the full-view sheet is opaque, the letterbox white.
 constexpr uint32_t kDarkMax = 0x40;
@@ -53,7 +53,7 @@ constexpr float kFullFraction = 0.90f;
 constexpr uint32_t kMaxSeq = 48;
 constexpr uint32_t kMaxCaptures = 24;
 
-// Scrim positions withheld per measurement. The evidence says one; a
+// Scrim ordinals withheld per verification. The evidence says one; a
 // second translucent full-view panel would get the same treatment.
 constexpr uint32_t kMaxScrims = 4;
 
@@ -73,18 +73,25 @@ constexpr uint32_t kSrvStageBytes = 64u << 10;
 // cb2 as the shader declares it: three float4s.
 constexpr uint32_t kCb2Bytes = 48;
 
-// Frames to let the copies execute before mapping, so the map never stalls
-// the render thread. panel_quad's number.
-constexpr uint32_t kSettleFrames = 4;
+// The copies are polled with DO_NOT_WAIT from the next frame and mapped
+// blocking at this deadline. The field sees the scrim for exactly as long
+// as this takes, so it is not a fixed settle any more: typically the GPU
+// is done in a frame or two.
+constexpr uint32_t kSettleDeadline = 6;
 
-// Wanting a measurement this long without ever seeing two identical frames
-// is worth one log line: it means the loader is animating continuously and
-// the fix is standing down, correctly but invisibly.
-constexpr uint32_t kStuckFrames = 600;
+// The withhold rides a CHAIN of panel-bearing frames and re-verifies its
+// classification about every two seconds of them. One panel-less frame is
+// forgiven (a hiccup); two in a row mean the dialogs are gone.
+constexpr uint32_t kReverifyFrames = 120;
+constexpr uint32_t kChainGrace = 2;
+
+// After this many consecutive refusals, arming goes back to requiring two
+// identical frames -- so a panel-bearing screen that is NOT the loader
+// (and animates forever) cannot re-trigger a 4 MB capture every frame.
+constexpr uint32_t kRefuseCool = 3;
 
 // Collection attempts abandoned because draws would not fit the capture
-// before the same shape is recorded as unmeasurable. Guards against a
-// measure-discard loop re-copying a 4 MB buffer every third frame.
+// before the same shape is recorded as unmeasurable.
 constexpr uint32_t kMaxDropStreak = 3;
 
 FaultBudget g_budget("loaderPanel", 6);
@@ -106,14 +113,11 @@ struct Rect {
 };
 
 // One entry in a frame's composition: the shape of one draw into an
-// interface-sized surface. Position in the sequence is the entry's identity.
+// interface-sized surface.
 struct SeqEnt {
     uint32_t count = 0;
     uint32_t w = 0;
     uint32_t h = 0;
-    bool same(uint32_t c, uint32_t tw, uint32_t th) const {
-        return count == c && w == tw && h == th;
-    }
 };
 
 // One draw collected into the pending measurement.
@@ -126,53 +130,53 @@ struct CapDraw {
     void*    vsSrv = nullptr;   // identity of VS t0 at the draw, not held
 };
 
-// --- the current frame's composition -------------------------------------
+// --- the current frame -----------------------------------------------------
 uint32_t g_frame = 0;
 uint32_t g_seqLen = 0;
 SeqEnt   g_seq[kMaxSeq];
 uint32_t g_hashAcc = 2166136261u;
-bool     g_prefixOk = true;   // does this frame still match the measured one?
-bool     g_subArm = false;    // set by OnDraw for the Substitute that follows
+uint32_t g_panelOrdinal = 0;     // chain-dims 30-index draws seen this frame
+bool     g_frameAnyPanel = false;
+bool     g_frameChainPanel = false;
+bool     g_subArm = false;       // set by OnDraw for the Substitute call
 
-// The last COMPLETED frame's hash; two consecutive equal hashes are the
-// stability that arms a collection.
+// The last COMPLETED frame's hash, for the refusal cooldown's stability
+// requirement.
 uint32_t g_liveHash = 0;
 
-// --- the measurement lifecycle -------------------------------------------
+// --- the measurement lifecycle ---------------------------------------------
 bool     g_collecting = false;   // this frame's draws are being captured
-uint32_t g_armedHash = 0;        // the stable shape the collection is of
-uint32_t g_settleAt = 0;         // 0 = nothing pending
-uint32_t g_wantSince = 0;
-bool     g_stuckNoted = false;
+uint32_t g_settleFrom = 0;       // frame the collection closed; 0 = none
+uint32_t g_armedHash = 0;        // the collected frame's hash, for dedup
+uint32_t g_measuredHash = 0;     // last refused shape; 0 = none
+uint32_t g_refuseStreak = 0;
 uint32_t g_dropStreak = 0;
 
-// --- the pending capture --------------------------------------------------
+// --- the pending capture ---------------------------------------------------
 ID3D11Buffer* g_ibStage = nullptr;
 ID3D11Buffer* g_vbStage = nullptr;
 ID3D11Buffer* g_srvStage = nullptr;   // the widget table (VS t0)
 ID3D11Buffer* g_cb2Stage = nullptr;   // the flag constants (VS b2)
 CapDraw       g_caps[kMaxCaptures];
 uint32_t      g_capCount = 0;
-uint32_t      g_capDropped = 0;  // qualifying draws that did not fit
+uint32_t      g_capDropped = 0;
 uint32_t      g_ibFill = 0;
 uint32_t      g_capStride = 0;
 uint32_t      g_capVertexBytes = 0;
-uint32_t      g_srvCopied = 0;       // bytes of the table in staging
-uint32_t      g_srvFirstElem = 0;    // the view's element offset
+uint32_t      g_srvCopied = 0;
+uint32_t      g_srvFirstElem = 0;
 bool          g_cb2Copied = false;
-SeqEnt        g_capSeq[kMaxSeq]; // the collection frame's composition
+SeqEnt        g_capSeq[kMaxSeq];
 uint32_t      g_capSeqLen = 0;
 
-// --- the measured result: scrim positions to withhold ---------------------
-uint32_t g_measuredHash = 0;     // shape this verdict belongs to; 0 = none
-uint32_t g_measuredLen = 0;
-SeqEnt   g_measuredSeq[kMaxSeq];
-bool     g_haveRoles = false;
-uint32_t g_scrimPos[kMaxScrims];
-uint32_t g_scrimCount = 0;
+// --- the chain: the withhold, live -----------------------------------------
+bool     g_chainOn = false;
+uint32_t g_chainW = 0, g_chainH = 0;
+uint32_t g_chainOrd[kMaxScrims];
+uint32_t g_chainOrdCount = 0;
+uint32_t g_chainMissed = 0;      // consecutive panel-less frames
+uint32_t g_reverifyAt = 0;
 uint32_t g_measurements = 0;
-uint32_t g_lastScrimPos = 0xFFFFFFFFu;   // engage-log rate limiting
-uint32_t g_lastScrimCount = 0;
 
 void failOnce(const char* why) {
     static bool noted = false;
@@ -193,36 +197,40 @@ void dropPending() {
     g_srvFirstElem = 0;
     g_cb2Copied = false;
     g_capSeqLen = 0;
-    g_settleAt = 0;
+    g_settleFrom = 0;
     g_collecting = false;
 }
 
+void chainOff() {
+    g_chainOn = false;
+    g_chainOrdCount = 0;
+    g_chainMissed = 0;
+    g_reverifyAt = 0;
+}
+
 void resetMeasured() {
-    g_haveRoles = false;
-    g_scrimCount = 0;
+    chainOff();
     g_measuredHash = 0;
-    g_measuredLen = 0;
+    g_refuseStreak = 0;
 }
 
 void resetFrameAcc() {
     g_seqLen = 0;
     g_hashAcc = 2166136261u;
-    g_prefixOk = true;
+    g_panelOrdinal = 0;
+    g_frameAnyPanel = false;
+    g_frameChainPanel = false;
     g_subArm = false;
 }
 
-// A verdict for a shape that yielded nothing to withhold. Recording the
-// hash is what stops the same shape being re-measured -- and re-copying a
-// 4 MB buffer -- every stable window until the dialog changes.
+// A refusal for a shape. Recording the hash is what stops the same shape
+// being re-measured -- and re-copying a 4 MB buffer -- until it changes.
 void recordNone(const char* why) {
-    g_haveRoles = false;
-    g_scrimCount = 0;
     g_measuredHash = g_armedHash;
-    g_measuredLen = g_capSeqLen;
-    memcpy(g_measuredSeq, g_capSeq, sizeof(SeqEnt) * g_capSeqLen);
+    ++g_refuseStreak;
     Log::get().note("loading panel: measured %u draw(s) and drew no "
-                    "conclusion -- %s. Stock for this dialog state; the next "
-                    "change re-measures.",
+                    "conclusion -- %s. Stock for this state; a changed one "
+                    "re-measures.",
                     g_capCount, why);
 }
 
@@ -275,21 +283,18 @@ bool loaderPanelOnDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
         g_seq[p].w = targetW;
         g_seq[p].h = targetH;
         ++g_seqLen;
-    } else {
-        // A frame too busy to record cannot be matched against; no
-        // substitution past this point.
-        g_prefixOk = false;
     }
 
-    // Withholding is positional, and a position only means anything while
-    // the frame has matched the measured sequence at every step so far.
-    if (g_measuredLen) {
-        if (p >= g_measuredLen || !g_measuredSeq[p].same(count, targetW, targetH)) {
-            g_prefixOk = false;
+    uint32_t ord = 0xFFFFFFFFu;
+    if (count == kPanelIndices) {
+        g_frameAnyPanel = true;
+        if (g_chainOn && targetW == g_chainW && targetH == g_chainH) {
+            g_frameChainPanel = true;
+            ord = g_panelOrdinal++;
         }
     }
 
-    // Collection: capture this draw if the frame is the armed one and the
+    // Collection: capture this draw if the frame is being captured and the
     // draw is a solid quad batch -- text reads a texture; the panels this
     // module classifies read none. A qualifying draw that cannot be
     // captured -- capacity, an overlong frame -- poisons the collection.
@@ -364,8 +369,7 @@ bool loaderPanelOnDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
                         cd.i16 = idxSize == 2u;
                         // The widget table and flags, at the first panel of
                         // the frame -- the same GPU-timeline copy discipline
-                        // as the vertex buffer. Later panels record only the
-                        // view's identity, so a mixed-table frame can refuse.
+                        // as the vertex buffer.
                         if (count == kPanelIndices) {
                             ID3D11ShaderResourceView* srv = nullptr;
                             ctx->VSGetShaderResources(0, 1, &srv);
@@ -454,12 +458,14 @@ bool loaderPanelOnDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
         }
     }
 
-    // The withhold decision. Only a position the measurement marked as the
-    // scrim, and only while this frame still matches the measured one.
+    // The withhold: while the chain is live, the verified scrim ordinals
+    // are swallowed EVERY frame -- fade-in, percent ticks and the dialog
+    // switch included, because the ordinal is frame-local and needs no
+    // composition match.
     g_subArm = false;
-    if (g_haveRoles && g_prefixOk) {
-        for (uint32_t i = 0; i < g_scrimCount; ++i) {
-            if (g_scrimPos[i] == p) {
+    if (ord != 0xFFFFFFFFu) {
+        for (uint32_t i = 0; i < g_chainOrdCount; ++i) {
+            if (g_chainOrd[i] == ord) {
                 g_subArm = true;
                 return true;
             }
@@ -485,9 +491,7 @@ bool loaderPanelSubstitute(ID3D11DeviceContext* ctx, PfnDrawIndexedInstanced dra
 
 namespace {
 
-// The clip-space footprint of one panel's fill under one element matrix:
-// evaluate x' = r0.x*x + r0.y*y + r0.w and y' likewise at the fill's four
-// corners (z is 0 and w is 1 in this vertex layout).
+// The clip-space footprint of one panel's fill under one element matrix.
 struct Foot {
     float cx0, cx1, cy0, cy1;
     bool valid = false;
@@ -514,40 +518,55 @@ Foot footprint(const float* elem, const Rect& fill) {
     return f;
 }
 
-// Retire a settled capture into a verdict: which positions are the scrim.
-// Runs on the render thread inside the caller's budget guard; every exit
-// records the shape so it is not re-measured.
-void analyze(ID3D11DeviceContext* ctx) {
+// Retire a settled capture into a verdict: which panel ordinals are the
+// scrim. Returns false while the GPU still owns the copies and the caller
+// should try again next frame; true when the capture was consumed.
+bool tryAnalyze(ID3D11DeviceContext* ctx, bool allowWait) {
+    const bool wasChain = g_chainOn;
     if (!g_srvStage || !g_srvCopied) {
-        recordNone("no widget table was bound at the panels' draws");
-        return;
+        if (wasChain) {
+            chainOff();
+            Log::get().note("loading panel: re-verification lost the widget "
+                            "table; the withhold stands down.");
+        } else {
+            recordNone("no widget table was bound at the panels' draws");
+        }
+        return true;
     }
     if (!g_cb2Stage || !g_cb2Copied) {
-        recordNone("the panels' flag constants could not be captured");
-        return;
+        if (wasChain) {
+            chainOff();
+            Log::get().note("loading panel: re-verification lost the flag "
+                            "constants; the withhold stands down.");
+        } else {
+            recordNone("the panels' flag constants could not be captured");
+        }
+        return true;
     }
-    D3D11_MAPPED_SUBRESOURCE mi{}, mv{}, ms{}, mc{};
-    if (FAILED(ctx->Map(g_ibStage, 0, D3D11_MAP_READ, 0, &mi)) || !mi.pData ||
-        FAILED(ctx->Map(g_vbStage, 0, D3D11_MAP_READ, 0, &mv)) || !mv.pData ||
-        FAILED(ctx->Map(g_srvStage, 0, D3D11_MAP_READ, 0, &ms)) || !ms.pData ||
-        FAILED(ctx->Map(g_cb2Stage, 0, D3D11_MAP_READ, 0, &mc)) || !mc.pData) {
-        if (mi.pData) ctx->Unmap(g_ibStage, 0);
-        if (mv.pData) ctx->Unmap(g_vbStage, 0);
-        if (ms.pData) ctx->Unmap(g_srvStage, 0);
-        failOnce("the measurement could not be mapped");
-        return;
+    const UINT mapFlags = allowWait ? 0 : D3D11_MAP_FLAG_DO_NOT_WAIT;
+    ID3D11Buffer* stages[4] = {g_ibStage, g_vbStage, g_srvStage, g_cb2Stage};
+    D3D11_MAPPED_SUBRESOURCE maps[4] = {};
+    for (int i = 0; i < 4; ++i) {
+        const HRESULT hr =
+            ctx->Map(stages[i], 0, D3D11_MAP_READ, mapFlags, &maps[i]);
+        if (hr == DXGI_ERROR_WAS_STILL_DRAWING) {
+            for (int j = 0; j < i; ++j) ctx->Unmap(stages[j], 0);
+            return false;   // not ready; poll again next frame
+        }
+        if (FAILED(hr) || !maps[i].pData) {
+            for (int j = 0; j < i; ++j) ctx->Unmap(stages[j], 0);
+            failOnce("the measurement could not be mapped");
+            return true;
+        }
     }
-    const uint8_t* ibBase = static_cast<const uint8_t*>(mi.pData);
-    const uint8_t* vbBase = static_cast<const uint8_t*>(mv.pData);
-    const uint8_t* tbl = static_cast<const uint8_t*>(ms.pData);
+    const uint8_t* ibBase = static_cast<const uint8_t*>(maps[0].pData);
+    const uint8_t* vbBase = static_cast<const uint8_t*>(maps[1].pData);
+    const uint8_t* tbl = static_cast<const uint8_t*>(maps[2].pData);
     uint32_t flags = 0;
-    memcpy(&flags, static_cast<const uint8_t*>(mc.pData) + 32, 4);
+    memcpy(&flags, static_cast<const uint8_t*>(maps[3].pData) + 32, 4);
 
     auto unmapAll = [&] {
-        ctx->Unmap(g_cb2Stage, 0);
-        ctx->Unmap(g_srvStage, 0);
-        ctx->Unmap(g_vbStage, 0);
-        ctx->Unmap(g_ibStage, 0);
+        for (int i = 3; i >= 0; --i) ctx->Unmap(stages[i], 0);
     };
 
     // Per captured panel: the fill quad's bounds, the RGBA8 at offset 8,
@@ -597,7 +616,6 @@ void analyze(ID3D11DeviceContext* ctx) {
         }
     }
 
-    // The live element index, exactly as the shader selects it.
     auto liveIdx = [&](uint32_t d) -> uint32_t {
         if (flags & kFlagIdx2) return idx2[d];
         if (flags & kFlagIdx1) return idx1[d];
@@ -610,8 +628,6 @@ void analyze(ID3D11DeviceContext* ctx) {
         memcpy(out8, tbl + off, 32);
         return true;
     };
-
-    // When a verdict refuses, name every panel it saw.
     auto dumpPanels = [&] {
         for (uint32_t d = 0; d < g_capCount && d < 10; ++d) {
             const CapDraw& cd = g_caps[d];
@@ -632,21 +648,29 @@ void analyze(ID3D11DeviceContext* ctx) {
     }
     if (mixed) {
         dumpPanels();
-        recordNone("the 30-index panels read different widget tables");
         unmapAll();
-        return;
+        if (wasChain) {
+            chainOff();
+            Log::get().note("loading panel: the panels split across widget "
+                            "tables; the withhold stands down.");
+        } else {
+            recordNone("the 30-index panels read different widget tables");
+        }
+        return true;
     }
 
     // The scrim: a standalone panel, dark and translucent, whose element
     // maps its fill to the full view -- verified through the same matrix
-    // the shader will use, so a misclassification cannot survive its own
-    // footprint.
-    uint32_t scrimPos[kMaxScrims];
-    uint32_t scrims = 0;
+    // the shader will use. Its ORDINAL among same-surface panels is the
+    // identity the withhold rides: frame-local, immune to text churn.
+    uint32_t ords[kMaxScrims];
+    uint32_t nOrds = 0;
+    uint32_t dimsW = 0, dimsH = 0;
     uint32_t scrimRgba = 0, scrimElem = 0;
     for (uint32_t d = 0; d < g_capCount; ++d) {
         const CapDraw& cd = g_caps[d];
         if (cd.count != kPanelIndices || !known[d]) continue;
+        const SeqEnt& se = g_capSeq[cd.seqPos];
         const uint32_t c = rgba[d];
         const uint32_t r = c & 0xFF, gch = (c >> 8) & 0xFF,
                        b = (c >> 16) & 0xFF, a = (c >> 24) & 0xFF;
@@ -656,50 +680,70 @@ void analyze(ID3D11DeviceContext* ctx) {
         if (!elemRows(liveIdx(d), rows)) continue;
         const Foot f = footprint(rows, fill[d]);
         if (!f.valid) continue;
-        if (f.cx1 - f.cx0 >= 2.0f * kFullFraction &&
-            f.cy1 - f.cy0 >= 2.0f * kFullFraction && scrims < kMaxScrims) {
-            if (scrims == 0) {
-                scrimRgba = c;
-                scrimElem = liveIdx(d);
-            }
-            scrimPos[scrims++] = cd.seqPos;
+        if (f.cx1 - f.cx0 < 2.0f * kFullFraction ||
+            f.cy1 - f.cy0 < 2.0f * kFullFraction) {
+            continue;
         }
+        if (nOrds == 0) {
+            dimsW = se.w;
+            dimsH = se.h;
+            scrimRgba = c;
+            scrimElem = liveIdx(d);
+        } else if (se.w != dimsW || se.h != dimsH) {
+            continue;
+        }
+        // This scrim's ordinal: panels into the same surface before it.
+        uint32_t ord = 0;
+        for (uint32_t e = 0; e < d; ++e) {
+            if (g_caps[e].count == kPanelIndices &&
+                g_capSeq[g_caps[e].seqPos].w == se.w &&
+                g_capSeq[g_caps[e].seqPos].h == se.h) {
+                ++ord;
+            }
+        }
+        if (nOrds < kMaxScrims) ords[nOrds++] = ord;
     }
     unmapAll();
 
-    if (scrims == 0) {
+    if (nOrds == 0) {
         dumpPanels();
-        recordNone("no dark translucent panel maps to the full view");
-        return;
+        if (wasChain) {
+            chainOff();
+            Log::get().note("loading panel: re-verification no longer finds "
+                            "the scrim; the withhold stands down.");
+        } else {
+            recordNone("no dark translucent panel maps to the full view");
+        }
+        return true;
     }
 
-    memcpy(g_scrimPos, scrimPos, sizeof(uint32_t) * scrims);
-    g_scrimCount = scrims;
-    g_haveRoles = true;
-    g_measuredHash = g_armedHash;
-    g_measuredLen = g_capSeqLen;
-    memcpy(g_measuredSeq, g_capSeq, sizeof(SeqEnt) * g_capSeqLen);
+    const bool changed =
+        !g_chainOn || g_chainOrdCount != nOrds || g_chainW != dimsW ||
+        g_chainH != dimsH ||
+        memcmp(g_chainOrd, ords, sizeof(uint32_t) * nOrds) != 0;
+    memcpy(g_chainOrd, ords, sizeof(uint32_t) * nOrds);
+    g_chainOrdCount = nOrds;
+    g_chainW = dimsW;
+    g_chainH = dimsH;
+    g_chainOn = true;
+    g_chainMissed = 0;
+    g_reverifyAt = g_frame + kReverifyFrames;
+    g_refuseStreak = 0;
     ++g_measurements;
-
-    // The engage line, rate-limited: after the first few, log again only
-    // when the scrim moved position -- the percent text re-measures on
-    // every tick and the scrim holds still through all of them.
-    const bool moved =
-        scrimPos[0] != g_lastScrimPos || scrims != g_lastScrimCount;
-    g_lastScrimPos = scrimPos[0];
-    g_lastScrimCount = scrims;
-    if (g_measurements <= 4 || moved) {
+    if (changed) {
         Log::get().note(
-            "loading panel: FIT -- measurement %u from %u solids of %u "
-            "interface draws. The scrim at draw %u (rgba %08X, element %u, "
-            "full-view by its own matrix) is withheld; the dialog's black "
-            "backing is the game's own eye-level layer and stays, so the "
-            "box keeps its ground and nothing beyond it is tinted.%s",
-            g_measurements, g_capCount, g_capSeqLen,
-            scrimPos[0], scrimRgba, scrimElem,
-            scrims > 1 ? " More than one scrim was found; each is withheld."
-                       : "");
+            "loading panel: FIT -- measurement %u from %u solids. The scrim "
+            "is panel ordinal %u of the %ux%u surface (rgba %08X, element "
+            "%u, full-view by its own matrix); it is withheld from this "
+            "frame on, every frame the loader's panels persist, and "
+            "re-verified about every two seconds. The dialog's black "
+            "backing is the game's own eye-level layer and stays.%s",
+            g_measurements, g_capCount, ords[0], dimsW, dimsH,
+            scrimRgba, scrimElem,
+            nOrds > 1 ? " More than one scrim was found; each is withheld."
+                      : "");
     }
+    return true;
 }
 
 }  // namespace
@@ -708,6 +752,7 @@ void loaderPanelTick(ID3D11DeviceContext* ctx) {
     ++g_frame;
     if (!g_on) {
         if (g_ibStage || g_vbStage || g_collecting) dropPending();
+        if (g_chainOn) chainOff();
         resetFrameAcc();
         g_liveHash = 0;
         return;
@@ -715,17 +760,17 @@ void loaderPanelTick(ID3D11DeviceContext* ctx) {
 
     const uint32_t finishedHash = g_seqLen ? g_hashAcc : 0;
 
-    // The collection frame just closed: keep it only if the composition it
-    // captured is the one that was armed. A mismatch means the loader moved
-    // mid-collection -- fade-in, progress re-tessellation -- and the capture
-    // describes no stable state.
+    // The collection frame just closed. No stability requirement any more:
+    // classification is frame-local, so even a mid-fade frame is a valid
+    // sample -- which is what lets the withhold start during the fade-in
+    // instead of after it.
     if (g_collecting) {
         g_collecting = false;
-        if (finishedHash == g_armedHash && g_capCount > 0 &&
-            g_capDropped == 0) {
+        if (g_capCount > 0 && g_capDropped == 0) {
             memcpy(g_capSeq, g_seq, sizeof(SeqEnt) * g_seqLen);
             g_capSeqLen = g_seqLen;
-            g_settleAt = g_frame + kSettleFrames;
+            g_armedHash = finishedHash;
+            g_settleFrom = g_frame;
             g_dropStreak = 0;
         } else {
             const bool dropped = g_capDropped != 0;
@@ -739,34 +784,48 @@ void loaderPanelTick(ID3D11DeviceContext* ctx) {
         }
     }
 
-    // A settled capture is ready to read.
-    if (g_settleAt && g_frame >= g_settleAt && ctx) {
-        g_settleAt = 0;
-        guardedBudget(g_budget, [&] { analyze(ctx); });
-        dropPending();
+    // A closed capture is polled without waiting; the GPU usually finishes
+    // within a frame or two, and the deadline map blocks at worst once.
+    if (g_settleFrom && ctx) {
+        const bool allowWait = g_frame >= g_settleFrom + kSettleDeadline;
+        bool consumed = false;
+        guardedBudget(g_budget, [&] { consumed = tryAnalyze(ctx, allowWait); });
+        if (consumed || allowWait) {
+            g_settleFrom = 0;
+            dropPending();
+        }
     }
 
-    // Want a measurement? Arm one only off the back of two identical
-    // consecutive frames, so the capture describes a state the next frames
-    // will still be in.
-    const bool want = g_seqLen > 0 && finishedHash != g_measuredHash;
-    if (want && !g_collecting && !g_settleAt) {
-        if (finishedHash == g_liveHash) {
+    // Chain maintenance: the withhold lives exactly as long as panels keep
+    // arriving (one hiccup frame forgiven), and re-verifies periodically. A
+    // frame with no interface draws at all counts as panel-less too -- the
+    // chain must not sleep through a screen change and wake on an unrelated
+    // panel later.
+    if (g_chainOn) {
+        if (!g_frameChainPanel) {
+            if (++g_chainMissed >= kChainGrace) {
+                chainOff();
+            }
+        } else {
+            g_chainMissed = 0;
+            if (g_frame >= g_reverifyAt && !g_collecting && !g_settleFrom) {
+                dropPending();
+                g_collecting = true;
+            }
+        }
+    }
+
+    // Arming: the moment a panel-bearing frame appears with no chain, and
+    // no verdict already standing for its exact shape. After a few
+    // refusals, arming requires two identical frames, so a panel-bearing
+    // screen that is not the loader cannot re-trigger a 4 MB capture every
+    // frame of its animation.
+    if (!g_chainOn && !g_collecting && !g_settleFrom && g_frameAnyPanel &&
+        finishedHash != g_measuredHash) {
+        if (g_refuseStreak < kRefuseCool || finishedHash == g_liveHash) {
             dropPending();
             g_collecting = true;
-            g_armedHash = finishedHash;
-            g_wantSince = 0;
-        } else if (!g_wantSince) {
-            g_wantSince = g_frame;
-        } else if (!g_stuckNoted && g_frame - g_wantSince > kStuckFrames) {
-            g_stuckNoted = true;
-            Log::get().note(
-                "loading panel: the loader's draws have not held still for "
-                "two consecutive frames in %u frames; the scrim draws "
-                "stock until they do.", kStuckFrames);
         }
-    } else if (!want) {
-        g_wantSince = 0;
     }
 
     g_liveHash = finishedHash;
