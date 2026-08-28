@@ -60,7 +60,7 @@ const wchar_t* kTipText = L"EDVR is free. If it saved you an evening, you can";
 // The client area and every control position below are in 96-dpi units, scaled
 // once at layout time.
 const int kClientWidth = 720;
-const int kClientHeight = 652;
+const int kClientHeight = 688;
 const int kMargin = 24;
 const int kCardPad = 20;
 
@@ -181,7 +181,7 @@ void applyLayout() {
         HDC dc = GetDC(g.window);
         const int prefix = ui::textWidth(dc, kTipText, ui::fonts().caption);
         ReleaseDC(g.window, dc);
-        MoveWindow(g.tip, dp(kMargin) + prefix + dp(5), dp(621), dp(76), dp(20), TRUE);
+        MoveWindow(g.tip, dp(kMargin) + prefix + dp(5), dp(657), dp(76), dp(20), TRUE);
     }
 
     // Whether the report needs a scrollbar depends on how tall it is, and it
@@ -310,10 +310,10 @@ COLORREF colourFor(Tone tone) {
 // painting
 // ---------------------------------------------------------------------------
 
-// The install picker and the folder it names sit above both screens: the
-// settings being edited are the settings of whichever install is selected, and
-// a Settings tab that does not say which folder it is writing to is asking to
-// be used on the wrong one.
+// The install picker and the folder it names sit above both screens -- and
+// above the TABS: the settings being edited are the settings of whichever
+// install is selected, and a Settings tab that does not say which folder it
+// is writing to is asking to be used on the wrong one.
 void paintInstallPicker(HDC dc) {
     const ui::Theme& t = ui::theme();
     const ui::Fonts& f = ui::fonts();
@@ -327,10 +327,10 @@ void paintInstallScreen(HDC dc) {
     const ui::Theme& t = ui::theme();
     const ui::Fonts& f = ui::fonts();
 
-    RECT card{dp(kMargin), dp(150), dp(kClientWidth - kMargin), dp(300)};
+    RECT card{dp(kMargin), dp(186), dp(kClientWidth - kMargin), dp(336)};
     ui::paintCard(dc, card, g.dpi);
 
-    int y = 166;
+    int y = 202;
     for (const StatusRow& row : g.status) {
         const int centre = dp(y + 10);
         ui::fillCircle(dc, dp(kMargin + kCardPad + 5), centre, dp(4), colourFor(row.tone));
@@ -346,29 +346,29 @@ void paintInstallScreen(HDC dc) {
         y += 22;
     }
 
-    RECT actions{dp(kMargin), dp(312), dp(kClientWidth - kMargin), dp(434)};
+    RECT actions{dp(kMargin), dp(348), dp(kClientWidth - kMargin), dp(470)};
     ui::paintCard(dc, actions, g.dpi);
 
-    RECT reassure{dp(kMargin + kCardPad), dp(404), dp(kClientWidth - kMargin - kCardPad), dp(424)};
+    RECT reassure{dp(kMargin + kCardPad), dp(440), dp(kClientWidth - kMargin - kCardPad), dp(460)};
     ui::drawText(dc,
                  L"Nothing is changed until you confirm it, and every file replaced is copied "
                  L"into edvr_backup\\ first.",
                  reassure, f.caption, t.subtext, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
 
-    RECT report{dp(kMargin), dp(446), dp(kClientWidth - kMargin), dp(612)};
+    RECT report{dp(kMargin), dp(482), dp(kClientWidth - kMargin), dp(648)};
     ui::paintCard(dc, report, g.dpi);
 }
 
 void paintSettingsScreen(HDC dc) {
     const ui::Theme& t = ui::theme();
     const ui::Fonts& f = ui::fonts();
-    RECT card{dp(kMargin), dp(150), dp(kClientWidth - kMargin), dp(612)};
+    RECT card{dp(kMargin), dp(186), dp(kClientWidth - kMargin), dp(648)};
     ui::paintCard(dc, card, g.dpi);
 
-    RECT heading{dp(kMargin + kCardPad), dp(166), dp(kClientWidth - kMargin - kCardPad), dp(188)};
-    ui::drawText(dc, L"Settings", heading, f.heading, t.text, DT_LEFT | DT_SINGLELINE);
-
-    RECT note{dp(kMargin + kCardPad), dp(190), dp(kClientWidth - kMargin - kCardPad), dp(208)};
+    // No "Settings" heading inside the card: the active tab above already
+    // says it, and a heading repeating a tab is the same redundancy the
+    // Setup tab was renamed to avoid. The note carries the useful part.
+    RECT note{dp(kMargin + kCardPad), dp(202), dp(kClientWidth - kMargin - kCardPad), dp(222)};
     const std::wstring where =
         g.settings.loaded()
             ? L"Written into the edvr.ini of the install above, and live within a second. The "
@@ -378,8 +378,8 @@ void paintSettingsScreen(HDC dc) {
 
     // The search box is a real edit control with its 3D border taken off, so
     // the frame around it is drawn here to match everything else.
-    RECT search{dp(kMargin + kCardPad) - dp(6), dp(214), dp(kMargin + kCardPad) + dp(326),
-                dp(246)};
+    RECT search{dp(kMargin + kCardPad) - dp(6), dp(250), dp(kMargin + kCardPad) + dp(326),
+                dp(282)};
     ui::fillRounded(dc, search, dp(6), t.control);
     ui::strokeRounded(dc, search, dp(6), t.controlBorder);
 }
@@ -415,7 +415,7 @@ void paintWindow(HWND window) {
     else
         paintSettingsScreen(dc);
 
-    RECT tip{dp(kMargin), dp(622), dp(kClientWidth - kMargin), dp(642)};
+    RECT tip{dp(kMargin), dp(658), dp(kClientWidth - kMargin), dp(678)};
     ui::drawText(dc, kTipText, tip, f.caption, t.subtext, DT_LEFT | DT_SINGLELINE);
 
     BitBlt(screenDc, 0, 0, client.right, client.bottom, dc, 0, 0, SRCCOPY);
@@ -711,12 +711,16 @@ void createControls(HWND window) {
     ui::buildFonts(g.dpi);
     const ui::Fonts& f = ui::fonts();
 
-    g.tabInstall = ui::makeButton(window, L"Install", kIdTabInstall, ui::ButtonStyle::TabActive,
+    // The tabs sit UNDER the install picker, not beside the title: the
+    // screens are two views of whichever install is selected above, and the
+    // reading order should say so. "Setup" rather than "Install", so the tab
+    // names the screen and only the button names the action.
+    g.tabInstall = ui::makeButton(window, L"Setup", kIdTabInstall, ui::ButtonStyle::TabActive,
                                   f.body);
     g.tabSettings = ui::makeButton(window, L"Settings", kIdTabSettings, ui::ButtonStyle::Tab,
                                    f.body);
-    place(g.tabInstall, 528, 22, 84, 30, Screen::Install, true);
-    place(g.tabSettings, 616, 22, 92, 30, Screen::Install, true);
+    place(g.tabInstall, kMargin, 146, 84, 30, Screen::Install, true);
+    place(g.tabSettings, kMargin + 92, 146, 92, 30, Screen::Install, true);
 
     g.combo = CreateWindowExW(0, L"COMBOBOX", L"",
                               WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL | CBS_DROPDOWNLIST,
@@ -735,7 +739,7 @@ void createControls(HWND window) {
      // it to checked threw that flag away without a word.
     g.chkKeep = ui::makeCheckbox(window, L"Keep the settings I have changed", kIdChkKeep,
                                  g.args.keepSettings, f.body);
-    place(g.chkKeep, kMargin + kCardPad, 330, 420, 24, Screen::Install);
+    place(g.chkKeep, kMargin + kCardPad, 366, 420, 24, Screen::Install);
 
     g.install = ui::makeButton(window, L"Install", kIdInstall, ui::ButtonStyle::Primary, f.body);
     g.repair = ui::makeButton(window, L"Repair", kIdRepair, ui::ButtonStyle::Secondary, f.body);
@@ -743,10 +747,10 @@ void createControls(HWND window) {
                                  f.body);
     g.collectLogs = ui::makeButton(window, L"Save logs", kIdCollectLogs,
                                    ui::ButtonStyle::Secondary, f.body);
-    place(g.install, kMargin + kCardPad, 362, 124, 34, Screen::Install);
-    place(g.repair, 172, 362, 104, 34, Screen::Install);
-    place(g.uninstall, 284, 362, 104, 34, Screen::Install);
-    place(g.collectLogs, 396, 362, 116, 34, Screen::Install);
+    place(g.install, kMargin + kCardPad, 398, 124, 34, Screen::Install);
+    place(g.repair, 172, 398, 104, 34, Screen::Install);
+    place(g.uninstall, 284, 398, 104, 34, Screen::Install);
+    place(g.collectLogs, 396, 398, 116, 34, Screen::Install);
     // No Close button: it was the one control at list height marked
     // both-screens, so it painted through the settings page -- and the
     // window's own close box already does the job.
@@ -757,10 +761,10 @@ void createControls(HWND window) {
                                nullptr);
     SendMessageW(g.search, WM_SETFONT, reinterpret_cast<WPARAM>(f.body), TRUE);
     SendMessageW(g.search, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"Search settings"));
-    place(g.search, kMargin + kCardPad, 216, 320, 28, Screen::Settings);
+    place(g.search, kMargin + kCardPad, 252, 320, 28, Screen::Settings);
 
     g.settingsList = createSettingsList(window, kIdSettingsList, g.dpi);
-    place(g.settingsList, kMargin + 2, 256, kClientWidth - 2 * kMargin - 4, 350, Screen::Settings);
+    place(g.settingsList, kMargin + 2, 292, kClientWidth - 2 * kMargin - 4, 350, Screen::Settings);
 
     g.report = CreateWindowExW(0, L"EDIT", L"",
                                WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE | ES_READONLY, 0,
@@ -768,14 +772,14 @@ void createControls(HWND window) {
                                reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdReport)), nullptr,
                                nullptr);
     SendMessageW(g.report, WM_SETFONT, reinterpret_cast<WPARAM>(f.body), TRUE);
-    place(g.report, kMargin + kCardPad - 4, 460, 636, 140, Screen::Install);
+    place(g.report, kMargin + kCardPad - 4, 496, 636, 140, Screen::Install);
 
     g.tip = ui::makeButton(window, L"leave a tip", kIdKofi, ui::ButtonStyle::Link, f.caption);
-    place(g.tip, kMargin, 621, 76, 20, Screen::Install, true);  // x fixed up in applyLayout
+    place(g.tip, kMargin, 657, 76, 20, Screen::Install, true);  // x fixed up in applyLayout
 
     g.discord = ui::makeButton(window, L"Ask on Discord", kIdDiscord, ui::ButtonStyle::Link,
                                f.caption);
-    place(g.discord, kClientWidth - kMargin - 110, 621, 110, 20, Screen::Install, true);
+    place(g.discord, kClientWidth - kMargin - 110, 657, 110, 20, Screen::Install, true);
 
     // Dark mode does not reach the native controls on its own. These two theme
     // names are what File Explorer uses for exactly this, and on a light theme
