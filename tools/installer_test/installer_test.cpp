@@ -437,7 +437,9 @@ static void testShippedIni(const std::wstring& root) {
         "[fix]\r\n"
         "fss_panel_distance = 1.0\r\n"
         "fss_res = 1\r\n"
-        "fss_eye_sync = stock\r\n"   // a key that never existed: carried, not eaten
+        "fss_eye_heal = 1\r\n"        // the pre-0.11 pair, both of which
+        "fss_reveal_sync = on\r\n"    // now merge into ONE new key
+        "fss_eye_glue = stock\r\n"   // a key that never existed: carried, not eaten
         "[advanced]\r\n"
         "cull_guard_percent = 20.0\r\n";
     MergeReport moveRep;
@@ -448,11 +450,13 @@ static void testShippedIni(const std::wstring& root) {
              "the full-res body follows the section move");
     expectEq(iniValue(migrated, "fix.fss_panel_distance"), "",
              "nothing is left under the old name for the reader to shadow");
+    expectEq(iniValue(migrated, "fix.fss_eye_sync"), "on",
+             "the retired pair of keys lands merged on the one new key");
     expectEq(iniValue(migrated, "advanced.cull_guard_percent"), "20.0",
              "an unmoved tuned value still lands in its own section");
-    check(iniValue(migrated, "fix.fss_eye_sync") == "stock",
+    check(iniValue(migrated, "fix.fss_eye_glue") == "stock",
           "a key this version never shipped is carried, with its note");
-    check(moveRep.followed.size() >= 2,
+    check(moveRep.followed.size() >= 4,
           "the report says the values followed their settings");
 }
 

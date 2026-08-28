@@ -10,6 +10,7 @@
 #include <cstring>
 
 #include "../common/config.h"
+#include "../common/eye_sync.h"
 #include "../common/frame_flag.h"
 #include "../common/guard.h"
 #include "../common/hotkey.h"
@@ -1666,8 +1667,7 @@ vr::EVRCompositorError hookedWaitGetPoses(void* self,
             // philosophies (fill the left vs stamp the right); flipping it
             // mid-session is exactly how it gets judged.
             {
-                int hm = Config::get().getInt("experimental.fss_eye_heal", 1);
-                if (hm < 0 || hm > 2) hm = 0;
+                const int hm = eyeSyncFromConfig(Config::get()).healMode;
                 if (s->fssHealOn != hm) {
                     s->fssHealOn = hm;
                     Log::get().note("fss eye heal: mode %d.", hm);
@@ -1808,8 +1808,7 @@ void* interceptInterface(void* iface, const char* interfaceVersion) {
     }
 
     {
-        int hm = cfg.getInt("experimental.fss_eye_heal", 1);
-        if (hm < 0 || hm > 2) hm = 0;
+        const int hm = eyeSyncFromConfig(cfg).healMode;
         s.fssHealOn = hm;
         float td = cfg.getFloat("experimental.fss_theater", 0.0f);
         if (td < 0.0f || td > 10.0f) td = 0.0f;

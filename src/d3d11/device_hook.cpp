@@ -7,6 +7,7 @@
 #include <dxgi1_2.h>
 
 #include "../common/config.h"
+#include "../common/eye_sync.h"
 #include "../common/frame_flag.h"
 #include "../common/guard.h"
 #include "../common/hotkey.h"
@@ -683,11 +684,7 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
             vScreenRefreshConfig();
             g_state->fssTheaterWanted =
                 Config::get().getFloat("experimental.fss_theater", 0.0f) > 0.0f ||
-                (Config::get().getString("fix.fss_reveal_sync", "off") !=
-                     "off" &&
-                 Config::get().getString("fix.fss_reveal_sync", "off") !=
-                     "stock") ||
-                Config::get().getInt("experimental.fss_eye_heal", 1) != 0;
+                eyeSyncFromConfig(Config::get()).any();
             journalWatchSetEagerStatus(g_state->fssTheaterWanted);
             // The liveness pass, on the same once-a-second cadence. In-place
             // patches are on a table other tools can write too, and one that
@@ -962,11 +959,7 @@ State& ensureState() {
         journalWatchConfigure();
         g_state->fssTheaterWanted =
             Config::get().getFloat("experimental.fss_theater", 0.0f) > 0.0f ||
-            (Config::get().getString("fix.fss_reveal_sync", "off") !=
-                 "off" &&
-             Config::get().getString("fix.fss_reveal_sync", "off") !=
-                 "stock") ||
-            Config::get().getInt("experimental.fss_eye_heal", 1) != 0;
+            eyeSyncFromConfig(Config::get()).any();
         journalWatchSetEagerStatus(g_state->fssTheaterWanted);
         g_state->dumpOnExternalCam =
             Config::get().getBool("advanced.dump_camera_on_external_cam", false);

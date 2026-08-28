@@ -44,10 +44,11 @@
 // covers those), and lockstep holds the eyes identical through the
 // composite-drawn resolve that follows. steady stays as an instrument.
 //
-// fix.fss_reveal_sync = on | off | steady (developer instrument). on =
-// the lockstep mechanism above, shipped on; free when off. Recognition
-// rides the body-frame gate and the composite's vertex hash, the
-// fss_probe pattern exactly.
+// Configured by fix.fss_eye_sync -- ONE key for the whole fix
+// (src/common/eye_sync.h); this module serves the composite half (the
+// lockstep and steady mechanisms). Free when neither is armed.
+// Recognition rides the body-frame gate and the composite's vertex
+// hash, the fss_probe pattern exactly.
 #pragma once
 
 #include <cstdint>

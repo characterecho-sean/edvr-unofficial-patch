@@ -156,7 +156,7 @@ def keys_moved():
     source of truth, three consumers (this header, the installer merge, and
     a human reading the file)."""
     out = {}
-    pending = None
+    pending = []   # annotations STACK: several old names, one merged key
     section = ''
     if not os.path.exists(INI):
         return out
@@ -166,25 +166,27 @@ def keys_moved():
             m = re.match(r'^\[([^\]]+)\]', line)
             if m:
                 section = m.group(1).strip()
-                pending = None
+                pending = []
                 continue
             if not line:
-                pending = None
+                pending = []
                 continue
             if line[:1] in ('#', ';'):
                 body = line.lstrip('#;').strip()
                 if body.lower().startswith('moved-from:'):
-                    pending = body[len('moved-from:'):].strip()
+                    pending.append(body[len('moved-from:'):].strip())
                     continue
                 km = re.match(r'^([A-Za-z0-9_]+)\s*=', body)
                 if km and ' ' not in body.split('=')[0].strip() and pending:
-                    out[pending.lower()] = '%s.%s' % (section, km.group(1))
-                    pending = None
+                    for p in pending:
+                        out[p.lower()] = '%s.%s' % (section, km.group(1))
+                    pending = []
                 continue
             km = re.match(r'^([A-Za-z0-9_]+)\s*=', line)
-            if km and pending:
-                out[pending.lower()] = '%s.%s' % (section, km.group(1))
-            pending = None
+            if km:
+                for p in pending:
+                    out[p.lower()] = '%s.%s' % (section, km.group(1))
+            pending = []
     return out
 
 

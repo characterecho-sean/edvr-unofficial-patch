@@ -239,6 +239,7 @@ void Config::auditResolve(void* parsedMap) {
     auto& parsed = *static_cast<std::map<std::string, std::string>*>(parsedMap);
 
     std::set<std::string> movedOld;
+    std::set<std::string> synthesized;
     for (size_t i = 0; i < g_auditMovedCount; ++i) {
         const std::string oldK = g_auditMoved[i][0];
         const std::string newK = g_auditMoved[i][1];
@@ -250,6 +251,7 @@ void Config::auditResolve(void* parsedMap) {
             // The old-layout line still works: its value is read as the new
             // key this session, and the log says how to make that permanent.
             parsed[newK] = o->second;
+            synthesized.insert(newK);
             if (m_impl->auditNoted.insert("mv:" + oldK).second) {
                 m_impl->auditPending.push_back(
                     "edvr.ini: " + oldK + " has moved to " + newK +
@@ -257,7 +259,11 @@ void Config::auditResolve(void* parsedMap) {
                     "the old line this session. The installer's update "
                     "migrates the file, or move the line yourself.");
             }
-        } else if (n->second != o->second) {
+        } else if (n->second != o->second && !synthesized.count(newK)) {
+            // Two settings can merge into one new key; a second old value
+            // arriving after the first synthesized the target is not the
+            // user contradicting themselves, so the conflict note is only
+            // for a target genuinely set in the file.
             if (m_impl->auditNoted.insert("mv2:" + oldK).second) {
                 m_impl->auditPending.push_back(
                     "edvr.ini: both " + oldK + " and " + newK + " are set, "

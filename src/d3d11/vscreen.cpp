@@ -13,6 +13,7 @@
 #include <cstring>
 
 #include "../common/config.h"
+#include "../common/eye_sync.h"
 #include "../common/frame_flag.h"  // the eye-texture size, from the openvr half
 #include "../common/guard.h"
 #include "../common/log.h"
@@ -2853,8 +2854,7 @@ void vScreenRefreshConfig() {
         // commented out: this default is what everybody runs. Moving a setting out
         // of [fix] is a decision about where it is configured, not a decision to
         // turn the fix off.
-        int n = cfg.getInt("experimental.fss_eye_heal", 1);
-        if (n < 0 || n > 2) n = 0;
+        const int n = eyeSyncFromConfig(cfg).healMode;
         if (s->fssHealOn != n) {
             s->fssHealOn = n;
             Log::get().note(
@@ -3701,8 +3701,7 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
             cfg.getInt("advanced.census_fss_jump", 0) ? 1 : 0;
         g_state->fssTheaterOn =
             cfg.getFloat("experimental.fss_theater", 0.0f) > 0.0f;
-        int n = cfg.getInt("experimental.fss_eye_heal", 1);
-        if (n < 0 || n > 2) n = 0;
+        const int n = eyeSyncFromConfig(cfg).healMode;
         if (g_state->fssHealOn != n) {
             g_state->fssHealOn = n;
             Log::get().note(

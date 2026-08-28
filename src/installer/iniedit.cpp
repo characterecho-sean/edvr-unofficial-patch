@@ -169,9 +169,14 @@ namespace {
 
 // "# moved-from: fix.exposure_damping" above a key, in the NEW file: where this
 // setting used to live. Read as a map from the old dotted name to the new one.
+// Annotations STACK: several old names may precede one key, which is how two
+// settings merge into a single new one (fss_eye_heal + fss_reveal_sync ->
+// fss_eye_sync); each old name maps to the same target, and when more than one
+// old value is present in a user's file the last one in file order lands (they
+// agree in every configuration that was ever a default).
 std::map<std::string, std::pair<std::string, std::string>> movedKeys(const IniDoc& doc) {
     std::map<std::string, std::pair<std::string, std::string>> out;
-    std::string pending;
+    std::vector<std::string> pending;
     for (const IniLine& line : doc.lines) {
         if (line.kind == LineKind::Comment) {
             const std::string body = trim(line.text);
@@ -179,7 +184,7 @@ std::map<std::string, std::pair<std::string, std::string>> movedKeys(const IniDo
             while (at < body.size() && (body[at] == '#' || body[at] == ';')) ++at;
             const std::string text = trim(body.substr(at));
             if (lower(text).rfind("moved-from:", 0) == 0) {
-                pending = trim(text.substr(strlen("moved-from:")));
+                pending.push_back(trim(text.substr(strlen("moved-from:"))));
             }
             continue;
         }
@@ -187,10 +192,10 @@ std::map<std::string, std::pair<std::string, std::string>> movedKeys(const IniDo
             pending.clear();
             continue;
         }
-        if (!pending.empty()) {
-            out[lower(pending)] = {line.section, line.key};
-            pending.clear();
+        for (const std::string& p : pending) {
+            out[lower(p)] = {line.section, line.key};
         }
+        pending.clear();
     }
     return out;
 }

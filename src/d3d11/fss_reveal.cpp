@@ -9,6 +9,7 @@
 #include <string>
 
 #include "../common/config.h"
+#include "../common/eye_sync.h"
 #include "../common/guard.h"
 #include "../common/log.h"
 #include "exposure_fix.h"   // lookupShaderHash
@@ -92,24 +93,21 @@ FaultBudget g_budget("fssReveal", 8);
 
 void fssRevealConfigure(Config& cfg) {
     const bool wasSteady = g_steady;
-    // High-level values: on | off | steady (developer instrument). The
-    // mechanism's campaign names -- "lockstep" and "stock" -- survive as
-    // silent aliases for inis written while they were the words.
-    const std::string m = cfg.getString("fix.fss_reveal_sync", "off");
-    const bool on = m == "on" || m == "lockstep";
-    if (m == "off" || m == "stock") {
-        g_steady = false;
-    } else if (m == "steady") {
-        g_steady = true;
-    } else if (on) {
-        g_steady = false;
-        g_lockstep = true;
-    } else {
-        g_steady = false;
-        Log::get().note("fss_reveal_sync \"%s\" is not on, off or steady; "
-                        "running off.", m.c_str());
+    // ONE key for the whole black-squares fix (src/common/eye_sync.h);
+    // this module serves its composite half.
+    const EyeSync es = eyeSyncFromConfig(cfg);
+    if (!es.recognised) {
+        static bool s_badValueNoted = false;
+        if (!s_badValueNoted) {
+            s_badValueNoted = true;
+            Log::get().note(
+                "fss_eye_sync \"%s\" is not on, off or a developer value "
+                "(heal, mirror, sync, steady); running on. Said once.",
+                cfg.getString("fix.fss_eye_sync", "on").c_str());
+        }
     }
-    if (!on) g_lockstep = false;
+    g_steady = es.steady;
+    g_lockstep = es.lockstep;
     static bool s_wasLockstep = false;
     const bool lockFlip = s_wasLockstep != g_lockstep;
     s_wasLockstep = g_lockstep;
