@@ -101,9 +101,26 @@ void breadcrumb(const char* stage) {
 
     char line[256];
     size_t n = 0;
-    const DWORD tick = GetTickCount();
+    const uint64_t tick = GetTickCount64();
     // Fixed-width decimal tick, written digit by digit.
-    for (int div = 100000000; div > 0; div /= 10) {
+    //
+    // THE DIVISOR STARTED AT 100000000, WHICH IS NINE DIGITS, and a tick count
+    // reaches ten of them at 11.57 days of uptime. Past that the leading digit
+    // was simply dropped: 1,000,000,000 rendered as "0", and 1,036,800,000 as
+    // "36800000" -- a stamp that reads as EARLIER than the lines before it.
+    // The source was GetTickCount, a DWORD, so it also wrapped outright at
+    // 49.7 days.
+    //
+    // This was survivable while these lines were only ever read as an ordered
+    // sequence within one boot. The heartbeat makes them a QUANTITY -- the
+    // whole point is comparing the last one against the log's own clock -- and
+    // a reporter with a fortnight of uptime is not exotic; issue #19's was at
+    // 9.3 days, which is inside a fortnight of tripping it. The two clocks now
+    // agree, and 1e19 is the largest power of ten a uint64 holds -- twenty
+    // digits, which is all of GetTickCount64. (1e18 was the first attempt and
+    // drops the leading digit of a full-range tick: the same defect this hunk
+    // is about, one order of magnitude further out.)
+    for (uint64_t div = 10000000000000000000ull; div > 0; div /= 10) {
         const char digit = static_cast<char>('0' + ((tick / div) % 10));
         if (n || digit != '0' || div == 1) line[n++] = digit;
     }
@@ -115,6 +132,191 @@ void breadcrumb(const char* stage) {
     DWORD written = 0;
     WriteFile(f, line, static_cast<DWORD>(n), &written, nullptr);
     CloseHandle(f);
+}
+
+namespace {
+
+// Appends one decimal number to a hand-built line. Same posture as breadcrumb
+// itself: no CRT formatting, because the crash handler below runs in a process
+// that is already failing and printf is not a thing to reach for there.
+void appendNum(char* line, size_t& n, size_t cap, uint64_t v) {
+    char tmp[24];
+    size_t t = 0;
+    if (v == 0) tmp[t++] = '0';
+    while (v > 0 && t < sizeof(tmp)) { tmp[t++] = static_cast<char>('0' + (v % 10)); v /= 10; }
+    while (t > 0 && n < cap - 1) line[n++] = tmp[--t];
+}
+
+void appendStr(char* line, size_t& n, size_t cap, const char* s) {
+    for (; s && *s && n < cap - 1; ++s) line[n++] = *s;
+}
+
+void appendHex(char* line, size_t& n, size_t cap, uint64_t v) {
+    appendStr(line, n, cap, "0x");
+    bool lead = true;
+    for (int shift = 60; shift >= 0; shift -= 4) {
+        const unsigned d = static_cast<unsigned>((v >> shift) & 0xF);
+        if (d == 0 && lead && shift > 0) continue;
+        lead = false;
+        if (n < cap - 1) line[n++] = static_cast<char>(d < 10 ? '0' + d : 'A' + (d - 10));
+    }
+}
+
+LPTOP_LEVEL_EXCEPTION_FILTER g_prevFilter = nullptr;
+bool g_filterInstalled = false;
+
+LONG WINAPI edvrCrashFilter(EXCEPTION_POINTERS* info) {
+    // A STACK OVERFLOW IS THE ONE CRASH THIS MUST NOT TOUCH.
+    //
+    // On EXCEPTION_STACK_OVERFLOW the filter runs on what is left of the last
+    // guard page. This function's own frame is a char[256] and a wchar_t[260],
+    // breadcrumb's is another 256 plus a MAX_PATH path buffer, and CreateFileW
+    // below that is several kilobytes of ntdll. Overflowing again inside a
+    // top-level filter is not a second chance: the process is terminated on the
+    // spot, which means g_prevFilter never runs and the game's own crash
+    // reporter never runs either. Writing one diagnostic line would cost the
+    // player the dialog that actually reports the bug.
+    //
+    // This is not a hypothetical shape here. d3d11_proxy.cpp records a chained
+    // proxy recursing "until the stack ran out ... STATUS_STACK_OVERFLOW,
+    // 0xC00000FD, with nothing logged, which is exactly what EDHM users
+    // reported" -- so the mod chain this feature exists to disambiguate is the
+    // one that produces this code. Hand it straight on.
+    if (info && info->ExceptionRecord &&
+        info->ExceptionRecord->ExceptionCode == EXCEPTION_STACK_OVERFLOW) {
+        return g_prevFilter ? g_prevFilter(info) : EXCEPTION_CONTINUE_SEARCH;
+    }
+
+    // Guarded so a fault raised while reporting a fault cannot loop. One line
+    // is the whole budget: the process is going down either way, and a handler
+    // that tries to be thorough is a handler that hangs the crash dialog.
+    static volatile long entered = 0;
+    if (InterlockedExchange(&entered, 1) != 0) {
+        return g_prevFilter ? g_prevFilter(info) : EXCEPTION_CONTINUE_SEARCH;
+    }
+
+    char line[256];
+    size_t n = 0;
+    appendStr(line, n, sizeof(line), "gfx: UNHANDLED exception ");
+    const void* addr = nullptr;
+    if (info && info->ExceptionRecord) {
+        appendHex(line, n, sizeof(line), info->ExceptionRecord->ExceptionCode);
+        addr = info->ExceptionRecord->ExceptionAddress;
+        appendStr(line, n, sizeof(line), " at ");
+        appendHex(line, n, sizeof(line), reinterpret_cast<uintptr_t>(addr));
+    } else {
+        appendStr(line, n, sizeof(line), "(no record)");
+    }
+
+    // WHOSE CODE IT WAS. The point of the whole exercise.
+    appendStr(line, n, sizeof(line), " in ");
+    HMODULE mod = nullptr;
+    wchar_t path[MAX_PATH]{};
+    if (addr &&
+        GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                               GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           reinterpret_cast<LPCWSTR>(addr), &mod) &&
+        mod && GetModuleFileNameW(mod, path, MAX_PATH) > 0) {
+        const wchar_t* base = path;
+        for (const wchar_t* p = path; *p; ++p) {
+            if (*p == L'\\') base = p + 1;
+        }
+        // Module names are ASCII in practice; anything else is written as '?'
+        // rather than risking a conversion call here.
+        for (; *base && n < sizeof(line) - 1; ++base) {
+            line[n++] = (*base < 0x80) ? static_cast<char>(*base) : '?';
+        }
+        appendStr(line, n, sizeof(line), " +");
+        appendHex(line, n, sizeof(line),
+                  reinterpret_cast<uintptr_t>(addr) - reinterpret_cast<uintptr_t>(mod));
+    } else if (addr) {
+        appendStr(line, n, sizeof(line), "no module (address is not in a loaded image)");
+    } else {
+        // Distinct from the line above, which asserts something about an
+        // address. There was no address to assert it about.
+        appendStr(line, n, sizeof(line), "no module (no exception record)");
+    }
+    line[n] = 0;
+    breadcrumb(line);
+
+    // Elite installs its own reporter and the player expects its dialog. Ours
+    // is a note in the margin, not a replacement.
+    return g_prevFilter ? g_prevFilter(info) : EXCEPTION_CONTINUE_SEARCH;
+}
+
+}  // namespace
+
+void breadcrumbInstallCrashHandler() {
+    static volatile long done = 0;
+    if (InterlockedExchange(&done, 1) != 0) return;
+    g_prevFilter = SetUnhandledExceptionFilter(edvrCrashFilter);
+    g_filterInstalled = true;
+}
+
+void breadcrumbRemoveCrashHandler() {
+    // A FILTER LEFT BEHIND BY AN UNLOADED MODULE POINTS INTO FREED ADDRESS
+    // SPACE, and the next unhandled exception in the process jumps into it --
+    // so the cost of skipping this is not "no breadcrumb", it is that the game
+    // loses its crash reporting entirely, in a process where a mod unloading
+    // is exactly the sort of thing worth reporting. Everything else installed
+    // here is undone on the FreeLibrary branch; this is not an exception.
+    if (!g_filterInstalled) return;
+    g_filterInstalled = false;
+    // Only take ours down. If another module installed a filter after we did,
+    // restoring g_prevFilter would throw THEIRS away as well, so the chain goes
+    // back only when the top of it is still us.
+    //
+    // AND WHEN IT IS NOT, THIS FUNCTION DOES NOT ACHIEVE ITS PURPOSE. That
+    // module saved a `prev` pointing at edvrCrashFilter, in an image that is
+    // about to be unmapped, and nothing reachable from here can reach into its
+    // private state to correct it. The choice is between one dangling pointer
+    // and two; this takes the one. Said plainly because the alternative is a
+    // comment claiming a hazard was removed when it was moved.
+    LPTOP_LEVEL_EXCEPTION_FILTER current = SetUnhandledExceptionFilter(g_prevFilter);
+    if (current != edvrCrashFilter) {
+        // Someone else is on top. Undo our undo.
+        SetUnhandledExceptionFilter(current);
+    }
+    g_prevFilter = nullptr;
+}
+
+void breadcrumbHeartbeat(uint64_t frameNo) {
+    // Half a minute, by the clock rather than by a frame count -- the rate
+    // varies by headset and a loading screen renders thousands of frames a
+    // second, which is exactly the case a count would mis-time.
+    //
+    // Configurable, and 0 turns it off, because this is the one per-frame cost
+    // in the render path that writes to DISK. Every other one in vscreen has a
+    // key; a breadcrumb is an open/append/close rather than an append to the
+    // log's already-open handle, and a file create in the game folder goes
+    // through whatever filter driver is watching it. Thirty seconds is the
+    // judgement that a hitch at that cadence is worth a crash landing
+    // somewhere, and the key is there for anyone whose machine disagrees.
+    static uint64_t intervalMs = 0;
+    static bool     read = false;
+    if (!read) {
+        read = true;
+        intervalMs = static_cast<uint64_t>(Config::get().getIntInRange(
+                         "log.breadcrumb_heartbeat_seconds", 30, 0, 3600)) * 1000ull;
+    }
+    if (intervalMs == 0) return;
+    static uint64_t lastMs = 0;
+    const uint64_t now = GetTickCount64();
+    // First call arms the clock without writing: the loader-phase crumbs
+    // already cover this moment and a second line saying so is noise.
+    if (lastMs == 0) { lastMs = now; return; }
+    if (now - lastMs < intervalMs) return;
+    lastMs = now;
+
+    char line[128];
+    size_t n = 0;
+    appendStr(line, n, sizeof(line), "gfx: alive, frame ");
+    appendNum(line, n, sizeof(line), frameNo);
+    appendStr(line, n, sizeof(line), ", ");
+    appendNum(line, n, sizeof(line), now / 1000);
+    appendStr(line, n, sizeof(line), "s uptime");
+    line[n] = 0;
+    breadcrumb(line);
 }
 
 void writeFatalNote(const std::wstring& dir, const wchar_t* text) {

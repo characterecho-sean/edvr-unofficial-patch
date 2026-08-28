@@ -34,6 +34,11 @@
 // arithmetic and lives in the header precisely so it can be asserted here.
 #include "../../src/d3d11/camera_view.h"
 #include "../../src/d3d11/head_offset_gate.h"
+// Linked into this fixture already; the two pure decisions it exposes --
+// journalPickNewest and cameraViewRebuildBackoff -- had no coverage at all
+// until the review rounds on issue #19 found three arithmetic bugs between
+// them, every one of which is one line of table here.
+#include "../../src/d3d11/journal_watch.h"
 // Same reason: eyeShapedAtScale is the recogniser rule that decides whether
 // the gate is fed at all, and it is inline in the header so this file can
 // assert it against the sizes a real rig produced.
@@ -270,6 +275,187 @@ int eyeShapeChecks() {
 // These are not invented shapes. The first is the exact layout from issue #2,
 // which cost that player Explorer Cam for the last twenty-four minutes of a
 // session; the rest are the neighbouring cases that a fix for it must not break.
+// THE MID-REBUILD BACKOFF, as a table.
+//
+// Six lines of arithmetic that had three bugs across two review rounds, none of
+// them visible by reading it. Each group below is one of them.
+int rebuildBackoffChecks() {
+    int bad = 0;
+    auto want = [&](const char* what, CameraViewBackoff got, uint32_t runs,
+                    uint64_t waitMs) {
+        ++g_checks;
+        if (got.runs == runs && got.waitMs == waitMs) return;
+        printf("  FAIL  %s -- got runs=%u wait=%llums, expected runs=%u "
+               "wait=%llums\n",
+               what, got.runs, (unsigned long long)got.waitMs, runs,
+               (unsigned long long)waitMs);
+        ++bad;
+    };
+
+    // A SINGLE GENUINE MOVE IS UNTOUCHED. The first mid-rebuild answer of an
+    // episode waits the flat cooldown, which is the case the rescan budget is
+    // deliberately generous for. dueMs = 0 is "no episode yet".
+    want("first answer waits the flat cooldown",
+         cameraViewRebuildBackoff(0, 0, 100000), 1, 2700);
+
+    // A RUN OF THEM DOUBLES, walked forward the way a station visit does, with
+    // each answer's dueMs carried into the next.
+    uint32_t runs = 0;
+    uint64_t due = 0, now = 100000;
+    {
+        const uint64_t expect[] = {2700, 5400, 10800, 21600, 43200};
+        for (int i = 0; i < 5; ++i) {
+            const CameraViewBackoff bo = cameraViewRebuildBackoff(runs, due, now);
+            char what[96];
+            _snprintf_s(what, _TRUNCATE, "consecutive answer %d doubles the wait",
+                        i + 1);
+            want(what, bo, static_cast<uint32_t>(i + 1), expect[i]);
+            runs = bo.runs;
+            due = bo.dueMs;
+            now = due + 1500;   // the wait, then a 1.5s heap walk
+        }
+    }
+
+    // AND THEN STOPS DOUBLING. kRebuildBackoffMax caps the shift at 4, so 43.2s
+    // is the ceiling however long the episode runs. The cap constant (45s) is a
+    // guard against a future edit to the shift and must never be what binds --
+    // if this ever reads 45000, the two constants have swapped roles.
+    for (int i = 0; i < 3; ++i) {
+        const CameraViewBackoff bo = cameraViewRebuildBackoff(runs, due, now);
+        want("a long episode holds at the ceiling, never 86400", bo, runs + 1,
+             43200);
+        runs = bo.runs;
+        due = bo.dueMs;
+        now = due + 1500;
+    }
+
+    // THE RECOVERY, which is review finding #1. The run count was reset at two
+    // of the seven paths that end an episode, so it stayed high, and the next
+    // single ordinary array move waited 43 seconds -- the forty-second dead
+    // window the rescan budget exists to prevent. A quiet gap must bring it
+    // back to the flat cooldown whichever path ended the episode.
+    want("a quiet gap ends the episode and restores the flat cooldown",
+         cameraViewRebuildBackoff(5, 1000000, 1000000 + 60001), 1, 2700);
+
+    // The boundary, pinned: expiry is strictly greater, so exactly the grace
+    // period is still the same episode.
+    want("exactly the grace period is still the same episode",
+         cameraViewRebuildBackoff(4, 1000000, 1000000 + 60000), 5, 43200);
+
+    // THE WALK MUST NOT COUNT, which is review finding V2. The gap between two
+    // answers is the wait PLUS a heap walk, and the walk's length is a user
+    // setting: at camera_index_mb_per_frame = 8 a 14 GB walk takes 20 seconds.
+    // Measured from the ANSWER, 43.2s + 20s exceeded the 60s grace, so every
+    // episode expired and the backoff silently switched itself off -- the exact
+    // drain it exists to prevent, reintroduced by its own guard. Measured from
+    // the DUE time, the walk is out of the comparison.
+    want("a slow heap walk is not mistaken for a quiet gap",
+         cameraViewRebuildBackoff(4, 1000000, 1000000 + 20000), 5, 43200);
+
+    // dueMs is the caller's carry, and must be now + wait.
+    {
+        const CameraViewBackoff bo = cameraViewRebuildBackoff(0, 0, 500000);
+        ++g_checks;
+        if (bo.dueMs != 500000 + 2700) {
+            printf("  FAIL  dueMs must be now + wait, got %llu\n",
+                   (unsigned long long)bo.dueMs);
+            ++bad;
+        }
+    }
+
+    if (!bad) {
+        printf("  ok    the mid-rebuild backoff doubles, caps, recovers after a "
+               "quiet gap, and never counts the heap walk as quiet\n");
+    }
+    return bad;
+}
+
+// WHICH JOURNAL IS OURS, as a table.
+//
+// The decision that read a crashed session's journal as this session's and
+// announced gameplay 0.1s into a process still sitting at the launcher
+// (issue #19). Times are FILETIME units, stated relative to notBefore because
+// that is what the comparison is against.
+int journalPickChecks() {
+    int bad = 0;
+    constexpr uint64_t kSec = 10000000ull;
+    constexpr uint64_t N = 1000000ull * kSec;   // notBefore: our start, less slack
+
+    auto want = [&](const char* what, const uint64_t* cre, const uint64_t* wr,
+                    size_t count, int index, bool ours) {
+        ++g_checks;
+        const JournalPick got = journalPickNewest(cre, wr, count, N);
+        if (got.index == index && got.ours == ours) return;
+        printf("  FAIL  %s -- got index=%d ours=%d, expected index=%d ours=%d\n",
+               what, got.index, got.ours ? 1 : 0, index, ours ? 1 : 0);
+        ++bad;
+    };
+
+    // Nothing at all, and nothing live: both resolve to "do not know" rather
+    // than to a file.
+    want("an empty folder picks nothing", nullptr, nullptr, 0, -1, false);
+    {
+        const uint64_t cre[] = {N - 3600 * kSec};
+        const uint64_t wr[] = {N - 60 * kSec};
+        want("a journal untouched since we started is not a candidate", cre, wr, 1,
+             -1, false);
+    }
+
+    // THE ISSUE #19 CASE. [0] is the crashed session's journal: created 27
+    // minutes ago, written 40 seconds after notBefore because the crash landed
+    // inside the slack. [1] is ours: created moments ago and barely written, so
+    // it LOSES on recency and must win anyway.
+    {
+        const uint64_t cre[] = {N - 1620 * kSec, N + 32 * kSec};
+        const uint64_t wr[] = {N + 40 * kSec, N + 33 * kSec};
+        want("our journal beats a crashed session's, despite the write times", cre,
+             wr, 2, 1, true);
+
+        // The same two in the order the walk might equally have found them.
+        // Provenance must not depend on what FindFirstFile returns first.
+        const uint64_t creR[] = {N + 32 * kSec, N - 1620 * kSec};
+        const uint64_t wrR[] = {N + 33 * kSec, N + 40 * kSec};
+        want("...and the same whichever order the walk found them in", creR, wrR, 2,
+             0, true);
+    }
+
+    // BEFORE OURS EXISTS the foreign one is still adopted -- live events from it
+    // are worth having -- but `ours` is false, which is what makes the caller
+    // tail it from the end rather than replay its history.
+    {
+        const uint64_t cre[] = {N - 1620 * kSec};
+        const uint64_t wr[] = {N + 40 * kSec};
+        want("a foreign journal is adopted, but not as ours", cre, wr, 1, 0, false);
+    }
+
+    // THE RUNNING BEST WRITE TIME GOES BACKWARDS when a born file displaces a
+    // non-born one, and this is what proves that is harmless: the non-born file
+    // carries an enormous write time, and the two born files must still be
+    // compared against each other rather than against it.
+    {
+        const uint64_t cre[] = {N - 1620 * kSec, N + 5 * kSec, N + 6 * kSec};
+        const uint64_t wr[] = {N + 9000 * kSec, N + 10 * kSec, N + 20 * kSec};
+        want("a stale write time from the other class is never consulted", cre, wr,
+             3, 2, true);
+    }
+
+    // Equal provenance falls back to recency, and that comparison is strict, so
+    // a tie keeps the first -- a stable answer rather than one that flips
+    // between reglobs.
+    {
+        const uint64_t cre[] = {N + 5 * kSec, N + 6 * kSec};
+        const uint64_t wr[] = {N + 20 * kSec, N + 20 * kSec};
+        want("an exact tie on write time keeps the first, stably", cre, wr, 2, 0,
+             true);
+    }
+
+    if (!bad) {
+        printf("  ok    the journal pick prefers provenance over recency, in any "
+               "order, and a crashed session's journal never wins\n");
+    }
+    return bad;
+}
+
 int cameraRunChecks() {
     // Real storage, so the addresses are real addresses. The grouping never
     // dereferences them, but arithmetic on invented pointers is a bad habit to
@@ -1217,6 +1403,10 @@ int main(int argc, char** argv) {
     // fails here at 72 or 120 while still passing at 90.
     edvr::g_clockForTest = &fakeClock;
     g_bad += timingChecks();
+    // Pure decisions over numbers, so they run once here rather than inside
+    // the 72/90/120Hz loop below -- there is no frame rate in either.
+    g_bad += rebuildBackoffChecks();
+    g_bad += journalPickChecks();
     const uint32_t rates[] = {72, 90, 120};
     for (uint32_t hz : rates) {
         const int before = g_bad;

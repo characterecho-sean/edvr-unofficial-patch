@@ -17,6 +17,7 @@
 #include "../common/frame_flag.h"  // the eye-texture size, from the openvr half
 #include "../common/guard.h"
 #include "../common/log.h"
+#include "../common/proxy.h"  // breadcrumbHeartbeat, the steady-state trail
 #include "../common/timing.h"
 #include "../common/vtable_hook.h"
 #include "backdrop_fix.h"
@@ -4068,6 +4069,13 @@ void vScreenFrameBoundary() {
     s->eyeDrawsThisFrame = 0;
     s->sceneDrawsThisFrame = 0;
     ++s->frameNo;
+
+    // The steady-state breadcrumb. Rate-limits itself to one line every
+    // log.breadcrumb_heartbeat_seconds (30 by default, 0 disables it); this
+    // call is a clock read and a compare on the frames between. It sits at
+    // the END of the boundary so the frame it reports is a frame that
+    // completed.
+    breadcrumbHeartbeat(s->frameNo);
 }
 
 void installVScreenFixes(ID3D11Device* device, HookMode mode) {

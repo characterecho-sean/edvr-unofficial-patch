@@ -6,6 +6,7 @@
 
 #include <cstring>
 #include <string>
+#include <vector>
 
 #include "../common/config.h"
 #include "../common/log.h"
@@ -90,6 +91,12 @@ struct State {
     // Files older than EDVR's own start are the PREVIOUS session's journal:
     // replaying one would fire last session's boundaries into this one.
     FILETIME     notBefore = {};
+    // Said once: a journal was adopted that we could not prove is ours, so it
+    // is being tailed from the end rather than replayed. See newestJournal.
+    // `ownNoted` retires that statement when a proven-ours file replaces it.
+    bool         foreignNoted = false;
+    bool         ownNoted = false;
+    bool         sizeFailNoted = false;
     // Token carry across read chunks, so an event name split by a chunk
     // boundary is still seen. Sixteen bytes covers `"event":"` plus slack.
     char         carry[32] = {};
@@ -111,24 +118,41 @@ void closeFile() {
     g_s.carryLen = 0;
 }
 
-// The newest Journal.*.log modified since this process started, or empty.
-std::wstring newestJournal() {
+// FILETIME is a 64-bit count in two halves; the decision below wants one
+// number, and a fixture wants one it can write as a literal.
+uint64_t asU64(const FILETIME& t) {
+    return (static_cast<uint64_t>(t.dwHighDateTime) << 32) | t.dwLowDateTime;
+}
+
+// The newest Journal.*.log that could belong to THIS session, or empty.
+// `ours` reports whether the winner was CREATED since we started.
+//
+// This is the directory walk only. Which candidate wins, and why that test is
+// creation time rather than write time, is journalPickNewest in the header --
+// where the reasoning sits beside the decision it argues for, and where a
+// fixture can reach it.
+std::wstring newestJournal(bool& ours) {
+    // The walk collects; journalPickNewest decides. The decision is a pure
+    // function over times so it can be put in a table -- see its header.
     WIN32_FIND_DATAW fd{};
     const std::wstring pattern = g_s.dir + L"\\Journal.*.log";
     HANDLE find = FindFirstFileW(pattern.c_str(), &fd);
     if (find == INVALID_HANDLE_VALUE) return std::wstring();
-    std::wstring best;
-    FILETIME bestTime = {};
+    std::vector<std::wstring> names;
+    std::vector<uint64_t> creation, write;
     do {
         if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
-        if (CompareFileTime(&fd.ftLastWriteTime, &g_s.notBefore) < 0) continue;
-        if (best.empty() || CompareFileTime(&fd.ftLastWriteTime, &bestTime) > 0) {
-            best = fd.cFileName;
-            bestTime = fd.ftLastWriteTime;
-        }
+        names.push_back(fd.cFileName);
+        creation.push_back(asU64(fd.ftCreationTime));
+        write.push_back(asU64(fd.ftLastWriteTime));
     } while (FindNextFileW(find, &fd));
     FindClose(find);
-    return best;
+
+    const JournalPick pick = journalPickNewest(
+        creation.data(), write.data(), names.size(), asU64(g_s.notBefore));
+    ours = pick.ours;
+    return pick.index < 0 ? std::wstring()
+                          : names[static_cast<size_t>(pick.index)];
 }
 
 void onEvent(const char* name, uint32_t len) {
@@ -281,6 +305,35 @@ void scanEvents(const char* data, uint32_t len) {
 
 }  // namespace
 
+JournalPick journalPickNewest(const uint64_t* creation, const uint64_t* write,
+                              size_t count, uint64_t notBefore) {
+    JournalPick best;
+    uint64_t bestWrite = 0;
+    for (size_t i = 0; i < count; ++i) {
+        // Tier one: is it live at all? A file untouched since we started
+        // cannot be the journal of a session that is running now.
+        if (write[i] < notBefore) continue;
+        const bool born = creation[i] >= notBefore;
+        // Tier two: provenance outranks recency. Until the game creates its
+        // own journal the only candidate may be a foreign one, and the moment
+        // ours appears it must win -- even for the seconds before the game has
+        // written enough to it to be the most recently touched file there.
+        //
+        // bestWrite going BACKWARDS when a born file displaces a non-born one
+        // is correct, not a bug: the third clause only ever compares within one
+        // provenance class, so a value carried over from the other class is
+        // never consulted against it.
+        const bool better = best.index < 0 || (born && !best.ours) ||
+                            (born == best.ours && write[i] > bestWrite);
+        if (better) {
+            best.index = static_cast<int>(i);
+            best.ours = born;
+            bestWrite = write[i];
+        }
+    }
+    return best;
+}
+
 void journalWatchConfigure() {
     Config& cfg = Config::get();
     g_s.enabled = cfg.getBool("d3d11.journal_watch", true);
@@ -290,6 +343,12 @@ void journalWatchConfigure() {
     // Half a minute of slack: the journal for THIS process is created around
     // the moment this code runs, and file times are not promised to be
     // ordered against ours to the millisecond.
+    //
+    // newestJournal applies this to CREATION time to decide whether a journal
+    // is ours, and to write time only to decide whether it is live at all. The
+    // slack is sized for the first question. Read the second comment there
+    // before widening it: thirty seconds against write time is what let a
+    // crashed session's journal be replayed into the next one (issue #19).
     ULARGE_INTEGER t;
     t.LowPart = g_s.notBefore.dwLowDateTime;
     t.HighPart = g_s.notBefore.dwHighDateTime;
@@ -362,7 +421,8 @@ void journalWatchTick() {
     // Find or refresh the file being tailed.
     if (s.handle == INVALID_HANDLE_VALUE || dueMs(s.reglobMs, kReglobMs)) {
         s.reglobMs = stampMs();
-        const std::wstring newest = newestJournal();
+        bool ours = false;
+        const std::wstring newest = newestJournal(ours);
         if (!newest.empty() && newest != s.file) {
             closeFile();
             s.file = newest;
@@ -377,8 +437,72 @@ void journalWatchTick() {
                 s.file.clear();
                 return;
             }
-            // A new file replays from the top: its early lines are this
-            // session's LoadGame, which is exactly the state being rebuilt.
+            // A file we can prove is ours replays from the top: its early lines
+            // are this session's LoadGame, which is exactly the state being
+            // rebuilt. One we cannot is tailed from the END instead -- live
+            // events from it are still worth having, and are still ours if the
+            // game is in fact writing them, but its HISTORY belongs to whoever
+            // wrote it and must not fire boundaries into this session.
+            if (!ours) {
+                LARGE_INTEGER size{};
+                if (!GetFileSizeEx(s.handle, &size) || size.QuadPart < 0) {
+                    // WITHOUT THE SIZE THERE IS NO TAIL, only a replay -- and a
+                    // replay of an unproven file is the whole bug. Leaving
+                    // s.offset at the 0 that closeFile set would revert to it
+                    // silently, which is the failure mode this module keeps
+                    // meeting.
+                    //
+                    // CHARGED AND SAID ONCE, both of which the first version of
+                    // this branch skipped and both of which it needed. Dropping
+                    // the handle re-arms the reglob immediately -- the gate above
+                    // short-circuits on INVALID_HANDLE_VALUE and does not wait
+                    // the four seconds -- so a persistent failure comes back
+                    // every poll, twice a second. Unlatched, that is 7000 log
+                    // lines an hour and the 4 MB cap inside three hours, which is
+                    // the instrument destroying the evidence for the third time
+                    // in this codebase. Uncharged, the watcher never retires
+                    // either, because kMaxFaults is what retires it.
+                    const DWORD err = GetLastError();
+                    closeFile();
+                    s.file.clear();
+                    if (!s.sizeFailNoted) {
+                        s.sizeFailNoted = true;
+                        Log::get().note(
+                            "journal: could not measure a journal that cannot be "
+                            "proved to be this session's (error %lu), so it is "
+                            "being left alone rather than replayed from the top. "
+                            "Retrying quietly; if this is the only journal there "
+                            "is, gameplay boundaries will come from the render "
+                            "state instead.",
+                            err);
+                    }
+                    if (++s.faults > kMaxFaults) goto retire;
+                    return;
+                }
+                s.offset = static_cast<uint64_t>(size.QuadPart);
+                if (!s.foreignNoted) {
+                    s.foreignNoted = true;
+                    Log::get().note(
+                        "journal: %S was written since this process started but "
+                        "created before it, so it cannot be proved to be this "
+                        "session's. Reading it from the end rather than replaying "
+                        "it -- the usual cause is a previous run that crashed and "
+                        "was relaunched within the half-minute, whose LoadGame "
+                        "would otherwise be read as this one's.",
+                        s.file.c_str());
+                }
+            } else if (s.foreignNoted && !s.ownNoted) {
+                // The line above stands as the last word on provenance
+                // otherwise, and a support reader would take it for the whole
+                // session. Say when it stops being true: the game's own journal
+                // usually appears within a reglob or two of the foreign one.
+                s.ownNoted = true;
+                Log::get().note(
+                    "journal: %S was created after this process started, so it "
+                    "IS this session's and is being read in full. That "
+                    "supersedes the line above about reading from the end.",
+                    s.file.c_str());
+            }
         }
         if (s.handle == INVALID_HANDLE_VALUE) return;   // nothing yet
     }

@@ -260,6 +260,11 @@ BOOL CALLBACK initOnceCallback(PINIT_ONCE, PVOID, PVOID*) {
     if (n == 0 || n >= MAX_PATH) wcscpy_s(realPath, L"(unknown)");
     edvr::Log::get().note("forwarding to %S", realPath);
     edvr::breadcrumb("gfx: log open");
+    // From here on an unhandled exception names the module it came from
+    // instead of leaving the trail blank. Faults on our own frame path do not
+    // arrive here -- guard.h absorbs those deliberately -- so what this catches
+    // is the ones nobody claimed. See breadcrumbInstallCrashHandler.
+    edvr::breadcrumbInstallCrashHandler();
     return TRUE;
 }
 
@@ -271,6 +276,9 @@ void shutdown() {
     // Per-site fault totals, so "logged once" does not mean "counted once".
     edvr::reportFaultSites();
     edvr::shutdownDeviceHooks();
+    // Before the module goes: a filter pointing into an unmapped image would
+    // take the game's own crash reporting down with it.
+    edvr::breadcrumbRemoveCrashHandler();
     edvr::Log::get().note("edvr d3d11 proxy detaching");
     edvr::Log::get().close();
 }
