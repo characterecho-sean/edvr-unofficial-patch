@@ -749,26 +749,6 @@ void saveLogs() {
     }
     setReport(text);
 }
-// The install picker's pixels: field and list rows in the house font and
-// colours. The OS still owns the frame and the drop arrow (flat under the
-// dark theme); what was stock about it -- sunken text in a system font at
-// a system size -- is gone.
-void drawComboItem(const DRAWITEMSTRUCT* item) {
-    const ui::Theme& t = ui::theme();
-    const bool inField = (item->itemState & ODS_COMBOBOXEDIT) != 0;
-    const bool selected = (item->itemState & ODS_SELECTED) != 0;
-    const COLORREF bg = inField ? t.control : (selected ? t.controlHover : t.cardBg);
-    ui::fillRect(item->hDC, item->rcItem, bg);
-    if (item->itemID == static_cast<UINT>(-1)) return;
-    wchar_t text[512]{};
-    SendMessageW(item->hwndItem, CB_GETLBTEXT, item->itemID, reinterpret_cast<LPARAM>(text));
-    RECT rc = item->rcItem;
-    rc.left += dp(10);
-    rc.right -= dp(6);
-    ui::drawText(item->hDC, text, rc, ui::fonts().body, t.text,
-                 DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-}
-
 void showScreen(Screen screen) {
     g.screen = screen;
     ui::setButtonStyle(g.tabInstall,
@@ -919,7 +899,7 @@ LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
         case WM_DRAWITEM: {
             const DRAWITEMSTRUCT* item = reinterpret_cast<const DRAWITEMSTRUCT*>(lparam);
             if (item->CtlID == kIdCombo) {
-                drawComboItem(item);
+                ui::drawComboItem(item, g.dpi);
                 return TRUE;
             }
             if (ui::drawOwnerDrawn(item, g.dpi)) return TRUE;

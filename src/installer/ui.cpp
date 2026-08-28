@@ -574,6 +574,22 @@ void drawSlimScrollbar(HDC dc, const RECT& pane, int contentPx, int pagePx, int 
     fillRounded(dc, thumb, dp(2, dpi), active ? t.subtext : t.controlBorder);
 }
 
+void drawComboItem(const DRAWITEMSTRUCT* item, UINT dpi) {
+    const Theme& t = theme();
+    const bool inField = (item->itemState & ODS_COMBOBOXEDIT) != 0;
+    const bool selected = (item->itemState & ODS_SELECTED) != 0;
+    const COLORREF bg = inField ? t.control : (selected ? t.controlHover : t.cardBg);
+    fillRect(item->hDC, item->rcItem, bg);
+    if (item->itemID == static_cast<UINT>(-1)) return;
+    wchar_t text[512]{};
+    SendMessageW(item->hwndItem, CB_GETLBTEXT, item->itemID, reinterpret_cast<LPARAM>(text));
+    RECT rc = item->rcItem;
+    rc.left += dp(10, dpi);
+    rc.right -= dp(6, dpi);
+    drawText(item->hDC, text, rc, fonts().body, t.text,
+             DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+}
+
 int textHeightPx(HFONT font) {
     HDC dc = GetDC(nullptr);
     HFONT previous = static_cast<HFONT>(SelectObject(dc, font));

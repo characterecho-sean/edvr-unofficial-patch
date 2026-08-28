@@ -92,6 +92,11 @@ void drawSlimScrollbar(HDC dc, const RECT& pane, int contentPx, int pagePx, int 
 // centring means sizing the control to the text and centring the control.
 int textHeightPx(HFONT font);
 
+// One combo look for every real COMBOBOX in the app (the install picker,
+// the settings window's resolution dropdown): field and list rows in the
+// house font and colours. The OS keeps the frame and the drop arrow.
+void drawComboItem(const DRAWITEMSTRUCT* item, UINT dpi);
+
 // Text, with the DPI-correct font and no background fill.
 void drawText(HDC dc, const std::wstring& text, RECT rect, HFONT font, COLORREF colour,
               UINT format);

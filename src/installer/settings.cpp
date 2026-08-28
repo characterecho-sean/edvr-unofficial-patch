@@ -246,4 +246,14 @@ bool SettingsModel::set(size_t index, const std::string& value) {
     return true;
 }
 
+const std::vector<ResolutionPreset>& vscreenPresets() {
+    // 16:9 exactly, 1920x1080 up to the 5120x2880 the ini's own comment
+    // names as the headroom step; the window offers these plus Custom.
+    static const std::vector<ResolutionPreset> presets = {
+        {"1920", "1080"}, {"2560", "1440"}, {"2880", "1620"},
+        {"3200", "1800"}, {"3840", "2160"}, {"5120", "2880"},
+    };
+    return presets;
+}
+
 }  // namespace edvr::installer
