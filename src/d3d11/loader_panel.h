@@ -7,68 +7,73 @@
 // (backdrop_fix.h) what it covers is worth seeing. The field's ideal, in
 // their words: collapse it to "the exact size and shape" of the modal.
 //
-// THE MODEL, corrected on 2026-08-28. The frame holds TWO kinds of dark
-// rectangle, not one:
+// THE MODEL, measured across four flights on 2026-08-28 and read out of
+// vs 666EF0C4C616F67E's own disassembly (docs/shaders/ui-widget-vs.asm).
+// Elite's widget system draws every solid panel as the SAME 30-index
+// bordered quad set spanning one normalized space (about +/-32765), and
+// places it with a PER-ELEMENT 4x4 MATRIX read from a structured buffer at
+// VS t0 (stride 160; offsets 64/80 of the element feed the pixel shader
+// its styling). Each vertex selects its element with a BYTE packed in its
+// COLOUR attributes -- offset 12 or 16 of the 24-byte vertex, chosen by
+// flag bits 0x4000/0x8000 in VS cb2[2].x. That is why three rasterizer
+// architectures died measuring nothing: vertices, viewports and scissors
+// are identical on every panel -- full-space, full-surface, off -- and the
+// census never looked at VS resources at all. The roles are told apart by
+// colour (RGBA8 at vertex offset 8: the scrim is black at alpha 0x66, the
+// box black at 0xFF, the letterbox white) and CONFIRMED by each element's
+// own matrix footprint -- the scrim's maps to the full view, the box's to
+// the modal's rect, the exact rect the field wants the scrim collapsed to.
 //
-//   * the BACKDROP: a five-quad bordered panel -- fill plus four edge strips,
-//     30 indices -- spanning the whole coordinate space (measured 65529 wide
-//     at +/-32765). This is the thing to shrink.
-//   * the BOX: the modal the player actually sees, drawn ON TOP of the
-//     backdrop. Field-observed on both intro dialogs -- a solid black
-//     backing behind "PREPARING SHADERS", an orange-bordered frame around
-//     the taller second dialog. Either its own 30-index panel or solid quads
-//     inside a larger batch; this module handles both.
+// WHERE THE BOX ACTUALLY IS, settled by seven flights and one screenshot.
+// The dialog's solid black backing is NOT in the interface surface at all:
+// every quad of every interface draw was captured, matrix-verified and
+// colour-estimated across three hunt generations, and nothing there
+// renders a dark boxed rect. The eye-level census shows where it lives --
+// each eye's frame ends with a textured quad, a constant-buffered quad
+// with depth (stride-8 vertices: a positioned rect), and then the
+// 5760-index composite that lifts the interface in. The backing is an
+// EYE-LEVEL layer under that composite, kin to the menu's dark layer that
+// famously survived emptying the interface buffer.
 //
-// Two earlier architectures died for want of that distinction. A hand-tuned
-// ratio (fix.loading_panel_scale) was rightly rejected in the field: a magic
-// number is wrong on the next rig and the next dialog. A measured fit then
-// sized the panel to "the union of everything else", which on a fade-in frame
-// is a TEXT RUN: it measured 913x568 -- one line of text -- against a
-// 65529x65529 panel and collapsed it to a sliver. The failure was read as
-// "there is no box, the panel IS the box", and that conclusion was wrong: the
-// probes that seemed to prove it (census_skip_offscreen, census_skip_quad)
-// match every draw sharing a signature, so the backdrop and the box -- both
-// X:30 -- always vanished together, and the one-shot quad probe only ever
-// sampled the first of them. What LOOKED like one batched call was two.
+// THE MECHANISM, which that discovery makes almost embarrassingly small.
 //
-// THE MECHANISM.
+//   Measure IMMEDIATELY: the first frame that shows a 30-index panel is
+//   captured -- every textureless quad-batch draw's indices (the shared
+//   vertex buffer once), plus the widget table (VS t0) and the flag
+//   constants (VS b2), all GPU-timeline copies, polled with DO_NOT_WAIT
+//   so the verdict lands a frame or two later. No stability wait: the
+//   classification is frame-local, so a mid-fade frame is a valid sample,
+//   and the field's report that the scrim showed briefly at first was the
+//   old stability gate's cost, not a necessity. The scrim appears first
+//   in a text-over-scrim phase BEFORE the dialogs, so the withhold is
+//   normally live before any modal exists.
 //
-//   Measure: when the loader's frame composition -- the sequence of draw
-//   shapes into the interface surface -- holds identical for two consecutive
-//   frames, capture one frame: every textureless quad-batch draw's indices,
-//   plus the shared vertex buffer, GPU-copied to staging and read back once
-//   the copies have certainly executed. Stability gating exists because the
-//   dialog fades in over many frames; the old code measured whichever
-//   transitional frame it woke in, which is why its collections returned 1,
-//   3, 6, 11, 9, 12 draws on six consecutive attempts.
+//   Classify: the scrim is the standalone panel that is dark, translucent,
+//   and whose element maps its fill to the full view -- verified through
+//   the same matrix the shader will use, so a misclassification cannot
+//   survive its own footprint.
 //
-//   Classify: the backdrop is any 30-index draw with a quad spanning most of
-//   the widest and tallest extent in the capture. The TARGET is the union of
-//   every other solid's quads -- the box's own panel dominates that union
-//   when it exists, and the bare backing rectangle is found inside its batch
-//   when it does not. Full-span sheets and edge-riding strips stay out of the
-//   union; textured draws (the text) were never in it, which is what makes
-//   the old text-run circularity impossible by construction.
+//   Withhold BY ORDINAL: the verified scrim is the k-th panel of its
+//   surface in the frame (k = 0 in every measurement to date), an
+//   identity that is frame-local and immune to the text churn that broke
+//   positional matching. It is swallowed every frame -- fade-in, percent
+//   ticks and the dialog switch included -- for as long as panels keep
+//   arriving (one hiccup frame forgiven; the census shows menu frames
+//   carry no panels, so the chain cannot outlive the loader), and the
+//   classification is re-verified about every two seconds. Inside the
+//   box, 40% black over the backing's opaque black was invisible --
+//   withholding is pixel-identical to a perfect collapse there. Outside
+//   the box, the tint was the defect, and now does not exist.
 //
-//   Substitute: the backdrop draw alone is swallowed and re-issued from its
-//   own vertices with positions remapped linearly onto the target bounds --
-//   colour and the rest of the 24-byte vertex travel through untouched, so
-//   nothing about the encoding has to be decoded. The box, its border and
-//   every glyph on it are the game's own draws, forwarded bit-identically.
-//   Substitution is by POSITION in the frame's draw sequence, valid only
-//   while the frame matches the measured sequence up to that position; the
-//   moment composition diverges -- animation, dialog change -- later draws
-//   run stock and the next stable window re-measures. A dialog switch shows
-//   the previous target for the few frames a fresh measurement takes.
+// EVERY failure -- no stable window, no table bound, mixed tables, no
+// dark translucent full-view element -- draws stock and says why in the
+// log, once per measured shape. Stock is the game's own full-view scrim:
+// safe, just big.
 //
-// EVERY failure -- no stable window, no backdrop found, no solids beside the
-// backdrop (the scrim shows alone before the dialog arrives), a sliver-sized
-// or full-surface union -- draws stock and says why in the log, once per
-// measured shape. Stock is the game's own full-view panel: safe, just big.
-//
-// WHAT IT DOES NOT DO. It does not remove the backdrop -- the box's designed
-// look keeps a dark ground behind it, in the right place. It does not touch
-// the frosted wash layered over the whole view, which is fix.loading_dim's
+// WHAT IT DOES NOT DO. It does not touch the dialog's backing, border or
+// text -- the backing is an eye-level draw this module never sees, and the
+// content draws are forwarded bit-identically. It does not touch the
+// frosted wash layered over the whole view, which is fix.loading_dim's
 // job (docs/loading-scrim.md) and a different mechanism entirely.
 //
 // SCOPE. The intro only. The main menu is a rendered hangar with a dark
@@ -77,7 +82,8 @@
 // boundary already measured for this module: menu-shaped frames peak around
 // twenty draws, a rendered scene clears a hundred.
 //
-// STATUS: rebuilt 2026-08-28 on the corrected model; awaiting a field
+// STATUS: final form 2026-08-28 -- the withhold -- after seven flights and
+// a screenshot placed the backing at eye level; awaiting the confirming
 // flight. docs/loading-panel-handoff.md carries the full evidence trail.
 #pragma once
 
