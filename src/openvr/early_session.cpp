@@ -196,7 +196,9 @@ void runInner(PFN_RealGetGenericInterface get) {
             "\"Recreating OpenXR session\" timestamp against the game's first "
             "eye submit. A time near zero means the rebuild did not happen "
             "here and will still happen later; the error code says why the "
-            "runtime declined.",
+            "runtime declined -- 101 is DoNotHaveFocus, which is what SteamVR "
+            "answers, measured 2026-08-29: it rebuilds no session, so there "
+            "is nothing here to move and nothing is paid.",
             static_cast<int>(err), static_cast<unsigned long long>(took));
     }
 

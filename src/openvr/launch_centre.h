@@ -18,7 +18,10 @@
 // launch: the splash, the loading screens, and the intro movie's panel,
 // which is placed 3.35 m from the origin. On the two flights above that put
 // the movie 2.77 m in front of the player, and then 0.15 m BEHIND them.
-// SteamVR does not do this; the origin is stable there.
+// SteamVR does not do this; the origin is stable there. VERIFIED 2026-08-29
+// on the Steam install: the runtime read as Valve's own, auto left this off,
+// and the early handover's submit came back 101 (DoNotHaveFocus) in 0 ms --
+// no session rebuild, nothing to correct, nothing paid.
 //
 // WHAT THIS DOES
 //
