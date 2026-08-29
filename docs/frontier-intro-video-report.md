@@ -26,9 +26,9 @@ by about 5.5× and moves from the player's face to a screen in the world, in
 one frame. Since the movie is evidently authored to lead into the splash,
 that transition is the part most visibly lost.
 
-Two lesser issues sit alongside it and are described at the end: the movie
-begins several seconds before anything is submitted to the headset, and the
-frame in which VR starts takes 2.7 seconds.
+A note at the end records two things this report deliberately does NOT claim,
+because they turned out to belong to a third-party runtime layer rather than
+to Elite.
 
 ## Steps to reproduce
 
@@ -101,20 +101,35 @@ motion. It is a screen in the world, with the stereo depth that implies.
    composite shader serve the loading screens, so anything decided here is
    likely to apply to those too.
 
-## The two adjacent issues
+## Runtime note, and what this report does NOT claim
 
-**The movie starts before VR does.** On the measured rig the game creates its
-D3D device at +0.9 s and begins drawing the movie at ~3.2 s, but does not ask
-for `IVRCompositor` until +4.6 s and submits its first frame at +6.4 s. The
-first three to five seconds of a twenty-second ident therefore play to the
-desktop window only; in the headset the player is still in the runtime's home
-environment. Starting playback after the compositor is up — or bringing the
-compositor up earlier — would recover them.
+An earlier draft of this page also reported that the movie begins several
+seconds before anything reaches the headset, and that the frame in which VR
+starts takes 2.7 seconds. **Both were withdrawn**: they are artifacts of
+OpenComposite, not of Elite.
 
-**The handover frame takes 2.7 seconds.** The frame in which the first eye
-draw happens measured 2719 ms on one run and over 2 s on every run observed.
-It is a single long frame rather than a run of slow ones. Players read it as
-the intro freezing.
+Under SteamVR the ident plays from its first frame with no stall. Under
+OpenComposite it does not, and OpenComposite's own log says why -- it starts
+an OpenXR session before it knows the application's graphics API, then tears
+it down and rebuilds it on the first D3D11 submit, blocking in a 250 ms poll
+ten times over:
+
+```
++0.000  VR_InitInternal2
++0.034  first OpenXR session started
++2.493  "Recreating OpenXR session for application graphics API"
+        "Session Exit state has not been reached yet, waiting 250ms ..." x10
++5.006  second session started and ready
+```
+
+The same rig also reports the headset at yaw ~180 and y -23 m through
+OpenComposite while SteamVR places it correctly, which is why the splash can
+appear behind the player there. That is a tracking-space difference in the
+runtime layer and nothing Elite does.
+
+**What this report does claim** is only the panel itself: its size and its
+head-locked transform come from the game's own constant buffer, computed from
+the eye's own dimensions, and are independent of which runtime is underneath.
 
 ## Impact note
 
