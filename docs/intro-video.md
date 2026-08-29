@@ -6,7 +6,12 @@ Pimax via OpenComposite). The model this page opened with was a hypothesis
 built from the install's own files and from old logs; flight 1 confirmed it,
 including the vertex shader, and flight 3 then refuted the part of it that
 said where the fix would go. Both are below, because the correction is the
-finding. No fix is written.
+finding.
+
+**Shipped and field-verified the same day.** The movie now plays on the
+splash's own screen, at the splash's size, world-anchored, debanded and
+resampled with AMD's FSR. What shipped, what it deliberately does not do,
+and the four bugs it took to get there are at the end.
 
 ## The defect, in the field's words
 
