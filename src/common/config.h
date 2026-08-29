@@ -42,7 +42,7 @@ public:
     // Binaries that never register run without the audit, nothing else
     // changes. Tests register small fixture tables of their own.
     void setAuditTables(const char* const* knownLower, size_t knownCount,
-                        const char* const (*movedOldNew)[2], size_t movedCount);
+                        const char* const (*movedOldNew)[3], size_t movedCount);
 
     // Set a value in memory, without touching the file.
     //

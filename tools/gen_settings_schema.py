@@ -157,12 +157,14 @@ def parse_ini(path):
     expectTitle = None
     prose = []          # comment lines since the last key or blank run
     annotation = None
+    movedFrom = []      # (old dotted, old default) lines since the last key
 
     for index, raw in enumerate(lines):
         line = raw.strip()
         if not line:
             prose = []
             annotation = None
+            movedFrom = []
             continue
         if line.startswith('['):
             close = line.find(']')
@@ -194,6 +196,15 @@ def parse_ini(path):
             ui = UI_RE.match(body)
             if ui:
                 annotation = ui.group(1).strip()
+            elif body.startswith('moved-from:'):
+                # Migration metadata, not prose -- captured so the window can
+                # read an un-migrated file the way the runtime does.
+                spec = body[len('moved-from:'):].strip()
+                dm = re.match(r'^(\S+)\s*\(default\s+([^)]*)\)$', spec)
+                if dm:
+                    movedFrom.append((dm.group(1), dm.group(2).strip()))
+                else:
+                    movedFrom.append((spec, ''))
             else:
                 prose.append(body)
             continue
@@ -213,6 +224,8 @@ def parse_ini(path):
             # above the first. The others are not undocumented; they share it.
             s.description = settings[-1].description
         s.group = group
+        s.movedFrom = list(movedFrom)
+        movedFrom = []
         s.line = index + 1
         if annotation is not None:
             s.annotated = True
@@ -503,6 +516,20 @@ def main():
         f.write('// Do not edit, and do not commit: the sources are the ini and the code.\n')
         f.write('static const SettingDef kSettings[] = {\n')
         f.write('\n'.join(rows))
+        f.write('\n};\n')
+        f.write('\n')
+        f.write('// {old dotted name, new dotted name, the old key\'s shipped\n')
+        f.write('// default (a user line still carrying it is stale, not a choice)}\n')
+        f.write('static const char* const kMovedSettings[][3] = {\n')
+        movedRows = []
+        for s in exposed:
+            for old, oldDefault in getattr(s, 'movedFrom', []):
+                movedRows.append('    {%s, %s, %s},' % (
+                    c_string(old), c_string('%s.%s' % (s.section, s.key)),
+                    c_string(oldDefault)))
+        if not movedRows:
+            movedRows.append('    {"", "", ""},  // none; empty arrays are not C++')
+        f.write('\n'.join(movedRows))
         f.write('\n};\n')
     print('gen_settings_schema: wrote %s (%d settings)' % (out_path, len(rows)))
     return 0

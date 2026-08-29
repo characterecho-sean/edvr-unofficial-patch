@@ -45,6 +45,7 @@
 #include "intro_probe.h"
 #include "journal_watch.h"  // gameplay started, for the low-peak notice
 #include "loader_panel.h"
+#include "splash_dim.h"
 #include "quad_probe.h"
 #include "remlok_fix.h"
 #include "scrim_fix.h"
@@ -2638,6 +2639,17 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     if (v == DrawVerdict::kBackdrop) backdropBegin(self);
     draw();
     if (v == DrawVerdict::kBackdrop) backdropEnd(self);
+    // The splash screen's dim under the loader's dialogs (splash_dim.h):
+    // the still's composite and the intro movie's composite are the two
+    // draws that put the screen into the eye, and each is re-issued once
+    // through the dark shader while the scrim withhold is active. After
+    // backdropEnd so that pairing stays pristine; the placement state the
+    // re-issue needs is still bound either way.
+    if ((v == DrawVerdict::kBackdrop || v == DrawVerdict::kIntroPanel) &&
+        splashDimBegin(self)) {
+        draw();
+        splashDimEnd(self);
+    }
     if (v == DrawVerdict::kParticle) particleEnd(self);
     if (v == DrawVerdict::kGlareSteady) sunglareEnd(self);
     if (v == DrawVerdict::kBillboard) billboardEnd(self);
@@ -3354,6 +3366,7 @@ void vScreenRefreshConfig() {
     scrimConfigure(cfg);
     quadProbeConfigure(cfg);
     loaderPanelConfigure(cfg);
+    splashDimConfigure(cfg);
     introProbeConfigure(cfg);
     introPanelConfigure(cfg);
     introUpscaleConfigure(cfg);
@@ -4235,6 +4248,7 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     scrimConfigure(cfg);
     quadProbeConfigure(cfg);
     loaderPanelConfigure(cfg);
+    splashDimConfigure(cfg);
     introProbeConfigure(cfg);
     introPanelConfigure(cfg);
     introUpscaleConfigure(cfg);
@@ -4453,6 +4467,7 @@ void shutdownVScreenFixes() {
     scrimShutdown();
     quadProbeShutdown();
     loaderPanelShutdown();
+    splashDimShutdown();
     backdropShutdown();
     fssScanShutdown();
     fssPanelShutdown();

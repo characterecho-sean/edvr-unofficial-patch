@@ -9,6 +9,7 @@
 #include <string>
 
 #include "../common/config.h"
+#include "../common/intro_mode.h"
 #include "../common/guard.h"
 #include "../common/log.h"
 #include "shader_swap.h"
@@ -641,9 +642,11 @@ void runChain(ID3D11DeviceContext* ctx, ID3D11ShaderResourceView* srcRaw) {
 }  // namespace
 
 void introUpscaleConfigure(Config& cfg) {
-    const std::string v = cfg.getString("fix.intro_video_upscale", "stock");
-    const Mode want = v == "fsr" ? Mode::kFsr
-                                 : (v == "sharp" ? Mode::kSharp : Mode::kOff);
+    const IntroVideoMode ivm =
+        introVideoParse(cfg.getString("fix.intro_video", "screen"));
+    const Mode want = ivm.upscale == 2
+                          ? Mode::kFsr
+                          : (ivm.upscale == 1 ? Mode::kSharp : Mode::kOff);
     const float wasDeband = g_deband;
     const float wasSharpen = g_sharpen;
     g_targetW = static_cast<uint32_t>(

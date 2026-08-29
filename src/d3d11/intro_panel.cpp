@@ -10,6 +10,7 @@
 #include <string>
 
 #include "../common/config.h"
+#include "../common/intro_mode.h"
 #include "../common/guard.h"
 #include "../common/log.h"
 #include "../common/frame_flag.h"   // headForward / eyeTangents, from the vr half
@@ -84,7 +85,7 @@ constexpr float kScreenDistDefault = 3.35f;
 // matters.
 constexpr float kHalfIpd = 0.0315f;
 
-// World lock (fix.intro_video_lock). The counter-move is witchstar_fix's,
+// World lock (part of fix.intro_video = screen). The counter-move is witchstar_fix's,
 // which already holds a head-locked sprite on a world direction by shifting
 // the VIEWPORT for one draw -- no matrix, no new channel, and field-proven on
 // a different draw. It counter-moves against the game's world forward, and
@@ -104,7 +105,7 @@ bool  g_lockRefusedNoted = false;
 
 float g_screenDist = kScreenDistDefault;
 
-// Set when fix.intro_video_size names the splash rather than a number.
+// Set when fix.intro_video plays the movie on the splash's screen.
 bool  g_matchSplash = false;
 float g_engagedScale = 1.0f;
 
@@ -274,18 +275,16 @@ void releaseSlot(Slot& s) {
 void introPanelConfigure(Config& cfg) {
     const float wasSize = g_size;
     const bool  wasMatch = g_matchSplash;
-    const std::string v = cfg.getString("fix.intro_video_size", "stock");
-    g_matchSplash = (v == "splash");
-    if (g_matchSplash) {
-        g_size = 0.0f;   // derived at readback, from the panel's own numbers
-    } else {
-        g_size = static_cast<float>(atof(v.c_str()));
-        if (g_size < 1.0f) g_size = 1.0f;   // "stock" and anything unparsed
-        if (g_size > kMaxSize) g_size = kMaxSize;
+    const std::string raw = cfg.getString("fix.intro_video", "screen");
+    const IntroVideoMode mode = introVideoParse(raw);
+    if (!mode.recognised) {
+        Log::get().note("intro_video \"%s\" is not screen or stock; running "
+                        "the default, screen.", raw.c_str());
     }
-    const std::string lk = cfg.getString("fix.intro_video_lock", "head");
+    g_matchSplash = mode.screen;
+    g_size = mode.screen ? 0.0f : 1.0f;   // derived at readback when on
     const bool wasLock = g_worldLock;
-    g_worldLock = (lk == "world");
+    g_worldLock = mode.worldLock;
     g_screenDist = cfg.getFloat("advanced.intro_video_distance",
                                 kScreenDistDefault);
     if (g_screenDist < 1.0f) g_screenDist = 1.0f;

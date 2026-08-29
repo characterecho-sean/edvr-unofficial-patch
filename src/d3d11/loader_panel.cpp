@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "../common/config.h"
+#include "../common/intro_mode.h"
 #include "../common/guard.h"
 #include "../common/log.h"
 
@@ -191,6 +192,17 @@ uint32_t g_measurements = 0;
 bool     g_retired = false;      // a rendered scene arrived: the intro is
                                  // over and this module is done for the
                                  // session, engaged or not
+// splash_dim's signal mirrors the SURFACE, not the withhold events: the
+// interface skips its panel draws on scattered frames and stops rendering
+// altogether while a dialog holds still, but its surface keeps the last
+// rendered pixels either way -- natively the tint never blinked, so the
+// dim must not either. It turns on at any withhold, holds through frames
+// the interface does not render, and turns off only after a sustained run
+// of interface-rendered frames with no withhold in them (or retirement).
+constexpr uint32_t kDimOffFrames = 15;
+bool     g_dimLive = false;
+uint32_t g_dimMiss = 0;          // rendered frames without a withhold
+bool     g_frameWithheld = false;
 
 // Until the session's FIRST verdict, the first panel of each frame is
 // withheld SPECULATIVELY: nine flights of measurement say that draw is
@@ -238,6 +250,8 @@ void resetMeasured() {
     g_refuseStreak = 0;
     g_retired = false;
     g_specDone = false;
+    g_dimLive = false;
+    g_dimMiss = 0;
 }
 
 void resetFrameAcc() {
@@ -247,6 +261,7 @@ void resetFrameAcc() {
     g_frameAnyPanel = false;
     g_frameChainPanel = false;
     g_frameFirstPanelDone = false;
+    g_frameWithheld = false;
     g_subArm = false;
 }
 
@@ -266,16 +281,7 @@ void recordNone(const char* why) {
 
 void loaderPanelConfigure(Config& cfg) {
     const bool was = g_on;
-    const std::string m = cfg.getString("fix.loading_panel", "stock");
-    if (m == "stock") {
-        g_on = false;
-    } else if (m == "fit") {
-        g_on = true;
-    } else {
-        g_on = false;
-        Log::get().note("loading_panel \"%s\" is not stock or fit; running "
-                        "stock.", m.c_str());
-    }
+    g_on = loadingDimParse(cfg.getString("fix.loading_dim", "screen")).withhold;
     if (was != g_on) {
         if (!g_on) {
             dropPending();
@@ -293,6 +299,10 @@ void loaderPanelConfigure(Config& cfg) {
 }
 
 bool loaderPanelWants() { return g_on; }
+
+bool loaderPanelDimWanted() {
+    return g_on && g_dimLive;
+}
 
 bool loaderPanelOnDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
                        uint32_t instances, uint32_t startIndex, int baseVertex,
@@ -498,6 +508,8 @@ bool loaderPanelOnDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
         for (uint32_t i = 0; i < g_chainOrdCount; ++i) {
             if (g_chainOrd[i] == ord) {
                 g_subArm = true;
+                g_frameWithheld = true;
+                g_dimLive = true;
                 return true;
             }
         }
@@ -507,6 +519,8 @@ bool loaderPanelOnDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
     // measurement that will confirm it is still in flight.
     if (!g_specDone && !g_chainOn && !g_retired && firstPanel) {
         g_subArm = true;
+        g_frameWithheld = true;
+        g_dimLive = true;
         return true;
     }
     return false;
@@ -809,6 +823,8 @@ void loaderPanelTick(ID3D11DeviceContext* ctx, bool sceneFrame) {
         }
         chainOff();
         dropPending();
+        g_dimLive = false;
+        g_dimMiss = 0;
     }
 
     const uint32_t finishedHash = g_seqLen ? g_hashAcc : 0;
@@ -894,6 +910,16 @@ void loaderPanelTick(ID3D11DeviceContext* ctx, bool sceneFrame) {
             dropPending();
             g_collecting = true;
         }
+    }
+
+    // The dim's hysteresis: reset by any withhold, advanced only by frames
+    // the interface actually rendered, untouched by frames it did not --
+    // mirroring the surface those frames leave untouched.
+    if (g_frameWithheld) {
+        g_dimMiss = 0;
+    } else if (g_dimLive && g_seqLen > 0 && ++g_dimMiss >= kDimOffFrames) {
+        g_dimLive = false;
+        g_dimMiss = 0;
     }
 
     g_liveHash = finishedHash;

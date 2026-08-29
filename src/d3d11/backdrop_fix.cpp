@@ -5,6 +5,7 @@
 #include <d3d11.h>
 
 #include "../common/config.h"
+#include "../common/intro_mode.h"
 #include "../common/guard.h"
 #include "../common/log.h"
 #include "binding_shadow.h"
@@ -488,9 +489,14 @@ static_assert(kPassCount % 2 == 1,
               "samples the second-to-last image");
 
 void backdropConfigure(Config& cfg) {
-    const std::string mode = cfg.getString("fix.menu_backdrop", "stock");
-    const bool splash = mode == "splash";
-    const bool on = splash || mode == "smooth";
+    const std::string raw = cfg.getString("fix.intro_backdrop", "splash");
+    const IntroBackdropMode bm = introBackdropParse(raw);
+    if (!bm.recognised) {
+        Log::get().note("intro_backdrop \"%s\" is not splash or stock; "
+                        "running the default, splash.", raw.c_str());
+    }
+    const bool splash = bm.splash;
+    const bool on = bm.on;
 
     // 0..64 of 255. Above about 24 this stops being a deband and starts
     // being a blur that eats stars, which is a thing to be able to SEE

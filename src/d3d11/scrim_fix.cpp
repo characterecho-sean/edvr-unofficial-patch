@@ -7,6 +7,7 @@
 #include <string>
 
 #include "../common/config.h"
+#include "../common/intro_mode.h"
 #include "../common/log.h"
 #include "binding_shadow.h"
 
@@ -117,16 +118,13 @@ ID3D11ShaderResourceView* uniformSrv(ID3D11DeviceContext* ctx) {
 
 void scrimConfigure(Config& cfg) {
     const bool was = g_on;
-    const std::string m = cfg.getString("fix.loading_dim", "stock");
-    if (m == "stock") {
-        g_on = false;
-    } else if (m == "off") {
-        g_on = true;
-    } else {
-        g_on = false;
-        Log::get().note("loading_dim \"%s\" is not stock or off; running "
-                        "stock.", m.c_str());
+    const std::string m = cfg.getString("fix.loading_dim", "screen");
+    const LoadingDimMode dm = loadingDimParse(m);
+    if (!dm.recognised) {
+        Log::get().note("loading_dim \"%s\" is not screen or stock; running "
+                        "the default, screen.", m.c_str());
     }
+    g_on = dm.washOff;
     g_level = static_cast<uint32_t>(
         cfg.getIntInRange("advanced.loading_dim_level", 0, 0, 255));
 

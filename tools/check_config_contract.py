@@ -174,18 +174,23 @@ def keys_moved():
             if line[:1] in ('#', ';'):
                 body = line.lstrip('#;').strip()
                 if body.lower().startswith('moved-from:'):
-                    pending.append(body[len('moved-from:'):].strip())
+                    spec = body[len('moved-from:'):].strip()
+                    dm = re.match(r'^(\S+)\s*\(default\s+([^)]*)\)$', spec)
+                    if dm:
+                        pending.append((dm.group(1), dm.group(2).strip()))
+                    else:
+                        pending.append((spec, ''))
                     continue
                 km = re.match(r'^([A-Za-z0-9_]+)\s*=', body)
                 if km and ' ' not in body.split('=')[0].strip() and pending:
-                    for p in pending:
-                        out[p.lower()] = '%s.%s' % (section, km.group(1))
+                    for p, d in pending:
+                        out[p.lower()] = ('%s.%s' % (section, km.group(1)), d)
                     pending = []
                 continue
             km = re.match(r'^([A-Za-z0-9_]+)\s*=', line)
             if km:
-                for p in pending:
-                    out[p.lower()] = '%s.%s' % (section, km.group(1))
+                for p, d in pending:
+                    out[p.lower()] = ('%s.%s' % (section, km.group(1)), d)
             pending = []
     return out
 
@@ -207,13 +212,15 @@ def emit_header(path, read, doc, moved):
     lines += [
         '};',
         '',
-        '// {old dotted name (lowercase), new dotted name}',
-        'inline constexpr const char* kMovedKeys[][2] = {',
+        "// {old dotted name (lowercase), new dotted name, the old key's shipped",
+        '// default -- a user line still carrying it is stale, not a choice}',
+        'inline constexpr const char* kMovedKeys[][3] = {',
     ]
     for old in sorted(moved):
-        lines.append('    {"%s", "%s"},' % (old, moved[old].lower()))
+        lines.append('    {"%s", "%s", "%s"},' %
+                     (old, moved[old][0].lower(), moved[old][1]))
     if not moved:
-        lines.append('    {"", ""},  // none; a zero-length array is not C++')
+        lines.append('    {"", "", ""},  // none; a zero-length array is not C++')
     lines += ['};', '', '}}  // namespace edvr::contractgen', '']
     with open(path, 'w', encoding='utf-8', newline='\n') as f:
         f.write('\n'.join(lines))
@@ -243,7 +250,7 @@ def main():
     # old name that is still live is ambiguous, and a move pointing at itself
     # is a typo.
     live = set(k.lower() for k in read) | set(k.lower() for k in doc)
-    for old, new in sorted(moved.items()):
+    for old, (new, _oldDefault) in sorted(moved.items()):
         if old in live:
             problems.append(
                 'MOVED-FROM NAMES A LIVE KEY: "%s" (annotated as moved to %s)\n'

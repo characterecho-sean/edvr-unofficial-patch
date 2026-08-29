@@ -43,7 +43,8 @@ namespace edvr {
 
 class Config;
 
-// Reads fix.intro_video_upscale (stock | sharp). Install and reload; live.
+// Reads fix.intro_video (this module's slice is the resample). Install
+// and reload; live.
 void introUpscaleConfigure(Config& cfg);
 
 // False in stock mode and once stood down, which keeps the draw path free.
