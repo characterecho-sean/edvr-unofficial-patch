@@ -620,22 +620,65 @@ to break it.
 Both count frames the same way `DC` lines do — `intro probe: frame N` and
 `DC begin ... frame=N` are the same N.
 
+## What shipped
+
+All four keys are in `[fix]`, all off by default, all live.
+
+| key | what it does |
+|---|---|
+| `intro_video_size = stock \| splash \| <number>` | `splash` grows the movie's panel until it covers what the splash covers, derived at runtime from the panel's own constants -- x5.53 on the measured rig. A number is a plain multiple. |
+| `intro_video_lock = head \| world` | `world` replaces the panel's screen-space transform with a real view-projection, so the movie is drawn on the splash's own screen: 16:9, 3.35 m away, on the game's forward, with the stereo a screen at that distance has. |
+| `intro_video_upscale = stock \| sharp \| fsr` | `fsr` is AMD's EASU from their vendored sources, `sharp` a Catmull-Rom, and `sharp` is also the automatic fallback if EASU will not compile. Resamples to `vscreen_res_width`, floored at twice the source. |
+| `advanced.intro_video_deband / _dither / _sharpen` | the deband ahead of the upscale, and AMD's RCAS after it. |
+
+The order is deband, then EASU, then RCAS: the blocking is in the encode and
+lives in source space, so it is flattened before anything magnifies it; RCAS
+after the upscale is AMD's own order.
+
+**What it does not do.** Phase A -- the movie plays for three to five seconds
+before Elite hands the compositor anything, and no frame of that is ours to
+change. The 2.7 s freeze, which is the game bringing VR up. And the game's
+forward being 180 degrees out on this rig, which the handover pose log
+established belongs to the runtime and not to Elite.
+
+## What the bugs were, since the pattern is the lesson
+
+Four of the last six flights failed on the same *kind* of mistake rather than
+on the physics, and they are worth listing together:
+
+* **A viewport counter-move to world-lock the panel.** It can only translate,
+  so it can never give stereo, so the picture always reads as being at
+  infinity. It could not have worked at any sign or gain -- and I shipped a
+  gain knob to tune the sign of something structurally incapable.
+* **The `fsr` mode never parsed.** The three-mode rewrite failed its
+  assertion inside a batch of edits and I re-ran only some of the others. The
+  first-call path then returned without logging, so the log was silent rather
+  than wrong. *When a batched edit aborts, every edit in that batch is
+  suspect.*
+* **The resample cache keyed on the source resource.** The two eyes have
+  their own surfaces, so each eye's draw destroyed the other's build and the
+  second bound a texture nothing had dispatched into. Fixed, then
+  **reintroduced one commit later** with a comment explaining why it was
+  fine. The comment was half right -- the source view genuinely must follow
+  the resource; the chain must not. Two lifetimes, one cache test.
+* **The deband threshold carried across with the algorithm.**
+  `backdrop_fix`'s 8/255 is tuned for BC1 banding, which steps 4-8 levels.
+  DCT blocking at 2.9 Mbit/s steps much further, so the weight was zero at
+  every block edge and the pass preserved them exactly. A number is part of a
+  measurement, not part of an algorithm.
+
+The physics was read correctly at every stage -- from the shader
+disassembly, the constants, the frustum tangents. What went wrong was
+assumed: a handedness, a lifetime, a threshold, a mode string.
+
 ## Status
 
-Measured 2026-08-28 across five flights, and the mechanism is now closed by
-reading rather than flying.
+Shipped and field-verified 2026-08-28: the movie plays on the splash's own
+screen, at the splash's size, world-anchored, debanded and resampled with
+FSR. Every stage is off by default and each has a log line naming what it
+did.
 
-**Established.** The movie is three YUV planes converted into a per-eye
-1920x1080 surface and put in front of each eye by a unit quad whose scale,
-orientation and position come entirely from **vertex constant buffer 2**;
-its pixel shader is a single `sample`. The freeze is one frame of 2.7 s and
-is the VR handover itself. Phase A submits nothing to the headset and is
-unreachable from here — censused at 3.0 s and drawing literally nothing.
-The surround is already black.
-
-**Remaining.** The contents of `cb2` in the movie's state and in the
-splash's — two dumps, flight 6, no waiting required. Then the fix is
-`panel_distance`'s own mechanism aimed at a different slot. Plus the
-facing-the-wrong-way symptom, which still has no measurement of its own.
-
-No fix written.
+Open: the movie's first three to five seconds, which are not reachable from
+here; early VR init as a way to recover part of them (unbuilt, and it would
+only shorten the gap rather than close it); and the runtime's play space,
+which is where the 180-degree forward gets fixed.
