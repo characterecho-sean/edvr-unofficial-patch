@@ -146,6 +146,11 @@ python "%ROOT%\tools\check_config_contract.py" --quiet --emit "%GEN%\config_cont
 if errorlevel 1 ( echo [edvr] ERROR: contract header generation failed & exit /b 1 )
 
 echo [edvr] === d3d11.dll ===
+REM AMD FSR 1.0 as embeddable HLSL. Generated rather than committed so the
+REM vendored headers stay byte-identical to upstream (src\d3d11\fsr\).
+python "%ROOT%\tools\gen_fsr_hlsl.py" --root "%ROOT%" --out "%GEN%"
+if errorlevel 1 ( echo [edvr] ERROR: FSR shader embedding failed & exit /b 1 )
+
 python "%ROOT%\tools\gen_exports.py" --source "%SystemRoot%\System32\d3d11.dll" ^
     --tag d3d11 --out "%GEN%" ^
     --wrap D3D11CreateDevice --wrap D3D11CreateDeviceAndSwapChain ^

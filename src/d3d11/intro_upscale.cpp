@@ -12,6 +12,23 @@
 #include "../common/log.h"
 #include "shader_swap.h"
 
+// AMD's own FSR, CPU side: A_CPU gives FsrEasuCon, which computes the four
+// constants EASU needs from the input and output sizes. Transcribing that
+// arithmetic by hand is exactly what vendoring exists to avoid.
+#define A_CPU 1
+// AMD's headers are a library of helpers, so at /W4 every one this build
+// does not call is a C4505. They are vendored unmodified and will stay that
+// way, so the warning is silenced HERE rather than in their text -- a real
+// warning from our own code must not end up buried in two hundred of theirs.
+#pragma warning(push)
+#pragma warning(disable : 4505)   // unreferenced local function removed
+#include "fsr/ffx_a.h"
+#include "fsr/ffx_fsr1.h"
+#pragma warning(pop)
+
+// The same two files as GPU text, generated at build time.
+#include "fsr_hlsl_gen.h"
+
 namespace edvr {
 namespace {
 
@@ -20,6 +37,51 @@ namespace {
 // gentle 1.47x, which is where the returns stop being worth the memory on a
 // rig already running a 5424x5356 eye.
 constexpr uint32_t kFactor = 2;
+
+// Which resampler ran. "sharp" is the Catmull-Rom below; "fsr" is AMD's
+// EASU, with Catmull-Rom as its fallback if the compile fails -- a rig
+// without a working compiler for one is unlikely to have one for the other,
+// but degrading to a good bicubic beats degrading to bilinear.
+enum class Mode { kOff, kSharp, kFsr };
+Mode g_mode = Mode::kOff;
+Mode g_running = Mode::kOff;
+
+// EASU's entry point, wrapped in the callbacks AMD's header asks the
+// calling shader to provide: three gather4s, one per colour channel.
+// Everything the resampling itself does is theirs; this is the plumbing
+// around it, and the shape comes from their own usage block.
+const char kEasuMain[] =
+    "Texture2D<float4> Src : register(t0);\n"
+    "SamplerState Smp : register(s0);\n"
+    "RWTexture2D<float4> Dst : register(u0);\n"
+    "cbuffer P : register(b0) {\n"
+    "    uint4 con0; uint4 con1; uint4 con2; uint4 con3; uint2 dstSize;\n"
+    "};\n"
+    "AF4 FsrEasuRF(AF2 p) { return Src.GatherRed(Smp, p); }\n"
+    "AF4 FsrEasuGF(AF2 p) { return Src.GatherGreen(Smp, p); }\n"
+    "AF4 FsrEasuBF(AF2 p) { return Src.GatherBlue(Smp, p); }\n"
+    "[numthreads(8,8,1)]\n"
+    "void main(uint3 id : SV_DispatchThreadID) {\n"
+    "    if (id.x >= dstSize.x || id.y >= dstSize.y) return;\n"
+    "    AF3 c;\n"
+    "    FsrEasuF(c, id.xy, con0, con1, con2, con3);\n"
+    "    Dst[id.xy] = float4(c, 1.0);\n"
+    "}\n";
+
+// The defines AMD's header documents for an HLSL float build, in the
+// order its own usage block gives them.
+const char kEasuPrologue[] =
+    "#define A_GPU 1\n"
+    "#define A_HLSL 1\n";
+
+const char kEasuMiddle[] =
+    "#define FSR_EASU_F 1\n";
+
+std::string joinChunks(const char* const* chunks) {
+    std::string out;
+    for (const char* const* c = chunks; *c; ++c) out += *c;
+    return out;
+}
 
 // Catmull-Rom, stated so it can be checked rather than trusted. The kernel
 // is the standard cubic with a = -0.5:
@@ -84,7 +146,10 @@ void*    g_srcRes = nullptr;      // the surface the build was made for
 bool g_doneThisFrame = false;
 bool g_bound = false;
 ID3D11ShaderResourceView* g_saved = nullptr;
+ID3D11SamplerState* g_smp = nullptr;   // EASU gathers through a sampler
 uint32_t g_dispatches = 0;
+// EASU's four constants, from AMD's own FsrEasuCon on the CPU.
+uint32_t g_con[16] = {0};
 
 void failOnce(const char* why) {
     if (g_failed) return;
@@ -135,10 +200,40 @@ bool build(ID3D11DeviceContext* ctx, ID3D11ShaderResourceView* src) {
 
     bool ok = true;
     if (!g_cs) {
-        g_cs = shaderSwapCompileCs(ctx, kUpscaleHlsl, sizeof(kUpscaleHlsl) - 1,
-                                   "main", "intro upscale", nullptr,
-                                   "intro video upscale");
-        if (!g_cs) { ok = false; failOnce("the resampler would not compile"); }
+        if (g_mode == Mode::kFsr) {
+            // AMD's two files ahead of our entry point. HLSL is text:
+            // concatenation is what #include would have done, without
+            // needing an include handler inside D3DCompile.
+            const std::string hlsl = std::string(kEasuPrologue) +
+                                     joinChunks(kFfxAChunks) + kEasuMiddle +
+                                     joinChunks(kFfxFsr1Chunks) + kEasuMain;
+            g_cs = shaderSwapCompileCs(ctx, hlsl.c_str(), hlsl.size(), "main",
+                                       "intro easu", nullptr,
+                                       "intro video upscale");
+            g_running = g_cs ? Mode::kFsr : Mode::kOff;
+            if (!g_cs) {
+                Log::get().note(
+                    "intro video upscale: EASU would not compile; falling "
+                    "back to the bicubic, which is a smaller win than FSR "
+                    "and a much larger one than the bilinear the game does.");
+            }
+        }
+        if (!g_cs) {
+            g_cs = shaderSwapCompileCs(ctx, kUpscaleHlsl,
+                                       sizeof(kUpscaleHlsl) - 1, "main",
+                                       "intro upscale", nullptr,
+                                       "intro video upscale");
+            g_running = g_cs ? Mode::kSharp : Mode::kOff;
+        }
+        if (!g_cs) { ok = false; failOnce("no resampler would compile"); }
+    }
+    if (ok && g_running == Mode::kFsr && !g_smp) {
+        D3D11_SAMPLER_DESC sm{};
+        sm.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+        sm.AddressU = sm.AddressV = sm.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+        sm.MaxLOD = D3D11_FLOAT32_MAX;
+        ok = SUCCEEDED(dev->CreateSamplerState(&sm, &g_smp));
+        if (!ok) failOnce("the resampler's sampler could not be created");
     }
     const DXGI_FORMAT kTypeless = DXGI_FORMAT_R8G8B8A8_TYPELESS;
     const DXGI_FORMAT kTyped = DXGI_FORMAT_R8G8B8A8_UNORM;
@@ -174,7 +269,10 @@ bool build(ID3D11DeviceContext* ctx, ID3D11ShaderResourceView* src) {
     }
     if (ok && !g_cb) {
         D3D11_BUFFER_DESC bd{};
-        bd.ByteWidth = 16;
+        // Four uint4s of EASU constants plus the output size, rounded to the
+        // 16-byte multiple a constant buffer wants. The bicubic uses the
+        // first four words of the same buffer.
+        bd.ByteWidth = 80;
         bd.Usage = D3D11_USAGE_DYNAMIC;
         bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
         bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
@@ -185,12 +283,27 @@ bool build(ID3D11DeviceContext* ctx, ID3D11ShaderResourceView* src) {
         g_srcW = td.Width;
         g_srcH = td.Height;
         g_srcRes = res;
+        if (g_running == Mode::kFsr) {
+            // AMD's own constant setup. Viewport and input image are the
+            // same here -- the movie is not dynamically scaled -- and the
+            // output is what we allocated.
+            FsrEasuCon(reinterpret_cast<AU1*>(g_con + 0),
+                       reinterpret_cast<AU1*>(g_con + 4),
+                       reinterpret_cast<AU1*>(g_con + 8),
+                       reinterpret_cast<AU1*>(g_con + 12),
+                       static_cast<AF1>(td.Width), static_cast<AF1>(td.Height),
+                       static_cast<AF1>(td.Width), static_cast<AF1>(td.Height),
+                       static_cast<AF1>(td.Width * kFactor),
+                       static_cast<AF1>(td.Height * kFactor));
+        }
         Log::get().note(
-            "intro video upscale: SHARP -- the movie's %ux%u frame is "
-            "resampled to %ux%u (Catmull-Rom, sixteen taps) and the "
+            "intro video upscale: %s -- the movie's %ux%u frame is "
+            "resampled to %ux%u and the "
             "composite samples ours. It leaves the game's own sampler a "
             "%.2fx step instead of about 2.95x. No resampler adds detail: "
             "this is a 1080p source either way.",
+            g_running == Mode::kFsr ? "FSR (AMD's EASU)"
+                                    : "SHARP (Catmull-Rom, sixteen taps)",
             td.Width, td.Height, td.Width * kFactor, td.Height * kFactor,
             2.95 / kFactor);
     }
@@ -219,7 +332,9 @@ void introUpscaleConfigure(Config& cfg) {
         "intro video upscale: SHARP. The movie's frame is resampled to twice "
         "its size before the game magnifies it across the screen, which is "
         "where the pixelation comes from -- a 1080p frame drawn about 2.95x "
-        "linear. It sharpens; it cannot add detail (docs\\intro-video.md).");
+        "linear. It sharpens; it cannot add detail (docs\\intro-video.md).",
+        g_mode == Mode::kFsr ? "FSR (AMD's own EASU, vendored)"
+                             : "SHARP (Catmull-Rom)");
 }
 
 bool introUpscaleWants() { return g_on && !g_failed; }
@@ -238,8 +353,17 @@ bool introUpscaleBegin(ID3D11DeviceContext* ctx,
             D3D11_MAPPED_SUBRESOURCE m{};
             if (SUCCEEDED(ctx->Map(g_cb, 0, D3D11_MAP_WRITE_DISCARD, 0, &m)) &&
                 m.pData) {
-                uint32_t p[4] = {g_srcW, g_srcH, g_srcW * kFactor,
-                                 g_srcH * kFactor};
+                uint32_t p[20] = {0};
+                if (g_running == Mode::kFsr) {
+                    memcpy(p, g_con, sizeof(g_con));
+                    p[16] = g_srcW * kFactor;
+                    p[17] = g_srcH * kFactor;
+                } else {
+                    p[0] = g_srcW;
+                    p[1] = g_srcH;
+                    p[2] = g_srcW * kFactor;
+                    p[3] = g_srcH * kFactor;
+                }
                 memcpy(m.pData, p, sizeof(p));
                 ctx->Unmap(g_cb, 0);
             }
@@ -257,7 +381,13 @@ bool introUpscaleBegin(ID3D11DeviceContext* ctx,
             ID3D11ShaderResourceView* in = srcSrv;
             ID3D11UnorderedAccessView* out = g_uav;
             ID3D11Buffer* cb = g_cb;
+            ID3D11SamplerState* smpWas = nullptr;
+            ctx->CSGetSamplers(0, 1, &smpWas);
             ctx->CSSetShader(g_cs, nullptr, 0);
+            if (g_smp) {
+                ID3D11SamplerState* s = g_smp;
+                ctx->CSSetSamplers(0, 1, &s);
+            }
             ctx->CSSetShaderResources(0, 1, &in);
             ctx->CSSetUnorderedAccessViews(0, 1, &out, nullptr);
             ctx->CSSetConstantBuffers(0, 1, &cb);
@@ -272,6 +402,8 @@ bool introUpscaleBegin(ID3D11DeviceContext* ctx,
             ctx->CSSetShaderResources(0, 1, &srvWas);
             ctx->CSSetUnorderedAccessViews(0, 1, &uavWas, nullptr);
             ctx->CSSetConstantBuffers(0, 1, &cbWas);
+            ctx->CSSetSamplers(0, 1, &smpWas);
+            if (smpWas) smpWas->Release();
             if (csWas) csWas->Release();
             if (srvWas) srvWas->Release();
             if (uavWas) uavWas->Release();
@@ -310,6 +442,7 @@ void introUpscaleShutdown() {
     releaseAll();
     if (g_cs) { g_cs->Release(); g_cs = nullptr; }
     if (g_cb) { g_cb->Release(); g_cb = nullptr; }
+    if (g_smp) { g_smp->Release(); g_smp = nullptr; }
     if (g_saved) { g_saved->Release(); g_saved = nullptr; }
     g_bound = false;
 }
