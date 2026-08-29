@@ -12,6 +12,7 @@
 #include "../common/config.h"
 #include "../common/guard.h"
 #include "../common/log.h"
+#include "../common/frame_flag.h"   // headForward / eyeTangents, from the vr half
 #include "binding_shadow.h"
 
 namespace edvr {
@@ -58,6 +59,29 @@ constexpr float kSplashHalfWidthNdc = 1.0440f;
 // 5.5 is what matching the splash takes here; 8 leaves room for a headset
 // where the same match needs more.
 constexpr float kMaxSize = 8.0f;
+
+// World lock (fix.intro_video_lock). The counter-move is witchstar_fix's,
+// which already holds a head-locked sprite on a world direction by shifting
+// the VIEWPORT for one draw -- no matrix, no new channel, and field-proven on
+// a different draw. It counter-moves against the game's world forward, and
+// that is exactly the anchor wanted here -- the field's own words, "the
+// game's forward is where the splash screen anchors". Sharing it is what
+// makes the cut work: if forward is wrong the movie and the splash are wrong
+// TOGETHER and one recentre fixes both, where a movie anchored to the
+// player's own view would need the cut to jump.
+//
+// On the measured rig forward IS 180 degrees out, but that is the runtime's
+// doing and not the game's: the pose log shows valid, tracking-OK poses
+// reporting yaw 180 and y -23 m from the first frame (docs/intro-video.md).
+// A play space is the place to fix that, not a panel transform.
+bool  g_worldLock = false;
+float g_lockGain = 1.0f;
+bool  g_anchored = false;   // the "holding" line has been said
+
+// What the current draw changed, so endDraw undoes exactly that.
+bool     g_vpSaved = false;
+UINT     g_savedVpCount = 0;
+D3D11_VIEWPORT g_savedVps[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE];
 
 // Set when fix.intro_video_size names the splash rather than a number.
 bool  g_matchSplash = false;
@@ -139,7 +163,27 @@ void introPanelConfigure(Config& cfg) {
         if (g_size < 1.0f) g_size = 1.0f;   // "stock" and anything unparsed
         if (g_size > kMaxSize) g_size = kMaxSize;
     }
-    if (g_size == wasSize && g_matchSplash == wasMatch) return;
+    const std::string lk = cfg.getString("fix.intro_video_lock", "head");
+    const bool wasLock = g_worldLock;
+    g_worldLock = (lk == "world");
+    g_lockGain = cfg.getFloat("advanced.intro_video_lock_gain", 1.0f);
+    if (g_lockGain < -2.0f) g_lockGain = -2.0f;
+    if (g_lockGain > 2.0f) g_lockGain = 2.0f;
+    if (g_worldLock != wasLock) {
+        Log::get().note(
+            g_worldLock
+                ? "intro video lock: WORLD. The movie's panel is held on the "
+                  "game's own forward -- the direction the splash after it "
+                  "anchors to -- instead of riding your head, by counter-"
+                  "moving the viewport per draw from the pose the vr half "
+                  "publishes. Sharing the splash's anchor is the point: one "
+                  "recentre then fixes both. Needs openvr_api.dll installed."
+                : "intro video lock: head. The movie's panel rides your head, "
+                  "which is the game's own behaviour.");
+    }
+    if (g_size == wasSize && g_matchSplash == wasMatch && g_worldLock == wasLock) {
+        return;
+    }
     if (g_matchSplash) {
         Log::get().note(
             "intro video size: SPLASH. The launch movie's panel is grown until "
@@ -164,7 +208,8 @@ void introPanelConfigure(Config& cfg) {
 }
 
 bool introPanelWants() {
-    return (g_matchSplash || g_size != 1.0f) && !g_retired && !g_refused;
+    return (g_matchSplash || g_size != 1.0f || g_worldLock) && !g_retired &&
+           !g_refused;
 }
 
 void introPanelNoteFill(uint32_t targetW, uint32_t targetH) {
@@ -184,6 +229,60 @@ bool introPanelOnComposite(ID3D11DeviceContext* ctx, char kind, uint32_t count,
     if (g_fillFrame != g_frame || !g_fillW) return false;
     if (srvW != g_fillW || srvH != g_fillH) return false;
 
+    // The world lock, before the constant substitution: it changes the
+    // viewport rather than the constants, so the two compose and either can
+    // be on alone.
+    if (g_worldLock) {
+        guardedBudget(g_budget, [&] {
+            float tx = 0.0f, ty = 0.0f;
+            if (!headForward(&tx, &ty)) return;   // vr half absent: no lock
+            float outer = 0.0f, inner = 0.0f;
+            if (!eyeTangents(&outer, &inner)) return;
+            const float span = outer + inner;
+            if (span < 1e-3f) return;
+            if (!g_anchored) {
+                g_anchored = true;
+                Log::get().note(
+                    "intro video lock: holding the game's forward, which is "
+                    "where the splash anchors (tangents now %+.4f %+.4f). If "
+                    "that direction is not in front of you the movie lands "
+                    "where the splash will land -- the same recentre fixes "
+                    "both, which is the point of sharing the anchor.",
+                    static_cast<double>(tx), static_cast<double>(ty));
+            }
+            UINT n = 1;
+            D3D11_VIEWPORT vp{};
+            ctx->RSGetViewports(&n, &vp);
+            if (n == 0 || vp.Width <= 0.0f) return;
+            // Pixels per unit tangent, horizontal. The vertical span is not
+            // published and the two agree within a couple of percent on every
+            // headset measured -- witchstar_fix's note, and the same
+            // reasoning holds for a panel as for a sprite.
+            const float pxPerTan = vp.Width / span;
+            // Against the GAME's forward, not a captured view: tx and ty ARE
+            // that direction in the current head frame, so counter-moving by
+            // them holds it. witchstar_fix does the same for a sprite; the
+            // anchor is the game's, deliberately, because the splash uses it.
+            float sx = tx * pxPerTan * g_lockGain;
+            float sy = -ty * pxPerTan * g_lockGain;
+            // A pathological pose must not fling the viewport into numeric
+            // nonsense; past a viewport off-axis the panel is out of view
+            // anyway.
+            const float lim = vp.Width * 0.9f;
+            if (sx > lim) sx = lim;
+            if (sx < -lim) sx = -lim;
+            if (sy > lim) sy = lim;
+            if (sy < -lim) sy = -lim;
+            g_savedVpCount = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
+            ctx->RSGetViewports(&g_savedVpCount, g_savedVps);
+            D3D11_VIEWPORT shifted = vp;
+            shifted.TopLeftX = vp.TopLeftX + sx;
+            shifted.TopLeftY = vp.TopLeftY + sy;
+            ctx->RSSetViewports(1, &shifted);
+            g_vpSaved = true;
+        });
+    }
+
     bool bound = false;
     guardedBudget(g_budget, [&] {
         ID3D11Buffer* cb = nullptr;
@@ -196,6 +295,12 @@ bool introPanelOnComposite(ID3D11DeviceContext* ctx, char kind, uint32_t count,
         }
         if (!s) { cb->Release(); return; }
 
+        if (!g_matchSplash && g_size == 1.0f) {
+            // Lock only: nothing to substitute, but the caller still has to
+            // call endDraw so the viewport goes back.
+            cb->Release();
+            return;
+        }
         if (s->ready && s->ours) {
             g_restore = cb;
             ID3D11Buffer* ours = s->ours;
@@ -239,14 +344,23 @@ bool introPanelOnComposite(ID3D11DeviceContext* ctx, char kind, uint32_t count,
         dev->Release();
         cb->Release();
     });
-    return bound;
+    // Either change is a match. Returning false with a shifted viewport
+    // would leak it into every draw after this one -- the caller only calls
+    // endDraw when this says yes.
+    return bound || g_vpSaved;
 }
 
 void introPanelEndDraw(ID3D11DeviceContext* ctx) {
-    if (!ctx || !g_restore) return;
-    ID3D11Buffer* orig = static_cast<ID3D11Buffer*>(g_restore);
-    ctx->VSSetConstantBuffers(kVsSlot, 1, &orig);
-    g_restore = nullptr;
+    if (!ctx) return;
+    if (g_restore) {
+        ID3D11Buffer* orig = static_cast<ID3D11Buffer*>(g_restore);
+        ctx->VSSetConstantBuffers(kVsSlot, 1, &orig);
+        g_restore = nullptr;
+    }
+    if (g_vpSaved) {
+        ctx->RSSetViewports(g_savedVpCount, g_savedVps);
+        g_vpSaved = false;
+    }
 }
 
 void introPanelTick(ID3D11DeviceContext* ctx, bool sceneFrame) {
