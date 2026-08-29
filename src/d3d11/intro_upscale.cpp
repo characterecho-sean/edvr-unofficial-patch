@@ -32,11 +32,24 @@
 namespace edvr {
 namespace {
 
-// Twice the source in each axis. Three times would land the game's own
-// sampler at 1:1, and costs 74 MB against 33; two leaves the final step a
-// gentle 1.47x, which is where the returns stop being worth the memory on a
-// rig already running a 5424x5356 eye.
-constexpr uint32_t kFactor = 2;
+// How wide the resampled frame is made, in pixels.
+//
+// Taken from fix.vscreen_res_width -- the on-foot screen's resolution --
+// because that is the same question asked once already: how sharp do you
+// want a flat screen in this headset, given your GPU. A rig set to 5120
+// there has said it can afford 5120 here, and the movie's panel is about
+// 5663 eye pixels wide, so that lands the game's own sampler at roughly 1.1x
+// instead of the 1.48x a fixed 3840 gave.
+//
+// FLOORED at twice the source. Somebody running the stock 1920 on-foot panel
+// has said they do not want to spend on panel resolution, but at 1:1 this
+// pass would do nothing at all, and it is cheap enough that not running it
+// is the worse answer. Height always follows from the source's aspect, never
+// from vscreen_res_height: the movie is 16:9 and must not be distorted
+// because somebody set an unusual panel shape.
+constexpr uint32_t kMinFactor = 2;
+constexpr uint32_t kMaxWidth = 8192;
+uint32_t g_targetW = 0;
 
 // Which resampler ran. "sharp" is the Catmull-Rom below; "fsr" is AMD's
 // EASU, with Catmull-Rom as its fallback if the compile fails -- a rig
@@ -141,7 +154,7 @@ ID3D11Texture2D*          g_tex = nullptr;
 ID3D11UnorderedAccessView* g_uav = nullptr;
 ID3D11ShaderResourceView* g_gameSrv = nullptr;   // what the draw samples
 uint32_t g_srcW = 0, g_srcH = 0;
-void*    g_srcRes = nullptr;      // the surface the build was made for
+uint32_t g_outW = 0, g_outH = 0;
 
 bool g_doneThisFrame = false;
 bool g_bound = false;
@@ -163,7 +176,7 @@ void releaseAll() {
     if (g_gameSrv) { g_gameSrv->Release(); g_gameSrv = nullptr; }
     if (g_tex) { g_tex->Release(); g_tex = nullptr; }
     g_srcW = g_srcH = 0;
-    g_srcRes = nullptr;
+    g_outW = g_outH = 0;
 }
 
 // Is this SRV's format an sRGB one? Our game-facing view must match, or the
@@ -188,7 +201,26 @@ bool build(ID3D11DeviceContext* ctx, ID3D11ShaderResourceView* src) {
     const bool srgb = srgbOf(sd.Format);
     t->Release();
 
-    if (g_tex && g_srcRes == res && g_srcW == td.Width && g_srcH == td.Height) {
+    // Keyed on SIZE, never on which surface was seen first.
+    //
+    // The two eyes have their OWN 1920x1080 surfaces (measured: distinct
+    // resources, identical content, filled from the same YUV planes by the
+    // same shaders). Keying the cache on the resource meant each eye's draw
+    // found the other eye's build, released a 33 MB texture, made a fresh
+    // one -- and the second eye of the pair then bound it WITHOUT
+    // dispatching, because the once-a-frame guard had already been spent.
+    // One eye sampled undefined memory every frame, and the log grew to
+    // 3094 rebuild lines in one intro saying so.
+    //
+    // One resample serves both eyes. That was always the design -- the
+    // header says so -- and this test is what makes it true rather than
+    // aspirational.
+    if (g_tex && g_srcW == td.Width && g_srcH == td.Height &&
+        g_outW == (g_targetW ? (g_targetW < td.Width * kMinFactor
+                                    ? td.Width * kMinFactor
+                                    : (g_targetW > kMaxWidth ? kMaxWidth
+                                                             : g_targetW))
+                             : td.Width * kMinFactor)) {
         res->Release();
         return true;
     }
@@ -239,10 +271,21 @@ bool build(ID3D11DeviceContext* ctx, ID3D11ShaderResourceView* src) {
     const DXGI_FORMAT kTyped = DXGI_FORMAT_R8G8B8A8_UNORM;
     const DXGI_FORMAT kGame =
         srgb ? DXGI_FORMAT_R8G8B8A8_UNORM_SRGB : DXGI_FORMAT_R8G8B8A8_UNORM;
+    // The output size: the asked-for width, floored and capped, with the
+    // height carried from the source so the aspect cannot drift.
+    uint32_t outW = g_targetW ? g_targetW : td.Width * kMinFactor;
+    if (outW < td.Width * kMinFactor) outW = td.Width * kMinFactor;
+    if (outW > kMaxWidth) outW = kMaxWidth;
+    uint32_t outH = td.Height ? static_cast<uint32_t>(
+                        (static_cast<uint64_t>(outW) * td.Height + td.Width / 2) /
+                        td.Width)
+                              : 0;
+    if (outW == 0 || outH == 0) { dev->Release(); res->Release(); return false; }
+
     if (ok) {
         D3D11_TEXTURE2D_DESC od{};
-        od.Width = td.Width * kFactor;
-        od.Height = td.Height * kFactor;
+        od.Width = outW;
+        od.Height = outH;
         od.MipLevels = 1;
         od.ArraySize = 1;
         od.Format = kTypeless;
@@ -282,7 +325,8 @@ bool build(ID3D11DeviceContext* ctx, ID3D11ShaderResourceView* src) {
     if (ok) {
         g_srcW = td.Width;
         g_srcH = td.Height;
-        g_srcRes = res;
+        g_outW = outW;
+        g_outH = outH;
         if (g_running == Mode::kFsr) {
             // AMD's own constant setup. Viewport and input image are the
             // same here -- the movie is not dynamically scaled -- and the
@@ -293,19 +337,19 @@ bool build(ID3D11DeviceContext* ctx, ID3D11ShaderResourceView* src) {
                        reinterpret_cast<AU1*>(g_con + 12),
                        static_cast<AF1>(td.Width), static_cast<AF1>(td.Height),
                        static_cast<AF1>(td.Width), static_cast<AF1>(td.Height),
-                       static_cast<AF1>(td.Width * kFactor),
-                       static_cast<AF1>(td.Height * kFactor));
+                       static_cast<AF1>(outW), static_cast<AF1>(outH));
         }
         Log::get().note(
             "intro video upscale: %s -- the movie's %ux%u frame is "
             "resampled to %ux%u and the "
-            "composite samples ours. It leaves the game's own sampler a "
+            "composite samples ours -- the width is fix.vscreen_res_width, "
+            "floored at twice the source. It leaves the game's own sampler a "
             "%.2fx step instead of about 2.95x. No resampler adds detail: "
             "this is a 1080p source either way.",
             g_running == Mode::kFsr ? "FSR (AMD's EASU)"
                                     : "SHARP (Catmull-Rom, sixteen taps)",
-            td.Width, td.Height, td.Width * kFactor, td.Height * kFactor,
-            2.95 / kFactor);
+            td.Width, td.Height, outW, outH,
+            outW ? 5663.0 / static_cast<double>(outW) : 0.0);
     }
     dev->Release();
     res->Release();
@@ -316,6 +360,10 @@ bool build(ID3D11DeviceContext* ctx, ID3D11ShaderResourceView* src) {
 
 void introUpscaleConfigure(Config& cfg) {
     const std::string v = cfg.getString("fix.intro_video_upscale", "stock");
+    // The on-foot screen's width, which is the same question about the same
+    // GPU. Read every configure so a change to it is live here too.
+    g_targetW = static_cast<uint32_t>(
+        cfg.getIntInRange("fix.vscreen_res_width", 1920, 640, 8192));
     const Mode want = v == "fsr" ? Mode::kFsr
                                  : (v == "sharp" ? Mode::kSharp : Mode::kOff);
     const bool first = !g_configured;
@@ -362,13 +410,13 @@ bool introUpscaleBegin(ID3D11DeviceContext* ctx,
                 uint32_t p[20] = {0};
                 if (g_running == Mode::kFsr) {
                     memcpy(p, g_con, sizeof(g_con));
-                    p[16] = g_srcW * kFactor;
-                    p[17] = g_srcH * kFactor;
+                    p[16] = g_outW;
+                    p[17] = g_outH;
                 } else {
                     p[0] = g_srcW;
                     p[1] = g_srcH;
-                    p[2] = g_srcW * kFactor;
-                    p[3] = g_srcH * kFactor;
+                    p[2] = g_outW;
+                    p[3] = g_outH;
                 }
                 memcpy(m.pData, p, sizeof(p));
                 ctx->Unmap(g_cb, 0);
@@ -397,8 +445,7 @@ bool introUpscaleBegin(ID3D11DeviceContext* ctx,
             ctx->CSSetShaderResources(0, 1, &in);
             ctx->CSSetUnorderedAccessViews(0, 1, &out, nullptr);
             ctx->CSSetConstantBuffers(0, 1, &cb);
-            ctx->Dispatch((g_srcW * kFactor + 7) / 8,
-                          (g_srcH * kFactor + 7) / 8, 1);
+            ctx->Dispatch((g_outW + 7) / 8, (g_outH + 7) / 8, 1);
 
             ID3D11ShaderResourceView* nullSrv = nullptr;
             ID3D11UnorderedAccessView* nullUav = nullptr;
