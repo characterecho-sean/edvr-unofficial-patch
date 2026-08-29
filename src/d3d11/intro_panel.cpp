@@ -207,9 +207,16 @@ bool buildWorldCb(bool leftEye, float dist, float vpW, float vpH,
     const float ex = leftEye ? -kHalfIpd : kHalfIpd;
 
     // The three basis vectors of the panel, in view space.
+    //
+    // The panel's +x points to the viewer's LEFT, which is the game's own
+    // convention on both of its panels and not a choice: the movie's
+    // cb2[1].x is -1/2712 and the splash's is -0.780645 against an m00 of
+    // 0.78073, so each maps a unit of quad x to -1 units of view x. Built
+    // the other way the picture comes out MIRRORED -- which is exactly what
+    // the first flight showed, with everything else right.
     float cx[3], cy[3], c0[3];
     for (int i = 0; i < 3; ++i) {
-        cx[i] = At(i, 0) * kScreenHalfW;
+        cx[i] = At(i, 0) * -kScreenHalfW;
         cy[i] = At(i, 1) * kScreenHalfH;
         // the panel's centre at (0,0,-dist) in the seated frame, brought
         // into view space, with the head's translation and the eye offset
