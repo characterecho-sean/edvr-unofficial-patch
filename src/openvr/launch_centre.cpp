@@ -1,5 +1,7 @@
 #include "launch_centre.h"
 
+#include <windows.h>
+
 #include <string>
 
 #include "../common/config.h"
@@ -12,6 +14,42 @@ namespace {
 
 bool     g_on = false;
 bool     g_configured = false;
+HMODULE  g_realModule = nullptr;
+
+// Which runtime is underneath, decided by what its openvr_api exports.
+//
+// Neither DLL carries a version resource -- ProductName, FileDescription and
+// CompanyName are all empty on both, checked on the field rig -- so there is
+// no name to read. The export tables differ cleanly instead:
+//
+//   OpenComposite   VRClientCoreFactory, HmdSystemFactory, VR_Init,
+//                   VR_InitInternal2 ... and NO VRDashboardManager
+//   Valve           VRControlPanel, VRDashboardManager ... and no factories
+//
+// VRClientCoreFactory is the discriminator worth leaning on: it is the
+// DRIVER-side factory, which in Valve's design lives in vrclient.dll and
+// never in openvr_api.dll. OpenComposite is a single DLL pretending to be
+// the whole stack, so it has to export it.
+//
+// The absent dashboard is the second witness, and the project already knew
+// it independently -- openvr_proxy.cpp's interface-suppression comment says
+// "OpenComposite has no dashboard to put an overlay in".
+//
+// Both tests must agree. A future Valve DLL growing one of these exports, or
+// an OpenComposite build gaining a dashboard, then reads as "unsure" and
+// auto stays off rather than guessing.
+enum class Runtime { Unknown, OpenComposite, Valve };
+Runtime g_runtime = Runtime::Unknown;
+
+Runtime identifyRuntime(HMODULE m) {
+    if (!m) return Runtime::Unknown;
+    const bool coreFactory = GetProcAddress(m, "VRClientCoreFactory") != nullptr;
+    const bool hmdFactory  = GetProcAddress(m, "HmdSystemFactory") != nullptr;
+    const bool dashboard   = GetProcAddress(m, "VRDashboardManager") != nullptr;
+    if (coreFactory && hmdFactory && !dashboard) return Runtime::OpenComposite;
+    if (dashboard && !coreFactory) return Runtime::Valve;
+    return Runtime::Unknown;
+}
 bool     g_done = false;      // the reset has been asked for, once
 uint32_t g_waited = 0;        // frames spent waiting for the interface
 
@@ -40,16 +78,50 @@ constexpr uint32_t kMaxWaitFrames = 600;
 
 }  // namespace
 
+void launchCentreNoteRuntime(void* realModule) {
+    g_realModule = static_cast<HMODULE>(realModule);
+}
+
 void launchCentreConfigure() {
     Config& cfg = Config::get();
-    const std::string v = cfg.getString("fix.launch_centre", "off");
-    const bool on = (v == "on" || v == "1");
-    if (!on && v != "off" && v != "0" && !v.empty()) {
+    const std::string v = cfg.getString("fix.launch_centre", "auto");
+
+    if (g_runtime == Runtime::Unknown) g_runtime = identifyRuntime(g_realModule);
+    const bool oc = (g_runtime == Runtime::OpenComposite);
+
+    bool on = false;
+    if (v == "on" || v == "1") {
+        on = true;
+    } else if (v == "off" || v == "0") {
+        on = false;
+    } else if (v == "auto" || v.empty()) {
+        on = oc;
+    } else {
         Log::get().note(
             "fix.launch_centre = \"%s\" is not a value this build knows; "
-            "treating it as off. Use on or off.",
+            "treating it as auto. Use auto, on or off.",
             v.c_str());
+        on = oc;
     }
+
+    if (!g_configured) {
+        Log::get().note(
+            "launch centre: the runtime under this proxy reads as %s -- by its "
+            "exports, not its name, because neither DLL carries a version "
+            "resource. OpenComposite exports VRClientCoreFactory and "
+            "HmdSystemFactory and has no VRDashboardManager; Valve's is the "
+            "other way round (src/openvr/launch_centre.h).%s",
+            g_runtime == Runtime::OpenComposite ? "OPENCOMPOSITE"
+            : g_runtime == Runtime::Valve       ? "SteamVR (Valve's own)"
+                                                : "NEITHER clearly",
+            (v == "auto" || v.empty())
+                ? (oc ? " auto turns this ON here, because this is the runtime "
+                        "whose origin moves between launches."
+                      : " auto leaves this off: only OpenComposite has been "
+                        "measured putting its origin somewhere new each launch.")
+                : " A value other than auto is set, so that decides it.");
+    }
+
     if (g_configured && on == g_on) return;
     g_configured = true;
     g_on = on;

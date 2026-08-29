@@ -64,6 +64,15 @@ class Config;
 // reload -- head_offset.h documents at length the session this project lost
 // to a configure() that only ran on reload, and tools/check_install_reads.py
 // enforces it statically.
+// Told the real runtime's module handle as soon as openvr_proxy.cpp has it,
+// which is before the config exists -- so this only remembers the handle.
+// The identification, and the line about it, happen in Configure.
+//
+// Passed in rather than looked up: the real module's FILENAME is a config
+// value (advanced.real_openvr_dll, "openvr_api_oc.dll" on the rig this was
+// written for), so there is nothing to GetModuleHandle for.
+void launchCentreNoteRuntime(void* realModule);
+
 void launchCentreConfigure();
 
 // Ask the runtime to recentre, once, as soon as it can honour the request.

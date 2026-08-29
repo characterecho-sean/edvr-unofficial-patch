@@ -23,6 +23,7 @@
 #include "../common/proxy.h"
 #include "compositor_hook.h"
 #include "early_session.h"
+#include "launch_centre.h"
 #include "openvr_min.h"
 #include "system_hook.h"
 
@@ -111,6 +112,11 @@ BOOL CALLBACK loadOnceCallback(PINIT_ONCE, PVOID, PVOID*) {
 
         g_realGetGenericInterface = reinterpret_cast<PFN_VR_GetGenericInterface>(
             GetProcAddress(g_realModule, "VR_GetGenericInterface"));
+        // Which runtime this actually is, for fix.launch_centre = auto.
+        // Only the handle is handed over here: this runs before the config
+        // or the log exist, so the identification and the line about it
+        // wait for launchCentreConfigure.
+        edvr::launchCentreNoteRuntime(g_realModule);
         edvr::breadcrumb(g_realGetGenericInterface
                              ? "vr: exports resolved"
                              : "vr: FAILED no VR_GetGenericInterface");
