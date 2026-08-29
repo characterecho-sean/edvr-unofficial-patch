@@ -226,8 +226,25 @@ struct Tex {
 
 Tex g_small[2];      // deband ping-pong, source size
 Tex g_big[2];        // the upscale's output, then RCAS's
-ID3D11ShaderResourceView* g_srcRaw = nullptr;   // the game's texture, non-sRGB
-void*    g_srcRes = nullptr;
+// The game's own surfaces, viewed unconverted -- ONE PER EYE, and kept
+// apart from the chain on purpose.
+//
+// This is the bug that bit twice. The chain (textures, shaders, constants)
+// depends only on SIZE and settings; the source view depends on the
+// RESOURCE, and the two eyes have their own. Folding the resource into the
+// chain's cache test made every second draw a full teardown and rebuild --
+// and since the chain runs once a frame, the second eye then bound a texture
+// nothing had dispatched into. That is what a flickering eye looks like from
+// the outside, and a 1 MB log of rebuild lines is what it looks like from
+// in here.
+//
+// So: two source views, looked up by resource, created on demand, and NEVER
+// torn down by a chain rebuild.
+struct SrcView {
+    void*                     res = nullptr;
+    ID3D11ShaderResourceView* raw = nullptr;
+};
+SrcView g_src[2];
 uint32_t g_srcW = 0, g_srcH = 0, g_outW = 0, g_outH = 0;
 bool     g_srgb = false;
 
@@ -245,13 +262,44 @@ void failOnce(const char* why) {
                     "the game samples it for the rest of this session.", why);
 }
 
+// The chain only. The source views outlive it -- they describe the game's
+// textures, not ours, and dropping them is what made the rebuild loop.
 void releaseAll() {
     for (Tex& t : g_small) t.release();
     for (Tex& t : g_big) t.release();
-    if (g_srcRaw) { g_srcRaw->Release(); g_srcRaw = nullptr; }
-    g_srcRes = nullptr;
     g_srcW = g_srcH = g_outW = g_outH = 0;
     g_final = nullptr;
+}
+
+void releaseSources() {
+    for (SrcView& s : g_src) {
+        if (s.raw) s.raw->Release();
+        s = SrcView();
+    }
+}
+
+// Our own NON-sRGB view of a game surface: the stored values, which is what
+// its sampler would have decoded. Everything is worked on unconverted and
+// the sRGB-ness is put back only in the game-facing view, so the game's
+// shader does exactly what it always did.
+ID3D11ShaderResourceView* rawViewOf(ID3D11Device* dev, ID3D11Resource* res) {
+    for (SrcView& s : g_src) {
+        if (s.res == res && s.raw) return s.raw;
+    }
+    for (SrcView& s : g_src) {
+        if (s.raw) continue;
+        D3D11_SHADER_RESOURCE_VIEW_DESC rd{};
+        rd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+        rd.Texture2D.MipLevels = 1;
+        rd.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        if (FAILED(dev->CreateShaderResourceView(res, &rd, &s.raw))) {
+            s.raw = nullptr;
+            return nullptr;
+        }
+        s.res = res;
+        return s.raw;
+    }
+    return nullptr;   // more than two eyes is not a case that exists
 }
 
 bool srgbOf(DXGI_FORMAT f) {
@@ -334,10 +382,16 @@ bool build(ID3D11DeviceContext* ctx, ID3D11ShaderResourceView* src) {
     // g_srcRaw is the exception that must follow the resource: it is a view
     // OVER the game's texture, so it is rebuilt when that changes -- which is
     // why the source pointer is compared here and nowhere else.
-    if (g_big[0].tex && g_srcRaw && g_srcRes == res && g_srcW == td.Width &&
-        g_srcH == td.Height && g_outW == wantW && g_srgb == srgb) {
+    if (g_big[0].tex && g_srcW == td.Width && g_srcH == td.Height &&
+        g_outW == wantW && g_srgb == srgb) {
+        // The chain stands. Make sure THIS eye's source view exists -- that
+        // is per-resource work and must not disturb anything else.
+        ID3D11Device* d2 = nullptr;
+        ctx->GetDevice(&d2);
+        const bool haveView = d2 && rawViewOf(d2, res) != nullptr;
+        if (d2) d2->Release();
         res->Release();
-        return true;
+        return haveView;
     }
     releaseAll();
 
@@ -424,15 +478,7 @@ bool build(ID3D11DeviceContext* ctx, ID3D11ShaderResourceView* src) {
     if (ok && (outW == 0 || outH == 0)) ok = false;
 
     if (ok) {
-        // Our own NON-sRGB view of the game's surface: the stored values,
-        // which is what its sampler would have decoded. Everything is worked
-        // on unconverted and the final game-facing view carries the sRGB-ness
-        // back, so the game's shader does exactly what it always did.
-        D3D11_SHADER_RESOURCE_VIEW_DESC rd{};
-        rd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
-        rd.Texture2D.MipLevels = 1;
-        rd.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-        ok = SUCCEEDED(dev->CreateShaderResourceView(res, &rd, &g_srcRaw));
+        ok = rawViewOf(dev, res) != nullptr;
         if (!ok) failOnce("the movie's frame could not be viewed unconverted");
     }
     if (ok && g_deband > 0.0f && g_csDeband) {
@@ -455,7 +501,6 @@ bool build(ID3D11DeviceContext* ctx, ID3D11ShaderResourceView* src) {
         g_outW = outW;
         g_outH = outH;
         g_srgb = srgb;
-        g_srcRes = res;
         g_final = g_big[1].tex ? g_big[1].game : g_big[0].game;
         if (g_running == Mode::kFsr) {
             FsrEasuCon(reinterpret_cast<AU1*>(g_con + 0),
@@ -509,7 +554,7 @@ void runPass(ID3D11DeviceContext* ctx, ID3D11ComputeShader* cs,
     ctx->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
 }
 
-void runChain(ID3D11DeviceContext* ctx) {
+void runChain(ID3D11DeviceContext* ctx, ID3D11ShaderResourceView* srcRaw) {
     // The compute stage is saved and put back around the WHOLE chain: the
     // exposure fix owns slots here and must not find ours.
     ID3D11ComputeShader* csWas = nullptr;
@@ -533,12 +578,12 @@ void runChain(ID3D11DeviceContext* ctx) {
     // 1. Deband, at source size, ping-ponging. The first pass reads the
     //    game's surface unconverted; each later one reads what the previous
     //    wrote, and the upscale reads whichever buffer the parity landed on.
-    ID3D11ShaderResourceView* upIn = g_srcRaw;
+    ID3D11ShaderResourceView* upIn = srcRaw;
     if (g_csDeband && g_deband > 0.0f && g_small[0].tex) {
         for (int i = 0; i < kDebandCount; ++i) {
             const int dst = i % 2;
             ID3D11ShaderResourceView* in =
-                (i == 0) ? g_srcRaw : g_small[1 - dst].read;
+                (i == 0) ? srcRaw : g_small[1 - dst].read;
             const float p[4] = {static_cast<float>(kDebandPasses[i].radius),
                                 g_deband * kDebandPasses[i].scale / 255.0f,
                                 (i == kDebandCount - 1) ? g_dither / 255.0f
@@ -659,7 +704,20 @@ bool introUpscaleBegin(ID3D11DeviceContext* ctx,
     guardedBudget(g_budget, [&] {
         if (!build(ctx, srcSrv)) return;
         if (!g_doneThisFrame) {
-            runChain(ctx);
+            // Whichever eye arrives first drives the chain; the other simply
+            // binds the result. Their content is identical (same planes, same
+            // shaders, measured), so one pass is not just cheaper -- it makes
+            // the eyes unable to differ.
+            ID3D11Resource* res = nullptr;
+            srcSrv->GetResource(&res);
+            ID3D11Device* dev = nullptr;
+            ctx->GetDevice(&dev);
+            ID3D11ShaderResourceView* raw =
+                (res && dev) ? rawViewOf(dev, res) : nullptr;
+            if (dev) dev->Release();
+            if (res) res->Release();
+            if (!raw) return;
+            runChain(ctx, raw);
             g_doneThisFrame = true;
         }
         if (!g_final) return;
@@ -689,6 +747,7 @@ void introUpscaleFrameEnd() { g_doneThisFrame = false; }
 
 void introUpscaleShutdown() {
     releaseAll();
+    releaseSources();
     if (g_csDeband) { g_csDeband->Release(); g_csDeband = nullptr; }
     if (g_csUp) { g_csUp->Release(); g_csUp = nullptr; }
     if (g_csRcas) { g_csRcas->Release(); g_csRcas = nullptr; }
