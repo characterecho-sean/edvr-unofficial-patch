@@ -1,8 +1,9 @@
 // The scrolling list of settings.
 //
 // A child window that draws itself: one row per setting, grouped by the ini's
-// own sections, with the control on the right and the recommended value called
-// out beside it. Custom-drawn for the same reason the rest of the window is --
+// own sections, with the control on the right, the word it is set to under it,
+// and one link back to the recommended value when it is not there already.
+// Custom-drawn for the same reason the rest of the window is --
 // nothing to install, and a hundred real child controls to build, move and
 // theme is more machinery than one paint function.
 //

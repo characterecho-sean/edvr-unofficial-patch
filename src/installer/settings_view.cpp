@@ -323,6 +323,60 @@ bool twoChoiceToggle(const SettingRow& row, std::string* onValue,
     return true;
 }
 
+// What a switch is SET to, in the file's own word. A switch shows a position,
+// not a word, and nothing else on the row says that on here writes "steady"
+// and off writes "stock". Suppressed where the word would only repeat the
+// switch -- a bool, or a choice whose two values already are on and off -- and
+// absent for a segmented choice, whose segments carry the words themselves.
+std::wstring stateWord(const SettingRow& row) {
+    std::string onValue, offValue;
+    if (!twoChoiceToggle(row, &onValue, &offValue)) return std::wstring();
+    if (onValue == "on" && offValue == "off") return std::wstring();
+    const std::string current = row.value == onValue ? onValue : offValue;
+    for (const Choice& choice : row.choices) {
+        if (choice.value == current) return fromUtf8(choice.label);
+    }
+    return fromUtf8(current);
+}
+
+// The recommended value as somebody would say it: a toggle holds 1 or 0 in the
+// file, and "1" under a switch names nothing.
+std::wstring recommendedWord(const SettingRow& row) {
+    if (row.def->kind == SettingKind::Toggle) {
+        return isOn(row.def->recommended) ? L"on" : L"off";
+    }
+    return row.shownRecommended();
+}
+
+// The one link in a row, shown only when the value is not the recommended one,
+// and worded for what it DOES. The old text named the value instead -- "use
+// splash" under a switch, which the field read as a state label, and then read
+// "use auto" beside an auto/on/off control as the control being wrong about
+// itself. Where the recommendation IS the shipped default this is the way
+// back; where it is not -- a 0.3 curve with a 0.7 distance is a tested pairing
+// and neither number is the default -- it is an invitation. One word, because
+// the longest helper it sits beside -- the resolution rows' default and their
+// range -- leaves 74 px of the 222 this column has, and a range ellipsised to
+// "640 to 819" is a wrong number rather than a shortened one.
+std::wstring recommendLink(const SettingRow& row) {
+    if (row.isRecommended) return std::wstring();
+    if (strcmp(row.def->recommended, row.def->shipped) == 0) return L"reset";
+    return L"try " + recommendedWord(row);
+}
+
+// The link's own rectangle: the whole of the click target and none of the
+// quiet text beside it. The old line was one target end to end, so a click on
+// the "default splash" half applied the recommendation -- which is exactly why
+// one line of two phrases read as two links.
+RECT recommendLinkRect(const List* list, HDC dc, const RowGeometry& geo,
+                       const std::wstring& label) {
+    RECT r{0, 0, 0, 0};
+    if (label.empty()) return r;
+    r = geo.recommended;
+    r.left = r.right - ui::textWidth(dc, label, ui::fonts().caption) - dp(list, 4);
+    return r;
+}
+
 void paintRow(const List* list, HDC dc, const RECT& rowRect, const SettingRow& row) {
     const ui::Theme& t = ui::theme();
     const ui::Fonts& f = ui::fonts();
@@ -395,31 +449,22 @@ void paintRow(const List* list, HDC dc, const RECT& rowRect, const SettingRow& r
         }
     }
 
-    // The recommended value, always visible: a quiet note when the current
-    // value already is it, and a button when it is not. "Flagged where
-    // possible" was the ask, and a number somebody can act on beats a number
-    // they have to compare by eye.
-    // Under the control: what the setting ships as, and what it will accept.
-    // A number box with no bounds beside it is a guess, and a value somebody
-    // has moved should say what it was. When the two differ this line is the
-    // way back -- click it and the recommended value goes in.
-    const std::wstring helper = row.helper();
-    if (!helper.empty()) {
-        RECT line = geo.recommended;
-        if (row.isRecommended) {
-            ui::drawText(dc, helper, line, f.caption, t.muted,
-                         DT_RIGHT | DT_SINGLELINE | DT_END_ELLIPSIS);
-        } else {
-            const std::wstring label =
-                L"use " + row.shownRecommended() + L"   \x00b7   " + helper;
-            ui::drawText(dc, label, line, f.caption, t.accent,
-                         DT_RIGHT | DT_SINGLELINE | DT_END_ELLIPSIS);
-        }
-    } else if (!row.isRecommended) {
-        // A toggle away from its default still deserves the way back.
-        RECT line = geo.recommended;
-        ui::drawText(dc, L"use " + row.shownRecommended(), line, f.caption, t.accent,
-                     DT_RIGHT | DT_SINGLELINE);
+    // Under the control, at most two things and never two links: one quiet
+    // word for what a switch is set to (for a number, what it ships as and
+    // what it will take), and -- only when the value is not the recommended
+    // one -- the single link that puts it right. The link is drawn first, so a
+    // long quiet half is the half that gets ellipsised.
+    const bool isChoice = row.def->kind == SettingKind::Choice;
+    const std::wstring link = recommendLink(row);
+    const std::wstring quiet = isChoice ? stateWord(row) : row.helper();
+    RECT line = geo.recommended;
+    if (!link.empty()) {
+        ui::drawText(dc, link, line, f.caption, t.accent, DT_RIGHT | DT_SINGLELINE);
+        line.right -= ui::textWidth(dc, link, f.caption) + dp(list, 12);
+    }
+    if (!quiet.empty() && line.right > line.left) {
+        ui::drawText(dc, quiet, line, f.caption, isChoice ? t.subtext : t.muted,
+                     DT_RIGHT | DT_SINGLELINE | DT_END_ELLIPSIS);
     }
 }
 
@@ -645,10 +690,42 @@ void openResolutionCombo(List* list, const RECT& box) {
     SendMessageW(list->combo, CB_SHOWDROPDOWN, TRUE, 0);
 }
 
+// The row whose link is under the pointer, if any. The click and the cursor
+// both ask this one question, so what is clickable can never drift from what
+// was drawn -- and the quiet text beside the link is no longer part of it.
+bool linkHit(List* list, int x, int y, size_t* rowIndex) {
+    if (!list->model) return false;
+    RECT client{};
+    GetClientRect(list->hwnd, &client);
+    for (const Item& item : list->items) {
+        if (item.kind != ItemKind::Setting) continue;
+        RECT rect{client.left, dp(list, item.y) - list->scroll, client.right,
+                  dp(list, item.y + item.height) - list->scroll};
+        if (y < rect.top || y >= rect.bottom) continue;
+        const SettingRow& row = list->model->rows()[item.row];
+        const std::wstring label = recommendLink(row);
+        if (label.empty()) return false;
+        HDC dc = GetDC(list->hwnd);
+        const RECT box = recommendLinkRect(list, dc, geometryFor(list, rect), label);
+        ReleaseDC(list->hwnd, dc);
+        const POINT point{x, y};
+        if (!PtInRect(&box, point)) return false;
+        if (rowIndex) *rowIndex = item.row;
+        return true;
+    }
+    return false;
+}
+
 void onClick(List* list, int x, int y) {
     commitEdit(list);
     hideEdit(list);
     if (!list->model) return;
+
+    size_t linkRow = 0;
+    if (linkHit(list, x, y, &linkRow)) {
+        applyValue(list, linkRow, list->model->rows()[linkRow].def->recommended);
+        return;
+    }
 
     RECT client{};
     GetClientRect(list->hwnd, &client);
@@ -671,10 +748,6 @@ void onClick(List* list, int x, int y) {
         const RowGeometry geo = geometryFor(list, rect);
         POINT point{x, y};
 
-        if (!row.isRecommended && PtInRect(&geo.recommended, point)) {
-            applyValue(list, item.row, row.def->recommended);
-            return;
-        }
         switch (row.def->kind) {
             case SettingKind::Toggle: {
                 const RECT box = toggleRect(list, geo);
@@ -785,6 +858,18 @@ LRESULT CALLBACK listProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam)
             }
             return 0;
         case WM_SETCURSOR:
+            // The hand over a row's link. Colour alone did not say "click me":
+            // the field read one as a label, and reasonably -- it sat under a
+            // switch and named a value.
+            if (list && LOWORD(lparam) == HTCLIENT) {
+                POINT point{};
+                GetCursorPos(&point);
+                ScreenToClient(hwnd, &point);
+                if (linkHit(list, point.x, point.y, nullptr)) {
+                    SetCursor(LoadCursorW(nullptr, IDC_HAND));
+                    return TRUE;
+                }
+            }
             return DefWindowProcW(hwnd, message, wparam, lparam);
         case WM_COMMAND:
             if (list && list->combo &&

@@ -148,6 +148,21 @@ Changes are written straight into `edvr.ini`, keeping its layout and comments,
 and the game re-reads that file about once a second, so there is no Apply
 button: the change is live by the time the mouse is up.
 
+**Under each control, one line: the word it is set to, and one link.** A switch
+shows a position, not a word, and nothing else on the row says that on writes
+`steady` and off writes `stock` — so that word sits underneath, quietly. Beside
+it, and only when the value is not the recommended one, a single link: *reset*
+where the recommendation is the shipped default, *try 0.7* where it is not (a
+0.3 curve with a 0.7 distance is a tested pairing, and neither number is the
+default). Only the link is clickable, and the pointer turns to a hand over it.
+
+That line used to name the value instead — "use splash", in the link colour,
+directly under a switch — and the field read it as a label for the switch's
+state rather than as a button, then read "use auto" beside an auto/on/off
+control as the control being wrong about itself. The whole line was one click
+target too, recommendation and "default splash" together, so one line of two
+phrases read as two links.
+
 **The table is generated, not written.** `tools/gen_settings_schema.py` builds
 it from the two places the facts already live:
 
