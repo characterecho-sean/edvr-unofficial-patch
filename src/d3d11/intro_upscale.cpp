@@ -316,12 +316,18 @@ bool build(ID3D11DeviceContext* ctx, ID3D11ShaderResourceView* src) {
 
 void introUpscaleConfigure(Config& cfg) {
     const std::string v = cfg.getString("fix.intro_video_upscale", "stock");
-    const bool on = (v == "sharp");
+    const Mode want = v == "fsr" ? Mode::kFsr
+                                 : (v == "sharp" ? Mode::kSharp : Mode::kOff);
     const bool first = !g_configured;
     g_configured = true;
-    if (on == g_on && !first) return;
-    g_on = on;
-    if (!on) {
+    if (want == g_mode && !first) return;
+    // A mode change means a different shader, so the built one goes and the
+    // next matched draw compiles the other.
+    if (g_cs) { g_cs->Release(); g_cs = nullptr; }
+    g_running = Mode::kOff;
+    g_mode = want;
+    g_on = want != Mode::kOff;
+    if (!g_on) {
         if (!first) {
             Log::get().note("intro video upscale: stock. The movie is sampled "
                             "the way the game samples it.");
@@ -329,12 +335,12 @@ void introUpscaleConfigure(Config& cfg) {
         return;
     }
     Log::get().note(
-        "intro video upscale: SHARP. The movie's frame is resampled to twice "
+        "intro video upscale: %s. The movie's frame is resampled to twice "
         "its size before the game magnifies it across the screen, which is "
         "where the pixelation comes from -- a 1080p frame drawn about 2.95x "
         "linear. It sharpens; it cannot add detail (docs\\intro-video.md).",
-        g_mode == Mode::kFsr ? "FSR (AMD's own EASU, vendored)"
-                             : "SHARP (Catmull-Rom)");
+        want == Mode::kFsr ? "FSR (AMD's own EASU, vendored)"
+                           : "SHARP (Catmull-Rom)");
 }
 
 bool introUpscaleWants() { return g_on && !g_failed; }
