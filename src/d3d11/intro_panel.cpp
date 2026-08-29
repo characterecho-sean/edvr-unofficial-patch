@@ -14,6 +14,7 @@
 #include "../common/log.h"
 #include "../common/frame_flag.h"   // headForward / eyeTangents, from the vr half
 #include "binding_shadow.h"
+#include "intro_upscale.h"
 
 namespace edvr {
 namespace {
@@ -245,6 +246,16 @@ bool buildWorldCb(bool leftEye, float dist, float vpW, float vpH,
     return true;
 }
 
+// The view the draw was about to sample, for the resampler. Released by
+// the caller's use of it inside introUpscaleBegin, which takes its own
+// reference on anything it keeps.
+ID3D11ShaderResourceView* srvOf(ID3D11DeviceContext* ctx) {
+    ID3D11ShaderResourceView* v = nullptr;
+    ctx->PSGetShaderResources(0, 1, &v);
+    if (v) v->Release();   // the binding outlives the call; no ref kept
+    return v;
+}
+
 Slot* findSlot(void* key) {
     for (uint32_t i = 0; i < g_slotCount; ++i) {
         if (g_slot[i].key == key) return &g_slot[i];
@@ -318,8 +329,9 @@ void introPanelConfigure(Config& cfg) {
 }
 
 bool introPanelWants() {
-    return (g_matchSplash || g_size != 1.0f || g_worldLock) && !g_retired &&
-           !g_refused;
+    return (g_matchSplash || g_size != 1.0f || g_worldLock ||
+            introUpscaleWants()) &&
+           !g_retired && !g_refused;
 }
 
 void introPanelNoteFill(uint32_t targetW, uint32_t targetH) {
@@ -338,6 +350,11 @@ bool introPanelOnComposite(ID3D11DeviceContext* ctx, char kind, uint32_t count,
     // so a marker from this frame is the movie playing and nothing else.
     if (g_fillFrame != g_frame || !g_fillW) return false;
     if (srvW != g_fillW || srvH != g_fillH) return false;
+
+    // The resampled frame, if that is on: the same matched draw, a
+    // different slot. Independent of the transform -- either can run alone,
+    // and each restores only what it changed.
+    const bool upscaled = introUpscaleBegin(ctx, srvOf(ctx));
 
     // The world lock is not a nudge to the game's geometry -- it is a
     // REPLACEMENT transform, built here and written into cb2 exactly as the
@@ -447,11 +464,12 @@ bool introPanelOnComposite(ID3D11DeviceContext* ctx, char kind, uint32_t count,
     // Either change is a match. Returning false with a shifted viewport
     // would leak it into every draw after this one -- the caller only calls
     // endDraw when this says yes.
-    return bound;
+    return bound || upscaled;
 }
 
 void introPanelEndDraw(ID3D11DeviceContext* ctx) {
     if (!ctx) return;
+    introUpscaleEnd(ctx);
     if (g_restore) {
         ID3D11Buffer* orig = static_cast<ID3D11Buffer*>(g_restore);
         ctx->VSSetConstantBuffers(kVsSlot, 1, &orig);
@@ -461,6 +479,7 @@ void introPanelEndDraw(ID3D11DeviceContext* ctx) {
 
 void introPanelTick(ID3D11DeviceContext* ctx, bool sceneFrame) {
     ++g_frame;
+    introUpscaleFrameEnd();
     if (sceneFrame && !g_retired && (g_slotCount || g_applied)) {
         g_retired = true;
         Log::get().note(

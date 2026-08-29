@@ -41,6 +41,7 @@
 #include "glitch_frame.h"
 #include "holo_fix.h"
 #include "intro_panel.h"
+#include "intro_upscale.h"
 #include "intro_probe.h"
 #include "journal_watch.h"  // gameplay started, for the low-peak notice
 #include "loader_panel.h"
@@ -3355,6 +3356,7 @@ void vScreenRefreshConfig() {
     loaderPanelConfigure(cfg);
     introProbeConfigure(cfg);
     introPanelConfigure(cfg);
+    introUpscaleConfigure(cfg);
     backdropConfigure(cfg);
     fssScanConfigure(cfg);
     fssPanelConfigure(cfg);
@@ -4235,6 +4237,7 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     loaderPanelConfigure(cfg);
     introProbeConfigure(cfg);
     introPanelConfigure(cfg);
+    introUpscaleConfigure(cfg);
     backdropConfigure(cfg);
     fssScanConfigure(cfg);
     fssPanelConfigure(cfg);
