@@ -83,6 +83,15 @@ void systemHookNoteSubmittedSize(vr::EVREye eye, uint32_t w, uint32_t h);
 // required (boundary-less test processes).
 bool systemHookCropTarget(vr::EVREye eye, uint32_t* w, uint32_t* h);
 
+// The IVRSystem the game was handed, or null.
+//
+// Only ever non-null for IVRSystem_012: maybeObserveSystemInterface refuses
+// every other version outright, so a caller holding this also holds this
+// build's field-validated slot map for it (slots 0/1/2/4 are checked live).
+// That refusal is the safety -- a pointer to some other generation would be
+// a vtable this build cannot index.
+void* systemInterfaceV012();
+
 void shutdownSystemHook();
 
 }  // namespace edvr

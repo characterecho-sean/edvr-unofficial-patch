@@ -2,6 +2,7 @@
 
 #include "../common/timing.h"
 #include "head_offset.h"
+#include "launch_centre.h"
 
 #include <windows.h>
 #include <d3d11.h>   // GetDesc on the submitted texture, for its size only
@@ -1456,6 +1457,16 @@ vr::EVRCompositorError hookedWaitGetPoses(void* self,
 
     if (s->inert) return result;
 
+    // FIRST, before anything reads a pose.
+    //
+    // This one shifts the tracking origin, so it must land before the head
+    // pose is published to d3d11.dll, before the instruments record, and
+    // before headOffsetApply -- otherwise the movie's panel is built from a
+    // raw pose while the game's own panels use a shifted one, and the two
+    // screens disagree by however far the runtime's origin drifted this
+    // launch. See launch_centre.h.
+    launchCentreApply(result, renderPoses, renderCount, gamePoses, gameCount);
+
     // The pair-timing boundary: frame cadence, and the burst summary.
     {
         ++s->pace_boundaryNo;
@@ -1718,6 +1729,7 @@ vr::EVRCompositorError hookedWaitGetPoses(void* self,
         if (Config::get().reloadIfChanged()) {
             Log::get().note("config reloaded");
             headOffsetConfigure();
+    launchCentreConfigure();
             configurePoseRing(s);
             // The cull guard's margin is tuned from inside a headset, so its
             // keys are live; mode changes take effect at the next boundary.
@@ -2039,6 +2051,7 @@ void* interceptInterface(void* iface, const char* interfaceVersion) {
     // head_offset.cpp is SHARED, so there is one reader and both builds call it
     // from install and from reload.
     headOffsetConfigure();
+    launchCentreConfigure();
     resubmitShadowConfigure();
     // The cull guard's twin of the same rule (its own install already read
     // config -- the system interface arrives first -- but this path is the

@@ -1270,6 +1270,12 @@ void maybeObserveSystemInterface(void* iface, const char* interfaceVersion) {
             : "");
 }
 
+void* systemInterfaceV012() {
+    State* s = g_state;
+    if (!s || s->inert) return nullptr;
+    return s->ownerIface;
+}
+
 void shutdownSystemHook() {
     State* s = g_state;
     if (!s) return;
