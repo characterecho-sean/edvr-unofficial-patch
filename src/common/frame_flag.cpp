@@ -115,6 +115,14 @@ struct Shared {
     // The arrival stamp: bumped by d3d11 each frame the zoom-press
     // window is open. The heal scopes itself to exactly these frames.
     volatile LONG fssArrivalStamp;
+    // The head pose the runtime returned, row-major 3x4, published every
+    // frame BEFORE any EDVR offset touches it. The intro panel builds a
+    // world-space transform from it so the movie can be drawn on the
+    // splash's screen instead of pasted to the face (intro_panel.h). seq is
+    // the presence bit: a never-published channel and a genuinely zero pose
+    // would otherwise read the same.
+    volatile LONG headPoseSeq;
+    float         headPoseM[12];
     float         fssPanelRect[16];  // corner UVs TL,TR,BR,BL as (u,v):
                                      // [0..7] the LEFT eye's, [8..15] the
                                      // RIGHT eye's -- the renderer
@@ -168,7 +176,9 @@ struct Shared {
 // The name is built once, at first use. The two DLLs are in the same process,
 // so the channel between them is unaffected.
 //
-// _v18 because the arrival stamp joined for the window-scoped heal. _v17
+// _v19 because the head pose joined, for the intro movie's world-space
+// panel (intro_panel.h). _v18 because the arrival stamp joined for the
+// window-scoped heal. _v17
 // added the centring servo's redo counter.
 // _v16 carried both eyes' corner sets for the nose-mask stitch. _v15 was one eye's corners, _v14 the 4-float rect,
 // _v13 fssBodyStamp, _v12 fssChromeStamp, _v11 fssMonoFrames, _v10
@@ -195,7 +205,7 @@ const wchar_t* mappingName() {
     static wchar_t name[64];
     static bool built = false;
     if (!built) {
-        _snwprintf_s(name, _TRUNCATE, L"Local\\edvr_glitch_frame_v18_%lu",
+        _snwprintf_s(name, _TRUNCATE, L"Local\\edvr_glitch_frame_v19_%lu",
                      GetCurrentProcessId());
         built = true;
     }
@@ -224,6 +234,20 @@ volatile LONG g_worldJump = 0;
 void noteWorldJump() { InterlockedExchange(&g_worldJump, 1); }
 
 bool takeWorldJump() { return InterlockedExchange(&g_worldJump, 0) != 0; }
+
+void publishHeadPose(const float* m12) {
+    Shared* s = map();
+    if (!s || !m12) return;
+    for (int i = 0; i < 12; ++i) s->headPoseM[i] = m12[i];
+    InterlockedIncrement(&s->headPoseSeq);
+}
+
+bool headPose(float* out12) {
+    Shared* s = map();
+    if (!s || !out12 || s->headPoseSeq == 0) return false;
+    for (int i = 0; i < 12; ++i) out12[i] = s->headPoseM[i];
+    return true;
+}
 
 void publishFssPanelRect(const float* corners16) {
     Shared* s = map();

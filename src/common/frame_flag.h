@@ -248,6 +248,19 @@ bool eyeTangents(float* outerMag, float* innerMag);
 // carries an always-set presence bit: a zero word is "nobody publishing",
 // never "centred".
 void announceHeadForward(float tx, float ty);
+
+// The head pose the runtime returned, row-major 3x4 (rotation in the left
+// 3x3, translation in the last column), published by openvr_api.dll every
+// frame BEFORE any EDVR offset touches it.
+//
+// headForward above is a DIRECTION and cannot carry roll or translation,
+// which is enough to counter-move a sprite and not enough to place a panel
+// in the world. The intro movie needs the whole pose: it builds a real
+// view-projection so the movie is drawn on the splash's own screen, with
+// the stereo that a screen at a distance has (intro_panel.h). False when
+// nothing has published, which the caller must treat as "leave it alone".
+void publishHeadPose(const float* m12);
+bool headPose(float* out12);
 bool headForward(float* tx, float* ty);
 
 // The cull guard's state, published by openvr_api.dll at its stage

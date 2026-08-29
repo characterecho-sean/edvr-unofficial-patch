@@ -1556,6 +1556,16 @@ vr::EVRCompositorError hookedWaitGetPoses(void* self,
                 float fwd = m[2][2];   // == -(d.z); 1 facing forward
                 if (fwd < 0.05f) fwd = 0.05f;
                 announceHeadForward(dx / fwd, dy / fwd);
+                // The WHOLE pose, for the intro panel's world-space screen.
+                // A direction cannot carry roll or translation; a panel
+                // placed in the world needs both. Same raw pose the ring
+                // records -- before the head offset -- so Explorer Cam
+                // cannot drag the movie's screen around with it.
+                float m12[12];
+                for (int rr = 0; rr < 3; ++rr) {
+                    for (int cc = 0; cc < 4; ++cc) m12[rr * 4 + cc] = m[rr][cc];
+                }
+                publishHeadPose(m12);
             }
 
             // The handover log: the session's first calls, plus every later

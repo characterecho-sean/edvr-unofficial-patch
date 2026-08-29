@@ -60,6 +60,29 @@ constexpr float kSplashHalfWidthNdc = 1.0440f;
 // where the same match needs more.
 constexpr float kMaxSize = 8.0f;
 
+// THE SPLASH'S OWN SCREEN, measured 2026-08-28 from its constants and its
+// vertices in one frame (docs/intro-video.md):
+//
+//   half-extents 4.44444 x 2.5 world units -- 16:9, and the same +-1 unit
+//   quad the movie uses, so only the transform differs;
+//   corner w of 3.3259 3.6643 3.3196 3.6580 -- about 3.35 units away and
+//   very nearly fronto-parallel;
+//   106.4 degrees wide by 73.4 tall, centred on the game's forward.
+//
+// Placing the movie on exactly these numbers is the point: the field asked
+// for it to play "as if anchored on the virtual screen the splash screen
+// appears on", and the game has already told us where that screen is.
+constexpr float kScreenHalfW = 4.44444f;
+constexpr float kScreenHalfH = 2.5f;
+constexpr float kScreenDistDefault = 3.35f;
+
+// Half the interpupillary distance, metres. The panel's stereo comes from
+// offsetting each eye's ray origin by this; the runtime publishes no IPD,
+// and at 3.35 m a few millimetres of error is far under a tenth of a
+// degree. Named rather than buried so it can be corrected if it ever
+// matters.
+constexpr float kHalfIpd = 0.0315f;
+
 // World lock (fix.intro_video_lock). The counter-move is witchstar_fix's,
 // which already holds a head-locked sprite on a world direction by shifting
 // the VIEWPORT for one draw -- no matrix, no new channel, and field-proven on
@@ -75,13 +98,10 @@ constexpr float kMaxSize = 8.0f;
 // reporting yaw 180 and y -23 m from the first frame (docs/intro-video.md).
 // A play space is the place to fix that, not a panel transform.
 bool  g_worldLock = false;
-float g_lockGain = 1.0f;
 bool  g_anchored = false;   // the "holding" line has been said
+bool  g_lockRefusedNoted = false;
 
-// What the current draw changed, so endDraw undoes exactly that.
-bool     g_vpSaved = false;
-UINT     g_savedVpCount = 0;
-D3D11_VIEWPORT g_savedVps[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE];
+float g_screenDist = kScreenDistDefault;
 
 // Set when fix.intro_video_size names the splash rather than a number.
 bool  g_matchSplash = false;
@@ -104,8 +124,15 @@ struct Slot {
     void*         key = nullptr;   // the game's cb2 buffer for one eye
     ID3D11Buffer* stage = nullptr; // the readback copy, transient
     uint32_t      dueFrame = 0;    // 0 = nothing settling
-    ID3D11Buffer* ours = nullptr;  // our replacement constants
+    ID3D11Buffer* ours = nullptr;  // our replacement constants (dynamic)
     bool          ready = false;
+    // Which eye this buffer belongs to, read from the GAME's own constants:
+    // cb2[4].x is the centre of an asymmetric frustum and is positive in
+    // the eye whose outer tangent is on the left. Measured +0.1939 and
+    // -0.1940 on this headset, against a frustum centre of 0.193973
+    // computed from its published tangents -- so this is a reading, not a
+    // convention anybody chose.
+    bool          leftEye = false;
 };
 Slot     g_slot[kMaxSlots];
 uint32_t g_slotCount = 0;
@@ -133,6 +160,81 @@ bool looksScreenSpace(const float* f) {
     // The scale must be a plausible half-size in pixels. A world-space quad
     // measured 4.4 by 2.5 units; a screen-space one measured 512 by 288.
     if (f[0] < 16.0f || f[1] < 16.0f) return false;
+    return true;
+}
+
+// Build cb2 for a world-space panel on the splash's screen.
+//
+// The vertex shader is  o1 = x*cb2[1] + y*cb2[2] + z*cb2[3] + cb2[4], with
+// (x,y) the unit quad already multiplied by cb2[0]. Set cb2[0] to 1 and the
+// four remaining float4s ARE the columns of a 4x4 acting on (x, y, z, 1) --
+// which is what the splash's own constants are, measured.
+//
+// leftEye picks the frustum and the eye offset. It is read from the GAME's
+// own constants: cb2[4].x is the centre of an asymmetric frustum, positive
+// in the eye whose outer tangent is on the left. No guessing which submit
+// this is.
+//
+// Returns false when the pose or the tangents are not published -- without
+// openvr_api.dll installed there is no world to lock to, and stock is the
+// honest answer.
+bool buildWorldCb(bool leftEye, float dist, float vpW, float vpH,
+                  float* out) {
+    float pose[12];
+    if (!headPose(pose)) return false;
+    float outer = 0.0f, inner = 0.0f;
+    if (!eyeTangents(&outer, &inner)) return false;
+    const float span = outer + inner;
+    if (span < 1e-3f) return false;
+
+    // The eye's frustum. The OUTER tangent is temporal: left edge of the
+    // left eye, right edge of the right. The vertical span is not published
+    // and follows from the eye texture's shape -- the same derivation
+    // fss_theater makes, and it reproduces this headset's published
+    // +-1.2648 to four decimals from 5424x5356.
+    const float lt = leftEye ? -outer : -inner;
+    const float rt = leftEye ? inner : outer;
+    const float vt = span * 0.5f * (vpW > 0.0f ? vpH / vpW : 1.0f);
+    const float tp = -vt, bt = vt;
+    const float m00 = 2.0f / (rt - lt), m02 = (rt + lt) / (rt - lt);
+    const float m11 = 2.0f / (bt - tp), m12 = (bt + tp) / (bt - tp);
+
+    // View: the seated frame through the head's inverse, plus this eye's
+    // lateral offset. R is the pose's rotation; A = R-transpose.
+    const float* R = pose;   // row-major 3x4: R[r*4+c]
+    auto At = [&](int i, int j) { return R[j * 4 + i]; };   // A[i][j] = R[j][i]
+    const float tx = R[3], ty = R[7], tz = R[11];
+    const float ex = leftEye ? -kHalfIpd : kHalfIpd;
+
+    // The three basis vectors of the panel, in view space.
+    float cx[3], cy[3], c0[3];
+    for (int i = 0; i < 3; ++i) {
+        cx[i] = At(i, 0) * kScreenHalfW;
+        cy[i] = At(i, 1) * kScreenHalfH;
+        // the panel's centre at (0,0,-dist) in the seated frame, brought
+        // into view space, with the head's translation and the eye offset
+        const float o = -(At(i, 0) * tx + At(i, 1) * ty + At(i, 2) * tz);
+        c0[i] = At(i, 2) * (-dist) + o;
+    }
+    c0[0] -= ex;
+
+    // No depth buffer is bound for this draw (census "d=-"), so z is free;
+    // half of w keeps ndc.z at 0.5, safely inside [0,1] whatever the panel
+    // does.
+    auto col = [&](const float* v, bool centre, float* dst) {
+        dst[0] = m00 * v[0] + m02 * v[2];
+        dst[1] = m11 * v[1] + m12 * v[2];
+        dst[3] = -v[2];
+        dst[2] = 0.5f * dst[3];
+        (void)centre;
+    };
+    for (int i = 0; i < 20; ++i) out[i] = 0.0f;
+    out[0] = 1.0f;   // cb2[0]: the unit quad is already the panel's shape
+    out[1] = 1.0f;
+    col(cx, false, out + 4);
+    col(cy, false, out + 8);
+    // cb2[3] stays zero: the quad's z is zero on every vertex (measured).
+    col(c0, true, out + 16);
     return true;
 }
 
@@ -166,9 +268,10 @@ void introPanelConfigure(Config& cfg) {
     const std::string lk = cfg.getString("fix.intro_video_lock", "head");
     const bool wasLock = g_worldLock;
     g_worldLock = (lk == "world");
-    g_lockGain = cfg.getFloat("advanced.intro_video_lock_gain", 1.0f);
-    if (g_lockGain < -2.0f) g_lockGain = -2.0f;
-    if (g_lockGain > 2.0f) g_lockGain = 2.0f;
+    g_screenDist = cfg.getFloat("advanced.intro_video_distance",
+                                kScreenDistDefault);
+    if (g_screenDist < 1.0f) g_screenDist = 1.0f;
+    if (g_screenDist > 20.0f) g_screenDist = 20.0f;
     if (g_worldLock != wasLock) {
         Log::get().note(
             g_worldLock
@@ -229,60 +332,18 @@ bool introPanelOnComposite(ID3D11DeviceContext* ctx, char kind, uint32_t count,
     if (g_fillFrame != g_frame || !g_fillW) return false;
     if (srvW != g_fillW || srvH != g_fillH) return false;
 
-    // The world lock, before the constant substitution: it changes the
-    // viewport rather than the constants, so the two compose and either can
-    // be on alone.
-    if (g_worldLock) {
-        guardedBudget(g_budget, [&] {
-            float tx = 0.0f, ty = 0.0f;
-            if (!headForward(&tx, &ty)) return;   // vr half absent: no lock
-            float outer = 0.0f, inner = 0.0f;
-            if (!eyeTangents(&outer, &inner)) return;
-            const float span = outer + inner;
-            if (span < 1e-3f) return;
-            if (!g_anchored) {
-                g_anchored = true;
-                Log::get().note(
-                    "intro video lock: holding the game's forward, which is "
-                    "where the splash anchors (tangents now %+.4f %+.4f). If "
-                    "that direction is not in front of you the movie lands "
-                    "where the splash will land -- the same recentre fixes "
-                    "both, which is the point of sharing the anchor.",
-                    static_cast<double>(tx), static_cast<double>(ty));
-            }
-            UINT n = 1;
-            D3D11_VIEWPORT vp{};
-            ctx->RSGetViewports(&n, &vp);
-            if (n == 0 || vp.Width <= 0.0f) return;
-            // Pixels per unit tangent, horizontal. The vertical span is not
-            // published and the two agree within a couple of percent on every
-            // headset measured -- witchstar_fix's note, and the same
-            // reasoning holds for a panel as for a sprite.
-            const float pxPerTan = vp.Width / span;
-            // Against the GAME's forward, not a captured view: tx and ty ARE
-            // that direction in the current head frame, so counter-moving by
-            // them holds it. witchstar_fix does the same for a sprite; the
-            // anchor is the game's, deliberately, because the splash uses it.
-            float sx = tx * pxPerTan * g_lockGain;
-            float sy = -ty * pxPerTan * g_lockGain;
-            // A pathological pose must not fling the viewport into numeric
-            // nonsense; past a viewport off-axis the panel is out of view
-            // anyway.
-            const float lim = vp.Width * 0.9f;
-            if (sx > lim) sx = lim;
-            if (sx < -lim) sx = -lim;
-            if (sy > lim) sy = lim;
-            if (sy < -lim) sy = -lim;
-            g_savedVpCount = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
-            ctx->RSGetViewports(&g_savedVpCount, g_savedVps);
-            D3D11_VIEWPORT shifted = vp;
-            shifted.TopLeftX = vp.TopLeftX + sx;
-            shifted.TopLeftY = vp.TopLeftY + sy;
-            ctx->RSSetViewports(1, &shifted);
-            g_vpSaved = true;
-        });
-    }
-
+    // The world lock is not a nudge to the game's geometry -- it is a
+    // REPLACEMENT transform, built here and written into cb2 exactly as the
+    // splash's own is. A viewport shift (the first attempt, witchstar_fix's
+    // pattern) can only translate: it gives no stereo, so the picture always
+    // reads as being at infinity, and the splash's screen is not at
+    // infinity. That is why it could never have worked, whatever its sign.
+    //
+    // What is built: clip = Proj * View * Model, for a 16:9 quad of the
+    // splash's own half-extents at the splash's own distance, centred on the
+    // game's forward -- which in the seated frame is -Z, so the panel sits at
+    // (0,0,-d) and needs no anchor of its own. Ordinary world geometry, so
+    // the compositor reprojects it like anything else in the scene.
     bool bound = false;
     guardedBudget(g_budget, [&] {
         ID3D11Buffer* cb = nullptr;
@@ -302,6 +363,38 @@ bool introPanelOnComposite(ID3D11DeviceContext* ctx, char kind, uint32_t count,
             return;
         }
         if (s->ready && s->ours) {
+            // The world panel is rebuilt EVERY draw -- the view moves with
+            // the head, which is the entire point -- so the buffer is
+            // dynamic and written here rather than baked once.
+            if (g_worldLock) {
+                UINT nvp = 1;
+                D3D11_VIEWPORT vp{};
+                ctx->RSGetViewports(&nvp, &vp);
+                float world[kCbFloats];
+                if (nvp == 0 || vp.Width <= 0.0f ||
+                    !buildWorldCb(s->leftEye, g_screenDist, vp.Width, vp.Height,
+                                  world)) {
+                    // No pose, no tangents, no viewport: stock rather than a
+                    // panel placed on guesses.
+                    if (!g_lockRefusedNoted) {
+                        g_lockRefusedNoted = true;
+                        Log::get().note(
+                            "intro video lock: no head pose or eye tangents "
+                            "published -- openvr_api.dll is what publishes "
+                            "them. The movie stays as the game drew it.");
+                    }
+                    cb->Release();
+                    return;
+                }
+                D3D11_MAPPED_SUBRESOURCE m{};
+                if (FAILED(ctx->Map(s->ours, 0, D3D11_MAP_WRITE_DISCARD, 0, &m)) ||
+                    !m.pData) {
+                    cb->Release();
+                    return;
+                }
+                memcpy(m.pData, world, kCbBytes);
+                ctx->Unmap(s->ours, 0);
+            }
             g_restore = cb;
             ID3D11Buffer* ours = s->ours;
             ctx->VSSetConstantBuffers(kVsSlot, 1, &ours);
@@ -347,7 +440,7 @@ bool introPanelOnComposite(ID3D11DeviceContext* ctx, char kind, uint32_t count,
     // Either change is a match. Returning false with a shifted viewport
     // would leak it into every draw after this one -- the caller only calls
     // endDraw when this says yes.
-    return bound || g_vpSaved;
+    return bound;
 }
 
 void introPanelEndDraw(ID3D11DeviceContext* ctx) {
@@ -356,10 +449,6 @@ void introPanelEndDraw(ID3D11DeviceContext* ctx) {
         ID3D11Buffer* orig = static_cast<ID3D11Buffer*>(g_restore);
         ctx->VSSetConstantBuffers(kVsSlot, 1, &orig);
         g_restore = nullptr;
-    }
-    if (g_vpSaved) {
-        ctx->RSSetViewports(g_savedVpCount, g_savedVps);
-        g_vpSaved = false;
     }
 }
 
@@ -438,11 +527,17 @@ void introPanelTick(ID3D11DeviceContext* ctx, bool sceneFrame) {
             out[1] = f[1] * scale;
             D3D11_BUFFER_DESC bd{};
             bd.ByteWidth = kCbBytes;
-            bd.Usage = D3D11_USAGE_IMMUTABLE;
+            // DYNAMIC, not immutable: the world panel is rebuilt every draw
+            // because the view moves with the head. The size-only mode
+            // writes these bytes once and never again, and pays nothing for
+            // the difference.
+            bd.Usage = D3D11_USAGE_DYNAMIC;
             bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+            bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
             D3D11_SUBRESOURCE_DATA sr{};
             sr.pSysMem = out;
             if (SUCCEEDED(dev->CreateBuffer(&bd, &sr, &s.ours)) && s.ours) {
+                s.leftEye = f[16] > 0.0f;
                 s.ready = true;
                 Log::get().note(
                     "intro video size: read the movie panel's own constants -- "
