@@ -160,6 +160,19 @@ struct Shared {
     // WORD must keep meaning "nobody publishing" -- the presence bit and
     // the bias keep every published value nonzero.
     volatile LONG headForward;
+    // gameDev  the game's own ID3D11Device, written by d3d11.dll at device
+    //          creation and read by openvr_api.dll's early handover.
+    //
+    // The one field published before the openvr half has run at all, which
+    // is what makes the early handover possible: OpenComposite rebuilds its
+    // OpenXR session for the application's graphics API on the first
+    // compositor call that carries a texture, and that rebuild costs 2.5 s
+    // on this rig. Doing it ourselves, on the game's device, before the game
+    // asks for the compositor, moves the cost off the intro movie.
+    //
+    // LONG64 rather than LONG: this is a 64-bit pointer, and submitTex above
+    // is the precedent.
+    volatile LONG64 gameDev;
 };
 
 // Per PROCESS, not per logon session.
@@ -176,6 +189,8 @@ struct Shared {
 // The name is built once, at first use. The two DLLs are in the same process,
 // so the channel between them is unaffected.
 //
+// _v20 because the game's D3D11 device joined, for the early VR handover
+// (early_session.h).
 // _v19 because the head pose joined, for the intro movie's world-space
 // panel (intro_panel.h). _v18 because the arrival stamp joined for the
 // window-scoped heal. _v17
@@ -205,7 +220,7 @@ const wchar_t* mappingName() {
     static wchar_t name[64];
     static bool built = false;
     if (!built) {
-        _snwprintf_s(name, _TRUNCATE, L"Local\\edvr_glitch_frame_v19_%lu",
+        _snwprintf_s(name, _TRUNCATE, L"Local\\edvr_glitch_frame_v20_%lu",
                      GetCurrentProcessId());
         built = true;
     }
@@ -336,6 +351,18 @@ void* submittedTexture(int eye) {
     Shared* s = map();
     if (!s || eye < 0 || eye > 1) return nullptr;
     return reinterpret_cast<void*>(s->submitTex[eye]);
+}
+
+void publishGameDevice(void* device) {
+    Shared* s = map();
+    if (!s) return;
+    s->gameDev = reinterpret_cast<LONG64>(device);
+}
+
+void* gameDevice() {
+    Shared* s = map();
+    if (!s) return nullptr;
+    return reinterpret_cast<void*>(s->gameDev);
 }
 
 void markGlitchFrame() {

@@ -19,4 +19,20 @@ void* interceptInterface(void* iface, const char* interfaceVersion);
 
 void shutdownCompositorHook();
 
+// The IVRCompositor versions this build knows the vtable layout of, in the
+// order the table declares them (the generation the game links first).
+//
+// Exposed for the early handover, which has to ask the runtime for a
+// compositor BEFORE the game does and therefore cannot be told which version
+// to want -- it walks this list and takes the first the runtime answers.
+// Reusing the one table is the point: a second copy would be a second thing
+// to update when a game build moves forward, and the first to be forgotten.
+//
+// Submit's slot is 5 for every generation listed, and has been since
+// IVRCompositor_014, but it is read from the table rather than assumed
+// because the table is where that fact is written down.
+size_t      knownCompositorCount();
+const char* knownCompositorVersion(size_t i);   // null if i is out of range
+size_t      knownCompositorSubmitSlot(size_t i);  // 0 if i is out of range
+
 }  // namespace edvr

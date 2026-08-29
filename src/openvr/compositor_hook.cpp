@@ -1810,6 +1810,20 @@ vr::EVRCompositorError hookedWaitGetPoses(void* self,
 
 }  // namespace
 
+size_t knownCompositorCount() {
+    return sizeof(kCompositorTable) / sizeof(kCompositorTable[0]);
+}
+
+const char* knownCompositorVersion(size_t i) {
+    if (i >= knownCompositorCount()) return nullptr;
+    return kCompositorTable[i].version;
+}
+
+size_t knownCompositorSubmitSlot(size_t i) {
+    if (i >= knownCompositorCount()) return 0;
+    return kCompositorTable[i].submit;
+}
+
 void* interceptInterface(void* iface, const char* interfaceVersion) {
     if (!iface || !interfaceVersion) return iface;
 

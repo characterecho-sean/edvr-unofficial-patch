@@ -22,6 +22,7 @@
 #include "../common/log.h"
 #include "../common/proxy.h"
 #include "compositor_hook.h"
+#include "early_session.h"
 #include "openvr_min.h"
 #include "system_hook.h"
 
@@ -278,6 +279,15 @@ extern "C" void* __cdecl edvr_impl_VR_GetGenericInterface(const char* interfaceV
         return nullptr;
     }
     ensureInitialised();
+
+    // The earliest moment EDVR is in control with a log open, which is what
+    // the early handover needs: it must run before the game asks for the
+    // compositor, and this is the call in which the game asks for its FIRST
+    // interface. Measured on the field rig that is 2.46 s of headroom.
+    //
+    // It returns immediately after the first time, and immediately every time
+    // unless fix.vr_handover asks for it. See early_session.h.
+    edvr::earlySessionRun(g_realGetGenericInterface);
 
     // BEFORE the real call, which is the whole point: the runtime we shield
     // against answers a request it does not like with a fatal dialog, so the

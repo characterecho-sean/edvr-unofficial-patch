@@ -16,6 +16,7 @@
 #include <string>
 
 #include "../common/config.h"
+#include "../common/frame_flag.h"
 #include "../common/guard.h"
 #include "../common/log.h"
 #include "../common/proxy.h"
@@ -70,6 +71,17 @@ void attachToDevice(ID3D11Device* device, IDXGISwapChain* swapChain,
     edvr::guardedBudget(g_createBudget, [&] {
         logDeviceCreation(device, driverType, flags, hr);
         if (!device) return;
+        // Published before anything is hooked, and deliberately before the
+        // config is consulted: the openvr half decides whether it wants this,
+        // and it cannot ask for it later -- by the time the game requests an
+        // interface the moment has passed. Publishing an unwanted pointer
+        // costs one store into a mapping we already own. See early_session.h.
+        //
+        // The FIRST device wins. attachToDevice runs again for a second
+        // device (device_hook.cpp says so in as many words), and the early
+        // handover wants the one the game actually renders with, which on
+        // every rig measured is the first.
+        if (!edvr::gameDevice()) edvr::publishGameDevice(device);
         edvr::hookDevice(device);
         if (swapChain) {
             edvr::hookSwapChain(swapChain);

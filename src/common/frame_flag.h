@@ -53,6 +53,20 @@ void clearGlitchFrame();
 void publishSubmitTexture(int eye, void* texture);
 void* submittedTexture(int eye);
 
+// The game's own ID3D11Device, published by d3d11.dll the moment the game
+// creates it. A raw pointer valid within this process, like submitTex above.
+//
+// This one runs the other way round from every other d3d11 -> openvr field:
+// it is published BEFORE the openvr half has been called at all. Measured on
+// the field rig, the device is created 1.20 s before openvr_api.dll is first
+// asked for an interface, which is the whole reason the early handover has
+// anything to work with (early_session.h).
+//
+// Null means no d3d11 half, or a device the proxy never saw. Every reader
+// must treat that as "stand down", not as a reason to wait.
+void  publishGameDevice(void* device);
+void* gameDevice();
+
 // The FSS arrival-mono window: d3d11 sets the frame count when a camera
 // jump lands while the scanner's screen is up; the openvr half submits
 // the right eye's texture for both eyes while it counts down (one
