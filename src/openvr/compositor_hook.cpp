@@ -138,6 +138,10 @@ struct State {
     void*            ownerIface = nullptr;
     PFN_Submit       realSubmit = nullptr;
     PFN_WaitGetPoses realWaitGetPoses = nullptr;
+    // The handover pose log (advanced.handover_pose_log).
+    uint32_t handoverLogWanted = 0;
+    uint32_t handoverLogged = 0;
+    int32_t  handoverLastValid = -1;   // -1 = nothing seen yet
 
     Sentinel* sentinel = nullptr;
 
@@ -418,6 +422,18 @@ void configurePoseRing(State* s) {
         s->poseCamBound = s->poseCamKey.key() != 0;
     }
     s->poseDumpOnCam = cfg.getBool("advanced.dump_camera_on_external_cam", false);
+    // The handover log: how many of the session's FIRST poses to write out.
+    //
+    // The intro-video work needs this (docs/intro-video.md). Elite's splash
+    // panel was measured BEHIND the player before any recentre -- about 180
+    // degrees out -- which is what latching a seated origin from a bad pose
+    // looks like, and the moment it could happen is the 2.7-second VR
+    // handover, while the player is still in the runtime's home space.
+    // WaitGetPoses runs once per submitted frame, so the session's first few
+    // dozen calls ARE that handover. Read-only: it records what the runtime
+    // returned and changes nothing.
+    s->handoverLogWanted = static_cast<uint32_t>(
+        cfg.getIntInRange("advanced.handover_pose_log", 0, 0, 240));
 
     // SAID OUT LOUD, once, because an instrument that records silently and
     // dumps on a key is indistinguishable from one that is not there. A whole
@@ -1541,6 +1557,42 @@ vr::EVRCompositorError hookedWaitGetPoses(void* self,
                 if (fwd < 0.05f) fwd = 0.05f;
                 announceHeadForward(dx / fwd, dy / fwd);
             }
+
+            // The handover log: the session's first calls, plus every later
+            // call where VALIDITY changes -- a pose that goes valid late is
+            // exactly the shape this exists to catch, and it can happen after
+            // the line budget is spent.
+            const bool validFlip =
+                s->handoverLastValid >= 0 &&
+                s->handoverLastValid != (hmd.bPoseIsValid ? 1 : 0);
+            if (s->handoverLogWanted &&
+                (s->handoverLogged < s->handoverLogWanted || validFlip)) {
+                if (s->handoverLogged < s->handoverLogWanted) ++s->handoverLogged;
+                const auto& mm = hmd.mDeviceToAbsoluteTracking.m;
+                // Forward is the negated third ROW of a row-major rotation;
+                // yaw and pitch off it say where the headset was pointing.
+                const float fx = -mm[2][0], fy = -mm[2][1], fz = -mm[2][2];
+                float fyc = fy < -1.0f ? -1.0f : (fy > 1.0f ? 1.0f : fy);
+                const double yaw = atan2(static_cast<double>(fx),
+                                         static_cast<double>(-fz)) * 57.2957795;
+                const double pitch = asin(static_cast<double>(fyc)) * 57.2957795;
+                // An exactly-identity rotation is the tell for a pose the
+                // runtime has not filled in, and it is worth naming outright
+                // rather than leaving to whoever reads the numbers.
+                const bool ident = mm[0][0] == 1.0f && mm[1][1] == 1.0f &&
+                                   mm[2][2] == 1.0f && mm[0][1] == 0.0f &&
+                                   mm[0][2] == 0.0f && mm[1][0] == 0.0f;
+                Log::get().note(
+                    "handover pose %u: valid=%d result=%d yaw=%+.1f pitch=%+.1f "
+                    "pos %+.3f %+.3f %+.3f%s%s",
+                    s->poseFrame, hmd.bPoseIsValid ? 1 : 0,
+                    static_cast<int>(hmd.eTrackingResult), yaw, pitch,
+                    mm[0][3], mm[1][3], mm[2][3],
+                    ident ? "  IDENTITY ROTATION -- the runtime has not filled "
+                            "this pose in" : "",
+                    validFlip ? "  <-- validity changed here" : "");
+            }
+            s->handoverLastValid = hmd.bPoseIsValid ? 1 : 0;
         });
     }
 
