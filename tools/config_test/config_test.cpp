@@ -203,8 +203,16 @@ int main(int argc, char** argv) {
         // any more -- and the compiled default (inherit) moved the whole
         // scanner UI.
         static const char* kKnown[] = {"fix.alpha", "experimental.beta"};
-        static const char* kMoved[][2] = {{"fix.beta", "experimental.beta"}};
-        Config::get().setAuditTables(kKnown, 2, kMoved, 1);
+        static const char* kMoved[][3] = {
+            {"fix.beta", "experimental.beta", ""},
+            // A move whose old key shipped a default: a user line still
+            // carrying that default is an un-updated file, not a choice, and
+            // must NOT follow the move -- the new key's own default rules.
+            // 2026-08-28's field bug exactly: menu_backdrop = stock (the old
+            // shipped default) suppressing intro_backdrop's new splash.
+            {"fix.gamma", "experimental.gamma", "stock"},
+        };
+        Config::get().setAuditTables(kKnown, 2, kMoved, 2);
         static const char kAuditIni[] =
             "[fix]\r\n"
             "beta = 7\r\n"          // the old-layout line: must follow the move
@@ -231,6 +239,20 @@ int main(int argc, char** argv) {
             Config::get().init(scratch);
             expectInt("experimental.beta", 5,
                       "when old and new are both set, the new name wins");
+        }
+        static const char kStaleIni[] =
+            "[fix]\r\n"
+            "gamma = stock\r\n"      // the OLD key's shipped default: stale
+            "beta = screen\r\n";     // a real choice on a move with no default
+        if (!writeIni(scratch, kStaleIni)) {
+            fail("audit stale-default ini", "could not write it");
+        } else {
+            Config::get().init(scratch);
+            expectStr("experimental.gamma", "<unset>",
+                      "an old line carrying its retired default does not "
+                      "follow the move; the caller's own default rules");
+            expectStr("experimental.beta", "screen",
+                      "a real old-line choice still follows the move");
         }
         Config::get().setAuditTables(nullptr, 0, nullptr, 0);
     }

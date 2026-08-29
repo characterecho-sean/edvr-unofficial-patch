@@ -194,10 +194,25 @@ void SettingsModel::refreshRows() {
         row.choices = splitChoices(def.choices);
 
         // What the file says, or -- for a setting the user's ini does not carry
-        // at all -- what this build ships. Showing the shipped value is right:
-        // it is what the game will use.
+        // at all -- what this build ships. An un-migrated file is read the way
+        // the runtime reads it: through the moved-from map, ignoring an old
+        // line that still carries its retired default (that is an un-updated
+        // file, not a choice -- the field saw the window claim splash while
+        // the runtime honoured a stale menu_backdrop = stock).
         const std::string dotted = std::string(def.section) + "." + def.key;
-        row.value = iniValue(m_text, dotted, def.shipped);
+        const char* kAbsent = "\x01";
+        row.value = iniValue(m_text, dotted, kAbsent);
+        if (row.value == kAbsent) {
+            row.value = def.shipped;
+            for (const auto& mv : kMovedSettings) {
+                if (!mv[0][0] || dotted != mv[1]) continue;
+                const std::string oldValue = iniValue(m_text, mv[0], kAbsent);
+                if (oldValue == kAbsent) continue;
+                if (mv[2][0] && oldValue == mv[2]) continue;  // stale default
+                row.value = oldValue;
+                break;
+            }
+        }
         row.isRecommended = sameValue(def, row.value, def.recommended);
         row.isShipped = sameValue(def, row.value, def.shipped);
         m_rows.push_back(row);
@@ -208,6 +223,14 @@ bool SettingsModel::set(size_t index, const std::string& value) {
     if (index >= m_rows.size()) return false;
     const SettingDef& def = *m_rows[index].def;
     const std::string dotted = std::string(def.section) + "." + def.key;
+
+    // Re-read the file first: the install/update path rewrites edvr.ini --
+    // migrating renamed keys as it goes -- and a model cached when this
+    // window opened would write that pre-update text straight back over the
+    // migration, one stale byte at a time. Measured in the field, 2026-08-28:
+    // an update at 21:45:22, a settings save at 21:45:39, and the migrated
+    // file was gone.
+    m_text = readTextFile(m_iniPath);
 
     // The merge engine, used for one value: merging a document with itself is a
     // no-op (installer_test proves it), so the only change is the forced value

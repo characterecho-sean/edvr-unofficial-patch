@@ -26,7 +26,7 @@ namespace {
 // Registered by config_audit.cpp (DLLs) or by a test; null means no audit.
 const char* const*        g_auditKnown = nullptr;
 size_t                    g_auditKnownCount = 0;
-const char* const (*g_auditMoved)[2] = nullptr;
+const char* const (*g_auditMoved)[3] = nullptr;
 size_t                    g_auditMovedCount = 0;
 
 std::string lowered(const std::string& s) {
@@ -39,7 +39,7 @@ std::string lowered(const std::string& s) {
 }  // namespace
 
 void Config::setAuditTables(const char* const* knownLower, size_t knownCount,
-                            const char* const (*movedOldNew)[2],
+                            const char* const (*movedOldNew)[3],
                             size_t movedCount) {
     g_auditKnown = knownLower;
     g_auditKnownCount = knownCount;
@@ -246,8 +246,25 @@ void Config::auditResolve(void* parsedMap) {
         movedOld.insert(oldK);
         auto o = parsed.find(oldK);
         if (o == parsed.end()) continue;
+        const std::string oldDefault = g_auditMoved[i][2];
+        const bool staleDefault = !oldDefault.empty() && o->second == oldDefault;
         auto n = parsed.find(newK);
         if (n == parsed.end()) {
+            if (staleDefault) {
+                // The line carries the OLD key's shipped default -- nobody's
+                // choice, just an un-updated file. The new key's own default
+                // (which may have flipped) must rule, so nothing is
+                // synthesized from it.
+                if (m_impl->auditNoted.insert("mv:" + oldK).second) {
+                    m_impl->auditPending.push_back(
+                        "edvr.ini: " + oldK + " has moved to " + newK +
+                        ", and your line still carries the retired default (" +
+                        o->second + "), so it is ignored and " + newK +
+                        "'s own default applies. The installer's update "
+                        "tidies the file.");
+                }
+                continue;
+            }
             // The old-layout line still works: its value is read as the new
             // key this session, and the log says how to make that permanent.
             parsed[newK] = o->second;
@@ -259,6 +276,9 @@ void Config::auditResolve(void* parsedMap) {
                     "the old line this session. The installer's update "
                     "migrates the file, or move the line yourself.");
             }
+        } else if (staleDefault) {
+            // Both set, but the old line is only the retired default: the
+            // new line rules and there is nothing worth a warning.
         } else if (n->second != o->second && !synthesized.count(newK)) {
             // Two settings can merge into one new key; a second old value
             // arriving after the first synthesized the target is not the

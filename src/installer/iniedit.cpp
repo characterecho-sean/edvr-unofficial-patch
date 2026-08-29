@@ -174,9 +174,18 @@ namespace {
 // fss_eye_sync); each old name maps to the same target, and when more than one
 // old value is present in a user's file the last one in file order lands (they
 // agree in every configuration that was ever a default).
-std::map<std::string, std::pair<std::string, std::string>> movedKeys(const IniDoc& doc) {
-    std::map<std::string, std::pair<std::string, std::string>> out;
-    std::vector<std::string> pending;
+struct MovedTarget {
+    std::string section;
+    std::string key;
+    std::string oldDefault;   // the OLD key's shipped default, or empty: a
+                              // user line still carrying it is stale, not a
+                              // choice, and must not override the new
+                              // default when it migrates
+};
+
+std::map<std::string, MovedTarget> movedKeys(const IniDoc& doc) {
+    std::map<std::string, MovedTarget> out;
+    std::vector<std::pair<std::string, std::string>> pending;  // old, default
     for (const IniLine& line : doc.lines) {
         if (line.kind == LineKind::Comment) {
             const std::string body = trim(line.text);
@@ -184,7 +193,19 @@ std::map<std::string, std::pair<std::string, std::string>> movedKeys(const IniDo
             while (at < body.size() && (body[at] == '#' || body[at] == ';')) ++at;
             const std::string text = trim(body.substr(at));
             if (lower(text).rfind("moved-from:", 0) == 0) {
-                pending.push_back(trim(text.substr(strlen("moved-from:"))));
+                std::string spec = trim(text.substr(strlen("moved-from:")));
+                std::string oldDefault;
+                const size_t open = spec.find("(default");
+                if (open != std::string::npos) {
+                    const size_t close = spec.find(')', open);
+                    if (close != std::string::npos) {
+                        oldDefault =
+                            trim(spec.substr(open + strlen("(default"),
+                                             close - open - strlen("(default")));
+                        spec = trim(spec.substr(0, open));
+                    }
+                }
+                pending.emplace_back(spec, oldDefault);
             }
             continue;
         }
@@ -192,8 +213,8 @@ std::map<std::string, std::pair<std::string, std::string>> movedKeys(const IniDo
             pending.clear();
             continue;
         }
-        for (const std::string& p : pending) {
-            out[lower(p)] = {line.section, line.key};
+        for (const auto& p : pending) {
+            out[lower(p.first)] = {line.section, line.key, p.second};
         }
         pending.clear();
     }
@@ -310,7 +331,7 @@ std::string mergeIni(const std::string& next, const std::string& user, const std
     MergeReport& rep = report ? *report : local;
 
     IniDoc nextDoc = iniParse(next);
-    const std::map<std::string, std::pair<std::string, std::string>> moved = movedKeys(nextDoc);
+    const std::map<std::string, MovedTarget> moved = movedKeys(nextDoc);
     const IniDoc userDoc = iniParse(user);
     const IniDoc baseDoc = iniParse(base ? *base : next);
     rep.twoWay = (base == nullptr);
@@ -385,9 +406,22 @@ std::string mergeIni(const std::string& next, const std::string& user, const std
             // above its new key, and the value follows it there instead of
             // being stranded under a name nothing reads.
             const auto move = moved.find(lower(dotted));
+            if (u.present && move != moved.end() &&
+                !move->second.oldDefault.empty() &&
+                u.value == move->second.oldDefault) {
+                // Their line carries the OLD key's shipped default -- an
+                // un-updated file, not a choice. The new line stands as
+                // shipped and the stale line is consumed.
+                rep.adopted.push_back(dotted + " = " + u.value +
+                                      "  (retired default; " +
+                                      dottedName(move->second.section,
+                                                 move->second.key) +
+                                      " ships its own)");
+                continue;
+            }
             if (u.present && move != moved.end()) {
-                const std::string& newSection = move->second.first;
-                const std::string& newKey = move->second.second;
+                const std::string& newSection = move->second.section;
+                const std::string& newKey = move->second.key;
                 const Effective already = effectiveOf(userDoc, newSection, newKey);
                 if (!already.present) {  // an explicit new-key value wins
                     size_t target = std::string::npos;

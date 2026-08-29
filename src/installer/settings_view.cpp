@@ -302,6 +302,27 @@ void drawRestartBadge(const List* list, HDC dc, const RECT& labelRect,
     }
 }
 
+// A two-way choice where one side is "leave the game alone" reads better as
+// a switch than as two buttons: on is the fix, off is stock. The value
+// written stays the choice string -- only the control changes.
+bool twoChoiceToggle(const SettingRow& row, std::string* onValue,
+                     std::string* offValue) {
+    if (!row.def || row.def->kind != SettingKind::Choice ||
+        row.choices.size() != 2) {
+        return false;
+    }
+    int off = -1;
+    for (int i = 0; i < 2; ++i) {
+        if (row.choices[i].value == "stock" || row.choices[i].value == "off") {
+            off = i;
+        }
+    }
+    if (off < 0) return false;
+    if (onValue) *onValue = row.choices[1 - off].value;
+    if (offValue) *offValue = row.choices[off].value;
+    return true;
+}
+
 void paintRow(const List* list, HDC dc, const RECT& rowRect, const SettingRow& row) {
     const ui::Theme& t = ui::theme();
     const ui::Fonts& f = ui::fonts();
@@ -332,6 +353,20 @@ void paintRow(const List* list, HDC dc, const RECT& rowRect, const SettingRow& r
             break;
         }
         case SettingKind::Choice: {
+            std::string onValue;
+            if (twoChoiceToggle(row, &onValue, nullptr)) {
+                const RECT box = toggleRect(list, geo);
+                const bool on = row.value == onValue;
+                const int height = box.bottom - box.top;
+                ui::fillRounded(dc, box, height / 2, on ? t.accent : t.control);
+                if (!on) ui::strokeRounded(dc, box, height / 2, t.controlBorder);
+                const int knob = height / 2 - dp(list, 3);
+                const int cx =
+                    on ? box.right - knob - dp(list, 4) : box.left + knob + dp(list, 4);
+                ui::fillCircle(dc, cx, (box.top + box.bottom) / 2, knob,
+                               on ? t.accentText : t.subtext);
+                break;
+            }
             const std::vector<RECT> segments = segmentsFor(list, geo, row.choices.size());
             for (size_t i = 0; i < segments.size(); ++i) {
                 const bool selected = row.choices[i].value == row.value;
@@ -647,6 +682,15 @@ void onClick(List* list, int x, int y) {
                 return;
             }
             case SettingKind::Choice: {
+                std::string onValue, offValue;
+                if (twoChoiceToggle(row, &onValue, &offValue)) {
+                    const RECT box = toggleRect(list, geo);
+                    if (PtInRect(&box, point)) {
+                        applyValue(list, item.row,
+                                   row.value == onValue ? offValue : onValue);
+                    }
+                    return;
+                }
                 const std::vector<RECT> segments = segmentsFor(list, geo, row.choices.size());
                 for (size_t i = 0; i < segments.size(); ++i) {
                     if (PtInRect(&segments[i], point)) {
