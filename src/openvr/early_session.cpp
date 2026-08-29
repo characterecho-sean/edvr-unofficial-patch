@@ -92,7 +92,7 @@ void runInner(PFN_RealGetGenericInterface get) {
 
     // Values name what the player gets -- when the handover happens -- not the
     // mechanism underneath it.
-    const std::string mode = cfg.getString("fix.vr_handover", "stock");
+    const std::string mode = cfg.getString("fix.vr_handover", "early");
     if (mode != "early") {
         if (mode != "stock") {
             Log::get().note(
@@ -110,11 +110,11 @@ void runInner(PFN_RealGetGenericInterface get) {
         // it does not on any rig measured, but "measured on one rig" is not
         // "cannot happen", and the honest answer is to stand down and say so.
         Log::get().note(
-            "vr handover: EARLY was asked for, but no D3D11 device has been "
-            "published -- either d3d11.dll is not installed alongside this "
-            "file, or the game reached VR init before creating its device. "
-            "Standing down; the handover happens on the game's own schedule, "
-            "exactly as it does without this setting.");
+            "vr handover: no D3D11 device has been published -- either "
+            "d3d11.dll is not installed alongside this file, or the game "
+            "reached VR init before creating its device. Standing down; the "
+            "handover happens on the game's own schedule, exactly as it does "
+            "with fix.vr_handover = stock.");
         return;
     }
 
@@ -123,9 +123,9 @@ void runInner(PFN_RealGetGenericInterface get) {
     void* comp = acquireCompositor(get, &submitSlot, &version);
     if (!comp) {
         Log::get().note(
-            "vr handover: EARLY was asked for, but the runtime answered none "
-            "of the %zu IVRCompositor versions this build knows. Standing "
-            "down.",
+            "vr handover: the runtime answered none of the %zu IVRCompositor "
+            "versions this build knows, so there is nothing to hand a frame "
+            "to. Standing down.",
             knownCompositorCount());
         return;
     }
@@ -153,9 +153,12 @@ void runInner(PFN_RealGetGenericInterface get) {
         "vr handover: EARLY -- submitting a 1x1 frame on the game's own device "
         "(%p) through %s now, so OpenComposite rebuilds its OpenXR session for "
         "the game's graphics API here instead of inside the game's first "
-        "compositor call. The rebuild costs about 2.5 s on this rig either way; "
-        "the point is that it is paid while the game is still loading rather "
-        "than over the intro movie. The next line says how long it took.",
+        "compositor call, where it lands part-way through the intro movie. "
+        "The rebuild costs about 2.5 s on this rig either way. It does NOT "
+        "cost the frame loop: the game runs VR init on a different thread from "
+        "the one that presents, measured 2026-08-29 -- the render thread kept "
+        "going the whole time, and no frame reached even 200 ms. The next line "
+        "says how long it took.",
         static_cast<void*>(dev), version);
 
     vr::Texture_t t = {};
