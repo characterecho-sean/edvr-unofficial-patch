@@ -7,6 +7,7 @@
 #include <string>
 
 #include "../common/config.h"
+#include "../common/intro_mode.h"
 #include "../common/frame_flag.h"
 #include "../common/guard.h"
 #include "../common/log.h"
@@ -89,21 +90,12 @@ bool ensureBuilt(ID3D11DeviceContext* ctx) {
 
 void splashDimConfigure(Config& cfg) {
     const bool was = g_on;
-    const std::string m = cfg.getString("fix.loading_splash_dim", "on");
-    if (m == "on") {
-        g_on = true;
-    } else if (m == "off") {
-        g_on = false;
-    } else {
-        g_on = false;
-        Log::get().note("loading_splash_dim \"%s\" is not on or off; "
-                        "running off.", m.c_str());
-    }
+    g_on = loadingDimParse(cfg.getString("fix.loading_dim", "screen")).splashDim;
     if (was != g_on) {
         Log::get().note(
-            "splash dim: %s. While the loader's dialogs are up (and "
-            "fix.loading_panel is withholding their full-view scrim), the "
-            "splash screen itself is %s (docs/loading-panel-handoff.md).",
+            "splash dim: %s. While the loader's dialogs are up (and their "
+            "full-view scrim is being withheld), the splash screen itself "
+            "is %s (docs/loading-panel-handoff.md).",
             g_on ? "ON" : "off",
             g_on ? "dimmed by the scrim's own tint -- the screen steps "
                    "back, the world does not"

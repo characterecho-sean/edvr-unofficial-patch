@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "../common/config.h"
+#include "../common/intro_mode.h"
 #include "../common/guard.h"
 #include "../common/log.h"
 
@@ -280,16 +281,7 @@ void recordNone(const char* why) {
 
 void loaderPanelConfigure(Config& cfg) {
     const bool was = g_on;
-    const std::string m = cfg.getString("fix.loading_panel", "stock");
-    if (m == "stock") {
-        g_on = false;
-    } else if (m == "fit") {
-        g_on = true;
-    } else {
-        g_on = false;
-        Log::get().note("loading_panel \"%s\" is not stock or fit; running "
-                        "stock.", m.c_str());
-    }
+    g_on = loadingDimParse(cfg.getString("fix.loading_dim", "screen")).withhold;
     if (was != g_on) {
         if (!g_on) {
             dropPending();

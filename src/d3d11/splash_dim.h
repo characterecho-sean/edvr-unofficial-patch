@@ -33,7 +33,8 @@ namespace edvr {
 
 class Config;
 
-// Reads fix.loading_splash_dim (on | off). Install and reload; live.
+// Reads fix.loading_dim (this module's slice is the splash dim). Install
+// and reload; live.
 void splashDimConfigure(Config& cfg);
 
 // Arm the dim for one re-issue of the screen composite that just drew:

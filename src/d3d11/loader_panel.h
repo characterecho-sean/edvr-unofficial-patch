@@ -95,7 +95,8 @@ namespace edvr {
 
 class Config;
 
-// Reads fix.loading_panel (stock | fit). Install and reload; live.
+// Reads fix.loading_dim (this module's slice is the scrim withhold).
+// Install and reload; live.
 void loaderPanelConfigure(Config& cfg);
 
 // False in stock mode, which keeps the per-draw path free when off.

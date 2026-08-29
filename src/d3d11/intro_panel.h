@@ -47,8 +47,9 @@ namespace edvr {
 
 class Config;
 
-// Reads fix.intro_video_size (1.0 = the game's own size, off). Install and
-// reload; live, though the panel only exists during the intro.
+// Reads fix.intro_video (screen | stock -- this module's slices are the
+// size and the world anchor). Install and reload; live, though the panel
+// only exists during the intro.
 void introPanelConfigure(Config& cfg);
 
 // False at size 1.0, which keeps the per-draw path free in the shipped

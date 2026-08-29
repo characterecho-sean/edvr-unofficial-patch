@@ -194,7 +194,10 @@ def parse_ini(path):
             ui = UI_RE.match(body)
             if ui:
                 annotation = ui.group(1).strip()
-            else:
+            elif not body.startswith('moved-from:'):
+                # Migration metadata for the contract tooling, not prose:
+                # without this the settings window's tooltips end in a list
+                # of retired key names.
                 prose.append(body)
             continue
 

@@ -6,6 +6,14 @@ than inferred from disappearances. Everything measured here came from the
 field rig (Frontier launcher install, game build 330683, eye textures
 5424x5356) on 2026-08-28; everything else says what it is.
 
+> **Key surface, 2026-08-28 (post-consolidation):** everything this doc
+> calls `fix.loading_panel = fit` and `loading_splash_dim = on` now ships
+> as ONE key, **`fix.loading_dim = screen`** (default on), which also
+> absorbs the frosted-wash removal. `stock` is the game's own; `wash` and
+> `panel` remain as developer values, one mechanism each. Old spellings
+> parse silently and old ini lines migrate via moved-from. The mechanism
+> descriptions below are unchanged and correct.
+
 ## The defect, stated exactly
 
 While Elite's loader shows its progress dialogs, a dark bordered panel is
