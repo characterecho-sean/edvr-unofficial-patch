@@ -101,6 +101,11 @@ void loaderPanelConfigure(Config& cfg);
 // False in stock mode, which keeps the per-draw path free when off.
 bool loaderPanelWants();
 
+// True on frames where the game wanted its scrim (a withhold happened this
+// frame or a couple back). splash_dim.h rides this to dim the splash
+// screen itself on exactly the game's own schedule.
+bool loaderPanelDimWanted();
+
 // Called for every draw into an interface-sized offscreen surface while the
 // fix is on and the frame is loader-shaped. Records the frame's composition,
 // feeds a pending measurement, and answers whether THIS draw is a backdrop

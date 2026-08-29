@@ -191,6 +191,9 @@ uint32_t g_measurements = 0;
 bool     g_retired = false;      // a rendered scene arrived: the intro is
                                  // over and this module is done for the
                                  // session, engaged or not
+uint32_t g_lastWithhold = 0;     // frame of the most recent swallow, for
+                                 // splash_dim's "the game wanted its scrim
+                                 // this frame" signal
 
 // Until the session's FIRST verdict, the first panel of each frame is
 // withheld SPECULATIVELY: nine flights of measurement say that draw is
@@ -293,6 +296,14 @@ void loaderPanelConfigure(Config& cfg) {
 }
 
 bool loaderPanelWants() { return g_on; }
+
+bool loaderPanelDimWanted() {
+    // "The game wanted its scrim this frame": a swallow happened this frame
+    // or within the couple of frames the interface skips its panel draws.
+    // The screen composites run later in the same frame than the withhold,
+    // so the splash dim follows the game's own scrim schedule with no lag.
+    return g_on && g_lastWithhold != 0 && g_frame - g_lastWithhold <= 2;
+}
 
 bool loaderPanelOnDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
                        uint32_t instances, uint32_t startIndex, int baseVertex,
@@ -498,6 +509,7 @@ bool loaderPanelOnDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
         for (uint32_t i = 0; i < g_chainOrdCount; ++i) {
             if (g_chainOrd[i] == ord) {
                 g_subArm = true;
+                g_lastWithhold = g_frame;
                 return true;
             }
         }
@@ -507,6 +519,7 @@ bool loaderPanelOnDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
     // measurement that will confirm it is still in flight.
     if (!g_specDone && !g_chainOn && !g_retired && firstPanel) {
         g_subArm = true;
+        g_lastWithhold = g_frame;
         return true;
     }
     return false;

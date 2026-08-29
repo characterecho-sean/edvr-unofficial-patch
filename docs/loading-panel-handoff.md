@@ -220,6 +220,20 @@ swallow has been live for seconds. After a few refusals, arming falls
 back to requiring two identical frames, so a panel-bearing screen that is
 not the loader cannot re-trigger a 4 MB capture per animation frame.
 
+**The splash dims instead** (`splash_dim.{h,cpp}`, field-requested after
+the withhold flew). The scrim's DESIGN -- the splash stepping back while
+a dialog talks -- was right; only its address was wrong. So on exactly
+the frames the withhold swallows the scrim (loaderPanelDimWanted, zero
+lag: the screen composites draw later in the same frame), the splash
+screen's own composite -- the backdrop still's, or the intro movie's --
+is re-issued once through a compiled dark pixel shader (0,0,0,0.4 -- the
+scrim's measured alpha exactly) under src-alpha blend, after backdropEnd
+so that pairing stays pristine. The tint lands on the screen, flat as
+the screen is, and nowhere else. Gated to the eye-side composite by RTV
+size (the backdrop verdict also wraps an offscreen half). Off switch:
+`loading_splash_dim = off`, a commented key -- deliberately not in the
+installer's settings window pending the intro knob consolidation.
+
 **Log lines to look for** (`edvr_logs`):
 
 * `loading panel: FIT -- measurement N from S solids of D interface

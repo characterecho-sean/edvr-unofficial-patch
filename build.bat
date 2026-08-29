@@ -193,6 +193,7 @@ cl.exe %CFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "%ROOT%\src\d3d11\intro_panel.cpp" ^
     "%ROOT%\src\d3d11\intro_upscale.cpp" ^
     "%ROOT%\src\d3d11\loader_panel.cpp" ^
+    "%ROOT%\src\d3d11\splash_dim.cpp" ^
     "%ROOT%\src\d3d11\witchstar_fix.cpp" "%ROOT%\src\d3d11\fov_probe.cpp" ^
     "%ROOT%\src\d3d11\cb_peek.cpp" "%ROOT%\src\d3d11\billboard_fix.cpp" ^
     "%ROOT%\src\d3d11\particle_fix.cpp" "%ROOT%\src\d3d11\shader_swap.cpp" "%ROOT%\src\d3d11\sunglare_fix.cpp"
