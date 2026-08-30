@@ -622,9 +622,60 @@ static void recordDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
         if (ps) ps->Release();
     }
 
-    Log::get().note("%s %u #%u %c n=%u i=%u r=%s d=%s c=%s s=%s,%s,%s,%s%s%s%s q=%u",
-                    tag, g_frameOrdinal, index, kind, count, instances, r, d, c,
-                    s0, s1, s2, s3, tail, xt, pt, q);
+    // WHERE THE DRAW LANDS, which this has never recorded (2026-08-30).
+    //
+    // The black-planet hunt reached a draw that is ISSUED for both eyes,
+    // six times each, with byte-identical shared inputs -- and produces
+    // nothing in one of them. A live skip probe proved it is the draw that
+    // paints the body: remove it from the good eye and the body goes black
+    // there too. So the pixels are being asked for and not arriving, and
+    // the census had no column that could show why.
+    //
+    // Viewport and scissor are the plainest way that happens: a draw with a
+    // viewport of the wrong size, or an empty scissor, runs to completion
+    // and rasterises nowhere. Every other channel for this draw has been
+    // read and matched -- shaders, textures, index counts, order, render
+    // target, and b0 -- which makes the state NOBODY has looked at the
+    // place to look.
+    //
+    // Two COM calls on recorded draws only, alongside the four the sampler
+    // probe above already makes. "vp=none" means the probe did not answer,
+    // exactly as the absent tokens elsewhere on this line do.
+    char vt[112] = "";
+    {
+        D3D11_VIEWPORT vp[1] = {};
+        UINT nvp = 1;
+        D3D11_RECT sc[1] = {};
+        UINT nsc = 1;
+        bool got = false;
+        guardedBudget(g_iaBudget, [&] {
+            ctx->RSGetViewports(&nvp, vp);
+            ctx->RSGetScissorRects(&nsc, sc);
+            got = true;
+        });
+        if (got) {
+            char scb[48];
+            if (nsc >= 1) {
+                _snprintf_s(scb, sizeof(scb), _TRUNCATE, "%ld,%ld-%ld,%ld",
+                            sc[0].left, sc[0].top, sc[0].right, sc[0].bottom);
+            } else {
+                _snprintf_s(scb, sizeof(scb), _TRUNCATE, "off");
+            }
+            if (nvp >= 1) {
+                _snprintf_s(vt, sizeof(vt), _TRUNCATE,
+                            " vp=%.0f,%.0f+%.0fx%.0f z=%.3f-%.3f sc=%s",
+                            vp[0].TopLeftX, vp[0].TopLeftY, vp[0].Width,
+                            vp[0].Height, vp[0].MinDepth, vp[0].MaxDepth, scb);
+            } else {
+                _snprintf_s(vt, sizeof(vt), _TRUNCATE, " vp=none sc=%s", scb);
+            }
+        }
+    }
+
+    Log::get().note(
+        "%s %u #%u %c n=%u i=%u r=%s d=%s c=%s s=%s,%s,%s,%s%s%s%s%s q=%u",
+        tag, g_frameOrdinal, index, kind, count, instances, r, d, c, s0, s1,
+        s2, s3, tail, xt, pt, vt, q);
 
     // The CB watch, after the draw's own line so a DCW dump always follows
     // the draw it belongs to. Any recorded draw can match -- DC for the FSS

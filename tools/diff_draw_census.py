@@ -63,7 +63,16 @@ DRAW_RE = re.compile(r'^DC (\d+) #(\d+) ([A-Z]) n=(\d+) i=(\d+) '
                      r'r=(\S+) d=(\S+) c=(\S+) s=(\S+),(\S+),(\S+),(\S+)'
                      r'(?: vs=(\S+)(?: vh=([0-9A-Fa-f]+))? vb=(\S+) '
                      r'sd=(\d+) of=(\d+) tp=(\d+))?'
-                     r'(?: x=\S+(?:,\S+){3})?(?: ph=[0-9A-Fa-f]+)?(?: q=\d+)?$')
+                     r'(?: x=\S+(?:,\S+){3})?(?: ph=[0-9A-Fa-f]+)?'
+                     # The viewport/scissor tail (2026-08-30), optional for
+                     # the same reason every tail before it is: logs already
+                     # captured do not carry it and must keep parsing. It is
+                     # deliberately NOT part of a draw's signature -- see
+                     # signature() -- because a diff across two censuses
+                     # compares what was drawn, and where it landed is read
+                     # off the line directly when that is the question.
+                     r'(?: vp=\S+(?: z=\S+)? sc=\S+)?'
+                     r'(?: q=\d+)?$')
 FRAME_RE = re.compile(r'^DC frame (\d+) draws=(\d+)(?: \S+=\d+)*$')
 # res= is the underlying resource's identity -- what connects an SRV @id to
 # an RTV @id over the same texture WITHIN one census. Parsed past here
