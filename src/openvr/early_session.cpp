@@ -17,7 +17,15 @@
 namespace edvr {
 namespace {
 
-bool g_ran = false;
+// The once-guard, INTERLOCKED rather than a plain bool.
+//
+// Whoever calls VR_GetGenericInterface first triggers this, and that is not
+// guaranteed to be the game's VR-init thread: openvr_proxy.cpp records a
+// MEASURED case of something injected into the process asking for an
+// interface on its own thread. Two threads reading a plain bool both see
+// false and both submit, which is two concurrent Submits on one compositor
+// with no frame open.
+volatile LONG g_ran = 0;
 
 // Submit, as the compositor's vtable holds it. Same shape compositor_hook.cpp
 // declares; repeated here rather than shared because that one is a private
@@ -223,14 +231,55 @@ void runInner(PFN_RealGetGenericInterface get) {
 }  // namespace
 
 void earlySessionRun(PFN_RealGetGenericInterface get) {
-    if (g_ran || !get) return;
-    g_ran = true;
+    if (!get) return;
+    if (InterlockedCompareExchange(&g_ran, 1, 0) != 0) return;
+
+    Config& cfg = Config::get();
+
+    // THE CRASH SENTINEL, which this path went without for three releases.
+    //
+    // Every other risky thing in this codebase arms one -- the compositor
+    // vtable hook, the IVRSystem observer -- and guard.h's whole safety
+    // argument is "a hook that crashes disables itself next launch". This
+    // path had no such protection, and it is the one that has actually
+    // killed a game: a user on a runtime neither of this project's headsets
+    // could test crashed about a second after the handover, and every
+    // relaunch ran it again. A boot loop with no way out but editing a file
+    // the player has not been told about.
+    //
+    // Armed before the first runtime call and confirmed after the last, so
+    // anything that dies in between costs the NEXT launch its handover and
+    // nothing else.
+    Sentinel sentinel(cfg.logDir().c_str(), L"early_session");
+    if (sentinel.trippedOnStartup() &&
+        !cfg.getBool("advanced.ignore_sentinel", false)) {
+        sentinel.clearTrip();
+        Log::get().note(
+            "vr handover: SENTINEL TRIPPED -- the previous run started the "
+            "early handover and never finished it, which usually means it "
+            "crashed. Skipping it for THIS session only; it will try again "
+            "next launch, and the game starts exactly as it would with "
+            "fix.vr_handover = stock. If this keeps happening the handover "
+            "really is crashing on your runtime: set fix.vr_handover = stock "
+            "to stop it for good, and please report the log.");
+        return;
+    }
+    if (!sentinel.arm()) {
+        Log::get().note("vr handover: the crash sentinel could not be written, "
+                        "so a crash in the handover will not disable it next "
+                        "launch.");
+    }
+
     // The whole body is guarded, not just the submit: acquireCompositor calls
     // into the runtime, and reading a vtable off an interface pointer is a
     // dereference of something another process's DLL owns. A fault anywhere in
     // here must cost the handover and nothing else -- the game has not started
     // rendering yet, and it must still be able to.
     guarded("earlySession", [&] { runInner(get); });
+
+    // Reached only if the body returned. A hard crash inside it leaves the
+    // sentinel armed, which is the point.
+    sentinel.confirm();
 }
 
 }  // namespace edvr

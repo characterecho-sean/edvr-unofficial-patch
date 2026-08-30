@@ -1285,6 +1285,12 @@ void* systemInterfaceV012() {
     return s->ownerIface;
 }
 
+size_t systemInterfacePrefixV012() {
+    State* s = g_state;
+    if (!s || s->inert || !s->ownerIface) return 0;
+    return s->hook.executablePrefix();
+}
+
 void shutdownSystemHook() {
     State* s = g_state;
     if (!s) return;

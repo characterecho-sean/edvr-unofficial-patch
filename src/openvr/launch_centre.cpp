@@ -90,6 +90,16 @@ float g_panelDist = 3.35f;   // matches intro_panel.cpp's kScreenDistDefault
 // straight down the axis. Together, to the bit, they are a runtime
 // answering before it knows -- see the caller for the Quest 3 measurement.
 bool looksLikePlaceholder(const vr::TrackedDevicePose_t& p) {
+    // A result the runtime has not measured is a placeholder whatever the
+    // numbers say. The Quest 3 evidence below happens to report
+    // Running_OK on its fake poses, so this alone would not have caught
+    // it -- but a runtime that is honest about not knowing must not have
+    // its answer taken either, and every pose the ring records already
+    // carries this field.
+    if (p.eTrackingResult != vr::TrackingResult_Running_OK &&
+        p.eTrackingResult != vr::TrackingResult_Running_OutOfRange) {
+        return true;
+    }
     const auto& m = p.mDeviceToAbsoluteTracking.m;
     if (m[0][3] != 0.0f || m[1][3] != 0.0f || m[2][3] != 0.0f) return false;
     for (int r = 0; r < 3; ++r) {
@@ -158,6 +168,22 @@ void launchCentreConfigure() {
     if (d < 0.2f || d > 50.0f) d = 3.35f;
     g_panelDist = d;
 
+    // Never re-arm mid-session.
+    //
+    // Configure runs on every config reload -- about once a second. It
+    // could flip g_on false->true long after startup, and g_done was
+    // never reset, so a player who switched this on while flying got the
+    // origin snapped to wherever their head happened to be. The header
+    // promises "once, at the start of the session"; this keeps it.
+    if (g_configured && !g_on && on && g_done) {
+        Log::get().note(
+            "launch centre: switched on mid-session, which is too late to "
+            "be a LAUNCH centre -- this session is left alone. It takes "
+            "effect at the next start.");
+        g_on = false;
+        return;
+    }
+
     if (g_configured && on == g_on) return;
     g_configured = true;
     g_on = on;
@@ -184,7 +210,21 @@ void launchCentreApply(vr::EVRCompositorError err,
     if (!g_on || g_done) return;
     // Anything but success and the arrays may be stale or untouched, so the
     // "is tracking up yet" test below would be reading nothing.
-    if (err != 0) return;
+    if (err != 0) {
+        // Counted, not returned on silently. A runtime that keeps failing
+        // WaitGetPoses would otherwise leave this waiting for the whole
+        // session with no line ever written -- a silent no-op, which is
+        // the exact failure the header says the wait exists to prevent.
+        if (++g_waited >= kMaxWaitFrames) {
+            g_done = true;
+            Log::get().note(
+                "launch centre: gave up after %u frames -- WaitGetPoses "
+                "kept failing, so there was never a pose to act on. The "
+                "origin is left as the runtime set it.",
+                g_waited);
+        }
+        return;
+    }
 
     // Wait for a headset pose the runtime vouches for AND actually means.
     //
@@ -286,18 +326,43 @@ void launchCentreApply(vr::EVRCompositorError err,
                         .mDeviceToAbsoluteTracking.m;
     const float bx = m[0][3], by = m[1][3], bz = m[2][3];
 
-    void** vtable = *reinterpret_cast<void***>(sys);
-    if (!vtable || !vtable[kSlotResetSeatedZeroPose]) {
+    // The slot is RANGE-CHECKED, and the vtable is read inside the guard.
+    //
+    // system_hook only ever proved this table has more than 4 entries -- that
+    // is all its own slots need (compositor_hook does the equivalent check
+    // against executablePrefix before it replaces anything). Slot 11 was
+    // taken on trust. A shorter table meant an unguarded read past the end of
+    // the array and then a call through whatever happened to be there.
+    //
+    // Both the vptr dereference and the slot read now sit inside guarded()
+    // with the call, because both dereference memory another module owns.
+    const size_t prefix = systemInterfacePrefixV012();
+    if (prefix <= kSlotResetSeatedZeroPose) {
+        g_done = true;
+        Log::get().note(
+            "launch centre: this IVRSystem's vtable measured %zu usable "
+            "method(s) and ResetSeatedZeroPose is slot %zu, so the slot is "
+            "past the end of what was verified. Not calling it; the origin is "
+            "left as the runtime set it. Please report this log.",
+            prefix, kSlotResetSeatedZeroPose);
+        return;
+    }
+
+    bool called = false;
+    const bool survived = guarded("launchCentre/reset", [&] {
+        void** vtable = *reinterpret_cast<void***>(sys);
+        if (!vtable || !vtable[kSlotResetSeatedZeroPose]) return;
+        called = true;
+        reinterpret_cast<PFN_ResetSeatedZeroPose>(
+            vtable[kSlotResetSeatedZeroPose])(sys);
+    });
+
+    if (survived && !called) {
         Log::get().note("launch centre: IVRSystem_012 has no method at slot "
                         "%zu; the origin is left as the runtime set it.",
                         kSlotResetSeatedZeroPose);
         return;
     }
-
-    const bool survived = guarded("launchCentre/reset", [&] {
-        reinterpret_cast<PFN_ResetSeatedZeroPose>(
-            vtable[kSlotResetSeatedZeroPose])(sys);
-    });
 
     if (!survived) {
         Log::get().note(
