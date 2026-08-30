@@ -78,7 +78,8 @@ typedef void(*PFN_ResetSeatedZeroPose)(void* self);
 // Give up after this many frames rather than testing forever.
 // How far the panel may sit off your gaze before this bothers to act, and
 // how far away the panel is. Both read from config at Configure.
-float g_cosLimit  = 0.0f;    // cos(90 deg): act only when strictly behind
+float g_cosLimit  = 1.0f;    // set from g_angleDeg
+float g_angleDeg  = 0.0f;    // 0 = recentre whatever the angle (the default)
 float g_panelDist = 3.35f;   // matches intro_panel.cpp's kScreenDistDefault
 
 // A pose the runtime has filled in but not yet measured.
@@ -149,8 +150,9 @@ void launchCentreConfigure() {
     }
 
     // Read every time, so both are tunable without a rebuild.
-    float deg = cfg.getFloat("advanced.launch_centre_angle", 90.0f);
-    if (deg < 5.0f || deg > 180.0f) deg = 90.0f;
+    float deg = cfg.getFloat("advanced.launch_centre_angle", 0.0f);
+    if (deg < 0.0f || deg > 180.0f) deg = 0.0f;
+    g_angleDeg = deg;
     g_cosLimit = cosf(deg * 0.0174532925f);
     float d = cfg.getFloat("advanced.intro_video_distance", 3.35f);
     if (d < 0.2f || d > 50.0f) d = 3.35f;
@@ -222,19 +224,21 @@ void launchCentreApply(vr::EVRCompositorError err,
         return;
     }
 
-    // Only recentre if it would actually fix something.
+    // Recentre whenever this is on, by default.
     //
-    // The panel this exists for hangs at (0, 0, -dist) in the tracking
-    // space, so where it APPEARS depends on where the runtime put you. When
-    // it is already in front of you there is nothing to correct, and moving
-    // the origin anyway is a gratuitous shove -- which is what a rig with a
-    // sane origin, SteamVR included, would get.
+    // It began as a conditional -- act only when the panel is behind you --
+    // on the reasoning that a rig with a sane origin should not be shoved
+    // for nothing. The Quest 3 killed that: the flight of 2026-08-29 18:30
+    // put the panel 72 degrees off to the right, which is plainly wrong to
+    // look at and nowhere near "behind", so the gate declined and the
+    // player got the bad placement the feature exists to prevent.
     //
-    // The test is the panel's direction against the way you are facing.
-    // Behind is the default, and the angle is a knob because "behind" is the
-    // clear case rather than the only one: a panel ninety degrees to the
-    // side is just as wrong and just as fixable.
-    {
+    // On OpenComposite the origin is somewhere new every launch, so there
+    // is no case where declining helps: the choice was between fixing it
+    // and sometimes fixing it. advanced.launch_centre_angle keeps the
+    // conditional for anyone who wants it, and defaults to 0, meaning act
+    // whatever the angle.
+    if (g_angleDeg > 0.0f) {
         const auto& m =
             renderPoses[vr::k_unTrackedDeviceIndex_Hmd].mDeviceToAbsoluteTracking.m;
         // The pose's -Z column is where the head looks.
@@ -250,10 +254,10 @@ void launchCentreApply(vr::EVRCompositorError err,
             if (cosang > g_cosLimit) {
                 g_done = true;
                 Log::get().note(
-                    "launch centre: the panel is already %.0f degrees off "
-                    "where you are looking, which is inside the %.0f this "
-                    "acts on, so the origin is left alone. Nothing was "
-                    "wrong to fix.",
+                    "launch centre: the panel sits %.0f degrees off your "
+                    "gaze, and advanced.launch_centre_angle says to act only "
+                    "past %.0f, so the origin is left alone. Set that key to "
+                    "0 -- the default -- to recentre whatever the angle.",
                     static_cast<double>(acosf(cosang) * 57.2957795f),
                     static_cast<double>(acosf(g_cosLimit) * 57.2957795f));
                 return;
