@@ -146,6 +146,18 @@ struct State {
     // when the healthy eye turns out to be the second one.
     uint64_t pairSyncHash = 0;
     bool     pairSyncReverse = false;
+    // ":all" -- run outside the FSS scanner too.
+    //
+    // The mode latch was right for the pair this was built for and wrong for
+    // the one that needs it now. The black-planet hunt (2026-08-30) localised
+    // its loss with the eye-split dump: the body's surface reaches BOTH eyes'
+    // geometry buffers and one eye loses it during lighting, which puts the
+    // clustered light-culling dispatches -- game-wide, nothing to do with the
+    // scanner -- squarely in frame. Equalising their b1 INPUT healed nothing;
+    // this equalises their OUTPUT, which is the half never tested.
+    //
+    // Off by default, so the latch still guards every use that predates this.
+    bool     pairSyncAllModes = false;
     uint8_t  pairSyncSeen = 0;            // occurrences this frame
     void*    pairSyncFirstUav = nullptr;  // occurrence 1's UAV0 view -- the
                                           // firstEye[] bargain: identity held
@@ -1036,7 +1048,8 @@ void STDMETHODCALLTYPE hookedDispatch(ID3D11DeviceContext* self, UINT x, UINT y,
     // view pointer is held across the frame on the firstEye[] bargain: the
     // context keeps its own reference to anything bound, the boundary
     // clears it, and the resolve happens under the guard.
-    if (s->pairSyncHash && deviceHookFssModeLatch() &&
+    if (s->pairSyncHash &&
+        (s->pairSyncAllModes || deviceHookFssModeLatch()) &&
         hashOf(bindingGet(BindSlot::Cs)) == s->pairSyncHash) {
         ++s->pairSyncSeen;
         if (s->pairSyncSeen == 1) {
@@ -1249,22 +1262,41 @@ void exposureConfigure(Config& cfg) {
             const uint64_t hadCopies = s->pairSyncCopies;
             s->pairSyncHash = 0;
             s->pairSyncReverse = false;
+            s->pairSyncAllModes = false;
             s->pairSyncNoted = false;
             if (!spec.empty()) {
                 char* end = nullptr;
                 const unsigned long long h =
                     _strtoui64(spec.c_str(), &end, 16);
                 bool ok = end != spec.c_str() && h != 0;
-                if (ok && *end == ':' &&
-                    (end[1] == 'r' || end[1] == 'R') && end[2] == '\0') {
-                    s->pairSyncReverse = true;
-                } else if (ok && *end != '\0') {
-                    ok = false;
+                // Suffixes are peeled one at a time and in any order, rather
+                // than matched as one fixed tail. ":r" was the only one when
+                // this was written, so it was compared whole; a second
+                // suffix makes that shape wrong twice over -- ":r:all" and
+                // ":all:r" both mean the same thing, and a user who writes
+                // the second and gets a silent refusal has met exactly the
+                // failure this hunt lost three rounds to.
+                while (ok && *end == ':') {
+                    const char* tok = end + 1;
+                    const char* stop = tok;
+                    while (*stop && *stop != ':') ++stop;
+                    const size_t len = static_cast<size_t>(stop - tok);
+                    if (len == 1 && (tok[0] == 'r' || tok[0] == 'R')) {
+                        s->pairSyncReverse = true;
+                    } else if (len == 3 && _strnicmp(tok, "all", 3) == 0) {
+                        s->pairSyncAllModes = true;
+                    } else {
+                        ok = false;
+                    }
+                    end = const_cast<char*>(stop);
                 }
+                if (ok && *end != '\0') ok = false;
                 if (!ok) {
+                    s->pairSyncReverse = false;
+                    s->pairSyncAllModes = false;
                     Log::get().note(
                         "dispatch pair sync: \"%s\" is not one 16-digit hex "
-                        "hash with an optional :r suffix; refused.",
+                        "hash with optional :r and :all suffixes; refused.",
                         spec.c_str());
                 } else {
                     s->pairSyncHash = h;
@@ -1272,10 +1304,14 @@ void exposureConfigure(Config& cfg) {
                         "dispatch pair sync ARMED: ch=%016llX runs per eye, "
                         "and the %s occurrence's UAV0 is copied over the "
                         "%s's each frame -- both eyes read one eye's data. "
-                        "Clear the setting to restore.",
+                        "Engages %s. Clear the setting to restore.",
                         static_cast<unsigned long long>(h),
                         s->pairSyncReverse ? "SECOND" : "FIRST",
-                        s->pairSyncReverse ? "first" : "second");
+                        s->pairSyncReverse ? "first" : "second",
+                        s->pairSyncAllModes
+                            ? "EVERYWHERE (:all) -- the scanner mode gate is "
+                              "off, so this acts in normal flight too"
+                            : "only while the FSS scanner is up");
                 }
             } else {
                 Log::get().note(
