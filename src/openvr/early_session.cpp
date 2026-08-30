@@ -92,7 +92,7 @@ void runInner(PFN_RealGetGenericInterface get) {
 
     // Values name what the player gets -- when the handover happens -- not the
     // mechanism underneath it.
-    const std::string mode = cfg.getString("fix.vr_handover", "early");
+    const std::string mode = cfg.getString("fix.vr_handover", "stock");
     if (mode != "early") {
         if (mode != "stock") {
             Log::get().note(
@@ -202,7 +202,22 @@ void runInner(PFN_RealGetGenericInterface get) {
             static_cast<int>(err), static_cast<unsigned long long>(took));
     }
 
-    tex->Release();
+    // DELIBERATELY NOT RELEASED.
+    //
+    // Submit is asynchronous: the compositor may read this texture after it
+    // returns. This used to Release() here, one line after the call, and
+    // that is a use-after-free waiting for a runtime that actually queues
+    // the frame. The Pimax never did -- its submit path soft-aborts and
+    // probably never touches the pixels -- so the mistake was invisible
+    // on the rig it was written on. A field crash report on 2026-08-30
+    // showed a runtime returning 0 in 953 ms, which is acceptance, and the
+    // session dying moments later.
+    //
+    // A 1x1 texture leaked once per process is four bytes and a handle. It
+    // is the cheapest possible way to be certain the compositor still owns
+    // something valid, and there is no later moment at which we could know
+    // it is safe to free.
+    (void)tex;
 }
 
 }  // namespace
