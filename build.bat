@@ -134,6 +134,26 @@ set "EDVR_VER=unknown"
 for /f "delims=" %%v in ('git -C "%ROOT%" describe --tags --always --dirty 2^>nul') do set "EDVR_VER=%%v"
 echo [edvr] version %EDVR_VER%
 
+REM A -dirty build is fine to make and dangerous to SEND, so say so loudly.
+REM
+REM The version is stamped here, at compile time, from the tree as it stands.
+REM Build-then-commit therefore bakes in the pre-commit describe, and the
+REM binary afterwards disagrees with what `git describe` says -- which is
+REM exactly what happened twice on 2026-08-30, once reaching a field tester
+REM whose logs then reported a version that did not exist. The binary was
+REM correct both times; only its name was wrong, which on a support path is
+REM its own kind of wrong.
+REM
+REM Not an error: building a dirty tree is the normal inner loop, and
+REM refusing it would make the guard the thing people work around. It is a
+REM line you cannot miss in the output when you are about to hand the file
+REM to somebody.
+echo %EDVR_VER% | findstr /C:"-dirty" >nul && (
+    echo [edvr] NOTE: this build is stamped %EDVR_VER% -- from a tree with
+    echo [edvr]       uncommitted changes. Committing does NOT relabel it;
+    echo [edvr]       commit first, then build, before sending it anywhere.
+)
+
 set CFLAGS=/nologo /c /O2 /MT /std:c++17 /EHsc /W4 /GR- ^
  /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE ^
  /DEDVR_VERSION_STRING=\"%EDVR_VER%\" ^
