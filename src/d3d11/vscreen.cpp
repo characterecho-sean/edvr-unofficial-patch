@@ -4477,6 +4477,11 @@ void shutdownVScreenFixes() {
     fssRingShutdown();
     fssDumpShutdown();
     billboardShutdown();
+    // Both halves of the intro. Neither was on this roll-call, so a session
+    // that ended without a rendered scene ever arriving -- quitting from the
+    // menu -- freed nothing at all.
+    introPanelShutdown();
+    introUpscaleShutdown();
     g_state->hook.uninstall();
 }
 
