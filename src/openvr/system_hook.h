@@ -92,6 +92,15 @@ bool systemHookCropTarget(vr::EVREye eye, uint32_t* w, uint32_t* h);
 // a vtable this build cannot index.
 void* systemInterfaceV012();
 
+// How many vtable slots that interface was measured to have -- VTableHook's
+// executablePrefix, the count of entries that looked like real code. 0 if
+// nothing is hooked.
+//
+// A caller reaching for a slot must check it against this. system_hook only
+// ever validated ">4" for its own use, so a higher slot is unproven until
+// asked about individually.
+size_t systemInterfacePrefixV012();
+
 void shutdownSystemHook();
 
 }  // namespace edvr

@@ -183,6 +183,56 @@ struct MovedTarget {
                               // default when it migrates
 };
 
+// "# retired-default: early" above a key, in the NEW file: a value this key
+// used to SHIP as its default and no longer does.
+//
+// moved-from's "(default X)" covers a key that went away. This covers the
+// other half: a key that stayed put while its shipped default changed, which
+// the merge could not otherwise tell from a deliberate choice -- every
+// install of the old version has the old default written out as a literal
+// line, so "the user's value differs from what we ship now" is true for all
+// of them.
+//
+// It exists because fix.vr_handover shipped "early" in 0.12.1 and 0.12.2 and
+// then had to be withdrawn: it crashed the game on runtimes neither of this
+// project's headsets could test. Flipping the default in the source reached
+// nobody, because every one of those installs carries the line.
+//
+// The cost is real and deliberate: somebody who chose the retired value ON
+// PURPOSE loses that choice once, and is told so in the report. For a value
+// withdrawn because it crashed, that is the right way round.
+//
+// Annotations STACK, like moved-from: a key may retire more than one former
+// default over its life.
+std::map<std::string, std::set<std::string>> retiredDefaults(const IniDoc& doc) {
+    std::map<std::string, std::set<std::string>> out;
+    std::vector<std::string> pending;
+    for (const IniLine& line : doc.lines) {
+        if (line.kind == LineKind::Comment) {
+            const std::string body = trim(line.text);
+            size_t at = 0;
+            while (at < body.size() && (body[at] == '#' || body[at] == ';')) ++at;
+            const std::string text = trim(body.substr(at));
+            if (lower(text).rfind("retired-default:", 0) == 0) {
+                pending.push_back(
+                    trim(text.substr(strlen("retired-default:"))));
+            }
+            continue;
+        }
+        if (line.kind == LineKind::Blank || line.kind == LineKind::Section) {
+            pending.clear();
+            continue;
+        }
+        if (line.kind == LineKind::Key || line.kind == LineKind::CommentedKey) {
+            for (const std::string& v : pending) {
+                out[lower(dottedName(line.section, line.key))].insert(lower(v));
+            }
+        }
+        pending.clear();
+    }
+    return out;
+}
+
 std::map<std::string, MovedTarget> movedKeys(const IniDoc& doc) {
     std::map<std::string, MovedTarget> out;
     std::vector<std::pair<std::string, std::string>> pending;  // old, default
@@ -332,6 +382,8 @@ std::string mergeIni(const std::string& next, const std::string& user, const std
 
     IniDoc nextDoc = iniParse(next);
     const std::map<std::string, MovedTarget> moved = movedKeys(nextDoc);
+    const std::map<std::string, std::set<std::string>> retired =
+        retiredDefaults(nextDoc);
     const IniDoc userDoc = iniParse(user);
     const IniDoc baseDoc = iniParse(base ? *base : next);
     rep.twoWay = (base == nullptr);
@@ -457,6 +509,25 @@ std::string mergeIni(const std::string& next, const std::string& user, const std
                 (b.known ? rep.retired : rep.carried).push_back(dotted + " = " + u.value);
             }
             continue;
+        }
+
+        // A value this key used to ship as its default is not a choice.
+        //
+        // It has to be tested HERE, in the known-key path, and before
+        // changedByUser is honoured: every install of the old version has
+        // the old default written out as a literal line, so it looks
+        // exactly like somebody typing it on purpose. moved-from cannot
+        // reach this case -- its retired-default arm lives under !n.known,
+        // and this key never went anywhere.
+        if (u.present) {
+            const auto r = retired.find(lower(dotted));
+            if (r != retired.end() && r->second.count(lower(u.value))) {
+                rep.adopted.push_back(
+                    dotted + " = " + u.value +
+                    "  (a default this version retired; it now ships " +
+                    n.value + " -- set it again if you meant it)");
+                continue;
+            }
         }
 
         if (changedByUser) {

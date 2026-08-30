@@ -43,17 +43,26 @@ Geysers are the clearest case because their plumes are large, tall and
 close. **The same construction is used by other particle effects, and that
 is now measured rather than supposed.** Disassembling every vertex shader
 the game creates and looking for the construction finds **seven** carrying
-it. Two have been matched to effects a player can point at:
+it. Three have been matched to effects a player can point at:
 
 | effect | vertex shader |
 |---|---|
 | geyser and smoke plumes | `EB787F983BC1F5A3` |
 | solar flares off star surfaces | `6041FD2D3D0164E1` |
+| the witchspace starfield | `9AEC596A2B036EA6` |
 
 The solar flare is the same artifact at a very different scale: a
 prominence hanging off a star swings and flattens as you turn your head,
 which is hard to miss because there is nothing else nearby to anchor it
-against. The remaining five draw effects that have not been named yet.
+against. The remaining four draw effects that have not been named yet.
+
+The three are worth listing together because they show how little the
+shaders have in common besides the bug. The flare and the starfield are
+close enough that a careless comparison calls them the same program — same
+inputs, same instruction sequence — and they still write their results to
+different output registers under different `TEXCOORD` indices. Anything
+that treats one as a stand-in for the other is wrong, and wrong in a way
+that only shows up on screen.
 
 An eighth shader in the family, `DB113566B6A59C5B`, does **not** carry the
 bug: it selects a supplied axis or world up instead of the camera's, and it

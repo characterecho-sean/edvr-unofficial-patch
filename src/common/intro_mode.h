@@ -17,7 +17,7 @@
 //     with the Catmull-Rom resample instead of FSR). Legacy spellings from
 //     the retired keys parse silently: splash/world/fsr and any numeric
 //     size mean screen; head/1/1.0 alone meant the game's own lock or
-//     size and map to stock only as the full-key value "stock" does.
+//     size. "head" is the dev value above, not a stock alias.
 //
 //   fix.intro_backdrop = splash | stock
 //     splash  the menu keeps its nicer first picture, debanded (the
@@ -67,8 +67,7 @@ struct IntroVideoMode {
 inline IntroVideoMode introVideoParse(std::string raw) {
     const std::string v = intro_detail::lowered(raw);
     IntroVideoMode m;
-    if (v == "stock" || v == "off" || v == "0" || v == "head" || v == "1" ||
-        v == "1.0") {
+    if (v == "stock" || v == "off" || v == "0" || v == "1" || v == "1.0") {
         m.screen = false;
         m.worldLock = false;
         m.upscale = 0;
@@ -76,6 +75,15 @@ inline IntroVideoMode introVideoParse(std::string raw) {
     }
     if (v == "sharp") {
         m.upscale = 1;
+        return m;
+    }
+    // The documented dev value: the splash-sized, resampled panel with the
+    // world anchor OFF. It was listed in the stock branch, so it produced
+    // full stock instead -- and there was no way at all to run the panel
+    // without the world lock, which is the one A/B that isolates the
+    // geometry from the rest of the intro fix.
+    if (v == "head") {
+        m.worldLock = false;
         return m;
     }
     if (v == "screen" || v == "on" || v == "splash" || v == "world" ||

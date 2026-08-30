@@ -159,6 +159,7 @@ struct State {
     bool      sigLogged = false;
     bool      gateNoted = false;
     bool      restage = false;            // margin changed mid-flight: redo 1->2
+    bool      guardHeldForIntroNoted = false;  // said once, while the intro is up
     bool      submitCopy = true;          // copy mechanism vs narrowed bounds
     bool      receiverInstalled = false;  // slot 1 = member receiver, not asm
     bool      restartNoted = false;       // "enable needs a restart", said once
@@ -736,6 +737,36 @@ void promoteOrDemote(State* s) {
 
     // Stage 0 -> 1: start asking for bigger render targets. Projections stay
     // TRUE; the game simply supersamples while it adopts.
+    // NOT WHILE THE INTRO IS UP.
+    //
+    // Going live widens the frustum the game renders with and crops it
+    // back at submit. The intro panel, meanwhile, is placed from the TRUE
+    // tangents -- so during the movie and the menu the two disagree by the
+    // whole margin, and the panel comes out oversized and displaced.
+    // Measured on paper at cull_guard = symmetric with the default
+    // fraction: 24% oversize on a Quest 3.
+    //
+    // Terrain culling is a flight concern. There is nothing for it to do
+    // over a movie, so waiting for a scene costs the guard nothing and
+    // removes the interaction entirely.
+    //
+    // gameDevice() is the presence test: without the d3d11 half nobody
+    // will ever announce a scene, and an openvr-only install must not
+    // have its guard held back forever by a message that cannot come.
+    if (s->stage == 0 && s->liePending && !s->guardInert &&
+        s->modeRequested != GuardMode::Off && gameDevice() &&
+        !sceneArrived()) {
+        if (!s->guardHeldForIntroNoted) {
+            s->guardHeldForIntroNoted = true;
+            Log::get().note(
+                "cull guard: holding off until a rendered scene arrives. "
+                "Widening the frustum while the intro movie and the menu "
+                "are up would put the movie's panel out of step with what "
+                "the game renders, and there is no terrain to cull yet.");
+        }
+        return;
+    }
+
     if (s->stage == 0 && s->liePending && !s->guardInert &&
         s->modeRequested != GuardMode::Off) {
         s->liePending = false;
@@ -1283,6 +1314,12 @@ void* systemInterfaceV012() {
     State* s = g_state;
     if (!s || s->inert) return nullptr;
     return s->ownerIface;
+}
+
+size_t systemInterfacePrefixV012() {
+    State* s = g_state;
+    if (!s || s->inert || !s->ownerIface) return 0;
+    return s->hook.executablePrefix();
 }
 
 void shutdownSystemHook() {

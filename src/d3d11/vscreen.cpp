@@ -3489,6 +3489,11 @@ void vScreenFrameBoundary() {
     if (g_state && g_state->ownerCtx) {
         quadProbeTick(g_state->ownerCtx);
         drawCensusTick(g_state->ownerCtx);
+        // Told to the openvr half whether or not any intro fix is on: the
+        // cull guard holds its lie until a scene exists, and that must
+        // depend on the GAME reaching one, not on EDVR being configured
+        // to do anything about the intro.
+        if (g_state->eyeDrawsLastFrame >= kSceneEyeDraws) announceSceneArrived();
         introPanelTick(g_state->ownerCtx,
                        g_state->eyeDrawsLastFrame >= kSceneEyeDraws);
         // The scene flag retires the loader fix when the intro ends: the
@@ -4492,6 +4497,11 @@ void shutdownVScreenFixes() {
     fssDumpShutdown();
     eyeSplitShutdown();
     billboardShutdown();
+    // Both halves of the intro. Neither was on this roll-call, so a session
+    // that ended without a rendered scene ever arriving -- quitting from the
+    // menu -- freed nothing at all.
+    introPanelShutdown();
+    introUpscaleShutdown();
     g_state->hook.uninstall();
 }
 

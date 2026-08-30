@@ -286,15 +286,6 @@ extern "C" void* __cdecl edvr_impl_VR_GetGenericInterface(const char* interfaceV
     }
     ensureInitialised();
 
-    // The earliest moment EDVR is in control with a log open, which is what
-    // the early handover needs: it must run before the game asks for the
-    // compositor, and this is the call in which the game asks for its FIRST
-    // interface. Measured on the field rig that is 2.46 s of headroom.
-    //
-    // It returns immediately after the first time, and immediately every time
-    // unless fix.vr_handover asks for it. See early_session.h.
-    edvr::earlySessionRun(g_realGetGenericInterface);
-
     // BEFORE the real call, which is the whole point: the runtime we shield
     // against answers a request it does not like with a fatal dialog, so the
     // request must never reach it. See interfaceSuppressed.
@@ -303,6 +294,22 @@ extern "C" void* __cdecl edvr_impl_VR_GetGenericInterface(const char* interfaceV
         if (error) *error = 105;  // VRInitError_Init_InterfaceNotFound
         return nullptr;
     }
+
+    // AFTER the suppression shield, not before it.
+    //
+    // The handover asks the runtime for compositor versions the GAME never
+    // requested -- it walks this build's table until one answers. That is
+    // exactly the traffic interfaceSuppressed exists to keep away from
+    // OpenComposite, which raises a FATAL message box for an interface it
+    // does not implement (see the comment on interfaceSuppressed, and the
+    // measured 2026-08-18 case behind it). Running the handover first
+    // reached around the shield; it only survived because IVRCompositor_014
+    // is answered first and the walk stops there.
+    //
+    // Nothing else moves: this is still inside the game's first
+    // VR_GetGenericInterface, which is what the handover needs.
+    edvr::earlySessionRun(g_realGetGenericInterface);
+
 
     void* iface = g_realGetGenericInterface(interfaceVersion, error);
     if (!iface || !interfaceVersion) return iface;

@@ -81,7 +81,26 @@ void attachToDevice(ID3D11Device* device, IDXGISwapChain* swapChain,
         // device (device_hook.cpp says so in as many words), and the early
         // handover wants the one the game actually renders with, which on
         // every rig measured is the first.
-        if (!edvr::gameDevice()) edvr::publishGameDevice(device);
+        // AddRef, and never release.
+        //
+        // This pointer is read by openvr_api.dll from a different call
+        // stack entirely -- the handover creates a texture on it before the
+        // game has asked for a compositor -- so nothing on that path holds
+        // the device alive. Every other consumer of a device pointer in
+        // this DLL runs inside a hook body where the caller provably does.
+        //
+        // Without the reference this is a use-after-free waiting for a game
+        // that drops its first device, and the smoke logs show the two
+        // devices reported at the SAME ADDRESS on occasion -- the allocator
+        // handing the block straight back, which makes staleness
+        // undetectable by comparing pointers.
+        //
+        // One reference held for the process lifetime. The device outlives
+        // the game either way.
+        if (!edvr::gameDevice()) {
+            device->AddRef();
+            edvr::publishGameDevice(device);
+        }
         edvr::hookDevice(device);
         if (swapChain) {
             edvr::hookSwapChain(swapChain);

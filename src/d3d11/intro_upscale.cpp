@@ -270,6 +270,14 @@ void releaseAll() {
     for (Tex& t : g_big) t.release();
     g_srcW = g_srcH = g_outW = g_outH = 0;
     g_final = nullptr;
+    // Re-arm the once-per-frame dispatch.
+    //
+    // Without this the invariant "nothing binds g_final before something
+    // has dispatched into it" holds only by the accident that no cache miss
+    // currently lands between the two eyes of one frame. A rebuild that did
+    // would hand the second eye a texture nothing had written -- which is
+    // exactly the flickering eye this file already shipped once.
+    g_doneThisFrame = false;
 }
 
 void releaseSources() {
@@ -300,7 +308,18 @@ ID3D11ShaderResourceView* rawViewOf(ID3D11Device* dev, ID3D11Resource* res) {
         s.res = res;
         return s.raw;
     }
-    return nullptr;   // more than two eyes is not a case that exists
+    // Both slots are taken by other resources.
+    //
+    // This used to return null in silence, and the caller propagated it as
+    // a plain "no" -- so whichever eye held a slot kept the resampled frame
+    // and the other silently reverted to the game's bilinear, permanently,
+    // with not one line written. A per-eye sharpness mismatch is precisely
+    // the field symptom this file has twice been debugged for, and it must
+    // not be the one failure here that says nothing.
+    failOnce("more than two distinct source surfaces were seen, and this "
+             "keeps a view for two -- so it would have resampled one eye "
+             "and not the other. Please report this log");
+    return nullptr;
 }
 
 bool srgbOf(DXGI_FORMAT f) {

@@ -135,6 +135,24 @@ struct Slot {
     // computed from its published tangents -- so this is a reading, not a
     // convention anybody chose.
     bool          leftEye = false;
+    // Whether leftEye above means anything.
+    //
+    // cb2[4].x is the frustum CENTRE, and a symmetric frustum centres at
+    // zero -- so on a headset whose horizontal frustum is symmetric the
+    // sign test reads false for BOTH eyes, both get the same eye offset,
+    // and the panel comes out with zero disparity: it reads as being at
+    // infinity, which is the exact failure the world-lock exists to avoid
+    // (see the note above buildWorldCb). Near-symmetric is worse than
+    // symmetric -- the sign becomes a coin flip and the two eyes can be
+    // classified the same, or swapped.
+    //
+    // Both measured headsets are strongly asymmetric (+-0.1939 on the
+    // Pimax), which is why this went unnoticed. There is no other
+    // information in cb2 to tell the eyes apart, so the honest answer is
+    // to refuse rather than guess: the movie stays head-locked and the log
+    // says why.
+    bool          eyeKnown = false;
+    float         centre = 0.0f;   // cb2[4].x as read, for the refusal line
 };
 Slot     g_slot[kMaxSlots];
 uint32_t g_slotCount = 0;
@@ -180,14 +198,23 @@ bool looksScreenSpace(const float* f) {
 // Returns false when the pose or the tangents are not published -- without
 // openvr_api.dll installed there is no world to lock to, and stock is the
 // honest answer.
+// Finite in the sense that matters: not NaN, not infinity.
+//
+// Written out rather than std::isfinite because this build compiles with
+// /fp:precise and the comparison form is unambiguous under it.
+bool isFiniteF(float v) { return v == v && v <= 3.4e38f && v >= -3.4e38f; }
+
 bool buildWorldCb(bool leftEye, float dist, float vpW, float vpH,
-                  float* out) {
+                  float* out, const char** why) {
     float pose[12];
-    if (!headPose(pose)) return false;
+    if (!headPose(pose)) { *why = "no head pose has been published"; return false; }
     float outer = 0.0f, inner = 0.0f;
-    if (!eyeTangents(&outer, &inner)) return false;
+    if (!eyeTangents(&outer, &inner)) {
+        *why = "no eye tangents have been published";
+        return false;
+    }
     const float span = outer + inner;
-    if (span < 1e-3f) return false;
+    if (span < 1e-3f) { *why = "the published tangents are degenerate"; return false; }
 
     // The eye's frustum. The OUTER tangent is temporal: left edge of the
     // left eye, right edge of the right.
@@ -225,9 +252,21 @@ bool buildWorldCb(bool leftEye, float dist, float vpW, float vpH,
         tp = -topMag;
         bt = botMag;
     } else {
-        const float vt = span * 0.5f * (vpW > 0.0f ? vpH / vpW : 1.0f);
-        tp = -vt;
-        bt = vt;
+        // The horizontal pair published and the vertical did not.
+        //
+        // The two are validated independently by their publishers, so a
+        // runtime whose vertical tangent trips a refusal while the
+        // horizontal passes would land here -- and silently reinstate the
+        // symmetric derivation this change exists to remove, on the exact
+        // headsets it is wrong for, with nothing in the log to say so.
+        //
+        // A MISMATCHED pair of halves cannot reach this: they use different
+        // mapping names, so eyeTangents() fails too and we refused above.
+        // So the only live path here is a partial publish, and the honest
+        // answer is the same as for no pose at all.
+        *why = "the vertical tangents are missing while the horizontal ones "
+               "are present -- a partial publish";
+        return false;
     }
 
     const float m00 = 2.0f / (rt - lt), m02 = (rt + lt) / (rt - lt);
@@ -258,6 +297,37 @@ bool buildWorldCb(bool leftEye, float dist, float vpW, float vpH,
         c0[i] = At(i, 2) * (-dist) + o;
     }
     c0[0] -= ex;
+
+    // The panel has to be IN FRONT of this eye.
+    //
+    // It is anchored in the tracking space, not to the head, so where it
+    // lands depends on where the runtime put the origin -- and on
+    // OpenComposite that moves by metres between launches
+    // (launch_centre.h). When it lands behind, every vertex gets w < 0,
+    // D3D clips the quad, and the movie SILENTLY VANISHES: bound is still
+    // true, the draw is still counted, and the retirement line reports it
+    // resized N draws. One test turns that into a line somebody can act
+    // on.
+    if (!(c0[2] < 0.0f)) {
+        *why = "the panel would be BEHIND you -- the runtime's origin is not "
+               "where you are, so the screen the game anchors there is out of "
+               "sight. See the launch centre lines in the other log";
+        return false;
+    }
+
+    // Nothing non-finite reaches the constant buffer.
+    //
+    // The pose is the one channel published with no validation -- 12
+    // floats copied in and out, while every other channel refuses NaN at
+    // the publisher -- and an identity or zero rotation makes every
+    // column zero and w = 0. A single test here covers the pose, the
+    // tangents and the arithmetic between them.
+    for (int i = 0; i < 3; ++i) {
+        if (!isFiniteF(cx[i]) || !isFiniteF(cy[i]) || !isFiniteF(c0[i])) {
+            *why = "the transform came out non-finite";
+            return false;
+        }
+    }
 
     // No depth buffer is bound for this draw (census "d=-"), so z is free;
     // half of w keeps ndc.z at 0.5, safely inside [0,1] whatever the panel
@@ -360,9 +430,21 @@ void introPanelConfigure(Config& cfg) {
 }
 
 bool introPanelWants() {
-    return (g_matchSplash || g_size != 1.0f || g_worldLock ||
-            introUpscaleWants()) &&
-           !g_retired && !g_refused;
+    // g_refused is about the TRANSFORM ONLY.
+    //
+    // It is set when the constants cannot be read back, or when they do not
+    // read as a screen-space placement -- both facts about cb2, and neither
+    // one a reason to stop resampling the picture. It used to gate this
+    // whole function, so either refusal switched the resample off with it:
+    // the movie would play sharp for the few frames before the readback
+    // settled and then visibly drop to pixelated for the rest of the intro,
+    // while the log talked only about panel constants.
+    //
+    // The comment above applyIntroPanel states the invariant this restores:
+    // "Independent of the transform -- either can run alone."
+    const bool wantsTransform =
+        (g_matchSplash || g_size != 1.0f || g_worldLock) && !g_refused;
+    return (wantsTransform || introUpscaleWants()) && !g_retired;
 }
 
 void introPanelNoteFill(uint32_t targetW, uint32_t targetH) {
@@ -422,21 +504,58 @@ bool introPanelOnComposite(ID3D11DeviceContext* ctx, char kind, uint32_t count,
             // the head, which is the entire point -- so the buffer is
             // dynamic and written here rather than baked once.
             if (g_worldLock) {
+                // Refuse unless we know WHICH eye this is, and unless the
+                // two slots disagree about it.
+                //
+                // The eye decides the lateral offset, and getting it the
+                // same for both eyes yields a monoscopic panel that looks
+                // plausible and is wrong. Two slots that agree is proof
+                // the reading is not telling them apart, whatever the
+                // individual values were.
+                bool eyesDisagree = true;
+                for (uint32_t k = 0; k < g_slotCount; ++k) {
+                    const Slot& o = g_slot[k];
+                    if (&o == s || !o.ready || !o.eyeKnown) continue;
+                    if (o.leftEye == s->leftEye) eyesDisagree = false;
+                }
+                if (!s->eyeKnown || !eyesDisagree) {
+                    if (!g_lockRefusedNoted) {
+                        g_lockRefusedNoted = true;
+                        Log::get().note(
+                            "intro video lock: cannot tell the eyes apart "
+                            "from the game's own constants -- this panel's "
+                            "frustum centre reads %.4f%s. That value is the "
+                            "asymmetry of your headset's frustum, and a "
+                            "symmetric one centres at zero in BOTH eyes. "
+                            "Placing the movie in the world needs to know "
+                            "which eye it is drawing, so it stays as the "
+                            "game drew it rather than being shown flat to "
+                            "both eyes. Please report this log with your "
+                            "headset model.",
+                            static_cast<double>(s->centre),
+                            eyesDisagree ? ""
+                                         : " and both eyes read the same");
+                    }
+                    cb->Release();
+                    return;
+                }
                 UINT nvp = 1;
                 D3D11_VIEWPORT vp{};
                 ctx->RSGetViewports(&nvp, &vp);
                 float world[kCbFloats];
-                if (nvp == 0 || vp.Width <= 0.0f ||
-                    !buildWorldCb(s->leftEye, g_screenDist, vp.Width, vp.Height,
-                                  world)) {
+                const char* why = "the viewport is degenerate";
+                if (nvp == 0 || vp.Width <= 0.0f || vp.Height <= 0.0f ||
+                    !buildWorldCb(s->leftEye, g_screenDist, vp.Width,
+                                  vp.Height, world, &why)) {
                     // No pose, no tangents, no viewport: stock rather than a
                     // panel placed on guesses.
                     if (!g_lockRefusedNoted) {
                         g_lockRefusedNoted = true;
                         Log::get().note(
-                            "intro video lock: no head pose or eye tangents "
-                            "published -- openvr_api.dll is what publishes "
-                            "them. The movie stays as the game drew it.");
+                            "intro video lock: %s. The movie stays as the "
+                            "game drew it -- head-locked, which is where "
+                            "it started. Said once.",
+                            why);
                     }
                     cb->Release();
                     return;
@@ -518,6 +637,14 @@ void introPanelTick(ID3D11DeviceContext* ctx, bool sceneFrame) {
             "and this stands down for the session. It resized %u draw(s).",
             g_applied);
         introPanelShutdown();
+        // And the resample chain with it.
+        //
+        // introUpscaleShutdown existed and was called from NOWHERE, so the
+        // whole chain stayed resident for the session: two ping-pong pairs
+        // at the panel resolution, plus SRVs over the game's OWN video
+        // surfaces, which held those alive too. At 5120 wide that is the
+        // 128 MB the arming line promises only "while the intro runs".
+        introUpscaleShutdown();
         return;
     }
     if (!ctx) return;
@@ -594,6 +721,12 @@ void introPanelTick(ID3D11DeviceContext* ctx, bool sceneFrame) {
             D3D11_SUBRESOURCE_DATA sr{};
             sr.pSysMem = out;
             if (SUCCEEDED(dev->CreateBuffer(&bd, &sr, &s.ours)) && s.ours) {
+                // A tenth of the measured +-0.1939 -- comfortably clear of
+                // any rounding in the game's own constants, and far below
+                // anything a genuinely asymmetric headset produces.
+                constexpr float kEyeCentreEps = 0.02f;
+                s.centre = f[16];
+                s.eyeKnown = (f[16] > kEyeCentreEps) || (f[16] < -kEyeCentreEps);
                 s.leftEye = f[16] > 0.0f;
                 s.ready = true;
                 Log::get().note(
