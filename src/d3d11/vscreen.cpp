@@ -33,6 +33,7 @@
 #include "fss_panel_rect.h"
 #include "fss_reveal.h"
 #include "fss_dump.h"
+#include "eye_split.h"
 #include "fss_ring.h"
 #include "fss_res.h"
 #include "fss_scan.h"
@@ -1412,6 +1413,7 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         s->censusAutoW == 0 && !fssResActive() && !fssScanWantsDraws() &&
         !fssPanelWantsDraws() && !fssProbeWants() && !fssRevealWantsDraws() &&
         !fssRingWantsDraws() && !fssDumpWantsDraws() &&
+        !eyeSplitWantsDraws() &&
         !remlokWantsDraws() && !holoWantsDraws() && !witchstarWantsDraws() &&
         !sunglareWantsDraws() && !cbPeekEnabled() && !billboardWantsDraws() &&
         !drawCensusArmed() && !panelQuadWants() && !panelCurveWants() &&
@@ -1909,6 +1911,15 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         fssDumpOnEyeDraw(self, kind, count, instances)) {
         return DrawVerdict::kFssDump;
     }
+
+    // The eye split (the black planet, 2026-08-30): note which target this
+    // draw lands in, so the frame boundary knows what to copy. Passive by
+    // construction -- it returns no verdict and changes no binding, so it
+    // composes with every fix below it and records the frame as the game
+    // actually renders it. It is gated by nothing but its own arming: the
+    // whole point is that it needs no knowledge of which draw is the body,
+    // every previous guess at that having been wrong.
+    if (eyeSplitWantsDraws()) eyeSplitOnEyeDraw(self);
 
     // The ring cross-feed (round eighteen), the same gate and shape: the
     // ring draws' hashes name general pipelines, and only the scanner's
@@ -3377,6 +3388,7 @@ void vScreenRefreshConfig() {
     fssRevealConfigure(cfg);
     fssRingConfigure(cfg);
     fssDumpConfigure(cfg);
+    eyeSplitConfigure(cfg);
     {
         s->censusFssJump = cfg.getInt("advanced.census_fss_jump", 0) ? 1 : 0;
         s->fssTheaterOn = cfg.getFloat("experimental.fss_theater", 0.0f) > 0.0f;
@@ -3566,6 +3578,7 @@ void vScreenFrameBoundary() {
     fssRevealFrameBoundary();
     fssRingFrameBoundary();
     fssDumpFrameBoundary(s->ownerCtx);
+    eyeSplitFrameBoundary(s->ownerCtx);
 
     // FSS frame pacing (round 31): the left-only squares are now measured
     // to be runtime-side (both submitted images carry the flicker equally),
@@ -4259,6 +4272,7 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     fssRevealConfigure(cfg);
     fssRingConfigure(cfg);
     fssDumpConfigure(cfg);
+    eyeSplitConfigure(cfg);
     {
         g_state->censusFssJump =
             cfg.getInt("advanced.census_fss_jump", 0) ? 1 : 0;
@@ -4476,6 +4490,7 @@ void shutdownVScreenFixes() {
     fssRevealShutdown();
     fssRingShutdown();
     fssDumpShutdown();
+    eyeSplitShutdown();
     billboardShutdown();
     g_state->hook.uninstall();
 }
