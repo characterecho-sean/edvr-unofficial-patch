@@ -126,7 +126,25 @@ uint32_t g_seq = 0;              // ONE ordinal across every recorded event in
 // The constant-buffer watch (see the header). Two slots: the watched draw's
 // VS b0 and PS b0. The shadow is refreshed by the Map/Unmap tee and dumped
 // at each watched draw, so a dump is the bytes the GPU reads for THAT draw.
-constexpr uint32_t kCbShadowBytes = 256;
+// 768 bytes, not 256, and the difference is a whole round of this hunt.
+//
+// 256 was sized for the 208-byte camera block the FSS work watched, and it
+// is a CLAMP rather than a size: a buffer larger than this is shadowed to
+// its first 256 bytes and dumped without a word to say the tail is missing.
+//
+// The black-planet hunt (2026-08-30) walked into that. Its lighting pass
+// declares CB2[47] -- 752 bytes -- and reads its light direction at cb2[42],
+// its light colour at cb2[40] and its shadow terms at cb2[36]. Every one of
+// those sits past byte 256, so the dump that was supposed to settle whether
+// the two eyes are lit from the same direction returned the first sixteen
+// vectors and stopped, showing only a camera matrix that differed by exactly
+// the eye separation -- which is correct, and looked like an answer.
+//
+// 768 covers that shader with room over. A buffer larger still is truncated
+// as before, but now SAYS SO where it is registered, because a silent
+// truncation on the support path is the failure this instrument keeps
+// meeting from the other side.
+constexpr uint32_t kCbShadowBytes = 768;
 constexpr uint32_t kCbDumpCap = 512;   // dumps per census; four watch slots
                                        // x 2 eyes x 30 frames in the FSS run
 struct CbWatch {
@@ -328,14 +346,31 @@ void cbWatchRegister(uint32_t slot, void* buf) {
     w.valid = false;
     w.bytes = 0;
     ResourceInfo info;
+    uint32_t full = 0;
     if (buf && bindingResolveResource(buf, &info) && info.isBuffer) {
+        full = info.a;
         w.bytes = info.a < kCbShadowBytes ? info.a : kCbShadowBytes;
     }
     static const char kSlotLetter[4] = {'v', 'p', 'x', 'y'};
     char tok[24];
-    Log::get().note("DCW register %c cb=%s bytes=%u", kSlotLetter[slot & 3],
-                    bindingToken(buf, Kind::kResource, tok, sizeof(tok)),
-                    w.bytes);
+    // The truncation is said out loud. It used to be silent, and a dump
+    // missing its tail reads exactly like a dump whose tail was identical --
+    // which is how a whole round went to a buffer whose interesting half was
+    // past the cap.
+    if (full > w.bytes) {
+        Log::get().note(
+            "DCW register %c cb=%s bytes=%u -- TRUNCATED, the buffer is %u "
+            "bytes and only the first %u are shadowed. Anything the shader "
+            "reads past vector %u is NOT in these dumps.",
+            kSlotLetter[slot & 3],
+            bindingToken(buf, Kind::kResource, tok, sizeof(tok)), w.bytes,
+            full, w.bytes, w.bytes / 16);
+    } else {
+        Log::get().note("DCW register %c cb=%s bytes=%u (whole buffer)",
+                        kSlotLetter[slot & 3],
+                        bindingToken(buf, Kind::kResource, tok, sizeof(tok)),
+                        w.bytes);
+    }
 }
 
 // One shadow dump: the bytes the GPU will read for the draw that asked. All
@@ -399,7 +434,7 @@ void cbWatchDump(ID3D11DeviceContext* ctx, uint32_t slot, uint32_t q) {
         return;
     }
     const uint32_t nf = w.bytes / 4;
-    char fl[1000];
+    char fl[4096];   // 192 floats at kCbShadowBytes=768; 1000 truncated silently
     size_t at = 0;
     const float* f = reinterpret_cast<const float*>(w.shadow);
     for (uint32_t i = 0; i < nf && at + 16 < sizeof(fl); ++i) {
@@ -1075,7 +1110,7 @@ void drawCensusTick(ID3D11DeviceContext* ctx) {
             }
             const float* f = static_cast<const float*>(m.pData);
             const uint32_t nf = r.bytes / 4;
-            char fl[1000];
+            char fl[4096];   // 192 floats at kCbShadowBytes=768; 1000 truncated silently
             size_t at = 0;
             for (uint32_t k = 0; k < nf && at + 16 < sizeof(fl); ++k) {
                 const int n = _snprintf_s(fl + at, sizeof(fl) - at, _TRUNCATE,
