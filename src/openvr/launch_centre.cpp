@@ -2,6 +2,8 @@
 
 #include <windows.h>
 
+#include <math.h>
+
 #include <string>
 
 #include "../common/config.h"
@@ -74,6 +76,30 @@ constexpr size_t kSlotResetSeatedZeroPose = 11;
 typedef void(*PFN_ResetSeatedZeroPose)(void* self);
 
 // Give up after this many frames rather than testing forever.
+// How far the panel may sit off your gaze before this bothers to act, and
+// how far away the panel is. Both read from config at Configure.
+float g_cosLimit  = 0.0f;    // cos(90 deg): act only when strictly behind
+float g_panelDist = 3.35f;   // matches intro_panel.cpp's kScreenDistDefault
+
+// A pose the runtime has filled in but not yet measured.
+//
+// Position exactly zero AND rotation exactly identity. Neither alone is
+// enough to refuse: a head can genuinely sit at the origin just after a
+// recentre, and a rotation can genuinely be identity if you are looking
+// straight down the axis. Together, to the bit, they are a runtime
+// answering before it knows -- see the caller for the Quest 3 measurement.
+bool looksLikePlaceholder(const vr::TrackedDevicePose_t& p) {
+    const auto& m = p.mDeviceToAbsoluteTracking.m;
+    if (m[0][3] != 0.0f || m[1][3] != 0.0f || m[2][3] != 0.0f) return false;
+    for (int r = 0; r < 3; ++r) {
+        for (int c = 0; c < 3; ++c) {
+            const float want = (r == c) ? 1.0f : 0.0f;
+            if (m[r][c] != want) return false;
+        }
+    }
+    return true;
+}
+
 constexpr uint32_t kMaxWaitFrames = 600;
 
 }  // namespace
@@ -122,6 +148,14 @@ void launchCentreConfigure() {
                 : " A value other than auto is set, so that decides it.");
     }
 
+    // Read every time, so both are tunable without a rebuild.
+    float deg = cfg.getFloat("advanced.launch_centre_angle", 90.0f);
+    if (deg < 5.0f || deg > 180.0f) deg = 90.0f;
+    g_cosLimit = cosf(deg * 0.0174532925f);
+    float d = cfg.getFloat("advanced.intro_video_distance", 3.35f);
+    if (d < 0.2f || d > 50.0f) d = 3.35f;
+    g_panelDist = d;
+
     if (g_configured && on == g_on) return;
     g_configured = true;
     g_on = on;
@@ -150,23 +184,81 @@ void launchCentreApply(vr::EVRCompositorError err,
     // "is tracking up yet" test below would be reading nothing.
     if (err != 0) return;
 
-    // Wait for a headset pose the runtime vouches for.
+    // Wait for a headset pose the runtime vouches for AND actually means.
     //
-    // Not impatience: OpenComposite's ResetSeatedZeroPose locates the view
-    // space against the seated space and does NOTHING AT ALL if that location
-    // comes back without valid position and orientation bits. Asking before
-    // tracking is up spends the one call this makes and silently changes
-    // nothing, which would look exactly like the feature being broken.
+    // Two reasons, and the second was learned the hard way. OpenComposite's
+    // ResetSeatedZeroPose locates the view space against the seated space
+    // and does NOTHING AT ALL if that location comes back without valid
+    // position and orientation bits, so asking before tracking is up spends
+    // the one call and silently changes nothing.
+    //
+    // And bPoseIsValid is not enough, because a runtime can set it before it
+    // has a pose. Quest 3 through Virtual Desktop, measured 2026-08-29:
+    //
+    //   pose 1: valid=1 result=200  pos 0 0 0   IDENTITY ROTATION
+    //   pose 2: valid=1 result=200  pos 0 0 0   IDENTITY ROTATION
+    //   pose 3: valid=1 result=200  pos +0.067 +1.137 +0.123  yaw -47.9
+    //
+    // The first two are placeholders wearing a valid flag. Recentring on
+    // them is a no-op -- the head is already "at" the origin -- and the real
+    // pose then arrives half a metre and forty-seven degrees away, with our
+    // one call already spent. That is the "the reset does not have the
+    // desired effect" the Quest 3 reports. Pimax never does this, which is
+    // why the plain valid check stood for as long as it did.
+    //
+    // A head exactly at the origin with exactly no rotation is not a pose a
+    // person produces, so refusing it costs a real session nothing.
     if (!renderPoses || renderCount == 0 ||
-        !renderPoses[vr::k_unTrackedDeviceIndex_Hmd].bPoseIsValid) {
+        !renderPoses[vr::k_unTrackedDeviceIndex_Hmd].bPoseIsValid ||
+        looksLikePlaceholder(renderPoses[vr::k_unTrackedDeviceIndex_Hmd])) {
         if (++g_waited >= kMaxWaitFrames) {
             g_done = true;
             Log::get().note(
-                "launch centre: gave up after %u frames without a valid "
-                "headset pose. The origin is left as the runtime set it.",
+                "launch centre: gave up after %u frames without a headset "
+                "pose worth acting on. The origin is left as the runtime set "
+                "it.",
                 g_waited);
         }
         return;
+    }
+
+    // Only recentre if it would actually fix something.
+    //
+    // The panel this exists for hangs at (0, 0, -dist) in the tracking
+    // space, so where it APPEARS depends on where the runtime put you. When
+    // it is already in front of you there is nothing to correct, and moving
+    // the origin anyway is a gratuitous shove -- which is what a rig with a
+    // sane origin, SteamVR included, would get.
+    //
+    // The test is the panel's direction against the way you are facing.
+    // Behind is the default, and the angle is a knob because "behind" is the
+    // clear case rather than the only one: a panel ninety degrees to the
+    // side is just as wrong and just as fixable.
+    {
+        const auto& m =
+            renderPoses[vr::k_unTrackedDeviceIndex_Hmd].mDeviceToAbsoluteTracking.m;
+        // The pose's -Z column is where the head looks.
+        const float fx = -m[0][2], fy = -m[1][2], fz = -m[2][2];
+        // Head -> panel, with the panel on -Z at dist from the origin.
+        const float px = 0.0f - m[0][3];
+        const float py = 0.0f - m[1][3];
+        const float pz = -g_panelDist - m[2][3];
+        const float plen = sqrtf(px * px + py * py + pz * pz);
+        const float flen = sqrtf(fx * fx + fy * fy + fz * fz);
+        if (plen > 1e-4f && flen > 1e-4f) {
+            const float cosang = (fx * px + fy * py + fz * pz) / (plen * flen);
+            if (cosang > g_cosLimit) {
+                g_done = true;
+                Log::get().note(
+                    "launch centre: the panel is already %.0f degrees off "
+                    "where you are looking, which is inside the %.0f this "
+                    "acts on, so the origin is left alone. Nothing was "
+                    "wrong to fix.",
+                    static_cast<double>(acosf(cosang) * 57.2957795f),
+                    static_cast<double>(acosf(g_cosLimit) * 57.2957795f));
+                return;
+            }
+        }
     }
 
     void* sys = systemInterfaceV012();
