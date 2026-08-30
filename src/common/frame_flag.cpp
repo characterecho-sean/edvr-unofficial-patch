@@ -180,6 +180,10 @@ struct Shared {
     // LONG64 rather than LONG: this is a 64-bit pointer, and submitTex above
     // is the precedent.
     volatile LONG64 gameDev;
+    // sceneArrived  latched by d3d11 at its scene boundary; read by the
+    //               cull guard so it does not lie about the frustum while
+    //               the intro is still on screen. See frame_flag.h.
+    volatile LONG sceneArrived;
 };
 
 // Per PROCESS, not per logon session.
@@ -196,7 +200,9 @@ struct Shared {
 // The name is built once, at first use. The two DLLs are in the same process,
 // so the channel between them is unaffected.
 //
-// _v21 because the vertical eye tangents joined: they were being DERIVED
+// _v22 because the scene-arrived latch joined, so the cull guard can hold
+// off while the intro is up (frame_flag.h).
+// _v21 because
 // on an assumption of symmetry that a Quest 3 breaks (frame_flag.h).
 // _v20 because the game's D3D11 device joined, for the early VR handover
 // (early_session.h).
@@ -229,7 +235,7 @@ const wchar_t* mappingName() {
     static wchar_t name[64];
     static bool built = false;
     if (!built) {
-        _snwprintf_s(name, _TRUNCATE, L"Local\\edvr_glitch_frame_v21_%lu",
+        _snwprintf_s(name, _TRUNCATE, L"Local\\edvr_glitch_frame_v22_%lu",
                      GetCurrentProcessId());
         built = true;
     }
@@ -372,6 +378,18 @@ void* gameDevice() {
     Shared* s = map();
     if (!s) return nullptr;
     return reinterpret_cast<void*>(s->gameDev);
+}
+
+void announceSceneArrived() {
+    Shared* s = map();
+    if (!s) return;
+    InterlockedExchange(&s->sceneArrived, 1);
+}
+
+bool sceneArrived() {
+    Shared* s = map();
+    if (!s) return false;
+    return InterlockedCompareExchange(&s->sceneArrived, 0, 0) != 0;
 }
 
 void markGlitchFrame() {

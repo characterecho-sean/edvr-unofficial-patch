@@ -3477,6 +3477,11 @@ void vScreenFrameBoundary() {
     if (g_state && g_state->ownerCtx) {
         quadProbeTick(g_state->ownerCtx);
         drawCensusTick(g_state->ownerCtx);
+        // Told to the openvr half whether or not any intro fix is on: the
+        // cull guard holds its lie until a scene exists, and that must
+        // depend on the GAME reaching one, not on EDVR being configured
+        // to do anything about the intro.
+        if (g_state->eyeDrawsLastFrame >= kSceneEyeDraws) announceSceneArrived();
         introPanelTick(g_state->ownerCtx,
                        g_state->eyeDrawsLastFrame >= kSceneEyeDraws);
         // The scene flag retires the loader fix when the intro ends: the

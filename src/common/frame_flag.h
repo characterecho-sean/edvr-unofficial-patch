@@ -64,6 +64,25 @@ void* submittedTexture(int eye);
 //
 // Null means no d3d11 half, or a device the proxy never saw. Every reader
 // must treat that as "stand down", not as a reason to wait.
+// The intro is over: a rendered scene has arrived.
+//
+// Latched once by d3d11.dll at its own scene boundary -- the same eye-draw
+// count the intro and loader fixes retire on -- and computed whether or not
+// any of those fixes are switched on, so this is a fact about the GAME and
+// not about EDVR's configuration.
+//
+// Read by the cull guard, which must not start lying about the frustum while
+// the movie and the menu are up: the intro panel is placed from the TRUE
+// tangents while the game would be rendering the widened ones, and the two
+// disagree by the whole margin. Terrain culling is a flight concern and has
+// nothing to do for a movie, so holding costs the guard nothing.
+//
+// False also means "nobody has said yet". A reader must pair it with
+// gameDevice() to tell "the intro is still up" from "no d3d11 half is
+// installed to tell me" -- the second must not hold anything back.
+void announceSceneArrived();
+bool sceneArrived();
+
 void  publishGameDevice(void* device);
 void* gameDevice();
 
