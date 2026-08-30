@@ -254,6 +254,31 @@ bool eyeTextureSize(uint32_t* width, uint32_t* height);
 void announceEyeTangents(float outerMag, float innerMag);
 bool eyeTangents(float* outerMag, float* innerMag);
 
+// The VERTICAL frustum of one eye, magnitudes of the top and bottom
+// tangents. Both eyes share these -- measured identical on every headset
+// seen -- so there is one pair, not two.
+//
+// This exists because the vertical span used to be DERIVED, from the
+// horizontal span and the eye texture's shape, on the assumption that the
+// vertical frustum is symmetric. That assumption was checked against one
+// headset and holds there exactly:
+//
+//   Pimax Crystal Super  5424x5356  t=-1.2648 b=+1.2648   symmetric
+//   Quest 3 (Virtual Desktop)
+//                        3072x3264  t=-1.4281 b=+0.9657   NOT symmetric
+//
+// On the Quest 3 the derivation puts the frustum's vertical centre 0.19 of
+// a half-height out, and because the intro panel is world-locked that error
+// is applied through a projection that no longer matches the runtime's --
+// so the panel shears as the head moves. Reported from the field and
+// reproduced (docs/intro-video.md).
+//
+// Publishing the measurement instead of deriving it is the fix. Readers
+// must still handle false: an older openvr_api.dll publishes nothing here,
+// and the derivation remains as the fallback for exactly that pairing.
+void announceEyeTangentsVertical(float topMag, float botMag);
+bool eyeTangentsVertical(float* topMag, float* botMag);
+
 // Where the ship's forward axis points in the CURRENT head frame, as
 // tangent-space offsets from straight ahead -- published by openvr_api.dll
 // every frame from the pose it is handed, read by d3d11.dll to counter-move

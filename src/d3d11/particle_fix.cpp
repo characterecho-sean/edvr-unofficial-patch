@@ -16,6 +16,7 @@
 
 #include "../common/timing.h"
 #include "exposure_fix.h"   // lookupShaderHash
+#include "flare_vs.h"
 #include "particle_vs.h"
 #include "shader_swap.h"
 
@@ -28,6 +29,43 @@ namespace {
 // had nothing to subtract, because a geyser field is never quiet in every
 // frame, and every size-level signature collided with terrain and props.
 constexpr uint64_t kPlumeVs = 0xEB787F983BC1F5A3ull;
+
+// The SOLAR FLARE billboard, found the same way 2026-08-29: prominences
+// erupting off star surfaces, riding the head. Same construction, same
+// constants, different shader.
+//
+// WHY A TABLE AND NOT MORE HASHES. The family has at least seven members
+// and they do NOT share a signature: the plume takes thirteen inputs and
+// writes twelve outputs, the flare takes ten and writes five. A shader
+// whose signature does not match the input layout and the pixel shader
+// behind it cannot be substituted at all, so each signature group needs
+// its own transcription and its own entry here.
+constexpr uint64_t kFlareVs = 0x6041FD2D3D0164E1ull;
+
+// A second hash whose instruction body is BYTE-IDENTICAL to kFlareVs --
+// the same program compiled twice. It gets the same replacement free.
+// Verified by diffing the two disassemblies, 2026-08-29.
+constexpr uint64_t kFlareVsTwin = 0x9AEC596A2B036EA6ull;
+
+struct BillboardVariant {
+    uint64_t    hash;
+    uint64_t    twin;      // a second hash with an identical body, or 0
+    const char* hlsl;
+    size_t      hlslLen;
+    const char* name;      // names the compile in the log
+};
+
+constexpr int kVariantCount = 2;
+const BillboardVariant kVariants[kVariantCount] = {
+    {kPlumeVs, 0, kParticleWorldVS, sizeof(kParticleWorldVS) - 1,
+     "particle_vs"},
+    {kFlareVs, kFlareVsTwin, kFlareWorldVS, sizeof(kFlareWorldVS) - 1,
+     "flare_vs"},
+};
+
+const char* variantLabel(int v) {
+    return (v == 1) ? "solar flare" : "smoke plume";
+}
 
 // cb1 is 280 registers. The basis vectors live at 278 and 279 -- floats
 // 1112..1119 -- and the neighbours are logged with them because "which
@@ -104,16 +142,20 @@ uint32_t bindOffsetRegs(ID3D11DeviceContext* ctx, UINT slot) {
     return static_cast<uint32_t>(first);
 }
 
-// Is this draw the particle billboard? By shader hash and nothing else:
-// the geyser hunt established that kind, count, stride and every sampler
-// size are shared with the terrain and prop pipelines.
-bool isPlumeDraw(ID3D11DeviceContext* ctx) {
+// Which billboard variant is this draw, or -1 for none? By shader hash and
+// nothing else: the geyser hunt established that kind, count, stride and
+// every sampler size are shared with the terrain and prop pipelines.
+int billboardVariantFor(ID3D11DeviceContext* ctx) {
     ID3D11VertexShader* vs = nullptr;
     ctx->VSGetShader(&vs, nullptr, nullptr);
-    if (!vs) return false;
+    if (!vs) return -1;
     const uint64_t h = lookupShaderHash(vs);
     vs->Release();
-    return h == kPlumeVs;
+    for (int i = 0; i < kVariantCount; ++i) {
+        if (h == kVariants[i].hash) return i;
+        if (kVariants[i].twin && h == kVariants[i].twin) return i;
+    }
+    return -1;
 }
 
 void readBack(ID3D11DeviceContext* ctx) {
@@ -326,8 +368,14 @@ float    g_lastFacing[3] = {};
 // The buffer copy the substitution needed every draw -- 5376 bytes,
 // mapped and filled -- is gone with it. What remains per draw is a shader
 // swap and a 32-byte constant write.
-ID3D11VertexShader* g_ourVs = nullptr;
-bool                g_vsTried = false;
+// One compiled replacement per signature group, compiled on first sight of
+// a draw that needs it. A group nobody draws costs nothing.
+ID3D11VertexShader* g_ourVs[kVariantCount] = {};
+bool                g_vsTried[kVariantCount] = {};
+uint64_t            g_appliedBy[kVariantCount] = {};
+// Which variant the draw currently being matched belongs to. Set by
+// particleOnDraw, read by particleBegin, -1 between them.
+int                 g_activeVariant = -1;
 ID3D11VertexShader* g_savedVs = nullptr;
 ID3D11Buffer*       g_ourCb = nullptr;     // b3: viewer position, world up
 ID3D11Buffer*       g_savedCb3 = nullptr;
@@ -428,7 +476,9 @@ bool particleOnDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
     if (g_mode != Mode::kSteady || !ctx) return false;
     if (kind != 'X' && kind != 'N') return false;
     if (instances == 0 || count < 6) return false;
-    if (!isPlumeDraw(ctx)) return false;
+    const int variant = billboardVariantFor(ctx);
+    if (variant < 0) return false;
+    g_activeVariant = variant;
 
     // Follow the buffer the game binds for these draws. Learning it here
     // rather than assuming means a build that moves the block simply never
@@ -481,14 +531,25 @@ bool particleOnDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
 void particleBegin(ID3D11DeviceContext* ctx) {
     g_engaged = false;
     if (!ctx || !g_shadowValid) return;
+    const int variant = g_activeVariant;
+    if (variant < 0 || variant >= kVariantCount) return;
     guardedBudget(g_subBudget, [&] {
-        if (!g_vsTried) {
-            g_vsTried = true;
-            g_ourVs = shaderSwapCompileVs(
-                ctx, kParticleWorldVS, sizeof(kParticleWorldVS) - 1, "main",
-                "particle_vs", nullptr, "particle billboard");
+        if (!g_vsTried[variant]) {
+            g_vsTried[variant] = true;
+            const BillboardVariant& d = kVariants[variant];
+            g_ourVs[variant] = shaderSwapCompileVs(
+                ctx, d.hlsl, d.hlslLen, "main", d.name, nullptr,
+                "particle billboard");
+            if (g_ourVs[variant]) {
+                Log::get().note(
+                    "particle billboard: replacement compiled for the %s "
+                    "(vs %016llX). Each signature group needs its own -- "
+                    "this family's shaders do not share one.",
+                    variantLabel(variant),
+                    static_cast<unsigned long long>(d.hash));
+            }
         }
-        if (!g_ourVs) return;   // compile failed: the game draws stock
+        if (!g_ourVs[variant]) return;   // compile failed: the game draws stock
 
         if (!g_ourCb) {
             ID3D11Device* dev = nullptr;
@@ -528,9 +589,10 @@ void particleBegin(ID3D11DeviceContext* ctx) {
         ctx->VSGetConstantBuffers(3, 1, &g_savedCb3);
         ID3D11Buffer* ours = g_ourCb;
         ctx->VSSetConstantBuffers(3, 1, &ours);
-        ctx->VSSetShader(g_ourVs, nullptr, 0);
+        ctx->VSSetShader(g_ourVs[variant], nullptr, 0);
         g_engaged = true;
         ++g_applied;
+        ++g_appliedBy[variant];
         if (g_camOk) ++g_facingUsed;
         g_lastFacing[0] = g_cam[0];
         g_lastFacing[1] = g_cam[1];
@@ -555,15 +617,20 @@ void particleEnd(ID3D11DeviceContext* ctx) {
     if (now - g_noteMs >= 10000) {
         Log::get().note(
             "particle billboard: steady -- %llu draw(s) in the last ten "
-            "seconds through the replacement shader, %llu of them with a "
-            "solved viewer at (%.1f %.1f %.1f). Each quad now faces the "
-            "viewer instead of the view axis.",
+            "seconds through the replacement shader (%llu smoke plume, "
+            "%llu solar flare), %llu of them with a solved viewer at "
+            "(%.1f %.1f %.1f). Each quad now faces the viewer instead of "
+            "the view axis. A zero in one of the two is not a fault -- it "
+            "means you were nowhere near that effect.",
             static_cast<unsigned long long>(g_applied - g_appliedAtNote),
+            static_cast<unsigned long long>(g_appliedBy[0]),
+            static_cast<unsigned long long>(g_appliedBy[1]),
             static_cast<unsigned long long>(g_facingUsed),
             g_lastFacing[0], g_lastFacing[1], g_lastFacing[2]);
         g_noteMs = now;
         g_appliedAtNote = g_applied;
         g_facingUsed = 0;
+        for (int i = 0; i < kVariantCount; ++i) g_appliedBy[i] = 0;
     }
 }
 
@@ -635,7 +702,9 @@ void particleOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
         }
         const uint64_t now = nowMs();
         if (now - g_lastMs < kSampleMs) return;
-        if (!isPlumeDraw(ctx)) return;
+        // Any family member will do for the probe: they share cb1 and the
+        // basis registers it samples, which is the whole point of it.
+        if (billboardVariantFor(ctx) < 0) return;
         ++g_seen;
         g_lastMs = now;
         queueCopy(ctx);
@@ -644,11 +713,15 @@ void particleOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
 }
 
 void particleShutdown() {
-    if (g_ourVs) {
-        g_ourVs->Release();
-        g_ourVs = nullptr;
+    for (int i = 0; i < kVariantCount; ++i) {
+        if (g_ourVs[i]) {
+            g_ourVs[i]->Release();
+            g_ourVs[i] = nullptr;
+        }
+        g_vsTried[i] = false;
+        g_appliedBy[i] = 0;
     }
-    g_vsTried = false;
+    g_activeVariant = -1;
     if (g_ourCb) {
         g_ourCb->Release();
         g_ourCb = nullptr;

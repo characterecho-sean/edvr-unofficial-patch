@@ -605,6 +605,15 @@ void emitValues(State* s) {
         {
             const float lm = fabsf(v[0]), rm = fabsf(v[1]);
             announceEyeTangents(lm > rm ? lm : rm, lm > rm ? rm : lm);
+            // And the VERTICAL pair, which used to be thrown away here.
+            // The intro panel derived it from the horizontal span and the
+            // eye's shape, which assumes the vertical frustum is
+            // symmetric. A Pimax's is (t=-1.2648 b=+1.2648) and a Quest 3's
+            // is not (t=-1.4281 b=+0.9657), so on the Quest the panel was
+            // built through a projection that did not match the runtime's
+            // and sheared as the head moved. v[2] is top, v[3] is bottom;
+            // both eyes report the same pair.
+            announceEyeTangentsVertical(fabsf(v[2]), fabsf(v[3]));
         }
         bool moved = !s->lastRawSeen[eye];
         for (int i = 0; i < 4 && !moved; ++i) {

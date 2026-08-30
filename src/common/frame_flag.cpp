@@ -149,6 +149,13 @@ struct Shared {
     // for -- deriving the per-headset overlay scale that puts the RemLok
     // line at a chosen angle -- is documented at the header declaration.
     volatile LONG eyeTangents;
+    // eyeTangentsV  the true VERTICAL frustum, packed as
+    //               (topMag_milli << 16) | botMag_milli. Both eyes share
+    //               it -- measured identical on every headset seen. Zero
+    //               is "nobody published", and the reader falls back to
+    //               DERIVING it, which is right on a symmetric headset
+    //               and wrong on a Quest 3. See frame_flag.h.
+    volatile LONG eyeTangentsV;
     // headForward  ship-forward in the current head frame, tangent-space,
     //              packed as (1 << 31) | ((tx_milli + 16384) << 15) |
     //              (ty_milli + 16384), each biased-15-bit, tangents times
@@ -189,6 +196,8 @@ struct Shared {
 // The name is built once, at first use. The two DLLs are in the same process,
 // so the channel between them is unaffected.
 //
+// _v21 because the vertical eye tangents joined: they were being DERIVED
+// on an assumption of symmetry that a Quest 3 breaks (frame_flag.h).
 // _v20 because the game's D3D11 device joined, for the early VR handover
 // (early_session.h).
 // _v19 because the head pose joined, for the intro movie's world-space
@@ -220,7 +229,7 @@ const wchar_t* mappingName() {
     static wchar_t name[64];
     static bool built = false;
     if (!built) {
-        _snwprintf_s(name, _TRUNCATE, L"Local\\edvr_glitch_frame_v20_%lu",
+        _snwprintf_s(name, _TRUNCATE, L"Local\\edvr_glitch_frame_v21_%lu",
                      GetCurrentProcessId());
         built = true;
     }
@@ -508,6 +517,35 @@ bool eyeTangents(float* outerMag, float* innerMag) {
     const uint32_t v = static_cast<uint32_t>(packed);
     if (outerMag) *outerMag = static_cast<float>(v >> 16) / 1000.0f;
     if (innerMag) *innerMag = static_cast<float>(v & 0xFFFFu) / 1000.0f;
+    return true;
+}
+
+void announceEyeTangentsVertical(float topMag, float botMag) {
+    Shared* s = map();
+    if (!s) return;
+    // Refused rather than truncated, the rule announceEyeTangents follows:
+    // a value that does not fit the packing is one this was not written
+    // for. Unlike the horizontal pair there is no outer/inner ordering to
+    // enforce -- top and bottom are ROLES, not magnitudes, and on the
+    // Quest 3 the top is the larger of the two.
+    if (!(topMag > 0.0f) || !(botMag > 0.0f) || topMag >= 65.0f ||
+        botMag >= 65.0f) {
+        return;
+    }
+    const uint32_t t = static_cast<uint32_t>(topMag * 1000.0f + 0.5f);
+    const uint32_t b = static_cast<uint32_t>(botMag * 1000.0f + 0.5f);
+    InterlockedExchange(&s->eyeTangentsV,
+                        static_cast<LONG>((t << 16) | (b & 0xFFFFu)));
+}
+
+bool eyeTangentsVertical(float* topMag, float* botMag) {
+    Shared* s = map();
+    if (!s) return false;
+    const LONG packed = InterlockedCompareExchange(&s->eyeTangentsV, 0, 0);
+    if (!packed) return false;
+    const uint32_t v = static_cast<uint32_t>(packed);
+    if (topMag) *topMag = static_cast<float>(v >> 16) / 1000.0f;
+    if (botMag) *botMag = static_cast<float>(v & 0xFFFFu) / 1000.0f;
     return true;
 }
 

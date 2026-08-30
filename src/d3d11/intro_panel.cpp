@@ -190,14 +190,46 @@ bool buildWorldCb(bool leftEye, float dist, float vpW, float vpH,
     if (span < 1e-3f) return false;
 
     // The eye's frustum. The OUTER tangent is temporal: left edge of the
-    // left eye, right edge of the right. The vertical span is not published
-    // and follows from the eye texture's shape -- the same derivation
-    // fss_theater makes, and it reproduces this headset's published
-    // +-1.2648 to four decimals from 5424x5356.
+    // left eye, right edge of the right.
     const float lt = leftEye ? -outer : -inner;
     const float rt = leftEye ? inner : outer;
-    const float vt = span * 0.5f * (vpW > 0.0f ? vpH / vpW : 1.0f);
-    const float tp = -vt, bt = vt;
+
+    // The VERTICAL frustum, measured if the openvr half publishes it.
+    //
+    // It used to be derived: half the horizontal span, scaled by the eye's
+    // shape, top and bottom forced equal. That is exact on a headset whose
+    // vertical frustum is symmetric, and this one's is --
+    //
+    //   Pimax Crystal Super  5424x5356  t=-1.2648 b=+1.2648
+    //     derived: 2.5617 * 0.5 * 5356/5424 = 1.26475, to four decimals
+    //
+    // -- which is why the derivation survived being wrong. A Quest 3
+    // through Virtual Desktop is not symmetric:
+    //
+    //   Quest 3              3072x3264  t=-1.4281 b=+0.9657
+    //     derived: 2.2155 * 0.5 * 3264/3072 = 1.17699, and SYMMETRIC
+    //
+    // so m12 came out 0 where the truth is -0.193 -- a tenth of the screen's
+    // height of frustum-centre error. The panel is world-locked, so that
+    // error is applied through a projection that no longer matches the
+    // runtime's, and it shears as the head turns. Reported from the field
+    // (Quest 3 + Virtual Desktop + OpenComposite) and reproduced.
+    //
+    // The derivation stays as the fallback for one pairing only: a d3d11.dll
+    // newer than the openvr_api.dll beside it, which publishes no vertical
+    // pair. That is the same rig this was right on for months.
+    float tp, bt;
+    float topMag = 0.0f, botMag = 0.0f;
+    if (eyeTangentsVertical(&topMag, &botMag) && topMag > 1e-3f &&
+        botMag > 1e-3f) {
+        tp = -topMag;
+        bt = botMag;
+    } else {
+        const float vt = span * 0.5f * (vpW > 0.0f ? vpH / vpW : 1.0f);
+        tp = -vt;
+        bt = vt;
+    }
+
     const float m00 = 2.0f / (rt - lt), m02 = (rt + lt) / (rt - lt);
     const float m11 = 2.0f / (bt - tp), m12 = (bt + tp) / (bt - tp);
 

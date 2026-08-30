@@ -1,4 +1,4 @@
-# Smoke and steam swim with the camera in VR
+# Smoke, steam and solar flares swim with the camera in VR
 
 *Written to accompany a Frontier issue report; no tracker number yet.
 Companion write-ups in this folder cover the sun's glare (sun-glare.md),
@@ -7,8 +7,9 @@ and the loading hologram (loading-hologram.md), which share the
 measurement method used here.*
 
 This is a write-up of how Odyssey orients its particle billboards, why that
-construction — correct on a monitor — makes plumes of smoke and steam swim
-and rotate in a headset, and what EDVR does about it from outside the game.
+construction — correct on a monitor — makes plumes of smoke and steam, and
+the solar flares that erupt off star surfaces, swim and rotate in a
+headset, and what EDVR does about it from outside the game.
 It is written for whoever might fix it properly, inside the engine, where
 the whole fix is one vector per vertex.
 
@@ -39,7 +40,26 @@ camera) where depth is real. Then:
   survived.
 
 Geysers are the clearest case because their plumes are large, tall and
-close. The same construction is used by other particle effects.
+close. **The same construction is used by other particle effects, and that
+is now measured rather than supposed.** Disassembling every vertex shader
+the game creates and looking for the construction finds **seven** carrying
+it. Two have been matched to effects a player can point at:
+
+| effect | vertex shader |
+|---|---|
+| geyser and smoke plumes | `EB787F983BC1F5A3` |
+| solar flares off star surfaces | `6041FD2D3D0164E1` |
+
+The solar flare is the same artifact at a very different scale: a
+prominence hanging off a star swings and flattens as you turn your head,
+which is hard to miss because there is nothing else nearby to anchor it
+against. The remaining five draw effects that have not been named yet.
+
+An eighth shader in the family, `DB113566B6A59C5B`, does **not** carry the
+bug: it selects a supplied axis or world up instead of the camera's, and it
+tests its basis length *before* dividing. The engine already contains a
+correct version of this construction — which is part of why the one below
+looks like an oversight rather than a decision.
 
 ## What is actually happening
 
@@ -102,6 +122,22 @@ its size or vertex count — in this scene those collide exactly with the
 terrain and prop pipelines. The substitution fails soft: any compile or
 lookup failure leaves the game drawing its own shader.
 
+**One replacement per shader, not one for the family.** The seven affected
+shaders share the construction but not their interfaces: the plume's takes
+thirteen inputs and writes twelve outputs, the solar flare's takes ten and
+writes five, and the others differ again. A replacement can only be
+substituted into a draw whose input layout and pixel shader it matches, so
+each has to be transcribed separately from its own bytecode — and
+transcribed carefully, because the variants differ in more than their
+signatures. The flare's axis-aligned modes do not normalise where the
+plume's do, and it has no distance-fade term at all; adapting one from the
+other rather than reading each would have changed how the flares look
+without changing whether they were correct.
+
+That asymmetry is the strongest argument for fixing this in the engine.
+Inside, it is one vector per vertex and all seven are fixed at once.
+Outside, it is seven transcriptions and seven chances to get one wrong.
+
 ## What a fix inside the game would look like
 
 The engine already has everything required; this is a construction choice,
@@ -129,10 +165,14 @@ not a data problem.
    most of the error, since a plume subtends far less angle than the view
    does.
 
-Reproduction for verification is cheap: stand at any geyser field in VR and
-tilt your head — the plume tilts with you. In a GPU capture the effect is
-the instanced draw whose vertex shader takes `ALIGNBLENDBRIGHT` and a
-flipbook atlas chain.
+Reproduction for verification is cheap, and there are two ways in: stand at
+any geyser field in VR and tilt your head — the plume tilts with you — or
+fly to a star with visible prominences and look past one, which swings and
+flattens as it leaves the centre of your view. In a GPU capture the effect
+is the instanced draw whose vertex shader takes `ALIGNBLENDBRIGHT` and a
+flipbook atlas chain; in a disassembly it is the shader that crosses the
+two camera basis vectors from its shared scene constants, which is the one
+line that separates the seven affected shaders from the one that is right.
 
 ---
 
