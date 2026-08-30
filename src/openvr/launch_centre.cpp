@@ -82,6 +82,27 @@ float g_cosLimit  = 1.0f;    // set from g_angleDeg
 float g_angleDeg  = 0.0f;    // 0 = recentre whatever the angle (the default)
 float g_panelDist = 3.35f;   // matches intro_panel.cpp's kScreenDistDefault
 
+// How far from the origin a headset may be and still be believed.
+//
+// Measured on a Quest 3 through Virtual Desktop, 2026-08-30: the first real
+// pose of the session reported the head 1673 m from the origin, and stayed
+// there -- a stable, valid, Running_OK pose that is simply not a place a
+// person is. A second run reported 9035 m. Recentring on one of those does
+// not help: the same call that takes +0.014 m to +0.001 m took +1673 m to
+// MINUS 1673 m, doubling the error into the other direction and leaving the
+// session unusable, splash and all.
+//
+// A play space is at most a room. Beyond this the runtime has lost its
+// tracking space, which is not something a recentre can repair, so the
+// honest move is to leave it alone and say so.
+float g_maxMetres = 20.0f;
+
+// The post-check. Whether the recentre actually took is worth knowing --
+// this build believed it did for a day.
+float    g_askedDist = 0.0f;
+uint32_t g_checkAt = 0;
+uint32_t g_frames = 0;
+
 // A pose the runtime has filled in but not yet measured.
 //
 // Position exactly zero AND rotation exactly identity. Neither alone is
@@ -167,6 +188,9 @@ void launchCentreConfigure() {
     float d = cfg.getFloat("advanced.intro_video_distance", 3.35f);
     if (d < 0.2f || d > 50.0f) d = 3.35f;
     g_panelDist = d;
+    float mx = cfg.getFloat("advanced.launch_centre_max_metres", 20.0f);
+    if (mx < 1.0f || mx > 10000.0f) mx = 20.0f;
+    g_maxMetres = mx;
 
     // Never re-arm mid-session.
     //
@@ -207,6 +231,39 @@ void launchCentreApply(vr::EVRCompositorError err,
                        uint32_t renderCount,
                        vr::TrackedDevicePose_t* /*gamePoses*/,
                        uint32_t /*gameCount*/) {
+    ++g_frames;
+
+    // Did the recentre actually take?
+    //
+    // Checked a few frames after the call, from the pose the game is
+    // being given. This build believed the call worked for a day because
+    // nothing ever looked: on a Quest 3 it turned +1673 m into -1673 m
+    // and reported success.
+    if (g_checkAt && g_frames >= g_checkAt && err == 0 && renderPoses &&
+        renderCount > vr::k_unTrackedDeviceIndex_Hmd &&
+        renderPoses[vr::k_unTrackedDeviceIndex_Hmd].bPoseIsValid) {
+        const auto& c = renderPoses[vr::k_unTrackedDeviceIndex_Hmd]
+                            .mDeviceToAbsoluteTracking.m;
+        const float d = sqrtf(c[0][3] * c[0][3] + c[1][3] * c[1][3] +
+                              c[2][3] * c[2][3]);
+        g_checkAt = 0;
+        if (d > 1.0f && d > g_askedDist * 0.5f) {
+            Log::get().note(
+                "launch centre: the recentre DID NOT TAKE -- you were %.3f m "
+                "from the runtime's centre when we asked and %.3f m after. "
+                "The runtime accepted the call and moved nothing useful, so "
+                "the game's world is anchored where it was. Set "
+                "fix.launch_centre = off if this repeats, and please report "
+                "this log.",
+                static_cast<double>(g_askedDist), static_cast<double>(d));
+        } else {
+            Log::get().note(
+                "launch centre: confirmed -- %.3f m from the centre before, "
+                "%.3f m after.",
+                static_cast<double>(g_askedDist), static_cast<double>(d));
+        }
+    }
+
     if (!g_on || g_done) return;
     // Anything but success and the arrays may be stale or untouched, so the
     // "is tracking up yet" test below would be reading nothing.
@@ -318,6 +375,36 @@ void launchCentreApply(vr::EVRCompositorError err,
         return;
     }
 
+    // REFUSE a pose no person could be standing in.
+    //
+    // Not a placeholder -- valid, Running_OK, stable for the whole
+    // session -- and not a place a head is. Measured on a Quest 3
+    // through Virtual Desktop: 1673 m one run, 9035 m another. Whatever
+    // has gone wrong in the runtime, a recentre does not repair it, and
+    // on that rig it made things worse rather than better.
+    {
+        const auto& q = renderPoses[vr::k_unTrackedDeviceIndex_Hmd]
+                            .mDeviceToAbsoluteTracking.m;
+        const float d = sqrtf(q[0][3] * q[0][3] + q[1][3] * q[1][3] +
+                              q[2][3] * q[2][3]);
+        if (d > g_maxMetres) {
+            g_done = true;
+            Log::get().note(
+                "launch centre: your headset is reported %.1f m from the "
+                "centre of its own tracking space, which is not a place a "
+                "person is -- the runtime has lost track of where your "
+                "room is. Recentring cannot repair that and has been "
+                "measured making it worse, so the origin is left alone. "
+                "Expect the splash screen and the intro movie to be a "
+                "long way off, because the game anchors them in that same "
+                "space. Recentre in your headset software, or restart it, "
+                "and relaunch.",
+                static_cast<double>(d));
+            return;
+        }
+        g_askedDist = d;
+    }
+
     // Only once, whatever happens below. A recentre that runs every frame
     // would chase the player's head around the room.
     g_done = true;
@@ -375,6 +462,7 @@ void launchCentreApply(vr::EVRCompositorError err,
         return;
     }
 
+    g_checkAt = g_frames + 8;
     Log::get().note(
         "launch centre: asked the runtime to recentre. Your head was at "
         "%.3f %.3f %.3f when we asked; the NEXT handover pose line should "

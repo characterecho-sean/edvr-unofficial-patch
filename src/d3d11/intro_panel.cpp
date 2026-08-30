@@ -205,13 +205,16 @@ bool looksScreenSpace(const float* f) {
 bool isFiniteF(float v) { return v == v && v <= 3.4e38f && v >= -3.4e38f; }
 
 bool buildWorldCb(bool leftEye, float dist, float vpW, float vpH,
-                  float* out) {
+                  float* out, const char** why) {
     float pose[12];
-    if (!headPose(pose)) return false;
+    if (!headPose(pose)) { *why = "no head pose has been published"; return false; }
     float outer = 0.0f, inner = 0.0f;
-    if (!eyeTangents(&outer, &inner)) return false;
+    if (!eyeTangents(&outer, &inner)) {
+        *why = "no eye tangents have been published";
+        return false;
+    }
     const float span = outer + inner;
-    if (span < 1e-3f) return false;
+    if (span < 1e-3f) { *why = "the published tangents are degenerate"; return false; }
 
     // The eye's frustum. The OUTER tangent is temporal: left edge of the
     // left eye, right edge of the right.
@@ -261,6 +264,8 @@ bool buildWorldCb(bool leftEye, float dist, float vpW, float vpH,
         // mapping names, so eyeTangents() fails too and we refused above.
         // So the only live path here is a partial publish, and the honest
         // answer is the same as for no pose at all.
+        *why = "the vertical tangents are missing while the horizontal ones "
+               "are present -- a partial publish";
         return false;
     }
 
@@ -303,7 +308,12 @@ bool buildWorldCb(bool leftEye, float dist, float vpW, float vpH,
     // true, the draw is still counted, and the retirement line reports it
     // resized N draws. One test turns that into a line somebody can act
     // on.
-    if (!(c0[2] < 0.0f)) return false;
+    if (!(c0[2] < 0.0f)) {
+        *why = "the panel would be BEHIND you -- the runtime's origin is not "
+               "where you are, so the screen the game anchors there is out of "
+               "sight. See the launch centre lines in the other log";
+        return false;
+    }
 
     // Nothing non-finite reaches the constant buffer.
     //
@@ -314,6 +324,7 @@ bool buildWorldCb(bool leftEye, float dist, float vpW, float vpH,
     // tangents and the arithmetic between them.
     for (int i = 0; i < 3; ++i) {
         if (!isFiniteF(cx[i]) || !isFiniteF(cy[i]) || !isFiniteF(c0[i])) {
+            *why = "the transform came out non-finite";
             return false;
         }
     }
@@ -532,17 +543,19 @@ bool introPanelOnComposite(ID3D11DeviceContext* ctx, char kind, uint32_t count,
                 D3D11_VIEWPORT vp{};
                 ctx->RSGetViewports(&nvp, &vp);
                 float world[kCbFloats];
+                const char* why = "the viewport is degenerate";
                 if (nvp == 0 || vp.Width <= 0.0f || vp.Height <= 0.0f ||
-                    !buildWorldCb(s->leftEye, g_screenDist, vp.Width, vp.Height,
-                                  world)) {
+                    !buildWorldCb(s->leftEye, g_screenDist, vp.Width,
+                                  vp.Height, world, &why)) {
                     // No pose, no tangents, no viewport: stock rather than a
                     // panel placed on guesses.
                     if (!g_lockRefusedNoted) {
                         g_lockRefusedNoted = true;
                         Log::get().note(
-                            "intro video lock: no head pose or eye tangents "
-                            "published -- openvr_api.dll is what publishes "
-                            "them. The movie stays as the game drew it.");
+                            "intro video lock: %s. The movie stays as the "
+                            "game drew it -- head-locked, which is where "
+                            "it started. Said once.",
+                            why);
                     }
                     cb->Release();
                     return;
