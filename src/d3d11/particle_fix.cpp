@@ -42,14 +42,32 @@ constexpr uint64_t kPlumeVs = 0xEB787F983BC1F5A3ull;
 // its own transcription and its own entry here.
 constexpr uint64_t kFlareVs = 0x6041FD2D3D0164E1ull;
 
-// A second hash whose instruction body is BYTE-IDENTICAL to kFlareVs --
-// the same program compiled twice. It gets the same replacement free.
-// Verified by diffing the two disassemblies, 2026-08-29.
-constexpr uint64_t kFlareVsTwin = 0x9AEC596A2B036EA6ull;
+// ONE HASH PER TRANSCRIPTION. NEVER A SECOND ONE ON A LIKENESS.
+//
+// 0.12.3 shipped 9AEC596A2B036EA6 alongside kFlareVs as a "twin", on the
+// claim that its instruction body was byte-identical and it would get the
+// flare's replacement free. It is not a twin, and the claim came from a
+// comparison that could not have detected the difference: it read only
+// indented lines, so it skipped every dcl_output, and semantic INDICES do
+// not appear in the instruction stream at all -- they live in the
+// signature block, which no instruction diff reads.
+//
+// The two shaders write the same values to DIFFERENT output registers
+// (max o2.y against max o1.y, utof o1.w against utof o0.w), declare
+// different masks, and carry different TEXCOORD indices: the flare emits
+// TEXCOORD 2/4/7/9 and 9AEC596A2B036EA6 emits 3/6/8/9. Substituting the
+// flare's replacement handed its pixel shader the wrong registers.
+//
+// What it draws is the WITCHSPACE STARFIELD, and in 0.12.3 that starfield
+// disappeared. Field-confirmed 2026-08-30 by census_skip on this hash.
+//
+// So: a hash earns a replacement only by having its own disassembly read
+// and its own transcription written. Likeness is not evidence, and the
+// cheap comparison that suggests it is the exact trap this paragraph is
+// here to stop.
 
 struct BillboardVariant {
     uint64_t    hash;
-    uint64_t    twin;      // a second hash with an identical body, or 0
     const char* hlsl;
     size_t      hlslLen;
     const char* name;      // names the compile in the log
@@ -57,9 +75,9 @@ struct BillboardVariant {
 
 constexpr int kVariantCount = 2;
 const BillboardVariant kVariants[kVariantCount] = {
-    {kPlumeVs, 0, kParticleWorldVS, sizeof(kParticleWorldVS) - 1,
+    {kPlumeVs, kParticleWorldVS, sizeof(kParticleWorldVS) - 1,
      "particle_vs"},
-    {kFlareVs, kFlareVsTwin, kFlareWorldVS, sizeof(kFlareWorldVS) - 1,
+    {kFlareVs, kFlareWorldVS, sizeof(kFlareWorldVS) - 1,
      "flare_vs"},
 };
 
@@ -153,7 +171,6 @@ int billboardVariantFor(ID3D11DeviceContext* ctx) {
     vs->Release();
     for (int i = 0; i < kVariantCount; ++i) {
         if (h == kVariants[i].hash) return i;
-        if (kVariants[i].twin && h == kVariants[i].twin) return i;
     }
     return -1;
 }
