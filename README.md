@@ -226,8 +226,9 @@ artifacts; `sun_glare = stock` restores the game's behaviour. Works on
 every star, witchspace arrivals included. Live: swap modes mid-flight
 and compare. *Details: [docs/sun-glare.md](docs/sun-glare.md).*
 
-**Smoke and steam swimming as you look around.** *On by default (`steady`).* Geyser
-plumes, and particle effects like them, are drawn as flat cards all sharing
+**Smoke, steam and solar flares swimming as you look around.** *On by default
+(`steady`).* Geyser plumes, the prominences that erupt off star surfaces, and
+particle effects like them are drawn as flat cards all sharing
 one orientation taken from the camera — so in a headset the whole plume
 rolls when you tilt your head, and appears to rotate about its own axis as
 you look past it. `steady` (the default) gives each particle its own
