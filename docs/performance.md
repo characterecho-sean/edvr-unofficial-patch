@@ -39,7 +39,7 @@ The toolkit's performance page, feature by feature:
 | In-headset settings menu | **Port, reimagined.** Feature 4 below — the toolkit's one indispensable piece of UX, rebuilt for a cockpit. |
 | Turbo mode | **No.** It defeats `xrWaitFrame` throttling, which is an OpenXR-runtime behaviour (WMR's, mostly). SteamVR paces through `WaitGetPoses`' running start and does not throttle that way; its own per-app settings already expose what is tunable. Re-implementing pacing is high regression risk for nothing measurable. |
 | Frame-rate lock / motion-reprojection lock | **No.** The reprojection half is WMR-specific; SteamVR's motion smoothing already halves adaptively. |
-| Metrics overlay | **No persistent overlay.** SteamVR ships a frame-timing overlay already. EDVR measures its **own** passes by timestamp query and reports them in the log — and, once the menu exists, live on its status page (feature 4). A HUD that stays up while you fly remains out of scope. |
+| Metrics overlay | **Port, re-anchored.** Feature 5 — an instrument you place in your cockpit, not a HUD that rides your head. An earlier draft of this document declined a persistent overlay outright; the objection was to head-locking, and the anchoring model below removes it. |
 | NIS (NVIDIA Image Scaling) | **No.** It exists in the toolkit as a preference alongside FSR; FSR is already vendored here and does the same job. A second upscaler is surface without capability. |
 
 Two adjacent things that come up in every discussion of foveation, and why
@@ -467,6 +467,83 @@ menu_toasts     = on           ; the transient change confirmations
 Defaults chosen at implementation after a sweep of Elite's stock binding
 sets; the collision check, not the choice, is the real safety.
 
+## Feature 5 — the performance monitor
+
+**The ask, verbatim from the field:** a lightweight readout at a
+configurable point in space *relative to the centred view* — because the
+toolkit head-locks its overlay front-and-slightly-above, and a thing that
+rides your head is a thing you cannot stop seeing.
+
+**An instrument, not a HUD.** The monitor is anchored in the seated
+tracking space — the space whose zero *is* Elite's centred view, and the
+space the launch centre already works in (it asks the runtime to move
+this very origin rather than subtracting from poses). Anchored there, the
+monitor behaves like a gauge screwed to the cockpit: it sits where you
+put it, you glance at it when you want it, and it leaves your view when
+you look away. When you recentre with Elite's own reset binding, the
+seated zero moves and the monitor follows the new centre without any
+help — which is the whole meaning of "relative to the centred view".
+It also stays put through Explorer Cam and on foot, because it lives in
+your play space, not the game's.
+
+**Placement is three live numbers** — yaw and pitch off centred forward,
+and distance — plus the stylish way to set them: a "move it here" row in
+the menu. Activate it, the monitor follows your aim; press the key and it
+drops where you are looking, with the coordinates written back to the
+ini. The shipped default sits low, roughly where a fuel gauge lives
+(~14° below centre, 2 m out, small), clear of Elite's own cockpit UI —
+the exact spot is a Phase 0 comfort measurement, not a guess. Its size,
+like the menu's type, is specified in degrees and derived per headset.
+
+**What it shows, and no more.** Four fields, smoothed, redrawn at 2–4 Hz
+so digits never flicker: frames per second and frame time (the submit
+pace machinery already measures every frame boundary and counts long
+frames — measured, it exists today); GPU frame time, by a timestamp
+query pair bracketing Present on the immediate context (believed sound
+on this single-context renderer; Phase 0 checks it against known
+workloads); EDVR's own passes, itemised in microseconds — the monitor
+measures itself and says its own price; and the long-frame count over
+the last half minute, which is the number that tells you whether the
+judder you felt was real. A slow sparkline of frame time is the one
+moving element, and it can be turned off.
+
+**Distraction is managed by design, not asked to be tolerated:**
+
+- `show = drops` mode: the monitor stays invisible until the pace
+  machinery sees a long-frame burst, fades in for a few seconds around
+  it, and leaves. Perf numbers exactly when something is worth
+  explaining, an empty cockpit the rest of the time.
+- **Glance-to-wake**: at rest the panel idles at low opacity; when your
+  head ray (your gaze, once feature 3 is live) lands on it, it brightens
+  to read. The rays are already computed for the menu's aim; the monitor
+  reuses them.
+- Nothing animates but the sparkline, and the sparkline crawls.
+
+**Why not point players at SteamVR's own frame graph:** it lives in the
+dashboard — not glanceable mid-fight, and on OpenComposite rigs there is
+no dashboard at all (measured; its absence is how EDVR detects
+OpenComposite). An in-world instrument serves both field rigs and real
+SteamVR alike.
+
+**How it is built.** The menu's machinery, third client: the same
+DirectWrite rasterise-on-change, the same per-eye quad draw, the same
+seated-space transform the "move it here" placement uses — one renderer
+serving the menu, the toasts, and this. While `render_scale` is live the
+monitor draws into the upscaler's output texture, which exists anyway —
+zero additional copies; with scale off, showing the monitor routes
+frames through the EDVR-owned copy path and the status page says so.
+Never onto the game's textures, like everything else here.
+
+**Settings sketch** (`[monitor]`):
+
+```
+show     = off    ; off | always | drops (appear around dropped frames)
+yaw      = 0      ; degrees right of centred forward; live
+pitch    = -14    ; degrees above centred forward (negative = below); live
+distance = 2.0    ; metres; live
+glance   = on     ; dim until looked at
+```
+
 ## Phase 0 — what must be measured, not assumed
 
 One instrumented session (plus desk checks against SDK headers) before or
@@ -508,15 +585,29 @@ during implementation, in the head-steer convention:
 11. **The collision sweep.** Menu-key defaults checked against Elite's
     stock keyboard and pad binding sets, and the live check exercised
     against a real player's binds file.
+12. **The seated space, confirmed.** That the poses at Submit are the
+    seated universe and Elite's own reset binding moves its zero
+    (believed from the launch-centre work, which operates on exactly
+    this origin); one flight — recentre, watch the monitor follow —
+    settles it.
+13. **GPU timing honesty.** The Present-bracketing timestamp pair
+    against known workloads (a render-scale step is itself a calibrated
+    change), so the monitor's GPU number is one a bug report can be
+    trusted to contain.
+14. **The monitor's spot.** A default placement that clears Elite's
+    cockpit UI across ship types on both rigs, and the glance
+    hysteresis that wakes it on a look without waking it on a pass.
 
 ## Phasing
 
 1. **Render scale + sharpening** — all vendors, biggest reach, assembles
    parts that already exist. Ships first and alone, ini-tuned.
-2. **The menu** — driving phase 1's two knobs plus the status page.
-   Deliberately second: it multiplies the tuning velocity of everything
-   after it, and every later phase lands as one more row instead of one
-   more reason to alt-tab. Toasts ride along.
+2. **The menu and the monitor** — one renderer, three clients (the menu
+   driving phase 1's knobs plus the status page, the toasts, the placed
+   monitor). Deliberately second: together they multiply the tuning
+   velocity of everything after — the monitor shows the cost, the menu
+   turns the knob, and every later phase lands as one more row instead
+   of one more reason to alt-tab.
 3. **Fixed foveation (VRS)** — NVIDIA-only, rides the census classifier;
    conservative presets; the guard-margin synergy; a row and a status
    line in the menu.
@@ -529,6 +620,6 @@ Each phase off by default, each with its own stand-down, each logging its
 price. Nothing in any phase reads or writes game memory or code: render
 scale and the gaze read edit answers and frames from outside (the guard's
 posture exactly), foveation adds calls into NVIDIA's driver, and the menu
-draws only on EDVR's own copies and watches keys it never takes. A player
-who wants none of it leaves the settings at their defaults and runs a
-build identical in behaviour to today's.
+and monitor draw only on EDVR's own copies and watch keys they never
+take. A player who wants none of it leaves the settings at their defaults
+and runs a build identical in behaviour to today's.
