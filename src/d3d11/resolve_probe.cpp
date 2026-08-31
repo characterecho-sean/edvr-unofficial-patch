@@ -102,7 +102,21 @@ bool isStateMode(Mode m) {
     return m == Mode::kNoStencil || m == Mode::kNoDepth || m == Mode::kNoBoth;
 }
 
-Mode                g_mode = Mode::kOff;
+// TWO independent halves, because the test that is still missing needs
+// both at once.
+//
+// `white` (a constant-emitting shader, the game's own state) left the body
+// black, and `noboth` (the game's own shader, both per-pixel tests off) left
+// it black too. Each of those rules out one thing while the OTHER is still
+// in play: the first still ran under the game's tests, and the second still
+// ran the game's own shader. The combination -- a shader that cannot output
+// black, with nothing able to reject it per pixel -- has never been run, and
+// it is the one that separates "the write never lands" from "the write lands
+// and something later paints over it".
+//
+// Spelled `white+noboth` in the ini; either half alone still works.
+Mode                g_shaderMode = Mode::kOff;
+Mode                g_stateMode = Mode::kOff;
 ID3D11PixelShader*  g_probePs = nullptr;
 bool                g_tried = false;
 ID3D11PixelShader*  g_savedPs = nullptr;
@@ -148,35 +162,54 @@ void resolveProbeConfigure(Config& cfg) {
     if (spec.length() >= sizeof(g_spec)) return;
     memcpy(g_spec, spec.c_str(), spec.length() + 1);
 
-    Mode want = Mode::kOff;
-    if (spec.empty() || spec == "off" || spec == "0") {
-        want = Mode::kOff;
-    } else if (spec == "white") {
-        want = Mode::kWhite;
-    } else if (spec == "inputs") {
-        want = Mode::kInputs;
-    } else if (spec == "nostencil") {
-        want = Mode::kNoStencil;
-    } else if (spec == "nodepth") {
-        want = Mode::kNoDepth;
-    } else if (spec == "noboth") {
-        want = Mode::kNoBoth;
-    } else {
-        Log::get().note(
-            "resolve probe: \"%s\" is not off, white, inputs, nostencil, "
-            "nodepth or noboth; refused.",
-            spec.c_str());
-        want = Mode::kOff;
+    // Words joined by '+', in any order: at most one shader word and one
+    // state word. A whole spec is refused rather than partly applied, so a
+    // typo cannot quietly run half the test somebody thinks they asked for.
+    Mode wantShader = Mode::kOff;
+    Mode wantState = Mode::kOff;
+    bool ok = true;
+    if (!(spec.empty() || spec == "off" || spec == "0")) {
+        size_t at = 0;
+        while (at <= spec.size()) {
+            const size_t plus = spec.find('+', at);
+            const std::string w =
+                spec.substr(at, plus == std::string::npos ? std::string::npos
+                                                          : plus - at);
+            if (w == "white" || w == "inputs") {
+                if (wantShader != Mode::kOff) ok = false;
+                wantShader = (w == "white") ? Mode::kWhite : Mode::kInputs;
+            } else if (w == "nostencil" || w == "nodepth" || w == "noboth") {
+                if (wantState != Mode::kOff) ok = false;
+                wantState = (w == "nostencil") ? Mode::kNoStencil
+                          : (w == "nodepth")   ? Mode::kNoDepth
+                                               : Mode::kNoBoth;
+            } else {
+                ok = false;
+            }
+            if (plus == std::string::npos) break;
+            at = plus + 1;
+        }
     }
-    if (want == g_mode) return;
-    g_mode = want;
+    if (!ok) {
+        Log::get().note(
+            "resolve probe: \"%s\" is not understood. One shader word "
+            "(white, inputs) and/or one state word (nostencil, nodepth, "
+            "noboth), joined with '+' -- \"white+noboth\" runs both. off is "
+            "off. Refused; the game draws its own.",
+            spec.c_str());
+        wantShader = Mode::kOff;
+        wantState = Mode::kOff;
+    }
+    if (wantShader == g_shaderMode && wantState == g_stateMode) return;
+    g_shaderMode = wantShader;
+    g_stateMode = wantState;
     // The compiled shader is per-mode (the variants differ by #define), so
     // a mode change drops it and the next matched draw builds the new one.
     // The derived state goes with it for the same reason.
     releaseShader();
     releaseState();
     g_engagedNoted = false;
-    switch (g_mode) {
+    switch (g_shaderMode) {
         case Mode::kWhite:
             Log::get().note(
                 "resolve probe ARMED (white): the deferred lighting resolve "
@@ -197,31 +230,47 @@ void resolveProbeConfigure(Config& cfg) {
                 "answer. Neither eye showing green over the body means the "
                 "multiplier is not the mechanism.");
             break;
+        default:
+            break;
+    }
+    switch (g_stateMode) {
         case Mode::kNoStencil:
         case Mode::kNoDepth:
         case Mode::kNoBoth:
             Log::get().note(
-                "resolve probe ARMED (%s): the resolve draws with the game's "
-                "OWN shader, but its depth-stencil state copied and %s "
-                "disabled -- every other comparison, mask and pass-op left "
-                "exactly as the game set it, so a body that appears can only "
-                "be the test that was turned off. Restored after each draw.",
-                g_mode == Mode::kNoStencil ? "nostencil"
-                    : g_mode == Mode::kNoDepth ? "nodepth" : "noboth",
-                g_mode == Mode::kNoStencil ? "the STENCIL test"
-                    : g_mode == Mode::kNoDepth ? "the DEPTH test"
-                                               : "both tests");
+                "resolve probe ARMED (%s): the resolve draws with its "
+                "depth-stencil state copied from the game's and %s disabled "
+                "-- every other comparison, mask and pass-op left exactly as "
+                "the game set it, so a body that appears can only be the test "
+                "that was turned off. Restored after each draw.",
+                g_stateMode == Mode::kNoStencil ? "nostencil"
+                    : g_stateMode == Mode::kNoDepth ? "nodepth" : "noboth",
+                g_stateMode == Mode::kNoStencil ? "the STENCIL test"
+                    : g_stateMode == Mode::kNoDepth ? "the DEPTH test"
+                                                    : "both tests");
             break;
-        case Mode::kOff:
-            Log::get().note("resolve probe: off, the game's own resolve.");
+        default:
             break;
+    }
+    if (g_shaderMode == Mode::kOff && g_stateMode == Mode::kOff) {
+        Log::get().note("resolve probe: off, the game's own resolve.");
+    } else if (g_shaderMode != Mode::kOff && g_stateMode != Mode::kOff) {
+        Log::get().note(
+            "resolve probe: BOTH halves are armed. The replacement shader "
+            "cannot output black and the per-pixel tests cannot reject it, "
+            "so a body-shaped dark region now means the write lands and "
+            "something LATER paints over it -- which is a different fault "
+            "from the one this has been chasing, and points at the draws "
+            "after the resolve rather than at the resolve itself.");
     }
 }
 
-bool resolveProbeWantsDraws() { return g_mode != Mode::kOff; }
+bool resolveProbeWantsDraws() {
+    return g_shaderMode != Mode::kOff || g_stateMode != Mode::kOff;
+}
 
 bool resolveProbeOnEyeDraw(ID3D11DeviceContext* ctx) {
-    if (g_mode == Mode::kOff || !ctx) return false;
+    if (!resolveProbeWantsDraws() || !ctx) return false;
     bool match = false;
     guardedBudget(g_budget, [&] {
         ID3D11PixelShader* ps = nullptr;
@@ -235,9 +284,9 @@ bool resolveProbeOnEyeDraw(ID3D11DeviceContext* ctx) {
 }
 
 void resolveProbeBegin(ID3D11DeviceContext* ctx) {
-    if (g_mode == Mode::kOff || !ctx) return;
+    if (!resolveProbeWantsDraws() || !ctx) return;
     guardedBudget(g_budget, [&] {
-        if (isShaderMode(g_mode)) {
+        if (isShaderMode(g_shaderMode)) {
             if (!g_probePs && !g_tried) {
                 g_tried = true;
                 const SwapMacro white[] = {{"PROBE_WHITE", "1"},
@@ -245,13 +294,15 @@ void resolveProbeBegin(ID3D11DeviceContext* ctx) {
                 g_probePs = shaderSwapCompilePs(
                     ctx, kProbePsHlsl, sizeof(kProbePsHlsl) - 1, "main",
                     "resolve_probe_ps",
-                    g_mode == Mode::kWhite ? white : nullptr, "resolve probe");
+                    g_shaderMode == Mode::kWhite ? white : nullptr,
+                    "resolve probe");
             }
             if (!g_probePs) return;   // shader_swap said why; draw stock
             ctx->PSGetShader(&g_savedPs, nullptr, nullptr);
             ctx->PSSetShader(g_probePs, nullptr, 0);
             g_psEngaged = true;
-        } else if (isStateMode(g_mode)) {
+        }
+        if (isStateMode(g_stateMode)) {
             // The game's own state is read first and DERIVED from, every
             // time this is armed fresh, because authoring one from nothing
             // would change comparisons and masks nobody asked about and
@@ -271,10 +322,25 @@ void resolveProbeBegin(ID3D11DeviceContext* ctx) {
                     d.DepthFunc = D3D11_COMPARISON_LESS;
                     d.StencilEnable = FALSE;
                 }
-                if (g_mode == Mode::kNoStencil || g_mode == Mode::kNoBoth) {
+                // The game's own values are captured BEFORE ours are applied.
+                //
+                // The first version of this logged the desc after modifying
+                // it, under the heading "the game's resolve state reads" --
+                // so the line reported OUR state wearing the game's name, and
+                // the two runs disagreed with each other in a way that took
+                // reading the source to untangle. A log line that lies about
+                // whose values it is printing is worse than no line.
+                const bool wasDepth = d.DepthEnable != FALSE;
+                const bool wasStencil = d.StencilEnable != FALSE;
+                const unsigned wasFunc = static_cast<unsigned>(d.DepthFunc);
+                const bool wasWriteAll =
+                    d.DepthWriteMask == D3D11_DEPTH_WRITE_MASK_ALL;
+                if (g_stateMode == Mode::kNoStencil ||
+                    g_stateMode == Mode::kNoBoth) {
                     d.StencilEnable = FALSE;
                 }
-                if (g_mode == Mode::kNoDepth || g_mode == Mode::kNoBoth) {
+                if (g_stateMode == Mode::kNoDepth ||
+                    g_stateMode == Mode::kNoBoth) {
                     d.DepthEnable = FALSE;
                 }
                 ID3D11Device* dev = nullptr;
@@ -284,16 +350,14 @@ void resolveProbeBegin(ID3D11DeviceContext* ctx) {
                     dev->Release();
                 }
                 Log::get().note(
-                    "resolve probe: the game's resolve state reads depth=%s "
-                    "func=%u write=%s stencil=%s ref=%u; ours is that with "
-                    "%s off.",
+                    "resolve probe: THE GAME'S state is depth=%s func=%u "
+                    "write=%s stencil=%s ref=%u; OURS is depth=%s "
+                    "stencil=%s.",
+                    wasDepth ? "on" : "off", wasFunc,
+                    wasWriteAll ? "all" : "zero",
+                    wasStencil ? "on" : "off", g_savedRef,
                     d.DepthEnable ? "on" : "off",
-                    static_cast<unsigned>(d.DepthFunc),
-                    d.DepthWriteMask == D3D11_DEPTH_WRITE_MASK_ALL ? "all"
-                                                                   : "zero",
-                    d.StencilEnable ? "on" : "off", g_savedRef,
-                    g_mode == Mode::kNoStencil ? "stencil"
-                        : g_mode == Mode::kNoDepth ? "depth" : "both");
+                    d.StencilEnable ? "on" : "off");
             }
             if (!g_derived) {
                 if (g_savedDs) {
