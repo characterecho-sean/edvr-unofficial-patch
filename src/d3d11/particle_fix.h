@@ -33,6 +33,13 @@ void particleConfigure(Config& cfg);
 // Whether the substitution is on -- the draw chain asks before matching.
 bool particleSteady();
 
+// Is this draw the witchspace starfield, with fix.witchspace_stars = off?
+// True means do not forward it. Nothing is substituted: the draw is simply
+// not made, which is what "off" should mean and is not how 0.12.3 removed
+// this by accident. Costs one bool read per draw when the key is on.
+bool witchspaceStarsSkip(ID3D11DeviceContext* ctx, char kind, uint32_t count,
+                         uint32_t instances);
+
 // The matched draw, for the verdict chain: this draw is a particle
 // billboard AND a substitute is ready to bind.
 bool particleOnDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,

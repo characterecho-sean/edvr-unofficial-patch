@@ -1437,6 +1437,14 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         return DrawVerdict::kParticle;
     }
 
+    // The witchspace starfield, withheld only when the player has asked for
+    // it. Here beside the billboards because it is the same family and the
+    // same identification -- by shader hash, before the eye gate, since the
+    // jump tunnel draws into the panel on foot as well.
+    if (witchspaceStarsSkip(self, kind, count, instances)) {
+        return DrawVerdict::kSkip;
+    }
+
     const uint32_t rtvGen = bindingGeneration(BindSlot::Rtv0);
     if (s->rtv0EyeGen != rtvGen) {
         s->rtv0Cand = -1;

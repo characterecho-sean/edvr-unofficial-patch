@@ -66,6 +66,23 @@ constexpr uint64_t kFlareVs = 0x6041FD2D3D0164E1ull;
 // cheap comparison that suggests it is the exact trap this paragraph is
 // here to stop.
 
+// The witchspace starfield, by the hash the twin mistake identified. It is
+// NOT replaced -- it has no transcription -- but it is offered as something
+// a player can turn off, because a user asked for the empty tunnel 0.12.3
+// produced by accident and it is a reasonable thing to want.
+//
+// Skipping the draw is not how 0.12.3 removed it. That fed the draw a
+// mismatched replacement and let the pixel shader read whatever the wrong
+// registers held, which happened to come out empty. Not drawing it at all
+// is the version that means what it says.
+//
+// Scope, measured: this hash appears ZERO times across three censuses at a
+// star where the flare's own hash appears 24 times, so it is not the
+// general background starfield. That is evidence it is specific to the
+// jump tunnel, not proof it draws nowhere else.
+constexpr uint64_t kWitchspaceStarsVs = 0x9AEC596A2B036EA6ull;
+bool g_hideWitchspaceStars = false;
+
 struct BillboardVariant {
     uint64_t    hash;
     const char* hlsl;
@@ -459,6 +476,34 @@ bool shapeOk(const float* f, uint32_t floats) {
 
 bool particleSteady() { return g_mode == Mode::kSteady; }
 
+uint64_t g_starsSkipped = 0;
+uint64_t g_starsNoteMs = 0;
+
+bool witchspaceStarsSkip(ID3D11DeviceContext* ctx, char kind, uint32_t count,
+                         uint32_t instances) {
+    if (!g_hideWitchspaceStars || !ctx) return false;
+    if (kind != 'X' && kind != 'N') return false;
+    if (instances == 0 || count < 6) return false;
+    ID3D11VertexShader* vs = nullptr;
+    ctx->VSGetShader(&vs, nullptr, nullptr);
+    if (!vs) return false;
+    const uint64_t h = lookupShaderHash(vs);
+    vs->Release();
+    if (h != kWitchspaceStarsVs) return false;
+    ++g_starsSkipped;
+    const uint64_t now = nowMs();
+    if (now - g_starsNoteMs >= 30000) {
+        g_starsNoteMs = now;
+        Log::get().note(
+            "witchspace stars: OFF -- %llu draw(s) of vs %016llX withheld so "
+            "far. The tunnel is empty by choice; set witchspace_stars = on "
+            "to have them back.",
+            static_cast<unsigned long long>(g_starsSkipped),
+            static_cast<unsigned long long>(kWitchspaceStarsVs));
+    }
+    return true;
+}
+
 void* particleTargetCb0() {
     return g_mode == Mode::kSteady ? g_target0 : nullptr;
 }
@@ -652,6 +697,32 @@ void particleEnd(ID3D11DeviceContext* ctx) {
 }
 
 void particleConfigure(Config& cfg) {
+    // The witchspace starfield switch. "on" is the game's own behaviour and
+    // the default; "off" empties the jump tunnel, which a player asked for
+    // after 0.12.3 did it by accident.
+    const std::string ws = cfg.getString("fix.witchspace_stars", "on");
+    const bool wasHidden = g_hideWitchspaceStars;
+    if (ws == "off") {
+        g_hideWitchspaceStars = true;
+    } else {
+        if (ws != "on") {
+            Log::get().note("witchspace stars: that is not on or off; "
+                            "leaving them on.");
+        }
+        g_hideWitchspaceStars = false;
+    }
+    if (g_hideWitchspaceStars != wasHidden) {
+        g_starsSkipped = 0;
+        g_starsNoteMs = 0;
+        Log::get().note(
+            g_hideWitchspaceStars
+                ? "witchspace stars: OFF. The streaking starfield inside the "
+                  "hyperspace tunnel is not drawn -- the draw is withheld, "
+                  "nothing else about the jump changes."
+                : "witchspace stars: ON. The hyperspace tunnel keeps its "
+                  "starfield, which is the game's own behaviour.");
+    }
+
     const Mode wasMode = g_mode;
     const std::string m = cfg.getString("fix.particle_billboard", "steady");
     if (m == "steady") {
