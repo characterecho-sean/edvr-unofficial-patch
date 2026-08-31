@@ -707,10 +707,73 @@ static void recordDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
         }
     }
 
+    // WHAT IS ALLOWED TO SURVIVE THE DRAW (2026-08-30, the same hunt).
+    //
+    // The viewport column above was added because the pixels were asked for
+    // and not arriving. It came back identical for both eyes -- and then a
+    // replacement pixel shader emitting a CONSTANT, reading nothing at all,
+    // still produced a black body in one eye. So the output is rejected
+    // after the shader runs, per pixel, and none of these three had ever
+    // been recorded:
+    //
+    //   ds=   depth test, its comparison, whether depth is written, the
+    //         stencil test and its reference. A stencil tag written by one
+    //         eye's prepass and not the other's rejects exactly a region,
+    //         which is the shape of this bug.
+    //   bm=   the render-target write mask. A zeroed mask is a draw that
+    //         runs and writes nothing.
+    //   pr=   predication. A predicated draw is invisible by construction:
+    //         the call arrives, the census records it, and the GPU skips it.
+    //
+    // Three COM calls and two GetDesc on recorded draws only, which is the
+    // same bargain the sampler probe above already makes.
+    char sv[128] = "";
+    {
+        ID3D11DepthStencilState* dss = nullptr;
+        ID3D11BlendState*        bs = nullptr;
+        ID3D11Predicate*         pred = nullptr;
+        UINT  ref = 0;
+        FLOAT bf[4] = {};
+        UINT  sampleMask = 0;
+        BOOL  predValue = FALSE;
+        bool  got = false;
+        guardedBudget(g_iaBudget, [&] {
+            ctx->OMGetDepthStencilState(&dss, &ref);
+            ctx->OMGetBlendState(&bs, bf, &sampleMask);
+            ctx->GetPredication(&pred, &predValue);
+            got = true;
+        });
+        if (got) {
+            D3D11_DEPTH_STENCIL_DESC dd{};
+            bool haveDs = false;
+            if (dss) { dss->GetDesc(&dd); haveDs = true; }
+            D3D11_BLEND_DESC bd{};
+            bool haveBs = false;
+            if (bs) { bs->GetDesc(&bd); haveBs = true; }
+            if (haveDs || haveBs || pred) {
+                _snprintf_s(sv, sizeof(sv), _TRUNCATE,
+                            " ds=%c%uw%c st=%c%u bm=%X pr=%c",
+                            haveDs ? (dd.DepthEnable ? '1' : '0') : '?',
+                            haveDs ? static_cast<unsigned>(dd.DepthFunc) : 0u,
+                            haveDs ? (dd.DepthWriteMask ==
+                                              D3D11_DEPTH_WRITE_MASK_ALL
+                                          ? 'A' : 'Z') : '?',
+                            haveDs ? (dd.StencilEnable ? '1' : '0') : '?',
+                            ref,
+                            haveBs ? bd.RenderTarget[0].RenderTargetWriteMask
+                                   : 0xFu,
+                            pred ? (predValue ? 'T' : 'F') : '-');
+            }
+        }
+        if (dss) dss->Release();
+        if (bs) bs->Release();
+        if (pred) pred->Release();
+    }
+
     Log::get().note(
-        "%s %u #%u %c n=%u i=%u r=%s d=%s c=%s s=%s,%s,%s,%s%s%s%s%s q=%u",
+        "%s %u #%u %c n=%u i=%u r=%s d=%s c=%s s=%s,%s,%s,%s%s%s%s%s%s q=%u",
         tag, g_frameOrdinal, index, kind, count, instances, r, d, c, s0, s1,
-        s2, s3, tail, xt, pt, vt, q);
+        s2, s3, tail, xt, pt, vt, sv, q);
 
     // The CB watch, after the draw's own line so a DCW dump always follows
     // the draw it belongs to. Any recorded draw can match -- DC for the FSS

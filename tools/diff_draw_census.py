@@ -72,6 +72,13 @@ DRAW_RE = re.compile(r'^DC (\d+) #(\d+) ([A-Z]) n=(\d+) i=(\d+) '
                      # compares what was drawn, and where it landed is read
                      # off the line directly when that is the question.
                      r'(?: vp=\S+(?: z=\S+)? sc=\S+)?'
+                     # The output-survival tail (2026-08-30): depth-stencil,
+                     # blend write mask, predication. Optional like every
+                     # tail before it, and out of the signature for the same
+                     # reason the viewport is -- a diff compares what was
+                     # drawn, and whether it was allowed to land is read off
+                     # the line when that is the question.
+                     r'(?: ds=\S+ st=\S+ bm=\S+ pr=\S+)?'
                      r'(?: q=\d+)?$')
 FRAME_RE = re.compile(r'^DC frame (\d+) draws=(\d+)(?: \S+=\d+)*$')
 # res= is the underlying resource's identity -- what connects an SRV @id to
