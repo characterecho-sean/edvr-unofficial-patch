@@ -36,9 +36,10 @@ The toolkit's performance page, feature by feature:
 | Sharpen-only (CAS mode) | **Port**, as a degenerate case of feature 1. |
 | Fixed foveated rendering | **Port**, NVIDIA-only on D3D11. Feature 2. |
 | Eye-tracked foveation | **Port**, via OpenVR's own new gaze API. Feature 3. |
+| In-headset settings menu | **Port, reimagined.** Feature 4 below — the toolkit's one indispensable piece of UX, rebuilt for a cockpit. |
 | Turbo mode | **No.** It defeats `xrWaitFrame` throttling, which is an OpenXR-runtime behaviour (WMR's, mostly). SteamVR paces through `WaitGetPoses`' running start and does not throttle that way; its own per-app settings already expose what is tunable. Re-implementing pacing is high regression risk for nothing measurable. |
 | Frame-rate lock / motion-reprojection lock | **No.** The reprojection half is WMR-specific; SteamVR's motion smoothing already halves adaptively. |
-| Metrics overlay | **No overlay.** SteamVR ships a frame-timing overlay already. What EDVR adds instead is timestamp queries around its **own** passes, reported in the log — every feature here ships with its price measured, the way the cull guard's ~6% is quoted. |
+| Metrics overlay | **No persistent overlay.** SteamVR ships a frame-timing overlay already. EDVR measures its **own** passes by timestamp query and reports them in the log — and, once the menu exists, live on its status page (feature 4). A HUD that stays up while you fly remains out of scope. |
 | NIS (NVIDIA Image Scaling) | **No.** It exists in the toolkit as a preference alongside FSR; FSR is already vendored here and does the same job. A second upscaler is surface without capability. |
 
 Two adjacent things that come up in every discussion of foveation, and why
@@ -323,6 +324,149 @@ The eye-tracked centre is a small delta on feature 2 (the mask generator
 gains a moving centre); the risk lives almost entirely in the interface
 pin, which is why the pin validates before it acts.
 
+## Feature 4 — the in-headset menu
+
+**Why it exists.** Every knob above is a taste-and-cost trade that can only
+be judged with the headset on, mid-flight, over the scene that is actually
+struggling. Today that judgement runs through alt-tabbing to a text editor
+or the installer — workable at a desk, miserable over a planet. The
+toolkit's menu, for all its looks, was the reason its features got tuned
+at all. This is that idea, built the way this project builds things.
+
+**What the toolkit's menu got wrong, which is the brief for this one:**
+head-locked text that rode every head movement; pixel-fixed type that came
+out tiny on wide-FOV headsets; three chorded function keys to navigate a
+tree; and no sense of what a setting *cost* beyond watching the corner FPS
+counter wobble.
+
+**The shape of the fix, in five decisions:**
+
+1. **World-anchored, not head-locked.** The panel spawns where you are
+   looking, at a comfortable distance (~1.4 m, curved gently toward you —
+   the `panel_curve` math, reused), and then stays put in the world while
+   you read it: the theater's frozen-pose anchoring (`theaterXform`,
+   reprojection-correct from inside Submit) is exactly this machinery.
+   Re-summoning recentres it to wherever you look now. Fade in and out,
+   ~150 ms; nothing else animates — motion on a panel is what looks cheap
+   in a headset, not the absence of it.
+2. **Type sized in degrees, not pixels.** Row text is specified as visual
+   angle (minimum cap height ~1.1°, measured for comfort in Phase 0) and
+   derived per headset from the tangents the system hook already captures
+   — the same numbers that place the RemLok lines. A Pimax and a Quest 3
+   get the same apparent size from different pixel counts. And the panel
+   is composited *after* the guard crop and the upscale, onto the
+   native-size outgoing frame, so its text is always native-crisp no
+   matter how far `render_scale` is pushed — the menu never degrades with
+   the setting it is adjusting.
+3. **Look at a row; press one key.** Head-aim replaces up/down navigation
+   entirely: the row under your gaze highlights (generous hitboxes,
+   sticky hysteresis so head jitter never flickers it), and EDVR's own
+   menu key activates — toggles toggle, enums cycle, sliders step, hold
+   to repeat, with a chorded reverse for the other direction. When
+   feature 3's gaze is live, the aim ray is your eyes instead of your
+   head, and an optional dwell-to-select needs no key at all — the menu
+   doubles as the eye tracker's live sanity check, since the highlight
+   *is* where EDVR thinks you are looking. XInput pads navigate too
+   (d-pad and face button — `xinput_watch` already polls pads
+   edge-triggered for the FSS bindings); a HOTAS stays out of reach, as
+   it already is, and head-aim is why that costs nothing.
+4. **Keys that are checked, because they cannot be captured.** EDVR
+   watches input and never blocks or injects it (`hotkey.h`'s polled,
+   foreground-gated design — the Explorer Cam promise, unchanged), so any
+   key the menu uses also reaches Elite. That is a fact to design around,
+   not hide: the menu's keys default to chords Elite's stock bindings
+   never use, and — the touch no other tool has — EDVR reads the
+   player's *actual* bindings (`elite_binds`) and verifies the menu keys
+   against them, warning in the log and on the panel itself when a menu
+   key would double-act in the ship. Head-aim keeps the key count to
+   two.
+5. **Every setting wears its price.** Each row shows what its current
+   value costs or saves, measured, not estimated: `render_scale` shows
+   the percentage of pixels being rendered and the upscaler's own
+   timestamp-query milliseconds beside it; foveation shows the rings'
+   savings; the status page shows the frame time and every EDVR pass's
+   share of it. The project's rule that every feature ships with its
+   price measured, promoted from the log into the interface. This —
+   more than any styling — is the "user friendly" the toolkit lacked:
+   the player watches the trade they are making, live, over the scene
+   they are making it for.
+
+**What it shows.** Two pages at first, deliberately few rows each:
+
+- **Performance** — `render_scale`, `render_sharpness`, `foveation`
+  preset, the gaze centre on/off with a live tracking indicator. Each row
+  carries a one-line plain-language hint (the ini's own explanations,
+  shortened; `edvr.ini` remains the deep documentation) and a
+  takes-effect-at-restart badge where that is true, exactly as the
+  installer's screen says it.
+- **Status** — the README's "checking it worked" section as a live panel:
+  which runtime is underneath (the launch centre's verdict), the real eye
+  size, guard state, scale state, whether VRS armed and if not why not,
+  gaze availability, frame time with EDVR's passes itemised. Read-only,
+  and the page a support thread will ask to see.
+
+The row registry is data-driven off the same config keys, so later
+live-tunable settings (panel distance, sun glare mode, the particle fix)
+can join without new machinery — but the menu ships scoped to what this
+design adds, plus status.
+
+**Toasts, the menu's little sibling.** When a live setting changes — from
+the menu, the installer, or a hand edit to the ini — a one-line
+confirmation fades through the lower view for a couple of seconds:
+`render scale 0.80 — rendering 64% of the pixels, upscaler 0.21 ms`.
+Today that feedback exists only in the log; a player tuning by ini edit
+deserves to see the change land without taking the headset off.
+`menu_toasts = off` for players who want nothing uncommanded on screen,
+ever.
+
+**How it is built.** The panel is rasterised on the CPU — DirectWrite for
+the glyphs, into a system-memory bitmap, uploaded once per *change*, not
+per frame — so there is no font engine on the GPU and no per-frame text
+cost; per frame the menu is one textured, alpha-blended quad per eye. The
+split follows the theater exactly: the openvr half owns the decision to
+show, the anchor pose and the input; the d3d11 half owns rasterisation
+and the draw, behind one export (`edvrMenuPanel`, working name), standing
+down loudly on a mismatched pair. While the menu or a toast is up, frames
+route through an EDVR-owned copy (the shadow path that already exists) so
+the game's own textures are never drawn on; when nothing is shown, the
+whole feature is one hotkey poll per frame.
+
+**Persistence, with one source of truth.** The menu writes `edvr.ini` —
+surgical value edits that preserve every comment, by the same config
+grammar `config.cpp` reads and the installer's merge already parses
+(`iniedit`'s contract: a merge that disagreed with the reader would write
+a file whose settings are not the ones it reports; the same holds for a
+menu). Changes apply in memory immediately and the file carries them to
+the next session; the installer's settings screen and the menu can never
+disagree, because neither owns any state the other lacks. The desktop
+screen remains the place for everything; the menu is the flight-relevant
+subset.
+
+**Safeguards, because they are the reason to trust it:** it never appears
+uncommanded (toasts are the one exception, and they have an off switch);
+it auto-dismisses after idle seconds; it draws only into EDVR's own
+copies, never the game's textures; its keys are watched, never taken —
+the game receives every press, which is why the collision check exists;
+and a rasterisation or draw failure means no menu and one log line, with
+the game unaffected. Closed, it costs one key poll; open, it costs the
+copy path and says so on its own status page.
+
+**Settings sketch** (`[hotkey]` and a new `[menu]` section):
+
+```
+[hotkey]
+menu            = CTRL+ALT+E   ; summon/dismiss; verified against your binds
+menu_adjust     = SPACE        ; activate/step the aimed row (chord reverses)
+
+[menu]
+distance        = 1.4          ; metres; live
+idle_dismiss    = 20           ; seconds; 0 = stay until dismissed
+menu_toasts     = on           ; the transient change confirmations
+```
+
+Defaults chosen at implementation after a sweep of Elite's stock binding
+sets; the collision check, not the choice, is the real safety.
+
 ## Phase 0 — what must be measured, not assumed
 
 One instrumented session (plus desk checks against SDK headers) before or
@@ -351,19 +495,40 @@ during implementation, in the head-steer convention:
 7. **Interplay flights.** Guard + scale composed; a withhold under scale;
    the theater under scale; a SteamVR resolution change *while* scale is
    live (the size channel should follow; watch it do so).
+8. **DirectWrite beside the game.** CPU rasterisation into a
+   system-memory bitmap in the game's process is believed inert; measure
+   that it is (no device interop, no per-frame cost, no loader surprises
+   at first use mid-session).
+9. **Legibility, in degrees.** The minimum comfortable cap height and row
+   spacing at 1.4 m on both rigs — the number the panel's whole layout is
+   derived from.
+10. **Head-aim comfort.** Hitbox size and highlight hysteresis that a
+    resting head does not flicker and a deliberate glance lands first
+    time; measured with the panel up, not reasoned about.
+11. **The collision sweep.** Menu-key defaults checked against Elite's
+    stock keyboard and pad binding sets, and the live check exercised
+    against a real player's binds file.
 
 ## Phasing
 
 1. **Render scale + sharpening** — all vendors, biggest reach, assembles
-   parts that already exist. Ships first and alone.
-2. **Fixed foveation (VRS)** — NVIDIA-only, rides the census classifier;
-   conservative presets; the guard-margin synergy.
-3. **Eye-tracked centre** — the moving centre on 2's mask, gated on real
-   SteamVR, a driver that answers, and the 6c exception holding up.
+   parts that already exist. Ships first and alone, ini-tuned.
+2. **The menu** — driving phase 1's two knobs plus the status page.
+   Deliberately second: it multiplies the tuning velocity of everything
+   after it, and every later phase lands as one more row instead of one
+   more reason to alt-tab. Toasts ride along.
+3. **Fixed foveation (VRS)** — NVIDIA-only, rides the census classifier;
+   conservative presets; the guard-margin synergy; a row and a status
+   line in the menu.
+4. **Eye-tracked centre** — the moving centre on 3's mask, gated on real
+   SteamVR, a driver that answers, and the 6c exception holding up. The
+   menu gains gaze aim and dwell, and its highlight becomes the live
+   check that the tracker and the mapping agree.
 
 Each phase off by default, each with its own stand-down, each logging its
-price. Nothing in any phase reads or writes game memory or code: features
-1 and 3 edit answers and frames from outside (the guard's posture
-exactly), feature 2 adds calls into NVIDIA's driver. A player who wants
-none of it leaves three settings at their defaults and runs a build
-identical in behaviour to today's.
+price. Nothing in any phase reads or writes game memory or code: render
+scale and the gaze read edit answers and frames from outside (the guard's
+posture exactly), foveation adds calls into NVIDIA's driver, and the menu
+draws only on EDVR's own copies and watches keys it never takes. A player
+who wants none of it leaves the settings at their defaults and runs a
+build identical in behaviour to today's.
