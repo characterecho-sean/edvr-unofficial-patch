@@ -34,6 +34,7 @@
 #include "fss_reveal.h"
 #include "fss_dump.h"
 #include "eye_split.h"
+#include "resolve_probe.h"
 #include "fss_ring.h"
 #include "fss_res.h"
 #include "fss_scan.h"
@@ -1246,6 +1247,9 @@ enum class DrawVerdict {
     kFssReveal,
     kFssRing,
     kFssDump,
+    // The deferred lighting resolve drawn through a replacement pixel
+    // shader (advanced.resolve_probe), wrapped in resolveProbeBegin/End.
+    kResolveProbe,
     // A batched draw re-issued without some of its quads (advanced.
     // census_skip_quad). Swallows the game's draw and makes up to two of its
     // own, so it must not be combined with anything that also draws.
@@ -1413,7 +1417,7 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         s->censusAutoW == 0 && !fssResActive() && !fssScanWantsDraws() &&
         !fssPanelWantsDraws() && !fssProbeWants() && !fssRevealWantsDraws() &&
         !fssRingWantsDraws() && !fssDumpWantsDraws() &&
-        !eyeSplitWantsDraws() &&
+        !eyeSplitWantsDraws() && !resolveProbeWantsDraws() &&
         !remlokWantsDraws() && !holoWantsDraws() && !witchstarWantsDraws() &&
         !sunglareWantsDraws() && !cbPeekEnabled() && !billboardWantsDraws() &&
         !drawCensusArmed() && !panelQuadWants() && !panelCurveWants() &&
@@ -1920,6 +1924,14 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     // whole point is that it needs no knowledge of which draw is the body,
     // every previous guess at that having been wrong.
     if (eyeSplitWantsDraws()) eyeSplitOnEyeDraw(self);
+
+    // The resolve probe (the black planet, 2026-08-30): recognised by its
+    // PIXEL shader hash, so it is asked LAST -- every fix above it that
+    // swaps a shader has already had its say, and this one replaces the
+    // whole pass rather than composing with anything.
+    if (resolveProbeWantsDraws() && resolveProbeOnEyeDraw(self)) {
+        return DrawVerdict::kResolveProbe;
+    }
 
     // The ring cross-feed (round eighteen), the same gate and shape: the
     // ring draws' hashes name general pipelines, and only the scanner's
@@ -2641,6 +2653,7 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     if (v == DrawVerdict::kFssReveal) fssRevealBegin(self);
     if (v == DrawVerdict::kFssRing) fssRingBegin(self);
     if (v == DrawVerdict::kFssDump) fssDumpBegin(self);
+    if (v == DrawVerdict::kResolveProbe) resolveProbeBegin(self);
     if (v == DrawVerdict::kHolo) holoBegin(self);
     if (v == DrawVerdict::kScrim) scrimBegin(self);
     if (v == DrawVerdict::kWitchstar) witchstarBegin(self);
@@ -2669,6 +2682,7 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     if (v == DrawVerdict::kHolo) holoEnd(self);
     if (v == DrawVerdict::kFssReveal) fssRevealEnd(self);
     if (v == DrawVerdict::kFssRing) fssRingEnd(self);
+    if (v == DrawVerdict::kResolveProbe) resolveProbeEnd(self);
     if (v == DrawVerdict::kFssDump) fssDumpEnd(self);
     if (v == DrawVerdict::kFssProbe) fssProbeEnd(self);
     if (v == DrawVerdict::kFssPanel) fssPanelEnd(self);
@@ -3389,6 +3403,7 @@ void vScreenRefreshConfig() {
     fssRingConfigure(cfg);
     fssDumpConfigure(cfg);
     eyeSplitConfigure(cfg);
+    resolveProbeConfigure(cfg);
     {
         s->censusFssJump = cfg.getInt("advanced.census_fss_jump", 0) ? 1 : 0;
         s->fssTheaterOn = cfg.getFloat("experimental.fss_theater", 0.0f) > 0.0f;
@@ -4278,6 +4293,7 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     fssRingConfigure(cfg);
     fssDumpConfigure(cfg);
     eyeSplitConfigure(cfg);
+    resolveProbeConfigure(cfg);
     {
         g_state->censusFssJump =
             cfg.getInt("advanced.census_fss_jump", 0) ? 1 : 0;
@@ -4496,6 +4512,7 @@ void shutdownVScreenFixes() {
     fssRingShutdown();
     fssDumpShutdown();
     eyeSplitShutdown();
+    resolveProbeShutdown();
     billboardShutdown();
     // Both halves of the intro. Neither was on this roll-call, so a session
     // that ended without a rendered scene ever arriving -- quitting from the
