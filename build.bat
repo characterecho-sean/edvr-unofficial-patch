@@ -562,6 +562,18 @@ python "%ROOT%\tools\diff_draw_census.py" --self-test || (
     exit /b 1
 )
 
+echo [edvr] === eye-split diff self-test ===
+REM The tool that compares the two eyes of one frame. It registers the
+REM eyes before it compares them, because their projections are off-centre
+REM by different amounts and far content does not land on the same pixel in
+REM both. A sign flip in that step reads as plausible either way, and once
+REM cost a fix built on tiles that had landed on the Milky Way band. It
+REM fails HERE, not in the next report somebody trusts.
+python "%ROOT%\tools\diff_eye_split.py" --self-test || (
+    echo [edvr] ERROR: the eye-split diff tool failed its own test
+    exit /b 1
+)
+
 echo [edvr] === config contract ===
 where python >nul 2>&1
 if errorlevel 1 (
