@@ -35,6 +35,7 @@
 #include "fss_dump.h"
 #include "eye_split.h"
 #include "resolve_probe.h"
+#include "stencil_probe.h"
 #include "fss_ring.h"
 #include "fss_res.h"
 #include "fss_scan.h"
@@ -1250,6 +1251,10 @@ enum class DrawVerdict {
     // The deferred lighting resolve drawn through a replacement pixel
     // shader (advanced.resolve_probe), wrapped in resolveProbeBegin/End.
     kResolveProbe,
+    // One named draw re-issued with a different stencil REFERENCE and
+    // nothing else changed (advanced.stencil_probe), wrapped in
+    // stencilProbeBegin/End.
+    kStencilProbe,
     // A batched draw re-issued without some of its quads (advanced.
     // census_skip_quad). Swallows the game's draw and makes up to two of its
     // own, so it must not be combined with anything that also draws.
@@ -1418,6 +1423,7 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         !fssPanelWantsDraws() && !fssProbeWants() && !fssRevealWantsDraws() &&
         !fssRingWantsDraws() && !fssDumpWantsDraws() &&
         !eyeSplitWantsDraws() && !resolveProbeWantsDraws() &&
+        !stencilProbeWantsDraws() &&
         !remlokWantsDraws() && !holoWantsDraws() && !witchstarWantsDraws() &&
         !sunglareWantsDraws() && !cbPeekEnabled() && !billboardWantsDraws() &&
         !drawCensusArmed() && !panelQuadWants() && !panelCurveWants() &&
@@ -1931,6 +1937,16 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     // whole pass rather than composing with anything.
     if (resolveProbeWantsDraws() && resolveProbeOnEyeDraw(self)) {
         return DrawVerdict::kResolveProbe;
+    }
+
+    // The stencil probe (the black planet, 2026-08-31), asked after the
+    // resolve probe because the two name different draws and the resolve is
+    // the more specific claim. This one changes no shader and swallows no
+    // draw -- it re-binds the game's own state with one number altered -- so
+    // it composes with everything and needs no place in the order beyond
+    // being past every fix that swaps a shader.
+    if (stencilProbeWantsDraws() && stencilProbeOnEyeDraw(self)) {
+        return DrawVerdict::kStencilProbe;
     }
 
     // The ring cross-feed (round eighteen), the same gate and shape: the
@@ -2654,6 +2670,7 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     if (v == DrawVerdict::kFssRing) fssRingBegin(self);
     if (v == DrawVerdict::kFssDump) fssDumpBegin(self);
     if (v == DrawVerdict::kResolveProbe) resolveProbeBegin(self);
+    if (v == DrawVerdict::kStencilProbe) stencilProbeBegin(self);
     if (v == DrawVerdict::kHolo) holoBegin(self);
     if (v == DrawVerdict::kScrim) scrimBegin(self);
     if (v == DrawVerdict::kWitchstar) witchstarBegin(self);
@@ -2682,6 +2699,7 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     if (v == DrawVerdict::kHolo) holoEnd(self);
     if (v == DrawVerdict::kFssReveal) fssRevealEnd(self);
     if (v == DrawVerdict::kFssRing) fssRingEnd(self);
+    if (v == DrawVerdict::kStencilProbe) stencilProbeEnd(self);
     if (v == DrawVerdict::kResolveProbe) resolveProbeEnd(self);
     if (v == DrawVerdict::kFssDump) fssDumpEnd(self);
     if (v == DrawVerdict::kFssProbe) fssProbeEnd(self);
@@ -3404,6 +3422,7 @@ void vScreenRefreshConfig() {
     fssDumpConfigure(cfg);
     eyeSplitConfigure(cfg);
     resolveProbeConfigure(cfg);
+    stencilProbeConfigure(cfg);
     {
         s->censusFssJump = cfg.getInt("advanced.census_fss_jump", 0) ? 1 : 0;
         s->fssTheaterOn = cfg.getFloat("experimental.fss_theater", 0.0f) > 0.0f;
@@ -4294,6 +4313,7 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     fssDumpConfigure(cfg);
     eyeSplitConfigure(cfg);
     resolveProbeConfigure(cfg);
+    stencilProbeConfigure(cfg);
     {
         g_state->censusFssJump =
             cfg.getInt("advanced.census_fss_jump", 0) ? 1 : 0;
@@ -4513,6 +4533,7 @@ void shutdownVScreenFixes() {
     fssDumpShutdown();
     eyeSplitShutdown();
     resolveProbeShutdown();
+    stencilProbeShutdown();
     billboardShutdown();
     // Both halves of the intro. Neither was on this roll-call, so a session
     // that ended without a rendered scene ever arriving -- quitting from the
