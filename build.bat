@@ -204,6 +204,7 @@ cl.exe %CFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "%ROOT%\src\d3d11\resolve_probe.cpp" ^
     "%ROOT%\src\d3d11\stencil_probe.cpp" ^
     "%ROOT%\src\d3d11\resolve_bind_fix.cpp" ^
+    "%ROOT%\src\d3d11\scanner_heat_fix.cpp" ^
     "%ROOT%\src\d3d11\fss_theater.cpp" ^
     "%ROOT%\src\d3d11\xinput_watch.cpp" ^
     "%ROOT%\src\d3d11\fss_panel_rect.cpp" ^

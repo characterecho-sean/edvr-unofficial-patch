@@ -36,6 +36,7 @@
 #include "eye_split.h"
 #include "resolve_probe.h"
 #include "resolve_bind_fix.h"
+#include "scanner_heat_fix.h"
 #include "stencil_probe.h"
 #include "fss_ring.h"
 #include "fss_res.h"
@@ -1275,6 +1276,10 @@ enum class DrawVerdict {
     // nothing else changed (advanced.stencil_probe), wrapped in
     // stencilProbeBegin/End.
     kStencilProbe,
+    // The DSS signal filter's blue overlay, re-issued a few extra times to
+    // stack its additive contribution up to flat-screen strength
+    // (fix.scanner_heat). Adds passes after the game's own draw; no Begin.
+    kScannerHeat,
     // A batched draw re-issued without some of its quads (advanced.
     // census_skip_quad). Swallows the game's draw and makes up to two of its
     // own, so it must not be combined with anything that also draws.
@@ -1444,6 +1449,7 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         !fssRingWantsDraws() && !fssDumpWantsDraws() &&
         !eyeSplitWantsDraws() && !resolveProbeWantsDraws() &&
         !stencilProbeWantsDraws() && !resolveBindWants() &&
+        !scannerHeatWants() &&
         !remlokWantsDraws() && !holoWantsDraws() && !witchstarWantsDraws() &&
         !sunglareWantsDraws() && !cbPeekEnabled() && !billboardWantsDraws() &&
         !drawCensusArmed() && !panelQuadWants() && !panelCurveWants() &&
@@ -1966,6 +1972,13 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     if ((resolveProbeWantsDraws() && resolveProbeOnEyeDraw(self)) ||
         (resolveBindWants() && resolveBindOnEyeDraw(self))) {
         return DrawVerdict::kResolveProbe;
+    }
+
+    // The DSS filter overlay (the black-planet hunt's coda): recognised by
+    // its pixel shader, which two shaders carry and only when a signal
+    // filter is up. No mode gate -- the hashes are the gate.
+    if (scannerHeatWants() && scannerHeatOnDraw(self, kind)) {
+        return DrawVerdict::kScannerHeat;
     }
 
     // The stencil probe (the black planet, 2026-08-31), asked after the
@@ -2724,6 +2737,15 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
         splashDimBegin(self)) {
         draw();
         splashDimEnd(self);
+    }
+    // The scanner heat boost: re-issue the same additive overlay draw a few
+    // more times. The game's blend, depth and bindings are still exactly as
+    // it left them, which is precisely the state each extra pass wants, so
+    // there is nothing to set or restore.
+    if (v == DrawVerdict::kScannerHeat) {
+        const uint32_t extra = scannerHeatExtraPasses();
+        for (uint32_t k = 0; k < extra; ++k) draw();
+        scannerHeatNoteApplied();
     }
     if (v == DrawVerdict::kParticle) particleEnd(self);
     if (v == DrawVerdict::kGlareSteady) sunglareEnd(self);
@@ -3491,6 +3513,7 @@ void vScreenRefreshConfig() {
     eyeSplitConfigure(cfg);
     resolveProbeConfigure(cfg);
     resolveBindConfigure(cfg);
+    scannerHeatConfigure(cfg);
     stencilProbeConfigure(cfg);
     {
         s->censusFssJump = cfg.getInt("advanced.census_fss_jump", 0) ? 1 : 0;
@@ -4383,6 +4406,7 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     eyeSplitConfigure(cfg);
     resolveProbeConfigure(cfg);
     resolveBindConfigure(cfg);
+    scannerHeatConfigure(cfg);
     stencilProbeConfigure(cfg);
     {
         g_state->censusFssJump =
@@ -4610,6 +4634,7 @@ void shutdownVScreenFixes() {
     eyeSplitShutdown();
     resolveProbeShutdown();
     resolveBindShutdown();
+    scannerHeatShutdown();
     stencilProbeShutdown();
     billboardShutdown();
     // Both halves of the intro. Neither was on this roll-call, so a session
