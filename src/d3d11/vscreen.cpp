@@ -35,6 +35,7 @@
 #include "fss_dump.h"
 #include "eye_split.h"
 #include "resolve_probe.h"
+#include "resolve_bind_fix.h"
 #include "stencil_probe.h"
 #include "fss_ring.h"
 #include "fss_res.h"
@@ -1442,7 +1443,7 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         !fssPanelWantsDraws() && !fssProbeWants() && !fssRevealWantsDraws() &&
         !fssRingWantsDraws() && !fssDumpWantsDraws() &&
         !eyeSplitWantsDraws() && !resolveProbeWantsDraws() &&
-        !stencilProbeWantsDraws() &&
+        !stencilProbeWantsDraws() && !resolveBindWants() &&
         !remlokWantsDraws() && !holoWantsDraws() && !witchstarWantsDraws() &&
         !sunglareWantsDraws() && !cbPeekEnabled() && !billboardWantsDraws() &&
         !drawCensusArmed() && !panelQuadWants() && !panelCurveWants() &&
@@ -1954,7 +1955,8 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     // PIXEL shader hash, so it is asked LAST -- every fix above it that
     // swaps a shader has already had its say, and this one replaces the
     // whole pass rather than composing with anything.
-    if (resolveProbeWantsDraws() && resolveProbeOnEyeDraw(self)) {
+    if ((resolveProbeWantsDraws() && resolveProbeOnEyeDraw(self)) ||
+        (resolveBindWants() && resolveBindOnEyeDraw(self))) {
         return DrawVerdict::kResolveProbe;
     }
 
@@ -2692,6 +2694,7 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     if (v == DrawVerdict::kFssReveal) fssRevealBegin(self);
     if (v == DrawVerdict::kFssRing) fssRingBegin(self);
     if (v == DrawVerdict::kFssDump) fssDumpBegin(self);
+    if (v == DrawVerdict::kResolveProbe) resolveBindBegin(self);
     if (v == DrawVerdict::kResolveProbe) resolveProbeBegin(self);
     if (v == DrawVerdict::kStencilProbe) stencilProbeBegin(self);
     if (v == DrawVerdict::kHolo) holoBegin(self);
@@ -2724,6 +2727,7 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     if (v == DrawVerdict::kFssRing) fssRingEnd(self);
     if (v == DrawVerdict::kStencilProbe) stencilProbeEnd(self);
     if (v == DrawVerdict::kResolveProbe) resolveProbeEnd(self);
+    if (v == DrawVerdict::kResolveProbe) resolveBindEnd(self);
     if (v == DrawVerdict::kFssDump) fssDumpEnd(self);
     if (v == DrawVerdict::kFssProbe) fssProbeEnd(self);
     if (v == DrawVerdict::kFssPanel) fssPanelEnd(self);
@@ -3478,6 +3482,7 @@ void vScreenRefreshConfig() {
     fssDumpConfigure(cfg);
     eyeSplitConfigure(cfg);
     resolveProbeConfigure(cfg);
+    resolveBindConfigure(cfg);
     stencilProbeConfigure(cfg);
     {
         s->censusFssJump = cfg.getInt("advanced.census_fss_jump", 0) ? 1 : 0;
@@ -4369,6 +4374,7 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     fssDumpConfigure(cfg);
     eyeSplitConfigure(cfg);
     resolveProbeConfigure(cfg);
+    resolveBindConfigure(cfg);
     stencilProbeConfigure(cfg);
     {
         g_state->censusFssJump =
@@ -4595,6 +4601,7 @@ void shutdownVScreenFixes() {
     fssDumpShutdown();
     eyeSplitShutdown();
     resolveProbeShutdown();
+    resolveBindShutdown();
     stencilProbeShutdown();
     billboardShutdown();
     // Both halves of the intro. Neither was on this roll-call, so a session
