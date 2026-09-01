@@ -753,8 +753,17 @@ static void recordDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
             bool haveBs = false;
             if (bs) { bs->GetDesc(&bd); haveBs = true; }
             if (haveDs || haveBs || pred) {
+                // bl= is the whole slot-0 blend equation and sm= the sample
+                // mask (2026-09-01, the DSS black planet). Every test that
+                // could reject a pixel AFTER the shader had been recorded or
+                // probed except this one: a draw under enable=1 with a zero
+                // source factor, or under sm=0, writes nothing while every
+                // recorded column reads healthy. A null blend state prints
+                // bl=0 with the API's defaults, so 0 always reads as
+                // "opaque, writes land".
                 _snprintf_s(sv, sizeof(sv), _TRUNCATE,
-                            " ds=%c%uw%c st=%c%u bm=%X pr=%c",
+                            " ds=%c%uw%c st=%c%u bm=%X pr=%c"
+                            " bl=%c%u,%u,%u/%u,%u,%u%s sm=%X",
                             haveDs ? (dd.DepthEnable ? '1' : '0') : '?',
                             haveDs ? static_cast<unsigned>(dd.DepthFunc) : 0u,
                             haveDs ? (dd.DepthWriteMask ==
@@ -764,7 +773,30 @@ static void recordDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
                             ref,
                             haveBs ? bd.RenderTarget[0].RenderTargetWriteMask
                                    : 0xFu,
-                            pred ? (predValue ? 'T' : 'F') : '-');
+                            pred ? (predValue ? 'T' : 'F') : '-',
+                            haveBs ? (bd.RenderTarget[0].BlendEnable ? '1'
+                                                                     : '0')
+                                   : '0',
+                            haveBs ? static_cast<unsigned>(
+                                         bd.RenderTarget[0].SrcBlend)
+                                   : 2u,
+                            haveBs ? static_cast<unsigned>(
+                                         bd.RenderTarget[0].DestBlend)
+                                   : 1u,
+                            haveBs ? static_cast<unsigned>(
+                                         bd.RenderTarget[0].BlendOp)
+                                   : 1u,
+                            haveBs ? static_cast<unsigned>(
+                                         bd.RenderTarget[0].SrcBlendAlpha)
+                                   : 2u,
+                            haveBs ? static_cast<unsigned>(
+                                         bd.RenderTarget[0].DestBlendAlpha)
+                                   : 1u,
+                            haveBs ? static_cast<unsigned>(
+                                         bd.RenderTarget[0].BlendOpAlpha)
+                                   : 1u,
+                            haveBs && bd.AlphaToCoverageEnable ? ",a2c" : "",
+                            sampleMask);
             }
         }
         if (dss) dss->Release();

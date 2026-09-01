@@ -132,6 +132,20 @@ bool                     g_derivedTried = false;
 ID3D11DepthStencilState* g_savedDs = nullptr;
 UINT                     g_savedRef = 0;
 bool                     g_dsEngaged = false;
+
+// The blend half (2026-09-01): every test that could reject the resolve's
+// output AFTER the shader has now been probed or recorded except the blend
+// unit, and the white run's result -- the replacement's constant landing in
+// one eye and not the other with depth and stencil both off -- has exactly
+// its shape: a nullifying blend or a zero sample mask. noblend binds the
+// NULL blend state (the API default: no blending, all channels land) with a
+// full sample mask, so output that appears can only have been eaten by what
+// was unbound.
+bool               g_wantNoBlend = false;
+ID3D11BlendState*  g_savedBs = nullptr;
+FLOAT              g_savedBf[4] = {};
+UINT               g_savedSm = 0xFFFFFFFFu;
+bool               g_blEngaged = false;
 bool                g_engagedNoted = false;
 uint64_t            g_applied = 0;
 char                g_spec[24] = {};
@@ -167,6 +181,7 @@ void resolveProbeConfigure(Config& cfg) {
     // typo cannot quietly run half the test somebody thinks they asked for.
     Mode wantShader = Mode::kOff;
     Mode wantState = Mode::kOff;
+    bool wantNoBlend = false;
     bool ok = true;
     if (!(spec.empty() || spec == "off" || spec == "0")) {
         size_t at = 0;
@@ -183,6 +198,9 @@ void resolveProbeConfigure(Config& cfg) {
                 wantState = (w == "nostencil") ? Mode::kNoStencil
                           : (w == "nodepth")   ? Mode::kNoDepth
                                                : Mode::kNoBoth;
+            } else if (w == "noblend") {
+                if (wantNoBlend) ok = false;
+                wantNoBlend = true;
             } else {
                 ok = false;
             }
@@ -193,16 +211,21 @@ void resolveProbeConfigure(Config& cfg) {
     if (!ok) {
         Log::get().note(
             "resolve probe: \"%s\" is not understood. One shader word "
-            "(white, inputs) and/or one state word (nostencil, nodepth, "
-            "noboth), joined with '+' -- \"white+noboth\" runs both. off is "
-            "off. Refused; the game draws its own.",
+            "(white, inputs), one state word (nostencil, nodepth, noboth) "
+            "and/or noblend, joined with '+' -- \"white+noboth+noblend\" "
+            "runs all three. off is off. Refused; the game draws its own.",
             spec.c_str());
         wantShader = Mode::kOff;
         wantState = Mode::kOff;
+        wantNoBlend = false;
     }
-    if (wantShader == g_shaderMode && wantState == g_stateMode) return;
+    if (wantShader == g_shaderMode && wantState == g_stateMode &&
+        wantNoBlend == g_wantNoBlend) {
+        return;
+    }
     g_shaderMode = wantShader;
     g_stateMode = wantState;
+    g_wantNoBlend = wantNoBlend;
     // The compiled shader is per-mode (the variants differ by #define), so
     // a mode change drops it and the next matched draw builds the new one.
     // The derived state goes with it for the same reason.
@@ -252,7 +275,19 @@ void resolveProbeConfigure(Config& cfg) {
         default:
             break;
     }
-    if (g_shaderMode == Mode::kOff && g_stateMode == Mode::kOff) {
+    if (g_wantNoBlend) {
+        Log::get().note(
+            "resolve probe ARMED (noblend): the resolve draws with NO blend "
+            "state -- the API default, blending off, every channel written, "
+            "full sample mask -- and the game's own state and mask are put "
+            "back after each draw. The blend unit is the one place output "
+            "could be rejected after the shader that no earlier probe or "
+            "census column covered; a body that appears under this names "
+            "it, and the census's bl= column then shows what the game had "
+            "bound.");
+    }
+    if (g_shaderMode == Mode::kOff && g_stateMode == Mode::kOff &&
+        !g_wantNoBlend) {
         Log::get().note("resolve probe: off, the game's own resolve.");
     } else if (g_shaderMode != Mode::kOff && g_stateMode != Mode::kOff) {
         Log::get().note(
@@ -266,7 +301,8 @@ void resolveProbeConfigure(Config& cfg) {
 }
 
 bool resolveProbeWantsDraws() {
-    return g_shaderMode != Mode::kOff || g_stateMode != Mode::kOff;
+    return g_shaderMode != Mode::kOff || g_stateMode != Mode::kOff ||
+           g_wantNoBlend;
 }
 
 bool resolveProbeOnEyeDraw(ID3D11DeviceContext* ctx) {
@@ -369,7 +405,13 @@ void resolveProbeBegin(ID3D11DeviceContext* ctx) {
             ctx->OMSetDepthStencilState(g_derived, g_savedRef);
             g_dsEngaged = true;
         }
-        if (!g_psEngaged && !g_dsEngaged) return;
+        if (g_wantNoBlend) {
+            ctx->OMGetBlendState(&g_savedBs, g_savedBf, &g_savedSm);
+            const FLOAT one[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+            ctx->OMSetBlendState(nullptr, one, 0xFFFFFFFFu);
+            g_blEngaged = true;
+        }
+        if (!g_psEngaged && !g_dsEngaged && !g_blEngaged) return;
         ++g_applied;
         if (!g_engagedNoted) {
             g_engagedNoted = true;
@@ -377,17 +419,19 @@ void resolveProbeBegin(ID3D11DeviceContext* ctx) {
                 "resolve probe: engaged -- the lighting resolve is drawing "
                 "with %s, restored after every draw. Counting silently from "
                 "here.",
-                g_psEngaged ? "the replacement shader"
-                            : "the modified depth-stencil state");
+                g_psEngaged    ? "the replacement shader"
+                : g_dsEngaged  ? "the modified depth-stencil state"
+                               : "the default blend state");
         }
     });
 }
 
 void resolveProbeEnd(ID3D11DeviceContext* ctx) {
-    if ((!g_psEngaged && !g_dsEngaged) || !ctx) return;
-    const bool ps = g_psEngaged, ds = g_dsEngaged;
+    if ((!g_psEngaged && !g_dsEngaged && !g_blEngaged) || !ctx) return;
+    const bool ps = g_psEngaged, ds = g_dsEngaged, bl = g_blEngaged;
     g_psEngaged = false;
     g_dsEngaged = false;
+    g_blEngaged = false;
     guardedBudget(g_budget, [&] {
         // Restore even where the saved pointer is null: null IS a state the
         // game can have been in, and leaving ours bound would apply it to
@@ -406,6 +450,15 @@ void resolveProbeEnd(ID3D11DeviceContext* ctx) {
                 g_savedDs = nullptr;
             }
         }
+        if (bl) {
+            // Null is a state the game can have been in; putting it back
+            // with the saved factor and mask is exact either way.
+            ctx->OMSetBlendState(g_savedBs, g_savedBf, g_savedSm);
+            if (g_savedBs) {
+                g_savedBs->Release();
+                g_savedBs = nullptr;
+            }
+        }
     });
 }
 
@@ -419,6 +472,10 @@ void resolveProbeShutdown() {
     if (g_savedDs) {
         g_savedDs->Release();
         g_savedDs = nullptr;
+    }
+    if (g_savedBs) {
+        g_savedBs->Release();
+        g_savedBs = nullptr;
     }
 }
 
