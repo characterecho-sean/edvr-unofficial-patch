@@ -140,6 +140,29 @@ long long secondsBetween(const FILETIME& a, const FILETIME& b) {
     return (diff < 0 ? -diff : diff) / 10000000ll;
 }
 
+// Elite keeps the user's graphics choices under the Windows profile, not the
+// game folder: LocalAppData/Frontier Developments/Elite Dangerous/
+// Options/Graphics. Several files live there and their NAMES shift with
+// the game version (Custom.4.0.fxcfg against the older Custom.fxcfg,
+// and so on), so the collector sweeps the folder rather than carrying
+// a list that would quietly go stale.
+std::wstring graphicsOptionsFolder() {
+    PWSTR path = nullptr;
+    std::wstring base;
+    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, nullptr, &path)) && path) {
+        base = path;
+        CoTaskMemFree(path);
+    } else {
+        wchar_t env[MAX_PATH]{};
+        if (GetEnvironmentVariableW(L"LOCALAPPDATA", env, MAX_PATH)) base = env;
+    }
+    if (base.empty()) return std::wstring();
+    return joinPath(joinPath(joinPath(joinPath(base, L"Frontier Developments"),
+                                      L"Elite Dangerous"),
+                             L"Options"),
+                    L"Graphics");
+}
+
 }  // namespace
 
 std::wstring desktopFolder() {
@@ -368,6 +391,82 @@ LogBundle collectLogs(const std::wstring& gameDir, const std::wstring& outDir) t
             take.push_back({extra.path, extra.name});
         } else if (extra.missing) {
             bundle.notes.push_back(extra.missing);
+        }
+    }
+
+    // ---- the game's own graphics settings ------------------------------
+    //
+    // Half the reports in the black-planet hunt hinge on "why this machine
+    // and not that one", and the per-rig variables live in two places: the
+    // profile's Options/Graphics folder (quality, display, the override file
+    // players hand-edit), swept whole into game_graphics/, and the master
+    // GraphicsConfiguration.xml beside the exe -- which guides tell people
+    // to edit directly, so the shipped copy on THIS machine is evidence too.
+    // Zip layout keeps provenance readable: root entries come from the game
+    // folder, game_graphics/ entries from the profile folder.
+    //
+    // Gated on something EDVR-side having been found first: the settings
+    // ride along WITH a report, they are not a report. Without the gate a
+    // press against a folder EDVR was never in would produce a zip of
+    // nothing but the machine's game settings -- and "found nothing to
+    // collect" is the honest answer there.
+    if (!take.empty()) {
+        const std::wstring master = joinPath(gameDir, L"GraphicsConfiguration.xml");
+        if (fileExists(master)) {
+            take.push_back({master, L"GraphicsConfiguration.xml"});
+        } else {
+            bundle.notes.push_back(
+                "No GraphicsConfiguration.xml beside the game's exe.");
+        }
+
+        const std::wstring optDir = graphicsOptionsFolder();
+        int swept = 0;
+        bool sawFolder = false;
+        if (!optDir.empty() && dirExists(optDir)) {
+            sawFolder = true;
+            std::vector<std::wstring> leaves;
+            WIN32_FIND_DATAW gfd{};
+            HANDLE gh = FindFirstFileW(joinPath(optDir, L"*").c_str(), &gfd);
+            if (gh != INVALID_HANDLE_VALUE) {
+                do {
+                    if (gfd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+                    // Everything in this folder is KB-sized XML or text. A
+                    // megabyte here is not a settings file, and the archive
+                    // is assembled in memory -- name it instead of taking it.
+                    const unsigned long long size =
+                        (static_cast<unsigned long long>(gfd.nFileSizeHigh) << 32) |
+                        gfd.nFileSizeLow;
+                    if (size > (1ull << 20)) {
+                        bundle.notes.push_back(
+                            toUtf8(gfd.cFileName) +
+                            " in the graphics settings folder is over a "
+                            "megabyte and was left out.");
+                        continue;
+                    }
+                    leaves.push_back(gfd.cFileName);
+                } while (FindNextFileW(gh, &gfd));
+                FindClose(gh);
+            }
+            // Name order, so two bundles from two machines diff cleanly.
+            std::sort(leaves.begin(), leaves.end());
+            for (const std::wstring& leaf : leaves) {
+                take.push_back({joinPath(optDir, leaf), L"game_graphics/" + leaf});
+                ++swept;
+            }
+        }
+        if (swept > 0) {
+            char line[128];
+            sprintf_s(line, "%d graphics settings file%s from the game's profile folder",
+                      swept, swept == 1 ? "" : "s");
+            bundle.notes.push_back(line);
+        } else if (sawFolder) {
+            bundle.notes.push_back(
+                "The game's graphics settings folder is there but empty.");
+        } else {
+            bundle.notes.push_back(
+                "No Elite graphics settings folder under this Windows "
+                "user's LocalAppData -- is the game run as a different "
+                "user?");
         }
     }
 
