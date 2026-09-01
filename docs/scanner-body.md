@@ -41,8 +41,10 @@ pixels rasterise**. The draw executes with every recordable state healthy —
 depth, stencil, blend, write mask, sample mask, predication, viewport,
 scissor all clean — and paints nothing.
 
-The visible symptom follows from what surrounds it. The scanner backdrop
-(scene repaint, starfield, dome) is a mono layer redrawn per eye from its
+The visible symptom follows from what surrounds it. The space backdrop
+(scene repaint, starfield, galaxy dome -- general passes that run in
+every mode, confirmed against a normal-flight census, not something the
+scanner adds) is a mono layer redrawn per eye from its
 own vertex buffers, at viewport `z=0–0` with depth func GEQUAL under
 reversed-Z — so it only lands where the depth buffer is empty. The planet's
 depth, laid by the G-buffer pass (which is fine in both eyes), excludes it
