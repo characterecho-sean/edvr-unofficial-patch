@@ -140,8 +140,14 @@ std::string statusReport(const Survey& s, const PayloadInfo& payload) {
         }
     }
     if (!payload.version.empty()) out += "\r\nThis installer carries EDVR " + payload.version + ".\r\n";
-    if (s.gameRunning)
+    if (s.gameRunningHere) {
         out += "\r\n!  Elite Dangerous is running. Close it before installing anything.\r\n";
+    } else if (s.gameRunningElsewhere) {
+        // Worth a line of its own. Somebody with two installs, told nothing,
+        // reads a status that ignores the game they can see running.
+        out += "\r\n-  Elite Dangerous is running, but from a different folder. This install is "
+               "not the one in use.\r\n";
+    }
     return out;
 }
 

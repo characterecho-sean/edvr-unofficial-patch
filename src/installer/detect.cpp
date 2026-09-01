@@ -277,6 +277,49 @@ void findFrontier(std::vector<GameInstall>* out) {
     for (const std::wstring& r : roots) addFromRoot(r, L"Frontier launcher", out);
 }
 
+// ---- who is running ------------------------------------------------------
+
+// The full path of a running process's executable, or nothing.
+//
+// PROCESS_QUERY_LIMITED_INFORMATION is the right to ask for: it is granted
+// across integrity levels, where the older PROCESS_QUERY_INFORMATION is
+// refused for anything running higher than the asker -- and a game launched by
+// a Steam that runs elevated, beside an installer that does not, is exactly
+// that shape. When it is refused anyway the caller reads the silence as the
+// dangerous answer, which is the whole reason this can return nothing.
+std::wstring processImagePath(DWORD pid) {
+    HANDLE proc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!proc) return std::wstring();
+    wchar_t buf[1024]{};
+    DWORD chars = 1024;
+    const BOOL ok = QueryFullProcessImageNameW(proc, 0, buf, &chars);
+    CloseHandle(proc);
+    if (!ok || chars == 0 || chars >= 1024) return std::wstring();
+    return std::wstring(buf, chars);
+}
+
+// The folder a path names a file in. A path with nothing above it but a drive
+// keeps its separator: "C:" on its own means the current directory on C:,
+// which is not the folder anybody asked about.
+std::wstring parentOf(const std::wstring& path) {
+    const size_t slash = path.find_last_of(L"\\/");
+    if (slash == std::wstring::npos) return std::wstring();
+    if (slash == 2 && path[1] == L':') return path.substr(0, 3);
+    return path.substr(0, slash);
+}
+
+// The same folder, however each side spelled it: case, trailing separators and
+// a "." or ".." on the way are differences Windows does not have.
+//
+// What this does not undo is a junction or an 8.3 short name -- two routes to
+// one folder still read as two folders. Both sides of every comparison here
+// come from a store's own record of where it put the game, or from the folder
+// the user picked, and neither arrives in those shapes.
+bool sameDir(const std::wstring& a, const std::wstring& b) {
+    if (a.empty() || b.empty()) return false;
+    return _wcsicmp(canonicalPath(a).c_str(), canonicalPath(b).c_str()) == 0;
+}
+
 }  // namespace
 
 std::string toUtf8(const std::wstring& s) {
@@ -367,23 +410,38 @@ bool describeDir(const std::wstring& dir, const std::wstring& source, GameInstal
     return true;
 }
 
-bool gameIsRunning() {
+GameRunState runStateOf(const wchar_t* exeName, const std::wstring& dir) {
     HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-    if (snap == INVALID_HANDLE_VALUE) return false;
+    if (snap == INVALID_HANDLE_VALUE) return GameRunState::NotRunning;
     PROCESSENTRY32W pe{};
     pe.dwSize = sizeof(pe);
-    bool running = false;
+    GameRunState state = GameRunState::NotRunning;
     if (Process32FirstW(snap, &pe)) {
         do {
-            if (_wcsicmp(pe.szExeFile, kGameExe) == 0) {
-                running = true;
-                break;
+            if (_wcsicmp(pe.szExeFile, exeName) != 0) continue;
+
+            // The name matched, which is where this used to stop. Every
+            // install on the machine carries the same one; only the folder a
+            // running copy was launched from has its files held open.
+            const std::wstring image = processImagePath(pe.th32ProcessID);
+
+            // A process that cannot be read is not a process that can be
+            // cleared -- it could be this very folder's, started elevated or
+            // already on its way out -- and a caller with no folder to compare
+            // against has asked the older question. Both read as the refusal,
+            // because a refusal is the direction somebody can recover from.
+            if (image.empty() || dir.empty() || sameDir(parentOf(image), dir)) {
+                state = GameRunState::ThisFolder;
+                break;  // nothing a later process says softens this
             }
+            state = GameRunState::OtherFolder;
         } while (Process32NextW(snap, &pe));
     }
     CloseHandle(snap);
-    return running;
+    return state;
 }
+
+GameRunState gameRunState(const std::wstring& gameDir) { return runStateOf(kGameExe, gameDir); }
 
 std::vector<GameInstall> findInstalls() {
     std::vector<GameInstall> found;

@@ -46,9 +46,26 @@ bool describeDir(const std::wstring& dir, const std::wstring& source, GameInstal
 // paper over.
 std::wstring findOpenvrDir(const std::wstring& gameDir);
 
-// Is EliteDangerous64.exe running? Every file we touch is one the game holds
-// open while it runs, so this is asked before anything is written.
-bool gameIsRunning();
+// Is Elite Dangerous running, and does that stop us?
+//
+// Every file this installer touches is one the game holds open while it runs
+// -- but only in the folder it was launched from. A machine with two installs
+// (the Frontier launcher's and Steam's) plays one while the other is patched,
+// and asking by executable NAME alone refused the second for the first one's
+// sake.
+enum class GameRunState {
+    NotRunning,   // no EliteDangerous64.exe anywhere on this machine
+    OtherFolder,  // running, and every copy of it came from some other install
+    ThisFolder,   // running from the folder about to be written into
+};
+
+// EliteDangerous64.exe, weighed against the folder about to be written into.
+GameRunState gameRunState(const std::wstring& gameDir);
+
+// The same question about any executable name. It takes the name rather than
+// fixing it because that is the only way to test the answer: no build machine
+// has Elite running, and every one of them has the test process itself.
+GameRunState runStateOf(const wchar_t* exeName, const std::wstring& dir);
 
 // Path and text helpers shared with the rest of the installer.
 std::wstring joinPath(const std::wstring& dir, const std::wstring& leaf);

@@ -20,6 +20,7 @@
 #include <windows.h>
 
 #include <cstdio>
+#include <cwctype>
 #include <string>
 #include <vector>
 
@@ -158,7 +159,7 @@ static Survey baseSurvey(const std::wstring& gameDir) {
     s.game.product = L"elite-dangerous-odyssey-64";
     s.game.odyssey = true;
     s.haveOpenvrDir = true;
-    s.gameRunning = false;
+    s.gameRunningHere = false;
     s.d3d11 = fakeDll(DllKind::Absent, joinPath(gameDir, L"d3d11.dll"), "");
     s.openvrCurrent =
         fakeDll(DllKind::OpenVrRuntime, joinPath(s.game.openvrDir, L"openvr_api.dll"), "game-vr");
@@ -740,11 +741,27 @@ static void testPlanner() {
         check(notesMention(plan, "d3d11_edhm.dll"), "and the report names the one left behind");
     }
 
-    {   // The game is running.
+    {   // The game is running, out of this very folder.
         Survey s = baseSurvey(dir);
-        s.gameRunning = true;
+        s.gameRunningHere = true;
         const Plan plan = planInstall(s, options, payload);
         check(plan.blocked && plan.steps.empty(), "nothing is planned while the game is running");
+        check(planUninstall(s, options).blocked, "and nothing is taken back out either");
+    }
+
+    {   // The game is running out of the OTHER install. A machine with two of
+        // them is somebody's actual setup, and a refusal that went by the
+        // executable's name alone stopped the folder nobody was playing from.
+        Survey s = baseSurvey(dir);
+        s.gameRunningElsewhere = true;
+        const Plan plan = planInstall(s, options, payload);
+        check(!plan.blocked && !plan.steps.empty(),
+              "a game running from a different folder does not stop this one");
+        check(notesMention(plan, "different folder"),
+              "and the report says so rather than leaving it unexplained");
+        const Plan out = planUninstall(s, options);
+        check(!out.blocked, "the same on the way back out");
+        check(notesMention(out, "different folder"), "and it says so there too");
     }
 
     {   // A build made without EDVR's openvr_api.dll. Not a choice anybody can
@@ -992,9 +1009,12 @@ static void testApply(const std::wstring& scratch) {
 
         Survey again = surveyTarget(s.game);
         // The build machine may well have Elite running -- it did the day this
-        // was written -- and that blocks a plan outright. This case is about
-        // the ini merge over a folder a previous run really wrote.
-        again.gameRunning = false;
+        // was written. It cannot be running from this scratch folder, so the
+        // survey reads it as somebody else's and plans anyway; both flags are
+        // cleared regardless, because this case is about the ini merge over a
+        // folder a previous run really wrote and nothing else.
+        again.gameRunningHere = false;
+        again.gameRunningElsewhere = false;
         Options second = options;
         second.backupStamp = L"20260827-120200";
         const Plan plan = planInstall(again, second, newer);
@@ -1040,6 +1060,47 @@ static void testProbe(const std::wstring& scratch) {
     DllInfo unknown = fakeDll(DllKind::D3d11Provider, L"C:\\x\\d3d11.dll", "x", L"Something Else");
     expectEq(toUtf8(chainNameFor(unknown)), "d3d11_other.dll",
              "an unrecognised mod still gets a name of its own");
+}
+
+// ---------------------------------------------------------------------------
+// which install is running
+// ---------------------------------------------------------------------------
+
+static void testRunState() {
+    printf("\nwho is running\n");
+
+    // Elite is not running on a build machine, and no test can make it. This
+    // process is running, and it is the same shape: a name that matches, and a
+    // folder that either is or is not the one being asked about, which is the
+    // whole of the question.
+    wchar_t self[1024]{};
+    const DWORD n = GetModuleFileNameW(nullptr, self, 1024);
+    check(n > 0 && n < 1024, "the test can find its own executable");
+    const std::wstring path(self, n);
+    const size_t slash = path.find_last_of(L"\\/");
+    check(slash != std::wstring::npos, "and that path has a folder in it");
+    if (slash == std::wstring::npos) return;
+    const std::wstring dir = path.substr(0, slash);
+    const std::wstring name = path.substr(slash + 1);
+
+    check(runStateOf(name.c_str(), dir) == GameRunState::ThisFolder,
+          "a process running from the folder asked about is that folder's");
+    check(runStateOf(name.c_str(), joinPath(dir, L"somewhere-else")) == GameRunState::OtherFolder,
+          "the same name from another folder is not -- the two-install refusal");
+    check(runStateOf(L"a-name-nothing-on-this-machine-has.exe", dir) == GameRunState::NotRunning,
+          "a name nobody is running is not running");
+    check(runStateOf(name.c_str(), std::wstring()) == GameRunState::ThisFolder,
+          "with no folder to compare against, a match is still a refusal");
+
+    // Spellings Windows treats as one folder have to read as one folder here,
+    // or the refusal misses the install it exists for.
+    std::wstring shouty = dir;
+    for (wchar_t& c : shouty) c = static_cast<wchar_t>(towupper(c));
+    check(runStateOf(name.c_str(), shouty + L"\\") == GameRunState::ThisFolder,
+          "case and a trailing separator are not a different folder");
+    check(runStateOf(name.c_str(), joinPath(joinPath(dir, L"down"), L"..")) ==
+              GameRunState::ThisFolder,
+          "nor is a path that goes down and comes back up");
 }
 
 // ---------------------------------------------------------------------------
@@ -1253,6 +1314,7 @@ int wmain(int argc, wchar_t** argv) {
     testPlanner();
     testApply(scratch);
     testProbe(scratch);
+    testRunState();
     testSettings(root, scratch);
     testLogBundle(scratch);
     testState();

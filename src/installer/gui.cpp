@@ -345,11 +345,20 @@ void rebuildStatus() {
         g.status.push_back(chain);
     }
 
-    if (s.gameRunning) {
+    if (s.gameRunningHere) {
         StatusRow running;
         running.label = L"Elite Dangerous";
         running.tone = Tone::Bad;
         running.value = L"running \x2014 close it before installing anything";
+        g.status.push_back(running);
+    } else if (s.gameRunningElsewhere) {
+        // Not a warning: the copy running belongs to another install and this
+        // one is free. Said anyway, because somebody who can see the game on
+        // their other monitor is owed the reason the buttons are still live.
+        StatusRow running;
+        running.label = L"Elite Dangerous";
+        running.tone = Tone::Muted;
+        running.value = L"running from a different folder \x2014 not this install";
         g.status.push_back(running);
     }
 }
@@ -504,7 +513,9 @@ void showSurvey() {
         return;
     }
 
-    const bool running = g.survey.gameRunning;
+    // This folder's copy, not the machine's. Another install being in a jump
+    // has no hold on the files here.
+    const bool running = g.survey.gameRunningHere;
     EnableWindow(g.install, !running);
     EnableWindow(g.repair, !running);
     EnableWindow(g.uninstall, !running);

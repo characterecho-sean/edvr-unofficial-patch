@@ -13,6 +13,14 @@ const wchar_t* kIni = L"edvr.ini";
 const wchar_t* kOpenvr = L"openvr_api.dll";
 const wchar_t* kOpenvrOrig = L"openvr_api_orig.dll";
 
+// Said when the game is running and it is not this folder's copy. Nothing is
+// stopped, so it is a note rather than a problem -- but not silence either:
+// being refused for a running game is what somebody expects here, and a report
+// that says nothing about it looks like the check never ran.
+const char* kRunningElsewhere =
+    "Elite Dangerous is running, but from a different folder -- this install is not the one in "
+    "use, so it can be changed.";
+
 std::string say(const std::wstring& w) { return toUtf8(w); }
 
 std::vector<std::wstring> subdirsOf(const std::wstring& dir) {
@@ -89,7 +97,12 @@ Survey surveyTarget(const GameInstall& game) {
     Survey s;
     s.game = game;
     if (s.game.openvrDir.empty()) s.game.openvrDir = findOpenvrDir(game.dir);
-    s.gameRunning = gameIsRunning();
+
+    // Asked about THIS folder, not about the executable's name: the other
+    // install on the machine can be in a jump while this one is patched.
+    const GameRunState running = gameRunState(s.game.dir);
+    s.gameRunningHere = running == GameRunState::ThisFolder;
+    s.gameRunningElsewhere = running == GameRunState::OtherFolder;
 
     s.d3d11 = probeDll(joinPath(game.dir, kD3d11));
     for (const std::wstring& name : filesLike(game.dir, L"d3d11_*.dll")) {
@@ -154,7 +167,7 @@ Plan planInstall(const Survey& s, const Options& o, const PayloadInfo& p) {
         plan.problems.push_back("No game folder chosen.");
         return plan;
     }
-    if (s.gameRunning) {
+    if (s.gameRunningHere) {
         plan.blocked = true;
         plan.problems.push_back(
             "Elite Dangerous is running. Close it first -- Windows will not let anything replace a "
@@ -166,6 +179,7 @@ Plan planInstall(const Survey& s, const Options& o, const PayloadInfo& p) {
         plan.problems.push_back("This installer carries no EDVR files. Nothing to install.");
         return plan;
     }
+    if (s.gameRunningElsewhere) plan.notes.push_back(kRunningElsewhere);
 
     std::vector<Step> body;
     std::vector<std::pair<std::string, std::string>> forced;  // ini keys the installer must set
@@ -620,11 +634,12 @@ Plan planUninstall(const Survey& s, const Options& o) {
     plan.backupDir =
         joinPath(backupRootPath(s.game.dir), o.backupStamp.empty() ? L"backup" : o.backupStamp);
 
-    if (s.gameRunning) {
+    if (s.gameRunningHere) {
         plan.blocked = true;
         plan.problems.push_back("Elite Dangerous is running. Close it first.");
         return plan;
     }
+    if (s.gameRunningElsewhere) plan.notes.push_back(kRunningElsewhere);
 
     std::vector<Step> body;
     bool wantBackupDir = false;

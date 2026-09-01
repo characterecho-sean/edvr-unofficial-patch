@@ -39,7 +39,14 @@ struct PayloadInfo {
 // The folder as it is right now.
 struct Survey {
     GameInstall game;
-    bool        gameRunning = false;
+
+    // Elite Dangerous, and whether the copy running is this folder's. Two
+    // separate facts because they lead to opposite places: one stops the run,
+    // the other is only worth saying out loud. A rig with two installs plays
+    // one while the other is patched, and a refusal that went by the
+    // executable's name alone stopped the folder nobody was in.
+    bool gameRunningHere = false;       // from this folder: nothing here can be written
+    bool gameRunningElsewhere = false;  // from another install: this folder is free
 
     DllInfo              d3d11;       // <game>\d3d11.dll
     std::vector<DllInfo> otherD3d11;  // d3d11_*.dll beside it: chain targets, ours or theirs

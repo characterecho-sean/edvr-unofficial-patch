@@ -284,7 +284,14 @@ line.
   not need. When a folder does need it, the installer says so and relaunches
   itself already confirmed.
 - **The game must be closed**, and it says which it is rather than failing on a
-  locked file halfway through.
+  locked file halfway through. *This* game: the running `EliteDangerous64.exe`
+  is asked where it was launched from, and only a copy running out of the folder
+  being installed into stops the run. A machine with two installs — a Frontier
+  launcher one and a Steam one — plays one while the other is patched, and a
+  refusal that went by the executable's name alone stopped the folder nobody was
+  in. The other install being up is said out loud rather than passed over in
+  silence. A process whose path cannot be read at all counts as this one, since
+  a refusal is the direction somebody can recover from.
 
 ## What it does not do
 
