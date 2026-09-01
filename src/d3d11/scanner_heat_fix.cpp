@@ -29,7 +29,6 @@ bool     g_on = false;
 uint32_t g_passes = 2;        // EXTRA re-issues; total strength is passes+1
 
 uint32_t g_applied = 0;       // matched draws boosted this session
-bool     g_notedOn = false;
 bool     g_engagedNoted = false;
 
 }  // namespace
@@ -43,10 +42,23 @@ void scannerHeatConfigure(Config& cfg) {
     const uint32_t passes = static_cast<uint32_t>(
         cfg.getIntInRange("advanced.scanner_heat_passes", 2, 1, 6));
 
+    // A session that STARTS with the fix off says so, once -- the same
+    // lesson resolve_bind_fix learned the same day: this key defaults off,
+    // so without this line every stock session's bundle is silent about a
+    // state the next faint-heat-map report will need.
+    static bool announced = false;
     const bool changed = (want != g_on) || (want && passes != g_passes);
     g_on = want;
     g_passes = passes;
-    if (!changed) return;
+    if (!changed) {
+        if (!announced && !g_on) {
+            Log::get().note("scanner heat fix off: the filter overlay is "
+                            "left at the game's own strength.");
+        }
+        announced = true;
+        return;
+    }
+    announced = true;
 
     if (g_on) {
         g_engagedNoted = false;
@@ -58,11 +70,9 @@ void scannerHeatConfigure(Config& cfg) {
             "already is. Off outside the scanner and whenever no filter is "
             "selected.",
             g_passes, g_passes + 1);
-        g_notedOn = true;
     } else {
         Log::get().note("scanner heat fix off: the filter overlay is left at "
                         "the game's own strength.");
-        g_notedOn = true;
     }
 }
 
