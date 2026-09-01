@@ -55,7 +55,21 @@ void releaseCache() {
 void resolveBindConfigure(Config& cfg) {
     const std::string v = cfg.getString("fix.scanner_body", "on");
     const bool want = !(v == "off" || v == "0");
-    if (want == g_on) return;
+    // A session that STARTS with the fix off used to say nothing at all --
+    // the 2026-09-01 fix-off capture only revealed its own state through
+    // the ini in the zip. One line at first sight, whatever the state, so
+    // every bundle names it.
+    static bool announced = false;
+    if (want == g_on) {
+        if (!announced && !g_on) {
+            announced = true;
+            Log::get().note("scanner body fix off: resolve draws are left "
+                            "as the game issues them.");
+        }
+        announced = true;
+        return;
+    }
+    announced = true;
     g_on = want;
     if (g_on) {
         Log::get().note(
