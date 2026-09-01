@@ -1276,10 +1276,16 @@ enum class DrawVerdict {
     // nothing else changed (advanced.stencil_probe), wrapped in
     // stencilProbeBegin/End.
     kStencilProbe,
-    // The DSS signal filter's blue overlay, re-issued a few extra times to
-    // stack its additive contribution up to flat-screen strength
-    // (fix.scanner_heat). Adds passes after the game's own draw; no Begin.
+    // The DSS signal filter's overlay, drawn with its own depth test off
+    // (fix.scanner_heat, advanced.scanner_heat_mode = overlay) so whatever
+    // stamps depth in front of the planet cannot reject it. Wrapped in
+    // scannerHeatBegin/End; the extra-passes loop runs inside that bracket.
     kScannerHeat,
+    // The same fix's other mode: the shell the game draws in front of the
+    // planet, stopped from WRITING depth while a filter is up (advanced.
+    // scanner_heat_mode = shell), so it can no longer reject the overlay
+    // that follows it. Wrapped in scannerHeatShellBegin/End; no passes.
+    kScannerHeatShell,
     // A batched draw re-issued without some of its quads (advanced.
     // census_skip_quad). Swallows the game's draw and makes up to two of its
     // own, so it must not be combined with anything that also draws.
@@ -1976,9 +1982,21 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
 
     // The DSS filter overlay (the black-planet hunt's coda): recognised by
     // its pixel shader, which two shaders carry and only when a signal
-    // filter is up. No mode gate -- the hashes are the gate.
-    if (scannerHeatWants() && scannerHeatOnDraw(self, kind)) {
+    // filter is up -- the hashes are the gate, in either scanner_heat_mode,
+    // because this sighting is also the only place the shell recognizer
+    // just below learns that a filter is up at all.
+    if (scannerHeatWants() && scannerHeatOnDraw(self, kind, s->frameNo)) {
         return DrawVerdict::kScannerHeat;
+    }
+
+    // The shell the game stamps in front of the planet before the overlay
+    // (advanced.scanner_heat_mode = shell): recognised the same way, but
+    // only within two frames of the latch the overlay recognizer above
+    // last stamped -- outside the scanner the latch never fires, so the
+    // shell's hash matching something in a menu can never matter here.
+    if (scannerHeatWants() &&
+        scannerHeatShellOnDraw(self, kind, s->frameNo)) {
+        return DrawVerdict::kScannerHeatShell;
     }
 
     // The stencil probe (the black planet, 2026-08-31), asked after the
@@ -2717,6 +2735,8 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     if (v == DrawVerdict::kFssDump) fssDumpBegin(self);
     if (v == DrawVerdict::kResolveProbe) resolveBindBegin(self);
     if (v == DrawVerdict::kResolveProbe) resolveProbeBegin(self);
+    if (v == DrawVerdict::kScannerHeat) scannerHeatBegin(self);
+    if (v == DrawVerdict::kScannerHeatShell) scannerHeatShellBegin(self);
     if (v == DrawVerdict::kStencilProbe) stencilProbeBegin(self);
     if (v == DrawVerdict::kHolo) holoBegin(self);
     if (v == DrawVerdict::kScrim) scrimBegin(self);
@@ -2738,14 +2758,18 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
         draw();
         splashDimEnd(self);
     }
-    // The scanner heat boost: re-issue the same additive overlay draw a few
-    // more times. The game's blend, depth and bindings are still exactly as
-    // it left them, which is precisely the state each extra pass wants, so
-    // there is nothing to set or restore.
+    // The scanner heat fix, both modes: the shell draw needs nothing after
+    // it but its own state put back. The overlay draw's extra passes -- the
+    // strength knob -- run INSIDE the depth-off bracket in overlay mode, so
+    // every pass reaches the eye and not just the first, before that state
+    // goes back too; in shell mode the bracket is a no-op and the passes
+    // simply re-issue the draw under whatever the game left bound.
+    if (v == DrawVerdict::kScannerHeatShell) scannerHeatShellEnd(self);
     if (v == DrawVerdict::kScannerHeat) {
         const uint32_t extra = scannerHeatExtraPasses();
         for (uint32_t k = 0; k < extra; ++k) draw();
         scannerHeatNoteApplied();
+        scannerHeatEnd(self);
     }
     if (v == DrawVerdict::kParticle) particleEnd(self);
     if (v == DrawVerdict::kGlareSteady) sunglareEnd(self);

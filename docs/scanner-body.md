@@ -130,3 +130,65 @@ queries at all** — only timestamp/event profiling.
 
 The vendor-facing report is the natural next step once the release ships;
 this document is its source material.
+
+## Coda: the DSS heat map
+
+`fix.scanner_heat`'s first build (2026-09-01, [scanner_heat_fix.cpp](../src/d3d11/scanner_heat_fix.cpp))
+treated the DSS signal filter's blue overlay as present but faint in VR —
+a ~7% blue lift measured in the eye-split dump — and re-issued it a few
+extra times to stack that up to flat strength. Arioch's field build
+(v0.12.4-25-gd443b25) engaged the fix every session, passes 2 through 6,
+and reported no change at all.
+
+The 7% figure was a mis-registration, not a measurement of the overlay's
+real strength. The dump compared the two eyes' hotspot pixels directly,
+but the per-eye projections are off-centre enough that the planet sits
+roughly 365 px further right in one eye than the other — so the
+comparison was reading the healthy eye's planet against the unhealthy
+eye's empty sky beside it. Registering the two eyes before comparing
+gives, in the HDR lit buffer (R11G11B10F) at the filter's hotspot pixels:
+
+| | R | G | B | blue excess B−(R+G)/2 |
+|---|---|---|---|---|
+| black eye, hotspots (overlay alone over nothing) | 0.0019 | 0.0429 | 0.0847 | 0.062 |
+| black eye, mapped-area wash next to hotspots | 0.0013 | 0.0032 | 0.0036 | 0.0014 |
+| lit eye, SAME planet positions | 0.0148 | 0.0148 | 0.0143 | -0.0005 |
+
+The lit eye's blue excess is negative — noise around zero, not a faint
+positive lift. The overlay is not swamped in a lit eye; by this measure
+it is not there at all, at under 1% of the black eye's value. Re-issuing
+an absent draw N times adds N times nothing, which is exactly what the
+field build showed.
+
+The census (bundle `20260901-182527`) named a candidate why: in frame DC 0
+the lit eye's HDR target got 30 draws against the black eye's 26, and the
+four extra sit immediately before the mapped-area fills and the filter
+overlay. The first of them, `#44` (`vh=41E245D4 ph=6EF82262`, a
+768-triangle position-only shell), draws `ds=17wA` — depth on,
+GREATER_EQUAL, **writing** depth — where every overlay and mapped-area
+draw after it carries `ds=17wZ`: depth on, GREATER_EQUAL, no write. Under
+reversed-Z, `#44` stamps its own nearer depth wherever it is nearer than
+the terrain; every `ds=17wZ` draw after it then tests GREATER_EQUAL
+against that stamp and fails wherever the shell covered it. `#44` and its
+three neighbours are the same four draws this document's own evidence
+already names as vanishing from one eye on alternating frames (see "What
+the road ruled out", above) — normal engine parity, not a bug — and in
+the frame where they are absent, the stamp never lands, the terrain's own
+depth survives, and the overlay passes: vivid blue over a black planet,
+in the eye the black-planet bug had already emptied. Census frame DC 1
+carries all four draws, and all the ds=17wZ overlays, in both eyes.
+
+`fix.scanner_heat` v2 no longer assumes which draw is at fault.
+`advanced.scanner_heat_mode = overlay` (the default) drops the overlay's
+own depth test instead, which answers the question regardless of which
+draw is doing the stamping; `= shell` stops draw `#44` from writing depth
+instead, leaving the overlay untouched, which is the narrower claim and —
+if it holds — the actual fix. Both derive one depth-stencil field from
+the game's own state and change nothing else, [resolve_probe.cpp](../src/d3d11/resolve_probe.cpp)'s
+pattern, so that a result is attributable to the one field that changed
+and not to some other comparison an authored-from-scratch state would
+have gotten wrong too.
+
+This is a hypothesis with one census and one dump behind it, not a
+verified mechanism, and as of this writing it has not been field-tested
+in either mode.
