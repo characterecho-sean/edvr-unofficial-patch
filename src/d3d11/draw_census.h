@@ -190,6 +190,29 @@ void drawCensusStructCount(void* dst, uint32_t dstOff, void* srcView,
 void drawCensusResolve(void* dst, uint32_t dstSub, void* src, uint32_t srcSub,
                        uint32_t fmt);
 
+// The calls that reset a target without a draw or a copy, and the query
+// brackets that turn rendered pixels into CPU decisions -- the two classes
+// no census had ever recorded (2026-09-01, the DSS black planet). The
+// planet's terrain draws with depth func EQUAL against a prepass laid with
+// GEQUAL, so its colour landing at all depends on the depth buffer's clear;
+// and the four draws one eye periodically loses have the exact shape of a
+// visibility-query decision. Clears and query brackets are where both
+// mechanisms live, and neither had ever appeared on a census line.
+//
+// "DCL" lines, in the one q= sequence with everything else:
+//   C  ClearRenderTargetView -- the view token (the same token the draws
+//      print as r=) and the colour THE GAME asked for, read before any
+//      EDVR substitution touches it.
+//   D  ClearDepthStencilView -- the view token (joins the draws' d=
+//      column), the flags (1 depth, 2 stencil, 3 both), and both values.
+//   B/E  query Begin/End -- the query's token and its D3D11_QUERY type,
+//      so an occlusion bracket around a group of draws reads directly
+//      off the census.
+void drawCensusClearColor(void* rtv, const float c[4], bool foreignCtx);
+void drawCensusClearDepth(void* dsv, uint32_t flags, float depth,
+                          uint32_t stencil, bool foreignCtx);
+void drawCensusQuery(char kind, void* async, bool foreignCtx);
+
 // One compute Dispatch, recorded while a census is running. Logged as "DCX"
 // with the bound compute shader's content hash and what UAV slots 0-3
 // resolve to -- the destinations a compute writer would write.

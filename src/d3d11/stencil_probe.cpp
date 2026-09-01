@@ -43,6 +43,24 @@ void releaseSaved() {
     }
 }
 
+// The tally, printed wherever a run ends -- a live reconfigure as much as
+// process exit. The first field run cleared the key mid-session and the
+// counters silently reset, so the log promised a report it never made.
+void logTally() {
+    if (!g_applied) return;
+    Log::get().note(
+        "stencil probe: %u draw(s) issued with reference %u. The game had "
+        "already chosen %u on %u of them and something else on %u%s. A run "
+        "whose 'something else' count is zero never reproduced the state "
+        "this is testing, whatever the picture looked like.",
+        g_applied, g_ref, g_ref, g_sameCount, g_changedCount,
+        g_haveOther ? "" : " (none seen)");
+    if (g_haveOther) {
+        Log::get().note("stencil probe: the first other reference seen was %u.",
+                        g_firstOther);
+    }
+}
+
 }  // namespace
 
 // "vs:HASH:REF" -- the vertex shader the census prints as vh=, and the
@@ -95,6 +113,7 @@ void stencilProbeConfigure(Config& cfg) {
     }
 
     if (wantHash == g_vsHash && wantRef == g_ref) return;
+    logTally();   // the outgoing run's receipt, before its counters reset
     g_vsHash = wantHash;
     g_ref = wantRef;
     g_engagedNoted = false;
@@ -190,20 +209,7 @@ void stencilProbeEnd(ID3D11DeviceContext* ctx) {
 }
 
 void stencilProbeShutdown() {
-    if (g_applied) {
-        Log::get().note(
-            "stencil probe: %u draw(s) issued with reference %u. The game "
-            "had already chosen %u on %u of them and something else on %u%s. "
-            "A run whose 'something else' count is zero never reproduced the "
-            "state this is testing, whatever the picture looked like.",
-            g_applied, g_ref, g_ref, g_sameCount, g_changedCount,
-            g_haveOther ? "" : " (none seen)");
-        if (g_haveOther) {
-            Log::get().note(
-                "stencil probe: the first other reference seen was %u.",
-                g_firstOther);
-        }
-    }
+    logTally();
     releaseSaved();
     g_engaged = false;
     g_applied = 0;

@@ -109,6 +109,8 @@ uint32_t g_offThisFrame = 0;     // offscreen draws this frame, for the line ind
 uint32_t g_offDraws = 0;         // offscreen draws this census, for the end line
 uint32_t g_copiesThisFrame = 0;  // copies this frame, for the line index
 uint32_t g_copies = 0;           // copies this census, for the end line
+uint32_t g_clearsThisFrame = 0;  // clears + query marks this frame
+uint32_t g_clears = 0;           // and this census, for the end line
 uint32_t g_dispThisFrame = 0;    // dispatches this frame, for the line index
 uint32_t g_dispatches = 0;       // dispatches this census, for the end line
 // The startup schedule, read once at the first frame edge -- these are
@@ -958,6 +960,73 @@ void drawCensusResolve(void* dst, uint32_t dstSub, void* src, uint32_t srcSub,
                     fmt, q);
 }
 
+// Clears and query brackets, on the same terms as the copies: recorded
+// only while a census runs, in the shared q= sequence, forwarded always
+// by their hooks. The view tokens deliberately go through the kView form
+// -- a clear names the same view pointer the draws print as r= and d=,
+// so the tokens JOIN, and "which eye's depth was cleared, and when" is
+// readable straight off the listing.
+void drawCensusClearColor(void* rtv, const float c[4], bool foreignCtx) {
+    if (g_framesLeft == 0) return;
+    ++g_clears;
+    ++g_clearsThisFrame;
+    const uint32_t q = g_seq++;
+    if (g_lines >= g_maxLines) return;
+    ++g_lines;
+    char rb[24];
+    const char* r = bindingToken(rtv, Kind::kView, rb, sizeof(rb));
+    Log::get().note("DCL %u #%u C rtv=%s c=%.3f,%.3f,%.3f,%.3f%s q=%u",
+                    g_frameOrdinal, g_clearsThisFrame - 1, r, c[0], c[1],
+                    c[2], c[3], foreignCtx ? " t=f" : "", q);
+}
+
+void drawCensusClearDepth(void* dsv, uint32_t flags, float depth,
+                          uint32_t stencil, bool foreignCtx) {
+    if (g_framesLeft == 0) return;
+    ++g_clears;
+    ++g_clearsThisFrame;
+    const uint32_t q = g_seq++;
+    if (g_lines >= g_maxLines) return;
+    ++g_lines;
+    char db[24];
+    const char* d = bindingToken(dsv, Kind::kView, db, sizeof(db));
+    Log::get().note("DCL %u #%u D dsv=%s f=%u z=%.3f s=%u%s q=%u",
+                    g_frameOrdinal, g_clearsThisFrame - 1, d, flags, depth,
+                    stencil, foreignCtx ? " t=f" : "", q);
+}
+
+// kind 'B' Begin / 'E' End. The type is read from the query itself so an
+// occlusion bracket is named as one: t=0 event, t=1 occlusion, t=8
+// occlusion-predicate, per D3D11_QUERY. A non-query asynchronous (a
+// counter) reports t=- and is recorded anyway; the bracket's POSITION is
+// the finding even when its type is exotic.
+void drawCensusQuery(char kind, void* async, bool foreignCtx) {
+    if (g_framesLeft == 0) return;
+    ++g_clears;
+    ++g_clearsThisFrame;
+    const uint32_t q = g_seq++;
+    if (g_lines >= g_maxLines) return;
+    ++g_lines;
+    char ab[24];
+    const char* a = bindingToken(async, Kind::kOpaque, ab, sizeof(ab));
+    char ty[8] = "-";
+    if (async) {
+        ID3D11Query* qy = nullptr;
+        if (SUCCEEDED(static_cast<IUnknown*>(async)->QueryInterface(
+                __uuidof(ID3D11Query), reinterpret_cast<void**>(&qy))) &&
+            qy) {
+            D3D11_QUERY_DESC qd{};
+            qy->GetDesc(&qd);
+            _snprintf_s(ty, sizeof(ty), _TRUNCATE, "%u",
+                        static_cast<unsigned>(qd.Query));
+            qy->Release();
+        }
+    }
+    Log::get().note("DCL %u #%u %c a=%s t=%s%s q=%u",
+                    g_frameOrdinal, g_clearsThisFrame - 1, kind, a, ty,
+                    foreignCtx ? " t=f" : "", q);
+}
+
 void drawCensusCbNoteMap(void* resource, void* data) {
     if (!g_cbWatchHash) return;
     for (CbWatch& w : g_cbWatch) {
@@ -1208,12 +1277,13 @@ void drawCensusFrameBoundary(uint32_t frameNo) {
     g_lastFrameNo = frameNo;
     runCensusSchedule(frameNo);
     if (g_framesLeft > 0) {
-        Log::get().note("DC frame %u draws=%u off=%u copies=%u disp=%u",
+        Log::get().note("DC frame %u draws=%u off=%u copies=%u disp=%u clears=%u",
                         g_frameOrdinal, g_drawsThisFrame, g_offThisFrame,
-                        g_copiesThisFrame, g_dispThisFrame);
+                        g_copiesThisFrame, g_dispThisFrame, g_clearsThisFrame);
         g_drawsThisFrame = 0;
         g_offThisFrame = 0;
         g_copiesThisFrame = 0;
+        g_clearsThisFrame = 0;
         g_dispThisFrame = 0;
         g_seq = 0;
         ++g_frameOrdinal;
@@ -1241,7 +1311,9 @@ void drawCensusFrameBoundary(uint32_t frameNo) {
         g_offThisFrame = 0;
         g_offDraws = 0;
         g_copiesThisFrame = 0;
+        g_clearsThisFrame = 0;
         g_copies = 0;
+        g_clears = 0;
         g_dispThisFrame = 0;
         g_dispatches = 0;
         g_seq = 0;

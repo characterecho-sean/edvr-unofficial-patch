@@ -148,6 +148,17 @@ constexpr size_t kSlotCopyStructureCount           = 49;
 // during the build, the eyes genuinely read different content, which is what
 // the headset reports and what every draws-only capture was blind to.
 constexpr size_t kSlotUpdateSubresource     = 48;
+// The reset-without-a-draw call and the query brackets, hooked on the
+// same census-only terms (2026-09-01, the DSS black planet). The
+// planet's terrain shades with depth func EQUAL against a GEQUAL
+// prepass, so whether its colour lands at all rides on the depth
+// buffer's clear; and the four draws one eye periodically loses have
+// the exact shape of an occlusion-query decision. Clears and query
+// brackets were the two remaining call classes no census had ever
+// recorded. Record-only, forward always.
+constexpr size_t kSlotClearDepthStencilView = 53;
+constexpr size_t kSlotBegin                 = 27;
+constexpr size_t kSlotEnd                   = 28;
 constexpr size_t kSlotResolveSubresource    = 57;
 // The FSS resolution fix's half: a viewport of exactly the body layer's
 // requested (half) size, set while an inflated target is bound, is scaled
@@ -246,6 +257,11 @@ typedef void(STDMETHODCALLTYPE* PFN_ResolveSubresource)(
     ID3D11DeviceContext*, ID3D11Resource*, UINT, ID3D11Resource*, UINT,
     DXGI_FORMAT);
 typedef void(STDMETHODCALLTYPE* PFN_ClearState)(ID3D11DeviceContext*);
+typedef void(STDMETHODCALLTYPE* PFN_ClearDsv)(ID3D11DeviceContext*,
+                                              ID3D11DepthStencilView*,
+                                              UINT, FLOAT, UINT8);
+typedef void(STDMETHODCALLTYPE* PFN_QueryMark)(ID3D11DeviceContext*,
+                                               ID3D11Asynchronous*);
 typedef void(STDMETHODCALLTYPE* PFN_DrawIndirectArgs)(ID3D11DeviceContext*,
                                                       ID3D11Buffer*, UINT);
 typedef void(STDMETHODCALLTYPE* PFN_CopyStructureCount)(
@@ -286,6 +302,9 @@ struct State {
     PFN_ResolveSubresource   realResolveSubresource = nullptr;
     PFN_RSSetViewports       realRSSetViewports = nullptr;
     PFN_ClearState           realClearState = nullptr;
+    PFN_ClearDsv             realClearDsv = nullptr;
+    PFN_QueryMark            realBegin = nullptr;
+    PFN_QueryMark            realEnd = nullptr;
     PFN_ExecuteCommandList   realExecuteCommandList = nullptr;
     // The bound target's underlying resource, cached per binding generation
     // for the FSS viewport paths -- resolved only while fssResActive(), so a
@@ -2150,6 +2169,10 @@ void STDMETHODCALLTYPE hookedClearRtv(ID3D11DeviceContext* self,
         s->realClearRtv(self, rtv, c);
         return;
     }
+    // The census's record of this clear, before the probes and before
+    // the void fix touches the colour: the line carries what the GAME
+    // asked for.
+    if (c && drawCensusArmed()) drawCensusClearColor(rtv, c, false);
     // The clear probe, before the void fix so it reports what the GAME asked
     // for rather than what EDVR left. Costs one size compare while armed and
     // nothing at all while the setting is empty, which is the shipped state.
@@ -2723,6 +2746,39 @@ void STDMETHODCALLTYPE hookedCopyResource(ID3D11DeviceContext* self,
                        foreignContext(self));
     }
     g_state->realCopyResource(self, dst, src);
+}
+
+// The depth clear, record-only: the planet's terrain colour landing at all
+// rides on this call's presence, position and values (see the slot
+// comment), and it was invisible to every capture of the hunt so far.
+void STDMETHODCALLTYPE hookedClearDsv(ID3D11DeviceContext* self,
+                                      ID3D11DepthStencilView* dsv, UINT flags,
+                                      FLOAT depth, UINT8 stencil) {
+    if (drawCensusArmed()) {
+        drawCensusClearDepth(dsv, flags, depth, stencil,
+                             foreignContext(self));
+    }
+    g_state->realClearDsv(self, dsv, flags, depth, stencil);
+}
+
+// The query brackets, record-only. What is measured between a Begin and
+// its End decides CPU-side draw issuance a frame or two later, which is
+// the exact shape of the four-draw elision; the bracket's position in the
+// q= sequence is the finding.
+void STDMETHODCALLTYPE hookedBegin(ID3D11DeviceContext* self,
+                                   ID3D11Asynchronous* async) {
+    if (drawCensusArmed()) {
+        drawCensusQuery('B', async, foreignContext(self));
+    }
+    g_state->realBegin(self, async);
+}
+
+void STDMETHODCALLTYPE hookedEnd(ID3D11DeviceContext* self,
+                                 ID3D11Asynchronous* async) {
+    if (drawCensusArmed()) {
+        drawCensusQuery('E', async, foreignContext(self));
+    }
+    g_state->realEnd(self, async);
 }
 
 // The GPU-driven draws, record-only: the argument buffer holds the counts,
@@ -4386,6 +4442,12 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
                    reinterpret_cast<void**>(&s.realVSSetConstantBuffers));
     s.hook.replace(kSlotCopyResource, &hookedCopyResource,
                    reinterpret_cast<void**>(&s.realCopyResource));
+    s.hook.replace(kSlotClearDepthStencilView, &hookedClearDsv,
+                   reinterpret_cast<void**>(&s.realClearDsv));
+    s.hook.replace(kSlotBegin, &hookedBegin,
+                   reinterpret_cast<void**>(&s.realBegin));
+    s.hook.replace(kSlotEnd, &hookedEnd,
+                   reinterpret_cast<void**>(&s.realEnd));
     s.hook.replace(kSlotDrawIndexedInstancedIndirect,
                    &hookedDrawIndexedInstancedIndirect,
                    reinterpret_cast<void**>(&s.realDrawIndexedInstancedIndirect));
