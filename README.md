@@ -373,7 +373,13 @@ Its safeguards, because they are the reason to trust it:
 - **It degrades on game updates.** The marker will move when Elite updates; EDVR
   then finds nothing, says so in the log, and falls back to key counting.
   `camera_index_type_offset` can be corrected by hand without waiting for a
-  build.
+  build. **It moved in build 332753**, which is what the repair below is for.
+- **It can tell you the new marker.** Set `camera_index_find = 1` under
+  `[d3d11]` and play a few minutes. After the ordinary search comes up empty,
+  EDVR looks for the camera records by their shape instead and prints the
+  offsets they would have to be, best first. Put one in
+  `camera_index_type_offset`, relaunch, and the log says whether it identified
+  the preset from it. It only ever suggests; it never adopts a number by itself.
 
 ## The terrain fix (cull guard)
 
@@ -525,7 +531,9 @@ rather than trusting a version number — its safeguards are described
 [below](#what-it-does-and-does-not-do).
 
 **Two things are measured from a specific build** (330683 / 4.4.0.3, the one
-this was developed against), and both degrade rather than guess:
+this was developed against), and both degrade rather than guess. The 4.4.1.0
+update (build 332753) moved the second of them and left the first alone —
+[docs/build-332753.md](docs/build-332753.md) has the full re-check:
 
 - **The transition flash fix** watches a viewpoint in a constant buffer — no
   instruction pattern to recognise, only a size and an offset. So it checks the
@@ -534,9 +542,9 @@ this was developed against), and both degrade rather than guess:
   at the old offset will not move like a viewpoint, and the fix disables itself
   and says so. It also switches off for the session if it ever withholds
   continuously — permanent judder would be worse than the flash.
-- **Explorer Cam's camera marker** will also move on update; the fix then
-  reports "do not know", falls back to key counting, and
-  `camera_index_type_offset` can be corrected by hand — see its section above.
+- **Explorer Cam's camera marker** will also move on update — and did, in
+  332753. The fix then reports "do not know" and falls back to key counting.
+  `camera_index_find` will suggest the new value; see its section above.
 
 **Recurring false jumps are recognised and left alone.** Flying low over
 terrain, the game alternates between shadow cameras whose fixed separation looks
