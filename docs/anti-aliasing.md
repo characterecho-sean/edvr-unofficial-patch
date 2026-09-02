@@ -61,8 +61,8 @@ camera does. In a headset it never stops moving: the head is never still,
 pixels are large in degrees (the field Quest 3 renders 1456 pixels across
 a 94° horizontal frustum at the eye size it measured over Steam Link —
 about fifteen per degree; `compositor_hook.cpp` and `system_hook.cpp`),
-and the eye is drawn to motion. That is the shimmer — content flickering on and off the grid,
-frame after frame.
+and the eye is drawn to motion. That is the shimmer — content flickering
+on and off the grid, frame after frame.
 
 Post-process anti-aliasing (FXAA, SMAA, MLAA and their relatives) runs on
 the *finished* image. It finds edges among pixels that have already been
@@ -88,9 +88,9 @@ same samples integrated over time.
 SMAA and the two MLX modes (MLX2, MLX4) — believed; the menu itself is the
 check. All four are believed to be post-process filters of the same family
 — none multisampled, none temporal — which is consistent with the field
-lore above and with their near-zero cost. Frontier announced
-a fuller anti-aliasing solution for Odyssey in 2021 and later cancelled it;
-none has shipped since (believed, from the public record). Two things this
+lore above and with their near-zero cost. Frontier announced a fuller
+anti-aliasing solution for Odyssey in 2021 and later cancelled it; none
+has shipped since (believed, from the public record). Two things this
 repo has measured bear on it, and both point the same way:
 
 - The deferred lighting resolve reads its four geometry-buffer inputs with
@@ -269,8 +269,8 @@ once the edge-tap subtlety performance.md already lists is settled.
 **What it does and does not fix.** It is real anti-aliasing — the pixel
 count is the anti-aliasing, and the filter is how much of it reaches the
 eye — but the pixels still have to be rendered, which is the expensive
-part players already pay. It is worth ~a resolve's difference over today's
-supersampling, not a new category. Its structural value is that it is the
+part players already pay. It is worth about one resolve's difference over
+today's supersampling, not a new category. Its structural value is that it is the
 door TAA walks through next, and that TAA over a supersampled input is the
 best anti-aliasing available anywhere.
 
@@ -333,9 +333,9 @@ discontinuity, takes the current pixel unblended.
    frame. Distant content barely moves under ship translation, but ship
    rotation shifts the whole view — a roll at 60°/s is about ten pixels a
    frame at 90 Hz at the field Quest 3's measured eye size — and the clamp
-   then rejects most of the history. The pass degrades to no anti-aliasing during fast turns, which
-   is when aliasing is hardest to see, and works fully when the ship is
-   steady, which is when the shimmer is worst. Acceptable for a first
+   then rejects most of the history. The pass degrades to no anti-aliasing
+   during fast turns, which is when aliasing is hardest to see, and works
+   fully when the ship is steady, which is when the shimmer is worst. Acceptable for a first
    flight; not the end state.
 2. *v2 — the game's camera.* The flash detector already reads the game's
    camera buffer every frame; if it carries the view matrix (Phase 0
@@ -356,10 +356,9 @@ sample different positions inside every pixel by construction, and the
 history converges to a genuine supersample of the scene even at rest. The
 mechanism is the cull guard's, with a different number: the raw tangents
 shifted by `jx·(r−l)/width` horizontally (one pixel is `(r−l)/width` in
-tangent units) and the vertical equivalent,
-the matrix elements following, the offset advanced at the frame boundary
-and held for the whole frame — the consistency rule `system_hook.cpp`
-already enforces, unchanged. The compositor never sees the jitter: the
+tangent units) and the vertical equivalent, the matrix elements following,
+the offset advanced at the frame boundary and held for the whole frame —
+the consistency rule `system_hook.cpp` already enforces, unchanged. The compositor never sees the jitter: the
 pass samples the current frame at the offset and lands it on the
 unjittered grid, so what is submitted is a frame drawn through the true
 projection, as today.
@@ -574,7 +573,6 @@ it is the part only something living where EDVR lives can do.
   another in games that already feed one, and the from-scratch matrix
   extraction is the per-game work of the PureDark-style mods — believed,
   from their own compatibility notes.)
-
 - **A post-process AA pass of EDVR's own** (SMAA, CMAA2, FXAA — all
   permissively licensed and small). It would duplicate what the game's
   menu already offers, and the argument above is that the offering is the
@@ -671,9 +669,10 @@ today that the README and `edvr.ini` can carry:
 2. **Feature C** — a day's work whenever a slot is free; it does not wait
    on anything.
 3. **Feature B v1** (head-motion reprojection, with the jitter), then
-   **v2** (the game's camera, once Phase 0 item 4 answers). This is the feature the ask is really about, and it goes
-   second only because A's door and Phase 0's measurements make it a
-   smaller, better-instrumented change.
+   **v2** (the game's camera, once Phase 0 item 4 answers). This is the
+   feature the ask is really about, and it goes second only because A's
+   door and Phase 0's measurements make it a smaller, better-instrumented
+   change.
 4. **Feature A, active** — `render_scale` above 1.0 — once performance.md's
    feature 1 has the size-lie choreography in place for the direction
    below 1.0; the two share every line but the factor.
