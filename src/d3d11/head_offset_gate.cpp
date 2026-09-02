@@ -125,22 +125,11 @@ struct Gate {
     bool     gatePanelSeenNoted = false;
     bool     gateViewSynced = false;
 
-    // THE DESYNC INSTRUMENT (advanced.camera_view_desync_log).
-    //
-    // The sync line above is said once a session and then the count is
-    // corrected in silence, which is right for a user and useless for the
-    // question "WHEN does the game reset its own index". Armed, this logs
-    // every distinct divergence with the context that names the boundary.
-    // Off by default; it needs the memory read on, which is not the shipped
-    // state either.
     // The wake edge. `wakeKnown` false means the status file has not answered
     // yet, and an unknown-to-true transition is not an edge, only the first
     // thing we happened to see.
     bool     wakeKnown = false;
     bool     wakeLast = false;
-    bool     desyncLog = false;
-    int32_t  lastDesyncGame = -2;
-    int32_t  lastDesyncCount = -2;
     bool     gateViewEverRead = false;   // something has supplied a real index
     bool     gateViewLostNoted = false;
     // The view bridge: a read that has died is covered by the counted view
@@ -208,10 +197,6 @@ Gate g;
 
 void headOffsetGateConfigure() {
     Config& cfg = Config::get();
-    // Read first and unconditionally: an instrument that only arms on some
-    // paths through this function is an instrument that lies about when it
-    // was watching.
-    g.desyncLog = cfg.getBool("advanced.camera_view_desync_log", false);
     // DEFAULTS HERE MATCH edvr.ini's DEFAULTS, and they did not.
     //
     // head_offset_view defaulted to -1 in code and 1 in the file; view_count to
@@ -1102,27 +1087,6 @@ void headOffsetGateFrame(uint32_t frameNo, uint32_t panelDraws, uint32_t eyeDraw
     // sync took both and the bridge faithfully held the poison). In-camera
     // reads sync as always: the player can genuinely cycle there.
     if (gameView >= 0 && gameView != g.gateViewIndex) {
-        // BEFORE the in-camera split, so a refused read is recorded too: the
-        // question is what the game did, not whether we were willing to
-        // believe it. Deduped on the pair rather than rate-limited, so a
-        // steady disagreement says its piece once and a changing one is
-        // followed exactly.
-        if (g.desyncLog &&
-            (gameView != g.lastDesyncGame || g.gateViewIndex != g.lastDesyncCount)) {
-            g.lastDesyncGame = gameView;
-            g.lastDesyncCount = g.gateViewIndex;
-            Log::get().note(
-                "camera view DESYNC: the game reads %d, the count says %d (%+d). "
-                "In camera: %s. On foot: %s. Panel: %u frame(s) since last up, "
-                "run %u. Disembark grace: %s. A fall to 0 that you did not press "
-                "for is the game resetting its own index, and whatever you were "
-                "doing at this timestamp is the boundary worth anchoring to.",
-                gameView, g.gateViewIndex, gameView - g.gateViewIndex,
-                g.gateInCamera ? "yes" : "no",
-                g.liveOnFootKnown ? (g.liveOnFoot ? "yes" : "no") : "unknown",
-                g.gateSincePanel, g.gatePanelRun,
-                g.footGraceJournal ? "open" : "closed");
-        }
         if (g.gateInCamera || !g.gateViewEverRead) {
             if (!g.gateViewSynced) {
                 g.gateViewSynced = true;
