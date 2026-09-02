@@ -14,6 +14,23 @@ held to be bad, worst of all in a headset — could EDVR supply its own MSAA
 when the player turns the game's off? And more broadly: what can be done
 about the shimmer VR players see?
 
+**The ask, verbatim from the field:** *"some way to attack the shimmering
+via some custom post processing — guess that's what ReShade is for, but
+nice if it would be part of EDVR. A super-tuned processing just to tackle
+the shimmering we all see so much of. A kind of Elite-specific anti-shimmer
+effect. Could we do something like this performantly?"* It came with a
+proposal worked out elsewhere: pull the game's real view and projection
+matrices out of its constant buffers, the way the from-scratch upscaler
+injections do for games with no native upscaler, combine them with the
+depth buffer into exact motion vectors for camera motion and static
+geometry, and accept that independently moving objects — other ships,
+station rings, planets — would need their per-object matrices too, which
+is per-game reverse engineering that breaks on engine updates; "a real
+project, not a shader tweak". That proposal is answered under
+[The field's proposal](#the-fields-proposal-motion-vectors-from-the-games-own-matrices):
+it is the right shape, it is feature B below, and EDVR already holds
+most of what it needs.
+
 The short answers, argued below:
 
 - **MSAA: no.** Not "hard" — unavailable, from outside a deferred
@@ -475,7 +492,88 @@ one lever that reaches the *cause* of the specular shimmer rather than its
 appearance, and deliberately last: it is justified only by residual
 sparkle measured after feature B, not before.
 
+## The field's proposal: motion vectors from the game's own matrices
+
+The proposal is correct in every particular, and it is feature B's v2. Where
+this design differs from the ReShade-addon framing it arrived in is in how
+much of the work is already done, and in one thing an addon cannot do at
+all:
+
+- **The camera is already read.** The flash detector reads the game's
+  camera buffer every frame, recognised by size and validated by the shape
+  of its contents (`src/d3d11/glitch_frame.h`) — no RenderDoc session, no
+  shader-layout reverse engineering, and it is the read that has already
+  survived every game update this project re-verifies per build
+  (`docs/build-332753.md` is the procedure). Feature B's exposure to
+  updates is the flash fix's, which the project carries today. Whether
+  that buffer holds the full view matrix or only the position is Phase 0
+  item 4; if the latter, the search is one census with the constant-buffer
+  watch (`advanced.census_cb_watch`) pointed at the scene's vertex shaders.
+- **The projection is not reverse-engineered; EDVR hands it to the game.**
+  Each eye's projection comes from the system hook's own answers, per
+  frame, exactly — including the jitter EDVR added. And the submit hook
+  names the eye. Neither is knowable from inside a post-process injection,
+  which sees one texture and must guess both.
+- **The depth buffer is named, not guessed.** The census classifier ties
+  the depth view to the eye draws it serves; a generic depth heuristic
+  picking the on-foot screen's depth, or the scanner's, is the kind of
+  failure that instrument exists to exclude.
+- **The jitter.** No post-process injection can move the game's sample
+  positions. EDVR can, through the answers it already edits, and that is
+  the difference between temporally *smoothing* the shimmer and
+  anti-aliasing it: without new sample positions the history converges to
+  the same aliased image the game drew; with them it converges to a
+  supersample of the scene.
+
+**Per-object matrices, declined on purpose.** The proposal's caveat is
+right about the cost and the fragility, and the design's answer is that
+they are not needed. Unmatched motion is what the neighbourhood clamp is
+for: history that disagrees with the pixels around it is bounded to them,
+so an object the reprojection missed shows a frame or two of its own
+aliasing rather than a trail. Elite's moving population is also kind to
+this: a station ring turns slowly in pixels per frame, planets slower
+still, and other ships are small in the frame at any range where their
+edges could shimmer. If v2 leaves visible ghosting on a passing ship, the
+next step is a reactive weight — blending less where the clamp is doing
+the most work, which the pass can compute for itself — not a per-draw
+matrix capture and an object-ID pass, which is the engine's own velocity
+buffer built from outside and re-built after every update.
+
+**Performantly: yes.** The pass is one compute dispatch per eye over the
+eye image, a handful of taps per pixel; believed a fraction of a
+millisecond per eye at Quest-3 sizes, measured by timestamp query in Phase
+0 and printed. That is cheaper than any supersampling players already run
+against the same shimmer, and the two compose — a calmer image at a lower
+HMD Quality is the trade this feature exists to offer.
+
+**"Elite-specific" is the frame anatomy, not the filter.** The temporal
+pass is the industry's; what makes it Elite's is everything this document
+decides around it: filtering after the HUD so the hairlines are treated,
+resetting on the flash withhold, running wide under the cull guard, the
+on-foot panel's behaviour, the theater and heal paths, the game's own AA
+detected by its passes, and feature D for the specular sparkle that even
+a temporal pass leaves during motion. That is the "super-tuned" part, and
+it is the part only something living where EDVR lives can do.
+
 ## Considered and declined
+
+- **A ReShade preset instead.** ReShade has applied effects in the
+  headset since 5.0 — a separate VR effect runtime, configured from the
+  SteamVR dashboard (vendor-stated, the 5.0 release notes) — and it runs
+  alongside EDVR (README). What it can do today: sharpening, and temporal
+  effects driven by *estimated* motion, the optical-flow helpers of the
+  Launchpad class computing per-pixel motion from colour and depth
+  (believed, from their documentation). What it cannot do: jitter the
+  projection, know each eye's true projection, or read the game's camera;
+  its depth is found by heuristic. A ReShade anti-shimmer is therefore
+  feature B's v1 with estimated motion and no jitter — a smoother whose
+  ghosting-versus-flicker trade is set by the estimate's quality. Players
+  who want to try one today can; the case for building it into EDVR is the
+  jitter and the truths EDVR already holds. (For the record, of the two
+  injection families the proposal cites: OptiScaler swaps one upscaler for
+  another in games that already feed one, and the from-scratch matrix
+  extraction is the per-game work of the PureDark-style mods — believed,
+  from their own compatibility notes.)
 
 - **A post-process AA pass of EDVR's own** (SMAA, CMAA2, FXAA — all
   permissively licensed and small). It would duplicate what the game's
