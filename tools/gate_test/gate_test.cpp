@@ -863,11 +863,24 @@ void runScenarios() {
     check(true, "two presses reach the wanted view and the offset arms, "
                 "read or no read");
 
+    // LEAVING SUPERCRUISE IS A BOUNDARY TOO (field, 2026-09-02). Dropping out
+    // rebuilds the scene as surely as entering does, so the edge counts in
+    // both directions and this is where rising-edge-only would have been
+    // silently wrong -- it would have carried the old count through every
+    // arrival.
+    // The count is already on the wanted view from the two presses above,
+    // and we are still inside supercruise.
+    check(true, "still on the wanted view inside supercruise");
+    headOffsetGateSetWakeLive(true, false, false);   // drop out
+    sceneFrame(2);
+    check(false, "dropping OUT of supercruise resets it as well");
+
     // A HIGH WAKE IS THE SAME BOUNDARY by a different signal: the jump
     // tunnel, which the witchspace fix already watches.
-    headOffsetGateSetWakeLive(true, false, false);
-    sceneFrame(1);
-    check(true, "back out of supercruise, still on the wanted view");
+    headOffsetGateViewBumped();
+    headOffsetGateViewBumped();
+    sceneFrame(2);
+    check(true, "back on the wanted view in normal space");
     headOffsetGateSetWakeLive(true, false, true);   // high wake: the tunnel
     sceneFrame(2);
     check(false, "a high wake resets it too");

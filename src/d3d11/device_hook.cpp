@@ -517,7 +517,6 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
                                     journalStatusSamples());
         headOffsetGateSetWakeLive(journalSupercruiseKnown(), journalSupercruise(),
                                   journalInJumpTunnel());
-        headOffsetGateSetVehicle(static_cast<int>(journalVehicle()));
         {
             const uint32_t entries = headOffsetGateEnterCount();
             if (entries != g_state->lastCameraEnters) {

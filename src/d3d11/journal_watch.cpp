@@ -67,10 +67,6 @@ struct State {
     // shutdown states -- Status then carries only "Flags":0.
     bool         onFootKnown = false;
     bool         onFoot = false;
-    // Which vehicle, for the camera-cycle ring. OnFoot wins over the vehicle
-    // bits: disembarking inside a ship leaves both true for a moment, and the
-    // commander is the thing being asked about.
-    JournalVehicle vehicle = JournalVehicle::Unknown;
     // GuiFocus from Status.json: 9 is the Full System Scanner. The game
     // states the MODE outright -- entry and exit by any path (keybind,
     // ESC, an interdiction yanking the player out of supercruise) all
@@ -257,20 +253,6 @@ void pollStatus() {
         ++g_s.statusSamples;
         g_s.onFootKnown = sawFlags2;
         g_s.onFoot = sawFlags2 && (flags2 & 0x01u) != 0;
-        // Bits 24 main ship, 25 fighter, 26 SRV.
-        if (g_s.onFoot) {
-            g_s.vehicle = JournalVehicle::OnFoot;
-        } else if (!sawFlags) {
-            g_s.vehicle = JournalVehicle::Unknown;
-        } else if ((flags & 0x04000000u) != 0) {
-            g_s.vehicle = JournalVehicle::Srv;
-        } else if ((flags & 0x02000000u) != 0) {
-            g_s.vehicle = JournalVehicle::Fighter;
-        } else if ((flags & 0x01000000u) != 0) {
-            g_s.vehicle = JournalVehicle::Ship;
-        } else {
-            g_s.vehicle = JournalVehicle::Unknown;
-        }
         // Bit 30 of Flags: the FSD jump itself -- the tunnel, not the
         // countdown before it. The distinction is what scopes the witchspace
         // star fix off the forming-wormhole phase, where the game still
@@ -289,7 +271,6 @@ void pollStatus() {
         g_s.fssFocus = fss;
     } else if (++g_s.statusMisses >= 3) {
         g_s.onFootKnown = false;
-        g_s.vehicle = JournalVehicle::Unknown;
         g_s.fsdJumpKnown = false;
         g_s.fssFocusKnown = false;
         g_s.fssFocus = false;
@@ -570,10 +551,6 @@ bool journalSupercruiseKnown() {
     return g_s.active && g_s.supercruiseKnown;
 }
 bool journalSupercruise() { return g_s.active && g_s.supercruise; }
-
-JournalVehicle journalVehicle() {
-    return g_s.active ? g_s.vehicle : JournalVehicle::Unknown;
-}
 bool journalGameplay() { return g_s.gameplay; }
 uint32_t journalDisembarks() { return g_s.disembarks; }
 uint32_t journalEmbarks() { return g_s.embarks; }

@@ -142,21 +142,6 @@ void headOffsetGateSetOnFootLive(bool known, bool onFoot, uint32_t sample);
 // arriving in it is.
 void headOffsetGateSetWakeLive(bool known, bool inSupercruise, bool inTunnel);
 
-// Which vehicle the commander is in, so the counted view can be walked round
-// the right ring.
-//
-// The game carries ONE camera index across every context and folds it into
-// whichever ring it lands in: 6 presets on foot, 8 in an SRV, up to 11 in a
-// ship and varying with its seat count. So a press in an SRV DOES move the
-// on-foot preset -- just round a longer ring first. Counting those presses
-// against the on-foot length walks a ring the player is not on; ignoring them
-// freezes a count the game is still moving. Both are wrong, and this is what
-// lets it be neither.
-//
-// Pass the raw journal value; the gate maps it to a ring length. Unknown
-// keeps the on-foot ring, which is what happens with no status file at all.
-void headOffsetGateSetVehicle(int journalVehicle);
-
 // Rising-edge counter of camera entries, for the caller that nudges the
 // view scanner: fresh candidates at every entry is what makes the anchored
 // certification land while the player is still cycling to their view.
