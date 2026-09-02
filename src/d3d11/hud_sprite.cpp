@@ -215,16 +215,22 @@ void writeCb(ID3D11DeviceContext* ctx, const void* data, uint32_t bytes) {
 
 // Compile once, for the session. False means stood down.
 bool ensureShaders(ID3D11DeviceContext* ctx, ID3D11Device* dev) {
-    if (g_csEasu) return true;
-    const std::string easu = std::string(kGpuPrologue) +
-                             joinChunks(kFfxAChunks) +
-                             "#define FSR_EASU_F 1\n" +
-                             joinChunks(kFfxFsr1Chunks) + kEasuMain;
-    g_csEasu = shaderSwapCompileCs(ctx, easu.c_str(), easu.size(), "main",
-                                   "hud sprite easu", nullptr, "hud icons");
+    // NOT "if (g_csEasu) return true": sharpening can be turned ON after the
+    // first build, and an early return here would leave RCAS uncompiled
+    // forever while the log said sharpening was on. Each piece is checked
+    // for itself; all of them are one-time.
     if (!g_csEasu) {
-        standDown("EASU would not compile");
-        return false;
+        const std::string easu = std::string(kGpuPrologue) +
+                                 joinChunks(kFfxAChunks) +
+                                 "#define FSR_EASU_F 1\n" +
+                                 joinChunks(kFfxFsr1Chunks) + kEasuMain;
+        g_csEasu = shaderSwapCompileCs(ctx, easu.c_str(), easu.size(), "main",
+                                       "hud sprite easu", nullptr,
+                                       "hud icons");
+        if (!g_csEasu) {
+            standDown("EASU would not compile");
+            return false;
+        }
     }
     if (g_sharpen >= 0.0f && !g_csRcas) {
         const std::string rcas = std::string(kGpuPrologue) +
@@ -371,10 +377,31 @@ Atlas* build(ID3D11DeviceContext* ctx, ID3D11ShaderResourceView* srcSrv,
     return &at;
 }
 
+// Drop every resampled atlas, so the next matched draw builds them again.
+// Called when a setting that CHANGES what a copy looks like moves.
+//
+// Without this, scale and sharpening were live in NAME ONLY: the cache is
+// keyed by source resource and never rebuilt, so raising the scale did
+// nothing at all until the game happened to recreate the atlas -- and the
+// log said nothing either way. A knob the ini calls live and that silently
+// is not is worse than one honestly documented as needing a restart.
+void dropAtlases() {
+    for (uint32_t i = 0; i < kMaxAtlas; ++i) {
+        g_atlas[i].a.release();
+        g_atlas[i].b.release();
+        g_atlas[i].src = nullptr;
+        g_atlas[i].final = nullptr;
+        g_atlas[i].failed = false;
+    }
+    g_atlasCount = 0;
+}
+
 }  // namespace
 
 void hudSpriteConfigure(Config& cfg) {
     const bool was = g_sharp;
+    const uint32_t wasScale = g_scale;
+    const float wasSharpen = g_sharpen;
     const std::string m = cfg.getString("experimental.hud_icons", "stock");
     if (m == "stock") {
         g_sharp = false;
@@ -411,6 +438,14 @@ void hudSpriteConfigure(Config& cfg) {
             Log::get().note("hud_icon_vs \"%s\" is not a hex shader hash; the "
                             "measured one is used instead.", pin.c_str());
         }
+    }
+
+    if ((g_scale != wasScale || g_sharpen != wasSharpen) && g_atlasCount) {
+        dropAtlases();
+        Log::get().note("hud icons: the resample settings changed, so every "
+                        "atlas is rebuilt at the next draw that samples it "
+                        "-- %ux, sharpening %s.",
+                        g_scale, g_sharpen >= 0.0f ? "on" : "off");
     }
 
     if (was != g_sharp) {
