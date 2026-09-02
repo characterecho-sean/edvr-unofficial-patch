@@ -45,6 +45,18 @@ void journalWatchSetEagerStatus(bool eager);
 bool journalFssFocusKnown();
 bool journalFssFocus();
 
+// Which vehicle the commander is in, from Status.json's Flags (bits 24, 25
+// and 26) and Flags2 (bit 0). The external camera's preset cycle is a
+// different length in each -- 6 on foot, 8 in an SRV, up to 11 in a ship and
+// varying with its seat count (measured 2026-09-02) -- and the game carries
+// ONE index across them, folding it into whichever ring it lands in. Anything
+// counting those presses has to know which ring it is on.
+//
+// Unknown means the status file has not answered, not that the commander is
+// nowhere.
+enum class JournalVehicle { Unknown, OnFoot, Srv, Ship, Fighter };
+JournalVehicle journalVehicle();
+
 // Flags bit 4: supercruise, where the FSS keys actually do something.
 bool journalSupercruiseKnown();
 bool journalSupercruise();

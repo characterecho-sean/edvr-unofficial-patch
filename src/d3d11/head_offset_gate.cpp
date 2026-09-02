@@ -133,13 +133,17 @@ struct Gate {
     // every distinct divergence with the context that names the boundary.
     // Off by default; it needs the memory read on, which is not the shipped
     // state either.
+    // The ring the counted view is walking right now, and the one it was
+    // walking when we last looked. A change between them is a context
+    // transition, and the index folds across it exactly as the game's does.
+    int32_t  gateViewCountSrv = 8;
+    int32_t  gateViewCountShip = 11;
+    int      gateVehicle = 0;          // matches JournalVehicle::Unknown
     // The wake edge. `wakeKnown` false means the status file has not answered
     // yet, and an unknown-to-true transition is not an edge, only the first
     // thing we happened to see.
     bool     wakeKnown = false;
     bool     wakeLast = false;
-    // So the off-foot skip explains itself once per leg rather than per press.
-    bool     offFootPressNoted = false;
     bool     desyncLog = false;
     int32_t  lastDesyncGame = -2;
     int32_t  lastDesyncCount = -2;
@@ -261,6 +265,10 @@ void headOffsetGateConfigure() {
         cfg.getIntInRange("fix.head_offset_intent_grace_ms", 2000, 0, 100000));
     g.gateWantView = cfg.getIntInRange("advanced.head_offset_view", 2, -1, 63);
     g.gateViewCount = cfg.getIntInRange("fix.head_offset_view_count", 6, 0, 64);
+    g.gateViewCountSrv =
+        cfg.getIntInRange("fix.head_offset_view_count_srv", 8, 0, 64);
+    g.gateViewCountShip =
+        cfg.getIntInRange("fix.head_offset_view_count_ship", 11, 0, 64);
     g.gateBridgeOn = cfg.getBool("fix.head_offset_view_bridge", true);
     // KEYLESS ENTRY IS PARKED, default off (product decision 2026-08-16).
     // The entry side field-certified -- grace, window, boarding-exit all
@@ -451,8 +459,24 @@ void headOffsetGateKeyPressed() {
 // can hand over an index from a context with a longer ring; that is a value
 // to fold, not to clamp to 5 and quietly call the last preset. C++ keeps the
 // sign of the dividend, so the negative case needs the second line.
+// The ring in force right now. 1..4 are JournalVehicle's OnFoot, Srv, Ship
+// and Fighter; 0 is Unknown, which keeps the on-foot ring because that is
+// what a rig with no status file has always used.
+//
+// A fighter borrows the ship's length. It is a guess rather than a
+// measurement, and it is the one context nobody has counted -- said here
+// rather than left for someone to infer from the absence of a setting.
+int currentRing() {
+    switch (g.gateVehicle) {
+        case 2:  return g.gateViewCountSrv;
+        case 3:
+        case 4:  return g.gateViewCountShip;
+        default: return g.gateViewCount;
+    }
+}
+
 int normalizeView(int v) {
-    const int n = g.gateViewCount;
+    const int n = currentRing();
     // 0 is a legitimate configuration meaning "do not wrap", and a negative
     // view is not a view under any configuration.
     if (n <= 0) return v < 0 ? 0 : v;
@@ -464,48 +488,47 @@ int normalizeView(int v) {
 // Both directions share this, because a ring walked one way and a ring walked
 // the other are the same ring, and giving them separate arithmetic is how they
 // drift apart.
+void headOffsetGateSetVehicle(int journalVehicle) {
+    if (journalVehicle == g.gateVehicle) return;
+    const int wasRing = currentRing();
+    const int was = g.gateViewIndex;
+    g.gateVehicle = journalVehicle;
+    const int nowRing = currentRing();
+    if (wasRing == nowRing) return;
+    // Fold across the transition, exactly as the game does: an SRV index of 7
+    // is a real preset there and cannot be one on foot, so on stepping out it
+    // becomes 1. Only a SHRINKING ring changes anything -- 2 on foot is still
+    // 2 in an SRV -- but normalize handles both and says so once either way.
+    g.gateViewIndex = normalizeView(g.gateViewIndex);
+    if (g.gateViewIndex != was) {
+        Log::get().note(
+            "external camera view: %d folds to %d -- the cycle is %d long here "
+            "and was %d, and the game carries one index across the two.",
+            was, g.gateViewIndex, nowRing, wasRing);
+    }
+}
+
 void headOffsetGateStepView(int delta) {
     g.gateHaveNextKey = true;
 
-    // A PRESS MADE OFF FOOT IS NOT A STEP OF THIS COUNT.
-    //
-    // The camera cycle is per-context and the contexts are different lengths:
-    // 6 on foot, 8 in an SRV, up to 11 in a ship and varying with its seat
-    // count (measured 2026-09-02). Different lengths mean different rings,
-    // and different rings mean the game cannot be keeping one index for all
-    // of them -- so a press made in an SRV moves the SRV's camera and leaves
-    // the on-foot one exactly where it was.
-    //
-    // Counting those presses anyway, with the on-foot modulus, walked the
-    // count round a ring the player was not on. The gate only ever arms on
-    // foot, so nothing here needs to track any other context; it needs to
-    // NOT track them.
-    //
-    // Only skip on a POSITIVE "not on foot". Unknown means the status file
-    // is not being read, and counting is the better guess there -- it is
-    // what happened before this existed.
-    if (g.liveOnFootKnown && !g.liveOnFoot) {
-        if (!g.offFootPressNoted) {
-            g.offFootPressNoted = true;
-            Log::get().note(
-                "external camera: a cycle key was pressed while you were not on "
-                "foot, so the counted view stays at %d. The camera cycle is a "
-                "different length in a ship or an SRV than on foot, so those "
-                "presses move a different camera and not this count. Said once.",
-                g.gateViewIndex);
-        }
-        return;
-    }
-    g.offFootPressNoted = false;
-
+    // A press off foot IS counted -- it walks a longer ring, and currentRing()
+    // says which. Skipping them was the first correction to the forward-only
+    // ratchet and it was itself wrong: the game keeps one index across every
+    // context, so a press in an SRV moves the on-foot preset too, just round
+    // a ring of 8 rather than 6 before it folds back.
     // Both ends. Going below zero is what the forward-only version never had
     // to think about, and stopping at zero rather than rolling round would
     // put the count one behind for the rest of the session, at the one moment
     // the player is trying to get back to a view they know.
     g.gateViewIndex = normalizeView(g.gateViewIndex + delta);
+    // NOT "leave the camera and re-enter". That advice was true only while a
+    // landing was believed to reset the index; the game keeps the view across
+    // camera toggles, so a toggle resynchronises nothing. A wake genuinely
+    // does put the game back to 0, which makes it the honest answer.
     Log::get().note("external camera view -> %d%s (wanted %s). Counted from "
-                    "keypresses, not read from the game -- if this disagrees with "
-                    "what you see, leave the camera and re-enter to resynchronise.",
+                    "keypresses, not read from the game -- if this disagrees "
+                    "with what you see, a jump or a drop to supercruise puts "
+                    "both back to 0.",
                     g.gateViewIndex,
                     g.gateViewCount > 0 ? "" : " (not wrapping; set "
                                                "fix.head_offset_view_count)",
