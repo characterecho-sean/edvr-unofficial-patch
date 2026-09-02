@@ -1,5 +1,11 @@
 # The black planet in one eye (DSS and FSS)
 
+*Frontier issue [78021](https://issues.frontierstore.net/issue-detail/78021) —
+"Detailed surface scanner eye mismatch in VR", filed 2025-08-22 against
+4.2.0.1 and marked Confirmed. The reporter describes the planet's surface
+as dark in one eye and light in the other after a scan, with the blue
+bio/geo areas fine — the symptom this document traces to its mechanism.*
+
 Investigated 2026-08-30 to 2026-09-01, from field reports: when scanning a
 planet, the body renders as a **featureless black disc in the right eye**
 and correctly in the left. The disc keeps the body's exact silhouette. Blue
@@ -128,8 +134,11 @@ queries at all** — only timestamp/event profiling.
 - SAVE LOGS now bundles the game's graphics settings (`game_graphics/`
   sweep plus the master `GraphicsConfiguration.xml`).
 
-The vendor-facing report is the natural next step once the release ships;
-this document is its source material.
+The tracker already holds the report: issue
+[78021](https://issues.frontierstore.net/issue-detail/78021), Confirmed,
+filed a year before the mechanism was found. This document is the source
+material for what to add to it — the second eye's resolve issued with no
+vertex buffer, and the lend that heals it.
 
 ## Coda: the DSS heat map
 
