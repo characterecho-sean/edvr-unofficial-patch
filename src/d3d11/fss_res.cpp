@@ -15,14 +15,23 @@
 namespace edvr {
 namespace {
 
-// Enough for four zoom-ins of color+depth pairs before the oldest entry is
-// recycled. Entries are never removed -- the game gives no release signal we
-// hook -- so a stale pointer can sit here until overwritten. It is compared
-// by identity and never dereferenced, and a recycled allocation would have
-// to land on the same address AND present the half-eye viewport against an
-// eye-sized target to be acted on; accepted, and the note below says which
+// Entries are never removed -- the game gives no release signal we hook --
+// so a stale pointer can sit here until overwritten. It is compared by
+// identity and never dereferenced, and a recycled allocation would have to
+// land on the same address AND present the pre-inflation viewport against
+// that target to be acted on; accepted, and the note below says which
 // texture every action was for.
-constexpr uint32_t kTracked = 8;
+//
+// Sized 32, not the 8 that served the FSS alone. Eight was four zoom-ins of
+// colour+depth pairs, which was ample when the only matcher produced two
+// textures. surface_inflate takes four sizes, each with a depth partner:
+// three named surfaces plus an FSS body pair is exactly eight, and the
+// moment anything is recreated the ring evicts an entry whose texture is
+// STILL BOUND. Its viewport then stops being scaled while its target stays
+// inflated, so that panel draws into a corner of itself -- a loud failure,
+// but one that costs a flight to diagnose. The array is pointers and two
+// sizes; there is no reason to be thrifty with it.
+constexpr uint32_t kTracked = 32;
 
 // The game asks for eye/2 per axis. Halving an odd size floors or ceils
 // depending on the engine's arithmetic, and the published eye size itself is
@@ -280,7 +289,7 @@ void fssResNoteViewportScaled(bool late) {
     if (g_s.scaleNotes < 6) {
         ++g_s.scaleNotes;
         Log::get().note(
-            "fss res: a body-layer viewport was scaled to full resolution "
+            "fss res: an inflated target's viewport was scaled to match it "
             "(%s; %u at set, %u at draw so far).",
             late ? "by the draw-time backstop" : "as it was set", g_s.scaled,
             g_s.scaledLate);
