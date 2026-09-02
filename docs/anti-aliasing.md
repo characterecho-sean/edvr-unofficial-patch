@@ -608,6 +608,44 @@ believed about a millisecond per eye at Quest-3 sizes for DLSS, measured
 before it ships, and repaid many times over by the pixels not rendered
 when it is used as the upscaler.
 
+## What it does for foveated rendering
+
+Asked alongside the DLSS question: does any of this improve foveation?
+Not the hardware side. performance.md's feature 2 is variable-rate
+shading through NVAPI, NVIDIA-only on D3D11, and feature 3's gaze centre
+is the runtime's own API; nothing here changes what either can reach. Two
+things it does change:
+
+- **It makes the rings pushable.** performance.md names VRS's failure
+  mode itself: coarse shading of the deferred lighting and post shows as
+  peripheral shimmer. A temporal pass at the door is the standard
+  companion to VRS for exactly that reason — engines ship the two
+  together, and the accumulation hides the coarser rate (believed; it is
+  standard practice). With the jitter, the coarse region is even partly
+  recovered over frames. Same look at coarser rates, or a calmer
+  periphery at the same rates: better foveation on the hardware that has
+  it, at no cost to the rings' design.
+- **It opens an every-vendor foveation the performance doc declined for
+  lack of a D3D11 VRS path.** A radial density mask — Valve's technique
+  from The Lab, shipped for non-NVIDIA GPUs by vrperfkit (believed) —
+  discards a checkerboard of peripheral pixels before shading, by a depth
+  or stencil mask laid ahead of the game's draws, and fills them back at
+  the door. From outside, the fill is a door pass of exactly feature A's
+  shape; and with the mask alternating each frame, feature B's history
+  fills the holes temporally instead of spatially — checkerboard rendering
+  of the periphery, reconstructed by the pass that already exists. Two
+  honest caveats: the savings on a deferred renderer are smaller than
+  VRS's, since a full-screen lighting resolve skips only where the mask
+  reaches its stencil (believed; vrperfkit's field experience says as
+  much), and laying the mask means a per-draw depth-stencil intervention
+  on the hot path, which this project spends reluctantly. A Phase 0
+  question — the census can name the passes the mask would have to reach —
+  not a promise.
+
+The eye-tracked centre is unchanged. A foveated *resolve* — full-quality
+temporal filtering at the fovea, cheaper in the periphery — is a small
+saving the same gaze point could drive; noted, not designed.
+
 ## Considered and declined
 
 - **A ReShade preset instead.** ReShade has applied effects in the
@@ -712,6 +750,10 @@ today that the README and `edvr.ini` can carry:
     per-eye feature creation on D3D11, the flags for a post-HUD LDR input,
     the HUD's text under it, and the price — measured the way NVAPI's
     caps are in performance.md's item 4.
+11. **The density mask's reach**, if every-vendor foveation is pursued:
+    which passes a peripheral depth/stencil mask actually skips on this
+    renderer (the census names them), the saving it buys against VRS's,
+    and the temporal fill's look at the ring boundary.
 
 ## Phasing
 
