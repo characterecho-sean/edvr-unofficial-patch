@@ -89,6 +89,21 @@ const char kPsCommon[] =
     "    return acc;\n"
     "}\n"
     "\n"
+    "// The scale probe's legend. tpp is TEXELS OF THE SURFACE PER OUTPUT\n"
+    "// PIXEL: below 1 the source is magnified and a reconstruction kernel\n"
+    "// is the right tool; above 1 it is minified, and what it wants is\n"
+    "// averaging over the footprint instead. Flat colours rather than a\n"
+    "// gradient, because the question is which side of 1 we are on and a\n"
+    "// gradient read through a headset is a guess.\n"
+    "float3 scaleRamp(float tpp)\n"
+    "{\n"
+    "    if (tpp < 0.5) return float3(0.0, 0.3, 1.0);   // blue    2x+ magnified\n"
+    "    if (tpp < 1.5) return float3(0.0, 1.0, 0.2);   // green   about 1:1\n"
+    "    if (tpp < 3.0) return float3(1.0, 1.0, 0.0);   // yellow  up to 3x minified\n"
+    "    if (tpp < 6.0) return float3(1.0, 0.0, 0.0);   // red     3-6x minified\n"
+    "    return float3(1.0, 0.0, 1.0);                  // magenta 6x+ minified\n"
+    "}\n"
+    "\n"
     "float4 shade(float3 rgb, float a)\n"
     "{\n"
     "    float3 c = rgb * rgb;\n"
@@ -108,6 +123,11 @@ const char kPsCommon[] =
 const char kPsCubicMain[] =
     "float4 main(float2 uv : TEXCOORD0) : SV_TARGET\n"
     "{\n"
+    "    float2 size;\n"
+    "    g_tex.GetDimensions(size.x, size.y);\n"
+    "    // Read while the quad is whole, before any discard.\n"
+    "    float2 dxt = ddx(uv) * size;\n"
+    "    float2 dyt = ddy(uv) * size;\n"
     "    float4 s = fetchCubic(uv);\n"
     "    // A cubic kernel overshoots. rgb is SQUARED in shade(), so a\n"
     "    // negative channel would come back as a bright one; alpha gates a\n"
@@ -115,6 +135,9 @@ const char kPsCubicMain[] =
     "    s.rgb = max(s.rgb, 0.0);\n"
     "    s.a = saturate(s.a);\n"
     "    if (s.a - 0.00001 < 0.0) discard;\n"
+    "#if EDVR_SCALE_PROBE\n"
+    "    return float4(scaleRamp(max(length(dxt), length(dyt))), s.a);\n"
+    "#endif\n"
     "    return shade(s.rgb, s.a);\n"
     "}\n";
 
@@ -178,6 +201,14 @@ const char kPsEasuMain[] =
     "    float a = saturate(fetchCubic(uv).a);\n"
     "    if (a - 0.00001 < 0.0) discard;\n"
     "\n"
+    "#if EDVR_SCALE_PROBE\n"
+    "    // The derivatives above, in texels. Painted flat and NOT through\n"
+    "    // shade(): that applies the HUD colour matrix, which maps every\n"
+    "    // hue onto the commander's HUD colour and would erase the answer.\n"
+    "    float tpp = max(length(g_dx * g_size), length(g_dy * g_size));\n"
+    "    return float4(scaleRamp(tpp), a);\n"
+    "#endif\n"
+    "\n"
     "    AF3 c;\n"
     "#if EDVR_RCAS\n"
     "    FsrRcasF(c.r, c.g, c.b, AU2(0, 0),\n"
@@ -204,11 +235,13 @@ bool     g_sharp = false;
 bool     g_failed = false;
 uint64_t g_vsHash = kVsHash;
 float    g_sharpen = 0.25f;   // RCAS stops; negative = RCAS off
+bool     g_scaleProbe = false;   // paint the local scale instead of the art
 Mode     g_running = Mode::kOff;
 
 ID3D11PixelShader* g_ps = nullptr;
 float              g_psSharpen = 0.0f;
 bool               g_psHadRcas = false;
+bool               g_psHadProbe = false;
 
 bool               g_engaged = false;
 ID3D11PixelShader* g_displaced = nullptr;
@@ -216,7 +249,8 @@ uint64_t           g_applied = 0;
 
 ID3D11PixelShader* replacement(ID3D11DeviceContext* ctx) {
     const bool wantRcas = g_sharpen >= 0.0f;
-    if (g_ps && g_psHadRcas == wantRcas && g_psSharpen == g_sharpen) {
+    if (g_ps && g_psHadRcas == wantRcas && g_psSharpen == g_sharpen &&
+        g_psHadProbe == g_scaleProbe) {
         return g_ps;
     }
     if (g_failed) return nullptr;
@@ -234,6 +268,7 @@ ID3D11PixelShader* replacement(ID3D11DeviceContext* ctx) {
     }
     const SwapMacro macros[] = {{"EDVR_RCAS", wantRcas ? "1" : "0"},
                                 {"EDVR_RCAS_SHARP", sharpBuf},
+                                {"EDVR_SCALE_PROBE", g_scaleProbe ? "1" : "0"},
                                 {nullptr, nullptr}};
 
     const std::string easu = std::string(kGpuPrologue) +
@@ -253,7 +288,7 @@ ID3D11PixelShader* replacement(ID3D11DeviceContext* ctx) {
                         "game does.");
         const std::string cubic = std::string(kPsCommon) + kPsCubicMain;
         g_ps = shaderSwapCompilePs(ctx, cubic.c_str(), cubic.size(), "main",
-                                   "target_indicator_cubic", nullptr,
+                                   "target_indicator_cubic", macros,
                                    "target indicator");
         g_running = g_ps ? Mode::kCubic : Mode::kOff;
     }
@@ -269,11 +304,22 @@ ID3D11PixelShader* replacement(ID3D11DeviceContext* ctx) {
     }
     g_psHadRcas = wantRcas;
     g_psSharpen = g_sharpen;
+    g_psHadProbe = g_scaleProbe;
     Log::get().note(
         "target indicator: running %s%s.",
         g_running == Mode::kEasu ? "EASU (AMD's own, vendored)"
                                  : "the bicubic (Catmull-Rom)",
         (g_running == Mode::kEasu && wantRcas) ? ", then RCAS-sharpened" : "");
+    if (g_scaleProbe) {
+        Log::get().note(
+            "target indicator: SCALE PROBE ON -- the indicator is painted a "
+            "flat colour for how many surface texels fall on one output "
+            "pixel, not its own art. blue = magnified 2x or more, green = "
+            "about 1:1, yellow = up to 3x minified, red = 3 to 6x, magenta = "
+            "more than 6x. Magnified is what a reconstruction kernel is for; "
+            "minified wants averaging over the footprint instead. Set "
+            "target_indicator_scale_probe = 0 to see the indicator again.");
+    }
     return g_ps;
 }
 
@@ -304,6 +350,9 @@ void targetSharpConfigure(Config& cfg) {
         if (g_sharpen < 0.0f) g_sharpen = 0.0f;
         if (g_sharpen > 2.0f) g_sharpen = 2.0f;
     }
+
+    g_scaleProbe = cfg.getBool("advanced.target_indicator_scale_probe",
+                               false);
 
     // The pin, for a build where the shader was recompiled. Empty keeps the
     // measured hash; a value that will not parse is refused out loud rather
