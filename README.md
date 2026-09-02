@@ -206,6 +206,18 @@ OpenComposite; if any rig shows the lines back on the nose, `remlok_swap_eyes`
 in the ini is the one-line correction, and that log is worth an issue.
 *Details: [docs/remlok-lines.md](docs/remlok-lines.md).*
 
+**The planet you are scanning going black in one eye.** In the surface and
+system scanners (DSS and FSS) the body renders as a featureless black disc in
+the right eye and correctly in the left — silhouette intact, the blue markers
+and the scanner's own UI fine in both (Frontier issue
+[78021](https://issues.frontierstore.net/issue-detail/78021)). The game
+issues the second eye's lighting draw with one of its inputs missing, so that
+eye's lighting lands nowhere. EDVR lends the draw the input the first eye's
+just used, for that one draw, put back exactly as found; `scanner_body = off`
+restores the game's behaviour. Present on some machines and absent on others,
+and on a machine without the bug it never engages.
+*Details: [docs/scanner-body.md](docs/scanner-body.md).*
+
 **The loading screen's shimmering ship.** The spinning ship hologram carries
 a faint, low-res, head-locked pattern inside its silhouette — the hologram
 is synthesized from the model's depth, and its scan pattern is sampled in
