@@ -114,6 +114,11 @@ struct State {
     Hotkey fssQuitKey;
     Hotkey fssZoomStepKey;
     Hotkey fssZoomKey;
+    // The camera cycle on a gamepad. Elite's own defaults put the view
+    // cycle on the D-pad and the camera toggle on the SAME D-pad direction
+    // with a modifier, so these carry a veto as well as a button.
+    XinputBinding extCamNextPad;
+    XinputBinding extCamPrevPad;
     XinputBinding fssEnterPad;
     XinputBinding fssQuitPad;
     XinputBinding fssZoomStepPad;
@@ -597,6 +602,19 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
             cameraViewNotePress();
             headOffsetGateViewUnbumped();
         }
+        // AND THE SAME PRESSES ON A GAMEPAD. Elite binds the view cycle to
+        // the D-pad by default and the keyboard arrows only as a secondary,
+        // so watching the keyboard alone misses every press a pad player
+        // makes -- which reads downstream as a count that is quietly one or
+        // two behind, with nothing to say why (field, 2026-09-02).
+        if (keysMeanGame && xinputPressed(g_state->extCamNextPad)) {
+            cameraViewNotePress();
+            headOffsetGateViewBumped();
+        }
+        if (keysMeanGame && xinputPressed(g_state->extCamPrevPad)) {
+            cameraViewNotePress();
+            headOffsetGateViewUnbumped();
+        }
         // The FSS theater's mode latch: the player's own FSS keys give
         // frame-exact edges -- press enter and the screen is up THIS
         // frame, press quit and it is gone. Underneath, the game's
@@ -848,6 +866,22 @@ void readoptGameBindings() {
         } else {
             g_state->fssQuitKey.setBinding("");
         }
+        char camMod2[40] = {0};
+        const bool haveCamMod2 =
+            eliteBindsLookupPadMod("PhotoCameraToggle_Humanoid", camMod2,
+                                   sizeof(camMod2)) ||
+            eliteBindsLookupPadMod("PhotoCameraToggle", camMod2,
+                                   sizeof(camMod2));
+        g_state->extCamNextPad = XinputBinding{};
+        if (eliteBindsLookupPad("VanityCameraScrollRight", fb, sizeof(fb)) &&
+            xinputTranslate(fb, &g_state->extCamNextPad) && haveCamMod2) {
+            xinputVeto(camMod2, &g_state->extCamNextPad);
+        }
+        g_state->extCamPrevPad = XinputBinding{};
+        if (eliteBindsLookupPad("VanityCameraScrollLeft", fb, sizeof(fb)) &&
+            xinputTranslate(fb, &g_state->extCamPrevPad) && haveCamMod2) {
+            xinputVeto(camMod2, &g_state->extCamPrevPad);
+        }
         g_state->fssEnterPad = XinputBinding{};
         if (eliteBindsLookupPad("ExplorationFSSEnter", fb, sizeof(fb))) {
             xinputTranslate(fb, &g_state->fssEnterPad);
@@ -963,6 +997,38 @@ State& ensureState() {
             }
             {
                 char pk[40];
+                // The camera toggle's gamepad chord, if it has one. Not
+                // watched as a binding -- it is read only so the view-cycle
+                // bindings know which presses are not theirs.
+                char camMod[40] = {0};
+                const bool haveCamMod =
+                    eliteBindsLookupPadMod("PhotoCameraToggle_Humanoid",
+                                           camMod, sizeof(camMod)) ||
+                    eliteBindsLookupPadMod("PhotoCameraToggle", camMod,
+                                           sizeof(camMod));
+                g_state->extCamNextPad = XinputBinding{};
+                if (eliteBindsLookupPad("VanityCameraScrollRight", pk,
+                                        sizeof(pk)) &&
+                    xinputTranslate(pk, &g_state->extCamNextPad)) {
+                    const bool vetoed =
+                        haveCamMod &&
+                        xinputVeto(camMod, &g_state->extCamNextPad);
+                    Log::get().note(
+                        "hotkey: the next-view key is also on your gamepad: "
+                        "%s.%s", pk,
+                        vetoed ? " Your camera toggle chords on the same "
+                                 "button, so a press with that modifier held "
+                                 "is left to the toggle."
+                               : "");
+                }
+                g_state->extCamPrevPad = XinputBinding{};
+                if (eliteBindsLookupPad("VanityCameraScrollLeft", pk,
+                                        sizeof(pk)) &&
+                    xinputTranslate(pk, &g_state->extCamPrevPad)) {
+                    if (haveCamMod) xinputVeto(camMod, &g_state->extCamPrevPad);
+                    Log::get().note("hotkey: the previous-view key is also on "
+                                    "your gamepad: %s.", pk);
+                }
                 g_state->fssEnterPad = XinputBinding{};
                 if (eliteBindsLookupPad("ExplorationFSSEnter", pk,
                                         sizeof(pk)) &&

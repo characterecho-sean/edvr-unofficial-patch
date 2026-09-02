@@ -94,6 +94,11 @@ bool held(const XINPUT_STATE& st, const XinputBinding& b) {
         (st.Gamepad.wButtons & b.buttons) != b.buttons) {
         return false;
     }
+    // A chord that contains this binding is being pressed, so this press
+    // belongs to the chord and not to us.
+    if (b.notButtons && (st.Gamepad.wButtons & b.notButtons) != 0) {
+        return false;
+    }
     if (b.trigger == 1 &&
         st.Gamepad.bLeftTrigger <= XINPUT_GAMEPAD_TRIGGER_THRESHOLD) {
         return false;
@@ -106,6 +111,14 @@ bool held(const XINPUT_STATE& st, const XinputBinding& b) {
 }
 
 }  // namespace
+
+bool xinputVeto(const char* eliteKey, XinputBinding* out) {
+    if (!out) return false;
+    XinputBinding tmp;
+    if (!xinputTranslate(eliteKey, &tmp)) return false;
+    out->notButtons |= tmp.buttons;
+    return true;
+}
 
 bool xinputTranslate(const char* eliteKey, XinputBinding* out) {
     if (!eliteKey || !out) return false;
