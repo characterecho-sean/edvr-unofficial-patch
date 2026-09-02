@@ -45,6 +45,7 @@
 #include "glitch_frame.h"
 #include "holo_fix.h"
 #include "target_sharp.h"
+#include "hud_sprite.h"
 #include "intro_panel.h"
 #include "intro_upscale.h"
 #include "intro_probe.h"
@@ -1253,6 +1254,8 @@ enum class DrawVerdict {
     // The target direction indicator, reconstructed rather than smeared
     // (target_sharp.h): forwarded through a replacement pixel shader.
     kTargetSharp,
+    // A HUD sprite atlas, resampled once and substituted (hud_sprite.h).
+    kHudSprite,
     // The intro movie's panel drawn with our constants at VS b2
     // (intro_panel.h): forwarded normally, restored after.
     kIntroPanel,
@@ -1448,7 +1451,7 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         !fssRingWantsDraws() && !fssDumpWantsDraws() &&
         !eyeSplitWantsDraws() && !resolveProbeWantsDraws() &&
         !stencilProbeWantsDraws() && !resolveBindWants() &&
-        !remlokWantsDraws() && !holoWantsDraws() && !targetSharpWantsDraws() &&
+        !remlokWantsDraws() && !holoWantsDraws() && !targetSharpWantsDraws() && !hudSpriteWantsDraws() &&
         !witchstarWantsDraws() &&
         !sunglareWantsDraws() && !cbPeekEnabled() && !billboardWantsDraws() &&
         !drawCensusArmed() && !panelQuadWants() && !panelCurveWants() &&
@@ -1899,6 +1902,13 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     if (targetSharpWantsDraws() &&
         targetSharpOnEyeDraw(self, kind, count, instances)) {
         return DrawVerdict::kTargetSharp;
+    }
+
+    // The HUD's sprite atlases, recognised the same way: shape, then what it
+    // samples, then its shader's hash.
+    if (hudSpriteWantsDraws() &&
+        hudSpriteOnEyeDraw(self, kind, count, instances)) {
+        return DrawVerdict::kHudSprite;
     }
 
     // The loader dialog's dimming wash, recognised by what it samples.
@@ -2721,6 +2731,7 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     if (v == DrawVerdict::kStencilProbe) stencilProbeBegin(self);
     if (v == DrawVerdict::kHolo) holoBegin(self);
     if (v == DrawVerdict::kTargetSharp) targetSharpBegin(self);
+    if (v == DrawVerdict::kHudSprite) hudSpriteBegin(self);
     if (v == DrawVerdict::kScrim) scrimBegin(self);
     if (v == DrawVerdict::kWitchstar) witchstarBegin(self);
     if (v == DrawVerdict::kBillboard) billboardBegin(self);
@@ -2745,6 +2756,7 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     if (v == DrawVerdict::kBillboard) billboardEnd(self);
     if (v == DrawVerdict::kWitchstar) witchstarEnd(self);
     if (v == DrawVerdict::kScrim) scrimEnd(self);
+    if (v == DrawVerdict::kHudSprite) hudSpriteEnd(self);
     if (v == DrawVerdict::kTargetSharp) targetSharpEnd(self);
     if (v == DrawVerdict::kHolo) holoEnd(self);
     if (v == DrawVerdict::kFssReveal) fssRevealEnd(self);
@@ -3492,6 +3504,7 @@ void vScreenRefreshConfig() {
     remlokConfigure(cfg);
     holoConfigure(cfg);
     targetSharpConfigure(cfg);
+    hudSpriteConfigure(cfg);
     scrimConfigure(cfg);
     quadProbeConfigure(cfg);
     loaderPanelConfigure(cfg);
@@ -4385,6 +4398,7 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     remlokConfigure(cfg);
     holoConfigure(cfg);
     targetSharpConfigure(cfg);
+    hudSpriteConfigure(cfg);
     scrimConfigure(cfg);
     quadProbeConfigure(cfg);
     loaderPanelConfigure(cfg);
