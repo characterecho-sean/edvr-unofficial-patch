@@ -78,6 +78,18 @@ void headOffsetGateSetKeyBound(bool bound);
 // the next view in its cycle.
 void headOffsetGateViewBumped();
 
+// The player pressed the PREVIOUS-view key, so the camera has moved back one
+// in its cycle.
+//
+// Counting only forward presses was a silent one-way ratchet. The cycle is a
+// ring the player walks in both directions, and Elite binds each direction to
+// its own key: forward moved the count, backward moved the game and nothing
+// else, so every backward press left the count permanently one ahead. Field-
+// seen 2026-09-02: cycling forward off the wanted view dropped the offset
+// correctly, and cycling straight back onto it did not bring the offset back,
+// because by then the count and the game disagreed.
+void headOffsetGateViewUnbumped();
+
 // Tell the gate whether hotkey.external_camera_next is CONFIGURED. Same
 // distinction as headOffsetGateSetKeyBound: the bridge's log line and the
 // dead-config warning need to know a key exists before its first press.

@@ -402,10 +402,22 @@ void headOffsetGateKeyPressed() {
                     g.gateViewIndex);
 }
 
-void headOffsetGateViewBumped() {
+// Both directions share this, because a ring walked one way and a ring walked
+// the other are the same ring, and giving them separate arithmetic is how they
+// drift apart.
+void headOffsetGateStepView(int delta) {
     g.gateHaveNextKey = true;
-    ++g.gateViewIndex;
-    if (g.gateViewCount > 0 && g.gateViewIndex >= g.gateViewCount) {
+    g.gateViewIndex += delta;
+    if (g.gateViewCount > 0) {
+        // Wrap at BOTH ends. Going below zero is what the forward-only version
+        // never had to think about, and clamping there instead of wrapping
+        // would put the count one behind for the rest of the session at the
+        // one moment the player is trying to get back to a known view.
+        if (g.gateViewIndex >= g.gateViewCount) g.gateViewIndex = 0;
+        if (g.gateViewIndex < 0) g.gateViewIndex = g.gateViewCount - 1;
+    } else if (g.gateViewIndex < 0) {
+        // Not wrapping is a legitimate configuration (view_count = 0), but a
+        // negative view is not a view under any of them.
         g.gateViewIndex = 0;
     }
     Log::get().note("external camera view -> %d%s (wanted %s). Counted from "
@@ -416,6 +428,10 @@ void headOffsetGateViewBumped() {
                                                "fix.head_offset_view_count)",
                     g.gateWantView < 0 ? "any" : "one specific view");
 }
+
+void headOffsetGateViewBumped() { headOffsetGateStepView(+1); }
+
+void headOffsetGateViewUnbumped() { headOffsetGateStepView(-1); }
 
 void headOffsetGateSetView(int view) { g.viewOverride = view; }
 

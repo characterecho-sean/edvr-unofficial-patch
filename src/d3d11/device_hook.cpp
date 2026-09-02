@@ -103,6 +103,10 @@ struct State {
     // to keep in step, in exchange for nothing a working install uses.
     Hotkey externalCamKey;
     Hotkey extCamNextKey;
+    // And the other way round the ring. Elite binds the two directions
+    // separately, so watching only one counts only half of what the player
+    // does with the cycle.
+    Hotkey extCamPrevKey;
     // The player's own FSS enter/quit keys, adopted from their Elite
     // bindings like the camera keys above; they give the theater's mode
     // latch its frame-exact edges.
@@ -584,6 +588,13 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
             cameraViewNotePress();
             headOffsetGateViewBumped();
         }
+        // The witness call is deliberately the same one: what certification
+        // needs is that the player's finger moved at this instant, not which
+        // way round the cycle it sent them.
+        if (keysMeanGame && g_state->extCamPrevKey.pressed()) {
+            cameraViewNotePress();
+            headOffsetGateViewUnbumped();
+        }
         // The FSS theater's mode latch: the player's own FSS keys give
         // frame-exact edges -- press enter and the screen is up THIS
         // frame, press quit and it is gone. Underneath, the game's
@@ -806,6 +817,24 @@ void readoptGameBindings() {
         }
     }
     {
+        const auto before = g_state->extCamPrevKey.key();
+        if (eliteBindsLookup("VanityCameraScrollLeft", b, sizeof(b))) {
+            g_state->extCamPrevKey.setBinding(b);
+            if (g_state->extCamPrevKey.key() != before) {
+                changed = true;
+                Log::get().note("hotkey: your Elite bindings changed -- "
+                                "external_camera_prev is now %s.", b);
+            }
+        } else if (before != 0) {
+            changed = true;
+            g_state->extCamPrevKey.setBinding("");
+            Log::get().note(
+                "hotkey: your Elite bindings changed and the previous-view key "
+                "is no longer on a keyboard key, so the old key is no longer "
+                "watched.");
+        }
+    }
+    {
         char fb[48];
         if (eliteBindsLookup("ExplorationFSSEnter", fb, sizeof(fb))) {
             g_state->fssEnterKey.setBinding(fb);
@@ -885,6 +914,7 @@ State& ensureState() {
         // focus rule. See hotkey.h.
         g_state->externalCamKey.setGameMirrored(true);
         g_state->extCamNextKey.setGameMirrored(true);
+        g_state->extCamPrevKey.setGameMirrored(true);
         g_state->fssEnterKey.setGameMirrored(true);
         g_state->fssQuitKey.setGameMirrored(true);
         if (Config::get().getBool("hotkey.read_game_bindings", true)) {
@@ -899,6 +929,14 @@ State& ensureState() {
                 g_state->extCamNextKey.setBinding(b);
                 Log::get().note("hotkey: external_camera_next adopted from "
                                 "your Elite bindings: %s", b);
+            }
+            if (eliteBindsLookup("VanityCameraScrollLeft", b, sizeof(b))) {
+                g_state->extCamPrevKey.setBinding(b);
+                Log::get().note("hotkey: external_camera_prev adopted from "
+                                "your Elite bindings: %s. Cycling backwards "
+                                "now moves the counted view backwards too; "
+                                "before this it moved the game and not the "
+                                "count.", b);
             }
             if (eliteBindsLookup("ExplorationFSSEnter", b, sizeof(b))) {
                 g_state->fssEnterKey.setBinding(b);
