@@ -95,9 +95,19 @@ void headOffsetGateViewUnbumped();
 // dead-config warning need to know a key exists before its first press.
 void headOffsetGateSetNextKeyBound(bool bound);
 
-// A new on-foot session has begun: the game resets its external-camera view
-// to 0 across this boundary (6ay), so the counted view and any held view
-// restart from 0 with it. Two detectors call this for the same landing --
+// A new on-foot session has begun.
+//
+// This NO LONGER resets the counted view, and the correction matters. 6ay
+// read a landing as the game zeroing its camera index, and the field
+// disagreed on 2026-09-02: disembarking and re-embarking leave the on-foot
+// preset exactly where it was. What 6ay actually saw was almost certainly a
+// backward cycle press that nothing was counting yet -- see
+// headOffsetGateViewUnbumped.
+//
+// A wake is the boundary that really does reset it; see
+// headOffsetGateSetWakeLive. What survives here is the bridge and grace
+// bookkeeping, which is about the READ dying across a landing and has
+// nothing to do with the count. Two detectors call this for the same landing --
 // the journal's Disembark (authoritative, wired in device_hook) and the
 // panel-return heuristic (fallback, internal) -- and it dedupes, so the
 // first to speak does the work. `source` names the caller in the log.
@@ -122,6 +132,15 @@ void headOffsetGateNoteEmbark();
 // from the camera -- panel gone, previous sample still saying on-foot for
 // up to a second -- cannot put the offset in the boarding animation.
 void headOffsetGateSetOnFootLive(bool known, bool onFoot, uint32_t sample);
+
+// The live supercruise flag and the jump-tunnel window, pushed in each frame.
+//
+// A LOW OR HIGH WAKE IS WHAT RESETS THE CAMERA (field, 2026-09-02). Entering
+// supercruise or jumping tears down the camera rig and builds a new one, and
+// the game's preset index goes back to 0 with it -- which is why the count
+// has to as well. Rising edges only: sitting in supercruise is not a wake,
+// arriving in it is.
+void headOffsetGateSetWakeLive(bool known, bool inSupercruise, bool inTunnel);
 
 // Rising-edge counter of camera entries, for the caller that nudges the
 // view scanner: fresh candidates at every entry is what makes the anchored

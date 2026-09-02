@@ -515,6 +515,8 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
         // which is what the anchored two-step certification feeds on.
         headOffsetGateSetOnFootLive(journalOnFootKnown(), journalOnFoot(),
                                     journalStatusSamples());
+        headOffsetGateSetWakeLive(journalSupercruiseKnown(), journalSupercruise(),
+                                  journalInJumpTunnel());
         {
             const uint32_t entries = headOffsetGateEnterCount();
             if (entries != g_state->lastCameraEnters) {

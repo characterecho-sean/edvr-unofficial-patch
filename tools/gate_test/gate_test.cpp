@@ -795,10 +795,19 @@ void runScenarios() {
     // flights of 2026-08-15). The first version held the old view across the
     // whole absence, on "the game freezes the view while the camera is
     // closed" -- and the ninth flight showed the offset applied on preset 0
-    // at re-entry: the game RESETS its camera view to 0 across a vehicle
-    // leg. The hold is only for dead-read stretches WITHIN an on-foot
-    // session; a ship leg starts a new session, where the count restarts at
-    // the game's own 0 and presses track from there with no read at all.
+    // at re-entry, which was read as the game RESETTING its view across a
+    // vehicle leg.
+    //
+    // THAT READING WAS WRONG, and the field said so on 2026-09-02:
+    // disembarking and re-embarking leave the on-foot preset exactly where
+    // it was. What the ninth flight almost certainly saw was a BACKWARD
+    // cycle press, which nothing counted until VanityCameraScrollLeft was
+    // wired up -- one uncounted press looks identical to a reset if you only
+    // ever check where you ended up.
+    //
+    // So a landing holds the view, and a LOW OR HIGH WAKE is the boundary
+    // that really zeroes it: entering supercruise or jumping rebuilds the
+    // camera and the preset goes with it. Both halves are asserted below.
     begin(true);
     headOffsetGateSetView(g_wantView);
     enterCamera();
@@ -814,15 +823,8 @@ void runScenarios() {
     headOffsetGateKeyPressed();           // re-enter the camera
     panelFrame(2);
     sceneFrame(12);
-    check(false, "a new on-foot session opens the camera on view 0, and the "
-                 "old held view does not arm there");
-    headOffsetGateViewBumped();           // cycle: 0 -> 1
-    sceneFrame(2);
-    check(false, "view 1 is not the wanted one either");
-    headOffsetGateViewBumped();           // cycle: 1 -> 2
-    sceneFrame(2);
-    check(true, "two presses reach the wanted view and the offset arms, "
-                "read or no read");
+    check(true, "a landing keeps the camera preset, so the held view arms "
+                "again at re-entry");
 
     // AND THE HOLD HAS NO CLOCK AT ALL: staying in the camera on the held
     // view for as long as the player wishes is the product requirement
@@ -831,6 +833,34 @@ void runScenarios() {
     // hour of frames on the hold stays on.
     sceneFrame(324000);
     check(true, "an hour in the camera on the held view is still on");
+
+    // NOW THE BOUNDARY THAT DOES RESET IT. A first sample is not an edge --
+    // arriving already in supercruise tells you nothing about a transition --
+    // so establish "not in a wake" before raising it.
+    headOffsetGateSetWakeLive(true, false, false);
+    sceneFrame(1);
+    check(true, "a first wake sample on its own is not an edge and changes "
+                "nothing");
+    headOffsetGateSetWakeLive(true, true, false);   // low wake: supercruise
+    sceneFrame(2);
+    check(false, "a low wake puts the counted view back to 0, and the offset "
+                 "comes off with it");
+    headOffsetGateViewBumped();           // cycle: 0 -> 1
+    sceneFrame(2);
+    check(false, "view 1 is not the wanted one either");
+    headOffsetGateViewBumped();           // cycle: 1 -> 2
+    sceneFrame(2);
+    check(true, "two presses reach the wanted view and the offset arms, "
+                "read or no read");
+
+    // A HIGH WAKE IS THE SAME BOUNDARY by a different signal: the jump
+    // tunnel, which the witchspace fix already watches.
+    headOffsetGateSetWakeLive(true, false, false);
+    sceneFrame(1);
+    check(true, "back out of supercruise, still on the wanted view");
+    headOffsetGateSetWakeLive(true, false, true);   // high wake: the tunnel
+    sceneFrame(2);
+    check(false, "a high wake resets it too");
 
     // A CAMERA TOGGLE WITHIN a session keeps the count: leaving the camera
     // to on-foot and coming straight back is the case the game genuinely
@@ -848,10 +878,12 @@ void runScenarios() {
     sceneFrame(12);
     check(true, "a same-session toggle keeps the held view and re-arms");
 
-    // THE JOURNAL'S BOUNDARY AND THE HEURISTIC'S ARE ONE RESET. Disembark
+    // THE JOURNAL'S BOUNDARY AND THE HEURISTIC'S ARE ONE EVENT. Disembark
     // (wired from device_hook) and the panel-return heuristic mark the same
-    // landing seconds apart; whichever speaks first does the work and the
-    // second is deduped, so a landing resets once, not twice.
+    // landing seconds apart, and the dedupe means it is announced once rather
+    // than twice. Neither touches the counted view any more -- what they still
+    // do is retire the bridge, which is about the READ dying across a landing
+    // and was never about the count.
     begin(true);
     headOffsetGateSetView(g_wantView);
     enterCamera();
@@ -865,11 +897,14 @@ void runScenarios() {
     headOffsetGateKeyPressed();               // would fire here -- deduped
     panelFrame(2);
     sceneFrame(12);
-    check(false, "the journal's reset put the new session on view 0");
-    headOffsetGateViewBumped();
+    check(true, "the journal's landing keeps the view, so the offset arms "
+                "again");
     headOffsetGateViewBumped();
     sceneFrame(2);
-    check(true, "two presses reach the wanted view after a journal reset");
+    check(false, "one press off the wanted view drops it");
+    headOffsetGateViewUnbumped();
+    sceneFrame(2);
+    check(true, "and cycling BACK onto it re-arms -- the backward key counts");
 
     // AN IDLE STRETCH (map, menu) is not a vehicle leg and must not reset:
     // neither panel nor scene accrues toward the session boundary.

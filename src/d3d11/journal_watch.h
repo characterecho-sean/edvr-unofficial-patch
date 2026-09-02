@@ -6,7 +6,7 @@
 // simply states: whether GAMEPLAY has started (LoadGame -- before it, every
 // keypress is menu navigation, and the next-view key is an arrow that menus
 // eat, 6ba), and where an ON-FOOT SESSION begins (Disembark -- the boundary
-// at which the game resets its external-camera view to 0, 6ay).
+// at which EDVR re-anchors what it knows about an on-foot session).
 //
 // READ ONLY, names only. The tail is polled twice a second, and the only
 // thing parsed out of it is which event happened; no payload is kept. If the

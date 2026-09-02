@@ -99,7 +99,7 @@ struct Gate {
     uint32_t gateIdleFrames = 0;         // frames with neither panel nor scene
     // Scene-without-panel frames OUTSIDE the camera since the panel was last
     // seen: ship or SRV time. The panel returning after enough of this is a
-    // NEW on-foot session, and the game resets its camera view to 0 across
+    // NEW on-foot session. The game does NOT reset its camera view across
     // that boundary -- see the reset at the panelNow block.
     uint32_t gateAwayScene = 0;
     bool     gateExternal = false;       // the latch itself
@@ -133,6 +133,11 @@ struct Gate {
     // every distinct divergence with the context that names the boundary.
     // Off by default; it needs the memory read on, which is not the shipped
     // state either.
+    // The wake edge. `wakeKnown` false means the status file has not answered
+    // yet, and an unknown-to-true transition is not an edge, only the first
+    // thing we happened to see.
+    bool     wakeKnown = false;
+    bool     wakeLast = false;
     // So the off-foot skip explains itself once per leg rather than per press.
     bool     offFootPressNoted = false;
     bool     desyncLog = false;
@@ -303,6 +308,32 @@ void headOffsetGateSetOnFootLive(bool known, bool onFoot, uint32_t sample) {
     if (known && onFoot) g.liveOnFootSeenThisFoot = true;
 }
 
+void headOffsetGateSetWakeLive(bool known, bool inSupercruise, bool inTunnel) {
+    if (!known) {
+        // No status file: remember nothing, so the first real sample after it
+        // comes back is not read as an edge it never saw.
+        g.wakeKnown = false;
+        return;
+    }
+    const bool wake = inSupercruise || inTunnel;
+    const bool rising = g.wakeKnown && wake && !g.wakeLast;
+    g.wakeKnown = true;
+    g.wakeLast = wake;
+    if (!rising || g.gateViewIndex == 0) {
+        // Already at 0 is not news, and saying so at every jump would bury
+        // the times it actually moved.
+        return;
+    }
+    Log::get().note(
+        "head offset: a wake -- the counted view goes from %d back to 0. "
+        "Entering supercruise or jumping rebuilds the camera and the game's "
+        "preset goes with it (field, 2026-09-02). This is the one boundary "
+        "that does; a landing does not.",
+        g.gateViewIndex);
+    g.gateViewIndex = 0;
+    g.gateBridgeStarted = false;
+}
+
 uint32_t headOffsetGateEnterCount() { return g.gateCameraEnters; }
 
 int headOffsetGateCountedView() { return g.gateViewIndex; }
@@ -333,14 +364,17 @@ void headOffsetGateNewFootSession(const char* source, bool journalSaysSo) {
     }
     if (g.lastFootResetMs != 0) return;
     g.lastFootResetMs = stampMs();
-    g.gateViewIndex = 0;
+    // THE COUNT IS NOT TOUCHED HERE ANY MORE. See the header: the field says
+    // a landing leaves the on-foot preset where it was, and the reset that
+    // used to live on this line was throwing away a correct number at every
+    // airlock.
     g.gateBridgeStarted = false;   // any held view belongs to the old session
     g.liveOnFootSeenThisFoot = false;   // this session's flag not yet observed
     Log::get().note(
-        "head offset: a new on-foot session (%s). The game resets its camera "
-        "view to 0 across this, so the view count and any held view restart "
-        "from 0 with it.",
-        source);
+        "head offset: a new on-foot session (%s). The counted view stays at "
+        "%d -- the game keeps your camera preset across a landing. A wake is "
+        "what resets it.",
+        source, g.gateViewIndex);
 }
 
 void headOffsetGateNoteEmbark() { g.footGraceJournal = false; }
@@ -392,9 +426,8 @@ void headOffsetGateKeyPressed() {
     // 0 on entry does not resynchronise the count, it desynchronises it by
     // exactly however far the player had cycled before.
     Log::get().note("external camera key pressed: intent %s%s. View index still %d "
-                    "(the game keeps the view across toggles WITHIN an on-foot "
-                    "session; a ship or vehicle leg resets it to 0, and the "
-                    "count restarts with it).",
+                    "(the game keeps the view across camera toggles and across "
+                    "landings; a low or high wake is what resets it).",
                     g.gateIntent ? "SET -- the head offset may arm when the flat "
                                    "panel stops"
                                  : "CLEARED -- the head offset comes off now",
@@ -516,7 +549,7 @@ void headOffsetGateFrame(uint32_t frameNo, uint32_t panelDraws, uint32_t eyeDraw
 
     if (panelNow) {
         // A NEW ON-FOOT SESSION: the panel is back after a vehicle leg, and
-        // the game resets its external-camera view to 0 across that boundary.
+        // the game keeps its external-camera view across that boundary.
         // "The game remembers the view across toggles" -- printed on every
         // press -- turned out to be true only WITHIN an on-foot session:
         // at every observed second landing the game was back on view 0 while
