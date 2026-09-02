@@ -298,6 +298,26 @@ void headOffsetGateSetKeyBound(bool bound) { g.gateKeyBound = bound; }
 void headOffsetGateSetNextKeyBound(bool bound) { g.gateHaveNextKey = bound; }
 
 void headOffsetGateSetOnFootLive(bool known, bool onFoot, uint32_t sample) {
+    // STEPPING OUT OF A VEHICLE: > 5 BECOMES 0, AND ANYTHING ELSE IS KEPT.
+    //
+    // The game's own rule, and it is a clamp rather than a fold (field,
+    // 2026-09-02). A vehicle's camera cycle is longer than the six on foot --
+    // 8 in an SRV, up to 11 in a ship -- and stepping out of one on a preset
+    // the on-foot cycle does not have puts you on 0. Land on a preset it DOES
+    // have and you keep it.
+    //
+    // Modulo was the wrong guess: 8 folds to 2, and the game gives 0.
+    const bool steppingOut = known && onFoot && g.liveOnFootKnown && !g.liveOnFoot;
+    if (steppingOut && g.gateViewCount > 0 &&
+        g.gateViewIndex >= g.gateViewCount) {
+        Log::get().note(
+            "external camera view: %d is past the end of the on-foot cycle "
+            "(0..%d), so stepping out puts it back to 0 -- the game does the "
+            "same. A vehicle preset the on-foot cycle also has would have been "
+            "kept.",
+            g.gateViewIndex, g.gateViewCount - 1);
+        g.gateViewIndex = 0;
+    }
     g.liveOnFootKnown = known;
     g.liveOnFoot = onFoot;
     g.liveSample = sample;
@@ -457,8 +477,19 @@ void headOffsetGateKeyPressed() {
 // can hand over an index from a context with a longer ring; that is a value
 // to fold, not to clamp to 5 and quietly call the last preset. C++ keeps the
 // sign of the dividend, so the negative case needs the second line.
+// The on-foot ring is 6 and wraps. A vehicle's is longer and this does not
+// need to know how much longer: off foot the count simply runs on unwrapped,
+// and the transition back is where the game's own rule is applied.
+//
+// One bit of context, not a taxonomy of vehicles. Unknown counts as on foot,
+// which is what a rig with no status file has always done.
+int currentRing() {
+    const bool offFoot = g.liveOnFootKnown && !g.liveOnFoot;
+    return offFoot ? 0 : g.gateViewCount;
+}
+
 int normalizeView(int v) {
-    const int n = g.gateViewCount;
+    const int n = currentRing();
     // 0 is a legitimate configuration meaning "do not wrap", and a negative
     // view is not a view under any configuration.
     if (n <= 0) return v < 0 ? 0 : v;
@@ -473,19 +504,15 @@ int normalizeView(int v) {
 void headOffsetGateStepView(int delta) {
     g.gateHaveNextKey = true;
 
-    // EVERY PRESS COUNTS, WHEREVER IT IS MADE, AND THE RING IS ALWAYS 0..5.
+    // EVERY PRESS COUNTS, WHEREVER IT IS MADE.
     //
-    // The game carries one camera index and folds it into whatever cycle the
-    // player is standing in: pick 7 in a ship, step out, and it shows you 1.
-    // So the on-foot number is what this count has to hold, and holding it
-    // means folding every press into six.
-    //
-    // Longer cycles elsewhere -- 8 in an SRV, more in a ship, varying with
-    // its seat count -- are deliberately not modelled. Doing so would mean a
-    // constant that is right for some ships and wrong for others, or a
-    // setting asking the user for a number they have no reason to know, and
-    // it only ever changes the answer if somebody cycles right round a
-    // vehicle's own cycle without stopping. The next wake corrects even that.
+    // On foot the ring is 6 and wraps. In a vehicle the count runs on
+    // unwrapped, because the vehicle's own cycle length is not modelled: a
+    // constant would be right for some ships and wrong for others, and a
+    // setting would ask the user for a number they have no reason to know.
+    // Running on is exact until somebody cycles right round a vehicle's own
+    // cycle without stopping, and stepping out or the next wake corrects even
+    // that.
     // Both ends. Going below zero is what the forward-only version never had
     // to think about, and stopping at zero rather than rolling round would
     // put the count one behind for the rest of the session, at the one moment

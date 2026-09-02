@@ -917,6 +917,32 @@ void runScenarios() {
     for (int i = 0; i < 5; ++i) headOffsetGateViewUnbumped();
     checkView(0, "and five more backward presses come back to 0");
 
+    // STEPPING OUT OF A VEHICLE: PAST THE END BECOMES 0, INSIDE IT IS KEPT.
+    // The game's rule, and it is a clamp rather than a fold (field,
+    // 2026-09-02): 8 in a ship becomes 0 on foot, not 8 mod 6.
+    begin(true);
+    headOffsetGateSetOnFootLive(true, false, 1);   // in a vehicle
+    for (int i = 0; i < 8; ++i) headOffsetGateViewBumped();
+    checkView(8, "in a vehicle the count runs on past the on-foot cycle");
+    headOffsetGateSetOnFootLive(true, true, 2);    // step out
+    checkView(0, "and stepping out on 8 puts it back to 0");
+
+    // The other half, which a plain reset-to-0 would get wrong: a vehicle
+    // preset the on-foot cycle also has is KEPT.
+    begin(true);
+    headOffsetGateSetOnFootLive(true, false, 1);
+    for (int i = 0; i < 3; ++i) headOffsetGateViewBumped();
+    checkView(3, "three presses in a vehicle");
+    headOffsetGateSetOnFootLive(true, true, 2);
+    checkView(3, "and stepping out on 3 keeps it -- the on-foot cycle has a 3");
+
+    // On foot the ring still wraps, which is what makes 6 unreachable there
+    // and the clamp above a vehicle-only event.
+    begin(true);
+    headOffsetGateSetOnFootLive(true, true, 1);
+    for (int i = 0; i < 8; ++i) headOffsetGateViewBumped();
+    checkView(2, "on foot, eight presses wrap twice and land on 2");
+
     // A READ FROM A LONGER RING IS FOLDED, NOT TAKEN RAW. 8 is an SRV index;
     // on foot it can only mean 2. Clamping would have said 5, which is a real
     // preset and the wrong one -- the failure mode worth a test of its own.
