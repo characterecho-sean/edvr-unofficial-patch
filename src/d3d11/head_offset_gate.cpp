@@ -133,6 +133,8 @@ struct Gate {
     // every distinct divergence with the context that names the boundary.
     // Off by default; it needs the memory read on, which is not the shipped
     // state either.
+    // So the off-foot skip explains itself once per leg rather than per press.
+    bool     offFootPressNoted = false;
     bool     desyncLog = false;
     int32_t  lastDesyncGame = -2;
     int32_t  lastDesyncCount = -2;
@@ -407,6 +409,38 @@ void headOffsetGateKeyPressed() {
 // drift apart.
 void headOffsetGateStepView(int delta) {
     g.gateHaveNextKey = true;
+
+    // A PRESS MADE OFF FOOT IS NOT A STEP OF THIS COUNT.
+    //
+    // The camera cycle is per-context and the contexts are different lengths:
+    // 6 on foot, 8 in an SRV, up to 11 in a ship and varying with its seat
+    // count (measured 2026-09-02). Different lengths mean different rings,
+    // and different rings mean the game cannot be keeping one index for all
+    // of them -- so a press made in an SRV moves the SRV's camera and leaves
+    // the on-foot one exactly where it was.
+    //
+    // Counting those presses anyway, with the on-foot modulus, walked the
+    // count round a ring the player was not on. The gate only ever arms on
+    // foot, so nothing here needs to track any other context; it needs to
+    // NOT track them.
+    //
+    // Only skip on a POSITIVE "not on foot". Unknown means the status file
+    // is not being read, and counting is the better guess there -- it is
+    // what happened before this existed.
+    if (g.liveOnFootKnown && !g.liveOnFoot) {
+        if (!g.offFootPressNoted) {
+            g.offFootPressNoted = true;
+            Log::get().note(
+                "external camera: a cycle key was pressed while you were not on "
+                "foot, so the counted view stays at %d. The camera cycle is a "
+                "different length in a ship or an SRV than on foot, so those "
+                "presses move a different camera and not this count. Said once.",
+                g.gateViewIndex);
+        }
+        return;
+    }
+    g.offFootPressNoted = false;
+
     g.gateViewIndex += delta;
     if (g.gateViewCount > 0) {
         // Wrap at BOTH ends. Going below zero is what the forward-only version
