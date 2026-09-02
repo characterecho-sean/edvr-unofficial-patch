@@ -44,10 +44,20 @@ constexpr uint64_t kVsHash = 0x5DA53D8B0133341Eull;
 // costing hundreds of megabytes.
 constexpr uint32_t kMaxSrc = 2048;
 
-// Enough atlases for the HUD several times over. Entries are keyed by the
-// source RESOURCE and never evicted: the game holds these for the session,
-// and a full table simply stops upscaling new ones.
-constexpr uint32_t kMaxAtlas = 8;
+// And a floor, which the first field run earned: the matched quads also
+// bind 1x1 placeholder textures -- a uniform colour standing in for an
+// absent map -- and a 1x1 resampled to 2x2 is the same uniform colour for a
+// dispatch, two views and a table slot. Harmless in itself; the harm is that
+// the table is finite and a wasted slot is one a real atlas cannot have.
+constexpr uint32_t kMinSrc = 16;
+
+// Entries are keyed by the source RESOURCE and never evicted: the game holds
+// these for the session. Sized 24 rather than the 8 this shipped with,
+// because one field run reached four slots in two minutes and the ceiling is
+// silent -- a full table simply stops upscaling, with nothing to say which
+// atlas missed out. The table is pointers and views; there is no reason to
+// be thrifty with it.
+constexpr uint32_t kMaxAtlas = 24;
 
 const char kGpuPrologue[] =
     "#define A_GPU 1\n"
@@ -263,7 +273,16 @@ Atlas* find(void* src) {
 // Build the upscaled copy of one atlas. Runs ONCE per source texture.
 Atlas* build(ID3D11DeviceContext* ctx, ID3D11ShaderResourceView* srcSrv,
              void* srcRes, uint32_t sw, uint32_t sh, bool srgb) {
-    if (g_atlasCount >= kMaxAtlas) return nullptr;
+    if (g_atlasCount >= kMaxAtlas) {
+        static bool said = false;
+        if (!said) {
+            said = true;
+            Log::get().note("hud icons: %u atlases are already resampled and "
+                            "the table is full; any further ones are sampled "
+                            "stock. Said once.", kMaxAtlas);
+        }
+        return nullptr;
+    }
     ID3D11Device* dev = nullptr;
     ctx->GetDevice(&dev);
     if (!dev) return nullptr;
@@ -418,7 +437,7 @@ bool hudSpriteOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
     }
     ResourceInfo src;
     if (!bindingResolve(bindingGet(BindSlot::PsSrv0), &src) ||
-        !src.isTexture2D || src.a == 0 || src.b == 0 ||
+        !src.isTexture2D || src.a < kMinSrc || src.b < kMinSrc ||
         src.a > kMaxSrc || src.b > kMaxSrc) {
         return false;
     }
