@@ -4,6 +4,8 @@
 
 #include <d3d11.h>
 
+#include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <string>
 
@@ -11,6 +13,7 @@
 #include "../common/log.h"
 #include "binding_shadow.h"
 #include "exposure_fix.h"   // lookupShaderHash
+#include "fsr_hlsl_gen.h"   // AMD's ffx_a.h and ffx_fsr1.h, as string chunks
 #include "shader_swap.h"
 #include "vscreen.h"        // vScreenIsEyeSized
 
@@ -28,13 +31,12 @@ constexpr uint32_t kInstances = 1;
 // other 6-index quad that samples one non-eye-sized texture.
 constexpr uint64_t kVsHash = 0xE508648660A352B2ull;
 
-// The replacement. Everything after the fetch is ps 63ABD86359B57D01
-// transcribed from its own disassembly:
+// Shared by both resamplers: the bindings, a Catmull-Rom fetch, and the
+// game's own colour maths.
 //
-//   sample r0, v0.xy, t0, s0
-//   add r1.x, r0.w, l(-0.000010) ; lt r1.x, r1.x, l(0) ; discard_nz r1.x
+// The colour maths is ps 63ABD86359B57D01 transcribed from its disassembly:
+//
 //   mul r0.xyz, r0.xyzx, r0.xyzx        <- the square
-//   mov o0.w, r0.w                      <- alpha is the SAMPLED alpha
 //   mul r0.xyz, r0.xyzx, cb2[0].xxxx
 //   mul r0.xyz, r0.xyzx, cb1[84].zzzz
 //   mul r0.xyz, r0.xyzx, cb1[61].yyyy
@@ -44,13 +46,15 @@ constexpr uint64_t kVsHash = 0xE508648660A352B2ull;
 //   mul o0.xyz, r0.xyzx, cb1[90].yyyy
 //
 // The two mads are one 3x3 matrix whose COLUMNS are cb1[85], cb1[86] and
-// cb1[87] -- written out below as three dot products rather than left as
-// the register shuffle, because a shuffle that is subtly wrong looks like a
-// colour shift and nothing else.
-const char kPsHlsl[] =
+// cb1[87] -- written out as three dot products rather than left as the
+// register shuffle, because a shuffle that is subtly wrong looks like a
+// colour shift and nothing else. The emitted tail was diffed against the
+// game's before this ever shipped.
+const char kPsCommon[] =
     "cbuffer CB1 : register(b1) { float4 g_cb1[91]; };\n"
     "cbuffer CB2 : register(b2) { float4 g_cb2[1]; };\n"
     "Texture2D<float4> g_tex : register(t0);\n"
+    "SamplerState g_smp : register(s0);\n"
     "\n"
     "// Catmull-Rom, a = -0.5, stated so it can be checked against a\n"
     "// reference rather than recognised:\n"
@@ -58,7 +62,7 @@ const char kPsHlsl[] =
     "//   w1 =  1    - 2.5 * t^2 + 1.5t^3\n"
     "//   w2 =  0.5t + 2.0 * t^2 - 1.5t^3\n"
     "//   w3 =       - 0.5 * t^2 + 0.5t^3\n"
-    "float4 fetch(float2 uv)\n"
+    "float4 fetchCubic(float2 uv)\n"
     "{\n"
     "    float2 size;\n"
     "    g_tex.GetDimensions(size.x, size.y);\n"
@@ -85,53 +89,191 @@ const char kPsHlsl[] =
     "    return acc;\n"
     "}\n"
     "\n"
-    "float4 main(float2 uv : TEXCOORD0) : SV_TARGET\n"
+    "float4 shade(float3 rgb, float a)\n"
     "{\n"
-    "    float4 s = fetch(uv);\n"
-    "    // A cubic kernel overshoots. rgb is SQUARED below, so a negative\n"
-    "    // channel would come back as a bright one; alpha gates a discard.\n"
-    "    s.rgb = max(s.rgb, 0.0);\n"
-    "    s.a = saturate(s.a);\n"
-    "\n"
-    "    if (s.a - 0.00001 < 0.0) discard;\n"
-    "\n"
-    "    float3 c = s.rgb * s.rgb;\n"
+    "    float3 c = rgb * rgb;\n"
     "    c *= g_cb2[0].x;\n"
     "    c *= g_cb1[84].z;\n"
     "    c *= g_cb1[61].y;\n"
-    "\n"
     "    float3 o;\n"
     "    o.x = c.x * g_cb1[85].x + c.y * g_cb1[86].x + c.z * g_cb1[87].x;\n"
     "    o.y = c.x * g_cb1[85].y + c.y * g_cb1[86].y + c.z * g_cb1[87].y;\n"
     "    o.z = c.x * g_cb1[85].z + c.y * g_cb1[86].z + c.z * g_cb1[87].z;\n"
-    "\n"
-    "    return float4(o * g_cb1[90].y, s.a);\n"
+    "    return float4(o * g_cb1[90].y, a);\n"
     "}\n";
+
+// The fallback, for a rig where EASU will not compile. A cubic is a smaller
+// win than an edge-adaptive kernel on line art and a much larger one than
+// the single bilinear tap the game does.
+const char kPsCubicMain[] =
+    "float4 main(float2 uv : TEXCOORD0) : SV_TARGET\n"
+    "{\n"
+    "    float4 s = fetchCubic(uv);\n"
+    "    // A cubic kernel overshoots. rgb is SQUARED in shade(), so a\n"
+    "    // negative channel would come back as a bright one; alpha gates a\n"
+    "    // discard.\n"
+    "    s.rgb = max(s.rgb, 0.0);\n"
+    "    s.a = saturate(s.a);\n"
+    "    if (s.a - 0.00001 < 0.0) discard;\n"
+    "    return shade(s.rgb, s.a);\n"
+    "}\n";
+
+// EASU, and RCAS over it. Everything the filtering itself does is AMD's;
+// what is here is the callbacks their header asks the calling shader to
+// provide, plus the constants.
+//
+// WHY THE CONSTANTS ARE BUILT PER PIXEL. FsrEasuCon bakes an output-pixel to
+// source-pixel map into con0, which assumes the two grids are related by a
+// fixed scale -- true for a fullscreen upscale, false here: this quad is 3D
+// cockpit geometry, so its UV is perspective-interpolated and not affine in
+// screen space. Zeroing con0.xy drops the integer output position out of
+// FsrEasuF's first line and con0.zw carries the source position directly,
+// which is the same arithmetic it would have done. con1..con3 are
+// FsrEasuCon's own terms with inputSize = the surface, term for term.
+//
+// RCAS reads a five-tap neighbourhood of the UPSCALED image, which does not
+// exist as a texture here -- so FsrRcasLoadF evaluates EASU again at the
+// neighbouring output pixel, reached by stepping the UV along its own screen
+// derivatives. Five EASU evaluations for one output pixel, on one small quad
+// per eye.
+const char kPsEasuMain[] =
+    "static float2 g_size, g_rcp, g_uv, g_dx, g_dy;\n"
+    "\n"
+    "AF4 FsrEasuRF(AF2 p) { return g_tex.GatherRed(g_smp, p); }\n"
+    "AF4 FsrEasuGF(AF2 p) { return g_tex.GatherGreen(g_smp, p); }\n"
+    "AF4 FsrEasuBF(AF2 p) { return g_tex.GatherBlue(g_smp, p); }\n"
+    "\n"
+    "float3 easuAt(float2 uv)\n"
+    "{\n"
+    "    float2 pp = uv * g_size - 0.5;\n"
+    "    AU4 con0 = AU4(0, 0, asuint(pp.x), asuint(pp.y));\n"
+    "    AU4 con1 = AU4(asuint(g_rcp.x), asuint(g_rcp.y),\n"
+    "                   asuint(g_rcp.x), asuint(-g_rcp.y));\n"
+    "    AU4 con2 = AU4(asuint(-g_rcp.x), asuint(2.0 * g_rcp.y),\n"
+    "                   asuint(g_rcp.x), asuint(2.0 * g_rcp.y));\n"
+    "    AU4 con3 = AU4(0, asuint(4.0 * g_rcp.y), 0, 0);\n"
+    "    AF3 c;\n"
+    "    FsrEasuF(c, AU2(0, 0), con0, con1, con2, con3);\n"
+    "    return c;\n"
+    "}\n"
+    "\n"
+    "AF4 FsrRcasLoadF(ASU2 p)\n"
+    "{\n"
+    "    return AF4(easuAt(g_uv + p.x * g_dx + p.y * g_dy), 1.0);\n"
+    "}\n"
+    "void FsrRcasInputF(inout AF1 r, inout AF1 g, inout AF1 b) {}\n"
+    "\n"
+    "float4 main(float2 uv : TEXCOORD0) : SV_TARGET\n"
+    "{\n"
+    "    g_tex.GetDimensions(g_size.x, g_size.y);\n"
+    "    g_rcp = 1.0 / g_size;\n"
+    "    g_uv = uv;\n"
+    "    // One output pixel's step in UV, taken BEFORE the discard so the\n"
+    "    // derivative is read while the quad is still whole.\n"
+    "    g_dx = ddx(uv);\n"
+    "    g_dy = ddy(uv);\n"
+    "\n"
+    "    // Alpha is a coverage mask and EASU has no alpha path, so it keeps\n"
+    "    // the cubic. It gates the same discard the game's shader gates.\n"
+    "    float a = saturate(fetchCubic(uv).a);\n"
+    "    if (a - 0.00001 < 0.0) discard;\n"
+    "\n"
+    "    AF3 c;\n"
+    "#if EDVR_RCAS\n"
+    "    FsrRcasF(c.r, c.g, c.b, AU2(0, 0),\n"
+    "             AU4(asuint(float(EDVR_RCAS_SHARP)), 0, 0, 0));\n"
+    "#else\n"
+    "    c = easuAt(uv);\n"
+    "#endif\n"
+    "    return shade(max(c, 0.0), a);\n"
+    "}\n";
+
+const char kGpuPrologue[] =
+    "#define A_GPU 1\n"
+    "#define A_HLSL 1\n";
+
+std::string joinChunks(const char* const* chunks) {
+    std::string out;
+    for (const char* const* c = chunks; *c; ++c) out += *c;
+    return out;
+}
+
+enum class Mode { kOff, kCubic, kEasu };
 
 bool     g_sharp = false;
 bool     g_failed = false;
 uint64_t g_vsHash = kVsHash;
+float    g_sharpen = 0.25f;   // RCAS stops; negative = RCAS off
+Mode     g_running = Mode::kOff;
 
 ID3D11PixelShader* g_ps = nullptr;
+float              g_psSharpen = 0.0f;
+bool               g_psHadRcas = false;
 
 bool               g_engaged = false;
 ID3D11PixelShader* g_displaced = nullptr;
 uint64_t           g_applied = 0;
 
 ID3D11PixelShader* replacement(ID3D11DeviceContext* ctx) {
-    if (g_ps || g_failed) return g_ps;
-    g_ps = shaderSwapCompilePs(ctx, kPsHlsl, sizeof(kPsHlsl) - 1, "main",
-                               "target_indicator_ps", nullptr,
+    const bool wantRcas = g_sharpen >= 0.0f;
+    if (g_ps && g_psHadRcas == wantRcas && g_psSharpen == g_sharpen) {
+        return g_ps;
+    }
+    if (g_failed) return nullptr;
+    if (g_ps) {
+        g_ps->Release();
+        g_ps = nullptr;
+    }
+
+    // AMD's own unit is STOPS of sharpness reduction, so 0 is the sharpest
+    // and the linear value the shader wants is exp2(-stops).
+    char sharpBuf[32] = "1.0";
+    if (wantRcas) {
+        _snprintf_s(sharpBuf, sizeof(sharpBuf), _TRUNCATE, "%.8f",
+                    static_cast<double>(powf(2.0f, -g_sharpen)));
+    }
+    const SwapMacro macros[] = {{"EDVR_RCAS", wantRcas ? "1" : "0"},
+                                {"EDVR_RCAS_SHARP", sharpBuf},
+                                {nullptr, nullptr}};
+
+    const std::string easu = std::string(kGpuPrologue) +
+                             joinChunks(kFfxAChunks) +
+                             "#define FSR_EASU_F 1\n" +
+                             "#define FSR_RCAS_F 1\n" +
+                             joinChunks(kFfxFsr1Chunks) + kPsCommon +
+                             kPsEasuMain;
+    g_ps = shaderSwapCompilePs(ctx, easu.c_str(), easu.size(), "main",
+                               "target_indicator_easu", macros,
                                "target indicator");
+    g_running = g_ps ? Mode::kEasu : Mode::kOff;
+    if (!g_ps) {
+        Log::get().note("target indicator: EASU would not compile; falling "
+                        "back to the bicubic, a smaller win than FSR on line "
+                        "art and a much larger one than the bilinear tap the "
+                        "game does.");
+        const std::string cubic = std::string(kPsCommon) + kPsCubicMain;
+        g_ps = shaderSwapCompilePs(ctx, cubic.c_str(), cubic.size(), "main",
+                                   "target_indicator_cubic", nullptr,
+                                   "target indicator");
+        g_running = g_ps ? Mode::kCubic : Mode::kOff;
+    }
     if (!g_ps) {
         // shaderSwapCompilePs has already said why. One stand-down for the
         // session: a compile that failed once fails every draw, and a line
         // per draw would be the log.
         g_failed = true;
-        Log::get().note("target indicator: the replacement shader could not "
-                        "be built, so the indicator is drawn exactly as the "
-                        "game draws it for the rest of this session.");
+        Log::get().note("target indicator: no resampler would compile, so the "
+                        "indicator is drawn exactly as the game draws it for "
+                        "the rest of this session.");
+        return nullptr;
     }
+    g_psHadRcas = wantRcas;
+    g_psSharpen = g_sharpen;
+    Log::get().note(
+        "target indicator: running %s%s.",
+        g_running == Mode::kEasu ? "EASU (AMD's own, vendored)"
+                                 : "the bicubic (Catmull-Rom)",
+        (g_running == Mode::kEasu && wantRcas) ? ", then RCAS-sharpened" : "");
     return g_ps;
 }
 
@@ -149,6 +291,18 @@ void targetSharpConfigure(Config& cfg) {
         g_sharp = false;
         Log::get().note("target_indicator \"%s\" is not stock or sharp; "
                         "running stock.", m.c_str());
+    }
+
+    // AMD's unit: stops of sharpness reduction, 0 the sharpest. "off" runs
+    // EASU with no sharpening pass at all.
+    const std::string s = cfg.getString("advanced.target_indicator_sharpen",
+                                        "0.25");
+    if (s == "off") {
+        g_sharpen = -1.0f;
+    } else {
+        g_sharpen = static_cast<float>(atof(s.c_str()));
+        if (g_sharpen < 0.0f) g_sharpen = 0.0f;
+        if (g_sharpen > 2.0f) g_sharpen = 2.0f;
     }
 
     // The pin, for a build where the shader was recompiled. Empty keeps the
@@ -175,10 +329,10 @@ void targetSharpConfigure(Config& cfg) {
             "target indicator: %s. The selected target's direction indicator "
             "is composited into the eye by one quad through a single bilinear "
             "sample; sharp replaces that pixel shader with the same colour "
-            "maths over a Catmull-Rom reconstruction, so the magnification "
-            "has cleaner edges. It cannot add detail. Watching for vs "
-            "%016llX.",
+            "maths over an edge-adaptive reconstruction (AMD's EASU), "
+            "sharpening %s. It cannot add detail. Watching for vs %016llX.",
             g_sharp ? "sharp" : "stock",
+            g_sharpen >= 0.0f ? "on" : "off",
             static_cast<unsigned long long>(g_vsHash));
     }
 }
@@ -229,9 +383,8 @@ void targetSharpBegin(ID3D11DeviceContext* ctx) {
 
     if (++g_applied == 1) {
         Log::get().note("target indicator: sharp engaged -- the composite is "
-                        "reconstructed with a Catmull-Rom kernel for exactly "
-                        "this draw, and the game's own shader is restored "
-                        "after every one.");
+                        "reconstructed for exactly this draw, and the game's "
+                        "own shader is restored after every one.");
     }
 }
 
