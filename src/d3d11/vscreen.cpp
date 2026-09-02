@@ -46,6 +46,7 @@
 #include "holo_fix.h"
 #include "target_sharp.h"
 #include "hud_sprite.h"
+#include "panel_upscale.h"
 #include "intro_panel.h"
 #include "intro_upscale.h"
 #include "intro_probe.h"
@@ -1256,6 +1257,8 @@ enum class DrawVerdict {
     kTargetSharp,
     // A HUD sprite atlas, resampled once and substituted (hud_sprite.h).
     kHudSprite,
+    // A cockpit holo panel, reconstructed once a frame (panel_upscale.h).
+    kPanelUpscale,
     // The intro movie's panel drawn with our constants at VS b2
     // (intro_panel.h): forwarded normally, restored after.
     kIntroPanel,
@@ -1451,7 +1454,7 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         !fssRingWantsDraws() && !fssDumpWantsDraws() &&
         !eyeSplitWantsDraws() && !resolveProbeWantsDraws() &&
         !stencilProbeWantsDraws() && !resolveBindWants() &&
-        !remlokWantsDraws() && !holoWantsDraws() && !targetSharpWantsDraws() && !hudSpriteWantsDraws() &&
+        !remlokWantsDraws() && !holoWantsDraws() && !targetSharpWantsDraws() && !hudSpriteWantsDraws() && !panelUpscaleWantsDraws() &&
         !witchstarWantsDraws() &&
         !sunglareWantsDraws() && !cbPeekEnabled() && !billboardWantsDraws() &&
         !drawCensusArmed() && !panelQuadWants() && !panelCurveWants() &&
@@ -1909,6 +1912,13 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     if (hudSpriteWantsDraws() &&
         hudSpriteOnEyeDraw(self, kind, count, instances)) {
         return DrawVerdict::kHudSprite;
+    }
+
+    // The cockpit holo panel carrying the target indicator, recognised by
+    // what it reads at slot 2 and then by its shader.
+    if (panelUpscaleWantsDraws() &&
+        panelUpscaleOnEyeDraw(self, kind, count, instances)) {
+        return DrawVerdict::kPanelUpscale;
     }
 
     // The loader dialog's dimming wash, recognised by what it samples.
@@ -2732,6 +2742,7 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     if (v == DrawVerdict::kHolo) holoBegin(self);
     if (v == DrawVerdict::kTargetSharp) targetSharpBegin(self);
     if (v == DrawVerdict::kHudSprite) hudSpriteBegin(self);
+    if (v == DrawVerdict::kPanelUpscale) panelUpscaleBegin(self);
     if (v == DrawVerdict::kScrim) scrimBegin(self);
     if (v == DrawVerdict::kWitchstar) witchstarBegin(self);
     if (v == DrawVerdict::kBillboard) billboardBegin(self);
@@ -2756,6 +2767,7 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     if (v == DrawVerdict::kBillboard) billboardEnd(self);
     if (v == DrawVerdict::kWitchstar) witchstarEnd(self);
     if (v == DrawVerdict::kScrim) scrimEnd(self);
+    if (v == DrawVerdict::kPanelUpscale) panelUpscaleEnd(self);
     if (v == DrawVerdict::kHudSprite) hudSpriteEnd(self);
     if (v == DrawVerdict::kTargetSharp) targetSharpEnd(self);
     if (v == DrawVerdict::kHolo) holoEnd(self);
@@ -3505,6 +3517,7 @@ void vScreenRefreshConfig() {
     holoConfigure(cfg);
     targetSharpConfigure(cfg);
     hudSpriteConfigure(cfg);
+    panelUpscaleConfigure(cfg);
     scrimConfigure(cfg);
     quadProbeConfigure(cfg);
     loaderPanelConfigure(cfg);
@@ -3623,6 +3636,7 @@ void vScreenFrameBoundary() {
     if (g_state && g_state->ownerCtx) {
         quadProbeTick(g_state->ownerCtx);
         drawCensusTick(g_state->ownerCtx);
+        panelUpscaleFrameEnd();
         // Told to the openvr half whether or not any intro fix is on: the
         // cull guard holds its lie until a scene exists, and that must
         // depend on the GAME reaching one, not on EDVR being configured
@@ -4399,6 +4413,7 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     holoConfigure(cfg);
     targetSharpConfigure(cfg);
     hudSpriteConfigure(cfg);
+    panelUpscaleConfigure(cfg);
     scrimConfigure(cfg);
     quadProbeConfigure(cfg);
     loaderPanelConfigure(cfg);
