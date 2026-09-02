@@ -115,6 +115,18 @@ const char kPsCommon[] =
     "    o.y = c.x * g_cb1[85].y + c.y * g_cb1[86].y + c.z * g_cb1[87].y;\n"
     "    o.z = c.x * g_cb1[85].z + c.y * g_cb1[86].z + c.z * g_cb1[87].z;\n"
     "    return float4(o * g_cb1[90].y, a);\n"
+    "}\n"
+    "\n"
+    "// The probe's colours, painted at the HUD's OWN magnitude. The eye\n"
+    "// target is a float HDR buffer and shade() scales by cb2[0].x (16 on\n"
+    "// the measured rig) and three more factors, so a flat 0..1 colour lands\n"
+    "// far too dim to read through a headset -- which is exactly what the\n"
+    "// first build of this probe did, and it reported as no change at all.\n"
+    "// shade() of white IS that scale, so it is measured, not guessed.\n"
+    "float probeGain()\n"
+    "{\n"
+    "    float3 w = shade(float3(1.0, 1.0, 1.0), 1.0).rgb;\n"
+    "    return max(max(w.r, max(w.g, w.b)), 1.0);\n"
     "}\n";
 
 // The fallback, for a rig where EASU will not compile. A cubic is a smaller
@@ -136,7 +148,8 @@ const char kPsCubicMain[] =
     "    s.a = saturate(s.a);\n"
     "    if (s.a - 0.00001 < 0.0) discard;\n"
     "#if EDVR_SCALE_PROBE\n"
-    "    return float4(scaleRamp(max(length(dxt), length(dyt))), s.a);\n"
+    "    return float4(scaleRamp(max(length(dxt), length(dyt))) *\n"
+    "                  probeGain(), s.a);\n"
     "#endif\n"
     "    return shade(s.rgb, s.a);\n"
     "}\n";
@@ -206,7 +219,7 @@ const char kPsEasuMain[] =
     "    // shade(): that applies the HUD colour matrix, which maps every\n"
     "    // hue onto the commander's HUD colour and would erase the answer.\n"
     "    float tpp = max(length(g_dx * g_size), length(g_dy * g_size));\n"
-    "    return float4(scaleRamp(tpp), a);\n"
+    "    return float4(scaleRamp(tpp) * probeGain(), a);\n"
     "#endif\n"
     "\n"
     "    AF3 c;\n"
