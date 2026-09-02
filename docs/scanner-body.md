@@ -178,17 +178,60 @@ depth survives, and the overlay passes: vivid blue over a black planet,
 in the eye the black-planet bug had already emptied. Census frame DC 1
 carries all four draws, and all the ds=17wZ overlays, in both eyes.
 
-`fix.scanner_heat` v2 no longer assumes which draw is at fault.
-`advanced.scanner_heat_mode = overlay` (the default) drops the overlay's
-own depth test instead, which answers the question regardless of which
-draw is doing the stamping; `= shell` stops draw `#44` from writing depth
-instead, leaving the overlay untouched, which is the narrower claim and —
-if it holds — the actual fix. Both derive one depth-stencil field from
-the game's own state and change nothing else, [resolve_probe.cpp](../src/d3d11/resolve_probe.cpp)'s
-pattern, so that a result is attributable to the one field that changed
-and not to some other comparison an authored-from-scratch state would
-have gotten wrong too.
+`fix.scanner_heat` v2 no longer assumed which draw was at fault, but it
+still assumed the hardware depth-stencil unit was the gatekeeper. Arioch's
+field build (bundle `20260902-064008`, v0.12.4-26-g7b77dcf) ran both of
+v2's modes with the fix engaged every session: the game's own state read
+back as `depth=on func=GREATER_EQUAL write=zero stencil=off`, rasterizer
+`cull=FRONT front=CW` — and nothing changed in either mode. The hardware
+depth-stencil unit was never the gatekeeper; both of v2's modes are
+refuted by that read-back, not superseded by a third guess.
 
-This is a hypothesis with one census and one dump behind it, not a
-verified mechanism, and as of this writing it has not been field-tested
-in either mode.
+A dump of the fill's own shader (`ps_3B47A4BCE1891CC8`, produced by `fxc
+/dumpbin`) showed why: it discards fragments itself, before the blend
+unit — or the hardware depth-stencil unit — ever runs, on three
+conditions entirely its own:
+
+1. a manual depth test: it samples the eye's linear-depth texture (t0,
+   R32, metres, `1e17` = sky) at `SV_POSITION.xy * cb1[332].zw`, and
+   discards when that depth is nearer than the fragment's own linear
+   depth (`TEXCOORD11.x`, the vertex shader's clip w);
+2. a radius window: the fragment's distance from the planet centre
+   (`TEXCOORD2.xyz + cb1[275].xyz - cb1[142].yzw`) must lie between
+   `cb1[137].x` and `cb1[137].y`;
+3. a gate: `cb1[149].w < TEXCOORD2.w`, where `TEXCOORD2.w` is the vertex
+   shader's `dot(normalize(worldPos - objectOrigin), cb1[151].xyz)` — a
+   hemisphere test against a direction constant; the else branch is an
+   unconditional discard.
+
+What survives is coloured from two 4096x1 lookup textures (t1, t2) over
+the normalized altitude, scaled by `cb1[150].y`, faded at the window's
+edges, multiplied by `cb1[90].y` and by 65, alpha 1, blended `ONE, ONE`
+(additive). None of this is visible to anything that only watches the
+pipeline state, which is exactly why watching it found nothing.
+
+A census re-read (three captures this round, both eyes each) ruled out
+the bindings too: every capture shows the overlay draws binding the
+proper eye-sized R32 depth texture at t0, the two LUTs at t1/t2, and the
+same cb0 object for both eyes (each census numbers its resources
+independently, so this is read within one capture's own lines, not across
+captures). cb1 — 333 float4 — goes unrecorded: the census's cb watch
+shadows only the first 768 bytes of a buffer, and every constant this
+shader reads sits beyond that. Whatever kills the overlay in a lit eye is
+in the constants or in the shader's own arithmetic, not in the bindings
+and not in the pipeline state.
+
+`fix.scanner_heat` v3 stops guessing at the pipeline entirely.
+[scanner_heat_fix.cpp](../src/d3d11/scanner_heat_fix.cpp) transcribes the
+fill's disassembly verbatim into HLSL and draws it through EDVR's own
+copy, [resolve_probe.cpp](../src/d3d11/resolve_probe.cpp)'s pattern:
+compile once, bind in place of the game's own, restore after.
+`advanced.scanner_heat_mode` skips one of the three discards above at a
+time (or all of them, the default for this round) so the field can narrow
+down which term is actually rejecting the fragment instead of reading a
+still image; `advanced.scanner_heat_probe` goes further and paints WHERE
+a term fails rather than only whether the picture changed.
+
+This is a hypothesis with one shader dump and one census re-read behind
+it, not a verified fix, and as of this writing v3 has not been
+field-tested.

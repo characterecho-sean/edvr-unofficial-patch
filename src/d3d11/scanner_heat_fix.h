@@ -1,64 +1,105 @@
 // The DSS signal filter's heat map, invisible in VR -- not because it is
-// faint, but because something the game draws in front of the planet
-// rejects it before it ever reaches the eye.
+// faint, but because its own pixel shader discards it before the blend
+// unit ever sees it, which two rounds of field testing had to find out the
+// hard way.
 //
-// WHERE THIS COMES FROM (2026-09-01, v1's field failure)
+// WHERE THIS COMES FROM (2026-09-02, v2's field failure)
 //
-// fix.scanner_heat's first cut (f5084cd) re-issued the filter overlay a few
-// extra times on the premise that it was present but swamped -- a ~7% blue
-// lift measured in the eye-split dump. Arioch's field build engaged the fix
-// every session, passes 2 through 6, and nothing changed. Re-measuring the
-// SAME dump with the two eyes correctly registered (the per-eye projections
-// are off-centre enough that the planet sits ~365 px further right in one
-// eye than the other; the 7% figure had compared unregistered tiles) found
-// the overlay not faint in a lit eye but ABSENT -- under 1% of its
-// black-eye value. Re-issuing an absent draw N times adds N times nothing,
-// which is exactly what the field build showed.
+// v1 (f5084cd) treated the overlay as present but swamped -- a ~7% blue
+// lift measured in the eye-split dump -- and re-issued it a few extra
+// times to stack that up to flat. Re-measuring the same dump with the two
+// eyes properly registered (the earlier compare had read the healthy eye's
+// planet against the unhealthy eye's empty sky beside it) found the
+// overlay not faint in a lit eye but ABSENT, under 1% of its black-eye
+// value. Re-issuing an absent draw N times adds N times nothing, which is
+// exactly what the field build showed.
 //
-// The census named a candidate why. The lit eye's frame carries a
-// 768-triangle shell (ps 6EF82262EB12A037, vs 41E245D488BFE83E) drawn over
-// the planet with depth on, GREATER_EQUAL, WRITING depth, immediately
-// before the mapped-area fills and the filter overlay -- all of which draw
-// depth on, GREATER_EQUAL, NO write. Under reversed-Z the shell stamps its
-// own nearer depth wherever it is nearer than the terrain; every draw after
-// it then tests GREATER_EQUAL against that stamp and fails wherever the
-// shell covered it. That shell is one of the four draws docs/scanner-body.md
-// already documents as vanishing from one eye on alternating frames --
-// normal engine parity, not a bug -- and in the frame where it is absent,
-// the stamp never lands, the terrain's own depth survives, and the overlay
-// passes: vivid blue over a black planet, in the eye the black-planet bug
-// had already emptied -- the "blue only in the right eye" report v1's own
-// commit ties to the same underlying bug.
+// v2 (7b77dcf) offered two hardware hypotheses: draw the overlay with
+// depth testing off, or draw the shell the game stamps in front of the
+// planet without depth writes -- either would explain an overlay failing
+// its own depth test against a nearer stamp. Arioch ran both (bundle
+// 20260902-064008, build v0.12.4-26-g7b77dcf): both engaged, the game's
+// own state read back exactly as v2 expected it (depth=on
+// func=GREATER_EQUAL write=zero stencil=off, rasterizer cull=FRONT
+// front=CW), and NOTHING changed in either mode. The hardware
+// depth-stencil unit was never the gatekeeper -- both of v2's modes are
+// refuted by that read-back, not by a guess that a third mode might do
+// better.
 //
-// This is a hypothesis with one census and one dump behind it, not a
-// verified mechanism -- see the coda docs/scanner-body.md appends for it.
-// The two modes below exist to let the field distinguish "depth rejection"
-// from "something else", and to settle on whichever mode actually holds.
+// A shader dump of the fill (ps `3B47A4BCE1891CC8`) settled why: it
+// discards fragments ITSELF, before the blend unit ever runs, on three
+// conditions entirely inside the shader and invisible to anything that
+// only watches the hardware depth-stencil state --
 //
-// WHAT THE TWO MODES DO
+//   1. a manual depth test against the eye's own linear-depth texture,
+//      sampled by hand at a uv the shader computes from a constant;
+//   2. a radius window around the planet centre;
+//   3. a hemisphere gate against a direction constant, whose failing
+//      branch is an unconditional discard regardless of the other two.
 //
-//   overlay   the filter's two shaders (3B47A4BCE1891CC8 the heat fill,
-//             5FC9FC1E3B008DF1 the markers) draw with depth testing OFF, so
-//             whatever stamped depth in front of them cannot reject them --
-//             regardless of which draw did the stamping. The broader claim,
-//             and the one to try first.
-//   shell     the shell draw stops WRITING depth (DepthWriteMask = ZERO)
-//             for as long as a filter is up; the overlay is left exactly as
-//             the game issues it. The narrower claim, and if the hypothesis
-//             above is right, the real fix -- it restores true depth
-//             semantics for everything the shell used to stamp over, not
-//             the overlay alone.
+// What survives is coloured from two lookup textures over normalized
+// altitude and blended additively (ONE, ONE). None of this touches the
+// pipeline state v2 was changing, which is exactly why changing it found
+// nothing.
 //
-// Both derive their depth-stencil state from the game's own, one field
-// changed and the rest untouched -- resolve_probe.cpp's pattern, here for
-// the same reason: a positive result has to be attributable to the ONE
-// thing that changed, not to some other comparison an authored-from-
-// scratch state would have gotten wrong too.
+// WHAT V3 DOES
+//
+// Transcribes the fill's disassembly verbatim into the HLSL below (cross-
+// checked instruction for instruction against the fxc dump, register for
+// register) and swaps it in through shader_swap.h -- resolve_probe.cpp's
+// pattern: compile once, PSSetShader in Begin, restore in End, null means
+// the swap failed and the fill draws stock, with shader_swap's own log
+// line already saying why. advanced.scanner_heat_mode picks which of the
+// three in-shader discards the compiled shader skips, so the field can
+// neutralize one term at a time instead of reading a still image and
+// guessing; advanced.scanner_heat_probe goes further and paints WHERE a
+// term fails instead of only whether the picture changed. Only the fill is
+// ever swapped -- the markers (`5FC9FC1E3B008DF1`) have a different vertex
+// signature and stay exactly the game's own, though they are still
+// recognised here so they keep counting for the tally and for
+// advanced.scanner_heat_passes.
+//
+// This is a hypothesis with one shader dump and one census re-read behind
+// it, not a verified fix -- see the coda docs/scanner-body.md appends for
+// it. As of this writing it has not been field-tested.
+//
+// WHAT THE MODE WORDS DO (advanced.scanner_heat_mode)
+//
+//   stock      the transcription with nothing changed. Should look exactly
+//              like the game -- still invisible in a lit eye. Exists to
+//              prove the swap path and the transcription before anything
+//              is skipped.
+//   nodepth    skip discard 1, the manual depth test.
+//   noradius   skip discard 2, the radius window.
+//   nogate     skip discard 3, the hemisphere gate; the gated maths runs
+//              regardless of which side of the gate a fragment lands on.
+//   uv         take the depth sample's texture coordinate from the depth
+//              texture's own dimensions instead of the constant the game
+//              supplies -- in case the constant, not the test, is wrong
+//              for a VR eye.
+//   gain       replace the game's brightness constant with
+//              advanced.scanner_heat_gain.
+//   all        every one of the above at once, the default for this round:
+//              answers "can the overlay be drawn at all through the swap"
+//              in one look, before narrowing to which single term matters.
+//
+// WHAT THE PROBE WORDS DO (advanced.scanner_heat_probe, overrides the mode
+// above while set -- the fill draws through a diagnostic paint instead)
+//
+//   why    discards nothing; paints magenta / red / green / blue / white
+//          for which of four outcomes a fragment would have hit: a
+//          nonsense depth sample, discard 1, discard 2, discard 3, or
+//          none of the above (the game's own shader would have drawn
+//          here).
+//   depth  paints the sampled scene depth itself as a grey ramp, so a
+//          displaced or missing disc says the depth sample is not landing
+//          where it should, independent of any of the three discards.
 //
 // fix.scanner_heat = on | off, default off -- it changes a stock look, and
-// which mode is right is still an open question. advanced.scanner_heat_mode
-// picks the mechanism; advanced.scanner_heat_passes tunes the overlay's
-// strength without a rebuild, independent of which mode is chosen.
+// v3 is still unverified. advanced.scanner_heat_mode and _probe choose the
+// compiled variant; advanced.scanner_heat_gain feeds modes gain and all;
+// advanced.scanner_heat_passes tunes the overlay's strength without a
+// rebuild, independent of which term is neutralized.
 #pragma once
 
 #include <cstdint>
@@ -71,50 +112,38 @@ class Config;
 
 void scannerHeatConfigure(Config& cfg);
 
-// One bool for the draw path's early-out set. Covers both modes: neither
-// recognizer below is asked unless this is true.
+// One bool for the draw path's early-out set: neither recognizer below is
+// asked unless this is true.
 bool scannerHeatWants();
 
-// True when this draw is one of the two heat-overlay shaders. kind gates
-// cheaply (both are indexed-instanced 'X'); the pixel-shader content hash is
-// the key, the same standard the other resolve-stage fixes match on. Asked
-// in BOTH modes -- in shell mode nothing about this draw changes, but this
-// is the only place "a filter is up" is ever observed, and a match stamps
-// frameNo for scannerHeatShellOnDraw's latch.
-bool scannerHeatOnDraw(ID3D11DeviceContext* ctx, char kind, uint32_t frameNo);
+// True when this draw is one of the two filter shaders, the fill or a
+// marker. kind gates cheaply (both are indexed-instanced 'X'); the pixel
+// shader's content hash is the key, the same standard the other
+// resolve-stage fixes match on. Which of the two matched is remembered for
+// scannerHeatBegin -- the fill gets the swapped shader, the marker never
+// does, and this is the only place that distinction is ever observed.
+bool scannerHeatOnDraw(ID3D11DeviceContext* ctx, char kind);
 
-// True when this draw is the shell the game stamps in front of the planet,
-// recognised the same way, but ONLY in shell mode and ONLY within two
-// frames of the latch scannerHeatOnDraw last stamped -- the shell draws
-// BEFORE the overlay within a frame, so the latch it sees here is always at
-// least one frame old. Outside the scanner the latch never fires, so this
-// never matches.
-bool scannerHeatShellOnDraw(ID3D11DeviceContext* ctx, char kind,
-                            uint32_t frameNo);
-
-// Around a matched overlay draw: in overlay mode, binds the derived
-// depth-off state; in shell mode this is a no-op, so it composes safely
-// with whatever verdict forwardWithVerdict is carrying. End must run even
-// when Begin declined, and does.
+// Around a matched draw. On a fill match: PSGetShader (saved), compile the
+// replacement once via shader_swap.h and PSSetShader it in; a compile that
+// failed or hasn't been tried leaves the draw alone. On a marker match:
+// does nothing at all, by design -- the marker stays the game's own.
+// End must run even when Begin declined, and does.
 void scannerHeatBegin(ID3D11DeviceContext* ctx);
 void scannerHeatEnd(ID3D11DeviceContext* ctx);
 
-// Around a matched shell draw: in shell mode, binds the derived write-off
-// state; in overlay mode this is a no-op. Same restore-on-every-path
-// contract as the pair above.
-void scannerHeatShellBegin(ID3D11DeviceContext* ctx);
-void scannerHeatShellEnd(ID3D11DeviceContext* ctx);
-
 // How many EXTRA times forwardWithVerdict should re-issue the matched
-// overlay draw. Applies in either mode: it is a strength knob on the
-// overlay's own additive blend, independent of which mode is keeping it
-// from being rejected.
+// draw: a strength knob on the overlay's additive blend, independent of
+// which shader variant is running. Applies to both the fill (re-issued
+// under the swapped shader, inside the same bracket) and a marker
+// (re-issued under whatever the game left bound, since Begin never
+// touched it).
 uint32_t scannerHeatExtraPasses();
 
-// Counts an overlay draw the kScannerHeat verdict carried, for the shutdown
-// tally -- in both modes, since the tally is also the "was a filter ever
-// up" signal in shell mode, where the overlay draw itself is otherwise left
-// alone.
+// Counts one matched draw for the shutdown tally -- called once per
+// original draw the kScannerHeat verdict carried, after the passes loop
+// and before End, while scannerHeatBegin's fill/marker decision and its
+// outcome still describe the draw being counted.
 void scannerHeatNoteApplied();
 void scannerHeatShutdown();
 
