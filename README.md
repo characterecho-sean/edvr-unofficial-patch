@@ -11,9 +11,8 @@ log is usually the whole answer. For everything else — setup questions,
 "is this normal", or just talking about it — there is a
 [Discord](https://discord.gg/ynkdf6Gdua).
 
-EDVR is free and stays free. If it saved you an evening,
-[tips are welcome](https://ko-fi.com/seancharacterecho) — they pay for nothing
-you get here, which is the point.
+EDVR is free and stays free. If it improves your VR experience,
+[tips are welcome](https://ko-fi.com/seancharacterecho) — please do not feel any obligation to do so.
 
 > **Already running EDHM or ReShade?** Both can run alongside EDVR. EDHM
 > installs itself as `d3d11.dll` too, and only one file can have that name —
