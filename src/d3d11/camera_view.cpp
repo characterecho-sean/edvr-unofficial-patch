@@ -242,7 +242,10 @@ struct Region {
 };
 
 struct State {
-    bool      track = true;
+    bool      track = false;
+    // So the off notice is said once, and again after a hot-reload
+    // that switches it back off.
+    bool      offNoted = false;
     size_t    ordinal = 11;          // 6ad.8b, stable across two launches
     uintptr_t typeOffset = 0x4D71C50;
     size_t    valueOffset = 0x10;
@@ -250,35 +253,6 @@ struct State {
     size_t    bytesPerFrame = 64u << 20;
 
     const uint8_t* typePtr = nullptr;
-
-    // THE FINDER (d3d11.camera_index_find). Off unless armed, and it only ever
-    // runs after the ordinary scan has found nothing -- a build where the type
-    // pointer still resolves has no question for it to answer.
-    //
-    // What it looks for is the array itself rather than the marker: three or
-    // more consecutive records at the known stride whose first field is the
-    // same pointer into the game's own image. That is what a C++ array of one
-    // polymorphic type looks like from outside, and it does not need to know
-    // which type. It reports; it never adopts. A candidate that came from a
-    // scan cannot certify itself, and a wrong marker silently read as right is
-    // the failure this whole file is arranged against.
-    bool      findArmed = false;
-    bool      finding = false;
-    bool      findDone = false;
-    const uint8_t* moduleLo = nullptr;
-    const uint8_t* moduleHi = nullptr;
-    struct Find {
-        const uint8_t* type = nullptr;   // the repeated first field
-        const uint8_t* bestBase = nullptr;
-        size_t         bestSlots = 0;
-        uint32_t       valueAtOrdinal = 0xFFFFFFFFu;
-        uint32_t       runs = 0;
-    };
-    static constexpr size_t kMaxFinds = 24;
-    Find      finds[kMaxFinds];
-    size_t    findCount = 0;
-    bool      findOverflow = false;
-
     std::vector<Region> regions;
     size_t    regionIndex = 0;
     size_t    regionOffset = 0;
@@ -855,206 +829,6 @@ bool anchorRefind() {
 // So: group by the structure the array actually has, and require the answer to
 // be unambiguous. Two candidate arrays is a reason to say "do not know", not a
 // reason to pick one -- picking is what produced the wrong answer above.
-// ---------------------------------------------------------------------------
-// THE FINDER
-//
-// camera_index_type_offset is an address inside one build of the game, and a
-// game update moves it (6ad.8g). Everything downstream of that already degrades
-// correctly -- no records, "do not know", back to counting keypresses -- but
-// correcting it has meant a debugger, and there is not always one to hand.
-//
-// This looks for the SHAPE the marker points into rather than for the marker. A
-// C++ array of one polymorphic type is, from outside, a stretch of memory where
-// the same pointer into the image reappears at a fixed stride. The stride is
-// already known (kStride, the record size), so three consecutive repeats is a
-// cheap and very specific test: ordinary heap noise does not lay the same image
-// pointer down three times 0x18 apart.
-//
-// It reports candidates and adopts none. The number it prints is a starting
-// point for camera_index_type_offset, and the behavioural identification that
-// already exists is what decides whether the number was right -- the same bar
-// every other answer in this file has to clear. Letting a scan certify itself
-// is precisely the mistake the ordinal arc made twice.
-void noteFind(const uint8_t* at, const uint8_t* type, const uint8_t* regEnd,
-              size_t* runBytes) {
-    // How far the run actually goes, in slots, bounded by the region so no read
-    // leaves memory already established as committed.
-    size_t slots = 0;
-    while (at + (slots + 1) * kStride <= regEnd &&
-           *reinterpret_cast<const uint8_t* const*>(at + slots * kStride) == type) {
-        ++slots;
-    }
-    *runBytes = slots * kStride;
-
-    // The value where the ordinal says the view lives, when the run is long
-    // enough to have one. Reported, not judged: a run that is long enough but
-    // reads implausibly is still worth seeing, because it says the stride and
-    // the anchor were right and only the ordinal is wrong.
-    uint32_t v = 0xFFFFFFFFu;
-    const uint8_t* ordRec = at + g_s.ordinal * kStride;
-    if (slots > g_s.ordinal && ordRec + g_s.valueOffset + 4 <= regEnd) {
-        v = *reinterpret_cast<const uint32_t*>(ordRec + g_s.valueOffset);
-    }
-
-    for (size_t i = 0; i < g_s.findCount; ++i) {
-        if (g_s.finds[i].type != type) continue;
-        ++g_s.finds[i].runs;
-        // Longest run wins the slot: the camera settings are one array, and a
-        // shorter stretch of the same type elsewhere is the noise that wrecked
-        // the ordinal arc.
-        if (slots > g_s.finds[i].bestSlots) {
-            g_s.finds[i].bestSlots = slots;
-            g_s.finds[i].bestBase = at;
-            g_s.finds[i].valueAtOrdinal = v;
-        }
-        return;
-    }
-    if (g_s.findCount >= State::kMaxFinds) { g_s.findOverflow = true; return; }
-    State::Find& f = g_s.finds[g_s.findCount++];
-    f.type = type;
-    f.bestBase = at;
-    f.bestSlots = slots;
-    f.valueAtOrdinal = v;
-    f.runs = 1;
-}
-
-// One frame's slice of the finder walk. Same budget and the same guarded reads
-// as scanSlice, for the same reason: 11 GB in one call stalls the headset long
-// enough to be indistinguishable from a hang.
-bool findSlice() {
-    size_t budget = g_s.bytesPerFrame;
-    while (budget > 0 && g_s.regionIndex < g_s.regions.size()) {
-        const Region& r = g_s.regions[g_s.regionIndex];
-        if (g_s.regionOffset >= r.size) {
-            ++g_s.regionIndex;
-            g_s.regionOffset = 0;
-            continue;
-        }
-        const uint8_t* const start = r.base + g_s.regionOffset;
-        size_t chunk = r.size - g_s.regionOffset;
-        if (chunk > kPage) chunk = kPage;
-        const uint8_t* const regEnd = r.base + r.size;
-        const uint8_t* const modLo = g_s.moduleLo;
-        const uint8_t* const modHi = g_s.moduleHi;
-        // The look-ahead reads run two strides past the slot. They stay inside
-        // THIS region, which VirtualQuery has already said is committed and
-        // readable -- crossing into the next page of the same region is safe in
-        // a way that crossing into the next region is not.
-        const size_t reach = 2 * kStride + sizeof(void*);
-        const bool ok = guarded("camera_view/findpage", [&] {
-            const uint8_t* p = start;
-            while (p < start + chunk && p + reach <= regEnd) {
-                const uint8_t* v = *reinterpret_cast<const uint8_t* const*>(p);
-                if (v < modLo || v >= modHi ||
-                    *reinterpret_cast<const uint8_t* const*>(p + kStride) != v ||
-                    *reinterpret_cast<const uint8_t* const*>(p + 2 * kStride) != v) {
-                    p += sizeof(void*);
-                    continue;
-                }
-                size_t runBytes = 0;
-                noteFind(p, v, regEnd, &runBytes);
-                // Past the whole run rather than one slot on. Without this the
-                // same array is re-walked from every record in it, which is
-                // quadratic in the array's length for no new information.
-                p += runBytes > 0 ? runBytes : sizeof(void*);
-            }
-        });
-        if (!ok) {
-            if (++g_s.faults > kMaxFaults) {
-                Log::get().note("camera view finder: giving up after %llu faults.",
-                                (unsigned long long)g_s.faults);
-                g_s.regionIndex = g_s.regions.size();
-                break;
-            }
-            ++g_s.regionsGone;
-            ++g_s.regionIndex;
-            g_s.regionOffset = 0;
-            continue;
-        }
-        g_s.regionOffset += chunk;
-        g_s.bytesScanned += chunk;
-        budget = budget > chunk ? budget - chunk : 0;
-    }
-    return g_s.regionIndex >= g_s.regions.size();
-}
-
-// Start the finder over the regions the failed scan already collected. Once per
-// session: the answer is a property of the executable, so a second walk of the
-// same heap cannot produce a different one.
-void beginFind() {
-    if (!g_s.findArmed || g_s.findDone || !g_s.moduleLo || !g_s.moduleHi) return;
-    g_s.findDone = true;
-    g_s.finding = true;
-    g_s.regionIndex = 0;
-    g_s.regionOffset = 0;
-    g_s.bytesScanned = 0;
-    g_s.findCount = 0;
-    g_s.findOverflow = false;
-    Log::get().note(
-        "camera view finder: armed, and the marker found nothing, so the array "
-        "is being looked for by its shape instead -- three or more records at "
-        "stride 0x%zX sharing one pointer into the game's image. This reports "
-        "candidates for d3d11.camera_index_type_offset and adopts none of them.",
-        kStride);
-}
-
-void finishFind() {
-    g_s.finding = false;
-    g_s.scanning = false;
-
-    if (g_s.findCount == 0) {
-        Log::get().note(
-            "camera view finder: nothing of that shape over %.0f MB. Either the "
-            "record stride changed with the update, or this ran before the game "
-            "had allocated. Nothing has been changed.",
-            (double)g_s.bytesScanned / (1024.0 * 1024.0));
-        return;
-    }
-
-    // Qualifying first: long enough to hold the ordinal, and reading like a view
-    // there. The rest are printed too, because "the stride is right and the
-    // ordinal is wrong" is a different repair from "none of this is the array",
-    // and only the full list tells them apart.
-    size_t order[State::kMaxFinds];
-    for (size_t i = 0; i < g_s.findCount; ++i) order[i] = i;
-    for (size_t i = 1; i < g_s.findCount; ++i) {
-        const size_t key = order[i];
-        const State::Find& k = g_s.finds[key];
-        const bool kq = k.bestSlots > g_s.ordinal && k.valueAtOrdinal <= g_s.plausibleMax;
-        size_t j = i;
-        while (j > 0) {
-            const State::Find& c = g_s.finds[order[j - 1]];
-            const bool cq = c.bestSlots > g_s.ordinal && c.valueAtOrdinal <= g_s.plausibleMax;
-            const bool keyFirst = (cq != kq) ? kq : (k.bestSlots > c.bestSlots);
-            if (!keyFirst) break;
-            order[j] = order[j - 1];
-            --j;
-        }
-        order[j] = key;
-    }
-
-    Log::get().note(
-        "camera view finder: %zu distinct type(s) laid out as arrays over "
-        "%.0f MB%s. Set d3d11.camera_index_type_offset to one of the offsets "
-        "below and relaunch; the behavioural identification then confirms it or "
-        "refuses, exactly as it does for the shipped value.",
-        g_s.findCount, (double)g_s.bytesScanned / (1024.0 * 1024.0),
-        g_s.findOverflow ? " (and more than that existed)" : "");
-    for (size_t i = 0; i < g_s.findCount; ++i) {
-        const State::Find& f = g_s.finds[order[i]];
-        const bool qualifies =
-            f.bestSlots > g_s.ordinal && f.valueAtOrdinal <= g_s.plausibleMax;
-        Log::get().note(
-            "camera view finder:   camera_index_type_offset = 0x%llX  -- longest "
-            "run %zu slot(s) at %p, %u run(s) of this type, ordinal %zu reads "
-            "%u.%s",
-            (unsigned long long)(f.type - g_s.moduleLo), f.bestSlots,
-            static_cast<const void*>(f.bestBase), f.runs, g_s.ordinal,
-            f.valueAtOrdinal,
-            qualifies ? "  <- long enough, and that reads like a view" : "");
-    }
-}
-
 void finishScan() {
     g_s.scanning = false;
     g_s.scanned = true;
@@ -1100,10 +874,6 @@ void finishScan() {
             (double)g_s.bytesScanned / (1024.0 * 1024.0),
             (unsigned long long)g_s.typeOffset);
         Log::get().note("camera view:%s", retry);
-        // The finder answers exactly this failure, and only this one. It is
-        // armed by hand and runs once, so a session that never asked for it
-        // pays nothing and a session that did does not pay twice.
-        beginFind();
         return;
     }
 
@@ -1422,7 +1192,27 @@ CameraViewBackoff cameraViewRebuildBackoff(uint32_t runs, uint64_t dueMs,
 
 void cameraViewConfigure() {
     Config& cfg = Config::get();
-    g_s.track = cfg.getBool("d3d11.camera_index_track", true);
+    const bool wasTracking = g_s.track;
+    g_s.track = cfg.getBool("d3d11.camera_index_track", false);
+    // OFF is the shipped state now, and silence would read as a fault. The
+    // one thing this module must never do is stop without saying so: every
+    // other way it can fail already announces itself, and a default that
+    // went quiet would be the exception that sends someone hunting.
+    if (!g_s.track) {
+        if (!g_s.offNoted || wasTracking) {
+            g_s.offNoted = true;
+            Log::get().note(
+                "camera view: off (d3d11.camera_index_track = 0), which is the "
+                "shipped default. Which camera preset you are on is counted from "
+                "your keypresses instead of read from the game -- anchored at "
+                "launch and at every new on-foot session, so it is right unless a "
+                "press goes unseen, and leaving the camera and re-entering resets "
+                "it. Turning this on searches eleven to seventeen gigabytes for "
+                "the records and needs a marker measured on YOUR game build.");
+        }
+        return;
+    }
+    g_s.offNoted = false;
     g_s.ordinal = static_cast<size_t>(
         cfg.getIntInRange("d3d11.camera_index_ordinal", 11, 0, 4095));
     g_s.valueOffset = static_cast<size_t>(
@@ -1444,39 +1234,10 @@ void cameraViewConfigure() {
 
     const uint8_t* base = reinterpret_cast<const uint8_t*>(GetModuleHandleW(nullptr));
     g_s.typePtr = base ? base + g_s.typeOffset : nullptr;
-
-    // The finder needs the image's bounds to tell a vtable pointer from any
-    // other eight bytes. Read from the headers rather than assumed: the whole
-    // point of the thing is that it runs on a build nobody has measured.
-    g_s.findArmed = cfg.getBool("d3d11.camera_index_find", false);
-    g_s.moduleLo = base;
-    g_s.moduleHi = nullptr;
-    if (base) {
-        const IMAGE_DOS_HEADER* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
-        if (dos->e_magic == IMAGE_DOS_SIGNATURE) {
-            const IMAGE_NT_HEADERS* nt =
-                reinterpret_cast<const IMAGE_NT_HEADERS*>(base + dos->e_lfanew);
-            if (nt->Signature == IMAGE_NT_SIGNATURE) {
-                g_s.moduleHi = base + nt->OptionalHeader.SizeOfImage;
-            }
-        }
-    }
-    if (g_s.findArmed && !g_s.moduleHi) {
-        Log::get().note("camera view finder: the game's image headers did not "
-                        "read, so there is no range to recognise a marker in. "
-                        "The finder stays off.");
-    }
 }
 
 void cameraViewRequestScan() {
-    // `finding` too: the finder walks the same region list, and a scan
-    // starting under it resets the walk to nought with both halves still
-    // believing they own it. The retry cooldown makes that collision
-    // unlikely rather than impossible, which is not the same thing.
-    if (!g_s.track || g_s.usable || g_s.scanning || g_s.finding ||
-        !g_s.typePtr) {
-        return;
-    }
+    if (!g_s.track || g_s.usable || g_s.scanning || !g_s.typePtr) return;
     if (g_s.cooldownUntilMs != 0 && nowMs() < g_s.cooldownUntilMs) return;
     // A rescan after a move does not spend the find-it-first-time budget.
     if (g_s.needRescan) {
@@ -1884,12 +1645,6 @@ void cameraViewTick(uint32_t eyeDraws) {
         cameraViewRequestScan();
     }
 
-    // The finder walks the same regions the failed scan collected, so it takes
-    // the driver's turn rather than running alongside it.
-    if (g_s.finding) {
-        if (findSlice()) finishFind();
-        return;
-    }
     if (!g_s.scanning) return;
     if (scanSlice()) finishScan();
 }
