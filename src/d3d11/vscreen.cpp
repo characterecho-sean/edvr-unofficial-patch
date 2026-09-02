@@ -36,7 +36,6 @@
 #include "eye_split.h"
 #include "resolve_probe.h"
 #include "resolve_bind_fix.h"
-#include "scanner_heat_fix.h"
 #include "stencil_probe.h"
 #include "fss_ring.h"
 #include "fss_res.h"
@@ -1276,16 +1275,6 @@ enum class DrawVerdict {
     // nothing else changed (advanced.stencil_probe), wrapped in
     // stencilProbeBegin/End.
     kStencilProbe,
-    // The DSS signal filter's fill, drawn through EDVR's own copy of its
-    // pixel shader (fix.scanner_heat) -- the fill discards itself before
-    // the blend unit ever sees it, on three conditions baked into the
-    // shader, and advanced.scanner_heat_mode/_probe pick which of those
-    // the compiled copy skips or paints instead of running. Wrapped in
-    // scannerHeatBegin/End; the extra-passes loop runs inside that
-    // bracket. The marker draws are recognised by the same verdict, so
-    // they keep counting, but scannerHeatBegin leaves them exactly as the
-    // game issues them -- only the fill's shader is ever swapped.
-    kScannerHeat,
     // A batched draw re-issued without some of its quads (advanced.
     // census_skip_quad). Swallows the game's draw and makes up to two of its
     // own, so it must not be combined with anything that also draws.
@@ -1455,7 +1444,6 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         !fssRingWantsDraws() && !fssDumpWantsDraws() &&
         !eyeSplitWantsDraws() && !resolveProbeWantsDraws() &&
         !stencilProbeWantsDraws() && !resolveBindWants() &&
-        !scannerHeatWants() &&
         !remlokWantsDraws() && !holoWantsDraws() && !witchstarWantsDraws() &&
         !sunglareWantsDraws() && !cbPeekEnabled() && !billboardWantsDraws() &&
         !drawCensusArmed() && !panelQuadWants() && !panelCurveWants() &&
@@ -1978,16 +1966,6 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     if ((resolveProbeWantsDraws() && resolveProbeOnEyeDraw(self)) ||
         (resolveBindWants() && resolveBindOnEyeDraw(self))) {
         return DrawVerdict::kResolveProbe;
-    }
-
-    // The DSS filter (the black-planet hunt's coda, then refuted and
-    // rebuilt as a shader transcription): recognised by its pixel shader,
-    // which the fill and the marker both carry and only while a signal
-    // filter is selected. Both matches return the same verdict -- whether
-    // the fill's shader actually gets swapped is decided inside
-    // scannerHeatBegin, from which one of the two matched.
-    if (scannerHeatWants() && scannerHeatOnDraw(self, kind)) {
-        return DrawVerdict::kScannerHeat;
     }
 
     // The stencil probe (the black planet, 2026-08-31), asked after the
@@ -2726,7 +2704,6 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     if (v == DrawVerdict::kFssDump) fssDumpBegin(self);
     if (v == DrawVerdict::kResolveProbe) resolveBindBegin(self);
     if (v == DrawVerdict::kResolveProbe) resolveProbeBegin(self);
-    if (v == DrawVerdict::kScannerHeat) scannerHeatBegin(self);
     if (v == DrawVerdict::kStencilProbe) stencilProbeBegin(self);
     if (v == DrawVerdict::kHolo) holoBegin(self);
     if (v == DrawVerdict::kScrim) scrimBegin(self);
@@ -2747,18 +2724,6 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
         splashDimBegin(self)) {
         draw();
         splashDimEnd(self);
-    }
-    // The scanner heat fix: extra passes -- the strength knob -- run
-    // INSIDE the swapped-shader bracket, so every pass reaches the eye
-    // through EDVR's own copy of the fill's shader and not just the
-    // first, before the game's own shader goes back. A marker draw never
-    // enters the bracket at all (scannerHeatBegin leaves it alone), so its
-    // passes simply re-issue the draw under whatever the game left bound.
-    if (v == DrawVerdict::kScannerHeat) {
-        const uint32_t extra = scannerHeatExtraPasses();
-        for (uint32_t k = 0; k < extra; ++k) draw();
-        scannerHeatNoteApplied();
-        scannerHeatEnd(self);
     }
     if (v == DrawVerdict::kParticle) particleEnd(self);
     if (v == DrawVerdict::kGlareSteady) sunglareEnd(self);
@@ -3526,7 +3491,6 @@ void vScreenRefreshConfig() {
     eyeSplitConfigure(cfg);
     resolveProbeConfigure(cfg);
     resolveBindConfigure(cfg);
-    scannerHeatConfigure(cfg);
     stencilProbeConfigure(cfg);
     {
         s->censusFssJump = cfg.getInt("advanced.census_fss_jump", 0) ? 1 : 0;
@@ -4419,7 +4383,6 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     eyeSplitConfigure(cfg);
     resolveProbeConfigure(cfg);
     resolveBindConfigure(cfg);
-    scannerHeatConfigure(cfg);
     stencilProbeConfigure(cfg);
     {
         g_state->censusFssJump =
@@ -4647,7 +4610,6 @@ void shutdownVScreenFixes() {
     eyeSplitShutdown();
     resolveProbeShutdown();
     resolveBindShutdown();
-    scannerHeatShutdown();
     stencilProbeShutdown();
     billboardShutdown();
     // Both halves of the intro. Neither was on this roll-call, so a session

@@ -133,20 +133,15 @@ this document is its source material.
 
 ## Coda: the DSS heat map
 
-`fix.scanner_heat`'s first build (2026-09-01, [scanner_heat_fix.cpp](../src/d3d11/scanner_heat_fix.cpp))
-treated the DSS signal filter's blue overlay as present but faint in VR —
-a ~7% blue lift measured in the eye-split dump — and re-issued it a few
-extra times to stack that up to flat strength. Arioch's field build
-(v0.12.4-25-gd443b25) engaged the fix every session, passes 2 through 6,
-and reported no change at all.
-
-The 7% figure was a mis-registration, not a measurement of the overlay's
-real strength. The dump compared the two eyes' hotspot pixels directly,
-but the per-eye projections are off-centre enough that the planet sits
-roughly 365 px further right in one eye than the other — so the
-comparison was reading the healthy eye's planet against the unhealthy
-eye's empty sky beside it. Registering the two eyes before comparing
-gives, in the HDR lit buffer (R11G11B10F) at the filter's hotspot pixels:
+With a signal filter up in the DSS, the game shades signal locations in
+blue. The first read on this compared the two eyes' hotspot pixels
+directly and found a ~7% blue lift in the lit eye, calling the overlay
+merely faint in VR. That was a mis-registration: the two eyes' projections
+sit off-centre from each other, so the comparison was reading the healthy
+eye's planet against the unhealthy eye's empty sky beside it. Registered
+properly, the deficit is real but different — the overlay present at the
+black eye's hotspots, and at the same positions in a lit eye under 1% of
+that value:
 
 | | R | G | B | blue excess B−(R+G)/2 |
 |---|---|---|---|---|
@@ -154,84 +149,16 @@ gives, in the HDR lit buffer (R11G11B10F) at the filter's hotspot pixels:
 | black eye, mapped-area wash next to hotspots | 0.0013 | 0.0032 | 0.0036 | 0.0014 |
 | lit eye, SAME planet positions | 0.0148 | 0.0148 | 0.0143 | -0.0005 |
 
-The lit eye's blue excess is negative — noise around zero, not a faint
-positive lift. The overlay is not swamped in a lit eye; by this measure
-it is not there at all, at under 1% of the black eye's value. Re-issuing
-an absent draw N times adds N times nothing, which is exactly what the
-field build showed.
+EDVR tried three mechanisms across 2026-09-01..02 to recover it:
+re-issuing the overlay draw extra times to stack its additive
+contribution; forcing off fields of the hardware depth-stencil state the
+draw used; and transcribing the fill shader's own disassembly into a
+replacement able to skip each of its three in-shader discards in turn, to
+find which one was rejecting the fragment. None is in the tree any more.
+The 2026-09-02 game update (build 332753) restored the heat map in VR on
+its own — Arioch confirmed it in the headset — and EDVR now ships nothing
+for it.
 
-The census (bundle `20260901-182527`) named a candidate why: in frame DC 0
-the lit eye's HDR target got 30 draws against the black eye's 26, and the
-four extra sit immediately before the mapped-area fills and the filter
-overlay. The first of them, `#44` (`vh=41E245D4 ph=6EF82262`, a
-768-triangle position-only shell), draws `ds=17wA` — depth on,
-GREATER_EQUAL, **writing** depth — where every overlay and mapped-area
-draw after it carries `ds=17wZ`: depth on, GREATER_EQUAL, no write. Under
-reversed-Z, `#44` stamps its own nearer depth wherever it is nearer than
-the terrain; every `ds=17wZ` draw after it then tests GREATER_EQUAL
-against that stamp and fails wherever the shell covered it. `#44` and its
-three neighbours are the same four draws this document's own evidence
-already names as vanishing from one eye on alternating frames (see "What
-the road ruled out", above) — normal engine parity, not a bug — and in
-the frame where they are absent, the stamp never lands, the terrain's own
-depth survives, and the overlay passes: vivid blue over a black planet,
-in the eye the black-planet bug had already emptied. Census frame DC 1
-carries all four draws, and all the ds=17wZ overlays, in both eyes.
-
-`fix.scanner_heat` v2 no longer assumed which draw was at fault, but it
-still assumed the hardware depth-stencil unit was the gatekeeper. Arioch's
-field build (bundle `20260902-064008`, v0.12.4-26-g7b77dcf) ran both of
-v2's modes with the fix engaged every session: the game's own state read
-back as `depth=on func=GREATER_EQUAL write=zero stencil=off`, rasterizer
-`cull=FRONT front=CW` — and nothing changed in either mode. The hardware
-depth-stencil unit was never the gatekeeper; both of v2's modes are
-refuted by that read-back, not superseded by a third guess.
-
-A dump of the fill's own shader (`ps_3B47A4BCE1891CC8`, produced by `fxc
-/dumpbin`) showed why: it discards fragments itself, before the blend
-unit — or the hardware depth-stencil unit — ever runs, on three
-conditions entirely its own:
-
-1. a manual depth test: it samples the eye's linear-depth texture (t0,
-   R32, metres, `1e17` = sky) at `SV_POSITION.xy * cb1[332].zw`, and
-   discards when that depth is nearer than the fragment's own linear
-   depth (`TEXCOORD11.x`, the vertex shader's clip w);
-2. a radius window: the fragment's distance from the planet centre
-   (`TEXCOORD2.xyz + cb1[275].xyz - cb1[142].yzw`) must lie between
-   `cb1[137].x` and `cb1[137].y`;
-3. a gate: `cb1[149].w < TEXCOORD2.w`, where `TEXCOORD2.w` is the vertex
-   shader's `dot(normalize(worldPos - objectOrigin), cb1[151].xyz)` — a
-   hemisphere test against a direction constant; the else branch is an
-   unconditional discard.
-
-What survives is coloured from two 4096x1 lookup textures (t1, t2) over
-the normalized altitude, scaled by `cb1[150].y`, faded at the window's
-edges, multiplied by `cb1[90].y` and by 65, alpha 1, blended `ONE, ONE`
-(additive). None of this is visible to anything that only watches the
-pipeline state, which is exactly why watching it found nothing.
-
-A census re-read (three captures this round, both eyes each) ruled out
-the bindings too: every capture shows the overlay draws binding the
-proper eye-sized R32 depth texture at t0, the two LUTs at t1/t2, and the
-same cb0 object for both eyes (each census numbers its resources
-independently, so this is read within one capture's own lines, not across
-captures). cb1 — 333 float4 — goes unrecorded: the census's cb watch
-shadows only the first 768 bytes of a buffer, and every constant this
-shader reads sits beyond that. Whatever kills the overlay in a lit eye is
-in the constants or in the shader's own arithmetic, not in the bindings
-and not in the pipeline state.
-
-`fix.scanner_heat` v3 stops guessing at the pipeline entirely.
-[scanner_heat_fix.cpp](../src/d3d11/scanner_heat_fix.cpp) transcribes the
-fill's disassembly verbatim into HLSL and draws it through EDVR's own
-copy, [resolve_probe.cpp](../src/d3d11/resolve_probe.cpp)'s pattern:
-compile once, bind in place of the game's own, restore after.
-`advanced.scanner_heat_mode` skips one of the three discards above at a
-time (or all of them, the default for this round) so the field can narrow
-down which term is actually rejecting the fragment instead of reading a
-still image; `advanced.scanner_heat_probe` goes further and paints WHERE
-a term fails rather than only whether the picture changed.
-
-This is a hypothesis with one shader dump and one census re-read behind
-it, not a verified fix, and as of this writing v3 has not been
-field-tested.
+The lesson that outlives the hunt: register the two eyes before comparing
+pixels, the miss that produced the 7% figure above. `tools/diff_eye_split.py`
+now does that itself before tiling (commit 8676060).
