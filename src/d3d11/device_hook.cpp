@@ -305,9 +305,10 @@ HRESULT STDMETHODCALLTYPE hookedCreatePS(ID3D11Device* self, const void* bytecod
     return hr;
 }
 
-// The FSS body layer's resolution (fss_res.h). The match, the doubling and
-// the refusal rules all live in that module; this hook only carries descs
-// to it and created textures back. One bool per create when the fix is off.
+// Render targets made larger than asked: the FSS body layer, and surfaces
+// named by size (fss_res.h). The match, the scaling and the refusal rules
+// all live in that module; this hook only carries descs to it and created
+// textures back. One bool per create when both matchers are off.
 HRESULT STDMETHODCALLTYPE hookedCreateTexture2D(ID3D11Device* self,
                                                 const D3D11_TEXTURE2D_DESC* desc,
                                                 const D3D11_SUBRESOURCE_DATA* init,
@@ -332,7 +333,12 @@ HRESULT STDMETHODCALLTYPE hookedCreateTexture2D(ID3D11Device* self,
     }
     if (out && *out) {
         guardedBudget(g_createBudget, [&] {
-            fssResNoteCreated(*out, desc->Width, desc->Height);
+            // The factor comes from the two descs we already hold rather
+            // than from the module, which would have to stash it between
+            // the match and this call -- and this hook runs on the game's
+            // streaming threads.
+            fssResNoteCreated(*out, desc->Width, desc->Height,
+                              desc->Width ? d.Width / desc->Width : 0);
         });
     }
     return hr;

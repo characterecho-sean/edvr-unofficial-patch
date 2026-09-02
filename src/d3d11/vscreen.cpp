@@ -1594,10 +1594,12 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
                 D3D11_VIEWPORT vp{};
                 self->RSGetViewports(&nvp, &vp);
                 if (nvp >= 1 && viewportIs(vp, ow, oh)) {
-                    vp.TopLeftX *= 2.0f;
-                    vp.TopLeftY *= 2.0f;
-                    vp.Width *= 2.0f;
-                    vp.Height *= 2.0f;
+                    const float k =
+                        static_cast<float>(fssResScaleOf(res));
+                    vp.TopLeftX *= k;
+                    vp.TopLeftY *= k;
+                    vp.Width *= k;
+                    vp.Height *= k;
                     s->realRSSetViewports(self, 1, &vp);
                     fssResNoteViewportScaled(true);
                 }
@@ -2916,11 +2918,12 @@ void STDMETHODCALLTYPE hookedRSSetViewports(ID3D11DeviceContext* self, UINT n,
     uint32_t ow = 0, oh = 0;
     void* res = currentRtv0Resource(s);
     if (res && fssResOrigSize(res, &ow, &oh) && viewportIs(vps[0], ow, oh)) {
+        const float k = static_cast<float>(fssResScaleOf(res));
         D3D11_VIEWPORT v = vps[0];
-        v.TopLeftX *= 2.0f;
-        v.TopLeftY *= 2.0f;
-        v.Width *= 2.0f;
-        v.Height *= 2.0f;
+        v.TopLeftX *= k;
+        v.TopLeftY *= k;
+        v.Width *= k;
+        v.Height *= k;
         s->realRSSetViewports(self, 1, &v);
         fssResNoteViewportScaled(false);
         return;
