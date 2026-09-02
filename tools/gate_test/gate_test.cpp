@@ -179,6 +179,16 @@ void check(bool want, const char* what) {
     ++g_bad;
 }
 
+// The counted view itself, for the cases where what matters is the number
+// rather than whether the offset happens to be on at it.
+void checkView(int want, const char* what) {
+    ++g_checks;
+    const int got = headOffsetGateCountedView();
+    if (got == want) return;
+    printf("  FAIL  %s -- counted view is %d, expected %d\n", what, got, want);
+    ++g_bad;
+}
+
 // Every scenario starts from a clean gate with the shipped configuration --
 // except that begin(false) scenarios are exercising the PARKED keyless path
 // (experimental.keyless_camera, default off since the 2026-08-16 pivot to keyed
@@ -877,6 +887,34 @@ void runScenarios() {
     panelFrame(2);
     sceneFrame(12);
     check(true, "a same-session toggle keeps the held view and re-arms");
+
+    // THE ON-FOOT RING IS 0..5 AND ROLLS OVER AT BOTH ENDS. The gate cares
+    // about no other context: an SRV's ring is 8 and a ship's up to 11, and a
+    // count that walked off either end of this one would name a preset the
+    // player cannot reach on foot.
+    begin(true);
+    enterCamera();
+    checkView(0, "the ring starts at 0");
+    for (int i = 0; i < 5; ++i) headOffsetGateViewBumped();
+    checkView(5, "five forward presses reach the end of the ring");
+    headOffsetGateViewBumped();
+    checkView(0, "and the sixth rolls over to the start");
+    headOffsetGateViewUnbumped();
+    checkView(5, "backward from the start rolls over to the end");
+    for (int i = 0; i < 5; ++i) headOffsetGateViewUnbumped();
+    checkView(0, "and five more backward presses come back to 0");
+
+    // A READ FROM A LONGER RING IS FOLDED, NOT TAKEN RAW. 8 is an SRV index;
+    // on foot it can only mean 2. Clamping would have said 5, which is a real
+    // preset and the wrong one -- the failure mode worth a test of its own.
+    begin(true);
+    enterCamera();
+    headOffsetGateSetView(8);
+    sceneFrame(2);
+    checkView(2, "a read of 8 folds into the on-foot ring as 2");
+    headOffsetGateSetView(11);
+    sceneFrame(2);
+    checkView(5, "and 11 folds to 5");
 
     // THE JOURNAL'S BOUNDARY AND THE HEURISTIC'S ARE ONE EVENT. Disembark
     // (wired from device_hook) and the panel-return heuristic mark the same

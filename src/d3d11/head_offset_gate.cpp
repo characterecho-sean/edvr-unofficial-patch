@@ -437,6 +437,30 @@ void headOffsetGateKeyPressed() {
                     g.gateViewIndex);
 }
 
+// EVERYTHING THAT LANDS IN THE COUNTED VIEW COMES THROUGH HERE.
+//
+// The on-foot cycle is the only one this gate cares about, and it is 6 long:
+// 0..5, rolling over at both ends. Other contexts are longer -- 8 in an SRV,
+// up to 11 in a ship and varying with its seat count (measured 2026-09-02) --
+// and the game appears to fold a larger index back into this range rather
+// than carry it, so folding is what we do too.
+//
+// Modulo rather than a pair of clamps. Clamping is right only for a step of
+// exactly one from inside the range, which is all the count could ever do
+// while stepping was its only writer. The read is the other writer, and it
+// can hand over an index from a context with a longer ring; that is a value
+// to fold, not to clamp to 5 and quietly call the last preset. C++ keeps the
+// sign of the dividend, so the negative case needs the second line.
+int normalizeView(int v) {
+    const int n = g.gateViewCount;
+    // 0 is a legitimate configuration meaning "do not wrap", and a negative
+    // view is not a view under any configuration.
+    if (n <= 0) return v < 0 ? 0 : v;
+    v %= n;
+    if (v < 0) v += n;
+    return v;
+}
+
 // Both directions share this, because a ring walked one way and a ring walked
 // the other are the same ring, and giving them separate arithmetic is how they
 // drift apart.
@@ -474,19 +498,11 @@ void headOffsetGateStepView(int delta) {
     }
     g.offFootPressNoted = false;
 
-    g.gateViewIndex += delta;
-    if (g.gateViewCount > 0) {
-        // Wrap at BOTH ends. Going below zero is what the forward-only version
-        // never had to think about, and clamping there instead of wrapping
-        // would put the count one behind for the rest of the session at the
-        // one moment the player is trying to get back to a known view.
-        if (g.gateViewIndex >= g.gateViewCount) g.gateViewIndex = 0;
-        if (g.gateViewIndex < 0) g.gateViewIndex = g.gateViewCount - 1;
-    } else if (g.gateViewIndex < 0) {
-        // Not wrapping is a legitimate configuration (view_count = 0), but a
-        // negative view is not a view under any of them.
-        g.gateViewIndex = 0;
-    }
+    // Both ends. Going below zero is what the forward-only version never had
+    // to think about, and stopping at zero rather than rolling round would
+    // put the count one behind for the rest of the session, at the one moment
+    // the player is trying to get back to a view they know.
+    g.gateViewIndex = normalizeView(g.gateViewIndex + delta);
     Log::get().note("external camera view -> %d%s (wanted %s). Counted from "
                     "keypresses, not read from the game -- if this disagrees with "
                     "what you see, leave the camera and re-enter to resynchronise.",
@@ -1100,7 +1116,11 @@ void headOffsetGateFrame(uint32_t frameNo, uint32_t panelDraws, uint32_t eyeDraw
                                 "press no longer desyncs anything.",
                                 gameView, g.gateViewIndex);
             }
-            g.gateViewIndex = gameView;
+            // Folded, not taken raw: a read taken while the game still
+            // holds a longer context's index would otherwise put the count
+            // somewhere the on-foot cycle cannot reach, and nothing
+            // downstream range-checks it.
+            g.gateViewIndex = normalizeView(gameView);
         } else {
             if (!g.gateSyncRefusedNoted) {
                 g.gateSyncRefusedNoted = true;
