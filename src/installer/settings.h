@@ -89,6 +89,7 @@ public:
     bool load(const std::wstring& gameDir);
 
     bool loaded() const { return m_loaded; }
+    const std::wstring& gameDir() const { return m_gameDir; }
     const std::wstring& iniPath() const { return m_iniPath; }
     const std::vector<SettingRow>& rows() const { return m_rows; }
 

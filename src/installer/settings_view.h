@@ -21,7 +21,11 @@
 namespace edvr::installer {
 
 HWND createSettingsList(HWND parent, int id, UINT dpi);
-void settingsListSetModel(HWND list, SettingsModel* model);
+
+// mirrorDir is where a change gets echoed outside the game folder (see
+// mirror.h); empty is a valid value meaning "no mirror for this install",
+// which a write simply skips.
+void settingsListSetModel(HWND list, SettingsModel* model, const std::wstring& mirrorDir);
 void settingsListSetFilter(HWND list, const std::wstring& needle);
 void settingsListRescale(HWND list, UINT dpi);
 

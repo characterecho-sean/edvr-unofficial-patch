@@ -6,6 +6,7 @@
 
 #include "apply.h"
 #include "logbundle.h"
+#include "mirror.h"
 #include "payload.h"
 
 namespace edvr::installer {
@@ -48,7 +49,12 @@ std::string usageText() {
            "  --dry-run            say what would happen; touch nothing.\r\n"
            "  --replace-settings   overwrite edvr.ini instead of keeping your values.\r\n"
            "  --remove-settings    with --uninstall, delete edvr.ini too.\r\n"
-           "  --help               this.\r\n";
+           "  --help               this.\r\n"
+           "\r\n"
+           "  A copy of edvr.ini (and the install record) is kept outside the game folder, in\r\n"
+           "  %LOCALAPPDATA%\\EDVR, so a game update that wipes the folder cannot take it too.\r\n"
+           "  --install restores from it automatically when the folder has no edvr.ini of its\r\n"
+           "  own, unless --replace-settings says you want fresh defaults instead.\r\n";
 }
 
 AppArgs parseArgs(int argc, wchar_t** argv) {
@@ -241,7 +247,7 @@ int runConsole(const AppArgs& args) {
         game = found.front();
     }
 
-    const Survey survey = surveyTarget(game);
+    Survey survey = surveyTarget(game);
     const PayloadInfo& payload = payloadInfo();
     writeOut(statusReport(survey, payload) + "\r\n");
 
@@ -259,13 +265,51 @@ int runConsole(const AppArgs& args) {
         return 0;
     }
 
+    const std::wstring mirrorDir = mirrorDirFor(survey.game);
+    const bool canMirror = args.action != AppArgs::Act::Uninstall;
+
+    // A folder with no edvr.ini at all but a mirror outside it is exactly the
+    // folder a game update just wiped. Restored by DEFAULT here -- there is no
+    // prompt to answer on a command line -- unless --replace-settings said the
+    // opposite: somebody who asked for fresh defaults should not have last
+    // week's settings appear anyway. --dry-run promises to touch nothing, and
+    // a restore is a write, so it is only ever described there, never done.
+    if (canMirror && !survey.iniPresent && args.keepSettings) {
+        const MirrorInfo mirror = readMirror(mirrorDir);
+        if (mirror.hasIni) {
+            writeOut("This folder has no edvr.ini, but one from an earlier install of it was "
+                     "found outside the game folder (" + toUtf8(mirror.dir) + "), last saved " +
+                     mirror.savedUtc + ".\r\n");
+            if (args.dryRun) {
+                writeOut("  Would restore it before installing -- skipped, this is a dry run. "
+                         "The plan below is for this folder as it is now, with no edvr.ini.\r\n\r\n");
+            } else {
+                std::vector<std::string> notes;
+                if (restoreFromMirror(survey.game.dir, mirror, &notes)) {
+                    for (const std::string& n : notes) writeOut("  " + n + "\r\n");
+                    survey = surveyTarget(game);
+                } else {
+                    writeOut("  Could not restore it -- continuing as a fresh install.\r\n");
+                }
+                writeOut("\r\n");
+            }
+        }
+    }
+
     const Options options = optionsFor(args, args.action == AppArgs::Act::Repair);
     const Plan plan = args.action == AppArgs::Act::Uninstall ? planUninstall(survey, options)
                                                              : planInstall(survey, options, payload);
     writeOut(planReport(plan));
 
     if (plan.blocked) return 1;
-    if (plan.nothingToDo || args.dryRun) return 0;
+    if (plan.nothingToDo) {
+        // Nothing changed in the folder, but this may be the first run of an
+        // installer new enough to mirror at all -- an install already at the
+        // latest build must not have to wait for its next update to get one.
+        if (canMirror && !args.dryRun) updateMirror(survey.game.dir, plan.backupDir, mirrorDir);
+        return 0;
+    }
+    if (args.dryRun) return 0;
 
     if (needsElevationFor(survey) && !isElevated()) {
         writeOut("\r\nThis folder needs administrator rights. Run the same command from an "
@@ -284,6 +328,14 @@ int runConsole(const AppArgs& args) {
                      "edvr_backup.\r\n");
         }
         return 1;
+    }
+    if (canMirror) {
+        const MirrorResult m = updateMirror(survey.game.dir, plan.backupDir, mirrorDir);
+        if (m.ok) writeOut(bullets(("\r\nMirrored to " + toUtf8(mirrorDir) +
+                                    " (outside the game folder, so a game update wiping this "
+                                    "folder cannot take it too):")
+                                       .c_str(),
+                                   m.saved));
     }
     writeOut("\r\nDone.\r\n");
     return 0;

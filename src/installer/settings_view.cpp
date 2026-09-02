@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "detect.h"
+#include "mirror.h"
 #include "ui.h"
 
 #pragma comment(lib, "comctl32.lib")
@@ -46,6 +47,7 @@ struct List {
     HWND           edit = nullptr;
     HWND           combo = nullptr;  // the resolution dropdown, shared
     SettingsModel* model = nullptr;
+    std::wstring   mirrorDir;  // where each write is echoed; see mirror.h
     UINT           dpi = 96;
     int            scroll = 0;      // pixels
     int            contentHeight = 0;
@@ -568,6 +570,10 @@ void applyValue(List* list, size_t rowIndex, const std::string& value) {
                     MB_OK | MB_ICONWARNING);
     } else {
         list->error.clear();
+        // Echoed outside the game folder on every successful write, not just
+        // on install: the mirror exists so a game update between now and the
+        // next install cannot take today's change with it.
+        updateMirrorIni(list->model->gameDir(), list->mirrorDir);
     }
     InvalidateRect(list->hwnd, nullptr, TRUE);
 }
@@ -978,10 +984,11 @@ HWND createSettingsList(HWND parent, int id, UINT dpi) {
     return hwnd;
 }
 
-void settingsListSetModel(HWND hwnd, SettingsModel* model) {
+void settingsListSetModel(HWND hwnd, SettingsModel* model, const std::wstring& mirrorDir) {
     List* list = listOf(hwnd);
     if (!list) return;
     list->model = model;
+    list->mirrorDir = mirrorDir;
     list->scroll = 0;
     rebuildItems(list);
     updateScrollbar(list);

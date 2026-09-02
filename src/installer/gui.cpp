@@ -24,6 +24,7 @@
 #include "app.h"
 #include "apply.h"
 #include "logbundle.h"
+#include "mirror.h"
 #include "payload.h"
 #include "settings.h"
 #include "settings_view.h"
@@ -539,7 +540,7 @@ void selectInstall(size_t index) {
     g.survey = surveyTarget(g.installs[index]);
     g.haveSurvey = true;
     g.settings.load(g.survey.game.dir);
-    settingsListSetModel(g.settingsList, &g.settings);
+    settingsListSetModel(g.settingsList, &g.settings, mirrorDirFor(g.survey.game));
     showSurvey();
 }
 
@@ -660,6 +661,33 @@ void runAction(AppArgs::Act action) {
     args.keepSettings = ui::checkboxChecked(g.chkKeep);
     args.removeSettings = false;
 
+    const std::wstring mirrorDir = mirrorDirFor(g.survey.game);
+    const bool canMirror = action != AppArgs::Act::Uninstall;
+
+    // A folder with no edvr.ini at all but a mirror outside it is exactly the
+    // folder a game update just wiped. Asked about, not assumed -- unlike the
+    // command line there is a window right here to ask in -- and only when
+    // "keep my settings" is still checked; unchecking it says fresh defaults
+    // are wanted, and old settings reappearing anyway would be worse than not
+    // finding the mirror at all.
+    if (canMirror && !g.survey.iniPresent && args.keepSettings) {
+        const MirrorInfo mirror = readMirror(mirrorDir);
+        if (mirror.hasIni) {
+            const std::wstring text =
+                L"This folder has no edvr.ini, but one from an earlier install of it was found "
+                L"outside the game folder, last saved " +
+                fromUtf8(mirror.savedUtc) +
+                L".\n\nRestore it before installing? It is kept at\n" + mirror.dir +
+                L"\nprecisely so a game update wiping this folder cannot take it too.";
+            const int answer = MessageBoxW(g.window, text.c_str(), L"EDVR installer",
+                                           MB_YESNO | MB_ICONQUESTION);
+            if (answer == IDYES) {
+                restoreFromMirror(g.survey.game.dir, mirror, nullptr);
+                g.survey = surveyTarget(g.survey.game);
+            }
+        }
+    }
+
     const PayloadInfo& payload = payloadInfo();
     const Options options = optionsFor(args, action == AppArgs::Act::Repair);
     const Plan plan = action == AppArgs::Act::Uninstall
@@ -672,6 +700,10 @@ void runAction(AppArgs::Act action) {
     // right there, it scrolls to the freshest line, and it can be read
     // again after the fact. Only QUESTIONS get a box from here on.
     if (plan.blocked || plan.nothingToDo) {
+        // Nothing changed in the folder, but this may be the first run of an
+        // installer new enough to mirror at all -- an install already at the
+        // latest build must not have to wait for its next update to get one.
+        if (canMirror && plan.nothingToDo) updateMirror(g.survey.game.dir, plan.backupDir, mirrorDir);
         setReport(planReport(plan) + "\r\n----\r\n" + planSummary(plan) + "\r\n");
         showSurvey();
         return;
@@ -719,6 +751,19 @@ void runAction(AppArgs::Act action) {
     if (result.ok) {
         text += "\r\nDone. Start Elite Dangerous; EDVR writes what it managed to install into "
                 "edvr_logs\\ next to the game.\r\n";
+        if (canMirror) {
+            const MirrorResult m = updateMirror(g.survey.game.dir, plan.backupDir, mirrorDir);
+            if (m.ok) {
+                text += "\r\nMirrored ";
+                for (size_t i = 0; i < m.saved.size(); ++i) {
+                    if (i) text += ", ";
+                    text += m.saved[i];
+                }
+                text += " to " + toUtf8(mirrorDir) +
+                        " (outside the game folder, so a game update wiping this folder cannot "
+                        "take it too).\r\n";
+            }
+        }
     } else {
         text += "\r\n" + result.error + "\r\n";
         if (result.rolledBack && !result.overwrote) {

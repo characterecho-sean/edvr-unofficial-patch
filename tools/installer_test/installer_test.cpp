@@ -28,6 +28,7 @@
 #include "../../src/installer/plan.h"
 #include "../../src/installer/probe.h"
 #include "../../src/installer/logbundle.h"
+#include "../../src/installer/mirror.h"
 #include "../../src/installer/settings.h"
 
 using namespace edvr::installer;
@@ -1028,6 +1029,146 @@ static void testApply(const std::wstring& scratch) {
 }
 
 // ---------------------------------------------------------------------------
+// the mirror kept outside the game folder
+// ---------------------------------------------------------------------------
+
+// The leaf of a matching subfolder under `dir`, or empty. Used only to find
+// the restore-<stamp> folder restoreFromMirror creates, whose exact name is
+// the clock at the moment the test runs.
+static std::wstring firstSubdirLike(const std::wstring& dir, const std::wstring& pattern) {
+    WIN32_FIND_DATAW fd{};
+    HANDLE h = FindFirstFileW(joinPath(dir, pattern).c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) return std::wstring();
+    std::wstring name;
+    do {
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+            name = fd.cFileName;
+            break;
+        }
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+    return name;
+}
+
+static void testMirror(const std::wstring& scratch) {
+    printf("\nthe mirror kept outside the game folder\n");
+
+    // A real install, laid out and applied exactly like testApply does --
+    // the mirror is worth testing against real files, not hand-placed ones.
+    const std::wstring gameDir = joinPath(scratch, L"mirrorgame");
+    layOutScratchGame(gameDir);
+    const PayloadInfo payload = testPayload(kNextIni);
+    const Options options = testOptions();
+    const Survey s = scratchSurvey(gameDir);
+    const Plan plan = planInstall(s, options, payload);
+    const ApplyResult applied = applyPlan(plan, provider(false));
+    check(applied.ok, "the scratch install this test mirrors applies", applied.error);
+
+    const std::wstring mirrorDir = joinPath(scratch, L"mirrorroot\\mirrorgame-test");
+    removeTree(joinPath(scratch, L"mirrorroot"));
+
+    {
+        const MirrorResult m = updateMirror(gameDir, plan.backupDir, mirrorDir);
+        check(m.ok, "updateMirror succeeds against a real install");
+        check(fileExists(joinPath(mirrorDir, L"edvr.ini")), "edvr.ini is mirrored");
+        check(fileExists(joinPath(mirrorDir, L"edvr.ini.base")), "edvr.ini.base is mirrored");
+        check(fileExists(joinPath(mirrorDir, L"state.ini")), "state.ini is mirrored");
+        check(fileExists(joinPath(mirrorDir, L"backup\\openvr_api.dll")),
+              "the backed-up openvr_api.dll is mirrored -- the game had no d3d11.dll of its own "
+              "to back up, so only this half of the pair exists here, same as in edvr_backup\\");
+        expectEq(readAll(joinPath(mirrorDir, L"edvr.ini")), readAll(joinPath(gameDir, L"edvr.ini")),
+                 "the mirrored edvr.ini matches the live one");
+    }
+
+    {
+        const MirrorInfo info = readMirror(mirrorDir);
+        check(info.hasIni, "readMirror sees the ini");
+        check(info.hasBaseIni, "and the base ini");
+        check(info.hasState, "and the state");
+        check(info.hasBackupPair, "and the backup pair");
+        check(!info.savedUtc.empty(), "and a saved-at time for it");
+    }
+
+    {   // A settings-window save only ever touches edvr.ini -- re-copying the
+        // record and the DLLs on every toggle would be pointless disk I/O for
+        // files that provably did not change.
+        writeAll(joinPath(gameDir, L"edvr.ini"), "[fix]\r\nshare_exposure = 0\r\n");
+        const MirrorResult m = updateMirrorIni(gameDir, mirrorDir);
+        check(m.ok, "updateMirrorIni succeeds");
+        check(m.saved.size() == 1 && m.saved[0] == "edvr.ini",
+              "and reports only the ini as saved");
+        expectEq(readAll(joinPath(mirrorDir, L"edvr.ini")), "[fix]\r\nshare_exposure = 0\r\n",
+                 "the mirrored ini picks up the settings-only change");
+        check(fileExists(joinPath(mirrorDir, L"backup\\openvr_api.dll")),
+              "the backup pair mirrored earlier is untouched");
+    }
+
+    {   // The disaster this exists for: the game folder is wiped -- by a game
+        // update, same as 2026-09-02 -- and the mirror outside it is all that
+        // is left.
+        const std::wstring wiped = joinPath(scratch, L"mirrorgame-wiped");
+        removeTree(wiped);
+        makeTree(wiped);
+        const MirrorInfo info = readMirror(mirrorDir);
+        std::vector<std::string> notes;
+        check(restoreFromMirror(wiped, info, &notes), "restoreFromMirror succeeds");
+        check(fileExists(joinPath(wiped, L"edvr.ini")), "edvr.ini comes back");
+        check(fileExists(joinPath(wiped, L"edvr_install\\edvr.ini.base")),
+              "so does edvr.ini.base");
+        check(fileExists(joinPath(wiped, L"edvr_install\\state.ini")), "so does state.ini");
+        check(!notes.empty(), "and it says what it did");
+
+        const std::wstring backupRoot = joinPath(wiped, L"edvr_backup");
+        const std::wstring stamp = firstSubdirLike(backupRoot, L"restored-*");
+        check(!stamp.empty(), "the backup pair lands in its own restored-<stamp> folder");
+        check(fileExists(joinPath(joinPath(backupRoot, stamp), L"openvr_api.dll")),
+              "which is exactly where the installer's own recovery scan for a genuine original "
+              "openvr_api.dll already looks");
+    }
+
+    {   // Nothing to restore is not an error; it is the ordinary case of a
+        // folder that was never mirrored at all.
+        MirrorInfo empty;
+        std::vector<std::string> notes;
+        check(!restoreFromMirror(joinPath(scratch, L"nowhere"), empty, &notes),
+              "restoreFromMirror refuses a mirror with no edvr.ini");
+        check(notes.empty(), "and adds no notes when it does");
+    }
+
+    {   // Frontier's own Products\ folder name is identical whether the game
+        // came from the Frontier launcher or Steam, so the leaf alone cannot
+        // be the mirror's name on a machine -- like this one -- with both.
+        GameInstall steam;
+        steam.dir = L"C:\\Games\\steamapps\\common\\Elite Dangerous\\Products\\"
+                    L"elite-dangerous-odyssey-64";
+        steam.source = L"Steam";
+        GameInstall frontier = steam;
+        frontier.source = L"Frontier launcher";
+        const std::wstring root = L"C:\\fake\\EDVR";
+
+        const std::wstring steamDir = mirrorDirFor(steam, root);
+        const std::wstring frontierDir = mirrorDirFor(frontier, root);
+        check(!steamDir.empty() && !frontierDir.empty(), "both installs resolve to a folder");
+        check(steamDir != frontierDir,
+              "two storefronts sharing a leaf folder name get two different mirrors");
+        check(mirrorDirFor(steam, root) == steamDir,
+              "and the same install resolves to the same mirror every time");
+    }
+
+    {   // No root at all -- LOCALAPPDATA unreadable, in practice never -- must
+        // be a quiet no-op everywhere, not a crash or a write into "".
+        GameInstall g;
+        g.dir = L"C:\\Games\\ed";
+        g.source = L"Steam";
+        check(mirrorDirFor(g, L"").empty(), "no root means no mirror path");
+        const MirrorResult m = updateMirror(gameDir, plan.backupDir, L"");
+        check(!m.ok, "updateMirror with no mirror directory is a safe no-op");
+        const MirrorResult mi = updateMirrorIni(gameDir, L"");
+        check(!mi.ok, "so is updateMirrorIni");
+    }
+}
+
+// ---------------------------------------------------------------------------
 // reading a DLL to find out whose it is
 // ---------------------------------------------------------------------------
 
@@ -1313,6 +1454,7 @@ int wmain(int argc, wchar_t** argv) {
     testShippedIni(root);
     testPlanner();
     testApply(scratch);
+    testMirror(scratch);
     testProbe(scratch);
     testRunState();
     testSettings(root, scratch);
