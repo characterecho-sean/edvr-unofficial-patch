@@ -107,6 +107,34 @@ Unknown formats fall back to four **and say so in the log**.
 The log argument is optional and gives the stages in the order the frame
 drew them, which is what makes "the first stage that disagrees" meaningful.
 
+**The eyes are registered before anything is compared.** The two eye
+projections are off-centre by different amounts, so content at infinity does
+not land on the same pixel in both — about 365 px apart at a 2517 px eye
+width, which is 91 px in these 4x-decimated files. Compared tile for tile at
+identical positions, a planet in one eye lands on empty sky in the other and
+the tool calls that a difference. It did exactly that on 2026-09-01: it
+reported a "7% blue overlay in the healthy eye" of a DSS scan and a fix was
+built on the number. The tiles had landed on the Milky Way band. There was no
+overlay.
+
+So the tool first measures how far one eye's content sits from the other's
+and moves eye1 by that vector, printing it in the header and again at the
+end. The measurement comes from the R32 linear-depth target (format 39,
+metres, sky written as 1e17): the finite-depth region of a far body is the
+same shape in both eyes even when one eye's colour is black, so the offset
+between the two centroids is the vector, checked by how well the two masks
+then overlap. With no depth target it cross-correlates luminance profiles
+instead, which is weaker because the bug being hunted takes brightness out
+of one eye. `--no-register` restores the old pixel-for-pixel comparison and
+is worth having only to reproduce an old report.
+
+Registration also needs the two files to *be* two eyes, and where a shape
+carries more than two targets that is a guess — the pairing goes by order of
+first sighting, which cannot tell a post chain's several buffers from the
+second eye's copy. Each stage is therefore measured both ways, and one that
+agrees better unmoved is reported unmoved and labelled **NOT A STEREO
+PAIR**.
+
 The two eyes are *supposed* to differ — they see the world from 6 cm apart.
 So the tool reports the **shape** of each difference rather than its
 presence. Parallax moves content sideways and leaves the total brightness

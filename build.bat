@@ -348,7 +348,8 @@ set INSTALLER_SRC="%ROOT%\src\installer\main.cpp" "%ROOT%\src\installer\gui.cpp"
     "%ROOT%\src\installer\app.cpp" "%ROOT%\src\installer\plan.cpp" ^
     "%ROOT%\src\installer\apply.cpp" "%ROOT%\src\installer\detect.cpp" ^
     "%ROOT%\src\installer\probe.cpp" "%ROOT%\src\installer\iniedit.cpp" ^
-    "%ROOT%\src\installer\state.cpp" "%ROOT%\src\installer\payload.cpp"
+    "%ROOT%\src\installer\state.cpp" "%ROOT%\src\installer\mirror.cpp" ^
+    "%ROOT%\src\installer\payload.cpp"
 set INSTALLER_LIBS=user32.lib gdi32.lib gdiplus.lib dwmapi.lib uxtheme.lib ^
     shell32.lib ole32.lib comctl32.lib advapi32.lib version.lib bcrypt.lib kernel32.lib
 
@@ -385,6 +386,7 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /GR- /DWIN32_LEAN_AND_MEAN /DNOMINMA
     "%ROOT%\src\installer\plan.cpp" "%ROOT%\src\installer\apply.cpp" ^
     "%ROOT%\src\installer\detect.cpp" "%ROOT%\src\installer\probe.cpp" ^
     "%ROOT%\src\installer\iniedit.cpp" "%ROOT%\src\installer\state.cpp" ^
+    "%ROOT%\src\installer\mirror.cpp" ^
     "%ROOT%\src\installer\settings.cpp" "%ROOT%\src\installer\logbundle.cpp" ^
     /link /INCREMENTAL:NO %INSTALLER_LIBS%
 if errorlevel 1 ( echo [edvr] ERROR: installer_test build failed & exit /b 1 )
@@ -559,6 +561,18 @@ REM drifts from the DC line format fails HERE, not in the ten minutes after a
 REM user finally reproduced the effect being chased.
 python "%ROOT%\tools\diff_draw_census.py" --self-test || (
     echo [edvr] ERROR: the census diff tool failed its own test
+    exit /b 1
+)
+
+echo [edvr] === eye-split diff self-test ===
+REM The tool that compares the two eyes of one frame. It registers the
+REM eyes before it compares them, because their projections are off-centre
+REM by different amounts and far content does not land on the same pixel in
+REM both. A sign flip in that step reads as plausible either way, and once
+REM cost a fix built on tiles that had landed on the Milky Way band. It
+REM fails HERE, not in the next report somebody trusts.
+python "%ROOT%\tools\diff_eye_split.py" --self-test || (
+    echo [edvr] ERROR: the eye-split diff tool failed its own test
     exit /b 1
 )
 
