@@ -270,9 +270,9 @@ once the edge-tap subtlety performance.md already lists is settled.
 count is the anti-aliasing, and the filter is how much of it reaches the
 eye — but the pixels still have to be rendered, which is the expensive
 part players already pay. It is worth about one resolve's difference over
-today's supersampling, not a new category. Its structural value is that it is the
-door TAA walks through next, and that TAA over a supersampled input is the
-best anti-aliasing available anywhere.
+today's supersampling, not a new category. Its structural value is that it
+is the door TAA walks through next, and that TAA over a supersampled input
+is the best anti-aliasing available anywhere.
 
 **Settings sketch** (`[fix]`; names final at implementation, alongside
 performance.md's):
@@ -335,8 +335,8 @@ discontinuity, takes the current pixel unblended.
    frame at 90 Hz at the field Quest 3's measured eye size — and the clamp
    then rejects most of the history. The pass degrades to no anti-aliasing
    during fast turns, which is when aliasing is hardest to see, and works
-   fully when the ship is steady, which is when the shimmer is worst. Acceptable for a first
-   flight; not the end state.
+   fully when the ship is steady, which is when the shimmer is worst.
+   Acceptable for a first flight; not the end state.
 2. *v2 — the game's camera.* The flash detector already reads the game's
    camera buffer every frame; if it carries the view matrix (Phase 0
    reads it), the reprojection is exact for every static thing in the
@@ -358,10 +358,10 @@ mechanism is the cull guard's, with a different number: the raw tangents
 shifted by `jx·(r−l)/width` horizontally (one pixel is `(r−l)/width` in
 tangent units) and the vertical equivalent, the matrix elements following,
 the offset advanced at the frame boundary and held for the whole frame —
-the consistency rule `system_hook.cpp` already enforces, unchanged. The compositor never sees the jitter: the
-pass samples the current frame at the offset and lands it on the
-unjittered grid, so what is submitted is a frame drawn through the true
-projection, as today.
+the consistency rule `system_hook.cpp` already enforces, unchanged. The
+compositor never sees the jitter: the pass samples the current frame at
+the offset and lands it on the unjittered grid, so what is submitted is a
+frame drawn through the true projection, as today.
 
 **Interactions, each decided here:**
 
@@ -554,6 +554,60 @@ detected by its passes, and feature D for the specular sparkle that even
 a temporal pass leaves during motion. That is the "super-tuned" part, and
 it is the part only something living where EDVR lives can do.
 
+## What the plumbing opens: DLSS, and FSR 2
+
+The question follows naturally: with a jittered render, a named depth
+buffer and camera-derived motion vectors in hand, is DLSS within reach?
+Yes. Those three, plus the jitter offsets and the projection, are the
+input contract of DLSS Super Resolution, and DLAA is the same feature at a
+render scale of 1.0. NGX exposes it to D3D11 applications through the
+`NVSDK_NGX_D3D11_*` entry points (vendor-stated, the SDK's headers), so
+nothing about Elite being D3D11 stands in the way. What the plumbing does
+not change:
+
+- **NVIDIA RTX only.** Turing and later — the same slice performance.md's
+  foveation serves; a capability check at init and one log line where it
+  cannot run.
+- **The motion vectors are still camera-derived.** DLSS is trained on true
+  per-pixel vectors and offers no clamp of EDVR's to tune: where the
+  vectors are wrong — a passing ship, an NPC — it ghosts in its own way,
+  and the remedy is the injection mods' remedy, a reactive mask or living
+  with it. Feature B's own pass keeps that trade in EDVR's hands, which is
+  why it comes first.
+- **The input is post-HUD LDR.** The programming guide wants DLSS before
+  UI compositing and prefers linear HDR input (vendor-stated); the door
+  hands it a tonemapped frame with the HUD already on it. That is how every
+  injected DLSS runs, and it works, out of spec — a Phase 0 look at the
+  HUD's text is the price of knowing how well.
+- **No frame generation.** It is D3D12 and Vulkan only (vendor-stated),
+  and it is not wanted in a headset anyway, where the runtime already
+  reprojects and latency is the thing being protected.
+- **Licensing.** The SDK's binaries ship under NVIDIA's RTX SDKs licence,
+  believed to permit redistribution inside an application on its terms;
+  the licence text decides, and it would travel alongside the way
+  `src/d3d11/fsr/README.md` carries AMD's and performance.md proposes for
+  NVAPI's.
+
+**What it would be worth.** The prize is not the anti-aliasing — feature B
+is that, on every vendor — but performance.md's feature 1: at a render
+scale of 0.67–0.75 a temporal reconstruction is in a different class from
+FSR 1's spatial one, and DLSS is the best of them. On RTX hardware it
+would become the preferred engine behind `render_scale`, with DLAA the
+preferred engine at 1.0, both behind the same door and the same settings.
+FSR 2 (MIT, with a D3D11 backend believed from 2.2) is the every-vendor
+engine of the same shape — a step behind in quality, a step ahead in
+tunability — and rides identical plumbing.
+
+**The order, therefore.** Feature B's own pass first: all vendors, the
+clamp in hand, the smallest change to measure the plumbing against. Then,
+with Phase 0 items 3–5 answered (depth, camera, jitter — the same three
+measurements DLSS needs), DLSS as the RTX engine behind the door and FSR 2
+as the every-vendor one, each an engine choice on the existing setting
+(`temporal_aa = edvr | dlss | fsr2`) rather than a new feature. Cost
+believed about a millisecond per eye at Quest-3 sizes for DLSS, measured
+before it ships, and repaid many times over by the pixels not rendered
+when it is used as the upscaler.
+
 ## Considered and declined
 
 - **A ReShade preset instead.** ReShade has applied effects in the
@@ -579,15 +633,10 @@ it is the part only something living where EDVR lives can do.
   wrong kind, not a poor instance of the right one. Its one plausible role
   is as the spatial half of feature B (SMAA T2x's shape), which is a
   tuning question for after B exists.
-- **A vendored temporal upscaler as the TAA** — FSR 2 (MIT, and believed
-  to ship a D3D11 backend from 2.2; its release notes decide) or DLSS/DLAA
-  (NVIDIA-only, NGX's D3D11 path). Both want per-pixel motion vectors and a
-  jitter from the engine; the jitter EDVR can supply, the motion vectors
-  only as camera-derived ones from depth — precisely the input a
-  hand-rolled pass handles with a clamp and a black box handles less
-  predictably. Both also cost more per eye than a minimal TAA. If feature B
-  disappoints, FSR 2 rides the same plumbing (depth, jitter, camera motion)
-  and is the upgrade path; it is not the starting point.
+- **A vendored temporal upscaler as the starting point** — DLSS or FSR 2
+  before EDVR's own pass. Declined for the reasons in the section above:
+  the plumbing is measured against the pass whose every knob is EDVR's,
+  and the engines follow it.
 - **MSAA for the HUD only.** Above; feasible, expensive, subsumed.
 - **Driver-level overrides.** Do nothing on this renderer, as above; the
   guidance says so rather than sending players to try them.
@@ -659,6 +708,10 @@ today that the README and `edvr.ini` can carry:
    performance.md's item 2, which now has two consumers.
 9. **Which passes feature D would need to cover**, if it is ever built:
    the census's list of lighting draws beyond the one resolve.
+10. **NGX on the target GPUs**, when the engine choice is built: init and
+    per-eye feature creation on D3D11, the flags for a post-HUD LDR input,
+    the HUD's text under it, and the price — measured the way NVAPI's
+    caps are in performance.md's item 4.
 
 ## Phasing
 
@@ -678,6 +731,9 @@ today that the README and `edvr.ini` can carry:
    below 1.0; the two share every line but the factor.
 5. **Feature D**, if and only if residual specular sparkle is measured
    after 3.
+6. **DLSS and FSR 2 as engines behind the door**, once 3's plumbing is
+   measured — DLSS first, by the size of its win as the upscaler on RTX
+   hardware, and as performance.md's feature 1 gains a temporal engine.
 
 Each off by default, each with its own stand-down and its price in the
 log. None of it reads or writes game memory or code: the passes treat
