@@ -140,6 +140,15 @@ std::string gameBuildVersion();
 // actually been verified against.
 bool gameBuildIsVerified();
 
+// The builds gameBuildIsVerified() accepts, as "330683" or "330683, 332753",
+// for log lines that want to name them.
+//
+// This is read from the list rather than written out by hand at each call
+// site. A literal in a log string is right until the day someone adds a build
+// and misses one, and then every log in the wild carries a number that is no
+// longer the whole truth -- which is the one thing these lines exist to say.
+std::string verifiedBuildList();
+
 // Drops a breadcrumb the first time this line is reached and never again.
 // For marking progress through a per-frame path without writing 90 lines a
 // second: what matters is whether we got there at all, once.

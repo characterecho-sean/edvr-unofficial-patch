@@ -81,6 +81,15 @@ bool gameBuildIsVerified() {
     return false;
 }
 
+std::string verifiedBuildList() {
+    std::string out;
+    for (const char* known : kVerifiedBuilds) {
+        if (!out.empty()) out += ", ";
+        out += known;
+    }
+    return out;
+}
+
 void breadcrumb(const char* stage) {
     if (!stage) return;
 

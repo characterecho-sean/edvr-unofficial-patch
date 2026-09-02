@@ -251,10 +251,15 @@ BOOL CALLBACK initOnceCallback(PINIT_ONCE, PVOID, PVOID*) {
                           g_moduleDir->c_str());
 
     const std::string build = edvr::gameBuildVersion();
+    // The builds named here come from the list itself, never a literal. A
+    // hard-coded number in this line survived one game update reading as
+    // current when it no longer was, which is exactly the confusion the line
+    // exists to prevent.
+    const std::string verified = edvr::verifiedBuildList();
     if (edvr::gameBuildIsVerified()) {
-        edvr::Log::get().note("game build %s -- this is the build the fix was "
-                              "developed against",
-                              build.c_str());
+        edvr::Log::get().note("game build %s -- one of the builds this was checked "
+                              "against (%s)",
+                              build.c_str(), verified.c_str());
     } else {
         // Not a warning. Every fix here identifies its target by what that
         // target does or looks like, so an unfamiliar build is the expected
@@ -265,12 +270,12 @@ BOOL CALLBACK initOnceCallback(PINIT_ONCE, PVOID, PVOID*) {
         // build, which was true while it was pinned to one. It no longer is:
         // it recognises the code it edits, and reports what it found.
         edvr::Log::get().note(
-            "game build %s -- not the build this was developed against (330683). Every "
+            "game build %s -- not one of the builds this was checked against (%s). Every "
             "fix here finds its target by what that target does or looks like, not by "
             "which build compiled it, so an unfamiliar build is expected rather than a "
             "problem. If anything fails to match, the lines below say so and nothing is "
             "touched.",
-            build.empty() ? "(unreadable)" : build.c_str());
+            build.empty() ? "(unreadable)" : build.c_str(), verified.c_str());
     }
 
     if (g_missingExports) {
