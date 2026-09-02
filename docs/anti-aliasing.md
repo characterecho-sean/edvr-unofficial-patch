@@ -559,8 +559,8 @@ today that the README and `edvr.ini` can carry:
 7. **The HUD under TAA.** Text legibility with jitter on and off, and
    ghosting on a passing ship at the default clamp: the two failure modes
    that would decide the defaults.
-8. **The resolve kernel's edge behaviour under the crop** — performance
-   .md's item 2, which now has two consumers.
+8. **The resolve kernel's edge behaviour under the crop** —
+   performance.md's item 2, which now has two consumers.
 9. **Which passes feature D would need to cover**, if it is ever built:
    the census's list of lighting draws beyond the one resolve.
 
