@@ -375,17 +375,25 @@ Its safeguards, because they are the reason to trust it:
   *watches* that key; it never presses or sends it.
 - **Your viewpoint moves at most 10 m per axis.** Beyond that it clamps and says
   so — refusing outright would snap the view, which is worse when worn.
-- **It gives up rather than guessing.** If the search finds nothing, or the
-  value stops looking like a camera view, it reports "do not know" and falls
-  back to counting your camera-key presses. It never substitutes a number that
-  might be wrong.
+- **It counts your camera-key presses**, and since build 332753 that is all it
+  does. Reading the preset out of the game is off by default — see below.
 - **It expires.** The two halves of EDVR agree once a frame about which mode you
   are in; if the deciding half stops running, the half that moves your view
   stops trusting it within about a second and puts your viewpoint back.
-- **It degrades on game updates.** The marker will move when Elite updates; EDVR
-  then finds nothing, says so in the log, and falls back to key counting.
-  `camera_index_type_offset` can be corrected by hand without waiting for a
-  build.
+- **Reading the preset from the game is off** (`camera_index_track = 0`). It
+  was a correction on top of the press count: better where it worked, because
+  it needs no key bound and cannot drift. Finding the records means walking
+  every page the game holds, which is eleven to seventeen gigabytes, and a
+  failed search retries four times. Build 332753 moved the marker, so on that
+  build it was fifty to seventy gigabytes of reading per session that found
+  nothing. Turning it back on needs a marker measured on your own build;
+  [docs/build-332753.md](docs/build-332753.md) has one for 332753 and shows how
+  it was arrived at.
+- **What that costs you.** The press count is anchored to zero at launch and to
+  zero again at every new on-foot session, which the game's own journal
+  announces, so it is right unless a press goes unseen. When one does, the
+  count stays wrong until you leave the camera and come back. With the read on,
+  the next successful read fixed it for you.
 
 ## The terrain fix (cull guard)
 
@@ -537,7 +545,9 @@ rather than trusting a version number — its safeguards are described
 [below](#what-it-does-and-does-not-do).
 
 **Two things are measured from a specific build** (330683 / 4.4.0.3, the one
-this was developed against), and both degrade rather than guess:
+this was developed against), and both degrade rather than guess. The 4.4.1.0
+update (build 332753) moved the second of them and left the first alone —
+[docs/build-332753.md](docs/build-332753.md) has the full re-check:
 
 - **The transition flash fix** watches a viewpoint in a constant buffer — no
   instruction pattern to recognise, only a size and an offset. So it checks the
@@ -546,9 +556,9 @@ this was developed against), and both degrade rather than guess:
   at the old offset will not move like a viewpoint, and the fix disables itself
   and says so. It also switches off for the session if it ever withholds
   continuously — permanent judder would be worse than the flash.
-- **Explorer Cam's camera marker** will also move on update; the fix then
-  reports "do not know", falls back to key counting, and
-  `camera_index_type_offset` can be corrected by hand — see its section above.
+- **Explorer Cam's camera marker** will also move on update — and did, in
+  332753. Reading the preset is now off by default and Explorer Cam counts key
+  presses instead; see its section above for what that costs.
 
 **Recurring false jumps are recognised and left alone.** Flying low over
 terrain, the game alternates between shadow cameras whose fixed separation looks

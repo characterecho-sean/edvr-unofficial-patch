@@ -24,6 +24,19 @@ namespace edvr {
 struct XinputBinding {
     uint16_t buttons = 0;
     uint8_t  trigger = 0;
+    // Buttons that must NOT be held for this to fire.
+    //
+    // Elite chords on a gamepad the way it does on a keyboard, and the two
+    // can share a button: the external camera toggle is DPad-Right WITH
+    // Face-Right, and cycling the view is DPad-Right alone. Watching the
+    // second without knowing about the first makes every toggle press also
+    // count as a view change -- the same "one press, two bindings" fault the
+    // keyboard path fixed in hotkeyWouldFire, arriving by a different door.
+    //
+    // The parser drops chorded gamepad slots, so a chord cannot be watched
+    // as a binding. It can still be watched as a VETO, which is all the
+    // unchorded binding needs to stay honest.
+    uint16_t notButtons = 0;
     bool     valid = false;
 };
 
@@ -31,6 +44,10 @@ struct XinputBinding {
 // into a binding. False for names this build cannot map -- said once in
 // the log with the raw name, so it can be reported and added.
 bool xinputTranslate(const char* eliteKey, XinputBinding* out);
+
+// Add `eliteKey`'s buttons to `out`'s veto mask. For teaching an unchorded
+// binding about a chord that shares its button.
+bool xinputVeto(const char* eliteKey, XinputBinding* out);
 
 // Poll the connected pads. Call once per frame from the frame boundary;
 // cheap for connected pads, throttled for empty slots.

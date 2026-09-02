@@ -242,7 +242,10 @@ struct Region {
 };
 
 struct State {
-    bool      track = true;
+    bool      track = false;
+    // So the off notice is said once, and again after a hot-reload
+    // that switches it back off.
+    bool      offNoted = false;
     size_t    ordinal = 11;          // 6ad.8b, stable across two launches
     uintptr_t typeOffset = 0x4D71C50;
     size_t    valueOffset = 0x10;
@@ -1189,7 +1192,27 @@ CameraViewBackoff cameraViewRebuildBackoff(uint32_t runs, uint64_t dueMs,
 
 void cameraViewConfigure() {
     Config& cfg = Config::get();
-    g_s.track = cfg.getBool("d3d11.camera_index_track", true);
+    const bool wasTracking = g_s.track;
+    g_s.track = cfg.getBool("d3d11.camera_index_track", false);
+    // OFF is the shipped state now, and silence would read as a fault. The
+    // one thing this module must never do is stop without saying so: every
+    // other way it can fail already announces itself, and a default that
+    // went quiet would be the exception that sends someone hunting.
+    if (!g_s.track) {
+        if (!g_s.offNoted || wasTracking) {
+            g_s.offNoted = true;
+            Log::get().note(
+                "camera view: off (d3d11.camera_index_track = 0), which is the "
+                "shipped default. Which camera preset you are on is counted from "
+                "your keypresses instead of read from the game -- anchored at "
+                "launch and at every new on-foot session, so it is right unless a "
+                "press goes unseen, and leaving the camera and re-entering resets "
+                "it. Turning this on searches eleven to seventeen gigabytes for "
+                "the records and needs a marker measured on YOUR game build.");
+        }
+        return;
+    }
+    g_s.offNoted = false;
     g_s.ordinal = static_cast<size_t>(
         cfg.getIntInRange("d3d11.camera_index_ordinal", 11, 0, 4095));
     g_s.valueOffset = static_cast<size_t>(

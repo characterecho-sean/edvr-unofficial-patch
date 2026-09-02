@@ -200,10 +200,17 @@ bool parseElementIn(const std::string& text, const char* element, char* out,
 }
 
 // The GamePad slots of one element: the raw Elite key name, no
-// translation (the xinput watcher owns that table). A slot with a
-// Modifier chord is skipped.
+// translation (the xinput watcher owns that table).
+//
+// A slot with a Modifier chord is skipped -- UNLESS the caller passes
+// modOut, in which case the chord is reported instead of hidden. Two
+// different questions share this walk: "which gamepad key fires this" wants
+// the unchorded slot only, and "does this element chord on a key somebody
+// else watches" wants exactly the ones the first question drops.
 bool parsePadIn(const std::string& text, const char* element, char* out,
-                size_t outLen, bool* present) {
+                size_t outLen, bool* present, char* modOut = nullptr,
+                size_t modLen = 0) {
+    if (modOut && modLen) modOut[0] = '\0';
     const size_t el = text.find(std::string("<") + element + ">");
     if (present) *present = el != std::string::npos;
     if (el == std::string::npos) return false;
@@ -224,7 +231,16 @@ bool parsePadIn(const std::string& text, const char* element, char* out,
             if (o != std::string::npos && o < slotEnd) slotEnd = o;
         }
         const size_t mod = text.find("<Modifier ", s);
-        if (mod != std::string::npos && mod < slotEnd) continue;
+        const bool chorded = mod != std::string::npos && mod < slotEnd;
+        if (chorded && !modOut) continue;
+        if (chorded) {
+            std::string modKey;
+            if (!attrAfter(text, mod, 160, "Key", &modKey)) continue;
+            snprintf(modOut, modLen, "%s", modKey.c_str());
+        } else if (modOut) {
+            // Asked for a chord and this slot has none: not an answer.
+            continue;
+        }
         snprintf(out, outLen, "%s", key.c_str());
         return true;
     }
@@ -302,6 +318,35 @@ bool eliteBindsLookupPadDir(const wchar_t* dirC, const char* element,
 bool eliteBindsLookupPad(const char* element, char* out, size_t outLen) {
     return eliteBindsLookupPadDir(bindingsDir().c_str(), element, out,
                                   outLen);
+}
+
+bool eliteBindsLookupPadMod(const char* element, char* out, size_t outLen) {
+    if (!element || !out || outLen == 0) return false;
+    out[0] = '\0';
+    const std::wstring dir = bindingsDir();
+    if (dir.empty()) return false;
+    // The same file walk as the lookups above, kept short because it wants
+    // only the newest maintained preset -- a stale file naming a chord that
+    // is no longer bound would veto a press for no reason.
+    WIN32_FIND_DATAW fd{};
+    HANDLE find = FindFirstFileW((dir + L"\\*.binds").c_str(), &fd);
+    if (find == INVALID_HANDLE_VALUE) return false;
+    std::wstring best;
+    FILETIME bestTime{};
+    do {
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+        if (best.empty() || CompareFileTime(&fd.ftLastWriteTime, &bestTime) > 0) {
+            best = fd.cFileName;
+            bestTime = fd.ftLastWriteTime;
+        }
+    } while (FindNextFileW(find, &fd));
+    FindClose(find);
+    if (best.empty()) return false;
+    std::string text;
+    if (!readWholeFile(dir + L"\\" + best, &text)) return false;
+    char key[48];
+    bool present = false;
+    return parsePadIn(text, element, key, sizeof(key), &present, out, outLen);
 }
 
 bool eliteBindsLookupDir(const wchar_t* dirC, const char* element, char* out,

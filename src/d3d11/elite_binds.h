@@ -41,6 +41,15 @@ bool eliteBindsLookup(const char* element, char* out, size_t outLen,
 // skipped -- watching half a chord would fire on a bare button the game
 // ignores. Same preset/file selection rules as the keyboard lookup.
 bool eliteBindsLookupPad(const char* element, char* out, size_t outLen);
+
+// The MODIFIER of an element's gamepad slot, when it has one -- the half
+// eliteBindsLookupPad throws away by skipping chorded slots.
+//
+// Wanted by a binding that shares a button with a chord and has to know when
+// to stand aside: watching DPad-Right for the view cycle means nothing unless
+// you can also tell that this particular DPad-Right came with Face-Right and
+// belongs to the camera toggle.
+bool eliteBindsLookupPadMod(const char* element, char* out, size_t outLen);
 bool eliteBindsLookupPadDir(const wchar_t* dir, const char* element,
                             char* out, size_t outLen);
 

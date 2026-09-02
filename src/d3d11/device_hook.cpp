@@ -103,6 +103,10 @@ struct State {
     // to keep in step, in exchange for nothing a working install uses.
     Hotkey externalCamKey;
     Hotkey extCamNextKey;
+    // And the other way round the ring. Elite binds the two directions
+    // separately, so watching only one counts only half of what the player
+    // does with the cycle.
+    Hotkey extCamPrevKey;
     // The player's own FSS enter/quit keys, adopted from their Elite
     // bindings like the camera keys above; they give the theater's mode
     // latch its frame-exact edges.
@@ -110,6 +114,11 @@ struct State {
     Hotkey fssQuitKey;
     Hotkey fssZoomStepKey;
     Hotkey fssZoomKey;
+    // The camera cycle on a gamepad. Elite's own defaults put the view
+    // cycle on the D-pad and the camera toggle on the SAME D-pad direction
+    // with a modifier, so these carry a veto as well as a button.
+    XinputBinding extCamNextPad;
+    XinputBinding extCamPrevPad;
     XinputBinding fssEnterPad;
     XinputBinding fssQuitPad;
     XinputBinding fssZoomStepPad;
@@ -511,6 +520,8 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
         // which is what the anchored two-step certification feeds on.
         headOffsetGateSetOnFootLive(journalOnFootKnown(), journalOnFoot(),
                                     journalStatusSamples());
+        headOffsetGateSetWakeLive(journalSupercruiseKnown(), journalSupercruise(),
+                                  journalInJumpTunnel());
         {
             const uint32_t entries = headOffsetGateEnterCount();
             if (entries != g_state->lastCameraEnters) {
@@ -583,6 +594,26 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
         if (keysMeanGame && g_state->extCamNextKey.pressed()) {
             cameraViewNotePress();
             headOffsetGateViewBumped();
+        }
+        // The witness call is deliberately the same one: what certification
+        // needs is that the player's finger moved at this instant, not which
+        // way round the cycle it sent them.
+        if (keysMeanGame && g_state->extCamPrevKey.pressed()) {
+            cameraViewNotePress();
+            headOffsetGateViewUnbumped();
+        }
+        // AND THE SAME PRESSES ON A GAMEPAD. Elite binds the view cycle to
+        // the D-pad by default and the keyboard arrows only as a secondary,
+        // so watching the keyboard alone misses every press a pad player
+        // makes -- which reads downstream as a count that is quietly one or
+        // two behind, with nothing to say why (field, 2026-09-02).
+        if (keysMeanGame && xinputPressed(g_state->extCamNextPad)) {
+            cameraViewNotePress();
+            headOffsetGateViewBumped();
+        }
+        if (keysMeanGame && xinputPressed(g_state->extCamPrevPad)) {
+            cameraViewNotePress();
+            headOffsetGateViewUnbumped();
         }
         // The FSS theater's mode latch: the player's own FSS keys give
         // frame-exact edges -- press enter and the screen is up THIS
@@ -806,6 +837,24 @@ void readoptGameBindings() {
         }
     }
     {
+        const auto before = g_state->extCamPrevKey.key();
+        if (eliteBindsLookup("VanityCameraScrollLeft", b, sizeof(b))) {
+            g_state->extCamPrevKey.setBinding(b);
+            if (g_state->extCamPrevKey.key() != before) {
+                changed = true;
+                Log::get().note("hotkey: your Elite bindings changed -- "
+                                "external_camera_prev is now %s.", b);
+            }
+        } else if (before != 0) {
+            changed = true;
+            g_state->extCamPrevKey.setBinding("");
+            Log::get().note(
+                "hotkey: your Elite bindings changed and the previous-view key "
+                "is no longer on a keyboard key, so the old key is no longer "
+                "watched.");
+        }
+    }
+    {
         char fb[48];
         if (eliteBindsLookup("ExplorationFSSEnter", fb, sizeof(fb))) {
             g_state->fssEnterKey.setBinding(fb);
@@ -816,6 +865,22 @@ void readoptGameBindings() {
             g_state->fssQuitKey.setBinding(fb);
         } else {
             g_state->fssQuitKey.setBinding("");
+        }
+        char camMod2[40] = {0};
+        const bool haveCamMod2 =
+            eliteBindsLookupPadMod("PhotoCameraToggle_Humanoid", camMod2,
+                                   sizeof(camMod2)) ||
+            eliteBindsLookupPadMod("PhotoCameraToggle", camMod2,
+                                   sizeof(camMod2));
+        g_state->extCamNextPad = XinputBinding{};
+        if (eliteBindsLookupPad("VanityCameraScrollRight", fb, sizeof(fb)) &&
+            xinputTranslate(fb, &g_state->extCamNextPad) && haveCamMod2) {
+            xinputVeto(camMod2, &g_state->extCamNextPad);
+        }
+        g_state->extCamPrevPad = XinputBinding{};
+        if (eliteBindsLookupPad("VanityCameraScrollLeft", fb, sizeof(fb)) &&
+            xinputTranslate(fb, &g_state->extCamPrevPad) && haveCamMod2) {
+            xinputVeto(camMod2, &g_state->extCamPrevPad);
         }
         g_state->fssEnterPad = XinputBinding{};
         if (eliteBindsLookupPad("ExplorationFSSEnter", fb, sizeof(fb))) {
@@ -885,6 +950,7 @@ State& ensureState() {
         // focus rule. See hotkey.h.
         g_state->externalCamKey.setGameMirrored(true);
         g_state->extCamNextKey.setGameMirrored(true);
+        g_state->extCamPrevKey.setGameMirrored(true);
         g_state->fssEnterKey.setGameMirrored(true);
         g_state->fssQuitKey.setGameMirrored(true);
         if (Config::get().getBool("hotkey.read_game_bindings", true)) {
@@ -899,6 +965,14 @@ State& ensureState() {
                 g_state->extCamNextKey.setBinding(b);
                 Log::get().note("hotkey: external_camera_next adopted from "
                                 "your Elite bindings: %s", b);
+            }
+            if (eliteBindsLookup("VanityCameraScrollLeft", b, sizeof(b))) {
+                g_state->extCamPrevKey.setBinding(b);
+                Log::get().note("hotkey: external_camera_prev adopted from "
+                                "your Elite bindings: %s. Cycling backwards "
+                                "now moves the counted view backwards too; "
+                                "before this it moved the game and not the "
+                                "count.", b);
             }
             if (eliteBindsLookup("ExplorationFSSEnter", b, sizeof(b))) {
                 g_state->fssEnterKey.setBinding(b);
@@ -923,6 +997,38 @@ State& ensureState() {
             }
             {
                 char pk[40];
+                // The camera toggle's gamepad chord, if it has one. Not
+                // watched as a binding -- it is read only so the view-cycle
+                // bindings know which presses are not theirs.
+                char camMod[40] = {0};
+                const bool haveCamMod =
+                    eliteBindsLookupPadMod("PhotoCameraToggle_Humanoid",
+                                           camMod, sizeof(camMod)) ||
+                    eliteBindsLookupPadMod("PhotoCameraToggle", camMod,
+                                           sizeof(camMod));
+                g_state->extCamNextPad = XinputBinding{};
+                if (eliteBindsLookupPad("VanityCameraScrollRight", pk,
+                                        sizeof(pk)) &&
+                    xinputTranslate(pk, &g_state->extCamNextPad)) {
+                    const bool vetoed =
+                        haveCamMod &&
+                        xinputVeto(camMod, &g_state->extCamNextPad);
+                    Log::get().note(
+                        "hotkey: the next-view key is also on your gamepad: "
+                        "%s.%s", pk,
+                        vetoed ? " Your camera toggle chords on the same "
+                                 "button, so a press with that modifier held "
+                                 "is left to the toggle."
+                               : "");
+                }
+                g_state->extCamPrevPad = XinputBinding{};
+                if (eliteBindsLookupPad("VanityCameraScrollLeft", pk,
+                                        sizeof(pk)) &&
+                    xinputTranslate(pk, &g_state->extCamPrevPad)) {
+                    if (haveCamMod) xinputVeto(camMod, &g_state->extCamPrevPad);
+                    Log::get().note("hotkey: the previous-view key is also on "
+                                    "your gamepad: %s.", pk);
+                }
                 g_state->fssEnterPad = XinputBinding{};
                 if (eliteBindsLookupPad("ExplorationFSSEnter", pk,
                                         sizeof(pk)) &&

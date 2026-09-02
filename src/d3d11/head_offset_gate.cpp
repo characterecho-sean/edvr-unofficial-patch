@@ -99,7 +99,7 @@ struct Gate {
     uint32_t gateIdleFrames = 0;         // frames with neither panel nor scene
     // Scene-without-panel frames OUTSIDE the camera since the panel was last
     // seen: ship or SRV time. The panel returning after enough of this is a
-    // NEW on-foot session, and the game resets its camera view to 0 across
+    // NEW on-foot session. The game does NOT reset its camera view across
     // that boundary -- see the reset at the panelNow block.
     uint32_t gateAwayScene = 0;
     bool     gateExternal = false;       // the latch itself
@@ -124,6 +124,12 @@ struct Gate {
     bool     gateViewWarned = false;
     bool     gatePanelSeenNoted = false;
     bool     gateViewSynced = false;
+
+    // The wake edge. `wakeKnown` false means the status file has not answered
+    // yet, and an unknown-to-true transition is not an edge, only the first
+    // thing we happened to see.
+    bool     wakeKnown = false;
+    bool     wakeLast = false;
     bool     gateViewEverRead = false;   // something has supplied a real index
     bool     gateViewLostNoted = false;
     // The view bridge: a read that has died is covered by the counted view
@@ -277,12 +283,66 @@ void headOffsetGateSetKeyBound(bool bound) { g.gateKeyBound = bound; }
 void headOffsetGateSetNextKeyBound(bool bound) { g.gateHaveNextKey = bound; }
 
 void headOffsetGateSetOnFootLive(bool known, bool onFoot, uint32_t sample) {
+    // STEPPING OUT OF A VEHICLE: > 5 BECOMES 0, AND ANYTHING ELSE IS KEPT.
+    //
+    // The game's own rule, and it is a clamp rather than a fold (field,
+    // 2026-09-02). A vehicle's camera cycle is longer than the six on foot --
+    // 8 in an SRV, up to 11 in a ship -- and stepping out of one on a preset
+    // the on-foot cycle does not have puts you on 0. Land on a preset it DOES
+    // have and you keep it.
+    //
+    // Modulo was the wrong guess: 8 folds to 2, and the game gives 0.
+    const bool steppingOut = known && onFoot && g.liveOnFootKnown && !g.liveOnFoot;
+    if (steppingOut && g.gateViewCount > 0 &&
+        g.gateViewIndex >= g.gateViewCount) {
+        Log::get().note(
+            "external camera view: %d is past the end of the on-foot cycle "
+            "(0..%d), so stepping out puts it back to 0 -- the game does the "
+            "same. A vehicle preset the on-foot cycle also has would have been "
+            "kept.",
+            g.gateViewIndex, g.gateViewCount - 1);
+        g.gateViewIndex = 0;
+    }
     g.liveOnFootKnown = known;
     g.liveOnFoot = onFoot;
     g.liveSample = sample;
     // The first true of a foot session retires the disembark grace: from
     // here the flag describes THIS leg, and false means boarding again.
     if (known && onFoot) g.liveOnFootSeenThisFoot = true;
+}
+
+void headOffsetGateSetWakeLive(bool known, bool inSupercruise, bool inTunnel) {
+    if (!known) {
+        // No status file: remember nothing, so the first real sample after it
+        // comes back is not read as an edge it never saw.
+        g.wakeKnown = false;
+        return;
+    }
+    // EITHER DIRECTION. Dropping out of supercruise rebuilds the scene as
+    // surely as entering it does, and the field asked for both (2026-09-02).
+    // Rising-edge-only was the conservative first cut and it was too narrow:
+    // it would have left the count untouched across every arrival.
+    //
+    // The tunnel is folded in on the same terms. Its own exit lands in
+    // supercruise, so that transition is usually seen twice in quick
+    // succession, and the second is free because the count is already 0.
+    const bool wake = inSupercruise || inTunnel;
+    const bool changed = g.wakeKnown && wake != g.wakeLast;
+    const bool entering = wake;
+    g.wakeKnown = true;
+    g.wakeLast = wake;
+    if (!changed || g.gateViewIndex == 0) {
+        // Already at 0 is not news, and saying so at every jump would bury
+        // the times it actually moved.
+        return;
+    }
+    Log::get().note(
+        "head offset: a wake (%s supercruise) -- the counted view goes from "
+        "%d back to 0. The transition rebuilds the camera and the game's "
+        "preset goes with it (field, 2026-09-02). A landing does not.",
+        entering ? "into" : "out of", g.gateViewIndex);
+    g.gateViewIndex = 0;
+    g.gateBridgeStarted = false;
 }
 
 uint32_t headOffsetGateEnterCount() { return g.gateCameraEnters; }
@@ -315,14 +375,17 @@ void headOffsetGateNewFootSession(const char* source, bool journalSaysSo) {
     }
     if (g.lastFootResetMs != 0) return;
     g.lastFootResetMs = stampMs();
-    g.gateViewIndex = 0;
+    // THE COUNT IS NOT TOUCHED HERE ANY MORE. See the header: the field says
+    // a landing leaves the on-foot preset where it was, and the reset that
+    // used to live on this line was throwing away a correct number at every
+    // airlock.
     g.gateBridgeStarted = false;   // any held view belongs to the old session
     g.liveOnFootSeenThisFoot = false;   // this session's flag not yet observed
     Log::get().note(
-        "head offset: a new on-foot session (%s). The game resets its camera "
-        "view to 0 across this, so the view count and any held view restart "
-        "from 0 with it.",
-        source);
+        "head offset: a new on-foot session (%s). The counted view stays at "
+        "%d -- the game keeps your camera preset across a landing. A wake is "
+        "what resets it.",
+        source, g.gateViewIndex);
 }
 
 void headOffsetGateNoteEmbark() { g.footGraceJournal = false; }
@@ -374,9 +437,8 @@ void headOffsetGateKeyPressed() {
     // 0 on entry does not resynchronise the count, it desynchronises it by
     // exactly however far the player had cycled before.
     Log::get().note("external camera key pressed: intent %s%s. View index still %d "
-                    "(the game keeps the view across toggles WITHIN an on-foot "
-                    "session; a ship or vehicle leg resets it to 0, and the "
-                    "count restarts with it).",
+                    "(the game keeps the view across camera toggles and across "
+                    "landings; a low or high wake is what resets it).",
                     g.gateIntent ? "SET -- the head offset may arm when the flat "
                                    "panel stops"
                                  : "CLEARED -- the head offset comes off now",
@@ -386,12 +448,61 @@ void headOffsetGateKeyPressed() {
                     g.gateViewIndex);
 }
 
-void headOffsetGateViewBumped() {
+// EVERYTHING THAT LANDS IN THE COUNTED VIEW COMES THROUGH HERE.
+//
+// The on-foot cycle is the only one this gate cares about, and it is 6 long:
+// 0..5, rolling over at both ends. Other contexts are longer -- 8 in an SRV,
+// up to 11 in a ship and varying with its seat count (measured 2026-09-02) --
+// and the game appears to fold a larger index back into this range rather
+// than carry it, so folding is what we do too.
+//
+// Modulo rather than a pair of clamps. Clamping is right only for a step of
+// exactly one from inside the range, which is all the count could ever do
+// while stepping was its only writer. The read is the other writer, and it
+// can hand over an index from a context with a longer ring; that is a value
+// to fold, not to clamp to 5 and quietly call the last preset. C++ keeps the
+// sign of the dividend, so the negative case needs the second line.
+// The on-foot ring is 6 and wraps. A vehicle's is longer and this does not
+// need to know how much longer: off foot the count simply runs on unwrapped,
+// and the transition back is where the game's own rule is applied.
+//
+// One bit of context, not a taxonomy of vehicles. Unknown counts as on foot,
+// which is what a rig with no status file has always done.
+int currentRing() {
+    const bool offFoot = g.liveOnFootKnown && !g.liveOnFoot;
+    return offFoot ? 0 : g.gateViewCount;
+}
+
+int normalizeView(int v) {
+    const int n = currentRing();
+    // 0 is a legitimate configuration meaning "do not wrap", and a negative
+    // view is not a view under any configuration.
+    if (n <= 0) return v < 0 ? 0 : v;
+    v %= n;
+    if (v < 0) v += n;
+    return v;
+}
+
+// Both directions share this, because a ring walked one way and a ring walked
+// the other are the same ring, and giving them separate arithmetic is how they
+// drift apart.
+void headOffsetGateStepView(int delta) {
     g.gateHaveNextKey = true;
-    ++g.gateViewIndex;
-    if (g.gateViewCount > 0 && g.gateViewIndex >= g.gateViewCount) {
-        g.gateViewIndex = 0;
-    }
+
+    // EVERY PRESS COUNTS, WHEREVER IT IS MADE.
+    //
+    // On foot the ring is 6 and wraps. In a vehicle the count runs on
+    // unwrapped, because the vehicle's own cycle length is not modelled: a
+    // constant would be right for some ships and wrong for others, and a
+    // setting would ask the user for a number they have no reason to know.
+    // Running on is exact until somebody cycles right round a vehicle's own
+    // cycle without stopping, and stepping out or the next wake corrects even
+    // that.
+    // Both ends. Going below zero is what the forward-only version never had
+    // to think about, and stopping at zero rather than rolling round would
+    // put the count one behind for the rest of the session, at the one moment
+    // the player is trying to get back to a view they know.
+    g.gateViewIndex = normalizeView(g.gateViewIndex + delta);
     Log::get().note("external camera view -> %d%s (wanted %s). Counted from "
                     "keypresses, not read from the game -- if this disagrees with "
                     "what you see, leave the camera and re-enter to resynchronise.",
@@ -400,6 +511,10 @@ void headOffsetGateViewBumped() {
                                                "fix.head_offset_view_count)",
                     g.gateWantView < 0 ? "any" : "one specific view");
 }
+
+void headOffsetGateViewBumped() { headOffsetGateStepView(+1); }
+
+void headOffsetGateViewUnbumped() { headOffsetGateStepView(-1); }
 
 void headOffsetGateSetView(int view) { g.viewOverride = view; }
 
@@ -450,7 +565,7 @@ void headOffsetGateFrame(uint32_t frameNo, uint32_t panelDraws, uint32_t eyeDraw
 
     if (panelNow) {
         // A NEW ON-FOOT SESSION: the panel is back after a vehicle leg, and
-        // the game resets its external-camera view to 0 across that boundary.
+        // the game keeps its external-camera view across that boundary.
         // "The game remembers the view across toggles" -- printed on every
         // press -- turned out to be true only WITHIN an on-foot session:
         // at every observed second landing the game was back on view 0 while
@@ -980,7 +1095,11 @@ void headOffsetGateFrame(uint32_t frameNo, uint32_t panelDraws, uint32_t eyeDraw
                                 "press no longer desyncs anything.",
                                 gameView, g.gateViewIndex);
             }
-            g.gateViewIndex = gameView;
+            // Folded, not taken raw: a read taken while the game still
+            // holds a longer context's index would otherwise put the count
+            // somewhere the on-foot cycle cannot reach, and nothing
+            // downstream range-checks it.
+            g.gateViewIndex = normalizeView(gameView);
         } else {
             if (!g.gateSyncRefusedNoted) {
                 g.gateSyncRefusedNoted = true;
