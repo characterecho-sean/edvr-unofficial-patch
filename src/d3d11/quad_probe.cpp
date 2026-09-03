@@ -40,9 +40,16 @@ bool kindIsIndexed(char k) { return k == 'I' || k == 'X'; }
 constexpr uint32_t kMaxVertexBytes = 4u << 20;
 
 // Matching draws recorded in the capture frame. The hunt that built this
-// found two; a frame with sixteen same-signature draws is a different
-// mystery, and the log says how many were left uncopied.
-constexpr uint32_t kMaxOccurrences = 16;
+// found two, and sixteen was generous for that. It is not generous for a
+// cockpit holo panel: those carry ten or more draws of one signature a
+// frame -- 2026-09-03, hunting a marker that is one of about ten identical
+// 30-index draws -- and sixteen occurrences came back holding only THREE
+// distinct ones, the rest being repeats, with the marker never reached.
+//
+// A cap that truncates before the interesting draw makes the instrument
+// answer the wrong question while looking like it worked. 64 costs a few
+// kilobytes of staging and reaches the whole panel.
+constexpr uint32_t kMaxOccurrences = 64;
 
 // Index bytes the capture will hold across all occurrences.
 constexpr uint32_t kIbStageBytes = 64u << 10;
