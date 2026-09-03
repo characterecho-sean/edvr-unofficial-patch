@@ -4344,17 +4344,31 @@ void vScreenFrameBoundary() {
         // acceptance, which is the field's test of the reprojection.
         {
             static uint32_t lastTemporalTreats = 0;
+            static uint64_t lastTemporalMs = 0;
             uint32_t treated = 0;
             double avgMs = 0.0, maxMs = 0.0, rejectPct = 0.0, clipPct = 0.0;
             if (temporalPassTotals(&treated, &avgMs, &maxMs, &rejectPct,
                                    &clipPct) &&
                 treated != lastTemporalTreats) {
+                // The frame rate the eye-submits imply over the interval:
+                // the one number that says whether the whole frame fits the
+                // headset's period, which no pass's own price can (the
+                // Pimax DLSS flight of 2026-09-03 ran at 60-76 fps against
+                // 90, worked out by hand from these totals).
+                const uint64_t nowMs = stampMs();
+                double fps = 0.0;
+                if (lastTemporalMs && nowMs > lastTemporalMs) {
+                    fps = static_cast<double>(treated - lastTemporalTreats) * 500.0 /
+                          static_cast<double>(nowMs - lastTemporalMs);
+                }
                 lastTemporalTreats = treated;
+                lastTemporalMs = nowMs;
                 Log::get().note(
                     "temporal aa totals: %u eye-submits treated this session, "
                     "%.2f ms per eye on average (max %.2f); history rejected "
-                    "for %.1f%% of pixels and clipped for %.1f%%.",
-                    treated, avgMs, maxMs, rejectPct, clipPct);
+                    "for %.1f%% of pixels and clipped for %.1f%%; %.0f frames "
+                    "per second over the last interval.",
+                    treated, avgMs, maxMs, rejectPct, clipPct, fps);
                 // The registration instrument's verdict so far, its own
                 // line: which candidate delta the history lands best with.
                 char reg[640];
