@@ -2,8 +2,8 @@
 
 #include <windows.h>
 
-#include <cstdio>
-#include <cstdlib>   // strtoul: the index-count list   // _snprintf_s: the candidate list
+#include <cstdio>    // _snprintf_s: the candidate list
+#include <cstdlib>   // strtoul: the index-count list
 #include <string>
 
 #include "../common/config.h"
@@ -71,13 +71,16 @@ constexpr uint32_t kMaxIndices = 8;
 //   IS, and the reason none of the sizes in this file were ever the
 //   invariant.
 //
-// So after enough frames of watching one panel, a count that is the only
-// one behaving that way is the marker, whatever number it happens to be on
-// this rig. Adopted out loud, and any ini list wins over it.
+// So after enough frames of watching one panel, the count that behaves that
+// way MOST is the marker, whatever number it happens to be on this rig --
+// this HUD blinks a lot of small things occasionally, and the marker pulses,
+// so it leads them clearly or the evidence is not good enough to act on.
+// Adopted out loud, and any ini list wins over it.
 constexpr uint32_t kMinShapeIndices = 60;    // a quad is 6; the marker is not
 constexpr uint32_t kCalibFrames = 600;       // panel frames before deciding
-constexpr uint32_t kCalibLoPct = 3;          // a pulse is a minority...
-constexpr uint32_t kCalibHiPct = 50;         // ...but not a rarity
+constexpr uint32_t kCalibLoPct = 5;          // below this it is incidental
+constexpr uint32_t kCalibHiPct = 95;         // at 100 it is furniture, not a pulse
+constexpr uint32_t kCalibLead = 2;           // and it must lead the next by this
 bool     g_calibrated = false;
 
 bool     g_off = false;
@@ -99,8 +102,9 @@ bool     g_saidNoMatch = false;
 // The flash is the one draw that is there on some frames and not others --
 // that is what a pulse is, and it is the property that does not change with
 // resolution, build or ship. Everything else on the panel is drawn every
-// frame. So a count seen in a minority of frames is a candidate, and the
-// log can hand the owner the number to set instead of asking for a census.
+// frame. So a count seen intermittently is a candidate, the leader among
+// them is used, and the log names them all either way rather than asking
+// the owner for a census.
 constexpr uint32_t kSeenSlots = 24;
 struct Seen {
     uint32_t indices = 0;
@@ -247,25 +251,42 @@ void wakePulseReport() {
     // say which, and picking either would be suppressing a draw on a guess.
     if (!g_calibrated && !g_saidNoMatch && g_dropped == 0 &&
         g_panelFrames >= kCalibFrames) {
-        uint32_t only = 0, hits = 0;
+        // Rank them, do not count them. The first build of this asked for
+        // EXACTLY ONE candidate and a Q3 produced eight: 891 at 56 per cent
+        // of frames, then 60 at 21, 120 at 18, and five more below 8. Seven
+        // were in band and the right one was above the ceiling, so it
+        // refused -- correctly by its own rule, and uselessly.
+        //
+        // The shape of that data is the answer. This HUD blinks a lot of
+        // small things occasionally; the marker pulses, so it is drawn far
+        // more often than any of them. Take the leader, and only when it
+        // leads clearly: 56 against 21 is a different claim from 8 against 7.
+        uint32_t best = 0, bestPct = 0, runnerUp = 0;
         for (uint32_t i = 0; i < g_seenCount; ++i) {
             const uint32_t pct = g_seen[i].frames * 100 / g_panelFrames;
             if (pct < kCalibLoPct || pct > kCalibHiPct) continue;
-            only = g_seen[i].indices;
-            ++hits;
+            if (pct > bestPct) {
+                runnerUp = bestPct;
+                bestPct = pct;
+                best = g_seen[i].indices;
+            } else if (pct > runnerUp) {
+                runnerUp = pct;
+            }
         }
-        if (hits == 1) {
+        if (best && bestPct >= runnerUp * kCalibLead) {
             g_calibrated = true;
-            g_indices[0] = only;
+            g_indices[0] = best;
             g_indexCount = 1;
             Log::get().note(
                 "wake pulse: none of the known index counts landed in this "
-                "%ux%u panel, but exactly one textureless shape on it is "
-                "drawn intermittently -- %u indices -- and that is what a "
-                "pulse looks like. Using it. Set advanced.wake_pulse_indices "
-                "if this is the wrong draw, and it is worth reporting either "
-                "way so the shipped set can grow.",
-                g_panelW, g_panelH, only);
+                "%ux%u panel, so it was worked out from behaviour instead. Of "
+                "the textureless shapes drawn on it, %u indices appears in "
+                "%u%% of frames and the next most frequent in %u%% -- a pulse "
+                "leading incidental blinking. Using it. Set "
+                "advanced.wake_pulse_indices if this is the wrong draw, and "
+                "it is worth reporting either way so the shipped set can "
+                "grow.",
+                g_panelW, g_panelH, best, bestPct, runnerUp);
             return;
         }
     }
