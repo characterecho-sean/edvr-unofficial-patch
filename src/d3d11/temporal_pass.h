@@ -83,10 +83,14 @@ bool temporalPassTotals(uint32_t* treated, double* avgMs, double* maxMs,
 // earlier (a pipelined renderer lands its frame a pose late), the game's
 // camera rows read as world->view, and the same rows transposed; and the
 // selected candidate's clip share split by head speed (still, slow,
-// fast). Formats the text; false when nothing has run. With the ship
-// steady and the head turning, the lowest clip share names the exact
-// association, and a share that climbs with head speed for ALL of them
-// is the translation v2's depth is for.
+// fast). Each share carries the mean SIZE of its clips in luma: a nudge
+// on a text edge is a few 255ths, a history that landed somewhere else
+// is tens, and a count alone cannot tell them apart (the main menu's
+// turning ship model clips under every candidate alike, for instance).
+// Formats the text; false when nothing has run. With the scene still and
+// the head turning, the lowest share and size name the exact
+// association, and a size that climbs with head speed for ALL of them is
+// the translation v2's depth is for.
 bool temporalPassRegistration(char* buf, size_t n);
 
 void temporalPassShutdown();

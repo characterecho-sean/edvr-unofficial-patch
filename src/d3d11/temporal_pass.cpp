@@ -33,7 +33,7 @@ Texture2D<float4> H : register(t1);      // the history, region-sized, on the un
 SamplerState L : register(s0);           // bilinear, clamp
 RWTexture2D<float4> O : register(u0);    // the output, region-sized, the game's format
 RWTexture2D<float4> N : register(u1);    // the new history
-RWStructuredBuffer<uint> Stats : register(u2);   // 0 rejected, 1 clipped; then (rejected, clipped) per candidate, four of them
+RWStructuredBuffer<uint> Stats : register(u2);   // 0 rejected, 1 clipped, 2 the clips' size (luma/255, summed); then the same three per candidate, four of them
 cbuffer P : register(b0) {
     int4   region;      // x0 y0 x1 y1: this eye's pixels in S (x1, y1 exclusive)
     int2   size;        // the region's size = the output's
@@ -129,12 +129,19 @@ bool fetchHistory(float2 p, float3 r0, float3 r1, float3 r2, out float3 hy) {
     hy = rgbToYcocg(catmullRom((pp + 0.5) / float2(size), float2(size)).rgb);
     return true;
 }
-groupshared uint gCount[10];
+// How far a clip moved the history, in luma, as a count of 1/255ths: a
+// nudge on a text edge is a few, a history that landed somewhere else
+// entirely is tens. Summed per reading, it separates the two where a
+// count of clipped pixels cannot.
+uint clipSize(float3 hc, float3 hy) {
+    return uint(saturate(abs(hc.x - hy.x)) * 255.0 + 0.5);
+}
+groupshared uint gCount[15];
 [numthreads(8, 8, 1)]
 void main(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
-    if (gi < 10) gCount[gi] = 0;
+    if (gi < 15) gCount[gi] = 0;
     GroupMemoryBarrierWithGroupSync();
-    uint count[10] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+    uint count[15] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
     if (id.x < (uint)size.x && id.y < (uint)size.y) {
         float2 p = float2(id.xy);
         int2 ci = int2(id.xy);
@@ -174,7 +181,10 @@ void main(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
             float3 hy;
             if (fetchHistory(p, dR0.xyz, dR1.xyz, dR2.xyz, hy)) {
                 float3 hc = clipToBox(boxMin, boxMax, hy);
-                if (any(abs(hc - hy) > 1e-4)) count[1] = 1;
+                if (any(abs(hc - hy) > 1e-4)) {
+                    count[1] = 1;
+                    count[2] = clipSize(hc, hy);
+                }
                 outc = lerp(cur.rgb, ycocgToRgb(hc), blend);
                 used = true;
             }
@@ -188,10 +198,13 @@ void main(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
                 float3 r2 = c == 0 ? c0R2.xyz : (c == 1 ? c1R2.xyz : (c == 2 ? c2R2.xyz : c3R2.xyz));
                 float3 h;
                 if (!fetchHistory(p, r0, r1, r2, h)) {
-                    count[2 + c * 2] = 1;
+                    count[3 + c * 3] = 1;
                 } else {
                     float3 hc2 = clipToBox(boxMin, boxMax, h);
-                    if (any(abs(hc2 - h) > 1e-4)) count[3 + c * 2] = 1;
+                    if (any(abs(hc2 - h) > 1e-4)) {
+                        count[4 + c * 3] = 1;
+                        count[5 + c * 3] = clipSize(hc2, h);
+                    }
                 }
             }
         }
@@ -201,11 +214,11 @@ void main(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
         N[id.xy] = float4(o, 1.0);
     }
     // One atomic per group per counter, not per pixel.
-    [unroll] for (int k = 0; k < 10; ++k) {
+    [unroll] for (int k = 0; k < 15; ++k) {
         if (count[k] != 0) InterlockedAdd(gCount[k], count[k]);
     }
     GroupMemoryBarrierWithGroupSync();
-    if (gi < 10) InterlockedAdd(Stats[gi], gCount[gi]);
+    if (gi < 15) InterlockedAdd(Stats[gi], gCount[gi]);
 }
 )HLSL";
 
@@ -356,7 +369,7 @@ struct Slot {
     bool          hadHistory = false;
 };
 constexpr int kSlots = 8;
-constexpr int kStatCount = 10;
+constexpr int kStatCount = 16;   // 15 used; a 64-byte buffer
 Slot g_slots[kSlots];
 
 void releaseSlot(Slot& q) {
@@ -378,8 +391,10 @@ uint64_t g_clipped = 0;
 uint64_t g_candPix[4] = {};
 uint64_t g_candRej[4] = {};
 uint64_t g_candClip[4] = {};
+uint64_t g_candSize[4] = {};    // the clips' sizes, 1/255ths of luma, summed
 uint64_t g_bucketPix[3] = {};
 uint64_t g_bucketClip[3] = {};
+uint64_t g_bucketSize[3] = {};
 uint32_t g_bucketFrames[3] = {};
 constexpr float kStillDeg = 0.03f;   // under 2 deg/s at 72 Hz: tracking noise
 constexpr float kSlowDeg = 0.30f;    // under 22 deg/s: a glance
@@ -437,12 +452,14 @@ void pollSlots(ID3D11DeviceContext* ctx) {
                     for (int c = 0; c < 4; ++c) {
                         if (!q.candPixels[c]) continue;
                         g_candPix[c] += q.candPixels[c];
-                        g_candRej[c] += v[2 + c * 2];
-                        g_candClip[c] += v[3 + c * 2];
+                        g_candRej[c] += v[3 + c * 3];
+                        g_candClip[c] += v[4 + c * 3];
+                        g_candSize[c] += v[5 + c * 3];
                     }
                     const int b = q.headDeg < kStillDeg ? 0 : (q.headDeg < kSlowDeg ? 1 : 2);
                     g_bucketPix[b] += q.pixels;
                     g_bucketClip[b] += v[1];
+                    g_bucketSize[b] += v[2];
                     ++g_bucketFrames[b];
                 }
                 ctx->Unmap(q.staging, 0);
@@ -1086,7 +1103,7 @@ bool temporalPassRegistration(char* buf, size_t n) {
     static const char* const kNames[4] = {"head", "head one frame earlier",
                                           "camera", "camera transposed"};
     size_t used = 0;
-    auto put = [&](const char* fmt, double a, double b, unsigned long long c) {
+    auto put = [&](const char* fmt, double a, double b, double c) {
         if (used >= n) return;
         const int k = snprintf(buf + used, n - used, fmt, a, b, c);
         if (k > 0) used += static_cast<size_t>(k);
@@ -1104,10 +1121,14 @@ bool temporalPassRegistration(char* buf, size_t n) {
             continue;
         }
         const double px = static_cast<double>(g_candPix[k]);
-        put("clipped %.1f%%, off %.1f%% (%llu eye-frames)",
-            100.0 * static_cast<double>(g_candClip[k]) / px,
-            100.0 * static_cast<double>(g_candRej[k]) / px,
-            static_cast<unsigned long long>(g_candPix[k] / (g_lastW && g_lastH ? static_cast<uint64_t>(g_lastW) * g_lastH : 1)));
+        // The mean clip size over the CLIPPED pixels: how far a clipped
+        // history had strayed, 1/255ths of luma.
+        const double meanSize = g_candClip[k]
+            ? static_cast<double>(g_candSize[k]) / static_cast<double>(g_candClip[k])
+            : 0.0;
+        put("clipped %.1f%% by %.1f/255 on average, off %.1f%%",
+            100.0 * static_cast<double>(g_candClip[k]) / px, meanSize,
+            100.0 * static_cast<double>(g_candRej[k]) / px);
     }
     static const char* const kBuckets[3] = {"still", "slow", "fast"};
     if (used < n) {
@@ -1123,11 +1144,14 @@ bool temporalPassRegistration(char* buf, size_t n) {
             if (m > 0) used += static_cast<size_t>(m);
             continue;
         }
-        const int m = snprintf(buf + used, n - used, "%s%s %.1f%% (%u eye-frames)",
+        const double meanSize = g_bucketClip[b]
+            ? static_cast<double>(g_bucketSize[b]) / static_cast<double>(g_bucketClip[b])
+            : 0.0;
+        const int m = snprintf(buf + used, n - used, "%s%s %.1f%% by %.1f/255 (%u eye-frames)",
                                b ? ", " : "", kBuckets[b],
                                100.0 * static_cast<double>(g_bucketClip[b]) /
                                    static_cast<double>(g_bucketPix[b]),
-                               g_bucketFrames[b]);
+                               meanSize, g_bucketFrames[b]);
         if (m > 0) used += static_cast<size_t>(m);
     }
     return true;

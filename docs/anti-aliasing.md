@@ -671,9 +671,10 @@ lands each frame a pose late, and the game's own camera rows being the
 better source. So the third build carries the instruments, not a fix:
 every treated frame also judges four candidate deltas by the same clip
 (the head's as used, the head's one frame earlier, the camera rows as
-world→view, the same rows transposed) and prints their clip shares beside
-the used delta's clip share split by head speed (still, slow, fast) as a
-`temporal aa registration` line; and a depth probe (Phase 0 item 3,
+world→view, the same rows transposed) and prints their clip shares, each
+with the mean size of its clips in luma so a nudge on a text edge and a
+misplaced history read apart, beside the used delta's split by head speed
+(still, slow, fast) as a `temporal aa registration` line; and a depth probe (Phase 0 item 3,
 `src/d3d11/depth_probe.cpp`) reports which texture the eye draws bind as
 their depth target, its format and bind flags, whether a shader view can
 be made over it or it must be copied, which eye's it is by the order they
