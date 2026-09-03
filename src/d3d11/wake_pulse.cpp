@@ -2,7 +2,8 @@
 
 #include <windows.h>
 
-#include <cstdio>   // _snprintf_s: the candidate list
+#include <cstdio>
+#include <cstdlib>   // strtoul: the index-count list   // _snprintf_s: the candidate list
 #include <string>
 
 #include "../common/config.h"
@@ -48,10 +49,20 @@ constexpr char     kKind = 'X';
 // So the default is only ever right for one panel size, and the useful thing
 // this module does about it is NAME THE CANDIDATES in the log rather than
 // leave the owner to census it. See the intermittency table below.
-constexpr uint32_t kIndices = 1728;
+constexpr uint32_t kIndices = 1728;    // panel 2440x1996
+constexpr uint32_t kIndicesAlt = 891;  // panel 1002x820, same shader
+
+// A LIST, not a number, and that is the honest shape of it. Two measured
+// points -- 576 triangles on a 2440-wide panel, 297 on a 1002-wide one --
+// fit neither a linear law nor a square-root one, so the count cannot be
+// computed from the panel size with any confidence from two samples. What
+// it can be is a set of known values, each acted on only when it lands in
+// THIS panel with this shape, so a wrong entry costs nothing anywhere else.
+constexpr uint32_t kMaxIndices = 8;
 
 bool     g_off = false;
-uint32_t g_indices = kIndices;
+uint32_t g_indices[kMaxIndices] = {kIndices, kIndicesAlt};
+uint32_t g_indexCount = 2;
 uint64_t g_dropped = 0;
 uint64_t g_lastReported = 0;   // the count the last line printed
 uint32_t g_reports = 0;        // how many lines have been printed at all
@@ -96,22 +107,47 @@ void wakePulseConfigure(Config& cfg) {
         Log::get().note("wake_pulse \"%s\" is not stock or off; running "
                         "stock.", m.c_str());
     }
-    g_indices = static_cast<uint32_t>(
-        cfg.getIntInRange("advanced.wake_pulse_indices",
-                          static_cast<int>(kIndices), 1, 1000000));
+    // Comma-separated, and empty means the measured set. A list because the
+    // count is tessellation and every panel size has its own.
+    const std::string spec = cfg.getString("advanced.wake_pulse_indices", "");
+    uint32_t parsed[kMaxIndices];
+    uint32_t n = 0;
+    bool ok = true;
+    for (const char* p = spec.c_str(); *p && ok;) {
+        while (*p == ' ' || *p == ',' || *p == '	') ++p;
+        if (!*p) break;
+        char* end = nullptr;
+        const unsigned long v = strtoul(p, &end, 10);
+        if (end == p || v == 0 || v > 1000000 || n == kMaxIndices) { ok = false; break; }
+        parsed[n++] = static_cast<uint32_t>(v);
+        p = end;
+    }
+    if (!spec.empty() && (!ok || n == 0)) {
+        Log::get().note("wake_pulse_indices \"%s\" is not up to %u whole "
+                        "numbers separated by commas; the measured set is "
+                        "used instead.", spec.c_str(), kMaxIndices);
+    } else if (n) {
+        for (uint32_t i = 0; i < n; ++i) g_indices[i] = parsed[i];
+        g_indexCount = n;
+    } else {
+        g_indices[0] = kIndices;
+        g_indices[1] = kIndicesAlt;
+        g_indexCount = 2;
+    }
 
     if (was != g_off) {
         Log::get().note(
             "wake pulse: %s. With a high wake selected, a marker under the "
             "speed readout flashes in time with the target indicator -- both "
             "are drawn into the same holo panel. off drops the one draw that "
-            "paints it (%u indices of the GUI's textureless vector shader) "
+            "paints it (%u known index counts of the GUI's textureless vector "
+            "shader) "
             "on the frames the flash is on, and leaves the rest of the panel "
             "alone. That count is tessellation and depends on the panel's "
             "pixel size, so if the count below stays at zero this build "
             "will name the candidates it saw and one of them wants "
             "setting in advanced.wake_pulse_indices.",
-            g_off ? "off" : "stock", g_indices);
+            g_off ? "off" : "stock", g_indexCount);
     }
 }
 
@@ -138,9 +174,12 @@ bool wakePulseSkips(char kind, uint32_t count, uint32_t targetW,
         ++g_panelFrames;
     }
 
-    if (kind == kKind && count == g_indices) {
-        ++g_dropped;
-        return true;
+    if (kind == kKind) {
+        for (uint32_t i = 0; i < g_indexCount; ++i) {
+            if (count != g_indices[i]) continue;
+            ++g_dropped;
+            return true;
+        }
     }
 
     // Not ours. Record it while we still have nothing, so that if the count
@@ -195,14 +234,15 @@ void wakePulseReport() {
         }
         Log::get().note(
             "wake pulse: the panel surface IS being found (%ux%u, seen %llu "
-            "times) but no %c draw of %u indices has landed in it, so nothing "
+            "times) but no %c draw of any known index count has landed in it, "
+            "so nothing "
             "is being held off. The count is TESSELLATION -- the GUI "
             "subdivides its curves by pixel size, so a smaller panel needs "
             "fewer -- and %u is right for a 2440x1996 panel. %s%s Set "
             "advanced.wake_pulse_indices to the one that stops the flashing. "
             "Said once.",
             g_panelW, g_panelH, static_cast<unsigned long long>(g_surfaceSeen),
-            kKind, g_indices, kIndices,
+            kKind, kIndices,
             found ? "Drawn in only some frames here, so a pulse: " : "",
             found ? list
                   : "Nothing on this panel was drawn intermittently while "
