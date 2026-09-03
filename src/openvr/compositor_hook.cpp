@@ -533,17 +533,31 @@ void dumpPoseRing(State* s, const char* trigger, uint32_t msAfterPress) {
         }
         double turnArcmin = 0.0;
         if (prevRot) {
-            double tr = 0.0;
+            // The relative rotation Rprev^T R, and its ANTISYMMETRIC part,
+            // which is sin(theta) times the axis. Exactly zero for identical
+            // matrices whatever float32 rounding did to their orthonormality,
+            // because rel[i][j] and rel[j][i] are the same products summed in
+            // the same order. The trace route -- acos((tr - 1) / 2) -- is not:
+            // acos near 1 turns a 1e-7 rounding error into 5e-4 radians, and
+            // the first field dump (2026-09-03, headset on a desk, position
+            // steady to 0.0 mm) read that as 1.75 arcmin of turn every frame.
+            double rel[3][3];
             for (int ii = 0; ii < 3; ++ii) {
-                for (int kk = 0; kk < 3; ++kk) {
-                    tr += static_cast<double>(prevRot[kk * 3 + ii]) *
-                          static_cast<double>(e.rot[kk * 3 + ii]);
+                for (int jj = 0; jj < 3; ++jj) {
+                    double v = 0.0;
+                    for (int kk = 0; kk < 3; ++kk) {
+                        v += static_cast<double>(prevRot[kk * 3 + ii]) *
+                             static_cast<double>(e.rot[kk * 3 + jj]);
+                    }
+                    rel[ii][jj] = v;
                 }
             }
-            double c = (tr - 1.0) * 0.5;
-            if (c > 1.0) c = 1.0;
-            if (c < -1.0) c = -1.0;
-            turnArcmin = acos(c) * 3437.74677;
+            const double ax = 0.5 * (rel[2][1] - rel[1][2]);
+            const double ay = 0.5 * (rel[0][2] - rel[2][0]);
+            const double az = 0.5 * (rel[1][0] - rel[0][1]);
+            double sn = sqrt(ax * ax + ay * ay + az * az);
+            if (sn > 1.0) sn = 1.0;
+            turnArcmin = asin(sn) * 3437.74677;
             turnSum += turnArcmin;
             if (turnArcmin > turnMax) turnMax = turnArcmin;
             if (turnArcmin > 0.6) ++turnOverHalf;
