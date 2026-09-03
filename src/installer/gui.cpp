@@ -155,9 +155,28 @@ void invalidateReportGutter() {
 // painted by the parent and has to follow.
 LRESULT CALLBACK reportProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam,
                             UINT_PTR /*id*/, DWORD_PTR /*data*/) {
+    // A multiline EDIT scrolls on the wheel only when it has WS_VSCROLL, and
+    // this one deliberately has no scroll bar -- the card draws its own slim
+    // gutter instead. So the control ignores the tick however it is
+    // delivered, and routing it correctly (which the pump now does) was
+    // necessary but not sufficient: two separate faults, one symptom, and
+    // the first fix looked like it had simply failed.
+    //
+    // So scroll it here. EM_LINESCROLL is what the EDIT would have done for
+    // itself with the style it does not have.
+    if (message == WM_MOUSEWHEEL) {
+        UINT lines = 3;
+        SystemParametersInfoW(SPI_GETWHEELSCROLLLINES, 0, &lines, 0);
+        if (lines == 0) lines = 3;          // "do not scroll" -- still scroll
+        if (lines > 24) lines = 24;         // WHEEL_PAGESCROLL is 0xFFFFFFFF
+        const int delta = GET_WHEEL_DELTA_WPARAM(wparam);
+        const int step = -delta * static_cast<int>(lines) / WHEEL_DELTA;
+        if (step != 0) SendMessageW(hwnd, EM_LINESCROLL, 0, step);
+        invalidateReportGutter();
+        return 0;
+    }
     const LRESULT out = DefSubclassProc(hwnd, message, wparam, lparam);
     switch (message) {
-        case WM_MOUSEWHEEL:
         case WM_KEYDOWN:
         case WM_MOUSEMOVE:
         case WM_TIMER:   // the EDIT's own drag-select autoscroll
