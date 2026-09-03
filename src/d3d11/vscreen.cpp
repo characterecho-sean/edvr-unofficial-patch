@@ -42,6 +42,7 @@
 #include "fss_scan.h"
 #include "fss_theater.h"  // the warm-up; the theater itself runs at submit
 #include "supersample_pass.h"  // likewise: warm-up and totals; the pass runs at submit
+#include "temporal_pass.h"     // and the temporal pass: warm-up, the camera capture, totals
 #include "fov_probe.h"
 #include "glitch_frame.h"
 #include "holo_fix.h"
@@ -1787,6 +1788,9 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         return DrawVerdict::kNone;
     }
     ++s->eyeDrawsThisFrame;
+    // The frame's FIRST eye draw: the last scene-constants write before it
+    // is this eye's camera, latched for the temporal pass (temporal_pass.h).
+    if (s->eyeDrawsThisFrame == 1) temporalPassNoteFirstEyeDraw();
 
     // The intro movie's panel (intro_panel.h). First thing in the eye
     // branch, because it must see the composite before any other fix
@@ -2587,6 +2591,9 @@ void STDMETHODCALLTYPE hookedUnmap(ID3D11DeviceContext* self, ID3D11Resource* re
             // And the live feed: the true view matrix at offset 932 of
             // the same block, named by the two-shot dump.
             sunglareSceneRows(s->camData, s->camBytes);
+            // The same rows, kept pending for the temporal pass's camera
+            // motion source until the frame's first eye draw claims them.
+            temporalPassNoteSceneWrite(s->camData, s->camBytes);
         });
         s->camResource = nullptr;
         s->camData = nullptr;
@@ -3555,6 +3562,7 @@ void vScreenRefreshConfig() {
     introPanelConfigure(cfg);
     introUpscaleConfigure(cfg);
     supersamplePassConfigure(cfg);
+    temporalPassConfigure(cfg);
     backdropConfigure(cfg);
     fssScanConfigure(cfg);
     fssPanelConfigure(cfg);
@@ -3673,6 +3681,10 @@ void vScreenFrameBoundary() {
         // so a session with every FSS feature off still reaches it. A flag
         // test when the resolve is off.
         supersamplePassTick(g_state->ownerCtx);
+        // The temporal pass: its warm compile, and this frame's camera
+        // rows becoming last frame's.
+        temporalPassTick(g_state->ownerCtx);
+        temporalPassFrameBoundary();
         // Told to the openvr half whether or not any intro fix is on: the
         // cull guard holds its lie until a scene exists, and that must
         // depend on the GAME reaching one, not on EDVR being configured
@@ -4288,6 +4300,23 @@ void vScreenFrameBoundary() {
                     treated, avgMs, maxMs);
             }
         }
+        // The temporal pass's, the same way -- with the history's
+        // acceptance, which is the field's test of the reprojection.
+        {
+            static uint32_t lastTemporalTreats = 0;
+            uint32_t treated = 0;
+            double avgMs = 0.0, maxMs = 0.0, rejectPct = 0.0, clipPct = 0.0;
+            if (temporalPassTotals(&treated, &avgMs, &maxMs, &rejectPct,
+                                   &clipPct) &&
+                treated != lastTemporalTreats) {
+                lastTemporalTreats = treated;
+                Log::get().note(
+                    "temporal aa totals: %u eye-submits treated this session, "
+                    "%.2f ms per eye on average (max %.2f); history rejected "
+                    "for %.1f%% of pixels and clipped for %.1f%%.",
+                    treated, avgMs, maxMs, rejectPct, clipPct);
+            }
+        }
 
         // What we DECLINED, its own line and only while it moved.
         //
@@ -4478,6 +4507,7 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     introPanelConfigure(cfg);
     introUpscaleConfigure(cfg);
     supersamplePassConfigure(cfg);
+    temporalPassConfigure(cfg);
     backdropConfigure(cfg);
     fssScanConfigure(cfg);
     fssPanelConfigure(cfg);
@@ -4724,6 +4754,7 @@ void shutdownVScreenFixes() {
     introPanelShutdown();
     introUpscaleShutdown();
     supersamplePassShutdown();
+    temporalPassShutdown();
     g_state->hook.uninstall();
 }
 

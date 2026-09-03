@@ -1,0 +1,1016 @@
+#include "temporal_pass.h"
+
+#include <cstring>
+
+#include <windows.h>
+
+#include <d3d11.h>
+
+#include "../common/config.h"
+#include "../common/guard.h"
+#include "../common/log.h"
+#include "../common/supersample_math.h"   // supersampleRegionFromBounds: one region rule at the door
+#include "../common/temporal_math.h"
+#include "shader_swap.h"
+
+namespace edvr {
+namespace {
+
+// The pass, one compute shader. The reprojection is temporalReproject in
+// src/common/temporal_math.h transcribed line for line; the C++ is the
+// reference the test pins and this is its GPU twin. Desk-compiled by
+// tools/compile_variants.py --target=cs_5_0 before it ships.
+//
+// Two things happen in gamma space on purpose. The blend: bright hairlines
+// in linear light would dominate their neighbours' average, and a
+// perceptual space is where every shipped TAA does its accumulation. And
+// the history: stored as the output is, so a frame with no history to
+// blend is bit-for-bit the game's own.
+constexpr char kTemporalCsHlsl[] = R"HLSL(
+Texture2D<float4> S : register(t0);      // this frame, the game's own texture (or the region copied out of it)
+Texture2D<float4> H : register(t1);      // the history, region-sized, on the unjittered grid
+SamplerState L : register(s0);           // bilinear, clamp
+RWTexture2D<float4> O : register(u0);    // the output, region-sized, the game's format
+RWTexture2D<float4> N : register(u1);    // the new history
+RWStructuredBuffer<uint> Stats : register(u2);   // 0 rejected, 1 clipped
+cbuffer P : register(b0) {
+    int4   region;      // x0 y0 x1 y1: this eye's pixels in S (x1, y1 exclusive)
+    int2   size;        // the region's size = the output's
+    int2   texSize;     // S's size, for the sampler's uv
+    float4 tanNow;      // l r t b this frame, jitter excluded
+    float4 tanPrev;     // l r t b for the frame the history holds
+    float4 jit;         // xy = this frame's jitter in pixels
+    float4 dR0;         // rows of the rotation taking this frame's view
+    float4 dR1;         // directions to last frame's (xyz; w unused)
+    float4 dR2;
+    float  blend;       // history weight
+    float  gamma;       // clip half-width, in standard deviations
+    int    haveHistory; // 0: nothing to blend, this frame goes out as it is
+    int    pad0;
+};
+float3 rgbToYcocg(float3 c) {
+    return float3(0.25 * c.r + 0.5 * c.g + 0.25 * c.b,
+                  0.5 * c.r - 0.5 * c.b,
+                  -0.25 * c.r + 0.5 * c.g - 0.25 * c.b);
+}
+float3 ycocgToRgb(float3 y) {
+    return float3(y.x + y.y - y.z, y.x + y.z, y.x - y.y - y.z);
+}
+// Pull q into the box along the ray from the box's centre: the standard
+// AABB clip, which keeps the history's hue while bounding its distance.
+float3 clipToBox(float3 mn, float3 mx, float3 q) {
+    float3 c = 0.5 * (mx + mn);
+    float3 e = 0.5 * (mx - mn) + 1e-5;
+    float3 v = q - c;
+    float3 a = abs(v / e);
+    float ma = max(a.x, max(a.y, a.z));
+    return ma > 1.0 ? c + v / ma : q;
+}
+// Catmull-Rom through nine bilinear fetches: the history sampled without
+// the softening a plain bilinear fetch would add every frame.
+float4 catmullRom(float2 uv, float2 tsize) {
+    float2 sp = uv * tsize;
+    float2 t1 = floor(sp - 0.5) + 0.5;
+    float2 f = sp - t1;
+    float2 w0 = f * (-0.5 + f * (1.0 - 0.5 * f));
+    float2 w1 = 1.0 + f * f * (-2.5 + 1.5 * f);
+    float2 w2 = f * (0.5 + f * (2.0 - 1.5 * f));
+    float2 w3 = f * f * (-0.5 + 0.5 * f);
+    float2 w12 = w1 + w2;
+    float2 o12 = w2 / w12;
+    float2 t0 = (t1 - 1.0) / tsize;
+    float2 t3 = (t1 + 2.0) / tsize;
+    float2 t12 = (t1 + o12) / tsize;
+    float4 r = 0.0;
+    r += H.SampleLevel(L, float2(t0.x, t0.y), 0) * w0.x * w0.y;
+    r += H.SampleLevel(L, float2(t12.x, t0.y), 0) * w12.x * w0.y;
+    r += H.SampleLevel(L, float2(t3.x, t0.y), 0) * w3.x * w0.y;
+    r += H.SampleLevel(L, float2(t0.x, t12.y), 0) * w0.x * w12.y;
+    r += H.SampleLevel(L, float2(t12.x, t12.y), 0) * w12.x * w12.y;
+    r += H.SampleLevel(L, float2(t3.x, t12.y), 0) * w3.x * w12.y;
+    r += H.SampleLevel(L, float2(t0.x, t3.y), 0) * w0.x * w3.y;
+    r += H.SampleLevel(L, float2(t12.x, t3.y), 0) * w12.x * w3.y;
+    r += H.SampleLevel(L, float2(t3.x, t3.y), 0) * w3.x * w3.y;
+    return r;
+}
+groupshared uint gRejected;
+groupshared uint gClipped;
+[numthreads(8, 8, 1)]
+void main(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
+    if (gi == 0) { gRejected = 0; gClipped = 0; }
+    GroupMemoryBarrierWithGroupSync();
+    uint rejected = 0;
+    uint clipped = 0;
+    if (id.x < (uint)size.x && id.y < (uint)size.y) {
+        float2 p = float2(id.xy);
+        // This frame's sample for the unjittered pixel: the content sits
+        // jit pixels off the grid, so the grid's pixel is that far into
+        // the image. Clamped to the region's inner half-pixel so a
+        // double-wide texture's other eye is never touched.
+        float2 sp = clamp(p + 0.5 + jit.xy, float2(0.5, 0.5), float2(size) - 0.5);
+        float2 suv = (float2(region.xy) + sp) / float2(texSize);
+        float4 cur = S.SampleLevel(L, suv, 0);
+        // The 3x3 neighbourhood of the current frame around the sample,
+        // in YCoCg: its mean and variance bound what the history may say.
+        int2 ci = clamp(int2(floor(p + jit.xy + 0.5)), int2(0, 0), size - 1);
+        float3 m1 = 0.0;
+        float3 m2 = 0.0;
+        [unroll] for (int dy = -1; dy <= 1; ++dy) {
+            [unroll] for (int dx = -1; dx <= 1; ++dx) {
+                int2 q = clamp(ci + int2(dx, dy), int2(0, 0), size - 1);
+                float3 s = rgbToYcocg(S.Load(int3(region.xy + q, 0)).rgb);
+                m1 += s;
+                m2 += s * s;
+            }
+        }
+        m1 /= 9.0;
+        m2 /= 9.0;
+        float3 sigma = sqrt(max(m2 - m1 * m1, 0.0));
+        float3 boxMin = m1 - gamma * sigma;
+        float3 boxMax = m1 + gamma * sigma;
+        float3 outc = cur.rgb;
+        bool used = false;
+        if (haveHistory != 0) {
+            // temporalReproject, transcribed: this pixel's direction now,
+            // rotated into last frame's view, projected through last
+            // frame's frustum. Off the image or behind the eye: no
+            // history, the current frame goes out unblended.
+            float3 d;
+            d.x = tanNow.x + (p.x + 0.5) / float(size.x) * (tanNow.y - tanNow.x);
+            d.y = tanNow.w - (p.y + 0.5) / float(size.y) * (tanNow.w - tanNow.z);
+            d.z = -1.0;
+            float3 dp = float3(dot(dR0.xyz, d), dot(dR1.xyz, d), dot(dR2.xyz, d));
+            if (dp.z < -1e-6) {
+                float xt = dp.x / -dp.z;
+                float yt = dp.y / -dp.z;
+                float2 pp;
+                pp.x = (xt - tanPrev.x) / (tanPrev.y - tanPrev.x) * float(size.x) - 0.5;
+                pp.y = (tanPrev.w - yt) / (tanPrev.w - tanPrev.z) * float(size.y) - 0.5;
+                if (pp.x >= 0.0 && pp.y >= 0.0 && pp.x <= float(size.x) - 1.0 &&
+                    pp.y <= float(size.y) - 1.0) {
+                    float3 h = catmullRom((pp + 0.5) / float2(size), float2(size)).rgb;
+                    float3 hy = rgbToYcocg(h);
+                    float3 hc = clipToBox(boxMin, boxMax, hy);
+                    if (any(abs(hc - hy) > 1e-4)) clipped = 1;
+                    outc = lerp(cur.rgb, ycocgToRgb(hc), blend);
+                    used = true;
+                }
+            }
+        }
+        if (!used) rejected = 1;
+        float3 o = saturate(outc);
+        O[id.xy] = float4(o, cur.a);
+        N[id.xy] = float4(o, 1.0);
+    }
+    // One atomic per group, not per pixel: the field's acceptance line.
+    InterlockedAdd(gRejected, rejected);
+    InterlockedAdd(gClipped, clipped);
+    GroupMemoryBarrierWithGroupSync();
+    if (gi == 0) {
+        InterlockedAdd(Stats[0], gRejected);
+        InterlockedAdd(Stats[1], gClipped);
+    }
+}
+)HLSL";
+
+// The cbuffer above, laid out to match: 144 bytes, nine 16-byte rows.
+struct PassParams {
+    int32_t region[4];
+    int32_t size[2];
+    int32_t texSize[2];
+    float   tanNow[4];
+    float   tanPrev[4];
+    float   jit[4];
+    float   dR0[4];
+    float   dR1[4];
+    float   dR2[4];
+    float   blend;
+    float   gamma;
+    int32_t haveHistory;
+    int32_t pad0;
+};
+static_assert(sizeof(PassParams) == 144, "the cbuffer is nine 16-byte rows");
+
+// The format allowlist: the supersample resolve's, for its reasons
+// (supersample_pass.cpp) -- typeless and UNORM families read and written
+// through the family's plain typed view, the source's own format kept on
+// the output, sRGB-typed sources refused.
+DXGI_FORMAT viewFormatOf(DXGI_FORMAT f, int* index) {
+    switch (f) {
+        case DXGI_FORMAT_R8G8B8A8_TYPELESS:
+        case DXGI_FORMAT_R8G8B8A8_UNORM:
+            *index = 0;
+            return DXGI_FORMAT_R8G8B8A8_UNORM;
+        case DXGI_FORMAT_B8G8R8A8_TYPELESS:
+        case DXGI_FORMAT_B8G8R8A8_UNORM:
+            *index = 1;
+            return DXGI_FORMAT_B8G8R8A8_UNORM;
+        case DXGI_FORMAT_R10G10B10A2_TYPELESS:
+        case DXGI_FORMAT_R10G10B10A2_UNORM:
+            *index = 2;
+            return DXGI_FORMAT_R10G10B10A2_UNORM;
+        case DXGI_FORMAT_R16G16B16A16_TYPELESS:
+        case DXGI_FORMAT_R16G16B16A16_UNORM:
+            *index = 3;
+            return DXGI_FORMAT_R16G16B16A16_UNORM;
+        case DXGI_FORMAT_R16G16B16A16_FLOAT:
+            *index = 4;
+            return DXGI_FORMAT_R16G16B16A16_FLOAT;
+        default:
+            *index = -1;
+            return DXGI_FORMAT_UNKNOWN;
+    }
+}
+constexpr int kFormatCount = 5;
+
+const char* formatName(DXGI_FORMAT f) {
+    switch (f) {
+        case DXGI_FORMAT_R8G8B8A8_TYPELESS:     return "R8G8B8A8_TYPELESS";
+        case DXGI_FORMAT_R8G8B8A8_UNORM:        return "R8G8B8A8_UNORM";
+        case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:   return "R8G8B8A8_UNORM_SRGB";
+        case DXGI_FORMAT_B8G8R8A8_TYPELESS:     return "B8G8R8A8_TYPELESS";
+        case DXGI_FORMAT_B8G8R8A8_UNORM:        return "B8G8R8A8_UNORM";
+        case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:   return "B8G8R8A8_UNORM_SRGB";
+        case DXGI_FORMAT_R10G10B10A2_TYPELESS:  return "R10G10B10A2_TYPELESS";
+        case DXGI_FORMAT_R10G10B10A2_UNORM:     return "R10G10B10A2_UNORM";
+        case DXGI_FORMAT_R16G16B16A16_TYPELESS: return "R16G16B16A16_TYPELESS";
+        case DXGI_FORMAT_R16G16B16A16_UNORM:    return "R16G16B16A16_UNORM";
+        case DXGI_FORMAT_R16G16B16A16_FLOAT:    return "R16G16B16A16_FLOAT";
+        default:                                return "?";
+    }
+}
+
+const char* motionName(int motion) {
+    return motion == 2 ? "camera" : motion == 1 ? "head" : "none";
+}
+
+// Per-eye owned resources. Release-before-recreate on any size or format
+// change; a change of size is also a reset of the history, which cannot
+// mean anything across a resize.
+struct EyeState {
+    void*                      srcRes = nullptr;   // the game's texture the view is over (identity)
+    ID3D11ShaderResourceView*  srcSrv = nullptr;
+    ID3D11Texture2D*           copyTex = nullptr;  // the copy-through, for a source that refuses a view
+    ID3D11ShaderResourceView*  copySrv = nullptr;
+    uint32_t                   copyW = 0, copyH = 0;
+    DXGI_FORMAT                copyFmt = DXGI_FORMAT_UNKNOWN;
+
+    ID3D11Texture2D*           hist[2] = {};       // ping-pong: read one, write the other
+    ID3D11ShaderResourceView*  histSrv[2] = {};
+    ID3D11UnorderedAccessView* histUav[2] = {};
+    int                        histRead = 0;
+    bool                       haveHistory = false;
+
+    ID3D11Texture2D*           outTex = nullptr;
+    ID3D11UnorderedAccessView* outUav = nullptr;
+
+    uint32_t    w = 0, h = 0;
+    DXGI_FORMAT outFmt = DXGI_FORMAT_UNKNOWN;
+    DXGI_FORMAT histFmt = DXGI_FORMAT_UNKNOWN;
+};
+EyeState g_eye[2];
+
+void releaseSrc(EyeState& e) {
+    if (e.srcSrv) { e.srcSrv->Release(); e.srcSrv = nullptr; }
+    e.srcRes = nullptr;
+}
+void releaseCopy(EyeState& e) {
+    if (e.copySrv) { e.copySrv->Release(); e.copySrv = nullptr; }
+    if (e.copyTex) { e.copyTex->Release(); e.copyTex = nullptr; }
+    e.copyW = e.copyH = 0;
+    e.copyFmt = DXGI_FORMAT_UNKNOWN;
+}
+void releaseOwned(EyeState& e) {
+    for (int i = 0; i < 2; ++i) {
+        if (e.histUav[i]) { e.histUav[i]->Release(); e.histUav[i] = nullptr; }
+        if (e.histSrv[i]) { e.histSrv[i]->Release(); e.histSrv[i] = nullptr; }
+        if (e.hist[i]) { e.hist[i]->Release(); e.hist[i] = nullptr; }
+    }
+    if (e.outUav) { e.outUav->Release(); e.outUav = nullptr; }
+    if (e.outTex) { e.outTex->Release(); e.outTex = nullptr; }
+    e.w = e.h = 0;
+    e.outFmt = e.histFmt = DXGI_FORMAT_UNKNOWN;
+    e.haveHistory = false;
+    e.histRead = 0;
+}
+void releaseEye(EyeState& e) {
+    releaseSrc(e);
+    releaseCopy(e);
+    releaseOwned(e);
+}
+
+// One slot per treated call: the GPU price by timestamp query, and the
+// pass's own count of rejected and clipped pixels copied out to a staging
+// buffer. Never awaited (DONOTFLUSH, DO_NOT_WAIT); a slot still in flight
+// is read on a later call, and a call that finds every slot busy runs
+// unmeasured. Measuring must never be able to stall the pass.
+struct Slot {
+    ID3D11Query*  disjoint = nullptr;
+    ID3D11Query*  begin = nullptr;
+    ID3D11Query*  end = nullptr;
+    ID3D11Buffer* staging = nullptr;
+    bool          inUse = false;
+    bool          timeDone = false;
+    bool          statsDone = false;
+    uint64_t      pixels = 0;
+};
+constexpr int kSlots = 8;
+Slot g_slots[kSlots];
+
+void releaseSlot(Slot& q) {
+    if (q.disjoint) { q.disjoint->Release(); q.disjoint = nullptr; }
+    if (q.begin) { q.begin->Release(); q.begin = nullptr; }
+    if (q.end) { q.end->Release(); q.end = nullptr; }
+    if (q.staging) { q.staging->Release(); q.staging = nullptr; }
+    q.inUse = false;
+}
+
+uint32_t g_timeCount = 0;
+double   g_timeSum = 0.0;
+double   g_timeMax = 0.0;
+uint64_t g_pixelsSeen = 0;
+uint64_t g_rejected = 0;
+uint64_t g_clipped = 0;
+bool     g_priceLogged = false;
+uint32_t g_lastW = 0, g_lastH = 0;
+
+void maybeLogPrice() {
+    if (g_priceLogged || g_timeCount < 120 || g_pixelsSeen == 0) return;
+    g_priceLogged = true;
+    Log::get().note(
+        "temporal aa: measured %.2f ms per eye on average (max %.2f) at "
+        "%ux%u -- one dispatch, nine history taps and a 3x3 neighbourhood "
+        "per pixel. History rejected for %.1f%% of pixels and clipped for "
+        "%.1f%% so far; both low with the head turning and the ship steady "
+        "means the reprojection is right (docs\\anti-aliasing.md Phase 0 "
+        "item 6's price, measured).",
+        g_timeSum / static_cast<double>(g_timeCount), g_timeMax, g_lastW,
+        g_lastH,
+        100.0 * static_cast<double>(g_rejected) / static_cast<double>(g_pixelsSeen),
+        100.0 * static_cast<double>(g_clipped) / static_cast<double>(g_pixelsSeen));
+}
+
+void pollSlots(ID3D11DeviceContext* ctx) {
+    for (Slot& q : g_slots) {
+        if (!q.inUse) continue;
+        if (!q.timeDone) {
+            D3D11_QUERY_DATA_TIMESTAMP_DISJOINT dj{};
+            if (ctx->GetData(q.disjoint, &dj, sizeof(dj),
+                             D3D11_ASYNC_GETDATA_DONOTFLUSH) == S_OK) {
+                UINT64 t0 = 0, t1 = 0;
+                const HRESULT hr0 = ctx->GetData(q.begin, &t0, sizeof(t0),
+                                                 D3D11_ASYNC_GETDATA_DONOTFLUSH);
+                const HRESULT hr1 = ctx->GetData(q.end, &t1, sizeof(t1),
+                                                 D3D11_ASYNC_GETDATA_DONOTFLUSH);
+                q.timeDone = true;
+                if (!dj.Disjoint && hr0 == S_OK && hr1 == S_OK && dj.Frequency) {
+                    const double ms = static_cast<double>(t1 - t0) * 1000.0 /
+                                      static_cast<double>(dj.Frequency);
+                    ++g_timeCount;
+                    g_timeSum += ms;
+                    if (ms > g_timeMax) g_timeMax = ms;
+                }
+            }
+        }
+        if (!q.statsDone) {
+            D3D11_MAPPED_SUBRESOURCE m{};
+            const HRESULT hr = ctx->Map(q.staging, 0, D3D11_MAP_READ,
+                                        D3D11_MAP_FLAG_DO_NOT_WAIT, &m);
+            if (SUCCEEDED(hr) && m.pData) {
+                const uint32_t* v = static_cast<const uint32_t*>(m.pData);
+                g_rejected += v[0];
+                g_clipped += v[1];
+                g_pixelsSeen += q.pixels;
+                ctx->Unmap(q.staging, 0);
+                q.statsDone = true;
+            } else if (hr != DXGI_ERROR_WAS_STILL_DRAWING) {
+                q.statsDone = true;   // an unreadable sample; drop it
+            }
+        }
+        if (q.timeDone && q.statsDone) q.inUse = false;
+    }
+    maybeLogPrice();
+}
+
+int acquireSlot(ID3D11Device* dev) {
+    for (int i = 0; i < kSlots; ++i) {
+        Slot& q = g_slots[i];
+        if (q.inUse) continue;
+        if (!q.disjoint) {
+            D3D11_QUERY_DESC qdd{};
+            qdd.Query = D3D11_QUERY_TIMESTAMP_DISJOINT;
+            D3D11_QUERY_DESC qdt{};
+            qdt.Query = D3D11_QUERY_TIMESTAMP;
+            D3D11_BUFFER_DESC bd{};
+            bd.ByteWidth = 16;
+            bd.Usage = D3D11_USAGE_STAGING;
+            bd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+            const bool made = SUCCEEDED(dev->CreateQuery(&qdd, &q.disjoint)) &&
+                              SUCCEEDED(dev->CreateQuery(&qdt, &q.begin)) &&
+                              SUCCEEDED(dev->CreateQuery(&qdt, &q.end)) &&
+                              SUCCEEDED(dev->CreateBuffer(&bd, nullptr, &q.staging));
+            if (!made) {
+                releaseSlot(q);
+                continue;
+            }
+        }
+        return i;
+    }
+    return -1;
+}
+
+FaultBudget g_budget("temporalPass", 8);
+
+ID3D11ComputeShader*       g_cs = nullptr;
+bool                       g_csTried = false;
+ID3D11Buffer*              g_cb = nullptr;
+ID3D11SamplerState*        g_samp = nullptr;
+ID3D11Buffer*              g_stats = nullptr;
+ID3D11UnorderedAccessView* g_statsUav = nullptr;
+
+bool     g_failNoted = false;
+bool     g_kindNoted = false;
+bool     g_regionNoted = false;
+bool     g_fmtUnknownNoted = false;
+bool     g_fmtChecked[kFormatCount] = {};
+bool     g_fmtSupported[kFormatCount] = {};
+bool     g_fmtUnsupportedNoted[kFormatCount] = {};
+bool     g_histChecked = false;
+DXGI_FORMAT g_histFmt = DXGI_FORMAT_UNKNOWN;
+bool     g_firstNoted = false;
+uint32_t g_treats = 0;
+
+// The configure and warm state.
+bool     g_wanted = false;
+bool     g_viewTransposed = false;
+bool     g_warmNoted = false;
+
+// The camera capture: the pending rows from the latest scene write, the
+// rows latched at this frame's first eye draw, and last frame's.
+float    g_pendingRows[12] = {};
+bool     g_pendingValid = false;
+float    g_curRows[12] = {};
+bool     g_curValid = false;
+bool     g_curLatched = false;
+float    g_prevRows[12] = {};
+bool     g_prevValid = false;
+uint32_t g_camPairs = 0;
+bool     g_camNoted = false;
+
+void failOnce(const char* what) {
+    if (g_failNoted) return;
+    g_failNoted = true;
+    Log::get().note("temporal aa: %s; the pass stands down.", what);
+}
+
+ID3D11ComputeShader* compileShader(ID3D11DeviceContext* ctx) {
+    return shaderSwapCompileCs(ctx, kTemporalCsHlsl, sizeof(kTemporalCsHlsl) - 1,
+                               "main", "temporal_aa_cs", nullptr,
+                               "temporal aa");
+}
+
+bool makeTex(ID3D11Device* dev, uint32_t w, uint32_t h, DXGI_FORMAT texFmt,
+             DXGI_FORMAT viewFmt, UINT bindFlags, ID3D11Texture2D** outTex,
+             ID3D11ShaderResourceView** outSrv,
+             ID3D11UnorderedAccessView** outUav) {
+    D3D11_TEXTURE2D_DESC td{};
+    td.Width = w;
+    td.Height = h;
+    td.MipLevels = 1;
+    td.ArraySize = 1;
+    td.Format = texFmt;
+    td.SampleDesc.Count = 1;
+    td.Usage = D3D11_USAGE_DEFAULT;
+    td.BindFlags = bindFlags;
+    if (FAILED(dev->CreateTexture2D(&td, nullptr, outTex)) || !*outTex) {
+        return false;
+    }
+    if (outSrv) {
+        D3D11_SHADER_RESOURCE_VIEW_DESC sd{};
+        sd.Format = viewFmt;
+        sd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+        sd.Texture2D.MipLevels = 1;
+        if (FAILED(dev->CreateShaderResourceView(*outTex, &sd, outSrv))) {
+            return false;
+        }
+    }
+    if (outUav) {
+        D3D11_UNORDERED_ACCESS_VIEW_DESC ud{};
+        ud.Format = viewFmt;
+        ud.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D;
+        if (FAILED(dev->CreateUnorderedAccessView(*outTex, &ud, outUav))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool setParams(ID3D11DeviceContext* ctx, const PassParams& p) {
+    D3D11_MAPPED_SUBRESOURCE m{};
+    if (FAILED(ctx->Map(g_cb, 0, D3D11_MAP_WRITE_DISCARD, 0, &m)) ||
+        !m.pData) {
+        return false;
+    }
+    memcpy(m.pData, &p, sizeof(p));
+    ctx->Unmap(g_cb, 0);
+    return true;
+}
+
+// The history's format: ten bits per channel is enough for an accumulation
+// to converge (the 8-bit output stalls within a level of its target; ten
+// bits stalls within a quarter of one) at half the memory of float16, and
+// this pass holds two of them per eye at render size. Float16 when the
+// device cannot store to it.
+DXGI_FORMAT pickHistoryFormat(ID3D11Device* dev) {
+    UINT support = 0;
+    if (SUCCEEDED(dev->CheckFormatSupport(DXGI_FORMAT_R10G10B10A2_UNORM, &support)) &&
+        (support & D3D11_FORMAT_SUPPORT_TYPED_UNORDERED_ACCESS_VIEW)) {
+        return DXGI_FORMAT_R10G10B10A2_UNORM;
+    }
+    support = 0;
+    if (SUCCEEDED(dev->CheckFormatSupport(DXGI_FORMAT_R16G16B16A16_FLOAT, &support)) &&
+        (support & D3D11_FORMAT_SUPPORT_TYPED_UNORDERED_ACCESS_VIEW)) {
+        return DXGI_FORMAT_R16G16B16A16_FLOAT;
+    }
+    return DXGI_FORMAT_UNKNOWN;
+}
+
+void* temporalInner(void* srcTex, int eye, const float* bounds,
+                    const float* tanNow, const float* tanPrev, float jxNow,
+                    float jyNow, const float* deltaHead, int motion,
+                    float blend, float clampSigma, unsigned flags) {
+    ID3D11Texture2D* src = nullptr;
+    static_cast<IUnknown*>(srcTex)->QueryInterface(
+        __uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&src));
+    if (!src) return nullptr;
+
+    D3D11_TEXTURE2D_DESC sd{};
+    src->GetDesc(&sd);
+
+    bool ok = true;
+    if (sd.SampleDesc.Count > 1 || sd.ArraySize != 1 || sd.MipLevels != 1) {
+        ok = false;
+        if (!g_kindNoted) {
+            g_kindNoted = true;
+            Log::get().note(
+                "temporal aa: the submitted texture is %ux%u samples=%u "
+                "array=%u mips=%u, a kind the pass does not handle. The "
+                "pass stands down.",
+                sd.Width, sd.Height, sd.SampleDesc.Count, sd.ArraySize,
+                sd.MipLevels);
+        }
+    }
+
+    uint32_t region[4] = {};
+    if (ok && !supersampleRegionFromBounds(sd.Width, sd.Height, bounds,
+                                           region, nullptr, nullptr)) {
+        ok = false;
+        if (!g_regionNoted) {
+            g_regionNoted = true;
+            Log::get().note(
+                "temporal aa: the Submit bounds name no usable eye region "
+                "of a %ux%u texture. The pass stands down.",
+                sd.Width, sd.Height);
+        }
+    }
+    const uint32_t w = ok ? region[2] - region[0] : 0;
+    const uint32_t h = ok ? region[3] - region[1] : 0;
+
+    int fmtIndex = -1;
+    DXGI_FORMAT viewFmt = DXGI_FORMAT_UNKNOWN;
+    if (ok) {
+        viewFmt = viewFormatOf(sd.Format, &fmtIndex);
+        if (fmtIndex < 0) {
+            ok = false;
+            if (!g_fmtUnknownNoted) {
+                g_fmtUnknownNoted = true;
+                Log::get().note(
+                    "temporal aa: the submitted texture's format is %s "
+                    "(DXGI_FORMAT %d), one this pass does not handle -- "
+                    "unmeasured formats are refused, not assumed. The pass "
+                    "stands down; please report this log.",
+                    formatName(sd.Format), static_cast<int>(sd.Format));
+            }
+        }
+    }
+
+    ID3D11Device* dev = nullptr;
+    ID3D11DeviceContext* ctx = nullptr;
+    if (ok) {
+        src->GetDevice(&dev);
+        if (dev) dev->GetImmediateContext(&ctx);
+        ok = dev != nullptr && ctx != nullptr;
+    }
+    if (ok) pollSlots(ctx);
+
+    if (ok && !g_fmtChecked[fmtIndex]) {
+        g_fmtChecked[fmtIndex] = true;
+        UINT support = 0;
+        g_fmtSupported[fmtIndex] =
+            SUCCEEDED(dev->CheckFormatSupport(viewFmt, &support)) &&
+            (support & D3D11_FORMAT_SUPPORT_TYPED_UNORDERED_ACCESS_VIEW) != 0;
+    }
+    if (ok && !g_fmtSupported[fmtIndex]) {
+        ok = false;
+        if (!g_fmtUnsupportedNoted[fmtIndex]) {
+            g_fmtUnsupportedNoted[fmtIndex] = true;
+            Log::get().note(
+                "temporal aa: this GPU/driver reports no typed unordered-"
+                "access support for %s, so the result cannot be written "
+                "here. The pass stands down.",
+                formatName(viewFmt));
+        }
+    }
+    if (ok && !g_histChecked) {
+        g_histChecked = true;
+        g_histFmt = pickHistoryFormat(dev);
+        if (g_histFmt == DXGI_FORMAT_UNKNOWN) {
+            failOnce("neither R10G10B10A2_UNORM nor R16G16B16A16_FLOAT can be "
+                     "stored to on this GPU/driver, and the history needs one");
+        }
+    }
+    ok = ok && g_histFmt != DXGI_FORMAT_UNKNOWN;
+
+    if (ok && !g_cs && !g_csTried) {
+        g_csTried = true;
+        g_cs = compileShader(ctx);
+    }
+    ok = ok && g_cs != nullptr;
+
+    if (ok && !g_cb) {
+        D3D11_BUFFER_DESC bd{};
+        bd.ByteWidth = sizeof(PassParams);
+        bd.Usage = D3D11_USAGE_DYNAMIC;
+        bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+        ok = SUCCEEDED(dev->CreateBuffer(&bd, nullptr, &g_cb));
+        if (!ok) failOnce("the parameter buffer could not be created");
+    }
+    if (ok && !g_samp) {
+        D3D11_SAMPLER_DESC smd{};
+        smd.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+        smd.AddressU = D3D11_TEXTURE_ADDRESS_CLAMP;
+        smd.AddressV = D3D11_TEXTURE_ADDRESS_CLAMP;
+        smd.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+        smd.MaxLOD = D3D11_FLOAT32_MAX;
+        ok = SUCCEEDED(dev->CreateSamplerState(&smd, &g_samp));
+        if (!ok) failOnce("the sampler could not be created");
+    }
+    if (ok && !g_stats) {
+        D3D11_BUFFER_DESC bd{};
+        bd.ByteWidth = 16;
+        bd.Usage = D3D11_USAGE_DEFAULT;
+        bd.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
+        bd.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+        bd.StructureByteStride = 4;
+        D3D11_UNORDERED_ACCESS_VIEW_DESC ud{};
+        ud.Format = DXGI_FORMAT_UNKNOWN;
+        ud.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
+        ud.Buffer.NumElements = 4;
+        ok = SUCCEEDED(dev->CreateBuffer(&bd, nullptr, &g_stats)) &&
+             SUCCEEDED(dev->CreateUnorderedAccessView(g_stats, &ud, &g_statsUav));
+        if (!ok) failOnce("the statistics buffer could not be created");
+    }
+
+    EyeState* eptr = ok ? &g_eye[eye] : nullptr;
+
+    // The input view: over the source when it allows one, else the region
+    // copied out (the theater's copy-through, the resolve's too).
+    ID3D11ShaderResourceView* inSrv = nullptr;
+    bool viaCopy = false;
+    if (ok) {
+        EyeState& e = *eptr;
+        if (sd.BindFlags & D3D11_BIND_SHADER_RESOURCE) {
+            if (e.srcRes != static_cast<void*>(src) || !e.srcSrv) {
+                releaseSrc(e);
+                D3D11_SHADER_RESOURCE_VIEW_DESC vd{};
+                vd.Format = viewFmt;
+                vd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+                vd.Texture2D.MipLevels = 1;
+                if (SUCCEEDED(dev->CreateShaderResourceView(src, &vd, &e.srcSrv)) &&
+                    e.srcSrv) {
+                    e.srcRes = src;
+                } else {
+                    e.srcSrv = nullptr;
+                }
+            }
+            inSrv = e.srcSrv;
+        }
+        if (!inSrv) {
+            viaCopy = true;
+            if (!e.copyTex || e.copyW != w || e.copyH != h || e.copyFmt != sd.Format) {
+                releaseCopy(e);
+                if (makeTex(dev, w, h, sd.Format, viewFmt, D3D11_BIND_SHADER_RESOURCE,
+                            &e.copyTex, &e.copySrv, nullptr)) {
+                    e.copyW = w;
+                    e.copyH = h;
+                    e.copyFmt = sd.Format;
+                } else {
+                    releaseCopy(e);
+                }
+            }
+            inSrv = e.copySrv;
+        }
+        if (!inSrv) {
+            ok = false;
+            failOnce("the submitted texture refuses a shader view and could "
+                     "not be copied");
+        }
+    }
+
+    // The owned pair and the output, rebuilt on any change of size or
+    // format -- which is a history reset too.
+    if (ok) {
+        EyeState& e = *eptr;
+        if (!e.outTex || e.w != w || e.h != h || e.outFmt != sd.Format ||
+            e.histFmt != g_histFmt) {
+            releaseOwned(e);
+            bool made = makeTex(dev, w, h, sd.Format, viewFmt,
+                                D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS,
+                                &e.outTex, nullptr, &e.outUav);
+            for (int i = 0; i < 2 && made; ++i) {
+                made = makeTex(dev, w, h, g_histFmt, g_histFmt,
+                               D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS,
+                               &e.hist[i], &e.histSrv[i], &e.histUav[i]);
+            }
+            if (made) {
+                e.w = w;
+                e.h = h;
+                e.outFmt = sd.Format;
+                e.histFmt = g_histFmt;
+            } else {
+                releaseOwned(e);
+                ok = false;
+                failOnce("the history or output textures could not be created");
+            }
+        }
+    }
+
+    void* result = nullptr;
+    if (ok) {
+        EyeState& e = *eptr;
+        if (flags & 1u) e.haveHistory = false;
+
+        // The rotation delta for this frame's motion source.
+        float delta[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+        bool haveDelta = motion == 0;
+        if (motion == 1 && deltaHead) {
+            memcpy(delta, deltaHead, sizeof(delta));
+            haveDelta = true;
+        } else if (motion == 2) {
+            if (g_curValid && g_prevValid) {
+                temporalViewDelta(g_prevRows, g_curRows, g_viewTransposed, delta);
+                haveDelta = true;
+            }
+        }
+        // No delta means no reprojection can be trusted: this frame goes
+        // out unblended and the history restarts from it.
+        const bool useHistory = e.haveHistory && haveDelta && tanPrev;
+
+        PassParams p{};
+        if (viaCopy) {
+            p.region[0] = 0;
+            p.region[1] = 0;
+            p.region[2] = static_cast<int32_t>(w);
+            p.region[3] = static_cast<int32_t>(h);
+            p.texSize[0] = static_cast<int32_t>(w);
+            p.texSize[1] = static_cast<int32_t>(h);
+        } else {
+            for (int i = 0; i < 4; ++i) p.region[i] = static_cast<int32_t>(region[i]);
+            p.texSize[0] = static_cast<int32_t>(sd.Width);
+            p.texSize[1] = static_cast<int32_t>(sd.Height);
+        }
+        p.size[0] = static_cast<int32_t>(w);
+        p.size[1] = static_cast<int32_t>(h);
+        memcpy(p.tanNow, tanNow, sizeof(p.tanNow));
+        memcpy(p.tanPrev, useHistory ? tanPrev : tanNow, sizeof(p.tanPrev));
+        p.jit[0] = jxNow;
+        p.jit[1] = jyNow;
+        for (int c = 0; c < 3; ++c) {
+            p.dR0[c] = delta[0 * 3 + c];
+            p.dR1[c] = delta[1 * 3 + c];
+            p.dR2[c] = delta[2 * 3 + c];
+        }
+        p.blend = blend;
+        p.gamma = clampSigma;
+        p.haveHistory = useHistory ? 1 : 0;
+
+        ID3D11ComputeShader* savedCs = nullptr;
+        ID3D11ShaderResourceView* savedSrv[2] = {};
+        ID3D11UnorderedAccessView* savedUav[3] = {};
+        ID3D11Buffer* savedCb = nullptr;
+        ID3D11SamplerState* savedSamp = nullptr;
+        ctx->CSGetShader(&savedCs, nullptr, nullptr);
+        ctx->CSGetShaderResources(0, 2, savedSrv);
+        ctx->CSGetUnorderedAccessViews(0, 3, savedUav);
+        ctx->CSGetConstantBuffers(0, 1, &savedCb);
+        ctx->CSGetSamplers(0, 1, &savedSamp);
+
+        const int qs = acquireSlot(dev);
+        if (qs >= 0) {
+            ctx->Begin(g_slots[qs].disjoint);
+            ctx->End(g_slots[qs].begin);
+        }
+        if (viaCopy) {
+            D3D11_BOX box{};
+            box.left = region[0];
+            box.top = region[1];
+            box.front = 0;
+            box.right = region[2];
+            box.bottom = region[3];
+            box.back = 1;
+            ctx->CopySubresourceRegion(e.copyTex, 0, 0, 0, 0, src, 0, &box);
+        }
+        const UINT zeros[4] = {0, 0, 0, 0};
+        ctx->ClearUnorderedAccessViewUint(g_statsUav, zeros);
+
+        const int readIdx = e.histRead;
+        const int writeIdx = 1 - readIdx;
+        bool ran = setParams(ctx, p);
+        if (ran) {
+            ID3D11ShaderResourceView* nullSrv[2] = {};
+            ID3D11UnorderedAccessView* nullUav[3] = {};
+            ctx->CSSetShaderResources(0, 2, nullSrv);
+            ctx->CSSetUnorderedAccessViews(0, 3, nullUav, nullptr);
+            ctx->CSSetShader(g_cs, nullptr, 0);
+            ID3D11ShaderResourceView* srvs[2] = {inSrv, e.histSrv[readIdx]};
+            ID3D11UnorderedAccessView* uavs[3] = {e.outUav, e.histUav[writeIdx],
+                                                  g_statsUav};
+            ID3D11Buffer* cb = g_cb;
+            ID3D11SamplerState* smp = g_samp;
+            ctx->CSSetShaderResources(0, 2, srvs);
+            ctx->CSSetUnorderedAccessViews(0, 3, uavs, nullptr);
+            ctx->CSSetConstantBuffers(0, 1, &cb);
+            ctx->CSSetSamplers(0, 1, &smp);
+            ctx->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
+        }
+        if (qs >= 0) {
+            ctx->End(g_slots[qs].end);
+            ctx->End(g_slots[qs].disjoint);
+            ctx->CopyResource(g_slots[qs].staging, g_stats);
+            g_slots[qs].inUse = true;
+            g_slots[qs].timeDone = false;
+            g_slots[qs].statsDone = false;
+            g_slots[qs].pixels = static_cast<uint64_t>(w) * h;
+        }
+
+        ID3D11ShaderResourceView* nullSrv2[2] = {};
+        ID3D11UnorderedAccessView* nullUav2[3] = {};
+        ctx->CSSetShaderResources(0, 2, nullSrv2);
+        ctx->CSSetUnorderedAccessViews(0, 3, nullUav2, nullptr);
+        ctx->CSSetShader(savedCs, nullptr, 0);
+        ctx->CSSetShaderResources(0, 2, savedSrv);
+        ctx->CSSetUnorderedAccessViews(0, 3, savedUav, nullptr);
+        ctx->CSSetConstantBuffers(0, 1, &savedCb);
+        ctx->CSSetSamplers(0, 1, &savedSamp);
+        if (savedCs) savedCs->Release();
+        for (auto* v : savedSrv) if (v) v->Release();
+        for (auto* v : savedUav) if (v) v->Release();
+        if (savedCb) savedCb->Release();
+        if (savedSamp) savedSamp->Release();
+
+        if (ran) {
+            e.histRead = writeIdx;
+            e.haveHistory = true;
+            result = e.outTex;
+            ++g_treats;
+            g_lastW = w;
+            g_lastH = h;
+            if (!g_firstNoted) {
+                g_firstNoted = true;
+                const double mb = static_cast<double>(w) * h *
+                                  (2.0 * (g_histFmt == DXGI_FORMAT_R10G10B10A2_UNORM ? 4.0 : 8.0) +
+                                   4.0) / 1048576.0;
+                Log::get().note(
+                    "temporal aa: first treated frame -- the game submits %s "
+                    "(DXGI_FORMAT %d), read and written through %s views%s; "
+                    "%ux%u per eye, history in %s, about %.0f MB per eye "
+                    "resident; motion from the %s, blend %.2f, clip %.2f "
+                    "sigma.",
+                    formatName(sd.Format), static_cast<int>(sd.Format),
+                    formatName(viewFmt),
+                    viaCopy ? " (copied out first: the source refuses a "
+                              "shader view)"
+                            : "",
+                    w, h, formatName(g_histFmt), mb, motionName(motion),
+                    static_cast<double>(blend), static_cast<double>(clampSigma));
+            }
+        } else {
+            failOnce("the parameter buffer could not be written");
+        }
+    }
+
+    if (ctx) ctx->Release();
+    if (dev) dev->Release();
+    src->Release();
+    return result;
+}
+
+}  // namespace
+
+void temporalPassConfigure(Config& cfg) {
+    const std::string mode = cfg.getString("fix.temporal_aa", "off");
+    g_wanted = _stricmp(mode.c_str(), "off") != 0 && !mode.empty();
+    g_viewTransposed = cfg.getBool("advanced.temporal_aa_view_transpose", false);
+}
+
+void temporalPassTick(ID3D11DeviceContext* ctx) {
+    if (!g_wanted || !ctx) return;
+    if (!g_cs && !g_csTried) {
+        g_csTried = true;
+        g_cs = compileShader(ctx);
+        if (g_cs && !g_warmNoted) {
+            g_warmNoted = true;
+            Log::get().note(
+                "temporal aa: shader warmed at session start -- the first "
+                "treated eye pays no compile.");
+        }
+    }
+}
+
+void temporalPassNoteSceneWrite(const void* data, uint32_t bytes) {
+    // The true view matrix lives at float offset 932 of the big scene
+    // block (measured by the sun-glare fix's two-shot dump: three 3x4
+    // rows, rotation plus translation). Only the rotation is kept, and
+    // only when it is one.
+    if (!g_wanted || !data || bytes < 944 * 4) return;
+    const float* f = static_cast<const float*>(data) + 932;
+    if (!temporalRowsAreRotation(f)) return;
+    memcpy(g_pendingRows, f, sizeof(g_pendingRows));
+    g_pendingValid = true;
+}
+
+void temporalPassNoteFirstEyeDraw() {
+    if (!g_wanted || g_curLatched) return;
+    g_curLatched = true;
+    if (g_pendingValid) {
+        memcpy(g_curRows, g_pendingRows, sizeof(g_curRows));
+        g_curValid = true;
+    } else {
+        g_curValid = false;
+    }
+}
+
+void temporalPassFrameBoundary() {
+    if (!g_wanted) return;
+    if (g_curLatched && g_curValid) {
+        if (g_prevValid) ++g_camPairs;
+        memcpy(g_prevRows, g_curRows, sizeof(g_prevRows));
+        g_prevValid = true;
+        if (!g_camNoted && g_camPairs >= 2) {
+            g_camNoted = true;
+            Log::get().note(
+                "temporal aa: the game's camera is being read -- the view "
+                "rows at float 932 of the scene block, latched at each "
+                "frame's first eye draw; advanced.temporal_aa_motion = "
+                "camera reprojects from them%s.",
+                g_viewTransposed ? " (transposed)" : "");
+        }
+    } else {
+        g_prevValid = false;
+    }
+    g_curLatched = false;
+    g_curValid = false;
+}
+
+bool temporalPassTotals(uint32_t* treated, double* avgMs, double* maxMs,
+                        double* rejectPct, double* clipPct) {
+    if (g_treats == 0) return false;
+    if (treated) *treated = g_treats;
+    if (avgMs) *avgMs = g_timeCount ? g_timeSum / static_cast<double>(g_timeCount) : 0.0;
+    if (maxMs) *maxMs = g_timeMax;
+    const double px = g_pixelsSeen ? static_cast<double>(g_pixelsSeen) : 1.0;
+    if (rejectPct) *rejectPct = 100.0 * static_cast<double>(g_rejected) / px;
+    if (clipPct) *clipPct = 100.0 * static_cast<double>(g_clipped) / px;
+    return true;
+}
+
+void temporalPassShutdown() {
+    if (g_treats > 0) {
+        Log::get().note("temporal aa: %u eye-submits treated this session.",
+                        g_treats);
+    }
+    for (EyeState& e : g_eye) releaseEye(e);
+    for (Slot& q : g_slots) releaseSlot(q);
+    if (g_statsUav) { g_statsUav->Release(); g_statsUav = nullptr; }
+    if (g_stats) { g_stats->Release(); g_stats = nullptr; }
+    if (g_samp) { g_samp->Release(); g_samp = nullptr; }
+    if (g_cb) { g_cb->Release(); g_cb = nullptr; }
+    if (g_cs) { g_cs->Release(); g_cs = nullptr; }
+}
+
+}  // namespace edvr
+
+extern "C" __declspec(dllexport) void* edvrTemporalAa(
+    void* srcTex, int eye, const float* bounds, const float* tanNow,
+    const float* tanPrev, float jxNow, float jyNow, const float* deltaHead,
+    int motion, float blend, float clampSigma, unsigned flags) {
+    if (!srcTex || eye < 0 || eye > 1 || !tanNow) return nullptr;
+    void* out = nullptr;
+    edvr::guardedBudget(edvr::g_budget, [&] {
+        out = edvr::temporalInner(srcTex, eye, bounds, tanNow, tanPrev, jxNow,
+                                  jyNow, deltaHead, motion, blend, clampSigma,
+                                  flags);
+    });
+    return out;
+}

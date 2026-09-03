@@ -24,6 +24,7 @@
 #include "resubmit_shadow.h"
 #include "supersample_resolve.h"
 #include "system_hook.h"
+#include "temporal_aa.h"
 
 namespace edvr {
 namespace {
@@ -936,6 +937,28 @@ vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
         *bnds = storage;
     };
 
+    // The temporal pass (docs\anti-aliasing.md, Feature B), FIRST at the
+    // door: on the game's own frame at render size, wide under the guard,
+    // before the crop and the resolve, so everything downstream sees a
+    // temporally settled image and the history keeps its margin at the
+    // edges. Forward path only -- the theater's rendering and the heal's
+    // composite are EDVR's own, the withhold's shadow is a repeat, and
+    // each of those breaks the history's continuity instead (noted below).
+    auto applyTemporal = [&](vr::Texture_t* tex,
+                             const vr::VRTextureBounds_t** bnds,
+                             vr::VRTextureBounds_t* storage) {
+        if (!s->validated || !temporalAaWanted()) return;
+        if (tex->eType != vr::TextureType_DirectX) {
+            temporalAaStandDown("the game is not submitting DirectX textures, "
+                                "which the pass needs");
+            return;
+        }
+        void* out = temporalAaTreat(eye, tex->handle, *bnds, storage);
+        if (!out) return;
+        tex->handle = out;
+        *bnds = storage;
+    };
+
     // The FSS arrival-mono substitution (fix.fss_arrival_mono): while the
     // window counts down, the LEFT eye submits the RIGHT eye's texture --
     // published last frame, one frame stale, at optical infinity where
@@ -1044,6 +1067,7 @@ vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
                 // existing, and unmeasured with both live at once.)
                 const vr::VRTextureBounds_t* subBounds = bounds;
                 vr::VRTextureBounds_t subStorage;
+                temporalAaNoteWithheld(eye);   // not the game's frame: the history restarts after
                 applyResolve(&sub, &subBounds, &subStorage);
                 return s->realSubmit(self, eye, &sub, subBounds, flags);
             }
@@ -1165,6 +1189,7 @@ vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
                     sub.handle = healed;
                     const vr::VRTextureBounds_t* subBounds = bounds;
                     vr::VRTextureBounds_t subStorage;
+                    temporalAaNoteWithheld(eye);
                     applyResolve(&sub, &subBounds, &subStorage);
                     return s->realSubmit(self, eye, &sub, subBounds, flags);
                 }
@@ -1316,8 +1341,11 @@ vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
         }
         uint32_t snapW = 0, snapH = 0;
         systemHookCropTarget(eye, &snapW, &snapH);
+        // The bounds the path carries NOW, not the game's: the temporal
+        // pass ahead of this crop substitutes a region-sized texture with
+        // full-span bounds, and the crop must compose with that.
         void* out = guardCropCopy(eye == vr::Eye_Left ? 0u : 1u, tex->handle,
-                                  bounds, guardFractions, snapW, snapH,
+                                  *bnds, guardFractions, snapW, snapH,
                                   storage);
         if (!out) {
             systemHookGuardStandDown("the crop copy refused (its own log line "
@@ -1400,6 +1428,9 @@ vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
             sub.handle = shadow;
             const vr::VRTextureBounds_t* subBounds = effBounds;
             vr::VRTextureBounds_t subStorage;
+            // A repeated frame is not new history; the pass restarts on
+            // the next real one rather than blend a frame with itself.
+            temporalAaNoteWithheld(eye);
             applyCullGuard(&sub, &subBounds, &subStorage);
             vr::VRTextureBounds_t subStorage2;
             applyResolve(&sub, &subBounds, &subStorage2);
@@ -1412,6 +1443,7 @@ vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
                             "-- two per frame, so half this many frames.",
                             static_cast<int>(eye), s->framesWithheld);
         }
+        temporalAaNoteWithheld(eye);
         // Success without submitting: what the game is told about every frame
         // the compositor later drops for timing reasons. 0 rather than a named
         // constant because openvr_min.h declares EVRCompositorError as a plain
@@ -1448,6 +1480,8 @@ vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
                 snapped = true;
             }
         }
+        vr::VRTextureBounds_t fwdStorage0;
+        applyTemporal(&fwd, &fwdBounds, &fwdStorage0);
         applyCullGuard(&fwd, &fwdBounds, &fwdStorage);
         vr::VRTextureBounds_t fwdStorage2;
         applyResolve(&fwd, &fwdBounds, &fwdStorage2);
@@ -1594,6 +1628,9 @@ vr::EVRCompositorError hookedWaitGetPoses(void* self,
             e.result = static_cast<int32_t>(hmd.eTrackingResult);
             e.valid = hmd.bPoseIsValid ? 1u : 0u;
             ++s->poseHead;
+            // The temporal pass's motion source, v1: the head's pose for the
+            // frame about to render, before the offset below moves it.
+            temporalAaNotePose(hmd.mDeviceToAbsoluteTracking, hmd.bPoseIsValid != 0);
 
             // Ship-forward in the current head frame, for the sprite-pinning
             // fix on the d3d11 side. World-forward is seated -Z; its
@@ -1779,6 +1816,9 @@ vr::EVRCompositorError hookedWaitGetPoses(void* self,
             // The resolve's mode, kernel and width are judged from inside a
             // headset, so all three are live; the next boundary decides.
             supersampleResolveConfigure();
+            // The temporal pass's weight, clip and motion source are judged
+            // from inside a headset too.
+            temporalAaConfigure();
             // The snapshot toggle is an in-headset A/B experiment, so it is
             // live too; the flip logs its own receipt.
             resubmitShadowConfigure();
@@ -1866,6 +1906,10 @@ vr::EVRCompositorError hookedWaitGetPoses(void* self,
     // submitted this frame, so the coming frame's two submits get one
     // verdict (supersample_resolve.h).
     supersampleResolveFrameBoundary();
+    // The temporal pass's boundary, last: it rolls the head-pose pair and
+    // tells the system hook the coming frame's jitter, which the game
+    // reads the moment it is released from here.
+    temporalAaFrameBoundary();
 
     return result;
 }
@@ -1931,20 +1975,22 @@ void* interceptInterface(void* iface, const char* interfaceVersion) {
         cfg.getString("fix.supersample_resolve", "auto");
     const bool wantResolve =
         !resolveMode.empty() && _stricmp(resolveMode.c_str(), "off") != 0;
-    if (!wantFlash && !wantOffset && !wantResolve) {
+    const std::string taaMode = cfg.getString("fix.temporal_aa", "off");
+    const bool wantTemporal =
+        !taaMode.empty() && _stricmp(taaMode.c_str(), "off") != 0;
+    if (!wantFlash && !wantOffset && !wantResolve && !wantTemporal) {
         Log::get().note("compositor passed through unhooked: fix.transition_flash, "
-                        "fix.head_offset_gate and fix.supersample_resolve are all "
-                        "off, and those are the only features that need this "
-                        "hook.");
+                        "fix.head_offset_gate, fix.supersample_resolve and "
+                        "fix.temporal_aa are all off, and those are the only "
+                        "features that need this hook.");
         return iface;
     }
     if (!wantFlash) {
         // Name whichever of the others is actually why, so the line does
-        // not claim the head offset when the resolve is the reason.
-        const char* why = wantOffset && wantResolve
-                              ? "the head offset and the supersample resolve"
-                          : wantOffset ? "the head offset"
-                                       : "the supersample resolve";
+        // not claim the head offset when a door pass is the reason.
+        const char* why = wantOffset ? "the head offset and the door passes"
+                          : wantTemporal ? "the temporal pass"
+                                         : "the supersample resolve";
         Log::get().note("transition flash fix off, but the compositor hook is "
                         "installed anyway for %s -- no eye submits will be "
                         "withheld.",
@@ -2127,6 +2173,7 @@ void* interceptInterface(void* iface, const char* interfaceVersion) {
     // The resolve reads its keys here too, for the same reason: install
     // and reload both, or the values keep their initialisers all session.
     supersampleResolveConfigure();
+    temporalAaConfigure();
 
     return iface;
 }
@@ -2141,6 +2188,7 @@ void shutdownCompositorHook() {
                     g_state->framesWithheld, resubmitShadowResubmits(),
                     resubmitShadowFallbacks());
     supersampleResolveShutdown();
+    temporalAaShutdown();
     resubmitShadowShutdown();
     g_state->compositorHook.uninstall();
     if (g_state->sentinel) g_state->sentinel->confirm();

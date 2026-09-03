@@ -178,7 +178,8 @@ python "%ROOT%\tools\gen_exports.py" --source "%SystemRoot%\System32\d3d11.dll" 
     --extra-export edvr_selftest_scene_draws ^
     --extra-export edvrFssHealLeft ^
     --extra-export edvrFssTheater ^
-    --extra-export edvrSupersampleResolve
+    --extra-export edvrSupersampleResolve ^
+    --extra-export edvrTemporalAa
 if errorlevel 1 ( echo [edvr] ERROR: export generation failed & exit /b 1 )
 
 if not exist "%OBJ%\d3d11" mkdir "%OBJ%\d3d11"
@@ -223,6 +224,7 @@ cl.exe %CFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "%ROOT%\src\d3d11\intro_panel.cpp" ^
     "%ROOT%\src\d3d11\intro_upscale.cpp" ^
     "%ROOT%\src\d3d11\supersample_pass.cpp" ^
+    "%ROOT%\src\d3d11\temporal_pass.cpp" ^
     "%ROOT%\src\d3d11\loader_panel.cpp" ^
     "%ROOT%\src\d3d11\splash_dim.cpp" ^
     "%ROOT%\src\d3d11\witchstar_fix.cpp" "%ROOT%\src\d3d11\fov_probe.cpp" ^
@@ -292,6 +294,7 @@ cl.exe %CFLAGS% /Fo"%OBJ%\openvr"\ ^
     "%ROOT%\src\openvr\head_offset.cpp" "%ROOT%\src\openvr\resubmit_shadow.cpp" ^
     "%ROOT%\src\openvr\system_hook.cpp" "%ROOT%\src\openvr\guard_crop.cpp" ^
     "%ROOT%\src\openvr\supersample_resolve.cpp" ^
+    "%ROOT%\src\openvr\temporal_aa.cpp" ^
     "%ROOT%\src\openvr\early_session.cpp" "%ROOT%\src\openvr\launch_centre.cpp" ^
     "%ROOT%\src\d3d11\elite_binds.cpp"
 if errorlevel 1 ( echo [edvr] ERROR: openvr compile failed & exit /b 1 )
@@ -525,6 +528,24 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
 if errorlevel 1 ( echo [edvr] ERROR: supersample_test build failed & exit /b 1 )
 "%BUILD%\supersample_test.exe" || (
     echo [edvr] ERROR: the supersample resolve's arithmetic is wrong
+    exit /b 1
+)
+
+echo [edvr] === temporal_test.exe ===
+REM The temporal pass's arithmetic (src\common\temporal_math.h): the jitter
+REM sequence and the SIGN of its tangent shift, the pixel-to-direction
+REM mapping on a real headset's lopsided frustum, the rotation deltas from
+REM the runtime's pose and the game's view rows, and the reprojection walked
+REM by hand against a known head turn. Header-only, links nothing from src\.
+if not exist "%OBJ%\taatest" mkdir "%OBJ%\taatest"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\taatest"\ ^
+    /Fe"%BUILD%\temporal_test.exe" ^
+    "%ROOT%\tools\temporal_test\temporal_test.cpp" ^
+    /link /INCREMENTAL:NO
+if errorlevel 1 ( echo [edvr] ERROR: temporal_test build failed & exit /b 1 )
+"%BUILD%\temporal_test.exe" || (
+    echo [edvr] ERROR: the temporal pass's arithmetic is wrong
     exit /b 1
 )
 

@@ -51,6 +51,8 @@ READERS = [
     # all three live, and the mode decides whether frames are treated at
     # all -- the exact shape of the head-offset failure above.
     ('supersampleResolveConfigure', os.path.join('src', 'openvr', 'compositor_hook.cpp')),
+    # The temporal pass's mode, jitter, weight, clip and motion source.
+    ('temporalAaConfigure', os.path.join('src', 'openvr', 'compositor_hook.cpp')),
 ]
 
 

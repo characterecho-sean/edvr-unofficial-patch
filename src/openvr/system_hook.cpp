@@ -165,6 +165,14 @@ struct State {
     bool      restartNoted = false;       // "enable needs a restart", said once
     bool      guardInert = false;         // formula or shape failed; truth only
 
+    // The temporal pass's jitter for the current frame (system_hook.h):
+    // written at the frame boundary, read by the raw thunk and the matrix
+    // receiver on the game's thread -- the same plain-store discipline as
+    // the lie, for the same reason.
+    bool      jitLive = false;
+    float     jitDx = 0.0f, jitDy = 0.0f;
+    bool      receiverForTemporal = false;  // the receiver was installed for it
+
     // THE TWO-STAGE GO-LIVE. Both field failures of this guard were the
     // transport (OpenComposite over VDXR) mishandling a submission shape the
     // session had not served before -- narrowed bounds first, then a
@@ -448,6 +456,16 @@ void hookedGetProjectionRaw(void* self, int32_t eye, float* l, float* r,
                 *b = lie[3];
             }
         }
+        // The temporal pass's jitter, after the lie: a sub-pixel shift of
+        // the whole frustum, told to the game only while the receiver can
+        // tell it the same thing (systemHookJitterAvailable), so the raw
+        // and matrix answers never disagree about where the frustum sits.
+        if (s->jitLive && s->receiverInstalled && s->matrixFormulaOk[eye]) {
+            *l += s->jitDx;
+            *r += s->jitDx;
+            *t += s->jitDy;
+            *b += s->jitDy;
+        }
     });
     systemHookPeriodic();
 }
@@ -539,14 +557,27 @@ vr::HmdMatrix44_t MatrixReceiver::GetProjectionMatrix(int32_t eye, float nearZ,
         }
     }
 
-    if (lieActiveFor(s, eye) && s->matrixFormulaOk[eye]) {
-        const float* lie = s->lied[eye];
-        const float du = lie[1] - lie[0], dv = lie[3] - lie[2];
+    // The edit: the lie's tangents when the guard is live, the truth's
+    // otherwise, either shifted by the temporal pass's jitter when one is
+    // live -- the same numbers the raw thunk answers, so the two calls tell
+    // one story about where the frustum sits this frame.
+    const bool lie = lieActiveFor(s, eye);
+    const bool jit = s->jitLive && s->matrixFormulaOk[eye];
+    if ((lie || jit) && s->matrixFormulaOk[eye]) {
+        float tt[4];
+        memcpy(tt, lie ? s->lied[eye] : s->trueRaw[eye], sizeof(tt));
+        if (jit) {
+            tt[0] += s->jitDx;
+            tt[1] += s->jitDx;
+            tt[2] += s->jitDy;
+            tt[3] += s->jitDy;
+        }
+        const float du = tt[1] - tt[0], dv = tt[3] - tt[2];
         if (du > 1e-4f && dv > 1e-4f) {
             m.m[0][0] = 2.0f / du;
-            m.m[0][2] = (lie[1] + lie[0]) / du;
+            m.m[0][2] = (tt[1] + tt[0]) / du;
             m.m[1][1] = 2.0f / dv;
-            m.m[1][2] = (lie[3] + lie[2]) / dv;
+            m.m[1][2] = (tt[3] + tt[2]) / dv;
         }
     }
     return m;
@@ -1285,7 +1316,14 @@ void maybeObserveSystemInterface(void* iface, const char* interfaceVersion) {
     // conventions at all. Decided once -- swapping mechanisms on a live
     // slot mid-session buys nothing and risks a torn frame.
     systemHookConfigure();
-    const bool wantReceiver = s.modeRequested != GuardMode::Off;
+    // The temporal pass's jitter needs the same receiver: a shift told
+    // through the raw tangents alone would leave the matrix the game
+    // renders through un-shifted. Read here, once, like the guard's mode.
+    {
+        const std::string taa = cfg.getString("fix.temporal_aa", "off");
+        s.receiverForTemporal = !taa.empty() && _stricmp(taa.c_str(), "off") != 0;
+    }
+    const bool wantReceiver = s.modeRequested != GuardMode::Off || s.receiverForTemporal;
 
     void* matrixEntry;
     if (wantReceiver) {
@@ -1335,10 +1373,37 @@ void maybeObserveSystemInterface(void* iface, const char* interfaceVersion) {
         "terrain culling investigation (frontier issue 72609)%s. Every call "
         "is forwarded; nothing changes until a go-live line says so.",
         wantReceiver
-            ? ", and the CULL GUARD is armed -- once both eyes' true "
-              "projections are read and checked, the game will be told a "
-              "wider frustum and the image cropped back at submit"
+            ? (s.modeRequested != GuardMode::Off
+                   ? ", and the CULL GUARD is armed -- once both eyes' true "
+                     "projections are read and checked, the game will be told "
+                     "a wider frustum and the image cropped back at submit"
+                   : ", with the matrix receiver in place for the temporal "
+                     "pass's jitter")
             : "");
+}
+
+void systemHookSetJitter(float dx, float dy, bool live) {
+    State* s = g_state;
+    if (!s) return;
+    s->jitDx = live ? dx : 0.0f;
+    s->jitDy = live ? dy : 0.0f;
+    s->jitLive = live && s->receiverInstalled;
+}
+
+bool systemHookJitterAvailable() {
+    State* s = g_state;
+    return s && s->installed && !s->inert && s->receiverInstalled &&
+           s->matrixChecked[0] && s->matrixChecked[1] && s->matrixFormulaOk[0] &&
+           s->matrixFormulaOk[1];
+}
+
+bool systemHookEffectiveTangents(vr::EVREye eye, float out[4]) {
+    State* s = g_state;
+    if (!s || !out) return false;
+    const int e = (eye == vr::Eye_Left) ? 0 : 1;
+    if (!s->trueSeen[e]) return false;
+    memcpy(out, lieActiveFor(s, e) ? s->lied[e] : s->trueRaw[e], sizeof(float) * 4);
+    return true;
 }
 
 void* systemInterfaceV012() {

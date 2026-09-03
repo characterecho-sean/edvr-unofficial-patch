@@ -90,6 +90,26 @@ bool systemHookCropTarget(vr::EVREye eye, uint32_t* w, uint32_t* h);
 // (supersample_resolve.h); nothing else here needs it.
 bool systemHookRecommendedSize(uint32_t* w, uint32_t* h);
 
+// The temporal pass's jitter (temporal_aa.h): a shift of every tangent the
+// game is told for the coming frame -- l and r by dx, t and b by dy -- set
+// at the frame boundary and held for the whole frame, the guard's own
+// consistency rule. live = false clears it. Applied in BOTH the raw thunk
+// and the matrix receiver, or not at all: see systemHookJitterAvailable.
+void systemHookSetJitter(float dx, float dy, bool live);
+
+// Whether a jitter can be told to the game at all: the member-shaped
+// matrix receiver is installed (decided at launch -- the guard armed, or
+// fix.temporal_aa on) and both eyes' matrices matched the tangent formula.
+// Without it the raw thunk alone would shift the tangents while the matrix
+// stayed put, and the game would render through one and be un-jittered
+// through the other.
+bool systemHookJitterAvailable();
+
+// The tangents the game is being told THIS frame, jitter excluded: the lie
+// under a live guard, the truth otherwise. False until that eye has been
+// seen.
+bool systemHookEffectiveTangents(vr::EVREye eye, float out[4]);
+
 // The IVRSystem the game was handed, or null.
 //
 // Only ever non-null for IVRSystem_012: maybeObserveSystemInterface refuses

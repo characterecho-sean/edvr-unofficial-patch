@@ -569,10 +569,11 @@ once, and every frame forwards as today. A jitter with the pass down is a
 frame drawn a sub-pixel off — invisible, but pointless — so the jitter
 arms only after the pass has treated a frame, and disarms with it.
 
-**Settings sketch** (`[fix]`):
+**Settings** (`[fix]`, as built):
 
 ```
-temporal_aa        = off   ; off | on. Restages live.
+temporal_aa        = off   ; off | on. On needs a restart (the projection
+                           ; edit installs at launch); the rest are live.
 temporal_aa_jitter = on    ; the sub-pixel projection jitter. Off =
                            ; smoothing only.
 temporal_aa_blend  = 0.90  ; history weight, 0.50..0.95: higher is calmer
@@ -581,6 +582,45 @@ temporal_aa_clamp  = 1.0   ; how far history may stray from the current
                            ; neighbourhood, in standard deviations: lower
                            ; means less ghosting and more flicker. Live.
 ```
+
+and under `[advanced]`, for the field's A/B: `temporal_aa_motion = head |
+camera | none` and `temporal_aa_view_transpose`.
+
+**What was built (2026-09-03: v1, off by default, not yet flown).** The
+openvr half (`src/openvr/temporal_aa.cpp`) owns the jitter and the head:
+each frame boundary advances a Halton (2,3) offset over eight frames and
+tells the system hook the shift of every tangent it implies (`src/common/
+temporal_math.h`, `temporalJitterToTangents`); the system hook applies it
+in both the raw thunk and the matrix receiver, or in neither — the
+receiver installs at launch when `temporal_aa` is on, exactly as it does
+for the guard, and a session where it did not (the key turned on live, or
+the runtime's matrix failing the tangent-formula check) runs the pass as a
+smoother and says so once. The head pose at `WaitGetPoses`, before any
+EDVR offset, is kept as a pair, and its rotation delta (`temporalHeadDelta`)
+is handed to the pass per eye. The treatment runs first at the door, on
+the game's own frame at render size, on the forward path only; the
+theater's and heal's renderings and a withheld frame's shadow each mark
+the history broken, and the next real frame starts it afresh. The d3d11
+half (`edvrTemporalAa`, `src/d3d11/temporal_pass.cpp`) does the pass: per
+pixel, this frame sampled at its jitter offset, the pixel's direction
+through this frame's frustum rotated by the delta and projected through
+last frame's (`temporalReproject`, transcribed), the history fetched there
+with a nine-tap Catmull-Rom, clipped to the current 3x3 neighbourhood's
+mean ± γσ in YCoCg, blended at the configured weight, and written as the
+output (the game's own format) and the new history (R10G10B10A2, float16
+where that cannot be stored to; two per eye). Rotation only, no depth: v1
+as designed, with the game's camera as an experiment behind
+`temporal_aa_motion = camera` — the view rows the sun-glare fix measured
+at float 932 of the scene block, latched at each frame's first eye draw,
+with `temporal_aa_view_transpose` for the reading the field has to settle.
+The pass counts, per frame, the pixels whose history was rejected (off the
+image or none yet) and clipped, and the graphics log's totals line prints
+both as percentages beside the price: with the head turning and the ship
+steady, a correct reprojection keeps both low, which is the instrument
+Phase 0 item 5 and the camera question both read. Desk-verified:
+`tools/temporal_test` pins the sequence, the shift's sign, the mapping on
+the Quest 3's frustum, both deltas and the reprojection against a known
+turn; `tools/smoke` runs the pass on a real device.
 
 ## Feature C — texture LOD bias, the small lever
 

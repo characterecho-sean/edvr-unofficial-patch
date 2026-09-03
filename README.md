@@ -214,6 +214,20 @@ flicker, run anisotropic filtering at 16x, and on SteamVR turn on Advanced
 Supersample Filtering.
 *Details: [docs/anti-aliasing.md](docs/anti-aliasing.md).*
 
+**The shimmer itself — temporal anti-aliasing.** *Off by default; a first
+build.* Elite has no temporal anti-aliasing, and its menu's options are
+edge filters that cannot touch content flickering on and off the pixel
+grid as your head moves. `temporal_aa = on` blends each frame with the
+frames before it, each moved to where its content sits now, with the
+projection the game renders through nudged by a sub-pixel amount every
+frame so the average converges to a real supersample even with the head
+held still. The first build moves the history by the headset's turn, which
+is exact for the cockpit and the HUD and right for the world whenever the
+ship is not turning; a fast turn leaves the world un-anti-aliased for
+those frames rather than ghosted. Set Elite's own anti-aliasing to Off or
+SMAA with it on. Needs a restart to turn on; the weight and the clamp are
+live. *Details: [docs/anti-aliasing.md](docs/anti-aliasing.md).*
+
 **The RemLok helmet's edge lines hanging along your nose.** When the
 emergency helmet deploys, its faint edge lines end up in the middle of your
 view instead of at your temples — the game stamps the same both-edges
