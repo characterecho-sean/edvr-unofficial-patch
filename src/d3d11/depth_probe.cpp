@@ -33,7 +33,7 @@ void main(uint3 id : SV_DispatchThreadID) {
 }
 )HLSL";
 
-constexpr int      kMaxTargets = 10;
+constexpr int      kMaxTargets = 24;   // the cockpit binds shadow maps by the handful
 constexpr uint64_t kSampleIntervalMs = 10000;
 constexpr int      kMaxSampleLines = 6;
 
@@ -609,17 +609,36 @@ void depthProbeFrameBoundary(ID3D11DeviceContext* ctx) {
                 "draw the eyes without it. v2 needs another way in; please "
                 "report this log.");
         } else {
+            // The busiest targets by draws last frame, so a cockpit census
+            // with a handful of shadow maps still names the scene's depth.
+            int order[kMaxTargets];
+            for (int i = 0; i < g_targetCount; ++i) order[i] = i;
+            for (int i = 1; i < g_targetCount; ++i) {
+                for (int j = i; j > 0 && g_targets[order[j]].drawsLastFrame >
+                                             g_targets[order[j - 1]].drawsLastFrame; --j) {
+                    const int tmp = order[j]; order[j] = order[j - 1]; order[j - 1] = tmp;
+                }
+            }
+            char busy[256] = "";
+            size_t used = 0;
+            for (int k = 0; k < g_targetCount && k < 4; ++k) {
+                const Target& b = g_targets[order[k]];
+                const int m = snprintf(busy + used, sizeof(busy) - used, "%s#%d %ux%u %u draws",
+                                       k ? ", " : "", order[k], b.w, b.h, b.drawsLastFrame);
+                if (m > 0) used += static_cast<size_t>(m);
+                if (used >= sizeof(busy)) break;
+            }
             Log::get().note(
                 "depth probe: %d distinct depth target(s) seen at draws over "
                 "120 frames, at most %u in one frame. Last frame: %u draws "
                 "hooked, %u of them with a depth target bound, %u with an "
-                "eye-sized colour target, %u indirect. Each target is sampled "
-                "at the LAST moment in a frame the game switches away from "
-                "it, both through a view and through a copy, and at the frame "
-                "boundary through a copy, every %llu s.",
+                "eye-sized colour target, %u indirect; the busiest targets: %s. "
+                "Each target is sampled at the LAST moment in a frame the game "
+                "switches away from it, both through a view and through a "
+                "copy, and at the frame boundary through a copy, every %llu s.",
                 g_targetCount, g_maxDistinct, g_drawsLastFrame,
                 g_drawsWithDsvLastFrame, g_eyeRtvDrawsLastFrame,
-                g_indirectLastFrame,
+                g_indirectLastFrame, busy,
                 static_cast<unsigned long long>(kSampleIntervalMs / 1000));
         }
     }
@@ -633,6 +652,7 @@ void depthProbeFrameBoundary(ID3D11DeviceContext* ctx) {
             const int idx = static_cast<int>(g_boundaryNext++ % static_cast<uint32_t>(g_targetCount));
             Target& t = g_targets[idx];
             if (!t.tex || t.samples > 1 || t.sampleLines >= kMaxSampleLines * 2) continue;
+            if (t.drawsLastFrame == 0 && g_targetCount > 4) continue;
             DXGI_FORMAT copyFmt = DXGI_FORMAT_UNKNOWN;
             const DXGI_FORMAT readFmt = depthReadFormat(t.texFmt, &copyFmt);
             if (readFmt == DXGI_FORMAT_UNKNOWN) continue;

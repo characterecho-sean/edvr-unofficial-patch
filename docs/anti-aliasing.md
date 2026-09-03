@@ -793,6 +793,40 @@ than resampled, live). The first part is the trade the feature IS: a
 player who values crisp text over calm edges is better served by the
 resolve alone, and the README says so.
 
+**The seventh flight (2026-09-03) settled the main menu.** The full
+census: 24 draws a frame reach the context EDVR hooks, 14 with an
+eye-sized colour target, 4 with a depth target (one each), none indirect,
+no command lists ever. A hangar with a ship model is not 24 draws, and the
+player confirmed the model never moves: the menu's ship and panel are a
+pre-rendered stereo image put in front of each eye, and the census cannot
+find scene depth there because there is none. The shimmer that survives
+with the head held still -- white and grey text more than orange -- is
+the same near-content story at its smallest scale: tracking noise moves
+the head a fraction of a millimetre a frame, which at a couple of metres
+is a tenth or two of a pixel that a rotation-only reprojection cannot
+follow, so a high-contrast stroke's history lands a hair off and the clip
+rejects it or the blend flickers; luminance flicker is what the eye sees,
+and orange has half the luminance contrast of white. The next census runs
+in the cockpit, where the scene is live geometry with thousands of draws
+and a depth target the probe will name.
+
+**Motion vectors, and DLSS.** The pass has no motion vectors. It has a
+rotation-only camera reprojection, which is a motion field exact for
+content at infinity and wrong by the head's translation for everything
+near; the game exposes none (its SMAA is spatial, and no motion-vector
+pass exists to read), and object motion is unrecoverable from outside.
+Per-pixel depth turns the camera's full pose delta into camera motion
+vectors, which is what DLSS, DLAA and FSR 2 consume together with colour,
+the jitter offset and the projection -- exactly the plumbing this branch
+built (the jitter through the projection edit, the pose delta, the door
+pass), plus the one input still missing. With depth found, DLAA (DLSS at
+native size, no upscale) is the tool for shimmer at this quality: a
+trained history handler with the exact registration my clip lacks, and
+text is where it shows. Objects that move on their own would still carry
+no motion of their own, which DLSS tolerates better than a hand-rolled
+clip. It needs an NVIDIA RTX GPU and the NGX runtime beside the game; FSR
+2 needs neither and takes the same inputs. Step one is the cockpit census.
+
 ## Feature C — texture LOD bias, the small lever
 
 Not all shimmer is geometry. Detail maps and normal maps sampled a mip
