@@ -1160,6 +1160,14 @@ bool systemHookCropTarget(vr::EVREye eye, uint32_t* w, uint32_t* h) {
     return true;
 }
 
+bool systemHookRecommendedSize(uint32_t* w, uint32_t* h) {
+    State* s = g_state;
+    if (!s || !w || !h || !s->trueSizeW || !s->trueSizeH) return false;
+    *w = s->trueSizeW;
+    *h = s->trueSizeH;
+    return true;
+}
+
 bool systemHookCropBounds(vr::EVREye eye, const vr::VRTextureBounds_t* in,
                           vr::VRTextureBounds_t* out) {
     State* s = g_state;

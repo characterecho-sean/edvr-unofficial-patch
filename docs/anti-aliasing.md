@@ -5,7 +5,9 @@
 about the game, runtimes and SDKs are labelled measured (established in this
 repo's field logs or code), vendor-stated (their documentation or release
 notes), or believed; what can only be settled at implementation time or in a
-live session is collected under Phase 0. Nothing here is implemented yet.*
+live session is collected under Phase 0. Feature A's passive mode was built
+on 2026-09-02 and ships off by default — its section records what was built
+and which log lines measure what; everything else here is design.*
 
 ## The ask
 
@@ -274,25 +276,84 @@ today's supersampling, not a new category. Its structural value is that it
 is the door TAA walks through next, and that TAA over a supersampled input
 is the best anti-aliasing available anywhere.
 
-**Settings sketch** (`[fix]`; names final at implementation, alongside
-performance.md's):
+**Settings** (`[fix]`, the names as built; performance.md's `render_scale`
+is not in this tree yet and is not invented here — the active mode waits
+on it):
 
 ```
-render_scale        = 1.0    ; per-axis. Below 1.0 upscales by FSR
-                             ; (performance.md); above 1.0 supersamples
-                             ; and resolves here. 1.0 = off. Restages live.
-supersample_resolve = auto   ; off | auto | on. auto engages whenever the
+supersample_resolve = off    ; off | auto | on. auto engages whenever the
                              ; game submits larger than the runtime asked
-                             ; for, however that came about.
+                             ; for, however that came about, and stays
+                             ; quiet otherwise; on is the same and says so
+                             ; when it finds nothing to do. Live.
 supersample_filter  = calm   ; calm (gaussian) | crisp (mitchell). Live.
-supersample_width   = 1.0    ; kernel radius in output pixels; wider is
-                             ; calmer and softer. Live.
+supersample_width   = 1.0    ; kernel radius in output pixels, 0.5..3.0;
+                             ; wider is calmer and softer. Live.
 ```
 
-Pixel cost quoted the way performance.md quotes it: `render_scale = 1.4`
-renders ~196% of native pixels. The pass's own price is measured by
-timestamp query and printed alongside; believed well under a millisecond
-per eye at headset sizes.
+Pixel cost quoted the way performance.md quotes it: HMD Quality 1.4
+renders ~196% of native pixels, and that is the game's price, paid
+already. The pass's own price is measured by timestamp query and printed
+in the graphics log; believed well under a millisecond per eye at headset
+sizes until the field says otherwise.
+
+**What was built (2026-09-02: the passive mode, off by default).** The
+openvr half decides (`src/openvr/supersample_resolve.cpp`). Every
+forwarded submit's per-eye size — the texture's size narrowed by its
+bounds, which is the post-crop size when the cull guard is live — is
+judged at the frame boundary against the recommendation the system hook
+captured (`systemHookRecommendedSize`): the resolve arms once both eyes
+submit the same size, larger than the recommendation by more than
+rounding (one percent or two pixels, whichever is larger), disarms on any
+change of either size, and re-adopts at the same boundary when the new
+size still qualifies, so a resolution change costs no untreated frame
+(`src/common/supersample_math.h` holds the state machine and the kernel
+maths, header-only, so a test drives them without a headset — the
+guard's changed-size adoption discipline, mirrored). The d3d11 half
+filters (`edvrSupersampleResolve`, `src/d3d11/supersample_pass.cpp`):
+two compute dispatches per eye, horizontal then vertical through a
+float16 intermediate, the taps clamped inside the eye's own region so
+the other eye's half of the double-wide texture and any guard margin are
+never read, gamma content decoded to linear light around the filter
+(what the compositor's own sRGB view does — the same operation with a
+better kernel, not a different one) and re-encoded after, into an
+EDVR-owned texture of the recommended size in the source's own format,
+submitted with full bounds in the original orientation. The treatment
+runs on every forwarding path of `hookedSubmit` — the game's frame, the
+guard's crop, the theater's rendering, the withhold's shadow — after the
+guard's crop where one runs: crop first, resolve second, sequentially;
+the fused dispatch is noted in the code as future work. Any refusal — a
+one-file install (the theater's "mismatched pair?" voice), an unlisted or
+sRGB-typed format, an MSAA or array source, a failed compile or view, a
+spent fault budget — stands the resolve down for the session with one
+line and forwards the game's own frame. The sharpen is a marked seam in
+the pass: `render_sharpness` is not in this tree, and RCAS runs at that
+seam once it is. Pinned at the desk by `tools/supersample_test` (both
+kernels' weights sum to one on every output pixel, a flat image stays
+flat at every width and ratio, taps never leave the region, the textbook
+Mitchell values at width 2, the arm/disarm verdict frame by frame
+including the double-wide and flipped bounds) and by `tools/smoke`,
+which runs the pass on a real device against a double-wide source and
+asserts no bleed across the seam.
+
+What the log says, and which Phase 0 item each line answers:
+
+- `supersample resolve: engaged -- each eye arrives at WxH against the
+  runtime's recommended WxH (…x horizontal, …x vertical …)`, in the vr
+  log: the detected ratio, the kernel and its radius.
+- `supersample resolve: first resolved frame -- the game submits <format>
+  (DXGI_FORMAT n) …`, in the graphics log: Phase 0 item 2, the submitted
+  format and whether it is read as gamma.
+- `supersample resolve: measured … ms per eye on average (max …)`, after
+  120 timed passes, and the periodic `supersample resolve totals:` line:
+  Phase 0 item 6's price half, by timestamp query.
+- `supersample resolve STANDING DOWN: …` or `… stands down`, anywhere: a
+  refusal, with its reason.
+
+Desk-checked on 2026-09-02 — the build, both harnesses and the shader
+desk-compiled — and not yet flown: the field numbers belong in those
+lines, not in this paragraph, and `auto` becomes the default when they
+have been read.
 
 ## Feature B — temporal anti-aliasing at the door
 
@@ -691,19 +752,22 @@ if the guard is live) → **crop** (the guard) → **scale** (EASU up for
 **sharpen** (RCAS) → **menu, toasts, monitor** composited onto the
 native-size outgoing frame. Fusions come later, in the order their edge-tap
 questions are answered; v1 may run them sequentially, since each already
-exists or is one dispatch.
+exists or is one dispatch. Built so far (2026-09-02): the crop, then the
+supersample resolve, sequential, each its own pass on the texture the one
+before produced; the fusion is noted in the code as future work.
 
 ## Guidance for players now
 
-Nothing in this document ships yet, and some of the shimmer has answers
-today that the README and `edvr.ini` can carry:
+Feature A ships (off by default, since 2026-09-02); the rest does not.
+Some of the shimmer has answers today, and the README and `edvr.ini` have
+carried them since the same date:
 
 - **Supersample through HMD Quality, not Elite's Supersampling slider**,
   in VR. The first hands the compositor a bigger frame to filter down as
   part of its distortion pass; the second has the game filter down before
   its post chain sees the result (believed, and it is the field's settled
-  advice). Feature A makes the choice moot; until then the compositor's
-  filter is the better one.
+  advice). Feature A, switched on, makes the choice moot; with it off the
+  compositor's filter is the better one.
 - **On SteamVR, turn on Advanced Supersample Filtering** (in the
   advanced video settings). It is the better downsample, and by its own
   description it is only noticeable at high supersampling — which is
@@ -722,7 +786,10 @@ today that the README and `edvr.ini` can carry:
    SMAA/FXAA pass hashes feature B's warning line needs.
 2. **The eye-texture formats** (shared with performance.md's item 1): the
    exact formats submitted, sRGB or not, for the resolve's and the TAA's
-   views.
+   views. *Instrumented 2026-09-02: the resolve's `first resolved frame`
+   line names the format and whether it is read as gamma. Measured so far
+   by the render-scale work: R8G8B8A8_TYPELESS on the Quest 3 over Virtual
+   Desktop (2026-09-02); the Pimax's is still untaken.*
 3. **The depth target.** Its format, whether it is created with
    shader-resource binding, and that the classifier names the same target
    the eye draws bind — one census with `d=` against one `CreateTexture2D`
@@ -739,6 +806,9 @@ today that the README and `edvr.ini` can carry:
    and a held-view comparison — the tile-difference method
    `docs/eye-brightness.md` used — of native, supersampled-bilinear,
    supersampled-resolved, and TAA, so "sharper" and "calmer" are numbers.
+   *The resolve's price is instrumented (2026-09-02): timestamp queries
+   around its two dispatches, printed after 120 samples and in the totals
+   line. Softness is not, and the comparison is still to be flown.*
 7. **The HUD under TAA.** Text legibility with jitter on and off, and
    ghosting on a passing ship at the default clamp: the two failure modes
    that would decide the defaults.
@@ -757,10 +827,11 @@ today that the README and `edvr.ini` can carry:
 
 ## Phasing
 
-1. **Feature A, passive** — the resolve at the door, auto-engaged, with the
-   guidance text landing in the README and `edvr.ini` at the same time.
-   Small, all vendors, and it builds the door machinery every later pass
-   uses.
+1. **Feature A, passive** — **built 2026-09-02**, off by default: the
+   resolve at the door, arming itself when the game submits larger than
+   asked, with the guidance text in the README and `edvr.ini`. Small, all
+   vendors, and it built the door machinery every later pass uses. `auto`
+   becomes the default once a field flight confirms its lines.
 2. **Feature C** — a day's work whenever a slot is free; it does not wait
    on anything.
 3. **Feature B v1** (head-motion reprojection, with the jitter), then

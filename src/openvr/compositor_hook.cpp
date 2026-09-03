@@ -22,6 +22,7 @@
 #include "guard_crop.h"
 #include "openvr_min.h"
 #include "resubmit_shadow.h"
+#include "supersample_resolve.h"
 #include "system_hook.h"
 
 namespace edvr {
@@ -909,6 +910,32 @@ vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
     }
     if (s->inert) return s->realSubmit(self, eye, texture, bounds, flags);
 
+    // The supersample resolve (docs\anti-aliasing.md, Feature A), applied
+    // to whatever texture a path is about to forward -- EVERY forwarding
+    // path below, after the guard's crop where one runs: crop first,
+    // resolve second, sequentially (a fused single dispatch, the crop's
+    // sub-rectangle fed straight into the filter's taps, is future work
+    // once performance.md's edge-tap question is answered). One flag test
+    // when it is off; applyCullGuard's discipline otherwise -- treat every
+    // path once, or none, so no path ships an untreated frame while the
+    // resolve is engaged. Only once validated, like the withhold: a hook
+    // that has not proved its slot has no business touching a frame.
+    auto applyResolve = [&](vr::Texture_t* tex,
+                            const vr::VRTextureBounds_t** bnds,
+                            vr::VRTextureBounds_t* storage) {
+        if (!s->validated || !supersampleResolveWanted()) return;
+        if (tex->eType != vr::TextureType_DirectX) {
+            supersampleResolveStandDown("the game is not submitting DirectX "
+                                        "textures, which the resolve needs");
+            return;
+        }
+        void* out = supersampleResolveTreat(eye, tex->handle, tex->eColorSpace,
+                                            *bnds, storage);
+        if (!out) return;   // not engaged, or stood down and said so
+        tex->handle = out;
+        *bnds = storage;
+    };
+
     // The FSS arrival-mono substitution (fix.fss_arrival_mono): while the
     // window counts down, the LEFT eye submits the RIGHT eye's texture --
     // published last frame, one frame stale, at optical infinity where
@@ -1010,7 +1037,15 @@ vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
             if (drawn) {
                 vr::Texture_t sub = *texture;
                 sub.handle = drawn;
-                return s->realSubmit(self, eye, &sub, bounds, flags);
+                // The theater's rendering is game-texture-sized, so a
+                // supersampled session's panel arrives supersampled too;
+                // the resolve treats it like any other forwarded frame.
+                // (The guard's crop does not run on this path -- pre-
+                // existing, and unmeasured with both live at once.)
+                const vr::VRTextureBounds_t* subBounds = bounds;
+                vr::VRTextureBounds_t subStorage;
+                applyResolve(&sub, &subBounds, &subStorage);
+                return s->realSubmit(self, eye, &sub, subBounds, flags);
             }
         }
     }
@@ -1128,7 +1163,10 @@ vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
                     }
                     vr::Texture_t sub = *texture;
                     sub.handle = healed;
-                    return s->realSubmit(self, eye, &sub, bounds, flags);
+                    const vr::VRTextureBounds_t* subBounds = bounds;
+                    vr::VRTextureBounds_t subStorage;
+                    applyResolve(&sub, &subBounds, &subStorage);
+                    return s->realSubmit(self, eye, &sub, subBounds, flags);
                 }
             }
         }
@@ -1363,6 +1401,8 @@ vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
             const vr::VRTextureBounds_t* subBounds = effBounds;
             vr::VRTextureBounds_t subStorage;
             applyCullGuard(&sub, &subBounds, &subStorage);
+            vr::VRTextureBounds_t subStorage2;
+            applyResolve(&sub, &subBounds, &subStorage2);
             return s->realSubmit(self, eye, &sub, subBounds, flags);
         }
         if (s->notesLeft > 0) {
@@ -1409,6 +1449,8 @@ vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
             }
         }
         applyCullGuard(&fwd, &fwdBounds, &fwdStorage);
+        vr::VRTextureBounds_t fwdStorage2;
+        applyResolve(&fwd, &fwdBounds, &fwdStorage2);
         const vr::EVRCompositorError result =
             s->realSubmit(self, eye, &fwd, fwdBounds, flags);
         // This frame was FORWARDED and accepted, so it becomes the copy a
@@ -1734,6 +1776,9 @@ vr::EVRCompositorError hookedWaitGetPoses(void* self,
             // The cull guard's margin is tuned from inside a headset, so its
             // keys are live; mode changes take effect at the next boundary.
             systemHookConfigure();
+            // The resolve's mode, kernel and width are judged from inside a
+            // headset, so all three are live; the next boundary decides.
+            supersampleResolveConfigure();
             // The snapshot toggle is an in-headset A/B experiment, so it is
             // live too; the flip logs its own receipt.
             resubmitShadowConfigure();
@@ -1816,6 +1861,11 @@ vr::EVRCompositorError hookedWaitGetPoses(void* self,
     // in the coming frame, and the submit crop at its end, can be made to
     // tell one story. Deferred log emission rides along.
     systemHookFrameBoundary();
+    // The resolve's own boundary, after the system hook's: it reads the
+    // recommendation the size hook captured and judges what both eyes
+    // submitted this frame, so the coming frame's two submits get one
+    // verdict (supersample_resolve.h).
+    supersampleResolveFrameBoundary();
 
     return result;
 }
@@ -1872,16 +1922,33 @@ void* interceptInterface(void* iface, const char* interfaceVersion) {
     // point is "is the feature switched on at all".
     const bool wantFlash = cfg.getBool("fix.transition_flash", true);
     const bool wantOffset = cfg.getBool("fix.head_offset_gate", true);
-    if (!wantFlash && !wantOffset) {
-        Log::get().note("compositor passed through unhooked: fix.transition_flash "
-                        "and fix.head_offset_gate are both off, and those are the "
-                        "only two features that need this hook.");
+    // The THIRD feature behind this hook: the supersample resolve treats
+    // frames at Submit, so a mode other than off needs the hook installed
+    // whatever the other two say. Read here rather than through
+    // supersampleResolveConfigure because that runs after the install,
+    // and this is the decision whether there is an install at all.
+    const std::string resolveMode =
+        cfg.getString("fix.supersample_resolve", "off");
+    const bool wantResolve =
+        !resolveMode.empty() && _stricmp(resolveMode.c_str(), "off") != 0;
+    if (!wantFlash && !wantOffset && !wantResolve) {
+        Log::get().note("compositor passed through unhooked: fix.transition_flash, "
+                        "fix.head_offset_gate and fix.supersample_resolve are all "
+                        "off, and those are the only features that need this "
+                        "hook.");
         return iface;
     }
     if (!wantFlash) {
+        // Name whichever of the others is actually why, so the line does
+        // not claim the head offset when the resolve is the reason.
+        const char* why = wantOffset && wantResolve
+                              ? "the head offset and the supersample resolve"
+                          : wantOffset ? "the head offset"
+                                       : "the supersample resolve";
         Log::get().note("transition flash fix off, but the compositor hook is "
-                        "installed anyway for the head offset -- no eye submits "
-                        "will be withheld.");
+                        "installed anyway for %s -- no eye submits will be "
+                        "withheld.",
+                        why);
     }
 
     size_t submitSlot = 0, posesSlot = 0;
@@ -2057,6 +2124,9 @@ void* interceptInterface(void* iface, const char* interfaceVersion) {
     // config -- the system interface arrives first -- but this path is the
     // one check_install_reads.py can see, and a second read is free).
     systemHookConfigure();
+    // The resolve reads its keys here too, for the same reason: install
+    // and reload both, or the values keep their initialisers all session.
+    supersampleResolveConfigure();
 
     return iface;
 }
@@ -2070,6 +2140,7 @@ void shutdownCompositorHook() {
                     "fell back to a missed deadline).",
                     g_state->framesWithheld, resubmitShadowResubmits(),
                     resubmitShadowFallbacks());
+    supersampleResolveShutdown();
     resubmitShadowShutdown();
     g_state->compositorHook.uninstall();
     if (g_state->sentinel) g_state->sentinel->confirm();

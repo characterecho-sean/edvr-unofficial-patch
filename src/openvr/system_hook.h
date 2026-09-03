@@ -83,6 +83,13 @@ void systemHookNoteSubmittedSize(vr::EVREye eye, uint32_t w, uint32_t h);
 // required (boundary-less test processes).
 bool systemHookCropTarget(vr::EVREye eye, uint32_t* w, uint32_t* h);
 
+// The runtime's recommended per-eye render size, as last answered on slot
+// 0 -- the TRUTH, before any guard inflation. False until the game has
+// asked (or the hook never installed). The supersample resolve keys on the
+// ratio between this and what the game actually submits
+// (supersample_resolve.h); nothing else here needs it.
+bool systemHookRecommendedSize(uint32_t* w, uint32_t* h);
+
 // The IVRSystem the game was handed, or null.
 //
 // Only ever non-null for IVRSystem_012: maybeObserveSystemInterface refuses

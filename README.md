@@ -191,6 +191,26 @@ the values tested on a Quest 3. Three settings:
 [The terrain fix](#the-terrain-fix-cull-guard).
 *Details: [docs/terrain-culling.md](docs/terrain-culling.md).*
 
+**Aliasing when you supersample — the resolve at the door.** *Off by
+default.* When Elite renders each eye larger than the headset asked for
+(its HMD Quality above 1.0), the compositor shrinks the image on the fly as
+it corrects for the lenses, with whatever sampler it happens to use.
+`supersample_resolve = auto` has EDVR filter each eye down to exactly the
+recommended size itself, at submit, in linear light, with a calm (Gaussian)
+or crisp (Mitchell) kernel — `supersample_filter` and `supersample_width`,
+both live — and hand the compositor a frame it samples one to one. The
+pixels are the game's; only who filters them changes, so it cannot add
+detail and does nothing unless the game is already submitting larger than
+asked. Costs one small GPU pass per eye, measured by timestamp query and
+printed in the graphics log. Off in this first build; `auto` becomes the
+default once field logs confirm it. Meanwhile, for the shimmer itself:
+supersample through HMD Quality rather than Elite's Supersampling slider
+(the slider shrinks the image before the game's own post-processing), set
+Elite's anti-aliasing to Off or SMAA and stop expecting it to touch
+flicker, run anisotropic filtering at 16x, and on SteamVR turn on Advanced
+Supersample Filtering.
+*Details: [docs/anti-aliasing.md](docs/anti-aliasing.md).*
+
 **The RemLok helmet's edge lines hanging along your nose.** When the
 emergency helmet deploys, its faint edge lines end up in the middle of your
 view instead of at your temples — the game stamps the same both-edges
@@ -591,6 +611,12 @@ is camera state, not gameplay state; it never writes to the buffer it reads, and
 the only action it can take is to not forward a call — or to hand SteamVR the
 game's own previous frame in its place: a copy EDVR keeps of the last frame it
 forwarded, always the game's content, never EDVR's.
+
+**The supersample resolve, off by default,** is one more thing of that kind:
+when the game submits a larger frame than the headset asked for, one GPU
+filter pass shrinks the game's frame into a texture EDVR owns, and that copy
+is what SteamVR receives — the game's texture is read, never written, no
+answer the game asks for changes, and nothing is read from memory.
 
 **Three fixes do more, and each is described in full:** the resolution fix
 (below) rewrites twelve numbers in the game's code; Explorer Cam

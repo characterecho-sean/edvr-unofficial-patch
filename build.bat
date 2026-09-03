@@ -177,7 +177,8 @@ python "%ROOT%\tools\gen_exports.py" --source "%SystemRoot%\System32\d3d11.dll" 
     --extra-export edvr_selftest_hooks ^
     --extra-export edvr_selftest_scene_draws ^
     --extra-export edvrFssHealLeft ^
-    --extra-export edvrFssTheater
+    --extra-export edvrFssTheater ^
+    --extra-export edvrSupersampleResolve
 if errorlevel 1 ( echo [edvr] ERROR: export generation failed & exit /b 1 )
 
 if not exist "%OBJ%\d3d11" mkdir "%OBJ%\d3d11"
@@ -216,6 +217,7 @@ cl.exe %CFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "%ROOT%\src\d3d11\intro_probe.cpp" ^
     "%ROOT%\src\d3d11\intro_panel.cpp" ^
     "%ROOT%\src\d3d11\intro_upscale.cpp" ^
+    "%ROOT%\src\d3d11\supersample_pass.cpp" ^
     "%ROOT%\src\d3d11\loader_panel.cpp" ^
     "%ROOT%\src\d3d11\splash_dim.cpp" ^
     "%ROOT%\src\d3d11\witchstar_fix.cpp" "%ROOT%\src\d3d11\fov_probe.cpp" ^
@@ -284,6 +286,7 @@ cl.exe %CFLAGS% /Fo"%OBJ%\openvr"\ ^
     "%ROOT%\src\openvr\openvr_proxy.cpp" "%ROOT%\src\openvr\compositor_hook.cpp" ^
     "%ROOT%\src\openvr\head_offset.cpp" "%ROOT%\src\openvr\resubmit_shadow.cpp" ^
     "%ROOT%\src\openvr\system_hook.cpp" "%ROOT%\src\openvr\guard_crop.cpp" ^
+    "%ROOT%\src\openvr\supersample_resolve.cpp" ^
     "%ROOT%\src\openvr\early_session.cpp" "%ROOT%\src\openvr\launch_centre.cpp" ^
     "%ROOT%\src\d3d11\elite_binds.cpp"
 if errorlevel 1 ( echo [edvr] ERROR: openvr compile failed & exit /b 1 )
@@ -498,6 +501,25 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
 if errorlevel 1 ( echo [edvr] ERROR: pose_test build failed & exit /b 1 )
 "%BUILD%\pose_test.exe" || (
     echo [edvr] ERROR: the head pose arithmetic is wrong
+    exit /b 1
+)
+
+echo [edvr] === supersample_test.exe ===
+REM The supersample resolve's arithmetic (src\common\supersample_math.h):
+REM the arm/disarm verdict from sizes, the eye region from Submit bounds
+REM (double-wide and flipped), and both kernels' weights -- table-tested,
+REM header-only, linking nothing from src\ at all. The HLSL in
+REM supersample_pass.cpp transcribes the same functions; this pins the
+REM reference they are transcribed from.
+if not exist "%OBJ%\sstest" mkdir "%OBJ%\sstest"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\sstest"\ ^
+    /Fe"%BUILD%\supersample_test.exe" ^
+    "%ROOT%\tools\supersample_test\supersample_test.cpp" ^
+    /link /INCREMENTAL:NO
+if errorlevel 1 ( echo [edvr] ERROR: supersample_test build failed & exit /b 1 )
+"%BUILD%\supersample_test.exe" || (
+    echo [edvr] ERROR: the supersample resolve's arithmetic is wrong
     exit /b 1
 )
 

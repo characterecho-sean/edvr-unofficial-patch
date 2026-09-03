@@ -14,7 +14,7 @@ only the one you happened to run gets checked otherwise. Failures print the
 compiler's own error text.
 
 Usage:
-    python tools/compile_variants.py [header] [define ...]
+    python tools/compile_variants.py [--target=cs_5_0] [header] [define ...]
 
 With no arguments it checks the sun-glare vertex shader and its three
 variants, which is what it was written for. Give it a header path to check a
@@ -30,8 +30,15 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_SRC = os.path.join(REPO, "src", "d3d11", "sunglare_vs.h")
 DEFAULT_DEFINES = ["NOGATE", "ALLWORLD", "ALLFLAT"]
 
-SRC = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_SRC
-DEFINES = sys.argv[2:] if len(sys.argv) > 2 else DEFAULT_DEFINES
+# --target=cs_5_0 (or ps_5_0) desk-compiles a compute or pixel shader the
+# same way; the default is the vertex target the tool was written for. The
+# supersample resolve's filter (src/d3d11/supersample_pass.cpp) is the first
+# compute shader checked here.
+ARGS = [a for a in sys.argv[1:] if not a.startswith("--target=")]
+TARGET = next((a[len("--target="):] for a in sys.argv[1:]
+               if a.startswith("--target=")), "vs_5_0").encode()
+SRC = ARGS[0] if len(ARGS) > 0 else DEFAULT_SRC
+DEFINES = ARGS[1:] if len(ARGS) > 1 else DEFAULT_DEFINES
 
 text = open(SRC, encoding="utf-8").read()
 match = re.search(r'R"HLSL\((.*)\)HLSL"', text, re.S)
@@ -54,7 +61,7 @@ def compile_variant(defname):
     else:
         pdef = None
     hr = d3d.D3DCompile(hlsl, len(hlsl), b"vs", pdef, None, b"main",
-                        b"vs_5_0", 0, 0, ctypes.byref(code), ctypes.byref(errs))
+                        TARGET, 0, 0, ctypes.byref(code), ctypes.byref(errs))
     ok = hr == 0 and code.value
     print(f"{defname or 'NORMAL'}: hr=0x{hr & 0xFFFFFFFF:08X} {'OK' if ok else 'FAIL'}")
     if errs.value:

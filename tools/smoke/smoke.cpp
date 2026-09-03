@@ -16,6 +16,12 @@
 #include <d3d11.h>
 
 #include <cstdio>
+#include <vector>
+
+// The supersample resolve's reference arithmetic, header-only: the shader
+// under test is a transcription of it, and one striped image below is
+// where the two are held to agree.
+#include "../../src/common/supersample_math.h"
 
 namespace {
 
@@ -73,6 +79,151 @@ bool clearGreyReadBack(ID3D11Device* device, ID3D11DeviceContext* ctx, UINT w, U
     rtv->Release();
     tex->Release();
     return ok;
+}
+
+// A solid-colour source standing in for a submitted eye texture. RENDER_
+// TARGET so it can be cleared; SHADER_RESOURCE when asked, because a real
+// eye texture is one -- and NOT when asked, to reach the resolve's
+// copy-through path for a source that refuses a shader view.
+bool makeSolidSrc(ID3D11Device* device, ID3D11DeviceContext* ctx, UINT w, UINT h,
+                  const float rgba[4], bool shaderResource, ID3D11Texture2D** outTex) {
+    D3D11_TEXTURE2D_DESC td{};
+    td.Width = w; td.Height = h; td.MipLevels = 1; td.ArraySize = 1;
+    td.Format = DXGI_FORMAT_R8G8B8A8_UNORM; td.SampleDesc.Count = 1;
+    td.Usage = D3D11_USAGE_DEFAULT;
+    td.BindFlags = D3D11_BIND_RENDER_TARGET |
+                   (shaderResource ? D3D11_BIND_SHADER_RESOURCE : 0);
+    ID3D11Texture2D* tex = nullptr;
+    if (FAILED(device->CreateTexture2D(&td, nullptr, &tex)) || !tex) return false;
+    ID3D11RenderTargetView* rtv = nullptr;
+    if (FAILED(device->CreateRenderTargetView(tex, nullptr, &rtv)) || !rtv) {
+        tex->Release();
+        return false;
+    }
+    ctx->ClearRenderTargetView(rtv, rgba);
+    rtv->Release();
+    *outTex = tex;
+    return true;
+}
+
+// Read back one pixel of an R8G8B8A8_UNORM texture.
+bool readPixelRgba8(ID3D11Device* device, ID3D11DeviceContext* ctx,
+                    ID3D11Texture2D* tex, UINT x, UINT y, unsigned char out[4]) {
+    D3D11_TEXTURE2D_DESC sd{};
+    sd.Width = 1; sd.Height = 1; sd.MipLevels = 1; sd.ArraySize = 1;
+    sd.Format = DXGI_FORMAT_R8G8B8A8_UNORM; sd.SampleDesc.Count = 1;
+    sd.Usage = D3D11_USAGE_STAGING; sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    ID3D11Texture2D* stage = nullptr;
+    if (FAILED(device->CreateTexture2D(&sd, nullptr, &stage)) || !stage) return false;
+    D3D11_BOX box{x, y, 0, x + 1, y + 1, 1};
+    ctx->CopySubresourceRegion(stage, 0, 0, 0, 0, tex, 0, &box);
+    D3D11_MAPPED_SUBRESOURCE m{};
+    bool ok = false;
+    if (SUCCEEDED(ctx->Map(stage, 0, D3D11_MAP_READ, 0, &m))) {
+        const unsigned char* px = static_cast<const unsigned char*>(m.pData);
+        out[0] = px[0]; out[1] = px[1]; out[2] = px[2]; out[3] = px[3];
+        ok = true;
+        ctx->Unmap(stage, 0);
+    }
+    stage->Release();
+    return ok;
+}
+
+// The resolve's result, checked: an ID3D11Texture2D of the expected size
+// and format whose pixel at (x, y) holds the expected colour within +/-tol.
+// Prints its own ok/FAIL line naming `label`.
+bool checkResolved(ID3D11Device* device, ID3D11DeviceContext* ctx, void* result,
+                   const char* label, UINT expectW, UINT expectH, UINT x, UINT y,
+                   unsigned char er, unsigned char eg, unsigned char eb, int tol) {
+    if (!result) {
+        printf("  FAIL  %s: edvrSupersampleResolve returned null\n", label);
+        return false;
+    }
+    ID3D11Texture2D* rtex = nullptr;
+    static_cast<IUnknown*>(result)->QueryInterface(
+        __uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&rtex));
+    if (!rtex) {
+        printf("  FAIL  %s: the result is not an ID3D11Texture2D\n", label);
+        return false;
+    }
+    D3D11_TEXTURE2D_DESC rd{};
+    rtex->GetDesc(&rd);
+    if (rd.Width != expectW || rd.Height != expectH ||
+        rd.Format != DXGI_FORMAT_R8G8B8A8_UNORM) {
+        printf("  FAIL  %s: the result is %ux%u format %d, expected %ux%u "
+               "R8G8B8A8_UNORM (the source's own format)\n",
+               label, rd.Width, rd.Height, static_cast<int>(rd.Format), expectW,
+               expectH);
+        rtex->Release();
+        return false;
+    }
+    unsigned char px[4] = {0, 0, 0, 0};
+    const bool got = readPixelRgba8(device, ctx, rtex, x, y, px);
+    rtex->Release();
+    if (!got) {
+        printf("  FAIL  %s: could not read the result back\n", label);
+        return false;
+    }
+    const int dr = static_cast<int>(px[0]) - er;
+    const int dg = static_cast<int>(px[1]) - eg;
+    const int db = static_cast<int>(px[2]) - eb;
+    if (dr < -tol || dr > tol || dg < -tol || dg > tol || db < -tol || db > tol) {
+        printf("  FAIL  %s: pixel (%u,%u) is (%u,%u,%u), expected within %d of "
+               "(%u,%u,%u)\n",
+               label, x, y, px[0], px[1], px[2], tol, er, eg, eb);
+        return false;
+    }
+    printf("  ok    %s: %ux%u, pixel (%u,%u) held at (%u,%u,%u)\n", label,
+           expectW, expectH, x, y, px[0], px[1], px[2]);
+    return true;
+}
+
+// The refusals want the opposite verdict: null is the pass.
+bool expectRefused(void* result, const char* label) {
+    if (result) {
+        printf("  FAIL  %s: edvrSupersampleResolve did not refuse\n", label);
+        return false;
+    }
+    printf("  ok    %s: refused as it should\n", label);
+    return true;
+}
+
+// The resolve on the CPU, one channel, from supersample_math.h's own
+// functions -- the same loop tools/supersample_test runs, so the GPU's
+// answer can be held to the reference rather than to a flat colour.
+void resolveAxisRef(int filter, float width, const float* in, int inN,
+                    float* out, int outN) {
+    const float scale = static_cast<float>(inN) / static_cast<float>(outN);
+    for (int o = 0; o < outN; ++o) {
+        const edvr::SupersampleTaps t =
+            edvr::supersampleTapRange(static_cast<uint32_t>(o), scale, width);
+        float acc = 0.0f, wsum = 0.0f;
+        for (int i = t.first; i <= t.last; ++i) {
+            const float w = edvr::supersampleKernel(
+                filter, (static_cast<float>(i) + 0.5f - t.centre) / scale, width);
+            int ic = i < 0 ? 0 : (i > inN - 1 ? inN - 1 : i);
+            acc += in[ic] * w;
+            wsum += w;
+        }
+        out[o] = wsum > 1e-6f ? acc / wsum : 0.0f;
+    }
+}
+void resolveRef(int filter, float width, const std::vector<float>& img, int inW,
+                int inH, int outW, int outH, std::vector<float>* out) {
+    std::vector<float> mid(static_cast<size_t>(outW) * inH);
+    std::vector<float> row(inW), rowOut(outW);
+    for (int y = 0; y < inH; ++y) {
+        for (int x = 0; x < inW; ++x) row[x] = img[static_cast<size_t>(y) * inW + x];
+        resolveAxisRef(filter, width, row.data(), inW, rowOut.data(), outW);
+        for (int x = 0; x < outW; ++x) mid[static_cast<size_t>(y) * outW + x] = rowOut[x];
+    }
+    std::vector<float> col(inH), colOut(outH);
+    out->assign(static_cast<size_t>(outW) * outH, 0.0f);
+    for (int x = 0; x < outW; ++x) {
+        for (int y = 0; y < inH; ++y) col[y] = mid[static_cast<size_t>(y) * outW + x];
+        resolveAxisRef(filter, width, col.data(), inH, colOut.data(), outH);
+        for (int y = 0; y < outH; ++y) (*out)[static_cast<size_t>(y) * outW + x] = colOut[y];
+    }
 }
 
 }  // namespace
@@ -263,6 +414,217 @@ int main(int argc, char** argv) {
             printf("  FAIL  the black void stopped working after ClearState/"
                    "ExecuteCommandList\n");
             rc = 1;
+        }
+    }
+
+    // The supersample resolve (docs/anti-aliasing.md Feature A): the filter
+    // called exactly the way the openvr half calls it at submit -- the
+    // texture, the eye, the Submit bounds, the size to land on, the kernel.
+    //
+    // BEFORE the scene-counter block, and the order is load-bearing: that
+    // block issues 150 pipeline-less draws, which this rig's driver survives
+    // only until the next GPU sync -- the first Map afterwards came back
+    // DEVICE_HUNG (0x887A0006), measured 2026-09-01 while the render-scale
+    // tests were being written. These tests map results back, so they run
+    // first; the counter reads a CPU-side count and does not care.
+    {
+        typedef void* (*PFN_Resolve)(void*, int, const float*, unsigned, unsigned,
+                                     int, float, int);
+        PFN_Resolve resolve =
+            reinterpret_cast<PFN_Resolve>(GetProcAddress(mod, "edvrSupersampleResolve"));
+        if (!resolve) {
+            printf("  FAIL  edvrSupersampleResolve is not exported\n");
+            rc = 1;
+        } else {
+            printf("  ok    edvrSupersampleResolve resolves\n");
+            const unsigned char cr = 200, cg = 120, cb = 60;
+            const float colour[4] = {cr / 255.0f, cg / 255.0f, cb / 255.0f, 1.0f};
+
+            // A flat colour survives both kernels, both colour spaces, at
+            // a Quest-3-ish ratio (400x304 -> 320x243, 1.25x): a constant
+            // image is the whole check of a normalised filter, and the
+            // sRGB round trip must land back on the same 8-bit value.
+            {
+                ID3D11Texture2D* src = nullptr;
+                if (!makeSolidSrc(device, ctx, 400, 304, colour, true, &src)) {
+                    printf("  FAIL  could not make the resolve test source\n");
+                    rc = 1;
+                } else {
+                    void* r1 = resolve(src, 0, nullptr, 320, 243, 0, 1.0f, 1);
+                    if (!checkResolved(device, ctx, r1, "calm, gamma: 400x304 -> 320x243",
+                                       320, 243, 160, 121, cr, cg, cb, 2)) rc = 1;
+                    void* r2 = resolve(src, 0, nullptr, 320, 243, 1, 2.0f, 1);
+                    if (!checkResolved(device, ctx, r2, "crisp at width 2, gamma",
+                                       320, 243, 160, 121, cr, cg, cb, 2)) rc = 1;
+                    void* r3 = resolve(src, 0, nullptr, 320, 243, 0, 3.0f, 0);
+                    if (!checkResolved(device, ctx, r3, "calm at width 3, stored values",
+                                       320, 243, 0, 0, cr, cg, cb, 2)) rc = 1;
+                    // Shrink only: asked to grow, or to do nothing, it refuses.
+                    if (!expectRefused(resolve(src, 0, nullptr, 500, 243, 0, 1.0f, 1),
+                                       "asked to grow one axis")) rc = 1;
+                    if (!expectRefused(resolve(src, 0, nullptr, 400, 304, 0, 1.0f, 1),
+                                       "asked for the same size")) rc = 1;
+                    src->Release();
+                }
+            }
+
+            // The double-wide case Elite submits: two eyes in one texture,
+            // each named by its bounds. The RIGHT eye resolved must hold the
+            // right half's colour at its centre AND in its leftmost column,
+            // where a tap that strayed one pixel left would read the other
+            // eye; the LEFT eye likewise in its rightmost column. Flipped v
+            // names the same pixels.
+            {
+                const unsigned char lr = 10, lg = 10, lb = 10;
+                const unsigned char rr = 220, rg = 30, rb = 180;
+                const float left[4] = {lr / 255.0f, lg / 255.0f, lb / 255.0f, 1.0f};
+                const float right[4] = {rr / 255.0f, rg / 255.0f, rb / 255.0f, 1.0f};
+                ID3D11Texture2D* wide = nullptr;
+                ID3D11Texture2D* half = nullptr;
+                if (!makeSolidSrc(device, ctx, 800, 304, left, true, &wide) ||
+                    !makeSolidSrc(device, ctx, 400, 304, right, true, &half)) {
+                    printf("  FAIL  could not make the double-wide test sources\n");
+                    rc = 1;
+                } else {
+                    D3D11_BOX box{0, 0, 0, 400, 304, 1};
+                    ctx->CopySubresourceRegion(wide, 0, 400, 0, 0, half, 0, &box);
+                    const float bR[4] = {0.5f, 0.0f, 1.0f, 1.0f};
+                    void* r = resolve(wide, 1, bR, 320, 243, 0, 2.0f, 1);
+                    if (!checkResolved(device, ctx, r, "right eye of a double-wide, centre",
+                                       320, 243, 160, 121, rr, rg, rb, 2)) rc = 1;
+                    if (!checkResolved(device, ctx, r, "right eye, leftmost column (no bleed)",
+                                       320, 243, 0, 121, rr, rg, rb, 2)) rc = 1;
+                    const float bL[4] = {0.0f, 0.0f, 0.5f, 1.0f};
+                    void* l = resolve(wide, 0, bL, 320, 243, 1, 2.0f, 1);
+                    if (!checkResolved(device, ctx, l, "left eye of a double-wide, rightmost column (no bleed)",
+                                       320, 243, 319, 121, lr, lg, lb, 2)) rc = 1;
+                    const float bLflip[4] = {0.0f, 1.0f, 0.5f, 0.0f};
+                    void* lf = resolve(wide, 0, bLflip, 320, 243, 0, 1.0f, 1);
+                    if (!checkResolved(device, ctx, lf, "left eye with flipped v",
+                                       320, 243, 319, 0, lr, lg, lb, 2)) rc = 1;
+                }
+                if (half) half->Release();
+                if (wide) wide->Release();
+            }
+
+            // A source that refuses a shader view (no SHADER_RESOURCE bind)
+            // goes through the copy: same answer.
+            {
+                ID3D11Texture2D* src = nullptr;
+                if (!makeSolidSrc(device, ctx, 400, 304, colour, false, &src)) {
+                    printf("  FAIL  could not make the copy-through test source\n");
+                    rc = 1;
+                } else {
+                    void* r = resolve(src, 1, nullptr, 320, 243, 0, 1.0f, 1);
+                    if (!checkResolved(device, ctx, r, "a source without a shader view, copied through",
+                                       320, 243, 160, 121, cr, cg, cb, 2)) rc = 1;
+                    src->Release();
+                }
+            }
+
+            // Not only flat colours: a striped source resolved on the GPU
+            // must match the CPU reference the shader is transcribed from
+            // -- the axis mapping, the scale and the tap range all have to
+            // agree for a single pixel to. Stripes of period 4 across and
+            // 6 down, so each axis resolves to something different, and
+            // the stored values filtered as they are (no sRGB round trip)
+            // so the comparison is of the filter alone.
+            {
+                const UINT sw = 400, sh = 304, ow = 320, oh = 243;
+                std::vector<unsigned char> bytes(static_cast<size_t>(sw) * sh * 4);
+                std::vector<float> ref(static_cast<size_t>(sw) * sh);
+                for (UINT y = 0; y < sh; ++y) {
+                    for (UINT x = 0; x < sw; ++x) {
+                        const unsigned char v = static_cast<unsigned char>(
+                            ((x % 4) < 2 ? 60 : 180) + ((y % 6) < 3 ? 0 : 60));
+                        unsigned char* p = &bytes[(static_cast<size_t>(y) * sw + x) * 4];
+                        p[0] = p[1] = p[2] = v;
+                        p[3] = 0xFF;
+                        ref[static_cast<size_t>(y) * sw + x] = v / 255.0f;
+                    }
+                }
+                D3D11_TEXTURE2D_DESC td{};
+                td.Width = sw; td.Height = sh; td.MipLevels = 1; td.ArraySize = 1;
+                td.Format = DXGI_FORMAT_R8G8B8A8_UNORM; td.SampleDesc.Count = 1;
+                td.Usage = D3D11_USAGE_DEFAULT;
+                td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+                D3D11_SUBRESOURCE_DATA init{};
+                init.pSysMem = bytes.data();
+                init.SysMemPitch = sw * 4;
+                ID3D11Texture2D* striped = nullptr;
+                if (FAILED(device->CreateTexture2D(&td, &init, &striped)) || !striped) {
+                    printf("  FAIL  could not make the striped test source\n");
+                    rc = 1;
+                } else {
+                    const int filters[2] = {edvr::kSupersampleCalm, edvr::kSupersampleCrisp};
+                    const float widths[2] = {1.0f, 2.0f};
+                    for (int f = 0; f < 2; ++f) {
+                        std::vector<float> wantRef;
+                        resolveRef(filters[f], widths[f], ref, sw, sh, ow, oh, &wantRef);
+                        void* r = resolve(striped, 0, nullptr, ow, oh, filters[f], widths[f], 0);
+                        const UINT probes[5][2] = {{0, 0}, {10, 10}, {160, 121}, {300, 200}, {319, 242}};
+                        int worst = 0;
+                        bool okAll = r != nullptr;
+                        for (const UINT* pr : probes) {
+                            if (!r) break;
+                            ID3D11Texture2D* rt = nullptr;
+                            static_cast<IUnknown*>(r)->QueryInterface(
+                                __uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&rt));
+                            unsigned char pix[4] = {0, 0, 0, 0};
+                            const bool gotPix = rt && readPixelRgba8(device, ctx, rt, pr[0], pr[1], pix);
+                            if (rt) rt->Release();
+                            if (!gotPix) { okAll = false; break; }
+                            const int expect = static_cast<int>(
+                                wantRef[static_cast<size_t>(pr[1]) * ow + pr[0]] * 255.0f + 0.5f);
+                            const int d = static_cast<int>(pix[0]) - expect;
+                            const int ad = d < 0 ? -d : d;
+                            if (ad > worst) worst = ad;
+                            if (ad > 2) {
+                                printf("  FAIL  %s stripes: pixel (%u,%u) is %u, the CPU reference says %d\n",
+                                       f == 0 ? "calm" : "crisp", pr[0], pr[1], pix[0], expect);
+                                okAll = false;
+                            }
+                        }
+                        if (okAll) {
+                            printf("  ok    %s stripes: the GPU pass matches the CPU reference "
+                                   "at five pixels (worst difference %d of 255)\n",
+                                   f == 0 ? "calm" : "crisp", worst);
+                        } else {
+                            rc = 1;
+                        }
+                    }
+                    striped->Release();
+                }
+            }
+
+            // Kinds and formats it does not handle: refused, never guessed.
+            {
+                D3D11_TEXTURE2D_DESC td{};
+                td.Width = 400; td.Height = 304; td.MipLevels = 1; td.ArraySize = 1;
+                td.Format = DXGI_FORMAT_R8G8B8A8_UNORM; td.SampleDesc.Count = 4;
+                td.Usage = D3D11_USAGE_DEFAULT; td.BindFlags = D3D11_BIND_RENDER_TARGET;
+                ID3D11Texture2D* msaa = nullptr;
+                if (FAILED(device->CreateTexture2D(&td, nullptr, &msaa)) || !msaa) {
+                    printf("  FAIL  could not create a 4x-MSAA source for the refusal check\n");
+                    rc = 1;
+                } else {
+                    if (!expectRefused(resolve(msaa, 0, nullptr, 320, 243, 0, 1.0f, 1),
+                                       "an MSAA source")) rc = 1;
+                    msaa->Release();
+                }
+                td.SampleDesc.Count = 1;
+                td.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+                td.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+                ID3D11Texture2D* f32 = nullptr;
+                if (FAILED(device->CreateTexture2D(&td, nullptr, &f32)) || !f32) {
+                    printf("  FAIL  could not create an R32G32B32A32_FLOAT source for the refusal check\n");
+                    rc = 1;
+                } else {
+                    if (!expectRefused(resolve(f32, 0, nullptr, 320, 243, 0, 1.0f, 0),
+                                       "an unlisted format (R32G32B32A32_FLOAT)")) rc = 1;
+                    f32->Release();
+                }
+            }
         }
     }
 

@@ -47,6 +47,10 @@ READERS = [
     # checker cannot see across files -- the compositor-install call stands
     # in, and is a real read.
     ('systemHookConfigure', os.path.join('src', 'openvr', 'compositor_hook.cpp')),
+    # The supersample resolve's mode, kernel and width (fix.supersample_*):
+    # all three live, and the mode decides whether frames are treated at
+    # all -- the exact shape of the head-offset failure above.
+    ('supersampleResolveConfigure', os.path.join('src', 'openvr', 'compositor_hook.cpp')),
 ]
 
 

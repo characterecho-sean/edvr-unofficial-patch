@@ -41,6 +41,7 @@
 #include "fss_res.h"
 #include "fss_scan.h"
 #include "fss_theater.h"  // the warm-up; the theater itself runs at submit
+#include "supersample_pass.h"  // likewise: warm-up and totals; the pass runs at submit
 #include "fov_probe.h"
 #include "glitch_frame.h"
 #include "holo_fix.h"
@@ -3481,6 +3482,7 @@ void vScreenRefreshConfig() {
     introProbeConfigure(cfg);
     introPanelConfigure(cfg);
     introUpscaleConfigure(cfg);
+    supersamplePassConfigure(cfg);
     backdropConfigure(cfg);
     fssScanConfigure(cfg);
     fssPanelConfigure(cfg);
@@ -3592,6 +3594,11 @@ void vScreenFrameBoundary() {
     if (g_state && g_state->ownerCtx) {
         quadProbeTick(g_state->ownerCtx);
         drawCensusTick(g_state->ownerCtx);
+        // The supersample resolve's warm compile, once a frame,
+        // unconditionally -- not nested under any other feature's gate,
+        // so a session with every FSS feature off still reaches it. A flag
+        // test when the resolve is off.
+        supersamplePassTick(g_state->ownerCtx);
         // Told to the openvr half whether or not any intro fix is on: the
         // cull guard holds its lie until a scene exists, and that must
         // depend on the GAME reaching one, not on EDVR being configured
@@ -4190,6 +4197,24 @@ void vScreenFrameBoundary() {
             windowFrames, s->eyeDrawsWindowMax, s->eyeDrawsMax,
             windowFrames, static_cast<uint32_t>(windowMs), windowFps);
 
+        // The supersample resolve's count and price, while they move. The
+        // decision lives in the openvr half's Submit hook but the pass and
+        // its timestamp queries live here, and this is the only totals
+        // line a closing game ever prints (see above).
+        {
+            static uint32_t lastResolveTreats = 0;
+            uint32_t treated = 0;
+            double avgMs = 0.0, maxMs = 0.0;
+            if (supersamplePassTotals(&treated, &avgMs, &maxMs) &&
+                treated != lastResolveTreats) {
+                lastResolveTreats = treated;
+                Log::get().note(
+                    "supersample resolve totals: %u eye-submits resolved this "
+                    "session, %.2f ms per eye on average (max %.2f).",
+                    treated, avgMs, maxMs);
+            }
+        }
+
         // What we DECLINED, its own line and only while it moved.
         //
         // The counterpart to every number above: those say what reached the
@@ -4373,6 +4398,7 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     introProbeConfigure(cfg);
     introPanelConfigure(cfg);
     introUpscaleConfigure(cfg);
+    supersamplePassConfigure(cfg);
     backdropConfigure(cfg);
     fssScanConfigure(cfg);
     fssPanelConfigure(cfg);
@@ -4617,6 +4643,7 @@ void shutdownVScreenFixes() {
     // menu -- freed nothing at all.
     introPanelShutdown();
     introUpscaleShutdown();
+    supersamplePassShutdown();
     g_state->hook.uninstall();
 }
 
