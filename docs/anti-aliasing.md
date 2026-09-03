@@ -906,6 +906,19 @@ front, which is the standard dilation. The probe's sample line now
 carries a 4x4 map of the nearest depth per block in metres, so where the
 HUD sits in depth is read straight off it.
 
+**The third depth flight (2026-09-03) confirmed it and made it the
+default.** The depth stayed in hand through the guard's rebuild and the
+station's screens (the busiest-pair rule following the scene's draws
+from two, to nine, to seven hundred a frame), and in every interval with
+the head moving the order was the same: "head with depth" best (12.1%,
+12.3%, 12.6%, 9.2% of pixels clipped by 1.5 to 2.3/255), the swapped
+eyes second, the rotation alone worst (15.6%, 21.5%, 20.6%, 12.9% by 3.0
+to 4.0). The map put the cockpit where a cockpit is -- the dashboard at
+0.3 to 0.7 m, the panels at 1 to 2 m, the hangar beyond the canopy at 9
+to 27 m -- so the HUD's text has the depth the reprojection needs.
+`temporal_aa_motion = depth` is the default from here; the pass costs
+0.47 ms per eye with the instrument's four candidates still running.
+
 ## Feature C — texture LOD bias, the small lever
 
 Not all shimmer is geometry. Detail maps and normal maps sampled a mip

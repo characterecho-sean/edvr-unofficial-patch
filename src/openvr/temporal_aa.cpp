@@ -31,7 +31,7 @@ struct State {
     bool   jitterWanted = true;
     float  blend = 0.90f;
     float  clamp = 1.0f;
-    Motion motion = Motion::Head;
+    Motion motion = Motion::Depth;
     bool   configured = false;
     bool   standDown = false;
 
@@ -108,14 +108,14 @@ void temporalAaConfigure() {
     if (!std::isfinite(clampSig)) clampSig = 1.0f;
     if (clampSig < 0.5f) clampSig = 0.5f;
     if (clampSig > 3.0f) clampSig = 3.0f;
-    const std::string rawMotion = cfg.getString("advanced.temporal_aa_motion", "head");
-    Motion motion = Motion::Head;
+    const std::string rawMotion = cfg.getString("advanced.temporal_aa_motion", "depth");
+    Motion motion = Motion::Depth;
     if (_stricmp(rawMotion.c_str(), "camera") == 0) motion = Motion::Camera;
     else if (_stricmp(rawMotion.c_str(), "none") == 0) motion = Motion::None;
     else if (_stricmp(rawMotion.c_str(), "depth") == 0) motion = Motion::Depth;
     else if (_stricmp(rawMotion.c_str(), "head") != 0 && !rawMotion.empty()) {
         Log::get().note("temporal_aa_motion = \"%s\" is not a source this build "
-                        "knows (head, depth, camera, none). Using head.",
+                        "knows (depth, head, camera, none). Using depth.",
                         rawMotion.c_str());
     }
 

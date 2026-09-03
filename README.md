@@ -234,9 +234,10 @@ is where to start. The second flight found the limit of the first build:
 a history moved by the head's rotation alone registers the world but not
 the cockpit, whose text sits close enough that the head's translation
 moves it by pixels, so it ghosts under head motion and stays soft. The
-cockpit census then found the scene's own depth, and `temporal_aa_motion =
-depth` reprojects every pixel with the head's translation through it,
-which is what a near panel needs to hold still. Know the trade before
+cockpit census then found the scene's own depth, and the pass now
+reprojects every pixel with the head's translation through it by default,
+which is what a near panel needs to hold still (three docked flights: the
+history lands on the cockpit with 40% fewer clips than by rotation alone). Know the trade before
 turning it on: a temporal filter converges
 to a properly filtered image, which is calmer and softer than the hard,
 aliased edges of text without it, and a side-by-side at HMD Quality 1.5
