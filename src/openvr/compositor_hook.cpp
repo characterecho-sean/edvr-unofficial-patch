@@ -610,7 +610,12 @@ static void restApply(State* s, vr::TrackedDevicePose_t* renderPoses,
         d2 += d * d;
     }
     const double vMm = sqrt(d2) * 1000.0;
-    const double v = vRot + 1.7 * vMm;
+    // Capped before the average: the session's first frames can carry the
+    // runtime re-establishing its origin (a 559-degree "turn" in the first
+    // field log), and one such frame would keep the filter stock for a
+    // second. A hundred arcminutes a frame is faster than a head turns.
+    double v = vRot + 1.7 * vMm;
+    if (v > 100.0) v = 100.0;
     for (int i = 0; i < 9; ++i) s->restPrevRot[i] = rot[i];
     for (int i = 0; i < 3; ++i) s->restPrevPos[i] = pos[i];
     s->restSpeed += 0.25 * (v - s->restSpeed);
@@ -623,8 +628,13 @@ static void restApply(State* s, vr::TrackedDevicePose_t* renderPoses,
         g2 += d * d;
     }
     const double gapMm = sqrt(g2) * 1000.0;
+    // A jump the head could not have made while the filter thinks it is
+    // slow -- a recentre, a tracking snap -- is followed at once. During
+    // real fast motion the factor is already 1 and a snap would change
+    // nothing, so it is neither taken nor counted (the first field log
+    // counted every quick head turn).
     double k;
-    if (gapArcmin > 30.0 || gapMm > 20.0 || v > 60.0) {
+    if ((gapArcmin > 30.0 || gapMm > 20.0) && s->restSpeed < s->restMoving) {
         s->restQ = restQuatFromMatrix(hmd.mDeviceToAbsoluteTracking.m);
         for (int i = 0; i < 3; ++i) s->restPos[i] = pos[i];
         ++s->restSnaps;

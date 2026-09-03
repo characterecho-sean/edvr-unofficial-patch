@@ -837,9 +837,64 @@ exists or is one dispatch. Built so far (2026-09-02): the crop, then the
 supersample resolve, sequential, each its own pass on the texture the one
 before produced; the fusion is noted in the code as future work.
 
+## The tracker never rests: the rest lock (shipped, off by default)
+
+*Measured 2026-09-03 on a Pimax Crystal Super; the instruments and the
+numbers are in the vr log's pose history, which since that day records the
+rotation as well as the position.*
+
+The shimmer on the main menu's ship — its near-horizontal hull lines
+flickering with the head held still, on both headsets, with the game's AA
+off and with SMAA, at HMD Quality 1.0 and 1.5, through the resolve at every
+width and through a build with no EDVR image pass at all — turned out to
+have one cause, and it is not in any filter:
+
+- **The reported pose moves while the headset does not.** With the headset
+  lying on a desk, the runtime's reported position held to under 0.05 mm a
+  frame, and its reported orientation wandered about 0.1 arcmin a frame,
+  with a step above 0.6 arcmin (half a rendered pixel at the centre of the
+  eye) about once a second. A one-pixel line blinks as that wander walks it
+  across pixel rows; a diagonal line only slides its own stair pattern along
+  itself, which is invisible — the field's observation that rolling the
+  head about 25 degrees removes the shimmer.
+- **It is applied twice.** The game renders from the wandering pose, and
+  the compositor then re-warps every frame from the pose it believes the
+  frame was rendered from to the pose it predicts at display, so a frame
+  rendered from a held pose still blinks in the headset. The game's mirror
+  window, which shows the eye as rendered, does not.
+- **Nothing downstream can remove it,** because the motion is real: the
+  resolve at calm 2.0, the compositor's own sampler and any post filter all
+  pass a moving line faithfully.
+
+**The fix, `fix.shimmer_rest`** (`src/openvr/compositor_hook.cpp`,
+`src/common/rest_math.h`): the pose handed to the game moves toward the
+tracker's pose by a factor k each frame — 0.02 at and under 0.3 arcmin a
+frame of smoothed head motion (a half-second time constant that passes the
+slow wander and takes the jitter down fifty times), 1 at and over 1.5 —
+and every submit while k < 1 carries `Submit_TextureWithPose` with a pose
+that slides with the same k between the frame's predicted display pose
+(nothing to re-warp) and its render pose (the stock warp, latency
+compensation intact). Both eyes are told the same pose each frame, since
+SteamVR keeps only the later submit's. Proven first as an instrument
+(`advanced.pose_hold = headset`) and then as the continuous form, at the
+main menu, in the headset, on native SteamVR. Under OpenComposite the
+game-side half works regardless; whether the submit-time pose reaches the
+OpenXR projection layer is unverified.
+
+**What it exposed.** With the view held, the seam that used to shimmer
+shows a row of bright dashes that get finer and more frequent as HMD
+Quality rises and merge when the head tilts: the game's rasteriser drawing
+a sliver of geometry narrower than a pixel without MSAA, lit wherever a
+pixel centre falls inside it. That is coverage information never
+rasterised, and no filter at the door can recover it. The levers are the
+ones this document already names — more samples per pixel, or feature B's
+temporal accumulation, whose history the rest lock finally registers
+exactly while the head is still.
+
 ## Guidance for players now
 
-Feature A ships (`auto` by default since 2026-09-03); the rest does not.
+Feature A ships (`auto` by default since 2026-09-03) and the rest lock
+above (off by default, the same day); the rest does not.
 Some of the shimmer has answers today, and the README and `edvr.ini` have
 carried them since the same date:
 
@@ -858,6 +913,9 @@ carried them since the same date:
   lever.
 - **Anisotropic filtering at 16x**, in the game's own menu, for surfaces
   at grazing angles — planet terrain at altitude especially.
+- **`shimmer_rest = on`** if a steady ship's lines flicker with your head
+  still. Off by default until more rigs have flown it; what it holds still
+  and what it cannot are in the section above.
 
 ## Phase 0 — what must be measured, not assumed
 
