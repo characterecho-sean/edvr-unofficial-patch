@@ -20,7 +20,8 @@ namespace {
 typedef void* (*PFN_EdvrTemporalAa)(void*, int, const float*, const float*,
                                     const float*, float, float, const float*,
                                     const float*, const float*, float, float,
-                                    float, int, float, float, unsigned);
+                                    float, int, float, float, unsigned, unsigned,
+                                    unsigned);
 
 constexpr uint32_t kMaxFaults = 8;
 
@@ -28,7 +29,8 @@ enum class Motion : uint8_t { None = 0, Head = 1, Camera = 2, Depth = 3 };
 
 struct State {
     bool   on = false;
-    bool   dlaa = false;   // fix.temporal_aa = dlaa: NVIDIA's history instead of the pass's own
+    bool   dlaa = false;   // fix.temporal_aa = dlaa | dlss: NVIDIA's history instead of the pass's own
+    bool   upscale = false; // ...and dlss: a frame smaller than the unit-quality size comes back at it
     bool   jitterWanted = true;
     float  blend = 0.90f;
     float  clamp = 1.0f;
@@ -95,11 +97,13 @@ void temporalAaConfigure() {
     const std::string raw = cfg.getString("fix.temporal_aa", "off");
     bool on = false;
     bool dlaa = false;
+    bool upscale = false;
     if (_stricmp(raw.c_str(), "on") == 0) on = true;
     else if (_stricmp(raw.c_str(), "dlaa") == 0) { on = true; dlaa = true; }
+    else if (_stricmp(raw.c_str(), "dlss") == 0) { on = true; dlaa = true; upscale = true; }
     else if (_stricmp(raw.c_str(), "off") != 0 && !raw.empty()) {
         Log::get().note("temporal_aa = \"%s\" is not a mode this build knows "
-                        "(off, on, dlaa). Treating it as off.", raw.c_str());
+                        "(off, on, dlaa, dlss). Treating it as off.", raw.c_str());
     }
     const std::string rawJit = cfg.getString("fix.temporal_aa_jitter", "on");
     const bool jitter = _stricmp(rawJit.c_str(), "off") != 0;
@@ -123,12 +127,14 @@ void temporalAaConfigure() {
     }
 
     const bool first = !s.configured;
-    const bool changed = first || on != s.on || dlaa != s.dlaa || jitter != s.jitterWanted ||
+    const bool changed = first || on != s.on || dlaa != s.dlaa || upscale != s.upscale ||
+                         jitter != s.jitterWanted ||
                          fabsf(blend - s.blend) > 1e-4f ||
                          fabsf(clampSig - s.clamp) > 1e-4f || motion != s.motion;
     s.configured = true;
     s.on = on;
     s.dlaa = dlaa;
+    s.upscale = upscale;
     s.jitterWanted = jitter;
     s.blend = blend;
     s.clamp = clampSig;
@@ -399,11 +405,26 @@ void* temporalAaTreat(vr::EVREye eye, void* handle,
     // Bit 1: NVIDIA's history instead of the pass's own, when the d3d11
     // half has the runtime; it says so once either way and falls back.
     if (s.dlaa) flags |= 2u;
+    // The size to come back at: under dlss, the unit-quality size when the
+    // frame is smaller than it on both axes (Elite's HMD Quality below
+    // 1.0 -- the frame is a fraction of that size, and NVIDIA's upscaler
+    // brings it back, which is the game's render cost falling with the
+    // square of the quality). Zero means the frame's own size.
+    unsigned outW = 0, outH = 0;
+    if (s.upscale) {
+        uint32_t uw = 0, uh = 0;
+        if (systemHookUnitQualitySize(&uw, &uh) && uw && uh &&
+            (region[2] - region[0]) * 50 < uw * 49 && (region[3] - region[1]) * 50 < uh * 49) {
+            outW = uw;
+            outH = uh;
+        }
+    }
     void* out = s.fn(handle, e, haveBounds ? b4 : nullptr, tanNow,
                      s.havePrev[e] ? s.tanPrev[e] : tanNow, s.jx, s.jy,
                      haveHeadDelta ? delta : nullptr, haveTv ? tv : nullptr,
                      haveTv ? tvSwapped : nullptr, nearZ, farZ, headDeg,
-                     static_cast<int>(s.motion), s.blend, s.clamp, flags);
+                     static_cast<int>(s.motion), s.blend, s.clamp, outW, outH,
+                     flags);
     if (!out) {
         temporalAaStandDown("the temporal pass refused (its own line in the "
                             "graphics log says why)");

@@ -40,7 +40,20 @@ NVSDK_NGX_Parameter* g_params = nullptr;
 struct EyeFeature {
     NVSDK_NGX_Handle* handle = nullptr;
     uint32_t          w = 0, h = 0;
+    uint32_t          outW = 0, outH = 0;
 };
+
+const char* qualityName(NVSDK_NGX_PerfQuality_Value q) {
+    switch (q) {
+        case NVSDK_NGX_PerfQuality_Value_DLAA:             return "DLAA";
+        case NVSDK_NGX_PerfQuality_Value_UltraQuality:     return "ultra quality";
+        case NVSDK_NGX_PerfQuality_Value_MaxQuality:       return "quality";
+        case NVSDK_NGX_PerfQuality_Value_Balanced:         return "balanced";
+        case NVSDK_NGX_PerfQuality_Value_MaxPerf:          return "performance";
+        case NVSDK_NGX_PerfQuality_Value_UltraPerformance: return "ultra performance";
+        default:                                           return "?";
+    }
+}
 EyeFeature g_feature[2];
 
 // The GPU-price ring, the resolve's discipline: never awaited.
@@ -203,11 +216,12 @@ bool dlaaAvailable(ID3D11Device* dev, const char** reason) {
 
 bool dlaaEvaluate(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* colour,
                   ID3D11Texture2D* depth, ID3D11Texture2D* motion,
-                  ID3D11Texture2D* output, uint32_t w, uint32_t h, float jx,
-                  float jy, bool reset, const char** reason) {
+                  ID3D11Texture2D* output, uint32_t w, uint32_t h,
+                  uint32_t outW, uint32_t outH, float jx, float jy, bool reset,
+                  const char** reason) {
 #ifndef EDVR_HAVE_NGX
     (void)ctx; (void)eye; (void)colour; (void)depth; (void)motion; (void)output;
-    (void)w; (void)h; (void)jx; (void)jy; (void)reset;
+    (void)w; (void)h; (void)outW; (void)outH; (void)jx; (void)jy; (void)reset;
     if (reason) *reason = "this build has no DLSS SDK in it";
     return false;
 #else
@@ -217,25 +231,50 @@ bool dlaaEvaluate(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* colour,
         return false;
     }
     pollTimingRing(ctx);
+    if (!outW || !outH) {
+        outW = w;
+        outH = h;
+    }
     EyeFeature& f = g_feature[eye];
-    if (!f.handle || f.w != w || f.h != h) {
+    if (!f.handle || f.w != w || f.h != h || f.outW != outW || f.outH != outH) {
         if (f.handle) {
             NVSDK_NGX_D3D11_ReleaseFeature(f.handle);
             f.handle = nullptr;
         }
-        // DLAA: the render size IS the output size. The optimal-settings
-        // query is still made, since the runtime expects it before a
-        // feature is created and it names the mode's sharpness.
+        // Equal sizes are DLAA. A larger output is DLSS proper: the mode
+        // is chosen by the ratio of the sizes -- two thirds is "quality",
+        // 0.58 "balanced", a half "performance", a third "ultra
+        // performance" -- and stepped down until the input sits within
+        // the range the runtime names for it, since the input is whatever
+        // Elite's HMD Quality produced, not what a mode would ask for.
+        NVSDK_NGX_PerfQuality_Value quality = NVSDK_NGX_PerfQuality_Value_DLAA;
         unsigned optW = 0, optH = 0, maxW = 0, maxH = 0, minW = 0, minH = 0;
         float sharpness = 0.0f;
-        NGX_DLSS_GET_OPTIMAL_SETTINGS(g_params, w, h, NVSDK_NGX_PerfQuality_Value_DLAA,
-                                      &optW, &optH, &maxW, &maxH, &minW, &minH, &sharpness);
+        if (outW == w && outH == h) {
+            NGX_DLSS_GET_OPTIMAL_SETTINGS(g_params, w, h, quality, &optW, &optH, &maxW, &maxH,
+                                          &minW, &minH, &sharpness);
+        } else {
+            const float ratio = static_cast<float>(w) / static_cast<float>(outW);
+            const NVSDK_NGX_PerfQuality_Value ladder[4] = {
+                NVSDK_NGX_PerfQuality_Value_MaxQuality, NVSDK_NGX_PerfQuality_Value_Balanced,
+                NVSDK_NGX_PerfQuality_Value_MaxPerf, NVSDK_NGX_PerfQuality_Value_UltraPerformance};
+            int start = ratio >= 0.66f ? 0 : ratio >= 0.58f ? 1 : ratio >= 0.5f ? 2 : 3;
+            quality = ladder[3];
+            for (int k = start; k < 4; ++k) {
+                NGX_DLSS_GET_OPTIMAL_SETTINGS(g_params, outW, outH, ladder[k], &optW, &optH,
+                                              &maxW, &maxH, &minW, &minH, &sharpness);
+                if (w >= minW && h >= minH && w <= (maxW ? maxW : w) && h <= (maxH ? maxH : h)) {
+                    quality = ladder[k];
+                    break;
+                }
+            }
+        }
         NVSDK_NGX_DLSS_Create_Params cp{};
         cp.Feature.InWidth = w;
         cp.Feature.InHeight = h;
-        cp.Feature.InTargetWidth = w;
-        cp.Feature.InTargetHeight = h;
-        cp.Feature.InPerfQualityValue = NVSDK_NGX_PerfQuality_Value_DLAA;
+        cp.Feature.InTargetWidth = outW;
+        cp.Feature.InTargetHeight = outH;
+        cp.Feature.InPerfQualityValue = quality;
         // LDR colour; motion vectors at the render size, unjittered (the
         // pass computes them on the unjittered grid); reversed-Z depth.
         cp.InFeatureCreateFlags = NVSDK_NGX_DLSS_Feature_Flags_MVLowRes |
@@ -254,11 +293,23 @@ bool dlaaEvaluate(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* colour,
         }
         f.w = w;
         f.h = h;
-        Log::get().note(
-            "dlaa: the feature is created for eye %d at %ux%u (the runtime's optimal "
-            "render size %ux%u, sharpness %.2f, which DLAA ignores); the history "
-            "starts here.",
-            eye, w, h, optW, optH, static_cast<double>(sharpness));
+        f.outW = outW;
+        f.outH = outH;
+        if (outW == w && outH == h) {
+            Log::get().note(
+                "dlaa: the feature is created for eye %d at %ux%u, DLAA (the runtime's "
+                "optimal render size %ux%u, sharpness %.2f, which DLAA ignores); the "
+                "history starts here.",
+                eye, w, h, optW, optH, static_cast<double>(sharpness));
+        } else {
+            Log::get().note(
+                "dlss: the feature is created for eye %d, %ux%u in and %ux%u out (%.0f%% "
+                "per axis), the %s mode, whose render range the runtime names as "
+                "%ux%u..%ux%u; the history starts here.",
+                eye, w, h, outW, outH,
+                100.0 * static_cast<double>(w) / static_cast<double>(outW),
+                qualityName(quality), minW, minH, maxW, maxH);
+        }
     }
 
     NVSDK_NGX_D3D11_DLSS_Eval_Params ep{};

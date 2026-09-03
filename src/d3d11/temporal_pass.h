@@ -135,6 +135,9 @@ extern "C" {
 //            rotation only where there is no depth).
 // blend:     history weight 0.5..0.95. clampSigma: the clip's half-width in
 //            standard deviations of the 3x3 neighbourhood.
+// outW/outH: with flags bit 1, the size to come back at -- larger than the
+//            frame for DLSS proper (the game rendered a fraction of it),
+//            zero or equal for DLAA. Ignored by the pass's own history.
 // flags:     bit 0 -- reset the history before this frame (a withheld frame
 //            broke continuity; the first frame after an engage); bit 1 --
 //            NVIDIA's history (DLAA) instead of the pass's own, when the
@@ -154,5 +157,6 @@ __declspec(dllexport) void* edvrTemporalAa(void* srcTex, int eye,
                                            float nearZ, float farZ,
                                            float headDeg, int motion,
                                            float blend, float clampSigma,
+                                           unsigned outW, unsigned outH,
                                            unsigned flags);
 }

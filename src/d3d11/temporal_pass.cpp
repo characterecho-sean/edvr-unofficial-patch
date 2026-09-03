@@ -448,6 +448,7 @@ struct EyeState {
     ID3D11UnorderedAccessView* dlDepthUav = nullptr;
     ID3D11Texture2D*           dlOut = nullptr;
     uint32_t                   dlW = 0, dlH = 0;
+    uint32_t                   dlOutW = 0, dlOutH = 0;
     ID3D11Texture2D*           copyTex = nullptr;  // the copy-through, for a source that refuses a view
     ID3D11ShaderResourceView*  copySrv = nullptr;
     uint32_t                   copyW = 0, copyH = 0;
@@ -484,6 +485,7 @@ void releaseDl(EyeState& e) {
     if (e.dlDepth) { e.dlDepth->Release(); e.dlDepth = nullptr; }
     if (e.dlOut) { e.dlOut->Release(); e.dlOut = nullptr; }
     e.dlW = e.dlH = 0;
+    e.dlOutW = e.dlOutH = 0;
 }
 void releaseCopy(EyeState& e) {
     if (e.copySrv) { e.copySrv->Release(); e.copySrv = nullptr; }
@@ -677,6 +679,7 @@ bool                       g_csTried = false;
 ID3D11ComputeShader*       g_csMv = nullptr;     // the motion-vector entry, for DLAA
 bool                       g_csMvTried = false;
 bool                       g_dlaaNoted = false;
+bool                       g_dlssNoted = false;
 bool                       g_dlaaFailNoted = false;
 uint32_t                   g_dlaaTreats = 0;
 ID3D11Buffer*              g_cb = nullptr;
@@ -803,7 +806,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     float jyNow, const float* deltaHead, const float* headTrans,
                     const float* headTransSwapped, float nearZ, float farZ,
                     float headDeg, int motion, float blend, float clampSigma,
-                    unsigned flags) {
+                    unsigned outW, unsigned outH, unsigned flags) {
     ID3D11Texture2D* src = nullptr;
     static_cast<IUnknown*>(srcTex)->QueryInterface(
         __uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&src));
@@ -1219,8 +1222,13 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                                                  "mv", "temporal_mv_cs", nullptr,
                                                  "temporal aa");
                 }
+                // The size to come back at: the frame's own, or the larger
+                // one asked for (DLSS proper).
+                const uint32_t oW = (outW && outH && (outW != w || outH != h)) ? outW : w;
+                const uint32_t oH = (outW && outH && (outW != w || outH != h)) ? outH : h;
                 bool made = g_csMv != nullptr;
-                if (made && (!e.dlOut || e.dlW != w || e.dlH != h)) {
+                if (made && (!e.dlOut || e.dlW != w || e.dlH != h || e.dlOutW != oW ||
+                             e.dlOutH != oH)) {
                     releaseDl(e);
                     made = makeTex(dev, w, h, DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM,
                                    D3D11_BIND_SHADER_RESOURCE, &e.dlColour, nullptr, nullptr) &&
@@ -1230,12 +1238,14 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                            makeTex(dev, w, h, DXGI_FORMAT_R32_FLOAT, DXGI_FORMAT_R32_FLOAT,
                                    D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS,
                                    &e.dlDepth, nullptr, &e.dlDepthUav) &&
-                           makeTex(dev, w, h, DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM,
+                           makeTex(dev, oW, oH, DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM,
                                    D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS,
                                    &e.dlOut, nullptr, nullptr);
                     if (made) {
                         e.dlW = w;
                         e.dlH = h;
+                        e.dlOutW = oW;
+                        e.dlOutH = oH;
                     } else {
                         releaseDl(e);
                     }
@@ -1283,17 +1293,20 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     // NVIDIA's evaluation.
                     const bool resetHist = (flags & 1u) != 0 || !e.haveHistory;
                     if (dlaaEvaluate(ctx, eye, e.dlColour, e.dlDepth, e.dlMv, e.dlOut, w, h,
-                                     jxNow, jyNow, resetHist, &why)) {
+                                     oW, oH, jxNow, jyNow, resetHist, &why)) {
                         usedDlaa = true;
-                        if (!g_dlaaNoted) {
+                        if (!g_dlaaNoted || (oW != w && !g_dlssNoted)) {
                             g_dlaaNoted = true;
+                            if (oW != w) g_dlssNoted = true;
                             Log::get().note(
-                                "temporal aa: DLAA engaged -- NVIDIA's history takes the "
+                                "temporal aa: %s engaged -- NVIDIA's history takes the "
                                 "%ux%u frame, its depth%s and the pass's own motion "
-                                "vectors, jittered as before; the pass's history and "
+                                "vectors, jittered as before%s; the pass's history and "
                                 "clip stand aside. Its price prints in the totals.",
-                                w, h, depthSrv ? "" : " (none in hand yet: no depth "
-                                                       "until the probe finds it)");
+                                oW != w ? "DLSS" : "DLAA", w, h,
+                                depthSrv ? "" : " (none in hand yet: no depth until the "
+                                                "probe finds it)",
+                                oW != w ? " and brings it back to the unit-quality size" : "");
                         }
                     } else if (!g_dlaaFailNoted) {
                         g_dlaaFailNoted = true;
@@ -1618,14 +1631,14 @@ extern "C" __declspec(dllexport) void* edvrTemporalAa(
     const float* tanPrev, float jxNow, float jyNow, const float* deltaHead,
     const float* headTrans, const float* headTransSwapped, float nearZ,
     float farZ, float headDeg, int motion, float blend, float clampSigma,
-    unsigned flags) {
+    unsigned outW, unsigned outH, unsigned flags) {
     if (!srcTex || eye < 0 || eye > 1 || !tanNow) return nullptr;
     void* out = nullptr;
     edvr::guardedBudget(edvr::g_budget, [&] {
         out = edvr::temporalInner(srcTex, eye, bounds, tanNow, tanPrev, jxNow,
                                   jyNow, deltaHead, headTrans, headTransSwapped,
                                   nearZ, farZ, headDeg, motion, blend,
-                                  clampSigma, flags);
+                                  clampSigma, outW, outH, flags);
     });
     return out;
 }

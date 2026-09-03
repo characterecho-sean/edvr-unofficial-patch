@@ -1259,6 +1259,18 @@ bool systemHookRecommendedSize(uint32_t* w, uint32_t* h) {
     return true;
 }
 
+bool systemHookUnitQualitySize(uint32_t* w, uint32_t* h) {
+    State* s = g_state;
+    if (!s || !w || !h || !s->trueSizeW || !s->trueSizeH) return false;
+    *w = s->trueSizeW;
+    *h = s->trueSizeH;
+    if (s->stage >= 1 && !s->guardInert) {
+        *w = static_cast<uint32_t>(lroundf(static_cast<float>(s->trueSizeW) * s->sizeFactorH));
+        *h = static_cast<uint32_t>(lroundf(static_cast<float>(s->trueSizeH) * s->sizeFactorV));
+    }
+    return true;
+}
+
 bool systemHookCropBounds(vr::EVREye eye, const vr::VRTextureBounds_t* in,
                           vr::VRTextureBounds_t* out) {
     State* s = g_state;

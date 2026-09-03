@@ -934,8 +934,32 @@ it the mode says so once and the own history runs. The runtime
 `nvngx_dlss.dll` must sit beside the game's executable, where NGX looks;
 its licence permits shipping it with an application, which is the
 installer's job. Objects that move on their own still carry no motion of
-their own, which DLSS tolerates better than a hand-rolled clip. Not yet
-flown.
+their own, which DLSS tolerates better than a hand-rolled clip.
+
+**Flown the same day on both headsets.** On the Pimax Crystal Super (HMD
+Quality 1.0, 5424x5356 per eye, 5792 wide under the guard) DLAA engaged
+at 2.7 ms per eye and the player's verdict was "amazing, I do not notice
+the shimmering text anymore". On the Quest 3 over Virtual Desktop (HMD
+Quality 1.5, 3358 wide under the guard, the resolve after) it engaged at
+1.0 ms per eye with some shimmer left, which the streaming codec's own
+frame-to-frame quantisation of text edges explains as well as anything
+the pass does; the check is HMD Quality 1.0 on the Quest, so DLAA's
+output goes to the encoder unresolved, and the encoder's bitrate.
+
+**DLSS proper (`temporal_aa = dlss`).** The player asked for it on the
+Pimax, where the game's own render at 5424x5356 per eye is the cost that
+matters. No size lie is needed: Elite's HMD Quality below 1.0 makes the
+game render a fraction of the unit-quality size (the runtime's
+recommendation, or the guard's widened answer while its lie stands --
+`systemHookUnitQualitySize`), and the pass asks NVIDIA's upscaler to
+bring the frame back to that size, the quality mode chosen by the ratio
+and stepped down until the input sits within the mode's range. The
+motion vectors and the depth are at the render size, as DLSS wants them;
+the guard's crop, the resolve (idle, since the crop lands at the
+recommendation) and the sharpen follow at the full size. At HMD Quality
+1.0 or above the mode behaves as DLAA. The interface surfaces scale with
+the render size, so the HUD is drawn smaller and reconstructed; whether
+that reads well is the flight's question.
 
 ## Feature C — texture LOD bias, the small lever
 

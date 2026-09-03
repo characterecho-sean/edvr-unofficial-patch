@@ -90,6 +90,12 @@ bool systemHookCropTarget(vr::EVREye eye, uint32_t* w, uint32_t* h);
 // (supersample_resolve.h); nothing else here needs it.
 bool systemHookRecommendedSize(uint32_t* w, uint32_t* h);
 
+// The size the game renders each eye at when Elite's HMD Quality is 1.0:
+// the runtime's recommendation, or the guard's widened answer while its
+// size lie stands. What a lowered HMD Quality is a fraction OF, and so
+// the size an upscaling pass brings the frame back to. False until seen.
+bool systemHookUnitQualitySize(uint32_t* w, uint32_t* h);
+
 // The temporal pass's jitter (temporal_aa.h): a shift of every tangent the
 // game is told for the coming frame -- l and r by dx, t and b by dy -- set
 // at the frame boundary and held for the whole frame, the guard's own
