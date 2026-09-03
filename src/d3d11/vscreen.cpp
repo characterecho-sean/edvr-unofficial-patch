@@ -48,6 +48,7 @@
 #include "hud_sprite.h"
 #include "panel_upscale.h"
 #include "wake_pulse.h"
+#include "hud_grain.h"
 #include "intro_panel.h"
 #include "intro_upscale.h"
 #include "intro_probe.h"
@@ -1260,6 +1261,8 @@ enum class DrawVerdict {
     kHudSprite,
     // A cockpit holo panel, reconstructed once a frame (panel_upscale.h).
     kPanelUpscale,
+    // The flight HUD with its noise table held flat (hud_grain.h).
+    kHudGrain,
     // The intro movie's panel drawn with our constants at VS b2
     // (intro_panel.h): forwarded normally, restored after.
     kIntroPanel,
@@ -1455,7 +1458,7 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         !fssRingWantsDraws() && !fssDumpWantsDraws() &&
         !eyeSplitWantsDraws() && !resolveProbeWantsDraws() &&
         !stencilProbeWantsDraws() && !resolveBindWants() &&
-        !remlokWantsDraws() && !holoWantsDraws() && !targetSharpWantsDraws() && !hudSpriteWantsDraws() && !panelUpscaleWantsDraws() &&
+        !remlokWantsDraws() && !holoWantsDraws() && !targetSharpWantsDraws() && !hudSpriteWantsDraws() && !panelUpscaleWantsDraws() && !hudGrainWantsDraws() &&
         !witchstarWantsDraws() &&
         !sunglareWantsDraws() && !cbPeekEnabled() && !billboardWantsDraws() &&
         !drawCensusArmed() && !panelQuadWants() && !panelCurveWants() &&
@@ -1931,6 +1934,13 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     if (panelUpscaleWantsDraws() &&
         panelUpscaleOnEyeDraw(self, kind, count, instances)) {
         return DrawVerdict::kPanelUpscale;
+    }
+
+    // The flight HUD's grain, recognised the same way: what it samples,
+    // then its shader.
+    if (hudGrainWantsDraws() &&
+        hudGrainOnEyeDraw(self, kind, count, instances)) {
+        return DrawVerdict::kHudGrain;
     }
 
     // The loader dialog's dimming wash, recognised by what it samples.
@@ -2755,6 +2765,7 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     if (v == DrawVerdict::kTargetSharp) targetSharpBegin(self);
     if (v == DrawVerdict::kHudSprite) hudSpriteBegin(self);
     if (v == DrawVerdict::kPanelUpscale) panelUpscaleBegin(self);
+    if (v == DrawVerdict::kHudGrain) hudGrainBegin(self);
     if (v == DrawVerdict::kScrim) scrimBegin(self);
     if (v == DrawVerdict::kWitchstar) witchstarBegin(self);
     if (v == DrawVerdict::kBillboard) billboardBegin(self);
@@ -2779,6 +2790,7 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     if (v == DrawVerdict::kBillboard) billboardEnd(self);
     if (v == DrawVerdict::kWitchstar) witchstarEnd(self);
     if (v == DrawVerdict::kScrim) scrimEnd(self);
+    if (v == DrawVerdict::kHudGrain) hudGrainEnd(self);
     if (v == DrawVerdict::kPanelUpscale) panelUpscaleEnd(self);
     if (v == DrawVerdict::kHudSprite) hudSpriteEnd(self);
     if (v == DrawVerdict::kTargetSharp) targetSharpEnd(self);
@@ -3531,6 +3543,7 @@ void vScreenRefreshConfig() {
     hudSpriteConfigure(cfg);
     panelUpscaleConfigure(cfg);
     wakePulseConfigure(cfg);
+    hudGrainConfigure(cfg);
     scrimConfigure(cfg);
     quadProbeConfigure(cfg);
     loaderPanelConfigure(cfg);
@@ -4429,6 +4442,7 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     hudSpriteConfigure(cfg);
     panelUpscaleConfigure(cfg);
     wakePulseConfigure(cfg);
+    hudGrainConfigure(cfg);
     scrimConfigure(cfg);
     quadProbeConfigure(cfg);
     loaderPanelConfigure(cfg);
