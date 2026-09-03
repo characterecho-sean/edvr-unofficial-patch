@@ -1170,6 +1170,26 @@ int runGui(HINSTANCE instance, const AppArgs& args) {
 
     MSG message;
     while (GetMessageW(&message, nullptr, 0, 0) > 0) {
+        // A wheel tick is delivered to whatever holds keyboard FOCUS, not to
+        // whatever the cursor is over. Every wheel handler in this program
+        // sits in a window proc, so unless that window happens to be focused
+        // its handler never runs at all -- which is why the report pane's own
+        // fix did nothing in the field: the tick was going to whichever
+        // button had focus and stopping there.
+        //
+        // Redirecting here, before dispatch, is the one place that fixes it
+        // for every control at once. Anything outside our own window tree is
+        // left alone, and WindowFromPoint skips hidden and disabled children,
+        // so a pane in either state still falls through to the parent's
+        // handler.
+        if (message.message == WM_MOUSEWHEEL) {
+            const POINT pt{GET_X_LPARAM(message.lParam),
+                           GET_Y_LPARAM(message.lParam)};   // screen coords
+            const HWND under = WindowFromPoint(pt);
+            if (under && (under == window || IsChild(window, under))) {
+                message.hwnd = under;
+            }
+        }
         if (IsDialogMessageW(window, &message)) continue;
         TranslateMessage(&message);
         DispatchMessageW(&message);

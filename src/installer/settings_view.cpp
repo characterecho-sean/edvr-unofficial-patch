@@ -618,6 +618,16 @@ LRESULT CALLBACK editProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam,
             // Swallow the beep an EDIT makes on Return.
             if (wparam == VK_RETURN || wparam == VK_ESCAPE) return 0;
             break;
+        case WM_MOUSEWHEEL:
+            // A single-line EDIT has nothing to scroll vertically, so it eats
+            // the tick and the list underneath stays put. That is exactly what
+            // "the mouse wheel does not work in the text box" is: the box is
+            // open, it holds focus, and it silently swallows every tick. Hand
+            // it to the list, which is what the cursor is really over.
+            if (list && list->hwnd) {
+                return SendMessageW(list->hwnd, message, wparam, lparam);
+            }
+            break;
         default:
             break;
     }
