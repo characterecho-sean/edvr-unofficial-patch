@@ -1053,6 +1053,20 @@ LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
             }
             break;
 
+        // WM_MOUSEWHEEL goes to whichever control has keyboard focus, not
+        // the one under the cursor -- and nobody clicks a read-only status
+        // pane before trying to scroll it. The settings list gets away with
+        // focus-routing because its rows take focus on click; the report
+        // needs the tick forwarded here so hovering it is enough.
+        case WM_MOUSEWHEEL: {
+            if (g.screen != Screen::Install || !g.report) break;
+            POINT pt{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};  // screen coords
+            ScreenToClient(window, &pt);
+            const RECT card = reportCardRect();
+            if (!PtInRect(&card, pt)) break;
+            return SendMessageW(g.report, WM_MOUSEWHEEL, wparam, lparam);
+        }
+
         case WM_CTLCOLOREDIT:
         case WM_CTLCOLORSTATIC:
         case WM_CTLCOLORLISTBOX: {
