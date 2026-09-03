@@ -7,6 +7,7 @@
 #include <string>
 
 #include "../common/config.h"
+#include "binding_shadow.h"
 #include "../common/log.h"
 
 namespace edvr {
@@ -59,6 +60,25 @@ constexpr uint32_t kIndicesAlt = 891;  // panel 1002x820, same shader
 // it can be is a set of known values, each acted on only when it lands in
 // THIS panel with this shape, so a wrong entry costs nothing anywhere else.
 constexpr uint32_t kMaxIndices = 8;
+
+// SELF-CALIBRATION, because a list only ever covers the panels somebody has
+// already measured. The marker is identified by three things that do not
+// change with resolution, build or ship:
+//
+//   it is drawn by the GUI's TEXTURELESS vector shader (no sampler bound),
+//   it is a SHAPE and not a single quad (hundreds of indices, never six),
+//   and it is there on some frames and not others -- which is what a pulse
+//   IS, and the reason none of the sizes in this file were ever the
+//   invariant.
+//
+// So after enough frames of watching one panel, a count that is the only
+// one behaving that way is the marker, whatever number it happens to be on
+// this rig. Adopted out loud, and any ini list wins over it.
+constexpr uint32_t kMinShapeIndices = 60;    // a quad is 6; the marker is not
+constexpr uint32_t kCalibFrames = 600;       // panel frames before deciding
+constexpr uint32_t kCalibLoPct = 3;          // a pulse is a minority...
+constexpr uint32_t kCalibHiPct = 50;         // ...but not a rarity
+bool     g_calibrated = false;
 
 bool     g_off = false;
 uint32_t g_indices[kMaxIndices] = {kIndices, kIndicesAlt};
@@ -186,7 +206,15 @@ bool wakePulseSkips(char kind, uint32_t count, uint32_t targetW,
     // is wrong for this panel the log can say what the alternatives were.
     // Stops costing anything the moment a real match happens or the table
     // fills.
-    if (kind == kKind && g_dropped == 0 && !g_saidNoMatch) {
+    // Only textureless SHAPES are candidates: the vector shader binds no
+    // sampler at all, which is what separates the marker from the textured
+    // widgets sharing this panel, and six indices is a quad rather than a
+    // drawn shape.
+    const bool vectorShape =
+        kind == kKind && count >= kMinShapeIndices &&
+        !bindingGet(BindSlot::PsSrv0) && !bindingGet(BindSlot::PsSrv1) &&
+        !bindingGet(BindSlot::PsSrv2) && !bindingGet(BindSlot::PsSrv3);
+    if (vectorShape && g_dropped == 0 && !g_saidNoMatch) {
         for (uint32_t i = 0; i < g_seenCount; ++i) {
             if (g_seen[i].indices != count) continue;
             if (g_seen[i].lastFrame != g_frame) {
@@ -208,6 +236,39 @@ bool wakePulseSkips(char kind, uint32_t count, uint32_t targetW,
 void wakePulseReport() {
     if (!g_off) return;
     ++g_frame;
+
+    // Self-calibration, before the giving-up line. If exactly ONE textureless
+    // shape on this panel is behaving like a pulse, that is the marker on
+    // this rig whatever its index count happens to be -- and this is the
+    // only part of the fix that does not depend on somebody having measured
+    // this panel size before.
+    //
+    // Exactly one, deliberately. Two candidates means the evidence does not
+    // say which, and picking either would be suppressing a draw on a guess.
+    if (!g_calibrated && !g_saidNoMatch && g_dropped == 0 &&
+        g_panelFrames >= kCalibFrames) {
+        uint32_t only = 0, hits = 0;
+        for (uint32_t i = 0; i < g_seenCount; ++i) {
+            const uint32_t pct = g_seen[i].frames * 100 / g_panelFrames;
+            if (pct < kCalibLoPct || pct > kCalibHiPct) continue;
+            only = g_seen[i].indices;
+            ++hits;
+        }
+        if (hits == 1) {
+            g_calibrated = true;
+            g_indices[0] = only;
+            g_indexCount = 1;
+            Log::get().note(
+                "wake pulse: none of the known index counts landed in this "
+                "%ux%u panel, but exactly one textureless shape on it is "
+                "drawn intermittently -- %u indices -- and that is what a "
+                "pulse looks like. Using it. Set advanced.wake_pulse_indices "
+                "if this is the wrong draw, and it is worth reporting either "
+                "way so the shipped set can grow.",
+                g_panelW, g_panelH, only);
+            return;
+        }
+    }
 
     // The diagnosis a field report needs, said once. "Still flashing" has
     // two causes and they want different answers: the panel was never
