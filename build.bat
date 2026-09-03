@@ -181,14 +181,33 @@ python "%ROOT%\tools\gen_exports.py" --source "%SystemRoot%\System32\d3d11.dll" 
     --extra-export edvrSupersampleResolve ^
     --extra-export edvrTemporalAa ^
     --extra-export edvrSharpen ^
-    --extra-export edvrDepthProbeSelftest
+    --extra-export edvrDepthProbeSelftest ^
+    --extra-export edvrDlaaAvailable
 if errorlevel 1 ( echo [edvr] ERROR: export generation failed & exit /b 1 )
 
 if not exist "%OBJ%\d3d11" mkdir "%OBJ%\d3d11"
 ml64.exe /nologo /c /Fo"%OBJ%\d3d11\thunks.obj" "%GEN%\edvr_thunks_d3d11.asm" >nul
 if errorlevel 1 ( echo [edvr] ERROR: ml64 failed & exit /b 1 )
 
-cl.exe %CFLAGS% /Fo"%OBJ%\d3d11"\ ^
+REM NVIDIA's DLSS SDK, when it is there (tools\fetch_ngx.py puts it under
+REM third_party\ngx; EDVR_NGX_SDK names another copy): the d3d11 half is
+REM built with the NGX calls in, the static library linked, and the runtime
+REM copied beside the harness. Without it the dlaa mode says so and the
+REM pass runs its own history.
+set NGX=
+if exist "%ROOT%\third_party\ngx\include\nvsdk_ngx.h" set NGX=%ROOT%\third_party\ngx
+if defined EDVR_NGX_SDK set NGX=%EDVR_NGX_SDK%
+set NGXFLAGS=
+set NGXLIB=
+if defined NGX (
+    set NGXFLAGS=/DEDVR_HAVE_NGX=1 /I"%NGX%\include"
+    set NGXLIB="%NGX%\lib\Windows_x86_64\x64\nvsdk_ngx_s.lib" advapi32.lib
+    echo [edvr] DLSS SDK: %NGX%
+    copy /Y "%NGX%\lib\Windows_x86_64\rel\nvngx_dlss.dll" "%BUILD%\" >nul
+) else (
+    echo [edvr] DLSS SDK: not present -- dlaa mode will stand down
+)
+cl.exe %CFLAGS% %NGXFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "%ROOT%\src\common\log.cpp" "%ROOT%\src\common\config.cpp" ^
     "%ROOT%\src\common\config_audit.cpp" ^
     "%ROOT%\src\common\guard.cpp" "%ROOT%\src\common\vtable_hook.cpp" ^
@@ -228,6 +247,7 @@ cl.exe %CFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "%ROOT%\src\d3d11\supersample_pass.cpp" ^
     "%ROOT%\src\d3d11\temporal_pass.cpp" ^
     "%ROOT%\src\d3d11\depth_probe.cpp" ^
+    "%ROOT%\src\d3d11\dlaa.cpp" ^
     "%ROOT%\src\d3d11\sharpen_pass.cpp" ^
     "%ROOT%\src\d3d11\loader_panel.cpp" ^
     "%ROOT%\src\d3d11\splash_dim.cpp" ^
@@ -238,7 +258,7 @@ if errorlevel 1 ( echo [edvr] ERROR: compile failed & exit /b 1 )
 
 link.exe /nologo /DLL /MACHINE:X64 /INCREMENTAL:NO ^
     /DEF:"%GEN%\edvr_d3d11.def" /OUT:"%BUILD%\d3d11.dll" ^
-    "%OBJ%\d3d11\*.obj" kernel32.lib user32.lib version.lib
+    "%OBJ%\d3d11\*.obj" kernel32.lib user32.lib version.lib %NGXLIB%
 if errorlevel 1 ( echo [edvr] ERROR: link failed & exit /b 1 )
 
 echo [edvr] built %BUILD%\d3d11.dll

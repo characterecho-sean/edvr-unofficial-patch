@@ -98,6 +98,10 @@ bool temporalPassTotals(uint32_t* treated, double* avgMs, double* maxMs,
 // the translation v2's depth is for.
 bool temporalPassRegistration(char* buf, size_t n);
 
+// The trained pass's totals (fix.temporal_aa = dlaa): eye-frames it took
+// and its measured price. False when it never ran.
+bool temporalPassDlaaTotals(uint32_t* frames, double* avgMs, double* maxMs);
+
 void temporalPassShutdown();
 
 }  // namespace edvr
@@ -132,7 +136,9 @@ extern "C" {
 // blend:     history weight 0.5..0.95. clampSigma: the clip's half-width in
 //            standard deviations of the 3x3 neighbourhood.
 // flags:     bit 0 -- reset the history before this frame (a withheld frame
-//            broke continuity; the first frame after an engage).
+//            broke continuity; the first frame after an engage); bit 1 --
+//            NVIDIA's history (DLAA) instead of the pass's own, when the
+//            runtime is there; the pass says so once either way.
 //
 // Returns the treated texture (EDVR-owned, per eye, the source's own format
 // family, region-sized, full-span content), or null: the pass refused or

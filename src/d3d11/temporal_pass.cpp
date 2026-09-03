@@ -14,6 +14,7 @@
 #include "../common/supersample_math.h"   // supersampleRegionFromBounds: one region rule at the door
 #include "../common/temporal_math.h"
 #include "depth_probe.h"
+#include "dlaa.h"
 #include "shader_swap.h"
 
 namespace edvr {
@@ -37,6 +38,8 @@ SamplerState L : register(s0);           // bilinear, clamp
 RWTexture2D<float4> O : register(u0);    // the output, region-sized, the game's format
 RWTexture2D<float4> N : register(u1);    // the new history
 RWStructuredBuffer<uint> Stats : register(u2);   // 0 rejected, 1 clipped, 2 the clips' size (luma/255, summed); then the same three per candidate, four of them
+RWTexture2D<float2> MV : register(u3);   // for a trained pass: motion vectors, pixels, current -> previous
+RWTexture2D<float>  ZC : register(u4);   // and the depth, copied as it is
 cbuffer P : register(b0) {
     int4   region;      // x0 y0 x1 y1: this eye's pixels in S (x1, y1 exclusive)
     int2   size;        // the region's size = the output's
@@ -200,6 +203,48 @@ bool fetchHistory(float2 p, float3 r0, float3 r1, float3 r2, out float3 hy) {
 // count of clipped pixels cannot.
 uint clipSize(float3 hc, float3 hy) {
     return uint(saturate(abs(hc.x - hy.x)) * 255.0 + 0.5);
+}
+// The motion vectors for a trained pass (DLAA): the same reprojection
+// the history fetch does, written out instead of used -- the pixel's
+// position last frame minus its position now, in render pixels, which
+// is DLSS's convention with a scale of one. Off the image or behind the
+// eye: no motion. The depth goes beside it, copied as the game wrote it
+// (reversed-Z, told to the runtime as such).
+[numthreads(8, 8, 1)]
+void mv(uint3 id : SV_DispatchThreadID) {
+    if (id.x >= (uint)size.x || id.y >= (uint)size.y) return;
+    float2 p = float2(id.xy);
+    float3 d;
+    d.x = tanNow.x + (p.x + 0.5) / float(size.x) * (tanNow.y - tanNow.x);
+    d.y = tanNow.w - (p.y + 0.5) / float(size.y) * (tanNow.w - tanNow.z);
+    d.z = -1.0;
+    float3 dp = float3(dot(dR0.xyz, d), dot(dR1.xyz, d), dot(dR2.xyz, d));
+    float zraw = Z.Load(int3(region.xy + int2(p), 0));
+    if (knobs.y != 0.0) {
+        float zr = 0.0;
+        [unroll] for (int oy = -1; oy <= 1; ++oy) {
+            [unroll] for (int ox = -1; ox <= 1; ++ox) {
+                int2 q = clamp(int2(p) + int2(ox, oy), int2(0, 0), size - 1);
+                zr = max(zr, Z.Load(int3(region.xy + q, 0)));
+            }
+        }
+        float den = zr * (knobs.w - knobs.z) + knobs.z;
+        if (zr > 0.0 && den > 0.0) {
+            float z = knobs.z * knobs.w / den;
+            dp = dp * z + tvUsed.xyz;
+        }
+    }
+    float2 motion = 0.0;
+    if (dp.z < -1e-6) {
+        float xt = dp.x / -dp.z;
+        float yt = dp.y / -dp.z;
+        float2 pp;
+        pp.x = (xt - tanPrev.x) / (tanPrev.y - tanPrev.x) * float(size.x) - 0.5;
+        pp.y = (tanPrev.w - yt) / (tanPrev.w - tanPrev.z) * float(size.y) - 0.5;
+        motion = pp - p;
+    }
+    MV[id.xy] = motion;
+    ZC[id.xy] = knobs.y != 0.0 ? zraw : 0.0;
 }
 groupshared uint gCount[15];
 [numthreads(8, 8, 1)]
@@ -394,6 +439,15 @@ struct EyeState {
     // source's view. Released when a different texture arrives.
     void*                      depthRes = nullptr;
     ID3D11ShaderResourceView*  depthSrv = nullptr;
+    // For the trained pass: the colour copied out typed, the motion
+    // vectors and the depth copy it is fed, and its output.
+    ID3D11Texture2D*           dlColour = nullptr;
+    ID3D11Texture2D*           dlMv = nullptr;
+    ID3D11UnorderedAccessView* dlMvUav = nullptr;
+    ID3D11Texture2D*           dlDepth = nullptr;
+    ID3D11UnorderedAccessView* dlDepthUav = nullptr;
+    ID3D11Texture2D*           dlOut = nullptr;
+    uint32_t                   dlW = 0, dlH = 0;
     ID3D11Texture2D*           copyTex = nullptr;  // the copy-through, for a source that refuses a view
     ID3D11ShaderResourceView*  copySrv = nullptr;
     uint32_t                   copyW = 0, copyH = 0;
@@ -422,6 +476,15 @@ void releaseDepth(EyeState& e) {
     if (e.depthSrv) { e.depthSrv->Release(); e.depthSrv = nullptr; }
     e.depthRes = nullptr;
 }
+void releaseDl(EyeState& e) {
+    if (e.dlMvUav) { e.dlMvUav->Release(); e.dlMvUav = nullptr; }
+    if (e.dlDepthUav) { e.dlDepthUav->Release(); e.dlDepthUav = nullptr; }
+    if (e.dlColour) { e.dlColour->Release(); e.dlColour = nullptr; }
+    if (e.dlMv) { e.dlMv->Release(); e.dlMv = nullptr; }
+    if (e.dlDepth) { e.dlDepth->Release(); e.dlDepth = nullptr; }
+    if (e.dlOut) { e.dlOut->Release(); e.dlOut = nullptr; }
+    e.dlW = e.dlH = 0;
+}
 void releaseCopy(EyeState& e) {
     if (e.copySrv) { e.copySrv->Release(); e.copySrv = nullptr; }
     if (e.copyTex) { e.copyTex->Release(); e.copyTex = nullptr; }
@@ -444,6 +507,7 @@ void releaseOwned(EyeState& e) {
 void releaseEye(EyeState& e) {
     releaseSrc(e);
     releaseDepth(e);
+    releaseDl(e);
     releaseCopy(e);
     releaseOwned(e);
 }
@@ -610,6 +674,11 @@ FaultBudget g_budget("temporalPass", 8);
 
 ID3D11ComputeShader*       g_cs = nullptr;
 bool                       g_csTried = false;
+ID3D11ComputeShader*       g_csMv = nullptr;     // the motion-vector entry, for DLAA
+bool                       g_csMvTried = false;
+bool                       g_dlaaNoted = false;
+bool                       g_dlaaFailNoted = false;
+uint32_t                   g_dlaaTreats = 0;
 ID3D11Buffer*              g_cb = nullptr;
 ID3D11SamplerState*        g_samp = nullptr;
 ID3D11Buffer*              g_stats = nullptr;
@@ -1126,12 +1195,123 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
             ctx->OMSetRenderTargets(0, nullptr, nullptr);
         }
 
-        const int qs = acquireSlot(dev);
+        // THE TRAINED PASS, when asked for (flags bit 1) and available: the
+        // motion vectors and the depth copy from the same reprojection
+        // the history fetch uses, the colour copied out typed, then
+        // NVIDIA's evaluation into an owned output that goes out in the
+        // pass's place. Any refusal says so once and the pass's own
+        // history runs instead, this frame and after.
+        bool usedDlaa = false;
+        if ((flags & 2u) != 0) {
+            const char* why = "";
+            if (!dlaaAvailable(dev, &why)) {
+                if (!g_dlaaFailNoted) {
+                    g_dlaaFailNoted = true;
+                    Log::get().note(
+                        "temporal aa: dlaa was asked for, but %s. The pass's own "
+                        "history runs instead.",
+                        why);
+                }
+            } else {
+                if (!g_csMv && !g_csMvTried) {
+                    g_csMvTried = true;
+                    g_csMv = shaderSwapCompileCs(ctx, kTemporalCsHlsl, sizeof(kTemporalCsHlsl) - 1,
+                                                 "mv", "temporal_mv_cs", nullptr,
+                                                 "temporal aa");
+                }
+                bool made = g_csMv != nullptr;
+                if (made && (!e.dlOut || e.dlW != w || e.dlH != h)) {
+                    releaseDl(e);
+                    made = makeTex(dev, w, h, DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM,
+                                   D3D11_BIND_SHADER_RESOURCE, &e.dlColour, nullptr, nullptr) &&
+                           makeTex(dev, w, h, DXGI_FORMAT_R16G16_FLOAT, DXGI_FORMAT_R16G16_FLOAT,
+                                   D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS,
+                                   &e.dlMv, nullptr, &e.dlMvUav) &&
+                           makeTex(dev, w, h, DXGI_FORMAT_R32_FLOAT, DXGI_FORMAT_R32_FLOAT,
+                                   D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS,
+                                   &e.dlDepth, nullptr, &e.dlDepthUav) &&
+                           makeTex(dev, w, h, DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM,
+                                   D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS,
+                                   &e.dlOut, nullptr, nullptr);
+                    if (made) {
+                        e.dlW = w;
+                        e.dlH = h;
+                    } else {
+                        releaseDl(e);
+                    }
+                }
+                if (made && setParams(ctx, p)) {
+                    // The colour, typed, whichever way the source came.
+                    D3D11_BOX box{};
+                    box.left = viaCopy ? 0 : region[0];
+                    box.top = viaCopy ? 0 : region[1];
+                    box.front = 0;
+                    box.right = box.left + w;
+                    box.bottom = box.top + h;
+                    box.back = 1;
+                    if (viaCopy) {
+                        D3D11_BOX full{};
+                        full.left = region[0];
+                        full.top = region[1];
+                        full.front = 0;
+                        full.right = region[2];
+                        full.bottom = region[3];
+                        full.back = 1;
+                        ctx->CopySubresourceRegion(e.copyTex, 0, 0, 0, 0, src, 0, &full);
+                        ctx->CopySubresourceRegion(e.dlColour, 0, 0, 0, 0, e.copyTex, 0, &box);
+                    } else {
+                        ctx->CopySubresourceRegion(e.dlColour, 0, 0, 0, 0, src, 0, &box);
+                    }
+                    // The motion vectors and the depth copy.
+                    ID3D11ShaderResourceView* nullSrvM[3] = {};
+                    ID3D11UnorderedAccessView* nullUavM[5] = {};
+                    ctx->CSSetShaderResources(0, 3, nullSrvM);
+                    ctx->CSSetUnorderedAccessViews(0, 5, nullUavM, nullptr);
+                    ctx->CSSetShader(g_csMv, nullptr, 0);
+                    ID3D11ShaderResourceView* srvsM[3] = {inSrv, e.histSrv[e.histRead], depthSrv};
+                    ID3D11UnorderedAccessView* uavsM[5] = {nullptr, nullptr, nullptr, e.dlMvUav,
+                                                           e.dlDepthUav};
+                    ID3D11Buffer* cbM = g_cb;
+                    ID3D11SamplerState* smpM = g_samp;
+                    ctx->CSSetShaderResources(0, 3, srvsM);
+                    ctx->CSSetUnorderedAccessViews(0, 5, uavsM, nullptr);
+                    ctx->CSSetConstantBuffers(0, 1, &cbM);
+                    ctx->CSSetSamplers(0, 1, &smpM);
+                    ctx->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
+                    ctx->CSSetShaderResources(0, 3, nullSrvM);
+                    ctx->CSSetUnorderedAccessViews(0, 5, nullUavM, nullptr);
+                    // NVIDIA's evaluation.
+                    const bool resetHist = (flags & 1u) != 0 || !e.haveHistory;
+                    if (dlaaEvaluate(ctx, eye, e.dlColour, e.dlDepth, e.dlMv, e.dlOut, w, h,
+                                     jxNow, jyNow, resetHist, &why)) {
+                        usedDlaa = true;
+                        if (!g_dlaaNoted) {
+                            g_dlaaNoted = true;
+                            Log::get().note(
+                                "temporal aa: DLAA engaged -- NVIDIA's history takes the "
+                                "%ux%u frame, its depth%s and the pass's own motion "
+                                "vectors, jittered as before; the pass's history and "
+                                "clip stand aside. Its price prints in the totals.",
+                                w, h, depthSrv ? "" : " (none in hand yet: no depth "
+                                                       "until the probe finds it)");
+                        }
+                    } else if (!g_dlaaFailNoted) {
+                        g_dlaaFailNoted = true;
+                        Log::get().note(
+                            "temporal aa: dlaa was asked for, but %s. The pass's own "
+                            "history runs instead.",
+                            why);
+                    }
+                }
+            }
+        }
+
+        const int qs = usedDlaa ? -1 : acquireSlot(dev);
         if (qs >= 0) {
             ctx->Begin(g_slots[qs].disjoint);
             ctx->End(g_slots[qs].begin);
         }
-        if (viaCopy) {
+        if (viaCopy && !usedDlaa) {
             D3D11_BOX box{};
             box.left = region[0];
             box.top = region[1];
@@ -1142,12 +1322,12 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
             ctx->CopySubresourceRegion(e.copyTex, 0, 0, 0, 0, src, 0, &box);
         }
         const UINT zeros[4] = {0, 0, 0, 0};
-        ctx->ClearUnorderedAccessViewUint(g_statsUav, zeros);
+        if (!usedDlaa) ctx->ClearUnorderedAccessViewUint(g_statsUav, zeros);
 
         const int readIdx = e.histRead;
         const int writeIdx = 1 - readIdx;
-        bool ran = setParams(ctx, p);
-        if (ran) {
+        bool ran = usedDlaa ? true : setParams(ctx, p);
+        if (ran && !usedDlaa) {
             ID3D11ShaderResourceView* nullSrv[3] = {};
             ID3D11UnorderedAccessView* nullUav[3] = {};
             ctx->CSSetShaderResources(0, 3, nullSrv);
@@ -1200,7 +1380,14 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         if (savedCb) savedCb->Release();
         if (savedSamp) savedSamp->Release();
 
-        if (ran) {
+        if (ran && usedDlaa) {
+            // The trained pass's frame goes out; the pass's own history is
+            // marked broken so a switch back starts afresh.
+            e.haveHistory = false;
+            result = e.dlOut;
+            ++g_treats;
+            ++g_dlaaTreats;
+        } else if (ran) {
             e.histRead = writeIdx;
             e.haveHistory = true;
             result = e.outTex;
@@ -1400,7 +1587,17 @@ bool temporalPassRegistration(char* buf, size_t n) {
     return true;
 }
 
+bool temporalPassDlaaTotals(uint32_t* frames, double* avgMs, double* maxMs) {
+    if (g_dlaaTreats == 0) return false;
+    uint32_t evals = 0;
+    if (!dlaaTotals(&evals, avgMs, maxMs)) return false;
+    if (frames) *frames = g_dlaaTreats;
+    return true;
+}
+
 void temporalPassShutdown() {
+    dlaaShutdown();
+    if (g_csMv) { g_csMv->Release(); g_csMv = nullptr; }
     if (g_treats > 0) {
         Log::get().note("temporal aa: %u eye-submits treated this session.",
                         g_treats);

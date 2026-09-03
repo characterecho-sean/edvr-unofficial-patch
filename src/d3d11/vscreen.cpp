@@ -4363,6 +4363,19 @@ void vScreenFrameBoundary() {
                 }
             }
         }
+        // The trained pass's, when it runs.
+        {
+            static uint32_t lastDlaaFrames = 0;
+            uint32_t frames = 0;
+            double avgMs = 0.0, maxMs = 0.0;
+            if (temporalPassDlaaTotals(&frames, &avgMs, &maxMs) && frames != lastDlaaFrames) {
+                lastDlaaFrames = frames;
+                Log::get().note(
+                    "dlaa totals: %u eye-frames evaluated this session, %.2f ms per "
+                    "eye on average (max %.2f).",
+                    frames, avgMs, maxMs);
+            }
+        }
         // The sharpening's, the same way.
         {
             static uint32_t lastSharpenTreats = 0;

@@ -11,3 +11,6 @@ edvr_breadcrumbs.txt
 .claude/
 
 build - Copy/
+
+# NVIDIA's DLSS SDK, fetched by tools/fetch_ngx.py; its licence keeps it out of the tree.
+third_party/ngx/

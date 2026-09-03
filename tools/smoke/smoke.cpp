@@ -751,6 +751,51 @@ int main(int argc, char** argv) {
         }
     }
 
+    // The trained pass (fix.temporal_aa = dlaa), through the temporal
+    // export with its DLAA bit: on a machine with the SDK built in, the
+    // runtime beside this harness and an RTX GPU, a steady solid colour
+    // must come back as itself; anywhere else the pass falls back to its
+    // own history and says why in its log, and this only checks the
+    // export still answers. The verdict is printed either way.
+    {
+        typedef void* (*PFN_Taa)(void*, int, const float*, const float*,
+                                 const float*, float, float, const float*,
+                                 const float*, const float*, float, float,
+                                 float, int, float, float, unsigned);
+        typedef int (*PFN_DlaaAvail)(void*, const char**);
+        PFN_Taa taa = reinterpret_cast<PFN_Taa>(GetProcAddress(mod, "edvrTemporalAa"));
+        PFN_DlaaAvail dlaaAvail =
+            reinterpret_cast<PFN_DlaaAvail>(GetProcAddress(mod, "edvrDlaaAvailable"));
+        if (!taa || !dlaaAvail) {
+            printf("  FAIL  edvrDlaaAvailable or edvrTemporalAa is not exported\n");
+            rc = 1;
+        } else {
+            const char* why = "";
+            const int avail = dlaaAvail(device, &why);
+            printf("  info  dlaa on this machine: %s\n", avail ? "available" : why);
+            const float tan[4] = {-1.0f, 1.0f, -1.0f, 1.0f};
+            const float ident[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+            const unsigned char cr = 90, cg = 160, cb = 200;
+            const float colour[4] = {cr / 255.0f, cg / 255.0f, cb / 255.0f, 1.0f};
+            ID3D11Texture2D* srcD = nullptr;
+            if (!makeSolidSrc(device, ctx, 400, 304, colour, true, &srcD)) {
+                printf("  FAIL  could not make the dlaa test source\n");
+                rc = 1;
+            } else {
+                void* r1 = taa(srcD, 0, nullptr, tan, tan, 0.0f, 0.0f, ident, nullptr,
+                               nullptr, 0.0f, 0.0f, 0.0f, 3, 0.9f, 1.0f, 1u | 2u);
+                if (!checkResolved(device, ctx, r1, "dlaa: a steady colour's first frame",
+                                   400, 304, 200, 152, cr, cg, cb, 4)) rc = 1;
+                void* r2 = taa(srcD, 0, nullptr, tan, tan, 0.25f, -0.25f, ident, nullptr,
+                               nullptr, 0.0f, 0.0f, 0.0f, 3, 0.9f, 1.0f, 2u);
+                if (!checkResolved(device, ctx, r2, avail ? "dlaa: ...and the second, through NVIDIA's history"
+                                                          : "dlaa: ...and the second, through the fallback",
+                                   400, 304, 200, 152, cr, cg, cb, 4)) rc = 1;
+                srcD->Release();
+            }
+        }
+    }
+
     // The render sharpening (docs/anti-aliasing.md's "sharpen" at the
     // door), called the way the openvr half calls it: AMD's RCAS on the
     // eye's region, the source's own size and format, the taps clamped

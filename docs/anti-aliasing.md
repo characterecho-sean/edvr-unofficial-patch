@@ -919,6 +919,24 @@ to 27 m -- so the HUD's text has the depth the reprojection needs.
 `temporal_aa_motion = depth` is the default from here; the pass costs
 0.47 ms per eye with the instrument's four candidates still running.
 
+**DLAA (built 2026-09-03, after the player's ask; the rig's GPU is an RTX
+5090).** `fix.temporal_aa = dlaa` hands NVIDIA's DLAA the inputs this
+branch already makes: the frame (copied out typed), the scene's depth
+(copied as the game wrote it, reversed-Z declared), per-pixel motion
+vectors written by the same reprojection the history fetch uses (the
+pixel's position last frame minus its position now, in render pixels),
+and the jitter offset. NVIDIA's history replaces the pass's own; the
+guard's crop, the resolve and the sharpen follow as before. The glue is
+`src/d3d11/dlaa.cpp` behind `EDVR_HAVE_NGX`, which `build.bat` sets when
+the SDK is under `third_party/ngx` (`tools/fetch_ngx.py`, a sparse clone
+of NVIDIA's public repository) or wherever `EDVR_NGX_SDK` points; without
+it the mode says so once and the own history runs. The runtime
+`nvngx_dlss.dll` must sit beside the game's executable, where NGX looks;
+its licence permits shipping it with an application, which is the
+installer's job. Objects that move on their own still carry no motion of
+their own, which DLSS tolerates better than a hand-rolled clip. Not yet
+flown.
+
 ## Feature C — texture LOD bias, the small lever
 
 Not all shimmer is geometry. Detail maps and normal maps sampled a mip

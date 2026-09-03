@@ -28,6 +28,7 @@ enum class Motion : uint8_t { None = 0, Head = 1, Camera = 2, Depth = 3 };
 
 struct State {
     bool   on = false;
+    bool   dlaa = false;   // fix.temporal_aa = dlaa: NVIDIA's history instead of the pass's own
     bool   jitterWanted = true;
     float  blend = 0.90f;
     float  clamp = 1.0f;
@@ -93,10 +94,12 @@ void temporalAaConfigure() {
 
     const std::string raw = cfg.getString("fix.temporal_aa", "off");
     bool on = false;
+    bool dlaa = false;
     if (_stricmp(raw.c_str(), "on") == 0) on = true;
+    else if (_stricmp(raw.c_str(), "dlaa") == 0) { on = true; dlaa = true; }
     else if (_stricmp(raw.c_str(), "off") != 0 && !raw.empty()) {
         Log::get().note("temporal_aa = \"%s\" is not a mode this build knows "
-                        "(off, on). Treating it as off.", raw.c_str());
+                        "(off, on, dlaa). Treating it as off.", raw.c_str());
     }
     const std::string rawJit = cfg.getString("fix.temporal_aa_jitter", "on");
     const bool jitter = _stricmp(rawJit.c_str(), "off") != 0;
@@ -120,11 +123,12 @@ void temporalAaConfigure() {
     }
 
     const bool first = !s.configured;
-    const bool changed = first || on != s.on || jitter != s.jitterWanted ||
+    const bool changed = first || on != s.on || dlaa != s.dlaa || jitter != s.jitterWanted ||
                          fabsf(blend - s.blend) > 1e-4f ||
                          fabsf(clampSig - s.clamp) > 1e-4f || motion != s.motion;
     s.configured = true;
     s.on = on;
+    s.dlaa = dlaa;
     s.jitterWanted = jitter;
     s.blend = blend;
     s.clamp = clampSig;
@@ -392,6 +396,9 @@ void* temporalAaTreat(vr::EVREye eye, void* handle,
         ((s.motion == Motion::Head || s.motion == Motion::Depth) && !haveDelta)) {
         flags |= 1u;
     }
+    // Bit 1: NVIDIA's history instead of the pass's own, when the d3d11
+    // half has the runtime; it says so once either way and falls back.
+    if (s.dlaa) flags |= 2u;
     void* out = s.fn(handle, e, haveBounds ? b4 : nullptr, tanNow,
                      s.havePrev[e] ? s.tanPrev[e] : tanNow, s.jx, s.jy,
                      haveHeadDelta ? delta : nullptr, haveTv ? tv : nullptr,
