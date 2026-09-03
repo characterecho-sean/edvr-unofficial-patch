@@ -861,6 +861,24 @@ alone at rest and under slow turns). The output-merger stage is cleared
 around the pass's dispatch, since the game's depth target may still be
 bound there at submit and a view over a bound target reads as nothing.
 
+**The first depth flight (2026-09-03) verified the plumbing and nothing
+else, through three faults of its own.** The eye offsets came through
+(±31.6 mm). The pass read the depth with planes 0.1..1000 m: the game
+asks for its projection with two pairs of planes, 0.025..50000 for the
+scene and 0.1..1000 for something else, and the capture kept the last
+pair seen, which reads the cockpit four times too far and under-corrects
+the translation by as much; the scene's pair is the one with the
+smallest near, and each pair is now logged once. The depth was found at
+3096 wide two seconds before the cull guard rebuilt every target at 3358,
+and the probe's table, full of the old targets, had no room for the new
+ones, so both depth candidates froze for the rest of the session; targets
+the game stops binding are evicted after 120 frames. And the candidates
+accumulated since each first had data, so the line compared a session of
+the rotation-only delta with fifteen seconds of the depth candidates; the
+registration line now judges every candidate over the same interval and
+starts afresh after each print. The pass also says when the depth goes
+away and when it is back. Second depth flight pending.
+
 ## Feature C — texture LOD bias, the small lever
 
 Not all shimmer is geometry. Detail maps and normal maps sampled a mip

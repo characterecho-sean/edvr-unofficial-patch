@@ -222,7 +222,9 @@ struct State {
     uint32_t  cropsApplied = 0;           // eye-submits cropped (bounds mode)
     bool      matrixFormulaOk[2] = {};
     bool      matrixChecked[2] = {};
-    float     nearZ = 0.0f, farZ = 0.0f;   // the game's planes, from its matrix calls
+    float     nearZ = 0.0f, farZ = 0.0f;   // the SCENE's planes: the smallest near the game asks with
+    float     planePairs[4][2] = {};       // the distinct pairs seen, for the log
+    int       planePairCount = 0;
     float     eyeToHead[2][12] = {};
     bool      eyeToHeadValid[2] = {};
     bool      eyeToHeadTried[2] = {};
@@ -512,9 +514,36 @@ vr::HmdMatrix44_t MatrixReceiver::GetProjectionMatrix(int32_t eye, float nearZ,
 
     State* s = g_state;
     if (!s || self != s->ownerIface || (eye != 0 && eye != 1)) return m;
+    // The game asks for its projection with more than one pair of planes
+    // -- 0.025..50000 for the scene and 0.1..1000 for something else, on
+    // the depth flight of 2026-09-03 -- and the depth reprojection wants
+    // the scene's. The smallest near names it: the last pair seen did
+    // not, and read the cockpit four times too far. Each new pair is
+    // logged once.
     if (nearZ > 0.0f && farZ > nearZ) {
-        s->nearZ = nearZ;
-        s->farZ = farZ;
+        bool known = false;
+        for (int i = 0; i < s->planePairCount; ++i) {
+            if (fabsf(s->planePairs[i][0] - nearZ) < 1e-6f &&
+                fabsf(s->planePairs[i][1] - farZ) < 1e-3f) {
+                known = true;
+                break;
+            }
+        }
+        if (!known && s->planePairCount < 4) {
+            s->planePairs[s->planePairCount][0] = nearZ;
+            s->planePairs[s->planePairCount][1] = farZ;
+            ++s->planePairCount;
+            Log::get().note(
+                "IVRSystem: the game asks for its projection with planes "
+                "%g..%g m (pair %d seen this session). The depth reprojection "
+                "reads the scene's depth with the smallest near of them.",
+                static_cast<double>(nearZ), static_cast<double>(farZ),
+                s->planePairCount);
+        }
+        if (!(s->nearZ > 0.0f) || nearZ < s->nearZ) {
+            s->nearZ = nearZ;
+            s->farZ = farZ;
+        }
     }
 
     if (!s->receiverFirstLogged) {

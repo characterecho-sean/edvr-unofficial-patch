@@ -33,7 +33,7 @@ void main(uint3 id : SV_DispatchThreadID) {
 }
 )HLSL";
 
-constexpr int      kMaxTargets = 24;   // the cockpit binds shadow maps by the handful
+constexpr int      kMaxTargets = 32;   // the cockpit binds shadow maps by the handful
 constexpr uint64_t kSampleIntervalMs = 10000;
 constexpr int      kMaxSampleLines = 6;
 
@@ -93,7 +93,7 @@ uint32_t g_boundaryNext = 0;        // round-robin over the targets
 uint64_t g_boundaryLastMs = 0;
 bool     g_stagingAtBoundary = false;
 uint32_t g_frameNo = 0;
-constexpr uint32_t kReleaseAfterFrames = 600;
+constexpr uint32_t kReleaseAfterFrames = 120;
 
 // The GPU side: the shader, its parameter buffer, the 1 KB result, TWO
 // staging twins (one per read path), and an owned copy of the target.
@@ -349,7 +349,9 @@ namespace {
 // budget, while the game has it bound. -1 when it cannot be described or
 // the table is full.
 int discoverTarget(void* dsv) {
-    if (g_targetCount >= kMaxTargets) return -1;
+    bool room = g_targetCount < kMaxTargets;
+    for (int i = 0; i < g_targetCount && !room; ++i) room = !g_targets[i].dsv;
+    if (!room) return -1;
     Target t;
     t.dsv = dsv;
     bool ok = false;
@@ -383,7 +385,11 @@ int discoverTarget(void* dsv) {
     });
     if (!ok) return -1;
     t.lastSeenFrame = g_frameNo;
-    const int idx = g_targetCount++;
+    int idx = -1;
+    for (int i = 0; i < g_targetCount; ++i) {
+        if (!g_targets[i].dsv) { idx = i; break; }   // an evicted slot
+    }
+    if (idx < 0) idx = g_targetCount++;
     g_targets[idx] = t;
     return idx;
 }
@@ -581,13 +587,21 @@ void depthProbeFrameBoundary(ID3D11DeviceContext* ctx) {
     g_eyeRtvDrawsLastFrame = g_eyeRtvDrawsThisFrame;
     g_drawsThisFrame = g_drawsWithDsvThisFrame = g_indirectThisFrame = 0;
     g_eyeRtvDrawsThisFrame = 0;
-    // A target not bound for a while lets its texture go: the game may
-    // have released it, and holding it would keep it alive for nothing.
+    // A target not bound for a while is EVICTED: its texture released (the
+    // game may have let it go, and holding it would keep it alive for
+    // nothing) and its slot freed. The depth flight of 2026-09-03 found
+    // the scene's depth at 3096 wide, then the cull guard rebuilt every
+    // target at 3358, and the table -- full of the old ones -- had no room
+    // for the new, so the depth was lost for the rest of the session.
+    // Announced targets keep their index in the log by leaving a hole that
+    // a later discovery may fill.
     for (int i = 0; i < g_targetCount; ++i) {
         Target& t = g_targets[i];
-        if (t.tex && g_frameNo - t.lastSeenFrame > kReleaseAfterFrames) {
-            t.tex->Release();
-            t.tex = nullptr;
+        if (t.dsv && g_frameNo - t.lastSeenFrame > kReleaseAfterFrames) {
+            if (t.tex) { t.tex->Release(); t.tex = nullptr; }
+            t.dsv = nullptr;
+            t.drawsLastFrame = t.drawsThisFrame = 0;
+            t.unbindsLastFrame = t.unbindsThisFrame = 0;
         }
     }
     if (g_distinctThisFrame > g_maxDistinct) g_maxDistinct = g_distinctThisFrame;

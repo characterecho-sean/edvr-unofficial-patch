@@ -467,6 +467,10 @@ uint64_t g_rejected = 0;
 uint64_t g_clipped = 0;
 // The registration instrument's sums: per candidate, and the selected
 // delta's clip share by head speed (still, slow, fast).
+// Since the last registration line, so every candidate is judged over
+// the SAME frames: the depth flight of 2026-09-03 compared a session's
+// worth of the rotation-only delta against fifteen seconds of the depth
+// candidates and could not tell them apart.
 uint64_t g_candPix[4] = {};
 uint64_t g_candRej[4] = {};
 uint64_t g_candClip[4] = {};
@@ -475,6 +479,7 @@ uint64_t g_bucketPix[3] = {};
 uint64_t g_bucketClip[3] = {};
 uint64_t g_bucketSize[3] = {};
 uint32_t g_bucketFrames[3] = {};
+uint32_t g_intervalFrames = 0;
 constexpr float kStillDeg = 0.03f;   // under 2 deg/s at 72 Hz: tracking noise
 constexpr float kSlowDeg = 0.30f;    // under 22 deg/s: a glance
 bool     g_priceLogged = false;
@@ -528,6 +533,7 @@ void pollSlots(ID3D11DeviceContext* ctx) {
                 g_clipped += v[1];
                 g_pixelsSeen += q.pixels;
                 if (q.hadHistory) {
+                    ++g_intervalFrames;
                     for (int c = 0; c < 4; ++c) {
                         if (!q.candPixels[c]) continue;
                         g_candPix[c] += q.candPixels[c];
@@ -699,6 +705,8 @@ DXGI_FORMAT pickHistoryFormat(ID3D11Device* dev) {
 }
 
 bool     g_depthNoted = false;
+bool     g_depthHeld = false;      // the last treat had the depth in hand
+uint32_t g_depthLostCount = 0;
 
 void* temporalInner(void* srcTex, int eye, const float* bounds,
                     const float* tanNow, const float* tanPrev, float jxNow,
@@ -927,7 +935,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
             depthSrv = e.depthSrv;
         }
     }
-    if (depthSrv && !g_depthNoted) {
+    if (depthSrv && (!g_depthNoted || !g_depthHeld)) {
         g_depthNoted = true;
         Log::get().note(
             "temporal aa: the scene's depth is in hand -- the depth probe's "
@@ -937,7 +945,17 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
             "the registration line's 'head with depth' and 'depth, eyes "
             "swapped' candidates say whether the eyes are assigned right.",
             sd.Width, sd.Height, static_cast<double>(nearZ), static_cast<double>(farZ));
+    } else if (!depthSrv && g_depthHeld && eye == 0) {
+        ++g_depthLostCount;
+        if (g_depthLostCount <= 3) {
+            Log::get().note(
+                "temporal aa: the scene's depth went away (the render size "
+                "changed, or the probe has not settled on the new targets "
+                "yet) -- the pass runs on the head's rotation alone until it "
+                "is found again, and says so when it is.");
+        }
     }
+    if (eye == 0) g_depthHeld = depthSrv != nullptr;
 
     // The owned pair and the output, rebuilt on any change of size or
     // format -- which is a history reset too.
@@ -1289,10 +1307,14 @@ bool temporalPassTotals(uint32_t* treated, double* avgMs, double* maxMs,
 }
 
 bool temporalPassRegistration(char* buf, size_t n) {
-    if (!buf || n == 0 || g_treats == 0) return false;
+    if (!buf || n == 0 || g_treats == 0 || g_intervalFrames == 0) return false;
     static const char* const kNames[4] = {"head, rotation only", "head with depth, eyes swapped",
                                           "camera", "head with depth"};
     size_t used = 0;
+    {
+        const int m = snprintf(buf, n, "over the last %u eye-frames: ", g_intervalFrames);
+        if (m > 0) used += static_cast<size_t>(m);
+    }
     auto put = [&](const char* fmt, double a, double b, double c) {
         if (used >= n) return;
         const int k = snprintf(buf + used, n - used, fmt, a, b, c);
@@ -1344,6 +1366,16 @@ bool temporalPassRegistration(char* buf, size_t n) {
                                meanSize, g_bucketFrames[b]);
         if (m > 0) used += static_cast<size_t>(m);
     }
+    // The interval starts afresh: the next line judges the next stretch.
+    memset(g_candPix, 0, sizeof(g_candPix));
+    memset(g_candRej, 0, sizeof(g_candRej));
+    memset(g_candClip, 0, sizeof(g_candClip));
+    memset(g_candSize, 0, sizeof(g_candSize));
+    memset(g_bucketPix, 0, sizeof(g_bucketPix));
+    memset(g_bucketClip, 0, sizeof(g_bucketClip));
+    memset(g_bucketSize, 0, sizeof(g_bucketSize));
+    memset(g_bucketFrames, 0, sizeof(g_bucketFrames));
+    g_intervalFrames = 0;
     return true;
 }
 
