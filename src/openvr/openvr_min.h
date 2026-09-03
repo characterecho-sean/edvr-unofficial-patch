@@ -71,6 +71,16 @@ struct Texture_t {
     EColorSpace  eColorSpace;
 };
 
+// Submit's pose-carrying texture, for Submit_TextureWithPose: openvr.h
+// derives it from Texture_t and appends the pose the frame was rendered
+// from, so the layout is the three fields above and then the matrix.
+struct VRTextureWithPose_t {
+    void*         handle;
+    ETextureType  eType;
+    EColorSpace   eColorSpace;
+    HmdMatrix34_t mDeviceToAbsoluteTracking;
+};
+
 struct VRTextureBounds_t {
     float uMin, vMin;
     float uMax, vMax;
