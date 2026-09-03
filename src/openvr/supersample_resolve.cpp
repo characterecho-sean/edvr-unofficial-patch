@@ -294,14 +294,33 @@ void* supersampleResolveTreat(vr::EVREye eye, void* handle,
     }
     const uint32_t regionW = region[2] - region[0];
     const uint32_t regionH = region[3] - region[1];
-    s.armer.note(e, regionW, regionH);
+    // NOT WHILE THE CULL GUARD IS STAGING. Stage 1 asks the game for wider
+    // targets and does not crop them yet, so for a couple of seconds every
+    // submit arrives supersampled by the guard's own margin -- 5792x5356
+    // against a recommended 5424x5356 on the first flight (Pimax, 7%
+    // horizontal, 2026-09-02) -- and the resolve armed on exactly that.
+    // The next frame the crop went live, delivered the recommended size,
+    // and the pass refused a 1:1 resolve; the resolve stood down for the
+    // session before a real supersampled frame ever reached it. Reports
+    // made while the guard is staging are not evidence about the game's
+    // own supersampling, so they are not fed to the armer at all. A
+    // resolve already armed keeps treating through the stage: the game
+    // renders TRUE projections into the wider stage-1 targets, so the
+    // whole region is the true view at a higher density, and shrinking it
+    // to the recommended size is exactly right.
+    if (!systemHookSizeProbeWanted()) s.armer.note(e, regionW, regionH);
 
     if (!s.armer.armed) return nullptr;
-    // A size that has moved under the armed decision and no longer covers
-    // the target (the runtime's slider went up, the game's quality went
-    // down): untouched for this frame, both eyes alike since both carry
-    // the same size; the boundary disarms. The pass takes anything larger.
-    if (regionW < s.armer.outW || regionH < s.armer.outH) return nullptr;
+    // A region that no longer exceeds the target by more than rounding --
+    // the guard's crop landing at the recommended size, the runtime's
+    // slider moving up, the game's quality moving down -- forwards
+    // untouched for this frame, both eyes alike since both carry the same
+    // size, and the boundary disarms. It is NOT a refusal: the same-size
+    // case is exactly what stood the first flight down, and nothing about
+    // it is wrong with the pass. The pass takes anything that exceeds.
+    if (!supersampleExceeds(s.armer.outW, s.armer.outH, regionW, regionH)) {
+        return nullptr;
+    }
 
     if (!s.fn && !s.fnTried) {
         s.fnTried = true;

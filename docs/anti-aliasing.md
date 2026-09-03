@@ -250,10 +250,12 @@ performance.md makes for the upscale direction, made for the downscale one.
 
 1. *Passive (v1):* the submit hook sees per-eye size > recommended size and
    arms — no size lie, nothing new asked of the game. Whatever produced
-   the supersampling (Elite's HMD Quality above 1.0, which is believed to
-   scale the game's targets past the recommended size and leave the
-   downsample to the compositor) is left as it is; only the resolve
-   changes hands.
+   the supersampling (Elite's HMD Quality above 1.0, which scales the
+   game's targets past the recommended size and leaves the downsample to
+   the compositor — measured 2026-09-02 on the Pimax over native SteamVR:
+   HMD Quality 1.25 submitted 6780x6695 per eye against a recommended
+   5424x5356, exactly 1.25x on each axis, one texture per eye with null
+   bounds) is left as it is; only the resolve changes hands.
 2. *Active (v2):* `render_scale` above 1.0 tells the game the headset wants
    more pixels (the stage-1 size lie, measured to work) and the same pass
    resolves them back to native. EDVR then controls both ends: the player
@@ -350,10 +352,39 @@ What the log says, and which Phase 0 item each line answers:
 - `supersample resolve STANDING DOWN: …` or `… stands down`, anywhere: a
   refusal, with its reason.
 
-Desk-checked on 2026-09-02 — the build, both harnesses and the shader
-desk-compiled — and not yet flown: the field numbers belong in those
-lines, not in this paragraph, and `auto` becomes the default when they
-have been read.
+**First flight (2026-09-02, Pimax Crystal Super over native SteamVR,
+`on`, the cull guard live at h 0.35).** Three things measured, one of
+them a bug:
+
+- Elite's HMD Quality 1.25 submits 6780x6695 per eye against the runtime's
+  recommended 5424x5356: exactly 1.25x on each axis (the belief in the
+  mechanism paragraph above, now measured). The game rebuilds its targets
+  the moment the setting is applied, mid-session, at 1.25x the size it is
+  currently being told.
+- The resolve armed on the wrong supersampling. The cull guard's stage 1
+  asks the game for 7 % wider targets and does not crop them yet, so for
+  two seconds every eye arrived at 5792x5356; the resolve saw "1.07x",
+  engaged, and the next frame the guard's crop delivered exactly the
+  recommended size — which the pass refused as a 1:1 resolve, and the
+  door read the refusal as a stand-down for the session. Fixed the same
+  day: reports made while the guard is staging are withheld from the
+  arming decision, and a region that no longer exceeds the target by more
+  than rounding forwards untouched (the boundary disarms) instead of
+  standing anything down. A resolve armed before the guard stages keeps
+  treating through stage 1, where the game renders true projections into
+  the wider targets, so the whole region is the true view at a higher
+  density and shrinking it is right.
+- Changing HMD Quality mid-session takes the cull guard down: its crop
+  snaps to the size the session adopted, the rebuilt textures are 25 %
+  off it, and the guard refuses and stands down as designed — silently,
+  until the same day's fix gave that refusal its log line. Set HMD Quality
+  before launching and the guard stages against the supersampled size
+  from the start (stage 1 at 1.25x1.07, the crop at 6780x6695, the resolve
+  from there to 5424x5356).
+
+The pass itself compiled and warmed one second into the session and
+linked to the door; it never treated a frame on this flight, so the
+format and price lines are still unread.
 
 ## Feature B — temporal anti-aliasing at the door
 

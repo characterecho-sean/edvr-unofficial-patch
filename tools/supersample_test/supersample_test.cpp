@@ -131,6 +131,18 @@ int main() {
               "exceeds: HMD Quality 1.25 (1820x1950) qualifies");
         check(supersampleExceeds(1456, 1560, 1300, 1950), false,
               "exceeds: smaller on either axis is never supersampling");
+        // The first flight's numbers (Pimax, 2026-09-02), as the gate the
+        // treat applies to the region it is handed: the guard's stage-1
+        // margin looks like supersampling to this test (7% is over 1%), the
+        // crop's landing at the recommended size does not -- which is why
+        // stage-1 reports are withheld from the armer and a non-exceeding
+        // region forwards untouched instead of standing anything down.
+        check(supersampleExceeds(5424, 5356, 5792, 5356), true,
+              "exceeds: the guard's 7% stage-1 margin reads as supersampling");
+        check(supersampleExceeds(5424, 5356, 5424, 5356), false,
+              "exceeds: the crop landing at the recommended size does not");
+        check(supersampleExceeds(5424, 5356, 6780, 6695), true,
+              "exceeds: HMD Quality 1.25 on the Pimax (6780x6695) qualifies");
         check(supersampleExceeds(0, 0, 1820, 1950), false,
               "exceeds: no recommendation, no verdict");
         // Small sizes: the two-pixel floor governs below 200 px.

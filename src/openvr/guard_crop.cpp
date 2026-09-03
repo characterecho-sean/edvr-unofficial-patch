@@ -25,6 +25,7 @@ struct State {
     bool faultsNoted = false;
     bool createFailNoted = false;
     bool kindNoted = false;
+    bool snapNoted = false;
 };
 State g_s;
 
@@ -126,6 +127,23 @@ void* guardCropCopy(uint32_t eye, void* srcHandle,
     };
     if (!snapAxis(x0, x1, snapW, sd.Width) ||
         !snapAxis(y0, y1, snapH, sd.Height)) {
+        // Said once, because the stand-down that follows this refusal
+        // promises "its own log line above says why" and for a whole
+        // flight there was no such line (2026-09-02: an HMD Quality change
+        // mid-session rebuilt the eye textures at 1.25x under the live
+        // guard, and the only trace was the stand-down itself).
+        if (!s.snapNoted) {
+            s.snapNoted = true;
+            Log::get().note(
+                "cull guard: the crop box is %ldx%ld pixels of a %ux%u "
+                "texture, more than 64 px from the %ux%u the session adopted "
+                "-- the render resolution moved under the live guard (an "
+                "HMD Quality or SteamVR resolution change mid-session does "
+                "this). The copy refuses rather than submit a shape the "
+                "transport has never served; restart with the new "
+                "resolution already set and the guard stages against it.",
+                x1 - x0, y1 - y0, sd.Width, sd.Height, snapW, snapH);
+        }
         return nullptr;
     }
 
