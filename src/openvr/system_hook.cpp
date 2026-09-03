@@ -1390,11 +1390,15 @@ void systemHookSetJitter(float dx, float dy, bool live) {
     s->jitLive = live && s->receiverInstalled;
 }
 
-bool systemHookJitterAvailable() {
+int systemHookJitterVerdict() {
     State* s = g_state;
-    return s && s->installed && !s->inert && s->receiverInstalled &&
-           s->matrixChecked[0] && s->matrixChecked[1] && s->matrixFormulaOk[0] &&
-           s->matrixFormulaOk[1];
+    if (!s || !s->installed || s->inert || !s->receiverInstalled) return -1;
+    if (!s->matrixChecked[0] || !s->matrixChecked[1]) return 0;
+    return (s->matrixFormulaOk[0] && s->matrixFormulaOk[1]) ? 1 : -1;
+}
+
+bool systemHookJitterAvailable() {
+    return systemHookJitterVerdict() > 0;
 }
 
 bool systemHookEffectiveTangents(vr::EVREye eye, float out[4]) {

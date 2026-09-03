@@ -22,6 +22,7 @@
 #include "guard_crop.h"
 #include "openvr_min.h"
 #include "resubmit_shadow.h"
+#include "sharpen.h"
 #include "supersample_resolve.h"
 #include "system_hook.h"
 #include "temporal_aa.h"
@@ -937,6 +938,26 @@ vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
         *bnds = storage;
     };
 
+    // The sharpening (docs\anti-aliasing.md's "sharpen" in the order at the
+    // door), LAST on every path: AMD's RCAS on whatever the passes before
+    // it produced -- the game's frame, the crop, the resolve's output --
+    // at the strength fix.render_sharpness names. Same discipline as the
+    // resolve: every path once, or none.
+    auto applySharpen = [&](vr::Texture_t* tex,
+                            const vr::VRTextureBounds_t** bnds,
+                            vr::VRTextureBounds_t* storage) {
+        if (!s->validated || !sharpenWanted()) return;
+        if (tex->eType != vr::TextureType_DirectX) {
+            sharpenStandDown("the game is not submitting DirectX textures, "
+                             "which the pass needs");
+            return;
+        }
+        void* out = sharpenTreat(eye, tex->handle, *bnds, storage);
+        if (!out) return;
+        tex->handle = out;
+        *bnds = storage;
+    };
+
     // The temporal pass (docs\anti-aliasing.md, Feature B), FIRST at the
     // door: on the game's own frame at render size, wide under the guard,
     // before the crop and the resolve, so everything downstream sees a
@@ -1069,6 +1090,8 @@ vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
                 vr::VRTextureBounds_t subStorage;
                 temporalAaNoteWithheld(eye);   // not the game's frame: the history restarts after
                 applyResolve(&sub, &subBounds, &subStorage);
+                vr::VRTextureBounds_t subStorage2;
+                applySharpen(&sub, &subBounds, &subStorage2);
                 return s->realSubmit(self, eye, &sub, subBounds, flags);
             }
         }
@@ -1191,6 +1214,8 @@ vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
                     vr::VRTextureBounds_t subStorage;
                     temporalAaNoteWithheld(eye);
                     applyResolve(&sub, &subBounds, &subStorage);
+                    vr::VRTextureBounds_t subStorage2;
+                    applySharpen(&sub, &subBounds, &subStorage2);
                     return s->realSubmit(self, eye, &sub, subBounds, flags);
                 }
             }
@@ -1434,6 +1459,8 @@ vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
             applyCullGuard(&sub, &subBounds, &subStorage);
             vr::VRTextureBounds_t subStorage2;
             applyResolve(&sub, &subBounds, &subStorage2);
+            vr::VRTextureBounds_t subStorage3;
+            applySharpen(&sub, &subBounds, &subStorage3);
             return s->realSubmit(self, eye, &sub, subBounds, flags);
         }
         if (s->notesLeft > 0) {
@@ -1485,6 +1512,8 @@ vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
         applyCullGuard(&fwd, &fwdBounds, &fwdStorage);
         vr::VRTextureBounds_t fwdStorage2;
         applyResolve(&fwd, &fwdBounds, &fwdStorage2);
+        vr::VRTextureBounds_t fwdStorage3;
+        applySharpen(&fwd, &fwdBounds, &fwdStorage3);
         const vr::EVRCompositorError result =
             s->realSubmit(self, eye, &fwd, fwdBounds, flags);
         // This frame was FORWARDED and accepted, so it becomes the copy a
@@ -1819,6 +1848,8 @@ vr::EVRCompositorError hookedWaitGetPoses(void* self,
             // The temporal pass's weight, clip and motion source are judged
             // from inside a headset too.
             temporalAaConfigure();
+            // The sharpening's strength is a slider judged in the headset.
+            sharpenConfigure();
             // The snapshot toggle is an in-headset A/B experiment, so it is
             // live too; the flip logs its own receipt.
             resubmitShadowConfigure();
@@ -1978,11 +2009,13 @@ void* interceptInterface(void* iface, const char* interfaceVersion) {
     const std::string taaMode = cfg.getString("fix.temporal_aa", "off");
     const bool wantTemporal =
         !taaMode.empty() && _stricmp(taaMode.c_str(), "off") != 0;
-    if (!wantFlash && !wantOffset && !wantResolve && !wantTemporal) {
+    const bool wantSharpen = cfg.getFloat("fix.render_sharpness", 0.0f) > 0.0f;
+    if (!wantFlash && !wantOffset && !wantResolve && !wantTemporal &&
+        !wantSharpen) {
         Log::get().note("compositor passed through unhooked: fix.transition_flash, "
-                        "fix.head_offset_gate, fix.supersample_resolve and "
-                        "fix.temporal_aa are all off, and those are the only "
-                        "features that need this hook.");
+                        "fix.head_offset_gate, fix.supersample_resolve, "
+                        "fix.temporal_aa and fix.render_sharpness are all off, "
+                        "and those are the only features that need this hook.");
         return iface;
     }
     if (!wantFlash) {
@@ -1990,7 +2023,8 @@ void* interceptInterface(void* iface, const char* interfaceVersion) {
         // not claim the head offset when a door pass is the reason.
         const char* why = wantOffset ? "the head offset and the door passes"
                           : wantTemporal ? "the temporal pass"
-                                         : "the supersample resolve";
+                          : wantResolve ? "the supersample resolve"
+                                        : "the render sharpening";
         Log::get().note("transition flash fix off, but the compositor hook is "
                         "installed anyway for %s -- no eye submits will be "
                         "withheld.",
@@ -2174,6 +2208,7 @@ void* interceptInterface(void* iface, const char* interfaceVersion) {
     // and reload both, or the values keep their initialisers all session.
     supersampleResolveConfigure();
     temporalAaConfigure();
+    sharpenConfigure();
 
     return iface;
 }
@@ -2189,6 +2224,7 @@ void shutdownCompositorHook() {
                     resubmitShadowFallbacks());
     supersampleResolveShutdown();
     temporalAaShutdown();
+    sharpenShutdown();
     resubmitShadowShutdown();
     g_state->compositorHook.uninstall();
     if (g_state->sentinel) g_state->sentinel->confirm();

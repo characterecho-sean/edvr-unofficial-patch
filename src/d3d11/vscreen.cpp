@@ -41,6 +41,7 @@
 #include "fss_res.h"
 #include "fss_scan.h"
 #include "fss_theater.h"  // the warm-up; the theater itself runs at submit
+#include "sharpen_pass.h"      // likewise: warm-up and totals; the sharpening runs at submit
 #include "supersample_pass.h"  // likewise: warm-up and totals; the pass runs at submit
 #include "temporal_pass.h"     // and the temporal pass: warm-up, the camera capture, totals
 #include "fov_probe.h"
@@ -3561,6 +3562,7 @@ void vScreenRefreshConfig() {
     introProbeConfigure(cfg);
     introPanelConfigure(cfg);
     introUpscaleConfigure(cfg);
+    sharpenPassConfigure(cfg);
     supersamplePassConfigure(cfg);
     temporalPassConfigure(cfg);
     backdropConfigure(cfg);
@@ -3681,6 +3683,8 @@ void vScreenFrameBoundary() {
         // so a session with every FSS feature off still reaches it. A flag
         // test when the resolve is off.
         supersamplePassTick(g_state->ownerCtx);
+        // The sharpening's warm compile and missing-hook note, likewise.
+        sharpenPassTick(g_state->ownerCtx);
         // The temporal pass: its warm compile, and this frame's camera
         // rows becoming last frame's.
         temporalPassTick(g_state->ownerCtx);
@@ -4317,6 +4321,20 @@ void vScreenFrameBoundary() {
                     treated, avgMs, maxMs, rejectPct, clipPct);
             }
         }
+        // The sharpening's, the same way.
+        {
+            static uint32_t lastSharpenTreats = 0;
+            uint32_t treated = 0;
+            double avgMs = 0.0, maxMs = 0.0;
+            if (sharpenPassTotals(&treated, &avgMs, &maxMs) &&
+                treated != lastSharpenTreats) {
+                lastSharpenTreats = treated;
+                Log::get().note(
+                    "render sharpening totals: %u eye-submits sharpened this "
+                    "session, %.2f ms per eye on average (max %.2f).",
+                    treated, avgMs, maxMs);
+            }
+        }
 
         // What we DECLINED, its own line and only while it moved.
         //
@@ -4506,6 +4524,7 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     introProbeConfigure(cfg);
     introPanelConfigure(cfg);
     introUpscaleConfigure(cfg);
+    sharpenPassConfigure(cfg);
     supersamplePassConfigure(cfg);
     temporalPassConfigure(cfg);
     backdropConfigure(cfg);
@@ -4755,6 +4774,7 @@ void shutdownVScreenFixes() {
     introUpscaleShutdown();
     supersamplePassShutdown();
     temporalPassShutdown();
+    sharpenPassShutdown();
     g_state->hook.uninstall();
 }
 

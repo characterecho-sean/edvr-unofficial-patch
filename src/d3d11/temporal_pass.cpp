@@ -39,7 +39,6 @@ cbuffer P : register(b0) {
     int2   texSize;     // S's size, for the sampler's uv
     float4 tanNow;      // l r t b this frame, jitter excluded
     float4 tanPrev;     // l r t b for the frame the history holds
-    float4 jit;         // xy = this frame's jitter in pixels
     float4 dR0;         // rows of the rotation taking this frame's view
     float4 dR1;         // directions to last frame's (xyz; w unused)
     float4 dR2;
@@ -103,16 +102,22 @@ void main(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
     uint clipped = 0;
     if (id.x < (uint)size.x && id.y < (uint)size.y) {
         float2 p = float2(id.xy);
-        // This frame's sample for the unjittered pixel: the content sits
-        // jit pixels off the grid, so the grid's pixel is that far into
-        // the image. Clamped to the region's inner half-pixel so a
-        // double-wide texture's other eye is never touched.
-        float2 sp = clamp(p + 0.5 + jit.xy, float2(0.5, 0.5), float2(size) - 0.5);
-        float2 suv = (float2(region.xy) + sp) / float2(texSize);
-        float4 cur = S.SampleLevel(L, suv, 0);
-        // The 3x3 neighbourhood of the current frame around the sample,
-        // in YCoCg: its mean and variance bound what the history may say.
-        int2 ci = clamp(int2(floor(p + jit.xy + 0.5)), int2(0, 0), size - 1);
+        int2 ci = int2(id.xy);
+        // This frame's sample: the pixel as the game rendered it, NOT
+        // resampled onto the unjittered grid. The jitter moved the content
+        // by under half a pixel, and the history integrates those true
+        // point samples into the box-filtered value the pixel should carry
+        // -- which IS the supersample. The first build resampled the frame
+        // bilinearly at the offset instead, so every frame's contribution
+        // arrived pre-blurred by a half-pixel tent and the history
+        // converged to that blur: text "a little fuzzy" on the first
+        // flight (Quest 3, HMD Quality 1.5, 2026-09-03). What goes out is
+        // then a tenth of one jittered sample and the rest settled
+        // history; a tenth of half a pixel is not a visible wobble, and
+        // blending the sample as rendered is what every shipped TAA does.
+        float4 cur = S.Load(int3(region.xy + ci, 0));
+        // The 3x3 neighbourhood of the current frame around the pixel, in
+        // YCoCg: its mean and variance bound what the history may say.
         float3 m1 = 0.0;
         float3 m2 = 0.0;
         [unroll] for (int dy = -1; dy <= 1; ++dy) {
@@ -173,14 +178,13 @@ void main(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
 }
 )HLSL";
 
-// The cbuffer above, laid out to match: 144 bytes, nine 16-byte rows.
+// The cbuffer above, laid out to match: 128 bytes, eight 16-byte rows.
 struct PassParams {
     int32_t region[4];
     int32_t size[2];
     int32_t texSize[2];
     float   tanNow[4];
     float   tanPrev[4];
-    float   jit[4];
     float   dR0[4];
     float   dR1[4];
     float   dR2[4];
@@ -189,7 +193,7 @@ struct PassParams {
     int32_t haveHistory;
     int32_t pad0;
 };
-static_assert(sizeof(PassParams) == 144, "the cbuffer is nine 16-byte rows");
+static_assert(sizeof(PassParams) == 128, "the cbuffer is eight 16-byte rows");
 
 // The format allowlist: the supersample resolve's, for its reasons
 // (supersample_pass.cpp) -- typeless and UNORM families read and written
@@ -536,9 +540,9 @@ DXGI_FORMAT pickHistoryFormat(ID3D11Device* dev) {
 }
 
 void* temporalInner(void* srcTex, int eye, const float* bounds,
-                    const float* tanNow, const float* tanPrev, float jxNow,
-                    float jyNow, const float* deltaHead, int motion,
-                    float blend, float clampSigma, unsigned flags) {
+                    const float* tanNow, const float* tanPrev,
+                    const float* deltaHead, int motion, float blend,
+                    float clampSigma, unsigned flags) {
     ID3D11Texture2D* src = nullptr;
     static_cast<IUnknown*>(srcTex)->QueryInterface(
         __uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&src));
@@ -784,8 +788,6 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         p.size[1] = static_cast<int32_t>(h);
         memcpy(p.tanNow, tanNow, sizeof(p.tanNow));
         memcpy(p.tanPrev, useHistory ? tanPrev : tanNow, sizeof(p.tanPrev));
-        p.jit[0] = jxNow;
-        p.jit[1] = jyNow;
         for (int c = 0; c < 3; ++c) {
             p.dR0[c] = delta[0 * 3 + c];
             p.dR1[c] = delta[1 * 3 + c];
@@ -1003,14 +1005,13 @@ void temporalPassShutdown() {
 
 extern "C" __declspec(dllexport) void* edvrTemporalAa(
     void* srcTex, int eye, const float* bounds, const float* tanNow,
-    const float* tanPrev, float jxNow, float jyNow, const float* deltaHead,
-    int motion, float blend, float clampSigma, unsigned flags) {
+    const float* tanPrev, const float* deltaHead, int motion, float blend,
+    float clampSigma, unsigned flags) {
     if (!srcTex || eye < 0 || eye > 1 || !tanNow) return nullptr;
     void* out = nullptr;
     edvr::guardedBudget(edvr::g_budget, [&] {
-        out = edvr::temporalInner(srcTex, eye, bounds, tanNow, tanPrev, jxNow,
-                                  jyNow, deltaHead, motion, blend, clampSigma,
-                                  flags);
+        out = edvr::temporalInner(srcTex, eye, bounds, tanNow, tanPrev,
+                                  deltaHead, motion, blend, clampSigma, flags);
     });
     return out;
 }

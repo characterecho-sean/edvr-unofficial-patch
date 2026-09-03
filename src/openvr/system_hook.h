@@ -105,6 +105,13 @@ void systemHookSetJitter(float dx, float dy, bool live);
 // through the other.
 bool systemHookJitterAvailable();
 
+// The same question with its third answer: +1 available, -1 never this
+// session (no receiver, an inert hook, or a runtime whose matrix failed
+// the tangent-formula check), 0 not yet known -- the receiver is in place
+// and the game has not asked for both eyes' matrices yet, which is where
+// the check happens. A caller that wants to say "cannot" waits for -1.
+int systemHookJitterVerdict();
+
 // The tangents the game is being told THIS frame, jitter excluded: the lie
 // under a live guard, the truth otherwise. False until that eye has been
 // seen.

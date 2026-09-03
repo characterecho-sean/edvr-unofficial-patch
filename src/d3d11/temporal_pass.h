@@ -83,9 +83,9 @@ extern "C" {
 //            srcTex, or null for the whole texture.
 // tanNow:    l, r, t, b -- the frustum the game rendered THIS frame
 //            through, jitter excluded (the lied tangents under the guard).
-// tanPrev:   the same for the frame whose history is being sampled.
-// jxNow/jyNow: this frame's jitter in render pixels (the content sits that
-//            far right and down from the unjittered grid).
+// tanPrev:   the same for the frame whose history is being sampled. The
+//            jitter is not a parameter: the frame is blended as rendered,
+//            and the history integrates the offsets (the shader says why).
 // deltaHead: 9 floats, row-major, the rotation taking this frame's view
 //            directions to last frame's (temporalHeadDelta); may be null.
 // motion:    0 none (no reprojection), 1 head (deltaHead), 2 camera (the
@@ -102,8 +102,8 @@ extern "C" {
 __declspec(dllexport) void* edvrTemporalAa(void* srcTex, int eye,
                                            const float* bounds,
                                            const float* tanNow,
-                                           const float* tanPrev, float jxNow,
-                                           float jyNow, const float* deltaHead,
-                                           int motion, float blend,
-                                           float clampSigma, unsigned flags);
+                                           const float* tanPrev,
+                                           const float* deltaHead, int motion,
+                                           float blend, float clampSigma,
+                                           unsigned flags);
 }

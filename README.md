@@ -215,7 +215,7 @@ Supersample Filtering.
 *Details: [docs/anti-aliasing.md](docs/anti-aliasing.md).*
 
 **The shimmer itself — temporal anti-aliasing.** *Off by default; a first
-build.* Elite has no temporal anti-aliasing, and its menu's options are
+build, flown once.* Elite has no temporal anti-aliasing, and its menu's options are
 edge filters that cannot touch content flickering on and off the pixel
 grid as your head moves. `temporal_aa = on` blends each frame with the
 frames before it, each moved to where its content sits now, with the
@@ -226,7 +226,11 @@ is exact for the cockpit and the HUD and right for the world whenever the
 ship is not turning; a fast turn leaves the world un-anti-aliased for
 those frames rather than ghosted. Set Elite's own anti-aliasing to Off or
 SMAA with it on. Needs a restart to turn on; the weight and the clamp are
-live. *Details: [docs/anti-aliasing.md](docs/anti-aliasing.md).*
+live. Every temporal filter trades a little edge contrast for its calm, so
+`render_sharpness` (0 to 1, live) runs AMD's RCAS on every outgoing frame
+as the last pass at the door, for the resolve's calm kernel as much as for
+this; the first flight found text a little soft without it, and 0.3 to 0.5
+is where to start. *Details: [docs/anti-aliasing.md](docs/anti-aliasing.md).*
 
 **The RemLok helmet's edge lines hanging along your nose.** When the
 emergency helmet deploys, its faint edge lines end up in the middle of your
@@ -634,7 +638,11 @@ larger than the headset asked for, is one more thing of that kind:
 when the game submits a larger frame than the headset asked for, one GPU
 filter pass shrinks the game's frame into a texture EDVR owns, and that copy
 is what SteamVR receives — the game's texture is read, never written, no
-answer the game asks for changes, and nothing is read from memory.
+answer the game asks for changes, and nothing is read from memory. The
+temporal pass and the sharpening (`temporal_aa`, `render_sharpness`, both
+off by default) are two more passes of exactly that kind, except that the
+temporal pass also shifts the projection the game is told by a fraction of
+a pixel each frame, the way the terrain fix shifts it by a margin.
 
 **Three fixes do more, and each is described in full:** the resolution fix
 (below) rewrites twelve numbers in the game's code; Explorer Cam

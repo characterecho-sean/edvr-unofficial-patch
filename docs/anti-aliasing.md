@@ -330,9 +330,12 @@ the fused dispatch is noted in the code as future work. Any refusal — a
 one-file install (the theater's "mismatched pair?" voice), an unlisted or
 sRGB-typed format, an MSAA or array source, a failed compile or view, a
 spent fault budget — stands the resolve down for the session with one
-line and forwards the game's own frame. The sharpen is a marked seam in
-the pass: `render_sharpness` is not in this tree, and RCAS runs at that
-seam once it is. Pinned at the desk by `tools/supersample_test` (both
+line and forwards the game's own frame. The sharpen that seam waited for
+is built (2026-09-03, after feature B's first flight): `render_sharpness`
+runs AMD's RCAS as the last pass at the door, `src/d3d11/sharpen_pass.cpp`
+behind `edvrSharpen`, on whatever the passes before it produced, its taps
+clamped inside the eye's region the way the resolve's are. Pinned at the
+desk by `tools/supersample_test` (both
 kernels' weights sum to one on every output pixel, a flat image stays
 flat at every width and ratio, taps never leave the region, the textbook
 Mitchell values at width 2, the arm/disarm verdict frame by frame
@@ -501,9 +504,14 @@ shifted by `jx·(r−l)/width` horizontally (one pixel is `(r−l)/width` in
 tangent units) and the vertical equivalent, the matrix elements following,
 the offset advanced at the frame boundary and held for the whole frame —
 the consistency rule `system_hook.cpp` already enforces, unchanged. The
-compositor never sees the jitter: the pass samples the current frame at
-the offset and lands it on the unjittered grid, so what is submitted is a
-frame drawn through the true projection, as today.
+compositor never sees the jitter as a wobble: the pass blends each frame
+*as rendered* with a history that sits on the unjittered grid, so what is
+submitted is nine parts settled history to one part of a sample under
+half a pixel off, the convention since Karis 2014. (v1 resampled the
+current frame onto the grid instead, and the first flight found text a
+little fuzzy: a bilinear resample at a half-pixel offset is a half-pixel
+tent every frame, and the history converged to that blur. Measured
+2026-09-03, Quest 3, HMD Quality 1.5.)
 
 **Interactions, each decided here:**
 
@@ -535,12 +543,12 @@ frame drawn through the true projection, as today.
   integrating. The on-foot picture's own sharpness is `vscreen_res`, the
   existing fix, and the pass does not change that.
 - **Elements that do not go through the projection.** A full-screen quad
-  drawn in clip space does not jitter with the scene, so un-jittering the
-  frame moves it by up to half a pixel each frame. At that amplitude it
-  is invisible on soft content and possibly visible on hairlines; the
-  census names which draws are which, and Phase 0's jitter A/B is where
-  it is looked for. The sun-glare draws EDVR already re-authors are the
-  likeliest members of this class.
+  drawn in clip space does not jitter with the scene: its sample is the
+  same every frame while the history around it integrates a jittered
+  scene, so it neither wobbles nor supersamples — it is smoothed only by
+  the head's motion. The census names which draws are which, and Phase
+  0's jitter A/B is where it is looked for. The sun-glare draws EDVR
+  already re-authors are the likeliest members of this class.
 - **Two eyes.** Separate histories, filtered identically; each eye's
   output is a deterministic function of its own inputs, so the only
   binocular differences the pass can produce are the ones already in the
@@ -581,12 +589,16 @@ temporal_aa_blend  = 0.90  ; history weight, 0.50..0.95: higher is calmer
 temporal_aa_clamp  = 1.0   ; how far history may stray from the current
                            ; neighbourhood, in standard deviations: lower
                            ; means less ghosting and more flicker. Live.
+render_sharpness   = 0.0   ; AMD's RCAS on every outgoing frame, the last
+                           ; pass at the door, 0 (off) to 1: what the
+                           ; history's resampling softens, handed back.
+                           ; Start at 0.3 to 0.5. Live.
 ```
 
 and under `[advanced]`, for the field's A/B: `temporal_aa_motion = head |
 camera | none` and `temporal_aa_view_transpose`.
 
-**What was built (2026-09-03: v1, off by default, not yet flown).** The
+**What was built (2026-09-03: v1, off by default; flown once, below).** The
 openvr half (`src/openvr/temporal_aa.cpp`) owns the jitter and the head:
 each frame boundary advances a Halton (2,3) offset over eight frames and
 tells the system hook the shift of every tangent it implies (`src/common/
@@ -602,7 +614,7 @@ the game's own frame at render size, on the forward path only; the
 theater's and heal's renderings and a withheld frame's shadow each mark
 the history broken, and the next real frame starts it afresh. The d3d11
 half (`edvrTemporalAa`, `src/d3d11/temporal_pass.cpp`) does the pass: per
-pixel, this frame sampled at its jitter offset, the pixel's direction
+pixel, this frame's pixel as rendered, the pixel's direction
 through this frame's frustum rotated by the delta and projected through
 last frame's (`temporalReproject`, transcribed), the history fetched there
 with a nine-tap Catmull-Rom, clipped to the current 3x3 neighbourhood's
@@ -621,6 +633,26 @@ Phase 0 item 5 and the camera question both read. Desk-verified:
 `tools/temporal_test` pins the sequence, the shift's sign, the mapping on
 the Quest 3's frustum, both deltas and the reprojection against a known
 turn; `tools/smoke` runs the pass on a real device.
+
+**Flown (2026-09-03, Quest 3 over Virtual Desktop at HMD Quality 1.5,
+Elite's SMAA off, motion from the head, blend 0.90, clamp 1.0).** The
+pass engaged on the first forwarded frame and ran the session at 0.20 ms
+per eye at 3096x3312 (max 0.65), with the resolve after it at 0.09; the
+history was rejected for 0.5–0.7% of pixels and clipped for 17–19%, the
+head turning in a cockpit — the reprojection by the head is right, which
+was the question. The jitter went live a few frames after the pass
+configured, once the game's first `GetProjectionMatrix` per eye had
+passed the tangent-formula check; the first build asked once, was told
+"not yet", and printed that the session could not be jittered, then
+jittered anyway (that line now waits for a verdict, and a "jitter is
+live" line says when). The one complaint: text "a little fuzzy". Two
+causes, both answered the same day. The first build resampled the
+current frame bilinearly onto the unjittered grid, a half-pixel tent
+every frame that the history converged to; the frame is now blended as
+rendered (the design text above). And every temporal filter softens by
+resampling its history each frame, which is what the sharpen at the door
+is for: `render_sharpness`, the seam feature A had marked, built now.
+Not yet flown together.
 
 ## Feature C — texture LOD bias, the small lever
 
@@ -873,9 +905,10 @@ if the guard is live) → **crop** (the guard) → **scale** (EASU up for
 **sharpen** (RCAS) → **menu, toasts, monitor** composited onto the
 native-size outgoing frame. Fusions come later, in the order their edge-tap
 questions are answered; v1 may run them sequentially, since each already
-exists or is one dispatch. Built so far (2026-09-02): the crop, then the
-supersample resolve, sequential, each its own pass on the texture the one
-before produced; the fusion is noted in the code as future work.
+exists or is one dispatch. Built so far (2026-09-03): temporal AA, the
+crop, the supersample resolve and the sharpen, sequential, each its own
+pass on the texture the one before produced; the fusions are noted in the
+code as future work.
 
 ## Guidance for players now
 

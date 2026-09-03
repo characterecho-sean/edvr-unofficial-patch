@@ -179,7 +179,8 @@ python "%ROOT%\tools\gen_exports.py" --source "%SystemRoot%\System32\d3d11.dll" 
     --extra-export edvrFssHealLeft ^
     --extra-export edvrFssTheater ^
     --extra-export edvrSupersampleResolve ^
-    --extra-export edvrTemporalAa
+    --extra-export edvrTemporalAa ^
+    --extra-export edvrSharpen
 if errorlevel 1 ( echo [edvr] ERROR: export generation failed & exit /b 1 )
 
 if not exist "%OBJ%\d3d11" mkdir "%OBJ%\d3d11"
@@ -225,6 +226,7 @@ cl.exe %CFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "%ROOT%\src\d3d11\intro_upscale.cpp" ^
     "%ROOT%\src\d3d11\supersample_pass.cpp" ^
     "%ROOT%\src\d3d11\temporal_pass.cpp" ^
+    "%ROOT%\src\d3d11\sharpen_pass.cpp" ^
     "%ROOT%\src\d3d11\loader_panel.cpp" ^
     "%ROOT%\src\d3d11\splash_dim.cpp" ^
     "%ROOT%\src\d3d11\witchstar_fix.cpp" "%ROOT%\src\d3d11\fov_probe.cpp" ^
@@ -295,6 +297,7 @@ cl.exe %CFLAGS% /Fo"%OBJ%\openvr"\ ^
     "%ROOT%\src\openvr\system_hook.cpp" "%ROOT%\src\openvr\guard_crop.cpp" ^
     "%ROOT%\src\openvr\supersample_resolve.cpp" ^
     "%ROOT%\src\openvr\temporal_aa.cpp" ^
+    "%ROOT%\src\openvr\sharpen.cpp" ^
     "%ROOT%\src\openvr\early_session.cpp" "%ROOT%\src\openvr\launch_centre.cpp" ^
     "%ROOT%\src\d3d11\elite_binds.cpp"
 if errorlevel 1 ( echo [edvr] ERROR: openvr compile failed & exit /b 1 )

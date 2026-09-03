@@ -18,8 +18,8 @@ namespace edvr {
 namespace {
 
 typedef void* (*PFN_EdvrTemporalAa)(void*, int, const float*, const float*,
-                                    const float*, float, float, const float*,
-                                    int, float, float, unsigned);
+                                    const float*, const float*, int, float,
+                                    float, unsigned);
 
 constexpr uint32_t kMaxFaults = 8;
 
@@ -40,7 +40,7 @@ struct State {
     // The jitter: the frame counter it is drawn from, this frame's offset
     // in render pixels, and whether the system hook could apply it.
     uint32_t frame = 0;
-    float    jx = 0.0f, jy = 0.0f;
+    bool     jitterLiveNoted = false;
     bool     jitterLive = false;
     bool     jitterUnavailableNoted = false;
     uint32_t renderW = 0, renderH = 0;   // the last treated region, for the pixel size
@@ -182,10 +182,19 @@ void temporalAaFrameBoundary() {
     // (the guard's receiver, installed at launch when either feature was
     // on) or the raw tangents and the matrix would disagree by the shift
     // -- worse than no jitter.
-    float jx = 0.0f, jy = 0.0f;
     bool live = false;
     if (s.jitterWanted) {
-        if (systemHookJitterAvailable()) {
+        // Asked every boundary, because the answer is not known at the
+        // first one: the receiver checks the runtime's matrix against the
+        // tangent formula on the game's FIRST GetProjectionMatrix per eye,
+        // which lands a frame or two after this pass configures. The
+        // first flight asked once, was told "not yet", printed that the
+        // session could not be jittered, and then jittered from the next
+        // frame on (Quest 3, 2026-09-03) -- so the line waits for a
+        // verdict, and says which one it got.
+        const int verdict = systemHookJitterVerdict();
+        if (verdict > 0) {
+            float jx = 0.0f, jy = 0.0f;
             temporalJitter(s.frame, &jx, &jy);
             float tan[4];
             uint32_t w = s.renderW, h = s.renderH;
@@ -195,25 +204,34 @@ void temporalAaFrameBoundary() {
                 temporalJitterToTangents(jx, jy, tan, w, h, &dx, &dy);
                 systemHookSetJitter(dx, dy, true);
                 live = true;
+                if (!s.jitterLiveNoted) {
+                    s.jitterLiveNoted = true;
+                    Log::get().note(
+                        "temporal aa: the jitter is live -- from this frame "
+                        "on, the projection the game is told moves by a "
+                        "sub-pixel Halton (2,3) offset every frame (one of "
+                        "eight, %ux%u render pixels), in the raw tangents "
+                        "and the matrix alike. temporal_aa_jitter = off "
+                        "holds it still, live.",
+                        w, h);
+                }
             }
-        } else if (!s.jitterUnavailableNoted) {
+        } else if (verdict < 0 && !s.jitterUnavailableNoted) {
             s.jitterUnavailableNoted = true;
             Log::get().note(
                 "temporal aa: the projection cannot be jittered this session "
-                "-- the matrix half of the projection edit is not installed "
-                "(temporal_aa was off at launch, or the runtime's matrix "
-                "failed the tangent-formula check). The pass runs as a "
+                "-- the matrix half of the projection edit is not in place "
+                "(temporal_aa was off at launch and the terrain fix is off, "
+                "or the runtime's matrix failed the tangent-formula check; "
+                "the cull guard's lines above say which). The pass runs as a "
                 "temporal smoother: real integration while the head moves, "
                 "nothing new while it is held still. Restart with "
                 "temporal_aa = on for the full effect.");
         }
+        // verdict 0: the receiver is in and the game has not asked for both
+        // eyes' matrices yet. Quiet; next boundary.
     }
-    if (!live) {
-        jx = jy = 0.0f;
-        if (s.jitterLive) systemHookSetJitter(0.0f, 0.0f, false);
-    }
-    s.jx = jx;
-    s.jy = jy;
+    if (!live && s.jitterLive) systemHookSetJitter(0.0f, 0.0f, false);
     s.jitterLive = live;
 }
 
@@ -304,7 +322,7 @@ void* temporalAaTreat(vr::EVREye eye, void* handle,
         flags |= 1u;
     }
     void* out = s.fn(handle, e, haveBounds ? b4 : nullptr, tanNow,
-                     s.havePrev[e] ? s.tanPrev[e] : tanNow, s.jx, s.jy,
+                     s.havePrev[e] ? s.tanPrev[e] : tanNow,
                      haveDelta ? delta : nullptr, static_cast<int>(s.motion),
                      s.blend, s.clamp, flags);
     if (!out) {
@@ -326,7 +344,10 @@ void* temporalAaTreat(vr::EVREye eye, void* handle,
             "price, the format and the history's acceptance once it has run "
             "a while.",
             region[2] - region[0], region[3] - region[1], motionName(s.motion),
-            s.jitterLive ? "on (Halton 2,3 over 8 frames)" : "off",
+            s.jitterWanted ? (s.jitterLive ? "on (Halton 2,3 over 8 frames)"
+                                           : "on, waiting for the projection "
+                                             "edit's verdict")
+                           : "off",
             static_cast<double>(s.blend), static_cast<double>(s.clamp));
     }
     outBounds->uMin = flipU ? 1.0f : 0.0f;
