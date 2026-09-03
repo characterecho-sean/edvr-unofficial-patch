@@ -124,6 +124,17 @@ bool systemHookEffectiveTangents(vr::EVREye eye, float out[4]);
 // build's field-validated slot map for it (slots 0/1/2/4 are checked live).
 // That refusal is the safety -- a pointer to some other generation would be
 // a vtable this build cannot index.
+// The eye's offset from the head (GetEyeToHeadTransform, the whole 3x4,
+// row-major), asked of the runtime once through the original entry and
+// kept: the translation the depth reprojection needs per eye. False until
+// the interface is observed or when the answer is not a rigid transform.
+bool systemHookEyeToHead(vr::EVREye eye, float out[12]);
+
+// The near and far planes the game names when it asks for its projection
+// matrix (0.025 and 50000 on every session so far), for reading its
+// reversed-Z depth in metres. False until the first such call.
+bool systemHookNearFar(float* nearZ, float* farZ);
+
 void* systemInterfaceV012();
 
 // How many vtable slots that interface was measured to have -- VTableHook's

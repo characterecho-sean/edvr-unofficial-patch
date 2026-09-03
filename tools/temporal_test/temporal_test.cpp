@@ -183,6 +183,37 @@ int main() {
         checkNear(edvr::temporalRotationAngleDeg(none), 0.0f, 1e-3f,
                   "rotation angle: no turn measures zero");
 
+        // The translation term. A head that steps 10 cm to the right, no
+        // turn: a point 1 m ahead was, last frame, 10 cm further LEFT in
+        // eye space (the world moved the other way), whichever eye.
+        {
+            float stepped[12];
+            memcpy(stepped, ident, sizeof(stepped));
+            stepped[3] = 0.10f;   // +x translation, row-major 3x4
+            const float eyeOff[3] = {-0.032f, 0.0f, 0.0f};
+            float tv[3];
+            edvr::temporalHeadTranslation(ident, stepped, eyeOff, tv);
+            checkNear(tv[0], 0.10f, 1e-6f, "translation: a 10 cm step right moves last frame's view 10 cm along x");
+            checkNear(tv[1], 0.0f, 1e-6f, "translation: ...and nothing along y");
+            checkNear(tv[2], 0.0f, 1e-6f, "translation: ...or z");
+            // The same step seen through a one-degree yaw: the eye's own
+            // offset enters through the turn, by (delta - I) e.
+            float tv2[3];
+            edvr::temporalHeadTranslation(ident, turned, eyeOff, tv2);
+            float de[3];
+            edvr::temporalApply3(delta, eyeOff, de);
+            checkNear(tv2[0], de[0] - eyeOff[0], 1e-6f, "translation: a pure turn moves the eye by (delta - I) e, x");
+            checkNear(tv2[2], de[2] - eyeOff[2], 1e-6f, "translation: ...z");
+        }
+        // Reversed-Z to metres, with the game's planes: the values the
+        // cockpit census read (2026-09-03) land where a cockpit is.
+        checkNear(edvr::temporalDepthToMetres(0.02007425f, 0.025f, 50000.0f), 1.245f, 0.01f,
+                  "depth: 0.0201 reads as 1.25 m with near 0.025 m");
+        checkNear(edvr::temporalDepthToMetres(0.00184340f, 0.025f, 50000.0f), 13.56f, 0.05f,
+                  "depth: 0.00184 reads as 13.6 m");
+        check(edvr::temporalDepthToMetres(0.0f, 0.025f, 50000.0f) > 40000.0f,
+              "depth: the far plane reads as the far distance");
+
         // The game's camera: the two readings of the rows differ by a
         // transpose, and the transposed reading is the other's inverse.
         float dv[9], dvT[9], prod[9];

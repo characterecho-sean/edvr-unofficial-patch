@@ -140,6 +140,41 @@ inline void temporalHeadDelta(const float prev34[12], const float now34[12],
     temporalMul3(rpT, rn, delta);
 }
 
+// The translation term of a depth reprojection, per eye. A point at
+// view-space position P in THIS frame's eye space was, last frame, at
+// R_prev^T (R_now (P + e) + t_now - t_prev) - e in that frame's eye space,
+// where e is the eye's offset in head space (GetEyeToHeadTransform's
+// translation) and [R | t] the runtime's head poses (device -> world).
+// That is delta * P + tv with delta = R_prev^T R_now (temporalHeadDelta)
+// and tv = delta * e + R_prev^T (t_now - t_prev) - e, which this returns.
+// With P known from depth the reprojection is exact for a rigid world;
+// without depth (P at infinity) tv vanishes and the rotation-only path
+// is what remains.
+inline void temporalHeadTranslation(const float prev34[12], const float now34[12],
+                                    const float eye[3], float tv[3]) {
+    float rp[9], rn[9], rpT[9], delta[9];
+    temporalRot3Of34(prev34, rp);
+    temporalRot3Of34(now34, rn);
+    temporalTranspose3(rp, rpT);
+    temporalMul3(rpT, rn, delta);
+    const float dt[3] = {now34[3] - prev34[3], now34[7] - prev34[7],
+                         now34[11] - prev34[11]};
+    float de[3], rdt[3];
+    temporalApply3(delta, eye, de);
+    temporalApply3(rpT, dt, rdt);
+    for (int i = 0; i < 3; ++i) tv[i] = de[i] + rdt[i] - eye[i];
+}
+
+// Reversed-Z depth to metres along the view axis, for a standard D3D
+// projection with the near plane at 1 and the far at 0:
+// z = near * far / (d * (far - near) + near). The far plane (d = 0) is
+// infinity; the caller treats it as such.
+inline float temporalDepthToMetres(float d, float nearZ, float farZ) {
+    const float den = d * (farZ - nearZ) + nearZ;
+    if (!(den > 0.0f)) return 0.0f;
+    return nearZ * farZ / den;
+}
+
 // The angle of a rotation, in degrees: acos((trace - 1) / 2), clamped.
 // The head's turn between two frames, for the pass's speed buckets.
 inline float temporalRotationAngleDeg(const float m[9]) {

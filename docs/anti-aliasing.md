@@ -827,6 +827,40 @@ no motion of their own, which DLSS tolerates better than a hand-rolled
 clip. It needs an NVIDIA RTX GPU and the NGX runtime beside the game; FSR
 2 needs neither and takes the same inputs. Step one is the cockpit census.
 
+**The cockpit census (2026-09-03, docked at a station) found the scene's
+depth.** Two targets, one per eye, 3358x3312 (the guard-widened render
+size), `R32G8X24_TYPELESS` under a `D32_FLOAT_S8X24_UINT` view, bind
+flags `0x48` (a shader view can be made over them directly), 302 and 325
+draws a frame, cleared to 0.0. Their values read as reversed-Z with the
+game's own near plane of 0.025 m and make physical sense for a docked
+cockpit: nearest sample 1.25 m, centre 13.6 m, farthest 46 m, no far-plane
+samples because the hangar encloses the view. Two more targets of that
+size get 6 and 7 draws with a handful of samples at 1.2 m -- a separate
+cockpit layer. The rest are shadow maps (512x512 and 256x256 `D16`, 191
+and 26 draws, no colour target) and the flat interface surfaces (`D24S8`,
+cleared to 1.0). The registration line moved the way the theory predicts:
+clips in the cockpit average 4/255 against 1/255 in the menu, since the
+cockpit has real near content. Phase 0 item 3: measured.
+
+**v2, step one (built the same day, `temporal_aa_motion = depth`).** Per
+pixel, the scene's depth turns the pixel into a point: P = z·d with z =
+near·far / (depth·(far − near) + near) (`temporalDepthToMetres`), moved
+into last frame's eye space by delta·P + tv where tv = delta·e +
+R_prev^T(t_now − t_prev) − e (`temporalHeadTranslation`; e the eye's
+offset from `GetEyeToHeadTransform`, asked once through the original
+entry), then projected through last frame's frustum as before. Where
+there is no depth (the far plane, or none bound) the direction alone is
+rotated, which is v1's path. The depth probe hands the pass the scene
+target for each eye by size and draw count, ordered by first bind in the
+frame with the first taken as the left eye; the registration instrument's
+candidates are now the head's rotation alone, the head with depth and the
+eyes SWAPPED, the camera rows, and the head with depth as assigned, so one
+flight says whether the assignment is right (the swapped candidate loses)
+and how much the translation buys (the depth candidates beat the rotation
+alone at rest and under slow turns). The output-merger stage is cleared
+around the pass's dispatch, since the game's depth target may still be
+bound there at submit and a view over a bound target reads as nothing.
+
 ## Feature C — texture LOD bias, the small lever
 
 Not all shimmer is geometry. Detail maps and normal maps sampled a mip

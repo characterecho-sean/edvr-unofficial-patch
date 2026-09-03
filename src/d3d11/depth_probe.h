@@ -34,6 +34,7 @@
 
 struct ID3D11DeviceContext;
 struct ID3D11DepthStencilView;
+struct ID3D11Texture2D;
 
 namespace edvr {
 
@@ -78,6 +79,17 @@ void depthProbeNoteClear(ID3D11DepthStencilView* dsv, float depth);
 
 // Once per frame: the per-frame bookkeeping, the readback poll, the lines.
 void depthProbeFrameBoundary(ID3D11DeviceContext* ctx);
+
+// THE SCENE'S DEPTH for one eye of the frame being submitted, for the
+// temporal pass: among the targets of the frame's render size, the ones
+// with the scene's draws (hundreds a frame; the cockpit census of
+// 2026-09-03 read 302 and 325 against 1, 6 and 7 for the composites and
+// the cockpit layer), ordered by when in the frame each was first bound --
+// the first is the first eye rendered, which is assumed to be the left
+// (the registration instrument's "depth, eyes swapped" candidate checks
+// that). Returns the texture the probe holds a reference on, valid for
+// the rest of this frame, or null when the census has not settled.
+bool depthProbeSceneDepth(uint32_t w, uint32_t h, int eye, ID3D11Texture2D** tex);
 
 void depthProbeShutdown();
 

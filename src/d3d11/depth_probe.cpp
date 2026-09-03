@@ -61,6 +61,7 @@ struct Target {
     uint32_t    framesSeen = 0;
     // The census: draws bound to it per frame, by what sat beside it.
     uint32_t    drawsThisFrame = 0, drawsLastFrame = 0;
+    uint32_t    firstBindThisFrame = 0, firstBindLastFrame = 0;   // the frame's draw index at first bind
     uint32_t    eyeRtvDrawsThisFrame = 0, eyeRtvDrawsLastFrame = 0;
     uint32_t    nullRtvDrawsThisFrame = 0, nullRtvDrawsLastFrame = 0;
     uint32_t    unbindsThisFrame = 0;   // how many times the game switched away from it
@@ -414,9 +415,33 @@ void depthProbeNoteDraw(ID3D11DeviceContext* ctx, void* dsv, bool rtvEyeSized,
     t.lastSeenFrame = g_frameNo;
     if (!t.boundThisFrame) {
         t.boundThisFrame = true;
+        t.firstBindThisFrame = g_drawsThisFrame;
         ++t.framesSeen;
         ++g_distinctThisFrame;
     }
+}
+
+bool depthProbeSceneDepth(uint32_t w, uint32_t h, int eye, ID3D11Texture2D** tex) {
+    if (!tex) return false;
+    *tex = nullptr;
+    if (!g_wanted || eye < 0 || eye > 1) return false;
+    // The scene's targets: this size, hundreds of draws last frame, a
+    // texture held. Two expected; ordered by first bind in the frame.
+    int found[2] = {-1, -1};
+    for (int i = 0; i < g_targetCount; ++i) {
+        const Target& t = g_targets[i];
+        if (!t.tex || t.w != w || t.h != h || t.samples > 1) continue;
+        if (t.drawsLastFrame < 50) continue;
+        if (found[0] < 0 || t.firstBindLastFrame < g_targets[found[0]].firstBindLastFrame) {
+            found[1] = found[0];
+            found[0] = i;
+        } else if (found[1] < 0 || t.firstBindLastFrame < g_targets[found[1]].firstBindLastFrame) {
+            found[1] = i;
+        }
+    }
+    if (found[eye] < 0) return false;
+    *tex = g_targets[found[eye]].tex;
+    return true;
 }
 
 void depthProbeNoteIndirectDraw(ID3D11DeviceContext* ctx, void* dsv) {
@@ -576,6 +601,7 @@ void depthProbeFrameBoundary(ID3D11DeviceContext* ctx) {
         t.unbindsLastFrame = t.unbindsThisFrame;
         t.unbindsThisFrame = 0;
         t.drawsLastFrame = t.drawsThisFrame;
+        t.firstBindLastFrame = t.firstBindThisFrame;
         t.eyeRtvDrawsLastFrame = t.eyeRtvDrawsThisFrame;
         t.nullRtvDrawsLastFrame = t.nullRtvDrawsThisFrame;
         t.drawsThisFrame = t.eyeRtvDrawsThisFrame = t.nullRtvDrawsThisFrame = 0;

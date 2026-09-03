@@ -118,12 +118,17 @@ extern "C" {
 //            restores the point sample for an A/B.
 // deltaHead: 9 floats, row-major, the rotation taking this frame's view
 //            directions to last frame's (temporalHeadDelta); may be null.
-// deltaHeadLag: the same delta one frame earlier, deltaGame: the delta of
-//            the game-pose array's HMD pose (each may be null), and
-//            headDeg the head's turn this frame in degrees -- all for the
-//            registration instrument only (temporalPassRegistration).
-// motion:    0 none (no reprojection), 1 head (deltaHead), 2 camera (the
-//            pass's own capture; falls back to none until a pair exists).
+// headTrans: 3 floats, the translation term of the depth reprojection for
+//            this eye (temporalHeadTranslation), and headTransSwapped the
+//            same for the OTHER eye's offset (the instrument's check of
+//            the eye assignment); may be null. nearZ/farZ: the game's
+//            planes, for its reversed-Z depth (0 = unknown, no depth).
+// headDeg:   the head's turn this frame in degrees, for the instrument.
+// motion:    0 none (no reprojection), 1 head (deltaHead, rotation only),
+//            2 camera (the pass's own capture; falls back to none until a
+//            pair exists), 3 depth (the head's rotation AND translation,
+//            per pixel through the scene's depth from the depth probe;
+//            rotation only where there is no depth).
 // blend:     history weight 0.5..0.95. clampSigma: the clip's half-width in
 //            standard deviations of the 3x3 neighbourhood.
 // flags:     bit 0 -- reset the history before this frame (a withheld frame
@@ -138,8 +143,9 @@ __declspec(dllexport) void* edvrTemporalAa(void* srcTex, int eye,
                                            const float* tanNow,
                                            const float* tanPrev, float jxNow,
                                            float jyNow, const float* deltaHead,
-                                           const float* deltaHeadLag,
-                                           const float* deltaGame,
+                                           const float* headTrans,
+                                           const float* headTransSwapped,
+                                           float nearZ, float farZ,
                                            float headDeg, int motion,
                                            float blend, float clampSigma,
                                            unsigned flags);

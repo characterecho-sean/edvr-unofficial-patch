@@ -19,12 +19,12 @@ namespace {
 
 typedef void* (*PFN_EdvrTemporalAa)(void*, int, const float*, const float*,
                                     const float*, float, float, const float*,
-                                    const float*, const float*, float, int,
-                                    float, float, unsigned);
+                                    const float*, const float*, float, float,
+                                    float, int, float, float, unsigned);
 
 constexpr uint32_t kMaxFaults = 8;
 
-enum class Motion : uint8_t { None = 0, Head = 1, Camera = 2 };
+enum class Motion : uint8_t { None = 0, Head = 1, Camera = 2, Depth = 3 };
 
 struct State {
     bool   on = false;
@@ -81,7 +81,8 @@ struct State {
 State g_s;
 
 const char* motionName(Motion m) {
-    return m == Motion::Camera ? "camera" : m == Motion::Head ? "head" : "none";
+    return m == Motion::Depth ? "head with depth"
+         : m == Motion::Camera ? "camera" : m == Motion::Head ? "head" : "none";
 }
 
 }  // namespace
@@ -111,9 +112,10 @@ void temporalAaConfigure() {
     Motion motion = Motion::Head;
     if (_stricmp(rawMotion.c_str(), "camera") == 0) motion = Motion::Camera;
     else if (_stricmp(rawMotion.c_str(), "none") == 0) motion = Motion::None;
+    else if (_stricmp(rawMotion.c_str(), "depth") == 0) motion = Motion::Depth;
     else if (_stricmp(rawMotion.c_str(), "head") != 0 && !rawMotion.empty()) {
         Log::get().note("temporal_aa_motion = \"%s\" is not a source this build "
-                        "knows (head, camera, none). Using head.",
+                        "knows (head, depth, camera, none). Using head.",
                         rawMotion.c_str());
     }
 
@@ -356,28 +358,44 @@ void* temporalAaTreat(vr::EVREye eye, void* handle,
     // size go with it, for the registration instrument alone.
     float delta[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
     float deltaLag[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
-    float deltaGame[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
     const bool haveHeadDelta = s.curValid && s.prevValid;
-    const bool haveLagDelta = s.prevValid && s.prev2Valid;
-    const bool haveGameDelta = s.curGameValid && s.prevGameValid;
     float headDeg = 0.0f;
     if (haveHeadDelta) {
         temporalHeadDelta(s.prevPose, s.curPose, delta);
         headDeg = temporalRotationAngleDeg(delta);
     }
-    if (haveLagDelta) temporalHeadDelta(s.prev2Pose, s.prevPose, deltaLag);
-    if (haveGameDelta) temporalHeadDelta(s.prevGame, s.curGame, deltaGame);
-    const bool haveDelta = s.motion == Motion::Head && haveHeadDelta;
+    // The translation term per eye, for the depth reprojection and for
+    // the instrument's check of the eye assignment (the other eye's
+    // offset): the runtime's eye-to-head offsets, asked once, and the
+    // game's planes, seen at its first matrix call.
+    float tv[3] = {0, 0, 0}, tvSwapped[3] = {0, 0, 0};
+    bool haveTv = false;
+    float nearZ = 0.0f, farZ = 0.0f;
+    if (haveHeadDelta) {
+        float e2h[2][12];
+        const bool okL = systemHookEyeToHead(vr::Eye_Left, e2h[0]);
+        const bool okR = systemHookEyeToHead(vr::Eye_Right, e2h[1]);
+        if (okL && okR) {
+            const float offThis[3] = {e2h[e][3], e2h[e][7], e2h[e][11]};
+            const float offOther[3] = {e2h[1 - e][3], e2h[1 - e][7], e2h[1 - e][11]};
+            temporalHeadTranslation(s.prevPose, s.curPose, offThis, tv);
+            temporalHeadTranslation(s.prevPose, s.curPose, offOther, tvSwapped);
+            haveTv = true;
+        }
+        if (!systemHookNearFar(&nearZ, &farZ)) nearZ = farZ = 0.0f;
+    }
+    (void)deltaLag;
+    const bool haveDelta =
+        (s.motion == Motion::Head || s.motion == Motion::Depth) && haveHeadDelta;
     unsigned flags = 0;
     if (s.resetNext[e] || !s.havePrev[e] ||
-        (s.motion == Motion::Head && !haveDelta)) {
+        ((s.motion == Motion::Head || s.motion == Motion::Depth) && !haveDelta)) {
         flags |= 1u;
     }
     void* out = s.fn(handle, e, haveBounds ? b4 : nullptr, tanNow,
                      s.havePrev[e] ? s.tanPrev[e] : tanNow, s.jx, s.jy,
-                     haveHeadDelta ? delta : nullptr,
-                     haveLagDelta ? deltaLag : nullptr,
-                     haveGameDelta ? deltaGame : nullptr, headDeg,
+                     haveHeadDelta ? delta : nullptr, haveTv ? tv : nullptr,
+                     haveTv ? tvSwapped : nullptr, nearZ, farZ, headDeg,
                      static_cast<int>(s.motion), s.blend, s.clamp, flags);
     if (!out) {
         temporalAaStandDown("the temporal pass refused (its own line in the "

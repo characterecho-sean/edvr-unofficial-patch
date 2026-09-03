@@ -222,6 +222,10 @@ struct State {
     uint32_t  cropsApplied = 0;           // eye-submits cropped (bounds mode)
     bool      matrixFormulaOk[2] = {};
     bool      matrixChecked[2] = {};
+    float     nearZ = 0.0f, farZ = 0.0f;   // the game's planes, from its matrix calls
+    float     eyeToHead[2][12] = {};
+    bool      eyeToHeadValid[2] = {};
+    bool      eyeToHeadTried[2] = {};
     bool      receiverFirstLogged = false;
 
     // True tangents per eye as the runtime reports them (l r t b), and the
@@ -508,6 +512,10 @@ vr::HmdMatrix44_t MatrixReceiver::GetProjectionMatrix(int32_t eye, float nearZ,
 
     State* s = g_state;
     if (!s || self != s->ownerIface || (eye != 0 && eye != 1)) return m;
+    if (nearZ > 0.0f && farZ > nearZ) {
+        s->nearZ = nearZ;
+        s->farZ = farZ;
+    }
 
     if (!s->receiverFirstLogged) {
         s->receiverFirstLogged = true;
@@ -1407,6 +1415,79 @@ bool systemHookEffectiveTangents(vr::EVREye eye, float out[4]) {
     const int e = (eye == vr::Eye_Left) ? 0 : 1;
     if (!s->trueSeen[e]) return false;
     memcpy(out, lieActiveFor(s, e) ? s->lied[e] : s->trueRaw[e], sizeof(float) * 4);
+    return true;
+}
+
+// GetEyeToHeadTransform through the ORIGINAL entry (slot 4, which the hook
+// counts and otherwise leaves alone), member-shaped like the matrix
+// forward: the runtime returns a 3x4 by value, which on x64 travels
+// through a hidden pointer a member-function call supplies.
+typedef vr::HmdMatrix34_t (SysIfaceTag::*PMF_EyeToHead)(int32_t);
+static_assert(sizeof(PMF_EyeToHead) == sizeof(void*),
+              "a single-inheritance member pointer must be one code pointer");
+
+bool systemHookEyeToHead(vr::EVREye eye, float out[12]) {
+    State* s = g_state;
+    const int e = (eye == vr::Eye_Left) ? 0 : 1;
+    if (!s || !s->installed || s->inert || !s->ownerIface || !out) return false;
+    if (!s->eyeToHeadTried[e]) {
+        s->eyeToHeadTried[e] = true;
+        if (!edvr_sysOrig[kSlotEyeToHead]) return false;
+        vr::HmdMatrix34_t m{};
+        bool got = false;
+        guarded("sysHook/eyeToHead", [&] {
+            PMF_EyeToHead f;
+            memcpy(&f, &edvr_sysOrig[kSlotEyeToHead], sizeof(f));
+            m = (reinterpret_cast<SysIfaceTag*>(s->ownerIface)->*f)(static_cast<int32_t>(e));
+            got = true;
+        });
+        if (!got) return false;
+        float rows[12];
+        for (int r = 0; r < 3; ++r) {
+            for (int c = 0; c < 4; ++c) rows[r * 4 + c] = m.m[r][c];
+        }
+        // A rigid transform with a small offset, or nothing: the runtime's
+        // eye-to-head is a cant and half an IPD, never more than a few cm.
+        float rot[9];
+        for (int r = 0; r < 3; ++r) {
+            for (int c = 0; c < 3; ++c) rot[r * 3 + c] = rows[r * 4 + c];
+        }
+        bool sane = true;
+        for (int r = 0; r < 3; ++r) {
+            const float n = rot[r * 3] * rot[r * 3] + rot[r * 3 + 1] * rot[r * 3 + 1] +
+                            rot[r * 3 + 2] * rot[r * 3 + 2];
+            if (fabsf(n - 1.0f) > 1e-3f) sane = false;
+        }
+        const float tx = rows[3], ty = rows[7], tz = rows[11];
+        if (fabsf(tx) > 0.1f || fabsf(ty) > 0.1f || fabsf(tz) > 0.1f) sane = false;
+        if (!sane) {
+            Log::get().note(
+                "IVRSystem: GetEyeToHeadTransform for the %s eye is not a rigid "
+                "transform with a small offset (row norms off or a translation "
+                "over 10 cm); the depth reprojection will run without an eye "
+                "offset. Please report this log.",
+                e == 0 ? "left" : "right");
+            return false;
+        }
+        memcpy(s->eyeToHead[e], rows, sizeof(rows));
+        s->eyeToHeadValid[e] = true;
+        Log::get().note(
+            "IVRSystem: the %s eye sits at (%.4f, %.4f, %.4f) m from the head "
+            "(GetEyeToHeadTransform, asked once through the original entry) -- "
+            "the offset the depth reprojection carries.",
+            e == 0 ? "left" : "right", static_cast<double>(tx),
+            static_cast<double>(ty), static_cast<double>(tz));
+    }
+    if (!s->eyeToHeadValid[e]) return false;
+    memcpy(out, s->eyeToHead[e], sizeof(float) * 12);
+    return true;
+}
+
+bool systemHookNearFar(float* nearZ, float* farZ) {
+    State* s = g_state;
+    if (!s || !(s->nearZ > 0.0f) || !(s->farZ > s->nearZ)) return false;
+    if (nearZ) *nearZ = s->nearZ;
+    if (farZ) *farZ = s->farZ;
     return true;
 }
 

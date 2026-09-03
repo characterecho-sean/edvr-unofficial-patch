@@ -13,6 +13,7 @@
 #include "../common/log.h"
 #include "../common/supersample_math.h"   // supersampleRegionFromBounds: one region rule at the door
 #include "../common/temporal_math.h"
+#include "depth_probe.h"
 #include "shader_swap.h"
 
 namespace edvr {
@@ -31,6 +32,7 @@ namespace {
 constexpr char kTemporalCsHlsl[] = R"HLSL(
 Texture2D<float4> S : register(t0);      // this frame, the game's own texture (or the region copied out of it)
 Texture2D<float4> H : register(t1);      // the history, region-sized, on the unjittered grid
+Texture2D<float> Z : register(t2);       // the scene's depth, the game's own, when the pass has it
 SamplerState L : register(s0);           // bilinear, clamp
 RWTexture2D<float4> O : register(u0);    // the output, region-sized, the game's format
 RWTexture2D<float4> N : register(u1);    // the new history
@@ -61,7 +63,9 @@ cbuffer P : register(b0) {
     float  gamma;       // clip half-width, in standard deviations
     int    haveHistory; // 0: nothing to blend, this frame goes out as it is
     int    candMask;    // bit c: candidate c has a delta this frame
-    float4 knobs;       // x the rest snap in pixels (0 off); yzw unused
+    float4 knobs;       // x the rest snap in pixels (0 off); y 1 = depth bound; z near, w far
+    float4 tvUsed;      // xyz the translation term for the used delta (depth motion), w unused
+    float4 tvCand;      // xyz the same for the instrument's swapped-eyes candidate
 };
 float3 rgbToYcocg(float3 c) {
     return float3(0.25 * c.r + 0.5 * c.g + 0.25 * c.b,
@@ -123,12 +127,26 @@ float4 catmullRom(float2 uv, float2 tsize) {
 // last frame's view by the rows given, projected through last frame's
 // frustum, the history fetched there. False off the image or behind the
 // eye. One function, so the instrument can ask it of every candidate.
-bool fetchHistory(float2 p, float3 r0, float3 r1, float3 r2, out float3 hy) {
+// With a translation and depth, the pixel is a POINT, not a direction:
+// P = z * d (d.z = -1, so z is the view depth in metres), moved to last
+// frame's eye space by delta * P + tv, then projected. Without depth (the
+// far plane, or none bound) the direction alone is rotated, which is the
+// rotation-only path: exact at infinity, and what v1 was everywhere.
+bool fetchHistoryT(float2 p, float3 r0, float3 r1, float3 r2, float3 tv,
+                   bool useDepth, out float3 hy) {
     float3 d;
     d.x = tanNow.x + (p.x + 0.5) / float(size.x) * (tanNow.y - tanNow.x);
     d.y = tanNow.w - (p.y + 0.5) / float(size.y) * (tanNow.w - tanNow.z);
     d.z = -1.0;
     float3 dp = float3(dot(r0, d), dot(r1, d), dot(r2, d));
+    if (useDepth) {
+        float zr = Z.Load(int3(region.xy + int2(p), 0));
+        float den = zr * (knobs.w - knobs.z) + knobs.z;
+        if (zr > 0.0 && den > 0.0) {
+            float z = knobs.z * knobs.w / den;
+            dp = dp * z + tv;
+        }
+    }
     hy = 0.0;
     if (dp.z >= -1e-6) return false;
     float xt = dp.x / -dp.z;
@@ -151,6 +169,9 @@ bool fetchHistory(float2 p, float3 r0, float3 r1, float3 r2, out float3 hy) {
     if (knobs.x > 0.0 && abs(dpp.x) < knobs.x && abs(dpp.y) < knobs.x) pp = p;
     hy = rgbToYcocg(catmullRom((pp + 0.5) / float2(size), float2(size)).rgb);
     return true;
+}
+bool fetchHistory(float2 p, float3 r0, float3 r1, float3 r2, out float3 hy) {
+    return fetchHistoryT(p, r0, r1, r2, float3(0.0, 0.0, 0.0), false, hy);
 }
 // How far a clip moved the history, in luma, as a count of 1/255ths: a
 // nudge on a text edge is a few, a history that landed somewhere else
@@ -216,7 +237,8 @@ void main(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
         bool used = false;
         if (haveHistory != 0) {
             float3 hy;
-            if (fetchHistory(p, dR0.xyz, dR1.xyz, dR2.xyz, hy)) {
+            if (fetchHistoryT(p, dR0.xyz, dR1.xyz, dR2.xyz, tvUsed.xyz,
+                              knobs.y != 0.0 && tvUsed.w != 0.0, hy)) {
                 float3 hc = clipToBox(boxMin, boxMax, hy);
                 if (any(abs(hc - hy) > 1e-4)) {
                     count[1] = 1;
@@ -225,16 +247,21 @@ void main(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
                 outc = lerp(cur.rgb, ycocgToRgb(hc), blend);
                 used = true;
             }
-            // The registration instrument: what each candidate delta would
-            // have fetched, judged by the same clip, counted and not used.
-            // Up to four more history reads per pixel while it runs.
+            // The registration instrument: what each candidate would have
+            // fetched, judged by the same clip, counted and not used. The
+            // candidates are now: 0 the head's rotation alone, 1 the head
+            // with depth and the eyes SWAPPED, 2 the game's camera rows,
+            // 3 the head with depth as assigned. Up to four more history
+            // reads per pixel while it runs.
             [unroll] for (int c = 0; c < 4; ++c) {
                 if ((candMask & (1 << c)) == 0) continue;
                 float3 r0 = c == 0 ? c0R0.xyz : (c == 1 ? c1R0.xyz : (c == 2 ? c2R0.xyz : c3R0.xyz));
                 float3 r1 = c == 0 ? c0R1.xyz : (c == 1 ? c1R1.xyz : (c == 2 ? c2R1.xyz : c3R1.xyz));
                 float3 r2 = c == 0 ? c0R2.xyz : (c == 1 ? c1R2.xyz : (c == 2 ? c2R2.xyz : c3R2.xyz));
+                float3 tvc = c == 1 ? tvCand.xyz : tvUsed.xyz;
+                bool depthC = knobs.y != 0.0 && (c == 1 || c == 3);
                 float3 h;
-                if (!fetchHistory(p, r0, r1, r2, h)) {
+                if (!fetchHistoryT(p, r0, r1, r2, tvc, depthC, h)) {
                     count[3 + c * 3] = 1;
                 } else {
                     float3 hc2 = clipToBox(boxMin, boxMax, h);
@@ -259,7 +286,7 @@ void main(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
 }
 )HLSL";
 
-// The cbuffer above, laid out to match: 352 bytes, twenty-two 16-byte rows.
+// The cbuffer above, laid out to match: 384 bytes, twenty-four 16-byte rows.
 struct PassParams {
     int32_t region[4];
     int32_t size[2];
@@ -276,8 +303,10 @@ struct PassParams {
     int32_t haveHistory;
     int32_t candMask;
     float   knobs[4];
+    float   tvUsed[4];
+    float   tvCand[4];
 };
-static_assert(sizeof(PassParams) == 352, "the cbuffer is twenty-two 16-byte rows");
+static_assert(sizeof(PassParams) == 384, "the cbuffer is twenty-four 16-byte rows");
 
 // The format allowlist: the supersample resolve's, for its reasons
 // (supersample_pass.cpp) -- typeless and UNORM families read and written
@@ -329,7 +358,8 @@ const char* formatName(DXGI_FORMAT f) {
 }
 
 const char* motionName(int motion) {
-    return motion == 2 ? "camera" : motion == 1 ? "head" : "none";
+    return motion == 3 ? "head with depth"
+         : motion == 2 ? "camera" : motion == 1 ? "head" : "none";
 }
 
 // Per-eye owned resources. Release-before-recreate on any size or format
@@ -338,6 +368,11 @@ const char* motionName(int motion) {
 struct EyeState {
     void*                      srcRes = nullptr;   // the game's texture the view is over (identity)
     ID3D11ShaderResourceView*  srcSrv = nullptr;
+    // The scene's depth for this eye, from the depth probe's held texture:
+    // a view typed to the depth channel, keyed on the texture like the
+    // source's view. Released when a different texture arrives.
+    void*                      depthRes = nullptr;
+    ID3D11ShaderResourceView*  depthSrv = nullptr;
     ID3D11Texture2D*           copyTex = nullptr;  // the copy-through, for a source that refuses a view
     ID3D11ShaderResourceView*  copySrv = nullptr;
     uint32_t                   copyW = 0, copyH = 0;
@@ -362,6 +397,10 @@ void releaseSrc(EyeState& e) {
     if (e.srcSrv) { e.srcSrv->Release(); e.srcSrv = nullptr; }
     e.srcRes = nullptr;
 }
+void releaseDepth(EyeState& e) {
+    if (e.depthSrv) { e.depthSrv->Release(); e.depthSrv = nullptr; }
+    e.depthRes = nullptr;
+}
 void releaseCopy(EyeState& e) {
     if (e.copySrv) { e.copySrv->Release(); e.copySrv = nullptr; }
     if (e.copyTex) { e.copyTex->Release(); e.copyTex = nullptr; }
@@ -383,6 +422,7 @@ void releaseOwned(EyeState& e) {
 }
 void releaseEye(EyeState& e) {
     releaseSrc(e);
+    releaseDepth(e);
     releaseCopy(e);
     releaseOwned(e);
 }
@@ -658,10 +698,12 @@ DXGI_FORMAT pickHistoryFormat(ID3D11Device* dev) {
     return DXGI_FORMAT_UNKNOWN;
 }
 
+bool     g_depthNoted = false;
+
 void* temporalInner(void* srcTex, int eye, const float* bounds,
                     const float* tanNow, const float* tanPrev, float jxNow,
-                    float jyNow, const float* deltaHead,
-                    const float* deltaHeadLag, const float* deltaGame,
+                    float jyNow, const float* deltaHead, const float* headTrans,
+                    const float* headTransSwapped, float nearZ, float farZ,
                     float headDeg, int motion, float blend, float clampSigma,
                     unsigned flags) {
     ID3D11Texture2D* src = nullptr;
@@ -843,6 +885,60 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         }
     }
 
+    // The scene's depth for this eye, when the probe has settled on it and
+    // the planes are known: a view typed to the depth channel over the
+    // game's own texture, held by the probe. Wanted by the depth motion
+    // and by the instrument's two depth candidates alike.
+    ID3D11ShaderResourceView* depthSrv = nullptr;
+    if (ok && nearZ > 0.0f && farZ > nearZ) {
+        EyeState& e = *eptr;
+        ID3D11Texture2D* dtex = nullptr;
+        if (depthProbeSceneDepth(sd.Width, sd.Height, eye, &dtex) && dtex) {
+            if (e.depthRes != static_cast<void*>(dtex) || !e.depthSrv) {
+                releaseDepth(e);
+                D3D11_TEXTURE2D_DESC dd{};
+                dtex->GetDesc(&dd);
+                DXGI_FORMAT rf = DXGI_FORMAT_UNKNOWN;
+                switch (dd.Format) {
+                    case DXGI_FORMAT_R32G8X24_TYPELESS:
+                    case DXGI_FORMAT_D32_FLOAT_S8X24_UINT:
+                        rf = DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS; break;
+                    case DXGI_FORMAT_R32_TYPELESS:
+                    case DXGI_FORMAT_D32_FLOAT:
+                        rf = DXGI_FORMAT_R32_FLOAT; break;
+                    case DXGI_FORMAT_R24G8_TYPELESS:
+                    case DXGI_FORMAT_D24_UNORM_S8_UINT:
+                        rf = DXGI_FORMAT_R24_UNORM_X8_TYPELESS; break;
+                    default: break;
+                }
+                if (rf != DXGI_FORMAT_UNKNOWN && (dd.BindFlags & D3D11_BIND_SHADER_RESOURCE)) {
+                    D3D11_SHADER_RESOURCE_VIEW_DESC vd{};
+                    vd.Format = rf;
+                    vd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+                    vd.Texture2D.MipLevels = 1;
+                    if (SUCCEEDED(dev->CreateShaderResourceView(dtex, &vd, &e.depthSrv)) &&
+                        e.depthSrv) {
+                        e.depthRes = dtex;
+                    } else {
+                        e.depthSrv = nullptr;
+                    }
+                }
+            }
+            depthSrv = e.depthSrv;
+        }
+    }
+    if (depthSrv && !g_depthNoted) {
+        g_depthNoted = true;
+        Log::get().note(
+            "temporal aa: the scene's depth is in hand -- the depth probe's "
+            "%ux%u target for this eye, read through a depth-channel view, "
+            "reversed-Z with the game's planes %.3f..%.0f m. The depth motion "
+            "reprojects every pixel with the head's translation from here; "
+            "the registration line's 'head with depth' and 'depth, eyes "
+            "swapped' candidates say whether the eyes are assigned right.",
+            sd.Width, sd.Height, static_cast<double>(nearZ), static_cast<double>(farZ));
+    }
+
     // The owned pair and the output, rebuilt on any change of size or
     // format -- which is a history reset too.
     if (ok) {
@@ -876,10 +972,13 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         EyeState& e = *eptr;
         if (flags & 1u) e.haveHistory = false;
 
-        // The rotation delta for this frame's motion source.
+        // The rotation delta for this frame's motion source. The depth
+        // motion is the head's rotation with its translation term, and
+        // falls back to the rotation alone until the depth is in hand.
         float delta[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
         bool haveDelta = motion == 0;
-        if (motion == 1 && deltaHead) {
+        const bool depthMotion = motion == 3;
+        if ((motion == 1 || depthMotion) && deltaHead) {
             memcpy(delta, deltaHead, sizeof(delta));
             haveDelta = true;
         } else if (motion == 2) {
@@ -896,21 +995,23 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         // them exist this frame (temporalPassRegistration).
         float cand[4][9];
         bool candValid[4] = {};
+        const bool haveDepth = depthSrv != nullptr && headTrans != nullptr;
         if (deltaHead) {
             memcpy(cand[0], deltaHead, sizeof(cand[0]));
             candValid[0] = true;
-        }
-        if (deltaHeadLag) {
-            memcpy(cand[1], deltaHeadLag, sizeof(cand[1]));
-            candValid[1] = true;
+            // 3: the head with depth as assigned; 1: with the eyes swapped.
+            if (haveDepth) {
+                memcpy(cand[3], deltaHead, sizeof(cand[3]));
+                candValid[3] = true;
+                if (headTransSwapped) {
+                    memcpy(cand[1], deltaHead, sizeof(cand[1]));
+                    candValid[1] = true;
+                }
+            }
         }
         if (g_curValid && g_prevValid) {
             temporalViewDelta(g_prevRows, g_curRows, false, cand[2]);
             candValid[2] = true;
-        }
-        if (deltaGame) {
-            memcpy(cand[3], deltaGame, sizeof(cand[3]));
-            candValid[3] = true;
         }
 
         PassParams p{};
@@ -935,6 +1036,18 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         p.jit[2] = g_filterCurrent ? 1.0f : 0.0f;
         p.jit[3] = g_historyC;
         p.knobs[0] = g_snapPx;
+        p.knobs[1] = haveDepth ? 1.0f : 0.0f;
+        p.knobs[2] = nearZ;
+        p.knobs[3] = farZ;
+        if (haveDepth) {
+            for (int i = 0; i < 3; ++i) {
+                p.tvUsed[i] = headTrans[i];
+                p.tvCand[i] = headTransSwapped ? headTransSwapped[i] : headTrans[i];
+            }
+        }
+        // The used delta carries its translation only under the depth
+        // motion; the head motion stays rotation-only, as v1 was.
+        p.tvUsed[3] = (depthMotion && haveDepth) ? 1.0f : 0.0f;
         for (int c = 0; c < 3; ++c) {
             p.dR0[c] = delta[0 * 3 + c];
             p.dR1[c] = delta[1 * 3 + c];
@@ -954,15 +1067,25 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         p.candMask = useHistory ? candMask : 0;
 
         ID3D11ComputeShader* savedCs = nullptr;
-        ID3D11ShaderResourceView* savedSrv[2] = {};
+        ID3D11ShaderResourceView* savedSrv[3] = {};
         ID3D11UnorderedAccessView* savedUav[3] = {};
         ID3D11Buffer* savedCb = nullptr;
         ID3D11SamplerState* savedSamp = nullptr;
         ctx->CSGetShader(&savedCs, nullptr, nullptr);
-        ctx->CSGetShaderResources(0, 2, savedSrv);
+        ctx->CSGetShaderResources(0, 3, savedSrv);
         ctx->CSGetUnorderedAccessViews(0, 3, savedUav);
         ctx->CSGetConstantBuffers(0, 1, &savedCb);
         ctx->CSGetSamplers(0, 1, &savedSamp);
+        // The game's depth target may still be bound on the output-merger
+        // stage at submit, and D3D nulls a shader view over a bound target
+        // without a word (the depth probe learned that the hard way). The
+        // stage is cleared for the dispatch and put back exactly after.
+        ID3D11RenderTargetView* savedRtv[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT] = {};
+        ID3D11DepthStencilView* savedDsv = nullptr;
+        if (depthSrv) {
+            ctx->OMGetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, savedRtv, &savedDsv);
+            ctx->OMSetRenderTargets(0, nullptr, nullptr);
+        }
 
         const int qs = acquireSlot(dev);
         if (qs >= 0) {
@@ -986,17 +1109,17 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         const int writeIdx = 1 - readIdx;
         bool ran = setParams(ctx, p);
         if (ran) {
-            ID3D11ShaderResourceView* nullSrv[2] = {};
+            ID3D11ShaderResourceView* nullSrv[3] = {};
             ID3D11UnorderedAccessView* nullUav[3] = {};
-            ctx->CSSetShaderResources(0, 2, nullSrv);
+            ctx->CSSetShaderResources(0, 3, nullSrv);
             ctx->CSSetUnorderedAccessViews(0, 3, nullUav, nullptr);
             ctx->CSSetShader(g_cs, nullptr, 0);
-            ID3D11ShaderResourceView* srvs[2] = {inSrv, e.histSrv[readIdx]};
+            ID3D11ShaderResourceView* srvs[3] = {inSrv, e.histSrv[readIdx], depthSrv};
             ID3D11UnorderedAccessView* uavs[3] = {e.outUav, e.histUav[writeIdx],
                                                   g_statsUav};
             ID3D11Buffer* cb = g_cb;
             ID3D11SamplerState* smp = g_samp;
-            ctx->CSSetShaderResources(0, 2, srvs);
+            ctx->CSSetShaderResources(0, 3, srvs);
             ctx->CSSetUnorderedAccessViews(0, 3, uavs, nullptr);
             ctx->CSSetConstantBuffers(0, 1, &cb);
             ctx->CSSetSamplers(0, 1, &smp);
@@ -1018,12 +1141,17 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
             }
         }
 
-        ID3D11ShaderResourceView* nullSrv2[2] = {};
+        ID3D11ShaderResourceView* nullSrv2[3] = {};
         ID3D11UnorderedAccessView* nullUav2[3] = {};
-        ctx->CSSetShaderResources(0, 2, nullSrv2);
+        ctx->CSSetShaderResources(0, 3, nullSrv2);
         ctx->CSSetUnorderedAccessViews(0, 3, nullUav2, nullptr);
+        if (depthSrv) {
+            ctx->OMSetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, savedRtv, savedDsv);
+            for (auto* v : savedRtv) if (v) v->Release();
+            if (savedDsv) savedDsv->Release();
+        }
         ctx->CSSetShader(savedCs, nullptr, 0);
-        ctx->CSSetShaderResources(0, 2, savedSrv);
+        ctx->CSSetShaderResources(0, 3, savedSrv);
         ctx->CSSetUnorderedAccessViews(0, 3, savedUav, nullptr);
         ctx->CSSetConstantBuffers(0, 1, &savedCb);
         ctx->CSSetSamplers(0, 1, &savedSamp);
@@ -1162,8 +1290,8 @@ bool temporalPassTotals(uint32_t* treated, double* avgMs, double* maxMs,
 
 bool temporalPassRegistration(char* buf, size_t n) {
     if (!buf || n == 0 || g_treats == 0) return false;
-    static const char* const kNames[4] = {"head", "head one frame earlier",
-                                          "camera", "game-pose head"};
+    static const char* const kNames[4] = {"head, rotation only", "head with depth, eyes swapped",
+                                          "camera", "head with depth"};
     size_t used = 0;
     auto put = [&](const char* fmt, double a, double b, double c) {
         if (used >= n) return;
@@ -1238,14 +1366,16 @@ void temporalPassShutdown() {
 extern "C" __declspec(dllexport) void* edvrTemporalAa(
     void* srcTex, int eye, const float* bounds, const float* tanNow,
     const float* tanPrev, float jxNow, float jyNow, const float* deltaHead,
-    const float* deltaHeadLag, const float* deltaGame, float headDeg,
-    int motion, float blend, float clampSigma, unsigned flags) {
+    const float* headTrans, const float* headTransSwapped, float nearZ,
+    float farZ, float headDeg, int motion, float blend, float clampSigma,
+    unsigned flags) {
     if (!srcTex || eye < 0 || eye > 1 || !tanNow) return nullptr;
     void* out = nullptr;
     edvr::guardedBudget(edvr::g_budget, [&] {
         out = edvr::temporalInner(srcTex, eye, bounds, tanNow, tanPrev, jxNow,
-                                  jyNow, deltaHead, deltaHeadLag, deltaGame,
-                                  headDeg, motion, blend, clampSigma, flags);
+                                  jyNow, deltaHead, headTrans, headTransSwapped,
+                                  nearZ, farZ, headDeg, motion, blend,
+                                  clampSigma, flags);
     });
     return out;
 }
