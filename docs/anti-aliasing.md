@@ -710,6 +710,31 @@ bound as the depth target, and D3D hands a shader a null view for that,
 so the fourth build samples at the moment the game unbinds a target, with
 the output-merger stage cleared first.
 
+**The fourth flight (2026-09-03, the main menu again).** The head's delta
+as used beat the lagged one a second time (18% by 1.3/255 against 24% by
+1.6), and the game-pose candidate never got a delta: the game asks
+`WaitGetPoses` for no game poses at all, so the render pose is the only
+pose it has, which settles the association for good. The depth probe read
+0.000 from every target again, at the first unbind with the stage
+cleared, for targets the game clears through `ClearDepthStencilView` (to
+0.0) and for ones it never does. Two readings remain: the shader view
+over a depth texture is being nulled by a hazard the probe does not see,
+or the targets hold nothing at the unbinds it sampled. The fifth build
+decides both at once: every sample is read through the direct view AND
+through a copy (a copy is not subject to a view's binding hazards), at
+the LAST switch away from the target in a frame (last frame's count says
+which), and `tools/smoke` now runs the probe's own sampler over a depth
+texture of the game's family cleared to 0.5, both ways, so the mechanism
+is proven at the desk before the flight. The player's two observations
+from this flight are placed elsewhere: text shimmers more under yaw than
+pitch because Latin text is mostly vertical stems, which a horizontal
+shift aliases and a vertical one barely touches, with a small extra
+parallax term for yaw from the eye's lever arm about the head; and the
+softness is the resolve's calm kernel, chosen for a session WITHOUT a
+temporal filter -- with one, the resolve can be crisp (`supersample_filter
+= crisp`, live) because the temporal box has already band-limited the
+frame, and `render_sharpness` can go to 1.0.
+
 ## Feature C — texture LOD bias, the small lever
 
 Not all shimmer is geometry. Detail maps and normal maps sampled a mip

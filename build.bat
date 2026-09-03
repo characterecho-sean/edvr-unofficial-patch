@@ -180,7 +180,8 @@ python "%ROOT%\tools\gen_exports.py" --source "%SystemRoot%\System32\d3d11.dll" 
     --extra-export edvrFssTheater ^
     --extra-export edvrSupersampleResolve ^
     --extra-export edvrTemporalAa ^
-    --extra-export edvrSharpen
+    --extra-export edvrSharpen ^
+    --extra-export edvrDepthProbeSelftest
 if errorlevel 1 ( echo [edvr] ERROR: export generation failed & exit /b 1 )
 
 if not exist "%OBJ%\d3d11" mkdir "%OBJ%\d3d11"

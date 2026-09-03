@@ -64,6 +64,7 @@ struct State {
     bool  curGameValid = false;
     float prevGame[12] = {};
     bool  prevGameValid = false;
+    bool  noGamePosesNoted = false;
 
     // Per eye: what the history holds (its frustum), and whether the next
     // treat must start afresh.
@@ -192,6 +193,14 @@ void temporalAaFrameBoundary() {
     s.prevGameValid = s.curGameValid;
     memcpy(s.curGame, s.pendingGame, sizeof(s.curGame));
     s.curGameValid = s.pendingGameValid;
+    if (s.on && s.curValid && !s.curGameValid && !s.noGamePosesNoted) {
+        s.noGamePosesNoted = true;
+        Log::get().note(
+            "temporal aa: the game asks WaitGetPoses for no game poses -- "
+            "the render pose is the only pose it has, so the registration "
+            "instrument's game-pose candidate stays empty and the head's "
+            "delta is the one to build on (measured 2026-09-03).");
+    }
 
     if (!temporalAaWanted()) {
         if (s.jitterLive) {

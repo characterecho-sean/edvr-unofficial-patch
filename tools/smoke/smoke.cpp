@@ -726,6 +726,31 @@ int main(int argc, char** argv) {
         }
     }
 
+    // The depth probe's read path (depth_probe.h): a depth texture of the
+    // game's own family, cleared through its depth view, read back through
+    // a shader view and through a copy. The fourth flight read zeros from
+    // the game's targets both ways it had tried; this says whether the
+    // mechanism can read a depth texture at all.
+    {
+        typedef unsigned (*PFN_DepthSelftest)(void*);
+        PFN_DepthSelftest depthTest = reinterpret_cast<PFN_DepthSelftest>(
+            GetProcAddress(mod, "edvrDepthProbeSelftest"));
+        if (!depthTest) {
+            printf("  FAIL  edvrDepthProbeSelftest is not exported\n");
+            rc = 1;
+        } else {
+            const unsigned bits = depthTest(device);
+            if (bits == 7u) {
+                printf("  ok    depth probe: a cleared R32G8X24 depth texture reads 0.5 "
+                       "through a direct view and through a copy\n");
+            } else {
+                printf("  FAIL  depth probe self-test returned %u (want 7: 1 setup, 2 "
+                       "direct view, 4 copy)\n", bits);
+                rc = 1;
+            }
+        }
+    }
+
     // The render sharpening (docs/anti-aliasing.md's "sharpen" at the
     // door), called the way the openvr half calls it: AMD's RCAS on the
     // eye's region, the source's own size and format, the taps clamped

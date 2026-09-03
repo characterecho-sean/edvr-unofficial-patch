@@ -1,6 +1,7 @@
 #include "depth_probe.h"
 
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 
 #include <windows.h>
@@ -48,10 +49,15 @@ struct Target {
     uint32_t    w = 0, h = 0;
     DXGI_FORMAT texFmt = DXGI_FORMAT_UNKNOWN;
     DXGI_FORMAT dsvFmt = DXGI_FORMAT_UNKNOWN;
+    UINT        dsvFlags = 0;           // D3D11_DSV_READ_ONLY_DEPTH and friends
     UINT        bindFlags = 0;
     UINT        samples = 1;
+    UINT        arraySize = 1;
+    UINT        mips = 1;
     uint32_t    firstEyeDraw = 0;       // the lowest eye-draw index it was bound at
     uint32_t    framesSeen = 0;
+    uint32_t    unbindsThisFrame = 0;   // how many times the game switched away from it
+    uint32_t    unbindsLastFrame = 0;
     uint64_t    lastSampleMs = 0;
     int         sampleLines = 0;
     float       clearValue = -1.0f;     // what the game clears it to; -1 = not seen
@@ -69,17 +75,19 @@ uint32_t g_eyeFrames = 0;   // frames that had at least one eye draw
 bool     g_eyeDrawThisFrame = false;
 bool     g_summaryNoted = false;
 
-// The GPU side: the shader, its parameter buffer, the 1 KB result and its
-// staging twin, and an owned copy for a target that refuses a view.
+// The GPU side: the shader, its parameter buffer, the 1 KB result, TWO
+// staging twins (one per read path), and an owned copy of the target.
 ID3D11ComputeShader*       g_cs = nullptr;
 bool                       g_csTried = false;
 ID3D11Buffer*              g_cb = nullptr;
 ID3D11Buffer*              g_out = nullptr;
 ID3D11UnorderedAccessView* g_outUav = nullptr;
-ID3D11Buffer*              g_staging = nullptr;
+ID3D11Buffer*              g_staging[2] = {};   // 0 the direct view, 1 the copy
 bool                       g_stagingInFlight = false;
+bool                       g_stagingHas[2] = {};
 int                        g_stagingTarget = -1;
-bool                       g_stagingCopied = false;
+uint32_t                   g_stagingCycle = 0, g_stagingCycles = 0;
+HRESULT                    g_stagingDirectHr = S_OK;
 ID3D11Texture2D*           g_copyTex = nullptr;
 uint32_t                   g_copyW = 0, g_copyH = 0;
 DXGI_FORMAT                g_copyFmt = DXGI_FORMAT_UNKNOWN;
@@ -143,12 +151,15 @@ void releaseGpu() {
     if (g_copyTex) { g_copyTex->Release(); g_copyTex = nullptr; }
     g_copyW = g_copyH = 0;
     g_copyFmt = DXGI_FORMAT_UNKNOWN;
-    if (g_staging) { g_staging->Release(); g_staging = nullptr; }
+    for (ID3D11Buffer*& s : g_staging) {
+        if (s) { s->Release(); s = nullptr; }
+    }
     if (g_outUav) { g_outUav->Release(); g_outUav = nullptr; }
     if (g_out) { g_out->Release(); g_out = nullptr; }
     if (g_cb) { g_cb->Release(); g_cb = nullptr; }
     if (g_cs) { g_cs->Release(); g_cs = nullptr; }
     g_stagingInFlight = false;
+    g_stagingHas[0] = g_stagingHas[1] = false;
 }
 
 bool ensureGpu(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
@@ -181,7 +192,8 @@ bool ensureGpu(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         cd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
         const bool made = SUCCEEDED(dev->CreateBuffer(&bd, nullptr, &g_out)) &&
                           SUCCEEDED(dev->CreateUnorderedAccessView(g_out, &ud, &g_outUav)) &&
-                          SUCCEEDED(dev->CreateBuffer(&sd, nullptr, &g_staging)) &&
+                          SUCCEEDED(dev->CreateBuffer(&sd, nullptr, &g_staging[0])) &&
+                          SUCCEEDED(dev->CreateBuffer(&sd, nullptr, &g_staging[1])) &&
                           SUCCEEDED(dev->CreateBuffer(&cd, nullptr, &g_cb));
         if (!made) {
             releaseGpu();
@@ -191,11 +203,117 @@ bool ensureGpu(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     return true;
 }
 
+// One run of the sampler: the grid of `srv` into g_out, copied to
+// `staging`. The compute stage is saved and put back around it.
+bool runSampler(ID3D11DeviceContext* ctx, ID3D11ShaderResourceView* srv,
+                uint32_t w, uint32_t h, ID3D11Buffer* staging) {
+    D3D11_MAPPED_SUBRESOURCE m{};
+    if (FAILED(ctx->Map(g_cb, 0, D3D11_MAP_WRITE_DISCARD, 0, &m)) || !m.pData) {
+        return false;
+    }
+    uint32_t prm[4] = {w, h, 0, 0};
+    memcpy(m.pData, prm, sizeof(prm));
+    ctx->Unmap(g_cb, 0);
+
+    ID3D11ComputeShader* savedCs = nullptr;
+    ID3D11ShaderResourceView* savedSrv = nullptr;
+    ID3D11UnorderedAccessView* savedUav = nullptr;
+    ID3D11Buffer* savedCb = nullptr;
+    ctx->CSGetShader(&savedCs, nullptr, nullptr);
+    ctx->CSGetShaderResources(0, 1, &savedSrv);
+    ctx->CSGetUnorderedAccessViews(0, 1, &savedUav);
+    ctx->CSGetConstantBuffers(0, 1, &savedCb);
+
+    ID3D11ShaderResourceView* nullSrv = nullptr;
+    ID3D11UnorderedAccessView* nullUav = nullptr;
+    ctx->CSSetShaderResources(0, 1, &nullSrv);
+    ctx->CSSetUnorderedAccessViews(0, 1, &nullUav, nullptr);
+    ctx->CSSetShader(g_cs, nullptr, 0);
+    ID3D11Buffer* cb = g_cb;
+    ctx->CSSetConstantBuffers(0, 1, &cb);
+    ctx->CSSetShaderResources(0, 1, &srv);
+    ctx->CSSetUnorderedAccessViews(0, 1, &g_outUav, nullptr);
+    ctx->Dispatch(1, 1, 1);
+    ctx->CSSetShaderResources(0, 1, &nullSrv);
+    ctx->CSSetUnorderedAccessViews(0, 1, &nullUav, nullptr);
+    ctx->CopyResource(staging, g_out);
+
+    ctx->CSSetShader(savedCs, nullptr, 0);
+    ctx->CSSetShaderResources(0, 1, &savedSrv);
+    ctx->CSSetUnorderedAccessViews(0, 1, &savedUav, nullptr);
+    ctx->CSSetConstantBuffers(0, 1, &savedCb);
+    if (savedCs) savedCs->Release();
+    if (savedSrv) savedSrv->Release();
+    if (savedUav) savedUav->Release();
+    if (savedCb) savedCb->Release();
+    return true;
+}
+
+// The copy path: the target's contents into an owned texture of the same
+// typeless family, viewable, ours. A copy is not subject to the binding
+// hazards a shader view is, so this reads whatever the direct view could
+// not.
+ID3D11ShaderResourceView* copiedView(ID3D11Device* dev, ID3D11DeviceContext* ctx,
+                                     ID3D11Texture2D* tex, uint32_t w, uint32_t h,
+                                     DXGI_FORMAT copyFmt, DXGI_FORMAT readFmt) {
+    if (!g_copyTex || g_copyW != w || g_copyH != h || g_copyFmt != copyFmt) {
+        if (g_copyTex) { g_copyTex->Release(); g_copyTex = nullptr; }
+        D3D11_TEXTURE2D_DESC td{};
+        td.Width = w;
+        td.Height = h;
+        td.MipLevels = 1;
+        td.ArraySize = 1;
+        td.Format = copyFmt;
+        td.SampleDesc.Count = 1;
+        td.Usage = D3D11_USAGE_DEFAULT;
+        td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        if (SUCCEEDED(dev->CreateTexture2D(&td, nullptr, &g_copyTex)) && g_copyTex) {
+            g_copyW = w;
+            g_copyH = h;
+            g_copyFmt = copyFmt;
+        } else {
+            g_copyTex = nullptr;
+            return nullptr;
+        }
+    }
+    ctx->CopyResource(g_copyTex, tex);
+    D3D11_SHADER_RESOURCE_VIEW_DESC sd{};
+    sd.Format = readFmt;
+    sd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+    sd.Texture2D.MipLevels = 1;
+    ID3D11ShaderResourceView* srv = nullptr;
+    dev->CreateShaderResourceView(g_copyTex, &sd, &srv);
+    return srv;
+}
+
 // Metres for a reversed-Z value under an infinite far plane: z = near /
 // value. Zero (the far plane) is infinity; the caller prints that as such.
 double metresOf(float v) {
     if (!(v > 0.0f)) return 0.0;
     return kNearPlaneM / static_cast<double>(v);
+}
+
+struct GridStats {
+    float mn = 1e30f, mx = -1e30f, centre = 0.0f;
+    int atClear = 0, bandFar = 0, bandKm = 0, bandHm = 0, bandM = 0, bandNear = 0;
+};
+
+GridStats gridStats(const float* v, float clear) {
+    GridStats g;
+    for (int i = 0; i < 256; ++i) {
+        const float d = v[i];
+        if (d < g.mn) g.mn = d;
+        if (d > g.mx) g.mx = d;
+        if (clear >= 0.0f && fabsf(d - clear) < 1e-7f) ++g.atClear;
+        // Bands, for the reversed-Z reading: value = near / z.
+        if (d <= 0.0f) ++g.bandFar;
+        else if (d < 2.5e-6f) ++g.bandKm;     // beyond 10 km
+        else if (d < 2.5e-4f) ++g.bandHm;     // 100 m .. 10 km
+        else if (d < 1.25e-2f) ++g.bandM;     // 2 m .. 100 m
+        else ++g.bandNear;                    // within 2 m
+    }
+    g.centre = v[7 * 16 + 7];
+    return g;
 }
 
 }  // namespace
@@ -241,7 +359,10 @@ void depthProbeNoteEyeDraw(ID3D11DeviceContext* ctx, void* dsv,
                     t.texFmt = td.Format;
                     t.bindFlags = td.BindFlags;
                     t.samples = td.SampleDesc.Count;
+                    t.arraySize = td.ArraySize;
+                    t.mips = td.MipLevels;
                     t.dsvFmt = vd.Format;
+                    t.dsvFlags = vd.Flags;
                     ok = true;
                     tex->Release();
                 }
@@ -264,12 +385,17 @@ void depthProbeNoteEyeDraw(ID3D11DeviceContext* ctx, void* dsv,
 
 bool depthProbeWantsSample(void* current, void* next) {
     if (!g_wanted || !current || current == next) return false;
-    if (g_stagingInFlight) return false;
     const int idx = findTarget(current);
     if (idx < 0) return false;
     Target& t = g_targets[idx];
+    // Every switch away from an eye-draw target counts, whether or not it
+    // is sampled: the LAST one in a frame is where the contents are
+    // complete, and last frame's count says which one that is.
+    ++t.unbindsThisFrame;
+    if (g_stagingInFlight) return false;
     if (t.sampleLines >= kMaxSampleLines) return false;
     if (t.lastSampleMs && !elapsedMs(t.lastSampleMs, kSampleIntervalMs)) return false;
+    if (t.unbindsLastFrame > 0 && t.unbindsThisFrame < t.unbindsLastFrame) return false;
     return true;
 }
 
@@ -318,89 +444,32 @@ void depthProbeSample(ID3D11DeviceContext* ctx, void* dsvPtr) {
                                 reinterpret_cast<void**>(&tex));
         }
         if (tex && ensureGpu(dev, ctx)) {
+            // Both paths, every sample, so a read that fails one way and
+            // not the other says so in one line.
+            g_stagingHas[0] = g_stagingHas[1] = false;
             D3D11_SHADER_RESOURCE_VIEW_DESC sd{};
             sd.Format = readFmt;
             sd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
             sd.Texture2D.MipLevels = 1;
-            ID3D11ShaderResourceView* srv = nullptr;
-            bool copied = false;
-            if (t.bindFlags & D3D11_BIND_SHADER_RESOURCE) {
-                dev->CreateShaderResourceView(tex, &sd, &srv);
+            ID3D11ShaderResourceView* direct = nullptr;
+            g_stagingDirectHr = (t.bindFlags & D3D11_BIND_SHADER_RESOURCE)
+                                    ? dev->CreateShaderResourceView(tex, &sd, &direct)
+                                    : E_FAIL;
+            if (direct) {
+                g_stagingHas[0] = runSampler(ctx, direct, t.w, t.h, g_staging[0]);
+                direct->Release();
             }
-            if (!srv) {
-                // The copy path: the same typeless family, viewable, ours.
-                if (!g_copyTex || g_copyW != t.w || g_copyH != t.h ||
-                    g_copyFmt != copyFmt) {
-                    if (g_copyTex) { g_copyTex->Release(); g_copyTex = nullptr; }
-                    D3D11_TEXTURE2D_DESC td{};
-                    td.Width = t.w;
-                    td.Height = t.h;
-                    td.MipLevels = 1;
-                    td.ArraySize = 1;
-                    td.Format = copyFmt;
-                    td.SampleDesc.Count = 1;
-                    td.Usage = D3D11_USAGE_DEFAULT;
-                    td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-                    if (SUCCEEDED(dev->CreateTexture2D(&td, nullptr, &g_copyTex)) &&
-                        g_copyTex) {
-                        g_copyW = t.w;
-                        g_copyH = t.h;
-                        g_copyFmt = copyFmt;
-                    } else {
-                        g_copyTex = nullptr;
-                    }
-                }
-                if (g_copyTex) {
-                    ctx->CopyResource(g_copyTex, tex);
-                    dev->CreateShaderResourceView(g_copyTex, &sd, &srv);
-                    copied = true;
-                }
+            ID3D11ShaderResourceView* copied =
+                copiedView(dev, ctx, tex, t.w, t.h, copyFmt, readFmt);
+            if (copied) {
+                g_stagingHas[1] = runSampler(ctx, copied, t.w, t.h, g_staging[1]);
+                copied->Release();
             }
-            if (srv) {
-                D3D11_MAPPED_SUBRESOURCE m{};
-                if (SUCCEEDED(ctx->Map(g_cb, 0, D3D11_MAP_WRITE_DISCARD, 0, &m)) &&
-                    m.pData) {
-                    uint32_t prm[4] = {t.w, t.h, 0, 0};
-                    memcpy(m.pData, prm, sizeof(prm));
-                    ctx->Unmap(g_cb, 0);
-
-                    ID3D11ComputeShader* savedCs = nullptr;
-                    ID3D11ShaderResourceView* savedSrv = nullptr;
-                    ID3D11UnorderedAccessView* savedUav = nullptr;
-                    ID3D11Buffer* savedCb = nullptr;
-                    ctx->CSGetShader(&savedCs, nullptr, nullptr);
-                    ctx->CSGetShaderResources(0, 1, &savedSrv);
-                    ctx->CSGetUnorderedAccessViews(0, 1, &savedUav);
-                    ctx->CSGetConstantBuffers(0, 1, &savedCb);
-
-                    ID3D11ShaderResourceView* nullSrv = nullptr;
-                    ID3D11UnorderedAccessView* nullUav = nullptr;
-                    ctx->CSSetShaderResources(0, 1, &nullSrv);
-                    ctx->CSSetUnorderedAccessViews(0, 1, &nullUav, nullptr);
-                    ctx->CSSetShader(g_cs, nullptr, 0);
-                    ID3D11Buffer* cb = g_cb;
-                    ctx->CSSetConstantBuffers(0, 1, &cb);
-                    ctx->CSSetShaderResources(0, 1, &srv);
-                    ctx->CSSetUnorderedAccessViews(0, 1, &g_outUav, nullptr);
-                    ctx->Dispatch(1, 1, 1);
-                    ctx->CSSetShaderResources(0, 1, &nullSrv);
-                    ctx->CSSetUnorderedAccessViews(0, 1, &nullUav, nullptr);
-                    ctx->CopyResource(g_staging, g_out);
-
-                    ctx->CSSetShader(savedCs, nullptr, 0);
-                    ctx->CSSetShaderResources(0, 1, &savedSrv);
-                    ctx->CSSetUnorderedAccessViews(0, 1, &savedUav, nullptr);
-                    ctx->CSSetConstantBuffers(0, 1, &savedCb);
-                    if (savedCs) savedCs->Release();
-                    if (savedSrv) savedSrv->Release();
-                    if (savedUav) savedUav->Release();
-                    if (savedCb) savedCb->Release();
-
-                    g_stagingInFlight = true;
-                    g_stagingTarget = idx;
-                    g_stagingCopied = copied;
-                }
-                srv->Release();
+            if (g_stagingHas[0] || g_stagingHas[1]) {
+                g_stagingInFlight = true;
+                g_stagingTarget = idx;
+                g_stagingCycle = t.unbindsThisFrame;
+                g_stagingCycles = t.unbindsLastFrame;
             }
         }
         if (tex) tex->Release();
@@ -426,19 +495,21 @@ void depthProbeFrameBoundary(ID3D11DeviceContext* ctx) {
     for (int i = 0; i < g_targetCount; ++i) {
         Target& t = g_targets[i];
         t.boundThisFrame = false;
+        t.unbindsLastFrame = t.unbindsThisFrame;
+        t.unbindsThisFrame = 0;
         if (t.announced) continue;
         t.announced = true;
         Log::get().note(
             "depth probe: the eye draws bind depth target #%d -- %ux%u, "
-            "texture format %s (%d), view format %s (%d), bind flags 0x%X, "
-            "%u sample(s); first bound at eye draw #%u of a frame. %s "
-            "(docs\\anti-aliasing.md Phase 0 item 3, measured.)",
+            "texture format %s (%d), view format %s (%d) flags 0x%X, bind "
+            "flags 0x%X, %u sample(s), array %u, mips %u; first bound at eye "
+            "draw #%u of a frame. %s (docs\\anti-aliasing.md Phase 0 item 3, "
+            "measured.)",
             i, t.w, t.h, fmtName(t.texFmt), static_cast<int>(t.texFmt),
-            fmtName(t.dsvFmt), static_cast<int>(t.dsvFmt), t.bindFlags,
-            t.samples, t.firstEyeDraw,
+            fmtName(t.dsvFmt), static_cast<int>(t.dsvFmt), t.dsvFlags,
+            t.bindFlags, t.samples, t.arraySize, t.mips, t.firstEyeDraw,
             (t.bindFlags & D3D11_BIND_SHADER_RESOURCE)
-                ? "A shader view can be made over it directly, so v2 reads "
-                  "it at submit for free."
+                ? "A shader view can be made over it directly."
                 : "No shader-resource bind: v2 would copy it out once per "
                   "eye (CopyResource, same typeless family) before reading.");
     }
@@ -455,57 +526,72 @@ void depthProbeFrameBoundary(ID3D11DeviceContext* ctx) {
             Log::get().note(
                 "depth probe: %d distinct depth target(s) seen at the eye "
                 "draws over 120 frames, at most %u in one frame. Each is "
-                "sampled at the moment the game unbinds it, its contents "
-                "complete, every %llu s, a few times per target.",
+                "sampled at the LAST moment in a frame the game switches "
+                "away from it, both through a view over it and through a "
+                "copy of it, every %llu s, a few times per target.",
                 g_targetCount, g_maxDistinct,
                 static_cast<unsigned long long>(kSampleIntervalMs / 1000));
         }
     }
-    if (g_stagingInFlight && ctx && g_staging) {
-        D3D11_MAPPED_SUBRESOURCE m{};
-        const HRESULT hr = ctx->Map(g_staging, 0, D3D11_MAP_READ,
-                                    D3D11_MAP_FLAG_DO_NOT_WAIT, &m);
-        if (SUCCEEDED(hr) && m.pData) {
-            const float* v = static_cast<const float*>(m.pData);
+    if (g_stagingInFlight && ctx) {
+        // Both stagings were written in the same call; the second is ready
+        // when the first is, and DO_NOT_WAIT on each keeps this a poll.
+        float vals[2][256];
+        bool got[2] = {};
+        bool stillDrawing = false;
+        for (int s = 0; s < 2; ++s) {
+            if (!g_stagingHas[s] || !g_staging[s]) continue;
+            D3D11_MAPPED_SUBRESOURCE m{};
+            const HRESULT hr = ctx->Map(g_staging[s], 0, D3D11_MAP_READ,
+                                        D3D11_MAP_FLAG_DO_NOT_WAIT, &m);
+            if (SUCCEEDED(hr) && m.pData) {
+                memcpy(vals[s], m.pData, sizeof(vals[s]));
+                ctx->Unmap(g_staging[s], 0);
+                got[s] = true;
+            } else if (hr == DXGI_ERROR_WAS_STILL_DRAWING) {
+                stillDrawing = true;
+            }
+        }
+        if (!stillDrawing) {
+            g_stagingInFlight = false;
             const int tIdx = g_stagingTarget >= 0 ? g_stagingTarget : 0;
             Target& t = g_targets[tIdx];
-            const float clear = t.clearValue;
-            float mn = 1e30f, mx = -1e30f;
-            int atClear = 0;
-            // Bands, for the reversed-Z reading: value = near / z.
-            int bandFar = 0, bandKm = 0, bandHm = 0, bandM = 0, bandNear = 0;
-            for (int i = 0; i < 256; ++i) {
-                const float d = v[i];
-                if (d < mn) mn = d;
-                if (d > mx) mx = d;
-                if (clear >= 0.0f && fabsf(d - clear) < 1e-7f) ++atClear;
-                if (d <= 0.0f) ++bandFar;
-                else if (d < 2.5e-6f) ++bandKm;     // beyond 10 km
-                else if (d < 2.5e-4f) ++bandHm;     // 100 m .. 10 km
-                else if (d < 1.25e-2f) ++bandM;     // 2 m .. 100 m
-                else ++bandNear;                    // within 2 m
-            }
-            const float centre = v[7 * 16 + 7];
-            ctx->Unmap(g_staging, 0);
-            g_stagingInFlight = false;
             ++t.sampleLines;
-            const bool reversed = clear >= 0.0f ? clear < 0.5f : (mx < 0.5f);
-            const float nearest = reversed ? mx : mn;
+            const float clear = t.clearValue;
+            char part[2][256];
+            for (int s = 0; s < 2; ++s) {
+                if (!g_stagingHas[s]) {
+                    snprintf(part[s], sizeof(part[s]),
+                             s == 0 ? "direct view: not made (hr 0x%08lX)"
+                                    : "copy: not made",
+                             static_cast<unsigned long>(g_stagingDirectHr));
+                    continue;
+                }
+                if (!got[s]) {
+                    snprintf(part[s], sizeof(part[s]), "%s: unreadable",
+                             s == 0 ? "direct view" : "copy");
+                    continue;
+                }
+                const GridStats g = gridStats(vals[s], clear);
+                const bool reversed = clear >= 0.0f ? clear < 0.5f : (g.mx < 0.5f);
+                const float nearest = reversed ? g.mx : g.mn;
+                snprintf(part[s], sizeof(part[s]),
+                         "%s: min %.8f, max %.8f, centre %.8f (%.2f m); %d at "
+                         "the far plane, %d beyond 10 km, %d at 100 m..10 km, "
+                         "%d at 2..100 m, %d within 2 m; nearest %.8f = %.2f m",
+                         s == 0 ? "direct view" : "copy",
+                         static_cast<double>(g.mn), static_cast<double>(g.mx),
+                         static_cast<double>(g.centre), metresOf(g.centre),
+                         g.bandFar, g.bandKm, g.bandHm, g.bandM, g.bandNear,
+                         static_cast<double>(nearest), metresOf(nearest));
+            }
             Log::get().note(
-                "depth probe: target #%d sampled on a 16x16 grid at its "
-                "unbind%s -- min %.8f, max %.8f, centre %.8f (%.2f m if "
-                "reversed-Z with near %.3f m); %d of 256 at the clear value "
-                "%.3f (nothing drawn there). Bands, read as reversed-Z: %d at "
-                "the far plane, %d beyond 10 km, %d at 100 m..10 km, %d at "
-                "2..100 m, %d within 2 m. The nearest sample %.8f is %.2f m "
-                "under that reading.",
-                tIdx, g_stagingCopied ? " (copied out first)" : "",
-                static_cast<double>(mn), static_cast<double>(mx),
-                static_cast<double>(centre), metresOf(centre), kNearPlaneM,
-                atClear, static_cast<double>(clear), bandFar, bandKm, bandHm,
-                bandM, bandNear, static_cast<double>(nearest), metresOf(nearest));
-        } else if (hr != DXGI_ERROR_WAS_STILL_DRAWING) {
-            g_stagingInFlight = false;   // unreadable; the next interval retries
+                "depth probe: target #%d sampled on a 16x16 grid at unbind %u "
+                "of %u in the frame (clear value %.3f%s; metres read as "
+                "reversed-Z with near %.3f m) -- %s; %s.",
+                tIdx, g_stagingCycle, g_stagingCycles,
+                static_cast<double>(clear), clear < 0.0f ? " = never seen" : "",
+                kNearPlaneM, part[0], part[1]);
         }
     }
 }
@@ -521,3 +607,73 @@ void depthProbeShutdown() {
 }
 
 }  // namespace edvr
+
+// The desk test of the read path (tools/smoke): a depth texture of the
+// family the game uses, cleared to a known value through a depth view,
+// unbound, then read both ways with the probe's own sampler. Returns bits:
+// 1 the setup was made, 2 the direct view read the value, 4 the copy did.
+extern "C" __declspec(dllexport) unsigned edvrDepthProbeSelftest(void* devicePtr) {
+    using namespace edvr;
+    ID3D11Device* dev = static_cast<ID3D11Device*>(devicePtr);
+    if (!dev) return 0;
+    ID3D11DeviceContext* ctx = nullptr;
+    dev->GetImmediateContext(&ctx);
+    if (!ctx) return 0;
+    unsigned bits = 0;
+    D3D11_TEXTURE2D_DESC td{};
+    td.Width = 64;
+    td.Height = 48;
+    td.MipLevels = 1;
+    td.ArraySize = 1;
+    td.Format = DXGI_FORMAT_R32G8X24_TYPELESS;
+    td.SampleDesc.Count = 1;
+    td.Usage = D3D11_USAGE_DEFAULT;
+    td.BindFlags = D3D11_BIND_DEPTH_STENCIL | D3D11_BIND_SHADER_RESOURCE;
+    ID3D11Texture2D* tex = nullptr;
+    ID3D11DepthStencilView* dsv = nullptr;
+    D3D11_DEPTH_STENCIL_VIEW_DESC dd{};
+    dd.Format = DXGI_FORMAT_D32_FLOAT_S8X24_UINT;
+    dd.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
+    const bool wantedBefore = g_wanted;
+    g_wanted = true;
+    if (SUCCEEDED(dev->CreateTexture2D(&td, nullptr, &tex)) && tex &&
+        SUCCEEDED(dev->CreateDepthStencilView(tex, &dd, &dsv)) && dsv &&
+        ensureGpu(dev, ctx)) {
+        bits |= 1u;
+        ctx->OMSetRenderTargets(0, nullptr, dsv);
+        ctx->ClearDepthStencilView(dsv, D3D11_CLEAR_DEPTH, 0.5f, 0);
+        ctx->OMSetRenderTargets(0, nullptr, nullptr);
+        DXGI_FORMAT copyFmt = DXGI_FORMAT_UNKNOWN;
+        const DXGI_FORMAT readFmt = depthReadFormat(td.Format, &copyFmt);
+        D3D11_SHADER_RESOURCE_VIEW_DESC sd{};
+        sd.Format = readFmt;
+        sd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+        sd.Texture2D.MipLevels = 1;
+        for (int s = 0; s < 2; ++s) {
+            ID3D11ShaderResourceView* srv = nullptr;
+            if (s == 0) dev->CreateShaderResourceView(tex, &sd, &srv);
+            else srv = copiedView(dev, ctx, tex, 64, 48, copyFmt, readFmt);
+            if (!srv) continue;
+            const bool ran = runSampler(ctx, srv, 64, 48, g_staging[s]);
+            srv->Release();
+            if (!ran) continue;
+            D3D11_MAPPED_SUBRESOURCE m{};
+            if (SUCCEEDED(ctx->Map(g_staging[s], 0, D3D11_MAP_READ, 0, &m)) && m.pData) {
+                const float* v = static_cast<const float*>(m.pData);
+                bool all = true;
+                for (int i = 0; i < 256; ++i) {
+                    if (fabsf(v[i] - 0.5f) > 1e-6f) all = false;
+                }
+                ctx->Unmap(g_staging[s], 0);
+                if (all) bits |= s == 0 ? 2u : 4u;
+            }
+        }
+    }
+    g_wanted = wantedBefore;
+    if (dsv) dsv->Release();
+    if (tex) tex->Release();
+    releaseGpu();
+    g_csTried = false;
+    ctx->Release();
+    return bits;
+}

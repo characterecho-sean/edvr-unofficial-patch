@@ -12,11 +12,16 @@
 // must be copied), which eye's each is (the order they are bound in a
 // frame), and HOW the values are encoded (standard or reversed, what the
 // far plane reads as, what a metre reads as), from a 16x16 grid of
-// samples read at the moment the game UNBINDS a target -- its contents
-// complete, and the view no longer bound as a target, which is the one
-// state in which a shader may read it. The third flight (2026-09-03) read
-// at the clear instead, while the view was still bound, and D3D handed
-// the shader nulls: 256 zeros per grid. Measured, and moved.
+// samples read at the LAST moment in a frame the game switches away from
+// a target -- its contents complete, and the view no longer bound as a
+// target, which is the one state in which a shader may read it -- both
+// through a view over the texture and through a copy of it, so a read
+// that fails one way and not the other says so in one line. The third
+// flight (2026-09-03) read at the clear, while the view was still bound,
+// and got 256 zeros per grid; the fourth read at the first unbind with
+// the stage cleared and got zeros again. Whether that is the read or the
+// buffer is what the two paths, the last-unbind rule and the desk
+// self-test below now decide.
 //
 // Runs only while fix.temporal_aa is on (it exists for that pass), costs
 // one pointer compare per eye draw and per render-target change, and one
@@ -61,3 +66,12 @@ void depthProbeFrameBoundary(ID3D11DeviceContext* ctx);
 void depthProbeShutdown();
 
 }  // namespace edvr
+
+extern "C" {
+// The desk test of the read path (tools/smoke): a depth texture of the
+// family the game uses (R32G8X24_TYPELESS under a D32_FLOAT_S8X24_UINT
+// view), cleared to 0.5 through the view, unbound, then read both ways
+// with the probe's own sampler. Returns bits: 1 the setup was made, 2 the
+// direct view read the value everywhere, 4 the copy did. 7 is a pass.
+__declspec(dllexport) unsigned edvrDepthProbeSelftest(void* device);
+}
