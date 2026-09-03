@@ -54,6 +54,11 @@ void depthProbeConfigure(Config& cfg);
 void depthProbeNoteDraw(ID3D11DeviceContext* ctx, void* dsv, bool rtvEyeSized,
                         bool rtvNull);
 
+// The indirect draws (DrawIndexedInstancedIndirect and its twin), which
+// never reach the classifier: counted and their depth target noted, so a
+// scene drawn GPU-side is not invisible to the census.
+void depthProbeNoteIndirectDraw(ID3D11DeviceContext* ctx, void* dsv);
+
 // Every eye-sized draw, with the same view and the draw's index within
 // the frame (1 = the frame's first eye draw), for which eye a target is.
 void depthProbeNoteEyeDraw(ID3D11DeviceContext* ctx, void* dsv,

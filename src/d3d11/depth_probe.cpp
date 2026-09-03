@@ -46,6 +46,9 @@ constexpr double kNearPlaneM = 0.025;
 
 struct Target {
     void*       dsv = nullptr;          // identity only; dereferenced only inside the game's own call
+    ID3D11Texture2D* tex = nullptr;     // the texture behind it, a reference HELD, so the
+                                        // frame-boundary read cannot touch a freed object
+    uint32_t    lastSeenFrame = 0;
     uint32_t    w = 0, h = 0;
     DXGI_FORMAT texFmt = DXGI_FORMAT_UNKNOWN;
     DXGI_FORMAT dsvFmt = DXGI_FORMAT_UNKNOWN;
@@ -80,6 +83,16 @@ uint32_t g_maxDistinct = 0;
 uint32_t g_eyeFrames = 0;   // frames that had at least one eye draw
 bool     g_eyeDrawThisFrame = false;
 bool     g_summaryNoted = false;
+// The census of all draws, per frame.
+uint32_t g_drawsThisFrame = 0, g_drawsLastFrame = 0;
+uint32_t g_drawsWithDsvThisFrame = 0, g_drawsWithDsvLastFrame = 0;
+uint32_t g_indirectThisFrame = 0, g_indirectLastFrame = 0;
+uint32_t g_eyeRtvDrawsThisFrame = 0, g_eyeRtvDrawsLastFrame = 0;
+uint32_t g_boundaryNext = 0;        // round-robin over the targets
+uint64_t g_boundaryLastMs = 0;
+bool     g_stagingAtBoundary = false;
+uint32_t g_frameNo = 0;
+constexpr uint32_t kReleaseAfterFrames = 600;
 
 // The GPU side: the shader, its parameter buffer, the 1 KB result, TWO
 // staging twins (one per read path), and an owned copy of the target.
@@ -362,12 +375,13 @@ int discoverTarget(void* dsv) {
                     t.dsvFmt = vd.Format;
                     t.dsvFlags = vd.Flags;
                     ok = true;
-                    tex->Release();
+                    t.tex = tex;   // the reference stays with the entry
                 }
                 res->Release();
             }
     });
     if (!ok) return -1;
+    t.lastSeenFrame = g_frameNo;
     const int idx = g_targetCount++;
     g_targets[idx] = t;
     return idx;
@@ -378,7 +392,11 @@ int discoverTarget(void* dsv) {
 void depthProbeNoteDraw(ID3D11DeviceContext* ctx, void* dsv, bool rtvEyeSized,
                         bool rtvNull) {
     (void)ctx;
-    if (!g_wanted || !dsv) return;
+    if (!g_wanted) return;
+    ++g_drawsThisFrame;
+    if (rtvEyeSized) ++g_eyeRtvDrawsThisFrame;
+    if (!dsv) return;
+    ++g_drawsWithDsvThisFrame;
     int idx;
     if (dsv == g_lastDrawDsv) {
         idx = g_lastDrawIdx;
@@ -393,11 +411,18 @@ void depthProbeNoteDraw(ID3D11DeviceContext* ctx, void* dsv, bool rtvEyeSized,
     ++t.drawsThisFrame;
     if (rtvEyeSized) ++t.eyeRtvDrawsThisFrame;
     if (rtvNull) ++t.nullRtvDrawsThisFrame;
+    t.lastSeenFrame = g_frameNo;
     if (!t.boundThisFrame) {
         t.boundThisFrame = true;
         ++t.framesSeen;
         ++g_distinctThisFrame;
     }
+}
+
+void depthProbeNoteIndirectDraw(ID3D11DeviceContext* ctx, void* dsv) {
+    if (!g_wanted) return;
+    ++g_indirectThisFrame;
+    depthProbeNoteDraw(ctx, dsv, false, false);
 }
 
 void depthProbeNoteEyeDraw(ID3D11DeviceContext* ctx, void* dsv,
@@ -522,8 +547,24 @@ void depthProbeNoteClear(ID3D11DepthStencilView* dsv, float depth) {
 
 void depthProbeFrameBoundary(ID3D11DeviceContext* ctx) {
     if (!g_wanted) return;
+    ++g_frameNo;
     if (g_eyeDrawThisFrame) ++g_eyeFrames;
     g_eyeDrawThisFrame = false;
+    g_drawsLastFrame = g_drawsThisFrame;
+    g_drawsWithDsvLastFrame = g_drawsWithDsvThisFrame;
+    g_indirectLastFrame = g_indirectThisFrame;
+    g_eyeRtvDrawsLastFrame = g_eyeRtvDrawsThisFrame;
+    g_drawsThisFrame = g_drawsWithDsvThisFrame = g_indirectThisFrame = 0;
+    g_eyeRtvDrawsThisFrame = 0;
+    // A target not bound for a while lets its texture go: the game may
+    // have released it, and holding it would keep it alive for nothing.
+    for (int i = 0; i < g_targetCount; ++i) {
+        Target& t = g_targets[i];
+        if (t.tex && g_frameNo - t.lastSeenFrame > kReleaseAfterFrames) {
+            t.tex->Release();
+            t.tex = nullptr;
+        }
+    }
     if (g_distinctThisFrame > g_maxDistinct) g_maxDistinct = g_distinctThisFrame;
     g_distinctThisFrame = 0;
     g_lastDsv = nullptr;   // a new frame: its first eye draw notes its view afresh
@@ -570,13 +611,56 @@ void depthProbeFrameBoundary(ID3D11DeviceContext* ctx) {
         } else {
             Log::get().note(
                 "depth probe: %d distinct depth target(s) seen at draws over "
-                "120 frames, at most %u in one frame. Each is sampled at the "
-                "LAST moment in a frame the game switches away from it, both "
-                "through a view over it and through a copy of it, every %llu "
-                "s, a few times per target; the one with the draws and no "
-                "colour target beside them is the scene's depth.",
-                g_targetCount, g_maxDistinct,
+                "120 frames, at most %u in one frame. Last frame: %u draws "
+                "hooked, %u of them with a depth target bound, %u with an "
+                "eye-sized colour target, %u indirect. Each target is sampled "
+                "at the LAST moment in a frame the game switches away from "
+                "it, both through a view and through a copy, and at the frame "
+                "boundary through a copy, every %llu s.",
+                g_targetCount, g_maxDistinct, g_drawsLastFrame,
+                g_drawsWithDsvLastFrame, g_eyeRtvDrawsLastFrame,
+                g_indirectLastFrame,
                 static_cast<unsigned long long>(kSampleIntervalMs / 1000));
+        }
+    }
+    // The frame-boundary read: one target per interval, round-robin, through
+    // the reference held on its texture and the copy path -- after every
+    // draw of the frame has been issued, whenever in the frame the depth
+    // was written. Nothing is unbound for it: a copy is not a view.
+    if (!g_stagingInFlight && ctx && g_targetCount > 0 &&
+        (g_boundaryLastMs == 0 || elapsedMs(g_boundaryLastMs, kSampleIntervalMs))) {
+        for (int tries = 0; tries < g_targetCount; ++tries) {
+            const int idx = static_cast<int>(g_boundaryNext++ % static_cast<uint32_t>(g_targetCount));
+            Target& t = g_targets[idx];
+            if (!t.tex || t.samples > 1 || t.sampleLines >= kMaxSampleLines * 2) continue;
+            DXGI_FORMAT copyFmt = DXGI_FORMAT_UNKNOWN;
+            const DXGI_FORMAT readFmt = depthReadFormat(t.texFmt, &copyFmt);
+            if (readFmt == DXGI_FORMAT_UNKNOWN) continue;
+            g_boundaryLastMs = stampMs();
+            guardedBudget(g_budget, [&] {
+                ID3D11Device* dev = nullptr;
+                ctx->GetDevice(&dev);
+                if (!dev) return;
+                if (ensureGpu(dev, ctx)) {
+                    g_stagingHas[0] = g_stagingHas[1] = false;
+                    ID3D11ShaderResourceView* copied =
+                        copiedView(dev, ctx, t.tex, t.w, t.h, copyFmt, readFmt);
+                    if (copied) {
+                        g_stagingHas[1] = runSampler(ctx, copied, t.w, t.h, g_staging[1]);
+                        copied->Release();
+                    }
+                    if (g_stagingHas[1]) {
+                        g_stagingInFlight = true;
+                        g_stagingTarget = idx;
+                        g_stagingCycle = 0;
+                        g_stagingCycles = t.unbindsLastFrame;
+                        g_stagingAtBoundary = true;
+                        g_stagingDirectHr = S_OK;
+                    }
+                }
+                dev->Release();
+            });
+            break;
         }
     }
     if (g_stagingInFlight && ctx) {
@@ -607,6 +691,10 @@ void depthProbeFrameBoundary(ID3D11DeviceContext* ctx) {
             char part[2][256];
             for (int s = 0; s < 2; ++s) {
                 if (!g_stagingHas[s]) {
+                    if (s == 0 && g_stagingAtBoundary) {
+                        snprintf(part[s], sizeof(part[s]), "direct view: not tried at the boundary");
+                        continue;
+                    }
                     snprintf(part[s], sizeof(part[s]),
                              s == 0 ? "direct view: not made (hr 0x%08lX)"
                                     : "copy: not made",
@@ -633,13 +721,13 @@ void depthProbeFrameBoundary(ID3D11DeviceContext* ctx) {
             }
             Log::get().note(
                 "depth probe: target #%d (%u draws/frame, %u with no colour "
-                "target) sampled on a 16x16 grid at unbind %u of %u in the "
-                "frame (clear value %.3f%s; metres read as reversed-Z with "
-                "near %.3f m) -- %s; %s.",
-                tIdx, t.drawsLastFrame, t.nullRtvDrawsLastFrame, g_stagingCycle,
-                g_stagingCycles, static_cast<double>(clear),
-                clear < 0.0f ? " = never seen" : "", kNearPlaneM, part[0],
-                part[1]);
+                "target) sampled on a 16x16 grid %s (clear value %.3f%s; "
+                "metres read as reversed-Z with near %.3f m) -- %s; %s.",
+                tIdx, t.drawsLastFrame, t.nullRtvDrawsLastFrame,
+                g_stagingAtBoundary ? "at the frame boundary" : "at its unbind",
+                static_cast<double>(clear), clear < 0.0f ? " = never seen" : "",
+                kNearPlaneM, part[0], part[1]);
+            g_stagingAtBoundary = false;
         }
     }
 }
@@ -648,6 +736,9 @@ void depthProbeShutdown() {
     if (g_targetCount > 0) {
         Log::get().note("depth probe: %d depth target(s) seen at the eye draws "
                         "this session.", g_targetCount);
+    }
+    for (int i = 0; i < g_targetCount; ++i) {
+        if (g_targets[i].tex) { g_targets[i].tex->Release(); g_targets[i].tex = nullptr; }
     }
     releaseGpu();
     g_targetCount = 0;

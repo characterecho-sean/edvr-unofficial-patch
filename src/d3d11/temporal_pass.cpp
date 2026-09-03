@@ -1,5 +1,6 @@
 #include "temporal_pass.h"
 
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 
@@ -40,7 +41,7 @@ cbuffer P : register(b0) {
     int2   texSize;     // S's size, for the sampler's uv
     float4 tanNow;      // l r t b this frame, jitter excluded
     float4 tanPrev;     // l r t b for the frame the history holds
-    float4 jit;         // xy this frame's jitter in pixels; z 1 = filter the current sample
+    float4 jit;         // xy this frame's jitter in pixels; z 1 = filter the current sample; w the history kernel's C
     float4 dR0;         // rows of the rotation taking this frame's view
     float4 dR1;         // directions to last frame's (xyz; w unused)
     float4 dR2;
@@ -60,6 +61,7 @@ cbuffer P : register(b0) {
     float  gamma;       // clip half-width, in standard deviations
     int    haveHistory; // 0: nothing to blend, this frame goes out as it is
     int    candMask;    // bit c: candidate c has a delta this frame
+    float4 knobs;       // x the rest snap in pixels (0 off); yzw unused
 };
 float3 rgbToYcocg(float3 c) {
     return float3(0.25 * c.r + 0.5 * c.g + 0.25 * c.b,
@@ -79,16 +81,27 @@ float3 clipToBox(float3 mn, float3 mx, float3 q) {
     float ma = max(a.x, max(a.y, a.z));
     return ma > 1.0 ? c + v / ma : q;
 }
-// Catmull-Rom through nine bilinear fetches: the history sampled without
-// the softening a plain bilinear fetch would add every frame.
+// The history's resampling kernel through nine bilinear fetches: a
+// bicubic of the B = 0 family with C from the parameters -- C = 0.5 is
+// Catmull-Rom, larger C is sharper with more ringing (0.75 is a common
+// "sharp bicubic"). Every frame the history is fetched at a sub-pixel
+// offset, since a tracked head is never quite still, and each fetch is a
+// low-pass whose losses compound through the exponential average: at a
+// third of a cycle per pixel Catmull-Rom keeps about half of the
+// contrast after that compounding at a 0.9 blend, and a sharper kernel
+// keeps more. advanced.temporal_aa_history_sharp sets C, live.
 float4 catmullRom(float2 uv, float2 tsize) {
+    float C = jit.w;
     float2 sp = uv * tsize;
     float2 t1 = floor(sp - 0.5) + 0.5;
     float2 f = sp - t1;
-    float2 w0 = f * (-0.5 + f * (1.0 - 0.5 * f));
-    float2 w1 = 1.0 + f * f * (-2.5 + 1.5 * f);
-    float2 w2 = f * (0.5 + f * (2.0 - 1.5 * f));
-    float2 w3 = f * f * (-0.5 + 0.5 * f);
+    float2 g0 = 1.0 + f;
+    float2 g3 = 2.0 - f;
+    float2 w0 = C * (-g0 * g0 * g0 + 5.0 * g0 * g0 - 8.0 * g0 + 4.0);
+    float2 w1 = (2.0 - C) * f * f * f + (C - 3.0) * f * f + 1.0;
+    float2 h = 1.0 - f;
+    float2 w2 = (2.0 - C) * h * h * h + (C - 3.0) * h * h + 1.0;
+    float2 w3 = C * (-g3 * g3 * g3 + 5.0 * g3 * g3 - 8.0 * g3 + 4.0);
     float2 w12 = w1 + w2;
     float2 o12 = w2 / w12;
     float2 t0 = (t1 - 1.0) / tsize;
@@ -127,6 +140,15 @@ bool fetchHistory(float2 p, float3 r0, float3 r1, float3 r2, out float3 hy) {
         pp.y > float(size.y) - 1.0) {
         return false;
     }
+    // The rest snap: a head within a fraction of a pixel of still is
+    // treated as still, and the history is fetched at its own texel
+    // instead of resampled a hair off it. Tracking noise alone moves a
+    // 3096-wide eye by a few tenths of a pixel a frame, and resampling at
+    // such offsets every frame is the blur that compounds; the snap's
+    // error is bounded by its threshold and never accumulates past it,
+    // since each frame re-registers the history afresh. Off at 0.
+    float2 dpp = pp - p;
+    if (knobs.x > 0.0 && abs(dpp.x) < knobs.x && abs(dpp.y) < knobs.x) pp = p;
     hy = rgbToYcocg(catmullRom((pp + 0.5) / float2(size), float2(size)).rgb);
     return true;
 }
@@ -151,18 +173,18 @@ void main(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
         // q - jit on the unjittered grid, so each is weighted by its
         // distance from THIS pixel's centre there: exp(-2.29 d^2), a
         // Gaussian of sigma 0.47 px, UE4's filter for the same job. Two
-        // things follow. The blend uses the filtered value, so a pixel
-        // whose history is rejected shows a spatially settled sample
-        // rather than the raw one hopping by the jitter (a thin line on a
-        // turning ship model shimmered exactly so on the fifth flight,
-        // head still, 2026-09-03). And the neighbourhood's moments are
-        // weighted the same way, so the clip box no longer swings with
-        // the jitter on a thin feature -- a converged history that was
-        // inside the box one frame and outside the next flickered at the
-        // jitter's period. At 3096 wide before a 1.5x resolve the filter's
+        // The blend uses the filtered value, so a pixel whose history is
+        // rejected shows a spatially settled sample rather than the raw
+        // one hopping by the jitter. The neighbourhood's moments are NOT
+        // weighted the same way: the sixth build tried that, the box
+        // narrowed to the filter's width, the clip fired on a third of
+        // the pixels at rest by hair-widths, and the picture shimmered
+        // faintly everywhere (measured 2026-09-03: 35% clipped by 0.3/255
+        // with the head still, against 11% by 0.5 before). The plain 3x3
+        // it is. At 3096 wide before a 1.5x resolve the filter's
         // softening is a third of an output pixel; the sharpen recovers
-        // the rest. advanced.temporal_aa_current = raw gives the earlier
-        // behaviour back for an A/B: the point sample, uniform moments.
+        // the rest. advanced.temporal_aa_current = raw gives the point
+        // sample back for an A/B.
         float4 cur = 0.0;
         float wsum = 0.0;
         float3 m1 = 0.0;
@@ -175,7 +197,7 @@ void main(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
                 float2 dpos = float2(dx, dy) - jit.xy;
                 float w = jit.z != 0.0 ? exp(-2.29 * dot(dpos, dpos))
                                        : ((dx == 0 && dy == 0) ? 1.0 : 0.0);
-                float wm = jit.z != 0.0 ? w : 1.0;
+                float wm = 1.0;
                 cur += sq * w;
                 wsum += w;
                 float3 s = rgbToYcocg(sq.rgb);
@@ -237,7 +259,7 @@ void main(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
 }
 )HLSL";
 
-// The cbuffer above, laid out to match: 336 bytes, twenty-one 16-byte rows.
+// The cbuffer above, laid out to match: 352 bytes, twenty-two 16-byte rows.
 struct PassParams {
     int32_t region[4];
     int32_t size[2];
@@ -253,8 +275,9 @@ struct PassParams {
     float   gamma;
     int32_t haveHistory;
     int32_t candMask;
+    float   knobs[4];
 };
-static_assert(sizeof(PassParams) == 336, "the cbuffer is twenty-one 16-byte rows");
+static_assert(sizeof(PassParams) == 352, "the cbuffer is twenty-two 16-byte rows");
 
 // The format allowlist: the supersample resolve's, for its reasons
 // (supersample_pass.cpp) -- typeless and UNORM families read and written
@@ -541,6 +564,8 @@ uint32_t g_treats = 0;
 bool     g_wanted = false;
 bool     g_viewTransposed = false;
 bool     g_filterCurrent = true;   // advanced.temporal_aa_current = filtered | raw
+float    g_historyC = 0.5f;        // advanced.temporal_aa_history_sharp: the cubic's C
+float    g_snapPx = 0.15f;         // advanced.temporal_aa_snap: the rest snap, pixels
 bool     g_warmNoted = false;
 
 // The camera capture: the pending rows from the latest scene write, the
@@ -908,6 +933,8 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         p.jit[0] = jxNow;
         p.jit[1] = jyNow;
         p.jit[2] = g_filterCurrent ? 1.0f : 0.0f;
+        p.jit[3] = g_historyC;
+        p.knobs[0] = g_snapPx;
         for (int c = 0; c < 3; ++c) {
             p.dR0[c] = delta[0 * 3 + c];
             p.dR1[c] = delta[1 * 3 + c];
@@ -1051,6 +1078,15 @@ void temporalPassConfigure(Config& cfg) {
     g_viewTransposed = cfg.getBool("advanced.temporal_aa_view_transpose", false);
     const std::string cur = cfg.getString("advanced.temporal_aa_current", "filtered");
     g_filterCurrent = _stricmp(cur.c_str(), "raw") != 0;
+    float c = cfg.getFloat("advanced.temporal_aa_history_sharp", 0.5f);
+    if (!std::isfinite(c)) c = 0.5f;
+    if (c < 0.5f) c = 0.5f;
+    if (c > 1.0f) c = 1.0f;
+    g_historyC = c;
+    float snap = cfg.getFloat("advanced.temporal_aa_snap", 0.15f);
+    if (!std::isfinite(snap) || snap < 0.0f) snap = 0.0f;
+    if (snap > 0.5f) snap = 0.5f;
+    g_snapPx = snap;
 }
 
 void temporalPassTick(ID3D11DeviceContext* ctx) {

@@ -2903,6 +2903,9 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstancedIndirect(
     if (drawCensusArmed()) {
         drawCensusDrawDirect(self, 'Z', 0, 0, foreignContext(self), args, off);
     }
+    if (!foreignContext(self)) {
+        depthProbeNoteIndirectDraw(self, bindingGet(BindSlot::Dsv0));
+    }
     g_state->realDrawIndexedInstancedIndirect(self, args, off);
 }
 
@@ -2910,6 +2913,9 @@ void STDMETHODCALLTYPE hookedDrawInstancedIndirect(ID3D11DeviceContext* self,
                                                    ID3D11Buffer* args, UINT off) {
     if (drawCensusArmed()) {
         drawCensusDrawDirect(self, 'Y', 0, 0, foreignContext(self), args, off);
+    }
+    if (!foreignContext(self)) {
+        depthProbeNoteIndirectDraw(self, bindingGet(BindSlot::Dsv0));
     }
     g_state->realDrawInstancedIndirect(self, args, off);
 }

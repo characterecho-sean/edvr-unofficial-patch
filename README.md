@@ -235,7 +235,12 @@ a history moved by the head's rotation alone registers the world but not
 the cockpit, whose text sits close enough that the head's translation
 moves it by pixels, so it ghosts under head motion and stays soft. The
 next build reprojects with depth; the current one carries the instruments
-for it. *Details: [docs/anti-aliasing.md](docs/anti-aliasing.md).*
+for it. Know the trade before turning it on: a temporal filter converges
+to a properly filtered image, which is calmer and softer than the hard,
+aliased edges of text without it, and a side-by-side at HMD Quality 1.5
+found the text much sharper with the resolve alone. If crisp text matters
+more to you than calm edges, leave this off and keep the resolve.
+*Details: [docs/anti-aliasing.md](docs/anti-aliasing.md).*
 
 **The RemLok helmet's edge lines hanging along your nose.** When the
 emergency helmet deploys, its faint edge lines end up in the middle of your

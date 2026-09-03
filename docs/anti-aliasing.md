@@ -758,6 +758,41 @@ neither the box nor a rejected pixel moves with the jitter;
 At 3096 wide before a 1.5x resolve the filter's softening is a third of
 an output pixel.
 
+**The sixth flight (2026-09-03), and the player's comparison.** Less
+shimmer in the text while moving; a faint shimmer everywhere at rest. The
+registration line said why: clipped 35% of pixels by 0.3/255 with the
+head still, against 11% by 0.5 before -- weighting the clip's moments by
+the filter narrowed the box to the filter's width, and the clip fired by
+hair-widths on a third of the pixels. The seventh build keeps the
+filtered sample and puts the box back to the plain 3x3. The census named
+every depth target the immediate context binds: each VR-sized one gets
+ONE draw a frame, and the only target with content is a 2626x1477
+`D24_UNORM_S8_UINT` at 12 draws a frame, cleared to 1.0 -- the flat
+monitor view. No `ExecuteCommandList` was ever seen and no foreign draws
+were counted, so the menu's eye draws bind no depth at all, or the scene
+is drawn by the indirect entry points the classifier never runs; the
+seventh build counts every draw by kind (with and without a depth target,
+indirect or not) and also reads each target at the frame boundary through
+a reference it holds, after every draw of the frame. Separately, the
+player compared against an install without the temporal pass at HMD
+Quality 1.5: **the text is much sharper without it**, and the ship's
+shimmering line shimmers there too. Both are placed honestly. The line is
+the game's own sub-pixel detail on a turning model, which no pass at the
+door settles without motion vectors. The softness has three parts: a
+temporal supersample converges to a box-filtered image, softer than
+point-sampled text with hard aliased edges by construction; every frame
+the history is resampled a fraction of a pixel off, since a tracked head
+is never still (the "still" bucket admits 0.03° a frame, 0.7 px at this
+density) and those losses compound through the exponential average; and
+the near-content misregistration of a rotation-only reprojection, for
+depth. The seventh build gives the pass two levers against the second
+part: `advanced.temporal_aa_history_sharp` (the resampling cubic's C, 0.5
+Catmull-Rom to 1.0, live) and `advanced.temporal_aa_snap` (a rest snap:
+under 0.15 px of motion the history is fetched at its own texel rather
+than resampled, live). The first part is the trade the feature IS: a
+player who values crisp text over calm edges is better served by the
+resolve alone, and the README says so.
+
 ## Feature C — texture LOD bias, the small lever
 
 Not all shimmer is geometry. Detail maps and normal maps sampled a mip
