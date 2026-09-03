@@ -2,6 +2,7 @@
 
 #include <windows.h>
 
+#include <cstdio>   // _snprintf_s: the candidate list
 #include <string>
 
 #include "../common/config.h"
@@ -36,7 +37,18 @@ constexpr float kAspectTol = 0.01f;
 constexpr uint32_t kMinWidth = 512;
 
 constexpr char     kKind = 'X';
-constexpr uint32_t kIndices = 1728;   // 288 quads, on game build 332753
+
+// 288 quads, measured where the panel comes out 2440x1996. The count is
+// TESSELLATION, not content: the GUI subdivides its vector curves by pixel
+// size, so the same widget on a smaller panel needs fewer segments. Measured
+// on one machine, two headsets, same build and same ship -- panel 2440x1996
+// takes 1728 indices and panel 1002x820 does not, which is why this shipped
+// working on one headset and dead on the other.
+//
+// So the default is only ever right for one panel size, and the useful thing
+// this module does about it is NAME THE CANDIDATES in the log rather than
+// leave the owner to census it. See the intermittency table below.
+constexpr uint32_t kIndices = 1728;
 
 bool     g_off = false;
 uint32_t g_indices = kIndices;
@@ -49,6 +61,26 @@ uint32_t g_reports = 0;        // how many lines have been printed at all
 uint64_t g_surfaceSeen = 0;
 uint32_t g_panelW = 0, g_panelH = 0;
 bool     g_saidNoMatch = false;
+
+// The intermittency table: which index counts land in the panel, and in how
+// many DISTINCT frames each.
+//
+// The flash is the one draw that is there on some frames and not others --
+// that is what a pulse is, and it is the property that does not change with
+// resolution, build or ship. Everything else on the panel is drawn every
+// frame. So a count seen in a minority of frames is a candidate, and the
+// log can hand the owner the number to set instead of asking for a census.
+constexpr uint32_t kSeenSlots = 24;
+struct Seen {
+    uint32_t indices = 0;
+    uint32_t frames = 0;      // distinct frames it appeared in
+    uint32_t lastFrame = 0;   // so one frame counts once
+};
+Seen     g_seen[kSeenSlots];
+uint32_t g_seenCount = 0;
+uint32_t g_frame = 0;         // every frame, so one frame counts a count once
+uint32_t g_panelFrames = 0;   // frames the panel was drawn in -- the denominator
+uint32_t g_panelLastFrame = 0;
 
 }  // namespace
 
@@ -75,9 +107,10 @@ void wakePulseConfigure(Config& cfg) {
             "are drawn into the same holo panel. off drops the one draw that "
             "paints it (%u indices of the GUI's textureless vector shader) "
             "on the frames the flash is on, and leaves the rest of the panel "
-            "alone. If the count below stays at zero, the index count has "
-            "moved: re-derive it with a census and set "
-            "advanced.wake_pulse_indices.",
+            "alone. That count is tessellation and depends on the panel's "
+            "pixel size, so if the count below stays at zero this build "
+            "will name the candidates it saw and one of them wants "
+            "setting in advanced.wake_pulse_indices.",
             g_off ? "off" : "stock", g_indices);
     }
 }
@@ -97,14 +130,45 @@ bool wakePulseSkips(char kind, uint32_t count, uint32_t targetW,
     ++g_surfaceSeen;
     g_panelW = targetW;
     g_panelH = targetH;
+    // Frames the panel was drawn in, not frames overall: menus and loading
+    // draw no panel, and counting them would dilute a real pulse below the
+    // threshold that is meant to find it.
+    if (g_panelLastFrame != g_frame) {
+        g_panelLastFrame = g_frame;
+        ++g_panelFrames;
+    }
 
-    if (kind != kKind || count != g_indices) return false;
-    ++g_dropped;
-    return true;
+    if (kind == kKind && count == g_indices) {
+        ++g_dropped;
+        return true;
+    }
+
+    // Not ours. Record it while we still have nothing, so that if the count
+    // is wrong for this panel the log can say what the alternatives were.
+    // Stops costing anything the moment a real match happens or the table
+    // fills.
+    if (kind == kKind && g_dropped == 0 && !g_saidNoMatch) {
+        for (uint32_t i = 0; i < g_seenCount; ++i) {
+            if (g_seen[i].indices != count) continue;
+            if (g_seen[i].lastFrame != g_frame) {
+                g_seen[i].lastFrame = g_frame;
+                ++g_seen[i].frames;
+            }
+            return false;
+        }
+        if (g_seenCount < kSeenSlots) {
+            g_seen[g_seenCount].indices = count;
+            g_seen[g_seenCount].frames = 1;
+            g_seen[g_seenCount].lastFrame = g_frame;
+            ++g_seenCount;
+        }
+    }
+    return false;
 }
 
 void wakePulseReport() {
     if (!g_off) return;
+    ++g_frame;
 
     // The diagnosis a field report needs, said once. "Still flashing" has
     // two causes and they want different answers: the panel was never
@@ -112,16 +176,38 @@ void wakePulseReport() {
     // says which, with the panel's real size to re-derive from.
     if (!g_saidNoMatch && g_dropped == 0 && g_surfaceSeen > 20000) {
         g_saidNoMatch = true;
+        // The candidates, named. A pulse is a draw present in a MINORITY of
+        // frames; everything else on this panel is drawn in all of them. Two
+        // per cent to sixty is wide enough for a slow blink and a fast one
+        // and still excludes the constant furniture.
+        char list[220] = "";
+        int at = 0, found = 0;
+        for (uint32_t i = 0; i < g_seenCount && at < 180; ++i) {
+            const uint32_t pct =
+                g_panelFrames ? g_seen[i].frames * 100 / g_panelFrames : 0;
+            if (pct < 2 || pct > 60) continue;
+            const int n = _snprintf_s(list + at, sizeof(list) - at, _TRUNCATE,
+                                      "%s%u (in %u%% of frames)",
+                                      found ? ", " : "", g_seen[i].indices, pct);
+            if (n <= 0) break;
+            at += n;
+            ++found;
+        }
         Log::get().note(
             "wake pulse: the panel surface IS being found (%ux%u, seen %llu "
             "times) but no %c draw of %u indices has landed in it, so nothing "
-            "is being held off. The index count is content-dependent and has "
-            "moved: take a census with census_offscreen on while the marker "
-            "flashes, find the draw into that surface that appears only on "
-            "the flashing frames, and set advanced.wake_pulse_indices to its "
-            "n=. Said once.",
+            "is being held off. The count is TESSELLATION -- the GUI "
+            "subdivides its curves by pixel size, so a smaller panel needs "
+            "fewer -- and %u is right for a 2440x1996 panel. %s%s Set "
+            "advanced.wake_pulse_indices to the one that stops the flashing. "
+            "Said once.",
             g_panelW, g_panelH, static_cast<unsigned long long>(g_surfaceSeen),
-            kKind, g_indices);
+            kKind, g_indices, kIndices,
+            found ? "Drawn in only some frames here, so a pulse: " : "",
+            found ? list
+                  : "Nothing on this panel was drawn intermittently while "
+                    "this watched, so the marker was probably never up -- "
+                    "select a high wake and look again.");
         return;
     }
 
