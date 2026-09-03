@@ -47,6 +47,7 @@
 #include "target_sharp.h"
 #include "hud_sprite.h"
 #include "panel_upscale.h"
+#include "wake_pulse.h"
 #include "intro_panel.h"
 #include "intro_upscale.h"
 #include "intro_probe.h"
@@ -1647,6 +1648,17 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
                         s->censusAutoFired, kCensusAutoFireCap);
                 }
                 s->censusAutoLastHitFrame = s->frameNo;
+            }
+        }
+        // The wake pulse (wake_pulse.h), beside the probe that found it and
+        // matched the same way: a draw shape into a target named by its
+        // proportion of the eye. A shipped fix rather than an instrument, so
+        // it is checked first and costs one bool when off.
+        if (wakePulseWantsDraws()) {
+            ResourceInfo wp;
+            if (bindingResolve(bindingGet(BindSlot::Rtv0), &wp) &&
+                wp.isTexture2D && wakePulseSkips(kind, count, wp.a, wp.b)) {
+                return DrawVerdict::kSkip;
             }
         }
         // The offscreen probe: skip draws INTO a buffer named by its size.
@@ -3518,6 +3530,7 @@ void vScreenRefreshConfig() {
     targetSharpConfigure(cfg);
     hudSpriteConfigure(cfg);
     panelUpscaleConfigure(cfg);
+    wakePulseConfigure(cfg);
     scrimConfigure(cfg);
     quadProbeConfigure(cfg);
     loaderPanelConfigure(cfg);
@@ -3637,6 +3650,7 @@ void vScreenFrameBoundary() {
         quadProbeTick(g_state->ownerCtx);
         drawCensusTick(g_state->ownerCtx);
         panelUpscaleFrameEnd();
+        wakePulseReport();
         // Told to the openvr half whether or not any intro fix is on: the
         // cull guard holds its lie until a scene exists, and that must
         // depend on the GAME reaching one, not on EDVR being configured
@@ -4414,6 +4428,7 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     targetSharpConfigure(cfg);
     hudSpriteConfigure(cfg);
     panelUpscaleConfigure(cfg);
+    wakePulseConfigure(cfg);
     scrimConfigure(cfg);
     quadProbeConfigure(cfg);
     loaderPanelConfigure(cfg);
