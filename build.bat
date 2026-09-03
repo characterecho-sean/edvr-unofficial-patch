@@ -211,6 +211,11 @@ cl.exe %CFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "%ROOT%\src\d3d11\panel_quad.cpp" "%ROOT%\src\d3d11\panel_curve.cpp" ^
     "%ROOT%\src\d3d11\shader_sig.cpp" ^
     "%ROOT%\src\d3d11\remlok_fix.cpp" "%ROOT%\src\d3d11\holo_fix.cpp" ^
+    "%ROOT%\src\d3d11\target_sharp.cpp" ^
+    "%ROOT%\src\d3d11\hud_sprite.cpp" ^
+    "%ROOT%\src\d3d11\panel_upscale.cpp" ^
+    "%ROOT%\src\d3d11\wake_pulse.cpp" ^
+    "%ROOT%\src\d3d11\hud_grain.cpp" ^
     "%ROOT%\src\d3d11\backdrop_fix.cpp" ^
     "%ROOT%\src\d3d11\scrim_fix.cpp" ^
     "%ROOT%\src\d3d11\quad_probe.cpp" ^

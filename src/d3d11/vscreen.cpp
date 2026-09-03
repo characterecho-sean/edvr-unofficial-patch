@@ -45,6 +45,11 @@
 #include "fov_probe.h"
 #include "glitch_frame.h"
 #include "holo_fix.h"
+#include "target_sharp.h"
+#include "hud_sprite.h"
+#include "panel_upscale.h"
+#include "wake_pulse.h"
+#include "hud_grain.h"
 #include "intro_panel.h"
 #include "intro_upscale.h"
 #include "intro_probe.h"
@@ -1250,6 +1255,15 @@ void noteForeignDraw(ID3D11DeviceContext* self) {
 // every element's identity.
 enum class DrawVerdict {
     kNone, kPanel, kSkip, kRemlok, kHolo, kWitchstar, kBillboard,
+    // The target direction indicator, reconstructed rather than smeared
+    // (target_sharp.h): forwarded through a replacement pixel shader.
+    kTargetSharp,
+    // A HUD sprite atlas, resampled once and substituted (hud_sprite.h).
+    kHudSprite,
+    // A cockpit holo panel, reconstructed once a frame (panel_upscale.h).
+    kPanelUpscale,
+    // The flight HUD with its noise table held flat (hud_grain.h).
+    kHudGrain,
     // The intro movie's panel drawn with our constants at VS b2
     // (intro_panel.h): forwarded normally, restored after.
     kIntroPanel,
@@ -1445,7 +1459,8 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         !fssRingWantsDraws() && !fssDumpWantsDraws() &&
         !eyeSplitWantsDraws() && !resolveProbeWantsDraws() &&
         !stencilProbeWantsDraws() && !resolveBindWants() &&
-        !remlokWantsDraws() && !holoWantsDraws() && !witchstarWantsDraws() &&
+        !remlokWantsDraws() && !holoWantsDraws() && !targetSharpWantsDraws() && !hudSpriteWantsDraws() && !panelUpscaleWantsDraws() && !hudGrainWantsDraws() &&
+        !witchstarWantsDraws() &&
         !sunglareWantsDraws() && !cbPeekEnabled() && !billboardWantsDraws() &&
         !drawCensusArmed() && !panelQuadWants() && !panelCurveWants() &&
         !particleWantsDraws() && !backdropWantsDraws() &&
@@ -1595,10 +1610,12 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
                 D3D11_VIEWPORT vp{};
                 self->RSGetViewports(&nvp, &vp);
                 if (nvp >= 1 && viewportIs(vp, ow, oh)) {
-                    vp.TopLeftX *= 2.0f;
-                    vp.TopLeftY *= 2.0f;
-                    vp.Width *= 2.0f;
-                    vp.Height *= 2.0f;
+                    const float k =
+                        static_cast<float>(fssResScaleOf(res));
+                    vp.TopLeftX *= k;
+                    vp.TopLeftY *= k;
+                    vp.Width *= k;
+                    vp.Height *= k;
                     s->realRSSetViewports(self, 1, &vp);
                     fssResNoteViewportScaled(true);
                 }
@@ -1635,6 +1652,19 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
                         s->censusAutoFired, kCensusAutoFireCap);
                 }
                 s->censusAutoLastHitFrame = s->frameNo;
+            }
+        }
+        // The wake pulse (wake_pulse.h), beside the probe that found it and
+        // matched the same way: a draw shape into a target named by its
+        // proportion of the eye. A shipped fix rather than an instrument, so
+        // it is checked first and costs one bool when off.
+        if (wakePulseWantsDraws()) {
+            ResourceInfo wp;
+            if (bindingResolve(bindingGet(BindSlot::Rtv0), &wp) &&
+                wp.isTexture2D &&
+                wakePulseSkips(self, kind, count, wp.a, wp.b,
+                               s->qsStartIndex, s->qsBaseVertex)) {
+                return DrawVerdict::kSkip;
             }
         }
         // The offscreen probe: skip draws INTO a buffer named by its size.
@@ -1886,6 +1916,34 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     // The loading hologram's pattern fix, same placement for the same reason.
     if (holoWantsDraws() && holoOnEyeDraw(kind, count, instances)) {
         return DrawVerdict::kHolo;
+    }
+
+    // The target indicator's composite, recognised the same way and in the
+    // same place: shape, then what it samples, then its shader's hash.
+    if (targetSharpWantsDraws() &&
+        targetSharpOnEyeDraw(self, kind, count, instances)) {
+        return DrawVerdict::kTargetSharp;
+    }
+
+    // The HUD's sprite atlases, recognised the same way: shape, then what it
+    // samples, then its shader's hash.
+    if (hudSpriteWantsDraws() &&
+        hudSpriteOnEyeDraw(self, kind, count, instances)) {
+        return DrawVerdict::kHudSprite;
+    }
+
+    // The cockpit holo panel carrying the target indicator, recognised by
+    // what it reads at slot 2 and then by its shader.
+    if (panelUpscaleWantsDraws() &&
+        panelUpscaleOnEyeDraw(self, kind, count, instances)) {
+        return DrawVerdict::kPanelUpscale;
+    }
+
+    // The flight HUD's grain, recognised the same way: what it samples,
+    // then its shader.
+    if (hudGrainWantsDraws() &&
+        hudGrainOnEyeDraw(self, kind, count, instances)) {
+        return DrawVerdict::kHudGrain;
     }
 
     // The loader dialog's dimming wash, recognised by what it samples.
@@ -2707,6 +2765,10 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     if (v == DrawVerdict::kResolveProbe) resolveProbeBegin(self);
     if (v == DrawVerdict::kStencilProbe) stencilProbeBegin(self);
     if (v == DrawVerdict::kHolo) holoBegin(self);
+    if (v == DrawVerdict::kTargetSharp) targetSharpBegin(self);
+    if (v == DrawVerdict::kHudSprite) hudSpriteBegin(self);
+    if (v == DrawVerdict::kPanelUpscale) panelUpscaleBegin(self);
+    if (v == DrawVerdict::kHudGrain) hudGrainBegin(self);
     if (v == DrawVerdict::kScrim) scrimBegin(self);
     if (v == DrawVerdict::kWitchstar) witchstarBegin(self);
     if (v == DrawVerdict::kBillboard) billboardBegin(self);
@@ -2731,6 +2793,10 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     if (v == DrawVerdict::kBillboard) billboardEnd(self);
     if (v == DrawVerdict::kWitchstar) witchstarEnd(self);
     if (v == DrawVerdict::kScrim) scrimEnd(self);
+    if (v == DrawVerdict::kHudGrain) hudGrainEnd(self);
+    if (v == DrawVerdict::kPanelUpscale) panelUpscaleEnd(self);
+    if (v == DrawVerdict::kHudSprite) hudSpriteEnd(self);
+    if (v == DrawVerdict::kTargetSharp) targetSharpEnd(self);
     if (v == DrawVerdict::kHolo) holoEnd(self);
     if (v == DrawVerdict::kFssReveal) fssRevealEnd(self);
     if (v == DrawVerdict::kFssRing) fssRingEnd(self);
@@ -2917,11 +2983,12 @@ void STDMETHODCALLTYPE hookedRSSetViewports(ID3D11DeviceContext* self, UINT n,
     uint32_t ow = 0, oh = 0;
     void* res = currentRtv0Resource(s);
     if (res && fssResOrigSize(res, &ow, &oh) && viewportIs(vps[0], ow, oh)) {
+        const float k = static_cast<float>(fssResScaleOf(res));
         D3D11_VIEWPORT v = vps[0];
-        v.TopLeftX *= 2.0f;
-        v.TopLeftY *= 2.0f;
-        v.Width *= 2.0f;
-        v.Height *= 2.0f;
+        v.TopLeftX *= k;
+        v.TopLeftY *= k;
+        v.Width *= k;
+        v.Height *= k;
         s->realRSSetViewports(self, 1, &v);
         fssResNoteViewportScaled(false);
         return;
@@ -3475,6 +3542,11 @@ void vScreenRefreshConfig() {
     fssResConfigure(cfg);
     remlokConfigure(cfg);
     holoConfigure(cfg);
+    targetSharpConfigure(cfg);
+    hudSpriteConfigure(cfg);
+    panelUpscaleConfigure(cfg);
+    wakePulseConfigure(cfg);
+    hudGrainConfigure(cfg);
     scrimConfigure(cfg);
     quadProbeConfigure(cfg);
     loaderPanelConfigure(cfg);
@@ -3594,6 +3666,8 @@ void vScreenFrameBoundary() {
     if (g_state && g_state->ownerCtx) {
         quadProbeTick(g_state->ownerCtx);
         drawCensusTick(g_state->ownerCtx);
+        panelUpscaleFrameEnd();
+        wakePulseReport();
         // The supersample resolve's warm compile, once a frame,
         // unconditionally -- not nested under any other feature's gate,
         // so a session with every FSS feature off still reaches it. A flag
@@ -4391,6 +4465,11 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     readCensusSkip(cfg, g_state);
     remlokConfigure(cfg);
     holoConfigure(cfg);
+    targetSharpConfigure(cfg);
+    hudSpriteConfigure(cfg);
+    panelUpscaleConfigure(cfg);
+    wakePulseConfigure(cfg);
+    hudGrainConfigure(cfg);
     scrimConfigure(cfg);
     quadProbeConfigure(cfg);
     loaderPanelConfigure(cfg);
@@ -4623,6 +4702,7 @@ void shutdownVScreenFixes() {
     holoShutdown();
     scrimShutdown();
     quadProbeShutdown();
+    wakePulseShutdown();
     loaderPanelShutdown();
     splashDimShutdown();
     backdropShutdown();

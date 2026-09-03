@@ -79,6 +79,19 @@ DRAW_RE = re.compile(r'^DC (\d+) #(\d+) ([A-Z]) n=(\d+) i=(\d+) '
                      # drawn, and whether it was allowed to land is read off
                      # the line when that is the question.
                      r'(?: ds=\S+ st=\S+ bm=\S+ pr=\S+)?'
+                     # The blend tail: bl= is slot 0's whole blend equation
+                     # and sm= the sample mask. Optional and out of the
+                     # signature for the same reason as the two tails above.
+                     #
+                     # This one was not optional, it was ABSENT -- and the
+                     # cost was a silent wrong answer, not a parse error. A
+                     # line the regex misses is a line skipped, so a census
+                     # of 888 draws read as 0 and the tool printed "No steady
+                     # difference": the exact words it would print if the
+                     # effect had genuinely not been captured. The self-test
+                     # passed throughout, because it builds its fixture from
+                     # lines this file writes rather than from a real log.
+                     r'(?: bl=\S+ sm=[0-9A-Fa-f]+)?'
                      r'(?: q=\d+)?$')
 FRAME_RE = re.compile(r'^DC frame (\d+) draws=(\d+)(?: \S+=\d+)*$')
 # res= is the underlying resource's identity -- what connects an SRV @id to

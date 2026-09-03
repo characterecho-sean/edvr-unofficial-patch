@@ -6,6 +6,7 @@
 
 #include "../common/config.h"
 #include "../common/log.h"
+#include "../common/frame_flag.h"   // eyeTextureSize: is it known yet?
 #include "binding_shadow.h"
 #include "vscreen.h"  // vScreenIsEyeSized
 
@@ -39,6 +40,12 @@ bool                      g_engaged = false;
 ID3D11ShaderResourceView* g_displaced = nullptr;
 
 uint64_t g_applied = 0;
+
+// The near-misses: a draw with the hologram's whole shape whose slot 0 did
+// not pass the eye test. Counted so a log can tell "engaged late" from
+// "never engaged".
+uint64_t g_missed = 0;
+bool     g_missNoted = false;
 
 ID3D11ShaderResourceView* uniformSrv(ID3D11DeviceContext* ctx) {
     if (g_srv && g_texLevel == g_level) return g_srv;
@@ -142,6 +149,30 @@ bool holoOnEyeDraw(char kind, uint32_t count, uint32_t instances) {
     ResourceInfo depth;
     if (!bindingResolve(bindingGet(BindSlot::PsSrv0), &depth) ||
         !depth.isTexture2D || !vScreenIsEyeSized(depth.a, depth.b)) {
+        // Everything about this draw says hologram except the one test that
+        // needs an answer from the OTHER half. A field report (2026-09-03)
+        // says the scan lines are back for the first few seconds of the
+        // loading screen, and the eye size arrives from openvr_api.dll nine
+        // seconds into a session -- so a hologram drawn before that cannot
+        // be recognised, however right the rest of it looks. Said once, with
+        // what slot 0 actually was, because "engaged late" and "never
+        // engaged" are different faults and the log could not tell them
+        // apart.
+        if (!g_missNoted && depth.isTexture2D) {
+            uint32_t ew = 0, eh = 0;
+            const bool known = eyeTextureSize(&ew, &eh) && ew && eh;
+            if (++g_missed >= 60) {
+                g_missNoted = true;
+                Log::get().note(
+                    "holo pattern: %llu hologram-shaped draw(s) went by "
+                    "unrecognised because slot 0 was %ux%u and the eye %s. "
+                    "The pattern is the game's own for those frames, which is "
+                    "what the scan lines at the start of a loading screen "
+                    "are. Said once.",
+                    static_cast<unsigned long long>(g_missed), depth.a, depth.b,
+                    known ? "is a different size" : "was not published yet");
+            }
+        }
         return false;
     }
     return true;

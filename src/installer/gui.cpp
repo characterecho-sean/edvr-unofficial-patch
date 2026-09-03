@@ -155,9 +155,28 @@ void invalidateReportGutter() {
 // painted by the parent and has to follow.
 LRESULT CALLBACK reportProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam,
                             UINT_PTR /*id*/, DWORD_PTR /*data*/) {
+    // A multiline EDIT scrolls on the wheel only when it has WS_VSCROLL, and
+    // this one deliberately has no scroll bar -- the card draws its own slim
+    // gutter instead. So the control ignores the tick however it is
+    // delivered, and routing it correctly (which the pump now does) was
+    // necessary but not sufficient: two separate faults, one symptom, and
+    // the first fix looked like it had simply failed.
+    //
+    // So scroll it here. EM_LINESCROLL is what the EDIT would have done for
+    // itself with the style it does not have.
+    if (message == WM_MOUSEWHEEL) {
+        UINT lines = 3;
+        SystemParametersInfoW(SPI_GETWHEELSCROLLLINES, 0, &lines, 0);
+        if (lines == 0) lines = 3;          // "do not scroll" -- still scroll
+        if (lines > 24) lines = 24;         // WHEEL_PAGESCROLL is 0xFFFFFFFF
+        const int delta = GET_WHEEL_DELTA_WPARAM(wparam);
+        const int step = -delta * static_cast<int>(lines) / WHEEL_DELTA;
+        if (step != 0) SendMessageW(hwnd, EM_LINESCROLL, 0, step);
+        invalidateReportGutter();
+        return 0;
+    }
     const LRESULT out = DefSubclassProc(hwnd, message, wparam, lparam);
     switch (message) {
-        case WM_MOUSEWHEEL:
         case WM_KEYDOWN:
         case WM_MOUSEMOVE:
         case WM_TIMER:   // the EDIT's own drag-select autoscroll
@@ -1053,6 +1072,20 @@ LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
             }
             break;
 
+        // WM_MOUSEWHEEL goes to whichever control has keyboard focus, not
+        // the one under the cursor -- and nobody clicks a read-only status
+        // pane before trying to scroll it. The settings list gets away with
+        // focus-routing because its rows take focus on click; the report
+        // needs the tick forwarded here so hovering it is enough.
+        case WM_MOUSEWHEEL: {
+            if (g.screen != Screen::Install || !g.report) break;
+            POINT pt{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};  // screen coords
+            ScreenToClient(window, &pt);
+            const RECT card = reportCardRect();
+            if (!PtInRect(&card, pt)) break;
+            return SendMessageW(g.report, WM_MOUSEWHEEL, wparam, lparam);
+        }
+
         case WM_CTLCOLOREDIT:
         case WM_CTLCOLORSTATIC:
         case WM_CTLCOLORLISTBOX: {
@@ -1156,6 +1189,26 @@ int runGui(HINSTANCE instance, const AppArgs& args) {
 
     MSG message;
     while (GetMessageW(&message, nullptr, 0, 0) > 0) {
+        // A wheel tick is delivered to whatever holds keyboard FOCUS, not to
+        // whatever the cursor is over. Every wheel handler in this program
+        // sits in a window proc, so unless that window happens to be focused
+        // its handler never runs at all -- which is why the report pane's own
+        // fix did nothing in the field: the tick was going to whichever
+        // button had focus and stopping there.
+        //
+        // Redirecting here, before dispatch, is the one place that fixes it
+        // for every control at once. Anything outside our own window tree is
+        // left alone, and WindowFromPoint skips hidden and disabled children,
+        // so a pane in either state still falls through to the parent's
+        // handler.
+        if (message.message == WM_MOUSEWHEEL) {
+            const POINT pt{GET_X_LPARAM(message.lParam),
+                           GET_Y_LPARAM(message.lParam)};   // screen coords
+            const HWND under = WindowFromPoint(pt);
+            if (under && (under == window || IsChild(window, under))) {
+                message.hwnd = under;
+            }
+        }
         if (IsDialogMessageW(window, &message)) continue;
         TranslateMessage(&message);
         DispatchMessageW(&message);

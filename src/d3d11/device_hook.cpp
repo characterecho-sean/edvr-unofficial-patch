@@ -23,6 +23,7 @@
 #include "../common/vtable_hook.h"
 #include "binding_shadow.h"
 #include "draw_census.h"
+#include "quad_probe.h"
 #include "exposure_fix.h"
 #include "vscreen.h"
 #include "glitch_frame.h"
@@ -305,9 +306,10 @@ HRESULT STDMETHODCALLTYPE hookedCreatePS(ID3D11Device* self, const void* bytecod
     return hr;
 }
 
-// The FSS body layer's resolution (fss_res.h). The match, the doubling and
-// the refusal rules all live in that module; this hook only carries descs
-// to it and created textures back. One bool per create when the fix is off.
+// Render targets made larger than asked: the FSS body layer, and surfaces
+// named by size (fss_res.h). The match, the scaling and the refusal rules
+// all live in that module; this hook only carries descs to it and created
+// textures back. One bool per create when both matchers are off.
 HRESULT STDMETHODCALLTYPE hookedCreateTexture2D(ID3D11Device* self,
                                                 const D3D11_TEXTURE2D_DESC* desc,
                                                 const D3D11_SUBRESOURCE_DATA* init,
@@ -332,7 +334,12 @@ HRESULT STDMETHODCALLTYPE hookedCreateTexture2D(ID3D11Device* self,
     }
     if (out && *out) {
         guardedBudget(g_createBudget, [&] {
-            fssResNoteCreated(*out, desc->Width, desc->Height);
+            // The factor comes from the two descs we already hold rather
+            // than from the module, which would have to stash it between
+            // the match and this call -- and this hook runs on the game's
+            // streaming threads.
+            fssResNoteCreated(*out, desc->Width, desc->Height,
+                              desc->Width ? d.Width / desc->Width : 0);
         });
     }
     return hr;
@@ -463,7 +470,13 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
         // history key, same cure: a diagnostic keypress that another window
         // swallowed must say so, because the log it failed to write is the
         // place anyone would look for the reason.
-        if (g_state->censusKey.pressed()) drawCensusRequest();
+        if (g_state->censusKey.pressed()) {
+            drawCensusRequest();
+            // Same key: the census says WHAT was drawn, the quad probe says
+            // WHERE. Two instruments on one press keeps the two answers on
+            // the same frame, which is the only way they can be compared.
+            quadProbeRequest();
+        }
         if (g_state->missedCensusNotes < kMissedDumpNotes &&
             g_state->censusKey.takeMissedWhileUnfocused()) {
             ++g_state->missedCensusNotes;
