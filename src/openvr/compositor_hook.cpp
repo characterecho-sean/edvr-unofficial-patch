@@ -319,6 +319,7 @@ struct State {
         uint64_t qpc;
         uint32_t frame;
         float    pos[3];
+        float    rot[9];   // the 3x3 rotation, row-major: the turn column
         int32_t  result;
         uint8_t  valid;
     };
@@ -334,6 +335,15 @@ struct State {
     uint64_t  poseHead = 0;
     uint32_t  poseFrame = 0;
     float     poseStepNoteMm = 50.0f;
+    // The pose hold (advanced.pose_hold): a developer instrument that hands
+    // the game the SAME headset pose every frame, captured when it turned on,
+    // whatever the tracker reports after. For telling the tracker's motion
+    // from the game's own: the compositor still reprojects the headset's
+    // view by the real head motion, so the reading is the game's mirror
+    // window, the eye as rendered. Off by default; live.
+    bool      poseHoldWanted = false;
+    bool      poseHolding = false;
+    vr::HmdMatrix34_t poseHold = {};
     Hotkey    poseDumpKey;
     bool      poseKeyBound = false;
     // The external-camera key, watched on THIS side too.
@@ -403,6 +413,7 @@ void configurePoseRing(State* s) {
     // Clamped anyway: 0 would flag every frame and drown the verdict it exists
     // to make readable.
     s->poseStepNoteMm = (std::isfinite(mm) && mm > 0.0f && mm <= 1000.0f) ? mm : 50.0f;
+    s->poseHoldWanted = cfg.getBool("advanced.pose_hold", false);
 
     // The camera key comes from the GAME's bindings, like everywhere else
     // (0.7.1 retired the ini keys). ONCE, not on every reload: this runs on
@@ -499,6 +510,14 @@ void dumpPoseRing(State* s, const char* trigger, uint32_t msAfterPress) {
     float    biggestMm = 0.0f;
     uint32_t badStates = 0;
     const float* prev = nullptr;
+    // The turn column: how far the headset ROTATED since the frame before,
+    // in arcminutes, from the relative rotation's trace. A hairline on a
+    // pixel grid moves with a fraction of a pixel of this; at the centre of
+    // a Pimax Crystal Super eye a rendered pixel is about 1.2 arcmin, on a
+    // Quest 3 over Virtual Desktop about 2.5.
+    const float* prevRot = nullptr;
+    double   turnSum = 0.0, turnMax = 0.0;
+    uint32_t turnN = 0, turnOverHalf = 0;
 
     for (uint64_t i = first; i < s->poseHead; ++i) {
         const State::PoseEntry& e = s->poseRing[i % State::kPoseRingFrames];
@@ -512,6 +531,24 @@ void dumpPoseRing(State* s, const char* trigger, uint32_t msAfterPress) {
             stepMm = sqrtf(d2) * 1000.0f;
             if (stepMm > biggestMm) biggestMm = stepMm;
         }
+        double turnArcmin = 0.0;
+        if (prevRot) {
+            double tr = 0.0;
+            for (int ii = 0; ii < 3; ++ii) {
+                for (int kk = 0; kk < 3; ++kk) {
+                    tr += static_cast<double>(prevRot[kk * 3 + ii]) *
+                          static_cast<double>(e.rot[kk * 3 + ii]);
+                }
+            }
+            double c = (tr - 1.0) * 0.5;
+            if (c > 1.0) c = 1.0;
+            if (c < -1.0) c = -1.0;
+            turnArcmin = acos(c) * 3437.74677;
+            turnSum += turnArcmin;
+            if (turnArcmin > turnMax) turnMax = turnArcmin;
+            if (turnArcmin > 0.6) ++turnOverHalf;
+            ++turnN;
+        }
         if (!e.valid || e.result != vr::TrackingResult_Running_OK) ++badStates;
         const double msAgo =
             freq ? static_cast<double>(static_cast<int64_t>(newest - e.qpc)) * 1000.0 /
@@ -524,12 +561,25 @@ void dumpPoseRing(State* s, const char* trigger, uint32_t msAfterPress) {
             lastStepFrame = e.frame;
             lastStepMsAgo = msAgo;
         }
-        Log::get().note("HMD %8.1fms f%-7u pos=(%+.3f %+.3f %+.3f) step=%6.1fmm %s%s",
+        Log::get().note("HMD %8.1fms f%-7u pos=(%+.3f %+.3f %+.3f) step=%6.1fmm turn=%6.2f arcmin %s%s",
                         -msAgo, e.frame, e.pos[0], e.pos[1], e.pos[2], stepMm,
+                        turnArcmin,
                         e.valid ? "" : "POSE-INVALID ",
                         e.result == vr::TrackingResult_Running_OK
                             ? "" : "TRACKING-NOT-OK");
         prev = e.pos;
+        prevRot = e.rot;
+    }
+    if (turnN > 0) {
+        Log::get().note(
+            "--- rotation across the window: the headset turned %.2f arcmin in "
+            "its largest one-frame step and %.3f arcmin per frame on average; "
+            "%u of %u frames turned more than 0.6 arcmin (about half a rendered "
+            "pixel at the centre of a Pimax Crystal Super eye). A hairline on "
+            "the ship blinks when the view moves a fraction of a pixel between "
+            "frames; if these are zero while it blinks, the motion is the "
+            "game's own. ---",
+            turnMax, turnSum / static_cast<double>(turnN), turnOverHalf, turnN);
     }
 
     // THE VERDICT. Two numbers and a count, so the next "was that EDVR?" session
@@ -1591,6 +1641,11 @@ vr::EVRCompositorError hookedWaitGetPoses(void* self,
             e.pos[0] = hmd.mDeviceToAbsoluteTracking.m[0][3];
             e.pos[1] = hmd.mDeviceToAbsoluteTracking.m[1][3];
             e.pos[2] = hmd.mDeviceToAbsoluteTracking.m[2][3];
+            for (int rr = 0; rr < 3; ++rr) {
+                for (int cc = 0; cc < 3; ++cc) {
+                    e.rot[rr * 3 + cc] = hmd.mDeviceToAbsoluteTracking.m[rr][cc];
+                }
+            }
             e.result = static_cast<int32_t>(hmd.eTrackingResult);
             e.valid = hmd.bPoseIsValid ? 1u : 0u;
             ++s->poseHead;
@@ -1688,6 +1743,50 @@ vr::EVRCompositorError hookedWaitGetPoses(void* self,
         s->poseDumpDueMs = 0;
         dumpPoseRing(s, "a key you pressed two seconds ago",
                      (uint32_t)(kPoseDumpDelayMs / 1000));
+    }
+
+    // The pose hold: advanced.pose_hold. After the ring has recorded the
+    // RAW pose (the instrument measures the headset, not this) and before
+    // the theater's own freeze and the head offset, which stack on whatever
+    // is here. Same shape as the theater freeze: the matrix held, the
+    // velocities zeroed so nothing extrapolates, both arrays.
+    if (renderCount > vr::k_unTrackedDeviceIndex_Hmd && renderPoses) {
+        if (s->poseHoldWanted) {
+            if (!s->poseHolding) {
+                s->poseHolding = true;
+                s->poseHold = renderPoses[vr::k_unTrackedDeviceIndex_Hmd]
+                                  .mDeviceToAbsoluteTracking;
+                Log::get().note(
+                    "pose hold: ON -- from this frame the game renders every "
+                    "frame from the headset pose captured now (position %+.3f "
+                    "%+.3f %+.3f), whatever the tracker reports after. A "
+                    "developer instrument for telling the tracker's motion "
+                    "from the game's own: judge the game's MIRROR window (the "
+                    "eye as rendered), because the compositor still reprojects "
+                    "the headset's view by your real head motion. The world is "
+                    "head-locked while this is on. pose_hold = 0 releases it, "
+                    "live.",
+                    s->poseHold.m[0][3], s->poseHold.m[1][3], s->poseHold.m[2][3]);
+            }
+            renderPoses[vr::k_unTrackedDeviceIndex_Hmd].mDeviceToAbsoluteTracking =
+                s->poseHold;
+            for (int k = 0; k < 3; ++k) {
+                renderPoses[vr::k_unTrackedDeviceIndex_Hmd].vVelocity.v[k] = 0.0f;
+                renderPoses[vr::k_unTrackedDeviceIndex_Hmd].vAngularVelocity.v[k] = 0.0f;
+            }
+            if (gameCount > vr::k_unTrackedDeviceIndex_Hmd && gamePoses) {
+                gamePoses[vr::k_unTrackedDeviceIndex_Hmd].mDeviceToAbsoluteTracking =
+                    s->poseHold;
+                for (int k = 0; k < 3; ++k) {
+                    gamePoses[vr::k_unTrackedDeviceIndex_Hmd].vVelocity.v[k] = 0.0f;
+                    gamePoses[vr::k_unTrackedDeviceIndex_Hmd].vAngularVelocity.v[k] = 0.0f;
+                }
+            }
+        } else if (s->poseHolding) {
+            s->poseHolding = false;
+            Log::get().note("pose hold: released -- the game gets the live headset "
+                            "pose again from this frame.");
+        }
     }
 
     // The head offset, applied BEFORE the game sees the poses.
