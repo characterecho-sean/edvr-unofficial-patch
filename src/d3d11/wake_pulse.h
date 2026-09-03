@@ -34,7 +34,8 @@
 // is matched by RATIO instead, which is session-proof -- a literal size is
 // not, and reusing a stale one cost a day of this investigation.
 //
-// Off by default, and free when off.
+// ON by default since the field verification: the flashing is removed
+// unless fix.wake_pulse = stock asks for it back. Free when off.
 #pragma once
 
 #include <cstdint>
@@ -43,7 +44,7 @@ namespace edvr {
 
 class Config;
 
-// Reads experimental.wake_pulse (stock | off) and
+// Reads fix.wake_pulse (stock | off) and
 // advanced.wake_pulse_indices. Install and reload; live.
 void wakePulseConfigure(Config& cfg);
 

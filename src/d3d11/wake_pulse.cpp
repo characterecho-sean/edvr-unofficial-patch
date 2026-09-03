@@ -32,7 +32,7 @@ uint32_t g_reports = 0;        // how many lines have been printed at all
 
 void wakePulseConfigure(Config& cfg) {
     const bool was = g_off;
-    const std::string m = cfg.getString("experimental.wake_pulse", "stock");
+    const std::string m = cfg.getString("fix.wake_pulse", "off");
     if (m == "stock") {
         g_off = false;
     } else if (m == "off") {
