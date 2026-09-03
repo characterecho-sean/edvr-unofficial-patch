@@ -140,7 +140,19 @@ bool fetchHistoryT(float2 p, float3 r0, float3 r1, float3 r2, float3 tv,
     d.z = -1.0;
     float3 dp = float3(dot(r0, d), dot(r1, d), dot(r2, d));
     if (useDepth) {
-        float zr = Z.Load(int3(region.xy + int2(p), 0));
+        // The NEAREST depth of the 3x3, not the pixel's own: at the edge of
+        // a near thing against a far one the pixel's own depth is either,
+        // and a history fetched by the far one at a text stroke's edge is
+        // the "underwater" the second depth flight saw at rest. With the
+        // nearest, the edge follows the thing in front, which is the
+        // standard dilation every velocity-based filter does.
+        float zr = 0.0;
+        [unroll] for (int oy = -1; oy <= 1; ++oy) {
+            [unroll] for (int ox = -1; ox <= 1; ++ox) {
+                int2 q = clamp(int2(p) + int2(ox, oy), int2(0, 0), size - 1);
+                zr = max(zr, Z.Load(int3(region.xy + q, 0)));
+            }
+        }
         float den = zr * (knobs.w - knobs.z) + knobs.z;
         if (zr > 0.0 && den > 0.0) {
             float z = knobs.z * knobs.w / den;
@@ -165,8 +177,17 @@ bool fetchHistoryT(float2 p, float3 r0, float3 r1, float3 r2, float3 tv,
     // such offsets every frame is the blur that compounds; the snap's
     // error is bounded by its threshold and never accumulates past it,
     // since each frame re-registers the history afresh. Off at 0.
+    // A SMOOTH snap: the fetch offset is scaled down continuously as it
+    // shrinks below the threshold, so neighbouring pixels on either side
+    // of it do not resample differently from frame to frame. The hard
+    // per-pixel snap of the seventh build did exactly that once depth
+    // made the offsets vary pixel by pixel, and the HUD's text shimmered
+    // "as if underwater" with the head held still (2026-09-03).
     float2 dpp = pp - p;
-    if (knobs.x > 0.0 && abs(dpp.x) < knobs.x && abs(dpp.y) < knobs.x) pp = p;
+    if (knobs.x > 0.0) {
+        float m = max(abs(dpp.x), abs(dpp.y));
+        pp = p + dpp * smoothstep(0.5 * knobs.x, 1.5 * knobs.x, m);
+    }
     hy = rgbToYcocg(catmullRom((pp + 0.5) / float2(size), float2(size)).rgb);
     return true;
 }

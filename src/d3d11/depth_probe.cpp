@@ -90,6 +90,8 @@ uint32_t g_drawsWithDsvThisFrame = 0, g_drawsWithDsvLastFrame = 0;
 uint32_t g_indirectThisFrame = 0, g_indirectLastFrame = 0;
 uint32_t g_eyeRtvDrawsThisFrame = 0, g_eyeRtvDrawsLastFrame = 0;
 uint32_t g_boundaryNext = 0;        // round-robin over the targets
+uint64_t g_censusLastMs = 0;
+constexpr uint64_t kCensusIntervalMs = 20000;
 uint64_t g_boundaryLastMs = 0;
 bool     g_stagingAtBoundary = false;
 uint32_t g_frameNo = 0;
@@ -316,6 +318,7 @@ double metresOf(float v) {
 struct GridStats {
     float mn = 1e30f, mx = -1e30f, centre = 0.0f;
     int atClear = 0, bandFar = 0, bandKm = 0, bandHm = 0, bandM = 0, bandNear = 0;
+    float block[16] = {};   // the 4x4 map: each block's NEAREST sample (reversed-Z max)
 };
 
 GridStats gridStats(const float* v, float clear) {
@@ -333,7 +336,36 @@ GridStats gridStats(const float* v, float clear) {
         else ++g.bandNear;                    // within 2 m
     }
     g.centre = v[7 * 16 + 7];
+    for (int by = 0; by < 4; ++by) {
+        for (int bx = 0; bx < 4; ++bx) {
+            float m = 0.0f;
+            for (int y = by * 4; y < by * 4 + 4; ++y) {
+                for (int x = bx * 4; x < bx * 4 + 4; ++x) {
+                    if (v[y * 16 + x] > m) m = v[y * 16 + x];
+                }
+            }
+            g.block[by * 4 + bx] = m;
+        }
+    }
     return g;
+}
+
+// The 4x4 map as text, rows top to bottom, metres under the reversed-Z
+// reading; "-" for a block whose nearest sample is the far plane. Where
+// the HUD sits in depth is read straight off it.
+void mapText(const GridStats& g, char* out, size_t n) {
+    size_t used = 0;
+    for (int i = 0; i < 16 && used < n; ++i) {
+        const float d = g.block[i];
+        int m;
+        if (d > 0.0f) {
+            m = snprintf(out + used, n - used, "%s%.1f", i ? (i % 4 ? " " : " | ") : "",
+                         metresOf(d));
+        } else {
+            m = snprintf(out + used, n - used, "%s-", i ? (i % 4 ? " " : " | ") : "");
+        }
+        if (m > 0) used += static_cast<size_t>(m);
+    }
 }
 
 }  // namespace
@@ -427,26 +459,54 @@ void depthProbeNoteDraw(ID3D11DeviceContext* ctx, void* dsv, bool rtvEyeSized,
     }
 }
 
+int  g_scenePick[2] = {-1, -1};   // the pair in use, for hysteresis
+
 bool depthProbeSceneDepth(uint32_t w, uint32_t h, int eye, ID3D11Texture2D** tex) {
     if (!tex) return false;
     *tex = nullptr;
     if (!g_wanted || eye < 0 || eye > 1) return false;
-    // The scene's targets: this size, hundreds of draws last frame, a
-    // texture held. Two expected; ordered by first bind in the frame.
-    int found[2] = {-1, -1};
+    // The scene's targets: the two BUSIEST of this size last frame,
+    // whatever the count -- the second depth flight (2026-09-03) had the
+    // world stop being drawn for a minute (the station's own screens)
+    // while the cockpit alone went to a pair with four to nine draws,
+    // which is exactly the depth the text needs, and a threshold of fifty
+    // refused it. Ordered by first bind in the frame; the pair in use is
+    // kept while it stays within half of the busiest, so two pairs the
+    // game alternates between do not flap.
+    int best[2] = {-1, -1};
     for (int i = 0; i < g_targetCount; ++i) {
         const Target& t = g_targets[i];
-        if (!t.tex || t.w != w || t.h != h || t.samples > 1) continue;
-        if (t.drawsLastFrame < 50) continue;
-        if (found[0] < 0 || t.firstBindLastFrame < g_targets[found[0]].firstBindLastFrame) {
-            found[1] = found[0];
-            found[0] = i;
-        } else if (found[1] < 0 || t.firstBindLastFrame < g_targets[found[1]].firstBindLastFrame) {
-            found[1] = i;
+        if (!t.dsv || !t.tex || t.w != w || t.h != h || t.samples > 1) continue;
+        if (t.drawsLastFrame < 1) continue;
+        if (best[0] < 0 || t.drawsLastFrame > g_targets[best[0]].drawsLastFrame) {
+            best[1] = best[0];
+            best[0] = i;
+        } else if (best[1] < 0 || t.drawsLastFrame > g_targets[best[1]].drawsLastFrame) {
+            best[1] = i;
         }
     }
-    if (found[eye] < 0) return false;
-    *tex = g_targets[found[eye]].tex;
+    if (best[0] < 0 || best[1] < 0) return false;
+    // Hysteresis: the pair in use stays while both are still of this size
+    // and drawn into at least half as much as the busiest.
+    bool keep = g_scenePick[0] >= 0 && g_scenePick[1] >= 0;
+    for (int k = 0; k < 2 && keep; ++k) {
+        const int i = g_scenePick[k];
+        if (i >= g_targetCount) { keep = false; break; }
+        const Target& t = g_targets[i];
+        keep = t.dsv && t.tex && t.w == w && t.h == h &&
+               t.drawsLastFrame * 2 >= g_targets[best[0]].drawsLastFrame &&
+               t.drawsLastFrame >= 1;
+    }
+    if (!keep) {
+        g_scenePick[0] = best[0];
+        g_scenePick[1] = best[1];
+    }
+    // The first bound in the frame is the first eye rendered: the left.
+    int first = g_scenePick[0], second = g_scenePick[1];
+    if (g_targets[second].firstBindLastFrame < g_targets[first].firstBindLastFrame) {
+        const int tmp = first; first = second; second = tmp;
+    }
+    *tex = g_targets[eye == 0 ? first : second].tex;
     return true;
 }
 
@@ -639,6 +699,39 @@ void depthProbeFrameBoundary(ID3D11DeviceContext* ctx) {
                 : "No shader-resource bind: v2 would copy it out once per "
                   "eye (CopyResource, same typeless family) before reading.");
     }
+    // The census, again every 20 s: the second depth flight showed the
+    // scene's draws moving between pairs of targets and dropping to a
+    // cockpit-only pass for a minute, which one line at 120 frames could
+    // never have shown.
+    if (g_summaryNoted && g_eyeFrames > 120 &&
+        (g_censusLastMs == 0 || elapsedMs(g_censusLastMs, kCensusIntervalMs))) {
+        g_censusLastMs = stampMs();
+        int order[kMaxTargets];
+        int live = 0;
+        for (int i = 0; i < g_targetCount; ++i) {
+            if (g_targets[i].dsv) order[live++] = i;
+        }
+        for (int i = 1; i < live; ++i) {
+            for (int j = i; j > 0 && g_targets[order[j]].drawsLastFrame >
+                                         g_targets[order[j - 1]].drawsLastFrame; --j) {
+                const int tmp = order[j]; order[j] = order[j - 1]; order[j - 1] = tmp;
+            }
+        }
+        char busy[320] = "";
+        size_t used = 0;
+        for (int k = 0; k < live && k < 5; ++k) {
+            const Target& b = g_targets[order[k]];
+            const int m = snprintf(busy + used, sizeof(busy) - used, "%s#%d %ux%u %u draws",
+                                   k ? ", " : "", order[k], b.w, b.h, b.drawsLastFrame);
+            if (m > 0) used += static_cast<size_t>(m);
+            if (used >= sizeof(busy)) break;
+        }
+        Log::get().note(
+            "depth probe census: %u draws last frame, %u with a depth target; "
+            "the busiest: %s; the pass's scene pair: #%d and #%d.",
+            g_drawsLastFrame, g_drawsWithDsvLastFrame, busy, g_scenePick[0],
+            g_scenePick[1]);
+    }
     if (!g_summaryNoted && g_eyeFrames >= 120) {
         g_summaryNoted = true;
         if (g_targetCount == 0) {
@@ -748,7 +841,7 @@ void depthProbeFrameBoundary(ID3D11DeviceContext* ctx) {
             Target& t = g_targets[tIdx];
             ++t.sampleLines;
             const float clear = t.clearValue;
-            char part[2][256];
+            char part[2][520];
             for (int s = 0; s < 2; ++s) {
                 if (!g_stagingHas[s]) {
                     if (s == 0 && g_stagingAtBoundary) {
@@ -769,15 +862,19 @@ void depthProbeFrameBoundary(ID3D11DeviceContext* ctx) {
                 const GridStats g = gridStats(vals[s], clear);
                 const bool reversed = clear >= 0.0f ? clear < 0.5f : (g.mx < 0.5f);
                 const float nearest = reversed ? g.mx : g.mn;
+                char map[200] = "";
+                if (s == 1 || !g_stagingHas[1]) mapText(g, map, sizeof(map));
                 snprintf(part[s], sizeof(part[s]),
                          "%s: min %.8f, max %.8f, centre %.8f (%.2f m); %d at "
                          "the far plane, %d beyond 10 km, %d at 100 m..10 km, "
-                         "%d at 2..100 m, %d within 2 m; nearest %.8f = %.2f m",
+                         "%d at 2..100 m, %d within 2 m; nearest %.8f = %.2f m%s%s",
                          s == 0 ? "direct view" : "copy",
                          static_cast<double>(g.mn), static_cast<double>(g.mx),
                          static_cast<double>(g.centre), metresOf(g.centre),
                          g.bandFar, g.bandKm, g.bandHm, g.bandM, g.bandNear,
-                         static_cast<double>(nearest), metresOf(nearest));
+                         static_cast<double>(nearest), metresOf(nearest),
+                         map[0] ? "; nearest per 4x4 block, top row first, in m: " : "",
+                         map);
             }
             Log::get().note(
                 "depth probe: target #%d (%u draws/frame, %u with no colour "

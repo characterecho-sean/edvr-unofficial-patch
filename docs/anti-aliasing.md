@@ -877,7 +877,34 @@ accumulated since each first had data, so the line compared a session of
 the rotation-only delta with fifteen seconds of the depth candidates; the
 registration line now judges every candidate over the same interval and
 starts afresh after each print. The pass also says when the depth goes
-away and when it is back. Second depth flight pending.
+away and when it is back.
+
+**The second depth flight (2026-09-03) gave the verdict.** With the head
+turning, "head with depth" clipped 12.8% and 10.8% of pixels by 1.8 and
+1.6/255 in two clean intervals, against the rotation alone at 21.0% and
+17.2% by 3.8, and the swapped-eyes candidate lost to it both times (16.2%
+and 12.6%): the depth reprojection registers better, and the eyes are
+assigned right. With the head still all candidates are equal, as they
+must be. The depth went away for a minute in the middle: the scene's
+targets fell to two draws and the world stopped being drawn (the
+station's own screens), while the cockpit alone went to a pair with four
+to nine draws -- exactly the depth the text needs -- which the selection
+rule's fifty-draw threshold refused. The rule is now the busiest pair of
+the size, whatever the count, with hysteresis, and the census prints
+every twenty seconds. The player's observation this time: with the head
+held still, the HUD's text moved "as if read through a heat shimmer, or
+underwater". That is the depth path's doing, twice over. Tracking noise
+moves the head a fraction of a millimetre a frame, and with depth near
+and far pixels are now moved by different sub-pixel amounts; the rest
+snap decided per pixel whether to resample or not, so neighbours on
+either side of its threshold warped differently from frame to frame, and
+at a text stroke's edge the pixel's own depth is either the stroke's or
+the background's. The eleventh build scales the fetch offset down
+smoothly below the threshold instead of snapping it, and reprojects each
+pixel by the NEAREST depth of its 3x3 so an edge follows the thing in
+front, which is the standard dilation. The probe's sample line now
+carries a 4x4 map of the nearest depth per block in metres, so where the
+HUD sits in depth is read straight off it.
 
 ## Feature C — texture LOD bias, the small lever
 
