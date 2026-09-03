@@ -212,8 +212,10 @@ struct SupersampleArmer {
 
     // A submitted size within the settle slack of the armed one has not
     // moved. The recommendation is compared exactly: it is the runtime's
-    // own number and changes only when somebody moves a slider.
-    static bool near(uint32_t a, uint32_t b) {
+    // own number and changes only when somebody moves a slider. (Not
+    // named near: windef.h defines that to nothing, a 16-bit keyword kept
+    // for compatibility, and the close-out build found out.)
+    static bool withinSlack(uint32_t a, uint32_t b) {
         return (a > b ? a - b : b - a) <= kSupersampleSettleSlackPx;
     }
 
@@ -222,7 +224,7 @@ struct SupersampleArmer {
         if (armed) {
             bool moved = recW != outW || recH != outH;
             for (int e = 0; e < 2; ++e) {
-                if (eyeSeen[e] && (!near(eyeW[e], inW) || !near(eyeH[e], inH))) {
+                if (eyeSeen[e] && (!withinSlack(eyeW[e], inW) || !withinSlack(eyeH[e], inH))) {
                     moved = true;
                 }
             }
