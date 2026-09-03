@@ -40,6 +40,7 @@ cbuffer P : register(b0) {
     int2   texSize;     // S's size, for the sampler's uv
     float4 tanNow;      // l r t b this frame, jitter excluded
     float4 tanPrev;     // l r t b for the frame the history holds
+    float4 jit;         // xy this frame's jitter in pixels; z 1 = filter the current sample
     float4 dR0;         // rows of the rotation taking this frame's view
     float4 dR1;         // directions to last frame's (xyz; w unused)
     float4 dR2;
@@ -145,33 +146,47 @@ void main(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
     if (id.x < (uint)size.x && id.y < (uint)size.y) {
         float2 p = float2(id.xy);
         int2 ci = int2(id.xy);
-        // This frame's sample: the pixel as the game rendered it, NOT
-        // resampled onto the unjittered grid. The jitter moved the content
-        // by under half a pixel, and the history integrates those true
-        // point samples into the box-filtered value the pixel should carry
-        // -- which IS the supersample. The first build resampled the frame
-        // bilinearly at the offset instead, so every frame's contribution
-        // arrived pre-blurred by a half-pixel tent and the history
-        // converged to that blur: text "a little fuzzy" on the first
-        // flight (Quest 3, HMD Quality 1.5, 2026-09-03). What goes out is
-        // then a tenth of one jittered sample and the rest settled
-        // history; a tenth of half a pixel is not a visible wobble, and
-        // blending the sample as rendered is what every shipped TAA does.
-        float4 cur = S.Load(int3(region.xy + ci, 0));
-        // The 3x3 neighbourhood of the current frame around the pixel, in
-        // YCoCg: its mean and variance bound what the history may say.
+        // This frame's sample and its neighbourhood, in one pass over the
+        // 3x3 around the pixel. The sample the game rendered at q sits at
+        // q - jit on the unjittered grid, so each is weighted by its
+        // distance from THIS pixel's centre there: exp(-2.29 d^2), a
+        // Gaussian of sigma 0.47 px, UE4's filter for the same job. Two
+        // things follow. The blend uses the filtered value, so a pixel
+        // whose history is rejected shows a spatially settled sample
+        // rather than the raw one hopping by the jitter (a thin line on a
+        // turning ship model shimmered exactly so on the fifth flight,
+        // head still, 2026-09-03). And the neighbourhood's moments are
+        // weighted the same way, so the clip box no longer swings with
+        // the jitter on a thin feature -- a converged history that was
+        // inside the box one frame and outside the next flickered at the
+        // jitter's period. At 3096 wide before a 1.5x resolve the filter's
+        // softening is a third of an output pixel; the sharpen recovers
+        // the rest. advanced.temporal_aa_current = raw gives the earlier
+        // behaviour back for an A/B: the point sample, uniform moments.
+        float4 cur = 0.0;
+        float wsum = 0.0;
         float3 m1 = 0.0;
         float3 m2 = 0.0;
+        float msum = 0.0;
         [unroll] for (int dy = -1; dy <= 1; ++dy) {
             [unroll] for (int dx = -1; dx <= 1; ++dx) {
                 int2 q = clamp(ci + int2(dx, dy), int2(0, 0), size - 1);
-                float3 s = rgbToYcocg(S.Load(int3(region.xy + q, 0)).rgb);
-                m1 += s;
-                m2 += s * s;
+                float4 sq = S.Load(int3(region.xy + q, 0));
+                float2 dpos = float2(dx, dy) - jit.xy;
+                float w = jit.z != 0.0 ? exp(-2.29 * dot(dpos, dpos))
+                                       : ((dx == 0 && dy == 0) ? 1.0 : 0.0);
+                float wm = jit.z != 0.0 ? w : 1.0;
+                cur += sq * w;
+                wsum += w;
+                float3 s = rgbToYcocg(sq.rgb);
+                m1 += s * wm;
+                m2 += s * s * wm;
+                msum += wm;
             }
         }
-        m1 /= 9.0;
-        m2 /= 9.0;
+        cur /= max(wsum, 1e-6);
+        m1 /= msum;
+        m2 /= msum;
         float3 sigma = sqrt(max(m2 - m1 * m1, 0.0));
         float3 boxMin = m1 - gamma * sigma;
         float3 boxMax = m1 + gamma * sigma;
@@ -222,13 +237,14 @@ void main(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
 }
 )HLSL";
 
-// The cbuffer above, laid out to match: 320 bytes, twenty 16-byte rows.
+// The cbuffer above, laid out to match: 336 bytes, twenty-one 16-byte rows.
 struct PassParams {
     int32_t region[4];
     int32_t size[2];
     int32_t texSize[2];
     float   tanNow[4];
     float   tanPrev[4];
+    float   jit[4];
     float   dR0[4];
     float   dR1[4];
     float   dR2[4];
@@ -238,7 +254,7 @@ struct PassParams {
     int32_t haveHistory;
     int32_t candMask;
 };
-static_assert(sizeof(PassParams) == 320, "the cbuffer is twenty 16-byte rows");
+static_assert(sizeof(PassParams) == 336, "the cbuffer is twenty-one 16-byte rows");
 
 // The format allowlist: the supersample resolve's, for its reasons
 // (supersample_pass.cpp) -- typeless and UNORM families read and written
@@ -524,6 +540,7 @@ uint32_t g_treats = 0;
 // The configure and warm state.
 bool     g_wanted = false;
 bool     g_viewTransposed = false;
+bool     g_filterCurrent = true;   // advanced.temporal_aa_current = filtered | raw
 bool     g_warmNoted = false;
 
 // The camera capture: the pending rows from the latest scene write, the
@@ -617,10 +634,11 @@ DXGI_FORMAT pickHistoryFormat(ID3D11Device* dev) {
 }
 
 void* temporalInner(void* srcTex, int eye, const float* bounds,
-                    const float* tanNow, const float* tanPrev,
-                    const float* deltaHead, const float* deltaHeadLag,
-                    const float* deltaGame, float headDeg, int motion,
-                    float blend, float clampSigma, unsigned flags) {
+                    const float* tanNow, const float* tanPrev, float jxNow,
+                    float jyNow, const float* deltaHead,
+                    const float* deltaHeadLag, const float* deltaGame,
+                    float headDeg, int motion, float blend, float clampSigma,
+                    unsigned flags) {
     ID3D11Texture2D* src = nullptr;
     static_cast<IUnknown*>(srcTex)->QueryInterface(
         __uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&src));
@@ -887,6 +905,9 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         p.size[1] = static_cast<int32_t>(h);
         memcpy(p.tanNow, tanNow, sizeof(p.tanNow));
         memcpy(p.tanPrev, useHistory ? tanPrev : tanNow, sizeof(p.tanPrev));
+        p.jit[0] = jxNow;
+        p.jit[1] = jyNow;
+        p.jit[2] = g_filterCurrent ? 1.0f : 0.0f;
         for (int c = 0; c < 3; ++c) {
             p.dR0[c] = delta[0 * 3 + c];
             p.dR1[c] = delta[1 * 3 + c];
@@ -1028,6 +1049,8 @@ void temporalPassConfigure(Config& cfg) {
     const std::string mode = cfg.getString("fix.temporal_aa", "off");
     g_wanted = _stricmp(mode.c_str(), "off") != 0 && !mode.empty();
     g_viewTransposed = cfg.getBool("advanced.temporal_aa_view_transpose", false);
+    const std::string cur = cfg.getString("advanced.temporal_aa_current", "filtered");
+    g_filterCurrent = _stricmp(cur.c_str(), "raw") != 0;
 }
 
 void temporalPassTick(ID3D11DeviceContext* ctx) {
@@ -1178,15 +1201,15 @@ void temporalPassShutdown() {
 
 extern "C" __declspec(dllexport) void* edvrTemporalAa(
     void* srcTex, int eye, const float* bounds, const float* tanNow,
-    const float* tanPrev, const float* deltaHead, const float* deltaHeadLag,
-    const float* deltaGame, float headDeg, int motion, float blend,
-    float clampSigma, unsigned flags) {
+    const float* tanPrev, float jxNow, float jyNow, const float* deltaHead,
+    const float* deltaHeadLag, const float* deltaGame, float headDeg,
+    int motion, float blend, float clampSigma, unsigned flags) {
     if (!srcTex || eye < 0 || eye > 1 || !tanNow) return nullptr;
     void* out = nullptr;
     edvr::guardedBudget(edvr::g_budget, [&] {
-        out = edvr::temporalInner(srcTex, eye, bounds, tanNow, tanPrev,
-                                  deltaHead, deltaHeadLag, deltaGame, headDeg,
-                                  motion, blend, clampSigma, flags);
+        out = edvr::temporalInner(srcTex, eye, bounds, tanNow, tanPrev, jxNow,
+                                  jyNow, deltaHead, deltaHeadLag, deltaGame,
+                                  headDeg, motion, blend, clampSigma, flags);
     });
     return out;
 }

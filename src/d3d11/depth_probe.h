@@ -42,9 +42,20 @@ class Config;
 // Reads fix.temporal_aa: the probe is wanted while the pass is.
 void depthProbeConfigure(Config& cfg);
 
-// Every eye-sized draw, with the depth-stencil view bound for it (the
-// binding shadow's Dsv0, which may be null) and the draw's index within
-// the frame (1 = the frame's first eye draw).
+// EVERY draw on the owner context, with the depth-stencil view bound for
+// it (the binding shadow's Dsv0, which may be null), whether the colour
+// target beside it was eye-sized, and whether there was none: the census
+// of where the game's depth actually goes. The fifth flight (2026-09-03)
+// read empty buffers from every target the EYE draws bind, both through a
+// view and through a copy, so the scene's depth is written by draws the
+// eye classifier never counts -- a depth pre-pass with no colour target
+// is the usual shape -- and this is how they are found. One pointer
+// compare per draw.
+void depthProbeNoteDraw(ID3D11DeviceContext* ctx, void* dsv, bool rtvEyeSized,
+                        bool rtvNull);
+
+// Every eye-sized draw, with the same view and the draw's index within
+// the frame (1 = the frame's first eye draw), for which eye a target is.
 void depthProbeNoteEyeDraw(ID3D11DeviceContext* ctx, void* dsv,
                            uint32_t eyeDrawIndex);
 

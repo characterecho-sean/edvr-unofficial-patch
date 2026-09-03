@@ -33,7 +33,7 @@ void main(uint3 id : SV_DispatchThreadID) {
 }
 )HLSL";
 
-constexpr int      kMaxTargets = 6;
+constexpr int      kMaxTargets = 10;
 constexpr uint64_t kSampleIntervalMs = 10000;
 constexpr int      kMaxSampleLines = 6;
 
@@ -54,8 +54,12 @@ struct Target {
     UINT        samples = 1;
     UINT        arraySize = 1;
     UINT        mips = 1;
-    uint32_t    firstEyeDraw = 0;       // the lowest eye-draw index it was bound at
+    uint32_t    firstEyeDraw = 0;       // the lowest eye-draw index it was bound at; 0 = never at one
     uint32_t    framesSeen = 0;
+    // The census: draws bound to it per frame, by what sat beside it.
+    uint32_t    drawsThisFrame = 0, drawsLastFrame = 0;
+    uint32_t    eyeRtvDrawsThisFrame = 0, eyeRtvDrawsLastFrame = 0;
+    uint32_t    nullRtvDrawsThisFrame = 0, nullRtvDrawsLastFrame = 0;
     uint32_t    unbindsThisFrame = 0;   // how many times the game switched away from it
     uint32_t    unbindsLastFrame = 0;
     uint64_t    lastSampleMs = 0;
@@ -68,6 +72,8 @@ struct Target {
 Target   g_targets[kMaxTargets];
 int      g_targetCount = 0;
 void*    g_lastDsv = nullptr;
+void*    g_lastDrawDsv = nullptr;   // the per-draw fast path's cache
+int      g_lastDrawIdx = -1;
 bool     g_wanted = false;
 uint32_t g_distinctThisFrame = 0;
 uint32_t g_maxDistinct = 0;
@@ -323,25 +329,17 @@ void depthProbeConfigure(Config& cfg) {
     g_wanted = _stricmp(mode.c_str(), "off") != 0 && !mode.empty();
 }
 
-void depthProbeNoteEyeDraw(ID3D11DeviceContext* ctx, void* dsv,
-                           uint32_t eyeDrawIndex) {
-    (void)ctx;
-    if (!g_wanted) return;
-    g_eyeDrawThisFrame = true;
-    // The common case is one compare: the same view as the last eye draw.
-    // (An address reused by a different view within a frame would be taken
-    // for the old one -- a probe's risk, worth one line of caveat and not
-    // a per-draw resolve.)
-    if (dsv == g_lastDsv) return;
-    g_lastDsv = dsv;
-    if (!dsv) return;
-    int idx = findTarget(dsv);
-    if (idx < 0) {
-        if (g_targetCount >= kMaxTargets) return;
-        Target t;
-        t.dsv = dsv;
-        bool ok = false;
-        guardedBudget(g_budget, [&] {
+namespace {
+
+// A view seen for the first time: its texture described once, under the
+// budget, while the game has it bound. -1 when it cannot be described or
+// the table is full.
+int discoverTarget(void* dsv) {
+    if (g_targetCount >= kMaxTargets) return -1;
+    Target t;
+    t.dsv = dsv;
+    bool ok = false;
+    guardedBudget(g_budget, [&] {
             ID3D11DepthStencilView* v = static_cast<ID3D11DepthStencilView*>(dsv);
             D3D11_DEPTH_STENCIL_VIEW_DESC vd{};
             v->GetDesc(&vd);
@@ -368,18 +366,55 @@ void depthProbeNoteEyeDraw(ID3D11DeviceContext* ctx, void* dsv,
                 }
                 res->Release();
             }
-        });
-        if (!ok) return;
-        t.firstEyeDraw = eyeDrawIndex;
-        idx = g_targetCount++;
-        g_targets[idx] = t;
+    });
+    if (!ok) return -1;
+    const int idx = g_targetCount++;
+    g_targets[idx] = t;
+    return idx;
+}
+
+}  // namespace
+
+void depthProbeNoteDraw(ID3D11DeviceContext* ctx, void* dsv, bool rtvEyeSized,
+                        bool rtvNull) {
+    (void)ctx;
+    if (!g_wanted || !dsv) return;
+    int idx;
+    if (dsv == g_lastDrawDsv) {
+        idx = g_lastDrawIdx;
+    } else {
+        idx = findTarget(dsv);
+        if (idx < 0) idx = discoverTarget(dsv);
+        g_lastDrawDsv = dsv;
+        g_lastDrawIdx = idx;
     }
+    if (idx < 0) return;
     Target& t = g_targets[idx];
+    ++t.drawsThisFrame;
+    if (rtvEyeSized) ++t.eyeRtvDrawsThisFrame;
+    if (rtvNull) ++t.nullRtvDrawsThisFrame;
     if (!t.boundThisFrame) {
         t.boundThisFrame = true;
         ++t.framesSeen;
         ++g_distinctThisFrame;
-        if (eyeDrawIndex < t.firstEyeDraw) t.firstEyeDraw = eyeDrawIndex;
+    }
+}
+
+void depthProbeNoteEyeDraw(ID3D11DeviceContext* ctx, void* dsv,
+                           uint32_t eyeDrawIndex) {
+    (void)ctx;
+    if (!g_wanted) return;
+    g_eyeDrawThisFrame = true;
+    // The common case is one compare: the same view as the last eye draw.
+    if (dsv == g_lastDsv) return;
+    g_lastDsv = dsv;
+    if (!dsv) return;
+    int idx = findTarget(dsv);
+    if (idx < 0) idx = discoverTarget(dsv);
+    if (idx < 0) return;
+    Target& t = g_targets[idx];
+    if (t.firstEyeDraw == 0 || eyeDrawIndex < t.firstEyeDraw) {
+        t.firstEyeDraw = eyeDrawIndex;
     }
 }
 
@@ -492,22 +527,32 @@ void depthProbeFrameBoundary(ID3D11DeviceContext* ctx) {
     if (g_distinctThisFrame > g_maxDistinct) g_maxDistinct = g_distinctThisFrame;
     g_distinctThisFrame = 0;
     g_lastDsv = nullptr;   // a new frame: its first eye draw notes its view afresh
+    g_lastDrawDsv = nullptr;
+    g_lastDrawIdx = -1;
     for (int i = 0; i < g_targetCount; ++i) {
         Target& t = g_targets[i];
         t.boundThisFrame = false;
         t.unbindsLastFrame = t.unbindsThisFrame;
         t.unbindsThisFrame = 0;
-        if (t.announced) continue;
+        t.drawsLastFrame = t.drawsThisFrame;
+        t.eyeRtvDrawsLastFrame = t.eyeRtvDrawsThisFrame;
+        t.nullRtvDrawsLastFrame = t.nullRtvDrawsThisFrame;
+        t.drawsThisFrame = t.eyeRtvDrawsThisFrame = t.nullRtvDrawsThisFrame = 0;
+        // Announced after a full frame of counting, so the line carries
+        // the census rather than a zero.
+        if (t.announced || t.framesSeen < 2) continue;
         t.announced = true;
         Log::get().note(
-            "depth probe: the eye draws bind depth target #%d -- %ux%u, "
-            "texture format %s (%d), view format %s (%d) flags 0x%X, bind "
-            "flags 0x%X, %u sample(s), array %u, mips %u; first bound at eye "
-            "draw #%u of a frame. %s (docs\\anti-aliasing.md Phase 0 item 3, "
-            "measured.)",
+            "depth probe: depth target #%d -- %ux%u, texture format %s (%d), "
+            "view format %s (%d) flags 0x%X, bind flags 0x%X, %u sample(s), "
+            "array %u, mips %u. Per frame: %u draws bound to it, %u of them "
+            "with an eye-sized colour target, %u with no colour target at "
+            "all%s. %s (docs\\anti-aliasing.md Phase 0 item 3, measured.)",
             i, t.w, t.h, fmtName(t.texFmt), static_cast<int>(t.texFmt),
             fmtName(t.dsvFmt), static_cast<int>(t.dsvFmt), t.dsvFlags,
-            t.bindFlags, t.samples, t.arraySize, t.mips, t.firstEyeDraw,
+            t.bindFlags, t.samples, t.arraySize, t.mips, t.drawsLastFrame,
+            t.eyeRtvDrawsLastFrame, t.nullRtvDrawsLastFrame,
+            t.firstEyeDraw ? "" : " -- never at an eye draw",
             (t.bindFlags & D3D11_BIND_SHADER_RESOURCE)
                 ? "A shader view can be made over it directly."
                 : "No shader-resource bind: v2 would copy it out once per "
@@ -524,11 +569,12 @@ void depthProbeFrameBoundary(ID3D11DeviceContext* ctx) {
                 "report this log.");
         } else {
             Log::get().note(
-                "depth probe: %d distinct depth target(s) seen at the eye "
-                "draws over 120 frames, at most %u in one frame. Each is "
-                "sampled at the LAST moment in a frame the game switches "
-                "away from it, both through a view over it and through a "
-                "copy of it, every %llu s, a few times per target.",
+                "depth probe: %d distinct depth target(s) seen at draws over "
+                "120 frames, at most %u in one frame. Each is sampled at the "
+                "LAST moment in a frame the game switches away from it, both "
+                "through a view over it and through a copy of it, every %llu "
+                "s, a few times per target; the one with the draws and no "
+                "colour target beside them is the scene's depth.",
                 g_targetCount, g_maxDistinct,
                 static_cast<unsigned long long>(kSampleIntervalMs / 1000));
         }
@@ -586,12 +632,14 @@ void depthProbeFrameBoundary(ID3D11DeviceContext* ctx) {
                          static_cast<double>(nearest), metresOf(nearest));
             }
             Log::get().note(
-                "depth probe: target #%d sampled on a 16x16 grid at unbind %u "
-                "of %u in the frame (clear value %.3f%s; metres read as "
-                "reversed-Z with near %.3f m) -- %s; %s.",
-                tIdx, g_stagingCycle, g_stagingCycles,
-                static_cast<double>(clear), clear < 0.0f ? " = never seen" : "",
-                kNearPlaneM, part[0], part[1]);
+                "depth probe: target #%d (%u draws/frame, %u with no colour "
+                "target) sampled on a 16x16 grid at unbind %u of %u in the "
+                "frame (clear value %.3f%s; metres read as reversed-Z with "
+                "near %.3f m) -- %s; %s.",
+                tIdx, t.drawsLastFrame, t.nullRtvDrawsLastFrame, g_stagingCycle,
+                g_stagingCycles, static_cast<double>(clear),
+                clear < 0.0f ? " = never seen" : "", kNearPlaneM, part[0],
+                part[1]);
         }
     }
 }
@@ -604,6 +652,8 @@ void depthProbeShutdown() {
     releaseGpu();
     g_targetCount = 0;
     g_lastDsv = nullptr;
+    g_lastDrawDsv = nullptr;
+    g_lastDrawIdx = -1;
 }
 
 }  // namespace edvr

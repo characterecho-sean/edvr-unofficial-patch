@@ -735,6 +735,29 @@ temporal filter -- with one, the resolve can be crisp (`supersample_filter
 = crisp`, live) because the temporal box has already band-limited the
 frame, and `render_sharpness` can go to 1.0.
 
+**The fifth flight (2026-09-03, the main menu, the resolve now crisp).**
+"Looks better." The probe read 0.000 through the copy as well as the
+view, from every target the eye draws bind, at the last switch away from
+each: those buffers are empty at that moment, so the scene's depth is
+written by draws the eye classifier never counts -- a depth pre-pass with
+no colour target is the usual shape -- and the sixth build censuses every
+draw's depth target (draws per frame, how many with an eye-sized colour
+target, how many with none) and samples them all. Two observations
+placed: shimmer under yaw remains (near content under translation, for
+depth); and with the head STILL, the ship model's horizontal lines
+shimmered constantly, which is the clip: its box was built from the
+current frame's 3x3, which hops with the jitter on a thin line, so a
+converged history sat inside the box one frame and outside the next and
+flickered at the jitter's period, and where it was rejected outright the
+raw jittered sample showed. The sixth build blends a jitter-aware
+filtered current sample (a Gaussian of sigma 0.47 px over the 3x3, each
+sample weighted by its distance from the pixel's centre on the unjittered
+grid, UE4's filter) and weights the clip's moments the same way, so
+neither the box nor a rejected pixel moves with the jitter;
+`advanced.temporal_aa_current = raw` keeps the point sample for an A/B.
+At 3096 wide before a 1.5x resolve the filter's softening is a third of
+an output pixel.
+
 ## Feature C — texture LOD bias, the small lever
 
 Not all shimmer is geometry. Detail maps and normal maps sampled a mip

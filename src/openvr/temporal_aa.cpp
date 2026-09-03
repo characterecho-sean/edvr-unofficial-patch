@@ -18,9 +18,9 @@ namespace edvr {
 namespace {
 
 typedef void* (*PFN_EdvrTemporalAa)(void*, int, const float*, const float*,
-                                    const float*, const float*, const float*,
-                                    const float*, float, int, float, float,
-                                    unsigned);
+                                    const float*, float, float, const float*,
+                                    const float*, const float*, float, int,
+                                    float, float, unsigned);
 
 constexpr uint32_t kMaxFaults = 8;
 
@@ -42,6 +42,7 @@ struct State {
     // in render pixels, and whether the system hook could apply it.
     uint32_t frame = 0;
     bool     jitterLiveNoted = false;
+    float    jx = 0.0f, jy = 0.0f;   // this frame's offset in render pixels, 0 when not live
     bool     jitterLive = false;
     bool     jitterUnavailableNoted = false;
     uint32_t renderW = 0, renderH = 0;   // the last treated region, for the pixel size
@@ -230,6 +231,8 @@ void temporalAaFrameBoundary() {
         if (verdict > 0) {
             float jx = 0.0f, jy = 0.0f;
             temporalJitter(s.frame, &jx, &jy);
+            s.jx = jx;
+            s.jy = jy;
             float tan[4];
             uint32_t w = s.renderW, h = s.renderH;
             if (!w || !h) systemHookRecommendedSize(&w, &h);
@@ -265,7 +268,10 @@ void temporalAaFrameBoundary() {
         // verdict 0: the receiver is in and the game has not asked for both
         // eyes' matrices yet. Quiet; next boundary.
     }
-    if (!live && s.jitterLive) systemHookSetJitter(0.0f, 0.0f, false);
+    if (!live) {
+        s.jx = s.jy = 0.0f;
+        if (s.jitterLive) systemHookSetJitter(0.0f, 0.0f, false);
+    }
     s.jitterLive = live;
 }
 
@@ -368,7 +374,7 @@ void* temporalAaTreat(vr::EVREye eye, void* handle,
         flags |= 1u;
     }
     void* out = s.fn(handle, e, haveBounds ? b4 : nullptr, tanNow,
-                     s.havePrev[e] ? s.tanPrev[e] : tanNow,
+                     s.havePrev[e] ? s.tanPrev[e] : tanNow, s.jx, s.jy,
                      haveHeadDelta ? delta : nullptr,
                      haveLagDelta ? deltaLag : nullptr,
                      haveGameDelta ? deltaGame : nullptr, headDeg,
