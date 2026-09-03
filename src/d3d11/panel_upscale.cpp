@@ -13,7 +13,6 @@
 #include "../common/guard.h"
 #include "../common/log.h"
 #include "binding_shadow.h"
-#include "../common/frame_flag.h"   // eyeTextureSize
 #include "exposure_fix.h"   // lookupShaderHash
 #include "shader_swap.h"
 
@@ -34,16 +33,23 @@ namespace {
 // what it does.
 constexpr uint64_t kVsHash = 0x81216C77F90DEDD6ull;
 
-// The surface the target indicator is on, as a FRACTION of the render
-// resolution rather than a literal size. Sizes are per-session -- reusing a
-// stale one is what made this fix read as refuted for most of a day -- so
-// the default is a ratio and the ini can override with an exact size.
+// The surface the target indicator is on, by its ASPECT.
 //
-// 2440x1996 on a 5424x5356 eye and 1952x1597 on a 4340x4284 one both give
-// these to four figures.
-constexpr float kFracW = 0.4498f;
-constexpr float kFracH = 0.3726f;
-constexpr float kFracTol = 0.004f;   // a little over a pixel at these sizes
+// This was keyed on the surface's fraction of the eye and that was wrong,
+// the same way wake_pulse's was. Measured across three configurations:
+//
+//   eye 5424x5356   2440x1996   aspect 1.22244   w/eye 0.4499
+//   eye 4340x4284   1952x1597   aspect 1.22229   w/eye 0.4498
+//   eye 3072x3264   1492x1221   aspect 1.22195   w/eye 0.4857
+//
+// The aspect holds to four figures; the width fraction does not, because
+// the surface tracks the game's INTERNAL render width, which is not a fixed
+// multiple of the submitted eye. Each panel has its own stable aspect
+// (1.222 here; 1.600, 4.65 and 0.667 for the others), so the aspect is what
+// tells one panel from another.
+constexpr float kAspect = 1.2224f;
+constexpr float kAspectTol = 0.01f;
+constexpr uint32_t kMinWidth = 512;   // a small 1.22:1 texture is not it
 
 // The panel slot. Slots 0 and 1 are the family's shared inputs (a 1536x1536
 // and a 512x512); slot 2 is the per-panel surface.
@@ -144,12 +150,9 @@ void standDown(const char* why) {
 // survives a headset change, which a literal size does not.
 bool isTarget(uint32_t w, uint32_t h) {
     if (g_wantW) return w == g_wantW && h == g_wantH;
-    uint32_t ew = 0, eh = 0;
-    if (!eyeTextureSize(&ew, &eh) || !ew || !eh) return false;
-    const float fw = static_cast<float>(w) / static_cast<float>(ew);
-    const float fh = static_cast<float>(h) / static_cast<float>(eh);
-    return fw > kFracW - kFracTol && fw < kFracW + kFracTol &&
-           fh > kFracH - kFracTol && fh < kFracH + kFracTol;
+    if (w < kMinWidth || h == 0) return false;
+    const float aspect = static_cast<float>(w) / static_cast<float>(h);
+    return aspect > kAspect - kAspectTol && aspect < kAspect + kAspectTol;
 }
 
 bool makeTex(ID3D11Device* dev, uint32_t w, uint32_t h, bool srgb, Tex* t) {
@@ -422,7 +425,7 @@ void panelUpscaleConfigure(Config& cfg) {
             g_sharp ? "sharp" : "stock", g_scale,
             g_sharpen >= 0.0f ? "on" : "off",
             static_cast<unsigned long long>(g_vsHash),
-            g_wantW ? "named" : "measured-fraction", kSlot);
+            g_wantW ? "named" : "measured-aspect", kSlot);
     }
 }
 
