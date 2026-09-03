@@ -1660,7 +1660,9 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         if (wakePulseWantsDraws()) {
             ResourceInfo wp;
             if (bindingResolve(bindingGet(BindSlot::Rtv0), &wp) &&
-                wp.isTexture2D && wakePulseSkips(kind, count, wp.a, wp.b)) {
+                wp.isTexture2D &&
+                wakePulseSkips(self, kind, count, wp.a, wp.b,
+                               s->qsStartIndex, s->qsBaseVertex)) {
                 return DrawVerdict::kSkip;
             }
         }
@@ -4674,6 +4676,7 @@ void shutdownVScreenFixes() {
     holoShutdown();
     scrimShutdown();
     quadProbeShutdown();
+    wakePulseShutdown();
     loaderPanelShutdown();
     splashDimShutdown();
     backdropShutdown();

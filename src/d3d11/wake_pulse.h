@@ -1,42 +1,60 @@
 // The flashing wake marker under the speed readout, held off.
 //
-// WHAT IT IS (measured 2026-09-02)
+// WHAT IT IS (measured 2026-09-02, identified 2026-09-03)
 //
 // With a high wake selected, a small element under the speed readout
 // pulses, in time with the target indicator's blue flash. Both are drawn
-// into the SAME cockpit holo panel -- the interface surface measuring
-// 0.4498 x 0.3726 of the render resolution (2440x1996 on a 5424x5356 eye,
-// 1952x1997 on a 4340x4284 one) -- which is why they share a rhythm.
+// into the SAME cockpit holo panel -- the interface surface whose aspect is
+// 1.2224 -- which is why they share a rhythm.
 //
-// Inside that surface it is one draw: the textureless GUI vector shader
-// 666EF0C4C616F67E, 1728 indices, 288 quads. It is present in only SOME
-// frames -- measured 0 of 3 with no wake, 1 of 3 and 2 of 3 with one -- and
-// that IS the pulse: the element is drawn on the frames the flash is on and
-// not on the others. Suppressing that draw removes the flash and leaves the
-// rest of the panel intact, verified in the field.
+// Inside that surface it is ONE draw by the textureless GUI vector shader
+// 666EF0C4C616F67E, and it is a RING: 96 quads whose every vertex sits on a
+// circle 0.46 to 0.49 of the way out from the panel's centre, spaced about
+// eleven degrees apart. It is drawn on the frames the flash is on and not on
+// the others, which is what the pulse is. Dropping it removes the flash and
+// leaves the rest of the panel intact, verified on two headsets.
 //
-// HOW IT WAS FOUND, because the obvious method does not work here
+// THE COUNT IS TESSELLATION, AND THE SHAPE IS NOT
 //
-// A census A/B finds nothing on these panels, in either direction. The GUI
-// batches its widgets into a handful of draws whose index counts change
-// every frame with the content -- the speed digits alone guarantee it -- so
-// a signature never repeats across frames and "in every frame of one and no
-// frame of the other" can never be satisfied. Restricting the comparison to
-// one SURFACE cut the noise enough for its stable shapes to be compared,
-// and that is what named this draw. For the cockpit HUD, suppression is the
-// instrument; differential capture is not.
+// The GUI subdivides its vector curves by pixel size: the same ring is 576
+// indices where the panel comes out 1002x820 and 1728 where it comes out
+// 2440x1996. That is why this shipped working on one headset and dead on
+// the other, and why a list of numbers can never finish -- a third render
+// resolution wants a third number.
 //
-// THE INDEX COUNT IS CONTENT-DEPENDENT, and that is this fix's weak point.
-// 1728 is what this widget's batch measured on game build 332753; another
-// build, or a different panel layout, can change it. So it is a setting,
-// the log says how many draws were dropped, and a count of zero means the
-// number needs re-deriving rather than that the fix is broken. The surface
-// is matched by RATIO instead, which is session-proof -- a literal size is
-// not, and reusing a stale one cost a day of this investigation.
+// So the list is a head start and the ring is the identification. On a panel
+// whose count is not known, one candidate draw at a time has its index slice
+// and vertex buffer copied, read back four frames later, and tested: are all
+// of its vertices on one thin circle about the panel's centre? Nothing else
+// there is -- the clip frames reach the corners, the widgets are rectangles,
+// the text is a strip. A pass adopts that count for the session; a failure
+// rules it out so the next candidate gets a turn. A draw present in nearly
+// every frame is refused however well it fits, because that is furniture
+// rather than a pulse.
+//
+// The cost is one readback per candidate, only while the count is unknown,
+// and nothing at all afterwards. The limitation is that the ring has to be
+// ON SCREEN to be recognised, so on an unmeasured panel the first high wake
+// of a session can still flash. The log says so.
+//
+// HOW IT WAS FOUND, because the obvious methods do not work here
+//
+// A census A/B finds nothing on these panels: the GUI batches its widgets
+// into draws whose index counts move every frame with the content, so a
+// signature never repeats. Ranking counts by how OFTEN they are drawn does
+// not work either -- it picked 891 on a Q3, which is not divisible by six
+// and so is not a quad list at all, and dropping it changed nothing visible.
+//
+// What worked was capturing EVERY vector draw into the panel across six
+// frames without a wake and three with one, and keeping the geometry present
+// in all three and none of the six. That left exactly one draw. Position
+// answers what index counts cannot.
 //
 // ON by default since the field verification: the flashing is removed
 // unless fix.wake_pulse = stock asks for it back. Free when off.
 #pragma once
+
+#include <d3d11.h>
 
 #include <cstdint>
 
@@ -54,12 +72,16 @@ bool wakePulseWantsDraws();
 // Is this offscreen draw the pulse? Called with the draw's shape and the
 // size of the target it is landing in, from the offscreen branch that
 // already resolves both. True means drop it.
-bool wakePulseSkips(char kind, uint32_t count, uint32_t targetW,
-                    uint32_t targetH);
+bool wakePulseSkips(ID3D11DeviceContext* ctx, char kind, uint32_t count,
+                    uint32_t targetW, uint32_t targetH, uint32_t startIndex,
+                    int baseVertex);
 
 // The receipt: dropped draws are counted and reported, because a
 // suppression that says nothing is indistinguishable from one that never
 // matched.
 void wakePulseReport();
+
+// Release the staging buffers the shape test uses, if it ever ran.
+void wakePulseShutdown();
 
 }  // namespace edvr

@@ -2,6 +2,9 @@
 
 #include <windows.h>
 
+#include <d3d11.h>
+
+#include <cmath>     // hypotf: the ring test
 #include <cstdio>    // _snprintf_s: the candidate list
 #include <cstdlib>   // strtoul: the index-count list
 #include <string>
@@ -51,37 +54,81 @@ constexpr char     kKind = 'X';
 // this module does about it is NAME THE CANDIDATES in the log rather than
 // leave the owner to census it. See the intermittency table below.
 constexpr uint32_t kIndices = 1728;    // panel 2440x1996
-constexpr uint32_t kIndicesAlt = 891;  // panel 1002x820, same shader
+constexpr uint32_t kIndicesAlt = 576;   // panel 1002x820, same shader
 
-// A LIST, not a number, and that is the honest shape of it. Two measured
-// points -- 576 triangles on a 2440-wide panel, 297 on a 1002-wide one --
-// fit neither a linear law nor a square-root one, so the count cannot be
-// computed from the panel size with any confidence from two samples. What
-// it can be is a set of known values, each acted on only when it lands in
-// THIS panel with this shape, so a wrong entry costs nothing anywhere else.
+// 891 stood here as the small panel's count for a day and was never this
+// widget: 891 is not divisible by six, so it cannot be a quad list at all.
+// It was picked by ranking counts on how OFTEN they were drawn, which is a
+// measure of blinking rather than of being the marker, and it dropped draws
+// without stopping the flash. The geometry below replaced that method.
+
+// A LIST, not a number, because the count is TESSELLATION. Both measured
+// points are the same widget at two subdivisions -- 96 quads on a 1002-wide
+// panel, 288 on a 2440-wide one -- so a third render resolution would want
+// a third number and no list ever finishes. The list is a head start for
+// the two panels already measured; the ring test below is what actually
+// identifies it.
 constexpr uint32_t kMaxIndices = 8;
 
-// SELF-CALIBRATION, because a list only ever covers the panels somebody has
-// already measured. The marker is identified by three things that do not
-// change with resolution, build or ship:
+// SELF-CALIBRATION BY SHAPE, because a list only covers panels somebody has
+// already measured, and the count moves with the panel's pixel size.
 //
-//   it is drawn by the GUI's TEXTURELESS vector shader (no sampler bound),
-//   it is a SHAPE and not a single quad (hundreds of indices, never six),
-//   and it is there on some frames and not others -- which is what a pulse
-//   IS, and the reason none of the sizes in this file were ever the
-//   invariant.
+// What the marker IS, measured on a Q3 (2026-09-03) by capturing every
+// vector draw into this panel across six frames without a wake and three
+// with one, and keeping the geometry present in all three and none of the
+// six: ONE draw, 576 indices, 96 quads, every quad centred on a circle
+// 0.46 to 0.49 of the way out from the panel's centre and spaced about 11
+// degrees apart. A 32-segment ring hugging the panel's edge, and the only
+// thing on that panel drawn exclusively while the flash is up.
 //
-// So after enough frames of watching one panel, the count that behaves that
-// way MOST is the marker, whatever number it happens to be on this rig --
-// this HUD blinks a lot of small things occasionally, and the marker pulses,
-// so it leads them clearly or the evidence is not good enough to act on.
-// Adopted out loud, and any ini list wins over it.
+// The tessellation changes with the panel; the ring does not. So the test
+// is: are ALL of this draw's vertices inside a thin annulus about the
+// panel's centre? Nothing else on this panel is -- the clip frames reach
+// the corners, the widgets are rectangles, the text is a strip. One
+// vertex-buffer readback settles it, and afterwards the adopted count
+// matches for free.
 constexpr uint32_t kMinShapeIndices = 60;    // a quad is 6; the marker is not
-constexpr uint32_t kCalibFrames = 600;       // panel frames before deciding
-constexpr uint32_t kCalibLoPct = 5;          // below this it is incidental
-constexpr uint32_t kCalibHiPct = 95;         // at 100 it is furniture, not a pulse
-constexpr uint32_t kCalibLead = 2;           // and it must lead the next by this
-bool     g_calibrated = false;
+
+// The coordinate space these panels are authored in: every position measured
+// on them lands in -32765..32764, and the clip frames span it exactly. A
+// draw whose vertices fall outside it is not in the space this test assumes,
+// and is refused rather than guessed at.
+constexpr float kSpaceHalf = 32765.0f;
+constexpr float kSpaceSize = 65529.0f;
+
+// The annulus. Measured 0.460..0.491; the band is wide enough for a ring
+// drawn a little in or out of that on another panel and nowhere near wide
+// enough to admit a rectangle, whose corners reach 0.64 or more.
+constexpr float kRingLo = 0.38f;
+constexpr float kRingHi = 0.56f;
+constexpr uint32_t kRingMinQuads = 24;   // 96 measured; a token circle is not this
+
+// A candidate that is drawn in nearly every frame is furniture, not a pulse,
+// whatever its shape -- a permanent ring border on some other panel must not
+// be adopted. Geometry says WHICH; this says it was ever absent.
+constexpr uint32_t kMaxCandPct = 80;
+
+constexpr uint32_t kRingSettle = 4;      // frames before the copies are mapped
+constexpr uint32_t kVbCopyMax = 4u << 20;
+constexpr uint32_t kTestNotes = 8;       // shape tests named in the log
+
+bool     g_learned = false;
+uint32_t g_testNotes = 0;
+
+// The one capture in flight, if any.
+ID3D11Buffer* g_ibStage = nullptr;
+ID3D11Buffer* g_vbStage = nullptr;
+bool          g_capPending = false;
+uint32_t      g_capSettle = 0;
+uint32_t      g_capCount = 0;
+int           g_capBase = 0;
+uint32_t      g_capStride = 0;
+uint32_t      g_capVbBytes = 0;
+bool          g_capI16 = true;
+// The context the copies were queued on, held so the readback a few frames
+// later does not need one handed to it. wakePulseReport takes no arguments
+// and this is not reason enough to change that.
+ID3D11DeviceContext* g_capCtx = nullptr;
 
 bool     g_off = false;
 uint32_t g_indices[kMaxIndices] = {kIndices, kIndicesAlt};
@@ -105,17 +152,153 @@ bool     g_saidNoMatch = false;
 // frame. So a count seen intermittently is a candidate, the leader among
 // them is used, and the log names them all either way rather than asking
 // the owner for a census.
-constexpr uint32_t kSeenSlots = 24;
+// 48, not 24. A 1253x1025 panel draws about twenty-five distinct index
+// counts in ordinary flight, so a 24-slot table is FULL by the time the
+// marker first appears -- and the marker's count arrives late by definition,
+// because it is only drawn during a wake. The first cut of the shape test
+// asked for a candidate to be in this table and so could never see the one
+// draw it was looking for (2026-09-03).
+constexpr uint32_t kSeenSlots = 48;
 struct Seen {
     uint32_t indices = 0;
     uint32_t frames = 0;      // distinct frames it appeared in
     uint32_t lastFrame = 0;   // so one frame counts once
+    bool     tried = false;   // the shape test has already ruled it out
 };
 Seen     g_seen[kSeenSlots];
 uint32_t g_seenCount = 0;
 uint32_t g_frame = 0;         // every frame, so one frame counts a count once
 uint32_t g_panelFrames = 0;   // frames the panel was drawn in -- the denominator
 uint32_t g_panelLastFrame = 0;
+
+
+void ringDropCapture() {
+    g_capPending = false;
+    g_capSettle = 0;
+    g_capCount = 0;
+    if (g_capCtx) { g_capCtx->Release(); g_capCtx = nullptr; }
+}
+
+// Copy this draw's index slice and its vertex buffer, to be read back a few
+// frames later. Nothing is mapped here: mapping a resource the GPU has not
+// finished with is the stall this whole design exists to avoid.
+void ringStartCapture(ID3D11DeviceContext* ctx, uint32_t count,
+                      uint32_t startIndex, int baseVertex) {
+    ID3D11Buffer* ib = nullptr;
+    DXGI_FORMAT ibFmt = DXGI_FORMAT_UNKNOWN;
+    UINT ibOff = 0;
+    ctx->IAGetIndexBuffer(&ib, &ibFmt, &ibOff);
+    ID3D11Buffer* vb = nullptr;
+    UINT stride = 0, vbOff = 0;
+    ctx->IAGetVertexBuffers(0, 1, &vb, &stride, &vbOff);
+    if (!ib || !vb || stride < 8) {
+        if (ib) ib->Release();
+        if (vb) vb->Release();
+        return;
+    }
+    const UINT idxSize = (ibFmt == DXGI_FORMAT_R16_UINT) ? 2u : 4u;
+    const UINT need = count * idxSize;
+    D3D11_BUFFER_DESC vd{};
+    vb->GetDesc(&vd);
+    const UINT vbBytes = vd.ByteWidth > kVbCopyMax ? kVbCopyMax : vd.ByteWidth;
+
+    ID3D11Device* dev = nullptr;
+    ctx->GetDevice(&dev);
+    bool ok = dev != nullptr && need <= 64u * 1024u;
+    if (ok && !g_ibStage) {
+        D3D11_BUFFER_DESC sd{};
+        sd.Usage = D3D11_USAGE_STAGING;
+        sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        sd.ByteWidth = 64u * 1024u;
+        ok = SUCCEEDED(dev->CreateBuffer(&sd, nullptr, &g_ibStage));
+    }
+    if (ok && (!g_vbStage || g_capVbBytes < vbBytes)) {
+        if (g_vbStage) { g_vbStage->Release(); g_vbStage = nullptr; }
+        D3D11_BUFFER_DESC sd{};
+        sd.Usage = D3D11_USAGE_STAGING;
+        sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        sd.ByteWidth = vbBytes;
+        ok = SUCCEEDED(dev->CreateBuffer(&sd, nullptr, &g_vbStage));
+    }
+    if (ok) {
+        D3D11_BOX box{};
+        box.left = ibOff + startIndex * idxSize;
+        box.right = box.left + need;
+        box.bottom = 1;
+        box.back = 1;
+        ctx->CopySubresourceRegion(g_ibStage, 0, 0, 0, 0, ib, 0, &box);
+        D3D11_BOX vbox{};
+        vbox.left = 0;
+        vbox.right = vbBytes;
+        vbox.bottom = 1;
+        vbox.back = 1;
+        ctx->CopySubresourceRegion(g_vbStage, 0, 0, 0, 0, vb, 0, &vbox);
+        g_capPending = true;
+        g_capSettle = kRingSettle;
+        g_capCount = count;
+        // baseVertex alone, as the probe that found this widget addresses
+        // it. The copy starts at the buffer's byte zero either way.
+        g_capBase = baseVertex;
+        g_capStride = stride;
+        g_capVbBytes = vbBytes;
+        g_capI16 = idxSize == 2;
+        if (g_capCtx) g_capCtx->Release();
+        g_capCtx = ctx;
+        g_capCtx->AddRef();
+    }
+    if (dev) dev->Release();
+    ib->Release();
+    vb->Release();
+}
+
+// Is every vertex of the captured draw on one thin circle about the panel's
+// centre? Positions are the float2 at offset 0, which is where every draw
+// measured on these panels carries them.
+bool ringDecide(ID3D11DeviceContext* ctx, float* loOut, float* hiOut) {
+    *loOut = 0.0f;
+    *hiOut = 0.0f;
+    if (!g_ibStage || !g_vbStage || !g_capCount || !g_capStride) return false;
+    D3D11_MAPPED_SUBRESOURCE mi{}, mv{};
+    if (FAILED(ctx->Map(g_ibStage, 0, D3D11_MAP_READ, 0, &mi)) || !mi.pData) {
+        return false;
+    }
+    if (FAILED(ctx->Map(g_vbStage, 0, D3D11_MAP_READ, 0, &mv)) || !mv.pData) {
+        ctx->Unmap(g_ibStage, 0);
+        return false;
+    }
+    const uint8_t* vb = static_cast<const uint8_t*>(mv.pData);
+    const uint16_t* i16 = static_cast<const uint16_t*>(mi.pData);
+    const uint32_t* i32 = static_cast<const uint32_t*>(mi.pData);
+    float lo = 1e30f, hi = -1e30f;
+    bool ok = true;
+    for (uint32_t i = 0; i < g_capCount; ++i) {
+        const uint32_t idx = g_capI16 ? i16[i] : i32[i];
+        const long long v = static_cast<long long>(idx) + g_capBase;
+        if (v < 0) { ok = false; break; }
+        const unsigned long long at =
+            static_cast<unsigned long long>(v) * g_capStride;
+        if (at + 8 > g_capVbBytes) { ok = false; break; }
+        float x = 0.0f, y = 0.0f;
+        memcpy(&x, vb + at, 4);
+        memcpy(&y, vb + at + 4, 4);
+        // Outside the space these panels are authored in, so this test's
+        // assumption does not hold for this draw.
+        if (!(x > -kSpaceHalf * 1.05f && x < kSpaceHalf * 1.05f &&
+              y > -kSpaceHalf * 1.05f && y < kSpaceHalf * 1.05f)) {
+            ok = false;
+            break;
+        }
+        const float r = hypotf(x / kSpaceSize, y / kSpaceSize);
+        if (r < lo) lo = r;
+        if (r > hi) hi = r;
+    }
+    ctx->Unmap(g_vbStage, 0);
+    ctx->Unmap(g_ibStage, 0);
+    if (!ok) return false;
+    *loOut = lo;
+    *hiOut = hi;
+    return g_capCount / 6 >= kRingMinQuads && lo >= kRingLo && hi <= kRingHi;
+}
 
 }  // namespace
 
@@ -177,8 +360,9 @@ void wakePulseConfigure(Config& cfg) {
 
 bool wakePulseWantsDraws() { return g_off; }
 
-bool wakePulseSkips(char kind, uint32_t count, uint32_t targetW,
-                    uint32_t targetH) {
+bool wakePulseSkips(ID3D11DeviceContext* ctx, char kind, uint32_t count,
+                    uint32_t targetW, uint32_t targetH, uint32_t startIndex,
+                    int baseVertex) {
     if (!g_off) return false;
     if (targetW < kMinWidth || targetH == 0) return false;
     const float aspect = static_cast<float>(targetW) / static_cast<float>(targetH);
@@ -218,22 +402,38 @@ bool wakePulseSkips(char kind, uint32_t count, uint32_t targetW,
         kind == kKind && count >= kMinShapeIndices &&
         !bindingGet(BindSlot::PsSrv0) && !bindingGet(BindSlot::PsSrv1) &&
         !bindingGet(BindSlot::PsSrv2) && !bindingGet(BindSlot::PsSrv3);
-    if (vectorShape && g_dropped == 0 && !g_saidNoMatch) {
-        for (uint32_t i = 0; i < g_seenCount; ++i) {
-            if (g_seen[i].indices != count) continue;
-            if (g_seen[i].lastFrame != g_frame) {
-                g_seen[i].lastFrame = g_frame;
-                ++g_seen[i].frames;
-            }
-            return false;
-        }
-        if (g_seenCount < kSeenSlots) {
-            g_seen[g_seenCount].indices = count;
-            g_seen[g_seenCount].frames = 1;
-            g_seen[g_seenCount].lastFrame = g_frame;
-            ++g_seenCount;
-        }
+    if (!vectorShape || g_dropped != 0) return false;
+
+    Seen* seen = nullptr;
+    for (uint32_t i = 0; i < g_seenCount; ++i) {
+        if (g_seen[i].indices != count) continue;
+        seen = &g_seen[i];
+        break;
     }
+    if (!seen && g_seenCount < kSeenSlots) {
+        seen = &g_seen[g_seenCount++];
+        seen->indices = count;
+    }
+    if (seen && seen->lastFrame != g_frame) {
+        seen->lastFrame = g_frame;
+        ++seen->frames;
+    }
+
+    // The ring test, on one candidate at a time. Quads only (six indices to
+    // one), never a count already ruled out, and never one drawn in so many
+    // frames that it is furniture rather than a pulse -- a permanent circular
+    // border would pass the geometry and must not be adopted on it alone.
+    //
+    // A count with no table slot left is still tested. The marker's count
+    // arrives LATE -- it is only drawn during a wake -- so it is exactly the
+    // one a full table would turn away, which is what the first cut of this
+    // did.
+    if (g_learned || g_capPending || !ctx) return false;
+    if (count % 6 || (seen && seen->tried)) return false;
+    const uint32_t frames = seen ? seen->frames : 1;
+    const uint32_t pct = g_panelFrames ? frames * 100 / g_panelFrames : 100;
+    if (pct > kMaxCandPct) return false;
+    ringStartCapture(ctx, count, startIndex, baseVertex);
     return false;
 }
 
@@ -241,53 +441,54 @@ void wakePulseReport() {
     if (!g_off) return;
     ++g_frame;
 
-    // Self-calibration, before the giving-up line. If exactly ONE textureless
-    // shape on this panel is behaving like a pulse, that is the marker on
-    // this rig whatever its index count happens to be -- and this is the
-    // only part of the fix that does not depend on somebody having measured
-    // this panel size before.
-    //
-    // Exactly one, deliberately. Two candidates means the evidence does not
-    // say which, and picking either would be suppressing a draw on a guess.
-    if (!g_calibrated && !g_saidNoMatch && g_dropped == 0 &&
-        g_panelFrames >= kCalibFrames) {
-        // Rank them, do not count them. The first build of this asked for
-        // EXACTLY ONE candidate and a Q3 produced eight: 891 at 56 per cent
-        // of frames, then 60 at 21, 120 at 18, and five more below 8. Seven
-        // were in band and the right one was above the ceiling, so it
-        // refused -- correctly by its own rule, and uselessly.
-        //
-        // The shape of that data is the answer. This HUD blinks a lot of
-        // small things occasionally; the marker pulses, so it is drawn far
-        // more often than any of them. Take the leader, and only when it
-        // leads clearly: 56 against 21 is a different claim from 8 against 7.
-        uint32_t best = 0, bestPct = 0, runnerUp = 0;
-        for (uint32_t i = 0; i < g_seenCount; ++i) {
-            const uint32_t pct = g_seen[i].frames * 100 / g_panelFrames;
-            if (pct < kCalibLoPct || pct > kCalibHiPct) continue;
-            if (pct > bestPct) {
-                runnerUp = bestPct;
-                bestPct = pct;
-                best = g_seen[i].indices;
-            } else if (pct > runnerUp) {
-                runnerUp = pct;
+    // The ring test's readback, once the copies have had time to execute.
+    // Whatever it decides, the count is not asked about again: a pass adopts
+    // it, a failure rules it out, and either way the next candidate gets its
+    // turn on a later frame.
+    if (g_capPending && g_capCount) {
+        if (g_capSettle) {
+            --g_capSettle;
+        } else {
+            const uint32_t count = g_capCount;
+            float lo = 0.0f, hi = 0.0f;
+            const bool isRing =
+                g_capCtx && ringDecide(g_capCtx, &lo, &hi);
+            for (uint32_t i = 0; i < g_seenCount; ++i) {
+                if (g_seen[i].indices == count) { g_seen[i].tried = true; break; }
             }
-        }
-        if (best && bestPct >= runnerUp * kCalibLead) {
-            g_calibrated = true;
-            g_indices[0] = best;
-            g_indexCount = 1;
-            Log::get().note(
-                "wake pulse: none of the known index counts landed in this "
-                "%ux%u panel, so it was worked out from behaviour instead. Of "
-                "the textureless shapes drawn on it, %u indices appears in "
-                "%u%% of frames and the next most frequent in %u%% -- a pulse "
-                "leading incidental blinking. Using it. Set "
-                "advanced.wake_pulse_indices if this is the wrong draw, and "
-                "it is worth reporting either way so the shipped set can "
-                "grow.",
-                g_panelW, g_panelH, best, bestPct, runnerUp);
-            return;
+            ringDropCapture();
+            if (isRing) {
+                g_learned = true;
+                g_indices[0] = count;
+                g_indexCount = 1;
+                Log::get().note(
+                    "wake pulse: the marker on this %ux%u panel is the %u-index "
+                    "draw -- all %u of its quads sit on one circle %.2f to "
+                    "%.2f of the way out from the panel's centre, which is the "
+                    "ring the flash paints and nothing else on this panel is. "
+                    "Found by its shape rather than its size, so it did not "
+                    "need this panel to have been measured before. Holding it "
+                    "off from here.",
+                    g_panelW, g_panelH, count, count / 6, lo, hi);
+                return;
+            }
+            // Every test named, up to a handful. A shape test that decides
+            // nothing is indistinguishable in a log from one that never ran,
+            // and the radii say WHY a candidate was refused -- a rectangle
+            // reaches 0.64 and more, a ring does not.
+            if (g_testNotes < kTestNotes) {
+                ++g_testNotes;
+                Log::get().note(
+                    "wake pulse: no known index count matched this %ux%u "
+                    "panel, so its draws are tested by shape -- the marker is "
+                    "a ring about the panel's centre. %u indices (%u quads) "
+                    "is not one: its vertices run %.2f to %.2f out from the "
+                    "centre, and a ring is a thin band near 0.47. Ruled out; "
+                    "others follow. The ring has to be ON SCREEN to be "
+                    "recognised, so the first high wake of a session may still "
+                    "flash. Said at most %u times.",
+                    g_panelW, g_panelH, count, count / 6, lo, hi, kTestNotes);
+            }
         }
     }
 
@@ -343,6 +544,13 @@ void wakePulseReport() {
                     "marker under the speed readout is held off; nothing "
                     "else on that panel is touched. Said at most 6 times.",
                     static_cast<unsigned long long>(g_dropped));
+}
+
+void wakePulseShutdown() {
+    ringDropCapture();
+    if (g_ibStage) { g_ibStage->Release(); g_ibStage = nullptr; }
+    if (g_vbStage) { g_vbStage->Release(); g_vbStage = nullptr; }
+    g_capVbBytes = 0;
 }
 
 }  // namespace edvr

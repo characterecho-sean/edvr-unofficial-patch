@@ -23,6 +23,7 @@
 #include "../common/vtable_hook.h"
 #include "binding_shadow.h"
 #include "draw_census.h"
+#include "quad_probe.h"
 #include "exposure_fix.h"
 #include "vscreen.h"
 #include "glitch_frame.h"
@@ -469,7 +470,13 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
         // history key, same cure: a diagnostic keypress that another window
         // swallowed must say so, because the log it failed to write is the
         // place anyone would look for the reason.
-        if (g_state->censusKey.pressed()) drawCensusRequest();
+        if (g_state->censusKey.pressed()) {
+            drawCensusRequest();
+            // Same key: the census says WHAT was drawn, the quad probe says
+            // WHERE. Two instruments on one press keeps the two answers on
+            // the same frame, which is the only way they can be compared.
+            quadProbeRequest();
+        }
         if (g_state->missedCensusNotes < kMissedDumpNotes &&
             g_state->censusKey.takeMissedWhileUnfocused()) {
             ++g_state->missedCensusNotes;

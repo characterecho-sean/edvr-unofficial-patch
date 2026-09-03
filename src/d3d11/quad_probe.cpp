@@ -49,7 +49,12 @@ constexpr uint32_t kMaxVertexBytes = 4u << 20;
 // A cap that truncates before the interesting draw makes the instrument
 // answer the wrong question while looking like it worked. 64 costs a few
 // kilobytes of staging and reaches the whole panel.
-constexpr uint32_t kMaxOccurrences = 64;
+//
+// 256 since the same hunt turned to ">N" and asked for EVERY vector draw
+// into the panel at once, which is the only way to diff one HUD state
+// against another by position: 26 draws of one index count were already in
+// frame, and the whole panel is several times that.
+constexpr uint32_t kMaxOccurrences = 256;
 
 // Index bytes the capture will hold across all occurrences.
 constexpr uint32_t kIbStageBytes = 64u << 10;
@@ -69,6 +74,12 @@ bool     g_armed = false;
 uint32_t g_wantW = 0, g_wantH = 0;
 char     g_wantKind = 0;
 uint32_t g_wantN = 0;
+// COUNT written as ">N": match every draw of at least N indices rather than
+// exactly N. The cockpit's vector widgets arrive BATCHED, and the batch's
+// index count moves frame to frame with whatever it holds -- an exact spec
+// cannot be aimed at a moving number, and that is the draw the marker lives
+// inside (2026-09-03).
+bool     g_wantAtLeast = false;
 // Matching frames to let pass before capturing. The first frame containing
 // a match is usually a fade-in frame: the first flight of this armed at
 // launch and caught the backdrop alone, one occurrence of the three the
@@ -124,6 +135,10 @@ struct VbSlot {
 
 struct Occ {
     uint32_t ibOffset = 0;         // bytes into the index staging buffer
+    // This draw's own index count. Under an exact spec it is g_wantN for
+    // every occurrence; under a >= threshold the occurrences differ, and
+    // decoding them all at g_wantN would read the wrong number of quads.
+    uint32_t count = 0;
     int      baseVertex = 0;       // non-indexed kinds: the start vertex
     uint32_t startIndex = 0;
     uint32_t instances = 0;
@@ -180,6 +195,7 @@ void quadProbeConfigure(Config& cfg) {
 
     uint32_t w = 0, h = 0, n = 0, skip = 0;
     char kind = 0;
+    bool atLeastWanted = false;
     if (!spec.empty()) {
         const char* p = spec.c_str();
         char* end = nullptr;
@@ -188,9 +204,11 @@ void quadProbeConfigure(Config& cfg) {
         bool ok = (end != p) && (*end == 'x' || *end == 'X');
         if (ok) { const char* q = end + 1; ph = strtoul(q, &end, 10); ok = end != q; }
         if (ok) ok = (*end == ':') && strchr("DINX", end[1]) && end[2] == ':';
+        bool atLeast = false;
         if (ok) {
             kind = end[1];
             const char* q = end + 3;
+            if (*q == '>') { atLeast = true; ++q; }
             pn = strtoul(q, &end, 10);
             ok = end != q;
         }
@@ -206,14 +224,19 @@ void quadProbeConfigure(Config& cfg) {
         // COUNT means indices for the indexed kinds (six to a quad) and
         // VERTICES for the non-indexed ones, where the only shape this
         // decodes is the four-vertex strip quad.
+        // A threshold names a floor, not a shape, so it is not held to the
+        // multiple of six -- the DRAWS it matches still are, and are checked
+        // one by one at match time. It means nothing for the strip kinds,
+        // whose only decodable shape is the four-vertex quad.
         const bool countOk =
             ok && pn != 0 &&
-            (kindIsIndexed(kind) ? (pn % kIndicesPerQuad == 0)
-                                 : (pn == kStripQuadVerts));
+            (kindIsIndexed(kind) ? (atLeast || pn % kIndicesPerQuad == 0)
+                                 : (!atLeast && pn == kStripQuadVerts));
         if (!ok || *end || pw == 0 || ph == 0 || !countOk) {
             Log::get().note("quad probe: \"%s\" is not "
                             "WIDTHxHEIGHT:KIND:COUNT[:SKIPFRAMES] with COUNT "
-                            "a multiple of six for I and X, or exactly %u for "
+                            "a multiple of six for I and X (or \">N\" for at "
+                            "least N indices), or exactly %u for "
                             "D and N; refused rather than half-applied.",
                             spec.c_str(), kStripQuadVerts);
         } else {
@@ -221,6 +244,7 @@ void quadProbeConfigure(Config& cfg) {
             h = static_cast<uint32_t>(ph);
             n = static_cast<uint32_t>(pn);
             skip = static_cast<uint32_t>(pskip);
+            atLeastWanted = atLeast;
         }
     }
     const uint32_t atMs = static_cast<uint32_t>(cfg.getIntInRange(
@@ -231,12 +255,14 @@ void quadProbeConfigure(Config& cfg) {
     // a second capture is asked for without a relaunch. The clock gate counts
     // as part of the request, so moving it alone also asks again.
     if (armed && (w != g_wantW || h != g_wantH || kind != g_wantKind ||
-                  n != g_wantN || skip != g_wantSkip || atMs != g_wantAtMs)) {
+                  n != g_wantN || atLeastWanted != g_wantAtLeast ||
+                  skip != g_wantSkip || atMs != g_wantAtMs)) {
         g_taken = false;
         g_skipLeft = skip;
         g_lastSkipFrame = 0;
     }
     g_wantW = w; g_wantH = h; g_wantKind = kind; g_wantN = n;
+    g_wantAtLeast = atLeastWanted;
     g_wantSkip = skip;
     g_wantAtMs = atMs;
     if (armed && !g_armed) {
@@ -245,26 +271,51 @@ void quadProbeConfigure(Config& cfg) {
             snprintf(when, sizeof(when),
                      " and not before %u ms into the session", atMs);
         }
-        Log::get().note("quad probe ARMED on %c:%u draws into a %ux%u target: "
+        Log::get().note("quad probe ARMED on %c:%s%u draws into a %ux%u "
+                        "target: "
                         "after letting %u matching frame(s) pass%s, the first "
                         "frame containing one has EVERY such draw copied, and "
                         "each occurrence's quads are logged with their extent, "
                         "uv span and the bytes past the position. Nothing is "
                         "changed. Set the spec off and on again for another "
                         "capture.",
-                        kind, n, w, h, skip, when);
+                        kind, atLeastWanted ? "at least " : "", n, w, h,
+                        skip, when);
     }
     g_armed = armed;
 }
 
 bool quadProbeWants() { return g_armed && !g_taken; }
 
+void quadProbeRequest() {
+    if (!g_armed) return;
+    // A marker that only shows during a hyperspace jump cannot be caught by
+    // a probe that fires the first time the panel appears, and the clock
+    // gate is a poor way to hit a fifteen-second window. The census key asks
+    // for a capture NOW, and asks again for each press.
+    const bool again = g_taken;
+    dropCapture();
+    g_taken = false;
+    g_skipLeft = g_wantSkip;
+    g_lastSkipFrame = 0;
+    Log::get().note("quad probe: capture requested by key -- the next frame "
+                    "holding a match is the one recorded%s.",
+                    again ? ", replacing the capture already taken" : "");
+}
+
 bool quadProbeOnDraw(ID3D11DeviceContext* ctx, uint32_t targetW,
                      uint32_t targetH, char kind, uint32_t count,
                      uint32_t instances, uint32_t startIndex, int baseVertex) {
     if (!g_armed || g_taken || g_pendingFrame || !ctx) return false;
     if (targetW != g_wantW || targetH != g_wantH) return false;
-    if (kind != g_wantKind || count != g_wantN) return false;
+    if (kind != g_wantKind) return false;
+    if (g_wantAtLeast) {
+        if (count < g_wantN) return false;
+        // Only a whole number of quads can be decoded, whatever the floor.
+        if (kindIsIndexed(kind) && count % kIndicesPerQuad) return false;
+    } else if (count != g_wantN) {
+        return false;
+    }
 
     // The clock gate, BEFORE the frame skip: while it holds the probe is
     // simply not looking, so matching frames must not be spent against the
@@ -376,6 +427,7 @@ bool quadProbeOnDraw(ID3D11DeviceContext* ctx, uint32_t targetW,
                 Occ& o = g_occ[g_occCount];
                 o = Occ{};
                 o.ibOffset = g_ibFill;
+                o.count = count;
                 o.baseVertex = baseVertex;
                 o.startIndex = startIndex;
                 o.instances = instances;
@@ -463,22 +515,42 @@ void quadProbeTick(ID3D11DeviceContext* ctx) {
             failOnce("no vertex copy could be mapped");
             return;
         }
-        const uint32_t quads = indexed ? g_wantN / kIndicesPerQuad : 1u;
         const uint32_t vertsPerQuad = indexed ? kIndicesPerQuad : kStripQuadVerts;
         Log::get().note(
-            "quad probe: %u occurrence(s) of %c:%u into %ux%u in one frame%s, "
+            "quad probe: %u occurrence(s) of %c:%s%u into %ux%u in one "
+            "frame%s, "
             "over %u distinct vertex buffer(s). Rectangles are the raw float2 "
             "at offset 0; the hex after each is the first vertex's remaining "
             "bytes -- colour, uv, whatever the layout holds. Same-signature "
             "occurrences that differ in extent are DIFFERENT rectangles "
             "sharing one widget; occurrences on different buffers were each "
             "read from their own.",
-            g_occCount, g_wantKind, g_wantN, g_wantW, g_wantH,
+            g_occCount, g_wantKind, g_wantAtLeast ? ">" : "", g_wantN,
+            g_wantW, g_wantH,
             g_occDropped ? " (more matched than fit; the excess was not "
                            "copied)" : "",
             g_vbCount);
         for (uint32_t oi = 0; oi < g_occCount; ++oi) {
             const Occ& o = g_occ[oi];
+            const uint32_t quads = indexed ? o.count / kIndicesPerQuad : 1u;
+            // A panel size is shared by several surfaces, so ONE widget's
+            // draw is captured once per surface -- 24 occurrences holding 8
+            // distinct ones, in the capture that asked for this. Repeats say
+            // nothing the first did not, and printing their geometry buried
+            // the eight that mattered under sixteen that did not.
+            uint32_t same = g_occCount;
+            for (uint32_t pi = 0; pi < oi; ++pi) {
+                const Occ& e = g_occ[pi];
+                if (e.baseVertex == o.baseVertex && e.startIndex == o.startIndex &&
+                    e.count == o.count && e.instances == o.instances &&
+                    e.vbSlot == o.vbSlot) { same = pi; break; }
+            }
+            if (same != g_occCount) {
+                Log::get().note("  occurrence %u: the same draw as occurrence "
+                                "%u -- this panel size is drawn into more "
+                                "than one surface.", oi, same);
+                continue;
+            }
             const bool i16 = o.ibFormat == DXGI_FORMAT_R16_UINT;
             char vps[64] = "viewport ?";
             if (o.vpKnown) {
@@ -496,10 +568,11 @@ void quadProbeTick(ID3D11DeviceContext* ctx) {
                 (o.vbSlot >= 0) ? vbData[o.vbSlot] : nullptr;
             const uint32_t stride = (o.vbSlot >= 0) ? g_vb[o.vbSlot].stride : 0;
             const uint32_t vbBytes = (o.vbSlot >= 0) ? g_vb[o.vbSlot].bytes : 0;
-            Log::get().note("  occurrence %u: %s %d, startIndex %u, "
-                            "instances %u, index format %s, stride %u, "
+            Log::get().note("  occurrence %u: %u indices, %s %d, startIndex "
+                            "%u, instances %u, index format %s, stride %u, "
                             "buffer %d, %s%s",
-                            oi, indexed ? "baseVertex" : "startVertex",
+                            oi, o.count,
+                            indexed ? "baseVertex" : "startVertex",
                             o.baseVertex, o.startIndex, o.instances,
                             indexed ? (i16 ? "R16" : "R32") : "none",
                             stride, o.vbSlot, vps, scs);

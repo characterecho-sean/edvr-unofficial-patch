@@ -81,6 +81,11 @@ void quadProbeConfigure(Config& cfg);
 // out of the draw path's condition for the rest of the session.
 bool quadProbeWants();
 
+// Ask for a capture now, replacing any already taken. Bound to the draw
+// census key so a transient widget -- a marker that only shows during a
+// hyperspace jump -- can be caught while it is on screen.
+void quadProbeRequest();
+
 // Does this draw match? Called per draw; the first match opens a one-frame
 // capture window and every match inside it is recorded as an occurrence.
 bool quadProbeOnDraw(ID3D11DeviceContext* ctx, uint32_t targetW,
