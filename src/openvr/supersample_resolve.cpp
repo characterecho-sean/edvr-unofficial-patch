@@ -88,7 +88,7 @@ void supersampleResolveConfigure() {
     State& s = g_s;
     Config& cfg = Config::get();
 
-    const std::string raw = cfg.getString("fix.supersample_resolve", "off");
+    const std::string raw = cfg.getString("fix.supersample_resolve", "auto");
     Mode mode = Mode::Off;
     if (_stricmp(raw.c_str(), "auto") == 0) mode = Mode::Auto;
     else if (_stricmp(raw.c_str(), "on") == 0) mode = Mode::On;

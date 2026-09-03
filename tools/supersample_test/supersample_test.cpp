@@ -253,6 +253,18 @@ int main() {
         check(a.boundary(1456, 1560) == SupersampleArmer::kReadopted, true,
               "armer: a size change both eyes agree on re-adopts at once");
         checkEq(a.inW, 1820, "armer re-adopted inW");
+        // Rounding is not a move: the guard's crop landing a pixel under
+        // the armed size (the Quest 3's 3095 against 3096) neither disarms
+        // nor re-adopts, and the armed size is kept; three pixels is a move.
+        a.note(0, 1819, 1949);
+        a.note(1, 1819, 1949);
+        check(a.boundary(1456, 1560) == SupersampleArmer::kNone && a.armed &&
+                  a.inW == 1820 && a.inH == 1950,
+              true, "armer: a pixel of rounding neither disarms nor re-adopts");
+        a.note(0, 1823, 1950);
+        a.note(1, 1823, 1950);
+        check(a.boundary(1456, 1560) == SupersampleArmer::kReadopted && a.inW == 1823,
+              true, "armer: three pixels is a move, and re-adopts");
         // The recommendation moving up to meet the submission: disarmed.
         a.note(0, 1820, 1950);
         a.note(1, 1820, 1950);

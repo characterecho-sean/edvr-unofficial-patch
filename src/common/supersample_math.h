@@ -33,6 +33,14 @@ enum SupersampleFilter : int { kSupersampleCalm = 0, kSupersampleCrisp = 1 };
 constexpr float kSupersampleWidthMin = 0.5f;
 constexpr float kSupersampleWidthMax = 3.0f;
 
+// How far a submitted size may drift from the one the resolve armed on
+// before it counts as a move. The cull guard's crop lands one pixel under
+// the pre-guard size on the Quest 3 -- 3095 against 3096, 2026-09-03 --
+// because canonical = submitted / factor rounds on its own, and an exact
+// comparison re-adopted on it: one log line per go-live, for nothing. Two
+// pixels is the same slack supersampleExceeds calls rounding.
+constexpr uint32_t kSupersampleSettleSlackPx = 2;
+
 // The width a kernel actually runs at. Crisp needs at least 1.0: its
 // nearest tap can sit half an output pixel from the centre, and below 1.0
 // that lands in Mitchell's negative lobe with no positive tap to outweigh
@@ -202,12 +210,21 @@ struct SupersampleArmer {
         eyeSeen[eye] = true;
     }
 
+    // A submitted size within the settle slack of the armed one has not
+    // moved. The recommendation is compared exactly: it is the runtime's
+    // own number and changes only when somebody moves a slider.
+    static bool near(uint32_t a, uint32_t b) {
+        return (a > b ? a - b : b - a) <= kSupersampleSettleSlackPx;
+    }
+
     Event boundary(uint32_t recW, uint32_t recH) {
         const bool wasArmed = armed;
         if (armed) {
             bool moved = recW != outW || recH != outH;
             for (int e = 0; e < 2; ++e) {
-                if (eyeSeen[e] && (eyeW[e] != inW || eyeH[e] != inH)) moved = true;
+                if (eyeSeen[e] && (!near(eyeW[e], inW) || !near(eyeH[e], inH))) {
+                    moved = true;
+                }
             }
             if (moved) armed = false;
         }

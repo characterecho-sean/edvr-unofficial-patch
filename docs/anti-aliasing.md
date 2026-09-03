@@ -6,8 +6,9 @@ about the game, runtimes and SDKs are labelled measured (established in this
 repo's field logs or code), vendor-stated (their documentation or release
 notes), or believed; what can only be settled at implementation time or in a
 live session is collected under Phase 0. Feature A's passive mode was built
-on 2026-09-02 and ships off by default — its section records what was built
-and which log lines measure what; everything else here is design.*
+on 2026-09-02, field-verified on both rigs by 2026-09-03 and ships as `auto`
+by default — its section records what was built and measured; everything
+else here is design.*
 
 ## The ask
 
@@ -283,7 +284,7 @@ is not in this tree yet and is not invented here — the active mode waits
 on it):
 
 ```
-supersample_resolve = off    ; off | auto | on. auto engages whenever the
+supersample_resolve = auto   ; off | auto | on. auto engages whenever the
                              ; game submits larger than the runtime asked
                              ; for, however that came about, and stays
                              ; quiet otherwise; on is the same and says so
@@ -299,7 +300,8 @@ already. The pass's own price is measured by timestamp query and printed
 in the graphics log; believed well under a millisecond per eye at headset
 sizes until the field says otherwise.
 
-**What was built (2026-09-02: the passive mode, off by default).** The
+**What was built (2026-09-02: the passive mode; `auto` by default since
+2026-09-03).** The
 openvr half decides (`src/openvr/supersample_resolve.cpp`). Every
 forwarded submit's per-eye size — the texture's size narrowed by its
 bounds, which is the post-crop size when the cull guard is live — is
@@ -415,6 +417,24 @@ engaged: 868 eye-submits resolved in the first forty seconds. Measured:
   followed every one of those sizes faithfully — 6349, 7240, 6780,
   re-adopted at each boundary without a stand-down — which is the
   composition working; the guard just gave it the wrong sizes.
+
+**Third and fourth flights (2026-09-03).** The third, fifteen seconds at
+the menu with the servers down, repeated the second's numbers. The fourth
+was the Quest 3 over Virtual Desktop at HMD Quality 1.5, four and a half
+minutes in a cockpit with the cull guard on: engaged at 3096x3312 against
+a recommended 2064x2208 (one texture per eye on that route), 0.09 ms per
+eye on average (max 0.48), every frame at a steady 90 fps; the guard's
+stage 1 adopted after 1.8 seconds against the rebuilt 3358-wide targets
+and its crop landed at 3095x3312 — the seeding fix verified, and the
+composed steady state the design describes; eleven transition-flash
+withholds went through crop-then-resolve on the shadow path without a
+line. One cosmetic finding: the crop's canonical rounds a pixel under the
+pre-guard size and the armer re-adopted on it, so the armer now treats two
+pixels as rounding, as `supersampleExceeds` does. With the engage line,
+the ratio and the price confirmed on both rigs, `auto` became the shipped
+default the same day. Still unflown: the double-wide texture with per-eye
+bounds (the Steam Link route, desk-verified in the GPU harness) and the
+theater path.
 
 ## Feature B — temporal anti-aliasing at the door
 
@@ -819,7 +839,7 @@ before produced; the fusion is noted in the code as future work.
 
 ## Guidance for players now
 
-Feature A ships (off by default, since 2026-09-02); the rest does not.
+Feature A ships (`auto` by default since 2026-09-03); the rest does not.
 Some of the shimmer has answers today, and the README and `edvr.ini` have
 carried them since the same date:
 
@@ -868,11 +888,13 @@ carried them since the same date:
    and a held-view comparison — the tile-difference method
    `docs/eye-brightness.md` used — of native, supersampled-bilinear,
    supersampled-resolved, and TAA, so "sharper" and "calmer" are numbers.
-   *The resolve's price is measured (2026-09-02, Pimax): 0.48 ms per eye
-   on average, max 0.80, resolving 6780x6695 to 5424x5356 with the calm
-   kernel at radius 1.0 — timestamp queries around its two dispatches,
-   printed after 120 samples and in the totals line. Softness is not, and
-   the held-view comparison is still to be flown.*
+   *The resolve's price is measured: 0.48 ms per eye on average, max
+   0.80, resolving 6780x6695 to 5424x5356 on the Pimax (2026-09-02), and
+   0.09 ms per eye, max 0.48, resolving 3096x3312 to 2064x2208 on the
+   Quest 3 (2026-09-03), calm kernel at radius 1.0 both times — timestamp
+   queries around its two dispatches, printed after 120 samples and in the
+   totals line. Softness is not, and the held-view comparison is still to
+   be flown.*
 7. **The HUD under TAA.** Text legibility with jitter on and off, and
    ghosting on a passing ship at the default clamp: the two failure modes
    that would decide the defaults.
@@ -891,11 +913,11 @@ carried them since the same date:
 
 ## Phasing
 
-1. **Feature A, passive** — **built 2026-09-02**, off by default: the
-   resolve at the door, arming itself when the game submits larger than
-   asked, with the guidance text in the README and `edvr.ini`. Small, all
-   vendors, and it built the door machinery every later pass uses. `auto`
-   becomes the default once a field flight confirms its lines.
+1. **Feature A, passive** — **built 2026-09-02, field-verified on both
+   rigs and `auto` by default from 2026-09-03**: the resolve at the door,
+   arming itself when the game submits larger than asked, with the
+   guidance text in the README and `edvr.ini`. Small, all vendors, and it
+   built the door machinery every later pass uses.
 2. **Feature C** — a day's work whenever a slot is free; it does not wait
    on anything.
 3. **Feature B v1** (head-motion reprojection, with the jitter), then

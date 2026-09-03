@@ -1928,7 +1928,7 @@ void* interceptInterface(void* iface, const char* interfaceVersion) {
     // supersampleResolveConfigure because that runs after the install,
     // and this is the decision whether there is an install at all.
     const std::string resolveMode =
-        cfg.getString("fix.supersample_resolve", "off");
+        cfg.getString("fix.supersample_resolve", "auto");
     const bool wantResolve =
         !resolveMode.empty() && _stricmp(resolveMode.c_str(), "off") != 0;
     if (!wantFlash && !wantOffset && !wantResolve) {

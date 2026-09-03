@@ -381,6 +381,7 @@ uint32_t g_treats = 0;
 
 // The warm and the missing-hook note (supersamplePassConfigure/Tick).
 bool     g_wanted = false;
+char     g_mode[16] = "auto";
 bool     g_warmNoted = false;
 bool     g_noHookNoted = false;
 uint64_t g_firstTickMs = 0;
@@ -852,8 +853,9 @@ void* resolveInner(void* srcTex, int eye, const float* bounds, uint32_t outW,
 }  // namespace edvr::(anonymous)
 
 void supersamplePassConfigure(Config& cfg) {
-    const std::string mode = cfg.getString("fix.supersample_resolve", "off");
+    const std::string mode = cfg.getString("fix.supersample_resolve", "auto");
     g_wanted = _stricmp(mode.c_str(), "off") != 0 && !mode.empty();
+    strncpy_s(g_mode, mode.c_str(), _TRUNCATE);
 }
 
 void supersamplePassTick(ID3D11DeviceContext* ctx) {
@@ -878,12 +880,12 @@ void supersamplePassTick(ID3D11DeviceContext* ctx) {
         elapsedMs(g_firstTickMs, kNoHookNoteMs)) {
         g_noHookNoted = true;
         Log::get().note(
-            "supersample resolve: fix.supersample_resolve is on, but no "
+            "supersample resolve: fix.supersample_resolve is %s, but no "
             "compositor hook has announced itself after %llu s. The resolve "
             "runs inside the openvr_api.dll half's Submit hook -- install "
             "that file, or restart the game with the setting on so the hook "
             "installs for it. Nothing is resolved until then.",
-            static_cast<unsigned long long>(kNoHookNoteMs / 1000));
+            g_mode, static_cast<unsigned long long>(kNoHookNoteMs / 1000));
     }
 }
 

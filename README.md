@@ -191,21 +191,22 @@ the values tested on a Quest 3. Three settings:
 [The terrain fix](#the-terrain-fix-cull-guard).
 *Details: [docs/terrain-culling.md](docs/terrain-culling.md).*
 
-**Aliasing when you supersample — the resolve at the door.** *Off by
-default.* When Elite renders each eye larger than the headset asked for
-(its HMD Quality above 1.0), the compositor shrinks the image on the fly as
-it corrects for the lenses, with whatever sampler it happens to use.
-`supersample_resolve = auto` has EDVR filter each eye down to exactly the
-recommended size itself, at submit, in linear light, with a calm (Gaussian)
-or crisp (Mitchell) kernel — `supersample_filter` and `supersample_width`,
-both live — and hand the compositor a frame it samples one to one. The
-pixels are the game's; only who filters them changes, so it cannot add
-detail and does nothing unless the game is already submitting larger than
-asked. Costs one small GPU pass per eye, measured by timestamp query and
-printed in the graphics log: about half a millisecond per eye on a Pimax
-Crystal Super at HMD Quality 1.25 (6780x6695 down to 5424x5356). Off in
-this first build; `auto` becomes the default once more field logs confirm
-it. Meanwhile, for the shimmer itself:
+**Aliasing when you supersample — the resolve at the door.** *On by
+default, and idle unless the game supersamples.* When Elite renders each
+eye larger than the headset asked for (its HMD Quality above 1.0), the
+compositor shrinks the image on the fly as it corrects for the lenses, with
+whatever sampler it happens to use. `supersample_resolve = auto` (the
+default) has EDVR filter each eye down to exactly the recommended size
+itself, at submit, in linear light, with a calm (Gaussian) or crisp
+(Mitchell) kernel — `supersample_filter` and `supersample_width`, both live
+— and hand the compositor a frame it samples one to one. The pixels are
+the game's; only who filters them changes, so it cannot add detail and does
+nothing unless the game is already submitting larger than asked. Costs one
+small GPU pass per eye, measured by timestamp query and printed in the
+graphics log: about half a millisecond per eye on a Pimax Crystal Super at
+HMD Quality 1.25 (6780x6695 down to 5424x5356), a tenth of one on a Quest 3
+at 1.5 (3096x3312 down to 2064x2208). `off` gives the compositor its
+filtering back. For the shimmer itself:
 supersample through HMD Quality rather than Elite's Supersampling slider
 (the slider shrinks the image before the game's own post-processing), set
 Elite's anti-aliasing to Off or SMAA and stop expecting it to touch
@@ -614,7 +615,8 @@ the only action it can take is to not forward a call — or to hand SteamVR the
 game's own previous frame in its place: a copy EDVR keeps of the last frame it
 forwarded, always the game's content, never EDVR's.
 
-**The supersample resolve, off by default,** is one more thing of that kind:
+**The supersample resolve**, on by default and idle unless the game submits
+larger than the headset asked for, is one more thing of that kind:
 when the game submits a larger frame than the headset asked for, one GPU
 filter pass shrinks the game's frame into a texture EDVR owns, and that copy
 is what SteamVR receives — the game's texture is read, never written, no
