@@ -384,7 +384,37 @@ them a bug:
 
 The pass itself compiled and warmed one second into the session and
 linked to the door; it never treated a frame on this flight, so the
-format and price lines are still unread.
+format and price lines were still unread.
+
+**Second flight (2026-09-02 20:21, same rig, same settings, HMD Quality
+set before launch).** The resolve engaged two seconds into the session,
+at the menu, once the game had rebuilt its targets to 6780x6695 against
+the recommended 5424x5356 (1.25x horizontal, 1.25x vertical), and stayed
+engaged: 868 eye-submits resolved in the first forty seconds. Measured:
+
+- **Phase 0 item 2, the format:** the game submits `R8G8B8A8_TYPELESS`
+  (DXGI_FORMAT 27), read and written through `R8G8B8A8_UNORM` views, in
+  linear light — the same format the render-scale work measured on the
+  Quest 3, so both field rigs agree.
+- **Phase 0 item 6, the price:** 0.48 ms per eye on average (max 0.80)
+  resolving 6780x6695 to 5424x5356 with the calm kernel at radius 1.0 —
+  the two dispatches over a 45-megapixel eye. "Well under a millisecond"
+  was the belief; half of one is the number.
+- **The cull guard, at HMD Quality above 1.0, had a bug of its own.** Its
+  stage 1 adopted after 77 ms, against the not-yet-rebuilt 6780-wide
+  targets: the pre-stage sizes it requires a change from were zero at a
+  session's first staging (the probe only runs during stage 1), zero had
+  "moved" to 6780, and 6780 cleared the 0.97 x 5792 threshold that the
+  native 5424 never had. The guard froze a canonical of 6349 the game was
+  about to abandon, cropped to it for four seconds (a true-FOV image at a
+  slightly lower density, geometrically right), and stood down when the
+  real 7240-wide targets arrived — now with its own log line. Fixed the
+  same day: the pre-stage sizes are seeded by the first submissions after
+  stage 1 begins, which are the sizes the game was submitting before it
+  rebuilt (it takes about two seconds to do so, measured). The resolve
+  followed every one of those sizes faithfully — 6349, 7240, 6780,
+  re-adopted at each boundary without a stand-down — which is the
+  composition working; the guard just gave it the wrong sizes.
 
 ## Feature B — temporal anti-aliasing at the door
 
@@ -817,10 +847,11 @@ carried them since the same date:
    SMAA/FXAA pass hashes feature B's warning line needs.
 2. **The eye-texture formats** (shared with performance.md's item 1): the
    exact formats submitted, sRGB or not, for the resolve's and the TAA's
-   views. *Instrumented 2026-09-02: the resolve's `first resolved frame`
-   line names the format and whether it is read as gamma. Measured so far
-   by the render-scale work: R8G8B8A8_TYPELESS on the Quest 3 over Virtual
-   Desktop (2026-09-02); the Pimax's is still untaken.*
+   views. *Measured 2026-09-02 by the resolve's `first resolved frame`
+   line: R8G8B8A8_TYPELESS (DXGI_FORMAT 27) on the Pimax Crystal Super
+   over native SteamVR, submitted as gamma content; the render-scale work
+   measured the same format on the Quest 3 over Virtual Desktop the same
+   day. Both rigs agree; the sRGB-typed variants have not been seen.*
 3. **The depth target.** Its format, whether it is created with
    shader-resource binding, and that the classifier names the same target
    the eye draws bind — one census with `d=` against one `CreateTexture2D`
@@ -837,9 +868,11 @@ carried them since the same date:
    and a held-view comparison — the tile-difference method
    `docs/eye-brightness.md` used — of native, supersampled-bilinear,
    supersampled-resolved, and TAA, so "sharper" and "calmer" are numbers.
-   *The resolve's price is instrumented (2026-09-02): timestamp queries
-   around its two dispatches, printed after 120 samples and in the totals
-   line. Softness is not, and the comparison is still to be flown.*
+   *The resolve's price is measured (2026-09-02, Pimax): 0.48 ms per eye
+   on average, max 0.80, resolving 6780x6695 to 5424x5356 with the calm
+   kernel at radius 1.0 — timestamp queries around its two dispatches,
+   printed after 120 samples and in the totals line. Softness is not, and
+   the held-view comparison is still to be flown.*
 7. **The HUD under TAA.** Text legibility with jitter on and off, and
    ghosting on a passing ship at the default clamp: the two failure modes
    that would decide the defaults.

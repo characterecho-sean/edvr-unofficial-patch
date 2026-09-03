@@ -190,7 +190,20 @@ struct State {
     // instantly -- field log 2026-08-18 21:35:01, an 8 ms "adoption" that
     // froze the canonical against targets the game was about to shrink,
     // which the snap would later refuse as a mid-session stand-down.
+    //
+    // SEEDED BY THE FIRST SUBMISSIONS AFTER STAGE 1 BEGINS, not read at
+    // the boundary: the probe only runs during stage 1, so at a session's
+    // first staging these were zero, and zero had "moved" to whatever the
+    // game was already submitting. At HMD Quality 1.0 that was harmless --
+    // the native size fell short of the threshold and adoption waited for
+    // the rebuild -- but at 1.25 the un-rebuilt 6780-wide targets cleared
+    // 0.97 x 5792 on the very first probe, the guard adopted a canonical
+    // of 6349 the game was about to abandon, and stood down when the real
+    // 7240 arrived (Pimax, 2026-09-02, both flights). The game takes about
+    // two seconds to rebuild (measured, the first of those flights), so
+    // the first probe after the boundary is the size to move FROM.
     uint32_t  preStageW[2] = {}, preStageH[2] = {};
+    bool      preStageSeeded[2] = {};
     bool      marginNoop = false;  // factors ~1.0: staging would never finish
     bool      stage1WaitNoted = false;
     float     sizeFactorH = 1.0f, sizeFactorV = 1.0f;
@@ -797,8 +810,9 @@ void promoteOrDemote(State* s) {
             return;
         }
         for (int e = 0; e < 2; ++e) {
-            s->preStageW[e] = s->submittedW[e];
-            s->preStageH[e] = s->submittedH[e];
+            s->preStageW[e] = 0;
+            s->preStageH[e] = 0;
+            s->preStageSeeded[e] = false;   // the first probe fills it in
         }
         s->stage = 1;
         s->stage1SinceMs = stampMs();
@@ -832,10 +846,12 @@ void promoteOrDemote(State* s) {
             }
             // The size must have MOVED since stage 1 began -- see preStageW.
             // The threshold alone reads leftover bigger-than-needed targets
-            // (a re-stage down in margin) as instant adoption and freezes
-            // the canonical against a size the game is about to abandon.
-            if (s->submittedW[e] == s->preStageW[e] &&
-                s->submittedH[e] == s->preStageH[e]) {
+            // (a re-stage down in margin, or HMD Quality above 1.0) as
+            // instant adoption and freezes the canonical against a size the
+            // game is about to abandon. Unseeded means no probe has run yet.
+            if (!s->preStageSeeded[e] ||
+                (s->submittedW[e] == s->preStageW[e] &&
+                 s->submittedH[e] == s->preStageH[e])) {
                 adopted = false;
             }
         }
@@ -1146,6 +1162,13 @@ void systemHookNoteSubmittedSize(vr::EVREye eye, uint32_t w, uint32_t h) {
     State* s = g_state;
     if (!s || !w || !h) return;
     const int e = (eye == vr::Eye_Left) ? 0 : 1;
+    // The first report after stage 1 began is the size the game was
+    // submitting BEFORE it rebuilt -- the size adoption must move from.
+    if (!s->preStageSeeded[e]) {
+        s->preStageSeeded[e] = true;
+        s->preStageW[e] = w;
+        s->preStageH[e] = h;
+    }
     s->submittedW[e] = w;
     s->submittedH[e] = h;
 }

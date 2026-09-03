@@ -151,7 +151,11 @@ keeps the edges clean). It then:
 2. **Starts the projection lie only after both eyes submit at the new
    size**, at a frame boundary, so every answer within a frame — raw
    tangents, the projection matrix, and the submitted image at the end —
-   tells one story.
+   tells one story. "New" is measured against the sizes the game was
+   submitting when stage 1 began, seeded from the first submissions after
+   that boundary (2026-09-02: with Elite's HMD Quality at 1.25 the
+   un-rebuilt 1.25x targets already cleared the size threshold, and the
+   guard adopted a canonical the game abandoned two seconds later).
 3. **Hands the runtime only the true-frustum region** of each frame, copied
    into an EDVR-owned texture at exactly the size the session had always
    submitted.

@@ -202,8 +202,10 @@ both live — and hand the compositor a frame it samples one to one. The
 pixels are the game's; only who filters them changes, so it cannot add
 detail and does nothing unless the game is already submitting larger than
 asked. Costs one small GPU pass per eye, measured by timestamp query and
-printed in the graphics log. Off in this first build; `auto` becomes the
-default once field logs confirm it. Meanwhile, for the shimmer itself:
+printed in the graphics log: about half a millisecond per eye on a Pimax
+Crystal Super at HMD Quality 1.25 (6780x6695 down to 5424x5356). Off in
+this first build; `auto` becomes the default once more field logs confirm
+it. Meanwhile, for the shimmer itself:
 supersample through HMD Quality rather than Elite's Supersampling slider
 (the slider shrinks the image before the game's own post-processing), set
 Elite's anti-aliasing to Off or SMAA and stop expecting it to touch
