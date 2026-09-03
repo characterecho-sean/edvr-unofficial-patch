@@ -140,6 +140,15 @@ inline void temporalHeadDelta(const float prev34[12], const float now34[12],
     temporalMul3(rpT, rn, delta);
 }
 
+// The angle of a rotation, in degrees: acos((trace - 1) / 2), clamped.
+// The head's turn between two frames, for the pass's speed buckets.
+inline float temporalRotationAngleDeg(const float m[9]) {
+    float c = 0.5f * (m[0] + m[4] + m[8] - 1.0f);
+    if (c > 1.0f) c = 1.0f;
+    if (c < -1.0f) c = -1.0f;
+    return acosf(c) * 57.2957795f;
+}
+
 // The camera's rotation delta from two frames of the game's own view
 // rows (3x4, row-major). Read as world -> view: a fixed world direction
 // seen in view space now, d_now = M_now w, was seen at M_prev M_now^T

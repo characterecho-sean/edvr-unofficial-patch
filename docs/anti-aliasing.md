@@ -652,7 +652,38 @@ every frame that the history converged to; the frame is now blended as
 rendered (the design text above). And every temporal filter softens by
 resampling its history each frame, which is what the sharpen at the door
 is for: `render_sharpness`, the seam feature A had marked, built now.
-Not yet flown together.
+
+**Flown again the same day (the second build, sharpen at 0.4 then 0.8
+live).** Jitter live from the first frame, 0.21 ms per eye, the sharpen
+0.04 ms. The world was right and the cockpit was not: text ghosted and
+jittered when the head moved, and stayed a little soft under a sharpen
+strong enough to ring, while the clip share rose to 24% of pixels. That
+is what a history which does not land on NEAR content looks like, and
+rotation-only cannot land it: the head's translation, which v1 ignores,
+moves a panel at 0.6 m by about two pixels a frame during a 30°/s turn at
+Quest 3 densities (24 px/deg at the centre of a 3096-wide eye), and by a
+fraction of a pixel from tracking noise alone while the world at infinity
+does not move at all. A misregistered history is a soft one, which no
+sharpen recovers; and where the clip rejects it, the raw jittered frame
+shows through with its half-pixel wobble. Two other explanations were
+worth a measurement before building on depth: a pipelined renderer that
+lands each frame a pose late, and the game's own camera rows being the
+better source. So the third build carries the instruments, not a fix:
+every treated frame also judges four candidate deltas by the same clip
+(the head's as used, the head's one frame earlier, the camera rows as
+world→view, the same rows transposed) and prints their clip shares beside
+the used delta's clip share split by head speed (still, slow, fast) as a
+`temporal aa registration` line; and a depth probe (Phase 0 item 3,
+`src/d3d11/depth_probe.cpp`) reports which texture the eye draws bind as
+their depth target, its format and bind flags, whether a shader view can
+be made over it or it must be copied, which eye's it is by the order they
+are bound, and a 16x16 grid of its values read at the moment the game
+clears it, with the clear value that says standard or reversed. **v2's
+shape, from this:** per-pixel depth turns the head's full pose delta
+(rotation and translation, per eye) into an exact reprojection of the
+cockpit, and the game's camera delta into the world's; the two are told
+apart by depth (the cockpit is within a few metres), which is also the
+first thing the probe measures.
 
 ## Feature C — texture LOD bias, the small lever
 

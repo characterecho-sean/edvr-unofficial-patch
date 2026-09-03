@@ -176,6 +176,12 @@ int main() {
             if (fabsf(none[i] - ((i % 4 == 0) ? 1.0f : 0.0f)) > 1e-6f) identity = false;
         }
         check(identity, "head delta: the same pose twice is the identity");
+        // The turn's size, for the registration instrument's speed
+        // buckets: one degree reads as one degree, no turn as none.
+        checkNear(edvr::temporalRotationAngleDeg(delta), 1.0f, 1e-3f,
+                  "rotation angle: a one-degree yaw measures one degree");
+        checkNear(edvr::temporalRotationAngleDeg(none), 0.0f, 1e-3f,
+                  "rotation angle: no turn measures zero");
 
         // The game's camera: the two readings of the rows differ by a
         // transpose, and the transposed reading is the other's inverse.

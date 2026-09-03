@@ -1,5 +1,6 @@
 #include "temporal_pass.h"
 
+#include <cstdio>
 #include <cstring>
 
 #include <windows.h>
@@ -32,7 +33,7 @@ Texture2D<float4> H : register(t1);      // the history, region-sized, on the un
 SamplerState L : register(s0);           // bilinear, clamp
 RWTexture2D<float4> O : register(u0);    // the output, region-sized, the game's format
 RWTexture2D<float4> N : register(u1);    // the new history
-RWStructuredBuffer<uint> Stats : register(u2);   // 0 rejected, 1 clipped
+RWStructuredBuffer<uint> Stats : register(u2);   // 0 rejected, 1 clipped; then (rejected, clipped) per candidate, four of them
 cbuffer P : register(b0) {
     int4   region;      // x0 y0 x1 y1: this eye's pixels in S (x1, y1 exclusive)
     int2   size;        // the region's size = the output's
@@ -42,10 +43,22 @@ cbuffer P : register(b0) {
     float4 dR0;         // rows of the rotation taking this frame's view
     float4 dR1;         // directions to last frame's (xyz; w unused)
     float4 dR2;
+    float4 c0R0;        // the registration instrument's candidates, same
+    float4 c0R1;        // shape: 0 the head as used, 1 the head one frame
+    float4 c0R2;        // earlier, 2 the camera rows as world->view, 3 the
+    float4 c1R0;        // camera rows transposed
+    float4 c1R1;
+    float4 c1R2;
+    float4 c2R0;
+    float4 c2R1;
+    float4 c2R2;
+    float4 c3R0;
+    float4 c3R1;
+    float4 c3R2;
     float  blend;       // history weight
     float  gamma;       // clip half-width, in standard deviations
     int    haveHistory; // 0: nothing to blend, this frame goes out as it is
-    int    pad0;
+    int    candMask;    // bit c: candidate c has a delta this frame
 };
 float3 rgbToYcocg(float3 c) {
     return float3(0.25 * c.r + 0.5 * c.g + 0.25 * c.b,
@@ -92,14 +105,36 @@ float4 catmullRom(float2 uv, float2 tsize) {
     r += H.SampleLevel(L, float2(t3.x, t3.y), 0) * w3.x * w3.y;
     return r;
 }
-groupshared uint gRejected;
-groupshared uint gClipped;
+// temporalReproject, transcribed: the pixel's direction now, rotated into
+// last frame's view by the rows given, projected through last frame's
+// frustum, the history fetched there. False off the image or behind the
+// eye. One function, so the instrument can ask it of every candidate.
+bool fetchHistory(float2 p, float3 r0, float3 r1, float3 r2, out float3 hy) {
+    float3 d;
+    d.x = tanNow.x + (p.x + 0.5) / float(size.x) * (tanNow.y - tanNow.x);
+    d.y = tanNow.w - (p.y + 0.5) / float(size.y) * (tanNow.w - tanNow.z);
+    d.z = -1.0;
+    float3 dp = float3(dot(r0, d), dot(r1, d), dot(r2, d));
+    hy = 0.0;
+    if (dp.z >= -1e-6) return false;
+    float xt = dp.x / -dp.z;
+    float yt = dp.y / -dp.z;
+    float2 pp;
+    pp.x = (xt - tanPrev.x) / (tanPrev.y - tanPrev.x) * float(size.x) - 0.5;
+    pp.y = (tanPrev.w - yt) / (tanPrev.w - tanPrev.z) * float(size.y) - 0.5;
+    if (pp.x < 0.0 || pp.y < 0.0 || pp.x > float(size.x) - 1.0 ||
+        pp.y > float(size.y) - 1.0) {
+        return false;
+    }
+    hy = rgbToYcocg(catmullRom((pp + 0.5) / float2(size), float2(size)).rgb);
+    return true;
+}
+groupshared uint gCount[10];
 [numthreads(8, 8, 1)]
 void main(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
-    if (gi == 0) { gRejected = 0; gClipped = 0; }
+    if (gi < 10) gCount[gi] = 0;
     GroupMemoryBarrierWithGroupSync();
-    uint rejected = 0;
-    uint clipped = 0;
+    uint count[10] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
     if (id.x < (uint)size.x && id.y < (uint)size.y) {
         float2 p = float2(id.xy);
         int2 ci = int2(id.xy);
@@ -136,49 +171,45 @@ void main(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
         float3 outc = cur.rgb;
         bool used = false;
         if (haveHistory != 0) {
-            // temporalReproject, transcribed: this pixel's direction now,
-            // rotated into last frame's view, projected through last
-            // frame's frustum. Off the image or behind the eye: no
-            // history, the current frame goes out unblended.
-            float3 d;
-            d.x = tanNow.x + (p.x + 0.5) / float(size.x) * (tanNow.y - tanNow.x);
-            d.y = tanNow.w - (p.y + 0.5) / float(size.y) * (tanNow.w - tanNow.z);
-            d.z = -1.0;
-            float3 dp = float3(dot(dR0.xyz, d), dot(dR1.xyz, d), dot(dR2.xyz, d));
-            if (dp.z < -1e-6) {
-                float xt = dp.x / -dp.z;
-                float yt = dp.y / -dp.z;
-                float2 pp;
-                pp.x = (xt - tanPrev.x) / (tanPrev.y - tanPrev.x) * float(size.x) - 0.5;
-                pp.y = (tanPrev.w - yt) / (tanPrev.w - tanPrev.z) * float(size.y) - 0.5;
-                if (pp.x >= 0.0 && pp.y >= 0.0 && pp.x <= float(size.x) - 1.0 &&
-                    pp.y <= float(size.y) - 1.0) {
-                    float3 h = catmullRom((pp + 0.5) / float2(size), float2(size)).rgb;
-                    float3 hy = rgbToYcocg(h);
-                    float3 hc = clipToBox(boxMin, boxMax, hy);
-                    if (any(abs(hc - hy) > 1e-4)) clipped = 1;
-                    outc = lerp(cur.rgb, ycocgToRgb(hc), blend);
-                    used = true;
+            float3 hy;
+            if (fetchHistory(p, dR0.xyz, dR1.xyz, dR2.xyz, hy)) {
+                float3 hc = clipToBox(boxMin, boxMax, hy);
+                if (any(abs(hc - hy) > 1e-4)) count[1] = 1;
+                outc = lerp(cur.rgb, ycocgToRgb(hc), blend);
+                used = true;
+            }
+            // The registration instrument: what each candidate delta would
+            // have fetched, judged by the same clip, counted and not used.
+            // Up to four more history reads per pixel while it runs.
+            [unroll] for (int c = 0; c < 4; ++c) {
+                if ((candMask & (1 << c)) == 0) continue;
+                float3 r0 = c == 0 ? c0R0.xyz : (c == 1 ? c1R0.xyz : (c == 2 ? c2R0.xyz : c3R0.xyz));
+                float3 r1 = c == 0 ? c0R1.xyz : (c == 1 ? c1R1.xyz : (c == 2 ? c2R1.xyz : c3R1.xyz));
+                float3 r2 = c == 0 ? c0R2.xyz : (c == 1 ? c1R2.xyz : (c == 2 ? c2R2.xyz : c3R2.xyz));
+                float3 h;
+                if (!fetchHistory(p, r0, r1, r2, h)) {
+                    count[2 + c * 2] = 1;
+                } else {
+                    float3 hc2 = clipToBox(boxMin, boxMax, h);
+                    if (any(abs(hc2 - h) > 1e-4)) count[3 + c * 2] = 1;
                 }
             }
         }
-        if (!used) rejected = 1;
+        if (!used) count[0] = 1;
         float3 o = saturate(outc);
         O[id.xy] = float4(o, cur.a);
         N[id.xy] = float4(o, 1.0);
     }
-    // One atomic per group, not per pixel: the field's acceptance line.
-    InterlockedAdd(gRejected, rejected);
-    InterlockedAdd(gClipped, clipped);
-    GroupMemoryBarrierWithGroupSync();
-    if (gi == 0) {
-        InterlockedAdd(Stats[0], gRejected);
-        InterlockedAdd(Stats[1], gClipped);
+    // One atomic per group per counter, not per pixel.
+    [unroll] for (int k = 0; k < 10; ++k) {
+        if (count[k] != 0) InterlockedAdd(gCount[k], count[k]);
     }
+    GroupMemoryBarrierWithGroupSync();
+    if (gi < 10) InterlockedAdd(Stats[gi], gCount[gi]);
 }
 )HLSL";
 
-// The cbuffer above, laid out to match: 128 bytes, eight 16-byte rows.
+// The cbuffer above, laid out to match: 320 bytes, twenty 16-byte rows.
 struct PassParams {
     int32_t region[4];
     int32_t size[2];
@@ -188,12 +219,13 @@ struct PassParams {
     float   dR0[4];
     float   dR1[4];
     float   dR2[4];
+    float   cand[4][3][4];   // candidate, row, xyz + pad
     float   blend;
     float   gamma;
     int32_t haveHistory;
-    int32_t pad0;
+    int32_t candMask;
 };
-static_assert(sizeof(PassParams) == 128, "the cbuffer is eight 16-byte rows");
+static_assert(sizeof(PassParams) == 320, "the cbuffer is twenty 16-byte rows");
 
 // The format allowlist: the supersample resolve's, for its reasons
 // (supersample_pass.cpp) -- typeless and UNORM families read and written
@@ -317,8 +349,14 @@ struct Slot {
     bool          timeDone = false;
     bool          statsDone = false;
     uint64_t      pixels = 0;
+    // The instrument's bookkeeping for this call: which candidates had a
+    // delta (their pixel totals), the head's turn, whether history ran.
+    uint64_t      candPixels[4] = {};
+    float         headDeg = 0.0f;
+    bool          hadHistory = false;
 };
 constexpr int kSlots = 8;
+constexpr int kStatCount = 10;
 Slot g_slots[kSlots];
 
 void releaseSlot(Slot& q) {
@@ -335,6 +373,16 @@ double   g_timeMax = 0.0;
 uint64_t g_pixelsSeen = 0;
 uint64_t g_rejected = 0;
 uint64_t g_clipped = 0;
+// The registration instrument's sums: per candidate, and the selected
+// delta's clip share by head speed (still, slow, fast).
+uint64_t g_candPix[4] = {};
+uint64_t g_candRej[4] = {};
+uint64_t g_candClip[4] = {};
+uint64_t g_bucketPix[3] = {};
+uint64_t g_bucketClip[3] = {};
+uint32_t g_bucketFrames[3] = {};
+constexpr float kStillDeg = 0.03f;   // under 2 deg/s at 72 Hz: tracking noise
+constexpr float kSlowDeg = 0.30f;    // under 22 deg/s: a glance
 bool     g_priceLogged = false;
 uint32_t g_lastW = 0, g_lastH = 0;
 
@@ -385,6 +433,18 @@ void pollSlots(ID3D11DeviceContext* ctx) {
                 g_rejected += v[0];
                 g_clipped += v[1];
                 g_pixelsSeen += q.pixels;
+                if (q.hadHistory) {
+                    for (int c = 0; c < 4; ++c) {
+                        if (!q.candPixels[c]) continue;
+                        g_candPix[c] += q.candPixels[c];
+                        g_candRej[c] += v[2 + c * 2];
+                        g_candClip[c] += v[3 + c * 2];
+                    }
+                    const int b = q.headDeg < kStillDeg ? 0 : (q.headDeg < kSlowDeg ? 1 : 2);
+                    g_bucketPix[b] += q.pixels;
+                    g_bucketClip[b] += v[1];
+                    ++g_bucketFrames[b];
+                }
                 ctx->Unmap(q.staging, 0);
                 q.statsDone = true;
             } else if (hr != DXGI_ERROR_WAS_STILL_DRAWING) {
@@ -406,7 +466,7 @@ int acquireSlot(ID3D11Device* dev) {
             D3D11_QUERY_DESC qdt{};
             qdt.Query = D3D11_QUERY_TIMESTAMP;
             D3D11_BUFFER_DESC bd{};
-            bd.ByteWidth = 16;
+            bd.ByteWidth = kStatCount * 4;
             bd.Usage = D3D11_USAGE_STAGING;
             bd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
             const bool made = SUCCEEDED(dev->CreateQuery(&qdd, &q.disjoint)) &&
@@ -541,8 +601,9 @@ DXGI_FORMAT pickHistoryFormat(ID3D11Device* dev) {
 
 void* temporalInner(void* srcTex, int eye, const float* bounds,
                     const float* tanNow, const float* tanPrev,
-                    const float* deltaHead, int motion, float blend,
-                    float clampSigma, unsigned flags) {
+                    const float* deltaHead, const float* deltaHeadLag,
+                    float headDeg, int motion, float blend, float clampSigma,
+                    unsigned flags) {
     ID3D11Texture2D* src = nullptr;
     static_cast<IUnknown*>(srcTex)->QueryInterface(
         __uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&src));
@@ -662,7 +723,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
     }
     if (ok && !g_stats) {
         D3D11_BUFFER_DESC bd{};
-        bd.ByteWidth = 16;
+        bd.ByteWidth = kStatCount * 4;
         bd.Usage = D3D11_USAGE_DEFAULT;
         bd.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
         bd.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
@@ -670,7 +731,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         D3D11_UNORDERED_ACCESS_VIEW_DESC ud{};
         ud.Format = DXGI_FORMAT_UNKNOWN;
         ud.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
-        ud.Buffer.NumElements = 4;
+        ud.Buffer.NumElements = kStatCount;
         ok = SUCCEEDED(dev->CreateBuffer(&bd, nullptr, &g_stats)) &&
              SUCCEEDED(dev->CreateUnorderedAccessView(g_stats, &ud, &g_statsUav));
         if (!ok) failOnce("the statistics buffer could not be created");
@@ -771,6 +832,24 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         // out unblended and the history restarts from it.
         const bool useHistory = e.haveHistory && haveDelta && tanPrev;
 
+        // The registration instrument's four candidates, whichever of
+        // them exist this frame (temporalPassRegistration).
+        float cand[4][9];
+        bool candValid[4] = {};
+        if (deltaHead) {
+            memcpy(cand[0], deltaHead, sizeof(cand[0]));
+            candValid[0] = true;
+        }
+        if (deltaHeadLag) {
+            memcpy(cand[1], deltaHeadLag, sizeof(cand[1]));
+            candValid[1] = true;
+        }
+        if (g_curValid && g_prevValid) {
+            temporalViewDelta(g_prevRows, g_curRows, false, cand[2]);
+            temporalViewDelta(g_prevRows, g_curRows, true, cand[3]);
+            candValid[2] = candValid[3] = true;
+        }
+
         PassParams p{};
         if (viaCopy) {
             p.region[0] = 0;
@@ -793,9 +872,18 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
             p.dR1[c] = delta[1 * 3 + c];
             p.dR2[c] = delta[2 * 3 + c];
         }
+        int candMask = 0;
+        for (int k = 0; k < 4; ++k) {
+            if (!candValid[k]) continue;
+            candMask |= 1 << k;
+            for (int r = 0; r < 3; ++r) {
+                for (int c = 0; c < 3; ++c) p.cand[k][r][c] = cand[k][r * 3 + c];
+            }
+        }
         p.blend = blend;
         p.gamma = clampSigma;
         p.haveHistory = useHistory ? 1 : 0;
+        p.candMask = useHistory ? candMask : 0;
 
         ID3D11ComputeShader* savedCs = nullptr;
         ID3D11ShaderResourceView* savedSrv[2] = {};
@@ -854,6 +942,12 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
             g_slots[qs].timeDone = false;
             g_slots[qs].statsDone = false;
             g_slots[qs].pixels = static_cast<uint64_t>(w) * h;
+            g_slots[qs].hadHistory = useHistory;
+            g_slots[qs].headDeg = headDeg;
+            for (int k = 0; k < 4; ++k) {
+                g_slots[qs].candPixels[k] =
+                    (useHistory && candValid[k]) ? static_cast<uint64_t>(w) * h : 0;
+            }
         }
 
         ID3D11ShaderResourceView* nullSrv2[2] = {};
@@ -987,6 +1081,58 @@ bool temporalPassTotals(uint32_t* treated, double* avgMs, double* maxMs,
     return true;
 }
 
+bool temporalPassRegistration(char* buf, size_t n) {
+    if (!buf || n == 0 || g_treats == 0) return false;
+    static const char* const kNames[4] = {"head", "head one frame earlier",
+                                          "camera", "camera transposed"};
+    size_t used = 0;
+    auto put = [&](const char* fmt, double a, double b, unsigned long long c) {
+        if (used >= n) return;
+        const int k = snprintf(buf + used, n - used, fmt, a, b, c);
+        if (k > 0) used += static_cast<size_t>(k);
+    };
+    for (int k = 0; k < 4; ++k) {
+        if (used < n) {
+            const int m = snprintf(buf + used, n - used, "%s%s ", k ? "; " : "", kNames[k]);
+            if (m > 0) used += static_cast<size_t>(m);
+        }
+        if (!g_candPix[k]) {
+            if (used < n) {
+                const int m = snprintf(buf + used, n - used, "(no delta yet)");
+                if (m > 0) used += static_cast<size_t>(m);
+            }
+            continue;
+        }
+        const double px = static_cast<double>(g_candPix[k]);
+        put("clipped %.1f%%, off %.1f%% (%llu eye-frames)",
+            100.0 * static_cast<double>(g_candClip[k]) / px,
+            100.0 * static_cast<double>(g_candRej[k]) / px,
+            static_cast<unsigned long long>(g_candPix[k] / (g_lastW && g_lastH ? static_cast<uint64_t>(g_lastW) * g_lastH : 1)));
+    }
+    static const char* const kBuckets[3] = {"still", "slow", "fast"};
+    if (used < n) {
+        const int m = snprintf(buf + used, n - used,
+                               ". The used delta's clip share by head speed (under %.2f, under %.2f, over that, degrees per frame): ",
+                               static_cast<double>(kStillDeg), static_cast<double>(kSlowDeg));
+        if (m > 0) used += static_cast<size_t>(m);
+    }
+    for (int b = 0; b < 3; ++b) {
+        if (used >= n) break;
+        if (!g_bucketPix[b]) {
+            const int m = snprintf(buf + used, n - used, "%s%s none", b ? ", " : "", kBuckets[b]);
+            if (m > 0) used += static_cast<size_t>(m);
+            continue;
+        }
+        const int m = snprintf(buf + used, n - used, "%s%s %.1f%% (%u eye-frames)",
+                               b ? ", " : "", kBuckets[b],
+                               100.0 * static_cast<double>(g_bucketClip[b]) /
+                                   static_cast<double>(g_bucketPix[b]),
+                               g_bucketFrames[b]);
+        if (m > 0) used += static_cast<size_t>(m);
+    }
+    return true;
+}
+
 void temporalPassShutdown() {
     if (g_treats > 0) {
         Log::get().note("temporal aa: %u eye-submits treated this session.",
@@ -1005,13 +1151,14 @@ void temporalPassShutdown() {
 
 extern "C" __declspec(dllexport) void* edvrTemporalAa(
     void* srcTex, int eye, const float* bounds, const float* tanNow,
-    const float* tanPrev, const float* deltaHead, int motion, float blend,
-    float clampSigma, unsigned flags) {
+    const float* tanPrev, const float* deltaHead, const float* deltaHeadLag,
+    float headDeg, int motion, float blend, float clampSigma, unsigned flags) {
     if (!srcTex || eye < 0 || eye > 1 || !tanNow) return nullptr;
     void* out = nullptr;
     edvr::guardedBudget(edvr::g_budget, [&] {
         out = edvr::temporalInner(srcTex, eye, bounds, tanNow, tanPrev,
-                                  deltaHead, motion, blend, clampSigma, flags);
+                                  deltaHead, deltaHeadLag, headDeg, motion,
+                                  blend, clampSigma, flags);
     });
     return out;
 }

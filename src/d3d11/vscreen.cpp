@@ -41,6 +41,7 @@
 #include "fss_res.h"
 #include "fss_scan.h"
 #include "fss_theater.h"  // the warm-up; the theater itself runs at submit
+#include "depth_probe.h"       // Phase 0 item 3: which depth target the eye draws use, and how it reads
 #include "sharpen_pass.h"      // likewise: warm-up and totals; the sharpening runs at submit
 #include "supersample_pass.h"  // likewise: warm-up and totals; the pass runs at submit
 #include "temporal_pass.h"     // and the temporal pass: warm-up, the camera capture, totals
@@ -1792,6 +1793,9 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     // The frame's FIRST eye draw: the last scene-constants write before it
     // is this eye's camera, latched for the temporal pass (temporal_pass.h).
     if (s->eyeDrawsThisFrame == 1) temporalPassNoteFirstEyeDraw();
+    // The depth target this eye draw uses, for the depth probe -- one
+    // pointer compare unless it changed (depth_probe.h).
+    depthProbeNoteEyeDraw(self, bindingGet(BindSlot::Dsv0), s->eyeDrawsThisFrame);
 
     // The intro movie's panel (intro_panel.h). First thing in the eye
     // branch, because it must see the composite before any other fix
@@ -2845,6 +2849,9 @@ void STDMETHODCALLTYPE hookedClearDsv(ID3D11DeviceContext* self,
         drawCensusClearDepth(dsv, flags, depth, stencil,
                              foreignContext(self));
     }
+    // The depth probe samples the finished depth behind an eye-draw
+    // target at the moment the game clears it for the next frame.
+    if (!foreignContext(self)) depthProbeBeforeClear(self, dsv, depth);
     g_state->realClearDsv(self, dsv, flags, depth, stencil);
 }
 
@@ -3565,6 +3572,7 @@ void vScreenRefreshConfig() {
     sharpenPassConfigure(cfg);
     supersamplePassConfigure(cfg);
     temporalPassConfigure(cfg);
+    depthProbeConfigure(cfg);
     backdropConfigure(cfg);
     fssScanConfigure(cfg);
     fssPanelConfigure(cfg);
@@ -3689,6 +3697,7 @@ void vScreenFrameBoundary() {
         // rows becoming last frame's.
         temporalPassTick(g_state->ownerCtx);
         temporalPassFrameBoundary();
+        depthProbeFrameBoundary(g_state->ownerCtx);
         // Told to the openvr half whether or not any intro fix is on: the
         // cull guard holds its lie until a scene exists, and that must
         // depend on the GAME reaching one, not on EDVR being configured
@@ -4319,6 +4328,12 @@ void vScreenFrameBoundary() {
                     "%.2f ms per eye on average (max %.2f); history rejected "
                     "for %.1f%% of pixels and clipped for %.1f%%.",
                     treated, avgMs, maxMs, rejectPct, clipPct);
+                // The registration instrument's verdict so far, its own
+                // line: which candidate delta the history lands best with.
+                char reg[640];
+                if (temporalPassRegistration(reg, sizeof(reg))) {
+                    Log::get().note("temporal aa registration: %s", reg);
+                }
             }
         }
         // The sharpening's, the same way.
@@ -4527,6 +4542,7 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     sharpenPassConfigure(cfg);
     supersamplePassConfigure(cfg);
     temporalPassConfigure(cfg);
+    depthProbeConfigure(cfg);
     backdropConfigure(cfg);
     fssScanConfigure(cfg);
     fssPanelConfigure(cfg);
@@ -4774,6 +4790,7 @@ void shutdownVScreenFixes() {
     introUpscaleShutdown();
     supersamplePassShutdown();
     temporalPassShutdown();
+    depthProbeShutdown();
     sharpenPassShutdown();
     g_state->hook.uninstall();
 }

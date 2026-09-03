@@ -633,8 +633,8 @@ int main(int argc, char** argv) {
     // resolve's tests: before the scene-counter block and its device hang.
     {
         typedef void* (*PFN_Taa)(void*, int, const float*, const float*,
-                                 const float*, const float*, int, float, float,
-                                 unsigned);
+                                 const float*, const float*, const float*,
+                                 float, int, float, float, unsigned);
         PFN_Taa taa = reinterpret_cast<PFN_Taa>(GetProcAddress(mod, "edvrTemporalAa"));
         if (!taa) {
             printf("  FAIL  edvrTemporalAa is not exported\n");
@@ -655,30 +655,30 @@ int main(int argc, char** argv) {
                 rc = 1;
             } else {
                 // The first frame after a reset goes out as it came in.
-                void* r1 = taa(srcA, 0, nullptr, tan, tan, ident, 1,
+                void* r1 = taa(srcA, 0, nullptr, tan, tan, ident, nullptr, 0.0f, 1,
                                0.9f, 1.0f, 1u);
                 if (!checkResolved(device, ctx, r1, "temporal: the first frame is the game's own",
                                    400, 304, 200, 152, ar, ag, ab, 2)) rc = 1;
                 // The same frame again, with history and no motion: the
                 // blend of a colour with itself.
-                void* r2 = taa(srcA, 0, nullptr, tan, tan, ident, 1,
+                void* r2 = taa(srcA, 0, nullptr, tan, tan, ident, nullptr, 0.0f, 1,
                                0.9f, 1.0f, 0u);
                 if (!checkResolved(device, ctx, r2, "temporal: a steady scene stays itself",
                                    400, 304, 200, 152, ar, ag, ab, 2)) rc = 1;
                 // A cut: the history (A) disagrees with everything around
                 // the pixel now (B, zero variance), so the clip pulls it
                 // to B and the output is the new scene, not a fade.
-                void* r3 = taa(srcB, 0, nullptr, tan, tan, ident, 1,
+                void* r3 = taa(srcB, 0, nullptr, tan, tan, ident, nullptr, 0.0f, 1,
                                0.9f, 1.0f, 0u);
                 if (!checkResolved(device, ctx, r3, "temporal: a cut is not ghosted",
                                    400, 304, 200, 152, br, bg, bb, 2)) rc = 1;
                 // Motion source none, and no delta at all: still the frame.
-                void* r4 = taa(srcB, 0, nullptr, tan, tan, nullptr, 0,
+                void* r4 = taa(srcB, 0, nullptr, tan, tan, nullptr, nullptr, 0.0f, 0,
                                0.9f, 1.0f, 0u);
                 if (!checkResolved(device, ctx, r4, "temporal: motion 'none' blends in place",
                                    400, 304, 200, 152, br, bg, bb, 2)) rc = 1;
                 // The other eye is its own history: eye 1 starts afresh.
-                void* r5 = taa(srcA, 1, nullptr, tan, tan, ident, 1,
+                void* r5 = taa(srcA, 1, nullptr, tan, tan, ident, nullptr, 0.0f, 1,
                                0.9f, 1.0f, 0u);
                 if (!checkResolved(device, ctx, r5, "temporal: the other eye has its own history",
                                    400, 304, 200, 152, ar, ag, ab, 2)) rc = 1;
@@ -698,10 +698,10 @@ int main(int argc, char** argv) {
                     D3D11_BOX box{0, 0, 0, 400, 304, 1};
                     ctx->CopySubresourceRegion(wide, 0, 400, 0, 0, half, 0, &box);
                     const float bR[4] = {0.5f, 0.0f, 1.0f, 1.0f};
-                    void* r = taa(wide, 1, bR, tan, tan, ident, 1, 0.9f, 1.0f, 1u);
+                    void* r = taa(wide, 1, bR, tan, tan, ident, nullptr, 0.0f, 1, 0.9f, 1.0f, 1u);
                     if (!checkResolved(device, ctx, r, "temporal: right eye of a double-wide, leftmost column (no bleed)",
                                        400, 304, 0, 152, br, bg, bb, 2)) rc = 1;
-                    r = taa(wide, 1, bR, tan, tan, ident, 1, 0.9f, 1.0f, 0u);
+                    r = taa(wide, 1, bR, tan, tan, ident, nullptr, 0.0f, 1, 0.9f, 1.0f, 0u);
                     if (!checkResolved(device, ctx, r, "temporal: ...and with history",
                                        400, 304, 0, 152, br, bg, bb, 2)) rc = 1;
                 }
@@ -715,7 +715,7 @@ int main(int argc, char** argv) {
                 td.Usage = D3D11_USAGE_DEFAULT; td.BindFlags = D3D11_BIND_RENDER_TARGET;
                 ID3D11Texture2D* msaa = nullptr;
                 if (SUCCEEDED(device->CreateTexture2D(&td, nullptr, &msaa)) && msaa) {
-                    if (!expectRefused(taa(msaa, 0, nullptr, tan, tan, ident, 1, 0.9f, 1.0f, 1u),
+                    if (!expectRefused(taa(msaa, 0, nullptr, tan, tan, ident, nullptr, 0.0f, 1, 0.9f, 1.0f, 1u),
                                        "temporal: an MSAA source")) rc = 1;
                     msaa->Release();
                 }

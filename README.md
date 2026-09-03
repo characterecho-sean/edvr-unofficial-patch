@@ -230,7 +230,12 @@ live. Every temporal filter trades a little edge contrast for its calm, so
 `render_sharpness` (0 to 1, live) runs AMD's RCAS on every outgoing frame
 as the last pass at the door, for the resolve's calm kernel as much as for
 this; the first flight found text a little soft without it, and 0.3 to 0.5
-is where to start. *Details: [docs/anti-aliasing.md](docs/anti-aliasing.md).*
+is where to start. The second flight found the limit of the first build:
+a history moved by the head's rotation alone registers the world but not
+the cockpit, whose text sits close enough that the head's translation
+moves it by pixels, so it ghosts under head motion and stays soft. The
+next build reprojects with depth; the current one carries the instruments
+for it. *Details: [docs/anti-aliasing.md](docs/anti-aliasing.md).*
 
 **The RemLok helmet's edge lines hanging along your nose.** When the
 emergency helmet deploys, its faint edge lines end up in the middle of your

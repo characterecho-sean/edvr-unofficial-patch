@@ -35,6 +35,7 @@
 // stands the pass down for the session with one line.
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 
 struct ID3D11DeviceContext;
@@ -72,6 +73,22 @@ void temporalPassFrameBoundary();
 bool temporalPassTotals(uint32_t* treated, double* avgMs, double* maxMs,
                         double* rejectPct, double* clipPct);
 
+// The registration instrument, for the same totals line. The second
+// flight (2026-09-03) ghosted and softened the cockpit's text under head
+// motion, which is what a history that does not land on near content
+// looks like; before v2 builds on depth, the frame-to-pose association
+// has to be exact. So every treated frame also asks what FOUR candidate
+// deltas would have fetched and judges each by the same clip, counting
+// and not using: the head's delta as used, the head's delta one frame
+// earlier (a pipelined renderer lands its frame a pose late), the game's
+// camera rows read as world->view, and the same rows transposed; and the
+// selected candidate's clip share split by head speed (still, slow,
+// fast). Formats the text; false when nothing has run. With the ship
+// steady and the head turning, the lowest clip share names the exact
+// association, and a share that climbs with head speed for ALL of them
+// is the translation v2's depth is for.
+bool temporalPassRegistration(char* buf, size_t n);
+
 void temporalPassShutdown();
 
 }  // namespace edvr
@@ -88,6 +105,9 @@ extern "C" {
 //            and the history integrates the offsets (the shader says why).
 // deltaHead: 9 floats, row-major, the rotation taking this frame's view
 //            directions to last frame's (temporalHeadDelta); may be null.
+// deltaHeadLag: the same delta one frame earlier (may be null), and
+//            headDeg the head's turn this frame in degrees -- both for the
+//            registration instrument only (temporalPassRegistration).
 // motion:    0 none (no reprojection), 1 head (deltaHead), 2 camera (the
 //            pass's own capture; falls back to none until a pair exists).
 // blend:     history weight 0.5..0.95. clampSigma: the clip's half-width in
@@ -103,7 +123,9 @@ __declspec(dllexport) void* edvrTemporalAa(void* srcTex, int eye,
                                            const float* bounds,
                                            const float* tanNow,
                                            const float* tanPrev,
-                                           const float* deltaHead, int motion,
+                                           const float* deltaHead,
+                                           const float* deltaHeadLag,
+                                           float headDeg, int motion,
                                            float blend, float clampSigma,
                                            unsigned flags);
 }

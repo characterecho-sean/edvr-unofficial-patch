@@ -226,6 +226,7 @@ cl.exe %CFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "%ROOT%\src\d3d11\intro_upscale.cpp" ^
     "%ROOT%\src\d3d11\supersample_pass.cpp" ^
     "%ROOT%\src\d3d11\temporal_pass.cpp" ^
+    "%ROOT%\src\d3d11\depth_probe.cpp" ^
     "%ROOT%\src\d3d11\sharpen_pass.cpp" ^
     "%ROOT%\src\d3d11\loader_panel.cpp" ^
     "%ROOT%\src\d3d11\splash_dim.cpp" ^

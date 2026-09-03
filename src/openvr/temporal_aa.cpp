@@ -18,8 +18,8 @@ namespace edvr {
 namespace {
 
 typedef void* (*PFN_EdvrTemporalAa)(void*, int, const float*, const float*,
-                                    const float*, const float*, int, float,
-                                    float, unsigned);
+                                    const float*, const float*, const float*,
+                                    float, int, float, float, unsigned);
 
 constexpr uint32_t kMaxFaults = 8;
 
@@ -53,6 +53,8 @@ struct State {
     bool  curValid = false;
     float prevPose[12] = {};
     bool  prevValid = false;
+    float prev2Pose[12] = {};   // the frame before that: the lagged candidate
+    bool  prev2Valid = false;
 
     // Per eye: what the history holds (its frustum), and whether the next
     // treat must start afresh.
@@ -163,6 +165,8 @@ void temporalAaFrameBoundary() {
     State& s = g_s;
     // The pose pair rolls whether or not the pass is on, so a live enable
     // has a delta on its first frame.
+    memcpy(s.prev2Pose, s.prevPose, sizeof(s.prev2Pose));
+    s.prev2Valid = s.prevValid;
     memcpy(s.prevPose, s.curPose, sizeof(s.prevPose));
     s.prevValid = s.curValid;
     memcpy(s.curPose, s.pendingPose, sizeof(s.curPose));
@@ -309,13 +313,22 @@ void* temporalAaTreat(vr::EVREye eye, void* handle,
     if (!s.fn) return nullptr;
 
     // The head's rotation between the frame the history holds and this
-    // one. Without a valid pair the pass is told so and restarts.
+    // one, computed whenever a pair exists (the instrument wants it under
+    // every motion source); the pass uses it only when the head is the
+    // source, and without a valid pair is told so and restarts. The
+    // lagged twin -- the same delta one frame earlier -- and the turn's
+    // size go with it, for the registration instrument alone.
     float delta[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
-    bool haveDelta = false;
-    if (s.motion == Motion::Head && s.curValid && s.prevValid) {
+    float deltaLag[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+    const bool haveHeadDelta = s.curValid && s.prevValid;
+    const bool haveLagDelta = s.prevValid && s.prev2Valid;
+    float headDeg = 0.0f;
+    if (haveHeadDelta) {
         temporalHeadDelta(s.prevPose, s.curPose, delta);
-        haveDelta = true;
+        headDeg = temporalRotationAngleDeg(delta);
     }
+    if (haveLagDelta) temporalHeadDelta(s.prev2Pose, s.prevPose, deltaLag);
+    const bool haveDelta = s.motion == Motion::Head && haveHeadDelta;
     unsigned flags = 0;
     if (s.resetNext[e] || !s.havePrev[e] ||
         (s.motion == Motion::Head && !haveDelta)) {
@@ -323,8 +336,9 @@ void* temporalAaTreat(vr::EVREye eye, void* handle,
     }
     void* out = s.fn(handle, e, haveBounds ? b4 : nullptr, tanNow,
                      s.havePrev[e] ? s.tanPrev[e] : tanNow,
-                     haveDelta ? delta : nullptr, static_cast<int>(s.motion),
-                     s.blend, s.clamp, flags);
+                     haveHeadDelta ? delta : nullptr,
+                     haveLagDelta ? deltaLag : nullptr, headDeg,
+                     static_cast<int>(s.motion), s.blend, s.clamp, flags);
     if (!out) {
         temporalAaStandDown("the temporal pass refused (its own line in the "
                             "graphics log says why)");
