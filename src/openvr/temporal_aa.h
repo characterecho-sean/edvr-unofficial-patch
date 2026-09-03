@@ -35,6 +35,11 @@ bool temporalAaWanted();
 // viewpoint, not its orientation). Kept as the pair this frame / last
 // frame the reprojection needs.
 void temporalAaNotePose(const vr::HmdMatrix34_t& pose, bool valid);
+// The same frame's HMD pose from WaitGetPoses's game-pose array (predicted
+// a frame further than the render pose), for the registration instrument
+// only: a renderer that draws with the game poses registers with their
+// delta, not the render poses'. Invalid when the game asked for none.
+void temporalAaNoteGamePose(const vr::HmdMatrix34_t& pose, bool valid);
 
 // The frame boundary, after the system hook's: advances the jitter and
 // tells the system hook the tangent shift for the coming frame.

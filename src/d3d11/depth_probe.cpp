@@ -22,22 +22,29 @@ namespace {
 constexpr char kSampleCsHlsl[] = R"HLSL(
 Texture2D<float> D : register(t0);
 RWStructuredBuffer<float> O : register(u0);
-cbuffer P : register(b0) { int2 size; int2 pad0; };
+cbuffer P : register(b0) { uint2 size; uint2 pad0; };
 [numthreads(16, 16, 1)]
 void main(uint3 id : SV_DispatchThreadID) {
     if (id.x >= 16 || id.y >= 16) return;
-    int2 p = int2((int(id.x) * 2 + 1) * size.x / 32, (int(id.y) * 2 + 1) * size.y / 32);
-    p = clamp(p, int2(0, 0), size - 1);
-    O[id.y * 16 + id.x] = D.Load(int3(p, 0));
+    uint2 p = uint2((id.x * 2 + 1) * size.x / 32, (id.y * 2 + 1) * size.y / 32);
+    p = min(p, size - 1);
+    O[id.y * 16 + id.x] = D.Load(int3(int2(p), 0));
 }
 )HLSL";
 
 constexpr int      kMaxTargets = 6;
-constexpr uint64_t kSampleIntervalMs = 15000;
+constexpr uint64_t kSampleIntervalMs = 10000;
 constexpr int      kMaxSampleLines = 6;
 
+// The near plane the game names when it asks for its projection (0.025,
+// every session's receiver line), for turning a reversed-Z value into
+// metres: with an infinite far plane, value = near / z. Believed, not
+// measured -- the probe prints the raw values beside it so the belief can
+// be checked against a known distance.
+constexpr double kNearPlaneM = 0.025;
+
 struct Target {
-    void*       dsv = nullptr;          // identity only; dereferenced only while bound or being cleared
+    void*       dsv = nullptr;          // identity only; dereferenced only inside the game's own call
     uint32_t    w = 0, h = 0;
     DXGI_FORMAT texFmt = DXGI_FORMAT_UNKNOWN;
     DXGI_FORMAT dsvFmt = DXGI_FORMAT_UNKNOWN;
@@ -47,6 +54,7 @@ struct Target {
     uint32_t    framesSeen = 0;
     uint64_t    lastSampleMs = 0;
     int         sampleLines = 0;
+    float       clearValue = -1.0f;     // what the game clears it to; -1 = not seen
     bool        boundThisFrame = false;
     bool        announced = false;
     bool        unreadableNoted = false;
@@ -57,7 +65,8 @@ void*    g_lastDsv = nullptr;
 bool     g_wanted = false;
 uint32_t g_distinctThisFrame = 0;
 uint32_t g_maxDistinct = 0;
-uint32_t g_frames = 0;
+uint32_t g_eyeFrames = 0;   // frames that had at least one eye draw
+bool     g_eyeDrawThisFrame = false;
 bool     g_summaryNoted = false;
 
 // The GPU side: the shader, its parameter buffer, the 1 KB result and its
@@ -71,7 +80,6 @@ ID3D11Buffer*              g_staging = nullptr;
 bool                       g_stagingInFlight = false;
 int                        g_stagingTarget = -1;
 bool                       g_stagingCopied = false;
-float                      g_stagingClear = 1.0f;
 ID3D11Texture2D*           g_copyTex = nullptr;
 uint32_t                   g_copyW = 0, g_copyH = 0;
 DXGI_FORMAT                g_copyFmt = DXGI_FORMAT_UNKNOWN;
@@ -183,6 +191,13 @@ bool ensureGpu(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     return true;
 }
 
+// Metres for a reversed-Z value under an infinite far plane: z = near /
+// value. Zero (the far plane) is infinity; the caller prints that as such.
+double metresOf(float v) {
+    if (!(v > 0.0f)) return 0.0;
+    return kNearPlaneM / static_cast<double>(v);
+}
+
 }  // namespace
 
 void depthProbeConfigure(Config& cfg) {
@@ -194,6 +209,7 @@ void depthProbeNoteEyeDraw(ID3D11DeviceContext* ctx, void* dsv,
                            uint32_t eyeDrawIndex) {
     (void)ctx;
     if (!g_wanted) return;
+    g_eyeDrawThisFrame = true;
     // The common case is one compare: the same view as the last eye draw.
     // (An address reused by a different view within a frame would be taken
     // for the old one -- a probe's risk, worth one line of caveat and not
@@ -246,14 +262,22 @@ void depthProbeNoteEyeDraw(ID3D11DeviceContext* ctx, void* dsv,
     }
 }
 
-void depthProbeBeforeClear(ID3D11DeviceContext* ctx, ID3D11DepthStencilView* dsv,
-                           float depth) {
-    if (!g_wanted || !dsv || !ctx) return;
-    const int idx = findTarget(dsv);
+bool depthProbeWantsSample(void* current, void* next) {
+    if (!g_wanted || !current || current == next) return false;
+    if (g_stagingInFlight) return false;
+    const int idx = findTarget(current);
+    if (idx < 0) return false;
+    Target& t = g_targets[idx];
+    if (t.sampleLines >= kMaxSampleLines) return false;
+    if (t.lastSampleMs && !elapsedMs(t.lastSampleMs, kSampleIntervalMs)) return false;
+    return true;
+}
+
+void depthProbeSample(ID3D11DeviceContext* ctx, void* dsvPtr) {
+    if (!g_wanted || !dsvPtr || !ctx) return;
+    const int idx = findTarget(dsvPtr);
     if (idx < 0) return;
     Target& t = g_targets[idx];
-    if (g_stagingInFlight || t.sampleLines >= kMaxSampleLines) return;
-    if (t.lastSampleMs && !elapsedMs(t.lastSampleMs, kSampleIntervalMs)) return;
     t.lastSampleMs = stampMs();
 
     if (t.samples > 1) {
@@ -281,6 +305,7 @@ void depthProbeBeforeClear(ID3D11DeviceContext* ctx, ID3D11DepthStencilView* dsv
         return;
     }
 
+    ID3D11DepthStencilView* dsv = static_cast<ID3D11DepthStencilView*>(dsvPtr);
     guardedBudget(g_budget, [&] {
         ID3D11Device* dev = nullptr;
         ctx->GetDevice(&dev);
@@ -335,8 +360,7 @@ void depthProbeBeforeClear(ID3D11DeviceContext* ctx, ID3D11DepthStencilView* dsv
                 D3D11_MAPPED_SUBRESOURCE m{};
                 if (SUCCEEDED(ctx->Map(g_cb, 0, D3D11_MAP_WRITE_DISCARD, 0, &m)) &&
                     m.pData) {
-                    int32_t prm[4] = {static_cast<int32_t>(t.w),
-                                      static_cast<int32_t>(t.h), 0, 0};
+                    uint32_t prm[4] = {t.w, t.h, 0, 0};
                     memcpy(m.pData, prm, sizeof(prm));
                     ctx->Unmap(g_cb, 0);
 
@@ -375,7 +399,6 @@ void depthProbeBeforeClear(ID3D11DeviceContext* ctx, ID3D11DepthStencilView* dsv
                     g_stagingInFlight = true;
                     g_stagingTarget = idx;
                     g_stagingCopied = copied;
-                    g_stagingClear = depth;
                 }
                 srv->Release();
             }
@@ -386,9 +409,17 @@ void depthProbeBeforeClear(ID3D11DeviceContext* ctx, ID3D11DepthStencilView* dsv
     });
 }
 
+void depthProbeNoteClear(ID3D11DepthStencilView* dsv, float depth) {
+    if (!g_wanted || !dsv) return;
+    const int idx = findTarget(dsv);
+    if (idx < 0) return;
+    g_targets[idx].clearValue = depth;
+}
+
 void depthProbeFrameBoundary(ID3D11DeviceContext* ctx) {
     if (!g_wanted) return;
-    ++g_frames;
+    if (g_eyeDrawThisFrame) ++g_eyeFrames;
+    g_eyeDrawThisFrame = false;
     if (g_distinctThisFrame > g_maxDistinct) g_maxDistinct = g_distinctThisFrame;
     g_distinctThisFrame = 0;
     g_lastDsv = nullptr;   // a new frame: its first eye draw notes its view afresh
@@ -411,21 +442,21 @@ void depthProbeFrameBoundary(ID3D11DeviceContext* ctx) {
                 : "No shader-resource bind: v2 would copy it out once per "
                   "eye (CopyResource, same typeless family) before reading.");
     }
-    if (!g_summaryNoted && g_frames >= 120) {
+    if (!g_summaryNoted && g_eyeFrames >= 120) {
         g_summaryNoted = true;
         if (g_targetCount == 0) {
             Log::get().note(
                 "depth probe: no depth-stencil view was bound during the eye "
-                "draws of the first 120 frames -- the game may bind depth by "
-                "a path the binding shadow does not see, or draw the eyes "
-                "without it. v2 needs another way in; please report this log.");
+                "draws of the first 120 frames that had any -- the game may "
+                "bind depth by a path the binding shadow does not see, or "
+                "draw the eyes without it. v2 needs another way in; please "
+                "report this log.");
         } else {
             Log::get().note(
                 "depth probe: %d distinct depth target(s) seen at the eye "
-                "draws over 120 frames, at most %u in one frame. Their "
-                "values are sampled at the moment the game clears each one "
-                "(the previous frame's depth, complete) every %llu s, a few "
-                "times per target.",
+                "draws over 120 frames, at most %u in one frame. Each is "
+                "sampled at the moment the game unbinds it, its contents "
+                "complete, every %llu s, a few times per target.",
                 g_targetCount, g_maxDistinct,
                 static_cast<unsigned long long>(kSampleIntervalMs / 1000));
         }
@@ -436,36 +467,43 @@ void depthProbeFrameBoundary(ID3D11DeviceContext* ctx) {
                                     D3D11_MAP_FLAG_DO_NOT_WAIT, &m);
         if (SUCCEEDED(hr) && m.pData) {
             const float* v = static_cast<const float*>(m.pData);
+            const int tIdx = g_stagingTarget >= 0 ? g_stagingTarget : 0;
+            Target& t = g_targets[tIdx];
+            const float clear = t.clearValue;
             float mn = 1e30f, mx = -1e30f;
-            int atClear = 0, nearOne = 0, nearZero = 0;
+            int atClear = 0;
+            // Bands, for the reversed-Z reading: value = near / z.
+            int bandFar = 0, bandKm = 0, bandHm = 0, bandM = 0, bandNear = 0;
             for (int i = 0; i < 256; ++i) {
                 const float d = v[i];
                 if (d < mn) mn = d;
                 if (d > mx) mx = d;
-                if (fabsf(d - g_stagingClear) < 1e-6f) ++atClear;
-                if (d > 1.0f - 1e-4f) ++nearOne;
-                if (d < 1e-4f) ++nearZero;
+                if (clear >= 0.0f && fabsf(d - clear) < 1e-7f) ++atClear;
+                if (d <= 0.0f) ++bandFar;
+                else if (d < 2.5e-6f) ++bandKm;     // beyond 10 km
+                else if (d < 2.5e-4f) ++bandHm;     // 100 m .. 10 km
+                else if (d < 1.25e-2f) ++bandM;     // 2 m .. 100 m
+                else ++bandNear;                    // within 2 m
             }
             const float centre = v[7 * 16 + 7];
             ctx->Unmap(g_staging, 0);
             g_stagingInFlight = false;
-            const bool reversed = g_stagingClear < 0.5f;
-            Target& t = g_targets[g_stagingTarget >= 0 ? g_stagingTarget : 0];
             ++t.sampleLines;
+            const bool reversed = clear >= 0.0f ? clear < 0.5f : (mx < 0.5f);
+            const float nearest = reversed ? mx : mn;
             Log::get().note(
-                "depth probe: target #%d sampled on a 16x16 grid%s -- min "
-                "%.7f, max %.7f, centre %.7f; %d of 256 still at the clear "
-                "value %.3f (nothing drawn there), %d within 1e-4 of 1, %d "
-                "within 1e-4 of 0. Cleared to %.3f, so this reads as %s "
-                "depth: the nearest sample is %.7f. The pass's cockpit is "
-                "at whatever the centre reads in a docked ship.",
-                g_stagingTarget, g_stagingCopied ? " (copied out first)" : "",
+                "depth probe: target #%d sampled on a 16x16 grid at its "
+                "unbind%s -- min %.8f, max %.8f, centre %.8f (%.2f m if "
+                "reversed-Z with near %.3f m); %d of 256 at the clear value "
+                "%.3f (nothing drawn there). Bands, read as reversed-Z: %d at "
+                "the far plane, %d beyond 10 km, %d at 100 m..10 km, %d at "
+                "2..100 m, %d within 2 m. The nearest sample %.8f is %.2f m "
+                "under that reading.",
+                tIdx, g_stagingCopied ? " (copied out first)" : "",
                 static_cast<double>(mn), static_cast<double>(mx),
-                static_cast<double>(centre), atClear,
-                static_cast<double>(g_stagingClear), nearOne, nearZero,
-                static_cast<double>(g_stagingClear),
-                reversed ? "REVERSED (far = 0)" : "standard (far = 1)",
-                static_cast<double>(reversed ? mx : mn));
+                static_cast<double>(centre), metresOf(centre), kNearPlaneM,
+                atClear, static_cast<double>(clear), bandFar, bandKm, bandHm,
+                bandM, bandNear, static_cast<double>(nearest), metresOf(nearest));
         } else if (hr != DXGI_ERROR_WAS_STILL_DRAWING) {
             g_stagingInFlight = false;   // unreadable; the next interval retries
         }

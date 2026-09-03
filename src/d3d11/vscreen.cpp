@@ -2298,6 +2298,18 @@ void STDMETHODCALLTYPE hookedOMSetRenderTargets(ID3D11DeviceContext* self, UINT 
         g_state->realOMSetRenderTargets(self, n, rtvs, dsv);
         return;
     }
+    // The depth probe reads an eye-draw depth target at the moment the
+    // game switches away from it: its contents complete, and -- once the
+    // stage is cleared here -- no longer bound as a target, which is the
+    // one state a shader may read it in (depth_probe.h). The game's own
+    // rebind follows and sets whatever it wanted.
+    {
+        void* cur = bindingGet(BindSlot::Dsv0);
+        if (depthProbeWantsSample(cur, dsv)) {
+            g_state->realOMSetRenderTargets(self, 0, nullptr, nullptr);
+            depthProbeSample(self, cur);
+        }
+    }
     // Unconditionally, even when the pointer looks unchanged: an identical
     // address after a rebind is not evidence of an identical view. bindingSet
     // bumps the generation either way.
@@ -2323,6 +2335,11 @@ void STDMETHODCALLTYPE hookedOMSetRtvAndUav(ID3D11DeviceContext* self, UINT n,
     // this builds against does not define the constant.
     constexpr UINT kKeepRenderTargetsUnchanged = 0xFFFFFFFFu;
     if (n != kKeepRenderTargetsUnchanged) {
+        void* cur = bindingGet(BindSlot::Dsv0);
+        if (depthProbeWantsSample(cur, dsv)) {
+            g_state->realOMSetRenderTargets(self, 0, nullptr, nullptr);
+            depthProbeSample(self, cur);
+        }
         bindingSet(BindSlot::Rtv0, (n && rtvs) ? rtvs[0] : nullptr);
         bindingSet(BindSlot::Dsv0, dsv);
     }
@@ -2849,9 +2866,9 @@ void STDMETHODCALLTYPE hookedClearDsv(ID3D11DeviceContext* self,
         drawCensusClearDepth(dsv, flags, depth, stencil,
                              foreignContext(self));
     }
-    // The depth probe samples the finished depth behind an eye-draw
-    // target at the moment the game clears it for the next frame.
-    if (!foreignContext(self)) depthProbeBeforeClear(self, dsv, depth);
+    // The depth probe learns which value the game clears an eye-draw
+    // target to, which says which way its depth runs.
+    if (!foreignContext(self)) depthProbeNoteClear(dsv, depth);
     g_state->realClearDsv(self, dsv, flags, depth, stencil);
 }
 

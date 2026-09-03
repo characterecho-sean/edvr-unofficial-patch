@@ -19,7 +19,8 @@ namespace {
 
 typedef void* (*PFN_EdvrTemporalAa)(void*, int, const float*, const float*,
                                     const float*, const float*, const float*,
-                                    float, int, float, float, unsigned);
+                                    const float*, float, int, float, float,
+                                    unsigned);
 
 constexpr uint32_t kMaxFaults = 8;
 
@@ -55,6 +56,14 @@ struct State {
     bool  prevValid = false;
     float prev2Pose[12] = {};   // the frame before that: the lagged candidate
     bool  prev2Valid = false;
+    // The game-pose array's HMD pose, the same three deep: the candidate
+    // for a renderer that draws with those (the instrument only).
+    float pendingGame[12] = {};
+    bool  pendingGameValid = false;
+    float curGame[12] = {};
+    bool  curGameValid = false;
+    float prevGame[12] = {};
+    bool  prevGameValid = false;
 
     // Per eye: what the history holds (its frustum), and whether the next
     // treat must start afresh.
@@ -161,6 +170,14 @@ void temporalAaNotePose(const vr::HmdMatrix34_t& pose, bool valid) {
     s.pendingValid = valid;
 }
 
+void temporalAaNoteGamePose(const vr::HmdMatrix34_t& pose, bool valid) {
+    State& s = g_s;
+    for (int r = 0; r < 3; ++r) {
+        for (int c = 0; c < 4; ++c) s.pendingGame[r * 4 + c] = pose.m[r][c];
+    }
+    s.pendingGameValid = valid;
+}
+
 void temporalAaFrameBoundary() {
     State& s = g_s;
     // The pose pair rolls whether or not the pass is on, so a live enable
@@ -171,6 +188,10 @@ void temporalAaFrameBoundary() {
     s.prevValid = s.curValid;
     memcpy(s.curPose, s.pendingPose, sizeof(s.curPose));
     s.curValid = s.pendingValid;
+    memcpy(s.prevGame, s.curGame, sizeof(s.prevGame));
+    s.prevGameValid = s.curGameValid;
+    memcpy(s.curGame, s.pendingGame, sizeof(s.curGame));
+    s.curGameValid = s.pendingGameValid;
 
     if (!temporalAaWanted()) {
         if (s.jitterLive) {
@@ -320,14 +341,17 @@ void* temporalAaTreat(vr::EVREye eye, void* handle,
     // size go with it, for the registration instrument alone.
     float delta[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
     float deltaLag[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+    float deltaGame[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
     const bool haveHeadDelta = s.curValid && s.prevValid;
     const bool haveLagDelta = s.prevValid && s.prev2Valid;
+    const bool haveGameDelta = s.curGameValid && s.prevGameValid;
     float headDeg = 0.0f;
     if (haveHeadDelta) {
         temporalHeadDelta(s.prevPose, s.curPose, delta);
         headDeg = temporalRotationAngleDeg(delta);
     }
     if (haveLagDelta) temporalHeadDelta(s.prev2Pose, s.prevPose, deltaLag);
+    if (haveGameDelta) temporalHeadDelta(s.prevGame, s.curGame, deltaGame);
     const bool haveDelta = s.motion == Motion::Head && haveHeadDelta;
     unsigned flags = 0;
     if (s.resetNext[e] || !s.havePrev[e] ||
@@ -337,7 +361,8 @@ void* temporalAaTreat(vr::EVREye eye, void* handle,
     void* out = s.fn(handle, e, haveBounds ? b4 : nullptr, tanNow,
                      s.havePrev[e] ? s.tanPrev[e] : tanNow,
                      haveHeadDelta ? delta : nullptr,
-                     haveLagDelta ? deltaLag : nullptr, headDeg,
+                     haveLagDelta ? deltaLag : nullptr,
+                     haveGameDelta ? deltaGame : nullptr, headDeg,
                      static_cast<int>(s.motion), s.blend, s.clamp, flags);
     if (!out) {
         temporalAaStandDown("the temporal pass refused (its own line in the "

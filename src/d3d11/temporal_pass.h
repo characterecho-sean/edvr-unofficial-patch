@@ -81,7 +81,12 @@ bool temporalPassTotals(uint32_t* treated, double* avgMs, double* maxMs,
 // deltas would have fetched and judges each by the same clip, counting
 // and not using: the head's delta as used, the head's delta one frame
 // earlier (a pipelined renderer lands its frame a pose late), the game's
-// camera rows read as world->view, and the same rows transposed; and the
+// camera rows read as world->view, and the delta of the game-pose array's
+// HMD pose (a renderer that draws with those, predicted a frame further,
+// registers with their delta). The transposed camera reading held the
+// fourth slot on the third flight and lost to the untransposed one by a
+// wide margin (62% clipped by 6.5/255 against 53% by 5.0), so the rows
+// are world->view and the slot went to the game pose. And the
 // selected candidate's clip share split by head speed (still, slow,
 // fast). Each share carries the mean SIZE of its clips in luma: a nudge
 // on a text edge is a few 255ths, a history that landed somewhere else
@@ -109,8 +114,9 @@ extern "C" {
 //            and the history integrates the offsets (the shader says why).
 // deltaHead: 9 floats, row-major, the rotation taking this frame's view
 //            directions to last frame's (temporalHeadDelta); may be null.
-// deltaHeadLag: the same delta one frame earlier (may be null), and
-//            headDeg the head's turn this frame in degrees -- both for the
+// deltaHeadLag: the same delta one frame earlier, deltaGame: the delta of
+//            the game-pose array's HMD pose (each may be null), and
+//            headDeg the head's turn this frame in degrees -- all for the
 //            registration instrument only (temporalPassRegistration).
 // motion:    0 none (no reprojection), 1 head (deltaHead), 2 camera (the
 //            pass's own capture; falls back to none until a pair exists).
@@ -129,6 +135,7 @@ __declspec(dllexport) void* edvrTemporalAa(void* srcTex, int eye,
                                            const float* tanPrev,
                                            const float* deltaHead,
                                            const float* deltaHeadLag,
+                                           const float* deltaGame,
                                            float headDeg, int motion,
                                            float blend, float clampSigma,
                                            unsigned flags);

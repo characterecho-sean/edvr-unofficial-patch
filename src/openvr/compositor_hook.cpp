@@ -1660,6 +1660,17 @@ vr::EVRCompositorError hookedWaitGetPoses(void* self,
             // The temporal pass's motion source, v1: the head's pose for the
             // frame about to render, before the offset below moves it.
             temporalAaNotePose(hmd.mDeviceToAbsoluteTracking, hmd.bPoseIsValid != 0);
+            // And the game-pose array's, predicted a frame further: the
+            // registration instrument's candidate for a renderer that
+            // draws with those instead (temporal_aa.h).
+            if (gamePoses && gameCount > vr::k_unTrackedDeviceIndex_Hmd) {
+                const vr::TrackedDevicePose_t& gp =
+                    gamePoses[vr::k_unTrackedDeviceIndex_Hmd];
+                temporalAaNoteGamePose(gp.mDeviceToAbsoluteTracking,
+                                       gp.bPoseIsValid != 0);
+            } else {
+                temporalAaNoteGamePose(hmd.mDeviceToAbsoluteTracking, false);
+            }
 
             // Ship-forward in the current head frame, for the sprite-pinning
             // fix on the d3d11 side. World-forward is seated -Z; its

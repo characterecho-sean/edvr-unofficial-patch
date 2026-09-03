@@ -686,6 +686,30 @@ cockpit, and the game's camera delta into the world's; the two are told
 apart by depth (the cockpit is within a few metres), which is also the
 first thing the probe measures.
 
+**The third flight (2026-09-03, the main menu, which is where all three
+flights were: a ship model turning on its own and a menu floating in
+space, the head the only camera motion).** The registration line settled
+two questions. The head's delta as used beat the same delta one frame
+earlier on both count and size (21% of pixels clipped by 1.2/255 against
+30% by 1.8), so the frame renders with the pose `WaitGetPoses` returned
+for it: no lag. The game's camera rows were far worse in that scene (53%
+by 5.0 read as world→view, 62% by 6.5 transposed), so they are not the
+head's motion there, and the untransposed reading is the right one; the
+transposed slot went to a fourth candidate, the delta of the game-pose
+array's HMD pose, for a renderer that draws with those. The clip share
+rose with head speed (11%, 20%, 28% still to fast) while the size barely
+did (0.5, 1.2, 1.5/255): most clips are edge nudges, and the text's
+misregistration is a small fraction of them, so the ghost the player sees
+on the panel is diluted in the mean. The depth probe found the targets:
+`R32G8X24_TYPELESS` textures viewed as `D32_FLOAT_S8X24_UINT`, bind flags
+`0x48` (shader-readable directly), two at 2064x2208 before the HMD
+Quality rebuild and four per frame at 3096x3312 after it (bound first at
+eye draws 2, 4, 12 and 15), cleared to 0.0, so reversed-Z. Every sampled
+value read 0.000: the probe read the texture while the game still had it
+bound as the depth target, and D3D hands a shader a null view for that,
+so the fourth build samples at the moment the game unbinds a target, with
+the output-merger stage cleared first.
+
 ## Feature C — texture LOD bias, the small lever
 
 Not all shimmer is geometry. Detail maps and normal maps sampled a mip

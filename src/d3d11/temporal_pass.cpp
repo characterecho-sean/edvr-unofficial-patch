@@ -46,7 +46,7 @@ cbuffer P : register(b0) {
     float4 c0R0;        // the registration instrument's candidates, same
     float4 c0R1;        // shape: 0 the head as used, 1 the head one frame
     float4 c0R2;        // earlier, 2 the camera rows as world->view, 3 the
-    float4 c1R0;        // camera rows transposed
+    float4 c1R0;        // game-pose array's head
     float4 c1R1;
     float4 c1R2;
     float4 c2R0;
@@ -619,8 +619,8 @@ DXGI_FORMAT pickHistoryFormat(ID3D11Device* dev) {
 void* temporalInner(void* srcTex, int eye, const float* bounds,
                     const float* tanNow, const float* tanPrev,
                     const float* deltaHead, const float* deltaHeadLag,
-                    float headDeg, int motion, float blend, float clampSigma,
-                    unsigned flags) {
+                    const float* deltaGame, float headDeg, int motion,
+                    float blend, float clampSigma, unsigned flags) {
     ID3D11Texture2D* src = nullptr;
     static_cast<IUnknown*>(srcTex)->QueryInterface(
         __uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&src));
@@ -863,8 +863,11 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         }
         if (g_curValid && g_prevValid) {
             temporalViewDelta(g_prevRows, g_curRows, false, cand[2]);
-            temporalViewDelta(g_prevRows, g_curRows, true, cand[3]);
-            candValid[2] = candValid[3] = true;
+            candValid[2] = true;
+        }
+        if (deltaGame) {
+            memcpy(cand[3], deltaGame, sizeof(cand[3]));
+            candValid[3] = true;
         }
 
         PassParams p{};
@@ -1101,7 +1104,7 @@ bool temporalPassTotals(uint32_t* treated, double* avgMs, double* maxMs,
 bool temporalPassRegistration(char* buf, size_t n) {
     if (!buf || n == 0 || g_treats == 0) return false;
     static const char* const kNames[4] = {"head", "head one frame earlier",
-                                          "camera", "camera transposed"};
+                                          "camera", "game-pose head"};
     size_t used = 0;
     auto put = [&](const char* fmt, double a, double b, double c) {
         if (used >= n) return;
@@ -1176,13 +1179,14 @@ void temporalPassShutdown() {
 extern "C" __declspec(dllexport) void* edvrTemporalAa(
     void* srcTex, int eye, const float* bounds, const float* tanNow,
     const float* tanPrev, const float* deltaHead, const float* deltaHeadLag,
-    float headDeg, int motion, float blend, float clampSigma, unsigned flags) {
+    const float* deltaGame, float headDeg, int motion, float blend,
+    float clampSigma, unsigned flags) {
     if (!srcTex || eye < 0 || eye > 1 || !tanNow) return nullptr;
     void* out = nullptr;
     edvr::guardedBudget(edvr::g_budget, [&] {
         out = edvr::temporalInner(srcTex, eye, bounds, tanNow, tanPrev,
-                                  deltaHead, deltaHeadLag, headDeg, motion,
-                                  blend, clampSigma, flags);
+                                  deltaHead, deltaHeadLag, deltaGame, headDeg,
+                                  motion, blend, clampSigma, flags);
     });
     return out;
 }
