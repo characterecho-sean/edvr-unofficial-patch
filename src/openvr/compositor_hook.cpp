@@ -366,6 +366,16 @@ struct State {
     float     restPrevRot[9] = {};            // last frame's RAW rotation, for the speed
     float     restPrevPos[3] = {};
     double    restSpeed = 0.0;     // smoothed arcmin-equivalents per frame
+    // The quietest the head ever got, this session: the TRACKER'S NOISE
+    // FLOOR, since a head at rest still reads whatever its tracking wanders
+    // by. It decides whether the hold can engage at all -- a floor above
+    // restStill means the threshold is unreachable on this headset and the
+    // pass sits in the easing band forever. Measured 2026-09-04: a Pimax
+    // Crystal Super floors at about 0.5 arcmin a frame and holds 8% of the
+    // time; a Quest 3 over Steam Link floors at about 1.9 and held 0% of
+    // 15,569 frames, so the one fix built to stop a hairline blinking never
+    // ran on the headset that needed it most.
+    double    restSpeedMin = 1e9;
     double    restK = 1.0;         // this frame's hold factor; 1 = stock
     vr::HmdMatrix34_t restRender = {};        // the pose the game rendered this frame from
     bool      restRenderValid = false;
@@ -621,6 +631,7 @@ static void restApply(State* s, vr::TrackedDevicePose_t* renderPoses,
     for (int i = 0; i < 9; ++i) s->restPrevRot[i] = rot[i];
     for (int i = 0; i < 3; ++i) s->restPrevPos[i] = pos[i];
     s->restSpeed += 0.25 * (v - s->restSpeed);
+    if (s->restSpeed < s->restSpeedMin) s->restSpeedMin = s->restSpeed;
 
     // The gap between what the game last got and where the tracker is now.
     const double gapArcmin = turnArcminBetween(s->restHeldRot, rot);
@@ -676,13 +687,23 @@ static void restApply(State* s, vr::TrackedDevicePose_t* renderPoses,
         s->restLogMs = stampMs();
         const uint32_t total = s->restFramesHeld + s->restFramesBetween + s->restFramesStock;
         if (total) {
+            const bool unreachable =
+                s->restSpeedMin < 1e8 && s->restSpeedMin > static_cast<double>(s->restStill);
             Log::get().note(
                 "shimmer rest totals: %u frames -- held %.0f%%, easing %.0f%%, stock "
                 "%.0f%%; %u snaps; %u submits carried the display pose, %u could not; "
-                "smoothed speed now %.2f arcmin/frame, factor %.3f.",
+                "smoothed speed now %.2f arcmin/frame, factor %.3f; the quietest this "
+                "session was %.2f against a hold threshold of %.2f%s",
                 total, 100.0 * s->restFramesHeld / total, 100.0 * s->restFramesBetween / total,
                 100.0 * s->restFramesStock / total, s->restSnaps, s->restCarried,
-                s->restFallbacks, s->restSpeed, k);
+                s->restFallbacks, s->restSpeed, k,
+                s->restSpeedMin < 1e8 ? s->restSpeedMin : 0.0,
+                static_cast<double>(s->restStill),
+                unreachable ? " -- this tracker's own noise never falls under the "
+                              "threshold, so the hold can never engage and the pass sits "
+                              "in the easing band; advanced.shimmer_rest_still is the key, "
+                              "and advanced.shimmer_rest_moving must stay above it."
+                            : ".");
         }
     }
 }

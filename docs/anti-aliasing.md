@@ -1325,6 +1325,24 @@ between two headsets can be held level. The reload line now names the
 mode as well -- it said "on" for dlaa and dlss too, and a whole
 session's logs read as the pass's own history while NVIDIA's ran.
 
+**Matching the density left a residue, and the residue has a name.** With
+the Quest 3 raised to 40.6 pixels per degree against the Pimax's 42.3 the
+shimmer improved but did not go, and the rest lock's own totals say why:
+the Pimax holds 8% of its frames and floors at 0.53 arcmin of motion a
+frame, while the Quest 3 over Steam Link held 0% of 15,569 frames and
+never got quieter than 1.90. The hold threshold is 0.60. A rendered pixel
+at that density is 1.48 arcmin, so the Quest 3's pose stream slides the
+image more than a whole pixel every frame with the head still, which is
+the hairline blink `fix.shimmer_rest` was built to stop -- and the fix
+cannot engage, because its threshold sits below the tracker's own noise
+floor. It spends the whole session in the easing band instead, where the
+compositor is told a pose the frame was not rendered from. The totals
+line now prints the floor beside the threshold and says so outright when
+the one is above the other. `advanced.shimmer_rest_still` and
+`advanced.shimmer_rest_moving` are the keys; whether raising them past a
+noisy tracker's floor buys back the hold without a lag on slow turns is
+the next flight's question.
+
 ## Feature C — texture LOD bias, the small lever
 
 Not all shimmer is geometry. Detail maps and normal maps sampled a mip
