@@ -763,6 +763,14 @@ double   g_camMoveSum = 0.0;        // metres: the camera's displacement a frame
 uint32_t g_camFrames = 0;
 uint32_t g_camDropRot = 0;          // frames whose camera delta was another camera's
 uint32_t g_camDropMove = 0;         // frames whose camera translation was a jump
+// The registration probes and the per-class clip shares, per interval
+// (the shader says what they are).
+int64_t     g_probeWorldDx = 0, g_probeWorldDy = 0;
+uint64_t    g_probeWorldN = 0;
+int64_t     g_probeShipDx = 0, g_probeShipDy = 0;
+uint64_t    g_probeShipN = 0;
+uint64_t    g_classWorldPix = 0, g_classWorldClip = 0;
+uint64_t    g_classShipPix = 0, g_classShipClip = 0;
 constexpr float kStillDeg = 0.03f;   // under 2 deg/s at 72 Hz: tracking noise
 constexpr float kSlowDeg = 0.30f;    // under 22 deg/s: a glance
 bool     g_priceLogged = false;
@@ -953,14 +961,6 @@ float       g_lastGoodC[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};   // the last accepted
 float       g_lastGoodTv[3] = {};                            // ...and its translation term
 bool        g_lastGoodValid = false;
 uint32_t    g_camCarried = 0;        // frames the ship's delta was carried over a drop
-// The registration probes and the per-class clip shares, per interval
-// (the shader says what they are).
-int64_t     g_probeWorldDx = 0, g_probeWorldDy = 0;
-uint64_t    g_probeWorldN = 0;
-int64_t     g_probeShipDx = 0, g_probeShipDy = 0;
-uint64_t    g_probeShipN = 0;
-uint64_t    g_classWorldPix = 0, g_classWorldClip = 0;
-uint64_t    g_classShipPix = 0, g_classShipClip = 0;
 float    g_curRows[12] = {};
 bool     g_curValid = false;
 bool     g_curLatched = false;
