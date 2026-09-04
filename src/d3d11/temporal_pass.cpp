@@ -7,6 +7,7 @@
 #include <windows.h>
 
 #include <d3d11.h>
+#include <cstdarg>
 
 #include "../common/config.h"
 #include "../common/guard.h"
@@ -37,7 +38,7 @@ Texture2D<float> Z : register(t2);       // the scene's depth, the game's own, w
 SamplerState L : register(s0);           // bilinear, clamp
 RWTexture2D<float4> O : register(u0);    // the output, region-sized, the game's format
 RWTexture2D<float4> N : register(u1);    // the new history
-RWStructuredBuffer<uint> Stats : register(u2);   // 0 rejected, 1 clipped, 2 the clips' size (luma/255, summed); then the same three per candidate, four of them
+RWStructuredBuffer<uint> Stats : register(u2);   // 0 rejected, 1 clipped, 2 the clips' size (luma/255, summed); then the same three per candidate, four of them; 15 pixels on the world path, 16 bright pixels, 17 bright pixels with no depth
 RWTexture2D<float2> MV : register(u3);   // for a trained pass: motion vectors, pixels, current -> previous
 RWTexture2D<float>  ZC : register(u4);   // and the depth, copied as it is
 cbuffer P : register(b0) {
@@ -69,6 +70,8 @@ cbuffer P : register(b0) {
     float4 knobs;       // x the rest snap in pixels (0 off); y 1 = depth bound; z near, w far
     float4 tvUsed;      // xyz the translation term for the used delta (depth motion), w unused
     float4 tvCand;      // xyz the same for the instrument's swapped-eyes candidate
+    float4 tvCam;       // xyz the translation term for the camera rows (the world path); w 1 = the world path is on
+    float4 split;       // x the ship's radius in metres: nearer takes the head's delta, farther and the far plane the camera's
 };
 float3 rgbToYcocg(float3 c) {
     return float3(0.25 * c.r + 0.5 * c.g + 0.25 * c.b,
@@ -136,13 +139,22 @@ float4 catmullRom(float2 uv, float2 tsize) {
 // far plane, or none bound) the direction alone is rotated, which is the
 // rotation-only path: exact at infinity, and what v1 was everywhere.
 bool fetchHistoryT(float2 p, float3 r0, float3 r1, float3 r2, float3 tv,
-                   bool useDepth, out float3 hy) {
+                   bool useDepth, bool allowWorld, out uint world, out float3 hy) {
     float3 d;
     d.x = tanNow.x + (p.x + 0.5) / float(size.x) * (tanNow.y - tanNow.x);
     d.y = tanNow.w - (p.y + 0.5) / float(size.y) * (tanNow.w - tanNow.z);
     d.z = -1.0;
     float3 dp = float3(dot(r0, d), dot(r1, d), dot(r2, d));
-    if (useDepth) {
+    world = 0;
+    // The world/ship split: the ship's own things (the cockpit, the hull)
+    // move with the head's delta; everything farther than split.x metres,
+    // and the far plane, moves with the game's CAMERA -- the head and the
+    // ship together, the rows the instrument's candidate 2 reads -- which
+    // is what a turning ship needs for its skybox and a station (the Pimax
+    // flight of 2026-09-04 saw both smear; the review's F6). The split
+    // needs a depth to classify by, so it runs only with one bound.
+    bool worldOn = allowWorld && tvCam.w != 0.0 && split.x > 0.0 && knobs.y != 0.0;
+    if (useDepth || worldOn) {
         // The NEAREST depth of the 3x3, not the pixel's own: at the edge of
         // a near thing against a far one the pixel's own depth is either,
         // and a history fetched by the far one at a text stroke's edge is
@@ -157,8 +169,13 @@ bool fetchHistoryT(float2 p, float3 r0, float3 r1, float3 r2, float3 tv,
             }
         }
         float den = zr * (knobs.w - knobs.z) + knobs.z;
-        if (zr > 0.0 && den > 0.0) {
-            float z = knobs.z * knobs.w / den;
+        bool far = zr <= 0.0 || den <= 0.0;
+        float z = far ? 0.0 : knobs.z * knobs.w / den;
+        if (worldOn && (far || z > split.x)) {
+            world = 1;
+            dp = float3(dot(c2R0.xyz, d), dot(c2R1.xyz, d), dot(c2R2.xyz, d));
+            if (!far) dp = dp * z + tvCam.xyz;
+        } else if (useDepth && !far) {
             dp = dp * z + tv;
         }
     }
@@ -195,7 +212,8 @@ bool fetchHistoryT(float2 p, float3 r0, float3 r1, float3 r2, float3 tv,
     return true;
 }
 bool fetchHistory(float2 p, float3 r0, float3 r1, float3 r2, out float3 hy) {
-    return fetchHistoryT(p, r0, r1, r2, float3(0.0, 0.0, 0.0), false, hy);
+    uint wd = 0;
+    return fetchHistoryT(p, r0, r1, r2, float3(0.0, 0.0, 0.0), false, false, wd, hy);
 }
 // How far a clip moved the history, in luma, as a count of 1/255ths: a
 // nudge on a text edge is a few, a history that landed somewhere else
@@ -204,54 +222,77 @@ bool fetchHistory(float2 p, float3 r0, float3 r1, float3 r2, out float3 hy) {
 uint clipSize(float3 hc, float3 hy) {
     return uint(saturate(abs(hc.x - hy.x)) * 255.0 + 0.5);
 }
+groupshared uint gCount[18];
 // The motion vectors for a trained pass (DLAA): the same reprojection
 // the history fetch does, written out instead of used -- the pixel's
 // position last frame minus its position now, in render pixels, which
-// is DLSS's convention with a scale of one. Off the image or behind the
-// eye: no motion. The depth goes beside it, copied as the game wrote it
-// (reversed-Z, told to the runtime as such).
+// is DLSS's convention with a scale of one (pinned on the desk by the
+// conventions rig in tools/smoke, 2026-09-04). Off the image or behind
+// the eye: no motion. The depth goes beside it, copied as the game wrote
+// it (reversed-Z, told to the runtime as such). The world/ship split is
+// the history fetch's, transcribed, and the counts feed the registration
+// line the way main's do.
 [numthreads(8, 8, 1)]
-void mv(uint3 id : SV_DispatchThreadID) {
-    if (id.x >= (uint)size.x || id.y >= (uint)size.y) return;
-    float2 p = float2(id.xy);
-    float3 d;
-    d.x = tanNow.x + (p.x + 0.5) / float(size.x) * (tanNow.y - tanNow.x);
-    d.y = tanNow.w - (p.y + 0.5) / float(size.y) * (tanNow.w - tanNow.z);
-    d.z = -1.0;
-    float3 dp = float3(dot(dR0.xyz, d), dot(dR1.xyz, d), dot(dR2.xyz, d));
-    float zraw = Z.Load(int3(region.xy + int2(p), 0));
-    if (knobs.y != 0.0) {
-        float zr = 0.0;
-        [unroll] for (int oy = -1; oy <= 1; ++oy) {
-            [unroll] for (int ox = -1; ox <= 1; ++ox) {
-                int2 q = clamp(int2(p) + int2(ox, oy), int2(0, 0), size - 1);
-                zr = max(zr, Z.Load(int3(region.xy + q, 0)));
+void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
+    if (gi < 18) gCount[gi] = 0;
+    GroupMemoryBarrierWithGroupSync();
+    uint count[18] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+    if (id.x < (uint)size.x && id.y < (uint)size.y) {
+        float2 p = float2(id.xy);
+        float3 d;
+        d.x = tanNow.x + (p.x + 0.5) / float(size.x) * (tanNow.y - tanNow.x);
+        d.y = tanNow.w - (p.y + 0.5) / float(size.y) * (tanNow.w - tanNow.z);
+        d.z = -1.0;
+        float3 dp = float3(dot(dR0.xyz, d), dot(dR1.xyz, d), dot(dR2.xyz, d));
+        float zraw = Z.Load(int3(region.xy + int2(p), 0));
+        if (knobs.y != 0.0) {
+            float zr = 0.0;
+            [unroll] for (int oy = -1; oy <= 1; ++oy) {
+                [unroll] for (int ox = -1; ox <= 1; ++ox) {
+                    int2 q = clamp(int2(p) + int2(ox, oy), int2(0, 0), size - 1);
+                    zr = max(zr, Z.Load(int3(region.xy + q, 0)));
+                }
+            }
+            float den = zr * (knobs.w - knobs.z) + knobs.z;
+            bool far = zr <= 0.0 || den <= 0.0;
+            float z = far ? 0.0 : knobs.z * knobs.w / den;
+            bool worldOn = tvCam.w != 0.0 && split.x > 0.0;
+            if (worldOn && (far || z > split.x)) {
+                count[15] = 1;
+                dp = float3(dot(c2R0.xyz, d), dot(c2R1.xyz, d), dot(c2R2.xyz, d));
+                if (!far) dp = dp * z + tvCam.xyz;
+            } else if (!far) {
+                dp = dp * z + tvUsed.xyz;
+            }
+            float luma = rgbToYcocg(S.Load(int3(region.xy + int2(p), 0)).rgb).x;
+            if (luma > 0.6) {
+                count[16] = 1;
+                if (zraw <= 0.0) count[17] = 1;
             }
         }
-        float den = zr * (knobs.w - knobs.z) + knobs.z;
-        if (zr > 0.0 && den > 0.0) {
-            float z = knobs.z * knobs.w / den;
-            dp = dp * z + tvUsed.xyz;
+        float2 motion = 0.0;
+        if (dp.z < -1e-6) {
+            float xt = dp.x / -dp.z;
+            float yt = dp.y / -dp.z;
+            float2 pp;
+            pp.x = (xt - tanPrev.x) / (tanPrev.y - tanPrev.x) * float(size.x) - 0.5;
+            pp.y = (tanPrev.w - yt) / (tanPrev.w - tanPrev.z) * float(size.y) - 0.5;
+            motion = pp - p;
         }
+        MV[id.xy] = motion;
+        ZC[id.xy] = knobs.y != 0.0 ? zraw : 0.0;
     }
-    float2 motion = 0.0;
-    if (dp.z < -1e-6) {
-        float xt = dp.x / -dp.z;
-        float yt = dp.y / -dp.z;
-        float2 pp;
-        pp.x = (xt - tanPrev.x) / (tanPrev.y - tanPrev.x) * float(size.x) - 0.5;
-        pp.y = (tanPrev.w - yt) / (tanPrev.w - tanPrev.z) * float(size.y) - 0.5;
-        motion = pp - p;
+    [unroll] for (int k = 0; k < 18; ++k) {
+        if (count[k] != 0) InterlockedAdd(gCount[k], count[k]);
     }
-    MV[id.xy] = motion;
-    ZC[id.xy] = knobs.y != 0.0 ? zraw : 0.0;
+    GroupMemoryBarrierWithGroupSync();
+    if (gi < 18) InterlockedAdd(Stats[gi], gCount[gi]);
 }
-groupshared uint gCount[15];
 [numthreads(8, 8, 1)]
 void main(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
-    if (gi < 15) gCount[gi] = 0;
+    if (gi < 18) gCount[gi] = 0;
     GroupMemoryBarrierWithGroupSync();
-    uint count[15] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+    uint count[18] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
     if (id.x < (uint)size.x && id.y < (uint)size.y) {
         float2 p = float2(id.xy);
         int2 ci = int2(id.xy);
@@ -294,6 +335,17 @@ void main(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
             }
         }
         cur /= max(wsum, 1e-6);
+        // The bright pixels, and the bright pixels with no depth behind
+        // them: HUD text the game draws without a depth write takes the
+        // rotation-only path and cannot register under head translation
+        // (the review of 2026-09-04, H5, believed; this counts it).
+        {
+            float lumaC = rgbToYcocg(S.Load(int3(region.xy + ci, 0)).rgb).x;
+            if (lumaC > 0.6) {
+                count[16] = 1;
+                if (knobs.y != 0.0 && Z.Load(int3(region.xy + ci, 0)) <= 0.0) count[17] = 1;
+            }
+        }
         m1 /= msum;
         m2 /= msum;
         float3 sigma = sqrt(max(m2 - m1 * m1, 0.0));
@@ -303,8 +355,10 @@ void main(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
         bool used = false;
         if (haveHistory != 0) {
             float3 hy;
+            uint worldTaken = 0;
             if (fetchHistoryT(p, dR0.xyz, dR1.xyz, dR2.xyz, tvUsed.xyz,
-                              knobs.y != 0.0 && tvUsed.w != 0.0, hy)) {
+                              knobs.y != 0.0 && tvUsed.w != 0.0, true, worldTaken, hy)) {
+                if (worldTaken != 0) count[15] = 1;
                 float3 hc = clipToBox(boxMin, boxMax, hy);
                 if (any(abs(hc - hy) > 1e-4)) {
                     count[1] = 1;
@@ -327,7 +381,8 @@ void main(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
                 float3 tvc = c == 1 ? tvCand.xyz : tvUsed.xyz;
                 bool depthC = knobs.y != 0.0 && (c == 1 || c == 3);
                 float3 h;
-                if (!fetchHistoryT(p, r0, r1, r2, tvc, depthC, h)) {
+                uint wc = 0;
+                if (!fetchHistoryT(p, r0, r1, r2, tvc, depthC, false, wc, h)) {
                     count[3 + c * 3] = 1;
                 } else {
                     float3 hc2 = clipToBox(boxMin, boxMax, h);
@@ -344,15 +399,15 @@ void main(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
         N[id.xy] = float4(o, 1.0);
     }
     // One atomic per group per counter, not per pixel.
-    [unroll] for (int k = 0; k < 15; ++k) {
+    [unroll] for (int k = 0; k < 18; ++k) {
         if (count[k] != 0) InterlockedAdd(gCount[k], count[k]);
     }
     GroupMemoryBarrierWithGroupSync();
-    if (gi < 15) InterlockedAdd(Stats[gi], gCount[gi]);
+    if (gi < 18) InterlockedAdd(Stats[gi], gCount[gi]);
 }
 )HLSL";
 
-// The cbuffer above, laid out to match: 384 bytes, twenty-four 16-byte rows.
+// The cbuffer above, laid out to match: 416 bytes, twenty-six 16-byte rows.
 struct PassParams {
     int32_t region[4];
     int32_t size[2];
@@ -371,8 +426,10 @@ struct PassParams {
     float   knobs[4];
     float   tvUsed[4];
     float   tvCand[4];
+    float   tvCam[4];    // the camera rows' translation term, w 1 = world path on
+    float   split[4];    // x the ship's radius in metres
 };
-static_assert(sizeof(PassParams) == 384, "the cbuffer is twenty-four 16-byte rows");
+static_assert(sizeof(PassParams) == 416, "the cbuffer is twenty-six 16-byte rows");
 
 // The format allowlist: the supersample resolve's, for its reasons
 // (supersample_pass.cpp) -- typeless and UNORM families read and written
@@ -544,7 +601,7 @@ struct Slot {
     bool          hadHistory = false;
 };
 constexpr int kSlots = 8;
-constexpr int kStatCount = 16;   // 15 used; a 64-byte buffer
+constexpr int kStatCount = 20;   // 18 used; an 80-byte buffer
 Slot g_slots[kSlots];
 
 void releaseSlot(Slot& q) {
@@ -576,6 +633,13 @@ uint64_t g_bucketClip[3] = {};
 uint64_t g_bucketSize[3] = {};
 uint32_t g_bucketFrames[3] = {};
 uint32_t g_intervalFrames = 0;
+uint64_t g_intervalPix = 0;         // pixels this interval, both paths
+uint64_t g_worldPix = 0;            // ...of which the world path took
+uint64_t g_brightPix = 0;           // bright pixels (luma over 0.6)
+uint64_t g_brightNoDepthPix = 0;    // ...of which had no depth
+double   g_camHeadDiffSum = 0.0;    // degrees: the camera's delta against the head's
+double   g_camMoveSum = 0.0;        // metres: the camera's displacement a frame
+uint32_t g_camFrames = 0;
 constexpr float kStillDeg = 0.03f;   // under 2 deg/s at 72 Hz: tracking noise
 constexpr float kSlowDeg = 0.30f;    // under 22 deg/s: a glance
 bool     g_priceLogged = false;
@@ -628,8 +692,12 @@ void pollSlots(ID3D11DeviceContext* ctx) {
                 g_rejected += v[0];
                 g_clipped += v[1];
                 g_pixelsSeen += q.pixels;
+                g_intervalPix += q.pixels;
+                g_worldPix += v[15];
+                g_brightPix += v[16];
+                g_brightNoDepthPix += v[17];
+                ++g_intervalFrames;
                 if (q.hadHistory) {
-                    ++g_intervalFrames;
                     for (int c = 0; c < 4; ++c) {
                         if (!q.candPixels[c]) continue;
                         g_candPix[c] += q.candPixels[c];
@@ -715,6 +783,7 @@ bool     g_viewTransposed = false;
 bool     g_filterCurrent = true;   // advanced.temporal_aa_current = filtered | raw
 float    g_historyC = 0.5f;        // advanced.temporal_aa_history_sharp: the cubic's C
 float    g_snapPx = 0.15f;         // advanced.temporal_aa_snap: the rest snap, pixels
+float    g_shipMetres = 40.0f;     // advanced.temporal_aa_ship_metres: the world/ship split (0 off)
 bool     g_warmNoted = false;
 
 // The camera capture: the pending rows from the latest scene write, the
@@ -1137,6 +1206,38 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
             temporalViewDelta(g_prevRows, g_curRows, false, cand[2]);
             candValid[2] = true;
         }
+        // The camera rows' translation term for the world path, and the
+        // instrument's check of the rows against the head: for world->view
+        // rows [R | t], a point P now was at R_p R_n^T P + (t_p - R_p R_n^T
+        // t_n) last frame. Docked, the camera IS the head, so its delta
+        // matches the head's and it does not move; in flight the
+        // difference is the ship's turn and the displacement its speed.
+        float tvCam[3] = {0.0f, 0.0f, 0.0f};
+        if (candValid[2]) {
+            const float tp[3] = {g_prevRows[3], g_prevRows[7], g_prevRows[11]};
+            const float tn[3] = {g_curRows[3], g_curRows[7], g_curRows[11]};
+            float rt[3];
+            temporalApply3(cand[2], tn, rt);
+            for (int i = 0; i < 3; ++i) tvCam[i] = tp[i] - rt[i];
+            // The camera's displacement in the world: c = -R^T t.
+            float rp[9], rn[9], rpT[9], rnT[9], cp[3], cn[3];
+            temporalRot3Of34(g_prevRows, rp);
+            temporalRot3Of34(g_curRows, rn);
+            temporalTranspose3(rp, rpT);
+            temporalTranspose3(rn, rnT);
+            temporalApply3(rpT, tp, cp);
+            temporalApply3(rnT, tn, cn);
+            const float mx = cn[0] - cp[0], my = cn[1] - cp[1], mz = cn[2] - cp[2];
+            g_camMoveSum += sqrt(static_cast<double>(mx) * mx + static_cast<double>(my) * my +
+                                 static_cast<double>(mz) * mz);
+            if (deltaHead) {
+                float ht[9], diff[9];
+                temporalTranspose3(deltaHead, ht);
+                temporalMul3(cand[2], ht, diff);
+                g_camHeadDiffSum += temporalRotationAngleDeg(diff);
+            }
+            ++g_camFrames;
+        }
 
         PassParams p{};
         if (viaCopy) {
@@ -1180,6 +1281,15 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         // The used delta carries its translation only under the depth
         // motion; the head motion stays rotation-only, as v1 was.
         p.tvUsed[3] = (depthMotion && haveDepth) ? 1.0f : 0.0f;
+        // The world/ship split (the shader says what it is): under the
+        // depth motion, with a depth bound and both frames' camera rows
+        // read, in the rows' measured convention (world->view; the
+        // transposed reading has no translation column to trust).
+        const bool worldOn = depthMotion && haveDepth && g_shipMetres > 0.0f &&
+                             candValid[2] && !g_viewTransposed;
+        for (int i = 0; i < 3; ++i) p.tvCam[i] = worldOn ? tvCam[i] : 0.0f;
+        p.tvCam[3] = worldOn ? 1.0f : 0.0f;
+        p.split[0] = g_shipMetres;
         for (int c = 0; c < 3; ++c) {
             p.dR0[c] = delta[0 * 3 + c];
             p.dR1[c] = delta[1 * 3 + c];
@@ -1225,6 +1335,18 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         // NVIDIA's evaluation into an owned output that goes out in the
         // pass's place. Any refusal says so once and the pass's own
         // history runs instead, this frame and after.
+        // The price and the stats slot, both paths: the trained path's own
+        // work (the colour copy and the motion-vector dispatch) is timed
+        // too, and its counts (the world path, the bright pixels without
+        // depth) come back through the same staging buffer.
+        const int qs = acquireSlot(dev);
+        if (qs >= 0) {
+            ctx->Begin(g_slots[qs].disjoint);
+            ctx->End(g_slots[qs].begin);
+        }
+        const UINT zeros[4] = {0, 0, 0, 0};
+        ctx->ClearUnorderedAccessViewUint(g_statsUav, zeros);
+
         bool usedDlaa = false;
         if ((flags & 2u) != 0) {
             const char* why = "";
@@ -1300,7 +1422,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     ctx->CSSetUnorderedAccessViews(0, 5, nullUavM, nullptr);
                     ctx->CSSetShader(g_csMv, nullptr, 0);
                     ID3D11ShaderResourceView* srvsM[3] = {inSrv, e.histSrv[e.histRead], depthSrv};
-                    ID3D11UnorderedAccessView* uavsM[5] = {nullptr, nullptr, nullptr, e.dlMvUav,
+                    ID3D11UnorderedAccessView* uavsM[5] = {nullptr, nullptr, g_statsUav, e.dlMvUav,
                                                            e.dlDepthUav};
                     ID3D11Buffer* cbM = g_cb;
                     ID3D11SamplerState* smpM = g_samp;
@@ -1361,11 +1483,6 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
             }
         }
 
-        const int qs = usedDlaa ? -1 : acquireSlot(dev);
-        if (qs >= 0) {
-            ctx->Begin(g_slots[qs].disjoint);
-            ctx->End(g_slots[qs].begin);
-        }
         if (viaCopy && !usedDlaa) {
             D3D11_BOX box{};
             box.left = region[0];
@@ -1376,9 +1493,6 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
             box.back = 1;
             ctx->CopySubresourceRegion(e.copyTex, 0, 0, 0, 0, src, 0, &box);
         }
-        const UINT zeros[4] = {0, 0, 0, 0};
-        if (!usedDlaa) ctx->ClearUnorderedAccessViewUint(g_statsUav, zeros);
-
         const int readIdx = e.histRead;
         const int writeIdx = 1 - readIdx;
         bool ran = usedDlaa ? true : setParams(ctx, p);
@@ -1515,6 +1629,10 @@ void temporalPassConfigure(Config& cfg) {
     if (!std::isfinite(snap) || snap < 0.0f) snap = 0.0f;
     if (snap > 0.5f) snap = 0.5f;
     g_snapPx = snap;
+    float ship = cfg.getFloat("advanced.temporal_aa_ship_metres", 40.0f);
+    if (!std::isfinite(ship) || ship < 0.0f) ship = 0.0f;
+    if (ship > 100000.0f) ship = 100000.0f;
+    g_shipMetres = ship;
 }
 
 void temporalPassTick(ID3D11DeviceContext* ctx) {
@@ -1588,65 +1706,85 @@ bool temporalPassTotals(uint32_t* treated, double* avgMs, double* maxMs,
     return true;
 }
 
+void regAppend(char* buf, size_t n, size_t& used, const char* fmt, ...) {
+    if (used >= n) return;
+    va_list ap;
+    va_start(ap, fmt);
+    const int m = vsnprintf(buf + used, n - used, fmt, ap);
+    va_end(ap);
+    if (m > 0) used += static_cast<size_t>(m);
+    if (used > n) used = n;
+}
+
 bool temporalPassRegistration(char* buf, size_t n) {
     if (!buf || n == 0 || g_treats == 0 || g_intervalFrames == 0) return false;
     static const char* const kNames[4] = {"head, rotation only", "head with depth, eyes swapped",
                                           "camera", "head with depth"};
     size_t used = 0;
-    {
-        const int m = snprintf(buf, n, "over the last %u eye-frames: ", g_intervalFrames);
-        if (m > 0) used += static_cast<size_t>(m);
-    }
-    auto put = [&](const char* fmt, double a, double b, double c) {
-        if (used >= n) return;
-        const int k = snprintf(buf + used, n - used, fmt, a, b, c);
-        if (k > 0) used += static_cast<size_t>(k);
-    };
-    for (int k = 0; k < 4; ++k) {
-        if (used < n) {
-            const int m = snprintf(buf + used, n - used, "%s%s ", k ? "; " : "", kNames[k]);
-            if (m > 0) used += static_cast<size_t>(m);
-        }
-        if (!g_candPix[k]) {
-            if (used < n) {
-                const int m = snprintf(buf + used, n - used, "(no delta yet)");
-                if (m > 0) used += static_cast<size_t>(m);
+    regAppend(buf, n, used, "over the last %u eye-frames: ", g_intervalFrames);
+    bool anyCand = false;
+    for (int k = 0; k < 4; ++k) if (g_candPix[k]) anyCand = true;
+    if (!anyCand) {
+        regAppend(buf, n, used, "the candidates were not judged (NVIDIA's history ran, or the "
+                                "pass's own had no history yet)");
+    } else {
+        for (int k = 0; k < 4; ++k) {
+            regAppend(buf, n, used, "%s%s ", k ? "; " : "", kNames[k]);
+            if (!g_candPix[k]) {
+                regAppend(buf, n, used, "(no delta yet)");
+                continue;
             }
-            continue;
+            const double px = static_cast<double>(g_candPix[k]);
+            // The mean clip size over the CLIPPED pixels: how far a clipped
+            // history had strayed, 1/255ths of luma.
+            const double meanSize = g_candClip[k]
+                ? static_cast<double>(g_candSize[k]) / static_cast<double>(g_candClip[k])
+                : 0.0;
+            regAppend(buf, n, used, "clipped %.1f%% by %.1f/255 on average, off %.1f%%",
+                      100.0 * static_cast<double>(g_candClip[k]) / px, meanSize,
+                      100.0 * static_cast<double>(g_candRej[k]) / px);
         }
-        const double px = static_cast<double>(g_candPix[k]);
-        // The mean clip size over the CLIPPED pixels: how far a clipped
-        // history had strayed, 1/255ths of luma.
-        const double meanSize = g_candClip[k]
-            ? static_cast<double>(g_candSize[k]) / static_cast<double>(g_candClip[k])
-            : 0.0;
-        put("clipped %.1f%% by %.1f/255 on average, off %.1f%%",
-            100.0 * static_cast<double>(g_candClip[k]) / px, meanSize,
-            100.0 * static_cast<double>(g_candRej[k]) / px);
-    }
-    static const char* const kBuckets[3] = {"still", "slow", "fast"};
-    if (used < n) {
-        const int m = snprintf(buf + used, n - used,
-                               ". The used delta's clip share by head speed (under %.2f, under %.2f, over that, degrees per frame): ",
-                               static_cast<double>(kStillDeg), static_cast<double>(kSlowDeg));
-        if (m > 0) used += static_cast<size_t>(m);
-    }
-    for (int b = 0; b < 3; ++b) {
-        if (used >= n) break;
-        if (!g_bucketPix[b]) {
-            const int m = snprintf(buf + used, n - used, "%s%s none", b ? ", " : "", kBuckets[b]);
-            if (m > 0) used += static_cast<size_t>(m);
-            continue;
+        static const char* const kBuckets[3] = {"still", "slow", "fast"};
+        bool anyBucket = false;
+        for (int b = 0; b < 3; ++b) if (g_bucketPix[b]) anyBucket = true;
+        if (anyBucket) {
+            regAppend(buf, n, used,
+                      ". The used delta's clip share by head speed (under %.2f, under %.2f, over "
+                      "that, degrees per frame): ",
+                      static_cast<double>(kStillDeg), static_cast<double>(kSlowDeg));
+            for (int b = 0; b < 3; ++b) {
+                if (!g_bucketPix[b]) {
+                    regAppend(buf, n, used, "%s%s none", b ? ", " : "", kBuckets[b]);
+                    continue;
+                }
+                const double meanSize = g_bucketClip[b]
+                    ? static_cast<double>(g_bucketSize[b]) / static_cast<double>(g_bucketClip[b])
+                    : 0.0;
+                regAppend(buf, n, used, "%s%s %.1f%% by %.1f/255 (%u eye-frames)",
+                          b ? ", " : "", kBuckets[b],
+                          100.0 * static_cast<double>(g_bucketClip[b]) /
+                              static_cast<double>(g_bucketPix[b]),
+                          meanSize, g_bucketFrames[b]);
+            }
         }
-        const double meanSize = g_bucketClip[b]
-            ? static_cast<double>(g_bucketSize[b]) / static_cast<double>(g_bucketClip[b])
-            : 0.0;
-        const int m = snprintf(buf + used, n - used, "%s%s %.1f%% by %.1f/255 (%u eye-frames)",
-                               b ? ", " : "", kBuckets[b],
-                               100.0 * static_cast<double>(g_bucketClip[b]) /
-                                   static_cast<double>(g_bucketPix[b]),
-                               meanSize, g_bucketFrames[b]);
-        if (m > 0) used += static_cast<size_t>(m);
+    }
+    // The world/ship split's share, the bright pixels without depth, and
+    // the camera rows against the head (docked: zero and zero).
+    if (g_intervalPix) {
+        regAppend(buf, n, used,
+                  ". The world path (the camera's delta beyond %.0f m and at the far plane) took "
+                  "%.1f%% of pixels; %.1f%% of the bright pixels (luma over 0.6) had no depth",
+                  static_cast<double>(g_shipMetres),
+                  100.0 * static_cast<double>(g_worldPix) / static_cast<double>(g_intervalPix),
+                  g_brightPix ? 100.0 * static_cast<double>(g_brightNoDepthPix) /
+                                    static_cast<double>(g_brightPix)
+                              : 0.0);
+    }
+    if (g_camFrames) {
+        regAppend(buf, n, used,
+                  "; the camera's delta differed from the head's by %.3f deg/frame on average "
+                  "and the camera moved %.4f m/frame (docked, both read 0)",
+                  g_camHeadDiffSum / g_camFrames, g_camMoveSum / g_camFrames);
     }
     // The interval starts afresh: the next line judges the next stretch.
     memset(g_candPix, 0, sizeof(g_candPix));
@@ -1658,6 +1796,13 @@ bool temporalPassRegistration(char* buf, size_t n) {
     memset(g_bucketSize, 0, sizeof(g_bucketSize));
     memset(g_bucketFrames, 0, sizeof(g_bucketFrames));
     g_intervalFrames = 0;
+    g_intervalPix = 0;
+    g_worldPix = 0;
+    g_brightPix = 0;
+    g_brightNoDepthPix = 0;
+    g_camHeadDiffSum = 0.0;
+    g_camMoveSum = 0.0;
+    g_camFrames = 0;
     return true;
 }
 

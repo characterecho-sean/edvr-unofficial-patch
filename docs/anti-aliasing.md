@@ -1027,6 +1027,31 @@ game's side, two live instruments under `[advanced]`:
 the pairing that makes text sharpest with the head still is the game's
 convention, and is then hard-coded.
 
+**The world/ship split (the Pimax flight of 2026-09-04, in space).** With
+a real history the review's F6 showed itself at once: the Milky Way
+smeared and a rotating station's lights blurred whenever the ship turned,
+because the motion vectors described the head alone and the ship's turn
+moves everything outside the canopy by a dozen pixels a frame. The
+game's own camera rows -- world->view, captured at each frame's first eye
+draw for the registration instrument's candidate 2 -- carry the head and
+the ship together, so the pass now splits by depth: pixels nearer than
+`advanced.temporal_aa_ship_metres` (40; the cockpit and the hull, which
+move with the head) keep the head's delta with its translation term,
+and pixels farther, plus the far plane, take the camera's delta with the
+translation term from the rows' own column, P_prev = R_p R_n^T P + (t_p
+- R_p R_n^T t_n). Both the history fetch and the motion-vector entry do
+it; the registration line reports the world path's share of pixels, the
+share of bright pixels with no depth behind them (HUD text drawn without
+a depth write, which no delta can register under head translation), and
+the camera's delta against the head's in degrees a frame with the
+camera's displacement in metres -- docked, both must read zero, which is
+the check that the rows are what the instrument believed (their cockpit
+candidate had clipped 3.7% by 7.6/255 with 6.8% off-image where the head
+read 8.1% by 2.2, an unexplained shape). The station's own rotation is
+object motion and stays unregistered, as in any temporal filter. The
+trained path now also acquires the pass's timing and stats slot, so the
+totals line prints its real price instead of zero.
+
 ## Feature C — texture LOD bias, the small lever
 
 Not all shimmer is geometry. Detail maps and normal maps sampled a mip
