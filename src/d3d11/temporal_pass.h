@@ -98,9 +98,12 @@ bool temporalPassTotals(uint32_t* treated, double* avgMs, double* maxMs,
 // the translation v2's depth is for.
 bool temporalPassRegistration(char* buf, size_t n);
 
-// The trained pass's totals (fix.temporal_aa = dlaa): eye-frames it took
-// and its measured price. False when it never ran.
-bool temporalPassDlaaTotals(uint32_t* frames, double* avgMs, double* maxMs);
+// The trained pass's totals (fix.temporal_aa = dlaa | dlss): eye-frames it
+// took, its measured price, and how many evaluations started NVIDIA's
+// history afresh (a handful per session on a good build: each eye's first
+// frame, each size change, each withhold). False when it never ran.
+bool temporalPassDlaaTotals(uint32_t* frames, double* avgMs, double* maxMs,
+                            uint32_t* resets);
 
 void temporalPassShutdown();
 

@@ -80,8 +80,23 @@ struct State {
     bool     faultsNoted = false;
     bool     engagedNoted = false;
     uint32_t treats = 0;
+
+    // The projection-read order (the review of 2026-09-04, F4). The jitter
+    // set at the boundary is the jitter the game rendered with only if the
+    // game reads its projection AFTER the boundary and before it submits;
+    // the cull guard's constant lie could never test that, a per-frame
+    // offset depends on it. Counted over the first frames and said once.
+    uint32_t readsAtBoundary = 0;
+    uint32_t readsAtLastTreat = 0;
+    bool     readsAtLastTreatValid = false;
+    bool     firstTreatOfFrame = false;
+    uint64_t readsBeforeSum = 0;   // boundary -> the frame's first treat
+    uint64_t readsAfterSum = 0;    // the frame's last treat -> the next boundary
+    uint32_t readOrderFrames = 0;
+    bool     readOrderNoted = false;
 };
 State g_s;
+constexpr uint32_t kReadOrderFrames = 600;
 
 const char* motionName(Motion m) {
     return m == Motion::Depth ? "head with depth"
@@ -223,6 +238,30 @@ void temporalAaFrameBoundary() {
         return;
     }
     ++s.frame;
+
+    // The projection-read order: the reads that landed between the last
+    // treat and this boundary, and the count armed for the coming frame.
+    {
+        const uint32_t reads = systemHookProjectionReads();
+        if (s.readsAtLastTreatValid && s.readOrderFrames < kReadOrderFrames) {
+            s.readsAfterSum += reads - s.readsAtLastTreat;
+        }
+        s.readsAtBoundary = reads;
+        s.firstTreatOfFrame = true;
+        if (!s.readOrderNoted && s.readOrderFrames >= kReadOrderFrames) {
+            s.readOrderNoted = true;
+            Log::get().note(
+                "temporal aa: over %u frames the game asked for its projection %.1f "
+                "times between the boundary and its first submit, and %.1f times "
+                "between its last submit and the next boundary. The jitter is set at "
+                "the boundary, so the first number should be the larger; if it is "
+                "not, the frame was rendered with the previous frame's offset and the "
+                "pass's jitter is a frame late (the review of 2026-09-04, F4).",
+                kReadOrderFrames,
+                static_cast<double>(s.readsBeforeSum) / kReadOrderFrames,
+                static_cast<double>(s.readsAfterSum) / kReadOrderFrames);
+        }
+    }
 
     // The jitter for the coming frame, as a shift of the tangents the
     // game will be told. It needs the matrix half of the projection edit
@@ -434,6 +473,18 @@ void* temporalAaTreat(vr::EVREye eye, void* handle,
     s.havePrev[e] = true;
     s.resetNext[e] = false;
     ++s.treats;
+    {
+        const uint32_t reads = systemHookProjectionReads();
+        if (s.firstTreatOfFrame) {
+            s.firstTreatOfFrame = false;
+            if (s.readOrderFrames < kReadOrderFrames) {
+                s.readsBeforeSum += reads - s.readsAtBoundary;
+                ++s.readOrderFrames;
+            }
+        }
+        s.readsAtLastTreat = reads;
+        s.readsAtLastTreatValid = true;
+    }
     if (!s.engagedNoted) {
         s.engagedNoted = true;
         Log::get().note(

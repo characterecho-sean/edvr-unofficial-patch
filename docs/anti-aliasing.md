@@ -974,6 +974,35 @@ no-motion floor with the lock on; `temporal_aa_snap` is expected to be
 moot and is left in until measured. DLAA and DLSS inherit the held pose
 through the same note (docs/rest-lock-handoff.md).
 
+**The review of 2026-09-04, and what it changed (docs/review-motion-vectors-2026-09-04.md,
+the Opus 5 review).** An adversarial read of the motion path found that the
+trained path had never accumulated a frame: its reset flag was keyed on the
+pass's OWN history flag, which the trained path never sets, so NVIDIA was
+told "the scene changed completely" on every evaluation of every flight so
+far -- DLAA ran as a single-frame spatial filter (hence "no ghosting"), and
+DLSS proper had to invent the missing resolution from one frame, which is
+what soft text looks like. Fixed: the trained path keeps its own continuity
+flag, and the totals line now counts the resets (a handful per session is
+right; the evaluation count is the bug). Second, the optimal-settings query
+was made on the parameter block from AllocateParameters, which the SDK's
+own helper refuses -- the "0x0" render sizes in the flight logs were that
+refusal printed as an answer -- so the DLSS mode was chosen blind by the size
+ratio; it is now asked on the capability block and the mode is the one
+whose own render size is nearest the frame's, within its range. Also: the
+previous frame's frustum reaches the motion vectors on the trained path
+(keyed on the same flag), NVIDIA gets the frame delta it asks for, the
+first trained frame prints what NVIDIA is handed, and a new instrument
+counts the game's projection reads on each side of the frame boundary,
+since the jitter set there is only the jitter the game rendered with if the
+game reads AFTER it -- the guard's constant lie could never test that, and
+a one-frame phase error would be up to 0.8 px of stable blur (the review's
+F4, unflown). The review's largest cleared item stands as a fact: under
+DLSS proper the cockpit's panel text is drawn into interface surfaces that
+scale with the INTERNAL render size, so at HMD Quality 0.67 the glyphs are
+rasterised at two-thirds size and no upscaler recovers them. DLSS buys
+frame time, not text; the flight that separates the two is DLAA at HMD
+Quality 1.0 against DLSS at 0.67 with the same output size.
+
 ## Feature C — texture LOD bias, the small lever
 
 Not all shimmer is geometry. Detail maps and normal maps sampled a mip

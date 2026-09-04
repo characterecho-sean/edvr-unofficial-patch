@@ -266,7 +266,16 @@ found the text much sharper with the resolve alone. If crisp text matters
 more to you than calm edges, leave this off and keep the resolve. With
 the rest lock on, the history is exactly registered while the head is
 still, so the softness at rest was resampling under a motion that no
-longer exists (believed, unflown as a pair as of 2026-09-04).
+longer exists (believed, unflown as a pair as of 2026-09-04). On an RTX
+GPU, `temporal_aa = dlaa` hands the same inputs to NVIDIA's trained
+history instead, and `dlss` also lets Elite's HMD Quality below 1.0 render
+a fraction of the size and brings it back to full size, which buys frame
+time. It does not buy text: the cockpit's panels are drawn into surfaces
+that scale with the internal render size, so at HMD Quality 0.67 their
+text is rasterised at two-thirds size and no upscaler recovers it. (Every
+trained flight before 2026-09-04 ran with NVIDIA's history reset every
+frame, a bug found by review; the verdicts on those flights are of a
+spatial filter, not of DLSS.)
 *Details: [docs/anti-aliasing.md](docs/anti-aliasing.md).*
 
 **The RemLok helmet's edge lines hanging along your nose.** When the

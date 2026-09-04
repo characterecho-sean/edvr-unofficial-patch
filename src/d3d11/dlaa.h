@@ -37,20 +37,27 @@ bool dlaaAvailable(ID3D11Device* dev, const char** reason);
 // motion vectors (R16G16_FLOAT, pixels, current -> previous), into the
 // output (R8G8B8A8_UNORM, outW x outH, an unordered-access view
 // possible). Equal sizes are DLAA; an output larger than the input is
-// DLSS proper, the quality mode chosen by the ratio and stepped down
-// until the input sits within the mode's range. The jitter is this
-// frame's offset in input pixels; reset breaks the history. A feature
-// per eye is created on first use and rebuilt on a size change. False on
-// any refusal, with its reason.
+// DLSS proper, the quality mode being the one whose own render size (as
+// the runtime names it for this output) is nearest the input, among the
+// modes whose range holds it; the size ratio decides only when the
+// runtime will not say. The jitter is this frame's offset in input
+// pixels; reset breaks the history and must be true ONLY when it is
+// broken (an eye's first frame, a size change, a withhold) -- the review
+// of 2026-09-04 found it raised every frame; frameMs is the time since
+// this eye's previous evaluation, zero when unknown. A feature per eye is
+// created on first use and rebuilt on a size change. False on any
+// refusal, with its reason.
 bool dlaaEvaluate(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* colour,
                   ID3D11Texture2D* depth, ID3D11Texture2D* motion,
                   ID3D11Texture2D* output, uint32_t w, uint32_t h,
                   uint32_t outW, uint32_t outH, float jx, float jy, bool reset,
-                  const char** reason);
+                  float frameMs, const char** reason);
 
-// The measured price, for the totals line: evaluations and the mean
-// milliseconds by timestamp query. False when nothing has run.
-bool dlaaTotals(uint32_t* evaluations, double* avgMs, double* maxMs);
+// The measured price, for the totals line: evaluations, the mean
+// milliseconds by timestamp query, and how many evaluations carried the
+// reset. False when nothing has run.
+bool dlaaTotals(uint32_t* evaluations, double* avgMs, double* maxMs,
+                uint32_t* resets);
 
 void dlaaShutdown();
 

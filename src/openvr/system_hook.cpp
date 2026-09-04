@@ -1439,6 +1439,10 @@ void systemHookSetJitter(float dx, float dy, bool live) {
     s->jitLive = live && s->receiverInstalled;
 }
 
+uint32_t systemHookProjectionReads() {
+    return edvr_sysCounts[kSlotMatrix] + edvr_sysCounts[kSlotRaw];
+}
+
 int systemHookJitterVerdict() {
     State* s = g_state;
     if (!s || !s->installed || s->inert || !s->receiverInstalled) return -1;

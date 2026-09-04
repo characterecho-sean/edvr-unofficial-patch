@@ -459,6 +459,13 @@ struct EyeState {
     ID3D11UnorderedAccessView* histUav[2] = {};
     int                        histRead = 0;
     bool                       haveHistory = false;
+    // The trained pass's continuity (NVIDIA's history), kept apart from
+    // the pass's own. The review of 2026-09-04 (docs/review-motion-vectors-2026-09-04.md,
+    // F1) found the reset flag keyed on haveHistory, which the trained
+    // path never sets: NVIDIA was told "the scene changed completely" on
+    // every frame and never accumulated a thing.
+    bool                       dlHaveHistory = false;
+    int64_t                    dlLastQpc = 0;   // the previous evaluation, for NVIDIA's frame delta
 
     ID3D11Texture2D*           outTex = nullptr;
     ID3D11UnorderedAccessView* outUav = nullptr;
@@ -486,6 +493,8 @@ void releaseDl(EyeState& e) {
     if (e.dlOut) { e.dlOut->Release(); e.dlOut = nullptr; }
     e.dlW = e.dlH = 0;
     e.dlOutW = e.dlOutH = 0;
+    e.dlHaveHistory = false;
+    e.dlLastQpc = 0;
 }
 void releaseCopy(EyeState& e) {
     if (e.copySrv) { e.copySrv->Release(); e.copySrv = nullptr; }
@@ -681,6 +690,7 @@ bool                       g_csMvTried = false;
 bool                       g_dlaaNoted = false;
 bool                       g_dlssNoted = false;
 bool                       g_dlaaFailNoted = false;
+bool                       g_trainedNoted = false;   // the first trained frame's line
 uint32_t                   g_dlaaTreats = 0;
 ID3D11Buffer*              g_cb = nullptr;
 ID3D11SamplerState*        g_samp = nullptr;
@@ -1081,7 +1091,10 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
     void* result = nullptr;
     if (ok) {
         EyeState& e = *eptr;
-        if (flags & 1u) e.haveHistory = false;
+        if (flags & 1u) {
+            e.haveHistory = false;
+            e.dlHaveHistory = false;
+        }
 
         // The rotation delta for this frame's motion source. The depth
         // motion is the head's rotation with its translation term, and
@@ -1141,7 +1154,15 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         p.size[0] = static_cast<int32_t>(w);
         p.size[1] = static_cast<int32_t>(h);
         memcpy(p.tanNow, tanNow, sizeof(p.tanNow));
-        memcpy(p.tanPrev, useHistory ? tanPrev : tanNow, sizeof(p.tanPrev));
+        // The trained path's continuity is NVIDIA's, not the pass's: its
+        // motion vectors need last frame's frustum whenever that history
+        // continues. Keyed on haveHistory, which the trained path never
+        // set, the vectors described the wrong previous frustum across a
+        // guard re-stage or a resolution change (the review's F7).
+        const bool trainedWanted = (flags & 2u) != 0;
+        const bool useTanPrev =
+            useHistory || (trainedWanted && e.dlHaveHistory && haveDelta && tanPrev);
+        memcpy(p.tanPrev, useTanPrev ? tanPrev : tanNow, sizeof(p.tanPrev));
         p.jit[0] = jxNow;
         p.jit[1] = jyNow;
         p.jit[2] = g_filterCurrent ? 1.0f : 0.0f;
@@ -1290,11 +1311,29 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     ctx->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
                     ctx->CSSetShaderResources(0, 3, nullSrvM);
                     ctx->CSSetUnorderedAccessViews(0, 5, nullUavM, nullptr);
-                    // NVIDIA's evaluation.
-                    const bool resetHist = (flags & 1u) != 0 || !e.haveHistory;
+                    // NVIDIA's evaluation. Its history restarts only when it is
+                    // broken: this eye's first frame, a withhold (flags bit 0),
+                    // rebuilt textures, or a frame the pass's own history ran in
+                    // between -- never every frame (the review's F1, 2026-09-04).
+                    const bool resetHist = (flags & 1u) != 0 || !e.dlHaveHistory;
+                    // The time since this eye's previous evaluation, which the
+                    // runtime uses to weigh motion against frame rate; zero on
+                    // a restart, when there is no previous frame to measure to.
+                    LARGE_INTEGER qNow{}, qFreq{};
+                    QueryPerformanceCounter(&qNow);
+                    QueryPerformanceFrequency(&qFreq);
+                    float frameMs = 0.0f;
+                    if (!resetHist && e.dlLastQpc && qFreq.QuadPart > 0) {
+                        frameMs = static_cast<float>(
+                            static_cast<double>(qNow.QuadPart - e.dlLastQpc) * 1000.0 /
+                            static_cast<double>(qFreq.QuadPart));
+                        if (frameMs < 1.0f || frameMs > 100.0f) frameMs = 0.0f;
+                    }
+                    e.dlLastQpc = qNow.QuadPart;
                     if (dlaaEvaluate(ctx, eye, e.dlColour, e.dlDepth, e.dlMv, e.dlOut, w, h,
-                                     oW, oH, jxNow, jyNow, resetHist, &why)) {
+                                     oW, oH, jxNow, jyNow, resetHist, frameMs, &why)) {
                         usedDlaa = true;
+                        e.dlHaveHistory = true;
                         if (!g_dlaaNoted || (oW != w && !g_dlssNoted)) {
                             g_dlaaNoted = true;
                             if (oW != w) g_dlssNoted = true;
@@ -1308,12 +1347,15 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                                                 "probe finds it)",
                                 oW != w ? " and brings it back to the unit-quality size" : "");
                         }
-                    } else if (!g_dlaaFailNoted) {
-                        g_dlaaFailNoted = true;
-                        Log::get().note(
-                            "temporal aa: dlaa was asked for, but %s. The pass's own "
-                            "history runs instead.",
-                            why);
+                    } else {
+                        e.dlHaveHistory = false;
+                        if (!g_dlaaFailNoted) {
+                            g_dlaaFailNoted = true;
+                            Log::get().note(
+                                "temporal aa: dlaa was asked for, but %s. The pass's own "
+                                "history runs instead.",
+                                why);
+                        }
                     }
                 }
             }
@@ -1400,9 +1442,28 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
             result = e.dlOut;
             ++g_treats;
             ++g_dlaaTreats;
+            if (!g_trainedNoted) {
+                // What NVIDIA is handed, once: the review of 2026-09-04
+                // found the trained path invisible in the log (F12).
+                g_trainedNoted = true;
+                Log::get().note(
+                    "temporal aa: first trained frame -- the game submits %s (DXGI_FORMAT "
+                    "%d)%s, %ux%u per eye; NVIDIA is handed the colour as R8G8B8A8_UNORM, "
+                    "the depth as R32_FLOAT (%s), the motion as R16G16_FLOAT in render "
+                    "pixels and this frame's jitter (%+.3f, %+.3f) px, and answers at "
+                    "%ux%u.",
+                    formatName(sd.Format), static_cast<int>(sd.Format),
+                    viaCopy ? " (copied out first: the source refuses a shader view)" : "",
+                    w, h,
+                    depthSrv ? "the scene's, reversed-Z"
+                             : "none yet: zeros until the probe finds it",
+                    static_cast<double>(jxNow), static_cast<double>(jyNow), e.dlOutW,
+                    e.dlOutH);
+            }
         } else if (ran) {
             e.histRead = writeIdx;
             e.haveHistory = true;
+            e.dlHaveHistory = false;   // NVIDIA's history did not see this frame
             result = e.outTex;
             ++g_treats;
             g_lastW = w;
@@ -1600,11 +1661,13 @@ bool temporalPassRegistration(char* buf, size_t n) {
     return true;
 }
 
-bool temporalPassDlaaTotals(uint32_t* frames, double* avgMs, double* maxMs) {
+bool temporalPassDlaaTotals(uint32_t* frames, double* avgMs, double* maxMs,
+                            uint32_t* resets) {
     if (g_dlaaTreats == 0) return false;
-    uint32_t evals = 0;
-    if (!dlaaTotals(&evals, avgMs, maxMs)) return false;
+    uint32_t evals = 0, rs = 0;
+    if (!dlaaTotals(&evals, avgMs, maxMs, &rs)) return false;
     if (frames) *frames = g_dlaaTreats;
+    if (resets) *resets = rs;
     return true;
 }
 

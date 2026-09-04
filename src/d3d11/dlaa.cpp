@@ -28,6 +28,7 @@ bool        g_available = false;
 const char* g_reason = "not asked yet";
 
 uint32_t g_evaluations = 0;
+uint32_t g_resets = 0;        // evaluations that restarted NVIDIA's history
 uint32_t g_timeCount = 0;
 double   g_timeSum = 0.0;
 double   g_timeMax = 0.0;
@@ -36,6 +37,13 @@ double   g_timeMax = 0.0;
 
 ID3D11Device*       g_device = nullptr;
 NVSDK_NGX_Parameter* g_params = nullptr;
+// The capability block, kept: the optimal-settings query only answers on
+// THIS block (the SDK's helper looks its callback up here and returns
+// FAIL_OutOfDate on a block from AllocateParameters -- which is what the
+// first two flights did, printing 0x0 as if the runtime had answered;
+// the review of 2026-09-04, F2).
+NVSDK_NGX_Parameter* g_caps = nullptr;
+bool                 g_optimalFailNoted = false;
 
 struct EyeFeature {
     NVSDK_NGX_Handle* handle = nullptr;
@@ -203,6 +211,7 @@ bool dlaaAvailable(ID3D11Device* dev, const char** reason) {
                            !g_params) {
                     g_reason = "NGX would not allocate its parameters";
                 } else {
+                    g_caps = caps;
                     g_available = true;
                     g_reason = "available";
                 }
@@ -218,14 +227,15 @@ bool dlaaEvaluate(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* colour,
                   ID3D11Texture2D* depth, ID3D11Texture2D* motion,
                   ID3D11Texture2D* output, uint32_t w, uint32_t h,
                   uint32_t outW, uint32_t outH, float jx, float jy, bool reset,
-                  const char** reason) {
+                  float frameMs, const char** reason) {
 #ifndef EDVR_HAVE_NGX
     (void)ctx; (void)eye; (void)colour; (void)depth; (void)motion; (void)output;
     (void)w; (void)h; (void)outW; (void)outH; (void)jx; (void)jy; (void)reset;
+    (void)frameMs;
     if (reason) *reason = "this build has no DLSS SDK in it";
     return false;
 #else
-    if (!g_available || !g_params || !ctx || !colour || !depth || !motion || !output ||
+    if (!g_available || !g_params || !g_caps || !ctx || !colour || !depth || !motion || !output ||
         eye < 0 || eye > 1 || !w || !h) {
         if (reason) *reason = g_available ? "a missing input" : g_reason;
         return false;
@@ -242,32 +252,65 @@ bool dlaaEvaluate(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* colour,
             f.handle = nullptr;
         }
         // Equal sizes are DLAA. A larger output is DLSS proper: the mode
-        // is chosen by the ratio of the sizes -- two thirds is "quality",
-        // 0.58 "balanced", a half "performance", a third "ultra
-        // performance" -- and stepped down until the input sits within
-        // the range the runtime names for it, since the input is whatever
-        // Elite's HMD Quality produced, not what a mode would ask for.
+        // is the one whose own render size, as the runtime names it for
+        // this output, is nearest the input among the modes whose range
+        // holds it -- the input is whatever Elite's HMD Quality produced,
+        // not what a mode would ask for. The size ratio decides only when
+        // the runtime will not say (it did not, for two flights: the query
+        // was made on the wrong parameter block; the review's F2).
         NVSDK_NGX_PerfQuality_Value quality = NVSDK_NGX_PerfQuality_Value_DLAA;
         unsigned optW = 0, optH = 0, maxW = 0, maxH = 0, minW = 0, minH = 0;
         float sharpness = 0.0f;
+        bool optKnown = false;
+        NVSDK_NGX_Result optErr = NVSDK_NGX_Result_Success;
         if (outW == w && outH == h) {
-            NGX_DLSS_GET_OPTIMAL_SETTINGS(g_params, w, h, quality, &optW, &optH, &maxW, &maxH,
-                                          &minW, &minH, &sharpness);
+            optErr = NGX_DLSS_GET_OPTIMAL_SETTINGS(g_caps, w, h, quality, &optW, &optH, &maxW,
+                                                   &maxH, &minW, &minH, &sharpness);
+            optKnown = !NVSDK_NGX_FAILED(optErr);
         } else {
-            const float ratio = static_cast<float>(w) / static_cast<float>(outW);
             const NVSDK_NGX_PerfQuality_Value ladder[4] = {
                 NVSDK_NGX_PerfQuality_Value_MaxQuality, NVSDK_NGX_PerfQuality_Value_Balanced,
                 NVSDK_NGX_PerfQuality_Value_MaxPerf, NVSDK_NGX_PerfQuality_Value_UltraPerformance};
-            int start = ratio >= 0.66f ? 0 : ratio >= 0.58f ? 1 : ratio >= 0.5f ? 2 : 3;
-            quality = ladder[3];
-            for (int k = start; k < 4; ++k) {
-                NGX_DLSS_GET_OPTIMAL_SETTINGS(g_params, outW, outH, ladder[k], &optW, &optH,
-                                              &maxW, &maxH, &minW, &minH, &sharpness);
-                if (w >= minW && h >= minH && w <= (maxW ? maxW : w) && h <= (maxH ? maxH : h)) {
-                    quality = ladder[k];
-                    break;
+            int best = -1;
+            unsigned bestDiff = ~0u;
+            for (int k = 0; k < 4; ++k) {
+                unsigned oW2 = 0, oH2 = 0, mxW = 0, mxH = 0, mnW = 0, mnH = 0;
+                float sh = 0.0f;
+                optErr = NGX_DLSS_GET_OPTIMAL_SETTINGS(g_caps, outW, outH, ladder[k], &oW2, &oH2,
+                                                       &mxW, &mxH, &mnW, &mnH, &sh);
+                if (NVSDK_NGX_FAILED(optErr)) break;
+                optKnown = true;
+                const bool inRange = w >= mnW && h >= mnH && w <= mxW && h <= mxH;
+                const unsigned diff = oW2 > w ? oW2 - w : w - oW2;
+                if (inRange && diff < bestDiff) {
+                    best = k;
+                    bestDiff = diff;
+                    optW = oW2; optH = oH2; minW = mnW; minH = mnH; maxW = mxW; maxH = mxH;
+                    sharpness = sh;
                 }
             }
+            if (best >= 0) {
+                quality = ladder[best];
+            } else if (optKnown) {
+                snprintf(g_reasonBuf, sizeof(g_reasonBuf),
+                         "a %ux%u frame sits outside every DLSS mode's render range for a "
+                         "%ux%u output",
+                         w, h, outW, outH);
+                g_reason = g_reasonBuf;
+                if (reason) *reason = g_reason;
+                return false;
+            } else {
+                const float ratio = static_cast<float>(w) / static_cast<float>(outW);
+                quality = ratio >= 0.66f ? ladder[0] : ratio >= 0.58f ? ladder[1]
+                        : ratio >= 0.5f ? ladder[2] : ladder[3];
+            }
+        }
+        if (!optKnown && !g_optimalFailNoted) {
+            g_optimalFailNoted = true;
+            Log::get().note(
+                "dlss: the runtime would not name its render sizes (%s, 0x%08X); the mode "
+                "is chosen by the size ratio alone.",
+                ngxResultName(optErr), static_cast<unsigned>(optErr));
         }
         NVSDK_NGX_DLSS_Create_Params cp{};
         cp.Feature.InWidth = w;
@@ -298,17 +341,17 @@ bool dlaaEvaluate(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* colour,
         if (outW == w && outH == h) {
             Log::get().note(
                 "dlaa: the feature is created for eye %d at %ux%u, DLAA (the runtime's "
-                "optimal render size %ux%u, sharpness %.2f, which DLAA ignores); the "
+                "optimal render size for this output %ux%u, which DLAA ignores); the "
                 "history starts here.",
-                eye, w, h, optW, optH, static_cast<double>(sharpness));
+                eye, w, h, optW, optH);
         } else {
             Log::get().note(
                 "dlss: the feature is created for eye %d, %ux%u in and %ux%u out (%.0f%% "
-                "per axis), the %s mode, whose render range the runtime names as "
-                "%ux%u..%ux%u; the history starts here.",
+                "per axis), the %s mode, whose own render size is %ux%u and whose range "
+                "the runtime names as %ux%u..%ux%u; the history starts here.",
                 eye, w, h, outW, outH,
                 100.0 * static_cast<double>(w) / static_cast<double>(outW),
-                qualityName(quality), minW, minH, maxW, maxH);
+                qualityName(quality), optW, optH, minW, minH, maxW, maxH);
         }
     }
 
@@ -327,6 +370,10 @@ bool dlaaEvaluate(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* colour,
     ep.InMVScaleY = 1.0f;
     ep.InPreExposure = 1.0f;
     ep.InExposureScale = 1.0f;
+    // The frame delta the SDK asks for ("helps in determining the amount
+    // to denoise or anti-alias based on the speed of the object"); zero
+    // when unknown, which the runtime treats as unstated.
+    ep.InFrameTimeDeltaInMsec = frameMs;
 
     ID3D11Device* dev = nullptr;
     ctx->GetDevice(&dev);
@@ -350,13 +397,16 @@ bool dlaaEvaluate(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* colour,
         return false;
     }
     ++g_evaluations;
+    if (reset) ++g_resets;
     return true;
 #endif
 }
 
-bool dlaaTotals(uint32_t* evaluations, double* avgMs, double* maxMs) {
+bool dlaaTotals(uint32_t* evaluations, double* avgMs, double* maxMs,
+                uint32_t* resets) {
     if (g_evaluations == 0) return false;
     if (evaluations) *evaluations = g_evaluations;
+    if (resets) *resets = g_resets;
     if (avgMs) *avgMs = g_timeCount ? g_timeSum / static_cast<double>(g_timeCount) : 0.0;
     if (maxMs) *maxMs = g_timeMax;
     return true;
@@ -370,15 +420,19 @@ void dlaaShutdown() {
         NVSDK_NGX_D3D11_DestroyParameters(g_params);
         g_params = nullptr;
     }
+    if (g_caps) {
+        NVSDK_NGX_D3D11_DestroyParameters(g_caps);
+        g_caps = nullptr;
+    }
     if (g_device) {
         NVSDK_NGX_D3D11_Shutdown1(g_device);
         g_device = nullptr;
     }
 #endif
     if (g_evaluations > 0) {
-        Log::get().note("dlaa: %u eye-frames evaluated this session, %.2f ms each on "
-                        "average (max %.2f).",
-                        g_evaluations,
+        Log::get().note("dlaa: %u eye-frames evaluated this session (%u of them started "
+                        "NVIDIA's history afresh), %.2f ms each on average (max %.2f).",
+                        g_evaluations, g_resets,
                         g_timeCount ? g_timeSum / static_cast<double>(g_timeCount) : 0.0,
                         g_timeMax);
     }
@@ -391,4 +445,16 @@ void dlaaShutdown() {
 // For tools/smoke: is DLAA usable on this device, and if not, why.
 extern "C" __declspec(dllexport) int edvrDlaaAvailable(void* device, const char** reason) {
     return edvr::dlaaAvailable(static_cast<ID3D11Device*>(device), reason) ? 1 : 0;
+}
+
+// For tools/smoke: the evaluations so far and how many carried the reset --
+// the desk check that NVIDIA's history is not restarted every frame. 0 when
+// nothing has run.
+extern "C" __declspec(dllexport) int edvrDlaaCounts(unsigned* evaluations, unsigned* resets) {
+    uint32_t e = 0, r = 0;
+    double a = 0.0, m = 0.0;
+    if (!edvr::dlaaTotals(&e, &a, &m, &r)) return 0;
+    if (evaluations) *evaluations = e;
+    if (resets) *resets = r;
+    return 1;
 }

@@ -806,6 +806,39 @@ int main(int argc, char** argv) {
                                           400, 304, 200, 152, cr, cg, cb, 4)) {
                     rc = 1;
                 }
+                // The reset discipline (the review of 2026-09-04, F1): NVIDIA's
+                // history must restart only on an eye's first frame, not every
+                // frame. Eight more frames of eye 0 without the reset bit, then
+                // the counts: eleven evaluations, two of them resets (each
+                // eye's first). Needs the runtime; says so otherwise.
+                typedef int (*PFN_DlaaCounts)(unsigned*, unsigned*);
+                PFN_DlaaCounts dlaaCounts =
+                    reinterpret_cast<PFN_DlaaCounts>(GetProcAddress(mod, "edvrDlaaCounts"));
+                for (int k = 0; k < 8; ++k) {
+                    void* rk = taa(srcD, 0, nullptr, tan, tan, 0.125f * k, -0.125f * k, ident,
+                                   nullptr, nullptr, 0.0f, 0.0f, 0.0f, 3, 0.9f, 1.0f, 0u, 0u, 2u);
+                    if (!rk) {
+                        printf("  FAIL  dlaa: frame %d of the reset test was refused\n", k);
+                        rc = 1;
+                    }
+                }
+                if (!dlaaCounts) {
+                    printf("  FAIL  edvrDlaaCounts is not exported\n");
+                    rc = 1;
+                } else if (avail) {
+                    unsigned evals = 0, resets = 0;
+                    dlaaCounts(&evals, &resets);
+                    if (evals == 11 && resets == 2) {
+                        printf("  ok    dlaa: 11 evaluations, 2 of them resets (each eye's first frame)\n");
+                    } else {
+                        printf("  FAIL  dlaa: %u evaluations, %u of them resets (expected 11 and 2: "
+                               "NVIDIA's history must not restart every frame)\n",
+                               evals, resets);
+                        rc = 1;
+                    }
+                } else {
+                    printf("  skip  dlaa: the reset count needs the runtime\n");
+                }
                 srcD->Release();
             }
         }

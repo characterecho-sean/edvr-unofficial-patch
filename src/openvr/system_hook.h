@@ -118,6 +118,12 @@ bool systemHookJitterAvailable();
 // the check happens. A caller that wants to say "cannot" waits for -1.
 int systemHookJitterVerdict();
 
+// How many times the game has asked for its projection (GetProjectionRaw
+// and GetProjectionMatrix together) since launch. The temporal pass reads
+// it at the frame boundary and at the first submit to learn WHEN the game
+// reads the projection relative to the boundary its jitter is set at.
+uint32_t systemHookProjectionReads();
+
 // The tangents the game is being told THIS frame, jitter excluded: the lie
 // under a live guard, the truth otherwise. False until that eye has been
 // seen.

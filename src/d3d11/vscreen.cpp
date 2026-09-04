@@ -4380,14 +4380,19 @@ void vScreenFrameBoundary() {
         // The trained pass's, when it runs.
         {
             static uint32_t lastDlaaFrames = 0;
-            uint32_t frames = 0;
+            uint32_t frames = 0, resets = 0;
             double avgMs = 0.0, maxMs = 0.0;
-            if (temporalPassDlaaTotals(&frames, &avgMs, &maxMs) && frames != lastDlaaFrames) {
+            if (temporalPassDlaaTotals(&frames, &avgMs, &maxMs, &resets) &&
+                frames != lastDlaaFrames) {
                 lastDlaaFrames = frames;
+                // The resets are the field's check on the review's F1: a
+                // handful per session (each eye's first frame, each size
+                // change, each withhold), never the evaluation count.
                 Log::get().note(
-                    "dlaa totals: %u eye-frames evaluated this session, %.2f ms per "
-                    "eye on average (max %.2f).",
-                    frames, avgMs, maxMs);
+                    "dlaa totals: %u eye-frames evaluated this session (%u of them "
+                    "started NVIDIA's history afresh), %.2f ms per eye on average "
+                    "(max %.2f).",
+                    frames, resets, avgMs, maxMs);
             }
         }
         // The sharpening's, the same way.
