@@ -38,7 +38,7 @@ Texture2D<float> Z : register(t2);       // the scene's depth, the game's own, w
 SamplerState L : register(s0);           // bilinear, clamp
 RWTexture2D<float4> O : register(u0);    // the output, region-sized, the game's format
 RWTexture2D<float4> N : register(u1);    // the new history
-RWStructuredBuffer<uint> Stats : register(u2);   // 0 rejected, 1 clipped, 2 the clips' size (luma/255, summed); then the same three per candidate, four of them; 15 pixels on the world path, 16 bright pixels, 17 bright pixels with no depth
+RWStructuredBuffer<uint> Stats : register(u2);   // 0 rejected, 1 clipped, 2 the clips' size (luma/255, summed); then the same three per candidate, four of them; 15 pixels on the world path, 16 bright pixels, 17 bright pixels with no depth; 18-20 the registration probes on the world path (sum dx*100, sum dy*100, count) and 21-23 on the ship; 24-27 world pixels, world clipped, ship pixels, ship clipped
 RWTexture2D<float2> MV : register(u3);   // for a trained pass: motion vectors, pixels, current -> previous
 RWTexture2D<float>  ZC : register(u4);   // and the depth, copied as it is
 cbuffer P : register(b0) {
@@ -239,7 +239,7 @@ uint clipSize(float3 hc, float3 hy) {
 )HLSL"
 // (adjacent literals: MSVC caps one at 16 KB)
 R"HLSL(
-groupshared uint gCount[18];
+groupshared uint gCount[28];
 // The motion vectors for a trained pass (DLAA): the same reprojection
 // the history fetch does, written out instead of used -- the pixel's
 // position last frame minus its position now, in render pixels, which
@@ -251,9 +251,9 @@ groupshared uint gCount[18];
 // line the way main's do.
 [numthreads(8, 8, 1)]
 void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
-    if (gi < 18) gCount[gi] = 0;
+    if (gi < 28) gCount[gi] = 0;
     GroupMemoryBarrierWithGroupSync();
-    uint count[18] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+    uint count[28] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
     if (id.x < (uint)size.x && id.y < (uint)size.y) {
         float2 p = float2(id.xy);
         float3 d;
@@ -307,20 +307,20 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
         }
         ZC[id.xy] = knobs.y != 0.0 ? zraw : 0.0;
     }
-    [unroll] for (int k = 0; k < 18; ++k) {
+    [unroll] for (int k = 0; k < 28; ++k) {
         if (count[k] != 0) InterlockedAdd(gCount[k], count[k]);
     }
     GroupMemoryBarrierWithGroupSync();
-    if (gi < 18) InterlockedAdd(Stats[gi], gCount[gi]);
+    if (gi < 28) InterlockedAdd(Stats[gi], gCount[gi]);
 }
 )HLSL"
 // (adjacent literals: MSVC caps one at 16 KB)
 R"HLSL(
 [numthreads(8, 8, 1)]
 void main(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
-    if (gi < 18) gCount[gi] = 0;
+    if (gi < 28) gCount[gi] = 0;
     GroupMemoryBarrierWithGroupSync();
-    uint count[18] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+    uint count[28] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
     if (id.x < (uint)size.x && id.y < (uint)size.y) {
         float2 p = float2(id.xy);
         int2 ci = int2(id.xy);
@@ -395,6 +395,16 @@ void main(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
                     count[1] = 1;
                     count[2] = clipSize(hc, hy);
                 }
+                // The used delta's clip share per class: the world path's
+                // pixels and the ship's, since the two are registered by
+                // different deltas and one number hid the other.
+                if (worldTaken != 0) {
+                    count[24] = 1;
+                    if (count[1] != 0) count[25] = 1;
+                } else {
+                    count[26] = 1;
+                    if (count[1] != 0) count[27] = 1;
+                }
                 outc = lerp(cur.rgb, ycocgToRgb(hc), blend);
                 used = true;
             }
@@ -429,6 +439,59 @@ void main(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
                 }
             }
         }
+        // The registration probes: on a 64-pixel grid, where the frame has
+        // texture, the history's best match within 4 px of the predicted
+        // position by a 5x5 luma SAD. The mean offset per class -- the
+        // world path, the ship -- is the used reprojection's systematic
+        // error in pixels, which no clip share can give: a steady offset
+        // that follows the motion is a lag or a scale, noise averages to
+        // zero, and the jitter's sub-pixel offset is in every probe and
+        // averages out too. Signed: (+2, 0) means the content sat two
+        // pixels further right in the history than the prediction said.
+        if (used && (id.x & 63) == 16 && (id.y & 63) == 16 && id.x >= 8 && id.y >= 8 &&
+            id.x + 8 < (uint)size.x && id.y + 8 < (uint)size.y) {
+            float curL[25];
+            float meanL = 0.0;
+            int kk = 0;
+            [unroll] for (int wy = -2; wy <= 2; ++wy) {
+                [unroll] for (int wx = -2; wx <= 2; ++wx) {
+                    curL[kk] = rgbToYcocg(S.Load(int3(region.xy + ci + int2(wx, wy), 0)).rgb).x;
+                    meanL += curL[kk];
+                    ++kk;
+                }
+            }
+            meanL /= 25.0;
+            float varL = 0.0;
+            [unroll] for (int jj = 0; jj < 25; ++jj) varL += (curL[jj] - meanL) * (curL[jj] - meanL);
+            if (varL > 0.0225) {
+                float2 pp = p + mvUsed;
+                int2 pq = int2(round(pp));
+                float bestSad = 1e9;
+                int2 best = int2(0, 0);
+                for (int sy = -4; sy <= 4; ++sy) {
+                    for (int sx = -4; sx <= 4; ++sx) {
+                        float sad = 0.0;
+                        int mm = 0;
+                        [unroll] for (int wy2 = -2; wy2 <= 2; ++wy2) {
+                            [unroll] for (int wx2 = -2; wx2 <= 2; ++wx2) {
+                                int2 q = clamp(pq + int2(sx + wx2, sy + wy2), int2(0, 0), size - 1);
+                                sad += abs(curL[mm] - rgbToYcocg(H.Load(int3(q, 0)).rgb).x);
+                                ++mm;
+                            }
+                        }
+                        if (sad < bestSad) {
+                            bestSad = sad;
+                            best = int2(sx, sy);
+                        }
+                    }
+                }
+                float2 resid = float2(best) + (float2(pq) - pp);
+                uint base = worldTaken != 0 ? 18u : 21u;
+                InterlockedAdd(Stats[base], asuint(int(round(resid.x * 100.0))));
+                InterlockedAdd(Stats[base + 1], asuint(int(round(resid.y * 100.0))));
+                InterlockedAdd(Stats[base + 2], 1u);
+            }
+        }
         if (!used) count[0] = 1;
         float3 o = saturate(outc);
         N[id.xy] = float4(o, 1.0);
@@ -448,11 +511,11 @@ void main(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
         O[id.xy] = float4(o, cur.a);
     }
     // One atomic per group per counter, not per pixel.
-    [unroll] for (int k = 0; k < 18; ++k) {
+    [unroll] for (int k = 0; k < 28; ++k) {
         if (count[k] != 0) InterlockedAdd(gCount[k], count[k]);
     }
     GroupMemoryBarrierWithGroupSync();
-    if (gi < 18) InterlockedAdd(Stats[gi], gCount[gi]);
+    if (gi < 28) InterlockedAdd(Stats[gi], gCount[gi]);
 }
 )HLSL";
 
@@ -659,7 +722,7 @@ struct Slot {
     bool          hadHistory = false;
 };
 constexpr int kSlots = 8;
-constexpr int kStatCount = 20;   // 18 used; an 80-byte buffer
+constexpr int kStatCount = 32;   // 28 used; a 128-byte buffer
 Slot g_slots[kSlots];
 
 void releaseSlot(Slot& q) {
@@ -756,6 +819,16 @@ void pollSlots(ID3D11DeviceContext* ctx) {
                 g_worldPix += v[15];
                 g_brightPix += v[16];
                 g_brightNoDepthPix += v[17];
+                g_probeWorldDx += static_cast<int32_t>(v[18]);
+                g_probeWorldDy += static_cast<int32_t>(v[19]);
+                g_probeWorldN += v[20];
+                g_probeShipDx += static_cast<int32_t>(v[21]);
+                g_probeShipDy += static_cast<int32_t>(v[22]);
+                g_probeShipN += v[23];
+                g_classWorldPix += v[24];
+                g_classWorldClip += v[25];
+                g_classShipPix += v[26];
+                g_classShipClip += v[27];
                 ++g_intervalFrames;
                 if (q.hadHistory) {
                     for (int c = 0; c < 4; ++c) {
@@ -880,6 +953,14 @@ float       g_lastGoodC[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};   // the last accepted
 float       g_lastGoodTv[3] = {};                            // ...and its translation term
 bool        g_lastGoodValid = false;
 uint32_t    g_camCarried = 0;        // frames the ship's delta was carried over a drop
+// The registration probes and the per-class clip shares, per interval
+// (the shader says what they are).
+int64_t     g_probeWorldDx = 0, g_probeWorldDy = 0;
+uint64_t    g_probeWorldN = 0;
+int64_t     g_probeShipDx = 0, g_probeShipDy = 0;
+uint64_t    g_probeShipN = 0;
+uint64_t    g_classWorldPix = 0, g_classWorldClip = 0;
+uint64_t    g_classShipPix = 0, g_classShipClip = 0;
 float    g_curRows[12] = {};
 bool     g_curValid = false;
 bool     g_curLatched = false;
@@ -2088,6 +2169,28 @@ bool temporalPassRegistration(char* buf, size_t n) {
                   "deg from the head's) and its translation on %u as a jump (over 50 m)",
                   g_camDropRot, g_camDropMove);
     }
+    if (g_classWorldPix || g_classShipPix) {
+        regAppend(buf, n, used,
+                  "; the used delta clipped %.1f%% of the world path's pixels and %.1f%% of the ship's",
+                  g_classWorldPix ? 100.0 * static_cast<double>(g_classWorldClip) /
+                                        static_cast<double>(g_classWorldPix)
+                                  : 0.0,
+                  g_classShipPix ? 100.0 * static_cast<double>(g_classShipClip) /
+                                       static_cast<double>(g_classShipPix)
+                                 : 0.0);
+    }
+    if (g_probeWorldN || g_probeShipN) {
+        regAppend(buf, n, used,
+                  "; the history's best match sat (%+.2f, %+.2f) px from the prediction on the world "
+                  "path (%llu probes) and (%+.2f, %+.2f) px on the ship (%llu probes) -- a steady "
+                  "offset that follows the motion is a lag or a scale, noise averages to zero",
+                  g_probeWorldN ? static_cast<double>(g_probeWorldDx) / 100.0 / static_cast<double>(g_probeWorldN) : 0.0,
+                  g_probeWorldN ? static_cast<double>(g_probeWorldDy) / 100.0 / static_cast<double>(g_probeWorldN) : 0.0,
+                  static_cast<unsigned long long>(g_probeWorldN),
+                  g_probeShipN ? static_cast<double>(g_probeShipDx) / 100.0 / static_cast<double>(g_probeShipN) : 0.0,
+                  g_probeShipN ? static_cast<double>(g_probeShipDy) / 100.0 / static_cast<double>(g_probeShipN) : 0.0,
+                  static_cast<unsigned long long>(g_probeShipN));
+    }
     // The interval starts afresh: the next line judges the next stretch.
     memset(g_candPix, 0, sizeof(g_candPix));
     memset(g_candRej, 0, sizeof(g_candRej));
@@ -2115,6 +2218,12 @@ bool temporalPassRegistration(char* buf, size_t n) {
     g_chooseResync = 0;
     g_chooseNone = 0;
     g_camCarried = 0;
+    g_probeWorldDx = g_probeWorldDy = 0;
+    g_probeWorldN = 0;
+    g_probeShipDx = g_probeShipDy = 0;
+    g_probeShipN = 0;
+    g_classWorldPix = g_classWorldClip = 0;
+    g_classShipPix = g_classShipClip = 0;
     return true;
 }
 

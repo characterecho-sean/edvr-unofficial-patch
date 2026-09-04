@@ -1148,6 +1148,23 @@ composition, no head note. `temporal_aa_view_transpose` defaults to 1
 and the docked figure is a real check at last: W must equal the head's
 delta whichever way the head turns.
 
+**The own pass in space (bfa61cf) showed the clip instrument's blind
+spot.** Both world readings clipped 37 to 47% of pixels against the
+head candidates' 15 to 23% while the ship turned -- not because the
+world path is wrong, but because a candidate is judged over every
+pixel, and the cockpit (a third of the image, textured) clips under any
+world delta while the sky (mostly black) clips under nothing. The
+comparison never saw the world. So the line now carries two things the
+clip share cannot: the used delta's clip share per class (the world
+path's pixels and the ship's separately), and REGISTRATION PROBES -- on
+a 64-pixel grid, where the frame has texture, the history's best match
+within 4 px of the predicted position by a 5x5 luma SAD, the mean
+offset reported per class in pixels. A steady offset that follows the
+motion is a lag or a scale; noise averages to zero; the jitter's
+sub-pixel offset is in every probe and averages out. That is the number
+the ghosting reports were missing: whether the reprojection is off by a
+pixel, and which way.
+
 ## Feature C — texture LOD bias, the small lever
 
 Not all shimmer is geometry. Detail maps and normal maps sampled a mip
