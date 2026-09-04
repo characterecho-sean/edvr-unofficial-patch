@@ -9,6 +9,7 @@
 
 #include <cmath>
 #include <cstring>
+#include <string>
 
 #include "../common/config.h"
 #include "../common/eye_sync.h"
@@ -18,6 +19,7 @@
 #include "../d3d11/elite_binds.h"   // the camera key, from the game's own bindings
 #include "../common/log.h"
 #include "../common/proxy.h"  // breadcrumb(), EDVR_BREADCRUMB_ONCE
+#include "../common/rest_math.h"
 #include "../common/vtable_hook.h"
 #include "guard_crop.h"
 #include "openvr_min.h"
@@ -321,6 +323,7 @@ struct State {
         uint64_t qpc;
         uint32_t frame;
         float    pos[3];
+        float    rot[9];   // the 3x3 rotation, row-major: the turn column
         int32_t  result;
         uint8_t  valid;
     };
@@ -336,6 +339,43 @@ struct State {
     uint64_t  poseHead = 0;
     uint32_t  poseFrame = 0;
     float     poseStepNoteMm = 50.0f;
+    // The pose hold (advanced.pose_hold): a developer instrument that hands
+    // the game the SAME headset pose every frame, captured when it turned on,
+    // whatever the tracker reports after. For telling the tracker's motion
+    // from the game's own: the compositor still reprojects the headset's
+    // view by the real head motion, so the reading is the game's mirror
+    // window, the eye as rendered. Off by default; live.
+    int       poseHoldMode = 0;      // 0 off; 1 game (the render pose); 2 headset (and the warp)
+    bool      poseHolding = false;
+    vr::HmdMatrix34_t poseHold = {};
+    bool      poseHoldWarpNoted = false;
+    uint32_t  poseHoldWarpFrames = 0;     // submits that carried a pose
+    uint32_t  poseHoldWarpFallbacks = 0;  // submits that could not
+
+    // shimmer_rest (fix.shimmer_rest): the rest lock, the continuous form of
+    // the pose hold. rest_math.h has the arithmetic and the reasoning; restApply
+    // and forwardSubmit have the two halves. The key and its two thresholds
+    // are read with the pose ring's config, install and reload alike.
+    bool      restWanted = false;
+    float     restStill = 0.3f;    // smoothed arcmin-equivalents per frame: held at and under
+    float     restMoving = 1.5f;   // ... stock at and over
+    bool      restHave = false;    // the state below is primed
+    RestQuat  restQ = {1.0, 0.0, 0.0, 0.0};   // the held rotation
+    double    restPos[3] = {};                // the held position, metres
+    float     restHeldRot[9] = {};            // the held rotation as handed out, for the gap check
+    float     restPrevRot[9] = {};            // last frame's RAW rotation, for the speed
+    float     restPrevPos[3] = {};
+    double    restSpeed = 0.0;     // smoothed arcmin-equivalents per frame
+    double    restK = 1.0;         // this frame's hold factor; 1 = stock
+    vr::HmdMatrix34_t restRender = {};        // the pose the game rendered this frame from
+    bool      restRenderValid = false;
+    vr::HmdMatrix34_t restDisp = {};          // this frame's predicted display pose, fetched once
+    uint64_t  restDispFrame = 0;
+    bool      restDispValid = false;
+    bool      restAnnounced = false;
+    uint32_t  restFramesHeld = 0, restFramesBetween = 0, restFramesStock = 0;
+    uint32_t  restSnaps = 0, restCarried = 0, restFallbacks = 0;
+    uint64_t  restLogMs = 0;
     Hotkey    poseDumpKey;
     bool      poseKeyBound = false;
     // The external-camera key, watched on THIS side too.
@@ -405,6 +445,34 @@ void configurePoseRing(State* s) {
     // Clamped anyway: 0 would flag every frame and drown the verdict it exists
     // to make readable.
     s->poseStepNoteMm = (std::isfinite(mm) && mm > 0.0f && mm <= 1000.0f) ? mm : 50.0f;
+    {
+        const std::string hold = cfg.getString("advanced.pose_hold", "0");
+        int mode = 0;
+        if (_stricmp(hold.c_str(), "1") == 0 || _stricmp(hold.c_str(), "game") == 0) {
+            mode = 1;
+        } else if (_stricmp(hold.c_str(), "2") == 0 ||
+                   _stricmp(hold.c_str(), "headset") == 0) {
+            mode = 2;
+        }
+        s->poseHoldMode = mode;
+    }
+    {
+        const std::string rest = cfg.getString("fix.shimmer_rest", "off");
+        const bool on = _stricmp(rest.c_str(), "on") == 0 || _stricmp(rest.c_str(), "1") == 0;
+        if (on != s->restWanted) {
+            s->restWanted = on;
+            s->restHave = false;
+            s->restAnnounced = false;
+        }
+        float still = cfg.getFloat("advanced.shimmer_rest_still", 0.3f);
+        float moving = cfg.getFloat("advanced.shimmer_rest_moving", 1.5f);
+        if (!std::isfinite(still) || still < 0.05f) still = 0.05f;
+        if (still > 5.0f) still = 5.0f;
+        if (!std::isfinite(moving) || moving > 30.0f) moving = 30.0f;
+        if (moving < still + 0.05f) moving = still + 0.05f;
+        s->restStill = still;
+        s->restMoving = moving;
+    }
 
     // The camera key comes from the GAME's bindings, like everywhere else
     // (0.7.1 retired the ini keys). ONCE, not on every reload: this runs on
@@ -458,6 +526,167 @@ void configurePoseRing(State* s) {
     }
 }
 
+// The angle between two stored rotations, in arcminutes: the antisymmetric
+// part of A^T B is sin(theta) times the axis, exactly zero for identical
+// matrices whatever float32 rounding did to their orthonormality. (The trace
+// route, acos((tr - 1) / 2), is not: near 1 it turns a 1e-7 rounding error
+// into 5e-4 radians, and the first field dump read that as 1.75 arcmin of
+// turn every frame from a headset lying on a desk.)
+static double turnArcminBetween(const float* a, const float* b) {
+    double rel[3][3];
+    for (int ii = 0; ii < 3; ++ii) {
+        for (int jj = 0; jj < 3; ++jj) {
+            double v = 0.0;
+            for (int kk = 0; kk < 3; ++kk) {
+                v += static_cast<double>(a[kk * 3 + ii]) *
+                     static_cast<double>(b[kk * 3 + jj]);
+            }
+            rel[ii][jj] = v;
+        }
+    }
+    const double ax = 0.5 * (rel[2][1] - rel[1][2]);
+    const double ay = 0.5 * (rel[0][2] - rel[2][0]);
+    const double az = 0.5 * (rel[1][0] - rel[0][1]);
+    double sn = sqrt(ax * ax + ay * ay + az * az);
+    if (sn > 1.0) sn = 1.0;
+    return asin(sn) * 3437.74677;
+}
+
+// shimmer_rest's pose half, once a frame from hookedWaitGetPoses after the
+// pose ring has recorded the raw pose and the pose hold has had its say.
+//
+// The head's speed is the turn since last frame plus its travel at two
+// metres (a millimetre is 1.7 arcminutes there), smoothed over about five
+// frames; the hold factor k comes from restHoldFactor; the held rotation and
+// position move k of the way toward the live ones and go out in both pose
+// arrays. Velocities are scaled by k so nothing extrapolates a motion the
+// pose did not make. A discontinuity nothing should follow slowly -- a
+// recentre, a tracking snap, a pose gone invalid -- snaps the held pose to
+// the live one. The frame's outgoing pose is kept for forwardSubmit.
+static void restApply(State* s, vr::TrackedDevicePose_t* renderPoses,
+                      uint32_t renderCount, vr::TrackedDevicePose_t* gamePoses,
+                      uint32_t gameCount) {
+    s->restRenderValid = false;
+    s->restK = 1.0;
+    if (!s->restWanted || s->poseHolding || renderCount <= vr::k_unTrackedDeviceIndex_Hmd ||
+        !renderPoses) {
+        s->restHave = false;
+        return;
+    }
+    vr::TrackedDevicePose_t& hmd = renderPoses[vr::k_unTrackedDeviceIndex_Hmd];
+    if (!hmd.bPoseIsValid || hmd.eTrackingResult != vr::TrackingResult_Running_OK) {
+        s->restHave = false;
+        return;
+    }
+    float rot[9];
+    float pos[3];
+    for (int rr = 0; rr < 3; ++rr) {
+        for (int cc = 0; cc < 3; ++cc) rot[rr * 3 + cc] = hmd.mDeviceToAbsoluteTracking.m[rr][cc];
+        pos[rr] = hmd.mDeviceToAbsoluteTracking.m[rr][3];
+    }
+    if (!s->restHave) {
+        // Primed from the live pose; this frame goes out stock.
+        s->restQ = restQuatFromMatrix(hmd.mDeviceToAbsoluteTracking.m);
+        for (int i = 0; i < 3; ++i) s->restPos[i] = pos[i];
+        for (int i = 0; i < 9; ++i) { s->restPrevRot[i] = rot[i]; s->restHeldRot[i] = rot[i]; }
+        for (int i = 0; i < 3; ++i) s->restPrevPos[i] = pos[i];
+        s->restSpeed = s->restMoving;
+        s->restHave = true;
+        if (!s->restAnnounced) {
+            s->restAnnounced = true;
+            Log::get().note(
+                "shimmer rest: on -- while your head is still (under %.2f arcmin "
+                "of motion a frame, smoothed) the game renders from a held pose "
+                "that follows the tracker's slow wander and not its jitter, and "
+                "the compositor is told the frame's display pose so it has "
+                "nothing to re-warp; over %.2f everything is stock. Totals every "
+                "20 s. Live.",
+                static_cast<double>(s->restStill), static_cast<double>(s->restMoving));
+        }
+        return;
+    }
+    const double vRot = turnArcminBetween(s->restPrevRot, rot);
+    double d2 = 0.0;
+    for (int i = 0; i < 3; ++i) {
+        const double d = static_cast<double>(pos[i]) - static_cast<double>(s->restPrevPos[i]);
+        d2 += d * d;
+    }
+    const double vMm = sqrt(d2) * 1000.0;
+    // Capped before the average: the session's first frames can carry the
+    // runtime re-establishing its origin (a 559-degree "turn" in the first
+    // field log), and one such frame would keep the filter stock for a
+    // second. A hundred arcminutes a frame is faster than a head turns.
+    double v = vRot + 1.7 * vMm;
+    if (v > 100.0) v = 100.0;
+    for (int i = 0; i < 9; ++i) s->restPrevRot[i] = rot[i];
+    for (int i = 0; i < 3; ++i) s->restPrevPos[i] = pos[i];
+    s->restSpeed += 0.25 * (v - s->restSpeed);
+
+    // The gap between what the game last got and where the tracker is now.
+    const double gapArcmin = turnArcminBetween(s->restHeldRot, rot);
+    double g2 = 0.0;
+    for (int i = 0; i < 3; ++i) {
+        const double d = static_cast<double>(pos[i]) - s->restPos[i];
+        g2 += d * d;
+    }
+    const double gapMm = sqrt(g2) * 1000.0;
+    // A jump the head could not have made while the filter thinks it is
+    // slow -- a recentre, a tracking snap -- is followed at once. During
+    // real fast motion the factor is already 1 and a snap would change
+    // nothing, so it is neither taken nor counted (the first field log
+    // counted every quick head turn).
+    double k;
+    if ((gapArcmin > 30.0 || gapMm > 20.0) && s->restSpeed < s->restMoving) {
+        s->restQ = restQuatFromMatrix(hmd.mDeviceToAbsoluteTracking.m);
+        for (int i = 0; i < 3; ++i) s->restPos[i] = pos[i];
+        ++s->restSnaps;
+        k = 1.0;
+    } else {
+        k = restHoldFactor(s->restSpeed, s->restStill, s->restMoving, 0.02);
+        s->restQ = restQuatNlerp(s->restQ, restQuatFromMatrix(hmd.mDeviceToAbsoluteTracking.m), k);
+        for (int i = 0; i < 3; ++i) s->restPos[i] += k * (static_cast<double>(pos[i]) - s->restPos[i]);
+    }
+    s->restK = k;
+    if (k < 0.999) {
+        restQuatToMatrix(s->restQ, hmd.mDeviceToAbsoluteTracking.m);
+        for (int i = 0; i < 3; ++i) hmd.mDeviceToAbsoluteTracking.m[i][3] = static_cast<float>(s->restPos[i]);
+        for (int i = 0; i < 3; ++i) {
+            hmd.vVelocity.v[i] *= static_cast<float>(k);
+            hmd.vAngularVelocity.v[i] *= static_cast<float>(k);
+        }
+        if (gameCount > vr::k_unTrackedDeviceIndex_Hmd && gamePoses) {
+            gamePoses[vr::k_unTrackedDeviceIndex_Hmd].mDeviceToAbsoluteTracking =
+                hmd.mDeviceToAbsoluteTracking;
+            for (int i = 0; i < 3; ++i) {
+                gamePoses[vr::k_unTrackedDeviceIndex_Hmd].vVelocity.v[i] *= static_cast<float>(k);
+                gamePoses[vr::k_unTrackedDeviceIndex_Hmd].vAngularVelocity.v[i] *= static_cast<float>(k);
+            }
+        }
+        if (k < 0.1) ++s->restFramesHeld; else ++s->restFramesBetween;
+    } else {
+        ++s->restFramesStock;
+    }
+    for (int rr = 0; rr < 3; ++rr) {
+        for (int cc = 0; cc < 3; ++cc) s->restHeldRot[rr * 3 + cc] = hmd.mDeviceToAbsoluteTracking.m[rr][cc];
+    }
+    s->restRender = hmd.mDeviceToAbsoluteTracking;
+    s->restRenderValid = true;
+
+    if (dueMs(s->restLogMs, 20000)) {
+        s->restLogMs = stampMs();
+        const uint32_t total = s->restFramesHeld + s->restFramesBetween + s->restFramesStock;
+        if (total) {
+            Log::get().note(
+                "shimmer rest totals: %u frames -- held %.0f%%, easing %.0f%%, stock "
+                "%.0f%%; %u snaps; %u submits carried the display pose, %u could not; "
+                "smoothed speed now %.2f arcmin/frame, factor %.3f.",
+                total, 100.0 * s->restFramesHeld / total, 100.0 * s->restFramesBetween / total,
+                100.0 * s->restFramesStock / total, s->restSnaps, s->restCarried,
+                s->restFallbacks, s->restSpeed, k);
+        }
+    }
+}
+
 // The pose history, and the verdict that makes it worth having.
 //
 // The three-way discrimination is the point: a game camera jump, an HMD pose
@@ -501,6 +730,15 @@ void dumpPoseRing(State* s, const char* trigger, uint32_t msAfterPress) {
     float    biggestMm = 0.0f;
     uint32_t badStates = 0;
     const float* prev = nullptr;
+    // The turn column: how far the headset ROTATED since the frame before,
+    // in arcminutes, from the relative rotation's trace. A hairline on a
+    // pixel grid moves with a fraction of a pixel of this; at the centre of
+    // a Pimax Crystal Super eye a rendered pixel is about 1.2 arcmin, on a
+    // Quest 3 over Virtual Desktop about 2.5.
+    const float* prevRot = nullptr;
+    const float* firstRot = nullptr;   // the drift column: turn since the window's first frame
+    double   turnSum = 0.0, turnMax = 0.0, driftMax = 0.0;
+    uint32_t turnN = 0, turnOverHalf = 0;
 
     for (uint64_t i = first; i < s->poseHead; ++i) {
         const State::PoseEntry& e = s->poseRing[i % State::kPoseRingFrames];
@@ -514,6 +752,21 @@ void dumpPoseRing(State* s, const char* trigger, uint32_t msAfterPress) {
             stepMm = sqrtf(d2) * 1000.0f;
             if (stepMm > biggestMm) biggestMm = stepMm;
         }
+        double turnArcmin = 0.0;
+        double driftArcmin = 0.0;
+        if (firstRot) {
+            driftArcmin = turnArcminBetween(firstRot, e.rot);
+            if (driftArcmin > driftMax) driftMax = driftArcmin;
+        } else {
+            firstRot = e.rot;
+        }
+        if (prevRot) {
+            turnArcmin = turnArcminBetween(prevRot, e.rot);
+            turnSum += turnArcmin;
+            if (turnArcmin > turnMax) turnMax = turnArcmin;
+            if (turnArcmin > 0.6) ++turnOverHalf;
+            ++turnN;
+        }
         if (!e.valid || e.result != vr::TrackingResult_Running_OK) ++badStates;
         const double msAgo =
             freq ? static_cast<double>(static_cast<int64_t>(newest - e.qpc)) * 1000.0 /
@@ -526,12 +779,26 @@ void dumpPoseRing(State* s, const char* trigger, uint32_t msAfterPress) {
             lastStepFrame = e.frame;
             lastStepMsAgo = msAgo;
         }
-        Log::get().note("HMD %8.1fms f%-7u pos=(%+.3f %+.3f %+.3f) step=%6.1fmm %s%s",
+        Log::get().note("HMD %8.1fms f%-7u pos=(%+.3f %+.3f %+.3f) step=%6.1fmm turn=%6.2f drift=%6.2f arcmin %s%s",
                         -msAgo, e.frame, e.pos[0], e.pos[1], e.pos[2], stepMm,
+                        turnArcmin, driftArcmin,
                         e.valid ? "" : "POSE-INVALID ",
                         e.result == vr::TrackingResult_Running_OK
                             ? "" : "TRACKING-NOT-OK");
         prev = e.pos;
+        prevRot = e.rot;
+    }
+    if (turnN > 0) {
+        Log::get().note(
+            "--- rotation across the window: the headset turned %.2f arcmin in "
+            "its largest one-frame step and %.3f arcmin per frame on average; "
+            "%u of %u frames turned more than 0.6 arcmin (about half a rendered "
+            "pixel at the centre of a Pimax Crystal Super eye); it wandered up "
+            "to %.2f arcmin from where the window began. A hairline on the ship "
+            "blinks when the view moves a fraction of a pixel between frames; "
+            "if these are zero while it blinks, the motion is the game's own. ---",
+            turnMax, turnSum / static_cast<double>(turnN), turnOverHalf, turnN,
+            driftMax);
     }
 
     // THE VERDICT. Two numbers and a count, so the next "was that EDVR?" session
@@ -893,6 +1160,165 @@ void theaterCenterServo(State* s) {
         s->theaterCenterStep == 1 ? " (the probe)" : " (calibrated)");
 }
 
+// ---------------------------------------------------------------------------
+// pose_hold = headset: the compositor's half.
+//
+// The compositor reprojects every frame from the pose it believes the frame
+// was rendered from to the pose it predicts at display. Holding the render
+// pose stills the game's own frame (the mirror) but the compositor then
+// re-warps that still frame by the tracker's motion, so the headset keeps
+// blinking. Submit_TextureWithPose lets the app say what pose a frame was
+// rendered from; telling the compositor the headset's pose predicted to this
+// frame's photons, fetched at submit, leaves it only the tracker's motion
+// over the few milliseconds between that fetch and its own -- the held frame
+// reaches the panel as rendered. The world is head-locked to that precision
+// while this is on: an instrument, not a mode to wear.
+//
+// IVRSystem_012 slots, none of them hooked, range-checked against the
+// vtable's executable prefix the way launch_centre checks slot 11.
+
+constexpr size_t  kSysSlotTimeSinceVsync = 5;
+constexpr size_t  kSysSlotDeviceToAbsolute = 10;
+constexpr size_t  kSysSlotFloatProp = 22;
+constexpr int32_t kPropSecondsFromVsyncToPhotons = 2001;
+constexpr int32_t kPropDisplayFrequency = 2002;
+constexpr size_t  kCompSlotGetTrackingSpace = 1;
+
+typedef bool (*PFN_TimeSinceVsync)(void* self, float* seconds, uint64_t* frame);
+typedef void (*PFN_DeviceToAbsolute)(void* self, int32_t origin, float secondsAhead,
+                                     vr::TrackedDevicePose_t* poses, uint32_t count);
+typedef float (*PFN_FloatProp)(void* self, uint32_t device, int32_t prop,
+                               int32_t* error);
+typedef int32_t (*PFN_GetTrackingSpace)(void* self);
+
+struct DisplayPrediction {
+    float   aheadMs = 0.0f;
+    float   hz = 0.0f;
+    float   vsyncToPhotonsMs = 0.0f;
+    int32_t origin = 0;
+};
+
+static bool predictDisplayPose(State* s, vr::HmdMatrix34_t* out,
+                               DisplayPrediction* info) {
+    void* sys = systemInterfaceV012();
+    if (!sys) return false;
+    const size_t prefix = systemInterfacePrefixV012();
+    if (prefix <= kSysSlotFloatProp) return false;
+    void** vt = *reinterpret_cast<void***>(sys);
+    if (!vt || !vt[kSysSlotTimeSinceVsync] || !vt[kSysSlotDeviceToAbsolute] ||
+        !vt[kSysSlotFloatProp]) {
+        return false;
+    }
+    float    sinceVsync = 0.0f;
+    uint64_t frameCounter = 0;
+    if (!reinterpret_cast<PFN_TimeSinceVsync>(vt[kSysSlotTimeSinceVsync])(
+            sys, &sinceVsync, &frameCounter)) {
+        sinceVsync = 0.0f;
+    }
+    int32_t err = 0;
+    float hz = reinterpret_cast<PFN_FloatProp>(vt[kSysSlotFloatProp])(
+        sys, vr::k_unTrackedDeviceIndex_Hmd, kPropDisplayFrequency, &err);
+    float v2p = reinterpret_cast<PFN_FloatProp>(vt[kSysSlotFloatProp])(
+        sys, vr::k_unTrackedDeviceIndex_Hmd, kPropSecondsFromVsyncToPhotons, &err);
+    if (!std::isfinite(hz) || hz < 1.0f) hz = 90.0f;
+    if (!std::isfinite(v2p) || v2p < 0.0f || v2p > 0.1f) v2p = 0.0f;
+    if (!std::isfinite(sinceVsync) || sinceVsync < 0.0f || sinceVsync > 1.0f) {
+        sinceVsync = 0.0f;
+    }
+    float ahead = 1.0f / hz - sinceVsync + v2p;
+    if (ahead < 0.0f) ahead = 0.0f;
+
+    int32_t origin = vr::TrackingUniverseSeated;
+    if (s->ownerIface) {
+        void** cvt = *reinterpret_cast<void***>(s->ownerIface);
+        if (cvt && cvt[kCompSlotGetTrackingSpace]) {
+            origin = reinterpret_cast<PFN_GetTrackingSpace>(
+                cvt[kCompSlotGetTrackingSpace])(s->ownerIface);
+        }
+        if (origin < 0 || origin > 2) origin = vr::TrackingUniverseSeated;
+    }
+    vr::TrackedDevicePose_t pose = {};
+    reinterpret_cast<PFN_DeviceToAbsolute>(vt[kSysSlotDeviceToAbsolute])(
+        sys, origin, ahead, &pose, 1);
+    if (!pose.bPoseIsValid) return false;
+    *out = pose.mDeviceToAbsoluteTracking;
+    if (info) {
+        info->aheadMs = ahead * 1000.0f;
+        info->hz = hz;
+        info->vsyncToPhotonsMs = v2p * 1000.0f;
+        info->origin = origin;
+    }
+    return true;
+}
+
+// Every forwarded frame leaves through here.
+static vr::EVRCompositorError forwardSubmit(State* s, void* self, vr::EVREye eye,
+                                            const vr::Texture_t* tex,
+                                            const vr::VRTextureBounds_t* bounds,
+                                            vr::EVRSubmitFlags flags) {
+    const int32_t f = static_cast<int32_t>(flags);
+    const bool plain = tex && (f & (vr::Submit_TextureWithPose | vr::Submit_TextureWithDepth)) == 0;
+    if (s->poseHoldMode == 2 && s->poseHolding && plain) {
+        vr::HmdMatrix34_t pose;
+        DisplayPrediction info;
+        if (predictDisplayPose(s, &pose, &info)) {
+            if (!s->poseHoldWarpNoted) {
+                s->poseHoldWarpNoted = true;
+                Log::get().note(
+                    "pose hold: headset -- the compositor is told each frame was "
+                    "rendered from the headset's pose predicted %.1f ms ahead "
+                    "(display %.0f Hz, vsync to photons %.1f ms, tracking space %d), "
+                    "fetched at submit.",
+                    info.aheadMs, info.hz, info.vsyncToPhotonsMs, info.origin);
+            }
+            vr::VRTextureWithPose_t twp;
+            twp.handle = tex->handle;
+            twp.eType = tex->eType;
+            twp.eColorSpace = tex->eColorSpace;
+            twp.mDeviceToAbsoluteTracking = pose;
+            ++s->poseHoldWarpFrames;
+            return s->realSubmit(self, eye,
+                                 reinterpret_cast<const vr::Texture_t*>(&twp), bounds,
+                                 static_cast<vr::EVRSubmitFlags>(
+                                     f | vr::Submit_TextureWithPose));
+        }
+        ++s->poseHoldWarpFallbacks;
+    } else if (s->restWanted && s->restRenderValid && s->restK < 0.999 && plain) {
+        // shimmer_rest's compositor half. The pose the compositor is told
+        // slides with the same factor: at k = 0 the display pose (nothing to
+        // re-warp, the held frame reaches the panel as rendered), at k = 1
+        // the render pose (the stock warp, latency compensation intact).
+        // The display pose is fetched once per frame, both eyes alike.
+        if (s->restDispFrame != s->pace_boundaryNo) {
+            s->restDispFrame = s->pace_boundaryNo;
+            s->restDispValid = predictDisplayPose(s, &s->restDisp, nullptr);
+        }
+        if (s->restDispValid) {
+            const RestQuat qd = restQuatFromMatrix(s->restDisp.m);
+            const RestQuat qr = restQuatFromMatrix(s->restRender.m);
+            const RestQuat qs = restQuatNlerp(qd, qr, s->restK);
+            vr::VRTextureWithPose_t twp;
+            twp.handle = tex->handle;
+            twp.eType = tex->eType;
+            twp.eColorSpace = tex->eColorSpace;
+            restQuatToMatrix(qs, twp.mDeviceToAbsoluteTracking.m);
+            for (int i = 0; i < 3; ++i) {
+                const double d = s->restDisp.m[i][3];
+                const double r = s->restRender.m[i][3];
+                twp.mDeviceToAbsoluteTracking.m[i][3] =
+                    static_cast<float>(d + s->restK * (r - d));
+            }
+            ++s->restCarried;
+            return s->realSubmit(self, eye,
+                                 reinterpret_cast<const vr::Texture_t*>(&twp), bounds,
+                                 static_cast<vr::EVRSubmitFlags>(
+                                     f | vr::Submit_TextureWithPose));
+        }
+        ++s->restFallbacks;
+    }
+    return s->realSubmit(self, eye, tex, bounds, flags);
+}
+
 vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
                                     const vr::Texture_t* texture,
                                     const vr::VRTextureBounds_t* bounds,
@@ -1092,7 +1518,7 @@ vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
                 applyResolve(&sub, &subBounds, &subStorage);
                 vr::VRTextureBounds_t subStorage2;
                 applySharpen(&sub, &subBounds, &subStorage2);
-                return s->realSubmit(self, eye, &sub, subBounds, flags);
+                return forwardSubmit(s, self, eye, &sub, subBounds, flags);
             }
         }
     }
@@ -1216,7 +1642,7 @@ vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
                     applyResolve(&sub, &subBounds, &subStorage);
                     vr::VRTextureBounds_t subStorage2;
                     applySharpen(&sub, &subBounds, &subStorage2);
-                    return s->realSubmit(self, eye, &sub, subBounds, flags);
+                    return forwardSubmit(s, self, eye, &sub, subBounds, flags);
                 }
             }
         }
@@ -1276,7 +1702,7 @@ vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
                 "game renders normally from here.",
                 s->submitCalls, static_cast<int>(eye), static_cast<const void*>(texture));
             s->inert = true;
-            return s->realSubmit(self, eye, texture, bounds, flags);
+            return forwardSubmit(s, self, eye, texture, bounds, flags);
         }
         s->eyesSeen |= (eye == vr::Eye_Left) ? 1u : 2u;
         if (++s->submitCalls >= 8 && s->eyesSeen == 3u) {
@@ -1461,7 +1887,7 @@ vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
             applyResolve(&sub, &subBounds, &subStorage2);
             vr::VRTextureBounds_t subStorage3;
             applySharpen(&sub, &subBounds, &subStorage3);
-            return s->realSubmit(self, eye, &sub, subBounds, flags);
+            return forwardSubmit(s, self, eye, &sub, subBounds, flags);
         }
         if (s->notesLeft > 0) {
             --s->notesLeft;
@@ -1515,7 +1941,7 @@ vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
         vr::VRTextureBounds_t fwdStorage3;
         applySharpen(&fwd, &fwdBounds, &fwdStorage3);
         const vr::EVRCompositorError result =
-            s->realSubmit(self, eye, &fwd, fwdBounds, flags);
+            forwardSubmit(s, self, eye, &fwd, fwdBounds, flags);
         // This frame was FORWARDED and accepted, so it becomes the copy a
         // later withhold can hand over. After realSubmit on purpose: the copy
         // is queued on the immediate context behind this frame's rendering,
@@ -1654,23 +2080,16 @@ vr::EVRCompositorError hookedWaitGetPoses(void* self,
             e.pos[0] = hmd.mDeviceToAbsoluteTracking.m[0][3];
             e.pos[1] = hmd.mDeviceToAbsoluteTracking.m[1][3];
             e.pos[2] = hmd.mDeviceToAbsoluteTracking.m[2][3];
+            for (int rr = 0; rr < 3; ++rr) {
+                for (int cc = 0; cc < 3; ++cc) {
+                    e.rot[rr * 3 + cc] = hmd.mDeviceToAbsoluteTracking.m[rr][cc];
+                }
+            }
             e.result = static_cast<int32_t>(hmd.eTrackingResult);
             e.valid = hmd.bPoseIsValid ? 1u : 0u;
             ++s->poseHead;
-            // The temporal pass's motion source, v1: the head's pose for the
-            // frame about to render, before the offset below moves it.
-            temporalAaNotePose(hmd.mDeviceToAbsoluteTracking, hmd.bPoseIsValid != 0);
-            // And the game-pose array's, predicted a frame further: the
-            // registration instrument's candidate for a renderer that
-            // draws with those instead (temporal_aa.h).
-            if (gamePoses && gameCount > vr::k_unTrackedDeviceIndex_Hmd) {
-                const vr::TrackedDevicePose_t& gp =
-                    gamePoses[vr::k_unTrackedDeviceIndex_Hmd];
-                temporalAaNoteGamePose(gp.mDeviceToAbsoluteTracking,
-                                       gp.bPoseIsValid != 0);
-            } else {
-                temporalAaNoteGamePose(hmd.mDeviceToAbsoluteTracking, false);
-            }
+            // (The temporal pass used to note this raw pose here; it now notes
+            // the pose the game renders from, after the rest lock below.)
 
             // Ship-forward in the current head frame, for the sprite-pinning
             // fix on the d3d11 side. World-forward is seated -Z; its
@@ -1767,6 +2186,65 @@ vr::EVRCompositorError hookedWaitGetPoses(void* self,
                      (uint32_t)(kPoseDumpDelayMs / 1000));
     }
 
+    // The pose hold: advanced.pose_hold. After the ring has recorded the
+    // RAW pose (the instrument measures the headset, not this) and before
+    // the theater's own freeze and the head offset, which stack on whatever
+    // is here. Same shape as the theater freeze: the matrix held, the
+    // velocities zeroed so nothing extrapolates, both arrays.
+    if (renderCount > vr::k_unTrackedDeviceIndex_Hmd && renderPoses) {
+        if (s->poseHoldMode >= 1) {
+            if (!s->poseHolding) {
+                s->poseHolding = true;
+                s->poseHold = renderPoses[vr::k_unTrackedDeviceIndex_Hmd]
+                                  .mDeviceToAbsoluteTracking;
+                s->poseHoldWarpNoted = false;
+                s->poseHoldWarpFrames = 0;
+                s->poseHoldWarpFallbacks = 0;
+                Log::get().note(
+                    "pose hold: ON (%s) -- from this frame the game renders every "
+                    "frame from the headset pose captured now (position %+.3f "
+                    "%+.3f %+.3f), whatever the tracker reports after. A "
+                    "developer instrument for telling the tracker's motion "
+                    "from the game's own. %s The world is head-locked while "
+                    "this is on. pose_hold = 0 releases it, live.",
+                    s->poseHoldMode == 2 ? "headset" : "game",
+                    s->poseHold.m[0][3], s->poseHold.m[1][3], s->poseHold.m[2][3],
+                    s->poseHoldMode == 2
+                        ? "Every forwarded frame also tells the compositor it "
+                          "was rendered from the headset's pose predicted to "
+                          "its own photons, fetched at submit, so the "
+                          "compositor has almost nothing to re-warp: judge the "
+                          "HEADSET."
+                        : "Judge the game's MIRROR window (the eye as "
+                          "rendered), because the compositor still reprojects "
+                          "the headset's view by your real head motion.");
+            }
+            renderPoses[vr::k_unTrackedDeviceIndex_Hmd].mDeviceToAbsoluteTracking =
+                s->poseHold;
+            for (int k = 0; k < 3; ++k) {
+                renderPoses[vr::k_unTrackedDeviceIndex_Hmd].vVelocity.v[k] = 0.0f;
+                renderPoses[vr::k_unTrackedDeviceIndex_Hmd].vAngularVelocity.v[k] = 0.0f;
+            }
+            if (gameCount > vr::k_unTrackedDeviceIndex_Hmd && gamePoses) {
+                gamePoses[vr::k_unTrackedDeviceIndex_Hmd].mDeviceToAbsoluteTracking =
+                    s->poseHold;
+                for (int k = 0; k < 3; ++k) {
+                    gamePoses[vr::k_unTrackedDeviceIndex_Hmd].vVelocity.v[k] = 0.0f;
+                    gamePoses[vr::k_unTrackedDeviceIndex_Hmd].vAngularVelocity.v[k] = 0.0f;
+                }
+            }
+        } else if (s->poseHolding) {
+            s->poseHolding = false;
+            Log::get().note("pose hold: released -- the game gets the live headset "
+                            "pose again from this frame (%u submits carried a "
+                            "predicted pose to the compositor, %u could not).",
+                            s->poseHoldWarpFrames, s->poseHoldWarpFallbacks);
+        }
+    }
+
+    // shimmer_rest's pose half. After the hold, which wins while it is on.
+    restApply(s, renderPoses, renderCount, gamePoses, gameCount);
+
     // The head offset, applied BEFORE the game sees the poses.
     //
     // Outside the telemetry guard below on purpose. That guard has a fault
@@ -1827,6 +2305,26 @@ vr::EVRCompositorError hookedWaitGetPoses(void* self,
             s->theaterCenterStep = 0;
             s->theaterCenterDone = false;
             s->theaterCenterBestErr = 1e9f;
+        }
+    }
+
+    // The temporal pass's motion source: the pose the game RENDERS FROM this
+    // frame -- after the rest lock and the theater's freeze have had their
+    // say, before the head offset (a constant, which cancels in the delta).
+    // Until 2026-09-04 this was noted from the raw ring above; under the rest
+    // lock that reprojected a still frame by the tracker's wander and
+    // misregistered the history by exactly the motion the lock removed
+    // (docs/rest-lock-handoff.md, the ordering rule). The game-pose note is
+    // the registration instrument's candidate for a renderer that draws
+    // with that array instead (temporal_aa.h).
+    if (result == 0 && renderPoses && renderCount > vr::k_unTrackedDeviceIndex_Hmd) {
+        const vr::TrackedDevicePose_t& hmd = renderPoses[vr::k_unTrackedDeviceIndex_Hmd];
+        temporalAaNotePose(hmd.mDeviceToAbsoluteTracking, hmd.bPoseIsValid != 0);
+        if (gamePoses && gameCount > vr::k_unTrackedDeviceIndex_Hmd) {
+            const vr::TrackedDevicePose_t& gp = gamePoses[vr::k_unTrackedDeviceIndex_Hmd];
+            temporalAaNoteGamePose(gp.mDeviceToAbsoluteTracking, gp.bPoseIsValid != 0);
+        } else {
+            temporalAaNoteGamePose(hmd.mDeviceToAbsoluteTracking, false);
         }
     }
 
