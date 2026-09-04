@@ -1220,6 +1220,27 @@ a layer's green, the scene's grey by distance, none magenta -- so
 whether the HUD's text is in the layer at all is a thing the eye can
 check.
 
+**The depth view answered (f846b9b, Pimax, 2026-09-04), and closed the
+layer route.** The menu's hangar has depth and its UI has none; the
+loading screen has none but the spinning ship. The layer the census had
+qualified is a head-locked render of the player's own ship seen from
+behind and above -- the HUD's schematic camera -- drawn into an
+eye-sized depth target; its silhouette was the boundary seen twice,
+the text inside it registered by the model's depth and the text outside
+by the sky's or the wall's. And none of the cockpit's UI panels or HUD
+text writes depth anywhere: the HUD is drawn on top, depthless, and
+borrows what is behind it. So the layers are off by default
+(`temporal_aa_depth_layers`), and the one lever left is an assumed HUD
+distance, `temporal_aa_hud_metres` (off by default; 1.4 is about right),
+for pixels that look like the HUD's text -- bright, with three or more
+bright neighbours in the 3x3, so a lone star is not one -- and read far
+or beyond eight metres; the depth view paints them yellow. Its price is
+stated in the key: a bright lamp, a lit panel or a dense star cluster
+far away is taken for text and pays the same misregistration in
+reverse. NVIDIA's history hides the HUD's problem by rejecting its
+misregistered text under motion, which is the difference the player
+sees between the trained modes and the pass's own history.
+
 ## Feature C — texture LOD bias, the small lever
 
 Not all shimmer is geometry. Detail maps and normal maps sampled a mip

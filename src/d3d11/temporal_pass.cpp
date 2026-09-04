@@ -73,7 +73,8 @@ cbuffer P : register(b0) {
     float4 tvUsed;      // xyz the translation term for the used delta (depth motion), w unused
     float4 tvCand;      // xyz the same for the instrument's swapped-eyes candidate
     float4 tvCam;       // xyz the translation term for the camera rows (the world path); w 1 = the world path is on
-    float4 split;       // x the ship's radius in metres (nearer: the head's delta; farther and the far plane: the camera's); y the debug view (1 motion, 2 error); z a depth in metres for depthless pixels in a menu-like scene (0 off); w 1 = menu-like scene
+    float4 split;       // x the ship's radius in metres (nearer: the head's delta; farther and the far plane: the camera's); y the debug view (1 motion, 2 error, 3 depth); z a depth in metres for depthless pixels in a menu-like scene (0 off); w 1 = menu-like scene
+    float4 hud;         // x an assumed depth in metres for bright text-like pixels that read far or beyond y metres (0 off); zw unused
 };
 float3 rgbToYcocg(float3 c) {
     return float3(0.25 * c.r + 0.5 * c.g + 0.25 * c.b,
@@ -156,6 +157,20 @@ R"HLSL(
 // half metre instead of the HUD's metre and a half: a shimmer bounded by
 // the dashboard's rounded silhouette (2026-09-04). So the layer wins
 // wherever it has a value, and the scene's depth fills the rest.
+// How many of the 3x3 around a texel are bright: a text stroke has three or
+// more, a lone star one or two. The HUD's text has no depth anywhere in
+// the game's targets (the depth view of 2026-09-04), so this is the only
+// handle on it.
+int brightAround(int2 c) {
+    int n = 0;
+    [unroll] for (int ty = -1; ty <= 1; ++ty) {
+        [unroll] for (int tx = -1; tx <= 1; ++tx) {
+            int2 hq = clamp(c + int2(tx, ty), int2(0, 0), size - 1);
+            if (rgbToYcocg(S.Load(int3(region.xy + hq, 0)).rgb).x > 0.6) ++n;
+        }
+    }
+    return n;
+}
 float zSceneAt(int2 q) { return Z.Load(int3(q, 0)); }
 float zLayerAt(int2 q) { return max(Z2.Load(int3(q, 0)), Z3.Load(int3(q, 0))); }
 float zAt(int2 q) {
@@ -199,6 +214,17 @@ bool fetchHistoryT(float2 p, float3 r0, float3 r1, float3 r2, float3 tv,
         float den = zr * (knobs.w - knobs.z) + knobs.z;
         bool far = zr <= 0.0 || den <= 0.0;
         float z = far ? 0.0 : knobs.z * knobs.w / den;
+        // The HUD's text has no depth in any of the game's targets: drawn on
+        // top, it borrows whatever is behind it -- the far plane in space, a
+        // hangar wall docked -- and cannot follow the head's translation. An
+        // assumed HUD distance for pixels that look like its text (bright,
+        // three or more bright neighbours) and read far or beyond hud.y
+        // metres; advanced.temporal_aa_hud_metres, off by default, since a
+        // bright lamp or a lit panel far away pays the same price in reverse.
+        if (hud.x > 0.0 && split.w == 0.0 && (far || z > hud.y) && brightAround(int2(p)) >= 3) {
+            far = false;
+            z = hud.x;
+        }
         if (worldOn && (far || z > split.x)) {
             world = 1;
             dp = float3(dot(c2R0.xyz, d), dot(c2R1.xyz, d), dot(c2R2.xyz, d));
@@ -298,6 +324,12 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
             float den = zr * (knobs.w - knobs.z) + knobs.z;
             bool far = zr <= 0.0 || den <= 0.0;
             float z = far ? 0.0 : knobs.z * knobs.w / den;
+            if (hud.x > 0.0 && split.w == 0.0 && (far || z > hud.y) && brightAround(int2(p)) >= 3) {
+                far = false;
+                z = hud.x;
+                // ...and the depth copy NVIDIA gets says the same
+                zraw = knobs.z * (knobs.w - hud.x) / (hud.x * (knobs.w - knobs.z));
+            }
             bool worldOn = tvCam.w != 0.0 && split.x > 0.0;
             if (worldOn && (far || z > split.x)) {
                 count[15] = 1;
@@ -577,6 +609,11 @@ void main(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
             } else {
                 o = float3(1.0, 0.0, 1.0);
             }
+            // ...and the assumed HUD depth, where it applies, in yellow.
+            if (hud.x > 0.0 && split.w == 0.0 && knobs.y != 0.0 && zl3 <= 0.0) {
+                float mz = zs3 > 0.0 ? knobs.z * knobs.w / (zs3 * (knobs.w - knobs.z) + knobs.z) : 0.0;
+                if ((zs3 <= 0.0 || mz > hud.y) && brightAround(ci) >= 3) o = float3(1.0, 1.0, 0.0);
+            }
         }
         O[id.xy] = float4(o, cur.a);
     }
@@ -589,7 +626,7 @@ void main(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
 }
 )HLSL";
 
-// The cbuffer above, laid out to match: 416 bytes, twenty-six 16-byte rows.
+// The cbuffer above, laid out to match: 432 bytes, twenty-seven 16-byte rows.
 struct PassParams {
     int32_t region[4];
     int32_t size[2];
@@ -610,8 +647,9 @@ struct PassParams {
     float   tvCand[4];
     float   tvCam[4];    // the camera rows' translation term, w 1 = world path on
     float   split[4];    // x the ship's radius in metres
+    float   hud[4];      // x an assumed HUD depth in metres (0 off), y its far threshold
 };
-static_assert(sizeof(PassParams) == 416, "the cbuffer is twenty-six 16-byte rows");
+static_assert(sizeof(PassParams) == 432, "the cbuffer is twenty-seven 16-byte rows");
 
 // The format allowlist: the supersample resolve's, for its reasons
 // (supersample_pass.cpp) -- typeless and UNORM families read and written
@@ -1008,6 +1046,8 @@ float    g_snapPx = 0.15f;         // advanced.temporal_aa_snap: the rest snap, 
 float    g_shipMetres = 40.0f;     // advanced.temporal_aa_ship_metres: the world/ship split (0 off)
 int      g_debugMode = 0;          // advanced.temporal_aa_debug: 0 off, 1 motion, 2 error
 float    g_menuMetres = 0.0f;      // advanced.temporal_aa_menu_metres: a depth for depthless pixels in a menu-like scene
+float    g_hudMetres = 0.0f;       // advanced.temporal_aa_hud_metres: an assumed depth for bright text-like pixels with none (0 off)
+bool     g_depthLayers = false;    // advanced.temporal_aa_depth_layers: the extra depth targets (off: the only one found was the ship model's)
 bool     g_warmNoted = false;
 
 // The camera capture: a ring of the last writes of every scene-block-sized
@@ -1448,7 +1488,12 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
             // keyed on the texture like the scene's; the shader takes the
             // nearest of all three at every read.
             ID3D11Texture2D* ltex[2] = {};
-            const int nLayers = depthProbeLayerDepths(sd.Width, sd.Height, eye, ltex, 2);
+            // Off by default since 2026-09-04: the only layer the census ever
+            // qualified was a head-locked render of the ship's own model (the
+            // HUD's schematic camera), whose silhouette then registered the
+            // text inside it and nothing outside. The HUD's text writes no
+            // depth anywhere; advanced.temporal_aa_hud_metres is the lever.
+            const int nLayers = g_depthLayers ? depthProbeLayerDepths(sd.Width, sd.Height, eye, ltex, 2) : 0;
             for (int k = 0; k < 2; ++k) {
                 if (k < nLayers && ltex[k]) {
                     if (e.layerRes[k] != static_cast<void*>(ltex[k]) || !e.layerSrv[k]) {
@@ -1732,6 +1777,8 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         p.split[1] = static_cast<float>(g_debugMode);
         p.split[2] = g_menuMetres;
         p.split[3] = (haveDepth && sceneDraws < 50u) ? 1.0f : 0.0f;
+        p.hud[0] = g_hudMetres;
+        p.hud[1] = 8.0f;   // beyond this a bright text-like pixel is taken for HUD text over the scene
         for (int c = 0; c < 3; ++c) {
             p.dR0[c] = delta[0 * 3 + c];
             p.dR1[c] = delta[1 * 3 + c];
@@ -2090,6 +2137,11 @@ void temporalPassConfigure(Config& cfg) {
     if (!std::isfinite(menu) || menu < 0.0f) menu = 0.0f;
     if (menu > 50.0f) menu = 50.0f;
     g_menuMetres = menu;
+    float hudm = cfg.getFloat("advanced.temporal_aa_hud_metres", 0.0f);
+    if (!std::isfinite(hudm) || hudm < 0.0f) hudm = 0.0f;
+    if (hudm > 10.0f) hudm = 10.0f;
+    g_hudMetres = hudm;
+    g_depthLayers = cfg.getBool("advanced.temporal_aa_depth_layers", false);
 }
 
 void temporalPassTick(ID3D11DeviceContext* ctx) {
