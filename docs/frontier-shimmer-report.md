@@ -178,9 +178,9 @@ is still exactly when people are reading.
    turn since the last frame plus its travel scaled to a couple of metres
    (a millimetre of travel counts as about 1.7 arcminutes), smoothed over
    about five frames. Let the render pose move toward the tracked pose by
-   a factor *k* each frame: 0.02 at and under 0.3 arcminutes a frame
+   a factor *k* each frame: 0.02 at and under 0.6 arcminutes a frame
    (a half-second time constant that passes the tracker's slow wander and
-   cuts its jitter fifty times), 1 at and over 1.5, linear between. That
+   cuts its jitter fifty times), 1 at and over 2.0, linear between. That
    is a One-Euro-style filter with the cutoff tied to speed; the world is
    stock the moment the head moves, and while still it sticks to the head
    by under a pixel, well below the eye's own fixational jitter.

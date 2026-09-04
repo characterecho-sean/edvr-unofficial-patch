@@ -357,8 +357,8 @@ struct State {
     // and forwardSubmit have the two halves. The key and its two thresholds
     // are read with the pose ring's config, install and reload alike.
     bool      restWanted = false;
-    float     restStill = 0.3f;    // smoothed arcmin-equivalents per frame: held at and under
-    float     restMoving = 1.5f;   // ... stock at and over
+    float     restStill = 0.6f;    // smoothed arcmin-equivalents per frame: held at and under
+    float     restMoving = 2.0f;   // ... stock at and over
     bool      restHave = false;    // the state below is primed
     RestQuat  restQ = {1.0, 0.0, 0.0, 0.0};   // the held rotation
     double    restPos[3] = {};                // the held position, metres
@@ -464,8 +464,8 @@ void configurePoseRing(State* s) {
             s->restHave = false;
             s->restAnnounced = false;
         }
-        float still = cfg.getFloat("advanced.shimmer_rest_still", 0.3f);
-        float moving = cfg.getFloat("advanced.shimmer_rest_moving", 1.5f);
+        float still = cfg.getFloat("advanced.shimmer_rest_still", 0.6f);
+        float moving = cfg.getFloat("advanced.shimmer_rest_moving", 2.0f);
         if (!std::isfinite(still) || still < 0.05f) still = 0.05f;
         if (still > 5.0f) still = 5.0f;
         if (!std::isfinite(moving) || moving > 30.0f) moving = 30.0f;

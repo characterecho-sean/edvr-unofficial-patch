@@ -1269,9 +1269,9 @@ have one cause, and it is not in any filter:
 
 **The fix, `fix.shimmer_rest`** (`src/openvr/compositor_hook.cpp`,
 `src/common/rest_math.h`): the pose handed to the game moves toward the
-tracker's pose by a factor k each frame — 0.02 at and under 0.3 arcmin a
+tracker's pose by a factor k each frame — 0.02 at and under 0.6 arcmin a
 frame of smoothed head motion (a half-second time constant that passes the
-slow wander and takes the jitter down fifty times), 1 at and over 1.5 —
+slow wander and takes the jitter down fifty times), 1 at and over 2.0 —
 and every submit while k < 1 carries `Submit_TextureWithPose` with a pose
 that slides with the same k between the frame's predicted display pose
 (nothing to re-warp) and its render pose (the stock warp, latency
