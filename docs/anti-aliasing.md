@@ -1241,6 +1241,21 @@ reverse. NVIDIA's history hides the HUD's problem by rejecting its
 misregistered text under motion, which is the difference the player
 sees between the trained modes and the pass's own history.
 
+**The same flight (9e20ea4) measured the world path in space.** Its
+probes read a steady -0.1 to -0.27 px in both axes while the ship class
+read +0.02, and the direction did not follow the motion: that is the
+station's own rotation, which is in no vector and which the world probes
+are dominated by (the station is the textured thing out there). The
+Milky Way's clouds sat below the probes' texture bar, so the skybox
+itself was never measured -- it now has its own probe class, the far
+plane, with a softer bar. Two more facts from the flight: the menu's
+hangar moved with the head at a 40 m split and not at 100 m, because
+the menu's camera is head-independent and its rows stand still while
+the head turns, so the world path now stands down while the rows turn
+less than a third as much as the head (a score, with a line); and the
+rows' tiebreak among continuous writes is now the latest, since the
+frame's last view matrix is the one the eyes were drawn with.
+
 ## Feature C — texture LOD bias, the small lever
 
 Not all shimmer is geometry. Detail maps and normal maps sampled a mip

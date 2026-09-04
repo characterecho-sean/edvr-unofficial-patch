@@ -40,7 +40,7 @@ Texture2D<float> Z3 : register(t4);      // ...and a second layer's
 SamplerState L : register(s0);           // bilinear, clamp
 RWTexture2D<float4> O : register(u0);    // the output, region-sized, the game's format
 RWTexture2D<float4> N : register(u1);    // the new history
-RWStructuredBuffer<uint> Stats : register(u2);   // 0 rejected, 1 clipped, 2 the clips' size (luma/255, summed); then the same three per candidate, four of them; 15 pixels on the world path, 16 bright pixels, 17 bright pixels with no depth; 18-20 the registration probes on the world path (sum dx*100, sum dy*100, count) and 21-23 on the ship; 24-27 world pixels, world clipped, ship pixels, ship clipped; 28 pixels with a layer's depth, 29 bright pixels with a layer's depth
+RWStructuredBuffer<uint> Stats : register(u2);   // 0 rejected, 1 clipped, 2 the clips' size (luma/255, summed); then the same three per candidate, four of them; 15 pixels on the world path, 16 bright pixels, 17 bright pixels with no depth; 18-20 the registration probes on the world path (sum dx*100, sum dy*100, count) and 21-23 on the ship; 24-27 world pixels, world clipped, ship pixels, ship clipped; 28 pixels with a layer's depth, 29 bright pixels with a layer's depth; 30-32 the registration probes on the sky (the far plane: sum dx*100, sum dy*100, count)
 RWTexture2D<float2> MV : register(u3);   // for a trained pass: motion vectors, pixels, current -> previous
 RWTexture2D<float>  ZC : register(u4);   // and the depth, copied as it is
 cbuffer P : register(b0) {
@@ -288,7 +288,7 @@ uint clipSize(float3 hc, float3 hy) {
 )HLSL"
 // (adjacent literals: MSVC caps one at 16 KB)
 R"HLSL(
-groupshared uint gCount[30];
+groupshared uint gCount[34];
 // The motion vectors for a trained pass (DLAA): the same reprojection
 // the history fetch does, written out instead of used -- the pixel's
 // position last frame minus its position now, in render pixels, which
@@ -300,9 +300,9 @@ groupshared uint gCount[30];
 // line the way main's do.
 [numthreads(8, 8, 1)]
 void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
-    if (gi < 30) gCount[gi] = 0;
+    if (gi < 34) gCount[gi] = 0;
     GroupMemoryBarrierWithGroupSync();
-    uint count[30] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+    uint count[34] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
     if (id.x < (uint)size.x && id.y < (uint)size.y) {
         float2 p = float2(id.xy);
         float3 d;
@@ -384,20 +384,20 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
         }
         ZC[id.xy] = knobs.y != 0.0 ? zraw : 0.0;
     }
-    [unroll] for (int k = 0; k < 30; ++k) {
+    [unroll] for (int k = 0; k < 34; ++k) {
         if (count[k] != 0) InterlockedAdd(gCount[k], count[k]);
     }
     GroupMemoryBarrierWithGroupSync();
-    if (gi < 30) InterlockedAdd(Stats[gi], gCount[gi]);
+    if (gi < 34) InterlockedAdd(Stats[gi], gCount[gi]);
 }
 )HLSL"
 // (adjacent literals: MSVC caps one at 16 KB)
 R"HLSL(
 [numthreads(8, 8, 1)]
 void main(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
-    if (gi < 30) gCount[gi] = 0;
+    if (gi < 34) gCount[gi] = 0;
     GroupMemoryBarrierWithGroupSync();
-    uint count[30] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+    uint count[34] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
     if (id.x < (uint)size.x && id.y < (uint)size.y) {
         float2 p = float2(id.xy);
         int2 ci = int2(id.xy);
@@ -546,7 +546,11 @@ void main(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
             meanL /= 25.0;
             float varL = 0.0;
             [unroll] for (int jj = 0; jj < 25; ++jj) varL += (curL[jj] - meanL) * (curL[jj] - meanL);
-            if (varL > 0.0225) {
+            // Three classes: the sky (the far plane, whose Milky Way is soft,
+            // so its texture bar is lower), the world with a depth (a station,
+            // whose own rotation is in no vector and shows here), the ship.
+            const bool sky = worldTaken != 0 && knobs.y != 0.0 && zAt(region.xy + ci) <= 0.0;
+            if (varL > (sky ? 0.0025 : 0.0225)) {
                 float2 pp = p + mvUsed;
                 int2 pq = int2(round(pp));
                 float bestSad = 1e9;
@@ -569,7 +573,7 @@ void main(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
                     }
                 }
                 float2 resid = float2(best) + (float2(pq) - pp);
-                uint base = worldTaken != 0 ? 18u : 21u;
+                uint base = sky ? 30u : (worldTaken != 0 ? 18u : 21u);
                 InterlockedAdd(Stats[base], asuint(int(round(resid.x * 100.0))));
                 InterlockedAdd(Stats[base + 1], asuint(int(round(resid.y * 100.0))));
                 InterlockedAdd(Stats[base + 2], 1u);
@@ -618,11 +622,11 @@ void main(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
         O[id.xy] = float4(o, cur.a);
     }
     // One atomic per group per counter, not per pixel.
-    [unroll] for (int k = 0; k < 30; ++k) {
+    [unroll] for (int k = 0; k < 34; ++k) {
         if (count[k] != 0) InterlockedAdd(gCount[k], count[k]);
     }
     GroupMemoryBarrierWithGroupSync();
-    if (gi < 30) InterlockedAdd(Stats[gi], gCount[gi]);
+    if (gi < 34) InterlockedAdd(Stats[gi], gCount[gi]);
 }
 )HLSL";
 
@@ -837,7 +841,7 @@ struct Slot {
     bool          hadHistory = false;
 };
 constexpr int kSlots = 8;
-constexpr int kStatCount = 32;   // 28 used; a 128-byte buffer
+constexpr int kStatCount = 40;   // 33 used; a 160-byte buffer
 Slot g_slots[kSlots];
 
 void releaseSlot(Slot& q) {
@@ -887,6 +891,8 @@ uint64_t    g_probeShipN = 0;
 uint64_t    g_classWorldPix = 0, g_classWorldClip = 0;
 uint64_t    g_classShipPix = 0, g_classShipClip = 0;
 uint64_t    g_layerPix = 0, g_brightLayerPix = 0;   // pixels, and bright pixels, with a layer's depth
+int64_t     g_probeSkyDx = 0, g_probeSkyDy = 0;
+uint64_t    g_probeSkyN = 0;
 constexpr float kStillDeg = 0.03f;   // under 2 deg/s at 72 Hz: tracking noise
 constexpr float kSlowDeg = 0.30f;    // under 22 deg/s: a glance
 bool     g_priceLogged = false;
@@ -955,6 +961,9 @@ void pollSlots(ID3D11DeviceContext* ctx) {
                 g_classShipClip += v[27];
                 g_layerPix += v[28];
                 g_brightLayerPix += v[29];
+                g_probeSkyDx += static_cast<int32_t>(v[30]);
+                g_probeSkyDy += static_cast<int32_t>(v[31]);
+                g_probeSkyN += v[32];
                 ++g_intervalFrames;
                 if (q.hadHistory) {
                     for (int c = 0; c < 4; ++c) {
@@ -1048,6 +1057,8 @@ int      g_debugMode = 0;          // advanced.temporal_aa_debug: 0 off, 1 motio
 float    g_menuMetres = 0.0f;      // advanced.temporal_aa_menu_metres: a depth for depthless pixels in a menu-like scene
 float    g_hudMetres = 0.0f;       // advanced.temporal_aa_hud_metres: an assumed depth for bright text-like pixels with none (0 off)
 bool     g_depthLayers = false;    // advanced.temporal_aa_depth_layers: the extra depth targets (off: the only one found was the ship model's)
+int      g_rowsFollow = 0;         // +1 a frame the rows turn with the head, -4 a frame they do not; the world path needs >= 0
+bool     g_rowsFollowNoted = false;
 bool     g_warmNoted = false;
 
 // The camera capture: a ring of the last writes of every scene-block-sized
@@ -1126,8 +1137,11 @@ void chooseCameraRows() {
             continuous = temporalRotationAngleDeg(d) < 3.0f;
         }
         if (continuous) {
-            const bool better = bestIdx < 0 || (bound && !bestBound) ||
-                                (bound == bestBound && w.seq > bestSeq);
+            // The LATEST continuous write, whichever object: continuity has
+            // already excluded the other cameras, and the frame's last view
+            // matrix is the one the eyes were drawn with (an earlier write of
+            // the same frame is a staler prediction of the same head).
+            const bool better = bestIdx < 0 || w.seq > bestSeq;
             if (better) { bestIdx = i; bestSeq = w.seq; bestBound = bound; }
         }
         const bool fbetter = fallIdx < 0 || (bound && !fallBound) ||
@@ -1689,6 +1703,33 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                 g_camHeadDiffSum += diffDeg;
             }
             ++g_camFrames;
+            // Do the rows follow the head at all? In the cockpit they carry it;
+            // at the main menu the camera is the menu's and the head is applied
+            // elsewhere, so the rows stand still while the head turns, and a
+            // world path built on them held the hangar's far wall still under
+            // a head turn (2026-09-04, at 40 m; not at 100 m, which put the
+            // wall on the head's path). A turning head with rows that turn
+            // less than a third as much is that case; the score keeps the
+            // path down until the rows follow again for a while.
+            if (headDeg > 0.1f) {
+                const float rowsDeg = temporalRotationAngleDeg(worldDelta);
+                if (rowsDeg < 0.3f * headDeg) {
+                    g_rowsFollow = g_rowsFollow > -30 ? g_rowsFollow - 4 : -30;
+                    if (g_rowsFollow < 0 && !g_rowsFollowNoted) {
+                        g_rowsFollowNoted = true;
+                        Log::get().note(
+                            "temporal aa: the game's view rows do not follow the head here (the "
+                            "menu's camera?) -- the world path stands down until they do.");
+                    }
+                } else {
+                    g_rowsFollow = g_rowsFollow < 30 ? g_rowsFollow + 1 : 30;
+                    if (g_rowsFollow >= 0 && g_rowsFollowNoted) {
+                        g_rowsFollowNoted = false;
+                        Log::get().note("temporal aa: the game's view rows follow the head again -- "
+                                        "the world path is back.");
+                    }
+                }
+            }
             // Plausibility, per frame: the rows' delta is the head's plus the
             // ship's turn, and no ship turns 270 degrees a second; a delta
             // beyond 3 degrees from the head's is another camera's rows or
@@ -1770,7 +1811,8 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         // head, so the world path detached its hangar wall (2026-09-04).
         const uint32_t sceneDraws = depthProbeSceneDraws();
         const bool worldOn = depthMotion && haveDepth && g_shipMetres > 0.0f &&
-                             candValid[2] && worldValid && sceneDraws >= 50u;
+                             candValid[2] && worldValid && sceneDraws >= 50u &&
+                             g_rowsFollow >= 0;
         for (int i = 0; i < 3; ++i) p.tvCam[i] = worldOn ? tvCam[i] : 0.0f;
         p.tvCam[3] = worldOn ? 1.0f : 0.0f;
         p.split[0] = g_shipMetres;
@@ -2387,11 +2429,19 @@ bool temporalPassRegistration(char* buf, size_t n, char* buf2, size_t n2) {
                                     static_cast<double>(g_brightPix)
                               : 0.0);
     }
+    if (g_probeSkyN) {
+        regAppend(buf, n, used,
+                  "; the history's best match sat (%+.2f, %+.2f) px from the prediction on the sky "
+                  "(%llu probes)",
+                  static_cast<double>(g_probeSkyDx) / 100.0 / static_cast<double>(g_probeSkyN),
+                  static_cast<double>(g_probeSkyDy) / 100.0 / static_cast<double>(g_probeSkyN),
+                  static_cast<unsigned long long>(g_probeSkyN));
+    }
     if (g_probeWorldN || g_probeShipN) {
         regAppend(buf, n, used,
                   "; the history's best match sat (%+.2f, %+.2f) px from the prediction on the world "
-                  "path (%llu probes) and (%+.2f, %+.2f) px on the ship (%llu probes) -- a steady "
-                  "offset that follows the motion is a lag or a scale, noise averages to zero",
+                  "with a depth (%llu probes) and (%+.2f, %+.2f) px on the ship (%llu probes) -- a "
+                  "steady offset that follows the motion is a lag or a scale, noise averages to zero",
                   g_probeWorldN ? static_cast<double>(g_probeWorldDx) / 100.0 / static_cast<double>(g_probeWorldN) : 0.0,
                   g_probeWorldN ? static_cast<double>(g_probeWorldDy) / 100.0 / static_cast<double>(g_probeWorldN) : 0.0,
                   static_cast<unsigned long long>(g_probeWorldN),
@@ -2433,6 +2483,8 @@ bool temporalPassRegistration(char* buf, size_t n, char* buf2, size_t n2) {
     g_classWorldPix = g_classWorldClip = 0;
     g_classShipPix = g_classShipClip = 0;
     g_layerPix = g_brightLayerPix = 0;
+    g_probeSkyDx = g_probeSkyDy = 0;
+    g_probeSkyN = 0;
     return true;
 }
 
