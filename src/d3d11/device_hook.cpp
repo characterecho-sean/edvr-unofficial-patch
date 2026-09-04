@@ -41,6 +41,10 @@ constexpr size_t kDevCreateTexture2D     = 5;
 constexpr size_t kDevCreateVertexShader  = 12;
 constexpr size_t kDevCreatePixelShader   = 15;
 constexpr size_t kDevCreateComputeShader = 18;
+// CreateSamplerState, counted against the SDK's ID3D11DeviceVtbl the same
+// way: CreateBlendState 20, CreateDepthStencilState 21, CreateRasterizerState
+// 22, CreateSamplerState 23.
+constexpr size_t kDevCreateSamplerState  = 23;
 constexpr size_t kSwapPresent            = 8;
 constexpr size_t kFactoryCreateSwapChain = 10;
 constexpr size_t kFactory2CreateSwapChainForHwnd = 15;
@@ -50,6 +54,8 @@ typedef HRESULT(STDMETHODCALLTYPE* PFN_CreateShader)(ID3D11Device*, const void*,
 typedef HRESULT(STDMETHODCALLTYPE* PFN_CreateTexture2D)(
     ID3D11Device*, const D3D11_TEXTURE2D_DESC*, const D3D11_SUBRESOURCE_DATA*,
     ID3D11Texture2D**);
+typedef HRESULT(STDMETHODCALLTYPE* PFN_CreateSamplerState)(
+    ID3D11Device*, const D3D11_SAMPLER_DESC*, ID3D11SamplerState**);
 typedef HRESULT(STDMETHODCALLTYPE* PFN_Present)(IDXGISwapChain*, UINT, UINT);
 typedef HRESULT(STDMETHODCALLTYPE* PFN_CreateSwapChain)(IDXGIFactory*, IUnknown*,
                                                         DXGI_SWAP_CHAIN_DESC*,
@@ -76,6 +82,35 @@ struct State {
     PFN_CreateShader realCreateVS = nullptr;
     PFN_CreateShader realCreatePS = nullptr;
     PFN_CreateTexture2D realCreateTexture2D = nullptr;
+    PFN_CreateSamplerState realCreateSamplerState = nullptr;
+    // The texture-filtering census. A repeating pattern on a distant
+    // surface -- a station's ribbed panels, a hull's hatching -- shimmers
+    // when the sampler picks a mip sharper than the pixel's footprint,
+    // and no pass at the submit door can put back detail the game never
+    // sampled. What the game ASKS for is the first thing to know, and
+    // nothing printed it. Shapes are (filter, anisotropy, bias); the
+    // table is small because a renderer reuses a handful.
+    struct SamplerShape {
+        uint32_t filter = 0;
+        uint32_t aniso = 0;
+        float    bias = 0.0f;
+        uint32_t count = 0;
+    };
+    SamplerShape samplerShapes[12];
+    uint32_t     samplerShapeCount = 0;
+    uint32_t     samplerCreates = 0;
+    uint32_t     samplerOther = 0;      // shapes past the table's end
+    uint64_t     samplerFirstMs = 0;
+    uint32_t     samplerCensusPrints = 0;
+    uint32_t     samplerPrintedShapes = 0;
+    // The overrides, both default-off. anisotropy promotes a plainly
+    // linear or already-anisotropic sampler; bias shifts its mip choice,
+    // positive for blurrier and quieter. Neither touches a comparison,
+    // minimum or maximum filter (shadows and depth reductions), nor a
+    // point sampler, whose look is deliberate.
+    int          samplerAniso = 0;
+    float        samplerBias = 0.0f;
+    bool         samplerForceNoted = false;
     // The shader-swap arc's dump mode: while armed, every vertex and pixel
     // shader blob the game creates is written to <logdir>\shaders by hash,
     // and the glare draw logs which two hashes it binds -- the pair to
@@ -1096,6 +1131,120 @@ State& ensureState() {
 
 }  // namespace
 
+// The reduction type lives in bits 7-8 of a D3D11_FILTER: 0 standard,
+// 1 comparison, 2 minimum, 3 maximum. Only a standard filter is ours to
+// touch, and only a linear or anisotropic one -- promoting a point
+// sampler would soften artwork that was asked for sharp.
+bool samplerIsOurs(uint32_t filter) {
+    if ((filter & 0x180u) != 0u) return false;
+    return filter == D3D11_FILTER_MIN_MAG_MIP_LINEAR ||
+           filter == D3D11_FILTER_ANISOTROPIC;
+}
+
+const char* samplerFilterName(uint32_t f) {
+    switch (f) {
+        case D3D11_FILTER_MIN_MAG_MIP_POINT: return "point";
+        case D3D11_FILTER_MIN_MAG_MIP_LINEAR: return "linear";
+        case D3D11_FILTER_MIN_MAG_LINEAR_MIP_POINT: return "linear, point mips";
+        case D3D11_FILTER_ANISOTROPIC: return "anisotropic";
+        case D3D11_FILTER_COMPARISON_MIN_MAG_MIP_LINEAR: return "linear, comparison";
+        case D3D11_FILTER_COMPARISON_ANISOTROPIC: return "anisotropic, comparison";
+        default: return "other";
+    }
+}
+
+void samplerCensusNote(State& s) {
+    char line[1100];
+    size_t used = 0;
+    for (uint32_t i = 0; i < s.samplerShapeCount && used < sizeof(line); ++i) {
+        const State::SamplerShape& sh = s.samplerShapes[i];
+        const int m = snprintf(line + used, sizeof(line) - used,
+                               "%s%u x %s (0x%02X) aniso %u bias %+.2f", i ? "; " : "",
+                               sh.count, samplerFilterName(sh.filter), sh.filter,
+                               sh.aniso, static_cast<double>(sh.bias));
+        if (m > 0) used += static_cast<size_t>(m);
+    }
+    Log::get().note(
+        "texture filtering census: %u sampler(s) in %u shape(s)%s -- %s. A "
+        "repeating pattern that shimmers on a distant surface is a mip chosen "
+        "sharper than the pixel covers: low anisotropy or a negative bias is "
+        "where that comes from, and neither the temporal pass nor NVIDIA's "
+        "history can restore detail the game never sampled. "
+        "advanced.texture_anisotropy and advanced.texture_lod_bias override "
+        "them (0 = leave the game's own choice alone).",
+        s.samplerCreates, s.samplerShapeCount,
+        s.samplerOther ? " (and more past the table)" : "", line);
+    s.samplerPrintedShapes = s.samplerShapeCount;
+    ++s.samplerCensusPrints;
+}
+
+HRESULT STDMETHODCALLTYPE hookedCreateSamplerState(ID3D11Device* self,
+                                                   const D3D11_SAMPLER_DESC* desc,
+                                                   ID3D11SamplerState** out) {
+    if (!g_state || !g_state->realCreateSamplerState) {
+        return E_FAIL;
+    }
+    State& s = *g_state;
+    if (!desc || self != s.device) return s.realCreateSamplerState(self, desc, out);
+    D3D11_SAMPLER_DESC d = *desc;
+    guardedBudget(g_createBudget, [&] {
+        const uint32_t filter = static_cast<uint32_t>(desc->Filter);
+        ++s.samplerCreates;
+        if (!s.samplerFirstMs) s.samplerFirstMs = GetTickCount64();
+        bool found = false;
+        for (uint32_t i = 0; i < s.samplerShapeCount; ++i) {
+            State::SamplerShape& sh = s.samplerShapes[i];
+            if (sh.filter == filter && sh.aniso == desc->MaxAnisotropy &&
+                sh.bias == desc->MipLODBias) {
+                ++sh.count;
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            const uint32_t n = sizeof(s.samplerShapes) / sizeof(s.samplerShapes[0]);
+            if (s.samplerShapeCount < n) {
+                State::SamplerShape& sh = s.samplerShapes[s.samplerShapeCount++];
+                sh.filter = filter;
+                sh.aniso = desc->MaxAnisotropy;
+                sh.bias = desc->MipLODBias;
+                sh.count = 1;
+            } else {
+                ++s.samplerOther;
+            }
+        }
+        // The overrides. Off by default, so the census costs the game a
+        // comparison and nothing else.
+        if ((s.samplerAniso > 0 || s.samplerBias != 0.0f) && samplerIsOurs(filter)) {
+            if (s.samplerAniso > 0) {
+                d.Filter = D3D11_FILTER_ANISOTROPIC;
+                d.MaxAnisotropy = static_cast<UINT>(s.samplerAniso);
+            }
+            d.MipLODBias = desc->MipLODBias + s.samplerBias;
+            if (!s.samplerForceNoted) {
+                s.samplerForceNoted = true;
+                Log::get().note(
+                    "texture filtering: the game's linear and anisotropic samplers are "
+                    "being created with anisotropy %d and %+.2f added to their mip bias. "
+                    "Point, comparison, minimum and maximum filters are left alone. A "
+                    "positive bias trades sharpness for quiet on distant repeating "
+                    "detail; a negative one does the reverse.",
+                    s.samplerAniso, static_cast<double>(s.samplerBias));
+            }
+        }
+        // Once the creates have settled: a renderer makes its samplers up
+        // front, so ten seconds after the first is past the burst. Printed
+        // again only if a shape appears that the first line did not carry.
+        const bool settled = GetTickCount64() - s.samplerFirstMs > 10000;
+        if (settled && (s.samplerCensusPrints == 0 ||
+                        (s.samplerCensusPrints < 3 &&
+                         s.samplerShapeCount > s.samplerPrintedShapes))) {
+            samplerCensusNote(s);
+        }
+    });
+    return s.realCreateSamplerState(self, &d, out);
+}
+
 void hookDevice(ID3D11Device* device) {
     if (!device) return;
     State& s = ensureState();
@@ -1185,6 +1334,16 @@ void hookDevice(ID3D11Device* device) {
                          reinterpret_cast<void**>(&s.realCreateCS));
     s.deviceHook.replace(kDevCreateTexture2D, &hookedCreateTexture2D,
                          reinterpret_cast<void**>(&s.realCreateTexture2D));
+    {
+        const int aniso = sentinelCfg.getIntInRange("advanced.texture_anisotropy", 0, 0, 16);
+        float bias = sentinelCfg.getFloat("advanced.texture_lod_bias", 0.0f);
+        if (!(bias > -4.0f)) bias = -4.0f;
+        if (!(bias < 4.0f)) bias = 4.0f;
+        s.samplerAniso = aniso;
+        s.samplerBias = bias;
+    }
+    s.deviceHook.replace(kDevCreateSamplerState, &hookedCreateSamplerState,
+                         reinterpret_cast<void**>(&s.realCreateSamplerState));
     // Before the first create can arrive: the FSS resolution fix's flag is
     // read here for install and on vScreen's reload path for live flips.
     fssResConfigure(sentinelCfg);
