@@ -138,6 +138,9 @@ float4 catmullRom(float2 uv, float2 tsize) {
 // frame's eye space by delta * P + tv, then projected. Without depth (the
 // far plane, or none bound) the direction alone is rotated, which is the
 // rotation-only path: exact at infinity, and what v1 was everywhere.
+)HLSL"
+// (adjacent literals: MSVC caps one at 16 KB)
+R"HLSL(
 bool fetchHistoryT(float2 p, float3 r0, float3 r1, float3 r2, float3 tv,
                    bool useDepth, bool allowWorld, out uint world, out float3 hy) {
     float3 d;
@@ -222,6 +225,9 @@ bool fetchHistory(float2 p, float3 r0, float3 r1, float3 r2, out float3 hy) {
 uint clipSize(float3 hc, float3 hy) {
     return uint(saturate(abs(hc.x - hy.x)) * 255.0 + 0.5);
 }
+)HLSL"
+// (adjacent literals: MSVC caps one at 16 KB)
+R"HLSL(
 groupshared uint gCount[18];
 // The motion vectors for a trained pass (DLAA): the same reprojection
 // the history fetch does, written out instead of used -- the pixel's
@@ -288,6 +294,9 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
     GroupMemoryBarrierWithGroupSync();
     if (gi < 18) InterlockedAdd(Stats[gi], gCount[gi]);
 }
+)HLSL"
+// (adjacent literals: MSVC caps one at 16 KB)
+R"HLSL(
 [numthreads(8, 8, 1)]
 void main(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
     if (gi < 18) gCount[gi] = 0;
