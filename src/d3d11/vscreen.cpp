@@ -2620,7 +2620,7 @@ void STDMETHODCALLTYPE hookedUnmap(ID3D11DeviceContext* self, ID3D11Resource* re
             sunglareSceneRows(s->camData, s->camBytes);
             // The same rows, kept pending for the temporal pass's camera
             // motion source until the frame's first eye draw claims them.
-            temporalPassNoteSceneWrite(s->camData, s->camBytes);
+            temporalPassNoteSceneWrite(s->camResource, s->camData, s->camBytes);
         });
         s->camResource = nullptr;
         s->camData = nullptr;

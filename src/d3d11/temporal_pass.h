@@ -59,8 +59,13 @@ void temporalPassTick(ID3D11DeviceContext* ctx);
 // rows as this frame's camera -- the last scene write before the first
 // eye draw is that eye's view, and the first eye each frame is the same
 // eye each frame, which is all a rotation delta needs.
-void temporalPassNoteSceneWrite(const void* data, uint32_t bytes);
-void temporalPassNoteFirstEyeDraw();
+// res is the buffer object written: the rows are kept PER OBJECT, and the
+// latch takes the object bound at the frame's first scene draw -- the game
+// maps several blocks of the scene block's size a frame (a reflection or
+// environment pass has its own camera), and the last write before the
+// draw was another camera's on half the frames in space (2026-09-04).
+void temporalPassNoteSceneWrite(const void* res, const void* data, uint32_t bytes);
+void temporalPassNoteFirstEyeDraw(ID3D11DeviceContext* ctx);
 // This frame's rows become last frame's; called at the frame boundary.
 void temporalPassFrameBoundary();
 
@@ -162,4 +167,13 @@ __declspec(dllexport) void* edvrTemporalAa(void* srcTex, int eye,
                                            float blend, float clampSigma,
                                            unsigned outW, unsigned outH,
                                            unsigned flags);
+
+// The headset's pose for the frame the history holds and for this one
+// (the runtime's 3x4 rows, head -> tracking, the poses the game rendered
+// from) and this eye's offset in head space, noted before each
+// edvrTemporalAa: the world path composes the ship's camera rows with
+// them, since the rows carry no headset. Null pointers clear the note.
+__declspec(dllexport) void edvrTemporalAaNoteHead(int eye, const float* prevPose,
+                                                  const float* nowPose,
+                                                  const float* eyeOffset);
 }

@@ -462,7 +462,7 @@ void depthProbeNoteDraw(ID3D11DeviceContext* ctx, void* dsv, bool rtvEyeSized,
     if (!g_sceneLatchedThisFrame && t.drawsThisFrame == 1 &&
         (idx == g_scenePick[0] || idx == g_scenePick[1])) {
         g_sceneLatchedThisFrame = true;
-        temporalPassNoteFirstEyeDraw();
+        temporalPassNoteFirstEyeDraw(ctx);
     }
     if (rtvEyeSized) ++t.eyeRtvDrawsThisFrame;
     if (rtvNull) ++t.nullRtvDrawsThisFrame;

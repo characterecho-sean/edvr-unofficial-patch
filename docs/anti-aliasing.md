@@ -1070,6 +1070,30 @@ a frame. The same line settled the depthless-text question: only 1 to 4%
 of bright pixels lack depth in the cockpit and in space, so the HUD text
 that moves with the head is not that case.
 
+**Its second flight (75dbda8) named the two faults underneath.** In space
+the delta was still dropped on half the frames: the rows come from any
+buffer of the scene block's size the game maps, and a reflection or
+environment pass maps its own with its own camera between the main
+write and the first scene draw on every other frame. The rows are now
+kept per buffer object and the latch takes the object BOUND at the
+scene's first draw (two constant-buffer queries a frame; the newest
+write only as a fallback, counted). And the station stayed sharp with
+the head at rest but ghosted with the skybox the moment the head moved:
+the rows are the SHIP's camera without the headset in them -- docked,
+their delta read exactly a slow head's turn rate against the head's --
+so the world path registered the ship's turn and not the head's. The
+openvr half now notes the two headset poses and the eye's offset before
+each treat (edvrTemporalAaNoteHead), and the world path composes them:
+W = R_hp^T C R_hn with the matching translation term (temporal_pass.cpp
+derives it), which is the head-only reprojection when the ship is still
+and the ship-only one when the head is. Docked, W must equal the head's
+delta whichever way the head turns, which is now what the registration
+line's figure measures. The menu's hangar wall, which the player says
+is real 3D, still detaches under head motion: its eye-sized depth
+targets read empty, so its geometry is drawn without a depth write and
+reprojects as the far plane; a menu-only depth assumption is the
+remaining lever there.
+
 ## Feature C — texture LOD bias, the small lever
 
 Not all shimmer is geometry. Detail maps and normal maps sampled a mip

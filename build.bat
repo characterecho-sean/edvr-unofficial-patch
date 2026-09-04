@@ -180,6 +180,7 @@ python "%ROOT%\tools\gen_exports.py" --source "%SystemRoot%\System32\d3d11.dll" 
     --extra-export edvrFssTheater ^
     --extra-export edvrSupersampleResolve ^
     --extra-export edvrTemporalAa ^
+    --extra-export edvrTemporalAaNoteHead ^
     --extra-export edvrSharpen ^
     --extra-export edvrDepthProbeSelftest ^
     --extra-export edvrDlaaAvailable ^

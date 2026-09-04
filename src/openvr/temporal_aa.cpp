@@ -27,6 +27,8 @@ constexpr uint32_t kMaxFaults = 8;
 
 enum class Motion : uint8_t { None = 0, Head = 1, Camera = 2, Depth = 3 };
 
+typedef void (*PFN_EdvrTemporalAaNoteHead)(int, const float*, const float*, const float*);
+
 struct State {
     bool   on = false;
     bool   dlaa = false;   // fix.temporal_aa = dlaa | dlss: NVIDIA's history instead of the pass's own
@@ -39,6 +41,7 @@ struct State {
     bool   standDown = false;
 
     PFN_EdvrTemporalAa fn = nullptr;
+    PFN_EdvrTemporalAaNoteHead fnHead = nullptr;   // the head note, for the world path
     bool fnTried = false;
 
     // The jitter: the frame counter it is drawn from, this frame's offset
@@ -421,6 +424,8 @@ void* temporalAaTreat(vr::EVREye eye, void* handle,
         if (m) {
             s.fn = reinterpret_cast<PFN_EdvrTemporalAa>(
                 GetProcAddress(m, "edvrTemporalAa"));
+            s.fnHead = reinterpret_cast<PFN_EdvrTemporalAaNoteHead>(
+                GetProcAddress(m, "edvrTemporalAaNoteHead"));
         }
         if (s.fn) {
             Log::get().note("temporal aa: the d3d11 half is linked.");
@@ -452,12 +457,16 @@ void* temporalAaTreat(vr::EVREye eye, void* handle,
     float tv[3] = {0, 0, 0}, tvSwapped[3] = {0, 0, 0};
     bool haveTv = false;
     float nearZ = 0.0f, farZ = 0.0f;
+    float eyeOffOut[3] = {0.0f, 0.0f, 0.0f};
+    bool haveEyeOff = false;
     if (haveHeadDelta) {
         float e2h[2][12];
         const bool okL = systemHookEyeToHead(vr::Eye_Left, e2h[0]);
         const bool okR = systemHookEyeToHead(vr::Eye_Right, e2h[1]);
         if (okL && okR) {
             const float offThis[3] = {e2h[e][3], e2h[e][7], e2h[e][11]};
+            memcpy(eyeOffOut, offThis, sizeof(eyeOffOut));
+            haveEyeOff = true;
             const float offOther[3] = {e2h[1 - e][3], e2h[1 - e][7], e2h[1 - e][11]};
             temporalHeadTranslation(s.prevPose, s.curPose, offThis, tv);
             temporalHeadTranslation(s.prevPose, s.curPose, offOther, tvSwapped);
@@ -494,6 +503,14 @@ void* temporalAaTreat(vr::EVREye eye, void* handle,
     // under the lag instrument, with the sign instrument's flips.
     const float jxOut = static_cast<float>(s.jitterSignX) * (s.jitterLag ? s.jxPrev : s.jx);
     const float jyOut = static_cast<float>(s.jitterSignY) * (s.jitterLag ? s.jyPrev : s.jy);
+    // The headset's two poses (the ones the game rendered from, held or
+    // not) and this eye's offset, for the world path's composition with
+    // the ship's camera rows (temporal_pass.h). A d3d11 half without the
+    // entry simply never gets them and keeps the world path off.
+    if (s.fnHead) {
+        if (haveHeadDelta && haveEyeOff) s.fnHead(e, s.prevPose, s.curPose, eyeOffOut);
+        else s.fnHead(e, nullptr, nullptr, nullptr);
+    }
     void* out = s.fn(handle, e, haveBounds ? b4 : nullptr, tanNow,
                      s.havePrev[e] ? s.tanPrev[e] : tanNow, jxOut, jyOut,
                      haveHeadDelta ? delta : nullptr, haveTv ? tv : nullptr,
