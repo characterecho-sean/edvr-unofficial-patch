@@ -1131,6 +1131,23 @@ blue) so a skybox that leads or trails the turn is a colour the eye can
 read; `error` paints the history's distance from the frame. The menu's
 wall, depthless, gets `temporal_aa_menu_metres` as an assumed depth.
 
+**The motion view answered in one flight (ab284a4).** With the rows read
+world->view and composed with the head, the world painted mid-grey under
+a head turn -- a zero fetch offset -- and moved only when the ship
+turned; with the transposed reading and the same composition it moved
+twice the head's turn and the sky smeared along the head's travel. Both
+follow if the rows already CARRY the headset's pose, stored view->world:
+composing the head into a delta that has it either cancels the head
+(one reading) or doubles it (the other), and a still ship's delta is the
+identity, so the docked figure never noticed. The earlier 'ship camera
+without the head' inference read a docked residual of 0.1 to 0.26
+degrees a frame as a slow head's rate; it was twice the rate. So the
+world path now takes the rows alone, read view->world: W = R_p^T R_n
+and tv = R_p^T (c_n - c_p) with c the eye's place in the world; no
+composition, no head note. `temporal_aa_view_transpose` defaults to 1
+and the docked figure is a real check at last: W must equal the head's
+delta whichever way the head turns.
+
 ## Feature C — texture LOD bias, the small lever
 
 Not all shimmer is geometry. Detail maps and normal maps sampled a mip

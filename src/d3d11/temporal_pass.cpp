@@ -1358,136 +1358,92 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
             temporalViewDelta(g_prevRows, g_curRows, false, cand[2]);
             candValid[2] = true;
         }
-        // The world path's delta and translation term: the SHIP's camera
-        // rows composed with the headset's pose. The rows carry no headset
-        // -- docked, their delta read exactly a slow head's turn rate
-        // against the head's (0.1 to 0.26 deg/frame), and in space the
-        // world registered the ship's turn but not the head's (2026-09-04).
-        // The eye sees P = R_h^T (S X + t_s - t_h) - e, so a point P now was,
-        // last frame, at W P + tv with
-        //   W  = R_hp^T C R_hn,               C = S_p S_n^T (the rows' delta)
-        //   tv = W e - e + R_hp^T [(t_sp - C t_sn) + (C t_hn - t_hp)]
-        // -- the head-only term when the ship is still, the ship-only term
-        // when the head is. Docked, W must equal the head's delta whichever
-        // way the head turns: the registration line's check.
+        // The world path's delta and translation term, from the game's view
+        // rows alone. The rows are the FULL view -- the headset's pose is in
+        // them -- stored view->world. The motion view of 2026-09-04 showed
+        // the world standing still under a head turn while the rows were
+        // read world->view and composed with the head (the head cancelled),
+        // and moving twice the head's turn under the other reading with the
+        // same composition (the head doubled); a still ship's delta is the
+        // identity, so the docked figure could not tell, and the earlier
+        // 'ship camera without the head' reading of a 0.1 to 0.26 deg/frame
+        // docked residual was twice a slow head's rate, not the rate. So:
+        // no composition. For rows [R | c] (view->world, c the eye's place
+        // in the world) a point P now was, last frame, at
+        //   W P + tv,   W = R_p^T R_n,   tv = R_p^T (c_n - c_p)
+        // (advanced.temporal_aa_view_transpose = 1, the default); read as
+        // world->view [S | t] instead (= 0), W = S_p S_n^T and tv = t_p -
+        // W t_n. The reading not in use is the instrument's candidate 1.
+        // Docked, W must equal the head's delta whichever way the head
+        // turns -- a real check now, since the rows carry the head.
         float tvCam[3] = {0.0f, 0.0f, 0.0f};
         float worldDelta[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
         bool worldValid = false;
-        float shipC[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};   // the ship's own delta, kept for the carry
-        // The rows read as world->view [S | t_s] (advanced.temporal_aa_view_
-        // transpose = 0) or as view->world [R_c | c] (= 1: S = R_c^T,
-        // t_s = -S c). Which is right was never settled -- the menu flights
-        // that 'settled' it compared a camera without the head against a
-        // moving head, which is noise -- and the fourth split flight's smear
-        // REVERSING direction once the ship's delta reached every frame is
-        // what an inverted reading looks like. So both are computed: the
-        // reading in use drives the world path, and the own pass judges
-        // both as candidates 2 (used) and 1 (the other) on its registration
-        // line; the key flips them live for an A/B by eye on the trained path.
-        auto rowsAsWorldView = [](const float rows[12], bool transposed, float S[9], float ts[3]) {
-            float R[9];
-            temporalRot3Of34(rows, R);
-            const float col[3] = {rows[3], rows[7], rows[11]};
-            if (!transposed) {
-                memcpy(S, R, sizeof(float) * 9);
-                memcpy(ts, col, sizeof(float) * 3);
+        auto worldFromRows = [](const float prev[12], const float now[12], bool transposed,
+                                float W[9], float tv[3], float camMove[3]) {
+            float Rp[9], Rn[9], RpT[9], RnT[9];
+            temporalRot3Of34(prev, Rp);
+            temporalRot3Of34(now, Rn);
+            temporalTranspose3(Rp, RpT);
+            temporalTranspose3(Rn, RnT);
+            const float colP[3] = {prev[3], prev[7], prev[11]};
+            const float colN[3] = {now[3], now[7], now[11]};
+            if (transposed) {
+                temporalMul3(RpT, Rn, W);
+                const float dc[3] = {colN[0] - colP[0], colN[1] - colP[1], colN[2] - colP[2]};
+                temporalApply3(RpT, dc, tv);
+                for (int i = 0; i < 3; ++i) camMove[i] = dc[i];
             } else {
-                temporalTranspose3(R, S);
-                float sc[3];
-                temporalApply3(S, col, sc);
-                for (int i = 0; i < 3; ++i) ts[i] = -sc[i];
+                temporalMul3(Rp, RnT, W);
+                float wt[3], cp[3], cn[3];
+                temporalApply3(W, colN, wt);
+                for (int i = 0; i < 3; ++i) tv[i] = colP[i] - wt[i];
+                temporalApply3(RpT, colP, cp);
+                temporalApply3(RnT, colN, cn);
+                for (int i = 0; i < 3; ++i) camMove[i] = cp[i] - cn[i];
             }
         };
-        float shipCo[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};   // the other reading's ship delta
-        float tsp[3] = {0, 0, 0}, tsn[3] = {0, 0, 0};
         if (candValid[2]) {
-            float Sp[9], Sn[9], SnT[9], Sop[9], Son[9], SonT[9], tso[3];
-            rowsAsWorldView(g_prevRows, g_viewTransposed, Sp, tsp);
-            rowsAsWorldView(g_curRows, g_viewTransposed, Sn, tsn);
-            temporalTranspose3(Sn, SnT);
-            temporalMul3(Sp, SnT, shipC);          // C = S_p S_n^T
-            memcpy(cand[2], shipC, sizeof(shipC));
-            rowsAsWorldView(g_prevRows, !g_viewTransposed, Sop, tso);
-            rowsAsWorldView(g_curRows, !g_viewTransposed, Son, tso);
-            temporalTranspose3(Son, SonT);
-            temporalMul3(Sop, SonT, shipCo);
-            // The ship camera's displacement in the world: c = -S^T t_s.
-            float rpT[9], rnT[9], cp[3], cn[3];
-            temporalTranspose3(Sp, rpT);
-            temporalTranspose3(Sn, rnT);
-            temporalApply3(rpT, tsp, cp);
-            temporalApply3(rnT, tsn, cn);
-            for (int i = 0; i < 3; ++i) { cp[i] = -cp[i]; cn[i] = -cn[i]; }
-            const float mx = cn[0] - cp[0], my = cn[1] - cp[1], mz = cn[2] - cp[2];
-            const double move = sqrt(static_cast<double>(mx) * mx + static_cast<double>(my) * my +
-                                     static_cast<double>(mz) * mz);
+            float camMove[3], otherW[9], otherTv[3], otherMove[3];
+            worldFromRows(g_prevRows, g_curRows, g_viewTransposed, worldDelta, tvCam, camMove);
+            worldFromRows(g_prevRows, g_curRows, !g_viewTransposed, otherW, otherTv, otherMove);
+            memcpy(cand[2], worldDelta, sizeof(worldDelta));
+            memcpy(cand[1], otherW, sizeof(otherW));
+            candValid[1] = true;
+            worldValid = true;
+            const double move = sqrt(static_cast<double>(camMove[0]) * camMove[0] +
+                                     static_cast<double>(camMove[1]) * camMove[1] +
+                                     static_cast<double>(camMove[2]) * camMove[2]);
             g_camMoveSum += move;
             float diffDeg = 0.0f;
-            // W and tv from a ship delta C: the composition above, as a
-            // function so the carry can redo it with last frame's C.
-            auto compose = [&](const float* C, float* W, float* tv) {
-                float rhp[9], rhn[9], rhpT[9], tmp[9];
-                temporalRot3Of34(e.headPrev, rhp);
-                temporalRot3Of34(e.headNow, rhn);
-                temporalTranspose3(rhp, rhpT);
-                temporalMul3(rhpT, C, tmp);
-                temporalMul3(tmp, rhn, W);
-                const float thp[3] = {e.headPrev[3], e.headPrev[7], e.headPrev[11]};
-                const float thn[3] = {e.headNow[3], e.headNow[7], e.headNow[11]};
-                float ctsn[3], cthn[3], inner[3], rinner[3], we[3];
-                temporalApply3(C, tsn, ctsn);
-                temporalApply3(C, thn, cthn);
-                for (int i = 0; i < 3; ++i) inner[i] = (tsp[i] - ctsn[i]) + (cthn[i] - thp[i]);
-                temporalApply3(rhpT, inner, rinner);
-                temporalApply3(W, e.eyeOff, we);
-                for (int i = 0; i < 3; ++i) tv[i] = we[i] - e.eyeOff[i] + rinner[i];
-            };
-            if (e.headNoted) {
-                compose(shipC, worldDelta, tvCam);
-                worldValid = true;
-                // The other reading, for the instrument's candidate 1 (its
-                // translation term is not used: judged rotation-only).
-                float worldO[9], tvO[3];
-                compose(shipCo, worldO, tvO);
-                memcpy(cand[1], worldO, sizeof(worldO));
-                candValid[1] = true;
-                if (deltaHead) {
-                    float ht[9], diff[9];
-                    temporalTranspose3(deltaHead, ht);
-                    temporalMul3(worldDelta, ht, diff);
-                    diffDeg = temporalRotationAngleDeg(diff);
-                    g_camHeadDiffSum += diffDeg;
-                }
-            } else if (deltaHead) {
+            if (deltaHead) {
                 float ht[9], diff[9];
                 temporalTranspose3(deltaHead, ht);
-                temporalMul3(cand[2], ht, diff);
+                temporalMul3(worldDelta, ht, diff);
                 diffDeg = temporalRotationAngleDeg(diff);
                 g_camHeadDiffSum += diffDeg;
             }
             ++g_camFrames;
-            // Plausibility, per frame: no ship turns 270 degrees a second,
-            // and none covers 50 m in a frame (4.5 km/s) outside
-            // supercruise, where nothing within the planes is drawn anyway.
-            // A delta beyond the first is another camera's rows and is
-            // dropped for the frame; a jump beyond the second is the
-            // floating origin moving, and only the translation is dropped.
+            // Plausibility, per frame: the rows' delta is the head's plus the
+            // ship's turn, and no ship turns 270 degrees a second; a delta
+            // beyond 3 degrees from the head's is another camera's rows or
+            // a stale latch, and last frame's accepted delta is carried in
+            // its place (a far better guess than the head alone, which
+            // smeared the world on every dropped frame). A jump over 50 m
+            // is the floating origin moving: only the translation is dropped.
             if (diffDeg > 3.0f) {
                 ++g_camDropRot;
-                if (worldValid && g_lastGoodValid) {
-                    // The carry: a ship turns smoothly, so last frame's
-                    // accepted delta is a far better guess for this frame
-                    // than the head alone, which was the fallback that
-                    // smeared the world on every dropped frame.
-                    memcpy(shipC, g_lastGoodC, sizeof(shipC));
-                    compose(shipC, worldDelta, tvCam);
+                if (g_lastGoodValid) {
+                    memcpy(worldDelta, g_lastGoodC, sizeof(worldDelta));
+                    memcpy(tvCam, g_lastGoodTv, sizeof(tvCam));
+                    memcpy(cand[2], worldDelta, sizeof(worldDelta));
                     ++g_camCarried;
                 } else {
                     candValid[2] = false;
                     worldValid = false;
                 }
-            } else if (worldValid) {
-                memcpy(g_lastGoodC, shipC, sizeof(g_lastGoodC));
+            } else {
+                memcpy(g_lastGoodC, worldDelta, sizeof(g_lastGoodC));
                 memcpy(g_lastGoodTv, tvCam, sizeof(g_lastGoodTv));
                 g_lastGoodValid = true;
             }
@@ -1495,9 +1451,6 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                 for (int i = 0; i < 3; ++i) tvCam[i] = 0.0f;
                 ++g_camDropMove;
             }
-            // The instrument's candidate 2 and the shader's world rows are
-            // the composed delta once the head is known.
-            if (worldValid) memcpy(cand[2], worldDelta, sizeof(worldDelta));
         }
 
         PassParams p{};
@@ -1892,7 +1845,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
 void temporalPassConfigure(Config& cfg) {
     const std::string mode = cfg.getString("fix.temporal_aa", "off");
     g_wanted = _stricmp(mode.c_str(), "off") != 0 && !mode.empty();
-    g_viewTransposed = cfg.getBool("advanced.temporal_aa_view_transpose", false);
+    g_viewTransposed = cfg.getBool("advanced.temporal_aa_view_transpose", true);
     const std::string cur = cfg.getString("advanced.temporal_aa_current", "filtered");
     g_filterCurrent = _stricmp(cur.c_str(), "raw") != 0;
     float c = cfg.getFloat("advanced.temporal_aa_history_sharp", 0.5f);
@@ -2013,9 +1966,9 @@ void temporalPassFrameBoundary() {
                 "temporal aa: the game's camera is being read -- the view "
                 "rows at float 932 of the scene block, the write of the frame that "
                 "follows last frame's (the block bound at the scene's first draw is "
-                "at VS b%d / PS b%d, -1 = not seen); they are the SHIP's camera, "
-                "composed with the headset's pose for the world path%s.",
-                g_latchSlotVs, g_latchSlotPs, g_viewTransposed ? " (transposed)" : "");
+                "at VS b%d / PS b%d, -1 = not seen); they are the full view with the "
+                "headset in it, read %s for the world path.",
+                g_latchSlotVs, g_latchSlotPs, g_viewTransposed ? "view->world" : "world->view");
         }
     } else {
         g_prevValid = false;
@@ -2112,9 +2065,10 @@ bool temporalPassRegistration(char* buf, size_t n) {
     }
     if (g_camFrames) {
         regAppend(buf, n, used,
-                  "; the world delta (the ship's camera composed with the head) differed "
-                  "from the head's by %.3f deg/frame on average and the ship's camera "
-                  "moved %.4f m/frame (docked, both read 0 whichever way the head turns)",
+                  "; the world delta (the game's view rows, the head in them) differed "
+                  "from the head's by %.3f deg/frame on average and the eye moved %.4f "
+                  "m/frame in the rows (docked: the first reads 0 whichever way the head "
+                  "turns, the second a head's sway)",
                   g_camHeadDiffSum / g_camFrames, g_camMoveSum / g_camFrames);
     }
     if (g_rowsFramesSum) {
