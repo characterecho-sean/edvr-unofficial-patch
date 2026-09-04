@@ -4374,9 +4374,11 @@ void vScreenFrameBoundary() {
                 // line: which candidate delta the history lands best with.
                 char reg[1150];
                 char reg2[1150];
-                if (temporalPassRegistration(reg, sizeof(reg), reg2, sizeof(reg2))) {
+                char reg3[1150];
+                if (temporalPassRegistration(reg, sizeof(reg), reg2, sizeof(reg2), reg3, sizeof(reg3))) {
                     Log::get().note("temporal aa registration: %s", reg);
                     if (reg2[0]) Log::get().note("temporal aa registration, the rest: %s", reg2);
+                    if (reg3[0]) Log::get().note("temporal aa registration, the probes: %s", reg3);
                 }
             }
         }

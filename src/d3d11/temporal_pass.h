@@ -104,7 +104,7 @@ bool temporalPassTotals(uint32_t* treated, double* avgMs, double* maxMs,
 // Two lines: the candidates and the world figures, then the latch, the
 // drops, the per-class clip shares and the probes (the logger caps a line
 // at 1200 characters). buf2 may be null.
-bool temporalPassRegistration(char* buf, size_t n, char* buf2, size_t n2);
+bool temporalPassRegistration(char* buf, size_t n, char* buf2, size_t n2, char* buf3, size_t n3);
 
 // The trained pass's totals (fix.temporal_aa = dlaa | dlss): eye-frames it
 // took, its measured price, and how many evaluations started NVIDIA's

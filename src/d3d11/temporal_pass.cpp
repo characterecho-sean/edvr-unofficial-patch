@@ -40,7 +40,7 @@ Texture2D<float> Z3 : register(t4);      // ...and a second layer's
 SamplerState L : register(s0);           // bilinear, clamp
 RWTexture2D<float4> O : register(u0);    // the output, region-sized, the game's format
 RWTexture2D<float4> N : register(u1);    // the new history
-RWStructuredBuffer<uint> Stats : register(u2);   // 0 rejected, 1 clipped, 2 the clips' size (luma/255, summed); then the same three per candidate, four of them; 15 pixels on the world path, 16 bright pixels, 17 bright pixels with no depth; 18-20 the registration probes on the world path (sum dx*100, sum dy*100, count) and 21-23 on the ship; 24-27 world pixels, world clipped, ship pixels, ship clipped; 28 pixels with a layer's depth, 29 bright pixels with a layer's depth; 30-32 the registration probes on the sky (the far plane: sum dx*100, sum dy*100, count)
+RWStructuredBuffer<uint> Stats : register(u2);   // 0 rejected, 1 clipped, 2 the clips' size (luma/255, summed); then the same three per candidate, four of them; 15 pixels on the world path, 16 bright pixels, 17 bright pixels with no depth; 18-20 the registration probes on the world path (sum dx*100, sum dy*100, count) and 21-23 on the ship; 24-27 world pixels, world clipped, ship pixels, ship clipped; 28 pixels with a layer's depth, 29 bright pixels with a layer's depth; 30-32 the registration probes on the sky (the far plane: sum dx*100, sum dy*100, count); 33-34 the probes' sum resid.mv*100 and sum mv.mv*100 on the sky, 35-36 on the world with a depth, 37-38 on the ship
 RWTexture2D<float2> MV : register(u3);   // for a trained pass: motion vectors, pixels, current -> previous
 RWTexture2D<float>  ZC : register(u4);   // and the depth, copied as it is
 cbuffer P : register(b0) {
@@ -288,7 +288,7 @@ uint clipSize(float3 hc, float3 hy) {
 )HLSL"
 // (adjacent literals: MSVC caps one at 16 KB)
 R"HLSL(
-groupshared uint gCount[34];
+groupshared uint gCount[40];
 // The motion vectors for a trained pass (DLAA): the same reprojection
 // the history fetch does, written out instead of used -- the pixel's
 // position last frame minus its position now, in render pixels, which
@@ -300,9 +300,9 @@ groupshared uint gCount[34];
 // line the way main's do.
 [numthreads(8, 8, 1)]
 void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
-    if (gi < 34) gCount[gi] = 0;
+    if (gi < 40) gCount[gi] = 0;
     GroupMemoryBarrierWithGroupSync();
-    uint count[34] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+    uint count[40] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
     if (id.x < (uint)size.x && id.y < (uint)size.y) {
         float2 p = float2(id.xy);
         float3 d;
@@ -384,20 +384,20 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
         }
         ZC[id.xy] = knobs.y != 0.0 ? zraw : 0.0;
     }
-    [unroll] for (int k = 0; k < 34; ++k) {
+    [unroll] for (int k = 0; k < 40; ++k) {
         if (count[k] != 0) InterlockedAdd(gCount[k], count[k]);
     }
     GroupMemoryBarrierWithGroupSync();
-    if (gi < 34) InterlockedAdd(Stats[gi], gCount[gi]);
+    if (gi < 40) InterlockedAdd(Stats[gi], gCount[gi]);
 }
 )HLSL"
 // (adjacent literals: MSVC caps one at 16 KB)
 R"HLSL(
 [numthreads(8, 8, 1)]
 void main(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
-    if (gi < 34) gCount[gi] = 0;
+    if (gi < 40) gCount[gi] = 0;
     GroupMemoryBarrierWithGroupSync();
-    uint count[34] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+    uint count[40] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
     if (id.x < (uint)size.x && id.y < (uint)size.y) {
         float2 p = float2(id.xy);
         int2 ci = int2(id.xy);
@@ -577,6 +577,14 @@ void main(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
                 InterlockedAdd(Stats[base], asuint(int(round(resid.x * 100.0))));
                 InterlockedAdd(Stats[base + 1], asuint(int(round(resid.y * 100.0))));
                 InterlockedAdd(Stats[base + 2], 1u);
+                // The match against the prediction's own motion, for a
+                // least-squares scale: with resid = k * mv the true motion
+                // was (1 + k) times the vector, k = sum(resid.mv) /
+                // sum(mv.mv) over the class. A signed mean cancels over a
+                // head that turns both ways; this does not.
+                uint base2 = sky ? 33u : (worldTaken != 0 ? 35u : 37u);
+                InterlockedAdd(Stats[base2], asuint(int(round(dot(resid, mvUsed) * 100.0))));
+                InterlockedAdd(Stats[base2 + 1], uint(round(dot(mvUsed, mvUsed) * 100.0)));
             }
         }
         if (!used) count[0] = 1;
@@ -622,11 +630,11 @@ void main(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
         O[id.xy] = float4(o, cur.a);
     }
     // One atomic per group per counter, not per pixel.
-    [unroll] for (int k = 0; k < 34; ++k) {
+    [unroll] for (int k = 0; k < 40; ++k) {
         if (count[k] != 0) InterlockedAdd(gCount[k], count[k]);
     }
     GroupMemoryBarrierWithGroupSync();
-    if (gi < 34) InterlockedAdd(Stats[gi], gCount[gi]);
+    if (gi < 40) InterlockedAdd(Stats[gi], gCount[gi]);
 }
 )HLSL";
 
@@ -841,7 +849,7 @@ struct Slot {
     bool          hadHistory = false;
 };
 constexpr int kSlots = 8;
-constexpr int kStatCount = 40;   // 33 used; a 160-byte buffer
+constexpr int kStatCount = 40;   // 39 used; a 160-byte buffer
 Slot g_slots[kSlots];
 
 void releaseSlot(Slot& q) {
@@ -893,6 +901,34 @@ uint64_t    g_classShipPix = 0, g_classShipClip = 0;
 uint64_t    g_layerPix = 0, g_brightLayerPix = 0;   // pixels, and bright pixels, with a layer's depth
 int64_t     g_probeSkyDx = 0, g_probeSkyDy = 0;
 uint64_t    g_probeSkyN = 0;
+int64_t     g_probeDot[3] = {};    // sum resid.mv * 100: sky, world with a depth, ship
+uint64_t    g_probeMm[3] = {};     // sum mv.mv * 100, the same classes
+// The rows' delta against the head's, per frame the world path had both:
+// the residual rotation's size by head-speed bucket, its regression on
+// the head's turn (a scale k: the rows turned (1 + k) times the head),
+// per axis, and on the turn's change (a lead in frames).
+double      g_rhN[3] = {}, g_rhSum[3] = {};
+double      g_rhDot = 0.0, g_rhMm = 0.0;
+double      g_rhDotAx[3] = {}, g_rhMmAx[3] = {};
+double      g_rhDotLag = 0.0, g_rhMmLag = 0.0;
+float       g_omegaPrev[3] = {};
+bool        g_omegaPrevValid = false;
+// The chooser's ambiguity: frames on which a second continuous reading
+// differed from the chosen one, and how far apart they sat.
+uint32_t    g_chooseMulti = 0;
+double      g_chooseSpreadSum = 0.0, g_chooseSpreadMax = 0.0;
+
+// A rotation as a small vector (degrees about x, y, z): the skew part,
+// scaled from sin to the angle. Exact enough under a few degrees.
+void temporalSmallRotVecDeg(const float R[9], float v[3]) {
+    const float deg = temporalRotationAngleDeg(R);
+    const float rad = deg * 3.14159265f / 180.0f;
+    const float s = sinf(rad);
+    const float scale = (s > 1e-6f ? rad / s : 1.0f) * 0.5f * (180.0f / 3.14159265f);
+    v[0] = (R[7] - R[5]) * scale;
+    v[1] = (R[2] - R[6]) * scale;
+    v[2] = (R[3] - R[1]) * scale;
+}
 constexpr float kStillDeg = 0.03f;   // under 2 deg/s at 72 Hz: tracking noise
 constexpr float kSlowDeg = 0.30f;    // under 22 deg/s: a glance
 bool     g_priceLogged = false;
@@ -964,6 +1000,10 @@ void pollSlots(ID3D11DeviceContext* ctx) {
                 g_probeSkyDx += static_cast<int32_t>(v[30]);
                 g_probeSkyDy += static_cast<int32_t>(v[31]);
                 g_probeSkyN += v[32];
+                for (int c = 0; c < 3; ++c) {
+                    g_probeDot[c] += static_cast<int32_t>(v[33 + c * 2]);
+                    g_probeMm[c] += v[34 + c * 2];
+                }
                 ++g_intervalFrames;
                 if (q.hadHistory) {
                     for (int c = 0; c < 4; ++c) {
@@ -1072,7 +1112,11 @@ struct RowsWrite {
     uint32_t    seq = 0;
     bool        valid = false;
 };
-constexpr int kRowsRing = 48;
+// 256: in space the game writes the block over a hundred times a frame
+// (114 measured 2026-09-04), and a ring of 48 had lost the frame's early
+// writes -- the eyes' among them, drawn before the reflections -- by
+// the time the frame was chosen.
+constexpr int kRowsRing = 256;
 RowsWrite   g_rowsRing[kRowsRing];
 uint32_t    g_rowsSeq = 0;           // writes ever, the ring's clock
 uint32_t    g_rowsFrame = 0;         // bumped each boundary
@@ -1118,6 +1162,8 @@ void chooseCameraRows() {
     uint32_t bestSeq = 0, fallSeq = 0;
     bool bestBound = false, fallBound = false;
     uint32_t count = 0;
+    int contIdx[kRowsRing];
+    int contN = 0;
     float rpT[9] = {};
     if (g_prevValid) {
         float rp[9];
@@ -1143,12 +1189,41 @@ void chooseCameraRows() {
             // the same frame is a staler prediction of the same head).
             const bool better = bestIdx < 0 || w.seq > bestSeq;
             if (better) { bestIdx = i; bestSeq = w.seq; bestBound = bound; }
+            contIdx[contN++] = i;
         }
         const bool fbetter = fallIdx < 0 || (bound && !fallBound) ||
                              (bound == fallBound && w.seq > fallSeq);
         if (fbetter) { fallIdx = i; fallSeq = w.seq; fallBound = bound; }
     }
     g_candSumCount += count;
+    // The ambiguity: another continuous write whose rows differ from the
+    // chosen (the same matrix written again is no ambiguity). Two cameras
+    // within three degrees of each other -- the other eye on canted
+    // panels, a pass with a stale view -- would alternate the choice and
+    // put their difference into the delta.
+    if (bestIdx >= 0) {
+        float cT[9], cr[9];
+        temporalRot3Of34(g_rowsRing[bestIdx].rows, cr);
+        temporalTranspose3(cr, cT);
+        float spread = 0.0f;
+        bool multi = false;
+        for (int k = 0; k < contN; ++k) {
+            const int i = contIdx[k];
+            if (i == bestIdx) continue;
+            if (memcmp(g_rowsRing[i].rows, g_rowsRing[bestIdx].rows, sizeof(float) * 12) == 0) continue;
+            float on[9], d[9];
+            temporalRot3Of34(g_rowsRing[i].rows, on);
+            temporalMul3(cT, on, d);
+            const float a = temporalRotationAngleDeg(d);
+            multi = true;
+            if (a > spread) spread = a;
+        }
+        if (multi) {
+            ++g_chooseMulti;
+            g_chooseSpreadSum += spread;
+            if (spread > g_chooseSpreadMax) g_chooseSpreadMax = spread;
+        }
+    }
     int pick = bestIdx;
     if (pick >= 0) {
         if (bestBound) ++g_chooseBound; else ++g_chooseOther;
@@ -1701,6 +1776,36 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                 temporalMul3(worldDelta, ht, diff);
                 diffDeg = temporalRotationAngleDeg(diff);
                 g_camHeadDiffSum += diffDeg;
+                // The residual against the head's turn, on the frames the
+                // delta is accepted: its size by head speed (a still head
+                // with a residual is noise between the two pose streams; one
+                // that grows with the speed is a scale or a lag), and the
+                // regressions that name the scale and the lead. The far
+                // plane is on this delta alone, and the sky probes read a
+                // steady fifth of a pixel off it in space (2026-09-04).
+                if (diffDeg <= 3.0f) {
+                    float rv[3], hv[3];
+                    temporalSmallRotVecDeg(diff, rv);
+                    temporalSmallRotVecDeg(deltaHead, hv);
+                    const int b = headDeg < kStillDeg ? 0 : (headDeg < kSlowDeg ? 1 : 2);
+                    g_rhN[b] += 1.0;
+                    g_rhSum[b] += diffDeg;
+                    for (int i = 0; i < 3; ++i) {
+                        g_rhDot += static_cast<double>(rv[i]) * hv[i];
+                        g_rhMm += static_cast<double>(hv[i]) * hv[i];
+                        g_rhDotAx[i] += static_cast<double>(rv[i]) * hv[i];
+                        g_rhMmAx[i] += static_cast<double>(hv[i]) * hv[i];
+                    }
+                    if (g_omegaPrevValid) {
+                        for (int i = 0; i < 3; ++i) {
+                            const double dw = static_cast<double>(hv[i]) - g_omegaPrev[i];
+                            g_rhDotLag += rv[i] * dw;
+                            g_rhMmLag += dw * dw;
+                        }
+                    }
+                    memcpy(g_omegaPrev, hv, sizeof(g_omegaPrev));
+                    g_omegaPrevValid = true;
+                }
             }
             ++g_camFrames;
             // Do the rows follow the head at all? In the cockpit they carry it;
@@ -2316,8 +2421,9 @@ void regAppend(char* buf, size_t n, size_t& used, const char* fmt, ...) {
     if (used > n) used = n;
 }
 
-bool temporalPassRegistration(char* buf, size_t n, char* buf2, size_t n2) {
+bool temporalPassRegistration(char* buf, size_t n, char* buf2, size_t n2, char* buf3, size_t n3) {
     if (buf2 && n2) buf2[0] = 0;
+    if (buf3 && n3) buf3[0] = 0;
     if (!buf || n == 0 || g_treats == 0 || g_intervalFrames == 0) return false;
     static const char* const kNames[4] = {"head, rotation only", "world, the other reading of the rows",
                                           "world, the reading in use", "head with depth"};
@@ -2429,6 +2535,10 @@ bool temporalPassRegistration(char* buf, size_t n, char* buf2, size_t n2) {
                                     static_cast<double>(g_brightPix)
                               : 0.0);
     }
+    // The third line: the probes and the rows against the head.
+    buf = buf3;
+    n = buf3 ? n3 : 0;
+    used = 0;
     if (g_probeSkyN) {
         regAppend(buf, n, used,
                   "; the history's best match sat (%+.2f, %+.2f) px from the prediction on the sky "
@@ -2448,6 +2558,39 @@ bool temporalPassRegistration(char* buf, size_t n, char* buf2, size_t n2) {
                   g_probeShipN ? static_cast<double>(g_probeShipDx) / 100.0 / static_cast<double>(g_probeShipN) : 0.0,
                   g_probeShipN ? static_cast<double>(g_probeShipDy) / 100.0 / static_cast<double>(g_probeShipN) : 0.0,
                   static_cast<unsigned long long>(g_probeShipN));
+    }
+    if (g_probeMm[0] || g_probeMm[1] || g_probeMm[2]) {
+        auto kOf = [](int c) {
+            return g_probeMm[c] ? static_cast<double>(g_probeDot[c]) / static_cast<double>(g_probeMm[c]) : 0.0;
+        };
+        auto pxOf = [](int c, uint64_t cnt) {
+            return cnt ? sqrt(static_cast<double>(g_probeMm[c]) / 100.0 / static_cast<double>(cnt)) : 0.0;
+        };
+        regAppend(buf, n, used,
+                  "; against its own vector the match scaled the motion by 1+k with k = %+.3f on the "
+                  "sky (%.1f px rms), %+.3f on the world (%.1f px), %+.3f on the ship (%.1f px) -- k "
+                  "under zero: the vector overshot the scene's turn",
+                  kOf(0), pxOf(0, g_probeSkyN), kOf(1), pxOf(1, g_probeWorldN), kOf(2), pxOf(2, g_probeShipN));
+    }
+    if (g_rhN[0] + g_rhN[1] + g_rhN[2] > 0.0) {
+        regAppend(buf, n, used,
+                  "; the rows' delta sat %.4f deg/frame from the head's with the head still (%.0f "
+                  "frames), %.4f slow (%.0f), %.4f fast (%.0f); the rows turned (1+k) times the head "
+                  "with k = %+.4f (about x %+.4f, y %+.4f, z %+.4f) and led its turn by %+.2f frames",
+                  g_rhN[0] ? g_rhSum[0] / g_rhN[0] : 0.0, g_rhN[0],
+                  g_rhN[1] ? g_rhSum[1] / g_rhN[1] : 0.0, g_rhN[1],
+                  g_rhN[2] ? g_rhSum[2] / g_rhN[2] : 0.0, g_rhN[2],
+                  g_rhMm > 0.0 ? g_rhDot / g_rhMm : 0.0,
+                  g_rhMmAx[0] > 0.0 ? g_rhDotAx[0] / g_rhMmAx[0] : 0.0,
+                  g_rhMmAx[1] > 0.0 ? g_rhDotAx[1] / g_rhMmAx[1] : 0.0,
+                  g_rhMmAx[2] > 0.0 ? g_rhDotAx[2] / g_rhMmAx[2] : 0.0,
+                  g_rhMmLag > 0.0 ? g_rhDotLag / g_rhMmLag : 0.0);
+    }
+    if (g_chooseMulti) {
+        regAppend(buf, n, used,
+                  "; on %u frames a second continuous reading differed from the chosen one, by %.2f "
+                  "deg on average and %.2f at most",
+                  g_chooseMulti, g_chooseSpreadSum / g_chooseMulti, g_chooseSpreadMax);
     }
     // The interval starts afresh: the next line judges the next stretch.
     memset(g_candPix, 0, sizeof(g_candPix));
@@ -2485,6 +2628,16 @@ bool temporalPassRegistration(char* buf, size_t n, char* buf2, size_t n2) {
     g_layerPix = g_brightLayerPix = 0;
     g_probeSkyDx = g_probeSkyDy = 0;
     g_probeSkyN = 0;
+    memset(g_probeDot, 0, sizeof(g_probeDot));
+    memset(g_probeMm, 0, sizeof(g_probeMm));
+    memset(g_rhN, 0, sizeof(g_rhN));
+    memset(g_rhSum, 0, sizeof(g_rhSum));
+    g_rhDot = g_rhMm = 0.0;
+    memset(g_rhDotAx, 0, sizeof(g_rhDotAx));
+    memset(g_rhMmAx, 0, sizeof(g_rhMmAx));
+    g_rhDotLag = g_rhMmLag = 0.0;
+    g_chooseMulti = 0;
+    g_chooseSpreadSum = g_chooseSpreadMax = 0.0;
     return true;
 }
 

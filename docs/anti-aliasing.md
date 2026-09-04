@@ -1256,6 +1256,32 @@ less than a third as much as the head (a score, with a line); and the
 rows' tiebreak among continuous writes is now the latest, since the
 frame's last view matrix is the one the eyes were drawn with.
 
+**The sky probes' first reading (6677fca, in space) put the far plane a
+fifth of a pixel off its prediction** -- (-0.22, -0.01) px over 230,000
+probes while the ship class read +0.02 in the same interval -- and the
+same flight's A/B settled where that error lives: with the depth split
+at 100 km, so that everything WITH a depth took the head's path, the
+station stopped blurring under a head turn and the skybox did not. The
+far plane takes the rows' delta whenever the world path is on, whatever
+the split; so the rows' rotation differs from the head's under a head
+turn by a small, steady amount, enough to trail a station's lights and
+the Milky Way's clouds over ten frames and too small for the
+degrees-per-frame figure to show. Three instruments now name it: the
+rows' residual against the head by head-speed bucket, with a regression
+that gives the scale (the rows turned 1+k times the head) per axis and
+a lead in frames; the probes' least-squares scale per class (a signed
+mean cancels over a head that turns both ways, a regression on the
+vector does not); and the chooser's ambiguity, the frames on which a
+second continuous write differed from the chosen and by how much. The
+write ring grew from 48 to 256, since the game writes the block 114
+times a frame in space and the eyes' early writes had fallen out of it
+before the frame was chosen; and the head's delta is now composed into
+each eye's frame through the eye-to-head rotation (a no-op on parallel
+panels, logged once as the cant). The no-build A/B for the flight:
+`temporal_aa_ship_metres = 0` turns the world path off entirely, so the
+sky reprojects by the head's own delta -- a clean sky there convicts
+the rows, a smeared one the game's own sky.
+
 ## Feature C — texture LOD bias, the small lever
 
 Not all shimmer is geometry. Detail maps and normal maps sampled a mip

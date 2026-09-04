@@ -42,6 +42,7 @@ struct State {
 
     PFN_EdvrTemporalAa fn = nullptr;
     PFN_EdvrTemporalAaNoteHead fnHead = nullptr;   // the head note, for the world path
+    bool cantNoted = false;                          // the eyes' cant, logged once
     bool fnTried = false;
 
     // The jitter: the frame counter it is drawn from, this frame's offset
@@ -471,6 +472,33 @@ void* temporalAaTreat(vr::EVREye eye, void* handle,
             temporalHeadTranslation(s.prevPose, s.curPose, offThis, tv);
             temporalHeadTranslation(s.prevPose, s.curPose, offOther, tvSwapped);
             haveTv = true;
+            // The eye's cant. The shader applies the delta to directions in
+            // the EYE's frame, which on canted panels is the head's frame
+            // turned by GetEyeToHeadTransform's rotation Re: the delta there
+            // is Re^T delta Re and the translation term Re^T tv (a pitch of
+            // the head is not a pitch of a canted eye). Parallel panels make
+            // Re the identity and this a no-op; the angles are logged once
+            // so the log says which headset this is (2026-09-04).
+            float Re[9], ReT[9], tmp[9], t2[3];
+            temporalRot3Of34(e2h[e], Re);
+            temporalTranspose3(Re, ReT);
+            temporalMul3(ReT, delta, tmp);
+            temporalMul3(tmp, Re, delta);
+            temporalApply3(ReT, tv, t2);
+            memcpy(tv, t2, sizeof(tv));
+            temporalApply3(ReT, tvSwapped, t2);
+            memcpy(tvSwapped, t2, sizeof(tvSwapped));
+            if (!s.cantNoted) {
+                s.cantNoted = true;
+                float RL[9], RR[9];
+                temporalRot3Of34(e2h[0], RL);
+                temporalRot3Of34(e2h[1], RR);
+                Log::get().note("temporal aa: the eyes sit %.2f (left) and %.2f (right) degrees from "
+                                "the head's frame -- the cant, zero on parallel panels; the head's delta "
+                                "is composed into each eye's frame.",
+                                static_cast<double>(temporalRotationAngleDeg(RL)),
+                                static_cast<double>(temporalRotationAngleDeg(RR)));
+            }
         }
         if (!systemHookNearFar(&nearZ, &farZ)) nearZ = farZ = 0.0f;
     }
