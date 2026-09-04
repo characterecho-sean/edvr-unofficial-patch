@@ -1113,6 +1113,24 @@ had been smearing the world on every dropped frame. The registration
 line says how the choice went (bound, another block's, a resync, none)
 and how often the carry ran.
 
+**The fourth flight (e2d93db) made the choice work -- the bound block's
+rows on 1,795 of 1,800 frames in space, no drops, no carries -- and the
+smear REVERSED direction.** With half the frames head-only the history
+trailed the truth; with every frame carrying the ship's delta under one
+reading of the rows it leads, which is what an inverted reading does.
+The docked check cannot catch that: with the ship still its delta is the
+identity and the composition collapses to the head's under either
+reading. So the build after adds the instruments that settle it: the
+world path reads the rows either way (`temporal_aa_view_transpose`, live
+on the trained path for an A/B by eye), the own pass judges BOTH
+readings composed with the head as candidates 2 (in use) and 1 (the
+other) on its registration line while the ship turns, and
+`temporal_aa_debug = motion` paints each pixel's fetch offset into the
+eye image (red right, green down, mid-grey still, the world path in
+blue) so a skybox that leads or trails the turn is a colour the eye can
+read; `error` paints the history's distance from the frame. The menu's
+wall, depthless, gets `temporal_aa_menu_metres` as an assumed depth.
+
 ## Feature C — texture LOD bias, the small lever
 
 Not all shimmer is geometry. Detail maps and normal maps sampled a mip
