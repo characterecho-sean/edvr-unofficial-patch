@@ -916,6 +916,14 @@ bool        g_omegaPrevValid = false;
 // The chooser's ambiguity: frames on which a second continuous reading
 // differed from the chosen one, and how far apart they sat.
 uint32_t    g_chooseMulti = 0;
+// The rows' translation against the head's, per axis, on frames the ship
+// stood still (under 2 cm in the rows): the sign says whether the frame
+// change is the z flip (+1, +1, +1 after it) or a half turn (-1, -1, -1).
+double      g_tvDot[3] = {}, g_tvMm[3] = {};
+uint32_t    g_tvFrames = 0;
+// The previous frame's rows written again this frame (the game's own
+// last-view block): skipped by the chooser, counted here.
+uint32_t    g_twinFrames = 0;
 double      g_chooseSpreadSum = 0.0, g_chooseSpreadMax = 0.0;
 
 // A rotation as a small vector (degrees about x, y, z): the skew part,
@@ -1164,6 +1172,9 @@ void chooseCameraRows() {
     uint32_t count = 0;
     int contIdx[kRowsRing];
     int contN = 0;
+    int twinIdx = -1;
+    uint32_t twinSeq = 0;
+    bool twinBound = false;
     float rpT[9] = {};
     if (g_prevValid) {
         float rp[9];
@@ -1183,6 +1194,14 @@ void chooseCameraRows() {
             continuous = temporalRotationAngleDeg(d) < 3.0f;
         }
         if (continuous) {
+            // A write identical to last frame's chosen rows is the game's
+            // own last-view block (nearly every frame in space carried one,
+            // a head-turn's angle from the current; 2026-09-04): kept only
+            // as the fallback, for a camera that truly stood still.
+            if (g_prevValid && memcmp(w.rows, g_prevRows, sizeof(w.rows)) == 0) {
+                if (twinIdx < 0 || w.seq > twinSeq) { twinIdx = i; twinSeq = w.seq; twinBound = bound; }
+                continue;
+            }
             // The LATEST continuous write, whichever object: continuity has
             // already excluded the other cameras, and the frame's last view
             // matrix is the one the eyes were drawn with (an earlier write of
@@ -1196,6 +1215,10 @@ void chooseCameraRows() {
         if (fbetter) { fallIdx = i; fallSeq = w.seq; fallBound = bound; }
     }
     g_candSumCount += count;
+    if (twinIdx >= 0) {
+        if (bestIdx >= 0) ++g_twinFrames;
+        else { bestIdx = twinIdx; bestSeq = twinSeq; bestBound = twinBound; }
+    }
     // The ambiguity: another continuous write whose rows differ from the
     // chosen (the same matrix written again is no ambiguity). Two cameras
     // within three degrees of each other -- the other eye on canted
@@ -1756,6 +1779,23 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                 temporalApply3(RnT, colN, cn);
                 for (int i = 0; i < 3; ++i) camMove[i] = cp[i] - cn[i];
             }
+            // The game's view space runs z forward (DirectX), the runtime's
+            // eye space z back. A rotation read in the one and applied in
+            // the other has its pitch and yaw reversed and its roll kept,
+            // which is exactly what the regression measured: over a dozen
+            // intervals in space the rows turned -1 times the head about x
+            // and y and +1 about z (k = -2, -2, 0; 2026-09-04), and the far
+            // plane, on this delta alone, moved the wrong way by the head's
+            // whole turn -- the sky's smear, and the station's under a head
+            // turn, both gone with the world path off. Conjugating by the
+            // z flip carries the delta into the eye's frame; the translation
+            // term takes the same flip (a reflection, not a half turn: the
+            // still-ship regression on the third line says which).
+            W[2] = -W[2];
+            W[5] = -W[5];
+            W[6] = -W[6];
+            W[7] = -W[7];
+            tv[2] = -tv[2];
         };
         if (candValid[2]) {
             float camMove[3], otherW[9], otherTv[3], otherMove[3];
@@ -1806,6 +1846,13 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     memcpy(g_omegaPrev, hv, sizeof(g_omegaPrev));
                     g_omegaPrevValid = true;
                 }
+            }
+            if (headTrans && diffDeg <= 3.0f && move < 0.02) {
+                for (int i = 0; i < 3; ++i) {
+                    g_tvDot[i] += static_cast<double>(tvCam[i]) * headTrans[i];
+                    g_tvMm[i] += static_cast<double>(headTrans[i]) * headTrans[i];
+                }
+                ++g_tvFrames;
             }
             ++g_camFrames;
             // Do the rows follow the head at all? In the cockpit they carry it;
@@ -2574,9 +2621,9 @@ bool temporalPassRegistration(char* buf, size_t n, char* buf2, size_t n2, char* 
     }
     if (g_rhN[0] + g_rhN[1] + g_rhN[2] > 0.0) {
         regAppend(buf, n, used,
-                  "; the rows' delta sat %.4f deg/frame from the head's with the head still (%.0f "
-                  "frames), %.4f slow (%.0f), %.4f fast (%.0f); the rows turned (1+k) times the head "
-                  "with k = %+.4f (about x %+.4f, y %+.4f, z %+.4f) and led its turn by %+.2f frames",
+                  "; the rows' delta sat %.4f deg/frame from the head's still (%.0f frames), %.4f "
+                  "slow (%.0f), %.4f fast (%.0f); the rows turned (1+k) times the head, k = %+.3f "
+                  "(x %+.3f, y %+.3f, z %+.3f), leading by %+.2f frames",
                   g_rhN[0] ? g_rhSum[0] / g_rhN[0] : 0.0, g_rhN[0],
                   g_rhN[1] ? g_rhSum[1] / g_rhN[1] : 0.0, g_rhN[1],
                   g_rhN[2] ? g_rhSum[2] / g_rhN[2] : 0.0, g_rhN[2],
@@ -2586,11 +2633,21 @@ bool temporalPassRegistration(char* buf, size_t n, char* buf2, size_t n2, char* 
                   g_rhMmAx[2] > 0.0 ? g_rhDotAx[2] / g_rhMmAx[2] : 0.0,
                   g_rhMmLag > 0.0 ? g_rhDotLag / g_rhMmLag : 0.0);
     }
-    if (g_chooseMulti) {
+    if (g_tvFrames) {
+        regAppend(buf, n, used,
+                  "; with the ship still (%u frames) the rows' translation followed the head's by "
+                  "(%+.2f, %+.2f, %+.2f) per axis",
+                  g_tvFrames,
+                  g_tvMm[0] > 0.0 ? g_tvDot[0] / g_tvMm[0] : 0.0,
+                  g_tvMm[1] > 0.0 ? g_tvDot[1] / g_tvMm[1] : 0.0,
+                  g_tvMm[2] > 0.0 ? g_tvDot[2] / g_tvMm[2] : 0.0);
+    }
+    if (g_chooseMulti || g_twinFrames) {
         regAppend(buf, n, used,
                   "; on %u frames a second continuous reading differed from the chosen one, by %.2f "
-                  "deg on average and %.2f at most",
-                  g_chooseMulti, g_chooseSpreadSum / g_chooseMulti, g_chooseSpreadMax);
+                  "deg on average and %.2f at most; last frame's rows came again on %u",
+                  g_chooseMulti, g_chooseMulti ? g_chooseSpreadSum / g_chooseMulti : 0.0,
+                  g_chooseSpreadMax, g_twinFrames);
     }
     // The interval starts afresh: the next line judges the next stretch.
     memset(g_candPix, 0, sizeof(g_candPix));
@@ -2638,6 +2695,10 @@ bool temporalPassRegistration(char* buf, size_t n, char* buf2, size_t n2, char* 
     g_rhDotLag = g_rhMmLag = 0.0;
     g_chooseMulti = 0;
     g_chooseSpreadSum = g_chooseSpreadMax = 0.0;
+    memset(g_tvDot, 0, sizeof(g_tvDot));
+    memset(g_tvMm, 0, sizeof(g_tvMm));
+    g_tvFrames = 0;
+    g_twinFrames = 0;
     return true;
 }
 

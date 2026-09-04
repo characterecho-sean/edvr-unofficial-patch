@@ -1282,6 +1282,30 @@ panels, logged once as the cant). The no-build A/B for the flight:
 sky reprojects by the head's own delta -- a clean sky there convicts
 the rows, a smeared one the game's own sky.
 
+**The instrument's first flight (a9f55f8) named the bug outright.** With
+the world path off the sky stopped smearing and the station rendered
+better, leaving only the station's panels blurring under a SHIP turn,
+which the head's delta cannot know. And the regression read, over a
+dozen intervals in space, k = -2 about x and y and 0 about z: the rows
+turned minus one times the head in pitch and yaw and plus one in roll
+(the menu, whose camera stands still, read exactly -1 on all three).
+Pitch and yaw reversed with roll kept is a rotation read in a z-forward
+view space and applied in a z-backward one -- the game's is DirectX, z
+forward; the runtime's eye space runs z back. The far plane, on the
+rows' delta alone, had moved the wrong way by the head's whole turn,
+and the probes' four-pixel window saturating both ways is what made
+that read as a fifth of a pixel. The rows' delta and its translation
+term are now conjugated by the z flip into the eye's frame; a
+still-ship regression of the rows' translation on the head's (+1 on
+every axis if the flip is a reflection, -1 if it is a half turn) checks
+the translation's sign, since the rotation cannot tell the two apart.
+The same flight showed a second continuous write on nearly every frame,
+a head-turn's angle from the chosen: the game's own last-view block,
+which the chooser now skips when its rows equal last frame's pick
+(kept as the fallback for a camera that truly stood still). The eyes
+sit at zero degrees on the Pimax, so the cant composition is a no-op
+there.
+
 ## Feature C — texture LOD bias, the small lever
 
 Not all shimmer is geometry. Detail maps and normal maps sampled a mip
