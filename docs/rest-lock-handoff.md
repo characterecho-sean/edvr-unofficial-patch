@@ -194,9 +194,10 @@ its own definition for the sharpen or DLSS work, keep one.
   "still" bucket (under 0.03 deg/frame) should show its clip share fall
   toward the no-motion floor with the lock on. That line is the cleanest
   instrument you have for "the merge is right".
-- **`advanced.temporal_aa_snap` (0.15 px) becomes largely moot.** The hold
-  removes the sub-pixel drift the snap was for. Leave it, measure whether
-  it ever fires, then decide.
+- **`advanced.temporal_aa_snap` is off (0) since 2026-09-04.** The hold
+  removes the sub-pixel drift the snap was for, and the snap turned out to
+  accumulate a lag on slowly drifting content (the review of that evening,
+  docs/review-temporal-far-warp-darkness-2026-09-04.md, F4).
 - **Depth reprojection (v2) and the DLSS / DLAA modes** take their motion
   from the noted poses, so they inherit the fix through the same call.
 - **Withholds and the theater.** `forwardSubmit` wraps whatever texture

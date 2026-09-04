@@ -255,9 +255,16 @@ bool fetchHistoryT(float2 p, float3 r0, float3 r1, float3 r2, float3 tv,
     // treated as still, and the history is fetched at its own texel
     // instead of resampled a hair off it. Tracking noise alone moves a
     // 3096-wide eye by a few tenths of a pixel a frame, and resampling at
-    // such offsets every frame is the blur that compounds; the snap's
-    // error is bounded by its threshold and never accumulates past it,
-    // since each frame re-registers the history afresh. Off at 0.
+    // such offsets every frame is the blur that compounds. OFF by default
+    // since 2026-09-04: the snap's error is NOT bounded by its threshold.
+    // Each frame re-registers by the frame's delta, not by the accumulated
+    // error, so motion the snap suppresses accumulates in the history to a
+    // steady lag of blend / (1 - blend) times the suppressed motion, about
+    // 0.7 px at the 0.9 blend for content drifting under the threshold --
+    // where distant content sits under a slow ship turn -- and the lag
+    // differs across the image (the review of 2026-09-04, F4). The rest
+    // lock (experimental.shimmer_rest) holds the pose at rest, which is
+    // what the snap was for. Off at 0.
     // A SMOOTH snap: the fetch offset is scaled down continuously as it
     // shrinks below the threshold, so neighbouring pixels on either side
     // of it do not resample differently from frame to frame. The hard
@@ -740,6 +747,7 @@ struct EyeState {
     ID3D11UnorderedAccessView* dlDepthUav = nullptr;
     ID3D11Texture2D*           dlOut = nullptr;
     ID3D11UnorderedAccessView* dlOutUav = nullptr;   // the debug motion view paints here
+    ID3D11Texture2D*           dlSubmit = nullptr;  // NVIDIA's frame copied into the game's own format: what goes out
     uint32_t                   dlW = 0, dlH = 0;
     uint32_t                   dlOutW = 0, dlOutH = 0;
     ID3D11Texture2D*           copyTex = nullptr;  // the copy-through, for a source that refuses a view
@@ -796,6 +804,7 @@ void releaseDl(EyeState& e) {
     if (e.dlDepth) { e.dlDepth->Release(); e.dlDepth = nullptr; }
     if (e.dlOutUav) { e.dlOutUav->Release(); e.dlOutUav = nullptr; }
     if (e.dlOut) { e.dlOut->Release(); e.dlOut = nullptr; }
+    if (e.dlSubmit) { e.dlSubmit->Release(); e.dlSubmit = nullptr; }
     e.dlW = e.dlH = 0;
     e.dlOutW = e.dlOutH = 0;
     e.dlHaveHistory = false;
@@ -1099,7 +1108,7 @@ bool     g_wanted = false;
 bool     g_viewTransposed = false;
 bool     g_filterCurrent = true;   // advanced.temporal_aa_current = filtered | raw
 float    g_historyC = 0.5f;        // advanced.temporal_aa_history_sharp: the cubic's C
-float    g_snapPx = 0.15f;         // advanced.temporal_aa_snap: the rest snap, pixels
+float    g_snapPx = 0.0f;          // advanced.temporal_aa_snap: the rest snap, pixels (0 = off, the default since 2026-09-04)
 float    g_shipMetres = 100.0f;    // advanced.temporal_aa_ship_metres: the world/ship split (0 off)
 int      g_debugMode = 0;          // advanced.temporal_aa_debug: 0 off, 1 motion, 2 error
 float    g_menuMetres = 0.0f;      // advanced.temporal_aa_menu_metres: a depth for depthless pixels in a menu-like scene
@@ -1145,6 +1154,7 @@ float       g_lastGoodC[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};   // the last accepted
 float       g_lastGoodTv[3] = {};                            // ...and its translation term
 bool        g_lastGoodValid = false;
 uint32_t    g_camCarried = 0;        // frames the ship's delta was carried over a drop
+uint32_t    g_camCarriedJump = 0;    // ...of which carried a translation over 50 m: zero by construction
 float    g_curRows[12] = {};
 bool     g_curValid = false;
 bool     g_curLatched = false;
@@ -1202,11 +1212,22 @@ void chooseCameraRows() {
                 if (twinIdx < 0 || w.seq > twinSeq) { twinIdx = i; twinSeq = w.seq; twinBound = bound; }
                 continue;
             }
-            // The LATEST continuous write, whichever object: continuity has
-            // already excluded the other cameras, and the frame's last view
-            // matrix is the one the eyes were drawn with (an earlier write of
-            // the same frame is a staler prediction of the same head).
-            const bool better = bestIdx < 0 || w.seq > bestSeq;
+            // The BOUND object's latest continuous write, else the latest
+            // continuous write of any object. The bound object is the scene
+            // camera's by construction (the latch fires at the frame's first
+            // draw into the scene pair's depth, depth_probe.cpp), and within
+            // one object the frame's last view matrix is the one the eyes
+            // were drawn with (an earlier write of the same frame is a staler
+            // prediction of the same head). Latest-of-any-object (6677fca)
+            // took another block's write on half the frames of every
+            // supercruise and arrival interval of 2026-09-04, and the rows
+            // then turned a quarter to a half of the head, lagging: a stale
+            // camera within three degrees, written after the scene's own.
+            // Steady space flight never showed it, since the bound block's
+            // write was the latest there (docs/review-temporal-far-warp-
+            // darkness-2026-09-04.md, F2).
+            const bool better = bestIdx < 0 || (bound && !bestBound) ||
+                                (bound == bestBound && w.seq > bestSeq);
             if (better) { bestIdx = i; bestSeq = w.seq; bestBound = bound; }
             contIdx[contN++] = i;
         }
@@ -1889,6 +1910,19 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
             // its place (a far better guess than the head alone, which
             // smeared the world on every dropped frame). A jump over 50 m
             // is the floating origin moving: only the translation is dropped.
+            // The jump is dropped BEFORE the last-good store, so a jump never
+            // becomes the translation a later dropped frame carries: stored
+            // first, a jump of hundreds of metres to tens of kilometres was
+            // carried into the next dropped frame and moved every pixel with
+            // a depth on the world path by it for one frame (the review of
+            // 2026-09-04, F3). A jump frame keeps the last plausible
+            // translation as its last-good, and a carried figure over 50 m is
+            // counted so the invariant has a witness on the line.
+            const bool jump = move >= 50.0;
+            if (jump) {
+                for (int i = 0; i < 3; ++i) tvCam[i] = 0.0f;
+                ++g_camDropMove;
+            }
             if (diffDeg > 3.0f) {
                 ++g_camDropRot;
                 if (g_lastGoodValid) {
@@ -1896,18 +1930,18 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     memcpy(tvCam, g_lastGoodTv, sizeof(tvCam));
                     memcpy(cand[2], worldDelta, sizeof(worldDelta));
                     ++g_camCarried;
+                    const double carried = sqrt(static_cast<double>(tvCam[0]) * tvCam[0] +
+                                                static_cast<double>(tvCam[1]) * tvCam[1] +
+                                                static_cast<double>(tvCam[2]) * tvCam[2]);
+                    if (carried >= 50.0) ++g_camCarriedJump;
                 } else {
                     candValid[2] = false;
                     worldValid = false;
                 }
             } else {
                 memcpy(g_lastGoodC, worldDelta, sizeof(g_lastGoodC));
-                memcpy(g_lastGoodTv, tvCam, sizeof(g_lastGoodTv));
+                if (!jump) memcpy(g_lastGoodTv, tvCam, sizeof(g_lastGoodTv));
                 g_lastGoodValid = true;
-            }
-            if (move >= 50.0) {
-                for (int i = 0; i < 3; ++i) tvCam[i] = 0.0f;
-                ++g_camDropMove;
             }
         }
 
@@ -2031,7 +2065,17 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         ctx->ClearUnorderedAccessViewUint(g_statsUav, zeros);
 
         bool usedDlaa = false;
-        if ((flags & 2u) != 0) {
+        // The trained path copies the colour into R8G8B8A8_UNORM, which is
+        // only legal within that family (the review of 2026-09-04, F9): any
+        // other family runs the pass's own history and says so once.
+        if ((flags & 2u) != 0 && fmtIndex != 0 && !g_dlaaFailNoted) {
+            g_dlaaFailNoted = true;
+            Log::get().note(
+                "temporal aa: dlaa was asked for, but the game submits %s and NVIDIA is "
+                "handed R8G8B8A8, a different family. The pass's own history runs instead.",
+                formatName(sd.Format));
+        }
+        if ((flags & 2u) != 0 && fmtIndex == 0) {
             const char* why = "";
             if (!dlaaAvailable(dev, &why)) {
                 if (!g_dlaaFailNoted) {
@@ -2066,7 +2110,17 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                                    &e.dlDepth, nullptr, &e.dlDepthUav) &&
                            makeTex(dev, oW, oH, DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM,
                                    D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS,
-                                   &e.dlOut, nullptr, &e.dlOutUav);
+                                   &e.dlOut, nullptr, &e.dlOutUav) &&
+                           // ...and the texture that goes OUT, in the game's own format
+                           // (typeless when the game's is), so the compositor is told the
+                           // same kind of texture on every path. NVIDIA writes a typed
+                           // UNORM, which the own pass never hands out: a typed texture
+                           // admits only a typed view at the compositor where a typeless
+                           // one admits an sRGB view, and that was the one uniform
+                           // brightness change the trained path could have made (the
+                           // review of 2026-09-04, D1).
+                           makeTex(dev, oW, oH, sd.Format, viewFmt, D3D11_BIND_SHADER_RESOURCE,
+                                   &e.dlSubmit, nullptr, nullptr);
                     if (made) {
                         e.dlW = w;
                         e.dlH = h;
@@ -2169,6 +2223,9 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                                 why);
                         }
                     }
+                    // The frame that goes out, in the game's own format (dlSubmit
+                    // says why). Inside the timed region, so the price is honest.
+                    if (usedDlaa) ctx->CopyResource(e.dlSubmit, e.dlOut);
                 }
             }
         }
@@ -2244,7 +2301,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
             // The trained pass's frame goes out; the pass's own history is
             // marked broken so a switch back starts afresh.
             e.haveHistory = false;
-            result = e.dlOut;
+            result = e.dlSubmit;
             ++g_treats;
             ++g_dlaaTreats;
             if (!g_trainedNoted) {
@@ -2256,7 +2313,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     "%d)%s, %ux%u per eye; NVIDIA is handed the colour as R8G8B8A8_UNORM, "
                     "the depth as R32_FLOAT (%s), the motion as R16G16_FLOAT in render "
                     "pixels and this frame's jitter (%+.3f, %+.3f) px, and answers at "
-                    "%ux%u.",
+                    "%ux%u, handed on in the game's own format.",
                     formatName(sd.Format), static_cast<int>(sd.Format),
                     viaCopy ? " (copied out first: the source refuses a shader view)" : "",
                     w, h,
@@ -2316,7 +2373,7 @@ void temporalPassConfigure(Config& cfg) {
     if (c < 0.5f) c = 0.5f;
     if (c > 1.0f) c = 1.0f;
     g_historyC = c;
-    float snap = cfg.getFloat("advanced.temporal_aa_snap", 0.15f);
+    float snap = cfg.getFloat("advanced.temporal_aa_snap", 0.0f);
     if (!std::isfinite(snap) || snap < 0.0f) snap = 0.0f;
     if (snap > 0.5f) snap = 0.5f;
     g_snapPx = snap;
@@ -2561,8 +2618,9 @@ bool temporalPassRegistration(char* buf, size_t n, char* buf2, size_t n2, char* 
     if (g_camDropRot || g_camDropMove) {
         regAppend(buf, n, used,
                   "; the camera's delta was dropped on %u frames as another camera's (over 3 "
-                  "deg from the head's) and its translation on %u as a jump (over 50 m)",
-                  g_camDropRot, g_camDropMove);
+                  "deg from the head's) and its translation on %u as a jump (over 50 m); a "
+                  "jump was carried on %u (zero by construction)",
+                  g_camDropRot, g_camDropMove, g_camCarriedJump);
     }
     if (g_classWorldPix || g_classShipPix) {
         regAppend(buf, n, used,
@@ -2676,6 +2734,7 @@ bool temporalPassRegistration(char* buf, size_t n, char* buf2, size_t n2, char* 
     g_chooseResync = 0;
     g_chooseNone = 0;
     g_camCarried = 0;
+    g_camCarriedJump = 0;
     g_probeWorldDx = g_probeWorldDy = 0;
     g_probeWorldN = 0;
     g_probeShipDx = g_probeShipDy = 0;

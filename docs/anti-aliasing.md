@@ -1343,6 +1343,34 @@ the one is above the other. `advanced.shimmer_rest_still` and
 noisy tracker's floor buys back the hold without a lag on slow turns is
 the next flight's question.
 
+**The review of the same evening (docs/review-temporal-far-warp-darkness-2026-09-04.md),
+and what it changed.** Asked what warps a station several kilometres off
+and what could make the game read darker than stock. The far path itself
+held: the station read its true depth (4.9 to 7.2 km in the scene pair's
+map), the rows turned with the head within six hundredths in steady space,
+and nothing is lost at that range. What warps it is the assumed HUD
+distance, which the live ini and the tester handout had at 2.4 m: every
+bright pixel with bright neighbours beyond eight metres -- a station's lit
+faces, its lights, a two-pixel star -- was reprojected at 2.4 m on the
+head's path while the dark faces beside it took the world's, and the
+trained path's depth copy said 2.4 m too; a heat-haze on lit structure at
+long range, worse on a noisier tracker. The handout and the live ini now
+leave it at 0, and the key's comment names the station. Four things were
+built: the row chooser prefers the bound object's continuous write again
+(latest-of-any-object had taken a stale block on half the frames of every
+supercruise and arrival interval, the rows turning a quarter to a half of
+the head there); a floating-origin jump is dropped before it can be stored
+as the last-good translation and carried into a later dropped frame; the
+trained path hands out NVIDIA's frame copied into the game's own format,
+so the compositor is told a typeless texture on every path (the one
+uniform brightness change the trained path could have made), and refuses
+any family but R8G8B8A8 with a line; and the rest snap defaults to 0,
+since a per-pixel snap accumulates a lag of about nine times the motion it
+suppresses (up to 0.7 px on slowly drifting distant content) and the rest
+lock now does its job at rest. Unflown as of the commit; the registration
+line's "another's", "carried" and k figures are the verification for the
+first two, a docked panel and the main menu for the third.
+
 ## Feature C — texture LOD bias, the small lever
 
 Not all shimmer is geometry. Detail maps and normal maps sampled a mip
