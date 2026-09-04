@@ -1100,7 +1100,7 @@ bool     g_viewTransposed = false;
 bool     g_filterCurrent = true;   // advanced.temporal_aa_current = filtered | raw
 float    g_historyC = 0.5f;        // advanced.temporal_aa_history_sharp: the cubic's C
 float    g_snapPx = 0.15f;         // advanced.temporal_aa_snap: the rest snap, pixels
-float    g_shipMetres = 40.0f;     // advanced.temporal_aa_ship_metres: the world/ship split (0 off)
+float    g_shipMetres = 100.0f;    // advanced.temporal_aa_ship_metres: the world/ship split (0 off)
 int      g_debugMode = 0;          // advanced.temporal_aa_debug: 0 off, 1 motion, 2 error
 float    g_menuMetres = 0.0f;      // advanced.temporal_aa_menu_metres: a depth for depthless pixels in a menu-like scene
 float    g_hudMetres = 0.0f;       // advanced.temporal_aa_hud_metres: an assumed depth for bright text-like pixels with none (0 off)
@@ -2320,7 +2320,7 @@ void temporalPassConfigure(Config& cfg) {
     if (!std::isfinite(snap) || snap < 0.0f) snap = 0.0f;
     if (snap > 0.5f) snap = 0.5f;
     g_snapPx = snap;
-    float ship = cfg.getFloat("advanced.temporal_aa_ship_metres", 40.0f);
+    float ship = cfg.getFloat("advanced.temporal_aa_ship_metres", 100.0f);
     if (!std::isfinite(ship) || ship < 0.0f) ship = 0.0f;
     if (ship > 100000.0f) ship = 100000.0f;
     g_shipMetres = ship;
