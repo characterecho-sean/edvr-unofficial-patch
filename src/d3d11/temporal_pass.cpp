@@ -2080,7 +2080,8 @@ void regAppend(char* buf, size_t n, size_t& used, const char* fmt, ...) {
     if (used > n) used = n;
 }
 
-bool temporalPassRegistration(char* buf, size_t n) {
+bool temporalPassRegistration(char* buf, size_t n, char* buf2, size_t n2) {
+    if (buf2 && n2) buf2[0] = 0;
     if (!buf || n == 0 || g_treats == 0 || g_intervalFrames == 0) return false;
     static const char* const kNames[4] = {"head, rotation only", "world, the other reading of the rows",
                                           "world, the reading in use", "head with depth"};
@@ -2163,6 +2164,11 @@ bool temporalPassRegistration(char* buf, size_t n) {
                   chosen ? static_cast<double>(g_candSumCount) / static_cast<double>(chosen) : 0.0,
                   g_chooseBound, g_chooseOther, g_chooseResync, g_chooseNone, g_camCarried);
     }
+    // The second line: the logger caps a line at 1200 characters, and the
+    // probes' figures fell off the end of the first (2026-09-04).
+    buf = buf2;
+    n = buf2 ? n2 : 0;
+    used = 0;
     if (g_camDropRot || g_camDropMove) {
         regAppend(buf, n, used,
                   "; the camera's delta was dropped on %u frames as another camera's (over 3 "

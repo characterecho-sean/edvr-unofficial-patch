@@ -4372,9 +4372,11 @@ void vScreenFrameBoundary() {
                     treated, avgMs, maxMs, rejectPct, clipPct, fps);
                 // The registration instrument's verdict so far, its own
                 // line: which candidate delta the history lands best with.
-                char reg[2000];
-                if (temporalPassRegistration(reg, sizeof(reg))) {
+                char reg[1150];
+                char reg2[1150];
+                if (temporalPassRegistration(reg, sizeof(reg), reg2, sizeof(reg2))) {
                     Log::get().note("temporal aa registration: %s", reg);
+                    if (reg2[0]) Log::get().note("temporal aa registration, the rest: %s", reg2);
                 }
             }
         }
