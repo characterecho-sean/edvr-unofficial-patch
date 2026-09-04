@@ -1094,6 +1094,25 @@ targets read empty, so its geometry is drawn without a depth write and
 reprojects as the far plane; a menu-only depth assumption is the
 remaining lever there.
 
+**Its third flight (d2d66f5) settled the composition and moved the
+fault.** Docked, the composed world delta read 0.04 to 0.14 degrees a
+frame against the head's whichever way the head turned, so the
+composition holds; and the menu's hangar wall no longer detaches. In
+space the latch found the block bound on every frame and the delta was
+STILL dropped on half of them, 75 degrees off on those: the block is
+right, the write is wrong -- the game draws into the scene's depth
+before it rewrites the block with the main camera on the frames where
+it has just rendered a reflection face. So the rows are now chosen at
+the frame's first treat, from ALL the frame's writes, by continuity:
+the write whose absolute orientation follows last frame's chosen rows
+within 3 degrees (a ship turns under 2 a frame; a reflection face or a
+shadow cascade sits tens away), the bound object's preferred; and a
+frame that still fails the plausibility check carries last frame's
+accepted ship delta instead of falling back to the head alone, which
+had been smearing the world on every dropped frame. The registration
+line says how the choice went (bound, another block's, a resync, none)
+and how often the carry ran.
+
 ## Feature C — texture LOD bias, the small lever
 
 Not all shimmer is geometry. Detail maps and normal maps sampled a mip

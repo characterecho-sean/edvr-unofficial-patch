@@ -804,26 +804,38 @@ float    g_snapPx = 0.15f;         // advanced.temporal_aa_snap: the rest snap, 
 float    g_shipMetres = 40.0f;     // advanced.temporal_aa_ship_metres: the world/ship split (0 off)
 bool     g_warmNoted = false;
 
-// The camera capture: the rows of every scene-block-sized buffer the game
-// wrote (per object, the newest few), the rows latched at this frame's
-// first scene draw from the object bound then, and last frame's.
-struct RowsEntry {
+// The camera capture: a ring of the last writes of every scene-block-sized
+// buffer the game maps (the object, the rows, the frame, the order), the
+// object bound at this frame's first scene draw, the rows CHOSEN for the
+// frame (chooseCameraRows), and last frame's.
+struct RowsWrite {
     const void* buf = nullptr;
     float       rows[12] = {};
     uint32_t    frame = 0;
+    uint32_t    seq = 0;
     bool        valid = false;
 };
-constexpr int kRowsEntries = 8;
-RowsEntry   g_rowsTable[kRowsEntries];
-uint32_t    g_rowsFrame = 0;         // bumped each boundary, for recency
-const void* g_rowsLast = nullptr;    // the newest write's object, the fallback
+constexpr int kRowsRing = 48;
+RowsWrite   g_rowsRing[kRowsRing];
+uint32_t    g_rowsSeq = 0;           // writes ever, the ring's clock
+uint32_t    g_rowsFrame = 0;         // bumped each boundary
+const void* g_boundBuf = nullptr;    // the object bound at this frame's first scene draw
+bool        g_boundSeen = false;
 uint32_t    g_rowsWrites = 0;        // writes this frame
 uint64_t    g_rowsWritesSum = 0;     // ...summed over the interval
 uint32_t    g_rowsFramesSum = 0;
-uint32_t    g_latchMatched = 0;      // latches that found the block bound
-uint32_t    g_latchFallback = 0;     // ...that took the newest write instead
-int         g_latchSlotVs = -1;      // where the block was found, for the log
+uint64_t    g_candSumCount = 0;      // this frame's candidate writes, summed
+uint32_t    g_chooseBound = 0;       // frames whose chosen rows were the bound object's
+uint32_t    g_chooseOther = 0;       // ...another object's, by continuity
+uint32_t    g_chooseResync = 0;      // ...nothing followed last frame's: the latest taken
+uint32_t    g_chooseNone = 0;        // ...no write this frame at all
+bool        g_chosenThisFrame = false;
+int         g_latchSlotVs = -1;      // where the bound block was found, for the log
 int         g_latchSlotPs = -1;
+float       g_lastGoodC[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};   // the last accepted ship delta
+float       g_lastGoodTv[3] = {};                            // ...and its translation term
+bool        g_lastGoodValid = false;
+uint32_t    g_camCarried = 0;        // frames the ship's delta was carried over a drop
 float    g_curRows[12] = {};
 bool     g_curValid = false;
 bool     g_curLatched = false;
@@ -831,6 +843,66 @@ float    g_prevRows[12] = {};
 bool     g_prevValid = false;
 uint32_t g_camPairs = 0;
 bool     g_camNoted = false;
+
+// The frame's camera rows, chosen once per frame at its first treat from
+// the frame's writes: the one that FOLLOWS last frame's chosen rows within
+// 3 degrees in absolute orientation (a ship turns under 2 a frame; a
+// reflection face's or a shadow cascade's camera sits tens away), the
+// bound object's preferred, else the latest such write. With nothing
+// continuous (the first frame, a cut) the bound object's latest write,
+// else the frame's latest. The bound block at the first scene draw held
+// a reflection face's camera on half the frames in space (2026-09-04):
+// the game draws into the scene's depth before it rewrites the block.
+void chooseCameraRows() {
+    if (g_chosenThisFrame) return;
+    g_chosenThisFrame = true;
+    g_curValid = false;
+    int bestIdx = -1, fallIdx = -1;
+    uint32_t bestSeq = 0, fallSeq = 0;
+    bool bestBound = false, fallBound = false;
+    uint32_t count = 0;
+    float rpT[9] = {};
+    if (g_prevValid) {
+        float rp[9];
+        temporalRot3Of34(g_prevRows, rp);
+        temporalTranspose3(rp, rpT);
+    }
+    for (int i = 0; i < kRowsRing; ++i) {
+        const RowsWrite& w = g_rowsRing[i];
+        if (!w.valid || w.frame != g_rowsFrame) continue;
+        ++count;
+        const bool bound = g_boundSeen && w.buf == g_boundBuf;
+        bool continuous = false;
+        if (g_prevValid) {
+            float rn[9], d[9];
+            temporalRot3Of34(w.rows, rn);
+            temporalMul3(rpT, rn, d);
+            continuous = temporalRotationAngleDeg(d) < 3.0f;
+        }
+        if (continuous) {
+            const bool better = bestIdx < 0 || (bound && !bestBound) ||
+                                (bound == bestBound && w.seq > bestSeq);
+            if (better) { bestIdx = i; bestSeq = w.seq; bestBound = bound; }
+        }
+        const bool fbetter = fallIdx < 0 || (bound && !fallBound) ||
+                             (bound == fallBound && w.seq > fallSeq);
+        if (fbetter) { fallIdx = i; fallSeq = w.seq; fallBound = bound; }
+    }
+    g_candSumCount += count;
+    int pick = bestIdx;
+    if (pick >= 0) {
+        if (bestBound) ++g_chooseBound; else ++g_chooseOther;
+    } else if (fallIdx >= 0) {
+        pick = fallIdx;
+        ++g_chooseResync;
+    } else {
+        ++g_chooseNone;
+    }
+    if (pick >= 0) {
+        memcpy(g_curRows, g_rowsRing[pick].rows, sizeof(g_curRows));
+        g_curValid = true;
+    }
+}
 
 void failOnce(const char* what) {
     if (g_failNoted) return;
@@ -1199,6 +1271,8 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
             e.dlHaveHistory = false;
         }
 
+        // This frame's camera rows, chosen from the frame's writes (once).
+        chooseCameraRows();
         // The rotation delta for this frame's motion source. The depth
         // motion is the head's rotation with its translation term, and
         // falls back to the rotation alone until the depth is in hand.
@@ -1255,7 +1329,9 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         float tvCam[3] = {0.0f, 0.0f, 0.0f};
         float worldDelta[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
         bool worldValid = false;
+        float shipC[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};   // the ship's own delta, kept for the carry
         if (candValid[2]) {
+            memcpy(shipC, cand[2], sizeof(shipC));
             const float tsp[3] = {g_prevRows[3], g_prevRows[7], g_prevRows[11]};
             const float tsn[3] = {g_curRows[3], g_curRows[7], g_curRows[11]};
             // The ship camera's displacement in the world: c = -R^T t.
@@ -1271,22 +1347,27 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                                      static_cast<double>(mz) * mz);
             g_camMoveSum += move;
             float diffDeg = 0.0f;
-            if (e.headNoted) {
+            // W and tv from a ship delta C: the composition above, as a
+            // function so the carry can redo it with last frame's C.
+            auto compose = [&](const float* C, float* W, float* tv) {
                 float rhp[9], rhn[9], rhpT[9], tmp[9];
                 temporalRot3Of34(e.headPrev, rhp);
                 temporalRot3Of34(e.headNow, rhn);
                 temporalTranspose3(rhp, rhpT);
-                temporalMul3(rhpT, cand[2], tmp);
-                temporalMul3(tmp, rhn, worldDelta);
+                temporalMul3(rhpT, C, tmp);
+                temporalMul3(tmp, rhn, W);
                 const float thp[3] = {e.headPrev[3], e.headPrev[7], e.headPrev[11]};
                 const float thn[3] = {e.headNow[3], e.headNow[7], e.headNow[11]};
                 float ctsn[3], cthn[3], inner[3], rinner[3], we[3];
-                temporalApply3(cand[2], tsn, ctsn);
-                temporalApply3(cand[2], thn, cthn);
+                temporalApply3(C, tsn, ctsn);
+                temporalApply3(C, thn, cthn);
                 for (int i = 0; i < 3; ++i) inner[i] = (tsp[i] - ctsn[i]) + (cthn[i] - thp[i]);
                 temporalApply3(rhpT, inner, rinner);
-                temporalApply3(worldDelta, e.eyeOff, we);
-                for (int i = 0; i < 3; ++i) tvCam[i] = we[i] - e.eyeOff[i] + rinner[i];
+                temporalApply3(W, e.eyeOff, we);
+                for (int i = 0; i < 3; ++i) tv[i] = we[i] - e.eyeOff[i] + rinner[i];
+            };
+            if (e.headNoted) {
+                compose(shipC, worldDelta, tvCam);
                 worldValid = true;
                 if (deltaHead) {
                     float ht[9], diff[9];
@@ -1310,9 +1391,23 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
             // dropped for the frame; a jump beyond the second is the
             // floating origin moving, and only the translation is dropped.
             if (diffDeg > 3.0f) {
-                candValid[2] = false;
-                worldValid = false;
                 ++g_camDropRot;
+                if (worldValid && g_lastGoodValid) {
+                    // The carry: a ship turns smoothly, so last frame's
+                    // accepted delta is a far better guess for this frame
+                    // than the head alone, which was the fallback that
+                    // smeared the world on every dropped frame.
+                    memcpy(shipC, g_lastGoodC, sizeof(shipC));
+                    compose(shipC, worldDelta, tvCam);
+                    ++g_camCarried;
+                } else {
+                    candValid[2] = false;
+                    worldValid = false;
+                }
+            } else if (worldValid) {
+                memcpy(g_lastGoodC, shipC, sizeof(g_lastGoodC));
+                memcpy(g_lastGoodTv, tvCam, sizeof(g_lastGoodTv));
+                g_lastGoodValid = true;
             }
             if (move >= 50.0) {
                 for (int i = 0; i < 3; ++i) tvCam[i] = 0.0f;
@@ -1741,73 +1836,54 @@ void temporalPassTick(ID3D11DeviceContext* ctx) {
 void temporalPassNoteSceneWrite(const void* res, const void* data, uint32_t bytes) {
     // The true view matrix lives at float offset 932 of the big scene
     // block (measured by the sun-glare fix's two-shot dump: three 3x4
-    // rows, rotation plus translation), kept per buffer object: the game
-    // maps several blocks of that size a frame, each pass with its own
-    // camera, and only the one bound at the scene's first draw is the
-    // scene's. Kept only when the rows are a rotation.
+    // rows, rotation plus translation). Every write of every block of
+    // that size goes into the ring, stamped with the frame and the order;
+    // chooseCameraRows picks the frame's at its first treat. Kept only
+    // when the rows are a rotation.
     if (!g_wanted || !data || bytes < 944 * 4) return;
     const float* f = static_cast<const float*>(data) + 932;
     if (!temporalRowsAreRotation(f)) return;
     ++g_rowsWrites;
-    g_rowsLast = res;
-    int slot = -1, oldest = 0;
-    for (int i = 0; i < kRowsEntries; ++i) {
-        if (g_rowsTable[i].valid && g_rowsTable[i].buf == res) { slot = i; break; }
-        if (!g_rowsTable[i].valid) { if (slot < 0) slot = i; }
-        else if (g_rowsTable[i].frame < g_rowsTable[oldest].frame) oldest = i;
-    }
-    if (slot < 0) slot = oldest;
-    RowsEntry& r = g_rowsTable[slot];
-    r.buf = res;
-    memcpy(r.rows, f, sizeof(r.rows));
-    r.frame = g_rowsFrame;
-    r.valid = true;
-}
-
-int findRowsEntry(const void* buf) {
-    if (!buf) return -1;
-    for (int i = 0; i < kRowsEntries; ++i) {
-        if (g_rowsTable[i].valid && g_rowsTable[i].buf == buf) return i;
-    }
-    return -1;
+    RowsWrite& w = g_rowsRing[g_rowsSeq % kRowsRing];
+    w.buf = res;
+    memcpy(w.rows, f, sizeof(w.rows));
+    w.frame = g_rowsFrame;
+    w.seq = g_rowsSeq;
+    w.valid = true;
+    ++g_rowsSeq;
 }
 
 void temporalPassNoteFirstEyeDraw(ID3D11DeviceContext* ctx) {
     if (!g_wanted || g_curLatched) return;
     g_curLatched = true;
-    g_curValid = false;
+    g_boundSeen = false;
+    g_boundBuf = nullptr;
+    if (!ctx) return;
     // The block bound at the scene's first draw: the vertex stage's
     // constant buffers first, then the pixel stage's, the lowest slot
-    // holding an object we have rows for. Two queries a frame.
-    int found = -1;
-    if (ctx) {
-        ID3D11Buffer* vs[8] = {};
-        ID3D11Buffer* ps[8] = {};
-        ctx->VSGetConstantBuffers(0, 8, vs);
-        ctx->PSGetConstantBuffers(0, 8, ps);
-        for (int i = 0; i < 8 && found < 0; ++i) {
-            const int k = findRowsEntry(vs[i]);
-            if (k >= 0) { found = k; g_latchSlotVs = i; }
+    // holding an object the ring has a write for. Two queries a frame.
+    // Only the OBJECT is kept: which of its writes is the frame's camera
+    // is chooseCameraRows's question, answered by continuity.
+    ID3D11Buffer* vs[8] = {};
+    ID3D11Buffer* ps[8] = {};
+    ctx->VSGetConstantBuffers(0, 8, vs);
+    ctx->PSGetConstantBuffers(0, 8, ps);
+    auto inRing = [&](const void* b) {
+        if (!b) return false;
+        for (int i = 0; i < kRowsRing; ++i) {
+            if (g_rowsRing[i].valid && g_rowsRing[i].buf == b) return true;
         }
-        for (int i = 0; i < 8 && found < 0; ++i) {
-            const int k = findRowsEntry(ps[i]);
-            if (k >= 0) { found = k; g_latchSlotPs = i; }
-        }
-        for (int i = 0; i < 8; ++i) {
-            if (vs[i]) vs[i]->Release();
-            if (ps[i]) ps[i]->Release();
-        }
+        return false;
+    };
+    for (int i = 0; i < 8 && !g_boundSeen; ++i) {
+        if (inRing(vs[i])) { g_boundBuf = vs[i]; g_boundSeen = true; g_latchSlotVs = i; }
     }
-    if (found >= 0) {
-        ++g_latchMatched;
-    } else {
-        // Not bound where we looked: the newest write, as before.
-        found = findRowsEntry(g_rowsLast);
-        if (found >= 0) ++g_latchFallback;
+    for (int i = 0; i < 8 && !g_boundSeen; ++i) {
+        if (inRing(ps[i])) { g_boundBuf = ps[i]; g_boundSeen = true; g_latchSlotPs = i; }
     }
-    if (found >= 0) {
-        memcpy(g_curRows, g_rowsTable[found].rows, sizeof(g_curRows));
-        g_curValid = true;
+    for (int i = 0; i < 8; ++i) {
+        if (vs[i]) vs[i]->Release();
+        if (ps[i]) ps[i]->Release();
     }
 }
 
@@ -1829,7 +1905,8 @@ void temporalPassFrameBoundary() {
     g_rowsWritesSum += g_rowsWrites;
     ++g_rowsFramesSum;
     g_rowsWrites = 0;
-    if (g_curLatched && g_curValid) {
+    g_chosenThisFrame = false;
+    if (g_curValid) {
         if (g_prevValid) ++g_camPairs;
         memcpy(g_prevRows, g_curRows, sizeof(g_prevRows));
         g_prevValid = true;
@@ -1837,9 +1914,9 @@ void temporalPassFrameBoundary() {
             g_camNoted = true;
             Log::get().note(
                 "temporal aa: the game's camera is being read -- the view "
-                "rows at float 932 of the scene block, the object bound at "
-                "each frame's first scene draw (found at VS b%d / PS b%d; -1 = "
-                "not there, the newest write taken); they are the SHIP's camera, "
+                "rows at float 932 of the scene block, the write of the frame that "
+                "follows last frame's (the block bound at the scene's first draw is "
+                "at VS b%d / PS b%d, -1 = not seen); they are the SHIP's camera, "
                 "composed with the headset's pose for the world path%s.",
                 g_latchSlotVs, g_latchSlotPs, g_viewTransposed ? " (transposed)" : "");
         }
@@ -1944,11 +2021,15 @@ bool temporalPassRegistration(char* buf, size_t n) {
                   g_camHeadDiffSum / g_camFrames, g_camMoveSum / g_camFrames);
     }
     if (g_rowsFramesSum) {
+        const uint32_t chosen = g_chooseBound + g_chooseOther + g_chooseResync + g_chooseNone;
         regAppend(buf, n, used,
-                  "; the scene block was written %.1f times a frame, and the latch found it "
-                  "bound on %u frames and took the newest write on %u",
+                  "; the scene block was written %.1f times a frame (%.1f candidates); the rows "
+                  "chosen by continuity were the bound block's on %u frames and another's on "
+                  "%u, nothing followed last frame's on %u, no write on %u; the ship's delta "
+                  "was carried over a drop on %u frames",
                   static_cast<double>(g_rowsWritesSum) / static_cast<double>(g_rowsFramesSum),
-                  g_latchMatched, g_latchFallback);
+                  chosen ? static_cast<double>(g_candSumCount) / static_cast<double>(chosen) : 0.0,
+                  g_chooseBound, g_chooseOther, g_chooseResync, g_chooseNone, g_camCarried);
     }
     if (g_camDropRot || g_camDropMove) {
         regAppend(buf, n, used,
@@ -1977,8 +2058,12 @@ bool temporalPassRegistration(char* buf, size_t n) {
     g_camDropMove = 0;
     g_rowsWritesSum = 0;
     g_rowsFramesSum = 0;
-    g_latchMatched = 0;
-    g_latchFallback = 0;
+    g_candSumCount = 0;
+    g_chooseBound = 0;
+    g_chooseOther = 0;
+    g_chooseResync = 0;
+    g_chooseNone = 0;
+    g_camCarried = 0;
     return true;
 }
 
