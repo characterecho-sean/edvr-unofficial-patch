@@ -5,6 +5,8 @@
 #include <windows.h>
 
 #include <dxgi1_2.h>
+#include <d3d11_3.h>   // ID3D11Device3::CreateRasterizerState2, the conservative-raster experiment
+#include <cstring>
 
 #include "../common/config.h"
 #include "../common/eye_sync.h"
@@ -38,6 +40,10 @@ namespace {
 // the same check the context slots got: a miscount here would silently hook
 // CreateTexture1D or CreateTexture3D.
 constexpr size_t kDevCreateTexture2D     = 5;
+// CreateRasterizerState verified against the SDK's ID3D11DeviceVtbl on
+// 2026-09-03: CreateBlendState 20, CreateDepthStencilState 21,
+// CreateRasterizerState 22, CreateSamplerState 23.
+constexpr size_t kDevCreateRasterizerState = 22;
 constexpr size_t kDevCreateVertexShader  = 12;
 constexpr size_t kDevCreatePixelShader   = 15;
 constexpr size_t kDevCreateComputeShader = 18;
@@ -50,6 +56,8 @@ typedef HRESULT(STDMETHODCALLTYPE* PFN_CreateShader)(ID3D11Device*, const void*,
 typedef HRESULT(STDMETHODCALLTYPE* PFN_CreateTexture2D)(
     ID3D11Device*, const D3D11_TEXTURE2D_DESC*, const D3D11_SUBRESOURCE_DATA*,
     ID3D11Texture2D**);
+typedef HRESULT(STDMETHODCALLTYPE* PFN_CreateRasterizerState)(
+    ID3D11Device*, const D3D11_RASTERIZER_DESC*, ID3D11RasterizerState**);
 typedef HRESULT(STDMETHODCALLTYPE* PFN_Present)(IDXGISwapChain*, UINT, UINT);
 typedef HRESULT(STDMETHODCALLTYPE* PFN_CreateSwapChain)(IDXGIFactory*, IUnknown*,
                                                         DXGI_SWAP_CHAIN_DESC*,
@@ -76,6 +84,20 @@ struct State {
     PFN_CreateShader realCreateVS = nullptr;
     PFN_CreateShader realCreatePS = nullptr;
     PFN_CreateTexture2D realCreateTexture2D = nullptr;
+    // experimental.conservative_raster: the game's solid-fill rasteriser
+    // states are recreated with D3D11.3 conservative rasterisation on, so a
+    // triangle lights every pixel it touches -- a sliver of geometry
+    // narrower than a pixel comes out as a solid line instead of dashes
+    // (docs/frontier-shimmer-report.md, mechanism 2). Restart-only: the
+    // states are created at load.
+    PFN_CreateRasterizerState realCreateRasterizerState = nullptr;
+    bool     conservative = false;
+    int      conservativeCull = 0;        // 0 any, 1 back, 2 front, 3 none
+    uint32_t conservativeTier = 0;
+    uint32_t conservativeSubstituted = 0;
+    uint32_t conservativeSkipped = 0;
+    uint32_t conservativeFailed = 0;
+    bool     conservativeQiNoted = false;
     // The shader-swap arc's dump mode: while armed, every vertex and pixel
     // shader blob the game creates is written to <logdir>\shaders by hash,
     // and the glare draw logs which two hashes it binds -- the pair to
@@ -304,6 +326,97 @@ HRESULT STDMETHODCALLTYPE hookedCreatePS(ID3D11Device* self, const void* bytecod
         if (g_state->shaderDump) dumpShaderBlob(L"ps", hash, bytecode, len);
     });
     return hr;
+}
+
+static const char* cullName(D3D11_CULL_MODE m) {
+    switch (m) {
+        case D3D11_CULL_NONE: return "none";
+        case D3D11_CULL_FRONT: return "front";
+        case D3D11_CULL_BACK: return "back";
+        default: return "?";
+    }
+}
+
+// experimental.conservative_raster. Every solid-fill rasteriser state the
+// game creates (filtered by cull mode, advanced.conservative_raster_cull) is
+// created instead through ID3D11Device3::CreateRasterizerState2 with
+// ConservativeRaster on. An ID3D11RasterizerState2 is an
+// ID3D11RasterizerState, so the game binds it with RSSetState as it would
+// its own, and every draw through it rasterises every pixel a triangle
+// touches. The desc's other fields carry over unchanged; any failure hands
+// the game its own state, exactly as if the experiment were off.
+HRESULT STDMETHODCALLTYPE hookedCreateRasterizerState(ID3D11Device* self,
+                                                      const D3D11_RASTERIZER_DESC* desc,
+                                                      ID3D11RasterizerState** out) {
+    State* s = g_state;
+    if (self != s->device || !desc || !out || !s->conservative) {
+        return s->realCreateRasterizerState(self, desc, out);
+    }
+    bool wanted = desc->FillMode == D3D11_FILL_SOLID;
+    if (wanted) {
+        switch (s->conservativeCull) {
+            case 1: wanted = desc->CullMode == D3D11_CULL_BACK; break;
+            case 2: wanted = desc->CullMode == D3D11_CULL_FRONT; break;
+            case 3: wanted = desc->CullMode == D3D11_CULL_NONE; break;
+            default: break;
+        }
+    }
+    if (!wanted) {
+        ++s->conservativeSkipped;
+        return s->realCreateRasterizerState(self, desc, out);
+    }
+    ID3D11Device3* dev3 = nullptr;
+    if (FAILED(self->QueryInterface(__uuidof(ID3D11Device3),
+                                    reinterpret_cast<void**>(&dev3))) ||
+        !dev3) {
+        if (!s->conservativeQiNoted) {
+            s->conservativeQiNoted = true;
+            Log::get().note("conservative raster: the device does not expose "
+                            "ID3D11Device3, so no state can be rewritten; the "
+                            "game's own states are used.");
+        }
+        ++s->conservativeFailed;
+        return s->realCreateRasterizerState(self, desc, out);
+    }
+    D3D11_RASTERIZER_DESC2 d2 = {};
+    d2.FillMode = desc->FillMode;
+    d2.CullMode = desc->CullMode;
+    d2.FrontCounterClockwise = desc->FrontCounterClockwise;
+    d2.DepthBias = desc->DepthBias;
+    d2.DepthBiasClamp = desc->DepthBiasClamp;
+    d2.SlopeScaledDepthBias = desc->SlopeScaledDepthBias;
+    d2.DepthClipEnable = desc->DepthClipEnable;
+    d2.ScissorEnable = desc->ScissorEnable;
+    d2.MultisampleEnable = desc->MultisampleEnable;
+    d2.AntialiasedLineEnable = desc->AntialiasedLineEnable;
+    d2.ForcedSampleCount = 0;
+    d2.ConservativeRaster = D3D11_CONSERVATIVE_RASTERIZATION_MODE_ON;
+    ID3D11RasterizerState2* rs2 = nullptr;
+    const HRESULT hr = dev3->CreateRasterizerState2(&d2, &rs2);
+    dev3->Release();
+    if (FAILED(hr) || !rs2) {
+        ++s->conservativeFailed;
+        if (s->conservativeFailed <= 3) {
+            Log::get().note("conservative raster: CreateRasterizerState2 failed "
+                            "(0x%08X) for a %s-cull state; the game's own state "
+                            "is used.",
+                            static_cast<unsigned>(hr), cullName(desc->CullMode));
+        }
+        return s->realCreateRasterizerState(self, desc, out);
+    }
+    *out = rs2;
+    const uint32_t n = ++s->conservativeSubstituted;
+    if (n <= 8 || (n % 64) == 0) {
+        Log::get().note("conservative raster: state %u rewritten -- fill solid, "
+                        "cull %s, depth clip %d, scissor %d, depth bias %d / "
+                        "%.2f, multisample %d; %u skipped, %u failed so far.",
+                        n, cullName(desc->CullMode), desc->DepthClipEnable ? 1 : 0,
+                        desc->ScissorEnable ? 1 : 0, desc->DepthBias,
+                        static_cast<double>(desc->SlopeScaledDepthBias),
+                        desc->MultisampleEnable ? 1 : 0, s->conservativeSkipped,
+                        s->conservativeFailed);
+    }
+    return S_OK;
 }
 
 // Render targets made larger than asked: the FSS body layer, and surfaces
@@ -1185,6 +1298,42 @@ void hookDevice(ID3D11Device* device) {
                          reinterpret_cast<void**>(&s.realCreateCS));
     s.deviceHook.replace(kDevCreateTexture2D, &hookedCreateTexture2D,
                          reinterpret_cast<void**>(&s.realCreateTexture2D));
+    // experimental.conservative_raster: read here, restart-only, and the
+    // hook goes in only when the hardware has the feature at all.
+    {
+        const std::string cr =
+            sentinelCfg.getString("experimental.conservative_raster", "off");
+        const bool on = _stricmp(cr.c_str(), "on") == 0 || _stricmp(cr.c_str(), "1") == 0;
+        const std::string cull =
+            sentinelCfg.getString("advanced.conservative_raster_cull", "any");
+        s.conservativeCull = _stricmp(cull.c_str(), "back") == 0    ? 1
+                             : _stricmp(cull.c_str(), "front") == 0 ? 2
+                             : _stricmp(cull.c_str(), "none") == 0  ? 3
+                                                                    : 0;
+        D3D11_FEATURE_DATA_D3D11_OPTIONS2 o2 = {};
+        const bool haveOpts = SUCCEEDED(device->CheckFeatureSupport(
+            D3D11_FEATURE_D3D11_OPTIONS2, &o2, sizeof(o2)));
+        s.conservativeTier =
+            haveOpts ? static_cast<uint32_t>(o2.ConservativeRasterizationTier) : 0u;
+        if (on && s.conservativeTier == 0) {
+            Log::get().note("conservative raster: asked for, but this device reports "
+                            "no conservative rasterisation support (D3D11_OPTIONS2 "
+                            "%s), so nothing is rewritten.",
+                            haveOpts ? "tier 0" : "unavailable");
+        } else if (on) {
+            s.conservative = true;
+            s.deviceHook.replace(kDevCreateRasterizerState, &hookedCreateRasterizerState,
+                                 reinterpret_cast<void**>(&s.realCreateRasterizerState));
+            Log::get().note(
+                "conservative raster: ON -- every solid-fill rasteriser state the "
+                "game creates (cull filter: %s) is rewritten with conservative "
+                "rasterisation, hardware tier %u, so a triangle lights every pixel "
+                "it touches. Experimental: expect silhouettes up to half a pixel "
+                "bolder and thin alpha-tested things fatter; the log counts the "
+                "states. Restart to turn it off.",
+                cull.c_str(), s.conservativeTier);
+        }
+    }
     // Before the first create can arrive: the FSS resolution fix's flag is
     // read here for install and on vScreen's reload path for live flips.
     fssResConfigure(sentinelCfg);
