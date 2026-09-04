@@ -32,7 +32,7 @@ namespace edvr {
 
 class Config;
 
-// Reads fix.supersample_resolve, for two things only this half can do:
+// Reads experimental.supersample_resolve, for two things only this half can do:
 // warm the shader ahead of the first engage, and say so when the setting
 // is on but no compositor hook ever announces itself (an openvr-only
 // install, or every feature that needs that hook was off at launch).

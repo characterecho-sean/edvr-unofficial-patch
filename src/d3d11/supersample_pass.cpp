@@ -853,7 +853,7 @@ void* resolveInner(void* srcTex, int eye, const float* bounds, uint32_t outW,
 }  // namespace edvr::(anonymous)
 
 void supersamplePassConfigure(Config& cfg) {
-    const std::string mode = cfg.getString("fix.supersample_resolve", "auto");
+    const std::string mode = cfg.getString("experimental.supersample_resolve", "auto");
     g_wanted = _stricmp(mode.c_str(), "off") != 0 && !mode.empty();
     strncpy_s(g_mode, mode.c_str(), _TRUNCATE);
 }
@@ -880,7 +880,7 @@ void supersamplePassTick(ID3D11DeviceContext* ctx) {
         elapsedMs(g_firstTickMs, kNoHookNoteMs)) {
         g_noHookNoted = true;
         Log::get().note(
-            "supersample resolve: fix.supersample_resolve is %s, but no "
+            "supersample resolve: experimental.supersample_resolve is %s, but no "
             "compositor hook has announced itself after %llu s. The resolve "
             "runs inside the openvr_api.dll half's Submit hook -- install "
             "that file, or restart the game with the setting on so the hook "

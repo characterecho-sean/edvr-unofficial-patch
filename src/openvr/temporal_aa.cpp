@@ -31,7 +31,7 @@ typedef void (*PFN_EdvrTemporalAaNoteHead)(int, const float*, const float*, cons
 
 struct State {
     bool   on = false;
-    bool   dlaa = false;   // fix.temporal_aa = dlaa | dlss: NVIDIA's history instead of the pass's own
+    bool   dlaa = false;   // experimental.temporal_aa = dlaa | dlss: NVIDIA's history instead of the pass's own
     bool   upscale = false; // ...and dlss: a frame smaller than the unit-quality size comes back at it
     bool   jitterWanted = true;
     float  blend = 0.90f;
@@ -149,7 +149,7 @@ void temporalAaConfigure() {
     State& s = g_s;
     Config& cfg = Config::get();
 
-    const std::string raw = cfg.getString("fix.temporal_aa", "off");
+    const std::string raw = cfg.getString("experimental.temporal_aa", "off");
     bool on = false;
     bool dlaa = false;
     bool upscale = false;
@@ -160,13 +160,13 @@ void temporalAaConfigure() {
         Log::get().note("temporal_aa = \"%s\" is not a mode this build knows "
                         "(off, on, dlaa, dlss). Treating it as off.", raw.c_str());
     }
-    const std::string rawJit = cfg.getString("fix.temporal_aa_jitter", "on");
+    const std::string rawJit = cfg.getString("experimental.temporal_aa_jitter", "on");
     const bool jitter = _stricmp(rawJit.c_str(), "off") != 0;
-    float blend = cfg.getFloat("fix.temporal_aa_blend", 0.90f);
+    float blend = cfg.getFloat("experimental.temporal_aa_blend", 0.90f);
     if (!std::isfinite(blend)) blend = 0.90f;
     if (blend < 0.5f) blend = 0.5f;
     if (blend > 0.95f) blend = 0.95f;
-    float clampSig = cfg.getFloat("fix.temporal_aa_clamp", 1.0f);
+    float clampSig = cfg.getFloat("experimental.temporal_aa_clamp", 1.0f);
     if (!std::isfinite(clampSig)) clampSig = 1.0f;
     if (clampSig < 0.5f) clampSig = 0.5f;
     if (clampSig > 3.0f) clampSig = 3.0f;

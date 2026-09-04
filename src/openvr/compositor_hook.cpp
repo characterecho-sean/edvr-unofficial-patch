@@ -352,7 +352,7 @@ struct State {
     uint32_t  poseHoldWarpFrames = 0;     // submits that carried a pose
     uint32_t  poseHoldWarpFallbacks = 0;  // submits that could not
 
-    // shimmer_rest (fix.shimmer_rest): the rest lock, the continuous form of
+    // shimmer_rest (experimental.shimmer_rest): the rest lock, the continuous form of
     // the pose hold. rest_math.h has the arithmetic and the reasoning; restApply
     // and forwardSubmit have the two halves. The key and its two thresholds
     // are read with the pose ring's config, install and reload alike.
@@ -467,7 +467,7 @@ void configurePoseRing(State* s) {
         s->poseHoldMode = mode;
     }
     {
-        const std::string rest = cfg.getString("fix.shimmer_rest", "off");
+        const std::string rest = cfg.getString("experimental.shimmer_rest", "off");
         const bool on = _stricmp(rest.c_str(), "on") == 0 || _stricmp(rest.c_str(), "1") == 0;
         if (on != s->restWanted) {
             s->restWanted = on;
@@ -1388,7 +1388,7 @@ vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
     // The sharpening (docs\anti-aliasing.md's "sharpen" in the order at the
     // door), LAST on every path: AMD's RCAS on whatever the passes before
     // it produced -- the game's frame, the crop, the resolve's output --
-    // at the strength fix.render_sharpness names. Same discipline as the
+    // at the strength experimental.render_sharpness names. Same discipline as the
     // resolve: every path once, or none.
     auto applySharpen = [&](vr::Texture_t* tex,
                             const vr::VRTextureBounds_t** bnds,
@@ -2533,18 +2533,18 @@ void* interceptInterface(void* iface, const char* interfaceVersion) {
     // supersampleResolveConfigure because that runs after the install,
     // and this is the decision whether there is an install at all.
     const std::string resolveMode =
-        cfg.getString("fix.supersample_resolve", "auto");
+        cfg.getString("experimental.supersample_resolve", "auto");
     const bool wantResolve =
         !resolveMode.empty() && _stricmp(resolveMode.c_str(), "off") != 0;
-    const std::string taaMode = cfg.getString("fix.temporal_aa", "off");
+    const std::string taaMode = cfg.getString("experimental.temporal_aa", "off");
     const bool wantTemporal =
         !taaMode.empty() && _stricmp(taaMode.c_str(), "off") != 0;
-    const bool wantSharpen = cfg.getFloat("fix.render_sharpness", 0.0f) > 0.0f;
+    const bool wantSharpen = cfg.getFloat("experimental.render_sharpness", 0.0f) > 0.0f;
     if (!wantFlash && !wantOffset && !wantResolve && !wantTemporal &&
         !wantSharpen) {
         Log::get().note("compositor passed through unhooked: fix.transition_flash, "
-                        "fix.head_offset_gate, fix.supersample_resolve, "
-                        "fix.temporal_aa and fix.render_sharpness are all off, "
+                        "fix.head_offset_gate, experimental.supersample_resolve, "
+                        "experimental.temporal_aa and experimental.render_sharpness are all off, "
                         "and those are the only features that need this hook.");
         return iface;
     }

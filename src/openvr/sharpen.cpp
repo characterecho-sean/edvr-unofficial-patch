@@ -46,7 +46,7 @@ void sharpenConfigure() {
     State& s = g_s;
     Config& cfg = Config::get();
 
-    float v = cfg.getFloat("fix.render_sharpness", 0.0f);
+    float v = cfg.getFloat("experimental.render_sharpness", 0.0f);
     if (!std::isfinite(v) || v < 0.0f) v = 0.0f;
     if (v > 1.0f) v = 1.0f;
 

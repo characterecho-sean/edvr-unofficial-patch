@@ -1369,7 +1369,7 @@ void maybeObserveSystemInterface(void* iface, const char* interfaceVersion) {
     // through the raw tangents alone would leave the matrix the game
     // renders through un-shifted. Read here, once, like the guard's mode.
     {
-        const std::string taa = cfg.getString("fix.temporal_aa", "off");
+        const std::string taa = cfg.getString("experimental.temporal_aa", "off");
         s.receiverForTemporal = !taa.empty() && _stricmp(taa.c_str(), "off") != 0;
     }
     const bool wantReceiver = s.modeRequested != GuardMode::Off || s.receiverForTemporal;

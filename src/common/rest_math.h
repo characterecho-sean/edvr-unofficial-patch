@@ -1,4 +1,4 @@
-// The rest lock's arithmetic (fix.shimmer_rest), header-only and pure, the
+// The rest lock's arithmetic (experimental.shimmer_rest), header-only and pure, the
 // supersample_math.h precedent: one definition for the openvr half that
 // applies it and for anything that wants to table-test it.
 //

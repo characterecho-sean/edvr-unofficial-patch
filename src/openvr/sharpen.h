@@ -1,7 +1,7 @@
 // Render sharpening at the door -- the openvr half.
 //
 // This half decides; the d3d11 half sharpens (src/d3d11/sharpen_pass.h).
-// The decision is one number, fix.render_sharpness, 0 (off) to 1
+// The decision is one number, experimental.render_sharpness, 0 (off) to 1
 // (strongest), read at the compositor hook's install and from the reload
 // poll -- a slider judged from inside a headset, so it is live. The
 // treatment is the LAST one on every forwarding path of hookedSubmit,
@@ -19,7 +19,7 @@
 
 namespace edvr {
 
-// Reads fix.render_sharpness. Called at the compositor hook's install and
+// Reads experimental.render_sharpness. Called at the compositor hook's install and
 // from the reload poll; a change says so once.
 void sharpenConfigure();
 

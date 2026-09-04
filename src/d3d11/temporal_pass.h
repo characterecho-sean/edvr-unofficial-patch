@@ -44,7 +44,7 @@ namespace edvr {
 
 class Config;
 
-// Reads fix.temporal_aa (the warm compile and the camera capture want to
+// Reads experimental.temporal_aa (the warm compile and the camera capture want to
 // know) and advanced.temporal_aa_view_transpose.
 void temporalPassConfigure(Config& cfg);
 
@@ -106,7 +106,7 @@ bool temporalPassTotals(uint32_t* treated, double* avgMs, double* maxMs,
 // at 1200 characters). buf2 may be null.
 bool temporalPassRegistration(char* buf, size_t n, char* buf2, size_t n2, char* buf3, size_t n3);
 
-// The trained pass's totals (fix.temporal_aa = dlaa | dlss): eye-frames it
+// The trained pass's totals (experimental.temporal_aa = dlaa | dlss): eye-frames it
 // took, its measured price, and how many evaluations started NVIDIA's
 // history afresh (a handful per session on a good build: each eye's first
 // frame, each size change, each withhold). False when it never ran.

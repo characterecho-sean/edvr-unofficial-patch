@@ -920,7 +920,7 @@ to 27 m -- so the HUD's text has the depth the reprojection needs.
 0.47 ms per eye with the instrument's four candidates still running.
 
 **DLAA (built 2026-09-03, after the player's ask; the rig's GPU is an RTX
-5090).** `fix.temporal_aa = dlaa` hands NVIDIA's DLAA the inputs this
+5090).** `experimental.temporal_aa = dlaa` hands NVIDIA's DLAA the inputs this
 branch already makes: the frame (copied out typed), the scene's depth
 (copied as the game wrote it, reversed-Z declared), per-pixel motion
 vectors written by the same reprojection the history fetch uses (the
@@ -1333,7 +1333,7 @@ frame, while the Quest 3 over Steam Link held 0% of 15,569 frames and
 never got quieter than 1.90. The hold threshold is 0.60. A rendered pixel
 at that density is 1.48 arcmin, so the Quest 3's pose stream slides the
 image more than a whole pixel every frame with the head still, which is
-the hairline blink `fix.shimmer_rest` was built to stop -- and the fix
+the hairline blink `experimental.shimmer_rest` was built to stop -- and the fix
 cannot engage, because its threshold sits below the tracker's own noise
 floor. It spends the whole session in the easing band instead, where the
 compositor is told a pose the frame was not rendered from. The totals
@@ -1636,7 +1636,7 @@ have one cause, and it is not in any filter:
   resolve at calm 2.0, the compositor's own sampler and any post filter all
   pass a moving line faithfully.
 
-**The fix, `fix.shimmer_rest`** (`src/openvr/compositor_hook.cpp`,
+**The fix, `experimental.shimmer_rest`** (`src/openvr/compositor_hook.cpp`,
 `src/common/rest_math.h`): the pose handed to the game moves toward the
 tracker's pose by a factor k each frame — 0.02 at and under 0.6 arcmin a
 frame of smoothed head motion (a half-second time constant that passes the

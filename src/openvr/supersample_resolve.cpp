@@ -88,7 +88,7 @@ void supersampleResolveConfigure() {
     State& s = g_s;
     Config& cfg = Config::get();
 
-    const std::string raw = cfg.getString("fix.supersample_resolve", "auto");
+    const std::string raw = cfg.getString("experimental.supersample_resolve", "auto");
     Mode mode = Mode::Off;
     if (_stricmp(raw.c_str(), "auto") == 0) mode = Mode::Auto;
     else if (_stricmp(raw.c_str(), "on") == 0) mode = Mode::On;
@@ -99,7 +99,7 @@ void supersampleResolveConfigure() {
             raw.c_str());
     }
 
-    const std::string rawFilter = cfg.getString("fix.supersample_filter", "calm");
+    const std::string rawFilter = cfg.getString("experimental.supersample_filter", "calm");
     int filter = kSupersampleCalm;
     if (_stricmp(rawFilter.c_str(), "crisp") == 0) filter = kSupersampleCrisp;
     else if (_stricmp(rawFilter.c_str(), "calm") != 0 && !rawFilter.empty()) {
@@ -109,7 +109,7 @@ void supersampleResolveConfigure() {
             rawFilter.c_str());
     }
 
-    float width = cfg.getFloat("fix.supersample_width", 1.0f);
+    float width = cfg.getFloat("experimental.supersample_width", 1.0f);
     if (!std::isfinite(width)) width = 1.0f;
     if (width < kSupersampleWidthMin) width = kSupersampleWidthMin;
     if (width > kSupersampleWidthMax) width = kSupersampleWidthMax;

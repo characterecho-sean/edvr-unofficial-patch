@@ -2306,7 +2306,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
 }  // namespace
 
 void temporalPassConfigure(Config& cfg) {
-    const std::string mode = cfg.getString("fix.temporal_aa", "off");
+    const std::string mode = cfg.getString("experimental.temporal_aa", "off");
     g_wanted = _stricmp(mode.c_str(), "off") != 0 && !mode.empty();
     g_viewTransposed = cfg.getBool("advanced.temporal_aa_view_transpose", true);
     const std::string cur = cfg.getString("advanced.temporal_aa_current", "filtered");

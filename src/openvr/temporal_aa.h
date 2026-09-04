@@ -12,8 +12,8 @@
 //
 // Order at the door: this pass FIRST, on the game's texture at render size
 // (wide under the cull guard), then the guard's crop, then the supersample
-// resolve. fix.temporal_aa = off | on, fix.temporal_aa_jitter = on | off,
-// fix.temporal_aa_blend, fix.temporal_aa_clamp -- all live;
+// resolve. experimental.temporal_aa = off | on, experimental.temporal_aa_jitter = on | off,
+// experimental.temporal_aa_blend, experimental.temporal_aa_clamp -- all live;
 // advanced.temporal_aa_motion = head | camera | none for the field's A/B.
 #pragma once
 

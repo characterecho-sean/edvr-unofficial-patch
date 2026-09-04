@@ -26,10 +26,10 @@
 
 namespace edvr {
 
-// The two kernels, by the names edvr.ini uses (fix.supersample_filter).
+// The two kernels, by the names edvr.ini uses (experimental.supersample_filter).
 enum SupersampleFilter : int { kSupersampleCalm = 0, kSupersampleCrisp = 1 };
 
-// The radius the ini accepts (fix.supersample_width), in output pixels.
+// The radius the ini accepts (experimental.supersample_width), in output pixels.
 constexpr float kSupersampleWidthMin = 0.5f;
 constexpr float kSupersampleWidthMax = 3.0f;
 
