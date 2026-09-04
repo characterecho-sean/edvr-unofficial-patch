@@ -91,6 +91,13 @@ void depthProbeFrameBoundary(ID3D11DeviceContext* ctx);
 // the rest of this frame, or null when the census has not settled.
 bool depthProbeSceneDepth(uint32_t w, uint32_t h, int eye, ID3D11Texture2D** tex);
 
+// How many draws the scene pair's lesser target took last frame: the
+// temporal pass's test of a REAL scene (hundreds in the cockpit and in
+// space; one or two for the main menu's pre-rendered backdrop, whose
+// far plane must not be reprojected by a camera that does not follow
+// the head). 0 until the census has settled.
+uint32_t depthProbeSceneDraws();
+
 void depthProbeShutdown();
 
 }  // namespace edvr

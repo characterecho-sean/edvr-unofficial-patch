@@ -13,6 +13,7 @@
 #include "../common/log.h"
 #include "../common/timing.h"
 #include "shader_swap.h"
+#include "temporal_pass.h"
 
 namespace edvr {
 namespace {
@@ -428,6 +429,9 @@ int discoverTarget(void* dsv) {
 
 }  // namespace
 
+int  g_scenePick[2] = {-1, -1};   // the pair in use, for hysteresis
+bool g_sceneLatchedThisFrame = false;   // the temporal pass's camera latch fired
+
 void depthProbeNoteDraw(ID3D11DeviceContext* ctx, void* dsv, bool rtvEyeSized,
                         bool rtvNull) {
     (void)ctx;
@@ -448,6 +452,18 @@ void depthProbeNoteDraw(ID3D11DeviceContext* ctx, void* dsv, bool rtvEyeSized,
     if (idx < 0) return;
     Target& t = g_targets[idx];
     ++t.drawsThisFrame;
+    // The temporal pass's camera latch: the frame's FIRST draw into the
+    // scene pair's depth is drawn with the scene camera by construction,
+    // whichever eye it is (the first bound is the first rendered). The
+    // first eye-sized draw was the latch until 2026-09-04, and in space
+    // it caught another camera on some frames: the rows' delta read 36
+    // to 40 degrees a frame against the head's and NVIDIA's history
+    // purged on each, a pulse every couple of seconds (temporal_pass.h).
+    if (!g_sceneLatchedThisFrame && t.drawsThisFrame == 1 &&
+        (idx == g_scenePick[0] || idx == g_scenePick[1])) {
+        g_sceneLatchedThisFrame = true;
+        temporalPassNoteFirstEyeDraw();
+    }
     if (rtvEyeSized) ++t.eyeRtvDrawsThisFrame;
     if (rtvNull) ++t.nullRtvDrawsThisFrame;
     t.lastSeenFrame = g_frameNo;
@@ -459,7 +475,6 @@ void depthProbeNoteDraw(ID3D11DeviceContext* ctx, void* dsv, bool rtvEyeSized,
     }
 }
 
-int  g_scenePick[2] = {-1, -1};   // the pair in use, for hysteresis
 
 bool depthProbeSceneDepth(uint32_t w, uint32_t h, int eye, ID3D11Texture2D** tex) {
     if (!tex) return false;
@@ -508,6 +523,16 @@ bool depthProbeSceneDepth(uint32_t w, uint32_t h, int eye, ID3D11Texture2D** tex
     }
     *tex = g_targets[eye == 0 ? first : second].tex;
     return true;
+}
+
+uint32_t depthProbeSceneDraws() {
+    if (!g_wanted || g_scenePick[0] < 0 || g_scenePick[1] < 0 ||
+        g_scenePick[0] >= g_targetCount || g_scenePick[1] >= g_targetCount) {
+        return 0;
+    }
+    const uint32_t a = g_targets[g_scenePick[0]].drawsLastFrame;
+    const uint32_t b = g_targets[g_scenePick[1]].drawsLastFrame;
+    return a < b ? a : b;
 }
 
 void depthProbeNoteIndirectDraw(ID3D11DeviceContext* ctx, void* dsv) {
@@ -641,6 +666,7 @@ void depthProbeFrameBoundary(ID3D11DeviceContext* ctx) {
     ++g_frameNo;
     if (g_eyeDrawThisFrame) ++g_eyeFrames;
     g_eyeDrawThisFrame = false;
+    g_sceneLatchedThisFrame = false;
     g_drawsLastFrame = g_drawsThisFrame;
     g_drawsWithDsvLastFrame = g_drawsWithDsvThisFrame;
     g_indirectLastFrame = g_indirectThisFrame;

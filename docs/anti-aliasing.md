@@ -1052,6 +1052,24 @@ object motion and stays unregistered, as in any temporal filter. The
 trained path now also acquires the pass's timing and stats slot, so the
 totals line prints its real price instead of zero.
 
+**Its first flight (719f3f0, Pimax, 2026-09-04) named two faults, both by
+the new figures.** In space the camera's delta differed from the head's
+by 36 to 40 degrees a frame and the camera "moved" 681 m a frame: the
+latch at the frame's first eye-sized draw was catching another camera's
+rows on some frames, NVIDIA purged its history on each, and the station
+pulsed bright and dark every couple of seconds. At the main menu the
+world path took 74 to 98% of pixels: the backdrop is a pre-rendered
+image at the far plane, its camera does not follow the head, and the
+hangar's back wall detached and flickered. So the latch now fires at the
+first draw into the scene pair's depth target (the scene camera's by
+construction; depth_probe.cpp), the delta is dropped for any frame it
+differs from the head's by over 3 degrees and its translation for any
+jump over 50 m (the floating origin), both counted on the registration
+line, and the world path needs a real scene of fifty draws into the pair
+a frame. The same line settled the depthless-text question: only 1 to 4%
+of bright pixels lack depth in the cockpit and in space, so the HUD text
+that moves with the head is not that case.
+
 ## Feature C — texture LOD bias, the small lever
 
 Not all shimmer is geometry. Detail maps and normal maps sampled a mip

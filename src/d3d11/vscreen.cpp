@@ -1794,9 +1794,10 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         return DrawVerdict::kNone;
     }
     ++s->eyeDrawsThisFrame;
-    // The frame's FIRST eye draw: the last scene-constants write before it
-    // is this eye's camera, latched for the temporal pass (temporal_pass.h).
-    if (s->eyeDrawsThisFrame == 1) temporalPassNoteFirstEyeDraw();
+    // (The temporal pass's camera latch used to fire at the frame's first
+    // eye draw here; since 2026-09-04 the depth probe fires it at the
+    // first draw into the scene pair's depth, which is the scene camera's
+    // by construction -- depth_probe.cpp says why.)
     // The depth target this eye draw uses, for the depth probe -- one
     // pointer compare unless it changed (depth_probe.h).
     depthProbeNoteEyeDraw(self, bindingGet(BindSlot::Dsv0), s->eyeDrawsThisFrame);

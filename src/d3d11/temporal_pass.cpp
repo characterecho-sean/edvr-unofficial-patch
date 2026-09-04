@@ -649,6 +649,8 @@ uint64_t g_brightNoDepthPix = 0;    // ...of which had no depth
 double   g_camHeadDiffSum = 0.0;    // degrees: the camera's delta against the head's
 double   g_camMoveSum = 0.0;        // metres: the camera's displacement a frame
 uint32_t g_camFrames = 0;
+uint32_t g_camDropRot = 0;          // frames whose camera delta was another camera's
+uint32_t g_camDropMove = 0;         // frames whose camera translation was a jump
 constexpr float kStillDeg = 0.03f;   // under 2 deg/s at 72 Hz: tracking noise
 constexpr float kSlowDeg = 0.30f;    // under 22 deg/s: a glance
 bool     g_priceLogged = false;
@@ -1237,15 +1239,36 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
             temporalApply3(rpT, tp, cp);
             temporalApply3(rnT, tn, cn);
             const float mx = cn[0] - cp[0], my = cn[1] - cp[1], mz = cn[2] - cp[2];
-            g_camMoveSum += sqrt(static_cast<double>(mx) * mx + static_cast<double>(my) * my +
-                                 static_cast<double>(mz) * mz);
+            const double move = sqrt(static_cast<double>(mx) * mx + static_cast<double>(my) * my +
+                                     static_cast<double>(mz) * mz);
+            g_camMoveSum += move;
+            float diffDeg = 0.0f;
             if (deltaHead) {
                 float ht[9], diff[9];
                 temporalTranspose3(deltaHead, ht);
                 temporalMul3(cand[2], ht, diff);
-                g_camHeadDiffSum += temporalRotationAngleDeg(diff);
+                diffDeg = temporalRotationAngleDeg(diff);
+                g_camHeadDiffSum += diffDeg;
             }
             ++g_camFrames;
+            // Plausibility, per frame: no ship turns 270 degrees a second,
+            // and none covers 50 m in a frame (4.5 km/s) outside
+            // supercruise, where nothing within the planes is drawn anyway.
+            // A delta beyond the first is another camera's rows or a stale
+            // latch and is dropped for the frame (the first space flight
+            // read 36 to 40 degrees a frame on average before the latch
+            // moved to the scene pair's first draw); a jump beyond the
+            // second is the floating origin moving, and only the
+            // translation is dropped -- the rotation still registers the
+            // turn. Both counted for the registration line.
+            if (diffDeg > 3.0f) {
+                candValid[2] = false;
+                ++g_camDropRot;
+            }
+            if (move >= 50.0) {
+                for (int i = 0; i < 3; ++i) tvCam[i] = 0.0f;
+                ++g_camDropMove;
+            }
         }
 
         PassParams p{};
@@ -1294,8 +1317,13 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         // depth motion, with a depth bound and both frames' camera rows
         // read, in the rows' measured convention (world->view; the
         // transposed reading has no translation column to trust).
+        // ...and only in a REAL scene: fifty draws into the scene pair a
+        // frame. The main menu's backdrop is a pre-rendered image at the far
+        // plane drawn with one or two, and its camera does not follow the
+        // head, so the world path detached its hangar wall (2026-09-04).
         const bool worldOn = depthMotion && haveDepth && g_shipMetres > 0.0f &&
-                             candValid[2] && !g_viewTransposed;
+                             candValid[2] && !g_viewTransposed &&
+                             depthProbeSceneDraws() >= 50u;
         for (int i = 0; i < 3; ++i) p.tvCam[i] = worldOn ? tvCam[i] : 0.0f;
         p.tvCam[3] = worldOn ? 1.0f : 0.0f;
         p.split[0] = g_shipMetres;
@@ -1795,6 +1823,12 @@ bool temporalPassRegistration(char* buf, size_t n) {
                   "and the camera moved %.4f m/frame (docked, both read 0)",
                   g_camHeadDiffSum / g_camFrames, g_camMoveSum / g_camFrames);
     }
+    if (g_camDropRot || g_camDropMove) {
+        regAppend(buf, n, used,
+                  "; the camera's delta was dropped on %u frames as another camera's (over 3 "
+                  "deg from the head's) and its translation on %u as a jump (over 50 m)",
+                  g_camDropRot, g_camDropMove);
+    }
     // The interval starts afresh: the next line judges the next stretch.
     memset(g_candPix, 0, sizeof(g_candPix));
     memset(g_candRej, 0, sizeof(g_candRej));
@@ -1812,6 +1846,8 @@ bool temporalPassRegistration(char* buf, size_t n) {
     g_camHeadDiffSum = 0.0;
     g_camMoveSum = 0.0;
     g_camFrames = 0;
+    g_camDropRot = 0;
+    g_camDropMove = 0;
     return true;
 }
 

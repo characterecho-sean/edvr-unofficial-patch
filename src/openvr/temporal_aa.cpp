@@ -157,7 +157,9 @@ void temporalAaConfigure() {
     else if (_stricmp(rawSign.c_str(), "flip_y") == 0) signY = -1;
     else if (_stricmp(rawSign.c_str(), "flip_both") == 0) { signX = -1; signY = -1; }
     const bool lag = cfg.getFloat("advanced.temporal_aa_jitter_lag", 0.0f) >= 0.5f;
-    if (s.configured && (signX != s.jitterSignX || signY != s.jitterSignY || lag != s.jitterLag)) {
+    const bool instrumentsOn = signX < 0 || signY < 0 || lag;
+    if ((s.configured && (signX != s.jitterSignX || signY != s.jitterSignY || lag != s.jitterLag)) ||
+        (!s.configured && instrumentsOn)) {
         Log::get().note(
             "temporal aa: the jitter handed to the pass and to NVIDIA is now %s%s "
             "(an A/B instrument; the projection the game renders through is unchanged).",
