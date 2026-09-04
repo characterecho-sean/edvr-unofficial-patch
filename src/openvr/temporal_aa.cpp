@@ -118,6 +118,31 @@ const char* motionName(Motion m) {
          : m == Motion::Camera ? "camera" : m == Motion::Head ? "head" : "none";
 }
 
+// The mode as the log should say it. The reload line used to say "on" for
+// every mode that was not off, so a log could not tell whose history had
+// run -- and a session spent comparing two headsets read as the pass's own
+// when NVIDIA's was doing the work (2026-09-04).
+const char* modeName(bool dlaa, bool upscale) {
+    if (!dlaa) return "on (the pass's own history)";
+    return upscale ? "dlss (NVIDIA's history, upscaling to the unit-quality size)"
+                   : "dlaa (NVIDIA's history at the frame's own size)";
+}
+
+// Pixels per degree, across and down, from the frustum the game renders
+// with and the size it submits. This is the number a comparison between
+// two headsets has to hold level: aliasing is set by how densely the
+// frame samples the world, not by which headset is on the head, and a
+// Quest 3 at three quarters quality samples about half as densely as a
+// Pimax Crystal Super at the same nominal settings.
+void samplingDensity(const float tan[4], uint32_t w, uint32_t h,
+                     float* degH, float* degV, float* pxH, float* pxV) {
+    const float k = 180.0f / 3.14159265f;
+    *degH = (atanf(-tan[0]) + atanf(tan[1])) * k;
+    *degV = (atanf(-tan[2]) + atanf(tan[3])) * k;
+    *pxH = *degH > 0.0f ? static_cast<float>(w) / *degH : 0.0f;
+    *pxV = *degV > 0.0f ? static_cast<float>(h) / *degV : 0.0f;
+}
+
 }  // namespace
 
 void temporalAaConfigure() {
@@ -201,11 +226,11 @@ void temporalAaConfigure() {
     // A motion or blend change mid-flight need not reset the history; a
     // freshly-on pass starts from nothing anyway.
     Log::get().note(
-        "temporal aa: on -- motion from the %s, jitter %s, history weight "
+        "temporal aa: %s -- motion from the %s, jitter %s, history weight "
         "%.2f, clip %.2f sigma. Engages at the first forwarded frame and "
         "says so; every key is live.",
-        motionName(motion), jitter ? "on" : "off", static_cast<double>(blend),
-        static_cast<double>(clampSig));
+        modeName(dlaa, upscale), motionName(motion), jitter ? "on" : "off",
+        static_cast<double>(blend), static_cast<double>(clampSig));
 }
 
 bool temporalAaWanted() {
@@ -568,6 +593,18 @@ void* temporalAaTreat(vr::EVREye eye, void* handle,
     }
     if (!s.engagedNoted) {
         s.engagedNoted = true;
+        float degH = 0.0f, degV = 0.0f, pxH = 0.0f, pxV = 0.0f;
+        samplingDensity(tanNow, region[2] - region[0], region[3] - region[1],
+                        &degH, &degV, &pxH, &pxV);
+        Log::get().note(
+            "temporal aa: the frame samples %.1f pixels per degree across and "
+            "%.1f down (%ux%u over %.0f x %.0f degrees). Aliasing follows this "
+            "number, so two headsets are only comparable when it matches: a "
+            "headset at half the density shimmers more with every setting "
+            "identical.",
+            static_cast<double>(pxH), static_cast<double>(pxV),
+            region[2] - region[0], region[3] - region[1],
+            static_cast<double>(degH), static_cast<double>(degV));
         Log::get().note(
             "temporal aa: engaged -- each eye's %ux%u frame is blended with "
             "its reprojected history at submit, before the guard's crop and "

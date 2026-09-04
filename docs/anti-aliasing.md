@@ -1306,6 +1306,25 @@ which the chooser now skips when its rows equal last frame's pick
 sit at zero degrees on the Pimax, so the cant composition is a no-op
 there.
 
+**The flight after it (Pimax, then a Quest 3 over Steam Link) confirmed
+the flip and closed two headset questions.** The rows now turn 1.00
+times the head on every axis (k within 0.01 of zero, against -1.92
+before), the residual sits at four hundredths of a degree a frame, the
+lead is zero, and the still-ship translation regression reads +1 per
+axis -- the flip is a reflection and the shipped sign is right. The
+Quest 3's frustum is asymmetric VERTICALLY (t -1.4281, b +0.9657)
+where the Pimax's is symmetric, which makes it the first headset to
+test the vertical mapping; it is correct, because the header and the
+shader both send the top row to b and the bottom to t, which is what
+OpenVR's own GetProjectionMatrix produces. The eyes read zero cant on
+both headsets. What is left is sampling density: the Pimax renders
+about 42 pixels per degree and the Quest 3 about 20 at three quarters
+quality, so the same frame shimmers more there with every setting
+identical, and the engage line now prints the number so a comparison
+between two headsets can be held level. The reload line now names the
+mode as well -- it said "on" for dlaa and dlss too, and a whole
+session's logs read as the pass's own history while NVIDIA's ran.
+
 ## Feature C — texture LOD bias, the small lever
 
 Not all shimmer is geometry. Detail maps and normal maps sampled a mip
