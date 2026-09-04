@@ -22,6 +22,9 @@
 // under test is a transcription of it, and one striped image below is
 // where the two are held to agree.
 #include "../../src/common/supersample_math.h"
+#include "../../src/common/temporal_math.h"
+#include <cmath>
+#include <cstring>
 
 namespace {
 
@@ -132,6 +135,36 @@ bool readPixelRgba8(ID3D11Device* device, ID3D11DeviceContext* ctx,
 // The resolve's result, checked: an ID3D11Texture2D of the expected size
 // and format whose pixel at (x, y) holds the expected colour within +/-tol.
 // Prints its own ok/FAIL line naming `label`.
+// Read back a region of an R8G8B8A8_UNORM texture: w x h pixels, row-major,
+// four bytes a pixel.
+bool readRegionRgba8(ID3D11Device* device, ID3D11DeviceContext* ctx,
+                     ID3D11Texture2D* tex, UINT x, UINT y, UINT w, UINT h,
+                     std::vector<unsigned char>& out) {
+    D3D11_TEXTURE2D_DESC sd{};
+    sd.Width = w; sd.Height = h; sd.MipLevels = 1; sd.ArraySize = 1;
+    sd.Format = DXGI_FORMAT_R8G8B8A8_UNORM; sd.SampleDesc.Count = 1;
+    sd.Usage = D3D11_USAGE_STAGING; sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    ID3D11Texture2D* stage = nullptr;
+    if (FAILED(device->CreateTexture2D(&sd, nullptr, &stage)) || !stage) return false;
+    D3D11_BOX box{x, y, 0, x + w, y + h, 1};
+    ctx->CopySubresourceRegion(stage, 0, 0, 0, 0, tex, 0, &box);
+    D3D11_MAPPED_SUBRESOURCE m{};
+    bool ok = false;
+    if (SUCCEEDED(ctx->Map(stage, 0, D3D11_MAP_READ, 0, &m))) {
+        out.resize(static_cast<size_t>(w) * h * 4);
+        for (UINT r = 0; r < h; ++r) {
+            memcpy(&out[static_cast<size_t>(r) * w * 4],
+                   static_cast<const unsigned char*>(m.pData) +
+                       static_cast<size_t>(r) * m.RowPitch,
+                   static_cast<size_t>(w) * 4);
+        }
+        ok = true;
+        ctx->Unmap(stage, 0);
+    }
+    stage->Release();
+    return ok;
+}
+
 bool checkResolved(ID3D11Device* device, ID3D11DeviceContext* ctx, void* result,
                    const char* label, UINT expectW, UINT expectH, UINT x, UINT y,
                    unsigned char er, unsigned char eg, unsigned char eb, int tol) {
@@ -840,6 +873,165 @@ int main(int argc, char** argv) {
                     printf("  skip  dlaa: the reset count needs the runtime\n");
                 }
                 srcD->Release();
+
+                // The NGX conventions rig (the review of 2026-09-04: F5, and
+                // T2 of its desk tests). A field of soft stripes at infinity,
+                // seen through a camera that yaws one degree a frame, is
+                // drawn EXACTLY as the pass's own mapping says a jittered
+                // frame looks -- content right by jx and down by jy, last
+                // frame's content 3.49 px to the left at the centre -- and
+                // sent through NVIDIA's history sixteen frames at a time
+                // with the motion vectors the pass computes from the same
+                // delta. The output is held against the unjittered truth of
+                // each frame over the middle of the image, for six
+                // variants: the delta as computed and transposed (the motion
+                // negated), and the jitter as passed, with y flipped, with x
+                // flipped. The least error names the conventions NVIDIA
+                // expects; the shipped pairing (as computed, as passed) must
+                // be it, or the field is being fed a sign it does not want.
+                // Sinusoids because their truth at any sub-pixel position is
+                // exact and band-limited, so a registered history converges
+                // to it and a misregistered one cannot.
+                if (avail) {
+                    const UINT W = 400, H = 304;
+                    const float thetaDeg = 1.0f;
+                    const float th = thetaDeg * 3.14159265f / 180.0f;
+                    const float ct = cosf(th), st = sinf(th);
+                    const float deltaFwd[9] = {ct, 0, st, 0, 1, 0, -st, 0, ct};
+                    const float deltaBack[9] = {ct, 0, -st, 0, 1, 0, st, 0, ct};
+                    auto pattern = [](float u, float v) -> float {
+                        // stripe fields of 3.5, 5 and 4.2 px periods at the
+                        // centre (2/400 tangent units per pixel)
+                        const float k = 200.0f;
+                        const float a = sinf(6.2831853f * u * k / 3.5f);
+                        const float b = sinf(6.2831853f * (0.6f * u + 0.8f * v) * k / 5.0f);
+                        const float c = sinf(6.2831853f * (-0.7f * u + 0.7f * v) * k / 4.2f);
+                        const float f = 0.5f + 0.16f * (a + b + c);
+                        return f < 0.0f ? 0.0f : f > 1.0f ? 1.0f : f;
+                    };
+                    // Frame k's image drawn with the jitter (jx, jy): the
+                    // camera-to-world rotation is Ry(k theta), so the pass's
+                    // delta R_prev^T R_now is Ry(theta) every frame.
+                    auto truth = [&](int k, float jx, float jy,
+                                     std::vector<unsigned char>& img) {
+                        const float ck = cosf(k * th), sk = sinf(k * th);
+                        const float R[9] = {ck, 0, sk, 0, 1, 0, -sk, 0, ck};
+                        img.resize(static_cast<size_t>(W) * H * 4);
+                        for (UINT y = 0; y < H; ++y) {
+                            for (UINT x = 0; x < W; ++x) {
+                                float d[3], wd[3];
+                                edvr::temporalPixelToDir(static_cast<float>(x) - jx,
+                                                         static_cast<float>(y) - jy, tan,
+                                                         W, H, d);
+                                edvr::temporalApply3(R, d, wd);
+                                const float u = wd[0] / -wd[2];
+                                const float v = wd[1] / -wd[2];
+                                const unsigned char g = static_cast<unsigned char>(
+                                    pattern(u, v) * 255.0f + 0.5f);
+                                unsigned char* px = &img[(static_cast<size_t>(y) * W + x) * 4];
+                                px[0] = g; px[1] = g; px[2] = g; px[3] = 255;
+                            }
+                        }
+                    };
+                    D3D11_TEXTURE2D_DESC td{};
+                    td.Width = W; td.Height = H; td.MipLevels = 1; td.ArraySize = 1;
+                    td.Format = DXGI_FORMAT_R8G8B8A8_UNORM; td.SampleDesc.Count = 1;
+                    td.Usage = D3D11_USAGE_DEFAULT;
+                    td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+                    ID3D11Texture2D* srcR = nullptr;
+                    if (FAILED(device->CreateTexture2D(&td, nullptr, &srcR)) || !srcR) {
+                        printf("  FAIL  conventions rig: could not make its source\n");
+                        rc = 1;
+                    } else {
+                        struct Variant { const char* name; const float* delta; float sx, sy; };
+                        const Variant variants[6] = {
+                            {"motion as computed, jitter as passed", deltaFwd, 1.0f, 1.0f},
+                            {"motion as computed, jitter y flipped", deltaFwd, 1.0f, -1.0f},
+                            {"motion as computed, jitter x flipped", deltaFwd, -1.0f, 1.0f},
+                            {"motion negated, jitter as passed", deltaBack, 1.0f, 1.0f},
+                            {"motion negated, jitter y flipped", deltaBack, 1.0f, -1.0f},
+                            {"motion negated, jitter x flipped", deltaBack, -1.0f, 1.0f},
+                        };
+                        const UINT rx = 100, ry = 77, rw = 200, rh = 150;
+                        double err[6] = {};
+                        double shippedByFrame[16] = {};
+                        bool rigOk = true;
+                        std::vector<unsigned char> img, ref, out;
+                        for (int vi = 0; vi < 6 && rigOk; ++vi) {
+                            double sum = 0.0;
+                            long n = 0;
+                            for (int k = 0; k < 16 && rigOk; ++k) {
+                                float jx = 0.0f, jy = 0.0f;
+                                edvr::temporalJitter(static_cast<uint32_t>(k), &jx, &jy);
+                                truth(k, jx, jy, img);
+                                ctx->UpdateSubresource(srcR, 0, nullptr, img.data(), W * 4, 0);
+                                void* r = taa(srcR, 0, nullptr, tan, tan, variants[vi].sx * jx,
+                                              variants[vi].sy * jy, variants[vi].delta, nullptr,
+                                              nullptr, 0.0f, 0.0f, thetaDeg, 1, 0.9f, 1.0f, 0u,
+                                              0u, k == 0 ? (1u | 2u) : 2u);
+                                if (!r) {
+                                    printf("  FAIL  conventions rig: frame %d of '%s' was refused\n",
+                                           k, variants[vi].name);
+                                    rc = 1;
+                                    rigOk = false;
+                                    break;
+                                }
+                                if (k >= 12 || vi == 0) {
+                                    truth(k, 0.0f, 0.0f, ref);
+                                    if (!readRegionRgba8(device, ctx, static_cast<ID3D11Texture2D*>(r),
+                                                         rx, ry, rw, rh, out)) {
+                                        printf("  FAIL  conventions rig: could not read the output back\n");
+                                        rc = 1;
+                                        rigOk = false;
+                                        break;
+                                    }
+                                    double fsum = 0.0;
+                                    for (UINT y = 0; y < rh; ++y) {
+                                        for (UINT x = 0; x < rw; ++x) {
+                                            const int o = out[(static_cast<size_t>(y) * rw + x) * 4];
+                                            const int e = ref[((static_cast<size_t>(y) + ry) * W + x + rx) * 4];
+                                            fsum += o > e ? o - e : e - o;
+                                        }
+                                    }
+                                    if (vi == 0) shippedByFrame[k] = fsum / (rw * rh);
+                                    if (k >= 12) {
+                                        sum += fsum;
+                                        n += static_cast<long>(rw) * rh;
+                                    }
+                                }
+                            }
+                            err[vi] = n ? sum / n : 1e9;
+                        }
+                        srcR->Release();
+                        if (rigOk) {
+                            printf("  info  conventions rig: the shipped pairing's error by frame "
+                                   "(1/255, against the unjittered truth): f0 %.1f, f1 %.1f, f3 %.1f, "
+                                   "f7 %.1f, f15 %.1f\n",
+                                   shippedByFrame[0], shippedByFrame[1], shippedByFrame[3],
+                                   shippedByFrame[7], shippedByFrame[15]);
+                            int best = 0;
+                            for (int vi = 1; vi < 6; ++vi) if (err[vi] < err[best]) best = vi;
+                            for (int vi = 0; vi < 6; ++vi) {
+                                printf("  info  conventions rig: %-40s error %.2f%s\n",
+                                       variants[vi].name, err[vi], vi == best ? "  <- least" : "");
+                            }
+                            // A clear win for another pairing is a sign the field
+                            // is being fed wrong; a near-tie is noise.
+                            if (best != 0 && err[best] < 0.85 * err[0]) {
+                                printf("  FAIL  conventions rig: NVIDIA's history converges best with '%s' "
+                                       "(%.2f vs the shipped %.2f) -- the sign handed to NGX is wrong\n",
+                                       variants[best].name, err[best], err[0]);
+                                rc = 1;
+                            } else {
+                                printf("  ok    conventions rig: the shipped pairing converges best "
+                                       "(%.2f; the runner-up %.2f)\n",
+                                       err[0], [&] { double m = 1e9; for (int vi = 1; vi < 6; ++vi) if (err[vi] < m) m = err[vi]; return m; }());
+                            }
+                        }
+                    }
+                } else {
+                    printf("  skip  conventions rig: needs the runtime\n");
+                }
             }
         }
     }

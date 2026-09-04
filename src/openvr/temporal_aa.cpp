@@ -94,6 +94,17 @@ struct State {
     uint64_t readsAfterSum = 0;    // the frame's last treat -> the next boundary
     uint32_t readOrderFrames = 0;
     bool     readOrderNoted = false;
+
+    // Two A/B instruments for the jitter handed to the consumers (the
+    // pass's filter and NGX), never to the projection the game renders
+    // through: a sign flip per axis, and a one-frame lag. They exist
+    // because the review of 2026-09-04 left the game's displacement
+    // direction (F5) and the read phase (F4) unmeasured in the field;
+    // the shipped answers are no flip and no lag.
+    int   jitterSignX = 1;
+    int   jitterSignY = 1;
+    bool  jitterLag = false;
+    float jxPrev = 0.0f, jyPrev = 0.0f;   // last frame's offset, for the lag
 };
 State g_s;
 constexpr uint32_t kReadOrderFrames = 600;
@@ -140,6 +151,23 @@ void temporalAaConfigure() {
                         "knows (depth, head, camera, none). Using depth.",
                         rawMotion.c_str());
     }
+    const std::string rawSign = cfg.getString("advanced.temporal_aa_jitter_sign", "as_is");
+    int signX = 1, signY = 1;
+    if (_stricmp(rawSign.c_str(), "flip_x") == 0) signX = -1;
+    else if (_stricmp(rawSign.c_str(), "flip_y") == 0) signY = -1;
+    else if (_stricmp(rawSign.c_str(), "flip_both") == 0) { signX = -1; signY = -1; }
+    const bool lag = cfg.getFloat("advanced.temporal_aa_jitter_lag", 0.0f) >= 0.5f;
+    if (s.configured && (signX != s.jitterSignX || signY != s.jitterSignY || lag != s.jitterLag)) {
+        Log::get().note(
+            "temporal aa: the jitter handed to the pass and to NVIDIA is now %s%s "
+            "(an A/B instrument; the projection the game renders through is unchanged).",
+            signX < 0 && signY < 0 ? "flipped on both axes"
+            : signX < 0 ? "flipped on x" : signY < 0 ? "flipped on y" : "as computed",
+            lag ? ", one frame late" : "");
+    }
+    s.jitterSignX = signX;
+    s.jitterSignY = signY;
+    s.jitterLag = lag;
 
     const bool first = !s.configured;
     const bool changed = first || on != s.on || dlaa != s.dlaa || upscale != s.upscale ||
@@ -238,6 +266,8 @@ void temporalAaFrameBoundary() {
         return;
     }
     ++s.frame;
+    s.jxPrev = s.jx;
+    s.jyPrev = s.jy;
 
     // The projection-read order: the reads that landed between the last
     // treat and this boundary, and the count armed for the coming frame.
@@ -458,8 +488,12 @@ void* temporalAaTreat(vr::EVREye eye, void* handle,
             outH = uh;
         }
     }
+    // The jitter handed to the consumers: this frame's, or last frame's
+    // under the lag instrument, with the sign instrument's flips.
+    const float jxOut = static_cast<float>(s.jitterSignX) * (s.jitterLag ? s.jxPrev : s.jx);
+    const float jyOut = static_cast<float>(s.jitterSignY) * (s.jitterLag ? s.jyPrev : s.jy);
     void* out = s.fn(handle, e, haveBounds ? b4 : nullptr, tanNow,
-                     s.havePrev[e] ? s.tanPrev[e] : tanNow, s.jx, s.jy,
+                     s.havePrev[e] ? s.tanPrev[e] : tanNow, jxOut, jyOut,
                      haveHeadDelta ? delta : nullptr, haveTv ? tv : nullptr,
                      haveTv ? tvSwapped : nullptr, nearZ, farZ, headDeg,
                      static_cast<int>(s.motion), s.blend, s.clamp, outW, outH,

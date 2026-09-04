@@ -1003,6 +1003,30 @@ rasterised at two-thirds size and no upscaler recovers them. DLSS buys
 frame time, not text; the flight that separates the two is DLAA at HMD
 Quality 1.0 against DLSS at 0.67 with the same output size.
 
+**First flight with a real history (5a0fa2b, Quest 3 at HMD Quality 1.5,
+DLAA at 3096x3312, 2026-09-04):** 4 resets in 5597 evaluations, so
+NVIDIA accumulated for the first time; the projection reads fell 20 to 8
+on the boundary's far side, so the jitter is not a frame late in the
+main; the rest lock never held (the Quest's tracking runs 1.2 to 2.8
+arcmin a frame against the 0.6 threshold, 28% easing). The player's
+verdict: white text noticeably shifts brightness with head movement,
+orange less. That is the gap between a converged thin stroke (its energy
+spread over the jitter's sub-pixel positions) and a fresh one, opened
+whenever the history is discarded or misregistered under motion -- which
+a wrong sign in either convention NVIDIA is handed would do on every
+moving frame and on no still one. So the desk now measures it: the
+conventions rig in tools/smoke draws a band-limited stripe field through
+a camera yawing a degree a frame, exactly as the pass's mapping says a
+jittered frame looks, runs it through NVIDIA's history with the pass's
+own motion vectors, and holds the output against the unjittered truth
+for six pairings (motion as computed or negated; jitter as passed, y
+flipped, x flipped). The shipped pairing must converge best. For the
+game's side, two live instruments under `[advanced]`:
+`temporal_aa_jitter_sign` (as_is, flip_x, flip_y, flip_both) and
+`temporal_aa_jitter_lag` (0, 1) change only what the consumers are told;
+the pairing that makes text sharpest with the head still is the game's
+convention, and is then hard-coded.
+
 ## Feature C — texture LOD bias, the small lever
 
 Not all shimmer is geometry. Detail maps and normal maps sampled a mip
