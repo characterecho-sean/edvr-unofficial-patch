@@ -1,4 +1,4 @@
-# Shimmer on steady geometry (VR): the render pose never rests, and sub-pixel seams have no coverage
+# Shimmer on steady geometry (VR): the render pose never rests, and sub-pixel detail is sampled as dashes
 
 **Type:** Bug report — VR rendering
 **Area:** Whole frame; most visible on the main-menu ship's hull lines, HUD hairlines and text
@@ -28,15 +28,23 @@ produce this, and we measured both on stock installations:
    render pose and telling the compositor the frame's display pose stopped
    the shimmer outright.
 
-2. **Thin geometry is rasterised as dashes.** With the pose held still,
+2. **Sub-pixel detail is sampled as dashes.** With the pose held still,
    the same seam shows as a row of bright dashes with dark gaps. The dashes
    get finer and more frequent as HMD Quality rises and merge when the
-   head rolls: a sliver of geometry narrower than a render pixel, lit
-   wherever a pixel centre falls inside it, with no coverage information
-   because the deferred path has no MSAA. The tracker's wander used to
-   slide that pattern along the seam every frame; that was the shimmer.
-   Nothing after rasterisation can recover coverage that was never
-   sampled. Only more samples per pixel can draw it whole.
+   head rolls: a feature narrower than a render pixel, sampled once per
+   pixel, lit wherever the sample happens to land on it. We tested the
+   geometry explanation directly — every solid-fill rasteriser state the
+   game creates rewritten with Direct3D 11.3 conservative rasterisation,
+   which lights every pixel a triangle touches — and the dashes were
+   unchanged while other surfaces grew triangle artifacts. So the seam is
+   not a geometry sliver: it is texture-space detail, most likely a
+   normal-map ridge whose specular highlight fires only where the sample
+   lands on the ridge, or a one-texel bright line, sampled at the render
+   grid's phase. The tracker's wander used to slide that pattern along the
+   seam every frame; that was the shimmer. Nothing after shading can
+   recover what a single sample per pixel skipped. Only more samples per
+   pixel, or band-limiting the detail and its specular before it is
+   sampled, can draw it whole.
 
 The rest of this report gives the reproduction, the measurements, what
 was excluded and how, and fix directions for each mechanism.
@@ -117,8 +125,17 @@ modulation. At HMD Quality 1.5 the dashes were finer and more frequent
 than at 1.0. Rolling the head merged them. A resolve kernel at the door
 (Mitchell at radius 2 px, then a Gaussian at radius 2 px, σ = 1 px, both
 on the 1.5x frame) left them unchanged: a dash every 20 to 60 pixels is a
-low-frequency pattern along the line, and the coverage it would take to
-draw the sliver as a continuous half-bright line was never rasterised.
+low-frequency pattern along the line, and what a single sample per pixel
+skipped is not in the image to recover.
+
+**The geometry test.** To separate a sub-pixel triangle from sub-pixel
+texture detail, every solid-fill rasteriser state the game created was
+rewritten with conservative rasterisation (Direct3D 11.3, hardware tier 3;
+eight states, back-, front- and no-cull alike, eight wireframe states left
+alone). Under it a triangle lights every pixel it touches, so a geometry
+sliver would have come out as a solid line. The dashes did not change,
+and other surfaces showed triangle-shaped artifacts from the extrapolated
+attributes, so the seam is not a geometry sliver and this is not a fix.
 
 ## What was excluded, and how
 
@@ -131,6 +148,7 @@ draw the sliver as a continuous half-bright line was never rasterised.
 | The supersample resolve kernel | unchanged by Mitchell 2.0 and Gaussian 2.0 at 1.5x |
 | Post-process AA | the same with Off and with SMAA |
 | Tracking position noise | steady to under 0.05 mm per frame |
+| A sub-pixel geometry sliver | conservative rasterisation on every solid state: dashes unchanged |
 
 What remains is the reported orientation, and the hold experiment
 confirms it: remove that motion and the shimmer stops.
@@ -140,12 +158,12 @@ confirms it: remove that motion and the shimmer stops.
 FXAA, SMAA and MLAA run on the finished image and blend along edges they
 find in it. Mechanism 1 is temporal — the image is right every frame and
 wrong between frames — so a spatial filter turns flicker into smoothly
-blended flicker. Mechanism 2 is missing coverage — the rasteriser decided
-"in" or "out" per pixel centre — and a dashed line is not an edge pattern
+blended flicker. Mechanism 2 is a single sample per pixel landing on or off a
+feature thinner than the pixel — and a dashed line is not an edge pattern
 those filters recognise. Neither can be reached from the post chain. The
 field's lore that "only HMD Quality does anything" is right for the wrong
-reason: supersampling helps mechanism 2 by putting more centres inside the
-sliver, and does nothing for mechanism 1.
+reason: supersampling helps mechanism 2 by putting more samples on the
+feature, and does nothing for mechanism 1.
 
 ## Suggested fix directions
 
@@ -190,25 +208,28 @@ repository below), field-verified at the main menu on the Crystal Super:
 with the head still the seam and the menu text stand steady, and turning
 the head shows no swim or lag. The numbers above are the ones it runs.
 
-### For sub-pixel geometry — the industry answer
+### For sub-pixel detail — the industry answer
 
 1. **Temporal anti-aliasing with a velocity buffer** (TAA, DLAA, FSR 2/3,
    XeSS). The deferred renderer already has the depth and matrices; a
    per-pixel motion vector pass is the missing input. Sub-pixel jitter
-   accumulated over a handful of frames integrates a sliver's true
-   coverage into a continuous line, and it is the answer every other
+   accumulated over a handful of frames integrates a feature's true
+   appearance into a continuous line, and it is the answer every other
    deferred engine settled on. The rest-pose filter above makes the
    history exactly registered while the head is still, which is when the
    shimmer is worst, so the two fixes compound.
 
-2. **Failing that, keep decorative geometry above a pixel on screen:** a
-   minimum screen-space width for seam and edge geometry, or seams baked
-   into textures where mipmapping band-limits them, and screen-space
-   expansion for hairlines. MSAA is impractical in the deferred path, and
-   supersampling is too expensive at the resolutions VR needs.
+2. **Band-limit the detail before it is sampled.** Specular anti-aliasing
+   (Toksvig or geometric) so a normal-map ridge's highlight widens with
+   distance instead of vanishing between samples; variance-preserving mip
+   filtering of the normal maps; and a texture LOD bias toward the softer
+   level for the finest hull detail. For genuinely sub-pixel geometry, a
+   minimum screen-space width. MSAA is impractical in the deferred path,
+   and supersampling is too expensive at the resolutions VR needs.
 
-3. **Specular anti-aliasing** (Toksvig or geometric) for the sparkle on
-   hull normal maps — related, and worth doing in the same pass.
+3. **Not conservative rasterisation.** Tested: no effect on the seam, and
+   triangle-shaped artifacts on other surfaces from the extrapolated
+   attributes.
 
 ## Impact note
 

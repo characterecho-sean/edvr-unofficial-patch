@@ -790,6 +790,14 @@ saving the same gaze point could drive; noted, not designed.
 
 ## Considered and declined
 
+- **Conservative rasterisation from the proxy** (D3D11.3, rewriting the
+  game's rasteriser states at creation so a triangle lights every pixel
+  it touches). Built and flown 2026-09-03 against the main-menu seam: the
+  dashes did not change, and other surfaces grew triangle-shaped
+  artifacts from the extrapolated attributes. The seam is not a geometry
+  sliver, and the mechanism is not a fix even where it would be. Reverted
+  the same day.
+
 - **A ReShade preset instead.** ReShade has applied effects in the
   headset since 5.0 — a separate VR effect runtime, configured from the
   SteamVR dashboard (vendor-stated, the 5.0 release notes) — and it runs
@@ -883,13 +891,19 @@ OpenXR projection layer is unverified.
 
 **What it exposed.** With the view held, the seam that used to shimmer
 shows a row of bright dashes that get finer and more frequent as HMD
-Quality rises and merge when the head tilts: the game's rasteriser drawing
-a sliver of geometry narrower than a pixel without MSAA, lit wherever a
-pixel centre falls inside it. That is coverage information never
-rasterised, and no filter at the door can recover it. The levers are the
-ones this document already names — more samples per pixel, or feature B's
-temporal accumulation, whose history the rest lock finally registers
-exactly while the head is still.
+Quality rises and merge when the head tilts: a feature narrower than a
+pixel, sampled once per pixel, lit wherever the sample lands on it. The
+geometry reading was tested and failed: every solid-fill rasteriser state
+the game creates rewritten with D3D11.3 conservative rasterisation (tier
+3, eight states, all cull modes) left the dashes unchanged and put
+triangle-shaped artifacts on other surfaces, so the seam is texture-space
+detail — most likely a normal-map ridge's specular, or a one-texel bright
+line — sampled at the render grid's phase. What a single sample skipped is
+not in the image, and no filter at the door can recover it. The levers are
+the ones this document already names: more samples per pixel, feature C's
+LOD bias and feature D's specular anti-aliasing for the texture side, and
+feature B's temporal accumulation, whose history the rest lock finally
+registers exactly while the head is still.
 
 ## Guidance for players now
 
