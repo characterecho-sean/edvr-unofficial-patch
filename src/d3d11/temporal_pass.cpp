@@ -40,7 +40,7 @@ Texture2D<float> Z3 : register(t4);      // ...and a second layer's
 SamplerState L : register(s0);           // bilinear, clamp
 RWTexture2D<float4> O : register(u0);    // the output, region-sized, the game's format
 RWTexture2D<float4> N : register(u1);    // the new history
-RWStructuredBuffer<uint> Stats : register(u2);   // 0 rejected, 1 clipped, 2 the clips' size (luma/255, summed); then the same three per candidate, four of them; 15 pixels on the world path, 16 bright pixels, 17 bright pixels with no depth; 18-20 the registration probes on the world path (sum dx*100, sum dy*100, count) and 21-23 on the ship; 24-27 world pixels, world clipped, ship pixels, ship clipped
+RWStructuredBuffer<uint> Stats : register(u2);   // 0 rejected, 1 clipped, 2 the clips' size (luma/255, summed); then the same three per candidate, four of them; 15 pixels on the world path, 16 bright pixels, 17 bright pixels with no depth; 18-20 the registration probes on the world path (sum dx*100, sum dy*100, count) and 21-23 on the ship; 24-27 world pixels, world clipped, ship pixels, ship clipped; 28 pixels with a layer's depth, 29 bright pixels with a layer's depth
 RWTexture2D<float2> MV : register(u3);   // for a trained pass: motion vectors, pixels, current -> previous
 RWTexture2D<float>  ZC : register(u4);   // and the depth, copied as it is
 cbuffer P : register(b0) {
@@ -262,7 +262,7 @@ uint clipSize(float3 hc, float3 hy) {
 )HLSL"
 // (adjacent literals: MSVC caps one at 16 KB)
 R"HLSL(
-groupshared uint gCount[28];
+groupshared uint gCount[30];
 // The motion vectors for a trained pass (DLAA): the same reprojection
 // the history fetch does, written out instead of used -- the pixel's
 // position last frame minus its position now, in render pixels, which
@@ -274,9 +274,9 @@ groupshared uint gCount[28];
 // line the way main's do.
 [numthreads(8, 8, 1)]
 void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
-    if (gi < 28) gCount[gi] = 0;
+    if (gi < 30) gCount[gi] = 0;
     GroupMemoryBarrierWithGroupSync();
-    uint count[28] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+    uint count[30] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
     if (id.x < (uint)size.x && id.y < (uint)size.y) {
         float2 p = float2(id.xy);
         float3 d;
@@ -313,6 +313,10 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
                 count[16] = 1;
                 if (zraw <= 0.0) count[17] = 1;
             }
+            if (zLayerAt(region.xy + int2(p)) > 0.0) {
+                count[28] = 1;
+                if (luma > 0.6) count[29] = 1;
+            }
         }
         float2 motion = 0.0;
         if (dp.z < -1e-6) {
@@ -329,23 +333,39 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
         if (split.y == 1.0) {
             O[id.xy] = float4(saturate(0.5 + motion.x / 16.0), saturate(0.5 + motion.y / 16.0),
                               count[15] != 0 ? 1.0 : 0.0, 1.0);
+        } else if (split.y == 3.0) {
+            float zl3 = zLayerAt(region.xy + int2(p));
+            float zs3 = zSceneAt(region.xy + int2(p));
+            float3 o3;
+            if (knobs.y == 0.0) {
+                o3 = float3(0.25, 0.0, 0.25);
+            } else if (zl3 > 0.0) {
+                o3 = float3(0.0, 1.0, 0.0);
+            } else if (zs3 > 0.0) {
+                float m3 = knobs.z * knobs.w / (zs3 * (knobs.w - knobs.z) + knobs.z);
+                float g3 = saturate(1.0 - log2(max(m3, 0.5)) / 8.0);
+                o3 = g3.xxx;
+            } else {
+                o3 = float3(1.0, 0.0, 1.0);
+            }
+            O[id.xy] = float4(o3, 1.0);
         }
         ZC[id.xy] = knobs.y != 0.0 ? zraw : 0.0;
     }
-    [unroll] for (int k = 0; k < 28; ++k) {
+    [unroll] for (int k = 0; k < 30; ++k) {
         if (count[k] != 0) InterlockedAdd(gCount[k], count[k]);
     }
     GroupMemoryBarrierWithGroupSync();
-    if (gi < 28) InterlockedAdd(Stats[gi], gCount[gi]);
+    if (gi < 30) InterlockedAdd(Stats[gi], gCount[gi]);
 }
 )HLSL"
 // (adjacent literals: MSVC caps one at 16 KB)
 R"HLSL(
 [numthreads(8, 8, 1)]
 void main(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
-    if (gi < 28) gCount[gi] = 0;
+    if (gi < 30) gCount[gi] = 0;
     GroupMemoryBarrierWithGroupSync();
-    uint count[28] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+    uint count[30] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
     if (id.x < (uint)size.x && id.y < (uint)size.y) {
         float2 p = float2(id.xy);
         int2 ci = int2(id.xy);
@@ -397,6 +417,12 @@ void main(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
             if (lumaC > 0.6) {
                 count[16] = 1;
                 if (knobs.y != 0.0 && zAt(region.xy + ci) <= 0.0) count[17] = 1;
+            }
+            // ...and how much of the image, and of its bright pixels, a
+            // layer's depth covers: whether the HUD's text is in the layer.
+            if (knobs.y != 0.0 && zLayerAt(region.xy + ci) > 0.0) {
+                count[28] = 1;
+                if (lumaC > 0.6) count[29] = 1;
             }
         }
         m1 /= msum;
@@ -532,15 +558,34 @@ void main(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
                        worldTaken != 0 ? 1.0 : 0.0);
         } else if (split.y == 2.0) {
             o = errUsed.xxx;
+        } else if (split.y == 3.0) {
+            // The depth view: where each pixel's depth comes from -- a
+            // layer's in green, the scene's in grey by distance (near
+            // bright, log scale to 256 m), none in magenta, no depth
+            // bound at all in dark purple. HUD text that is not green
+            // has no depth of its own and reprojects by what is behind it.
+            float zl3 = zLayerAt(region.xy + ci);
+            float zs3 = zSceneAt(region.xy + ci);
+            if (knobs.y == 0.0) {
+                o = float3(0.25, 0.0, 0.25);
+            } else if (zl3 > 0.0) {
+                o = float3(0.0, 1.0, 0.0);
+            } else if (zs3 > 0.0) {
+                float m3 = knobs.z * knobs.w / (zs3 * (knobs.w - knobs.z) + knobs.z);
+                float g3 = saturate(1.0 - log2(max(m3, 0.5)) / 8.0);
+                o = g3.xxx;
+            } else {
+                o = float3(1.0, 0.0, 1.0);
+            }
         }
         O[id.xy] = float4(o, cur.a);
     }
     // One atomic per group per counter, not per pixel.
-    [unroll] for (int k = 0; k < 28; ++k) {
+    [unroll] for (int k = 0; k < 30; ++k) {
         if (count[k] != 0) InterlockedAdd(gCount[k], count[k]);
     }
     GroupMemoryBarrierWithGroupSync();
-    if (gi < 28) InterlockedAdd(Stats[gi], gCount[gi]);
+    if (gi < 30) InterlockedAdd(Stats[gi], gCount[gi]);
 }
 )HLSL";
 
@@ -803,6 +848,7 @@ int64_t     g_probeShipDx = 0, g_probeShipDy = 0;
 uint64_t    g_probeShipN = 0;
 uint64_t    g_classWorldPix = 0, g_classWorldClip = 0;
 uint64_t    g_classShipPix = 0, g_classShipClip = 0;
+uint64_t    g_layerPix = 0, g_brightLayerPix = 0;   // pixels, and bright pixels, with a layer's depth
 constexpr float kStillDeg = 0.03f;   // under 2 deg/s at 72 Hz: tracking noise
 constexpr float kSlowDeg = 0.30f;    // under 22 deg/s: a glance
 bool     g_priceLogged = false;
@@ -869,6 +915,8 @@ void pollSlots(ID3D11DeviceContext* ctx) {
                 g_classWorldClip += v[25];
                 g_classShipPix += v[26];
                 g_classShipClip += v[27];
+                g_layerPix += v[28];
+                g_brightLayerPix += v[29];
                 ++g_intervalFrames;
                 if (q.hadHistory) {
                     for (int c = 0; c < 4; ++c) {
@@ -1817,7 +1865,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     ctx->CSSetShader(g_csMv, nullptr, 0);
                     ID3D11ShaderResourceView* srvsM[5] = {inSrv, e.histSrv[e.histRead], depthSrv,
                                                           e.layerSrv[0], e.layerSrv[1]};
-                    ID3D11UnorderedAccessView* uavsM[5] = {g_debugMode == 1 ? e.dlOutUav : nullptr,
+                    ID3D11UnorderedAccessView* uavsM[5] = {(g_debugMode == 1 || g_debugMode == 3) ? e.dlOutUav : nullptr,
                                                            nullptr, g_statsUav, e.dlMvUav,
                                                            e.dlDepthUav};
                     ID3D11Buffer* cbM = g_cb;
@@ -1848,7 +1896,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                         if (frameMs < 1.0f || frameMs > 100.0f) frameMs = 0.0f;
                     }
                     e.dlLastQpc = qNow.QuadPart;
-                    if (g_debugMode == 1) {
+                    if (g_debugMode == 1 || g_debugMode == 3) {
                         // The motion view: the mv entry painted the vectors into
                         // the output; NVIDIA is skipped and starts afresh after.
                         usedDlaa = true;
@@ -2036,7 +2084,8 @@ void temporalPassConfigure(Config& cfg) {
     if (ship > 100000.0f) ship = 100000.0f;
     g_shipMetres = ship;
     const std::string dbg = cfg.getString("advanced.temporal_aa_debug", "off");
-    g_debugMode = _stricmp(dbg.c_str(), "motion") == 0 ? 1 : _stricmp(dbg.c_str(), "error") == 0 ? 2 : 0;
+    g_debugMode = _stricmp(dbg.c_str(), "motion") == 0 ? 1 : _stricmp(dbg.c_str(), "error") == 0 ? 2
+                : _stricmp(dbg.c_str(), "depth") == 0 ? 3 : 0;
     float menu = cfg.getFloat("advanced.temporal_aa_menu_metres", 0.0f);
     if (!std::isfinite(menu) || menu < 0.0f) menu = 0.0f;
     if (menu > 50.0f) menu = 50.0f;
@@ -2278,6 +2327,14 @@ bool temporalPassRegistration(char* buf, size_t n, char* buf2, size_t n2) {
                                        static_cast<double>(g_classShipPix)
                                  : 0.0);
     }
+    if (g_intervalPix) {
+        regAppend(buf, n, used,
+                  "; a layer's depth covered %.2f%% of pixels and %.1f%% of the bright ones",
+                  100.0 * static_cast<double>(g_layerPix) / static_cast<double>(g_intervalPix),
+                  g_brightPix ? 100.0 * static_cast<double>(g_brightLayerPix) /
+                                    static_cast<double>(g_brightPix)
+                              : 0.0);
+    }
     if (g_probeWorldN || g_probeShipN) {
         regAppend(buf, n, used,
                   "; the history's best match sat (%+.2f, %+.2f) px from the prediction on the world "
@@ -2323,6 +2380,7 @@ bool temporalPassRegistration(char* buf, size_t n, char* buf2, size_t n2) {
     g_probeShipN = 0;
     g_classWorldPix = g_classWorldClip = 0;
     g_classShipPix = g_classShipClip = 0;
+    g_layerPix = g_brightLayerPix = 0;
     return true;
 }
 

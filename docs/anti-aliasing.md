@@ -1204,6 +1204,22 @@ then the scene's depth fills the rest -- and the probe samples eye-sized
 targets first and every two seconds, so the pair joins within seconds
 of the cockpit appearing. The line names the pair it took.
 
+**The priority build (b07f322) changed nothing by eye, and the log says
+why: no layer joined in the hangar at all.** The scene pair is eye-sized
+too, so the fast lane sampled IT every two seconds and the HUD pair never
+got the staging slot; the pair joined only in space, four minutes in.
+The clear region matching the cockpit's silhouette is then exactly the
+no-layer picture: text over the structure borrows the structure's depth
+and holds, text over the glass borrows the hangar wall's 9 to 27 m, or
+the sky's far plane, and cannot follow the head's translation. So the
+fast lane now excludes the scene pair, the census prints every eye-sized
+target with its draws and its last sample, the registration line says
+how much of the image and of its bright pixels a layer's depth covers,
+and `temporal_aa_debug = depth` paints the depth's source per pixel --
+a layer's green, the scene's grey by distance, none magenta -- so
+whether the HUD's text is in the layer at all is a thing the eye can
+check.
+
 ## Feature C — texture LOD bias, the small lever
 
 Not all shimmer is geometry. Detail maps and normal maps sampled a mip

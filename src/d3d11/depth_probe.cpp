@@ -643,7 +643,10 @@ bool depthProbeWantsSample(void* current, void* next) {
     // An eye-sized, single-sample target that has never been sampled goes
     // first: the temporal pass's HUD-layer test needs its reading, and the
     // round-robin took six minutes to reach the HUD pair (2026-09-04).
+    // ...but not the scene pair itself, which is eye-sized too and, on the
+    // fast lane, took every staging slot from the HUD pair (2026-09-04).
     const bool eyeSized = g_scenePick[0] >= 0 && g_scenePick[0] < g_targetCount &&
+                          idx != g_scenePick[0] && idx != g_scenePick[1] &&
                           t.w == g_targets[g_scenePick[0]].w &&
                           t.h == g_targets[g_scenePick[0]].h && t.samples == 1;
     if (eyeSized && !t.sampledOnce && t.lastSampleMs == 0) return true;
@@ -838,6 +841,29 @@ void depthProbeFrameBoundary(ID3D11DeviceContext* ctx) {
             "the busiest: %s; the pass's scene pair: #%d and #%d.",
             g_drawsLastFrame, g_drawsWithDsvLastFrame, busy, g_scenePick[0],
             g_scenePick[1]);
+        // Every eye-sized target, with its draws, its first bind and what
+        // its last sample read: the HUD-layer test's candidates, and why
+        // one is or is not taken.
+        if (g_scenePick[0] >= 0 && g_scenePick[0] < g_targetCount) {
+            const uint32_t ew = g_targets[g_scenePick[0]].w;
+            const uint32_t eh = g_targets[g_scenePick[0]].h;
+            char eyes[700] = "";
+            size_t u2 = 0;
+            for (int i = 0; i < g_targetCount && u2 < sizeof(eyes); ++i) {
+                const Target& e2 = g_targets[i];
+                if (!e2.dsv || e2.w != ew || e2.h != eh) continue;
+                const int m = snprintf(eyes + u2, sizeof(eyes) - u2, "%s#%d %u draws (bind %u)%s",
+                                       u2 ? ", " : "", i, e2.drawsLastFrame, e2.firstBindLastFrame,
+                                       e2.samples > 1 ? " msaa" : (!e2.sampledOnce ? " unsampled" : ""));
+                if (m > 0) u2 += static_cast<size_t>(m);
+                if (e2.sampledOnce && e2.samples <= 1 && u2 < sizeof(eyes)) {
+                    const int m2 = snprintf(eyes + u2, sizeof(eyes) - u2, " [far %d near %d]",
+                                            e2.sampleFar, e2.sampleNear);
+                    if (m2 > 0) u2 += static_cast<size_t>(m2);
+                }
+            }
+            Log::get().note("depth probe: the eye-sized targets: %s.", eyes);
+        }
     }
     if (!g_summaryNoted && g_eyeFrames >= 120) {
         g_summaryNoted = true;
