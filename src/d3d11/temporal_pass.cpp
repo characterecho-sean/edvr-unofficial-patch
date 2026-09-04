@@ -149,8 +149,18 @@ R"HLSL(
 // writes its own target, and this is where it joins (2026-09-04, the
 // 'Point Defence' observation: the letters over the frame registered, the
 // letters over the glass warped).
+// The HUD is drawn ON TOP of the cockpit without a depth test, so where
+// its layer has a depth, that is the visible surface's -- even where the
+// dashboard behind it is nearer. The first build took the nearest of
+// all, and the text over the dashboard was reprojected at the dashboard's
+// half metre instead of the HUD's metre and a half: a shimmer bounded by
+// the dashboard's rounded silhouette (2026-09-04). So the layer wins
+// wherever it has a value, and the scene's depth fills the rest.
+float zSceneAt(int2 q) { return Z.Load(int3(q, 0)); }
+float zLayerAt(int2 q) { return max(Z2.Load(int3(q, 0)), Z3.Load(int3(q, 0))); }
 float zAt(int2 q) {
-    return max(Z.Load(int3(q, 0)), max(Z2.Load(int3(q, 0)), Z3.Load(int3(q, 0))));
+    float l = zLayerAt(q);
+    return l > 0.0 ? l : zSceneAt(q);
 }
 bool fetchHistoryT(float2 p, float3 r0, float3 r1, float3 r2, float3 tv,
                    bool useDepth, bool allowWorld, out uint world, out float2 mvOut,
@@ -177,13 +187,15 @@ bool fetchHistoryT(float2 p, float3 r0, float3 r1, float3 r2, float3 tv,
         // the "underwater" the second depth flight saw at rest. With the
         // nearest, the edge follows the thing in front, which is the
         // standard dilation every velocity-based filter does.
-        float zr = 0.0;
+        float zs = 0.0, zl = 0.0;
         [unroll] for (int oy = -1; oy <= 1; ++oy) {
             [unroll] for (int ox = -1; ox <= 1; ++ox) {
                 int2 q = clamp(int2(p) + int2(ox, oy), int2(0, 0), size - 1);
-                zr = max(zr, zAt(region.xy + q));
+                zs = max(zs, zSceneAt(region.xy + q));
+                zl = max(zl, zLayerAt(region.xy + q));
             }
         }
+        float zr = zl > 0.0 ? zl : zs;
         float den = zr * (knobs.w - knobs.z) + knobs.z;
         bool far = zr <= 0.0 || den <= 0.0;
         float z = far ? 0.0 : knobs.z * knobs.w / den;
@@ -274,13 +286,15 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
         float3 dp = float3(dot(dR0.xyz, d), dot(dR1.xyz, d), dot(dR2.xyz, d));
         float zraw = zAt(region.xy + int2(p));
         if (knobs.y != 0.0) {
-            float zr = 0.0;
+            float zs = 0.0, zl = 0.0;
             [unroll] for (int oy = -1; oy <= 1; ++oy) {
                 [unroll] for (int ox = -1; ox <= 1; ++ox) {
                     int2 q = clamp(int2(p) + int2(ox, oy), int2(0, 0), size - 1);
-                    zr = max(zr, zAt(region.xy + q));
+                    zs = max(zs, zSceneAt(region.xy + q));
+                zl = max(zl, zLayerAt(region.xy + q));
                 }
             }
+            float zr = zl > 0.0 ? zl : zs;
             float den = zr * (knobs.w - knobs.z) + knobs.z;
             bool far = zr <= 0.0 || den <= 0.0;
             float z = far ? 0.0 : knobs.z * knobs.w / den;

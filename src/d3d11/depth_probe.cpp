@@ -36,6 +36,7 @@ void main(uint3 id : SV_DispatchThreadID) {
 
 constexpr int      kMaxTargets = 32;   // the cockpit binds shadow maps by the handful
 constexpr uint64_t kSampleIntervalMs = 10000;
+constexpr uint64_t kSampleIntervalEyeMs = 2000;   // eye-sized targets: the layer test wants them fresh
 constexpr int      kMaxSampleLines = 6;
 
 // The near plane the game names when it asks for its projection (0.025,
@@ -434,6 +435,8 @@ int discoverTarget(void* dsv) {
 }  // namespace
 
 int  g_scenePick[2] = {-1, -1};   // the pair in use, for hysteresis
+int  g_layerPick[4] = {-1, -1, -1, -1};   // the HUD/cockpit layer pairs in use (left, right; twice)
+int  g_layerNoted[4] = {-2, -2, -2, -2};  // ...as last logged
 bool g_sceneLatchedThisFrame = false;   // the temporal pass's camera latch fired
 
 void depthProbeNoteDraw(ID3D11DeviceContext* ctx, void* dsv, bool rtvEyeSized,
@@ -567,7 +570,28 @@ int depthProbeLayerDepths(uint32_t w, uint32_t h, int eye, ID3D11Texture2D** out
             const int tmp = a; a = b; b = tmp;
         }
         out[found++] = g_targets[eye == 0 ? a : b].tex;
+        if (found <= 2) {
+            g_layerPick[(found - 1) * 2] = a;
+            g_layerPick[(found - 1) * 2 + 1] = b;
+        }
         i += 2;
+    }
+    for (int k = found * 2; k < 4; ++k) g_layerPick[k] = -1;
+    if (eye == 0 && memcmp(g_layerPick, g_layerNoted, sizeof(g_layerPick)) != 0) {
+        memcpy(g_layerNoted, g_layerPick, sizeof(g_layerNoted));
+        char line[400];
+        size_t used = 0;
+        for (int k = 0; k < found && used < sizeof(line); ++k) {
+            const Target& a2 = g_targets[g_layerPick[k * 2]];
+            const Target& b2 = g_targets[g_layerPick[k * 2 + 1]];
+            const int m = snprintf(line + used, sizeof(line) - used,
+                                   "%s#%d and #%d (%u and %u draws; %d of 256 samples within 100 m, %d at the far plane)",
+                                   k ? "; " : "", g_layerPick[k * 2], g_layerPick[k * 2 + 1],
+                                   a2.drawsLastFrame, b2.drawsLastFrame, a2.sampleNear, a2.sampleFar);
+            if (m > 0) used += static_cast<size_t>(m);
+        }
+        Log::get().note("depth probe: the pass's HUD/cockpit depth layer pair(s): %s.",
+                        found ? line : "none");
     }
     return found;
 }
@@ -616,8 +640,18 @@ bool depthProbeWantsSample(void* current, void* next) {
     // complete, and last frame's count says which one that is.
     ++t.unbindsThisFrame;
     if (g_stagingInFlight) return false;
-    if (t.sampleLines >= kMaxSampleLines) return false;
-    if (t.lastSampleMs && !elapsedMs(t.lastSampleMs, kSampleIntervalMs)) return false;
+    // An eye-sized, single-sample target that has never been sampled goes
+    // first: the temporal pass's HUD-layer test needs its reading, and the
+    // round-robin took six minutes to reach the HUD pair (2026-09-04).
+    const bool eyeSized = g_scenePick[0] >= 0 && g_scenePick[0] < g_targetCount &&
+                          t.w == g_targets[g_scenePick[0]].w &&
+                          t.h == g_targets[g_scenePick[0]].h && t.samples == 1;
+    if (eyeSized && !t.sampledOnce && t.lastSampleMs == 0) return true;
+    if (t.sampleLines >= kMaxSampleLines && !eyeSized) return false;
+    if (t.lastSampleMs &&
+        !elapsedMs(t.lastSampleMs, eyeSized ? kSampleIntervalEyeMs : kSampleIntervalMs)) {
+        return false;
+    }
     if (t.unbindsLastFrame > 0 && t.unbindsThisFrame < t.unbindsLastFrame) return false;
     return true;
 }

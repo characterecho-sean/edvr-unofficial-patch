@@ -1189,6 +1189,21 @@ every texel. The registration line's 'bright pixels with no depth' is
 the measure of what is left; `temporal_aa_menu_metres` remains the lever
 for the menu, whose targets read empty.
 
+**The layers' first flight (da20dd6) drew a new boundary through the
+same text.** The HUD pair joined -- eye-sized, four draws a frame, five
+samples within two metres and the rest far -- but only after six
+minutes, since the probe reached it last; and where it joined, the
+letters over the dashboard began to shimmer while the letters over the
+glass held, along a rounded edge that moved with the head: the
+dashboard's silhouette. The HUD is drawn on top of the cockpit without a
+depth test, so where its layer has a depth that is the visible
+surface's even where the dashboard behind is nearer, and 'the nearest
+of all' picked the dashboard's half metre for text at a metre and a
+half. Now the layer wins wherever it has a value -- dilated on its own,
+then the scene's depth fills the rest -- and the probe samples eye-sized
+targets first and every two seconds, so the pair joins within seconds
+of the cockpit appearing. The line names the pair it took.
+
 ## Feature C — texture LOD bias, the small lever
 
 Not all shimmer is geometry. Detail maps and normal maps sampled a mip
