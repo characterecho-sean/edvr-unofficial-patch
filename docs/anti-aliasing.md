@@ -1165,6 +1165,30 @@ sub-pixel offset is in every probe and averages out. That is the number
 the ghosting reports were missing: whether the reprojection is off by a
 pixel, and which way.
 
+**The probes answered (c8dfb14, Pimax, 2026-09-04): the reprojection is
+unbiased.** On the ship class the history's best match sat within 0.05
+px of the prediction docked and in space; on the world path within 0.2
+px while the ship turned. The world path still clipped 38 to 52% of its
+pixels in the turn -- a dense star field crossing a 3x3 box that is
+black between stars, the own pass's clip doing its job at the price of
+the star's sub-pixel blur, which DLSS's history handles better. And the
+player's sharpest observation named the last fault: in the HUD's 'Point
+Defence', the letters over the cockpit frame held and the letters over
+the canopy glass warped with the head. HUD text has no depth in the
+scene's target; the 3x3 nearest-depth dilation lends each letter
+whatever sits behind it -- the frame's depth, or the sky's far plane and
+with it the rotation-only path, which cannot follow the head's
+translation for something a metre away. Menus and loading screens are
+depthless throughout, so all their text vibrated the same way. The game
+draws its HUD in passes with their own eye-sized depth targets (a few
+draws a frame, a few samples at 1.4 to 3.8 m, the rest far), so the pass
+now binds up to two such layers beside the scene's depth
+(`depthProbeLayerDepths`: eye-sized, outside the scene pair, drawn last
+frame, sampled sparse-and-near) and reads the NEAREST of all three at
+every texel. The registration line's 'bright pixels with no depth' is
+the measure of what is left; `temporal_aa_menu_metres` remains the lever
+for the menu, whose targets read empty.
+
 ## Feature C — texture LOD bias, the small lever
 
 Not all shimmer is geometry. Detail maps and normal maps sampled a mip

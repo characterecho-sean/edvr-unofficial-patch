@@ -68,6 +68,10 @@ struct Target {
     uint32_t    unbindsThisFrame = 0;   // how many times the game switched away from it
     uint32_t    unbindsLastFrame = 0;
     uint64_t    lastSampleMs = 0;
+    // What its last sample read, for the layer test: how much of the grid
+    // sat at the far plane, and how much within 100 m.
+    int         sampleFar = 0, sampleNear = 0;
+    bool        sampledOnce = false;
     int         sampleLines = 0;
     float       clearValue = -1.0f;     // what the game clears it to; -1 = not seen
     bool        boundThisFrame = false;
@@ -525,6 +529,49 @@ bool depthProbeSceneDepth(uint32_t w, uint32_t h, int eye, ID3D11Texture2D** tex
     return true;
 }
 
+int depthProbeLayerDepths(uint32_t w, uint32_t h, int eye, ID3D11Texture2D** out, int maxN) {
+    if (!out || maxN <= 0) return 0;
+    for (int i = 0; i < maxN; ++i) out[i] = nullptr;
+    if (!g_wanted || eye < 0 || eye > 1 || g_scenePick[0] < 0 || g_scenePick[1] < 0) return 0;
+    // The candidates: eye-sized, single-sample, not the scene pair, drawn
+    // into last frame, and SAMPLED as sparse-near -- at least half the grid
+    // at the far plane and some of it within 100 m. That is a cockpit or
+    // HUD layer (the docked flights read a few samples at 1.4 to 1.6 m in
+    // targets with four to nine draws, the rest far), and its depth is what
+    // the scene's lacks where the HUD sits over the canopy. A layer that
+    // fills the grid near is not one, and stays out.
+    int cand[8];
+    int n = 0;
+    for (int i = 0; i < g_targetCount && n < 8; ++i) {
+        const Target& t = g_targets[i];
+        if (i == g_scenePick[0] || i == g_scenePick[1]) continue;
+        if (!t.dsv || !t.tex || t.w != w || t.h != h || t.samples > 1) continue;
+        if (t.drawsLastFrame < 1 || !t.sampledOnce) continue;
+        if (t.sampleFar < 128 || t.sampleNear < 1) continue;
+        cand[n++] = i;
+    }
+    for (int i = 1; i < n; ++i) {
+        for (int j = i; j > 0 && g_targets[cand[j]].drawsLastFrame >
+                                     g_targets[cand[j - 1]].drawsLastFrame; --j) {
+            const int tmp = cand[j]; cand[j] = cand[j - 1]; cand[j - 1] = tmp;
+        }
+    }
+    // Pairs of like draw counts, each ordered by first bind (the first is
+    // the left, as for the scene pair); an odd one out is skipped.
+    int i = 0, found = 0;
+    while (i + 1 < n && found < maxN) {
+        int a = cand[i], b = cand[i + 1];
+        const uint32_t da = g_targets[a].drawsLastFrame, db = g_targets[b].drawsLastFrame;
+        if (da > db + 1) { ++i; continue; }
+        if (g_targets[b].firstBindLastFrame < g_targets[a].firstBindLastFrame) {
+            const int tmp = a; a = b; b = tmp;
+        }
+        out[found++] = g_targets[eye == 0 ? a : b].tex;
+        i += 2;
+    }
+    return found;
+}
+
 uint32_t depthProbeSceneDraws() {
     if (!g_wanted || g_scenePick[0] < 0 || g_scenePick[1] < 0 ||
         g_scenePick[0] >= g_targetCount || g_scenePick[1] >= g_targetCount) {
@@ -886,6 +933,11 @@ void depthProbeFrameBoundary(ID3D11DeviceContext* ctx) {
                     continue;
                 }
                 const GridStats g = gridStats(vals[s], clear);
+                if (s == 1 || !g_stagingHas[1]) {
+                    t.sampleFar = g.bandFar;
+                    t.sampleNear = g.bandM + g.bandNear;
+                    t.sampledOnce = true;
+                }
                 const bool reversed = clear >= 0.0f ? clear < 0.5f : (g.mx < 0.5f);
                 const float nearest = reversed ? g.mx : g.mn;
                 char map[200] = "";

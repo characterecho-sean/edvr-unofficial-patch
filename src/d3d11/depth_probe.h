@@ -98,6 +98,15 @@ bool depthProbeSceneDepth(uint32_t w, uint32_t h, int eye, ID3D11Texture2D** tex
 // the head). 0 until the census has settled.
 uint32_t depthProbeSceneDraws();
 
+// The cockpit and HUD layers' depth for this eye: up to maxN textures,
+// the eye's member of each pair of eye-sized targets outside the scene
+// pair that were drawn into last frame and whose last sample read sparse
+// and near (half the grid at the far plane, some within 100 m) -- the
+// game draws its HUD in passes with their own depth, and text over the
+// canopy has a depth there that the scene's target lacks. The pass takes
+// the nearest of the scene's and the layers'. Returns how many.
+int depthProbeLayerDepths(uint32_t w, uint32_t h, int eye, ID3D11Texture2D** out, int maxN);
+
 void depthProbeShutdown();
 
 }  // namespace edvr

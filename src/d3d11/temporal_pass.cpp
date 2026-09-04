@@ -35,6 +35,8 @@ constexpr char kTemporalCsHlsl[] = R"HLSL(
 Texture2D<float4> S : register(t0);      // this frame, the game's own texture (or the region copied out of it)
 Texture2D<float4> H : register(t1);      // the history, region-sized, on the unjittered grid
 Texture2D<float> Z : register(t2);       // the scene's depth, the game's own, when the pass has it
+Texture2D<float> Z2 : register(t3);      // a cockpit or HUD layer's depth, the same way (unbound reads 0)
+Texture2D<float> Z3 : register(t4);      // ...and a second layer's
 SamplerState L : register(s0);           // bilinear, clamp
 RWTexture2D<float4> O : register(u0);    // the output, region-sized, the game's format
 RWTexture2D<float4> N : register(u1);    // the new history
@@ -141,6 +143,15 @@ float4 catmullRom(float2 uv, float2 tsize) {
 )HLSL"
 // (adjacent literals: MSVC caps one at 16 KB)
 R"HLSL(
+// The depth at a texel: the NEAREST of the scene's and the layers' (reversed
+// Z, so the largest). HUD text has no depth of its own in the scene's
+// target and borrowed the sky's where it sat over the canopy; the HUD pass
+// writes its own target, and this is where it joins (2026-09-04, the
+// 'Point Defence' observation: the letters over the frame registered, the
+// letters over the glass warped).
+float zAt(int2 q) {
+    return max(Z.Load(int3(q, 0)), max(Z2.Load(int3(q, 0)), Z3.Load(int3(q, 0))));
+}
 bool fetchHistoryT(float2 p, float3 r0, float3 r1, float3 r2, float3 tv,
                    bool useDepth, bool allowWorld, out uint world, out float2 mvOut,
                    out float3 hy) {
@@ -170,7 +181,7 @@ bool fetchHistoryT(float2 p, float3 r0, float3 r1, float3 r2, float3 tv,
         [unroll] for (int oy = -1; oy <= 1; ++oy) {
             [unroll] for (int ox = -1; ox <= 1; ++ox) {
                 int2 q = clamp(int2(p) + int2(ox, oy), int2(0, 0), size - 1);
-                zr = max(zr, Z.Load(int3(region.xy + q, 0)));
+                zr = max(zr, zAt(region.xy + q));
             }
         }
         float den = zr * (knobs.w - knobs.z) + knobs.z;
@@ -261,13 +272,13 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
         d.y = tanNow.w - (p.y + 0.5) / float(size.y) * (tanNow.w - tanNow.z);
         d.z = -1.0;
         float3 dp = float3(dot(dR0.xyz, d), dot(dR1.xyz, d), dot(dR2.xyz, d));
-        float zraw = Z.Load(int3(region.xy + int2(p), 0));
+        float zraw = zAt(region.xy + int2(p));
         if (knobs.y != 0.0) {
             float zr = 0.0;
             [unroll] for (int oy = -1; oy <= 1; ++oy) {
                 [unroll] for (int ox = -1; ox <= 1; ++ox) {
                     int2 q = clamp(int2(p) + int2(ox, oy), int2(0, 0), size - 1);
-                    zr = max(zr, Z.Load(int3(region.xy + q, 0)));
+                    zr = max(zr, zAt(region.xy + q));
                 }
             }
             float den = zr * (knobs.w - knobs.z) + knobs.z;
@@ -371,7 +382,7 @@ void main(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
             float lumaC = rgbToYcocg(S.Load(int3(region.xy + ci, 0)).rgb).x;
             if (lumaC > 0.6) {
                 count[16] = 1;
-                if (knobs.y != 0.0 && Z.Load(int3(region.xy + ci, 0)) <= 0.0) count[17] = 1;
+                if (knobs.y != 0.0 && zAt(region.xy + ci) <= 0.0) count[17] = 1;
             }
         }
         m1 /= msum;
@@ -608,6 +619,9 @@ struct EyeState {
     // source's view. Released when a different texture arrives.
     void*                      depthRes = nullptr;
     ID3D11ShaderResourceView*  depthSrv = nullptr;
+    // The cockpit and HUD layers' depth, up to two, the same way.
+    void*                      layerRes[2] = {};
+    ID3D11ShaderResourceView*  layerSrv[2] = {};
     // For the trained pass: the colour copied out typed, the motion
     // vectors and the depth copy it is fed, and its output.
     ID3D11Texture2D*           dlColour = nullptr;
@@ -660,6 +674,10 @@ void releaseSrc(EyeState& e) {
 void releaseDepth(EyeState& e) {
     if (e.depthSrv) { e.depthSrv->Release(); e.depthSrv = nullptr; }
     e.depthRes = nullptr;
+    for (int k = 0; k < 2; ++k) {
+        if (e.layerSrv[k]) { e.layerSrv[k]->Release(); e.layerSrv[k] = nullptr; }
+        e.layerRes[k] = nullptr;
+    }
 }
 void releaseDl(EyeState& e) {
     if (e.dlMvUav) { e.dlMvUav->Release(); e.dlMvUav = nullptr; }
@@ -900,6 +918,7 @@ bool                       g_dlaaNoted = false;
 bool                       g_dlssNoted = false;
 bool                       g_dlaaFailNoted = false;
 bool                       g_trainedNoted = false;   // the first trained frame's line
+int                        g_layersNoted = -1;       // how many depth layers the log last named
 uint32_t                   g_dlaaTreats = 0;
 ID3D11Buffer*              g_cb = nullptr;
 ID3D11SamplerState*        g_samp = nullptr;
@@ -1301,6 +1320,33 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
     // game's own texture, held by the probe. Wanted by the depth motion
     // and by the instrument's two depth candidates alike.
     ID3D11ShaderResourceView* depthSrv = nullptr;
+    // A view typed to the depth channel over one of the game's depth
+    // textures, or null when its format has no such view.
+    auto depthViewOf = [&](ID3D11Texture2D* tex) -> ID3D11ShaderResourceView* {
+        D3D11_TEXTURE2D_DESC dd{};
+        tex->GetDesc(&dd);
+        DXGI_FORMAT rf = DXGI_FORMAT_UNKNOWN;
+        switch (dd.Format) {
+            case DXGI_FORMAT_R32G8X24_TYPELESS:
+            case DXGI_FORMAT_D32_FLOAT_S8X24_UINT:
+                rf = DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS; break;
+            case DXGI_FORMAT_R32_TYPELESS:
+            case DXGI_FORMAT_D32_FLOAT:
+                rf = DXGI_FORMAT_R32_FLOAT; break;
+            case DXGI_FORMAT_R24G8_TYPELESS:
+            case DXGI_FORMAT_D24_UNORM_S8_UINT:
+                rf = DXGI_FORMAT_R24_UNORM_X8_TYPELESS; break;
+            default: break;
+        }
+        if (rf == DXGI_FORMAT_UNKNOWN || !(dd.BindFlags & D3D11_BIND_SHADER_RESOURCE)) return nullptr;
+        D3D11_SHADER_RESOURCE_VIEW_DESC vd{};
+        vd.Format = rf;
+        vd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+        vd.Texture2D.MipLevels = 1;
+        ID3D11ShaderResourceView* v = nullptr;
+        if (FAILED(dev->CreateShaderResourceView(tex, &vd, &v))) return nullptr;
+        return v;
+    };
     if (ok && nearZ > 0.0f && farZ > nearZ) {
         EyeState& e = *eptr;
         ID3D11Texture2D* dtex = nullptr;
@@ -1336,6 +1382,37 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                 }
             }
             depthSrv = e.depthSrv;
+            // The cockpit and HUD layers' depth beside it, up to two pairs,
+            // keyed on the texture like the scene's; the shader takes the
+            // nearest of all three at every read.
+            ID3D11Texture2D* ltex[2] = {};
+            const int nLayers = depthProbeLayerDepths(sd.Width, sd.Height, eye, ltex, 2);
+            for (int k = 0; k < 2; ++k) {
+                if (k < nLayers && ltex[k]) {
+                    if (e.layerRes[k] != static_cast<void*>(ltex[k]) || !e.layerSrv[k]) {
+                        if (e.layerSrv[k]) { e.layerSrv[k]->Release(); e.layerSrv[k] = nullptr; }
+                        e.layerRes[k] = nullptr;
+                        e.layerSrv[k] = depthViewOf(ltex[k]);
+                        if (e.layerSrv[k]) e.layerRes[k] = ltex[k];
+                    }
+                } else if (e.layerSrv[k]) {
+                    e.layerSrv[k]->Release();
+                    e.layerSrv[k] = nullptr;
+                    e.layerRes[k] = nullptr;
+                }
+            }
+            if (eye == 0) {
+                const int have = (e.layerSrv[0] ? 1 : 0) + (e.layerSrv[1] ? 1 : 0);
+                if (have != g_layersNoted) {
+                    g_layersNoted = have;
+                    Log::get().note(
+                        "temporal aa: %d cockpit/HUD depth layer(s) join the scene's depth -- "
+                        "the nearest of all is what every pixel reprojects by, so HUD text over "
+                        "the canopy takes its own depth instead of the sky's (the registration "
+                        "line's 'bright pixels with no depth' says what is left).",
+                        have);
+                }
+            }
         }
     }
     if (depthSrv && (!g_depthNoted || !g_depthHeld)) {
@@ -1612,12 +1689,12 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         p.candMask = useHistory ? candMask : 0;
 
         ID3D11ComputeShader* savedCs = nullptr;
-        ID3D11ShaderResourceView* savedSrv[3] = {};
+        ID3D11ShaderResourceView* savedSrv[5] = {};
         ID3D11UnorderedAccessView* savedUav[3] = {};
         ID3D11Buffer* savedCb = nullptr;
         ID3D11SamplerState* savedSamp = nullptr;
         ctx->CSGetShader(&savedCs, nullptr, nullptr);
-        ctx->CSGetShaderResources(0, 3, savedSrv);
+        ctx->CSGetShaderResources(0, 5, savedSrv);
         ctx->CSGetUnorderedAccessViews(0, 3, savedUav);
         ctx->CSGetConstantBuffers(0, 1, &savedCb);
         ctx->CSGetSamplers(0, 1, &savedSamp);
@@ -1719,23 +1796,24 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                         ctx->CopySubresourceRegion(e.dlColour, 0, 0, 0, 0, src, 0, &box);
                     }
                     // The motion vectors and the depth copy.
-                    ID3D11ShaderResourceView* nullSrvM[3] = {};
+                    ID3D11ShaderResourceView* nullSrvM[5] = {};
                     ID3D11UnorderedAccessView* nullUavM[5] = {};
-                    ctx->CSSetShaderResources(0, 3, nullSrvM);
+                    ctx->CSSetShaderResources(0, 5, nullSrvM);
                     ctx->CSSetUnorderedAccessViews(0, 5, nullUavM, nullptr);
                     ctx->CSSetShader(g_csMv, nullptr, 0);
-                    ID3D11ShaderResourceView* srvsM[3] = {inSrv, e.histSrv[e.histRead], depthSrv};
+                    ID3D11ShaderResourceView* srvsM[5] = {inSrv, e.histSrv[e.histRead], depthSrv,
+                                                          e.layerSrv[0], e.layerSrv[1]};
                     ID3D11UnorderedAccessView* uavsM[5] = {g_debugMode == 1 ? e.dlOutUav : nullptr,
                                                            nullptr, g_statsUav, e.dlMvUav,
                                                            e.dlDepthUav};
                     ID3D11Buffer* cbM = g_cb;
                     ID3D11SamplerState* smpM = g_samp;
-                    ctx->CSSetShaderResources(0, 3, srvsM);
+                    ctx->CSSetShaderResources(0, 5, srvsM);
                     ctx->CSSetUnorderedAccessViews(0, 5, uavsM, nullptr);
                     ctx->CSSetConstantBuffers(0, 1, &cbM);
                     ctx->CSSetSamplers(0, 1, &smpM);
                     ctx->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
-                    ctx->CSSetShaderResources(0, 3, nullSrvM);
+                    ctx->CSSetShaderResources(0, 5, nullSrvM);
                     ctx->CSSetUnorderedAccessViews(0, 5, nullUavM, nullptr);
                     // NVIDIA's evaluation. Its history restarts only when it is
                     // broken: this eye's first frame, a withhold (flags bit 0),
@@ -1806,17 +1884,18 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         const int writeIdx = 1 - readIdx;
         bool ran = usedDlaa ? true : setParams(ctx, p);
         if (ran && !usedDlaa) {
-            ID3D11ShaderResourceView* nullSrv[3] = {};
+            ID3D11ShaderResourceView* nullSrv[5] = {};
             ID3D11UnorderedAccessView* nullUav[3] = {};
-            ctx->CSSetShaderResources(0, 3, nullSrv);
+            ctx->CSSetShaderResources(0, 5, nullSrv);
             ctx->CSSetUnorderedAccessViews(0, 3, nullUav, nullptr);
             ctx->CSSetShader(g_cs, nullptr, 0);
-            ID3D11ShaderResourceView* srvs[3] = {inSrv, e.histSrv[readIdx], depthSrv};
+            ID3D11ShaderResourceView* srvs[5] = {inSrv, e.histSrv[readIdx], depthSrv,
+                                                 e.layerSrv[0], e.layerSrv[1]};
             ID3D11UnorderedAccessView* uavs[3] = {e.outUav, e.histUav[writeIdx],
                                                   g_statsUav};
             ID3D11Buffer* cb = g_cb;
             ID3D11SamplerState* smp = g_samp;
-            ctx->CSSetShaderResources(0, 3, srvs);
+            ctx->CSSetShaderResources(0, 5, srvs);
             ctx->CSSetUnorderedAccessViews(0, 3, uavs, nullptr);
             ctx->CSSetConstantBuffers(0, 1, &cb);
             ctx->CSSetSamplers(0, 1, &smp);
@@ -1838,9 +1917,9 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
             }
         }
 
-        ID3D11ShaderResourceView* nullSrv2[3] = {};
+        ID3D11ShaderResourceView* nullSrv2[5] = {};
         ID3D11UnorderedAccessView* nullUav2[3] = {};
-        ctx->CSSetShaderResources(0, 3, nullSrv2);
+        ctx->CSSetShaderResources(0, 5, nullSrv2);
         ctx->CSSetUnorderedAccessViews(0, 3, nullUav2, nullptr);
         if (depthSrv) {
             ctx->OMSetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, savedRtv, savedDsv);
@@ -1848,7 +1927,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
             if (savedDsv) savedDsv->Release();
         }
         ctx->CSSetShader(savedCs, nullptr, 0);
-        ctx->CSSetShaderResources(0, 3, savedSrv);
+        ctx->CSSetShaderResources(0, 5, savedSrv);
         ctx->CSSetUnorderedAccessViews(0, 3, savedUav, nullptr);
         ctx->CSSetConstantBuffers(0, 1, &savedCb);
         ctx->CSSetSamplers(0, 1, &savedSamp);
