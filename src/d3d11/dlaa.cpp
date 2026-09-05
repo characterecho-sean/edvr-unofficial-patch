@@ -70,6 +70,10 @@ EyeFeature g_feature[2];
 // output sub-rectangles enabled and their own history, so switching the
 // fovea on or off never disturbs the full-frame path's accumulation.
 EyeFeature g_fovea[2];
+// The steady periphery's features (docs/performance.md feature 6): DLAA on
+// a reduced copy of the frame, a third slot with its own history, so the
+// fovea, the periphery and the full frame never share an accumulation.
+EyeFeature g_periph[2];
 
 // The GPU-price ring, the resolve's discipline: never awaited.
 struct QuerySlot {
@@ -164,6 +168,13 @@ void releaseFeatures() {
         f.w = f.h = 0;
     }
     for (EyeFeature& f : g_fovea) {
+        if (f.handle) {
+            NVSDK_NGX_D3D11_ReleaseFeature(f.handle);
+            f.handle = nullptr;
+        }
+        f.w = f.h = 0;
+    }
+    for (EyeFeature& f : g_periph) {
         if (f.handle) {
             NVSDK_NGX_D3D11_ReleaseFeature(f.handle);
             f.handle = nullptr;
@@ -416,42 +427,39 @@ bool dlaaEvaluate(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* colour,
 #endif
 }
 
-bool dlssEvaluateFovea(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* colour,
-                       ID3D11Texture2D* depth, ID3D11Texture2D* motion,
-                       ID3D11Texture2D* output, uint32_t inW, uint32_t inH,
-                       uint32_t outW, uint32_t outH, uint32_t icx, uint32_t icy,
-                       uint32_t icw, uint32_t ich, uint32_t ocx, uint32_t ocy,
-                       uint32_t ocw, uint32_t och, float jx, float jy, bool reset,
-                       float frameMs, const char** reason) {
-#ifndef EDVR_HAVE_NGX
-    (void)ctx; (void)eye; (void)colour; (void)depth; (void)motion; (void)output;
-    (void)inW; (void)inH; (void)outW; (void)outH; (void)icx; (void)icy; (void)icw;
-    (void)ich; (void)ocx; (void)ocy; (void)ocw; (void)och;
-    (void)jx; (void)jy; (void)reset; (void)frameMs;
-    if (reason) *reason = "this build has no DLSS SDK in it";
-    return false;
-#else
+#ifdef EDVR_HAVE_NGX
+namespace {
+// The general crop evaluation, which both the fovea and the steady periphery
+// are: NVIDIA runs on an INPUT crop (icx,icy,icw,ich) of the render-size
+// textures and writes an OUTPUT crop (ocx,ocy,ocw,och) of the native output,
+// through a feature `f` of its own (`what` names it in the log). The feature
+// is created at the input CROP size -> the output CROP size, not the full
+// frame -- the difference the crop probe (dlaaCropProbe) validated and the
+// production path first got wrong (0xBAD00005 in the field, 2026-09-05).
+// InRenderSubrectDimensions equals the created InWidth/InHeight; the input
+// sub-rect bases locate the crop in the full-frame render textures, and the
+// output base writes the (possibly upscaled) crop into the native output.
+// Equal crops are DLAA (1:1); a smaller input is DLSS upscaling just the
+// crop. Keyed on all four sizes, so a live width or render-size change
+// rebuilds and resets.
+bool evaluateCrop(EyeFeature& f, const char* what, int eye, ID3D11DeviceContext* ctx,
+                  ID3D11Texture2D* colour, ID3D11Texture2D* depth, ID3D11Texture2D* motion,
+                  ID3D11Texture2D* output, uint32_t inW, uint32_t inH, uint32_t outW,
+                  uint32_t outH, uint32_t icx, uint32_t icy, uint32_t icw, uint32_t ich,
+                  uint32_t ocx, uint32_t ocy, uint32_t ocw, uint32_t och, float jx, float jy,
+                  bool reset, float frameMs, const char** reason) {
     if (!g_available || !g_params || !ctx || !colour || !depth || !motion || !output ||
-        eye < 0 || eye > 1 || !inW || !inH || !icw || !ich || !ocw || !och) {
+        !inW || !inH || !icw || !ich || !ocw || !och) {
         if (reason) *reason = g_available ? "a missing input" : g_reason;
         return false;
     }
     if (icx + icw > inW || icy + ich > inH || ocx + ocw > outW || ocy + och > outH) {
-        if (reason) *reason = "the fovea crop falls outside the frame";
+        snprintf(g_reasonBuf, sizeof(g_reasonBuf), "the %s crop falls outside the frame", what);
+        g_reason = g_reasonBuf;
+        if (reason) *reason = g_reason;
         return false;
     }
     pollTimingRing(ctx);
-    EyeFeature& f = g_fovea[eye];
-    // The feature is created at the input CROP size -> the output CROP size,
-    // not the full frame -- the difference the crop probe (dlaaCropProbe)
-    // validated and the production path first got wrong (0xBAD00005 in the
-    // field, 2026-09-05). InRenderSubrectDimensions equals the created
-    // InWidth/InHeight; the input sub-rect bases locate the crop in the
-    // full-frame render textures, and the output base writes the upscaled
-    // crop into the native output. When the input and output crops are equal
-    // this is DLAA (1:1); when the input is smaller it is DLSS upscaling just
-    // the fovea. Keyed on all four sizes, so a live width or render-size
-    // change rebuilds and resets.
     bool didCreate = false;
     if (!f.handle || f.w != icw || f.h != ich || f.outW != ocw || f.outH != och) {
         if (f.handle) {
@@ -487,8 +495,8 @@ bool dlssEvaluateFovea(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* colou
         if (NVSDK_NGX_FAILED(cr) || !f.handle) {
             f.handle = nullptr;
             snprintf(g_reasonBuf, sizeof(g_reasonBuf),
-                     "the fovea feature would not be created at %ux%u->%ux%u: %s (0x%08X)", icw,
-                     ich, ocw, och, ngxResultName(cr), static_cast<unsigned>(cr));
+                     "the %s feature would not be created at %ux%u->%ux%u: %s (0x%08X)", what,
+                     icw, ich, ocw, och, ngxResultName(cr), static_cast<unsigned>(cr));
             g_reason = g_reasonBuf;
             if (reason) *reason = g_reason;
             return false;
@@ -499,11 +507,11 @@ bool dlssEvaluateFovea(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* colou
         f.outH = och;
         didCreate = true;
         Log::get().note(
-            "temporal aa fovea: NVIDIA's feature is created for eye %d, crop %ux%u in -> "
+            "temporal aa %s: NVIDIA's feature is created for eye %d, crop %ux%u in -> "
             "%ux%u out (%s, output sub-rectangles; input based at %u,%u in the %ux%u render, "
-            "output at %u,%u in the %ux%u frame); the crop's history starts here.",
-            eye, icw, ich, ocw, och, (icw == ocw && ich == och) ? "DLAA" : qualityName(q), icx,
-            icy, inW, inH, ocx, ocy, outW, outH);
+            "output at %u,%u in the %ux%u frame); its history starts here.",
+            what, eye, icw, ich, ocw, och, (icw == ocw && ich == och) ? "DLAA" : qualityName(q),
+            icx, icy, inW, inH, ocx, ocy, outW, outH);
     }
 
     NVSDK_NGX_D3D11_DLSS_Eval_Params ep{};
@@ -551,7 +559,7 @@ bool dlssEvaluateFovea(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* colou
         g_qring[qs].inUse = true;
     }
     if (NVSDK_NGX_FAILED(er)) {
-        snprintf(g_reasonBuf, sizeof(g_reasonBuf), "the fovea evaluation failed: %s (0x%08X)",
+        snprintf(g_reasonBuf, sizeof(g_reasonBuf), "the %s evaluation failed: %s (0x%08X)", what,
                  ngxResultName(er), static_cast<unsigned>(er));
         g_reason = g_reasonBuf;
         if (reason) *reason = g_reason;
@@ -560,6 +568,32 @@ bool dlssEvaluateFovea(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* colou
     ++g_evaluations;
     if (reset || didCreate) ++g_resets;   // a create forces a reset too (the review, F7)
     return true;
+}
+}  // namespace
+#endif  // EDVR_HAVE_NGX
+
+bool dlssEvaluateFovea(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* colour,
+                       ID3D11Texture2D* depth, ID3D11Texture2D* motion,
+                       ID3D11Texture2D* output, uint32_t inW, uint32_t inH,
+                       uint32_t outW, uint32_t outH, uint32_t icx, uint32_t icy,
+                       uint32_t icw, uint32_t ich, uint32_t ocx, uint32_t ocy,
+                       uint32_t ocw, uint32_t och, float jx, float jy, bool reset,
+                       float frameMs, const char** reason) {
+#ifndef EDVR_HAVE_NGX
+    (void)ctx; (void)eye; (void)colour; (void)depth; (void)motion; (void)output;
+    (void)inW; (void)inH; (void)outW; (void)outH; (void)icx; (void)icy; (void)icw;
+    (void)ich; (void)ocx; (void)ocy; (void)ocw; (void)och;
+    (void)jx; (void)jy; (void)reset; (void)frameMs;
+    if (reason) *reason = "this build has no DLSS SDK in it";
+    return false;
+#else
+    if (eye < 0 || eye > 1) {
+        if (reason) *reason = "a missing input";
+        return false;
+    }
+    return evaluateCrop(g_fovea[eye], "fovea", eye, ctx, colour, depth, motion, output, inW, inH,
+                        outW, outH, icx, icy, icw, ich, ocx, ocy, ocw, och, jx, jy, reset, frameMs,
+                        reason);
 #endif
 }
 
@@ -574,6 +608,29 @@ bool dlaaEvaluateFovea(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* colou
     return dlssEvaluateFovea(ctx, eye, colour, depth, motion, output, w, h, w, h, cropX, cropY,
                              cropW, cropH, cropX, cropY, cropW, cropH, jx, jy, reset, frameMs,
                              reason);
+}
+
+// The steady periphery (docs/performance.md feature 6): DLAA over the WHOLE of
+// a w x h frame -- a reduced copy of the render, or the render itself when the
+// game rendered small -- through the third feature slot, so its history is
+// its own. The composite upscales what comes back around the fovea.
+bool dlaaEvaluatePeriphery(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* colour,
+                           ID3D11Texture2D* depth, ID3D11Texture2D* motion,
+                           ID3D11Texture2D* output, uint32_t w, uint32_t h, float jx, float jy,
+                           bool reset, float frameMs, const char** reason) {
+#ifndef EDVR_HAVE_NGX
+    (void)ctx; (void)eye; (void)colour; (void)depth; (void)motion; (void)output;
+    (void)w; (void)h; (void)jx; (void)jy; (void)reset; (void)frameMs;
+    if (reason) *reason = "this build has no DLSS SDK in it";
+    return false;
+#else
+    if (eye < 0 || eye > 1) {
+        if (reason) *reason = "a missing input";
+        return false;
+    }
+    return evaluateCrop(g_periph[eye], "periphery", eye, ctx, colour, depth, motion, output, w, h,
+                        w, h, 0, 0, w, h, 0, 0, w, h, jx, jy, reset, frameMs, reason);
+#endif
 }
 
 bool dlaaTotals(uint32_t* evaluations, double* avgMs, double* maxMs,
@@ -1055,7 +1112,7 @@ int dlaaCropProbe(ID3D11Device* dev, ID3D11DeviceContext* ctx, char* report,
 // (1:1 or upscaled, a solid stays a solid) and the rest untouched.
 static bool foveaCase(ID3D11Device* dev, ID3D11DeviceContext* ctx, UINT inW, UINT inH,
                       UINT outW, UINT outH, UINT icx, UINT icy, UINT icw, UINT ich, UINT ocx,
-                      UINT ocy, UINT ocw, UINT och, const char** why) {
+                      UINT ocy, UINT ocw, UINT och, bool periphery, const char** why) {
     auto mk = [&](UINT tw, UINT th, DXGI_FORMAT fmt, UINT bind, const void* init, UINT pitch,
                   ID3D11Texture2D** out) {
         D3D11_TEXTURE2D_DESC td{};
@@ -1090,8 +1147,11 @@ static bool foveaCase(ID3D11Device* dev, ID3D11DeviceContext* ctx, UINT inW, UIN
     if (!ok && why) *why = "the test textures could not be created";
     const char* wf = "";
     for (int k = 0; ok && k < 2; ++k) {
-        if (!dlssEvaluateFovea(ctx, 0, col, dep, mot, out, inW, inH, outW, outH, icx, icy, icw, ich,
-                               ocx, ocy, ocw, och, 0.0f, 0.0f, k == 0, 0.0f, &wf)) {
+        const bool ran = periphery
+            ? dlaaEvaluatePeriphery(ctx, 0, col, dep, mot, out, inW, inH, 0.0f, 0.0f, k == 0, 0.0f, &wf)
+            : dlssEvaluateFovea(ctx, 0, col, dep, mot, out, inW, inH, outW, outH, icx, icy, icw, ich,
+                                ocx, ocy, ocw, och, 0.0f, 0.0f, k == 0, 0.0f, &wf);
+        if (!ran) {
             if (why) *why = wf;   // an NGX rejection (0xBAD00005) lands here
             ok = false;
         }
@@ -1120,6 +1180,13 @@ static bool foveaCase(ID3D11Device* dev, ID3D11DeviceContext* ctx, UINT inW, UIN
             if (why) *why = "the output crop is not the source colour -- NVIDIA refused the crop "
                             "or wrote it in the wrong place";
             ok = false;
+        } else if (periphery) {
+            // The periphery is the whole frame: its corner must be the colour too.
+            if (!(approx(outside[0], 90) && approx(outside[1], 160) && approx(outside[2], 200))) {
+                if (why) *why = "the periphery's corner is not the source colour -- the whole-frame "
+                                "DLAA did not cover the frame";
+                ok = false;
+            }
         } else if (!(approx(outside[0], 255) && approx(outside[1], 0) && approx(outside[2], 255))) {
             if (why) *why = "the output OUTSIDE the crop was overwritten -- the crop is not "
                             "confined to its sub-rectangle";
@@ -1147,19 +1214,29 @@ int dlaaFoveaSelfTest(ID3D11Device* dev, ID3D11DeviceContext* ctx, const char** 
         return -1;
     }
     // The 1:1 crop (DLAA): input crop == output crop, same-size textures.
-    if (!foveaCase(dev, ctx, 512, 384, 512, 384, 128, 64, 256, 256, 128, 64, 256, 256, why)) {
+    if (!foveaCase(dev, ctx, 512, 384, 512, 384, 128, 64, 256, 256, 128, 64, 256, 256, false, why)) {
         return 0;
     }
     // The upscale crop (DLSS, the half-render variant): a 256x256 input crop of
     // a small render becomes a 512x512 output crop of a 2x native frame (ratio
     // 0.5 -> MaxPerf).
-    if (!foveaCase(dev, ctx, 512, 384, 1024, 768, 128, 64, 256, 256, 256, 128, 512, 512, why)) {
+    if (!foveaCase(dev, ctx, 512, 384, 1024, 768, 128, 64, 256, 256, 256, 128, 512, 512, false, why)) {
         return 0;
     }
     // A non-half ratio (0.6 -> Balanced), so a second DLSS mode's create is
     // exercised too (the review of 2026-09-05, F1/F3): 300x300 input crop of a
     // 640x480 render, 500x500 output crop of a 1067x800 frame.
-    if (!foveaCase(dev, ctx, 640, 480, 1068, 800, 160, 90, 300, 300, 268, 150, 500, 500, why)) {
+    if (!foveaCase(dev, ctx, 640, 480, 1068, 800, 160, 90, 300, 300, 268, 150, 500, 500, false, why)) {
+        return 0;
+    }
+    // The steady periphery's slot: whole-frame DLAA on a reduced copy, at a
+    // mid size and at the smallest the smoke harness's 400x304 source reduces
+    // to (NVIDIA must accept a 200x152 DLAA feature, or the desk pipeline case
+    // would pass vacuously).
+    if (!foveaCase(dev, ctx, 512, 384, 512, 384, 0, 0, 512, 384, 0, 0, 512, 384, true, why)) {
+        return 0;
+    }
+    if (!foveaCase(dev, ctx, 200, 152, 200, 152, 0, 0, 200, 152, 0, 0, 200, 152, true, why)) {
         return 0;
     }
     return 1;

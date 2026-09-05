@@ -86,6 +86,19 @@ bool dlssEvaluateFovea(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* colou
                        uint32_t ocw, uint32_t och, float jx, float jy, bool reset,
                        float frameMs, const char** reason);
 
+// The steady periphery (docs/performance.md feature 6): DLAA over the WHOLE
+// of a w x h frame -- a copy of the render reduced to the periphery's scale,
+// or the render itself when the game rendered small -- through a third
+// per-eye feature with its own history, so the fovea, the periphery and the
+// full frame never share an accumulation. The composite upscales what comes
+// back around the fovea. The inputs are the same kinds as dlaaEvaluate's, at
+// w x h; `output` (R8G8B8A8_UNORM, w x h, an unordered-access view possible)
+// is written whole. False on any refusal, with its reason.
+bool dlaaEvaluatePeriphery(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* colour,
+                           ID3D11Texture2D* depth, ID3D11Texture2D* motion,
+                           ID3D11Texture2D* output, uint32_t w, uint32_t h, float jx, float jy,
+                           bool reset, float frameMs, const char** reason);
+
 // The measured price, for the totals line: evaluations, the mean
 // milliseconds by timestamp query, and how many evaluations carried the
 // reset. False when nothing has run.

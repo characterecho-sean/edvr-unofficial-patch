@@ -630,27 +630,65 @@ gets: the middle of the view is where the cockpit's text and the target
 sit, and it is measurable on both field rigs before any tracker is
 involved.
 
-**Built, fixed centre (2026-09-05, commit on the foveation branch).**
-`advanced.temporal_aa_fovea` (degrees across the crop, 0 = whole frame),
-`advanced.temporal_aa_fovea_edge` (the blend band, degrees) and
-`advanced.temporal_aa_periphery_calm` (0..1, how much calmer the periphery
-history gets toward the edge), all live. It works under both `temporal_aa =
-dlaa` (the crop 1:1) and `temporal_aa = dlss` (the game renders small, NVIDIA
-upscales just the crop to native, the periphery upscaled cheaply by the
-composite's bilinear sampler). `dlssEvaluateFovea` (`src/d3d11/dlaa.cpp`)
-runs a per-eye NGX feature at the input crop -> output crop with output
-sub-rectangles; the own-history dispatch fills the periphery, calmed with
-eccentricity; a composite shader (`kFoveaCsHlsl`, desk-compiled) blends the
-two over the edge band in the R8G8B8A8 stored representation the compositor
-samples as sRGB. The centre is the straight-ahead point from the effective
-tangents; the output crop is the input crop scaled exactly, so the fovea and
-periphery register. Skipped entirely at width 0, so an unchanged config is
-byte-for-byte today's behaviour. Flown on the Pimax under DLAA (the crop
-engages, ~0.32 ms/eye vs 2.7 full-frame); the remaining artefacts are the
-periphery's own-history shimmer (the calming addresses it) and, under head
-motion, the crop's history-boundary transient at the fovea edge -- content
-entering the crop has no accumulated history, the "underwater" a wider fovea
-or a processed margin beyond the visible crop would cure.
+**Built, fixed centre (2026-09-05, the foveation branch).**
+`advanced.temporal_aa_fovea` (degrees across the fovea, 0 = whole frame),
+`advanced.temporal_aa_fovea_shape` (round, the default, or square),
+`advanced.temporal_aa_fovea_edge` (the blend band, degrees, inside the
+fovea), `advanced.temporal_aa_periphery` (steady, the default, or sharp),
+`advanced.temporal_aa_periphery_scale` (the steady periphery's size as a
+fraction of the output, 0.5) and `advanced.temporal_aa_periphery_calm` (the
+sharp periphery's easing), all live. It works under both `temporal_aa =
+dlaa` (the crop 1:1) and `temporal_aa = dlss` (the game renders small,
+NVIDIA upscales just the crop to native). `src/d3d11/dlaa.cpp` runs up to
+three NGX features per eye, each with its own history: the full frame, the
+fovea crop (`dlssEvaluateFovea`, created at the input crop -> output crop
+with output sub-rectangles) and the periphery (`dlaaEvaluatePeriphery`,
+DLAA over a reduced copy). In `temporal_pass.cpp` the trained inputs are
+built once (the colour copied out typed, the motion vectors and depth copy
+at render size); a reduction shader boxes them down for the periphery
+(colour mean, nearest depth, that sample's motion scaled into the reduced
+pixels, the jitter scaled the same way); NVIDIA evaluates the periphery and
+the crop; and a composite shader blends the crop over the periphery --
+upscaled with a Catmull-Rom bicubic when it is smaller -- through a
+smoothstepped disc (an ellipse where the crop is clamped). The own pass
+does not run at all in that mode. With `periphery = sharp` the own pass
+fills the periphery at full size, eased mildly toward the frame's edge, and
+the composite writes its blend back into the own history so content
+leaving the fovea carries NVIDIA's pixels out with it and decays over
+frames instead of stepping. The centre is the straight-ahead point from the
+effective tangents; the output crop is the input crop scaled exactly, so the
+fovea and periphery register. Skipped entirely at width 0, so an unchanged
+config is byte-for-byte the plain trained path. The smoke harness drives the
+whole pipeline on the desk (both peripheries, three frames each, the
+composite counted) through a dev hook, beside the NGX slot checks.
+
+**Flown, and what the seam taught (2026-09-05).** The first builds paired
+NVIDIA's crop with the own history in the periphery, and three flights on
+the Pimax Crystal Super at HMD Quality 1.0 (4336x4284 per eye; a 40-degree
+fovea is a 1232-pixel square, 8.2% of the pixels, 0.32 ms per eye against
+2.7 full-frame) met the seam in three forms: periphery shimmer under head
+motion; then, after a calming that made the periphery's history heavier, an
+"underwater" smear the player saw wherever the eyes went; and finally, with
+the calming inverted, a square outline that showed under small
+back-and-forth head movements as "a lack of continuity". The mechanism is
+temporal, not spatial: the own history resamples itself every frame, so it
+blurs while the head moves and re-sharpens when it stops, while NVIDIA's
+crop does neither, and the boundary between a breathing region and a still
+one pulses -- no blend band hides that. Two more findings shaped the fix.
+With a fixed centre the player looks straight at the periphery whenever the
+eyes move, so it cannot be treated as peripheral vision, and any deliberate
+softening there is seen. And the own pass is not cheap at that size -- the
+totals put it near 1.3 ms per eye -- so crop-plus-own saved 0.8 ms of the
+2.7, not the 2.4 the crop alone suggested. The steady periphery answers all
+three: both sides of the seam are NVIDIA's and neither breathes; the
+periphery is softer (half the pixels each way, upscaled) but steady, the
+trade the player had already proposed for the half-render variant; and the
+whole arrangement -- crop 0.32 ms, periphery about a quarter of full-frame,
+reduction and composite a fraction -- costs less than the crop-plus-own it
+replaces. The disc came from the player's own question: the eye picks out a
+straight edge and a corner at far lower contrast than a smooth radial
+gradient. Unflown as of this writing; the first flight decides the default
+scale and whether the sharp periphery keeps a purpose.
 
 **What must be measured first (Phase 0 items 15 and 16).**
 
@@ -684,11 +722,13 @@ or a processed margin beyond the visible crop would cure.
 **What it does not do.** It leaves the game's cost alone: the render
 target is still full size, and the game still shades every pixel of it —
 that is feature 2's job, and the two compose (a coarsely shaded periphery
-under EDVR's own history, a full-rate fovea under NVIDIA's). It is
+under NVIDIA's reduced DLAA, a full-rate fovea under its crop). It is
 NVIDIA-only by construction, like the rest of the DLSS path. And the
-periphery's quality is EDVR's own pass's quality, which is the pre-DLAA
-one: calmer than nothing, softer than NVIDIA's — acceptable where the eye
-is not, and visible on a fixed centre when the player looks at the edge.
+periphery's resolution is the steady periphery's scale — softer than the
+fovea, visible on a fixed centre whenever the player's eyes leave the
+middle, which is the reason an eye-tracked centre (feature 3) is the real
+prize: with the fovea following the gaze the periphery is only ever seen
+peripherally, and the scale can drop further.
 
 **Settings sketch** (`[fix]`, final names at implementation):
 

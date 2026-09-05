@@ -337,17 +337,18 @@ void main(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
     if (id.x < (uint)size.x && id.y < (uint)size.y) {
         float2 p = float2(id.xy);
         int2 ci = int2(id.xy);
-        // Foveation-aware periphery (docs/performance.md feature 6): toward
-        // the edge the history's WEIGHT is REDUCED and the fallback sample is
-        // blurred MORE. Reducing the weight cuts the motion smear so the
-        // periphery matches the DLAA fovea's low latency at the seam (a
-        // heavier history smears -- the 2026-09-05 field lesson); the wider
-        // Gaussian holds the flicker down spatially, which the eye's low
-        // peripheral acuity does not resolve, without the temporal lag a
-        // heavier history would add. ecc is 0 inside the ramp's inner radius
-        // and 1 in the far periphery, scaled by the strength; exactly 0 when
-        // the fovea is off (fovea1.w == 0), so the full-frame pass is
-        // unchanged (blend >= 0.5 never reaches the 0.40 floor at ecc 0).
+        // Foveation-aware periphery (docs/performance.md feature 6, the
+        // sharp periphery only): toward the frame's edge the history's
+        // WEIGHT is eased down and the fallback sample is blurred a little
+        // more. A lighter history cuts the motion smear (a heavier one
+        // smears -- the 2026-09-05 field lesson); the wider Gaussian holds
+        // the flicker down spatially without the lag a heavier history
+        // adds. Mild, because with a fixed centre the player looks straight
+        // at the periphery whenever the eyes move; the ramp starts at the
+        // fovea's edge (outside the blend band) and reaches full strength at
+        // the farthest frame corner. ecc is exactly 0 when the fovea is off
+        // (fovea1.w == 0), so the full-frame pass is unchanged (blend >= 0.5
+        // never reaches the 0.40 floor at ecc 0).
         float ecc = 0.0;
         if (fovea1.w != 0.0) {
             float dist = length(p - fovea0.xy);
@@ -356,7 +357,7 @@ void main(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
         float blEff = blend - ecc * 0.30;                // history: LIGHTER toward the edge
         if (blEff < 0.40) blEff = 0.40;
         float gEff = gamma;                              // clamp unchanged
-        float curK = 2.29 / (1.0 + ecc * 4.0);           // the fallback Gaussian widens (spatial low-pass)
+        float curK = 2.29 / (1.0 + ecc * 1.5);           // the fallback Gaussian widens (spatial low-pass), mildly
         // This frame's sample and its neighbourhood, in one pass over the
         // 3x3 around the pixel. The sample the game rendered at q sits at
         // q - jit on the unjittered grid, so each is weighted by its
@@ -582,38 +583,145 @@ void main(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
 
 // The fovea composite (docs/performance.md feature 6), its own tiny shader
 // so its resource registers do not collide with the pass's above. NVIDIA
-// ran on a crop of the frame -- the fovea -- and the periphery is the own
-// history; this blends the two, full NVIDIA inside the crop, easing to the
-// periphery over the last `band` pixels before the crop's edge so the seam
-// is never a hard line. Outside the crop NVIDIA wrote nothing, and the
-// weight is zero there, so its texture is read only where it is valid.
+// ran on a crop of the frame -- the fovea -- and the periphery is either
+// NVIDIA's DLAA on a reduced copy of the frame (the steady periphery) or
+// the pass's own history (the sharp one); this blends the two, full NVIDIA
+// inside the fovea, easing to the periphery over the last `band` pixels
+// before the fovea's edge so the seam is never a hard line. The fovea is a
+// disc (an ellipse where a clamped crop is not square) by default: the eye
+// finds a straight edge and a corner at a far lower contrast than a smooth
+// radial gradient, which is why a square fovea read as "a square" under a
+// small head movement (2026-09-05). Outside the fovea NVIDIA's crop holds
+// nothing, and the weight is zero there, so its texture is read only where
+// it is valid. A periphery smaller than the output is upscaled here: a
+// Catmull-Rom bicubic (nine bilinear taps) when it is, a plain fetch at 1:1.
+// With the own periphery at 1:1 the blended result is also written back into
+// the own history, so content that leaves the fovea carries NVIDIA's
+// converged pixels into the periphery and decays there over frames instead
+// of stepping at the seam.
 constexpr char kFoveaCsHlsl[] = R"HLSL(
-Texture2D<float4> PERIPH : register(t0);   // the own-history periphery, at RENDER size
+Texture2D<float4> PERIPH : register(t0);   // the periphery: NVIDIA's reduced DLAA or the own history, any size
 Texture2D<float4> FOVEA  : register(t1);   // NVIDIA's output, native size, valid in the crop
 RWTexture2D<float4> FO   : register(u0);   // the composited native frame, game format
+RWTexture2D<float4> HIST : register(u1);   // the own history being written this frame (mode.y)
 SamplerState SMP : register(s0);           // bilinear clamp, for the periphery upscale
 cbuffer FC : register(b0) {
     float4 crop;   // output crop x0 y0 x1 y1 in native pixels, x1/y1 exclusive
-    float4 band;   // x the blend band in pixels; y the output width, z the output height; w unused
+    float4 band;   // x the blend band in pixels; y the output width, z the output height; w the periphery's width
+    float4 disc;   // xy the fovea's centre in native pixels, zw its half-extents (the ellipse's semi-axes)
+    float4 mode;   // x 1 = round fovea (else the rectangle); y 1 = write the history too; z 1 = the periphery is smaller than the output (bicubic); w the periphery's height
 };
+// Catmull-Rom through nine bilinear fetches (the pass's own kernel, C = 0.5),
+// for a periphery smaller than the output: sharper than the bilinear
+// upscale, mild ringing, the standard upscaling kernel.
+float4 periphCubic(float2 uv, float2 tsize) {
+    const float C = 0.5;
+    float2 sp = uv * tsize;
+    float2 t1 = floor(sp - 0.5) + 0.5;
+    float2 f = sp - t1;
+    float2 g0 = 1.0 + f;
+    float2 g3 = 2.0 - f;
+    float2 w0 = C * (-g0 * g0 * g0 + 5.0 * g0 * g0 - 8.0 * g0 + 4.0);
+    float2 w1 = (2.0 - C) * f * f * f + (C - 3.0) * f * f + 1.0;
+    float2 h = 1.0 - f;
+    float2 w2 = (2.0 - C) * h * h * h + (C - 3.0) * h * h + 1.0;
+    float2 w3 = C * (-g3 * g3 * g3 + 5.0 * g3 * g3 - 8.0 * g3 + 4.0);
+    float2 w12 = w1 + w2;
+    float2 o12 = w2 / w12;
+    float2 t0 = (t1 - 1.0) / tsize;
+    float2 t3 = (t1 + 2.0) / tsize;
+    float2 t12 = (t1 + o12) / tsize;
+    float4 r = 0.0;
+    r += PERIPH.SampleLevel(SMP, float2(t0.x, t0.y), 0) * w0.x * w0.y;
+    r += PERIPH.SampleLevel(SMP, float2(t12.x, t0.y), 0) * w12.x * w0.y;
+    r += PERIPH.SampleLevel(SMP, float2(t3.x, t0.y), 0) * w3.x * w0.y;
+    r += PERIPH.SampleLevel(SMP, float2(t0.x, t12.y), 0) * w0.x * w12.y;
+    r += PERIPH.SampleLevel(SMP, float2(t12.x, t12.y), 0) * w12.x * w12.y;
+    r += PERIPH.SampleLevel(SMP, float2(t3.x, t12.y), 0) * w3.x * w12.y;
+    r += PERIPH.SampleLevel(SMP, float2(t0.x, t3.y), 0) * w0.x * w3.y;
+    r += PERIPH.SampleLevel(SMP, float2(t12.x, t3.y), 0) * w12.x * w3.y;
+    r += PERIPH.SampleLevel(SMP, float2(t3.x, t3.y), 0) * w3.x * w3.y;
+    return r;
+}
 [numthreads(8, 8, 1)]
 void fovea(uint3 id : SV_DispatchThreadID) {
     if (id.x >= (uint)band.y || id.y >= (uint)band.z) return;
     int2 p = int2(id.xy);
-    float dx = min((float)p.x - crop.x, crop.z - 1.0 - (float)p.x);
-    float dy = min((float)p.y - crop.y, crop.w - 1.0 - (float)p.y);
-    float d = min(dx, dy);                 // pixels inside the crop's nearest edge
     float b = max(band.x, 1.0);
-    float w = saturate(d / b);
+    float w;
+    if (mode.x != 0.0) {
+        // The disc: the normalised radius in the ellipse inscribed in the
+        // crop, turned back into pixels inside its edge along the minor axis.
+        float2 n = (float2(p) + 0.5 - disc.xy) / max(disc.zw, 1.0);
+        float d = (1.0 - length(n)) * min(disc.z, disc.w);
+        w = saturate(d / b);
+    } else {
+        float dx = min((float)p.x - crop.x, crop.z - 1.0 - (float)p.x);
+        float dy = min((float)p.y - crop.y, crop.w - 1.0 - (float)p.y);
+        w = saturate(min(dx, dy) / b);     // pixels inside the crop's nearest edge
+    }
     w = w * w * (3.0 - 2.0 * w);           // smoothstep across the band
-    // The periphery is sampled by normalised uv, so a render-size history is
-    // bilinearly upscaled to the native output; at 1:1 (DLAA) the uv lands on
-    // texel centres, an exact copy. The fovea is native, read where it is
-    // valid (strictly inside the crop, where w > 0).
+    // The periphery is sampled by normalised uv, so any size lands on the
+    // native output: bicubic when it is smaller, an exact fetch at 1:1 (the
+    // uv lands on texel centres). The fovea is native, read where it is
+    // valid (strictly inside the fovea, where w > 0).
     float2 uv = (float2(p) + 0.5) / float2(band.y, band.z);
-    float4 per = PERIPH.SampleLevel(SMP, uv, 0);
+    float4 per = mode.z != 0.0 ? periphCubic(uv, float2(band.w, mode.w))
+                               : PERIPH.SampleLevel(SMP, uv, 0);
     float4 fov = w > 0.0 ? FOVEA.Load(int3(p, 0)) : per;
-    FO[p] = lerp(per, fov, w);
+    float4 o = lerp(per, fov, w);
+    FO[p] = o;
+    // The hand-off into the own history (mode.y, the sharp periphery at 1:1):
+    // inside the fovea and its band the history takes the blended result.
+    if (mode.y != 0.0 && w > 0.0) HIST[p] = float4(o.rgb, 1.0);
+}
+)HLSL";
+
+// The steady periphery's reduction (feature 6): the render-size colour,
+// depth and motion the trained path built, boxed down to the periphery's
+// size for its own DLAA. Colour is the block's mean; depth the block's
+// NEAREST (reversed-Z: the largest), which is the dilation every
+// depth-aware filter does at an edge; the motion is the vector of that
+// nearest sample, scaled into the reduced pixels, so depth and motion stay
+// the same surface's. The block is ceil(ratio) square at floor(p * ratio):
+// exact 2x2 at a half scale, a slightly wide box at other ratios.
+constexpr char kDownCsHlsl[] = R"HLSL(
+Texture2D<float4> DC : register(t0);    // the colour, render size
+Texture2D<float>  DZ : register(t1);    // the depth copy, render size
+Texture2D<float2> DM : register(t2);    // the motion vectors, render pixels
+RWTexture2D<float4> PC : register(u0);  // the reduced colour
+RWTexture2D<float>  PZ : register(u1);  // the reduced depth
+RWTexture2D<float2> PM : register(u2);  // the reduced motion, reduced pixels
+cbuffer DS : register(b0) {
+    float4 dims;   // x reduced width, y reduced height, z render width, w render height
+    float4 par;    // x the block side (ceil of the ratio), y the scale (reduced / render), zw unused
+};
+[numthreads(8, 8, 1)]
+void down(uint3 id : SV_DispatchThreadID) {
+    if (id.x >= (uint)dims.x || id.y >= (uint)dims.y) return;
+    float2 q = dims.zw / dims.xy;
+    int k = max(1, min(4, (int)par.x));
+    int2 base = int2(floor(float2(id.xy) * q));
+    int2 last = int2(dims.zw) - 1;
+    float4 c = 0.0;
+    float zmax = -1.0;
+    float2 mv = 0.0;
+    float n = 0.0;
+    [loop] for (int y = 0; y < k; ++y) {
+        [loop] for (int x = 0; x < k; ++x) {
+            int2 s = min(base + int2(x, y), last);
+            c += DC.Load(int3(s, 0));
+            n += 1.0;
+            float z = DZ.Load(int3(s, 0));
+            if (z > zmax) {
+                zmax = z;
+                mv = DM.Load(int3(s, 0));
+            }
+        }
+    }
+    PC[id.xy] = c / n;
+    PZ[id.xy] = max(zmax, 0.0);
+    PM[id.xy] = mv * par.y;
 }
 )HLSL";
 
@@ -710,10 +818,13 @@ struct EyeState {
     // For the trained pass: the colour copied out typed, the motion
     // vectors and the depth copy it is fed, and its output.
     ID3D11Texture2D*           dlColour = nullptr;
+    ID3D11ShaderResourceView*  dlColourSrv = nullptr;   // the steady periphery's reduction reads these three
     ID3D11Texture2D*           dlMv = nullptr;
     ID3D11UnorderedAccessView* dlMvUav = nullptr;
+    ID3D11ShaderResourceView*  dlMvSrv = nullptr;
     ID3D11Texture2D*           dlDepth = nullptr;
     ID3D11UnorderedAccessView* dlDepthUav = nullptr;
+    ID3D11ShaderResourceView*  dlDepthSrv = nullptr;
     ID3D11Texture2D*           dlOut = nullptr;
     ID3D11UnorderedAccessView* dlOutUav = nullptr;   // the debug motion view paints here
     ID3D11ShaderResourceView*  dlOutSrv = nullptr;   // the fovea composite reads NVIDIA's crop through this
@@ -756,6 +867,22 @@ struct EyeState {
     ID3D11UnorderedAccessView* foveaOutUav = nullptr;
     uint32_t                   foveaW = 0, foveaH = 0;
     bool                       foveaHaveHistory = false;
+    // The steady periphery (feature 6): NVIDIA's DLAA on a reduced copy of
+    // the frame. The reduced colour, depth and motion (only when the
+    // reduction is real: at a small render the render-size inputs serve),
+    // NVIDIA's reduced output the composite upscales, and its history flag.
+    ID3D11Texture2D*           prColour = nullptr;
+    ID3D11UnorderedAccessView* prColourUav = nullptr;
+    ID3D11Texture2D*           prDepth = nullptr;
+    ID3D11UnorderedAccessView* prDepthUav = nullptr;
+    ID3D11Texture2D*           prMv = nullptr;
+    ID3D11UnorderedAccessView* prMvUav = nullptr;
+    ID3D11Texture2D*           prOut = nullptr;
+    ID3D11ShaderResourceView*  prOutSrv = nullptr;
+    ID3D11UnorderedAccessView* prOutUav = nullptr;
+    uint32_t                   prW = 0, prH = 0;
+    bool                       prReduced = false;   // prColour/prDepth/prMv exist (the reduction is real)
+    bool                       prHaveHistory = false;
 
     uint32_t    w = 0, h = 0;
     DXGI_FORMAT outFmt = DXGI_FORMAT_UNKNOWN;
@@ -771,7 +898,25 @@ void releaseDepth(EyeState& e) {
     if (e.depthSrv) { e.depthSrv->Release(); e.depthSrv = nullptr; }
     e.depthRes = nullptr;
 }
+void releasePeriph(EyeState& e) {
+    if (e.prColourUav) { e.prColourUav->Release(); e.prColourUav = nullptr; }
+    if (e.prColour) { e.prColour->Release(); e.prColour = nullptr; }
+    if (e.prDepthUav) { e.prDepthUav->Release(); e.prDepthUav = nullptr; }
+    if (e.prDepth) { e.prDepth->Release(); e.prDepth = nullptr; }
+    if (e.prMvUav) { e.prMvUav->Release(); e.prMvUav = nullptr; }
+    if (e.prMv) { e.prMv->Release(); e.prMv = nullptr; }
+    if (e.prOutUav) { e.prOutUav->Release(); e.prOutUav = nullptr; }
+    if (e.prOutSrv) { e.prOutSrv->Release(); e.prOutSrv = nullptr; }
+    if (e.prOut) { e.prOut->Release(); e.prOut = nullptr; }
+    e.prW = e.prH = 0;
+    e.prReduced = false;
+    e.prHaveHistory = false;
+}
 void releaseDl(EyeState& e) {
+    releasePeriph(e);   // the periphery's sizes follow the render's
+    if (e.dlColourSrv) { e.dlColourSrv->Release(); e.dlColourSrv = nullptr; }
+    if (e.dlMvSrv) { e.dlMvSrv->Release(); e.dlMvSrv = nullptr; }
+    if (e.dlDepthSrv) { e.dlDepthSrv->Release(); e.dlDepthSrv = nullptr; }
     if (e.dlMvUav) { e.dlMvUav->Release(); e.dlMvUav = nullptr; }
     if (e.dlDepthUav) { e.dlDepthUav->Release(); e.dlDepthUav = nullptr; }
     if (e.dlColour) { e.dlColour->Release(); e.dlColour = nullptr; }
@@ -805,6 +950,7 @@ void releaseOwned(EyeState& e) {
     if (e.foveaOut) { e.foveaOut->Release(); e.foveaOut = nullptr; }
     e.foveaW = e.foveaH = 0;
     e.foveaHaveHistory = false;
+    releasePeriph(e);
     e.w = e.h = 0;
     e.outFmt = e.histFmt = DXGI_FORMAT_UNKNOWN;
     e.haveHistory = false;
@@ -1073,6 +1219,10 @@ bool                       g_foveaFailNoted = false;
 bool                       g_foveaFailed = false;
 uint32_t                   g_foveaFailW = 0, g_foveaFailFoW = 0;
 uint32_t                   g_foveaTreats = 0;
+ID3D11ComputeShader*       g_csDown = nullptr;    // the steady periphery's reduction (feature 6)
+bool                       g_csDownTried = false;
+ID3D11Buffer*              g_downCb = nullptr;    // its sizes
+bool                       g_periphWholeNoted = false;   // "the periphery would be the whole frame", once
 bool                       g_dlaaNoted = false;
 bool                       g_dlssNoted = false;
 bool                       g_dlaaFailNoted = false;
@@ -1104,7 +1254,10 @@ int      g_debugMode = 0;          // advanced.temporal_aa_debug: 0 off, 1 motio
 float    g_menuMetres = 0.0f;      // advanced.temporal_aa_menu_metres: a depth for depthless pixels in a menu-like scene
 float    g_foveaDeg = 0.0f;        // advanced.temporal_aa_fovea: NVIDIA runs on a crop this many degrees across; 0 = whole frame
 float    g_foveaEdgeDeg = 6.0f;    // advanced.temporal_aa_fovea_edge: the blend band, in degrees
-float    g_peripheryCalm = 0.6f;   // advanced.temporal_aa_periphery_calm: how much calmer the own history gets toward the periphery (0 uniform, 1 max), only with the fovea on
+float    g_peripheryCalm = 0.4f;   // advanced.temporal_aa_periphery_calm: how much the own history is eased toward the periphery (0 uniform, 1 max), the sharp periphery only
+bool     g_periphSteady = true;    // advanced.temporal_aa_periphery: steady (NVIDIA's DLAA on a reduced copy) or sharp (the own history at full size)
+float    g_periphScale = 0.5f;     // advanced.temporal_aa_periphery_scale: the steady periphery's size as a fraction of the output each way
+bool     g_foveaRound = true;      // advanced.temporal_aa_fovea_shape: round (a disc) or square (the crop)
 int      g_rowsFollow = 0;         // +1 a frame the rows turn with the head, -4 a frame they do not; the world path needs >= 0
 bool     g_rowsFollowNoted = false;
 bool     g_warmNoted = false;
@@ -1470,11 +1623,12 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         if (!ok) failOnce("the parameter buffer could not be created");
     }
     if (ok && !g_foveaCb) {
-        // Two float4s: the crop rectangle and the blend band. Created here
-        // beside g_cb so the fovea path never allocates on the render
-        // thread; only filled when the fovea is actually on.
+        // Four float4s: the crop rectangle, the blend band and the sizes,
+        // the disc, the mode flags. Created here beside g_cb so the fovea
+        // path never allocates on the render thread; only filled when the
+        // fovea is actually on.
         D3D11_BUFFER_DESC bd{};
-        bd.ByteWidth = 32;
+        bd.ByteWidth = 64;
         bd.Usage = D3D11_USAGE_DYNAMIC;
         bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
         bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
@@ -1483,6 +1637,17 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
             // full-frame DLAA if it is null. The main pass runs regardless.
             g_foveaCb = nullptr;
         }
+    }
+    if (ok && !g_downCb) {
+        // The steady periphery's reduction: two float4s of sizes. Not fatal
+        // either: without it the reduction cannot run and the sharp
+        // periphery stands in (the fovea path checks).
+        D3D11_BUFFER_DESC bd{};
+        bd.ByteWidth = 32;
+        bd.Usage = D3D11_USAGE_DYNAMIC;
+        bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+        if (!SUCCEEDED(dev->CreateBuffer(&bd, nullptr, &g_downCb))) g_downCb = nullptr;
     }
     if (ok && !g_samp) {
         D3D11_SAMPLER_DESC smd{};
@@ -1892,7 +2057,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         // review of 2026-09-05, F4): its motion vectors want last frustum too.
         const bool useTanPrev =
             useHistory ||
-            (trainedWanted && (e.dlHaveHistory || (g_foveaDeg > 0.0f && e.foveaHaveHistory)) &&
+            (trainedWanted && (e.dlHaveHistory || (g_foveaDeg > 0.0f && (e.foveaHaveHistory || e.prHaveHistory))) &&
              haveDelta && tanPrev);
         memcpy(p.tanPrev, useTanPrev ? tanPrev : tanNow, sizeof(p.tanPrev));
         p.jit[0] = jxNow;
@@ -2010,11 +2175,30 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         bool foveaMode = false;
         bool foveaComposited = false;
         bool foveaEvalOk = false;   // the crop eval ran and NVIDIA accumulated: history is live
+        // The steady periphery (feature 6): NVIDIA's DLAA around the fovea
+        // too, on a reduced copy of the frame, so both sides of the seam are
+        // NVIDIA's and neither breathes under head motion the way the own
+        // history does (the 2026-09-05 field lesson: the own periphery
+        // resamples itself every frame, blurring while the head moves and
+        // sharpening when it stops, and against a fovea that does neither the
+        // boundary pulsed). Its size is the OUTPUT scaled, or the render when
+        // the game rendered smaller than that (nothing to reduce); at 1:1 a
+        // scale that reduces nothing is the whole frame through NVIDIA, which
+        // is full-frame DLAA, and that runs instead.
+        bool steady = false;             // the periphery is NVIDIA's this frame
+        bool reduce = false;             // ...on a reduced copy (rw < w), not the render itself
+        uint32_t rw = w, rh = h;         // the periphery's size
+        bool periphOk = false;           // the periphery eval ran and accumulated this frame
         if (foveaWanted && !g_csFovea && !g_csFoveaTried) {
             g_csFoveaTried = true;
             g_csFovea = shaderSwapCompileCs(ctx, kFoveaCsHlsl, sizeof(kFoveaCsHlsl) - 1,
                                             "fovea", "temporal_fovea_cs", nullptr,
                                             "temporal aa");
+        }
+        if (foveaWanted && g_periphSteady && !g_csDown && !g_csDownTried) {
+            g_csDownTried = true;
+            g_csDown = shaderSwapCompileCs(ctx, kDownCsHlsl, sizeof(kDownCsHlsl) - 1,
+                                           "down", "temporal_down_cs", nullptr, "temporal aa");
         }
         if (foveaWanted && g_csFovea && dlaaAvailable(dev, nullptr)) {
             const float l = tanNow[0], r = tanNow[1], t = tanNow[2], b = tanNow[3];
@@ -2063,23 +2247,53 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     if (focx + focw > foW) focw = (foW - focx) & ~1u;
                     if (focy + foch > foH) foch = (foH - focy) & ~1u;
                 }
-                if (fcw >= 128 && focw >= 128 && foch >= 128 &&
-                    static_cast<uint64_t>(focw) * foch <=
-                        static_cast<uint64_t>(foW) * foH * 9 / 10) {
+                bool sizesOk = fcw >= 128 && focw >= 128 && foch >= 128 &&
+                               static_cast<uint64_t>(focw) * foch <=
+                                   static_cast<uint64_t>(foW) * foH * 9 / 10;
+                if (sizesOk && g_periphSteady) {
+                    // The periphery's size: the output scaled, even, at least
+                    // 128 each way, never above the render.
+                    uint32_t sw = static_cast<uint32_t>(static_cast<float>(foW) * g_periphScale + 0.5f) & ~1u;
+                    uint32_t sh = static_cast<uint32_t>(static_cast<float>(foH) * g_periphScale + 0.5f) & ~1u;
+                    if (sw < 128) sw = 128;
+                    if (sh < 128) sh = 128;
+                    if (sw >= w || sh >= h) { sw = w; sh = h; }
+                    const bool canReduce = g_csDown != nullptr && g_downCb != nullptr;
+                    reduce = sw < w && canReduce;
+                    if (!reduce) { sw = w; sh = h; }
+                    if (reduce || upscale) {
+                        steady = true;
+                        rw = sw;
+                        rh = sh;
+                    } else if (!canReduce) {
+                        // No reduction shader (its compile failure is in the
+                        // log): the sharp periphery stands in.
+                    } else {
+                        sizesOk = false;   // the whole frame: full-frame DLAA runs
+                        if (!g_periphWholeNoted) {
+                            g_periphWholeNoted = true;
+                            Log::get().note(
+                                "temporal aa: the fovea's steady periphery at scale %.2f would be the "
+                                "whole %ux%u frame, which is full-frame DLAA -- so that runs instead. "
+                                "Lower temporal_aa_periphery_scale (0.5 is half the pixels each way) "
+                                "or set temporal_aa_periphery = sharp for the own history there.",
+                                static_cast<double>(g_periphScale), w, h);
+                        }
+                    }
+                }
+                if (sizesOk) {
                     foveaMode = true;
-                    // The periphery calming (feature 6): the own pass reads
-                    // these from the cbuffer and eases its history lighter with
-                    // distance from the fovea centre. The ramp starts INSIDE
-                    // the fovea's radius (0.7 of it) so it covers the blend
-                    // band -- where the own history meets the DLAA and a heavy
-                    // history would smear against it -- and reaches full calm
-                    // at the farthest frame corner. The fovea's inner own
-                    // history is discarded (DLAA is shown there), so calming it
-                    // costs nothing.
-                    if (g_peripheryCalm > 0.0f) {
+                    // The periphery calming (feature 6, the sharp periphery
+                    // only): the own pass reads these from the cbuffer and
+                    // eases its history lighter with distance from the fovea
+                    // centre. The ramp starts at the fovea's edge -- the disc's
+                    // radius, outside the blend band, so the band blends NVIDIA
+                    // against the own history at its full weight -- and
+                    // reaches full strength at the farthest frame corner.
+                    if (!steady && g_peripheryCalm > 0.0f) {
                         const float ccx = static_cast<float>(fcx) + fcw * 0.5f;
                         const float ccy = static_cast<float>(fcy) + fch * 0.5f;
-                        const float inner = fcw * 0.35f;
+                        const float inner = 0.5f * static_cast<float>(fcw < fch ? fcw : fch);
                         float outer = 0.0f;
                         const float cwf = static_cast<float>(w), chf = static_cast<float>(h);
                         const float cor[4][2] = {{0, 0}, {cwf, 0}, {0, chf}, {cwf, chf}};
@@ -2144,13 +2358,13 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                              e.dlOutW != oW || e.dlOutH != oH)) {
                     releaseDl(e);
                     made = makeTex(dev, w, h, DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM,
-                                   D3D11_BIND_SHADER_RESOURCE, &e.dlColour, nullptr, nullptr) &&
+                                   D3D11_BIND_SHADER_RESOURCE, &e.dlColour, &e.dlColourSrv, nullptr) &&
                            makeTex(dev, w, h, DXGI_FORMAT_R16G16_FLOAT, DXGI_FORMAT_R16G16_FLOAT,
                                    D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS,
-                                   &e.dlMv, nullptr, &e.dlMvUav) &&
+                                   &e.dlMv, &e.dlMvSrv, &e.dlMvUav) &&
                            makeTex(dev, w, h, DXGI_FORMAT_R32_FLOAT, DXGI_FORMAT_R32_FLOAT,
                                    D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS,
-                                   &e.dlDepth, nullptr, &e.dlDepthUav) &&
+                                   &e.dlDepth, &e.dlDepthSrv, &e.dlDepthUav) &&
                            makeTex(dev, oW, oH, DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM,
                                    D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS,
                                    &e.dlOut, &e.dlOutSrv, &e.dlOutUav) &&
@@ -2285,31 +2499,40 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         const int readIdx = e.histRead;
         const int writeIdx = 1 - readIdx;
         bool ran = usedDlaa ? true : setParams(ctx, p);
+        bool ownRan = false;
         if (ran && !usedDlaa) {
-            ID3D11ShaderResourceView* nullSrv[3] = {};
-            ID3D11UnorderedAccessView* nullUav[3] = {};
-            ctx->CSSetShaderResources(0, 3, nullSrv);
-            ctx->CSSetUnorderedAccessViews(0, 3, nullUav, nullptr);
-            ctx->CSSetShader(g_cs, nullptr, 0);
-            ID3D11ShaderResourceView* srvs[3] = {inSrv, e.histSrv[readIdx], depthSrv};
-            ID3D11UnorderedAccessView* uavs[3] = {e.outUav, e.histUav[writeIdx],
-                                                  g_statsUav};
-            ID3D11Buffer* cb = g_cb;
-            ID3D11SamplerState* smp = g_samp;
-            ctx->CSSetShaderResources(0, 3, srvs);
-            ctx->CSSetUnorderedAccessViews(0, 3, uavs, nullptr);
-            ctx->CSSetConstantBuffers(0, 1, &cb);
-            ctx->CSSetSamplers(0, 1, &smp);
-            ctx->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
-
-            // The fovea (docs/performance.md feature 6): the own history just
-            // wrote e.outTex (the periphery); now NVIDIA runs on the crop, and
-            // the composite blends the two into e.foveaOut. All Elite's frames
-            // are the R8G8B8A8 family (the full DLAA path's CopyResource proves
-            // it), so the crop and the periphery share a channel order and a
-            // UNORM view, and the blend is in the stored representation the
-            // compositor samples as sRGB -- the same convention as the full
-            // trained path.
+            // THE FOVEA (docs/performance.md feature 6), NVIDIA's part first:
+            // the colour copied out typed, the motion vectors and the depth
+            // copy, then the steady periphery's reduction and DLAA, then the
+            // fovea crop. The own pass runs after, and only when it is needed
+            // -- the whole frame when the fovea is off or stood down this
+            // frame, the periphery when the periphery is the sharp one. The
+            // composite then blends whichever periphery there is under
+            // NVIDIA's crop. All Elite's frames are the R8G8B8A8 family (the
+            // full DLAA path's CopyResource proves it), so the crop and the
+            // periphery share a channel order and a UNORM view, and the blend
+            // is in the stored representation the compositor samples as sRGB
+            // -- the same convention as the full trained path.
+            bool compositeReady = false;   // g_foveaCb holds this frame's composite parameters
+            float bandPx = 0.0f;
+            const char* whyF = "";
+            auto standDown = [&](const char* why) {
+                // Latched: a failing crop (an NGX create or eval error) is not
+                // retried every frame -- a create costs tens to hundreds of ms
+                // (F3). The own history runs full-frame for the rest of the
+                // session, or until a config reload or size change re-arms it.
+                g_foveaFailed = true;
+                g_foveaFailW = w;
+                g_foveaFailFoW = foW;
+                if (!g_foveaFailNoted) {
+                    g_foveaFailNoted = true;
+                    Log::get().note(
+                        "temporal aa: the fovea was asked for, but %s. It is stood down for the "
+                        "session (the own history runs full-frame); edit the ini or change the "
+                        "render size to try again.",
+                        why);
+                }
+            };
             if (foveaMode) {
                 bool made = g_csMv != nullptr;
                 if (!g_csMv && !g_csMvTried) {
@@ -2319,20 +2542,22 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     made = g_csMv != nullptr;
                 }
                 // The colour, motion and depth are RENDER size (w x h); NVIDIA
-                // reads the input crop from them. The output e.dlOut is NATIVE
+                // reads the input crop from them, and the reduction reads them
+                // whole through the shader views. The output e.dlOut is NATIVE
                 // size (foW x foH == w x h for DLAA, larger for DLSS), where
-                // NVIDIA writes the upscaled crop.
-                if (made && (!e.dlOut || e.dlW != w || e.dlH != h || e.dlOutW != foW ||
-                             e.dlOutH != foH)) {
+                // NVIDIA writes the upscaled crop. Rebuilt on a size change,
+                // or when the full-frame path built them without the views.
+                if (made && (!e.dlOut || !e.dlColourSrv || !e.dlDepthSrv || !e.dlMvSrv ||
+                             e.dlW != w || e.dlH != h || e.dlOutW != foW || e.dlOutH != foH)) {
                     releaseDl(e);
                     made = makeTex(dev, w, h, DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM,
-                                   D3D11_BIND_SHADER_RESOURCE, &e.dlColour, nullptr, nullptr) &&
+                                   D3D11_BIND_SHADER_RESOURCE, &e.dlColour, &e.dlColourSrv, nullptr) &&
                            makeTex(dev, w, h, DXGI_FORMAT_R16G16_FLOAT, DXGI_FORMAT_R16G16_FLOAT,
                                    D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS,
-                                   &e.dlMv, nullptr, &e.dlMvUav) &&
+                                   &e.dlMv, &e.dlMvSrv, &e.dlMvUav) &&
                            makeTex(dev, w, h, DXGI_FORMAT_R32_FLOAT, DXGI_FORMAT_R32_FLOAT,
                                    D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS,
-                                   &e.dlDepth, nullptr, &e.dlDepthUav) &&
+                                   &e.dlDepth, &e.dlDepthSrv, &e.dlDepthUav) &&
                            makeTex(dev, foW, foH, DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM,
                                    D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS,
                                    &e.dlOut, &e.dlOutSrv, &e.dlOutUav);
@@ -2349,6 +2574,31 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                                    D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS,
                                    &e.foveaOut, nullptr, &e.foveaOutUav);
                     if (made) { e.foveaW = foW; e.foveaH = foH; }
+                }
+                // The steady periphery's textures: NVIDIA's reduced output
+                // always; the reduced inputs only when the reduction is real.
+                if (made && steady &&
+                    (!e.prOut || e.prW != rw || e.prH != rh || e.prReduced != reduce)) {
+                    releasePeriph(e);
+                    made = makeTex(dev, rw, rh, DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM,
+                                   D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS,
+                                   &e.prOut, &e.prOutSrv, &e.prOutUav);
+                    if (made && reduce) {
+                        made = makeTex(dev, rw, rh, DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM,
+                                       D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS,
+                                       &e.prColour, nullptr, &e.prColourUav) &&
+                               makeTex(dev, rw, rh, DXGI_FORMAT_R32_FLOAT, DXGI_FORMAT_R32_FLOAT,
+                                       D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS,
+                                       &e.prDepth, nullptr, &e.prDepthUav) &&
+                               makeTex(dev, rw, rh, DXGI_FORMAT_R16G16_FLOAT, DXGI_FORMAT_R16G16_FLOAT,
+                                       D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS,
+                                       &e.prMv, nullptr, &e.prMvUav);
+                    }
+                    if (made) {
+                        e.prW = rw; e.prH = rh; e.prReduced = reduce;
+                    } else {
+                        releasePeriph(e);
+                    }
                 }
                 if (made && e.outSrv && e.dlOutSrv) {
                     // The colour, typed, whichever way the source came (the
@@ -2370,7 +2620,8 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                         ctx->CopySubresourceRegion(e.dlColour, 0, 0, 0, 0, src, 0, &box);
                     }
                     // Motion vectors and the depth copy, full frame (NVIDIA
-                    // reads the crop's sub-rectangle of them).
+                    // reads the crop's sub-rectangle of them; the reduction
+                    // reads them whole).
                     ID3D11ShaderResourceView* nullSrvM[3] = {};
                     ID3D11UnorderedAccessView* nullUavM[5] = {};
                     ctx->CSSetShaderResources(0, 3, nullSrvM);
@@ -2378,10 +2629,10 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     ctx->CSSetShader(g_csMv, nullptr, 0);
                     ID3D11ShaderResourceView* srvsM[3] = {inSrv, e.histSrv[readIdx], depthSrv};
                     // u2 (the stats buffer) is left UNBOUND here: the own pass
-                    // already wrote its stats this frame, and the mv entry
-                    // writes the same slots (15-17), so binding it would double
-                    // them (the review of 2026-09-05, F5). Atomics on a null
-                    // UAV are dropped.
+                    // writes its stats when it runs, and the mv entry writes
+                    // the same slots (15-17), so binding it would double them
+                    // (the review of 2026-09-05, F5). Atomics on a null UAV
+                    // are dropped.
                     ID3D11UnorderedAccessView* uavsM[5] = {nullptr, nullptr, nullptr,
                                                            e.dlMvUav, e.dlDepthUav};
                     ID3D11Buffer* cbM = g_cb;
@@ -2394,99 +2645,190 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     ctx->CSSetShaderResources(0, 3, nullSrvM);
                     ctx->CSSetUnorderedAccessViews(0, 5, nullUavM, nullptr);
 
-                    const bool resetHist = (flags & 1u) != 0 || !e.foveaHaveHistory;
+                    // NVIDIA's frame delta, shared by the periphery and the
+                    // crop (evaluated together): the time since this eye's
+                    // previous evaluation, zero when unknown or absurd.
                     LARGE_INTEGER qn{}, qf{};
                     QueryPerformanceCounter(&qn);
                     QueryPerformanceFrequency(&qf);
                     float frameMs = 0.0f;
-                    if (!resetHist && e.dlLastQpc && qf.QuadPart > 0) {
+                    if (e.dlLastQpc && qf.QuadPart > 0) {
                         frameMs = static_cast<float>(
                             static_cast<double>(qn.QuadPart - e.dlLastQpc) * 1000.0 /
                             static_cast<double>(qf.QuadPart));
                         if (frameMs < 1.0f || frameMs > 100.0f) frameMs = 0.0f;
                     }
                     e.dlLastQpc = qn.QuadPart;
-                    const char* whyF = "";
-                    if (dlssEvaluateFovea(ctx, eye, e.dlColour, e.dlDepth, e.dlMv, e.dlOut, w, h,
-                                          foW, foH, fcx, fcy, fcw, fch, focx, focy, focw, foch,
-                                          jxNow, jyNow, resetHist, frameMs, &whyF)) {
-                        foveaEvalOk = true;   // e.foveaHaveHistory is set from this at frame end
-                        D3D11_MAPPED_SUBRESOURCE fm{};
-                        if (SUCCEEDED(ctx->Map(g_foveaCb, 0, D3D11_MAP_WRITE_DISCARD, 0, &fm)) &&
-                            fm.pData) {
-                            // The band and the crop are in the NATIVE output
-                            // space now (foW x foH), where the composite runs.
-                            float band = g_foveaEdgeDeg *
-                                         (static_cast<float>(foW) / (tanNow[1] - tanNow[0])) *
-                                         0.01745329252f;
-                            const float maxBand = 0.5f * static_cast<float>(focw < foch ? focw : foch);
-                            if (band > maxBand) band = maxBand;
-                            if (band < 1.0f) band = 1.0f;
-                            float* fc = static_cast<float*>(fm.pData);
-                            fc[0] = static_cast<float>(focx);
-                            fc[1] = static_cast<float>(focy);
-                            fc[2] = static_cast<float>(focx + focw);
-                            fc[3] = static_cast<float>(focy + foch);
-                            fc[4] = band;
-                            fc[5] = static_cast<float>(foW);
-                            fc[6] = static_cast<float>(foH);
-                            fc[7] = 0.0f;
-                            ctx->Unmap(g_foveaCb, 0);
-                            // PERIPH = the render-size own history (bilinearly
-                            // upscaled to the native output by the sampler when
-                            // the game rendered small); FOVEA = NVIDIA's native
-                            // crop.
-                            ID3D11ShaderResourceView* csrv[2] = {e.outSrv, e.dlOutSrv};
-                            ID3D11UnorderedAccessView* cuav[1] = {e.foveaOutUav};
-                            ID3D11ShaderResourceView* nullC2[2] = {};
-                            ID3D11UnorderedAccessView* nullC1[1] = {};
-                            ID3D11SamplerState* smpC = g_samp;
-                            ctx->CSSetShaderResources(0, 2, nullC2);
-                            ctx->CSSetUnorderedAccessViews(0, 1, nullC1, nullptr);
-                            ctx->CSSetShader(g_csFovea, nullptr, 0);
-                            ctx->CSSetShaderResources(0, 2, csrv);
-                            ctx->CSSetUnorderedAccessViews(0, 1, cuav, nullptr);
-                            ctx->CSSetConstantBuffers(0, 1, &g_foveaCb);
-                            ctx->CSSetSamplers(0, 1, &smpC);
-                            ctx->Dispatch((foW + 7) / 8, (foH + 7) / 8, 1);
-                            ctx->CSSetShaderResources(0, 2, nullC2);
-                            ctx->CSSetUnorderedAccessViews(0, 1, nullC1, nullptr);
-                            foveaComposited = true;
-                            ++g_foveaTreats;
-                            if (!g_foveaNoted) {
-                                g_foveaNoted = true;
-                                Log::get().note(
-                                    "temporal aa: DLSS where you look ENGAGED -- NVIDIA runs on a "
-                                    "%ux%u->%ux%u crop (%s, %.0f deg) around the straight-ahead "
-                                    "point at (%u, %u) of the %ux%u output, %.1f%% of its pixels; "
-                                    "the own history fills the periphery (%ux%u render%s), blended "
-                                    "over %.0f deg (%.0f px). NVIDIA's price is in the DLAA totals.",
-                                    fcw, fch, focw, foch, upscale ? "DLSS" : "DLAA",
-                                    static_cast<double>(g_foveaDeg), focx, focy, foW, foH,
-                                    100.0 * static_cast<double>(focw) * foch /
-                                        (static_cast<double>(foW) * foH),
-                                    w, h, upscale ? " upscaled to the output" : "",
-                                    static_cast<double>(g_foveaEdgeDeg), static_cast<double>(band));
+                    // The steady periphery: the reduction (when it is real),
+                    // then DLAA over the whole reduced frame.
+                    if (steady) {
+                        bool inputsOk = true;
+                        if (reduce) {
+                            D3D11_MAPPED_SUBRESOURCE dm{};
+                            if (SUCCEEDED(ctx->Map(g_downCb, 0, D3D11_MAP_WRITE_DISCARD, 0, &dm)) &&
+                                dm.pData) {
+                                const float ratio = static_cast<float>(w) / static_cast<float>(rw);
+                                float* dc = static_cast<float*>(dm.pData);
+                                dc[0] = static_cast<float>(rw);
+                                dc[1] = static_cast<float>(rh);
+                                dc[2] = static_cast<float>(w);
+                                dc[3] = static_cast<float>(h);
+                                dc[4] = ceilf(ratio - 1e-4f);
+                                dc[5] = static_cast<float>(rw) / static_cast<float>(w);
+                                dc[6] = 0.0f;
+                                dc[7] = 0.0f;
+                                ctx->Unmap(g_downCb, 0);
+                                ID3D11ShaderResourceView* dsrv[3] = {e.dlColourSrv, e.dlDepthSrv, e.dlMvSrv};
+                                ID3D11UnorderedAccessView* duav[3] = {e.prColourUav, e.prDepthUav, e.prMvUav};
+                                ID3D11ShaderResourceView* nullD3[3] = {};
+                                ID3D11UnorderedAccessView* nullDu[3] = {};
+                                ctx->CSSetShaderResources(0, 3, nullD3);
+                                ctx->CSSetUnorderedAccessViews(0, 3, nullDu, nullptr);
+                                ctx->CSSetShader(g_csDown, nullptr, 0);
+                                ctx->CSSetShaderResources(0, 3, dsrv);
+                                ctx->CSSetUnorderedAccessViews(0, 3, duav, nullptr);
+                                ctx->CSSetConstantBuffers(0, 1, &g_downCb);
+                                ctx->Dispatch((rw + 7) / 8, (rh + 7) / 8, 1);
+                                ctx->CSSetShaderResources(0, 3, nullD3);
+                                ctx->CSSetUnorderedAccessViews(0, 3, nullDu, nullptr);
+                            } else {
+                                inputsOk = false;
                             }
                         }
-                    } else {
-                        // Latched: a failing crop (an NGX create or eval error)
-                        // is not retried every frame -- a create costs tens to
-                        // hundreds of ms (F3). The own history runs full-frame
-                        // for the rest of the session, or until a config reload
-                        // or size change re-arms it.
-                        g_foveaFailed = true;
-                        g_foveaFailW = w;
-                        g_foveaFailFoW = foW;
-                        if (!g_foveaFailNoted) {
-                            g_foveaFailNoted = true;
-                            Log::get().note(
-                                "temporal aa: the fovea crop was asked for, but %s. It is stood "
-                                "down for the session (the own history runs full-frame); edit the "
-                                "ini or change the render size to try again.",
-                                whyF);
+                        if (inputsOk) {
+                            // The jitter in the periphery's own pixels: the
+                            // render's offset scaled by the reduction.
+                            const float sx = static_cast<float>(rw) / static_cast<float>(w);
+                            const float sy = static_cast<float>(rh) / static_cast<float>(h);
+                            const bool resetP = (flags & 1u) != 0 || !e.prHaveHistory;
+                            periphOk = dlaaEvaluatePeriphery(
+                                ctx, eye, reduce ? e.prColour : e.dlColour,
+                                reduce ? e.prDepth : e.dlDepth, reduce ? e.prMv : e.dlMv, e.prOut,
+                                rw, rh, jxNow * sx, jyNow * sy, resetP, frameMs, &whyF);
+                            if (!periphOk) standDown(whyF);
                         }
                     }
+                    // The fovea crop -- unless the steady periphery it is
+                    // composited over just failed (the latch has it).
+                    if (!steady || periphOk) {
+                        const bool resetHist = (flags & 1u) != 0 || !e.foveaHaveHistory;
+                        if (dlssEvaluateFovea(ctx, eye, e.dlColour, e.dlDepth, e.dlMv, e.dlOut, w, h,
+                                              foW, foH, fcx, fcy, fcw, fch, focx, focy, focw, foch,
+                                              jxNow, jyNow, resetHist, frameMs, &whyF)) {
+                            foveaEvalOk = true;   // e.foveaHaveHistory is set from this at frame end
+                        } else {
+                            standDown(whyF);
+                        }
+                    }
+                }
+                // This frame's composite parameters, written BEFORE the own
+                // pass decides whether to run: if they cannot be, the own pass
+                // runs whole and nothing is composited this frame.
+                if (foveaEvalOk) {
+                    const bool perSteady = periphOk;   // else the own periphery
+                    const uint32_t perW = perSteady ? rw : w, perH = perSteady ? rh : h;
+                    D3D11_MAPPED_SUBRESOURCE fm{};
+                    if (SUCCEEDED(ctx->Map(g_foveaCb, 0, D3D11_MAP_WRITE_DISCARD, 0, &fm)) &&
+                        fm.pData) {
+                        // The band, the crop and the disc are in the NATIVE
+                        // output space (foW x foH), where the composite runs.
+                        float band = g_foveaEdgeDeg *
+                                     (static_cast<float>(foW) / (tanNow[1] - tanNow[0])) *
+                                     0.01745329252f;
+                        const float maxBand = 0.5f * static_cast<float>(focw < foch ? focw : foch);
+                        if (band > maxBand) band = maxBand;
+                        if (band < 1.0f) band = 1.0f;
+                        float* fc = static_cast<float*>(fm.pData);
+                        fc[0] = static_cast<float>(focx);
+                        fc[1] = static_cast<float>(focy);
+                        fc[2] = static_cast<float>(focx + focw);
+                        fc[3] = static_cast<float>(focy + foch);
+                        fc[4] = band;
+                        fc[5] = static_cast<float>(foW);
+                        fc[6] = static_cast<float>(foH);
+                        fc[7] = static_cast<float>(perW);
+                        fc[8] = static_cast<float>(focx) + 0.5f * static_cast<float>(focw);
+                        fc[9] = static_cast<float>(focy) + 0.5f * static_cast<float>(foch);
+                        fc[10] = 0.5f * static_cast<float>(focw);
+                        fc[11] = 0.5f * static_cast<float>(foch);
+                        fc[12] = g_foveaRound ? 1.0f : 0.0f;
+                        // The hand-off into the own history: the sharp
+                        // periphery at 1:1 only (the history is render size).
+                        fc[13] = (!perSteady && perW == foW && perH == foH) ? 1.0f : 0.0f;
+                        fc[14] = (perW < foW || perH < foH) ? 1.0f : 0.0f;
+                        fc[15] = static_cast<float>(perH);
+                        ctx->Unmap(g_foveaCb, 0);
+                        compositeReady = true;
+                        bandPx = band;
+                    }
+                }
+            }
+            // THE OWN PASS: the whole frame, unless the steady periphery and
+            // the fovea both ran and the composite is ready to take them.
+            const bool ownNeeded = !(foveaMode && steady && periphOk && foveaEvalOk && compositeReady);
+            if (ownNeeded) {
+                ID3D11ShaderResourceView* nullSrv[3] = {};
+                ID3D11UnorderedAccessView* nullUav[3] = {};
+                ctx->CSSetShaderResources(0, 3, nullSrv);
+                ctx->CSSetUnorderedAccessViews(0, 3, nullUav, nullptr);
+                ctx->CSSetShader(g_cs, nullptr, 0);
+                ID3D11ShaderResourceView* srvs[3] = {inSrv, e.histSrv[readIdx], depthSrv};
+                ID3D11UnorderedAccessView* uavs[3] = {e.outUav, e.histUav[writeIdx],
+                                                      g_statsUav};
+                ID3D11Buffer* cb = g_cb;
+                ID3D11SamplerState* smp = g_samp;
+                ctx->CSSetShaderResources(0, 3, srvs);
+                ctx->CSSetUnorderedAccessViews(0, 3, uavs, nullptr);
+                ctx->CSSetConstantBuffers(0, 1, &cb);
+                ctx->CSSetSamplers(0, 1, &smp);
+                ctx->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
+                ownRan = true;
+            }
+            // THE COMPOSITE: NVIDIA's crop over whichever periphery there is.
+            if (foveaMode && foveaEvalOk && compositeReady && (periphOk || ownRan)) {
+                ID3D11ShaderResourceView* csrv[2] = {periphOk ? e.prOutSrv : e.outSrv, e.dlOutSrv};
+                // u1 is the own history being written this frame, for the
+                // hand-off (the shader writes it only when mode.y says so).
+                ID3D11UnorderedAccessView* cuav[2] = {
+                    e.foveaOutUav, (!periphOk && !upscale) ? e.histUav[writeIdx] : nullptr};
+                ID3D11ShaderResourceView* nullC2[2] = {};
+                ID3D11UnorderedAccessView* nullCu[2] = {};
+                ID3D11SamplerState* smpC = g_samp;
+                ctx->CSSetShaderResources(0, 2, nullC2);
+                ctx->CSSetUnorderedAccessViews(0, 2, nullCu, nullptr);
+                ctx->CSSetShader(g_csFovea, nullptr, 0);
+                ctx->CSSetShaderResources(0, 2, csrv);
+                ctx->CSSetUnorderedAccessViews(0, 2, cuav, nullptr);
+                ctx->CSSetConstantBuffers(0, 1, &g_foveaCb);
+                ctx->CSSetSamplers(0, 1, &smpC);
+                ctx->Dispatch((foW + 7) / 8, (foH + 7) / 8, 1);
+                ctx->CSSetShaderResources(0, 2, nullC2);
+                ctx->CSSetUnorderedAccessViews(0, 2, nullCu, nullptr);
+                foveaComposited = true;
+                ++g_foveaTreats;
+                if (!g_foveaNoted) {
+                    g_foveaNoted = true;
+                    char per[200];
+                    if (periphOk) {
+                        snprintf(per, sizeof(per),
+                                 "NVIDIA's too -- DLAA on a %ux%u copy (%.0f%% of the output each "
+                                 "way), upscaled bicubically; the pass's own history stands aside",
+                                 rw, rh, 100.0 * static_cast<double>(rw) / static_cast<double>(foW));
+                    } else {
+                        snprintf(per, sizeof(per), "the pass's own history (%ux%u render%s)", w, h,
+                                 upscale ? ", upscaled bicubically to the output" : "");
+                    }
+                    Log::get().note(
+                        "temporal aa: DLSS where you look ENGAGED -- NVIDIA runs on a %ux%u->%ux%u "
+                        "crop (%s, %.0f deg, %s) around the straight-ahead point at (%u, %u) of the "
+                        "%ux%u output, %.1f%% of its pixels; the periphery is %s; blended over "
+                        "%.0f deg (%.0f px). NVIDIA's price is in the DLAA totals.",
+                        fcw, fch, focw, foch, upscale ? "DLSS" : "DLAA",
+                        static_cast<double>(g_foveaDeg), g_foveaRound ? "round" : "square",
+                        focx + focw / 2, focy + foch / 2, foW, foH,
+                        100.0 * static_cast<double>(focw) * foch /
+                            (static_cast<double>(foW) * foH),
+                        per, static_cast<double>(g_foveaEdgeDeg), static_cast<double>(bandPx));
                 }
             }
         }
@@ -2532,6 +2874,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         // a later re-engage of the fovea resets rather than blending a stale
         // crop against fresh motion (the review of 2026-09-05, F4).
         e.foveaHaveHistory = foveaEvalOk;
+        e.prHaveHistory = periphOk;
 
         if (ran && usedDlaa) {
             // The trained pass's frame goes out; the pass's own history is
@@ -2559,8 +2902,15 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     e.dlOutH);
             }
         } else if (ran) {
-            e.histRead = writeIdx;
-            e.haveHistory = true;
+            if (ownRan) {
+                e.histRead = writeIdx;
+                e.haveHistory = true;
+            } else {
+                // The own pass stood aside (the steady periphery took its
+                // place): its history did not see this frame and restarts
+                // when it is next needed.
+                e.haveHistory = false;
+            }
             e.dlHaveHistory = false;   // NVIDIA's FULL-frame history did not see this frame
             // The fovea composite, when it ran, is what goes out: the own
             // history is still the periphery it was blended over, so its
@@ -2641,10 +2991,22 @@ void temporalPassConfigure(Config& cfg) {
     if (!std::isfinite(edge) || edge < 1.0f) edge = 1.0f;
     if (edge > 30.0f) edge = 30.0f;
     g_foveaEdgeDeg = edge;
-    float calm = cfg.getFloat("advanced.temporal_aa_periphery_calm", 0.6f);
+    float calm = cfg.getFloat("advanced.temporal_aa_periphery_calm", 0.4f);
     if (!std::isfinite(calm) || calm < 0.0f) calm = 0.0f;
     if (calm > 1.0f) calm = 1.0f;
     g_peripheryCalm = calm;
+    // The periphery around the fovea: steady (NVIDIA's DLAA on a reduced copy
+    // of the frame, the default) or sharp (the pass's own history at full
+    // size). dlaa and own are the mechanism names, kept as silent aliases.
+    const std::string per = cfg.getString("advanced.temporal_aa_periphery", "steady");
+    g_periphSteady = !(_stricmp(per.c_str(), "sharp") == 0 || _stricmp(per.c_str(), "own") == 0);
+    float pscale = cfg.getFloat("advanced.temporal_aa_periphery_scale", 0.5f);
+    if (!std::isfinite(pscale)) pscale = 0.5f;
+    if (pscale < 0.25f) pscale = 0.25f;
+    if (pscale > 1.0f) pscale = 1.0f;
+    g_periphScale = pscale;
+    const std::string shape = cfg.getString("advanced.temporal_aa_fovea_shape", "round");
+    g_foveaRound = _stricmp(shape.c_str(), "square") != 0;
     // A config reload re-arms the fovea after a failure stood it down (F3):
     // the user may have changed the width, or the transient may be gone.
     g_foveaFailed = false;
@@ -3021,6 +3383,8 @@ void temporalPassShutdown() {
     if (g_csMv) { g_csMv->Release(); g_csMv = nullptr; }
     if (g_csFovea) { g_csFovea->Release(); g_csFovea = nullptr; }
     if (g_foveaCb) { g_foveaCb->Release(); g_foveaCb = nullptr; }
+    if (g_csDown) { g_csDown->Release(); g_csDown = nullptr; }
+    if (g_downCb) { g_downCb->Release(); g_downCb = nullptr; }
     if (g_treats > 0) {
         Log::get().note("temporal aa: %u eye-submits treated this session.",
                         g_treats);
@@ -3051,6 +3415,29 @@ extern "C" __declspec(dllexport) void* edvrTemporalAa(
                                   clampSigma, outW, outH, flags);
     });
     return out;
+}
+
+// For tools/smoke: the fovea's settings set directly (the harness has no
+// ini), the failure latch cleared, and the count of composited frames so
+// far returned -- so a desk case can tell a fovea that ran from one that
+// quietly stood down to full-frame DLAA. A dev instrument; nothing else
+// calls it.
+extern "C" __declspec(dllexport) unsigned edvrTemporalAaFoveaDev(float deg, float edgeDeg, int steady,
+                                                                 float scale, int round) {
+    if (!std::isfinite(deg) || deg < 0.0f) deg = 0.0f;
+    if (deg > 0.0f && deg < 10.0f) deg = 10.0f;
+    if (deg > 120.0f) deg = 120.0f;
+    edvr::g_foveaDeg = deg;
+    if (!std::isfinite(edgeDeg) || edgeDeg < 1.0f) edgeDeg = 1.0f;
+    if (edgeDeg > 30.0f) edgeDeg = 30.0f;
+    edvr::g_foveaEdgeDeg = edgeDeg;
+    edvr::g_periphSteady = steady != 0;
+    if (!std::isfinite(scale) || scale < 0.25f) scale = 0.25f;
+    if (scale > 1.0f) scale = 1.0f;
+    edvr::g_periphScale = scale;
+    edvr::g_foveaRound = round != 0;
+    edvr::g_foveaFailed = false;
+    return edvr::g_foveaTreats;
 }
 
 extern "C" __declspec(dllexport) void edvrTemporalAaNoteHead(int eye, const float* prevPose,

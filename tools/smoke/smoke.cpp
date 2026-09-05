@@ -920,14 +920,68 @@ int main(int argc, char** argv) {
                     const char* fw = "";
                     const int fr = foveaCheck(device, ctx, &fw);
                     if (fr == 1) {
-                        printf("  ok    dlaa: the fovea crop runs (1:1 and upscaled) and stays "
-                               "inside its rectangle\n");
+                        printf("  ok    dlaa: the fovea crop runs (1:1 and upscaled) and stays inside "
+                               "its rectangle; the periphery slot runs whole-frame\n");
                     } else if (fr < 0) {
                         printf("  skip  dlaa: the fovea crop check needs the runtime (%s)\n", fw);
                     } else {
                         printf("  FAIL  dlaa: the fovea crop check -- %s\n", fw);
                         rc = 1;
                     }
+                }
+
+                // The fovea pipeline end to end (2026-09-05): the fovea crop,
+                // the steady periphery's reduction and DLAA, and the composite,
+                // driven through the production export with the fovea set by
+                // the dev hook (there is no ini here). A steady solid colour
+                // must come back as itself at the centre (NVIDIA's crop) and
+                // at a corner (the periphery, upscaled), and the composite
+                // must have RUN -- a fovea that quietly stood down to
+                // full-frame DLAA would pass the colour check vacuously. Both
+                // peripheries: steady (NVIDIA on a half-size copy) and sharp
+                // (the own history, with the hand-off into it).
+                typedef unsigned (*PFN_FoveaDev)(float, float, int, float, int);
+                PFN_FoveaDev foveaDev =
+                    reinterpret_cast<PFN_FoveaDev>(GetProcAddress(mod, "edvrTemporalAaFoveaDev"));
+                if (!foveaDev) {
+                    printf("  FAIL  edvrTemporalAaFoveaDev is not exported\n");
+                    rc = 1;
+                } else if (avail) {
+                    for (int steady = 1; steady >= 0; --steady) {
+                        const char* mode = steady ? "steady" : "sharp";
+                        const unsigned before = foveaDev(60.0f, 6.0f, steady, 0.5f, 1);
+                        bool okp = true;
+                        for (int k = 0; k < 3 && okp; ++k) {
+                            void* rp = taa(srcD, 0, nullptr, tan, tan, 0.125f * k, -0.125f * k, ident,
+                                           nullptr, nullptr, 0.0f, 0.0f, 0.0f, 3, 0.9f, 1.0f, 0u, 0u,
+                                           k == 0 ? (1u | 2u) : 2u);
+                            char label[96];
+                            snprintf(label, sizeof(label), "fovea (%s periphery): frame %d, the centre",
+                                     mode, k);
+                            if (!checkResolved(device, ctx, rp, label, 400, 304, 200, 152, cr, cg, cb, 4)) {
+                                okp = false;
+                            }
+                            snprintf(label, sizeof(label), "fovea (%s periphery): frame %d, a corner",
+                                     mode, k);
+                            if (okp && !checkResolved(device, ctx, rp, label, 400, 304, 6, 6, cr, cg, cb, 4)) {
+                                okp = false;
+                            }
+                        }
+                        const unsigned after = foveaDev(0.0f, 6.0f, 1, 0.5f, 1);   // off again
+                        if (!okp) {
+                            rc = 1;
+                        } else if (after - before < 3u) {
+                            printf("  FAIL  fovea (%s periphery): the composite ran %u times over 3 frames "
+                                   "(expected 3: the fovea stood down or never engaged)\n",
+                                   mode, after - before);
+                            rc = 1;
+                        } else {
+                            printf("  ok    fovea (%s periphery): 3 frames composited, the colour holds at "
+                                   "the centre and a corner\n", mode);
+                        }
+                    }
+                } else {
+                    printf("  skip  fovea pipeline: needs the runtime\n");
                 }
                 srcD->Release();
 
