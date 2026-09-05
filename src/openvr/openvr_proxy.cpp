@@ -23,6 +23,7 @@
 #include "../common/proxy.h"
 #include "compositor_hook.h"
 #include "early_session.h"
+#include "gaze_probe.h"
 #include "launch_centre.h"
 #include "openvr_min.h"
 #include "system_hook.h"
@@ -117,6 +118,11 @@ BOOL CALLBACK loadOnceCallback(PINIT_ONCE, PVOID, PVOID*) {
         // or the log exist, so the identification and the line about it
         // wait for launchCentreConfigure.
         edvr::launchCentreNoteRuntime(g_realModule);
+        // The gaze probe asks the runtime through this same pointer, later,
+        // from the frame loop; it is handed over here for the same reason
+        // the early session is handed it: nothing reaches around the export
+        // this file stands in for.
+        edvr::gazeProbeNoteGetter(g_realGetGenericInterface);
         edvr::breadcrumb(g_realGetGenericInterface
                              ? "vr: exports resolved"
                              : "vr: FAILED no VR_GetGenericInterface");
@@ -264,6 +270,7 @@ void noteSuppressedInterface(const char* name) {
 }
 
 void shutdown() {
+    edvr::gazeProbeShutdown();
     edvr::shutdownSystemHook();
     edvr::shutdownCompositorHook();
     edvr::Log::get().note("EDVR openvr proxy detaching");

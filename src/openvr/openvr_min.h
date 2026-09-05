@@ -63,6 +63,7 @@ enum ETrackingResult : int32_t {
 
 struct HmdMatrix34_t { float m[3][4]; };
 struct HmdMatrix44_t { float m[4][4]; };
+struct HmdVector2_t  { float v[2]; };
 struct HmdVector3_t  { float v[3]; };
 
 struct Texture_t {

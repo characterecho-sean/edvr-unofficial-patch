@@ -354,6 +354,7 @@ cl.exe %CFLAGS% /Fo"%OBJ%\openvr"\ ^
     "%ROOT%\src\openvr\temporal_aa.cpp" ^
     "%ROOT%\src\openvr\sharpen.cpp" ^
     "%ROOT%\src\openvr\early_session.cpp" "%ROOT%\src\openvr\launch_centre.cpp" ^
+    "%ROOT%\src\openvr\gaze_probe.cpp" ^
     "%ROOT%\src\d3d11\elite_binds.cpp"
 if errorlevel 1 ( echo [edvr] ERROR: openvr compile failed & exit /b 1 )
 

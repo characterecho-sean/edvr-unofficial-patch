@@ -7,6 +7,19 @@ documentation or release notes), or believed; what can only be settled at
 implementation time or in a live session is collected under Phase 0.
 Nothing here is implemented yet.*
 
+*Status, 2026-09-04. Feature 1's render scale exists on a branch; the
+sharpening half shipped in 0.14.0 as `render_sharpness`, alongside the
+temporal pass and NVIDIA's DLAA and DLSS at the door
+([anti-aliasing.md](anti-aliasing.md)). That work measured the one number
+this document lacked: NVIDIA's pass costs by output size, 2.7 ms per eye on
+a Pimax Crystal Super at HMD Quality 1.0, and it made a third foveation
+saving worth designing — feature 6 below, DLSS where you look. The field
+rig now includes that headset, whose eye tracker runs at 120 Hz, so
+feature 3's open question can be asked of a real driver; the gaze probe
+(`advanced.gaze_probe`, `src/openvr/gaze_probe.cpp`) is the first code
+from this document, and the phasing at the end now puts three probes
+before any feature.*
+
 ## The ask
 
 Port the performance features of OpenXR Toolkit into EDVR, so that
@@ -316,13 +329,51 @@ a direction is consumed each frame, compared against the last mask
 centre, and discarded. Nothing is logged, stored, or leaves the process;
 the log says gaze is in use once, at arming, and nothing afterwards.
 
-**Verification posture.** Neither field rig has an eye tracker, so this
-ships the way the cull guard shipped for real SteamVR: implemented,
-guarded, and asking for logs — the arming line, the first-call
-validation verdict, and the mask-update cadence line are the whole ask.
-The eye-tracked centre is a small delta on feature 2 (the mask generator
-gains a moving centre); the risk lives almost entirely in the interface
-pin, which is why the pin validates before it acts.
+**Verification posture, as first written.** Neither field rig had an eye
+tracker, so this was to ship the way the cull guard shipped for real
+SteamVR: implemented, guarded, and asking for logs — the arming line, the
+first-call validation verdict, and the mask-update cadence line the whole
+ask. The eye-tracked centre is a small delta on feature 2 (the mask
+generator gains a moving centre); the risk lives almost entirely in the
+interface pin, which is why the pin validates before it acts.
+
+**The route, settled (2026-09-04).** Three things changed since the
+paragraphs above. The field rig now includes a Pimax Crystal Super, whose
+tracker runs at 120 Hz, so the question can be put to a real driver. The
+SDK that carries the call is known: 2.15.6, whose `IVRSystem_Version` is
+`IVRSystem_026`, and the call as shipped returns per-eye NDC *points*
+(`GetEyeTrackedFoveationCenter(HmdVector2_t* left, HmdVector2_t* right)`,
+plus a variant that takes the projection matrix to use) rather than rays,
+so the shape test is finite and within the image's neighbourhood. And the
+6c exception is narrower than the paragraph above bargained for: OpenVR
+serves every interface in a second shape, the C function table
+(`FnTable:IVRSystem_026`), a plain struct of function pointers with no
+hidden `this` and no hidden return slot — the two things the ban's
+incident was about. The probe asks through that table, transcribed from
+Valve's `openvr_capi.h` at the SDK whose version string it names, so the
+index and the string come from one header. Before any gaze entry is
+called, entry 0 must answer the same recommended render size the game
+was told (the system hook holds the truth); a table that answers
+otherwise is not the table, and nothing further is called. The first
+calls run behind a crash sentinel, like the early handover, so a launch
+that dies in them costs the next launch the probe and nothing else. It
+only ever asks Valve's own runtime: OpenComposite raises a fatal dialog
+for an interface it does not implement, and the launch centre's export
+test says which runtime is underneath.
+
+The probe (`advanced.gaze_probe`, off by default) logs one line at
+arming, one at the first valid centre, then a summary every minute — how
+many frames the runtime vouched for, declined (no tracker, or a blink),
+or answered with something that is not a point; each eye's range, mean
+and mean per-frame step; and whether the projection variant agrees with
+the plain call. The step is the tell: a tracker that follows the eyes
+moves a little every frame, a driver publishing a constant moves by
+exactly nothing. No per-frame value is ever written — the privacy rule
+above, kept by the instrument as well as the feature. One flight on the
+Super, docked, answers whether Pimax Play's SteamVR driver publishes
+gaze; a `declined` column at 100% with a plain `IVRSystem_026` served
+means it does not, and the fixed-centre versions of features 2 and 6 are
+what that headset gets until it does.
 
 ## Feature 4 — the in-headset menu
 
@@ -544,6 +595,86 @@ distance = 2.0    ; metres; live
 glance   = on     ; dim until looked at
 ```
 
+## Feature 6 — DLSS where you look
+
+**Why it exists now.** Feature 2 shades the periphery coarser and leaves
+the pixel count alone. The temporal work added a second cost that scales
+with pixels: NVIDIA's DLAA and DLSS run over the whole output, and their
+price follows output size — measured at 2.7 ms per eye on the Pimax
+Crystal Super at HMD Quality 1.0 (roughly 31 megapixels per eye, against
+8 for a 4K monitor), 1.0 ms per eye on a Quest 3, 5.4 ms of an 11.1 ms
+frame at 90 Hz on the Pimax. Nothing in the rings touches that. A pass
+that runs only where the player is looking does.
+
+**What it is.** NVIDIA's runtime evaluates a sub-rectangle of larger
+buffers: the DLSS feature is created with output sub-rectangles enabled
+(`InEnableOutputSubrects`), and each evaluation names a base and size for
+the colour, depth, motion-vector and output regions
+(`InColorSubrectBase`, `InDepthSubrectBase`, `InMVSubrectBase`,
+`InOutputSubrectBase`, `InRenderSubrectDimensions` — vendor-stated, the
+310.7 headers). The pass keeps every input it already builds for the full
+frame — the jittered colour, the depth copy, the motion vectors — and
+hands NVIDIA a crop around the gaze point, at the crop's fixed size; the
+periphery outside the crop goes through EDVR's own temporal history, which
+exists and is tuned, or through the resolve alone. The two are composed at
+the door with a soft edge. Cost follows the crop's area: a crop a third of
+the frame's width is a ninth of its pixels, and 2.7 ms per eye becomes a
+fraction of a millisecond.
+
+**The centre.** Feature 3's gaze point, mapped through the eye's tangents
+exactly as the rings are, with the same fallback: a fixed centre — the
+straight-ahead point, which is not the texture centre in an asymmetric
+frustum — whenever gaze is invalid or absent. The fixed-centre version is
+a feature in its own right, and the one every headset without a tracker
+gets: the middle of the view is where the cockpit's text and the target
+sit, and it is measurable on both field rigs before any tracker is
+involved.
+
+**What must be measured first (Phase 0 items 15 and 16).**
+
+- *History under a moving crop.* NVIDIA's history is kept in output space
+  and reprojected by the motion vectors it is given. When the crop's base
+  moves with the gaze, content that was inside the crop last frame sits at
+  a different output pixel this frame by exactly the base's shift, which
+  is a uniform screen-space motion the pass can add to every motion
+  vector — a pan, in NVIDIA's terms, and pans are what motion vectors
+  exist for. Content entering the crop from outside has no history and
+  is reconstructed from the current frame alone, at the crop's edge,
+  which is the periphery of the fovea. Whether the runtime behaves this
+  way, or resets, or smears, is decided at the desk in the smoke harness:
+  a full-frame synthetic scene, a crop that moves by a known step per
+  frame with the step added to the vectors, and the crop's output compared
+  against the same scene evaluated at a fixed crop. A saccade is the
+  large-step case of the same test.
+- *The seam.* A crop's edge is a boundary between NVIDIA's reconstruction
+  and EDVR's, and under a saccade it moves at the tracker's latency. A
+  blend band in degrees of visual angle, wide enough that the eye is never
+  on it, is the design; how wide is a headset-on judgement, made with the
+  fixed centre first (look away from the middle and find the band), then
+  with gaze.
+
+**What it does not do.** It leaves the game's cost alone: the render
+target is still full size, and the game still shades every pixel of it —
+that is feature 2's job, and the two compose (a coarsely shaded periphery
+under EDVR's own history, a full-rate fovea under NVIDIA's). It is
+NVIDIA-only by construction, like the rest of the DLSS path. And the
+periphery's quality is EDVR's own pass's quality, which is the pre-DLAA
+one: calmer than nothing, softer than NVIDIA's — acceptable where the eye
+is not, and visible on a fixed centre when the player looks at the edge.
+
+**Settings sketch** (`[fix]`, final names at implementation):
+
+```
+temporal_aa_fovea = 0     ; degrees of visual angle across the crop; 0 = whole frame
+                          ; (today's behaviour). Live.
+temporal_aa_fovea_edge = 6 ; the blend band, in degrees. Live.
+```
+
+The crop's size in pixels follows from the degrees and the eye's tangents,
+so one number means the same thing on every headset. The centre comes from
+feature 3 when it can and the straight-ahead point when it cannot; there is
+no key for that, because there is no wrong answer to prefer.
+
 ## Phase 0 — what must be measured, not assumed
 
 One instrumented session (plus desk checks against SDK headers) before or
@@ -597,6 +728,21 @@ during implementation, in the head-steer convention:
 14. **The monitor's spot.** A default placement that clears Elite's
     cockpit UI across ship types on both rigs, and the glance
     hysteresis that wakes it on a look without waking it on a pass.
+15. **The gaze answer, on the Super.** `advanced.gaze_probe = on`, one
+    docked session on the Pimax Crystal Super under Valve's own SteamVR:
+    the arming line says whether `FnTable:IVRSystem_026` is served and
+    validated; the summaries say whether the driver vouches for a centre
+    at all, how often, and whether it moves. This decides whether that
+    headset gets the eye-tracked versions of features 2 and 6 or the
+    fixed-centre ones. (Built 2026-09-04; unflown.)
+16. **NVIDIA's history under a moving crop.** The smoke harness test
+    described under feature 6: a synthetic full-frame scene, a crop that
+    moves a known step per frame with the step folded into the motion
+    vectors, and the output compared against a fixed crop's. Decides
+    whether feature 6's moving fovea is a uniform-vector pan (design
+    holds), a reset per move (the fovea must move in steps, with a reset
+    at each), or a smear (the crop stays fixed and only its size is
+    gaze-driven).
 
 ## Phasing
 
@@ -608,13 +754,24 @@ during implementation, in the head-steer convention:
    velocity of everything after — the monitor shows the cost, the menu
    turns the knob, and every later phase lands as one more row instead
    of one more reason to alt-tab.
-3. **Fixed foveation (VRS)** — NVIDIA-only, rides the census classifier;
+3. **Three probes before any foveation feature** (revised 2026-09-04):
+   the gaze answer on the Super (item 15, built), NVIDIA's history under a
+   moving crop (item 16), and NVAPI's capabilities on the target GPUs
+   (item 4). The first is cheapest and decides the most — whether the one
+   headset with a tracker gets the eye-tracked versions at all — so it
+   goes first, and the other two are desk work that needs no headset.
+4. **Fixed foveation (VRS)** — NVIDIA-only, rides the census classifier;
    conservative presets; the guard-margin synergy; a row and a status
-   line in the menu.
-4. **Eye-tracked centre** — the moving centre on 3's mask, gated on real
-   SteamVR, a driver that answers, and the 6c exception holding up. The
-   menu gains gaze aim and dwell, and its highlight becomes the live
-   check that the tracker and the mapping agree.
+   line in the menu. Fixed centre: measurable on both field rigs.
+5. **DLSS where you look, fixed centre** — feature 6 on the
+   straight-ahead point, its size in degrees; the seam judged with the
+   headset on. Measurable on both field rigs, and it recovers most of
+   NVIDIA's cost before any tracker is involved.
+6. **Eye-tracked centre** — the moving centre on 4's mask and 5's crop,
+   gated on real SteamVR, a driver that answers (item 15's verdict), and
+   the table route holding up. The menu gains gaze aim and dwell, and its
+   highlight becomes the live check that the tracker and the mapping
+   agree.
 
 Each phase off by default, each with its own stand-down, each logging its
 price. Nothing in any phase reads or writes game memory or code: render

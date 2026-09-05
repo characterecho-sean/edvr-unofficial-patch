@@ -1602,8 +1602,14 @@ things it does change:
   not a promise.
 
 The eye-tracked centre is unchanged. A foveated *resolve* — full-quality
-temporal filtering at the fovea, cheaper in the periphery — is a small
-saving the same gaze point could drive; noted, not designed.
+temporal filtering at the fovea, cheaper in the periphery — was noted here
+as a small saving the same gaze point could drive. It is no longer small:
+NVIDIA's pass measured 2.7 ms per eye on the Pimax at HMD Quality 1.0,
+scaling with output size, and running it on a crop around the gaze point
+recovers most of that. It is designed as performance.md's feature 6, DLSS
+where you look, with the runtime's sub-rectangle inputs, and the gaze
+probe that decides which headsets can drive it is built
+(`advanced.gaze_probe`, 2026-09-04).
 
 ## Considered and declined
 

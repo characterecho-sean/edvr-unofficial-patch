@@ -476,4 +476,6 @@ void launchCentreApply(vr::EVRCompositorError err,
 
 bool launchCentreLatched() { return g_done; }
 
+bool launchCentreRuntimeIsValve() { return g_runtime == Runtime::Valve; }
+
 }  // namespace edvr

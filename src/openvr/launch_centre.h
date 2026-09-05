@@ -102,4 +102,11 @@ void launchCentreApply(vr::EVRCompositorError err,
 // asking again.
 bool launchCentreLatched();
 
+// Is the runtime under this proxy Valve's own SteamVR, by the export test
+// above? False for OpenComposite AND for "neither clearly": a caller about
+// to ask the runtime for an interface OpenComposite does not implement
+// must have a yes, not the absence of a no. Meaningful after
+// launchCentreConfigure has run.
+bool launchCentreRuntimeIsValve();
+
 }  // namespace edvr
