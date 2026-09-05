@@ -121,4 +121,18 @@ void dlaaShutdown();
 int dlaaCropProbe(ID3D11Device* dev, ID3D11DeviceContext* ctx, char* report,
                   uint32_t reportBytes);
 
+// The motion probe (2026-09-05): does NVIDIA's model behave the same on a
+// fovea crop as on the full frame while the content MOVES? The crop probe's
+// synthetic scene pans 6 px/frame for eighteen frames and then stands still
+// for eighteen; the full frame, the crop (a feature of the crop's size, output
+// sub-rectangles, a fixed base) and a half-size frame reduced the way the
+// steady periphery is are evaluated on identical inputs, and the error in the
+// crop's interior is recorded after every frame. Returns 1 when the crop
+// matches the full frame under motion and after it (any softening seen in the
+// field is the model's own), 2 when the crop is softer under motion, 3 when it
+// recovers slower after the pan stops, 4 when the scene did not discriminate,
+// 0 when the probe could not run (the report says why).
+int dlaaMotionProbe(ID3D11Device* dev, ID3D11DeviceContext* ctx, char* report,
+                    uint32_t reportBytes);
+
 }  // namespace edvr

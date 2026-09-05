@@ -1271,6 +1271,7 @@ float    g_peripheryCalm = 0.4f;   // advanced.temporal_aa_periphery_calm: how m
 bool     g_periphSteady = true;    // advanced.temporal_aa_periphery: steady (NVIDIA's DLAA on a reduced copy) or sharp (the own history at full size)
 float    g_periphScale = 0.5f;     // advanced.temporal_aa_periphery_scale: the steady periphery's size as a fraction of the output each way
 bool     g_foveaRound = true;      // advanced.temporal_aa_fovea_shape: round (a disc) or square (the crop)
+float    g_foveaDistance = 0.0f;   // advanced.temporal_aa_fovea_distance: where the two eyes' discs meet in depth, metres (0 = infinity: the straight-ahead point)
 int      g_rowsFollow = 0;         // +1 a frame the rows turn with the head, -4 a frame they do not; the world path needs >= 0
 bool     g_rowsFollowNoted = false;
 bool     g_warmNoted = false;
@@ -2222,10 +2223,27 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                 // and the native frame, so DLSS upscales the render crop to
                 // the native crop; equal sizes (no upscale) are DLAA. Even
                 // bases and sizes (NGX prefers them), at least 128 px.
+                // The disc's centre: the straight-ahead point (tx = ty = 0), or,
+                // with a fixation distance set, the point that far straight
+                // ahead of the HEAD as this eye sees it -- shifted toward the
+                // nose by the eye's offset over the distance -- so the two eyes'
+                // discs fuse at that depth instead of at infinity. Fused at
+                // infinity the disc read as an object far behind the cockpit
+                // and the splash panel, sliding over them as the head turned
+                // ("set in space away from me", the 2026-09-05 flight); OpenXR
+                // Toolkit ships the same shift as a fixed 4% of the half-width.
+                // The eye offset is the runtime's eye-to-head translation,
+                // noted per treat; it persists across a frame without a head
+                // delta, so the centre never flickers back to infinity.
+                float tcx = 0.0f, tcy = 0.0f;
+                if (g_foveaDistance > 0.0f && (e.eyeOff[0] != 0.0f || e.eyeOff[1] != 0.0f)) {
+                    tcx = -e.eyeOff[0] / g_foveaDistance;
+                    tcy = -e.eyeOff[1] / g_foveaDistance;
+                }
                 auto cropOf = [&](uint32_t fw, uint32_t fh, uint32_t& ox, uint32_t& oy,
                                   uint32_t& ow, uint32_t& oh) -> bool {
-                    const float cx = (-l / (r - l)) * static_cast<float>(fw);
-                    const float cy = (b / (b - t)) * static_cast<float>(fh);
+                    const float cx = ((tcx - l) / (r - l)) * static_cast<float>(fw);
+                    const float cy = ((b - tcy) / (b - t)) * static_cast<float>(fh);
                     const float halfa = tanf(g_foveaDeg * 0.5f * 0.01745329252f);
                     const float hwp = halfa * static_cast<float>(fw) / (r - l);
                     const float hhp = halfa * static_cast<float>(fh) / (b - t);
@@ -2833,11 +2851,13 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     }
                     Log::get().note(
                         "temporal aa: DLSS where you look ENGAGED -- NVIDIA runs on a %ux%u->%ux%u "
-                        "crop (%s, %.0f deg, %s) around the straight-ahead point at (%u, %u) of the "
+                        "crop (%s, %.0f deg, %s) around the %s at (%u, %u) of the "
                         "%ux%u output, %.1f%% of its pixels; the periphery is %s; blended over "
                         "%.0f deg (%.0f px). NVIDIA's price is in the DLAA totals.",
                         fcw, fch, focw, foch, upscale ? "DLSS" : "DLAA",
                         static_cast<double>(g_foveaDeg), g_foveaRound ? "round" : "square",
+                        g_foveaDistance > 0.0f ? "fixation point (the discs meet at the set depth)"
+                                               : "straight-ahead point (the discs meet at infinity)",
                         focx + focw / 2, focy + foch / 2, foW, foH,
                         100.0 * static_cast<double>(focw) * foch /
                             (static_cast<double>(foW) * foH),
@@ -3020,6 +3040,13 @@ void temporalPassConfigure(Config& cfg) {
     g_periphScale = pscale;
     const std::string shape = cfg.getString("advanced.temporal_aa_fovea_shape", "round");
     g_foveaRound = _stricmp(shape.c_str(), "square") != 0;
+    // Where the two eyes' discs meet in depth: 0 is infinity (the straight-ahead
+    // point, the flown behaviour); bounded below at arm's length.
+    float dist = cfg.getFloat("advanced.temporal_aa_fovea_distance", 0.0f);
+    if (!std::isfinite(dist) || dist < 0.0f) dist = 0.0f;
+    if (dist > 0.0f && dist < 0.3f) dist = 0.3f;
+    if (dist > 1000.0f) dist = 1000.0f;
+    g_foveaDistance = dist;
     // A config reload re-arms the fovea after a failure stood it down (F3):
     // the user may have changed the width, or the transient may be gone.
     g_foveaFailed = false;

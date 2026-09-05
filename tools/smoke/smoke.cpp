@@ -905,6 +905,40 @@ int main(int argc, char** argv) {
                     printf("  skip  dlaa: the moving-crop probe needs the runtime\n");
                 }
 
+                // The motion probe (2026-09-05): the same panning scene through
+                // NVIDIA's full-frame feature, the fovea crop and a half-size
+                // frame (the steady periphery's), the error in the crop's
+                // interior frame by frame -- does a crop soften under motion
+                // where the full frame does not? Findings are printed; only a
+                // probe that could not run where DLAA is available fails.
+                typedef int (*PFN_MotionProbe)(void*, void*, char*, unsigned);
+                PFN_MotionProbe motionProbe =
+                    reinterpret_cast<PFN_MotionProbe>(GetProcAddress(mod, "edvrDlaaMotionProbe"));
+                if (!motionProbe) {
+                    printf("  FAIL  edvrDlaaMotionProbe is not exported\n");
+                    rc = 1;
+                } else if (avail) {
+                    static char report2[8192];
+                    const int verdict2 = motionProbe(device, ctx, report2, sizeof(report2));
+                    char* line2 = report2;
+                    while (line2 && *line2) {
+                        char* nl = strchr(line2, '\n');
+                        if (nl) *nl = 0;
+                        printf("  info  %s\n", line2);
+                        line2 = nl ? nl + 1 : nullptr;
+                    }
+                    if (verdict2 == 0) {
+                        printf("  FAIL  dlaa: the motion probe could not run\n");
+                        rc = 1;
+                    } else {
+                        printf("  ok    dlaa: the motion probe ran (verdict %d: 1 crop matches full, 2 crop "
+                               "softer in motion, 3 crop slower after the stop, 4 not measurable)\n",
+                               verdict2);
+                    }
+                } else {
+                    printf("  skip  dlaa: the motion probe needs the runtime\n");
+                }
+
                 // The fovea path's 1:1 crop check (the review of 2026-09-05,
                 // F1/F12): a solid colour through the PRODUCTION fovea eval must
                 // come back as itself inside the crop and leave the periphery

@@ -1100,6 +1100,429 @@ int dlaaCropProbe(ID3D11Device* dev, ID3D11DeviceContext* ctx, char* report,
 #endif
 }
 
+// ---------------------------------------------------------------------------
+// The motion probe (2026-09-05). Sean, flying the fovea with NVIDIA on both
+// sides of the seam: "a blur effect in the center of my vision as I move my
+// head; it takes a second, or once I stop, for it to become crisp". Full-frame
+// DLAA never drew that complaint. Either the crop's feature behaves worse
+// under motion than the full frame's (a sub-rectangle defect), or DLAA
+// softens under motion everywhere and the full frame hid it by doing it
+// uniformly while a periphery that softens less now exposes it. Reading the
+// two evaluation paths cannot separate the two -- their parameters are
+// identical apart from the sub-rectangles -- so the desk decides: the crop
+// probe's synthetic scene PANNING at a steady speed for eighteen frames, then
+// standing still for eighteen, evaluated three ways on identical inputs (the
+// full frame, the fovea crop at a fixed base, and a half-size frame reduced
+// the way the steady periphery is), the error in the crop's interior measured
+// against the box-filtered truth frame by frame.
+// ---------------------------------------------------------------------------
+namespace {
+
+#ifdef EDVR_HAVE_NGX
+
+constexpr uint32_t kMW = 1280, kMH = 960;      // the frame
+constexpr uint32_t kMCX = 384, kMCY = 288;     // the crop's base
+constexpr uint32_t kMCW = 512, kMCH = 384;     // the crop
+constexpr uint32_t kMBorder = 24;              // the metric's interior margin
+constexpr uint32_t kMFrames = 36;
+constexpr uint32_t kMMoving = 18;              // frames 1..18 pan, 19..35 stand still
+constexpr int      kMV = 6;                    // the pan, px/frame at full size (even: 3 at half)
+constexpr uint32_t kMExtra = kMV * kMMoving;   // the scene's extra width for the pan
+
+struct MotionRig {
+    ID3D11Device*        dev = nullptr;
+    ID3D11DeviceContext* ctx = nullptr;
+    ID3D11Texture2D *colour = nullptr, *depth = nullptr, *motion = nullptr, *output = nullptr,
+                    *staging = nullptr;
+    ID3D11Texture2D *colourH = nullptr, *depthH = nullptr, *motionH = nullptr, *outputH = nullptr,
+                    *stagingH = nullptr;
+    std::vector<uint8_t>  framesF[kMFrames];   // grey, jittered, panned
+    std::vector<uint8_t>  framesH[kMFrames];   // the same, boxed 2x2 (the steady periphery's input)
+    float                 jit[kMFrames][2] = {};
+    std::vector<float>    truthF;              // box-filtered scene, (kMW + kMExtra) x kMH
+    std::vector<float>    truthH;              // ...and its 2x2 mean, half size
+    std::vector<uint8_t>  rgba;
+    std::vector<uint16_t> mv;
+
+    ~MotionRig() {
+        ID3D11Texture2D* all[10] = {colour, depth, motion, output, staging,
+                                    colourH, depthH, motionH, outputH, stagingH};
+        for (auto* t : all) if (t) t->Release();
+    }
+
+    static uint32_t shiftAt(uint32_t k) { return static_cast<uint32_t>(kMV) * (k < kMMoving ? k : kMMoving); }
+
+    bool make2D(uint32_t w, uint32_t h, DXGI_FORMAT fmt, UINT bind, const void* init, UINT pitch,
+                ID3D11Texture2D** out) {
+        D3D11_TEXTURE2D_DESC td{};
+        td.Width = w;
+        td.Height = h;
+        td.MipLevels = 1;
+        td.ArraySize = 1;
+        td.Format = fmt;
+        td.SampleDesc.Count = 1;
+        td.Usage = D3D11_USAGE_DEFAULT;
+        td.BindFlags = bind;
+        D3D11_SUBRESOURCE_DATA sd{};
+        sd.pSysMem = init;
+        sd.SysMemPitch = pitch;
+        return SUCCEEDED(dev->CreateTexture2D(&td, init ? &sd : nullptr, out)) && *out;
+    }
+
+    bool makeStaging(uint32_t w, uint32_t h, ID3D11Texture2D** out) {
+        D3D11_TEXTURE2D_DESC td{};
+        td.Width = w;
+        td.Height = h;
+        td.MipLevels = 1;
+        td.ArraySize = 1;
+        td.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        td.SampleDesc.Count = 1;
+        td.Usage = D3D11_USAGE_STAGING;
+        td.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        return SUCCEEDED(dev->CreateTexture2D(&td, nullptr, out)) && *out;
+    }
+
+    bool build(ProbeReport& rep) {
+        // The scene's truth over the width the pan sweeps, box-filtered 4x4,
+        // and its half-size mean. Frame k shows scene column x + shift(k) at
+        // screen column x, so one static truth serves every frame.
+        const uint32_t tw = kMW + kMExtra;
+        truthF.resize(static_cast<size_t>(tw) * kMH);
+        for (uint32_t y = 0; y < kMH; ++y) {
+            for (uint32_t x = 0; x < tw; ++x) {
+                double s = 0.0;
+                for (int sy = 0; sy < 4; ++sy) {
+                    for (int sx = 0; sx < 4; ++sx) {
+                        s += probeScene(x + (sx + 0.5) / 4.0, y + (sy + 0.5) / 4.0);
+                    }
+                }
+                truthF[static_cast<size_t>(y) * tw + x] = static_cast<float>(s / 16.0);
+            }
+        }
+        const uint32_t twH = tw / 2, hH = kMH / 2;
+        truthH.resize(static_cast<size_t>(twH) * hH);
+        for (uint32_t y = 0; y < hH; ++y) {
+            for (uint32_t x = 0; x < twH; ++x) {
+                const float* r0 = &truthF[static_cast<size_t>(2 * y) * tw + 2 * x];
+                const float* r1 = &truthF[static_cast<size_t>(2 * y + 1) * tw + 2 * x];
+                truthH[static_cast<size_t>(y) * twH + x] = 0.25f * (r0[0] + r0[1] + r1[0] + r1[1]);
+            }
+        }
+        // The frames: point samples at the pixel centre plus the jitter
+        // (Halton (2,3) centred, the pass's sequence), panned; and each boxed
+        // 2x2 as the steady periphery's reduction would.
+        for (uint32_t k = 0; k < kMFrames; ++k) {
+            jit[k][0] = static_cast<float>(probeHalton(k + 1, 2) - 0.5);
+            jit[k][1] = static_cast<float>(probeHalton(k + 1, 3) - 0.5);
+            const double shift = shiftAt(k);
+            framesF[k].resize(static_cast<size_t>(kMW) * kMH);
+            for (uint32_t y = 0; y < kMH; ++y) {
+                for (uint32_t x = 0; x < kMW; ++x) {
+                    const float v = probeScene(x + 0.5 + jit[k][0] + shift, y + 0.5 + jit[k][1]);
+                    framesF[k][static_cast<size_t>(y) * kMW + x] = static_cast<uint8_t>(v * 255.0f + 0.5f);
+                }
+            }
+            framesH[k].resize(static_cast<size_t>(kMW / 2) * (kMH / 2));
+            for (uint32_t y = 0; y < kMH / 2; ++y) {
+                for (uint32_t x = 0; x < kMW / 2; ++x) {
+                    const uint8_t* r0 = &framesF[k][static_cast<size_t>(2 * y) * kMW + 2 * x];
+                    const uint8_t* r1 = &framesF[k][static_cast<size_t>(2 * y + 1) * kMW + 2 * x];
+                    const uint32_t s = r0[0] + r0[1] + r1[0] + r1[1];
+                    framesH[k][static_cast<size_t>(y) * (kMW / 2) + x] = static_cast<uint8_t>((s + 2) / 4);
+                }
+            }
+        }
+        rgba.resize(static_cast<size_t>(kMW) * kMH * 4);
+        mv.resize(static_cast<size_t>(kMW) * kMH * 2);
+
+        std::vector<float> depthInit(static_cast<size_t>(kMW) * kMH, 0.5f);   // reversed-Z, mid-scene
+        const UINT rw = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
+        if (!make2D(kMW, kMH, DXGI_FORMAT_R8G8B8A8_UNORM, D3D11_BIND_SHADER_RESOURCE, nullptr, 0, &colour) ||
+            !make2D(kMW, kMH, DXGI_FORMAT_R32_FLOAT, D3D11_BIND_SHADER_RESOURCE, depthInit.data(), kMW * 4, &depth) ||
+            !make2D(kMW, kMH, DXGI_FORMAT_R16G16_FLOAT, D3D11_BIND_SHADER_RESOURCE, nullptr, 0, &motion) ||
+            !make2D(kMW, kMH, DXGI_FORMAT_R8G8B8A8_UNORM, rw, nullptr, 0, &output) ||
+            !make2D(kMW / 2, kMH / 2, DXGI_FORMAT_R8G8B8A8_UNORM, D3D11_BIND_SHADER_RESOURCE, nullptr, 0, &colourH) ||
+            !make2D(kMW / 2, kMH / 2, DXGI_FORMAT_R32_FLOAT, D3D11_BIND_SHADER_RESOURCE, depthInit.data(), (kMW / 2) * 4, &depthH) ||
+            !make2D(kMW / 2, kMH / 2, DXGI_FORMAT_R16G16_FLOAT, D3D11_BIND_SHADER_RESOURCE, nullptr, 0, &motionH) ||
+            !make2D(kMW / 2, kMH / 2, DXGI_FORMAT_R8G8B8A8_UNORM, rw, nullptr, 0, &outputH)) {
+            rep.line("motion probe: could not create the frame textures");
+            return false;
+        }
+        if (!makeStaging(kMCW, kMCH, &staging) || !makeStaging(kMCW / 2, kMCH / 2, &stagingH)) {
+            rep.line("motion probe: could not create the readback textures");
+            return false;
+        }
+        return true;
+    }
+
+    void uploadFrame(bool half, uint32_t k) {
+        const uint32_t w = half ? kMW / 2 : kMW, h = half ? kMH / 2 : kMH;
+        const uint8_t* g = (half ? framesH[k] : framesF[k]).data();
+        for (uint32_t i = 0; i < w * h; ++i) {
+            rgba[i * 4 + 0] = g[i];
+            rgba[i * 4 + 1] = g[i];
+            rgba[i * 4 + 2] = g[i];
+            rgba[i * 4 + 3] = 255;
+        }
+        ctx->UpdateSubresource(half ? colourH : colour, 0, nullptr, rgba.data(), w * 4, 0);
+    }
+
+    void uploadMotion(bool half, float mx, float my) {
+        const uint32_t w = half ? kMW / 2 : kMW, h = half ? kMH / 2 : kMH;
+        const uint16_t hx = probeHalf(mx), hy = probeHalf(my);
+        for (uint32_t i = 0; i < w * h; ++i) {
+            mv[i * 2 + 0] = hx;
+            mv[i * 2 + 1] = hy;
+        }
+        ctx->UpdateSubresource(half ? motionH : motion, 0, nullptr, mv.data(), w * 4, 0);
+    }
+
+    // mode 0: the full frame (no sub-rectangles); 1: the fovea crop (a
+    // feature of the crop's size, output sub-rectangles, a fixed base); 2:
+    // the half-size frame (the steady periphery's DLAA).
+    NVSDK_NGX_Handle* makeFeature(int mode) {
+        NVSDK_NGX_DLSS_Create_Params cp{};
+        const uint32_t w = mode == 1 ? kMCW : mode == 2 ? kMW / 2 : kMW;
+        const uint32_t h = mode == 1 ? kMCH : mode == 2 ? kMH / 2 : kMH;
+        cp.Feature.InWidth = w;
+        cp.Feature.InHeight = h;
+        cp.Feature.InTargetWidth = w;
+        cp.Feature.InTargetHeight = h;
+        cp.Feature.InPerfQualityValue = NVSDK_NGX_PerfQuality_Value_DLAA;
+        cp.InFeatureCreateFlags = NVSDK_NGX_DLSS_Feature_Flags_MVLowRes |
+                                  NVSDK_NGX_DLSS_Feature_Flags_DepthInverted;
+        cp.InEnableOutputSubrects = mode == 1;
+        NVSDK_NGX_Handle* hnd = nullptr;
+        const NVSDK_NGX_Result cr = NGX_D3D11_CREATE_DLSS_EXT(ctx, &hnd, g_params, &cp);
+        if (NVSDK_NGX_FAILED(cr)) return nullptr;
+        return hnd;
+    }
+
+    bool eval(int mode, NVSDK_NGX_Handle* h, float jx, float jy, bool reset, NVSDK_NGX_Result* err) {
+        const bool half = mode == 2;
+        NVSDK_NGX_D3D11_DLSS_Eval_Params ep{};
+        ep.Feature.pInColor = half ? colourH : colour;
+        ep.Feature.pInOutput = half ? outputH : output;
+        ep.pInDepth = half ? depthH : depth;
+        ep.pInMotionVectors = half ? motionH : motion;
+        ep.InJitterOffsetX = jx;
+        ep.InJitterOffsetY = jy;
+        ep.InRenderSubrectDimensions.Width = mode == 1 ? kMCW : half ? kMW / 2 : kMW;
+        ep.InRenderSubrectDimensions.Height = mode == 1 ? kMCH : half ? kMH / 2 : kMH;
+        ep.InReset = reset ? 1 : 0;
+        ep.InMVScaleX = 1.0f;
+        ep.InMVScaleY = 1.0f;
+        if (mode == 1) {
+            ep.InColorSubrectBase.X = kMCX;
+            ep.InColorSubrectBase.Y = kMCY;
+            ep.InDepthSubrectBase.X = kMCX;
+            ep.InDepthSubrectBase.Y = kMCY;
+            ep.InMVSubrectBase.X = kMCX;
+            ep.InMVSubrectBase.Y = kMCY;
+            ep.InOutputSubrectBase.X = kMCX;
+            ep.InOutputSubrectBase.Y = kMCY;
+        }
+        ep.InPreExposure = 1.0f;
+        ep.InExposureScale = 1.0f;
+        ep.InFrameTimeDeltaInMsec = 11.1f;
+        const NVSDK_NGX_Result er = NGX_D3D11_EVALUATE_DLSS_EXT(ctx, h, g_params, &ep);
+        if (err) *err = er;
+        return !NVSDK_NGX_FAILED(er);
+    }
+
+    // Mean absolute error over the crop's interior (at half size, the same
+    // region at half the coordinates) against frame k's truth, 0..255.
+    double measure(int mode, uint32_t k) {
+        const bool half = mode == 2;
+        const uint32_t d = half ? 2u : 1u;
+        const uint32_t bx = kMCX / d, by = kMCY / d, cw = kMCW / d, ch = kMCH / d, bd = kMBorder / d;
+        const uint32_t tw = (kMW + kMExtra) / d;
+        const uint32_t shift = shiftAt(k) / d;
+        const std::vector<float>& truth = half ? truthH : truthF;
+        ID3D11Texture2D* stg = half ? stagingH : staging;
+        D3D11_BOX box{bx, by, 0, bx + cw, by + ch, 1};
+        ctx->CopySubresourceRegion(stg, 0, 0, 0, 0, half ? outputH : output, 0, &box);
+        D3D11_MAPPED_SUBRESOURCE m{};
+        if (FAILED(ctx->Map(stg, 0, D3D11_MAP_READ, 0, &m))) return -1.0;
+        double sum = 0.0;
+        uint32_t n = 0;
+        for (uint32_t y = bd; y < ch - bd; ++y) {
+            const uint8_t* row = static_cast<const uint8_t*>(m.pData) + y * m.RowPitch;
+            for (uint32_t x = bd; x < cw - bd; ++x) {
+                const double got = row[x * 4] / 255.0;
+                const double want = truth[static_cast<size_t>(by + y) * tw + (bx + x + shift)];
+                sum += fabs(got - want);
+                ++n;
+            }
+        }
+        ctx->Unmap(stg, 0);
+        return n ? 255.0 * sum / n : -1.0;
+    }
+
+    // One series: 36 frames from a fresh history, the pan in frames 1..18
+    // and the vectors carrying mvSign times its per-frame shift (previous
+    // minus current is the pass's convention: content that moved left by v
+    // was at x + v last frame), the jitter handed over with jSign; the error
+    // after every frame.
+    bool run(int mode, int mvSign, float jSign, double err[kMFrames], ProbeReport& rep,
+             const char* name) {
+        NVSDK_NGX_Handle* h = makeFeature(mode);
+        if (!h) {
+            rep.line("motion probe: %s -- the feature would not be created", name);
+            return false;
+        }
+        const bool half = mode == 2;
+        const float v = half ? kMV * 0.5f : static_cast<float>(kMV);
+        const float js = half ? 0.5f * jSign : jSign;
+        float lastMx = 1e9f;
+        bool ok = true;
+        for (uint32_t k = 0; k < kMFrames && ok; ++k) {
+            const bool moving = k >= 1 && k <= kMMoving;
+            const float mx = moving ? mvSign * v : 0.0f;
+            if (mx != lastMx) {
+                uploadMotion(half, mx, 0.0f);
+                lastMx = mx;
+            }
+            uploadFrame(half, k);
+            NVSDK_NGX_Result er = NVSDK_NGX_Result_Success;
+            ok = eval(mode, h, js * jit[k][0], js * jit[k][1], k == 0, &er);
+            if (!ok) {
+                rep.line("motion probe: %s -- frame %u refused: %s (0x%08X)", name, k,
+                         ngxResultName(er), static_cast<unsigned>(er));
+                break;
+            }
+            err[k] = measure(mode, k);
+        }
+        NVSDK_NGX_D3D11_ReleaseFeature(h);
+        return ok;
+    }
+};
+
+double motionMean(const double* e, uint32_t a, uint32_t b) {
+    double s = 0.0;
+    uint32_t n = 0;
+    for (uint32_t k = a; k <= b && k < kMFrames; ++k) {
+        if (e[k] >= 0.0) {
+            s += e[k];
+            ++n;
+        }
+    }
+    return n ? s / n : -1.0;
+}
+
+#endif  // EDVR_HAVE_NGX
+
+}  // namespace
+
+int dlaaMotionProbe(ID3D11Device* dev, ID3D11DeviceContext* ctx, char* report,
+                    uint32_t reportBytes) {
+    ProbeReport rep{report, reportBytes};
+    if (report && reportBytes) report[0] = 0;
+#ifndef EDVR_HAVE_NGX
+    (void)dev; (void)ctx;
+    rep.line("motion probe: this build has no DLSS SDK in it");
+    return 0;
+#else
+    const char* why = nullptr;
+    if (!dev || !ctx || !dlaaAvailable(dev, &why)) {
+        rep.line("motion probe: DLAA is not available here (%s)", why ? why : "no device");
+        return 0;
+    }
+    MotionRig rig;
+    rig.dev = dev;
+    rig.ctx = ctx;
+    if (!rig.build(rep)) return 0;
+    rep.line("motion probe: a %ux%u frame panning %d px/frame for frames 1..%u, still after; "
+             "error = mean |output - truth| over the %ux%u crop's interior at (%u,%u), 0..255; "
+             "the half-size series is measured against its own half-size truth",
+             kMW, kMH, kMV, kMMoving, kMCW, kMCH, kMCX, kMCY);
+
+    // The signs, decided by the full frame itself: the vectors' sign that
+    // converges better under the pan, then the jitter's if the rest error
+    // does not beat the first frame (the crop probe found the content's
+    // shift, -j, to be NVIDIA's convention for these frames).
+    double fPlus[kMFrames], fMinus[kMFrames];
+    float jSign = -1.0f;
+    if (!rig.run(0, +1, jSign, fPlus, rep, "full frame, vectors +")) return 0;
+    if (!rig.run(0, -1, jSign, fMinus, rep, "full frame, vectors -")) return 0;
+    int mvSign = motionMean(fMinus, 8, kMMoving - 1) < motionMean(fPlus, 8, kMMoving - 1) ? -1 : +1;
+    double* full = mvSign < 0 ? fMinus : fPlus;
+    if (motionMean(full, 30, 35) >= full[0] * 0.9) {
+        // Try the other jitter sign before giving up on the scene.
+        double gPlus[kMFrames], gMinus[kMFrames];
+        if (!rig.run(0, +1, +1.0f, gPlus, rep, "full frame, vectors +, jitter +")) return 0;
+        if (!rig.run(0, -1, +1.0f, gMinus, rep, "full frame, vectors -, jitter +")) return 0;
+        const int mv2 = motionMean(gMinus, 8, kMMoving - 1) < motionMean(gPlus, 8, kMMoving - 1) ? -1 : +1;
+        double* full2 = mv2 < 0 ? gMinus : gPlus;
+        if (motionMean(full2, 30, 35) < motionMean(full, 30, 35)) {
+            jSign = +1.0f;
+            mvSign = mv2;
+            memcpy(fPlus, gPlus, sizeof(fPlus));
+            memcpy(fMinus, gMinus, sizeof(fMinus));
+            full = mvSign < 0 ? fMinus : fPlus;
+        }
+    }
+    rep.line("  signs: vectors carry %s the pan (previous minus current is the pass's convention), "
+             "jitter handed over as %s",
+             mvSign > 0 ? "+" : "-", jSign < 0 ? "the content's shift (-j)" : "the sample offset (+j)");
+
+    double crop[kMFrames], half[kMFrames];
+    if (!rig.run(1, mvSign, jSign, crop, rep, "fovea crop")) return 0;
+    if (!rig.run(2, mvSign, jSign, half, rep, "half-size frame")) return 0;
+
+    const uint32_t cols[12] = {0, 2, 5, 8, 11, 14, 17, 18, 19, 21, 25, 35};
+    char line[512];
+    int n = snprintf(line, sizeof(line), "  frame:            ");
+    for (uint32_t c : cols) n += snprintf(line + n, sizeof(line) - n, "%6u", c);
+    rep.line("%s", line);
+    const char* names[3] = {"  full-frame DLAA:  ", "  fovea crop DLAA:  ", "  half-size DLAA:   "};
+    const double* series[3] = {full, crop, half};
+    for (int s = 0; s < 3; ++s) {
+        n = snprintf(line, sizeof(line), "%s", names[s]);
+        for (uint32_t c : cols) n += snprintf(line + n, sizeof(line) - n, "%6.2f", series[s][c]);
+        rep.line("%s", line);
+    }
+    rep.line("  (frames 1..%u pan; %u is the first still frame)", kMMoving, kMMoving + 1);
+
+    const double fullMove = motionMean(full, 8, kMMoving - 1), fullEarly = motionMean(full, 19, 21),
+                 fullRest = motionMean(full, 28, 35);
+    const double cropMove = motionMean(crop, 8, kMMoving - 1), cropEarly = motionMean(crop, 19, 21),
+                 cropRest = motionMean(crop, 28, 35);
+    const double halfMove = motionMean(half, 8, kMMoving - 1), halfRest = motionMean(half, 28, 35);
+    rep.line("  steady pan (frames 8-17) / first frames still (19-21) / at rest (28-35): full %.2f / %.2f / %.2f, "
+             "crop %.2f / %.2f / %.2f, half %.2f / - / %.2f",
+             fullMove, fullEarly, fullRest, cropMove, cropEarly, cropRest, halfMove, halfRest);
+    if (fullRest > 0.0 && cropRest > 0.0 && halfRest > 0.0) {
+        rep.line("  softening under the pan (pan error / rest error): full %.2fx, crop %.2fx, half-size %.2fx",
+                 fullMove / fullRest, cropMove / cropRest, halfMove / halfRest);
+    }
+
+    if (fullRest < 0.0 || fullRest >= full[0] * 0.9) {
+        rep.line("  verdict: NOT MEASURABLE -- the full frame's rest error (%.2f) did not beat its "
+                 "first frame (%.2f)", fullRest, full[0]);
+        return 4;
+    }
+    const double rMove = cropMove / fullMove, rEarly = cropEarly / fullEarly, rRest = cropRest / fullRest;
+    int verdict;
+    const char* word;
+    if (rMove > 1.2) {
+        verdict = 2;
+        word = "THE CROP IS SOFTER UNDER MOTION than the full frame on the same input -- a sub-rectangle defect";
+    } else if (rEarly > 1.2) {
+        verdict = 3;
+        word = "THE CROP RECOVERS SLOWER after the pan stops than the full frame -- a sub-rectangle defect";
+    } else {
+        verdict = 1;
+        word = "THE CROP MATCHES THE FULL FRAME under motion and after it; any softening seen is the "
+               "model's own, which a full frame does everywhere at once and a fixed periphery makes "
+               "visible by comparison";
+    }
+    rep.line("  verdict: %s (crop/full: pan %.2f, first still frames %.2f, rest %.2f)", word, rMove,
+             rEarly, rRest);
+    return verdict;
+#endif
+}
+
 // The fovea path's desk check (the review of 2026-09-05, F1/F12): a solid
 // colour run through dlaaEvaluateFovea must come back as ITSELF inside the
 // crop (1:1, not upscaled or refused) and leave the output OUTSIDE the crop
@@ -1260,6 +1683,14 @@ extern "C" __declspec(dllexport) int edvrDlaaCounts(unsigned* evaluations, unsig
     if (evaluations) *evaluations = e;
     if (resets) *resets = r;
     return 1;
+}
+
+// For tools/smoke: the motion probe (dlaa.h): the crop against the full
+// frame and a half-size frame under a steady pan, frame by frame.
+extern "C" __declspec(dllexport) int edvrDlaaMotionProbe(void* device, void* context, char* report,
+                                                         unsigned reportBytes) {
+    return edvr::dlaaMotionProbe(static_cast<ID3D11Device*>(device),
+                                 static_cast<ID3D11DeviceContext*>(context), report, reportBytes);
 }
 
 // For tools/smoke: the moving-crop probe (dlaa.h). The verdict comes back
