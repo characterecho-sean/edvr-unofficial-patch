@@ -26,6 +26,7 @@ namespace {
 // stays true for the string it names.
 constexpr const char* kFnTableVersion = "FnTable:IVRSystem_026";
 constexpr size_t kFnRecommendedSize = 0;             // GetRecommendedRenderTargetSize
+constexpr size_t kFnSeatedToStanding = 13;           // GetSeatedZeroPoseToStandingAbsoluteTrackingPose
 constexpr size_t kFnFoveationCenter = 35;            // GetEyeTrackedFoveationCenter
 constexpr size_t kFnFoveationCenterForProjection = 36;
 constexpr size_t kFnRuntimeVersion = 49;             // GetRuntimeVersion
@@ -40,6 +41,10 @@ typedef bool (__stdcall* PFN_FoveationCenter)(vr::HmdVector2_t* ndcLeft,
 typedef bool (__stdcall* PFN_FoveationCenterForProjection)(const vr::HmdMatrix44_t* proj,
                                                            vr::HmdVector2_t* ndc);
 typedef const char* (__stdcall* PFN_RuntimeVersion)();
+// A 3x4 returned by value through a plain C function: the compiler supplies
+// the hidden return pointer the C way, which is the whole reason this file
+// speaks to the table and not the vtable.
+typedef vr::HmdMatrix34_t (__stdcall* PFN_SeatedToStanding)();
 
 PFN_RealGetGenericInterface g_get = nullptr;
 
@@ -60,6 +65,7 @@ constexpr uint32_t kMaxWaitFrames = 1800;
 
 PFN_FoveationCenter g_center = nullptr;
 PFN_FoveationCenterForProjection g_centerProj = nullptr;
+PFN_SeatedToStanding g_seatedToStanding = nullptr;
 Sentinel* g_sentinel = nullptr;
 
 // One eye's centre over a window of frames: range, mean and the mean
@@ -316,6 +322,49 @@ void summary(bool final) {
         final ? "totals" : "summary", haveL ? (ly < 0 ? "" : "+") : "?", haveL ? ly : 0.0,
         haveL ? lp : 0.0, haveR ? (ry < 0 ? "" : "+") : "?", haveR ? ry : 0.0,
         haveR ? rp : 0.0, h.n, h.mean(0), h.mean(1), h.mean(2), h.span(), hy, hp);
+    // The room test. Flight 2 (2026-09-05) read a constant 37 deg right,
+    // 54 deg up that eye sweeps moved by a few degrees and a 50 deg head
+    // turn dragged the same way -- the signature of a POINT in the room's
+    // standing space being projected as if it were head-relative. If so,
+    // the head's own position in standing space, read as such a point,
+    // lands on the same angles. The runtime's seated-to-standing transform
+    // is entry 13 of the same table; the game's poses are seated.
+    if (g_seatedToStanding && h.n) {
+        vr::HmdMatrix34_t m{};
+        bool got = false;
+        const bool survived = guarded("gazeProbe/seatedToStanding", [&] {
+            m = g_seatedToStanding();
+            got = true;
+        });
+        if (!survived) {
+            g_seatedToStanding = nullptr;
+            Log::get().note("gaze probe: the seated-to-standing call FAULTED; the room "
+                            "test is off for the session. Please report this log.");
+        } else if (got) {
+            const double p[3] = {h.mean(0), h.mean(1), h.mean(2)};
+            double s[3];
+            for (int r = 0; r < 3; ++r) {
+                s[r] = m.m[r][0] * p[0] + m.m[r][1] * p[1] + m.m[r][2] * p[2] + m.m[r][3];
+            }
+            const bool ahead = s[2] < -0.05;
+            const double yawS = ahead ? atan(s[0] / -s[2]) * 57.2957795 : 0.0;
+            const double pitchS = ahead ? atan(s[1] / -s[2]) * 57.2957795 : 0.0;
+            Log::get().note(
+                "gaze probe %s, the room test: the head sat at (%.3f, %.3f, %.3f) m in the "
+                "room's STANDING space (seated-to-standing from the runtime, translation "
+                "(%.3f, %.3f, %.3f)); that point read as head-relative would project to "
+                "%s -- if it lands on the centre's angles above, the runtime is projecting "
+                "a room-space point as if it were in the head's frame.",
+                final ? "totals" : "summary", s[0], s[1], s[2],
+                static_cast<double>(m.m[0][3]), static_cast<double>(m.m[1][3]),
+                static_cast<double>(m.m[2][3]),
+                ahead ? "" : "(behind or beside the origin: no projection)");
+            if (ahead) {
+                Log::get().note("gaze probe %s, the room test, angles: %+.1f deg yaw, %+.1f deg "
+                                "pitch.", final ? "totals" : "summary", yawS, pitchS);
+            }
+        }
+    }
     if (!final) {
         g_win = Counts();
         g_eye[0].reset();
@@ -380,11 +429,13 @@ void tryArm() {
     void* pCenter = nullptr;
     void* pCenterProj = nullptr;
     void* pVersion = nullptr;
+    void* pSeated = nullptr;
     survived = guarded("gazeProbe/table", [&] {
         pSize = fn[kFnRecommendedSize];
         pCenter = fn[kFnFoveationCenter];
         pCenterProj = fn[kFnFoveationCenterForProjection];
         pVersion = fn[kFnRuntimeVersion];
+        pSeated = fn[kFnSeatedToStanding];
     });
     if (!survived || !pSize || !pCenter || !pCenterProj) {
         g_sentinel->confirm();
@@ -430,6 +481,7 @@ void tryArm() {
 
     g_center = reinterpret_cast<PFN_FoveationCenter>(pCenter);
     g_centerProj = reinterpret_cast<PFN_FoveationCenterForProjection>(pCenterProj);
+    g_seatedToStanding = reinterpret_cast<PFN_SeatedToStanding>(pSeated);
 
     vr::HmdVector2_t L = {{NAN, NAN}}, R = {{NAN, NAN}};
     bool vouched = false;

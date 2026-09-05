@@ -759,7 +759,27 @@ during implementation, in the head-steer convention:
     the eyes (validity should drop for a real tracker); look far left,
     then far right, eyes only; then turn the head 30° while holding the
     gaze on one spot — a centre that swings with the head is in the wrong
-    frame, one that holds is head-relative as designed.
+    frame, one that holds is head-relative as designed. **Flight 2,
+    2026-09-05, calibrated, that sequence in five-second windows:** the
+    constant stayed (37° right, 54° up), so calibration was not the cause;
+    the eyes-closed window froze the value (per-frame step 0.0001, the
+    stillest of the flight) while staying 100% valid, so it is eye data
+    and the runtime never reports a blink; a full eye sweep left and
+    right moved the yaw by only about +6 and −5 degrees; and a 50° head
+    turn with the gaze held dragged it +9° the *same* way. A head-relative
+    gaze direction would have swung tens of degrees on the sweep and the
+    opposite way on the turn. All three fit one explanation: the runtime
+    is projecting a *point in the room's standing space* as if it were
+    head-relative — a short gaze vector added to a room-space origin, so
+    eye and head motion move it by centimetres, and the constant is the
+    origin itself. Solving the constant for that origin gives about
+    (0.67, 1.20, −0.72) m, and 1.20 m is a seated eye height. The probe's
+    room test (built the same night, unflown) reads the runtime's
+    seated-to-standing transform (entry 13 of the table) each window and
+    prints where the head sits in standing space and what that point
+    would project to; a match closes the case, and the finding then
+    belongs to Valve or Pimax, since no consumer of the NDC can undo a
+    projection whose depth it does not know.
 16. **NVIDIA's history under a moving crop.** The smoke harness test
     described under feature 6: a synthetic full-frame scene, a crop that
     moves a known step per frame with the step folded into the motion
