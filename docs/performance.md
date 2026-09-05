@@ -809,7 +809,19 @@ along and hidden there by being uniform; a periphery that holds a fixed
 reference makes it visible. The lever for that is the model itself --
 NVIDIA's render presets, which the same probe now sweeps (DLAA defaults to
 K, Performance to M, so the dlss configuration already runs two networks
-across the seam).
+across the seam). The sweep's numbers, error 0..255 in the crop's interior,
+pan / first still frames / at rest: full-frame DLAA under K 2.98 / 2.58 /
+2.15 (the default is K: identical), J 3.22 / 2.70 / 2.30, the deprecated
+CNN presets E 4.40 / 4.09 / 3.36 and F 7.56 / 5.57 / 5.01. No preset
+softens less under motion than K (1.38x its rest error; J 1.40x), and the
+frame delta told to the model (0, 11.1 or 33.3 ms) changed nothing. DLSS
+Performance 2x from a point-sampled half-size frame, against the full-size
+truth: the driver's default M 13.35 / 11.84 / 14.27 -- worse at rest than
+under the pan, barely below its first frame of 23.59 -- against K 9.41 /
+7.65 / 5.34, J 9.32 / 7.53 / 5.23 and L 8.30 / 7.22 / 6.69. So
+`temporal_aa_model` (quality = K for every mode, the default; responsive =
+J; auto = the driver's choice) forces K, which leaves DLAA exactly as it
+was and gives the dlss fovea the periphery's network.
 
 **What must be measured first (Phase 0 items 15 and 16).**
 

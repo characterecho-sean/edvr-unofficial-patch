@@ -3047,6 +3047,20 @@ void temporalPassConfigure(Config& cfg) {
     if (dist > 0.0f && dist < 0.3f) dist = 0.3f;
     if (dist > 1000.0f) dist = 1000.0f;
     g_foveaDistance = dist;
+    // The model NVIDIA runs (dlaa.h): quality = K for every mode, the shipped
+    // default; responsive = J (NVIDIA: slightly less ghosting, a little more
+    // flicker); auto = the driver's own choice per mode (K for DLAA, Quality
+    // and Balanced, M for Performance, L for Ultra Performance). The letters
+    // are silent aliases. Live: a change recreates the features.
+    const std::string model = cfg.getString("advanced.temporal_aa_model", "quality");
+    unsigned preset = 11;
+    if (_stricmp(model.c_str(), "auto") == 0 || _stricmp(model.c_str(), "default") == 0) preset = 0;
+    else if (_stricmp(model.c_str(), "responsive") == 0 || _stricmp(model.c_str(), "j") == 0) preset = 10;
+    else if (_stricmp(model.c_str(), "l") == 0) preset = 12;
+    else if (_stricmp(model.c_str(), "m") == 0) preset = 13;
+    else if (_stricmp(model.c_str(), "e") == 0) preset = 5;
+    else if (_stricmp(model.c_str(), "f") == 0) preset = 6;
+    dlaaSetPreset(preset);
     // A config reload re-arms the fovea after a failure stood it down (F3):
     // the user may have changed the width, or the transient may be gone.
     g_foveaFailed = false;

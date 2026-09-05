@@ -52,7 +52,43 @@ struct EyeFeature {
     NVSDK_NGX_Handle* handle = nullptr;
     uint32_t          w = 0, h = 0;
     uint32_t          outW = 0, outH = 0;
+    uint64_t          presetGen = 0;   // the preset generation the feature was created under
 };
+
+// The render preset -- NVIDIA's model -- forced on every quality mode (0 =
+// the driver's own choice per mode: K for DLAA, Quality and Balanced, M for
+// Performance, L for Ultra Performance), set by dlaaSetPreset from the
+// config and applied to the shared parameter block before each feature is
+// created. A change bumps the generation, so live features are recreated.
+// The desk's motion probe (2026-09-05) found M far behind K at rest on fine
+// detail -- a rest error 2.7x K's, barely below its own first frame -- and
+// the fovea's dlss variant is Performance mode, so K is the shipped default.
+unsigned g_preset = 11;
+uint64_t g_presetGen = 1;
+
+const char* presetName(unsigned p) {
+    switch (p) {
+        case 0:  return "the driver's default for the mode";
+        case 5:  return "E";
+        case 6:  return "F";
+        case 10: return "J";
+        case 11: return "K";
+        case 12: return "L";
+        case 13: return "M";
+        default: return "?";
+    }
+}
+
+void applyPresetHints() {
+    if (!g_params) return;
+    const char* names[6] = {NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_DLAA,
+                            NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Quality,
+                            NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Balanced,
+                            NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Performance,
+                            NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_UltraPerformance,
+                            NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_UltraQuality};
+    for (const char* n : names) g_params->Set(n, g_preset);
+}
 
 const char* qualityName(NVSDK_NGX_PerfQuality_Value q) {
     switch (q) {
@@ -271,7 +307,8 @@ bool dlaaEvaluate(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* colour,
         outH = h;
     }
     EyeFeature& f = g_feature[eye];
-    if (!f.handle || f.w != w || f.h != h || f.outW != outW || f.outH != outH) {
+    if (!f.handle || f.w != w || f.h != h || f.outW != outW || f.outH != outH ||
+        f.presetGen != g_presetGen) {
         if (f.handle) {
             NVSDK_NGX_D3D11_ReleaseFeature(f.handle);
             f.handle = nullptr;
@@ -348,6 +385,7 @@ bool dlaaEvaluate(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* colour,
         cp.InFeatureCreateFlags = NVSDK_NGX_DLSS_Feature_Flags_MVLowRes |
                                   NVSDK_NGX_DLSS_Feature_Flags_DepthInverted;
         cp.InEnableOutputSubrects = false;
+        applyPresetHints();
         const NVSDK_NGX_Result cr =
             NGX_D3D11_CREATE_DLSS_EXT(ctx, &f.handle, g_params, &cp);
         if (NVSDK_NGX_FAILED(cr) || !f.handle) {
@@ -363,20 +401,21 @@ bool dlaaEvaluate(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* colour,
         f.h = h;
         f.outW = outW;
         f.outH = outH;
+        f.presetGen = g_presetGen;
         if (outW == w && outH == h) {
             Log::get().note(
-                "dlaa: the feature is created for eye %d at %ux%u, DLAA (the runtime's "
-                "optimal render size for this output %ux%u, which DLAA ignores); the "
-                "history starts here.",
-                eye, w, h, optW, optH);
+                "dlaa: the feature is created for eye %d at %ux%u, DLAA, preset %s (the "
+                "runtime's optimal render size for this output %ux%u, which DLAA ignores); "
+                "the history starts here.",
+                eye, w, h, presetName(g_preset), optW, optH);
         } else {
             Log::get().note(
                 "dlss: the feature is created for eye %d, %ux%u in and %ux%u out (%.0f%% "
-                "per axis), the %s mode, whose own render size is %ux%u and whose range "
-                "the runtime names as %ux%u..%ux%u; the history starts here.",
+                "per axis), the %s mode, preset %s, whose own render size is %ux%u and whose "
+                "range the runtime names as %ux%u..%ux%u; the history starts here.",
                 eye, w, h, outW, outH,
                 100.0 * static_cast<double>(w) / static_cast<double>(outW),
-                qualityName(quality), optW, optH, minW, minH, maxW, maxH);
+                qualityName(quality), presetName(g_preset), optW, optH, minW, minH, maxW, maxH);
         }
     }
 
@@ -461,7 +500,8 @@ bool evaluateCrop(EyeFeature& f, const char* what, int eye, ID3D11DeviceContext*
     }
     pollTimingRing(ctx);
     bool didCreate = false;
-    if (!f.handle || f.w != icw || f.h != ich || f.outW != ocw || f.outH != och) {
+    if (!f.handle || f.w != icw || f.h != ich || f.outW != ocw || f.outH != och ||
+        f.presetGen != g_presetGen) {
         if (f.handle) {
             NVSDK_NGX_D3D11_ReleaseFeature(f.handle);
             f.handle = nullptr;
@@ -491,6 +531,7 @@ bool evaluateCrop(EyeFeature& f, const char* what, int eye, ID3D11DeviceContext*
                                   NVSDK_NGX_DLSS_Feature_Flags_DepthInverted;
         // NVIDIA writes at the output sub-rectangle's base rather than the origin.
         cp.InEnableOutputSubrects = true;
+        applyPresetHints();
         const NVSDK_NGX_Result cr = NGX_D3D11_CREATE_DLSS_EXT(ctx, &f.handle, g_params, &cp);
         if (NVSDK_NGX_FAILED(cr) || !f.handle) {
             f.handle = nullptr;
@@ -505,13 +546,14 @@ bool evaluateCrop(EyeFeature& f, const char* what, int eye, ID3D11DeviceContext*
         f.h = ich;
         f.outW = ocw;
         f.outH = och;
+        f.presetGen = g_presetGen;
         didCreate = true;
         Log::get().note(
             "temporal aa %s: NVIDIA's feature is created for eye %d, crop %ux%u in -> "
-            "%ux%u out (%s, output sub-rectangles; input based at %u,%u in the %ux%u render, "
-            "output at %u,%u in the %ux%u frame); its history starts here.",
+            "%ux%u out (%s, preset %s, output sub-rectangles; input based at %u,%u in the "
+            "%ux%u render, output at %u,%u in the %ux%u frame); its history starts here.",
             what, eye, icw, ich, ocw, och, (icw == ocw && ich == och) ? "DLAA" : qualityName(q),
-            icx, icy, inW, inH, ocx, ocy, outW, outH);
+            presetName(g_preset), icx, icy, inW, inH, ocx, ocy, outW, outH);
     }
 
     NVSDK_NGX_D3D11_DLSS_Eval_Params ep{};
@@ -630,6 +672,17 @@ bool dlaaEvaluatePeriphery(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* c
     }
     return evaluateCrop(g_periph[eye], "periphery", eye, ctx, colour, depth, motion, output, w, h,
                         w, h, 0, 0, w, h, 0, 0, w, h, jx, jy, reset, frameMs, reason);
+#endif
+}
+
+void dlaaSetPreset(unsigned preset) {
+#ifdef EDVR_HAVE_NGX
+    if (preset != g_preset) {
+        g_preset = preset;
+        ++g_presetGen;   // every live feature is recreated on its next evaluation
+    }
+#else
+    (void)preset;
 #endif
 }
 
@@ -1575,8 +1628,7 @@ int dlaaMotionProbe(ID3D11Device* dev, ID3D11DeviceContext* ctx, char* report,
                      pr > 0.0 ? pm / pr : 0.0, e[0]);
         }
     }
-    g_params->Set(NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_DLAA, 0u);
-    g_params->Set(NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Performance, 0u);
+    applyPresetHints();   // the sweep's hints off the shared block; the configured ones back
 
     if (fullRest < 0.0 || fullRest >= full[0] * 0.9) {
         rep.line("  verdict: NOT MEASURABLE -- the full frame's rest error (%.2f) did not beat its "
