@@ -904,6 +904,31 @@ int main(int argc, char** argv) {
                 } else {
                     printf("  skip  dlaa: the moving-crop probe needs the runtime\n");
                 }
+
+                // The fovea path's 1:1 crop check (the review of 2026-09-05,
+                // F1/F12): a solid colour through the PRODUCTION fovea eval must
+                // come back as itself inside the crop and leave the periphery
+                // untouched. This is the test that would have caught the
+                // feature-created-at-full-size bug (0xBAD00005) before a flight.
+                typedef int (*PFN_FoveaCheck)(void*, void*, const char**);
+                PFN_FoveaCheck foveaCheck =
+                    reinterpret_cast<PFN_FoveaCheck>(GetProcAddress(mod, "edvrDlaaFoveaCheck"));
+                if (!foveaCheck) {
+                    printf("  FAIL  edvrDlaaFoveaCheck is not exported\n");
+                    rc = 1;
+                } else {
+                    const char* fw = "";
+                    const int fr = foveaCheck(device, ctx, &fw);
+                    if (fr == 1) {
+                        printf("  ok    dlaa: the fovea crop runs 1:1 and stays inside its "
+                               "rectangle\n");
+                    } else if (fr < 0) {
+                        printf("  skip  dlaa: the fovea crop check needs the runtime (%s)\n", fw);
+                    } else {
+                        printf("  FAIL  dlaa: the fovea crop check -- %s\n", fw);
+                        rc = 1;
+                    }
+                }
                 srcD->Release();
 
                 // The NGX conventions rig (the review of 2026-09-04: F5, and

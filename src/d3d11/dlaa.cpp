@@ -440,40 +440,53 @@ bool dlaaEvaluateFovea(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* colou
     }
     pollTimingRing(ctx);
     EyeFeature& f = g_fovea[eye];
-    if (!f.handle || f.w != w || f.h != h) {
+    // The feature is created at the CROP size, not the full frame -- the
+    // difference the crop probe (dlaaCropProbe, this file) validated and the
+    // production path first got wrong (0xBAD00005 in the field, 2026-09-05).
+    // NGX reads InRenderSubrectDimensions smaller than InWidth as dynamic
+    // resolution -- render small, UPSCALE to InTarget -- which for DLAA
+    // (render != target) is an invalid parameter. Sized to the crop, the
+    // render sub-rect EQUALS InWidth/InHeight and the sub-rect BASES locate
+    // that crop inside the full-frame textures; the output base writes it
+    // back at the same place. Keyed on the crop size, so a live change of the
+    // fovea width rebuilds the feature (and resets its history).
+    bool didCreate = false;
+    if (!f.handle || f.w != cropW || f.h != cropH) {
         if (f.handle) {
             NVSDK_NGX_D3D11_ReleaseFeature(f.handle);
             f.handle = nullptr;
         }
         NVSDK_NGX_DLSS_Create_Params cp{};
-        cp.Feature.InWidth = w;
-        cp.Feature.InHeight = h;
-        cp.Feature.InTargetWidth = w;
-        cp.Feature.InTargetHeight = h;
+        cp.Feature.InWidth = cropW;
+        cp.Feature.InHeight = cropH;
+        cp.Feature.InTargetWidth = cropW;
+        cp.Feature.InTargetHeight = cropH;
         cp.Feature.InPerfQualityValue = NVSDK_NGX_PerfQuality_Value_DLAA;
         cp.InFeatureCreateFlags = NVSDK_NGX_DLSS_Feature_Flags_MVLowRes |
                                   NVSDK_NGX_DLSS_Feature_Flags_DepthInverted;
-        // The one difference from the full-frame feature: NVIDIA may write a
-        // sub-rectangle of the output rather than all of it.
+        // The one difference from the full-frame feature: NVIDIA writes at the
+        // output sub-rectangle's base rather than the origin.
         cp.InEnableOutputSubrects = true;
         const NVSDK_NGX_Result cr = NGX_D3D11_CREATE_DLSS_EXT(ctx, &f.handle, g_params, &cp);
         if (NVSDK_NGX_FAILED(cr) || !f.handle) {
             f.handle = nullptr;
             snprintf(g_reasonBuf, sizeof(g_reasonBuf),
-                     "the fovea feature would not be created at %ux%u: %s (0x%08X)", w, h,
-                     ngxResultName(cr), static_cast<unsigned>(cr));
+                     "the fovea feature would not be created at %ux%u: %s (0x%08X)", cropW,
+                     cropH, ngxResultName(cr), static_cast<unsigned>(cr));
             g_reason = g_reasonBuf;
             if (reason) *reason = g_reason;
             return false;
         }
-        f.w = w;
-        f.h = h;
-        f.outW = w;
-        f.outH = h;
+        f.w = cropW;
+        f.h = cropH;
+        f.outW = cropW;
+        f.outH = cropH;
+        didCreate = true;
         Log::get().note(
-            "temporal aa fovea: NVIDIA's feature is created for eye %d at %ux%u with "
-            "output sub-rectangles; the crop's history starts here.",
-            eye, w, h);
+            "temporal aa fovea: NVIDIA's feature is created for eye %d at the crop size "
+            "%ux%u (output sub-rectangles, based at %u,%u in the %ux%u frame); the crop's "
+            "history starts here.",
+            eye, cropW, cropH, cropX, cropY, w, h);
     }
 
     NVSDK_NGX_D3D11_DLSS_Eval_Params ep{};
@@ -486,7 +499,10 @@ bool dlaaEvaluateFovea(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* colou
     ep.InJitterOffsetY = jy;
     ep.InRenderSubrectDimensions.Width = cropW;
     ep.InRenderSubrectDimensions.Height = cropH;
-    ep.InReset = reset ? 1 : 0;
+    // A freshly created feature has no history, so it must reset whatever the
+    // caller thought -- a live fovea-width change recreates the feature
+    // without the caller's history flag knowing.
+    ep.InReset = (reset || didCreate) ? 1 : 0;
     ep.InMVScaleX = 1.0f;
     ep.InMVScaleY = 1.0f;
     // The crop's top-left in each input, and where it lands in the output:
@@ -997,6 +1013,101 @@ int dlaaCropProbe(ID3D11Device* dev, ID3D11DeviceContext* ctx, char* report,
 #endif
 }
 
+// The fovea path's desk check (the review of 2026-09-05, F1/F12): a solid
+// colour run through dlaaEvaluateFovea must come back as ITSELF inside the
+// crop (1:1, not upscaled or refused) and leave the output OUTSIDE the crop
+// untouched. This is the test that would have caught the feature-created-at-
+// full-size bug before a flight. Returns 1 pass, 0 fail (*why names it), -1
+// skip (no runtime). Its own textures, released before it returns.
+int dlaaFoveaSelfTest(ID3D11Device* dev, ID3D11DeviceContext* ctx, const char** why) {
+#ifndef EDVR_HAVE_NGX
+    (void)dev; (void)ctx;
+    if (why) *why = "this build has no DLSS SDK in it";
+    return -1;
+#else
+    const char* w0 = "";
+    if (!dev || !ctx || !dlaaAvailable(dev, &w0)) {
+        if (why) *why = w0[0] ? w0 : "no device";
+        return -1;
+    }
+    const UINT W = 512, H = 384, cx = 128, cy = 64, cw = 256, ch = 256;
+    auto mk = [&](DXGI_FORMAT fmt, UINT bind, const void* init, UINT pitch,
+                  ID3D11Texture2D** out) {
+        D3D11_TEXTURE2D_DESC td{};
+        td.Width = W; td.Height = H; td.MipLevels = 1; td.ArraySize = 1;
+        td.Format = fmt; td.SampleDesc.Count = 1; td.Usage = D3D11_USAGE_DEFAULT;
+        td.BindFlags = bind;
+        D3D11_SUBRESOURCE_DATA sd{}; sd.pSysMem = init; sd.SysMemPitch = pitch;
+        return SUCCEEDED(dev->CreateTexture2D(&td, init ? &sd : nullptr, out)) && *out;
+    };
+    std::vector<uint8_t> colA(static_cast<size_t>(W) * H * 4);
+    std::vector<uint8_t> outB(static_cast<size_t>(W) * H * 4);
+    for (size_t i = 0; i < static_cast<size_t>(W) * H; ++i) {
+        colA[i * 4 + 0] = 90; colA[i * 4 + 1] = 160; colA[i * 4 + 2] = 200; colA[i * 4 + 3] = 255;
+        outB[i * 4 + 0] = 255; outB[i * 4 + 1] = 0; outB[i * 4 + 2] = 255; outB[i * 4 + 3] = 255;
+    }
+    std::vector<float> depth(static_cast<size_t>(W) * H, 0.5f);
+    std::vector<uint16_t> motion(static_cast<size_t>(W) * H * 2, 0);
+    ID3D11Texture2D *col = nullptr, *dep = nullptr, *mot = nullptr, *out = nullptr, *stg = nullptr;
+    bool ok = mk(DXGI_FORMAT_R8G8B8A8_UNORM, D3D11_BIND_SHADER_RESOURCE, colA.data(), W * 4, &col) &&
+              mk(DXGI_FORMAT_R32_FLOAT, D3D11_BIND_SHADER_RESOURCE, depth.data(), W * 4, &dep) &&
+              mk(DXGI_FORMAT_R16G16_FLOAT, D3D11_BIND_SHADER_RESOURCE, motion.data(), W * 4, &mot) &&
+              mk(DXGI_FORMAT_R8G8B8A8_UNORM,
+                 D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS, outB.data(), W * 4, &out);
+    if (ok) {
+        D3D11_TEXTURE2D_DESC td{};
+        td.Width = W; td.Height = H; td.MipLevels = 1; td.ArraySize = 1;
+        td.Format = DXGI_FORMAT_R8G8B8A8_UNORM; td.SampleDesc.Count = 1;
+        td.Usage = D3D11_USAGE_STAGING; td.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        ok = SUCCEEDED(dev->CreateTexture2D(&td, nullptr, &stg)) && stg;
+    }
+    if (!ok && why) *why = "the test textures could not be created";
+    const char* wf = "";
+    for (int k = 0; ok && k < 2; ++k) {
+        if (!dlaaEvaluateFovea(ctx, 0, col, dep, mot, out, W, H, cx, cy, cw, ch, 0.0f, 0.0f,
+                               k == 0, 0.0f, &wf)) {
+            if (why) *why = wf;   // this is the F1 failure: 0xBAD00005 lands here
+            ok = false;
+        }
+    }
+    uint8_t centre[4] = {}, outside[4] = {};
+    if (ok) {
+        ctx->CopyResource(stg, out);
+        D3D11_MAPPED_SUBRESOURCE m{};
+        if (SUCCEEDED(ctx->Map(stg, 0, D3D11_MAP_READ, 0, &m)) && m.pData) {
+            auto rd = [&](UINT x, UINT y, uint8_t* o) {
+                const uint8_t* r = static_cast<const uint8_t*>(m.pData) + static_cast<size_t>(y) * m.RowPitch + static_cast<size_t>(x) * 4;
+                o[0] = r[0]; o[1] = r[1]; o[2] = r[2]; o[3] = r[3];
+            };
+            rd(cx + cw / 2, cy + ch / 2, centre);
+            rd(10, 10, outside);
+            ctx->Unmap(stg, 0);
+        } else {
+            if (why) *why = "the output could not be read back";
+            ok = false;
+        }
+    }
+    if (ok) {
+        auto approx = [](uint8_t v, int t) { const int d = static_cast<int>(v) - t; return d > -8 && d < 8; };
+        if (!(approx(centre[0], 90) && approx(centre[1], 160) && approx(centre[2], 200))) {
+            if (why) *why = "the crop centre is not the source colour -- NVIDIA upscaled or "
+                            "refused the crop instead of running it 1:1";
+            ok = false;
+        } else if (!(approx(outside[0], 255) && approx(outside[1], 0) && approx(outside[2], 255))) {
+            if (why) *why = "the output OUTSIDE the crop was overwritten -- the crop is not "
+                            "confined to its sub-rectangle";
+            ok = false;
+        }
+    }
+    if (stg) stg->Release();
+    if (out) out->Release();
+    if (mot) mot->Release();
+    if (dep) dep->Release();
+    if (col) col->Release();
+    return ok ? 1 : 0;
+#endif
+}
+
 }  // namespace edvr
 
 // For tools/smoke: is DLAA usable on this device, and if not, why.
@@ -1022,4 +1133,12 @@ extern "C" __declspec(dllexport) int edvrDlaaCropProbe(void* device, void* conte
                                                        unsigned reportBytes) {
     return edvr::dlaaCropProbe(static_cast<ID3D11Device*>(device),
                                static_cast<ID3D11DeviceContext*>(context), report, reportBytes);
+}
+
+// For tools/smoke: the fovea path's 1:1 crop check (the review of 2026-09-05).
+// 1 pass, 0 fail (*why names it), -1 skip (no runtime).
+extern "C" __declspec(dllexport) int edvrDlaaFoveaCheck(void* device, void* context,
+                                                        const char** why) {
+    return edvr::dlaaFoveaSelfTest(static_cast<ID3D11Device*>(device),
+                                   static_cast<ID3D11DeviceContext*>(context), why);
 }

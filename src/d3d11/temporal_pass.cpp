@@ -1033,6 +1033,11 @@ bool                       g_csFoveaTried = false;
 ID3D11Buffer*              g_foveaCb = nullptr;   // its crop and edge band
 bool                       g_foveaNoted = false;
 bool                       g_foveaFailNoted = false;
+// Latched when the fovea's NGX create or eval fails, so it is not retried
+// every frame (a create costs tens to hundreds of ms -- a stutter storm).
+// Cleared on a config reload and on a frame-size change, so a fixed cause
+// (a bad size, a transient) gets another chance without a relaunch.
+bool                       g_foveaFailed = false;
 uint32_t                   g_foveaTreats = 0;
 bool                       g_dlaaNoted = false;
 bool                       g_dlssNoted = false;
@@ -1847,8 +1852,13 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         // set, the vectors described the wrong previous frustum across a
         // guard re-stage or a resolution change (the review's F7).
         const bool trainedWanted = (flags & 2u) != 0;
+        // ...and the fovea's crop history is NVIDIA's too, on a frame where the
+        // own periphery history may be invalid but the crop's is not (the
+        // review of 2026-09-05, F4): its motion vectors want last frustum too.
         const bool useTanPrev =
-            useHistory || (trainedWanted && e.dlHaveHistory && haveDelta && tanPrev);
+            useHistory ||
+            (trainedWanted && (e.dlHaveHistory || (g_foveaDeg > 0.0f && e.foveaHaveHistory)) &&
+             haveDelta && tanPrev);
         memcpy(p.tanPrev, useTanPrev ? tanPrev : tanNow, sizeof(p.tanPrev));
         p.jit[0] = jxNow;
         p.jit[1] = jyNow;
@@ -1948,11 +1958,17 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         // DLAA block below can stand aside; the composition runs after the
         // own-history dispatch, which is the periphery it blends over.
         const bool upscale = (outW && outH && (outW != w || outH != h));
+        // g_debugMode off: the debug views paint the OWN pass's output, and the
+        // fovea would blend NVIDIA's crop over that -- a mixed instrument (the
+        // review of 2026-09-05, F6). g_foveaFailed off: a failing crop is not
+        // retried every frame (F3).
         const bool foveaWanted = (flags & 2u) != 0 && fmtIndex == 0 && g_foveaDeg > 0.0f &&
-                                 !upscale && g_foveaCb != nullptr;
+                                 !upscale && g_foveaCb != nullptr && g_debugMode == 0 &&
+                                 !g_foveaFailed;
         uint32_t fcx = 0, fcy = 0, fcw = 0, fch = 0;
         bool foveaMode = false;
         bool foveaComposited = false;
+        bool foveaEvalOk = false;   // the crop eval ran and NVIDIA accumulated: history is live
         if (foveaWanted && !g_csFovea && !g_csFoveaTried) {
             g_csFoveaTried = true;
             g_csFovea = shaderSwapCompileCs(ctx, kFoveaCsHlsl, sizeof(kFoveaCsHlsl) - 1,
@@ -2026,8 +2042,14 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                 const uint32_t oW = (outW && outH && (outW != w || outH != h)) ? outW : w;
                 const uint32_t oH = (outW && outH && (outW != w || outH != h)) ? outH : h;
                 bool made = g_csMv != nullptr;
-                if (made && (!e.dlOut || e.dlW != w || e.dlH != h || e.dlOutW != oW ||
-                             e.dlOutH != oH)) {
+                // !e.dlSubmit is in the test because the fovea path rebuilds
+                // e.dlColour..e.dlOut at the same size but never dlSubmit (it
+                // does not use it) -- so a fovea -> full-DLAA switch would find
+                // e.dlOut valid, skip this rebuild, and CopyResource into a
+                // null dlSubmit, returning null and standing the whole pass
+                // down for the session (the review of 2026-09-05, F2).
+                if (made && (!e.dlOut || !e.dlSubmit || e.dlW != w || e.dlH != h ||
+                             e.dlOutW != oW || e.dlOutH != oH)) {
                     releaseDl(e);
                     made = makeTex(dev, w, h, DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM,
                                    D3D11_BIND_SHADER_RESOURCE, &e.dlColour, nullptr, nullptr) &&
@@ -2207,7 +2229,6 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                 if (made && (!e.dlOut || e.dlW != w || e.dlH != h || e.dlOutW != w ||
                              e.dlOutH != h)) {
                     releaseDl(e);
-                    e.foveaHaveHistory = false;
                     made = makeTex(dev, w, h, DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM,
                                    D3D11_BIND_SHADER_RESOURCE, &e.dlColour, nullptr, nullptr) &&
                            makeTex(dev, w, h, DXGI_FORMAT_R16G16_FLOAT, DXGI_FORMAT_R16G16_FLOAT,
@@ -2260,7 +2281,12 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     ctx->CSSetUnorderedAccessViews(0, 5, nullUavM, nullptr);
                     ctx->CSSetShader(g_csMv, nullptr, 0);
                     ID3D11ShaderResourceView* srvsM[3] = {inSrv, e.histSrv[readIdx], depthSrv};
-                    ID3D11UnorderedAccessView* uavsM[5] = {nullptr, nullptr, g_statsUav,
+                    // u2 (the stats buffer) is left UNBOUND here: the own pass
+                    // already wrote its stats this frame, and the mv entry
+                    // writes the same slots (15-17), so binding it would double
+                    // them (the review of 2026-09-05, F5). Atomics on a null
+                    // UAV are dropped.
+                    ID3D11UnorderedAccessView* uavsM[5] = {nullptr, nullptr, nullptr,
                                                            e.dlMvUav, e.dlDepthUav};
                     ID3D11Buffer* cbM = g_cb;
                     ID3D11SamplerState* smpM = g_samp;
@@ -2288,7 +2314,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     if (dlaaEvaluateFovea(ctx, eye, e.dlColour, e.dlDepth, e.dlMv, e.dlOut, w, h,
                                           fcx, fcy, fcw, fch, jxNow, jyNow, resetHist, frameMs,
                                           &whyF)) {
-                        e.foveaHaveHistory = true;
+                        foveaEvalOk = true;   // e.foveaHaveHistory is set from this at frame end
                         D3D11_MAPPED_SUBRESOURCE fm{};
                         if (SUCCEEDED(ctx->Map(g_foveaCb, 0, D3D11_MAP_WRITE_DISCARD, 0, &fm)) &&
                             fm.pData) {
@@ -2338,12 +2364,18 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                             }
                         }
                     } else {
-                        e.foveaHaveHistory = false;
+                        // Latched: a failing crop (an NGX create or eval error)
+                        // is not retried every frame -- a create costs tens to
+                        // hundreds of ms (F3). The own history runs full-frame
+                        // for the rest of the session, or until a config reload
+                        // or size change re-arms it.
+                        g_foveaFailed = true;
                         if (!g_foveaFailNoted) {
                             g_foveaFailNoted = true;
                             Log::get().note(
-                                "temporal aa: the fovea crop was asked for, but %s. The own "
-                                "history runs full-frame instead, this frame and after.",
+                                "temporal aa: the fovea crop was asked for, but %s. It is stood "
+                                "down for the session (the own history runs full-frame); edit the "
+                                "ini or change the render size to try again.",
                                 whyF);
                         }
                     }
@@ -2385,6 +2417,13 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         for (auto* v : savedUav) if (v) v->Release();
         if (savedCb) savedCb->Release();
         if (savedSamp) savedSamp->Release();
+
+        // NVIDIA's crop history is live only if the crop eval ran and
+        // accumulated THIS frame. Any frame that did not composite the fovea
+        // -- full DLAA, the own history alone, a failed eval -- clears it, so
+        // a later re-engage of the fovea resets rather than blending a stale
+        // crop against fresh motion (the review of 2026-09-05, F4).
+        e.foveaHaveHistory = foveaEvalOk;
 
         if (ran && usedDlaa) {
             // The trained pass's frame goes out; the pass's own history is
@@ -2488,9 +2527,15 @@ void temporalPassConfigure(Config& cfg) {
     if (fov > 120.0f) fov = 120.0f;
     g_foveaDeg = fov;
     float edge = cfg.getFloat("advanced.temporal_aa_fovea_edge", 6.0f);
-    if (!std::isfinite(edge) || edge < 0.0f) edge = 0.0f;
+    // Floored at 1 deg when the fovea is on: DLSS treats the crop's edge as the
+    // image edge (clamped taps, no history beyond it), so a hard seam lets its
+    // border artefacts in at full weight (the review of 2026-09-05, F11).
+    if (!std::isfinite(edge) || edge < 1.0f) edge = 1.0f;
     if (edge > 30.0f) edge = 30.0f;
     g_foveaEdgeDeg = edge;
+    // A config reload re-arms the fovea after a failure stood it down (F3):
+    // the user may have changed the width, or the transient may be gone.
+    g_foveaFailed = false;
 }
 
 void temporalPassTick(ID3D11DeviceContext* ctx) {
