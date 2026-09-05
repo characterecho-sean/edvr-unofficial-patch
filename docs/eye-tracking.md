@@ -23,7 +23,12 @@ is therefore `d - t`: a unit gaze vector `d` minus a five-metre position
 `t`, which is why it sat at 37 degrees right and 55 up, why the eyes
 moved it only a few degrees the wrong way, and why stepping half a metre
 moved it and held. EDVR knows `t` every frame (the raw-universe HMD pose),
-so `d` is recoverable: one quadratic per frame. Independently, the same
+so `d` is recoverable -- by one addition per frame, `d = p + t`, because
+the runtime hands the vector out with its scale intact (measured in the
+first Phase 1 flight, 2026-09-05 12:31; the plan below was written for a
+normalised centre, and its quadratic is now the check). The origin's
+distance is a session's, not a constant: 5 m in the morning's flights,
+15.6 m at noon. Independently, the same
 tracker is readable directly from Pimax's runtime through the client
 library its driver uses, the route mbucchia's SteamVR shim took on this
 headset family.
@@ -340,6 +345,49 @@ gaze_probe_summary_frames = 450
 
 then the protocol above, and read the `frame repair` and `pvr` lines of
 each window in the vr log.
+
+**Flown 2026-09-05 12:31 (`v0.14.0-24-g363cfa4-dirty`; steps 4 and 5 of
+the protocol swapped, no crouch).** Four findings, one of them changing
+Route A:
+
+1. *The centre carries its scale.* The point-form read answered finite
+   values with `|p| = 15.85`, and `t` that session was `(-11.24, -10.71,
+   1.89)`, `|t| = 15.6`: SteamVR hands out `d - t` itself, not its
+   direction. The gaze is then `d = p + t`, one addition per frame, and
+   `|d| = 1` turns from the constraint that had to supply the scale into
+   a per-frame check of the model. The quadratic is ill-conditioned at
+   this distance -- its discriminant `(n.t)^2 - |t|^2 + 1` came out at
+   0.007 from a rounding-limited `n`, and the two roots landed fourteen
+   degrees apart -- so it is demoted to the check for a runtime that
+   normalises.
+2. *The raw origin moves between sessions.* Five metres from the chair in
+   the morning, 15.6 m at noon. `t` is read every frame (it is); nothing
+   about it may be fixed at arming.
+3. *The probe's own bounds rejected the data.* The runtime vouched for
+   every one of the flight's 7,000 plain calls and the probe counted every
+   one malformed: its sanity bound was 2 NDC, and a centre 15 m off
+   projects at 2.9. The direction-form read's bound of 4 on the tangents
+   let through only the windows where they dipped under it (3.87, 3.81 at
+   rest, consistent with a gaze near straight ahead). Both bounds are 64
+   now; finite is the shape that matters.
+4. *Route B never armed*, by the probe's own doing: it asked the client
+   library for its version and clock before `initialise`, and the clock
+   read as nothing. It initialises first now and prints what it read if
+   the check still fails. The tracking system is `aapvr`; the
+   driver-version property did not answer, and its error code is printed
+   next time.
+
+The rebuilt probe (`e230df2`) does the subtraction every frame from two
+point-form reads (x and y with the identity-with-w matrix, z with the
+first row swapped in) and prints per window: `|p|`'s mean, `|d|`'s mean
+and range (1.000 says the model is exact), `d`'s mean direction for the
+four sign variants with each one's frustum share, the RMS angle to Route
+B, and the counts of frames the read declined or `|d|` fell outside
+0.5..2. The next flight is the protocol in order. Success reads as: the
+first window at rest straight ahead with `|d|` at 1.000 in one variant,
+the sweeps swinging that variant 25 to 35 degrees, the head turn with the
+gaze held swinging it the other way by the head's yaw, and Route B's
+tangents agreeing within about 2 degrees RMS.
 
 ### Phase 2: the gaze source
 
