@@ -743,6 +743,22 @@ without the game or a headset:
 build\smoke.exe build\d3d11.dll
 ```
 
+For the DLAA and DLSS modes, and for an installer that carries NVIDIA's
+runtime, the DLSS SDK has to be on the machine. It is not in this repository
+(its licence keeps it out) and it is not in the graphics driver:
+
+```
+python tools\fetch_ngx.py
+```
+
+fetches one pinned commit of NVIDIA's public SDK repository into
+`%LOCALAPPDATA%\EDVR\ngx-sdk`, a single copy every checkout and worktree
+finds, and checks the runtime's hash against the pin in the script. A build
+without it still succeeds and says so loudly: it has no DLAA and its
+installer carries no runtime. `package.bat` refuses to package such a build
+unless told `--no-dlss`. `EDVR_NGX_SDK` points the build at a copy somewhere
+else.
+
 `build\openvr_api.dll` is built too if a copy of the real file can be found to
 read exports from — it looks in the game's install and `reference\`, or point at
 one explicitly:

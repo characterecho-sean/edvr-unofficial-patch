@@ -12,5 +12,7 @@ edvr_breadcrumbs.txt
 
 build - Copy/
 
-# NVIDIA's DLSS SDK, fetched by tools/fetch_ngx.py; its licence keeps it out of the tree.
+# NVIDIA's DLSS SDK (tools/fetch_ngx.py --into third_party/ngx puts it here; the
+# default is one copy per machine under %LOCALAPPDATA%\EDVR\ngx-sdk). Its licence
+# keeps it out of the tree: not stand-alone, not under an open source licence.
 third_party/ngx/

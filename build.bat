@@ -191,23 +191,46 @@ if not exist "%OBJ%\d3d11" mkdir "%OBJ%\d3d11"
 ml64.exe /nologo /c /Fo"%OBJ%\d3d11\thunks.obj" "%GEN%\edvr_thunks_d3d11.asm" >nul
 if errorlevel 1 ( echo [edvr] ERROR: ml64 failed & exit /b 1 )
 
-REM NVIDIA's DLSS SDK, when it is there (tools\fetch_ngx.py puts it under
-REM third_party\ngx; EDVR_NGX_SDK names another copy): the d3d11 half is
+REM NVIDIA's DLSS SDK. EDVR_NGX_SDK names a copy explicitly; else the
+REM checkout's own third_party\ngx; else the machine's copy under
+REM %LOCALAPPDATA%\EDVR\ngx-sdk, which is where tools\fetch_ngx.py puts it
+REM (one copy every checkout and worktree finds). The d3d11 half is then
 REM built with the NGX calls in, the static library linked, and the runtime
-REM copied beside the harness. Without it the dlaa mode says so and the
-REM pass runs its own history.
+REM and NVIDIA's licence copied into the build for the installer and the
+REM zip. The copy is VERIFIED first -- the files the build reads, and the
+REM runtime's SHA-256 against the pin in tools\fetch_ngx.py -- and a
+REM mismatch fails the build: the DLL the installer carries must be the
+REM one the flights verified, and updating it is a deliberate commit.
+REM Without any SDK the build still succeeds, since the code compiles
+REM either way, but says so loudly: that build has no DLAA and its
+REM installer carries no runtime, which is not a release (package.bat
+REM refuses it unless told --no-dlss).
 set NGX=
-if exist "%ROOT%\third_party\ngx\include\nvsdk_ngx.h" set NGX=%ROOT%\third_party\ngx
 if defined EDVR_NGX_SDK set NGX=%EDVR_NGX_SDK%
+if not defined NGX if exist "%ROOT%\third_party\ngx\include\nvsdk_ngx.h" set NGX=%ROOT%\third_party\ngx
+if not defined NGX if exist "%LOCALAPPDATA%\EDVR\ngx-sdk\include\nvsdk_ngx.h" set NGX=%LOCALAPPDATA%\EDVR\ngx-sdk
 set NGXFLAGS=
 set NGXLIB=
 if defined NGX (
+    python "%ROOT%\tools\fetch_ngx.py" --verify "%NGX%" || (
+        echo [edvr] ERROR: the DLSS SDK at %NGX% is not the pinned one. tools\fetch_ngx.py
+        echo        names the commit and the runtime's hash; fetch it again, or update the
+        echo        pin on purpose.
+        exit /b 1
+    )
     set NGXFLAGS=/DEDVR_HAVE_NGX=1 /I"%NGX%\include"
     set NGXLIB="%NGX%\lib\Windows_x86_64\x64\nvsdk_ngx_s.lib" advapi32.lib
     echo [edvr] DLSS SDK: %NGX%
     copy /Y "%NGX%\lib\Windows_x86_64\rel\nvngx_dlss.dll" "%BUILD%\" >nul
+    copy /Y "%NGX%\LICENSE.txt" "%BUILD%\NVIDIA-DLSS-LICENSE.txt" >nul
 ) else (
-    echo [edvr] DLSS SDK: not present -- dlaa mode will stand down
+    echo [edvr] ==================================================================
+    echo [edvr] NO DLSS SDK. This build has no DLAA, and its installer carries no
+    echo [edvr] nvngx_dlss.dll. Fine for development; NOT a release. To fetch the
+    echo [edvr] pinned SDK once for this machine:  python tools\fetch_ngx.py
+    echo [edvr] ==================================================================
+    if exist "%BUILD%\nvngx_dlss.dll" del /q "%BUILD%\nvngx_dlss.dll"
+    if exist "%BUILD%\NVIDIA-DLSS-LICENSE.txt" del /q "%BUILD%\NVIDIA-DLSS-LICENSE.txt"
 )
 cl.exe %CFLAGS% %NGXFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "%ROOT%\src\common\log.cpp" "%ROOT%\src\common\config.cpp" ^

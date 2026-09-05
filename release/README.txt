@@ -112,7 +112,9 @@ of it.)
 
 INSTALL
 
-Run edvr-installer.exe, in this folder. It carries both DLLs and edvr.ini
+Run edvr-installer.exe, in this folder. It carries both DLLs, edvr.ini and
+NVIDIA's DLSS runtime (placed beside the game on machines with an NVIDIA
+card, for temporal_aa = dlaa; NVIDIA-DLSS-LICENSE.txt is its licence)
 inside it, finds your install (Frontier launcher, Steam or Epic), puts each
 file where it goes, and gets the two steps right that manual installs get
 wrong: it RENAMES the game's openvr_api.dll rather than overwriting it, and if
