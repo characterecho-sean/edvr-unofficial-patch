@@ -229,8 +229,8 @@ temporal pass below integrates that wander instead of fighting it, and the
 lock could not engage on a Quest 3's tracking at all.
 *Details: [docs/anti-aliasing.md](docs/anti-aliasing.md).*
 
-**The shimmer itself — temporal anti-aliasing.** *Off by default; a first
-build, flown once.* Elite has no temporal anti-aliasing, and its menu's options are
+**The shimmer itself — temporal anti-aliasing.** *Off by default; in the
+installer's settings window.* Elite has no temporal anti-aliasing, and its menu's options are
 edge filters that cannot touch content flickering on and off the pixel
 grid as your head moves. `temporal_aa = on` blends each frame with the
 frames before it, each moved to where its content sits now, with the
@@ -482,8 +482,7 @@ what a fix inside it would look like:
 [docs/terrain-culling.md](docs/terrain-culling.md). It is off by default
 because it costs GPU time; enabling it is three settings in `edvr.ini`.
 
-1. **Turn it on, then restart the game** — this is the one cull-guard
-   setting that is not live:
+1. **Turn it on** — live, like every other cull-guard setting:
 
    ```
    [fix]

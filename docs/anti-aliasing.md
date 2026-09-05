@@ -580,8 +580,8 @@ arms only after the pass has treated a frame, and disarms with it.
 **Settings** (`[fix]`, as built):
 
 ```
-temporal_aa        = off   ; off | on. On needs a restart (the projection
-                           ; edit installs at launch); the rest are live.
+temporal_aa        = off   ; off | on | dlaa | dlss. Live, like the rest:
+                           ; the projection edit is in from every launch.
 temporal_aa_jitter = on    ; the sub-pixel projection jitter. Off =
                            ; smoothing only.
 temporal_aa_blend  = 0.90  ; history weight, 0.50..0.95: higher is calmer
