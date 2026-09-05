@@ -1793,7 +1793,7 @@ vr::EVRCompositorError hookedWaitGetPoses(void* self,
     // The gaze probe's one call a frame, at the same boundary the design
     // names for the real thing (docs/performance.md, feature 3). Off unless
     // advanced.gaze_probe says otherwise; see gaze_probe.h.
-    gazeProbeApply();
+    gazeProbeApply(result, renderPoses, renderCount);
 
     // The pair-timing boundary: frame cadence, and the burst summary.
     {

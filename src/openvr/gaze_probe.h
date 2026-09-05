@@ -69,7 +69,13 @@ void gazeProbeConfigure();
 
 // Per frame, from hookedWaitGetPoses after the real call returns: arms on
 // the first call it can, asks every frame after, summarises on schedule.
-void gazeProbeApply();
+// The head's render pose rides along so each summary can place the
+// reported centre against where the head was and which way it faced --
+// a gaze that swings with the head is in the wrong frame, one that holds
+// through a head turn is head-relative as designed. `err` is
+// WaitGetPoses' own result; the pose is read only when it is 0.
+void gazeProbeApply(vr::EVRCompositorError err, const vr::TrackedDevicePose_t* renderPoses,
+                    uint32_t renderCount);
 
 // The session's totals, once.
 void gazeProbeShutdown();

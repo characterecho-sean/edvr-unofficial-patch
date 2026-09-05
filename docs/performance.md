@@ -740,7 +740,26 @@ during implementation, in the head-steer convention:
     validated; the summaries say whether the driver vouches for a centre
     at all, how often, and whether it moves. This decides whether that
     headset gets the eye-tracked versions of features 2 and 6 or the
-    fixed-centre ones. (Built 2026-09-04; unflown.)
+    fixed-centre ones. **Flown 2026-09-05, docked, three minutes, SteamVR
+    2.17.8: the driver publishes gaze.** The table was served, entry 0
+    answered the 4340×4284 the game was told, and all 12,600 frames came
+    back valid with the centre moving by 0.0015–0.0021 NDC a frame. The
+    values were the second finding: the two eyes differed in x by a
+    constant 0.388, which is exactly twice the frustum's horizontal offset
+    for these tangents (l −1.529, r +1.032), so both eyes report one shared
+    direction projected through their own frustums, and the projection
+    variant agreed with the plain call to four decimals. That direction
+    sat at 37° right and 54° up for the whole session — just outside the
+    visible field, where eyes cannot rest. The tracker had never been
+    calibrated in Pimax Play (calibrated after the flight); the other
+    candidate is the driver's vector arriving in a frame the runtime does
+    not expect. The next flight separates them with the instruments added
+    the same day: summaries every 450 frames read as directions, with the
+    head's position and facing beside them. Look straight ahead; close
+    the eyes (validity should drop for a real tracker); look far left,
+    then far right, eyes only; then turn the head 30° while holding the
+    gaze on one spot — a centre that swings with the head is in the wrong
+    frame, one that holds is head-relative as designed.
 16. **NVIDIA's history under a moving crop.** The smoke harness test
     described under feature 6: a synthetic full-frame scene, a crop that
     moves a known step per frame with the step folded into the motion

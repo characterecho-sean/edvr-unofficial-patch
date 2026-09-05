@@ -118,14 +118,70 @@ struct Counts {
     uint32_t malformed = 0;  // it vouched for something that is not a point
 };
 
+// The head over the same window: where it was and which way it faced, so
+// the reported centre can be read against it. Position in the runtime's
+// tracking space, metres; facing as the device's -z in that space.
+struct HeadWindow {
+    uint32_t n = 0;
+    double sum[3] = {0.0, 0.0, 0.0};
+    float  lo[3] = {0.0f, 0.0f, 0.0f}, hi[3] = {0.0f, 0.0f, 0.0f};
+    double fwd[3] = {0.0, 0.0, 0.0};   // summed forward vectors
+    void add(const vr::HmdMatrix34_t& m) {
+        const float p[3] = {m.m[0][3], m.m[1][3], m.m[2][3]};
+        for (int i = 0; i < 3; ++i) {
+            if (n == 0) lo[i] = hi[i] = p[i];
+            if (p[i] < lo[i]) lo[i] = p[i];
+            if (p[i] > hi[i]) hi[i] = p[i];
+            sum[i] += p[i];
+            fwd[i] += -m.m[i][2];   // the device's -z axis, in tracking space
+        }
+        ++n;
+    }
+    void reset() {
+        n = 0;
+        for (int i = 0; i < 3; ++i) { sum[i] = 0.0; fwd[i] = 0.0; lo[i] = hi[i] = 0.0f; }
+    }
+    double mean(int i) const { return n ? sum[i] / n : 0.0; }
+    double span() const {
+        double s = 0.0;
+        for (int i = 0; i < 3; ++i) if (hi[i] - lo[i] > s) s = hi[i] - lo[i];
+        return s;
+    }
+    // Facing, degrees: yaw + = right (+x), pitch + = up (+y).
+    void facing(double* yawDeg, double* pitchDeg) const {
+        if (!n) { *yawDeg = *pitchDeg = 0.0; return; }
+        const double x = fwd[0] / n, y = fwd[1] / n, z = fwd[2] / n;
+        *yawDeg = atan2(x, -z) * 57.2957795;
+        *pitchDeg = atan2(y, sqrt(x * x + z * z)) * 57.2957795;
+    }
+};
+
 Counts g_win, g_total;
 EyeWindow g_eye[2], g_eyeTotal[2];
+HeadWindow g_head, g_headTotal;
 uint32_t g_frames = 0;          // frames since arming
 uint32_t g_summaries = 0;
-uint32_t g_nextSummary = 600;   // a quick first verdict, then a minute apart
-constexpr uint32_t kSummaryEvery = 5400;
-constexpr uint32_t kSummaryCap = 40;
+uint32_t g_nextSummary = 600;   // a quick first verdict, then on the cadence
+uint32_t g_cadence = 5400;      // advanced.gaze_probe_summary_frames (live)
+constexpr uint32_t kSummaryCap = 400;
 bool g_firstValidSaid = false;
+
+// The reported centre read back as a direction through the eye's own
+// projection (Valve's ComposeProjection, tangents l r t b): NDC x =
+// m00 tx - m02, NDC y = m11 ty - m12 for a direction (tx, ty, -1). yaw +
+// = right, pitch + = up in OpenVR's NDC. False without the tangents.
+bool ndcToDegrees(int eye, double ndcX, double ndcY, double* yawDeg, double* pitchDeg) {
+    float t4[4];
+    if (!systemHookEffectiveTangents(eye == 0 ? vr::Eye_Left : vr::Eye_Right, t4)) return false;
+    const double l = t4[0], r = t4[1], t = t4[2], b = t4[3];
+    if (!(r > l) || !(b > t)) return false;
+    const double m00 = 2.0 / (r - l), m02 = (r + l) / (r - l);
+    const double m11 = 2.0 / (b - t), m12 = (b + t) / (b - t);
+    const double tx = (ndcX + m02) / m00, ty = (ndcY + m12) / m11;
+    *yawDeg = atan(tx) * 57.2957795;
+    *pitchDeg = atan(ty) * 57.2957795;
+    return true;
+}
 
 // The projection variant, checked against the plain answer now and then:
 // with the runtime's own projection the two must agree, which validates
@@ -228,6 +284,7 @@ void checkProjectionVariant(bool vouched, const vr::HmdVector2_t& L) {
 void summary(bool final) {
     const Counts& c = final ? g_total : g_win;
     const EyeWindow* e = final ? g_eyeTotal : g_eye;
+    const HeadWindow& h = final ? g_headTotal : g_head;
     const double pct = c.asked ? 100.0 * c.valid / c.asked : 0.0;
     Log::get().note(
         "gaze probe %s: asked %u, valid %u (%.1f%%), declined %u, malformed %u; "
@@ -243,12 +300,29 @@ void summary(bool final) {
         g_projN, g_projDeclined,
         final ? "." : ". A step of 0.0000 with valid answers is a driver publishing "
                       "a constant, not a tracker.");
+    // The same window read as directions, and the head beside them.
+    double ly = 0.0, lp = 0.0, ry = 0.0, rp = 0.0;
+    const bool haveL = e[0].n && ndcToDegrees(0, e[0].meanX(), e[0].meanY(), &ly, &lp);
+    const bool haveR = e[1].n && ndcToDegrees(1, e[1].meanX(), e[1].meanY(), &ry, &rp);
+    double hy = 0.0, hp = 0.0;
+    h.facing(&hy, &hp);
+    Log::get().note(
+        "gaze probe %s, read as directions: the mean centre is %s%.1f deg yaw, %+.1f deg "
+        "pitch (left eye) and %s%.1f deg yaw, %+.1f deg pitch (right eye), through each "
+        "eye's own projection, + = right / up; the head over the same %u frames sat at "
+        "(%.3f, %.3f, %.3f) m in tracking space, moved at most %.3f m, and faced %+.1f deg "
+        "yaw, %+.1f deg pitch. A centre that swings with the head's facing is in the "
+        "wrong frame; one that holds through a head turn is head-relative.",
+        final ? "totals" : "summary", haveL ? (ly < 0 ? "" : "+") : "?", haveL ? ly : 0.0,
+        haveL ? lp : 0.0, haveR ? (ry < 0 ? "" : "+") : "?", haveR ? ry : 0.0,
+        haveR ? rp : 0.0, h.n, h.mean(0), h.mean(1), h.mean(2), h.span(), hy, hp);
     if (!final) {
         g_win = Counts();
         g_eye[0].reset();
         g_eye[1].reset();
+        g_head.reset();
         ++g_summaries;
-        g_nextSummary = (g_summaries == 1) ? 1800 : g_nextSummary + kSummaryEvery;
+        g_nextSummary = g_frames + g_cadence;
     }
 }
 
@@ -369,22 +443,38 @@ void tryArm() {
     }
     g_sentinel->confirm();
     g_phase = Phase::Armed;
+    // Where straight ahead lands in each eye's NDC, for reading the
+    // summaries: an asymmetric frustum puts it off the image centre.
+    double ax[2] = {0.0, 0.0}, ay[2] = {0.0, 0.0};
+    bool haveAhead = true;
+    for (int e = 0; e < 2 && haveAhead; ++e) {
+        float t4[4];
+        haveAhead = systemHookEffectiveTangents(e == 0 ? vr::Eye_Left : vr::Eye_Right, t4) &&
+                    t4[1] > t4[0] && t4[3] > t4[2];
+        if (haveAhead) {
+            ax[e] = -(t4[1] + t4[0]) / (t4[1] - t4[0]);
+            ay[e] = -(t4[3] + t4[2]) / (t4[3] - t4[2]);
+        }
+    }
     Log::get().note(
         "gaze probe: ARMED on %s (runtime reports itself as \"%s\"). Entry 0 "
         "answered %ux%u, matching what the game was told%s. The first "
-        "GetEyeTrackedFoveationCenter call %s. Asking every frame from here; "
-        "the first summary comes after 600 frames, then a minute apart. "
-        "Nothing per frame is written down.",
+        "GetEyeTrackedFoveationCenter call %s. Straight ahead is NDC (%+.3f, %+.3f) in "
+        "the left eye and (%+.3f, %+.3f) in the right%s. Asking every frame from here; "
+        "the first summary comes after 600 frames, then every %u "
+        "(advanced.gaze_probe_summary_frames). Nothing per frame is written down.",
         kFnTableVersion, runtimeVersion ? runtimeVersion : "(no version string)", w, h,
         haveTruth ? "" : " (by sanity range only)",
         vouched ? "VOUCHED for a centre" : "DECLINED (false): no tracker, no gaze "
                                             "published by this headset's driver, or "
-                                            "not yet -- the summaries say which");
+                                            "not yet -- the summaries say which",
+        ax[0], ay[0], ax[1], ay[1],
+        haveAhead ? "" : " (tangents not yet seen: zeros printed)", g_cadence);
     record(vouched, L, R);
     ++g_frames;
 }
 
-void ask() {
+void ask(const vr::TrackedDevicePose_t* hmd) {
     vr::HmdVector2_t L = {{NAN, NAN}}, R = {{NAN, NAN}};
     bool vouched = false;
     const bool survived = guarded("gazeProbe/ask", [&] { vouched = g_center(&L, &R); });
@@ -395,6 +485,10 @@ void ask() {
         return;
     }
     record(vouched, L, R);
+    if (hmd && hmd->bPoseIsValid) {
+        g_head.add(hmd->mDeviceToAbsoluteTracking);
+        g_headTotal.add(hmd->mDeviceToAbsoluteTracking);
+    }
     if ((g_frames % 60) == 0) checkProjectionVariant(vouched, L);
     ++g_frames;
     if (g_summaries < kSummaryCap && g_frames >= g_nextSummary) summary(false);
@@ -407,6 +501,17 @@ void gazeProbeNoteGetter(PFN_RealGetGenericInterface get) { g_get = get; }
 void gazeProbeConfigure() {
     Config& cfg = Config::get();
     const bool want = cfg.getBool("advanced.gaze_probe", false);
+    // The summary cadence is live: a look-sequence flight wants a few
+    // seconds a window, a soak wants a minute.
+    int cadence = cfg.getInt("advanced.gaze_probe_summary_frames", 5400);
+    if (cadence < 60) cadence = 60;
+    if (cadence > 54000) cadence = 54000;
+    if (static_cast<uint32_t>(cadence) != g_cadence) {
+        g_cadence = static_cast<uint32_t>(cadence);
+        if (g_phase == Phase::Armed && g_nextSummary > g_frames + g_cadence) {
+            g_nextSummary = g_frames + g_cadence;
+        }
+    }
     if (!g_configured) {
         g_configured = true;
         g_wanted = want;
@@ -427,13 +532,18 @@ void gazeProbeConfigure() {
     }
 }
 
-void gazeProbeApply() {
+void gazeProbeApply(vr::EVRCompositorError err, const vr::TrackedDevicePose_t* renderPoses,
+                    uint32_t renderCount) {
     if (!g_wanted || g_phase == Phase::Off) return;
     if (g_phase == Phase::Waiting) {
         tryArm();
         return;
     }
-    ask();
+    const vr::TrackedDevicePose_t* hmd =
+        (err == 0 && renderPoses && renderCount > vr::k_unTrackedDeviceIndex_Hmd)
+            ? &renderPoses[vr::k_unTrackedDeviceIndex_Hmd]
+            : nullptr;
+    ask(hmd);
 }
 
 void gazeProbeShutdown() {
