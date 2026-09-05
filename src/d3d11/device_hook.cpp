@@ -45,6 +45,32 @@ constexpr size_t kDevCreateComputeShader = 18;
 // way: CreateBlendState 20, CreateDepthStencilState 21, CreateRasterizerState
 // 22, CreateSamplerState 23.
 constexpr size_t kDevCreateSamplerState  = 23;
+
+// THE CREATES THAT CAN FAIL, hooked to say so and for no other reason.
+//
+// Elite treats a failing HRESULT from its DX11 backend as fatal: its own
+// F3D_VERIFY excuses DXGI_ERROR_DEVICE_REMOVED and calls abort() for
+// everything else, and abort lands on a five-byte die-stub that every other
+// fatal error in the game shares. So the process ends at an address that
+// names nothing, with none of our code on the stack, and the refusal that
+// actually caused it is never written down anywhere (issue #20). These
+// hooks change nothing at all. They exist so that the line before the crash
+// says which call D3D11 refused and with what.
+//
+// Counted against the SDK's ID3D11DeviceVtbl the same way the four above
+// were: CreateBuffer 3, CreateTexture1D 4, CreateTexture2D 5,
+// CreateTexture3D 6, CreateShaderResourceView 7, CreateUnorderedAccessView
+// 8, CreateRenderTargetView 9, CreateDepthStencilView 10.
+constexpr size_t kDevCreateBuffer        = 3;
+constexpr size_t kDevCreateTexture1D     = 4;
+constexpr size_t kDevCreateTexture3D     = 6;
+constexpr size_t kDevCreateSrv           = 7;
+constexpr size_t kDevCreateUav           = 8;
+constexpr size_t kDevCreateRtv           = 9;
+constexpr size_t kDevCreateDsv           = 10;
+// One past the highest of them: the saved-original table is indexed by slot.
+constexpr size_t kDevCreateSlots         = 11;
+
 constexpr size_t kSwapPresent            = 8;
 constexpr size_t kFactoryCreateSwapChain = 10;
 constexpr size_t kFactory2CreateSwapChainForHwnd = 15;
@@ -56,6 +82,13 @@ typedef HRESULT(STDMETHODCALLTYPE* PFN_CreateTexture2D)(
     ID3D11Texture2D**);
 typedef HRESULT(STDMETHODCALLTYPE* PFN_CreateSamplerState)(
     ID3D11Device*, const D3D11_SAMPLER_DESC*, ID3D11SamplerState**);
+// All seven of the creates above share one register shape: this, a pointer,
+// a pointer, an out pointer. For a resource create the first is the desc and
+// the second the initial data; for a view create the first is the resource
+// and the second the view desc. One typedef covers both, which is what lets
+// one template body stand behind all seven slots.
+typedef HRESULT(STDMETHODCALLTYPE* PFN_DevCreate)(ID3D11Device*, const void*,
+                                                  const void*, void**);
 typedef HRESULT(STDMETHODCALLTYPE* PFN_Present)(IDXGISwapChain*, UINT, UINT);
 typedef HRESULT(STDMETHODCALLTYPE* PFN_CreateSwapChain)(IDXGIFactory*, IUnknown*,
                                                         DXGI_SWAP_CHAIN_DESC*,
@@ -83,6 +116,11 @@ struct State {
     PFN_CreateShader realCreatePS = nullptr;
     PFN_CreateTexture2D realCreateTexture2D = nullptr;
     PFN_CreateSamplerState realCreateSamplerState = nullptr;
+    // Indexed by vtable slot, so the template hook can find its own original
+    // from its own slot number. Slots we do not hook stay null and are never
+    // reached, because an unpatched entry never routes here.
+    PFN_DevCreate realDevCreate[kDevCreateSlots] = {};
+    uint32_t      createFailNotes = 0;
     // The texture-filtering census. A repeating pattern on a distant
     // surface -- a station's ribbed panels, a hull's hatching -- shimmers
     // when the sampler picks a mip sharper than the pixel's footprint,
@@ -380,10 +418,15 @@ HRESULT STDMETHODCALLTYPE hookedCreatePS(ID3D11Device* self, const void* bytecod
 // named by size (fss_res.h). The match, the scaling and the refusal rules
 // all live in that module; this hook only carries descs to it and created
 // textures back. One bool per create when both matchers are off.
-HRESULT STDMETHODCALLTYPE hookedCreateTexture2D(ID3D11Device* self,
-                                                const D3D11_TEXTURE2D_DESC* desc,
-                                                const D3D11_SUBRESOURCE_DATA* init,
-                                                ID3D11Texture2D** out) {
+// Defined with the other six creates below; this one is hooked already, for a
+// different reason, and only borrows the reporting.
+void noteDeviceCreateFailure(size_t slot, HRESULT hr, const void* first,
+                             const void* second, bool firstIsResource);
+
+HRESULT STDMETHODCALLTYPE createTexture2DForwarded(ID3D11Device* self,
+                                                   const D3D11_TEXTURE2D_DESC* desc,
+                                                   const D3D11_SUBRESOURCE_DATA* init,
+                                                   ID3D11Texture2D** out) {
     if (self != g_state->device || !desc || !fssResWantsCreates()) {
         return g_state->realCreateTexture2D(self, desc, init, out);
     }
@@ -411,6 +454,121 @@ HRESULT STDMETHODCALLTYPE hookedCreateTexture2D(ID3D11Device* self,
             fssResNoteCreated(*out, desc->Width, desc->Height,
                               desc->Width ? d.Width / desc->Width : 0);
         });
+    }
+    return hr;
+}
+
+// The same refusal line the other six creates get. Separate from the body
+// above because that one has four returns and this has to see all of them.
+HRESULT STDMETHODCALLTYPE hookedCreateTexture2D(ID3D11Device* self,
+                                                const D3D11_TEXTURE2D_DESC* desc,
+                                                const D3D11_SUBRESOURCE_DATA* init,
+                                                ID3D11Texture2D** out) {
+    const HRESULT hr = createTexture2DForwarded(self, desc, init, out);
+    if (FAILED(hr) && self == g_state->device) {
+        noteDeviceCreateFailure(kDevCreateTexture2D, hr, desc, init, false);
+    }
+    return hr;
+}
+
+// A fault while REPORTING a refusal must not switch off shader hashing, and
+// the reads below are of the game's own desc -- a pointer we were handed and
+// did not size. Its own budget, and a small one.
+FaultBudget g_createFailBudget("deviceHook.createFailNote", 4);
+
+// At most this many refusals a session. A create that fails once usually
+// fails every frame, and the line that matters is the first.
+constexpr uint32_t kCreateFailNotes = 12;
+
+const char* devCreateName(size_t slot) {
+    switch (slot) {
+        case kDevCreateBuffer:    return "CreateBuffer";
+        case kDevCreateTexture1D: return "CreateTexture1D";
+        case kDevCreateTexture2D: return "CreateTexture2D";
+        case kDevCreateTexture3D: return "CreateTexture3D";
+        case kDevCreateSrv:       return "CreateShaderResourceView";
+        case kDevCreateUav:       return "CreateUnorderedAccessView";
+        case kDevCreateRtv:       return "CreateRenderTargetView";
+        case kDevCreateDsv:       return "CreateDepthStencilView";
+        default:                  return "a device create";
+    }
+}
+
+// D3D11 refused something the GAME asked for. See kDevCreateBuffer above for
+// why this is worth a line: the crash that follows names nothing.
+void noteDeviceCreateFailure(size_t slot, HRESULT hr, const void* first,
+                             const void* second, bool firstIsResource) {
+    if (g_state->createFailNotes >= kCreateFailNotes) return;
+    ++g_state->createFailNotes;
+
+    char detail[320];
+    detail[0] = 0;
+    guardedBudget(g_createFailBudget, [&] {
+        if (firstIsResource) {
+            // A view desc opens with format and dimension before its union,
+            // and the resource is the thing that format has to be compatible
+            // WITH -- so both, when the resource is a 2D texture, which every
+            // render target and depth target here is.
+            const uint32_t* vd = static_cast<const uint32_t*>(second);
+            const unsigned fmt = second ? vd[0] : 0u;
+            const unsigned dim = second ? vd[1] : 0u;
+            ID3D11Texture2D* tex = nullptr;
+            if (first) {
+                ID3D11Resource* res = static_cast<ID3D11Resource*>(
+                    const_cast<void*>(first));
+                res->QueryInterface(__uuidof(ID3D11Texture2D),
+                                    reinterpret_cast<void**>(&tex));
+            }
+            if (tex) {
+                D3D11_TEXTURE2D_DESC td{};
+                tex->GetDesc(&td);
+                _snprintf_s(detail, _TRUNCATE,
+                            "view format %u dimension %u, over a %ux%u texture of "
+                            "format %u, %u mip(s), array %u, %ux MSAA, usage %u, "
+                            "bind 0x%X, cpu 0x%X, misc 0x%X",
+                            fmt, dim, td.Width, td.Height,
+                            static_cast<unsigned>(td.Format), td.MipLevels,
+                            td.ArraySize, td.SampleDesc.Count,
+                            static_cast<unsigned>(td.Usage), td.BindFlags,
+                            td.CPUAccessFlags, td.MiscFlags);
+                tex->Release();
+            } else {
+                _snprintf_s(detail, _TRUNCATE,
+                            "view format %u dimension %u, over a resource that is "
+                            "not a 2D texture", fmt, dim);
+            }
+        } else if (first) {
+            // Six words: exactly the length of the shortest of these descs
+            // (D3D11_BUFFER_DESC), so this never reads past one it was given.
+            const uint32_t* d = static_cast<const uint32_t*>(first);
+            _snprintf_s(detail, _TRUNCATE,
+                        "desc words %u %u %u %u %u %u%s", d[0], d[1], d[2], d[3],
+                        d[4], d[5], second ? ", with initial data" : "");
+        }
+    });
+
+    Log::get().note(
+        "D3D11 REFUSED the game's %s: hr 0x%08X, %s. Reported because Elite "
+        "treats any failure but DXGI_ERROR_DEVICE_REMOVED as fatal -- its own "
+        "check calls abort(), and the process then dies at one fixed address "
+        "that every unrelated fatal error in the game shares, with nothing of "
+        "ours on the stack. If a crash follows this line, this line is why. At "
+        "most %u a session.",
+        devCreateName(slot), static_cast<unsigned>(hr),
+        detail[0] ? detail : "no desc was passed", kCreateFailNotes);
+}
+
+// One body behind all seven slots. It forwards, and on a failure it says so.
+// Nothing else: the arguments go through untouched and the HRESULT comes back
+// untouched, so a session with this hooked renders exactly as one without it.
+template <size_t Slot, bool FirstIsResource>
+HRESULT STDMETHODCALLTYPE hookedDevCreate(ID3D11Device* self, const void* first,
+                                          const void* second, void** out) {
+    const HRESULT hr = g_state->realDevCreate[Slot](self, first, second, out);
+    // Patching in place hooks the CLASS, so another device sharing the table
+    // arrives here too. It gets the same forward; only ours gets the line.
+    if (FAILED(hr) && self == g_state->device) {
+        noteDeviceCreateFailure(Slot, hr, first, second, FirstIsResource);
     }
     return hr;
 }
@@ -1373,6 +1531,21 @@ void hookDevice(ID3D11Device* device) {
                          reinterpret_cast<void**>(&s.realCreateCS));
     s.deviceHook.replace(kDevCreateTexture2D, &hookedCreateTexture2D,
                          reinterpret_cast<void**>(&s.realCreateTexture2D));
+    // The six remaining creates that can fail, hooked to REPORT and nothing
+    // else -- see kDevCreateBuffer. The prefix check above already covers
+    // every slot here: it demands more than kDevCreateComputeShader, which is
+    // 18, and the highest of these is 10.
+#define EDVR_HOOK_DEV_CREATE(slot, firstIsResource)                          \
+    s.deviceHook.replace(slot, &hookedDevCreate<slot, firstIsResource>,      \
+                         reinterpret_cast<void**>(&s.realDevCreate[slot]))
+    EDVR_HOOK_DEV_CREATE(kDevCreateBuffer, false);
+    EDVR_HOOK_DEV_CREATE(kDevCreateTexture1D, false);
+    EDVR_HOOK_DEV_CREATE(kDevCreateTexture3D, false);
+    EDVR_HOOK_DEV_CREATE(kDevCreateSrv, true);
+    EDVR_HOOK_DEV_CREATE(kDevCreateUav, true);
+    EDVR_HOOK_DEV_CREATE(kDevCreateRtv, true);
+    EDVR_HOOK_DEV_CREATE(kDevCreateDsv, true);
+#undef EDVR_HOOK_DEV_CREATE
     {
         const int aniso = sentinelCfg.getIntInRange("advanced.texture_anisotropy", 0, 0, 16);
         float bias = sentinelCfg.getFloat("advanced.texture_lod_bias", 0.0f);
