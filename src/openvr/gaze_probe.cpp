@@ -239,9 +239,14 @@ void off(const char* why) {
     Log::get().note("gaze probe: OFF for the session -- %s", why);
 }
 
+// The runtime's centre on this rig is d - t, a unit gaze minus the head's
+// position in the raw universe, and the raw origin sits metres away (5 m
+// one session, 15.6 the next), so the centre projects far outside the image
+// -- the flight of 2026-09-05 12:31 read it at 2.9 NDC and a bound of 2
+// called every frame malformed. Finite is the shape; 64 fences off garbage.
 bool wellFormed(const vr::HmdVector2_t& v) {
-    return std::isfinite(v.v[0]) && std::isfinite(v.v[1]) && fabsf(v.v[0]) <= 2.0f &&
-           fabsf(v.v[1]) <= 2.0f;
+    return std::isfinite(v.v[0]) && std::isfinite(v.v[1]) && fabsf(v.v[0]) <= 64.0f &&
+           fabsf(v.v[1]) <= 64.0f;
 }
 
 // Valve's ComposeProjection, from the raw tangents in the order the system
@@ -267,8 +272,8 @@ bool composeProjection(const float t4[4], vr::HmdMatrix44_t* out) {
 }
 
 bool wellFormedTan(const vr::HmdVector2_t& v) {
-    return std::isfinite(v.v[0]) && std::isfinite(v.v[1]) && fabsf(v.v[0]) <= 4.0f &&
-           fabsf(v.v[1]) <= 4.0f;
+    return std::isfinite(v.v[0]) && std::isfinite(v.v[1]) && fabsf(v.v[0]) <= 64.0f &&
+           fabsf(v.v[1]) <= 64.0f;
 }
 
 // ---------------------------------------------------------------------------
@@ -361,6 +366,17 @@ struct RepairWindow {
     uint32_t inFrustum[2][4] = {};
     double   pvrDiffSq[2][4] = {}; // squared angular difference to Route B, degrees^2
     uint32_t pvrN = 0;
+    // The subtraction (primary since the 12:31 flight): p from the point-form
+    // reads carries its scale, so d = p + t.
+    uint32_t subN = 0;             // frames with p and t, |d| plausible
+    uint32_t noP = 0;              // the point-form reads declined or were not finite
+    uint32_t dRejected = 0;        // |d| outside 0.5..2: the model did not hold that frame
+    double   pAbsSum = 0.0;
+    double   dAbsSum = 0.0, dAbsMin = 0.0, dAbsMax = 0.0;
+    double   dSubSum[4][3] = {};
+    uint32_t inFrustumSub[4] = {};
+    double   pvrDiffSqSub[4] = {};
+    uint32_t pvrSubN = 0;
     void reset() { *this = RepairWindow(); }
 };
 RepairWindow g_repair, g_repairTotal;
@@ -478,21 +494,8 @@ void pvrArm() {
         return;
     }
     g_pvr.table = table;
-    // Plausibility before the tracker: the version string readable, the
-    // clock a finite positive number.
-    const char* ver = nullptr;
-    double now = 0.0;
-    survived = guarded("gazeProbePvr/version", [&] {
-        ver = reinterpret_cast<PFN_PvrVersionString>(table[kPvrVersionString])();
-        now = reinterpret_cast<PFN_PvrTimeSeconds>(table[kPvrTimeSeconds])();
-    });
-    if (!survived || !ver || !std::isfinite(now) || now <= 0.0) {
-        g_pvr.sentinel->confirm();
-        pvrOff(survived ? "the version string or the clock did not answer plausibly (not the table "
-                          "this build was written against)"
-                        : "the version or clock call FAULTED (caught)");
-        return;
-    }
+    // initialise first: the clock and the version come from the connection
+    // it opens (the 12:31 flight asked before it and the answer was nothing).
     int32_t rc = -1;
     survived = guarded("gazeProbePvr/initialise", [&] {
         rc = reinterpret_cast<PFN_PvrInitialise>(table[kPvrInitialise])();
@@ -503,6 +506,32 @@ void pvrArm() {
         snprintf(why, sizeof(why), survived ? "initialise answered pvrResult %d (0 is success)"
                                             : "initialise FAULTED (caught)", rc);
         pvrOff(why);
+        return;
+    }
+    // Plausibility before the tracker: the version string readable, the
+    // clock a finite positive number; what was read is said either way.
+    const char* ver = nullptr;
+    double now = 0.0;
+    survived = guarded("gazeProbePvr/version", [&] {
+        ver = reinterpret_cast<PFN_PvrVersionString>(table[kPvrVersionString])();
+        now = reinterpret_cast<PFN_PvrTimeSeconds>(table[kPvrTimeSeconds])();
+    });
+    if (!survived || !ver || !std::isfinite(now) || now <= 0.0) {
+        g_pvr.sentinel->confirm();
+        char why[220];
+        if (survived) {
+            snprintf(why, sizeof(why),
+                     "after initialise the version string is %s and the clock reads %.3f (not the "
+                     "table this build was written against, or a runtime answering nothing to a "
+                     "second client)",
+                     ver ? "readable" : "null", now);
+        } else {
+            snprintf(why, sizeof(why), "the version or clock call FAULTED (caught)");
+        }
+        pvrOff(why);
+        guarded("gazeProbePvr/shutdown", [&] {
+            reinterpret_cast<PFN_PvrShutdown>(table[kPvrShutdown])();
+        });
         return;
     }
     PvrHmd hmd = nullptr;
@@ -629,21 +658,10 @@ void pvrShutdown() {
 // eye's frustum and, when Route B has a sample this frame, against its
 // averaged tangents.
 void repairAccumulate() {
-    vr::HmdVector2_t tan = {{NAN, NAN}};
-    bool declined = false;
-    const bool haveN = callProj(kDirRows, &tan, &declined) && wellFormedTan(tan);
+    RepairWindow* w[2] = {&g_repair, &g_repairTotal};
     double t[3];
     const bool haveT = readRawHead(t);
-    RepairWindow* w[2] = {&g_repair, &g_repairTotal};
-    if (!haveN) { for (RepairWindow* rw : w) ++rw->noN; }
     if (!haveT) { for (RepairWindow* rw : w) ++rw->noT; }
-    if (!haveN || !haveT) return;
-    double n[3] = {tan.v[0], tan.v[1], -1.0};
-    const double nl = sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
-    for (double& c : n) c /= nl;
-    const double nt = n[0] * t[0] + n[1] * t[1] + n[2] * t[2];
-    const double tt = t[0] * t[0] + t[1] * t[1] + t[2] * t[2];
-    const double disc = nt * nt - tt + 1.0;
     float t4[4];
     const bool haveFrustum = systemHookEffectiveTangents(vr::Eye_Left, t4) && t4[1] > t4[0] && t4[3] > t4[2];
     double pvrDir[3] = {0.0, 0.0, 0.0};
@@ -654,6 +672,65 @@ void repairAccumulate() {
         const double pl = sqrt(pvrDir[0] * pvrDir[0] + pvrDir[1] * pvrDir[1] + 1.0);
         for (double& c : pvrDir) c /= pl;
     }
+    // The subtraction: p with its scale from two point-form reads (x and y
+    // with the identity-with-w=1 matrix, z with the first row swapped in),
+    // then d = p + t. |d| near 1 is the model holding; far from it, that
+    // frame is not the model's and is set aside.
+    vr::HmdVector2_t xy = {{NAN, NAN}}, zy = {{NAN, NAN}};
+    bool dec1 = false, dec2 = false;
+    const bool haveP = callProj(kPointRows, &xy, &dec1) && callProj(kZRows, &zy, &dec2) &&
+                       std::isfinite(xy.v[0]) && std::isfinite(xy.v[1]) && std::isfinite(zy.v[0]) &&
+                       fabsf(xy.v[0]) < 1000.0f && fabsf(xy.v[1]) < 1000.0f && fabsf(zy.v[0]) < 1000.0f;
+    if (!haveP) { for (RepairWindow* rw : w) ++rw->noP; }
+    if (haveP && haveT) {
+        const double p[3] = {xy.v[0], xy.v[1], zy.v[0]};
+        const double d0[3] = {p[0] + t[0], p[1] + t[1], p[2] + t[2]};
+        const double dl = sqrt(d0[0] * d0[0] + d0[1] * d0[1] + d0[2] * d0[2]);
+        const double pl = sqrt(p[0] * p[0] + p[1] * p[1] + p[2] * p[2]);
+        for (RepairWindow* rw : w) {
+            if (!(dl > 0.5 && dl < 2.0)) {
+                ++rw->dRejected;
+                continue;
+            }
+            if (rw->subN == 0) rw->dAbsMin = rw->dAbsMax = dl;
+            if (dl < rw->dAbsMin) rw->dAbsMin = dl;
+            if (dl > rw->dAbsMax) rw->dAbsMax = dl;
+            ++rw->subN;
+            rw->pAbsSum += pl;
+            rw->dAbsSum += dl;
+            for (int v = 0; v < 4; ++v) {
+                const double d[3] = {((v & 1) ? -d0[0] : d0[0]) / dl, ((v & 2) ? -d0[1] : d0[1]) / dl,
+                                     d0[2] / dl};
+                for (int i = 0; i < 3; ++i) rw->dSubSum[v][i] += d[i];
+                if (haveFrustum && d[2] < 0.0) {
+                    const double tx = d[0] / -d[2], ty = d[1] / -d[2];
+                    if (tx >= t4[0] && tx <= t4[1] && ty >= t4[2] && ty <= t4[3]) ++rw->inFrustumSub[v];
+                }
+                if (g_pvr.fresh) {
+                    double dot = d[0] * pvrDir[0] + d[1] * pvrDir[1] + d[2] * pvrDir[2];
+                    if (dot > 1.0) dot = 1.0;
+                    if (dot < -1.0) dot = -1.0;
+                    const double deg = acos(dot) * 57.2957795;
+                    rw->pvrDiffSqSub[v] += deg * deg;
+                }
+            }
+            if (g_pvr.fresh) ++rw->pvrSubN;
+        }
+    }
+    // The quadratic, kept as the check for a runtime that normalises (the
+    // 12:31 flight showed this one does not, and that at |t| = 15 m the
+    // discriminant is a hundredth swamped by the reading's precision).
+    vr::HmdVector2_t tan = {{NAN, NAN}};
+    bool declined = false;
+    const bool haveN = callProj(kDirRows, &tan, &declined) && wellFormedTan(tan);
+    if (!haveN) { for (RepairWindow* rw : w) ++rw->noN; }
+    if (!haveN || !haveT) return;
+    double n[3] = {tan.v[0], tan.v[1], -1.0};
+    const double nl = sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+    for (double& c : n) c /= nl;
+    const double nt = n[0] * t[0] + n[1] * t[1] + n[2] * t[2];
+    const double tt = t[0] * t[0] + t[1] * t[1] + t[2] * t[2];
+    const double disc = nt * nt - tt + 1.0;
     for (RepairWindow* rw : w) {
         ++rw->n;
         for (int i = 0; i < 3; ++i) rw->tSum[i] += t[i];
@@ -691,8 +768,43 @@ void repairAccumulate() {
 
 void repairSummary(bool final) {
     const RepairWindow& w = final ? g_repairTotal : g_repair;
-    if (w.n == 0 && w.noN == 0 && w.noT == 0) return;
+    if (w.n == 0 && w.noN == 0 && w.noT == 0 && w.subN == 0 && w.noP == 0) return;
     const char* vnames[4] = {"as-is", "x-mirrored", "y-mirrored", "both"};
+    {
+        char dirs[400];
+        int len = 0;
+        for (int v = 0; v < 4; ++v) {
+            const double* s = w.dSubSum[v];
+            const double l = sqrt(s[0] * s[0] + s[1] * s[1] + s[2] * s[2]);
+            double yaw = 0.0, pitch = 0.0;
+            if (l > 0.0) {
+                const double d[3] = {s[0] / l, s[1] / l, s[2] / l};
+                anglesOf(d, &yaw, &pitch);
+            }
+            len += snprintf(dirs + len, sizeof(dirs) - len, "%s%s %+.1f/%+.1f (%.0f%% in frustum)",
+                            v ? ", " : "", vnames[v], yaw, pitch,
+                            w.subN ? 100.0 * w.inFrustumSub[v] / w.subN : 0.0);
+        }
+        char agree[200] = "no Route B samples this window";
+        if (w.pvrSubN) {
+            int alen = snprintf(agree, sizeof(agree), "RMS to Route B: ");
+            for (int v = 0; v < 4; ++v) {
+                alen += snprintf(agree + alen, sizeof(agree) - alen, "%s%s %.1f deg", v ? ", " : "",
+                                 vnames[v], sqrt(w.pvrDiffSqSub[v] / w.pvrSubN));
+            }
+        }
+        Log::get().note(
+            "gaze probe %s, the frame repair by SUBTRACTION (Route A, primary): over %u frames (%u the "
+            "point-form read declined or was not finite, %u without a raw pose, %u with |d| outside "
+            "0.5..2 set aside) p = the runtime's centre with its scale, |p| mean %.2f m; d = p + t "
+            "has |d| mean %.3f, %.3f..%.3f (1.000 says the model is exact); d's mean direction as "
+            "yaw/pitch, degrees, + = right/up: %s. Straight ahead at rest and swinging with the eye "
+            "sweeps in one variant is the gaze; the head turn with the gaze held must swing it the "
+            "other way by the head's yaw. %s.",
+            final ? "SESSION TOTALS" : "summary", w.subN, w.noP, w.noT, w.dRejected,
+            w.subN ? w.pAbsSum / w.subN : 0.0, w.subN ? w.dAbsSum / w.subN : 0.0, w.dAbsMin, w.dAbsMax,
+            dirs, agree);
+    }
     char roots[2][320];
     for (int root = 0; root < 2; ++root) {
         int len = 0;
@@ -774,6 +886,7 @@ void driverIdentity(char* system, size_t systemCap, char* version, size_t versio
         buf[0] = 0;
         n = g_stringProp(vr::k_unTrackedDeviceIndex_Hmd, 1031, buf, sizeof(buf), &err);
         if (n > 0 && err == 0) snprintf(version, versionCap, "%s", buf);
+        else snprintf(version, versionCap, "? (property error %d)", err);
     });
 }
 
@@ -800,9 +913,9 @@ void record(bool vouched, const vr::HmdVector2_t& L, const vr::HmdVector2_t& R) 
         g_firstValidSaid = true;
         Log::get().note(
             "gaze probe: FIRST VALID CENTRE, %u frame(s) after arming -- the runtime "
-            "vouched for a per-eye point with a shape (finite, within 2 of the "
-            "image centre in NDC). Whether it FOLLOWS the eyes is what the "
-            "summaries below say: read the per-frame step and the ranges.",
+            "vouched for a per-eye point with a shape (finite). Whether it FOLLOWS "
+            "the eyes is what the summaries below say: read the per-frame step and "
+            "the ranges.",
             g_frames);
     }
 }
