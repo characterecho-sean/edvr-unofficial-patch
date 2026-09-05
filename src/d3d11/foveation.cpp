@@ -244,6 +244,37 @@ struct Seen {
 Seen     g_seen[48];
 uint32_t g_seenCount = 0;
 
+// Draws under the image by target signature, for the summary: which of the
+// frame's targets the coarse shading actually reached, and how many draws
+// went into each with and without it.
+struct Sig {
+    bool     used = false;
+    uint32_t w = 0, h = 0, fmt = 0;
+    uint64_t under = 0;   // eye draws into it with the image bound
+    uint64_t bare = 0;    // eye draws into it with no image (none made yet, or the passes filter)
+};
+Sig      g_sigs[8];
+Sig*     g_lastSig = nullptr;
+uint64_t g_eyeDraws = 0;       // eye-sized draws while armed
+uint64_t g_eyeDrawsUnder = 0;  // ...with the image bound
+uint64_t g_otherDraws = 0;     // draws into anything else while armed
+
+Sig* sigFor(const ResourceInfo& info) {
+    for (Sig& s : g_sigs) {
+        if (s.used && s.w == info.a && s.h == info.b && s.fmt == info.fmt) return &s;
+    }
+    for (Sig& s : g_sigs) {
+        if (!s.used) {
+            s.used = true;
+            s.w = info.a;
+            s.h = info.b;
+            s.fmt = info.fmt;
+            return &s;
+        }
+    }
+    return nullptr;
+}
+
 uint32_t  g_frame = 0;
 IUnknown* g_bound = nullptr;        // the view the context holds, as far as we know
 bool      g_boundUnknown = false;   // ClearState: whatever was bound may be gone
@@ -579,14 +610,25 @@ void arm(ID3D11DeviceContext* ctx) {
 
 void summary(const char* when) {
     const double f = g_framesArmed ? static_cast<double>(g_framesArmed) : 1.0;
+    char by[400];
+    int bl = 0;
+    for (const Sig& s : g_sigs) {
+        if (!s.used) continue;
+        bl += snprintf(by + bl, sizeof(by) - bl, "%s%ux%u fmt %u: %.0f under, %.0f bare", bl ? "; " : "", s.w, s.h,
+                       s.fmt, static_cast<double>(s.under) / f, static_cast<double>(s.bare) / f);
+        if (bl >= static_cast<int>(sizeof(by)) - 1) break;
+    }
     Log::get().note(
         "foveation: %s -- %u frames with the image armed; %.1f eye-sized targets a frame attributed "
         "to the left eye and %.1f to the right (%.1f a frame by the submitted texture, the rest by "
         "first-bind order); %.1f image switches a frame (most %u); %u images made; %u frames "
-        "without published tangents.",
+        "without published tangents. Draws a frame: %.0f into eye-sized targets, %.0f of them under "
+        "the image, %.0f into everything else; by target: %s.",
         when, g_framesArmed, static_cast<double>(g_targetsSum[0]) / f,
         static_cast<double>(g_targetsSum[1]) / f, static_cast<double>(g_submitMatched) / f,
-        static_cast<double>(g_switches) / f, g_switchesMax, g_imagesMade, g_noTangentFrames);
+        static_cast<double>(g_switches) / f, g_switchesMax, g_imagesMade, g_noTangentFrames,
+        static_cast<double>(g_eyeDraws) / f, static_cast<double>(g_eyeDrawsUnder) / f,
+        static_cast<double>(g_otherDraws) / f, bl ? by : "none seen");
 }
 
 }  // namespace
@@ -668,7 +710,16 @@ void foveationOnDraw(ID3D11DeviceContext* ctx, bool rtvEyeSized, void* rtv, uint
         return;
     }
     const bool fullScreenPass = count <= 6 && instances <= 1;
-    if (!rtvEyeSized || (g_geometryOnly && fullScreenPass)) {
+    if (!rtvEyeSized) {
+        if (g_phase == Phase::Armed) ++g_otherDraws;
+        if (g_bound || g_boundUnknown) applyView(ctx, nullptr);
+        return;
+    }
+    if (g_geometryOnly && fullScreenPass) {
+        if (g_phase == Phase::Armed) {
+            ++g_eyeDraws;
+            if (g_lastSig) ++g_lastSig->bare;
+        }
         if (g_bound || g_boundUnknown) applyView(ctx, nullptr);
         return;
     }
@@ -679,15 +730,26 @@ void foveationOnDraw(ID3D11DeviceContext* ctx, bool rtvEyeSized, void* rtv, uint
     if (rtvGen != g_lastRtvGen) {
         g_lastRtvGen = rtvGen;
         g_lastMask = nullptr;
+        g_lastSig = nullptr;
         ResourceInfo info;
         if (bindingResolve(rtv, &info) && info.isTexture2D && info.a >= kTile && info.b >= kTile) {
             const int eye = eyeOf(info);
+            g_lastSig = sigFor(info);
             g_lastMask = maskFor(ctx, info.a, info.b, eye);
             if (!g_lastMask && g_phase == Phase::Armed) ++g_noTangentFrames;
         }
     }
     IUnknown* want = g_lastMask ? g_lastMask->view : nullptr;
     if (want != g_bound || g_boundUnknown) applyView(ctx, want);
+    if (g_phase == Phase::Armed) {
+        ++g_eyeDraws;
+        if (want) {
+            ++g_eyeDrawsUnder;
+            if (g_lastSig) ++g_lastSig->under;
+        } else if (g_lastSig) {
+            ++g_lastSig->bare;
+        }
+    }
 }
 
 void foveationFrameBoundary(ID3D11DeviceContext* ctx) {

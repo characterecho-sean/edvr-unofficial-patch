@@ -377,6 +377,15 @@ struct RepairWindow {
     uint32_t inFrustumSub[4] = {};
     double   pvrDiffSqSub[4] = {};
     uint32_t pvrSubN = 0;
+    // The point-form vector's magnitudes over EVERY frame with p and t, so
+    // the frame and sign it is handed out in can be read off: which of
+    // |p + t| and |p - t| is 1, whether p is parallel to the direction-form
+    // n (cos +1) or opposed to it (-1), and the mean vectors themselves.
+    uint32_t magN = 0;
+    double   pAbs = 0.0, tAbs = 0.0, plusAbs = 0.0, minusAbs = 0.0;
+    double   cosPN = 0.0;
+    uint32_t cosN = 0;
+    double   pMean[3] = {}, tMean[3] = {};
     void reset() { *this = RepairWindow(); }
 };
 RepairWindow g_repair, g_repairTotal;
@@ -672,10 +681,24 @@ void repairAccumulate() {
         const double pl = sqrt(pvrDir[0] * pvrDir[0] + pvrDir[1] * pvrDir[1] + 1.0);
         for (double& c : pvrDir) c /= pl;
     }
-    // The subtraction: p with its scale from two point-form reads (x and y
-    // with the identity-with-w=1 matrix, z with the first row swapped in),
-    // then d = p + t. |d| near 1 is the model holding; far from it, that
-    // frame is not the model's and is set aside.
+    // The direction-form read first: its n serves the quadratic and the
+    // point-form's parallelism check alike.
+    vr::HmdVector2_t tan = {{NAN, NAN}};
+    bool declined = false;
+    const bool haveN = callProj(kDirRows, &tan, &declined) && wellFormedTan(tan);
+    if (!haveN) { for (RepairWindow* rw : w) ++rw->noN; }
+    double n[3] = {0.0, 0.0, -1.0};
+    if (haveN) {
+        n[0] = tan.v[0];
+        n[1] = tan.v[1];
+        const double nl = sqrt(n[0] * n[0] + n[1] * n[1] + 1.0);
+        for (double& c : n) c /= nl;
+    }
+    // The point-form check: p with its scale from two point-form reads (x
+    // and y with the identity-with-w=1 matrix, z with the first row swapped
+    // in). The 14:54 flight set every frame of p + t aside as not unit
+    // length, so the magnitudes are kept for every frame here and the
+    // acceptance below is the model being tested, not the model.
     vr::HmdVector2_t xy = {{NAN, NAN}}, zy = {{NAN, NAN}};
     bool dec1 = false, dec2 = false;
     const bool haveP = callProj(kPointRows, &xy, &dec1) && callProj(kZRows, &zy, &dec2) &&
@@ -685,9 +708,25 @@ void repairAccumulate() {
     if (haveP && haveT) {
         const double p[3] = {xy.v[0], xy.v[1], zy.v[0]};
         const double d0[3] = {p[0] + t[0], p[1] + t[1], p[2] + t[2]};
+        const double m0[3] = {p[0] - t[0], p[1] - t[1], p[2] - t[2]};
         const double dl = sqrt(d0[0] * d0[0] + d0[1] * d0[1] + d0[2] * d0[2]);
+        const double ml = sqrt(m0[0] * m0[0] + m0[1] * m0[1] + m0[2] * m0[2]);
         const double pl = sqrt(p[0] * p[0] + p[1] * p[1] + p[2] * p[2]);
+        const double tl = sqrt(t[0] * t[0] + t[1] * t[1] + t[2] * t[2]);
         for (RepairWindow* rw : w) {
+            ++rw->magN;
+            rw->pAbs += pl;
+            rw->tAbs += tl;
+            rw->plusAbs += dl;
+            rw->minusAbs += ml;
+            for (int i = 0; i < 3; ++i) {
+                rw->pMean[i] += p[i];
+                rw->tMean[i] += t[i];
+            }
+            if (haveN && pl > 0.0) {
+                rw->cosPN += (p[0] * n[0] + p[1] * n[1] + p[2] * n[2]) / pl;
+                ++rw->cosN;
+            }
             if (!(dl > 0.5 && dl < 2.0)) {
                 ++rw->dRejected;
                 continue;
@@ -717,17 +756,9 @@ void repairAccumulate() {
             if (g_pvr.fresh) ++rw->pvrSubN;
         }
     }
-    // The quadratic, kept as the check for a runtime that normalises (the
-    // 12:31 flight showed this one does not, and that at |t| = 15 m the
-    // discriminant is a hundredth swamped by the reading's precision).
-    vr::HmdVector2_t tan = {{NAN, NAN}};
-    bool declined = false;
-    const bool haveN = callProj(kDirRows, &tan, &declined) && wellFormedTan(tan);
-    if (!haveN) { for (RepairWindow* rw : w) ++rw->noN; }
+    // The quadratic -- Route A as it stands: the 14:54 flight's far root,
+    // both axes mirrored, agreed with Route B to 0.2 degrees RMS.
     if (!haveN || !haveT) return;
-    double n[3] = {tan.v[0], tan.v[1], -1.0};
-    const double nl = sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
-    for (double& c : n) c /= nl;
     const double nt = n[0] * t[0] + n[1] * t[1] + n[2] * t[2];
     const double tt = t[0] * t[0] + t[1] * t[1] + t[2] * t[2];
     const double disc = nt * nt - tt + 1.0;
@@ -793,17 +824,19 @@ void repairSummary(bool final) {
                                  vnames[v], sqrt(w.pvrDiffSqSub[v] / w.pvrSubN));
             }
         }
+        const double mn = w.magN ? static_cast<double>(w.magN) : 1.0;
         Log::get().note(
-            "gaze probe %s, the frame repair by SUBTRACTION (Route A, primary): over %u frames (%u the "
-            "point-form read declined or was not finite, %u without a raw pose, %u with |d| outside "
-            "0.5..2 set aside) p = the runtime's centre with its scale, |p| mean %.2f m; d = p + t "
-            "has |d| mean %.3f, %.3f..%.3f (1.000 says the model is exact); d's mean direction as "
-            "yaw/pitch, degrees, + = right/up: %s. Straight ahead at rest and swinging with the eye "
-            "sweeps in one variant is the gaze; the head turn with the gaze held must swing it the "
-            "other way by the head's yaw. %s.",
-            final ? "SESSION TOTALS" : "summary", w.subN, w.noP, w.noT, w.dRejected,
-            w.subN ? w.pAbsSum / w.subN : 0.0, w.subN ? w.dAbsSum / w.subN : 0.0, w.dAbsMin, w.dAbsMax,
-            dirs, agree);
+            "gaze probe %s, the point-form check (Route A's second reading): over %u frames with p and t "
+            "|p| %.2f, |t| %.2f, |p + t| %.2f, |p - t| %.2f, cos(p, n) %+.3f over %u; p mean (%.2f, %.2f, "
+            "%.2f), t mean (%.2f, %.2f, %.2f). Whichever of |p + t| and |p - t| reads 1.000 is the "
+            "model; cos +1 says p points along the direction-form reading, -1 against it. The unit "
+            "test as built (d = p + t within 0.5..2): %u frames accepted (%u the read declined, %u "
+            "without a raw pose, %u set aside), |d| mean %.3f, %.3f..%.3f; d's mean direction as "
+            "yaw/pitch, degrees, + = right/up: %s. %s.",
+            final ? "SESSION TOTALS" : "summary", w.magN, w.pAbs / mn, w.tAbs / mn, w.plusAbs / mn,
+            w.minusAbs / mn, w.cosN ? w.cosPN / w.cosN : 0.0, w.cosN, w.pMean[0] / mn, w.pMean[1] / mn,
+            w.pMean[2] / mn, w.tMean[0] / mn, w.tMean[1] / mn, w.tMean[2] / mn, w.subN, w.noP, w.noT,
+            w.dRejected, w.subN ? w.dAbsSum / w.subN : 0.0, w.dAbsMin, w.dAbsMax, dirs, agree);
     }
     char roots[2][320];
     for (int root = 0; root < 2; ++root) {

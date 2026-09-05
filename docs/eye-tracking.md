@@ -400,9 +400,9 @@ sat 5.8 to 6.4 m from the head this session. Three findings:
    Route B held one value, (0.043, 0.134) in both eyes, for the rest of
    the flight, its blink mean 0.47 in the window it froze and 0 after,
    its sample time still advancing at the frame rate. Both routes read
-   the same tracker, so the tracker itself stopped delivering -- a
-   headset lifted, eyes lost, or Pimax Play's tracking going idle -- and
-   the flight cannot say which.
+   the same tracker, so the tracker itself stopped delivering. Sean: "I
+   probably took the headset off when it froze" -- so a lifted headset
+   holds the last sample with every flag still set, and nothing idled.
 
 The rebuilt probe (`e230df2`) does the subtraction every frame from two
 point-form reads (x and y with the identity-with-w matrix, z with the
