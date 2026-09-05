@@ -1327,7 +1327,7 @@ struct MotionRig {
     void uploadFrame(int mode, uint32_t k) {
         const bool half = mode >= 2;
         const uint32_t w = half ? kMW / 2 : kMW, h = half ? kMH / 2 : kMH;
-        const uint8_t* g = (mode == 2 ? framesH[k] : mode == 3 ? framesP[k] : framesF[k]).data();
+        const uint8_t* g = (mode == 2 ? framesH[k] : mode >= 3 ? framesP[k] : framesF[k]).data();
         for (uint32_t i = 0; i < w * h; ++i) {
             rgba[i * 4 + 0] = g[i];
             rgba[i * 4 + 1] = g[i];
@@ -1354,20 +1354,23 @@ struct MotionRig {
     // preset is the render-preset hint for the mode's quality, set on the
     // shared parameter block before the create (0 = the driver's default);
     // the caller restores the defaults when its sweep is done.
+    // ...and 4: Performance 2x on a CROP with output sub-rectangles -- the
+    // dlss fovea's exact path (a half-size input crop of the point-sampled
+    // frame becomes the full-size output crop at the same base).
     NVSDK_NGX_Handle* makeFeature(int mode, unsigned preset) {
-        const bool perf = mode == 3;
+        const bool perf = mode == 3 || mode == 4;
         NVSDK_NGX_DLSS_Create_Params cp{};
-        const uint32_t w = mode == 1 ? kMCW : (mode == 2 || perf) ? kMW / 2 : kMW;
-        const uint32_t h = mode == 1 ? kMCH : (mode == 2 || perf) ? kMH / 2 : kMH;
+        const uint32_t w = mode == 1 ? kMCW : mode == 4 ? kMCW / 2 : (mode == 2 || perf) ? kMW / 2 : kMW;
+        const uint32_t h = mode == 1 ? kMCH : mode == 4 ? kMCH / 2 : (mode == 2 || perf) ? kMH / 2 : kMH;
         cp.Feature.InWidth = w;
         cp.Feature.InHeight = h;
-        cp.Feature.InTargetWidth = perf ? kMW : w;
-        cp.Feature.InTargetHeight = perf ? kMH : h;
+        cp.Feature.InTargetWidth = mode == 4 ? kMCW : perf ? kMW : w;
+        cp.Feature.InTargetHeight = mode == 4 ? kMCH : perf ? kMH : h;
         cp.Feature.InPerfQualityValue =
             perf ? NVSDK_NGX_PerfQuality_Value_MaxPerf : NVSDK_NGX_PerfQuality_Value_DLAA;
         cp.InFeatureCreateFlags = NVSDK_NGX_DLSS_Feature_Flags_MVLowRes |
                                   NVSDK_NGX_DLSS_Feature_Flags_DepthInverted;
-        cp.InEnableOutputSubrects = mode == 1;
+        cp.InEnableOutputSubrects = mode == 1 || mode == 4;
         g_params->Set(perf ? NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Performance
                            : NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_DLAA,
                       preset);
@@ -1379,7 +1382,7 @@ struct MotionRig {
 
     bool eval(int mode, NVSDK_NGX_Handle* h, float jx, float jy, bool reset, float frameMs,
               NVSDK_NGX_Result* err) {
-        const bool halfIn = mode == 2 || mode == 3;   // the half-size inputs
+        const bool halfIn = mode >= 2;   // the half-size inputs
         NVSDK_NGX_D3D11_DLSS_Eval_Params ep{};
         ep.Feature.pInColor = halfIn ? colourH : colour;
         ep.Feature.pInOutput = mode == 2 ? outputH : output;   // Performance answers at the full size
@@ -1387,18 +1390,19 @@ struct MotionRig {
         ep.pInMotionVectors = halfIn ? motionH : motion;
         ep.InJitterOffsetX = jx;
         ep.InJitterOffsetY = jy;
-        ep.InRenderSubrectDimensions.Width = mode == 1 ? kMCW : halfIn ? kMW / 2 : kMW;
-        ep.InRenderSubrectDimensions.Height = mode == 1 ? kMCH : halfIn ? kMH / 2 : kMH;
+        ep.InRenderSubrectDimensions.Width = mode == 1 ? kMCW : mode == 4 ? kMCW / 2 : halfIn ? kMW / 2 : kMW;
+        ep.InRenderSubrectDimensions.Height = mode == 1 ? kMCH : mode == 4 ? kMCH / 2 : halfIn ? kMH / 2 : kMH;
         ep.InReset = reset ? 1 : 0;
         ep.InMVScaleX = 1.0f;
         ep.InMVScaleY = 1.0f;
-        if (mode == 1) {
-            ep.InColorSubrectBase.X = kMCX;
-            ep.InColorSubrectBase.Y = kMCY;
-            ep.InDepthSubrectBase.X = kMCX;
-            ep.InDepthSubrectBase.Y = kMCY;
-            ep.InMVSubrectBase.X = kMCX;
-            ep.InMVSubrectBase.Y = kMCY;
+        if (mode == 1 || mode == 4) {
+            const uint32_t ibx = mode == 4 ? kMCX / 2 : kMCX, iby = mode == 4 ? kMCY / 2 : kMCY;
+            ep.InColorSubrectBase.X = ibx;
+            ep.InColorSubrectBase.Y = iby;
+            ep.InDepthSubrectBase.X = ibx;
+            ep.InDepthSubrectBase.Y = iby;
+            ep.InMVSubrectBase.X = ibx;
+            ep.InMVSubrectBase.Y = iby;
             ep.InOutputSubrectBase.X = kMCX;
             ep.InOutputSubrectBase.Y = kMCY;
         }
@@ -1412,12 +1416,14 @@ struct MotionRig {
 
     // Mean absolute error over the crop's interior (at half size, the same
     // region at half the coordinates) against frame k's truth, 0..255.
-    double measure(int mode, uint32_t k) {
+    // sx shifts the truth along the pan (in the series' own pixels): the
+    // shift that fits best says where the output's content really sits.
+    double measure(int mode, uint32_t k, int sx = 0) {
         const bool half = mode == 2;
         const uint32_t d = half ? 2u : 1u;
         const uint32_t bx = kMCX / d, by = kMCY / d, cw = kMCW / d, ch = kMCH / d, bd = kMBorder / d;
         const uint32_t tw = (kMW + kMExtra) / d;
-        const uint32_t shift = shiftAt(k) / d;
+        const uint32_t shift = static_cast<uint32_t>(static_cast<int>(shiftAt(k) / d) + sx);
         const std::vector<float>& truth = half ? truthH : truthF;
         ID3D11Texture2D* stg = half ? stagingH : staging;
         D3D11_BOX box{bx, by, 0, bx + cw, by + ch, 1};
@@ -1444,14 +1450,21 @@ struct MotionRig {
     // minus current is the pass's convention: content that moved left by v
     // was at x + v last frame), the jitter handed over with jSign; the error
     // after every frame.
+    // lagOut, when given, receives the output's positional lag under the
+    // steady pan (frames 8..17) in FRAMES: the truth shift that fits the
+    // output best, refined between integers, over the pan's per-frame step;
+    // positive means the output trails the motion.
     bool run(int mode, int mvSign, float jSign, double err[kMFrames], ProbeReport& rep,
-             const char* name, unsigned preset = 0, float frameMs = 11.1f) {
+             const char* name, unsigned preset = 0, float frameMs = 11.1f,
+             double* lagOut = nullptr) {
         NVSDK_NGX_Handle* h = makeFeature(mode, preset);
         if (!h) {
             rep.line("motion probe: %s -- the feature would not be created", name);
             return false;
         }
-        const bool half = mode == 2 || mode == 3;   // half-size inputs: half the pan
+        const bool half = mode >= 2;   // half-size inputs: half the pan
+        double lagSum = 0.0;
+        uint32_t lagN = 0;
         const float v = half ? kMV * 0.5f : static_cast<float>(kMV);
         // The box-reduced frame carries half the full frame's jitter; the
         // point-sampled one has its own, in its own pixels.
@@ -1474,7 +1487,26 @@ struct MotionRig {
                 break;
             }
             err[k] = measure(mode, k);
+            if (lagOut && k >= 8 && k <= kMMoving - 1) {
+                double e[7];
+                int best = 3;
+                for (int s = -3; s <= 3; ++s) {
+                    e[s + 3] = measure(mode, k, s);
+                    if (e[s + 3] >= 0.0 && e[s + 3] < e[best]) best = s + 3;
+                }
+                double sx = static_cast<double>(best - 3);
+                if (best > 0 && best < 6) {
+                    const double a = e[best - 1], b = e[best], c = e[best + 1];
+                    const double den = a - 2.0 * b + c;
+                    if (den > 1e-9) sx += 0.5 * (a - c) / den;
+                }
+                // output(x) ~ truth(x + sx); trailing content is at x - lag*v,
+                // so the lag in frames is -sx / v.
+                lagSum += -sx / v;
+                ++lagN;
+            }
         }
+        if (lagOut) *lagOut = lagN ? lagSum / lagN : 0.0;
         NVSDK_NGX_D3D11_ReleaseFeature(h);
         return ok;
     }
@@ -1548,23 +1580,45 @@ int dlaaMotionProbe(ID3D11Device* dev, ID3D11DeviceContext* ctx, char* report,
              "jitter handed over as %s",
              mvSign > 0 ? "+" : "-", jSign < 0 ? "the content's shift (-j)" : "the sample offset (+j)");
 
-    double crop[kMFrames], half[kMFrames];
-    if (!rig.run(1, mvSign, jSign, crop, rep, "fovea crop")) return 0;
-    if (!rig.run(2, mvSign, jSign, half, rep, "half-size frame")) return 0;
+    double crop[kMFrames], half[kMFrames], perfFull[kMFrames], perfCrop[kMFrames];
+    double lagFull = 0.0, lagCrop = 0.0, lagHalf = 0.0, lagPerfFull = 0.0, lagPerfCrop = 0.0;
+    if (!rig.run(0, mvSign, jSign, full, rep, "full frame (lag)", 0, 11.1f, &lagFull)) return 0;
+    if (!rig.run(1, mvSign, jSign, crop, rep, "fovea crop", 0, 11.1f, &lagCrop)) return 0;
+    if (!rig.run(2, mvSign, jSign, half, rep, "half-size frame", 0, 11.1f, &lagHalf)) return 0;
+    // The dlss configuration's pair, both under the shipped preset K: the
+    // periphery is the half-size DLAA above; the fovea is Performance 2x on a
+    // crop with output sub-rectangles, here beside Performance 2x on the whole
+    // frame so a sub-rectangle defect in the UPSCALING path would show.
+    const bool perfFullOk = rig.run(3, mvSign, jSign, perfFull, rep, "Performance 2x, full frame", 11, 11.1f, &lagPerfFull);
+    const bool perfCropOk = rig.run(4, mvSign, jSign, perfCrop, rep, "Performance 2x, fovea crop", 11, 11.1f, &lagPerfCrop);
 
     const uint32_t cols[12] = {0, 2, 5, 8, 11, 14, 17, 18, 19, 21, 25, 35};
     char line[512];
-    int n = snprintf(line, sizeof(line), "  frame:            ");
+    int n = snprintf(line, sizeof(line), "  frame:                 ");
     for (uint32_t c : cols) n += snprintf(line + n, sizeof(line) - n, "%6u", c);
     rep.line("%s", line);
-    const char* names[3] = {"  full-frame DLAA:  ", "  fovea crop DLAA:  ", "  half-size DLAA:   "};
-    const double* series[3] = {full, crop, half};
-    for (int s = 0; s < 3; ++s) {
+    const char* names[5] = {"  full-frame DLAA:       ", "  fovea crop DLAA:       ", "  half-size DLAA:        ",
+                            "  Perf 2x full (K):      ", "  Perf 2x crop (K):      "};
+    const double* series[5] = {full, crop, half, perfFull, perfCrop};
+    const bool have[5] = {true, true, true, perfFullOk, perfCropOk};
+    for (int s = 0; s < 5; ++s) {
+        if (!have[s]) continue;
         n = snprintf(line, sizeof(line), "%s", names[s]);
         for (uint32_t c : cols) n += snprintf(line + n, sizeof(line) - n, "%6.2f", series[s][c]);
         rep.line("%s", line);
     }
     rep.line("  (frames 1..%u pan; %u is the first still frame)", kMMoving, kMMoving + 1);
+    rep.line("  positional lag under the steady pan, in frames (+ trails the motion): full %.2f, crop %.2f, "
+             "half-size %.2f, Perf 2x full %.2f, Perf 2x crop %.2f",
+             lagFull, lagCrop, lagHalf, lagPerfFull, lagPerfCrop);
+    if (perfFullOk && perfCropOk) {
+        const double pfM = motionMean(perfFull, 8, kMMoving - 1), pcM = motionMean(perfCrop, 8, kMMoving - 1);
+        const double pfR = motionMean(perfFull, 28, 35), pcR = motionMean(perfCrop, 28, 35);
+        rep.line("  Performance 2x, crop against full: pan %.2f vs %.2f (%.2fx), rest %.2f vs %.2f (%.2fx)%s",
+                 pcM, pfM, pfM > 0.0 ? pcM / pfM : 0.0, pcR, pfR, pfR > 0.0 ? pcR / pfR : 0.0,
+                 (pfM > 0.0 && pcM / pfM > 1.2) ? "   <- THE UPSCALING CROP IS WORSE UNDER MOTION: a sub-rectangle defect"
+                                                 : "");
+    }
 
     const double fullMove = motionMean(full, 8, kMMoving - 1), fullEarly = motionMean(full, 19, 21),
                  fullRest = motionMean(full, 28, 35);
