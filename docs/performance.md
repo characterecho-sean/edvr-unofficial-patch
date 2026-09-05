@@ -267,6 +267,81 @@ foveation_headsets =       ; same FOV-signature gate as cull_guard_headsets
 ; custom: ring boundaries in degrees of visual angle, per-ring rates
 ```
 
+**Reference: how OpenXR Toolkit does it (read from its source, 2026-09-05).**
+mbucchia's OpenXR Toolkit (retired; last commit 2023-11-05) implements fixed
+and eye-tracked foveation as variable-rate shading with a shading-rate image,
+which is what this feature is. What its source settles:
+
+- *Mechanism.* D3D11 is NVIDIA-only through NvAPI: capabilities via
+  `NvAPI_D3D1x_GetGraphicsCapabilities` (`bVariablePixelRateShadingSupported`),
+  an R8_UINT mask texture at one texel per 16x16-pixel tile
+  (`NV_VARIABLE_PIXEL_SHADING_TILE_WIDTH`) wrapped in a shading-rate resource
+  view (`NvAPI_D3D11_CreateShadingRateResourceView`), a per-viewport lookup
+  table from mask value to rate set on all sixteen viewports at once
+  (`NvAPI_D3D11_RSSetViewportsPixelShadingRates`: X16..X1 per pixel, 2x1, 1x2,
+  2x2, 4x2, 2x4, 4x4, X0 cull), and the view bound with
+  `NvAPI_D3D11_RSSetShadingRateResourceView`. D3D12 uses Tier 2
+  `RSSetShadingRateImage` with MAX combiners so the coarsest source wins. The
+  NvAPI views are leaked on purpose and `NvAPI_Unload` is never called: both
+  crashed.
+- *The mask.* A compute shader writes up to four nested ellipses in NDC around
+  a centre: rate 1 inside ring 1, rate 2 between rings 1 and 2, rate 3 beyond
+  (ring 3 is "large enough"). Radii are PERCENT OF THE NDC HALF-HEIGHT, not
+  degrees, the horizontal semi-axis scaled by "Horizontal scale" (default
+  125%); presets Wide 55/80, Balanced 50/60, Narrow 30/55; rates Performance =
+  1x / 2x2 / 4x4 and Quality = 1x / 2x1 / 2x2; "Prefer resolution" swaps 2x1
+  for 1x2 and 4x2 for 2x4 (the default keeps vertical resolution); "Left/Right
+  bias" coarsens one eye by N steps. On the Crystal Super's frustum (tan
+  +-1.27 vertically) Wide's inner ring is a 35-degree radius: full shading over
+  the central ~70 degrees, 2x2 out to ~90, 4x4 beyond. Its degradation starts
+  far out and is gentle, and only the shading is coarse (rasterisation, depth
+  and edges stay per-pixel), which is why nobody sees a disc.
+- *The centre.* Not the texture centre: the head's forward axis projected
+  through each eye's FOV and pose (`GetProjectedGaze`, so asymmetric and canted
+  frusta are handled), then shifted 4% of the NDC half-width TOWARD THE NOSE
+  per eye, "determined experimentally". That is vergence: the eyes converge on
+  a cockpit at ~0.7 m and their fixation lands ~3 degrees nasal of straight
+  ahead. Feature 6's disc sits on the straight-ahead point with no such term.
+- *Where it applies.* The immediate context's vtable is detoured (Detours) at
+  `OMSetRenderTargets` and `OMSetRenderTargetsAndUnorderedAccessViews`; every
+  bind inside a frame is a candidate when the target is a Texture2D whose
+  aspect matches the eye render aspect (or half its width does: double-wide),
+  its width is at least 51% of the frame's dominant render width (a filter
+  that follows dynamic resolution and excludes half-size effect buffers), and
+  its array size is at most 2; a bind of anything else, or of null, disables
+  VRS, and so does the end of the frame. There is no depth test: eye-sized
+  post-processing passes are masked too, the source of its blocky bloom in
+  some titles. Masks exist per distinct target size, made on demand (deferred a
+  frame), aged out after 100 unused frames, regenerated only when settings
+  change -- or every frame under eye tracking.
+- *Which eye.* A frame analyzer: a swapchain image bound directly (forward
+  rendering), a copy INTO a swapchain image (deferred: the next target is the
+  other eye), or swapchain acquire order (fallback). Under OpenComposite it is
+  disabled and one centred "generic" mask serves both eyes, without the nasal
+  offset.
+- *Eye tracking.* `XR_EXT_eye_gaze_interaction`, `XR_FB_eye_tracking_social`
+  (the two eyes' poses slerped), HP Omnicept, and Pimax's aSeeVR/Droolon SDK
+  (the 5K/8K module, not the Crystal's Tobii). The gaze becomes a point at
+  "Eye projection distance" (default 2 m) along the ray in view space,
+  projected into each eye's NDC -- vergence by construction -- and the tiny
+  mask is recomputed each frame.
+- *A likely dead feature.* "Cull outer mask (HAM)" stamps the hidden-area mesh
+  with the cull value before the ring pass, but the ring pass writes
+  `min(existing, rate)` (there so Unity's upside-down mirrored pattern keeps
+  the finer rate) and every ring rate is numerically below cull, so the stamp
+  is overwritten. Unverified in the field; not to be copied.
+
+What this feature takes from it: the D3D11 recipe (the table on all
+viewports, a 16x16-tile R8_UINT mask, set at target bind, cleared at any other
+bind), 2x2 as the working middle rate, the per-eye nasal shift as a vergence
+term (a fixation distance, not a percentage), radii in degrees rather than
+NDC, and -- where a d3d11 proxy is better placed than an API layer -- masking
+only the scene's geometry draws into the scene target, which the census
+already classifies, so the HUD and the post passes are never coarsened. Pimax
+Play's own DFR uses the same NvAPI path (LibMagicD3D1164.dll); two holders of
+the shading-rate view cannot coexist, so this feature stands down when that
+module is loaded. The vergence term applies to feature 6's disc as well.
+
 ## Feature 3 — the eye-tracked centre
 
 **What changed since the toolkit era.** The toolkit needed a per-vendor
