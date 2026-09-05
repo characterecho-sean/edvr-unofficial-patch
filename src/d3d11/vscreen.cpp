@@ -34,6 +34,7 @@
 #include "fss_reveal.h"
 #include "fss_dump.h"
 #include "eye_split.h"
+#include "foveation.h"        // feature 2: the shading-rate image, bound at eye draws
 #include "resolve_probe.h"
 #include "resolve_bind_fix.h"
 #include "stencil_probe.h"
@@ -1460,7 +1461,7 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         s->censusAutoW == 0 && !fssResActive() && !fssScanWantsDraws() &&
         !fssPanelWantsDraws() && !fssProbeWants() && !fssRevealWantsDraws() &&
         !fssRingWantsDraws() && !fssDumpWantsDraws() &&
-        !eyeSplitWantsDraws() && !resolveProbeWantsDraws() &&
+        !eyeSplitWantsDraws() && !foveationWantsDraws() && !resolveProbeWantsDraws() &&
         !stencilProbeWantsDraws() && !resolveBindWants() &&
         !remlokWantsDraws() && !holoWantsDraws() && !targetSharpWantsDraws() && !hudSpriteWantsDraws() && !panelUpscaleWantsDraws() && !hudGrainWantsDraws() &&
         !witchstarWantsDraws() &&
@@ -1502,6 +1503,12 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         s->rtv0Eye = targetIsEyeSized(bindingGet(BindSlot::Rtv0), &s->rtv0Cand);
         s->rtv0EyeGen = rtvGen;
     }
+    // Foveated shading (foveation.h): the shading-rate image follows the
+    // census's verdict on slot 0 -- bound for an eye-sized target, cleared
+    // for anything else. One compare per draw once the answer is known, and
+    // it changes no binding of the game's, so everything below composes
+    // with it.
+    foveationOnDraw(self, s->rtv0Eye, bindingGet(BindSlot::Rtv0), rtvGen, kind, count, instances);
     // The intro probe, ABOVE the eye gate and deliberately. Its subject is the
     // startup sequence, and for the whole of the sequence's first phase there
     // is no eye texture to be on the right side of a gate about: one eye's
@@ -2409,6 +2416,7 @@ void STDMETHODCALLTYPE hookedClearState(ID3D11DeviceContext* self) {
                         kSlotClearState);
     }
     forgetBindings(s);
+    foveationOnClearState();
     s->realClearState(self);
 }
 
@@ -3609,6 +3617,7 @@ void vScreenRefreshConfig() {
     fssRingConfigure(cfg);
     fssDumpConfigure(cfg);
     eyeSplitConfigure(cfg);
+    foveationConfigure(cfg);
     resolveProbeConfigure(cfg);
     resolveBindConfigure(cfg);
     stencilProbeConfigure(cfg);
@@ -3821,6 +3830,7 @@ void vScreenFrameBoundary() {
     fssRingFrameBoundary();
     fssDumpFrameBoundary(s->ownerCtx);
     eyeSplitFrameBoundary(s->ownerCtx);
+    foveationFrameBoundary(s->ownerCtx);
 
     // FSS frame pacing (round 31): the left-only squares are now measured
     // to be runtime-side (both submitted images carry the flicker equally),
@@ -4615,6 +4625,7 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     fssRingConfigure(cfg);
     fssDumpConfigure(cfg);
     eyeSplitConfigure(cfg);
+    foveationConfigure(cfg);
     resolveProbeConfigure(cfg);
     resolveBindConfigure(cfg);
     stencilProbeConfigure(cfg);
@@ -4843,6 +4854,7 @@ void shutdownVScreenFixes() {
     fssRingShutdown();
     fssDumpShutdown();
     eyeSplitShutdown();
+    foveationShutdown();
     resolveProbeShutdown();
     resolveBindShutdown();
     stencilProbeShutdown();

@@ -69,6 +69,12 @@ void temporalPassNoteFirstEyeDraw(ID3D11DeviceContext* ctx);
 // This frame's rows become last frame's; called at the frame boundary.
 void temporalPassFrameBoundary();
 
+// The eye's offset from the head as the runtime last handed it to the pass
+// (metres, x toward the right), for the foveation's nasal shift. False
+// until a frame has been treated with a head delta and an offset: the
+// caller keeps its own default.
+bool temporalPassEyeOffset(int eye, float out[3]);
+
 // For the periodic totals line: eye-submits treated, the measured price,
 // and the share of pixels whose history was rejected (off the image or
 // none yet) or clipped (pulled to the neighbourhood). False when nothing

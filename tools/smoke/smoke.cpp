@@ -967,6 +967,43 @@ int main(int argc, char** argv) {
                     printf("  skip  dlaa: the cost probe needs the runtime\n");
                 }
 
+                // Foveated shading's desk test (docs/performance.md, feature
+                // 2): NvAPI armed on this device, a target drawn through a
+                // shading-rate image whose tile rows name every rate, and the
+                // shaded block size measured per row from the readback. The
+                // rate values and the view dimension are transcribed rather
+                // than vendored, so this is where a wrong one would show --
+                // as a block that is not the size its name says.
+                typedef int (*PFN_FovProbe)(void*, void*, char*, unsigned);
+                PFN_FovProbe fovProbe =
+                    reinterpret_cast<PFN_FovProbe>(GetProcAddress(mod, "edvrFoveationProbe"));
+                if (!fovProbe) {
+                    printf("  FAIL  edvrFoveationProbe is not exported\n");
+                    rc = 1;
+                } else {
+                    static char report4[16384];
+                    const int fv = fovProbe(device, ctx, report4, sizeof(report4));
+                    char* line4 = report4;
+                    while (line4 && *line4) {
+                        char* nl = strchr(line4, '\n');
+                        if (nl) *nl = 0;
+                        printf("  info  %s\n", line4);
+                        line4 = nl ? nl + 1 : nullptr;
+                    }
+                    if (fv == 1) {
+                        printf("  ok    foveation: the shading-rate image, written as the module writes it, "
+                               "shades every rate as named\n");
+                    } else if (fv == -1) {
+                        printf("  skip  foveation: variable-rate shading is not available on this "
+                               "machine\n");
+                    } else {
+                        printf("  FAIL  foveation: the shading-rate image %s\n",
+                               fv == 0 ? "had no effect on the shading"
+                                       : "shaded a rate as a different block size than its name");
+                        rc = 1;
+                    }
+                }
+
                 // The fovea path's 1:1 crop check (the review of 2026-09-05,
                 // F1/F12): a solid colour through the PRODUCTION fovea eval must
                 // come back as itself inside the crop and leave the periphery

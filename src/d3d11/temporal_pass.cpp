@@ -3461,6 +3461,14 @@ void temporalPassShutdown() {
     if (g_cs) { g_cs->Release(); g_cs = nullptr; }
 }
 
+bool temporalPassEyeOffset(int eye, float out[3]) {
+    if (eye < 0 || eye > 1 || !out) return false;
+    const EyeState& e = g_eye[eye];
+    if (e.eyeOff[0] == 0.0f && e.eyeOff[1] == 0.0f && e.eyeOff[2] == 0.0f) return false;
+    memcpy(out, e.eyeOff, sizeof(e.eyeOff));
+    return true;
+}
+
 }  // namespace edvr
 
 extern "C" __declspec(dllexport) void* edvrTemporalAa(

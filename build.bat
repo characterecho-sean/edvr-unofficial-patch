@@ -281,6 +281,7 @@ cl.exe %CFLAGS% %NGXFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "%ROOT%\src\d3d11\temporal_pass.cpp" ^
     "%ROOT%\src\d3d11\depth_probe.cpp" ^
     "%ROOT%\src\d3d11\dlaa.cpp" ^
+    "%ROOT%\src\d3d11\foveation.cpp" ^
     "%ROOT%\src\d3d11\sharpen_pass.cpp" ^
     "%ROOT%\src\d3d11\loader_panel.cpp" ^
     "%ROOT%\src\d3d11\splash_dim.cpp" ^

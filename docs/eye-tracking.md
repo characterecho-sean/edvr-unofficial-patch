@@ -415,6 +415,15 @@ gaze_probe_pvr = off    ; the Pimax-runtime probe
 
 ### Phase 3: features 6 and 2 take the moving centre
 
+*Redirected 2026-09-05 (docs/performance.md, feature 6, "Where the crop
+design stands").* The moving DLSS crop is off the plan: a crop resolves at
+the start of every large look, and no crop meets "no blur where the eyes
+look" under upscaling. Phase 3 is feature 2 alone -- the shading-rate
+image's rings follow the gaze -- with the fixed-centre build of feature 2
+(built the same day) as its base. The paragraphs below stand as written for
+feature 2's part; feature 6's is history.
+
+
 Unchanged from performance.md: feature 6's crop pans with a uniform
 vector (measured, item 16), feature 2's mask regenerates when the centre
 moves a tile. The fixed-centre versions still build first; the moving

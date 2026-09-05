@@ -342,6 +342,89 @@ Play's own DFR uses the same NvAPI path (LibMagicD3D1164.dll); two holders of
 the shading-rate view cannot coexist, so this feature stands down when that
 module is loaded. The vergence term applies to feature 6's disc as well.
 
+**Built, fixed centre (2026-09-05, the foveation branch; `src/d3d11/foveation.cpp`).**
+Sean's direction after the crisp-fovea discussion under feature 6: a DLSS
+crop cannot meet "no blur where the eyes look" under upscaling, because a
+crop never has history for where the eyes go next, so the gaze's value is
+here, and the fixed-centre build comes first because it needs no gaze at
+all. What was built:
+
+- *NvAPI without vendoring.* The six entry points are resolved through
+  `nvapi_QueryInterface` by the IDs in NVIDIA's `nvapi_interface.h` (MIT),
+  and the three structures -- the V2 capabilities (64 bytes), the
+  per-viewport rate table (68) and its container (16), the view description
+  (24) -- are transcribed from NVIDIA's reference documentation with
+  `static_assert`s on their sizes. Every structure carries its size in its
+  version word, so a transcription error is refused by the driver rather
+  than acted on; the two things the driver cannot check, the rate values
+  and the view dimension, are what the desk probe measures
+  (`edvrFoveationProbe` in tools/smoke: a 512x512 target drawn through an
+  image whose tile rows name every rate, the shaded block size read back per
+  row -- 1x1, 2x1, 1x2, 2x2, 4x2, 2x4, 4x4 must measure as themselves).
+- *The image.* One R8_UINT texture per eye-texture size and eye, a texel
+  per 16x16 tile, filled on the CPU: each eye's frustum from the tangents
+  the openvr half publishes (widened by the guard's lie when live), the
+  centre shifted toward the nose by the eye's offset over
+  `foveation_distance` (the temporal pass's noted offset, or a 32 mm half
+  IPD), and a tile's rate the finest its nearest point to the centre needs.
+  Texel 0 = full rate, 1 = the 2x2 ring, 2 = beyond (4x4; 2x2 in quality).
+- *Where it binds.* In the draw path, after the census's own eye-sized
+  verdict on slot 0: bound (rates and view, both, every time -- the table is
+  per-viewport state) when the target is eye-sized, cleared for anything
+  else, at ClearState and at the frame boundary. The eye of a target: the
+  submitted texture when it is one, else the depth probe's rule (of two
+  targets alike in size and format, the first bound in the frame is the
+  left). Instrumented: a 600-frame summary of targets per eye, how many were
+  known by the submitted texture, and image switches per frame.
+- *Settings.* `fix.foveation = off | quality | balanced | performance`
+  (70/100, 50/84, 38/70 degrees across for the full-rate disc and the 2x2
+  ring's outer edge); `advanced.foveation_inner`, `_outer` override the
+  preset; `advanced.foveation_distance` (0.7 m); `advanced.foveation_passes
+  = all | geometry` (the A/B for blocky bloom: geometry leaves draws of six
+  vertices or fewer -- the full-screen passes -- at full rate, at the cost
+  of the lighting pass's saving). All live.
+- *Fail-safes.* No nvapi64.dll, no entry points, an initialise or create or
+  set call not answering OK, a GPU reporting no support, or Pimax Play's
+  `LibMagicD3D1164.dll` in the process: one line and off for the session.
+
+**The desk (2026-09-05, RTX 5090, nvapi64.dll 32.0.16.1664).** Six rounds
+of the probe, and what they settled:
+
+- Every NvAPI call answers OK in every order tried (table then view, the
+  Toolkit's and vrperfkit's order; view then table; one viewport or
+  sixteen; the state set before or after the target; RegisterDevice first),
+  and the capability query says the GPU shades at variable rate. The
+  transcribed values were checked against nvapi.h read from NVIDIA's
+  repository: the rate enum is 0..11 with 1x1 at 5, 2x2 at 8 and 4x4 at 11,
+  the 2D view dimension is 4, the tile is 16, and the three structures are
+  68, 16 and 24 bytes with a one-byte `bool` leading the viewport record.
+- **The driver does not read the initial data of a shading-rate texture.**
+  An image given its texels at creation reads as zeros: every tile takes
+  texel 0's rate (mapped to 4x4, everything shaded 4x4; mapped to 1x1,
+  "no effect"). The same bytes written by `UpdateSubresource` or copied in
+  from a staging texture are read tile for tile. The module fills its
+  images with `UpdateSubresource`, so the module was right from the start
+  and the probe was wrong; the probe now does what the module does and
+  keeps the initial-data variant as the documented quirk.
+- With that, every rate measures as named -- 2x1 two wide and one tall,
+  1x2, 2x2, 4x2, 2x4, 4x4 -- both by the position the pixel shader reports
+  (the coarse pixel's, so it is a valid detector) and by a UAV counter of
+  invocations per band (32768 at full rate, 8192 at 2x2, 2048 at 4x4).
+- NvAPI's own VRS helper (`NvAPI_D3D_InitializeVRSHelper`, since R430, with
+  `NvAPI_D3D_InitializeNvGazeHandler` beside it taking per-eye gaze) also
+  shaded coarsely on this GPU by its own narrow pattern -- an alternative
+  for the eye-tracked phase should the explicit image ever fail elsewhere.
+  The probe round that read its pattern back did not come back (the smoke
+  hung until a restart), so the helper is neither used nor probed.
+- Two probe lessons: a full-screen triangle wound counter-clockwise is
+  culled by the default rasteriser state and measures the clear colour as
+  16x16 blocks; `near` is a Windows macro.
+
+Unflown at writing. The first flight measures the saving at Sean's 0.65
+render scale and looks at the periphery under DLSS, which has never been
+handed coarse-shaded input here; then the render scale rises until the
+saving is spent.
+
 ## Feature 3 — the eye-tracked centre
 
 **What changed since the toolkit era.** The toolkit needed a per-vendor
@@ -922,6 +1005,43 @@ side, at which point it is the frame. The two designs that do meet it:
 The fixed-centre fovea stays as a Quality 1.0 DLAA feature, where the fresh
 content converges in a few frames and the arithmetic favours it (about 3.4 ms
 a frame saved), with its limits recorded above.
+
+**Where the crop design stands (2026-09-05, after the eye-tracking
+discussion).** Sean's two objections settled it: eyes jump where heads
+stream, so an eye-tracked crop is crisp for a jump that lands inside it and
+resolves for about 0.3 s after one that does not -- and a real look is eyes
+first, head after, so the resolve sits at the start of every large look.
+Under upscaling no crop meets "no blur where the eyes look", structurally:
+crispness needs history, history needs coverage, and a crop never covers
+where the eyes go next; NVIDIA's history cannot be seeded from the
+periphery; at a given render resolution the full frame is the ceiling for
+the gazed region and a crop is only cheaper (about 2 ms a frame of the pass
+in the field). So the gaze's value is feature 2, whose shading rate has no
+history to rebuild, and the eye-tracked crop comes off the plan. The
+fixed-centre fovea stays as the DLAA feature documented above.
+
+*Reference: CheekyFoveatedDLSS (github.com/ClarkCheekyKent, read
+2026-09-05), the same design elsewhere.* A ReShade add-on that intercepts a
+game's own DLSS Super Resolution call (D3D11 and D3D12, OpenXR stereo for
+VR) and replaces the full-frame upscale with DLSS on a centre crop plus DLAA
+(preset E, the fastest) on the periphery downscaled to 0.75 of the render
+and brought back; the crop's edge feathered over 4% ("Transition width"),
+rectangular to elliptical by a "Roundness" control; the fovea 0.55 x 0.45
+of the frame by default with a "Stereo X offset" moving the two eyes'
+regions in equal and opposite directions (the nasal shift); eye tracking
+through XR_EXT_eye_gaze_interaction with 20 ms smoothing, falling back to
+the fixed centre; and, in `crop_motion.hpp`, the crop's shift folded into
+the motion vectors exactly as the moving-crop probe above validated
+("previousLocal = currentLocal + sceneMotion + currentOrigin -
+previousOrigin"), with DLSS history RESET above the larger of 64 px or 12.5%
+of the crop -- the post-saccade resolve, by design. It claims 2 to 3 ms a
+frame saved on the DLSS pass, which is what this branch measured. Nothing in
+it escapes the physics above, and its README makes no claim about the
+fovea's crispness under motion; it lists "OpenVR-only games" as
+unsupported, so it cannot run on Elite at all. Two things worth taking from
+it if the crop is ever revisited: a periphery at 0.75 rather than 0.5
+narrows the gap a resolve crosses, and the fastest DLAA preset is enough
+for a periphery.
 
 **Phase 0 for the eye-tracked fovea.** The gaze route on the Pimax (Route A,
 the client-side repair of the mis-framed data SteamVR hands out, or Route B,
