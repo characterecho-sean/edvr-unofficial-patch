@@ -782,6 +782,35 @@ smallest where both read the same render pixels -- the half-render variant
 itself and only the network mode differs. The first flight decides the default
 scale and whether the sharp periphery keeps a purpose.
 
+**Flight 3 and the desk (2026-09-05, later).** At 70 degrees, on dlaa and on
+dlss, two things remained. The disc's edges were "still pretty clear", and
+"it almost feels like the fovea disc is set in space away from me, rather
+than like glasses over my eyes"; and the centre of vision blurred while the
+head moved, becoming crisp a moment after it stopped. The first is
+geometry: each eye's disc was centred on that eye's own straight-ahead
+direction, and two parallel directions meet at infinity, so in stereo the
+disc's edge fused as an object far behind the cockpit and the splash panel
+-- and, screen-locked, it slid over them as the head turned, a distant
+object following the head, which nothing in the world does and which the
+visual system picks out even where acuity is low. Glasses read as "on my
+face" because their frames sit at a near depth. `temporal_aa_fovea_distance`
+(metres, live, 0 = infinity) shifts each eye's disc toward the nose by the
+runtime's eye-to-head offset over that distance, so the edge fuses at the
+depth of what is being looked at; OpenXR Toolkit ships the same shift as a
+fixed 4% of the half-width. The second was settled by a desk probe
+(`dlaaMotionProbe`, run by the smoke harness): the crop probe's scene
+panning 6 px/frame for eighteen frames then standing still, evaluated on
+identical inputs by the full-frame feature, the fovea crop and a half-size
+frame. The crop matched the full frame within 6-8% under the pan, on the
+first still frames and at rest; the full frame's own error under the pan
+was 1.38x its rest error, recovering within five to seven frames. So the
+softening in the centre is the model's own, present in full-frame DLAA all
+along and hidden there by being uniform; a periphery that holds a fixed
+reference makes it visible. The lever for that is the model itself --
+NVIDIA's render presets, which the same probe now sweeps (DLAA defaults to
+K, Performance to M, so the dlss configuration already runs two networks
+across the seam).
+
 **What must be measured first (Phase 0 items 15 and 16).**
 
 - *History under a moving crop.* NVIDIA's history is kept in output space

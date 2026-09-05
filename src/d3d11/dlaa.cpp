@@ -1279,19 +1279,28 @@ struct MotionRig {
 
     // mode 0: the full frame (no sub-rectangles); 1: the fovea crop (a
     // feature of the crop's size, output sub-rectangles, a fixed base); 2:
-    // the half-size frame (the steady periphery's DLAA).
-    NVSDK_NGX_Handle* makeFeature(int mode) {
+    // the half-size frame (the steady periphery's DLAA); 3: DLSS Performance
+    // from the half-size frame to the full size (the dlss fovea's mode). The
+    // preset is the render-preset hint for the mode's quality, set on the
+    // shared parameter block before the create (0 = the driver's default);
+    // the caller restores the defaults when its sweep is done.
+    NVSDK_NGX_Handle* makeFeature(int mode, unsigned preset) {
+        const bool perf = mode == 3;
         NVSDK_NGX_DLSS_Create_Params cp{};
-        const uint32_t w = mode == 1 ? kMCW : mode == 2 ? kMW / 2 : kMW;
-        const uint32_t h = mode == 1 ? kMCH : mode == 2 ? kMH / 2 : kMH;
+        const uint32_t w = mode == 1 ? kMCW : (mode == 2 || perf) ? kMW / 2 : kMW;
+        const uint32_t h = mode == 1 ? kMCH : (mode == 2 || perf) ? kMH / 2 : kMH;
         cp.Feature.InWidth = w;
         cp.Feature.InHeight = h;
-        cp.Feature.InTargetWidth = w;
-        cp.Feature.InTargetHeight = h;
-        cp.Feature.InPerfQualityValue = NVSDK_NGX_PerfQuality_Value_DLAA;
+        cp.Feature.InTargetWidth = perf ? kMW : w;
+        cp.Feature.InTargetHeight = perf ? kMH : h;
+        cp.Feature.InPerfQualityValue =
+            perf ? NVSDK_NGX_PerfQuality_Value_MaxPerf : NVSDK_NGX_PerfQuality_Value_DLAA;
         cp.InFeatureCreateFlags = NVSDK_NGX_DLSS_Feature_Flags_MVLowRes |
                                   NVSDK_NGX_DLSS_Feature_Flags_DepthInverted;
         cp.InEnableOutputSubrects = mode == 1;
+        g_params->Set(perf ? NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Performance
+                           : NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_DLAA,
+                      preset);
         NVSDK_NGX_Handle* hnd = nullptr;
         const NVSDK_NGX_Result cr = NGX_D3D11_CREATE_DLSS_EXT(ctx, &hnd, g_params, &cp);
         if (NVSDK_NGX_FAILED(cr)) return nullptr;
@@ -1299,16 +1308,16 @@ struct MotionRig {
     }
 
     bool eval(int mode, NVSDK_NGX_Handle* h, float jx, float jy, bool reset, NVSDK_NGX_Result* err) {
-        const bool half = mode == 2;
+        const bool halfIn = mode == 2 || mode == 3;   // the half-size inputs
         NVSDK_NGX_D3D11_DLSS_Eval_Params ep{};
-        ep.Feature.pInColor = half ? colourH : colour;
-        ep.Feature.pInOutput = half ? outputH : output;
-        ep.pInDepth = half ? depthH : depth;
-        ep.pInMotionVectors = half ? motionH : motion;
+        ep.Feature.pInColor = halfIn ? colourH : colour;
+        ep.Feature.pInOutput = mode == 2 ? outputH : output;   // Performance answers at the full size
+        ep.pInDepth = halfIn ? depthH : depth;
+        ep.pInMotionVectors = halfIn ? motionH : motion;
         ep.InJitterOffsetX = jx;
         ep.InJitterOffsetY = jy;
-        ep.InRenderSubrectDimensions.Width = mode == 1 ? kMCW : half ? kMW / 2 : kMW;
-        ep.InRenderSubrectDimensions.Height = mode == 1 ? kMCH : half ? kMH / 2 : kMH;
+        ep.InRenderSubrectDimensions.Width = mode == 1 ? kMCW : halfIn ? kMW / 2 : kMW;
+        ep.InRenderSubrectDimensions.Height = mode == 1 ? kMCH : halfIn ? kMH / 2 : kMH;
         ep.InReset = reset ? 1 : 0;
         ep.InMVScaleX = 1.0f;
         ep.InMVScaleY = 1.0f;
@@ -1365,13 +1374,13 @@ struct MotionRig {
     // was at x + v last frame), the jitter handed over with jSign; the error
     // after every frame.
     bool run(int mode, int mvSign, float jSign, double err[kMFrames], ProbeReport& rep,
-             const char* name) {
-        NVSDK_NGX_Handle* h = makeFeature(mode);
+             const char* name, unsigned preset = 0) {
+        NVSDK_NGX_Handle* h = makeFeature(mode, preset);
         if (!h) {
             rep.line("motion probe: %s -- the feature would not be created", name);
             return false;
         }
-        const bool half = mode == 2;
+        const bool half = mode == 2 || mode == 3;   // half-size inputs: half the pan, half the jitter
         const float v = half ? kMV * 0.5f : static_cast<float>(kMV);
         const float js = half ? 0.5f * jSign : jSign;
         float lastMx = 1e9f;
@@ -1496,6 +1505,43 @@ int dlaaMotionProbe(ID3D11Device* dev, ID3D11DeviceContext* ctx, char* report,
         rep.line("  softening under the pan (pan error / rest error): full %.2fx, crop %.2fx, half-size %.2fx",
                  fullMove / fullRest, cropMove / cropRest, halfMove / halfRest);
     }
+
+    // The presets. The softening under motion is the model's, and NVIDIA
+    // ships several: the render-preset hint picks one per quality mode. DLAA
+    // defaults to K and Performance (the dlss fovea's mode) to M, so in the
+    // dlss configuration the fovea and the periphery already run different
+    // networks. Each preset under the same pan, for DLAA on the full frame
+    // and for Performance from the half-size frame measured against the
+    // full-size truth. A refused preset is reported and skipped; the shared
+    // block's hints go back to the defaults after, so production is untouched.
+    struct PresetCase { unsigned id; const char* name; };
+    const PresetCase dlaaPresets[5] = {{0, "default (K)"}, {10, "J"}, {11, "K"},
+                                       {5, "E (CNN, deprecated)"}, {6, "F (CNN, deprecated)"}};
+    const PresetCase perfPresets[5] = {{0, "default (M)"}, {11, "K"}, {10, "J"}, {13, "M"}, {12, "L"}};
+    rep.line("  presets, full-frame DLAA -- pan 8-17 / first still 19-21 / rest 28-35 / softening / "
+             "first frame:");
+    for (const PresetCase& pc : dlaaPresets) {
+        double e[kMFrames];
+        for (double& v : e) v = -1.0;
+        if (rig.run(0, mvSign, jSign, e, rep, pc.name, pc.id)) {
+            const double pm = motionMean(e, 8, kMMoving - 1), pe = motionMean(e, 19, 21), pr = motionMean(e, 28, 35);
+            rep.line("    %-22s %.2f / %.2f / %.2f / %.2fx / %.2f", pc.name, pm, pe, pr,
+                     pr > 0.0 ? pm / pr : 0.0, e[0]);
+        }
+    }
+    rep.line("  presets, DLSS Performance 2x from the half-size frame (the dlss fovea's mode), against "
+             "the full-size truth:");
+    for (const PresetCase& pc : perfPresets) {
+        double e[kMFrames];
+        for (double& v : e) v = -1.0;
+        if (rig.run(3, mvSign, jSign, e, rep, pc.name, pc.id)) {
+            const double pm = motionMean(e, 8, kMMoving - 1), pe = motionMean(e, 19, 21), pr = motionMean(e, 28, 35);
+            rep.line("    %-22s %.2f / %.2f / %.2f / %.2fx / %.2f", pc.name, pm, pe, pr,
+                     pr > 0.0 ? pm / pr : 0.0, e[0]);
+        }
+    }
+    g_params->Set(NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_DLAA, 0u);
+    g_params->Set(NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Performance, 0u);
 
     if (fullRest < 0.0 || fullRest >= full[0] * 0.9) {
         rep.line("  verdict: NOT MEASURABLE -- the full frame's rest error (%.2f) did not beat its "
