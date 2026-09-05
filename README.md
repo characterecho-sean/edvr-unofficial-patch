@@ -240,8 +240,8 @@ held still. The first build moves the history by the headset's turn, which
 is exact for the cockpit and the HUD and right for the world whenever the
 ship is not turning; a fast turn leaves the world un-anti-aliased for
 those frames rather than ghosted. Set Elite's own anti-aliasing to Off or
-SMAA with it on. Needs a restart to turn on; the weight and the clamp are
-live. Every temporal filter trades a little edge contrast for its calm, so
+SMAA with it on. Live to turn on, as are the weight and the clamp. Every
+temporal filter trades a little edge contrast for its calm, so
 `render_sharpness` (0 to 1, live) runs AMD's RCAS on every outgoing frame
 as the last pass at the door, for the resolve's calm kernel as much as for
 this; the first flight found text a little soft without it, and 0.3 to 0.5

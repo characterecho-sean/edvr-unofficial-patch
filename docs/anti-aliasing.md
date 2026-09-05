@@ -1389,6 +1389,16 @@ below about 0.02 degrees -- the "still" residuals of 0.025 degrees a frame
 in every steady interval were that floor -- and now takes the skew into
 account and is exact at small angles. Unflown with the rest.
 
+**The projection edit is in from every launch (the same evening).** The
+receiver in the runtime's GetProjectionMatrix slot used to install only
+when the cull guard or the temporal pass was on at launch, so a key turned
+on later ran without its half of the edit -- the pass as a smoother with
+no jitter, the guard not at all -- and the settings window had to call
+both "restart" when the three keys returned to it. Idle, the receiver
+forwards the matrix unchanged, so it is now installed whatever the settings
+say, both keys are live from off, and `advanced.projection_edit = off`
+keeps the observation thunk for a rig where the receiver misbehaves.
+
 ## Feature C — texture LOD bias, the small lever
 
 Not all shimmer is geometry. Detail maps and normal maps sampled a mip

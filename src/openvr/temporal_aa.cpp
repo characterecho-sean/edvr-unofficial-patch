@@ -374,12 +374,11 @@ void temporalAaFrameBoundary() {
             Log::get().note(
                 "temporal aa: the projection cannot be jittered this session "
                 "-- the matrix half of the projection edit is not in place "
-                "(temporal_aa was off at launch and the terrain fix is off, "
-                "or the runtime's matrix failed the tangent-formula check; "
-                "the cull guard's lines above say which). The pass runs as a "
-                "temporal smoother: real integration while the head moves, "
-                "nothing new while it is held still. Restart with "
-                "temporal_aa = on for the full effect.");
+                "(advanced.projection_edit is off, or the runtime's matrix "
+                "failed the tangent-formula check; the cull guard's lines "
+                "above say which). The pass runs as a temporal smoother: real "
+                "integration while the head moves, nothing new while it is "
+                "held still.");
         }
         // verdict 0: the receiver is in and the game has not asked for both
         // eyes' matrices yet. Quiet; next boundary.

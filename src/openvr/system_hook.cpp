@@ -1372,7 +1372,22 @@ void maybeObserveSystemInterface(void* iface, const char* interfaceVersion) {
         const std::string taa = cfg.getString("fix.temporal_aa", "off");
         s.receiverForTemporal = !taa.empty() && _stricmp(taa.c_str(), "off") != 0;
     }
-    const bool wantReceiver = s.modeRequested != GuardMode::Off || s.receiverForTemporal;
+    // The receiver is in from EVERY launch since 2026-09-04, whatever the
+    // settings say. Idle, it forwards the matrix unchanged, notes the
+    // planes and runs its formula check once, and that is all. Until then
+    // it installed only when the guard or the temporal pass was on at
+    // launch, so a key turned on later ran without its half of the edit --
+    // the pass as a smoother with no jitter, the guard not at all -- and
+    // the settings window had to call both "restart". The convention it
+    // relies on is the game's own, verified by the phase-0 capture, and
+    // the guard and the pass have trusted it on every rig that ran them.
+    // advanced.projection_edit = off keeps the observation thunk in the
+    // slot instead, for a rig where the receiver misbehaves; a feature on
+    // at launch still gets the receiver, as before.
+    const std::string editKey = cfg.getString("advanced.projection_edit", "on");
+    const bool editWanted = editKey.empty() || _stricmp(editKey.c_str(), "off") != 0;
+    const bool wantReceiver =
+        editWanted || s.modeRequested != GuardMode::Off || s.receiverForTemporal;
 
     void* matrixEntry;
     if (wantReceiver) {
@@ -1426,8 +1441,9 @@ void maybeObserveSystemInterface(void* iface, const char* interfaceVersion) {
                    ? ", and the CULL GUARD is armed -- once both eyes' true "
                      "projections are read and checked, the game will be told "
                      "a wider frustum and the image cropped back at submit"
-                   : ", with the matrix receiver in place for the temporal "
-                     "pass's jitter")
+                   : ", with the matrix receiver in place (the cull guard and "
+                     "the temporal pass's jitter edit the projection through "
+                     "it, and it is idle until one of them is on)")
             : "");
 }
 
