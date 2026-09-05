@@ -101,13 +101,15 @@ bool dlaaEvaluatePeriphery(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* c
 
 // The model NVIDIA runs, as its render-preset number (nvsdk_ngx_defs.h:
 // 11 = K, 10 = J, 12 = L, 13 = M, 0 = the driver's own choice per quality
-// mode): `preset` for DLAA and the Quality modes, `upscalePreset` for
-// Balanced, Performance and Ultra Performance. Read from the config by the
-// temporal pass; a change recreates every live feature on its next
-// evaluation, so it is live. The desk's motion probe (2026-09-05) found
-// Performance mode's default, M, at 2.7x K's error at rest on fine detail;
-// under motion L softens least and K reconstructs most at rest.
-void dlaaSetPreset(unsigned preset, unsigned upscalePreset);
+// mode): `preset` for the full frame and the periphery in every mode,
+// `foveaPreset` for the fovea crop when it upscales. Read from the config by
+// the temporal pass; a change recreates every live feature on its next
+// evaluation, so it is live. Under DLAA the upscaling models L and M are
+// never applied (L cost five times K on the desk). The desk (2026-09-05):
+// Performance mode's default M is at 2.7x K's error at rest on fine detail;
+// under motion L softens least and converges fastest from fresh content,
+// which is what a crop needs; on the full frame the models cost the same.
+void dlaaSetPreset(unsigned preset, unsigned foveaPreset);
 
 // The measured price, for the totals line: evaluations, the mean
 // milliseconds by timestamp query, and how many evaluations carried the
@@ -144,5 +146,14 @@ int dlaaCropProbe(ID3D11Device* dev, ID3D11DeviceContext* ctx, char* report,
 // 0 when the probe could not run (the report says why).
 int dlaaMotionProbe(ID3D11Device* dev, ID3D11DeviceContext* ctx, char* report,
                     uint32_t reportBytes);
+
+// The cost probe (2026-09-05): NVIDIA's price per evaluation, per mode and
+// model, at the Pimax Crystal Super's sizes -- the full frame at Quality 1.0
+// and 0.65 under each model, the periphery variants, the flown fovea crop --
+// so the fovea design's trade (a crop's price against its lost history) is
+// priced rather than assumed. Synchronous timestamp queries; a desk tool.
+// Returns 1 when at least one case ran, 0 otherwise (the report says why).
+int dlaaCostProbe(ID3D11Device* dev, ID3D11DeviceContext* ctx, char* report,
+                  uint32_t reportBytes);
 
 }  // namespace edvr

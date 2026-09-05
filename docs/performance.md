@@ -856,6 +856,80 @@ steady` -- K for DLAA and the Quality modes, L for the upscaling ones -- is
 the shipped default: a little less at rest in the dlss fovea, much less
 swing when the head moves.
 
+**The design that gives a crisp DLSS fovea (2026-09-05, the answer to "no
+blurring where my eyes look").** The requirement, in Sean's words: DLSS
+upscaling the foveated area to native resolution, no blurring at all where
+the eyes are directly looking, the edges free to blur. Everything measured
+on 2026-09-05 bears on it:
+
+- DLSS upscaling needs about 25 to 30 frames of history to be crisp; DLAA 5
+  to 7. A crop loses history for anything that crosses its edge, and the
+  soft zone is head speed times that convergence time, on the leading side
+  of the motion, where the eyes go during a turn. The full frame keeps its
+  history for everything, because content moving within the frame stays
+  within it.
+- The geometry is exact (positional lag 0.00 frames for every feature at two
+  pan speeds), and the crop with output sub-rectangles matches the full
+  frame in every mode. Nothing here is a defect to fix; it is what a crop is.
+- The price, on this GPU at the Crystal Super's sizes (the cost probe, ms
+  per evaluation, desk; the field runs about 1.6x these under the game's
+  load): the full frame at native output costs the same whatever the model
+  -- DLAA K 1.72; Balanced 2818->4336 K 1.65, L 1.54, M 1.54, J 1.55;
+  Performance 2168->4336 K 1.55, but L 2.77 and M 2.21 -- so a cheaper
+  model on the full frame buys nothing, and under DLAA preset L costs 8.53,
+  five times K. The periphery's DLAA: 0.79 at the 0.65 render, 0.56 reduced
+  to a half. The flown 70-degree fovea crop (Balanced 1542->2372): K 0.62,
+  L 0.68. A 40-degree eye-tracked crop (Balanced 920->1416, L): 0.35.
+
+So a fixed-centre crop cannot meet the requirement under upscaling: to cover
+where the eyes might look it must be 60 degrees and more, and to keep its
+history under head motion it needs a margin of several frames of motion each
+side, at which point it is the frame. The two designs that do meet it:
+
+1. *Full-frame DLSS.* History everywhere, crisp everywhere, no seam. 1.65 ms
+   per eye on the desk at Quality 0.65 (about 2.7 in the field), and the
+   model does not change the price, so `temporal_aa_model = quality` (K) is
+   right there. This is what Sean found crisp in the A/B, and it is the
+   fallback whenever the tracker is absent or lost.
+
+2. *The eye-tracked fovea.* A small crop -- 30 to 40 degrees, the fovea and
+   parafovea plus the tracker's error and a frame of latency -- centred on
+   each eye's own gaze point (vergence comes with it; no fixation-distance
+   term). Its history survives because the crop moves WITH the content the
+   eyes hold: under fixation, smooth pursuit and the vestibulo-ocular reflex
+   the gaze point travels across the screen with the content, and the crop's
+   shift is folded into the motion vectors handed to NVIDIA -- the
+   convention the moving-crop probe validated (a pan converges like a still
+   crop; a jump costs one frame of fresh quality and twelve frames of
+   convergence under DLAA). A dead band keeps the crop still while the gaze
+   stays within the inner part of the disc, so small eye movements never
+   move it; when the gaze nears the edge the crop re-centres, the content
+   under the gaze keeping its history. The periphery is DLAA on a reduced
+   copy (a half; less once it is never looked at), bicubic to native, and
+   the fovea crop runs preset L (fastest from fresh content, least softening
+   under motion; the model key's `steady`). What remains is the saccade: the
+   eyes jump to a target that was in the periphery, the crop follows, and
+   the content under the new gaze has no fovea history. The composite fades
+   the fovea in by its history age over about twenty frames, so the gaze
+   sees the periphery's converged image (65% of native at Quality 0.65)
+   resolving to native over 0.2 s, the first 0.1 s of which saccadic
+   suppression hides. That resolve is the physics of temporal upscaling and
+   the only residual; everything else is crisp every frame. Price: about
+   0.35 + 0.56 + a composite, roughly a third of the full frame -- and the
+   same gaze then drives feature 2's shading rate for the game's own cost,
+   which is the larger prize.
+
+The fixed-centre fovea stays as a Quality 1.0 DLAA feature, where the fresh
+content converges in a few frames and the arithmetic favours it (about 3.4 ms
+a frame saved), with its limits recorded above.
+
+**Phase 0 for the eye-tracked fovea.** The gaze route on the Pimax (Route A,
+the client-side repair of the mis-framed data SteamVR hands out, or Route B,
+Pimax's own runtime; the plan and the probe protocol are on the eye-tracking
+branch); the post-saccade resolve time of an upscaling crop after a 200-px
+jump (the crop probe with an upscaling feature; this sets the fade's
+length); the dead band against the tracker's noise, in flight.
+
 **What must be measured first (Phase 0 items 15 and 16).**
 
 - *History under a moving crop.* NVIDIA's history is kept in output space

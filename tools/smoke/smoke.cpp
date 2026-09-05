@@ -939,6 +939,34 @@ int main(int argc, char** argv) {
                     printf("  skip  dlaa: the motion probe needs the runtime\n");
                 }
 
+                // The cost probe (2026-09-05): NVIDIA's price per mode and model
+                // at the Crystal Super's sizes, printed for the design record.
+                typedef int (*PFN_CostProbe)(void*, void*, char*, unsigned);
+                PFN_CostProbe costProbe =
+                    reinterpret_cast<PFN_CostProbe>(GetProcAddress(mod, "edvrDlaaCostProbe"));
+                if (!costProbe) {
+                    printf("  FAIL  edvrDlaaCostProbe is not exported\n");
+                    rc = 1;
+                } else if (avail) {
+                    static char report3[4096];
+                    const int cr = costProbe(device, ctx, report3, sizeof(report3));
+                    char* line3 = report3;
+                    while (line3 && *line3) {
+                        char* nl = strchr(line3, '\n');
+                        if (nl) *nl = 0;
+                        printf("  info  %s\n", line3);
+                        line3 = nl ? nl + 1 : nullptr;
+                    }
+                    if (cr == 0) {
+                        printf("  FAIL  dlaa: the cost probe could not run\n");
+                        rc = 1;
+                    } else {
+                        printf("  ok    dlaa: the cost probe ran\n");
+                    }
+                } else {
+                    printf("  skip  dlaa: the cost probe needs the runtime\n");
+                }
+
                 // The fovea path's 1:1 crop check (the review of 2026-09-05,
                 // F1/F12): a solid colour through the PRODUCTION fovea eval must
                 // come back as itself inside the crop and leave the periphery

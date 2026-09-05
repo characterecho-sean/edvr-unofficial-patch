@@ -55,16 +55,24 @@ struct EyeFeature {
     uint64_t          presetGen = 0;   // the preset generation the feature was created under
 };
 
-// The render preset -- NVIDIA's model -- forced on every quality mode (0 =
-// the driver's own choice per mode: K for DLAA, Quality and Balanced, M for
-// Performance, L for Ultra Performance), set by dlaaSetPreset from the
+// The render preset -- NVIDIA's model -- set by dlaaSetPreset from the
 // config and applied to the shared parameter block before each feature is
-// created. A change bumps the generation, so live features are recreated.
-// The desk's motion probe (2026-09-05) found M far behind K at rest on fine
-// detail -- a rest error 2.7x K's, barely below its own first frame -- and
-// the fovea's dlss variant is Performance mode, so K is the shipped default.
-unsigned g_preset = 11;          // DLAA's (and Quality's) preset
-unsigned g_presetUpscale = 11;   // the upscaling modes' (Balanced, Performance, Ultra Performance)
+// created, per ROLE: g_preset for the full frame and the periphery (every
+// mode), g_presetFovea for the fovea crop when it upscales (Balanced,
+// Performance, Ultra Performance). 0 = the driver's own choice per mode (K
+// for DLAA, Quality and Balanced, M for Performance, L for Ultra
+// Performance). A change bumps the generation, so live features are
+// recreated. The desk (2026-09-05): M is far behind K at rest on fine detail
+// (a rest error 2.7x K's); under motion L softens least while K reconstructs
+// most at rest; and the cost probe priced the models at the Crystal Super's
+// sizes -- on the full frame K, L, M and J cost the same within 7% (the
+// price is the output's), under Performance L costs 1.8x K, and under DLAA L
+// costs FIVE times K. So: K everywhere but the fovea's upscaling crop, which
+// gets L (its faster convergence from fresh content is what a crop needs,
+// and a crop is small enough that L's price does not matter); never L or M
+// under DLAA.
+unsigned g_preset = 11;        // the full frame's and the periphery's, every mode
+unsigned g_presetFovea = 12;   // the fovea crop's, when it upscales
 uint64_t g_presetGen = 1;
 
 const char* presetName(unsigned p) {
@@ -80,22 +88,29 @@ const char* presetName(unsigned p) {
     }
 }
 
-void applyPresetHints() {
-    if (!g_params) return;
-    g_params->Set(NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_DLAA, g_preset);
-    g_params->Set(NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_UltraQuality, g_preset);
-    g_params->Set(NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Quality, g_preset);
-    g_params->Set(NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Balanced, g_presetUpscale);
-    g_params->Set(NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Performance, g_presetUpscale);
-    g_params->Set(NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_UltraPerformance, g_presetUpscale);
-}
+// L and M are upscaling models: under DLAA L cost five times K on the desk.
+unsigned dlaaSafe(unsigned p) { return (p == 12 || p == 13) ? 11u : p; }
 
-// The preset a feature of this quality runs under, for the log.
-unsigned presetFor(NVSDK_NGX_PerfQuality_Value q) {
-    return (q == NVSDK_NGX_PerfQuality_Value_DLAA || q == NVSDK_NGX_PerfQuality_Value_MaxQuality ||
-            q == NVSDK_NGX_PerfQuality_Value_UltraQuality)
-               ? g_preset
-               : g_presetUpscale;
+// The hints for a feature about to be created: `upscaleP` for the upscaling
+// modes, g_preset for DLAA and the Quality modes.
+void applyPresetHints(unsigned upscaleP) {
+    if (!g_params) return;
+    g_params->Set(NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_DLAA, dlaaSafe(g_preset));
+    g_params->Set(NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_UltraQuality, dlaaSafe(g_preset));
+    g_params->Set(NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Quality, dlaaSafe(g_preset));
+    g_params->Set(NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Balanced, upscaleP);
+    g_params->Set(NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Performance, upscaleP);
+    g_params->Set(NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_UltraPerformance, upscaleP);
+}
+void applyPresetHints() { applyPresetHints(g_preset); }
+
+// The preset a feature of this quality and role runs under, for the log.
+unsigned presetFor(NVSDK_NGX_PerfQuality_Value q, bool fovea = false) {
+    if (q == NVSDK_NGX_PerfQuality_Value_DLAA || q == NVSDK_NGX_PerfQuality_Value_MaxQuality ||
+        q == NVSDK_NGX_PerfQuality_Value_UltraQuality) {
+        return dlaaSafe(g_preset);
+    }
+    return fovea ? g_presetFovea : g_preset;
 }
 
 const char* qualityName(NVSDK_NGX_PerfQuality_Value q) {
@@ -539,7 +554,8 @@ bool evaluateCrop(EyeFeature& f, const char* what, int eye, ID3D11DeviceContext*
                                   NVSDK_NGX_DLSS_Feature_Flags_DepthInverted;
         // NVIDIA writes at the output sub-rectangle's base rather than the origin.
         cp.InEnableOutputSubrects = true;
-        applyPresetHints();
+        const bool isFovea = what[0] == 'f';
+        applyPresetHints(isFovea ? g_presetFovea : g_preset);
         const NVSDK_NGX_Result cr = NGX_D3D11_CREATE_DLSS_EXT(ctx, &f.handle, g_params, &cp);
         if (NVSDK_NGX_FAILED(cr) || !f.handle) {
             f.handle = nullptr;
@@ -561,7 +577,7 @@ bool evaluateCrop(EyeFeature& f, const char* what, int eye, ID3D11DeviceContext*
             "%ux%u out (%s, preset %s, output sub-rectangles; input based at %u,%u in the "
             "%ux%u render, output at %u,%u in the %ux%u frame); its history starts here.",
             what, eye, icw, ich, ocw, och, (icw == ocw && ich == och) ? "DLAA" : qualityName(q),
-            presetName(presetFor(q)), icx, icy, inW, inH, ocx, ocy, outW, outH);
+            presetName(presetFor(q, isFovea)), icx, icy, inW, inH, ocx, ocy, outW, outH);
     }
 
     NVSDK_NGX_D3D11_DLSS_Eval_Params ep{};
@@ -683,16 +699,16 @@ bool dlaaEvaluatePeriphery(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* c
 #endif
 }
 
-void dlaaSetPreset(unsigned preset, unsigned upscalePreset) {
+void dlaaSetPreset(unsigned preset, unsigned foveaPreset) {
 #ifdef EDVR_HAVE_NGX
-    if (preset != g_preset || upscalePreset != g_presetUpscale) {
+    if (preset != g_preset || foveaPreset != g_presetFovea) {
         g_preset = preset;
-        g_presetUpscale = upscalePreset;
+        g_presetFovea = foveaPreset;
         ++g_presetGen;   // every live feature is recreated on its next evaluation
     }
 #else
     (void)preset;
-    (void)upscalePreset;
+    (void)foveaPreset;
 #endif
 }
 
@@ -1776,6 +1792,218 @@ int dlaaMotionProbe(ID3D11Device* dev, ID3D11DeviceContext* ctx, char* report,
 #endif
 }
 
+// ---------------------------------------------------------------------------
+// The cost probe (2026-09-05): NVIDIA's price per evaluation, per mode and
+// model, at the Pimax Crystal Super's sizes (4336x4284 native; 2818x2784 at
+// HMD Quality 0.65, 2168x2142 at 0.5). The fovea design trades NVIDIA's
+// history for its price: a crop is cheap and loses history at its edge, the
+// full frame keeps history everywhere and pays for every pixel. Whether a
+// cheaper MODEL on the full frame beats a crop is a number, and this is it.
+// Synchronous by design (a desk tool may wait): a disjoint query around a
+// batch of evaluations, a timestamp pair around each, the warm-ups discarded.
+// ---------------------------------------------------------------------------
+namespace {
+
+#ifdef EDVR_HAVE_NGX
+
+struct CostCase {
+    const char*                 name;
+    uint32_t                    inW, inH, outW, outH;
+    NVSDK_NGX_PerfQuality_Value q;
+    unsigned                    preset;
+};
+
+constexpr int kCostWarm = 3, kCostN = 20;
+
+bool costCase(ID3D11Device* dev, ID3D11DeviceContext* ctx, ID3D11Texture2D* colour,
+              ID3D11Texture2D* depth, ID3D11Texture2D* motion, ID3D11Texture2D* output,
+              const CostCase& c, double* meanMs, double* minMs, char* why, size_t whyCap) {
+    const char* hint = c.q == NVSDK_NGX_PerfQuality_Value_DLAA       ? NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_DLAA
+                     : c.q == NVSDK_NGX_PerfQuality_Value_MaxQuality ? NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Quality
+                     : c.q == NVSDK_NGX_PerfQuality_Value_Balanced   ? NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Balanced
+                     : c.q == NVSDK_NGX_PerfQuality_Value_MaxPerf    ? NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Performance
+                                                                     : NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_UltraPerformance;
+    g_params->Set(hint, c.preset);
+    NVSDK_NGX_DLSS_Create_Params cp{};
+    cp.Feature.InWidth = c.inW;
+    cp.Feature.InHeight = c.inH;
+    cp.Feature.InTargetWidth = c.outW;
+    cp.Feature.InTargetHeight = c.outH;
+    cp.Feature.InPerfQualityValue = c.q;
+    cp.InFeatureCreateFlags = NVSDK_NGX_DLSS_Feature_Flags_MVLowRes |
+                              NVSDK_NGX_DLSS_Feature_Flags_DepthInverted;
+    cp.InEnableOutputSubrects = true;   // the textures are the largest case's; every case writes at the origin
+    NVSDK_NGX_Handle* h = nullptr;
+    const NVSDK_NGX_Result cr = NGX_D3D11_CREATE_DLSS_EXT(ctx, &h, g_params, &cp);
+    if (NVSDK_NGX_FAILED(cr) || !h) {
+        snprintf(why, whyCap, "not created: %s (0x%08X)", ngxResultName(cr), static_cast<unsigned>(cr));
+        return false;
+    }
+    ID3D11Query* dis = nullptr;
+    ID3D11Query* ts[2 * kCostN] = {};
+    D3D11_QUERY_DESC qd{};
+    qd.Query = D3D11_QUERY_TIMESTAMP_DISJOINT;
+    bool ok = SUCCEEDED(dev->CreateQuery(&qd, &dis)) && dis;
+    qd.Query = D3D11_QUERY_TIMESTAMP;
+    for (int i = 0; ok && i < 2 * kCostN; ++i) ok = SUCCEEDED(dev->CreateQuery(&qd, &ts[i])) && ts[i];
+    if (!ok) {
+        snprintf(why, whyCap, "the timing queries could not be created");
+    } else {
+        ctx->Begin(dis);
+        for (int i = 0; ok && i < kCostWarm + kCostN; ++i) {
+            NVSDK_NGX_D3D11_DLSS_Eval_Params ep{};
+            ep.Feature.pInColor = colour;
+            ep.Feature.pInOutput = output;
+            ep.pInDepth = depth;
+            ep.pInMotionVectors = motion;
+            ep.InJitterOffsetX = 0.25f * static_cast<float>((i & 3) - 1);
+            ep.InJitterOffsetY = 0.25f * static_cast<float>(((i >> 2) & 3) - 1);
+            ep.InRenderSubrectDimensions.Width = c.inW;
+            ep.InRenderSubrectDimensions.Height = c.inH;
+            ep.InReset = i == 0 ? 1 : 0;
+            ep.InMVScaleX = 1.0f;
+            ep.InMVScaleY = 1.0f;
+            ep.InPreExposure = 1.0f;
+            ep.InExposureScale = 1.0f;
+            ep.InFrameTimeDeltaInMsec = 11.1f;
+            const int t = i - kCostWarm;
+            if (t >= 0) ctx->End(ts[2 * t]);
+            const NVSDK_NGX_Result er = NGX_D3D11_EVALUATE_DLSS_EXT(ctx, h, g_params, &ep);
+            if (t >= 0) ctx->End(ts[2 * t + 1]);
+            if (NVSDK_NGX_FAILED(er)) {
+                snprintf(why, whyCap, "evaluation %d failed: %s (0x%08X)", i, ngxResultName(er),
+                         static_cast<unsigned>(er));
+                ok = false;
+            }
+        }
+        ctx->End(dis);
+        ctx->Flush();
+        if (ok) {
+            D3D11_QUERY_DATA_TIMESTAMP_DISJOINT dj{};
+            int spins = 0;
+            while (ctx->GetData(dis, &dj, sizeof(dj), 0) != S_OK && spins < 5000) {
+                Sleep(1);
+                ++spins;
+            }
+            if (spins >= 5000 || dj.Disjoint || dj.Frequency == 0) {
+                snprintf(why, whyCap, "the timing queries did not resolve (%s)",
+                         dj.Disjoint ? "disjoint" : "timed out");
+                ok = false;
+            } else {
+                double sum = 0.0, mn = 1e9;
+                int n = 0;
+                for (int t = 0; t < kCostN; ++t) {
+                    UINT64 a = 0, b = 0;
+                    spins = 0;
+                    while ((ctx->GetData(ts[2 * t], &a, sizeof(a), 0) != S_OK ||
+                            ctx->GetData(ts[2 * t + 1], &b, sizeof(b), 0) != S_OK) && spins < 5000) {
+                        Sleep(1);
+                        ++spins;
+                    }
+                    if (spins >= 5000 || b < a) continue;
+                    const double ms = static_cast<double>(b - a) * 1000.0 / static_cast<double>(dj.Frequency);
+                    sum += ms;
+                    if (ms < mn) mn = ms;
+                    ++n;
+                }
+                if (n == 0) {
+                    snprintf(why, whyCap, "no timestamp pair resolved");
+                    ok = false;
+                } else {
+                    *meanMs = sum / n;
+                    *minMs = mn;
+                }
+            }
+        }
+    }
+    for (ID3D11Query* q : ts) if (q) q->Release();
+    if (dis) dis->Release();
+    NVSDK_NGX_D3D11_ReleaseFeature(h);
+    return ok;
+}
+
+#endif  // EDVR_HAVE_NGX
+
+}  // namespace
+
+int dlaaCostProbe(ID3D11Device* dev, ID3D11DeviceContext* ctx, char* report, uint32_t reportBytes) {
+    ProbeReport rep{report, reportBytes};
+    if (report && reportBytes) report[0] = 0;
+#ifndef EDVR_HAVE_NGX
+    (void)dev; (void)ctx;
+    rep.line("cost probe: this build has no DLSS SDK in it");
+    return 0;
+#else
+    const char* why = nullptr;
+    if (!dev || !ctx || !dlaaAvailable(dev, &why)) {
+        rep.line("cost probe: DLAA is not available here (%s)", why ? why : "no device");
+        return 0;
+    }
+    constexpr uint32_t W = 4336, H = 4284;   // the Crystal Super's native eye
+    auto mk = [&](uint32_t w, uint32_t h, DXGI_FORMAT fmt, UINT bind, ID3D11Texture2D** out) {
+        D3D11_TEXTURE2D_DESC td{};
+        td.Width = w;
+        td.Height = h;
+        td.MipLevels = 1;
+        td.ArraySize = 1;
+        td.Format = fmt;
+        td.SampleDesc.Count = 1;
+        td.Usage = D3D11_USAGE_DEFAULT;
+        td.BindFlags = bind;
+        return SUCCEEDED(dev->CreateTexture2D(&td, nullptr, out)) && *out;
+    };
+    ID3D11Texture2D *colour = nullptr, *depth = nullptr, *motion = nullptr, *output = nullptr;
+    const bool made = mk(W, H, DXGI_FORMAT_R8G8B8A8_UNORM, D3D11_BIND_SHADER_RESOURCE, &colour) &&
+                      mk(W, H, DXGI_FORMAT_R32_FLOAT, D3D11_BIND_SHADER_RESOURCE, &depth) &&
+                      mk(W, H, DXGI_FORMAT_R16G16_FLOAT, D3D11_BIND_SHADER_RESOURCE, &motion) &&
+                      mk(W, H, DXGI_FORMAT_R8G8B8A8_UNORM,
+                         D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS, &output);
+    if (!made) {
+        rep.line("cost probe: the textures could not be created");
+        if (colour) colour->Release();
+        if (depth) depth->Release();
+        if (motion) motion->Release();
+        if (output) output->Release();
+        return 0;
+    }
+    const CostCase cases[] = {
+        {"DLAA 4336x4284, K (full frame, Quality 1.0)", W, H, W, H, NVSDK_NGX_PerfQuality_Value_DLAA, 11},
+        {"DLAA 4336x4284, L", W, H, W, H, NVSDK_NGX_PerfQuality_Value_DLAA, 12},
+        {"Balanced 2818->4336, K (full frame, Quality 0.65)", 2818, 2784, W, H, NVSDK_NGX_PerfQuality_Value_Balanced, 11},
+        {"Balanced 2818->4336, L", 2818, 2784, W, H, NVSDK_NGX_PerfQuality_Value_Balanced, 12},
+        {"Balanced 2818->4336, M", 2818, 2784, W, H, NVSDK_NGX_PerfQuality_Value_Balanced, 13},
+        {"Balanced 2818->4336, J", 2818, 2784, W, H, NVSDK_NGX_PerfQuality_Value_Balanced, 10},
+        {"Performance 2168->4336, K (full frame, Quality 0.5)", 2168, 2142, W, H, NVSDK_NGX_PerfQuality_Value_MaxPerf, 11},
+        {"Performance 2168->4336, L", 2168, 2142, W, H, NVSDK_NGX_PerfQuality_Value_MaxPerf, 12},
+        {"Performance 2168->4336, M", 2168, 2142, W, H, NVSDK_NGX_PerfQuality_Value_MaxPerf, 13},
+        {"DLAA 2818x2784, K (the periphery at the 0.65 render)", 2818, 2784, 2818, 2784, NVSDK_NGX_PerfQuality_Value_DLAA, 11},
+        {"DLAA 2168x2142, K (the periphery reduced to a half)", 2168, 2142, 2168, 2142, NVSDK_NGX_PerfQuality_Value_DLAA, 11},
+        {"Balanced 1542->2372, K (the flown 70-deg fovea crop)", 1542, 1542, 2372, 2372, NVSDK_NGX_PerfQuality_Value_Balanced, 11},
+        {"Balanced 1542->2372, L", 1542, 1542, 2372, 2372, NVSDK_NGX_PerfQuality_Value_Balanced, 12},
+        {"Balanced 920->1416, L (a 40-deg eye-tracked fovea)", 920, 920, 1416, 1416, NVSDK_NGX_PerfQuality_Value_Balanced, 12},
+    };
+    rep.line("cost probe: NVIDIA's price per evaluation on this GPU at the Crystal Super's sizes -- the mean "
+             "of %d evaluations after %d warm-ups, and the fastest, in ms", kCostN, kCostWarm);
+    int ran = 0;
+    for (const CostCase& c : cases) {
+        double mean = 0.0, mn = 0.0;
+        char cwhy[160] = "";
+        if (costCase(dev, ctx, colour, depth, motion, output, c, &mean, &mn, cwhy, sizeof(cwhy))) {
+            rep.line("  %-52s %6.2f  (min %.2f)", c.name, mean, mn);
+            ++ran;
+        } else {
+            rep.line("  %-52s %s", c.name, cwhy);
+        }
+    }
+    applyPresetHints();   // the configured hints back on the shared block
+    colour->Release();
+    depth->Release();
+    motion->Release();
+    output->Release();
+    return ran > 0 ? 1 : 0;
+#endif
+}
+
 // The fovea path's desk check (the review of 2026-09-05, F1/F12): a solid
 // colour run through dlaaEvaluateFovea must come back as ITSELF inside the
 // crop (1:1, not upscaled or refused) and leave the output OUTSIDE the crop
@@ -1936,6 +2164,14 @@ extern "C" __declspec(dllexport) int edvrDlaaCounts(unsigned* evaluations, unsig
     if (evaluations) *evaluations = e;
     if (resets) *resets = r;
     return 1;
+}
+
+// For tools/smoke: the cost probe (dlaa.h): NVIDIA's price per mode and
+// model at the Crystal Super's sizes.
+extern "C" __declspec(dllexport) int edvrDlaaCostProbe(void* device, void* context, char* report,
+                                                       unsigned reportBytes) {
+    return edvr::dlaaCostProbe(static_cast<ID3D11Device*>(device),
+                               static_cast<ID3D11DeviceContext*>(context), report, reportBytes);
 }
 
 // For tools/smoke: the motion probe (dlaa.h): the crop against the full
