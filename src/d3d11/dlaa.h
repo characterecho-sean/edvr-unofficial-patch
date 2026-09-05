@@ -72,6 +72,20 @@ bool dlaaEvaluateFovea(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* colou
                        float jx, float jy, bool reset, float frameMs,
                        const char** reason);
 
+// The general form: NVIDIA runs on an INPUT crop (icx,icy,icw,ich) of the
+// render-size textures and writes an OUTPUT crop (ocx,ocy,ocw,och) of the
+// native output. Equal crops are DLAA (1:1, dlaaEvaluateFovea above); a
+// smaller input crop is DLSS upscaling just the fovea (docs/performance.md
+// feature 6, the half-render variant). The feature is created at the input
+// crop -> output crop and rebuilt when either changes. False on refusal.
+bool dlssEvaluateFovea(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* colour,
+                       ID3D11Texture2D* depth, ID3D11Texture2D* motion,
+                       ID3D11Texture2D* output, uint32_t inW, uint32_t inH,
+                       uint32_t outW, uint32_t outH, uint32_t icx, uint32_t icy,
+                       uint32_t icw, uint32_t ich, uint32_t ocx, uint32_t ocy,
+                       uint32_t ocw, uint32_t och, float jx, float jy, bool reset,
+                       float frameMs, const char** reason);
+
 // The measured price, for the totals line: evaluations, the mean
 // milliseconds by timestamp query, and how many evaluations carried the
 // reset. False when nothing has run.

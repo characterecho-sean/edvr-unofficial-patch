@@ -920,8 +920,8 @@ int main(int argc, char** argv) {
                     const char* fw = "";
                     const int fr = foveaCheck(device, ctx, &fw);
                     if (fr == 1) {
-                        printf("  ok    dlaa: the fovea crop runs 1:1 and stays inside its "
-                               "rectangle\n");
+                        printf("  ok    dlaa: the fovea crop runs (1:1 and upscaled) and stays "
+                               "inside its rectangle\n");
                     } else if (fr < 0) {
                         printf("  skip  dlaa: the fovea crop check needs the runtime (%s)\n", fw);
                     } else {

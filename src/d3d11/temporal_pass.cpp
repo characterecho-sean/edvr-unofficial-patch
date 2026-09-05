@@ -585,12 +585,13 @@ void main(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
 // is never a hard line. Outside the crop NVIDIA wrote nothing, and the
 // weight is zero there, so its texture is read only where it is valid.
 constexpr char kFoveaCsHlsl[] = R"HLSL(
-Texture2D<float4> PERIPH : register(t0);   // the own-history full frame
-Texture2D<float4> FOVEA  : register(t1);   // NVIDIA's output, valid in the crop
-RWTexture2D<float4> FO   : register(u0);   // the composited full frame, game format
+Texture2D<float4> PERIPH : register(t0);   // the own-history periphery, at RENDER size
+Texture2D<float4> FOVEA  : register(t1);   // NVIDIA's output, native size, valid in the crop
+RWTexture2D<float4> FO   : register(u0);   // the composited native frame, game format
+SamplerState SMP : register(s0);           // bilinear clamp, for the periphery upscale
 cbuffer FC : register(b0) {
-    float4 crop;   // x0 y0 x1 y1 in pixels, x1/y1 exclusive
-    float4 band;   // x the blend band in pixels; y width, z height; w unused
+    float4 crop;   // output crop x0 y0 x1 y1 in native pixels, x1/y1 exclusive
+    float4 band;   // x the blend band in pixels; y the output width, z the output height; w unused
 };
 [numthreads(8, 8, 1)]
 void fovea(uint3 id : SV_DispatchThreadID) {
@@ -602,7 +603,12 @@ void fovea(uint3 id : SV_DispatchThreadID) {
     float b = max(band.x, 1.0);
     float w = saturate(d / b);
     w = w * w * (3.0 - 2.0 * w);           // smoothstep across the band
-    float4 per = PERIPH.Load(int3(p, 0));
+    // The periphery is sampled by normalised uv, so a render-size history is
+    // bilinearly upscaled to the native output; at 1:1 (DLAA) the uv lands on
+    // texel centres, an exact copy. The fovea is native, read where it is
+    // valid (strictly inside the crop, where w > 0).
+    float2 uv = (float2(p) + 0.5) / float2(band.y, band.z);
+    float4 per = PERIPH.SampleLevel(SMP, uv, 0);
     float4 fov = w > 0.0 ? FOVEA.Load(int3(p, 0)) : per;
     FO[p] = lerp(per, fov, w);
 }
@@ -1974,20 +1980,24 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         ctx->ClearUnorderedAccessViewUint(g_statsUav, zeros);
 
         // DLSS where you look (docs/performance.md feature 6): with a fovea
-        // width set, and the trained DLAA path the one running (not DLSS's
-        // upscale), NVIDIA runs on a crop around the straight-ahead point and
-        // the own history fills the periphery. Decided here so the full-frame
-        // DLAA block below can stand aside; the composition runs after the
-        // own-history dispatch, which is the periphery it blends over.
+        // width set, NVIDIA runs on a crop around the straight-ahead point and
+        // the own history fills the periphery. Under temporal_aa = dlaa the
+        // crop is 1:1 (the game rendered full size); under dlss the game
+        // rendered small and NVIDIA upscales just the crop to the native
+        // output, the periphery upscaled cheaply in the composite. Decided
+        // here so the full-frame trained block below can stand aside; the
+        // composition runs after the own-history dispatch it blends over.
         const bool upscale = (outW && outH && (outW != w || outH != h));
+        const uint32_t foW = upscale ? outW : w;   // the native output size
+        const uint32_t foH = upscale ? outH : h;
         // g_debugMode off: the debug views paint the OWN pass's output, and the
         // fovea would blend NVIDIA's crop over that -- a mixed instrument (the
         // review of 2026-09-05, F6). g_foveaFailed off: a failing crop is not
         // retried every frame (F3).
         const bool foveaWanted = (flags & 2u) != 0 && fmtIndex == 0 && g_foveaDeg > 0.0f &&
-                                 !upscale && g_foveaCb != nullptr && g_debugMode == 0 &&
-                                 !g_foveaFailed;
-        uint32_t fcx = 0, fcy = 0, fcw = 0, fch = 0;
+                                 g_foveaCb != nullptr && g_debugMode == 0 && !g_foveaFailed;
+        uint32_t fcx = 0, fcy = 0, fcw = 0, fch = 0;      // INPUT crop, in the render (w x h) space
+        uint32_t focx = 0, focy = 0, focw = 0, foch = 0;  // OUTPUT crop, in the native (foW x foH) space
         bool foveaMode = false;
         bool foveaComposited = false;
         bool foveaEvalOk = false;   // the crop eval ran and NVIDIA accumulated: history is live
@@ -2000,32 +2010,38 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         if (foveaWanted && g_csFovea && dlaaAvailable(dev, nullptr)) {
             const float l = tanNow[0], r = tanNow[1], t = tanNow[2], b = tanNow[3];
             if (r > l && b > t) {
-                // The straight-ahead point (tx = ty = 0) in pixels: off the
-                // texture centre in an asymmetric frustum. Crop half-extents
-                // from the fovea's half-angle, in each axis's pixels-per-tan.
-                const float cxpx = (-l / (r - l)) * static_cast<float>(w);
-                const float cypx = (b / (b - t)) * static_cast<float>(h);
-                const float half = tanf(g_foveaDeg * 0.5f * 0.01745329252f);
-                const float hw = half * static_cast<float>(w) / (r - l);
-                const float hh = half * static_cast<float>(h) / (b - t);
-                int ix0 = static_cast<int>(cxpx - hw);
-                int iy0 = static_cast<int>(cypx - hh);
-                int ix1 = static_cast<int>(cxpx + hw + 0.5f);
-                int iy1 = static_cast<int>(cypx + hh + 0.5f);
-                if (ix0 < 0) ix0 = 0;
-                if (iy0 < 0) iy0 = 0;
-                if (ix1 > static_cast<int>(w)) ix1 = static_cast<int>(w);
-                if (iy1 > static_cast<int>(h)) iy1 = static_cast<int>(h);
-                ix0 &= ~1; iy0 &= ~1; ix1 &= ~1; iy1 &= ~1;   // NGX prefers even bases and sizes
-                const int cw = ix1 - ix0, ch = iy1 - iy0;
-                // Worth it only when the crop is appreciably smaller than the
-                // frame; otherwise the seam buys nothing and full DLAA runs.
-                if (cw >= 128 && ch >= 128 &&
-                    static_cast<uint64_t>(cw) * ch <= static_cast<uint64_t>(w) * h * 9 / 10) {
-                    fcx = static_cast<uint32_t>(ix0);
-                    fcy = static_cast<uint32_t>(iy0);
-                    fcw = static_cast<uint32_t>(cw);
-                    fch = static_cast<uint32_t>(ch);
+                // The straight-ahead point (tx = ty = 0) and the crop's
+                // half-extents, in a given full size -- off the texture centre
+                // in an asymmetric frustum. The SAME NDC region in the render
+                // and the native frame, so DLSS upscales the render crop to
+                // the native crop; equal sizes (no upscale) are DLAA. Even
+                // bases and sizes (NGX prefers them), at least 128 px.
+                auto cropOf = [&](uint32_t fw, uint32_t fh, uint32_t& ox, uint32_t& oy,
+                                  uint32_t& ow, uint32_t& oh) -> bool {
+                    const float cx = (-l / (r - l)) * static_cast<float>(fw);
+                    const float cy = (b / (b - t)) * static_cast<float>(fh);
+                    const float halfa = tanf(g_foveaDeg * 0.5f * 0.01745329252f);
+                    const float hwp = halfa * static_cast<float>(fw) / (r - l);
+                    const float hhp = halfa * static_cast<float>(fh) / (b - t);
+                    int x0 = static_cast<int>(cx - hwp), y0 = static_cast<int>(cy - hhp);
+                    int x1 = static_cast<int>(cx + hwp + 0.5f), y1 = static_cast<int>(cy + hhp + 0.5f);
+                    if (x0 < 0) x0 = 0;
+                    if (y0 < 0) y0 = 0;
+                    if (x1 > static_cast<int>(fw)) x1 = static_cast<int>(fw);
+                    if (y1 > static_cast<int>(fh)) y1 = static_cast<int>(fh);
+                    x0 &= ~1; y0 &= ~1; x1 &= ~1; y1 &= ~1;
+                    const int cw = x1 - x0, ch = y1 - y0;
+                    if (cw < 128 || ch < 128) return false;
+                    ox = static_cast<uint32_t>(x0); oy = static_cast<uint32_t>(y0);
+                    ow = static_cast<uint32_t>(cw); oh = static_cast<uint32_t>(ch);
+                    return true;
+                };
+                // Worth it only when the output crop is appreciably smaller
+                // than the native frame; otherwise the seam buys nothing.
+                if (cropOf(w, h, fcx, fcy, fcw, fch) &&
+                    cropOf(foW, foH, focx, focy, focw, foch) &&
+                    static_cast<uint64_t>(focw) * foch <=
+                        static_cast<uint64_t>(foW) * foH * 9 / 10) {
                     foveaMode = true;
                     // The periphery calming (feature 6): the own pass reads
                     // these from the cbuffer and eases its history calmer with
@@ -2274,8 +2290,12 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                                                  "mv", "temporal_mv_cs", nullptr, "temporal aa");
                     made = g_csMv != nullptr;
                 }
-                if (made && (!e.dlOut || e.dlW != w || e.dlH != h || e.dlOutW != w ||
-                             e.dlOutH != h)) {
+                // The colour, motion and depth are RENDER size (w x h); NVIDIA
+                // reads the input crop from them. The output e.dlOut is NATIVE
+                // size (foW x foH == w x h for DLAA, larger for DLSS), where
+                // NVIDIA writes the upscaled crop.
+                if (made && (!e.dlOut || e.dlW != w || e.dlH != h || e.dlOutW != foW ||
+                             e.dlOutH != foH)) {
                     releaseDl(e);
                     made = makeTex(dev, w, h, DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM,
                                    D3D11_BIND_SHADER_RESOURCE, &e.dlColour, nullptr, nullptr) &&
@@ -2285,22 +2305,22 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                            makeTex(dev, w, h, DXGI_FORMAT_R32_FLOAT, DXGI_FORMAT_R32_FLOAT,
                                    D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS,
                                    &e.dlDepth, nullptr, &e.dlDepthUav) &&
-                           makeTex(dev, w, h, DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM,
+                           makeTex(dev, foW, foH, DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM,
                                    D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS,
                                    &e.dlOut, &e.dlOutSrv, &e.dlOutUav);
                     if (made) {
-                        e.dlW = w; e.dlH = h; e.dlOutW = w; e.dlOutH = h;
+                        e.dlW = w; e.dlH = h; e.dlOutW = foW; e.dlOutH = foH;
                     } else {
                         releaseDl(e);
                     }
                 }
-                if (made && (!e.foveaOut || e.foveaW != w || e.foveaH != h)) {
+                if (made && (!e.foveaOut || e.foveaW != foW || e.foveaH != foH)) {
                     if (e.foveaOutUav) { e.foveaOutUav->Release(); e.foveaOutUav = nullptr; }
                     if (e.foveaOut) { e.foveaOut->Release(); e.foveaOut = nullptr; }
-                    made = makeTex(dev, w, h, sd.Format, viewFmt,
+                    made = makeTex(dev, foW, foH, sd.Format, viewFmt,
                                    D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS,
                                    &e.foveaOut, nullptr, &e.foveaOutUav);
-                    if (made) { e.foveaW = w; e.foveaH = h; }
+                    if (made) { e.foveaW = foW; e.foveaH = foH; }
                 }
                 if (made && e.outSrv && e.dlOutSrv) {
                     // The colour, typed, whichever way the source came (the
@@ -2359,39 +2379,48 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     }
                     e.dlLastQpc = qn.QuadPart;
                     const char* whyF = "";
-                    if (dlaaEvaluateFovea(ctx, eye, e.dlColour, e.dlDepth, e.dlMv, e.dlOut, w, h,
-                                          fcx, fcy, fcw, fch, jxNow, jyNow, resetHist, frameMs,
-                                          &whyF)) {
+                    if (dlssEvaluateFovea(ctx, eye, e.dlColour, e.dlDepth, e.dlMv, e.dlOut, w, h,
+                                          foW, foH, fcx, fcy, fcw, fch, focx, focy, focw, foch,
+                                          jxNow, jyNow, resetHist, frameMs, &whyF)) {
                         foveaEvalOk = true;   // e.foveaHaveHistory is set from this at frame end
                         D3D11_MAPPED_SUBRESOURCE fm{};
                         if (SUCCEEDED(ctx->Map(g_foveaCb, 0, D3D11_MAP_WRITE_DISCARD, 0, &fm)) &&
                             fm.pData) {
-                            float band = g_foveaEdgeDeg * (static_cast<float>(w) / (tanNow[1] - tanNow[0])) *
+                            // The band and the crop are in the NATIVE output
+                            // space now (foW x foH), where the composite runs.
+                            float band = g_foveaEdgeDeg *
+                                         (static_cast<float>(foW) / (tanNow[1] - tanNow[0])) *
                                          0.01745329252f;
-                            const float maxBand = 0.5f * static_cast<float>(fcw < fch ? fcw : fch);
+                            const float maxBand = 0.5f * static_cast<float>(focw < foch ? focw : foch);
                             if (band > maxBand) band = maxBand;
                             if (band < 1.0f) band = 1.0f;
                             float* fc = static_cast<float*>(fm.pData);
-                            fc[0] = static_cast<float>(fcx);
-                            fc[1] = static_cast<float>(fcy);
-                            fc[2] = static_cast<float>(fcx + fcw);
-                            fc[3] = static_cast<float>(fcy + fch);
+                            fc[0] = static_cast<float>(focx);
+                            fc[1] = static_cast<float>(focy);
+                            fc[2] = static_cast<float>(focx + focw);
+                            fc[3] = static_cast<float>(focy + foch);
                             fc[4] = band;
-                            fc[5] = static_cast<float>(w);
-                            fc[6] = static_cast<float>(h);
+                            fc[5] = static_cast<float>(foW);
+                            fc[6] = static_cast<float>(foH);
                             fc[7] = 0.0f;
                             ctx->Unmap(g_foveaCb, 0);
+                            // PERIPH = the render-size own history (bilinearly
+                            // upscaled to the native output by the sampler when
+                            // the game rendered small); FOVEA = NVIDIA's native
+                            // crop.
                             ID3D11ShaderResourceView* csrv[2] = {e.outSrv, e.dlOutSrv};
                             ID3D11UnorderedAccessView* cuav[1] = {e.foveaOutUav};
                             ID3D11ShaderResourceView* nullC2[2] = {};
                             ID3D11UnorderedAccessView* nullC1[1] = {};
+                            ID3D11SamplerState* smpC = g_samp;
                             ctx->CSSetShaderResources(0, 2, nullC2);
                             ctx->CSSetUnorderedAccessViews(0, 1, nullC1, nullptr);
                             ctx->CSSetShader(g_csFovea, nullptr, 0);
                             ctx->CSSetShaderResources(0, 2, csrv);
                             ctx->CSSetUnorderedAccessViews(0, 1, cuav, nullptr);
                             ctx->CSSetConstantBuffers(0, 1, &g_foveaCb);
-                            ctx->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
+                            ctx->CSSetSamplers(0, 1, &smpC);
+                            ctx->Dispatch((foW + 7) / 8, (foH + 7) / 8, 1);
                             ctx->CSSetShaderResources(0, 2, nullC2);
                             ctx->CSSetUnorderedAccessViews(0, 1, nullC1, nullptr);
                             foveaComposited = true;
@@ -2400,15 +2429,16 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                                 g_foveaNoted = true;
                                 Log::get().note(
                                     "temporal aa: DLSS where you look ENGAGED -- NVIDIA runs on a "
-                                    "%ux%u crop (%.0f deg) around the straight-ahead point at "
-                                    "(%u, %u), %.1f%% of the %ux%u frame's pixels; the own history "
-                                    "fills the periphery, blended over %.0f deg (%.0f px). NVIDIA's "
-                                    "price for the crop is in the DLAA totals.",
-                                    fcw, fch, static_cast<double>(g_foveaDeg), fcx, fcy,
-                                    100.0 * static_cast<double>(fcw) * fch /
-                                        (static_cast<double>(w) * h),
-                                    w, h, static_cast<double>(g_foveaEdgeDeg),
-                                    static_cast<double>(band));
+                                    "%ux%u->%ux%u crop (%s, %.0f deg) around the straight-ahead "
+                                    "point at (%u, %u) of the %ux%u output, %.1f%% of its pixels; "
+                                    "the own history fills the periphery (%ux%u render%s), blended "
+                                    "over %.0f deg (%.0f px). NVIDIA's price is in the DLAA totals.",
+                                    fcw, fch, focw, foch, upscale ? "DLSS" : "DLAA",
+                                    static_cast<double>(g_foveaDeg), focx, focy, foW, foH,
+                                    100.0 * static_cast<double>(focw) * foch /
+                                        (static_cast<double>(foW) * foH),
+                                    w, h, upscale ? " upscaled to the output" : "",
+                                    static_cast<double>(g_foveaEdgeDeg), static_cast<double>(band));
                             }
                         }
                     } else {
