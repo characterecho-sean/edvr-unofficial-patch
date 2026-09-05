@@ -99,7 +99,7 @@ void supersampleResolveConfigure() {
             raw.c_str());
     }
 
-    const std::string rawFilter = cfg.getString("experimental.supersample_filter", "calm");
+    const std::string rawFilter = cfg.getString("fix.supersample_filter", "calm");
     int filter = kSupersampleCalm;
     if (_stricmp(rawFilter.c_str(), "crisp") == 0) filter = kSupersampleCrisp;
     else if (_stricmp(rawFilter.c_str(), "calm") != 0 && !rawFilter.empty()) {

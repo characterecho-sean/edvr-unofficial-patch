@@ -12,6 +12,7 @@ const wchar_t* kD3d11 = L"d3d11.dll";
 const wchar_t* kIni = L"edvr.ini";
 const wchar_t* kOpenvr = L"openvr_api.dll";
 const wchar_t* kOpenvrOrig = L"openvr_api_orig.dll";
+const wchar_t* kNgx = L"nvngx_dlss.dll";   // NVIDIA's DLSS runtime, beside the game's executable
 
 // Said when the game is running and it is not this folder's copy. Nothing is
 // stopped, so it is a note rather than a problem -- but not silence either:
@@ -114,6 +115,8 @@ Survey surveyTarget(const GameInstall& game) {
     if (s.iniPresent) s.iniText = readTextFile(iniPath);
     s.baseIniText = readTextFile(baseIniPath(game.dir));
     s.state = readState(game.dir);
+    s.ngx = probeDll(joinPath(game.dir, kNgx));
+    s.nvidiaAdapter = nvidiaAdapterPresent(&s.nvidiaAdapterName);
 
     if (!s.game.openvrDir.empty()) {
         s.haveOpenvrDir = true;
@@ -382,6 +385,66 @@ Plan planInstall(const Survey& s, const Options& o, const PayloadInfo& p) {
                                  say(s.state.chainTarget) +
                                  ") is no longer there, so advanced.real_dll has been cleared.");
         }
+    }
+
+    // ------------------------------------------------------------------
+    // nvngx_dlss.dll -- NVIDIA's DLSS runtime, which temporal_aa = dlaa and
+    // dlss need beside the game's executable (where NGX looks for it). The
+    // driver does not ship it and the SDK's licence lets an application
+    // carry it, which is what this installer is. Three rules: placed only
+    // where an NVIDIA adapter is present (it is 59 MB, and on any other
+    // card the pass falls back to its own history regardless); a copy that
+    // is not ours -- the user's own, or one NVIDIA's updater replaced -- is
+    // left alone; and only the copy we placed is ever replaced or removed,
+    // by its hash in the install record.
+    // ------------------------------------------------------------------
+    if (p.haveNgx) {
+        const std::wstring dst = joinPath(s.game.dir, kNgx);
+        const DllInfo& cur = s.ngx;
+        const bool present = cur.kind != DllKind::Absent && cur.kind != DllKind::Unreadable;
+        const bool ours = present && s.state.ngxInstalled && !s.state.ngxSha.empty() &&
+                          cur.sha256 == s.state.ngxSha;
+        next.ngxInstalled = false;
+        next.ngxSha.clear();
+        if (cur.kind == DllKind::Unreadable) {
+            plan.problems.push_back(
+                "There is an nvngx_dlss.dll beside the game that cannot be read -- something has "
+                "it open. NVIDIA's DLSS runtime was not touched.");
+        } else if (present && cur.sha256 == p.ngxSha && !o.repair) {
+            plan.notes.push_back(
+                "nvngx_dlss.dll (NVIDIA's DLSS runtime) is already this build's -- left alone.");
+            next.ngxInstalled = true;
+            next.ngxSha = p.ngxSha;
+        } else if (present && !ours && cur.sha256 != p.ngxSha) {
+            plan.notes.push_back(
+                "A different nvngx_dlss.dll is already beside the game (yours, or one NVIDIA's "
+                "updater replaced) -- left alone; temporal_aa = dlaa uses it.");
+        } else if (!s.nvidiaAdapter) {
+            plan.notes.push_back(
+                "No NVIDIA graphics card was found, so NVIDIA's DLSS runtime (nvngx_dlss.dll, "
+                "59 MB) was not placed. temporal_aa = dlaa and dlss need one, and run EDVR's own "
+                "history without it.");
+            if (ours) {
+                next.ngxInstalled = true;
+                next.ngxSha = s.state.ngxSha;
+            }
+        } else {
+            if (present) backup(dst, "the nvngx_dlss.dll EDVR placed, being replaced");
+            writePayload("ngx", dst,
+                         present ? "updates NVIDIA's DLSS runtime"
+                                 : "places NVIDIA's DLSS runtime beside the game");
+            plan.notes.push_back(
+                present ? "Updating nvngx_dlss.dll (NVIDIA's DLSS runtime)."
+                        : "Placing nvngx_dlss.dll (NVIDIA's DLSS runtime, for temporal_aa = dlaa).");
+            next.ngxInstalled = true;
+            next.ngxSha = p.ngxSha;
+        }
+    } else if (s.state.ngxInstalled) {
+        // This installer carries no runtime (a build without the SDK): what an
+        // earlier one placed stays, and stays recorded as ours.
+        plan.notes.push_back(
+            "This installer carries no DLSS runtime; the nvngx_dlss.dll a previous one placed "
+            "is left where it is.");
     }
 
     // ------------------------------------------------------------------
@@ -768,6 +831,20 @@ Plan planUninstall(const Survey& s, const Options& o) {
         } else {
             plan.notes.push_back("No EDVR openvr_api.dll to remove.");
         }
+    }
+
+    // ---- NVIDIA's DLSS runtime ----------------------------------------
+    // Removed only when it is the copy this installer placed, by its hash: a
+    // copy the user put there themselves, or one NVIDIA's updater replaced,
+    // is theirs to keep. No backup of a 59 MB file the payload already holds.
+    const std::wstring ngxPath = joinPath(s.game.dir, kNgx);
+    if (s.state.ngxInstalled && !s.state.ngxSha.empty() && s.ngx.kind != DllKind::Absent &&
+        s.ngx.kind != DllKind::Unreadable && s.ngx.sha256 == s.state.ngxSha) {
+        remove(ngxPath, "removes NVIDIA's DLSS runtime, which EDVR placed", s.ngx.sha256);
+        plan.notes.push_back("Removing nvngx_dlss.dll (NVIDIA's DLSS runtime, which EDVR placed).");
+    } else if (s.ngx.kind != DllKind::Absent) {
+        plan.notes.push_back(
+            "The nvngx_dlss.dll beside the game is not the copy EDVR placed -- left alone.");
     }
 
     // ---- settings and record ------------------------------------------

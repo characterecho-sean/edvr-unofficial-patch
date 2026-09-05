@@ -18,8 +18,9 @@ namespace edvr::installer {
 #define IDR_EDVR_D3D11 101
 #define IDR_EDVR_OPENVR 102
 #define IDR_EDVR_INI 103
+#define IDR_EDVR_NGX 104   // NVIDIA's DLSS runtime, nvngx_dlss.dll, when the build had the SDK
 
-// "d3d11" | "openvr" | "ini". False when this build carries no such item.
+// "d3d11" | "openvr" | "ini" | "ngx". False when this build carries no such item.
 bool payloadItem(const std::string& item, const void** data, size_t* size);
 
 // Version, hashes and the shipped edvr.ini text, computed once.

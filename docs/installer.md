@@ -1,7 +1,8 @@
 # The installer
 
-`edvr-installer.exe` — one executable, carrying `d3d11.dll`, `openvr_api.dll`
-and `edvr.ini` as resources. It finds the game, installs or updates EDVR,
+`edvr-installer.exe` — one executable, carrying `d3d11.dll`, `openvr_api.dll`,
+`edvr.ini` and NVIDIA's DLSS runtime (`nvngx_dlss.dll`) as resources. It
+finds the game, installs or updates EDVR,
 preserves the settings you have changed, keeps other mods working, and can put
 everything back.
 
@@ -292,6 +293,26 @@ line.
   in. The other install being up is said out loud rather than passed over in
   silence. A process whose path cannot be read at all counts as this one, since
   a refusal is the direction somebody can recover from.
+
+## NVIDIA's DLSS runtime
+
+`temporal_aa = dlaa` and `dlss` hand each frame to NVIDIA's history, which
+lives in `nvngx_dlss.dll`. The driver does not ship that file (on the rig this
+was built on the driver store holds the NGX loader and the frame-generation
+library, and NGX keeps an over-the-air model cache under
+`ProgramData\NVIDIA\NGX`, but no super-resolution runtime), so the application
+has to carry it, and the DLSS SDK licence allows exactly that: the runtime may
+be distributed as incorporated into an application, not as a stand-alone
+download. So it rides inside the installer, unmodified, and is placed beside
+the game's executable, where NGX looks for it, under three rules. Only where an
+NVIDIA adapter is present, by DXGI's vendor id (a machine with an AMD
+integrated GPU beside an RTX card counts): it is 59 MB, and on any other card
+the pass falls back to its own history regardless. Only when the slot is empty
+or holds the copy a previous EDVR install placed: a copy you put there
+yourself, or one NVIDIA's updater replaced, is left alone, and the report says
+so. And uninstall removes only the copy EDVR placed, by the hash in the install
+record. A build made without the DLSS SDK ships an installer without the
+runtime, and says so in its window and its report.
 
 ## What it does not do
 

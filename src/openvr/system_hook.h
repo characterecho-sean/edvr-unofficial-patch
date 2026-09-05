@@ -105,7 +105,7 @@ void systemHookSetJitter(float dx, float dy, bool live);
 
 // Whether a jitter can be told to the game at all: the member-shaped
 // matrix receiver is installed (decided at launch -- the guard armed, or
-// experimental.temporal_aa on) and both eyes' matrices matched the tangent formula.
+// fix.temporal_aa on) and both eyes' matrices matched the tangent formula.
 // Without it the raw thunk alone would shift the tangents while the matrix
 // stayed put, and the game would render through one and be un-jittered
 // through the other.

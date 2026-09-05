@@ -33,7 +33,7 @@ namespace edvr {
 
 class Config;
 
-// Reads experimental.render_sharpness, for two things only this half can do: warm
+// Reads fix.render_sharpness, for two things only this half can do: warm
 // the shader ahead of the first engage, and say so when the strength is
 // set but no compositor hook ever announces itself (an openvr-only
 // install, or every feature that needs that hook was off at launch).

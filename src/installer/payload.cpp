@@ -28,6 +28,7 @@ int idFor(const std::string& item) {
     if (item == "d3d11") return IDR_EDVR_D3D11;
     if (item == "openvr") return IDR_EDVR_OPENVR;
     if (item == "ini") return IDR_EDVR_INI;
+    if (item == "ngx") return IDR_EDVR_NGX;
     return 0;
 }
 
@@ -53,6 +54,10 @@ const PayloadInfo& payloadInfo() {
         if (payloadItem("openvr", &data, &size)) {
             p.haveOpenvr = true;
             p.openvrSha = sha256Bytes(data, size);
+        }
+        if (payloadItem("ngx", &data, &size)) {
+            p.haveNgx = true;
+            p.ngxSha = sha256Bytes(data, size);
         }
         if (payloadItem("ini", &data, &size)) {
             p.iniText.assign(static_cast<const char*>(data), size);

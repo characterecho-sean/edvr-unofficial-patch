@@ -673,7 +673,7 @@ void* sharpenInner(void* srcTex, int eye, const float* bounds, float strength) {
 }  // namespace edvr::(anonymous)
 
 void sharpenPassConfigure(Config& cfg) {
-    float v = cfg.getFloat("experimental.render_sharpness", 0.0f);
+    float v = cfg.getFloat("fix.render_sharpness", 0.0f);
     if (!std::isfinite(v) || v < 0.0f) v = 0.0f;
     if (v > 1.0f) v = 1.0f;
     g_strength = v;
@@ -699,7 +699,7 @@ void sharpenPassTick(ID3D11DeviceContext* ctx) {
         elapsedMs(g_firstTickMs, kNoHookNoteMs)) {
         g_noHookNoted = true;
         Log::get().note(
-            "render sharpening: experimental.render_sharpness is %.2f, but no "
+            "render sharpening: fix.render_sharpness is %.2f, but no "
             "compositor hook has announced itself after %llu s. The pass "
             "runs inside the openvr_api.dll half's Submit hook -- install "
             "that file, or restart the game with the setting on so the hook "

@@ -2,6 +2,7 @@
 
 #include <windows.h>
 #include <tlhelp32.h>
+#include <dxgi.h>
 
 #include <algorithm>
 #include <cwctype>
@@ -466,6 +467,32 @@ std::vector<GameInstall> findInstalls() {
                          return a.odyssey && !b.odyssey;
                      });
     return unique;
+}
+
+bool nvidiaAdapterPresent(std::wstring* name) {
+    // DXGI rather than WMI or the registry: it is the same enumeration the
+    // game's D3D11 device comes from, it needs no COM apartment, and a
+    // software adapter (the render-only "Basic Render Driver") is flagged as
+    // such rather than passing for a card. 0x10DE is NVIDIA's PCI vendor id.
+    IDXGIFactory1* factory = nullptr;
+    if (FAILED(CreateDXGIFactory1(__uuidof(IDXGIFactory1), reinterpret_cast<void**>(&factory))) ||
+        !factory) {
+        return false;
+    }
+    bool found = false;
+    for (UINT i = 0; !found; ++i) {
+        IDXGIAdapter1* adapter = nullptr;
+        if (factory->EnumAdapters1(i, &adapter) != S_OK || !adapter) break;
+        DXGI_ADAPTER_DESC1 desc{};
+        if (SUCCEEDED(adapter->GetDesc1(&desc)) && !(desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) &&
+            desc.VendorId == 0x10DE) {
+            found = true;
+            if (name) *name = desc.Description;
+        }
+        adapter->Release();
+    }
+    factory->Release();
+    return found;
 }
 
 }  // namespace edvr::installer

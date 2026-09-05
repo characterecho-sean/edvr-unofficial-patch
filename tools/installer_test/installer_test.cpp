@@ -490,6 +490,55 @@ static void testPlanner() {
               "it keeps this version's default ini for the next merge");
     }
 
+    {   // NVIDIA's DLSS runtime: placed only where an NVIDIA card is, and only
+        // when the slot is empty or holds the copy we placed.
+        PayloadInfo withNgx = payload;
+        withNgx.haveNgx = true;
+        withNgx.ngxSha = "cccc-new-ngx";
+        Survey s = baseSurvey(dir);
+        s.nvidiaAdapter = true;
+        Plan plan = planInstall(s, options, withNgx);
+        check(hasStep(plan, Action::WritePayload, nullptr, L"nvngx_dlss.dll"),
+              "with an NVIDIA card the DLSS runtime is placed");
+        check(plan.nextState.ngxInstalled && plan.nextState.ngxSha == "cccc-new-ngx",
+              "and recorded as ours");
+        s.nvidiaAdapter = false;
+        plan = planInstall(s, options, withNgx);
+        check(!hasStep(plan, Action::WritePayload, nullptr, L"nvngx_dlss.dll"),
+              "without one it is not");
+        check(notesMention(plan, "No NVIDIA"), "and the report says so");
+        s.nvidiaAdapter = true;
+        s.ngx = fakeDll(DllKind::Foreign, joinPath(dir, L"nvngx_dlss.dll"), "their-ngx");
+        plan = planInstall(s, options, withNgx);
+        check(!hasStep(plan, Action::WritePayload, nullptr, L"nvngx_dlss.dll"),
+              "a copy that is not ours is left alone");
+        check(!plan.nextState.ngxInstalled, "and not claimed");
+        s.state.present = true;
+        s.state.ngxInstalled = true;
+        s.state.ngxSha = "their-ngx";
+        plan = planInstall(s, options, withNgx);
+        check(hasStep(plan, Action::WritePayload, nullptr, L"nvngx_dlss.dll"),
+              "an older copy of ours is updated");
+        check(hasStep(plan, Action::Backup, L"nvngx_dlss.dll", L"nvngx_dlss.dll"),
+              "and backed up first");
+        s.ngx = fakeDll(DllKind::Foreign, joinPath(dir, L"nvngx_dlss.dll"), "cccc-new-ngx");
+        plan = planInstall(s, options, withNgx);
+        check(!hasStep(plan, Action::WritePayload, nullptr, L"nvngx_dlss.dll"),
+              "this build's copy is left alone");
+        check(plan.nextState.ngxInstalled, "and still recorded");
+        s.ngx = fakeDll(DllKind::Foreign, joinPath(dir, L"nvngx_dlss.dll"), "their-ngx");
+        const Plan un = planUninstall(s, options);
+        check(hasStep(un, Action::Delete, L"nvngx_dlss.dll", nullptr),
+              "uninstall removes the copy EDVR placed");
+        s.state.ngxSha = "some-other";
+        const Plan un2 = planUninstall(s, options);
+        check(!hasStep(un2, Action::Delete, L"nvngx_dlss.dll", nullptr),
+              "but not one it did not place");
+        const Plan none = planInstall(baseSurvey(dir), options, payload);
+        check(!hasStep(none, Action::WritePayload, nullptr, L"nvngx_dlss.dll"),
+              "an installer without the runtime never writes one");
+    }
+
     {   // EDHM is already installed as d3d11.dll.
         Survey s = baseSurvey(dir);
         s.d3d11 = fakeDll(DllKind::D3d11Provider, joinPath(dir, L"d3d11.dll"), "edhm-sha",

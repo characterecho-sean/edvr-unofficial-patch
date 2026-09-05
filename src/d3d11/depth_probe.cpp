@@ -377,7 +377,7 @@ void mapText(const GridStats& g, char* out, size_t n) {
 }  // namespace
 
 void depthProbeConfigure(Config& cfg) {
-    const std::string mode = cfg.getString("experimental.temporal_aa", "off");
+    const std::string mode = cfg.getString("fix.temporal_aa", "off");
     g_wanted = _stricmp(mode.c_str(), "off") != 0 && !mode.empty();
 }
 

@@ -65,6 +65,9 @@ InstallState parseState(const std::string& text) {
     s.openvrOrigName = fromUtf8(get("openvr", "orig_name"));
     s.openvrOrigSha = get("openvr", "orig_sha256");
 
+    s.ngxSha = get("ngx", "sha256");
+    s.ngxInstalled = !s.ngxSha.empty();
+
     s.iniSha = get("ini", "sha256");
 
     // A record with no version is not a record; it is a file that happens to
@@ -99,6 +102,9 @@ std::string serializeState(const InstallState& state) {
     out += "sha256 = " + (state.openvrInstalled ? state.openvrSha : std::string()) + "\r\n";
     out += "orig_name = " + toUtf8(state.openvrOrigName) + "\r\n";
     out += "orig_sha256 = " + state.openvrOrigSha + "\r\n";
+
+    out += "\r\n[ngx]\r\n";
+    out += "sha256 = " + (state.ngxInstalled ? state.ngxSha : std::string()) + "\r\n";
 
     out += "\r\n[ini]\r\n";
     out += "sha256 = " + state.iniSha + "\r\n";

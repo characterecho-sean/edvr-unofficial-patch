@@ -53,7 +53,7 @@ READERS = [
     ('supersampleResolveConfigure', os.path.join('src', 'openvr', 'compositor_hook.cpp')),
     # The temporal pass's mode, jitter, weight, clip and motion source.
     ('temporalAaConfigure', os.path.join('src', 'openvr', 'compositor_hook.cpp')),
-    # The render sharpening's strength (experimental.render_sharpness): one number,
+    # The render sharpening's strength (fix.render_sharpness): one number,
     # live, and zero means the pass never runs.
     ('sharpenConfigure', os.path.join('src', 'openvr', 'compositor_hook.cpp')),
 ]

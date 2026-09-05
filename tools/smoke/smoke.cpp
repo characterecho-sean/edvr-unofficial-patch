@@ -785,7 +785,7 @@ int main(int argc, char** argv) {
         }
     }
 
-    // The trained pass (experimental.temporal_aa = dlaa), through the temporal
+    // The trained pass (fix.temporal_aa = dlaa), through the temporal
     // export with its DLAA bit: on a machine with the SDK built in, the
     // runtime beside this harness and an RTX GPU, a steady solid colour
     // must come back as itself; anywhere else the pass falls back to its

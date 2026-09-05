@@ -24,13 +24,18 @@ EDVR is free and stays free. If it improves your VR experience,
 ## Install
 
 **Run `edvr-installer.exe`** from the release. One file, nothing to extract,
-nothing to put in the right folder — it carries both DLLs and `edvr.ini` inside
-it and does the whole install:
+nothing to put in the right folder — it carries both DLLs, `edvr.ini` and
+NVIDIA's DLSS runtime inside it and does the whole install:
 
 - **Finds the game.** Frontier launcher, Steam or Epic, on whichever drive —
   it asks each launcher where it put the game rather than guessing paths, and
   confirms every answer by finding `EliteDangerous64.exe`. Or point it at a
   folder yourself.
+- **Places NVIDIA's DLSS runtime** (`nvngx_dlss.dll`, 59 MB) beside the game
+  when the machine has an NVIDIA card, which is what `temporal_aa = dlaa`
+  needs; on any other card it skips it and says so. A copy you put there
+  yourself, or one NVIDIA's own updater replaced, is left alone, and
+  uninstall removes only the copy it placed.
 - **Keeps your settings.** Updating never overwrites `edvr.ini`: it writes the
   new version's file with your values put back into it, so new settings and
   changed defaults arrive and nothing you tuned is lost. It says which is which
@@ -756,7 +761,10 @@ here so you can read exactly what it does and build it yourself.
 
 ## Licence and standing
 
-MIT — see [LICENSE](LICENSE).
+MIT — see [LICENSE](LICENSE). One file the installer carries is not: NVIDIA's
+DLSS runtime, `nvngx_dlss.dll`, is NVIDIA's software under the NVIDIA RTX SDKs
+licence, distributed unmodified as part of this application as that licence
+allows, and only placed on machines with an NVIDIA card.
 
 Not affiliated with, endorsed by, or supported by Frontier Developments plc or
 Valve Corporation. Elite Dangerous is a trademark of Frontier Developments plc.

@@ -67,6 +67,12 @@ GameRunState gameRunState(const std::wstring& gameDir);
 // has Elite running, and every one of them has the test process itself.
 GameRunState runStateOf(const wchar_t* exeName, const std::wstring& dir);
 
+// Is there an NVIDIA graphics adapter in this machine, by DXGI's vendor id,
+// software adapters skipped? NVIDIA's DLSS runtime is placed only where
+// there is one. The first such adapter's name goes to `name` when given. A
+// machine with an AMD integrated GPU beside an NVIDIA card counts.
+bool nvidiaAdapterPresent(std::wstring* name);
+
 // Path and text helpers shared with the rest of the installer.
 std::wstring joinPath(const std::wstring& dir, const std::wstring& leaf);
 std::wstring leafOf(const std::wstring& path);

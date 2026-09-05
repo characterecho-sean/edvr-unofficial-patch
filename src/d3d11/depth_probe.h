@@ -23,7 +23,7 @@
 // buffer is what the two paths, the last-unbind rule and the desk
 // self-test below now decide.
 //
-// Runs only while experimental.temporal_aa is on (it exists for that pass), costs
+// Runs only while fix.temporal_aa is on (it exists for that pass), costs
 // one pointer compare per eye draw and per render-target change, and one
 // tiny dispatch every few seconds; dereferences a view only inside the
 // call the game made with it; stands down for the session on any
@@ -40,7 +40,7 @@ namespace edvr {
 
 class Config;
 
-// Reads experimental.temporal_aa: the probe is wanted while the pass is.
+// Reads fix.temporal_aa: the probe is wanted while the pass is.
 void depthProbeConfigure(Config& cfg);
 
 // EVERY draw on the owner context, with the depth-stencil view bound for

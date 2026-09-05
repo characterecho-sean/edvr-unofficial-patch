@@ -33,6 +33,8 @@ struct PayloadInfo {
     std::string d3d11Sha;
     bool        haveOpenvr = false;
     std::string openvrSha;
+    bool        haveNgx = false;   // NVIDIA's DLSS runtime, nvngx_dlss.dll
+    std::string ngxSha;
     std::string iniText;  // the shipped default edvr.ini
 };
 
@@ -53,6 +55,14 @@ struct Survey {
     bool                 iniPresent = false;
     std::string iniText;      // the user's edvr.ini
     std::string baseIniText;  // the shipped ini of the installed version, if kept
+
+    // NVIDIA's DLSS runtime beside the game, and whether this machine has a
+    // card for it: an NVIDIA adapter by DXGI's vendor id. A machine with an
+    // AMD integrated GPU beside an RTX card counts, and the rig this was
+    // built on is one.
+    DllInfo      ngx;            // <game>\nvngx_dlss.dll
+    bool         nvidiaAdapter = false;
+    std::wstring nvidiaAdapterName;
 
     bool    haveOpenvrDir = false;
     DllInfo openvrCurrent;  // <openvr>\openvr_api.dll
@@ -98,7 +108,7 @@ struct Step {
     Action       action = Action::MakeDir;
     std::wstring from;
     std::wstring to;
-    std::string  item;  // "d3d11" | "openvr" for WritePayload
+    std::string  item;  // "d3d11" | "openvr" | "ngx" for WritePayload
     std::string  text;  // for WriteText
     std::string  why;   // shown to the user, one line
 

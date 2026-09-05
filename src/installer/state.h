@@ -40,6 +40,9 @@ struct InstallState {
     std::wstring openvrOrigName;  // normally openvr_api_orig.dll
     std::string  openvrOrigSha;   // the game's own runtime, as we found it
 
+    bool         ngxInstalled = false;  // NVIDIA's DLSS runtime, the copy we placed
+    std::string  ngxSha;
+
     std::string iniSha;       // the edvr.ini we wrote; a differing file is user edits
     bool        hasBaseIni = false;
 };

@@ -16,6 +16,11 @@ Generated rather than committed for two reasons:
     rather than fail to compile. A committed .rc naming a file that is not
     there is a build error; this script simply leaves the line out, and
     payloadInfo() reports the half as absent at runtime.
+  * nvngx_dlss.dll, NVIDIA's DLSS runtime, is optional the same way: build.bat
+    copies it into the build only when the DLSS SDK is present, and an
+    installer without it says so in its window. The SDK's licence allows the
+    runtime to ship as part of an application and not as a stand-alone
+    download, which is why it rides inside this executable.
   * The version string comes from `git describe`, like the DLLs'.
 
 Usage:
@@ -32,6 +37,7 @@ import sys
 IDR_D3D11 = 101
 IDR_OPENVR = 102
 IDR_INI = 103
+IDR_NGX = 104   # NVIDIA's DLSS runtime, when the build had the SDK
 RT_MANIFEST = 24
 
 
@@ -133,6 +139,7 @@ def main():
     d3d11 = os.path.join(args.build, 'd3d11.dll')
     openvr = os.path.join(args.build, 'openvr_api.dll')
     ini = os.path.join(args.root, 'edvr.ini')
+    ngx = os.path.join(args.build, 'nvngx_dlss.dll')
     manifest = os.path.join(args.root, 'src', 'installer', 'installer.manifest')
 
     if not os.path.exists(d3d11):
@@ -176,6 +183,12 @@ def main():
         lines.append('// no openvr_api.dll in the build: this installer ships without the')
         lines.append('// transition flash fix and Explorer Cam, and says so in its window.')
         carried = 'd3d11.dll and edvr.ini'
+    if os.path.exists(ngx):
+        lines.append('%d RCDATA "%s"' % (IDR_NGX, rc_path(ngx)))
+        carried += ", and NVIDIA's DLSS runtime (nvngx_dlss.dll)"
+    else:
+        lines.append('// no nvngx_dlss.dll in the build (no DLSS SDK): this installer ships without')
+        lines.append("// NVIDIA's runtime, and temporal_aa = dlaa falls back to EDVR's own history.")
 
     version = args.version
     lines += [

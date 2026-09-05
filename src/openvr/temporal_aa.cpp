@@ -33,7 +33,7 @@ typedef void (*PFN_EdvrTemporalAaNoteHead)(int, const float*, const float*, cons
 
 struct State {
     bool   on = false;
-    bool   dlaa = false;   // experimental.temporal_aa = dlaa | dlss: NVIDIA's history instead of the pass's own
+    bool   dlaa = false;   // fix.temporal_aa = dlaa | dlss: NVIDIA's history instead of the pass's own
     bool   upscale = false; // ...and dlss: a frame smaller than the unit-quality size comes back at it
     bool   jitterWanted = true;
     float  blend = 0.90f;
@@ -150,7 +150,7 @@ void temporalAaConfigure() {
     State& s = g_s;
     Config& cfg = Config::get();
 
-    const std::string raw = cfg.getString("experimental.temporal_aa", "off");
+    const std::string raw = cfg.getString("fix.temporal_aa", "off");
     bool on = false;
     bool dlaa = false;
     bool upscale = false;

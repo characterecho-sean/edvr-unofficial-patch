@@ -134,6 +134,14 @@ std::string statusReport(const Survey& s, const PayloadInfo& payload) {
         out += "openvr_api.dll    the game's own copy was not found under this folder\r\n";
     }
     out += std::string("edvr.ini          ") + (s.iniPresent ? "present" : "not present") + "\r\n";
+    out += std::string("nvngx_dlss.dll    ") +
+           (s.ngx.kind == DllKind::Absent ? std::string("not present (NVIDIA's DLSS runtime)")
+                                          : toUtf8(describeDll(s.ngx))) +
+           "\r\n";
+    out += std::string("NVIDIA card       ") +
+           (s.nvidiaAdapter ? toUtf8(s.nvidiaAdapterName)
+                            : std::string("none found -- temporal_aa = dlaa needs one")) +
+           "\r\n";
 
     if (s.state.present) {
         out += "\r\nLast installed by this installer: " + s.state.edvrVersion;

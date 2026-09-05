@@ -20,7 +20,7 @@
 // while the resolve is engaged. Crop first, resolve second, sequentially;
 // a fused dispatch is future work.
 //
-// experimental.supersample_resolve = off | auto | on, experimental.supersample_filter =
+// experimental.supersample_resolve = off | auto | on, fix.supersample_filter =
 // calm | crisp, experimental.supersample_width = radius in output pixels. All live.
 #pragma once
 

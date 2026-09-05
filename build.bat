@@ -388,7 +388,7 @@ set INSTALLER_SRC="%ROOT%\src\installer\main.cpp" "%ROOT%\src\installer\gui.cpp"
     "%ROOT%\src\installer\state.cpp" "%ROOT%\src\installer\mirror.cpp" ^
     "%ROOT%\src\installer\payload.cpp"
 set INSTALLER_LIBS=user32.lib gdi32.lib gdiplus.lib dwmapi.lib uxtheme.lib ^
-    shell32.lib ole32.lib comctl32.lib advapi32.lib version.lib bcrypt.lib kernel32.lib
+    shell32.lib ole32.lib comctl32.lib advapi32.lib version.lib bcrypt.lib dxgi.lib kernel32.lib
 
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /GR- /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /I"%GEN%" ^
