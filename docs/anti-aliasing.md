@@ -1371,6 +1371,24 @@ lock now does its job at rest. Unflown as of the commit; the registration
 line's "another's", "carried" and k figures are the verification for the
 first two, a docked panel and the main menu for the third.
 
+**The cleanup of the same evening.** Five levers the record had proven
+wrong or dead came out, so the pass has fewer ways to be misconfigured:
+the rest snap (an accumulating lag, above); the HUD depth layers (the only
+layer ever found was the ship model's schematic render); the assumed HUD
+distance (it caught a station's lit faces and missed orange text); the
+`camera` motion source (the rows alone, read without the z flip -- wrong
+since the flip was measured); and the transposed-reading A/B with the
+instrument's candidate 1 (the reading is settled: view->world). The
+shader reads one depth again, the cbuffer lost a row, and the depth view
+paints the scene's depth in grey and no depth in magenta. Two things were
+found on the way: `temporal_aa_motion = head` had never been assigned by
+the parser since depth became the default, so it silently ran depth (fixed);
+and the rotation angle behind the residual, the continuity test and the
+head-speed buckets was an acos of the trace in float, which cannot resolve
+below about 0.02 degrees -- the "still" residuals of 0.025 degrees a frame
+in every steady interval were that floor -- and now takes the skew into
+account and is exact at small angles. Unflown with the rest.
+
 ## Feature C — texture LOD bias, the small lever
 
 Not all shimmer is geometry. Detail maps and normal maps sampled a mip

@@ -18,8 +18,12 @@ far plane and then follows the brightness through every pass at the door.
 
 **Built the same evening, on this branch, unflown:** F2, F3, D1 (with the
 morning review's F9 family gate) and F4's default, in the code; F1 in the
-handout, the live ini and the key's comment. The design record's Feature B
-section carries the summary.
+handout, the live ini and the key's comment. A cleanup pass followed in a
+second commit: the rest snap, the HUD depth layers, the assumed HUD
+distance, the un-flipped `camera` motion source and the transposed-reading
+A/B are gone, the `head` motion source is parsed again, and the rotation
+angle is exact at small angles (the instrument note below). The design
+record's Feature B section carries both summaries.
 
 ---
 

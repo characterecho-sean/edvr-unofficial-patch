@@ -45,7 +45,7 @@ namespace edvr {
 class Config;
 
 // Reads experimental.temporal_aa (the warm compile and the camera capture want to
-// know) and advanced.temporal_aa_view_transpose.
+// know) and the pass's [advanced] keys.
 void temporalPassConfigure(Config& cfg);
 
 // Once per frame, from the frame boundary: the warm compile when wanted.
@@ -140,8 +140,8 @@ extern "C" {
 //            planes, for its reversed-Z depth (0 = unknown, no depth).
 // headDeg:   the head's turn this frame in degrees, for the instrument.
 // motion:    0 none (no reprojection), 1 head (deltaHead, rotation only),
-//            2 camera (the pass's own capture; falls back to none until a
-//            pair exists), 3 depth (the head's rotation AND translation,
+//            2 retired (the rows alone, un-flipped; the frame goes out
+//            unblended), 3 depth (the head's rotation AND translation,
 //            per pixel through the scene's depth from the depth probe;
 //            rotation only where there is no depth).
 // blend:     history weight 0.5..0.95. clampSigma: the clip's half-width in

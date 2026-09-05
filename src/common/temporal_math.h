@@ -175,13 +175,18 @@ inline float temporalDepthToMetres(float d, float nearZ, float farZ) {
     return nearZ * farZ / den;
 }
 
-// The angle of a rotation, in degrees: acos((trace - 1) / 2), clamped.
-// The head's turn between two frames, for the pass's speed buckets.
+// The angle of a rotation, in degrees, from the trace and the skew both:
+// cos = (trace - 1) / 2, sin = |skew| / 2, angle = atan2(sin, cos). An acos
+// of the trace alone cannot resolve below about 0.02 degrees in float (the
+// cosine of a small angle rounds to 1), and the registration line's
+// residuals sat on that floor for a day (2026-09-04); the skew is exact
+// there. The head's turn between two frames, the chooser's continuity
+// test, the rows' residual against the head.
 inline float temporalRotationAngleDeg(const float m[9]) {
-    float c = 0.5f * (m[0] + m[4] + m[8] - 1.0f);
-    if (c > 1.0f) c = 1.0f;
-    if (c < -1.0f) c = -1.0f;
-    return acosf(c) * 57.2957795f;
+    const float c = 0.5f * (m[0] + m[4] + m[8] - 1.0f);
+    const float sx = m[7] - m[5], sy = m[2] - m[6], sz = m[3] - m[1];
+    const float s = 0.5f * sqrtf(sx * sx + sy * sy + sz * sz);
+    return atan2f(s, c) * 57.2957795f;
 }
 
 // The camera's rotation delta from two frames of the game's own view

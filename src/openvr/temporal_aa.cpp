@@ -25,7 +25,9 @@ typedef void* (*PFN_EdvrTemporalAa)(void*, int, const float*, const float*,
 
 constexpr uint32_t kMaxFaults = 8;
 
-enum class Motion : uint8_t { None = 0, Head = 1, Camera = 2, Depth = 3 };
+// 2 was "camera", the rows alone read without the z flip: wrong since the
+// flip was measured, retired 2026-09-04.
+enum class Motion : uint8_t { None = 0, Head = 1, Depth = 3 };
 
 typedef void (*PFN_EdvrTemporalAaNoteHead)(int, const float*, const float*, const float*);
 
@@ -114,8 +116,7 @@ State g_s;
 constexpr uint32_t kReadOrderFrames = 600;
 
 const char* motionName(Motion m) {
-    return m == Motion::Depth ? "head with depth"
-         : m == Motion::Camera ? "camera" : m == Motion::Head ? "head" : "none";
+    return m == Motion::Depth ? "head with depth" : m == Motion::Head ? "head" : "none";
 }
 
 // The mode as the log should say it. The reload line used to say "on" for
@@ -172,12 +173,15 @@ void temporalAaConfigure() {
     if (clampSig > 3.0f) clampSig = 3.0f;
     const std::string rawMotion = cfg.getString("advanced.temporal_aa_motion", "depth");
     Motion motion = Motion::Depth;
-    if (_stricmp(rawMotion.c_str(), "camera") == 0) motion = Motion::Camera;
-    else if (_stricmp(rawMotion.c_str(), "none") == 0) motion = Motion::None;
+    // "head" was never assigned here while depth was the default, so the
+    // key silently ran depth (found 2026-09-04 in the cleanup pass).
+    if (_stricmp(rawMotion.c_str(), "none") == 0) motion = Motion::None;
     else if (_stricmp(rawMotion.c_str(), "depth") == 0) motion = Motion::Depth;
-    else if (_stricmp(rawMotion.c_str(), "head") != 0 && !rawMotion.empty()) {
+    else if (_stricmp(rawMotion.c_str(), "head") == 0) motion = Motion::Head;
+    else if (!rawMotion.empty()) {
         Log::get().note("temporal_aa_motion = \"%s\" is not a source this build "
-                        "knows (depth, head, camera, none). Using depth.",
+                        "knows (depth, head, none; \"camera\" was retired 2026-09-04). "
+                        "Using depth.",
                         rawMotion.c_str());
     }
     const std::string rawSign = cfg.getString("advanced.temporal_aa_jitter_sign", "as_is");

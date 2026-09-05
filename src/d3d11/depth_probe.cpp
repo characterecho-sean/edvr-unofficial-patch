@@ -36,7 +36,7 @@ void main(uint3 id : SV_DispatchThreadID) {
 
 constexpr int      kMaxTargets = 32;   // the cockpit binds shadow maps by the handful
 constexpr uint64_t kSampleIntervalMs = 10000;
-constexpr uint64_t kSampleIntervalEyeMs = 2000;   // eye-sized targets: the layer test wants them fresh
+constexpr uint64_t kSampleIntervalEyeMs = 2000;   // eye-sized targets: the census line wants them fresh
 constexpr int      kMaxSampleLines = 6;
 
 // The near plane the game names when it asks for its projection (0.025,
@@ -69,7 +69,7 @@ struct Target {
     uint32_t    unbindsThisFrame = 0;   // how many times the game switched away from it
     uint32_t    unbindsLastFrame = 0;
     uint64_t    lastSampleMs = 0;
-    // What its last sample read, for the layer test: how much of the grid
+    // What its last sample read, for the census line: how much of the grid
     // sat at the far plane, and how much within 100 m.
     int         sampleFar = 0, sampleNear = 0;
     bool        sampledOnce = false;
@@ -435,8 +435,6 @@ int discoverTarget(void* dsv) {
 }  // namespace
 
 int  g_scenePick[2] = {-1, -1};   // the pair in use, for hysteresis
-int  g_layerPick[4] = {-1, -1, -1, -1};   // the HUD/cockpit layer pairs in use (left, right; twice)
-int  g_layerNoted[4] = {-2, -2, -2, -2};  // ...as last logged
 bool g_sceneLatchedThisFrame = false;   // the temporal pass's camera latch fired
 
 void depthProbeNoteDraw(ID3D11DeviceContext* ctx, void* dsv, bool rtvEyeSized,
@@ -532,70 +530,6 @@ bool depthProbeSceneDepth(uint32_t w, uint32_t h, int eye, ID3D11Texture2D** tex
     return true;
 }
 
-int depthProbeLayerDepths(uint32_t w, uint32_t h, int eye, ID3D11Texture2D** out, int maxN) {
-    if (!out || maxN <= 0) return 0;
-    for (int i = 0; i < maxN; ++i) out[i] = nullptr;
-    if (!g_wanted || eye < 0 || eye > 1 || g_scenePick[0] < 0 || g_scenePick[1] < 0) return 0;
-    // The candidates: eye-sized, single-sample, not the scene pair, drawn
-    // into last frame, and SAMPLED as sparse-near -- at least half the grid
-    // at the far plane and some of it within 100 m. That is a cockpit or
-    // HUD layer (the docked flights read a few samples at 1.4 to 1.6 m in
-    // targets with four to nine draws, the rest far), and its depth is what
-    // the scene's lacks where the HUD sits over the canopy. A layer that
-    // fills the grid near is not one, and stays out.
-    int cand[8];
-    int n = 0;
-    for (int i = 0; i < g_targetCount && n < 8; ++i) {
-        const Target& t = g_targets[i];
-        if (i == g_scenePick[0] || i == g_scenePick[1]) continue;
-        if (!t.dsv || !t.tex || t.w != w || t.h != h || t.samples > 1) continue;
-        if (t.drawsLastFrame < 1 || !t.sampledOnce) continue;
-        if (t.sampleFar < 128 || t.sampleNear < 1) continue;
-        cand[n++] = i;
-    }
-    for (int i = 1; i < n; ++i) {
-        for (int j = i; j > 0 && g_targets[cand[j]].drawsLastFrame >
-                                     g_targets[cand[j - 1]].drawsLastFrame; --j) {
-            const int tmp = cand[j]; cand[j] = cand[j - 1]; cand[j - 1] = tmp;
-        }
-    }
-    // Pairs of like draw counts, each ordered by first bind (the first is
-    // the left, as for the scene pair); an odd one out is skipped.
-    int i = 0, found = 0;
-    while (i + 1 < n && found < maxN) {
-        int a = cand[i], b = cand[i + 1];
-        const uint32_t da = g_targets[a].drawsLastFrame, db = g_targets[b].drawsLastFrame;
-        if (da > db + 1) { ++i; continue; }
-        if (g_targets[b].firstBindLastFrame < g_targets[a].firstBindLastFrame) {
-            const int tmp = a; a = b; b = tmp;
-        }
-        out[found++] = g_targets[eye == 0 ? a : b].tex;
-        if (found <= 2) {
-            g_layerPick[(found - 1) * 2] = a;
-            g_layerPick[(found - 1) * 2 + 1] = b;
-        }
-        i += 2;
-    }
-    for (int k = found * 2; k < 4; ++k) g_layerPick[k] = -1;
-    if (eye == 0 && memcmp(g_layerPick, g_layerNoted, sizeof(g_layerPick)) != 0) {
-        memcpy(g_layerNoted, g_layerPick, sizeof(g_layerNoted));
-        char line[400];
-        size_t used = 0;
-        for (int k = 0; k < found && used < sizeof(line); ++k) {
-            const Target& a2 = g_targets[g_layerPick[k * 2]];
-            const Target& b2 = g_targets[g_layerPick[k * 2 + 1]];
-            const int m = snprintf(line + used, sizeof(line) - used,
-                                   "%s#%d and #%d (%u and %u draws; %d of 256 samples within 100 m, %d at the far plane)",
-                                   k ? "; " : "", g_layerPick[k * 2], g_layerPick[k * 2 + 1],
-                                   a2.drawsLastFrame, b2.drawsLastFrame, a2.sampleNear, a2.sampleFar);
-            if (m > 0) used += static_cast<size_t>(m);
-        }
-        Log::get().note("depth probe: the pass's HUD/cockpit depth layer pair(s): %s.",
-                        found ? line : "none");
-    }
-    return found;
-}
-
 uint32_t depthProbeSceneDraws() {
     if (!g_wanted || g_scenePick[0] < 0 || g_scenePick[1] < 0 ||
         g_scenePick[0] >= g_targetCount || g_scenePick[1] >= g_targetCount) {
@@ -641,8 +575,9 @@ bool depthProbeWantsSample(void* current, void* next) {
     ++t.unbindsThisFrame;
     if (g_stagingInFlight) return false;
     // An eye-sized, single-sample target that has never been sampled goes
-    // first: the temporal pass's HUD-layer test needs its reading, and the
-    // round-robin took six minutes to reach the HUD pair (2026-09-04).
+    // first: the census line wants its reading, and the round-robin took
+    // six minutes to reach the HUD pair (2026-09-04; the layer test that
+    // first asked for this is gone, the census keeps the lane).
     // ...but not the scene pair itself, which is eye-sized too and, on the
     // fast lane, took every staging slot from the HUD pair (2026-09-04).
     const bool eyeSized = g_scenePick[0] >= 0 && g_scenePick[0] < g_targetCount &&
@@ -842,8 +777,7 @@ void depthProbeFrameBoundary(ID3D11DeviceContext* ctx) {
             g_drawsLastFrame, g_drawsWithDsvLastFrame, busy, g_scenePick[0],
             g_scenePick[1]);
         // Every eye-sized target, with its draws, its first bind and what
-        // its last sample read: the HUD-layer test's candidates, and why
-        // one is or is not taken.
+        // its last sample read.
         if (g_scenePick[0] >= 0 && g_scenePick[0] < g_targetCount) {
             const uint32_t ew = g_targets[g_scenePick[0]].w;
             const uint32_t eh = g_targets[g_scenePick[0]].h;

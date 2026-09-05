@@ -35,12 +35,10 @@ constexpr char kTemporalCsHlsl[] = R"HLSL(
 Texture2D<float4> S : register(t0);      // this frame, the game's own texture (or the region copied out of it)
 Texture2D<float4> H : register(t1);      // the history, region-sized, on the unjittered grid
 Texture2D<float> Z : register(t2);       // the scene's depth, the game's own, when the pass has it
-Texture2D<float> Z2 : register(t3);      // a cockpit or HUD layer's depth, the same way (unbound reads 0)
-Texture2D<float> Z3 : register(t4);      // ...and a second layer's
 SamplerState L : register(s0);           // bilinear, clamp
 RWTexture2D<float4> O : register(u0);    // the output, region-sized, the game's format
 RWTexture2D<float4> N : register(u1);    // the new history
-RWStructuredBuffer<uint> Stats : register(u2);   // 0 rejected, 1 clipped, 2 the clips' size (luma/255, summed); then the same three per candidate, four of them; 15 pixels on the world path, 16 bright pixels, 17 bright pixels with no depth; 18-20 the registration probes on the world path (sum dx*100, sum dy*100, count) and 21-23 on the ship; 24-27 world pixels, world clipped, ship pixels, ship clipped; 28 pixels with a layer's depth, 29 bright pixels with a layer's depth; 30-32 the registration probes on the sky (the far plane: sum dx*100, sum dy*100, count); 33-34 the probes' sum resid.mv*100 and sum mv.mv*100 on the sky, 35-36 on the world with a depth, 37-38 on the ship
+RWStructuredBuffer<uint> Stats : register(u2);   // 0 rejected, 1 clipped, 2 the clips' size (luma/255, summed); then the same three per candidate, four of them; 15 pixels on the world path, 16 bright pixels, 17 bright pixels with no depth; 18-20 the registration probes on the world path (sum dx*100, sum dy*100, count) and 21-23 on the ship; 24-27 world pixels, world clipped, ship pixels, ship clipped; 28-29 unused (the depth layers, retired 2026-09-04); 30-32 the registration probes on the sky (the far plane: sum dx*100, sum dy*100, count); 33-34 the probes' sum resid.mv*100 and sum mv.mv*100 on the sky, 35-36 on the world with a depth, 37-38 on the ship
 RWTexture2D<float2> MV : register(u3);   // for a trained pass: motion vectors, pixels, current -> previous
 RWTexture2D<float>  ZC : register(u4);   // and the depth, copied as it is
 cbuffer P : register(b0) {
@@ -54,9 +52,9 @@ cbuffer P : register(b0) {
     float4 dR1;         // directions to last frame's (xyz; w unused)
     float4 dR2;
     float4 c0R0;        // the registration instrument's candidates, same
-    float4 c0R1;        // shape: 0 the head as used, 1 the head one frame
-    float4 c0R2;        // earlier, 2 the camera rows as world->view, 3 the
-    float4 c1R0;        // game-pose array's head
+    float4 c0R1;        // shape: 0 the head's rotation alone, 1 retired,
+    float4 c0R2;        // 2 the world path's delta from the rows, 3 the
+    float4 c1R0;        // head with depth as used
     float4 c1R1;
     float4 c1R2;
     float4 c2R0;
@@ -69,12 +67,11 @@ cbuffer P : register(b0) {
     float  gamma;       // clip half-width, in standard deviations
     int    haveHistory; // 0: nothing to blend, this frame goes out as it is
     int    candMask;    // bit c: candidate c has a delta this frame
-    float4 knobs;       // x the rest snap in pixels (0 off); y 1 = depth bound; z near, w far
+    float4 knobs;       // x unused (the rest snap, retired 2026-09-04); y 1 = depth bound; z near, w far
     float4 tvUsed;      // xyz the translation term for the used delta (depth motion), w unused
     float4 tvCand;      // xyz the same for the instrument's swapped-eyes candidate
     float4 tvCam;       // xyz the translation term for the camera rows (the world path); w 1 = the world path is on
     float4 split;       // x the ship's radius in metres (nearer: the head's delta; farther and the far plane: the camera's); y the debug view (1 motion, 2 error, 3 depth); z a depth in metres for depthless pixels in a menu-like scene (0 off); w 1 = menu-like scene
-    float4 hud;         // x an assumed depth in metres for bright text-like pixels that read far or beyond y metres (0 off); zw unused
 };
 float3 rgbToYcocg(float3 c) {
     return float3(0.25 * c.r + 0.5 * c.g + 0.25 * c.b,
@@ -144,39 +141,15 @@ float4 catmullRom(float2 uv, float2 tsize) {
 )HLSL"
 // (adjacent literals: MSVC caps one at 16 KB)
 R"HLSL(
-// The depth at a texel: the NEAREST of the scene's and the layers' (reversed
-// Z, so the largest). HUD text has no depth of its own in the scene's
-// target and borrowed the sky's where it sat over the canopy; the HUD pass
-// writes its own target, and this is where it joins (2026-09-04, the
-// 'Point Defence' observation: the letters over the frame registered, the
-// letters over the glass warped).
-// The HUD is drawn ON TOP of the cockpit without a depth test, so where
-// its layer has a depth, that is the visible surface's -- even where the
-// dashboard behind it is nearer. The first build took the nearest of
-// all, and the text over the dashboard was reprojected at the dashboard's
-// half metre instead of the HUD's metre and a half: a shimmer bounded by
-// the dashboard's rounded silhouette (2026-09-04). So the layer wins
-// wherever it has a value, and the scene's depth fills the rest.
-// How many of the 3x3 around a texel are bright: a text stroke has three or
-// more, a lone star one or two. The HUD's text has no depth anywhere in
-// the game's targets (the depth view of 2026-09-04), so this is the only
-// handle on it.
-int brightAround(int2 c) {
-    int n = 0;
-    [unroll] for (int ty = -1; ty <= 1; ++ty) {
-        [unroll] for (int tx = -1; tx <= 1; ++tx) {
-            int2 hq = clamp(c + int2(tx, ty), int2(0, 0), size - 1);
-            if (rgbToYcocg(S.Load(int3(region.xy + hq, 0)).rgb).x > 0.6) ++n;
-        }
-    }
-    return n;
-}
+// The depth at a texel: the scene's target. Two levers once sat here and
+// are gone since 2026-09-04: extra eye-sized depth targets joined as HUD
+// layers, of which the only one ever found was a head-locked render of the
+// ship's own model; and an assumed depth for bright text-like pixels,
+// which took a distant station's lit faces for text and left Elite's
+// orange HUD text, below its brightness bar, untouched. The HUD writes no
+// depth anywhere the pass can see (docs/anti-aliasing.md has the record).
 float zSceneAt(int2 q) { return Z.Load(int3(q, 0)); }
-float zLayerAt(int2 q) { return max(Z2.Load(int3(q, 0)), Z3.Load(int3(q, 0))); }
-float zAt(int2 q) {
-    float l = zLayerAt(q);
-    return l > 0.0 ? l : zSceneAt(q);
-}
+float zAt(int2 q) { return zSceneAt(q); }
 bool fetchHistoryT(float2 p, float3 r0, float3 r1, float3 r2, float3 tv,
                    bool useDepth, bool allowWorld, out uint world, out float2 mvOut,
                    out float3 hy) {
@@ -202,29 +175,16 @@ bool fetchHistoryT(float2 p, float3 r0, float3 r1, float3 r2, float3 tv,
         // the "underwater" the second depth flight saw at rest. With the
         // nearest, the edge follows the thing in front, which is the
         // standard dilation every velocity-based filter does.
-        float zs = 0.0, zl = 0.0;
+        float zr = 0.0;
         [unroll] for (int oy = -1; oy <= 1; ++oy) {
             [unroll] for (int ox = -1; ox <= 1; ++ox) {
                 int2 q = clamp(int2(p) + int2(ox, oy), int2(0, 0), size - 1);
-                zs = max(zs, zSceneAt(region.xy + q));
-                zl = max(zl, zLayerAt(region.xy + q));
+                zr = max(zr, zSceneAt(region.xy + q));
             }
         }
-        float zr = zl > 0.0 ? zl : zs;
         float den = zr * (knobs.w - knobs.z) + knobs.z;
         bool far = zr <= 0.0 || den <= 0.0;
         float z = far ? 0.0 : knobs.z * knobs.w / den;
-        // The HUD's text has no depth in any of the game's targets: drawn on
-        // top, it borrows whatever is behind it -- the far plane in space, a
-        // hangar wall docked -- and cannot follow the head's translation. An
-        // assumed HUD distance for pixels that look like its text (bright,
-        // three or more bright neighbours) and read far or beyond hud.y
-        // metres; advanced.temporal_aa_hud_metres, off by default, since a
-        // bright lamp or a lit panel far away pays the same price in reverse.
-        if (hud.x > 0.0 && split.w == 0.0 && (far || z > hud.y) && brightAround(int2(p)) >= 3) {
-            far = false;
-            z = hud.x;
-        }
         if (worldOn && (far || z > split.x)) {
             world = 1;
             dp = float3(dot(c2R0.xyz, d), dot(c2R1.xyz, d), dot(c2R2.xyz, d));
@@ -251,31 +211,13 @@ bool fetchHistoryT(float2 p, float3 r0, float3 r1, float3 r2, float3 tv,
         pp.y > float(size.y) - 1.0) {
         return false;
     }
-    // The rest snap: a head within a fraction of a pixel of still is
-    // treated as still, and the history is fetched at its own texel
-    // instead of resampled a hair off it. Tracking noise alone moves a
-    // 3096-wide eye by a few tenths of a pixel a frame, and resampling at
-    // such offsets every frame is the blur that compounds. OFF by default
-    // since 2026-09-04: the snap's error is NOT bounded by its threshold.
-    // Each frame re-registers by the frame's delta, not by the accumulated
-    // error, so motion the snap suppresses accumulates in the history to a
-    // steady lag of blend / (1 - blend) times the suppressed motion, about
-    // 0.7 px at the 0.9 blend for content drifting under the threshold --
-    // where distant content sits under a slow ship turn -- and the lag
-    // differs across the image (the review of 2026-09-04, F4). The rest
-    // lock (experimental.shimmer_rest) holds the pose at rest, which is
-    // what the snap was for. Off at 0.
-    // A SMOOTH snap: the fetch offset is scaled down continuously as it
-    // shrinks below the threshold, so neighbouring pixels on either side
-    // of it do not resample differently from frame to frame. The hard
-    // per-pixel snap of the seventh build did exactly that once depth
-    // made the offsets vary pixel by pixel, and the HUD's text shimmered
-    // "as if underwater" with the head held still (2026-09-03).
-    float2 dpp = pp - p;
-    if (knobs.x > 0.0) {
-        float m = max(abs(dpp.x), abs(dpp.y));
-        pp = p + dpp * smoothstep(0.5 * knobs.x, 1.5 * knobs.x, m);
-    }
+    // (A per-pixel "rest snap" once sat here, fetching the history at its
+    // own texel under a fraction of a pixel of motion. Gone since
+    // 2026-09-04: each frame re-registers by the frame's delta, not by the
+    // accumulated error, so the motion it suppressed accumulated into a lag
+    // of blend / (1 - blend) times that motion, about 0.7 px on slowly
+    // drifting distant content, and differed across the image. The rest
+    // lock, experimental.shimmer_rest, holds the pose at rest instead.)
     mvOut = pp - p;
     hy = rgbToYcocg(catmullRom((pp + 0.5) / float2(size), float2(size)).rgb);
     return true;
@@ -319,24 +261,16 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
         float3 dp = float3(dot(dR0.xyz, d), dot(dR1.xyz, d), dot(dR2.xyz, d));
         float zraw = zAt(region.xy + int2(p));
         if (knobs.y != 0.0) {
-            float zs = 0.0, zl = 0.0;
+            float zr = 0.0;
             [unroll] for (int oy = -1; oy <= 1; ++oy) {
                 [unroll] for (int ox = -1; ox <= 1; ++ox) {
                     int2 q = clamp(int2(p) + int2(ox, oy), int2(0, 0), size - 1);
-                    zs = max(zs, zSceneAt(region.xy + q));
-                zl = max(zl, zLayerAt(region.xy + q));
+                    zr = max(zr, zSceneAt(region.xy + q));
                 }
             }
-            float zr = zl > 0.0 ? zl : zs;
             float den = zr * (knobs.w - knobs.z) + knobs.z;
             bool far = zr <= 0.0 || den <= 0.0;
             float z = far ? 0.0 : knobs.z * knobs.w / den;
-            if (hud.x > 0.0 && split.w == 0.0 && (far || z > hud.y) && brightAround(int2(p)) >= 3) {
-                far = false;
-                z = hud.x;
-                // ...and the depth copy NVIDIA gets says the same
-                zraw = knobs.z * (knobs.w - hud.x) / (hud.x * (knobs.w - knobs.z));
-            }
             bool worldOn = tvCam.w != 0.0 && split.x > 0.0;
             if (worldOn && (far || z > split.x)) {
                 count[15] = 1;
@@ -351,10 +285,6 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
             if (luma > 0.6) {
                 count[16] = 1;
                 if (zraw <= 0.0) count[17] = 1;
-            }
-            if (zLayerAt(region.xy + int2(p)) > 0.0) {
-                count[28] = 1;
-                if (luma > 0.6) count[29] = 1;
             }
         }
         float2 motion = 0.0;
@@ -373,13 +303,10 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
             O[id.xy] = float4(saturate(0.5 + motion.x / 16.0), saturate(0.5 + motion.y / 16.0),
                               count[15] != 0 ? 1.0 : 0.0, 1.0);
         } else if (split.y == 3.0) {
-            float zl3 = zLayerAt(region.xy + int2(p));
             float zs3 = zSceneAt(region.xy + int2(p));
             float3 o3;
             if (knobs.y == 0.0) {
                 o3 = float3(0.25, 0.0, 0.25);
-            } else if (zl3 > 0.0) {
-                o3 = float3(0.0, 1.0, 0.0);
             } else if (zs3 > 0.0) {
                 float m3 = knobs.z * knobs.w / (zs3 * (knobs.w - knobs.z) + knobs.z);
                 float g3 = saturate(1.0 - log2(max(m3, 0.5)) / 8.0);
@@ -457,12 +384,6 @@ void main(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
                 count[16] = 1;
                 if (knobs.y != 0.0 && zAt(region.xy + ci) <= 0.0) count[17] = 1;
             }
-            // ...and how much of the image, and of its bright pixels, a
-            // layer's depth covers: whether the HUD's text is in the layer.
-            if (knobs.y != 0.0 && zLayerAt(region.xy + ci) > 0.0) {
-                count[28] = 1;
-                if (lumaC > 0.6) count[29] = 1;
-            }
         }
         m1 /= msum;
         m2 /= msum;
@@ -500,19 +421,19 @@ void main(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
             }
             // The registration instrument: what each candidate would have
             // fetched, judged by the same clip, counted and not used. The
-            // candidates are now: 0 the head's rotation alone, 1 the head
-            // with depth and the eyes SWAPPED, 2 the game's camera rows,
-            // 3 the head with depth as assigned. Up to four more history
-            // reads per pixel while it runs.
+            // candidates: 0 the head's rotation alone, 2 the world path's
+            // delta from the game's view rows, 3 the head with depth as
+            // used (slot 1 is retired). Up to three more history reads per
+            // pixel while it runs.
             [unroll] for (int c = 0; c < 4; ++c) {
                 if ((candMask & (1 << c)) == 0) continue;
                 float3 r0 = c == 0 ? c0R0.xyz : (c == 1 ? c1R0.xyz : (c == 2 ? c2R0.xyz : c3R0.xyz));
                 float3 r1 = c == 0 ? c0R1.xyz : (c == 1 ? c1R1.xyz : (c == 2 ? c2R1.xyz : c3R1.xyz));
                 float3 r2 = c == 0 ? c0R2.xyz : (c == 1 ? c1R2.xyz : (c == 2 ? c2R2.xyz : c3R2.xyz));
-                // Candidates 1 and 2 are the two readings of the game's view
-                // rows composed with the head (2 the reading in use, 1 the
-                // other), judged rotation-only so they are compared alike;
-                // 3 is the head with depth as used for the ship's own pixels.
+                // Candidate 2 is the world path's delta from the game's view
+                // rows, judged rotation-only; 3 is the head with depth as
+                // used for the ship's own pixels; slot 1 is retired (the
+                // rows' other reading, settled 2026-09-04).
                 float3 tvc = c == 1 ? tvCand.xyz : tvUsed.xyz;
                 bool depthC = knobs.y != 0.0 && c == 3;
                 float3 h;
@@ -610,28 +531,20 @@ void main(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
         } else if (split.y == 2.0) {
             o = errUsed.xxx;
         } else if (split.y == 3.0) {
-            // The depth view: where each pixel's depth comes from -- a
-            // layer's in green, the scene's in grey by distance (near
-            // bright, log scale to 256 m), none in magenta, no depth
-            // bound at all in dark purple. HUD text that is not green
-            // has no depth of its own and reprojects by what is behind it.
-            float zl3 = zLayerAt(region.xy + ci);
+            // The depth view: where each pixel's depth comes from -- the
+            // scene's in grey by distance (near bright, log scale to
+            // 256 m), none in magenta, no depth bound at all in dark
+            // purple. HUD text shows magenta: it has no depth of its own
+            // and reprojects by what is behind it.
             float zs3 = zSceneAt(region.xy + ci);
             if (knobs.y == 0.0) {
                 o = float3(0.25, 0.0, 0.25);
-            } else if (zl3 > 0.0) {
-                o = float3(0.0, 1.0, 0.0);
             } else if (zs3 > 0.0) {
                 float m3 = knobs.z * knobs.w / (zs3 * (knobs.w - knobs.z) + knobs.z);
                 float g3 = saturate(1.0 - log2(max(m3, 0.5)) / 8.0);
                 o = g3.xxx;
             } else {
                 o = float3(1.0, 0.0, 1.0);
-            }
-            // ...and the assumed HUD depth, where it applies, in yellow.
-            if (hud.x > 0.0 && split.w == 0.0 && knobs.y != 0.0 && zl3 <= 0.0) {
-                float mz = zs3 > 0.0 ? knobs.z * knobs.w / (zs3 * (knobs.w - knobs.z) + knobs.z) : 0.0;
-                if ((zs3 <= 0.0 || mz > hud.y) && brightAround(ci) >= 3) o = float3(1.0, 1.0, 0.0);
             }
         }
         O[id.xy] = float4(o, cur.a);
@@ -645,7 +558,7 @@ void main(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
 }
 )HLSL";
 
-// The cbuffer above, laid out to match: 432 bytes, twenty-seven 16-byte rows.
+// The cbuffer above, laid out to match: 416 bytes, twenty-six 16-byte rows.
 struct PassParams {
     int32_t region[4];
     int32_t size[2];
@@ -666,9 +579,8 @@ struct PassParams {
     float   tvCand[4];
     float   tvCam[4];    // the camera rows' translation term, w 1 = world path on
     float   split[4];    // x the ship's radius in metres
-    float   hud[4];      // x an assumed HUD depth in metres (0 off), y its far threshold
 };
-static_assert(sizeof(PassParams) == 432, "the cbuffer is twenty-seven 16-byte rows");
+static_assert(sizeof(PassParams) == 416, "the cbuffer is twenty-six 16-byte rows");
 
 // The format allowlist: the supersample resolve's, for its reasons
 // (supersample_pass.cpp) -- typeless and UNORM families read and written
@@ -720,8 +632,7 @@ const char* formatName(DXGI_FORMAT f) {
 }
 
 const char* motionName(int motion) {
-    return motion == 3 ? "head with depth"
-         : motion == 2 ? "camera" : motion == 1 ? "head" : "none";
+    return motion == 3 ? "head with depth" : motion == 1 ? "head" : "none";
 }
 
 // Per-eye owned resources. Release-before-recreate on any size or format
@@ -735,9 +646,6 @@ struct EyeState {
     // source's view. Released when a different texture arrives.
     void*                      depthRes = nullptr;
     ID3D11ShaderResourceView*  depthSrv = nullptr;
-    // The cockpit and HUD layers' depth, up to two, the same way.
-    void*                      layerRes[2] = {};
-    ID3D11ShaderResourceView*  layerSrv[2] = {};
     // For the trained pass: the colour copied out typed, the motion
     // vectors and the depth copy it is fed, and its output.
     ID3D11Texture2D*           dlColour = nullptr;
@@ -791,10 +699,6 @@ void releaseSrc(EyeState& e) {
 void releaseDepth(EyeState& e) {
     if (e.depthSrv) { e.depthSrv->Release(); e.depthSrv = nullptr; }
     e.depthRes = nullptr;
-    for (int k = 0; k < 2; ++k) {
-        if (e.layerSrv[k]) { e.layerSrv[k]->Release(); e.layerSrv[k] = nullptr; }
-        e.layerRes[k] = nullptr;
-    }
 }
 void releaseDl(EyeState& e) {
     if (e.dlMvUav) { e.dlMvUav->Release(); e.dlMvUav = nullptr; }
@@ -907,7 +811,6 @@ int64_t     g_probeShipDx = 0, g_probeShipDy = 0;
 uint64_t    g_probeShipN = 0;
 uint64_t    g_classWorldPix = 0, g_classWorldClip = 0;
 uint64_t    g_classShipPix = 0, g_classShipClip = 0;
-uint64_t    g_layerPix = 0, g_brightLayerPix = 0;   // pixels, and bright pixels, with a layer's depth
 int64_t     g_probeSkyDx = 0, g_probeSkyDy = 0;
 uint64_t    g_probeSkyN = 0;
 int64_t     g_probeDot[3] = {};    // sum resid.mv * 100: sky, world with a depth, ship
@@ -1012,8 +915,6 @@ void pollSlots(ID3D11DeviceContext* ctx) {
                 g_classWorldClip += v[25];
                 g_classShipPix += v[26];
                 g_classShipClip += v[27];
-                g_layerPix += v[28];
-                g_brightLayerPix += v[29];
                 g_probeSkyDx += static_cast<int32_t>(v[30]);
                 g_probeSkyDy += static_cast<int32_t>(v[31]);
                 g_probeSkyN += v[32];
@@ -1084,7 +985,6 @@ bool                       g_dlaaNoted = false;
 bool                       g_dlssNoted = false;
 bool                       g_dlaaFailNoted = false;
 bool                       g_trainedNoted = false;   // the first trained frame's line
-int                        g_layersNoted = -1;       // how many depth layers the log last named
 uint32_t                   g_dlaaTreats = 0;
 ID3D11Buffer*              g_cb = nullptr;
 ID3D11SamplerState*        g_samp = nullptr;
@@ -1105,15 +1005,11 @@ uint32_t g_treats = 0;
 
 // The configure and warm state.
 bool     g_wanted = false;
-bool     g_viewTransposed = false;
 bool     g_filterCurrent = true;   // advanced.temporal_aa_current = filtered | raw
 float    g_historyC = 0.5f;        // advanced.temporal_aa_history_sharp: the cubic's C
-float    g_snapPx = 0.0f;          // advanced.temporal_aa_snap: the rest snap, pixels (0 = off, the default since 2026-09-04)
 float    g_shipMetres = 100.0f;    // advanced.temporal_aa_ship_metres: the world/ship split (0 off)
-int      g_debugMode = 0;          // advanced.temporal_aa_debug: 0 off, 1 motion, 2 error
+int      g_debugMode = 0;          // advanced.temporal_aa_debug: 0 off, 1 motion, 2 error, 3 depth
 float    g_menuMetres = 0.0f;      // advanced.temporal_aa_menu_metres: a depth for depthless pixels in a menu-like scene
-float    g_hudMetres = 0.0f;       // advanced.temporal_aa_hud_metres: an assumed depth for bright text-like pixels with none (0 off)
-bool     g_depthLayers = false;    // advanced.temporal_aa_depth_layers: the extra depth targets (off: the only one found was the ship model's)
 int      g_rowsFollow = 0;         // +1 a frame the rows turn with the head, -4 a frame they do not; the world path needs >= 0
 bool     g_rowsFollowNoted = false;
 bool     g_warmNoted = false;
@@ -1555,33 +1451,6 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
     // game's own texture, held by the probe. Wanted by the depth motion
     // and by the instrument's two depth candidates alike.
     ID3D11ShaderResourceView* depthSrv = nullptr;
-    // A view typed to the depth channel over one of the game's depth
-    // textures, or null when its format has no such view.
-    auto depthViewOf = [&](ID3D11Texture2D* tex) -> ID3D11ShaderResourceView* {
-        D3D11_TEXTURE2D_DESC dd{};
-        tex->GetDesc(&dd);
-        DXGI_FORMAT rf = DXGI_FORMAT_UNKNOWN;
-        switch (dd.Format) {
-            case DXGI_FORMAT_R32G8X24_TYPELESS:
-            case DXGI_FORMAT_D32_FLOAT_S8X24_UINT:
-                rf = DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS; break;
-            case DXGI_FORMAT_R32_TYPELESS:
-            case DXGI_FORMAT_D32_FLOAT:
-                rf = DXGI_FORMAT_R32_FLOAT; break;
-            case DXGI_FORMAT_R24G8_TYPELESS:
-            case DXGI_FORMAT_D24_UNORM_S8_UINT:
-                rf = DXGI_FORMAT_R24_UNORM_X8_TYPELESS; break;
-            default: break;
-        }
-        if (rf == DXGI_FORMAT_UNKNOWN || !(dd.BindFlags & D3D11_BIND_SHADER_RESOURCE)) return nullptr;
-        D3D11_SHADER_RESOURCE_VIEW_DESC vd{};
-        vd.Format = rf;
-        vd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
-        vd.Texture2D.MipLevels = 1;
-        ID3D11ShaderResourceView* v = nullptr;
-        if (FAILED(dev->CreateShaderResourceView(tex, &vd, &v))) return nullptr;
-        return v;
-    };
     if (ok && nearZ > 0.0f && farZ > nearZ) {
         EyeState& e = *eptr;
         ID3D11Texture2D* dtex = nullptr;
@@ -1617,42 +1486,6 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                 }
             }
             depthSrv = e.depthSrv;
-            // The cockpit and HUD layers' depth beside it, up to two pairs,
-            // keyed on the texture like the scene's; the shader takes the
-            // nearest of all three at every read.
-            ID3D11Texture2D* ltex[2] = {};
-            // Off by default since 2026-09-04: the only layer the census ever
-            // qualified was a head-locked render of the ship's own model (the
-            // HUD's schematic camera), whose silhouette then registered the
-            // text inside it and nothing outside. The HUD's text writes no
-            // depth anywhere; advanced.temporal_aa_hud_metres is the lever.
-            const int nLayers = g_depthLayers ? depthProbeLayerDepths(sd.Width, sd.Height, eye, ltex, 2) : 0;
-            for (int k = 0; k < 2; ++k) {
-                if (k < nLayers && ltex[k]) {
-                    if (e.layerRes[k] != static_cast<void*>(ltex[k]) || !e.layerSrv[k]) {
-                        if (e.layerSrv[k]) { e.layerSrv[k]->Release(); e.layerSrv[k] = nullptr; }
-                        e.layerRes[k] = nullptr;
-                        e.layerSrv[k] = depthViewOf(ltex[k]);
-                        if (e.layerSrv[k]) e.layerRes[k] = ltex[k];
-                    }
-                } else if (e.layerSrv[k]) {
-                    e.layerSrv[k]->Release();
-                    e.layerSrv[k] = nullptr;
-                    e.layerRes[k] = nullptr;
-                }
-            }
-            if (eye == 0) {
-                const int have = (e.layerSrv[0] ? 1 : 0) + (e.layerSrv[1] ? 1 : 0);
-                if (have != g_layersNoted) {
-                    g_layersNoted = have;
-                    Log::get().note(
-                        "temporal aa: %d cockpit/HUD depth layer(s) join the scene's depth -- "
-                        "the nearest of all is what every pixel reprojects by, so HUD text over "
-                        "the canopy takes its own depth instead of the sky's (the registration "
-                        "line's 'bright pixels with no depth' says what is left).",
-                        have);
-                }
-            }
         }
     }
     if (depthSrv && (!g_depthNoted || !g_depthHeld)) {
@@ -1724,38 +1557,29 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         if ((motion == 1 || depthMotion) && deltaHead) {
             memcpy(delta, deltaHead, sizeof(delta));
             haveDelta = true;
-        } else if (motion == 2) {
-            if (g_curValid && g_prevValid) {
-                temporalViewDelta(g_prevRows, g_curRows, g_viewTransposed, delta);
-                haveDelta = true;
-            }
         }
         // No delta means no reprojection can be trusted: this frame goes
         // out unblended and the history restarts from it.
         const bool useHistory = e.haveHistory && haveDelta && tanPrev;
 
-        // The registration instrument's four candidates, whichever of
-        // them exist this frame (temporalPassRegistration).
+        // The registration instrument's candidates, whichever of them
+        // exist this frame (temporalPassRegistration): 0 the head's
+        // rotation alone, 2 the world path's delta from the rows, 3 the
+        // head with depth as used. Slot 1 held the rows' other reading
+        // until 2026-09-04, when the z flip settled the reading
+        // (docs/anti-aliasing.md); it stays empty.
         float cand[4][9];
         bool candValid[4] = {};
         const bool haveDepth = depthSrv != nullptr && headTrans != nullptr;
         if (deltaHead) {
             memcpy(cand[0], deltaHead, sizeof(cand[0]));
             candValid[0] = true;
-            // 3: the head with depth as assigned; 1: with the eyes swapped.
             if (haveDepth) {
                 memcpy(cand[3], deltaHead, sizeof(cand[3]));
                 candValid[3] = true;
-                if (headTransSwapped) {
-                    memcpy(cand[1], deltaHead, sizeof(cand[1]));
-                    candValid[1] = true;
-                }
             }
         }
-        if (g_curValid && g_prevValid) {
-            temporalViewDelta(g_prevRows, g_curRows, false, cand[2]);
-            candValid[2] = true;
-        }
+        candValid[2] = g_curValid && g_prevValid;
         // The world path's delta and translation term, from the game's view
         // rows alone. The rows are the FULL view -- the headset's pose is in
         // them -- stored view->world. The motion view of 2026-09-04 showed
@@ -1768,38 +1592,27 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         // docked residual was twice a slow head's rate, not the rate. So:
         // no composition. For rows [R | c] (view->world, c the eye's place
         // in the world) a point P now was, last frame, at
-        //   W P + tv,   W = R_p^T R_n,   tv = R_p^T (c_n - c_p)
-        // (advanced.temporal_aa_view_transpose = 1, the default); read as
-        // world->view [S | t] instead (= 0), W = S_p S_n^T and tv = t_p -
-        // W t_n. The reading not in use is the instrument's candidate 1.
-        // Docked, W must equal the head's delta whichever way the head
-        // turns -- a real check now, since the rows carry the head.
+        //   W P + tv,   W = R_p^T R_n,   tv = R_p^T (c_n - c_p).
+        // (The other reading, world->view, was an A/B key and the
+        // instrument's candidate 1 until 2026-09-04: it stood the world
+        // still under a head turn, and is gone.) Docked, W must equal the
+        // head's delta whichever way the head turns -- a real check, since
+        // the rows carry the head.
         float tvCam[3] = {0.0f, 0.0f, 0.0f};
         float worldDelta[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
         bool worldValid = false;
-        auto worldFromRows = [](const float prev[12], const float now[12], bool transposed,
+        auto worldFromRows = [](const float prev[12], const float now[12],
                                 float W[9], float tv[3], float camMove[3]) {
-            float Rp[9], Rn[9], RpT[9], RnT[9];
+            float Rp[9], Rn[9], RpT[9];
             temporalRot3Of34(prev, Rp);
             temporalRot3Of34(now, Rn);
             temporalTranspose3(Rp, RpT);
-            temporalTranspose3(Rn, RnT);
             const float colP[3] = {prev[3], prev[7], prev[11]};
             const float colN[3] = {now[3], now[7], now[11]};
-            if (transposed) {
-                temporalMul3(RpT, Rn, W);
-                const float dc[3] = {colN[0] - colP[0], colN[1] - colP[1], colN[2] - colP[2]};
-                temporalApply3(RpT, dc, tv);
-                for (int i = 0; i < 3; ++i) camMove[i] = dc[i];
-            } else {
-                temporalMul3(Rp, RnT, W);
-                float wt[3], cp[3], cn[3];
-                temporalApply3(W, colN, wt);
-                for (int i = 0; i < 3; ++i) tv[i] = colP[i] - wt[i];
-                temporalApply3(RpT, colP, cp);
-                temporalApply3(RnT, colN, cn);
-                for (int i = 0; i < 3; ++i) camMove[i] = cp[i] - cn[i];
-            }
+            temporalMul3(RpT, Rn, W);
+            const float dc[3] = {colN[0] - colP[0], colN[1] - colP[1], colN[2] - colP[2]};
+            temporalApply3(RpT, dc, tv);
+            for (int i = 0; i < 3; ++i) camMove[i] = dc[i];
             // The game's view space runs z forward (DirectX), the runtime's
             // eye space z back. A rotation read in the one and applied in
             // the other has its pitch and yaw reversed and its roll kept,
@@ -1819,12 +1632,9 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
             tv[2] = -tv[2];
         };
         if (candValid[2]) {
-            float camMove[3], otherW[9], otherTv[3], otherMove[3];
-            worldFromRows(g_prevRows, g_curRows, g_viewTransposed, worldDelta, tvCam, camMove);
-            worldFromRows(g_prevRows, g_curRows, !g_viewTransposed, otherW, otherTv, otherMove);
+            float camMove[3];
+            worldFromRows(g_prevRows, g_curRows, worldDelta, tvCam, camMove);
             memcpy(cand[2], worldDelta, sizeof(worldDelta));
-            memcpy(cand[1], otherW, sizeof(otherW));
-            candValid[1] = true;
             worldValid = true;
             const double move = sqrt(static_cast<double>(camMove[0]) * camMove[0] +
                                      static_cast<double>(camMove[1]) * camMove[1] +
@@ -1974,7 +1784,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         p.jit[1] = jyNow;
         p.jit[2] = g_filterCurrent ? 1.0f : 0.0f;
         p.jit[3] = g_historyC;
-        p.knobs[0] = g_snapPx;
+        p.knobs[0] = 0.0f;   // the rest snap's slot, retired 2026-09-04
         p.knobs[1] = haveDepth ? 1.0f : 0.0f;
         p.knobs[2] = nearZ;
         p.knobs[3] = farZ;
@@ -1989,8 +1799,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         p.tvUsed[3] = (depthMotion && haveDepth) ? 1.0f : 0.0f;
         // The world/ship split (the shader says what it is): under the
         // depth motion, with a depth bound and both frames' camera rows
-        // read, in the rows' measured convention (world->view; the
-        // transposed reading has no translation column to trust).
+        // read (view->world, the rows' measured convention).
         // ...and only in a REAL scene: fifty draws into the scene pair a
         // frame. The main menu's backdrop is a pre-rendered image at the far
         // plane drawn with one or two, and its camera does not follow the
@@ -2005,8 +1814,6 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         p.split[1] = static_cast<float>(g_debugMode);
         p.split[2] = g_menuMetres;
         p.split[3] = (haveDepth && sceneDraws < 50u) ? 1.0f : 0.0f;
-        p.hud[0] = g_hudMetres;
-        p.hud[1] = 8.0f;   // beyond this a bright text-like pixel is taken for HUD text over the scene
         for (int c = 0; c < 3; ++c) {
             p.dR0[c] = delta[0 * 3 + c];
             p.dR1[c] = delta[1 * 3 + c];
@@ -2026,12 +1833,12 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         p.candMask = useHistory ? candMask : 0;
 
         ID3D11ComputeShader* savedCs = nullptr;
-        ID3D11ShaderResourceView* savedSrv[5] = {};
+        ID3D11ShaderResourceView* savedSrv[3] = {};
         ID3D11UnorderedAccessView* savedUav[3] = {};
         ID3D11Buffer* savedCb = nullptr;
         ID3D11SamplerState* savedSamp = nullptr;
         ctx->CSGetShader(&savedCs, nullptr, nullptr);
-        ctx->CSGetShaderResources(0, 5, savedSrv);
+        ctx->CSGetShaderResources(0, 3, savedSrv);
         ctx->CSGetUnorderedAccessViews(0, 3, savedUav);
         ctx->CSGetConstantBuffers(0, 1, &savedCb);
         ctx->CSGetSamplers(0, 1, &savedSamp);
@@ -2153,24 +1960,23 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                         ctx->CopySubresourceRegion(e.dlColour, 0, 0, 0, 0, src, 0, &box);
                     }
                     // The motion vectors and the depth copy.
-                    ID3D11ShaderResourceView* nullSrvM[5] = {};
+                    ID3D11ShaderResourceView* nullSrvM[3] = {};
                     ID3D11UnorderedAccessView* nullUavM[5] = {};
-                    ctx->CSSetShaderResources(0, 5, nullSrvM);
+                    ctx->CSSetShaderResources(0, 3, nullSrvM);
                     ctx->CSSetUnorderedAccessViews(0, 5, nullUavM, nullptr);
                     ctx->CSSetShader(g_csMv, nullptr, 0);
-                    ID3D11ShaderResourceView* srvsM[5] = {inSrv, e.histSrv[e.histRead], depthSrv,
-                                                          e.layerSrv[0], e.layerSrv[1]};
+                    ID3D11ShaderResourceView* srvsM[3] = {inSrv, e.histSrv[e.histRead], depthSrv};
                     ID3D11UnorderedAccessView* uavsM[5] = {(g_debugMode == 1 || g_debugMode == 3) ? e.dlOutUav : nullptr,
                                                            nullptr, g_statsUav, e.dlMvUav,
                                                            e.dlDepthUav};
                     ID3D11Buffer* cbM = g_cb;
                     ID3D11SamplerState* smpM = g_samp;
-                    ctx->CSSetShaderResources(0, 5, srvsM);
+                    ctx->CSSetShaderResources(0, 3, srvsM);
                     ctx->CSSetUnorderedAccessViews(0, 5, uavsM, nullptr);
                     ctx->CSSetConstantBuffers(0, 1, &cbM);
                     ctx->CSSetSamplers(0, 1, &smpM);
                     ctx->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
-                    ctx->CSSetShaderResources(0, 5, nullSrvM);
+                    ctx->CSSetShaderResources(0, 3, nullSrvM);
                     ctx->CSSetUnorderedAccessViews(0, 5, nullUavM, nullptr);
                     // NVIDIA's evaluation. Its history restarts only when it is
                     // broken: this eye's first frame, a withhold (flags bit 0),
@@ -2244,18 +2050,17 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         const int writeIdx = 1 - readIdx;
         bool ran = usedDlaa ? true : setParams(ctx, p);
         if (ran && !usedDlaa) {
-            ID3D11ShaderResourceView* nullSrv[5] = {};
+            ID3D11ShaderResourceView* nullSrv[3] = {};
             ID3D11UnorderedAccessView* nullUav[3] = {};
-            ctx->CSSetShaderResources(0, 5, nullSrv);
+            ctx->CSSetShaderResources(0, 3, nullSrv);
             ctx->CSSetUnorderedAccessViews(0, 3, nullUav, nullptr);
             ctx->CSSetShader(g_cs, nullptr, 0);
-            ID3D11ShaderResourceView* srvs[5] = {inSrv, e.histSrv[readIdx], depthSrv,
-                                                 e.layerSrv[0], e.layerSrv[1]};
+            ID3D11ShaderResourceView* srvs[3] = {inSrv, e.histSrv[readIdx], depthSrv};
             ID3D11UnorderedAccessView* uavs[3] = {e.outUav, e.histUav[writeIdx],
                                                   g_statsUav};
             ID3D11Buffer* cb = g_cb;
             ID3D11SamplerState* smp = g_samp;
-            ctx->CSSetShaderResources(0, 5, srvs);
+            ctx->CSSetShaderResources(0, 3, srvs);
             ctx->CSSetUnorderedAccessViews(0, 3, uavs, nullptr);
             ctx->CSSetConstantBuffers(0, 1, &cb);
             ctx->CSSetSamplers(0, 1, &smp);
@@ -2277,9 +2082,9 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
             }
         }
 
-        ID3D11ShaderResourceView* nullSrv2[5] = {};
+        ID3D11ShaderResourceView* nullSrv2[3] = {};
         ID3D11UnorderedAccessView* nullUav2[3] = {};
-        ctx->CSSetShaderResources(0, 5, nullSrv2);
+        ctx->CSSetShaderResources(0, 3, nullSrv2);
         ctx->CSSetUnorderedAccessViews(0, 3, nullUav2, nullptr);
         if (depthSrv) {
             ctx->OMSetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, savedRtv, savedDsv);
@@ -2287,7 +2092,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
             if (savedDsv) savedDsv->Release();
         }
         ctx->CSSetShader(savedCs, nullptr, 0);
-        ctx->CSSetShaderResources(0, 5, savedSrv);
+        ctx->CSSetShaderResources(0, 3, savedSrv);
         ctx->CSSetUnorderedAccessViews(0, 3, savedUav, nullptr);
         ctx->CSSetConstantBuffers(0, 1, &savedCb);
         ctx->CSSetSamplers(0, 1, &savedSamp);
@@ -2365,7 +2170,6 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
 void temporalPassConfigure(Config& cfg) {
     const std::string mode = cfg.getString("experimental.temporal_aa", "off");
     g_wanted = _stricmp(mode.c_str(), "off") != 0 && !mode.empty();
-    g_viewTransposed = cfg.getBool("advanced.temporal_aa_view_transpose", true);
     const std::string cur = cfg.getString("advanced.temporal_aa_current", "filtered");
     g_filterCurrent = _stricmp(cur.c_str(), "raw") != 0;
     float c = cfg.getFloat("advanced.temporal_aa_history_sharp", 0.5f);
@@ -2373,10 +2177,6 @@ void temporalPassConfigure(Config& cfg) {
     if (c < 0.5f) c = 0.5f;
     if (c > 1.0f) c = 1.0f;
     g_historyC = c;
-    float snap = cfg.getFloat("advanced.temporal_aa_snap", 0.0f);
-    if (!std::isfinite(snap) || snap < 0.0f) snap = 0.0f;
-    if (snap > 0.5f) snap = 0.5f;
-    g_snapPx = snap;
     float ship = cfg.getFloat("advanced.temporal_aa_ship_metres", 100.0f);
     if (!std::isfinite(ship) || ship < 0.0f) ship = 0.0f;
     if (ship > 100000.0f) ship = 100000.0f;
@@ -2388,11 +2188,6 @@ void temporalPassConfigure(Config& cfg) {
     if (!std::isfinite(menu) || menu < 0.0f) menu = 0.0f;
     if (menu > 50.0f) menu = 50.0f;
     g_menuMetres = menu;
-    float hudm = cfg.getFloat("advanced.temporal_aa_hud_metres", 0.0f);
-    if (!std::isfinite(hudm) || hudm < 0.0f) hudm = 0.0f;
-    if (hudm > 10.0f) hudm = 10.0f;
-    g_hudMetres = hudm;
-    g_depthLayers = cfg.getBool("advanced.temporal_aa_depth_layers", false);
 }
 
 void temporalPassTick(ID3D11DeviceContext* ctx) {
@@ -2493,8 +2288,8 @@ void temporalPassFrameBoundary() {
                 "rows at float 932 of the scene block, the write of the frame that "
                 "follows last frame's (the block bound at the scene's first draw is "
                 "at VS b%d / PS b%d, -1 = not seen); they are the full view with the "
-                "headset in it, read %s for the world path.",
-                g_latchSlotVs, g_latchSlotPs, g_viewTransposed ? "view->world" : "world->view");
+                "headset in it, read view->world for the world path.",
+                g_latchSlotVs, g_latchSlotPs);
         }
     } else {
         g_prevValid = false;
@@ -2529,8 +2324,8 @@ bool temporalPassRegistration(char* buf, size_t n, char* buf2, size_t n2, char* 
     if (buf2 && n2) buf2[0] = 0;
     if (buf3 && n3) buf3[0] = 0;
     if (!buf || n == 0 || g_treats == 0 || g_intervalFrames == 0) return false;
-    static const char* const kNames[4] = {"head, rotation only", "world, the other reading of the rows",
-                                          "world, the reading in use", "head with depth"};
+    static const char* const kNames[4] = {"head, rotation only", "(retired)",
+                                          "world, the rows' delta", "head with depth"};
     size_t used = 0;
     regAppend(buf, n, used, "over the last %u eye-frames: ", g_intervalFrames);
     bool anyCand = false;
@@ -2539,12 +2334,11 @@ bool temporalPassRegistration(char* buf, size_t n, char* buf2, size_t n2, char* 
         regAppend(buf, n, used, "the candidates were not judged (NVIDIA's history ran, or the "
                                 "pass's own had no history yet)");
     } else {
+        bool firstCand = true;
         for (int k = 0; k < 4; ++k) {
-            regAppend(buf, n, used, "%s%s ", k ? "; " : "", kNames[k]);
-            if (!g_candPix[k]) {
-                regAppend(buf, n, used, "(no delta yet)");
-                continue;
-            }
+            if (!g_candPix[k]) continue;   // slot 1 is retired; the rest print once they have a delta
+            regAppend(buf, n, used, "%s%s ", firstCand ? "" : "; ", kNames[k]);
+            firstCand = false;
             const double px = static_cast<double>(g_candPix[k]);
             // The mean clip size over the CLIPPED pixels: how far a clipped
             // history had strayed, 1/255ths of luma.
@@ -2631,14 +2425,6 @@ bool temporalPassRegistration(char* buf, size_t n, char* buf2, size_t n2, char* 
                   g_classShipPix ? 100.0 * static_cast<double>(g_classShipClip) /
                                        static_cast<double>(g_classShipPix)
                                  : 0.0);
-    }
-    if (g_intervalPix) {
-        regAppend(buf, n, used,
-                  "; a layer's depth covered %.2f%% of pixels and %.1f%% of the bright ones",
-                  100.0 * static_cast<double>(g_layerPix) / static_cast<double>(g_intervalPix),
-                  g_brightPix ? 100.0 * static_cast<double>(g_brightLayerPix) /
-                                    static_cast<double>(g_brightPix)
-                              : 0.0);
     }
     // The third line: the probes and the rows against the head.
     buf = buf3;
@@ -2741,7 +2527,6 @@ bool temporalPassRegistration(char* buf, size_t n, char* buf2, size_t n2, char* 
     g_probeShipN = 0;
     g_classWorldPix = g_classWorldClip = 0;
     g_classShipPix = g_classShipClip = 0;
-    g_layerPix = g_brightLayerPix = 0;
     g_probeSkyDx = g_probeSkyDy = 0;
     g_probeSkyN = 0;
     memset(g_probeDot, 0, sizeof(g_probeDot));
