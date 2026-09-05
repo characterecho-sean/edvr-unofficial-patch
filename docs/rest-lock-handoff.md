@@ -1,5 +1,13 @@
 # Handoff: the rest lock meets the temporal pass
 
+**Retired 2026-09-04.** The rest lock was removed the day after it merged:
+the temporal pass, DLAA and DLSS above all, integrates the tracker's wander
+rather than fighting it, and the lock could not engage on a Quest 3 at all.
+This handoff stays as the record of the merge's ordering rule (which the
+temporal pass keeps: it notes the pose the game renders from, not the raw
+ring) and of the measurements. `advanced.pose_hold`, the instrument that
+proved the mechanism, remains.
+
 *For the agent working on `claude/temporal-aa`. Written 2026-09-03 at the
 end of the day the shimmer was traced to its cause; everything below is
 measured on Sean's rig unless it says believed. Read this before merging

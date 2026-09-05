@@ -1653,7 +1653,7 @@ crop, the supersample resolve and the sharpen, sequential, each its own
 pass on the texture the one before produced; the fusions are noted in the
 code as future work.
 
-## The tracker never rests: the rest lock (shipped, off by default)
+## The tracker never rests: the rest lock (shipped 2026-09-03, retired 2026-09-04)
 
 *Measured 2026-09-03 on a Pimax Crystal Super; the instruments and the
 numbers are in the vr log's pose history, which since that day records the
@@ -1713,10 +1713,24 @@ LOD bias and feature D's specular anti-aliasing for the texture side, and
 feature B's temporal accumulation, whose history the rest lock finally
 registers exactly while the head is still.
 
+**Retired the day after it merged (2026-09-04).** Two facts decided it.
+The temporal pass integrates the tracker's wander instead of fighting it:
+under the jitter and a registered history the wander is one more sub-pixel
+sample, and on the trained path NVIDIA's history handles it outright, so a
+held pose bought nothing the pass was not already buying. And the lock
+could not engage on the headset that needed it most: the Quest 3's
+tracking floors at 1.9 arcminutes a frame against a 0.6 threshold, held
+zero of 15,569 frames, and raising the threshold produced a jerkiness
+worse than the shimmer. The key, its two thresholds, the pose half and the
+compositor half are gone; `advanced.pose_hold`, the instrument that proved
+the mechanism, stays. The measurements above stand as the record of what
+the tracker does.
+
 ## Guidance for players now
 
-Feature A ships (`auto` by default since 2026-09-03) and the rest lock
-above (off by default, the same day); the rest does not.
+Feature A ships (`auto` by default since 2026-09-03); the rest lock above
+shipped the same day and was retired on 2026-09-04; feature B is on its
+branch.
 Some of the shimmer has answers today, and the README and `edvr.ini` have
 carried them since the same date:
 
@@ -1735,9 +1749,10 @@ carried them since the same date:
   lever.
 - **Anisotropic filtering at 16x**, in the game's own menu, for surfaces
   at grazing angles — planet terrain at altitude especially.
-- **`shimmer_rest = on`** if a steady ship's lines flicker with your head
-  still. Off by default until more rigs have flown it; what it holds still
-  and what it cannot are in the section above.
+- **The temporal pass**, `temporal_aa = dlaa` on an RTX card and `on`
+  elsewhere, if a steady ship's lines flicker with your head still: the
+  rest lock that once addressed them is retired (above), and the pass
+  integrates the wander it was built to hold.
 
 ## Phase 0 — what must be measured, not assumed
 

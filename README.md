@@ -214,25 +214,14 @@ flicker, run anisotropic filtering at 16x, and on SteamVR turn on Advanced
 Supersample Filtering.
 *Details: [docs/anti-aliasing.md](docs/anti-aliasing.md).*
 
-**The shimmer on a steady ship — the rest lock.** *Off by default.* A
-headset's tracking never quite stops. Measured on a Pimax Crystal Super
-lying on a desk: the reported position steady to a twentieth of a
-millimetre, the reported orientation wandering about a tenth of an
-arcminute every frame with a half-pixel step a few times a second. The
-game renders from that pose and the compositor re-warps every frame by the
-same motion, so any line about a pixel wide — a hull seam, a hairline, text
-— blinks as it crosses pixel rows, and no resolve or post filter can touch
-it because the motion is real. `shimmer_rest = on` holds the pose the game
-renders from while your head is still (following the tracker's slow wander,
-not its jitter) and tells the compositor each frame's true display pose so
-it has nothing left to re-warp; the moment you move, everything is stock,
-so the compositor's late reprojection keeps its latency compensation. The
-world sticks to your head by under a pixel while still, below what an eye
-can notice. Field-proven at the main menu on native SteamVR. What it
-cannot do: a seam narrower than a pixel is drawn as dashes by the game's
-own rasteriser (no MSAA), and holding the view still makes those dashes
-visible where they used to crawl; only more samples — HMD Quality, or a
-temporal pass — draw them whole. Two thresholds under `[advanced]`.
+**The shimmer on a steady ship.** A headset's tracking never quite stops:
+measured on a Pimax Crystal Super lying on a desk, the reported orientation
+wanders about a tenth of an arcminute every frame, and the compositor
+re-warps every frame by that motion, so any line about a pixel wide blinks
+as it crosses pixel rows. A rest lock that held the render pose while the
+head was still shipped on 2026-09-03 and was retired the next day: the
+temporal pass below integrates that wander instead of fighting it, and the
+lock could not engage on a Quest 3's tracking at all.
 *Details: [docs/anti-aliasing.md](docs/anti-aliasing.md).*
 
 **The shimmer itself — temporal anti-aliasing.** *Off by default; a first
@@ -263,10 +252,7 @@ turning it on: a temporal filter converges
 to a properly filtered image, which is calmer and softer than the hard,
 aliased edges of text without it, and a side-by-side at HMD Quality 1.5
 found the text much sharper with the resolve alone. If crisp text matters
-more to you than calm edges, leave this off and keep the resolve. With
-the rest lock on, the history is exactly registered while the head is
-still, so the softness at rest was resampling under a motion that no
-longer exists (believed, unflown as a pair as of 2026-09-04). On an RTX
+more to you than calm edges, leave this off and keep the resolve. On an RTX
 GPU, `temporal_aa = dlaa` hands the same inputs to NVIDIA's trained
 history instead, and `dlss` also lets Elite's HMD Quality below 1.0 render
 a fraction of the size and brings it back to full size, which buys frame
@@ -689,12 +675,6 @@ temporal pass and the sharpening (`temporal_aa`, `render_sharpness`, both
 off by default) are two more passes of exactly that kind, except that the
 temporal pass also shifts the projection the game is told by a fraction of
 a pixel each frame, the way the terrain fix shifts it by a margin.
-
-**The rest lock**, off by default, changes two answers and nothing else:
-the headset pose the game is handed each frame (held while your head is
-still, live the moment it moves) and the pose the compositor is told a
-frame was rendered from (a field OpenVR provides for exactly that). No
-memory is read or written, and the game's frame is forwarded untouched.
 
 **Three fixes do more, and each is described in full:** the resolution fix
 (below) rewrites twelve numbers in the game's code; Explorer Cam
