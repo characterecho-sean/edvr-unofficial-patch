@@ -631,17 +631,26 @@ sit, and it is measurable on both field rigs before any tracker is
 involved.
 
 **Built, fixed centre (2026-09-05, commit on the foveation branch).**
-`advanced.temporal_aa_fovea` (degrees across the crop, 0 = whole frame) and
-`advanced.temporal_aa_fovea_edge` (the blend band, degrees), live, under
-`temporal_aa = dlaa`. `dlaaEvaluateFovea` (`src/d3d11/dlaa.cpp`) runs a
-per-eye NGX feature with output sub-rectangles on the crop; the own-history
-dispatch fills the periphery; a composite shader (`kFoveaCsHlsl`, desk-
-compiled) blends the two over the edge band in the R8G8B8A8 stored
-representation the compositor samples as sRGB. The centre is the straight-
-ahead point from the effective tangents. Skipped entirely at width 0, so an
-unchanged config is byte-for-byte today's behaviour; DLSS's upscale is not
-foveated yet (the periphery would need upscaling too). Unflown. The seam
-(item below) is the headset-on judgement that remains.
+`advanced.temporal_aa_fovea` (degrees across the crop, 0 = whole frame),
+`advanced.temporal_aa_fovea_edge` (the blend band, degrees) and
+`advanced.temporal_aa_periphery_calm` (0..1, how much calmer the periphery
+history gets toward the edge), all live. It works under both `temporal_aa =
+dlaa` (the crop 1:1) and `temporal_aa = dlss` (the game renders small, NVIDIA
+upscales just the crop to native, the periphery upscaled cheaply by the
+composite's bilinear sampler). `dlssEvaluateFovea` (`src/d3d11/dlaa.cpp`)
+runs a per-eye NGX feature at the input crop -> output crop with output
+sub-rectangles; the own-history dispatch fills the periphery, calmed with
+eccentricity; a composite shader (`kFoveaCsHlsl`, desk-compiled) blends the
+two over the edge band in the R8G8B8A8 stored representation the compositor
+samples as sRGB. The centre is the straight-ahead point from the effective
+tangents; the output crop is the input crop scaled exactly, so the fovea and
+periphery register. Skipped entirely at width 0, so an unchanged config is
+byte-for-byte today's behaviour. Flown on the Pimax under DLAA (the crop
+engages, ~0.32 ms/eye vs 2.7 full-frame); the remaining artefacts are the
+periphery's own-history shimmer (the calming addresses it) and, under head
+motion, the crop's history-boundary transient at the fovea edge -- content
+entering the crop has no accumulated history, the "underwater" a wider fovea
+or a processed margin beyond the visible crop would cure.
 
 **What must be measured first (Phase 0 items 15 and 16).**
 

@@ -337,23 +337,26 @@ void main(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
     if (id.x < (uint)size.x && id.y < (uint)size.y) {
         float2 p = float2(id.xy);
         int2 ci = int2(id.xy);
-        // Foveation-aware periphery (docs/performance.md feature 6): the
-        // further a pixel sits outside the fovea, the calmer its history --
-        // a wider fallback sample, a looser variance clamp and a heavier
-        // blend. The periphery's thin geometry stops toggling under head
-        // motion, where the eye is flicker-sensitive but cannot resolve the
-        // softness the calm costs. ecc is 0 inside the fovea's inner radius
+        // Foveation-aware periphery (docs/performance.md feature 6): toward
+        // the edge the history's WEIGHT is REDUCED and the fallback sample is
+        // blurred MORE. Reducing the weight cuts the motion smear so the
+        // periphery matches the DLAA fovea's low latency at the seam (a
+        // heavier history smears -- the 2026-09-05 field lesson); the wider
+        // Gaussian holds the flicker down spatially, which the eye's low
+        // peripheral acuity does not resolve, without the temporal lag a
+        // heavier history would add. ecc is 0 inside the ramp's inner radius
         // and 1 in the far periphery, scaled by the strength; exactly 0 when
         // the fovea is off (fovea1.w == 0), so the full-frame pass is
-        // unchanged.
+        // unchanged (blend >= 0.5 never reaches the 0.40 floor at ecc 0).
         float ecc = 0.0;
         if (fovea1.w != 0.0) {
             float dist = length(p - fovea0.xy);
             ecc = saturate((dist - fovea0.z) * fovea0.w) * fovea1.x;
         }
-        float gEff = gamma + ecc * 1.25;                 // clamp: up to +1.25 sigma looser
-        float blEff = min(blend + ecc * 0.07, 0.985);    // history: up to +0.07 heavier
-        float curK = 2.29 / (1.0 + ecc * 1.5);           // the fallback sample's Gaussian widens
+        float blEff = blend - ecc * 0.30;                // history: LIGHTER toward the edge
+        if (blEff < 0.40) blEff = 0.40;
+        float gEff = gamma;                              // clamp unchanged
+        float curK = 2.29 / (1.0 + ecc * 4.0);           // the fallback Gaussian widens (spatial low-pass)
         // This frame's sample and its neighbourhood, in one pass over the
         // 3x3 around the pixel. The sample the game rendered at q sits at
         // q - jit on the unjittered grid, so each is weighted by its
@@ -614,7 +617,7 @@ void fovea(uint3 id : SV_DispatchThreadID) {
 }
 )HLSL";
 
-// The cbuffer above, laid out to match: 416 bytes, twenty-six 16-byte rows.
+// The cbuffer above, laid out to match: 448 bytes, twenty-eight 16-byte rows.
 struct PassParams {
     int32_t region[4];
     int32_t size[2];
@@ -1063,8 +1066,12 @@ bool                       g_foveaFailNoted = false;
 // Latched when the fovea's NGX create or eval fails, so it is not retried
 // every frame (a create costs tens to hundreds of ms -- a stutter storm).
 // Cleared on a config reload and on a frame-size change, so a fixed cause
-// (a bad size, a transient) gets another chance without a relaunch.
+// (a bad size, a transient) gets another chance without a relaunch. The
+// sizes it failed at re-arm it when either changes (the review of
+// 2026-09-05, F4: one eye's refusal must not strand both for the session
+// across an HMD Quality change).
 bool                       g_foveaFailed = false;
+uint32_t                   g_foveaFailW = 0, g_foveaFailFoW = 0;
 uint32_t                   g_foveaTreats = 0;
 bool                       g_dlaaNoted = false;
 bool                       g_dlssNoted = false;
@@ -1994,6 +2001,8 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         // fovea would blend NVIDIA's crop over that -- a mixed instrument (the
         // review of 2026-09-05, F6). g_foveaFailed off: a failing crop is not
         // retried every frame (F3).
+        // A failed crop re-arms when the render or output size changes (F4).
+        if (g_foveaFailed && (w != g_foveaFailW || foW != g_foveaFailFoW)) g_foveaFailed = false;
         const bool foveaWanted = (flags & 2u) != 0 && fmtIndex == 0 && g_foveaDeg > 0.0f &&
                                  g_foveaCb != nullptr && g_debugMode == 0 && !g_foveaFailed;
         uint32_t fcx = 0, fcy = 0, fcw = 0, fch = 0;      // INPUT crop, in the render (w x h) space
@@ -2036,22 +2045,41 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     ow = static_cast<uint32_t>(cw); oh = static_cast<uint32_t>(ch);
                     return true;
                 };
-                // Worth it only when the output crop is appreciably smaller
-                // than the native frame; otherwise the seam buys nothing.
-                if (cropOf(w, h, fcx, fcy, fcw, fch) &&
-                    cropOf(foW, foH, focx, focy, focw, foch) &&
+                // The OUTPUT crop is the input crop scaled exactly to the
+                // native frame -- NOT computed independently, which rounds the
+                // two apart by up to a native pixel per edge, differently per
+                // eye, and reads as a depth step at the seam (the review of
+                // 2026-09-05, F2). At foW == w (DLAA) it is the input crop
+                // exactly. Worth it only when the output crop is appreciably
+                // smaller than the frame.
+                auto scaleTo = [](uint32_t v, uint32_t from, uint32_t to) -> uint32_t {
+                    return static_cast<uint32_t>((static_cast<uint64_t>(v) * to / from) & ~1ull);
+                };
+                if (cropOf(w, h, fcx, fcy, fcw, fch)) {
+                    focx = scaleTo(fcx, w, foW);
+                    focw = scaleTo(fcw, w, foW);
+                    focy = scaleTo(fcy, h, foH);
+                    foch = scaleTo(fch, h, foH);
+                    if (focx + focw > foW) focw = (foW - focx) & ~1u;
+                    if (focy + foch > foH) foch = (foH - focy) & ~1u;
+                }
+                if (fcw >= 128 && focw >= 128 && foch >= 128 &&
                     static_cast<uint64_t>(focw) * foch <=
                         static_cast<uint64_t>(foW) * foH * 9 / 10) {
                     foveaMode = true;
                     // The periphery calming (feature 6): the own pass reads
-                    // these from the cbuffer and eases its history calmer with
-                    // distance from the fovea centre. The ramp starts at the
-                    // fovea's half-width -- so the visible seam is uncalmed --
-                    // and reaches full calm at the farthest frame corner.
+                    // these from the cbuffer and eases its history lighter with
+                    // distance from the fovea centre. The ramp starts INSIDE
+                    // the fovea's radius (0.7 of it) so it covers the blend
+                    // band -- where the own history meets the DLAA and a heavy
+                    // history would smear against it -- and reaches full calm
+                    // at the farthest frame corner. The fovea's inner own
+                    // history is discarded (DLAA is shown there), so calming it
+                    // costs nothing.
                     if (g_peripheryCalm > 0.0f) {
                         const float ccx = static_cast<float>(fcx) + fcw * 0.5f;
                         const float ccy = static_cast<float>(fcy) + fch * 0.5f;
-                        const float inner = fcw * 0.5f;
+                        const float inner = fcw * 0.35f;
                         float outer = 0.0f;
                         const float cwf = static_cast<float>(w), chf = static_cast<float>(h);
                         const float cor[4][2] = {{0, 0}, {cwf, 0}, {0, chf}, {cwf, chf}};
@@ -2448,6 +2476,8 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                         // for the rest of the session, or until a config reload
                         // or size change re-arms it.
                         g_foveaFailed = true;
+                        g_foveaFailW = w;
+                        g_foveaFailFoW = foW;
                         if (!g_foveaFailNoted) {
                             g_foveaFailNoted = true;
                             Log::get().note(

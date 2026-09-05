@@ -458,15 +458,20 @@ bool dlssEvaluateFovea(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* colou
             NVSDK_NGX_D3D11_ReleaseFeature(f.handle);
             f.handle = nullptr;
         }
-        // Equal crops are DLAA; a smaller input picks the quality mode by the
-        // crop's own upscale ratio, the same ladder the full-frame path uses.
+        // Equal crops are DLAA. A smaller input picks the quality mode by the
+        // FRAME's upscale ratio, not the crop's -- the frame ratio is the same
+        // for both eyes and stable, so the eyes never land on different DLSS
+        // networks across a 0.5/0.58/0.667 threshold the way the per-eye crop
+        // ratio does when rounding straddles it (the review of 2026-09-05,
+        // F1). The +eps keeps exactly 0.5 on MaxPerf rather than
+        // UltraPerformance (a 1/2-scale input is not the 1/3-scale mode).
         NVSDK_NGX_PerfQuality_Value q = NVSDK_NGX_PerfQuality_Value_DLAA;
-        if (icw != ocw || ich != och) {
-            const float ratio = static_cast<float>(icw) / static_cast<float>(ocw);
-            q = ratio >= 0.66f ? NVSDK_NGX_PerfQuality_Value_MaxQuality
-              : ratio >= 0.58f ? NVSDK_NGX_PerfQuality_Value_Balanced
-              : ratio >= 0.5f  ? NVSDK_NGX_PerfQuality_Value_MaxPerf
-              :                  NVSDK_NGX_PerfQuality_Value_UltraPerformance;
+        if (inW != outW || inH != outH) {
+            const float ratio = static_cast<float>(inW) / static_cast<float>(outW) + 0.002f;
+            q = ratio >= 0.667f ? NVSDK_NGX_PerfQuality_Value_MaxQuality
+              : ratio >= 0.58f  ? NVSDK_NGX_PerfQuality_Value_Balanced
+              : ratio >= 0.5f   ? NVSDK_NGX_PerfQuality_Value_MaxPerf
+              :                   NVSDK_NGX_PerfQuality_Value_UltraPerformance;
         }
         NVSDK_NGX_DLSS_Create_Params cp{};
         cp.Feature.InWidth = icw;
@@ -497,8 +502,8 @@ bool dlssEvaluateFovea(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* colou
             "temporal aa fovea: NVIDIA's feature is created for eye %d, crop %ux%u in -> "
             "%ux%u out (%s, output sub-rectangles; input based at %u,%u in the %ux%u render, "
             "output at %u,%u in the %ux%u frame); the crop's history starts here.",
-            eye, icw, ich, ocw, och, (icw == ocw && ich == och) ? "DLAA" : "DLSS", icx, icy,
-            inW, inH, ocx, ocy, outW, outH);
+            eye, icw, ich, ocw, och, (icw == ocw && ich == och) ? "DLAA" : qualityName(q), icx,
+            icy, inW, inH, ocx, ocy, outW, outH);
     }
 
     NVSDK_NGX_D3D11_DLSS_Eval_Params ep{};
@@ -553,7 +558,7 @@ bool dlssEvaluateFovea(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* colou
         return false;
     }
     ++g_evaluations;
-    if (reset) ++g_resets;
+    if (reset || didCreate) ++g_resets;   // a create forces a reset too (the review, F7)
     return true;
 #endif
 }
@@ -1146,8 +1151,15 @@ int dlaaFoveaSelfTest(ID3D11Device* dev, ID3D11DeviceContext* ctx, const char** 
         return 0;
     }
     // The upscale crop (DLSS, the half-render variant): a 256x256 input crop of
-    // a small render becomes a 512x512 output crop of a 2x native frame.
+    // a small render becomes a 512x512 output crop of a 2x native frame (ratio
+    // 0.5 -> MaxPerf).
     if (!foveaCase(dev, ctx, 512, 384, 1024, 768, 128, 64, 256, 256, 256, 128, 512, 512, why)) {
+        return 0;
+    }
+    // A non-half ratio (0.6 -> Balanced), so a second DLSS mode's create is
+    // exercised too (the review of 2026-09-05, F1/F3): 300x300 input crop of a
+    // 640x480 render, 500x500 output crop of a 1067x800 frame.
+    if (!foveaCase(dev, ctx, 640, 480, 1068, 800, 160, 90, 300, 300, 268, 150, 500, 500, why)) {
         return 0;
     }
     return 1;
