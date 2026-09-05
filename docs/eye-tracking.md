@@ -377,6 +377,33 @@ Route A:
    driver-version property did not answer, and its error code is printed
    next time.
 
+**Flown 2026-09-05 14:54 (`v0.14.0-27-ge11153b-dirty`; Route B armed:
+LibPVRClient64 interface 1.32, "1.33.1", clock 89 s).** The raw origin
+sat 5.8 to 6.4 m from the head this session. Three findings:
+
+1. *Route A is validated against Route B.* Over the first window's 599
+   frames, and the two after it, the direction-form quadratic's FAR root
+   with both axes mirrored agreed with Pimax's own tracker to 0.2, 0.1 and
+   0.0 degrees RMS, and read within a few degrees of straight ahead (the
+   discriminant 0.13 to 0.16, never negative; the near root 40 to 56
+   degrees away and out of the frustum). Two independent instruments agree
+   frame by frame: SteamVR's centre IS a unit gaze minus the raw-universe
+   head position, and the repair recovers it at this distance.
+2. *The subtraction did not.* Every frame's `p + t` fell outside 0.5..2
+   and was set aside, so the point-form vector is not `d - t` in the frame
+   and sign assumed (`|p|` was 6.5 at arming against `|t|` 5.8). The next
+   build prints `|p|`, `|t|`, `|p + t|` and `|p - t|` per window so the
+   right combination can be read off; until then the quadratic, which
+   works, is Route A.
+3. *The tracker froze.* From about 40 s in, SteamVR's centre stopped
+   moving (per-frame step 0.0000 with every answer still vouched) and
+   Route B held one value, (0.043, 0.134) in both eyes, for the rest of
+   the flight, its blink mean 0.47 in the window it froze and 0 after,
+   its sample time still advancing at the frame rate. Both routes read
+   the same tracker, so the tracker itself stopped delivering -- a
+   headset lifted, eyes lost, or Pimax Play's tracking going idle -- and
+   the flight cannot say which.
+
 The rebuilt probe (`e230df2`) does the subtraction every frame from two
 point-form reads (x and y with the identity-with-w matrix, z with the
 first row swapped in) and prints per window: `|p|`'s mean, `|d|`'s mean

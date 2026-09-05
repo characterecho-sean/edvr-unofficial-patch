@@ -420,10 +420,21 @@ of the probe, and what they settled:
   culled by the default rasteriser state and measures the clear colour as
   16x16 blocks; `near` is a Windows macro.
 
-Unflown at writing. The first flight measures the saving at Sean's 0.65
-render scale and looks at the periphery under DLSS, which has never been
-handed coarse-shaded input here; then the render scale rises until the
-saving is spent.
+**Flight 1 (2026-09-05 14:54, `v0.14.0-27-ge11153b-dirty`, balanced).**
+Armed at the first eye draw, bound, and running for the session: four
+images made (both eye-sized sizes on this rig -- the 3252x3213 render and
+the 4336x4284 output -- for each eye), about two distinct eye-sized
+targets a frame, 2.6 image switches a frame, no tangent gaps. Sean's word
+on the picture: "definitely more what I expected". On performance he saw
+no large gain, and the log says why that cannot be read from this flight:
+the session ran 81, 87, 89 and 90 frames a second by twenty-second
+windows, at the 90 Hz cap for its second half, where a saving is headroom
+and not frame rate; and the pass itself cost 2.8 ms an eye (NVIDIA's 1.9
+of it), about 5 ms of an 11 ms frame that a shading rate cannot touch,
+because the pass is compute. What the log cannot yet say is how many of
+the frame's draws ran under the image. Next: an A/B with the live key
+against SteamVR's GPU frame time in a heavy scene, a summary that counts
+draws under the image per target size, and then the render scale up.
 
 ## Feature 3 — the eye-tracked centre
 
