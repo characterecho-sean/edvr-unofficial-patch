@@ -226,8 +226,16 @@ if defined NGX (
 ) else (
     echo [edvr] ==================================================================
     echo [edvr] NO DLSS SDK. This build has no DLAA, and its installer carries no
-    echo [edvr] nvngx_dlss.dll. Fine for development; NOT a release. To fetch the
-    echo [edvr] pinned SDK once for this machine:  python tools\fetch_ngx.py
+    echo [edvr] nvngx_dlss.dll. Fine for development; NOT a release. Looked for
+    echo [edvr] include\nvsdk_ngx.h in these three places, in this order:
+    if defined EDVR_NGX_SDK (
+        echo [edvr]   EDVR_NGX_SDK   = %EDVR_NGX_SDK%
+    ) else (
+        echo [edvr]   EDVR_NGX_SDK   = ^(not set^)
+    )
+    echo [edvr]   the checkout    = %ROOT%\third_party\ngx
+    echo [edvr]   this machine    = %LOCALAPPDATA%\EDVR\ngx-sdk
+    echo [edvr] To fetch the pinned SDK once for this machine:  python tools\fetch_ngx.py
     echo [edvr] ==================================================================
     if exist "%BUILD%\nvngx_dlss.dll" del /q "%BUILD%\nvngx_dlss.dll"
     if exist "%BUILD%\NVIDIA-DLSS-LICENSE.txt" del /q "%BUILD%\NVIDIA-DLSS-LICENSE.txt"
@@ -684,6 +692,16 @@ if errorlevel 1 (
     )
 )
 
+echo.
+REM The one line a release engineer has to see, after thousands of compiler
+REM lines: whether the installer just built carries NVIDIA's runtime.
+if exist "%BUILD%\nvngx_dlss.dll" (
+    echo [edvr] DLSS runtime: CARRIED -- build\edvr-installer.exe places nvngx_dlss.dll
+    echo        beside the game on machines with an NVIDIA card.
+) else (
+    echo [edvr] DLSS runtime: NOT CARRIED -- no DLSS SDK was found ^(the boxed notice
+    echo        above says where it looked^). Not a release build.
+)
 echo.
 echo [edvr] To install: copy build\d3d11.dll and edvr.ini next to
 echo        EliteDangerous64.exe, and build\openvr_api.dll into
