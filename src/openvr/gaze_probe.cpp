@@ -27,6 +27,7 @@ namespace {
 constexpr const char* kFnTableVersion = "FnTable:IVRSystem_026";
 constexpr size_t kFnRecommendedSize = 0;             // GetRecommendedRenderTargetSize
 constexpr size_t kFnSeatedToStanding = 13;           // GetSeatedZeroPoseToStandingAbsoluteTrackingPose
+constexpr size_t kFnRawToStanding = 14;              // GetRawZeroPoseToStandingAbsoluteTrackingPose
 constexpr size_t kFnFoveationCenter = 35;            // GetEyeTrackedFoveationCenter
 constexpr size_t kFnFoveationCenterForProjection = 36;
 constexpr size_t kFnRuntimeVersion = 49;             // GetRuntimeVersion
@@ -66,7 +67,35 @@ constexpr uint32_t kMaxWaitFrames = 1800;
 PFN_FoveationCenter g_center = nullptr;
 PFN_FoveationCenterForProjection g_centerProj = nullptr;
 PFN_SeatedToStanding g_seatedToStanding = nullptr;
+PFN_SeatedToStanding g_rawToStanding = nullptr;   // same shape, entry 14
 Sentinel* g_sentinel = nullptr;
+
+// p' = M p for a row-major 3x4 (rotation | translation).
+void apply34(const vr::HmdMatrix34_t& m, const double p[3], double out[3]) {
+    for (int r = 0; r < 3; ++r) {
+        out[r] = m.m[r][0] * p[0] + m.m[r][1] * p[1] + m.m[r][2] * p[2] + m.m[r][3];
+    }
+}
+// p' = M^-1 p for a rigid 3x4: R^T (p - t).
+void applyInverse34(const vr::HmdMatrix34_t& m, const double p[3], double out[3]) {
+    const double d[3] = {p[0] - m.m[0][3], p[1] - m.m[1][3], p[2] - m.m[2][3]};
+    for (int c = 0; c < 3; ++c) {
+        out[c] = m.m[0][c] * d[0] + m.m[1][c] * d[1] + m.m[2][c] * d[2];
+    }
+}
+// The yaw a rigid transform turns +z by, degrees, for saying whether two
+// universes are rotated against each other.
+double yawOf34(const vr::HmdMatrix34_t& m) {
+    return atan2(static_cast<double>(m.m[0][2]), static_cast<double>(m.m[2][2])) * 57.2957795;
+}
+// Where a point would land if it were read as a direction in the head's
+// frame: yaw/pitch through the projection, or "behind" when z >= 0.
+bool pointAngles(const double p[3], double* yawDeg, double* pitchDeg) {
+    if (!(p[2] < -0.05)) return false;
+    *yawDeg = atan(p[0] / -p[2]) * 57.2957795;
+    *pitchDeg = atan(p[1] / -p[2]) * 57.2957795;
+    return true;
+}
 
 // One eye's centre over a window of frames: range, mean and the mean
 // per-frame step. The step is the tell -- a tracker that follows the eyes
@@ -329,40 +358,55 @@ void summary(bool final) {
     // the head's own position in standing space, read as such a point,
     // lands on the same angles. The runtime's seated-to-standing transform
     // is entry 13 of the same table; the game's poses are seated.
+    // Flight 3 (2026-09-05) put the head at (-2.3, -4.5, +2.4) m in the
+    // STANDING universe -- nowhere near the predicted point and behind the
+    // origin -- so if the constant is a room-space origin, it is not
+    // SteamVR's standing space. The driver's own RAW universe (the frame an
+    // inside-out headset starts in) is the other candidate: entry 14 maps
+    // raw to standing, so head_raw = inverse(raw->standing) * head_standing.
     if (g_seatedToStanding && h.n) {
-        vr::HmdMatrix34_t m{};
-        bool got = false;
-        const bool survived = guarded("gazeProbe/seatedToStanding", [&] {
-            m = g_seatedToStanding();
-            got = true;
+        vr::HmdMatrix34_t ss{}, rs{};
+        bool gotSs = false, gotRs = false;
+        const bool survived = guarded("gazeProbe/universes", [&] {
+            ss = g_seatedToStanding();
+            gotSs = true;
+            if (g_rawToStanding) {
+                rs = g_rawToStanding();
+                gotRs = true;
+            }
         });
         if (!survived) {
             g_seatedToStanding = nullptr;
-            Log::get().note("gaze probe: the seated-to-standing call FAULTED; the room "
-                            "test is off for the session. Please report this log.");
-        } else if (got) {
+            g_rawToStanding = nullptr;
+            Log::get().note("gaze probe: a universe-transform call FAULTED; the room test "
+                            "is off for the session. Please report this log.");
+        } else if (gotSs) {
             const double p[3] = {h.mean(0), h.mean(1), h.mean(2)};
-            double s[3];
-            for (int r = 0; r < 3; ++r) {
-                s[r] = m.m[r][0] * p[0] + m.m[r][1] * p[1] + m.m[r][2] * p[2] + m.m[r][3];
-            }
-            const bool ahead = s[2] < -0.05;
-            const double yawS = ahead ? atan(s[0] / -s[2]) * 57.2957795 : 0.0;
-            const double pitchS = ahead ? atan(s[1] / -s[2]) * 57.2957795 : 0.0;
+            double s[3], rw[3] = {0.0, 0.0, 0.0};
+            apply34(ss, p, s);
+            if (gotRs) applyInverse34(rs, s, rw);
+            double ys = 0.0, ps = 0.0, yr = 0.0, pr = 0.0;
+            const bool aheadS = pointAngles(s, &ys, &ps);
+            const bool aheadR = gotRs && pointAngles(rw, &yr, &pr);
+            char angS[64], angR[64];
+            if (aheadS) snprintf(angS, sizeof(angS), "%+.1f deg yaw, %+.1f deg pitch", ys, ps);
+            else snprintf(angS, sizeof(angS), "behind or beside the origin");
+            if (!gotRs) snprintf(angR, sizeof(angR), "(entry 14 not available)");
+            else if (aheadR) snprintf(angR, sizeof(angR), "%+.1f deg yaw, %+.1f deg pitch", yr, pr);
+            else snprintf(angR, sizeof(angR), "behind or beside the origin");
             Log::get().note(
                 "gaze probe %s, the room test: the head sat at (%.3f, %.3f, %.3f) m in the "
-                "room's STANDING space (seated-to-standing from the runtime, translation "
-                "(%.3f, %.3f, %.3f)); that point read as head-relative would project to "
-                "%s -- if it lands on the centre's angles above, the runtime is projecting "
-                "a room-space point as if it were in the head's frame.",
+                "STANDING universe (seated-to-standing translation (%.3f, %.3f, %.3f), yaw "
+                "%+.1f deg) -- read as head-relative that projects to %s; and at (%.3f, %.3f, "
+                "%.3f) m in the RAW universe (raw-to-standing translation (%.3f, %.3f, %.3f), "
+                "yaw %+.1f deg) -- read as head-relative that projects to %s. Whichever lands "
+                "on the centre's angles above is the frame the runtime is mixing in.",
                 final ? "totals" : "summary", s[0], s[1], s[2],
-                static_cast<double>(m.m[0][3]), static_cast<double>(m.m[1][3]),
-                static_cast<double>(m.m[2][3]),
-                ahead ? "" : "(behind or beside the origin: no projection)");
-            if (ahead) {
-                Log::get().note("gaze probe %s, the room test, angles: %+.1f deg yaw, %+.1f deg "
-                                "pitch.", final ? "totals" : "summary", yawS, pitchS);
-            }
+                static_cast<double>(ss.m[0][3]), static_cast<double>(ss.m[1][3]),
+                static_cast<double>(ss.m[2][3]), yawOf34(ss), angS, rw[0], rw[1], rw[2],
+                gotRs ? static_cast<double>(rs.m[0][3]) : 0.0,
+                gotRs ? static_cast<double>(rs.m[1][3]) : 0.0,
+                gotRs ? static_cast<double>(rs.m[2][3]) : 0.0, gotRs ? yawOf34(rs) : 0.0, angR);
         }
     }
     if (!final) {
@@ -430,12 +474,14 @@ void tryArm() {
     void* pCenterProj = nullptr;
     void* pVersion = nullptr;
     void* pSeated = nullptr;
+    void* pRaw = nullptr;
     survived = guarded("gazeProbe/table", [&] {
         pSize = fn[kFnRecommendedSize];
         pCenter = fn[kFnFoveationCenter];
         pCenterProj = fn[kFnFoveationCenterForProjection];
         pVersion = fn[kFnRuntimeVersion];
         pSeated = fn[kFnSeatedToStanding];
+        pRaw = fn[kFnRawToStanding];
     });
     if (!survived || !pSize || !pCenter || !pCenterProj) {
         g_sentinel->confirm();
@@ -482,6 +528,7 @@ void tryArm() {
     g_center = reinterpret_cast<PFN_FoveationCenter>(pCenter);
     g_centerProj = reinterpret_cast<PFN_FoveationCenterForProjection>(pCenterProj);
     g_seatedToStanding = reinterpret_cast<PFN_SeatedToStanding>(pSeated);
+    g_rawToStanding = reinterpret_cast<PFN_SeatedToStanding>(pRaw);
 
     vr::HmdVector2_t L = {{NAN, NAN}}, R = {{NAN, NAN}};
     bool vouched = false;
