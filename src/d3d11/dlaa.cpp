@@ -1138,6 +1138,7 @@ struct MotionRig {
                     *stagingH = nullptr;
     std::vector<uint8_t>  framesF[kMFrames];   // grey, jittered, panned
     std::vector<uint8_t>  framesH[kMFrames];   // the same, boxed 2x2 (the steady periphery's input)
+    std::vector<uint8_t>  framesP[kMFrames];   // half size as a game would RENDER it: point samples (the dlss fovea's input)
     float                 jit[kMFrames][2] = {};
     std::vector<float>    truthF;              // box-filtered scene, (kMW + kMExtra) x kMH
     std::vector<float>    truthH;              // ...and its 2x2 mean, half size
@@ -1231,6 +1232,21 @@ struct MotionRig {
                     framesH[k][static_cast<size_t>(y) * (kMW / 2) + x] = static_cast<uint8_t>((s + 2) / 4);
                 }
             }
+            // ...and the half-size frame as a game rendering at half size
+            // would make it: POINT samples at the half-size pixel centres
+            // plus the jitter in half-size pixels -- the dlss fovea's input.
+            // (The box above is the steady periphery's reduction of a
+            // full-size frame, which has already thrown the fine detail
+            // away; an upscaler fed that has nothing to reconstruct from.)
+            framesP[k].resize(static_cast<size_t>(kMW / 2) * (kMH / 2));
+            for (uint32_t y = 0; y < kMH / 2; ++y) {
+                for (uint32_t x = 0; x < kMW / 2; ++x) {
+                    const float v = probeScene((x + 0.5 + jit[k][0]) * 2.0 + shift,
+                                               (y + 0.5 + jit[k][1]) * 2.0);
+                    framesP[k][static_cast<size_t>(y) * (kMW / 2) + x] =
+                        static_cast<uint8_t>(v * 255.0f + 0.5f);
+                }
+            }
         }
         rgba.resize(static_cast<size_t>(kMW) * kMH * 4);
         mv.resize(static_cast<size_t>(kMW) * kMH * 2);
@@ -1255,9 +1271,10 @@ struct MotionRig {
         return true;
     }
 
-    void uploadFrame(bool half, uint32_t k) {
+    void uploadFrame(int mode, uint32_t k) {
+        const bool half = mode >= 2;
         const uint32_t w = half ? kMW / 2 : kMW, h = half ? kMH / 2 : kMH;
-        const uint8_t* g = (half ? framesH[k] : framesF[k]).data();
+        const uint8_t* g = (mode == 2 ? framesH[k] : mode == 3 ? framesP[k] : framesF[k]).data();
         for (uint32_t i = 0; i < w * h; ++i) {
             rgba[i * 4 + 0] = g[i];
             rgba[i * 4 + 1] = g[i];
@@ -1307,7 +1324,8 @@ struct MotionRig {
         return hnd;
     }
 
-    bool eval(int mode, NVSDK_NGX_Handle* h, float jx, float jy, bool reset, NVSDK_NGX_Result* err) {
+    bool eval(int mode, NVSDK_NGX_Handle* h, float jx, float jy, bool reset, float frameMs,
+              NVSDK_NGX_Result* err) {
         const bool halfIn = mode == 2 || mode == 3;   // the half-size inputs
         NVSDK_NGX_D3D11_DLSS_Eval_Params ep{};
         ep.Feature.pInColor = halfIn ? colourH : colour;
@@ -1333,7 +1351,7 @@ struct MotionRig {
         }
         ep.InPreExposure = 1.0f;
         ep.InExposureScale = 1.0f;
-        ep.InFrameTimeDeltaInMsec = 11.1f;
+        ep.InFrameTimeDeltaInMsec = frameMs;
         const NVSDK_NGX_Result er = NGX_D3D11_EVALUATE_DLSS_EXT(ctx, h, g_params, &ep);
         if (err) *err = er;
         return !NVSDK_NGX_FAILED(er);
@@ -1374,15 +1392,17 @@ struct MotionRig {
     // was at x + v last frame), the jitter handed over with jSign; the error
     // after every frame.
     bool run(int mode, int mvSign, float jSign, double err[kMFrames], ProbeReport& rep,
-             const char* name, unsigned preset = 0) {
+             const char* name, unsigned preset = 0, float frameMs = 11.1f) {
         NVSDK_NGX_Handle* h = makeFeature(mode, preset);
         if (!h) {
             rep.line("motion probe: %s -- the feature would not be created", name);
             return false;
         }
-        const bool half = mode == 2 || mode == 3;   // half-size inputs: half the pan, half the jitter
+        const bool half = mode == 2 || mode == 3;   // half-size inputs: half the pan
         const float v = half ? kMV * 0.5f : static_cast<float>(kMV);
-        const float js = half ? 0.5f * jSign : jSign;
+        // The box-reduced frame carries half the full frame's jitter; the
+        // point-sampled one has its own, in its own pixels.
+        const float js = mode == 2 ? 0.5f * jSign : jSign;
         float lastMx = 1e9f;
         bool ok = true;
         for (uint32_t k = 0; k < kMFrames && ok; ++k) {
@@ -1392,9 +1412,9 @@ struct MotionRig {
                 uploadMotion(half, mx, 0.0f);
                 lastMx = mx;
             }
-            uploadFrame(half, k);
+            uploadFrame(mode, k);
             NVSDK_NGX_Result er = NVSDK_NGX_Result_Success;
-            ok = eval(mode, h, js * jit[k][0], js * jit[k][1], k == 0, &er);
+            ok = eval(mode, h, js * jit[k][0], js * jit[k][1], k == 0, frameMs, &er);
             if (!ok) {
                 rep.line("motion probe: %s -- frame %u refused: %s (0x%08X)", name, k,
                          ngxResultName(er), static_cast<unsigned>(er));
@@ -1529,8 +1549,23 @@ int dlaaMotionProbe(ID3D11Device* dev, ID3D11DeviceContext* ctx, char* report,
                      pr > 0.0 ? pm / pr : 0.0, e[0]);
         }
     }
-    rep.line("  presets, DLSS Performance 2x from the half-size frame (the dlss fovea's mode), against "
-             "the full-size truth:");
+    rep.line("  frame delta told to the model, full-frame DLAA, default preset -- pan / first still / "
+             "rest / softening / first frame:");
+    const float deltas[3] = {0.0f, 11.1f, 33.3f};
+    for (float fd : deltas) {
+        double e[kMFrames];
+        for (double& v : e) v = -1.0;
+        char label[32];
+        if (fd > 0.0f) snprintf(label, sizeof(label), "%.1f ms", static_cast<double>(fd));
+        else snprintf(label, sizeof(label), "0 (unknown)");
+        if (rig.run(0, mvSign, jSign, e, rep, label, 0, fd)) {
+            const double pm = motionMean(e, 8, kMMoving - 1), pe = motionMean(e, 19, 21), pr = motionMean(e, 28, 35);
+            rep.line("    %-22s %.2f / %.2f / %.2f / %.2fx / %.2f", label, pm, pe, pr,
+                     pr > 0.0 ? pm / pr : 0.0, e[0]);
+        }
+    }
+    rep.line("  presets, DLSS Performance 2x from a half-size POINT-SAMPLED frame (the dlss fovea's input "
+             "and mode), against the full-size truth:");
     for (const PresetCase& pc : perfPresets) {
         double e[kMFrames];
         for (double& v : e) v = -1.0;
