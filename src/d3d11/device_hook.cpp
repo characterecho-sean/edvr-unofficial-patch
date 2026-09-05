@@ -181,7 +181,10 @@ struct State {
     uint32_t lastCameraEnters = 0;
     uint64_t frameCounter = 0;
     uint64_t configPollMs = 0;
-    uint64_t firstFrameMs = 0;   // for the crash sentinel's confirm window
+    // For the crash sentinel's confirm window: the previous Present, and the
+    // frame time credited so far. See kSentinelConfirmMs.
+    uint64_t lastPresentMs = 0;
+    uint64_t presentingMs = 0;
 
     // Dump the camera history on every external-camera keypress. Diagnostic,
     // off by default: one line per frame of the ring, every press.
@@ -230,7 +233,39 @@ struct State {
 // 1800fps, so 600 of them went by in a third of a second and the sentinel
 // confirmed survival before the game had drawn anything at all. The window
 // that was supposed to cover the risky period closed before it started.
+//
+// AND THEN IT WAS BROKEN A THIRD TIME, as six seconds of WALL CLOCK measured
+// from the first Present -- which one stalled frame can spend on its own.
+// Issue #20, 2026-09-05: the temporal pass compiles its HLSL synchronously in
+// the first frame's vScreenFrameBoundary, and on the reporter's rig fxc took
+// 6.26 seconds over it ("internal warning: optimization did not converge").
+// Present #2 therefore arrived at +6.3 s, the window was satisfied by a single
+// frame nobody had rendered, the .armed file was deleted, and the crash 2.2
+// seconds later left no trip behind. Measured across twenty crashes in one
+// breadcrumb file: fifteen at 8.6-9.6 s with the pass on and never a stand-down
+// after them, four at 2.4 s with it off and a stand-down after every one. The
+// protection was absent in exactly the configuration that needed it, and the
+// user's report was "temporal_aa crashes the game" when what it did was hide
+// the sentinel.
+//
+// So the window is now six seconds of PRESENTING, accumulated from the gaps
+// between Presents, and a gap longer than kSentinelMaxFrameMs contributes
+// nothing at all. A stall is not evidence the hooks survived anything; it is
+// evidence that nothing happened. Time is only credited for frames that look
+// like frames.
 constexpr uint64_t kSentinelConfirmMs = 6000;
+
+// The longest gap between two Presents that still counts as the game
+// presenting.
+//
+// Four frames a second. Elite's menu and loading screens present at about
+// 1800fps and the headset rates are 72 to 120, so no real frame is remotely
+// near this; the gaps it throws away are one-shot startup work of ours (a
+// shader compile, a first-frame allocation) and hitches severe enough that
+// crediting them would be a lie either way. Deliberately far above any frame
+// and far below the 6.26 s that produced issue #20: the value only has to
+// separate those two populations, and they are four orders of magnitude apart.
+constexpr uint64_t kSentinelMaxFrameMs = 250;
 
 // Frames to wait after an external-camera keypress before dumping the history.
 //
@@ -413,9 +448,13 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
     // frame work stops the confirmation, the sentinel trips on the next launch,
     // and every fix switches itself off over something that never crashed.
     ++g_state->framesSeen;
-    if (g_state->firstFrameMs == 0) g_state->firstFrameMs = stampMs();
-    if (!g_state->sentinelConfirmed &&
-        elapsedMs(g_state->firstFrameMs, kSentinelConfirmMs)) {
+    const uint64_t presentMs = stampMs();
+    if (g_state->lastPresentMs != 0) {
+        const uint64_t frameMs = presentMs - g_state->lastPresentMs;
+        if (frameMs <= kSentinelMaxFrameMs) g_state->presentingMs += frameMs;
+    }
+    g_state->lastPresentMs = presentMs;
+    if (!g_state->sentinelConfirmed && g_state->presentingMs >= kSentinelConfirmMs) {
         g_state->sentinelConfirmed = true;
         if (g_state->sentinel) g_state->sentinel->confirm();
     }
