@@ -630,6 +630,19 @@ gets: the middle of the view is where the cockpit's text and the target
 sit, and it is measurable on both field rigs before any tracker is
 involved.
 
+**Built, fixed centre (2026-09-05, commit on the foveation branch).**
+`advanced.temporal_aa_fovea` (degrees across the crop, 0 = whole frame) and
+`advanced.temporal_aa_fovea_edge` (the blend band, degrees), live, under
+`temporal_aa = dlaa`. `dlaaEvaluateFovea` (`src/d3d11/dlaa.cpp`) runs a
+per-eye NGX feature with output sub-rectangles on the crop; the own-history
+dispatch fills the periphery; a composite shader (`kFoveaCsHlsl`, desk-
+compiled) blends the two over the edge band in the R8G8B8A8 stored
+representation the compositor samples as sRGB. The centre is the straight-
+ahead point from the effective tangents. Skipped entirely at width 0, so an
+unchanged config is byte-for-byte today's behaviour; DLSS's upscale is not
+foveated yet (the periphery would need upscaling too). Unflown. The seam
+(item below) is the headset-on judgement that remains.
+
 **What must be measured first (Phase 0 items 15 and 16).**
 
 - *History under a moving crop.* NVIDIA's history is kept in output space
