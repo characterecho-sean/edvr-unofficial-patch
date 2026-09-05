@@ -72,6 +72,8 @@ cbuffer P : register(b0) {
     float4 tvCand;      // xyz the same for the instrument's swapped-eyes candidate
     float4 tvCam;       // xyz the translation term for the camera rows (the world path); w 1 = the world path is on
     float4 split;       // x the ship's radius in metres (nearer: the head's delta; farther and the far plane: the camera's); y the debug view (1 motion, 2 error, 3 depth); z a depth in metres for depthless pixels in a menu-like scene (0 off); w 1 = menu-like scene
+    float4 fovea0;      // xy the fovea centre in output pixels, z the inner radius (px) where the periphery calming starts, w 1/(the ramp width in px)
+    float4 fovea1;      // x the periphery calm strength (0..1), w 1 = the fovea is on (else no modulation)
 };
 float3 rgbToYcocg(float3 c) {
     return float3(0.25 * c.r + 0.5 * c.g + 0.25 * c.b,
@@ -335,6 +337,23 @@ void main(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
     if (id.x < (uint)size.x && id.y < (uint)size.y) {
         float2 p = float2(id.xy);
         int2 ci = int2(id.xy);
+        // Foveation-aware periphery (docs/performance.md feature 6): the
+        // further a pixel sits outside the fovea, the calmer its history --
+        // a wider fallback sample, a looser variance clamp and a heavier
+        // blend. The periphery's thin geometry stops toggling under head
+        // motion, where the eye is flicker-sensitive but cannot resolve the
+        // softness the calm costs. ecc is 0 inside the fovea's inner radius
+        // and 1 in the far periphery, scaled by the strength; exactly 0 when
+        // the fovea is off (fovea1.w == 0), so the full-frame pass is
+        // unchanged.
+        float ecc = 0.0;
+        if (fovea1.w != 0.0) {
+            float dist = length(p - fovea0.xy);
+            ecc = saturate((dist - fovea0.z) * fovea0.w) * fovea1.x;
+        }
+        float gEff = gamma + ecc * 1.25;                 // clamp: up to +1.25 sigma looser
+        float blEff = min(blend + ecc * 0.07, 0.985);    // history: up to +0.07 heavier
+        float curK = 2.29 / (1.0 + ecc * 1.5);           // the fallback sample's Gaussian widens
         // This frame's sample and its neighbourhood, in one pass over the
         // 3x3 around the pixel. The sample the game rendered at q sits at
         // q - jit on the unjittered grid, so each is weighted by its
@@ -362,7 +381,7 @@ void main(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
                 int2 q = clamp(ci + int2(dx, dy), int2(0, 0), size - 1);
                 float4 sq = S.Load(int3(region.xy + q, 0));
                 float2 dpos = float2(dx, dy) - jit.xy;
-                float w = jit.z != 0.0 ? exp(-2.29 * dot(dpos, dpos))
+                float w = jit.z != 0.0 ? exp(-curK * dot(dpos, dpos))
                                        : ((dx == 0 && dy == 0) ? 1.0 : 0.0);
                 float wm = 1.0;
                 cur += sq * w;
@@ -388,8 +407,8 @@ void main(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
         m1 /= msum;
         m2 /= msum;
         float3 sigma = sqrt(max(m2 - m1 * m1, 0.0));
-        float3 boxMin = m1 - gamma * sigma;
-        float3 boxMax = m1 + gamma * sigma;
+        float3 boxMin = m1 - gEff * sigma;
+        float3 boxMax = m1 + gEff * sigma;
         float3 outc = cur.rgb;
         bool used = false;
         uint worldTaken = 0;
@@ -416,7 +435,7 @@ void main(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
                     count[26] = 1;
                     if (count[1] != 0) count[27] = 1;
                 }
-                outc = lerp(cur.rgb, ycocgToRgb(hc), blend);
+                outc = lerp(cur.rgb, ycocgToRgb(hc), blEff);
                 used = true;
             }
             // The registration instrument: what each candidate would have
@@ -610,8 +629,10 @@ struct PassParams {
     float   tvCand[4];
     float   tvCam[4];    // the camera rows' translation term, w 1 = world path on
     float   split[4];    // x the ship's radius in metres
+    float   fovea0[4];   // xy centre px, z inner radius px, w 1/ramp px (feature 6, periphery calming)
+    float   fovea1[4];   // x calm strength 0..1, w 1 = fovea on
 };
-static_assert(sizeof(PassParams) == 416, "the cbuffer is twenty-six 16-byte rows");
+static_assert(sizeof(PassParams) == 448, "the cbuffer is twenty-eight 16-byte rows");
 
 // The format allowlist: the supersample resolve's, for its reasons
 // (supersample_pass.cpp) -- typeless and UNORM families read and written
@@ -1070,6 +1091,7 @@ int      g_debugMode = 0;          // advanced.temporal_aa_debug: 0 off, 1 motio
 float    g_menuMetres = 0.0f;      // advanced.temporal_aa_menu_metres: a depth for depthless pixels in a menu-like scene
 float    g_foveaDeg = 0.0f;        // advanced.temporal_aa_fovea: NVIDIA runs on a crop this many degrees across; 0 = whole frame
 float    g_foveaEdgeDeg = 6.0f;    // advanced.temporal_aa_fovea_edge: the blend band, in degrees
+float    g_peripheryCalm = 0.6f;   // advanced.temporal_aa_periphery_calm: how much calmer the own history gets toward the periphery (0 uniform, 1 max), only with the fovea on
 int      g_rowsFollow = 0;         // +1 a frame the rows turn with the head, -4 a frame they do not; the world path needs >= 0
 bool     g_rowsFollowNoted = false;
 bool     g_warmNoted = false;
@@ -2005,6 +2027,32 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     fcw = static_cast<uint32_t>(cw);
                     fch = static_cast<uint32_t>(ch);
                     foveaMode = true;
+                    // The periphery calming (feature 6): the own pass reads
+                    // these from the cbuffer and eases its history calmer with
+                    // distance from the fovea centre. The ramp starts at the
+                    // fovea's half-width -- so the visible seam is uncalmed --
+                    // and reaches full calm at the farthest frame corner.
+                    if (g_peripheryCalm > 0.0f) {
+                        const float ccx = static_cast<float>(fcx) + fcw * 0.5f;
+                        const float ccy = static_cast<float>(fcy) + fch * 0.5f;
+                        const float inner = fcw * 0.5f;
+                        float outer = 0.0f;
+                        const float cwf = static_cast<float>(w), chf = static_cast<float>(h);
+                        const float cor[4][2] = {{0, 0}, {cwf, 0}, {0, chf}, {cwf, chf}};
+                        for (int k = 0; k < 4; ++k) {
+                            const float dcx = cor[k][0] - ccx, dcy = cor[k][1] - ccy;
+                            const float d = sqrtf(dcx * dcx + dcy * dcy);
+                            if (d > outer) outer = d;
+                        }
+                        float ramp = outer - inner;
+                        if (ramp < 1.0f) ramp = 1.0f;
+                        p.fovea0[0] = ccx;
+                        p.fovea0[1] = ccy;
+                        p.fovea0[2] = inner;
+                        p.fovea0[3] = 1.0f / ramp;
+                        p.fovea1[0] = g_peripheryCalm;
+                        p.fovea1[3] = 1.0f;   // the fovea is on: modulate
+                    }
                 }
             }
         }
@@ -2533,6 +2581,10 @@ void temporalPassConfigure(Config& cfg) {
     if (!std::isfinite(edge) || edge < 1.0f) edge = 1.0f;
     if (edge > 30.0f) edge = 30.0f;
     g_foveaEdgeDeg = edge;
+    float calm = cfg.getFloat("advanced.temporal_aa_periphery_calm", 0.6f);
+    if (!std::isfinite(calm) || calm < 0.0f) calm = 0.0f;
+    if (calm > 1.0f) calm = 1.0f;
+    g_peripheryCalm = calm;
     // A config reload re-arms the fovea after a failure stood it down (F3):
     // the user may have changed the width, or the transient may be gone.
     g_foveaFailed = false;
