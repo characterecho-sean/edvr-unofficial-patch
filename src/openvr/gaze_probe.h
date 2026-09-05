@@ -49,6 +49,19 @@
 // driver that publishes a constant. Never a per-frame value: the privacy
 // promise of the Explorer Cam, made here for gaze.
 //
+// PHASE 1 OF docs/eye-tracking.md (2026-09-05)
+//
+// The four flights of that morning showed the runtime's centre to be a
+// unit gaze minus the headset's position in Pimax's raw universe. Two
+// routes to the gaze are probed here, aggregates only: Route A repairs the
+// frame -- entry 36 with a hand-made matrix gives the direction's tangents,
+// entry 12 gives the head in the raw universe every frame, and one
+// quadratic per frame recovers the unit gaze for both roots and four sign
+// variants, each judged against the eye's frustum; Route B, behind
+// advanced.gaze_probe_pvr and its own crash sentinel, loads Pimax's client
+// library and reads its tracker directly, and the two are compared. The
+// ARMED lines name the driver (entry 28) for the report to the vendor.
+//
 // A dev instrument, [advanced], off by default. Read at launch only: the
 // interface request is made once, and nothing after that is worth making
 // live.
