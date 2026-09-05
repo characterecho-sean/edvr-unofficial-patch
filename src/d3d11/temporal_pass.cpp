@@ -678,13 +678,21 @@ void fovea(uint3 id : SV_DispatchThreadID) {
 )HLSL";
 
 // The steady periphery's reduction (feature 6): the render-size colour,
-// depth and motion the trained path built, boxed down to the periphery's
-// size for its own DLAA. Colour is the block's mean; depth the block's
+// depth and motion the trained path built, resampled down to the
+// periphery's size for its own DLAA. An AREA-WEIGHTED box: each reduced
+// pixel's footprint is exactly [p * ratio, (p + 1) * ratio) in render
+// pixels, and every render pixel it overlaps contributes by its overlap, so
+// the sample sits exactly where the reduced pixel's centre says it does at
+// ANY ratio. (The first build dropped a 2x2 box at floor(p * ratio), exact
+// only at a half scale; at 0.7 that put each sample up to 0.6 render pixels
+// off in a seven-pixel pattern, a real displacement of the periphery
+// against the fovea that the 2026-09-05 flight saw as a shift and, as
+// content slid across the pattern under head motion, as a lag before the
+// two agreed again.) Colour is the weighted mean; depth the footprint's
 // NEAREST (reversed-Z: the largest), which is the dilation every
 // depth-aware filter does at an edge; the motion is the vector of that
 // nearest sample, scaled into the reduced pixels, so depth and motion stay
-// the same surface's. The block is ceil(ratio) square at floor(p * ratio):
-// exact 2x2 at a half scale, a slightly wide box at other ratios.
+// the same surface's.
 constexpr char kDownCsHlsl[] = R"HLSL(
 Texture2D<float4> DC : register(t0);    // the colour, render size
 Texture2D<float>  DZ : register(t1);    // the depth copy, render size
@@ -694,24 +702,29 @@ RWTexture2D<float>  PZ : register(u1);  // the reduced depth
 RWTexture2D<float2> PM : register(u2);  // the reduced motion, reduced pixels
 cbuffer DS : register(b0) {
     float4 dims;   // x reduced width, y reduced height, z render width, w render height
-    float4 par;    // x the block side (ceil of the ratio), y the scale (reduced / render), zw unused
+    float4 par;    // x unused (was the block side), y the scale (reduced / render), zw unused
 };
 [numthreads(8, 8, 1)]
 void down(uint3 id : SV_DispatchThreadID) {
     if (id.x >= (uint)dims.x || id.y >= (uint)dims.y) return;
-    float2 q = dims.zw / dims.xy;
-    int k = max(1, min(4, (int)par.x));
-    int2 base = int2(floor(float2(id.xy) * q));
-    int2 last = int2(dims.zw) - 1;
+    float2 q = dims.zw / dims.xy;                    // render pixels per reduced pixel, > 1
+    float2 x0 = float2(id.xy) * q;                   // the footprint [x0, x1) in render pixels
+    float2 x1 = x0 + q;
+    int2 k0 = int2(floor(x0));
+    int2 k1 = min(int2(ceil(x1)), int2(dims.zw));    // exclusive
     float4 c = 0.0;
+    float wsum = 0.0;
     float zmax = -1.0;
     float2 mv = 0.0;
-    float n = 0.0;
-    [loop] for (int y = 0; y < k; ++y) {
-        [loop] for (int x = 0; x < k; ++x) {
-            int2 s = min(base + int2(x, y), last);
-            c += DC.Load(int3(s, 0));
-            n += 1.0;
+    [loop] for (int y = k0.y; y < k1.y; ++y) {
+        float wy = min((float)y + 1.0, x1.y) - max((float)y, x0.y);
+        [loop] for (int x = k0.x; x < k1.x; ++x) {
+            float wx = min((float)x + 1.0, x1.x) - max((float)x, x0.x);
+            float w = wx * wy;
+            if (w <= 0.0) continue;
+            int2 s = int2(x, y);
+            c += DC.Load(int3(s, 0)) * w;
+            wsum += w;
             float z = DZ.Load(int3(s, 0));
             if (z > zmax) {
                 zmax = z;
@@ -719,7 +732,7 @@ void down(uint3 id : SV_DispatchThreadID) {
             }
         }
     }
-    PC[id.xy] = c / n;
+    PC[id.xy] = c / max(wsum, 1e-6);
     PZ[id.xy] = max(zmax, 0.0);
     PM[id.xy] = mv * par.y;
 }
@@ -2673,7 +2686,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                                 dc[1] = static_cast<float>(rh);
                                 dc[2] = static_cast<float>(w);
                                 dc[3] = static_cast<float>(h);
-                                dc[4] = ceilf(ratio - 1e-4f);
+                                dc[4] = ceilf(ratio - 1e-4f);   // unused since the area-weighted box; kept for the layout
                                 dc[5] = static_cast<float>(rw) / static_cast<float>(w);
                                 dc[6] = 0.0f;
                                 dc[7] = 0.0f;

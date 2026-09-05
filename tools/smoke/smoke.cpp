@@ -947,21 +947,30 @@ int main(int argc, char** argv) {
                     printf("  FAIL  edvrTemporalAaFoveaDev is not exported\n");
                     rc = 1;
                 } else if (avail) {
-                    for (int steady = 1; steady >= 0; --steady) {
-                        const char* mode = steady ? "steady" : "sharp";
-                        const unsigned before = foveaDev(60.0f, 6.0f, steady, 0.5f, 1);
+                    // Three cases: the steady periphery at a half scale (an exact
+                    // 2:1 reduction), at 0.7 (a fractional ratio, the area-weighted
+                    // box's general path -- the 2026-09-05 flight ran here), and the
+                    // sharp periphery with its hand-off.
+                    const struct { int steady; float scale; const char* mode; } cases[3] = {
+                        {1, 0.5f, "steady periphery, half"},
+                        {1, 0.7f, "steady periphery, 0.7"},
+                        {0, 0.5f, "sharp periphery"}};
+                    for (int ci = 0; ci < 3; ++ci) {
+                        const int steady = cases[ci].steady;
+                        const char* mode = cases[ci].mode;
+                        const unsigned before = foveaDev(60.0f, 6.0f, steady, cases[ci].scale, 1);
                         bool okp = true;
                         for (int k = 0; k < 3 && okp; ++k) {
                             void* rp = taa(srcD, 0, nullptr, tan, tan, 0.125f * k, -0.125f * k, ident,
                                            nullptr, nullptr, 0.0f, 0.0f, 0.0f, 3, 0.9f, 1.0f, 0u, 0u,
                                            k == 0 ? (1u | 2u) : 2u);
                             char label[96];
-                            snprintf(label, sizeof(label), "fovea (%s periphery): frame %d, the centre",
+                            snprintf(label, sizeof(label), "fovea (%s): frame %d, the centre",
                                      mode, k);
                             if (!checkResolved(device, ctx, rp, label, 400, 304, 200, 152, cr, cg, cb, 4)) {
                                 okp = false;
                             }
-                            snprintf(label, sizeof(label), "fovea (%s periphery): frame %d, a corner",
+                            snprintf(label, sizeof(label), "fovea (%s): frame %d, a corner",
                                      mode, k);
                             if (okp && !checkResolved(device, ctx, rp, label, 400, 304, 6, 6, cr, cg, cb, 4)) {
                                 okp = false;
@@ -971,12 +980,12 @@ int main(int argc, char** argv) {
                         if (!okp) {
                             rc = 1;
                         } else if (after - before < 3u) {
-                            printf("  FAIL  fovea (%s periphery): the composite ran %u times over 3 frames "
+                            printf("  FAIL  fovea (%s): the composite ran %u times over 3 frames "
                                    "(expected 3: the fovea stood down or never engaged)\n",
                                    mode, after - before);
                             rc = 1;
                         } else {
-                            printf("  ok    fovea (%s periphery): 3 frames composited, the colour holds at "
+                            printf("  ok    fovea (%s): 3 frames composited, the colour holds at "
                                    "the centre and a corner\n", mode);
                         }
                     }

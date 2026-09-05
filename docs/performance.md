@@ -687,7 +687,24 @@ whole arrangement -- crop 0.32 ms, periphery about a quarter of full-frame,
 reduction and composite a fraction -- costs less than the crop-plus-own it
 replaces. The disc came from the player's own question: the eye picks out a
 straight edge and a corner at far lower contrast than a smooth radial
-gradient. Unflown as of this writing; the first flight decides the default
+gradient.
+
+**Flight 2 (2026-09-05 09:15, scale raised live to 0.7).** The disc reads
+as round. What remains: a "noticeable shift" at the seam, and a lag after
+the head stops before the fovea blends into the scene. One cause is in the
+log: at 0.7 the reduction dropped a 2x2 box at floor(p * 1.43), so each
+reduced pixel's sample sat up to 0.6 render pixels off its true position in
+a seven-pixel pattern -- exact only at a half scale, where the flight
+spent its first three seconds. That is a real displacement of the periphery
+against the fovea, and as content slides across the pattern under head
+motion NVIDIA sees per-pixel position noise, converging again only once
+the head stops. The reduction is now an area-weighted box, position-exact
+at any ratio. What cannot be removed that way is the two networks' different
+response to the same head motion at two pixel scales (half the pixel motion
+in the periphery, a box-filtered input): inherent to two instances, and
+smallest where both read the same render pixels -- the half-render variant
+(`temporal_aa = dlss` at HMD Quality 0.5), where the periphery is the render
+itself and only the network mode differs. The first flight decides the default
 scale and whether the sharp periphery keeps a purpose.
 
 **What must be measured first (Phase 0 items 15 and 16).**
