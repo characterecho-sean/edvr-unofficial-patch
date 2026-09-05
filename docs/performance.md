@@ -645,7 +645,13 @@ involved.
   a full-frame synthetic scene, a crop that moves by a known step per
   frame with the step added to the vectors, and the crop's output compared
   against the same scene evaluated at a fixed crop. A saccade is the
-  large-step case of the same test.
+  large-step case of the same test. **Measured 2026-09-04, and the design
+  holds** (Phase 0 item 16 has the numbers): with the shift in the
+  vectors a crop moving four pixels a frame converges to within a tenth
+  of a still crop's error; without it, or with the sign wrong, it is
+  ten times worse; a saccade of 200 pixels costs one frame of
+  fresh-history quality at the new place and is converged twelve frames
+  later.
 - *The seam.* A crop's edge is a boundary between NVIDIA's reconstruction
   and EDVR's, and under a saccade it moves at the tracker's latency. A
   blend band in degrees of visual angle, wide enough that the eye is never
@@ -742,7 +748,22 @@ during implementation, in the head-steer convention:
     whether feature 6's moving fovea is a uniform-vector pan (design
     holds), a reset per move (the fovea must move in steps, with a reset
     at each), or a smear (the crop stays fixed and only its size is
-    gaze-driven).
+    gaze-driven). **Measured 2026-09-04 on the RTX 5090 with DLSS
+    310.7.0: a PAN.** `dlaaCropProbe` (`src/d3d11/dlaa.cpp`, run by the
+    smoke harness): a 1280×960 scene of half-pixel lines and a
+    near-Nyquist grating, a 512×384 crop, 24 Halton-jittered frames per
+    condition from a fresh history, error = mean distance from the
+    box-filtered truth in 0..255 over the crop's interior. Still crop:
+    8.76 after one frame, 2.52 after 24. Moving 4 px/frame with the
+    shift in the vectors (previous minus current, the pass's convention):
+    2.78. Same with the sign reversed: 22.89; with the vectors at zero:
+    24.63. Saccade of 200×100 px at frame 12 with the jump in the
+    vectors: 7.09 right after, 2.97 twelve frames later. The jitter's
+    sign was checked in the same run: handing NVIDIA the content's shift
+    on screen wins (2.52 against 4.72 for the sample offset), which is
+    the convention the pass ships. Feature 6's moving fovea is therefore
+    a uniform vector, and the seam question (the blend band, a headset-on
+    judgement) is the one that remains.
 
 ## Phasing
 
@@ -756,8 +777,8 @@ during implementation, in the head-steer convention:
    of one more reason to alt-tab.
 3. **Three probes before any foveation feature** (revised 2026-09-04):
    the gaze answer on the Super (item 15, built), NVIDIA's history under a
-   moving crop (item 16), and NVAPI's capabilities on the target GPUs
-   (item 4). The first is cheapest and decides the most — whether the one
+   moving crop (item 16, measured: a pan), and NVAPI's capabilities on the
+   target GPUs (item 4). The first is cheapest and decides the most — whether the one
    headset with a tracker gets the eye-tracked versions at all — so it
    goes first, and the other two are desk work that needs no headset.
 4. **Fixed foveation (VRS)** — NVIDIA-only, rides the census classifier;

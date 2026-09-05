@@ -1,7 +1,10 @@
 #include "dlaa.h"
 
+#include <cmath>
+#include <cstdarg>
 #include <cstdio>
 #include <cstring>
+#include <vector>
 
 #include <windows.h>
 
@@ -440,6 +443,435 @@ void dlaaShutdown() {
     g_available = false;
 }
 
+// ---------------------------------------------------------------------------
+// The moving-crop probe (docs/performance.md, feature 6 and Phase 0 item 16).
+//
+// Feature 6 runs NVIDIA's model on a crop around the gaze point, and the
+// crop moves with the eyes. NVIDIA keeps its history in output space and
+// reprojects it by the motion vectors it is given, so a crop whose base
+// moved by (dx, dy) since last frame shows every pixel's content (dx, dy)
+// away from where the history holds it -- a uniform pan, which the pass
+// can fold into the vectors. Whether the runtime treats it as one, resets,
+// or smears, is decided here at the desk: a synthetic scene of fine detail
+// rendered with the pass's own kind of jitter, a crop that sits still, a
+// crop that moves a step a frame with the step in the vectors (both
+// signs), the same with the vectors at zero, and a saccade; the crop's
+// output measured against the box-filtered truth each time.
+//
+// Grey scene, so the truth is one number per pixel: a soft two-axis
+// grating with one-pixel bright lines every sixteen -- the lines are what
+// a single jittered frame gets wrong and an accumulated history gets right.
+// ---------------------------------------------------------------------------
+namespace {
+
+#ifdef EDVR_HAVE_NGX
+
+constexpr uint32_t kPW = 1280, kPH = 960;   // the frame
+constexpr uint32_t kPCW = 512, kPCH = 384;  // the crop
+constexpr uint32_t kPFrames = 24;
+constexpr uint32_t kPBorder = 24;           // the metric's interior margin
+constexpr int      kPStep = 4;              // the moving crop's step, px/frame
+
+// The scene must be one a single jittered frame gets WRONG, or the
+// history has nothing to show. A first draft drew one-pixel lines on
+// pixel boundaries, which every point sample within half a pixel of the
+// centre lands inside -- no aliasing at all, and the first frame beat the
+// converged one. So: half-pixel lines that straddle no pixel edge (a
+// point sample hits them on half the jitters and misses on the rest,
+// where the box truth is half), and a grating near Nyquist, which point
+// samples alias and the box filter attenuates.
+float probeScene(double x, double y) {
+    double v = 0.45 + 0.20 * sin(x * (6.283185307 / 23.0)) * cos(y * (6.283185307 / 17.0)) +
+               0.12 * sin(x * (6.283185307 / 2.5)) * sin(y * (6.283185307 / 3.5));
+    const double fx = x - 16.0 * floor(x / 16.0);
+    const double fy = y - 16.0 * floor(y / 16.0);
+    if ((fx >= 0.25 && fx < 0.75) || (fy >= 0.25 && fy < 0.75)) v += 0.45;
+    if (v > 1.0) v = 1.0;
+    if (v < 0.0) v = 0.0;
+    return static_cast<float>(v);
+}
+
+double probeHalton(uint32_t i, uint32_t base) {
+    double f = 1.0, r = 0.0;
+    while (i > 0) {
+        f /= base;
+        r += f * (i % base);
+        i /= base;
+    }
+    return r;
+}
+
+uint16_t probeHalf(float f) {
+    uint32_t u;
+    memcpy(&u, &f, 4);
+    const uint32_t sign = (u >> 16) & 0x8000u;
+    int32_t exp = static_cast<int32_t>((u >> 23) & 0xFF) - 127 + 15;
+    uint32_t mant = u & 0x7FFFFFu;
+    if (exp <= 0) return static_cast<uint16_t>(sign);           // flush tiny to zero
+    if (exp >= 31) return static_cast<uint16_t>(sign | 0x7C00u); // overflow to inf
+    return static_cast<uint16_t>(sign | (static_cast<uint32_t>(exp) << 10) | (mant >> 13));
+}
+
+struct ProbeReport {
+    char*    buf;
+    uint32_t cap;
+    uint32_t len = 0;
+    void line(const char* fmt, ...) {
+        if (!buf || len + 2 >= cap) return;
+        va_list ap;
+        va_start(ap, fmt);
+        const int n = vsnprintf(buf + len, cap - len, fmt, ap);
+        va_end(ap);
+        if (n < 0) return;
+        len += static_cast<uint32_t>(n);
+        if (len + 2 < cap) {
+            buf[len++] = '\n';
+            buf[len] = 0;
+        } else {
+            len = cap - 1;
+            buf[len] = 0;
+        }
+    }
+};
+
+struct ProbeRig {
+    ID3D11Device*         dev = nullptr;
+    ID3D11DeviceContext*  ctx = nullptr;
+    ID3D11Texture2D*      colour = nullptr;
+    ID3D11Texture2D*      depth = nullptr;
+    ID3D11Texture2D*      motion = nullptr;
+    ID3D11Texture2D*      output = nullptr;
+    ID3D11Texture2D*      staging = nullptr;
+    std::vector<uint8_t>  frames[kPFrames];   // grey, jittered
+    float                 jit[kPFrames][2] = {};
+    std::vector<float>    truth;
+    std::vector<uint8_t>  rgba;
+    std::vector<uint16_t> mv;
+
+    ~ProbeRig() {
+        if (colour) colour->Release();
+        if (depth) depth->Release();
+        if (motion) motion->Release();
+        if (output) output->Release();
+        if (staging) staging->Release();
+    }
+
+    bool make2D(uint32_t w, uint32_t h, DXGI_FORMAT fmt, UINT bind, const void* init,
+                UINT pitch, ID3D11Texture2D** out) {
+        D3D11_TEXTURE2D_DESC td{};
+        td.Width = w;
+        td.Height = h;
+        td.MipLevels = 1;
+        td.ArraySize = 1;
+        td.Format = fmt;
+        td.SampleDesc.Count = 1;
+        td.Usage = D3D11_USAGE_DEFAULT;
+        td.BindFlags = bind;
+        D3D11_SUBRESOURCE_DATA sd{};
+        sd.pSysMem = init;
+        sd.SysMemPitch = pitch;
+        return SUCCEEDED(dev->CreateTexture2D(&td, init ? &sd : nullptr, out)) && *out;
+    }
+
+    bool build(ProbeReport& rep) {
+        // The scene, box-filtered (4x4) for the truth; then the frames the
+        // pass would render: point samples at the pixel centre plus the
+        // frame's jitter, Halton (2,3) centred, the sequence the pass uses.
+        truth.resize(kPW * kPH);
+        for (uint32_t y = 0; y < kPH; ++y) {
+            for (uint32_t x = 0; x < kPW; ++x) {
+                double s = 0.0;
+                for (int sy = 0; sy < 4; ++sy) {
+                    for (int sx = 0; sx < 4; ++sx) {
+                        s += probeScene(x + (sx + 0.5) / 4.0, y + (sy + 0.5) / 4.0);
+                    }
+                }
+                truth[y * kPW + x] = static_cast<float>(s / 16.0);
+            }
+        }
+        for (uint32_t k = 0; k < kPFrames; ++k) {
+            jit[k][0] = static_cast<float>(probeHalton(k + 1, 2) - 0.5);
+            jit[k][1] = static_cast<float>(probeHalton(k + 1, 3) - 0.5);
+            frames[k].resize(kPW * kPH);
+            for (uint32_t y = 0; y < kPH; ++y) {
+                for (uint32_t x = 0; x < kPW; ++x) {
+                    const float v = probeScene(x + 0.5 + jit[k][0], y + 0.5 + jit[k][1]);
+                    frames[k][y * kPW + x] = static_cast<uint8_t>(v * 255.0f + 0.5f);
+                }
+            }
+        }
+        rgba.resize(kPW * kPH * 4);
+        mv.resize(kPW * kPH * 2);
+
+        std::vector<float> depthInit(kPW * kPH, 0.5f);   // reversed-Z, mid-scene
+        if (!make2D(kPW, kPH, DXGI_FORMAT_R8G8B8A8_UNORM, D3D11_BIND_SHADER_RESOURCE, nullptr, 0,
+                    &colour) ||
+            !make2D(kPW, kPH, DXGI_FORMAT_R32_FLOAT, D3D11_BIND_SHADER_RESOURCE, depthInit.data(),
+                    kPW * 4, &depth) ||
+            !make2D(kPW, kPH, DXGI_FORMAT_R16G16_FLOAT, D3D11_BIND_SHADER_RESOURCE, nullptr, 0,
+                    &motion) ||
+            !make2D(kPW, kPH, DXGI_FORMAT_R8G8B8A8_UNORM,
+                    D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS, nullptr, 0,
+                    &output)) {
+            rep.line("crop probe: could not create the frame textures");
+            return false;
+        }
+        D3D11_TEXTURE2D_DESC td{};
+        td.Width = kPCW;
+        td.Height = kPCH;
+        td.MipLevels = 1;
+        td.ArraySize = 1;
+        td.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        td.SampleDesc.Count = 1;
+        td.Usage = D3D11_USAGE_STAGING;
+        td.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        if (FAILED(dev->CreateTexture2D(&td, nullptr, &staging)) || !staging) {
+            rep.line("crop probe: could not create the readback texture");
+            return false;
+        }
+        return true;
+    }
+
+    void uploadFrame(uint32_t k) {
+        const uint8_t* g = frames[k].data();
+        for (uint32_t i = 0; i < kPW * kPH; ++i) {
+            rgba[i * 4 + 0] = g[i];
+            rgba[i * 4 + 1] = g[i];
+            rgba[i * 4 + 2] = g[i];
+            rgba[i * 4 + 3] = 255;
+        }
+        ctx->UpdateSubresource(colour, 0, nullptr, rgba.data(), kPW * 4, 0);
+    }
+
+    void uploadMotion(float mx, float my) {
+        const uint16_t hx = probeHalf(mx), hy = probeHalf(my);
+        for (uint32_t i = 0; i < kPW * kPH; ++i) {
+            mv[i * 2 + 0] = hx;
+            mv[i * 2 + 1] = hy;
+        }
+        ctx->UpdateSubresource(motion, 0, nullptr, mv.data(), kPW * 4, 0);
+    }
+
+    NVSDK_NGX_Handle* makeFeature() {
+        NVSDK_NGX_DLSS_Create_Params cp{};
+        cp.Feature.InWidth = kPCW;
+        cp.Feature.InHeight = kPCH;
+        cp.Feature.InTargetWidth = kPCW;
+        cp.Feature.InTargetHeight = kPCH;
+        cp.Feature.InPerfQualityValue = NVSDK_NGX_PerfQuality_Value_DLAA;
+        cp.InFeatureCreateFlags = NVSDK_NGX_DLSS_Feature_Flags_MVLowRes |
+                                  NVSDK_NGX_DLSS_Feature_Flags_DepthInverted;
+        cp.InEnableOutputSubrects = true;
+        NVSDK_NGX_Handle* h = nullptr;
+        const NVSDK_NGX_Result cr = NGX_D3D11_CREATE_DLSS_EXT(ctx, &h, g_params, &cp);
+        if (NVSDK_NGX_FAILED(cr)) return nullptr;
+        return h;
+    }
+
+    bool eval(NVSDK_NGX_Handle* h, uint32_t bx, uint32_t by, float jx, float jy, bool reset,
+              NVSDK_NGX_Result* err) {
+        NVSDK_NGX_D3D11_DLSS_Eval_Params ep{};
+        ep.Feature.pInColor = colour;
+        ep.Feature.pInOutput = output;
+        ep.pInDepth = depth;
+        ep.pInMotionVectors = motion;
+        ep.InJitterOffsetX = jx;
+        ep.InJitterOffsetY = jy;
+        ep.InRenderSubrectDimensions.Width = kPCW;
+        ep.InRenderSubrectDimensions.Height = kPCH;
+        ep.InReset = reset ? 1 : 0;
+        ep.InMVScaleX = 1.0f;
+        ep.InMVScaleY = 1.0f;
+        ep.InColorSubrectBase.X = bx;
+        ep.InColorSubrectBase.Y = by;
+        ep.InDepthSubrectBase.X = bx;
+        ep.InDepthSubrectBase.Y = by;
+        ep.InMVSubrectBase.X = bx;
+        ep.InMVSubrectBase.Y = by;
+        ep.InOutputSubrectBase.X = bx;
+        ep.InOutputSubrectBase.Y = by;
+        ep.InPreExposure = 1.0f;
+        ep.InExposureScale = 1.0f;
+        ep.InFrameTimeDeltaInMsec = 11.1f;
+        const NVSDK_NGX_Result er = NGX_D3D11_EVALUATE_DLSS_EXT(ctx, h, g_params, &ep);
+        if (err) *err = er;
+        return !NVSDK_NGX_FAILED(er);
+    }
+
+    // Mean absolute error of the crop's interior against the truth, in
+    // 0..255 units. -1 when the readback fails.
+    double measure(uint32_t bx, uint32_t by) {
+        D3D11_BOX box{bx, by, 0, bx + kPCW, by + kPCH, 1};
+        ctx->CopySubresourceRegion(staging, 0, 0, 0, 0, output, 0, &box);
+        D3D11_MAPPED_SUBRESOURCE m{};
+        if (FAILED(ctx->Map(staging, 0, D3D11_MAP_READ, 0, &m))) return -1.0;
+        double sum = 0.0;
+        uint32_t n = 0;
+        for (uint32_t y = kPBorder; y < kPCH - kPBorder; ++y) {
+            const uint8_t* row = static_cast<const uint8_t*>(m.pData) + y * m.RowPitch;
+            for (uint32_t x = kPBorder; x < kPCW - kPBorder; ++x) {
+                const double got = row[x * 4] / 255.0;
+                const double want = truth[(by + y) * kPW + (bx + x)];
+                sum += fabs(got - want);
+                ++n;
+            }
+        }
+        ctx->Unmap(staging, 0);
+        return n ? 255.0 * sum / n : -1.0;
+    }
+
+    // One condition: 24 frames from a fresh history. The crop's base
+    // follows `moving` (kPStep a frame in x) and `saccade` (a jump at
+    // frame 12); the vectors carry mvSign times the base's shift, in the
+    // pass's own convention (previous minus current, pixels); the jitter
+    // handed to NVIDIA is jSign times the offset the frame was sampled at
+    // (+1 the sample offset, -1 the content's shift on screen). Errors
+    // after the first frame, right after the jump (saccade only) and at
+    // the end.
+    bool run(bool moving, bool saccade, int mvSign, float jSign, double* eFirst,
+             double* eJump, double* eEnd, ProbeReport& rep, const char* name) {
+        NVSDK_NGX_Handle* h = makeFeature();
+        if (!h) {
+            rep.line("crop probe: %s -- the crop feature would not be created (output "
+                     "sub-rectangles enabled)", name);
+            return false;
+        }
+        uint32_t bx = moving ? 320u : 384u, by = 288u;
+        uint32_t prevX = bx, prevY = by;
+        *eFirst = *eJump = *eEnd = -1.0;
+        float lastMx = 0.0f, lastMy = 0.0f;
+        bool motionSet = false;
+        bool ok = true;
+        for (uint32_t k = 0; k < kPFrames && ok; ++k) {
+            if (moving) bx = 320u + static_cast<uint32_t>(kPStep) * k;
+            if (saccade && k == 12) {
+                bx += 200u;
+                by += 100u;
+            }
+            const float dx = static_cast<float>(static_cast<int>(bx) - static_cast<int>(prevX));
+            const float dy = static_cast<float>(static_cast<int>(by) - static_cast<int>(prevY));
+            const float mx = mvSign * dx, my = mvSign * dy;
+            if (!motionSet || mx != lastMx || my != lastMy) {
+                uploadMotion(mx, my);
+                lastMx = mx;
+                lastMy = my;
+                motionSet = true;
+            }
+            uploadFrame(k);
+            NVSDK_NGX_Result er = NVSDK_NGX_Result_Success;
+            ok = eval(h, bx, by, jSign * jit[k][0], jSign * jit[k][1], k == 0, &er);
+            if (!ok) {
+                rep.line("crop probe: %s -- frame %u refused: %s (0x%08X)", name, k,
+                         ngxResultName(er), static_cast<unsigned>(er));
+                break;
+            }
+            if (k == 0) *eFirst = measure(bx, by);
+            if (saccade && k == 12) *eJump = measure(bx, by);
+            prevX = bx;
+            prevY = by;
+        }
+        if (ok) *eEnd = measure(bx, by);
+        NVSDK_NGX_D3D11_ReleaseFeature(h);
+        return ok;
+    }
+};
+
+#endif  // EDVR_HAVE_NGX
+
+}  // namespace
+
+int dlaaCropProbe(ID3D11Device* dev, ID3D11DeviceContext* ctx, char* report,
+                  uint32_t reportBytes) {
+    ProbeReport rep{report, reportBytes};
+    if (report && reportBytes) report[0] = 0;
+#ifndef EDVR_HAVE_NGX
+    (void)dev; (void)ctx;
+    rep.line("crop probe: this build has no DLSS SDK in it");
+    return 0;
+#else
+    const char* why = nullptr;
+    if (!dev || !ctx || !dlaaAvailable(dev, &why)) {
+        rep.line("crop probe: DLAA is not available here (%s)", why ? why : "no device");
+        return 0;
+    }
+    ProbeRig rig;
+    rig.dev = dev;
+    rig.ctx = ctx;
+    if (!rig.build(rep)) return 0;
+    rep.line("crop probe: a %ux%u frame, a %ux%u crop (%.0f%% of the pixels), %u frames per "
+             "condition from a fresh history, Halton (2,3) jitter; error = mean |output - "
+             "truth| over the crop's interior, 0..255",
+             kPW, kPH, kPCW, kPCH, 100.0 * kPCW * kPCH / (kPW * kPH), kPFrames);
+
+    double f1, j1, e1;   // still crop, jitter +
+    double f2, j2, e2;   // still crop, jitter -
+    if (!rig.run(false, false, 0, +1.0f, &f1, &j1, &e1, rep, "still crop, jitter +")) return 0;
+    if (!rig.run(false, false, 0, -1.0f, &f2, &j2, &e2, rep, "still crop, jitter -")) return 0;
+    const float jSign = (e2 < e1) ? -1.0f : +1.0f;
+    // A frame sampled at x + j shows its content moved by -j, so handing
+    // over -j hands over the content's shift on screen -- the convention
+    // the conventions rig found NVIDIA expects and the pass ships ("as
+    // passed" there is content right by jx). +j is the sample offset.
+    rep.line("  still crop, jitter handed over as the sample offset:   first frame %.2f, "
+             "after %u frames %.2f", f1, kPFrames, e1);
+    rep.line("  still crop, jitter handed over as the content's shift: first frame %.2f, "
+             "after %u frames %.2f   <- %s", f2, kPFrames, e2,
+             jSign < 0 ? "WINS; the content's shift is NVIDIA's convention, and the pass's own"
+                       : "loses; the SAMPLE OFFSET won, which contradicts the pass's convention");
+    const double eSteady = jSign > 0 ? e1 : e2;
+    const double eFirst = jSign > 0 ? f1 : f2;
+
+    double mf, mj, mPlus, mMinus, mZero;
+    if (!rig.run(true, false, +1, jSign, &mf, &mj, &mPlus, rep, "moving crop, vectors +")) return 0;
+    if (!rig.run(true, false, -1, jSign, &mf, &mj, &mMinus, rep, "moving crop, vectors -")) return 0;
+    if (!rig.run(true, false, 0, jSign, &mf, &mj, &mZero, rep, "moving crop, vectors 0")) return 0;
+    rep.line("  moving crop, %d px/frame, vectors carry +shift: after %u frames %.2f", kPStep,
+             kPFrames, mPlus);
+    rep.line("  moving crop, %d px/frame, vectors carry -shift: after %u frames %.2f", kPStep,
+             kPFrames, mMinus);
+    rep.line("  moving crop, %d px/frame, vectors zero:         after %u frames %.2f", kPStep,
+             kPFrames, mZero);
+    const int mvSign = (mMinus < mPlus) ? -1 : +1;
+    const double eMove = (mvSign < 0) ? mMinus : mPlus;
+
+    double sf, sj, se;
+    if (!rig.run(false, true, mvSign, jSign, &sf, &sj, &se, rep, "saccade")) return 0;
+    rep.line("  saccade of 200x100 px at frame 12, vectors carry it (%s): right after %.2f, "
+             "12 frames later %.2f", mvSign < 0 ? "-shift" : "+shift", sj, se);
+
+    // Where the moved crop's error sits between a fresh history (first
+    // frame) and a converged still one: near 0 is a pan, near 1 a reset
+    // per move, beyond it a smear.
+    const double span = eFirst - eSteady;
+    if (span <= 0.5) {
+        rep.line("  verdict: NOT MEASURABLE -- the still crop's history did not beat its own "
+                 "first frame (%.2f vs %.2f), so the scene gave the history nothing to fix "
+                 "and a moved crop cannot be placed against it. The moved crop's error was "
+                 "%.2f with the shift in the vectors, %.2f without.",
+                 eSteady, eFirst, eMove, mZero);
+        return 4;
+    }
+    const double r = (eMove - eSteady) / span;
+    int verdict;
+    const char* word;
+    if (r < 0.35) {
+        verdict = 1;
+        word = "PAN -- a moved crop with the shift in the vectors converges like a still one";
+    } else if (r < 1.5) {
+        verdict = 2;
+        word = "RESET-LIKE -- a moved crop converges like a fresh history each move";
+    } else {
+        verdict = 3;
+        word = "SMEAR -- a moved crop is worse than a fresh history";
+    }
+    rep.line("  verdict: %s (r = %.2f: 0 = still crop's %.2f, 1 = first frame's %.2f; the "
+             "vectors' sign that wins is %s, the pass's own convention is previous minus "
+             "current)",
+             word, r, eSteady, eFirst, mvSign < 0 ? "-shift" : "+shift");
+    return verdict;
+#endif
+}
+
 }  // namespace edvr
 
 // For tools/smoke: is DLAA usable on this device, and if not, why.
@@ -457,4 +889,12 @@ extern "C" __declspec(dllexport) int edvrDlaaCounts(unsigned* evaluations, unsig
     if (evaluations) *evaluations = e;
     if (resets) *resets = r;
     return 1;
+}
+
+// For tools/smoke: the moving-crop probe (dlaa.h). The verdict comes back
+// and the report is written for the harness to print.
+extern "C" __declspec(dllexport) int edvrDlaaCropProbe(void* device, void* context, char* report,
+                                                       unsigned reportBytes) {
+    return edvr::dlaaCropProbe(static_cast<ID3D11Device*>(device),
+                               static_cast<ID3D11DeviceContext*>(context), report, reportBytes);
 }

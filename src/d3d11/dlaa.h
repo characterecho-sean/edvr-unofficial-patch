@@ -61,4 +61,18 @@ bool dlaaTotals(uint32_t* evaluations, double* avgMs, double* maxMs,
 
 void dlaaShutdown();
 
+// The moving-crop probe (docs/performance.md, feature 6 and Phase 0 item
+// 16), a desk experiment for the smoke harness: does NVIDIA's history
+// survive a crop that moves with the gaze when the shift is folded into
+// the motion vectors? Runs a synthetic scene through DLAA on a 512x384
+// crop of a 1280x960 frame under six conditions and writes a multi-line
+// report into `report`. Returns 1 when a moved crop converges like a
+// still one (a pan), 2 when it converges like a fresh history (a reset
+// per move), 3 when it is worse than a fresh history (a smear), 4 when
+// the scene did not discriminate (the still crop's history did not beat
+// its first frame, so nothing can be placed against it), 0 when the
+// probe could not run (the report says why).
+int dlaaCropProbe(ID3D11Device* dev, ID3D11DeviceContext* ctx, char* report,
+                  uint32_t reportBytes);
+
 }  // namespace edvr

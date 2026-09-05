@@ -872,6 +872,38 @@ int main(int argc, char** argv) {
                 } else {
                     printf("  skip  dlaa: the reset count needs the runtime\n");
                 }
+
+                // The moving-crop probe (docs/performance.md, feature 6 and
+                // Phase 0 item 16): whether NVIDIA's history survives a crop
+                // that moves with the gaze once the shift is in the vectors.
+                // Any verdict is a finding, printed; only a probe that could
+                // not run on a machine where DLAA is available is a failure.
+                typedef int (*PFN_CropProbe)(void*, void*, char*, unsigned);
+                PFN_CropProbe cropProbe =
+                    reinterpret_cast<PFN_CropProbe>(GetProcAddress(mod, "edvrDlaaCropProbe"));
+                if (!cropProbe) {
+                    printf("  FAIL  edvrDlaaCropProbe is not exported\n");
+                    rc = 1;
+                } else if (avail) {
+                    static char report[4096];
+                    const int verdict = cropProbe(device, ctx, report, sizeof(report));
+                    char* line = report;
+                    while (line && *line) {
+                        char* nl = strchr(line, '\n');
+                        if (nl) *nl = 0;
+                        printf("  info  %s\n", line);
+                        line = nl ? nl + 1 : nullptr;
+                    }
+                    if (verdict == 0) {
+                        printf("  FAIL  dlaa: the moving-crop probe could not run\n");
+                        rc = 1;
+                    } else {
+                        printf("  ok    dlaa: the moving-crop probe ran (verdict %d: 1 pan, 2 "
+                               "reset-like, 3 smear, 4 not measurable)\n", verdict);
+                    }
+                } else {
+                    printf("  skip  dlaa: the moving-crop probe needs the runtime\n");
+                }
                 srcD->Release();
 
                 // The NGX conventions rig (the review of 2026-09-04: F5, and
