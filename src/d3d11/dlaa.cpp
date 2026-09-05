@@ -1179,8 +1179,7 @@ constexpr uint32_t kMCW = 512, kMCH = 384;     // the crop
 constexpr uint32_t kMBorder = 24;              // the metric's interior margin
 constexpr uint32_t kMFrames = 36;
 constexpr uint32_t kMMoving = 18;              // frames 1..18 pan, 19..35 stand still
-constexpr int      kMV = 6;                    // the pan, px/frame at full size (even: 3 at half)
-constexpr uint32_t kMExtra = kMV * kMMoving;   // the scene's extra width for the pan
+constexpr int      kMV = 6;                    // the default pan, px/frame at full size (even: 3 at half)
 
 struct MotionRig {
     ID3D11Device*        dev = nullptr;
@@ -1197,6 +1196,7 @@ struct MotionRig {
     std::vector<float>    truthH;              // ...and its 2x2 mean, half size
     std::vector<uint8_t>  rgba;
     std::vector<uint16_t> mv;
+    int                   pan = kMV;             // px/frame at full size; even, so the half frame moves a whole pixel
 
     ~MotionRig() {
         ID3D11Texture2D* all[10] = {colour, depth, motion, output, staging,
@@ -1204,7 +1204,8 @@ struct MotionRig {
         for (auto* t : all) if (t) t->Release();
     }
 
-    static uint32_t shiftAt(uint32_t k) { return static_cast<uint32_t>(kMV) * (k < kMMoving ? k : kMMoving); }
+    uint32_t extra() const { return static_cast<uint32_t>(pan) * kMMoving; }   // the scene's extra width for the pan
+    uint32_t shiftAt(uint32_t k) const { return static_cast<uint32_t>(pan) * (k < kMMoving ? k : kMMoving); }
 
     bool make2D(uint32_t w, uint32_t h, DXGI_FORMAT fmt, UINT bind, const void* init, UINT pitch,
                 ID3D11Texture2D** out) {
@@ -1240,7 +1241,7 @@ struct MotionRig {
         // The scene's truth over the width the pan sweeps, box-filtered 4x4,
         // and its half-size mean. Frame k shows scene column x + shift(k) at
         // screen column x, so one static truth serves every frame.
-        const uint32_t tw = kMW + kMExtra;
+        const uint32_t tw = kMW + extra();
         truthF.resize(static_cast<size_t>(tw) * kMH);
         for (uint32_t y = 0; y < kMH; ++y) {
             for (uint32_t x = 0; x < tw; ++x) {
@@ -1422,7 +1423,7 @@ struct MotionRig {
         const bool half = mode == 2;
         const uint32_t d = half ? 2u : 1u;
         const uint32_t bx = kMCX / d, by = kMCY / d, cw = kMCW / d, ch = kMCH / d, bd = kMBorder / d;
-        const uint32_t tw = (kMW + kMExtra) / d;
+        const uint32_t tw = (kMW + extra()) / d;
         const uint32_t shift = static_cast<uint32_t>(static_cast<int>(shiftAt(k) / d) + sx);
         const std::vector<float>& truth = half ? truthH : truthF;
         ID3D11Texture2D* stg = half ? stagingH : staging;
@@ -1465,7 +1466,9 @@ struct MotionRig {
         const bool half = mode >= 2;   // half-size inputs: half the pan
         double lagSum = 0.0;
         uint32_t lagN = 0;
-        const float v = half ? kMV * 0.5f : static_cast<float>(kMV);
+        const int R = (half ? pan / 4 : pan / 2) + 3;   // the lag search, in the series' pixels
+        std::vector<double> es(static_cast<size_t>(2 * R + 1));
+        const float v = half ? pan * 0.5f : static_cast<float>(pan);
         // The box-reduced frame carries half the full frame's jitter; the
         // point-sampled one has its own, in its own pixels.
         const float js = mode == 2 ? 0.5f * jSign : jSign;
@@ -1488,15 +1491,15 @@ struct MotionRig {
             }
             err[k] = measure(mode, k);
             if (lagOut && k >= 8 && k <= kMMoving - 1) {
-                double e[7];
-                int best = 3;
-                for (int s = -3; s <= 3; ++s) {
-                    e[s + 3] = measure(mode, k, s);
-                    if (e[s + 3] >= 0.0 && e[s + 3] < e[best]) best = s + 3;
+                int best = R;
+                for (int s = -R; s <= R; ++s) {
+                    es[static_cast<size_t>(s + R)] = measure(mode, k, s);
+                    if (es[static_cast<size_t>(s + R)] >= 0.0 && es[static_cast<size_t>(s + R)] < es[static_cast<size_t>(best)]) best = s + R;
                 }
-                double sx = static_cast<double>(best - 3);
-                if (best > 0 && best < 6) {
-                    const double a = e[best - 1], b = e[best], c = e[best + 1];
+                double sx = static_cast<double>(best - R);
+                if (best > 0 && best < 2 * R) {
+                    const double a = es[static_cast<size_t>(best - 1)], b = es[static_cast<size_t>(best)],
+                                 c = es[static_cast<size_t>(best + 1)];
                     const double den = a - 2.0 * b + c;
                     if (den > 1e-9) sx += 0.5 * (a - c) / den;
                 }
@@ -1549,7 +1552,7 @@ int dlaaMotionProbe(ID3D11Device* dev, ID3D11DeviceContext* ctx, char* report,
     rep.line("motion probe: a %ux%u frame panning %d px/frame for frames 1..%u, still after; "
              "error = mean |output - truth| over the %ux%u crop's interior at (%u,%u), 0..255; "
              "the half-size series is measured against its own half-size truth",
-             kMW, kMH, kMV, kMMoving, kMCW, kMCH, kMCX, kMCY);
+             kMW, kMH, rig.pan, kMMoving, kMCW, kMCH, kMCX, kMCY);
 
     // The signs, decided by the full frame itself: the vectors' sign that
     // converges better under the pan, then the jitter's if the rest error
@@ -1646,14 +1649,27 @@ int dlaaMotionProbe(ID3D11Device* dev, ID3D11DeviceContext* ctx, char* report,
                                        {5, "E (CNN, deprecated)"}, {6, "F (CNN, deprecated)"}};
     const PresetCase perfPresets[5] = {{0, "default (M)"}, {11, "K"}, {10, "J"}, {13, "M"}, {12, "L"}};
     rep.line("  presets, full-frame DLAA -- pan 8-17 / first still 19-21 / rest 28-35 / softening / "
-             "first frame:");
+             "first frame / lag (frames):");
     for (const PresetCase& pc : dlaaPresets) {
         double e[kMFrames];
         for (double& v : e) v = -1.0;
-        if (rig.run(0, mvSign, jSign, e, rep, pc.name, pc.id)) {
+        double lg = 0.0;
+        if (rig.run(0, mvSign, jSign, e, rep, pc.name, pc.id, 11.1f, &lg)) {
             const double pm = motionMean(e, 8, kMMoving - 1), pe = motionMean(e, 19, 21), pr = motionMean(e, 28, 35);
-            rep.line("    %-22s %.2f / %.2f / %.2f / %.2fx / %.2f", pc.name, pm, pe, pr,
-                     pr > 0.0 ? pm / pr : 0.0, e[0]);
+            rep.line("    %-22s %.2f / %.2f / %.2f / %.2fx / %.2f / %.2f", pc.name, pm, pe, pr,
+                     pr > 0.0 ? pm / pr : 0.0, e[0], lg);
+        }
+    }
+    rep.line("  presets, half-size DLAA (the steady periphery), its own truth -- pan / first still / rest / "
+             "softening / first frame / lag (frames):");
+    for (const PresetCase& pc : dlaaPresets) {
+        double e[kMFrames];
+        for (double& v : e) v = -1.0;
+        double lg = 0.0;
+        if (rig.run(2, mvSign, jSign, e, rep, pc.name, pc.id, 11.1f, &lg)) {
+            const double pm = motionMean(e, 8, kMMoving - 1), pe = motionMean(e, 19, 21), pr = motionMean(e, 28, 35);
+            rep.line("    %-22s %.2f / %.2f / %.2f / %.2fx / %.2f / %.2f", pc.name, pm, pe, pr,
+                     pr > 0.0 ? pm / pr : 0.0, e[0], lg);
         }
     }
     rep.line("  frame delta told to the model, full-frame DLAA, default preset -- pan / first still / "
@@ -1672,17 +1688,57 @@ int dlaaMotionProbe(ID3D11Device* dev, ID3D11DeviceContext* ctx, char* report,
         }
     }
     rep.line("  presets, DLSS Performance 2x from a half-size POINT-SAMPLED frame (the dlss fovea's input "
-             "and mode), against the full-size truth:");
+             "and mode), against the full-size truth -- pan / first still / rest / softening / first frame / "
+             "lag (frames):");
     for (const PresetCase& pc : perfPresets) {
         double e[kMFrames];
         for (double& v : e) v = -1.0;
-        if (rig.run(3, mvSign, jSign, e, rep, pc.name, pc.id)) {
+        double lg = 0.0;
+        if (rig.run(3, mvSign, jSign, e, rep, pc.name, pc.id, 11.1f, &lg)) {
             const double pm = motionMean(e, 8, kMMoving - 1), pe = motionMean(e, 19, 21), pr = motionMean(e, 28, 35);
-            rep.line("    %-22s %.2f / %.2f / %.2f / %.2fx / %.2f", pc.name, pm, pe, pr,
-                     pr > 0.0 ? pm / pr : 0.0, e[0]);
+            rep.line("    %-22s %.2f / %.2f / %.2f / %.2fx / %.2f / %.2f", pc.name, pm, pe, pr,
+                     pr > 0.0 ? pm / pr : 0.0, e[0], lg);
         }
     }
     applyPresetHints();   // the sweep's hints off the shared block; the configured ones back
+
+    // The FAST pan. A rapid nod moves content a hundred pixels a frame and
+    // more at 4336 wide; 24 px a frame here is the same fraction of the
+    // frame. Each layer's softening and lag at that speed, and the fovea's
+    // upscaling mode under K and under L (the sweep found L softening least
+    // under the slow pan).
+    {
+        MotionRig fast;
+        fast.dev = dev;
+        fast.ctx = ctx;
+        fast.pan = 24;
+        if (fast.build(rep)) {
+            double fF[kMFrames], fC[kMFrames], fH[kMFrames], fP[kMFrames], fPL[kMFrames];
+            double lF = 0.0, lC = 0.0, lH = 0.0, lP = 0.0, lPL = 0.0;
+            const bool okF = fast.run(0, mvSign, jSign, fF, rep, "fast pan, full-frame DLAA", 11, 11.1f, &lF);
+            const bool okC = fast.run(1, mvSign, jSign, fC, rep, "fast pan, fovea crop DLAA", 11, 11.1f, &lC);
+            const bool okH = fast.run(2, mvSign, jSign, fH, rep, "fast pan, half-size DLAA", 11, 11.1f, &lH);
+            const bool okP = fast.run(3, mvSign, jSign, fP, rep, "fast pan, Perf 2x full (K)", 11, 11.1f, &lP);
+            const bool okPL = fast.run(3, mvSign, jSign, fPL, rep, "fast pan, Perf 2x full (L)", 12, 11.1f, &lPL);
+            applyPresetHints();
+            rep.line("  FAST pan, %d px/frame (a rapid nod's speed) -- pan 8-17 / first still 19-21 / rest 28-35 / "
+                     "softening / first frame / lag (frames):", fast.pan);
+            auto row = [&](const char* name, const double* e, double lg, bool ok) {
+                if (!ok) {
+                    rep.line("    %-30s not run", name);
+                    return;
+                }
+                const double pm = motionMean(e, 8, kMMoving - 1), pe = motionMean(e, 19, 21), pr = motionMean(e, 28, 35);
+                rep.line("    %-30s %.2f / %.2f / %.2f / %.2fx / %.2f / %.2f", name, pm, pe, pr,
+                         pr > 0.0 ? pm / pr : 0.0, e[0], lg);
+            };
+            row("full-frame DLAA (K)", fF, lF, okF);
+            row("fovea crop DLAA (K)", fC, lC, okC);
+            row("half-size DLAA (K), own truth", fH, lH, okH);
+            row("Perf 2x full (K)", fP, lP, okP);
+            row("Perf 2x full (L)", fPL, lPL, okPL);
+        }
+    }
 
     if (fullRest < 0.0 || fullRest >= full[0] * 0.9) {
         rep.line("  verdict: NOT MEASURABLE -- the full frame's rest error (%.2f) did not beat its "

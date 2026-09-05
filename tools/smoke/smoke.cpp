@@ -918,7 +918,7 @@ int main(int argc, char** argv) {
                     printf("  FAIL  edvrDlaaMotionProbe is not exported\n");
                     rc = 1;
                 } else if (avail) {
-                    static char report2[12288];
+                    static char report2[16384];
                     const int verdict2 = motionProbe(device, ctx, report2, sizeof(report2));
                     char* line2 = report2;
                     while (line2 && *line2) {
