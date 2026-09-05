@@ -779,7 +779,44 @@ during implementation, in the head-steer convention:
     prints where the head sits in standing space and what that point
     would project to; a match closes the case, and the finding then
     belongs to Valve or Pimax, since no consumer of the NDC can undo a
-    projection whose depth it does not know.
+    projection whose depth it does not know. **Flights 3 and 4,
+    2026-09-05: neither room frame is it, and the value is not usable
+    gaze.** The runtime's standing space is itself uncalibrated on this rig
+    (the head reads 5 m below and behind the standing origin — no SteamVR
+    room setup for a headset that does its own tracking), and the raw
+    universe came back identical to it (raw-to-standing was the identity
+    transform), so both candidate frames collapsed to one and neither
+    projects in front. The decisive test was translation: standing and
+    stepping half a metre to the right moved the reported centre by about
+    7° of yaw and it *held* at the new value, when a genuine gaze direction
+    is invariant to where the head is. Combined with the earlier flights —
+    frozen but still "valid" with the eyes shut, ~5° of swing for a full
+    eye sweep, ~9° dragged the *same* way as a 50° head turn — every input
+    produces a small, damped, sometimes physically backwards response
+    around a large fixed offset (37° right, 55° up, just past the frame's
+    top-right corner). That is not a gaze vector in any frame a client can
+    read; it is a mis-framed, heavily damped value the driver flags valid.
+
+    **Why, and what it means for the plan.** Pimax runs its own dynamic
+    foveated rendering inside Pimax Play at the runtime level, so its
+    SteamVR driver has never needed to expose true head-relative gaze
+    through OpenVR's client API — a third-party shim existed precisely to
+    add eye-tracking to Pimax's SteamVR driver for apps that want the
+    standard gaze path. `GetEyeTrackedFoveationCenter` answering `true`
+    with a damped, mis-framed constant is consistent with that: the API is
+    served but not fed real gaze in the frame the header promises. So
+    **feature 3's eye-tracked centre is blocked on this driver**, not on
+    EDVR — there is no transform a client can apply to recover a gaze
+    direction from what comes back. The probe stays in the tree
+    (`advanced.gaze_probe`) to re-answer the question the instant a driver,
+    a Pimax Play update, or a shim changes it, and to check other headsets.
+    Everything downstream proceeds on the **fixed centre**, which needs no
+    tracker and helps every headset: features 2 and 6 build and measure on
+    the straight-ahead point on both field rigs. One wrinkle to hold for
+    feature 2: on the Pimax, its own DFR already coarsens the periphery, so
+    EDVR's VRS there would overlap it; feature 6 (the DLSS crop, which cuts
+    NVIDIA's pass cost, not the game's shading) is additive regardless and
+    is the one to build first.
 16. **NVIDIA's history under a moving crop.** The smoke harness test
     described under feature 6: a synthetic full-frame scene, a crop that
     moves a known step per frame with the step folded into the motion
