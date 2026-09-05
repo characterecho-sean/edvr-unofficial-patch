@@ -558,6 +558,37 @@ void main(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
 }
 )HLSL";
 
+// The fovea composite (docs/performance.md feature 6), its own tiny shader
+// so its resource registers do not collide with the pass's above. NVIDIA
+// ran on a crop of the frame -- the fovea -- and the periphery is the own
+// history; this blends the two, full NVIDIA inside the crop, easing to the
+// periphery over the last `band` pixels before the crop's edge so the seam
+// is never a hard line. Outside the crop NVIDIA wrote nothing, and the
+// weight is zero there, so its texture is read only where it is valid.
+constexpr char kFoveaCsHlsl[] = R"HLSL(
+Texture2D<float4> PERIPH : register(t0);   // the own-history full frame
+Texture2D<float4> FOVEA  : register(t1);   // NVIDIA's output, valid in the crop
+RWTexture2D<float4> FO   : register(u0);   // the composited full frame, game format
+cbuffer FC : register(b0) {
+    float4 crop;   // x0 y0 x1 y1 in pixels, x1/y1 exclusive
+    float4 band;   // x the blend band in pixels; y width, z height; w unused
+};
+[numthreads(8, 8, 1)]
+void fovea(uint3 id : SV_DispatchThreadID) {
+    if (id.x >= (uint)band.y || id.y >= (uint)band.z) return;
+    int2 p = int2(id.xy);
+    float dx = min((float)p.x - crop.x, crop.z - 1.0 - (float)p.x);
+    float dy = min((float)p.y - crop.y, crop.w - 1.0 - (float)p.y);
+    float d = min(dx, dy);                 // pixels inside the crop's nearest edge
+    float b = max(band.x, 1.0);
+    float w = saturate(d / b);
+    w = w * w * (3.0 - 2.0 * w);           // smoothstep across the band
+    float4 per = PERIPH.Load(int3(p, 0));
+    float4 fov = w > 0.0 ? FOVEA.Load(int3(p, 0)) : per;
+    FO[p] = lerp(per, fov, w);
+}
+)HLSL";
+
 // The cbuffer above, laid out to match: 416 bytes, twenty-six 16-byte rows.
 struct PassParams {
     int32_t region[4];
@@ -655,6 +686,7 @@ struct EyeState {
     ID3D11UnorderedAccessView* dlDepthUav = nullptr;
     ID3D11Texture2D*           dlOut = nullptr;
     ID3D11UnorderedAccessView* dlOutUav = nullptr;   // the debug motion view paints here
+    ID3D11ShaderResourceView*  dlOutSrv = nullptr;   // the fovea composite reads NVIDIA's crop through this
     ID3D11Texture2D*           dlSubmit = nullptr;  // NVIDIA's frame copied into the game's own format: what goes out
     uint32_t                   dlW = 0, dlH = 0;
     uint32_t                   dlOutW = 0, dlOutH = 0;
@@ -685,6 +717,15 @@ struct EyeState {
 
     ID3D11Texture2D*           outTex = nullptr;
     ID3D11UnorderedAccessView* outUav = nullptr;
+    ID3D11ShaderResourceView*  outSrv = nullptr;    // the fovea composite reads the own-history periphery through this
+
+    // The fovea composite (docs/performance.md feature 6): the full frame
+    // with NVIDIA's crop blended over the own-history periphery, in the
+    // game's own format, and the crop's own NVIDIA history flag.
+    ID3D11Texture2D*           foveaOut = nullptr;
+    ID3D11UnorderedAccessView* foveaOutUav = nullptr;
+    uint32_t                   foveaW = 0, foveaH = 0;
+    bool                       foveaHaveHistory = false;
 
     uint32_t    w = 0, h = 0;
     DXGI_FORMAT outFmt = DXGI_FORMAT_UNKNOWN;
@@ -707,6 +748,7 @@ void releaseDl(EyeState& e) {
     if (e.dlMv) { e.dlMv->Release(); e.dlMv = nullptr; }
     if (e.dlDepth) { e.dlDepth->Release(); e.dlDepth = nullptr; }
     if (e.dlOutUav) { e.dlOutUav->Release(); e.dlOutUav = nullptr; }
+    if (e.dlOutSrv) { e.dlOutSrv->Release(); e.dlOutSrv = nullptr; }
     if (e.dlOut) { e.dlOut->Release(); e.dlOut = nullptr; }
     if (e.dlSubmit) { e.dlSubmit->Release(); e.dlSubmit = nullptr; }
     e.dlW = e.dlH = 0;
@@ -727,7 +769,12 @@ void releaseOwned(EyeState& e) {
         if (e.hist[i]) { e.hist[i]->Release(); e.hist[i] = nullptr; }
     }
     if (e.outUav) { e.outUav->Release(); e.outUav = nullptr; }
+    if (e.outSrv) { e.outSrv->Release(); e.outSrv = nullptr; }
     if (e.outTex) { e.outTex->Release(); e.outTex = nullptr; }
+    if (e.foveaOutUav) { e.foveaOutUav->Release(); e.foveaOutUav = nullptr; }
+    if (e.foveaOut) { e.foveaOut->Release(); e.foveaOut = nullptr; }
+    e.foveaW = e.foveaH = 0;
+    e.foveaHaveHistory = false;
     e.w = e.h = 0;
     e.outFmt = e.histFmt = DXGI_FORMAT_UNKNOWN;
     e.haveHistory = false;
@@ -981,6 +1028,12 @@ ID3D11ComputeShader*       g_cs = nullptr;
 bool                       g_csTried = false;
 ID3D11ComputeShader*       g_csMv = nullptr;     // the motion-vector entry, for DLAA
 bool                       g_csMvTried = false;
+ID3D11ComputeShader*       g_csFovea = nullptr;  // the fovea composite (feature 6)
+bool                       g_csFoveaTried = false;
+ID3D11Buffer*              g_foveaCb = nullptr;   // its crop and edge band
+bool                       g_foveaNoted = false;
+bool                       g_foveaFailNoted = false;
+uint32_t                   g_foveaTreats = 0;
 bool                       g_dlaaNoted = false;
 bool                       g_dlssNoted = false;
 bool                       g_dlaaFailNoted = false;
@@ -1010,6 +1063,8 @@ float    g_historyC = 0.5f;        // advanced.temporal_aa_history_sharp: the cu
 float    g_shipMetres = 100.0f;    // advanced.temporal_aa_ship_metres: the world/ship split (0 off)
 int      g_debugMode = 0;          // advanced.temporal_aa_debug: 0 off, 1 motion, 2 error, 3 depth
 float    g_menuMetres = 0.0f;      // advanced.temporal_aa_menu_metres: a depth for depthless pixels in a menu-like scene
+float    g_foveaDeg = 0.0f;        // advanced.temporal_aa_fovea: NVIDIA runs on a crop this many degrees across; 0 = whole frame
+float    g_foveaEdgeDeg = 6.0f;    // advanced.temporal_aa_fovea_edge: the blend band, in degrees
 int      g_rowsFollow = 0;         // +1 a frame the rows turn with the head, -4 a frame they do not; the world path needs >= 0
 bool     g_rowsFollowNoted = false;
 bool     g_warmNoted = false;
@@ -1374,6 +1429,21 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         ok = SUCCEEDED(dev->CreateBuffer(&bd, nullptr, &g_cb));
         if (!ok) failOnce("the parameter buffer could not be created");
     }
+    if (ok && !g_foveaCb) {
+        // Two float4s: the crop rectangle and the blend band. Created here
+        // beside g_cb so the fovea path never allocates on the render
+        // thread; only filled when the fovea is actually on.
+        D3D11_BUFFER_DESC bd{};
+        bd.ByteWidth = 32;
+        bd.Usage = D3D11_USAGE_DYNAMIC;
+        bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+        if (!SUCCEEDED(dev->CreateBuffer(&bd, nullptr, &g_foveaCb))) {
+            // Not fatal: the fovea path checks g_foveaCb and stands down to
+            // full-frame DLAA if it is null. The main pass runs regardless.
+            g_foveaCb = nullptr;
+        }
+    }
     if (ok && !g_samp) {
         D3D11_SAMPLER_DESC smd{};
         smd.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
@@ -1519,7 +1589,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
             releaseOwned(e);
             bool made = makeTex(dev, w, h, sd.Format, viewFmt,
                                 D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS,
-                                &e.outTex, nullptr, &e.outUav);
+                                &e.outTex, &e.outSrv, &e.outUav);
             for (int i = 0; i < 2 && made; ++i) {
                 made = makeTex(dev, w, h, g_histFmt, g_histFmt,
                                D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS,
@@ -1871,6 +1941,58 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         const UINT zeros[4] = {0, 0, 0, 0};
         ctx->ClearUnorderedAccessViewUint(g_statsUav, zeros);
 
+        // DLSS where you look (docs/performance.md feature 6): with a fovea
+        // width set, and the trained DLAA path the one running (not DLSS's
+        // upscale), NVIDIA runs on a crop around the straight-ahead point and
+        // the own history fills the periphery. Decided here so the full-frame
+        // DLAA block below can stand aside; the composition runs after the
+        // own-history dispatch, which is the periphery it blends over.
+        const bool upscale = (outW && outH && (outW != w || outH != h));
+        const bool foveaWanted = (flags & 2u) != 0 && fmtIndex == 0 && g_foveaDeg > 0.0f &&
+                                 !upscale && g_foveaCb != nullptr;
+        uint32_t fcx = 0, fcy = 0, fcw = 0, fch = 0;
+        bool foveaMode = false;
+        bool foveaComposited = false;
+        if (foveaWanted && !g_csFovea && !g_csFoveaTried) {
+            g_csFoveaTried = true;
+            g_csFovea = shaderSwapCompileCs(ctx, kFoveaCsHlsl, sizeof(kFoveaCsHlsl) - 1,
+                                            "fovea", "temporal_fovea_cs", nullptr,
+                                            "temporal aa");
+        }
+        if (foveaWanted && g_csFovea && dlaaAvailable(dev, nullptr)) {
+            const float l = tanNow[0], r = tanNow[1], t = tanNow[2], b = tanNow[3];
+            if (r > l && b > t) {
+                // The straight-ahead point (tx = ty = 0) in pixels: off the
+                // texture centre in an asymmetric frustum. Crop half-extents
+                // from the fovea's half-angle, in each axis's pixels-per-tan.
+                const float cxpx = (-l / (r - l)) * static_cast<float>(w);
+                const float cypx = (b / (b - t)) * static_cast<float>(h);
+                const float half = tanf(g_foveaDeg * 0.5f * 0.01745329252f);
+                const float hw = half * static_cast<float>(w) / (r - l);
+                const float hh = half * static_cast<float>(h) / (b - t);
+                int ix0 = static_cast<int>(cxpx - hw);
+                int iy0 = static_cast<int>(cypx - hh);
+                int ix1 = static_cast<int>(cxpx + hw + 0.5f);
+                int iy1 = static_cast<int>(cypx + hh + 0.5f);
+                if (ix0 < 0) ix0 = 0;
+                if (iy0 < 0) iy0 = 0;
+                if (ix1 > static_cast<int>(w)) ix1 = static_cast<int>(w);
+                if (iy1 > static_cast<int>(h)) iy1 = static_cast<int>(h);
+                ix0 &= ~1; iy0 &= ~1; ix1 &= ~1; iy1 &= ~1;   // NGX prefers even bases and sizes
+                const int cw = ix1 - ix0, ch = iy1 - iy0;
+                // Worth it only when the crop is appreciably smaller than the
+                // frame; otherwise the seam buys nothing and full DLAA runs.
+                if (cw >= 128 && ch >= 128 &&
+                    static_cast<uint64_t>(cw) * ch <= static_cast<uint64_t>(w) * h * 9 / 10) {
+                    fcx = static_cast<uint32_t>(ix0);
+                    fcy = static_cast<uint32_t>(iy0);
+                    fcw = static_cast<uint32_t>(cw);
+                    fch = static_cast<uint32_t>(ch);
+                    foveaMode = true;
+                }
+            }
+        }
+
         bool usedDlaa = false;
         // The trained path copies the colour into R8G8B8A8_UNORM, which is
         // only legal within that family (the review of 2026-09-04, F9): any
@@ -1882,7 +2004,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                 "handed R8G8B8A8, a different family. The pass's own history runs instead.",
                 formatName(sd.Format));
         }
-        if ((flags & 2u) != 0 && fmtIndex == 0) {
+        if ((flags & 2u) != 0 && fmtIndex == 0 && !foveaMode) {
             const char* why = "";
             if (!dlaaAvailable(dev, &why)) {
                 if (!g_dlaaFailNoted) {
@@ -1917,7 +2039,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                                    &e.dlDepth, nullptr, &e.dlDepthUav) &&
                            makeTex(dev, oW, oH, DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM,
                                    D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS,
-                                   &e.dlOut, nullptr, &e.dlOutUav) &&
+                                   &e.dlOut, &e.dlOutSrv, &e.dlOutUav) &&
                            // ...and the texture that goes OUT, in the game's own format
                            // (typeless when the game's is), so the compositor is told the
                            // same kind of texture on every path. NVIDIA writes a typed
@@ -2065,6 +2187,168 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
             ctx->CSSetConstantBuffers(0, 1, &cb);
             ctx->CSSetSamplers(0, 1, &smp);
             ctx->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
+
+            // The fovea (docs/performance.md feature 6): the own history just
+            // wrote e.outTex (the periphery); now NVIDIA runs on the crop, and
+            // the composite blends the two into e.foveaOut. All Elite's frames
+            // are the R8G8B8A8 family (the full DLAA path's CopyResource proves
+            // it), so the crop and the periphery share a channel order and a
+            // UNORM view, and the blend is in the stored representation the
+            // compositor samples as sRGB -- the same convention as the full
+            // trained path.
+            if (foveaMode) {
+                bool made = g_csMv != nullptr;
+                if (!g_csMv && !g_csMvTried) {
+                    g_csMvTried = true;
+                    g_csMv = shaderSwapCompileCs(ctx, kTemporalCsHlsl, sizeof(kTemporalCsHlsl) - 1,
+                                                 "mv", "temporal_mv_cs", nullptr, "temporal aa");
+                    made = g_csMv != nullptr;
+                }
+                if (made && (!e.dlOut || e.dlW != w || e.dlH != h || e.dlOutW != w ||
+                             e.dlOutH != h)) {
+                    releaseDl(e);
+                    e.foveaHaveHistory = false;
+                    made = makeTex(dev, w, h, DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM,
+                                   D3D11_BIND_SHADER_RESOURCE, &e.dlColour, nullptr, nullptr) &&
+                           makeTex(dev, w, h, DXGI_FORMAT_R16G16_FLOAT, DXGI_FORMAT_R16G16_FLOAT,
+                                   D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS,
+                                   &e.dlMv, nullptr, &e.dlMvUav) &&
+                           makeTex(dev, w, h, DXGI_FORMAT_R32_FLOAT, DXGI_FORMAT_R32_FLOAT,
+                                   D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS,
+                                   &e.dlDepth, nullptr, &e.dlDepthUav) &&
+                           makeTex(dev, w, h, DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM,
+                                   D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS,
+                                   &e.dlOut, &e.dlOutSrv, &e.dlOutUav);
+                    if (made) {
+                        e.dlW = w; e.dlH = h; e.dlOutW = w; e.dlOutH = h;
+                    } else {
+                        releaseDl(e);
+                    }
+                }
+                if (made && (!e.foveaOut || e.foveaW != w || e.foveaH != h)) {
+                    if (e.foveaOutUav) { e.foveaOutUav->Release(); e.foveaOutUav = nullptr; }
+                    if (e.foveaOut) { e.foveaOut->Release(); e.foveaOut = nullptr; }
+                    made = makeTex(dev, w, h, sd.Format, viewFmt,
+                                   D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS,
+                                   &e.foveaOut, nullptr, &e.foveaOutUav);
+                    if (made) { e.foveaW = w; e.foveaH = h; }
+                }
+                if (made && e.outSrv && e.dlOutSrv) {
+                    // The colour, typed, whichever way the source came (the
+                    // full path's copy logic).
+                    D3D11_BOX box{};
+                    box.left = viaCopy ? 0 : region[0];
+                    box.top = viaCopy ? 0 : region[1];
+                    box.front = 0;
+                    box.right = box.left + w;
+                    box.bottom = box.top + h;
+                    box.back = 1;
+                    if (viaCopy) {
+                        D3D11_BOX full{};
+                        full.left = region[0]; full.top = region[1]; full.front = 0;
+                        full.right = region[2]; full.bottom = region[3]; full.back = 1;
+                        ctx->CopySubresourceRegion(e.copyTex, 0, 0, 0, 0, src, 0, &full);
+                        ctx->CopySubresourceRegion(e.dlColour, 0, 0, 0, 0, e.copyTex, 0, &box);
+                    } else {
+                        ctx->CopySubresourceRegion(e.dlColour, 0, 0, 0, 0, src, 0, &box);
+                    }
+                    // Motion vectors and the depth copy, full frame (NVIDIA
+                    // reads the crop's sub-rectangle of them).
+                    ID3D11ShaderResourceView* nullSrvM[3] = {};
+                    ID3D11UnorderedAccessView* nullUavM[5] = {};
+                    ctx->CSSetShaderResources(0, 3, nullSrvM);
+                    ctx->CSSetUnorderedAccessViews(0, 5, nullUavM, nullptr);
+                    ctx->CSSetShader(g_csMv, nullptr, 0);
+                    ID3D11ShaderResourceView* srvsM[3] = {inSrv, e.histSrv[readIdx], depthSrv};
+                    ID3D11UnorderedAccessView* uavsM[5] = {nullptr, nullptr, g_statsUav,
+                                                           e.dlMvUav, e.dlDepthUav};
+                    ID3D11Buffer* cbM = g_cb;
+                    ID3D11SamplerState* smpM = g_samp;
+                    ctx->CSSetShaderResources(0, 3, srvsM);
+                    ctx->CSSetUnorderedAccessViews(0, 5, uavsM, nullptr);
+                    ctx->CSSetConstantBuffers(0, 1, &cbM);
+                    ctx->CSSetSamplers(0, 1, &smpM);
+                    ctx->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
+                    ctx->CSSetShaderResources(0, 3, nullSrvM);
+                    ctx->CSSetUnorderedAccessViews(0, 5, nullUavM, nullptr);
+
+                    const bool resetHist = (flags & 1u) != 0 || !e.foveaHaveHistory;
+                    LARGE_INTEGER qn{}, qf{};
+                    QueryPerformanceCounter(&qn);
+                    QueryPerformanceFrequency(&qf);
+                    float frameMs = 0.0f;
+                    if (!resetHist && e.dlLastQpc && qf.QuadPart > 0) {
+                        frameMs = static_cast<float>(
+                            static_cast<double>(qn.QuadPart - e.dlLastQpc) * 1000.0 /
+                            static_cast<double>(qf.QuadPart));
+                        if (frameMs < 1.0f || frameMs > 100.0f) frameMs = 0.0f;
+                    }
+                    e.dlLastQpc = qn.QuadPart;
+                    const char* whyF = "";
+                    if (dlaaEvaluateFovea(ctx, eye, e.dlColour, e.dlDepth, e.dlMv, e.dlOut, w, h,
+                                          fcx, fcy, fcw, fch, jxNow, jyNow, resetHist, frameMs,
+                                          &whyF)) {
+                        e.foveaHaveHistory = true;
+                        D3D11_MAPPED_SUBRESOURCE fm{};
+                        if (SUCCEEDED(ctx->Map(g_foveaCb, 0, D3D11_MAP_WRITE_DISCARD, 0, &fm)) &&
+                            fm.pData) {
+                            float band = g_foveaEdgeDeg * (static_cast<float>(w) / (tanNow[1] - tanNow[0])) *
+                                         0.01745329252f;
+                            const float maxBand = 0.5f * static_cast<float>(fcw < fch ? fcw : fch);
+                            if (band > maxBand) band = maxBand;
+                            if (band < 1.0f) band = 1.0f;
+                            float* fc = static_cast<float*>(fm.pData);
+                            fc[0] = static_cast<float>(fcx);
+                            fc[1] = static_cast<float>(fcy);
+                            fc[2] = static_cast<float>(fcx + fcw);
+                            fc[3] = static_cast<float>(fcy + fch);
+                            fc[4] = band;
+                            fc[5] = static_cast<float>(w);
+                            fc[6] = static_cast<float>(h);
+                            fc[7] = 0.0f;
+                            ctx->Unmap(g_foveaCb, 0);
+                            ID3D11ShaderResourceView* csrv[2] = {e.outSrv, e.dlOutSrv};
+                            ID3D11UnorderedAccessView* cuav[1] = {e.foveaOutUav};
+                            ID3D11ShaderResourceView* nullC2[2] = {};
+                            ID3D11UnorderedAccessView* nullC1[1] = {};
+                            ctx->CSSetShaderResources(0, 2, nullC2);
+                            ctx->CSSetUnorderedAccessViews(0, 1, nullC1, nullptr);
+                            ctx->CSSetShader(g_csFovea, nullptr, 0);
+                            ctx->CSSetShaderResources(0, 2, csrv);
+                            ctx->CSSetUnorderedAccessViews(0, 1, cuav, nullptr);
+                            ctx->CSSetConstantBuffers(0, 1, &g_foveaCb);
+                            ctx->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
+                            ctx->CSSetShaderResources(0, 2, nullC2);
+                            ctx->CSSetUnorderedAccessViews(0, 1, nullC1, nullptr);
+                            foveaComposited = true;
+                            ++g_foveaTreats;
+                            if (!g_foveaNoted) {
+                                g_foveaNoted = true;
+                                Log::get().note(
+                                    "temporal aa: DLSS where you look ENGAGED -- NVIDIA runs on a "
+                                    "%ux%u crop (%.0f deg) around the straight-ahead point at "
+                                    "(%u, %u), %.1f%% of the %ux%u frame's pixels; the own history "
+                                    "fills the periphery, blended over %.0f deg (%.0f px). NVIDIA's "
+                                    "price for the crop is in the DLAA totals.",
+                                    fcw, fch, static_cast<double>(g_foveaDeg), fcx, fcy,
+                                    100.0 * static_cast<double>(fcw) * fch /
+                                        (static_cast<double>(w) * h),
+                                    w, h, static_cast<double>(g_foveaEdgeDeg),
+                                    static_cast<double>(band));
+                            }
+                        }
+                    } else {
+                        e.foveaHaveHistory = false;
+                        if (!g_foveaFailNoted) {
+                            g_foveaFailNoted = true;
+                            Log::get().note(
+                                "temporal aa: the fovea crop was asked for, but %s. The own "
+                                "history runs full-frame instead, this frame and after.",
+                                whyF);
+                        }
+                    }
+                }
+            }
         }
         if (qs >= 0) {
             ctx->End(g_slots[qs].end);
@@ -2130,9 +2414,14 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         } else if (ran) {
             e.histRead = writeIdx;
             e.haveHistory = true;
-            e.dlHaveHistory = false;   // NVIDIA's history did not see this frame
-            result = e.outTex;
+            e.dlHaveHistory = false;   // NVIDIA's FULL-frame history did not see this frame
+            // The fovea composite, when it ran, is what goes out: the own
+            // history is still the periphery it was blended over, so its
+            // ping-pong above stands. NVIDIA's crop history lives in the fovea
+            // feature (e.foveaHaveHistory), kept apart from both.
+            result = foveaComposited ? e.foveaOut : e.outTex;
             ++g_treats;
+            if (foveaComposited) ++g_dlaaTreats;
             g_lastW = w;
             g_lastH = h;
             if (!g_firstNoted) {
@@ -2188,6 +2477,20 @@ void temporalPassConfigure(Config& cfg) {
     if (!std::isfinite(menu) || menu < 0.0f) menu = 0.0f;
     if (menu > 50.0f) menu = 50.0f;
     g_menuMetres = menu;
+    // DLSS where you look (docs/performance.md feature 6). The crop's width
+    // in degrees of visual angle; 0 is the whole frame, today's behaviour.
+    // Bounded below by a size worth cropping (a crop wider than the frame is
+    // the whole frame) and above at a full hemisphere. Live: the branch
+    // reads g_foveaDeg each frame, so it can be tuned from inside a headset.
+    float fov = cfg.getFloat("advanced.temporal_aa_fovea", 0.0f);
+    if (!std::isfinite(fov) || fov < 0.0f) fov = 0.0f;
+    if (fov > 0.0f && fov < 10.0f) fov = 10.0f;   // below this the fovea is not worth the seam
+    if (fov > 120.0f) fov = 120.0f;
+    g_foveaDeg = fov;
+    float edge = cfg.getFloat("advanced.temporal_aa_fovea_edge", 6.0f);
+    if (!std::isfinite(edge) || edge < 0.0f) edge = 0.0f;
+    if (edge > 30.0f) edge = 30.0f;
+    g_foveaEdgeDeg = edge;
 }
 
 void temporalPassTick(ID3D11DeviceContext* ctx) {
@@ -2559,6 +2862,8 @@ bool temporalPassDlaaTotals(uint32_t* frames, double* avgMs, double* maxMs,
 void temporalPassShutdown() {
     dlaaShutdown();
     if (g_csMv) { g_csMv->Release(); g_csMv = nullptr; }
+    if (g_csFovea) { g_csFovea->Release(); g_csFovea = nullptr; }
+    if (g_foveaCb) { g_foveaCb->Release(); g_foveaCb = nullptr; }
     if (g_treats > 0) {
         Log::get().note("temporal aa: %u eye-submits treated this session.",
                         g_treats);

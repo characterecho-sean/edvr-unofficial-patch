@@ -53,6 +53,25 @@ bool dlaaEvaluate(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* colour,
                   uint32_t outW, uint32_t outH, float jx, float jy, bool reset,
                   float frameMs, const char** reason);
 
+// One eye, one frame, but NVIDIA runs on a CROP of the frame -- the fovea,
+// docs/performance.md feature 6. The colour, depth and motion are the same
+// full-frame textures dlaaEvaluate is fed; the crop names the sub-rectangle
+// (in render pixels, cropX/cropY the top-left, cropW/cropH the size) that
+// NVIDIA reads and writes, through the runtime's input and output
+// sub-rectangles. DLAA only (1:1), so the output crop is the input crop; a
+// per-eye feature is created with output sub-rectangles enabled and rebuilt
+// on a size change. The crop must lie inside the frame. `output` is written
+// only in the crop region; the periphery is the caller's to fill and blend.
+// The moving-crop probe (2026-09-04) proved a crop pans cleanly through
+// NVIDIA's history; a fixed centre is the trivial case of that. False on any
+// refusal, with its reason. Counts into the same totals as dlaaEvaluate.
+bool dlaaEvaluateFovea(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* colour,
+                       ID3D11Texture2D* depth, ID3D11Texture2D* motion,
+                       ID3D11Texture2D* output, uint32_t w, uint32_t h,
+                       uint32_t cropX, uint32_t cropY, uint32_t cropW, uint32_t cropH,
+                       float jx, float jy, bool reset, float frameMs,
+                       const char** reason);
+
 // The measured price, for the totals line: evaluations, the mean
 // milliseconds by timestamp query, and how many evaluations carried the
 // reset. False when nothing has run.

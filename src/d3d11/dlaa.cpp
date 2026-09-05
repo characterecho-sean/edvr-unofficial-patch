@@ -66,6 +66,10 @@ const char* qualityName(NVSDK_NGX_PerfQuality_Value q) {
     }
 }
 EyeFeature g_feature[2];
+// The fovea features, kept apart from the full-frame ones: created with
+// output sub-rectangles enabled and their own history, so switching the
+// fovea on or off never disturbs the full-frame path's accumulation.
+EyeFeature g_fovea[2];
 
 // The GPU-price ring, the resolve's discipline: never awaited.
 struct QuerySlot {
@@ -153,6 +157,13 @@ char g_reasonBuf[256];
 
 void releaseFeatures() {
     for (EyeFeature& f : g_feature) {
+        if (f.handle) {
+            NVSDK_NGX_D3D11_ReleaseFeature(f.handle);
+            f.handle = nullptr;
+        }
+        f.w = f.h = 0;
+    }
+    for (EyeFeature& f : g_fovea) {
         if (f.handle) {
             NVSDK_NGX_D3D11_ReleaseFeature(f.handle);
             f.handle = nullptr;
@@ -394,6 +405,120 @@ bool dlaaEvaluate(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* colour,
     }
     if (NVSDK_NGX_FAILED(er)) {
         snprintf(g_reasonBuf, sizeof(g_reasonBuf), "the evaluation failed: %s (0x%08X)",
+                 ngxResultName(er), static_cast<unsigned>(er));
+        g_reason = g_reasonBuf;
+        if (reason) *reason = g_reason;
+        return false;
+    }
+    ++g_evaluations;
+    if (reset) ++g_resets;
+    return true;
+#endif
+}
+
+bool dlaaEvaluateFovea(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* colour,
+                       ID3D11Texture2D* depth, ID3D11Texture2D* motion,
+                       ID3D11Texture2D* output, uint32_t w, uint32_t h,
+                       uint32_t cropX, uint32_t cropY, uint32_t cropW, uint32_t cropH,
+                       float jx, float jy, bool reset, float frameMs,
+                       const char** reason) {
+#ifndef EDVR_HAVE_NGX
+    (void)ctx; (void)eye; (void)colour; (void)depth; (void)motion; (void)output;
+    (void)w; (void)h; (void)cropX; (void)cropY; (void)cropW; (void)cropH;
+    (void)jx; (void)jy; (void)reset; (void)frameMs;
+    if (reason) *reason = "this build has no DLSS SDK in it";
+    return false;
+#else
+    if (!g_available || !g_params || !ctx || !colour || !depth || !motion || !output ||
+        eye < 0 || eye > 1 || !w || !h || !cropW || !cropH) {
+        if (reason) *reason = g_available ? "a missing input" : g_reason;
+        return false;
+    }
+    if (cropX + cropW > w || cropY + cropH > h) {
+        if (reason) *reason = "the fovea crop falls outside the frame";
+        return false;
+    }
+    pollTimingRing(ctx);
+    EyeFeature& f = g_fovea[eye];
+    if (!f.handle || f.w != w || f.h != h) {
+        if (f.handle) {
+            NVSDK_NGX_D3D11_ReleaseFeature(f.handle);
+            f.handle = nullptr;
+        }
+        NVSDK_NGX_DLSS_Create_Params cp{};
+        cp.Feature.InWidth = w;
+        cp.Feature.InHeight = h;
+        cp.Feature.InTargetWidth = w;
+        cp.Feature.InTargetHeight = h;
+        cp.Feature.InPerfQualityValue = NVSDK_NGX_PerfQuality_Value_DLAA;
+        cp.InFeatureCreateFlags = NVSDK_NGX_DLSS_Feature_Flags_MVLowRes |
+                                  NVSDK_NGX_DLSS_Feature_Flags_DepthInverted;
+        // The one difference from the full-frame feature: NVIDIA may write a
+        // sub-rectangle of the output rather than all of it.
+        cp.InEnableOutputSubrects = true;
+        const NVSDK_NGX_Result cr = NGX_D3D11_CREATE_DLSS_EXT(ctx, &f.handle, g_params, &cp);
+        if (NVSDK_NGX_FAILED(cr) || !f.handle) {
+            f.handle = nullptr;
+            snprintf(g_reasonBuf, sizeof(g_reasonBuf),
+                     "the fovea feature would not be created at %ux%u: %s (0x%08X)", w, h,
+                     ngxResultName(cr), static_cast<unsigned>(cr));
+            g_reason = g_reasonBuf;
+            if (reason) *reason = g_reason;
+            return false;
+        }
+        f.w = w;
+        f.h = h;
+        f.outW = w;
+        f.outH = h;
+        Log::get().note(
+            "temporal aa fovea: NVIDIA's feature is created for eye %d at %ux%u with "
+            "output sub-rectangles; the crop's history starts here.",
+            eye, w, h);
+    }
+
+    NVSDK_NGX_D3D11_DLSS_Eval_Params ep{};
+    ep.Feature.pInColor = colour;
+    ep.Feature.pInOutput = output;
+    ep.Feature.InSharpness = 0.0f;
+    ep.pInDepth = depth;
+    ep.pInMotionVectors = motion;
+    ep.InJitterOffsetX = jx;
+    ep.InJitterOffsetY = jy;
+    ep.InRenderSubrectDimensions.Width = cropW;
+    ep.InRenderSubrectDimensions.Height = cropH;
+    ep.InReset = reset ? 1 : 0;
+    ep.InMVScaleX = 1.0f;
+    ep.InMVScaleY = 1.0f;
+    // The crop's top-left in each input, and where it lands in the output:
+    // the same pixel, because DLAA does not resize.
+    ep.InColorSubrectBase.X = cropX;
+    ep.InColorSubrectBase.Y = cropY;
+    ep.InDepthSubrectBase.X = cropX;
+    ep.InDepthSubrectBase.Y = cropY;
+    ep.InMVSubrectBase.X = cropX;
+    ep.InMVSubrectBase.Y = cropY;
+    ep.InOutputSubrectBase.X = cropX;
+    ep.InOutputSubrectBase.Y = cropY;
+    ep.InPreExposure = 1.0f;
+    ep.InExposureScale = 1.0f;
+    ep.InFrameTimeDeltaInMsec = frameMs;
+
+    ID3D11Device* dev = nullptr;
+    ctx->GetDevice(&dev);
+    const int qs = dev ? acquireQuerySlot(dev) : -1;
+    if (dev) dev->Release();
+    if (qs >= 0) {
+        ctx->Begin(g_qring[qs].disjoint);
+        ctx->End(g_qring[qs].begin);
+    }
+    const NVSDK_NGX_Result er = NGX_D3D11_EVALUATE_DLSS_EXT(ctx, f.handle, g_params, &ep);
+    if (qs >= 0) {
+        ctx->End(g_qring[qs].end);
+        ctx->End(g_qring[qs].disjoint);
+        g_qring[qs].inUse = true;
+    }
+    if (NVSDK_NGX_FAILED(er)) {
+        snprintf(g_reasonBuf, sizeof(g_reasonBuf), "the fovea evaluation failed: %s (0x%08X)",
                  ngxResultName(er), static_cast<unsigned>(er));
         g_reason = g_reasonBuf;
         if (reason) *reason = g_reason;
