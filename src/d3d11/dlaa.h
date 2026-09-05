@@ -101,12 +101,13 @@ bool dlaaEvaluatePeriphery(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* c
 
 // The model NVIDIA runs, as its render-preset number (nvsdk_ngx_defs.h:
 // 11 = K, 10 = J, 12 = L, 13 = M, 0 = the driver's own choice per quality
-// mode), forced on every mode. Read from the config by the temporal pass;
-// a change recreates every live feature on its next evaluation, so it is
-// live. K is the shipped default: the desk's motion probe (2026-09-05)
-// found Performance mode's default, M, at 2.7x K's error at rest on fine
-// detail, and the dlss fovea is Performance mode.
-void dlaaSetPreset(unsigned preset);
+// mode): `preset` for DLAA and the Quality modes, `upscalePreset` for
+// Balanced, Performance and Ultra Performance. Read from the config by the
+// temporal pass; a change recreates every live feature on its next
+// evaluation, so it is live. The desk's motion probe (2026-09-05) found
+// Performance mode's default, M, at 2.7x K's error at rest on fine detail;
+// under motion L softens least and K reconstructs most at rest.
+void dlaaSetPreset(unsigned preset, unsigned upscalePreset);
 
 // The measured price, for the totals line: evaluations, the mean
 // milliseconds by timestamp query, and how many evaluations carried the

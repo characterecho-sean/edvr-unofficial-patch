@@ -3047,20 +3047,27 @@ void temporalPassConfigure(Config& cfg) {
     if (dist > 0.0f && dist < 0.3f) dist = 0.3f;
     if (dist > 1000.0f) dist = 1000.0f;
     g_foveaDistance = dist;
-    // The model NVIDIA runs (dlaa.h): quality = K for every mode, the shipped
-    // default; responsive = J (NVIDIA: slightly less ghosting, a little more
-    // flicker); auto = the driver's own choice per mode (K for DLAA, Quality
-    // and Balanced, M for Performance, L for Ultra Performance). The letters
-    // are silent aliases. Live: a change recreates the features.
-    const std::string model = cfg.getString("advanced.temporal_aa_model", "quality");
-    unsigned preset = 11;
-    if (_stricmp(model.c_str(), "auto") == 0 || _stricmp(model.c_str(), "default") == 0) preset = 0;
-    else if (_stricmp(model.c_str(), "responsive") == 0 || _stricmp(model.c_str(), "j") == 0) preset = 10;
-    else if (_stricmp(model.c_str(), "l") == 0) preset = 12;
-    else if (_stricmp(model.c_str(), "m") == 0) preset = 13;
-    else if (_stricmp(model.c_str(), "e") == 0) preset = 5;
-    else if (_stricmp(model.c_str(), "f") == 0) preset = 6;
-    dlaaSetPreset(preset);
+    // The model NVIDIA runs (dlaa.h): quality = K for every mode; steady = K
+    // for DLAA and Quality, L for the upscaling modes (the desk found L
+    // softening least under motion where K reconstructs most at rest -- the
+    // trade the fovea's upscaling variant wants, since its softening under
+    // motion is what shows against a periphery that softens less);
+    // responsive = J (NVIDIA: slightly less ghosting, a little more flicker);
+    // auto = the driver's own choice per mode (K for DLAA, Quality and
+    // Balanced, M for Performance, L for Ultra Performance). The letters are
+    // silent aliases for one model everywhere. Live: a change recreates the
+    // features.
+    const std::string model = cfg.getString("advanced.temporal_aa_model", "steady");
+    unsigned preset = 11, presetUp = 12;
+    if (_stricmp(model.c_str(), "quality") == 0 || _stricmp(model.c_str(), "k") == 0) { preset = 11; presetUp = 11; }
+    else if (_stricmp(model.c_str(), "steady") == 0) { preset = 11; presetUp = 12; }
+    else if (_stricmp(model.c_str(), "auto") == 0 || _stricmp(model.c_str(), "default") == 0) { preset = 0; presetUp = 0; }
+    else if (_stricmp(model.c_str(), "responsive") == 0 || _stricmp(model.c_str(), "j") == 0) { preset = 10; presetUp = 10; }
+    else if (_stricmp(model.c_str(), "l") == 0) { preset = 12; presetUp = 12; }
+    else if (_stricmp(model.c_str(), "m") == 0) { preset = 13; presetUp = 13; }
+    else if (_stricmp(model.c_str(), "e") == 0) { preset = 5; presetUp = 5; }
+    else if (_stricmp(model.c_str(), "f") == 0) { preset = 6; presetUp = 6; }
+    dlaaSetPreset(preset, presetUp);
     // A config reload re-arms the fovea after a failure stood it down (F3):
     // the user may have changed the width, or the transient may be gone.
     g_foveaFailed = false;

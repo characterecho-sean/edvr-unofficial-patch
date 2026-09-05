@@ -63,7 +63,8 @@ struct EyeFeature {
 // The desk's motion probe (2026-09-05) found M far behind K at rest on fine
 // detail -- a rest error 2.7x K's, barely below its own first frame -- and
 // the fovea's dlss variant is Performance mode, so K is the shipped default.
-unsigned g_preset = 11;
+unsigned g_preset = 11;          // DLAA's (and Quality's) preset
+unsigned g_presetUpscale = 11;   // the upscaling modes' (Balanced, Performance, Ultra Performance)
 uint64_t g_presetGen = 1;
 
 const char* presetName(unsigned p) {
@@ -81,13 +82,20 @@ const char* presetName(unsigned p) {
 
 void applyPresetHints() {
     if (!g_params) return;
-    const char* names[6] = {NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_DLAA,
-                            NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Quality,
-                            NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Balanced,
-                            NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Performance,
-                            NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_UltraPerformance,
-                            NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_UltraQuality};
-    for (const char* n : names) g_params->Set(n, g_preset);
+    g_params->Set(NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_DLAA, g_preset);
+    g_params->Set(NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_UltraQuality, g_preset);
+    g_params->Set(NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Quality, g_preset);
+    g_params->Set(NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Balanced, g_presetUpscale);
+    g_params->Set(NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Performance, g_presetUpscale);
+    g_params->Set(NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_UltraPerformance, g_presetUpscale);
+}
+
+// The preset a feature of this quality runs under, for the log.
+unsigned presetFor(NVSDK_NGX_PerfQuality_Value q) {
+    return (q == NVSDK_NGX_PerfQuality_Value_DLAA || q == NVSDK_NGX_PerfQuality_Value_MaxQuality ||
+            q == NVSDK_NGX_PerfQuality_Value_UltraQuality)
+               ? g_preset
+               : g_presetUpscale;
 }
 
 const char* qualityName(NVSDK_NGX_PerfQuality_Value q) {
@@ -407,7 +415,7 @@ bool dlaaEvaluate(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* colour,
                 "dlaa: the feature is created for eye %d at %ux%u, DLAA, preset %s (the "
                 "runtime's optimal render size for this output %ux%u, which DLAA ignores); "
                 "the history starts here.",
-                eye, w, h, presetName(g_preset), optW, optH);
+                eye, w, h, presetName(presetFor(quality)), optW, optH);
         } else {
             Log::get().note(
                 "dlss: the feature is created for eye %d, %ux%u in and %ux%u out (%.0f%% "
@@ -415,7 +423,7 @@ bool dlaaEvaluate(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* colour,
                 "range the runtime names as %ux%u..%ux%u; the history starts here.",
                 eye, w, h, outW, outH,
                 100.0 * static_cast<double>(w) / static_cast<double>(outW),
-                qualityName(quality), presetName(g_preset), optW, optH, minW, minH, maxW, maxH);
+                qualityName(quality), presetName(presetFor(quality)), optW, optH, minW, minH, maxW, maxH);
         }
     }
 
@@ -553,7 +561,7 @@ bool evaluateCrop(EyeFeature& f, const char* what, int eye, ID3D11DeviceContext*
             "%ux%u out (%s, preset %s, output sub-rectangles; input based at %u,%u in the "
             "%ux%u render, output at %u,%u in the %ux%u frame); its history starts here.",
             what, eye, icw, ich, ocw, och, (icw == ocw && ich == och) ? "DLAA" : qualityName(q),
-            presetName(g_preset), icx, icy, inW, inH, ocx, ocy, outW, outH);
+            presetName(presetFor(q)), icx, icy, inW, inH, ocx, ocy, outW, outH);
     }
 
     NVSDK_NGX_D3D11_DLSS_Eval_Params ep{};
@@ -675,14 +683,16 @@ bool dlaaEvaluatePeriphery(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* c
 #endif
 }
 
-void dlaaSetPreset(unsigned preset) {
+void dlaaSetPreset(unsigned preset, unsigned upscalePreset) {
 #ifdef EDVR_HAVE_NGX
-    if (preset != g_preset) {
+    if (preset != g_preset || upscalePreset != g_presetUpscale) {
         g_preset = preset;
+        g_presetUpscale = upscalePreset;
         ++g_presetGen;   // every live feature is recreated on its next evaluation
     }
 #else
     (void)preset;
+    (void)upscalePreset;
 #endif
 }
 

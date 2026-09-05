@@ -823,6 +823,39 @@ under the pan, barely below its first frame of 23.59 -- against K 9.41 /
 J; auto = the driver's choice) forces K, which leaves DLAA exactly as it
 was and gives the dlss fovea the periphery's network.
 
+**The bulge under a rapid nod (flight 4, 2026-09-05 11:17: dlss at about
+Quality 0.65, fovea 70, fixation 0.8).** "When I move my head up and down
+rapidly, it kind of makes it look like I'm causing the scene to bow in and
+out at the eye point." The probe grew two measurements and a fast pan.
+Positional lag -- the truth shift that fits each series' output best -- is
+0.00 frames for every series at both 6 and 24 px/frame: with exact vectors
+the model does not trail the motion, so the geometry across the seam is
+exact and the bulge is not a displacement. The dlss fovea's exact path
+(Performance 2x on a crop with output sub-rectangles) matches Performance
+2x on the whole frame (1.02x under the pan). What the fast pan did find: at
+24 px/frame -- a nod's speed at this frame size -- the fovea crop is 27%
+worse than the full frame during the pan and 23% worse at rest ten frames
+after it, where at 6 px/frame the two matched. That is the crop's history
+boundary: the pan replaces the crop's whole content within the eighteen
+frames, and content that has just entered the crop has no history, while
+the periphery's DLAA covers the whole frame and keeps its history for
+everything that moves within it. Under a rapid nod the centre is therefore
+largely fresh -- less converged, its texture visibly different from the
+periphery's -- and it re-converges once the head stops: a texture change at
+the eye point, not a warp. Two remedies belong to the design, not to a
+preset: a history margin (NVIDIA's crop larger than the visible disc, so
+content has accumulated before it is seen; costly at a nod's speed, since
+the margin must cover several frames of motion), and a content-following
+crop (the crop's base slides with the content during fast motion, the shift
+folded into the vectors the way the moving-crop probe validated, and
+re-centres at rest -- which is what an eye-tracked crop does by itself,
+since the eyes hold a target while the head turns). What a preset can do:
+under the fast pan the upscaling mode's K softens 1.78x against L's 1.24x
+(pan 9.40 against 8.71, rest 5.29 against 7.02), so `temporal_aa_model =
+steady` -- K for DLAA and the Quality modes, L for the upscaling ones -- is
+the shipped default: a little less at rest in the dlss fovea, much less
+swing when the head moves.
+
 **What must be measured first (Phase 0 items 15 and 16).**
 
 - *History under a moving crop.* NVIDIA's history is kept in output space
