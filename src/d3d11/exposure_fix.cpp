@@ -1551,6 +1551,10 @@ void installExposureFix(ID3D11Device* device, HookMode mode) {
     // vScreen hooks so the two never disagree about this one object. Between
     // attach and the first replace, which is the only window setMode allows.
     s.hook.setMode(mode);
+    // Same implementation module as vScreen's hook on the same object -- the
+    // two must agree about this as well, or one of them would take a slot back
+    // from the runtime while the other conceded it (issue #21).
+    s.hook.setImplementationModule(systemD3D11Module());
 
     s.hook.replace(kSlotCSSetShader, &hookedCSSetShader,
                    reinterpret_cast<void**>(&s.realCSSetShader));

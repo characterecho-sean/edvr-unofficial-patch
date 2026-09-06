@@ -399,6 +399,139 @@ int main() {
         }
     }
 
+    // THE IMPLEMENTATION MODULE -- the exemption that unblocked issue #21, and
+    // the two ways it must stay narrow.
+    //
+    // The field case: Windows' d3d11.dll re-pointed ALL 29 of EDVR's patched
+    // context slots 57 ms after install, before the first frame. Nothing of
+    // ours ever ran, so the quiet vouch -- measured silence on a slot while
+    // OTHER thunks on the object still fire -- could never be earned, reclaim
+    // correctly refused every slot, and the DLL sat inert for fourteen minutes
+    // and 102,210 frames explaining exactly why. An entry arriving from the
+    // module that IMPLEMENTS the method cannot be a chainer, because a
+    // chainer's thunk is the chainer's own code, so that case never needed the
+    // vouch. setImplementationModule is how a caller says which module that is.
+    //
+    // It has to be TOLD, and this cell is why. The first cut inferred it -- "the
+    // new entry and the one it replaced are in the same image" -- and the
+    // chainer cell above failed instantly, because in this test the chainer and
+    // the entries it displaces are all in one binary. Inference cannot separate
+    // them; a caller's assertion can.
+    {
+        void* const selfModule = GetModuleHandleW(nullptr);
+        // Some other loaded image, for the negative half. Anything that is
+        // certainly mapped and certainly not where this test's code lives.
+        void* const otherModule = GetModuleHandleW(L"kernel32.dll");
+
+        // (1) NAMED, AND THE RE-POINT COMES FROM IT: adopted with no vouch, and
+        // both run afterwards. The bypasser shape, not the chainer shape --
+        // adopting a chainer is a call loop no matter who vouches for it.
+        {
+            VTableHook owner;
+            g_owner = &wrapper;
+            g_ownerHits = 0;
+            g_toolkitHits = 0;
+            if (!owner.attach(&wrapper)) {
+                fail("attach for the implementation-module cell", "attach refused");
+            } else {
+                owner.setImplementationModule(selfModule);
+                owner.replace(0, reinterpret_cast<void*>(&thunkOne),
+                              reinterpret_cast<void**>(&g_realOne));
+                owner.commit();
+
+                g_toolkitClean = reinterpret_cast<PFN_One>(wrapper.mySlotOneAtBirth);
+                writeSlot(&wrapper, 0, reinterpret_cast<void*>(&toolkitOne));
+                check(owner.reclaim("impl-module-cell") == 1,
+                      "a re-point from the named implementation module is taken "
+                      "back with no vouch at all",
+                      "reclaim refused it -- issue #21's rig stays inert");
+
+                g_ownerHits = 0;
+                g_toolkitHits = 0;
+                const int got = w->one();
+                check(g_ownerHits == 1 && g_toolkitHits == 1,
+                      "...and BOTH run afterwards, ours in front",
+                      "the adopted entry was not chained to correctly");
+                // 101 from the wrapper, +10000 as the adopted entry passes it
+                // on, +1000 as our thunk wraps that -- the same arithmetic the
+                // chainer cell's 31101 spells out, stacked the other way up.
+                check(got == 11101,
+                      "...with the forward pointing at the adopted entry",
+                      "the composed return value is wrong");
+
+                owner.uninstall();
+                writeSlot(&wrapper, 0, wrapper.mySlotOneAtBirth);
+            }
+        }
+
+        // (2) NAMED, BUT THE RE-POINT COMES FROM SOMEWHERE ELSE: still refused
+        // without a vouch. The exemption is scoped to the module the caller
+        // named; it is not a blanket "adopt anything". A rival tool must go on
+        // earning the vouch exactly as before.
+        {
+            VTableHook owner;
+            g_owner = &wrapper;
+            g_ownerHits = 0;
+            g_toolkitHits = 0;
+            if (!owner.attach(&wrapper)) {
+                fail("attach for the foreign-module cell", "attach refused");
+            } else {
+                owner.setImplementationModule(otherModule);
+                owner.replace(0, reinterpret_cast<void*>(&thunkOne),
+                              reinterpret_cast<void**>(&g_realOne));
+                owner.commit();
+
+                g_toolkitClean = reinterpret_cast<PFN_One>(wrapper.mySlotOneAtBirth);
+                writeSlot(&wrapper, 0, reinterpret_cast<void*>(&toolkitOne));
+                check(owner.reclaim("foreign-module-cell") == 0,
+                      "a re-point from any OTHER module still needs the vouch",
+                      "the exemption leaked past the module it was scoped to");
+                check(readSlot(&wrapper, 0) == reinterpret_cast<void*>(&toolkitOne),
+                      "...and the slot was left exactly as it was found",
+                      "a refused reclaim wrote to the table anyway");
+
+                owner.uninstall();
+                writeSlot(&wrapper, 0, wrapper.mySlotOneAtBirth);
+            }
+        }
+
+        // (3) THE CHAINER, WITH THE MODULE NAMED. The negative that guards the
+        // whole design: naming a module must not turn the chainer cell above
+        // into an adoption. Here the caller names a module the chainer does not
+        // live in -- which is the contract setImplementationModule states, that
+        // the named module implements the methods and is not a tool that hooks.
+        {
+            VTableHook owner;
+            g_owner = &wrapper;
+            g_ownerHits = 0;
+            g_chainHits = 0;
+            if (!owner.attach(&wrapper)) {
+                fail("attach for the chainer-with-module cell", "attach refused");
+            } else {
+                owner.setImplementationModule(otherModule);
+                owner.replace(0, reinterpret_cast<void*>(&thunkOne),
+                              reinterpret_cast<void**>(&g_realOne));
+                owner.commit();
+
+                g_chainSaved = reinterpret_cast<PFN_One>(readSlot(&wrapper, 0));
+                writeSlot(&wrapper, 0, reinterpret_cast<void*>(&chainerOne));
+                check(owner.reclaim("chainer-with-module-cell") == 0,
+                      "a chainer is still refused when a module has been named",
+                      "the exemption adopted a chainer -- the next call would "
+                      "overflow the stack");
+
+                g_ownerHits = 0;
+                g_chainHits = 0;
+                check(w->one() == 31101 && g_ownerHits == 1 && g_chainHits == 1,
+                      "...and the chain still runs exactly once each",
+                      "the refused pass disturbed the chain");
+
+                owner.uninstall();
+                writeSlot(&wrapper, 0, wrapper.mySlotOneAtBirth);
+            }
+        }
+    }
+
     // THE SHARED SLOT -- the loop hazard. ClearState is hooked by BOTH context
     // hooks in the real DLL, stacked. The lower one must read the upper as a
     // healthy chain, not a clobber: "reclaiming" it would splice the upper out,

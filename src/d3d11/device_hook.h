@@ -33,6 +33,17 @@ namespace edvr {
 // just orphaned. Sharing one answer removes the straddle entirely.
 HookMode contextHookModeFor(ID3D11DeviceContext* ctx);
 
+// Windows' own d3d11.dll, as a module base -- NOT this DLL, which the game
+// also has loaded under the name d3d11.dll.
+//
+// For VTableHook::setImplementationModule on the context hooks: this is the
+// image that implements ID3D11DeviceContext, and it re-points its own vtable
+// entries as it re-selects internal variants (issue #21, where it took all 29
+// of EDVR's patched slots 57 ms after install). Naming it lets reclaim take
+// those slots back without waiting for call evidence that a total bypass makes
+// impossible to gather. Null before the proxy has resolved it.
+void* systemD3D11Module();
+
 void hookDevice(ID3D11Device* device);
 void hookSwapChain(IDXGISwapChain* swapChain);
 void hookFactoryForDevice(ID3D11Device* device);

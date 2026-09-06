@@ -4673,6 +4673,10 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     // exposure hooks so the two agree about this one object. Between attach
     // and the first replace, the only window setMode allows.
     s.hook.setMode(mode);
+    // And who implements this context, so reclaim can take a slot back from
+    // the runtime's own re-pointing without waiting for call evidence that a
+    // total bypass never produces (issue #21).
+    s.hook.setImplementationModule(systemD3D11Module());
 
     s.hook.replace(kSlotClearRenderTargetView, &hookedClearRtv,
                    reinterpret_cast<void**>(&s.realClearRtv));
@@ -4737,12 +4741,22 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
                     (s.distanceEnabled || s.countForFlashFix)
                         ? "on"
                         : "OFF -- the transition flash fix cannot act without it",
+                    // WHAT the mode is, never WHY it was picked. This line used
+                    // to explain the choice -- "the context is a wrapper's, e.g.
+                    // ReShade" for in-place -- and advanced.context_hook_mode
+                    // made that a lie the first time anyone used it: issue #21's
+                    // logs say "the context is a wrapper's" three lines under a
+                    // probe result of 96 of 96 entries inside Windows' own
+                    // d3d11.dll. The reason belongs to whoever decided, and
+                    // contextHookModeFor already prints it, twice when forced.
                     s.hook.mode() == HookMode::CopyVptr
-                        ? "by private vtable copy (the context is the runtime's own, "
-                          "which re-points its shared table between modes -- a copy is "
-                          "immune)"
-                        : "in place (the context is a wrapper's, e.g. ReShade; reclaim "
-                          "watches for another tool re-pointing our slots)");
+                        ? "by private vtable copy (this object dispatches through "
+                          "a table of EDVR's own; nothing else can bypass the "
+                          "fixes, and the copy does not follow the table it was "
+                          "taken from)"
+                        : "in place (the shared table is patched, so anything else "
+                          "that writes those slots composes with EDVR; reclaim "
+                          "watches for our entries being re-pointed)");
     ctx->Release();
 }
 

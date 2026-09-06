@@ -377,6 +377,8 @@ namespace edvr {
 // object stays InPlace -- issue #6 avoided. A threshold, not all-or-nothing,
 // because a thin wrapper may forward some slots straight to d3d11.dll; a
 // clear majority in d3d11.dll is the runtime's own table.
+void* systemD3D11Module() { return g_systemModule; }
+
 HookMode contextHookModeFor(ID3D11DeviceContext* ctx) {
     if (!ctx || !g_systemModule) return HookMode::InPlace;
     void** vt = nullptr;

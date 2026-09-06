@@ -92,6 +92,17 @@ const char* ownerModuleName(void* p, char* buf, size_t bufLen) {
     return buf;
 }
 
+// Which mapped image a pointer belongs to, or null for none. The same
+// VirtualQuery ownerModuleName uses, without the formatting -- this one is a
+// comparison, not a message, and it runs on the reclaim path rather than only
+// the logging one.
+void* owningModule(void* p) {
+    if (!p) return nullptr;
+    MEMORY_BASIC_INFORMATION mbi{};
+    if (VirtualQuery(p, &mbi, sizeof(mbi)) != sizeof(mbi)) return nullptr;
+    return mbi.AllocationBase;
+}
+
 }  // namespace
 
 bool isExecutableAddress(const void* p) {
@@ -611,6 +622,7 @@ size_t VTableHook::reclaim(const char* name, const size_t* quietSlots,
     const char* who = name ? name : "?";
 
     size_t reclaimed = 0;
+    size_t ownerReclaimed = 0;   // of those, taken back from the module's own re-point
     char slots[96];
     slots[0] = '\0';
     // Who we chained to, for the report below. One name is enough: multiple
@@ -668,14 +680,24 @@ size_t VTableHook::reclaim(const char* name, const size_t* quietSlots,
         // its forward; our thunk still runs -- the thing to leave alone,
         // because adopting a chainer's entry points the two hooks at each
         // other and the next call is a stack overflow). The slot's own call
-        // traffic is the only fact that tells them apart, the caller is the
-        // only one who has it, and quietSlots is how it vouches. No vouch, no
-        // re-patch -- the note below is what a starved-but-unvouched slot
+        // traffic is USUALLY the only fact that tells them apart, the caller is
+        // the only one who has it, and quietSlots is how it vouches. No vouch,
+        // no re-patch -- the note below is what a starved-but-unvouched slot
         // leaves behind instead of silence.
+        //
+        // The exception is setImplementationModule: see its comment. When the
+        // caller has named the image that implements these methods, an entry
+        // arriving FROM that image is that image re-selecting its own internals,
+        // not a rival hook, and it is adopted with no traffic evidence at all --
+        // which is the whole point, because issue #21's rig is one where traffic
+        // evidence is unobtainable by construction.
         bool vouched = false;
         for (size_t i = 0; i < quietCount; ++i) {
             if (quietSlots[i] == p.slot) { vouched = true; break; }
         }
+        const bool ownerRepoint =
+            !vouched && m_implModule && owningModule(now) == m_implModule;
+        if (ownerRepoint) vouched = true;
         if (!vouched) {
             if (!p.foreignNoted) {
                 p.foreignNoted = true;
@@ -740,10 +762,21 @@ size_t VTableHook::reclaim(const char* name, const size_t* quietSlots,
         // an unbounded retry -- and an unbounded copy of writeEntry's own
         // failure line, once a second, for the session. Bounded by the same
         // cap as success: 64 lines at the very worst, then concession.
-        ++p.repatches;
+        //
+        // EXCEPT when the re-pointer is the module that owns the entry. The cap
+        // exists to end a tug-of-war with a TOOL: two hookers trading one slot
+        // every second serve nobody, and somebody has to stop. An image
+        // maintaining its own vtable is not that. It will not tire, it will not
+        // negotiate, and conceding to it does not restore any other tool's
+        // function -- it just switches EDVR off after a minute on a rig where
+        // everything was working. The exchange still costs one aligned pointer
+        // write per pass, which is nothing. So an owner re-point is adopted for
+        // as long as it keeps happening, and the log's doubling cadence is what
+        // keeps that visible instead of silent.
+        if (!ownerRepoint) ++p.repatches;
         const bool wrote = writeEntry(m_vtable, p.slot, p.replacement);
 
-        if (p.repatches >= kMaxRepatchesPerSlot) {
+        if (!ownerRepoint && p.repatches >= kMaxRepatchesPerSlot) {
             p.retired = true;
             char modBuf[MAX_PATH];
             Log::get().note(
@@ -758,6 +791,7 @@ size_t VTableHook::reclaim(const char* name, const size_t* quietSlots,
         if (!wrote) continue;
 
         ++reclaimed;
+        if (ownerRepoint) ++ownerReclaimed;
         adoptedMod = ownerModuleName(now, adoptedModBuf, sizeof(adoptedModBuf));
         char one[16];
         _snprintf_s(one, sizeof(one), _TRUNCATE, "%s%zu", slots[0] ? ", " : "",
@@ -781,6 +815,29 @@ size_t VTableHook::reclaim(const char* name, const size_t* quietSlots,
             Log::get().note("VTableHook %s: reclaim #%u (slot(s) %s, taken by %s).",
                             who, m_reclaimEvents, slots,
                             adoptedMod ? adoptedMod : "?");
+        }
+        // Said separately the first time it happens, because it is a different
+        // event with a different meaning: not a rival tool bypassing us, but the
+        // module that implements these methods swapping its own table under
+        // everybody. It is the one kind of re-point EDVR adopts without any
+        // traffic evidence, and the one it will keep adopting for the whole
+        // session rather than conceding after 64 rounds -- so a reader who ever
+        // wonders why this hook never gives up should find the answer here.
+        if (ownerReclaimed && !m_ownerRepointNoted) {
+            m_ownerRepointNoted = true;
+            Log::get().note(
+                "VTableHook %s: %zu of those were re-pointed BY THE MODULE THAT "
+                "IMPLEMENTS THEM (%s), which is that module re-selecting its own "
+                "internal variants and not another tool at all. An entry from the "
+                "same image as the one it replaced cannot be a hook chaining "
+                "through EDVR -- another tool's hook is that tool's own code -- so "
+                "no quiet-slot evidence is required to take it back, and EDVR will "
+                "keep taking it back for as long as it keeps happening. Issue #21: "
+                "on a rig where this happens to EVERY patched slot before the "
+                "first frame, waiting for that evidence meant waiting forever, and "
+                "every fix in this DLL sat inert with the log dutifully explaining "
+                "why.",
+                who, ownerReclaimed, adoptedMod ? adoptedMod : "?");
         }
     }
     return reclaimed;

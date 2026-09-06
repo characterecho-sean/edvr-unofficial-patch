@@ -158,6 +158,36 @@ public:
     // install order peels the stack exactly as it was built.
     void uninstall();
 
+    // Name the module that IMPLEMENTS these methods, if the caller knows it.
+    //
+    // This is the one fact that lets reclaim adopt a re-pointed slot with no
+    // traffic evidence, and it stays with the caller for the same reason the
+    // mechanism choice does: only the caller knows which image implements what
+    // it hooked. Optional -- unset means every re-point goes through the quiet
+    // vouch, which is the behaviour every release before this one had.
+    //
+    // WHAT IT ASSERTS, and it is a promise the caller must be able to keep:
+    // this module implements the methods, and it is not a tool that hooks. The
+    // D3D11 runtime qualifies. A wrapper mod does not, and neither does EDVR's
+    // own DLL -- pass a module that might CHAIN through us and reclaim will
+    // adopt a chainer's thunk as its forward, which points the two hooks at
+    // each other and overflows the stack on the next call. tools/vtable_test
+    // has that cell, and it failed the first cut of this feature, which
+    // inferred the module from the entries instead of being told: the test's
+    // chainer and the entry it replaced live in the same image, so an inferred
+    // rule adopted it. Being TOLD cannot make that mistake.
+    //
+    // Why it is needed at all: the vouch is measured silence on a slot while
+    // OTHER thunks on the object still fire, and issue #21 found the rig where
+    // that is unobtainable -- Windows' d3d11.dll re-pointed all 29 patched
+    // slots 57 ms after install, before the first frame, so no thunk of ours
+    // ever ran to be measured. Every slot was correctly detected, correctly
+    // reported, and correctly left alone, and the DLL sat inert for fourteen
+    // minutes explaining itself. An entry arriving from the implementation
+    // module cannot be a chainer -- a chainer's thunk is the chainer's own
+    // code -- so that case never needed the proxy in the first place.
+    void setImplementationModule(void* moduleBase) { m_implModule = moduleBase; }
+
     // Re-read every committed slot; re-patch the ones somebody re-pointed --
     // but ONLY where the caller can vouch the slot's own thunk has gone quiet.
     //
@@ -280,6 +310,13 @@ private:
     // runtime that re-points every second must stay visible without filling
     // the log with the fact.
     uint32_t           m_copyDriftEvents = 0;
+    // The "the module re-pointed its own table" explanation, said once. It is
+    // a different event from a rival tool's clobber and needs its own line.
+    bool               m_ownerRepointNoted = false;
+    // The image that implements these methods, per setImplementationModule.
+    // Null until a caller names one, and then reclaim may adopt from it
+    // without a vouch.
+    void*              m_implModule = nullptr;
     // How many reclaim() passes found something to re-patch. Drives the log
     // cadence: the first explains, later ones report at doublings, so a tool
     // that re-hooks every second cannot fill the log while still being visible
