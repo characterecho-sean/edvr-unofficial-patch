@@ -13,7 +13,11 @@
 //   an OpenXR Toolkit install flipped the runtime's mode; the war for those
 //   slots was unwinnable because the opponent was the OS maintaining its own
 //   state). A private copy never notices any of that -- which is why 0.7.0
-//   "just worked" on the stack that broke 0.7.2+. Its vice was issue #6: on a
+//   "just worked" on the stack that broke 0.7.2+. Never noticing is the virtue
+//   and, on a rig where the swapped-to entry is not interchangeable with the
+//   swapped-from one, it is also the vice: the object then dispatches through a
+//   snapshot of a table that has moved on. reclaim() measures that as DRIFT and
+//   reports it; issue #21 is why it does. Its OTHER vice was issue #6: on a
 //   rig where the object is a WRAPPER's proxy (ReShade as dxgi.dll), the
 //   table belongs to the wrapper, re-pointing the wrapper's object breaks the
 //   wrapper's own dispatch assumptions, and the game crashes at launch.
@@ -199,15 +203,25 @@ public:
     // Returns how many slots were re-patched this pass. `name` labels the log
     // lines; the first reclaim explains itself, later ones report at doublings.
     //
-    // CopyVptr mode returns 0 without looking: the private copy has no
-    // co-owners to misread and no shared table for the runtime or a
-    // clean-resolving tool to rewrite -- immunity is the mode's whole reason
-    // to exist, and a reclaim over it would be patrolling a wall nobody can
+    // CopyVptr mode re-patches nothing and always returns 0: the private copy
+    // has no co-owners to misread and no shared table for the runtime or a
+    // clean-resolving tool to rewrite -- immunity is the mode's whole reason to
+    // exist, and re-patching over it would be patrolling a wall nobody can
     // reach. (A later tool that vtable-patches finds the copy through the
     // object's vptr and chains through our thunks; one that swaps the vptr
     // again stacks on top the way we stacked. Both compose without help --
     // 0.7.0 and 0.7.1 shipped exactly this and the field never contradicted
     // it.)
+    //
+    // It does still LOOK, at two different things, because "immune" was an
+    // assertion this class made about itself and never checked. It reports a
+    // tool that wrote through the object into our copy (m_copyBreachNoted), and
+    // it reports DRIFT: slots where the live shared table no longer says what
+    // we copied. Drift is the mode working as designed -- and, if the entries
+    // the runtime swaps between are not interchangeable, it is also the mode's
+    // failure mode, with the game calling an implementation the runtime has
+    // moved on from. Issue #21 is the field case that turned that from an
+    // unstated premise into a question; see noteCopyDrift in the .cpp.
     size_t reclaim(const char* name, const size_t* quietSlots = nullptr,
                    size_t quietCount = 0);
 
@@ -244,6 +258,11 @@ private:
     // changes nothing if the protection could not be moved.
     static bool writeEntry(void** vtable, size_t slot, void* value);
 
+    // CopyVptr only, read-only, from reclaim(): compare the copy we dispatch
+    // through against the live shared table and report where they no longer
+    // agree. The measurement of the premise the mode rests on -- see the .cpp.
+    void noteCopyDrift(const char* who);
+
     void*              m_object = nullptr;
     void**             m_vtable = nullptr;
     std::vector<Patch> m_patches;
@@ -256,6 +275,11 @@ private:
     // never touched again except by uninstall's clear.
     std::vector<void*> m_copy;
     bool               m_copyBreachNoted = false;  // the copy-mode breach line, said once
+    // How many passes found the live shared table saying something our copy
+    // does not. Same cadence as m_reclaimEvents, and for the same reason: a
+    // runtime that re-points every second must stay visible without filling
+    // the log with the fact.
+    uint32_t           m_copyDriftEvents = 0;
     // How many reclaim() passes found something to re-patch. Drives the log
     // cadence: the first explains, later ones report at doublings, so a tool
     // that re-hooks every second cannot fill the log while still being visible

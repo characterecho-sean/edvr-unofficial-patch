@@ -474,6 +474,90 @@ void VTableHook::uninstall() {
     m_reclaimEvents = 0;
 }
 
+// The counterpart to reclaim() for the mode that has no war to fight: does the
+// table we COPIED still say what the live one says?
+//
+// CopyVptr's entire claim is immunity -- the runtime may re-point its shared
+// table as often as it likes, because our object no longer dispatches through
+// it. That claim rests on a premise this file states nowhere and has never
+// measured: that the entries a runtime swaps BETWEEN are interchangeable, so a
+// frozen snapshot stays as good as the live table for the whole session. If
+// they are not -- if a swap is the runtime moving its object onto a different
+// implementation because its own state now requires that one -- then a private
+// copy is not immunity. It is a snapshot of a table that has since moved on,
+// and the game is calling last second's implementation with this second's
+// state, which is the kind of mismatch that ends in a dead GPU rather than a
+// wrong pixel.
+//
+// Issue #21 is what an unmeasured premise looks like from the field: a rig
+// where the context table is re-pointed about once a second, where every
+// in-place release survives and every copy release dies a second and a half
+// after the hooks arm -- and where the only way anyone could find that out was
+// to install five years of releases in order, because this class reported
+// nothing at all about the mode whose immunity it was asserting.
+//
+// So: read-only, once per reclaim pass. How far our copy has drifted from the
+// live table, and whose code the live table points at now. It heals nothing.
+// What to DO about drift depends entirely on who is causing it, and that name
+// is the fact this line exists to supply.
+void VTableHook::noteCopyDrift(const char* who) {
+    size_t drifted = 0;
+    void*  firstNow = nullptr;
+    char   slots[96];
+    slots[0] = '\0';
+
+    const size_t span = m_execPrefix < m_copy.size() ? m_execPrefix : m_copy.size();
+    for (size_t i = 0; i < span; ++i) {
+        // What this slot held when we copied it. Our patches overwrote the
+        // copy, so for a patched slot that value lives in the Patch and not in
+        // m_copy -- comparing the live table against our own thunk would report
+        // every hooked slot as drift, every pass, forever.
+        void* copied = m_copy[i];
+        for (const Patch& p : m_patches) {
+            if (p.slot == i) {
+                copied = p.original;
+                break;
+            }
+        }
+        void* now = nullptr;
+        if (!guarded("VTableHook::noteCopyDrift/read-slot",
+                     [&] { now = m_vtable[i]; })) {
+            break;
+        }
+        if (now == copied) continue;
+        if (!drifted) firstNow = now;
+        ++drifted;
+        char one[16];
+        _snprintf_s(one, sizeof(one), _TRUNCATE, "%s%zu", slots[0] ? ", " : "", i);
+        strncat_s(slots, sizeof(slots), one, _TRUNCATE);
+    }
+    if (!drifted) return;
+
+    ++m_copyDriftEvents;
+    char modBuf[MAX_PATH];
+    if (m_copyDriftEvents == 1) {
+        Log::get().note(
+            "VTableHook %s: the vtable EDVR copied has DRIFTED from the live "
+            "one -- %zu of the first %zu slots (%s) now hold something else in "
+            "the table the runtime shares, and the first of them points into "
+            "%s. EDVR's copy still holds what those slots held at install, and "
+            "this object dispatches through the copy, so the game is calling "
+            "the older entries. That is what the private-copy mode is FOR when "
+            "the two are interchangeable, and is a genuine hazard when they are "
+            "not. Nothing was changed. This check repeats about once a second "
+            "and reports again at doublings; if this log ends in a crash, this "
+            "line is the one to report.",
+            who, drifted, span, slots,
+            ownerModuleName(firstNow, modBuf, sizeof(modBuf)));
+    } else if ((m_copyDriftEvents & (m_copyDriftEvents - 1)) == 0) {
+        Log::get().note(
+            "VTableHook %s: copy drift #%u (%zu slot(s): %s; first points into "
+            "%s).",
+            who, m_copyDriftEvents, drifted, slots,
+            ownerModuleName(firstNow, modBuf, sizeof(modBuf)));
+    }
+}
+
 size_t VTableHook::reclaim(const char* name, const size_t* quietSlots,
                            size_t quietCount) {
     if (!m_committed) return 0;
@@ -519,6 +603,7 @@ size_t VTableHook::reclaim(const char* name, const size_t* quietSlots,
                         ownerModuleName(m_copy[p.slot], modBuf, sizeof(modBuf)));
                 }
             }
+            noteCopyDrift(who);
         }
         return 0;
     }
