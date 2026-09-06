@@ -1016,6 +1016,16 @@ int eyeOf(const ResourceInfo& info) {
         k->h = info.b;
         k->fmt = info.fmt;
     }
+    // A target the runtime has EVER submitted keeps the eye it was
+    // submitted as, on every frame after as well as the one it was seen
+    // on. The final target is double-buffered, so only one of each eye's
+    // two is the current submitted texture in any given frame, and on the
+    // frames where it was not, the pairing below was free to reassign it
+    // -- the flight of 2026-09-06 09:21 caught it doing exactly that, with
+    // one target reading RIGHT while the same line said it had been
+    // submitted as LEFT, which put the right eye's mask on the left eye's
+    // final image. Ground truth outranks the pairing, always.
+    if (eye < 0 && k && k->everSubmitted) eye = k->submittedAs;
     if (eye >= 0) {
         bySubmit = true;
         ++g_submitMatched;
@@ -1030,6 +1040,8 @@ int eyeOf(const ResourceInfo& info) {
             k->everSubmitted = true;
             k->submittedAs = eye;
         }
+        // Rooted for this frame too, so the pairing takes its phase from
+        // this one and never writes over it.
     } else if (k && k->settled) {
         eye = k->eye;
         ++g_settledByOrder;
@@ -1100,6 +1112,13 @@ void settleEyesByOrder() {
         if (g_seen[i].bySubmit) continue;   // ground truth already
         Known* k = knownFor(g_seen[i].resource);
         if (!k) continue;
+        if (k->everSubmitted) {
+            // Belt and braces: never let the pairing move a target the
+            // runtime itself has named.
+            k->eye = k->submittedAs;
+            k->settled = true;
+            continue;
+        }
         if (k->settled && k->eye == eye) continue;
         if (k->settled && k->eye != eye) {
             ++g_corrections;
