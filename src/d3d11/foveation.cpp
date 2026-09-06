@@ -413,6 +413,7 @@ uint32_t g_censusGen = ~0u;
 uint64_t g_eyeDraws = 0;       // eye-sized draws while armed
 uint64_t g_eyeDrawsUnder = 0;  // ...with the image bound
 uint64_t g_otherDraws = 0;     // draws into anything else while armed
+uint64_t g_unknownEyeDraws = 0;   // ...left at full rate because the eye is not known
 
 // The state the game's eye draws run under, for the summary: the cull
 // flight of 2026-09-06 06:39 left the periphery lit with every eye draw
@@ -637,6 +638,7 @@ bool      g_boundUnknown = false;   // ClearState: whatever was bound may be gon
 bool      g_ratesOn = false;
 uint32_t  g_lastRtvGen = ~0u;
 Mask*     g_lastMask = nullptr;
+bool      g_lastEyeUnknown = false;
 uint32_t  g_appliedGen = ~0u;        // the binding generation the image was last applied at
 
 NvViewportRates  g_rates[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE];
@@ -1171,54 +1173,63 @@ const char* gpuBusyText() {
 
 void summary(const char* when) {
     const double f = g_framesArmed ? static_cast<double>(g_framesArmed) : 1.0;
-    // The targets by draws, largest first, at most eight.
-    const Sig* order[16] = {};
-    int n = 0;
-    for (const Sig& s : g_sigs) {
-        if (s.used) order[n++] = &s;
-    }
-    for (int i = 1; i < n; ++i) {
-        const Sig* s = order[i];
-        int j = i;
-        while (j > 0 && order[j - 1]->under + order[j - 1]->bare + order[j - 1]->other < s->under + s->bare + s->other) {
-            order[j] = order[j - 1];
-            --j;
-        }
-        order[j] = s;
-    }
-    char by[900];
-    int bl = 0;
-    for (int i = 0; i < n && i < 8; ++i) {
-        const Sig& s = *order[i];
-        const char* name = fmtName(s.fmt);
-        char fmtBuf[24];
-        if (!name) {
-            snprintf(fmtBuf, sizeof(fmtBuf), "fmt %u", s.fmt);
-            name = fmtBuf;
-        }
-        const int wrote = snprintf(by + bl, sizeof(by) - bl, "%s%ux%u %s: %.0f under, %.0f bare, %.0f as not-an-eye",
-                                   bl ? "; " : "", s.w, s.h, name, static_cast<double>(s.under) / f,
-                                   static_cast<double>(s.bare) / f, static_cast<double>(s.other) / f);
-        if (wrote < 0 || bl + wrote >= static_cast<int>(sizeof(by)) - 1) break;
-        bl += wrote;
-    }
+    // Split across several lines: one line carrying all of this was cut by
+    // the log's own limit on 2026-09-06 09:05, and everything after the
+    // target list -- the whole point of it -- was lost.
     Log::get().note(
         "foveation: %s -- %u frames with the image armed; %.1f eye-sized targets a frame attributed "
-        "to the left eye and %.1f to the right (%.1f a frame by the submitted texture, the rest by "
-        "first-bind order); %.1f image switches a frame (most %u); %u images made; %u frames "
-        "without published tangents. Draws a frame over the whole armed span: %.0f into eye-sized "
-        "targets, %.0f of them under the image, %.0f into everything else; by target, largest "
-        "first: %s. GPU busy since the last summary: %s. The centre: %s. Eyes settled: %.1f a frame by a "
-        "submitted texture, %.1f by the render order behind one, %.1f not yet placed, %llu corrections. "
-        "The state the eye draws run under -- %s. The eye targets themselves: %s.",
+        "to the left eye and %.1f to the right; %.1f image switches a frame (most %u); %u images made; "
+        "%u frames without published tangents.",
         when, g_framesArmed, static_cast<double>(g_targetsSum[0]) / f,
-        static_cast<double>(g_targetsSum[1]) / f, static_cast<double>(g_submitMatched) / f,
-        static_cast<double>(g_switches) / f, g_switchesMax, g_imagesMade, g_noTangentFrames,
-        static_cast<double>(g_eyeDraws) / f, static_cast<double>(g_eyeDrawsUnder) / f,
-        static_cast<double>(g_otherDraws) / f, bl ? by : "none seen", gpuBusyText(), centreText(),
+        static_cast<double>(g_targetsSum[1]) / f, static_cast<double>(g_switches) / f, g_switchesMax,
+        g_imagesMade, g_noTangentFrames);
+    Log::get().note(
+        "foveation: %s, the draws -- %.0f a frame into eye-sized targets, %.0f of them under the image, "
+        "%.0f left at full rate because the eye is not known, %.0f into everything else. Eyes settled: "
+        "%.1f a frame by a submitted texture, %.1f by the render order behind one, %.1f not placed, "
+        "%llu corrections.",
+        when, static_cast<double>(g_eyeDraws) / f, static_cast<double>(g_eyeDrawsUnder) / f,
+        static_cast<double>(g_unknownEyeDraws) / f, static_cast<double>(g_otherDraws) / f,
         static_cast<double>(g_settledBySubmit) / f, static_cast<double>(g_settledByOrder) / f,
-        static_cast<double>(g_unsettled) / f, static_cast<unsigned long long>(g_corrections), stateText(),
-        targetsText());
+        static_cast<double>(g_unsettled) / f, static_cast<unsigned long long>(g_corrections));
+    {
+        // The targets by draws, largest first, at most eight.
+        const Sig* order[16] = {};
+        int n = 0;
+        for (const Sig& s : g_sigs) {
+            if (s.used) order[n++] = &s;
+        }
+        for (int i = 1; i < n; ++i) {
+            const Sig* s = order[i];
+            int j = i;
+            while (j > 0 && order[j - 1]->under + order[j - 1]->bare + order[j - 1]->other < s->under + s->bare + s->other) {
+                order[j] = order[j - 1];
+                --j;
+            }
+            order[j] = s;
+        }
+        char by[700];
+        int bl = 0;
+        for (int i = 0; i < n && i < 8; ++i) {
+            const Sig& s = *order[i];
+            const char* name = fmtName(s.fmt);
+            char fmtBuf[24];
+            if (!name) {
+                snprintf(fmtBuf, sizeof(fmtBuf), "fmt %u", s.fmt);
+                name = fmtBuf;
+            }
+            const int wrote = snprintf(by + bl, sizeof(by) - bl, "%s%ux%u %s: %.0f under, %.0f bare, %.0f as not-an-eye",
+                                       bl ? "; " : "", s.w, s.h, name, static_cast<double>(s.under) / f,
+                                       static_cast<double>(s.bare) / f, static_cast<double>(s.other) / f);
+            if (wrote < 0 || bl + wrote >= static_cast<int>(sizeof(by)) - 1) break;
+            bl += wrote;
+        }
+        Log::get().note("foveation: %s, by target size -- %s.", when, bl ? by : "none seen");
+    }
+    Log::get().note("foveation: %s, the eye targets -- %s.", when, targetsText());
+    Log::get().note("foveation: %s, the GPU busy since the last summary: %s. The centre: %s.", when,
+                    gpuBusyText(), centreText());
+    Log::get().note("foveation: %s, the state the eye draws run under -- %s.", when, stateText());
     g_gpuBusySum = 0;
     g_gpuBusyN = 0;
     g_gpuBusyMax = 0;
@@ -1226,6 +1237,7 @@ void summary(const char* when) {
     g_settledBySubmit = 0;
     g_settledByOrder = 0;
     g_unsettled = 0;
+    g_unknownEyeDraws = 0;
 }
 
 }  // namespace
@@ -1384,11 +1396,28 @@ void foveationOnDraw(ID3D11DeviceContext* ctx, bool rtvEyeSized, void* rtv, uint
     if (rtvGen != g_lastRtvGen) {
         g_lastRtvGen = rtvGen;
         g_lastMask = nullptr;
+        g_lastEyeUnknown = false;
         ResourceInfo info;
         if (bindingResolve(rtv, &info) && info.isTexture2D && info.a >= kTile && info.b >= kTile) {
             const int eye = eyeOf(info);
-            g_lastMask = maskFor(ctx, info.a, info.b, eye);
-            if (!g_lastMask && g_phase == Phase::Armed) ++g_noTangentFrames;
+            // ONLY where the eye is known. The two eyes' frusta are
+            // mirrored, so a target wearing the other eye's mask has its
+            // rings a fifth of the image out, and that is rivalry rather
+            // than blur -- the flight of 2026-09-06 09:05 measured ten
+            // eye-sized targets a frame with only the two submitted ones
+            // identified, so eight of them were wearing the left eye's
+            // mask by default and the right eye saw the left eye's
+            // pattern. Elite interleaves the two eyes' draws
+            // (eye_split.h), so no ordering rule can place the rest; an
+            // unplaced target is left at full rate, which costs coverage
+            // and cannot be seen.
+            const Known* k = knownFor(info.resource);
+            if (k && k->settled) {
+                g_lastMask = maskFor(ctx, info.a, info.b, eye);
+                if (!g_lastMask && g_phase == Phase::Armed) ++g_noTangentFrames;
+            } else {
+                g_lastEyeUnknown = true;
+            }
         }
     }
     IUnknown* want = g_lastMask ? g_lastMask->view : nullptr;
@@ -1403,6 +1432,7 @@ void foveationOnDraw(ID3D11DeviceContext* ctx, bool rtvEyeSized, void* rtv, uint
     }
     if (g_phase == Phase::Armed) {
         ++g_eyeDraws;
+        if (g_lastEyeUnknown) ++g_unknownEyeDraws;
         if (want) {
             ++g_eyeDrawsUnder;
             if (g_censusSig) ++g_censusSig->under;
@@ -1505,6 +1535,7 @@ void foveationFrameBoundary(ID3D11DeviceContext* ctx) {
     g_lastMask = nullptr;
     g_censusGen = ~0u;
     g_censusSig = nullptr;
+    g_lastEyeUnknown = false;
     // A size the game stopped rendering at (a resolution change) ages out.
     for (Mask& m : g_masks) {
         if (m.used && g_frame - m.lastFrame > 900) releaseMask(m);
