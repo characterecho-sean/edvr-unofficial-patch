@@ -630,6 +630,41 @@ how many eyes were settled by a submitted texture, how many by the render
 order behind one, how many are not yet placed, and how many corrections
 the walk has made.
 
+**The preset is not a free choice once DLSS is on (2026-09-06).** With the
+eye-tracked centre working and both eyes' discs finally on one direction,
+Sean still read blockiness on menu text, and it sat *inside* the full-rate
+disc, which is where it cannot be. Three settings named the mechanism
+between them: with the feature off it was gone, with
+`advanced.foveation_passes = geometry` it stayed, and at `quality` instead
+of `performance` it was gone again.
+
+The rate changes in a hard step at the disc's edge, and DLSS accumulates
+each pixel over eight to sixteen frames. A pixel that has just crossed
+into the disc still carries the coarse version of itself in the history,
+and resolves over the frames that follow. So the artefact appears inside
+the disc by construction: it is the recent past of pixels that were
+outside it. The preset decides how often that happens, because the angles
+are full cones -- performance's disc reaches only 19 degrees from the gaze
+and quality's 35. A menu subtends more than 19, so at performance every
+small saccade drags text across the step; at 35 the step sits outside
+anything being read and nothing crosses.
+
+`foveation_passes = geometry` was the wrong lever and its failure is
+informative: it exempts draws of six vertices or fewer, which are the
+full-screen quads, and the game batches its UI text into ordinary geometry
+with far more. The UI never left the mask.
+
+This is a property of a moving rate boundary under any temporal
+accumulator, not a fault to be tuned out, and it is the same physics that
+took the eye-tracked DLSS crop off the plan: a boundary that moves with
+the eye must be resolved by the accumulator every time it moves.
+CheekyFoveatedDLSS meets it by resetting the DLSS history on large gaze
+jumps, trading the blockiness for a resolve. That trade is not worth
+making here, because the measurement above says the feature buys no frames
+on Elite to pay for it. The honest resolution is the one now written into
+edvr.ini: with the temporal pass on, use quality -- which shades less
+coarsely still, and so saves less than the nothing already measured.
+
 ## Feature 3 — the eye-tracked centre
 
 **What changed since the toolkit era.** The toolkit needed a per-vendor
