@@ -271,6 +271,26 @@ constexpr uint32_t kRatePreset = 0xFFFFFFFFu;
 uint32_t g_outerOverride = kRatePreset;
 bool     g_cullInner = false;   // the diagnostic that culls the full-rate disc itself
 bool     g_cullAll = false;     // ...and every tile of the eye
+// THE STRIP ONLY ONE EYE CAN SEE.
+//
+// The two frusta are mirrored and asymmetric: on the Crystal Super each
+// eye reaches 1.529 in tangent to its own temporal side and 1.032 to the
+// nose. So the far temporal strip of each eye, everything past the other
+// eye's nasal reach, is territory NO other eye covers -- and equally,
+// nothing there can disagree with the other eye, because the other eye
+// has nothing there to disagree with.
+//
+// That is what makes it the one place culling is free of rivalry. Cull
+// inside the binocular overlap and one eye goes black where its partner
+// still draws, which the brain will not let you ignore. Cull the
+// monocular strip and the only cost is a slightly narrower field, at the
+// very edge of vision, in both eyes symmetrically.
+//
+// It is about a fifth of each eye's width here, and unlike a shading rate
+// a cull stops the WRITES as well as the shading, which is where the eye
+// draws actually spend their time (see docs/performance.md, feature 2).
+// Sean's idea, 2026-09-06.
+bool     g_monoEdge = false;
 // The attribution test: blacken every tile of the eye the module BELIEVES
 // it is drawing. Which of the commander's own eyes goes dark is then the
 // measurement -- "cull_left" darkening the right eye says the two are
@@ -785,6 +805,11 @@ const char* rateName(uint32_t rate) {
     }
 }
 const char* outerRateName() { return rateName(outerRate()); }
+const char* monoEdgeName(bool skip) {
+    return skip ? "the strip only one eye can see is SKIPPED entirely "
+                  "(advanced.foveation_monocular_edge = skip)"
+                : "every part of each eye is drawn (advanced.foveation_monocular_edge = draw)";
+}
 
 void releaseMask(Mask& m) {
     if (m.tex) m.tex->Release();
@@ -963,6 +988,14 @@ bool fillMask(ID3D11DeviceContext* ctx, Mask& m) {
         m.gen = g_settingsGen;
         return true;
     }
+    // The monocular strip's boundary, in this eye's own tangents. The
+    // other eye reaches to this eye's nasal tangent mirrored, so for the
+    // left eye (l -outer, r +inner) everything below -r is territory the
+    // right eye does not cover, and for the right eye (l -inner, r +outer)
+    // everything above -l is. Symmetric frusta put the boundary on the
+    // image edge, which culls nothing, which is correct.
+    const bool  monoLeft = m.eye == 0;
+    const float monoEdge = monoLeft ? -r : -l;
     const float fw = static_cast<float>(m.w), fh = static_cast<float>(m.h);
     for (uint32_t j = 0; j < m.th; ++j) {
         const float py0 = static_cast<float>(j * kTile);
@@ -979,7 +1012,12 @@ bool fillMask(ID3D11DeviceContext* ctx, Mask& m) {
             const float nx = cx < tx0 ? tx0 : (cx > tx1 ? tx1 : cx);
             const float ny = cy < ty0 ? ty0 : (cy > ty1 ? ty1 : cy);
             const float d2 = (nx - cx) * (nx - cx) + (ny - cy) * (ny - cy);
-            g_scratch[static_cast<size_t>(j) * m.tw + i] = d2 < ri2 ? 0 : (d2 < ro2 ? 1 : 2);
+            uint8_t rate = d2 < ri2 ? 0 : (d2 < ro2 ? 1 : 2);
+            // Whole tiles only: a tile straddling the boundary still holds
+            // pixels the other eye can see, and half a culled tile at the
+            // seam would be a hard edge in the overlap.
+            if (g_monoEdge && (monoLeft ? (tx1 <= monoEdge) : (tx0 >= monoEdge))) rate = 3;
+            g_scratch[static_cast<size_t>(j) * m.tw + i] = rate;
         }
     }
     ctx->UpdateSubresource(m.tex, 0, nullptr, g_scratch, m.tw, 0);
@@ -1277,13 +1315,14 @@ void arm(ID3D11DeviceContext* ctx) {
     Log::get().note(
         "foveation: ARMED (fix.foveation = %s) -- NvAPI is up and %s. Full-rate shading inside %.0f "
         "degrees about each eye's fixation point (%.2f m), one shade per 2x2 pixels out to %.0f "
-        "degrees, one per %s beyond; %s. The rate table reads %s inside, %s in the ring, %s beyond. The image "
+        "degrees, one per %s beyond; %s; %s. The rate table reads %s inside, %s in the ring, %s beyond. The image "
         "binds at the first eye draw. Modules in the process with names worth knowing: %s.",
         modeName(g_mode),
         sup == 1 ? "the driver says this GPU shades at variable rate" : "the capability query was refused, so the view will decide",
-        g_innerDeg, g_distance, g_outerDeg, outerRateName(), rateName(innerRate()), rateName(midRate()), rateName(outerRate()),
+        g_innerDeg, g_distance, g_outerDeg, outerRateName(),
         g_geometryOnly ? "geometry draws only, the full-screen passes at full rate (advanced.foveation_passes = geometry)"
                        : "every draw into the eye, the full-screen passes included (advanced.foveation_passes = all)",
+        monoEdgeName(g_monoEdge), rateName(innerRate()), rateName(midRate()), rateName(outerRate()),
         suspectModules());
 }
 
@@ -1449,6 +1488,8 @@ void foveationConfigure(Config& cfg) {
     if (dist > 0.0f && dist < 0.2f) dist = 0.2f;
     const std::string passes = cfg.getString("advanced.foveation_passes", "all");
     const bool geom = passes == "geometry";
+    const std::string monoKey = cfg.getString("advanced.foveation_monocular_edge", "draw");
+    const bool mono = monoKey == "skip";
     const std::string outerRateKey = cfg.getString("advanced.foveation_outer_rate", "preset");
     uint32_t outerOverride = kRatePreset;
     bool cullInner = false, cullAll = false;
@@ -1464,7 +1505,7 @@ void foveationConfigure(Config& cfg) {
     const bool changed = m != g_mode || inner != g_innerDeg || outer != g_outerDeg ||
                          dist != g_distance || geom != g_geometryOnly || follow != g_followEyes ||
                          outerOverride != g_outerOverride || cullInner != g_cullInner || cullAll != g_cullAll ||
-                         cullEye != g_cullEye;
+                         cullEye != g_cullEye || mono != g_monoEdge;
     const bool first = !g_configured;
     g_configured = true;
     g_mode = m;
@@ -1477,6 +1518,7 @@ void foveationConfigure(Config& cfg) {
     g_cullInner = cullInner;
     g_cullAll = cullAll;
     g_cullEye = cullEye;
+    g_monoEdge = mono;
     if (changed) ++g_settingsGen;
     if ((first || changed) && cullEye >= 0) {
         Log::get().note(
@@ -1513,16 +1555,16 @@ void foveationConfigure(Config& cfg) {
     if (g_phase == Phase::Off) {
         g_phase = Phase::Wanted;
         Log::get().note("foveation: ON (fix.foveation = %s): full rate inside %.0f degrees, 2x2 to %.0f, "
-                        "%s beyond, fixation %.2f m, %s draws. Arms at the first eye draw "
+                        "%s beyond, fixation %.2f m, %s draws, %s. Arms at the first eye draw "
                         "(docs/performance.md, feature 2).",
                         modeName(m), inner, outer, outerRate() == kRate4x4 ? "4x4" : "2x2", dist,
-                        geom ? "geometry" : "all");
+                        geom ? "geometry" : "all", monoEdgeName(mono));
     } else if (changed && g_phase == Phase::Armed) {
         Log::get().note("foveation: settings changed (fix.foveation = %s, %.0f/%.0f degrees, %.2f m, %s "
-                        "draws; the rate table now reads %s inside, %s in the ring, %s beyond) -- the images "
+                        "draws, %s; the rate table now reads %s inside, %s in the ring, %s beyond) -- the images "
                         "refill at their next use.",
-                        modeName(m), inner, outer, dist, geom ? "geometry" : "all", rateName(innerRate()),
-                        rateName(midRate()), rateName(outerRate()));
+                        modeName(m), inner, outer, dist, geom ? "geometry" : "all", monoEdgeName(mono),
+                        rateName(innerRate()), rateName(midRate()), rateName(outerRate()));
     }
 }
 
