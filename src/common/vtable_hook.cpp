@@ -103,6 +103,23 @@ void* owningModule(void* p) {
     return mbi.AllocationBase;
 }
 
+// A page protection as its name, for the write autopsy. Hex here would be one
+// more lookup between a reader and the answer, and the copy-on-write values are
+// the whole reason the line exists.
+const char* protectName(DWORD p) {
+    switch (p & 0xFF) {
+        case PAGE_NOACCESS:               return "PAGE_NOACCESS";
+        case PAGE_READONLY:               return "PAGE_READONLY";
+        case PAGE_READWRITE:              return "PAGE_READWRITE";
+        case PAGE_WRITECOPY:              return "PAGE_WRITECOPY (copy-on-write)";
+        case PAGE_EXECUTE:                return "PAGE_EXECUTE";
+        case PAGE_EXECUTE_READ:           return "PAGE_EXECUTE_READ";
+        case PAGE_EXECUTE_READWRITE:      return "PAGE_EXECUTE_READWRITE";
+        case PAGE_EXECUTE_WRITECOPY:      return "PAGE_EXECUTE_WRITECOPY (copy-on-write)";
+        default:                          return "an unnamed protection";
+    }
+}
+
 // Append a slot number to a comma-separated list, or close the list with an
 // ellipsis if it will not fit.
 //
@@ -195,7 +212,8 @@ size_t vtableEntriesInModule(void** vtable, size_t count, void* moduleBase) {
     return hits;
 }
 
-bool VTableHook::writeEntry(void** vtable, size_t slot, void* value) {
+bool VTableHook::writeEntry(void** vtable, size_t slot, void* value,
+                            const char* why) {
     DWORD oldProtect = 0;
     if (!VirtualProtect(&vtable[slot], sizeof(void*), PAGE_READWRITE, &oldProtect)) {
         Log::get().note("VTableHook: could not make vtable slot %zu at %p "
@@ -205,8 +223,77 @@ bool VTableHook::writeEntry(void** vtable, size_t slot, void* value) {
     }
     const bool ok =
         guarded("VTableHook::writeEntry", [&] { vtable[slot] = value; });
+
+    // THE WRITE AUTOPSY. Five years of this function assuming its own writes
+    // land, and issue #21 is the rig that made the assumption worth testing:
+    // there the slot is foreign again on the very next frame, every frame,
+    // always holding the SAME original pointer -- one distinct entry through
+    // eight thousand exchanges. That is not somebody selecting between
+    // implementations. That is a restore, and there are two families of cause
+    // this function has never been able to tell apart:
+    //
+    //   * somebody writes the original back after we write ours, or
+    //   * our write does not survive, and nobody else is involved at all.
+    //
+    // Nothing here ever read the slot back, so the second family has never once
+    // been looked at. Two reads settle it, and their PLACEMENT is the point:
+    // one straight after the store while the page is still PAGE_READWRITE, one
+    // after the protection is put back. If the value is ours at the first and
+    // gone at the second, restoring the protection is what loses it -- a
+    // one-line bug in here, not a war with the operating system.
+    void* afterWrite = nullptr;
+    guarded("VTableHook::writeEntry/read-back",
+            [&] { afterWrite = vtable[slot]; });
+
+    // Restore -- but never to a copy-on-write protection. Putting
+    // PAGE_WRITECOPY or PAGE_EXECUTE_WRITECOPY back onto a page that has just
+    // been made private by writing to it is the classic way to have the private
+    // copy dropped and the image's original contents returned, which would look
+    // exactly like the field report above. The non-copy equivalents leave the
+    // page as readable and as executable as it was, and are what every other
+    // hooking library restores. Only reached when a table lives in a mapped
+    // image; the D3D11 context's table is heap-resident on the reporting rig,
+    // where this changes nothing.
+    DWORD restore = oldProtect;
+    if (restore == PAGE_WRITECOPY)                 restore = PAGE_READONLY;
+    else if (restore == PAGE_EXECUTE_WRITECOPY)    restore = PAGE_EXECUTE_READ;
     DWORD ignored = 0;
-    VirtualProtect(&vtable[slot], sizeof(void*), oldProtect, &ignored);
+    VirtualProtect(&vtable[slot], sizeof(void*), restore, &ignored);
+
+    void* afterRestore = nullptr;
+    guarded("VTableHook::writeEntry/read-back-2",
+            [&] { afterRestore = vtable[slot]; });
+
+    if (ok && m_writeAutopsies < kWriteAutopsies &&
+        (afterWrite != value || afterRestore != value)) {
+        // Reported only when a write did NOT survive its own function. A write
+        // that lands and stays needs no line, and the ordinary case must not
+        // fill the log to prove it is ordinary.
+        ++m_writeAutopsies;
+        MEMORY_BASIC_INFORMATION mbi{};
+        const bool haveMbi =
+            VirtualQuery(&vtable[slot], &mbi, sizeof(mbi)) == sizeof(mbi);
+        Log::get().note(
+            "VTableHook: the %s write to slot %zu at %p DID NOT SURVIVE this "
+            "function. Straight after the store the slot held %s; after the page "
+            "protection was restored it held %s. Page: %s, %s, allocation base "
+            "%p, protection was %s and was put back as %s. If the value was ours "
+            "before the restore and not after, the restore is the bug; if it was "
+            "already not ours before it, the store itself did not take. Said at "
+            "most %u times.",
+            why ? why : "?", slot, (void*)&vtable[slot],
+            afterWrite == value ? "OURS" : "the ORIGINAL (not ours)",
+            afterRestore == value ? "OURS" : "the ORIGINAL (not ours)",
+            haveMbi ? (mbi.Type == MEM_IMAGE     ? "a mapped image"
+                       : mbi.Type == MEM_MAPPED  ? "a mapped file or section"
+                       : mbi.Type == MEM_PRIVATE ? "private memory (heap)"
+                                                 : "an unnamed region")
+                    : "unqueryable",
+            haveMbi && mbi.State == MEM_COMMIT ? "committed" : "not committed",
+            haveMbi ? mbi.AllocationBase : nullptr,
+            protectName(oldProtect), protectName(restore),
+            static_cast<unsigned>(kWriteAutopsies));
+    }
     return ok;
 }
 
@@ -328,14 +415,14 @@ bool VTableHook::commit() {
     size_t written = 0;
     for (; written < m_patches.size(); ++written) {
         const Patch& p = m_patches[written];
-        if (!writeEntry(m_vtable, p.slot, p.replacement)) break;
+        if (!writeEntry(m_vtable, p.slot, p.replacement, "install")) break;
     }
     if (written < m_patches.size()) {
         // Partial patch is worse than none: a half-installed fix is a fix
         // whose invariants nobody has reasoned about. Put back what went in.
         for (size_t i = 0; i < written; ++i) {
             const Patch& p = m_patches[i];
-            writeEntry(m_vtable, p.slot, p.original);
+            writeEntry(m_vtable, p.slot, p.original, "roll back");
         }
         Log::get().note("VTableHook: %zu of %zu entries could not be patched at "
                         "%p, so all of them were rolled back and the fix is off.",
@@ -468,7 +555,7 @@ void VTableHook::uninstall() {
                                 p.slot, (void*)m_vtable);
                 continue;
             }
-            writeEntry(m_vtable, p.slot, p.original);
+            writeEntry(m_vtable, p.slot, p.original, "uninstall");
         }
         m_committed = false;
     }
@@ -940,7 +1027,7 @@ size_t VTableHook::reclaim(const char* name, const size_t* quietSlots,
         // on issue #21's rig that is 29 of them. Failing repeatably also means
         // the forward has been moved while our thunk is NOT in the slot, which
         // is a state to escape rather than re-enter for the session.
-        const bool wrote = writeEntry(m_vtable, p.slot, p.replacement);
+        const bool wrote = writeEntry(m_vtable, p.slot, p.replacement, "re-claim");
         if (!ownerRepoint || !wrote) ++p.repatches;
 
         if (p.repatches >= kMaxRepatchesPerSlot) {

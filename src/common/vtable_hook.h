@@ -345,7 +345,17 @@ private:
 
     // Writes one entry with the page temporarily writable. Returns false and
     // changes nothing if the protection could not be moved.
-    static bool writeEntry(void** vtable, size_t slot, void* value);
+    //
+    // Reads the slot back twice -- once before the protection is restored, once
+    // after -- and reports when the write did not survive its own function.
+    // `why` labels the write in that report ("install", "re-claim", "undo").
+    // See the definition: five years of assuming these writes land, and a rig
+    // where the slot is the original again on the next frame, every frame.
+    bool writeEntry(void** vtable, size_t slot, void* value, const char* why);
+
+    // How many non-surviving writes get an autopsy line. Three is enough to
+    // show install and re-claim behaving the same way without a line per frame.
+    static constexpr uint32_t kWriteAutopsies = 3;
 
     // Clear everything this hook believed about the object it just released.
     // Called from every one of uninstall()'s three exits; see the definition.
@@ -384,6 +394,7 @@ private:
     size_t             m_lastDisplaced = 0;
     size_t             m_lastConceded = 0;
     bool               m_lastPassRan = false;
+    uint32_t           m_writeAutopsies = 0;   // see kWriteAutopsies
     // How many reclaim() passes found something to re-patch. Drives the log
     // cadence: the first explains, later ones report at doublings, so a tool
     // that re-hooks every second cannot fill the log while still being visible
