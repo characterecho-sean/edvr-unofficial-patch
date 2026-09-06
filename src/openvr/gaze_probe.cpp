@@ -694,11 +694,13 @@ void repairAccumulate() {
         const double nl = sqrt(n[0] * n[0] + n[1] * n[1] + 1.0);
         for (double& c : n) c /= nl;
     }
-    // The point-form check: p with its scale from two point-form reads (x
+    // The point-form repair: p with its scale from two point-form reads (x
     // and y with the identity-with-w=1 matrix, z with the first row swapped
-    // in). The 14:54 flight set every frame of p + t aside as not unit
-    // length, so the magnitudes are kept for every frame here and the
-    // acceptance below is the model being tested, not the model.
+    // in). The 18:15 flight read |p - t| = 1.00 in every window and
+    // cos(p, n) = -1.000: the point form is handed out as t - d, the head's
+    // raw-universe position minus the unit gaze, so the gaze is d = t - p,
+    // one subtraction per frame. The magnitudes stay in the summary as the
+    // standing check of that model.
     vr::HmdVector2_t xy = {{NAN, NAN}}, zy = {{NAN, NAN}};
     bool dec1 = false, dec2 = false;
     const bool haveP = callProj(kPointRows, &xy, &dec1) && callProj(kZRows, &zy, &dec2) &&
@@ -707,18 +709,18 @@ void repairAccumulate() {
     if (!haveP) { for (RepairWindow* rw : w) ++rw->noP; }
     if (haveP && haveT) {
         const double p[3] = {xy.v[0], xy.v[1], zy.v[0]};
-        const double d0[3] = {p[0] + t[0], p[1] + t[1], p[2] + t[2]};
-        const double m0[3] = {p[0] - t[0], p[1] - t[1], p[2] - t[2]};
+        const double d0[3] = {t[0] - p[0], t[1] - p[1], t[2] - p[2]};   // the gaze, d = t - p
+        const double s0[3] = {p[0] + t[0], p[1] + t[1], p[2] + t[2]};   // the other sign, for the record
         const double dl = sqrt(d0[0] * d0[0] + d0[1] * d0[1] + d0[2] * d0[2]);
-        const double ml = sqrt(m0[0] * m0[0] + m0[1] * m0[1] + m0[2] * m0[2]);
+        const double ml = sqrt(s0[0] * s0[0] + s0[1] * s0[1] + s0[2] * s0[2]);
         const double pl = sqrt(p[0] * p[0] + p[1] * p[1] + p[2] * p[2]);
         const double tl = sqrt(t[0] * t[0] + t[1] * t[1] + t[2] * t[2]);
         for (RepairWindow* rw : w) {
             ++rw->magN;
             rw->pAbs += pl;
             rw->tAbs += tl;
-            rw->plusAbs += dl;
-            rw->minusAbs += ml;
+            rw->plusAbs += ml;    // |p + t|
+            rw->minusAbs += dl;   // |t - p|, the gaze's length: 1.000 when the model holds
             for (int i = 0; i < 3; ++i) {
                 rw->pMean[i] += p[i];
                 rw->tMean[i] += t[i];
@@ -826,13 +828,14 @@ void repairSummary(bool final) {
         }
         const double mn = w.magN ? static_cast<double>(w.magN) : 1.0;
         Log::get().note(
-            "gaze probe %s, the point-form check (Route A's second reading): over %u frames with p and t "
-            "|p| %.2f, |t| %.2f, |p + t| %.2f, |p - t| %.2f, cos(p, n) %+.3f over %u; p mean (%.2f, %.2f, "
-            "%.2f), t mean (%.2f, %.2f, %.2f). Whichever of |p + t| and |p - t| reads 1.000 is the "
-            "model; cos +1 says p points along the direction-form reading, -1 against it. The unit "
-            "test as built (d = p + t within 0.5..2): %u frames accepted (%u the read declined, %u "
-            "without a raw pose, %u set aside), |d| mean %.3f, %.3f..%.3f; d's mean direction as "
-            "yaw/pitch, degrees, + = right/up: %s. %s.",
+            "gaze probe %s, the frame repair by SUBTRACTION (Route A, d = t - p): over %u frames with p and "
+            "t |p| %.2f, |t| %.2f, |p + t| %.2f, |t - p| %.2f (1.000 says the model holds), cos(p, n) "
+            "%+.3f over %u (-1 says the point form is handed out opposed to the direction form, as "
+            "measured); p mean (%.2f, %.2f, %.2f), t mean (%.2f, %.2f, %.2f). Frames with |d| within "
+            "0.5..2: %u (%u the read declined, %u without a raw pose, %u set aside), |d| mean %.3f, "
+            "%.3f..%.3f; d's mean direction as yaw/pitch, degrees, + = right/up, in four sign "
+            "conventions: %s. The convention whose yaw goes left when the eyes go left and whose pitch "
+            "goes up when they go up is the gaze in the head's frame. %s.",
             final ? "SESSION TOTALS" : "summary", w.magN, w.pAbs / mn, w.tAbs / mn, w.plusAbs / mn,
             w.minusAbs / mn, w.cosN ? w.cosPN / w.cosN : 0.0, w.cosN, w.pMean[0] / mn, w.pMean[1] / mn,
             w.pMean[2] / mn, w.tMean[0] / mn, w.tMean[1] / mn, w.tMean[2] / mn, w.subN, w.noP, w.noT,

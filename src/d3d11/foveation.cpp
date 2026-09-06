@@ -244,17 +244,23 @@ struct Seen {
 Seen     g_seen[48];
 uint32_t g_seenCount = 0;
 
-// Draws under the image by target signature, for the summary: which of the
-// frame's targets the coarse shading actually reached, and how many draws
-// went into each with and without it.
+// The census: every target the game draws into while the feature is armed,
+// by size and format, with its draws split into those under the image,
+// eye-sized draws without it, and draws the census called something other
+// than an eye. One resolve per rebind, one counter per draw. The 18:15
+// flight's single summary landed in the loading screen and said nothing
+// about the scene, so this is periodic, and it names the targets the
+// coarse shading did NOT reach as well as the ones it did.
 struct Sig {
     bool     used = false;
     uint32_t w = 0, h = 0, fmt = 0;
     uint64_t under = 0;   // eye draws into it with the image bound
     uint64_t bare = 0;    // eye draws into it with no image (none made yet, or the passes filter)
+    uint64_t other = 0;   // draws into it while the census called it not eye-sized
 };
-Sig      g_sigs[8];
-Sig*     g_lastSig = nullptr;
+Sig      g_sigs[16];
+Sig*     g_censusSig = nullptr;
+uint32_t g_censusGen = ~0u;
 uint64_t g_eyeDraws = 0;       // eye-sized draws while armed
 uint64_t g_eyeDrawsUnder = 0;  // ...with the image bound
 uint64_t g_otherDraws = 0;     // draws into anything else while armed
@@ -273,6 +279,34 @@ Sig* sigFor(const ResourceInfo& info) {
         }
     }
     return nullptr;
+}
+
+const char* fmtName(uint32_t fmt) {
+    switch (fmt) {
+        case 2: return "R32G32B32A32_FLOAT";
+        case 10: return "R16G16B16A16_FLOAT";
+        case 11: return "R16G16B16A16_UNORM";
+        case 16: return "R32G32_FLOAT";
+        case 23: return "R10G10B10A2_TYPELESS";
+        case 24: return "R10G10B10A2_UNORM";
+        case 26: return "R11G11B10_FLOAT";
+        case 27: return "R8G8B8A8_TYPELESS";
+        case 28: return "R8G8B8A8_UNORM";
+        case 29: return "R8G8B8A8_UNORM_SRGB";
+        case 33: return "R16G16_TYPELESS";
+        case 34: return "R16G16_FLOAT";
+        case 39: return "R32_TYPELESS";
+        case 41: return "R32_FLOAT";
+        case 53: return "R16_TYPELESS";
+        case 54: return "R16_FLOAT";
+        case 56: return "R16_UNORM";
+        case 60: return "R8_TYPELESS";
+        case 61: return "R8_UNORM";
+        case 87: return "B8G8R8A8_UNORM";
+        case 90: return "B8G8R8A8_TYPELESS";
+        case 91: return "B8G8R8A8_UNORM_SRGB";
+        default: return nullptr;
+    }
 }
 
 uint32_t  g_frame = 0;
@@ -610,20 +644,44 @@ void arm(ID3D11DeviceContext* ctx) {
 
 void summary(const char* when) {
     const double f = g_framesArmed ? static_cast<double>(g_framesArmed) : 1.0;
-    char by[400];
-    int bl = 0;
+    // The targets by draws, largest first, at most eight.
+    const Sig* order[16] = {};
+    int n = 0;
     for (const Sig& s : g_sigs) {
-        if (!s.used) continue;
-        bl += snprintf(by + bl, sizeof(by) - bl, "%s%ux%u fmt %u: %.0f under, %.0f bare", bl ? "; " : "", s.w, s.h,
-                       s.fmt, static_cast<double>(s.under) / f, static_cast<double>(s.bare) / f);
-        if (bl >= static_cast<int>(sizeof(by)) - 1) break;
+        if (s.used) order[n++] = &s;
+    }
+    for (int i = 1; i < n; ++i) {
+        const Sig* s = order[i];
+        int j = i;
+        while (j > 0 && order[j - 1]->under + order[j - 1]->bare + order[j - 1]->other < s->under + s->bare + s->other) {
+            order[j] = order[j - 1];
+            --j;
+        }
+        order[j] = s;
+    }
+    char by[900];
+    int bl = 0;
+    for (int i = 0; i < n && i < 8; ++i) {
+        const Sig& s = *order[i];
+        const char* name = fmtName(s.fmt);
+        char fmtBuf[24];
+        if (!name) {
+            snprintf(fmtBuf, sizeof(fmtBuf), "fmt %u", s.fmt);
+            name = fmtBuf;
+        }
+        const int wrote = snprintf(by + bl, sizeof(by) - bl, "%s%ux%u %s: %.0f under, %.0f bare, %.0f as not-an-eye",
+                                   bl ? "; " : "", s.w, s.h, name, static_cast<double>(s.under) / f,
+                                   static_cast<double>(s.bare) / f, static_cast<double>(s.other) / f);
+        if (wrote < 0 || bl + wrote >= static_cast<int>(sizeof(by)) - 1) break;
+        bl += wrote;
     }
     Log::get().note(
         "foveation: %s -- %u frames with the image armed; %.1f eye-sized targets a frame attributed "
         "to the left eye and %.1f to the right (%.1f a frame by the submitted texture, the rest by "
         "first-bind order); %.1f image switches a frame (most %u); %u images made; %u frames "
-        "without published tangents. Draws a frame: %.0f into eye-sized targets, %.0f of them under "
-        "the image, %.0f into everything else; by target: %s.",
+        "without published tangents. Draws a frame over the whole armed span: %.0f into eye-sized "
+        "targets, %.0f of them under the image, %.0f into everything else; by target, largest "
+        "first: %s.",
         when, g_framesArmed, static_cast<double>(g_targetsSum[0]) / f,
         static_cast<double>(g_targetsSum[1]) / f, static_cast<double>(g_submitMatched) / f,
         static_cast<double>(g_switches) / f, g_switchesMax, g_imagesMade, g_noTangentFrames,
@@ -709,16 +767,26 @@ void foveationOnDraw(ID3D11DeviceContext* ctx, bool rtvEyeSized, void* rtv, uint
         }
         return;
     }
+    // The census's resolve, once per rebind, for every target.
+    if (g_phase == Phase::Armed && rtvGen != g_censusGen) {
+        g_censusGen = rtvGen;
+        g_censusSig = nullptr;
+        ResourceInfo info;
+        if (rtv && bindingResolve(rtv, &info) && info.isTexture2D) g_censusSig = sigFor(info);
+    }
     const bool fullScreenPass = count <= 6 && instances <= 1;
     if (!rtvEyeSized) {
-        if (g_phase == Phase::Armed) ++g_otherDraws;
+        if (g_phase == Phase::Armed) {
+            ++g_otherDraws;
+            if (g_censusSig) ++g_censusSig->other;
+        }
         if (g_bound || g_boundUnknown) applyView(ctx, nullptr);
         return;
     }
     if (g_geometryOnly && fullScreenPass) {
         if (g_phase == Phase::Armed) {
             ++g_eyeDraws;
-            if (g_lastSig) ++g_lastSig->bare;
+            if (g_censusSig) ++g_censusSig->bare;
         }
         if (g_bound || g_boundUnknown) applyView(ctx, nullptr);
         return;
@@ -730,11 +798,9 @@ void foveationOnDraw(ID3D11DeviceContext* ctx, bool rtvEyeSized, void* rtv, uint
     if (rtvGen != g_lastRtvGen) {
         g_lastRtvGen = rtvGen;
         g_lastMask = nullptr;
-        g_lastSig = nullptr;
         ResourceInfo info;
         if (bindingResolve(rtv, &info) && info.isTexture2D && info.a >= kTile && info.b >= kTile) {
             const int eye = eyeOf(info);
-            g_lastSig = sigFor(info);
             g_lastMask = maskFor(ctx, info.a, info.b, eye);
             if (!g_lastMask && g_phase == Phase::Armed) ++g_noTangentFrames;
         }
@@ -745,9 +811,9 @@ void foveationOnDraw(ID3D11DeviceContext* ctx, bool rtvEyeSized, void* rtv, uint
         ++g_eyeDraws;
         if (want) {
             ++g_eyeDrawsUnder;
-            if (g_lastSig) ++g_lastSig->under;
-        } else if (g_lastSig) {
-            ++g_lastSig->bare;
+            if (g_censusSig) ++g_censusSig->under;
+        } else if (g_censusSig) {
+            ++g_censusSig->bare;
         }
     }
 }
@@ -764,9 +830,16 @@ void foveationFrameBoundary(ID3D11DeviceContext* ctx) {
         if (g_switchesFrame > g_switchesMax) g_switchesMax = g_switchesFrame;
         g_targetsSum[0] += g_targetsFrame[0];
         g_targetsSum[1] += g_targetsFrame[1];
-        if (!g_summaryDone && g_framesArmed == 600) {
+        // The first summary early, then one every 1800 frames (twenty
+        // seconds at 90 Hz): the loading screen's targets are not the
+        // scene's, and the scene changes.
+        if (g_framesArmed == 600) {
             g_summaryDone = true;
             summary("after 600 frames");
+        } else if (g_framesArmed % 1800 == 0) {
+            char when[48];
+            snprintf(when, sizeof(when), "after %u frames", g_framesArmed);
+            summary(when);
         }
         if (!g_noTangentNoted && g_noTangentFrames >= 600) {
             g_noTangentNoted = true;
@@ -780,6 +853,8 @@ void foveationFrameBoundary(ID3D11DeviceContext* ctx) {
     g_targetsFrame[0] = g_targetsFrame[1] = 0;
     g_lastRtvGen = ~0u;
     g_lastMask = nullptr;
+    g_censusGen = ~0u;
+    g_censusSig = nullptr;
     // A size the game stopped rendering at (a resolution change) ages out.
     for (Mask& m : g_masks) {
         if (m.used && g_frame - m.lastFrame > 900) releaseMask(m);

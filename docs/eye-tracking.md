@@ -404,6 +404,21 @@ sat 5.8 to 6.4 m from the head this session. Three findings:
    probably took the headset off when it froze" -- so a lifted headset
    holds the last sample with every flag still set, and nothing idled.
 
+**Flown 2026-09-05 18:15 (`v0.14.0-29-g31b66f8-dirty`).** The magnitudes
+named the frame: in every window `|t - p|` read 1.00 and `cos(p, n)` read
+-1.000, so the point form is handed out as `t - d`, the head's raw-universe
+position minus the unit gaze, and **the gaze is `d = t - p`, one
+subtraction per frame**, with no root to choose. The quadratic's far root
+agreed with Route B to 0.1 degrees RMS again in every window, through a
+window with 35-degree eye sweeps in it, and the raw origin sat 5.6 m off.
+What the flight did not settle is the sign convention of the head frame:
+the variant of `d` that matches Pimax's tangents is the one with both
+axes mirrored, and whether that is OpenVR's frame or Pimax's is decided
+by the sweep protocol, headset on -- the convention whose yaw goes left
+when the eyes go left and whose pitch goes up when they go up. The next
+build prints `d`'s mean direction per window in all four conventions with
+`d = t - p` as the model.
+
 The rebuilt probe (`e230df2`) does the subtraction every frame from two
 point-form reads (x and y with the identity-with-w matrix, z with the
 first row swapped in) and prints per window: `|p|`'s mean, `|d|`'s mean

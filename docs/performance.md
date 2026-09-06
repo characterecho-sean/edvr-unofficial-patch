@@ -436,6 +436,24 @@ the frame's draws ran under the image. Next: an A/B with the live key
 against SteamVR's GPU frame time in a heavy scene, a summary that counts
 draws under the image per target size, and then the render scale up.
 
+**Flight 2 (2026-09-05 18:15, `v0.14.0-29-g31b66f8-dirty`).** Sean
+switched between the three presets in flight (balanced, performance,
+quality, twice over) and saw no change in frame time; quality looked
+best. The frame-rate windows say why nothing could show: 89, 88, 86, 90,
+82, 84, 86, 85, 87, 86, 84, 85, 88, 84, 77 and 48 frames a second, and
+the one thing they track is the draw count -- 695 eye draws a frame at
+88, about 2,000 to 2,500 at 84 to 87, and 4,921 at 48. The previous
+flight ran the same range at native 4336x4284 under DLAA; this one at
+3252x3213 under DLSS, 1.8 times fewer pixels, at the same frame rates.
+A frame whose time follows draws and ignores pixels is bound by the CPU's
+submission, not the GPU's shading, and a shading rate cannot shorten it.
+The draws-under-the-image summary landed in the loading screen (two draws
+a frame, both under the image) and said nothing about the scene, so the
+next build makes it a periodic census of every target the game draws
+into, eye-sized or not, with the draws that ran under the image and the
+ones that did not. The plan holds: the saving is spent on resolution,
+which moves the frame's time to the GPU, where it can be measured.
+
 ## Feature 3 — the eye-tracked centre
 
 **What changed since the toolkit era.** The toolkit needed a per-vendor
