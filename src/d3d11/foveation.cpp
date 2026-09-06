@@ -266,6 +266,7 @@ uint32_t g_gazeStamp = 0;
 uint32_t g_gazeAge = 0;
 bool     g_maskCentreValid = false;
 float    g_maskTx = 0.0f, g_maskTy = 0.0f;
+uint32_t g_maskLines = 0;       // the geometry lines a session prints, capped
 uint32_t g_gazeRefills = 0;
 uint64_t g_gazeFramesFollowed = 0;
 bool     g_gazeNotedOn = false;
@@ -809,6 +810,27 @@ bool fillMask(ID3D11DeviceContext* ctx, Mask& m) {
     if (!frustumOf(m.eye, m.w, m.h, &l, &r, &top, &bot)) return false;
     float cx, cy;
     centreOf(m.eye, &cx, &cy);
+    // The geometry this mask is built on, said outright for the first few:
+    // which eye, the frustum the tangents gave, where the rings' centre
+    // landed in that frustum, and what that is as NDC. The left eye's
+    // straight-ahead sits RIGHT of its image centre (+0.194 on the Crystal
+    // Super) and the right eye's LEFT of it (-0.194); a mask whose centre
+    // reads the other eye's sign is built on the wrong frustum, which is
+    // what puts its rings on the wrong side of the frame.
+    if (g_maskLines < 8) {
+        ++g_maskLines;
+        const float ndcx = (r > l) ? (2.0f * (cx - l) / (r - l) - 1.0f) : 0.0f;
+        const float ndcy = (bot + top > 0.0f) ? (2.0f * (top - cy) / (top + bot) - 1.0f) : 0.0f;
+        float outerT = 0.0f, innerT = 0.0f;
+        eyeTangents(&outerT, &innerT);
+        Log::get().note(
+            "foveation: the %s eye's %ux%u mask is built on the frustum l %+.3f r %+.3f top %+.3f bottom "
+            "%+.3f (the published tangents are outer %.3f, inner %.3f), with the rings centred at tangent "
+            "(%+.3f, %+.3f) -- NDC (%+.3f, %+.3f), where the LEFT eye's straight ahead should read about "
+            "+0.19 and the RIGHT eye's about -0.19. Full rate within %.3f of that, the ring to %.3f.",
+            m.eye == 0 ? "LEFT" : "RIGHT", m.w, m.h, l, r, top, bot, outerT, innerT, cx, cy, ndcx, -ndcy,
+            tanf(0.5f * g_innerDeg * 0.01745329252f), tanf(0.5f * g_outerDeg * 0.01745329252f));
+    }
     const float deg2rad = 0.01745329252f;
     float inner = g_innerDeg, outer = g_outerDeg;
     if (outer > 178.0f) outer = 178.0f;
