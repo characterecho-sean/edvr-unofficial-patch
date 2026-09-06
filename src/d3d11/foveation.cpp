@@ -153,6 +153,31 @@ struct NvApi {
 NvApi       g_nv;
 FaultBudget g_budget("foveation", 3);
 
+// Every line this file builds goes through this.
+//
+// snprintf returns what it WOULD have written, so `len += snprintf(...)`
+// walks the cursor PAST the buffer as soon as one field is truncated, and
+// the next call is handed a pointer past the end and a size that wrapped
+// through zero -- which writes over whatever static follows, and what
+// follows here is the rate table NvAPI reads by pointer. The pre-ship
+// review of 2026-09-06 found three builders doing exactly that, one of
+// them a summary line that grows with the number of render target sizes a
+// session has seen.
+struct Text {
+    char*  buf;
+    size_t cap;
+    size_t len = 0;
+    bool   full() const { return cap == 0 || len + 1 >= cap; }
+    template <class... A>
+    void add(const char* fmt, A... a) {
+        if (full()) return;
+        const int n = snprintf(buf + len, cap - len, fmt, a...);
+        if (n <= 0) return;
+        const size_t room = cap - len - 1;
+        len += (static_cast<size_t>(n) < room) ? static_cast<size_t>(n) : room;
+    }
+};
+
 const char* nvError(NvStatus s, char* buf, size_t n) {
     char msg[64] = {};
     bool got = false;
@@ -266,10 +291,14 @@ uint32_t g_gazeStamp = 0;
 uint32_t g_gazeAge = 0;
 bool     g_maskCentreValid = false;
 float    g_maskTx = 0.0f, g_maskTy = 0.0f;
+float    g_builtTx = 0.0f, g_builtTy = 0.0f;   // the centre the last mask was actually built on
 uint32_t g_maskLines = 0;       // the geometry lines a session prints, capped
 uint32_t g_masksMade = 0;
 uint64_t g_maskRefills = 0;    // refills done at the frame boundary
 uint32_t g_gazeRefills = 0;
+uint32_t g_gazeLosses = 0;      // frames the source published "lost", blinks included
+uint32_t g_wantedFrames = 0;    // frames wanted but never armed
+bool     g_wantedNoted = false;
 uint64_t g_gazeFramesFollowed = 0;
 bool     g_gazeNotedOn = false;
 bool     g_gazeNotedLost = false;
@@ -301,6 +330,11 @@ struct Mask {
     uint32_t         lastFrame = 0;
 };
 Mask g_masks[8];
+
+// The frame counter, declared here rather than with the rest of the
+// per-frame state further down because the target table below ages its
+// entries by it.
+uint32_t g_frame = 0;
 
 // WHICH EYE A TARGET BELONGS TO
 //
@@ -334,6 +368,7 @@ uint32_t g_seenCount = 0;
 // The verdicts that outlive the frame.
 struct Known {
     void*    resource = nullptr;
+    uint32_t lastSeen = 0;   // the frame it was last drawn into
     int      eye = 0;
     bool     settled = false;   // by a submitted texture, or by the walk behind one
     bool     everSubmitted = false;
@@ -345,19 +380,36 @@ struct Known {
 Known    g_known[64];
 uint32_t g_knownCount = 0;
 uint64_t g_settledBySubmit = 0, g_settledByOrder = 0, g_unsettled = 0, g_corrections = 0;
+uint32_t g_knownEvictions = 0;
 
 Known* knownFor(void* resource) {
     for (uint32_t i = 0; i < g_knownCount; ++i) {
-        if (g_known[i].resource == resource) return &g_known[i];
+        if (g_known[i].resource == resource) {
+            g_known[i].lastSeen = g_frame;
+            return &g_known[i];
+        }
     }
+    Known* slot = nullptr;
     if (g_knownCount < sizeof(g_known) / sizeof(g_known[0])) {
-        Known& k = g_known[g_knownCount++];
-        k.resource = resource;
-        k.eye = 0;
-        k.settled = false;
-        return &k;
+        slot = &g_known[g_knownCount++];
+    } else {
+        // Full: take the one least recently drawn into rather than
+        // returning nothing. Returning nothing left every later target --
+        // the submitted ones included -- unattributed and so at full rate
+        // for the rest of the session, silently (the pre-ship review of
+        // 2026-09-06). A table this size only fills when the game has
+        // recreated its targets many times over, and the oldest entry is
+        // then the one least likely to be a live texture.
+        slot = &g_known[0];
+        for (Known& k : g_known) {
+            if (k.lastSeen < slot->lastSeen) slot = &k;
+        }
+        ++g_knownEvictions;
     }
-    return nullptr;
+    *slot = Known();
+    slot->resource = resource;
+    slot->lastSeen = g_frame;
+    return slot;
 }
 
 // The eye targets named one by one, busiest first: the masks are right --
@@ -365,7 +417,8 @@ Known* knownFor(void* resource) {
 // the runtime measured it -- so what is left is which mask each target
 // gets, and that cannot be read from totals.
 const char* targetsText() {
-    static char text[900];
+    static char buf[900];
+    Text t{buf, sizeof(buf)};
     const Known* order[64] = {};
     int n = 0;
     for (uint32_t i = 0; i < g_knownCount; ++i) {
@@ -380,17 +433,15 @@ const char* targetsText() {
         }
         order[j] = k;
     }
-    int l = 0;
-    for (int i = 0; i < n && i < 8 && l < static_cast<int>(sizeof(text)) - 1; ++i) {
+    for (int i = 0; i < n && i < 8 && !t.full(); ++i) {
         const Known& k = *order[i];
-        l += snprintf(text + l, sizeof(text) - l,
-                      "%s#%d %ux%u fmt %u: %s, settled %s%s, %llu draws%s", l ? "; " : "",
-                      static_cast<int>(&k - g_known), k.w, k.h, k.fmt, k.eye == 0 ? "LEFT" : "RIGHT",
-                      k.settled ? "yes" : "NO",
-                      k.everSubmitted ? (k.submittedAs == 0 ? " (submitted as LEFT)" : " (submitted as RIGHT)") : "",
-                      static_cast<unsigned long long>(k.draws), k.corrections ? " [corrected]" : "");
+        t.add("%s#%d %ux%u fmt %u: %s, settled %s%s, %llu draws%s", t.len ? "; " : "",
+              static_cast<int>(&k - g_known), k.w, k.h, k.fmt, k.eye == 0 ? "LEFT" : "RIGHT",
+              k.settled ? "yes" : "NO",
+              k.everSubmitted ? (k.submittedAs == 0 ? " (submitted as LEFT)" : " (submitted as RIGHT)") : "",
+              static_cast<unsigned long long>(k.draws), k.corrections ? " [corrected]" : "");
     }
-    return l ? text : "none";
+    return t.len ? buf : "none";
 }
 
 // The census: every target the game draws into while the feature is armed,
@@ -442,6 +493,12 @@ RasterSeen g_rasters[8];
 uint64_t   g_rasterNullDraws = 0;   // draws with no rasteriser state object bound (the default state)
 uint64_t   g_gsDraws = 0, g_sampledDraws = 0;
 uint64_t   g_a2cDraws = 0, g_hsDraws = 0;
+// A rasteriser state with a forced sample count, seen on an eye draw. With
+// the image bound that combination REMOVED THE DEVICE on the desk
+// (2026-09-06), so the feature stands down the moment one is seen rather
+// than waiting to find out. Elite's own eye draws read zero in every
+// flight sampled, so this is a guard against a pass none of them caught.
+uint32_t   g_forcedSamplesSeen = 0;
 uint32_t   g_topologies[4] = {}, g_topologyDraws[4] = {};
 uint32_t   g_vpCount = 0;
 float      g_vp[4] = {};
@@ -497,6 +554,7 @@ void sampleDrawState(ID3D11DeviceContext* ctx) {
                 forced = rd1.ForcedSampleCount;
                 rs1->Release();
             }
+            if (forced != 0) g_forcedSamplesSeen = forced;
             const uint32_t packed = (rd.FillMode & 3u) | ((rd.CullMode & 3u) << 2) | ((rd.FrontCounterClockwise ? 1u : 0u) << 4) |
                                     ((rd.DepthClipEnable ? 1u : 0u) << 5) | ((rd.ScissorEnable ? 1u : 0u) << 6) |
                                     ((rd.MultisampleEnable ? 1u : 0u) << 7) | ((rd.AntialiasedLineEnable ? 1u : 0u) << 8) |
@@ -561,33 +619,33 @@ void sampleDrawState(ID3D11DeviceContext* ctx) {
 }
 
 const char* stateText() {
-    static char text[900];
-    int l = 0;
-    l += snprintf(text + l, sizeof(text) - l, "targets:");
-    for (int i = 0; i < 16 && l < static_cast<int>(sizeof(text)) - 1; ++i) {
+    static char buf[900];
+    Text t{buf, sizeof(buf)};
+    t.add("targets:");
+    for (int i = 0; i < 16 && !t.full(); ++i) {
         if (!g_sigs[i].used || !g_sigDesc[i].known) continue;
         const SigDesc& d = g_sigDesc[i];
-        l += snprintf(text + l, sizeof(text) - l, " %ux%u view dim %u (4 = tex2d, 5 = tex2d array), array %u, %u sample(s), %u mip(s), bind 0x%X;",
-                      g_sigs[i].w, g_sigs[i].h, d.viewDim, d.arraySize, d.samples, d.mips, d.bind);
+        t.add(" %ux%u view dim %u (4 = tex2d, 5 = tex2d array), array %u, %u sample(s), %u mip(s), bind 0x%X;",
+              g_sigs[i].w, g_sigs[i].h, d.viewDim, d.arraySize, d.samples, d.mips, d.bind);
     }
-    l += snprintf(text + l, sizeof(text) - l, " rasteriser states at %llu sampled eye draws (%llu with none bound):",
-                  static_cast<unsigned long long>(g_sampledDraws), static_cast<unsigned long long>(g_rasterNullDraws));
+    t.add(" rasteriser states at %llu sampled eye draws (%llu with none bound):",
+          static_cast<unsigned long long>(g_sampledDraws), static_cast<unsigned long long>(g_rasterNullDraws));
     for (const RasterSeen& r : g_rasters) {
-        if (!r.used || l >= static_cast<int>(sizeof(text)) - 1) continue;
+        if (!r.used || t.full()) continue;
         const uint32_t p = r.packed;
-        l += snprintf(text + l, sizeof(text) - l, " [%llu draws: fill %u, cull %u, ccw %u, depthclip %u, scissor %u, MULTISAMPLE %u, aalines %u, bias %u, forced samples %u]",
-                      static_cast<unsigned long long>(r.draws), p & 3u, (p >> 2) & 3u, (p >> 4) & 1u, (p >> 5) & 1u,
-                      (p >> 6) & 1u, (p >> 7) & 1u, (p >> 8) & 1u, (p >> 9) & 1u, r.forcedSamples);
+        t.add(" [%llu draws: fill %u, cull %u, ccw %u, depthclip %u, scissor %u, MULTISAMPLE %u, aalines %u, bias %u, forced samples %u]",
+              static_cast<unsigned long long>(r.draws), p & 3u, (p >> 2) & 3u, (p >> 4) & 1u, (p >> 5) & 1u,
+              (p >> 6) & 1u, (p >> 7) & 1u, (p >> 8) & 1u, (p >> 9) & 1u, r.forcedSamples);
     }
-    l += snprintf(text + l, sizeof(text) - l, "; geometry shader bound on %llu of them, hull shader on %llu, alpha-to-coverage on %llu; topologies (4 = triangle list, 5 = strip, 33+ = patches):",
-                  static_cast<unsigned long long>(g_gsDraws), static_cast<unsigned long long>(g_hsDraws),
-                  static_cast<unsigned long long>(g_a2cDraws));
-    for (int i = 0; i < 4 && l < static_cast<int>(sizeof(text)) - 1; ++i) {
-        if (g_topologyDraws[i]) l += snprintf(text + l, sizeof(text) - l, " %u x%u", g_topologies[i], g_topologyDraws[i]);
+    t.add("; geometry shader bound on %llu of them, hull shader on %llu, alpha-to-coverage on %llu; topologies (4 = triangle list, 5 = strip, 33+ = patches):",
+          static_cast<unsigned long long>(g_gsDraws), static_cast<unsigned long long>(g_hsDraws),
+          static_cast<unsigned long long>(g_a2cDraws));
+    for (int i = 0; i < 4 && !t.full(); ++i) {
+        if (g_topologyDraws[i]) t.add(" %u x%u", g_topologies[i], g_topologyDraws[i]);
     }
-    l += snprintf(text + l, sizeof(text) - l, "; viewports %u, the first at (%.0f, %.0f) %.0fx%.0f, off the origin on %u of %u tallies",
-                  g_vpCount, g_vp[0], g_vp[1], g_vp[2], g_vp[3], g_vpOddTallies, g_vpTallies);
-    return text;
+    t.add("; viewports %u, the first at (%.0f, %.0f) %.0fx%.0f, off the origin on %u of %u tallies",
+          g_vpCount, g_vp[0], g_vp[1], g_vp[2], g_vp[3], g_vpOddTallies, g_vpTallies);
+    return buf;
 }
 
 Sig* sigFor(const ResourceInfo& info) {
@@ -634,7 +692,6 @@ const char* fmtName(uint32_t fmt) {
     }
 }
 
-uint32_t  g_frame = 0;
 IUnknown* g_bound = nullptr;        // the view the context holds, as far as we know
 bool      g_boundUnknown = false;   // ClearState: whatever was bound may be gone
 bool      g_ratesOn = false;
@@ -827,19 +884,27 @@ bool frustumOf(int eye, uint32_t w, uint32_t h, float* l, float* r, float* top, 
 void centreOf(int eye, float* cx, float* cy) {
     *cx = 0.0f;
     *cy = 0.0f;
-    if (g_distance <= 0.0f) return;
-    float ox = eye == 0 ? -0.032f : 0.032f, oy = 0.0f;
-    float off[3];
-    if (temporalPassEyeOffset(eye, off) && std::isfinite(off[0]) && std::isfinite(off[1])) {
-        ox = off[0];
-        oy = off[1];
+    // The nasal shift, and ONLY the nasal shift, is what the fixation
+    // distance governs: each eye's line to a point that far ahead of the
+    // head, so the two eyes' rings fuse at that depth rather than at
+    // infinity. A distance of zero means "fuse at infinity", which is no
+    // shift -- it does not mean "no centre". The early return that used to
+    // stand here took the gaze with it, so setting the distance to zero
+    // silently nailed the rings to straight ahead while the census still
+    // reported the gaze it was no longer using (2026-09-06, caught by
+    // Sean: the culled inner disc did not move with his eyes).
+    if (g_distance > 0.0f) {
+        float ox = eye == 0 ? -0.032f : 0.032f, oy = 0.0f;
+        float off[3];
+        if (temporalPassEyeOffset(eye, off) && std::isfinite(off[0]) && std::isfinite(off[1])) {
+            ox = off[0];
+            oy = off[1];
+        }
+        *cx = -ox / g_distance;
+        *cy = -oy / g_distance;
     }
-    *cx = -ox / g_distance;
-    *cy = -oy / g_distance;
     // The eye-tracked centre, when the source publishes one: the gaze's
-    // head-frame tangents, on top of the nasal shift (the gaze is the
-    // head's direction to the fixated point; each eye's line to it is
-    // still offset by that eye over the fixation distance).
+    // head-frame tangents, on top of whatever shift the distance asked for.
     if (g_followEyes && g_gazeValid && g_maskCentreValid) {
         *cx += g_maskTx;
         *cy += g_maskTy;
@@ -854,6 +919,8 @@ bool fillMask(ID3D11DeviceContext* ctx, Mask& m) {
     if (!frustumOf(m.eye, m.w, m.h, &l, &r, &top, &bot)) return false;
     float cx, cy;
     centreOf(m.eye, &cx, &cy);
+    g_builtTx = cx;
+    g_builtTy = cy;
     // The geometry this mask is built on, said outright for the first few:
     // which eye, the frustum the tangents gave, where the rings' centre
     // landed in that frustum, and what that is as NDC. The left eye's
@@ -926,6 +993,18 @@ Mask* maskFor(ID3D11DeviceContext* ctx, uint32_t w, uint32_t h, int eye) {
     for (Mask& m : g_masks) {
         if (m.used && m.w == w && m.h == h && m.eye == eye) {
             m.lastFrame = g_frame;
+            // Never hand out an image whose texels have never been written.
+            // The slot is marked used before its first fill, and that fill
+            // fails while the openvr half has published no tangents to
+            // centre on -- so without this the second call for that size
+            // would find the slot, skip the fill, and bind a texture with
+            // undefined contents, whose texels the rate table reads as
+            // rates (the pre-ship review of 2026-09-06). The boundary
+            // refill fills it the moment the tangents arrive.
+            if (m.gen == 0) {
+                ++g_noTangentFrames;
+                return nullptr;
+            }
             // NOT refilled here. A mask rewritten in the middle of a frame
             // shades that frame's earlier draws at one set of rates and its
             // later ones at another, and with the centre following the eyes
@@ -1000,6 +1079,8 @@ Mask* maskFor(ID3D11DeviceContext* ctx, uint32_t w, uint32_t h, int eye) {
     slot->lastFrame = g_frame;
     ++g_imagesMade;
     ++g_masksMade;
+    // ...and the slot keeps gen 0 until a fill succeeds, so the branch
+    // above refuses it until then.
     if (g_imagesMade <= 8) {
         Log::get().note("foveation: image %u made for the %s eye at %ux%u (%u x %u tiles).", g_imagesMade,
                         eye == 0 ? "LEFT" : "RIGHT", w, h, td.Width, td.Height);
@@ -1145,15 +1226,15 @@ void settleEyesByOrder() {
 // same state -- another injector, an overlay, a VR layer, NVIDIA's own --
 // for the ARMED line. A census, not a verdict.
 const char* suspectModules() {
-    static char text[600];
-    int l = 0;
+    static char buf[600];
+    Text t{buf, sizeof(buf)};
     HMODULE mods[512];
     DWORD needed = 0;
     if (!EnumProcessModules(GetCurrentProcess(), mods, sizeof(mods), &needed)) return "(the module list could not be read)";
     const size_t n = needed / sizeof(HMODULE) < 512 ? needed / sizeof(HMODULE) : 512;
     const char* keys[] = {"nv", "pimax", "magic", "xr", "vr", "reshade", "overlay", "hook", "inject", "layer",
                           "toolkit", "steam", "discord", "rtss", "afterburner", "fps", "d3d", "dxgi"};
-    for (size_t i = 0; i < n && l < static_cast<int>(sizeof(text)) - 40; ++i) {
+    for (size_t i = 0; i < n && !t.full(); ++i) {
         char name[MAX_PATH] = {};
         if (!GetModuleBaseNameA(GetCurrentProcess(), mods[i], name, sizeof(name))) continue;
         char lower[MAX_PATH];
@@ -1165,9 +1246,9 @@ const char* suspectModules() {
             if (strstr(lower, key)) { hit = true; break; }
         }
         if (!hit) continue;
-        l += snprintf(text + l, sizeof(text) - l, "%s%s", l ? ", " : "", name);
+        t.add("%s%s", t.len ? ", " : "", name);
     }
-    return l ? text : "(none of the suspect names)";
+    return t.len ? buf : "(none of the suspect names)";
 }
 
 void arm(ID3D11DeviceContext* ctx) {
@@ -1206,15 +1287,25 @@ void arm(ID3D11DeviceContext* ctx) {
 }
 
 const char* centreText() {
-    static char text[200];
+    // 200 was too small for the built-on centre this line now carries, and
+    // snprintf would have dropped exactly the field the fix added, at the
+    // end -- the same way the census once dropped its own evidence.
+    static char text[320];
     if (!g_followEyes) {
         snprintf(text, sizeof(text), "straight ahead (fix.foveation_centre = ahead)");
     } else if (g_gazeValid) {
+        // The gaze AND the centre the masks were actually built on. They
+        // differ whenever something between the two drops the gaze, which
+        // is exactly the fault that hid behind this line reading only the
+        // first of them.
         snprintf(text, sizeof(text),
-                 "following the eyes -- %llu frames so far, %u refills for gaze motion past the %.1f-degree "
-                 "dead band, now at tangents (%+.3f, %+.3f)",
+                 "following the eyes -- %llu frames so far, %u refills for gaze motion past the "
+                 "%.1f-degree dead band, %u frames the gaze was published lost (blinks included); "
+                 "the gaze is at tangents (%+.3f, %+.3f) and the masks were last built on "
+                 "(%+.3f, %+.3f)",
                  static_cast<unsigned long long>(g_gazeFramesFollowed), g_gazeRefills,
-                 atanf(kGazeDeadBand) * 57.2957795f, g_gazeTx, g_gazeTy);
+                 atanf(kGazeDeadBand) * 57.2957795f, g_gazeLosses, g_gazeTx, g_gazeTy, g_builtTx,
+                 g_builtTy);
     } else {
         snprintf(text, sizeof(text),
                  "straight ahead -- no gaze published%s (%llu frames followed so far, %u refills)",
@@ -1257,11 +1348,11 @@ void summary(const char* when) {
         "foveation: %s, the draws -- %.0f a frame into eye-sized targets, %.0f of them under the image, "
         "%.0f left at full rate because the eye is not known, %.0f into everything else. Eyes settled: "
         "%.1f a frame by a submitted texture, %.1f by the pairing of their size's targets, %.1f not placed, "
-        "%llu corrections.",
+        "%llu corrections, %u evictions.",
         when, static_cast<double>(g_eyeDraws) / f, static_cast<double>(g_eyeDrawsUnder) / f,
         static_cast<double>(g_unknownEyeDraws) / f, static_cast<double>(g_otherDraws) / f,
         static_cast<double>(g_settledBySubmit) / f, static_cast<double>(g_settledByOrder) / f,
-        static_cast<double>(g_unsettled) / f, static_cast<unsigned long long>(g_corrections));
+        static_cast<double>(g_unsettled) / f, static_cast<unsigned long long>(g_corrections), g_knownEvictions);
     {
         // The targets by draws, largest first, at most eight.
         const Sig* order[16] = {};
@@ -1464,6 +1555,15 @@ void foveationOnDraw(ID3D11DeviceContext* ctx, bool rtvEyeSized, void* rtv, uint
         arm(ctx);
         if (g_phase != Phase::Armed) return;
     }
+    if (g_forcedSamplesSeen) {
+        char why[200];
+        snprintf(why, sizeof(why),
+                 "an eye draw ran under a rasteriser state with a forced sample count of %u, and that "
+                 "combination removes the device outright",
+                 g_forcedSamplesSeen);
+        standDown(ctx, why);
+        return;
+    }
     if (rtvGen != g_lastRtvGen) {
         g_lastRtvGen = rtvGen;
         g_lastMask = nullptr;
@@ -1553,7 +1653,15 @@ void foveationFrameBoundary(ID3D11DeviceContext* ctx) {
                         }
                     }
                 } else {
-                    g_gazeAge = 1000;   // published as lost: fall back now
+                    // A gaze published as LOST is usually a blink: the read
+                    // declines, or its length leaves the band, for a few
+                    // frames. Falling back on the first of them snapped the
+                    // rings to straight ahead and back, with two refills,
+                    // every time the commander blinked (the pre-ship review
+                    // of 2026-09-06), so a loss now has to persist as long
+                    // as a silence does before the centre moves.
+                    ++g_gazeAge;
+                    ++g_gazeLosses;
                 }
             } else {
                 ++g_gazeAge;
@@ -1606,6 +1714,20 @@ void foveationFrameBoundary(ID3D11DeviceContext* ctx) {
         }
     }
     settleEyesByOrder();
+    // Wanted, and nothing has ever arrived to arm on: no eye-sized target,
+    // which on a headset whose eye textures are small enough to fall to the
+    // size guess means the openvr half never published one. Said once,
+    // because a feature doing nothing in silence is the worst failure this
+    // codebase has (the pre-ship review of 2026-09-06 found this path had
+    // no line at all).
+    if (g_phase == Phase::Wanted && !g_wantedNoted && ++g_wantedFrames >= 1800) {
+        g_wantedNoted = true;
+        Log::get().note(
+            "foveation: ON, but 1800 frames have passed without a single eye-sized target to arm on. "
+            "Either openvr_api.dll is not installed beside the game (or is an older one, which cannot "
+            "tell this half the eye size), or this headset's eye textures are not being recognised. "
+            "Nothing is being shaded coarsely. Said once.");
+    }
     g_switchesFrame = 0;
     g_seenCount = 0;
     g_targetsFrame[0] = g_targetsFrame[1] = 0;

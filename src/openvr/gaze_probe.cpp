@@ -1414,13 +1414,30 @@ void gazeProbeConfigure() {
         g_configured = true;
         g_wanted = want;
         // The source: read at launch, since it rides on the one-time arming.
+        //
+        // Both keys, and fix.foveation is the one that decides: the centre
+        // defaults to "eyes", so reading it alone armed this table, its
+        // validation and three runtime calls a frame for EVERY commander on
+        // every headset, whether or not they had asked for foveated shading
+        // at all -- and printed an ARMED line promising summaries that
+        // would never come (the pre-ship review of 2026-09-06). A gaze
+        // nobody asked for is nobody's to read.
+        const std::string mode = cfg.getString("fix.foveation", "off");
         const std::string centre = cfg.getString("fix.foveation_centre", "eyes");
-        g_sourceWanted = centre != "ahead";
+        // The same five spellings the d3d11 half accepts as on, and no
+        // others: a mode it does not recognise stands the feature down
+        // there with a warning, so a typo must not leave this half reading
+        // a gaze for a feature that is not running.
+        const bool on = mode == "quality" || mode == "balanced" || mode == "performance" ||
+                        mode == "on" || mode == "1";
+        g_sourceWanted = on && centre != "ahead";
         if (g_sourceWanted) {
             Log::get().note(
-                "gaze source: wanted (fix.foveation_centre = eyes) -- the eye-tracked centre for the "
-                "foveation's rings, published once a frame when this headset's driver gives one "
-                "(docs/eye-tracking.md). Arms with the runtime's first frame.");
+                "gaze source: wanted (fix.foveation = %s with fix.foveation_centre = eyes) -- the "
+                "eye-tracked centre for the foveation's rings, published once a frame when this "
+                "headset's driver gives one (docs/eye-tracking.md). Arms with the runtime's first "
+                "frame.",
+                mode.c_str());
         }
         // Route B rides on the probe: the Pimax-runtime read, off by default.
         g_pvr.wanted = want && cfg.getBool("advanced.gaze_probe_pvr", false);
