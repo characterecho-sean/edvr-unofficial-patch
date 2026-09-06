@@ -267,6 +267,8 @@ uint32_t g_gazeAge = 0;
 bool     g_maskCentreValid = false;
 float    g_maskTx = 0.0f, g_maskTy = 0.0f;
 uint32_t g_maskLines = 0;       // the geometry lines a session prints, capped
+uint32_t g_masksMade = 0;
+uint64_t g_maskRefills = 0;    // refills done at the frame boundary
 uint32_t g_gazeRefills = 0;
 uint64_t g_gazeFramesFollowed = 0;
 bool     g_gazeNotedOn = false;
@@ -924,7 +926,15 @@ Mask* maskFor(ID3D11DeviceContext* ctx, uint32_t w, uint32_t h, int eye) {
     for (Mask& m : g_masks) {
         if (m.used && m.w == w && m.h == h && m.eye == eye) {
             m.lastFrame = g_frame;
-            if (m.gen != g_settingsGen && !fillMask(ctx, m)) return nullptr;
+            // NOT refilled here. A mask rewritten in the middle of a frame
+            // shades that frame's earlier draws at one set of rates and its
+            // later ones at another, and with the centre following the eyes
+            // a refill lands mid-frame whenever the gaze crosses the dead
+            // band -- which is what left blocky work INSIDE the disc, in
+            // whichever eye's passes the rewrite fell between (the flight
+            // of 2026-09-06 09:36). The frame boundary refills instead, so
+            // a frame is always shaded by one mask per eye, at most one
+            // frame behind the gaze.
             return &m;
         }
     }
@@ -989,6 +999,7 @@ Mask* maskFor(ID3D11DeviceContext* ctx, uint32_t w, uint32_t h, int eye) {
     slot->gen = 0;
     slot->lastFrame = g_frame;
     ++g_imagesMade;
+    ++g_masksMade;
     if (g_imagesMade <= 8) {
         Log::get().note("foveation: image %u made for the %s eye at %ux%u (%u x %u tiles).", g_imagesMade,
                         eye == 0 ? "LEFT" : "RIGHT", w, h, td.Width, td.Height);
@@ -1238,10 +1249,10 @@ void summary(const char* when) {
     Log::get().note(
         "foveation: %s -- %u frames with the image armed; %.1f eye-sized targets a frame attributed "
         "to the left eye and %.1f to the right; %.1f image switches a frame (most %u); %u images made; "
-        "%u frames without published tangents.",
+        "%u frames without published tangents; %.2f mask refills a frame, all at the frame boundary.",
         when, g_framesArmed, static_cast<double>(g_targetsSum[0]) / f,
         static_cast<double>(g_targetsSum[1]) / f, static_cast<double>(g_switches) / f, g_switchesMax,
-        g_imagesMade, g_noTangentFrames);
+        g_imagesMade, g_noTangentFrames, static_cast<double>(g_maskRefills) / f);
     Log::get().note(
         "foveation: %s, the draws -- %.0f a frame into eye-sized targets, %.0f of them under the image, "
         "%.0f left at full rate because the eye is not known, %.0f into everything else. Eyes settled: "
@@ -1297,6 +1308,7 @@ void summary(const char* when) {
     g_settledByOrder = 0;
     g_unsettled = 0;
     g_unknownEyeDraws = 0;
+    g_maskRefills = 0;
 }
 
 }  // namespace
@@ -1513,6 +1525,13 @@ void foveationFrameBoundary(ID3D11DeviceContext* ctx) {
         if (g_bound || g_boundUnknown) applyView(ctx, nullptr);
         ++g_framesArmed;
         if (g_framesArmed % 90 == 0) gpuBusySample();
+        // Every mask the settings or the gaze have moved on from, rewritten
+        // here where no draw of this frame or the next has begun.
+        for (Mask& m : g_masks) {
+            if (m.used && m.gen != g_settingsGen) {
+                if (fillMask(ctx, m)) ++g_maskRefills;
+            }
+        }
         if (g_followEyes) {
             float tx = 0.0f, ty = 0.0f;
             uint32_t stamp = 0;
