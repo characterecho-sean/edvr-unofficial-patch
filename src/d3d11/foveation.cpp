@@ -1047,25 +1047,65 @@ int eyeOf(const ResourceInfo& info) {
     return eye;
 }
 
-// The frame's targets, walked backwards: each takes the eye of the next
-// one a submitted texture identified. Called at the frame boundary, before
-// the frame's list is cleared.
+// The eyes, settled by PAIRING rather than by order.
+//
+// The census of 2026-09-06 09:14 showed the shape of the thing: every size
+// and format the game draws into has its targets in matched pairs, one per
+// eye, with draw counts within a fraction of a percent of each other --
+// 187,012 against 179,201 for the scene's R10G10B10A2 pair, 13,038 against
+// 12,677 for the R11G11B10 one, and four targets for the final R8G8B8A8,
+// which is that pair double-buffered. The two submitted textures root one
+// of those groups outright, and within a frame each group's members are
+// bound in the same eye order as that rooted one. So: rank each size's
+// targets by their first bind in the frame, take the phase from a rooted
+// member where the group has one and from the frame's first rooted target
+// otherwise, and the ranks alternate from there.
+//
+// This replaces the walk back from each submitted texture, which settled
+// eight targets a frame and was wrong about all of them: it assumed each
+// eye's targets form a contiguous block ending at that eye's submitted
+// one, and Elite interleaves the two eyes' draws (eye_split.h) and binds
+// its submitted textures nowhere near last.
 void settleEyesByOrder() {
-    int nextEye = -1;
-    for (int i = static_cast<int>(g_seenCount) - 1; i >= 0; --i) {
+    // The frame's phase: the eye of the first target the submitted
+    // textures identified, in bind order.
+    int framePhase = -1;
+    for (uint32_t i = 0; i < g_seenCount; ++i) {
         if (g_seen[i].bySubmit) {
-            nextEye = g_seen[i].eye;
-            continue;
+            framePhase = g_seen[i].eye;
+            break;
         }
-        if (nextEye < 0) continue;   // nothing submitted after it this frame
+    }
+    if (framePhase < 0) return;   // nothing rooted this frame: leave it alone
+    for (uint32_t i = 0; i < g_seenCount; ++i) {
+        // This target's rank among its own size and format, in bind order,
+        // and the phase its group carries if a submitted texture rooted one.
+        uint32_t rank = 0;
+        int groupPhase = -1;
+        uint32_t groupRank = 0;
+        for (uint32_t j = 0; j < g_seenCount; ++j) {
+            if (g_seen[j].w != g_seen[i].w || g_seen[j].h != g_seen[i].h || g_seen[j].fmt != g_seen[i].fmt) continue;
+            if (j < i) ++rank;
+            if (groupPhase < 0 && g_seen[j].bySubmit) {
+                groupPhase = g_seen[j].eye;
+                groupRank = 0;
+                for (uint32_t m = 0; m < j; ++m) {
+                    if (g_seen[m].w == g_seen[j].w && g_seen[m].h == g_seen[j].h && g_seen[m].fmt == g_seen[j].fmt) ++groupRank;
+                }
+            }
+        }
+        const int phase = groupPhase >= 0 ? groupPhase : framePhase;
+        const uint32_t base = groupPhase >= 0 ? groupRank : 0;
+        const int eye = (((rank - base) & 1u) == 0) ? phase : 1 - phase;
+        if (g_seen[i].bySubmit) continue;   // ground truth already
         Known* k = knownFor(g_seen[i].resource);
         if (!k) continue;
-        if (k->settled && k->eye == nextEye) continue;
-        if (k->settled && k->eye != nextEye) {
+        if (k->settled && k->eye == eye) continue;
+        if (k->settled && k->eye != eye) {
             ++g_corrections;
             ++k->corrections;
         }
-        k->eye = nextEye;
+        k->eye = eye;
         k->settled = true;
         ++g_settingsGen;   // rebuild that size's masks around the right centre
     }
@@ -1186,7 +1226,7 @@ void summary(const char* when) {
     Log::get().note(
         "foveation: %s, the draws -- %.0f a frame into eye-sized targets, %.0f of them under the image, "
         "%.0f left at full rate because the eye is not known, %.0f into everything else. Eyes settled: "
-        "%.1f a frame by a submitted texture, %.1f by the render order behind one, %.1f not placed, "
+        "%.1f a frame by a submitted texture, %.1f by the pairing of their size's targets, %.1f not placed, "
         "%llu corrections.",
         when, static_cast<double>(g_eyeDraws) / f, static_cast<double>(g_eyeDrawsUnder) / f,
         static_cast<double>(g_unknownEyeDraws) / f, static_cast<double>(g_otherDraws) / f,
