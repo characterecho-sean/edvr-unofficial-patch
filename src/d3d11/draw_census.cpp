@@ -47,10 +47,18 @@ constexpr uint32_t kMaxLinesCeiling = 16384;
 // interned 160 and missed 1216 more -- Elite runs hundreds of distinct
 // eye-sized views and per-state textures through three frames, and the
 // table filled before the LATE-frame render targets arrived, which cost the
-// exact draws the census existed to name. 512 covers what was measured with
+// exact draws the census existed to name. 512 covered what was measured with
 // three times over; past it, tokens degrade to inline resolution (below),
 // never to an unusable '?'.
-constexpr uint32_t kMaxInterned = 512;
+//
+// 2048 since 2026-09-06: a three-frame cockpit census with offscreen draws
+// interned 512 and overflowed by 310 to 963 (the 2026-09-03 logs), and an
+// inline token carries no identity -- the two eyes' same-shaped depth
+// buffers then read as one, which is exactly the question the crisp-UI
+// gates ask (tools/crisp_ui_gates.py). internOf is a linear scan, so a
+// full table costs a few tens of milliseconds per census frame; a hitch
+// on the three frames of an instrument nobody runs by accident.
+constexpr uint32_t kMaxInterned = 2048;
 
 // The startup schedule (advanced.census_at_ms). At most eight moments, each
 // naming milliseconds after this session's FIRST frame edge.
