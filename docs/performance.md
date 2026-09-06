@@ -673,6 +673,32 @@ should be on at quality.** It still ships off, because half a millisecond
 that buys no frames is not worth an NVIDIA-only code path being on by
 default for people who will never look at this file.
 
+### Why the preset does not move the needle
+
+Sean asked, and the answer is the last thing this arc had left to learn.
+The presets differ enormously in shader work. Taking the frustum's own
+extent and each preset's radii, performance shades about 15 per cent of
+what full rate would cost and quality about 37: a factor of two and a
+half between them. If pixel shading were where the time went, that would
+be impossible to miss. It is missed entirely.
+
+Set that against the cull, which freed 26 points of GPU busy. The two
+measurements differ in exactly one respect. **Culling stops the pixels
+being written. Coarse shading does not.** A 4x4 tile still writes all
+sixteen pixels to the render target; variable-rate shading removes shader
+invocations and nothing else. So the cull's 26 points is the cost of the
+eye draws entire -- vertex work, rasterisation, depth, and above all the
+bandwidth of writing a fat G-buffer at 2818x2784 twice a frame -- while
+the preset's half millisecond is the shader invocations alone.
+
+Divide them: the pixel shader is something like a sixth of what those
+draws cost, and the other five sixths are writes and geometry that no
+shading rate can touch. Changing the preset moves a fraction of that
+sixth, which lands under the noise. That is not a quirk of Elite. It is
+what VRS does to any deferred renderer whose G-buffer traffic dominates
+its pixel shaders, and it is the honest reason this feature was never
+going to pay here.
+
 ## Feature 3 — the eye-tracked centre
 
 **What changed since the toolkit era.** The toolkit needed a per-vendor
