@@ -1463,6 +1463,21 @@ void foveationConfigure(Config& cfg) {
     if (outer < inner + 4.0f) outer = inner + 4.0f;
     const std::string centre = cfg.getString("fix.foveation_centre", "eyes");
     const bool follow = centre != "ahead";
+    // Anything that is not "ahead" follows the eyes, which means a typo
+    // gets the default silently. Sean's own ini was found carrying
+    // "follows" on 2026-09-06 -- the second word of this key's settings
+    // label, hand-copied -- and it had been working by accident for an
+    // unknown number of flights. Say so once: a value this file does not
+    // recognise should never pass without the log naming what it became.
+    static bool centreWarned = false;
+    if (!centreWarned && centre != "eyes" && centre != "ahead") {
+        centreWarned = true;
+        Log::get().note(
+            "foveation: fix.foveation_centre = \"%s\" is not one of this key's values (eyes, ahead). "
+            "Reading it as eyes, so the rings follow the gaze; write \"eyes\" to say so outright, or "
+            "\"ahead\" for the fixed centre.",
+            centre.c_str());
+    }
     // THE DEFAULT DEPENDS ON WHO IS AIMING THE DISC.
     //
     // The shift aims each eye's disc at a point this far ahead, so the two
