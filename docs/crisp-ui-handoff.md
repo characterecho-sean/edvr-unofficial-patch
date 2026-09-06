@@ -34,8 +34,11 @@ already accumulates the cockpit. B is a third of A's code, keeps the game's
 own look exactly, and leaves the text softer than A.
 
 Both need the interface surfaces rasterised at the output size to give the
-text real detail; that lever exists (`advanced.surface_inflate`) and needs one
-small extension. Sean's question -- could the UI be CAS-upscaled
+text real detail; that lever exists (`advanced.surface_inflate`, built in the
+target-indicator arc and field-verified engaging) but needs a float factor
+and one flight to prove it reaches the TEXT and not only the vector lines,
+because no inflate flight has ever been judged on the letters (A5, gate G9).
+Sean's question -- could the UI be CAS-upscaled
 independently -- is answered in A5: yes, the machinery for it exists
 (`panel_upscale`), but a spatial upscale of a two-thirds rasterisation adds
 no detail, only cleaner edges, and it does nothing about the swim. Inflation
@@ -96,6 +99,8 @@ what design A does. Design B fixes half two only, and needs A5 for half one.
 |---|---|---|
 | The UI writes no depth; the depth view paints it magenta | MEASURED | flight 29, `edvr.ini` comment on `temporal_aa_debug` |
 | Interface surfaces track the internal render size | MEASURED | `fss_res.h`, three sizes, three surfaces |
+| Inflating a surface at creation makes the game rasterise into it larger, viewports scaled to match | MEASURED | the target-indicator arc, 2026-09-02: six textures created, six viewports scaled, frame rate unchanged |
+| Inflating a surface behind the game's back sharpens its TEXT, not only its vector lines | BELIEVED | both inflate flights were judged on the fixed-size target indicator alone; the glyph atlas's lifetime is unknown -- G9 |
 | Cockpit holo panels: one family, vs `81216C77F90DEDD6` / ps `A2965EC2931A39C8`, 24 draws a frame, each sampling a different surface at PS slot 2 | MEASURED | `panel_upscale.h`, the cockpit-HUD map of 2026-09-02 |
 | A second composite family exists, vs `E508648660A352B2`, sampling one surface (magnified: `uv = snorm16 * cb2[1].xy * 16 + cb2[1].zw`) | MEASURED | `hud_sprite.h`, the target-indicator hunt |
 | The flight HUD (altimeter ladder, speed, coords) is vs `B7790CBFC6554097` / ps `8DEF46452FA459F5`, vector geometry straight into the eye, sampling the eye-sized depth at PS slot 0 and a 256x256 noise table at slot 1 | MEASURED | `hud_grain.cpp:137-161` |
@@ -435,31 +440,76 @@ that is a 1.5x bilinear magnification of two-thirds-resolution text: stable,
 unjittered, and soft. The layer fixes the swim; the surface's own resolution
 fixes the softness, and there are two ways to raise it.
 
-**Inflate the surface (preferred).** `advanced.surface_inflate` already
-creates a named surface N times larger at `CreateTexture2D` and scales the
-game's viewport to match, and the field verified the mechanism engaging (six
-textures created, six viewports scaled, 2026-09-02). Because the content is
-vector geometry and a large glyph atlas, what comes back is REAL detail --
-the same detail Elite's own supersampling produces, without charging the
-scene for it. Two extensions:
+**Inflate the surface (preferred, with one thing to prove first).**
+`advanced.surface_inflate` already creates a named surface N times larger
+at `CreateTexture2D` and scales the game's viewport to match
+(`fss_res.cpp:191-224`; the `RSSetViewports` path plus the draw-time
+backstop at `vscreen.cpp:1612-1630`), and the target-indicator arc verified
+the mechanism engaging in the field: six textures created, six viewports
+scaled, no failures, frame rate unchanged (2026-09-02). Vector geometry
+provably sharpens with a bigger surface -- the widget shader draws in a
+normalised space and places each element by a matrix (`loader_panel.h`),
+so more pixels is more detail. TEXT is the open question. Both inflate
+flights were judged on the fixed-size target indicator alone and recorded
+"nothing visible changed"; nobody looked at the letters. The text shader
+samples a 2048x2048 A8 glyph atlas (the loading-panel census,
+`docs/loading-panel-handoff.md`), and whether that atlas is baked for the
+resolution the game started at, or holds glyphs large enough (or as distance
+fields) to survive magnification, is unmeasured. The natural experiment that
+sharpened the HUD's text -- a 1.635x larger eye between headsets -- let the
+game bake for the new size; inflation happens behind the game's back. Hence
+G9 before this ships: one flight with the cockpit surfaces inflated at HMD
+Quality 0.67, after a menu trip, judged on the text; and a look at whether
+the 2048x2048 A8 texture is created again after a resolution change (the
+create hook sees every texture; a fresh bake means the atlas follows the
+size, and a single creation per session means it caps the text).
 
-- A `match` mode: the factor is the pass's output width over the render
-  width (1/0.67 = 1.5 at Quality; 1.0 under DLAA, where the mode does
-  nothing). Today the factor is an integer 2..4 (`fss_res.cpp:167-171`) held
-  in a `uint32_t` (`fssResScaleOf`); it becomes a float, the viewport paths
-  already multiply rather than double.
-- The sizes come from the classifier, not from the ini: every UI surface
-  the classifier learned is a size to inflate at its NEXT creation. The
-  cockpit's surfaces are created at session start and recreated on a trip
-  through the main menu or a resolution change, so the first session after
-  enabling it inflates nothing until the menu is visited; the totals line
-  says "N surfaces learned, M inflated, the rest at their next creation."
+Three extensions, the first a requirement rather than a convenience:
+
+- **A float factor, exactly output over render.** The composite samples
+  the surface with the game's own sampler -- plain trilinear (the 2026-09-04
+  census: 552 of 613 samplers) over a single-mip target. A 2x surface under
+  DLSS Quality is 1.33x denser than the layer's pixels: minification with no
+  mip chain, which sparkles on thin strokes as the head moves -- the exact
+  class of artefact this design exists to remove, and now with no temporal
+  filter over the layer to hide it. A factor of 1/0.67 = 1.5 at Quality
+  (1.0 under DLAA, where the mode does nothing) recreates each surface at
+  the size the game would have made at HMD Quality 1.0, so the
+  surface-to-panel ratio is the one the game designs for, and the fixed-size
+  sprite comes out exactly as it does at 1.0 -- no better, no worse. Today
+  the parser refuses anything but integers 2..4 (`fss_res.cpp:114`,
+  `:167-171`) and the factor is a `uint32_t` (`fssResScaleOf`); it becomes a
+  float, and the viewport paths already multiply rather than double.
+- **A `match` mode, with the sizes learned rather than named.** Every UI
+  surface the classifier learned is a size to inflate at its NEXT creation.
+  That arc's lesson is why: surface sizes are valid only for the session
+  they were measured in, and its "odd size with a depth partner" rule
+  filtered out the one surface that mattered. The cockpit's surfaces are
+  created at session start and recreated on a trip through the main menu or
+  a resolution change, so the first session after enabling it inflates
+  nothing until the menu is visited; the totals line says "N surfaces
+  learned, M inflated, the rest at their next creation."
+- **The tracked ring.** `fss_res` keeps 32 entries shared with the FSS rule
+  and evicts entries whose textures are still bound (`fss_res.h:24-31`).
+  Every learned surface and its depth partner is two entries; size the ring
+  for the learned set, or evict by liveness.
 
 Two limits, both measured in the hud-surface arc: artwork laid out at a
 FIXED PIXEL SIZE inside a surface (the target direction indicator) does not
 sharpen however big the surface is, and line widths held in surface pixels
 would thin (open risk, never observed). Depth partners are matched by size
 and inflate alike.
+
+**If G9 fails, the lever beyond inflation is the game's own layout size.**
+The on-foot screen's resolution is already forced by rewriting the
+immediates at six call sites where the game decides it (`vscreen_res.h`),
+which makes the game lay out AND bake for the size it is told -- inflation
+cannot do the second half. The cockpit surfaces are a fixed fraction of the
+internal render size; the arithmetic that applies that fraction is the
+analogous patch, and a bigger layout would bake the atlas and place the
+sprites for it. The target-indicator arc judged that out of proportion for
+one sprite; for every piece of UI text under DLSS the sum is different. Not
+in this plan: the fallback if inflation cannot reach the letters.
 
 **Resample the surface (Sean's CAS).** `experimental.holo_panels = sharp`
 (`panel_upscale.cpp`) does exactly this for one panel: AMD's EASU then RCAS
@@ -586,10 +636,12 @@ lines are the copies.
 | G6 | Does a GUI family ever draw straight into a submitted eye target? | GUI `vh=` on `DC` (not `DCO`) lines with an eye `r=` | if yes, those draws are direct UI with `crisp_ui_jitter = none` |
 | G7 | Does the flight HUD's pixel shader derive its depth UV from SV_Position and a screen size? | disassemble ps `8DEF46452FA459F5` (the census's `ph=`), look for `vPos`-based UVs | refuse the family, or bind a depth resampled to the layer's size at slot 0 for it |
 | G8 | Does any pass read the UI's target after the UI draws, other than the copy to the submitted texture? | draws after the last UI draw with the UI target in `s=` | an in-game AA pass over the HUD means the stock HUD has edge AA the layer lacks: a 2x layer with a box downsample restores it; with DLSS on, the game's AA should be off anyway |
+| G9 | Does inflating a surface sharpen its TEXT, or only its vector lines? | one flight, no build: `surface_inflate` on the cockpit surfaces (2x today, `match` once it exists) at HMD Quality 0.67, after a menu trip, judged on the letters; and whether the create hook sees a fresh 2048x2048 A8 texture after a resolution change | text unchanged: the glyph atlas caps it -- the layout-size patch (A5) or vector-only gains; design A still removes the swim either way |
 
-G1 and G3 decide whether A can ship as designed; G5 and G6 only choose
-branches the design already has; G2, G4, G7 and G8 are per-family and can
-be settled after the first flight with the `layer` view.
+G1 and G3 decide whether A can ship as designed; G9 decides whether A5's
+inflation is worth carrying or the layout-size patch is the next arc; G5 and
+G6 only choose branches the design already has; G2, G4, G7 and G8 are
+per-family and can be settled after the first flight with the `layer` view.
 
 # The test plan
 
