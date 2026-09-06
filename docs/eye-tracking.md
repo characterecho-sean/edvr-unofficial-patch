@@ -459,7 +459,11 @@ because it needs the probe's table arming, validation and sentinel and
 nothing else; `fix.foveation_centre = eyes` is its switch. The sketch below
 stands as written for what it does; the source tag is the driver's name in
 the arming line, blinks hold by way of the d3d11 half's one-second grace,
-and the privacy rule is kept: nothing per frame is written down.
+and the privacy rule is kept: nothing per frame is written down. *Flown
+2026-09-06 06:20*: armed on `aapvr` at the runtime's first frame, the first
+gaze published within a tenth of a second, the rings followed it for the
+whole flight (673 refills in 5,400 frames), and Sean reported it working
+well. Phase 3's fixed-centre half and its moving half have both flown.
 
 
 A small module (`src/openvr/gaze_source.cpp`, working name) behind one

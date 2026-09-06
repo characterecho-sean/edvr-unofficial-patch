@@ -233,6 +233,7 @@ float    g_outerDeg = 84.0f;   // degrees across the 2x2 ring's outer edge
 float    g_distance = 0.7f;    // metres, the nasal shift's fixation distance
 bool     g_geometryOnly = false;
 bool     g_followEyes = true;   // fix.foveation_centre = eyes
+uint32_t g_outerOverride = 0;   // advanced.foveation_outer_rate: 0 = the preset's, else a rate code
 uint32_t g_settingsGen = 1;    // bumped on any change; images refill at their next use
 bool     g_configured = false;
 
@@ -423,7 +424,19 @@ void fillRates(bool enable, uint32_t mid, uint32_t outer) {
     g_ratesDesc.viewports = g_rates;
 }
 
-uint32_t outerRate() { return g_mode == Mode::Quality ? kRate2x2 : kRate4x4; }
+constexpr uint32_t kRateCull = 0;  // NV_PIXEL_X0_CULL_RASTER_PIXELS: the tile is not rasterised
+uint32_t outerRate() {
+    if (g_outerOverride) return g_outerOverride;
+    return g_mode == Mode::Quality ? kRate2x2 : kRate4x4;
+}
+const char* outerRateName() {
+    switch (outerRate()) {
+        case kRateCull: return "CULLED (not drawn at all)";
+        case kRate2x2: return "2x2";
+        case kRate4x4: return "4x4";
+        default: return "?";
+    }
+}
 
 void releaseMask(Mask& m) {
     if (m.tex) m.tex->Release();
@@ -719,7 +732,7 @@ void arm(ID3D11DeviceContext* ctx) {
         "degrees, one per %s beyond; %s. The image binds at the first eye draw.",
         modeName(g_mode),
         sup == 1 ? "the driver says this GPU shades at variable rate" : "the capability query was refused, so the view will decide",
-        g_innerDeg, g_distance, g_outerDeg, outerRate() == kRate4x4 ? "4x4" : "2x2",
+        g_innerDeg, g_distance, g_outerDeg, outerRateName(),
         g_geometryOnly ? "geometry draws only, the full-screen passes at full rate (advanced.foveation_passes = geometry)"
                        : "every draw into the eye, the full-screen passes included (advanced.foveation_passes = all)");
 }
@@ -837,9 +850,15 @@ void foveationConfigure(Config& cfg) {
     const bool geom = passes == "geometry";
     const std::string centre = cfg.getString("fix.foveation_centre", "eyes");
     const bool follow = centre != "ahead";
+    const std::string outerRateKey = cfg.getString("advanced.foveation_outer_rate", "preset");
+    uint32_t outerOverride = 0;
+    if (outerRateKey == "cull") outerOverride = kRateCull;
+    else if (outerRateKey == "2x2") outerOverride = kRate2x2;
+    else if (outerRateKey == "4x4") outerOverride = kRate4x4;
 
     const bool changed = m != g_mode || inner != g_innerDeg || outer != g_outerDeg ||
-                         dist != g_distance || geom != g_geometryOnly || follow != g_followEyes;
+                         dist != g_distance || geom != g_geometryOnly || follow != g_followEyes ||
+                         outerOverride != g_outerOverride;
     const bool first = !g_configured;
     g_configured = true;
     g_mode = m;
@@ -848,7 +867,14 @@ void foveationConfigure(Config& cfg) {
     g_distance = dist;
     g_geometryOnly = geom;
     g_followEyes = follow;
+    g_outerOverride = outerOverride;
     if (changed) ++g_settingsGen;
+    if (outerOverride == kRateCull && (first || changed)) {
+        Log::get().note("foveation: advanced.foveation_outer_rate = cull -- the tiles beyond the outer ring are "
+                        "NOT DRAWN. A diagnostic: the periphery goes black, which proves the image reaches "
+                        "the game's pixels, and the frame time under it is the most any shading rate could "
+                        "save on this scene.");
+    }
 
     if (unknown && (first || changed)) {
         Log::get().note("foveation: fix.foveation = \"%s\" is not a choice here (off, quality, balanced, "
@@ -872,8 +898,8 @@ void foveationConfigure(Config& cfg) {
                         geom ? "geometry" : "all");
     } else if (changed && g_phase == Phase::Armed) {
         Log::get().note("foveation: settings changed (fix.foveation = %s, %.0f/%.0f degrees, %.2f m, %s "
-                        "draws) -- the images refill at their next use.",
-                        modeName(m), inner, outer, dist, geom ? "geometry" : "all");
+                        "draws, outer ring %s) -- the images refill at their next use.",
+                        modeName(m), inner, outer, dist, geom ? "geometry" : "all", outerRateName());
     }
 }
 
@@ -1253,8 +1279,9 @@ struct Measure {
 // One draw through the image, bound the way the module binds it (the table,
 // then the view, all sixteen viewports), and the measurement: the shaded
 // block's size per band from the positions, and the shader's invocations
-// per band from the counter.
-bool runVariant(ProbeRig& g, uint32_t table0, Measure& m, char* err, size_t errCap) {
+// per band from the counter. viewportsAfter sets the viewport again AFTER
+// the rates and the view, as a game does between our bind and its draw.
+bool runVariant(ProbeRig& g, uint32_t table0, bool viewportsAfter, Measure& m, char* err, size_t errCap) {
     ID3D11DeviceContext* ctx = g.ctx;
     const FLOAT clear[4] = {-1.0f, -1.0f, 0.0f, 0.0f};
     const UINT zeros[4] = {0, 0, 0, 0};
@@ -1292,6 +1319,10 @@ bool runVariant(ProbeRig& g, uint32_t table0, Measure& m, char* err, size_t errC
                  survived ? edvr::nvError(rc1 != edvr::kNvOk ? rc1 : rc2, e, sizeof(e)) : "a fault (caught)", rc1, rc2);
         ctx->OMSetRenderTargets(0, nullptr, nullptr);
         return false;
+    }
+    if (viewportsAfter) {
+        ctx->RSSetViewports(1, &vp);
+        ctx->RSSetState(g.rs);
     }
     ctx->Draw(3, 0);
     for (edvr::NvViewportRates& v : rates) v.enable = 0;
@@ -1365,17 +1396,21 @@ extern "C" __declspec(dllexport) int edvrFoveationProbe(void* device, void* cont
     const uint32_t bandFull = kPw * 4 * edvr::kTile;
     int verdict = 0;
     bool anyDrew = false;
-    for (int variant = 0; variant < 2; ++variant) {
+    for (int variant = 0; variant < 3; ++variant) {
         // Variant 0 is the module's way and the pass condition; variant 1 is
         // the documented quirk, with texel 0 mapped to 4x4 so an unread
-        // image shows as 4x4 everywhere rather than as nothing.
-        const bool viaUpdate = variant == 0;
+        // image shows as 4x4 everywhere rather than as nothing; variant 2 is
+        // the module's way with the viewport set again after the bind, as a
+        // game sets its viewports between our bind and its draws.
+        const bool viaUpdate = variant != 1;
+        const bool viewportsAfter = variant == 2;
         const uint32_t table0 = viaUpdate ? edvr::kRate1x1 : edvr::kRate4x4;
-        const char* name = viaUpdate ? "the image written by UpdateSubresource (as the module fills it)"
-                                     : "the same image given its texels as initial data at creation";
+        const char* name = variant == 0 ? "the image written by UpdateSubresource (as the module fills it)"
+                         : variant == 1 ? "the same image given its texels as initial data at creation"
+                                        : "the module's way, with the viewport and rasteriser state set again after the bind";
         char err[240] = {};
         Measure m;
-        if (!g.makeImage(viaUpdate, err, sizeof(err)) || !runVariant(g, table0, m, err, sizeof(err))) {
+        if (!g.makeImage(viaUpdate, err, sizeof(err)) || !runVariant(g, table0, viewportsAfter, m, err, sizeof(err))) {
             r.line("foveation probe: %s -- %s", name, err);
             continue;
         }
@@ -1406,7 +1441,8 @@ extern "C" __declspec(dllexport) int edvrFoveationProbe(void* device, void* cont
                name, kNames[0], kNames[1], kNames[2], kNames[3], kNames[4], kNames[5], kNames[6], kNames[7], blocks, counts,
                bandFull,
                named ? " -- as named" : (!anyEffect ? " -- NO EFFECT" : (allTexel0 ? " -- every tile took texel 0's rate: the image was not read" : " -- an effect, not as named")));
-        if (viaUpdate) verdict = named ? 1 : (anyEffect ? 2 : 0);
+        if (variant == 0) verdict = named ? 1 : (anyEffect ? 2 : 0);
+        if (variant == 2 && verdict == 1 && !named) verdict = 2;
     }
     if (!anyDrew) return 0;
     return verdict;

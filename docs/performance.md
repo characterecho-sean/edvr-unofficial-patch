@@ -490,6 +490,28 @@ now carries the GPU's own busy percentage, sampled once a second through
 `NvAPI_GPU_GetDynamicPstatesInfoEx` for the whole GPU -- under 90 is a
 frame the GPU is not the limit of.
 
+**Flight 4 (2026-09-06 06:20, `v0.14.0-31-gef0f3f3-dirty`, native
+4336x4284 under DLAA).** The centre followed the eyes from the first frame
+-- the source armed on `aapvr` at head-frame tangents (+0.015, +0.070),
+the rings refilled 673 times in 5,400 frames as the gaze crossed the
+dead band -- and Sean's word was "seems to work well". The GPU figure
+answered the question the earlier flights could not: 83 to 85 percent
+busy through the menu, 82 with a peak of 98 as the scene arrived, and
+**98 percent on average in the scene window** (260 eye draws a frame,
+every one under the image, 69 frames a second, the performance preset).
+So the GPU was the limit there, and the ring sizes still moved nothing.
+That leaves the GPU's time somewhere the shading rate does not reach: the
+pass's own compute at native (2.5 to 2.9 ms an eye, some 5.5 ms of the
+14.5 ms frame), the game's compute-side lighting and post (its exposure
+runs in a compute shader, which is how the exposure fix hooks it), the
+G-buffer's bandwidth at 37 million pixels a frame -- or the image not
+taking effect inside the game despite taking effect on the desk. The
+next build carries the instrument that separates those:
+`advanced.foveation_outer_rate = cull` leaves the tiles beyond the outer
+ring undrawn, so the periphery goes black, which proves the image reaches
+the game's pixels by eye alone, and the frame time under it is the
+ceiling of what any rate could save on that scene.
+
 ## Feature 3 — the eye-tracked centre
 
 **What changed since the toolkit era.** The toolkit needed a per-vendor
