@@ -512,6 +512,24 @@ ring undrawn, so the periphery goes black, which proves the image reaches
 the game's pixels by eye alone, and the frame time under it is the
 ceiling of what any rate could save on that scene.
 
+**Flight 5 (2026-09-06 06:39, `v0.14.0-32-gb492198-dirty`, performance,
+the cull on from launch, native).** Every eye draw ran under the image
+(217 a frame), the GPU read 84 percent busy with a peak of 98, and Sean's
+frame time stayed at 13.3 ms. Whether the periphery went black is the
+observation that decides which way this goes, and it is awaited. Meanwhile
+the desk closed the two remaining gaps between the desk and the game: the
+image survives the viewport and rasteriser state being set again after
+the bind, and it survives the target itself being bound again -- so the
+driver keeps it across everything a game does between our bind and its
+draws. The module now applies the image after every rebind of the target
+regardless, as OpenXR Toolkit and vrperfkit do, at a few NvAPI calls a
+frame. If the periphery was black: the image reaches the game's pixels,
+three quarters of the frame undrawn changed nothing, and Elite's GPU time
+at native lives where a shading rate cannot reach -- compute lighting and
+post, shadow atlases, the G-buffer's bandwidth, and this pass's own 5 ms.
+If it was not: something in the game defeats the image that nothing on
+the desk does, and that is the hunt.
+
 ## Feature 3 — the eye-tracked centre
 
 **What changed since the toolkit era.** The toolkit needed a per-vendor

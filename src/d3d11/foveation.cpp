@@ -360,6 +360,7 @@ bool      g_boundUnknown = false;   // ClearState: whatever was bound may be gon
 bool      g_ratesOn = false;
 uint32_t  g_lastRtvGen = ~0u;
 Mask*     g_lastMask = nullptr;
+uint32_t  g_appliedGen = ~0u;        // the binding generation the image was last applied at
 
 NvViewportRates  g_rates[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE];
 NvViewportsRates g_ratesDesc = {};
@@ -957,7 +958,15 @@ void foveationOnDraw(ID3D11DeviceContext* ctx, bool rtvEyeSized, void* rtv, uint
         }
     }
     IUnknown* want = g_lastMask ? g_lastMask->view : nullptr;
-    if (want != g_bound || g_boundUnknown) applyView(ctx, want);
+    // Applied again after EVERY rebind of the target (the generation moves
+    // at each OMSetRenderTargets), not only when the wanted view changes:
+    // the working implementations set the image after every bind, and a
+    // driver that drops it on a rebind would otherwise leave this module
+    // believing it bound while the game shaded at full rate.
+    if (want != g_bound || g_boundUnknown || (want && rtvGen != g_appliedGen)) {
+        applyView(ctx, want);
+        g_appliedGen = rtvGen;
+    }
     if (g_phase == Phase::Armed) {
         ++g_eyeDraws;
         if (want) {
@@ -1281,7 +1290,7 @@ struct Measure {
 // block's size per band from the positions, and the shader's invocations
 // per band from the counter. viewportsAfter sets the viewport again AFTER
 // the rates and the view, as a game does between our bind and its draw.
-bool runVariant(ProbeRig& g, uint32_t table0, bool viewportsAfter, Measure& m, char* err, size_t errCap) {
+bool runVariant(ProbeRig& g, uint32_t table0, bool viewportsAfter, bool rebindAfter, Measure& m, char* err, size_t errCap) {
     ID3D11DeviceContext* ctx = g.ctx;
     const FLOAT clear[4] = {-1.0f, -1.0f, 0.0f, 0.0f};
     const UINT zeros[4] = {0, 0, 0, 0};
@@ -1323,6 +1332,12 @@ bool runVariant(ProbeRig& g, uint32_t table0, bool viewportsAfter, Measure& m, c
     if (viewportsAfter) {
         ctx->RSSetViewports(1, &vp);
         ctx->RSSetState(g.rs);
+    }
+    if (rebindAfter) {
+        // The same target bound again, as a game rebinds its eye target
+        // between passes: does the image survive the rebind?
+        ctx->OMSetRenderTargetsAndUnorderedAccessViews(1, &g.rtv, nullptr, 1, 1, uavs, nullptr);
+        ctx->RSSetViewports(1, &vp);
     }
     ctx->Draw(3, 0);
     for (edvr::NvViewportRates& v : rates) v.enable = 0;
@@ -1396,21 +1411,26 @@ extern "C" __declspec(dllexport) int edvrFoveationProbe(void* device, void* cont
     const uint32_t bandFull = kPw * 4 * edvr::kTile;
     int verdict = 0;
     bool anyDrew = false;
-    for (int variant = 0; variant < 3; ++variant) {
+    for (int variant = 0; variant < 4; ++variant) {
         // Variant 0 is the module's way and the pass condition; variant 1 is
         // the documented quirk, with texel 0 mapped to 4x4 so an unread
         // image shows as 4x4 everywhere rather than as nothing; variant 2 is
         // the module's way with the viewport set again after the bind, as a
-        // game sets its viewports between our bind and its draws.
+        // game sets its viewports between our bind and its draws; variant 3
+        // rebinds the target itself after the bind, as a game does between
+        // its passes -- if the image does not survive that, the module must
+        // apply it again after every rebind, which it now does.
         const bool viaUpdate = variant != 1;
         const bool viewportsAfter = variant == 2;
+        const bool rebindAfter = variant == 3;
         const uint32_t table0 = viaUpdate ? edvr::kRate1x1 : edvr::kRate4x4;
         const char* name = variant == 0 ? "the image written by UpdateSubresource (as the module fills it)"
                          : variant == 1 ? "the same image given its texels as initial data at creation"
-                                        : "the module's way, with the viewport and rasteriser state set again after the bind";
+                         : variant == 2 ? "the module's way, with the viewport and rasteriser state set again after the bind"
+                                        : "the module's way, with the TARGET bound again after the bind";
         char err[240] = {};
         Measure m;
-        if (!g.makeImage(viaUpdate, err, sizeof(err)) || !runVariant(g, table0, viewportsAfter, m, err, sizeof(err))) {
+        if (!g.makeImage(viaUpdate, err, sizeof(err)) || !runVariant(g, table0, viewportsAfter, rebindAfter, m, err, sizeof(err))) {
             r.line("foveation probe: %s -- %s", name, err);
             continue;
         }
@@ -1440,9 +1460,11 @@ extern "C" __declspec(dllexport) int edvrFoveationProbe(void* device, void* cont
                "(full rate %u)%s",
                name, kNames[0], kNames[1], kNames[2], kNames[3], kNames[4], kNames[5], kNames[6], kNames[7], blocks, counts,
                bandFull,
-               named ? " -- as named" : (!anyEffect ? " -- NO EFFECT" : (allTexel0 ? " -- every tile took texel 0's rate: the image was not read" : " -- an effect, not as named")));
+               named ? " -- as named" : (!anyEffect ? (variant == 3 ? " -- NO EFFECT: a rebind of the target DROPS the image" : " -- NO EFFECT") : (allTexel0 ? " -- every tile took texel 0's rate: the image was not read" : " -- an effect, not as named")));
         if (variant == 0) verdict = named ? 1 : (anyEffect ? 2 : 0);
         if (variant == 2 && verdict == 1 && !named) verdict = 2;
+        // Variant 3 is informational: the module re-applies after every
+        // rebind either way.
     }
     if (!anyDrew) return 0;
     return verdict;
