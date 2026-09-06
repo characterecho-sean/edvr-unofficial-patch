@@ -419,6 +419,25 @@ when the eyes go left and whose pitch goes up when they go up. The next
 build prints `d`'s mean direction per window in all four conventions with
 `d = t - p` as the model.
 
+**Flown 2026-09-06 05:47 (`v0.14.0-30-ge9ebb10-dirty`): the gaze,
+complete.** `|t - p|` read 1.00 with every one of each window's 450 frames
+accepted, and the sweep protocol, headset on, named the head frame's
+convention. The variant with both axes mirrored matched Pimax's tracker
+to 0.1 to 0.7 degrees RMS in every window, and it read -20 degrees of yaw
+with the eyes far left, +14 far right, +11 of pitch far up and -26 far
+down, with Pimax's tangents saying the same. So, with `p` from the two
+point-form reads of entry 36 and `t` from entry 12 in the raw universe:
+
+```
+gaze, in the head's frame (x right, y up, -z forward)
+  = normalize( p.x - t.x,  p.y - t.y,  t.z - p.z )
+```
+
+Unit length by construction, one subtraction per frame, no root to choose,
+and Route B not needed at runtime. The morning's "x is mirrored" was half
+of it: the runtime's frame has both x and y opposed to OpenVR's. This is
+what Phase 2's gaze source computes.
+
 The rebuilt probe (`e230df2`) does the subtraction every frame from two
 point-form reads (x and y with the identity-with-w matrix, z with the
 first row swapped in) and prints per window: `|p|`'s mean, `|d|`'s mean
@@ -432,6 +451,16 @@ gaze held swinging it the other way by the head's yaw, and Route B's
 tangents agreeing within about 2 degrees RMS.
 
 ### Phase 2: the gaze source
+
+*Built 2026-09-06, with Phase 3, on the foveation branch* -- see
+docs/performance.md, feature 2, "the centre following the eyes". The source
+lives in `gaze_probe.cpp` beside the probe rather than in a file of its own,
+because it needs the probe's table arming, validation and sentinel and
+nothing else; `fix.foveation_centre = eyes` is its switch. The sketch below
+stands as written for what it does; the source tag is the driver's name in
+the arming line, blinks hold by way of the d3d11 half's one-second grace,
+and the privacy rule is kept: nothing per frame is written down.
+
 
 A small module (`src/openvr/gaze_source.cpp`, working name) behind one
 call, `gazeSample()`: a head-relative unit direction, a source tag, and

@@ -321,6 +321,17 @@ void publishHeadPose(const float* m12);
 bool headPose(float* out12);
 bool headForward(float* tx, float* ty);
 
+// The eye-tracked gaze, published by openvr_api.dll every frame it has one
+// (docs/eye-tracking.md: on the Pimax, the repair d = t - p, one subtraction
+// a frame), as head-frame tangents packed the way headForward is, with a
+// stamp bumped on every publish. "Lost" is a publish too: it writes a zero
+// word, so the reader falls back at once rather than by staleness. Read by
+// d3d11.dll's foveation to centre its rings. The stamp is filled whether or
+// not a gaze is present; the return says whether one is.
+void announceGaze(float tx, float ty);
+void announceGazeLost();
+bool gazeCentre(float* tx, float* ty, uint32_t* stamp);
+
 // The cull guard's state, published by openvr_api.dll at its stage
 // transitions and read by d3d11.dll once per frame boundary.
 //

@@ -4,9 +4,11 @@
 
 #include <cmath>
 #include <cstring>
+#include <string>
 
 #include "../common/config.h"
 #include "../common/guard.h"
+#include "../common/frame_flag.h"
 #include "../common/log.h"
 #include "launch_centre.h"
 #include "system_hook.h"
@@ -59,6 +61,18 @@ PFN_RealGetGenericInterface g_get = nullptr;
 bool g_wanted = false;       // advanced.gaze_probe, as read at launch
 bool g_configured = false;
 bool g_saidChanged = false;
+// The gaze SOURCE (docs/eye-tracking.md, Phase 2): fix.foveation_centre =
+// eyes arms the same table and, on Pimax's driver, publishes the repaired
+// gaze to the d3d11 half every frame -- d = t - p, one subtraction, as the
+// flights of 2026-09-05/06 measured against Pimax's own tracker. It rides
+// on the probe's arming and its sentinel, and logs nothing per frame.
+bool     g_sourceWanted = false;   // fix.foveation_centre = eyes, as read at launch
+bool     g_sourceOn = false;       // armed and publishing
+uint64_t g_sourcePublished = 0;
+uint64_t g_sourceInvalid = 0;
+bool     g_sourceFirstNoted = false;
+char     g_trackingSystem[128] = {};
+void sourceArm();
 
 enum class Phase { Waiting, Armed, Off };
 Phase g_phase = Phase::Waiting;
@@ -1252,6 +1266,7 @@ void tryArm() {
         // and Route B, when asked for.
         char sys[128], drv[128];
         driverIdentity(sys, sizeof(sys), drv, sizeof(drv));
+        snprintf(g_trackingSystem, sizeof(g_trackingSystem), "%s", sys);
         Log::get().note(
             "gaze probe: the HMD's tracking system is \"%s\", driver version \"%s\" (entry 28, "
             "properties 1000 and 1031).",
@@ -1259,11 +1274,103 @@ void tryArm() {
     }
     pointFormRead();
     pvrArm();
-    record(vouched, L, R);
+    if (g_sourceWanted) sourceArm();
+    if (g_wanted) record(vouched, L, R);
     ++g_frames;
 }
 
+// The source's read: the gaze in the head's frame (x right, y up, -z
+// forward), from the two point-form reads of entry 36 and the raw-universe
+// head of entry 12 -- normalize(p.x - t.x, p.y - t.y, t.z - p.z), the
+// formula the sweep protocol of 2026-09-06 named. False with why = 1 when a
+// read declined, 2 when the length is not near 1 (the model does not hold
+// this frame), 3 when the gaze is behind the head or past the packing.
+bool sourceRead(double d[3], float* tx, float* ty, int* why) {
+    vr::HmdVector2_t xy = {{NAN, NAN}}, zy = {{NAN, NAN}};
+    bool dec1 = false, dec2 = false;
+    if (!(callProj(kPointRows, &xy, &dec1) && callProj(kZRows, &zy, &dec2) && std::isfinite(xy.v[0]) &&
+          std::isfinite(xy.v[1]) && std::isfinite(zy.v[0]))) {
+        *why = 1;
+        return false;
+    }
+    double t[3];
+    if (!readRawHead(t)) {
+        *why = 1;
+        return false;
+    }
+    d[0] = xy.v[0] - t[0];
+    d[1] = xy.v[1] - t[1];
+    d[2] = t[2] - zy.v[0];
+    const double l = sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+    if (!(l > 0.9 && l < 1.1)) {
+        *why = 2;
+        return false;
+    }
+    for (int i = 0; i < 3; ++i) d[i] /= l;
+    if (d[2] > -0.2) {
+        *why = 3;
+        return false;
+    }
+    *tx = static_cast<float>(d[0] / -d[2]);
+    *ty = static_cast<float>(d[1] / -d[2]);
+    if (fabsf(*tx) > 2.9f || fabsf(*ty) > 2.9f) {
+        *why = 3;
+        return false;
+    }
+    return true;
+}
+
+void sourceArm() {
+    if (strcmp(g_trackingSystem, "aapvr") != 0) {
+        Log::get().note(
+            "gaze source: OFF -- this headset's tracking system is \"%s\" and the repair (d = t - p) "
+            "was measured on Pimax's \"aapvr\"; the rings stay on straight ahead. fix.foveation_centre = "
+            "eyes is the Pimax route only, so far.",
+            g_trackingSystem);
+        return;
+    }
+    double d[3];
+    float tx = 0.0f, ty = 0.0f;
+    int why = 0;
+    if (!sourceRead(d, &tx, &ty, &why)) {
+        Log::get().note(
+            "gaze source: OFF -- the first read did not give a gaze (%s); the rings stay on straight ahead.",
+            why == 1 ? "a read declined" : why == 2 ? "the length was not near 1, so the model does not hold here"
+                                                    : "it pointed behind the head or past the packing");
+        return;
+    }
+    g_sourceOn = true;
+    Log::get().note(
+        "gaze source: ON (fix.foveation_centre = eyes) -- the eye-tracked centre is published to the d3d11 "
+        "half every frame: d = t - p from entries 36 and 12 on \"%s\", head-frame tangents (%+.3f, %+.3f) at "
+        "arming. The rings follow it; a lost gaze is published as lost and the rings fall back to straight "
+        "ahead. Nothing per frame is written down.",
+        g_trackingSystem, tx, ty);
+}
+
+void sourcePublish() {
+    double d[3];
+    float tx = 0.0f, ty = 0.0f;
+    int why = 0;
+    if (sourceRead(d, &tx, &ty, &why)) {
+        announceGaze(tx, ty);
+        ++g_sourcePublished;
+        if (!g_sourceFirstNoted) {
+            g_sourceFirstNoted = true;
+            Log::get().note("gaze source: the first gaze is published.");
+        }
+    } else {
+        announceGazeLost();
+        ++g_sourceInvalid;
+    }
+}
+
 void ask(const vr::TrackedDevicePose_t* hmd) {
+    if (g_sourceOn) sourcePublish();
+    if (!g_wanted) {
+        ++g_frames;
+        return;
+    }
     vr::HmdVector2_t L = {{NAN, NAN}}, R = {{NAN, NAN}};
     bool vouched = false;
     const bool survived = guarded("gazeProbe/ask", [&] { vouched = g_center(&L, &R); });
@@ -1306,6 +1413,15 @@ void gazeProbeConfigure() {
     if (!g_configured) {
         g_configured = true;
         g_wanted = want;
+        // The source: read at launch, since it rides on the one-time arming.
+        const std::string centre = cfg.getString("fix.foveation_centre", "eyes");
+        g_sourceWanted = centre != "ahead";
+        if (g_sourceWanted) {
+            Log::get().note(
+                "gaze source: wanted (fix.foveation_centre = eyes) -- the eye-tracked centre for the "
+                "foveation's rings, published once a frame when this headset's driver gives one "
+                "(docs/eye-tracking.md). Arms with the runtime's first frame.");
+        }
         // Route B rides on the probe: the Pimax-runtime read, off by default.
         g_pvr.wanted = want && cfg.getBool("advanced.gaze_probe_pvr", false);
         if (g_pvr.wanted) {
@@ -1333,7 +1449,7 @@ void gazeProbeConfigure() {
 
 void gazeProbeApply(vr::EVRCompositorError err, const vr::TrackedDevicePose_t* renderPoses,
                     uint32_t renderCount) {
-    if (!g_wanted || g_phase == Phase::Off) return;
+    if ((!g_wanted && !g_sourceWanted) || g_phase == Phase::Off) return;
     if (g_phase == Phase::Waiting) {
         tryArm();
         return;
@@ -1347,6 +1463,12 @@ void gazeProbeApply(vr::EVRCompositorError err, const vr::TrackedDevicePose_t* r
 
 void gazeProbeShutdown() {
     if (g_phase != Phase::Armed) return;
+    if (g_sourceOn) {
+        Log::get().note("gaze source: %llu frames published a gaze, %llu published lost.",
+                        static_cast<unsigned long long>(g_sourcePublished),
+                        static_cast<unsigned long long>(g_sourceInvalid));
+    }
+    if (!g_wanted) return;
     summary(true);
     pvrShutdown();
 }

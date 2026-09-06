@@ -40,7 +40,9 @@ constexpr uint32_t kIdGraphicsCaps     = 0x52B1499Au;  // NvAPI_D3D1x_GetGraphic
 constexpr uint32_t kIdCreateRateView   = 0x99CA2DFFu;  // NvAPI_D3D11_CreateShadingRateResourceView
 constexpr uint32_t kIdSetRateView      = 0x1B0C2F83u;  // NvAPI_D3D11_RSSetShadingRateResourceView
 constexpr uint32_t kIdSetViewportRates = 0x34F7938Fu;  // NvAPI_D3D11_RSSetViewportsPixelShadingRates
-constexpr uint32_t kIdRegisterDevice   = 0x8C02C4D0u;  // NvAPI_D3D_RegisterDevice (the probe tries it)
+constexpr uint32_t kIdRegisterDevice   = 0x8C02C4D0u;  // NvAPI_D3D_RegisterDevice (unused; resolved for the record)
+constexpr uint32_t kIdEnumPhysicalGpus = 0xE5AC921Fu;  // NvAPI_EnumPhysicalGPUs
+constexpr uint32_t kIdGpuDynamicPstate = 0x60DED2EDu;  // NvAPI_GPU_GetDynamicPstatesInfoEx
 
 constexpr uint32_t nvVersion(uint32_t size, uint32_t ver) { return size | (ver << 16); }
 
@@ -109,6 +111,25 @@ typedef NvStatus (__cdecl* PFN_NvSetRateView)(IUnknown* context, IUnknown* view)
 typedef NvStatus (__cdecl* PFN_NvSetViewportRates)(IUnknown* context, NvViewportsRates* desc);
 typedef NvStatus (__cdecl* PFN_NvRegisterDevice)(IUnknown* device);
 
+// NV_GPU_DYNAMIC_PSTATES_INFO_EX: version, flags, and eight utilisation
+// domains of {bIsPresent:1, percentage} -- domain 0 is the graphics engine,
+// "percentage of time where the domain is considered busy in the last 1
+// second interval". The whole GPU, not this process: the question it
+// answers is whether the GPU was the frame's limit at all.
+struct NvGpuUtilisation {
+    uint32_t present;   // bit 0
+    uint32_t percentage;
+};
+struct NvDynamicPstates {
+    uint32_t         version, flags;
+    NvGpuUtilisation utilisation[8];
+};
+static_assert(sizeof(NvDynamicPstates) == 72, "NV_GPU_DYNAMIC_PSTATES_INFO_EX is 72 bytes");
+constexpr uint32_t kDynamicPstatesVer1 = nvVersion(sizeof(NvDynamicPstates), 1);
+constexpr uint32_t kMaxPhysicalGpus = 64;  // NVAPI_MAX_PHYSICAL_GPUS
+typedef NvStatus (__cdecl* PFN_NvEnumPhysicalGpus)(void** handles, uint32_t* count);
+typedef NvStatus (__cdecl* PFN_NvGpuDynamicPstates)(void* gpu, NvDynamicPstates* info);
+
 struct NvApi {
     bool                   tried = false;
     bool                   ok = false;
@@ -119,7 +140,11 @@ struct NvApi {
     PFN_NvSetRateView      setRateView = nullptr;
     PFN_NvSetViewportRates setViewportRates = nullptr;
     PFN_NvRegisterDevice   registerDevice = nullptr;    // optional
+    PFN_NvEnumPhysicalGpus enumGpus = nullptr;          // optional: the busy figure
+    PFN_NvGpuDynamicPstates dynamicPstates = nullptr;   // optional
     PFN_NvQueryInterface   query = nullptr;
+    void*                  gpu = nullptr;               // the first physical GPU, once enumerated
+    bool                   gpuTried = false;
     char                   why[240] = {};
 };
 NvApi       g_nv;
@@ -158,6 +183,8 @@ bool nvArm() {
     bool survived = guardedBudget(g_budget, [&] {
         g_nv.initialize = reinterpret_cast<PFN_NvInitialize>(query(kIdInitialize));
         g_nv.registerDevice = reinterpret_cast<PFN_NvRegisterDevice>(query(kIdRegisterDevice));
+        g_nv.enumGpus = reinterpret_cast<PFN_NvEnumPhysicalGpus>(query(kIdEnumPhysicalGpus));
+        g_nv.dynamicPstates = reinterpret_cast<PFN_NvGpuDynamicPstates>(query(kIdGpuDynamicPstate));
         g_nv.errorMessage = reinterpret_cast<PFN_NvGetErrorMessage>(query(kIdGetErrorMessage));
         g_nv.graphicsCaps = reinterpret_cast<PFN_NvGraphicsCaps>(query(kIdGraphicsCaps));
         g_nv.createRateView = reinterpret_cast<PFN_NvCreateRateView>(query(kIdCreateRateView));
@@ -205,8 +232,25 @@ float    g_innerDeg = 50.0f;   // degrees across the full-rate disc
 float    g_outerDeg = 84.0f;   // degrees across the 2x2 ring's outer edge
 float    g_distance = 0.7f;    // metres, the nasal shift's fixation distance
 bool     g_geometryOnly = false;
+bool     g_followEyes = true;   // fix.foveation_centre = eyes
 uint32_t g_settingsGen = 1;    // bumped on any change; images refill at their next use
 bool     g_configured = false;
+
+// The eye-tracked centre (frame_flag.h: the openvr half's gaze source).
+// The rings are refilled when the gaze has moved past a dead band from the
+// centre they were last built on; a gaze published as lost, or silent for
+// a second, returns the centre to straight ahead.
+bool     g_gazeValid = false;
+float    g_gazeTx = 0.0f, g_gazeTy = 0.0f;
+uint32_t g_gazeStamp = 0;
+uint32_t g_gazeAge = 0;
+bool     g_maskCentreValid = false;
+float    g_maskTx = 0.0f, g_maskTy = 0.0f;
+uint32_t g_gazeRefills = 0;
+uint64_t g_gazeFramesFollowed = 0;
+bool     g_gazeNotedOn = false;
+bool     g_gazeNotedLost = false;
+constexpr float kGazeDeadBand = 0.026f;   // tangent, about 1.5 degrees
 
 const char* modeName(Mode m) {
     switch (m) {
@@ -335,6 +379,36 @@ uint32_t g_noTangentFrames = 0;
 bool     g_noTangentNoted = false;
 bool     g_summaryDone = false;
 bool     g_boundOnce = false;
+// The GPU's busy figure, one sample a second since the last summary.
+uint64_t g_gpuBusySum = 0;
+uint32_t g_gpuBusyN = 0;
+uint32_t g_gpuBusyMax = 0;
+uint32_t g_gpuBusyAbsent = 0;
+
+void gpuBusySample() {
+    if (!g_nv.ok || !g_nv.enumGpus || !g_nv.dynamicPstates) return;
+    if (!g_nv.gpuTried) {
+        g_nv.gpuTried = true;
+        void* handles[kMaxPhysicalGpus] = {};
+        uint32_t count = 0;
+        NvStatus rc = -1;
+        guardedBudget(g_budget, [&] { rc = g_nv.enumGpus(handles, &count); });
+        if (rc == kNvOk && count > 0) g_nv.gpu = handles[0];
+    }
+    if (!g_nv.gpu) return;
+    NvDynamicPstates info = {};
+    info.version = kDynamicPstatesVer1;
+    NvStatus rc = -1;
+    guardedBudget(g_budget, [&] { rc = g_nv.dynamicPstates(g_nv.gpu, &info); });
+    if (rc != kNvOk || !(info.utilisation[0].present & 1u)) {
+        ++g_gpuBusyAbsent;
+        return;
+    }
+    const uint32_t pct = info.utilisation[0].percentage > 100 ? 100 : info.utilisation[0].percentage;
+    g_gpuBusySum += pct;
+    ++g_gpuBusyN;
+    if (pct > g_gpuBusyMax) g_gpuBusyMax = pct;
+}
 
 void fillRates(bool enable, uint32_t mid, uint32_t outer) {
     for (NvViewportRates& r : g_rates) {
@@ -459,6 +533,14 @@ void centreOf(int eye, float* cx, float* cy) {
     }
     *cx = -ox / g_distance;
     *cy = -oy / g_distance;
+    // The eye-tracked centre, when the source publishes one: the gaze's
+    // head-frame tangents, on top of the nasal shift (the gaze is the
+    // head's direction to the fixated point; each eye's line to it is
+    // still offset by that eye over the fixation distance).
+    if (g_followEyes && g_gazeValid && g_maskCentreValid) {
+        *cx += g_maskTx;
+        *cy += g_maskTy;
+    }
 }
 
 // A tile's rate is the finest its NEAREST point to the centre needs: a tile
@@ -642,6 +724,42 @@ void arm(ID3D11DeviceContext* ctx) {
                        : "every draw into the eye, the full-screen passes included (advanced.foveation_passes = all)");
 }
 
+const char* centreText() {
+    static char text[200];
+    if (!g_followEyes) {
+        snprintf(text, sizeof(text), "straight ahead (fix.foveation_centre = ahead)");
+    } else if (g_gazeValid) {
+        snprintf(text, sizeof(text),
+                 "following the eyes -- %llu frames so far, %u refills for gaze motion past the %.1f-degree "
+                 "dead band, now at tangents (%+.3f, %+.3f)",
+                 static_cast<unsigned long long>(g_gazeFramesFollowed), g_gazeRefills,
+                 atanf(kGazeDeadBand) * 57.2957795f, g_gazeTx, g_gazeTy);
+    } else {
+        snprintf(text, sizeof(text),
+                 "straight ahead -- no gaze published%s (%llu frames followed so far, %u refills)",
+                 g_gazeStamp ? " right now" : " yet", static_cast<unsigned long long>(g_gazeFramesFollowed),
+                 g_gazeRefills);
+    }
+    return text;
+}
+
+const char* gpuBusyText() {
+    static char text[160];
+    if (g_gpuBusyN == 0) {
+        snprintf(text, sizeof(text), "no reading (%s)",
+                 !g_nv.enumGpus || !g_nv.dynamicPstates ? "this NvAPI has no utilisation entry points"
+                 : !g_nv.gpu                             ? "no physical GPU enumerated"
+                 : g_gpuBusyAbsent                       ? "the graphics domain answered absent"
+                                                         : "no sample yet");
+        return text;
+    }
+    snprintf(text, sizeof(text),
+             "%.0f%% on average, most %u%%, over %u one-second samples of the whole GPU (under 90 is "
+             "a frame the GPU is not the limit of)",
+             static_cast<double>(g_gpuBusySum) / g_gpuBusyN, g_gpuBusyMax, g_gpuBusyN);
+    return text;
+}
+
 void summary(const char* when) {
     const double f = g_framesArmed ? static_cast<double>(g_framesArmed) : 1.0;
     // The targets by draws, largest first, at most eight.
@@ -681,12 +799,16 @@ void summary(const char* when) {
         "first-bind order); %.1f image switches a frame (most %u); %u images made; %u frames "
         "without published tangents. Draws a frame over the whole armed span: %.0f into eye-sized "
         "targets, %.0f of them under the image, %.0f into everything else; by target, largest "
-        "first: %s.",
+        "first: %s. GPU busy since the last summary: %s. The centre: %s.",
         when, g_framesArmed, static_cast<double>(g_targetsSum[0]) / f,
         static_cast<double>(g_targetsSum[1]) / f, static_cast<double>(g_submitMatched) / f,
         static_cast<double>(g_switches) / f, g_switchesMax, g_imagesMade, g_noTangentFrames,
         static_cast<double>(g_eyeDraws) / f, static_cast<double>(g_eyeDrawsUnder) / f,
-        static_cast<double>(g_otherDraws) / f, bl ? by : "none seen");
+        static_cast<double>(g_otherDraws) / f, bl ? by : "none seen", gpuBusyText(), centreText());
+    g_gpuBusySum = 0;
+    g_gpuBusyN = 0;
+    g_gpuBusyMax = 0;
+    g_gpuBusyAbsent = 0;
 }
 
 }  // namespace
@@ -713,9 +835,11 @@ void foveationConfigure(Config& cfg) {
     if (dist > 0.0f && dist < 0.2f) dist = 0.2f;
     const std::string passes = cfg.getString("advanced.foveation_passes", "all");
     const bool geom = passes == "geometry";
+    const std::string centre = cfg.getString("fix.foveation_centre", "eyes");
+    const bool follow = centre != "ahead";
 
     const bool changed = m != g_mode || inner != g_innerDeg || outer != g_outerDeg ||
-                         dist != g_distance || geom != g_geometryOnly;
+                         dist != g_distance || geom != g_geometryOnly || follow != g_followEyes;
     const bool first = !g_configured;
     g_configured = true;
     g_mode = m;
@@ -723,6 +847,7 @@ void foveationConfigure(Config& cfg) {
     g_outerDeg = outer;
     g_distance = dist;
     g_geometryOnly = geom;
+    g_followEyes = follow;
     if (changed) ++g_settingsGen;
 
     if (unknown && (first || changed)) {
@@ -827,6 +952,59 @@ void foveationFrameBoundary(ID3D11DeviceContext* ctx) {
         // them is not a state to leave lying about.
         if (g_bound || g_boundUnknown) applyView(ctx, nullptr);
         ++g_framesArmed;
+        if (g_framesArmed % 90 == 0) gpuBusySample();
+        if (g_followEyes) {
+            float tx = 0.0f, ty = 0.0f;
+            uint32_t stamp = 0;
+            const bool present = gazeCentre(&tx, &ty, &stamp);
+            if (stamp != g_gazeStamp) {
+                g_gazeStamp = stamp;
+                if (present) {
+                    g_gazeTx = tx;
+                    g_gazeTy = ty;
+                    g_gazeAge = 0;
+                    if (!g_gazeValid) {
+                        g_gazeValid = true;
+                        ++g_settingsGen;
+                        g_gazeNotedLost = false;
+                        if (!g_gazeNotedOn) {
+                            g_gazeNotedOn = true;
+                            Log::get().note("foveation: the centre follows the eyes from here -- the gaze "
+                                            "source is publishing (fix.foveation_centre = eyes).");
+                        }
+                    }
+                } else {
+                    g_gazeAge = 1000;   // published as lost: fall back now
+                }
+            } else {
+                ++g_gazeAge;
+            }
+            if (g_gazeValid && g_gazeAge > 90) {
+                g_gazeValid = false;
+                g_maskCentreValid = false;
+                ++g_settingsGen;
+                if (!g_gazeNotedLost) {
+                    g_gazeNotedLost = true;
+                    Log::get().note("foveation: the gaze is lost or silent -- the centre is straight ahead "
+                                    "until it returns. Said once per loss.");
+                }
+            }
+            if (g_gazeValid) {
+                ++g_gazeFramesFollowed;
+                const float dx = g_gazeTx - g_maskTx, dy = g_gazeTy - g_maskTy;
+                if (!g_maskCentreValid || dx * dx + dy * dy > kGazeDeadBand * kGazeDeadBand) {
+                    g_maskTx = g_gazeTx;
+                    g_maskTy = g_gazeTy;
+                    g_maskCentreValid = true;
+                    ++g_settingsGen;
+                    ++g_gazeRefills;
+                }
+            }
+        } else if (g_gazeValid) {
+            g_gazeValid = false;
+            g_maskCentreValid = false;
+            ++g_settingsGen;
+        }
         if (g_switchesFrame > g_switchesMax) g_switchesMax = g_switchesFrame;
         g_targetsSum[0] += g_targetsFrame[0];
         g_targetsSum[1] += g_targetsFrame[1];

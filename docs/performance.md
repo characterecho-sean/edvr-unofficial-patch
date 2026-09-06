@@ -454,6 +454,42 @@ into, eye-sized or not, with the draws that ran under the image and the
 ones that did not. The plan holds: the saving is spent on resolution,
 which moves the frame's time to the GPU, where it can be measured.
 
+**Flight 3 (2026-09-06 05:47, `v0.14.0-30-ge9ebb10-dirty`, quality).**
+The census answers the coverage question: in the scene at 3252x3213 the
+frame drew 357 times into eye-sized targets and every one of them ran
+under the image -- 320 into the R10G10B10A2 main target, 14 into the
+R8G8B8A8 one, 2 into an R32 -- while the 55 draws a frame that did not
+went to the 3840x2160 mirror window, two 406x401 effect buffers and a
+1920x1080 surface, none of them an eye. Mid-flight the render rose to
+native 4336x4284 (DLAA) and its R10G10B10A2 target took 84 draws a frame
+under the image. The coarse shading reaches the scene's passes; the
+frame rate ran 87, 84 and 85 at 3252 and 77 at native. What the log still
+cannot say is whether the GPU was the limit in any of those windows; the
+next build samples the GPU's own busy figure through NvAPI and prints it
+with the census.
+
+**Built, the centre following the eyes (2026-09-06, the foveation
+branch).** Phase 2 and Phase 3 of docs/eye-tracking.md in one build, on the
+formula the sweep protocol named. The openvr half's gaze source
+(`gaze_probe.cpp`, riding on the probe's arming and sentinel) computes
+`normalize(p.x - t.x, p.y - t.y, t.z - p.z)` every frame from the two
+point-form reads of entry 36 and the raw-universe head of entry 12, keeps it
+only when its length is within a tenth of 1 and it points ahead, and
+publishes it as head-frame tangents over the frame_flag channel (mapping
+`_v23`), with "lost" published as a zero word so the reader falls back at
+once. It arms only on Pimax's `aapvr` driver, where the repair was measured;
+elsewhere one line and the fixed centre. The d3d11 half reads the channel
+at each frame boundary: a fresh gaze moves the rings' centre, on top of the
+nasal shift, once it has travelled past a 1.5-degree dead band from the
+centre the images were last built on (a refill by UpdateSubresource, a few
+kilobytes an image); a gaze published as lost, or silent for a second,
+returns the centre to straight ahead with one line. `fix.foveation_centre =
+eyes | ahead`, eyes the default; the tracker side reads it at launch, the
+rings live. The summary names the centre's state and the refill count, and
+now carries the GPU's own busy percentage, sampled once a second through
+`NvAPI_GPU_GetDynamicPstatesInfoEx` for the whole GPU -- under 90 is a
+frame the GPU is not the limit of.
+
 ## Feature 3 — the eye-tracked centre
 
 **What changed since the toolkit era.** The toolkit needed a per-vendor
