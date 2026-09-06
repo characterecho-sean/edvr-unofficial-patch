@@ -561,6 +561,55 @@ because it removed the device outright with the image bound:
 the tile quotient rounded UP, since a floor-sized image leaves the
 uncovered strip at full rate, which is what the module already does.
 
+**Flight 6 (2026-09-06 07:35): the feature works, and its ceiling on Elite
+is measured.** With `cull_all` the whole view went black, which is the
+proof the four earlier rounds were reaching for: the shading-rate image
+does reach the game's pixels, per eye, every draw. And the same flight
+priced the feature, because culling every tile is the most any shading
+rate could ever save:
+
+| The eye's pixel shading | GPU busy | Frames a second |
+|---|---|---|
+| all of it culled (`cull_all`) | 72% | 88 |
+| the outer ring culled (`cull`) | 92 to 93% | 88, then 84 |
+| shaded normally (earlier flights, same scenes) | 98% | 84 to 89 |
+
+So the whole of the eye draws' pixel shading is about a quarter of this
+GPU's time at native, and removing every last pixel of it buys no frames
+at all: at 88 the frame is held by the 90 Hz cap and the CPU's submission,
+not by the GPU. A preset moves a fraction of that quarter -- the step from
+quality to performance is a few percent of the frame -- which is why no
+ring size ever showed. **Foveated shading is not a performance lever on
+Elite at these settings.** It is not broken and it is not free to keep
+looking for one; the honest ceiling is a few tenths of a millisecond in a
+13.3 ms frame, and the rest of that frame is vertex and geometry work,
+shadow atlases, compute lighting and post, bandwidth, and this pass's own
+5 ms.
+
+Where that leaves the feature: it ships off, it stays correct, and the
+gaze it is built on is worth more than the shading rate it drives -- the
+same source now feeds the eye-tracked centre, and would feed anything
+later that wants to know where the commander is looking. If the render
+scale is ever pushed far past native, the quarter grows and the arithmetic
+changes; that is the only condition under which to revisit it.
+
+**The stereo defect, found in the same flight and fixed.** Under the outer
+cull Sean saw the two eyes disagree, and the census had been saying why
+all along: 6.5 targets a frame attributed to the left eye against 4.6 to
+the right, where the truth is one each. The attribution was a parity guess
+-- the first target of a size is the left eye's, the second the right --
+and it breaks on any size the game uses an odd number of times. Since the
+two eyes' frusta are mirrored, their straight-ahead points sit a fifth of
+the image apart, so a target wearing the other eye's mask has its rings
+that far out, which in stereo is rivalry rather than blur. The textures
+the openvr half sees submitted are each eye's last target, so every target
+bound before one belongs to the same eye: the frame boundary now walks the
+frame's targets backwards, gives each the eye of the next submitted one,
+and remembers that per resource for the frames after. The census reports
+how many eyes were settled by a submitted texture, how many by the render
+order behind one, how many are not yet placed, and how many corrections
+the walk has made.
+
 ## Feature 3 — the eye-tracked centre
 
 **What changed since the toolkit era.** The toolkit needed a per-vendor

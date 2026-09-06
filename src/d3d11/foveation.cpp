@@ -291,14 +291,58 @@ struct Mask {
 };
 Mask g_masks[8];
 
-// The frame's eye-sized targets in first-bind order, for eye attribution.
+// WHICH EYE A TARGET BELONGS TO
+//
+// It matters more than it looks: the two eyes' frusta are mirrored, so
+// their straight-ahead points sit a fifth of the image apart (NDC +0.194
+// and -0.194 on the Crystal Super), and a target wearing the other eye's
+// mask has its disc that far out. That is the stereo rivalry Sean saw
+// under the cull on 2026-09-06, and the census had already said the
+// attribution was wrong: 6.5 targets a frame to the left eye against 4.6
+// to the right, where the truth is one each.
+//
+// The parity guess that produced those numbers -- the first target of a
+// size is the left eye's, the second the right -- breaks on any size the
+// game uses an odd number of times. What is true instead: the textures
+// the openvr half sees submitted ARE each eye's last target, so every
+// target bound before one, since the previous submitted target, belongs
+// to the same eye. So the frame boundary walks the frame's targets
+// backwards and gives each the eye of the next submitted one, and that
+// verdict is remembered per resource for every frame after. The first
+// frame after a target appears may be wrong; from the second it is the
+// game's own order that says so.
 struct Seen {
     void*    resource;
     uint32_t w, h, fmt;
     int      eye;
+    bool     bySubmit;   // this one WAS a submitted texture: ground truth
 };
 Seen     g_seen[48];
 uint32_t g_seenCount = 0;
+
+// The verdicts that outlive the frame.
+struct Known {
+    void* resource = nullptr;
+    int   eye = 0;
+    bool  settled = false;   // by a submitted texture, or by the walk behind one
+};
+Known    g_known[64];
+uint32_t g_knownCount = 0;
+uint64_t g_settledBySubmit = 0, g_settledByOrder = 0, g_unsettled = 0, g_corrections = 0;
+
+Known* knownFor(void* resource) {
+    for (uint32_t i = 0; i < g_knownCount; ++i) {
+        if (g_known[i].resource == resource) return &g_known[i];
+    }
+    if (g_knownCount < sizeof(g_known) / sizeof(g_known[0])) {
+        Known& k = g_known[g_knownCount++];
+        k.resource = resource;
+        k.eye = 0;
+        k.settled = false;
+        return &k;
+    }
+    return nullptr;
+}
 
 // The census: every target the game draws into while the feature is armed,
 // by size and format, with its draws split into those under the image,
@@ -874,25 +918,61 @@ int eyeOf(const ResourceInfo& info) {
     for (uint32_t i = 0; i < g_seenCount; ++i) {
         if (g_seen[i].resource == info.resource) return g_seen[i].eye;
     }
+    bool bySubmit = false;
     int eye = -1;
     for (int e = 0; e < 2; ++e) {
         void* sub = submittedTexture(e);
         if (sub && sub == info.resource) eye = e;
     }
+    Known* k = knownFor(info.resource);
     if (eye >= 0) {
+        bySubmit = true;
         ++g_submitMatched;
-    } else {
-        uint32_t alike = 0;
-        for (uint32_t i = 0; i < g_seenCount; ++i) {
-            if (g_seen[i].w == info.a && g_seen[i].h == info.b && g_seen[i].fmt == info.fmt) ++alike;
+        ++g_settledBySubmit;
+        if (k) {
+            if (k->settled && k->eye != eye) {
+                ++g_corrections;
+                ++g_settingsGen;   // its mask was built for the other eye
+            }
+            k->eye = eye;
+            k->settled = true;
         }
-        eye = static_cast<int>(alike & 1u);
+    } else if (k && k->settled) {
+        eye = k->eye;
+        ++g_settledByOrder;
+    } else {
+        // Not yet placed: the frame boundary's walk settles it behind the
+        // next submitted target. Until then the left eye, which is what
+        // the old guess would have said for a target seen first.
+        eye = k ? k->eye : 0;
+        ++g_unsettled;
     }
     if (g_seenCount < sizeof(g_seen) / sizeof(g_seen[0])) {
-        g_seen[g_seenCount++] = Seen{info.resource, info.a, info.b, info.fmt, eye};
+        g_seen[g_seenCount++] = Seen{info.resource, info.a, info.b, info.fmt, eye, bySubmit};
     }
     ++g_targetsFrame[eye];
     return eye;
+}
+
+// The frame's targets, walked backwards: each takes the eye of the next
+// one a submitted texture identified. Called at the frame boundary, before
+// the frame's list is cleared.
+void settleEyesByOrder() {
+    int nextEye = -1;
+    for (int i = static_cast<int>(g_seenCount) - 1; i >= 0; --i) {
+        if (g_seen[i].bySubmit) {
+            nextEye = g_seen[i].eye;
+            continue;
+        }
+        if (nextEye < 0) continue;   // nothing submitted after it this frame
+        Known* k = knownFor(g_seen[i].resource);
+        if (!k) continue;
+        if (k->settled && k->eye == nextEye) continue;
+        if (k->settled && k->eye != nextEye) ++g_corrections;
+        k->eye = nextEye;
+        k->settled = true;
+        ++g_settingsGen;   // rebuild that size's masks around the right centre
+    }
 }
 
 // The modules in the process whose names suggest they might touch the
@@ -1034,17 +1114,23 @@ void summary(const char* when) {
         "first-bind order); %.1f image switches a frame (most %u); %u images made; %u frames "
         "without published tangents. Draws a frame over the whole armed span: %.0f into eye-sized "
         "targets, %.0f of them under the image, %.0f into everything else; by target, largest "
-        "first: %s. GPU busy since the last summary: %s. The centre: %s. The state the eye draws run "
-        "under -- %s.",
+        "first: %s. GPU busy since the last summary: %s. The centre: %s. Eyes settled: %.1f a frame by a "
+        "submitted texture, %.1f by the render order behind one, %.1f not yet placed, %llu corrections. "
+        "The state the eye draws run under -- %s.",
         when, g_framesArmed, static_cast<double>(g_targetsSum[0]) / f,
         static_cast<double>(g_targetsSum[1]) / f, static_cast<double>(g_submitMatched) / f,
         static_cast<double>(g_switches) / f, g_switchesMax, g_imagesMade, g_noTangentFrames,
         static_cast<double>(g_eyeDraws) / f, static_cast<double>(g_eyeDrawsUnder) / f,
-        static_cast<double>(g_otherDraws) / f, bl ? by : "none seen", gpuBusyText(), centreText(), stateText());
+        static_cast<double>(g_otherDraws) / f, bl ? by : "none seen", gpuBusyText(), centreText(),
+        static_cast<double>(g_settledBySubmit) / f, static_cast<double>(g_settledByOrder) / f,
+        static_cast<double>(g_unsettled) / f, static_cast<unsigned long long>(g_corrections), stateText());
     g_gpuBusySum = 0;
     g_gpuBusyN = 0;
     g_gpuBusyMax = 0;
     g_gpuBusyAbsent = 0;
+    g_settledBySubmit = 0;
+    g_settledByOrder = 0;
+    g_unsettled = 0;
 }
 
 }  // namespace
@@ -1298,6 +1384,7 @@ void foveationFrameBoundary(ID3D11DeviceContext* ctx) {
                             "image stays unbound until they arrive.", g_noTangentFrames);
         }
     }
+    settleEyesByOrder();
     g_switchesFrame = 0;
     g_seenCount = 0;
     g_targetsFrame[0] = g_targetsFrame[1] = 0;
