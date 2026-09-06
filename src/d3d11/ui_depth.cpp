@@ -273,6 +273,12 @@ void uiDepthConfigure(Config& cfg) {
     if (g_on && !was) {
         g_stoodDown = false;
         g_announced = false;
+        // A fresh window, so the engage line counts this switch-on and not
+        // whatever the last window had accumulated before the key went off
+        // (the first flight's second engage line read 79564 draws).
+        g_wComposite = g_wDirect = g_wWrote = g_wNoDepth = g_wNoState = 0;
+        g_wLearned = 0;
+        g_wFrames = 0;
         Log::get().note("ui depth: ON -- the interface's composites and the flight HUD "
                         "will write their depth for the temporal pass (%u direct "
                         "famil%s, %u excluded). It says so again when the first "
@@ -313,10 +319,6 @@ void uiDepthNoteOffscreenDraw(ID3D11DeviceContext* ctx) {
 
 bool uiDepthOnEyeDraw(ID3D11DeviceContext* ctx) {
     if (!g_on || g_stoodDown) return false;
-    if (!bindingGet(BindSlot::Dsv0)) {
-        ++g_wNoDepth;
-        return false;
-    }
     bool composite = false;
     static const BindSlot kSlots[4] = {BindSlot::PsSrv0, BindSlot::PsSrv1,
                                        BindSlot::PsSrv2, BindSlot::PsSrv3};
@@ -328,15 +330,22 @@ bool uiDepthOnEyeDraw(ID3D11DeviceContext* ctx) {
     }
     const uint64_t h = boundVsHash(ctx);
     if (h && inList(g_exclude, g_excludeCount, h)) return false;
+    const bool direct = !composite && h && inList(g_families, g_familyCount, h);
+    if (!composite && !direct) return false;
+    // A piece of the interface with no depth target bound has nowhere to
+    // write. Counted here, after the classification, so the figure is
+    // interface draws left alone -- the first flight counted every
+    // depthless eye draw (the post chain's) and read 10 a frame for nothing.
+    if (!bindingGet(BindSlot::Dsv0)) {
+        ++g_wNoDepth;
+        return false;
+    }
     if (composite) {
         ++g_wComposite;
-        return true;
-    }
-    if (h && inList(g_families, g_familyCount, h)) {
+    } else {
         ++g_wDirect;
-        return true;
     }
-    return false;
+    return true;
 }
 
 void uiDepthBegin(ID3D11DeviceContext* ctx) {

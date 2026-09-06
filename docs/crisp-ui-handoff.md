@@ -229,6 +229,47 @@ and one state swap per UI draw: the game's depth-stencil state's writing
 twin, its test kept, ALWAYS where it had none. Default off; ini only until
 flown.
 
+## Flight 2 (2026-09-06 11:21, v0.14.0-15-gaa353b5, the on/off A/B)
+
+**Sean: "That looks much better!"** -- the text stopped shuttling and
+swimming under DLSS with `ui_depth = on`, toggled live against off, docked
+and after a jump. The log:
+
+- engaged on the first frame after the switch; then 63 to 82 interface
+  draws a frame writing depth (24 to 28 composites, the rest the flight
+  HUD), 9 surfaces known within a minute and 13 by the end as panels came
+  into view; 5 depth states derived; nothing left alone for want of a
+  writable state; no fault, no stand-down;
+- the pass unchanged in price: NVIDIA's 1.85 ms an eye, EDVR's 2.34, 88-90
+  fps, and NVIDIA's history restarted 4 times in 40,000 eye-frames -- the
+  interface's new depth did not disturb it;
+- the depth probe's cockpit-layer targets read 238-243 of 256 samples
+  within 2 m, as before.
+
+Two counter fixes followed the read (the "left alone: no depth target"
+figure had counted every depthless eye draw, 10 a frame of post chain; the
+window counters did not reset on a live toggle). Neither changes behaviour.
+
+**What this settles.** The temporal half of the defect was the depth, and
+B0 is enough for it. Design A stays parked. What B0 does not touch is
+detail: the letters are still rasterised at the render size, and G9 is the
+next flight -- no build, an ini line:
+
+    surface_inflate = 1267x1036:2, 589x883:2, 1327x760:2, 1769x380:2
+
+which names the four text-carrying cockpit surfaces measured at 2818x2784
+(HMD Quality 0.65 on the Pimax; the sizes follow the internal render size,
+so the same HMD Quality must be used), inflated 2x from the next launch.
+Judge the letters against the same panels with the line commented out.
+The 2654x2322 surface carries icons and vectors only and is left out; the
+menu and loader share 2212x1244.
+
+**Open, small:** the target indicator quad still has no depth (it draws
+into the G-buffer before lighting, so writing there would feed the
+lighting resolve); the loading screen's UI has depth only when the depth
+probe finds a scene pair there, which its draw-count rule refuses on the
+loader's few draws.
+
 # Design A: the UI layer
 
 ## A1. What counts as UI: the classifier
