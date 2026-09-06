@@ -253,7 +253,10 @@ groupshared uint gCount[40];
 void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
     if (gi < 40) gCount[gi] = 0;
     GroupMemoryBarrierWithGroupSync();
-    uint count[40] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+    // Three counters, not forty. This pass writes 15, 16 and 17 and no
+    // others, and a forty-element local array costs forty registers of
+    // occupancy on a dispatch that covers the whole eye.
+    uint count15 = 0, count16 = 0, count17 = 0;
     if (id.x < (uint)size.x && id.y < (uint)size.y) {
         float2 p = float2(id.xy);
         float3 d;
@@ -275,7 +278,7 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
             float z = far ? 0.0 : knobs.z * knobs.w / den;
             bool worldOn = tvCam.w != 0.0 && split.x > 0.0;
             if (worldOn && (far || z > split.x)) {
-                count[15] = 1;
+                count15 = 1;
                 dp = float3(dot(c2R0.xyz, d), dot(c2R1.xyz, d), dot(c2R2.xyz, d));
                 if (!far) dp = dp * z + tvCam.xyz;
             } else if (!far) {
@@ -285,8 +288,8 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
             }
             float luma = rgbToYcocg(S.Load(int3(region.xy + int2(p), 0)).rgb).x;
             if (luma > 0.6) {
-                count[16] = 1;
-                if (zraw <= 0.0) count[17] = 1;
+                count16 = 1;
+                if (zraw <= 0.0) count17 = 1;
             }
         }
         float2 motion = 0.0;
@@ -303,7 +306,7 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
         // NVIDIA's place (the pass skips its evaluation that frame).
         if (split.y == 1.0) {
             O[id.xy] = float4(saturate(0.5 + motion.x / 16.0), saturate(0.5 + motion.y / 16.0),
-                              count[15] != 0 ? 1.0 : 0.0, 1.0);
+                              count15 != 0 ? 1.0 : 0.0, 1.0);
         } else if (split.y == 3.0) {
             float zs3 = zSceneAt(region.xy + int2(p));
             float3 o3;
@@ -320,11 +323,17 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
         }
         ZC[id.xy] = knobs.y != 0.0 ? zraw : 0.0;
     }
-    [unroll] for (int k = 0; k < 40; ++k) {
-        if (count[k] != 0) InterlockedAdd(gCount[k], count[k]);
-    }
+    if (count15 != 0) InterlockedAdd(gCount[15], count15);
+    if (count16 != 0) InterlockedAdd(gCount[16], count16);
+    if (count17 != 0) InterlockedAdd(gCount[17], count17);
     GroupMemoryBarrierWithGroupSync();
-    if (gi < 40) InterlockedAdd(Stats[gi], gCount[gi]);
+    // Only the counters that moved. A group whose counters are all zero --
+    // which is nearly every group, since these count rare classes of pixel
+    // -- used to pay forty global atomics onto forty contended addresses
+    // regardless. At the Crystal Super's size that is 290,512 groups an
+    // eye, so 11.6 million atomic adds an eye and 23 million a frame, for
+    // a set of numbers that only a log line reads.
+    if (gi < 40 && gCount[gi] != 0) InterlockedAdd(Stats[gi], gCount[gi]);
 }
 )HLSL"
 // (adjacent literals: MSVC caps one at 16 KB)
@@ -572,12 +581,14 @@ void main(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
         }
         O[id.xy] = float4(o, cur.a);
     }
-    // One atomic per group per counter, not per pixel.
+    // One atomic per group per counter, not per pixel -- and none at all
+    // for a counter that did not move, which is most of them in most
+    // groups.
     [unroll] for (int k = 0; k < 40; ++k) {
         if (count[k] != 0) InterlockedAdd(gCount[k], count[k]);
     }
     GroupMemoryBarrierWithGroupSync();
-    if (gi < 40) InterlockedAdd(Stats[gi], gCount[gi]);
+    if (gi < 40 && gCount[gi] != 0) InterlockedAdd(Stats[gi], gCount[gi]);
 }
 )HLSL";
 
