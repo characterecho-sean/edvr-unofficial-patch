@@ -298,6 +298,7 @@ uint64_t g_maskRefills = 0;    // refills done at the frame boundary
 uint32_t g_gazeRefills = 0;
 uint32_t g_gazeLosses = 0;      // frames the source published "lost", blinks included
 uint32_t g_wantedFrames = 0;    // frames wanted but never armed
+uint64_t g_wantedSince = 0;     // tick of the first such frame
 bool     g_wantedNoted = false;
 uint64_t g_gazeFramesFollowed = 0;
 bool     g_gazeNotedOn = false;
@@ -1421,13 +1422,33 @@ void foveationConfigure(Config& cfg) {
     if (std::isfinite(innerKey) && innerKey >= 10.0f) inner = innerKey > 170.0f ? 170.0f : innerKey;
     if (std::isfinite(outerKey) && outerKey >= 10.0f) outer = outerKey > 178.0f ? 178.0f : outerKey;
     if (outer < inner + 4.0f) outer = inner + 4.0f;
-    float dist = cfg.getFloat("advanced.foveation_distance", 0.7f);
+    const std::string centre = cfg.getString("fix.foveation_centre", "eyes");
+    const bool follow = centre != "ahead";
+    // THE DEFAULT DEPENDS ON WHO IS AIMING THE DISC.
+    //
+    // The shift aims each eye's disc at a point this far ahead, so the two
+    // discs fuse at that depth and NOWHERE ELSE: at any other distance the
+    // eyes' coarse/fine boundaries sit apart by the vergence angle, and
+    // whatever falls between them is sharp in one eye and blocky in the
+    // other. That is a rivalry the commander cannot look away from.
+    //
+    // It exists for the FIXED centre, where a disc pinned to each eye's
+    // straight ahead otherwise fuses at infinity and reads as a window set
+    // in space rather than glasses on the face. When the EYES aim the disc
+    // there is nothing to correct: the gaze is already a direction in the
+    // head frame and both eyes take the same one, so a shift can only pull
+    // them apart. Twice now a flight has found the same symptom with the
+    // fixed default under the eye-tracked centre -- "the left eye had VRS
+    // shading in the middle" on 2026-09-06, at 0.086 tangent between the
+    // two discs, which is 5 degrees of rivalry on menu text.
+    //
+    // So: no shift when the eyes are driving, the cockpit's depth when
+    // they are not. Either can still be set outright.
+    float dist = cfg.getFloat("advanced.foveation_distance", follow ? 0.0f : 0.7f);
     if (!std::isfinite(dist) || dist < 0.0f) dist = 0.0f;
     if (dist > 0.0f && dist < 0.2f) dist = 0.2f;
     const std::string passes = cfg.getString("advanced.foveation_passes", "all");
     const bool geom = passes == "geometry";
-    const std::string centre = cfg.getString("fix.foveation_centre", "eyes");
-    const bool follow = centre != "ahead";
     const std::string outerRateKey = cfg.getString("advanced.foveation_outer_rate", "preset");
     uint32_t outerOverride = kRatePreset;
     bool cullInner = false, cullAll = false;
@@ -1720,10 +1741,21 @@ void foveationFrameBoundary(ID3D11DeviceContext* ctx) {
     // because a feature doing nothing in silence is the worst failure this
     // codebase has (the pre-ship review of 2026-09-06 found this path had
     // no line at all).
-    if (g_phase == Phase::Wanted && !g_wantedNoted && ++g_wantedFrames >= 1800) {
+    //
+    // Frames AND seconds, because frames alone cried wolf: Elite's loading
+    // screen runs uncapped at about 200 a second, so 1800 of them passed
+    // nine seconds in and this line printed one second before the feature
+    // armed perfectly well (the flight of 2026-09-06 11:14). A count is not
+    // a clock on a screen with nothing to draw.
+    if (g_phase == Phase::Wanted && !g_wantedNoted) {
+        ++g_wantedFrames;
+        if (g_wantedSince == 0) g_wantedSince = GetTickCount64();
+    }
+    if (g_phase == Phase::Wanted && !g_wantedNoted && g_wantedFrames >= 1800 && g_wantedSince != 0 &&
+        GetTickCount64() - g_wantedSince >= 60000) {
         g_wantedNoted = true;
         Log::get().note(
-            "foveation: ON, but 1800 frames have passed without a single eye-sized target to arm on. "
+            "foveation: ON, but a minute of frames has passed without a single eye-sized target to arm on. "
             "Either openvr_api.dll is not installed beside the game (or is an older one, which cannot "
             "tell this half the eye size), or this headset's eye textures are not being recognised. "
             "Nothing is being shaded coarsely. Said once.");
