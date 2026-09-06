@@ -331,9 +331,14 @@ uint32_t g_seenCount = 0;
 
 // The verdicts that outlive the frame.
 struct Known {
-    void* resource = nullptr;
-    int   eye = 0;
-    bool  settled = false;   // by a submitted texture, or by the walk behind one
+    void*    resource = nullptr;
+    int      eye = 0;
+    bool     settled = false;   // by a submitted texture, or by the walk behind one
+    bool     everSubmitted = false;
+    int      submittedAs = -1;  // the eye it was seen submitted as, if ever
+    uint32_t w = 0, h = 0, fmt = 0;
+    uint64_t draws = 0;
+    uint32_t corrections = 0;
 };
 Known    g_known[64];
 uint32_t g_knownCount = 0;
@@ -353,6 +358,39 @@ Known* knownFor(void* resource) {
     return nullptr;
 }
 
+// The eye targets named one by one, busiest first: the masks are right --
+// the flight of 2026-09-06 08:23 printed both eyes' geometry exactly as
+// the runtime measured it -- so what is left is which mask each target
+// gets, and that cannot be read from totals.
+const char* targetsText() {
+    static char text[900];
+    const Known* order[64] = {};
+    int n = 0;
+    for (uint32_t i = 0; i < g_knownCount; ++i) {
+        if (g_known[i].draws) order[n++] = &g_known[i];
+    }
+    for (int i = 1; i < n; ++i) {
+        const Known* k = order[i];
+        int j = i;
+        while (j > 0 && order[j - 1]->draws < k->draws) {
+            order[j] = order[j - 1];
+            --j;
+        }
+        order[j] = k;
+    }
+    int l = 0;
+    for (int i = 0; i < n && i < 8 && l < static_cast<int>(sizeof(text)) - 1; ++i) {
+        const Known& k = *order[i];
+        l += snprintf(text + l, sizeof(text) - l,
+                      "%s#%d %ux%u fmt %u: %s, settled %s%s, %llu draws%s", l ? "; " : "",
+                      static_cast<int>(&k - g_known), k.w, k.h, k.fmt, k.eye == 0 ? "LEFT" : "RIGHT",
+                      k.settled ? "yes" : "NO",
+                      k.everSubmitted ? (k.submittedAs == 0 ? " (submitted as LEFT)" : " (submitted as RIGHT)") : "",
+                      static_cast<unsigned long long>(k.draws), k.corrections ? " [corrected]" : "");
+    }
+    return l ? text : "none";
+}
+
 // The census: every target the game draws into while the feature is armed,
 // by size and format, with its draws split into those under the image,
 // eye-sized draws without it, and draws the census called something other
@@ -369,6 +407,8 @@ struct Sig {
 };
 Sig      g_sigs[16];
 Sig*     g_censusSig = nullptr;
+struct Known;
+Known*   g_censusKnown = nullptr;
 uint32_t g_censusGen = ~0u;
 uint64_t g_eyeDraws = 0;       // eye-sized draws while armed
 uint64_t g_eyeDrawsUnder = 0;  // ...with the image bound
@@ -969,6 +1009,11 @@ int eyeOf(const ResourceInfo& info) {
         if (sub && sub == info.resource) eye = e;
     }
     Known* k = knownFor(info.resource);
+    if (k) {
+        k->w = info.a;
+        k->h = info.b;
+        k->fmt = info.fmt;
+    }
     if (eye >= 0) {
         bySubmit = true;
         ++g_submitMatched;
@@ -980,6 +1025,8 @@ int eyeOf(const ResourceInfo& info) {
             }
             k->eye = eye;
             k->settled = true;
+            k->everSubmitted = true;
+            k->submittedAs = eye;
         }
     } else if (k && k->settled) {
         eye = k->eye;
@@ -1012,7 +1059,10 @@ void settleEyesByOrder() {
         Known* k = knownFor(g_seen[i].resource);
         if (!k) continue;
         if (k->settled && k->eye == nextEye) continue;
-        if (k->settled && k->eye != nextEye) ++g_corrections;
+        if (k->settled && k->eye != nextEye) {
+            ++g_corrections;
+            ++k->corrections;
+        }
         k->eye = nextEye;
         k->settled = true;
         ++g_settingsGen;   // rebuild that size's masks around the right centre
@@ -1160,14 +1210,15 @@ void summary(const char* when) {
         "targets, %.0f of them under the image, %.0f into everything else; by target, largest "
         "first: %s. GPU busy since the last summary: %s. The centre: %s. Eyes settled: %.1f a frame by a "
         "submitted texture, %.1f by the render order behind one, %.1f not yet placed, %llu corrections. "
-        "The state the eye draws run under -- %s.",
+        "The state the eye draws run under -- %s. The eye targets themselves: %s.",
         when, g_framesArmed, static_cast<double>(g_targetsSum[0]) / f,
         static_cast<double>(g_targetsSum[1]) / f, static_cast<double>(g_submitMatched) / f,
         static_cast<double>(g_switches) / f, g_switchesMax, g_imagesMade, g_noTangentFrames,
         static_cast<double>(g_eyeDraws) / f, static_cast<double>(g_eyeDrawsUnder) / f,
         static_cast<double>(g_otherDraws) / f, bl ? by : "none seen", gpuBusyText(), centreText(),
         static_cast<double>(g_settledBySubmit) / f, static_cast<double>(g_settledByOrder) / f,
-        static_cast<double>(g_unsettled) / f, static_cast<unsigned long long>(g_corrections), stateText());
+        static_cast<double>(g_unsettled) / f, static_cast<unsigned long long>(g_corrections), stateText(),
+        targetsText());
     g_gpuBusySum = 0;
     g_gpuBusyN = 0;
     g_gpuBusyMax = 0;
@@ -1299,10 +1350,14 @@ void foveationOnDraw(ID3D11DeviceContext* ctx, bool rtvEyeSized, void* rtv, uint
     if (g_phase == Phase::Armed && rtvGen != g_censusGen) {
         g_censusGen = rtvGen;
         g_censusSig = nullptr;
+        g_censusKnown = nullptr;
         ResourceInfo info;
         if (rtv && bindingResolve(rtv, &info) && info.isTexture2D) {
             g_censusSig = sigFor(info);
-            if (rtvEyeSized) describeTarget(rtv, g_censusSig);
+            if (rtvEyeSized) {
+                describeTarget(rtv, g_censusSig);
+                g_censusKnown = knownFor(info.resource);
+            }
         }
     }
     const bool fullScreenPass = count <= 6 && instances <= 1;
@@ -1354,6 +1409,7 @@ void foveationOnDraw(ID3D11DeviceContext* ctx, bool rtvEyeSized, void* rtv, uint
         } else if (g_censusSig) {
             ++g_censusSig->bare;
         }
+        if (g_censusKnown) ++g_censusKnown->draws;
         if (g_eyeDraws % 61 == 0) sampleDrawState(ctx);
     }
 }
