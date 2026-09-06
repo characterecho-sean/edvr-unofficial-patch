@@ -3,6 +3,8 @@
 #include <windows.h>
 
 #include <d3d11.h>
+#include <d3d11_1.h>   // ID3D11RasterizerState1: the forced sample count, one of the states a game may set
+#include <psapi.h>     // the module census in the ARMED line
 
 #include <cmath>
 #include <cstdarg>
@@ -233,7 +235,16 @@ float    g_outerDeg = 84.0f;   // degrees across the 2x2 ring's outer edge
 float    g_distance = 0.7f;    // metres, the nasal shift's fixation distance
 bool     g_geometryOnly = false;
 bool     g_followEyes = true;   // fix.foveation_centre = eyes
-uint32_t g_outerOverride = 0;   // advanced.foveation_outer_rate: 0 = the preset's, else a rate code
+// advanced.foveation_outer_rate. The sentinel for "the preset's own" is NOT
+// zero: zero is NV_PIXEL_X0_CULL_RASTER_PIXELS, the cull rate itself, and
+// while it was the sentinel the cull setting fell straight through to the
+// preset -- the flight of 2026-09-06 06:39 ran with "cull" set and its own
+// ARMED line said "one per 4x4 beyond". Nothing was ever culled, and the
+// periphery Sean watched was 4x4-shaded, not undrawn.
+constexpr uint32_t kRatePreset = 0xFFFFFFFFu;
+uint32_t g_outerOverride = kRatePreset;
+bool     g_cullInner = false;   // the diagnostic that culls the full-rate disc itself
+bool     g_cullAll = false;     // ...and every tile of the eye
 uint32_t g_settingsGen = 1;    // bumped on any change; images refill at their next use
 bool     g_configured = false;
 
@@ -309,6 +320,179 @@ uint32_t g_censusGen = ~0u;
 uint64_t g_eyeDraws = 0;       // eye-sized draws while armed
 uint64_t g_eyeDrawsUnder = 0;  // ...with the image bound
 uint64_t g_otherDraws = 0;     // draws into anything else while armed
+
+// The state the game's eye draws run under, for the summary: the cull
+// flight of 2026-09-06 06:39 left the periphery lit with every eye draw
+// under the image, so something the game sets defeats it that the desk
+// never set. Per target, once: the view's dimension and the texture's
+// array size, sample count and mips. Per sampled eye draw: the rasteriser
+// state's flags (fill, cull, multisample, antialiased lines, scissor, depth
+// clip, forced sample count), whether a geometry shader is bound, the
+// viewport count and the first viewport's rectangle.
+struct SigDesc {
+    bool     known = false;
+    uint32_t viewDim = 0;      // D3D11_RTV_DIMENSION
+    uint32_t arraySize = 0, samples = 0, mips = 0, bind = 0, misc = 0;
+};
+SigDesc g_sigDesc[16];
+
+struct RasterSeen {
+    bool     used = false;
+    uint32_t packed = 0;
+    uint32_t forcedSamples = 0;
+    uint64_t draws = 0;
+};
+RasterSeen g_rasters[8];
+uint64_t   g_rasterNullDraws = 0;   // draws with no rasteriser state object bound (the default state)
+uint64_t   g_gsDraws = 0, g_sampledDraws = 0;
+uint64_t   g_a2cDraws = 0, g_hsDraws = 0;
+uint32_t   g_topologies[4] = {}, g_topologyDraws[4] = {};
+uint32_t   g_vpCount = 0;
+float      g_vp[4] = {};
+uint32_t   g_vpTallies = 0, g_vpOddTallies = 0;   // viewports not at the origin or not the target's size
+
+void describeTarget(void* rtv, Sig* sig) {
+    if (!rtv || !sig) return;
+    const size_t index = static_cast<size_t>(sig - g_sigs);
+    if (index >= 16 || g_sigDesc[index].known) return;
+    SigDesc& d = g_sigDesc[index];
+    d.known = true;
+    guardedBudget(g_budget, [&] {
+        ID3D11RenderTargetView* view = static_cast<ID3D11RenderTargetView*>(rtv);
+        D3D11_RENDER_TARGET_VIEW_DESC vd = {};
+        view->GetDesc(&vd);
+        d.viewDim = static_cast<uint32_t>(vd.ViewDimension);
+        ID3D11Resource* res = nullptr;
+        view->GetResource(&res);
+        if (res) {
+            ID3D11Texture2D* tex = nullptr;
+            res->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&tex));
+            if (tex) {
+                D3D11_TEXTURE2D_DESC td = {};
+                tex->GetDesc(&td);
+                d.arraySize = td.ArraySize;
+                d.samples = td.SampleDesc.Count;
+                d.mips = td.MipLevels;
+                d.bind = td.BindFlags;
+                d.misc = td.MiscFlags;
+                tex->Release();
+            }
+            res->Release();
+        }
+    });
+}
+
+void sampleDrawState(ID3D11DeviceContext* ctx) {
+    ++g_sampledDraws;
+    guardedBudget(g_budget, [&] {
+        ID3D11RasterizerState* rs = nullptr;
+        ctx->RSGetState(&rs);
+        if (!rs) {
+            ++g_rasterNullDraws;
+        } else {
+            D3D11_RASTERIZER_DESC rd = {};
+            rs->GetDesc(&rd);
+            uint32_t forced = 0;
+            ID3D11RasterizerState1* rs1 = nullptr;
+            rs->QueryInterface(__uuidof(ID3D11RasterizerState1), reinterpret_cast<void**>(&rs1));
+            if (rs1) {
+                D3D11_RASTERIZER_DESC1 rd1 = {};
+                rs1->GetDesc1(&rd1);
+                forced = rd1.ForcedSampleCount;
+                rs1->Release();
+            }
+            const uint32_t packed = (rd.FillMode & 3u) | ((rd.CullMode & 3u) << 2) | ((rd.FrontCounterClockwise ? 1u : 0u) << 4) |
+                                    ((rd.DepthClipEnable ? 1u : 0u) << 5) | ((rd.ScissorEnable ? 1u : 0u) << 6) |
+                                    ((rd.MultisampleEnable ? 1u : 0u) << 7) | ((rd.AntialiasedLineEnable ? 1u : 0u) << 8) |
+                                    ((rd.DepthBias ? 1u : 0u) << 9) | ((forced & 0xFu) << 10);
+            rs->Release();
+            RasterSeen* slot = nullptr;
+            for (RasterSeen& r : g_rasters) {
+                if (r.used && r.packed == packed) { slot = &r; break; }
+            }
+            if (!slot) {
+                for (RasterSeen& r : g_rasters) {
+                    if (!r.used) { r.used = true; r.packed = packed; r.forcedSamples = forced; slot = &r; break; }
+                }
+            }
+            if (slot) ++slot->draws;
+        }
+        ID3D11GeometryShader* gs = nullptr;
+        ctx->GSGetShader(&gs, nullptr, nullptr);
+        if (gs) {
+            ++g_gsDraws;
+            gs->Release();
+        }
+        ID3D11HullShader* hs = nullptr;
+        ctx->HSGetShader(&hs, nullptr, nullptr);
+        if (hs) {
+            ++g_hsDraws;
+            hs->Release();
+        }
+        ID3D11BlendState* bs = nullptr;
+        FLOAT factor[4];
+        UINT mask = 0;
+        ctx->OMGetBlendState(&bs, factor, &mask);
+        if (bs) {
+            D3D11_BLEND_DESC bd = {};
+            bs->GetDesc(&bd);
+            if (bd.AlphaToCoverageEnable) ++g_a2cDraws;
+            bs->Release();
+        }
+        D3D11_PRIMITIVE_TOPOLOGY topo = D3D11_PRIMITIVE_TOPOLOGY_UNDEFINED;
+        ctx->IAGetPrimitiveTopology(&topo);
+        for (int i = 0; i < 4; ++i) {
+            if (g_topologyDraws[i] == 0 || g_topologies[i] == static_cast<uint32_t>(topo)) {
+                g_topologies[i] = static_cast<uint32_t>(topo);
+                ++g_topologyDraws[i];
+                break;
+            }
+        }
+        UINT n = 0;
+        ctx->RSGetViewports(&n, nullptr);
+        if (n > 0 && n <= D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE) {
+            D3D11_VIEWPORT vps[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE];
+            ctx->RSGetViewports(&n, vps);
+            g_vpCount = n;
+            g_vp[0] = vps[0].TopLeftX;
+            g_vp[1] = vps[0].TopLeftY;
+            g_vp[2] = vps[0].Width;
+            g_vp[3] = vps[0].Height;
+            ++g_vpTallies;
+            if (vps[0].TopLeftX != 0.0f || vps[0].TopLeftY != 0.0f) ++g_vpOddTallies;
+        }
+    });
+}
+
+const char* stateText() {
+    static char text[900];
+    int l = 0;
+    l += snprintf(text + l, sizeof(text) - l, "targets:");
+    for (int i = 0; i < 16 && l < static_cast<int>(sizeof(text)) - 1; ++i) {
+        if (!g_sigs[i].used || !g_sigDesc[i].known) continue;
+        const SigDesc& d = g_sigDesc[i];
+        l += snprintf(text + l, sizeof(text) - l, " %ux%u view dim %u (4 = tex2d, 5 = tex2d array), array %u, %u sample(s), %u mip(s), bind 0x%X;",
+                      g_sigs[i].w, g_sigs[i].h, d.viewDim, d.arraySize, d.samples, d.mips, d.bind);
+    }
+    l += snprintf(text + l, sizeof(text) - l, " rasteriser states at %llu sampled eye draws (%llu with none bound):",
+                  static_cast<unsigned long long>(g_sampledDraws), static_cast<unsigned long long>(g_rasterNullDraws));
+    for (const RasterSeen& r : g_rasters) {
+        if (!r.used || l >= static_cast<int>(sizeof(text)) - 1) continue;
+        const uint32_t p = r.packed;
+        l += snprintf(text + l, sizeof(text) - l, " [%llu draws: fill %u, cull %u, ccw %u, depthclip %u, scissor %u, MULTISAMPLE %u, aalines %u, bias %u, forced samples %u]",
+                      static_cast<unsigned long long>(r.draws), p & 3u, (p >> 2) & 3u, (p >> 4) & 1u, (p >> 5) & 1u,
+                      (p >> 6) & 1u, (p >> 7) & 1u, (p >> 8) & 1u, (p >> 9) & 1u, r.forcedSamples);
+    }
+    l += snprintf(text + l, sizeof(text) - l, "; geometry shader bound on %llu of them, hull shader on %llu, alpha-to-coverage on %llu; topologies (4 = triangle list, 5 = strip, 33+ = patches):",
+                  static_cast<unsigned long long>(g_gsDraws), static_cast<unsigned long long>(g_hsDraws),
+                  static_cast<unsigned long long>(g_a2cDraws));
+    for (int i = 0; i < 4 && l < static_cast<int>(sizeof(text)) - 1; ++i) {
+        if (g_topologyDraws[i]) l += snprintf(text + l, sizeof(text) - l, " %u x%u", g_topologies[i], g_topologyDraws[i]);
+    }
+    l += snprintf(text + l, sizeof(text) - l, "; viewports %u, the first at (%.0f, %.0f) %.0fx%.0f, off the origin on %u of %u tallies",
+                  g_vpCount, g_vp[0], g_vp[1], g_vp[2], g_vp[3], g_vpOddTallies, g_vpTallies);
+    return text;
+}
 
 Sig* sigFor(const ResourceInfo& info) {
     for (Sig& s : g_sigs) {
@@ -412,11 +596,12 @@ void gpuBusySample() {
     if (pct > g_gpuBusyMax) g_gpuBusyMax = pct;
 }
 
-void fillRates(bool enable, uint32_t mid, uint32_t outer) {
+void fillRates(bool enable, uint32_t inner, uint32_t mid, uint32_t outer) {
     for (NvViewportRates& r : g_rates) {
         r.enable = enable ? 1 : 0;
         memset(r.pad, 0, sizeof(r.pad));
         for (uint32_t& t : r.table) t = kRate1x1;
+        r.table[0] = inner;
         r.table[1] = mid;
         r.table[2] = outer;
     }
@@ -426,18 +611,23 @@ void fillRates(bool enable, uint32_t mid, uint32_t outer) {
 }
 
 constexpr uint32_t kRateCull = 0;  // NV_PIXEL_X0_CULL_RASTER_PIXELS: the tile is not rasterised
+uint32_t innerRate() { return (g_cullAll || g_cullInner) ? kRateCull : kRate1x1; }
+uint32_t midRate() { return g_cullAll ? kRateCull : kRate2x2; }
 uint32_t outerRate() {
-    if (g_outerOverride) return g_outerOverride;
+    if (g_cullAll) return kRateCull;
+    if (g_outerOverride != kRatePreset) return g_outerOverride;
     return g_mode == Mode::Quality ? kRate2x2 : kRate4x4;
 }
-const char* outerRateName() {
-    switch (outerRate()) {
+const char* rateName(uint32_t rate) {
+    switch (rate) {
         case kRateCull: return "CULLED (not drawn at all)";
+        case kRate1x1: return "1x1";
         case kRate2x2: return "2x2";
         case kRate4x4: return "4x4";
         default: return "?";
     }
 }
+const char* outerRateName() { return rateName(outerRate()); }
 
 void releaseMask(Mask& m) {
     if (m.tex) m.tex->Release();
@@ -451,7 +641,7 @@ void standDown(ID3D11DeviceContext* ctx, const char* why);
 // sets its viewports between our calls.
 void applyView(ID3D11DeviceContext* ctx, IUnknown* view) {
     if (!g_nv.ok || !ctx) return;
-    fillRates(view != nullptr, kRate2x2, outerRate());
+    fillRates(view != nullptr, innerRate(), midRate(), outerRate());
     NvStatus rc1 = kNvOk, rc2 = kNvOk;
     const bool survived = guardedBudget(g_budget, [&] {
         rc1 = g_nv.setViewportRates(ctx, &g_ratesDesc);
@@ -490,7 +680,7 @@ void standDown(ID3D11DeviceContext* ctx, const char* why) {
     if (g_nv.ok && ctx && (g_bound || g_boundUnknown)) {
         // Best effort, unbudgeted for the answer: a failure here has nothing
         // left to stand down.
-        fillRates(false, kRate2x2, outerRate());
+        fillRates(false, kRate1x1, kRate2x2, outerRate());
         guardedBudget(g_budget, [&] {
             g_nv.setRateView(ctx, nullptr);
             g_nv.setViewportRates(ctx, &g_ratesDesc);
@@ -705,6 +895,35 @@ int eyeOf(const ResourceInfo& info) {
     return eye;
 }
 
+// The modules in the process whose names suggest they might touch the
+// same state -- another injector, an overlay, a VR layer, NVIDIA's own --
+// for the ARMED line. A census, not a verdict.
+const char* suspectModules() {
+    static char text[600];
+    int l = 0;
+    HMODULE mods[512];
+    DWORD needed = 0;
+    if (!EnumProcessModules(GetCurrentProcess(), mods, sizeof(mods), &needed)) return "(the module list could not be read)";
+    const size_t n = needed / sizeof(HMODULE) < 512 ? needed / sizeof(HMODULE) : 512;
+    const char* keys[] = {"nv", "pimax", "magic", "xr", "vr", "reshade", "overlay", "hook", "inject", "layer",
+                          "toolkit", "steam", "discord", "rtss", "afterburner", "fps", "d3d", "dxgi"};
+    for (size_t i = 0; i < n && l < static_cast<int>(sizeof(text)) - 40; ++i) {
+        char name[MAX_PATH] = {};
+        if (!GetModuleBaseNameA(GetCurrentProcess(), mods[i], name, sizeof(name))) continue;
+        char lower[MAX_PATH];
+        size_t k = 0;
+        for (; name[k] && k < sizeof(lower) - 1; ++k) lower[k] = static_cast<char>(tolower(static_cast<unsigned char>(name[k])));
+        lower[k] = 0;
+        bool hit = false;
+        for (const char* key : keys) {
+            if (strstr(lower, key)) { hit = true; break; }
+        }
+        if (!hit) continue;
+        l += snprintf(text + l, sizeof(text) - l, "%s%s", l ? ", " : "", name);
+    }
+    return l ? text : "(none of the suspect names)";
+}
+
 void arm(ID3D11DeviceContext* ctx) {
     if (GetModuleHandleW(L"LibMagicD3D1164.dll")) {
         standDown(ctx, "Pimax Play's own foveated rendering (LibMagicD3D1164.dll) is loaded in this "
@@ -730,12 +949,14 @@ void arm(ID3D11DeviceContext* ctx) {
     Log::get().note(
         "foveation: ARMED (fix.foveation = %s) -- NvAPI is up and %s. Full-rate shading inside %.0f "
         "degrees about each eye's fixation point (%.2f m), one shade per 2x2 pixels out to %.0f "
-        "degrees, one per %s beyond; %s. The image binds at the first eye draw.",
+        "degrees, one per %s beyond; %s. The rate table reads %s inside, %s in the ring, %s beyond. The image "
+        "binds at the first eye draw. Modules in the process with names worth knowing: %s.",
         modeName(g_mode),
         sup == 1 ? "the driver says this GPU shades at variable rate" : "the capability query was refused, so the view will decide",
-        g_innerDeg, g_distance, g_outerDeg, outerRateName(),
+        g_innerDeg, g_distance, g_outerDeg, outerRateName(), rateName(innerRate()), rateName(midRate()), rateName(outerRate()),
         g_geometryOnly ? "geometry draws only, the full-screen passes at full rate (advanced.foveation_passes = geometry)"
-                       : "every draw into the eye, the full-screen passes included (advanced.foveation_passes = all)");
+                       : "every draw into the eye, the full-screen passes included (advanced.foveation_passes = all)",
+        suspectModules());
 }
 
 const char* centreText() {
@@ -813,12 +1034,13 @@ void summary(const char* when) {
         "first-bind order); %.1f image switches a frame (most %u); %u images made; %u frames "
         "without published tangents. Draws a frame over the whole armed span: %.0f into eye-sized "
         "targets, %.0f of them under the image, %.0f into everything else; by target, largest "
-        "first: %s. GPU busy since the last summary: %s. The centre: %s.",
+        "first: %s. GPU busy since the last summary: %s. The centre: %s. The state the eye draws run "
+        "under -- %s.",
         when, g_framesArmed, static_cast<double>(g_targetsSum[0]) / f,
         static_cast<double>(g_targetsSum[1]) / f, static_cast<double>(g_submitMatched) / f,
         static_cast<double>(g_switches) / f, g_switchesMax, g_imagesMade, g_noTangentFrames,
         static_cast<double>(g_eyeDraws) / f, static_cast<double>(g_eyeDrawsUnder) / f,
-        static_cast<double>(g_otherDraws) / f, bl ? by : "none seen", gpuBusyText(), centreText());
+        static_cast<double>(g_otherDraws) / f, bl ? by : "none seen", gpuBusyText(), centreText(), stateText());
     g_gpuBusySum = 0;
     g_gpuBusyN = 0;
     g_gpuBusyMax = 0;
@@ -852,14 +1074,17 @@ void foveationConfigure(Config& cfg) {
     const std::string centre = cfg.getString("fix.foveation_centre", "eyes");
     const bool follow = centre != "ahead";
     const std::string outerRateKey = cfg.getString("advanced.foveation_outer_rate", "preset");
-    uint32_t outerOverride = 0;
+    uint32_t outerOverride = kRatePreset;
+    bool cullInner = false, cullAll = false;
     if (outerRateKey == "cull") outerOverride = kRateCull;
     else if (outerRateKey == "2x2") outerOverride = kRate2x2;
     else if (outerRateKey == "4x4") outerOverride = kRate4x4;
+    else if (outerRateKey == "cull_inner") cullInner = true;
+    else if (outerRateKey == "cull_all") cullAll = true;
 
     const bool changed = m != g_mode || inner != g_innerDeg || outer != g_outerDeg ||
                          dist != g_distance || geom != g_geometryOnly || follow != g_followEyes ||
-                         outerOverride != g_outerOverride;
+                         outerOverride != g_outerOverride || cullInner != g_cullInner || cullAll != g_cullAll;
     const bool first = !g_configured;
     g_configured = true;
     g_mode = m;
@@ -869,12 +1094,18 @@ void foveationConfigure(Config& cfg) {
     g_geometryOnly = geom;
     g_followEyes = follow;
     g_outerOverride = outerOverride;
+    g_cullInner = cullInner;
+    g_cullAll = cullAll;
     if (changed) ++g_settingsGen;
-    if (outerOverride == kRateCull && (first || changed)) {
-        Log::get().note("foveation: advanced.foveation_outer_rate = cull -- the tiles beyond the outer ring are "
-                        "NOT DRAWN. A diagnostic: the periphery goes black, which proves the image reaches "
-                        "the game's pixels, and the frame time under it is the most any shading rate could "
-                        "save on this scene.");
+    if ((first || changed) && (outerOverride == kRateCull || cullInner || cullAll)) {
+        Log::get().note(
+            "foveation: advanced.foveation_outer_rate = %s -- %s NOT DRAWN. A diagnostic: what is culled goes "
+            "BLACK, which proves by eye that the image reaches the game's pixels, and the frame time under it "
+            "is the most any shading rate could save on this scene.",
+            outerRateKey.c_str(),
+            cullAll   ? "EVERY tile of each eye is"
+            : cullInner ? "the full-rate disc itself, where you are looking, is"
+                        : "the tiles beyond the outer ring are");
     }
 
     if (unknown && (first || changed)) {
@@ -899,8 +1130,10 @@ void foveationConfigure(Config& cfg) {
                         geom ? "geometry" : "all");
     } else if (changed && g_phase == Phase::Armed) {
         Log::get().note("foveation: settings changed (fix.foveation = %s, %.0f/%.0f degrees, %.2f m, %s "
-                        "draws, outer ring %s) -- the images refill at their next use.",
-                        modeName(m), inner, outer, dist, geom ? "geometry" : "all", outerRateName());
+                        "draws; the rate table now reads %s inside, %s in the ring, %s beyond) -- the images "
+                        "refill at their next use.",
+                        modeName(m), inner, outer, dist, geom ? "geometry" : "all", rateName(innerRate()),
+                        rateName(midRate()), rateName(outerRate()));
     }
 }
 
@@ -924,7 +1157,10 @@ void foveationOnDraw(ID3D11DeviceContext* ctx, bool rtvEyeSized, void* rtv, uint
         g_censusGen = rtvGen;
         g_censusSig = nullptr;
         ResourceInfo info;
-        if (rtv && bindingResolve(rtv, &info) && info.isTexture2D) g_censusSig = sigFor(info);
+        if (rtv && bindingResolve(rtv, &info) && info.isTexture2D) {
+            g_censusSig = sigFor(info);
+            if (rtvEyeSized) describeTarget(rtv, g_censusSig);
+        }
     }
     const bool fullScreenPass = count <= 6 && instances <= 1;
     if (!rtvEyeSized) {
@@ -975,6 +1211,7 @@ void foveationOnDraw(ID3D11DeviceContext* ctx, bool rtvEyeSized, void* rtv, uint
         } else if (g_censusSig) {
             ++g_censusSig->bare;
         }
+        if (g_eyeDraws % 61 == 0) sampleDrawState(ctx);
     }
 }
 
@@ -1153,6 +1390,107 @@ const char*    kNames[kBands]   = {"1x1", "2x1", "1x2", "2x2", "4x2", "2x4", "4x
 const uint32_t kExpectW[kBands] = {1, 2, 1, 2, 4, 2, 4, 1};
 const uint32_t kExpectH[kBands] = {1, 1, 2, 2, 2, 4, 4, 1};
 
+// The same pixel shader, writing depth as well: a pixel shader that
+// outputs SV_Depth is one of the things a driver may hold at full rate.
+const char kProbePsDepth[] =
+    "RWByteAddressBuffer counts : register(u1);\n"
+    "float2 main(float4 pos : SV_Position, out float depth : SV_Depth) : SV_Target {\n"
+    "    uint band = min(uint(pos.y) / 64u, 7u);\n"
+    "    counts.InterlockedAdd(band * 4u, 1u);\n"
+    "    depth = 0.5;\n"
+    "    return pos.xy;\n"
+    "}\n";
+
+// The vertex shader with a varying, for the pixel shaders that read one at
+// sample frequency or beside SV_Coverage -- the two shader features a
+// driver holds at full rate by the D3D12 rule, if it applies them here.
+const char kProbeVsUv[] =
+    "struct V { float4 pos : SV_Position; float2 uv : TEXCOORD0; };\n"
+    "V main(uint id : SV_VertexID) {\n"
+    "    V v;\n"
+    "    float2 p = float2(id == 2 ? 3.0 : -1.0, id == 1 ? 3.0 : -1.0);\n"
+    "    v.pos = float4(p, 0.5, 1.0);\n"
+    "    v.uv = p * 0.5 + 0.5;\n"
+    "    return v;\n"
+    "}\n";
+const char kProbePsSample[] =
+    "RWByteAddressBuffer counts : register(u1);\n"
+    "float2 main(float4 pos : SV_Position, sample float2 uv : TEXCOORD0) : SV_Target {\n"
+    "    uint band = min(uint(pos.y) / 64u, 7u);\n"
+    "    counts.InterlockedAdd(band * 4u, 1u);\n"
+    "    return pos.xy + uv * 0.0;\n"
+    "}\n";
+const char kProbePsAlpha[] =
+    "RWByteAddressBuffer counts : register(u1);\n"
+    "float4 main(float4 pos : SV_Position) : SV_Target {\n"
+    "    uint band = min(uint(pos.y) / 64u, 7u);\n"
+    "    counts.InterlockedAdd(band * 4u, 1u);\n"
+    "    return float4(pos.xy, 0.0, 1.0);\n"
+    "}\n";
+const char kProbePsMrt[] =
+    "RWByteAddressBuffer counts : register(u3);\n"
+    "struct O { float2 a : SV_Target0; float4 b : SV_Target1; float4 c : SV_Target2; };\n"
+    "O main(float4 pos : SV_Position) {\n"
+    "    uint band = min(uint(pos.y) / 64u, 7u);\n"
+    "    counts.InterlockedAdd(band * 4u, 1u);\n"
+    "    O o;\n"
+    "    o.a = pos.xy;\n"
+    "    o.b = float4(0.25, 0.5, 0.75, 1.0);\n"
+    "    o.c = float4(1.0, 0.75, 0.5, 0.25);\n"
+    "    return o;\n"
+    "}\n";
+const char kProbePsCoverage[] =
+    "RWByteAddressBuffer counts : register(u1);\n"
+    "float2 main(float4 pos : SV_Position, float2 uv : TEXCOORD0, uint cov : SV_Coverage) : SV_Target {\n"
+    "    uint band = min(uint(pos.y) / 64u, 7u);\n"
+    "    counts.InterlockedAdd(band * 4u, 1u);\n"
+    "    return pos.xy + uv * 0.0 + float(cov & 0u);\n"
+    "}\n";
+
+// A candidate state for the draw, one per variant: what the game might
+// set that the plain probe never did.
+struct Candidate {
+    const char* name;
+    bool        arrayTarget;    // the target an array of two, the view over slice 0 as TEXTURE2DARRAY
+    bool        arrayImage;     // the image an array of one, the view TEXTURE2DARRAY
+    bool        depth;          // a depth buffer bound, depth test on
+    bool        multisample;    // rasteriser MultisampleEnable
+    bool        aaLines;        // rasteriser AntialiasedLineEnable
+    bool        scissor;        // rasteriser ScissorEnable with a full-target rect
+    uint32_t    forcedSamples;  // rasteriser ForcedSampleCount (11.1) -- REMOVED the device on the desk; not run
+    uint32_t    psKind;         // 0 plain, 1 writes SV_Depth, 2 reads a varying at sample frequency, 3 reads SV_Coverage, 4 writes alpha 1 under alpha-to-coverage, 5 three targets
+    uint32_t    commandList;    // 0 no; 1 the draw replayed from a command list with the image set on the immediate context; 2 with it set on the deferred context before recording
+    // The target's own properties: a size of its own (0 = the 512x512),
+    // the texture and view formats (0 = R32G32_FLOAT, whose positions can
+    // be read back; a typed view over a typeless texture counts only), the
+    // image sized by the floor of the tile quotient rather than its
+    // ceiling, three targets bound at once, a clear after the bind.
+    uint32_t    targetW, targetH;
+    uint32_t    texFormat, viewFormat;
+    bool        floorTiles;
+    bool        mrt;
+    bool        clearAfterBind;
+    uint32_t    drawKind;       // 0 Draw; 1 DrawIndexed; 2 DrawIndexedInstanced x2; 3 DrawInstanced x2
+    bool        slice1;         // the array target's view over slice 1 rather than 0
+    bool        imageSlices2;   // the array image of two slices (the pattern in both)
+};
+
+// A target of a candidate's own: texture, view, staging copy.
+struct TargetSet {
+    bool                    used = false;
+    uint32_t                w = 0, h = 0, texFormat = 0, viewFormat = 0;
+    bool                    floatFormat = true;
+    ID3D11Texture2D*        tex = nullptr;
+    ID3D11RenderTargetView* rtv = nullptr;
+    ID3D11Texture2D*        staging = nullptr;
+    void release() {
+        if (rtv) rtv->Release();
+        if (tex) tex->Release();
+        if (staging) staging->Release();
+        *this = TargetSet();
+    }
+};
+
 struct ProbeRig {
     ID3D11Device*              dev = nullptr;
     ID3D11DeviceContext*       ctx = nullptr;
@@ -1165,8 +1503,27 @@ struct ProbeRig {
     ID3D11Buffer*              countsStaging = nullptr;
     ID3D11UnorderedAccessView* uav = nullptr;
     ID3D11VertexShader*        vs = nullptr;
+    ID3D11VertexShader*        vsUv = nullptr;
     ID3D11PixelShader*         ps = nullptr;
+    ID3D11PixelShader*         psDepth = nullptr;
+    ID3D11PixelShader*         psSample = nullptr;
+    ID3D11PixelShader*         psCoverage = nullptr;
+    ID3D11PixelShader*         psAlpha = nullptr;
+    ID3D11PixelShader*         psMrt = nullptr;
+    ID3D11BlendState*          blendA2c = nullptr;
     ID3D11RasterizerState*     rs = nullptr;
+    TargetSet                  custom[4];
+    ID3D11Texture2D*           mrtTex[2] = {};
+    ID3D11RenderTargetView*    mrtRtv[2] = {};
+    // The candidates' resources, made on demand.
+    ID3D11Texture2D*           targetArr = nullptr;
+    ID3D11RenderTargetView*    rtvArr = nullptr;
+    ID3D11RenderTargetView*    rtvArr1 = nullptr;   // slice 1
+    ID3D11Buffer*              indices = nullptr;
+    ID3D11Texture2D*           depthTex = nullptr;
+    ID3D11DepthStencilView*    dsv = nullptr;
+    ID3D11DepthStencilState*   dss = nullptr;
+    ID3D11RasterizerState*     rsCandidate = nullptr;
     ~ProbeRig() {
         if (rtv) rtv->Release();
         if (target) target->Release();
@@ -1176,8 +1533,219 @@ struct ProbeRig {
         if (countsStaging) countsStaging->Release();
         if (uav) uav->Release();
         if (vs) vs->Release();
+        if (vsUv) vsUv->Release();
         if (ps) ps->Release();
+        if (psDepth) psDepth->Release();
+        if (psSample) psSample->Release();
+        if (psCoverage) psCoverage->Release();
+        if (psAlpha) psAlpha->Release();
+        if (psMrt) psMrt->Release();
+        if (blendA2c) blendA2c->Release();
         if (rs) rs->Release();
+        for (TargetSet& t : custom) t.release();
+        for (int i = 0; i < 2; ++i) {
+            if (mrtRtv[i]) mrtRtv[i]->Release();
+            if (mrtTex[i]) mrtTex[i]->Release();
+        }
+        if (targetArr) targetArr->Release();
+        if (rtvArr) rtvArr->Release();
+        if (rtvArr1) rtvArr1->Release();
+        if (indices) indices->Release();
+        if (depthTex) depthTex->Release();
+        if (dsv) dsv->Release();
+        if (dss) dss->Release();
+        if (rsCandidate) rsCandidate->Release();
+    }
+    bool makeCandidates(char* err, size_t errCap) {
+        D3D11_TEXTURE2D_DESC td = {};
+        td.Width = kPw;
+        td.Height = kPh;
+        td.MipLevels = 1;
+        td.ArraySize = 2;
+        td.Format = DXGI_FORMAT_R32G32_FLOAT;
+        td.SampleDesc.Count = 1;
+        td.Usage = D3D11_USAGE_DEFAULT;
+        td.BindFlags = D3D11_BIND_RENDER_TARGET;
+        if (FAILED(dev->CreateTexture2D(&td, nullptr, &targetArr))) {
+            snprintf(err, errCap, "the array target could not be created");
+            return false;
+        }
+        D3D11_RENDER_TARGET_VIEW_DESC rd = {};
+        rd.Format = DXGI_FORMAT_R32G32_FLOAT;
+        rd.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2DARRAY;
+        rd.Texture2DArray.FirstArraySlice = 0;
+        rd.Texture2DArray.ArraySize = 1;
+        if (FAILED(dev->CreateRenderTargetView(targetArr, &rd, &rtvArr))) {
+            snprintf(err, errCap, "the array target's view could not be created");
+            return false;
+        }
+        rd.Texture2DArray.FirstArraySlice = 1;
+        if (FAILED(dev->CreateRenderTargetView(targetArr, &rd, &rtvArr1))) {
+            snprintf(err, errCap, "the array target's slice-1 view could not be created");
+            return false;
+        }
+        const uint32_t idx[3] = {0, 1, 2};
+        D3D11_BUFFER_DESC ib = {};
+        ib.ByteWidth = sizeof(idx);
+        ib.Usage = D3D11_USAGE_IMMUTABLE;
+        ib.BindFlags = D3D11_BIND_INDEX_BUFFER;
+        D3D11_SUBRESOURCE_DATA idata = {idx, 0, 0};
+        if (FAILED(dev->CreateBuffer(&ib, &idata, &indices))) {
+            snprintf(err, errCap, "the index buffer could not be created");
+            return false;
+        }
+        D3D11_TEXTURE2D_DESC dd = {};
+        dd.Width = kPw;
+        dd.Height = kPh;
+        dd.MipLevels = 1;
+        dd.ArraySize = 1;
+        dd.Format = DXGI_FORMAT_D32_FLOAT;
+        dd.SampleDesc.Count = 1;
+        dd.Usage = D3D11_USAGE_DEFAULT;
+        dd.BindFlags = D3D11_BIND_DEPTH_STENCIL;
+        if (FAILED(dev->CreateTexture2D(&dd, nullptr, &depthTex)) || FAILED(dev->CreateDepthStencilView(depthTex, nullptr, &dsv))) {
+            snprintf(err, errCap, "the depth buffer could not be created");
+            return false;
+        }
+        D3D11_DEPTH_STENCIL_DESC sd = {};
+        sd.DepthEnable = TRUE;
+        sd.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ALL;
+        sd.DepthFunc = D3D11_COMPARISON_LESS_EQUAL;
+        if (FAILED(dev->CreateDepthStencilState(&sd, &dss))) {
+            snprintf(err, errCap, "the depth-stencil state could not be created");
+            return false;
+        }
+        psDepth = edvr::shaderSwapCompilePs(ctx, kProbePsDepth, sizeof(kProbePsDepth) - 1, "main",
+                                            "foveation_probe_ps_depth", nullptr, "foveation probe");
+        vsUv = edvr::shaderSwapCompileVs(ctx, kProbeVsUv, sizeof(kProbeVsUv) - 1, "main", "foveation_probe_vs_uv",
+                                         nullptr, "foveation probe");
+        psSample = edvr::shaderSwapCompilePs(ctx, kProbePsSample, sizeof(kProbePsSample) - 1, "main",
+                                             "foveation_probe_ps_sample", nullptr, "foveation probe");
+        psCoverage = edvr::shaderSwapCompilePs(ctx, kProbePsCoverage, sizeof(kProbePsCoverage) - 1, "main",
+                                               "foveation_probe_ps_coverage", nullptr, "foveation probe");
+        psAlpha = edvr::shaderSwapCompilePs(ctx, kProbePsAlpha, sizeof(kProbePsAlpha) - 1, "main",
+                                            "foveation_probe_ps_alpha", nullptr, "foveation probe");
+        psMrt = edvr::shaderSwapCompilePs(ctx, kProbePsMrt, sizeof(kProbePsMrt) - 1, "main",
+                                          "foveation_probe_ps_mrt", nullptr, "foveation probe");
+        for (int i = 0; i < 2; ++i) {
+            D3D11_TEXTURE2D_DESC md = {};
+            md.Width = kPw;
+            md.Height = kPh;
+            md.MipLevels = 1;
+            md.ArraySize = 1;
+            md.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+            md.SampleDesc.Count = 1;
+            md.Usage = D3D11_USAGE_DEFAULT;
+            md.BindFlags = D3D11_BIND_RENDER_TARGET;
+            if (FAILED(dev->CreateTexture2D(&md, nullptr, &mrtTex[i])) || FAILED(dev->CreateRenderTargetView(mrtTex[i], nullptr, &mrtRtv[i]))) {
+                snprintf(err, errCap, "the extra targets could not be created");
+                return false;
+            }
+        }
+        if (!psDepth || !vsUv || !psSample || !psCoverage || !psAlpha || !psMrt) {
+            snprintf(err, errCap, "a candidate shader did not compile (depth %d, uv vs %d, sample %d, coverage %d, alpha %d)",
+                     psDepth ? 1 : 0, vsUv ? 1 : 0, psSample ? 1 : 0, psCoverage ? 1 : 0, psAlpha ? 1 : 0);
+            return false;
+        }
+        D3D11_BLEND_DESC bd = {};
+        bd.AlphaToCoverageEnable = TRUE;
+        bd.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+        if (FAILED(dev->CreateBlendState(&bd, &blendA2c)) || !blendA2c) {
+            snprintf(err, errCap, "the alpha-to-coverage blend state could not be created");
+            return false;
+        }
+        return true;
+    }
+    // A target of the candidate's own size and formats, made once per shape.
+    TargetSet* targetFor(const Candidate& c, char* err, size_t errCap) {
+        const uint32_t texFmt = c.texFormat ? c.texFormat : DXGI_FORMAT_R32G32_FLOAT;
+        const uint32_t viewFmt = c.viewFormat ? c.viewFormat : texFmt;
+        for (TargetSet& t : custom) {
+            if (t.used && t.w == c.targetW && t.h == c.targetH && t.texFormat == texFmt && t.viewFormat == viewFmt) return &t;
+        }
+        TargetSet* slot = nullptr;
+        for (TargetSet& t : custom) {
+            if (!t.used) { slot = &t; break; }
+        }
+        if (!slot) {
+            custom[0].release();
+            slot = &custom[0];
+        }
+        D3D11_TEXTURE2D_DESC td = {};
+        td.Width = c.targetW;
+        td.Height = c.targetH;
+        td.MipLevels = 1;
+        td.ArraySize = 1;
+        td.Format = static_cast<DXGI_FORMAT>(texFmt);
+        td.SampleDesc.Count = 1;
+        td.Usage = D3D11_USAGE_DEFAULT;
+        td.BindFlags = D3D11_BIND_RENDER_TARGET;
+        if (FAILED(dev->CreateTexture2D(&td, nullptr, &slot->tex))) {
+            snprintf(err, errCap, "a %ux%u target of format %u could not be created", c.targetW, c.targetH, texFmt);
+            return nullptr;
+        }
+        D3D11_RENDER_TARGET_VIEW_DESC rd = {};
+        rd.Format = static_cast<DXGI_FORMAT>(viewFmt);
+        rd.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
+        if (FAILED(dev->CreateRenderTargetView(slot->tex, &rd, &slot->rtv))) {
+            snprintf(err, errCap, "the %ux%u target's view (format %u) could not be created", c.targetW, c.targetH, viewFmt);
+            slot->release();
+            return nullptr;
+        }
+        td.BindFlags = 0;
+        td.Usage = D3D11_USAGE_STAGING;
+        td.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        if (FAILED(dev->CreateTexture2D(&td, nullptr, &slot->staging))) {
+            snprintf(err, errCap, "the %ux%u target's staging copy could not be created", c.targetW, c.targetH);
+            slot->release();
+            return nullptr;
+        }
+        slot->used = true;
+        slot->w = c.targetW;
+        slot->h = c.targetH;
+        slot->texFormat = texFmt;
+        slot->viewFormat = viewFmt;
+        slot->floatFormat = texFmt == DXGI_FORMAT_R32G32_FLOAT;
+        return slot;
+    }
+    // The rasteriser state a candidate asks for, replacing the last one.
+    bool makeRasteriser(const Candidate& c, char* err, size_t errCap) {
+        if (rsCandidate) { rsCandidate->Release(); rsCandidate = nullptr; }
+        if (c.forcedSamples) {
+            ID3D11Device1* dev1 = nullptr;
+            dev->QueryInterface(__uuidof(ID3D11Device1), reinterpret_cast<void**>(&dev1));
+            if (!dev1) {
+                snprintf(err, errCap, "no ID3D11Device1 for a forced sample count");
+                return false;
+            }
+            D3D11_RASTERIZER_DESC1 rd = {};
+            rd.FillMode = D3D11_FILL_SOLID;
+            rd.CullMode = D3D11_CULL_NONE;
+            rd.DepthClipEnable = TRUE;
+            rd.ScissorEnable = c.scissor ? TRUE : FALSE;
+            rd.MultisampleEnable = c.multisample ? TRUE : FALSE;
+            rd.AntialiasedLineEnable = c.aaLines ? TRUE : FALSE;
+            rd.ForcedSampleCount = c.forcedSamples;
+            const HRESULT hr = dev1->CreateRasterizerState1(&rd, reinterpret_cast<ID3D11RasterizerState1**>(&rsCandidate));
+            dev1->Release();
+            if (FAILED(hr) || !rsCandidate) {
+                snprintf(err, errCap, "the forced-sample rasteriser state could not be created (hr 0x%08lX)", static_cast<unsigned long>(hr));
+                return false;
+            }
+            return true;
+        }
+        D3D11_RASTERIZER_DESC rd = {};
+        rd.FillMode = D3D11_FILL_SOLID;
+        rd.CullMode = D3D11_CULL_NONE;
+        rd.DepthClipEnable = TRUE;
+        rd.ScissorEnable = c.scissor ? TRUE : FALSE;
+        rd.MultisampleEnable = c.multisample ? TRUE : FALSE;
+        rd.AntialiasedLineEnable = c.aaLines ? TRUE : FALSE;
+        if (FAILED(dev->CreateRasterizerState(&rd, &rsCandidate)) || !rsCandidate) {
+            snprintf(err, errCap, "the candidate rasteriser state could not be created");
+            return false;
+        }
+        return true;
     }
     bool makeCommon(Report& r) {
         D3D11_TEXTURE2D_DESC td = {};
@@ -1239,34 +1807,48 @@ struct ProbeRig {
     // The image and its view, remade per variant (the old view is left to
     // the process). Tile rows cycle through the eight table entries; the
     // texels arrive as initial data or by UpdateSubresource.
-    bool makeImage(bool viaUpdate, char* err, size_t errCap) {
+    bool makeImage(bool viaUpdate, char* err, size_t errCap, bool asArray = false, uint32_t tilesW = kPtiles,
+                   uint32_t tilesH = kPtiles, uint32_t slices = 1) {
         if (image) { image->Release(); image = nullptr; }
         view = nullptr;
-        uint8_t pattern[kPtiles * kPtiles];
-        for (uint32_t j = 0; j < kPtiles; ++j) {
-            for (uint32_t i = 0; i < kPtiles; ++i) pattern[j * kPtiles + i] = static_cast<uint8_t>((j / 4) & 7);
+        static uint8_t pattern[512 * 512];
+        if (tilesW > 512 || tilesH > 512) {
+            snprintf(err, errCap, "an image of %ux%u tiles is past the probe's buffer", tilesW, tilesH);
+            return false;
+        }
+        for (uint32_t j = 0; j < tilesH; ++j) {
+            for (uint32_t i = 0; i < tilesW; ++i) pattern[j * tilesW + i] = static_cast<uint8_t>((j / 4) & 7);
         }
         D3D11_TEXTURE2D_DESC id = {};
-        id.Width = kPtiles;
-        id.Height = kPtiles;
+        id.Width = tilesW;
+        id.Height = tilesH;
         id.MipLevels = 1;
-        id.ArraySize = 1;
+        id.ArraySize = slices;
         id.Format = DXGI_FORMAT_R8_UINT;
         id.SampleDesc.Count = 1;
         id.Usage = D3D11_USAGE_DEFAULT;
         id.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-        D3D11_SUBRESOURCE_DATA init = {pattern, kPtiles, 0};
+        D3D11_SUBRESOURCE_DATA init = {pattern, tilesW, 0};
         const HRESULT hr = dev->CreateTexture2D(&id, viaUpdate ? nullptr : &init, &image);
         if (FAILED(hr)) {
             snprintf(err, errCap, "the image could not be created (hr 0x%08lX)", static_cast<unsigned long>(hr));
             return false;
         }
-        if (viaUpdate) ctx->UpdateSubresource(image, 0, nullptr, pattern, kPtiles, 0);
+        if (viaUpdate) {
+            for (uint32_t s = 0; s < slices; ++s) ctx->UpdateSubresource(image, s, nullptr, pattern, tilesW, 0);
+        }
         edvr::NvRateViewDesc vd = {};
         vd.version = edvr::kRateViewVer1;
         vd.format = DXGI_FORMAT_R8_UINT;
-        vd.dimension = edvr::kDimTexture2D;
-        vd.tex2d.mipSlice = 0;
+        if (asArray) {
+            vd.dimension = 5;   // NV_SRRV_DIMENSION_TEXTURE2DARRAY
+            vd.tex2dArray.mipSlice = 0;
+            vd.tex2dArray.firstSlice = 0;
+            vd.tex2dArray.arraySize = slices;
+        } else {
+            vd.dimension = edvr::kDimTexture2D;
+            vd.tex2d.mipSlice = 0;
+        }
         edvr::NvStatus rc = -1;
         const bool survived = edvr::guardedBudget(edvr::g_budget, [&] { rc = edvr::g_nv.createRateView(dev, image, &vd, &view); });
         if (!survived || rc != edvr::kNvOk || !view) {
@@ -1290,24 +1872,66 @@ struct Measure {
 // block's size per band from the positions, and the shader's invocations
 // per band from the counter. viewportsAfter sets the viewport again AFTER
 // the rates and the view, as a game does between our bind and its draw.
-bool runVariant(ProbeRig& g, uint32_t table0, bool viewportsAfter, bool rebindAfter, Measure& m, char* err, size_t errCap) {
+bool runVariant(ProbeRig& g, uint32_t table0, bool viewportsAfter, bool rebindAfter, const Candidate* c, Measure& m, char* err, size_t errCap) {
     ID3D11DeviceContext* ctx = g.ctx;
     const FLOAT clear[4] = {-1.0f, -1.0f, 0.0f, 0.0f};
     const UINT zeros[4] = {0, 0, 0, 0};
-    ctx->ClearRenderTargetView(g.rtv, clear);
+    TargetSet* custom = nullptr;
+    if (c && c->targetW) {
+        custom = g.targetFor(*c, err, errCap);
+        if (!custom) return false;
+    }
+    ID3D11RenderTargetView* rtv = custom ? custom->rtv : (c && c->arrayTarget) ? (c->slice1 ? g.rtvArr1 : g.rtvArr) : g.rtv;
+    ID3D11DepthStencilView* dsv = (c && c->depth) ? g.dsv : nullptr;
+    const uint32_t tw = custom ? custom->w : kPw, th = custom ? custom->h : kPh;
+    const bool floatTarget = custom ? custom->floatFormat : true;
+    const bool mrt = c && c->mrt;
+    ID3D11RenderTargetView* rtvs[3] = {rtv, g.mrtRtv[0], g.mrtRtv[1]};
+    const UINT rtvCount = mrt ? 3u : 1u;
+    const UINT uavSlot = mrt ? 3u : 1u;
+    ctx->ClearRenderTargetView(rtv, clear);
+    if (dsv) ctx->ClearDepthStencilView(dsv, D3D11_CLEAR_DEPTH, 1.0f, 0);
     ctx->ClearUnorderedAccessViewUint(g.uav, zeros);
     ID3D11UnorderedAccessView* uavs[1] = {g.uav};
-    D3D11_VIEWPORT vp = {0.0f, 0.0f, static_cast<float>(kPw), static_cast<float>(kPh), 0.0f, 1.0f};
-    ctx->RSSetState(g.rs);
-    ctx->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFFu);
-    ctx->OMSetDepthStencilState(nullptr, 0);
+    D3D11_VIEWPORT vp = {0.0f, 0.0f, static_cast<float>(tw), static_cast<float>(th), 0.0f, 1.0f};
+    ctx->RSSetState(c && g.rsCandidate ? g.rsCandidate : g.rs);
+    if (c && c->scissor) {
+        D3D11_RECT rect = {0, 0, static_cast<LONG>(kPw), static_cast<LONG>(kPh)};
+        ctx->RSSetScissorRects(1, &rect);
+    }
+    ID3D11VertexShader* vs = (c && (c->psKind == 2 || c->psKind == 3)) ? g.vsUv : g.vs;
+    ID3D11PixelShader* ps = !c ? g.ps : c->psKind == 1 ? g.psDepth : c->psKind == 2 ? g.psSample : c->psKind == 3 ? g.psCoverage : c->psKind == 4 ? g.psAlpha : c->psKind == 5 ? g.psMrt : g.ps;
+    ID3D11BlendState* blend = (c && c->psKind == 4) ? g.blendA2c : nullptr;
+    ctx->OMSetBlendState(blend, nullptr, 0xFFFFFFFFu);
+    ctx->OMSetDepthStencilState(dsv ? g.dss : nullptr, 0);
     ctx->IASetInputLayout(nullptr);
     ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    ctx->VSSetShader(g.vs, nullptr, 0);
-    ctx->PSSetShader(g.ps, nullptr, 0);
+    ctx->VSSetShader(vs, nullptr, 0);
+    ctx->PSSetShader(ps, nullptr, 0);
     ctx->GSSetShader(nullptr, nullptr, 0);
-    ctx->OMSetRenderTargetsAndUnorderedAccessViews(1, &g.rtv, nullptr, 1, 1, uavs, nullptr);
+    ctx->OMSetRenderTargetsAndUnorderedAccessViews(rtvCount, rtvs, dsv, uavSlot, 1, uavs, nullptr);
     ctx->RSSetViewports(1, &vp);
+    // The command-list path: the draw recorded on a deferred context with the
+    // same state, replayed on the immediate one -- a game that records its
+    // scene that way replays draws no hook here sees.
+    ID3D11CommandList* commandList = nullptr;
+    ID3D11DeviceContext* deferred = nullptr;
+    if (c && c->commandList) {
+        if (FAILED(g.dev->CreateDeferredContext(0, &deferred)) || !deferred) {
+            snprintf(err, errCap, "no deferred context");
+            return false;
+        }
+        deferred->RSSetState(c && g.rsCandidate ? g.rsCandidate : g.rs);
+        deferred->OMSetBlendState(blend, nullptr, 0xFFFFFFFFu);
+        deferred->OMSetDepthStencilState(dsv ? g.dss : nullptr, 0);
+        deferred->IASetInputLayout(nullptr);
+        deferred->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        deferred->VSSetShader(vs, nullptr, 0);
+        deferred->PSSetShader(ps, nullptr, 0);
+        deferred->GSSetShader(nullptr, nullptr, 0);
+        deferred->OMSetRenderTargetsAndUnorderedAccessViews(rtvCount, rtvs, dsv, uavSlot, 1, uavs, nullptr);
+        deferred->RSSetViewports(1, &vp);
+    }
 
     edvr::NvViewportRates rates[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE];
     for (edvr::NvViewportRates& v : rates) {
@@ -1336,43 +1960,98 @@ bool runVariant(ProbeRig& g, uint32_t table0, bool viewportsAfter, bool rebindAf
     if (rebindAfter) {
         // The same target bound again, as a game rebinds its eye target
         // between passes: does the image survive the rebind?
-        ctx->OMSetRenderTargetsAndUnorderedAccessViews(1, &g.rtv, nullptr, 1, 1, uavs, nullptr);
+        ctx->OMSetRenderTargetsAndUnorderedAccessViews(rtvCount, rtvs, dsv, uavSlot, 1, uavs, nullptr);
         ctx->RSSetViewports(1, &vp);
     }
-    ctx->Draw(3, 0);
+    if (c && c->clearAfterBind) {
+        // A clear of the target after the image is bound, as a game clears
+        // its targets at the start of a pass.
+        ctx->ClearRenderTargetView(rtv, clear);
+    }
+    if (deferred) {
+        if (c->commandList == 2) {
+            // The image set on the deferred context itself, before the
+            // draw is recorded: does NvAPI take it there at all?
+            edvr::NvStatus rcD1 = -1, rcD2 = -1;
+            edvr::guardedBudget(edvr::g_budget, [&] {
+                rcD1 = edvr::g_nv.setViewportRates(deferred, &desc);
+                rcD2 = edvr::g_nv.setRateView(deferred, g.view);
+            });
+            if (rcD1 != edvr::kNvOk || rcD2 != edvr::kNvOk) {
+                snprintf(err, errCap, "NvAPI refused the deferred context (rates %d, view %d)", rcD1, rcD2);
+                deferred->Release();
+                ctx->OMSetRenderTargets(0, nullptr, nullptr);
+                return false;
+            }
+        }
+        deferred->Draw(3, 0);   // the command-list candidates draw plainly
+        if (FAILED(deferred->FinishCommandList(FALSE, &commandList)) || !commandList) {
+            snprintf(err, errCap, "FinishCommandList failed");
+            deferred->Release();
+            ctx->OMSetRenderTargets(0, nullptr, nullptr);
+            return false;
+        }
+        ctx->ExecuteCommandList(commandList, FALSE);
+        commandList->Release();
+        deferred->Release();
+        // The replay restores nothing (FALSE): rebind for the unbind and copy.
+        ctx->OMSetRenderTargetsAndUnorderedAccessViews(rtvCount, rtvs, dsv, uavSlot, 1, uavs, nullptr);
+    } else if (c && c->drawKind == 1) {
+        ctx->IASetIndexBuffer(g.indices, DXGI_FORMAT_R32_UINT, 0);
+        ctx->DrawIndexed(3, 0, 0);
+    } else if (c && c->drawKind == 2) {
+        ctx->IASetIndexBuffer(g.indices, DXGI_FORMAT_R32_UINT, 0);
+        ctx->DrawIndexedInstanced(3, 2, 0, 0, 0);
+    } else if (c && c->drawKind == 3) {
+        ctx->DrawInstanced(3, 2, 0, 0);
+    } else {
+        ctx->Draw(3, 0);
+    }
     for (edvr::NvViewportRates& v : rates) v.enable = 0;
     edvr::guardedBudget(edvr::g_budget, [&] {
         edvr::g_nv.setRateView(ctx, nullptr);
         edvr::g_nv.setViewportRates(ctx, &desc);
     });
     ID3D11UnorderedAccessView* none[1] = {nullptr};
-    ctx->OMSetRenderTargetsAndUnorderedAccessViews(0, nullptr, nullptr, 1, 1, none, nullptr);
-    ctx->CopyResource(g.staging, g.target);
+    ctx->OMSetRenderTargetsAndUnorderedAccessViews(0, nullptr, nullptr, uavSlot, 1, none, nullptr);
+    ctx->OMSetDepthStencilState(nullptr, 0);
+    ctx->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFFu);
+    ctx->RSSetState(g.rs);
+    ID3D11Texture2D* staging = custom ? custom->staging : g.staging;
+    if (custom) ctx->CopyResource(staging, custom->tex);
+    else if (c && c->arrayTarget) ctx->CopySubresourceRegion(g.staging, 0, 0, 0, 0, g.targetArr, c->slice1 ? 1 : 0, nullptr);
+    else ctx->CopyResource(g.staging, g.target);
     ctx->CopyResource(g.countsStaging, g.counts);
     D3D11_MAPPED_SUBRESOURCE map = {};
-    if (FAILED(ctx->Map(g.staging, 0, D3D11_MAP_READ, 0, &map))) {
+    if (FAILED(ctx->Map(staging, 0, D3D11_MAP_READ, 0, &map))) {
         snprintf(err, errCap, "the readback could not be mapped");
         return false;
     }
     const uint8_t* base = static_cast<const uint8_t*>(map.pData);
-    const float* first = reinterpret_cast<const float*>(base);
-    const float* last = reinterpret_cast<const float*>(base + (kPh - 1) * map.RowPitch) + 2 * (kPw - 1);
-    m.drew = first[0] >= 0.0f && last[0] >= 0.0f;
-    for (uint32_t band = 0; band < kBands; ++band) {
-        const uint32_t y0 = band * 4 * edvr::kTile;
-        const float* row = reinterpret_cast<const float*>(base + y0 * map.RowPitch);
-        uint32_t bw = 1;
-        while (bw < 16 && row[2 * bw] == row[0]) ++bw;
-        uint32_t bh = 1;
-        while (bh < 16) {
-            const float* rowk = reinterpret_cast<const float*>(base + (y0 + bh) * map.RowPitch);
-            if (rowk[1] != row[1]) break;
-            ++bh;
+    if (floatTarget) {
+        const float* first = reinterpret_cast<const float*>(base);
+        const float* last = reinterpret_cast<const float*>(base + (th - 1) * map.RowPitch) + 2 * (tw - 1);
+        m.drew = first[0] >= 0.0f && last[0] >= 0.0f;
+        for (uint32_t band = 0; band < kBands; ++band) {
+            const uint32_t y0 = band * 4 * edvr::kTile;
+            if (y0 + 16 > th) { m.bw[band] = m.bh[band] = 1; continue; }
+            const float* row = reinterpret_cast<const float*>(base + y0 * map.RowPitch);
+            uint32_t bw = 1;
+            while (bw < 16 && row[2 * bw] == row[0]) ++bw;
+            uint32_t bh = 1;
+            while (bh < 16) {
+                const float* rowk = reinterpret_cast<const float*>(base + (y0 + bh) * map.RowPitch);
+                if (rowk[1] != row[1]) break;
+                ++bh;
+            }
+            m.bw[band] = bw;
+            m.bh[band] = bh;
         }
-        m.bw[band] = bw;
-        m.bh[band] = bh;
+    } else {
+        m.drew = true;   // judged by the counter alone
+        for (uint32_t band = 0; band < kBands; ++band) m.bw[band] = m.bh[band] = 1;
     }
-    ctx->Unmap(g.staging, 0);
+    ctx->Unmap(staging, 0);
     D3D11_MAPPED_SUBRESOURCE cmap = {};
     if (FAILED(ctx->Map(g.countsStaging, 0, D3D11_MAP_READ, 0, &cmap))) {
         snprintf(err, errCap, "the counter readback could not be mapped");
@@ -1430,7 +2109,7 @@ extern "C" __declspec(dllexport) int edvrFoveationProbe(void* device, void* cont
                                         : "the module's way, with the TARGET bound again after the bind";
         char err[240] = {};
         Measure m;
-        if (!g.makeImage(viaUpdate, err, sizeof(err)) || !runVariant(g, table0, viewportsAfter, rebindAfter, m, err, sizeof(err))) {
+        if (!g.makeImage(viaUpdate, err, sizeof(err)) || !runVariant(g, table0, viewportsAfter, rebindAfter, nullptr, m, err, sizeof(err))) {
             r.line("foveation probe: %s -- %s", name, err);
             continue;
         }
@@ -1465,6 +2144,78 @@ extern "C" __declspec(dllexport) int edvrFoveationProbe(void* device, void* cont
         if (variant == 2 && verdict == 1 && !named) verdict = 2;
         // Variant 3 is informational: the module re-applies after every
         // rebind either way.
+    }
+    // The candidate states: what a game might set that the plain draw did
+    // not. Informational -- each names itself as named, or as holding the
+    // shading at full rate.
+    {
+        char err[240] = {};
+        if (!g.makeCandidates(err, sizeof(err))) {
+            r.line("foveation probe: the candidate states could not be set up -- %s", err);
+        } else {
+            // ForcedSampleCount is not among these: with the image bound it
+            // removed the device on the desk (2026-09-06), which is its own
+            // finding and not one to repeat in every smoke.
+            const Candidate candidates[] = {
+                {"the target an ARRAY of two, the view over slice 0 (TEXTURE2DARRAY), the image 2D", true, false, false, false, false, false, 0, 0, 0, 0, 0, 0, 0, false, false, false, 0, false, false},
+                {"the target an ARRAY of two, the image an array of one (TEXTURE2DARRAY view)", true, true, false, false, false, false, 0, 0, 0, 0, 0, 0, 0, false, false, false, 0, false, false},
+                {"a DEPTH buffer bound, depth test on", false, false, true, false, false, false, 0, 0, 0, 0, 0, 0, 0, false, false, false, 0, false, false},
+                {"rasteriser MultisampleEnable", false, false, false, true, false, false, 0, 0, 0, 0, 0, 0, 0, false, false, false, 0, false, false},
+                {"rasteriser AntialiasedLineEnable", false, false, false, false, true, false, 0, 0, 0, 0, 0, 0, 0, false, false, false, 0, false, false},
+                {"rasteriser ScissorEnable with a full rect", false, false, false, false, false, true, 0, 0, 0, 0, 0, 0, 0, false, false, false, 0, false, false},
+                {"the pixel shader writing SV_Depth", false, false, false, false, false, false, 0, 1, 0, 0, 0, 0, 0, false, false, false, 0, false, false},
+                {"the pixel shader reading a varying at SAMPLE frequency", false, false, false, false, false, false, 0, 2, 0, 0, 0, 0, 0, false, false, false, 0, false, false},
+                {"the pixel shader reading SV_Coverage", false, false, false, false, false, false, 0, 3, 0, 0, 0, 0, 0, false, false, false, 0, false, false},
+                {"a blend state with ALPHA-TO-COVERAGE, the pixel shader writing alpha 1", false, false, false, false, false, false, 0, 4, 0, 0, 0, 0, 0, false, false, false, 0, false, false},
+                {"the draw replayed from a COMMAND LIST, the image set on the immediate context", false, false, false, false, false, false, 0, 0, 1, 0, 0, 0, 0, false, false, false, 0, false, false},
+                {"the draw replayed from a COMMAND LIST, the image set on the deferred context before recording", false, false, false, false, false, false, 0, 0, 2, 0, 0, 0, 0, false, false, false, 0, false, false},
+                // The target's own properties, which the plain probe never varied.
+                {"a 500x500 target (NOT a multiple of 16), the image 32x32 tiles (the quotient rounded UP, as the module sizes it)", false, false, false, false, false, false, 0, 0, 0, 500, 500, 0, 0, false, false, false, 0, false, false},
+                {"a 500x500 target, the image 31x31 tiles (the quotient rounded DOWN)", false, false, false, false, false, false, 0, 0, 0, 500, 500, 0, 0, true, false, false, 0, false, false},
+                {"the game's 4336x4284 target, the image 271x268 tiles (rounded up)", false, false, false, false, false, false, 0, 0, 0, 4336, 4284, 0, 0, false, false, false, 0, false, false},
+                {"the game's 4336x4284 target, the image 271x267 tiles (rounded down)", false, false, false, false, false, false, 0, 0, 0, 4336, 4284, 0, 0, true, false, false, 0, false, false},
+                {"a TYPELESS R8G8B8A8 texture under an R8G8B8A8_UNORM view (counted only)", false, false, false, false, false, false, 0, 0, 0, 512, 512, 27, 28, false, false, false, 0, false, false},
+                {"a TYPELESS R10G10B10A2 texture under an R10G10B10A2_UNORM view (counted only)", false, false, false, false, false, false, 0, 0, 0, 512, 512, 23, 24, false, false, false, 0, false, false},
+                {"THREE targets bound at once, the counter at u3", false, false, false, false, false, false, 0, 5, 0, 0, 0, 0, 0, false, true, false, 0, false, false},
+                {"a CLEAR of the target after the image is bound", false, false, false, false, false, false, 0, 0, 0, 0, 0, 0, 0, false, false, true, 0, false, false},
+                // The draws a game makes, and the other eye's slice.
+                {"DrawIndexed through an index buffer", false, false, false, false, false, false, 0, 0, 0, 0, 0, 0, 0, false, false, false, 1, false, false},
+                {"DrawIndexedInstanced, two instances (counts double)", false, false, false, false, false, false, 0, 0, 0, 0, 0, 0, 0, false, false, false, 2, false, false},
+                {"DrawInstanced, two instances (counts double)", false, false, false, false, false, false, 0, 0, 0, 0, 0, 0, 0, false, false, false, 3, false, false},
+                {"the array target's SLICE 1 under a 2D image", true, false, false, false, false, false, 0, 0, 0, 0, 0, 0, 0, false, false, false, 0, true, false},
+                {"the array target's SLICE 1 under an array image of one slice", true, true, false, false, false, false, 0, 0, 0, 0, 0, 0, 0, false, false, false, 0, true, false},
+                {"the array target's SLICE 1 under an array image of TWO slices", true, true, false, false, false, false, 0, 0, 0, 0, 0, 0, 0, false, false, false, 0, true, true},
+            };
+            for (const Candidate& c : candidates) {
+                Measure m;
+                char cerr[240] = {};
+                const uint32_t tw = c.targetW ? c.targetW : kPw, th = c.targetH ? c.targetH : kPh;
+                const uint32_t tilesW = c.floorTiles ? tw / edvr::kTile : (tw + edvr::kTile - 1) / edvr::kTile;
+                const uint32_t tilesH = c.floorTiles ? th / edvr::kTile : (th + edvr::kTile - 1) / edvr::kTile;
+                if (!g.makeRasteriser(c, cerr, sizeof(cerr)) ||
+                    !g.makeImage(true, cerr, sizeof(cerr), c.arrayImage, tilesW, tilesH, c.imageSlices2 ? 2u : 1u) ||
+                    !runVariant(g, edvr::kRate1x1, false, false, &c, m, cerr, sizeof(cerr))) {
+                    r.line("foveation probe: %s -- %s", c.name, cerr);
+                    continue;
+                }
+                if (!m.drew) {
+                    r.line("foveation probe: %s -- the triangle rasterised NOTHING", c.name);
+                    continue;
+                }
+                bool named = true, anyEffect = false;
+                char counts[200];
+                int cl = 0;
+                const uint32_t instances = (c.drawKind == 2 || c.drawKind == 3) ? 2u : 1u;
+                for (uint32_t band = 0; band < kBands; ++band) {
+                    cl += snprintf(counts + cl, sizeof(counts) - cl, "%s%u", band ? " " : "", m.count[band]);
+                    const uint32_t expectCount = instances * bandFull / (kExpectW[band] * kExpectH[band]);
+                    if (m.count[band] > expectCount + expectCount / 8 || m.count[band] < expectCount - expectCount / 8) named = false;
+                    if (m.count[band] < instances * bandFull * 3 / 4) anyEffect = true;
+                }
+                r.line("foveation probe: %s -- invocations per band: %s%s", c.name, counts,
+                       named ? " -- as named" : (!anyEffect ? " -- FULL RATE: this state holds the shading at 1x1" : " -- an effect, not as named"));
+            }
+        }
     }
     if (!anyDrew) return 0;
     return verdict;

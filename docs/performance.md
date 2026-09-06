@@ -523,12 +523,43 @@ the bind, and it survives the target itself being bound again -- so the
 driver keeps it across everything a game does between our bind and its
 draws. The module now applies the image after every rebind of the target
 regardless, as OpenXR Toolkit and vrperfkit do, at a few NvAPI calls a
-frame. If the periphery was black: the image reaches the game's pixels,
-three quarters of the frame undrawn changed nothing, and Elite's GPU time
-at native lives where a shading rate cannot reach -- compute lighting and
-post, shadow atlases, the G-buffer's bandwidth, and this pass's own 5 ms.
-If it was not: something in the game defeats the image that nothing on
-the desk does, and that is the hunt.
+frame. Sean flew it and the periphery stayed lit.
+
+**And the cull had never run (found 2026-09-06 07:10).** The setting kept
+its override in a word whose zero meant "leave the preset alone", and
+NVIDIA's cull rate is zero, so choosing cull set the override to zero and
+fell through to the preset. The flight's own ARMED line says it plainly:
+the key was `cull` and the line read "one per 4x4 beyond". Nothing was
+undrawn, the periphery could not have gone black, and the observation says
+nothing at all about whether the image reaches the game's pixels. The
+sentinel is now `0xFFFFFFFF`, entry 0 of the rate table is set explicitly
+rather than left to the fill loop, and both the ARMED and settings lines
+print the table the driver will read -- what is shaded inside, in the ring
+and beyond -- rather than echoing the key. **A log line that repeats a
+setting instead of the state it produced hides exactly this class of bug**,
+and this one hid it for four rounds of desk work.
+
+Two diagnostics join `cull`, because a black rim at the extreme edge of a
+headset is easy to miss even when it is really there: `cull_inner` leaves
+the full-rate disc undrawn -- a black hole where the eyes are looking,
+which also shows whether the disc tracks them -- and `cull_all` leaves
+every tile undrawn, which cannot be missed.
+
+**What the desk settled while the phantom was being chased.** Twenty-five
+states, all shading exactly as named, so none of them is what defeats the
+image in the game: an array target under a 2D image, an array image and a
+two-slice array image, either slice; a depth buffer with the test on;
+MultisampleEnable, AntialiasedLineEnable, ScissorEnable; a pixel shader
+writing SV_Depth, one reading a varying at sample frequency, one reading
+SV_Coverage; alpha-to-coverage; the draw replayed from a command list with
+the image set on either context; three targets bound at once; a clear after
+the bind; typeless textures under typed views; every draw kind, indexed and
+instanced; the game's own 4336x4284 target; and the whole probe re-run on a
+device at the game's feature level 12.0. One state is not on that list
+because it removed the device outright with the image bound:
+`ForcedSampleCount`. One sizing rule was settled by it: the image must be
+the tile quotient rounded UP, since a floor-sized image leaves the
+uncovered strip at full rate, which is what the module already does.
 
 ## Feature 3 — the eye-tracked centre
 

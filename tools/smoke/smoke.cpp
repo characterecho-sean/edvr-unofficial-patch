@@ -990,6 +990,38 @@ int main(int argc, char** argv) {
                         printf("  info  %s\n", line4);
                         line4 = nl ? nl + 1 : nullptr;
                     }
+                    // Once more on a device at the GAME's feature level: Elite
+                    // creates its D3D11 device at 12.0 (its log says
+                    // featureLevel=0xC000), this harness at 11.0. Informational;
+                    // the verdict above stands.
+                    {
+                        const D3D_FEATURE_LEVEL want12[] = {D3D_FEATURE_LEVEL_12_0};
+                        ID3D11Device* dev12 = nullptr;
+                        ID3D11DeviceContext* ctx12 = nullptr;
+                        D3D_FEATURE_LEVEL got12{};
+                        if (SUCCEEDED(create(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0, want12, 1,
+                                             D3D11_SDK_VERSION, &dev12, &got12, &ctx12))) {
+                            static char report5[16384];
+                            const int fv2 = fovProbe(dev12, ctx12, report5, sizeof(report5));
+                            printf("  info  foveation probe on a feature level 0x%X device (the game's): verdict %d\n",
+                                   static_cast<unsigned>(got12), fv2);
+                            char* line5 = report5;
+                            int shown = 0;
+                            while (line5 && *line5) {
+                                char* nl = strchr(line5, '\n');
+                                if (nl) *nl = 0;
+                                if (shown < 4 || strstr(line5, "FULL RATE") || strstr(line5, "NO EFFECT")) {
+                                    printf("  info  [FL 12.0] %s\n", line5);
+                                }
+                                ++shown;
+                                line5 = nl ? nl + 1 : nullptr;
+                            }
+                            ctx12->Release();
+                            dev12->Release();
+                        } else {
+                            printf("  note  foveation: no feature level 12.0 device for the second probe\n");
+                        }
+                    }
                     if (fv == 1) {
                         printf("  ok    foveation: the shading-rate image, written as the module writes it, "
                                "shades every rate as named\n");
