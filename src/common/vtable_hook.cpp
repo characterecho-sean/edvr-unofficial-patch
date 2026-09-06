@@ -612,6 +612,13 @@ void VTableHook::noteCopyDrift(const char* who) {
 
 size_t VTableHook::reclaim(const char* name, const size_t* quietSlots,
                            size_t quietCount) {
+    // Answered fresh by every pass, including the passes that re-patch nothing:
+    // a caller sampling it once a frame is asking "were the hooks in the table
+    // just now", and a stale answer from the last pass that DID something would
+    // report the opposite of the truth. Zeroed before the early returns too --
+    // an uncommitted or copy-mode hook has no displacement to report, and
+    // leaving yesterday's number there would be worse than saying nothing.
+    m_lastDisplaced = 0;
     if (!m_committed) return 0;
     if (m_mode == HookMode::CopyVptr) {
         // No war to fight -- but VERIFY the immunity rather than assume it,
@@ -698,6 +705,14 @@ size_t VTableHook::reclaim(const char* name, const size_t* quietSlots,
         ReleaseSRWLockShared(&g_slotOwnersLock);
 
         if (oursOnTop) continue;   // healthy: a co-owner is on top, we are in its chain
+
+        // Counted here, past the two healthy shapes and before every refusal:
+        // this slot is not ours and not a co-owner's, so for however long that
+        // has been true our thunk has not been in the dispatch path. Counted
+        // whether or not the pass goes on to re-patch it, because the caller's
+        // question is "were we installed", not "did we do something about it".
+        ++m_lastDisplaced;
+
         if (p.retired) continue;   // conceded earlier; the intruder keeps it
 
         // Whether the writer is the image the caller named as implementing

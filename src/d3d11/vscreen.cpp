@@ -807,6 +807,14 @@ struct State {
     // consumed and zeroed by vScreenReclaimHooks.
     uint32_t eyeDrawsSinceReclaim = 0;
     bool     starvationNoted = false;
+    // The duty cycle, sampled once a frame by vScreenReclaimTick and reported
+    // with the totals. hookFrames counts the samples; hookFramesHeld counts the
+    // ones where every patched slot still held our thunk. Their ratio is the
+    // fraction of frames the fixes were actually in the dispatch path, which on
+    // a rig whose runtime rewrites the table all session is NOT the same
+    // question as whether they are installed.
+    uint32_t hookFrames = 0;
+    uint32_t hookFramesHeld = 0;
     bool     lowPeakNoted = false;
     // When the journal first said gameplay had started, 0 until it does. The
     // low-peak notice is timed off this rather than off install, because
@@ -3705,6 +3713,39 @@ bool vScreenReclaimHooks() {
     return sceneRendered;
 }
 
+// The FAST PATROL: the same repair, every frame, with NOTHING VOUCHED.
+//
+// Once a second was sized for the opponent this code was written against -- a
+// tool that hooks once at its own startup, where being a second late costs a
+// second. Issue #21's rig is a different opponent: the D3D11 runtime rewrites
+// the same 23 slots about once a second, for the whole session, and against a
+// one-hertz rewriter a one-hertz repair is the worst cadence available. Our
+// thunks end up installed for part of every second and out of the table for
+// the rest, so the fixes do not fail -- they STROBE, and a black void that
+// paints on some frames and not others is worse than one that never paints.
+// This closes the window to a frame.
+//
+// The vouch list is deliberately empty, and that is the whole safety argument.
+// quietSlots is measured silence over CONSECUTIVE PASSES, and its thresholds
+// mean seconds; handing this pass a vouch list would reinterpret "three
+// consecutive quiet passes" as thirty milliseconds and let a chainer's ordinary
+// lull earn adoption -- the call loop the gate exists to prevent, rebuilt by
+// the cadence change alone. With no vouches the only thing this pass can adopt
+// is a re-point from the module named by setImplementationModule, which needs
+// no traffic evidence because it cannot be a chainer. Everything else waits for
+// the once-a-second pass and its full discipline, unchanged.
+//
+// Also the sampling point for the duty-cycle figure in the totals line: whether
+// the hooks were found installed is asked once per frame, here, because that is
+// the only cadence at which the answer means anything.
+void vScreenReclaimTick() {
+    State* s = g_state;
+    if (!s) return;
+    s->hook.reclaim("vScreen context", nullptr, 0);
+    ++s->hookFrames;
+    if (s->hook.lastPassDisplaced() == 0) ++s->hookFramesHeld;
+}
+
 void vScreenFrameBoundary() {
     // The quad probe's readback: a capture taken a few frames ago is decoded
     // here, where the copy has certainly executed and mapping cannot stall
@@ -4317,12 +4358,27 @@ void vScreenFrameBoundary() {
             "They are NOT a fault indicator -- the flash detector needs the count above "
             "100 to consider a frame at all. The fps is what the GAME produced, which is "
             "not the headset's refresh rate: far above it on a loading screen, half of "
-            "it when the runtime is reprojecting.",
+            "it when the runtime is reprojecting. The hooks held the context's table "
+            "on %u%% of %u checked frames%s",
             static_cast<unsigned long long>(s->panelOverrides),
             static_cast<unsigned long long>(s->voidClears),
             s->voidFrameMin == 0xFFFFFFFFu ? 0u : s->voidFrameMin, s->voidFrameMax,
             windowFrames, s->eyeDrawsWindowMax, s->eyeDrawsMax,
-            windowFrames, static_cast<uint32_t>(windowMs), windowFps);
+            windowFrames, static_cast<uint32_t>(windowMs), windowFps,
+            s->hookFrames ? (unsigned)((s->hookFramesHeld * 100ull) / s->hookFrames)
+                          : 100u,
+            s->hookFrames,
+            // 100% is the ordinary answer and needs no essay. Anything less
+            // means something is taking the slots back, the fixes are running
+            // on a fraction of frames, and the reader needs to know that is
+            // what they are looking at rather than a fix that half-works.
+            (s->hookFrames && s->hookFramesHeld < s->hookFrames)
+                ? " -- on the others something had re-pointed slots EDVR "
+                  "patched, so the fixes below were not in the dispatch path "
+                  "for part of each of those frames. The VTableHook lines say "
+                  "who. A fix that acts on some frames and not others looks "
+                  "like flicker, not like a fix that is off."
+                : ".");
 
         // The supersample resolve's count and price, while they move. The
         // decision lives in the openvr half's Submit hook but the pass and
@@ -4501,6 +4557,10 @@ void vScreenFrameBoundary() {
         s->voidFrameMin = 0xFFFFFFFFu;
         s->voidFrameMax = 0;
         s->eyeDrawsWindowMax = 0;
+        // Per window like the rest, and for the same reason: a duty cycle
+        // averaged over the whole session hides the minute it went wrong.
+        s->hookFrames = 0;
+        s->hookFramesHeld = 0;
         s->windowStartMs = now;
         s->windowStartFrame = s->frameNo;
     }

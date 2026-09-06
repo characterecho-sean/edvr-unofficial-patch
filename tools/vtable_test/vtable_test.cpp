@@ -494,6 +494,19 @@ int main() {
                       "...with the forward pointing at the adopted entry",
                       "the composed return value is wrong");
 
+                // The duty-cycle fact, which the totals line reports per frame.
+                // The pass that found the slot taken must say so, and the next
+                // pass -- with our thunk back on top -- must say the opposite,
+                // or a caller sampling it once a frame is reading a number that
+                // never changes.
+                check(owner.lastPassDisplaced() == 1,
+                      "the pass that found the slot taken reports it displaced",
+                      "the displaced count did not see a slot it re-patched");
+                check(owner.reclaim("impl-module-cell") == 0 &&
+                          owner.lastPassDisplaced() == 0,
+                      "...and the next pass, back on top, reports none",
+                      "the displaced count is stale rather than per-pass");
+
                 owner.uninstall();
                 writeSlot(&wrapper, 0, wrapper.mySlotOneAtBirth);
             }
@@ -524,6 +537,10 @@ int main() {
                 check(readSlot(&wrapper, 0) == reinterpret_cast<void*>(&toolkitOne),
                       "...and the slot was left exactly as it was found",
                       "a refused reclaim wrote to the table anyway");
+                check(owner.lastPassDisplaced() == 1,
+                      "...and a REFUSED slot still counts as displaced",
+                      "the duty-cycle count only sees slots it heals, so it "
+                      "would report 100% on a rig where nothing is healing");
 
                 owner.uninstall();
                 writeSlot(&wrapper, 0, wrapper.mySlotOneAtBirth);

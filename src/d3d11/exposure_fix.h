@@ -63,6 +63,12 @@ void exposureFixFrameBoundary();
 // detection finding nothing forever with nothing said.
 void exposureFixReclaimHooks(bool sceneRendered);
 
+// The per-frame half, nothing vouched -- the twin of vScreenReclaimTick, on the
+// other hook of the same object. Both or neither: run one at frame rate and the
+// other once a second and the runtime's rewrite leaves one of them out of the
+// table for up to a second while the other is already back in.
+void exposureFixReclaimTick();
+
 // Runtime toggle, for comparing against stock behaviour without restarting.
 void toggleExposureFix();
 bool exposureFixEnabled();

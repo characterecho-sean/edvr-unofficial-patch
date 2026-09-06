@@ -1623,6 +1623,16 @@ void exposureFixReclaimHooks(bool sceneRendered) {
     s->hook.reclaim("exposure context", quiet, n);
 }
 
+// The fast patrol, per frame, nothing vouched. vScreenReclaimTick's comment
+// carries the argument; this is the same pass on the other hook of the same
+// object, and the two must run at the same cadence or the runtime's rewrite
+// leaves one of them out of the table for a second while the other is back in.
+void exposureFixReclaimTick() {
+    State* s = g_state;
+    if (!s) return;
+    s->hook.reclaim("exposure context", nullptr, 0);
+}
+
 void shutdownExposureFix() {
     if (!g_state) return;
     g_state->enabled = false;

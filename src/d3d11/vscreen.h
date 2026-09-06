@@ -144,6 +144,17 @@ void vScreenFrameBoundary();
 // leaves the exposure fix detection-only.
 bool vScreenReclaimHooks();
 
+// The same repair EVERY FRAME, with nothing vouched -- so the only thing it can
+// take back is a re-point from the module named by setImplementationModule,
+// which needs no traffic evidence. Against issue #21's rig, where the D3D11
+// runtime rewrites the table about once a second all session, a once-a-second
+// repair leaves the hooks out of the dispatch path for part of every second and
+// the fixes strobe. This closes that to a frame. It must NOT be given a vouch
+// list: those thresholds count consecutive passes and mean seconds, and reading
+// them at frame rate would let a chainer's ordinary lull earn adoption. See the
+// definition.
+void vScreenReclaimTick();
+
 // Did the ClearState and ExecuteCommandList hooks actually run?
 //
 // For the build check only. Their vtable slots were counted from declaration

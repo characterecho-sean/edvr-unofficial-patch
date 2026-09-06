@@ -255,6 +255,22 @@ public:
     size_t reclaim(const char* name, const size_t* quietSlots = nullptr,
                    size_t quietCount = 0);
 
+    // How many committed slots the last reclaim() pass found holding something
+    // that is neither our replacement nor a co-owner's -- whether or not it
+    // re-patched any of them.
+    //
+    // THE DUTY-CYCLE FACT. On issue #21's rig the D3D11 runtime rewrites the
+    // context's table about once a second and reclaim writes it back, so the
+    // hooks are not installed CONTINUOUSLY -- they are installed between
+    // exchanges. Nothing measured what fraction of frames that was, and "the
+    // fixes are running" and "the fixes are running on some frames" look
+    // identical in every totals line this project has. A caller polling this
+    // once a frame can say which.
+    //
+    // Zero in CopyVptr mode, where the question does not arise: the object
+    // dispatches through a table only we can write.
+    size_t   lastPassDisplaced() const { return m_lastDisplaced; }
+
     bool     attached() const { return m_object != nullptr; }
     bool     committed() const { return m_committed; }
     size_t   entryCount() const { return m_execPrefix; }
@@ -317,6 +333,8 @@ private:
     // Null until a caller names one, and then reclaim may adopt from it
     // without a vouch.
     void*              m_implModule = nullptr;
+    // Slots found not ours on the last pass -- see lastPassDisplaced().
+    size_t             m_lastDisplaced = 0;
     // How many reclaim() passes found something to re-patch. Drives the log
     // cadence: the first explains, later ones report at doublings, so a tool
     // that re-hooks every second cannot fill the log while still being visible

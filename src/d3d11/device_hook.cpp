@@ -1022,6 +1022,26 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
         bindingFrameBoundary();
         exposureFixFrameBoundary();
         vScreenFrameBoundary();
+
+        // THE FAST PATROL on the two context hooks, every frame.
+        //
+        // Their opponent is not a tool that installs once. On issue #21's rig
+        // the D3D11 runtime rewrites the same slots about once a second for the
+        // whole session, and against a one-hertz rewriter the once-a-second
+        // pass below is the worst cadence available: our thunks end up in the
+        // table for part of every second and out of it for the rest, so the
+        // fixes do not fail, they STROBE. This closes the window to a frame.
+        //
+        // Only the two CONTEXT hooks. The device, swapchain and factory tables
+        // have never been contested by anything in the field, they carry no
+        // per-thunk counters to vouch with, and their reclaim cannot heal
+        // anything without one -- so running them at frame rate would buy a
+        // VirtualQuery per foreign entry per frame and nothing else.
+        //
+        // These passes vouch NOTHING; see vScreenReclaimTick for why that is
+        // the whole safety argument rather than a shortcut.
+        vScreenReclaimTick();
+        exposureFixReclaimTick();
         // Polled rather than watched, twice a second by the journal watcher
         // and once a second here. The user is wearing a
         // headset and cannot see a text editor, so the settings that are worth
