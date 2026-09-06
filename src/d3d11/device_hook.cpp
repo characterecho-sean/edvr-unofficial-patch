@@ -603,7 +603,12 @@ void noteDeviceCreateFailure(size_t slot, HRESULT hr, const void* first,
     // something else, or the driver fell over on its own. It is one call, it
     // is the discriminator, and asking for it needs the device we already
     // hold. Issue #20 got this far and no further without it.
-    char removed[96];
+    // 320, not 96. The first field build truncated the answer mid-sentence --
+    // "(DXGI_ERROR_DEVICE_HUNG -- the GPU stopped responding" and then nothing,
+    // losing the half that says what to do about it. The reason strings run to
+    // about 180 characters because they are written to be read by whoever
+    // pasted the log, not looked up.
+    char removed[320];
     removed[0] = 0;
     if (hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET) {
         const HRESULT why = g_state->device ? g_state->device->GetDeviceRemovedReason()
