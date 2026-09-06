@@ -628,7 +628,7 @@ lines are the copies.
 
 | Gate | Question | Read | If it says otherwise |
 |---|---|---|---|
-| G1 | Are the composites drawn into the tonemapped 8-bit target, and through an sRGB or a UNORM view? | `r=` on the `81216C77F90DEDD6` lines, the interned format; the RTV view format needs one added field to the census (`GetDesc` on the view) | HDR target: the layer bypasses tonemap and bloom and the HUD's look changes -- flight it with `layer` view beside stock, or go to design B |
+| G1 | Are the composites drawn into the tonemapped 8-bit target, and through an sRGB or a UNORM view? | `r=` on the `81216C77F90DEDD6` lines, then that token's `DC id` line: `fmt=` is the texture's format and `vf=` the view's (added 2026-09-06 for this gate; for RGBA8, 27 typeless, 28 UNORM, 29 UNORM_SRGB; 10 = RGBA16F, 26 = R11G11B10F) | HDR target: the layer bypasses tonemap and bloom and the HUD's look changes -- flight it with `layer` view beside stock, or go to design B |
 | G2 | Do the UI draws bind a depth view or test depth? | `d=` and `ds=` on the same lines | a family that tests depth: decide per family between ignoring the test (panels win) and leaving it in the frame |
 | G3 | Which blend shapes do the UI families use? | `bl=` | a shape outside the table: extend the table if it has a premultiplied form, else that family stays |
 | G4 | Do the composites carry the eye's projection (the jitter)? | flight A/B: `crisp_ui_jitter = none` makes a jittered family shuttle; `as_is` makes an unjittered one shuttle | per-family jitter flag in the direct list |

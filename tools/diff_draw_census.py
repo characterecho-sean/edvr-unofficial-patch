@@ -99,7 +99,11 @@ FRAME_RE = re.compile(r'^DC frame (\d+) draws=(\d+)(?: \S+=\d+)*$')
 # because it is per-session noise BETWEEN censuses, exactly like the pointer
 # ordinals the signature already excludes.
 ID_TEX_RE = re.compile(r'^DC id @(\d+) tex (\d+)x(\d+) fmt=(\d+)'
-                       r'(?: res=\S+)?$')
+                       # vf= is the VIEW's format (2026-09-06, the crisp-UI
+                       # gates): a typeless texture's line cannot say whether
+                       # the game bound an sRGB or a UNORM view over it.
+                       # Optional and parsed past, like res= before it.
+                       r'(?: res=\S+)?(?: vf=\d+)?$')
 ID_BUF_RE = re.compile(r'^DC id @(\d+) buf (\d+)(?: res=\S+)?$')
 ID_UNK_RE = re.compile(r'^DC id @(\d+) \?$')
 END_RE = re.compile(r'^DC end census=(\d+) draws=(\d+)(?: \S+=\d+)*? '
@@ -418,7 +422,7 @@ def self_test():
             b += ['DC %d #99 I n=12 i=1 r=@1 d=- c=@9 s=@4,-,-,- q=4' % f]
         b += ['DC frame %d draws=%d off=0 copies=2 disp=1' % (
             f, 5 if f == 1 else 4)]
-    b += ['DC id @1 tex 1832x1920 fmt=87 res=000001B2C3D40000',
+    b += ['DC id @1 tex 1832x1920 fmt=87 res=000001B2C3D40000 vf=29',
           'DC id @2 tex 1832x1920 fmt=45 res=000001B2C3D48000',
           'DC id @3 tex 4096x4096 fmt=98 res=000001B2C3D50000',
           'DC id @4 tex 2048x2048 fmt=28 res=000001B2C3D58000',
