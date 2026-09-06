@@ -630,40 +630,48 @@ how many eyes were settled by a submitted texture, how many by the render
 order behind one, how many are not yet placed, and how many corrections
 the walk has made.
 
-**The preset is not a free choice once DLSS is on (2026-09-06).** With the
-eye-tracked centre working and both eyes' discs finally on one direction,
-Sean still read blockiness on menu text, and it sat *inside* the full-rate
-disc, which is where it cannot be. Three settings named the mechanism
-between them: with the feature off it was gone, with
-`advanced.foveation_passes = geometry` it stayed, and at `quality` instead
-of `performance` it was gone again.
+**The preset is not a free choice, and 38 degrees is not much (2026-09-06).**
+With the eye-tracked centre working and both eyes' discs finally aimed at
+one direction, Sean still read blockiness on menu text. Four settings
+bracketed it: with the feature off it was gone; with
+`advanced.foveation_passes = geometry` it stayed; at `quality` instead of
+`performance` it was gone; and **with `fix.temporal_aa` off it persisted**,
+which is the one that matters, because it rules out the upscaler.
 
-The rate changes in a hard step at the disc's edge, and DLSS accumulates
-each pixel over eight to sixteen frames. A pixel that has just crossed
-into the disc still carries the coarse version of itself in the history,
-and resolves over the frames that follow. So the artefact appears inside
-the disc by construction: it is the recent past of pixels that were
-outside it. The preset decides how often that happens, because the angles
-are full cones -- performance's disc reaches only 19 degrees from the gaze
-and quality's 35. A menu subtends more than 19, so at performance every
-small saccade drags text across the step; at 35 the step sits outside
-anything being read and nothing crosses.
+So the cause is spatial and plain. The preset angles are full cones, so
+performance's full-rate disc reaches only 19 degrees either side of the
+gaze and quality's 35. An Elite menu is wider than 19 degrees, so while
+you read the middle of a panel its edges are being shaded one sample per
+2x2, and on high-contrast UI type that is visible. At 35 the disc covers
+the panel and there is nothing to see. No temporal mechanism is needed to
+explain it, and the flight with the pass off says none is involved.
 
-`foveation_passes = geometry` was the wrong lever and its failure is
-informative: it exempts draws of six vertices or fewer, which are the
-full-screen quads, and the game batches its UI text into ordinary geometry
-with far more. The UI never left the mask.
+An earlier draft of this section blamed DLSS history carrying coarse
+pixels into the disc as it moved. That was wrong, and Sean's
+temporal-off flight is what falsified it. It is recorded here because the
+wrong explanation was the more interesting one, and being interesting is
+not evidence.
 
-This is a property of a moving rate boundary under any temporal
-accumulator, not a fault to be tuned out, and it is the same physics that
-took the eye-tracked DLSS crop off the plan: a boundary that moves with
-the eye must be resolved by the accumulator every time it moves.
-CheekyFoveatedDLSS meets it by resetting the DLSS history on large gaze
-jumps, trading the blockiness for a resolve. That trade is not worth
-making here, because the measurement above says the feature buys no frames
-on Elite to pay for it. The honest resolution is the one now written into
-edvr.ini: with the temporal pass on, use quality -- which shades less
-coarsely still, and so saves less than the nothing already measured.
+`foveation_passes = geometry` was the wrong lever, and its failure says
+why the radius is the only one: that key exempts draws of six vertices or
+fewer, which are the full-screen quads, and the game batches its UI text
+into ordinary geometry with far more. The UI never leaves the mask.
+
+**And the same session finally put a number on the saving: about 0.5 ms of
+frame time for any preset other than off.** That does not contradict the
+cull measurement above, it completes it. Culling every tile moved the GPU
+from 98 per cent busy to 72 and gained no frames, because the frame is
+held at the 90 Hz cap and bound on draw submission; a saving can be real
+and still buy no fps. Half a millisecond is what the shading rate is
+actually worth on this rig, against a temporal pass costing ten times
+that.
+
+The useful part is that it did not vary with the preset. Quality saves
+what performance saves and is the only one that survives reading, so
+there is no trade to make between them: **if the feature is on at all, it
+should be on at quality.** It still ships off, because half a millisecond
+that buys no frames is not worth an NVIDIA-only code path being on by
+default for people who will never look at this file.
 
 ## Feature 3 — the eye-tracked centre
 
