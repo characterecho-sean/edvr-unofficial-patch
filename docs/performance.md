@@ -586,6 +586,26 @@ looking for one; the honest ceiling is a few tenths of a millisecond in a
 shadow atlases, compute lighting and post, bandwidth, and this pass's own
 5 ms.
 
+**And where the frame's time actually goes (2026-09-06 09:42).** Sean
+turned the temporal pass off at native and the frame fell from 13.3 ms to
+8.2. The pass's own accounting agrees to within a fifth of a millisecond:
+2.8 ms an eye, 5.6 a frame, of which NVIDIA's evaluation is 1.75 an eye
+and the rest is the pass's own work around it. So at native resolution the
+single largest piece of this frame that EDVR controls is EDVR's own
+anti-aliasing, at about forty percent of it -- while the whole of the
+game's eye-draw pixel shading, the only thing a shading rate can reach, is
+about a quarter of the GPU's time and yields nothing at the cap. The
+foveation arc spent itself hunting tenths of a millisecond in the smaller
+of the two.
+
+That is not an argument against the pass, which is what makes the image
+what it is, but it does name the next lever honestly: at native the pass
+is paid for in full and buys only anti-aliasing, whereas at a render scale
+of 0.65 to 0.75 the same pass costs the same -- NVIDIA's price is set by
+the output, measured on the desk -- and buys back everything the game
+saves by rendering fewer pixels. A commander at native with DLAA is paying
+both bills at once.
+
 Where that leaves the feature: it ships off, it stays correct, and the
 gaze it is built on is worth more than the shading rate it drives -- the
 same source now feeds the eye-tracked centre, and would feed anything
