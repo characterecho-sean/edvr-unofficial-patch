@@ -580,6 +580,46 @@ int main() {
             }
         }
 
+        // (3b) AN OWNER RE-POINT IS NEVER CAPPED, INCLUDING WHEN IT IS ALSO
+        // VOUCHED. The cap ends a tug-of-war between two TOOLS; the module that
+        // implements the method will not tire and conceding to it just switches
+        // EDVR off. This was written as `ownerRepoint = !vouched && …`, so a
+        // slot that happened to be vouched as well was booked against the cap
+        // and retired after 64 exchanges -- the exact concession the exemption
+        // exists to prevent, arriving on whichever slots the once-a-second
+        // vouched pass reached before the per-frame one. 200 exchanges, all
+        // vouched, all from the named module: none may be conceded.
+        {
+            VTableHook owner;
+            g_owner = &wrapper;
+            if (!owner.attach(&wrapper)) {
+                fail("attach for the vouched-owner cell", "attach refused");
+            } else {
+                owner.setImplementationModule(selfModule);
+                owner.replace(0, reinterpret_cast<void*>(&thunkOne),
+                              reinterpret_cast<void**>(&g_realOne));
+                owner.commit();
+
+                const size_t quietSlot0[1] = {0};
+                size_t healed = 0;
+                for (int i = 0; i < 200; ++i) {
+                    g_toolkitClean = reinterpret_cast<PFN_One>(readSlot(&wrapper, 0));
+                    writeSlot(&wrapper, 0, reinterpret_cast<void*>(&toolkitOne));
+                    healed += owner.reclaim("vouched-owner-cell", quietSlot0, 1);
+                }
+                check(healed == 200,
+                      "200 vouched owner re-points are all taken back, none "
+                      "conceded",
+                      "the cap retired a slot the implementation module owns -- "
+                      "on a rig whose runtime re-points every second, EDVR goes "
+                      "inert about a minute in");
+
+                owner.uninstall();
+                writeSlot(&wrapper, 0, wrapper.mySlotOneAtBirth);
+                g_realOne = reinterpret_cast<PFN_One>(wrapper.mySlotOneAtBirth);
+            }
+        }
+
         // (4) THE HAZARD ITSELF, PINNED DOWN. Name a module the CHAINER lives
         // in and the exemption adopts it -- forward pointing at the chainer,
         // chainer forwarding to our thunk, a two-node cycle that the next
@@ -678,6 +718,17 @@ int main() {
             check(readSlot(&wrapper, 0) == reinterpret_cast<void*>(&toolkitOne),
                   "...and the intruder keeps it",
                   "somebody rewrote the shared slot after all");
+            // A concession is NOT displacement, and the duty-cycle figure the
+            // totals line reports depends on the difference. Counted together,
+            // one permanently conceded slot -- and on issue #21's rig ClearState
+            // is exactly that, on the first pass -- pins the figure at "never
+            // held" for the whole session and hides every slot that IS being
+            // healed within a frame: the measurement reporting total failure
+            // while the fix works.
+            check(hookA.lastPassDisplaced() == 0 && hookA.lastPassConceded() == 1,
+                  "a conceded shared slot counts as conceded, not as displaced",
+                  "the duty-cycle figure will read 0% forever on any rig with "
+                  "one conceded slot");
 
             hookB.uninstall();
             hookA.uninstall();

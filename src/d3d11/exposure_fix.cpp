@@ -1630,6 +1630,8 @@ void exposureFixReclaimHooks(bool sceneRendered) {
 void exposureFixReclaimTick() {
     State* s = g_state;
     if (!s) return;
+    // Copy mode has no slot to lose; see vScreenReclaimTick.
+    if (s->hook.mode() == HookMode::CopyVptr) return;
     s->hook.reclaim("exposure context", nullptr, 0);
 }
 

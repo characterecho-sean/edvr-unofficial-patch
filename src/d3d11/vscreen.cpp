@@ -815,6 +815,11 @@ struct State {
     // question as whether they are installed.
     uint32_t hookFrames = 0;
     uint32_t hookFramesHeld = 0;
+    // Slots given up for good -- excluded from the ratio above, because a
+    // permanent known loss counted as displacement pins the ratio at zero for
+    // the session and hides the slots that ARE being held. Reported as its own
+    // number instead.
+    uint32_t hookConceded = 0;
     bool     lowPeakNoted = false;
     // When the journal first said gameplay had started, 0 until it does. The
     // low-peak notice is timed off this rather than off install, because
@@ -3741,9 +3746,20 @@ bool vScreenReclaimHooks() {
 void vScreenReclaimTick() {
     State* s = g_state;
     if (!s) return;
+    // Nothing to patrol in copy mode: the object dispatches through a table
+    // only EDVR can write, so there is no slot for anyone to take. reclaim's
+    // copy branch does real work -- a breach scan and a 300-entry drift walk --
+    // and running that per frame would buy the same answer 144 times a second
+    // and make its own "this check repeats about once a second" a lie. The
+    // once-a-second pass still runs it.
+    if (s->hook.mode() == HookMode::CopyVptr) return;
     s->hook.reclaim("vScreen context", nullptr, 0);
+    if (!s->hook.lastPassRan()) return;   // unpatrolled is not "held"
     ++s->hookFrames;
     if (s->hook.lastPassDisplaced() == 0) ++s->hookFramesHeld;
+    if (s->hook.lastPassConceded() > s->hookConceded) {
+        s->hookConceded = static_cast<uint32_t>(s->hook.lastPassConceded());
+    }
 }
 
 void vScreenFrameBoundary() {
@@ -4358,27 +4374,38 @@ void vScreenFrameBoundary() {
             "They are NOT a fault indicator -- the flash detector needs the count above "
             "100 to consider a frame at all. The fps is what the GAME produced, which is "
             "not the headset's refresh rate: far above it on a loading screen, half of "
-            "it when the runtime is reprojecting. The hooks held the context's table "
-            "on %u%% of %u checked frames%s",
+            "it when the runtime is reprojecting.",
             static_cast<unsigned long long>(s->panelOverrides),
             static_cast<unsigned long long>(s->voidClears),
             s->voidFrameMin == 0xFFFFFFFFu ? 0u : s->voidFrameMin, s->voidFrameMax,
             windowFrames, s->eyeDrawsWindowMax, s->eyeDrawsMax,
-            windowFrames, static_cast<uint32_t>(windowMs), windowFps,
-            s->hookFrames ? (unsigned)((s->hookFramesHeld * 100ull) / s->hookFrames)
-                          : 100u,
-            s->hookFrames,
-            // 100% is the ordinary answer and needs no essay. Anything less
-            // means something is taking the slots back, the fixes are running
-            // on a fraction of frames, and the reader needs to know that is
-            // what they are looking at rather than a fix that half-works.
-            (s->hookFrames && s->hookFramesHeld < s->hookFrames)
-                ? " -- on the others something had re-pointed slots EDVR "
-                  "patched, so the fixes below were not in the dispatch path "
-                  "for part of each of those frames. The VTableHook lines say "
-                  "who. A fix that acts on some frames and not others looks "
-                  "like flicker, not like a fix that is off."
-                : ".");
+            windowFrames, static_cast<uint32_t>(windowMs), windowFps);
+
+        // A LINE OF ITS OWN, not a tail on the one above.
+        //
+        // Log::note truncates at about 1167 bytes and the totals line already
+        // runs near a thousand; appending this took it 70 to 110 bytes past the
+        // cut, so the sentence explaining a sub-100% figure was the part that
+        // got chopped -- the explanation lost precisely when it was printed. The
+        // line above it splits for the same reason, twenty lines up.
+        //
+        // Only when there is something to say. A hook nobody contests holds the
+        // table on every frame and does not need a line saying so every twenty
+        // seconds for the rest of the session.
+        if (s->hookFrames && (s->hookFramesHeld < s->hookFrames || s->hookConceded)) {
+            const unsigned held =
+                static_cast<unsigned>((s->hookFramesHeld * 100ull) / s->hookFrames);
+            Log::get().note(
+                "vScreen hooks: EDVR's draw and bind hooks were in the context's "
+                "table on %u%% of %u checked frames this window, and %u slot(s) "
+                "are conceded for good. On the frames they were not, something "
+                "had re-pointed slots EDVR patched and the fixes reading those "
+                "calls did nothing for part of the frame -- which looks like "
+                "flicker rather than like a fix that is off. The VTableHook "
+                "lines name who. A tool that CHAINS through EDVR counts here "
+                "too and is harmless, so read this with them, not alone.",
+                held, s->hookFrames, s->hookConceded);
+        }
 
         // The supersample resolve's count and price, while they move. The
         // decision lives in the openvr half's Submit hook but the pass and
@@ -4561,6 +4588,8 @@ void vScreenFrameBoundary() {
         // averaged over the whole session hides the minute it went wrong.
         s->hookFrames = 0;
         s->hookFramesHeld = 0;
+        // NOT hookConceded: a concession is permanent, so a per-window reset
+        // would report it once and then claim it had healed.
         s->windowStartMs = now;
         s->windowStartFrame = s->frameNo;
     }
@@ -4811,9 +4840,10 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
                     // contextHookModeFor already prints it, twice when forced.
                     s.hook.mode() == HookMode::CopyVptr
                         ? "by private vtable copy (this object dispatches through "
-                          "a table of EDVR's own; nothing else can bypass the "
-                          "fixes, and the copy does not follow the table it was "
-                          "taken from)"
+                          "a table of EDVR's own, so a tool writing the shared "
+                          "one cannot bypass the fixes -- but one that writes "
+                          "through the OBJECT still reaches the copy, and the "
+                          "copy does not follow the table it was taken from)"
                         : "in place (the shared table is patched, so anything else "
                           "that writes those slots composes with EDVR; reclaim "
                           "watches for our entries being re-pointed)");

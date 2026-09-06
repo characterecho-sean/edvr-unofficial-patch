@@ -267,9 +267,27 @@ public:
     // identical in every totals line this project has. A caller polling this
     // once a frame can say which.
     //
+    // CONTESTED slots only. A slot already conceded -- retired after a
+    // tug-of-war, or shared by two EDVR hooks and therefore unrepairable by
+    // either alone -- is a permanent, already-logged loss, and counting it here
+    // would peg the figure at "never held" for the rest of the session and hide
+    // the slots that ARE being healed within a frame. Those are counted by
+    // lastPassConceded instead, so the caller can report both.
+    //
     // Zero in CopyVptr mode, where the question does not arise: the object
     // dispatches through a table only we can write.
     size_t   lastPassDisplaced() const { return m_lastDisplaced; }
+
+    // Slots this pass found foreign and will never contest again. Steady for
+    // the session once the concessions have happened, so a caller reports the
+    // number rather than a rate.
+    size_t   lastPassConceded() const { return m_lastConceded; }
+
+    // Did the last reclaim() actually inspect the table? False when the hook is
+    // uncommitted, in copy mode, or when the slot registry overflowed and
+    // re-claiming is off for the session. A caller sampling lastPassDisplaced()
+    // must not score an unpatrolled hook as perfectly held.
+    bool     lastPassRan() const { return m_lastPassRan; }
 
     bool     attached() const { return m_object != nullptr; }
     bool     committed() const { return m_committed; }
@@ -298,11 +316,40 @@ private:
         bool     sharedNoted = false;  // the shared-slot report, said once
         bool     foreignNoted = false; // the unvouched-foreign report, said once
         bool     oddNoted = false;     // the non-executable-entry report, said once
+        // "Is this foreign entry the implementation module's own?", cached
+        // against the entry that answered it. reclaim now runs every frame, and
+        // the question costs a VirtualQuery -- which a permanently foreign slot
+        // nobody will heal would otherwise pay every frame for the session to
+        // re-derive an answer that cannot have changed. A different pointer is
+        // a different question and is classified again.
+        void*    lastForeign = nullptr;
+        bool     lastForeignIsOwner = false;
+        // THE VARIANT CENSUS, and it exists to answer a design question rather
+        // than a diagnostic one.
+        //
+        // Patrolling the table is a treaty, not a peace: the runtime rewrites
+        // the slot, we write it back, forever, and between the two writes our
+        // thunk is not in the dispatch path. The only design with no window at
+        // all is to stop owning the SLOT and own the CODE -- hook the entry
+        // point of every implementation the runtime selects, so it can rewrite
+        // its table as often as it likes and whichever variant it picks is one
+        // we are already inside. That is only tractable if the set of variants
+        // per slot is SMALL AND CLOSED. Nothing has ever measured whether it is.
+        // Four is enough to answer the question: a slot that alternates between
+        // two entries says the set is tiny and the design is easy; one that
+        // overflows says the opposite, loudly, and saves the attempt.
+        void*    seen[4] = {};
+        uint8_t  seenCount = 0;
+        bool     seenOverflow = false;
     };
 
     // Writes one entry with the page temporarily writable. Returns false and
     // changes nothing if the protection could not be moved.
     static bool writeEntry(void** vtable, size_t slot, void* value);
+
+    // Clear everything this hook believed about the object it just released.
+    // Called from every one of uninstall()'s three exits; see the definition.
+    void forgetObject();
 
     // CopyVptr only, read-only, from reclaim(): compare the copy we dispatch
     // through against the live shared table and report where they no longer
@@ -335,6 +382,8 @@ private:
     void*              m_implModule = nullptr;
     // Slots found not ours on the last pass -- see lastPassDisplaced().
     size_t             m_lastDisplaced = 0;
+    size_t             m_lastConceded = 0;
+    bool               m_lastPassRan = false;
     // How many reclaim() passes found something to re-patch. Drives the log
     // cadence: the first explains, later ones report at doublings, so a tool
     // that re-hooks every second cannot fill the log while still being visible
