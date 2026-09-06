@@ -187,6 +187,48 @@ G1's view format, G5 and G6 outside the cockpit, and G10 in the menus. Build
 B0 while it flies. Flight 2: B0 on against off, docked and in space. G9 (the
 surfaces' resolution) after that, since B0 changes nothing about detail.
 
+## Flight 1 (2026-09-06, Frontier install, Pimax at 2818x2784 under DLSS)
+
+Five censuses landed before the graphics log hit its 4 MB cap (raise
+`log.max_mb` before the next census session): the main menu, the loading
+screen, and three cockpit views. Read with the reader, with the 2048-entry
+table so every token kept its identity:
+
+- **Main menu:** the panel is one GUI surface (2212x1244), composited by
+  `A888D51024D9798E` / `9107E72CB016CC02` into the tonemapped `RGBA8_TYPELESS`
+  target through a UNORM view, depth test OFF, premultiplied blend. After
+  it: only the copies to the submit texture and EDVR's own pass.
+- **Loading screen:** the same composite family plus the loader's
+  5760-index `4EF6DDB075A927FA` and a `B018D143700AB803` quad, sampling two
+  2212x1244 surfaces, into the 8-bit target, test off. The reader saw no GUI
+  draws in its three frames because the dialog's surfaces are rebuilt only
+  when they change: the DLL's session-long memory is what classifies them.
+- **Cockpit (three views):** exactly the 2026-09-03 picture at the new
+  size. Holo panels 22-24 a frame and the flight HUD into `R11G11B10F`
+  (`view=same`), test GEQUAL write off, premultiplied; the target indicator
+  quad into `RGB10A2_TYPELESS` (view `RGB10A2_UNORM`), which the loading
+  census shows to be the G-BUFFER colour target (the ship model draws into
+  it with depth write on, before the lighting resolve) -- so that family
+  is excluded from B0. After the last UI draw: the tonemap reads the HDR
+  target and nothing else; the only touch of the depth is EDVR's own mv
+  dispatch (`6D94E9C00DCE909F`, reading it as `R32F_X8X24_TYPELESS`).
+- **G1's view format:** the HDR target is `R11G11B10F` viewed as itself;
+  the 8-bit target is `RGBA8_TYPELESS` viewed as `RGBA8_UNORM` (encoded-space
+  blending) at every UI composite in the menus.
+- **The shader dump answered the discard question.** `ps A2965EC2931A39C8`
+  (holo panels) discards at two sites, `ps 8DEF46452FA459F5` (flight HUD)
+  at five, the menu/loader composites at one each; the target indicator's
+  `ps E23C45251B7ECDFE` at none. Every composite vertex shader projects
+  through `cb1[276]`, the scene block's projection rows, so they carry the
+  jitter (G4, for A).
+
+**Built from this: `fix.ui_depth` (src/d3d11/ui_depth.h), the B0 form.**
+The classifier as designed (GUI-family surfaces learned at offscreen draws,
+composites by what they sample, the flight HUD by hash, an exclude list),
+and one state swap per UI draw: the game's depth-stencil state's writing
+twin, its test kept, ALWAYS where it had none. Default off; ini only until
+flown.
+
 # Design A: the UI layer
 
 ## A1. What counts as UI: the classifier

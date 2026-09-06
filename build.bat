@@ -271,6 +271,7 @@ cl.exe %CFLAGS% %NGXFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "%ROOT%\src\d3d11\panel_upscale.cpp" ^
     "%ROOT%\src\d3d11\wake_pulse.cpp" ^
     "%ROOT%\src\d3d11\hud_grain.cpp" ^
+    "%ROOT%\src\d3d11\ui_depth.cpp" ^
     "%ROOT%\src\d3d11\backdrop_fix.cpp" ^
     "%ROOT%\src\d3d11\scrim_fix.cpp" ^
     "%ROOT%\src\d3d11\quad_probe.cpp" ^

@@ -53,6 +53,7 @@
 #include "panel_upscale.h"
 #include "wake_pulse.h"
 #include "hud_grain.h"
+#include "ui_depth.h"
 #include "intro_panel.h"
 #include "intro_upscale.h"
 #include "intro_probe.h"
@@ -581,6 +582,11 @@ struct State {
     // at the top of every beginPanelOverride, so it can never outlive the draw
     // that set it.
     bool     curveThisDraw = false;
+    // Set by beginPanelOverride when this eye draw is a piece of the
+    // interface that should write its depth (ui_depth.h), consumed by
+    // forwardWithVerdict's scope. A flag for curveThisDraw's reason: it
+    // composes with whatever verdict claims the draw. Cleared beside it.
+    bool     uiDepthThisDraw = false;
 
     void*    compositeCb = nullptr;
     uint8_t  shadow[512] = {};
@@ -1419,6 +1425,7 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     // Cleared before anything can set it, on every draw, so a substitution
     // can never be attributed to a draw that did not ask for one.
     s->curveThisDraw = false;
+    s->uiDepthThisDraw = false;
     // Counting eye draws is not part of the panel distance fix, even though it
     // happens here.
     //
@@ -1463,7 +1470,7 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         !eyeSplitWantsDraws() && !resolveProbeWantsDraws() &&
         !stencilProbeWantsDraws() && !resolveBindWants() &&
         !remlokWantsDraws() && !holoWantsDraws() && !targetSharpWantsDraws() && !hudSpriteWantsDraws() && !panelUpscaleWantsDraws() && !hudGrainWantsDraws() &&
-        !witchstarWantsDraws() &&
+        !uiDepthWantsDraws() && !witchstarWantsDraws() &&
         !sunglareWantsDraws() && !cbPeekEnabled() && !billboardWantsDraws() &&
         !drawCensusArmed() && !panelQuadWants() && !panelCurveWants() &&
         !particleWantsDraws() && !backdropWantsDraws() &&
@@ -1574,6 +1581,11 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         if (drawCensusWantsOffscreen() && drawCensusArmed()) {
             drawCensusOffDraw(self, kind, count, instances);
         }
+        // The interface's surfaces, learned where the GUI renderer draws
+        // them (ui_depth.h): one bool while off, one hash while a target is
+        // new. Before the returns below, because a surface is a surface
+        // whatever else this draw turns out to be.
+        if (uiDepthWantsDraws()) uiDepthNoteOffscreenDraw(self);
         // The intro movie's YUV-to-RGB fill: a four-vertex draw with all
         // three planes bound, into the surface the composite reads. It is
         // what tells this frame apart from the splash's, which uses the
@@ -1801,6 +1813,11 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     // The depth target this eye draw uses, for the depth probe -- one
     // pointer compare unless it changed (depth_probe.h).
     depthProbeNoteEyeDraw(self, bindingGet(BindSlot::Dsv0), s->eyeDrawsThisFrame);
+    // The interface's depth (ui_depth.h): a composite of a learned surface,
+    // or a named family drawn straight into the eye, writes its depth. A
+    // flag and not a verdict, so it composes with whatever claims the draw
+    // below; forwardWithVerdict's scope consumes it.
+    if (uiDepthWantsDraws()) s->uiDepthThisDraw = uiDepthOnEyeDraw(self);
 
     // The intro movie's panel (intro_panel.h). First thing in the eye
     // branch, because it must see the composite before any other fix
@@ -2675,6 +2692,23 @@ void STDMETHODCALLTYPE hookedUnmap(ID3D11DeviceContext* self, ID3D11Resource* re
 template <typename RealDraw>
 void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
                         RealDraw&& draw) {
+    // The interface's depth write (ui_depth.h) brackets EVERY path below --
+    // the swallows that draw their own geometry, the sub-draw re-issue, the
+    // skip that draws nothing -- as a scope, so no return can leave the
+    // game's depth state swapped. Consumes the flag the way the skip below
+    // consumes curveThisDraw: its lifetime ends inside the call that set it.
+    struct UiDepthScope {
+        ID3D11DeviceContext* ctx;
+        bool                 on;
+        explicit UiDepthScope(ID3D11DeviceContext* c)
+            : ctx(c), on(g_state->uiDepthThisDraw) {
+            g_state->uiDepthThisDraw = false;
+            if (on) uiDepthBegin(ctx);
+        }
+        ~UiDepthScope() {
+            if (on) uiDepthEnd(ctx);
+        }
+    } uiDepthScope(self);
     if (v == DrawVerdict::kSkip) {
         // A skipped draw is not drawn at all, so there is nothing to replace.
         // Clearing here rather than trusting the next draw to do it keeps the
@@ -3590,6 +3624,7 @@ void vScreenRefreshConfig() {
     panelUpscaleConfigure(cfg);
     wakePulseConfigure(cfg);
     hudGrainConfigure(cfg);
+    uiDepthConfigure(cfg);
     scrimConfigure(cfg);
     quadProbeConfigure(cfg);
     loaderPanelConfigure(cfg);
@@ -3714,6 +3749,7 @@ void vScreenFrameBoundary() {
         drawCensusTick(g_state->ownerCtx);
         panelUpscaleFrameEnd();
         wakePulseReport();
+        uiDepthFrameBoundary();
         // The supersample resolve's warm compile, once a frame,
         // unconditionally -- not nested under any other feature's gate,
         // so a session with every FSS feature off still reaches it. A flag
@@ -4596,6 +4632,7 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     panelUpscaleConfigure(cfg);
     wakePulseConfigure(cfg);
     hudGrainConfigure(cfg);
+    uiDepthConfigure(cfg);
     scrimConfigure(cfg);
     quadProbeConfigure(cfg);
     loaderPanelConfigure(cfg);
@@ -4829,6 +4866,7 @@ void shutdownVScreenFixes() {
     }
     remlokShutdown();
     holoShutdown();
+    uiDepthShutdown();
     scrimShutdown();
     quadProbeShutdown();
     wakePulseShutdown();
