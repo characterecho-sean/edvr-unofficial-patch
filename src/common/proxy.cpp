@@ -171,6 +171,80 @@ void appendHex(char* line, size_t& n, size_t cap, uint64_t v) {
     }
 }
 
+// How much of the faulting stack the filter reads, and how many frames of it
+// it names.
+//
+// 4 KB and eight names. Frames in this process run 32 to 200 bytes, so the
+// scan reaches a couple of dozen of them -- past a CRT abort path and into
+// whoever called it, which is the whole reason for the line -- and the cost is
+// 512 loads plus at most eight loader calls, in a process that is going down.
+constexpr unsigned kCrashStackSlots = 512;
+constexpr unsigned kCrashStackNames = 8;
+
+// WHOSE CODE WAS ON THE STACK, which the faulting address alone does not say.
+//
+// Elite funnels EVERY fatal error through one five-byte stub -- `xor eax,eax;
+// mov [rax],eax; ret`, registered at startup with _set_abort_behavior,
+// signal(SIGABRT), set_terminate and an encoded-pointer handler -- so an
+// abort(), an uncaught C++ exception and a pure-virtual call all report the
+// identical access violation at the identical address. Issue #20 and issue #19
+// are indistinguishable in the line above and always will be. The stack is the
+// only thing that separates them, and the single question it has to answer is
+// whether any of our code was on it.
+//
+// No unwind data and no dbghelp: this is a raw scan for values that point
+// inside a loaded image with a call instruction in front of them. It over-
+// reports (a stale return address from a previous call is still a return
+// address) and it under-reports (a frame whose return address has been
+// overwritten is gone). Neither matters for the question being asked, and both
+// are better than loading a symbol engine inside a top-level filter.
+//
+// The whole scan is one __try because reading off the end of the committed
+// stack, or in front of a page boundary, is expected rather than exceptional.
+void appendStackModules(char* line, size_t& n, size_t cap, const CONTEXT* ctx) {
+    volatile unsigned named = 0;
+    __try {
+        const uintptr_t* sp = reinterpret_cast<const uintptr_t*>(ctx->Rsp);
+        for (unsigned i = 0; i < kCrashStackSlots && named < kCrashStackNames; ++i) {
+            const uintptr_t a = sp[i];
+            if (a < 0x10000) continue;
+            HMODULE mod = nullptr;
+            if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                        GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                    reinterpret_cast<LPCWSTR>(a), &mod) ||
+                !mod) {
+                continue;
+            }
+            // CALL rel32, and CALL r/m64 (FF /2) in the encodings that reach
+            // seven bytes back. A value that points into an image with none of
+            // these before it is a pointer someone stored, not a frame.
+            const unsigned char* p = reinterpret_cast<const unsigned char*>(a);
+            const bool afterCall =
+                p[-5] == 0xE8 || (p[-2] == 0xFF && (p[-1] & 0x38) == 0x10) ||
+                (p[-3] == 0xFF && (p[-2] & 0x38) == 0x10) ||
+                (p[-6] == 0xFF && (p[-5] & 0x38) == 0x10) ||
+                (p[-7] == 0xFF && (p[-6] & 0x38) == 0x10);
+            if (!afterCall) continue;
+            wchar_t path[MAX_PATH]{};
+            if (GetModuleFileNameW(mod, path, MAX_PATH) == 0) continue;
+            const wchar_t* base = path;
+            for (const wchar_t* q = path; *q; ++q) {
+                if (*q == L'\\') base = q + 1;
+            }
+            appendStr(line, n, cap, " ");
+            for (; *base && n < cap - 1; ++base) {
+                line[n++] = (*base < 0x80) ? static_cast<char>(*base) : '?';
+            }
+            appendStr(line, n, cap, "+");
+            appendHex(line, n, cap, a - reinterpret_cast<uintptr_t>(mod));
+            ++named;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        appendStr(line, n, cap, " (the stack could not be read this far)");
+    }
+    if (named == 0) appendStr(line, n, cap, " no return address found");
+}
+
 LPTOP_LEVEL_EXCEPTION_FILTER g_prevFilter = nullptr;
 bool g_filterInstalled = false;
 
@@ -247,6 +321,19 @@ LONG WINAPI edvrCrashFilter(EXCEPTION_POINTERS* info) {
     }
     line[n] = 0;
     breadcrumb(line);
+
+    // The second line, and the one that is actually diagnostic. See
+    // appendStackModules: the address above names Elite's own die-stub for
+    // every abort, terminate and purecall it has, so it cannot tell two
+    // unrelated bugs apart and the stack can.
+    if (info && info->ContextRecord) {
+        char frames[256];
+        size_t f = 0;
+        appendStr(frames, f, sizeof(frames), "gfx: stack:");
+        appendStackModules(frames, f, sizeof(frames), info->ContextRecord);
+        frames[f] = 0;
+        breadcrumb(frames);
+    }
 
     // Elite installs its own reporter and the player expects its dialog. Ours
     // is a note in the margin, not a replacement.

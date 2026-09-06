@@ -47,10 +47,18 @@ constexpr uint32_t kMaxLinesCeiling = 16384;
 // interned 160 and missed 1216 more -- Elite runs hundreds of distinct
 // eye-sized views and per-state textures through three frames, and the
 // table filled before the LATE-frame render targets arrived, which cost the
-// exact draws the census existed to name. 512 covers what was measured with
+// exact draws the census existed to name. 512 covered what was measured with
 // three times over; past it, tokens degrade to inline resolution (below),
 // never to an unusable '?'.
-constexpr uint32_t kMaxInterned = 512;
+//
+// 2048 since 2026-09-06: a three-frame cockpit census with offscreen draws
+// interned 512 and overflowed by 310 to 963 (the 2026-09-03 logs), and an
+// inline token carries no identity -- the two eyes' same-shaped depth
+// buffers then read as one, which is exactly the question the crisp-UI
+// gates ask (tools/crisp_ui_gates.py). internOf is a linear scan, so a
+// full table costs a few tens of milliseconds per census frame; a hitch
+// on the three frames of an instrument nobody runs by accident.
+constexpr uint32_t kMaxInterned = 2048;
 
 // The startup schedule (advanced.census_at_ms). At most eight moments, each
 // naming milliseconds after this session's FIRST frame edge.
@@ -89,6 +97,14 @@ struct Interned {
     void*        ptr = nullptr;
     ResourceInfo info;
     bool         resolved = false;
+    // The VIEW's own format, for views over a typeless texture: the resource
+    // line says R8G8B8A8_TYPELESS and cannot say whether the game blends
+    // through an sRGB or a UNORM view, which is the difference between
+    // blending in linear light and in encoded values (docs/crisp-ui-handoff.md,
+    // gate G1). Captured at intern time with the resource, for the same
+    // reason resolution happens there: the pointer is certainly alive.
+    uint32_t     viewFmt = 0;
+    bool         viewFmtKnown = false;
 };
 
 bool resolveByKind(void* ptr, Kind kind, ResourceInfo* out) {
@@ -226,6 +242,57 @@ uint32_t g_overflow = 0;         // intern-table misses
 Interned g_tab[kMaxInterned];
 uint32_t g_tabCount = 0;
 
+// A view's own format, off the view itself. A view bound to the OM or PS
+// stage is one of four interfaces; each is asked in turn and the first that
+// answers gives its desc. Under its own budget: a stale view here must not
+// cost the resolve that every other token on a census line depends on.
+FaultBudget g_viewBudget("drawCensus.viewFormat", 5);
+
+bool viewFormatOf(void* view, uint32_t* fmt) {
+    bool ok = false;
+    guardedBudget(g_viewBudget, [&] {
+        IUnknown* u = static_cast<IUnknown*>(view);
+        ID3D11RenderTargetView* rtv = nullptr;
+        ID3D11DepthStencilView* dsv = nullptr;
+        ID3D11ShaderResourceView* srv = nullptr;
+        ID3D11UnorderedAccessView* uav = nullptr;
+        if (SUCCEEDED(u->QueryInterface(__uuidof(ID3D11RenderTargetView),
+                                        reinterpret_cast<void**>(&rtv))) &&
+            rtv) {
+            D3D11_RENDER_TARGET_VIEW_DESC d{};
+            rtv->GetDesc(&d);
+            *fmt = static_cast<uint32_t>(d.Format);
+            ok = true;
+            rtv->Release();
+        } else if (SUCCEEDED(u->QueryInterface(__uuidof(ID3D11DepthStencilView),
+                                               reinterpret_cast<void**>(&dsv))) &&
+                   dsv) {
+            D3D11_DEPTH_STENCIL_VIEW_DESC d{};
+            dsv->GetDesc(&d);
+            *fmt = static_cast<uint32_t>(d.Format);
+            ok = true;
+            dsv->Release();
+        } else if (SUCCEEDED(u->QueryInterface(__uuidof(ID3D11ShaderResourceView),
+                                               reinterpret_cast<void**>(&srv))) &&
+                   srv) {
+            D3D11_SHADER_RESOURCE_VIEW_DESC d{};
+            srv->GetDesc(&d);
+            *fmt = static_cast<uint32_t>(d.Format);
+            ok = true;
+            srv->Release();
+        } else if (SUCCEEDED(u->QueryInterface(__uuidof(ID3D11UnorderedAccessView),
+                                               reinterpret_cast<void**>(&uav))) &&
+                   uav) {
+            D3D11_UNORDERED_ACCESS_VIEW_DESC d{};
+            uav->GetDesc(&d);
+            *fmt = static_cast<uint32_t>(d.Format);
+            ok = true;
+            uav->Release();
+        }
+    });
+    return ok;
+}
+
 // The table index for a bound object, interning on first sight. Resolution
 // happens here, at record time, while the binding is certainly alive --
 // resolving at dump time would probe pointers three frames stale, which is
@@ -250,6 +317,7 @@ int internOf(void* ptr, Kind kind) {
     // 512 bytes"), and one that used to cost a separate probe to learn.
     // Contents are still not the census's business.
     e.resolved = resolveByKind(ptr, kind, &e.info);
+    e.viewFmtKnown = kind == Kind::kView && viewFormatOf(ptr, &e.viewFmt);
     return static_cast<int>(g_tabCount++);
 }
 
@@ -516,8 +584,15 @@ void dumpInternTable() {
         if (!e.resolved) {
             Log::get().note("DC id @%u ?", i);
         } else if (e.info.isTexture2D) {
-            Log::get().note("DC id @%u tex %ux%u fmt=%u res=%p", i, e.info.a,
-                            e.info.b, e.info.fmt, e.info.resource);
+            if (e.viewFmtKnown) {
+                Log::get().note("DC id @%u tex %ux%u fmt=%u res=%p vf=%u", i,
+                                e.info.a, e.info.b, e.info.fmt,
+                                e.info.resource, e.viewFmt);
+            } else {
+                Log::get().note("DC id @%u tex %ux%u fmt=%u res=%p", i,
+                                e.info.a, e.info.b, e.info.fmt,
+                                e.info.resource);
+            }
         } else if (e.info.isBuffer) {
             Log::get().note("DC id @%u buf %u res=%p", i, e.info.a,
                             e.info.resource);
