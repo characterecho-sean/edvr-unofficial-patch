@@ -172,22 +172,25 @@ context_hook_mode = shared
 ```
 
 changes how EDVR attaches to the game's render context. `auto` (the default)
-gives the context a private copy of its dispatch table, which nothing else can
-bypass; `shared` patches the table the game shares with every other tool. On at
-least one rig the private copy is fatal and `shared` is not
+asks whose code implements the context and picks for you: a private copy of the
+dispatch table when the methods are Windows' own, the shared table when another
+mod wraps them. The log line says which it chose. `shared` forces the second,
+and on at least one rig the private copy is fatal where `shared` is not
 ([#21](https://github.com/characterecho-sean/edvr-unofficial-patch/issues/21)).
-The fixes still run, and if another tool pushes EDVR out of a slot the log says
-so by name.
+If anything pushes EDVR out of a slot the log says so by name.
 
 ```ini
 [advanced]
 d3d11_fixes = 0
 ```
 
-turns the Direct3D half off for good -- no hooks, nothing to crash. The
-`openvr_api.dll` half keeps working, so the terrain fix, the launch recentre
-and the compositor fixes all stay; the black void, the panel fixes and the
-anti-aliasing passes do not.
+turns the Direct3D fixes off for good. Nothing is hooked on the device or on
+its render context, so the black void, the panel fixes, the shader
+replacements and the anti-aliasing passes are all inert. The `openvr_api.dll`
+half keeps working, and so do the swapchain and DXGI hooks that carry the
+frame boundary it runs on -- so this is not "EDVR loads and does nothing", and
+if a crash survives it, that is worth reporting: it is in one of those or in
+the VR half.
 
 Please report which of the two you needed, with the log from each -- that is
 the measurement that turns a workaround into a fix.

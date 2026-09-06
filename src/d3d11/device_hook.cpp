@@ -256,6 +256,9 @@ struct State {
     Sentinel* sentinel = nullptr;
     uint32_t  framesSeen = 0;
     bool      sentinelConfirmed = false;
+    // The advanced.d3d11_fixes = 0 paragraph, said once. hookDevice runs per
+    // created device and the game creates more than one.
+    bool      fixesOffNoted = false;
 };
 
 // How long the hooks must survive before install is treated as having worked.
@@ -1556,24 +1559,42 @@ void hookDevice(ID3D11Device* device) {
     // A user who has diagnosed their way to a workaround out of a file
     // permission was owed a documented setting three releases ago.
     //
-    // What it leaves running is exactly what a tripped sentinel leaves running:
-    // the Present hook (installed from hookSwapChain, not from here) and the
-    // whole openvr half, whose compositor hook, terrain guard and launch
-    // recentre never needed this device at all.
-    if (!sentinelCfg.getBool("advanced.d3d11_fixes", true)) {
-        Log::get().note(
-            "d3d11 fixes are OFF by request (advanced.d3d11_fixes = 0), so no "
-            "hooks are installed on the device or its context this session or "
-            "any other: the black void, the panel distance, the exposure share, "
-            "the transition flash detector, the anti-aliasing passes and "
-            "Explorer Cam's half of the gate are all inert, and the game renders "
-            "as it would without this file. The openvr half is untouched and "
-            "still runs. Set it back to 1 to try them again.");
-        return;
-    }
-
+    // What it leaves running is exactly what a tripped sentinel leaves running,
+    // which is NOT nothing: the swapchain's Present hook and the DXGI factory
+    // hooks are installed from hookSwapChain and hookFactoryForDevice, which
+    // the proxy calls independently of this function, and the whole openvr half
+    // never needed this device at all. The frame boundary the VR half's fixes
+    // ride on is one of those, so the switch has to leave them.
+    //
+    // The order below is load-bearing. This check sits AFTER the Sentinel is
+    // constructed, so that a .armed file left behind by an earlier crashing
+    // session is still cleared: putting it above meant the first launch after a
+    // user set the switch back to 1 was eaten by a stale SENTINEL TRIPPED, and
+    // the log said "no hooks are installed" while never touching the file that
+    // proves otherwise.
     if (!s.sentinel) {
         s.sentinel = new Sentinel(sentinelCfg.logDir().c_str(), L"d3d11_hooks");
+    }
+    if (!sentinelCfg.getBool("advanced.d3d11_fixes", true)) {
+        if (s.sentinel->trippedOnStartup()) s.sentinel->clearTrip();
+        // Said once. hookDevice runs per device, and Elite creates more than
+        // one; the paragraph is for the reader, not for every device.
+        if (!s.fixesOffNoted) {
+            s.fixesOffNoted = true;
+            Log::get().note(
+                "d3d11 fixes are OFF by request (advanced.d3d11_fixes = 0), so no "
+                "hooks are installed on the device or on its context, this session "
+                "or any other: the black void, the panel distance, the exposure "
+                "share, the transition flash detector, the anti-aliasing passes, "
+                "the shader replacements and Explorer Cam's half of the gate are "
+                "all inert, and the game renders as it would without this half "
+                "installed. What is still hooked is the swapchain's Present and "
+                "the DXGI factory, which carry the frame boundary the openvr half "
+                "runs on -- so if a crash survives this setting, it is in one of "
+                "those or in the openvr half, and that is worth reporting. Set it "
+                "back to 1 to try the fixes again.");
+        }
+        return;
     }
     if (s.sentinel->trippedOnStartup() &&
         !sentinelCfg.getBool("advanced.ignore_sentinel", false)) {

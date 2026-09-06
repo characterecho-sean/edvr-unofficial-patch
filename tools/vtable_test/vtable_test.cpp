@@ -159,6 +159,33 @@ static int chainerOne(IThing* self) {
     return g_chainSaved(self) + 30000;
 }
 
+// The same write, but into a table named DIRECTLY rather than found through an
+// object -- and through a volatile pointer, which is the whole point.
+//
+// The copy-mode cell below rewrites the vtable of a local object whose dynamic
+// type the compiler knows exactly. A vtable is immutable as far as the language
+// is concerned, so MSVC is entitled to treat a store into one as dead and drop
+// it, and it does: measured 2026-09-06, the store vanished and the cell that
+// claimed to prove "the runtime re-pointing its OWN table does not bypass a
+// copy hook" had been re-pointing nothing at all since the day it was written.
+// It passed for the same reason an empty test passes. writeSlot above survives
+// only because its table arrives through an opaque void* the compiler cannot
+// trace back to an object.
+//
+// volatile is what states the intent the optimiser must respect. Read the slot
+// back with readTableSlot for the same reason.
+static void writeTableSlot(void** table, size_t slot, void* value) {
+    DWORD prot = 0;
+    VirtualProtect(&table[slot], sizeof(void*), PAGE_READWRITE, &prot);
+    *reinterpret_cast<void* volatile*>(&table[slot]) = value;
+    DWORD ignored = 0;
+    VirtualProtect(&table[slot], sizeof(void*), prot, &ignored);
+}
+
+static void* readTableSlot(void** table, size_t slot) {
+    return *reinterpret_cast<void* volatile*>(&table[slot]);
+}
+
 // A third party's write into the live table, without a VTableHook.
 static void writeSlot(void* object, size_t slot, void* value) {
     void** vt = *reinterpret_cast<void***>(object);
@@ -419,9 +446,17 @@ int main() {
     // them; a caller's assertion can.
     {
         void* const selfModule = GetModuleHandleW(nullptr);
-        // Some other loaded image, for the negative half. Anything that is
-        // certainly mapped and certainly not where this test's code lives.
+        // Some other loaded image, for the negative halves. Anything certainly
+        // mapped and certainly not where this test's code lives.
         void* const otherModule = GetModuleHandleW(L"kernel32.dll");
+        // Asserted, because a null module disables the exemption outright
+        // (vtable_hook.cpp requires m_implModule non-null) -- so if either of
+        // these came back null the negative cells below would pass by doing
+        // nothing at all, which is the shape of a test that has quietly stopped
+        // testing.
+        check(selfModule != nullptr && otherModule != nullptr,
+              "both module handles for the implementation-module cells resolved",
+              "a null handle would make the negative cells vacuous");
 
         // (1) NAMED, AND THE RE-POINT COMES FROM IT: adopted with no vouch, and
         // both run afterwards. The bypasser shape, not the chainer shape --
@@ -495,11 +530,8 @@ int main() {
             }
         }
 
-        // (3) THE CHAINER, WITH THE MODULE NAMED. The negative that guards the
-        // whole design: naming a module must not turn the chainer cell above
-        // into an adoption. Here the caller names a module the chainer does not
-        // live in -- which is the contract setImplementationModule states, that
-        // the named module implements the methods and is not a tool that hooks.
+        // (3) A CHAINER FROM ELSEWHERE, WITH A MODULE NAMED: still refused.
+        // Naming a module must not weaken the gate for everybody else.
         {
             VTableHook owner;
             g_owner = &wrapper;
@@ -516,8 +548,8 @@ int main() {
                 g_chainSaved = reinterpret_cast<PFN_One>(readSlot(&wrapper, 0));
                 writeSlot(&wrapper, 0, reinterpret_cast<void*>(&chainerOne));
                 check(owner.reclaim("chainer-with-module-cell") == 0,
-                      "a chainer is still refused when a module has been named",
-                      "the exemption adopted a chainer -- the next call would "
+                      "a chainer outside the named module is still refused",
+                      "the exemption leaked to a chainer -- the next call would "
                       "overflow the stack");
 
                 g_ownerHits = 0;
@@ -526,6 +558,57 @@ int main() {
                       "...and the chain still runs exactly once each",
                       "the refused pass disturbed the chain");
 
+                owner.uninstall();
+                writeSlot(&wrapper, 0, wrapper.mySlotOneAtBirth);
+            }
+        }
+
+        // (4) THE HAZARD ITSELF, PINNED DOWN. Name a module the CHAINER lives
+        // in and the exemption adopts it -- forward pointing at the chainer,
+        // chainer forwarding to our thunk, a two-node cycle that the next
+        // dispatch would turn into a stack overflow.
+        //
+        // This cell asserts the broken outcome on purpose. It is not a bug
+        // being tolerated: it is the exact reason setImplementationModule takes
+        // an assertion from the caller instead of inferring the module from the
+        // entries, and the reason its header says the named module must be one
+        // that implements the methods and does not hook. An inferred rule was
+        // written first and cell (3) above killed it in one run, because here
+        // the chainer and the entries it displaces are all in one binary. If
+        // somebody later "simplifies" the contract back to inference, this cell
+        // stops failing -- and that silence is the signal to read the header.
+        //
+        // It never dispatches through the cycle, because a test that overflows
+        // the stack reports nothing.
+        {
+            VTableHook owner;
+            g_owner = &wrapper;
+            g_ownerHits = 0;
+            g_chainHits = 0;
+            if (!owner.attach(&wrapper)) {
+                fail("attach for the misnamed-module cell", "attach refused");
+            } else {
+                owner.setImplementationModule(selfModule);
+                owner.replace(0, reinterpret_cast<void*>(&thunkOne),
+                              reinterpret_cast<void**>(&g_realOne));
+                owner.commit();
+
+                g_chainSaved = reinterpret_cast<PFN_One>(readSlot(&wrapper, 0));
+                writeSlot(&wrapper, 0, reinterpret_cast<void*>(&chainerOne));
+                check(owner.reclaim("misnamed-module-cell") == 1,
+                      "naming a module the chainer lives in DOES adopt it -- the "
+                      "contract is the caller's to keep",
+                      "the exemption no longer trusts the caller, so the header's "
+                      "contract and this cell disagree");
+                check(g_realOne == &chainerOne,
+                      "...and that is a call cycle, which is why the module is "
+                      "asserted and never inferred",
+                      "the forward is not the chainer, so this cell is no longer "
+                      "describing the hazard it names");
+
+                // Break the cycle before anything can dispatch through it.
+                writeSlot(&wrapper, 0, wrapper.mySlotOneAtBirth);
+                g_realOne = reinterpret_cast<PFN_One>(wrapper.mySlotOneAtBirth);
                 owner.uninstall();
                 writeSlot(&wrapper, 0, wrapper.mySlotOneAtBirth);
             }
@@ -663,11 +746,13 @@ int main() {
             // silently bypassed here (that is the field bug). The copy never
             // saw the write, because the object stopped dispatching through
             // the real table the moment we swapped its vptr.
-            DWORD prot = 0;
-            VirtualProtect(&realTable[0], sizeof(void*), PAGE_READWRITE, &prot);
-            realTable[0] = reinterpret_cast<void*>(&toolkitOne);  // a "new variant"
-            DWORD ignored = 0;
-            VirtualProtect(&realTable[0], sizeof(void*), prot, &ignored);
+            writeTableSlot(realTable, 0, reinterpret_cast<void*>(&toolkitOne));
+            // Proved, not assumed. This cell's whole claim rests on the table
+            // really having changed, and for years it had not -- see
+            // writeTableSlot.
+            check(readTableSlot(realTable, 0) == reinterpret_cast<void*>(&toolkitOne),
+                  "the owner's re-point actually landed in the shared table",
+                  "the store was optimised away, so this cell proves nothing");
 
             g_ownerHits = 0;
             check(r->one() == 1001,
@@ -677,14 +762,27 @@ int main() {
             check(g_ownerHits == 1, "...our thunk still ran",
                   "our thunk stopped running after the table rewrite");
 
-            // Restore the borrowed table before uninstall compares against it.
-            VirtualProtect(&realTable[0], sizeof(void*), PAGE_READWRITE, &prot);
-            realTable[0] = realSlot0;
-            VirtualProtect(&realTable[0], sizeof(void*), prot, &ignored);
-
+            // Reclaim runs while the shared table is STILL re-pointed, which is
+            // the state noteCopyDrift exists to describe. It must still change
+            // nothing -- immunity is the mode's whole point -- but it must also
+            // have looked: this call is the only coverage the drift walk has,
+            // and it was added because the first cut of this cell restored the
+            // table on the line above and then measured a drift of zero.
             check(copy.reclaim("copy-cell") == 0,
-                  "reclaim is a no-op in copy mode",
+                  "reclaim is a no-op in copy mode even while the shared table "
+                  "is re-pointed",
                   "copy mode tried to reclaim a table it does not share");
+            check(readTableSlot(realTable, 0) == reinterpret_cast<void*>(&toolkitOne),
+                  "...and the drift walk left the shared table exactly as it "
+                  "found it",
+                  "measuring drift wrote to the table it was measuring");
+            g_ownerHits = 0;
+            check(r->one() == 1001 && g_ownerHits == 1,
+                  "...and dispatch through the copy is untouched by the walk",
+                  "the drift walk disturbed the private copy");
+
+            // Restore the borrowed table before uninstall compares against it.
+            writeTableSlot(realTable, 0, realSlot0);
 
             copy.uninstall();
             check(*reinterpret_cast<void***>(&runtimeObj) == realTable,

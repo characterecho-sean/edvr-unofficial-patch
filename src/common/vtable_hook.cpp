@@ -483,6 +483,14 @@ void VTableHook::uninstall() {
     m_execPrefix = 0;
     m_patches.clear();
     m_reclaimEvents = 0;
+    // The implementation module is an assertion about the object that has just
+    // been let go. Carrying it into a later attach() would hand the next object
+    // a promise nobody made about it -- and this one waives the chainer gate, so
+    // a stale copy of it is the difference between a refusal and an adoption.
+    m_implModule = nullptr;
+    m_copyDriftEvents = 0;
+    m_ownerRepointNoted = false;
+    m_copyBreachNoted = false;
 }
 
 // The counterpart to reclaim() for the mode that has no war to fight: does the
@@ -508,14 +516,39 @@ void VTableHook::uninstall() {
 // nothing at all about the mode whose immunity it was asserting.
 //
 // So: read-only, once per reclaim pass. How far our copy has drifted from the
-// live table, and whose code the live table points at now. It heals nothing.
-// What to DO about drift depends entirely on who is causing it, and that name
-// is the fact this line exists to supply.
+// table it was copied from, and whose code that table points at now. It heals
+// nothing. What to DO about drift depends entirely on who is causing it, and
+// that name is the fact this line exists to supply.
+//
+// TWO LIMITS, both deliberate, both worth knowing before reading a report:
+//
+//   * STACKED COPY HOOKS ONLY MEASURE THE BOTTOM ONE. When two hooks take the
+//     same object in copy mode, the second attaches to an object whose vptr the
+//     first already moved, so its m_vtable IS the first hook's private buffer.
+//     Nothing else writes that buffer, so the upper hook's drift is structurally
+//     zero for the session. In the d3d11 half that is the exposure hook
+//     underneath and vScreen on top, so the exposure hook's line is the real
+//     measurement and vScreen's silence says nothing at all. Do not read it as
+//     "vScreen's slots were stable".
+//   * THE SPAN IS THE PROBE PREFIX, NOT THE INTERFACE. m_execPrefix walks until
+//     an entry stops looking like code, which on a D3D11 context runs to about
+//     300 -- past the ~150 methods the interface has, into whatever the module
+//     put next in .rdata. Entries beyond the interface are reported honestly as
+//     entries, and the message says "for any of those that is a method of this
+//     interface", because a slot the object has no method at cannot be called
+//     through and is not evidence of anything.
 void VTableHook::noteCopyDrift(const char* who) {
     size_t drifted = 0;
     void*  firstNow = nullptr;
-    char   slots[96];
+    // Wider than reclaim's list, because this walks the whole probe prefix
+    // rather than the two dozen slots a caller patched, and a slot list that
+    // truncates does not merely stop early: strncat_s cuts mid-number, so
+    // ", 19" becomes ", 1" and the line names a slot that never drifted. The
+    // count above it is the honest total either way, and appending stops
+    // cleanly at the ellipsis rather than trailing off.
+    char   slots[512];
     slots[0] = '\0';
+    bool   listFull = false;
 
     const size_t span = m_execPrefix < m_copy.size() ? m_execPrefix : m_copy.size();
     for (size_t i = 0; i < span; ++i) {
@@ -538,8 +571,16 @@ void VTableHook::noteCopyDrift(const char* who) {
         if (now == copied) continue;
         if (!drifted) firstNow = now;
         ++drifted;
+        if (listFull) continue;
         char one[16];
         _snprintf_s(one, sizeof(one), _TRUNCATE, "%s%zu", slots[0] ? ", " : "", i);
+        // Room for this entry AND the ellipsis, or the list closes here. Never
+        // a partial number.
+        if (strlen(slots) + strlen(one) + 5 >= sizeof(slots)) {
+            strncat_s(slots, sizeof(slots), ", ...", _TRUNCATE);
+            listFull = true;
+            continue;
+        }
         strncat_s(slots, sizeof(slots), one, _TRUNCATE);
     }
     if (!drifted) return;
@@ -548,16 +589,16 @@ void VTableHook::noteCopyDrift(const char* who) {
     char modBuf[MAX_PATH];
     if (m_copyDriftEvents == 1) {
         Log::get().note(
-            "VTableHook %s: the vtable EDVR copied has DRIFTED from the live "
-            "one -- %zu of the first %zu slots (%s) now hold something else in "
-            "the table the runtime shares, and the first of them points into "
-            "%s. EDVR's copy still holds what those slots held at install, and "
-            "this object dispatches through the copy, so the game is calling "
-            "the older entries. That is what the private-copy mode is FOR when "
-            "the two are interchangeable, and is a genuine hazard when they are "
-            "not. Nothing was changed. This check repeats about once a second "
-            "and reports again at doublings; if this log ends in a crash, this "
-            "line is the one to report.",
+            "VTableHook %s: the vtable EDVR copied has DRIFTED from the table it "
+            "was copied FROM -- %zu of the first %zu entries (%s) now hold "
+            "something else, and the first of them points into %s. EDVR's copy "
+            "still holds what they held at install, and this object dispatches "
+            "through the copy, so for any of those that is a method of this "
+            "interface, the game is calling the older entry. That is what the "
+            "private-copy mode is FOR when the two are interchangeable, and a "
+            "genuine hazard when they are not. Nothing was changed. This check "
+            "repeats about once a second and reports again at doublings; if this "
+            "log ends in a crash, this line is the one to report.",
             who, drifted, span, slots,
             ownerModuleName(firstNow, modBuf, sizeof(modBuf)));
     } else if ((m_copyDriftEvents & (m_copyDriftEvents - 1)) == 0) {
@@ -630,6 +671,10 @@ size_t VTableHook::reclaim(const char* name, const size_t* quietSlots,
     // per-slot detection lines carry their own names if it ever is.
     char        adoptedModBuf[MAX_PATH];
     const char* adoptedMod = nullptr;
+    // The implementation module's own name, kept apart from adoptedMod so the
+    // owner-repoint line can never be handed a rival tool's path.
+    char        ownerModBuf[MAX_PATH];
+    const char* ownerMod = nullptr;
 
     for (Patch& p : m_patches) {
         void* now = nullptr;
@@ -655,21 +700,48 @@ size_t VTableHook::reclaim(const char* name, const size_t* quietSlots,
         if (oursOnTop) continue;   // healthy: a co-owner is on top, we are in its chain
         if (p.retired) continue;   // conceded earlier; the intruder keeps it
 
+        // Whether the writer is the image the caller named as implementing
+        // these methods. Computed BEFORE the shared-slot branch, because that
+        // branch reports what it is conceding to and "another tool" is the
+        // wrong words for the D3D11 runtime rewriting its own table.
+        bool vouched = false;
+        for (size_t i = 0; i < quietCount; ++i) {
+            if (quietSlots[i] == p.slot) { vouched = true; break; }
+        }
+        const bool ownerRepoint =
+            !vouched && m_implModule && owningModule(now) == m_implModule;
+
         if (owners > 1) {
             // Two of ours underneath, a stranger on top. Whichever of us
             // re-patched alone would splice the other out of the chain, so
             // neither does. Said once per owner, because the names differ and
             // both features are the ones going quiet.
+            //
+            // THE EXEMPTION DOES NOT REACH HERE, and that is a known gap rather
+            // than an oversight. Restoring a shared slot means rebuilding a
+            // STACK -- slot -> upper thunk -> lower thunk -> the new entry --
+            // and no single hook holds both halves: the lower owner's forward
+            // must become the runtime's new entry while only the upper owner
+            // may write the slot. One hook acting alone gets it wrong in either
+            // direction. So on issue #21's rig the 28 unshared slots heal and
+            // ClearState (110, hooked by both the exposure and vScreen
+            // contexts) does not, which costs the binding shadow its
+            // ClearState notifications. The repair needs the registry to drive
+            // both owners in one pass; the line below at least stops calling
+            // the operating system "another tool" while it waits.
             if (!p.sharedNoted) {
                 p.sharedNoted = true;
                 char modBuf[MAX_PATH];
                 Log::get().note(
-                    "VTableHook %s: slot %zu was re-pointed by another tool "
-                    "(%s), and it is a slot TWO EDVR hooks share -- re-patching "
-                    "it from either one would cut the other out of the chain, "
-                    "so it is left with the other tool and whatever reads this "
-                    "call stays bypassed. Report this log.",
-                    who, p.slot, ownerModuleName(now, modBuf, sizeof(modBuf)));
+                    "VTableHook %s: slot %zu was re-pointed by %s (%s), and it "
+                    "is a slot TWO EDVR hooks share -- re-patching it from "
+                    "either one would cut the other out of the chain, so it is "
+                    "left as it is and whatever reads this call stays bypassed. "
+                    "Report this log.",
+                    who, p.slot,
+                    ownerRepoint ? "the module that implements it"
+                                 : "another tool",
+                    ownerModuleName(now, modBuf, sizeof(modBuf)));
             }
             continue;
         }
@@ -690,13 +762,8 @@ size_t VTableHook::reclaim(const char* name, const size_t* quietSlots,
         // arriving FROM that image is that image re-selecting its own internals,
         // not a rival hook, and it is adopted with no traffic evidence at all --
         // which is the whole point, because issue #21's rig is one where traffic
-        // evidence is unobtainable by construction.
-        bool vouched = false;
-        for (size_t i = 0; i < quietCount; ++i) {
-            if (quietSlots[i] == p.slot) { vouched = true; break; }
-        }
-        const bool ownerRepoint =
-            !vouched && m_implModule && owningModule(now) == m_implModule;
+        // evidence is unobtainable by construction. `ownerRepoint` was computed
+        // above, before the shared-slot branch that also reports it.
         if (ownerRepoint) vouched = true;
         if (!vouched) {
             if (!p.foreignNoted) {
@@ -763,20 +830,28 @@ size_t VTableHook::reclaim(const char* name, const size_t* quietSlots,
         // failure line, once a second, for the session. Bounded by the same
         // cap as success: 64 lines at the very worst, then concession.
         //
-        // EXCEPT when the re-pointer is the module that owns the entry. The cap
-        // exists to end a tug-of-war with a TOOL: two hookers trading one slot
-        // every second serve nobody, and somebody has to stop. An image
-        // maintaining its own vtable is not that. It will not tire, it will not
-        // negotiate, and conceding to it does not restore any other tool's
-        // function -- it just switches EDVR off after a minute on a rig where
-        // everything was working. The exchange still costs one aligned pointer
-        // write per pass, which is nothing. So an owner re-point is adopted for
-        // as long as it keeps happening, and the log's doubling cadence is what
-        // keeps that visible instead of silent.
-        if (!ownerRepoint) ++p.repatches;
+        // EXCEPT when the re-pointer is the module that owns the entry AND the
+        // write lands. The cap exists to end a tug-of-war with a TOOL: two
+        // hookers trading one slot every second serve nobody, and somebody has
+        // to stop. An image maintaining its own vtable is not that. It will not
+        // tire, it will not negotiate, and conceding to it does not restore any
+        // other tool's function -- it just switches EDVR off after a minute on a
+        // rig where everything was working. A successful exchange costs one
+        // aligned pointer write per pass, which is nothing, so it is allowed to
+        // run for the session with the log's doubling cadence keeping it
+        // visible.
+        //
+        // A FAILED write is a different animal and stays capped, owner or not.
+        // writeEntry logs every time VirtualProtect refuses it, so exempting
+        // failures would restore exactly the unbounded-log regression the cap
+        // was added for -- one line per contested slot per second, forever, and
+        // on issue #21's rig that is 29 of them. Failing repeatably also means
+        // the forward has been moved while our thunk is NOT in the slot, which
+        // is a state to escape rather than re-enter for the session.
         const bool wrote = writeEntry(m_vtable, p.slot, p.replacement);
+        if (!ownerRepoint || !wrote) ++p.repatches;
 
-        if (!ownerRepoint && p.repatches >= kMaxRepatchesPerSlot) {
+        if (p.repatches >= kMaxRepatchesPerSlot) {
             p.retired = true;
             char modBuf[MAX_PATH];
             Log::get().note(
@@ -791,8 +866,17 @@ size_t VTableHook::reclaim(const char* name, const size_t* quietSlots,
         if (!wrote) continue;
 
         ++reclaimed;
-        if (ownerRepoint) ++ownerReclaimed;
         adoptedMod = ownerModuleName(now, adoptedModBuf, sizeof(adoptedModBuf));
+        if (ownerRepoint) {
+            // Named from THIS slot, not from whatever the pass happened to
+            // adopt last. A pass can mix the two kinds -- the runtime taking
+            // one slot while a rival tool takes another -- and sharing one name
+            // between the two reports would put a rival tool's path into the
+            // sentence "the module that implements them", which is a false
+            // statement about somebody else's software.
+            ++ownerReclaimed;
+            ownerMod = ownerModuleName(now, ownerModBuf, sizeof(ownerModBuf));
+        }
         char one[16];
         _snprintf_s(one, sizeof(one), _TRUNCATE, "%s%zu", slots[0] ? ", " : "",
                     p.slot);
@@ -828,16 +912,17 @@ size_t VTableHook::reclaim(const char* name, const size_t* quietSlots,
             Log::get().note(
                 "VTableHook %s: %zu of those were re-pointed BY THE MODULE THAT "
                 "IMPLEMENTS THEM (%s), which is that module re-selecting its own "
-                "internal variants and not another tool at all. An entry from the "
-                "same image as the one it replaced cannot be a hook chaining "
-                "through EDVR -- another tool's hook is that tool's own code -- so "
+                "internal variants and not another tool at all. EDVR was told which "
+                "image implements this object, and an entry coming FROM it cannot "
+                "be a hook chaining through EDVR -- another tool's hook is that "
+                "tool's own code -- so "
                 "no quiet-slot evidence is required to take it back, and EDVR will "
                 "keep taking it back for as long as it keeps happening. Issue #21: "
                 "on a rig where this happens to EVERY patched slot before the "
                 "first frame, waiting for that evidence meant waiting forever, and "
                 "every fix in this DLL sat inert with the log dutifully explaining "
                 "why.",
-                who, ownerReclaimed, adoptedMod ? adoptedMod : "?");
+                who, ownerReclaimed, ownerMod ? ownerMod : "?");
         }
     }
     return reclaimed;

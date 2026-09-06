@@ -438,6 +438,18 @@ HookMode contextHookModeFor(ID3D11DeviceContext* ctx) {
                _stricmp(want.c_str(), "copyvptr") == 0) {
         mode = HookMode::CopyVptr;
         forced = "private";
+    } else if (!want.empty() && _stricmp(want.c_str(), "auto") != 0) {
+        // A misspelling must not read as an unset key. This is the setting a
+        // crashing user is asked to set and then report two logs from, and
+        // "privat" or "in_place" falling silently through to the probe would
+        // make the two runs identical and the whole experiment a waste of
+        // their evening. Config's own numeric and boolean readers say this for
+        // their own bad values; a string one has to say it itself.
+        Log::get().note(
+            "edvr.ini: advanced.context_hook_mode = \"%s\" is not one of auto, "
+            "shared or private, so it was IGNORED and the probe decided as "
+            "usual. Check the spelling.",
+            want.c_str());
     }
 
     Log::get().note(
