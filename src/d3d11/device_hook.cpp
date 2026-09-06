@@ -49,13 +49,14 @@ constexpr size_t kDevCreateSamplerState  = 23;
 // THE CREATES THAT CAN FAIL, hooked to say so and for no other reason.
 //
 // Elite treats a failing HRESULT from its DX11 backend as fatal: its own
-// F3D_VERIFY excuses DXGI_ERROR_DEVICE_REMOVED and calls abort() for
-// everything else, and abort lands on a five-byte die-stub that every other
-// fatal error in the game shares. So the process ends at an address that
-// names nothing, with none of our code on the stack, and the refusal that
-// actually caused it is never written down anywhere (issue #20). These
-// hooks change nothing at all. They exist so that the line before the crash
-// says which call D3D11 refused and with what.
+// F3D_VERIFY excuses 0x887A000A -- DXGI_ERROR_WAS_STILL_DRAWING, and only
+// that one -- and calls abort() for everything else, DEVICE_REMOVED very
+// much included. Abort lands on a five-byte die-stub that every other fatal
+// error in the game shares, so the process ends at an address that names
+// nothing, with none of our code on the stack, and the refusal that actually
+// caused it is never written down anywhere (issue #20). These hooks change
+// nothing at all. They exist so that the line before the crash says which
+// call D3D11 refused and with what.
 //
 // Counted against the SDK's ID3D11DeviceVtbl the same way the four above
 // were: CreateBuffer 3, CreateTexture1D 4, CreateTexture2D 5,
@@ -480,6 +481,54 @@ FaultBudget g_createFailBudget("deviceHook.createFailNote", 4);
 // fails every frame, and the line that matters is the first.
 constexpr uint32_t kCreateFailNotes = 12;
 
+// The failures a create can actually come back with, named. A hex HRESULT in
+// a bug report is a lookup somebody has to do before they can think, and the
+// two families mean completely different things: 0x8007xxxx is D3D refusing
+// the arguments, 0x887Axxxx is DXGI saying the device is gone.
+const char* hresultName(HRESULT hr) {
+    switch (hr) {
+        case E_INVALIDARG:                    return "E_INVALIDARG";
+        case E_OUTOFMEMORY:                   return "E_OUTOFMEMORY";
+        case E_NOTIMPL:                       return "E_NOTIMPL";
+        case E_FAIL:                          return "E_FAIL";
+        case DXGI_ERROR_INVALID_CALL:         return "DXGI_ERROR_INVALID_CALL";
+        case DXGI_ERROR_UNSUPPORTED:          return "DXGI_ERROR_UNSUPPORTED";
+        case DXGI_ERROR_DEVICE_REMOVED:       return "DXGI_ERROR_DEVICE_REMOVED";
+        case DXGI_ERROR_DEVICE_HUNG:          return "DXGI_ERROR_DEVICE_HUNG";
+        case DXGI_ERROR_DEVICE_RESET:         return "DXGI_ERROR_DEVICE_RESET";
+        case DXGI_ERROR_DRIVER_INTERNAL_ERROR: return "DXGI_ERROR_DRIVER_INTERNAL_ERROR";
+        case DXGI_ERROR_WAS_STILL_DRAWING:    return "DXGI_ERROR_WAS_STILL_DRAWING";
+        default:                              return "unnamed";
+    }
+}
+
+// GetDeviceRemovedReason's answers, which are a smaller set and carry the
+// blame: HUNG is a TDR reset (something took longer than Windows allows),
+// RESET is somebody else's fault landing on us, DRIVER_INTERNAL_ERROR is the
+// driver, INVALID_CALL is a command we should never have submitted.
+const char* deviceRemovedReasonName(HRESULT why) {
+    switch (why) {
+        case S_OK: return "the device does not report itself removed, which "
+                          "means this was asked too early or too late";
+        case DXGI_ERROR_DEVICE_HUNG:
+            return "DXGI_ERROR_DEVICE_HUNG -- the GPU stopped responding and "
+                   "Windows reset it, which is what work overrunning the TDR "
+                   "timeout looks like";
+        case DXGI_ERROR_DEVICE_RESET:
+            return "DXGI_ERROR_DEVICE_RESET -- the device was reset by "
+                   "something outside this process";
+        case DXGI_ERROR_DEVICE_REMOVED:
+            return "DXGI_ERROR_DEVICE_REMOVED -- the adapter itself went away";
+        case DXGI_ERROR_DRIVER_INTERNAL_ERROR:
+            return "DXGI_ERROR_DRIVER_INTERNAL_ERROR -- the display driver "
+                   "failed on its own";
+        case DXGI_ERROR_INVALID_CALL:
+            return "DXGI_ERROR_INVALID_CALL -- an invalid command reached the "
+                   "GPU, which is the one of these that would be ours";
+        default: return "unnamed";
+    }
+}
+
 const char* devCreateName(size_t slot) {
     switch (slot) {
         case kDevCreateBuffer:    return "CreateBuffer";
@@ -547,15 +596,31 @@ void noteDeviceCreateFailure(size_t slot, HRESULT hr, const void* first,
         }
     });
 
+    // WHY THE DEVICE WENT, when it went. DEVICE_REMOVED on a call whose
+    // arguments were perfectly good says only that the GPU was already gone;
+    // the reason code says whether it hung (a TDR reset, which is what a
+    // dispatch of ours overrunning two seconds would look like), was reset by
+    // something else, or the driver fell over on its own. It is one call, it
+    // is the discriminator, and asking for it needs the device we already
+    // hold. Issue #20 got this far and no further without it.
+    char removed[96];
+    removed[0] = 0;
+    if (hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET) {
+        const HRESULT why = g_state->device ? g_state->device->GetDeviceRemovedReason()
+                                            : S_OK;
+        _snprintf_s(removed, _TRUNCATE, " The device removal reason is 0x%08X (%s).",
+                    static_cast<unsigned>(why), deviceRemovedReasonName(why));
+    }
+
     Log::get().note(
-        "D3D11 REFUSED the game's %s: hr 0x%08X, %s. Reported because Elite "
-        "treats any failure but DXGI_ERROR_DEVICE_REMOVED as fatal -- its own "
-        "check calls abort(), and the process then dies at one fixed address "
-        "that every unrelated fatal error in the game shares, with nothing of "
-        "ours on the stack. If a crash follows this line, this line is why. At "
-        "most %u a session.",
-        devCreateName(slot), static_cast<unsigned>(hr),
-        detail[0] ? detail : "no desc was passed", kCreateFailNotes);
+        "D3D11 REFUSED the game's %s: hr 0x%08X (%s), %s.%s Reported because "
+        "Elite treats every failure but DXGI_ERROR_WAS_STILL_DRAWING as fatal "
+        "-- its own check calls abort(), and the process then dies at one fixed "
+        "address that every unrelated fatal error in the game shares, with "
+        "nothing of ours on the stack. If a crash follows this line, this line "
+        "is why. At most %u a session.",
+        devCreateName(slot), static_cast<unsigned>(hr), hresultName(hr),
+        detail[0] ? detail : "no desc was passed", removed, kCreateFailNotes);
 }
 
 // One body behind all seven slots. It forwards, and on a failure it says so.
