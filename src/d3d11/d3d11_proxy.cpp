@@ -13,6 +13,7 @@
 #include <d3d11.h>
 #include <dxgi.h>
 
+#include <cstring>  // _stricmp, for the hook-mode override's spellings
 #include <string>
 
 #include "../common/config.h"
@@ -402,8 +403,41 @@ HookMode contextHookModeFor(ID3D11DeviceContext* ctx) {
     // -- issue #6 by another door. 75% keeps a 20-point margin below the
     // runtime and a 65-point gap above any wrapper, and InPlace (the safe
     // default) catches everything that does not clearly clear it.
-    const HookMode mode =
+    const HookMode probed =
         (inSystem * 4 >= kSample * 3) ? HookMode::CopyVptr : HookMode::InPlace;
+
+    // THE OVERRIDE, and why the probe needs one.
+    //
+    // The probe answers "whose code backs this object", which is the right
+    // question for issue #6 and settles nothing else. It cannot answer the one
+    // issue #21 asked: what if the runtime's own table is being re-pointed
+    // CONTINUOUSLY, so a private copy is not a snapshot of a settled table but
+    // a freeze-frame of a moving one? On that rig every CopyVptr release since
+    // 0.7.5 dies about a second and a half after the hooks arm, and 0.7.4 --
+    // the last in-place-only release -- does not. Nothing in edvr.ini could
+    // ask that question, so the reporter had to answer it by installing five
+    // years of releases one at a time.
+    //
+    // This key is that experiment, kept. It also stands in for the mechanism
+    // the field keeps needing and this file keeps not having: a rig where one
+    // mode is fatal can pick the other for itself, in a text file, without a
+    // build.
+    const std::string want =
+        Config::get().getString("advanced.context_hook_mode", "auto");
+    HookMode mode = probed;
+    const char* forced = nullptr;
+    if (_stricmp(want.c_str(), "shared") == 0 ||
+        _stricmp(want.c_str(), "inplace") == 0 ||
+        _stricmp(want.c_str(), "in-place") == 0) {
+        mode = HookMode::InPlace;
+        forced = "shared";
+    } else if (_stricmp(want.c_str(), "private") == 0 ||
+               _stricmp(want.c_str(), "copy") == 0 ||
+               _stricmp(want.c_str(), "copyvptr") == 0) {
+        mode = HookMode::CopyVptr;
+        forced = "private";
+    }
+
     Log::get().note(
         "context hook mode: %s -- %zu of %zu sampled vtable entries are inside "
         "Windows' d3d11.dll, and the vtable array itself is %s it. CopyVptr is "
@@ -412,6 +446,18 @@ HookMode contextHookModeFor(ID3D11DeviceContext* ctx) {
         "them (issue #6 safety).",
         mode == HookMode::CopyVptr ? "CopyVptr" : "InPlace", inSystem, kSample,
         arrayInside ? "inside" : "outside");
+    if (forced) {
+        // Said separately and always, never folded into the line above: a
+        // forced mode is the single most important fact about a log that is
+        // being compared with another log, and it must not be something a
+        // reader has to notice the ABSENCE of a word to spot.
+        Log::get().note(
+            "context hook mode: FORCED to %s by advanced.context_hook_mode = "
+            "%s. The probe on its own would have chosen %s. Remove the setting "
+            "to go back to the probe.",
+            forced, want.c_str(),
+            probed == HookMode::CopyVptr ? "CopyVptr" : "InPlace");
+    }
     return mode;
 }
 

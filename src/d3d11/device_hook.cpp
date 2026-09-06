@@ -1543,6 +1543,35 @@ void hookDevice(ID3D11Device* device) {
     }
 
     Config& sentinelCfg = Config::get();
+
+    // THE OFF SWITCH FOR THIS HALF, which until issue #21 did not exist.
+    //
+    // The sentinel disables these hooks for ONE launch after a crash, which is
+    // right for a crash that happens once. It is the wrong shape entirely for a
+    // rig where they crash EVERY launch: the game then alternates crash, play,
+    // crash, play, and there is no setting anywhere that says "stop trying".
+    // The reporter of #21 found the only lever the code left them -- making
+    // edvr_logs\d3d11_hooks.armed read-only so the sentinel can never clear its
+    // own trip -- and it worked, which is the part that should be embarrassing.
+    // A user who has diagnosed their way to a workaround out of a file
+    // permission was owed a documented setting three releases ago.
+    //
+    // What it leaves running is exactly what a tripped sentinel leaves running:
+    // the Present hook (installed from hookSwapChain, not from here) and the
+    // whole openvr half, whose compositor hook, terrain guard and launch
+    // recentre never needed this device at all.
+    if (!sentinelCfg.getBool("advanced.d3d11_fixes", true)) {
+        Log::get().note(
+            "d3d11 fixes are OFF by request (advanced.d3d11_fixes = 0), so no "
+            "hooks are installed on the device or its context this session or "
+            "any other: the black void, the panel distance, the exposure share, "
+            "the transition flash detector, the anti-aliasing passes and "
+            "Explorer Cam's half of the gate are all inert, and the game renders "
+            "as it would without this file. The openvr half is untouched and "
+            "still runs. Set it back to 1 to try them again.");
+        return;
+    }
+
     if (!s.sentinel) {
         s.sentinel = new Sentinel(sentinelCfg.logDir().c_str(), L"d3d11_hooks");
     }

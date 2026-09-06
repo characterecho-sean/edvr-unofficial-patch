@@ -158,6 +158,40 @@ The [Discord](https://discord.gg/ynkdf6Gdua) is good for setup questions and
 for "is this normal". Bugs still want an issue: chat loses attachments and
 the thread, and an issue is what remembers a problem long enough to fix it.
 
+### If the game dies a second or two after launch
+
+`edvr_breadcrumbs.txt` ending at `arming d3d11 hooks` means the Direct3D half
+got its hooks in and the game died shortly after. EDVR's crash sentinel turns
+those hooks off for the **next** launch on its own, so the usual shape of this
+is crash, play, crash, play. Two settings under `[advanced]` in `edvr.ini` are
+worth trying, in this order:
+
+```ini
+[advanced]
+context_hook_mode = shared
+```
+
+changes how EDVR attaches to the game's render context. `auto` (the default)
+gives the context a private copy of its dispatch table, which nothing else can
+bypass; `shared` patches the table the game shares with every other tool. On at
+least one rig the private copy is fatal and `shared` is not
+([#21](https://github.com/characterecho-sean/edvr-unofficial-patch/issues/21)).
+The fixes still run, and if another tool pushes EDVR out of a slot the log says
+so by name.
+
+```ini
+[advanced]
+d3d11_fixes = 0
+```
+
+turns the Direct3D half off for good -- no hooks, nothing to crash. The
+`openvr_api.dll` half keeps working, so the terrain fix, the launch recentre
+and the compositor fixes all stay; the black void, the panel fixes and the
+anti-aliasing passes do not.
+
+Please report which of the two you needed, with the log from each -- that is
+the measurement that turns a workaround into a fix.
+
 ### Uninstall
 
 Run `edvr-installer.exe` and press **Uninstall**. It removes EDVR's files,
