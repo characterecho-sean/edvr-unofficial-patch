@@ -30,6 +30,14 @@ tail is optional here, the way tools/diff_draw_census.py reads them: a log
 captured before a field existed must still parse, and a field that is merely
 new must never cost a session again.
 
+This reader is NOT a model of src/d3d11/ui_depth.cpp (the review of
+2026-09-06): its DIRECT list carries the target indicator quad, which the
+DLL's built-in direct list does not, so the G10 section can report a depth
+toucher the classifier never binds; it sees only the three frames of one
+census where the DLL remembers surfaces for the session; and it parses no
+DCL depth-clear lines, so "nothing clears the depth mid-frame" is not a
+thing it can say. Read it as the gates' evidence, not as the fix's log.
+
 Exit 0 when at least one census was read, 1 otherwise.
 """
 

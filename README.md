@@ -266,8 +266,15 @@ that scale with the internal render size, so at HMD Quality 0.67 their
 text is rasterised at two-thirds size and no upscaler recovers it. (Every
 trained flight before 2026-09-04 ran with NVIDIA's history reset every
 frame, a bug found by review; the verdicts on those flights are of a
-spatial filter, not of DLSS.)
-*Details: [docs/anti-aliasing.md](docs/anti-aliasing.md).*
+spatial filter, not of DLSS.) What the trained modes did to the HUD's text
+before `ui_depth` was make it swim: Elite draws its interface depth-tested but
+never writes its depth, so the pass held a panel a metre away at infinity
+and NVIDIA's history rejected it under every head movement. `ui_depth`
+(on by default; nothing happens while `temporal_aa` is off) has the holo
+panels and the flight HUD write their depth into the buffer the pass
+reads, and the text holds still (flown 2026-09-06).
+*Details: [docs/anti-aliasing.md](docs/anti-aliasing.md) and
+[docs/crisp-ui-handoff.md](docs/crisp-ui-handoff.md).*
 
 **The RemLok helmet's edge lines hanging along your nose.** When the
 emergency helmet deploys, its faint edge lines end up in the middle of your

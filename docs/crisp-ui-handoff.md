@@ -270,6 +270,62 @@ lighting resolve); the loading screen's UI has depth only when the depth
 probe finds a scene pair there, which its draw-count rule refuses on the
 loader's few draws.
 
+## The adversarial review (2026-09-06) and what changed
+
+An Opus 5 agent reviewed the built fix against the code and the censuses
+(`docs/review-ui-depth-2026-09-06.md`). Verdict: no crash or hang, the
+mechanism sound where measured, the cockpit evidence good; eighteen
+findings, five of them blocking a default-on merge. Every one was taken:
+
+- **The restore is never skipped.** `uiDepthEnd` restored inside
+  `guardedBudget`, which skips its body once the budget is spent, so a
+  budget spent between Begin and End would have left the writing twin bound
+  for every later draw. Now `guarded` (SEH, no budget), the way
+  `resolve_probe.cpp` restores.
+- **Gated on the pass.** `fix.temporal_aa = off` now makes the module do
+  nothing, so the default costs a stock install nothing (the depth probe's
+  own rule). A key set on without the pass says once that it waits.
+- **Writes only where the pass reads.** The menu's composite binds a depth
+  of its own that nothing reads (measured: no event in the menu census
+  touches it, while the pass's dispatch reads the hangar's pair). Such
+  draws are now left alone and counted ("not into the scene's depth" on
+  the totals line), through `depthProbeIsSceneDepth`. The prose in the ini
+  and the README claims the cockpit and the flight HUD, which is what was
+  flown.
+- **The memos fit and cost nothing.** A 256-entry FIFO memo against a
+  measured 257-275 sampled views a frame thrashed, pushing thousands of
+  pointers a frame through `bindingResolve`, whose five-fault budget is
+  shared with `targetIsEyeSized`. Now a 1024-entry hashed memo with a
+  four-slot probe, and a second one for vertex-shader hashes so the
+  registry's lock is not taken per draw. Cheapest test first again: no
+  depth target, then the surfaces, then the hash.
+- **Learned surfaces are validated and evicted.** Each surface is kept
+  with the size and format it had when learned; a sampled resource at a
+  learned address with a different shape is a recycled address and drops
+  out, counted. The ring's overwrites are counted and said once.
+- **The state cache checks its room before creating.** A full table used
+  to create and release a D3D state per draw for the session.
+- **The header says what is true.** The indicator is left alone because
+  it samples an authored atlas and lookup tables, not a learned surface;
+  there is no target check. The visibility the header promised now exists:
+  every newly classified family logs one line with its target's size and
+  format, so a field log from the galaxy map or on foot can name what was
+  treated.
+- **The per-draw flag is thread-local**, so a draw recorded on a deferred
+  context by another thread can neither take the render thread's flag nor
+  be treated by it.
+- `advanced.ui_depth_test = always` is the A/B for the kept test's one
+  cost (a later, farther piece of interface losing its overlap against an
+  earlier, nearer one). Counters split "already writes" from "no twin"; a
+  stand-down is for the session.
+
+Not taken, recorded: the reviewer's ladder ([experimental] first, default
+on after a menu, a loading screen and an un-censused context have been
+flown). Sean chose default on after the cockpit flight, with the gate and
+the scene-pair check making the default free and explicit elsewhere. The
+"about forty lines" of the plan became about 450 with the classifier's
+memos and the logging.
+
 # Design A: the UI layer
 
 ## A1. What counts as UI: the classifier

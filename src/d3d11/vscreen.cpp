@@ -582,11 +582,6 @@ struct State {
     // at the top of every beginPanelOverride, so it can never outlive the draw
     // that set it.
     bool     curveThisDraw = false;
-    // Set by beginPanelOverride when this eye draw is a piece of the
-    // interface that should write its depth (ui_depth.h), consumed by
-    // forwardWithVerdict's scope. A flag for curveThisDraw's reason: it
-    // composes with whatever verdict claims the draw. Cleared beside it.
-    bool     uiDepthThisDraw = false;
 
     void*    compositeCb = nullptr;
     uint8_t  shadow[512] = {};
@@ -1262,6 +1257,14 @@ void noteForeignDraw(ID3D11DeviceContext* self) {
 // with its instance count clamped to sunglareKeep() -- SV_InstanceID
 // restarts at zero per call, so a prefix is the only subset that keeps
 // every element's identity.
+// Set by beginPanelOverride when this eye draw is a piece of the interface
+// that should write its depth (ui_depth.h), consumed by forwardWithVerdict's
+// scope. A flag rather than a DrawVerdict for curveThisDraw's reason: it
+// composes with whatever verdict claims the draw. Thread-local rather than
+// a State member so a draw recorded on a deferred context by another thread
+// cannot take a flag the render thread set for its own next draw.
+thread_local bool t_uiDepthThisDraw = false;
+
 enum class DrawVerdict {
     kNone, kPanel, kSkip, kRemlok, kHolo, kWitchstar, kBillboard,
     // The target direction indicator, reconstructed rather than smeared
@@ -1425,7 +1428,7 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     // Cleared before anything can set it, on every draw, so a substitution
     // can never be attributed to a draw that did not ask for one.
     s->curveThisDraw = false;
-    s->uiDepthThisDraw = false;
+    t_uiDepthThisDraw = false;
     // Counting eye draws is not part of the panel distance fix, even though it
     // happens here.
     //
@@ -1817,7 +1820,7 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     // or a named family drawn straight into the eye, writes its depth. A
     // flag and not a verdict, so it composes with whatever claims the draw
     // below; forwardWithVerdict's scope consumes it.
-    if (uiDepthWantsDraws()) s->uiDepthThisDraw = uiDepthOnEyeDraw(self);
+    if (uiDepthWantsDraws()) t_uiDepthThisDraw = uiDepthOnEyeDraw(self);
 
     // The intro movie's panel (intro_panel.h). First thing in the eye
     // branch, because it must see the composite before any other fix
@@ -2697,12 +2700,14 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     // skip that draws nothing -- as a scope, so no return can leave the
     // game's depth state swapped. Consumes the flag the way the skip below
     // consumes curveThisDraw: its lifetime ends inside the call that set it.
+    // The flag is thread-local, so a deferred-context draw on another
+    // thread can neither steal it nor be treated by it.
     struct UiDepthScope {
         ID3D11DeviceContext* ctx;
         bool                 on;
         explicit UiDepthScope(ID3D11DeviceContext* c)
-            : ctx(c), on(g_state->uiDepthThisDraw) {
-            g_state->uiDepthThisDraw = false;
+            : ctx(c), on(t_uiDepthThisDraw) {
+            t_uiDepthThisDraw = false;
             if (on) uiDepthBegin(ctx);
         }
         ~UiDepthScope() {
