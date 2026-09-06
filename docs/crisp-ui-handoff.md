@@ -133,6 +133,60 @@ run before UI compositing. Every injected DLSS runs post-HUD and lives with
 it. This is the one place EDVR can do better than an injector, because it
 already sits on the draw path.
 
+# What the first censuses said (2026-09-06)
+
+Before any new flight, four cockpit censuses from 2026-09-03 (the
+cockpit-HUD arc's, Quest 3 at 2064x2208, offscreen draws recorded) were
+read with `tools/crisp_ui_gates.py`. They answer G1, G2, G3, G6 and G8, and
+a gate this document had not asked, G10 -- and they change the order of
+work.
+
+| Gate | Answer | Evidence |
+|---|---|---|
+| G1 | The holo panels and the flight HUD are drawn into the lit HDR buffer, `R11G11B10_FLOAT`, BEFORE exposure, tonemap and SMAA. The target indicator quad goes into an `RGB10A2_TYPELESS` target. | the family lines' `r=`; the tonemap `2D78DC3FD2C0C543` is the only reader of the R11G11B10F target after the last UI draw, and SMAA (`68842760565CC3BA` edges, `03D186CE0EC031E3` weights with the 160x560 area and 64x16 search textures, `98E6F9986FDC9A53` blend) runs after it on the RGBA8 target |
+| G2 | The UI draws bind the scene depth pair and TEST against it (`GEQUAL`, reversed-Z), write off. Not depthless: depth-tested and non-writing. | `ds=17wZ` on every holo-panel, flight-HUD and target-indicator line |
+| G3 | ONE/INV_SRC_ALPHA (premultiplied over) for the panels and the flight HUD; SRC_ALPHA/INV_SRC_ALPHA for the indicator. All within the layer's table. | `bl=` |
+| G6 | No GUI family ever drew into an eye target. | none in four censuses |
+| G8 | After the UI: the exposure compute shader, the tonemap into `RGBA8_TYPELESS`, SMAA, a copy into an `RGBA8_UNORM_SRGB` texture (the submit), the monitor mirror. The stock HUD is SMAA'd. | the frame tails |
+| G10 (new) | After the last UI draw nothing tests against or reads the scene depth, except two overlay draws (`A888D51024D9798E`) whose depth test is OFF. | per complete frame, censuses with identity tokens |
+| G5 (partial) | Per-eye targets: one R11G11B10F and one RGB10A2 per eye, one depth pair per eye. | the tokens |
+
+**What follows.**
+
+1. **Design A as written is out for the cockpit.** A layer composited at
+   the door takes the panels out of the HDR chain: no bloom, no tonemap,
+   no SMAA, and the look changes. A's viable form transcribes the tonemap
+   (`2D78DC3FD2C0C543`, fed by the exposure shader the exposure fix already
+   reads) and applies it to the layer, accepts the missing bloom, and adds
+   the layer's own edge anti-aliasing. That is a larger arc and is PARKED,
+   not declined: the classifier, the viewport map and the composite are
+   still the right pieces if it is ever built.
+2. **Design B has a smaller form than the one written below, B0.** The UI
+   draws already bind the scene depth and test against it. Swapping their
+   depth-stencil state to WRITE, with the game's own GEQUAL test kept, puts
+   the HUD's depth into the scene pair -- where the pass, the depth probe
+   and NVIDIA's depth copy already read it, with no pairing, no copy and no
+   pass change. G10 says nothing downstream reads that buffer after the UI.
+   About forty lines: the classifier plus one state swap in the wrap.
+   Two hazards decide between B0 and the copy form: (a) with the test kept,
+   a UI element drawn AFTER another at a greater distance loses its overlap
+   where the earlier one wrote depth, and whether a panel's transparent
+   area stamps at all turns on its pixel shader discarding on alpha; (b)
+   see-through pixels take the panel's motion, as B4 says. B0 flies first
+   because it is cheap; B with the copy (a per-eye copy of the scene depth
+   at the eye's first UI draw, the re-issue into it with the test kept, the
+   pass reading the copy) is exact and leaves the game's buffer alone, and
+   is the fallback if either hazard shows.
+3. **The classifier stands.** Five surfaces learned per session, every
+   holo-panel draw found through slot 2, the direct list confirmed, G6
+   none. It is the same code for A, B and B0.
+
+**Plan.** Flight 1: the three censuses (main menu, loading screen, cockpit)
+on the Frontier install with the `vf=` build and the shader dump, to settle
+G1's view format, G5 and G6 outside the cockpit, and G10 in the menus. Build
+B0 while it flies. Flight 2: B0 on against off, docked and in space. G9 (the
+surfaces' resolution) after that, since B0 changes nothing about detail.
+
 # Design A: the UI layer
 
 ## A1. What counts as UI: the classifier
@@ -637,6 +691,7 @@ lines are the copies.
 | G7 | Does the flight HUD's pixel shader derive its depth UV from SV_Position and a screen size? | disassemble ps `8DEF46452FA459F5` (the census's `ph=`), look for `vPos`-based UVs | refuse the family, or bind a depth resampled to the layer's size at slot 0 for it |
 | G8 | Does any pass read the UI's target after the UI draws, other than the copy to the submitted texture? | draws after the last UI draw with the UI target in `s=` | an in-game AA pass over the HUD means the stock HUD has edge AA the layer lacks: a 2x layer with a box downsample restores it; with DLSS on, the game's AA should be off anyway |
 | G9 | Does inflating a surface sharpen its TEXT, or only its vector lines? | one flight, no build: `surface_inflate` on the cockpit surfaces (2x today, `match` once it exists) at HMD Quality 0.67, after a menu trip, judged on the letters; and whether the create hook sees a fresh 2048x2048 A8 texture after a resolution change | text unchanged: the glyph atlas caps it -- the layout-size patch (A5) or vector-only gains; design A still removes the swim either way |
+| G10 | After the last UI draw, does anything test against or read the scene depth the UI draws bind? | `tools/crisp_ui_gates.py`, the G10 section, on a census with identity tokens (3 frames, the 2048-entry table) | a later depth-tested draw or a depth read: B0 would change the game's picture -- use B with the copy |
 
 G1 and G3 decide whether A can ship as designed; G9 decides whether A5's
 inflation is worth carrying or the layout-size patch is the next arc; G5 and
@@ -794,9 +849,12 @@ B's layer, so every classified draw gets one treatment or the other.
   (2026-09-04, evening). The classifier is what replaces it.
 - **Do not leave the UI in the DLSS input unjittered.** NGX un-jitters the
   whole frame; an unjittered element then shuttles by the jitter instead.
-- **Do not write UI depth into the game's own scene depth.** Anything the
-  game reads from that buffer after the UI would see panels in it; B's
-  separate layer costs one target and avoids the question.
+- **Do not write UI depth into the game's own scene depth without G10.**
+  Anything the game reads from that buffer after the UI would see panels
+  in it. In the cockpit G10 measured nothing reading it (2026-09-06), which
+  is what makes B0 admissible there; the menus and the loading screen need
+  their own G10 before B0 is trusted in them, and B's separate copy is the
+  form that never needs the question answered.
 - **The bias-current-colour mask is an instrument, not the fix.** The SDK
   exposes it (`nvsdk_ngx_helpers.h:152`, unwired in `dlaa.cpp:361-365`); a
   coverage mask from the same re-issue would stop the swim but leave the UI
