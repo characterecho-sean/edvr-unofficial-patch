@@ -94,6 +94,7 @@ constexpr uint32_t kRateViewVer1 = nvVersion(sizeof(NvRateViewDesc), 1);
 constexpr uint32_t kDimTexture2D = 4;  // NV_SRRV_DIMENSION_TEXTURE2D
 
 // NV_PIXEL_SHADING_RATE: one shade per raster pixel, and per block.
+constexpr uint32_t kRateCull = 0;  // NV_PIXEL_X0_CULL_RASTER_PIXELS: the tile is not rasterised
 constexpr uint32_t kRate1x1 = 5;   // NV_PIXEL_X1_PER_RASTER_PIXEL
 constexpr uint32_t kRate2x1 = 6;   // NV_PIXEL_X1_PER_2X1_RASTER_PIXELS
 constexpr uint32_t kRate1x2 = 7;   // NV_PIXEL_X1_PER_1X2_RASTER_PIXELS
@@ -245,6 +246,13 @@ constexpr uint32_t kRatePreset = 0xFFFFFFFFu;
 uint32_t g_outerOverride = kRatePreset;
 bool     g_cullInner = false;   // the diagnostic that culls the full-rate disc itself
 bool     g_cullAll = false;     // ...and every tile of the eye
+// The attribution test: blacken every tile of the eye the module BELIEVES
+// it is drawing. Which of the commander's own eyes goes dark is then the
+// measurement -- "cull_left" darkening the right eye says the two are
+// swapped, which the flight of 2026-09-06 08:00 suspected from the rings
+// landing on the wrong side. -1 is off; 0 and 1 are the module's own
+// numbering, 0 being the eye the openvr half submits as Eye_Left.
+int      g_cullEye = -1;
 uint32_t g_settingsGen = 1;    // bumped on any change; images refill at their next use
 bool     g_configured = false;
 
@@ -648,13 +656,15 @@ void fillRates(bool enable, uint32_t inner, uint32_t mid, uint32_t outer) {
         r.table[0] = inner;
         r.table[1] = mid;
         r.table[2] = outer;
+        // Entry 3 is the attribution test's: only the masks of the eye
+        // under test are written with it, and nothing else ever is.
+        r.table[3] = kRateCull;
     }
     g_ratesDesc.version = kViewportsVer1;
     g_ratesDesc.numViewports = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
     g_ratesDesc.viewports = g_rates;
 }
 
-constexpr uint32_t kRateCull = 0;  // NV_PIXEL_X0_CULL_RASTER_PIXELS: the tile is not rasterised
 uint32_t innerRate() { return (g_cullAll || g_cullInner) ? kRateCull : kRate1x1; }
 uint32_t midRate() { return g_cullAll ? kRateCull : kRate2x2; }
 uint32_t outerRate() {
@@ -811,6 +821,14 @@ bool fillMask(ID3D11DeviceContext* ctx, Mask& m) {
         g_scratch = new uint8_t[need];
         g_scratchCap = need;
     }
+    // The attribution test: this eye's every tile culled, the other eye's
+    // built as usual, so the commander's own eyes name the mapping.
+    if (g_cullEye == m.eye) {
+        memset(g_scratch, 3, need);
+        ctx->UpdateSubresource(m.tex, 0, nullptr, g_scratch, m.tw, 0);
+        m.gen = g_settingsGen;
+        return true;
+    }
     const float fw = static_cast<float>(m.w), fh = static_cast<float>(m.h);
     for (uint32_t j = 0; j < m.th; ++j) {
         const float py0 = static_cast<float>(j * kTile);
@@ -907,6 +925,10 @@ Mask* maskFor(ID3D11DeviceContext* ctx, uint32_t w, uint32_t h, int eye) {
     slot->gen = 0;
     slot->lastFrame = g_frame;
     ++g_imagesMade;
+    if (g_imagesMade <= 8) {
+        Log::get().note("foveation: image %u made for the %s eye at %ux%u (%u x %u tiles).", g_imagesMade,
+                        eye == 0 ? "LEFT" : "RIGHT", w, h, td.Width, td.Height);
+    }
     if (!fillMask(ctx, *slot)) return nullptr;  // kept; filled when the tangents arrive
     return slot;
 }
@@ -1167,10 +1189,14 @@ void foveationConfigure(Config& cfg) {
     else if (outerRateKey == "4x4") outerOverride = kRate4x4;
     else if (outerRateKey == "cull_inner") cullInner = true;
     else if (outerRateKey == "cull_all") cullAll = true;
+    int cullEye = -1;
+    if (outerRateKey == "cull_left") cullEye = 0;
+    else if (outerRateKey == "cull_right") cullEye = 1;
 
     const bool changed = m != g_mode || inner != g_innerDeg || outer != g_outerDeg ||
                          dist != g_distance || geom != g_geometryOnly || follow != g_followEyes ||
-                         outerOverride != g_outerOverride || cullInner != g_cullInner || cullAll != g_cullAll;
+                         outerOverride != g_outerOverride || cullInner != g_cullInner || cullAll != g_cullAll ||
+                         cullEye != g_cullEye;
     const bool first = !g_configured;
     g_configured = true;
     g_mode = m;
@@ -1182,7 +1208,16 @@ void foveationConfigure(Config& cfg) {
     g_outerOverride = outerOverride;
     g_cullInner = cullInner;
     g_cullAll = cullAll;
+    g_cullEye = cullEye;
     if (changed) ++g_settingsGen;
+    if ((first || changed) && cullEye >= 0) {
+        Log::get().note(
+            "foveation: advanced.foveation_outer_rate = %s -- every tile of the eye this module believes is the "
+            "%s one is NOT DRAWN. THE TEST: shut one eye at a time. If the eye that goes black is the %s one, "
+            "the module's eyes are the runtime's; if it is the other, they are swapped, which is what puts the "
+            "rings on the wrong side of the frame.",
+            outerRateKey.c_str(), cullEye == 0 ? "LEFT" : "RIGHT", cullEye == 0 ? "left" : "right");
+    }
     if ((first || changed) && (outerOverride == kRateCull || cullInner || cullAll)) {
         Log::get().note(
             "foveation: advanced.foveation_outer_rate = %s -- %s NOT DRAWN. A diagnostic: what is culled goes "
