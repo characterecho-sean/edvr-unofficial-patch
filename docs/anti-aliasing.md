@@ -1497,6 +1497,12 @@ the most work, which the pass can compute for itself — not a per-draw
 matrix capture and an object-ID pass, which is the engine's own velocity
 buffer built from outside and re-built after every update.
 
+*Revisited on 2026-09-07 in [per-object-motion.md](per-object-motion.md):
+the formula is the world path's with one matrix per rigid mover, the pose
+is a 24-byte slice of the instanced-mesh record EDVR already decodes, and
+the scene depth's own stencil can carry the tag. The same question, three
+of its costs since measured; nothing built.*
+
 **Performantly: yes.** The pass is one compute dispatch per eye over the
 eye image, a handful of taps per pixel; believed a fraction of a
 millisecond per eye at Quest-3 sizes, measured by timestamp query in Phase

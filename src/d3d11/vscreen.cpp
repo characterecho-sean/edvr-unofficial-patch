@@ -2857,6 +2857,16 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     if (v == DrawVerdict::kParticle) particleBegin(self);
     if (v == DrawVerdict::kBackdrop) backdropBegin(self);
     draw();
+    // The interface's alpha-aware depth pass (ui_depth.h): a composite
+    // drawn through the interface projection is drawn once more, depth
+    // only, right after its own draw and inside the scope that owns the
+    // flag -- the splash dim's re-issue shape below, for the same reason:
+    // the placement state the second draw needs is still bound.
+    if (uiDepthWantsReissue()) {
+        uiDepthReissueBegin(self);
+        draw();
+        uiDepthReissueEnd(self);
+    }
     if (v == DrawVerdict::kBackdrop) backdropEnd(self);
     // The splash screen's dim under the loader's dialogs (splash_dim.h):
     // the still's composite and the intro movie's composite are the two
@@ -3602,6 +3612,13 @@ void readCensusSkip(Config& cfg, State* s) {
                         "(%llu draws were skipped while it was set).",
                         static_cast<unsigned long long>(s->censusSkipped));
     }
+}
+
+void vScreenSetRenderTargetsRaw(ID3D11DeviceContext* ctx, uint32_t n,
+                                ID3D11RenderTargetView* const* rtvs,
+                                ID3D11DepthStencilView* dsv) {
+    if (!g_state || !g_state->realOMSetRenderTargets || !ctx) return;
+    g_state->realOMSetRenderTargets(ctx, n, rtvs, dsv);
 }
 
 bool vScreenIsEyeSized(uint32_t w, uint32_t h) {

@@ -119,6 +119,12 @@ bool temporalPassRegistration(char* buf, size_t n, char* buf2, size_t n2, char* 
 bool temporalPassDlaaTotals(uint32_t* frames, double* avgMs, double* maxMs,
                             uint32_t* resets);
 
+// The scene's near and far planes the last treat decoded depth with (the
+// openvr half's smallest-near pair). For ui_depth, which re-scales a
+// composite's depth from the interface projection's encoding into the
+// scene's. False until a treat has run.
+bool temporalPassPlanes(float* nearZ, float* farZ);
+
 void temporalPassShutdown();
 
 }  // namespace edvr

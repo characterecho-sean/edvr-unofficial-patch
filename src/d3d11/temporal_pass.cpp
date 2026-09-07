@@ -1279,6 +1279,8 @@ bool     g_filterCurrent = true;   // advanced.temporal_aa_current = filtered | 
 float    g_historyC = 0.5f;        // advanced.temporal_aa_history_sharp: the cubic's C
 float    g_shipMetres = 100.0f;    // advanced.temporal_aa_ship_metres: the world/ship split (0 off)
 int      g_debugMode = 0;          // advanced.temporal_aa_debug: 0 off, 1 motion, 2 error, 3 depth
+float    g_lastNear = 0.0f;        // the planes the last treat decoded with (temporalPassPlanes)
+float    g_lastFar = 0.0f;
 float    g_menuMetres = 0.0f;      // advanced.temporal_aa_menu_metres: a depth for depthless pixels in a menu-like scene
 float    g_foveaDeg = 0.0f;        // advanced.temporal_aa_fovea: NVIDIA runs on a crop this many degrees across; 0 = whole frame
 float    g_foveaEdgeDeg = 6.0f;    // advanced.temporal_aa_fovea_edge: the blend band, in degrees
@@ -1756,6 +1758,8 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
     // and by the instrument's two depth candidates alike.
     ID3D11ShaderResourceView* depthSrv = nullptr;
     if (ok && nearZ > 0.0f && farZ > nearZ) {
+        g_lastNear = nearZ;
+        g_lastFar = farZ;
         EyeState& e = *eptr;
         ID3D11Texture2D* dtex = nullptr;
         if (depthProbeSceneDepth(sd.Width, sd.Height, eye, &dtex) && dtex) {
@@ -3519,6 +3523,17 @@ bool temporalPassEyeOffset(int eye, float out[3]) {
     if (e.eyeOff[0] == 0.0f && e.eyeOff[1] == 0.0f && e.eyeOff[2] == 0.0f) return false;
     memcpy(out, e.eyeOff, sizeof(e.eyeOff));
     return true;
+}
+
+}  // namespace edvr
+
+namespace edvr {
+
+bool temporalPassPlanes(float* nearZ, float* farZ) {
+    if (!nearZ || !farZ) return false;
+    *nearZ = g_lastNear;
+    *farZ = g_lastFar;
+    return g_lastNear > 0.0f && g_lastFar > g_lastNear;
 }
 
 }  // namespace edvr
