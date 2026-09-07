@@ -291,6 +291,20 @@ bool     g_cullAll = false;     // ...and every tile of the eye
 // draws actually spend their time (see docs/performance.md, feature 2).
 // Sean's idea, 2026-09-06.
 bool     g_monoEdge = false;
+// ...and the other half of the same idea, Sean's, 2026-09-07: leave
+// everything BOTH eyes can see alone.
+//
+// The flight of that morning priced the alternative. Quality's full-rate
+// disc is 35 degrees and each eye's field runs to 45.9 nasally, so a look
+// to either side drops that eye's far nasal band outside the disc -- 25
+// degrees of coarse shading at a gaze of 8 degrees right, swapping eyes
+// when you look the other way. No disc smaller than the field escapes
+// that, and a disc as large as the field saves nothing.
+//
+// So stop trying to shade the binocular field at all. Confine every rate
+// this module sets to the strip each eye sees alone, where there is no
+// partner image to disagree with and, with the cull, nothing to see.
+bool     g_overlapKeep = false;
 // The attribution test: blacken every tile of the eye the module BELIEVES
 // it is drawing. Which of the commander's own eyes goes dark is then the
 // measurement -- "cull_left" darkening the right eye says the two are
@@ -805,10 +819,18 @@ const char* rateName(uint32_t rate) {
     }
 }
 const char* outerRateName() { return rateName(outerRate()); }
-const char* monoEdgeName(bool skip) {
-    return skip ? "the strip only one eye can see is SKIPPED entirely "
-                  "(advanced.foveation_monocular_edge = skip)"
-                : "every part of each eye is drawn (advanced.foveation_monocular_edge = draw)";
+const char* monoEdgeName(bool skip, bool keep) {
+    if (keep && skip)
+        return "everything both eyes can see stays at FULL RATE, and the strip each eye sees alone is "
+               "SKIPPED entirely (advanced.foveation_overlap = keep with foveation_monocular_edge = skip)";
+    if (keep)
+        return "everything both eyes can see stays at FULL RATE; only the strip each eye sees alone is "
+               "shaded coarsely (advanced.foveation_overlap = keep)";
+    if (skip)
+        return "the rings shade the whole eye, and the strip only one eye can see is SKIPPED entirely "
+               "(advanced.foveation_monocular_edge = skip)";
+    return "the rings shade every part of each eye (advanced.foveation_overlap = shade with "
+           "foveation_monocular_edge = draw)";
 }
 
 void releaseMask(Mask& m) {
@@ -962,11 +984,14 @@ bool fillMask(ID3D11DeviceContext* ctx, Mask& m) {
         // eye's own tangents and as a side of the image. Sean reported
         // coarse work on the RIGHT eye's NASAL side on 2026-09-07 and
         // nothing in the log could confirm or deny where the strip went.
-        char strip[160] = {};
-        if (g_monoEdge) {
+        char strip[300] = {};
+        if (g_monoEdge || g_overlapKeep) {
             snprintf(strip, sizeof(strip),
-                     " The strip only this eye sees, beyond tangent %+.3f on its %s (%s) side, is not drawn.",
-                     monoEdge, monoLeft ? "left" : "right", "temporal");
+                     " The strip only this eye sees begins at tangent %+.3f on its %s (temporal) side; it "
+                     "is %s, and everything nearer the nose than that %s.",
+                     monoEdge, monoLeft ? "left" : "right",
+                     g_monoEdge ? "NOT DRAWN" : "shaded by the rings",
+                     g_overlapKeep ? "stays at full rate" : "is shaded by the rings");
         }
         const float ndcx = (r > l) ? (2.0f * (cx - l) / (r - l) - 1.0f) : 0.0f;
         const float ndcy = (bot + top > 0.0f) ? (2.0f * (top - cy) / (top + bot) - 1.0f) : 0.0f;
@@ -1025,9 +1050,12 @@ bool fillMask(ID3D11DeviceContext* ctx, Mask& m) {
             const float d2 = (nx - cx) * (nx - cx) + (ny - cy) * (ny - cy);
             uint8_t rate = d2 < ri2 ? 0 : (d2 < ro2 ? 1 : 2);
             // Whole tiles only: a tile straddling the boundary still holds
-            // pixels the other eye can see, and half a culled tile at the
-            // seam would be a hard edge in the overlap.
-            if (g_monoEdge && (monoLeft ? (tx1 <= monoEdge) : (tx0 >= monoEdge))) rate = 3;
+            // pixels the other eye can see, so it counts as shared, and
+            // half a culled tile at the seam would be a hard edge inside
+            // the overlap.
+            const bool alone = monoLeft ? (tx1 <= monoEdge) : (tx0 >= monoEdge);
+            if (g_overlapKeep && !alone) rate = 0;
+            if (g_monoEdge && alone) rate = 3;
             g_scratch[static_cast<size_t>(j) * m.tw + i] = rate;
         }
     }
@@ -1333,7 +1361,7 @@ void arm(ID3D11DeviceContext* ctx) {
         g_innerDeg, g_distance, g_outerDeg, outerRateName(),
         g_geometryOnly ? "geometry draws only, the full-screen passes at full rate (advanced.foveation_passes = geometry)"
                        : "every draw into the eye, the full-screen passes included (advanced.foveation_passes = all)",
-        monoEdgeName(g_monoEdge), rateName(innerRate()), rateName(midRate()), rateName(outerRate()),
+        monoEdgeName(g_monoEdge, g_overlapKeep), rateName(innerRate()), rateName(midRate()), rateName(outerRate()),
         suspectModules());
 }
 
@@ -1516,6 +1544,8 @@ void foveationConfigure(Config& cfg) {
     const bool geom = passes == "geometry";
     const std::string monoKey = cfg.getString("advanced.foveation_monocular_edge", "draw");
     const bool mono = monoKey == "skip";
+    const std::string overlapKey = cfg.getString("advanced.foveation_overlap", "shade");
+    const bool overlapKeep = overlapKey == "keep";
     const std::string outerRateKey = cfg.getString("advanced.foveation_outer_rate", "preset");
     uint32_t outerOverride = kRatePreset;
     bool cullInner = false, cullAll = false;
@@ -1531,7 +1561,7 @@ void foveationConfigure(Config& cfg) {
     const bool changed = m != g_mode || inner != g_innerDeg || outer != g_outerDeg ||
                          dist != g_distance || geom != g_geometryOnly || follow != g_followEyes ||
                          outerOverride != g_outerOverride || cullInner != g_cullInner || cullAll != g_cullAll ||
-                         cullEye != g_cullEye || mono != g_monoEdge;
+                         cullEye != g_cullEye || mono != g_monoEdge || overlapKeep != g_overlapKeep;
     const bool first = !g_configured;
     g_configured = true;
     g_mode = m;
@@ -1545,6 +1575,7 @@ void foveationConfigure(Config& cfg) {
     g_cullAll = cullAll;
     g_cullEye = cullEye;
     g_monoEdge = mono;
+    g_overlapKeep = overlapKeep;
     if (changed) ++g_settingsGen;
     if ((first || changed) && cullEye >= 0) {
         Log::get().note(
@@ -1584,12 +1615,12 @@ void foveationConfigure(Config& cfg) {
                         "%s beyond, fixation %.2f m, %s draws, %s. Arms at the first eye draw "
                         "(docs/performance.md, feature 2).",
                         modeName(m), inner, outer, outerRate() == kRate4x4 ? "4x4" : "2x2", dist,
-                        geom ? "geometry" : "all", monoEdgeName(mono));
+                        geom ? "geometry" : "all", monoEdgeName(mono, overlapKeep));
     } else if (changed && g_phase == Phase::Armed) {
         Log::get().note("foveation: settings changed (fix.foveation = %s, %.0f/%.0f degrees, %.2f m, %s "
                         "draws, %s; the rate table now reads %s inside, %s in the ring, %s beyond) -- the images "
                         "refill at their next use.",
-                        modeName(m), inner, outer, dist, geom ? "geometry" : "all", monoEdgeName(mono),
+                        modeName(m), inner, outer, dist, geom ? "geometry" : "all", monoEdgeName(mono, overlapKeep),
                         rateName(innerRate()), rateName(midRate()), rateName(outerRate()));
     }
 }
