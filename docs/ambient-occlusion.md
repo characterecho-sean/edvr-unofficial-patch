@@ -5,9 +5,11 @@ branch `claude/asteroid-ao-inconsistency-xt19n7` off main `dc3ebad`. Claims
 about EDVR cite the source; claims about the game are labelled measured
 (this repo's censuses, dumps and disassemblies), read (taken from a
 captured shader's bytecode), or believed; what only a live session can
-settle is collected under Phase 0. Nothing here is built, and nothing here
-has been captured: the ambient-occlusion pass has never appeared on a
-census by name, and no file in this tree mentions it.*
+settle is collected under Phase 0. Nothing here is built. The first capture
+arrived the same day, on issue #23, and its reading is recorded under
+[What the first worksheet said](#what-the-first-worksheet-said) as far as
+it has gone; before it, the ambient-occlusion pass had never appeared on a
+census by name, and no file in this tree mentioned it.*
 
 ## The ask
 
@@ -40,7 +42,9 @@ the Frontier forums for VR is to turn ambient occlusion off, with the
 pilot's arm named as where its wrongness shows
 ([forums.frontier.co.uk, "What are the best graphics settings in VR?"](https://forums.frontier.co.uk/threads/what-are-the-best-graphics-settings-in-vr.583899/)).
 No entry for it was found on Frontier's public tracker (believed: one
-search, 2026-09-07), and this repo's own tracker has none.
+search, 2026-09-07). This repo's is
+[#23](https://github.com/characterecho-sean/edvr-unofficial-patch/issues/23),
+filed from the worksheet the same day.
 
 The asteroid is where this reporter sees it; on none of the readings
 below is it where the fault lives. Screen-space occlusion is one pass over
@@ -370,6 +374,33 @@ And in prose, the answers only the person in the headset has:
   looks like a different technique or the same one with less of it.
 - Headset, runtime, and Elite's HMD Quality. A half-resolution pass under
   a high render scale is a different picture from one at the native size.
+
+## What the first worksheet said
+
+Issue [#23](https://github.com/characterecho-sean/edvr-unofficial-patch/issues/23),
+2026-09-07, filed by the reporter from the worksheet with the Save logs
+bundle and the dumps attached. The rig: a Quest 3 through OpenComposite on
+SteamVR's OpenXR layer, HMD Quality 1.0, the supersampling slider at 1.0,
+an RTX 4080 Super, EDVR 0.14.0, no other mods, temporal AA normally DLAA.
+Ambient occlusion at Ultra. The prose half of Phase 0, and what each
+answer closes:
+
+| Answer | What it says |
+|---|---|
+| Still there on the stock game, EDVR's file renamed aside | **D is closed.** The fault is the game's, like the black planet and the FSS split before it, and EDVR can only reach it from outside. |
+| Still there with temporal AA off | The pass is not involved, and DLAA's history was not shaping it. |
+| Unchanged with the head held still | **B is closed.** A stale eye equals the current one when nothing moves, so an alternate-frame pass would agree at rest. It also rules out any temporal half of the pass. |
+| Level, not pattern: the cracks are darker or wider in one eye | The difference survives the game's blur as an amount, not as grain. "Wider" is worth keeping: a half-size buffer brought back up through a depth-aware filter makes crack edges a different width in each eye (C2). |
+| Neither eye consistently worse: they just disagree | The darker eye changes crack by crack. A missing or weaker pass makes one eye consistently lighter; a view-dependent estimate flips sign from one crack to the next. This is C's shape, and A's if the seed differs per eye, since a different kernel rotation is a different estimate at every pixel. |
+| Same at any distance | Not a near-field effect. Whatever it is happens at the pass, not in what feeds it. |
+| Low looks exactly the same as Ultra, and shows it too | The levels change the amount of work, not the technique. The fault is in the technique's stereo-blind core, not in a quality tier's extra pass. |
+| Only icy rings so far | Q11 stays open. The arm and the hangar have not been looked at. |
+
+What the prose leaves: **A or C**, and the census and the dump decide
+between them (Phase 1). The reporter did every step of the session and
+felt the hitch, so the bundle should carry two censuses, one eye-split
+dump and the shader dump. The reading of those files goes here when it
+is done.
 
 ## Phase 1: reading the capture
 
