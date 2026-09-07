@@ -148,21 +148,43 @@ void appendSlot(char* list, size_t listSize, size_t slot) {
 // See the header for why naming the writer needed its own mechanism.
 struct WriteWatch {
     void*     slotAddress = nullptr;
+    uintptr_t tableLo = 0;           // the vtable array, so a write can be told
+    uintptr_t tableHi = 0;           // from a write merely sharing its page
     void*     pageBase = nullptr;
     SIZE_T    pageSize = 0;
     DWORD     writableProtect = 0;   // what the page was, and is put back to
     DWORD     readOnlyProtect = 0;   // the same without write permission
     volatile LONG armed = 0;
-    volatile LONG rearmWanted = 0;
-    uint32_t  catches = 0;
+    volatile LONG rearmWanted = 0;   // the frame-path fallback, see vtableWatchRearm
+    volatile LONG stepPending = 0;   // a single step is owed to us
+    volatile LONG stepThread = 0;    // ...by this thread, and no other
+    bool      finished = false;
+    uint32_t  catches = 0;           // writes seen anywhere on the page
+    uint32_t  inTable = 0;           // ...of which, inside the vtable
+    uint32_t  reported = 0;          // in-table lines printed
+    uintptr_t lo = 0;                // span of addresses written
+    uintptr_t hi = 0;
+    void*     sites[4] = {};         // distinct writing instructions
+    uint32_t  siteCount = 0;
     char      who[48] = {};
 };
 WriteWatch g_watch;
 PVOID      g_watchHandler = nullptr;
 
-// Four is enough to tell one writer from several and to show whether the same
-// instruction does it every time; more than that is a log nobody reads.
-constexpr uint32_t kMaxWatchCatches = 4;
+// How many writes INSIDE the vtable earn a line. Four shows whether one
+// instruction does it or several; past that the summary is the useful thing.
+constexpr uint32_t kMaxWatchReports = 4;
+
+// The total budget, because the page is shared with whatever else the runtime
+// put on it and that turned out to be written constantly. Every caught write
+// costs two exceptions -- the fault and the single step that re-arms behind it
+// -- so this bounds the cost of an armed probe at a few tens of milliseconds
+// even on a page nobody stops writing to.
+constexpr uint32_t kMaxWatchCatches = 2000;
+
+// x86 EFlags trap flag: set it in the context we resume into and the CPU
+// raises a single-step exception after exactly one instruction.
+constexpr DWORD kTrapFlag = 0x100;
 
 // The same protection without write permission, or 0 if there is nothing to
 // take away (already read-only, or no access at all).
@@ -176,12 +198,74 @@ DWORD withoutWrite(DWORD p) {
     }
 }
 
+// Everything the watch saw, once, when it stops. The SPAN is the point: the
+// first cut of this probe reported four catches at one address 264 bytes below
+// the vtable and the field read it, reasonably, as the leading edge of a sweep
+// that then ran up through the table -- but the probe could not have seen such
+// a sweep, because it surrendered the page after the first store and did not
+// take it back until the next frame. A range that reaches the table proves the
+// sweep; one that stays pinned below it disproves it.
+void reportWatchSummary() {
+    if (g_watch.finished) return;
+    g_watch.finished = true;
+    char siteBuf[4][MAX_PATH];
+    char joined[3 * MAX_PATH];
+    joined[0] = '\0';
+    for (uint32_t i = 0; i < g_watch.siteCount; ++i) {
+        char one[MAX_PATH + 4];
+        _snprintf_s(one, sizeof(one), _TRUNCATE, "%s%s", i ? "; " : "",
+                    ownerModuleName(g_watch.sites[i], siteBuf[i],
+                                    sizeof(siteBuf[i])));
+        strncat_s(joined, sizeof(joined), one, _TRUNCATE);
+    }
+    Log::get().note(
+        "VTableHook %s: write watch DISARMED. It saw %u write(s) to the page, "
+        "%u of them INSIDE the vtable itself, spanning %p to %p. The vtable "
+        "occupies %p to %p, so a span that reaches into that range is one "
+        "sweep rewriting the table and a span that stays outside it is traffic "
+        "that merely shares the page and says nothing about our slots. The "
+        "instruction(s) responsible: %s. The page is back to normal and nothing "
+        "further is intercepted.",
+        g_watch.who, static_cast<unsigned>(g_watch.catches),
+        static_cast<unsigned>(g_watch.inTable),
+        reinterpret_cast<void*>(g_watch.lo), reinterpret_cast<void*>(g_watch.hi),
+        reinterpret_cast<void*>(g_watch.tableLo),
+        reinterpret_cast<void*>(g_watch.tableHi),
+        joined[0] ? joined : "none recorded");
+}
+
 LONG CALLBACK writeWatchHandler(EXCEPTION_POINTERS* ep) {
+    const EXCEPTION_RECORD* er = ep ? ep->ExceptionRecord : nullptr;
+    if (!er) return EXCEPTION_CONTINUE_SEARCH;
+
+    // THE SECOND HALF OF EVERY CATCH. The write we let through has now
+    // happened, so take the page back before anything else touches it.
+    //
+    // This is what the first cut of the probe lacked, and it is why that cut
+    // could only ever see one write per frame: it opened the page and waited
+    // for the frame path to close it, so an entire sweep of stores went by
+    // unseen behind the first one. Re-protecting here instead means every
+    // write is caught, which is the difference between "somebody wrote near our
+    // table" and "somebody wrote OUR TABLE".
+    if (er->ExceptionCode == EXCEPTION_SINGLE_STEP &&
+        InterlockedCompareExchange(&g_watch.stepPending, 0, 0) &&
+        g_watch.stepThread == static_cast<LONG>(GetCurrentThreadId())) {
+        InterlockedExchange(&g_watch.stepPending, 0);
+        if (ep->ContextRecord) ep->ContextRecord->EFlags &= ~kTrapFlag;
+        if (!g_watch.finished) {
+            DWORD previous = 0;
+            if (VirtualProtect(g_watch.pageBase, g_watch.pageSize,
+                               g_watch.readOnlyProtect, &previous)) {
+                InterlockedExchange(&g_watch.armed, 1);
+            }
+        }
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
+
     if (!InterlockedCompareExchange(&g_watch.armed, 0, 0)) {
         return EXCEPTION_CONTINUE_SEARCH;
     }
-    const EXCEPTION_RECORD* er = ep ? ep->ExceptionRecord : nullptr;
-    if (!er || er->ExceptionCode != EXCEPTION_ACCESS_VIOLATION) {
+    if (er->ExceptionCode != EXCEPTION_ACCESS_VIOLATION) {
         return EXCEPTION_CONTINUE_SEARCH;
     }
     // [0] is 0 for a read, 1 for a write, 8 for a DEP violation; [1] is the
@@ -196,45 +280,70 @@ LONG CALLBACK writeWatchHandler(EXCEPTION_POINTERS* ep) {
     const uintptr_t lo = reinterpret_cast<uintptr_t>(g_watch.pageBase);
     if (at < lo || at >= lo + g_watch.pageSize) return EXCEPTION_CONTINUE_SEARCH;
 
-    // Let the write through: restore write permission and disarm. The
-    // instruction re-executes when we continue, and the frame path puts the
-    // watch back.
+    // Let the write through, then owe ourselves one instruction: set the trap
+    // flag and the page comes back the moment the store has retired.
     InterlockedExchange(&g_watch.armed, 0);
     DWORD ignored = 0;
     VirtualProtect(g_watch.pageBase, g_watch.pageSize, g_watch.writableProtect,
                    &ignored);
+    if (ep->ContextRecord) {
+        ep->ContextRecord->EFlags |= kTrapFlag;
+        g_watch.stepThread = static_cast<LONG>(GetCurrentThreadId());
+        InterlockedExchange(&g_watch.stepPending, 1);
+    } else {
+        // No context to step with. Fall back to the frame path, which is a
+        // whole frame late and will miss the rest of any sweep -- said nowhere
+        // because it has never been observed; the fallback exists so that a
+        // missing context cannot silently end the watch.
+        InterlockedExchange(&g_watch.rearmWanted, 1);
+    }
 
-    if (g_watch.catches < kMaxWatchCatches) {
-        ++g_watch.catches;
+    ++g_watch.catches;
+    if (!g_watch.lo || at < g_watch.lo) g_watch.lo = at;
+    if (at > g_watch.hi) g_watch.hi = at;
+    bool knownSite = false;
+    for (uint32_t i = 0; i < g_watch.siteCount; ++i) {
+        if (g_watch.sites[i] == er->ExceptionAddress) { knownSite = true; break; }
+    }
+    if (!knownSite && g_watch.siteCount < 4) {
+        g_watch.sites[g_watch.siteCount++] = er->ExceptionAddress;
+    }
+
+    const bool inTable = at >= g_watch.tableLo && at < g_watch.tableHi;
+    if (inTable) ++g_watch.inTable;
+
+    // Only writes INSIDE the table get a line. A write that merely shares the
+    // page is what the last build reported four times and it answered nothing;
+    // it is counted, and the summary says how many there were.
+    if (inTable && g_watch.reported < kMaxWatchReports) {
+        ++g_watch.reported;
         char modBuf[MAX_PATH];
         Log::get().note(
-            "VTableHook %s: CAUGHT THE WRITER. Something wrote to %p, which is "
-            "%s, and the instruction that did it is at %s. The write has been "
-            "allowed through and the watch re-arms next frame; at most %u of "
-            "these. THIS is the author of the value that keeps reappearing in "
-            "the slot -- every other module name in this log is the value "
-            "itself, not whoever stored it.",
+            "VTableHook %s: CAUGHT A WRITE TO THE VTABLE ITSELF. %p was written "
+            "-- %s -- by the instruction at %s. This is the author of the value "
+            "that keeps reappearing, named directly: every other module name in "
+            "this log is the value found in a slot, not whoever stored it. The "
+            "write was allowed through and the page taken straight back.",
             g_watch.who, reinterpret_cast<void*>(at),
             at == reinterpret_cast<uintptr_t>(g_watch.slotAddress)
                 ? "exactly the watched slot"
-                : "elsewhere on the same page as the watched slot",
-            ownerModuleName(er->ExceptionAddress, modBuf, sizeof(modBuf)),
-            static_cast<unsigned>(kMaxWatchCatches));
+                : "another slot of the same table",
+            ownerModuleName(er->ExceptionAddress, modBuf, sizeof(modBuf)));
     }
-    if (g_watch.catches < kMaxWatchCatches) {
-        InterlockedExchange(&g_watch.rearmWanted, 1);
-    } else {
-        Log::get().note(
-            "VTableHook %s: write watch DISARMED after %u catches. The page is "
-            "back to normal and nothing further is being intercepted.",
-            g_watch.who, static_cast<unsigned>(g_watch.catches));
+
+    if (g_watch.catches >= kMaxWatchCatches ||
+        g_watch.inTable >= kMaxWatchReports) {
+        g_watch.finished = true;   // the single step will not re-arm
+        InterlockedExchange(&g_watch.rearmWanted, 0);
+        reportWatchSummary();
     }
     return EXCEPTION_CONTINUE_EXECUTION;
 }
 
 }  // namespace
 
-bool vtableWatchSlot(void** vtable, size_t slot, const char* who) {
+bool vtableWatchSlot(void** vtable, size_t slot, size_t slotCount,
+                     const char* who) {
     if (!vtable) return false;
     if (g_watch.slotAddress) {
         Log::get().note("VTableHook: a write watch is already armed on %p; "
@@ -276,11 +385,22 @@ bool vtableWatchSlot(void** vtable, size_t slot, const char* who) {
     }
 
     g_watch.slotAddress = addr;
+    // The table's own extent, so a write to it can be told from a write that
+    // merely shares its page -- the distinction the first cut of this probe
+    // could not make, and the one the whole question turns on.
+    g_watch.tableLo = reinterpret_cast<uintptr_t>(vtable);
+    g_watch.tableHi = g_watch.tableLo + slotCount * sizeof(void*);
     g_watch.pageBase = pageBase;
     g_watch.pageSize = pageSize;
     g_watch.writableProtect = mbi.Protect;
     g_watch.readOnlyProtect = readOnly;
     g_watch.catches = 0;
+    g_watch.inTable = 0;
+    g_watch.reported = 0;
+    g_watch.lo = 0;
+    g_watch.hi = 0;
+    g_watch.siteCount = 0;
+    g_watch.finished = false;
     strncpy_s(g_watch.who, who ? who : "?", _TRUNCATE);
 
     DWORD previous = 0;
@@ -293,13 +413,16 @@ bool vtableWatchSlot(void** vtable, size_t slot, const char* who) {
     }
     InterlockedExchange(&g_watch.armed, 1);
     Log::get().note(
-        "VTableHook %s: WRITE WATCH ARMED on slot %zu at %p. Its page (%p, %llu "
-        "bytes, %s) is read-only until something writes to it, and the next "
-        "write is caught and its instruction named. Diagnostic only -- every "
-        "write anywhere on this page takes an exception while it is armed, so "
-        "this is for one session with a purpose, not for playing. Set "
+        "VTableHook %s: WRITE WATCH ARMED on slot %zu at %p. The table runs %p "
+        "to %p and its page is %p (%llu bytes, %s). The page is read-only, every "
+        "write to it is caught and its instruction named, and the page is taken "
+        "straight back after each one -- so a whole sweep of stores is seen, not "
+        "just the first. Only writes INSIDE the table are reported; the rest are "
+        "counted and summarised when it stops. Diagnostic only: every write "
+        "anywhere on this page takes two exceptions while this is armed. Set "
         "advanced.vtable_writer_probe back to 0 afterwards.",
-        g_watch.who, slot, addr, pageBase,
+        g_watch.who, slot, addr, reinterpret_cast<void*>(g_watch.tableLo),
+        reinterpret_cast<void*>(g_watch.tableHi), pageBase,
         static_cast<unsigned long long>(pageSize), protectName(mbi.Protect));
     return true;
 }

@@ -116,9 +116,24 @@ size_t vtableEntriesInModule(void** vtable, size_t count, void* moduleBase);
 // So: make the page read-only, catch the access violation the next write
 // raises, and log the FAULTING INSTRUCTION's module and offset. That is the
 // author, directly, with no inference in it. The write is then let through --
-// protection restored, EXCEPTION_CONTINUE_EXECUTION, the instruction re-runs
-// and succeeds -- and the page is re-armed from the frame path so the next one
-// is caught too, up to a handful, after which it disarms for good.
+// protection restored, the trap flag set, EXCEPTION_CONTINUE_EXECUTION -- and
+// the single-step exception that arrives one instruction later takes the page
+// straight back.
+//
+// THAT SINGLE STEP IS THE WHOLE DESIGN, and the first cut of this probe did not
+// have it: it opened the page and waited for the frame path to close it, so it
+// saw one write per frame and an entire sweep of stores went by behind the
+// first. Its four catches all landed 264 bytes BELOW the table -- traffic
+// sharing the page -- and not one write to a slot was ever observed, while the
+// log's wording invited exactly the reading that a sweep had been seen. Taking
+// the page back after each store is what turns "somebody wrote near our table"
+// into "somebody wrote OUR TABLE".
+//
+// `slotCount` gives the table's extent so a write to it can be told from a
+// write that merely shares its page: only the former is reported, the latter is
+// counted, and the summary at the end prints the SPAN of everything written --
+// a range that reaches the table proves a sweep, one that stays outside it
+// disproves the sweep and says the writer is still unfound.
 //
 // DIAGNOSTIC, OFF BY DEFAULT, and it must stay that way. While armed, every
 // write anywhere on that page takes an exception, and a page holds far more
@@ -129,7 +144,8 @@ size_t vtableEntriesInModule(void** vtable, size_t count, void* moduleBase);
 // if the page cannot be made read-only, if it is read-only already (in which
 // case the writer is un-protecting it and this cannot see that), or if a watch
 // is already armed -- one at a time, because one answer is what is wanted.
-bool vtableWatchSlot(void** vtable, size_t slot, const char* who);
+bool vtableWatchSlot(void** vtable, size_t slot, size_t slotCount,
+                     const char* who);
 
 // Put the watch back after a catch let a write through. Cheap and safe to call
 // every frame; does nothing unless a catch is pending. Re-arming here rather

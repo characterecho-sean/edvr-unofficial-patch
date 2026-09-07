@@ -1,4 +1,4 @@
-﻿#include "vscreen.h"
+#include "vscreen.h"
 #include "head_offset_gate.h"
 #include "camera_view.h"
 
@@ -4862,7 +4862,8 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
             cfg.getIntInRange("advanced.vtable_writer_probe", 0, 0, 511);
         if (probeSlot > 0 && s.hook.mode() != HookMode::CopyVptr) {
             vtableWatchSlot(s.hook.originalVTable(),
-                            static_cast<size_t>(probeSlot), "vScreen context");
+                            static_cast<size_t>(probeSlot),
+                            s.hook.executablePrefix(), "vScreen context");
         } else if (probeSlot > 0) {
             Log::get().note(
                 "advanced.vtable_writer_probe asked to watch slot %d, but this "

@@ -689,7 +689,7 @@ int main() {
             fail("VirtualAlloc for the write-watch cell", "allocation refused");
         } else {
             fake[3] = reinterpret_cast<void*>(&thunkOne);
-            check(vtableWatchSlot(fake, 3, "watch-cell"),
+            check(vtableWatchSlot(fake, 3, 8, "watch-cell"),
                   "the write watch arms on a writable page",
                   "arming refused on a plain read-write page");
 
