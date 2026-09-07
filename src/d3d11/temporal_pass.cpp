@@ -52,7 +52,7 @@ cbuffer P : register(b0) {
     float4 dR1;         // directions to last frame's (xyz; w unused)
     float4 dR2;
     float4 c0R0;        // the registration instrument's candidates, same
-    float4 c0R1;        // shape: 0 the head's rotation alone, 1 retired,
+    float4 c0R1;        // shape: 0 the head's rotation alone, 1 the eyes swapped,
     float4 c0R2;        // 2 the world path's delta from the rows, 3 the
     float4 c1R0;        // head with depth as used
     float4 c1R1;
@@ -455,7 +455,7 @@ void main(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
             // fetched, judged by the same clip, counted and not used. The
             // candidates: 0 the head's rotation alone, 2 the world path's
             // delta from the game's view rows, 3 the head with depth as
-            // used (slot 1 is retired). Up to three more history reads per
+            // used, 1 the same with the other eye's translation. Up to four
             // pixel while it runs.
             [unroll] for (int c = 0; c < 4; ++c) {
                 if ((candMask & (1 << c)) == 0) continue;
@@ -464,10 +464,14 @@ void main(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
                 float3 r2 = c == 0 ? c0R2.xyz : (c == 1 ? c1R2.xyz : (c == 2 ? c2R2.xyz : c3R2.xyz));
                 // Candidate 2 is the world path's delta from the game's view
                 // rows, judged rotation-only; 3 is the head with depth as
-                // used for the ship's own pixels; slot 1 is retired (the
-                // rows' other reading, settled 2026-09-04).
+                // used for the ship's own pixels; 1 is 3 again with the
+                // OTHER eye's translation, which is the whole test of
+                // whether the depth textures are assigned to the right
+                // eyes -- so it must reproject with depth exactly as 3
+                // does, or it collapses into a copy of candidate 0 and
+                // measures nothing.
                 float3 tvc = c == 1 ? tvCand.xyz : tvUsed.xyz;
-                bool depthC = knobs.y != 0.0 && c == 3;
+                bool depthC = knobs.y != 0.0 && (c == 3 || c == 1);
                 float3 h;
                 uint wc = 0;
                 float2 mvc = 0.0;
@@ -1865,9 +1869,18 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         // The registration instrument's candidates, whichever of them
         // exist this frame (temporalPassRegistration): 0 the head's
         // rotation alone, 2 the world path's delta from the rows, 3 the
-        // head with depth as used. Slot 1 held the rows' other reading
-        // until 2026-09-04, when the z flip settled the reading
-        // (docs/anti-aliasing.md); it stays empty.
+        // head with depth as used, 1 the same as 3 but reprojected with
+        // the OTHER eye's translation.
+        //
+        // Slot 1 held the rows' other reading until 2026-09-04, when the
+        // z flip settled that (docs/anti-aliasing.md). It was then rebuilt
+        // for the eyes-swapped question -- the constant buffer carries
+        // tvCand, the caller computes tvSwapped and passes it, the shader
+        // reads it -- but candValid[1] was never set, so the candidate has
+        // never once run, while depth_probe.h and this pass's own runtime
+        // line have gone on telling the reader it answers whether the eyes
+        // are assigned right. It was armed for a flight on 2026-09-07 and
+        // could not have reported. Now it can.
         float cand[4][9];
         bool candValid[4] = {};
         const bool haveDepth = depthSrv != nullptr && headTrans != nullptr;
@@ -1877,6 +1890,13 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
             if (haveDepth) {
                 memcpy(cand[3], deltaHead, sizeof(cand[3]));
                 candValid[3] = true;
+                // Only when the other eye's translation is genuinely in
+                // hand: tvCand falls back to this eye's, which would make
+                // candidate 1 a copy of 3 and its verdict meaningless.
+                if (headTransSwapped) {
+                    memcpy(cand[1], deltaHead, sizeof(cand[1]));
+                    candValid[1] = true;
+                }
             }
         }
         candValid[2] = g_curValid && g_prevValid;
@@ -3241,7 +3261,7 @@ bool temporalPassRegistration(char* buf, size_t n, char* buf2, size_t n2, char* 
     if (buf2 && n2) buf2[0] = 0;
     if (buf3 && n3) buf3[0] = 0;
     if (!buf || n == 0 || g_treats == 0 || g_intervalFrames == 0) return false;
-    static const char* const kNames[4] = {"head, rotation only", "(retired)",
+    static const char* const kNames[4] = {"head, rotation only", "depth, eyes swapped",
                                           "world, the rows' delta", "head with depth"};
     size_t used = 0;
     regAppend(buf, n, used, "over the last %u eye-frames: ", g_intervalFrames);
@@ -3253,7 +3273,7 @@ bool temporalPassRegistration(char* buf, size_t n, char* buf2, size_t n2, char* 
     } else {
         bool firstCand = true;
         for (int k = 0; k < 4; ++k) {
-            if (!g_candPix[k]) continue;   // slot 1 is retired; the rest print once they have a delta
+            if (!g_candPix[k]) continue;   // each prints once it has a delta to judge
             regAppend(buf, n, used, "%s%s ", firstCand ? "" : "; ", kNames[k]);
             firstCand = false;
             const double px = static_cast<double>(g_candPix[k]);
