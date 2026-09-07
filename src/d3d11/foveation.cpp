@@ -403,7 +403,8 @@ uint32_t g_seenCount = 0;
 // The verdicts that outlive the frame.
 struct Known {
     void*    resource = nullptr;
-    uint32_t lastSeen = 0;   // the frame it was last drawn into
+    uint32_t lastSeen = 0;      // the frame it was last drawn into
+    uint32_t lastCleared = 0;   // the frame its skipped strip was painted black
     int      eye = 0;
     bool     settled = false;   // by a submitted texture, or by the walk behind one
     bool     everSubmitted = false;
@@ -416,6 +417,7 @@ Known    g_known[64];
 uint32_t g_knownCount = 0;
 uint64_t g_settledBySubmit = 0, g_settledByOrder = 0, g_unsettled = 0, g_corrections = 0;
 uint32_t g_knownEvictions = 0;
+uint64_t g_stripClears = 0;   // strip paint-outs, one per eye target per frame
 
 Known* knownFor(void* resource) {
     for (uint32_t i = 0; i < g_knownCount; ++i) {
@@ -1067,6 +1069,59 @@ bool fillMask(ID3D11DeviceContext* ctx, Mask& m) {
 // The image for this size and eye, made on first sight, refilled when the
 // settings changed since it was filled. Null when the tangents have not
 // been published yet (nothing to centre on) or after a stand-down.
+// PAINT THE SKIPPED STRIP BLACK.
+//
+// A culled tile is not drawn, and "not drawn" means the target keeps
+// whatever it already held -- the previous frame, or, across a scene
+// change, the previous SCENE. Sean saw exactly that on 2026-09-07:
+// "the outer cull leaves some image data from the previous scene", and
+// the smear at the edge of his left eye was the same observation from
+// the other side. So clear the strip once a frame, on the first draw
+// into each eye target; every draw after it leaves the strip alone,
+// because that is what culling it means.
+//
+// If the game clears the whole target after this, the strip takes the
+// game's clear colour instead, which is still a colour of this frame's
+// choosing rather than last scene's picture.
+void clearStrip(ID3D11DeviceContext* ctx, void* rtv, int eye, uint32_t w, uint32_t h) {
+    if (!ctx || !rtv || w == 0 || h == 0) return;
+    float l, r, top, bot;
+    if (!frustumOf(eye, w, h, &l, &r, &top, &bot)) return;
+    if (!(r > l)) return;
+    const bool  monoLeft = eye == 0;
+    const float edge = monoLeft ? -r : -l;
+    const float pb = (edge - l) / (r - l) * static_cast<float>(w);
+    if (!std::isfinite(pb)) return;
+    const int tile = static_cast<int>(kTile);
+    D3D11_RECT rect = {};
+    rect.top = 0;
+    rect.bottom = static_cast<int>(h);
+    if (monoLeft) {
+        // The culled tiles are those ending at or before the boundary.
+        const int tiles = static_cast<int>(pb / static_cast<float>(tile));
+        if (tiles <= 0) return;
+        rect.left = 0;
+        rect.right = tiles * tile;
+    } else {
+        const int first = static_cast<int>(ceilf(pb / static_cast<float>(tile)));
+        if (first * tile >= static_cast<int>(w)) return;
+        rect.left = first * tile;
+        rect.right = static_cast<int>(w);
+    }
+    if (rect.right <= rect.left) return;
+    guardedBudget(g_budget, [&] {
+        ID3D11DeviceContext1* ctx1 = nullptr;
+        if (FAILED(ctx->QueryInterface(__uuidof(ID3D11DeviceContext1),
+                                       reinterpret_cast<void**>(&ctx1))) ||
+            !ctx1) {
+            return;
+        }
+        const float black[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+        ctx1->ClearView(static_cast<ID3D11RenderTargetView*>(rtv), black, &rect, 1);
+        ctx1->Release();
+    });
+}
+
 Mask* maskFor(ID3D11DeviceContext* ctx, uint32_t w, uint32_t h, int eye) {
     for (Mask& m : g_masks) {
         if (m.used && m.w == w && m.h == h && m.eye == eye) {
@@ -1427,11 +1482,12 @@ void summary(const char* when) {
         "foveation: %s, the draws -- %.0f a frame into eye-sized targets, %.0f of them under the image, "
         "%.0f left at full rate because the eye is not known, %.0f into everything else. Eyes settled: "
         "%.1f a frame by a submitted texture, %.1f by the pairing of their size's targets, %.1f not placed, "
-        "%llu corrections, %u evictions.",
+        "%llu corrections, %u evictions; %.1f strip paint-outs a frame.",
         when, static_cast<double>(g_eyeDraws) / f, static_cast<double>(g_eyeDrawsUnder) / f,
         static_cast<double>(g_unknownEyeDraws) / f, static_cast<double>(g_otherDraws) / f,
         static_cast<double>(g_settledBySubmit) / f, static_cast<double>(g_settledByOrder) / f,
-        static_cast<double>(g_unsettled) / f, static_cast<unsigned long long>(g_corrections), g_knownEvictions);
+        static_cast<double>(g_unsettled) / f, static_cast<unsigned long long>(g_corrections), g_knownEvictions,
+        static_cast<double>(g_stripClears) / f);
     {
         // The targets by draws, largest first, at most eight.
         const Sig* order[16] = {};
@@ -1479,6 +1535,7 @@ void summary(const char* when) {
     g_unsettled = 0;
     g_unknownEyeDraws = 0;
     g_maskRefills = 0;
+    g_stripClears = 0;
 }
 
 }  // namespace
@@ -1702,10 +1759,17 @@ void foveationOnDraw(ID3D11DeviceContext* ctx, bool rtvEyeSized, void* rtv, uint
             // (eye_split.h), so no ordering rule can place the rest; an
             // unplaced target is left at full rate, which costs coverage
             // and cannot be seen.
-            const Known* k = knownFor(info.resource);
+            Known* k = knownFor(info.resource);
             if (k && k->settled) {
                 g_lastMask = maskFor(ctx, info.a, info.b, eye);
                 if (!g_lastMask && g_phase == Phase::Armed) ++g_noTangentFrames;
+                // Once a frame per target, and before the draws that will
+                // leave the strip untouched.
+                if (g_lastMask && g_monoEdge && k->lastCleared != g_frame) {
+                    k->lastCleared = g_frame;
+                    ++g_stripClears;
+                    clearStrip(ctx, rtv, eye, info.a, info.b);
+                }
             } else {
                 g_lastEyeUnknown = true;
             }
