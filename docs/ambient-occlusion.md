@@ -6,10 +6,12 @@ about EDVR cite the source; claims about the game are labelled measured
 (this repo's censuses, dumps and disassemblies), read (taken from a
 captured shader's bytecode), or believed; what only a live session can
 settle is collected under Phase 0. Nothing here is built. The first capture
-arrived the same day, on issue #23, and its reading is recorded under
-[What the first worksheet said](#what-the-first-worksheet-said) as far as
-it has gone; before it, the ambient-occlusion pass had never appeared on a
-census by name, and no file in this tree mentioned it.*
+arrived the same day, on issue #23; the worksheet's half is under
+[What the first worksheet said](#what-the-first-worksheet-said) and the
+files' half under [What the capture said](#what-the-capture-said). The
+pass now has a name, HBAO, and it is a chain of compute shaders -- but its
+hashes are still unknown, because the capture's two census presses were
+both discarded on the foreground check and no census recorded.*
 
 ## The ask
 
@@ -47,8 +49,9 @@ search, 2026-09-07). This repo's is
 filed from the worksheet the same day.
 
 The asteroid is where this reporter sees it; on none of the readings
-below is it where the fault lives. Screen-space occlusion is one pass over
-the whole frame (believed; the census shows it), so whatever the mechanism
+below is it where the fault lives. Screen-space occlusion is one chain over
+the whole frame (read, from the game's own symbols: five compute entry
+points from a linear depth to a blurred result), so whatever the mechanism
 is, it is the same on the pilot's arm the forum thread names, in a
 station's hangar, and on a planet's surface -- the cracks of an icy
 fragment are simply where the most silhouettes per degree sit in view,
@@ -97,16 +100,16 @@ Measured, with the source:
   finds occlusion *queries* (`src/d3d11/draw_census.cpp:1106`, the DCL
   query brackets) and the sun glare's own occlusion test
   (`sunglare_vs.h:300`) and nothing else. The pass has no name, no hash, no known slot.
-- **The eye-split dump has probably already photographed the buffer.** The
-  measured field frame carried sixteen eye-sized targets, among them a
-  2324x2392 target at format 60, `R8_TYPELESS`, one byte a texel
-  (`src/d3d11/eye_split.cpp:65`; [eye-split.md](eye-split.md)). A
-  one-channel eye-sized target is the shape of an occlusion buffer, and
-  `tools/diff_eye_split.py` decodes that format
-  (`diff_eye_split.py:157`). That it *is* the occlusion buffer is
-  believed; its `EYESPLIT` manifest line (`eye_split.cpp:187`) carries the
-  draw count into it, and a full-screen pass is one draw where the
-  geometry buffer is hundreds.
+- ~~**The eye-split dump has probably already photographed the buffer.**~~
+  **Wrong, and the first capture proved it wrong** -- kept here because it
+  is the guess this hunt paid for. The reasoning was: the measured field
+  frame carried sixteen eye-sized targets, among them a 2324x2392 target at
+  format 60, `R8_TYPELESS`, one byte a texel (`src/d3d11/eye_split.cpp:65`;
+  [eye-split.md](eye-split.md)); a one-channel eye-sized target is the
+  shape of an occlusion buffer. It is the shape of a sun-shadow mask too,
+  and that is what it turned out to be. The occlusion is written by compute
+  shaders into UAVs, which the dump cannot see at all. See
+  [What the capture said](#what-the-capture-said), Q4.
 - **This engine runs some passes for one eye per frame.** The scanner-body
   hunt recorded the four atmosphere draws vanishing from one eye on
   alternate frames in healthy normal flight, and filed it as ordinary
@@ -399,8 +402,359 @@ answer closes:
 What the prose leaves: **A or C**, and the census and the dump decide
 between them (Phase 1). The reporter did every step of the session and
 felt the hitch, so the bundle should carry two censuses, one eye-split
-dump and the shader dump. The reading of those files goes here when it
-is done.
+dump and the shader dump.
+
+## What the capture said
+
+Read at the desk 2026-09-07, from the two zips on the issue: the Save logs
+bundle and the hand-made zip of `edvr_logs\dumps` and `edvr_logs\shaders`.
+Nothing from either is in this tree. The session log names EDVR v0.14.0
+and game build 332841, and the eye is 2528x2704 as `openvr_api.dll`
+published it.
+
+The plan expected the census to name the pass and the other files to
+describe it. It came out the other way round: **the census did not record
+at all**, and the game's own files named the pass outright.
+
+### The census did not record
+
+Both presses were thrown away, and the log says so in the reporter's own
+session:
+
+```
+[12:20:26.828] the draw census key was pressed, but another window had focus, so nothing was captured.
+[12:20:59.848] the draw census key was pressed, but another window had focus, so nothing was captured.
+```
+
+No `DC begin census` line exists anywhere in the log, and the breadcrumbs
+carry none either. The timing fits the worksheet exactly -- the two presses
+are thirty-three seconds apart and the eye-split dump lands at 12:21:39 --
+so the reporter did everything asked; the instrument dropped it.
+
+The cause is measured, not guessed. `dump_draws` is one of EDVR's own keys
+rather than a binding adopted from Elite, so it keeps the foreground check
+(`hotkey.cpp:148-149`, `gameHasFocus` at `hotkey.cpp:59-65`), and only the
+camera and FSS keys are marked game-mirrored (`device_hook.cpp:1266-1270`).
+In VR the foreground window is ordinarily the compositor's mirror or the
+settings app and not Elite's, which `hotkey.h:66-67` already says in as
+many words. **This is a design fault in the instrument, not in the
+reporter**: the census key is the one key a player presses while wearing a
+headset, and it is the one key that requires the flat window to be
+focused. The clock-driven arming below is the way round it, and making the
+census key game-mirrored -- or exempting it -- is the second instrument
+change this hunt asks for, after Q4's.
+
+Without a census, Phase 1 steps 1, 2 and 6 could not be done, and with them
+every Phase 2 probe, each of which takes a shader hash as its only
+argument. Steps 3, 4 and 5 were attempted from the other files, and two of
+the three came back with something the plan had not expected.
+
+### Q9, and the pass's name: it is HBAO, and it is compute
+
+Read, from `GraphicsConfiguration.xml` in the bundle (lines 75-137) and
+from the game executable of the same build:
+
+Elite's ambient occlusion is **HBAO** -- horizon-based, a `<HBAO>` block with
+four tiers, `Off`, `Low`, `Medium`, `High`. Across the three enabled tiers
+exactly three values change, and nothing else:
+
+| | Low | Medium | High |
+|---|---|---|---|
+| `HBAO2_Bias` | 0.3 | 0.2 | 0.05 |
+| `HBAO2_BlurSharpness` | 8.0 | 256.0 | 256.0 |
+| `ResolutionScale` | 0.25 | 0.5 | 1.0 |
+
+Everything else is common to all three: `HBAO_RadiusInMeters` 3.0,
+`HBAO_NearRadiusInMeters` 2.0, `HBAO_NearDistance` 30.0,
+`HBAO_PowExponent` 5.0, `HBAO_Bias` 0.5, `HBAO_BlurSharpness` 0.5,
+`HBAO2_ScreenRadius` 0.07, `HBAO2_PrescaleWithClamp` 1.0,
+`HBAO2_PowExponent` 1.0, `HBAO2_Strength` 4.0, `HBAO2_PrenormalFade` 0.8,
+`MultiSampleCount` 1. The tier is chosen by `<AOQuality>` in the profile,
+and the reporter's `Custom.4.4.fxcfg` carries `<AOQuality>3</AOQuality>` --
+the fourth entry, `High`, at full resolution. The index-into-the-block
+reading is cross-checked against five other keys in the same file whose
+blocks have different lengths (`EnvmapQuality` 1 of 2, `GalaxyMapQuality`
+2 of 3, `BloomQuality` 0 of 4, `TerrainQuality` 4 of 5, `VolumetricsQuality`
+3 of 4) and holds for all of them. The menu's top entry is `High`; the
+worksheet's "Ultra" is the same tier.
+
+Two consequences, immediately:
+
+- **C2 is closed.** At the reported setting the pass runs at
+  `ResolutionScale` 1.0 -- full eye resolution -- so there is no
+  half-resolution buffer to restore. And the fault is unchanged at `Low`,
+  which is quarter resolution with a blur sharpness of 8 rather than 256,
+  so it is not a resolution artefact at any tier.
+- **The worksheet's "Low looks exactly the same as High" is now odd
+  enough to re-ask.** A quarter-resolution pass under a much softer blur
+  should not look identical to a full-resolution one. The likeliest
+  explanation is that the tier did not take without a restart, which would
+  mean control A of the worksheet measured the top tier twice. Worth one
+  line in a reply, not a mechanism.
+
+The executable settles what the census would have: the AO **is a chain of
+compute shaders**. Its entry-point names and its HLSL binding names are in
+the image in clear (verified here on a local install of the same build,
+332841, and `GFSDK` appears zero times, so this is Frontier's own port and
+not NVIDIA's linked library):
+
+```
+HBAO_CONSTRUCT_LINEAR_DEPTH_ONLY_CS   HBAO_CONSTRUCT_NORMAL_AND_DEPTH_CS
+HBAO_PERFORM_AO_CS                    HBAO_REINTERLEAVE_AND_BLUR_CS
+HBAO_REINTERLEAVE_BLUR_UPSAMPLE_CS
+g_constructNormalAndDepthArraySourceLinearDepthTexture
+g_constructNormalAndDepthArrayOutputDepthTexture
+g_performAONormalSourceTexture   g_performAOSourceDepthTextureArray
+g_performAOData                  g_performAOOutputTexture
+g_reinterleaveAndBlurAO          g_reinterleaveAndBlurOutput
+>fRenderHBAONode::PerformAOData  c_flagsTexture  OutputHBAO
+>HBAO_Jitter                     fFragment.HBAO.2D
+```
+
+and, in one contiguous run beside them, the shader's whole parameter list:
+
+```
+c_viewDepthTexture  c_randomTexture  c_quarterResolution  c_fullResolution
+c_invQuarterResolution  c_invFullResolution  c_UVToViewA  c_UVToViewB
+c_radiusToScreen  c_negInvR2  c_nDotVBias  c_AOMultiplier  c_powExponent
+c_blurSharpness  c_AODepthTexture  c_deinterleavedTexturing
+c_useJitterTexture  c_enableBlur  c_jitterPositionScaler  c_jitter
+c_float2Offset  c_fullResNormalTexture  c_quarterResDepthTexture
+c_AOTextureArray  c_unpackZ  c_viewMatrixT  c_nearRadiusToScreen
+c_nearNegInvR2  c_nearDistance
+```
+
+with `SeparateDepthTextureInto8Targets`, `ReconstructNormalPS`,
+`ReinterleaveAOPS` and `DebugNormalsPS` immediately before them -- the
+pixel-shader half of the same chain, kept alongside the compute one.
+
+That list is the answer to **Q6, in kind**. The pass takes its per-pixel
+kernel rotation from a jitter that is *selected by where the pixel is*:
+`c_deinterleavedTexturing` with `c_float2Offset` splits the depth buffer
+into sixteen layers by the pixel's position modulo four
+(`g_performAOSourceDepthTextureArray`, `c_AOTextureArray`,
+`c_quarterResDepthTexture`), runs the horizon sweep per layer with that
+layer's own `c_jitter`, and reinterleaves; the alternative path,
+`c_useJitterTexture` with `c_randomTexture`, samples a small tiling table
+at the same pixel grid. Either way the rotation is a function of the pixel
+coordinate and of nothing else. **That is mechanism C's premise, no longer
+believed but read from the game's own symbols**: the same surface point
+lands on a different pixel in each eye, so it falls in a different layer,
+so it is estimated with a different rotation, and cracks are where that
+shows because cracks are all silhouette.
+
+It is also **the answer to Q2: a dispatch, not a draw** -- which changes
+which probes apply (`census_skip_dispatch`, `dispatch_pair_sync`,
+`census_cb_watch` reading a compute shader's b0 and b1), and which is why
+the shader dump was always going to come up empty. See below.
+
+### Q4: the dump did not catch the occlusion, and could not
+
+The eye-split dump fired cleanly -- 24 targets, both eyes at every stage of
+one frame -- and **none of them is the occlusion buffer.** The reason is
+structural, and the doc half-anticipated it at Q4: the dump records the
+render target bound at slot 0 of a *draw*
+(`OMGetRenderTargets(1, ...)`, `eye_split.cpp:244-250`, called from
+`vscreen.cpp:2053`), and every stage of Elite's HBAO writes a compute
+shader's UAV -- `g_performAOOutputTexture`, `g_reinterleaveAndBlurOutput`.
+A UAV that is never bound as a render target is invisible to this
+instrument. So is a dispatch.
+
+It is worth saying what the dump *did* catch in that shape, because it is
+the thing a hasty reading would call the occlusion. One target is
+one-channel and eye-sized, in both eyes:
+
+```
+EYESPLIT stage=5 shape=632x676f60 eye=0 draws=2 src=2528x2704 step=4 pitch=2560
+EYESPLIT stage=8 shape=632x676f60 eye=1 draws=2 src=2528x2704 step=4 pitch=2560
+```
+
+Format 60 is `R8_TYPELESS`, one byte a texel (`eye_split.cpp:63-73`), at
+the full eye size, two draws into each eye's copy, sitting between the
+linearised depth and the 53-draw lit scene. Measured from the file against
+the same eye's linear depth, it is exactly 255 on 100.0% of the texels at
+the far plane, continuous on geometry (55% at 0, 32% at 255, 13% between),
+saturated to 0 across whole asteroids at 300 to 3000 units, back at 255
+beyond about 10^5, and on the near cockpit it draws hairlines along the
+canopy sill and the console rim.
+
+**It is the sun-shadow mask, not the occlusion**, and the reporter's own
+shader dump proves it. `ps_7EAC71963E66C5FE` is a full-screen deferred
+shadow resolve: it loads scene depth at integer pixel coordinates,
+reconstructs a world position through the ray basis in `cb2`, reads a flag
+byte from the stencil (`and l(4)`, then `l(128)` / `l(192)` under a second
+branch), loops over `cb2[35].x` cascades projecting by
+`cb2[i + 11]` / `cb2[i + 19]` with a smoothstep crossfade between them,
+does a bicubic PCF filter (the coefficients `-0.166667, 0.5, -0.5,
+0.166667` then `0.020833, 0.479167` are the standard cubic B-spline
+weights), and -- this is the line that settles it -- **returns exactly
+`l(1.000000)` when no cascade covers the pixel**, ending
+`mad o0.xyzw, r3.xxxx, r0.xxxx, r0.zzzz`: one scalar splatted to four
+channels, which is what an `R8` render target takes the `.x` of. Every
+measured property above follows: 1.0 at the far plane, 1.0 past the last
+cascade, contact hairlines from the PCF on near geometry. The plausible
+second draw is `ps_8A08FF781272C5F6`, two instructions that splat one
+interpolated scalar -- a fill.
+
+So the eye diff measures the shadow mask. For the record, it says the
+shadow mask is fine: `diff_eye_split.py` reports
+
+```
+stage 5  632x676 fmt=60   tiles differing 70.6%  balance -0.00  worst +1.0000  draws 2/2  [1148/1638 tiles]
+```
+
+and the 70.6% is the differ's whole-frame registration aligning one
+disparity across a cockpit at a metre and a ring at a kilometre. Registered
+tile by tile instead -- each 32x32 dump-pixel tile aligned on the *rendered
+image* and that same shift applied to the other buffers, which takes
+parallax out by construction -- over the 131 tiles that register at
+r >= 0.70 and carry detail:
+
+| after per-tile registration | median r | 10th percentile |
+|---|---|---|
+| rendered image (registered on) | 0.974 | 0.940 |
+| linear depth | 0.939 | 0.877 |
+| shadow mask | 0.950 | 0.394 |
+
+The mask agrees between the eyes marginally better than the depth does
+(paired median +0.004); its level difference is 0.28% of full scale with
+the darker eye a coin flip tile to tile (eye0 darker on 48.9%); and the
+whole-frame disparity is +616 render pixels, matching the linear depth's
++648 and the HDR image's +616. **Shadows are not the reporter's fault.**
+
+**Q7 therefore stays open**, and Q1 and Q3 only half close: the tier's
+`ResolutionScale` of 1.0 says the occlusion is eye-sized, and nothing
+photographed it.
+
+Two more gates, for whoever aims the next dump:
+
+- It writes **every fourth texel of every fourth row**
+  (`eye_split.cpp:29-38`). Anything finer than four render pixels is gone,
+  and a kernel rotation on a four-pixel lattice is precisely that scale --
+  so even with the UAV gate lifted, this dump could not see the grain
+  mechanism C predicts.
+- Its size gate is within two pixels of the published eye
+  (`near2`, `vscreen.cpp:876`; `targetIsEyeSized`, `vscreen.cpp:1012`), so
+  at `Low` or `Medium`, where `ResolutionScale` is 0.25 or 0.5, nothing of
+  the chain would be captured at all.
+
+**Q10** is answerable anyway: eye0 is the eye rendered first
+(`eye_split.cpp:127-130`), and on the one buffer that was photographed neither
+eye is the worse one.
+
+### Step 5: the shader dump could never have held it
+
+The reporter's shader dump is complete and useful, and it cannot contain
+the pass. 348 blobs arrived, 200 pixel shaders and 148 vertex shaders and
+no compute shader at all, because the dump writes only `vs` and `ps`
+(`device_hook.cpp:397` and `:413`). Every stage of Elite's HBAO ends in
+`_CS`.
+
+All 200 pixel shaders were disassembled and read anyway, twice, under two
+different briefs. What that found:
+
+- `ps_CB95394B50D737D6`, five instructions, `c/(z+d)`, one channel out --
+  the depth linearisation, matching the `R32_TYPELESS` target that takes
+  one draw. This is the only member of the occlusion chain identified.
+- No horizon sweep, no kernel rotation, no small-table lookup indexed by a
+  pixel position modulo its size, anywhere in the 200. The nearest things
+  are SMAA's three vertex shaders and a depth-aware upsample, both
+  identified and both something else.
+
+A further check dates the dump against the session: no shader was created
+after 12:19:57, and the reporter set ambient occlusion to its top tier at
+about 12:20:5x, so the AO shaders existed before that -- they were created
+at load, while the setting was still on from the previous session. The
+dump is not missing them because it started late. It is missing them
+because they are compute.
+
+### Where that leaves it
+
+| | | |
+|---|---|---|
+| **A** | the seed steps per pass | **open.** `c_jitter` is a constant of the pass and the shape A needs; whether it advances per pass is unmeasured, and `census_cb_watch` on the dispatch is what says. |
+| **B** | one eye per frame | **closed**, by the worksheet: a stale eye equals the current one when nothing moves, and the fault is unchanged at rest. The dump adds nothing here, having photographed the wrong buffer. |
+| **C** | the noise is anchored to the pixel grid | **named, and its premise read.** The deinterleave is by pixel modulo four and the rotation follows the layer; the alternative path samples a tiling table at the pixel grid. What is not yet measured is that this is what the reporter is seeing. |
+| **C2** | the resolution | **closed.** The reported tier is `ResolutionScale` 1.0, and the fault is unchanged at 0.25. |
+| **D** | EDVR | **closed**, by the worksheet. |
+
+C is the mechanism the evidence names and A is not excluded, and a single
+census settles both -- it names the dispatch, and `census_cb_watch` on that
+name reads `c_jitter` per eye. Nothing else is worth building first.
+
+### The second capture
+
+One more session, nothing new built into the game, and the census armed
+from a clock so that no key has to be pressed and no window has to be
+focused. Everything the reporter has to do is put five lines in a file and
+sit still twice.
+
+```
+[fix]
+temporal_aa = off
+
+[log]
+max_mb = 32
+
+[advanced]
+census_offscreen = 1
+census_frames = 2
+census_lines = 16384
+census_at_ms = 300000,600000
+glare_shader_dump = 0
+```
+
+Four things about that block:
+
+- `census_at_ms` is read **once, at the first frame**
+  (`draw_census.cpp:1292-1296`), so it must be in the file before the game
+  launches; editing it mid-session does nothing. Up to eight moments,
+  comma separated (`kMaxSchedule`, `draw_census.cpp:80`). Each one arms a
+  census that records offscreen draws whatever `census_offscreen` says
+  (`draw_census.cpp:1320-1322`), which is what a compute chain needs.
+- `log.max_mb = 32` is the line Phase 0 above should have carried and did
+  not. The default cap is 4 MB (`log.cpp:105-106`) and a census at 16384
+  lines is about 2.3 MB (`draw_census.cpp:40-41`), so two or three of them
+  plus an ordinary session's log silently stops the writer; a census that
+  loses its end line is dropped by the differ rather than half-trusted
+  (`diff_draw_census.py:144-146`). A truncated log looks exactly like a
+  capture that worked.
+- `glare_shader_dump` can go off. It cost the reporter a restart and 348
+  files and could never have held a compute shader.
+- The two moments are five minutes and ten minutes in, and the design is
+  the same as Phase 0's: **the first with ambient occlusion Off, the second
+  with it at the top tier**, parked in the ring, still, looking at a
+  cracked fragment both times. The AO-off census is the baseline, and the
+  hashes present only in the second are the chain.
+
+**The differ will not do that comparison, and this is the third instrument
+change.** `tools/diff_draw_census.py` parses `DC` *draw* lines only
+(`DRAW_RE`, `diff_draw_census.py:62`); a `DCX` dispatch line
+(`DCX %u #%u n=%u,%u,%u ch=%016llX u=...`, `draw_census.cpp:1273`) is
+skipped, and the file's own note about the `bl=` tail says exactly what
+that costs: a line the regex misses is a line the tool reports as absent,
+in the same words it would use if the effect had not been captured. Until
+it reads `DCX`, the comparison is done by hand -- the `ch=` values in the
+AO-on census that do not appear in the AO-off one -- which for five entry
+points is a `sort | uniq` and not a hardship, but it must be done knowingly.
+
+With the dispatches named, Phase 2 becomes, in order:
+
+```
+[advanced]
+census_skip_dispatch = <ch>          # the occlusion vanishes: the right pass
+census_cb_watch      = <ch>          # A's gate; also dumps a CS's b0 and b1
+census_cb_slot       = 0
+
+[experimental]
+dispatch_pair_sync   = <ch>:all      # both eyes read one eye's occlusion
+```
+
+`census_skip_dispatch` takes up to four comma-separated hashes and
+`dispatch_pair_sync` one sixteen-digit hash with optional `:r` and `:all`
+suffixes; `:all` is needed because its default gate is the FSS scanner
+being up. `census_cb_watch` matches compute shaders and dumps b0 and b1 as
+the DCW lines' x and y slots (`edvr.ini`, the `census_cb_watch` block).
 
 ## Phase 1: reading the capture
 
@@ -509,40 +863,77 @@ identical has made one of them wrong.
 
 ## Open questions
 
-Each with what answers it. None is answerable from the desk.
+Each with what answers it, and what the first capture did to it.
 
-1. **Does the pass run per eye?** Two families of lines per frame, or one
-   read by both resolves (Phase 1, steps 1-2).
-2. **Draw or dispatch?** `DC`/`DCO` or `DCX` (step 1). It decides which
-   substitution, which skip key, and whether `dispatch_pair_sync` applies.
-3. **What size and format is the target?** The interned table (step 3).
-4. **Did the dump catch it?** `eye_split` records the render target bound
-   at each *eye-texture* draw, and an eye-texture draw is one into a
-   target of the eye's own size, within two pixels (`vScreenIsEyeSized`,
-   `vscreen.h:95`; `near2` in `vscreen.cpp:876`).
-   A half-sized target is inside the census's shape gate
-   (`eyeShapedAtScale`, `vscreen.h:68`, 40% to 250%) but outside the
-   dump's, and a target written only by a dispatch is outside it
-   entirely. Widening the dump's gate to the shape test is a two-line
-   change; copying a named dispatch's `u0` at the boundary is
-   `dispatch_pair_sync`'s copy pointed at a staging texture. Either is
-   the first instrument change this hunt makes, if Q3 says so.
-5. **Does a constant step per pass?** `census_cb_watch` (Phase 2).
-6. **Is there a noise table, and at which slot?** The pass's `s=` column
-   and the interned table's size for it; the disassembly's modulo (step 5).
-7. **Level or pattern?** The eye-split diff's `balance` and the reporter's
-   own account (step 4, Phase 0).
-8. **Stock, temporal AA off, and Low?** The reporter (Phase 0).
-9. **What do the levels change?** The `GraphicsConfiguration.xml` in the
-   Save logs bundle, read rather than believed.
-10. **Which eye renders first on this rig, and is it the worse one?** The
-    dump's `eye0` is the eye rendered first; the reporter names the worse
-    eye. The scanner-body hunt found the healthy eye drew first in every
-    failing frame, and whether that holds here is one line of the log.
-11. **Everywhere, or only asteroids?** The worksheet's "where else" answer
-    first; then one look at the pilot's arm and one in a hangar by anyone
-    with the fault. Everywhere means the pass; asteroids alone means what
-    feeds it ([Beyond asteroids](#beyond-asteroids)).
+1. **Does the pass run per eye?** Still open on its own evidence. The
+   worksheet closed B independently (unchanged at rest), and the dump
+   photographed the shadow mask rather than the occlusion, so it says
+   nothing about this. Phase 1 step 2 on the next census, counting DCX
+   lines against the two eyes' depth clears.
+2. **Draw or dispatch?** **ANSWERED: dispatch.** Read from the game
+   executable of build 332841 -- `HBAO_CONSTRUCT_LINEAR_DEPTH_ONLY_CS`,
+   `HBAO_CONSTRUCT_NORMAL_AND_DEPTH_CS`, `HBAO_PERFORM_AO_CS`,
+   `HBAO_REINTERLEAVE_AND_BLUR_CS`, `HBAO_REINTERLEAVE_BLUR_UPSAMPLE_CS`.
+   So the probes are `census_skip_dispatch`, `dispatch_pair_sync` and
+   `census_cb_watch` on a compute hash, and the fix is a dispatch-shaped
+   substitution. A draw-shaped tail exists too (`ReinterleaveAOPS`).
+3. **What size and format is the target?** Half answered. The tier's
+   `ResolutionScale` is 1.0 (0.5 at Medium, 0.25 at Low), so at the
+   reporter's setting the pass runs at full eye size; the format is
+   whatever `g_performAOOutputTexture` is created as, and nothing in the
+   capture says. The dump's eye-sized `R8_TYPELESS` target is the shadow
+   mask, not this.
+4. **Did the dump catch it?** **ANSWERED: no, and it cannot as built.**
+   `eye_split` records the render target bound at slot 0 of a *draw*
+   (`eye_split.cpp:244-250`, from `vscreen.cpp:2053`), and the HBAO chain
+   writes UAVs (`g_performAOOutputTexture`,
+   `g_reinterleaveAndBlurOutput`), which it cannot see; nor can it see a
+   dispatch. Two further gates would bite even if that one were lifted: it
+   writes every fourth texel of every fourth row (`eye_split.cpp:29-38`),
+   which aliases away a rotation grain on a four-pixel lattice, and its
+   size gate is within two pixels of the eye (`near2`,
+   `vscreen.cpp:876`), so at Low or Medium nothing of the chain is
+   captured at all. **Copying a named dispatch's `u0` at the boundary --
+   `dispatch_pair_sync`'s copy pointed at a staging texture -- is the
+   first instrument change this hunt makes**, and a second dump is not
+   worth taking before it exists.
+5. **Does a constant step per pass?** Open, and now specific: the constant
+   is `c_jitter` (with `c_float2Offset` and `c_jitterPositionScaler`), and
+   `census_cb_watch` on the AO dispatch dumps a compute shader's b0 and b1
+   as the DCW lines' x and y slots.
+6. **Is there a noise table, and at which slot?** ANSWERED in kind, not in
+   slot. The pass carries both idioms: `c_deinterleavedTexturing` with
+   `c_float2Offset` and a per-layer `c_jitter`, splitting the depth buffer
+   by the pixel's position modulo four; and `c_useJitterTexture` with
+   `c_randomTexture`, a tiling table read at the pixel grid. Which is bound
+   at this tier, and at which slot, needs the census.
+7. **Level or pattern?** **Still open.** The reporter says level; nothing
+   in the capture photographed the occlusion, so the dump cannot second
+   them. What it did measure is the sun-shadow mask, which agrees between
+   the eyes as well as the linear depth does (0.28% of full scale, the
+   darker eye a coin flip tile to tile) -- so shadows are not the fault
+   and can be set aside.
+8. **Stock, temporal AA off, and Low?** ANSWERED by the worksheet: all
+   three still show it. One thread left -- Low is a quarter-resolution pass
+   with a blur sharpness of 8 against 256, and "looks exactly the same as
+   High" is worth re-asking.
+9. **What do the levels change?** **ANSWERED**, read from the reporter's
+   own `GraphicsConfiguration.xml`: only `HBAO2_Bias`,
+   `HBAO2_BlurSharpness` and `ResolutionScale`. Not the sample count, not
+   the radius, not the strength.
+10. **Which eye renders first on this rig, and is it the worse one?**
+    Eye0 renders first (`eye_split.cpp:127-130`), and the reporter says
+    neither eye is worse. On the one buffer that was photographed the
+    shadow mask -- neither is, measured. The scanner-body hunt's pattern,
+    the healthy eye drawing first, has no unhealthy eye here to name.
+11. **Everywhere, or only asteroids?** Open. The worksheet says "only icy
+    rings so far" and the arm and the hangar are still unlooked at
+    ([Beyond asteroids](#beyond-asteroids)).
+12. **Is the deinterleave on at this tier, and how many layers?** New.
+    `SeparateDepthTextureInto8Targets` says eight render targets at a time,
+    which is sixteen layers in two passes, the ordinary 4x4 HBAO lattice --
+    but that is the pixel-shader path's name and the compute path may
+    differ. The census's DCX lines and their `u` columns say.
 
 ## What this document does not do
 
