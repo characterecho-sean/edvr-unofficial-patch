@@ -601,9 +601,42 @@ It ends `mad o0.xyzw, r3.xxxx, r0.xxxx, r0.zzzz` -- one scalar splatted to
 four channels, which is what an `R8` render target takes the `.x` of. Every
 measured property above follows: exactly 1.0 on the sky, 1.0 again past the
 last cascade, and hairline self-shadowing at creases on near geometry where
-the cascade resolution is highest. The plausible second draw is
+the cascade resolution is highest. Even the histogram is the shader's own
+arithmetic: its tail is `movc r0.x, r0.z, r0.x, l(1.000000)` followed by a
+light-bleeding remap, `saturate((v - cb2[5].x) / (1 - cb2[5].x))` through a
+smoothstep, which rails hard at both ends -- and the buffer measures 40.8%
+at exactly 0 and 49.3% at exactly 255. The plausible second draw is
 `ps_8A08FF781272C5F6`, two instructions that splat one interpolated
 scalar -- a fill.
+
+Two things confirm it independently of reading any shader, and either alone
+would be enough:
+
+- **It cannot be occlusion, from the pixels.** Occlusion is a local
+  function of the depth neighbourhood, so a patch of surface that is
+  locally flat with nothing near it must come out unoccluded whatever the
+  strength, the bias or the exponent. Take every 7x7 window of the dump
+  (28x28 render pixels) that lies wholly on geometry and whose depth varies
+  by less than 2% across the window: eye0 has 78,289 of them and **75.3%
+  read exactly 0**; restrict to beyond 50 units and 44,437 windows read
+  **97.3% exactly 0, mean 3.4 of 255**. Eye1 gives 80.1% and 96.6%. Forty
+  thousand flat, isolated patches reading fully occluded is not an
+  occlusion buffer. It is a surface facing away from the sun.
+- **Its consumer says so, and this tree said so first.** The deferred
+  lighting resolve `ps_7CECABDE34FFBE9E` loads this target at `t3`, picks a
+  channel with `dp3 r0.x, r0.xyzx, cb2[44].xyzx`, and then multiplies **both
+  the diffuse and the specular** by that one scalar
+  (`mul r0.yzw, r0.xxxx, r1.xxyz` and `mul r1.xyz, r0.xxxx, r2.xyzx`).
+  Ambient occlusion does not scale direct specular; a light-visibility term
+  does. That hash is not a new find either: `7CECABDE34FFBE9E` is the same
+  deferred resolve the black-planet hunt named on 2026-08-30
+  (`resolve_probe.h:1-23`; the write-up is
+  [scanner-body.md](scanner-body.md), which that header still calls
+  `docs/black-body.md`), and
+  `resolve_probe.h:44` already calls its `t3` blue channel "the shadow
+  mask". This tree had the buffer identified before this document guessed
+  at it, and the guess would not have been made if the two hunts' notes had
+  been read together.
 
 So the eye diff measures the shadow mask. For the record, it says the
 shadow mask is fine: `diff_eye_split.py` reports
