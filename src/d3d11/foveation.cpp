@@ -954,8 +954,20 @@ bool fillMask(ID3D11DeviceContext* ctx, Mask& m) {
     // Super) and the right eye's LEFT of it (-0.194); a mask whose centre
     // reads the other eye's sign is built on the wrong frustum, which is
     // what puts its rings on the wrong side of the frame.
+    const bool  monoLeft = m.eye == 0;
+    const float monoEdge = monoLeft ? -r : -l;
     if (g_maskLines < 8) {
         ++g_maskLines;
+        // Say which side the skipped strip actually landed on, in this
+        // eye's own tangents and as a side of the image. Sean reported
+        // coarse work on the RIGHT eye's NASAL side on 2026-09-07 and
+        // nothing in the log could confirm or deny where the strip went.
+        char strip[160] = {};
+        if (g_monoEdge) {
+            snprintf(strip, sizeof(strip),
+                     " The strip only this eye sees, beyond tangent %+.3f on its %s (%s) side, is not drawn.",
+                     monoEdge, monoLeft ? "left" : "right", "temporal");
+        }
         const float ndcx = (r > l) ? (2.0f * (cx - l) / (r - l) - 1.0f) : 0.0f;
         const float ndcy = (bot + top > 0.0f) ? (2.0f * (top - cy) / (top + bot) - 1.0f) : 0.0f;
         float outerT = 0.0f, innerT = 0.0f;
@@ -964,9 +976,9 @@ bool fillMask(ID3D11DeviceContext* ctx, Mask& m) {
             "foveation: the %s eye's %ux%u mask is built on the frustum l %+.3f r %+.3f top %+.3f bottom "
             "%+.3f (the published tangents are outer %.3f, inner %.3f), with the rings centred at tangent "
             "(%+.3f, %+.3f) -- NDC (%+.3f, %+.3f), where the LEFT eye's straight ahead should read about "
-            "+0.19 and the RIGHT eye's about -0.19. Full rate within %.3f of that, the ring to %.3f.",
+            "+0.19 and the RIGHT eye's about -0.19. Full rate within %.3f of that, the ring to %.3f.%s",
             m.eye == 0 ? "LEFT" : "RIGHT", m.w, m.h, l, r, top, bot, outerT, innerT, cx, cy, ndcx, -ndcy,
-            tanf(0.5f * g_innerDeg * 0.01745329252f), tanf(0.5f * g_outerDeg * 0.01745329252f));
+            tanf(0.5f * g_innerDeg * 0.01745329252f), tanf(0.5f * g_outerDeg * 0.01745329252f), strip);
     }
     const float deg2rad = 0.01745329252f;
     float inner = g_innerDeg, outer = g_outerDeg;
@@ -988,14 +1000,13 @@ bool fillMask(ID3D11DeviceContext* ctx, Mask& m) {
         m.gen = g_settingsGen;
         return true;
     }
-    // The monocular strip's boundary, in this eye's own tangents. The
-    // other eye reaches to this eye's nasal tangent mirrored, so for the
-    // left eye (l -outer, r +inner) everything below -r is territory the
-    // right eye does not cover, and for the right eye (l -inner, r +outer)
-    // everything above -l is. Symmetric frusta put the boundary on the
-    // image edge, which culls nothing, which is correct.
-    const bool  monoLeft = m.eye == 0;
-    const float monoEdge = monoLeft ? -r : -l;
+    // The monocular strip's boundary (monoLeft/monoEdge above) is in this
+    // eye's own tangents: the other eye reaches to this eye's nasal
+    // tangent mirrored, so for the left eye (l -outer, r +inner)
+    // everything below -r is territory the right eye does not cover, and
+    // for the right eye (l -inner, r +outer) everything above -l is.
+    // Symmetric frusta put the boundary on the image edge, which culls
+    // nothing, which is correct.
     const float fw = static_cast<float>(m.w), fh = static_cast<float>(m.h);
     for (uint32_t j = 0; j < m.th; ++j) {
         const float py0 = static_cast<float>(j * kTile);

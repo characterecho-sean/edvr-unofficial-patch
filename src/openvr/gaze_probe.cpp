@@ -68,11 +68,22 @@ bool g_saidChanged = false;
 // on the probe's arming and its sentinel, and logs nothing per frame.
 bool     g_sourceWanted = false;   // fix.foveation_centre = eyes, as read at launch
 bool     g_sourceOn = false;       // armed and publishing
+// The tracker is not ready when the runtime's first frame arrives. On
+// 2026-09-07 the source read once, was declined, and switched itself off
+// for the whole session -- while the probe running beside it recorded
+// "FIRST VALID CENTRE, 369 frames after arming". Six seconds. So the
+// first read is an attempt, not a verdict: keep asking until one answers
+// or the wait is plainly hopeless.
+bool     g_sourceEligible = false;   // the tracking system is one the repair was measured on
+bool     g_sourceGaveUp = false;
+uint32_t g_sourceTries = 0;
+const uint32_t kSourceTryLimit = 5400;   // a minute of frames, against 369 measured
 uint64_t g_sourcePublished = 0;
 uint64_t g_sourceInvalid = 0;
 bool     g_sourceFirstNoted = false;
 char     g_trackingSystem[128] = {};
 void sourceArm();
+void sourceTry();
 
 enum class Phase { Waiting, Armed, Off };
 Phase g_phase = Phase::Waiting;
@@ -1329,23 +1340,40 @@ void sourceArm() {
             g_trackingSystem);
         return;
     }
+    // Eligible: the repair itself applies here. Whether the tracker is
+    // AWAKE yet is a separate question, and sourceTry keeps asking it.
+    g_sourceEligible = true;
+    sourceTry();
+}
+
+// One attempt at the first gaze, made every frame until one answers.
+void sourceTry() {
+    if (g_sourceOn || g_sourceGaveUp || !g_sourceEligible) return;
     double d[3];
     float tx = 0.0f, ty = 0.0f;
     int why = 0;
+    ++g_sourceTries;
     if (!sourceRead(d, &tx, &ty, &why)) {
-        Log::get().note(
-            "gaze source: OFF -- the first read did not give a gaze (%s); the rings stay on straight ahead.",
-            why == 1 ? "a read declined" : why == 2 ? "the length was not near 1, so the model does not hold here"
-                                                    : "it pointed behind the head or past the packing");
+        if (g_sourceTries >= kSourceTryLimit) {
+            g_sourceGaveUp = true;
+            Log::get().note(
+                "gaze source: OFF -- %u frames of asking and no gaze yet (%s); the rings stay on straight "
+                "ahead for this session. The tracker may be off in Pimax Play, or this headset may not have "
+                "one.",
+                g_sourceTries,
+                why == 1 ? "the reads keep declining"
+                : why == 2 ? "the length was not near 1, so the model does not hold here"
+                           : "it pointed behind the head or past the packing");
+        }
         return;
     }
     g_sourceOn = true;
     Log::get().note(
         "gaze source: ON (fix.foveation_centre = eyes) -- the eye-tracked centre is published to the d3d11 "
         "half every frame: d = t - p from entries 36 and 12 on \"%s\", head-frame tangents (%+.3f, %+.3f) at "
-        "arming. The rings follow it; a lost gaze is published as lost and the rings fall back to straight "
-        "ahead. Nothing per frame is written down.",
-        g_trackingSystem, tx, ty);
+        "arming, after %u frame(s) of asking. The rings follow it; a lost gaze is published as lost and the "
+        "rings fall back to straight ahead. Nothing per frame is written down.",
+        g_trackingSystem, tx, ty, g_sourceTries);
 }
 
 void sourcePublish() {
@@ -1367,6 +1395,7 @@ void sourcePublish() {
 
 void ask(const vr::TrackedDevicePose_t* hmd) {
     if (g_sourceOn) sourcePublish();
+    else sourceTry();   // the tracker wakes late; keep asking until it does
     if (!g_wanted) {
         ++g_frames;
         return;
