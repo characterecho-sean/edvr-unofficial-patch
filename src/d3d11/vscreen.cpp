@@ -2315,13 +2315,6 @@ void STDMETHODCALLTYPE hookedClearRtv(ID3D11DeviceContext* self,
     s->realClearRtv(self, rtv, c);
 }
 
-void vScreenSetRenderTargetsRaw(ID3D11DeviceContext* ctx, uint32_t n,
-                                ID3D11RenderTargetView* const* rtvs,
-                                ID3D11DepthStencilView* dsv) {
-    if (!g_state || !g_state->realOMSetRenderTargets || !ctx) return;
-    g_state->realOMSetRenderTargets(ctx, n, rtvs, dsv);
-}
-
 void STDMETHODCALLTYPE hookedOMSetRenderTargets(ID3D11DeviceContext* self, UINT n,
                                                 ID3D11RenderTargetView* const* rtvs,
                                                 ID3D11DepthStencilView* dsv) {
@@ -3601,6 +3594,13 @@ void readCensusSkip(Config& cfg, State* s) {
                         "(%llu draws were skipped while it was set).",
                         static_cast<unsigned long long>(s->censusSkipped));
     }
+}
+
+void vScreenSetRenderTargetsRaw(ID3D11DeviceContext* ctx, uint32_t n,
+                                ID3D11RenderTargetView* const* rtvs,
+                                ID3D11DepthStencilView* dsv) {
+    if (!g_state || !g_state->realOMSetRenderTargets || !ctx) return;
+    g_state->realOMSetRenderTargets(ctx, n, rtvs, dsv);
 }
 
 bool vScreenIsEyeSized(uint32_t w, uint32_t h) {
