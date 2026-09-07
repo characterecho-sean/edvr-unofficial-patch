@@ -15,6 +15,7 @@
 #include "binding_shadow.h"
 #include "depth_probe.h"    // depthProbeIsSceneDepth, ...Format: where the pass reads
 #include "exposure_fix.h"   // lookupShaderHash
+#include "temporal_pass.h"  // temporalPassPlanes: the scene's encoding
 #include "vscreen.h"        // vScreenSetRenderTargetsRaw: the rebind past the shadow
 
 namespace edvr {
@@ -56,6 +57,23 @@ bool     g_menus = true;       // advanced.ui_depth_menus: bind the pass's depth
                                // a composite whose own depth nothing reads
 bool     g_eyesSwapped = false; // advanced.ui_depth_eyes = swapped: the A/B for
                                 // the order rule that names the eye
+// THE ENCODING. The menu's and the loader's composites are drawn through
+// the interface projection -- near 0.1 m, far 1000 m on build 332841 (the
+// receiver logs every pair the game asks for) -- while the scene pair the
+// pass reads is decoded with the scene's (0.025 m, 50000 m). A reversed-Z
+// value is near/z to within a part in a thousand this side of ten metres,
+// so the two encodings differ by the ratio of the nears: a composite's
+// depth written as it comes decoded four times too near (measured
+// 2026-09-07: the menu panel at 0.26 m where 1.03 m is right). The
+// rebound draw's VIEWPORT depth range carries the correction: MaxDepth =
+// sceneNear / uiNear scales what the rasteriser writes, no shader touched.
+float    g_uiNear = 0.1f;       // advanced.ui_depth_planes
+float    g_uiFar = 1000.0f;
+bool     g_scaleNoted = false;
+constexpr uint32_t kMaxViewports = 16;
+D3D11_VIEWPORT g_savedVps[kMaxViewports];
+UINT     g_savedVpCount = 0;
+bool     g_vpScaled = false;
 uint32_t g_frame = 0;
 
 uint64_t g_families[kMaxHashes];
@@ -206,14 +224,62 @@ ID3D11DepthStencilView*  g_savedDsv = nullptr;
 
 // Counters: this window, and the session.
 uint32_t g_wComposite = 0, g_wDirect = 0, g_wWrote = 0, g_wDepthless = 0,
-         g_wNotScene = 0, g_wRebound = 0, g_wNoPair = 0, g_wAlreadyWrote = 0,
-         g_wNoTwin = 0, g_wLearned = 0, g_wFrames = 0;
+         g_wNotScene = 0, g_wRebound = 0, g_wNoPair = 0, g_wNoScene = 0,
+         g_wAlreadyWrote = 0, g_wNoTwin = 0, g_wLearned = 0, g_wFrames = 0;
 uint64_t g_sessionWrote = 0;
 
 void resetWindow() {
     g_wComposite = g_wDirect = g_wWrote = g_wDepthless = g_wNotScene = 0;
-    g_wRebound = g_wNoPair = g_wAlreadyWrote = g_wNoTwin = g_wLearned = 0;
+    g_wRebound = g_wNoPair = g_wNoScene = g_wAlreadyWrote = g_wNoTwin = 0;
+    g_wLearned = 0;
     g_wFrames = 0;
+}
+
+// The draws the pass's pair must carry before a composite is bound to it:
+// the loading screen's pair is whichever two eye-sized targets the ship
+// model's handful of draws make busiest, and a dialog's full-view depth
+// stamped over the model made it flicker (2026-09-07). The pass's own
+// rule for a real scene.
+constexpr uint32_t kRealSceneDraws = 50;
+
+// The viewport depth range that carries the encoding correction, and its
+// undoing. Through the context's own entry: vscreen's hook touches only
+// inflated FSS targets.
+void scaleViewportsForUi(ID3D11DeviceContext* ctx) {
+    float sceneNear = 0.0f, sceneFar = 0.0f;
+    if (!temporalPassPlanes(&sceneNear, &sceneFar) || !(g_uiNear > 0.0f)) return;
+    float scale = sceneNear / g_uiNear;
+    if (!(scale > 0.0f)) return;
+    if (scale > 1.0f) scale = 1.0f;
+    g_savedVpCount = kMaxViewports;
+    ctx->RSGetViewports(&g_savedVpCount, g_savedVps);
+    if (g_savedVpCount == 0 || g_savedVpCount > kMaxViewports) {
+        g_savedVpCount = 0;
+        return;
+    }
+    D3D11_VIEWPORT scaled[kMaxViewports];
+    for (UINT i = 0; i < g_savedVpCount; ++i) {
+        scaled[i] = g_savedVps[i];
+        scaled[i].MaxDepth = scaled[i].MinDepth + (scaled[i].MaxDepth - scaled[i].MinDepth) * scale;
+    }
+    ctx->RSSetViewports(g_savedVpCount, scaled);
+    g_vpScaled = true;
+    if (!g_scaleNoted) {
+        g_scaleNoted = true;
+        Log::get().note("ui depth: a rebound composite's depth is written through a "
+                        "viewport depth range of %.4f -- the interface projection's "
+                        "near %g m against the scene's %g m -- so its reversed-Z value "
+                        "decodes in the scene's encoding (advanced.ui_depth_planes).",
+                        static_cast<double>(scale), static_cast<double>(g_uiNear),
+                        static_cast<double>(sceneNear));
+    }
+}
+
+void restoreViewports(ID3D11DeviceContext* ctx) {
+    if (!g_vpScaled) return;
+    g_vpScaled = false;
+    if (g_savedVpCount) ctx->RSSetViewports(g_savedVpCount, g_savedVps);
+    g_savedVpCount = 0;
 }
 
 void releasePairViews() {
@@ -541,6 +607,29 @@ void uiDepthConfigure(Config& cfg) {
                                 : "its colour target's order in the frame, first "
                                   "= left");
     }
+    {
+        // The interface projection's planes: "near, far" in metres.
+        const std::string planes = cfg.getString("advanced.ui_depth_planes", "0.1, 1000");
+        float n = 0.0f, f = 0.0f;
+        char* end = nullptr;
+        n = static_cast<float>(strtod(planes.c_str(), &end));
+        while (end && (*end == ' ' || *end == ',' || *end == '\t')) ++end;
+        if (end && *end) f = static_cast<float>(strtod(end, nullptr));
+        if (n > 0.0f && f > n) {
+            if (n != g_uiNear || f != g_uiFar) {
+                g_uiNear = n;
+                g_uiFar = f;
+                g_scaleNoted = false;
+            }
+        } else if (planes != "0.1, 1000") {
+            Log::get().note("ui depth: advanced.ui_depth_planes = \"%s\" is not "
+                            "\"near, far\" in metres with far beyond near; the "
+                            "interface projection is taken as 0.1..1000 m.",
+                            planes.c_str());
+            g_uiNear = 0.1f;
+            g_uiFar = 1000.0f;
+        }
+    }
     const bool menus = cfg.getBool("advanced.ui_depth_menus", true);
     if (menus != g_menus) {
         g_menus = menus;
@@ -656,6 +745,13 @@ bool uiDepthOnEyeDraw(ID3D11DeviceContext* ctx) {
             ++g_wNotScene;
             return false;
         }
+        // Only onto a real scene's pair, and only once the pass has told
+        // this half the scene's planes (the correction needs them).
+        float sn = 0.0f, sf = 0.0f;
+        if (depthProbeSceneDraws() < kRealSceneDraws || !temporalPassPlanes(&sn, &sf)) {
+            ++g_wNoScene;
+            return false;
+        }
         ResourceInfo rt;
         if (!bindingResolve(bindingGet(BindSlot::Rtv0), &rt) || !rt.isTexture2D) {
             ++g_wNotScene;
@@ -716,6 +812,7 @@ void uiDepthBegin(ID3D11DeviceContext* ctx) {
             vScreenSetRenderTargetsRaw(ctx, n, g_savedRtvs, ours);
             g_rebound = true;
             ++g_wRebound;
+            scaleViewportsForUi(ctx);
             if (!g_rebindNoted) {
                 g_rebindNoted = true;
                 Log::get().note("ui depth: a composite whose own depth nothing reads "
@@ -756,6 +853,7 @@ void uiDepthBegin(ID3D11DeviceContext* ctx) {
         // A fault after the rebind: the game's bindings go back now rather
         // than at End, which the scope still calls.
         guarded("uiDepth.rebindRestore", [&] {
+            restoreViewports(ctx);
             uint32_t n = 0;
             for (uint32_t i = 0; i < kMaxRtvs; ++i) {
                 if (g_savedRtvs[i]) n = i + 1;
@@ -784,6 +882,7 @@ void uiDepthEnd(ID3D11DeviceContext* ctx) {
     if (g_rebound) {
         g_rebound = false;
         guarded("uiDepth.rebindRestore", [&] {
+            restoreViewports(ctx);
             uint32_t n = 0;
             for (uint32_t i = 0; i < kMaxRtvs; ++i) {
                 if (g_savedRtvs[i]) n = i + 1;
@@ -808,21 +907,22 @@ void uiDepthFrameBoundary() {
                         g_wWrote, g_wComposite, g_surfaceCount, g_wDirect);
     }
     if (g_wFrames >= kTotalsFrames) {
-        if (g_wWrote || g_wNotScene || g_wRebound || g_wNoPair || g_wNoTwin ||
-            g_wLearned || g_evictions) {
+        if (g_wWrote || g_wNotScene || g_wRebound || g_wNoPair || g_wNoScene ||
+            g_wNoTwin || g_wLearned || g_evictions) {
             Log::get().note("ui depth totals: %.1f interface draws a frame wrote depth "
                             "(%.1f composites, %.1f direct; %.1f bound to the pass's "
                             "depth in place of their own); %u surfaces known, %u "
                             "learned this window, %u forgotten; left alone: %.1f a "
-                            "frame not into the scene's depth, %.1f with no pair to "
-                            "bind, %u already writing, %u with no twin; %u depth "
-                            "states; %llu written this session.",
+                            "frame not into the scene's depth, %.1f with no real scene "
+                            "to bind to, %.1f with no pair, %u already writing, %u "
+                            "with no twin; %u depth states; %llu written this session.",
                             static_cast<double>(g_wWrote) / g_wFrames,
                             static_cast<double>(g_wComposite) / g_wFrames,
                             static_cast<double>(g_wDirect) / g_wFrames,
                             static_cast<double>(g_wRebound) / g_wFrames,
                             g_surfaceCount, g_wLearned, g_evictions,
                             static_cast<double>(g_wNotScene) / g_wFrames,
+                            static_cast<double>(g_wNoScene) / g_wFrames,
                             static_cast<double>(g_wNoPair) / g_wFrames,
                             g_wAlreadyWrote, g_wNoTwin, g_stateCount,
                             static_cast<unsigned long long>(g_sessionWrote));

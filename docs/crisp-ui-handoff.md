@@ -358,6 +358,49 @@ composite vertex shader projects through the scene block's rows) and a
 2D quad placed in NDC would break -- none of the classified families is
 one. Unflown at the time of writing.
 
+### Flight 3 (2026-09-07 12:50, v0.14.0-19-g8cd6e55): no change in the menus, the loader's ship model worse
+
+The rebind engaged exactly as built (one composite an eye in the menu,
+six a frame on the loading screen, all onto the pass's pair, no "no
+pair"), and Sean saw no change in the menu or loading text while the
+loading screen's 3D ship model "seemed to be flickering/blurring more".
+Both are explained by two things the flight-1 census already held:
+
+- **The encoding.** The menu's UI-pass depth targets sample the centre of
+  the view -- the panel -- at a raw reversed-Z value of 0.097, which the
+  pass's decode (near 0.025 m) calls 0.26 m and the game's other
+  projection pair (0.1 m .. 1000 m, logged by the receiver) calls 1.03 m.
+  A menu panel a metre away is plausible; a quarter of a metre is not. So
+  the menu and loader composites are drawn through the interface
+  projection, and their depth written as it comes into the scene's pair
+  decodes four times too near: the head-translation correction overshoots
+  fourfold and the text keeps moving. The cockpit families never had this
+  problem because they bind the scene pair and test against it, so they
+  must share the scene's projection (the census: all three cockpit
+  families bind the same two depth views, cleared to zero every frame).
+- **The loading screen's pair is not a scene.** With the ship model drawn
+  by a handful of draws, "the two busiest eye-sized depth targets" is an
+  arbitrary pick, and the loader's full-view composite (its scrim region
+  is translucent, not discarded) stamped the dialog's depth over the
+  model, which then reprojected at the dialog's distance.
+
+**The fix, same build family.** The rebound draw is written through a
+viewport depth range whose `MaxDepth` is the ratio of the nears (0.025 /
+0.1 = 0.25): a reversed-Z value is near/z to within a part in a thousand
+this side of ten metres, so scaling what the rasteriser writes by that
+ratio converts the interface encoding into the scene's with no shader
+touched (`advanced.ui_depth_planes` carries the interface pair, default
+the measured 0.1, 1000). And the rebind requires a real scene pair
+(`depthProbeSceneDraws() >= 50`, the pass's own rule), so the loading
+screen is left exactly as the game issues it; its text stays unfixed and
+its model stays right. The menu's UI-pass depth targets are NOT cleared
+by the game each frame (no clear of them in the census's frames), which
+the rebind sidesteps by writing into the pair, cleared every frame.
+
+Measured, not yet flown: the corrected menu depth. The `temporal_aa_debug
+= depth` view is the check -- the panel should paint at about a metre,
+nearer than the hangar wall, not far brighter than everything.
+
 # Design A: the UI layer
 
 ## A1. What counts as UI: the classifier
