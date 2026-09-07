@@ -3078,8 +3078,29 @@ void temporalPassConfigure(Config& cfg) {
     else if (_stricmp(model.c_str(), "responsive") == 0 || _stricmp(model.c_str(), "j") == 0) { preset = 10; presetFov = 10; }
     else if (_stricmp(model.c_str(), "l") == 0) { preset = 12; presetFov = 12; }
     else if (_stricmp(model.c_str(), "m") == 0) { preset = 13; presetFov = 13; }
-    else if (_stricmp(model.c_str(), "e") == 0) { preset = 5; presetFov = 5; }
-    else if (_stricmp(model.c_str(), "f") == 0) { preset = 6; presetFov = 6; }
+    // The letters stop here, and deliberately. NVSDK_NGX_DLSS_Hint_Render_
+    // Preset (nvsdk_ngx_defs.h, DLSS SDK 310.4) has no A, B, C or D at all
+    // -- they were removed, with the header saying to use J or K instead --
+    // and it marks G, H, I, N and O as reverting to default behaviour if
+    // asked for. E and F survive as deprecated. So the selectable set is
+    // exactly E, F, J, K, L, M, which is what the branches above accept.
+    // A tidier-looking letter range would offer four presets that no
+    // longer exist.
+    else if (!model.empty()) {
+        // Never silently fall through to the default: this branch has
+        // been bitten four times by a setting whose effective state was
+        // not printed.
+        static bool modelWarned = false;
+        if (!modelWarned) {
+            modelWarned = true;
+            Log::get().note(
+                "temporal aa: advanced.temporal_aa_model = \"%s\" is not a model this build knows "
+                "(steady, quality, responsive, auto, or a preset letter e, f, j, k, l or m -- NVIDIA "
+                "removed A to D and ignores G, H, I, N and O). Running steady: preset K for the "
+                "frame, L for the fovea crop.",
+                model.c_str());
+        }
+    }
     dlaaSetPreset(preset, presetFov);
     // A config reload re-arms the fovea after a failure stood it down (F3):
     // the user may have changed the width, or the transient may be gone.
