@@ -2862,9 +2862,21 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     // only, right after its own draw and inside the scope that owns the
     // flag -- the splash dim's re-issue shape below, for the same reason:
     // the placement state the second draw needs is still bound.
-    if (uiDepthWantsReissue()) {
-        uiDepthReissueBegin(self);
-        draw();
+    // Gated on the scope's THREAD-LOCAL flag, not on the module's globals.
+    // uiDepthWantsReissue reads g_mode, which the render thread sets and
+    // clears around this block, so a draw arriving on another context in
+    // between would run Begin on the FOREIGN context and overwrite the
+    // saved bindings this thread is about to restore. `on` is the flag
+    // captured for the draw this thread itself classified.
+    //
+    // And the second draw is issued only when Begin says it set the
+    // depth-only state up. A decline leaves the game's own state exactly
+    // as it was, so a draw issued regardless would be the game's composite
+    // a second time, in full colour, over itself -- and the paths that
+    // decline latch, so it would last the session (the pre-release review
+    // of 2026-09-07). splashDimBegin below has had this shape all along.
+    if (uiDepthScope.on && uiDepthWantsReissue()) {
+        if (uiDepthReissueBegin(self)) draw();
         uiDepthReissueEnd(self);
     }
     if (v == DrawVerdict::kBackdrop) backdropEnd(self);

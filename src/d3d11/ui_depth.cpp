@@ -1053,10 +1053,19 @@ void uiDepthEnd(ID3D11DeviceContext* ctx) {
     g_mode = Mode::kNone;
 }
 
-void uiDepthReissueBegin(ID3D11DeviceContext* ctx) {
+// True when the second draw is set up to write DEPTH ONLY. False means
+// this call declined, and the caller must NOT issue the draw: every
+// decline leaves the game's own state exactly as it was, so a draw issued
+// anyway is the game's composite a second time, in full colour, over
+// itself. The paths that decline -- no depth-stencil state or constant
+// buffer, and no pair view to rebind to -- are latched by their own
+// one-shot notes, so once one starts failing it fails for every composite
+// after, and the doubling would last the session (the pre-release review
+// of 2026-09-07). splashDimBegin below has taken this shape all along.
+bool uiDepthReissueBegin(ID3D11DeviceContext* ctx) {
     g_reissueOn = false;
     g_rebound = false;
-    if (!g_on || g_stoodDown || g_mode != Mode::kReissue || !g_reissueShader) return;
+    if (!g_on || g_stoodDown || g_mode != Mode::kReissue || !g_reissueShader) return false;
     const bool rebind = g_wantRebind;
     g_wantRebind = false;
     DepthShader* shader = g_reissueShader;
@@ -1118,6 +1127,7 @@ void uiDepthReissueBegin(ID3D11DeviceContext* ctx) {
         g_rebound = false;
         g_reissueOn = false;
     }
+    return g_reissueOn;
 }
 
 void uiDepthReissueEnd(ID3D11DeviceContext* ctx) {

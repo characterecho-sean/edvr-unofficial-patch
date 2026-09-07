@@ -116,9 +116,13 @@ void uiDepthEnd(ID3D11DeviceContext* ctx);
 // clipping below the alpha floor, the pass's depth for its eye bound where
 // the composite's own is not it, the nearer-wins test, and the viewport
 // depth range converting the encoding. The caller issues the second draw
-// between Begin and End when WantsReissue says so.
+// between Begin and End when WantsReissue says so AND Begin returns true.
 bool uiDepthWantsReissue();
-void uiDepthReissueBegin(ID3D11DeviceContext* ctx);
+// True when the depth-only draw is set up and the caller should issue it.
+// False means this call declined and left the game's own state untouched,
+// so issuing the draw anyway would be the game's composite a second time,
+// in full colour, over itself.
+bool uiDepthReissueBegin(ID3D11DeviceContext* ctx);
 void uiDepthReissueEnd(ID3D11DeviceContext* ctx);
 
 // Once per frame: the engage line, the totals line every 20 s.
