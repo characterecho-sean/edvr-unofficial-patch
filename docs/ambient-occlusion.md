@@ -700,7 +700,7 @@ max_mb = 32
 census_offscreen = 1
 census_frames = 2
 census_lines = 16384
-census_at_ms = 300000,600000
+census_at_ms = 360000,720000
 glare_shader_dump = 0
 ```
 
@@ -721,11 +721,12 @@ Four things about that block:
   capture that worked.
 - `glare_shader_dump` can go off. It cost the reporter a restart and 348
   files and could never have held a compute shader.
-- The two moments are five minutes and ten minutes in, and the design is
-  the same as Phase 0's: **the first with ambient occlusion Off, the second
-  with it at the top tier**, parked in the ring, still, looking at a
-  cracked fragment both times. The AO-off census is the baseline, and the
-  hashes present only in the second are the chain.
+- The two moments are six and twelve minutes after the game's first drawn
+  frame, and the design is the same as Phase 0's: **the first with ambient
+  occlusion Off, the second with it at the top tier**, parked in the ring,
+  still, looking at a cracked fragment both times, and not in the options
+  menu when the clock passes either moment. The AO-off census is the
+  baseline, and the `ch=` hashes present only in the second are the chain.
 
 **The differ will not do that comparison, and this is the third instrument
 change.** `tools/diff_draw_census.py` parses `DC` *draw* lines only
