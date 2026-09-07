@@ -672,6 +672,61 @@ int main() {
         }
     }
 
+    // THE WRITE WATCH -- does it catch a write, name it, and let it through?
+    //
+    // The instrument that answers the question every other line in this file
+    // begs: not "what pointer is in the slot" but "who put it there". This is
+    // the one probe in the recent run that CAN be tested in-process, because
+    // the trigger is an ordinary store to a page we control, so it is tested.
+    //
+    // The write must still land. A watch that caught the writer and swallowed
+    // the write would corrupt whatever it was watching, which on a real rig is
+    // the D3D11 runtime's own dispatch table.
+    {
+        void** fake = static_cast<void**>(
+            VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+        if (!fake) {
+            fail("VirtualAlloc for the write-watch cell", "allocation refused");
+        } else {
+            fake[3] = reinterpret_cast<void*>(&thunkOne);
+            check(vtableWatchSlot(fake, 3, "watch-cell"),
+                  "the write watch arms on a writable page",
+                  "arming refused on a plain read-write page");
+
+            // The store that must be caught AND must succeed. volatile so the
+            // compiler cannot decide a write nobody reads is not worth doing --
+            // the same trap that left the copy-mode cell testing nothing.
+            *reinterpret_cast<void* volatile*>(&fake[3]) =
+                reinterpret_cast<void*>(&toolkitOne);
+
+            check(vtableWatchCatches() == 1,
+                  "...catches the write and names the instruction that did it",
+                  "the write went through unseen, so the probe would report "
+                  "nothing on the rig it was built for");
+            check(*reinterpret_cast<void* volatile*>(&fake[3]) ==
+                      reinterpret_cast<void*>(&toolkitOne),
+                  "...and the write still landed",
+                  "the watch swallowed the write it was only supposed to "
+                  "observe -- on a real rig that corrupts the runtime's table");
+
+            // Re-arm, and catch a second one, which is what the frame path does.
+            vtableWatchRearm();
+            *reinterpret_cast<void* volatile*>(&fake[3]) =
+                reinterpret_cast<void*>(&thunkOne);
+            check(vtableWatchCatches() == 2,
+                  "...and re-arms to catch the next one",
+                  "the watch fired once and went deaf");
+
+            vtableWatchStop();
+            *reinterpret_cast<void* volatile*>(&fake[3]) =
+                reinterpret_cast<void*>(&toolkitOne);
+            check(vtableWatchCatches() == 0,
+                  "a stopped watch is silent and the page is writable again",
+                  "stopping the watch did not disarm it");
+            VirtualFree(fake, 0, MEM_RELEASE);
+        }
+    }
+
     // THE SHARED SLOT -- the loop hazard. ClearState is hooked by BOTH context
     // hooks in the real DLL, stacked. The lower one must read the upper as a
     // healthy chain, not a clobber: "reclaiming" it would splice the upper out,

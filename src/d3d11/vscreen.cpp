@@ -3746,6 +3746,11 @@ bool vScreenReclaimHooks() {
 void vScreenReclaimTick() {
     State* s = g_state;
     if (!s) return;
+    // Put the write watch back if a catch let a write through last frame. Free
+    // when nothing is armed, and it has to happen on a frame path rather than
+    // inside the handler -- the faulting instruction needs a writable page to
+    // finish on.
+    vtableWatchRearm();
     // Nothing to patrol in copy mode: the object dispatches through a table
     // only EDVR can write, so there is no slot for anyone to take. reclaim's
     // copy branch does real work -- a breach scan and a 300-entry drift walk --
@@ -4847,6 +4852,27 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
                         : "in place (the shared table is patched, so anything else "
                           "that writes those slots composes with EDVR; reclaim "
                           "watches for our entries being re-pointed)");
+    // The write watch, if somebody has asked for it. AFTER commit, so what it
+    // catches is whoever puts the ORIGINAL back rather than EDVR putting its
+    // own thunk in; and only in the shared mode, because in the private mode
+    // this table is not the one the object dispatches through and nobody has
+    // any reason to write it.
+    {
+        const int probeSlot =
+            cfg.getIntInRange("advanced.vtable_writer_probe", 0, 0, 511);
+        if (probeSlot > 0 && s.hook.mode() != HookMode::CopyVptr) {
+            vtableWatchSlot(s.hook.originalVTable(),
+                            static_cast<size_t>(probeSlot), "vScreen context");
+        } else if (probeSlot > 0) {
+            Log::get().note(
+                "advanced.vtable_writer_probe asked to watch slot %d, but this "
+                "context is hooked by private vtable copy, where the shared "
+                "table is not what the object dispatches through and nobody "
+                "writes it. Set context_hook_mode = shared to use the probe.",
+                probeSlot);
+        }
+    }
+
     ctx->Release();
 }
 
@@ -4906,6 +4932,11 @@ namespace edvr {
 
 void shutdownVScreenFixes() {
     if (!g_state) return;
+
+    // Disarm the write watch before anything else. Leaving a page of somebody
+    // else's memory read-only after EDVR has gone is not a thing to do to a
+    // process, however diagnostic the reason was.
+    vtableWatchStop();
 
     // How often each fix actually did something.
     //

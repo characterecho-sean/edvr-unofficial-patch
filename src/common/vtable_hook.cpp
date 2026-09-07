@@ -143,7 +143,193 @@ void appendSlot(char* list, size_t listSize, size_t slot) {
     strncat_s(list, listSize, one, _TRUNCATE);
 }
 
+// THE WRITE WATCH. One page, made read-only, so the next write to it faults and
+// the handler can read the faulting instruction's address out of the exception.
+// See the header for why naming the writer needed its own mechanism.
+struct WriteWatch {
+    void*     slotAddress = nullptr;
+    void*     pageBase = nullptr;
+    SIZE_T    pageSize = 0;
+    DWORD     writableProtect = 0;   // what the page was, and is put back to
+    DWORD     readOnlyProtect = 0;   // the same without write permission
+    volatile LONG armed = 0;
+    volatile LONG rearmWanted = 0;
+    uint32_t  catches = 0;
+    char      who[48] = {};
+};
+WriteWatch g_watch;
+PVOID      g_watchHandler = nullptr;
+
+// Four is enough to tell one writer from several and to show whether the same
+// instruction does it every time; more than that is a log nobody reads.
+constexpr uint32_t kMaxWatchCatches = 4;
+
+// The same protection without write permission, or 0 if there is nothing to
+// take away (already read-only, or no access at all).
+DWORD withoutWrite(DWORD p) {
+    switch (p & 0xFF) {
+        case PAGE_READWRITE:         return PAGE_READONLY;
+        case PAGE_WRITECOPY:         return PAGE_READONLY;
+        case PAGE_EXECUTE_READWRITE: return PAGE_EXECUTE_READ;
+        case PAGE_EXECUTE_WRITECOPY: return PAGE_EXECUTE_READ;
+        default:                     return 0;
+    }
+}
+
+LONG CALLBACK writeWatchHandler(EXCEPTION_POINTERS* ep) {
+    if (!InterlockedCompareExchange(&g_watch.armed, 0, 0)) {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+    const EXCEPTION_RECORD* er = ep ? ep->ExceptionRecord : nullptr;
+    if (!er || er->ExceptionCode != EXCEPTION_ACCESS_VIOLATION) {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+    // [0] is 0 for a read, 1 for a write, 8 for a DEP violation; [1] is the
+    // address touched. A read of a read-only page does not fault, so anything
+    // arriving here for our page is the write we are hunting -- but the test is
+    // explicit, because passing somebody else's access violation off as our
+    // answer would be worse than no answer.
+    if (er->NumberParameters < 2 || er->ExceptionInformation[0] != 1) {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+    const uintptr_t at = static_cast<uintptr_t>(er->ExceptionInformation[1]);
+    const uintptr_t lo = reinterpret_cast<uintptr_t>(g_watch.pageBase);
+    if (at < lo || at >= lo + g_watch.pageSize) return EXCEPTION_CONTINUE_SEARCH;
+
+    // Let the write through: restore write permission and disarm. The
+    // instruction re-executes when we continue, and the frame path puts the
+    // watch back.
+    InterlockedExchange(&g_watch.armed, 0);
+    DWORD ignored = 0;
+    VirtualProtect(g_watch.pageBase, g_watch.pageSize, g_watch.writableProtect,
+                   &ignored);
+
+    if (g_watch.catches < kMaxWatchCatches) {
+        ++g_watch.catches;
+        char modBuf[MAX_PATH];
+        Log::get().note(
+            "VTableHook %s: CAUGHT THE WRITER. Something wrote to %p, which is "
+            "%s, and the instruction that did it is at %s. The write has been "
+            "allowed through and the watch re-arms next frame; at most %u of "
+            "these. THIS is the author of the value that keeps reappearing in "
+            "the slot -- every other module name in this log is the value "
+            "itself, not whoever stored it.",
+            g_watch.who, reinterpret_cast<void*>(at),
+            at == reinterpret_cast<uintptr_t>(g_watch.slotAddress)
+                ? "exactly the watched slot"
+                : "elsewhere on the same page as the watched slot",
+            ownerModuleName(er->ExceptionAddress, modBuf, sizeof(modBuf)),
+            static_cast<unsigned>(kMaxWatchCatches));
+    }
+    if (g_watch.catches < kMaxWatchCatches) {
+        InterlockedExchange(&g_watch.rearmWanted, 1);
+    } else {
+        Log::get().note(
+            "VTableHook %s: write watch DISARMED after %u catches. The page is "
+            "back to normal and nothing further is being intercepted.",
+            g_watch.who, static_cast<unsigned>(g_watch.catches));
+    }
+    return EXCEPTION_CONTINUE_EXECUTION;
+}
+
 }  // namespace
+
+bool vtableWatchSlot(void** vtable, size_t slot, const char* who) {
+    if (!vtable) return false;
+    if (g_watch.slotAddress) {
+        Log::get().note("VTableHook: a write watch is already armed on %p; "
+                        "only one at a time, so this request was ignored.",
+                        g_watch.slotAddress);
+        return false;
+    }
+
+    void* const addr = static_cast<void*>(&vtable[slot]);
+    MEMORY_BASIC_INFORMATION mbi{};
+    if (VirtualQuery(addr, &mbi, sizeof(mbi)) != sizeof(mbi)) return false;
+
+    const DWORD readOnly = withoutWrite(mbi.Protect);
+    if (!readOnly) {
+        Log::get().note(
+            "VTableHook: cannot watch slot %zu at %p -- the page is %s, which is "
+            "not writable to begin with, so a write to it already faults and "
+            "whoever writes must be un-protecting it first. This probe cannot "
+            "see that.",
+            slot, addr, protectName(mbi.Protect));
+        return false;
+    }
+
+    // ONE page, not the region. VirtualQuery reports the whole run of pages
+    // sharing a protection, which on a heap can be megabytes; making all of
+    // that read-only would fault on every unrelated write in it and bring the
+    // game to a halt.
+    SYSTEM_INFO si{};
+    GetSystemInfo(&si);
+    const SIZE_T pageSize = si.dwPageSize ? si.dwPageSize : 4096;
+    void* const pageBase = reinterpret_cast<void*>(
+        reinterpret_cast<uintptr_t>(addr) & ~static_cast<uintptr_t>(pageSize - 1));
+
+    if (!g_watchHandler) {
+        // First in the chain: a handler that runs after somebody else's would
+        // never see an exception they continued from.
+        g_watchHandler = AddVectoredExceptionHandler(1, writeWatchHandler);
+        if (!g_watchHandler) return false;
+    }
+
+    g_watch.slotAddress = addr;
+    g_watch.pageBase = pageBase;
+    g_watch.pageSize = pageSize;
+    g_watch.writableProtect = mbi.Protect;
+    g_watch.readOnlyProtect = readOnly;
+    g_watch.catches = 0;
+    strncpy_s(g_watch.who, who ? who : "?", _TRUNCATE);
+
+    DWORD previous = 0;
+    if (!VirtualProtect(pageBase, pageSize, readOnly, &previous)) {
+        Log::get().note("VTableHook: could not make the page at %p read-only "
+                        "(err %lu), so the write watch is off.",
+                        pageBase, GetLastError());
+        g_watch.slotAddress = nullptr;
+        return false;
+    }
+    InterlockedExchange(&g_watch.armed, 1);
+    Log::get().note(
+        "VTableHook %s: WRITE WATCH ARMED on slot %zu at %p. Its page (%p, %llu "
+        "bytes, %s) is read-only until something writes to it, and the next "
+        "write is caught and its instruction named. Diagnostic only -- every "
+        "write anywhere on this page takes an exception while it is armed, so "
+        "this is for one session with a purpose, not for playing. Set "
+        "advanced.vtable_writer_probe back to 0 afterwards.",
+        g_watch.who, slot, addr, pageBase,
+        static_cast<unsigned long long>(pageSize), protectName(mbi.Protect));
+    return true;
+}
+
+void vtableWatchRearm() {
+    if (!InterlockedCompareExchange(&g_watch.rearmWanted, 0, 0)) return;
+    InterlockedExchange(&g_watch.rearmWanted, 0);
+    DWORD previous = 0;
+    if (VirtualProtect(g_watch.pageBase, g_watch.pageSize,
+                       g_watch.readOnlyProtect, &previous)) {
+        InterlockedExchange(&g_watch.armed, 1);
+    }
+}
+
+uint32_t vtableWatchCatches() { return g_watch.catches; }
+
+void vtableWatchStop() {
+    if (!g_watch.slotAddress) return;
+    InterlockedExchange(&g_watch.armed, 0);
+    InterlockedExchange(&g_watch.rearmWanted, 0);
+    DWORD previous = 0;
+    VirtualProtect(g_watch.pageBase, g_watch.pageSize, g_watch.writableProtect,
+                   &previous);
+    // The handler stays registered. Removing it would race any thread already
+    // inside it, and an unarmed handler is a compare and a return.
+    g_watch.slotAddress = nullptr;
+    g_watch.pageBase = nullptr;
+    g_watch.pageSize = 0;
+    g_watch.catches = 0;
+}
 
 bool isExecutableAddress(const void* p) {
     if (!p) return false;

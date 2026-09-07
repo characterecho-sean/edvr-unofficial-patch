@@ -100,6 +100,53 @@ bool vtableInsideModule(void** vtable, void* moduleBase);
 // live, which vtableInsideModule was not.
 size_t vtableEntriesInModule(void** vtable, size_t count, void* moduleBase);
 
+// WATCH ONE VTABLE SLOT AND NAME WHOEVER WRITES TO IT.
+//
+// Every attribution this file makes is of a POINTER FOUND IN A SLOT, not of the
+// code that put it there -- ownerModuleName resolves the value, and the reclaim
+// lines that say "re-pointed by <module>" have always been naming the thing now
+// in the table rather than its author. On issue #21's rig that distinction
+// became the whole question: something restores one canonical value into
+// twenty-three slots every frame, EDVR's own writes were proven to land and
+// survive, EDHM and every overlay were taken out of the process and it carried
+// on, and the only code left in there is the D3D11 runtime and the game itself.
+// Which of those two, nobody can say, because nothing has ever looked at the
+// writer.
+//
+// So: make the page read-only, catch the access violation the next write
+// raises, and log the FAULTING INSTRUCTION's module and offset. That is the
+// author, directly, with no inference in it. The write is then let through --
+// protection restored, EXCEPTION_CONTINUE_EXECUTION, the instruction re-runs
+// and succeeds -- and the page is re-armed from the frame path so the next one
+// is caught too, up to a handful, after which it disarms for good.
+//
+// DIAGNOSTIC, OFF BY DEFAULT, and it must stay that way. While armed, every
+// write anywhere on that page takes an exception, and a page holds far more
+// than one vtable. It is for a rig with a known writer to point at it for one
+// session, not for anybody's daily flying.
+//
+// `slot` is an index into `vtable`; `who` labels the log lines. Returns false
+// if the page cannot be made read-only, if it is read-only already (in which
+// case the writer is un-protecting it and this cannot see that), or if a watch
+// is already armed -- one at a time, because one answer is what is wanted.
+bool vtableWatchSlot(void** vtable, size_t slot, const char* who);
+
+// Put the watch back after a catch let a write through. Cheap and safe to call
+// every frame; does nothing unless a catch is pending. Re-arming here rather
+// than inside the handler avoids the single-step dance: the faulting
+// instruction gets a writable page, completes, and the next frame closes it
+// again.
+void vtableWatchRearm();
+
+// How many writes the watch has caught. For the unit cell, and for anyone
+// asking whether an armed watch ever fired.
+uint32_t vtableWatchCatches();
+
+// Disarm: give the page its write permission back and forget the watch. Safe
+// to call when nothing is armed. Called at teardown so a session never ends
+// leaving somebody else's page read-only, and by the unit cell between runs.
+void vtableWatchStop();
+
 // Which mechanism a hook uses. Decided by the CALLER before replace(), from
 // vtableInsideModule() and knowledge of which module implements the object.
 enum class HookMode : uint32_t {
