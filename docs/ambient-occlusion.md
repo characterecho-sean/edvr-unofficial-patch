@@ -580,21 +580,30 @@ canopy sill and the console rim.
 
 **It is the sun-shadow mask, not the occlusion**, and the reporter's own
 shader dump proves it. `ps_7EAC71963E66C5FE` is a full-screen deferred
-shadow resolve: it loads scene depth at integer pixel coordinates,
-reconstructs a world position through the ray basis in `cb2`, reads a flag
-byte from the stencil (`and l(4)`, then `l(128)` / `l(192)` under a second
-branch), loops over `cb2[35].x` cascades projecting by
-`cb2[i + 11]` / `cb2[i + 19]` with a smoothstep crossfade between them,
-does a bicubic PCF filter (the coefficients `-0.166667, 0.5, -0.5,
-0.166667` then `0.020833, 0.479167` are the standard cubic B-spline
-weights), and -- this is the line that settles it -- **returns exactly
-`l(1.000000)` when no cascade covers the pixel**, ending
-`mad o0.xyzw, r3.xxxx, r0.xxxx, r0.zzzz`: one scalar splatted to four
-channels, which is what an `R8` render target takes the `.x` of. Every
-measured property above follows: 1.0 at the far plane, 1.0 past the last
-cascade, contact hairlines from the PCF on near geometry. The plausible
-second draw is `ps_8A08FF781272C5F6`, two instructions that splat one
-interpolated scalar -- a fill.
+shadow resolve. It loads the linearised depth at integer pixel coordinates
+-- the same `R32_TYPELESS` target `ps_CB95394B50D737D6` filled -- builds a
+view ray from `cb2[1]`, `cb2[2]`, `cb2[4]` and rescales it to that depth,
+transforms into light space by `cb2[7..10]`, reads a flag byte
+(`* 255`, `ftou`, then `and l(4)` and `and l(192)`) where bit 2 forces full
+shadow and bits 6 and 7 divert to a precomputed screen-space term, and
+loops over `cb2[35].x` cascades, each a scale and bias at `cb2[i + 11]` /
+`cb2[i + 19]` with a smoothstep crossfade between the two it lands in. The
+filter is a cubic B-spline over sixteen `gather4` fetches, and the shadow
+map is a **moment** shadow map: the de-quantisation matrix at lines 223-227
+(`-0.035956`, then rows beginning `0.222774`, `0.154968`, `0.145199`,
+`0.163127`) is Peters and Klein's, verbatim, followed by the Hamburger
+4MSM Cholesky solve and a light-bleeding reduction.
+
+The line that settles it is the fallback: **when no cascade contains the
+pixel the shader moves `l(1.000000)`** and both crossfade weights go to
+zero, so the result collapses to the flag byte's default, which is 1.0.
+It ends `mad o0.xyzw, r3.xxxx, r0.xxxx, r0.zzzz` -- one scalar splatted to
+four channels, which is what an `R8` render target takes the `.x` of. Every
+measured property above follows: exactly 1.0 on the sky, 1.0 again past the
+last cascade, and hairline self-shadowing at creases on near geometry where
+the cascade resolution is highest. The plausible second draw is
+`ps_8A08FF781272C5F6`, two instructions that splat one interpolated
+scalar -- a fill.
 
 So the eye diff measures the shadow mask. For the record, it says the
 shadow mask is fine: `diff_eye_split.py` reports
@@ -657,9 +666,16 @@ different briefs. What that found:
   the depth linearisation, matching the `R32_TYPELESS` target that takes
   one draw. This is the only member of the occlusion chain identified.
 - No horizon sweep, no kernel rotation, no small-table lookup indexed by a
-  pixel position modulo its size, anywhere in the 200. The nearest things
-  are SMAA's three vertex shaders and a depth-aware upsample, both
-  identified and both something else.
+  pixel position modulo its size, anywhere in the 200. The near misses were
+  each run down and each is something else: SMAA's three vertex shaders and
+  its blending-weight pixel shader (`ps_BAB75803059C271D`, the `0.8281`
+  search test and the 1/160, 1/560 area-texture pixel size); a depth-aware
+  upsample of a half-resolution colour layer (`ps_07B3F82100F29401`); and
+  the one genuine separable cross-bilateral blur, `ps_DE3602618E7E7F7E`,
+  which cannot be the occlusion's because it filters four channels, gates
+  empty pixels to **zero** rather than one -- an occlusion's empty value is
+  unoccluded, not black -- and normalises its depth difference against a
+  kilometre-scale clamp.
 
 A further check dates the dump against the session: no shader was created
 after 12:19:57, and the reporter set ambient occlusion to its top tier at
