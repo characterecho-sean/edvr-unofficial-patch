@@ -401,6 +401,50 @@ Measured, not yet flown: the corrected menu depth. The `temporal_aa_debug
 = depth` view is the check -- the panel should paint at about a metre,
 nearer than the hangar wall, not far brighter than everything.
 
+### Flight 4 (2026-09-07 13:10, v0.14.0-20-g0ba94c9): the main menu fixed
+
+Sean: "Main menu is fixed (and any similar invocation it seems). Loading
+screen is not, but the model doesn't shimmer. I also notice the intro
+screen/modals are swimming too." So the encoding was the whole of the
+menu's problem, and the remaining cases are the frames with no real scene:
+the loading screen and the intro's splash with its modals, which the
+real-scene gate had deliberately left alone.
+
+### The alpha-aware depth pass (2026-09-07, built for flight 5)
+
+The loader's and the intro's composites need the same depth as the menu's,
+minus one thing: their translucent full-view regions (the loader's 40%
+scrim, the vignette) lie over the ship model, and a depth written there
+moves the model with the dialog (flight 3). Depth alone cannot tell a
+scrim from a box; the composite's ALPHA can. The shader dump gave the two
+composite pixel shaders' alpha paths in a few instructions each: `ps
+85565E9261812E2F` (the curved screen, vs `4EF6DDB075A927FA`) samples the
+surface at TEXCOORD0 through slot 0; `ps 9107E72CB016CC02` (the panel, vs
+`A888D51024D9798E`) samples it at TEXCOORD6 through slot 1, adds a
+holographic smear, and discards only where every channel is under 5/255.
+The third "composite" the surface rule had named, vs `B018D143700AB803`,
+turned out to run a pixel shader that reads nothing and outputs zero: its
+surface binding is a leftover, and it is now excluded by hash.
+
+So an interface-projection composite is left exactly as the game draws
+it, and then drawn ONCE MORE, depth only: no colour target, EDVR's pixel
+shader in the game's place (the same surface sample, `clip` below
+`advanced.ui_depth_alpha`, 0.5 by default -- the scrim drops out, the box
+and the text stay), the pass's depth for its eye bound where the
+composite's own is not it, the nearer-wins test so a model in front of the
+screen keeps its depth, and the viewport depth range converting the
+encoding. The real-scene gate is gone: the alpha rule is what it stood in
+for. Same shape as the splash dim's re-issue in `forwardWithVerdict`, and
+the cockpit's families keep the in-place twin. Per-family log lines now
+carry both hashes and say which path a family took, so an unknown
+composite in a new context (the galaxy map, the SRV) shows up as "no
+depth shader of its own yet" with its pixel shader named.
+
+Not covered: the intro movie's own quad (placed in NDC by its vertex
+buffer, not a GUI surface) and the splash still if it is composited by
+something other than the loader's screen composite; the first flight of
+this pass says which.
+
 # Design A: the UI layer
 
 ## A1. What counts as UI: the classifier

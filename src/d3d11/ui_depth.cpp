@@ -5,7 +5,7 @@
 #include <d3d11.h>
 
 #include <cstdint>
-#include <cstdlib>   // _strtoui64: the hash lists
+#include <cstdlib>   // _strtoui64, strtod: the hash lists and the planes
 #include <cstring>
 #include <string>
 
@@ -15,6 +15,7 @@
 #include "binding_shadow.h"
 #include "depth_probe.h"    // depthProbeIsSceneDepth, ...Format: where the pass reads
 #include "exposure_fix.h"   // lookupShaderHash
+#include "shader_swap.h"    // shaderSwapCompilePs: the alpha-aware depth shaders
 #include "temporal_pass.h"  // temporalPassPlanes: the scene's encoding
 #include "vscreen.h"        // vScreenSetRenderTargetsRaw: the rebind past the shadow
 
@@ -30,6 +31,20 @@ constexpr uint64_t kGuiText   = 0x1012E00B3CB44469ull;
 constexpr uint64_t kGuiIcons  = 0xA3E5D3FCBC1165F8ull;
 // The flight HUD's vector family, drawn straight into the eye (hud_grain.h).
 constexpr uint64_t kFlightHud = 0xB7790CBFC6554097ull;
+// The cockpit's holo-panel family (panel_upscale.h).
+constexpr uint64_t kHoloPanel = 0x81216C77F90DEDD6ull;
+// The two interface composites drawn through the interface projection: the
+// menu's and the loader's panel (vs A888D51024D9798E, ps 9107E72CB016CC02)
+// and the loader's curved screen (vs 4EF6DDB075A927FA, ps 85565E9261812E2F).
+constexpr uint64_t kPanelVs  = 0xA888D51024D9798Eull;
+constexpr uint64_t kPanelPs  = 0x9107E72CB016CC02ull;
+constexpr uint64_t kScreenVs = 0x4EF6DDB075A927FAull;
+constexpr uint64_t kScreenPs = 0x85565E9261812E2Full;
+// A mesh draw whose pixel shader (258B95AC99520C1F) reads nothing and writes
+// nothing; the interface surface in its slot 0 is a leftover binding, and
+// the surface rule took it for a composite on the loading screen
+// (2026-09-07). Never treated.
+constexpr uint64_t kNullPsMesh = 0xB018D143700AB803ull;
 
 constexpr uint32_t kMaxSurfaces = 64;      // a session showed thirteen
 constexpr uint32_t kMaxHashes = 16;
@@ -37,7 +52,7 @@ constexpr uint32_t kMaxStates = 16;        // the game has a handful of depth st
 constexpr uint32_t kMemoSize = 1024;       // a power of two: the probe masks
 constexpr uint32_t kMemoProbe = 4;
 constexpr uint32_t kMemoLifeFrames = 120;  // a sampled view's answer
-constexpr uint32_t kVsMemoLifeFrames = 600; // a vertex shader's hash
+constexpr uint32_t kVsMemoLifeFrames = 600; // a shader's hash
 constexpr uint32_t kChecksPerTarget = 64;  // hashes asked of a newly bound target
 constexpr uint32_t kExhausted = 64;        // targets asked to exhaustion, remembered
 constexpr uint32_t kExhaustedRearmFrames = 600;
@@ -53,8 +68,8 @@ bool     g_stoodDown = false;
 bool     g_announced = false;
 bool     g_waitingNoted = false;
 bool     g_testAlways = false; // advanced.ui_depth_test = always
-bool     g_menus = true;       // advanced.ui_depth_menus: bind the pass's depth at
-                               // a composite whose own depth nothing reads
+bool     g_menus = true;       // advanced.ui_depth_menus: the interface-projection
+                               // composites get the alpha-aware depth pass
 bool     g_eyesSwapped = false; // advanced.ui_depth_eyes = swapped: the A/B for
                                 // the order rule that names the eye
 // THE ENCODING. The menu's and the loader's composites are drawn through
@@ -64,11 +79,13 @@ bool     g_eyesSwapped = false; // advanced.ui_depth_eyes = swapped: the A/B for
 // value is near/z to within a part in a thousand this side of ten metres,
 // so the two encodings differ by the ratio of the nears: a composite's
 // depth written as it comes decoded four times too near (measured
-// 2026-09-07: the menu panel at 0.26 m where 1.03 m is right). The
-// rebound draw's VIEWPORT depth range carries the correction: MaxDepth =
-// sceneNear / uiNear scales what the rasteriser writes, no shader touched.
+// 2026-09-07: the menu panel at 0.26 m where 1.03 m is right). The depth
+// pass's VIEWPORT depth range carries the correction: MaxDepth =
+// sceneNear / uiNear scales what the rasteriser writes, no maths in the
+// shader.
 float    g_uiNear = 0.1f;       // advanced.ui_depth_planes
 float    g_uiFar = 1000.0f;
+float    g_alphaFloor = 0.5f;   // advanced.ui_depth_alpha: below it, no depth
 bool     g_scaleNoted = false;
 constexpr uint32_t kMaxViewports = 16;
 D3D11_VIEWPORT g_savedVps[kMaxViewports];
@@ -137,6 +154,7 @@ struct PtrMemo {
 
 PtrMemo<kMemoSize> g_viewMemo;   // sampled view -> 1 surface / 0 not
 PtrMemo<kMemoSize> g_vsMemo;     // vertex shader -> its bytecode hash
+PtrMemo<kMemoSize> g_psMemo;     // pixel shader -> its bytecode hash
 
 // Learned surfaces: resource identities with the shape they had when
 // learned. A match is by identity AND shape, so an address the game
@@ -191,12 +209,63 @@ uint32_t  g_stateCount = 0;
 bool      g_statesFullNoted = false;
 bool      g_createFailedNoted = false;
 
-// THE REBIND, for a composite whose own depth target nothing reads (the
-// main menu's panel, the loader's dialog; measured 2026-09-06): the pass's
-// depth for that eye is bound in its place for the one draw, through the
-// original OM entry, and the game's bindings are put back before anything
-// else looks. EDVR's own view over the probe's texture, in the format the
-// game binds it with; one per eye, remade when the pair moves.
+// THE ALPHA-AWARE DEPTH PASS, for a composite drawn through the interface
+// projection. Its own draw is left exactly as the game issued it; a second
+// draw of the same geometry follows with no colour target, EDVR's pixel
+// shader in place of the game's -- the same surface sample the game's
+// takes, clipped below the alpha floor, so the dialog's box and its text
+// write depth and its 40% scrim over the ship model does not -- the
+// pass's depth for the eye bound where the composite's own is not it,
+// the game's nearer-wins test (a model in front of the screen keeps its
+// depth), and the viewport depth range converting the encoding. The pixel
+// shaders are transcriptions of the game's alpha path, from the dumps of
+// 2026-09-06: ps 9107E72CB016CC02 samples the surface at TEXCOORD6 through
+// slot 1; ps 85565E9261812E2F at TEXCOORD0 through slot 0.
+const char kPanelDepthHlsl[] =
+    "Texture2D<float4> Surf : register(t1);\n"
+    "SamplerState Smp : register(s1);\n"
+    "cbuffer P : register(b13) { float4 floorAndPad; };\n"
+    "struct In {\n"
+    "    float4 tc0 : TEXCOORD0;\n"
+    "    float3 tc2 : TEXCOORD2;\n"
+    "    float3 tc4 : TEXCOORD4;\n"
+    "    float3 tc5 : TEXCOORD5;\n"
+    "    float2 tc6 : TEXCOORD6;\n"
+    "};\n"
+    "void main(In i) {\n"
+    "    float a = Surf.Sample(Smp, i.tc6).a;\n"
+    "    clip(a - floorAndPad.x);\n"
+    "}\n";
+const char kScreenDepthHlsl[] =
+    "Texture2D<float4> Surf : register(t0);\n"
+    "SamplerState Smp : register(s0);\n"
+    "cbuffer P : register(b13) { float4 floorAndPad; };\n"
+    "struct In { float2 tc0 : TEXCOORD0; };\n"
+    "void main(In i) {\n"
+    "    float a = Surf.Sample(Smp, i.tc0).a;\n"
+    "    clip(a - floorAndPad.x);\n"
+    "}\n";
+
+struct DepthShader {
+    uint64_t            ps = 0;         // the game's pixel shader it stands in for
+    const char*         hlsl = nullptr;
+    size_t              len = 0;
+    const char*         name = nullptr;
+    ID3D11PixelShader*  shader = nullptr;
+    bool                tried = false;
+};
+DepthShader g_depthShaders[2] = {
+    {kPanelPs, kPanelDepthHlsl, sizeof(kPanelDepthHlsl) - 1, "ui_depth_panel_ps", nullptr, false},
+    {kScreenPs, kScreenDepthHlsl, sizeof(kScreenDepthHlsl) - 1, "ui_depth_screen_ps", nullptr, false},
+};
+ID3D11Buffer* g_floorCb = nullptr;
+float         g_floorCbValue = -1.0f;
+ID3D11DepthStencilState* g_reissueDss = nullptr;   // GEQUAL, write all
+bool          g_reissueDssFailedNoted = false;
+
+// The pass's depth view for a rebind: EDVR's own view over the probe's
+// texture, in the format the game binds it with; one per eye, remade when
+// the pair moves.
 constexpr uint32_t kMaxRtvs = 8;
 struct PairView {
     ID3D11Texture2D*         tex = nullptr;   // identity only, the probe holds the reference
@@ -211,128 +280,35 @@ bool     g_rebindNoted = false;
 void*    g_frameRtv[2] = {nullptr, nullptr};
 uint32_t g_frameRtvCount = 0;
 
-// Per draw.
+// Per draw: what the classification decided, consumed by Begin/End and by
+// the re-issue.
+enum class Mode { kNone, kInPlace, kReissue };
+Mode                     g_mode = Mode::kNone;
 bool                     g_engaged = false;
 ID3D11DepthStencilState* g_savedDss = nullptr;
 UINT                     g_savedRef = 0;
-bool                     g_wantRebind = false;   // decided at classification
+bool                     g_wantRebind = false;
 uint32_t                 g_rebindW = 0, g_rebindH = 0;
 int                      g_rebindEye = -1;
 bool                     g_rebound = false;      // the OM was swapped for this draw
 ID3D11RenderTargetView*  g_savedRtvs[kMaxRtvs] = {};
 ID3D11DepthStencilView*  g_savedDsv = nullptr;
+DepthShader*             g_reissueShader = nullptr;
+ID3D11PixelShader*       g_savedPs = nullptr;
+bool                     g_reissueOn = false;
 
 // Counters: this window, and the session.
 uint32_t g_wComposite = 0, g_wDirect = 0, g_wWrote = 0, g_wDepthless = 0,
-         g_wNotScene = 0, g_wRebound = 0, g_wNoPair = 0, g_wNoScene = 0,
-         g_wAlreadyWrote = 0, g_wNoTwin = 0, g_wLearned = 0, g_wFrames = 0;
+         g_wNotScene = 0, g_wRebound = 0, g_wNoPair = 0, g_wReissued = 0,
+         g_wNoShader = 0, g_wAlreadyWrote = 0, g_wNoTwin = 0, g_wLearned = 0,
+         g_wFrames = 0;
 uint64_t g_sessionWrote = 0;
 
 void resetWindow() {
     g_wComposite = g_wDirect = g_wWrote = g_wDepthless = g_wNotScene = 0;
-    g_wRebound = g_wNoPair = g_wNoScene = g_wAlreadyWrote = g_wNoTwin = 0;
-    g_wLearned = 0;
+    g_wRebound = g_wNoPair = g_wReissued = g_wNoShader = 0;
+    g_wAlreadyWrote = g_wNoTwin = g_wLearned = 0;
     g_wFrames = 0;
-}
-
-// The draws the pass's pair must carry before a composite is bound to it:
-// the loading screen's pair is whichever two eye-sized targets the ship
-// model's handful of draws make busiest, and a dialog's full-view depth
-// stamped over the model made it flicker (2026-09-07). The pass's own
-// rule for a real scene.
-constexpr uint32_t kRealSceneDraws = 50;
-
-// The viewport depth range that carries the encoding correction, and its
-// undoing. Through the context's own entry: vscreen's hook touches only
-// inflated FSS targets.
-void scaleViewportsForUi(ID3D11DeviceContext* ctx) {
-    float sceneNear = 0.0f, sceneFar = 0.0f;
-    if (!temporalPassPlanes(&sceneNear, &sceneFar) || !(g_uiNear > 0.0f)) return;
-    float scale = sceneNear / g_uiNear;
-    if (!(scale > 0.0f)) return;
-    if (scale > 1.0f) scale = 1.0f;
-    g_savedVpCount = kMaxViewports;
-    ctx->RSGetViewports(&g_savedVpCount, g_savedVps);
-    if (g_savedVpCount == 0 || g_savedVpCount > kMaxViewports) {
-        g_savedVpCount = 0;
-        return;
-    }
-    D3D11_VIEWPORT scaled[kMaxViewports];
-    for (UINT i = 0; i < g_savedVpCount; ++i) {
-        scaled[i] = g_savedVps[i];
-        scaled[i].MaxDepth = scaled[i].MinDepth + (scaled[i].MaxDepth - scaled[i].MinDepth) * scale;
-    }
-    ctx->RSSetViewports(g_savedVpCount, scaled);
-    g_vpScaled = true;
-    if (!g_scaleNoted) {
-        g_scaleNoted = true;
-        Log::get().note("ui depth: a rebound composite's depth is written through a "
-                        "viewport depth range of %.4f -- the interface projection's "
-                        "near %g m against the scene's %g m -- so its reversed-Z value "
-                        "decodes in the scene's encoding (advanced.ui_depth_planes).",
-                        static_cast<double>(scale), static_cast<double>(g_uiNear),
-                        static_cast<double>(sceneNear));
-    }
-}
-
-void restoreViewports(ID3D11DeviceContext* ctx) {
-    if (!g_vpScaled) return;
-    g_vpScaled = false;
-    if (g_savedVpCount) ctx->RSSetViewports(g_savedVpCount, g_savedVps);
-    g_savedVpCount = 0;
-}
-
-void releasePairViews() {
-    for (int e = 0; e < 2; ++e) {
-        if (g_pair[e].dsv) g_pair[e].dsv->Release();
-        g_pair[e] = PairView();
-    }
-}
-
-// EDVR's depth view over the pass's texture for this eye, made once per
-// texture. Null when there is no pair or the view cannot be made.
-ID3D11DepthStencilView* pairViewFor(ID3D11DeviceContext* ctx, int eye, uint32_t w,
-                                    uint32_t h) {
-    ID3D11Texture2D* tex = nullptr;
-    uint32_t fmt = 0;
-    if (!depthProbeSceneDepthFormat(w, h, eye, &tex, &fmt) || !tex) return nullptr;
-    PairView& p = g_pair[eye];
-    if (p.tex == tex && p.dsv) return p.dsv;
-    if (p.dsv) {
-        p.dsv->Release();
-        p.dsv = nullptr;
-    }
-    p.tex = tex;
-    ID3D11Device* dev = nullptr;
-    ctx->GetDevice(&dev);
-    if (!dev) return nullptr;
-    D3D11_DEPTH_STENCIL_VIEW_DESC d{};
-    d.Format = static_cast<DXGI_FORMAT>(fmt);
-    d.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
-    d.Texture2D.MipSlice = 0;
-    const HRESULT hr = dev->CreateDepthStencilView(tex, &d, &p.dsv);
-    dev->Release();
-    if (FAILED(hr) || !p.dsv) {
-        p.dsv = nullptr;
-        if (!g_pairCreateFailedNoted) {
-            g_pairCreateFailedNoted = true;
-            Log::get().note("ui depth: a depth view over the pass's %ux%u target "
-                            "(format %u) could not be made (0x%08lX); composites "
-                            "outside the scene's depth stay as the game issued them.",
-                            w, h, fmt, static_cast<unsigned long>(hr));
-        }
-        return nullptr;
-    }
-    return p.dsv;
-}
-
-int eyeIndexFor(const void* rtvRes) {
-    for (uint32_t i = 0; i < g_frameRtvCount; ++i) {
-        if (g_frameRtv[i] == rtvRes) return static_cast<int>(i);
-    }
-    if (g_frameRtvCount >= 2) return -1;
-    g_frameRtv[g_frameRtvCount] = const_cast<void*>(rtvRes);
-    return static_cast<int>(g_frameRtvCount++);
 }
 
 int surfaceIndex(const void* res) {
@@ -408,6 +384,25 @@ uint64_t boundVsHash(ID3D11DeviceContext* ctx) {
     return h;
 }
 
+// The bound pixel shader's hash, the same way; asked only of composites.
+uint64_t boundPsHash(ID3D11DeviceContext* ctx) {
+    uint64_t h = 0;
+    guardedBudget(g_budget, [&] {
+        ID3D11PixelShader* ps = nullptr;
+        ctx->PSGetShader(&ps, nullptr, nullptr);
+        if (!ps) return;
+        uint64_t memo = 0;
+        if (g_psMemo.get(ps, g_frame, kVsMemoLifeFrames, &memo)) {
+            h = memo;
+        } else {
+            h = lookupShaderHash(ps);
+            g_psMemo.put(ps, g_frame, h);
+        }
+        ps->Release();
+    });
+    return h;
+}
+
 // Is this sampled view over a learned surface? Memoised by view identity;
 // a miss resolves the view (guarded, binding_shadow's budget) while it is
 // certainly bound.
@@ -456,17 +451,17 @@ void noteExhausted(const void* res) {
 
 // A family seen for the first time: one line with its target, the
 // visibility the header promises, so a field log can say what was treated.
-void noteFamily(uint64_t vh, bool composite) {
+void noteFamily(uint64_t vh, uint64_t ph, const char* how) {
     if (!vh || g_familyLoggedCount >= kMaxFamilyLines) return;
     if (inList(g_familyLogged, g_familyLoggedCount, vh)) return;
     g_familyLogged[g_familyLoggedCount++] = vh;
     ResourceInfo rt;
     const bool haveRt = bindingResolve(bindingGet(BindSlot::Rtv0), &rt) && rt.isTexture2D;
-    Log::get().note("ui depth: a new interface family -- vs %016llX (%s) draws into "
-                    "%ux%u DXGI format %u and now writes its depth.",
+    Log::get().note("ui depth: a new interface family -- vs %016llX ps %016llX draws "
+                    "into %ux%u DXGI format %u: %s.",
                     static_cast<unsigned long long>(vh),
-                    composite ? "samples a learned surface" : "named direct family",
-                    haveRt ? rt.a : 0u, haveRt ? rt.b : 0u, haveRt ? rt.fmt : 0u);
+                    static_cast<unsigned long long>(ph),
+                    haveRt ? rt.a : 0u, haveRt ? rt.b : 0u, haveRt ? rt.fmt : 0u, how);
 }
 
 enum class TwinWhy { kOk, kAlreadyWrites, kNoTwin };
@@ -542,6 +537,71 @@ ID3D11DepthStencilState* writingTwin(ID3D11DeviceContext* ctx,
     return ours;
 }
 
+// The re-issue's depth state: the nearer wins, so a ship model in front of
+// the loader's screen keeps its depth; stencil left off.
+ID3D11DepthStencilState* reissueState(ID3D11DeviceContext* ctx) {
+    if (g_reissueDss) return g_reissueDss;
+    if (g_reissueDssFailedNoted) return nullptr;
+    D3D11_DEPTH_STENCIL_DESC d{};
+    d.DepthEnable = TRUE;
+    d.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ALL;
+    d.DepthFunc = g_testAlways ? D3D11_COMPARISON_ALWAYS : D3D11_COMPARISON_GREATER_EQUAL;
+    d.StencilEnable = FALSE;
+    ID3D11Device* dev = nullptr;
+    ctx->GetDevice(&dev);
+    if (!dev) return nullptr;
+    const HRESULT hr = dev->CreateDepthStencilState(&d, &g_reissueDss);
+    dev->Release();
+    if (FAILED(hr) || !g_reissueDss) {
+        g_reissueDss = nullptr;
+        g_reissueDssFailedNoted = true;
+        Log::get().note("ui depth: the depth pass's state could not be made "
+                        "(0x%08lX); interface-projection composites stay as the "
+                        "game issued them.",
+                        static_cast<unsigned long>(hr));
+        return nullptr;
+    }
+    return g_reissueDss;
+}
+
+DepthShader* depthShaderFor(ID3D11DeviceContext* ctx, uint64_t ps) {
+    for (DepthShader& s : g_depthShaders) {
+        if (s.ps != ps) continue;
+        if (!s.shader && !s.tried) {
+            s.tried = true;
+            s.shader = shaderSwapCompilePs(ctx, s.hlsl, s.len, "main", s.name, nullptr,
+                                           "ui depth");
+        }
+        return s.shader ? &s : nullptr;
+    }
+    return nullptr;
+}
+
+// The alpha floor, in a constant buffer of EDVR's at b13 (a slot the
+// game's composites leave empty: their pixel stages declare b2 alone).
+ID3D11Buffer* floorBuffer(ID3D11DeviceContext* ctx) {
+    if (g_floorCb && g_floorCbValue == g_alphaFloor) return g_floorCb;
+    if (g_floorCb) {
+        g_floorCb->Release();
+        g_floorCb = nullptr;
+    }
+    ID3D11Device* dev = nullptr;
+    ctx->GetDevice(&dev);
+    if (!dev) return nullptr;
+    const float data[4] = {g_alphaFloor, 0.0f, 0.0f, 0.0f};
+    D3D11_BUFFER_DESC bd{};
+    bd.ByteWidth = sizeof(data);
+    bd.Usage = D3D11_USAGE_IMMUTABLE;
+    bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+    D3D11_SUBRESOURCE_DATA sd{};
+    sd.pSysMem = data;
+    const HRESULT hr = dev->CreateBuffer(&bd, &sd, &g_floorCb);
+    dev->Release();
+    if (FAILED(hr)) g_floorCb = nullptr;
+    g_floorCbValue = g_alphaFloor;
+    return g_floorCb;
+}
+
 void parseHashes(const std::string& spec, uint64_t* out, uint32_t* count,
                  uint32_t cap, const char* key) {
     *count = 0;
@@ -570,6 +630,126 @@ void releaseStates() {
     }
     g_stateCount = 0;
     g_statesFullNoted = false;
+    if (g_reissueDss) {
+        g_reissueDss->Release();
+        g_reissueDss = nullptr;
+    }
+    g_reissueDssFailedNoted = false;
+}
+
+void releasePairViews() {
+    for (int e = 0; e < 2; ++e) {
+        if (g_pair[e].dsv) g_pair[e].dsv->Release();
+        g_pair[e] = PairView();
+    }
+}
+
+// EDVR's depth view over the pass's texture for this eye, made once per
+// texture. Null when there is no pair or the view cannot be made.
+ID3D11DepthStencilView* pairViewFor(ID3D11DeviceContext* ctx, int eye, uint32_t w,
+                                    uint32_t h) {
+    ID3D11Texture2D* tex = nullptr;
+    uint32_t fmt = 0;
+    if (!depthProbeSceneDepthFormat(w, h, eye, &tex, &fmt) || !tex) return nullptr;
+    PairView& p = g_pair[eye];
+    if (p.tex == tex && p.dsv) return p.dsv;
+    if (p.dsv) {
+        p.dsv->Release();
+        p.dsv = nullptr;
+    }
+    p.tex = tex;
+    ID3D11Device* dev = nullptr;
+    ctx->GetDevice(&dev);
+    if (!dev) return nullptr;
+    D3D11_DEPTH_STENCIL_VIEW_DESC d{};
+    d.Format = static_cast<DXGI_FORMAT>(fmt);
+    d.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
+    d.Texture2D.MipSlice = 0;
+    const HRESULT hr = dev->CreateDepthStencilView(tex, &d, &p.dsv);
+    dev->Release();
+    if (FAILED(hr) || !p.dsv) {
+        p.dsv = nullptr;
+        if (!g_pairCreateFailedNoted) {
+            g_pairCreateFailedNoted = true;
+            Log::get().note("ui depth: a depth view over the pass's %ux%u target "
+                            "(format %u) could not be made (0x%08lX); composites "
+                            "outside the scene's depth stay as the game issued them.",
+                            w, h, fmt, static_cast<unsigned long>(hr));
+        }
+        return nullptr;
+    }
+    return p.dsv;
+}
+
+int eyeIndexFor(const void* rtvRes) {
+    for (uint32_t i = 0; i < g_frameRtvCount; ++i) {
+        if (g_frameRtv[i] == rtvRes) return static_cast<int>(i);
+    }
+    if (g_frameRtvCount >= 2) return -1;
+    g_frameRtv[g_frameRtvCount] = const_cast<void*>(rtvRes);
+    return static_cast<int>(g_frameRtvCount++);
+}
+
+// The viewport depth range that carries the encoding correction, and its
+// undoing. Through the context's own entry: vscreen's hook touches only
+// inflated FSS targets.
+void scaleViewportsForUi(ID3D11DeviceContext* ctx) {
+    float sceneNear = 0.0f, sceneFar = 0.0f;
+    if (!temporalPassPlanes(&sceneNear, &sceneFar) || !(g_uiNear > 0.0f)) return;
+    float scale = sceneNear / g_uiNear;
+    if (!(scale > 0.0f)) return;
+    if (scale > 1.0f) scale = 1.0f;
+    g_savedVpCount = kMaxViewports;
+    ctx->RSGetViewports(&g_savedVpCount, g_savedVps);
+    if (g_savedVpCount == 0 || g_savedVpCount > kMaxViewports) {
+        g_savedVpCount = 0;
+        return;
+    }
+    D3D11_VIEWPORT scaled[kMaxViewports];
+    for (UINT i = 0; i < g_savedVpCount; ++i) {
+        scaled[i] = g_savedVps[i];
+        scaled[i].MaxDepth = scaled[i].MinDepth + (scaled[i].MaxDepth - scaled[i].MinDepth) * scale;
+    }
+    ctx->RSSetViewports(g_savedVpCount, scaled);
+    g_vpScaled = true;
+    if (!g_scaleNoted) {
+        g_scaleNoted = true;
+        Log::get().note("ui depth: an interface-projection composite's depth is written "
+                        "through a viewport depth range of %.4f -- the interface "
+                        "projection's near %g m against the scene's %g m -- so its "
+                        "reversed-Z value decodes in the scene's encoding "
+                        "(advanced.ui_depth_planes).",
+                        static_cast<double>(scale), static_cast<double>(g_uiNear),
+                        static_cast<double>(sceneNear));
+    }
+}
+
+void restoreViewports(ID3D11DeviceContext* ctx) {
+    if (!g_vpScaled) return;
+    g_vpScaled = false;
+    if (g_savedVpCount) ctx->RSSetViewports(g_savedVpCount, g_savedVps);
+    g_savedVpCount = 0;
+}
+
+void releaseSavedOm() {
+    for (uint32_t i = 0; i < kMaxRtvs; ++i) {
+        if (g_savedRtvs[i]) g_savedRtvs[i]->Release();
+        g_savedRtvs[i] = nullptr;
+    }
+    if (g_savedDsv) g_savedDsv->Release();
+    g_savedDsv = nullptr;
+}
+
+uint32_t savedRtvCount() {
+    uint32_t n = 0;
+    for (uint32_t i = 0; i < kMaxRtvs; ++i) {
+        if (g_savedRtvs[i]) n = i + 1;
+    }
+    return n;
+}
+
+void restoreOm(ID3D11DeviceContext* ctx) {
+    vScreenSetRenderTargetsRaw(ctx, savedRtvCount(), g_savedRtvs, g_savedDsv);
 }
 
 }  // namespace
@@ -595,17 +775,13 @@ void uiDepthConfigure(Config& cfg) {
     for (uint32_t i = 0; i < extraCount && g_familyCount < kMaxHashes; ++i) {
         if (!inList(g_families, g_familyCount, extra[i])) g_families[g_familyCount++] = extra[i];
     }
-    parseHashes(cfg.getString("advanced.ui_depth_exclude", ""), g_exclude, &g_excludeCount,
+    // The exclude list: the null-shader mesh built in, the ini's after.
+    g_excludeCount = 0;
+    g_exclude[g_excludeCount++] = kNullPsMesh;
+    parseHashes(cfg.getString("advanced.ui_depth_exclude", ""), extra, &extraCount,
                 kMaxHashes, "advanced.ui_depth_exclude");
-    const std::string eyes = cfg.getString("advanced.ui_depth_eyes", "as_is");
-    const bool swapped = eyes == "swapped";
-    if (swapped != g_eyesSwapped) {
-        g_eyesSwapped = swapped;
-        Log::get().note("ui depth: the eye a rebound composite belongs to is %s.",
-                        swapped ? "the REVERSE of its colour target's order in the "
-                                  "frame (advanced.ui_depth_eyes = swapped)"
-                                : "its colour target's order in the frame, first "
-                                  "= left");
+    for (uint32_t i = 0; i < extraCount && g_excludeCount < kMaxHashes; ++i) {
+        if (!inList(g_exclude, g_excludeCount, extra[i])) g_exclude[g_excludeCount++] = extra[i];
     }
     {
         // The interface projection's planes: "near, far" in metres.
@@ -630,13 +806,29 @@ void uiDepthConfigure(Config& cfg) {
             g_uiFar = 1000.0f;
         }
     }
+    {
+        float a = cfg.getFloat("advanced.ui_depth_alpha", 0.5f);
+        if (!(a >= 0.0f)) a = 0.0f;
+        if (a > 1.0f) a = 1.0f;
+        g_alphaFloor = a;
+    }
+    const std::string eyes = cfg.getString("advanced.ui_depth_eyes", "as_is");
+    const bool swapped = eyes == "swapped";
+    if (swapped != g_eyesSwapped) {
+        g_eyesSwapped = swapped;
+        Log::get().note("ui depth: the eye a rebound composite belongs to is %s.",
+                        swapped ? "the REVERSE of its colour target's order in the "
+                                  "frame (advanced.ui_depth_eyes = swapped)"
+                                : "its colour target's order in the frame, first "
+                                  "= left");
+    }
     const bool menus = cfg.getBool("advanced.ui_depth_menus", true);
     if (menus != g_menus) {
         g_menus = menus;
-        Log::get().note("ui depth: composites whose own depth nothing reads are %s.",
-                        menus ? "bound to the pass's depth for the draw (the menus "
-                                "and the loading screen)"
-                              : "left alone (advanced.ui_depth_menus = 0)");
+        Log::get().note("ui depth: interface-projection composites (the menus, the "
+                        "loading screen, the modals) %s.",
+                        menus ? "get the alpha-aware depth pass"
+                              : "are left alone (advanced.ui_depth_menus = 0)");
     }
     // The test instrument changes what a twin is, so the twins are remade.
     const std::string test = cfg.getString("advanced.ui_depth_test", "as_is");
@@ -658,10 +850,10 @@ void uiDepthConfigure(Config& cfg) {
         resetWindow();
         Log::get().note("ui depth: ON -- the interface's composites and the flight HUD "
                         "will write their depth for the temporal pass (%u direct "
-                        "famil%s, %u excluded). It says so again when the first "
-                        "frame writes.",
+                        "famil%s, %u excluded, alpha floor %.2f). It says so again "
+                        "when the first frame writes.",
                         g_familyCount, g_familyCount == 1 ? "y" : "ies",
-                        g_excludeCount);
+                        g_excludeCount, static_cast<double>(g_alphaFloor));
     } else if (!g_on && was) {
         Log::get().note("ui depth: off%s. The interface draws as the game issues it.",
                         g_keyOn ? " while temporal_aa is off" : "");
@@ -709,6 +901,10 @@ void uiDepthNoteOffscreenDraw(ID3D11DeviceContext* ctx) {
 }
 
 bool uiDepthOnEyeDraw(ID3D11DeviceContext* ctx) {
+    g_mode = Mode::kNone;
+    g_wantRebind = false;
+    g_rebindEye = -1;
+    g_reissueShader = nullptr;
     if (!g_on || g_stoodDown) return false;
     // Cheapest first: no depth target, nothing to write (the post chain's
     // fullscreen draws, ten a frame).
@@ -732,29 +928,55 @@ bool uiDepthOnEyeDraw(ID3D11DeviceContext* ctx) {
     const uint64_t h = boundVsHash(ctx);
     if (!composite && !(h && inList(g_families, g_familyCount, h))) return false;
     if (h && inList(g_exclude, g_excludeCount, h)) return false;
-    // Only where the pass reads: the scene pair. A composite that binds a
-    // depth of its own that nothing reads (the main menu's panel, the
-    // loader's dialog; measured 2026-09-06) has the pass's depth bound in
-    // its place for the draw, for its eye -- when the pair exists and the
-    // eye can be told (the first colour target treated in a frame is the
-    // left, the probe's own rule).
-    g_wantRebind = false;
-    g_rebindEye = -1;
-    if (!dsvIsSceneDepth(dsv)) {
-        if (!g_menus) {
-            ++g_wNotScene;
-            return false;
+
+    // WHICH PROJECTION. The cockpit's families bind the scene pair and
+    // test against it, so they share the scene's projection and write
+    // depth in place. A composite that does not bind the pair is drawn
+    // through the interface projection (the menus, the loader, the modals;
+    // measured 2026-09-07) and gets the alpha-aware depth pass instead,
+    // whichever depth it binds.
+    const bool scenePair = dsvIsSceneDepth(dsv);
+    const bool sceneFamily = h == kHoloPanel || inList(g_families, g_familyCount, h);
+    if (scenePair && sceneFamily) {
+        g_mode = Mode::kInPlace;
+        if (g_familyLoggedCount < kMaxFamilyLines && !inList(g_familyLogged, g_familyLoggedCount, h)) {
+            noteFamily(h, boundPsHash(ctx),
+                       composite ? "samples a learned surface; writes its depth in "
+                                   "place, the scene's own encoding"
+                                 : "named direct family; writes its depth in place");
         }
-        // Only onto a real scene's pair, and only once the pass has told
-        // this half the scene's planes (the correction needs them).
-        float sn = 0.0f, sf = 0.0f;
-        if (depthProbeSceneDraws() < kRealSceneDraws || !temporalPassPlanes(&sn, &sf)) {
-            ++g_wNoScene;
-            return false;
+        if (composite) {
+            ++g_wComposite;
+        } else {
+            ++g_wDirect;
         }
+        return true;
+    }
+    if (!composite) return false;   // a direct family off the scene pair: left alone
+    if (!g_menus) {
+        ++g_wNotScene;
+        return false;
+    }
+    // The alpha-aware pass needs a shader for this family's pixel stage,
+    // the scene's planes for the encoding, and the pass's depth for the
+    // eye when the composite's own is not it.
+    const uint64_t ph = boundPsHash(ctx);
+    DepthShader* shader = depthShaderFor(ctx, ph);
+    if (!shader) {
+        ++g_wNoShader;
+        noteFamily(h, ph, "samples a learned surface but has no depth shader of "
+                          "its own yet; left alone");
+        return false;
+    }
+    float sn = 0.0f, sf = 0.0f;
+    if (!temporalPassPlanes(&sn, &sf)) {
+        ++g_wNoPair;
+        return false;
+    }
+    if (!scenePair) {
         ResourceInfo rt;
         if (!bindingResolve(bindingGet(BindSlot::Rtv0), &rt) || !rt.isTexture2D) {
-            ++g_wNotScene;
+            ++g_wNoPair;
             return false;
         }
         int eye = eyeIndexFor(rt.resource);
@@ -770,58 +992,22 @@ bool uiDepthOnEyeDraw(ID3D11DeviceContext* ctx) {
         g_rebindW = rt.a;
         g_rebindH = rt.b;
     }
-    noteFamily(h, composite);
-    if (composite) {
-        ++g_wComposite;
-    } else {
-        ++g_wDirect;
-    }
+    g_mode = Mode::kReissue;
+    g_reissueShader = shader;
+    noteFamily(h, ph, scenePair ? "interface projection; its depth written by the "
+                                  "alpha-aware pass into its own target, the pass's"
+                                : "interface projection; its depth written by the "
+                                  "alpha-aware pass into the pass's target for its eye");
+    ++g_wComposite;
     return true;
 }
 
-void releaseSavedOm() {
-    for (uint32_t i = 0; i < kMaxRtvs; ++i) {
-        if (g_savedRtvs[i]) g_savedRtvs[i]->Release();
-        g_savedRtvs[i] = nullptr;
-    }
-    if (g_savedDsv) g_savedDsv->Release();
-    g_savedDsv = nullptr;
-}
+bool uiDepthWantsReissue() { return g_mode == Mode::kReissue && g_reissueShader != nullptr; }
 
 void uiDepthBegin(ID3D11DeviceContext* ctx) {
     g_engaged = false;
-    g_rebound = false;
-    if (!g_on || g_stoodDown) return;
-    const bool rebind = g_wantRebind;
-    g_wantRebind = false;
+    if (!g_on || g_stoodDown || g_mode != Mode::kInPlace) return;
     const bool ran = guardedBudget(g_budget, [&] {
-        // The rebind first, so the twin is derived against the state the
-        // draw will run with (the same state: the OM swap changes no
-        // depth-stencil state).
-        if (rebind) {
-            ID3D11DepthStencilView* ours = pairViewFor(ctx, g_rebindEye, g_rebindW, g_rebindH);
-            if (!ours) {
-                ++g_wNoPair;
-                return;
-            }
-            ctx->OMGetRenderTargets(kMaxRtvs, g_savedRtvs, &g_savedDsv);
-            uint32_t n = 0;
-            for (uint32_t i = 0; i < kMaxRtvs; ++i) {
-                if (g_savedRtvs[i]) n = i + 1;
-            }
-            vScreenSetRenderTargetsRaw(ctx, n, g_savedRtvs, ours);
-            g_rebound = true;
-            ++g_wRebound;
-            scaleViewportsForUi(ctx);
-            if (!g_rebindNoted) {
-                g_rebindNoted = true;
-                Log::get().note("ui depth: a composite whose own depth nothing reads "
-                                "is bound to the pass's %ux%u depth for its draw "
-                                "(eye %d by the order its colour target appeared "
-                                "this frame); the game's bindings are put back after.",
-                                g_rebindW, g_rebindH, g_rebindEye);
-            }
-        }
         ID3D11DepthStencilState* game = nullptr;
         UINT ref = 0;
         ctx->OMGetDepthStencilState(&game, &ref);
@@ -849,28 +1035,13 @@ void uiDepthBegin(ID3D11DeviceContext* ctx) {
                         "state swap faulted repeatedly. The interface draws as "
                         "the game issues it.");
     }
-    if (!ran && g_rebound) {
-        // A fault after the rebind: the game's bindings go back now rather
-        // than at End, which the scope still calls.
-        guarded("uiDepth.rebindRestore", [&] {
-            restoreViewports(ctx);
-            uint32_t n = 0;
-            for (uint32_t i = 0; i < kMaxRtvs; ++i) {
-                if (g_savedRtvs[i]) n = i + 1;
-            }
-            vScreenSetRenderTargetsRaw(ctx, n, g_savedRtvs, g_savedDsv);
-        });
-        releaseSavedOm();
-        g_rebound = false;
-    }
 }
 
 void uiDepthEnd(ID3D11DeviceContext* ctx) {
     // Under SEH but NOT under the budget: a budget spent between Begin and
     // End would skip a guardedBudget body, and a restore skipped leaves our
-    // writing twin, or our depth view, on every later draw in the frame
-    // (review finding 1; resolve_probe.cpp restores the same way for the
-    // same reason).
+    // writing twin on every later draw in the frame (review finding 1;
+    // resolve_probe.cpp restores the same way for the same reason).
     if (g_engaged) {
         g_engaged = false;
         guarded("uiDepth.restore", [&] { ctx->OMSetDepthStencilState(g_savedDss, g_savedRef); });
@@ -879,18 +1050,102 @@ void uiDepthEnd(ID3D11DeviceContext* ctx) {
             g_savedDss = nullptr;
         }
     }
-    if (g_rebound) {
-        g_rebound = false;
-        guarded("uiDepth.rebindRestore", [&] {
-            restoreViewports(ctx);
-            uint32_t n = 0;
-            for (uint32_t i = 0; i < kMaxRtvs; ++i) {
-                if (g_savedRtvs[i]) n = i + 1;
+    g_mode = Mode::kNone;
+}
+
+void uiDepthReissueBegin(ID3D11DeviceContext* ctx) {
+    g_reissueOn = false;
+    g_rebound = false;
+    if (!g_on || g_stoodDown || g_mode != Mode::kReissue || !g_reissueShader) return;
+    const bool rebind = g_wantRebind;
+    g_wantRebind = false;
+    DepthShader* shader = g_reissueShader;
+    const bool ran = guardedBudget(g_budget, [&] {
+        ID3D11DepthStencilState* dss = reissueState(ctx);
+        ID3D11Buffer* cb = floorBuffer(ctx);
+        if (!dss || !cb) {
+            ++g_wNoTwin;
+            return;
+        }
+        // The colour target off, the depth target the pass's when the
+        // composite's own is not it; through the original entry so the
+        // binding shadow keeps describing the game's bindings.
+        ctx->OMGetRenderTargets(kMaxRtvs, g_savedRtvs, &g_savedDsv);
+        ID3D11DepthStencilView* target = g_savedDsv;
+        if (rebind) {
+            target = pairViewFor(ctx, g_rebindEye, g_rebindW, g_rebindH);
+            if (!target) {
+                releaseSavedOm();
+                ++g_wNoPair;
+                return;
             }
-            vScreenSetRenderTargetsRaw(ctx, n, g_savedRtvs, g_savedDsv);
+            ++g_wRebound;
+            if (!g_rebindNoted) {
+                g_rebindNoted = true;
+                Log::get().note("ui depth: a composite whose own depth is not the pass's "
+                                "has its depth pass bound to the pass's %ux%u depth "
+                                "(eye %d by the order its colour target appeared this "
+                                "frame); the game's bindings are put back after.",
+                                g_rebindW, g_rebindH, g_rebindEye);
+            }
+        }
+        vScreenSetRenderTargetsRaw(ctx, 0, nullptr, target);
+        g_rebound = true;
+        ctx->OMGetDepthStencilState(&g_savedDss, &g_savedRef);
+        ctx->OMSetDepthStencilState(dss, 0);
+        ctx->PSGetShader(&g_savedPs, nullptr, nullptr);
+        ctx->PSSetShader(shader->shader, nullptr, 0);
+        ctx->PSSetConstantBuffers(13, 1, &cb);
+        scaleViewportsForUi(ctx);
+        g_reissueOn = true;
+        ++g_wReissued;
+        ++g_wWrote;
+        ++g_sessionWrote;
+    });
+    if (!ran && !g_budget.shouldRun() && !g_stoodDown) {
+        g_stoodDown = true;
+        Log::get().note("ui depth: STANDING DOWN for the session -- the depth pass "
+                        "faulted repeatedly. The interface draws as the game issues it.");
+    }
+    if (!ran && g_rebound) {
+        // A fault after the rebind: everything back now rather than at End,
+        // which the caller still calls.
+        guarded("uiDepth.reissueRestore", [&] {
+            restoreViewports(ctx);
+            restoreOm(ctx);
         });
         releaseSavedOm();
+        g_rebound = false;
+        g_reissueOn = false;
     }
+}
+
+void uiDepthReissueEnd(ID3D11DeviceContext* ctx) {
+    if (g_reissueOn) {
+        g_reissueOn = false;
+        guarded("uiDepth.reissueRestore", [&] {
+            ctx->PSSetShader(g_savedPs, nullptr, 0);
+            ID3D11Buffer* none = nullptr;
+            ctx->PSSetConstantBuffers(13, 1, &none);
+            ctx->OMSetDepthStencilState(g_savedDss, g_savedRef);
+            restoreViewports(ctx);
+        });
+        if (g_savedPs) {
+            g_savedPs->Release();
+            g_savedPs = nullptr;
+        }
+        if (g_savedDss) {
+            g_savedDss->Release();
+            g_savedDss = nullptr;
+        }
+    }
+    if (g_rebound) {
+        g_rebound = false;
+        guarded("uiDepth.reissueRestore", [&] { restoreOm(ctx); });
+        releaseSavedOm();
+    }
+    g_mode = Mode::kNone;
+    g_reissueShader = nullptr;
 }
 
 void uiDepthFrameBoundary() {
@@ -903,27 +1158,30 @@ void uiDepthFrameBoundary() {
         g_announced = true;
         Log::get().note("ui depth: engaged -- %u interface draws wrote their depth "
                         "this window (%u composites of %u learned surfaces, %u "
-                        "direct), the game's depth test kept where it had one.",
-                        g_wWrote, g_wComposite, g_surfaceCount, g_wDirect);
+                        "direct, %u through the alpha-aware pass), the game's depth "
+                        "test kept where it had one.",
+                        g_wWrote, g_wComposite, g_surfaceCount, g_wDirect, g_wReissued);
     }
     if (g_wFrames >= kTotalsFrames) {
-        if (g_wWrote || g_wNotScene || g_wRebound || g_wNoPair || g_wNoScene ||
+        if (g_wWrote || g_wNotScene || g_wRebound || g_wNoPair || g_wNoShader ||
             g_wNoTwin || g_wLearned || g_evictions) {
             Log::get().note("ui depth totals: %.1f interface draws a frame wrote depth "
-                            "(%.1f composites, %.1f direct; %.1f bound to the pass's "
-                            "depth in place of their own); %u surfaces known, %u "
-                            "learned this window, %u forgotten; left alone: %.1f a "
-                            "frame not into the scene's depth, %.1f with no real scene "
-                            "to bind to, %.1f with no pair, %u already writing, %u "
-                            "with no twin; %u depth states; %llu written this session.",
+                            "(%.1f composites, %.1f direct; %.1f through the alpha-aware "
+                            "pass, %.1f of those bound to the pass's depth); %u surfaces "
+                            "known, %u learned this window, %u forgotten; left alone: "
+                            "%.1f a frame with no depth shader for their family, %.1f "
+                            "with no pair or planes, %.1f by the menus switch, %u already "
+                            "writing, %u with no state; %u depth states; %llu written "
+                            "this session.",
                             static_cast<double>(g_wWrote) / g_wFrames,
                             static_cast<double>(g_wComposite) / g_wFrames,
                             static_cast<double>(g_wDirect) / g_wFrames,
+                            static_cast<double>(g_wReissued) / g_wFrames,
                             static_cast<double>(g_wRebound) / g_wFrames,
                             g_surfaceCount, g_wLearned, g_evictions,
-                            static_cast<double>(g_wNotScene) / g_wFrames,
-                            static_cast<double>(g_wNoScene) / g_wFrames,
+                            static_cast<double>(g_wNoShader) / g_wFrames,
                             static_cast<double>(g_wNoPair) / g_wFrames,
+                            static_cast<double>(g_wNotScene) / g_wFrames,
                             g_wAlreadyWrote, g_wNoTwin, g_stateCount,
                             static_cast<unsigned long long>(g_sessionWrote));
         }
@@ -936,15 +1194,31 @@ void uiDepthShutdown() {
         g_savedDss->Release();
         g_savedDss = nullptr;
     }
+    if (g_savedPs) {
+        g_savedPs->Release();
+        g_savedPs = nullptr;
+    }
     g_engaged = false;
+    g_reissueOn = false;
     g_rebound = false;
+    g_mode = Mode::kNone;
     releaseSavedOm();
     releasePairViews();
     releaseStates();
+    for (DepthShader& s : g_depthShaders) {
+        if (s.shader) s.shader->Release();
+        s.shader = nullptr;
+        s.tried = false;
+    }
+    if (g_floorCb) {
+        g_floorCb->Release();
+        g_floorCb = nullptr;
+    }
     g_surfaceCount = 0;
     g_surfaceNext = 0;
     g_viewMemo.clear();
     g_vsMemo.clear();
+    g_psMemo.clear();
     for (uint32_t i = 0; i < kExhausted; ++i) g_exhausted[i] = Exhausted();
     g_familyLoggedCount = 0;
     g_on = false;
