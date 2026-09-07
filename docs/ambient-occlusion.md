@@ -42,6 +42,17 @@ pilot's arm named as where its wrongness shows
 No entry for it was found on Frontier's public tracker (believed: one
 search, 2026-09-07), and this repo's own tracker has none.
 
+The asteroid is where this reporter sees it; on none of the readings
+below is it where the fault lives. Screen-space occlusion is one pass over
+the whole frame (believed; the census shows it), so whatever the mechanism
+is, it is the same on the pilot's arm the forum thread names, in a
+station's hangar, and on a planet's surface -- the cracks of an icy
+fragment are simply where the most silhouettes per degree sit in view,
+close enough for the eyes to disagree about them. The capture asks where
+else it shows for that reason, and a fix to the pass fixes it everywhere
+the pass runs. The section [Beyond asteroids](#beyond-asteroids) says
+what the other scenes add.
+
 ## The short version
 
 Screen-space ambient occlusion is computed from each eye's own depth
@@ -276,6 +287,36 @@ To be ruled out first, because it costs one session and no analysis:
 - **Not the jitter, not the resolve, not the guard**, for the reasons
   measured above.
 
+## Beyond asteroids
+
+The reported scene is the hardest one to reproduce (a ring, a large
+fragment, a parked ship) and not the most telling one. Three others are
+worth a look from anyone who has the fault, and each adds something the
+asteroid cannot:
+
+- **The pilot's arm and the cockpit.** The nearest geometry in the game,
+  where the two eyes' views differ most and a stereo-blind occlusion is at
+  its worst; and where a stale eye (mechanism B) would show as a level
+  difference that swings with every head movement, because near content
+  moves the most pixels per degree. The forum thread names it; the
+  worksheet asks for it.
+- **A station's hangar.** Edges everywhere, controlled lighting, and no
+  ring to find -- anyone can dock. If a second capture is ever needed,
+  this is the scene to take it in, because every rig can reach it in two
+  minutes and the census diff is cleanest where the lighting does not
+  change between the two presses.
+- **A planet's surface.** Terrain has its own passes (the cull guard's
+  whole subject), and whether the occlusion runs over terrain the same
+  way, or at all, is one more line of the census.
+
+What the breadth decides: if the fault shows everywhere the pass runs, it
+is one of the three mechanisms above and the fix is at the pass. If it
+shows only on asteroids, something asteroid-specific feeds the pass
+differently per eye -- a material or a detail map that is not the
+occlusion's own doing -- and the hunt moves to the asteroid's draws, with
+the same instruments. The reporter's answer to "where else" in Part 2 of
+the worksheet is the first evidence, and Q11 below is the gate.
+
 ## Phase 0: the capture
 
 One session on the reporter's rig, shipped instruments only. The restart
@@ -467,6 +508,10 @@ Each with what answers it. None is answerable from the desk.
     dump's `eye0` is the eye rendered first; the reporter names the worse
     eye. The scanner-body hunt found the healthy eye drew first in every
     failing frame, and whether that holds here is one line of the log.
+11. **Everywhere, or only asteroids?** The worksheet's "where else" answer
+    first; then one look at the pilot's arm and one in a hangar by anyone
+    with the fault. Everywhere means the pass; asteroids alone means what
+    feeds it ([Beyond asteroids](#beyond-asteroids)).
 
 ## What this document does not do
 
