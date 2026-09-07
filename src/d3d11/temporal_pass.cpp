@@ -12,6 +12,7 @@
 #include "../common/config.h"
 #include "../common/guard.h"
 #include "../common/log.h"
+#include "device_hook.h"   // the auto mip bias's source, to check against a real frame
 #include "../common/supersample_math.h"   // supersampleRegionFromBounds: one region rule at the door
 #include "../common/temporal_math.h"
 #include "depth_probe.h"
@@ -2534,6 +2535,30 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                                 depthSrv ? "" : " (none in hand yet: no depth until the "
                                                 "probe finds it)",
                                 oW != w ? " and brings it back to the unit-quality size" : "");
+                            // advanced.texture_lod_bias = auto had to decide
+                            // before a frame existed, from Elite's own
+                            // multiplier. This is the first moment the REAL
+                            // fraction is known, so check the two against each
+                            // other while there is something to compare.
+                            float autoMult = 0.0f, autoBias = 0.0f;
+                            if (deviceHookAutoBiasSource(&autoMult, &autoBias) && autoMult > 0.0f) {
+                                const float seen =
+                                    (oW && oW != w) ? static_cast<float>(w) / static_cast<float>(oW)
+                                                    : 1.0f;
+                                const bool agree = fabsf(seen - autoMult) < 0.02f;
+                                Log::get().note(
+                                    "texture filtering: the mip bias %+.2f was derived at launch from "
+                                    "Elite's render fraction of %.3f, and this frame's fraction is "
+                                    "%.3f -- %s",
+                                    static_cast<double>(autoBias), static_cast<double>(autoMult),
+                                    static_cast<double>(seen),
+                                    agree ? "they agree, so the mips are right for this frame."
+                                          : "they DISAGREE. A mip bias is baked into every sampler at "
+                                            "creation, so this session's textures are wrong by the "
+                                            "difference and only a restart can fix it. If a restart "
+                                            "does not, HMDRenderTargetMultiplier no longer means the "
+                                            "render fraction and auto needs rethinking.");
+                            }
                         }
                     } else {
                         e.dlHaveHistory = false;

@@ -149,6 +149,9 @@ struct State {
     // point sampler, whose look is deliberate.
     int          samplerAniso = 0;
     float        samplerBias = 0.0f;
+    char         samplerBiasWhy[220] = {};   // where the bias came from, for the log
+    bool         samplerBiasAuto = false;    // derived from Elite's own multiplier
+    float        samplerBiasMult = 0.0f;     // ...and the multiplier it was derived from
     bool         samplerForceNoted = false;
     // The shader-swap arc's dump mode: while armed, every vertex and pixel
     // shader blob the game creates is written to <logdir>\shaders by hash,
@@ -1398,6 +1401,84 @@ State& ensureState() {
 
 }  // namespace
 
+// ELITE'S OWN VR RENDER-TARGET MULTIPLIER, for advanced.texture_lod_bias
+// = auto.
+//
+// A mip bias is baked into a sampler when it is created and is immutable
+// after, and this renderer makes its samplers up front (see the census
+// below) -- before the eye targets exist, so before anything in this
+// process can measure the render scale from a frame. Measuring it later
+// would bias only the stragglers, which is a feature that does almost
+// nothing and says nothing about it.
+//
+// So take it from the game's own settings, which are written before it
+// starts: Options\Graphics\<preset>.<major>.<minor>.fxcfg carries
+// <HMDRenderTargetMultiplier>, the fraction of the runtime's recommended
+// size Elite renders at. The newest .fxcfg is the one it last wrote.
+// SSAAMultiplier is read alongside only to be reported, so that if the
+// bias ever disagrees with the render size in the log, the second number
+// is already there to explain it.
+//
+// A format this file does not control, so every failure is silent-safe:
+// no directory, no file, no field, or an unreasonable value all leave the
+// bias at zero and say why.
+bool eliteHmdMultiplier(float* mult, float* ssaa, char* fileOut, size_t fileLen) {
+    if (mult) *mult = 0.0f;
+    if (ssaa) *ssaa = 0.0f;
+    if (fileOut && fileLen) fileOut[0] = 0;
+    wchar_t appdata[MAX_PATH] = {};
+    const DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", appdata, MAX_PATH);
+    if (n == 0 || n >= MAX_PATH) return false;
+    std::wstring dir = std::wstring(appdata) +
+                       L"\\Frontier Developments\\Elite Dangerous\\Options\\Graphics\\";
+    WIN32_FIND_DATAW fd = {};
+    HANDLE h = FindFirstFileW((dir + L"*.fxcfg").c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    std::wstring best;
+    FILETIME bestTime = {};
+    do {
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+        if (best.empty() || CompareFileTime(&fd.ftLastWriteTime, &bestTime) > 0) {
+            best = fd.cFileName;
+            bestTime = fd.ftLastWriteTime;
+        }
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+    if (best.empty()) return false;
+    HANDLE f = CreateFileW((dir + best).c_str(), GENERIC_READ,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
+                           FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (f == INVALID_HANDLE_VALUE) return false;
+    const DWORD size = GetFileSize(f, nullptr);
+    std::string text;
+    if (size != INVALID_FILE_SIZE && size <= (1u << 20)) {
+        text.resize(size);
+        DWORD got = 0;
+        if (!ReadFile(f, &text[0], size, &got, nullptr)) got = 0;
+        text.resize(got);
+    }
+    CloseHandle(f);
+    if (text.empty()) return false;
+    if (fileOut && fileLen) {
+        const int w = WideCharToMultiByte(CP_UTF8, 0, best.c_str(), -1, fileOut,
+                                          static_cast<int>(fileLen), nullptr, nullptr);
+        if (w <= 0) fileOut[0] = 0;
+    }
+    struct Field { const char* tag; float* out; };
+    const Field fields[] = {{"<HMDRenderTargetMultiplier>", mult}, {"<SSAAMultiplier>", ssaa}};
+    bool gotMult = false;
+    for (const Field& fl : fields) {
+        if (!fl.out) continue;
+        const size_t at = text.find(fl.tag);
+        if (at == std::string::npos) continue;
+        const float v = static_cast<float>(atof(text.c_str() + at + strlen(fl.tag)));
+        if (!(v > 0.0f) || !(v < 8.0f)) continue;
+        *fl.out = v;
+        if (fl.out == mult) gotMult = true;
+    }
+    return gotMult;
+}
+
 // The reduction type lives in bits 7-8 of a D3D11_FILTER: 0 standard,
 // 1 comparison, 2 minimum, 3 maximum. Only a standard filter is ours to
 // touch, and only a linear or anisotropic one -- promoting a point
@@ -1492,11 +1573,12 @@ HRESULT STDMETHODCALLTYPE hookedCreateSamplerState(ID3D11Device* self,
                 s.samplerForceNoted = true;
                 Log::get().note(
                     "texture filtering: the game's linear and anisotropic samplers are "
-                    "being created with anisotropy %d and %+.2f added to their mip bias. "
-                    "Point, comparison, minimum and maximum filters are left alone. A "
+                    "being created with anisotropy %d and %+.2f added to their mip bias "
+                    "(%s). Point, comparison, minimum and maximum filters are left alone. A "
                     "positive bias trades sharpness for quiet on distant repeating "
                     "detail; a negative one does the reverse.",
-                    s.samplerAniso, static_cast<double>(s.samplerBias));
+                    s.samplerAniso, static_cast<double>(s.samplerBias),
+                    s.samplerBiasWhy[0] ? s.samplerBiasWhy : "no bias asked for");
             }
         }
         // Once the creates have settled: a renderer makes its samplers up
@@ -1618,7 +1700,36 @@ void hookDevice(ID3D11Device* device) {
 #undef EDVR_HOOK_DEV_CREATE
     {
         const int aniso = sentinelCfg.getIntInRange("advanced.texture_anisotropy", 0, 0, 16);
-        float bias = sentinelCfg.getFloat("advanced.texture_lod_bias", 0.0f);
+        const std::string biasKey = sentinelCfg.getString("advanced.texture_lod_bias", "0");
+        float bias = 0.0f;
+        if (_stricmp(biasKey.c_str(), "auto") == 0) {
+            float mult = 0.0f, ssaa = 0.0f;
+            char file[80] = {};
+            if (eliteHmdMultiplier(&mult, &ssaa, file, sizeof(file))) {
+                bias = log2f(mult);
+                s.samplerBiasAuto = true;
+                s.samplerBiasMult = mult;
+                snprintf(s.samplerBiasWhy, sizeof(s.samplerBiasWhy),
+                         "auto: Elite renders at %.3f of the size the runtime recommends "
+                         "(HMDRenderTargetMultiplier in %s; its SSAAMultiplier is %.3f), and "
+                         "log2 of that is the bias the mips want",
+                         static_cast<double>(mult), file[0] ? file : "its graphics preset",
+                         static_cast<double>(ssaa));
+            } else {
+                // Say it here rather than leave it to the sampler line: a
+                // failed auto leaves the bias at zero, which switches the
+                // whole override off, which would print nothing at all.
+                Log::get().note(
+                    "texture filtering: advanced.texture_lod_bias = auto, but Elite's graphics "
+                    "preset gave no HMDRenderTargetMultiplier (Options\\Graphics\\*.fxcfg under "
+                    "%%LOCALAPPDATA%%\\Frontier Developments\\Elite Dangerous). No bias is applied. "
+                    "Set a number instead, or check the game has written its settings once.");
+            }
+        } else {
+            bias = static_cast<float>(atof(biasKey.c_str()));
+            snprintf(s.samplerBiasWhy, sizeof(s.samplerBiasWhy),
+                     "advanced.texture_lod_bias = %s", biasKey.c_str());
+        }
         if (!(bias > -4.0f)) bias = -4.0f;
         if (!(bias < 4.0f)) bias = 4.0f;
         s.samplerAniso = aniso;
@@ -1765,6 +1876,14 @@ bool deviceHookFssModeLatch() {
 bool deviceHookTakeFssZoomPress() {
     if (!g_state || !g_state->fssZoomPressPending) return false;
     g_state->fssZoomPressPending = false;
+    return true;
+}
+
+bool deviceHookAutoBiasSource(float* multiplier, float* bias) {
+    State& s = ensureState();
+    if (!s.samplerBiasAuto) return false;
+    if (multiplier) *multiplier = s.samplerBiasMult;
+    if (bias) *bias = s.samplerBias;
     return true;
 }
 
