@@ -771,6 +771,34 @@ void dlaaShutdown() {
 // ---------------------------------------------------------------------------
 namespace {
 
+// The probes' report buffer. OUTSIDE the NGX guard on purpose: the three
+// probe entry points below build one before they branch, and their
+// no-SDK arms use it to say why they did nothing. Declared inside the
+// guard, a build without the DLSS SDK failed to compile on three lines
+// that had nothing to do with NVIDIA (2026-09-07). It touches no NGX
+// type, so there is nothing to guard.
+struct ProbeReport {
+    char*    buf;
+    uint32_t cap;
+    uint32_t len = 0;
+    void line(const char* fmt, ...) {
+        if (!buf || len + 2 >= cap) return;
+        va_list ap;
+        va_start(ap, fmt);
+        const int n = vsnprintf(buf + len, cap - len, fmt, ap);
+        va_end(ap);
+        if (n < 0) return;
+        len += static_cast<uint32_t>(n);
+        if (len + 2 < cap) {
+            buf[len++] = '\n';
+            buf[len] = 0;
+        } else {
+            len = cap - 1;
+            buf[len] = 0;
+        }
+    }
+};
+
 #ifdef EDVR_HAVE_NGX
 
 constexpr uint32_t kPW = 1280, kPH = 960;   // the frame
@@ -818,28 +846,6 @@ uint16_t probeHalf(float f) {
     if (exp >= 31) return static_cast<uint16_t>(sign | 0x7C00u); // overflow to inf
     return static_cast<uint16_t>(sign | (static_cast<uint32_t>(exp) << 10) | (mant >> 13));
 }
-
-struct ProbeReport {
-    char*    buf;
-    uint32_t cap;
-    uint32_t len = 0;
-    void line(const char* fmt, ...) {
-        if (!buf || len + 2 >= cap) return;
-        va_list ap;
-        va_start(ap, fmt);
-        const int n = vsnprintf(buf + len, cap - len, fmt, ap);
-        va_end(ap);
-        if (n < 0) return;
-        len += static_cast<uint32_t>(n);
-        if (len + 2 < cap) {
-            buf[len++] = '\n';
-            buf[len] = 0;
-        } else {
-            len = cap - 1;
-            buf[len] = 0;
-        }
-    }
-};
 
 struct ProbeRig {
     ID3D11Device*         dev = nullptr;
