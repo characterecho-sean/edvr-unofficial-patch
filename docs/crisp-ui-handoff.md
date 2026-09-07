@@ -326,6 +326,38 @@ the scene-pair check making the default free and explicit elsewhere. The
 "about forty lines" of the plan became about 450 with the classifier's
 memos and the logging.
 
+## The menus and the loading screen: the rebind (2026-09-07)
+
+Sean, after the merged build: the cockpit UI "looks great", the main menu,
+the settings menu and the loading screens are still aliased and swimming.
+Expected from the review's finding 3: those composites bind a depth target
+of their own that nothing reads, while the pass reads the busiest pair (the
+hangar's in the menu; the ship model's on the loading screen), so a depth
+written where the game put it registers nothing.
+
+The fix is to write it where the pass reads. For a classified draw whose
+bound depth is not the scene pair's, the module binds EDVR's own depth view
+over the pair's texture for that eye in the game's place for the one draw
+(`depthProbeSceneDepthFormat` hands out the probe's texture and the view
+format the game binds it with; `vScreenSetRenderTargetsRaw` goes through
+the original OM entry so the binding shadow keeps describing the game's
+bindings), writes with the ALWAYS twin the test-off state derives to, and
+puts the game's targets back before anything else looks. The eye is read
+from the order the draw's colour target first appears among treated draws
+in the frame -- first is the left, the depth probe's own rule for the pair
+-- with `advanced.ui_depth_eyes = swapped` as the A/B if a menu steadies in
+one eye only, and `advanced.ui_depth_menus = 0` as the kill switch. The
+totals line counts the rebound draws and the draws with no pair to bind.
+
+What it rests on that is not yet measured: that the LDR composites appear
+in the same eye order as the G-buffer passes the probe orders the pair by
+(a swap degrades to a half-fixed panel, since both eyes' panels sit at the
+same depth and only their screen positions differ); and that a composite's
+`SV_Position.z` is a real distance, which the shader dump supports (every
+composite vertex shader projects through the scene block's rows) and a
+2D quad placed in NDC would break -- none of the classified families is
+one. Unflown at the time of writing.
+
 # Design A: the UI layer
 
 ## A1. What counts as UI: the classifier
