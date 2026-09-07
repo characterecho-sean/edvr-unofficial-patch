@@ -133,9 +133,13 @@ game uses some of them: the holo panels draw with stencil enabled and
 reference 4 (`review-ui-depth-2026-09-06.md:498-500`), and the lighting
 pass of the black-planet hunt ran one draw at reference 8 in the frame the
 body survived and 16 in the frame it did not (`src/d3d11/stencil_probe.h`).
-Which bits those passes *read* is not recorded -- the census prints the
-enable and the reference and not the masks (`src/d3d11/draw_census.cpp:839-856`)
--- and is Phase 0's first question.
+Which bits those passes *read* was not recorded: the census printed the
+enable and the reference and not the masks. Since 2026-09-07 it prints the
+masks and the ops as well, as the `so=` column
+(`src/d3d11/draw_census.cpp:837-881`, read by `tools/stencil_census.py`),
+so Phase 0's first question now needs only a flight. What the logs already
+here can say is that the *references* the scene's draws use span all eight
+bits, which is a reason for pessimism rather than an answer (question 1).
 
 **The per-draw twin.** Around one draw, fetch the game's depth-stencil
 state and reference, bind a twin with a field changed, forward, restore.
@@ -470,14 +474,50 @@ stops and why it stops there.
 
 One flight, three scenes (the slot of a rotating station, a pad with the
 gear down, a wing-mate alongside; on foot at a settlement if there is
-time), with the census extended by two columns. Each question names what
-answers it.
+time), with the census extended. Each question names what answers it.
+
+*Worked on 2026-09-07.* The census column is built and the tool that reads
+it exists; questions 2, 5 and 8 are answered from logs already on this
+machine, and 1 has a provisional answer. Each is marked below with what
+answered it. The rest need the game running -- see
+[the flight checklist](#the-flight-checklist) at the end of this section.
 
 1. **Which stencil bits are free.** Extend the census's `ds=` column
    (`draw_census.cpp:839-856`) with the stencil read mask, write mask and
    the three ops, and list the masks of every draw and clear that touches
    the scene pair. The tag's write mask must miss every read mask; a
    lighting pass that reads 0xFF ends the stencil design and starts 2b.
+
+   *The column is built* (2026-09-07): the census now prints `so=` after
+   `sm=` -- read mask, write mask, `FrontFace.StencilFunc` and the three
+   front ops, with the back face appended after a `+` only when it differs.
+   It costs no new API call, because the `GetDesc` the `ds=` column already
+   pays for carries all of it. `tools/stencil_census.py` decodes it into
+   the four answers this question wants, per depth target.
+
+   *Provisionally answered, and it is a warning* (measured 2026-09-07). Two
+   denominators, and they are different. Eye-sized 32-bit stencil-bearing
+   depth targets appear in 209 censuses across 78 logs, carrying 199,283
+   draws -- but the `st=` column itself only arrived on 2026-09-02, so
+   **just 17 logs and 51 censuses, 44,162 of those draws, say anything about
+   stencil at all**. Everything below is that subset, and it is the
+   REFERENCES only: no log predating the new column can give the masks.
+
+   **74.8% of the scene-depth draws that record it run with stencil
+   enabled** (33,052 of 44,162; the other 25.2% have it off). This is not a
+   mostly-unused plane. The references seen are 0, 4, 5, 7, 8, 9, 21, 25,
+   32, 149 and 255, and their union is **0xFF: every one of the eight bits
+   is named by some draw's reference.** The commonest are 5 (10,772 draws),
+   4 (7,839) and **149 = 0b10010101, 7,293 draws, which names bit 7**. The
+   design's own recollection that "refs 4, 8 and 16 have been seen" is
+   wrong in one particular worth fixing: **reference 16 appears in no
+   census on this machine**, and the population the design did not know
+   about (149, 21, 25, 7) is the larger one.
+
+   A reference is still not a mask -- a draw referencing 149 through a read
+   mask of 0x04 reads one bit -- so this neither opens nor closes the
+   stencil route. What it does is move the prior: go into the flight
+   expecting the masks to be wide, and have tier 2b ready.
 2. **Whether the stencil survives to Submit.** From the same census: after
    the last scene draw, does anything clear or write the pair's stencil
    before EDVR's `mv` dispatch (which `review-ui-depth-2026-09-06.md:67-71`
@@ -485,6 +525,61 @@ answers it.
    at q=698/703 in census 4 are "the eye depth"; whether that is the scene
    pair or the composite's depth decides whether step 4 reads the stencil
    in place or copies it at the last unbind.
+
+   **Answered YES, it survives** (measured 2026-09-07 by
+   `tools/stencil_census.py` from `edvr_gfx_20260906_105837.log`, the
+   2026-09-06 ui-depth flight, game build 332841, Pimax 2818x2784, five
+   censuses with `census_offscreen = yes`). Two findings, and the first
+   settles the question the design left open:
+
+   - **The q=698/703 clears ARE the scene pair, and they open the frame
+     rather than closing it.** In census 4 the pair is `@75` and `@83`, the
+     two 2818x2784 `R32G8X24_TYPELESS` targets under `D32F_S8X24` views,
+     and they are exactly the two the `mv` dispatch samples. The clear at
+     q=698 is `DEPTH|STENCIL`, and that target's **first** draw of the
+     frame is q=699. It is the scene pass's own opening clear, not a later
+     wipe. The same shape holds in all three frames (q=570/571, q=625/626)
+     and in every other census of that log.
+   - **Nothing at all touches the pair between its last draw and the
+     dispatch**, in 24 of 24 target-frames (4 censuses x 2 eyes x 3
+     frames). In census 4 frame 0 the last draw is q=1771 and the dispatch
+     q=1968, and no draw, clear, copy or other dispatch names that resource
+     in between.
+
+   Widening past that one log: across all 209 censuses, **every stencil
+   clear of an eye-sized scene depth (258 of them) falls before that
+   target's first draw of the frame.** None is mid-frame and none is after
+   the last draw. So the plane the scene's draws leave is the plane that is
+   still there at the end of the frame, and **step 4 can read the stencil
+   in place; the rescue copy at the last unbind is not needed.**
+
+   Split the claim, because its two halves are not equally strong.
+
+   - **"Nothing CLEARS it" is airtight.** `ClearDepthStencilView` is
+     recorded unconditionally on `g_framesLeft` and is not on the draw
+     path, so no early return can hide one. All 161 `DCL D` lines in that
+     log resolve, all 161 are `f=3`, and exactly two per frame hit the
+     scene pair, always at the head of the pass.
+   - **"Nothing DRAWS into it" carries a blind spot that must be stated.**
+     `vscreen.cpp:1497-1499` returns `DrawVerdict::kParticle` *before*
+     either census call, so a particle billboard the geyser fix substitutes
+     is never written to the log at all. That session had the fix on and
+     its own counter reports 4,904 replacement draws in the window holding
+     censuses 3 and 4. So the denominator is "every draw, clear, copy and
+     dispatch the census recorded, which excludes substituted particle
+     billboards". It does not plausibly flip the answer -- a particle quad
+     cannot clear stencil, only overwrite pixels it rasterises, and it
+     belongs inside the scene pass -- but for a scheme that stamps tags
+     into that plane it is exactly the wrong thing to leave unsaid.
+
+   Three further limits. The `mv` dispatch exists only when the temporal
+   pass is running, which is one log on this machine, so the 24 clean
+   target-frames are one session in a cockpit. Census 5 of that log lost
+   its intern table to the size cap, but its DSV side is still readable --
+   a draw's `d=` and a clear's `dsv=` are the same pointer and intern to
+   the same id -- and it gives four more clean frames and two partial ones,
+   same build and session. And none of this says the stencil's CONTENT is
+   useful, only that nothing erases it.
 3. **The pool.** Its object at t33 (`VSGetShaderResources` at a scene
    draw), size, usage, stride, and its write path (the `DCW`, `DCC` and
    `U` census lines, `draw_census.h`), how many writes a frame, and whether
@@ -500,6 +595,51 @@ answers it.
    a structured load at stride 336, the position at byte 16, the subtraction
    of `cb1[275]`, the unorm16 unpack. Count the families that carry it and
    name any scene family that does not.
+
+   **Answered from the desk, and it holds** (measured 2026-09-07). No
+   flight was needed: `glare_shader_dump` ran on 2026-09-06 and left 224
+   vertex shaders and 413 pixel shaders in `edvr_logs\shaders`, from the
+   same session as `edvr_gfx_20260906_105837.log` (EDVR v0.14.0-12-gc8546cd,
+   game build 332841). All 224 disassemble cleanly with `fxc /dumpbin`.
+
+   - **Where the record is read at all, it is read identically.** 71 of the
+     224 declare a 336-byte structured buffer, and it is a biconditional:
+     exactly the 71 that declare an `INSTANCEANDMODELDATAINDEX` input.
+     **All 71 carry the complete pattern and none carries part of it** --
+     `t33` in 71/71, position at byte 16 in 71/71, `-cb1[275]` in 71/71,
+     the unorm16 quaternion unpack in 71/71, bones at `t38` stride 48 in
+     71/71. The design's `t33` and `cb1[275]` are not assumptions any more.
+   - **Against the families that actually draw the scene**: 67 distinct
+     vertex shaders draw into an eye-sized scene depth in that log's
+     censuses. **33 of them carry the record, and those 33 are 82.6% of the
+     scene's draws** (5,768 of 6,981); `t33` and `cb1[275]` in 33 of 33.
+     The 34 that carry no 336-stride buffer are 17.4% of draws and are
+     **the families tier 2 was never going to reach anyway**: the flight
+     HUD (`B7790CBFC6554097`), the target indicator
+     (`5DA53D8B0133341E`), the instanced-billboard particle cluster
+     (`0357BBB2DEE43C1F`, `A1B7CFCD0BE7493E`, `8289669D93A18C1D` and five
+     siblings, instance counts to 512), the witchspace starfield
+     (`9AEC596A2B036EA6`) and the full-screen post triangles.
+   - **No blind spots in that session; some across the corpus.** All 110
+     distinct `vh=` hashes in the five censuses of that log have a
+     `vs_<hash>.dxbc` on disk, so the intersection is complete *there*.
+     Widened to every log on the machine, 144 distinct vertex shaders have
+     driven an eye draw at some point and **40 of them have no dump** --
+     other sessions, other scenes, and nothing measured excludes a
+     different slot or rebase constant in those 40. Pulling the other way:
+     48 of the 71 record-carriers do appear as `vh=` on eye draws across
+     the corpus, so the record is not a dump artefact. The one *named*
+     scene family with no dump is the sun-glare train, which that session
+     never flew past; a second dump parked at a star would close it.
+
+   Two method notes for whoever re-runs this. About a third of the dump is
+   compiled with `[precise]` modifiers, which `fxc` prints *inside* the
+   opcode and which split the unorm16 `mad` into a separate `mul` and
+   `add`; a regex that does not allow for it reports 47 false "declares 336
+   but never loads it". And the record's field *meanings* (byte 0 the bone
+   base, 4 the scale, 8..15 the quaternion, 16..27 the position) are
+   inferred from how each is consumed, not stated by the bytecode -- the
+   offsets and the arithmetic are measured.
 6. **How many distinct motions a frame has.** With the pool shadow
    running and nothing tagged, count buckets per frame in the three scenes:
    the bit budget against the demand.
@@ -512,11 +652,173 @@ answers it.
 8. **The game's own velocity, if any.** One census with Blur on: any
    eye-sized `R16G16` target written in the G-buffer pass (the interned
    table's `vf=`).
+
+   **Answered NO, with one caveat that is the real finding** (measured
+   2026-09-07 over every census on this machine: 80 logs with a census, 212
+   complete captures, 49,360 interned texture rows, of which 12,587 at an
+   eye size). This goes at the top because a yes would have changed the
+   whole design.
+
+   - **No eye-sized game velocity target exists in any census.**
+     `R16G16_UNORM`, `R16G16_UINT`, `R16G16_SNORM`, `R16G16_SINT` and
+     `R32G32_FLOAT` appear at *no size, in no log, ever*. The only
+     eye-sized `R16G16_FLOAT` in the corpus is **EDVR's own**: two per
+     census, written as UAV slot 3 of our motion-vector dispatch
+     `6D94E9C00DCE909F`, named as such in the same log's prose. No game
+     draw writes it.
+   - **What does exist is a half-eye reprojection offset, and it is not
+     what this question means.** At 1412x1392 (half the eye, rounded to a
+     multiple of 8) there is an `R16G16_TYPELESS` under an `R16G16_FLOAT`
+     view, one per eye. Its reader (`ps_30F73C5E4A94DB52`, disassembled)
+     samples it, divides by an accumulation weight, **adds the result to
+     the UV**, and then does three things only a reprojection offset does:
+     bounds-tests the offset UV against the unit square, scales the
+     history blend by the offset's length in pixels, and samples a depth
+     at the *reprojected* UV to difference it against the depth at the
+     current one as a confidence. It is nonetheless not a velocity buffer
+     in this question's sense, on four measured grounds -- half-sized;
+     **no geometry is ever rasterised at that viewport** (all 88 draws
+     there are `n=3 i=1` full-screen triangles, against G-buffer draws of
+     `n=111048` at full size); it sits in a self-contained half-res chain;
+     and it is **cleared to (0,0,0,0) and read back in the same frame in
+     22 of 22 recorded instances**, along with that pass's colour input.
+     So Elite *allocates, clears and consumes* it; nothing in any log
+     shows it *written*. Its chain composites with premultiplied OVER
+     (`SrcBlend` ONE, `DestBlend` INV_SRC_ALPHA), so an all-zero layer
+     leaves the eye untouched -- consistent with the whole effect having
+     been idle in these captures, which is a flight question, not an
+     analysis one.
+   - **THE CAVEAT, and it weakens the negative: the census cannot see
+     multiple render targets.** The binding shadow has exactly one
+     render-target slot (`BindSlot::Rtv0`, `binding_shadow.h:58`); `r=` is
+     that slot (`draw_census.cpp:654`) and the direct-read path asks
+     `OMGetRenderTargets(1, ...)`. The `x=` column is pixel-shader inputs
+     4..7, not extra targets. **A velocity buffer written as MRT slot 1, 2
+     or 3 of the G-buffer pass -- which is exactly where an engine puts
+     one -- is invisible to every census ever taken.** The repo already
+     records this blind spot in another context (`resolve_probe.h:27-31`:
+     the terrain pass's MRT slots 1 and 2, which "nothing has ever
+     captured, in any state"), and it is demonstrable inside the very
+     census under discussion: `ps_DFCBA0EC70B03C9B`, the draw at census 4
+     frame 0 `q=1613`, declares `SV_TARGET` 0 **and** 1, and its census
+     line records only `r=@89`. A second render target, proven by
+     disassembly, on a line the instrument wrote down as single-target.
+     So the honest form of the answer is **"nothing in render-target slot
+     0, in any session"**, and the flight checklist below carries the
+     census change that would close it.
+   - **A second, smaller blind spot rides with it.** The census records a
+     view's underlying resource but not its mip or array subresource
+     range. That is what decides whether the 22-of-22 clear-before-read
+     above means the buffer really was zero, or merely that a different
+     slice of it was cleared. It belongs beside the render-target slots,
+     not after them.
+   - **One loose end worth naming.** An eye-sized `R8G8_TYPELESS` is
+     present in most sessions (328 rows across 29 logs at 5424x5356, 236
+     across 25 at 4340x4284). Two channels at eye size is the right
+     *shape*; eight bits a channel is poor for velocity and right for SMAA
+     edges, which is what `crisp_ui_gates.py`'s label guesses. That guess
+     has never been checked against a disassembly, and it is cheap to
+     check now that the dump exists.
+
+   The Blur half of the question is unanswered and, as posed, unanswerable
+   from these logs: **nothing in any log records Elite's own graphics
+   settings**, so no census can be said to have been taken with Blur on or
+   off. If the question is worth closing, it needs a deliberate A/B --
+   one census with the setting on and one with it off, noted by hand.
 9. **The bias mask.** `pInBiasCurrentColorMask` in the vendored NGX helper
    header, for tier 1 on the trained path.
 10. **The learning cost.** Time `IAGetVertexBuffers` on a scene draw with
     the timing the totals line already uses, and the memo's hit rate over
     an interval, printed once.
+
+### The flight checklist
+
+The desk half of Phase 0 was done on 2026-09-07: the census column is built,
+`tools/stencil_census.py` exists, and questions 2, 5 and 8 are answered as
+far as logs already on the machine can answer them. What is left needs the
+game running.
+
+**Before launching.** In `edvr.ini`:
+
+| Key | Value | Why |
+|---|---|---|
+| `advanced.census_offscreen` | `1` | the scene's G-buffer draws land in offscreen targets; without this the census records only draws into the eye textures and questions 1, 3 and 4 see nothing. The 2026-09-06 censuses had it on, which is why they could be used at all |
+| `advanced.glare_shader_dump` | `1` for ONE session, then `0` | question 5's disassembly. A dump already exists from 2026-09-06 (224 vertex shaders); a fresh one is only needed if the game build has moved |
+| `fix.temporal_aa` | `on` | question 2 measures up to EDVR's own `mv` dispatch, which does not exist when the pass is off. Every census taken without it can answer question 1 and not question 2 |
+| `hotkey.dump_draws` | bound | the census key. `advanced.census_at_ms` arms one automatically if the scene is too brief to catch by hand |
+
+**The three scenes**, one census each, held still for the three frames the
+capture takes:
+
+1. **The slot of a rotating station.** The largest mover any frame has: the
+   interior fills the view and the ship counter-rotates to match it.
+2. **A pad with the gear down.** Rigid near movers at scale, and the pad and
+   the ship moving together.
+3. **A wing-mate alongside.** A separate rigid body at a distance where its
+   edges are the thing that shimmers.
+4. On foot at a settlement, if there is time: skinned movers, for the root
+   motion tier 2 reaches and the limbs it does not.
+
+**The first thing to check, before anything else.** The `so=` column has
+never been through a real frame. Three self-tests cover it -- the census
+diff's, the crisp-UI reader's and `stencil_census.py`'s own -- but all three
+run against fixture lines hand-derived from the emitter's format string, and
+the smoke harness does not exercise the census at all. So the emitter and the
+parsers agree with each other and with nobody's measurement. Take one real
+census line by eye and confirm its `so=` token reads as a plausible stencil
+state beside its `ds=` and `st=` neighbours before trusting a single number
+below it.
+
+**Afterwards, on the logs** (from the repo root; the logs are in `edvr_logs`
+beside `EliteDangerous64.exe`):
+
+```bash
+python tools/stencil_census.py "<path>\edvr_logs\edvr_gfx_<stamp>.log"
+```
+
+That is questions 1 and 2: per depth target, the stencil states seen, the
+bits read, the bits written, the bits free, and whether anything touches the
+target between its last draw and the `mv` dispatch. Add `--listing` for every
+draw and clear in `q=` order when a number needs explaining.
+
+```bash
+python tools/diff_draw_census.py "<log-a>" "<log-b>"
+```
+
+Question 4's draw-order half: two censuses of the same scene, and whether the
+same draws appear in the same order.
+
+```bash
+python tools/crisp_ui_gates.py "<path>\edvr_logs\edvr_gfx_<stamp>.log"
+```
+
+The resource picture -- sizes, formats, view formats, who writes and who
+reads -- which is how questions 3 and 8 are read off a census.
+
+**Three census gaps, in the order they matter.** None is a new hook; all
+three are things the instrument already has in hand and throws away.
+
+1. **Render-target slots 1-3.** The census records slot 0 only (`r=`, from
+   `BindSlot::Rtv0`, `binding_shadow.h:58`). A velocity buffer is
+   classically slot 1 or 2 of a G-buffer pass, so that is exactly where
+   question 8's answer would hide -- and a shader writing two targets on a
+   line the census recorded as single-target has already been found in
+   these logs (`ps_DFCBA0EC70B03C9B`). The `OMSetRenderTargets` hook
+   receives the whole array and its count (`vscreen.cpp:2318-2320`), so
+   this is a shadow widening and a column. Until it is done, "no velocity
+   target found" means "none in slot 0".
+2. **The view's subresource range.** Recorded resources, unrecorded mip and
+   array slice. It is the one thing that decides whether the half-res
+   buffer's clear-then-read means the buffer was zero or that a different
+   slice was cleared, and the same ambiguity will reach any conclusion
+   drawn from a view token.
+3. **Substituted particle billboards are not recorded at all.**
+   `vscreen.cpp:1497-1499` returns before both census calls, so with the
+   geyser fix on, thousands of draws a census are absent from the log with
+   no counter on the census's own totals line saying so. For a design that
+   stamps tags into the scene's stencil, a class of scene draws the
+   instrument cannot see is a hole worth closing before the flight, or at
+   minimum turning the fix off for the census.
 
 ## Verification
 
@@ -573,6 +875,16 @@ which is this project's contract for every read of the game.
 
 1. **Phase 0**, the census columns and the flight. Questions 1, 2, 3 and 8
    decide the design; 5 and 6 size it.
+
+   *The desk half is done* (2026-09-07). The census prints the stencil masks
+   and ops as `so=`, `tools/stencil_census.py` reads them, and the questions
+   the logs already on the machine could answer are answered above:
+   **8 is no** (subject to the render-target-slot-0 blind spot), **2 is yes,
+   the stencil survives**, **5 holds at `t33` and `cb1[275]` across 33 of
+   the 67 scene families, 82.6% of scene draws**, and **1 has a provisional
+   answer that argues for pessimism** -- every stencil bit is named by some
+   draw's reference, so budget for tier 2b. What is left is the flight:
+   questions 1 (the masks), 3, 4, 6, 7 and 10.
 2. **Tier 1**, about a day, behind its own key: the mask, the reactive
    weight, the bias mask on the trained path. It ships on its own merit and
    stays on under tier 2.

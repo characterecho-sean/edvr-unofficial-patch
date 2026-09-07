@@ -92,6 +92,15 @@ DRAW_RE = re.compile(r'^DC (\d+) #(\d+) ([A-Z]) n=(\d+) i=(\d+) '
                      # passed throughout, because it builds its fixture from
                      # lines this file writes rather than from a real log.
                      r'(?: bl=\S+ sm=[0-9A-Fa-f]+)?'
+                     # The stencil's masks and ops (2026-09-07, the per-object
+                     # motion Phase 0 census): so=rRR/wWW/fF/fail,zfail,pass
+                     # with an optional +back face. Appended AFTER sm= rather
+                     # than folded into st=, because st= already means
+                     # "enable then reference" in every log already captured
+                     # and a field that changes MEANING is the one thing the
+                     # comment above says must still fail here. Optional and
+                     # out of the signature like the three tails before it.
+                     r'(?: so=\S+)?'
                      r'(?: q=\d+)?$')
 FRAME_RE = re.compile(r'^DC frame (\d+) draws=(\d+)(?: \S+=\d+)*$')
 # res= is the underlying resource's identity -- what connects an SRV @id to
@@ -413,9 +422,24 @@ def self_test():
         b += ['DC %d #%d I n=5000 i=24 r=@1 d=@2 c=@9 s=@3,-,-,- '
               'vs=@7 vb=@8 sd=32 of=0 tp=4 x=@4,-,-,- '
               'ph=00AA11BB22CC33DD q=0' % (f, 1),
-              'DC %d #%d I n=6 i=1 r=@1 d=- c=@9 s=@4,-,-,- q=1' % (f, 2),
+              # The full modern tail, on a draw that is IDENTICAL in both
+              # censuses and carries NO tail in census a: the output-survival
+              # columns, the blend equation and so= (the stencil masks and
+              # ops, 2026-09-07) must parse, and must leave this draw matched
+              # rather than reported as added or changed. A tail that reached
+              # the signature would show up here as a false ADDED.
+              'DC %d #%d I n=6 i=1 r=@1 d=- c=@9 s=@4,-,-,- '
+              'vp=0,0+1832x1920 z=0.000-1.000 sc=off '
+              'ds=17wZ st=14 bm=F pr=- bl=1,5,6,1/2,1,1 sm=FFFFFFFF '
+              'so=rFF/wFF/f8/1,1,2 q=1' % (f, 2),
+              # The two-faced form of so=, on one half of the overlay pair
+              # below. Its twin at #611 carries no tail at all, so this also
+              # proves a tail does not stop the two from merging into one
+              # signature.
               'DC %d #%d D n=4 i=1 r=@1 d=- c=@9 s=@5,-,-,- '
-              'vs=@7 vb=- sd=0 of=0 tp=5 q=2' % (f, 610),
+              'vs=@7 vb=- sd=0 of=0 tp=5 '
+              'ds=17wA st=18 bm=F pr=- bl=0,2,1,1/2,1,1 sm=FFFFFFFF '
+              'so=r0F/w0F/f3/1,1,3+f8/1,2,3 q=2' % (f, 610),
               'DC %d #%d D n=4 i=1 r=@6 d=- c=@9 s=tex512x64f28,-,-,- '
               'vs=@10 vb=- sd=0 of=0 tp=5 q=3' % (f, 611)]
         if f == 1:

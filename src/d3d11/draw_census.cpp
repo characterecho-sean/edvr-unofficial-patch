@@ -804,7 +804,13 @@ static void recordDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
     //
     // Three COM calls and two GetDesc on recorded draws only, which is the
     // same bargain the sampler probe above already makes.
-    char sv[128] = "";
+    //
+    // 256 and not 128 (2026-09-07): the so= token below adds up to 29 more
+    // characters, and the tail was already within about forty of the old
+    // buffer once every %u in it is allowed its full width. _snprintf_s with
+    // _TRUNCATE loses the END of the line silently, which is where q= lives,
+    // so an overflow here would cost a census rather than a column.
+    char sv[256] = "";
     {
         ID3D11DepthStencilState* dss = nullptr;
         ID3D11BlendState*        bs = nullptr;
@@ -828,6 +834,51 @@ static void recordDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
             bool haveBs = false;
             if (bs) { bs->GetDesc(&bd); haveBs = true; }
             if (haveDs || haveBs || pred) {
+                // so= is the rest of the stencil state (2026-09-07,
+                // docs/per-object-motion.md Phase 0 question 1). st= has
+                // always printed the enable and the REFERENCE, which says
+                // what a draw compares against and nothing about which BITS
+                // it touches -- and the per-object-motion design needs bits
+                // the game neither reads nor writes to stamp a per-mover tag
+                // into. A reference of 4 is not evidence that bit 2 is the
+                // only bit read: that is the read mask's to say, and no
+                // census has ever carried one.
+                //
+                // r/w are the read and write masks in hex, f is
+                // FrontFace.StencilFunc, then the three front ops in the
+                // order fail, depth-fail, pass. The back face is appended
+                // after a + only when it differs from the front, because it
+                // almost never does and a column that is identical on every
+                // line is a column nobody reads. Both faces share the two
+                // masks, which is why they are not repeated.
+                //
+                // Costs nothing new: dd is the GetDesc the ds= column above
+                // already paid for.
+                char so[64] = "";
+                if (haveDs) {
+                    const D3D11_DEPTH_STENCILOP_DESC& fr = dd.FrontFace;
+                    const D3D11_DEPTH_STENCILOP_DESC& bk = dd.BackFace;
+                    char bkb[32] = "";
+                    if (bk.StencilFunc != fr.StencilFunc ||
+                        bk.StencilFailOp != fr.StencilFailOp ||
+                        bk.StencilDepthFailOp != fr.StencilDepthFailOp ||
+                        bk.StencilPassOp != fr.StencilPassOp) {
+                        _snprintf_s(bkb, sizeof(bkb), _TRUNCATE,
+                                    "+f%u/%u,%u,%u",
+                                    static_cast<unsigned>(bk.StencilFunc),
+                                    static_cast<unsigned>(bk.StencilFailOp),
+                                    static_cast<unsigned>(bk.StencilDepthFailOp),
+                                    static_cast<unsigned>(bk.StencilPassOp));
+                    }
+                    _snprintf_s(so, sizeof(so), _TRUNCATE,
+                                " so=r%02X/w%02X/f%u/%u,%u,%u%s",
+                                static_cast<unsigned>(dd.StencilReadMask),
+                                static_cast<unsigned>(dd.StencilWriteMask),
+                                static_cast<unsigned>(fr.StencilFunc),
+                                static_cast<unsigned>(fr.StencilFailOp),
+                                static_cast<unsigned>(fr.StencilDepthFailOp),
+                                static_cast<unsigned>(fr.StencilPassOp), bkb);
+                }
                 // bl= is the whole slot-0 blend equation and sm= the sample
                 // mask (2026-09-01, the DSS black planet). Every test that
                 // could reject a pixel AFTER the shader had been recorded or
@@ -838,7 +889,7 @@ static void recordDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
                 // "opaque, writes land".
                 _snprintf_s(sv, sizeof(sv), _TRUNCATE,
                             " ds=%c%uw%c st=%c%u bm=%X pr=%c"
-                            " bl=%c%u,%u,%u/%u,%u,%u%s sm=%X",
+                            " bl=%c%u,%u,%u/%u,%u,%u%s sm=%X%s",
                             haveDs ? (dd.DepthEnable ? '1' : '0') : '?',
                             haveDs ? static_cast<unsigned>(dd.DepthFunc) : 0u,
                             haveDs ? (dd.DepthWriteMask ==
@@ -871,7 +922,7 @@ static void recordDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
                                          bd.RenderTarget[0].BlendOpAlpha)
                                    : 1u,
                             haveBs && bd.AlphaToCoverageEnable ? ",a2c" : "",
-                            sampleMask);
+                            sampleMask, so);
             }
         }
         if (dss) dss->Release();

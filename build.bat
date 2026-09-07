@@ -670,6 +670,27 @@ python "%ROOT%\tools\diff_draw_census.py" --self-test || (
     exit /b 1
 )
 
+echo [edvr] === crisp-UI gates parse self-test ===
+REM This reader had none until 2026-09-07, and it reads the same census
+REM emitter the two tools around it do. It asserts the PARSE, not the gates:
+REM a new trailing field that swallowed q= would leave every report subtly
+REM wrong with no error anywhere.
+python "%ROOT%\tools\crisp_ui_gates.py" --self-test || (
+    echo [edvr] ERROR: the crisp-UI gates reader failed its own test
+    exit /b 1
+)
+
+echo [edvr] === stencil census self-test ===
+REM The reader that answers "which stencil bits are free" and "does the
+REM stencil survive to the motion-vector dispatch" off a census
+REM (docs/per-object-motion.md Phase 0). It decodes the so= column the DLL
+REM started printing on 2026-09-07, and a mask read one bit out is a wrong
+REM answer that looks exactly like a right one. It fails HERE.
+python "%ROOT%\tools\stencil_census.py" --self-test || (
+    echo [edvr] ERROR: the stencil census tool failed its own test
+    exit /b 1
+)
+
 echo [edvr] === eye-split diff self-test ===
 REM The tool that compares the two eyes of one frame. It registers the
 REM eyes before it compares them, because their projections are off-centre

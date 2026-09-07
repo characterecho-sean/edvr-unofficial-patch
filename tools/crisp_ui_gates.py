@@ -117,7 +117,7 @@ class Ev(object):
     or a copy (DCC). Fields absent for a kind stay at their defaults."""
     __slots__ = ('tag', 'frame', 'idx', 'kind', 'n', 'i', 'r', 'd', 'c',
                  's', 'x', 'vh', 'ph', 'ch', 'u', 'ds', 'st', 'bm', 'bl',
-                 'q', 'src', 'dst', 'at')
+                 'so', 'q', 'src', 'dst', 'at')
 
     def __init__(self):
         self.s = []
@@ -125,7 +125,7 @@ class Ev(object):
         self.u = []
         self.r = self.d = self.c = '-'
         self.vh = self.ph = self.ch = None
-        self.ds = self.st = self.bm = self.bl = None
+        self.ds = self.st = self.bm = self.bl = self.so = None
         self.q = -1
         self.src = self.dst = None
         self.at = (0, 0)
@@ -190,6 +190,13 @@ def parse(path):
                         ev.bm = v
                     elif k == 'bl':
                         ev.bl = v
+                    elif k == 'so':
+                        # The stencil's masks and ops (2026-09-07). Kept
+                        # rather than used: the gates ask nothing of it, and
+                        # tools/stencil_census.py is what decodes it. It is
+                        # stored so this reader's picture of a draw is the
+                        # whole line, not the part it happens to want.
+                        ev.so = v
                     elif k == 'q':
                         ev.q = int(v)
                 cur.events.append(ev)
@@ -632,7 +639,98 @@ def report(census, out):
     w('\n')
 
 
+def self_test():
+    """That this reader still parses a census line, in both vintages.
+
+    Added 2026-09-07 with the so= column. This tool had no self-test, and it
+    reads the same emitter tools/diff_draw_census.py does -- whose own
+    comment records what a drifted regex costs: a current log parsed as zero
+    censuses, and a report that said "no difference" in the exact words it
+    would have used had the effect genuinely been absent. The gates
+    themselves are not asserted here; the PARSE is, because that is the half
+    that fails silently."""
+    old = ('[12:00:00.000] DC 0 #1 X n=360 i=1 r=@1 d=@2 c=@3 s=@4,-,-,- '
+           'vh=A888D51024D9798E ds=02wA st=14 bm=F pr=- q=804')
+    new = ('[12:00:00.000] DC 0 #2 X n=360 i=1 r=@1 d=@2 c=@3 s=@4,-,-,- '
+           'vh=81216C77F90DEDD6 ds=17wZ st=14 bm=F pr=- '
+           'bl=1,5,6,1/2,1,1 sm=FFFFFFFF so=rFF/w18/f7/1,1,3 q=805')
+    lines = ['[12:00:00.000] DC begin census=1 frames=1 frame=1', old, new,
+             '[12:00:00.000] DC id @1 tex 2818x2784 fmt=87 res=00000000AA00',
+             '[12:00:00.000] DC id @2 tex 2818x2784 fmt=19 res=00000000AB00',
+             '[12:00:00.000] DC id @3 buf 256 res=00000000AC00',
+             '[12:00:00.000] DC id @4 tex 2212x1244 fmt=28 res=00000000AD00',
+             '[12:00:00.000] DC end census=1 draws=2 lines=2 interned=4 '
+             'overflow=0 truncated=0']
+    censuses = []
+    cur = None
+    for raw in lines:
+        m = LINE_RE.match(raw)
+        if not m:
+            continue
+        line = m.group(1)
+        b = BEGIN_RE.match(line)
+        if b:
+            cur = Census(int(b.group(1)), int(b.group(2)), int(b.group(3)))
+            censuses.append(cur)
+            continue
+        if cur is None:
+            continue
+        e = END_RE.match(line)
+        if e:
+            cur.end = e.group(2).strip()
+            cur = None
+            continue
+        h = HEAD_RE.match(line)
+        if h:
+            ev = Ev()
+            ev.tag, ev.frame, ev.idx = h.group(1), int(h.group(2)), int(h.group(3))
+            for k, v in KV_RE.findall(h.group(14)):
+                if k == 'vh':
+                    ev.vh = v.upper()
+                elif k == 'ds':
+                    ev.ds = v
+                elif k == 'st':
+                    ev.st = v
+                elif k == 'so':
+                    ev.so = v
+                elif k == 'q':
+                    ev.q = int(v)
+            cur.events.append(ev)
+            continue
+        t = ID_TEX_RE.match(line)
+        if t:
+            cur.ids['@' + t.group(1)] = dict(
+                kind='tex', w=int(t.group(2)), h=int(t.group(3)),
+                fmt=int(t.group(4)), res=t.group(5),
+                vf=int(t.group(6)) if t.group(6) else None)
+    if len(censuses) != 1 or len(censuses[0].events) != 2:
+        print('self-test: expected 1 census with 2 draws, got %d/%s'
+              % (len(censuses),
+                 len(censuses[0].events) if censuses else '-'))
+        return 1
+    a, b = censuses[0].events
+    if a.q != 804 or a.st != '14' or a.so is not None:
+        print('self-test: the pre-2026-09-07 line parsed wrong: %r'
+              % ((a.q, a.st, a.so),))
+        return 1
+    if b.q != 805 or b.st != '14' or b.so != 'rFF/w18/f7/1,1,3':
+        print('self-test: the so= line parsed wrong: %r'
+              % ((b.q, b.st, b.so),))
+        return 1
+    # The whole point: a NEW trailing field must not swallow q=. That is the
+    # failure mode, not a rejected line -- q= is last, and a greedy tail
+    # takes it with no error of any kind.
+    if tok_desc(censuses[0], '@2') != '2818x2784 R32G8X24_TYPELESS(19)':
+        print('self-test: the depth token described wrong: %r'
+              % tok_desc(censuses[0], '@2'))
+        return 1
+    print('self-test: ok')
+    return 0
+
+
 def main(argv):
+    if '--self-test' in argv[1:]:
+        return self_test()
     if len(argv) < 2:
         print(__doc__)
         return 1
