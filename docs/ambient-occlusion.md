@@ -20,7 +20,7 @@ Field-reported 2026-09-07, verbatim:
 
 It came with a screenshot: the mirror view from a Gutamaya cockpit parked
 in an icy ring, one large cracked fragment filling the canopy, a prospector
-limpet armed. The mirror shows one eye, so it cannot show the difference,
+limpet controller selected. The mirror shows one eye, so it cannot show the difference,
 and nothing sent so far can. What the report does fix is the setting (the
 top level), the scene (an icy ring, close to a large fragment with cracks),
 and that the difference is steady enough to look at rather than a flicker
@@ -80,8 +80,8 @@ Measured, with the source:
 
 - **Nothing in EDVR touches ambient occlusion.** A grep for "occlusion"
   finds occlusion *queries* (`src/d3d11/draw_census.cpp:1106`, the DCL
-  query brackets) and the sun's depth test (`sunglare_vs.h:300`) and
-  nothing else. The pass has no name, no hash, no known slot.
+  query brackets) and the sun glare's own occlusion test
+  (`sunglare_vs.h:300`) and nothing else. The pass has no name, no hash, no known slot.
 - **The eye-split dump has probably already photographed the buffer.** The
   measured field frame carried sixteen eye-sized targets, among them a
   2324x2392 target at format 60, `R8_TYPELESS`, one byte a texel
@@ -102,8 +102,9 @@ Measured, with the source:
   sub-pixel shift is added to both eyes' tangents from one `jitDx`, `jitDy`
   pair (`src/openvr/system_hook.cpp:469-474`), and only while both eyes'
   projection formula checks passed (`system_hook.cpp:1466`). It moves both
-  frusta together or neither. The cull guard's widening is symmetric by
-  mode, and the supersample resolve runs one kernel per eye at submit. The
+  frusta together or neither. The cull guard, off by default, widens both
+  eyes' frusta by the same fractions, and the supersample resolve runs one
+  kernel per eye at submit. The
   temporal pass's per-eye *history* is the only EDVR mechanism that could
   make the eyes converge to different pictures, and only while it is on.
 - **The game's view rows are readable.** The frame's true view matrix sits
@@ -191,7 +192,7 @@ is truly still.
 
 **Signature.** In the census, the pass's family of lines appears once per
 frame with the eyes alternating (pair against the two eyes' depth clears,
-the DCL `D` lines that bracket each eye's pass), or twice per frame with
+the DCL `D` lines that open each eye's pass), or twice per frame with
 one eye's lighting resolve reading a target the pass last wrote in the
 previous frame -- the `r=` token of the pass against the `s=` tokens of
 the resolve, frame by frame.
@@ -214,9 +215,9 @@ is a small tiling noise texture indexed by screen position -- `hud_grain`
 found exactly such a table, 256x256 at slot 1, behind the flight HUD's
 shimmer (`hud_grain.h`). The same surface point then gets a different
 rotation in each eye because it lands on a different pixel: content at
-infinity sits about 365 pixels apart between the eyes on the measured
-headset ([eye-split.md](eye-split.md)), and nearer content further, per
-pixel, with the eye's own view. The blur is screen-space too. And if the
+infinity sits about 365 pixels apart between the eyes at a 2517-pixel
+eye width ([eye-split.md](eye-split.md)), and nearer content further,
+per pixel, with the eye's own view. The blur is screen-space too. And if the
 top level runs the pass at half resolution with a depth-aware upsample
 (believed; the target's size in the census's interned table settles it),
 thin depth discontinuities -- cracks again -- resolve differently in each
@@ -302,14 +303,14 @@ scene with offscreen draws needs: a full scene is thousands of draws a
 frame, and three frames of that spend the default cap on the way past
 (the `census_offscreen` block in `edvr.ini`).
 
-1. With ambient occlusion at its highest, fly into an icy ring and park a
-   few hundred metres from a large fragment with visible cracks. Hold
-   still. Press the census key once.
-2. Set ambient occlusion **Off** in the game's graphics options, return
-   to the same view, and press the census key again. If the game insists
-   on a restart for the change, do this as a second session; the differ
-   takes two logs.
-3. Put ambient occlusion back to its highest. In `edvr.ini`, set
+1. Set ambient occlusion **Off** in the game's graphics options. Fly into
+   an icy ring and park a few hundred metres from a large fragment with
+   visible cracks. Hold still. Press the census key once: this is the
+   baseline, the frame without the pass.
+2. Set ambient occlusion to its highest, return to the same view, and
+   press the census key again. If the game insists on a restart for the
+   change, do this as a second session; the differ takes two logs.
+3. With ambient occlusion still at its highest, in `edvr.ini` set
    `eye_split = 3` under `[advanced]` and save, with the fragment in
    view. One hitch, one dump. The key is live.
 4. Quit. Run the installer's **Save logs**. Then zip `edvr_logs\dumps`
@@ -334,8 +335,9 @@ And in prose, the answers only the person in the headset has:
 At the desk, in this order; each step names what it answers.
 
 1. **Name the pass.** `python tools/diff_draw_census.py <gfx-log>`
-   compares the last two censuses (the AO-off census must be the
-   baseline; with two sessions, pass both logs). The `ADDED` section is
+   compares the last two censuses, the earlier as the baseline, which is
+   why Phase 0 takes the AO-off census first (with two sessions, pass
+   both logs, baseline first). The `ADDED` section is
    the pass and its blur: for each eye, one full-screen draw (`D` or `I`,
    three to six vertices) whose `s0` is the eye's depth and whose `r=`
    resolves in the interned table to a one-channel target, or a `DCX`
@@ -444,7 +446,8 @@ Each with what answers it. None is answerable from the desk.
 3. **What size and format is the target?** The interned table (step 3).
 4. **Did the dump catch it?** `eye_split` records the render target bound
    at each *eye-texture* draw, and an eye-texture draw is one into a
-   target of the eye's exact size (`vScreenIsEyeSized`, `vscreen.h:95`).
+   target of the eye's own size, within two pixels (`vScreenIsEyeSized`,
+   `vscreen.h:95`; `near2` in `vscreen.cpp:876`).
    A half-sized target is inside the census's shape gate
    (`eyeShapedAtScale`, `vscreen.h:68`, 40% to 250%) but outside the
    dump's, and a target written only by a dispatch is outside it
