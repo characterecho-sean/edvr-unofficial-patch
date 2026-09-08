@@ -622,12 +622,29 @@ answered it. The rest need the game running -- see
    the test unconditionally true, so in that scene the renderer reads the
    stencil and ignores it, and constrains no bit.
 
-   Two limits on that, and the second is the one to act on. The value is a
-   GPU copy taken a few frames after the dispatch, so it is strong evidence
-   about the buffer rather than proof about that draw. And it was flown in
-   ordinary flight, while this renderer's headline job is the FSS arrival
-   path -- a mask armed only there would be invisible here. **Repeat the
-   reading during an FSS scan before question 1 is called closed.**
+   What the branch selects, for anyone judging the risk: the stencil test
+   picks the LAST entry of a per-tile list when it passes and the FIRST when
+   it fails (`umax count,1` then `-1`, against `mov 0`). So a mask that
+   covered a tag bit would change which entry the renderer reads -- real
+   behaviour, not a no-op -- which is why it was worth measuring rather than
+   waving through.
+
+   One limit stands: the value is a GPU copy taken a few frames after the
+   dispatch, so it is strong evidence about the buffer rather than proof
+   about that draw.
+
+   *A recommendation withdrawn.* This first said to repeat the reading during
+   an FSS scan, on the reasoning that `fss-scanner.md` names this renderer as
+   the FSS arrival content's producer, so a mask might be armed only there.
+   That was wrong, and the logs already said so: the dispatches appear in
+   **three separate census logs across ordinary flight** -- a station at
+   distance, an explosion, and a third scene -- with no scan involved, 12,
+   24 and 16 of them. The FSS is where earlier work first *noticed* this
+   shader, not a mode that changes it. Its constant block also reads like
+   static tile geometry (`1, 0, 1/256, 256`) rather than a per-mode toggle.
+   Nothing needs flying for this; if more confidence is ever wanted, leaving
+   `census_cb_watch` set during ordinary play costs nothing and the value can
+   be re-read from any later log.
 2. **Whether the stencil survives to Submit.** From the same census: after
    the last scene draw, does anything clear or write the pair's stencil
    before EDVR's `mv` dispatch (which `review-ui-depth-2026-09-06.md:67-71`
