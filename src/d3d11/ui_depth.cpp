@@ -40,6 +40,11 @@ constexpr uint64_t kPanelVs  = 0xA888D51024D9798Eull;
 constexpr uint64_t kPanelPs  = 0x9107E72CB016CC02ull;
 constexpr uint64_t kScreenVs = 0x4EF6DDB075A927FAull;
 constexpr uint64_t kScreenPs = 0x85565E9261812E2Full;
+// The cockpit holo panels' pixel shader, for the reactive mask's coverage:
+// it samples the interface surface at t2 through s1 at TEXCOORD8 (its own
+// disassembly, 2026-09-08 -- the same shape as the menu panel's, which
+// takes t1 through s1 at TEXCOORD6).
+constexpr uint64_t kHoloPanelPs = 0xA2965EC2931A39C8ull;
 // A mesh draw whose pixel shader (258B95AC99520C1F) reads nothing and writes
 // nothing; the interface surface in its slot 0 is a leftover binding, and
 // the surface rule took it for a composite on the loading screen
@@ -63,6 +68,7 @@ FaultBudget g_budget("uiDepth", 5);
 
 bool     g_keyOn = false;      // fix.ui_depth = on
 bool     g_passOn = false;     // fix.temporal_aa is not off
+bool     g_trained = false;    // ...and it is NVIDIA's history, which reads the mask
 bool     g_on = false;         // both
 bool     g_stoodDown = false;
 bool     g_announced = false;
@@ -86,6 +92,7 @@ bool     g_eyesSwapped = false; // advanced.ui_depth_eyes = swapped: the A/B for
 float    g_uiNear = 0.1f;       // advanced.ui_depth_planes
 float    g_uiFar = 1000.0f;
 float    g_alphaFloor = 0.5f;   // advanced.ui_depth_alpha: below it, no depth
+float    g_reactive = 0.0f;     // advanced.ui_depth_reactive: the bias mask's value
 bool     g_scaleNoted = false;
 constexpr uint32_t kMaxViewports = 16;
 D3D11_VIEWPORT g_savedVps[kMaxViewports];
@@ -221,10 +228,15 @@ bool      g_createFailedNoted = false;
 // shaders are transcriptions of the game's alpha path, from the dumps of
 // 2026-09-06: ps 9107E72CB016CC02 samples the surface at TEXCOORD6 through
 // slot 1; ps 85565E9261812E2F at TEXCOORD0 through slot 0.
+// Each returns the reactive strength as its colour, so ONE shader serves
+// both errands: with a depth target and no colour target it writes depth
+// where the interface covers, and with the mask bound as its colour target
+// it marks the same pixels for NVIDIA. b13 carries (alpha floor, strength);
+// the game's composites declare b2 alone, so b13 is free.
 const char kPanelDepthHlsl[] =
     "Texture2D<float4> Surf : register(t1);\n"
     "SamplerState Smp : register(s1);\n"
-    "cbuffer P : register(b13) { float4 floorAndPad; };\n"
+    "cbuffer P : register(b13) { float4 floorAndStrength; };\n"
     "struct In {\n"
     "    float4 tc0 : TEXCOORD0;\n"
     "    float3 tc2 : TEXCOORD2;\n"
@@ -232,18 +244,38 @@ const char kPanelDepthHlsl[] =
     "    float3 tc5 : TEXCOORD5;\n"
     "    float2 tc6 : TEXCOORD6;\n"
     "};\n"
-    "void main(In i) {\n"
+    "float4 main(In i) : SV_Target {\n"
     "    float a = Surf.Sample(Smp, i.tc6).a;\n"
-    "    clip(a - floorAndPad.x);\n"
+    "    clip(a - floorAndStrength.x);\n"
+    "    return floorAndStrength.y;\n"
     "}\n";
 const char kScreenDepthHlsl[] =
     "Texture2D<float4> Surf : register(t0);\n"
     "SamplerState Smp : register(s0);\n"
-    "cbuffer P : register(b13) { float4 floorAndPad; };\n"
+    "cbuffer P : register(b13) { float4 floorAndStrength; };\n"
     "struct In { float2 tc0 : TEXCOORD0; };\n"
-    "void main(In i) {\n"
+    "float4 main(In i) : SV_Target {\n"
     "    float a = Surf.Sample(Smp, i.tc0).a;\n"
-    "    clip(a - floorAndPad.x);\n"
+    "    clip(a - floorAndStrength.x);\n"
+    "    return floorAndStrength.y;\n"
+    "}\n";
+// The cockpit holo panels: their depth is written in place by the game's
+// own draw under the writing twin, so this one only ever marks the mask.
+const char kHoloDepthHlsl[] =
+    "Texture2D<float4> Surf : register(t2);\n"
+    "SamplerState Smp : register(s1);\n"
+    "cbuffer P : register(b13) { float4 floorAndStrength; };\n"
+    "struct In {\n"
+    "    float4 tc0 : TEXCOORD0;\n"
+    "    float3 tc4 : TEXCOORD4;\n"
+    "    float3 tc6 : TEXCOORD6;\n"
+    "    float3 tc7 : TEXCOORD7;\n"
+    "    float2 tc8 : TEXCOORD8;\n"
+    "};\n"
+    "float4 main(In i) : SV_Target {\n"
+    "    float a = Surf.Sample(Smp, i.tc8).a;\n"
+    "    clip(a - floorAndStrength.x);\n"
+    "    return floorAndStrength.y;\n"
     "}\n";
 
 struct DepthShader {
@@ -254,14 +286,31 @@ struct DepthShader {
     ID3D11PixelShader*  shader = nullptr;
     bool                tried = false;
 };
-DepthShader g_depthShaders[2] = {
+DepthShader g_depthShaders[3] = {
     {kPanelPs, kPanelDepthHlsl, sizeof(kPanelDepthHlsl) - 1, "ui_depth_panel_ps", nullptr, false},
     {kScreenPs, kScreenDepthHlsl, sizeof(kScreenDepthHlsl) - 1, "ui_depth_screen_ps", nullptr, false},
+    {kHoloPanelPs, kHoloDepthHlsl, sizeof(kHoloDepthHlsl) - 1, "ui_depth_holo_ps", nullptr, false},
 };
 ID3D11Buffer* g_floorCb = nullptr;
 float         g_floorCbValue = -1.0f;
+float         g_floorCbStrength = -1.0f;
 ID3D11DepthStencilState* g_reissueDss = nullptr;   // GEQUAL, write all
 bool          g_reissueDssFailedNoted = false;
+
+// THE REACTIVE MASK (ui_depth.h): one per eye at the render size, cleared
+// every frame, marked by the same second draw that writes the interface's
+// depth, handed to NVIDIA by the temporal pass.
+struct Mask {
+    ID3D11Texture2D*        tex = nullptr;
+    ID3D11RenderTargetView* rtv = nullptr;
+    uint32_t                w = 0, h = 0;
+    bool                    marked = false;   // anything drawn since the clear
+};
+Mask     g_mask[2];
+bool     g_maskFailedNoted = false;
+bool     g_maskSizeNoted = false;
+ID3D11BlendState* g_maskBlend = nullptr;     // opaque, red only
+ID3D11DepthStencilState* g_maskDss = nullptr; // test as the game, writes off
 
 // The pass's depth view for a rebind: EDVR's own view over the probe's
 // texture, in the format the game binds it with; one per eye, remade when
@@ -285,9 +334,11 @@ uint32_t g_frameRtvCount = 0;
 enum class Mode { kNone, kInPlace, kReissue };
 Mode                     g_mode = Mode::kNone;
 bool                     g_engaged = false;
-ID3D11DepthStencilState* g_savedDss = nullptr;
+ID3D11DepthStencilState* g_savedDss = nullptr;   // the in-place swap's, owned by Begin/End
 UINT                     g_savedRef = 0;
 bool                     g_wantRebind = false;
+bool                     g_wantMask = false;     // this draw marks the reactive mask
+int                      g_drawEye = -1;
 uint32_t                 g_rebindW = 0, g_rebindH = 0;
 int                      g_rebindEye = -1;
 bool                     g_rebound = false;      // the OM was swapped for this draw
@@ -295,19 +346,28 @@ ID3D11RenderTargetView*  g_savedRtvs[kMaxRtvs] = {};
 ID3D11DepthStencilView*  g_savedDsv = nullptr;
 DepthShader*             g_reissueShader = nullptr;
 ID3D11PixelShader*       g_savedPs = nullptr;
+// The second draw's saved state, kept apart from the in-place swap's: the
+// two nest, and sharing one slot let the re-issue's restore null the state
+// the in-place End was still to put back.
+ID3D11DepthStencilState* g_reSavedDss = nullptr;
+UINT                     g_reSavedRef = 0;
+ID3D11BlendState*        g_reSavedBlend = nullptr;
+FLOAT                    g_reSavedBlendFactor[4] = {};
+UINT                     g_reSavedSampleMask = 0;
 bool                     g_reissueOn = false;
 
 // Counters: this window, and the session.
 uint32_t g_wComposite = 0, g_wDirect = 0, g_wWrote = 0, g_wDepthless = 0,
          g_wNotScene = 0, g_wRebound = 0, g_wNoPair = 0, g_wReissued = 0,
          g_wNoShader = 0, g_wAlreadyWrote = 0, g_wNoTwin = 0, g_wLearned = 0,
-         g_wFrames = 0;
+         g_wMarked = 0, g_wFrames = 0;
 uint64_t g_sessionWrote = 0;
+bool     g_maskNotedOnce = false;
 
 void resetWindow() {
     g_wComposite = g_wDirect = g_wWrote = g_wDepthless = g_wNotScene = 0;
     g_wRebound = g_wNoPair = g_wReissued = g_wNoShader = 0;
-    g_wAlreadyWrote = g_wNoTwin = g_wLearned = 0;
+    g_wAlreadyWrote = g_wNoTwin = g_wLearned = g_wMarked = 0;
     g_wFrames = 0;
 }
 
@@ -577,10 +637,88 @@ DepthShader* depthShaderFor(ID3D11DeviceContext* ctx, uint64_t ps) {
     return nullptr;
 }
 
-// The alpha floor, in a constant buffer of EDVR's at b13 (a slot the
-// game's composites leave empty: their pixel stages declare b2 alone).
+// The reactive mask for one eye at this size, made on demand.
+Mask* maskFor(ID3D11DeviceContext* ctx, int eye, uint32_t w, uint32_t h) {
+    if (eye < 0 || eye > 1 || !w || !h) return nullptr;
+    Mask& m = g_mask[eye];
+    if (m.tex && m.w == w && m.h == h) return &m;
+    if (m.rtv) { m.rtv->Release(); m.rtv = nullptr; }
+    if (m.tex) { m.tex->Release(); m.tex = nullptr; }
+    m.w = 0;
+    m.h = 0;
+    m.marked = false;
+    ID3D11Device* dev = nullptr;
+    ctx->GetDevice(&dev);
+    if (!dev) return nullptr;
+    D3D11_TEXTURE2D_DESC td{};
+    td.Width = w;
+    td.Height = h;
+    td.MipLevels = 1;
+    td.ArraySize = 1;
+    td.Format = DXGI_FORMAT_R8_UNORM;
+    td.SampleDesc.Count = 1;
+    td.Usage = D3D11_USAGE_DEFAULT;
+    td.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+    HRESULT hr = dev->CreateTexture2D(&td, nullptr, &m.tex);
+    if (SUCCEEDED(hr) && m.tex) hr = dev->CreateRenderTargetView(m.tex, nullptr, &m.rtv);
+    dev->Release();
+    if (FAILED(hr) || !m.tex || !m.rtv) {
+        if (m.rtv) { m.rtv->Release(); m.rtv = nullptr; }
+        if (m.tex) { m.tex->Release(); m.tex = nullptr; }
+        if (!g_maskFailedNoted) {
+            g_maskFailedNoted = true;
+            Log::get().note("ui depth: the %ux%u reactive mask could not be made "
+                            "(0x%08lX); the interface's depth is still written and "
+                            "nothing is handed to NVIDIA.",
+                            w, h, static_cast<unsigned long>(hr));
+        }
+        return nullptr;
+    }
+    m.w = w;
+    m.h = h;
+    return &m;
+}
+
+// The mask draw's states: colour written opaquely into the red channel,
+// and the game's own depth test kept with writes off, so a panel behind
+// the cockpit frame marks nothing where it is hidden.
+ID3D11BlendState* maskBlend(ID3D11DeviceContext* ctx) {
+    if (g_maskBlend) return g_maskBlend;
+    ID3D11Device* dev = nullptr;
+    ctx->GetDevice(&dev);
+    if (!dev) return nullptr;
+    D3D11_BLEND_DESC bd{};
+    bd.RenderTarget[0].BlendEnable = FALSE;
+    bd.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_RED;
+    const HRESULT hr = dev->CreateBlendState(&bd, &g_maskBlend);
+    dev->Release();
+    if (FAILED(hr)) g_maskBlend = nullptr;
+    return g_maskBlend;
+}
+
+ID3D11DepthStencilState* maskDepthState(ID3D11DeviceContext* ctx) {
+    if (g_maskDss) return g_maskDss;
+    ID3D11Device* dev = nullptr;
+    ctx->GetDevice(&dev);
+    if (!dev) return nullptr;
+    D3D11_DEPTH_STENCIL_DESC d{};
+    d.DepthEnable = TRUE;
+    d.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ZERO;
+    d.DepthFunc = D3D11_COMPARISON_GREATER_EQUAL;
+    d.StencilEnable = FALSE;
+    const HRESULT hr = dev->CreateDepthStencilState(&d, &g_maskDss);
+    dev->Release();
+    if (FAILED(hr)) g_maskDss = nullptr;
+    return g_maskDss;
+}
+
+// The alpha floor and the reactive strength, in a constant buffer of
+// EDVR's at b13 (a slot the game's composites leave empty: their pixel
+// stages declare b2 alone).
 ID3D11Buffer* floorBuffer(ID3D11DeviceContext* ctx) {
-    if (g_floorCb && g_floorCbValue == g_alphaFloor) return g_floorCb;
+    if (g_floorCb && g_floorCbValue == g_alphaFloor && g_floorCbStrength == g_reactive) {
+        return g_floorCb;
+    }
     if (g_floorCb) {
         g_floorCb->Release();
         g_floorCb = nullptr;
@@ -588,7 +726,7 @@ ID3D11Buffer* floorBuffer(ID3D11DeviceContext* ctx) {
     ID3D11Device* dev = nullptr;
     ctx->GetDevice(&dev);
     if (!dev) return nullptr;
-    const float data[4] = {g_alphaFloor, 0.0f, 0.0f, 0.0f};
+    const float data[4] = {g_alphaFloor, g_reactive, 0.0f, 0.0f};
     D3D11_BUFFER_DESC bd{};
     bd.ByteWidth = sizeof(data);
     bd.Usage = D3D11_USAGE_IMMUTABLE;
@@ -599,6 +737,7 @@ ID3D11Buffer* floorBuffer(ID3D11DeviceContext* ctx) {
     dev->Release();
     if (FAILED(hr)) g_floorCb = nullptr;
     g_floorCbValue = g_alphaFloor;
+    g_floorCbStrength = g_reactive;
     return g_floorCb;
 }
 
@@ -765,6 +904,9 @@ void uiDepthConfigure(Config& cfg) {
     // configure because fix.temporal_aa is live (depth_probe.cpp's rule).
     const std::string aa = cfg.getString("fix.temporal_aa", "off");
     g_passOn = !aa.empty() && _stricmp(aa.c_str(), "off") != 0;
+    // Only NVIDIA's history reads a bias mask; the pass's own does not, so
+    // marking one under temporal_aa = on would be draws for nothing.
+    g_trained = _stricmp(aa.c_str(), "dlaa") == 0 || _stricmp(aa.c_str(), "dlss") == 0;
     // The direct list: the flight HUD built in, the ini's additions after.
     g_familyCount = 0;
     g_families[g_familyCount++] = kFlightHud;
@@ -811,6 +953,29 @@ void uiDepthConfigure(Config& cfg) {
         if (!(a >= 0.0f)) a = 0.0f;
         if (a > 1.0f) a = 1.0f;
         g_alphaFloor = a;
+    }
+    {
+        float r = cfg.getFloat("advanced.ui_depth_reactive", 0.5f);
+        if (!(r >= 0.0f)) r = 0.0f;
+        if (r > 1.0f) r = 1.0f;
+        if (r != g_reactive) {
+            const bool was = g_reactive > 0.0f;
+            g_reactive = r;
+            if (r > 0.0f) {
+                Log::get().note("ui depth: the interface is marked for NVIDIA at "
+                                "strength %.2f -- where it is marked, this frame's "
+                                "colour is favoured over the history, so a readout "
+                                "that changes in place stops blending with the digit "
+                                "before it. 1 stops the interface accumulating "
+                                "altogether, which is sharp and shimmering; 0 is the "
+                                "steady interface that blurs a changing digit.",
+                                static_cast<double>(r));
+            } else if (was) {
+                Log::get().note("ui depth: the interface is no longer marked for "
+                                "NVIDIA (advanced.ui_depth_reactive = 0); it "
+                                "accumulates as the rest of the frame does.");
+            }
+        }
     }
     const std::string eyes = cfg.getString("advanced.ui_depth_eyes", "as_is");
     const bool swapped = eyes == "swapped";
@@ -903,7 +1068,9 @@ void uiDepthNoteOffscreenDraw(ID3D11DeviceContext* ctx) {
 bool uiDepthOnEyeDraw(ID3D11DeviceContext* ctx) {
     g_mode = Mode::kNone;
     g_wantRebind = false;
+    g_wantMask = false;
     g_rebindEye = -1;
+    g_drawEye = -1;
     g_reissueShader = nullptr;
     if (!g_on || g_stoodDown) return false;
     // Cheapest first: no depth target, nothing to write (the post chain's
@@ -939,6 +1106,25 @@ bool uiDepthOnEyeDraw(ID3D11DeviceContext* ctx) {
     const bool sceneFamily = h == kHoloPanel || inList(g_families, g_familyCount, h);
     if (scenePair && sceneFamily) {
         g_mode = Mode::kInPlace;
+        // The reactive mask, when one is asked for and this family's pixel
+        // stage has a coverage shader: a second draw marks it. The depth
+        // is already written in place by the game's own draw.
+        if (g_reactive > 0.0f && g_trained) {
+            const uint64_t ph = boundPsHash(ctx);
+            DepthShader* shader = depthShaderFor(ctx, ph);
+            ResourceInfo rt;
+            if (shader && bindingResolve(bindingGet(BindSlot::Rtv0), &rt) && rt.isTexture2D) {
+                int eye = eyeIndexFor(rt.resource);
+                if (eye >= 0 && g_eyesSwapped) eye = 1 - eye;
+                if (eye >= 0) {
+                    g_wantMask = true;
+                    g_reissueShader = shader;
+                    g_drawEye = eye;
+                    g_rebindW = rt.a;
+                    g_rebindH = rt.b;
+                }
+            }
+        }
         if (g_familyLoggedCount < kMaxFamilyLines && !inList(g_familyLogged, g_familyLoggedCount, h)) {
             noteFamily(h, boundPsHash(ctx),
                        composite ? "samples a learned surface; writes its depth in "
@@ -989,9 +1175,20 @@ bool uiDepthOnEyeDraw(ID3D11DeviceContext* ctx) {
         }
         g_wantRebind = true;
         g_rebindEye = eye;
+        g_drawEye = eye;
         g_rebindW = rt.a;
         g_rebindH = rt.b;
+    } else {
+        ResourceInfo rt;
+        if (bindingResolve(bindingGet(BindSlot::Rtv0), &rt) && rt.isTexture2D) {
+            int eye = eyeIndexFor(rt.resource);
+            if (eye >= 0 && g_eyesSwapped) eye = 1 - eye;
+            g_drawEye = eye;
+            g_rebindW = rt.a;
+            g_rebindH = rt.b;
+        }
     }
+    g_wantMask = g_reactive > 0.0f && g_trained && g_drawEye >= 0;
     g_mode = Mode::kReissue;
     g_reissueShader = shader;
     noteFamily(h, ph, scenePair ? "interface projection; its depth written by the "
@@ -1002,7 +1199,12 @@ bool uiDepthOnEyeDraw(ID3D11DeviceContext* ctx) {
     return true;
 }
 
-bool uiDepthWantsReissue() { return g_mode == Mode::kReissue && g_reissueShader != nullptr; }
+bool uiDepthWantsReissue() {
+    if (!g_reissueShader) return false;
+    // The interface-projection composites always want it (their depth is
+    // written by it); the in-place families only when a mask is asked for.
+    return g_mode == Mode::kReissue || (g_mode == Mode::kInPlace && g_wantMask);
+}
 
 void uiDepthBegin(ID3D11DeviceContext* ctx) {
     g_engaged = false;
@@ -1053,32 +1255,39 @@ void uiDepthEnd(ID3D11DeviceContext* ctx) {
     g_mode = Mode::kNone;
 }
 
-// True when the second draw is set up to write DEPTH ONLY. False means
-// this call declined, and the caller must NOT issue the draw: every
-// decline leaves the game's own state exactly as it was, so a draw issued
-// anyway is the game's composite a second time, in full colour, over
-// itself. The paths that decline -- no depth-stencil state or constant
-// buffer, and no pair view to rebind to -- are latched by their own
+// True when the second draw is set up to write DEPTH, the reactive mask,
+// or both -- never colour. False means this call declined, and the caller
+// must NOT issue the draw: every decline leaves the game's own state
+// exactly as it was, so a draw issued anyway is the game's composite a
+// second time, in full colour, over itself. The paths that decline -- no
+// depth-stencil state or constant buffer, no pair view to rebind to, no
+// mask for a draw that wanted only a mask -- are latched by their own
 // one-shot notes, so once one starts failing it fails for every composite
 // after, and the doubling would last the session (the pre-release review
 // of 2026-09-07). splashDimBegin below has taken this shape all along.
 bool uiDepthReissueBegin(ID3D11DeviceContext* ctx) {
     g_reissueOn = false;
     g_rebound = false;
-    if (!g_on || g_stoodDown || g_mode != Mode::kReissue || !g_reissueShader) return false;
+    if (!g_on || g_stoodDown || !g_reissueShader) return false;
+    const bool depthPass = g_mode == Mode::kReissue;   // this draw writes depth
+    const bool wantMask = g_wantMask;
     const bool rebind = g_wantRebind;
     g_wantRebind = false;
+    g_wantMask = false;
+    if (!depthPass && !wantMask) return false;
     DepthShader* shader = g_reissueShader;
     const bool ran = guardedBudget(g_budget, [&] {
-        ID3D11DepthStencilState* dss = reissueState(ctx);
+        // The depth pass writes depth with the nearer-wins test; a
+        // mask-only pass over a family whose depth is already written just
+        // marks, with the same test and no writes.
+        ID3D11DepthStencilState* dss = depthPass ? reissueState(ctx) : maskDepthState(ctx);
         ID3D11Buffer* cb = floorBuffer(ctx);
         if (!dss || !cb) {
             ++g_wNoTwin;
             return;
         }
-        // The colour target off, the depth target the pass's when the
-        // composite's own is not it; through the original entry so the
-        // binding shadow keeps describing the game's bindings.
+        Mask* mask = wantMask ? maskFor(ctx, g_drawEye, g_rebindW, g_rebindH) : nullptr;
+        if (wantMask && !mask && !depthPass) return;   // nothing left to do
         ctx->OMGetRenderTargets(kMaxRtvs, g_savedRtvs, &g_savedDsv);
         ID3D11DepthStencilView* target = g_savedDsv;
         if (rebind) {
@@ -1098,18 +1307,42 @@ bool uiDepthReissueBegin(ID3D11DeviceContext* ctx) {
                                 g_rebindW, g_rebindH, g_rebindEye);
             }
         }
-        vScreenSetRenderTargetsRaw(ctx, 0, nullptr, target);
+        // The mask as the only colour target when one is wanted, none
+        // otherwise; through the original entry so the binding shadow keeps
+        // describing the game's bindings.
+        ID3D11RenderTargetView* rtv = mask ? mask->rtv : nullptr;
+        vScreenSetRenderTargetsRaw(ctx, mask ? 1 : 0, mask ? &rtv : nullptr, target);
         g_rebound = true;
-        ctx->OMGetDepthStencilState(&g_savedDss, &g_savedRef);
+        if (mask) {
+            mask->marked = true;
+            ++g_wMarked;
+            ctx->OMGetBlendState(&g_reSavedBlend, g_reSavedBlendFactor, &g_reSavedSampleMask);
+            ID3D11BlendState* bs = maskBlend(ctx);
+            const FLOAT one[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+            if (bs) ctx->OMSetBlendState(bs, one, 0xFFFFFFFFu);
+            if (!g_maskNotedOnce) {
+                g_maskNotedOnce = true;
+                Log::get().note("ui depth: the reactive mask is being marked at "
+                                "%ux%u for eye %d at strength %.2f -- where it is "
+                                "set, NVIDIA favours this frame's colour, so a "
+                                "readout that changes in place stops blending with "
+                                "the digit before it (advanced.ui_depth_reactive).",
+                                g_rebindW, g_rebindH, g_drawEye,
+                                static_cast<double>(g_reactive));
+            }
+        }
+        ctx->OMGetDepthStencilState(&g_reSavedDss, &g_reSavedRef);
         ctx->OMSetDepthStencilState(dss, 0);
         ctx->PSGetShader(&g_savedPs, nullptr, nullptr);
         ctx->PSSetShader(shader->shader, nullptr, 0);
         ctx->PSSetConstantBuffers(13, 1, &cb);
-        scaleViewportsForUi(ctx);
+        if (depthPass) scaleViewportsForUi(ctx);
         g_reissueOn = true;
-        ++g_wReissued;
-        ++g_wWrote;
-        ++g_sessionWrote;
+        if (depthPass) {
+            ++g_wReissued;
+            ++g_wWrote;
+            ++g_sessionWrote;
+        }
     });
     if (!ran && !g_budget.shouldRun() && !g_stoodDown) {
         g_stoodDown = true;
@@ -1137,17 +1370,26 @@ void uiDepthReissueEnd(ID3D11DeviceContext* ctx) {
             ctx->PSSetShader(g_savedPs, nullptr, 0);
             ID3D11Buffer* none = nullptr;
             ctx->PSSetConstantBuffers(13, 1, &none);
-            ctx->OMSetDepthStencilState(g_savedDss, g_savedRef);
+            ctx->OMSetDepthStencilState(g_reSavedDss, g_reSavedRef);
+            if (g_reSavedBlend || g_reSavedSampleMask) {
+                ctx->OMSetBlendState(g_reSavedBlend, g_reSavedBlendFactor,
+                                     g_reSavedSampleMask);
+            }
             restoreViewports(ctx);
         });
         if (g_savedPs) {
             g_savedPs->Release();
             g_savedPs = nullptr;
         }
-        if (g_savedDss) {
-            g_savedDss->Release();
-            g_savedDss = nullptr;
+        if (g_reSavedDss) {
+            g_reSavedDss->Release();
+            g_reSavedDss = nullptr;
         }
+        if (g_reSavedBlend) {
+            g_reSavedBlend->Release();
+            g_reSavedBlend = nullptr;
+        }
+        g_reSavedSampleMask = 0;
     }
     if (g_rebound) {
         g_rebound = false;
@@ -1158,10 +1400,43 @@ void uiDepthReissueEnd(ID3D11DeviceContext* ctx) {
     g_reissueShader = nullptr;
 }
 
-void uiDepthFrameBoundary() {
+bool uiDepthReactiveMask(uint32_t w, uint32_t h, int eye, ID3D11Texture2D** tex) {
+    if (!tex) return false;
+    *tex = nullptr;
+    if (!g_on || g_stoodDown || !(g_reactive > 0.0f) || eye < 0 || eye > 1) return false;
+    Mask& m = g_mask[eye];
+    if (!m.tex || !m.marked) return false;
+    if (m.w != w || m.h != h) {
+        // The pass treats a region of the submitted texture; a mask drawn
+        // at another size cannot be handed over as it is. Said once.
+        if (!g_maskSizeNoted) {
+            g_maskSizeNoted = true;
+            Log::get().note("ui depth: the reactive mask is %ux%u but the pass treats "
+                            "%ux%u, so it is not handed to NVIDIA. The interface's "
+                            "depth is unaffected; this is the cull guard's crop or a "
+                            "size change.",
+                            m.w, m.h, w, h);
+        }
+        return false;
+    }
+    *tex = m.tex;
+    return true;
+}
+
+void uiDepthFrameBoundary(ID3D11DeviceContext* ctx) {
     ++g_frame;
     g_frameRtv[0] = g_frameRtv[1] = nullptr;
     g_frameRtvCount = 0;
+    // The masks are marked during the frame and read at its submits, so
+    // the clear belongs here, after both.
+    if (ctx) {
+        for (Mask& m : g_mask) {
+            if (!m.rtv || !m.marked) continue;
+            const FLOAT zero[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+            guardedBudget(g_budget, [&] { ctx->ClearRenderTargetView(m.rtv, zero); });
+            m.marked = false;
+        }
+    }
     if (!g_on) return;
     ++g_wFrames;
     if (!g_announced && g_wWrote > 0) {
@@ -1208,6 +1483,14 @@ void uiDepthShutdown() {
         g_savedPs->Release();
         g_savedPs = nullptr;
     }
+    if (g_reSavedDss) {
+        g_reSavedDss->Release();
+        g_reSavedDss = nullptr;
+    }
+    if (g_reSavedBlend) {
+        g_reSavedBlend->Release();
+        g_reSavedBlend = nullptr;
+    }
     g_engaged = false;
     g_reissueOn = false;
     g_rebound = false;
@@ -1215,6 +1498,19 @@ void uiDepthShutdown() {
     releaseSavedOm();
     releasePairViews();
     releaseStates();
+    for (Mask& m : g_mask) {
+        if (m.rtv) m.rtv->Release();
+        if (m.tex) m.tex->Release();
+        m = Mask();
+    }
+    if (g_maskBlend) {
+        g_maskBlend->Release();
+        g_maskBlend = nullptr;
+    }
+    if (g_maskDss) {
+        g_maskDss->Release();
+        g_maskDss = nullptr;
+    }
     for (DepthShader& s : g_depthShaders) {
         if (s.shader) s.shader->Release();
         s.shader = nullptr;

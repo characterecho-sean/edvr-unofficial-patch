@@ -594,8 +594,21 @@ void dumpInternTable() {
                                 e.info.resource);
             }
         } else if (e.info.isBuffer) {
-            Log::get().note("DC id @%u buf %u res=%p", i, e.info.a,
-                            e.info.resource);
+            // stride= is the STRUCTURE stride, and it identifies a buffer the
+            // way a texture's WxH does (2026-09-07). binding_shadow has
+            // resolved it into ResourceInfo::b since it was written and this
+            // line has always thrown it away, so the instanced-mesh pool --
+            // the one the per-object motion design needs, recognisable by its
+            // 336-byte record -- was indistinguishable from any other buffer
+            // of the same byte width. Omitted when zero, which is every
+            // constant and vertex buffer.
+            if (e.info.b) {
+                Log::get().note("DC id @%u buf %u res=%p stride=%u", i,
+                                e.info.a, e.info.resource, e.info.b);
+            } else {
+                Log::get().note("DC id @%u buf %u res=%p", i, e.info.a,
+                                e.info.resource);
+            }
         } else {
             Log::get().note("DC id @%u ?", i);
         }
@@ -734,6 +747,57 @@ static void recordDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
         if (ps) ps->Release();
     }
 
+    // VERTEX-shader resources, slots 32-39 (2026-09-07, the per-object motion
+    // hunt).
+    //
+    // Every shader-resource column this file has ever had is the PIXEL
+    // side -- s= is PSGetShaderResources(0,8) and x= is (4,4). Nothing has
+    // ever read a VS SRV, so the instanced-mesh POOL has been invisible to
+    // every census ever taken: the structured buffer Elite's vertex shaders
+    // index for each instance's pose, which docs/per-object-motion.md needs
+    // named, sized and its write path found before a per-mover tag can be
+    // built. Phase 0's question 3 was unanswerable for want of this one call.
+    //
+    // 32..39 rather than 0..7 because that is where the pool lives: 71 of 71
+    // dumped vertex shaders declare it at t33 with a 336-byte stride, and the
+    // bone palette beside it at t38 (docs/shaders/fss-panel-vs.asm, and the
+    // 2026-09-06 dump). If a future build moves them, this window is the
+    // thing to move, and a fresh glare_shader_dump is how you would learn it.
+    //
+    // One COM call on recorded draws only, the same bargain x= above makes.
+    // The column is OMITTED when the whole window is empty, which is most
+    // draws -- a line per draw is what the log buffer is sized around, and a
+    // run of eight dashes on every one of them would buy nothing.
+    char vsr[224] = "";
+    if (st.ok) {
+        ID3D11ShaderResourceView* vres[8] = {};
+        bool got = false;
+        guardedBudget(g_iaBudget, [&] {
+            ctx->VSGetShaderResources(32, 8, vres);
+            got = true;
+        });
+        if (got) {
+            bool any = false;
+            for (ID3D11ShaderResourceView* v : vres) {
+                if (v) { any = true; break; }
+            }
+            if (any) {
+                char vb[8][24];
+                const char* tk[8];
+                for (int i = 0; i < 8; ++i) {
+                    tk[i] = bindingToken(vres[i], Kind::kView, vb[i],
+                                         sizeof(vb[i]));
+                }
+                _snprintf_s(vsr, sizeof(vsr), _TRUNCATE,
+                            " vt=%s,%s,%s,%s,%s,%s,%s,%s", tk[0], tk[1], tk[2],
+                            tk[3], tk[4], tk[5], tk[6], tk[7]);
+            }
+        }
+        for (ID3D11ShaderResourceView* v : vres) {
+            if (v) v->Release();
+        }
+    }
+
     // WHERE THE DRAW LANDS, which this has never recorded (2026-08-30).
     //
     // The black-planet hunt reached a draw that is ISSUED for both eyes,
@@ -804,7 +868,13 @@ static void recordDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
     //
     // Three COM calls and two GetDesc on recorded draws only, which is the
     // same bargain the sampler probe above already makes.
-    char sv[128] = "";
+    //
+    // 256 and not 128 (2026-09-07): the so= token below adds up to 29 more
+    // characters, and the tail was already within about forty of the old
+    // buffer once every %u in it is allowed its full width. _snprintf_s with
+    // _TRUNCATE loses the END of the line silently, which is where q= lives,
+    // so an overflow here would cost a census rather than a column.
+    char sv[256] = "";
     {
         ID3D11DepthStencilState* dss = nullptr;
         ID3D11BlendState*        bs = nullptr;
@@ -828,6 +898,51 @@ static void recordDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
             bool haveBs = false;
             if (bs) { bs->GetDesc(&bd); haveBs = true; }
             if (haveDs || haveBs || pred) {
+                // so= is the rest of the stencil state (2026-09-07,
+                // docs/per-object-motion.md Phase 0 question 1). st= has
+                // always printed the enable and the REFERENCE, which says
+                // what a draw compares against and nothing about which BITS
+                // it touches -- and the per-object-motion design needs bits
+                // the game neither reads nor writes to stamp a per-mover tag
+                // into. A reference of 4 is not evidence that bit 2 is the
+                // only bit read: that is the read mask's to say, and no
+                // census has ever carried one.
+                //
+                // r/w are the read and write masks in hex, f is
+                // FrontFace.StencilFunc, then the three front ops in the
+                // order fail, depth-fail, pass. The back face is appended
+                // after a + only when it differs from the front, because it
+                // almost never does and a column that is identical on every
+                // line is a column nobody reads. Both faces share the two
+                // masks, which is why they are not repeated.
+                //
+                // Costs nothing new: dd is the GetDesc the ds= column above
+                // already paid for.
+                char so[64] = "";
+                if (haveDs) {
+                    const D3D11_DEPTH_STENCILOP_DESC& fr = dd.FrontFace;
+                    const D3D11_DEPTH_STENCILOP_DESC& bk = dd.BackFace;
+                    char bkb[32] = "";
+                    if (bk.StencilFunc != fr.StencilFunc ||
+                        bk.StencilFailOp != fr.StencilFailOp ||
+                        bk.StencilDepthFailOp != fr.StencilDepthFailOp ||
+                        bk.StencilPassOp != fr.StencilPassOp) {
+                        _snprintf_s(bkb, sizeof(bkb), _TRUNCATE,
+                                    "+f%u/%u,%u,%u",
+                                    static_cast<unsigned>(bk.StencilFunc),
+                                    static_cast<unsigned>(bk.StencilFailOp),
+                                    static_cast<unsigned>(bk.StencilDepthFailOp),
+                                    static_cast<unsigned>(bk.StencilPassOp));
+                    }
+                    _snprintf_s(so, sizeof(so), _TRUNCATE,
+                                " so=r%02X/w%02X/f%u/%u,%u,%u%s",
+                                static_cast<unsigned>(dd.StencilReadMask),
+                                static_cast<unsigned>(dd.StencilWriteMask),
+                                static_cast<unsigned>(fr.StencilFunc),
+                                static_cast<unsigned>(fr.StencilFailOp),
+                                static_cast<unsigned>(fr.StencilDepthFailOp),
+                                static_cast<unsigned>(fr.StencilPassOp), bkb);
+                }
                 // bl= is the whole slot-0 blend equation and sm= the sample
                 // mask (2026-09-01, the DSS black planet). Every test that
                 // could reject a pixel AFTER the shader had been recorded or
@@ -838,7 +953,7 @@ static void recordDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
                 // "opaque, writes land".
                 _snprintf_s(sv, sizeof(sv), _TRUNCATE,
                             " ds=%c%uw%c st=%c%u bm=%X pr=%c"
-                            " bl=%c%u,%u,%u/%u,%u,%u%s sm=%X",
+                            " bl=%c%u,%u,%u/%u,%u,%u%s sm=%X%s",
                             haveDs ? (dd.DepthEnable ? '1' : '0') : '?',
                             haveDs ? static_cast<unsigned>(dd.DepthFunc) : 0u,
                             haveDs ? (dd.DepthWriteMask ==
@@ -871,7 +986,7 @@ static void recordDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
                                          bd.RenderTarget[0].BlendOpAlpha)
                                    : 1u,
                             haveBs && bd.AlphaToCoverageEnable ? ",a2c" : "",
-                            sampleMask);
+                            sampleMask, so);
             }
         }
         if (dss) dss->Release();
@@ -880,9 +995,9 @@ static void recordDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
     }
 
     Log::get().note(
-        "%s %u #%u %c n=%u i=%u r=%s d=%s c=%s s=%s,%s,%s,%s%s%s%s%s%s q=%u",
+        "%s %u #%u %c n=%u i=%u r=%s d=%s c=%s s=%s,%s,%s,%s%s%s%s%s%s%s q=%u",
         tag, g_frameOrdinal, index, kind, count, instances, r, d, c, s0, s1,
-        s2, s3, tail, xt, pt, vt, sv, q);
+        s2, s3, tail, xt, pt, vsr, vt, sv, q);
 
     // The CB watch, after the draw's own line so a DCW dump always follows
     // the draw it belongs to. Any recorded draw can match -- DC for the FSS

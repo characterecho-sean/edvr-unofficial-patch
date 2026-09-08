@@ -47,9 +47,17 @@ bool dlaaAvailable(ID3D11Device* dev, const char** reason);
 // this eye's previous evaluation, zero when unknown. A feature per eye is
 // created on first use and rebuilt on a size change. False on any
 // refusal, with its reason.
+// `reactive` may be null; when given it is a w x h mask (R8_UNORM) whose
+// value tells the runtime how far to favour THIS frame's colour over the
+// history at that pixel -- NVIDIA's bias-current-colour input. It is for
+// content that changes without moving, which no motion vector can
+// describe: a HUD readout counting down registers perfectly and blends
+// with the digit before it (measured 2026-09-08, the flip side of
+// fix.ui_depth). Zero everywhere is the same as not passing one.
 bool dlaaEvaluate(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* colour,
                   ID3D11Texture2D* depth, ID3D11Texture2D* motion,
-                  ID3D11Texture2D* output, uint32_t w, uint32_t h,
+                  ID3D11Texture2D* output, ID3D11Texture2D* reactive,
+                  uint32_t w, uint32_t h,
                   uint32_t outW, uint32_t outH, float jx, float jy, bool reset,
                   float frameMs, const char** reason);
 
