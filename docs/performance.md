@@ -809,6 +809,14 @@ what that headset gets until it does.
 
 ## Feature 4 — the in-headset menu
 
+*Superseded 2026-09-07 by [settings-menu.md](settings-menu.md), which
+keeps every decision below and changes one premise: Elite's keyboard CAN
+be taken while the menu is open (measured from the exe's imports -- three
+in-process doors, no system hook), so the menu owns the keyboard, gains
+arrow-key navigation, a developer tier for the advanced and experimental
+sections, and build-enforced restart flagging. This section stays as the
+origin of the design.*
+
 **Why it exists.** Every knob above is a taste-and-cost trade that can only
 be judged with the headset on, mid-flight, over the scene that is actually
 struggling. Today that judgement runs through alt-tabbing to a text editor
