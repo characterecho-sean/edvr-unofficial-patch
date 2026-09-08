@@ -659,7 +659,22 @@ HRESULT STDMETHODCALLTYPE hookedCreateCS(ID3D11Device* self, const void* bytecod
     const HRESULT hr = g_state->realCreateCS(self, bytecode, len, linkage, out);
     guardedBudget(g_createBudget, [&] {
         if (FAILED(hr) || !bytecode || len == 0 || !out || !*out) return;
-        registerShaderHash(*out, fnv1a64(bytecode, len));
+        const uint64_t hash = fnv1a64(bytecode, len);
+        registerShaderHash(*out, hash);
+        // COMPUTE shaders dump too (2026-09-07), and they had to start.
+        //
+        // This hook has registered their hashes since it was written, so a
+        // census could NAME a dispatch -- and the dump wrote only vs_ and
+        // ps_, so nothing could ever read one. That gap bit twice in one
+        // day. The per-object motion work found the game reading the scene
+        // depth's STENCIL plane from compute (5998146D464F5C0E and
+        // EB0245DE0BB23BB6, the amortized tile renderer of
+        // docs/fss-scanner.md), which is a consumer a stencil tag must not
+        // disturb and which the draw-level so= column cannot see, because a
+        // compute shader has no depth-stencil state to record. And the
+        // temporal pass's own dispatch hash changes whenever its shader
+        // does, which a dump makes checkable instead of inferable.
+        if (g_state->shaderDump) dumpShaderBlob(L"cs", hash, bytecode, len);
     });
     return hr;
 }
