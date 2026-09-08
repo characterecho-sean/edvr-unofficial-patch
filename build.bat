@@ -210,7 +210,9 @@ python "tools\gen_exports.py" --source "%SystemRoot%\System32\d3d11.dll" ^
     --extra-export edvrDepthProbeSelftest ^
     --extra-export edvrDlaaAvailable ^
     --extra-export edvrDlaaCounts ^
-    --extra-export edvrMenuPanel
+    --extra-export edvrMenuPanel ^
+    --extra-export edvrDoorGpuBegin ^
+    --extra-export edvrDoorGpuEnd
 if errorlevel 1 ( echo [edvr] ERROR: export generation failed & exit /b 1 )
 
 if not exist "%OBJ%\d3d11" mkdir "%OBJ%\d3d11"

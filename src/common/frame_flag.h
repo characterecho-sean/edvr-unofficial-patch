@@ -396,6 +396,16 @@ void publishFrameTiming(const FrameTimingSample& s);
 // the publish count so a reader can tell a fresh sample from a repeat.
 bool frameTimingSample(FrameTimingSample* out, uint32_t* seq);
 
+// EDVR'S OWN ACTIVITY, for the monitor's drop attribution: the openvr half
+// ORs in the events it causes during a frame (a withhold, a resubmit --
+// perf_monitor.h names the bits) and adds the CPU time its door work took
+// in microseconds; the d3d11 half takes both at its frame boundary, which
+// clears them. One frame's worth crosses at a time.
+void     noteEdvrEvent(uint32_t bits);
+uint32_t takeEdvrEvents();
+void     addDoorCpuUs(uint32_t us);
+uint32_t takeDoorCpuUs();
+
 // The cull guard's state, published by openvr_api.dll at its stage
 // transitions and read by d3d11.dll once per frame boundary.
 //

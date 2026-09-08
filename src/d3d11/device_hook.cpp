@@ -26,6 +26,7 @@
 #include "quad_probe.h"
 #include "exposure_fix.h"
 #include "menu.h"
+#include "perf_monitor.h"
 #include "vscreen.h"
 #include "glitch_frame.h"
 #include "vscreen_res.h"
@@ -701,6 +702,10 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
             static_cast<unsigned long>(GetCurrentThreadId()));
     }
 
+    // The frame boundary's own CPU time, credited to the frame the monitor
+    // just ringed inside it (menuTick runs perfMonitorFrame), so a dropped
+    // frame's row says what EDVR's boundary work cost in it.
+    const int64_t boundaryT0 = qpcNow();
     guardedBudget(g_frameBudget, [&] {
         if (g_state->toggleKey.pressed()) toggleExposureFix();
         // Deliberately not part of the toggle: it reports, it does not change
@@ -782,6 +787,7 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
             // WHERE. Two instruments on one press keeps the two answers on
             // the same frame, which is the only way they can be compared.
             quadProbeRequest();
+            perfMonitorNoteEvent(kEvCensus);
         }
         if (g_state->missedCensusNotes < kMissedDumpNotes &&
             g_state->censusKey.takeMissedWhileUnfocused()) {
@@ -1081,6 +1087,10 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
             exposureFixReclaimHooks(sceneRendered);
         }
     });
+    if (qpcFrequency() > 0) {
+        perfMonitorNoteCpu(kCpuBoundary, static_cast<double>(qpcNow() - boundaryT0) * 1000.0 /
+                                             static_cast<double>(qpcFrequency()));
+    }
     return hr;
 }
 
@@ -1120,6 +1130,7 @@ HRESULT STDMETHODCALLTYPE hookedCreateSwapChainForHwnd(
 void readoptGameBindings() {
     char b[48];
     bool changed = false;
+    perfMonitorNoteEvent(kEvBinds);
     {
         const auto before = g_state->externalCamKey.key();
         // The ON-FOOT element first: the game acts on _Humanoid on foot,
@@ -1237,6 +1248,7 @@ void menuActionDumpCamera(void*) { dumpCameraRing("the settings menu"); }
 void menuActionCensus(void*) {
     drawCensusRequest();
     quadProbeRequest();
+    perfMonitorNoteEvent(kEvCensus);
 }
 void menuActionResetView(void*) {
     headOffsetGateNewFootSession("the settings menu", /*journalSaysSo=*/false);

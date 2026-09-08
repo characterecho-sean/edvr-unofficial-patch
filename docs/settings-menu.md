@@ -348,6 +348,54 @@ and where it applies, the measured cost or the restart badge.
    the list of changes waiting for a restart; and the result of the last
    ini write.
 
+**Diagnosing drops caused by the mod** (built 2026-09-07 the same night,
+after the question was asked). A drop count says drops happened, not why,
+and the mod's own one-off work is the class that would explain one: a
+shader compile at first engage, a withhold, a reload parsing the ini on
+the render thread, the menu's own write. So every frame's ring entry now
+carries what EDVR did in it and what it cost, and the page and the log
+read the two together:
+
+- **Events**, ORed into the frame from wherever they happen, both halves
+  (`PerfEvent` in `perf_monitor.h`, the openvr half's crossing on the
+  channel): a reload with its duration, an ini write, a shader compile
+  with its duration (every `shaderSwapCompile*`), NVIDIA's feature
+  creation with its duration, a withhold, a resubmit, a census request, a
+  bitmap upload, a bindings re-read, the menu opening or closing.
+- **EDVR's CPU time**, measured: the frame boundary's body (a clock around
+  `hookedPresent`'s frame work), the door's passes per eye (a clock around
+  the lambdas in `hookedSubmit`, crossing on the channel), and the draw
+  hooks on one frame in sixteen -- the four draw thunks clock themselves
+  and the real call they forward, and the difference is EDVR's own cost in
+  the hook. Two clock reads per draw on a sample frame, one branch on the
+  other fifteen.
+- **EDVR's GPU time at the door**: a timestamp pair per eye around every
+  pass the door runs (`edvrDoorGpuBegin` / `End`, exports the openvr half
+  calls), never awaited, polled on later calls. This is the mod's whole
+  submit-side GPU price in one number, beside the compositor's app GPU
+  figure. What it does not cover: the ui_depth second draws and the
+  theater's draw-path work, which happen inside the game's frame.
+- **The page**: "Dropped frames" now ends with how many of the window's
+  drops coincided with EDVR activity, naming the events, against how many
+  were clean; "Last drop" shows the most recent drop or long frame with
+  its interval and EDVR's events in it; "EDVR CPU" and "EDVR GPU" show the
+  measured per-frame figures.
+- **The log**: a `monitor: DROPPED FRAME` (or `LONG FRAME`, for one over
+  twice the budget by EDVR's own clock when the compositor reports no
+  drop) line with the interval, the compositor's app GPU time, EDVR's four
+  costs and its events, at most one every five seconds and sixty a
+  session -- so a field report carries the attribution without the
+  headset on.
+- **And the hitch removed**: the menu's ini write (read, merge, write,
+  replace, mirror copy, backup copy) ran on the render thread in the first
+  build; it now runs on a worker, serialised and coalesced while a key is
+  held, and the frame thread only enqueues, shows the value, and drains
+  the results.
+
+What this cannot do is name a cause the ring does not carry. A drop with
+no EDVR event and ordinary EDVR costs is the game's or the runtime's, and
+the page says so by calling it clean.
+
 **The overlay** (`menu.fps_overlay = on`, off by default): a one-line
 readout -- frames per second and frame time over the last second, the
 app's GPU time, frames dropped in the last ten seconds -- shown while the

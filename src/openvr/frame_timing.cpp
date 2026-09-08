@@ -209,6 +209,48 @@ void frameTimingBoundary(void* iface, size_t prefix) {
     ++s.published;
 }
 
+namespace {
+typedef void (*PFN_DoorGpu)(void*, int);
+PFN_DoorGpu g_doorBegin = nullptr;
+PFN_DoorGpu g_doorEnd = nullptr;
+bool        g_doorTried = false;
+int64_t     g_doorQpc[2] = {};
+
+void resolveDoorGpu() {
+    if (g_doorTried) return;
+    g_doorTried = true;
+    HMODULE m = GetModuleHandleW(L"d3d11.dll");
+    if (!m) return;
+    g_doorBegin = reinterpret_cast<PFN_DoorGpu>(GetProcAddress(m, "edvrDoorGpuBegin"));
+    g_doorEnd = reinterpret_cast<PFN_DoorGpu>(GetProcAddress(m, "edvrDoorGpuEnd"));
+    if (!g_doorBegin || !g_doorEnd) {
+        g_doorBegin = g_doorEnd = nullptr;
+        Log::get().note("compositor timing: d3d11.dll exports no door GPU bracket (an older "
+                        "pair); the Monitor page's door GPU figure stays blank.");
+    }
+}
+}  // namespace
+
+void frameTimingDoorBegin(void* handle, int eye) {
+    if (eye < 0 || eye > 1) return;
+    g_doorQpc[eye] = qpcNow();
+    if (handle) {
+        resolveDoorGpu();
+        if (g_doorBegin) g_doorBegin(handle, eye);
+    }
+}
+
+void frameTimingDoorEnd(void* handle, int eye) {
+    if (eye < 0 || eye > 1) return;
+    if (handle && g_doorEnd) g_doorEnd(handle, eye);
+    if (g_doorQpc[eye] && qpcFrequency() > 0) {
+        const double us = static_cast<double>(qpcNow() - g_doorQpc[eye]) * 1.0e6 /
+                          static_cast<double>(qpcFrequency());
+        if (us > 0.0 && us < 1.0e6) addDoorCpuUs(static_cast<uint32_t>(us));
+    }
+    g_doorQpc[eye] = 0;
+}
+
 void frameTimingShutdown() {
     if (g_s.published) {
         Log::get().note("compositor timing: %u samples published, %u frames dropped by the "

@@ -45,6 +45,7 @@
 #include "depth_probe.h"       // Phase 0 item 3: which depth target the eye draws use, and how it reads
 #include "sharpen_pass.h"      // likewise: warm-up and totals; the sharpening runs at submit
 #include "menu.h"              // the settings menu's reload: its keys, then the row diff
+#include "perf_monitor.h"      // the draw hooks' sampled cost, and the reload as an event
 #include "supersample_pass.h"  // likewise: warm-up and totals; the pass runs at submit
 #include "temporal_pass.h"     // and the temporal pass: warm-up, the camera capture, totals
 #include "fov_probe.h"
@@ -3114,25 +3115,48 @@ void STDMETHODCALLTYPE hookedRSSetViewports(ID3D11DeviceContext* self, UINT n,
 // vertex's index is offset by. The quad probe reads it (quad_probe.h); it
 // was reading whatever the last INDEXED draw had left there, which for a
 // spec aimed at a 4-vertex draw would have been a silently wrong rectangle.
+// The draw hooks' own cost, for the monitor's drop attribution: on a sample
+// frame (one in sixteen, perf_monitor.h) each draw thunk clocks itself and
+// the real call it forwards, and the difference is what EDVR spent in the
+// hook. Two clock reads per draw on those frames, one branch otherwise.
+struct DrawClock {
+    bool    on;
+    int64_t t0;
+    int64_t real = 0;
+    DrawClock() : on(perfMonitorSampleDraws()), t0(on ? qpcNow() : 0) {}
+    ~DrawClock() {
+        if (on) perfMonitorDrawTicks(qpcNow() - t0, real);
+    }
+};
+
 void STDMETHODCALLTYPE hookedDraw(ID3D11DeviceContext* self, UINT count, UINT start) {
+    DrawClock clock;
     ++g_state->thunkHits[kHitDraw];
     if (quadProbeWants()) g_state->qsBaseVertex = static_cast<INT>(start);
     const DrawVerdict v = beginPanelOverride(self, 'D', count, 1);
-    forwardWithVerdict(self, v, [&] { g_state->realDraw(self, count, start); });
+    forwardWithVerdict(self, v, [&] {
+        const int64_t r0 = clock.on ? qpcNow() : 0;
+        g_state->realDraw(self, count, start);
+        if (clock.on) clock.real += qpcNow() - r0;
+    });
     if (v == DrawVerdict::kPanel) endPanelOverride(self);
 }
 void STDMETHODCALLTYPE hookedDrawIndexed(ID3D11DeviceContext* self, UINT count,
                                          UINT startIndex, INT baseVertex) {
+    DrawClock clock;
     ++g_state->thunkHits[kHitDrawIndexed];
     const DrawVerdict v = beginPanelOverride(self, 'I', count, 1);
     forwardWithVerdict(self, v, [&] {
+        const int64_t r0 = clock.on ? qpcNow() : 0;
         g_state->realDrawIndexed(self, count, startIndex, baseVertex);
+        if (clock.on) clock.real += qpcNow() - r0;
     });
     if (v == DrawVerdict::kPanel) endPanelOverride(self);
 }
 void STDMETHODCALLTYPE hookedDrawInstanced(ID3D11DeviceContext* self, UINT perInstance,
                                            UINT instances, UINT startVertex,
                                            UINT startInstance) {
+    DrawClock clock;
     // See hookedDraw: the start vertex, before the call that reads it.
     if (quadProbeWants()) g_state->qsBaseVertex = static_cast<INT>(startVertex);
     const DrawVerdict v = beginPanelOverride(self, 'N', perInstance, instances);
@@ -3149,8 +3173,10 @@ void STDMETHODCALLTYPE hookedDrawInstanced(ID3D11DeviceContext* self, UINT perIn
                            ? g_state->glareClamp
                            : instances;
     forwardWithVerdict(self, v, [&] {
+        const int64_t r0 = clock.on ? qpcNow() : 0;
         g_state->realDrawInstanced(self, perInstance, drawn, startVertex,
                                    startInstance);
+        if (clock.on) clock.real += qpcNow() - r0;
     });
     if (v == DrawVerdict::kPanel) endPanelOverride(self);
 }
@@ -3158,6 +3184,7 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
                                                   UINT perInstance, UINT instances,
                                                   UINT startIndex, INT baseVertex,
                                                   UINT startInstance) {
+    DrawClock clock;
     // The rect deriver's capture runs INSIDE beginPanelOverride (the
     // chrome tracker's matched branch), so its draw-args stash must land
     // before the call.
@@ -3175,8 +3202,10 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
     }
     const DrawVerdict v = beginPanelOverride(self, 'X', perInstance, instances);
     forwardWithVerdict(self, v, [&] {
+        const int64_t r0 = clock.on ? qpcNow() : 0;
         g_state->realDrawIndexedInstanced(self, perInstance, instances, startIndex,
                                           baseVertex, startInstance);
+        if (clock.on) clock.real += qpcNow() - r0;
     });
     if (v == DrawVerdict::kPanel) endPanelOverride(self);
     if (v == DrawVerdict::kIntroPanel) introPanelEndDraw(self);
@@ -3647,7 +3676,20 @@ void vScreenRefreshConfig() {
     if (!s) return;
     Config& cfg = Config::get();
     // Cheap: one GetFileAttributesEx, and only when the write time moved.
+    const int64_t reloadT0 = qpcNow();
     if (!cfg.reloadIfChanged()) return;
+    // A reload -- the parse of a 124 KB ini and every module's reconfigure,
+    // on the render thread -- is an EDVR event with a duration, for the
+    // monitor's drop attribution.
+    struct ReloadClock {
+        int64_t t0;
+        ~ReloadClock() {
+            perfMonitorNoteEvent(kEvReload, qpcFrequency() > 0
+                                                ? static_cast<double>(qpcNow() - t0) * 1000.0 /
+                                                      static_cast<double>(qpcFrequency())
+                                                : 0.0);
+        }
+    } reloadClock{reloadT0};
 
     const bool  wasVoid  = s->blackVoid;
     const float wasScale = s->distanceScale;

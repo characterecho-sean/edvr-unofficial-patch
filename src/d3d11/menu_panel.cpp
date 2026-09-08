@@ -19,6 +19,7 @@
 #include "../common/log.h"
 #include "../common/supersample_math.h"
 #include "../common/timing.h"
+#include "perf_monitor.h"   // the upload is an event for the drop attribution
 #include "shader_swap.h"
 
 namespace edvr {
@@ -211,10 +212,13 @@ void layout(const MenuContent& c, std::vector<Op>& ops, std::vector<LineRect>& l
             h.alpha = kHighlightAlpha;
             ops.push_back(h);
         }
+        // Information rows carry long values, so the split sits further
+        // left for them than for a setting's label and value.
+        const int split = l.style == kMenuInfo ? W * 26 / 100 : W * 6 / 10;
         Op left;
         left.text = true;
         left.str = widen(l.left);
-        left.rect = {pad, y, W * 6 / 10, y + rowPitch};
+        left.rect = {pad, y, split, y + rowPitch};
         left.align = DT_LEFT;
         left.font = l.style == kMenuHeading ? Font::Small : Font::Row;
         left.rgb = l.style == kMenuHeading ? kHeading
@@ -228,8 +232,8 @@ void layout(const MenuContent& c, std::vector<Op>& ops, std::vector<LineRect>& l
             Op right;
             right.text = true;
             right.str = widen(l.right);
-            right.rect = {W * 6 / 10, y, W - pad, y + rowPitch};
-            right.align = DT_RIGHT;
+            right.rect = {split, y, W - pad, y + rowPitch};
+            right.align = l.style == kMenuInfo ? DT_LEFT : DT_RIGHT;
             right.font = Font::Row;
             right.rgb = l.style == kMenuInfo ? kLabel
                         : l.style == kMenuDim ? kDimText
@@ -242,7 +246,7 @@ void layout(const MenuContent& c, std::vector<Op>& ops, std::vector<LineRect>& l
                 b.str = l.badge == kBadgeRestart ? L"restart"
                         : l.badge == kBadgePending ? L"at next launch"
                                                    : L"?";
-                b.rect = {W * 6 / 10, y + rowPitch * 62 / 100, W - pad, y + rowPitch};
+                b.rect = {split, y + rowPitch * 62 / 100, W - pad, y + rowPitch};
                 b.align = DT_RIGHT;
                 b.font = Font::Small;
                 b.rgb = l.badge == kBadgeUnknown ? kDimText : kBadge;
@@ -1122,6 +1126,7 @@ void menuPanelTick(ID3D11Device* dev) {
         ctx->UpdateSubresource(g_panelTex, 0, nullptr, r.rgba.data(),
                                static_cast<UINT>(r.w) * 4, 0);
         ctx->Release();
+        perfMonitorNoteEvent(kEvRaster);
         g_panelAspect.store(static_cast<float>(r.h) / static_cast<float>(r.w));
         std::lock_guard<std::mutex> lock(g_w.m);
         g_w.liveLines = r.lines;

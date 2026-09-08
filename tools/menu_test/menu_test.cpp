@@ -19,6 +19,7 @@
 #include "../../src/common/perf_math.h"
 #include "../../src/d3d11/input_gate.h"
 #include "../../src/d3d11/menu_panel.h"
+#include "../../src/d3d11/perf_monitor.h"
 #include "../../src/openvr/menu_door.h"
 #include "../../src/openvr/system_hook.h"
 
@@ -28,6 +29,9 @@ namespace edvr {
 // menu_door.cpp asks the system hook for the eye offset; this fixture has no
 // runtime, so it answers "unknown" and the door's fallback is what is tested.
 bool systemHookEyeToHead(vr::EVREye, float[12]) { return false; }
+// The panel and the shader compile note events for the monitor's drop
+// attribution; this fixture has no monitor, so the note goes nowhere.
+void perfMonitorNoteEvent(uint32_t, double) {}
 }  // namespace edvr
 
 namespace {

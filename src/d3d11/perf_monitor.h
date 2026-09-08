@@ -58,6 +58,55 @@ int perfMonitorGraph(float* out, int max, float* budgetMs);
 // gather.
 void perfMonitorOverlayLine(char* buf, size_t bufLen);
 
+// DROP ATTRIBUTION (docs/settings-menu.md, "diagnosing drops caused by the
+// mod"). Every frame's ring entry carries what EDVR did in it -- the events
+// below, ORed in from wherever they happen (both halves: the openvr one
+// crosses on the channel) -- and what EDVR's own work cost: the frame
+// boundary's CPU time, the door's CPU time, the draw hooks' CPU time on
+// sampled frames, and the door's GPU time from a timestamp pair. A dropped
+// or long frame is then a row with EDVR's part of it written down, the
+// Monitor page counts the drops that coincided with EDVR activity against
+// the ones that did not, and a rate-limited log line carries the same
+// evidence into a field report.
+enum PerfEvent : uint32_t {
+    kEvReload   = 1u << 0,   // edvr.ini re-read and every module reconfigured
+    kEvIniWrite = 1u << 1,   // the menu wrote edvr.ini (the I/O is off-thread; the reload follows)
+    kEvCompile  = 1u << 2,   // a shader compiled through shader_swap
+    kEvWithhold = 1u << 3,   // the transition-flash fix withheld a submit
+    kEvResubmit = 1u << 4,   // ...and handed the compositor the previous frame's copy
+    kEvCensus   = 1u << 5,   // a draw census or quad probe was requested
+    kEvRaster   = 1u << 6,   // the menu uploaded a fresh bitmap
+    kEvBinds    = 1u << 7,   // Elite's bindings were re-read
+    kEvNgx      = 1u << 8,   // NVIDIA's DLSS feature was (re)created
+    kEvMenu     = 1u << 9,   // the menu opened or closed
+};
+// Note an event in the frame in progress; `ms` is the event's own duration
+// where one is known (a compile, a reload), 0 otherwise. Any thread.
+void perfMonitorNoteEvent(uint32_t bits, double ms = 0.0);
+
+// EDVR's CPU time, credited to the frame most recently ringed: the frame
+// boundary's body, or the door's (the latter arrives over the channel).
+enum PerfCpu { kCpuBoundary = 0, kCpuDoor = 1 };
+void perfMonitorNoteCpu(int which, double ms);
+
+// Draw-hook sampling: on one frame in sixteen the draw thunks time
+// themselves and the real call they forward; the difference is EDVR's own
+// cost in the hooks, credited to that frame and shown as the running
+// figure. The thunks pay two clock reads per draw on a sample frame and
+// one branch otherwise.
+bool perfMonitorSampleDraws();
+void perfMonitorDrawTicks(int64_t wholeTicks, int64_t realTicks);
+
 void perfMonitorShutdown();
 
 }  // namespace edvr
+
+extern "C" {
+// The door's GPU bracket, called by the openvr half around every pass it
+// runs at the door for one eye (frame_timing.h): a timestamp pair on the
+// game's immediate context, never awaited, polled on later calls. `tex`
+// is any ID3D11Texture2D* on the game's device. The measured time per
+// frame (both eyes) is the Monitor page's "EDVR at the door" GPU figure.
+__declspec(dllexport) void edvrDoorGpuBegin(void* tex, int eye);
+__declspec(dllexport) void edvrDoorGpuEnd(void* tex, int eye);
+}

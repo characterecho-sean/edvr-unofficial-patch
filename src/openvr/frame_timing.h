@@ -35,6 +35,14 @@ void frameTimingConfigure();
 // table's executable prefix.
 void frameTimingBoundary(void* iface, size_t prefix);
 
+// THE DOOR'S OWN PRICE, for the monitor's drop attribution: bracket the
+// passes hookedSubmit runs for one eye. CPU time is clocked here and added
+// to the channel; GPU time is a timestamp pair the d3d11 half keeps
+// (edvrDoorGpuBegin / End, resolved once). `handle` is the texture the
+// path is about to treat; a null handle brackets the CPU only.
+void frameTimingDoorBegin(void* handle, int eye);
+void frameTimingDoorEnd(void* handle, int eye);
+
 // The session's line for the shutdown totals.
 void frameTimingShutdown();
 

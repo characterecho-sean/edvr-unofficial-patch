@@ -212,6 +212,11 @@ struct Shared {
     // The overlay's head lock: bit 31 on, then yaw and pitch as tenths of a
     // degree biased by 4096 in twelve bits each.
     volatile LONG     menuHeadLock;
+    // EDVR's activity this frame, openvr -> d3d11: event bits ORed in, the
+    // door's CPU microseconds added; both taken (cleared) at the d3d11
+    // frame boundary.
+    volatile LONG     edvrEvents;
+    volatile LONG     doorCpuUs;
 };
 
 // Per PROCESS, not per logon session.
@@ -747,6 +752,26 @@ bool menuHeadLock(float* yawDeg, float* pitchDeg) {
     if (yawDeg) *yawDeg = (static_cast<int32_t>((v >> 12) & 0xFFFu) - 4096) / 10.0f;
     if (pitchDeg) *pitchDeg = (static_cast<int32_t>(v & 0xFFFu) - 4096) / 10.0f;
     return true;
+}
+
+void noteEdvrEvent(uint32_t bits) {
+    Shared* s = map();
+    if (s && bits) InterlockedOr(&s->edvrEvents, static_cast<LONG>(bits));
+}
+
+uint32_t takeEdvrEvents() {
+    Shared* s = map();
+    return s ? static_cast<uint32_t>(InterlockedExchange(&s->edvrEvents, 0)) : 0u;
+}
+
+void addDoorCpuUs(uint32_t us) {
+    Shared* s = map();
+    if (s && us) InterlockedExchangeAdd(&s->doorCpuUs, static_cast<LONG>(us > 1000000u ? 1000000u : us));
+}
+
+uint32_t takeDoorCpuUs() {
+    Shared* s = map();
+    return s ? static_cast<uint32_t>(InterlockedExchange(&s->doorCpuUs, 0)) : 0u;
 }
 
 void publishFrameTiming(const FrameTimingSample& sample) {

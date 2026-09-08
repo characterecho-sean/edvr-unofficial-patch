@@ -18,6 +18,7 @@
 #include "../common/guard.h"
 #include "../common/hotkey.h"
 #include "../d3d11/elite_binds.h"   // the camera key, from the game's own bindings
+#include "../d3d11/perf_monitor.h"  // the event bits the monitor's drop attribution names
 #include "../common/log.h"
 #include "../common/proxy.h"  // breadcrumb(), EDVR_BREADCRUMB_ONCE
 #include "../common/vtable_hook.h"
@@ -1688,6 +1689,9 @@ vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
                     "this many frames.",
                     static_cast<int>(eye), s->framesWithheld);
             }
+            // An EDVR event for the monitor's drop attribution: a withhold
+            // answered with the previous frame's copy.
+            noteEdvrEvent(kEvWithhold | kEvResubmit);
             vr::Texture_t sub = *texture;
             sub.handle = shadow;
             const vr::VRTextureBounds_t* subBounds = effBounds;
@@ -1695,6 +1699,8 @@ vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
             // A repeated frame is not new history; the pass restarts on
             // the next real one rather than blend a frame with itself.
             temporalAaNoteWithheld(eye);
+            const int eyeNo = eye == vr::Eye_Left ? 0 : 1;
+            frameTimingDoorBegin(shadow, eyeNo);
             applyCullGuard(&sub, &subBounds, &subStorage);
             vr::VRTextureBounds_t subStorage2;
             applyResolve(&sub, &subBounds, &subStorage2);
@@ -1702,8 +1708,11 @@ vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
             applySharpen(&sub, &subBounds, &subStorage3);
             vr::VRTextureBounds_t subStorage4;
             applyMenu(&sub, &subBounds, &subStorage4);
+            frameTimingDoorEnd(shadow, eyeNo);
             return forwardSubmit(s, self, eye, &sub, subBounds, flags);
         }
+        // The classic withhold: nothing submitted, the compositor reprojects.
+        noteEdvrEvent(kEvWithhold);
         if (s->notesLeft > 0) {
             --s->notesLeft;
             Log::get().note("transition flash: frame NOT submitted (eye %d). SteamVR will "
@@ -1748,6 +1757,12 @@ vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
                 snapped = true;
             }
         }
+        // The door's bracket (frame_timing.h): CPU time here, GPU time by a
+        // timestamp pair the d3d11 half keeps, around every pass below, for
+        // the monitor's "EDVR at the door" figures.
+        const int  eyeNo = eye == vr::Eye_Left ? 0 : 1;
+        void* const doorTex = (texture && texture->eType == vr::TextureType_DirectX) ? fwd.handle : nullptr;
+        frameTimingDoorBegin(doorTex, eyeNo);
         vr::VRTextureBounds_t fwdStorage0;
         applyTemporal(&fwd, &fwdBounds, &fwdStorage0);
         applyCullGuard(&fwd, &fwdBounds, &fwdStorage);
@@ -1757,6 +1772,7 @@ vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
         applySharpen(&fwd, &fwdBounds, &fwdStorage3);
         vr::VRTextureBounds_t fwdStorage4;
         applyMenu(&fwd, &fwdBounds, &fwdStorage4);
+        frameTimingDoorEnd(doorTex, eyeNo);
         const vr::EVRCompositorError result =
             forwardSubmit(s, self, eye, &fwd, fwdBounds, flags);
         // This frame was FORWARDED and accepted, so it becomes the copy a

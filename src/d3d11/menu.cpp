@@ -4,11 +4,14 @@
 
 #include <cctype>
 #include <cmath>
+#include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <cwctype>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "../common/config.h"
@@ -440,6 +443,90 @@ bool menuIniWrite(const std::string& dotted, const std::string& value, std::stri
     return true;
 }
 
+// THE WRITE RUNS OFF THE FRAME THREAD. The first build did the read, the
+// merge, the write, the replace, the mirror copy and the backup copy on
+// the render thread -- a several-millisecond hitch on every change, which
+// is exactly the class of drop the Monitor page exists to attribute. Now
+// the frame thread enqueues and shows the value at once; a worker does the
+// I/O, serialised, coalescing repeated changes to one key while a key is
+// held; and the frame thread drains the results, asking for the reload
+// that applies each landed write.
+struct WriteJob {
+    int         def;
+    std::string dotted;
+    std::string value;
+    std::string before;
+};
+struct WriteDone {
+    WriteJob    job;
+    bool        ok;
+    std::string err;
+};
+struct Writer {
+    std::mutex              m;
+    std::condition_variable cv;
+    std::thread             thread;
+    bool                    started = false;
+    bool                    quit = false;
+    std::vector<WriteJob>   queue;
+    std::vector<WriteDone>  done;
+};
+Writer g_writer;
+
+void writerMain() {
+    for (;;) {
+        std::vector<WriteJob> jobs;
+        {
+            std::unique_lock<std::mutex> lock(g_writer.m);
+            g_writer.cv.wait(lock, [] { return g_writer.quit || !g_writer.queue.empty(); });
+            if (g_writer.quit) return;
+            jobs.swap(g_writer.queue);
+        }
+        // Coalesce: the last value for each key is the one that matters.
+        std::vector<WriteJob> last;
+        for (size_t i = 0; i < jobs.size(); ++i) {
+            bool later = false;
+            for (size_t j = i + 1; j < jobs.size(); ++j) {
+                if (jobs[j].dotted == jobs[i].dotted) {
+                    later = true;
+                    break;
+                }
+            }
+            if (!later) last.push_back(jobs[i]);
+        }
+        for (const WriteJob& job : last) {
+            WriteDone d;
+            d.job = job;
+            d.ok = false;
+            guarded("menu/write", [&] { d.ok = menuIniWrite(job.dotted, job.value, &d.err); });
+            if (!d.ok && d.err.empty()) d.err = "the write faulted";
+            std::lock_guard<std::mutex> lock(g_writer.m);
+            g_writer.done.push_back(d);
+        }
+    }
+}
+
+void enqueueWrite(const WriteJob& job) {
+    std::lock_guard<std::mutex> lock(g_writer.m);
+    if (!g_writer.started) {
+        g_writer.started = true;
+        g_writer.quit = false;
+        g_writer.thread = std::thread(writerMain);
+    }
+    g_writer.queue.push_back(job);
+    g_writer.cv.notify_one();
+}
+
+void stopWriter() {
+    {
+        std::lock_guard<std::mutex> lock(g_writer.m);
+        g_writer.quit = true;
+        g_writer.cv.notify_one();
+    }
+    if (g_writer.started && g_writer.thread.joinable()) g_writer.thread.join();
+    g_writer.started = false;
+}
+
 // ---------------------------------------------------------------------------
 // Pages
 
@@ -816,28 +903,54 @@ void buildToastContent(MenuContent& c, const std::string& text, float widthDeg, 
 void applyChange(int defIndex, const std::string& fileValue) {
     State& s = g_s;
     const MenuRowDef& d = kMenuRows[defIndex];
-    const std::string dotted = dottedOf(d);
-    const std::string before = g_rows[defIndex].value;
-    std::string err;
-    if (!menuIniWrite(dotted, fileValue, &err)) {
-        s.lastWrite = "FAILED: " + err;
-        Log::get().note("menu: %s = %s could not be written: %s.", dotted.c_str(),
-                        fileValue.c_str(), err.c_str());
-        s.contentDirty = true;
-        return;
-    }
-    s.menuWroteDotted = dotted;
-    s.pollRequest = true;
-    s.lastWrite = dotted + " = " + fileValue;
-    Log::get().note("menu: %s %s -> %s (written to edvr.ini; %s).", dotted.c_str(),
-                    before.empty() ? "(default)" : before.c_str(), fileValue.c_str(),
-                    d.applies == 2 ? "takes effect at the next launch"
-                    : d.applies == 1 ? "live"
-                                     : "when it applies is not documented");
-    // Show it now; the reload confirms it within the frame.
+    WriteJob job;
+    job.def = defIndex;
+    job.dotted = dottedOf(d);
+    job.value = fileValue;
+    job.before = g_rows[defIndex].value;
+    // Show it now; the worker writes it; the reload that follows confirms it.
     g_rows[defIndex].value = fileValue;
     if (d.applies == 2) g_rows[defIndex].pending = (fileValue != g_rows[defIndex].snapshot);
+    s.menuWroteDotted = job.dotted;
+    s.lastWrite = "writing " + job.dotted + " = " + fileValue;
     s.contentDirty = true;
+    perfMonitorNoteEvent(kEvIniWrite);
+    enqueueWrite(job);
+}
+
+// The worker's results, on the frame thread: the log line, the Status
+// page's last-write, the reload request for each landed write, and the
+// row put back to what the file says when a write failed.
+void drainWrites() {
+    State& s = g_s;
+    std::vector<WriteDone> done;
+    {
+        std::lock_guard<std::mutex> lock(g_writer.m);
+        if (g_writer.done.empty()) return;
+        done.swap(g_writer.done);
+    }
+    for (const WriteDone& w : done) {
+        const MenuRowDef& d = kMenuRows[w.job.def];
+        if (w.ok) {
+            s.pollRequest = true;
+            s.lastWrite = w.job.dotted + " = " + w.job.value;
+            Log::get().note("menu: %s %s -> %s (written to edvr.ini; %s).", w.job.dotted.c_str(),
+                            w.job.before.empty() ? "(default)" : w.job.before.c_str(),
+                            w.job.value.c_str(),
+                            d.applies == 2 ? "takes effect at the next launch"
+                            : d.applies == 1 ? "live"
+                                             : "when it applies is not documented");
+        } else {
+            s.lastWrite = "FAILED: " + w.err;
+            Log::get().note("menu: %s = %s could not be written: %s.", w.job.dotted.c_str(),
+                            w.job.value.c_str(), w.err.c_str());
+            g_rows[w.job.def].value = rowValue(d);
+            if (d.applies == 2) {
+                g_rows[w.job.def].pending = (g_rows[w.job.def].value != g_rows[w.job.def].snapshot);
+            }
+        }
+        s.contentDirty = true;
+    }
 }
 
 void stepRow(int defIndex, int dir, int mult) {
@@ -1153,6 +1266,7 @@ void openMenu(uint64_t now) {
     s.toastAlpha = 0.0f;
     s.overlayUp = false;
     s.overlayAlpha = 0.0f;
+    perfMonitorNoteEvent(kEvMenu);
     Log::get().note("menu: open (%s, %.1f m, keys %s).", s.pages[s.page].name,
                     static_cast<double>(s.distance), s.privateWanted ? "private" : "shared");
 }
@@ -1163,6 +1277,7 @@ void closeMenu(const char* why) {
     s.open = false;
     s.resetArmedEntry = -1;
     inputGateSetPrivate(false);
+    perfMonitorNoteEvent(kEvMenu);
     Log::get().note("menu: closed (%s).", why);
 }
 
@@ -1296,6 +1411,8 @@ void menuTick(ID3D11Device* dev) {
         // samplers run only while the Monitor page is showing.
         perfMonitorFrame(dev);
         perfMonitorSetActive(s.open && s.pages[s.page].monitor);
+        // Writes the worker finished since last frame.
+        drainWrites();
 
         // The summon key: EDVR's own, focus-gated. With Shift, recentre.
         if (s.summon.pressed()) {
@@ -1459,6 +1576,7 @@ void menuShutdown() {
     setMenuVisible(0.0f);
     setMenuHeadLock(false, 0.0f, 0.0f);
     inputGateShutdown();
+    stopWriter();
     menuPanelShutdown();
     perfMonitorShutdown();
 }

@@ -11,6 +11,7 @@
 #include <d3d11.h>
 
 #include "../common/log.h"
+#include "perf_monitor.h"   // the feature's creation is an event with a duration
 
 #ifdef EDVR_HAVE_NGX
 // NVIDIA's SDK, as shipped: nvsdk_ngx.h declares the D3D11 entry points,
@@ -409,8 +410,16 @@ bool dlaaEvaluate(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* colour,
                                   NVSDK_NGX_DLSS_Feature_Flags_DepthInverted;
         cp.InEnableOutputSubrects = false;
         applyPresetHints();
+        // An event with a duration for the monitor's drop attribution: the
+        // feature's creation is the mod's own heaviest one-off on the render
+        // thread, and it recurs at every size change.
+        const int64_t createT0 = qpcNow();
         const NVSDK_NGX_Result cr =
             NGX_D3D11_CREATE_DLSS_EXT(ctx, &f.handle, g_params, &cp);
+        perfMonitorNoteEvent(kEvNgx, qpcFrequency() > 0
+                                         ? static_cast<double>(qpcNow() - createT0) * 1000.0 /
+                                               static_cast<double>(qpcFrequency())
+                                         : 0.0);
         if (NVSDK_NGX_FAILED(cr) || !f.handle) {
             f.handle = nullptr;
             snprintf(g_reasonBuf, sizeof(g_reasonBuf),
