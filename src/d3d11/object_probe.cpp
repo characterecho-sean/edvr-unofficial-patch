@@ -59,7 +59,9 @@ bool     g_keepValid = false;
 
 // The interval's figures.
 uint64_t g_pairs = 0, g_skipped = 0;
-uint64_t g_changed = 0, g_poseOnly = 0, g_other = 0, g_moved = 0;
+uint64_t g_live = 0;                       // non-empty records, summed over pairs
+uint64_t g_changed = 0, g_poseChanged = 0, g_otherOnly = 0, g_moved = 0;
+uint64_t g_allocated = 0, g_freed = 0;
 uint32_t g_maxChanged = 0;
 uint64_t g_bucketSum = 0;
 uint32_t g_bucketMax = 0;
@@ -68,6 +70,12 @@ uint64_t g_rebasePairs = 0;
 double   g_rebaseMaxM = 0.0;
 uint32_t g_poolChanges = 0;
 uint64_t g_reportMs = 0;
+// Which bytes of a rewritten record changed, summed over the interval's
+// changed records (the first flight, 2026-09-08: every changed record was
+// "rewritten", so the fields the game touches per frame have to be learned
+// before an identity can be keyed on the ones it does not).
+uint64_t g_byteHist[kRecordBytes] = {};
+uint64_t g_byteHistN = 0;
 
 FaultBudget g_budget("objectProbe", 5);
 
@@ -160,14 +168,31 @@ bool motionOf(const Pose& prev, const Pose& now, MotionKey* key, bool* pureTrans
     return true;
 }
 
-// The pair's diff: one sampled frame against the one before it.
+bool emptyRecord(const uint8_t* r) {
+    for (uint32_t i = 0; i < kRecordBytes; ++i) {
+        if (r[i]) return false;
+    }
+    return true;
+}
+
+// The pair's diff: one sampled frame against the one before it. An empty
+// (all-zero) slot is nobody: a slot freed to zeros matched every other
+// empty slot as "moved" on the first flight and inflated that figure a
+// hundredfold, so allocation and freeing are counted on their own and only
+// live records take part in the rest. A record whose pose bytes changed is
+// a pose change whatever else in it changed -- the game rewrites more than
+// the pose each frame, and the byte histogram says which fields.
 void diffPair(const uint8_t* prev, const uint8_t* now, uint32_t bytes) {
     const uint32_t n = bytes / kRecordBytes;
     std::unordered_map<uint64_t, uint32_t> prevByHash;
     prevByHash.reserve(n);
-    for (uint32_t i = 0; i < n; ++i) prevByHash[fnv1a(prev + i * kRecordBytes, kRecordBytes)] = i;
+    for (uint32_t i = 0; i < n; ++i) {
+        const uint8_t* a = prev + i * kRecordBytes;
+        if (!emptyRecord(a)) prevByHash[fnv1a(a, kRecordBytes)] = i;
+    }
 
-    uint32_t changed = 0, poseOnly = 0, other = 0, moved = 0;
+    uint32_t live = 0, changed = 0, poseChanged = 0, otherOnly = 0, moved = 0;
+    uint32_t allocated = 0, freed = 0;
     MotionKey keys[kMaxBuckets];
     uint32_t keyCount[kMaxBuckets] = {};
     bool keyPure[kMaxBuckets] = {};
@@ -177,13 +202,20 @@ void diffPair(const uint8_t* prev, const uint8_t* now, uint32_t bytes) {
     for (uint32_t i = 0; i < n; ++i) {
         const uint8_t* a = prev + i * kRecordBytes;
         const uint8_t* b = now + i * kRecordBytes;
+        const bool emptyNow = emptyRecord(b);
+        if (!emptyNow) ++live;
         if (memcmp(a, b, kRecordBytes) == 0) continue;
+        const bool emptyBefore = emptyRecord(a);
+        if (emptyNow) { ++freed; continue; }
+        if (emptyBefore) { ++allocated; continue; }
         ++changed;
-        const bool restSame = memcmp(a, b, 4) == 0 &&
-                              memcmp(a + 28, b + 28, kRecordBytes - 28) == 0;
+        for (uint32_t k = 0; k < kRecordBytes; ++k) {
+            if (a[k] != b[k]) ++g_byteHist[k];
+        }
+        ++g_byteHistN;
         const bool poseDiff = memcmp(a + 4, b + 4, 24) != 0;
-        if (restSame && poseDiff) {
-            ++poseOnly;
+        if (poseDiff) {
+            ++poseChanged;
             MotionKey k;
             bool pure = false;
             float tm = 0.0f;
@@ -205,28 +237,35 @@ void diffPair(const uint8_t* prev, const uint8_t* now, uint32_t bytes) {
                 }
             }
         } else {
-            ++other;
+            ++otherOnly;
         }
-        // The same bytes at another slot last frame: the record moved, which
-        // is a repacked pool and the death of a per-slot identity.
+        // The same live bytes at another slot last frame, and that slot has
+        // since changed: the record moved, which is a repacked pool and the
+        // death of a per-slot identity.
         auto it = prevByHash.find(fnv1a(b, kRecordBytes));
-        if (it != prevByHash.end() && it->second != i) ++moved;
+        if (it != prevByHash.end() && it->second != i) {
+            const uint32_t j = it->second;
+            if (memcmp(prev + j * kRecordBytes, now + j * kRecordBytes, kRecordBytes) != 0) ++moved;
+        }
     }
-    // An origin rebase: more than half the pool's records took one and the
+    // An origin rebase: more than half the live records took one and the
     // same pure translation.
     bool rebase = false;
     float rebaseM = 0.0f;
     for (int j = 0; j < nk; ++j) {
-        if (keyPure[j] && keyCount[j] * 2 > n) {
+        if (keyPure[j] && live && keyCount[j] * 2 > live) {
             rebase = true;
             rebaseM = keyT[j];
         }
     }
     ++g_pairs;
+    g_live += live;
     g_changed += changed;
-    g_poseOnly += poseOnly;
-    g_other += other;
+    g_poseChanged += poseChanged;
+    g_otherOnly += otherOnly;
     g_moved += moved;
+    g_allocated += allocated;
+    g_freed += freed;
     if (changed > g_maxChanged) g_maxChanged = changed;
     g_bucketSum += static_cast<uint64_t>(nk);
     if (static_cast<uint32_t>(nk) > g_bucketMax) g_bucketMax = static_cast<uint32_t>(nk);
@@ -253,26 +292,67 @@ void releasePool() {
     g_records = 0;
 }
 
+// The byte histogram as ranges: which bytes of a changed record change in
+// nearly every one (per-frame fields), which sometimes, which never -- the
+// record's layout read off its behaviour, and the identity's key is the
+// bytes that never move for a live object.
+void byteRanges(char* buf, size_t n) {
+    size_t used = 0;
+    buf[0] = 0;
+    if (!g_byteHistN) return;
+    int ranges = 0;
+    uint32_t k = 0;
+    while (k < kRecordBytes && ranges < 40) {
+        const double f0 = static_cast<double>(g_byteHist[k]) / static_cast<double>(g_byteHistN);
+        const int cls0 = f0 >= 0.9 ? 2 : (f0 >= 0.05 ? 1 : 0);
+        uint32_t e = k;
+        double sum = f0;
+        while (e + 1 < kRecordBytes) {
+            const double f = static_cast<double>(g_byteHist[e + 1]) / static_cast<double>(g_byteHistN);
+            const int cls = f >= 0.9 ? 2 : (f >= 0.05 ? 1 : 0);
+            if (cls != cls0) break;
+            ++e;
+            sum += f;
+        }
+        if (cls0 != 0) {
+            const int m = snprintf(buf + used, n - used, "%s%u-%u %.0f%%", ranges ? ", " : "",
+                                   k, e, 100.0 * sum / static_cast<double>(e - k + 1));
+            if (m < 0 || static_cast<size_t>(m) >= n - used) break;
+            used += static_cast<size_t>(m);
+            ++ranges;
+        }
+        k = e + 1;
+    }
+}
+
 void report() {
     if (!g_pairs && !g_skipped) return;
     const double pairs = g_pairs ? static_cast<double>(g_pairs) : 1.0;
+    char ranges[640];
+    byteRanges(ranges, sizeof(ranges));
     Log::get().note(
-        "object probe: over %llu frame pairs (%llu skipped, a copy not ready in time): "
-        "per pair %.0f records changed of %u (%.0f pose only, %.0f rewritten), at most %u; "
-        "%.1f found at another slot per pair (a repacked pool, if not zero); distinct rigid "
-        "motions among the changed: %.1f on average, %u at most%s; the whole pool's positions "
-        "shifted together on %llu pairs (an origin rebase, up to %.1f m); the pool object "
-        "changed %u times. Question 3 is 'found at another slot' near zero; question 6 is the "
-        "motions figure.",
+        "object probe: over %llu frame pairs (%llu skipped, a copy not ready in time): %.0f "
+        "live records of %u; per pair %.0f changed (%.0f with a new pose, %.0f other fields "
+        "only; at most %u), %.1f allocated, %.1f freed, %.1f found at another slot (a "
+        "repacked pool, if not near zero); distinct rigid motions among the pose changes: "
+        "%.1f on average, %u at most%s; the live records' positions shifted together on %llu "
+        "pairs (an origin rebase, up to %.1f m); the pool object changed %u times. Bytes of a "
+        "changed record that changed, by range with the share of changed records they changed "
+        "in (fields under 5%% left out): %s.",
         static_cast<unsigned long long>(g_pairs), static_cast<unsigned long long>(g_skipped),
-        static_cast<double>(g_changed) / pairs, g_records,
-        static_cast<double>(g_poseOnly) / pairs, static_cast<double>(g_other) / pairs,
-        g_maxChanged, static_cast<double>(g_moved) / pairs,
+        static_cast<double>(g_live) / pairs, g_records,
+        static_cast<double>(g_changed) / pairs, static_cast<double>(g_poseChanged) / pairs,
+        static_cast<double>(g_otherOnly) / pairs, g_maxChanged,
+        static_cast<double>(g_allocated) / pairs, static_cast<double>(g_freed) / pairs,
+        static_cast<double>(g_moved) / pairs,
         static_cast<double>(g_bucketSum) / pairs, g_bucketMax,
         g_bucketOverflow ? " (and more past the table)" : "",
-        static_cast<unsigned long long>(g_rebasePairs), g_rebaseMaxM, g_poolChanges);
+        static_cast<unsigned long long>(g_rebasePairs), g_rebaseMaxM, g_poolChanges,
+        ranges[0] ? ranges : "none");
     g_pairs = g_skipped = 0;
-    g_changed = g_poseOnly = g_other = g_moved = 0;
+    g_live = 0;
+    g_changed = g_poseChanged = g_otherOnly = g_moved = 0;
+    g_allocated = g_freed = 0;
     g_maxChanged = 0;
     g_bucketSum = 0;
     g_bucketMax = 0;
@@ -280,6 +360,8 @@ void report() {
     g_rebasePairs = 0;
     g_rebaseMaxM = 0.0;
     g_poolChanges = 0;
+    memset(g_byteHist, 0, sizeof(g_byteHist));
+    g_byteHistN = 0;
 }
 
 bool ensureSlot(ID3D11DeviceContext* ctx, Slot& s) {
@@ -397,8 +479,8 @@ void objectProbeOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t instance
                         "a frame carries (question 6) and when the origin rebased (question 7). "
                         "Nothing on the draw path but one shader-resource read a second.",
                         g_poolBytes, g_records, kRecordBytes,
-                        static_cast<double>(g_poolBytes) / 1048576.0, kPairEvery,
-                        static_cast<void*>(g_pool));
+                        static_cast<double>(g_poolBytes) / 1048576.0,
+                        static_cast<void*>(g_pool), kPairEvery);
                 }
             } else {
                 buf->Release();

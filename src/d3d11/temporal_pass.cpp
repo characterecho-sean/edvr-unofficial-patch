@@ -446,9 +446,15 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
                         [unroll] for (int wy2 = -2; wy2 <= 2; ++wy2) {
                             [unroll] for (int wx2 = -2; wx2 <= 2; ++wx2) {
                                 int2 q = clamp(pq + int2(sx + wx2, sy + wy2), int2(0, 0), size - 1);
-                                // The history texel this render pixel maps to.
-                                int2 hq = int2(round((float2(q) + 0.5) * probe.x - 0.5));
-                                sad += abs(curL[mm] - rgbToYcocg(H.Load(int3(hq, 0)).rgb).x);
+                                // The history at this render pixel's CENTRE, bilinear:
+                                // H is probe.x times the render size, so the uv is the
+                                // render pixel's own, and at 2x that is the mean of the
+                                // four output texels the pixel covers. Picking one
+                                // texel put every reading a quarter of a render pixel
+                                // to the right and down (the first DLSS flight of the
+                                // probe, 2026-09-08: +0.2 px on every class at rest).
+                                float2 huv = (float2(q) + 0.5) / float2(size);
+                                sad += abs(curL[mm] - rgbToYcocg(H.SampleLevel(L, huv, 0).rgb).x);
                                 ++mm;
                             }
                         }
