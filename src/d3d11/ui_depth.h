@@ -50,6 +50,15 @@
 // is named by its vertex shader's hash; advanced.ui_depth_families adds
 // others, advanced.ui_depth_exclude removes any.
 //
+// WHICH EYE a composite is drawn into is read from the order its colour
+// target appears in the frame -- counted separately for each target SIZE
+// AND FORMAT, because Elite renders a cockpit frame through three pairs of
+// same-sized targets. One table for the whole frame filled up on the lit
+// HDR pair (the holo panels and the flight HUD) and left the escape menu's
+// composite, which lands in the tonemapped pair, with no eye and no depth:
+// the main menu was fixed because nothing else is treated there, and the
+// same menu in flight was not (measured from a census, 2026-09-08).
+//
 // TWO families are named as sharing the scene's projection rather than
 // found by the surface rule alone: the cockpit's holo panels, and the
 // SPRITE composite (vs E508648660A352B2), which draws into the same lit

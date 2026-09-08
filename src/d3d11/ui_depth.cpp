@@ -95,7 +95,7 @@ constexpr uint32_t kVsMemoLifeFrames = 600; // a shader's hash
 constexpr uint32_t kChecksPerTarget = 64;  // hashes asked of a newly bound target
 constexpr uint32_t kExhausted = 64;        // targets asked to exhaustion, remembered
 constexpr uint32_t kExhaustedRearmFrames = 600;
-constexpr uint32_t kMaxFamilyLines = 16;
+constexpr uint32_t kMaxFamilyLines = 24;  // a pair per outcome, not per pair
 constexpr uint32_t kTotalsFrames = 1800;   // about 20 s at 90 Hz
 
 FaultBudget g_budget("uiDepth", 5);
@@ -240,9 +240,10 @@ bool        g_dsvIsScene = false;
 // say. Keyed on the vertex shader alone, the in-flight escape menu's
 // composite was silent for two days behind the main menu's line
 // (2026-09-08).
-uint64_t g_familyLoggedVs[kMaxFamilyLines];
-uint64_t g_familyLoggedPs[kMaxFamilyLines];
-uint32_t g_familyLoggedCount = 0;
+uint64_t    g_familyLoggedVs[kMaxFamilyLines];
+uint64_t    g_familyLoggedPs[kMaxFamilyLines];
+const char* g_familyLoggedHow[kMaxFamilyLines];
+uint32_t    g_familyLoggedCount = 0;
 // Pixel shaders adopted by another's transcription, named once each.
 bool     g_variants = true;    // advanced.ui_depth_variants
 uint64_t g_variantLogged[kMaxHashes];
@@ -390,8 +391,35 @@ bool     g_rebindNoted = false;
 // The eye a treated draw belongs to, by the ORDER its colour target first
 // appears in the frame among treated draws: the first is the left, the
 // depth probe's own convention for the pair (first bound = left).
-void*    g_frameRtv[2] = {nullptr, nullptr};
-uint32_t g_frameRtvCount = 0;
+// WHICH EYE a treated draw's colour target is, by the order the targets
+// appear in the frame -- but counted SEPARATELY FOR EACH SHAPE, which is
+// the whole of the 2026-09-08 escape-menu bug.
+//
+// The rule was one two-slot table for the frame: first target seen is the
+// left eye, second the right, anything after that has no eye and its draw
+// is declined. That holds while every treated draw goes into the same pair
+// of targets, which is true in the menus -- and false in the cockpit, where
+// Elite renders through three pairs at the same size. The holo panels and
+// the flight HUD are treated into the LIT HDR pair (R11G11B10_FLOAT), and
+// they fill both slots early in the frame; the escape menu then composites
+// into the TONEMAPPED pair (R8G8B8A8_TYPELESS) and finds the table full, so
+// it is declined for want of an eye and never writes its depth. That is
+// exactly the reported defect: the main menu is fixed because nothing else
+// is treated there, and the same menu opened in flight is not.
+//
+// Counting per (width, height, format) is the same rule applied where it is
+// actually true. Each pair gets its own left and right, a third target of
+// one shape still has no eye, and the table is sized for a handful of
+// shapes rather than one.
+struct FrameTarget {
+    const void* res = nullptr;
+    uint32_t    w = 0, h = 0, fmt = 0;
+    uint32_t    eye = 0;
+};
+constexpr uint32_t kMaxFrameTargets = 8;
+FrameTarget g_frameTargets[kMaxFrameTargets];
+uint32_t    g_frameTargetCount = 0;
+bool        g_frameTargetsFullNoted = false;
 
 // Per draw: what the classification decided, consumed by Begin/End and by
 // the re-issue.
@@ -575,18 +603,29 @@ void noteExhausted(const void* res) {
 
 // A family seen for the first time: one line with its target, the
 // visibility the header promises, so a field log can say what was treated.
-bool familySeen(uint64_t vh, uint64_t ph) {
+// Keyed on the OUTCOME as well as the pair. One family takes different
+// paths in different places -- the menu panel is treated at the main menu
+// and was declined for want of an eye in the cockpit -- and a log that
+// names a pair once says only what happened the first time. That is the
+// second thing to hide the escape menu, after the vertex-only key
+// (2026-09-08). The message is the outcome: `how` is a string literal per
+// site, so two sites that merge to one address are saying the same thing.
+bool familySeen(uint64_t vh, uint64_t ph, const char* how) {
     for (uint32_t i = 0; i < g_familyLoggedCount; ++i) {
-        if (g_familyLoggedVs[i] == vh && g_familyLoggedPs[i] == ph) return true;
+        if (g_familyLoggedVs[i] == vh && g_familyLoggedPs[i] == ph &&
+            g_familyLoggedHow[i] == how) {
+            return true;
+        }
     }
     return false;
 }
 
 void noteFamily(uint64_t vh, uint64_t ph, const char* how) {
     if (!vh || g_familyLoggedCount >= kMaxFamilyLines) return;
-    if (familySeen(vh, ph)) return;
+    if (familySeen(vh, ph, how)) return;
     g_familyLoggedVs[g_familyLoggedCount] = vh;
     g_familyLoggedPs[g_familyLoggedCount] = ph;
+    g_familyLoggedHow[g_familyLoggedCount] = how;
     ++g_familyLoggedCount;
     ResourceInfo rt;
     const bool haveRt = bindingResolve(bindingGet(BindSlot::Rtv0), &rt) && rt.isTexture2D;
@@ -926,13 +965,31 @@ ID3D11DepthStencilView* pairViewFor(ID3D11DeviceContext* ctx, int eye, uint32_t 
     return p.dsv;
 }
 
-int eyeIndexFor(const void* rtvRes) {
-    for (uint32_t i = 0; i < g_frameRtvCount; ++i) {
-        if (g_frameRtv[i] == rtvRes) return static_cast<int>(i);
+int eyeIndexFor(const void* rtvRes, uint32_t w, uint32_t h, uint32_t fmt) {
+    uint32_t ofShape = 0;
+    for (uint32_t i = 0; i < g_frameTargetCount; ++i) {
+        const FrameTarget& t = g_frameTargets[i];
+        if (t.res == rtvRes) return static_cast<int>(t.eye);
+        if (t.w == w && t.h == h && t.fmt == fmt) ++ofShape;
     }
-    if (g_frameRtvCount >= 2) return -1;
-    g_frameRtv[g_frameRtvCount] = const_cast<void*>(rtvRes);
-    return static_cast<int>(g_frameRtvCount++);
+    if (ofShape >= 2) return -1;   // a third target of this shape: no eye
+    if (g_frameTargetCount >= kMaxFrameTargets) {
+        if (!g_frameTargetsFullNoted) {
+            g_frameTargetsFullNoted = true;
+            Log::get().note("ui depth: more than %u distinct colour targets among the "
+                            "interface draws of one frame; the ones past the table get "
+                            "no eye and their depth pass is declined.",
+                            kMaxFrameTargets);
+        }
+        return -1;
+    }
+    FrameTarget& t = g_frameTargets[g_frameTargetCount++];
+    t.res = rtvRes;
+    t.w = w;
+    t.h = h;
+    t.fmt = fmt;
+    t.eye = ofShape;
+    return static_cast<int>(ofShape);
 }
 
 // The viewport depth range that carries the encoding correction, and its
@@ -1236,7 +1293,7 @@ bool uiDepthOnEyeDraw(ID3D11DeviceContext* ctx) {
             DepthShader* shader = depthShaderFor(ctx, ph, h, surfaceSlot);
             ResourceInfo rt;
             if (shader && bindingResolve(bindingGet(BindSlot::Rtv0), &rt) && rt.isTexture2D) {
-                int eye = eyeIndexFor(rt.resource);
+                int eye = eyeIndexFor(rt.resource, rt.a, rt.b, rt.fmt);
                 if (eye >= 0 && g_eyesSwapped) eye = 1 - eye;
                 if (eye >= 0) {
                     g_wantMask = true;
@@ -1295,7 +1352,7 @@ bool uiDepthOnEyeDraw(ID3D11DeviceContext* ctx) {
                               "something that is not a 2D colour target; left alone");
             return false;
         }
-        int eye = eyeIndexFor(rt.resource);
+        int eye = eyeIndexFor(rt.resource, rt.a, rt.b, rt.fmt);
         if (eye >= 0 && g_eyesSwapped) eye = 1 - eye;
         ID3D11Texture2D* tex = nullptr;
         uint32_t fmt = 0;
@@ -1317,7 +1374,7 @@ bool uiDepthOnEyeDraw(ID3D11DeviceContext* ctx) {
     } else {
         ResourceInfo rt;
         if (bindingResolve(bindingGet(BindSlot::Rtv0), &rt) && rt.isTexture2D) {
-            int eye = eyeIndexFor(rt.resource);
+            int eye = eyeIndexFor(rt.resource, rt.a, rt.b, rt.fmt);
             if (eye >= 0 && g_eyesSwapped) eye = 1 - eye;
             g_drawEye = eye;
             g_rebindW = rt.a;
@@ -1439,7 +1496,8 @@ bool uiDepthReissueBegin(ID3D11DeviceContext* ctx) {
                 Log::get().note("ui depth: a composite whose own depth is not the pass's "
                                 "has its depth pass bound to the pass's %ux%u depth "
                                 "(eye %d by the order its colour target appeared this "
-                                "frame); the game's bindings are put back after.",
+                                "frame among targets of ITS OWN size and format); the "
+                                "game's bindings are put back after.",
                                 g_rebindW, g_rebindH, g_rebindEye);
             }
         }
@@ -1561,8 +1619,7 @@ bool uiDepthReactiveMask(uint32_t w, uint32_t h, int eye, ID3D11Texture2D** tex)
 
 void uiDepthFrameBoundary(ID3D11DeviceContext* ctx) {
     ++g_frame;
-    g_frameRtv[0] = g_frameRtv[1] = nullptr;
-    g_frameRtvCount = 0;
+    g_frameTargetCount = 0;
     // The masks are marked during the frame and read at its submits, so
     // the clear belongs here, after both.
     if (ctx) {
