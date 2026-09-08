@@ -518,6 +518,46 @@ answered it. The rest need the game running -- see
    mask of 0x04 reads one bit -- so this neither opens nor closes the
    stencil route. What it does is move the prior: go into the flight
    expecting the masks to be wide, and have tier 2b ready.
+
+   **ANSWERED BY THE FLIGHT: bits 1 and 6 are free, and the stencil route
+   lives** (measured 2026-09-07 over 13 scene depth targets across
+   `edvr_gfx_20260907_182944.log` and `edvr_gfx_20260907_185152.log`, six
+   scenes, ~10,000 stencil-enabled scene draws). The provisional pessimism
+   above was wrong, and it was wrong for an instructive reason: it read
+   REFERENCES, and a reference names bits a draw never touches.
+
+   - **What the game READS is narrow and specific.** Nine reader families in
+     all. `9AEC596A2B036EA6` (the witchspace starfield) and
+     `EB787F983BC1F5A3` (the plume) test **bit 7** with EQUAL through mask
+     `80`; `53211E8C072CD02E` tests **bit 5** through `20`;
+     `D8FCE3CEA16B9B51` and `0C4E76889907B963` test **bit 4** through `10`;
+     `9FFA5D5E79F04873` tests **bit 3** through `08`; `E508648660A352B2`
+     (the interface composite) tests **bit 0** through `01`. Union of every
+     narrow read mask: **0xB9, bits 0, 3, 4, 5 and 7.**
+   - **What the game WRITES through a narrow mask** is `15`, `05`, `95`,
+     `0D` and `09`: union **0xBD, bits 0, 2, 3, 4, 5 and 7.**
+   - **So bits 1 and 6 are touched by no narrow mask at all**, in either
+     direction, in any scene flown.
+   - **The full-mask writers do not close them.** 825 draws write `w=FF`,
+     and 802 of them run `ds=17wA` -- reversed-Z GEQUAL with depth writes
+     on -- with ops `KEEP/KEEP/REPLACE`, i.e. **pass-op only**. Such a draw
+     changes the stencil only where it WINS the depth test, which is
+     precisely the rule the tag design already relies on: a draw that
+     overwrites a mover's tag has, by construction, taken that pixel's
+     visible surface, and the zero it leaves in bits 1 and 6 means "no tag",
+     which sends that pixel down the world path -- the right answer for a
+     static surface. The remaining 23 are depth-DISABLED (`ds=02wA`):
+     `FC1193AFFC596F74`, a full-screen quad (n<=6) that stamps ref 8 across
+     the whole eye, and the GUI vector shader `666EF0C4C616F67E`. **Both run
+     early in the scene pass** (q=585..1509 of frames spanning to ~3,800),
+     before the movers, so a tag stamped after them survives them.
+
+   The cost of the answer is the bit budget. **Two bits, not the three the
+   cost table assumed: three movers and zero, not seven.** Buckets will
+   overflow more often in the slot than the design expected, and overflow
+   degrades to the world path, which is what every mover gets today. If more
+   tags are needed later, bit 3 is the next candidate -- one family reads it,
+   through mask `08`, once per frame.
 2. **Whether the stencil survives to Submit.** From the same census: after
    the last scene draw, does anything clear or write the pair's stencil
    before EDVR's `mv` dispatch (which `review-ui-depth-2026-09-06.md:67-71`
@@ -735,39 +775,70 @@ answered it. The rest need the game running -- see
 
 The desk half of Phase 0 was done on 2026-09-07: the census column is built,
 `tools/stencil_census.py` exists, and questions 2, 5 and 8 are answered as
-far as logs already on the machine can answer them. What is left needs the
-game running.
+far as logs already on the machine can answer them.
+
+**The first flight went the same day and half worked**
+(`edvr_gfx_20260907_182944.log`, build `v0.14.1-2-gdd8facb`, game 332841,
+Steam install, eye 2514x2482). What it bought: the `so=` column came back
+correct on real frames, and **question 1 has an answer** (above). What it
+lost: five key presses produced two censuses, and both stopped at the 4096
+line cap partway through frame 0, so neither wrote its intern table and
+neither reached the `mv` dispatch. So question 2 could not be re-checked on
+this build, and no `@N` token in that log resolves to a resource. The three
+rows at the top of the table below are the cure; everything above them was
+already right.
 
 **Before launching.** In `edvr.ini`:
 
 | Key | Value | Why |
 |---|---|---|
-| `advanced.census_offscreen` | `1` | the scene's G-buffer draws land in offscreen targets; without this the census records only draws into the eye textures and questions 1, 3 and 4 see nothing. The 2026-09-06 censuses had it on, which is why they could be used at all |
+| `advanced.census_lines` | `16384` | **the setting the 2026-09-07 flight died on.** The default is 4096 and one frame of a busy scene is about 5,500 events, so both censuses stopped partway through frame 0 -- and a capped census never reaches `finish()`'s intern table, so its `@N` tokens cannot be resolved to resources at all. 16384 is the ceiling |
+| `advanced.census_frames` | `2` | 2 x 5,500 fits under the ceiling with margin; 3 does not. Two frames is enough for question 4's draw-order comparison and for question 2, which needs one COMPLETE frame -- the `mv` dispatch is the last thing in it, and a capped frame never gets there |
+| `advanced.census_offscreen` | `1`, or `0` for headroom | measured 2026-09-07: **the scene's G-buffer draws land in EYE-SIZED targets and are recorded as `DC` whether this is on or off.** The scene depth pair carried 1,513 and 1,147 draws, all `DC`. What `1` adds is the shadow atlas (about 1,000 draws a frame, `DCO`), the UI surfaces and the half-res chain -- about 22% of the line budget, and none of it needed for questions 1 or 2. An earlier draft of this checklist said the G-buffer needed it; that was wrong |
 | `advanced.glare_shader_dump` | `1` for ONE session, then `0` | question 5's disassembly. A dump already exists from 2026-09-06 (224 vertex shaders); a fresh one is only needed if the game build has moved |
 | `fix.temporal_aa` | `on` | question 2 measures up to EDVR's own `mv` dispatch, which does not exist when the pass is off. Every census taken without it can answer question 1 and not question 2 |
-| `hotkey.dump_draws` | bound | the census key. `advanced.census_at_ms` arms one automatically if the scene is too brief to catch by hand |
+| `hotkey.dump_draws` | bound, and **verify it before you rely on it** | the census key. On 2026-09-07 it was `NUMLOCK` and five presses armed two censuses. The two instruments that would explain that both stayed silent: no "already running; ignored" note (so nothing landed on a running census) and no "another window had focus" note (so the focus gate did not eat them). The DLL therefore never saw the other presses as edges at all. Press it once on the ground and confirm the "census armed" line appears before flying anywhere |
+| `log.max_mb` | `32` | the default 4 lost a whole census to the size cap on 2026-09-06. A capture at the raised line cap is bigger again |
+| `fix.particle_billboard` | `stock` for the census | the fix returns at `vscreen.cpp:1497-1499` BEFORE both census calls, so with it on `steady` its substituted draws are absent from the log entirely and the capture silently under-counts the scene. Set it back afterwards |
 
-**The three scenes**, one census each, held still for the three frames the
-capture takes:
+**The scenes**, one census each, held still for the frames the capture takes.
+The order is deliberate: the first is the acceptance test and the cheapest
+capture, and the rest widen the draw population from there.
 
-1. **The slot of a rotating station.** The largest mover any frame has: the
-   interior fills the view and the ship counter-rotates to match it.
-2. **A pad with the gear down.** Rigid near movers at scale, and the pad and
+1. **A station at DISTANCE, the rim in view.** This is the scene the whole
+   design exists for, and the one with a number already attached to it: the
+   far-warp review measured the rim at about half a pixel a frame at 5 km
+   against a hub moving none, so the history smears the rim and not the hub
+   (`review-temporal-far-warp-darkness-2026-09-04.md:286-296`). Three things
+   make it first. It is the **acceptance test** -- everything else on this
+   list is diagnostic, and this is where the feature either removes a visible
+   smear or does not. It is the **smallest draw population** of any scene
+   here, so it is the one most likely to fit inside the census line cap and
+   come back with its intern table intact, which the 2026-09-07 flight did
+   not. And it **bounds question 6 from below**: one or two rigid movers in
+   frame, against the slot's many, and the tag budget has to cover both ends.
+2. **The slot of a rotating station.** The largest mover any frame has: the
+   interior fills the view and the ship counter-rotates to match it. The
+   upper bound on question 6, and the densest census.
+3. **A pad with the gear down.** Rigid near movers at scale, and the pad and
    the ship moving together.
-3. **A wing-mate alongside.** A separate rigid body at a distance where its
+4. **A wing-mate alongside.** A separate rigid body at a distance where its
    edges are the thing that shimmers.
-4. On foot at a settlement, if there is time: skinned movers, for the root
+5. On foot at a settlement, if there is time: skinned movers, for the root
    motion tier 2 reaches and the limbs it does not.
 
-**The first thing to check, before anything else.** The `so=` column has
-never been through a real frame. Three self-tests cover it -- the census
-diff's, the crisp-UI reader's and `stencil_census.py`'s own -- but all three
-run against fixture lines hand-derived from the emitter's format string, and
-the smoke harness does not exercise the census at all. So the emitter and the
-parsers agree with each other and with nobody's measurement. Take one real
-census line by eye and confirm its `so=` token reads as a plausible stencil
-state beside its `ds=` and `st=` neighbours before trusting a single number
-below it.
+Take the distant station FIRST in the session, before the dense scenes: if
+the line cap or the key turns out to be wrong, the one capture that matters
+most is already on disk.
+
+**The `so=` column is proven on real frames** (2026-09-07), so this step is
+done and is recorded here only so nobody repeats it. It came back reading as
+a coherent stencil state on every line, decoded by the tool without a special
+case, and it immediately said something no earlier census could: that the
+game's scene draws use write masks `15`, `05`, `95`, `0D`, `09` and `FF`,
+almost all with read mask `00` and function ALWAYS. The one thing to keep
+checking on a NEW game build is that the masks still look like that rather
+than like garbage, which is one line read by eye.
 
 **Afterwards, on the logs** (from the repo root; the logs are in `edvr_logs`
 beside `EliteDangerous64.exe`):
