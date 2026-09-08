@@ -164,16 +164,29 @@ struct WriteWatch {
     uint32_t  reported = 0;          // in-table lines printed
     uintptr_t lo = 0;                // span of addresses written
     uintptr_t hi = 0;
-    void*     sites[4] = {};         // distinct writing instructions
+    void*     sites[8] = {};         // distinct writing instructions
     uint32_t  siteCount = 0;
+    // WHICH SLOTS, as a bitmap over the 512 the probe will address. The scope
+    // question the first proof left open: four draw entries were caught in one
+    // burst, and whether the same sweep restores the other nineteen slots on
+    // EDVR's list or only the draws decides how much of the permanent fix has
+    // to exist. A count cannot answer that; the set can.
+    uint64_t  slotsWritten[8] = {};
     char      who[48] = {};
 };
 WriteWatch g_watch;
 PVOID      g_watchHandler = nullptr;
 
-// How many writes INSIDE the vtable earn a line. Four shows whether one
-// instruction does it or several; past that the summary is the useful thing.
-constexpr uint32_t kMaxWatchReports = 4;
+// How many writes INSIDE the vtable earn a line.
+//
+// Four, at first, which was enough to prove the writer: four consecutive draw
+// slots restored by four stores fourteen bytes apart inside system32\d3d11.dll.
+// It was not enough to answer what came next -- whether that sweep restores all
+// twenty-three slots EDVR patches or only the draw block -- because it stopped
+// the watch four writes in, before the rest of the sweep could show itself.
+// Thirty-two covers the whole of EDVR's list with room over, and the summary
+// prints the SET rather than the count, which is the actual question.
+constexpr uint32_t kMaxWatchReports = 32;
 
 // The total budget, because the page is shared with whatever else the runtime
 // put on it and that turned out to be written constantly. Every caught write
@@ -208,29 +221,37 @@ DWORD withoutWrite(DWORD p) {
 void reportWatchSummary() {
     if (g_watch.finished) return;
     g_watch.finished = true;
-    char siteBuf[4][MAX_PATH];
-    char joined[3 * MAX_PATH];
+    char siteBuf[MAX_PATH];
+    char joined[4 * MAX_PATH];
     joined[0] = '\0';
     for (uint32_t i = 0; i < g_watch.siteCount; ++i) {
         char one[MAX_PATH + 4];
         _snprintf_s(one, sizeof(one), _TRUNCATE, "%s%s", i ? "; " : "",
-                    ownerModuleName(g_watch.sites[i], siteBuf[i],
-                                    sizeof(siteBuf[i])));
+                    ownerModuleName(g_watch.sites[i], siteBuf, sizeof(siteBuf)));
         strncat_s(joined, sizeof(joined), one, _TRUNCATE);
+    }
+    // THE SET, which is the answer the count could never give.
+    char slots[512];
+    slots[0] = '\0';
+    for (size_t i = 0; i < 512; ++i) {
+        if (g_watch.slotsWritten[i >> 6] & (1ull << (i & 63))) {
+            appendSlot(slots, sizeof(slots), i);
+        }
     }
     Log::get().note(
         "VTableHook %s: write watch DISARMED. It saw %u write(s) to the page, "
-        "%u of them INSIDE the vtable itself, spanning %p to %p. The vtable "
-        "occupies %p to %p, so a span that reaches into that range is one "
-        "sweep rewriting the table and a span that stays outside it is traffic "
-        "that merely shares the page and says nothing about our slots. The "
-        "instruction(s) responsible: %s. The page is back to normal and nothing "
-        "further is intercepted.",
+        "%u of them INSIDE the vtable itself, spanning %p to %p; the vtable "
+        "occupies %p to %p. The slots written were: %s. The instruction(s) "
+        "responsible: %s. If that slot list covers everything EDVR patches, one "
+        "sweep restores the whole table; if it is only part of it, the rest are "
+        "being lost some other way and that is a different question. The page is "
+        "back to normal and nothing further is intercepted.",
         g_watch.who, static_cast<unsigned>(g_watch.catches),
         static_cast<unsigned>(g_watch.inTable),
         reinterpret_cast<void*>(g_watch.lo), reinterpret_cast<void*>(g_watch.hi),
         reinterpret_cast<void*>(g_watch.tableLo),
         reinterpret_cast<void*>(g_watch.tableHi),
+        slots[0] ? slots : "none -- no write landed inside the table at all",
         joined[0] ? joined : "none recorded");
 }
 
@@ -305,12 +326,16 @@ LONG CALLBACK writeWatchHandler(EXCEPTION_POINTERS* ep) {
     for (uint32_t i = 0; i < g_watch.siteCount; ++i) {
         if (g_watch.sites[i] == er->ExceptionAddress) { knownSite = true; break; }
     }
-    if (!knownSite && g_watch.siteCount < 4) {
+    if (!knownSite && g_watch.siteCount < 8) {
         g_watch.sites[g_watch.siteCount++] = er->ExceptionAddress;
     }
 
     const bool inTable = at >= g_watch.tableLo && at < g_watch.tableHi;
-    if (inTable) ++g_watch.inTable;
+    if (inTable) {
+        ++g_watch.inTable;
+        const size_t which = (at - g_watch.tableLo) / sizeof(void*);
+        if (which < 512) g_watch.slotsWritten[which >> 6] |= 1ull << (which & 63);
+    }
 
     // Only writes INSIDE the table get a line. A write that merely shares the
     // page is what the last build reported four times and it answered nothing;
@@ -400,6 +425,7 @@ bool vtableWatchSlot(void** vtable, size_t slot, size_t slotCount,
     g_watch.lo = 0;
     g_watch.hi = 0;
     g_watch.siteCount = 0;
+    for (uint32_t i = 0; i < 8; ++i) g_watch.slotsWritten[i] = 0;
     g_watch.finished = false;
     strncpy_s(g_watch.who, who ? who : "?", _TRUNCATE);
 
