@@ -260,7 +260,7 @@ float    g_innerDeg = 50.0f;   // degrees across the full-rate disc
 float    g_outerDeg = 84.0f;   // degrees across the 2x2 ring's outer edge
 float    g_distance = 0.7f;    // metres, the nasal shift's fixation distance
 bool     g_geometryOnly = false;
-bool     g_followEyes = true;   // fix.foveation_centre = eyes
+bool     g_followEyes = true;   // experimental.foveation_centre = eyes
 // advanced.foveation_outer_rate. The sentinel for "the preset's own" is NOT
 // zero: zero is NV_PIXEL_X0_CULL_RASTER_PIXELS, the cull rate itself, and
 // while it was the sentinel the cull setting fell straight through to the
@@ -882,7 +882,7 @@ void standDown(ID3D11DeviceContext* ctx, const char* why) {
     if (g_phase == Phase::Down) return;
     g_phase = Phase::Down;
     Log::get().note("foveation: OFF for this session -- %s. The game shades at full rate everywhere, "
-                    "as with fix.foveation off.", why);
+                    "as with experimental.foveation off.", why);
     if (g_nv.ok && ctx && (g_bound || g_boundUnknown)) {
         // Best effort, unbudgeted for the answer: a failure here has nothing
         // left to stand down.
@@ -1407,7 +1407,7 @@ void arm(ID3D11DeviceContext* ctx) {
     }
     g_phase = Phase::Armed;
     Log::get().note(
-        "foveation: ARMED (fix.foveation = %s) -- NvAPI is up and %s. Full-rate shading inside %.0f "
+        "foveation: ARMED (experimental.foveation = %s) -- NvAPI is up and %s. Full-rate shading inside %.0f "
         "degrees about each eye's fixation point (%.2f m), one shade per 2x2 pixels out to %.0f "
         "degrees, one per %s beyond; %s; %s. The rate table reads %s inside, %s in the ring, %s beyond. The image "
         "binds at the first eye draw. Modules in the process with names worth knowing: %s.",
@@ -1426,7 +1426,7 @@ const char* centreText() {
     // end -- the same way the census once dropped its own evidence.
     static char text[320];
     if (!g_followEyes) {
-        snprintf(text, sizeof(text), "straight ahead (fix.foveation_centre = ahead)");
+        snprintf(text, sizeof(text), "straight ahead (experimental.foveation_centre = ahead)");
     } else if (g_gazeValid) {
         // The gaze AND the centre the masks were actually built on. They
         // differ whenever something between the two drops the gaze, which
@@ -1541,7 +1541,7 @@ void summary(const char* when) {
 }  // namespace
 
 void foveationConfigure(Config& cfg) {
-    const std::string mode = cfg.getString("fix.foveation", "off");
+    const std::string mode = cfg.getString("experimental.foveation", "off");
     Mode m = Mode::Off;
     bool unknown = false;
     if (mode == "quality") m = Mode::Quality;
@@ -1557,7 +1557,7 @@ void foveationConfigure(Config& cfg) {
     if (std::isfinite(innerKey) && innerKey >= 10.0f) inner = innerKey > 170.0f ? 170.0f : innerKey;
     if (std::isfinite(outerKey) && outerKey >= 10.0f) outer = outerKey > 178.0f ? 178.0f : outerKey;
     if (outer < inner + 4.0f) outer = inner + 4.0f;
-    const std::string centre = cfg.getString("fix.foveation_centre", "eyes");
+    const std::string centre = cfg.getString("experimental.foveation_centre", "eyes");
     const bool follow = centre != "ahead";
     // Anything that is not "ahead" follows the eyes, which means a typo
     // gets the default silently. Sean's own ini was found carrying
@@ -1569,7 +1569,7 @@ void foveationConfigure(Config& cfg) {
     if (!centreWarned && centre != "eyes" && centre != "ahead") {
         centreWarned = true;
         Log::get().note(
-            "foveation: fix.foveation_centre = \"%s\" is not one of this key's values (eyes, ahead). "
+            "foveation: experimental.foveation_centre = \"%s\" is not one of this key's values (eyes, ahead). "
             "Reading it as eyes, so the rings follow the gaze; write \"eyes\" to say so outright, or "
             "\"ahead\" for the fixed centre.",
             centre.c_str());
@@ -1654,13 +1654,13 @@ void foveationConfigure(Config& cfg) {
     }
 
     if (unknown && (first || changed)) {
-        Log::get().note("foveation: fix.foveation = \"%s\" is not a choice here (off, quality, balanced, "
+        Log::get().note("foveation: experimental.foveation = \"%s\" is not a choice here (off, quality, balanced, "
                         "performance); treated as off.", mode.c_str());
     }
     if (m == Mode::Off) {
         if (g_phase != Phase::Down) {
             if (g_phase == Phase::Armed) {
-                Log::get().note("foveation: off (fix.foveation) -- the image is cleared at the next draw.");
+                Log::get().note("foveation: off (experimental.foveation) -- the image is cleared at the next draw.");
             }
             g_phase = Phase::Off;
         }
@@ -1668,13 +1668,13 @@ void foveationConfigure(Config& cfg) {
     }
     if (g_phase == Phase::Off) {
         g_phase = Phase::Wanted;
-        Log::get().note("foveation: ON (fix.foveation = %s): full rate inside %.0f degrees, 2x2 to %.0f, "
+        Log::get().note("foveation: ON (experimental.foveation = %s): full rate inside %.0f degrees, 2x2 to %.0f, "
                         "%s beyond, fixation %.2f m, %s draws, %s. Arms at the first eye draw "
                         "(docs/performance.md, feature 2).",
                         modeName(m), inner, outer, outerRate() == kRate4x4 ? "4x4" : "2x2", dist,
                         geom ? "geometry" : "all", monoEdgeName(mono, overlapKeep));
     } else if (changed && g_phase == Phase::Armed) {
-        Log::get().note("foveation: settings changed (fix.foveation = %s, %.0f/%.0f degrees, %.2f m, %s "
+        Log::get().note("foveation: settings changed (experimental.foveation = %s, %.0f/%.0f degrees, %.2f m, %s "
                         "draws, %s; the rate table now reads %s inside, %s in the ring, %s beyond) -- the images "
                         "refill at their next use.",
                         modeName(m), inner, outer, dist, geom ? "geometry" : "all", monoEdgeName(mono, overlapKeep),
@@ -1833,7 +1833,7 @@ void foveationFrameBoundary(ID3D11DeviceContext* ctx) {
                         if (!g_gazeNotedOn) {
                             g_gazeNotedOn = true;
                             Log::get().note("foveation: the centre follows the eyes from here -- the gaze "
-                                            "source is publishing (fix.foveation_centre = eyes).");
+                                            "source is publishing (experimental.foveation_centre = eyes).");
                         }
                     }
                 } else {

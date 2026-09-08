@@ -70,6 +70,10 @@ struct Op {
     UINT         align = 0;      // DT_LEFT / DT_RIGHT / DT_CENTER, DT_WORDBREAK for wrapping
     Font         font = Font::Row;
     bool         top = false;    // draw from the rect's top, unclipped, rather than centred
+    // A clip for this op only, for text scrolled inside a window: the rect
+    // may sit above the clip, which is what makes the scroll.
+    bool         clipped = false;
+    RECT         clip{};
     // A fill with rounded ends: the corner radius in pixels (0 square), and
     // whether only the border is drawn. GDI's own RoundRect is not
     // antialiased, and a switch drawn with square corners does not read as
@@ -88,6 +92,7 @@ struct Raster {
     int      w = 0, h = 0;
     std::vector<LineRect> lines;
     float    cardFrac = 1.0f;    // how much of the width the menu card spans
+    int      popupScrollMax = 0; // line-steps the tooltip's body can be scrolled
     double   ms = 0.0;
 };
 
@@ -237,7 +242,8 @@ int measureWrapped(const std::wstring& s, int widthPx, int emPx) {
 // headset. `popupBodyH` is the measured height of the tooltip's body, 0
 // when there is none.
 void layout(const MenuContent& c, std::vector<Op>& ops, std::vector<LineRect>& lines, int* outH,
-            int popupBodyH) {
+            int popupBodyH, int* outPopupScrollMax) {
+    if (outPopupScrollMax) *outPopupScrollMax = 0;
     const int cap = c.capPx;
     const int W = c.widthPx;
     // The MENU CARD's width. The bitmap is wider: the pixels past the card
@@ -409,11 +415,15 @@ void layout(const MenuContent& c, std::vector<Op>& ops, std::vector<LineRect>& l
         if (l.style == kMenuHeading) left.rect.left = pad / 2;
         if (c.toast) left.rect.right = cardW - pad;
         ops.push_back(left);
+        // The switch: a pill the width of two knobs, the knob at the end the
+        // value is at. The installer's proportions. Where a word survives
+        // beside it -- a two-way choice that writes something other than on
+        // and off -- the value text stops short of the pill.
+        const int switchH = rowPitch * 55 / 100;
+        const int switchW = switchH * 19 / 10;
         if (l.toggle) {
-            // The switch: a pill the width of two knobs, the knob at the
-            // end the value is at. The installer's proportions.
-            const int h = rowPitch * 55 / 100;
-            const int wsw = h * 19 / 10;
+            const int h = switchH;
+            const int wsw = switchW;
             const int right = cardW - pad;
             const RECT box = {right - wsw, y + (rowPitch - h) / 2, right, y + (rowPitch + h) / 2};
             const bool on = l.toggle == 2;
@@ -459,6 +469,7 @@ void layout(const MenuContent& c, std::vector<Op>& ops, std::vector<LineRect>& l
                         : l.badge == kBadgePending ? kBadge
                                                    : kValue;
             if (l.style == kMenuRowEdit) right.rect.right -= cap / 3;
+            if (l.toggle) right.rect.right -= switchW + cap / 2;
             ops.push_back(right);
             if (l.badge == kBadgeRestart || l.badge == kBadgeUnknown || l.badge == kBadgePending) {
                 Op b;
@@ -567,14 +578,24 @@ void layout(const MenuContent& c, std::vector<Op>& ops, std::vector<LineRect>& l
         // so the drawn card is the width its name says.
         const int stripL = cardW + static_cast<int>(cardW * kTipGapFrac);
         const int stripR = W;
-        const int tipW = stripR - stripL;
         const int inset = cap * 55 / 100;
         const int titleLead = cap * 13 / 10;
-        // The body's real height, measured; capped only by the panel's own,
-        // which is what keeps the tooltip from ever changing the bitmap.
-        int bodyH = popupBodyH > 0 ? popupBodyH : cap;
+        // The body's real height, measured; capped by the panel's own, which
+        // is what keeps the tooltip from ever changing the bitmap. What does
+        // not fit is scrolled to, a line at a time, rather than lost.
+        const int fullH = popupBodyH > 0 ? popupBodyH : cap;
         const int roomH = H - pad - 2 * inset - titleLead;
-        if (bodyH > roomH) bodyH = roomH > cap ? roomH : cap;
+        const int bodyH = fullH > roomH ? (roomH > cap ? roomH : cap) : fullH;
+        const int lineH = cap * 105 / 100;
+        const int overflow = fullH - bodyH;
+        int scroll = c.popupScroll * lineH;
+        if (scroll > overflow) scroll = overflow > 0 ? overflow : 0;
+        if (scroll < 0) scroll = 0;
+        // How many line-steps the model may ask for; it clamps its own
+        // counter to this on the next tick.
+        if (outPopupScrollMax) {
+            *outPopupScrollMax = overflow > 0 ? (overflow + lineH - 1) / lineH : 0;
+        }
         const int cardH = inset + titleLead + bodyH + inset;
         int top = popupRowTop - cap / 2;
         if (top + cardH > H - pad / 2) top = H - pad / 2 - cardH;
@@ -605,12 +626,41 @@ void layout(const MenuContent& c, std::vector<Op>& ops, std::vector<LineRect>& l
         Op b;
         b.text = true;
         b.str = widen(c.popup);
-        b.rect = {card.left + inset, card.top + inset + titleLead, card.right - inset,
-                  card.bottom - inset};
+        const RECT bodyBox = {card.left + inset, card.top + inset + titleLead, card.right - inset,
+                              card.bottom - inset};
+        // Scrolling is the text drawn from higher up, clipped to the window
+        // it belongs in.
+        b.rect = {bodyBox.left, bodyBox.top - scroll, bodyBox.right, bodyBox.top - scroll + fullH};
         b.align = DT_LEFT | DT_WORDBREAK;
         b.font = Font::Tip;
         b.rgb = kHint;
+        b.clipped = true;
+        b.clip = bodyBox;
         ops.push_back(b);
+        if (overflow > 0) {
+            // A thumb on the card's edge: how much of the text is showing
+            // and where in it you are. PageUp and PageDown move it.
+            const int trackX = card.right - inset / 2;
+            const int trackTop = bodyBox.top, trackBot = bodyBox.bottom;
+            const int trackH = trackBot - trackTop;
+            const int wpx = cap / 8 > 0 ? cap / 8 : 1;
+            Op track;
+            track.rect = {trackX, trackTop, trackX + wpx, trackBot};
+            track.rgb = kHint;
+            track.alpha = 0.18f;
+            track.radius = wpx / 2;
+            ops.push_back(track);
+            int thumbH = trackH * bodyH / (fullH > 0 ? fullH : 1);
+            if (thumbH < cap) thumbH = cap;
+            if (thumbH > trackH) thumbH = trackH;
+            const int thumbY = trackTop + (trackH - thumbH) * scroll / overflow;
+            Op thumb;
+            thumb.rect = {trackX, thumbY, trackX + wpx, thumbY + thumbH};
+            thumb.rgb = kPopupEdge;
+            thumb.alpha = 0.8f;
+            thumb.radius = wpx / 2;
+            ops.push_back(thumb);
+        }
         // A rule from the row to the card, so which row it belongs to is
         // never in doubt.
         const int mid = (popupRowTop + popupRowBottom) / 2;
@@ -635,6 +685,10 @@ void execute(Dib& d, const std::vector<Op>& ops, bool coverage, HFONT fonts[kFon
         HFONT f = fonts[static_cast<int>(o.font)];
         HGDIOBJ oldF = SelectObject(d.dc, f);
         SetTextColor(d.dc, coverage ? RGB(255, 255, 255) : RGB(o.rgb.r, o.rgb.g, o.rgb.b));
+        if (o.clipped) {
+            SaveDC(d.dc);
+            IntersectClipRect(d.dc, o.clip.left, o.clip.top, o.clip.right, o.clip.bottom);
+        }
         RECT r = o.rect;
         UINT fmt = o.align | DT_NOPREFIX;
         if (!(o.align & DT_WORDBREAK)) {
@@ -646,6 +700,7 @@ void execute(Dib& d, const std::vector<Op>& ops, bool coverage, HFONT fonts[kFon
             fmt |= DT_END_ELLIPSIS;
         }
         DrawTextW(d.dc, o.str.c_str(), -1, &r, fmt);
+        if (o.clipped) RestoreDC(d.dc, -1);
         SelectObject(d.dc, oldF);
     }
 }
@@ -664,7 +719,8 @@ bool rasterise(const MenuContent& c, Raster& out) {
         popupBodyH = measureWrapped(widen(c.popup), c.widthPx - stripL - 2 * inset,
                                     c.capPx * 78 / 100);
     }
-    layout(c, ops, lines, &H, popupBodyH);
+    int popupScrollMax = 0;
+    layout(c, ops, lines, &H, popupBodyH, &popupScrollMax);
     const int W = c.widthPx;
     // The width is bounded upstream (the model clamps the CARD, and the
     // strip is a fixed fraction of it), but say so here too: this is the
@@ -718,6 +774,7 @@ bool rasterise(const MenuContent& c, Raster& out) {
     out.lines.swap(lines);
     out.cardFrac = c.cardPx > 0 && c.cardPx <= W ? static_cast<float>(c.cardPx) / static_cast<float>(W)
                                                  : 1.0f;
+    out.popupScrollMax = popupScrollMax;
     out.ms = qpcFrequency() > 0
                  ? static_cast<double>(qpcNow() - t0) * 1000.0 / static_cast<double>(qpcFrequency())
                  : 0.0;
@@ -740,6 +797,7 @@ struct Worker {
     std::vector<LineRect>   liveLines;
     int                     liveW = 0, liveH = 0;
     float                   liveCardFrac = 1.0f;
+    int                     livePopupScrollMax = 0;
     double                  lastMs = 0.0;
 };
 Worker g_w;
@@ -1461,6 +1519,7 @@ void menuPanelTick(ID3D11Device* dev) {
         g_w.liveW = r.w;
         g_w.liveH = r.h;
         g_w.liveCardFrac = r.cardFrac;
+        g_w.livePopupScrollMax = r.popupScrollMax;
         g_w.lastMs = r.ms;
     });
 }
@@ -1471,6 +1530,11 @@ void menuPanelSetGeometry(const MenuGeometry& g) {
 }
 
 float menuPanelAspect() { return g_panelAspect.load(); }
+
+int menuPanelPopupScrollMax() {
+    std::lock_guard<std::mutex> lock(g_w.m);
+    return g_w.livePopupScrollMax;
+}
 
 int menuPanelLineAt(float u, float v) {
     if (u < 0.0f || u > 1.0f || v < 0.0f || v > 1.0f) return -1;

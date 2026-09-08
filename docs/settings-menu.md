@@ -267,7 +267,8 @@ Head-aim and keys coexist; whichever moved last owns the highlight.
 | Up / Down | move the highlight; hold to repeat (400 ms, then 12 Hz) |
 | Left / Right | step the highlighted row: toggle, cycle a choice, step a number; hold to repeat; Shift steps a number by ten steps |
 | Enter / Space | activate: flip a switch, next choice, or open a number or string for typing; on an action row, fire it |
-| Tab / Shift+Tab, PageUp / PageDown | previous / next page |
+| Tab / Shift+Tab | next / previous page |
+| PageUp / PageDown | read on through the explanation beside the row, three lines at a time; changes the page when there is nothing to scroll |
 | Home / End | first / last row |
 | R | reset the highlighted row to its shipped default (a confirm on the row, then R again) |
 | Escape, the summon key | close (fade out, keys released); Escape first abandons a value being typed |
@@ -302,12 +303,17 @@ parked, so a look that wanders cannot take the row away mid-value.
 Typing is what the keyboard gate makes possible and Feature 4 could not
 offer.
 
-**A boolean is a switch.** A `Toggle` row draws the installer's control
-where its value would be -- an accent track with the knob at the end the
-value is at -- so the two settings windows read alike and an on/off row
-is told apart from a choice at a glance. A row with a pending restart
-change keeps its text (`off -> on`), because a switch cannot show two
-values at once.
+**Anything with two states is a switch.** A `Toggle` row draws the
+installer's control where its value would be -- an accent track with the
+knob at the end the value is at -- and so does a two-way CHOICE where one
+side is "leave the game alone", by the installer's own rule
+(`twoChoiceToggle` in `settings_view.cpp`): exactly two choices, one of
+them `off` or `stock`. That is most of the fixes, and they read as
+switches now rather than as words to cycle. Where the value written is
+not literally `on`/`off` -- one that writes `steady` against `stock` --
+the word stays beside the switch, because the switch alone cannot say
+it; where it is, the word goes. A row with a pending restart change keeps
+its text (`off -> on`), because a switch cannot show two values at once.
 
 **The tooltip is a card of its own, BESIDE the panel.** The highlighted
 row gets what `edvr.ini` says about that key. **The facts come first** --
@@ -329,6 +335,15 @@ not a character count -- capped by the panel's own height. A rule joins
 it to the row it belongs to. Resting the look on the card counts as
 using the menu, so an idle dismiss set by hand cannot close the panel
 mid-sentence.
+
+**What does not fit is scrolled to, not lost.** PageUp and PageDown move
+the body three lines at a time, with a thumb on the card's edge showing
+how much there is and where in it you are. The raster measures the text
+and publishes how far it can still go (`menuPanelPopupScrollMax`), and
+the model clamps its counter to that, so the scroll cannot run off the
+end of a text only the raster has measured. Those two keys fall back to
+changing the page when there is nothing to scroll; Tab is what changes
+the page deliberately.
 
 **How it sits beside the panel without moving it.** The rasterised bitmap
 is WIDER than the menu card -- the card, a gap, and the tooltip's strip,
@@ -577,11 +592,21 @@ gains the "live" or "restart" word the generator derived.
 4. **Advanced** and 5. **Experimental.** Every key the build reads from
    those sections, automatically: `getBool` reads are toggles, `getInt` /
    `getFloat` (and their `InRange` forms) are numbers with the declared
-   bounds, and `getString` reads are read-only unless the key carries a
-   `# dev: choices a, b, c` line (a new, optional annotation, allowed only
-   outside `[fix]`, the mirror of the rule that `# ui:` is allowed only
-   inside it). Instruments that write files or scan memory are still one
-   toggle away, which is why the tier exists and is off by default.
+   bounds, and `getString` reads are typed unless the key carries choices.
+   A developer key gets its choices from a `# dev: choices a, b, c` line,
+   or from a full `# ui:` line where it has one.
+   **A `ui:` line is allowed outside `[fix]`** (`UI_SECTIONS` in the
+   generator). It buys the key its LABEL and its CHOICES in this menu and
+   nothing else: the installer's window still shows only `[fix]`
+   (`EXPOSED_SECTIONS`), and the key's page and tier still come from its
+   section. The point is that demoting a setting out of `[fix]` costs it
+   its tier and its page but not the words somebody already wrote for it.
+   Foveated shading was demoted that way on 2026-09-08 -- it ships off,
+   and what it saves does not move the frame rate on Elite -- and kept
+   both its label and its four presets. A key may carry a `ui:` line or a
+   `dev:` line, never both.
+   Instruments that write files or scan memory are still one toggle away,
+   which is why the tier exists and is off by default.
 6. **Instruments.** Action rows for the things that today need a hotkey
    bound: dump the camera history (the `PAUSE` key's job), take a draw
    census with the quad probe, reload `edvr.ini` now, write a marker line

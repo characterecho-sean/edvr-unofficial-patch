@@ -156,6 +156,7 @@ struct State {
     bool     tooltipUp = false;
     bool     tooltipsWere = true;    // to notice a live change of shape
     bool     tipWidthNoted = false;
+    int      tooltipScroll = 0;      // lines of the tooltip's body scrolled past
     uint64_t tickMs = 0;
 
     bool  open = false;
@@ -322,6 +323,39 @@ std::vector<ChoiceItem> choicesOf(const MenuRowDef& d) {
         pos = bar + 1;
     }
     return out;
+}
+
+// A two-way choice where one side is "leave the game alone" reads better as
+// a switch than as a word to cycle: on is the fix, off is stock. The
+// installer's own rule (settings_view.cpp's twoChoiceToggle), so the two
+// settings windows agree about which rows are switches. The value written
+// is still the choice string; only the control changes.
+bool twoChoiceSwitch(const MenuRowDef& d, std::string* onValue, std::string* offValue) {
+    if (d.kind != MenuKind::Choice) return false;
+    const std::vector<ChoiceItem> items = choicesOf(d);
+    if (items.size() != 2) return false;
+    int off = -1;
+    for (int i = 0; i < 2; ++i) {
+        if (items[i].value == "stock" || items[i].value == "off") off = i;
+    }
+    if (off < 0) return false;
+    if (onValue) *onValue = items[1 - off].value;
+    if (offValue) *offValue = items[off].value;
+    return true;
+}
+
+// What a switch is SET to, in the file's own word -- suppressed when the
+// word would only repeat the switch (a plain on/off pair), kept when it
+// would not (on writes "steady", off writes "stock").
+std::string switchWord(const MenuRowDef& d, const std::string& value) {
+    std::string on, off;
+    if (!twoChoiceSwitch(d, &on, &off)) return std::string();
+    if (on == "on" && off == "off") return std::string();
+    const std::string current = _stricmp(value.c_str(), on.c_str()) == 0 ? on : off;
+    for (const ChoiceItem& c : choicesOf(d)) {
+        if (_stricmp(c.value.c_str(), current.c_str()) == 0) return c.label;
+    }
+    return current;
 }
 
 std::string displayValue(const MenuRowDef& d, const std::string& v) {
@@ -1011,11 +1045,24 @@ void buildContent(MenuContent& c) {
                 l.badge = kBadgeUnknown;
             }
             strncpy(l.right, v.c_str(), sizeof(l.right) - 1);
-            // A boolean is a switch, drawn where the value would be: the
-            // installer's control, so the two windows read alike.
-            if (d.kind == MenuKind::Toggle && !editingThis && !r.pending) {
-                l.toggle = boolOf(r.value, boolOf(d.shipped, false)) ? 2 : 1;
-                l.right[0] = 0;
+            // Anything with two states is a switch, drawn where the value
+            // would be: a plain boolean, and a two-way choice where one
+            // side is "leave the game alone". The installer's own rule.
+            // A row with a change waiting for a restart keeps its words,
+            // because a switch cannot show two values at once.
+            if (!editingThis && !r.pending) {
+                std::string on;
+                if (d.kind == MenuKind::Toggle) {
+                    l.toggle = boolOf(r.value, boolOf(d.shipped, false)) ? 2 : 1;
+                    l.right[0] = 0;
+                } else if (twoChoiceSwitch(d, &on, nullptr)) {
+                    l.toggle = _stricmp(r.value.c_str(), on.c_str()) == 0 ? 2 : 1;
+                    // The word stays only where it says something the
+                    // switch does not.
+                    const std::string word = switchWord(d, r.value);
+                    strncpy(l.right, word.c_str(), sizeof(l.right) - 1);
+                    l.right[sizeof(l.right) - 1] = 0;
+                }
             }
             l.style = editingThis ? kMenuRowEdit : (hi ? kMenuRowHi : kMenuRow);
             if (hi && showTip) {
@@ -1024,6 +1071,7 @@ void buildContent(MenuContent& c) {
                 // needs to type a value -- the range, the default, and
                 // whether the change waits for a restart.
                 c.popupLine = c.lineCount - 1;
+                c.popupScroll = s.tooltipScroll;
                 snprintf(c.popupTitle, sizeof(c.popupTitle), "%s.%s", d.section, d.key);
                 // THE FACTS FIRST, THE INI'S PROSE LAST. Some comment
                 // blocks run to three thousand characters, and this buffer
@@ -1078,7 +1126,7 @@ void buildContent(MenuContent& c) {
         s.editEntry >= 0
             ? std::string("Type a value   Backspace deletes   Enter writes it   Esc cancels")
             : std::string("Up/Down pick   Left/Right change   Enter switch or type   Tab page   "
-                          "R twice resets   Esc close");
+                          "PgUp/PgDn read on   R twice resets   Esc close");
     if (pendingN) {
         char pb[64];
         snprintf(pb, sizeof(pb), "   %d change%s at next launch", pendingN, pendingN == 1 ? "" : "s");
@@ -1236,6 +1284,25 @@ void activateEntry() {
 void noteHighlightMoved() {
     g_s.highlightSinceMs = g_s.tickMs;
     g_s.tooltipUp = false;
+    g_s.tooltipScroll = 0;
+}
+
+// Scroll the tooltip's body. Returns whether it moved -- when it did not,
+// the key is free to do what it did before, which is change the page.
+bool scrollTooltip(int lines) {
+    State& s = g_s;
+    if (!s.tooltipUp) return false;
+    const int max = menuPanelPopupScrollMax();
+    // The raster reports what is left to scroll from where it is NOW, so
+    // the ceiling is where it already sits plus that.
+    const int ceiling = s.tooltipScroll + max;
+    int next = s.tooltipScroll + lines;
+    if (next < 0) next = 0;
+    if (next > ceiling) next = ceiling;
+    if (next == s.tooltipScroll) return false;
+    s.tooltipScroll = next;
+    s.contentDirty = true;
+    return true;
 }
 
 void moveHighlight(int dir) {
@@ -1444,8 +1511,15 @@ void handleKeys(uint64_t now) {
             case kEnter:
             case kSpace: activateEntry(); break;
             case kTab: changePage(s.shiftHeld ? -1 : +1); break;
-            case kPgUp: changePage(-1); break;
-            case kPgDn: changePage(+1); break;
+            // PageUp and PageDown read the explanation beside the row when
+            // there is more of it than fits. Tab is what changes the page,
+            // so these only fall back to that when nothing can scroll.
+            case kPgUp:
+                if (!scrollTooltip(-3)) changePage(-1);
+                break;
+            case kPgDn:
+                if (!scrollTooltip(+3)) changePage(+1);
+                break;
             case kHome:
                 if (!p.status) { p.highlight = 0; moveHighlight(0); if (p.entries.size() && p.entries[0].kind == EntryKind::Heading) moveHighlight(+1); noteHighlightMoved(); s.contentDirty = true; }
                 break;
@@ -1686,10 +1760,10 @@ void menuConfigure(Config& cfg) {
     {
         // Under a third of a second is not a dwell, it is a flicker: those
         // values, and 0, mean no tooltip at all.
-        float d = cfg.getFloat("menu.tooltip_delay", 1.5f);
-        if (!(d >= 0.3f)) d = 0.0f;
-        if (d > 10.0f) d = 10.0f;
-        s.tooltipDelayS = d;
+        float delay = cfg.getFloat("menu.tooltip_delay", 1.5f);
+        if (!(delay >= 0.3f)) delay = 0.0f;
+        if (delay > 10.0f) delay = 10.0f;
+        s.tooltipDelayS = delay;
     }
     // With a tooltip beside it, the panel reaches out to
     // atan(2.14 * tan(w/2)) on the right -- 29.8 degrees at the default

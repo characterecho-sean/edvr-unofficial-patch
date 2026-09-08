@@ -83,6 +83,12 @@ import sys
 # offsets it is tuned with are not, because tuning them means wearing the
 # headset and watching, which is what the ini's hot reload is for.
 EXPOSED_SECTIONS = ('fix',)
+# The sections whose keys may carry a `ui:` line at all. The installer's
+# window still shows only EXPOSED_SECTIONS; what a ui: line buys a developer
+# key is its LABEL and its CHOICES in the in-headset menu, so that demoting a
+# setting from [fix] to [experimental] costs it its tier and its page but not
+# the words somebody already wrote for it.
+UI_SECTIONS = ('fix', 'advanced', 'experimental')
 
 READ_RE = re.compile(
     r'get(Bool|Int|Float|String)([A-Za-z]*)\s*\(\s*"([^"]+)"\s*,\s*([^;]*?)\)', re.S)
@@ -433,17 +439,25 @@ def main():
     settings = parse_ini(ini_path)
 
     # ---- the enforcement --------------------------------------------------
-    stray = [s for s in settings if s.annotated and s.section not in EXPOSED_SECTIONS]
+    stray = [s for s in settings if s.annotated and s.section not in UI_SECTIONS]
     if stray:
-        print('gen_settings_schema: ERROR: only [%s] settings appear in the window.'
-              % ']/['.join(EXPOSED_SECTIONS))
+        print('gen_settings_schema: ERROR: a ui: line belongs to a [%s] setting.'
+              % ']/['.join(UI_SECTIONS))
         print()
-        print('[advanced] and [experimental] are safety valves and developer instruments:')
-        print('a window that offers them invites people to change things the log is')
-        print('supposed to send them to, and turns a support thread into a guessing game.')
-        print('The other sections are plumbing rather than fixes. Remove the ui: line:')
+        print('The window shows only [%s]; a ui: line elsewhere buys a label and'
+              % ']/['.join(EXPOSED_SECTIONS))
+        print('choices for the in-headset menu\'s developer tier and nothing more. The')
+        print('remaining sections are plumbing rather than settings. Remove the ui: line:')
         print()
         for s in stray:
+            print('  edvr.ini:%d  %s.%s' % (s.line, s.section, s.key))
+        return 1
+
+    bothAnnotated = [s for s in settings if s.annotated and s.devAnnotated]
+    if bothAnnotated:
+        print('gen_settings_schema: ERROR: a setting carries both a ui: and a dev: line; '
+              'the ui: line already gives the menu its label and choices.')
+        for s in bothAnnotated:
             print('  edvr.ini:%d  %s.%s' % (s.line, s.section, s.key))
         return 1
 
@@ -576,7 +590,9 @@ def main():
         kind, default, lo, hi, precision = code[dotted]
         if lo is None and s.range_lo is not None:
             lo, hi = s.range_lo, s.range_hi
-        choices = s.choices if s.section in EXPOSED_SECTIONS else s.devChoices
+        # A developer key with a ui: line keeps its label and its choices; one
+        # without falls back to its own name and its dev: line.
+        choices = s.choices if s.choices else s.devChoices
         if choices:
             kind = 'choice'
         applies = when_it_applies(s)
@@ -584,7 +600,7 @@ def main():
             '    {%s, %s, %s, %s,\n     %s,\n     MenuKind::%s, %s, %s, %s, %d, %s, %s, %d,\n'
             '     MenuTier::%s, %s, %s},' % (
                 c_string(s.section), c_string(s.key),
-                c_string(s.label if s.section in EXPOSED_SECTIONS else s.key),
+                c_string(s.label if s.annotated else s.key),
                 c_string(summarise(s.description)),
                 c_string(s.description),
                 {'toggle': 'Toggle', 'number': 'Number', 'text': 'Text',

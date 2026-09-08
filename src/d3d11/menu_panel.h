@@ -116,6 +116,7 @@ struct MenuContent {
     char     popupTitle[96];
     char     popup[1024];
     int      popupLine = -1;
+    int      popupScroll = 0;   // lines of the body scrolled past
     bool     toast = false; // a one-line panel instead of the menu
     bool     compact = false;   // info pages: a tighter row pitch
     // Sizing, decided by the model from the channel: the bitmap's width in
@@ -163,6 +164,12 @@ void menuPanelSetGeometry(const MenuGeometry& g);
 
 // The last built raster's height over its width (0 until one exists).
 float menuPanelAspect();
+
+// How many line-steps the tooltip's body could still be scrolled in the
+// raster now showing: 0 when it all fits. The model clamps its own counter
+// to this, so the scroll cannot run off the end of a text only the raster
+// has measured.
+int menuPanelPopupScrollMax();
 
 // Which line a panel-relative point lands on: u 0..1 left to right, v 0..1
 // TOP to bottom. -1 for none, a heading, no raster yet, or a point in the
