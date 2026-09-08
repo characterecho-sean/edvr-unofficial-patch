@@ -50,6 +50,19 @@
 // is named by its vertex shader's hash; advanced.ui_depth_families adds
 // others, advanced.ui_depth_exclude removes any.
 //
+// TWO families are named as sharing the scene's projection rather than
+// found by the surface rule alone: the cockpit's holo panels, and the
+// SPRITE composite (vs E508648660A352B2), which draws into the same lit
+// HDR target and was measured still swimming on 2026-09-08 after
+// everything else had stopped. Both are composites by the surface rule,
+// which is what decides they are interface at all; being named is only
+// what says their depth belongs in the scene's own encoding, written in
+// place, rather than through the alpha-aware pass. Naming them here rather
+// than in advanced.ui_depth_families is deliberate: that list is consulted
+// BEFORE the surface test, so it would also claim the sprite family's
+// draws that sample no interface surface, and there are tens of thousands
+// of those (hud_sprite.h).
+//
 // A family's PIXEL stage has variants where its vertex stage does not. The
 // panel that composites the main menu also composites the escape menu you
 // open in flight, through a pixel shader that adds a colour matrix -- and a

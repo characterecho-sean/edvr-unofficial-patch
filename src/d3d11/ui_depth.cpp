@@ -54,6 +54,26 @@ constexpr uint64_t kScreenPs = 0x85565E9261812E2Full;
 // draws a frame in the window its menu was up).
 constexpr uint64_t kPanelPsTinted = 0x015EF9349EC097E8ull;
 constexpr uint64_t kPanelPsCheap  = 0xF2F872B191F656D5ull;
+// The sprite composite: the cockpit's other interface-surface family, and
+// the one the flight of 2026-09-08 named as still swimming after the panel
+// variants above went in. It draws into the lit HDR target the holo panels
+// and the flight HUD use, so it belongs to the cockpit's UI pass and shares
+// the scene's projection where it binds the scene's pair -- hence it counts
+// as a scene family, like the holo panels, rather than through
+// advanced.ui_depth_families (which would also claim its draws that sample
+// no interface surface at all, and there are tens of thousands of those:
+// hud_sprite.h).
+//
+// Its pixel shader wants no new transcription. target_sharp.h read the same
+// shader out of its disassembly in September and states it in full: one
+// bilinear sample of t0 through s0 at TEXCOORD0, an alpha discard, and a
+// HUD colour matrix -- which is kScreenDepthHlsl's shape exactly, register
+// for register. (target_sharp calls this family the target indicator;
+// hud_sprite.h later disproved that by suppression -- dropping all 86k of
+// its draws left the indicator on screen. The shader reading is sound
+// whatever the family turns out to draw.)
+constexpr uint64_t kHudSprite = 0xE508648660A352B2ull;
+constexpr uint64_t kSpritePs  = 0x63ABD86359B57D01ull;
 // The cockpit holo panels' pixel shader, for the reactive mask's coverage:
 // it samples the interface surface at t2 through s1 at TEXCOORD8 (its own
 // disassembly, 2026-09-08 -- the same shape as the menu panel's, which
@@ -315,7 +335,7 @@ const char kHoloDepthHlsl[] =
 constexpr uint32_t kMaxStandIns = 4;
 struct DepthShader {
     uint64_t            ps[kMaxStandIns];  // the game's pixel shaders it stands in for
-    uint64_t            vs;                // their vertex family, for a variant
+    uint64_t            vs[kMaxStandIns];  // their vertex families, for a variant
     uint32_t            slot;              // the PS SRV slot its HLSL reads
     const char*         hlsl;
     size_t              len;
@@ -324,11 +344,15 @@ struct DepthShader {
     bool                tried;
 };
 DepthShader g_depthShaders[3] = {
-    {{kPanelPs, kPanelPsTinted, kPanelPsCheap, 0}, kPanelVs, 1,
+    {{kPanelPs, kPanelPsTinted, kPanelPsCheap, 0}, {kPanelVs, 0, 0, 0}, 1,
      kPanelDepthHlsl, sizeof(kPanelDepthHlsl) - 1, "ui_depth_panel_ps", nullptr, false},
-    {{kScreenPs, 0, 0, 0}, kScreenVs, 0,
+    // The loader's curved screen and the sprite composite are one shader's
+    // work apart: both take one bilinear sample of t0 through s0 at
+    // TEXCOORD0 and discard on its alpha, so this transcription is already
+    // both their coverage.
+    {{kScreenPs, kSpritePs, 0, 0}, {kScreenVs, kHudSprite, 0, 0}, 0,
      kScreenDepthHlsl, sizeof(kScreenDepthHlsl) - 1, "ui_depth_screen_ps", nullptr, false},
-    {{kHoloPanelPs, 0, 0, 0}, kHoloPanel, 2,
+    {{kHoloPanelPs, 0, 0, 0}, {kHoloPanel, 0, 0, 0}, 2,
      kHoloDepthHlsl, sizeof(kHoloDepthHlsl) - 1, "ui_depth_holo_ps", nullptr, false},
 };
 ID3D11Buffer* g_floorCb = nullptr;
@@ -694,7 +718,12 @@ DepthShader* depthShaderFor(ID3D11DeviceContext* ctx, uint64_t ps, uint64_t vs, 
     }
     if (!g_variants || !vs || slot < 0) return nullptr;
     for (DepthShader& s : g_depthShaders) {
-        if (s.vs != vs || s.slot != static_cast<uint32_t>(slot)) continue;
+        if (s.slot != static_cast<uint32_t>(slot)) continue;
+        bool family = false;
+        for (const uint64_t named : s.vs) {
+            if (named && named == vs) family = true;
+        }
+        if (!family) continue;
         DepthShader* got = compiled(ctx, s);
         if (!got) return nullptr;
         if (!inList(g_variantLogged, g_variantLoggedCount, ps) &&
@@ -1193,7 +1222,8 @@ bool uiDepthOnEyeDraw(ID3D11DeviceContext* ctx) {
     // measured 2026-09-07) and gets the alpha-aware depth pass instead,
     // whichever depth it binds.
     const bool scenePair = dsvIsSceneDepth(dsv);
-    const bool sceneFamily = h == kHoloPanel || inList(g_families, g_familyCount, h);
+    const bool sceneFamily = h == kHoloPanel || h == kHudSprite ||
+                             inList(g_families, g_familyCount, h);
     if (scenePair && sceneFamily) {
         g_mode = Mode::kInPlace;
         const bool wantLine = g_familyLoggedCount < kMaxFamilyLines;
