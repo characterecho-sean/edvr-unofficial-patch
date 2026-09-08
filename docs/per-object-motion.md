@@ -661,6 +661,29 @@ answered it. The rest need the game running -- see
    `U` census lines, `draw_census.h`), how many writes a frame, and whether
    a record keeps its index across frames (two frames' dumps, diffed:
    the same pose bytes at the same slot).
+
+   *The instrument is built* (2026-09-07), and it had to be: **every
+   shader-resource column this census has ever had was the PIXEL side** --
+   `s=` is `PSGetShaderResources(0,8)` and `x=` is `(4,4)`. Nothing had ever
+   read a vertex-shader resource, so the pool was invisible to every census
+   ever taken and this question was unanswerable for want of one call. Two
+   additions close it:
+
+   - **`vt=`**, the vertex-shader resource window, slots 32..39 -- where the
+     pool lives at t33 and the bone palette at t38, in 71 of 71 dumped
+     shaders. One `VSGetShaderResources` on recorded draws only, the same
+     bargain `x=` already makes, and the column is omitted entirely when the
+     window is empty, which is most draws.
+   - **`stride=`** on interned buffer lines. `binding_shadow` has resolved a
+     buffer's `StructureByteStride` into `ResourceInfo::b` since it was
+     written and the census threw it away, so a 336-byte pool was
+     indistinguishable from any other buffer of the same byte width. Omitted
+     when zero, which is every constant and vertex buffer.
+
+   Between them a census now names the pool, sizes it, and gives its record
+   stride. What still needs the flight is the rest of the question: its write
+   path, how many writes a frame, and whether a record keeps its index
+   between frames.
 4. **The instance stream and the draw order.** Which slot feeds
    `INSTANCEANDMODELDATAINDEX` in the hull, station and asteroid families
    (the input layout at creation), its usage and write path, and whether

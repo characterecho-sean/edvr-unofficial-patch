@@ -104,7 +104,8 @@ DISP_RE = re.compile(r'^DCX (\d+) #(\d+) n=(\d+),(\d+),(\d+) ch=([0-9A-Fa-f]+) '
                      r'u=(\S+)(.*)$')
 ID_TEX_RE = re.compile(r'^DC id @(\d+) tex (\d+)x(\d+) fmt=(\d+)'
                        r'(?: res=(\S+))?(?: vf=(\d+))?$')
-ID_BUF_RE = re.compile(r'^DC id @(\d+) buf (\d+)(?: res=(\S+))?$')
+ID_BUF_RE = re.compile(r'^DC id @(\d+) buf (\d+)(?: res=(\S+))?'
+                       r'(?: stride=(\d+))?$')
 COPY_RE = re.compile(r'^DCC (\d+) #(\d+) ([A-Z]) dst=(\S+) sub=(\d+) '
                      r'at=(\d+),(\d+) src=(\S+) sub=(\d+)(.*)$')
 BEGIN_RE = re.compile(r'^DC begin census=(\d+) frames=(\d+) frame=(\d+)')
@@ -117,12 +118,13 @@ class Ev(object):
     or a copy (DCC). Fields absent for a kind stay at their defaults."""
     __slots__ = ('tag', 'frame', 'idx', 'kind', 'n', 'i', 'r', 'd', 'c',
                  's', 'x', 'vh', 'ph', 'ch', 'u', 'ds', 'st', 'bm', 'bl',
-                 'so', 'q', 'src', 'dst', 'at')
+                 'so', 'vt', 'q', 'src', 'dst', 'at')
 
     def __init__(self):
         self.s = []
         self.x = []
         self.u = []
+        self.vt = []
         self.r = self.d = self.c = '-'
         self.vh = self.ph = self.ch = None
         self.ds = self.st = self.bm = self.bl = self.so = None
@@ -197,6 +199,11 @@ def parse(path):
                         # stored so this reader's picture of a draw is the
                         # whole line, not the part it happens to want.
                         ev.so = v
+                    elif k == 'vt':
+                        # VS resource slots 32-39 (2026-09-07), where the
+                        # instanced-mesh pool lives. Same bargain as so=:
+                        # stored so the picture is whole.
+                        ev.vt = v.split(',')
                     elif k == 'q':
                         ev.q = int(v)
                 cur.events.append(ev)
@@ -225,9 +232,13 @@ def parse(path):
                 continue
             u = ID_BUF_RE.match(line)
             if u:
-                cur.ids['@' + u.group(1)] = dict(kind='buf', w=int(u.group(2)),
-                                                 h=0, fmt=0, res=u.group(3),
-                                                 vf=None)
+                # h carries the STRUCTURE stride for a buffer, which is the
+                # same slot binding_shadow's ResourceInfo puts it in. It is
+                # what tells a 336-byte instanced-mesh pool from any other
+                # buffer of the same size.
+                cur.ids['@' + u.group(1)] = dict(
+                    kind='buf', w=int(u.group(2)), h=int(u.group(4) or 0),
+                    fmt=0, res=u.group(3), vf=None)
                 continue
             c = COPY_RE.match(line)
             if c:
@@ -266,6 +277,8 @@ def tok_desc(census, tok):
             return 'buf %s' % m.group(1)
         return tok
     if e['kind'] == 'buf':
+        if e['h']:
+            return 'buf %d stride %d' % (e['w'], e['h'])
         return 'buf %d' % e['w']
     s = '%dx%d %s' % (e['w'], e['h'], fmt_name(e['fmt']))
     if e['vf'] is not None and e['vf'] != e['fmt']:
@@ -652,13 +665,16 @@ def self_test():
     old = ('[12:00:00.000] DC 0 #1 X n=360 i=1 r=@1 d=@2 c=@3 s=@4,-,-,- '
            'vh=A888D51024D9798E ds=02wA st=14 bm=F pr=- q=804')
     new = ('[12:00:00.000] DC 0 #2 X n=360 i=1 r=@1 d=@2 c=@3 s=@4,-,-,- '
-           'vh=81216C77F90DEDD6 ds=17wZ st=14 bm=F pr=- '
+           'vh=81216C77F90DEDD6 vt=-,@5,-,-,-,-,-,- ds=17wZ st=14 bm=F pr=- '
            'bl=1,5,6,1/2,1,1 sm=FFFFFFFF so=rFF/w18/f7/1,1,3 q=805')
     lines = ['[12:00:00.000] DC begin census=1 frames=1 frame=1', old, new,
              '[12:00:00.000] DC id @1 tex 2818x2784 fmt=87 res=00000000AA00',
              '[12:00:00.000] DC id @2 tex 2818x2784 fmt=19 res=00000000AB00',
              '[12:00:00.000] DC id @3 buf 256 res=00000000AC00',
              '[12:00:00.000] DC id @4 tex 2212x1244 fmt=28 res=00000000AD00',
+             # The structured form: a buffer line may now carry a stride, and
+             # one without it must still parse (every log before 2026-09-07).
+             '[12:00:00.000] DC id @5 buf 3010560 res=00000000AE00 stride=336',
              '[12:00:00.000] DC end census=1 draws=2 lines=2 interned=4 '
              'overflow=0 truncated=0']
     censuses = []
@@ -693,6 +709,8 @@ def self_test():
                     ev.st = v
                 elif k == 'so':
                     ev.so = v
+                elif k == 'vt':
+                    ev.vt = v.split(',')
                 elif k == 'q':
                     ev.q = int(v)
             cur.events.append(ev)
@@ -703,6 +721,12 @@ def self_test():
                 kind='tex', w=int(t.group(2)), h=int(t.group(3)),
                 fmt=int(t.group(4)), res=t.group(5),
                 vf=int(t.group(6)) if t.group(6) else None)
+            continue
+        u = ID_BUF_RE.match(line)
+        if u:
+            cur.ids['@' + u.group(1)] = dict(
+                kind='buf', w=int(u.group(2)), h=int(u.group(4) or 0),
+                fmt=0, res=u.group(3), vf=None)
     if len(censuses) != 1 or len(censuses[0].events) != 2:
         print('self-test: expected 1 census with 2 draws, got %d/%s'
               % (len(censuses),
@@ -716,6 +740,19 @@ def self_test():
     if b.q != 805 or b.st != '14' or b.so != 'rFF/w18/f7/1,1,3':
         print('self-test: the so= line parsed wrong: %r'
               % ((b.q, b.st, b.so),))
+        return 1
+    if b.vt != ['-', '@5', '-', '-', '-', '-', '-', '-'] or a.vt != []:
+        print('self-test: the vt= window parsed wrong: %r / %r' % (b.vt, a.vt))
+        return 1
+    # A structured buffer must carry its stride through to the description,
+    # which is what tells the instanced-mesh pool from any other buffer.
+    if tok_desc(censuses[0], '@5') != 'buf 3010560 stride 336':
+        print('self-test: the buffer stride did not survive: %r'
+              % tok_desc(censuses[0], '@5'))
+        return 1
+    if tok_desc(censuses[0], '@3') != 'buf 256':
+        print('self-test: a strideless buffer should not grow a stride: %r'
+              % tok_desc(censuses[0], '@3'))
         return 1
     # The whole point: a NEW trailing field must not swallow q=. That is the
     # failure mode, not a rejected line -- q= is last, and a greedy tail

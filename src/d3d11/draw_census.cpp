@@ -594,8 +594,21 @@ void dumpInternTable() {
                                 e.info.resource);
             }
         } else if (e.info.isBuffer) {
-            Log::get().note("DC id @%u buf %u res=%p", i, e.info.a,
-                            e.info.resource);
+            // stride= is the STRUCTURE stride, and it identifies a buffer the
+            // way a texture's WxH does (2026-09-07). binding_shadow has
+            // resolved it into ResourceInfo::b since it was written and this
+            // line has always thrown it away, so the instanced-mesh pool --
+            // the one the per-object motion design needs, recognisable by its
+            // 336-byte record -- was indistinguishable from any other buffer
+            // of the same byte width. Omitted when zero, which is every
+            // constant and vertex buffer.
+            if (e.info.b) {
+                Log::get().note("DC id @%u buf %u res=%p stride=%u", i,
+                                e.info.a, e.info.resource, e.info.b);
+            } else {
+                Log::get().note("DC id @%u buf %u res=%p", i, e.info.a,
+                                e.info.resource);
+            }
         } else {
             Log::get().note("DC id @%u ?", i);
         }
@@ -732,6 +745,57 @@ static void recordDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
             if (v) v->Release();
         }
         if (ps) ps->Release();
+    }
+
+    // VERTEX-shader resources, slots 32-39 (2026-09-07, the per-object motion
+    // hunt).
+    //
+    // Every shader-resource column this file has ever had is the PIXEL
+    // side -- s= is PSGetShaderResources(0,8) and x= is (4,4). Nothing has
+    // ever read a VS SRV, so the instanced-mesh POOL has been invisible to
+    // every census ever taken: the structured buffer Elite's vertex shaders
+    // index for each instance's pose, which docs/per-object-motion.md needs
+    // named, sized and its write path found before a per-mover tag can be
+    // built. Phase 0's question 3 was unanswerable for want of this one call.
+    //
+    // 32..39 rather than 0..7 because that is where the pool lives: 71 of 71
+    // dumped vertex shaders declare it at t33 with a 336-byte stride, and the
+    // bone palette beside it at t38 (docs/shaders/fss-panel-vs.asm, and the
+    // 2026-09-06 dump). If a future build moves them, this window is the
+    // thing to move, and a fresh glare_shader_dump is how you would learn it.
+    //
+    // One COM call on recorded draws only, the same bargain x= above makes.
+    // The column is OMITTED when the whole window is empty, which is most
+    // draws -- a line per draw is what the log buffer is sized around, and a
+    // run of eight dashes on every one of them would buy nothing.
+    char vsr[224] = "";
+    if (st.ok) {
+        ID3D11ShaderResourceView* vres[8] = {};
+        bool got = false;
+        guardedBudget(g_iaBudget, [&] {
+            ctx->VSGetShaderResources(32, 8, vres);
+            got = true;
+        });
+        if (got) {
+            bool any = false;
+            for (ID3D11ShaderResourceView* v : vres) {
+                if (v) { any = true; break; }
+            }
+            if (any) {
+                char vb[8][24];
+                const char* tk[8];
+                for (int i = 0; i < 8; ++i) {
+                    tk[i] = bindingToken(vres[i], Kind::kView, vb[i],
+                                         sizeof(vb[i]));
+                }
+                _snprintf_s(vsr, sizeof(vsr), _TRUNCATE,
+                            " vt=%s,%s,%s,%s,%s,%s,%s,%s", tk[0], tk[1], tk[2],
+                            tk[3], tk[4], tk[5], tk[6], tk[7]);
+            }
+        }
+        for (ID3D11ShaderResourceView* v : vres) {
+            if (v) v->Release();
+        }
     }
 
     // WHERE THE DRAW LANDS, which this has never recorded (2026-08-30).
@@ -931,9 +995,9 @@ static void recordDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
     }
 
     Log::get().note(
-        "%s %u #%u %c n=%u i=%u r=%s d=%s c=%s s=%s,%s,%s,%s%s%s%s%s%s q=%u",
+        "%s %u #%u %c n=%u i=%u r=%s d=%s c=%s s=%s,%s,%s,%s%s%s%s%s%s%s q=%u",
         tag, g_frameOrdinal, index, kind, count, instances, r, d, c, s0, s1,
-        s2, s3, tail, xt, pt, vt, sv, q);
+        s2, s3, tail, xt, pt, vsr, vt, sv, q);
 
     // The CB watch, after the draw's own line so a DCW dump always follows
     // the draw it belongs to. Any recorded draw can match -- DC for the FSS

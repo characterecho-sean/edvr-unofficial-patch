@@ -77,7 +77,12 @@ COPY_RE = re.compile(r'^DCC (\d+) #(\d+) ([A-Z]) dst=(\S+) sub=(\d+) '
                      r'at=(\d+),(\d+) src=(\S+) sub=(\d+)(.*)$')
 ID_TEX_RE = re.compile(r'^DC id @(\d+) tex (\d+)x(\d+) fmt=(\d+)'
                        r'(?: res=(\S+))?(?: vf=(\d+))?$')
-ID_BUF_RE = re.compile(r'^DC id @(\d+) buf (\d+)(?: res=(\S+))?$')
+# stride= is the buffer's STRUCTURE stride (2026-09-07), carried in h the way
+# binding_shadow's ResourceInfo carries it: it is what tells the 336-byte
+# instanced-mesh pool from any other buffer of the same size. Absent on every
+# log captured before that date, and on every buffer that is not structured.
+ID_BUF_RE = re.compile(r'^DC id @(\d+) buf (\d+)(?: res=(\S+))?'
+                       r'(?: stride=(\d+))?$')
 BEGIN_RE = re.compile(r'^DC begin census=(\d+) frames=(\d+) frame=(\d+)')
 END_RE = re.compile(r'^DC end census=(\d+)(.*)$')
 KV_RE = re.compile(r'(\w+)=(\S+)')
@@ -244,6 +249,8 @@ class Census(object):
                                      fmt_name(int(m.group(3))))
             return tok
         if e['kind'] == 'buf':
+            if e['h']:
+                return 'buf %d stride %d' % (e['w'], e['h'])
             return 'buf %d' % e['w']
         s = '%dx%d %s' % (e['w'], e['h'], fmt_name(e['fmt']))
         if e['vf'] is not None and e['vf'] != e['fmt']:
@@ -346,8 +353,8 @@ def parse_lines(lines, source):
         u = ID_BUF_RE.match(line)
         if u:
             cur.ids['@' + u.group(1)] = dict(kind='buf', w=int(u.group(2)),
-                                             h=0, fmt=0, res=u.group(3),
-                                             vf=None)
+                                             h=int(u.group(4) or 0), fmt=0,
+                                             res=u.group(3), vf=None)
     return censuses
 
 
@@ -701,6 +708,9 @@ def self_test():
         'DC id @2 tex 1832x1920 fmt=87 res=00000000AAAA1000',
         'DC id @3 tex 4096x4096 fmt=98 res=00000000AAAA2000',
         'DC id @9 buf 256 res=00000000AAAA3000',
+        # A structured buffer with its stride, and the strideless form above
+        # it: both must parse, and the stride must reach the description.
+        'DC id @12 buf 3010560 res=00000000AAAA6000 stride=336',
         'DC id @10 tex 1832x1920 fmt=19 res=00000000DEAD0000 vf=20',
         'DC id @11 tex 1832x1920 fmt=19 res=00000000DEAD0000 vf=20',
         'DC id @20 tex 512x512 fmt=45 res=00000000DEAD8000',
@@ -802,6 +812,16 @@ def self_test():
     off = [e for e in draws if e.sten.enable is False]
     if len(off) != 1 or off[0].sten.read_bits() or off[0].sten.write_bits():
         print('self-test: a stencil-disabled draw contributed bits')
+        return 1
+
+    # A buffer's structure stride must survive into the description, and a
+    # buffer without one must not grow one.
+    if c1.desc('@12') != 'buf 3010560 stride 336':
+        print('self-test: the buffer stride did not survive: %r'
+              % c1.desc('@12'))
+        return 1
+    if c1.desc('@9') != 'buf 256':
+        print('self-test: a strideless buffer grew a stride: %r' % c1.desc('@9'))
         return 1
 
     # The back-face form must parse, and a front-only form must alias back

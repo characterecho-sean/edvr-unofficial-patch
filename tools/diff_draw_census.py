@@ -64,6 +64,12 @@ DRAW_RE = re.compile(r'^DC (\d+) #(\d+) ([A-Z]) n=(\d+) i=(\d+) '
                      r'(?: vs=(\S+)(?: vh=([0-9A-Fa-f]+))? vb=(\S+) '
                      r'sd=(\d+) of=(\d+) tp=(\d+))?'
                      r'(?: x=\S+(?:,\S+){3})?(?: ph=[0-9A-Fa-f]+)?'
+                     # vt= is VERTEX-shader resource slots 32-39 (2026-09-07,
+                     # the per-object motion hunt): the window the instanced
+                     # mesh pool lives in. Emitted only when something in it
+                     # is bound, so most draws still carry no such token.
+                     # Optional and out of the signature like every tail.
+                     r'(?: vt=\S+(?:,\S+){7})?'
                      # The viewport/scissor tail (2026-08-30), optional for
                      # the same reason every tail before it is: logs already
                      # captured do not carry it and must keep parsing. It is
@@ -113,7 +119,12 @@ ID_TEX_RE = re.compile(r'^DC id @(\d+) tex (\d+)x(\d+) fmt=(\d+)'
                        # the game bound an sRGB or a UNORM view over it.
                        # Optional and parsed past, like res= before it.
                        r'(?: res=\S+)?(?: vf=\d+)?$')
-ID_BUF_RE = re.compile(r'^DC id @(\d+) buf (\d+)(?: res=\S+)?$')
+# stride= is the buffer's STRUCTURE stride (2026-09-07). It identifies a
+# structured buffer the way a texture's size does -- the instanced-mesh pool
+# is the one at 336 -- and is omitted when zero, which is every constant and
+# vertex buffer. Parsed past, like res=, because it is not part of a
+# signature.
+ID_BUF_RE = re.compile(r'^DC id @(\d+) buf (\d+)(?: res=\S+)?(?: stride=\d+)?$')
 ID_UNK_RE = re.compile(r'^DC id @(\d+) \?$')
 END_RE = re.compile(r'^DC end census=(\d+) draws=(\d+)(?: \S+=\d+)*? '
                     r'lines=(\d+) interned=(\d+) overflow=(\d+) '
@@ -419,9 +430,15 @@ def self_test():
     # test, forever.
     b = ['DC begin census=2 frames=3 frame=2000 offscreen=yes']
     for f in range(3):
-        b += ['DC %d #%d I n=5000 i=24 r=@1 d=@2 c=@9 s=@3,-,-,- '
+        b += [# vt= (the VS resource window, 2026-09-07) sits between ph= and
+              # vp=, and is on the scene draw because that is the draw whose
+              # pool the per-object work is after. Census a's twin carries no
+              # vt= at all, so both vintages parse and the field stays out of
+              # the signature -- if it reached it, this draw would report as
+              # CHANGED rather than matching.
+              'DC %d #%d I n=5000 i=24 r=@1 d=@2 c=@9 s=@3,-,-,- '
               'vs=@7 vb=@8 sd=32 of=0 tp=4 x=@4,-,-,- '
-              'ph=00AA11BB22CC33DD q=0' % (f, 1),
+              'ph=00AA11BB22CC33DD vt=-,@11,-,-,-,-,@12,- q=0' % (f, 1),
               # The full modern tail, on a draw that is IDENTICAL in both
               # censuses and carries NO tail in census a: the output-survival
               # columns, the blend equation and so= (the stencil masks and
@@ -454,6 +471,12 @@ def self_test():
           'DC id @6 tex 1832x1920 fmt=87 res=000001B2C3D68000',
           'DC id @9 buf 256 res=000001B2C3D70000', 'DC id @7 ?',
           'DC id @8 buf 96 res=000001B2C3D78000', 'DC id @10 ?',
+          # The structured-buffer form, with and without a stride: @11 is the
+          # instanced-mesh pool's shape (336) and @12 the bone palette's (48).
+          # A buffer with no stride still parses, which is every constant
+          # buffer in every log already captured.
+          'DC id @11 buf 3010560 res=000001B2C3D80000 stride=336',
+          'DC id @12 buf 460800 res=000001B2C3D88000 stride=48',
           'DC end census=2 draws=13 off=0 copies=6 disp=3 lines=13 '
           'interned=10 overflow=1 truncated=0']
 
