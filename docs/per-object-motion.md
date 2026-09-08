@@ -1547,17 +1547,29 @@ which is this project's contract for every read of the game.
    *Its fourth flight* (13:47 the same day, `v0.14.1-59-g5ad454e`; landed,
    distant, the slot), the first with pairs on disk, read by
    `tools/pool_pair.py` -- and questions 3, 6 and 7 close on it. **The
-   frame is the ship's.** cb1[275] reads (0.030, -0.002, 0.000) m, the
-   pilot's head in the cockpit, and rows 277-278 are the camera's basis in
-   that frame, turning with the head while the records do not: a pair
-   with the head turning and the ship still (frames 8360-8361, 1,876
-   live) had not one record change. In flight (11064-11065) every station
-   part moved by the inverse of the ship's motion, and the largest rigid
-   cluster held 52% of the pose changes at 0.043 deg and 0.19 m a frame
-   (76% on 13768-13769, at 0.035 deg and 0.45 m): the station, rigid, in
-   the ship's frame; the records' median displacement of 1.1 m a frame at
-   1.5 km is that turn's lever arm. **The slot is not an identity, even
-   at rest.** Landed, ship still, set stable (4680-4681: nothing
+   frame is the world's, the one the camera rows share.** The scene block
+   the pairs carry is the big block the pass reads its camera from: rows
+   233-235 are that camera, row 241 its world position, and rows 275-279
+   are the HEAD's pose in the ship (cb1[275] reads (0.030, -0.002, 0.000)
+   m, the pilot in the cockpit, its basis turning with the head). Three
+   things place the records in the camera's frame and not the ship's: in
+   flight (11064-11065) the camera's world position moved 1.49 m in the
+   frame while the station's parts moved by a turn of 0.043 deg with a
+   translation of 0.19 m, so the ship's motion is not in the records; the
+   largest cluster's axis is the same on 11064-11065 and 13768-13769
+   (within a few degrees) with the rate 0.035-0.043 deg a frame -- a
+   station's axis, fixed in the world, turning once in a hundred seconds
+   or so -- and the records' median displacement of 1.1 m a frame at 1.5
+   km is that turn's lever arm; and on a distant pair (5784-5785) four
+   records turned 0.207 deg a frame about another axis, the SHIP's own
+   parts at the ship's yaw rate. (A first reading of these pairs called
+   the frame the ship's, from the head's rows; the camera rows in the same
+   block said otherwise.) A pair with the head turning and the ship
+   moving 1.1 m (8360-8361, 1,876 live) had not one record change, which
+   is a frame the game did not rewrite, not a frame that stands still.
+   Docked, nothing moves (4680-4681): the game's frame co-rotates with the
+   station once the ship is attached to it. **The slot is not an identity,
+   even at rest.** Landed, ship still, set stable (4680-4681: nothing
    allocated, 11 freed), 160 of 279 live records sat byte for byte at a
    NEW slot and the nearest same-signature record was at the same slot for
    only 67: the pool is partly re-ordered every frame, so a quarter to a
@@ -1569,16 +1581,46 @@ which is this project's contract for every read of the game.
    **The second block is the current pose**, every pair, 100%. So:
    question 3, no slot identity, content identity instead; question 6,
    one dominant rigid motion (the station) with a few small bodies beside
-   it; question 7, the frame is the ship's, the head's position in
-   cb1[275], and no rebase seen. What follows for the design: the world
-   path already carries the ship's own motion through the camera rows, so
-   a static station part is registered by it, and the per-object work
-   reduces to the STATION's own rotation relative to the ship -- one rigid
-   motion for all its parts -- plus the few other bodies. The classifier's
-   arithmetic is to subtract the ship's motion from each cluster's `D`
-   (the camera's world delta the pass already has, less the head's delta
-   that cb1[275..278] gives in the ship's frame), and the tag's job is
-   membership.
+   it; question 7, the frame is the world's -- the camera rows' -- with
+   no rebase seen. What follows for the design: the world path already
+   carries the ship's own motion through the camera rows, so a static
+   station part is registered by it, and the per-object work reduces to
+   the STATION's own turn in the world -- one rigid motion for all its
+   parts, which the pool's largest cluster gives directly, in the frame
+   the pass already reprojects in -- plus the few other bodies.
+
+   *Built the same afternoon, the body's path* (`fix.temporal_aa_objects`,
+   the player's choice of the two ways to apply it; the stencil tag is
+   not built). No tag and no draw classification, since the pool's slots
+   are re-ordered every frame and nothing per instance survives to the
+   next. Instead the largest rigid cluster's delta `[Rd | td]` -- a point
+   at w now was at Rd w + td last frame, in the world -- is composed with
+   the camera rows into a SECOND reprojection for every pixel the world
+   path takes with a depth (`temporalBodyPath`: W = R_p^T Rd R_n, tv =
+   R_p^T (Rd c_n + td - c_p), the camera path's own z-flip; with Rd = I it
+   is the camera path, which the test pins). Per pixel the two landings
+   are compared by a 3x3 luma SAD against last frame's image -- the pass's
+   own history on its path, NVIDIA's previous output on the trained one,
+   sampled at the render pixel's centre as the registration probe learned
+   to -- and the body's is taken where it matches by a margin
+   (`advanced.temporal_aa_objects_margin`, 0.85: the camera's is the
+   default, and a flat patch that matches both stays with it); landings
+   under a third of a pixel apart ask no question and pay nothing. The
+   body comes from object_probe.cpp's pair diff (every eighth frame, held
+   120 frames -- a station's rate is constant), gated as a body and not a
+   scatter: forty records and a quarter of the pose changes at least,
+   under a degree and twenty metres a frame. On the trained path it stands
+   down on the frames the probe does (a debug view painting into the
+   output, a restart, no history yet). Stats slot 29 counts the pixels
+   that took it; the registration line prints the share with the body's
+   records, turn and age, and `temporal_aa_debug = objects` paints them.
+   What it does not do yet: a second body (another ship, the other
+   station), the ship's own instanced parts (a small cluster at the yaw
+   rate, which the head path already registers), and a diff off the
+   render thread (the pair diff is a millisecond or two every eighth
+   frame while the fix is on). The first flight reads the share against
+   the slot's approach: a few percent far off, most of the frame in the
+   slot, and the panels' smear gone with it.
 4. **Tier 2b** only if question 1 says no bits.
 5. **Tier 3** as `tools/` work against dumped frames, never on the hot
    path.

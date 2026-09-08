@@ -37,9 +37,22 @@ constexpr uint64_t kDumpEveryMs = 30000;
 constexpr uint32_t kDumpMax = 8;
 constexpr uint32_t kSceneSlot = 1;       // the scene block, VS b1: cb1[275] is the camera in the record's frame
 
-bool     g_on = false;
+bool     g_on = false;        // the pool is copied and diffed (the probe, or the fix that reads it)
+bool     g_verbose = false;   // advanced.object_probe: the totals, the dumps, the absent line
 bool     g_wasOn = false;
 uint32_t g_checksLeft = 0;
+// The dominant body's motion for the temporal pass (tier 2): the largest
+// cluster of the last pair, held kMotionHoldFrames after it. The gates
+// below keep a shuffled pool's garbage out: a pair whose largest cluster
+// is a scatter of re-slotted records has no body in it.
+constexpr uint32_t kMotionHoldFrames = 120;
+constexpr uint32_t kMotionMinRecords = 40;
+constexpr float    kMotionMinShare = 0.25f;
+constexpr float    kMotionMaxDeg = 1.0f;    // a frame; a station turns a twentieth of that
+constexpr float    kMotionMaxM = 20.0f;
+ObjectMotion g_motion = {};
+bool     g_motionValid = false;
+uint32_t g_motionAge = 0;
 uint64_t g_checkMs = 0;
 ID3D11Buffer* g_pool = nullptr;      // held (AddRef) while recognised
 uint32_t g_poolBytes = 0;
@@ -383,6 +396,24 @@ void diffPair(const uint8_t* prev, const uint8_t* now, uint32_t bytes) {
         const Cluster& c = clusters[big];
         const double angle = c.angleSum / c.count;
         const double trans = c.transSum / c.count;
+        // The body for the temporal pass: the cluster's own delta, as a
+        // rotation matrix (the quaternion's, in quatRotate's convention:
+        // p_prev = R p_now + t) -- when it is a body and not a scatter.
+        const float share = static_cast<float>(c.count) / static_cast<float>(poseChanged);
+        if (c.count >= kMotionMinRecords && share >= kMotionMinShare &&
+            angle <= static_cast<double>(kMotionMaxDeg) && trans <= static_cast<double>(kMotionMaxM)) {
+            const float x = c.q[0], y = c.q[1], z = c.q[2], w = c.q[3];
+            float* R = g_motion.R;
+            R[0] = 1.0f - 2.0f * (y * y + z * z); R[1] = 2.0f * (x * y - w * z);       R[2] = 2.0f * (x * z + w * y);
+            R[3] = 2.0f * (x * y + w * z);       R[4] = 1.0f - 2.0f * (x * x + z * z); R[5] = 2.0f * (y * z - w * x);
+            R[6] = 2.0f * (x * z - w * y);       R[7] = 2.0f * (y * z + w * x);       R[8] = 1.0f - 2.0f * (x * x + y * y);
+            memcpy(g_motion.t, c.t, sizeof(g_motion.t));
+            g_motion.share = share;
+            g_motion.records = c.count;
+            g_motion.age = 0;
+            g_motionAge = 0;
+            g_motionValid = true;
+        }
         ++g_bigPairs;
         g_bigShareSum += static_cast<double>(c.count) / static_cast<double>(poseChanged);
         g_bigAngleSum += angle;
@@ -649,7 +680,7 @@ void poll(ID3D11DeviceContext* ctx) {
             g_keepValid = true;
         } else if (g_keepValid && g_keepFrame + 1 == s->frame && g_keep.size() == s->bytes) {
             diffPair(g_keep.data(), bytes, s->bytes);
-            if (g_dumps < kDumpMax && dueMs(g_dumpMs, kDumpEveryMs)) {
+            if (g_verbose && g_dumps < kDumpMax && dueMs(g_dumpMs, kDumpEveryMs)) {
                 g_dumpMs = stampMs();
                 ++g_dumps;
                 wchar_t pa[MAX_PATH], pb[MAX_PATH];
@@ -681,10 +712,21 @@ void poll(ID3D11DeviceContext* ctx) {
 }  // namespace
 
 void objectProbeConfigure(Config& cfg) {
-    g_on = cfg.getBool("advanced.object_probe", false);
+    // The probe's readings are for the desk; the pool's copy and diff also
+    // feed the temporal pass's body path (fix.temporal_aa_objects), which
+    // needs them without the log.
+    g_verbose = cfg.getBool("advanced.object_probe", false);
+    g_on = g_verbose || cfg.getBool("fix.temporal_aa_objects", false);
 }
 
 bool objectProbeWantsDraws() { return g_on; }
+
+bool objectMotionGet(ObjectMotion* out) {
+    if (!g_motionValid || !out) return false;
+    *out = g_motion;
+    out->age = g_motionAge;
+    return true;
+}
 
 void objectProbeOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t instances) {
     if (!g_on || g_checksLeft == 0 || !ctx) return;
@@ -781,16 +823,19 @@ void objectProbeFrameBoundary(ID3D11DeviceContext* ctx) {
         if (g_wasOn) {
             // Switched off live: the copies and the reference go, the
             // figures print once more.
-            report();
+            if (g_verbose) report();
             releaseRing();
             releasePool();
             g_wasOn = false;
             g_noted = false;
+            g_motionValid = false;
         }
         return;
     }
     g_wasOn = true;
     ++g_frame;
+    // The body's motion ages a frame; past the hold it is nobody's.
+    if (g_motionValid && ++g_motionAge > kMotionHoldFrames) g_motionValid = false;
     g_checksLeft = (g_pool && !dueMs(g_checkMs, kRecheckMs)) ? 0 : kChecksPerFrame;
     if (!ctx) return;
     guardedBudget(g_budget, [&] {
@@ -799,7 +844,7 @@ void objectProbeFrameBoundary(ID3D11DeviceContext* ctx) {
             const uint32_t phase = g_frame % kPairEvery;
             if (phase == 0 || phase == 1) issueCopy(ctx, phase == 0);
             poll(ctx);
-        } else if (++g_framesWithoutPool == kAbsentFrames && !g_absentNoted) {
+        } else if (++g_framesWithoutPool == kAbsentFrames && !g_absentNoted && g_verbose) {
             g_absentNoted = true;
             Log::get().note(
                 "object probe: on, but no 336-byte structured buffer has been found at VS t33 on "
@@ -811,7 +856,7 @@ void objectProbeFrameBoundary(ID3D11DeviceContext* ctx) {
     });
     if (dueMs(g_reportMs, kReportMs)) {
         g_reportMs = stampMs();
-        report();
+        if (g_verbose) report();
     }
 }
 
@@ -820,6 +865,7 @@ void objectProbeShutdown() {
     releasePool();
     g_on = false;
     g_wasOn = false;
+    g_motionValid = false;
 }
 
 }  // namespace edvr

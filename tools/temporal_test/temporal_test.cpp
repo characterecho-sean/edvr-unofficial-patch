@@ -300,6 +300,74 @@ int main() {
               "reproject: a wider previous frustum pulls the same direction inward");
     }
 
+    {
+        // Tier 2's body path (temporalBodyPath): with no body motion it is
+        // the camera path exactly -- W = R_p^T R_n and tv = R_p^T (c_n -
+        // c_p), z-flipped -- and with a fixed camera it is the body's own
+        // delta, z-flipped. Two camera poses a yaw apart and a step along
+        // x, then a body turning 1 degree about y.
+        float prev[12] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0};
+        float now[12];
+        yaw34(2.0f * 3.14159265f / 180.0f, now);
+        now[3] = 5.0f;   // the camera stepped 5 m along x
+        const float ident[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+        const float none3[3] = {0, 0, 0};
+        float W[9], tv[3];
+        edvr::temporalBodyPath(prev, now, ident, none3, W, tv);
+        // The camera path by hand, the way worldFromRows builds it.
+        float Rp[9], Rn[9], RpT[9], Wc[9], tvc[3];
+        edvr::temporalRot3Of34(prev, Rp);
+        edvr::temporalRot3Of34(now, Rn);
+        edvr::temporalTranspose3(Rp, RpT);
+        edvr::temporalMul3(RpT, Rn, Wc);
+        const float dc[3] = {now[3] - prev[3], now[7] - prev[7], now[11] - prev[11]};
+        edvr::temporalApply3(RpT, dc, tvc);
+        Wc[2] = -Wc[2]; Wc[5] = -Wc[5]; Wc[6] = -Wc[6]; Wc[7] = -Wc[7];
+        tvc[2] = -tvc[2];
+        bool same = true;
+        for (int i = 0; i < 9; ++i) same = same && fabsf(W[i] - Wc[i]) < 1e-6f;
+        for (int i = 0; i < 3; ++i) same = same && fabsf(tv[i] - tvc[i]) < 1e-6f;
+        check(same, "body path: with no body motion it is the camera path");
+        // A fixed camera at the origin: the path is the body's delta itself
+        // (its rotation about y keeps the xz entries, which the flip negates).
+        const float c = cosf(1.0f * 3.14159265f / 180.0f);
+        const float s = sinf(1.0f * 3.14159265f / 180.0f);
+        const float Rd[9] = {c, 0, s, 0, 1, 0, -s, 0, c};
+        const float td[3] = {0.5f, 0.0f, -0.25f};
+        edvr::temporalBodyPath(prev, prev, Rd, td, W, tv);
+        checkNear(W[0], c, 1e-6f, "body path: a fixed camera keeps the body's rotation (xx)");
+        checkNear(W[2], -s, 1e-6f, "body path: ...and flips its xz entry into the eye's frame");
+        checkNear(W[6], s, 1e-6f, "body path: ...and its zx entry");
+        checkNear(tv[0], 0.5f, 1e-6f, "body path: the body's translation passes (x)");
+        checkNear(tv[2], 0.25f, 1e-6f, "body path: ...z-flipped");
+        // A station part that turned with the body: its world position now,
+        // carried back by [Rd | td], must be what the path predicts through
+        // the camera -- the algebra's whole claim, checked at one point.
+        const float pw[3] = {100.0f, 20.0f, -300.0f};
+        float pv[3];   // view-space now: v = R_n^T (w - c_n)
+        float RnT[9];
+        edvr::temporalTranspose3(Rn, RnT);
+        const float wc[3] = {pw[0] - now[3], pw[1] - now[7], pw[2] - now[11]};
+        edvr::temporalApply3(RnT, wc, pv);
+        edvr::temporalBodyPath(prev, now, Rd, td, W, tv);
+        // The path is conjugated into the eye's frame (z back), so it takes
+        // an eye-space point and returns one: flip in, flip out, and the
+        // compare is in the game's own view space.
+        const float pvEye[3] = {pv[0], pv[1], -pv[2]};
+        float got[3];
+        edvr::temporalApply3(W, pvEye, got);
+        for (int i = 0; i < 3; ++i) got[i] += tv[i];
+        got[2] = -got[2];
+        float wprev[3], want[3];
+        edvr::temporalApply3(Rd, pw, wprev);
+        for (int i = 0; i < 3; ++i) wprev[i] += td[i];
+        const float wp[3] = {wprev[0] - prev[3], wprev[1] - prev[7], wprev[2] - prev[11]};
+        edvr::temporalApply3(RpT, wp, want);
+        checkNear(got[0], want[0], 1e-3f, "body path: a turned part lands where the world says (x)");
+        checkNear(got[1], want[1], 1e-3f, "body path: ...(y)");
+        checkNear(got[2], want[2], 1e-3f, "body path: ...(z)");
+    }
+
     if (g_fails) {
         printf("\nTEMPORAL TEST FAILED (%d)\n", g_fails);
         return 1;

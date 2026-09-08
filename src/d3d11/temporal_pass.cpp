@@ -18,6 +18,7 @@
 #include "../common/temporal_math.h"
 #include "depth_probe.h"
 #include "dlaa.h"
+#include "object_probe.h"   // objectMotionGet: the dominant body's own motion, for the body's path (tier 2)
 #include "ui_depth.h"   // uiDepthReactiveMask: the interface's bias mask
 #include "shader_swap.h"
 
@@ -82,6 +83,11 @@ cbuffer P : register(b0) {
     float4 fovea1;      // x the periphery calm strength (0..1), w 1 = the fovea is on (else no modulation)
     float4 movers;      // x 1 = the mover mask is on (ZP holds last frame's depth for this frustum); y the depth tolerance, a fraction; z the strength, how much history a masked pixel loses (0..1); w 1 = main writes ZC
     float4 probe;       // for the mv entry: x the history's scale (H is NVIDIA's previous output at outW/w times the render size); y 1 = run the registration probes against it; z 1 = UM holds the interface's reactive mask, to fold into MK; w unused
+    float4 stR0;        // the body's path (tier 2, docs/per-object-motion.md): the composite delta's rows,
+    float4 stR1;        // the camera's with the dominant body's own turn -- a station's -- in it
+    float4 stR2;
+    float4 tvSt;        // xyz its translation term; w 1 = the body's path is on this frame
+    float4 objects;     // x the match margin (the body's 3x3 SAD must be under this times the camera's); y the least separation, pixels, below which there is no question
 };
 float3 rgbToYcocg(float3 c) {
     return float3(0.25 * c.r + 0.5 * c.g + 0.25 * c.b,
@@ -212,6 +218,58 @@ float moverAt(float2 pp, float zPred, bool thick) {
     float tol = movers.y;
     return (zPred < zmin * (1.0 - tol) || zPred > zmax * (1.0 + tol)) ? 1.0 : 0.0;
 }
+// Tier 2 of docs/per-object-motion.md (2026-09-08): the dominant rigid
+// body's own motion -- a station's turn, read from the game's instance
+// pool by object_probe.cpp in the world frame the camera rows share -- as
+// a SECOND reprojection for the world path's pixels, taken per pixel where
+// last frame's image around its landing matches this frame's better than
+// the camera's landing does. No tag and no draw classification: the choice
+// is local, and a pixel that is not the body's keeps the camera's vector
+// because the body's lands on the wrong content. The pool's slots are
+// re-ordered every frame (its fourth flight), so nothing per instance can
+// be trusted from one frame to the next; a turn shared by a thousand parts
+// can, and this is all it needs.
+float lumaAt(int2 q) {
+    return rgbToYcocg(S.Load(int3(region.xy + clamp(q, int2(0, 0), size - 1), 0)).rgb).x;
+}
+// The history's luma at a render pixel's centre, bilinear: main's H is
+// region-sized and mv's is NVIDIA's previous output at probe.x times the
+// size, and the uv is the same in both (the registration probe's lesson).
+float histLumaAt(float2 q) {
+    return rgbToYcocg(H.SampleLevel(L, (q + 0.5) / float2(size), 0).rgb).x;
+}
+float sad3(int2 p, float2 pp) {
+    float s = 0.0;
+    [unroll] for (int oy = -1; oy <= 1; ++oy) {
+        [unroll] for (int ox = -1; ox <= 1; ++ox) {
+            s += abs(lumaAt(p + int2(ox, oy)) - histLumaAt(pp + float2(ox, oy)));
+        }
+    }
+    return s;
+}
+// Where this pixel's surface was last frame if it moved with the body:
+// the camera's path composed with the body's turn. False when it lands
+// behind the eye or off the image.
+bool bodyPixel(float3 d, float z, out float2 pp, out float zp) {
+    float3 dp = float3(dot(stR0.xyz, d), dot(stR1.xyz, d), dot(stR2.xyz, d)) * z + tvSt.xyz;
+    zp = -dp.z;
+    pp = 0.0;
+    if (dp.z >= -1e-6) return false;
+    float xt = dp.x / -dp.z;
+    float yt = dp.y / -dp.z;
+    pp.x = (xt - tanPrev.x) / (tanPrev.y - tanPrev.x) * float(size.x) - 0.5;
+    pp.y = (tanPrev.w - yt) / (tanPrev.w - tanPrev.z) * float(size.y) - 0.5;
+    return pp.x >= 0.0 && pp.y >= 0.0 && pp.x <= float(size.x) - 1.0 && pp.y <= float(size.y) - 1.0;
+}
+// The body's path over the camera's when its 3x3 matches by the margin
+// (objects.x, under 1: the camera's is the default) and the two land at
+// least objects.y pixels apart; nearer than that there is no question,
+// and no cost.
+bool preferBody(int2 p, float2 ppCam, float2 ppBody) {
+    float2 dd = ppBody - ppCam;
+    if (dot(dd, dd) < objects.y * objects.y) return false;
+    return sad3(p, ppBody) < sad3(p, ppCam) * objects.x;
+}
 // zPred: the predicted view depth of this pixel's surface in last frame's
 // eye space, metres, for the mover mask -- 0 when the pixel took no real
 // depth (the far plane, the menu's assumed depth, no depth bound).
@@ -229,6 +287,7 @@ bool fetchHistoryT(float2 p, float3 r0, float3 r1, float3 r2, float3 tv,
     mvOut = 0.0;
     zPred = 0.0;
     depthN = 0;
+    float zBody = 0.0;   // the depth the body's path would take; 0 = not this pixel's question
     // The world/ship split: the ship's own things (the cockpit, the hull)
     // move with the head's delta; everything farther than split.x metres,
     // and the far plane, moves with the game's CAMERA -- the head and the
@@ -262,6 +321,7 @@ bool fetchHistoryT(float2 p, float3 r0, float3 r1, float3 r2, float3 tv,
             if (!far) {
                 dp = dp * z + tvCam.xyz;
                 zPred = -dp.z;
+                zBody = tvSt.w != 0.0 ? z : 0.0;
             }
         } else if (useDepth && !far) {
             dp = dp * z + tv;
@@ -293,6 +353,19 @@ bool fetchHistoryT(float2 p, float3 r0, float3 r1, float3 r2, float3 tv,
     // of blend / (1 - blend) times that motion, about 0.7 px on slowly
     // drifting distant content, and differed across the image. The rest
     // lock, experimental.shimmer_rest, holds the pose at rest instead.)
+    // The body's path, where this pixel took the world path with a depth:
+    // its landing over the camera's when the history there matches better
+    // (preferBody says how). world = 2 marks the choice for the counters
+    // and the debug view; the fetch below is the same either way.
+    if (zBody > 0.0) {
+        float2 ppB;
+        float zpB;
+        if (bodyPixel(d, zBody, ppB, zpB) && preferBody(int2(p), pp, ppB)) {
+            pp = ppB;
+            zPred = zpB;
+            world = 2;
+        }
+    }
     mvOut = pp - p;
     hy = rgbToYcocg(catmullRom((pp + 0.5) / float2(size), float2(size)).rgb);
     return true;
@@ -362,7 +435,7 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
     // Three counters, not forty. This pass writes 15, 16 and 17 and no
     // others, and a forty-element local array costs forty registers of
     // occupancy on a dispatch that covers the whole eye.
-    uint count15 = 0, count16 = 0, count17 = 0, count28 = 0;
+    uint count15 = 0, count16 = 0, count17 = 0, count28 = 0, count29 = 0;
     if (id.x < (uint)size.x && id.y < (uint)size.y) {
         float2 p = float2(id.xy);
         float3 d;
@@ -373,6 +446,7 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
         float zraw = zAt(region.xy + int2(p));
         float zPred = 0.0;   // for the mover mask: the surface's predicted depth last frame, 0 = none
         uint depthN = 0;     // ...and how many of the 3x3 have a depth now (thick or thin)
+        float zBody = 0.0;   // the depth the body's path would take; 0 = not this pixel's question
         if (knobs.y != 0.0) {
             float zr = 0.0;
             [unroll] for (int oy = -1; oy <= 1; ++oy) {
@@ -393,6 +467,7 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
                 if (!far) {
                     dp = dp * z + tvCam.xyz;
                     zPred = -dp.z;
+                    zBody = tvSt.w != 0.0 ? z : 0.0;
                 }
             } else if (!far) {
                 dp = dp * z + tvUsed.xyz;
@@ -415,6 +490,20 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
             pp.x = (xt - tanPrev.x) / (tanPrev.y - tanPrev.x) * float(size.x) - 0.5;
             pp.y = (tanPrev.w - yt) / (tanPrev.w - tanPrev.z) * float(size.y) - 0.5;
             motion = pp - p;
+            // The body's path over the camera's, where the history at the
+            // camera's landing is on the image to compare against (H is
+            // NVIDIA's previous output here, bound for it).
+            if (zBody > 0.0 && pp.x >= 0.0 && pp.y >= 0.0 &&
+                pp.x <= float(size.x) - 1.0 && pp.y <= float(size.y) - 1.0) {
+                float2 ppB;
+                float zpB;
+                if (bodyPixel(d, zBody, ppB, zpB) && preferBody(int2(p), pp, ppB)) {
+                    pp = ppB;
+                    motion = pp - p;
+                    zPred = zpB;
+                    count29 = 1;
+                }
+            }
             // The mover mask, where the prediction lands on last frame's
             // image (off it NVIDIA has no history to bias against anyway).
             if (movers.x != 0.0 && pp.x >= 0.0 && pp.y >= 0.0 &&
@@ -517,6 +606,11 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
             // Painted the way main's views are, into the output's own size.
             float3 dim = S.Load(int3(region.xy + int2(p), 0)).rgb * 0.25;
             paintDebug(id.xy, size, mover != 0.0 ? float3(1.0, 1.0, 1.0) : dim);
+        } else if (split.y == 5.0) {
+            // The objects view: the pixels that took the body's path, white
+            // over the frame dimmed -- a station should light up whole.
+            float3 dim = S.Load(int3(region.xy + int2(p), 0)).rgb * 0.25;
+            paintDebug(id.xy, size, count29 != 0 ? float3(1.0, 1.0, 1.0) : dim);
         } else if (split.y == 3.0) {
             float zs3 = zSceneAt(region.xy + int2(p));
             float3 o3;
@@ -537,6 +631,7 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
     if (count16 != 0) InterlockedAdd(gCount[16], count16);
     if (count17 != 0) InterlockedAdd(gCount[17], count17);
     if (count28 != 0) InterlockedAdd(gCount[28], count28);
+    if (count29 != 0) InterlockedAdd(gCount[29], count29);
     GroupMemoryBarrierWithGroupSync();
     // Only the counters that moved. A group whose counters are all zero --
     // which is nearly every group, since these count rare classes of pixel
@@ -647,6 +742,7 @@ void main(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
                               knobs.y != 0.0 && tvUsed.w != 0.0, true, worldTaken, mvUsed, zPred,
                               depthN, hy)) {
                 if (worldTaken != 0) count[15] = 1;
+                if (worldTaken == 2) count[29] = 1;   // the body's path taken
                 // The mover mask (moverAt says): a masked pixel keeps less
                 // of its history, by the strength -- at 1 it is the fresh
                 // frame alone, spatially settled by the filter above.
@@ -799,6 +895,9 @@ void main(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
         } else if (split.y == 4.0) {
             // The mover view: the mask white over the frame dimmed.
             o = mover != 0.0 ? float3(1.0, 1.0, 1.0) : cur.rgb * 0.25;
+        } else if (split.y == 5.0) {
+            // The objects view: the pixels that took the body's path.
+            o = worldTaken == 2 ? float3(1.0, 1.0, 1.0) : cur.rgb * 0.25;
         } else if (split.y == 3.0) {
             // The depth view: where each pixel's depth comes from -- the
             // scene's in grey by distance (near bright, log scale to
@@ -1011,8 +1110,13 @@ struct PassParams {
     float   fovea1[4];   // x calm strength 0..1, w 1 = fovea on
     float   movers[4];   // x 1 = mover mask on, y tolerance (fraction), z strength 0..1, w 1 = main writes the depth copy (tier 1, docs/per-object-motion.md)
     float   probe[4];    // x the history's scale for the mv entry's probes (outW / w), y 1 = run them (NVIDIA's previous output bound at t1)
+    float   st0[4];      // the body's path (tier 2, docs/per-object-motion.md): the composite delta's rows...
+    float   st1[4];
+    float   st2[4];
+    float   tvSt[4];     // ...xyz its translation term, w 1 = on this frame
+    float   objects[4];  // x the match margin, y the least separation in pixels
 };
-static_assert(sizeof(PassParams) == 480, "the cbuffer is thirty 16-byte rows");
+static_assert(sizeof(PassParams) == 560, "the cbuffer is thirty-five 16-byte rows");
 
 // The format allowlist: the supersample resolve's, for its reasons
 // (supersample_pass.cpp) -- typeless and UNORM families read and written
@@ -1367,6 +1471,7 @@ constexpr float kSlowDeg = 0.30f;    // under 22 deg/s: a glance
 bool     g_priceLogged = false;
 uint32_t g_lastW = 0, g_lastH = 0;
 uint64_t g_moverPix = 0;   // pixels the mover mask set this interval (Stats[28]; tier 1)
+uint64_t g_bodyPix = 0;    // pixels that took the body's path this interval (Stats[29]; tier 2)
 
 void maybeLogPrice() {
     if (g_priceLogged || g_timeCount < 120 || g_pixelsSeen == 0) return;
@@ -1420,6 +1525,7 @@ void pollSlots(ID3D11DeviceContext* ctx) {
                 g_brightPix += v[16];
                 g_brightNoDepthPix += v[17];
                 g_moverPix += v[28];
+                g_bodyPix += v[29];
                 g_probeWorldDx += static_cast<int32_t>(v[18]);
                 g_probeWorldDy += static_cast<int32_t>(v[19]);
                 g_probeWorldN += v[20];
@@ -1553,6 +1659,14 @@ bool     g_moversOn = false;       // fix.temporal_aa_movers
 float    g_moversTol = 0.03f;      // advanced.temporal_aa_movers_tolerance, percent in the ini
 float    g_moversStrength = 1.0f;  // advanced.temporal_aa_movers_strength
 bool     g_moversNoted = false;    // the engage line, once
+// Tier 2: the dominant body's own path (fix.temporal_aa_objects), from the
+// instance pool's largest rigid cluster (object_probe.cpp), taken per pixel
+// against the camera's by a 3x3 match with this margin.
+bool     g_objectsOn = false;      // fix.temporal_aa_objects
+float    g_objectsMargin = 0.85f;  // advanced.temporal_aa_objects_margin
+bool     g_objectsNoted = false;   // the engage line, once
+ObjectMotion g_bodyLast = {};      // the motion last handed to the shader, for the log
+bool     g_bodyLastValid = false;
 float    g_foveaDeg = 0.0f;        // advanced.temporal_aa_fovea: NVIDIA runs on a crop this many degrees across; 0 = whole frame
 float    g_foveaEdgeDeg = 6.0f;    // advanced.temporal_aa_fovea_edge: the blend band, in degrees
 float    g_peripheryCalm = 0.4f;   // advanced.temporal_aa_periphery_calm: how much the own history is eased toward the periphery (0 uniform, 1 max), the sharp periphery only
@@ -2496,6 +2610,45 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                              g_rowsFollow >= 0;
         for (int i = 0; i < 3; ++i) p.tvCam[i] = worldOn ? tvCam[i] : 0.0f;
         p.tvCam[3] = worldOn ? 1.0f : 0.0f;
+        // Tier 2: the body's path, the camera's composed with the dominant
+        // body's own turn (temporalBodyPath), on whenever the world path is
+        // and the pool has given a body. The trained block below may still
+        // stand it down for a frame it cannot compare against.
+        bool bodyOn = false;
+        if (g_objectsOn && worldOn) {
+            ObjectMotion om;
+            if (objectMotionGet(&om)) {
+                float W[9], tv[3];
+                temporalBodyPath(g_prevRows, g_curRows, om.R, om.t, W, tv);
+                float* rows[3] = {p.st0, p.st1, p.st2};
+                for (int r = 0; r < 3; ++r) {
+                    for (int c = 0; c < 3; ++c) rows[r][c] = W[r * 3 + c];
+                    rows[r][3] = 0.0f;
+                }
+                for (int i = 0; i < 3; ++i) p.tvSt[i] = tv[i];
+                bodyOn = true;
+                g_bodyLast = om;
+                g_bodyLastValid = true;
+                if (!g_objectsNoted) {
+                    g_objectsNoted = true;
+                    Log::get().note(
+                        "temporal aa: the dominant body's own path is on -- the instance pool's largest "
+                        "rigid cluster (%u records, %.0f%% of the pool's movers) turns %.4f deg and moves "
+                        "%.3f m a frame in the world, and each world-path pixel with a depth now takes "
+                        "that path over the camera's where last frame's image matches it better "
+                        "(margin %.2f). The registration line's share says how many did.",
+                        om.records, 100.0 * static_cast<double>(om.share),
+                        static_cast<double>(temporalRotationAngleDeg(om.R)),
+                        sqrt(static_cast<double>(om.t[0]) * om.t[0] + static_cast<double>(om.t[1]) * om.t[1] +
+                             static_cast<double>(om.t[2]) * om.t[2]),
+                        static_cast<double>(g_objectsMargin));
+                }
+            }
+        }
+        p.tvSt[3] = bodyOn ? 1.0f : 0.0f;
+        p.objects[0] = g_objectsMargin;
+        p.objects[1] = 0.3f;
+        p.objects[2] = p.objects[3] = 0.0f;
         p.split[0] = g_shipMetres;
         p.split[1] = static_cast<float>(g_debugMode);
         p.split[2] = g_menuMetres;
@@ -2868,7 +3021,8 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     // The motion vectors and the depth copy -- and, with the
                     // mover mask on, last frame's depth read at t3 and the
                     // mask written at u5 (tier 1, docs/per-object-motion.md).
-                    const bool debugPaint = g_debugMode == 1 || g_debugMode == 3 || g_debugMode == 4;
+                    const bool debugPaint = g_debugMode == 1 || g_debugMode == 3 || g_debugMode == 4 ||
+                                            g_debugMode == 5;
                     // The registration probes against NVIDIA's previous output
                     // (the shader says why, 2026-09-08): its last frame is
                     // still in e.dlOut until the evaluation below overwrites
@@ -2883,6 +3037,15 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                                          e.dlOutSrv && g_statsUav != nullptr;
                     p.probe[0] = static_cast<float>(oW) / static_cast<float>(w);
                     p.probe[1] = probeNv ? 1.0f : 0.0f;
+                    // The body's path (tier 2) compares against the same
+                    // previous output, so it stands down on the frames the
+                    // probe does -- a debug view painting into that output,
+                    // a restart, no history yet -- and the row is put back
+                    // after the dispatch for the crops that follow.
+                    const bool bodyNv = p.tvSt[3] != 0.0f && !debugPaint && e.dlHaveHistory &&
+                                        (flags & 1u) == 0 && e.dlOutSrv;
+                    const float tvStSaved = p.tvSt[3];
+                    if (!bodyNv) p.tvSt[3] = 0.0f;
                     // The interface's reactive mask, when ui_depth marked one
                     // this frame at this size: content that changes without
                     // moving, which no motion vector can describe (ui_depth.h).
@@ -2919,7 +3082,8 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     ctx->CSSetUnorderedAccessViews(0, 6, nullUavM, nullptr);
                     ctx->CSSetShader(g_csMv, nullptr, 0);
                     ID3D11ShaderResourceView* srvsM[5] = {inSrv,
-                                                          probeNv ? e.dlOutSrv : e.histSrv[e.histRead],
+                                                          (probeNv || bodyNv) ? e.dlOutSrv
+                                                                              : e.histSrv[e.histRead],
                                                           depthSrv,
                                                           p.movers[0] != 0.0f ? e.zPrevSrv : nullptr,
                                                           uiBound ? e.uiMaskSrv : nullptr};
@@ -2935,6 +3099,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     ctx->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
                     ctx->CSSetShaderResources(0, 5, nullSrvM);
                     ctx->CSSetUnorderedAccessViews(0, 6, nullUavM, nullptr);
+                    p.tvSt[3] = tvStSaved;
                     if (haveDepth && e.zPrev) zcWritten = true;
                     // What NVIDIA is handed: the union when the mover mask
                     // ran this frame, else the interface's alone (as before
@@ -3558,7 +3723,14 @@ void temporalPassConfigure(Config& cfg) {
     g_shipMetres = ship;
     const std::string dbg = cfg.getString("advanced.temporal_aa_debug", "off");
     g_debugMode = _stricmp(dbg.c_str(), "motion") == 0 ? 1 : _stricmp(dbg.c_str(), "error") == 0 ? 2
-                : _stricmp(dbg.c_str(), "depth") == 0 ? 3 : _stricmp(dbg.c_str(), "movers") == 0 ? 4 : 0;
+                : _stricmp(dbg.c_str(), "depth") == 0 ? 3 : _stricmp(dbg.c_str(), "movers") == 0 ? 4
+                : _stricmp(dbg.c_str(), "objects") == 0 ? 5 : 0;
+    g_objectsOn = cfg.getBool("fix.temporal_aa_objects", false);
+    float margin = cfg.getFloat("advanced.temporal_aa_objects_margin", 0.85f);
+    if (!std::isfinite(margin)) margin = 0.85f;
+    if (margin < 0.5f) margin = 0.5f;
+    if (margin > 1.0f) margin = 1.0f;
+    g_objectsMargin = margin;
     float menu = cfg.getFloat("advanced.temporal_aa_menu_metres", 0.0f);
     if (!std::isfinite(menu) || menu < 0.0f) menu = 0.0f;
     if (menu > 50.0f) menu = 50.0f;
@@ -3918,6 +4090,26 @@ bool temporalPassRegistration(char* buf, size_t n, char* buf2, size_t n2, char* 
                   100.0 * static_cast<double>(g_moverPix) / static_cast<double>(g_intervalPix),
                   100.0 * static_cast<double>(g_moversTol), static_cast<double>(g_moversStrength));
     }
+    // Tier 2: how many pixels took the body's path, and the body it was --
+    // a station should read as a few percent of the frame far off and
+    // most of it in the slot, with its turn steady from interval to
+    // interval; zero with a body in hand means the margin never let it in.
+    if (g_objectsOn && g_intervalPix) {
+        if (g_bodyLastValid) {
+            regAppend(buf, n, used,
+                      "; the body's path took %.2f%% of pixels (the body: %u records, %.0f%% of the "
+                      "pool's movers, %.4f deg and %.3f m a frame, %u frames old)",
+                      100.0 * static_cast<double>(g_bodyPix) / static_cast<double>(g_intervalPix),
+                      g_bodyLast.records, 100.0 * static_cast<double>(g_bodyLast.share),
+                      static_cast<double>(temporalRotationAngleDeg(g_bodyLast.R)),
+                      sqrt(static_cast<double>(g_bodyLast.t[0]) * g_bodyLast.t[0] +
+                           static_cast<double>(g_bodyLast.t[1]) * g_bodyLast.t[1] +
+                           static_cast<double>(g_bodyLast.t[2]) * g_bodyLast.t[2]),
+                      g_bodyLast.age);
+        } else {
+            regAppend(buf, n, used, "; the body's path is on but no body is in hand (no pool, or no pair yet)");
+        }
+    }
     // The third line: the probes and the rows against the head.
     buf = buf3;
     n = buf3 ? n3 : 0;
@@ -4021,6 +4213,7 @@ bool temporalPassRegistration(char* buf, size_t n, char* buf2, size_t n2, char* 
     g_classWorldPix = g_classWorldClip = 0;
     g_classShipPix = g_classShipClip = 0;
     g_moverPix = 0;
+    g_bodyPix = 0;
     g_probeSkyDx = g_probeSkyDy = 0;
     g_probeSkyN = 0;
     memset(g_probeDot, 0, sizeof(g_probeDot));

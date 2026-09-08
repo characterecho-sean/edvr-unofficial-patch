@@ -57,4 +57,20 @@ void objectProbeFrameBoundary(ID3D11DeviceContext* ctx);
 
 void objectProbeShutdown();
 
+// The dominant rigid body's motion between two consecutive frames, in the
+// game's world frame (the one the camera rows share, docs/per-object-motion.md
+// phase 0 question 7): a point at p now was at R p + t last frame. From the
+// largest rigid cluster of the last pair diffed -- a station's turn, with
+// every part of it in one cluster -- and held for a while after, since a
+// station's rate is constant. False until a pair has given one, and again
+// once it has gone stale.
+struct ObjectMotion {
+    float    R[9];       // row-major 3x3
+    float    t[3];
+    float    share;      // of the pair's pose changes the cluster held, 0..1
+    uint32_t records;    // records in it
+    uint32_t age;        // frames since the pair's second frame
+};
+bool objectMotionGet(ObjectMotion* out);
+
 }  // namespace edvr

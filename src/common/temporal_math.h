@@ -232,6 +232,40 @@ inline void temporalViewDelta(const float prev12[12], const float now12[12],
     }
 }
 
+// Tier 2 of docs/per-object-motion.md (2026-09-08): a rigid body's own
+// path. The body moved in the world by [Rd | td] -- a point at w now was
+// at Rd w + td last frame, the instance pool's own delta for its largest
+// cluster (object_probe.cpp), in the frame the camera rows share -- and
+// the rows are read as worldFromRows reads them, [R | c] with a
+// view-space point v at R v + c in the world. So a body point at
+// view-space P now was, last frame, at
+//   R_p^T (Rd (R_n P + c_n) + td - c_p) = W P + tv,
+//   W = R_p^T Rd R_n,   tv = R_p^T (Rd c_n + td - c_p),
+// with the same z-flip conjugation the camera path takes into the eye's
+// frame. With Rd = I and td = 0 it IS the camera path, which the test
+// pins; a station's turn is what it adds.
+inline void temporalBodyPath(const float prev34[12], const float now34[12],
+                             const float Rd[9], const float td[3], float W[9],
+                             float tv[3]) {
+    float Rp[9], Rn[9], RpT[9], tmp[9];
+    temporalRot3Of34(prev34, Rp);
+    temporalRot3Of34(now34, Rn);
+    temporalTranspose3(Rp, RpT);
+    temporalMul3(Rd, Rn, tmp);
+    temporalMul3(RpT, tmp, W);
+    const float cN[3] = {now34[3], now34[7], now34[11]};
+    const float cP[3] = {prev34[3], prev34[7], prev34[11]};
+    float rc[3];
+    temporalApply3(Rd, cN, rc);
+    const float dc[3] = {rc[0] + td[0] - cP[0], rc[1] + td[1] - cP[1], rc[2] + td[2] - cP[2]};
+    temporalApply3(RpT, dc, tv);
+    W[2] = -W[2];
+    W[5] = -W[5];
+    W[6] = -W[6];
+    W[7] = -W[7];
+    tv[2] = -tv[2];
+}
+
 // Are these three rows a rotation? Near-unit, near-orthogonal -- the
 // sun-glare fix's own validation of the game's view rows, shared.
 inline bool temporalRowsAreRotation(const float m34[12]) {
