@@ -202,6 +202,14 @@ void frameTimingBoundary(void* iface, size_t prefix) {
     out.totalGpuMs = raw.totalRenderGpuMs;
     out.compGpuMs = raw.compositorRenderGpuMs;
     out.cpuFrameMs = raw.clientFrameIntervalMs;
+    // The app's busy time, fpsVR's CPU frametime: from the poses arriving
+    // to the second eye's submit. Both stamps are milliseconds on the
+    // compositor's frame clock; a pair that reads backwards or absurd is
+    // reported as unknown rather than as a number.
+    {
+        const float busy = raw.newFrameReadyMs - raw.newPosesReadyMs;
+        out.appCpuMs = (finite(busy) && busy >= 0.0f && busy < 1000.0f) ? busy : 0.0f;
+    }
     out.presentCpuMs = raw.presentCallCpuMs;
     out.idleCpuMs = raw.compositorIdleCpuMs;
     out.displayHz = s.hz;

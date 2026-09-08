@@ -233,6 +233,8 @@ struct Shared {
 // The name is built once, at first use. The two DLLs are in the same process,
 // so the channel between them is unaffected.
 //
+// _v26 because the frame timing sample gained the app's busy time (fpsVR's
+// CPU frametime), and the EDVR-activity and head-lock words.
 // _v25 because the compositor's frame timing joined, for the menu's
 // Monitor page (frame_flag.h, docs/settings-menu.md).
 // _v24 because the settings menu's channel joined: the anchor, the
@@ -275,7 +277,7 @@ const wchar_t* mappingName() {
     static wchar_t name[64];
     static bool built = false;
     if (!built) {
-        _snwprintf_s(name, _TRUNCATE, L"Local\\edvr_glitch_frame_v25_%lu",
+        _snwprintf_s(name, _TRUNCATE, L"Local\\edvr_glitch_frame_v26_%lu",
                      GetCurrentProcessId());
         built = true;
     }

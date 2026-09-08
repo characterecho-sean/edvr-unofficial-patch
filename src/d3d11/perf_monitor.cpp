@@ -38,6 +38,7 @@ struct Frame {
     float    appGpuMs = 0.0f;    // the compositor's word, when published
     float    compGpuMs = 0.0f;
     float    cpuFrameMs = 0.0f;
+    float    appCpuMs = 0.0f;    // the app's busy time, fpsVR's CPU frametime
     uint8_t  reproj = 0;         // any reprojection reason
     uint8_t  motion = 0;         // motion smoothing
     uint8_t  dropped = 0;        // frames dropped at this sample
@@ -446,6 +447,7 @@ void perfMonitorFrame(ID3D11Device* dev) {
         f.appGpuMs = sample.appGpuMs;
         f.compGpuMs = sample.compGpuMs;
         f.cpuFrameMs = sample.cpuFrameMs;
+        f.appCpuMs = sample.appCpuMs;
         f.reproj = (sample.reprojFlags & 0x0Fu) ? 1 : 0;
         f.motion = (sample.reprojFlags & 0x08u) ? 1 : 0;
         f.haveComp = 1;
@@ -538,8 +540,8 @@ int perfMonitorTiles(PerfTile* out, int max) {
     char v[32], sub[48];
 
     // The interval ring, summarised, and the drops attributed.
-    float present[kRing], appGpu[kRing], compGpu[kRing];
-    int cnt = 0, compCnt = 0, reproj = 0, dropped = 0;
+    float present[kRing], appGpu[kRing], compGpu[kRing], appCpu[kRing];
+    int cnt = 0, compCnt = 0, cpuCnt = 0, reproj = 0, dropped = 0;
     int dropsWithEdvr = 0, dropsClean = 0;
     uint32_t dropEventBits = 0;
     double edvrBoundary = 0.0, edvrDoor = 0.0, doorGpu = 0.0;
@@ -552,6 +554,7 @@ int perfMonitorTiles(PerfTile* out, int max) {
             compGpu[compCnt] = f.compGpuMs;
             ++compCnt;
             reproj += f.reproj;
+            if (f.appCpuMs > 0.0f) appCpu[cpuCnt++] = f.appCpuMs;
         }
         dropped += f.dropped;
         edvrBoundary += f.cpuBoundaryMs;
@@ -574,13 +577,24 @@ int perfMonitorTiles(PerfTile* out, int max) {
     const float budget = hz > 0.0f ? 1000.0f / hz : 11.1f;
     const float windowS = ps.count ? ps.count * ps.avgMs / 1000.0f : 0.0f;
 
-    // Row 1: the frame.
+    // Row 1: the frame. FRAME TIME is fpsVR's number -- the app's BUSY time
+    // from the compositor, poses ready to second submit -- and the Present
+    // period sits on its sub-line. The two differ by the wait for the
+    // compositor's running start when the game is hitting rate (flown
+    // 2026-09-07: about 2 ms on a 90 Hz Pimax), so a tile that showed the
+    // period read as slower than fpsVR by exactly that.
     if (ps.count) {
         snprintf(v, sizeof(v), "%.1f", perfFpsOf(ps.avgMs));
         snprintf(sub, sizeof(sub), "fps, %.0f s window", windowS);
         tile("FRAME RATE", v, sub);
-        snprintf(v, sizeof(v), "%.1f", ps.avgMs);
-        snprintf(sub, sizeof(sub), "ms, max %.1f", ps.maxMs);
+        if (cpuCnt) {
+            const PerfStats ac = perfStatsOf(appCpu, cpuCnt);
+            snprintf(v, sizeof(v), "%.1f", ac.avgMs);
+            snprintf(sub, sizeof(sub), "ms busy, max %.1f; period %.1f", ac.maxMs, ps.avgMs);
+        } else {
+            snprintf(v, sizeof(v), "%.1f", ps.avgMs);
+            snprintf(sub, sizeof(sub), "ms period, max %.1f (no busy time)", ps.maxMs);
+        }
         tile("FRAME TIME", v, sub);
         snprintf(v, sizeof(v), "%.0f", perfFpsOf(ps.p99Ms));
         snprintf(sub, sizeof(sub), "fps, slowest 1%% = %.1f ms", ps.p99Ms);
@@ -773,7 +787,17 @@ void perfMonitorOverlayLine(char* buf, size_t bufLen) {
     }
     char drop[40] = "";
     if (dropped) snprintf(drop, sizeof(drop), "   %d dropped", dropped);
-    snprintf(buf, bufLen, "%.0f fps   %.1f ms%s%s", perfFpsOf(ps.avgMs), ps.avgMs, gpu, drop);
+    // The overlay's ms is the busy time too, when the compositor gives it.
+    float appCpu[kRing];
+    int cpuN = 0;
+    float secs2 = 0.0f;
+    for (int i = s.count - 1; i >= 0 && secs2 < 1.0f; --i) {
+        const Frame& f = ringAt(i);
+        if (f.haveComp && f.appCpuMs > 0.0f) appCpu[cpuN++] = f.appCpuMs;
+        secs2 += f.presentMs / 1000.0f;
+    }
+    const float ms = cpuN ? perfStatsOf(appCpu, cpuN).avgMs : ps.avgMs;
+    snprintf(buf, bufLen, "%.0f fps   %.1f ms%s%s", perfFpsOf(ps.avgMs), ms, gpu, drop);
     buf[bufLen - 1] = 0;
 }
 

@@ -332,6 +332,13 @@ and where it applies, the measured cost or the restart badge.
    - EDVR's own passes' measured cost, from the totals they already keep;
    - a **frame-time strip** of the last 120 frames against the budget
      line, green within it, amber over it, red at twice it.
+   **FRAME TIME is fpsVR's number**: the app's busy time from the
+   compositor's timing (poses ready to the second eye's submit), not the
+   Present period, which sits on the tile's sub-line. Flown 2026-09-07:
+   the period read 2 ms slower than fpsVR on a 90 Hz Pimax, and the 2 ms
+   is the wait for the compositor's running start when the game is
+   hitting rate. Frame rate, the 1% low and the strip stay on the period,
+   as fpsVR's do.
    Laid out as **sixteen tiles, four across** -- a caption, one big
    number, one small line each -- after the first flight found rows of
    sentences full of numbers unreadable in a headset; the last drop and

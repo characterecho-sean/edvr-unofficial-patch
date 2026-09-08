@@ -386,7 +386,8 @@ struct FrameTimingSample {
     float    appGpuMs;        // pre-submit + post-submit GPU time, the app's
     float    totalGpuMs;      // from the previous present to the end of compositor work
     float    compGpuMs;       // the compositor's own GPU time
-    float    cpuFrameMs;      // the app's interval between WaitGetPoses calls
+    float    cpuFrameMs;      // the app's interval between WaitGetPoses calls (the period)
+    float    appCpuMs;        // the app's BUSY time: poses ready to second submit -- fpsVR's CPU frametime
     float    presentCpuMs;    // time blocked in Present
     float    idleCpuMs;       // compositor-measured slack before running start
     float    displayHz;       // the headset's refresh, or 0 when unknown
