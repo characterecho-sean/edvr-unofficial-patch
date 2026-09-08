@@ -1237,3 +1237,28 @@ view's green), `crisp_ui.cpp` (the re-issue and the depth target).
    should the layer refuse below a VRAM floor?
 5. Whether the CAS resample path (A5, second option) is worth carrying at
    all, given inflation.
+
+## 2026-09-08, later: the flight HUD's depth under its strokes
+
+Found by the per-object motion work: once the temporal pass registered a
+station's turn, the station under a target bracket showed a blurred quad
+the size of the bracket's bounding box, at any reactive strength. The
+flight HUD family (`vs B7790CBFC6554097`) draws into the scene's pair under
+the writing twin, and its pixel shader (`8DEF46452FA459F5`) marches a
+noise-modulated capsule per stroke and emits the quad's empty corners at
+alpha nought without a discard -- so the twin wrote the bracket's depth
+over the whole quad. It had no coverage shader either, so the reactive
+mask never covered it.
+
+`kHudDepthHlsl` (ui_depth.cpp) transcribes the shader's pre-march part
+register for register -- the manual depth test at t0, the fade, the
+capsule's geometry and the normalised squared distance q from its axis,
+the screen-space mode -- and bounds the march (density is nought past
+q = 0.571 at full noise; the stand-in ramps to nought at q = 0.35, times
+the fade, clipped below the floor). `Mode::kReissueScene` sends the family
+through the second draw in the scene's own viewport: no writing twin, depth
+by the reissue with the nearer-wins test, the mask marked by the same draw.
+The family line reads "the flight HUD; its depth written by the coverage
+pass in the scene's projection". If a HUD element ever loses depth it
+should have, q's ramp (0.35) is the knob; if a quad gains it, the ramp is
+too wide.

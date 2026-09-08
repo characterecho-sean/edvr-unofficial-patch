@@ -1727,6 +1727,30 @@ which is this project's contract for every read of the game.
    approach's general softness is DLSS at 50% per axis under 5 m a frame
    of motion, the candidate that has stood since the third flight of the
    day, with the station small on screen.
+
+   *Its fifth flight* (16:42, `v0.14.1-66-gc245d88`; reactive 0.5 and
+   then 0): the station clear, the bracket still "a quad that is blurred
+   under the bracket" at either strength -- so not the mask. The player
+   was right that the brackets have depth, and that is the fault: the
+   flight HUD family draws into the scene's pair under ui_depth's WRITING
+   twin, and its pixel shader (`8DEF46452FA459F5`, disassembled from the
+   dump) is no vector rasteriser -- it marches a noise-modulated capsule
+   for each stroke and emits the empty corners of the stroke's bounding
+   quad at alpha nought without a discard, so the twin wrote the
+   bracket's depth over the whole quad and the station beneath reprojected
+   at it. The family had no coverage shader either, so the reactive mask
+   never covered it, which is why the strength changed nothing. Fixed in
+   ui_depth (the crisp-UI workstream's module, at the player's word):
+   `kHudDepthHlsl` transcribes the shader's pre-march part register for
+   register and bounds the march with a ramp to nought at q = 0.35, and
+   the family goes through the second draw in the scene's own projection
+   (`Mode::kReissueScene`) -- depth under the strokes' cores, the mask
+   marked by the same draw, and the game's own draw left without a
+   writing twin. What this flight taught about distance is recorded with
+   the settings: the render is 2514 in both modes, DLSS is a 2x round
+   trip through the supersample resolve (whose kernel had been the calm
+   Gaussian since a menu toggle), and the levers are the crisp kernel,
+   `texture_lod_bias = auto`, and Elite's HMD Quality.
 4. **Tier 2b** only if question 1 says no bits.
 5. **Tier 3** as `tools/` work against dumped frames, never on the hot
    path.

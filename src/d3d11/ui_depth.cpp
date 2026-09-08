@@ -31,6 +31,11 @@ constexpr uint64_t kGuiText   = 0x1012E00B3CB44469ull;
 constexpr uint64_t kGuiIcons  = 0xA3E5D3FCBC1165F8ull;
 // The flight HUD's vector family, drawn straight into the eye (hud_grain.h).
 constexpr uint64_t kFlightHud = 0xB7790CBFC6554097ull;
+// ...and its pixel shader, which is no vector rasteriser: it MARCHES a
+// noise-modulated capsule for each stroke (kHudDepthHlsl says what it does
+// before the march), and the empty corners of a stroke's bounding quad come
+// out at alpha nought without a discard.
+constexpr uint64_t kFlightHudPs = 0x8DEF46452FA459F5ull;
 // The cockpit's holo-panel family (panel_upscale.h).
 constexpr uint64_t kHoloPanel = 0x81216C77F90DEDD6ull;
 // The two interface composites drawn through the interface projection: the
@@ -323,6 +328,82 @@ const char kHoloDepthHlsl[] =
     "    return floorAndStrength.y;\n"
     "}\n";
 
+// THE FLIGHT HUD'S COVERAGE, for the depth pass in the scene's projection.
+//
+// Under the writing twin the HUD's own draw wrote depth over every pixel of
+// each stroke's bounding quad, and once the temporal pass registered a
+// station's turn (docs/per-object-motion.md, tier 2) the station under a
+// target bracket showed "a quad that is blurred under the bracket" (the
+// player, 2026-09-08): those pixels carried the bracket's depth and not the
+// station's. The shader's disassembly (ps 8DEF46452FA459F5, the dump of
+// 2026-09-06) says why no discard saves them: after a manual depth test
+// against the eye-sized depth resolve at t0 (v1 holds the clip position),
+// a fade from the distance and the element's own strength, and the
+// geometry of one stroke -- a capsule from TEXCOORD5 to TEXCOORD16 of
+// radius TEXCOORD13.w, the ray from TEXCOORD0 through the pixel's world
+// point in TEXCOORD18 -- it marches cb1[203].w steps along the ray inside
+// that capsule, sampling three octaves of value noise from t1, and the
+// density at each step is a smoothstep of (noise * 0.571 - q), q being the
+// normalised squared distance from the stroke's axis. Where q exceeds the
+// noise the sum is nought, the transmittance stays one, and the pixel is
+// emitted at alpha nought with its depth written all the same.
+//
+// This stand-in transcribes everything before the march register for
+// register -- the same test, the same discards, the same q -- and stands in
+// for the march with its own bound: the density is nought past q = 0.571 at
+// full noise and about half that at the noise's mean, so the alpha is taken
+// as the fade times a ramp that reaches nought at q = 0.35, and clipped
+// below the floor. That writes depth under a stroke's bright core and not
+// under its bounding quad, which is the whole of the errand; the glow's
+// fringe, a few pixels of faint light, keeps the scene's depth beneath it.
+// The screen-space mode of the same shader (TEXCOORD2.w over a half) takes
+// its distance from TEXCOORD17.x, and is transcribed too.
+const char kHudDepthHlsl[] =
+    "Texture2D<float4> Depth : register(t0);\n"
+    "SamplerState Smp1 : register(s1);\n"
+    "cbuffer CB1 : register(b1) { float4 cb1[205]; };\n"
+    "cbuffer P : register(b13) { float4 floorAndStrength; };\n"
+    "struct In {\n"
+    "    float4 tc0 : TEXCOORD0;\n"
+    "    float4 tc1 : TEXCOORD1;\n"
+    "    float4 tc2 : TEXCOORD2;\n"
+    "    float4 tc5 : TEXCOORD5;\n"
+    "    float4 tc9 : TEXCOORD9;\n"
+    "    float4 tc10 : TEXCOORD10;\n"
+    "    float4 tc13 : TEXCOORD13;\n"
+    "    float4 tc16 : TEXCOORD16;\n"
+    "    float2 tc17 : TEXCOORD17;\n"
+    "    float3 tc18 : TEXCOORD18;\n"
+    "};\n"
+    "float4 main(In i) : SV_Target {\n"
+    "    // The game's own depth test against the resolve at t0.\n"
+    "    float2 uv = i.tc1.xy / i.tc1.z * 0.5 + 0.5;\n"
+    "    float sceneZ = Depth.Sample(Smp1, float2(uv.x, 1.0 - uv.y)).x;\n"
+    "    if (sceneZ - i.tc1.z < 0.0) discard;\n"
+    "    if (i.tc5.w - 0.01 < 0.0) discard;\n"
+    "    // The fade: the element's strength against a distance term.\n"
+    "    float k = cb1[204].x / (cb1[204].x + 0.00001);\n"
+    "    float fade = saturate(length(i.tc10.xyz) * 0.05 - i.tc13.w * 0.5);\n"
+    "    float near = saturate(i.tc9.w / max(cb1[204].x, 0.01));\n"
+    "    float opacity = k * (near - fade) + fade;\n"
+    "    if (opacity - 0.001 < 0.0) discard;\n"
+    "    // One stroke's capsule, and the pixel's distance from its axis.\n"
+    "    float3 seg = i.tc5.xyz - i.tc16.xyz;\n"
+    "    if (length(seg) - 0.01 < 0.0) discard;\n"
+    "    float3 e = i.tc18.xyz - i.tc5.xyz;\n"
+    "    float t = dot(e, -seg) / (seg.x * seg.x);\n"
+    "    float dist;\n"
+    "    if (t < 0.0) dist = length(e);\n"
+    "    else if (t > 1.0) dist = length(i.tc18.xyz - (i.tc5.xyz - seg));\n"
+    "    else dist = length(i.tc18.xyz - (i.tc5.xyz - t * seg));\n"
+    "    float nd = i.tc2.w > 0.5 ? (i.tc17.x * 2.0 - 1.0) : saturate(dist / i.tc13.w);\n"
+    "    float q = nd * nd;\n"
+    "    // The march's bound stands in for the march.\n"
+    "    float a = opacity * saturate(1.0 - q / 0.35);\n"
+    "    clip(a - floorAndStrength.x);\n"
+    "    return floorAndStrength.y;\n"
+    "}\n";
+
 // A transcription stands in for the pixel shaders it names -- and, when the
 // game draws a variant none of them names, for any pixel shader of the same
 // VERTEX family that takes the interface surface from the slot this one
@@ -344,9 +425,14 @@ struct DepthShader {
     ID3D11PixelShader*  shader;
     bool                tried;
 };
-DepthShader g_depthShaders[3] = {
+DepthShader g_depthShaders[4] = {
     {{kPanelPs, kPanelPsTinted, kPanelPsCheap, 0}, {kPanelVs, 0, 0, 0}, 1,
      kPanelDepthHlsl, sizeof(kPanelDepthHlsl) - 1, "ui_depth_panel_ps", nullptr, false},
+    // The flight HUD's coverage (kHudDepthHlsl): its slot is the depth
+    // resolve it tests against, not an interface surface, so no variant of
+    // another family can borrow it by slot.
+    {{kFlightHudPs, 0, 0, 0}, {kFlightHud, 0, 0, 0}, 0xFFFFu,
+     kHudDepthHlsl, sizeof(kHudDepthHlsl) - 1, "ui_depth_hud_ps", nullptr, false},
     // The loader's curved screen and the sprite composite are one shader's
     // work apart: both take one bilinear sample of t0 through s0 at
     // TEXCOORD0 and discard on its alpha, so this transcription is already
@@ -423,7 +509,12 @@ bool        g_frameTargetsFullNoted = false;
 
 // Per draw: what the classification decided, consumed by Begin/End and by
 // the re-issue.
-enum class Mode { kNone, kInPlace, kReissue };
+// kReissueScene: a scene-projection family whose depth goes through the
+// second draw with a coverage shader instead of the writing twin -- the
+// flight HUD, whose own draw would write every pixel of a stroke's
+// bounding quad. No viewport change and no rebind: it already draws into
+// the scene's pair with the scene's projection.
+enum class Mode { kNone, kInPlace, kReissue, kReissueScene };
 Mode                     g_mode = Mode::kNone;
 bool                     g_engaged = false;
 ID3D11DepthStencilState* g_savedDss = nullptr;   // the in-place swap's, owned by Begin/End
@@ -1285,18 +1376,28 @@ bool uiDepthOnEyeDraw(ID3D11DeviceContext* ctx) {
         g_mode = Mode::kInPlace;
         const bool wantLine = g_familyLoggedCount < kMaxFamilyLines;
         const bool wantMask = g_reactive > 0.0f && g_trained;
-        const uint64_t ph = (wantMask || wantLine) ? boundPsHash(ctx) : 0;
+        // The flight HUD's depth goes through the second draw with its
+        // coverage shader (kHudDepthHlsl says why), so its pixel stage is
+        // always looked up; the others only when the mask or the line
+        // wants it.
+        const bool hud = h == kFlightHud;
+        const uint64_t ph = (hud || wantMask || wantLine) ? boundPsHash(ctx) : 0;
+        DepthShader* shader = (hud || wantMask) ? depthShaderFor(ctx, ph, h, surfaceSlot) : nullptr;
+        if (hud && shader) {
+            g_mode = Mode::kReissueScene;
+            g_reissueShader = shader;
+        }
         // The reactive mask, when one is asked for and this family's pixel
-        // stage has a coverage shader: a second draw marks it. The depth
-        // is already written in place by the game's own draw.
-        if (wantMask) {
-            DepthShader* shader = depthShaderFor(ctx, ph, h, surfaceSlot);
+        // stage has a coverage shader: the second draw marks it. For the
+        // in-place families the depth is already written by the game's own
+        // draw; for the flight HUD the same second draw writes it.
+        if (shader && (wantMask || g_mode == Mode::kReissueScene)) {
             ResourceInfo rt;
-            if (shader && bindingResolve(bindingGet(BindSlot::Rtv0), &rt) && rt.isTexture2D) {
+            if (bindingResolve(bindingGet(BindSlot::Rtv0), &rt) && rt.isTexture2D) {
                 int eye = eyeIndexFor(rt.resource, rt.a, rt.b, rt.fmt);
                 if (eye >= 0 && g_eyesSwapped) eye = 1 - eye;
                 if (eye >= 0) {
-                    g_wantMask = true;
+                    g_wantMask = wantMask;
                     g_reissueShader = shader;
                     g_drawEye = eye;
                     g_rebindW = rt.a;
@@ -1306,9 +1407,12 @@ bool uiDepthOnEyeDraw(ID3D11DeviceContext* ctx) {
         }
         if (wantLine) {
             noteFamily(h, ph,
-                       composite ? "samples a learned surface; writes its depth in "
-                                   "place, the scene's own encoding"
-                                 : "named direct family; writes its depth in place");
+                       g_mode == Mode::kReissueScene
+                           ? "the flight HUD; its depth written by the coverage pass in the "
+                             "scene's projection, under its strokes and not their quads"
+                       : composite ? "samples a learned surface; writes its depth in "
+                                     "place, the scene's own encoding"
+                                   : "named direct family; writes its depth in place");
         }
         if (composite) {
             ++g_wComposite;
@@ -1395,8 +1499,10 @@ bool uiDepthOnEyeDraw(ID3D11DeviceContext* ctx) {
 bool uiDepthWantsReissue() {
     if (!g_reissueShader) return false;
     // The interface-projection composites always want it (their depth is
-    // written by it); the in-place families only when a mask is asked for.
-    return g_mode == Mode::kReissue || (g_mode == Mode::kInPlace && g_wantMask);
+    // written by it), and so does the flight HUD in the scene's projection;
+    // the in-place families only when a mask is asked for.
+    return g_mode == Mode::kReissue || g_mode == Mode::kReissueScene ||
+           (g_mode == Mode::kInPlace && g_wantMask);
 }
 
 void uiDepthBegin(ID3D11DeviceContext* ctx) {
@@ -1462,7 +1568,8 @@ bool uiDepthReissueBegin(ID3D11DeviceContext* ctx) {
     g_reissueOn = false;
     g_rebound = false;
     if (!g_on || g_stoodDown || !g_reissueShader) return false;
-    const bool depthPass = g_mode == Mode::kReissue;   // this draw writes depth
+    const bool depthPass = g_mode == Mode::kReissue || g_mode == Mode::kReissueScene;   // this draw writes depth
+    const bool sceneProjection = g_mode == Mode::kReissueScene;   // ...in the scene's own viewport
     const bool wantMask = g_wantMask;
     const bool rebind = g_wantRebind;
     g_wantRebind = false;
@@ -1530,7 +1637,7 @@ bool uiDepthReissueBegin(ID3D11DeviceContext* ctx) {
         ctx->PSGetShader(&g_savedPs, nullptr, nullptr);
         ctx->PSSetShader(shader->shader, nullptr, 0);
         ctx->PSSetConstantBuffers(13, 1, &cb);
-        if (depthPass) scaleViewportsForUi(ctx);
+        if (depthPass && !sceneProjection) scaleViewportsForUi(ctx);
         g_reissueOn = true;
         if (depthPass) {
             ++g_wReissued;
