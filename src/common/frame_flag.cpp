@@ -217,6 +217,7 @@ struct Shared {
     // frame boundary.
     volatile LONG     edvrEvents;
     volatile LONG     doorCpuUs;
+    volatile LONG     waitCpuUs;
 };
 
 // Per PROCESS, not per logon session.
@@ -233,6 +234,8 @@ struct Shared {
 // The name is built once, at first use. The two DLLs are in the same process,
 // so the channel between them is unaffected.
 //
+// _v28 because the frame timing sample names its layout (184 or 176) and
+// the WaitGetPoses block time crosses for the render thread's busy time.
 // _v27 because the frame timing sample is now the SETTLED record (two
 // compositor frames back) and carries the compositor's CPU time and the
 // poses-ready and frame-ready stamps.
@@ -280,7 +283,7 @@ const wchar_t* mappingName() {
     static wchar_t name[64];
     static bool built = false;
     if (!built) {
-        _snwprintf_s(name, _TRUNCATE, L"Local\\edvr_glitch_frame_v27_%lu",
+        _snwprintf_s(name, _TRUNCATE, L"Local\\edvr_glitch_frame_v28_%lu",
                      GetCurrentProcessId());
         built = true;
     }
@@ -777,6 +780,16 @@ void addDoorCpuUs(uint32_t us) {
 uint32_t takeDoorCpuUs() {
     Shared* s = map();
     return s ? static_cast<uint32_t>(InterlockedExchange(&s->doorCpuUs, 0)) : 0u;
+}
+
+void addWaitCpuUs(uint32_t us) {
+    Shared* s = map();
+    if (s && us) InterlockedExchangeAdd(&s->waitCpuUs, static_cast<LONG>(us > 1000000u ? 1000000u : us));
+}
+
+uint32_t takeWaitCpuUs() {
+    Shared* s = map();
+    return s ? static_cast<uint32_t>(InterlockedExchange(&s->waitCpuUs, 0)) : 0u;
 }
 
 void publishFrameTiming(const FrameTimingSample& sample) {

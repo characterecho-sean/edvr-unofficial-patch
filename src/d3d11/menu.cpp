@@ -105,6 +105,37 @@ struct KeyRepeat {
     uint64_t nextMs = 0;
 };
 
+// The keys a typed value can be built from: the digits (top row and the
+// numeric pad), the letters, and the punctuation a value in this ini can
+// contain -- a decimal point, a minus, a comma for a list, a space, and
+// Backspace. Nothing else is admitted, so a stray key cannot corrupt a
+// value, and the gate keeps every one of them from the game meanwhile.
+struct EditKey {
+    int  vk;
+    char plain;    // the character it types, or 0 for Backspace
+    char shifted;  // what Shift makes of it, when that differs
+};
+constexpr EditKey kEditKeys[] = {
+    {'0', '0', ')'}, {'1', '1', '!'}, {'2', '2', '@'}, {'3', '3', '#'}, {'4', '4', '$'},
+    {'5', '5', '%'}, {'6', '6', '^'}, {'7', '7', '&'}, {'8', '8', '*'}, {'9', '9', '('},
+    {VK_NUMPAD0, '0', '0'}, {VK_NUMPAD1, '1', '1'}, {VK_NUMPAD2, '2', '2'},
+    {VK_NUMPAD3, '3', '3'}, {VK_NUMPAD4, '4', '4'}, {VK_NUMPAD5, '5', '5'},
+    {VK_NUMPAD6, '6', '6'}, {VK_NUMPAD7, '7', '7'}, {VK_NUMPAD8, '8', '8'},
+    {VK_NUMPAD9, '9', '9'}, {VK_DECIMAL, '.', '.'}, {VK_SUBTRACT, '-', '-'},
+    {'A', 'a', 'A'}, {'B', 'b', 'B'}, {'C', 'c', 'C'}, {'D', 'd', 'D'}, {'E', 'e', 'E'},
+    {'F', 'f', 'F'}, {'G', 'g', 'G'}, {'H', 'h', 'H'}, {'I', 'i', 'I'}, {'J', 'j', 'J'},
+    {'K', 'k', 'K'}, {'L', 'l', 'L'}, {'M', 'm', 'M'}, {'N', 'n', 'N'}, {'O', 'o', 'O'},
+    {'P', 'p', 'P'}, {'Q', 'q', 'Q'}, {'R', 'r', 'R'}, {'S', 's', 'S'}, {'T', 't', 'T'},
+    {'U', 'u', 'U'}, {'V', 'v', 'V'}, {'W', 'w', 'W'}, {'X', 'x', 'X'}, {'Y', 'y', 'Y'},
+    {'Z', 'z', 'Z'},
+    {VK_OEM_PERIOD, '.', '>'}, {VK_OEM_MINUS, '-', '_'}, {VK_OEM_COMMA, ',', '<'},
+    {VK_SPACE, ' ', ' '}, {VK_BACK, 0, 0},
+};
+constexpr int kEditKeyCount = static_cast<int>(sizeof(kEditKeys) / sizeof(kEditKeys[0]));
+// A typed value is never longer than this: the longest thing in the ini is
+// a key name, and the row has to show it.
+constexpr size_t kEditMax = 40;
+
 struct State {
     bool configured = false;
     Hotkey summon;
@@ -134,6 +165,15 @@ struct State {
 
     KeyRepeat keys[12];
     bool shiftHeld = false;
+
+    // Typing a value (a number, or a free string): the row being typed
+    // into, the buffer, and the caret's blink. Enter opens and commits,
+    // Escape cancels, Backspace deletes.
+    int         editEntry = -1;      // an entry index on the current page, or -1
+    int         editDef = -1;
+    std::string editBuf;
+    bool        editBad = false;     // the buffer is out of bounds or not a number
+    KeyRepeat   editKeys[kEditKeyCount];
 
     bool aimParked = false;
     int  aimSameCount = 0;
@@ -775,15 +815,79 @@ void buildMonitor(MenuContent& c) {
 // ---------------------------------------------------------------------------
 // Content
 
+// The bitmap's size, from the headset's own pixels per degree at the
+// panel: the panel is specified in degrees, so it reads the same size in
+// any headset and composites near 1:1.
+void sizeContent(MenuContent& c, float widthDeg, float textDeg) {
+    float ppd = 45.0f;
+    uint32_t ew = 0, eh = 0;
+    float outer = 0.0f, inner = 0.0f;
+    if (eyeTextureSize(&ew, &eh) && eyeTangents(&outer, &inner) && ew > 0) {
+        const float spanDeg = (atanf(outer) + atanf(inner)) * 57.2957795f;
+        if (spanDeg > 20.0f) ppd = static_cast<float>(ew) / spanDeg;
+    }
+    if (ppd < 12.0f) ppd = 12.0f;
+    if (ppd > 80.0f) ppd = 80.0f;
+    c.widthPx = static_cast<int>(ppd * widthDeg + 0.5f);
+    if (c.widthPx < 480) c.widthPx = 480;
+    if (c.widthPx > 1600) c.widthPx = 1600;
+    c.capPx = static_cast<int>(ppd * textDeg + 0.5f);
+    if (c.capPx < 10) c.capPx = 10;
+    if (c.capPx > 80) c.capPx = 80;
+}
+
 void buildContent(MenuContent& c) {
     State& s = g_s;
     memset(&c, 0, sizeof(c));
-    c.tabCount = static_cast<int>(s.pages.size());
-    if (c.tabCount > kMenuMaxTabs) c.tabCount = kMenuMaxTabs;
-    for (int i = 0; i < c.tabCount; ++i) {
-        strncpy(c.tabs[i], s.pages[i].name, sizeof(c.tabs[i]) - 1);
+    c.popupLine = -1;
+    sizeContent(c, s.widthDeg, s.textDeg);
+
+    // The tab strip: a window of pages that fits the panel, always
+    // including the current one, with an arrow at whichever end has more.
+    // Developer mode adds four pages, and the strip ran off the edge --
+    // the tabs beyond it could not be seen, so nothing said they existed.
+    {
+        const int total = static_cast<int>(s.pages.size());
+        const int pad = c.capPx * 8 / 10;
+        const int gap = c.capPx / 2;
+        const int arrow = c.capPx;    // the room an arrow takes at either end
+        // The panel's own estimate of a tab's width, the raster's formula.
+        auto tabWidth = [&](int i) {
+            return static_cast<int>(strlen(s.pages[i].name)) * c.capPx * 6 / 10 + c.capPx;
+        };
+        int first = 0, last = total - 1;
+        int room = c.widthPx - 2 * pad;
+        // Grow outward from the current page while there is room, ending
+        // before the arrows that say what is left over.
+        first = last = s.page;
+        room -= tabWidth(s.page);
+        for (bool grew = true; grew;) {
+            grew = false;
+            if (last + 1 < total) {
+                const int need = tabWidth(last + 1) + gap + (last + 2 < total ? arrow : 0);
+                if (need <= room) {
+                    room -= tabWidth(last + 1) + gap;
+                    ++last;
+                    grew = true;
+                }
+            }
+            if (first > 0) {
+                const int need = tabWidth(first - 1) + gap + (first - 1 > 0 ? arrow : 0);
+                if (need <= room) {
+                    room -= tabWidth(first - 1) + gap;
+                    --first;
+                    grew = true;
+                }
+            }
+        }
+        if (last - first + 1 > kMenuMaxTabs) last = first + kMenuMaxTabs - 1;
+        for (int i = first; i <= last; ++i) {
+            strncpy(c.tabs[c.tabCount++], s.pages[i].name, sizeof(c.tabs[0]) - 1);
+        }
+        c.activeTab = s.page - first;
+        c.tabMoreLeft = first > 0;
+        c.tabMoreRight = last < total - 1;
     }
-    c.activeTab = s.page;
     Page& p = s.pages[s.page];
     const int pendingN = pendingRestartCount();
 
@@ -822,9 +926,14 @@ void buildContent(MenuContent& c) {
             }
             const MenuRowDef& d = kMenuRows[e.def];
             const RowState& r = g_rows[e.def];
+            const bool editingThis = (s.editEntry == i);
             strncpy(l.left, d.label, sizeof(l.left) - 1);
             std::string v = displayValue(d, r.value);
-            if (r.pending) {
+            if (editingThis) {
+                // What has been typed, with a caret. The raster shows a
+                // typed row in the value colour whatever its kind.
+                v = s.editBuf + "_";
+            } else if (r.pending) {
                 v = displayValue(d, r.snapshot) + " -> " + v;
                 l.badge = kBadgePending;
             } else if (d.applies == 2) {
@@ -833,19 +942,47 @@ void buildContent(MenuContent& c) {
                 l.badge = kBadgeUnknown;
             }
             strncpy(l.right, v.c_str(), sizeof(l.right) - 1);
-            l.style = d.kind == MenuKind::Text ? kMenuDim : (hi ? kMenuRowHi : kMenuRow);
+            // A boolean is a switch, drawn where the value would be: the
+            // installer's control, so the two windows read alike.
+            if (d.kind == MenuKind::Toggle && !editingThis && !r.pending) {
+                l.toggle = boolOf(r.value, boolOf(d.shipped, false)) ? 2 : 1;
+                l.right[0] = 0;
+            }
+            l.style = editingThis ? kMenuRowEdit : (hi ? kMenuRowHi : kMenuRow);
             if (hi) {
-                if (s.resetArmedEntry == i) {
-                    snprintf(c.hint, sizeof(c.hint), "Press R again to reset to the shipped %s.",
-                             displayValue(d, d.shipped).c_str());
-                } else if (s.developer) {
-                    snprintf(c.hint, sizeof(c.hint), "%s.%s (%s) -- %s", d.section, d.key,
-                             d.applies == 1 ? "live" : d.applies == 2 ? "restart" : "when it applies is not documented",
-                             d.hint);
-                } else {
-                    snprintf(c.hint, sizeof(c.hint), "%s%s", d.hint,
-                             d.applies == 2 ? " Takes effect at the next launch." : "");
+                // The tooltip beside the row: what the ini says about this
+                // key, in the ini's own words, plus the facts a person
+                // needs to type a value -- the range, the default, and
+                // whether the change waits for a restart.
+                c.popupLine = c.lineCount - 1;
+                snprintf(c.popupTitle, sizeof(c.popupTitle), "%s.%s", d.section, d.key);
+                std::string body = d.detail[0] ? d.detail : d.hint;
+                body += "\n";
+                if (d.kind == MenuKind::Number && d.lo[0] && d.hi[0]) {
+                    body += std::string("\nRange ") + d.lo + " to " + d.hi + ".";
+                } else if (d.kind == MenuKind::Choice) {
+                    std::string list;
+                    for (const ChoiceItem& ch : choicesOf(d)) {
+                        if (!list.empty()) list += ", ";
+                        list += ch.label;
+                    }
+                    if (!list.empty()) body += "\nChoices: " + list + ".";
                 }
+                body += std::string("\nShipped ") + displayValue(d, d.shipped) + ". " +
+                        (d.applies == 1   ? "Applies at once."
+                         : d.applies == 2 ? "Takes effect at the next launch."
+                                          : "When it applies is not documented.");
+                if (editingThis) {
+                    body += s.editBad ? "\n\nThat is not a value this key accepts."
+                                      : "\n\nEnter writes it, Escape leaves it alone.";
+                } else if (s.resetArmedEntry == i) {
+                    body += "\n\nPress R again to reset it to the shipped value.";
+                } else if (d.kind == MenuKind::Toggle || d.kind == MenuKind::Choice) {
+                    body += "\n\nEnter or Left/Right changes it.";
+                } else {
+                    body += "\n\nEnter types a value; Left/Right steps it.";
+                }
+                strncpy(c.popup, body.c_str(), sizeof(c.popup) - 1);
             }
         }
         if (c.lineCount == 0) {
@@ -855,7 +992,11 @@ void buildContent(MenuContent& c) {
         }
     }
 
-    std::string footer = "Up/Down pick   Left/Right change   Enter toggle   Tab page   Esc close";
+    std::string footer =
+        s.editEntry >= 0
+            ? std::string("Type a value   Backspace deletes   Enter writes it   Esc cancels")
+            : std::string("Up/Down pick   Left/Right change   Enter switch or type   Tab page   "
+                          "R twice resets   Esc close");
     if (pendingN) {
         char pb[64];
         snprintf(pb, sizeof(pb), "   %d change%s at next launch", pendingN, pendingN == 1 ? "" : "s");
@@ -864,23 +1005,6 @@ void buildContent(MenuContent& c) {
     if (s.open && s.privateWanted && !inputGatePrivate()) footer += "   KEYS SHARED WITH THE GAME";
     if (!s.privateWanted) footer += "   keys shared (menu.keyboard)";
     strncpy(c.footer, footer.c_str(), sizeof(c.footer) - 1);
-
-    // Sizing from the channel: pixels per degree at the panel.
-    float ppd = 45.0f;
-    uint32_t ew = 0, eh = 0;
-    float outer = 0.0f, inner = 0.0f;
-    if (eyeTextureSize(&ew, &eh) && eyeTangents(&outer, &inner) && ew > 0) {
-        const float spanDeg = (atanf(outer) + atanf(inner)) * 57.2957795f;
-        if (spanDeg > 20.0f) ppd = static_cast<float>(ew) / spanDeg;
-    }
-    if (ppd < 12.0f) ppd = 12.0f;
-    if (ppd > 80.0f) ppd = 80.0f;
-    c.widthPx = static_cast<int>(ppd * s.widthDeg + 0.5f);
-    if (c.widthPx < 480) c.widthPx = 480;
-    if (c.widthPx > 1600) c.widthPx = 1600;
-    c.capPx = static_cast<int>(ppd * s.textDeg + 0.5f);
-    if (c.capPx < 10) c.capPx = 10;
-    if (c.capPx > 80) c.capPx = 80;
 }
 
 // The toast's and the overlay's angular width.
@@ -893,21 +1017,9 @@ void buildToastContent(MenuContent& c, const std::string& text, float widthDeg, 
     c.lineCount = 1;
     strncpy(c.lines[0].left, text.c_str(), sizeof(c.lines[0].left) - 1);
     c.lines[0].style = kMenuInfo;
-    float ppd = 45.0f;
-    uint32_t ew = 0, eh = 0;
-    float outer = 0.0f, inner = 0.0f;
-    if (eyeTextureSize(&ew, &eh) && eyeTangents(&outer, &inner) && ew > 0) {
-        const float spanDeg = (atanf(outer) + atanf(inner)) * 57.2957795f;
-        if (spanDeg > 20.0f) ppd = static_cast<float>(ew) / spanDeg;
-    }
-    if (ppd < 12.0f) ppd = 12.0f;
-    if (ppd > 80.0f) ppd = 80.0f;
-    c.widthPx = static_cast<int>(ppd * widthDeg + 0.5f);
-    if (c.widthPx < 320) c.widthPx = 320;
+    c.popupLine = -1;
+    sizeContent(c, widthDeg, g_s.textDeg * capScale);
     if (c.widthPx > 1200) c.widthPx = 1200;
-    c.capPx = static_cast<int>(ppd * g_s.textDeg * capScale + 0.5f);
-    if (c.capPx < 10) c.capPx = 10;
-    if (c.capPx > 80) c.capPx = 80;
 }
 
 // ---------------------------------------------------------------------------
@@ -1004,6 +1116,11 @@ void stepRow(int defIndex, int dir, int mult) {
     }
 }
 
+// Typing a value, defined with the keys below.
+void beginEdit(int entryIndex, int defIndex);
+void cancelEdit();
+void commitEdit();
+
 void activateEntry() {
     State& s = g_s;
     Page& p = s.pages[s.page];
@@ -1019,7 +1136,12 @@ void activateEntry() {
     }
     if (e.kind == EntryKind::Setting) {
         const MenuRowDef& d = kMenuRows[e.def];
-        if (d.kind == MenuKind::Toggle || d.kind == MenuKind::Choice) stepRow(e.def, +1, 1);
+        if (d.kind == MenuKind::Toggle || d.kind == MenuKind::Choice) {
+            stepRow(e.def, +1, 1);
+        } else {
+            // A number or a free string: type it. Enter again commits.
+            beginEdit(p.highlight, e.def);
+        }
     }
 }
 
@@ -1088,6 +1210,97 @@ void initKeys() {
         g_s.keys[i].down = false;
         g_s.keys[i].nextMs = 0;
     }
+    for (int i = 0; i < kEditKeyCount; ++i) {
+        g_s.editKeys[i].vk = kEditKeys[i].vk;
+        g_s.editKeys[i].down = false;
+        g_s.editKeys[i].nextMs = 0;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Typing a value
+
+// Whether what has been typed could be written. A number must parse and
+// sit within the row's bounds; anything else is the author's business.
+bool editBufferBad() {
+    const State& s = g_s;
+    if (s.editDef < 0) return false;
+    const MenuRowDef& d = kMenuRows[s.editDef];
+    if (d.kind != MenuKind::Number) return false;
+    if (s.editBuf.empty()) return true;
+    char* end = nullptr;
+    const double v = strtod(s.editBuf.c_str(), &end);
+    if (!end || *end) return true;
+    if (d.lo[0] && v < atof(d.lo)) return true;
+    if (d.hi[0] && v > atof(d.hi)) return true;
+    return false;
+}
+
+void beginEdit(int entryIndex, int defIndex) {
+    State& s = g_s;
+    s.editEntry = entryIndex;
+    s.editDef = defIndex;
+    s.editBuf = g_rows[defIndex].value;
+    if (s.editBuf.size() > kEditMax) s.editBuf.resize(kEditMax);
+    s.editBad = editBufferBad();
+    s.contentDirty = true;
+}
+
+void cancelEdit() {
+    State& s = g_s;
+    if (s.editEntry < 0) return;
+    s.editEntry = -1;
+    s.editDef = -1;
+    s.editBuf.clear();
+    s.editBad = false;
+    s.contentDirty = true;
+}
+
+void applyChange(int defIndex, const std::string& fileValue);
+
+void commitEdit() {
+    State& s = g_s;
+    if (s.editEntry < 0 || s.editDef < 0) return;
+    const int def = s.editDef;
+    std::string v = s.editBuf;
+    // Trim the spaces a person types either side of a value; the ini would
+    // keep them and the next read would not match.
+    while (!v.empty() && v.front() == ' ') v.erase(v.begin());
+    while (!v.empty() && v.back() == ' ') v.pop_back();
+    const bool bad = editBufferBad();
+    cancelEdit();
+    if (bad) {
+        const MenuRowDef& d = kMenuRows[def];
+        s.lastWrite = std::string("not written: ") + dottedOf(d) + " needs a number" +
+                      (d.lo[0] && d.hi[0] ? std::string(" from ") + d.lo + " to " + d.hi : "");
+        s.contentDirty = true;
+        return;
+    }
+    if (v != g_rows[def].value) applyChange(def, v);
+}
+
+// One tick of the typing keys. Returns whether anything was typed.
+bool handleEditKeys(uint64_t now, bool focused) {
+    State& s = g_s;
+    bool any = false;
+    for (int i = 0; i < kEditKeyCount; ++i) {
+        const int n = pollKey(s.editKeys[i], now, focused);
+        if (!n) continue;
+        any = true;
+        const EditKey& k = kEditKeys[i];
+        for (int rep = 0; rep < n; ++rep) {
+            if (k.vk == VK_BACK) {
+                if (!s.editBuf.empty()) s.editBuf.pop_back();
+            } else if (s.editBuf.size() < kEditMax) {
+                s.editBuf.push_back(s.shiftHeld ? k.shifted : k.plain);
+            }
+        }
+    }
+    if (any) {
+        s.editBad = editBufferBad();
+        s.contentDirty = true;
+    }
+    return any;
 }
 
 void handleKeys(uint64_t now) {
@@ -1096,6 +1309,29 @@ void handleKeys(uint64_t now) {
     s.shiftHeld = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
     bool any = false;
     Page& p = s.pages[s.page];
+    // While a value is being typed the navigation keys are the editor's:
+    // Enter commits, the arrows and Tab are held (Escape cancels, from the
+    // tick). Everything else goes into the buffer.
+    if (s.editEntry >= 0) {
+        if (s.editEntry != p.highlight) cancelEdit();
+    }
+    if (s.editEntry >= 0) {
+        if (handleEditKeys(now, focused)) any = true;
+        for (int i = 0; i < 12; ++i) {
+            const int n = pollKey(s.keys[i], now, focused);
+            if (!n) continue;
+            any = true;
+            if (i == kEnter) commitEdit();
+        }
+        if (any) {
+            s.lastInputMs = now;
+            s.aimParked = true;
+        }
+        return;
+    }
+    // Not typing: the typing keys are still polled, so that holding one
+    // down before an edit begins does not fire the moment it does.
+    for (int i = 0; i < kEditKeyCount; ++i) pollKey(s.editKeys[i], now, false);
     for (int i = 0; i < 12; ++i) {
         const int n = pollKey(s.keys[i], now, focused);
         if (!n) continue;
@@ -1171,6 +1407,9 @@ bool headRayInAnchor(float org[3], float dir[3]) {
 void handleAim(uint64_t now) {
     State& s = g_s;
     if (s.aimMode == 1) return;
+    // A look that wanders must not take the row out from under a value
+    // being typed.
+    if (s.editEntry >= 0) return;
     Page& p = s.pages[s.page];
     if (p.status || p.entries.empty()) return;
     float org[3], dir[3];
@@ -1299,6 +1538,7 @@ void closeMenu(const char* why) {
     State& s = g_s;
     if (!s.open) return;
     s.open = false;
+    cancelEdit();
     s.resetArmedEntry = -1;
     inputGateSetPrivate(false);
     perfMonitorNoteEvent(kEvMenu);
@@ -1456,10 +1696,19 @@ void menuTick(ID3D11Device* dev) {
         }
 
         if (s.open) {
-            // Escape, then the navigation keys, then the head.
+            // Escape, then the navigation keys, then the head. Escape ends
+            // a value being typed before it closes the menu, so a typed
+            // value can be abandoned without losing the panel.
             static bool escDown = false;
             const bool esc = gameHasFocus() && (GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0;
-            if (esc && !escDown) closeMenu("Escape");
+            if (esc && !escDown) {
+                if (s.editEntry >= 0) {
+                    cancelEdit();
+                    s.lastInputMs = now;
+                } else {
+                    closeMenu("Escape");
+                }
+            }
             escDown = esc;
         }
         if (s.open) {

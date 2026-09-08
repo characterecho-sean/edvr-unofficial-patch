@@ -95,6 +95,14 @@ void perfMonitorNoteEvent(uint32_t bits, double ms = 0.0);
 enum PerfCpu { kCpuBoundary = 0, kCpuDoor = 1 };
 void perfMonitorNoteCpu(int which, double ms);
 
+// The time the game's thread was blocked inside the real Present, noted by
+// the swapchain hook before the frame is ringed; with the WaitGetPoses
+// block (over the channel) it is subtracted from the frame period for the
+// CPU TIME tile: the render thread's own time, which the compositor's
+// poses-to-submit stamp cannot give for a game that calls WaitGetPoses
+// thirty microseconds before it submits.
+void perfMonitorNotePresentWait(double ms);
+
 // Draw-hook sampling: on one frame in sixteen the draw thunks time
 // themselves and the real call they forward; the difference is EDVR's own
 // cost in the hooks, credited to that frame and shown as the running

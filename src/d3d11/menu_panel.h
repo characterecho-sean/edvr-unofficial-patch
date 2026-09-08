@@ -40,6 +40,7 @@ enum MenuLineStyle : uint8_t {
     kMenuInfo = 3,      // status text: label left, value right, no highlight
     kMenuDim = 4,       // a read-only row
     kMenuNote = 5,      // one full-width line of small text, `left` only
+    kMenuRowEdit = 6,   // the row whose value is being typed: a field and a caret
 };
 
 enum MenuBadge : uint8_t {
@@ -54,6 +55,7 @@ struct MenuLine {
     char    right[64];
     uint8_t style;
     uint8_t badge;
+    uint8_t toggle;   // 0 none; 1 off, 2 on: a switch is drawn in place of `right`
 };
 
 constexpr int kMenuMaxTabs = 8;
@@ -72,17 +74,28 @@ struct MenuTile {
 // Everything the panel shows, as text. The model builds one of these on
 // every change; the raster lays it out.
 struct MenuContent {
+    // The tabs the strip shows: a window of the pages that fits the panel,
+    // `activeTab` indexing THIS array. An arrow at either end says there
+    // are pages that way.
     char     tabs[kMenuMaxTabs][24];
     int      tabCount = 0;
     int      activeTab = 0;
+    bool     tabMoreLeft = false;
+    bool     tabMoreRight = false;
     MenuLine lines[kMenuMaxLines];
     int      lineCount = 0;
     // Tiles are laid out ABOVE the lines, `tileColumns` across (4 when 0).
     MenuTile tiles[kMenuMaxTiles];
     int      tileCount = 0;
     int      tileColumns = 0;
-    char     hint[200];     // the highlighted row's explanation
+    char     hint[200];     // an explanation under the rows (information pages)
     char     footer[160];   // keys, pending-restart count, warnings
+    // The tooltip beside the highlighted row: a title line and a wrapped
+    // body, drawn over the rows below (or above) line `popupLine`; -1 for
+    // none. Sized to its text, up to nine lines of it.
+    char     popupTitle[96];
+    char     popup[720];
+    int      popupLine = -1;
     bool     toast = false; // a one-line panel instead of the menu
     bool     compact = false;   // info pages: a tighter row pitch
     // Sizing, decided by the model from the channel: bitmap width in

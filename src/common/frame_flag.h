@@ -384,6 +384,7 @@ uint32_t runtimeKind();
 // odd count tries again.
 constexpr uint32_t kFrameTimingLag = 2;   // the record read: this many compositor frames back
 struct FrameTimingSample {
+    uint32_t layout;          // the record size the runtime answered: 184 (openvr.h's) or 176 (a 1.0-era layout whose leading words differ -- its counts are not decoded)
     uint32_t frameIndex;      // the compositor's, increments per compositor frame
     uint32_t presents;        // times this frame was presented
     uint32_t droppedTotal;    // dropped frames since launch, as counted by the reader
@@ -414,6 +415,14 @@ void     noteEdvrEvent(uint32_t bits);
 uint32_t takeEdvrEvents();
 void     addDoorCpuUs(uint32_t us);
 uint32_t takeDoorCpuUs();
+// The microseconds the game's thread spent BLOCKED inside the runtime's
+// WaitGetPoses this frame (the openvr half clocks the real call). With the
+// time blocked in Present, it is what the Monitor page subtracts from the
+// frame period to get the render thread's own busy time -- the compositor's
+// poses-to-submit stamp cannot be that for Elite, which calls WaitGetPoses
+// thirty microseconds before it submits (flown 2026-09-07).
+void     addWaitCpuUs(uint32_t us);
+uint32_t takeWaitCpuUs();
 
 // The cull guard's state, published by openvr_api.dll at its stage
 // transitions and read by d3d11.dll once per frame boundary.

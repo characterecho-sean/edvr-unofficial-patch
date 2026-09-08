@@ -46,6 +46,17 @@ constexpr Rgb kBadge = {255, 170, 60};
 constexpr Rgb kHint = {190, 190, 190};
 constexpr Rgb kFooter = {140, 140, 140};
 constexpr Rgb kToastText = {255, 200, 120};
+// The switch, the installer's colours: an accent track when on, a grey one
+// when off, with a knob at the end the value is at.
+constexpr Rgb kSwitchOn = {255, 150, 40};
+constexpr Rgb kSwitchOff = {90, 96, 104};
+constexpr Rgb kKnobOn = {24, 20, 16};
+constexpr Rgb kKnobOff = {200, 200, 200};
+// The tooltip: a darker card than the panel, so it reads as being above it.
+constexpr Rgb kPopupBg = {8, 11, 15};
+constexpr float kPopupAlpha = 0.97f;
+constexpr Rgb kPopupEdge = {255, 150, 40};
+constexpr Rgb kEditField = {255, 255, 255};
 
 enum class Font { Row, Tab, Small, Hint, Big, Caption, TileSub };
 constexpr int kFontCount = 7;
@@ -59,6 +70,12 @@ struct Op {
     UINT         align = 0;      // DT_LEFT / DT_RIGHT / DT_CENTER, DT_WORDBREAK for wrapping
     Font         font = Font::Row;
     bool         top = false;    // draw from the rect's top, unclipped, rather than centred
+    // A fill with rounded ends: the corner radius in pixels (0 square), and
+    // whether only the border is drawn. GDI's own RoundRect is not
+    // antialiased, and a switch drawn with square corners does not read as
+    // a switch, so these are blended per pixel like every other fill here.
+    int          radius = 0;
+    int          stroke = 0;     // 0 filled, else the border's thickness
 };
 
 struct LineRect {
@@ -130,6 +147,52 @@ void fillOver(Dib& d, const RECT& r, Rgb rgb, float a) {
     }
 }
 
+// One rounded fill, antialiased, "over" onto the premultiplied buffer.
+// Coverage is the signed distance to the rounded rectangle, clamped over
+// one pixel; a stroke keeps the band between two such distances.
+void fillRoundedOver(Dib& d, const RECT& r, int radius, int stroke, Rgb rgb, float a) {
+    const int x0 = r.left < 0 ? 0 : r.left, y0 = r.top < 0 ? 0 : r.top;
+    const int x1 = r.right > d.w ? d.w : r.right, y1 = r.bottom > d.h ? d.h : r.bottom;
+    if (x1 <= x0 || y1 <= y0) return;
+    const float fx0 = static_cast<float>(r.left), fy0 = static_cast<float>(r.top);
+    const float fx1 = static_cast<float>(r.right), fy1 = static_cast<float>(r.bottom);
+    const float halfW = (fx1 - fx0) * 0.5f, halfH = (fy1 - fy0) * 0.5f;
+    const float cx = fx0 + halfW, cy = fy0 + halfH;
+    float rad = static_cast<float>(radius);
+    if (rad > halfW) rad = halfW;
+    if (rad > halfH) rad = halfH;
+    for (int y = y0; y < y1; ++y) {
+        uint32_t* row = d.bits + static_cast<size_t>(y) * d.w;
+        for (int x = x0; x < x1; ++x) {
+            // Distance from the rounded rectangle's edge, negative inside.
+            const float px = static_cast<float>(x) + 0.5f - cx;
+            const float py = static_cast<float>(y) + 0.5f - cy;
+            float qx = fabsf(px) - (halfW - rad);
+            float qy = fabsf(py) - (halfH - rad);
+            if (qx < 0.0f) qx = 0.0f;
+            if (qy < 0.0f) qy = 0.0f;
+            const float dist = sqrtf(qx * qx + qy * qy) - rad;
+            float cov = 0.5f - dist;   // one pixel of feathering
+            if (stroke > 0) {
+                const float inner = dist + static_cast<float>(stroke);
+                const float covIn = inner + 0.5f;
+                if (covIn < cov) cov = covIn;
+            }
+            if (cov <= 0.0f) continue;
+            if (cov > 1.0f) cov = 1.0f;
+            const int ia = static_cast<int>(a * cov * 255.0f + 0.5f);
+            if (ia <= 0) continue;
+            const uint32_t p = row[x];
+            const int ob = p & 0xFF, og = (p >> 8) & 0xFF, orr = (p >> 16) & 0xFF;
+            const int nb = rgb.b * ia / 255 + ob * (255 - ia) / 255;
+            const int ng = rgb.g * ia / 255 + og * (255 - ia) / 255;
+            const int nr = rgb.r * ia / 255 + orr * (255 - ia) / 255;
+            row[x] = static_cast<uint32_t>(nb) | (static_cast<uint32_t>(ng) << 8) |
+                     (static_cast<uint32_t>(nr) << 16);
+        }
+    }
+}
+
 HFONT makeFont(int emPx, bool bold) {
     LOGFONTW lf{};
     lf.lfHeight = -emPx;
@@ -188,8 +251,21 @@ void layout(const MenuContent& c, std::vector<Op>& ops, std::vector<LineRect>& l
     }
     int y = pad;
     if (!c.toast) {
-        // The tab bar: names spaced across the width.
+        // The tab bar: the window of names the model chose, with an arrow
+        // at whichever end has pages beyond it, so the strip never ends
+        // without saying there is more.
         int x = pad;
+        if (c.tabMoreLeft) {
+            Op a;
+            a.text = true;
+            a.str = L"<";
+            a.rect = {x, y, x + cap, y + tabH};
+            a.rgb = kTabIdle;
+            a.align = DT_LEFT;
+            a.font = Font::Tab;
+            ops.push_back(a);
+            x += cap;
+        }
         for (int i = 0; i < c.tabCount; ++i) {
             Op o;
             o.text = true;
@@ -208,6 +284,16 @@ void layout(const MenuContent& c, std::vector<Op>& ops, std::vector<LineRect>& l
                 ops.push_back(under);
             }
             x += wpx + cap / 2;
+        }
+        if (c.tabMoreRight) {
+            Op a;
+            a.text = true;
+            a.str = L">";
+            a.rect = {x, y, x + cap, y + tabH};
+            a.rgb = kTabIdle;
+            a.align = DT_LEFT;
+            a.font = Font::Tab;
+            ops.push_back(a);
         }
         y += tabH;
     }
@@ -255,19 +341,26 @@ void layout(const MenuContent& c, std::vector<Op>& ops, std::vector<LineRect>& l
         }
         y += tilesH;
     }
+    int popupRowTop = -1, popupRowBottom = -1;
     for (int i = 0; i < rows; ++i) {
         const MenuLine& l = c.lines[i];
         const RECT rr = {pad / 2, y, W - pad / 2, y + rowPitch};
+        if (i == c.popupLine) {
+            popupRowTop = rr.top;
+            popupRowBottom = rr.bottom;
+        }
         LineRect lr;
         lr.y0 = static_cast<float>(rr.top) / H;
         lr.y1 = static_cast<float>(rr.bottom) / H;
-        lr.selectable = l.style == kMenuRow || l.style == kMenuRowHi || l.style == kMenuDim;
+        lr.selectable = l.style == kMenuRow || l.style == kMenuRowHi || l.style == kMenuDim ||
+                        l.style == kMenuRowEdit;
         lines.push_back(lr);
-        if (l.style == kMenuRowHi) {
+        if (l.style == kMenuRowHi || l.style == kMenuRowEdit) {
             Op h;
             h.rect = rr;
             h.rgb = kHighlight;
             h.alpha = kHighlightAlpha;
+            h.radius = cap / 4;
             ops.push_back(h);
         }
         // Information rows carry long values, so the split sits further
@@ -288,8 +381,46 @@ void layout(const MenuContent& c, std::vector<Op>& ops, std::vector<LineRect>& l
         if (l.style == kMenuHeading) left.rect.left = pad / 2;
         if (c.toast) left.rect.right = W - pad;
         ops.push_back(left);
+        if (l.toggle) {
+            // The switch: a pill the width of two knobs, the knob at the
+            // end the value is at. The installer's proportions.
+            const int h = rowPitch * 55 / 100;
+            const int wsw = h * 19 / 10;
+            const int right = W - pad;
+            const RECT box = {right - wsw, y + (rowPitch - h) / 2, right, y + (rowPitch + h) / 2};
+            const bool on = l.toggle == 2;
+            Op track;
+            track.rect = box;
+            track.rgb = on ? kSwitchOn : kSwitchOff;
+            track.alpha = on ? 0.95f : 0.55f;
+            track.radius = h / 2;
+            ops.push_back(track);
+            const int knobR = h / 2 - h / 8;
+            const int kcx = on ? box.right - h / 2 : box.left + h / 2;
+            const int kcy = (box.top + box.bottom) / 2;
+            Op knob;
+            knob.rect = {kcx - knobR, kcy - knobR, kcx + knobR, kcy + knobR};
+            knob.rgb = on ? kKnobOn : kKnobOff;
+            knob.alpha = 0.95f;
+            knob.radius = knobR;
+            ops.push_back(knob);
+        }
         if (l.right[0]) {
             Op right;
+            if (l.style == kMenuRowEdit) {
+                // A field behind the typed value, so the row reads as one.
+                Op field;
+                field.rect = {split, y + rowPitch / 6, W - pad, y + rowPitch - rowPitch / 6};
+                field.rgb = kEditField;
+                field.alpha = 0.10f;
+                field.radius = cap / 5;
+                ops.push_back(field);
+                Op edge = field;
+                edge.rgb = kPopupEdge;
+                edge.alpha = 0.8f;
+                edge.stroke = cap / 12 > 0 ? cap / 12 : 1;
+                ops.push_back(edge);
+            }
             right.text = true;
             right.str = widen(l.right);
             right.rect = {split, y, W - pad, y + rowPitch};
@@ -299,6 +430,7 @@ void layout(const MenuContent& c, std::vector<Op>& ops, std::vector<LineRect>& l
                         : l.style == kMenuDim ? kDimText
                         : l.badge == kBadgePending ? kBadge
                                                    : kValue;
+            if (l.style == kMenuRowEdit) right.rect.right -= cap / 3;
             ops.push_back(right);
             if (l.badge == kBadgeRestart || l.badge == kBadgeUnknown || l.badge == kBadgePending) {
                 Op b;
@@ -392,14 +524,90 @@ void layout(const MenuContent& c, std::vector<Op>& ops, std::vector<LineRect>& l
             ops.push_back(f);
         }
     }
+
+    // The tooltip, last, so it sits over the rows: a card beside the
+    // highlighted row carrying what edvr.ini says about that key. It is
+    // sized to its own text, and it slides up when there is not room
+    // below, so it never runs off the panel.
+    if (!c.toast && c.popupLine >= 0 && popupRowTop >= 0 && c.popup[0]) {
+        const int cardW = W * 46 / 100;
+        const int inset = cap * 6 / 10;
+        const int titleH = cap * 15 / 10;
+        const int bodyLead = cap * 12 / 10;      // a line of the small face
+        const int textW = cardW - 2 * inset;
+        // The wrapped line count, estimated the way the face measures:
+        // Segoe UI averages about half its em per character.
+        const int emSmall = cap * 7 / 7;
+        const int perLine = textW * 2 / (emSmall > 0 ? emSmall : 1);
+        int bodyLines = 0;
+        {
+            int run = 0;
+            for (const char* q = c.popup; *q; ++q) {
+                if (*q == '\n') {
+                    bodyLines += run > 0 ? (run + perLine - 1) / perLine : 1;
+                    run = 0;
+                } else {
+                    ++run;
+                }
+            }
+            if (run > 0) bodyLines += (run + perLine - 1) / perLine;
+        }
+        if (bodyLines < 1) bodyLines = 1;
+        if (bodyLines > 14) bodyLines = 14;
+        const int cardH = inset + titleH + bodyLines * bodyLead + inset;
+        int top = popupRowTop - cap / 4;
+        if (top + cardH > H - pad / 2) top = H - pad / 2 - cardH;
+        if (top < pad / 2) top = pad / 2;
+        const RECT card = {W - pad / 2 - cardW, top, W - pad / 2, top + cardH};
+        Op bg;
+        bg.rect = card;
+        bg.rgb = kPopupBg;
+        bg.alpha = kPopupAlpha;
+        bg.radius = cap / 3;
+        ops.push_back(bg);
+        Op edge = bg;
+        edge.rgb = kPopupEdge;
+        edge.alpha = 0.55f;
+        edge.stroke = cap / 12 > 0 ? cap / 12 : 1;
+        ops.push_back(edge);
+        if (c.popupTitle[0]) {
+            Op t;
+            t.text = true;
+            t.str = widen(c.popupTitle);
+            t.rect = {card.left + inset, card.top + inset, card.right - inset,
+                      card.top + inset + titleH};
+            t.align = DT_LEFT;
+            t.font = Font::Caption;
+            t.rgb = kValue;
+            ops.push_back(t);
+        }
+        Op b;
+        b.text = true;
+        b.str = widen(c.popup);
+        b.rect = {card.left + inset, card.top + inset + titleH, card.right - inset,
+                  card.bottom - inset};
+        b.align = DT_LEFT | DT_WORDBREAK;
+        b.font = Font::Small;
+        b.rgb = kHint;
+        ops.push_back(b);
+        // A tick from the row to the card, so which row it belongs to is
+        // never in doubt.
+        Op tick;
+        tick.rect = {card.left - cap / 3, (popupRowTop + popupRowBottom) / 2 - cap / 12,
+                     card.left, (popupRowTop + popupRowBottom) / 2 + cap / 12};
+        tick.rgb = kPopupEdge;
+        tick.alpha = 0.55f;
+        ops.push_back(tick);
+    }
 }
 
 // Execute the ops into one DIB, in colour or as coverage.
 void execute(Dib& d, const std::vector<Op>& ops, bool coverage, HFONT fonts[kFontCount]) {
     for (const Op& o : ops) {
         if (!o.text) {
-            if (coverage) fillOver(d, o.rect, Rgb{255, 255, 255}, o.alpha);
-            else fillOver(d, o.rect, o.rgb, o.alpha);
+            const Rgb rgb = coverage ? Rgb{255, 255, 255} : o.rgb;
+            if (o.radius > 0 || o.stroke > 0) fillRoundedOver(d, o.rect, o.radius, o.stroke, rgb, o.alpha);
+            else fillOver(d, o.rect, rgb, o.alpha);
             continue;
         }
         HFONT f = fonts[static_cast<int>(o.font)];

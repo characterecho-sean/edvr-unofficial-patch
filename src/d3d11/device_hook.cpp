@@ -674,7 +674,15 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
     if (self != g_state->swapChain) {
         return g_state->realPresent(self, syncInterval, flags);
     }
+    // The time blocked in the real Present is the monitor's, with the time
+    // blocked in WaitGetPoses: the frame period less the two is the render
+    // thread's own busy time.
+    const int64_t presentT0 = qpcNow();
     const HRESULT hr = g_state->realPresent(self, syncInterval, flags);
+    if (qpcFrequency() > 0) {
+        perfMonitorNotePresentWait(static_cast<double>(qpcNow() - presentT0) * 1000.0 /
+                                   static_cast<double>(qpcFrequency()));
+    }
 
     // OUTSIDE the fault budget, and that is the point. Confirming is a file
     // delete; putting it inside would mean a burst of faults anywhere in the

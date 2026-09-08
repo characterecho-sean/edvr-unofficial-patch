@@ -44,6 +44,11 @@ struct Frame {
     float    appCpuMs = 0.0f;    // the app's busy time, poses ready to second submit
     float    posesReadyMs = 0.0f;
     float    frameReadyMs = 0.0f;
+    float    totalGpuMs = 0.0f;  // the GPU frame: previous present to the end of compositor work
+    // Blocked time on the game's thread this frame, EDVR's own clocks: the
+    // period less these is the render thread's busy time (CPU TIME).
+    float    presentWaitMs = 0.0f;
+    float    posesWaitMs = 0.0f;
     uint8_t  reproj = 0;         // any reprojection reason
     uint8_t  motion = 0;         // motion smoothing
     uint8_t  dropped = 0;        // frames dropped at this sample
@@ -126,6 +131,10 @@ struct State {
     int       doorOpen[2] = {-1, -1};   // the slot begun and not yet ended
     float     doorGpuMs[2] = {0.0f, 0.0f};
     uint32_t  doorGpuSamples = 0;
+
+    // The Present block noted by the swapchain hook, for the frame about
+    // to be ringed.
+    float    pendingPresentWaitMs = 0.0f;
 
     // The drop log's rate limit, and the last drop for the page.
     uint64_t dropLogMs = 0;
@@ -407,24 +416,27 @@ void dropLine(const Frame& f, float budgetMs) {
     ++s.dropLogged;
     char ev[200];
     eventList(f.events, f.eventMs, ev, sizeof(ev));
-    char comp[200] = "the compositor's record has not settled yet";
+    char comp[260] = "the compositor's record has not settled yet";
     if (f.haveComp) {
         snprintf(comp, sizeof(comp),
-                 "the compositor's record: GPU app %.1f + compositor %.1f ms, app busy %.1f ms "
-                 "(poses %.1f, submit %.1f ms from vsync)%s",
-                 static_cast<double>(f.appGpuMs), static_cast<double>(f.compGpuMs),
-                 static_cast<double>(f.appCpuMs), static_cast<double>(f.posesReadyMs),
+                 "the compositor's record: GPU frame %.1f ms (app fields %.1f, compositor %.1f), "
+                 "poses at %.1f and submit at %.1f ms from vsync%s",
+                 static_cast<double>(f.totalGpuMs), static_cast<double>(f.appGpuMs),
+                 static_cast<double>(f.compGpuMs), static_cast<double>(f.posesReadyMs),
                  static_cast<double>(f.frameReadyMs), f.dropped ? "" : ", no drop reported");
     }
+    const float busy = f.presentMs - f.presentWaitMs - f.posesWaitMs;
     Log::get().note(
-        "monitor: %s -- %.1f ms between Presents (budget %.1f); %s; EDVR this frame: boundary "
-        "%.2f ms, door %.2f ms, draw hooks ~%.2f ms (sampled), door GPU %.2f ms; EDVR events: %s. "
-        "At most one of these lines every %u s, %u a session.",
+        "monitor: %s -- %.1f ms between Presents (budget %.1f), of which the thread waited %.1f in "
+        "Present and %.1f in WaitGetPoses (busy %.1f); %s; EDVR this frame: boundary %.2f ms, "
+        "door %.2f ms, draw hooks ~%.2f ms (sampled), door GPU %.2f ms; EDVR events: %s. At most "
+        "one of these lines every %u s, %u a session.",
         f.dropped ? "DROPPED FRAME" : "LONG FRAME", static_cast<double>(f.presentMs),
-        static_cast<double>(budgetMs), comp, static_cast<double>(f.cpuBoundaryMs),
-        static_cast<double>(f.cpuDoorMs), static_cast<double>(f.cpuDrawsMs),
-        static_cast<double>(f.doorGpuMs), ev, static_cast<unsigned>(kDropLogEveryMs / 1000),
-        kDropLogMax);
+        static_cast<double>(budgetMs), static_cast<double>(f.presentWaitMs),
+        static_cast<double>(f.posesWaitMs), static_cast<double>(busy > 0.0f ? busy : 0.0f), comp,
+        static_cast<double>(f.cpuBoundaryMs), static_cast<double>(f.cpuDoorMs),
+        static_cast<double>(f.cpuDrawsMs), static_cast<double>(f.doorGpuMs), ev,
+        static_cast<unsigned>(kDropLogEveryMs / 1000), kDropLogMax);
 }
 
 void noteDrop(const Frame& f, float budgetMs) {
@@ -454,6 +466,11 @@ void perfMonitorFrame(ID3D11Device* dev) {
         f.presentMs = ms > 0.0 && ms < 5000.0 ? static_cast<float>(ms) : 0.0f;
     }
     s.lastQpc = q;
+    // The frame's waits: Present's, noted by the swapchain hook a moment
+    // ago; WaitGetPoses's, over the channel.
+    f.presentWaitMs = s.pendingPresentWaitMs;
+    s.pendingPresentWaitMs = 0.0f;
+    f.posesWaitMs = static_cast<float>(takeWaitCpuUs()) / 1000.0f;
     // EDVR's part: the events of the frame just ending, from both halves.
     const uint32_t ev = s.events.exchange(0) | takeEdvrEvents();
     f.events = static_cast<uint16_t>(ev & 0xFFFFu);
@@ -494,6 +511,7 @@ void perfMonitorFrame(ID3D11Device* dev) {
             settled = &ringAt(s.count - 1 - static_cast<int>(kFrameTimingLag));
             settled->appGpuMs = sample.appGpuMs;
             settled->compGpuMs = sample.compGpuMs;
+            settled->totalGpuMs = sample.totalGpuMs;
             settled->compCpuMs = sample.compCpuMs;
             settled->cpuFrameMs = sample.cpuFrameMs;
             settled->appCpuMs = sample.appCpuMs;
@@ -543,6 +561,10 @@ void perfMonitorNoteCpu(int which, double ms) {
     else if (which == kCpuDoor) f->cpuDoorMs += static_cast<float>(ms);
 }
 
+void perfMonitorNotePresentWait(double ms) {
+    if (ms >= 0.0 && ms < 5000.0) g_s.pendingPresentWaitMs = static_cast<float>(ms);
+}
+
 bool perfMonitorSampleDraws() { return g_s.sampleDraws; }
 
 void perfMonitorDrawTicks(int64_t wholeTicks, int64_t realTicks) {
@@ -576,22 +598,34 @@ int perfMonitorTiles(PerfTile* out, int max) {
     char v[32], sub[40];
 
     // The interval ring, summarised, and the drops attributed.
-    float present[kRing], appGpu[kRing], compGpu[kRing], gpuFrame[kRing], appCpu[kRing];
-    int cnt = 0, compCnt = 0, cpuCnt = 0, reproj = 0, dropped = 0;
+    float present[kRing], appGpu[kRing], compGpu[kRing], gpuFrame[kRing], busy[kRing], waits[kRing];
+    int cnt = 0, compCnt = 0, reproj = 0, dropped = 0;
     int dropsWithEdvr = 0, dropsClean = 0;
     uint32_t dropEventBits = 0;
     double edvrBoundary = 0.0, edvrDoor = 0.0, doorGpu = 0.0;
+    double appFields = 0.0;
     int doorGpuN = 0;
+    const bool counts = s.haveSample && s.lastSample.layout == 184u;
     for (int i = 0; i < s.count; ++i) {
         const Frame& f = ringAt(i);
-        present[cnt++] = f.presentMs;
+        present[cnt] = f.presentMs;
+        const float b = f.presentMs - f.presentWaitMs - f.posesWaitMs;
+        busy[cnt] = b > 0.0f ? b : 0.0f;
+        waits[cnt] = f.presentWaitMs + f.posesWaitMs;
+        ++cnt;
         if (f.haveComp) {
-            appGpu[compCnt] = f.appGpuMs;
+            // The GPU frame is the record's total -- the timeline from the
+            // previous present to the end of the compositor's work, which is
+            // fpsVR's GPU frametime (flown 2026-09-07: 10.4 against its 9.6
+            // to 10). The app's own two fields read 0.3 ms for Elite, whose
+            // GPU work is issued before its WaitGetPoses, outside the window
+            // they measure; the app's share is total less the compositor's.
+            appGpu[compCnt] = f.totalGpuMs - f.compGpuMs > 0.0f ? f.totalGpuMs - f.compGpuMs : 0.0f;
             compGpu[compCnt] = f.compGpuMs;
-            gpuFrame[compCnt] = f.appGpuMs + f.compGpuMs;
+            gpuFrame[compCnt] = f.totalGpuMs;
+            appFields += f.appGpuMs;
             ++compCnt;
             reproj += f.reproj;
-            if (f.appCpuMs > 0.0f) appCpu[cpuCnt++] = f.appCpuMs;
         }
         dropped += f.dropped;
         edvrBoundary += f.cpuBoundaryMs;
@@ -614,15 +648,14 @@ int perfMonitorTiles(PerfTile* out, int max) {
     const float budget = hz > 0.0f ? 1000.0f / hz : 11.1f;
     const float windowS = ps.count ? ps.count * ps.avgMs / 1000.0f : 0.0f;
 
-    // Row 1: the frame. fpsVR's two frametimes, both the compositor's
-    // word from the settled record: GPU TIME is the app's GPU work plus the
-    // compositor's own (fpsVR's author describes it as the scene, the
-    // companion window and the distortion pass -- the three GPU fields);
-    // CPU TIME is the app's busy time, poses ready to the second submit,
-    // which runs past the period at rate because running start hands the
-    // poses out a few ms before the vsync. Flown 2026-09-07 with the
-    // in-flight record: FRAME TIME showed the busy time (10-13 ms) against
-    // fpsVR's steady 9.6, which is its GPU figure.
+    // Row 1: the frame. GPU TIME is the compositor's GPU frame total --
+    // fpsVR's GPU frametime (its author's "scene, companion window and
+    // distortion" is that timeline). CPU TIME is EDVR's own: the frame
+    // period less what the game's thread spent blocked in WaitGetPoses and
+    // in Present, i.e. the render thread's busy time. The compositor's
+    // poses-to-submit stamp cannot be that for Elite, which calls
+    // WaitGetPoses thirty microseconds before it submits (flown 2026-09-07:
+    // busy 0.03 ms, every frame).
     if (ps.count) {
         snprintf(v, sizeof(v), "%.1f", perfFpsOf(ps.avgMs));
         snprintf(sub, sizeof(sub), "fps, period %.1f ms", ps.avgMs);
@@ -636,29 +669,37 @@ int perfMonitorTiles(PerfTile* out, int max) {
     }
     if (compCnt) {
         const PerfStats gf = perfStatsOf(gpuFrame, compCnt);
-        const PerfStats ag = perfStatsOf(appGpu, compCnt);
-        const PerfStats cg = perfStatsOf(compGpu, compCnt);
         snprintf(v, sizeof(v), "%.1f", gf.avgMs);
-        snprintf(sub, sizeof(sub), "ms, app %.1f + comp %.1f", ag.avgMs, cg.avgMs);
+        snprintf(sub, sizeof(sub), "ms, max %.1f", gf.maxMs);
         tile("GPU TIME", v, sub);
     } else {
         tile("GPU TIME", "--", glitchConsumerPresent() ? "no compositor timing" : "no openvr half");
     }
-    if (cpuCnt) {
-        const PerfStats ac = perfStatsOf(appCpu, cpuCnt);
-        snprintf(v, sizeof(v), "%.1f", ac.avgMs);
-        snprintf(sub, sizeof(sub), "ms busy, max %.1f", ac.maxMs);
+    if (ps.count) {
+        const PerfStats bs = perfStatsOf(busy, cnt);
+        const PerfStats ws = perfStatsOf(waits, cnt);
+        snprintf(v, sizeof(v), "%.1f", bs.avgMs);
+        snprintf(sub, sizeof(sub), "ms thread busy; waits %.1f", ws.avgMs);
         tile("CPU TIME", v, sub);
     } else {
-        tile("CPU TIME", "--", compCnt ? "no busy stamps" : "");
+        tile("CPU TIME", "--", "");
     }
 
-    // Row 2: the app's GPU alone, and the drops.
+    // Row 2: the app's GPU share, and the drops.
     if (compCnt) {
         const PerfStats ag = perfStatsOf(appGpu, compCnt);
+        const PerfStats cg = perfStatsOf(compGpu, compCnt);
         snprintf(v, sizeof(v), "%.1f", ag.avgMs);
-        snprintf(sub, sizeof(sub), "ms, max %.1f", ag.maxMs);
+        snprintf(sub, sizeof(sub), "ms less comp %.1f; fields %.1f", cg.avgMs, appFields / compCnt);
         tile("APP GPU", v, sub);
+    } else {
+        tile("APP GPU", "--", "");
+    }
+    if (compCnt && !counts) {
+        tile("DROPPED", "--", "layout 176: not decoded");
+        tile("BY CAUSE", "--", "");
+        tile("REPROJECTED", "--", "");
+    } else if (compCnt) {
         snprintf(v, sizeof(v), "%d", dropped);
         snprintf(sub, sizeof(sub), "in %.0f s, %u total", windowS, s.haveSample ? s.lastSample.droppedTotal : 0u);
         tile("DROPPED", v, sub);
@@ -674,7 +715,6 @@ int perfMonitorTiles(PerfTile* out, int max) {
         snprintf(v, sizeof(v), "%.0f%%", 100.0f * static_cast<float>(reproj) / static_cast<float>(compCnt));
         tile("REPROJECTED", v, "of frames");
     } else {
-        tile("APP GPU", "--", "");
         tile("DROPPED", "--", "no compositor timing");
         tile("BY CAUSE", "--", "");
         tile("REPROJECTED", "--", "");
@@ -809,21 +849,21 @@ int perfMonitorGraph(float* out, int max, float* budgetMs) {
 void perfMonitorOverlayLine(char* buf, size_t bufLen) {
     State& s = g_s;
     if (!buf || !bufLen) return;
-    // The last second of intervals, the last ten of drops; fpsVR's pair of
-    // frametimes (GPU: app + compositor; CPU: the app's busy time) from
-    // the settled records in that second.
-    float present[kRing], gpuFrame[kRing], appCpu[kRing];
-    int n = 0, gpuN = 0, cpuN = 0, dropped = 0;
+    // The last second of intervals, the last ten of drops; the GPU frame
+    // (the compositor's total, fpsVR's GPU frametime) from the settled
+    // records in that second, and the render thread's busy time.
+    float present[kRing], gpuFrame[kRing], busy[kRing];
+    int n = 0, gpuN = 0, dropped = 0;
     float secs = 0.0f;
     for (int i = s.count - 1; i >= 0; --i) {
         const Frame& f = ringAt(i);
         dropped += f.dropped;
         if (secs < 1.0f) {
-            present[n++] = f.presentMs;
-            if (f.haveComp) {
-                gpuFrame[gpuN++] = f.appGpuMs + f.compGpuMs;
-                if (f.appCpuMs > 0.0f) appCpu[cpuN++] = f.appCpuMs;
-            }
+            present[n] = f.presentMs;
+            const float b = f.presentMs - f.presentWaitMs - f.posesWaitMs;
+            busy[n] = b > 0.0f ? b : 0.0f;
+            ++n;
+            if (f.haveComp) gpuFrame[gpuN++] = f.totalGpuMs;
             secs += f.presentMs / 1000.0f;
         }
     }
@@ -834,14 +874,10 @@ void perfMonitorOverlayLine(char* buf, size_t bufLen) {
     }
     char times[80] = "";
     if (gpuN) {
-        const float gpu = perfStatsOf(gpuFrame, gpuN).avgMs;
-        if (cpuN) {
-            snprintf(times, sizeof(times), "   gpu %.1f   cpu %.1f", gpu, perfStatsOf(appCpu, cpuN).avgMs);
-        } else {
-            snprintf(times, sizeof(times), "   gpu %.1f", gpu);
-        }
+        snprintf(times, sizeof(times), "   gpu %.1f   cpu %.1f", perfStatsOf(gpuFrame, gpuN).avgMs,
+                 perfStatsOf(busy, n).avgMs);
     } else {
-        snprintf(times, sizeof(times), "   %.1f ms", ps.avgMs);
+        snprintf(times, sizeof(times), "   %.1f ms   cpu %.1f", ps.avgMs, perfStatsOf(busy, n).avgMs);
     }
     char drop[40] = "";
     if (dropped) snprintf(drop, sizeof(drop), "   %d dropped", dropped);

@@ -11,10 +11,10 @@
 namespace edvr {
 
 enum class MenuKind : unsigned char {
-    Toggle,   // getBool: on / off
-    Number,   // getInt / getFloat, stepped within its bounds
+    Toggle,   // getBool: on / off, drawn as a switch
+    Number,   // getInt / getFloat, stepped within its bounds, or typed
     Choice,   // an enumerated string: cycled
-    Text,     // a free string: shown, never edited from a headset
+    Text,     // a free string: typed
 };
 
 enum class MenuTier : unsigned char {
@@ -28,6 +28,7 @@ struct MenuRowDef {
     const char* key;
     const char* label;     // the ui: label, or the key for a developer row
     const char* hint;      // the comment block's first sentence
+    const char* detail;    // the whole comment block, for the row's tooltip
     MenuKind    kind;
     const char* shipped;   // the value edvr.ini ships with
     const char* lo;        // bounds, when known; empty otherwise

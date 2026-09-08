@@ -263,7 +263,7 @@ Head-aim and keys coexist; whichever moved last owns the highlight.
 |---|---|
 | Up / Down | move the highlight; hold to repeat (400 ms, then 12 Hz) |
 | Left / Right | step the highlighted row: toggle, cycle a choice, step a number; hold to repeat; Shift steps a number by ten steps |
-| Enter / Space | activate: toggle, next choice, or (phase B) open a number for typing; on an action row, fire it |
+| Enter / Space | activate: flip a switch, next choice, or open a number or string for typing; on an action row, fire it |
 | Tab / Shift+Tab, PageUp / PageDown | previous / next page |
 | Home / End | first / last row |
 | R | reset the highlighted row to its shipped default (a confirm on the row, then R again) |
@@ -286,10 +286,35 @@ an aim ray steadier than a head, which means the eye tracker, and
 `docs/eye-tracking.md` records that no field driver publishes a usable one
 today.
 
-**Typing a value** (phase B, needs `menu.keyboard = private`): Enter on a
-number row opens it for text; digits, `.`, `-` and Backspace edit; Enter
-commits, clamped to the row's range and precision; Escape cancels. This is
-the one interaction the gate makes possible that Feature 4 could not offer.
+**Typing a value** (BUILT 2026-09-07, the gate's whole point): Enter on a
+number or string row opens it for typing. The digits, the letters, the
+numeric pad, `.` `-` `,` space and Backspace edit the buffer -- and
+nothing else, so a stray key cannot corrupt a value; Enter writes it,
+Escape leaves it alone, and moving off the row abandons it. A number is
+checked before it is written: one that does not parse, or falls outside
+the row's own range, is refused with the range named on the Status page's
+last-write line rather than written and clamped silently. While a row is
+being typed the arrows and Tab belong to the editor, and head-aim is
+parked, so a look that wanders cannot take the row away mid-value.
+Typing is what the keyboard gate makes possible and Feature 4 could not
+offer.
+
+**A boolean is a switch.** A `Toggle` row draws the installer's control
+where its value would be -- an accent track with the knob at the end the
+value is at -- so the two settings windows read alike and an on/off row
+is told apart from a choice at a glance. A row with a pending restart
+change keeps its text (`off -> on`), because a switch cannot show two
+values at once.
+
+**The tooltip.** The highlighted row carries a card beside it with what
+`edvr.ini` says about that key: the dotted name as its title, the ini's
+WHOLE comment block (not just the first sentence the rows show), the
+range or the list of choices, the shipped value, whether the change
+applies at once or waits for a launch, and the keys that act on it. The
+card is sized to its own text, anchored to the row with a tick, and
+slides up when there is no room below, so it never runs off the panel.
+The generator carries the full comment block into the row table as
+`detail` for exactly this.
 
 **Pads** (phase B): d-pad navigates and steps, A activates, B closes,
 bumpers change page, watched through `xinput_watch` and masked from the
@@ -297,9 +322,15 @@ game through door 4.
 
 ## What it shows
 
-Pages, in tab order. Each row is: label, value, a one-line hint (the
-ini's own explanation, first sentence, by the generator's `summarise()`),
-and where it applies, the measured cost or the restart badge.
+Pages, in tab order. Each row is: label, then its value as a switch, a
+number, a choice or a typed string, and where it applies, the restart
+badge. The ini's own explanation is in the tooltip beside the row.
+
+**The tab strip scrolls.** It shows the window of pages that fits the
+panel's width, always including the current one, with a `<` or `>` at
+whichever end has more. Developer mode adds four pages and the strip ran
+off the edge -- the pages past it could not be seen, and nothing said
+they were there (flown 2026-09-07).
 
 1. **Performance.** The rows tagged `menu performance` in `edvr.ini`:
    `temporal_aa`, `ui_depth`, `render_sharpness`, `supersample_filter`,
@@ -332,28 +363,45 @@ and where it applies, the measured cost or the restart badge.
    - EDVR's own passes' measured cost, from the totals they already keep;
    - a **frame-time strip** of the last 120 frames against the budget
      line, green within it, amber over it, red at twice it.
-   **GPU TIME and CPU TIME are fpsVR's two frametimes**, both the
-   compositor's word. GPU TIME is the app's GPU work plus the
-   compositor's own -- fpsVR's author describes it as "the scene, the
-   companion window and the distortion pass", which are the three GPU
-   fields of the record. CPU TIME is the app's busy time, poses ready to
-   the second eye's submit; it runs past the Present period even at rate,
-   because running start hands the poses out a few ms before the vsync,
-   so the app's window is the period plus that. Neither is the Present
-   period, which sits on the FRAME RATE tile; frame rate, the 1% low and
-   the strip stay on the period, as fpsVR's do.
+   **GPU TIME and CPU TIME are fpsVR's two frametimes.** GPU TIME is the
+   compositor's own GPU frame total -- its record's "time between work
+   submitted immediately after present until the end of compositor
+   submitted work", which is the timeline fpsVR's author describes as the
+   scene, the companion window and the distortion pass. CPU TIME is
+   EDVR's own measurement, not the compositor's: the Present-to-Present
+   period less the time the game's thread spent blocked inside
+   WaitGetPoses and inside Present, which is the render thread's busy
+   time. The APP GPU tile carries the app's share, the frame total less
+   the compositor's, and names the record's own two app fields beside it.
+   The Present period sits on the FRAME RATE tile; frame rate, the 1%
+   low and the strip stay on the period, as fpsVR's do.
    **The record read is the settled one, two compositor frames back.**
-   Flown 2026-09-07 with the most recent record (`framesAgo = 0`): its CPU
-   stamps were complete at the WaitGetPoses boundary but its GPU fields
-   were not -- the app's GPU time read 0.2 ms for a frame whose door pass
-   alone was 5 ms -- and fpsVR, which reads a settled record, showed a
-   steady 9.6 while our busy-time FRAME TIME wandered 10-13. The monitor
-   writes the settled record into the ring entry of the frame it
-   describes, two back, so drops and EDVR's events line up. Twice a
+   Flown 2026-09-07 with the most recent record (`framesAgo = 0`): its
+   GPU fields had not resolved at the WaitGetPoses boundary. Two further
+   findings from the probe on the next flight:
+   - **The 176-byte layout is not this header's.** The reader offered
+     176 bytes first and SteamVR ANSWERED, but the record it filled puts
+     `m_flSystemTimeInSeconds` where this struct has the dropped-frame
+     count and the reprojection flags -- proven by decoding those two
+     words as one double: 33699 s and 33740 s at two probes 40.7 s
+     apart. Every drop the page counted from that record was noise, and
+     the drop-frame log line fired on frames that never dropped. The
+     reader now offers **184, openvr.h's own, first**, and if only 176
+     is accepted it says so and leaves the count and reprojection
+     columns blank rather than showing numbers it cannot decode.
+   - **Elite's WaitGetPoses is thirty microseconds before its Submit.**
+     The record's poses-ready and frame-ready stamps read 1.14 and 1.17
+     ms from the same vsync, every frame: the game renders, then latches
+     poses, then submits. So the compositor's app-busy window is ~0 for
+     this game and cannot be a CPU frametime, which is why CPU TIME is
+     measured here instead.
+   The monitor writes the settled record into the ring entry of the frame
+   it describes, two back, so drops and EDVR's events line up. Twice a
    session (20 s and 60 s after arming, three frames each) the openvr
-   half logs the four most recent records side by side, every raw field,
-   as "compositor timing probe": the log of any flight shows which record
-   has resolved, and every stamp fpsVR could be built from.
+   half logs the four most recent records side by side, every decoded
+   field, as "compositor timing probe", followed by the most recent
+   record's raw words in hex -- so a layout this build decodes wrongly
+   can be read off any flight's log without another build.
    Laid out as **sixteen tiles, four across** -- a caption, one big
    number, one small line each -- after the first flight found rows of
    sentences full of numbers unreadable in a headset; the last drop and
@@ -438,9 +486,9 @@ no EDVR event and ordinary EDVR costs is the game's or the runtime's, and
 the page says so by calling it clean.
 
 **The overlay** (`menu.fps_overlay = on`, off by default): a one-line
-readout -- frames per second over the last second, fpsVR's GPU and CPU
-frametimes from the settled records in it, frames dropped in the last
-ten seconds -- shown while the
+readout -- frames per second over the last second, the GPU frame time
+from the settled records in it, the render thread's busy time, frames
+dropped in the last ten seconds -- shown while the
 menu is CLOSED and pinned to the head, the toolkit's overlay, because that
 is what was asked for and a gauge you carry has its uses. `fps_overlay_yaw`
 and `fps_overlay_pitch` put it where you can stop seeing it (default 16

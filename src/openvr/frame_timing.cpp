@@ -124,8 +124,29 @@ void settleProbe(void* iface, PFN_GetFrameTiming fn, uint32_t published) {
         if (w <= 0) break;
         len += static_cast<size_t>(w) < sizeof(line) - len ? static_cast<size_t>(w) : sizeof(line) - len - 1;
     }
-    Log::get().note("compositor timing probe (ms; poses/ready/upd/rstart are from the frame's vsync): %s",
-                    line);
+    Log::get().note("compositor timing probe (layout %u; ms; poses/ready/upd/rstart are from the "
+                    "frame's vsync): %s",
+                    g_s.sizeUsed, line);
+    // And the most recent record's raw words, so a layout the decode above
+    // has wrong can be read off the log without another build.
+    {
+        FrameTimingRaw r{};
+        r.size = g_s.sizeUsed;
+        bool ok = false;
+        guarded("frameTiming/probeRaw", [&] { ok = fn(iface, &r, 0); });
+        if (ok) {
+            const uint32_t* words = reinterpret_cast<const uint32_t*>(&r);
+            const size_t n = sizeof(r) / sizeof(uint32_t);
+            char hex[sizeof(r) / sizeof(uint32_t) * 9 + 8];
+            size_t hl = 0;
+            for (size_t i = 0; i < n && hl + 10 < sizeof(hex); ++i) {
+                hl += static_cast<size_t>(snprintf(hex + hl, sizeof(hex) - hl, "%s%08x", i ? " " : "", words[i]));
+            }
+            Log::get().note("compositor timing probe raw (ago 0, %u words of the %u-byte record as "
+                            "written, little-endian): %s",
+                            static_cast<unsigned>(n), g_s.sizeUsed, hex);
+        }
+    }
 }
 
 void standDown(const char* why) {
@@ -187,13 +208,15 @@ void frameTimingBoundary(void* iface, size_t prefix) {
     bool got = false;
     PFN_GetFrameTiming fn = reinterpret_cast<PFN_GetFrameTiming>(vt[kSlotGetFrameTiming]);
     const bool survived = guardedBudget(g_budget, [&] {
-        // The size the runtime expects for the generation it serves: the
-        // 1.0-era layout first, then the later one, remembered once one works.
-        // The record asked for is the SETTLED one, kFrameTimingLag frames
-        // back: the most recent is still in flight at this boundary and its
-        // GPU stamps have not resolved (flown 2026-09-07: 0.2 ms for a frame
-        // whose door pass alone was 5 ms).
-        const uint32_t sizes[2] = {s.sizeUsed ? s.sizeUsed : 176u, s.sizeUsed ? s.sizeUsed : 184u};
+        // The size the runtime expects: openvr.h's own 184 first, and the
+        // 1.0-era 176 only if that is refused, remembered once one works.
+        // The order matters: SteamVR ANSWERS a 176-byte request, but in a
+        // layout whose leading words are not this header's -- flown
+        // 2026-09-07, the drop-count and flag words held the two halves of
+        // the record's clock (the "flags" advanced by exactly the 41 s
+        // between two probes), so every frame read as dropped. The record
+        // asked for is the one kFrameTimingLag frames back.
+        const uint32_t sizes[2] = {s.sizeUsed ? s.sizeUsed : 184u, s.sizeUsed ? s.sizeUsed : 176u};
         for (int i = 0; i < 2 && !got; ++i) {
             memset(&raw, 0, sizeof(raw));
             raw.size = sizes[i];
@@ -238,22 +261,30 @@ void frameTimingBoundary(void* iface, size_t prefix) {
         s.armed = true;
         Log::get().note(
             "compositor timing: armed -- IVRCompositor::GetFrameTiming answers (layout %u "
-            "bytes), one read per frame at the boundary for the menu's Monitor page, of the "
-            "record %u frames back (the settled one): the app's GPU time, the compositor's, "
+            "bytes%s), one read per frame at the boundary for the menu's Monitor page, of the "
+            "record %u frames back (the settled one): the GPU frame time, the compositor's, "
             "dropped and reprojected frames, the CPU frame interval and the app's busy time. "
             "advanced.compositor_timing = off turns it off, live.",
-            s.sizeUsed, kFrameTimingLag);
+            s.sizeUsed,
+            s.sizeUsed == 176u ? ": the 1.0-era layout, whose drop and reprojection words this "
+                                 "build does not decode -- those columns stay blank"
+                               : "",
+            kFrameTimingLag);
     }
+    // The 176-byte layout's leading words are not openvr.h's (above): its
+    // counts and flags are not believed.
+    const bool counts = s.sizeUsed == 184u;
     FrameTimingSample out{};
     if (raw.frameIndex != s.lastIndex) {
         // A new compositor frame: its dropped count is new information.
-        s.droppedTotal += raw.numDroppedFrames;
+        if (counts && raw.numDroppedFrames < 1000u) s.droppedTotal += raw.numDroppedFrames;
         s.lastIndex = raw.frameIndex;
     }
+    out.layout = s.sizeUsed;
     out.frameIndex = raw.frameIndex;
-    out.presents = raw.numFramePresents;
+    out.presents = counts ? raw.numFramePresents : 0u;
     out.droppedTotal = s.droppedTotal;
-    out.reprojFlags = raw.reprojectionFlags;
+    out.reprojFlags = counts ? raw.reprojectionFlags : 0u;
     out.appGpuMs = raw.preSubmitGpuMs + raw.postSubmitGpuMs;
     out.totalGpuMs = raw.totalRenderGpuMs;
     out.compGpuMs = raw.compositorRenderGpuMs;

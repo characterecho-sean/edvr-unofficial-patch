@@ -581,11 +581,12 @@ def main():
             kind = 'choice'
         applies = when_it_applies(s)
         menuOut.append(
-            '    {%s, %s, %s, %s,\n     MenuKind::%s, %s, %s, %s, %d, %s, %s, %d,\n'
+            '    {%s, %s, %s, %s,\n     %s,\n     MenuKind::%s, %s, %s, %s, %d, %s, %s, %d,\n'
             '     MenuTier::%s, %s, %s},' % (
                 c_string(s.section), c_string(s.key),
                 c_string(s.label if s.section in EXPOSED_SECTIONS else s.key),
                 c_string(summarise(s.description)),
+                c_string(s.description),
                 {'toggle': 'Toggle', 'number': 'Number', 'text': 'Text',
                  'choice': 'Choice'}[kind],
                 c_string(s.value), c_string(lo or ''), c_string(hi or ''), precision,

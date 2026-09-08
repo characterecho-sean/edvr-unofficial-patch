@@ -1815,9 +1815,19 @@ vr::EVRCompositorError hookedWaitGetPoses(void* self,
     }
 
     // WaitGetPoses blocks until the compositor releases the app, which makes it
-    // the natural frame boundary.
+    // the natural frame boundary. How long it blocked crosses to the monitor:
+    // with the time blocked in Present, it is what the frame period loses to
+    // waiting, and the rest is the render thread's own time.
+    LARGE_INTEGER waitT0, waitT1, waitF;
+    QueryPerformanceCounter(&waitT0);
     const vr::EVRCompositorError result =
         s->realWaitGetPoses(self, renderPoses, renderCount, gamePoses, gameCount);
+    QueryPerformanceCounter(&waitT1);
+    QueryPerformanceFrequency(&waitF);
+    if (waitF.QuadPart > 0 && waitT1.QuadPart > waitT0.QuadPart) {
+        const int64_t us = (waitT1.QuadPart - waitT0.QuadPart) * 1000000 / waitF.QuadPart;
+        addWaitCpuUs(us > 0 ? static_cast<uint32_t>(us) : 0u);
+    }
 
     if (s->inert) return result;
 
