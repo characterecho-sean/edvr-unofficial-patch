@@ -38,13 +38,22 @@ namespace {
 // help: this cap bites first.
 //
 // 16 MB covers a three-frame census of the densest scene flown with room to
-// spare. It costs nothing when nothing is bursting: the buffers reserve 64 KB
-// and a vector only commits what it holds, so this is a ceiling, not an
-// allocation. Both buffers can reach it, so the true worst case is twice
-// this, briefly, while a capture drains.
-constexpr int    kDefaultBufferMb = 16;
-constexpr size_t kMinBufferBytes  = 64u * 1024u;
-constexpr DWORD  kFlushIntervalMs = 250;
+// spare, and it is a CEILING on what may queue, not a standing allocation:
+// the buffers start at kReserveBytes and grow only as far as a burst takes
+// them.
+//
+// But growth is not free afterwards. std::vector::clear() keeps capacity, so
+// without the reclaim in writeBuffer() one census would leave a buffer
+// holding its peak for the rest of the session -- and both of the pair can
+// peak, so a 16 MB ceiling would mean up to 32 MB resident in a DLL sitting
+// inside somebody's VR session. Hence kReclaimAboveBytes: past that, the
+// buffer is swapped for a fresh one at the reserve size. Below it the
+// capacity is left alone, so the steady state never allocates at all.
+constexpr int    kDefaultBufferMb   = 16;
+constexpr size_t kMinBufferBytes    = 64u * 1024u;
+constexpr size_t kReserveBytes      = 64u * 1024u;
+constexpr size_t kReclaimAboveBytes = 1u * 1024u * 1024u;
+constexpr DWORD  kFlushIntervalMs   = 250;
 
 // The link time of the module this code is compiled into, read from its own PE
 // header. This is the identity a binary carries wherever it is copied, and the
@@ -137,8 +146,8 @@ bool Log::open(const std::wstring& dir, const wchar_t* tag) {
     if (m_bufferCapBytes < kMinBufferBytes) m_bufferCapBytes = kMinBufferBytes;
 
     m_impl = new Impl();
-    m_impl->buf[0].reserve(64 * 1024);
-    m_impl->buf[1].reserve(64 * 1024);
+    m_impl->buf[0].reserve(kReserveBytes);
+    m_impl->buf[1].reserve(kReserveBytes);
     m_dir = dir;
 
     // Created here rather than at config time, so logging turned off leaves no
@@ -242,6 +251,14 @@ void Log::writeBuffer(int index) {
                   nullptr);
         m_bytesWritten += written;
         b.clear();
+        // clear() keeps capacity, so a burst that grew this buffer to the
+        // ceiling would hold that memory until the process exits. Give it
+        // back once it is well past the steady state; a swap because
+        // shrink_to_fit() is a non-binding request.
+        if (b.capacity() > kReclaimAboveBytes) {
+            std::vector<char>().swap(b);
+            b.reserve(kReserveBytes);
+        }
     }
 
     // Say so when lines were lost (2026-09-07).
