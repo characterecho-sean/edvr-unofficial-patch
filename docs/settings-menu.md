@@ -332,13 +332,28 @@ and where it applies, the measured cost or the restart badge.
    - EDVR's own passes' measured cost, from the totals they already keep;
    - a **frame-time strip** of the last 120 frames against the budget
      line, green within it, amber over it, red at twice it.
-   **FRAME TIME is fpsVR's number**: the app's busy time from the
-   compositor's timing (poses ready to the second eye's submit), not the
-   Present period, which sits on the tile's sub-line. Flown 2026-09-07:
-   the period read 2 ms slower than fpsVR on a 90 Hz Pimax, and the 2 ms
-   is the wait for the compositor's running start when the game is
-   hitting rate. Frame rate, the 1% low and the strip stay on the period,
-   as fpsVR's do.
+   **GPU TIME and CPU TIME are fpsVR's two frametimes**, both the
+   compositor's word. GPU TIME is the app's GPU work plus the
+   compositor's own -- fpsVR's author describes it as "the scene, the
+   companion window and the distortion pass", which are the three GPU
+   fields of the record. CPU TIME is the app's busy time, poses ready to
+   the second eye's submit; it runs past the Present period even at rate,
+   because running start hands the poses out a few ms before the vsync,
+   so the app's window is the period plus that. Neither is the Present
+   period, which sits on the FRAME RATE tile; frame rate, the 1% low and
+   the strip stay on the period, as fpsVR's do.
+   **The record read is the settled one, two compositor frames back.**
+   Flown 2026-09-07 with the most recent record (`framesAgo = 0`): its CPU
+   stamps were complete at the WaitGetPoses boundary but its GPU fields
+   were not -- the app's GPU time read 0.2 ms for a frame whose door pass
+   alone was 5 ms -- and fpsVR, which reads a settled record, showed a
+   steady 9.6 while our busy-time FRAME TIME wandered 10-13. The monitor
+   writes the settled record into the ring entry of the frame it
+   describes, two back, so drops and EDVR's events line up. Twice a
+   session (20 s and 60 s after arming, three frames each) the openvr
+   half logs the four most recent records side by side, every raw field,
+   as "compositor timing probe": the log of any flight shows which record
+   has resolved, and every stamp fpsVR could be built from.
    Laid out as **sixteen tiles, four across** -- a caption, one big
    number, one small line each -- after the first flight found rows of
    sentences full of numbers unreadable in a headset; the last drop and
@@ -399,10 +414,19 @@ read the two together:
   measured per-frame figures.
 - **The log**: a `monitor: DROPPED FRAME` (or `LONG FRAME`, for one over
   twice the budget by EDVR's own clock when the compositor reports no
-  drop) line with the interval, the compositor's app GPU time, EDVR's four
-  costs and its events, at most one every five seconds and sixty a
-  session -- so a field report carries the attribution without the
-  headset on.
+  drop) line with the interval, the compositor's record for the frame
+  (GPU app and compositor, the app's busy time, when the poses came and
+  when the submit landed, from the vsync), EDVR's four costs and its
+  events, at most one every five seconds and sixty a session -- so a
+  field report carries the attribution without the headset on.
+- **The frame the record describes.** The compositor's record is read
+  two frames back (the settled one, above), and it is written into the
+  ring entry of THAT frame, beside the events EDVR raised in it. The
+  first build wrote it into the newest entry, so a drop was blamed on
+  whatever EDVR did two frames after it -- and with the Monitor page up,
+  that was its own bitmap upload four times a second, which is why the
+  "with EDVR" count climbed steadily on the second flight (2026-09-07)
+  while every logged drop said "EDVR events: none".
 - **And the hitch removed**: the menu's ini write (read, merge, write,
   replace, mirror copy, backup copy) ran on the render thread in the first
   build; it now runs on a worker, serialised and coalesced while a key is
@@ -414,8 +438,9 @@ no EDVR event and ordinary EDVR costs is the game's or the runtime's, and
 the page says so by calling it clean.
 
 **The overlay** (`menu.fps_overlay = on`, off by default): a one-line
-readout -- frames per second and frame time over the last second, the
-app's GPU time, frames dropped in the last ten seconds -- shown while the
+readout -- frames per second over the last second, fpsVR's GPU and CPU
+frametimes from the settled records in it, frames dropped in the last
+ten seconds -- shown while the
 menu is CLOSED and pinned to the head, the toolkit's overlay, because that
 is what was asked for and a gauge you carry has its uses. `fps_overlay_yaw`
 and `fps_overlay_pitch` put it where you can stop seeing it (default 16
@@ -489,9 +514,13 @@ Sean's addition, made a first-class mechanism rather than a badge:
 
 ## Placement and rendering
 
-**Anchor.** On summon, the d3d11 half latches the current raw head pose
+**Anchor.** On summon, the d3d11 half reads the current raw head pose
 (`headPose()`, published by the openvr half before any EDVR offset touches
-it) as the anchor and publishes it on the channel; the panel sits
+it), takes its look direction's yaw and pitch and builds the anchor from
+those with **no roll** -- upright in the world, so the panel's edges are
+level whatever tilt the head had at the summon (the first build latched
+the whole pose, roll included, and a head cocked at F8 got a cocked menu;
+flown 2026-09-07) -- and publishes it on the channel; the panel sits
 `menu.distance` metres (default 1.4) along the anchor's forward, upright
 in the anchor frame, and does not move until recentred or re-summoned. At
 the door, the openvr half computes the per-eye transform exactly as

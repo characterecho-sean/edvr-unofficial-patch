@@ -233,6 +233,9 @@ struct Shared {
 // The name is built once, at first use. The two DLLs are in the same process,
 // so the channel between them is unaffected.
 //
+// _v27 because the frame timing sample is now the SETTLED record (two
+// compositor frames back) and carries the compositor's CPU time and the
+// poses-ready and frame-ready stamps.
 // _v26 because the frame timing sample gained the app's busy time (fpsVR's
 // CPU frametime), and the EDVR-activity and head-lock words.
 // _v25 because the compositor's frame timing joined, for the menu's
@@ -277,7 +280,7 @@ const wchar_t* mappingName() {
     static wchar_t name[64];
     static bool built = false;
     if (!built) {
-        _snwprintf_s(name, _TRUNCATE, L"Local\\edvr_glitch_frame_v26_%lu",
+        _snwprintf_s(name, _TRUNCATE, L"Local\\edvr_glitch_frame_v27_%lu",
                      GetCurrentProcessId());
         built = true;
     }

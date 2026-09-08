@@ -1217,10 +1217,13 @@ void handleAim(uint64_t now) {
 // ---------------------------------------------------------------------------
 // Open, close, anchor
 
-// Anchor the panel at the head's current pose, turned by yaw about the
-// head's up axis and then pitched about its right axis: R' = R * Ry(yaw) *
-// Rx(pitch). Zero and zero is where you are looking; a toast sits a little
-// below; the overlay wherever it was put.
+// Anchor the panel where the head is looking, UPRIGHT IN THE WORLD: the
+// anchor's yaw and pitch are the head's look direction's, its roll is
+// zero, so the panel's edges are level whatever tilt the head had at the
+// summon (the first build latched the whole head pose, roll included, and
+// a head cocked at F8 got a cocked menu -- flown 2026-09-07). The offsets
+// add to those angles: zero and zero is where you are looking; a toast
+// sits a little below. R = Ry(yaw) * Rx(pitch), no Rz.
 void latchAnchor(float yawDeg, float pitchDeg) {
     State& s = g_s;
     float c[12];
@@ -1228,18 +1231,26 @@ void latchAnchor(float yawDeg, float pitchDeg) {
         s.anchorValid = false;
         return;
     }
-    const float ty = yawDeg * 0.0174532925f, tp = pitchDeg * 0.0174532925f;
-    const float cy = cosf(ty), sy = sinf(ty), cp = cosf(tp), sp = sinf(tp);
-    // Ry(yaw) * Rx(pitch), row-major.
-    const float m[9] = {cy, sy * sp, sy * cp, 0.0f, cp, -sp, -sy, cy * sp, cy * cp};
-    float out[12];
-    for (int r = 0; r < 3; ++r) {
-        const float x = c[r * 4 + 0], y = c[r * 4 + 1], z = c[r * 4 + 2];
-        out[r * 4 + 0] = x * m[0] + y * m[3] + z * m[6];
-        out[r * 4 + 1] = x * m[1] + y * m[4] + z * m[7];
-        out[r * 4 + 2] = x * m[2] + y * m[5] + z * m[8];
-        out[r * 4 + 3] = c[r * 4 + 3];
+    // The look direction is minus the pose's third column; its yaw is
+    // read on the horizon, its pitch from its rise. Looking straight up or
+    // down leaves no horizon to read a yaw from, so the head's up axis
+    // stands in (it points along the horizon then: forward when looking
+    // down, backward when looking up).
+    float fx = -c[2], fy = -c[6], fz = -c[10];
+    float hx = fx, hz = fz;
+    if (hx * hx + hz * hz < 0.05f * 0.05f) {
+        const float sgn = fy < 0.0f ? 1.0f : -1.0f;
+        hx = sgn * c[1];
+        hz = sgn * c[9];
     }
+    const float yaw = atan2f(-hx, -hz) + yawDeg * 0.0174532925f;
+    const float rise = fy > 1.0f ? 1.0f : (fy < -1.0f ? -1.0f : fy);
+    const float pitch = asinf(rise) + pitchDeg * 0.0174532925f;
+    const float cy = cosf(yaw), sy = sinf(yaw), cp = cosf(pitch), sp = sinf(pitch);
+    // Ry(yaw) * Rx(pitch), row-major, with the head's position.
+    const float out[12] = {cy, sy * sp, sy * cp, c[3],
+                           0.0f, cp, -sp, c[7],
+                           -sy, cy * sp, cy * cp, c[11]};
     memcpy(s.anchor, out, sizeof(out));
     s.anchorValid = true;
     publishMenuAnchor(out);

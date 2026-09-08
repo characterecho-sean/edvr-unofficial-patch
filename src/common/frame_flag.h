@@ -373,11 +373,16 @@ void announceRuntimeKind(uint32_t kind);
 uint32_t runtimeKind();
 
 // THE COMPOSITOR'S FRAME TIMING (docs/settings-menu.md, the Monitor page):
-// what the runtime itself measured for the frame just presented, read by the
-// openvr half through IVRCompositor::GetFrameTiming at each WaitGetPoses and
-// published whole. The d3d11 half's monitor rings it up. Published under a
-// sequence counter that is odd while a write is in flight, so the reader
-// never sees half a sample; a reader that catches an odd count tries again.
+// what the runtime itself measured for a SETTLED frame -- the one two
+// compositor frames back, whose GPU timestamps have resolved (the most
+// recent record is still in flight at the boundary, and reads its GPU
+// fields as a fraction of a millisecond) -- read by the openvr half through
+// IVRCompositor::GetFrameTiming at each WaitGetPoses and published whole.
+// The d3d11 half's monitor rings it up against the frame it describes.
+// Published under a sequence counter that is odd while a write is in
+// flight, so the reader never sees half a sample; a reader that catches an
+// odd count tries again.
+constexpr uint32_t kFrameTimingLag = 2;   // the record read: this many compositor frames back
 struct FrameTimingSample {
     uint32_t frameIndex;      // the compositor's, increments per compositor frame
     uint32_t presents;        // times this frame was presented
@@ -386,8 +391,11 @@ struct FrameTimingSample {
     float    appGpuMs;        // pre-submit + post-submit GPU time, the app's
     float    totalGpuMs;      // from the previous present to the end of compositor work
     float    compGpuMs;       // the compositor's own GPU time
+    float    compCpuMs;       // the compositor's own CPU time submitting that work
     float    cpuFrameMs;      // the app's interval between WaitGetPoses calls (the period)
-    float    appCpuMs;        // the app's BUSY time: poses ready to second submit -- fpsVR's CPU frametime
+    float    appCpuMs;        // the app's BUSY time: poses ready to second submit
+    float    posesReadyMs;    // when WaitGetPoses returned, ms from the frame's vsync (running start is negative)
+    float    frameReadyMs;    // when the second Submit landed, ms from the same vsync
     float    presentCpuMs;    // time blocked in Present
     float    idleCpuMs;       // compositor-measured slack before running start
     float    displayHz;       // the headset's refresh, or 0 when unknown

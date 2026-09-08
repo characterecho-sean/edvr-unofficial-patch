@@ -201,11 +201,11 @@ void layout(const MenuContent& c, std::vector<Op>& ops, std::vector<LineRect>& l
             o.font = Font::Tab;
             ops.push_back(o);
             if (i == c.activeTab) {
-                Op u;
-                u.rect = {x, y + tabH - cap / 6, x + wpx - cap / 2, y + tabH};
-                u.rgb = kTabActive;
-                u.alpha = 0.9f;
-                ops.push_back(u);
+                Op under;
+                under.rect = {x, y + tabH - cap / 6, x + wpx - cap / 2, y + tabH};
+                under.rgb = kTabActive;
+                under.alpha = 0.9f;
+                ops.push_back(under);
             }
             x += wpx + cap / 2;
         }

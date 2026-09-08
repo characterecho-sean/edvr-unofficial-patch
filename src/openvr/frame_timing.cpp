@@ -4,6 +4,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 
 #include "../common/config.h"
@@ -77,6 +78,56 @@ State g_s;
 
 FaultBudget g_budget("frameTiming", 4);
 
+// The settle probe: twice in a session, twenty and sixty seconds after
+// arming, three frames each, the four most recent records side by side in
+// the log -- so a flight shows which record's GPU fields have resolved
+// and every raw stamp fpsVR could be built from. Flown 2026-09-07 with the
+// most recent record: the app's GPU time read 0.2 ms for a frame whose
+// door pass alone was 5 ms, and fpsVR showed a steady 9.6.
+constexpr uint32_t kProbeAt[2] = {1800, 5400};
+constexpr uint32_t kProbeFrames = 3;
+constexpr uint32_t kProbeDepth = 4;
+
+void settleProbe(void* iface, PFN_GetFrameTiming fn, uint32_t published) {
+    bool due = false;
+    for (uint32_t at : kProbeAt) {
+        if (published >= at && published < at + kProbeFrames) due = true;
+    }
+    if (!due) return;
+    char line[900];
+    size_t len = 0;
+    for (uint32_t ago = 0; ago < kProbeDepth && len + 1 < sizeof(line); ++ago) {
+        FrameTimingRaw r{};
+        r.size = g_s.sizeUsed;
+        bool ok = false;
+        guarded("frameTiming/probe", [&] { ok = fn(iface, &r, ago); });
+        int w = 0;
+        if (!ok) {
+            w = snprintf(line + len, sizeof(line) - len, "%sago %u: refused", ago ? " | " : "", ago);
+        } else {
+            w = snprintf(line + len, sizeof(line) - len,
+                         "%sago %u: idx %u pre %.2f post %.2f total %.2f comp %.2f ccpu %.2f idle %.2f "
+                         "interval %.2f wgp %.2f poses %.2f ready %.2f upd %.2f-%.2f rstart %.2f "
+                         "drop %u pres %u flags 0x%x",
+                         ago ? " | " : "", ago, r.frameIndex, static_cast<double>(r.preSubmitGpuMs),
+                         static_cast<double>(r.postSubmitGpuMs), static_cast<double>(r.totalRenderGpuMs),
+                         static_cast<double>(r.compositorRenderGpuMs),
+                         static_cast<double>(r.compositorRenderCpuMs),
+                         static_cast<double>(r.compositorIdleCpuMs),
+                         static_cast<double>(r.clientFrameIntervalMs),
+                         static_cast<double>(r.waitGetPosesCalledMs), static_cast<double>(r.newPosesReadyMs),
+                         static_cast<double>(r.newFrameReadyMs), static_cast<double>(r.compositorUpdateStartMs),
+                         static_cast<double>(r.compositorUpdateEndMs),
+                         static_cast<double>(r.compositorRenderStartMs), r.numDroppedFrames,
+                         r.numFramePresents, r.reprojectionFlags);
+        }
+        if (w <= 0) break;
+        len += static_cast<size_t>(w) < sizeof(line) - len ? static_cast<size_t>(w) : sizeof(line) - len - 1;
+    }
+    Log::get().note("compositor timing probe (ms; poses/ready/upd/rstart are from the frame's vsync): %s",
+                    line);
+}
+
 void standDown(const char* why) {
     if (g_s.standDown) return;
     g_s.standDown = true;
@@ -134,15 +185,19 @@ void frameTimingBoundary(void* iface, size_t prefix) {
 
     FrameTimingRaw raw{};
     bool got = false;
+    PFN_GetFrameTiming fn = reinterpret_cast<PFN_GetFrameTiming>(vt[kSlotGetFrameTiming]);
     const bool survived = guardedBudget(g_budget, [&] {
-        PFN_GetFrameTiming fn = reinterpret_cast<PFN_GetFrameTiming>(vt[kSlotGetFrameTiming]);
         // The size the runtime expects for the generation it serves: the
         // 1.0-era layout first, then the later one, remembered once one works.
+        // The record asked for is the SETTLED one, kFrameTimingLag frames
+        // back: the most recent is still in flight at this boundary and its
+        // GPU stamps have not resolved (flown 2026-09-07: 0.2 ms for a frame
+        // whose door pass alone was 5 ms).
         const uint32_t sizes[2] = {s.sizeUsed ? s.sizeUsed : 176u, s.sizeUsed ? s.sizeUsed : 184u};
         for (int i = 0; i < 2 && !got; ++i) {
             memset(&raw, 0, sizeof(raw));
             raw.size = sizes[i];
-            if (fn(iface, &raw, 0)) {
+            if (fn(iface, &raw, kFrameTimingLag)) {
                 got = true;
                 s.sizeUsed = sizes[i];
             }
@@ -183,10 +238,11 @@ void frameTimingBoundary(void* iface, size_t prefix) {
         s.armed = true;
         Log::get().note(
             "compositor timing: armed -- IVRCompositor::GetFrameTiming answers (layout %u "
-            "bytes), one read per frame at the boundary for the menu's Monitor page: the "
-            "app's GPU time, the compositor's, dropped and reprojected frames, the CPU "
-            "frame interval. advanced.compositor_timing = off turns it off, live.",
-            s.sizeUsed);
+            "bytes), one read per frame at the boundary for the menu's Monitor page, of the "
+            "record %u frames back (the settled one): the app's GPU time, the compositor's, "
+            "dropped and reprojected frames, the CPU frame interval and the app's busy time. "
+            "advanced.compositor_timing = off turns it off, live.",
+            s.sizeUsed, kFrameTimingLag);
     }
     FrameTimingSample out{};
     if (raw.frameIndex != s.lastIndex) {
@@ -201,20 +257,24 @@ void frameTimingBoundary(void* iface, size_t prefix) {
     out.appGpuMs = raw.preSubmitGpuMs + raw.postSubmitGpuMs;
     out.totalGpuMs = raw.totalRenderGpuMs;
     out.compGpuMs = raw.compositorRenderGpuMs;
+    out.compCpuMs = raw.compositorRenderCpuMs;
     out.cpuFrameMs = raw.clientFrameIntervalMs;
-    // The app's busy time, fpsVR's CPU frametime: from the poses arriving
-    // to the second eye's submit. Both stamps are milliseconds on the
-    // compositor's frame clock; a pair that reads backwards or absurd is
-    // reported as unknown rather than as a number.
+    // The app's busy time: from the poses arriving to the second eye's
+    // submit. Both stamps are milliseconds from the frame's vsync (running
+    // start puts the first a few ms before it); a pair that reads backwards
+    // or absurd is reported as unknown rather than as a number.
     {
         const float busy = raw.newFrameReadyMs - raw.newPosesReadyMs;
         out.appCpuMs = (finite(busy) && busy >= 0.0f && busy < 1000.0f) ? busy : 0.0f;
+        out.posesReadyMs = finite(raw.newPosesReadyMs) ? raw.newPosesReadyMs : 0.0f;
+        out.frameReadyMs = finite(raw.newFrameReadyMs) ? raw.newFrameReadyMs : 0.0f;
     }
     out.presentCpuMs = raw.presentCallCpuMs;
     out.idleCpuMs = raw.compositorIdleCpuMs;
     out.displayHz = s.hz;
     publishFrameTiming(out);
     ++s.published;
+    settleProbe(iface, fn, s.published);
 }
 
 namespace {
