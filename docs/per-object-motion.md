@@ -594,6 +594,40 @@ answered it. The rest need the game running -- see
    One thing the flight settled in the design's favour: the scene depth's
    bind flags are `0x48`, so `SHADER_RESOURCE` is set and step 4's stencil
    view is creatable directly, with no copy.
+
+   **A consumer the so= column can never see, found and then measured**
+   (2026-09-07). Everything above is a statement about DRAWS, because `so=`
+   records a draw's depth-stencil state and **a compute shader has none**.
+   Chasing an unrelated stale hash turned up two of the game's compute
+   shaders sampling the scene depth through an `X32_G8X24_UINT` view -- the
+   stencil plane -- which no analysis here had accounted for. They are
+   `5998146D464F5C0E` and `EB0245DE0BB23BB6`, the amortised tile renderer
+   `fss-scanner.md` already named as the FSS arrival content's real
+   producer.
+
+   Reading them needed the shader dump extended to compute, which it had
+   never covered. Disassembled
+   (`docs/shaders/tile-renderer-cs.asm`), the entire stencil use is:
+
+       ld_indexable(texture2d)(uint,uint,uint,uint) r1.z, r1.xyzw, t4.xzyw
+       and  r1.z, r1.z, cb1[26].y
+       ieq  r1.z, r1.z, cb1[26].y
+       if_nz r1.z
+
+   `(stencil & M) == M`, with **M a runtime constant, so the bytecode gives
+   the mechanism and not the mask.** Measured instead, through the census's
+   compute constant-buffer watch, which already reads `CSGetConstantBuffers(0, 2)`
+   and needed no change: **`cb1[26].y` is 0, raw bits `0x00000000`, in all
+   four readbacks across two censuses and both eyes.** A mask of zero makes
+   the test unconditionally true, so in that scene the renderer reads the
+   stencil and ignores it, and constrains no bit.
+
+   Two limits on that, and the second is the one to act on. The value is a
+   GPU copy taken a few frames after the dispatch, so it is strong evidence
+   about the buffer rather than proof about that draw. And it was flown in
+   ordinary flight, while this renderer's headline job is the FSS arrival
+   path -- a mask armed only there would be invisible here. **Repeat the
+   reading during an FSS scan before question 1 is called closed.**
 2. **Whether the stencil survives to Submit.** From the same census: after
    the last scene draw, does anything clear or write the pair's stencil
    before EDVR's `mv` dispatch (which `review-ui-depth-2026-09-06.md:67-71`
