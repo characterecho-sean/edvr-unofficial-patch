@@ -521,6 +521,29 @@ the mask's:
   of edge pixels, which at a 2x upscale is a soft edge. The first two
   have live knobs (`temporal_aa_movers = off`, `temporal_aa_ship_metres =
   10`, Elite's HMD Quality); the probe decides the third.
+- **The interface's text swam again with the mask on** (the session of
+  10:43, after main's interface reactive mask had been merged in and the
+  player had judged that mask good on main). Two things in the mask did
+  it, both fixed the same hour. The fold handed NVIDIA `max(interface,
+  mover)`: wherever the mover test tripped on a text stroke the
+  interface's 0.5 became 1.0 -- fresh frame only, text that never
+  accumulates, the swim `ui_depth` exists to fix. And the test trips on
+  strokes by construction: "a surface now where only sky was" is for a
+  hull's leading edge arriving over space, but `ui_depth` writes depth
+  only under the strokes, so on every frame the head moves a stroke
+  reprojects onto texels that had no depth last frame. Now the
+  interface's value stands wherever it marked a pixel (that module knows
+  its pixels and chose its strength with the player's eyes on the text),
+  and the "only sky was" rule requires a THICK surface now -- six of the
+  nine texels around the pixel with a depth: a hull, not a stroke or a
+  wire -- with thin features getting the range test alone. The same rule
+  is in `temporalMoverTest`, two more cases pinned. **Tier 1's standing
+  after the day:** built, measured, cheap, and parked off by default. It
+  cannot reach a mover's interior, and on the trained path it competes
+  with the interface's mask for the one bias input NVIDIA offers; tier 2
+  corrects the vectors instead and never touches that input, which is why
+  it composes with the interface's mask by construction and is where the
+  work goes next.
 - **The hitching coincides with the transition-flash detector's
   withholds.** It withheld 10 frames between 09:34:23 and 09:35:03 ("drawn
   from 5016 world units off the camera's path", while cataloguing the
