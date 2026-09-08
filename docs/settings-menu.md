@@ -446,46 +446,78 @@ they were there (flown 2026-09-07).
    EDVR's own measurement, not the compositor's: the Present-to-Present
    period less the time the game's thread spent blocked inside
    WaitGetPoses and inside Present, which is the render thread's busy
-   time. The APP GPU tile carries the app's share, the frame total less
-   the compositor's, and names the record's own two app fields beside it.
-   The Present period sits on the FRAME RATE tile; frame rate, the 1%
-   low and the strips stay on the period, as fpsVR's do.
-   **Both are the mean over about 200 milliseconds**, which is fpsVR's
-   own update window, with the ten-second mean on the sub-line. Averaging
-   the whole ring instead read about a millisecond under fpsVR (flown
-   2026-09-07), and that is the whole of that gap.
-   A trap worth recording: fpsVR's PINNED Q&A defines both readouts as
-   the "Maximum ... per fpsVR refresh interval", and that page is wrong
-   today. It describes the behaviour before fpsVR 1.24.1 (August 2022),
-   which changed the printed numbers to the arithmetic mean over one
-   overlay update; the Q&A was never edited. The graphs stayed
-   per-frame. Do not take that page as the answer a second time.
-   **The record read is the settled one, two compositor frames back.**
-   Flown 2026-09-07 with the most recent record (`framesAgo = 0`): its
-   GPU fields had not resolved at the WaitGetPoses boundary. Two further
-   findings from the probe on the next flight:
-   - **The 176-byte layout is not this header's.** The reader offered
-     176 bytes first and SteamVR ANSWERED, but the record it filled puts
-     `m_flSystemTimeInSeconds` where this struct has the dropped-frame
-     count and the reprojection flags -- proven by decoding those two
-     words as one double: 33699 s and 33740 s at two probes 40.7 s
-     apart. Every drop the page counted from that record was noise, and
-     the drop-frame log line fired on frames that never dropped. The
-     reader now offers **184, openvr.h's own, first**, and if only 176
-     is accepted it says so and leaves the count and reprojection
-     columns blank rather than showing numbers it cannot decode.
-   - **Elite's WaitGetPoses is thirty microseconds before its Submit.**
-     The record's poses-ready and frame-ready stamps read 1.14 and 1.17
-     ms from the same vsync, every frame: the game renders, then latches
-     poses, then submits. So the compositor's app-busy window is ~0 for
-     this game and cannot be a CPU frametime, which is why CPU TIME is
-     measured here instead.
-   The monitor writes the settled record into the ring entry of the frame
-   it describes, two back, so drops and EDVR's events line up. Twice a
-   session (20 s and 60 s after arming, three frames each) the openvr
-   half logs the four most recent records side by side, every decoded
-   field, as "compositor timing probe", followed by the most recent
-   record's raw words in hex -- so a layout this build decodes wrongly
+   time -- a LARGER window than the compositor's, by the work the game
+   does after its second submit, and the more useful of the two when a
+   frame is CPU bound. APP GPU carries the scene's own GPU work, which
+   the record reports directly. The Present period sits on the FRAME RATE
+   tile; frame rate, the 1% low and the strips stay on the period, as
+   fpsVR's do.
+   Both tiles are the **mean over about 200 milliseconds**, fpsVR's own
+   update window, with the ten-second mean on the sub-line.
+
+   **THE RECORD IS NOT THE STRUCT IN openvr.h, AND ITS SIZE FIELD DOES
+   NOT SAY SO.** This cost four flights and two wrong answers, so it is
+   written down in full.
+
+   Elite ships an `openvr_api.dll` that exports `IVRCompositor_014`,
+   which is OpenVR **v0.9.20**. SteamVR fills the `Compositor_FrameTiming`
+   belonging to the interface a process BOUND, not the size the caller
+   asked for: we passed 184, it echoed 184 back untouched, and it filled
+   the 176-byte v0.9.20 record. Decoding that with the modern struct
+   displaced eleven fields. What the Monitor page was actually showing:
+
+   | Tile | Read from | Which is really |
+   |---|---|---|
+   | GPU TIME | byte 40 | `m_flCompositorIdleCpuMs` |
+   | APP GPU | bytes 32+36 | the compositor's own GPU and CPU |
+   | DROPPED | byte 16 | the low half of the record's clock |
+   | REPROJECTED | byte 20 | the high half of the record's clock |
+
+   The clock is what proved it. Read bytes 16 to 23 as one double and
+   they are a plausible uptime that advances by one frame period per
+   frame index, and by exactly the wall-clock seconds between two
+   probes. Nothing else fits.
+
+   So the reader now **measures which layout it is being given** and
+   never asks the size field. The test is that clock: only one candidate
+   offset holds a value that is a plausible uptime AND advances like a
+   frame clock, and the pose confirms it, since an `HmdMatrix34_t` whose
+   rows are unit vectors sits at byte 84 in one layout and 96 in the
+   other. Both must agree before the reader arms, and it says in the log
+   which layout it found and why.
+
+   The real field map, v0.9.20: dropped frames at **12**, the clock at
+   **16**, the scene's GPU work at **24**, the GPU frame at **28**, the
+   compositor's GPU at 32 and CPU at 36, its idle at 40, the WaitGetPoses
+   / poses-ready / frame-ready stamps at 60, 64 and 68, the pose at 84,
+   and the reprojection flags LAST at **168**.
+
+   **GPU TIME** is `m_flTotalRenderGpuMs` (byte 28), which is Valve's own
+   worked example on the `Compositor_FrameTiming` page and what fpsVR
+   shows: 9.51 ms mean across the six probe samples against fpsVR's
+   steady 9.6. **CPU TIME** is that page's other example,
+   `m_flNewFrameReadyMs - m_flNewPosesReadyMs + m_flCompositorRenderCpuMs`
+   (2.47 ms mean), with EDVR's own render-thread figure (3.67 ms) beside
+   it; the 1.20 ms between them is entirely the tail from the second
+   submit to the next WaitGetPoses call, which fpsVR's window excludes
+   and ours includes.
+
+   Two claims from the misdecode are now retracted, in case they are
+   remembered: "Elite calls WaitGetPoses thirty microseconds before it
+   submits" was `compositorRenderStart - compositorUpdateEnd`, two
+   adjacent compositor stamps. It really calls it 7.2 ms before the
+   vsync, gets poses 0.2 ms after it, and submits 2.6 ms after that. And
+   "the app's GPU time reads 0.2 ms" was the compositor's own GPU plus
+   CPU time.
+
+   **The record read is the settled one, two compositor frames back**;
+   with the most recent one (`framesAgo = 0`) the GPU fields have not
+   resolved at the WaitGetPoses boundary. The monitor writes it into the
+   ring entry of the frame it describes, two back, so drops and EDVR's
+   events line up. Twice a session (20 s and 60 s after arming, three
+   frames each) the openvr half logs the four most recent records field
+   by field, and then the newest record's RAW WORDS in hex. That hex is
+   what identified the layout; keep it, because it is the only thing that
    can be read off any flight's log without another build.
    Laid out as **sixteen tiles, four across** -- a caption, one big
    number, one small line each -- after the first flight found rows of

@@ -427,7 +427,7 @@ void dropLine(const Frame& f, float budgetMs) {
     char comp[260] = "the compositor's record has not settled yet";
     if (f.haveComp) {
         snprintf(comp, sizeof(comp),
-                 "the compositor's record: GPU frame %.1f ms (app fields %.1f, compositor %.1f), "
+                 "the compositor's record: GPU frame %.1f ms (scene %.1f, compositor %.1f), "
                  "poses at %.1f and submit at %.1f ms from vsync%s",
                  static_cast<double>(f.totalGpuMs), static_cast<double>(f.appGpuMs),
                  static_cast<double>(f.compGpuMs), static_cast<double>(f.posesReadyMs),
@@ -611,14 +611,18 @@ int perfMonitorTiles(PerfTile* out, int max) {
     // The mean over fpsVR's own update window, so the two numbers can be
     // read side by side. Averaging the whole ten-second ring instead read
     // about a millisecond under it (flown 2026-09-07).
-    double matchGpu = 0.0, matchCpu = 0.0;
-    int matchGpuN = 0, matchCpuN = 0;
+    double matchGpu = 0.0, matchCpu = 0.0, matchApp = 0.0;
+    int matchGpuN = 0, matchCpuN = 0, matchAppN = 0;
     float matchSecs = 0.0f;
     for (int i = s.count - 1; i >= 0 && matchSecs < kMatchWindowS; --i) {
         const Frame& f = ringAt(i);
         if (f.haveComp) {
             matchGpu += f.totalGpuMs;
             ++matchGpuN;
+            if (f.appCpuMs > 0.0f) {
+                matchApp += f.appCpuMs;
+                ++matchAppN;
+            }
         }
         const float b = f.presentMs - f.presentWaitMs - f.posesWaitMs;
         if (b > 0.0f) {
@@ -629,12 +633,11 @@ int perfMonitorTiles(PerfTile* out, int max) {
     }
     const float recentGpu = matchGpuN ? static_cast<float>(matchGpu / matchGpuN) : 0.0f;
     const float recentCpu = matchCpuN ? static_cast<float>(matchCpu / matchCpuN) : 0.0f;
+    const float recentAppCpu = matchAppN ? static_cast<float>(matchApp / matchAppN) : 0.0f;
     int dropsWithEdvr = 0, dropsClean = 0;
     uint32_t dropEventBits = 0;
     double edvrBoundary = 0.0, edvrDoor = 0.0, doorGpu = 0.0;
-    double appFields = 0.0;
     int doorGpuN = 0;
-    const bool counts = s.haveSample && s.lastSample.layout == 184u;
     for (int i = 0; i < s.count; ++i) {
         const Frame& f = ringAt(i);
         present[cnt] = f.presentMs;
@@ -643,16 +646,11 @@ int perfMonitorTiles(PerfTile* out, int max) {
         waits[cnt] = f.presentWaitMs + f.posesWaitMs;
         ++cnt;
         if (f.haveComp) {
-            // The GPU frame is the record's total -- the timeline from the
-            // previous present to the end of the compositor's work, which is
-            // fpsVR's GPU frametime (flown 2026-09-07: 10.4 against its 9.6
-            // to 10). The app's own two fields read 0.3 ms for Elite, whose
-            // GPU work is issued before its WaitGetPoses, outside the window
-            // they measure; the app's share is total less the compositor's.
-            appGpu[compCnt] = f.totalGpuMs - f.compGpuMs > 0.0f ? f.totalGpuMs - f.compGpuMs : 0.0f;
+            // The GPU frame is the record's total, and the app's share is the
+            // scene's own GPU work, which the record reports directly.
+            appGpu[compCnt] = f.appGpuMs;
             compGpu[compCnt] = f.compGpuMs;
             gpuFrame[compCnt] = f.totalGpuMs;
-            appFields += f.appGpuMs;
             ++compCnt;
             reproj += f.reproj;
         }
@@ -677,14 +675,14 @@ int perfMonitorTiles(PerfTile* out, int max) {
     const float budget = hz > 0.0f ? 1000.0f / hz : 11.1f;
     const float windowS = ps.count ? ps.count * ps.avgMs / 1000.0f : 0.0f;
 
-    // Row 1: the frame. GPU TIME is the compositor's GPU frame total --
-    // fpsVR's GPU frametime (its author's "scene, companion window and
-    // distortion" is that timeline). CPU TIME is EDVR's own: the frame
-    // period less what the game's thread spent blocked in WaitGetPoses and
-    // in Present, i.e. the render thread's busy time. The compositor's
-    // poses-to-submit stamp cannot be that for Elite, which calls
-    // WaitGetPoses thirty microseconds before it submits (flown 2026-09-07:
-    // busy 0.03 ms, every frame).
+    // Row 1: the frame, as fpsVR reports it. Both come from Valve's own
+    // worked example on the Compositor_FrameTiming page: the GPU frame is
+    // the record's total, and the app's CPU frame is the poses-to-submit
+    // window plus the compositor's own submit cost. EDVR's own measure of
+    // the render thread -- the period less the time blocked in
+    // WaitGetPoses and in Present -- goes on the CPU tile's sub-line,
+    // because it is the larger number and the useful one: it includes the
+    // work after the submit, which fpsVR's window does not.
     if (ps.count) {
         snprintf(v, sizeof(v), "%.1f", perfFpsOf(ps.avgMs));
         snprintf(sub, sizeof(sub), "fps, period %.1f ms", ps.avgMs);
@@ -706,11 +704,15 @@ int perfMonitorTiles(PerfTile* out, int max) {
     }
     if (ps.count) {
         const PerfStats bs = perfStatsOf(busy, cnt);
-        const PerfStats ws = perfStatsOf(waits, cnt);
-        snprintf(v, sizeof(v), "%.1f", recentCpu > 0.0f ? recentCpu : bs.avgMs);
-        snprintf(sub, sizeof(sub), "ms now; %.1f over 10 s", bs.avgMs);
+        if (recentAppCpu > 0.0f) {
+            snprintf(v, sizeof(v), "%.1f", recentAppCpu);
+            snprintf(sub, sizeof(sub), "ms app; %.1f thread", bs.avgMs);
+        } else {
+            // No usable stamps: fall back to our own, and say which it is.
+            snprintf(v, sizeof(v), "%.1f", recentCpu > 0.0f ? recentCpu : bs.avgMs);
+            snprintf(sub, sizeof(sub), "ms thread; no app stamps");
+        }
         tile("CPU TIME", v, sub);
-        (void)ws;
     } else {
         tile("CPU TIME", "--", "");
     }
@@ -720,16 +722,12 @@ int perfMonitorTiles(PerfTile* out, int max) {
         const PerfStats ag = perfStatsOf(appGpu, compCnt);
         const PerfStats cg = perfStatsOf(compGpu, compCnt);
         snprintf(v, sizeof(v), "%.1f", ag.avgMs);
-        snprintf(sub, sizeof(sub), "ms less comp %.1f; fields %.1f", cg.avgMs, appFields / compCnt);
+        snprintf(sub, sizeof(sub), "ms scene; %.1f compositor", cg.avgMs);
         tile("APP GPU", v, sub);
     } else {
         tile("APP GPU", "--", "");
     }
-    if (compCnt && !counts) {
-        tile("DROPPED", "--", "layout 176: not decoded");
-        tile("BY CAUSE", "--", "");
-        tile("REPROJECTED", "--", "");
-    } else if (compCnt) {
+    if (compCnt) {
         snprintf(v, sizeof(v), "%d", dropped);
         snprintf(sub, sizeof(sub), "in %.0f s, %u total", windowS, s.haveSample ? s.lastSample.droppedTotal : 0u);
         tile("DROPPED", v, sub);

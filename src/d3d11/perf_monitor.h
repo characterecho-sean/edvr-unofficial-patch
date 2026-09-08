@@ -101,10 +101,10 @@ void perfMonitorNoteCpu(int which, double ms);
 
 // The time the game's thread was blocked inside the real Present, noted by
 // the swapchain hook before the frame is ringed; with the WaitGetPoses
-// block (over the channel) it is subtracted from the frame period for the
-// CPU TIME tile: the render thread's own time, which the compositor's
-// poses-to-submit stamp cannot give for a game that calls WaitGetPoses
-// thirty microseconds before it submits.
+// block (over the channel) it is subtracted from the frame period to give
+// the render thread's own time, on the CPU TIME tile's sub-line. It is a
+// larger window than the compositor's own poses-to-submit figure, by the
+// work the game does after its second submit.
 void perfMonitorNotePresentWait(double ms);
 
 // Draw-hook sampling: on one frame in sixteen the draw thunks time

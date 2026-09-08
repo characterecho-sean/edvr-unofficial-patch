@@ -25,52 +25,85 @@ constexpr int32_t kPropDisplayFrequency = 2002;
 typedef bool (*PFN_GetFrameTiming)(void* self, void* timing, uint32_t framesAgo);
 typedef float (*PFN_FloatProp)(void* self, uint32_t device, int32_t prop, int32_t* error);
 
-// Compositor_FrameTiming as openvr.h laid it out in the 1.0 era (176
-// bytes), with the two vsync counts the later layout appends (184). The
-// fields read are the ones both share.
-struct FrameTimingRaw {
-    uint32_t size;
-    uint32_t frameIndex;
-    uint32_t numFramePresents;
-    uint32_t numMisPresented;
-    uint32_t numDroppedFrames;
-    uint32_t reprojectionFlags;
-    double   systemTimeInSeconds;
-    float    preSubmitGpuMs;
-    float    postSubmitGpuMs;
-    float    totalRenderGpuMs;
-    float    compositorRenderGpuMs;
-    float    compositorRenderCpuMs;
-    float    compositorIdleCpuMs;
-    float    clientFrameIntervalMs;
-    float    presentCallCpuMs;
-    float    waitForPresentCpuMs;
-    float    submitFrameMs;
-    float    waitGetPosesCalledMs;
-    float    newPosesReadyMs;
-    float    newFrameReadyMs;
-    float    compositorUpdateStartMs;
-    float    compositorUpdateEndMs;
-    float    compositorRenderStartMs;
-    vr::TrackedDevicePose_t hmdPose;
-    uint32_t numVSyncsReadyForUse;
-    uint32_t numVSyncsToFirstView;
+// COMPOSITOR_FRAMETIMING COMES IN TWO LAYOUTS, AND THE SIZE FIELD DOES NOT
+// SAY WHICH. SteamVR fills the struct belonging to the compositor interface
+// the process BOUND, not the size the caller asked for -- Elite ships an
+// openvr_api.dll that exports IVRCompositor_014 (openvr v0.9.20), so it is
+// served the record of that era whatever we pass, and our m_nSize comes
+// back echoed and ignored. Decoding that with the modern struct displaced
+// eleven fields: the GPU frame time read as the compositor's idle CPU time,
+// the dropped-frame count and the reprojection flags read as the two halves
+// of the record's own clock. Both were wrong in the field, and the clock is
+// what proved it: those two words, read together as a double, advanced by
+// exactly the wall-clock seconds between two probes.
+//
+// So the fields are read by BYTE OFFSET from a raw buffer, through a table
+// chosen once by measurement (armLayout below), and never by casting.
+struct Layout {
+    const char* name;
+    uint32_t size;        // what to ask for
+    int systemTime;       // the double; the discriminator
+    int presents, dropped, flags;
+    int sceneGpu;         // the app's own GPU work
+    int totalGpu;         // the GPU frame: fpsVR's GPU frametime
+    int compGpu, compCpu, idleCpu, presentCpu;
+    int wgpCalled, posesReady, frameReady;   // ms from the frame's vsync
+    int pose;             // the HmdMatrix34_t, for the confirming test
 };
-static_assert(offsetof(FrameTimingRaw, numVSyncsReadyForUse) == 176,
-              "the 1.0-era Compositor_FrameTiming is 176 bytes");
-static_assert(sizeof(FrameTimingRaw) == 184, "the later layout is 184 bytes");
+
+// openvr v0.9.20 / IVRCompositor_014 (identical in v1.0.0's _015): four
+// uint32, the double at 16, fifteen floats, the pose at 84, the fidelity
+// level at 164 and the reprojection flags LAST at 168.
+constexpr Layout kLegacy = {"IVRCompositor_014 (openvr 0.9.20)", 176,
+                            /*systemTime*/ 16,
+                            /*presents*/ 8, /*dropped*/ 12, /*flags*/ 168,
+                            /*sceneGpu*/ 24, /*totalGpu*/ 28, /*compGpu*/ 32,
+                            /*compCpu*/ 36, /*idleCpu*/ 40, /*presentCpu*/ 48,
+                            /*wgp*/ 60, /*poses*/ 64, /*ready*/ 68, /*pose*/ 84};
+
+// openvr.h as it stands: six uint32, the double at 24, sixteen floats, the
+// pose at 96. m_flPreSubmitGpuMs takes the place of the scene's GPU time.
+constexpr Layout kModern = {"the current openvr.h", 184,
+                            /*systemTime*/ 24,
+                            /*presents*/ 8, /*dropped*/ 16, /*flags*/ 20,
+                            /*sceneGpu*/ 32, /*totalGpu*/ 40, /*compGpu*/ 44,
+                            /*compCpu*/ 48, /*idleCpu*/ 52, /*presentCpu*/ 60,
+                            /*wgp*/ 72, /*poses*/ 76, /*ready*/ 80, /*pose*/ 96};
+
+constexpr size_t kBufBytes = 256;   // room for either, with slack
+
+float f32At(const uint8_t* b, int off) {
+    float v = 0.0f;
+    memcpy(&v, b + off, sizeof(v));
+    return v;
+}
+uint32_t u32At(const uint8_t* b, int off) {
+    uint32_t v = 0;
+    memcpy(&v, b + off, sizeof(v));
+    return v;
+}
+double f64At(const uint8_t* b, int off) {
+    double v = 0.0;
+    memcpy(&v, b + off, sizeof(v));
+    return v;
+}
 
 struct State {
     bool     on = true;
     bool     configured = false;
     bool     standDown = false;
-    bool     armed = false;         // the first answer validated
-    uint32_t sizeUsed = 0;          // 176 or 184, once one worked
+    bool     armed = false;         // the layout chosen and validated
+    const Layout* layout = nullptr;
+    uint32_t sizeUsed = 0;          // the size the runtime accepted
     uint32_t lastIndex = 0;
     uint32_t droppedTotal = 0;
     uint32_t published = 0;
     uint32_t refusals = 0;
     uint32_t faults = 0;
+    // The arming measurement: one earlier sample of each candidate's clock.
+    double   armClock[2] = {0.0, 0.0};
+    uint32_t armIndex = 0;
+    int      armSeen = 0;
     float    hz = 0.0f;
     uint64_t hzMs = 0;
 };
@@ -78,12 +111,12 @@ State g_s;
 
 FaultBudget g_budget("frameTiming", 4);
 
-// The settle probe: twice in a session, twenty and sixty seconds after
-// arming, three frames each, the four most recent records side by side in
-// the log -- so a flight shows which record's GPU fields have resolved
-// and every raw stamp fpsVR could be built from. Flown 2026-09-07 with the
-// most recent record: the app's GPU time read 0.2 ms for a frame whose
-// door pass alone was 5 ms, and fpsVR showed a steady 9.6.
+// The probe: twice in a session, twenty and sixty seconds after arming,
+// three frames each -- every field of the four most recent records under
+// the layout in use, and then the newest record's RAW WORDS in hex, so a
+// layout this build decodes wrongly can be read off any flight's log
+// without another build. That hex is what identified the layout on
+// 2026-09-08; keep it.
 constexpr uint32_t kProbeAt[2] = {1800, 5400};
 constexpr uint32_t kProbeFrames = 3;
 constexpr uint32_t kProbeDepth = 4;
@@ -93,62 +126,92 @@ void settleProbe(void* iface, PFN_GetFrameTiming fn, uint32_t published) {
     for (uint32_t at : kProbeAt) {
         if (published >= at && published < at + kProbeFrames) due = true;
     }
-    if (!due) return;
+    if (!due || !g_s.layout) return;
+    const Layout& L = *g_s.layout;
     char line[900];
     size_t len = 0;
+    alignas(8) uint8_t buf[kBufBytes];
     for (uint32_t ago = 0; ago < kProbeDepth && len + 1 < sizeof(line); ++ago) {
-        FrameTimingRaw r{};
-        r.size = g_s.sizeUsed;
+        memset(buf, 0, sizeof(buf));
+        *reinterpret_cast<uint32_t*>(buf) = g_s.sizeUsed;
         bool ok = false;
-        guarded("frameTiming/probe", [&] { ok = fn(iface, &r, ago); });
+        guarded("frameTiming/probe", [&] { ok = fn(iface, buf, ago); });
         int w = 0;
         if (!ok) {
             w = snprintf(line + len, sizeof(line) - len, "%sago %u: refused", ago ? " | " : "", ago);
         } else {
             w = snprintf(line + len, sizeof(line) - len,
-                         "%sago %u: idx %u pre %.2f post %.2f total %.2f comp %.2f ccpu %.2f idle %.2f "
-                         "interval %.2f wgp %.2f poses %.2f ready %.2f upd %.2f-%.2f rstart %.2f "
-                         "drop %u pres %u flags 0x%x",
-                         ago ? " | " : "", ago, r.frameIndex, static_cast<double>(r.preSubmitGpuMs),
-                         static_cast<double>(r.postSubmitGpuMs), static_cast<double>(r.totalRenderGpuMs),
-                         static_cast<double>(r.compositorRenderGpuMs),
-                         static_cast<double>(r.compositorRenderCpuMs),
-                         static_cast<double>(r.compositorIdleCpuMs),
-                         static_cast<double>(r.clientFrameIntervalMs),
-                         static_cast<double>(r.waitGetPosesCalledMs), static_cast<double>(r.newPosesReadyMs),
-                         static_cast<double>(r.newFrameReadyMs), static_cast<double>(r.compositorUpdateStartMs),
-                         static_cast<double>(r.compositorUpdateEndMs),
-                         static_cast<double>(r.compositorRenderStartMs), r.numDroppedFrames,
-                         r.numFramePresents, r.reprojectionFlags);
+                         "%sago %u: idx %u t %.4f scene %.2f total %.2f cgpu %.2f ccpu %.3f idle %.2f "
+                         "pres_cpu %.3f wgp %.2f poses %.2f ready %.2f drop %u pres %u flags 0x%x",
+                         ago ? " | " : "", ago, u32At(buf, 4), f64At(buf, L.systemTime),
+                         static_cast<double>(f32At(buf, L.sceneGpu)),
+                         static_cast<double>(f32At(buf, L.totalGpu)),
+                         static_cast<double>(f32At(buf, L.compGpu)),
+                         static_cast<double>(f32At(buf, L.compCpu)),
+                         static_cast<double>(f32At(buf, L.idleCpu)),
+                         static_cast<double>(f32At(buf, L.presentCpu)),
+                         static_cast<double>(f32At(buf, L.wgpCalled)),
+                         static_cast<double>(f32At(buf, L.posesReady)),
+                         static_cast<double>(f32At(buf, L.frameReady)), u32At(buf, L.dropped),
+                         u32At(buf, L.presents), u32At(buf, L.flags));
         }
         if (w <= 0) break;
         len += static_cast<size_t>(w) < sizeof(line) - len ? static_cast<size_t>(w) : sizeof(line) - len - 1;
     }
-    Log::get().note("compositor timing probe (layout %u; ms; poses/ready/upd/rstart are from the "
-                    "frame's vsync): %s",
-                    g_s.sizeUsed, line);
-    // And the most recent record's raw words, so a layout the decode above
-    // has wrong can be read off the log without another build.
+    Log::get().note("compositor timing probe (%s; ms; wgp/poses/ready are from the frame's vsync): %s",
+                    L.name, line);
     {
-        FrameTimingRaw r{};
-        r.size = g_s.sizeUsed;
+        memset(buf, 0, sizeof(buf));
+        *reinterpret_cast<uint32_t*>(buf) = g_s.sizeUsed;
         bool ok = false;
-        guarded("frameTiming/probeRaw", [&] { ok = fn(iface, &r, 0); });
+        guarded("frameTiming/probeRaw", [&] { ok = fn(iface, buf, 0); });
         if (ok) {
-            const uint32_t* words = reinterpret_cast<const uint32_t*>(&r);
-            const size_t n = sizeof(r) / sizeof(uint32_t);
-            char hex[sizeof(r) / sizeof(uint32_t) * 9 + 8];
+            const size_t n = 48;   // 192 bytes, past either layout
+            char hex[48 * 9 + 8];
             size_t hl = 0;
             for (size_t i = 0; i < n && hl + 10 < sizeof(hex); ++i) {
-                hl += static_cast<size_t>(snprintf(hex + hl, sizeof(hex) - hl, "%s%08x", i ? " " : "", words[i]));
+                hl += static_cast<size_t>(
+                    snprintf(hex + hl, sizeof(hex) - hl, "%s%08x", i ? " " : "",
+                             u32At(buf, static_cast<int>(i * 4))));
             }
-            Log::get().note("compositor timing probe raw (ago 0, %u words of the %u-byte record as "
-                            "written, little-endian): %s",
-                            static_cast<unsigned>(n), g_s.sizeUsed, hex);
+            Log::get().note("compositor timing probe raw (ago 0, %u words of the record as written, "
+                            "little-endian): %s",
+                            static_cast<unsigned>(n), hex);
         }
     }
 }
 
+// WHICH LAYOUT THE RUNTIME IS FILLING, by measurement rather than by the
+// size field, which this runtime echoes back unchanged.
+//
+// The test is the record's own clock. Only one of the two candidate
+// offsets holds m_flSystemTimeInSeconds, and it is unmistakable: it is a
+// plausible uptime, and it advances by about one frame period between
+// consecutive frame indices. At the other offset the modern layout has two
+// small counts (which read as zero or a denormal) and the legacy one has
+// two GPU floats (which read as hundreds of thousands of seconds and do
+// not advance monotonically). The pose confirms it: an HmdMatrix34_t whose
+// rows are unit vectors sits at 84 in one layout and 96 in the other.
+bool clockPlausible(double t) { return t > 1.0 && t < 1.0e7; }
+
+bool poseLooksRight(const uint8_t* buf, int off) {
+    for (int r = 0; r < 3; ++r) {
+        const float x = f32At(buf, off + (r * 4 + 0) * 4);
+        const float y = f32At(buf, off + (r * 4 + 1) * 4);
+        const float z = f32At(buf, off + (r * 4 + 2) * 4);
+        const float n = x * x + y * y + z * z;
+        if (!(n > 0.98f && n < 1.02f)) return false;
+    }
+    return true;
+}
+
+// Two samples of one candidate: does its clock advance like a frame clock?
+bool clockAdvances(double before, double now, uint32_t frames) {
+    if (!clockPlausible(before) || !clockPlausible(now)) return false;
+    if (frames == 0 || frames > 600) return false;
+    const double perFrame = (now - before) * 1000.0 / static_cast<double>(frames);
+    return perFrame > 1.0 && perFrame < 120.0;   // 8 Hz to 1000 Hz
+}
 void standDown(const char* why) {
     if (g_s.standDown) return;
     g_s.standDown = true;
@@ -204,23 +267,20 @@ void frameTimingBoundary(void* iface, size_t prefix) {
     }
     refreshHz();
 
-    FrameTimingRaw raw{};
+    alignas(8) uint8_t buf[kBufBytes];
     bool got = false;
     PFN_GetFrameTiming fn = reinterpret_cast<PFN_GetFrameTiming>(vt[kSlotGetFrameTiming]);
     const bool survived = guardedBudget(g_budget, [&] {
-        // The size the runtime expects: openvr.h's own 184 first, and the
-        // 1.0-era 176 only if that is refused, remembered once one works.
-        // The order matters: SteamVR ANSWERS a 176-byte request, but in a
-        // layout whose leading words are not this header's -- flown
-        // 2026-09-07, the drop-count and flag words held the two halves of
-        // the record's clock (the "flags" advanced by exactly the 41 s
-        // between two probes), so every frame read as dropped. The record
-        // asked for is the one kFrameTimingLag frames back.
+        // The size to ask for. It selects nothing -- this runtime echoes it
+        // back untouched and fills the layout belonging to the compositor
+        // interface the game bound -- so ask for the larger and let the
+        // detection below decide what came back. The record read is the one
+        // kFrameTimingLag frames back, the settled one.
         const uint32_t sizes[2] = {s.sizeUsed ? s.sizeUsed : 184u, s.sizeUsed ? s.sizeUsed : 176u};
         for (int i = 0; i < 2 && !got; ++i) {
-            memset(&raw, 0, sizeof(raw));
-            raw.size = sizes[i];
-            if (fn(iface, &raw, kFrameTimingLag)) {
+            memset(buf, 0, sizeof(buf));
+            *reinterpret_cast<uint32_t*>(buf) = sizes[i];
+            if (fn(iface, buf, kFrameTimingLag)) {
                 got = true;
                 s.sizeUsed = sizes[i];
             }
@@ -241,68 +301,96 @@ void frameTimingBoundary(void* iface, size_t prefix) {
         }
         return;
     }
-    // Validate the first answer before believing any: the echoed size, a
-    // finite interval in a frame's range, an index that moves.
+
+    // ARM: choose the layout by measuring the record, never by its size
+    // field. Two consecutive answers are needed, because the test is that
+    // the clock ADVANCES like a frame clock.
     if (!s.armed) {
-        const bool sane = raw.size == s.sizeUsed && finite(raw.clientFrameIntervalMs) &&
-                          finite(raw.preSubmitGpuMs) && finite(raw.totalRenderGpuMs) &&
-                          raw.clientFrameIntervalMs >= 0.0f && raw.clientFrameIntervalMs < 5000.0f;
-        if (!sane) {
-            standDown("the first GetFrameTiming answer did not read as a frame timing (size "
-                      "not echoed, or an interval out of range) -- the slot or the layout is "
-                      "not this build's; please report this log");
+        const Layout* candidates[2] = {&kLegacy, &kModern};
+        const uint32_t idx = u32At(buf, 4);
+        const double now[2] = {f64At(buf, kLegacy.systemTime), f64At(buf, kModern.systemTime)};
+        if (s.armSeen == 0) {
+            s.armClock[0] = now[0];
+            s.armClock[1] = now[1];
+            s.armIndex = idx;
+            s.armSeen = 1;
             return;
         }
-        if (s.lastIndex == 0) {
-            s.lastIndex = raw.frameIndex;
-            return;   // one more frame, to see the index move
+        if (idx == s.armIndex) return;   // the same record; wait for a new one
+        const uint32_t frames = idx > s.armIndex ? idx - s.armIndex : 0;
+        int chosen = -1;
+        for (int i = 0; i < 2; ++i) {
+            if (!clockAdvances(s.armClock[i], now[i], frames)) continue;
+            if (!poseLooksRight(buf, candidates[i]->pose)) continue;
+            chosen = i;
         }
-        if (raw.frameIndex == s.lastIndex) return;
+        if (chosen < 0) {
+            // Try again from scratch for a while: the first records after a
+            // scene change can be odd. Give up loudly rather than guess.
+            s.armClock[0] = now[0];
+            s.armClock[1] = now[1];
+            s.armIndex = idx;
+            if (++s.refusals > 900) {
+                standDown("no candidate layout's clock advanced like a frame clock, and no "
+                          "candidate's pose read as a rotation -- this runtime's "
+                          "Compositor_FrameTiming is neither layout this build knows. The "
+                          "probe's raw words in this log say what it is; please report it");
+            }
+            return;
+        }
+        s.layout = candidates[chosen];
         s.armed = true;
+        s.lastIndex = idx;
         Log::get().note(
-            "compositor timing: armed -- IVRCompositor::GetFrameTiming answers (layout %u "
-            "bytes%s), one read per frame at the boundary for the menu's Monitor page, of the "
-            "record %u frames back (the settled one): the GPU frame time, the compositor's, "
-            "dropped and reprojected frames, the CPU frame interval and the app's busy time. "
+            "compositor timing: armed -- IVRCompositor::GetFrameTiming answers, and the record "
+            "it fills is %s, chosen by measurement: its clock at byte %d advanced one frame "
+            "period per frame index and its pose at byte %d reads as a rotation. One read per "
+            "frame at the boundary, of the record %u frames back (the settled one). "
             "advanced.compositor_timing = off turns it off, live.",
-            s.sizeUsed,
-            s.sizeUsed == 176u ? ": the 1.0-era layout, whose drop and reprojection words this "
-                                 "build does not decode -- those columns stay blank"
-                               : "",
-            kFrameTimingLag);
+            s.layout->name, s.layout->systemTime, s.layout->pose, kFrameTimingLag);
+        return;
     }
-    // The 176-byte layout's leading words are not openvr.h's (above): its
-    // counts and flags are not believed.
-    const bool counts = s.sizeUsed == 184u;
+    const Layout& L = *s.layout;
+
     FrameTimingSample out{};
-    if (raw.frameIndex != s.lastIndex) {
+    const uint32_t idx = u32At(buf, 4);
+    if (idx != s.lastIndex) {
         // A new compositor frame: its dropped count is new information.
-        if (counts && raw.numDroppedFrames < 1000u) s.droppedTotal += raw.numDroppedFrames;
-        s.lastIndex = raw.frameIndex;
+        const uint32_t d = u32At(buf, L.dropped);
+        if (d < 1000u) s.droppedTotal += d;
+        s.lastIndex = idx;
     }
-    out.layout = s.sizeUsed;
-    out.frameIndex = raw.frameIndex;
-    out.presents = counts ? raw.numFramePresents : 0u;
+    out.layout = L.size;
+    out.frameIndex = idx;
+    out.presents = u32At(buf, L.presents);
     out.droppedTotal = s.droppedTotal;
-    out.reprojFlags = counts ? raw.reprojectionFlags : 0u;
-    out.appGpuMs = raw.preSubmitGpuMs + raw.postSubmitGpuMs;
-    out.totalGpuMs = raw.totalRenderGpuMs;
-    out.compGpuMs = raw.compositorRenderGpuMs;
-    out.compCpuMs = raw.compositorRenderCpuMs;
-    out.cpuFrameMs = raw.clientFrameIntervalMs;
-    // The app's busy time: from the poses arriving to the second eye's
-    // submit. Both stamps are milliseconds from the frame's vsync (running
-    // start puts the first a few ms before it); a pair that reads backwards
-    // or absurd is reported as unknown rather than as a number.
+    out.reprojFlags = u32At(buf, L.flags);
+    // THE GPU FRAME TIME is the record's own total: Valve's example on the
+    // Compositor_FrameTiming page adds exactly this field, and it is what
+    // fpsVR shows. The app's share is the scene's own GPU work beside it.
+    out.totalGpuMs = f32At(buf, L.totalGpu);
+    out.appGpuMs = f32At(buf, L.sceneGpu);
+    out.compGpuMs = f32At(buf, L.compGpu);
+    out.compCpuMs = f32At(buf, L.compCpu);
+    out.idleCpuMs = f32At(buf, L.idleCpu);
+    out.presentCpuMs = f32At(buf, L.presentCpu);
+    // THE APP'S CPU FRAME TIME, the same page's example: from the poses
+    // arriving to the second eye's submit, plus the compositor's own submit
+    // cost. The stamps are milliseconds from the frame's vsync, and running
+    // start puts the first of them before it, so either may be negative;
+    // only their difference is a duration, and a pair that reads backwards
+    // is reported as unknown rather than as a number.
     {
-        const float busy = raw.newFrameReadyMs - raw.newPosesReadyMs;
+        const float poses = f32At(buf, L.posesReady);
+        const float ready = f32At(buf, L.frameReady);
+        const float busy = ready - poses + f32At(buf, L.compCpu);
         out.appCpuMs = (finite(busy) && busy >= 0.0f && busy < 1000.0f) ? busy : 0.0f;
-        out.posesReadyMs = finite(raw.newPosesReadyMs) ? raw.newPosesReadyMs : 0.0f;
-        out.frameReadyMs = finite(raw.newFrameReadyMs) ? raw.newFrameReadyMs : 0.0f;
+        out.posesReadyMs = finite(poses) ? poses : 0.0f;
+        out.frameReadyMs = finite(ready) ? ready : 0.0f;
     }
-    out.presentCpuMs = raw.presentCallCpuMs;
-    out.idleCpuMs = raw.compositorIdleCpuMs;
-    out.displayHz = s.hz;
+    // The record's own frame period, from its clock: the field named for it
+    // in the legacy layout is not one (it reads about 3 ms at 90 Hz).
+    out.cpuFrameMs = 0.0f;    out.displayHz = s.hz;
     publishFrameTiming(out);
     ++s.published;
     settleProbe(iface, fn, s.published);

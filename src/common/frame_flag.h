@@ -384,7 +384,7 @@ uint32_t runtimeKind();
 // odd count tries again.
 constexpr uint32_t kFrameTimingLag = 2;   // the record read: this many compositor frames back
 struct FrameTimingSample {
-    uint32_t layout;          // the record size the runtime answered: 184 (openvr.h's) or 176 (a 1.0-era layout whose leading words differ -- its counts are not decoded)
+    uint32_t layout;          // which layout the runtime was measured to be filling: 176 (openvr 0.9.20 / IVRCompositor_014, which Elite binds) or 184 (the current openvr.h)
     uint32_t frameIndex;      // the compositor's, increments per compositor frame
     uint32_t presents;        // times this frame was presented
     uint32_t droppedTotal;    // dropped frames since launch, as counted by the reader
@@ -393,8 +393,8 @@ struct FrameTimingSample {
     float    totalGpuMs;      // from the previous present to the end of compositor work
     float    compGpuMs;       // the compositor's own GPU time
     float    compCpuMs;       // the compositor's own CPU time submitting that work
-    float    cpuFrameMs;      // the app's interval between WaitGetPoses calls (the period)
-    float    appCpuMs;        // the app's BUSY time: poses ready to second submit
+    float    cpuFrameMs;      // unused: no layout this build reads carries a usable frame interval
+    float    appCpuMs;        // the app's CPU frame: poses ready to second submit, plus the compositor's submit cost -- fpsVR's CPU frametime
     float    posesReadyMs;    // when WaitGetPoses returned, ms from the frame's vsync (running start is negative)
     float    frameReadyMs;    // when the second Submit landed, ms from the same vsync
     float    presentCpuMs;    // time blocked in Present
@@ -418,9 +418,11 @@ uint32_t takeDoorCpuUs();
 // The microseconds the game's thread spent BLOCKED inside the runtime's
 // WaitGetPoses this frame (the openvr half clocks the real call). With the
 // time blocked in Present, it is what the Monitor page subtracts from the
-// frame period to get the render thread's own busy time -- the compositor's
-// poses-to-submit stamp cannot be that for Elite, which calls WaitGetPoses
-// thirty microseconds before it submits (flown 2026-09-07).
+// frame period to get the render thread's own busy time. That is a LARGER
+// window than the compositor's poses-to-submit one -- by the work after the
+// second submit -- and the more useful of the two when a frame is CPU
+// bound; the compositor's is the one that matches fpsVR, so the tile shows
+// that and this on its sub-line.
 void     addWaitCpuUs(uint32_t us);
 uint32_t takeWaitCpuUs();
 
