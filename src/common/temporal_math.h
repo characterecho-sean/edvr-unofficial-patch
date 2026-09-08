@@ -266,6 +266,101 @@ inline void temporalBodyPath(const float prev34[12], const float now34[12],
     tv[2] = -tv[2];
 }
 
+// The rotation of an axis-angle vector (Rodrigues): w's direction the axis,
+// its length the angle in radians; row-major, R v rotates v.
+inline void temporalRodrigues(const float w[3], float R[9]) {
+    const float th = sqrtf(w[0] * w[0] + w[1] * w[1] + w[2] * w[2]);
+    if (th < 1e-9f) {
+        const float I[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+        memcpy(R, I, sizeof(I));
+        return;
+    }
+    const float a[3] = {w[0] / th, w[1] / th, w[2] / th};
+    const float s = sinf(th), c = cosf(th), k = 1.0f - c;
+    R[0] = c + a[0] * a[0] * k;        R[1] = a[0] * a[1] * k - a[2] * s; R[2] = a[0] * a[2] * k + a[1] * s;
+    R[3] = a[1] * a[0] * k + a[2] * s; R[4] = c + a[1] * a[1] * k;        R[5] = a[1] * a[2] * k - a[0] * s;
+    R[6] = a[2] * a[0] * k - a[1] * s; R[7] = a[2] * a[1] * k + a[0] * s; R[8] = c + a[2] * a[2] * k;
+}
+
+// The rigid motion that best carries n points now to where they were: the
+// least-squares (w, t) of p_prev - p_now = w x p_now + t, the small-angle
+// form (exact to the angle squared times the distance, millimetres for a
+// station's turn ten kilometres off), about the points' centroid for the
+// conditioning. The instance pool gives every part of a station as a
+// (now, prev) pair; one part's quantised delta is noisy by a quarter of
+// the turn, and the fit over hundreds is not (tier 2's second flight,
+// 2026-09-08). Returns false with fewer than three points or a singular
+// system; rms is the fit's residual in metres.
+inline bool temporalRigidFit(const float* pNow, const float* pPrev, int n, float w[3],
+                             float t[3], float* rms) {
+    if (n < 3) return false;
+    double c0[3] = {0, 0, 0};
+    for (int i = 0; i < n; ++i) {
+        for (int k = 0; k < 3; ++k) c0[k] += pNow[i * 3 + k];
+    }
+    for (double& c : c0) c /= n;
+    double A[6][6] = {};
+    double b[6] = {};
+    for (int i = 0; i < n; ++i) {
+        const double p[3] = {pNow[i * 3] - c0[0], pNow[i * 3 + 1] - c0[1], pNow[i * 3 + 2] - c0[2]};
+        const double d[3] = {pPrev[i * 3] - pNow[i * 3], pPrev[i * 3 + 1] - pNow[i * 3 + 1],
+                             pPrev[i * 3 + 2] - pNow[i * 3 + 2]};
+        // Row r of [-[p]x | I]: w x p = -[p]x w.
+        double M[3][6] = {{0, p[2], -p[1], 1, 0, 0},
+                          {-p[2], 0, p[0], 0, 1, 0},
+                          {p[1], -p[0], 0, 0, 0, 1}};
+        for (int r = 0; r < 3; ++r) {
+            for (int j = 0; j < 6; ++j) {
+                b[j] += M[r][j] * d[r];
+                for (int k = 0; k < 6; ++k) A[j][k] += M[r][j] * M[r][k];
+            }
+        }
+    }
+    // Gaussian elimination with partial pivoting on the 6x6.
+    double x[6] = {};
+    for (int col = 0; col < 6; ++col) {
+        int piv = col;
+        for (int r = col + 1; r < 6; ++r) {
+            if (fabs(A[r][col]) > fabs(A[piv][col])) piv = r;
+        }
+        if (fabs(A[piv][col]) < 1e-12) return false;
+        if (piv != col) {
+            for (int k = 0; k < 6; ++k) { const double tmp = A[col][k]; A[col][k] = A[piv][k]; A[piv][k] = tmp; }
+            const double tb = b[col]; b[col] = b[piv]; b[piv] = tb;
+        }
+        for (int r = col + 1; r < 6; ++r) {
+            const double f = A[r][col] / A[col][col];
+            for (int k = col; k < 6; ++k) A[r][k] -= f * A[col][k];
+            b[r] -= f * b[col];
+        }
+    }
+    for (int r = 5; r >= 0; --r) {
+        double s = b[r];
+        for (int k = r + 1; k < 6; ++k) s -= A[r][k] * x[k];
+        x[r] = s / A[r][r];
+    }
+    // Back from the centroid: t = t' - w x c0.
+    for (int k = 0; k < 3; ++k) w[k] = static_cast<float>(x[k]);
+    const double wc[3] = {x[1] * c0[2] - x[2] * c0[1], x[2] * c0[0] - x[0] * c0[2],
+                          x[0] * c0[1] - x[1] * c0[0]};
+    for (int k = 0; k < 3; ++k) t[k] = static_cast<float>(x[3 + k] - wc[k]);
+    if (rms) {
+        float R[9];
+        temporalRodrigues(w, R);
+        double sum = 0.0;
+        for (int i = 0; i < n; ++i) {
+            float q[3];
+            temporalApply3(R, pNow + i * 3, q);
+            for (int k = 0; k < 3; ++k) {
+                const double e = q[k] + t[k] - pPrev[i * 3 + k];
+                sum += e * e;
+            }
+        }
+        *rms = static_cast<float>(sqrt(sum / n));
+    }
+    return true;
+}
+
 // Are these three rows a rotation? Near-unit, near-orthogonal -- the
 // sun-glare fix's own validation of the game's view rows, shared.
 inline bool temporalRowsAreRotation(const float m34[12]) {

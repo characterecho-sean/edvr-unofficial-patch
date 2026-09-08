@@ -1649,6 +1649,32 @@ which is this project's contract for every read of the game.
    camera rows and tested against it -- one load, no comparison, and a
    ship crossing the empty space between the arms stays the camera's. The
    next flight's A/B belongs at the slot.
+
+   *Its second flight* (15:28 the same day, `v0.14.1-62-gafc5d9b`; the
+   A/B at the slot: "better with it off, on it shimmers more"). The log
+   names the defect. During the A/B the body in hand read 0.0124 deg and
+   0.000 m; the pair before it 0.000 deg and 1.570 m; the one before
+   that 0.0373 deg -- while the interval's turn was a steady 0.021-0.023
+   deg a frame. The clustering tolerance of 0.03 deg was WIDER than the
+   turn, so every static thing in view merged into the station's cluster
+   (the fifteen-kilometre box of the third flight), the cluster's motion
+   was whichever record came first, and every eighth frame the
+   station's pixels were re-registered by a different wrong vector, a
+   pixel or several at slot range: the shimmer. Three corrections. The
+   tolerance is 0.01 deg, three quanta, under the turn, and a cluster
+   carries the running mean of its members' deltas. The motion handed to
+   the pass is the least-squares rigid fit over ALL the cluster's parts'
+   positions (`temporalRigidFit`: the small-angle w x p + t about the
+   centroid, a 6x6 solve; the residual gates the body as one rigid thing
+   at half a metre) -- one part's quantised delta is noisy by a quarter
+   of the turn, the fit over hundreds is not. And the motion is exported
+   as rates per millisecond over the pair's own interval and scaled by
+   the pass to its frame's length, so a pair measured on a long frame no
+   longer over-turns the frames after it; a body must also TURN (0.004
+   deg a pair), since a pure translation is another ship or the player's
+   own parts and handed the station a shift it never made. The
+   registration line now prints the fit's residual and the pair's
+   interval beside the turn.
 4. **Tier 2b** only if question 1 says no bits.
 5. **Tier 3** as `tools/` work against dumped frames, never on the hot
    path.

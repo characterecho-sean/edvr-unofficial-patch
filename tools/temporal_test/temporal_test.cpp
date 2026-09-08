@@ -368,6 +368,47 @@ int main() {
         checkNear(got[2], want[2], 1e-3f, "body path: ...(z)");
     }
 
+    {
+        // The rigid fit (temporalRigidFit) and Rodrigues: twenty points of a
+        // body ten kilometres off, turned 0.05 deg about a tilted axis
+        // through a point away from the origin and moved 0.2 m, recovered
+        // from their (now, prev) pairs to the metre-per-thousand.
+        const float axis[3] = {0.6f, 0.8f, 0.0f};
+        const float ang = 0.05f * 3.14159265f / 180.0f;
+        const float wTrue[3] = {axis[0] * ang, axis[1] * ang, axis[2] * ang};
+        float Rt[9];
+        edvr::temporalRodrigues(wTrue, Rt);
+        checkNear(edvr::temporalRotationAngleDeg(Rt), 0.05f, 1e-4f, "rodrigues: the angle round-trips");
+        const float centre[3] = {8000.0f, -2000.0f, 5000.0f};
+        const float shift[3] = {0.2f, 0.0f, -0.1f};
+        float pNow[60], pPrev[60];
+        for (int i = 0; i < 20; ++i) {
+            const float p[3] = {centre[0] + 700.0f * sinf(i * 1.7f), centre[1] + 500.0f * cosf(i * 2.3f),
+                                centre[2] + 900.0f * sinf(i * 0.9f + 1.0f)};
+            // prev = R (p - centre) + centre + shift: a turn about the centre, then a step
+            const float rel[3] = {p[0] - centre[0], p[1] - centre[1], p[2] - centre[2]};
+            float rr[3];
+            edvr::temporalApply3(Rt, rel, rr);
+            for (int k = 0; k < 3; ++k) {
+                pNow[i * 3 + k] = p[k];
+                pPrev[i * 3 + k] = rr[k] + centre[k] + shift[k];
+            }
+        }
+        float w[3], t[3], rms = 0.0f;
+        check(edvr::temporalRigidFit(pNow, pPrev, 20, w, t, &rms), "rigid fit: solves");
+        // Float positions at eight kilometres carry half a millimetre; over
+        // lever arms of a kilometre that is a few millionths of a radian.
+        checkNear(w[0], wTrue[0], 5e-6f, "rigid fit: the axis-angle (x)");
+        checkNear(w[1], wTrue[1], 5e-6f, "rigid fit: ...(y)");
+        checkNear(w[2], wTrue[2], 5e-6f, "rigid fit: ...(z)");
+        // t = centre - R centre + shift
+        float rc[3];
+        edvr::temporalApply3(Rt, centre, rc);
+        checkNear(t[0], centre[0] - rc[0] + shift[0], 0.01f, "rigid fit: the translation (x)");
+        checkNear(t[2], centre[2] - rc[2] + shift[2], 0.01f, "rigid fit: ...(z)");
+        check(rms < 0.01f, "rigid fit: the residual is millimetres");
+    }
+
     if (g_fails) {
         printf("\nTEMPORAL TEST FAILED (%d)\n", g_fails);
         return 1;

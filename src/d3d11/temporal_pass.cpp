@@ -1665,6 +1665,7 @@ float    g_objectsReach = 60.0f;   // advanced.temporal_aa_objects_reach, metres
 bool     g_objectsNoted = false;   // the engage line, once
 ObjectMotion g_bodyLast = {};      // the motion last handed to the shader, for the log
 bool     g_bodyLastValid = false;
+float    g_bodyDtMs = 11.1f;       // this frame's length, for the body's rates
 // The body's occupancy grid on the GPU (object_probe.h): one for both
 // eyes, uploaded when the probe's version moves.
 ID3D11Texture3D*          g_bodyGrid = nullptr;
@@ -2649,8 +2650,33 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         if (g_objectsOn && worldOn) {
             ObjectMotion om;
             if (objectMotionGet(&om) && ensureBodyGrid(dev, ctx, om)) {
+                // The body's motion over THIS frame's length: its rates
+                // times the interval since the last frame (a station turns
+                // at a constant rate; a pair measured on a long frame is a
+                // larger turn, and the frame it is applied to may be short).
+                LARGE_INTEGER qNowB{}, qFreqB{};
+                QueryPerformanceCounter(&qNowB);
+                QueryPerformanceFrequency(&qFreqB);
+                static LONGLONG s_lastBodyQpc = 0;
+                static uint32_t s_lastBodyFrame = 0;
+                float dtMs = 11.1f;
+                if (s_lastBodyQpc && qFreqB.QuadPart > 0 && s_lastBodyFrame != g_rowsFrame) {
+                    dtMs = static_cast<float>(static_cast<double>(qNowB.QuadPart - s_lastBodyQpc) * 1000.0 /
+                                              static_cast<double>(qFreqB.QuadPart));
+                }
+                if (s_lastBodyFrame != g_rowsFrame) {
+                    s_lastBodyQpc = qNowB.QuadPart;
+                    s_lastBodyFrame = g_rowsFrame;
+                    g_bodyDtMs = (dtMs >= 5.0f && dtMs <= 50.0f) ? dtMs : 11.1f;
+                }
+                const float wF[3] = {om.omegaPerMs[0] * g_bodyDtMs, om.omegaPerMs[1] * g_bodyDtMs,
+                                     om.omegaPerMs[2] * g_bodyDtMs};
+                const float tF[3] = {om.tPerMs[0] * g_bodyDtMs, om.tPerMs[1] * g_bodyDtMs,
+                                     om.tPerMs[2] * g_bodyDtMs};
+                float Rf[9];
+                temporalRodrigues(wF, Rf);
                 float W[9], tv[3];
-                temporalBodyPath(g_prevRows, g_curRows, om.R, om.t, W, tv);
+                temporalBodyPath(g_prevRows, g_curRows, Rf, tF, W, tv);
                 float* rows[3] = {p.st0, p.st1, p.st2};
                 float* wrows[3] = {p.wR0, p.wR1, p.wR2};
                 for (int r = 0; r < 3; ++r) {
@@ -2674,14 +2700,16 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     g_objectsNoted = true;
                     Log::get().note(
                         "temporal aa: the dominant body's own path is on -- the instance pool's largest "
-                        "rigid cluster (%u records, %.0f%% of the pool's movers) turns %.4f deg and moves "
-                        "%.3f m a frame in the world, its parts fill a box %.0f x %.0f x %.0f m, and each "
-                        "world-path pixel whose depth places it within %.0f m of a part takes that path "
-                        "over the camera's. The registration line's share says how many do.",
-                        om.records, 100.0 * static_cast<double>(om.share),
+                        "rigid cluster (%u records, %.0f%% of the pool's movers, fit to %.3f m) turns "
+                        "%.4f deg and moves %.3f m over its pair's %.1f ms in the world, its parts fill a "
+                        "box %.0f x %.0f x %.0f m, and each world-path pixel whose depth places it within "
+                        "%.0f m of a part takes that path over the camera's, scaled to the frame's own "
+                        "length. The registration line's share says how many do.",
+                        om.records, 100.0 * static_cast<double>(om.share), static_cast<double>(om.rms),
                         static_cast<double>(temporalRotationAngleDeg(om.R)),
                         sqrt(static_cast<double>(om.t[0]) * om.t[0] + static_cast<double>(om.t[1]) * om.t[1] +
                              static_cast<double>(om.t[2]) * om.t[2]),
+                        static_cast<double>(om.dtMs),
                         static_cast<double>(om.bmax[0] - om.bmin[0]),
                         static_cast<double>(om.bmax[1] - om.bmin[1]),
                         static_cast<double>(om.bmax[2] - om.bmin[2]),
@@ -4136,14 +4164,16 @@ bool temporalPassRegistration(char* buf, size_t n, char* buf2, size_t n2, char* 
         if (g_bodyLastValid) {
             regAppend(buf, n, used,
                       "; the body's path took %.2f%% of pixels (the body: %u records, %.0f%% of the "
-                      "pool's movers, %.4f deg and %.3f m a frame, a box %.0f x %.0f x %.0f m, %u "
-                      "frames old)",
+                      "pool's movers, fit to %.3f m, %.4f deg and %.3f m over its pair's %.1f ms, a box "
+                      "%.0f x %.0f x %.0f m, %u frames old)",
                       100.0 * static_cast<double>(g_bodyPix) / static_cast<double>(g_intervalPix),
                       g_bodyLast.records, 100.0 * static_cast<double>(g_bodyLast.share),
+                      static_cast<double>(g_bodyLast.rms),
                       static_cast<double>(temporalRotationAngleDeg(g_bodyLast.R)),
                       sqrt(static_cast<double>(g_bodyLast.t[0]) * g_bodyLast.t[0] +
                            static_cast<double>(g_bodyLast.t[1]) * g_bodyLast.t[1] +
                            static_cast<double>(g_bodyLast.t[2]) * g_bodyLast.t[2]),
+                      static_cast<double>(g_bodyLast.dtMs),
                       static_cast<double>(g_bodyLast.bmax[0] - g_bodyLast.bmin[0]),
                       static_cast<double>(g_bodyLast.bmax[1] - g_bodyLast.bmin[1]),
                       static_cast<double>(g_bodyLast.bmax[2] - g_bodyLast.bmin[2]),

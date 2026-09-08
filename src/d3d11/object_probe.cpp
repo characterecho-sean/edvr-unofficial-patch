@@ -13,6 +13,7 @@
 #include "../common/config.h"
 #include "../common/guard.h"
 #include "../common/log.h"
+#include "../common/temporal_math.h"   // temporalRigidFit, temporalRodrigues: the body's motion from its parts
 #include "../common/timing.h"
 #include "binding_shadow.h"
 
@@ -48,8 +49,10 @@ uint32_t g_checksLeft = 0;
 constexpr uint32_t kMotionHoldFrames = 120;
 constexpr uint32_t kMotionMinRecords = 40;
 constexpr float    kMotionMinShare = 0.25f;
+constexpr float    kMotionMinDeg = 0.004f;  // a pair; a station turns 0.02-0.045, a static scatter 0
 constexpr float    kMotionMaxDeg = 1.0f;    // a frame; a station turns a twentieth of that
 constexpr float    kMotionMaxM = 20.0f;
+constexpr float    kMotionMaxRmsM = 0.5f;   // the rigid fit's residual: parts that moved as one
 ObjectMotion g_motion = {};
 bool     g_motionValid = false;
 uint32_t g_motionAge = 0;
@@ -126,6 +129,7 @@ struct Slot {
     uint32_t bytes = 0;
     uint32_t sceneBytes = 0;
     uint32_t frame = 0;
+    uint64_t stamp = 0;      // when the copy was issued, ms: the pair's interval is the two stamps' difference
     bool     inUse = false;
     bool     keep = false;   // the first of a pair: its bytes are kept for the second
 };
@@ -133,6 +137,7 @@ Slot g_ring[kRing];
 std::vector<uint8_t> g_keep;        // the first frame of a pair, copied out of its staging buffer
 std::vector<uint8_t> g_keepScene;   // ...and its scene block
 uint32_t g_keepFrame = 0;
+uint64_t g_keepStamp = 0;
 bool     g_keepValid = false;
 
 // The interval's figures.
@@ -247,13 +252,22 @@ uint64_t signatureOf(const uint8_t* r) {
 // so the first flight's exact keys at a centimetre split one motion across
 // more buckets than the table had (64 of 64, every interval in flight).
 constexpr int   kMaxClusters = 64;
-constexpr float kClusterAngleDeg = 0.03f;   // eight quanta
+// 0.01 deg: three quanta. It was 0.03 on the body path's first two flights
+// and that is WIDER than a station's turn (0.021-0.043 deg a frame), so
+// every static thing in view merged into the station's cluster -- a box
+// fifteen kilometres across, and a representative that was whichever
+// record came first: 0.012 deg one pair, 0.000 deg and 1.57 m the next,
+// handed to the pass as the station and re-registering its pixels by a
+// pixel or two every eighth frame. That was the shimmer.
+constexpr float kClusterAngleDeg = 0.01f;
 constexpr float kClusterPosM = 0.03f;       // three centimetres...
 constexpr float kClusterPosPerM = 2.0e-4f;  // ...plus the quantum's lever arm on the record's distance
 
 struct Cluster {
-    float    q[4];
+    float    q[4];       // the running MEAN delta, normalised: a member's noise averages out
     float    t[3];
+    double   qSum[4];
+    double   tSum[3];
     uint32_t count;
     double   angleSum;
     double   transSum;
@@ -290,12 +304,27 @@ int clusterOf(Cluster* cs, int* n, const float qd[4], const float t[3], float an
         ++c.count;
         c.angleSum += angleDeg;
         c.transSum += transM;
+        // The mean, the sign of the quaternion aligned to the cluster's.
+        float dotRaw = 0.0f;
+        for (int i = 0; i < 4; ++i) dotRaw += qd[i] * c.q[i];
+        const double sg = dotRaw < 0.0f ? -1.0 : 1.0;
+        for (int i = 0; i < 4; ++i) c.qSum[i] += sg * qd[i];
+        for (int i = 0; i < 3; ++i) c.tSum[i] += t[i];
+        double qn = 0.0;
+        for (int i = 0; i < 4; ++i) qn += c.qSum[i] * c.qSum[i];
+        qn = sqrt(qn);
+        if (qn > 1e-12) {
+            for (int i = 0; i < 4; ++i) c.q[i] = static_cast<float>(c.qSum[i] / qn);
+        }
+        for (int i = 0; i < 3; ++i) c.t[i] = static_cast<float>(c.tSum[i] / c.count);
         return j;
     }
     if (*n >= kMaxClusters) return -1;
     Cluster& c = cs[*n];
     memcpy(c.q, qd, sizeof(c.q));
     memcpy(c.t, t, sizeof(c.t));
+    for (int i = 0; i < 4; ++i) c.qSum[i] = qd[i];
+    for (int i = 0; i < 3; ++i) c.tSum[i] = t[i];
     c.count = 1;
     c.angleSum = angleDeg;
     c.transSum = transM;
@@ -318,7 +347,7 @@ bool emptyRecord(const uint8_t* r) {
 // the pose each frame, and the byte histogram says which fields. The
 // second flight added the identity by signature, the second pose block's
 // provenance and the tolerance clustering.
-void diffPair(const uint8_t* prev, const uint8_t* now, uint32_t bytes) {
+void diffPair(const uint8_t* prev, const uint8_t* now, uint32_t bytes, uint32_t dtMs) {
     const uint32_t n = bytes / kRecordBytes;
     std::vector<uint64_t> hashNow(n, 0), sigPrev(n, 0), sigNow(n, 0);
     std::vector<uint8_t> livePrev(n, 0), liveNow(n, 0);
@@ -353,9 +382,10 @@ void diffPair(const uint8_t* prev, const uint8_t* now, uint32_t bytes) {
     Cluster clusters[kMaxClusters];
     int nc = 0;
     uint32_t overflow = 0;
-    // Each pose change's cluster and position now, for the body's grid.
+    // Each pose change's cluster and positions, for the body's fit and grid.
     std::vector<int> clusterIdx(n, -1);
     std::vector<float> posNow(static_cast<size_t>(n) * 3, 0.0f);
+    std::vector<float> posPrev(static_cast<size_t>(n) * 3, 0.0f);
     for (uint32_t i = 0; i < n; ++i) {
         const uint8_t* a = prev + i * kRecordBytes;
         const uint8_t* b = now + i * kRecordBytes;
@@ -397,14 +427,16 @@ void diffPair(const uint8_t* prev, const uint8_t* now, uint32_t bytes) {
         if (poseDiff) {
             ++poseChanged;
             float qd[4], t[3], angle = 0.0f, trans = 0.0f, dist = 0.0f;
+            const Pose pa = decodePose(a);
             const Pose pb = decodePose(b);
-            if (rigidDelta(decodePose(a), pb, qd, t, &angle, &trans, &dist)) {
+            if (rigidDelta(pa, pb, qd, t, &angle, &trans, &dist)) {
                 const int cj = clusterOf(clusters, &nc, qd, t, angle, trans, dist);
                 if (cj < 0) {
                     ++overflow;
                 } else {
                     clusterIdx[i] = cj;
                     memcpy(&posNow[static_cast<size_t>(i) * 3], pb.p, sizeof(pb.p));
+                    memcpy(&posPrev[static_cast<size_t>(i) * 3], pa.p, sizeof(pa.p));
                 }
             }
         } else {
@@ -465,23 +497,49 @@ void diffPair(const uint8_t* prev, const uint8_t* now, uint32_t bytes) {
         const float share = static_cast<float>(c.count) / static_cast<float>(poseChanged);
         if (c.count >= kMotionMinRecords && share >= kMotionMinShare &&
             angle <= static_cast<double>(kMotionMaxDeg) && trans <= static_cast<double>(kMotionMaxM)) {
-            const float x = c.q[0], y = c.q[1], z = c.q[2], w = c.q[3];
-            float* R = g_motion.R;
-            R[0] = 1.0f - 2.0f * (y * y + z * z); R[1] = 2.0f * (x * y - w * z);       R[2] = 2.0f * (x * z + w * y);
-            R[3] = 2.0f * (x * y + w * z);       R[4] = 1.0f - 2.0f * (x * x + z * z); R[5] = 2.0f * (y * z - w * x);
-            R[6] = 2.0f * (x * z - w * y);       R[7] = 2.0f * (y * z + w * x);       R[8] = 1.0f - 2.0f * (x * x + y * y);
-            memcpy(g_motion.t, c.t, sizeof(g_motion.t));
-            g_motion.share = share;
-            g_motion.records = c.count;
-            g_motion.age = 0;
-            g_motionAge = 0;
-            g_motionValid = true;
+            // The body's motion from ALL its parts' positions, not one
+            // record's quantised delta: the least-squares rigid fit, and
+            // its residual says whether these parts moved as one.
             std::vector<int> members;
             members.reserve(c.count);
+            std::vector<float> fitNow, fitPrev;
+            fitNow.reserve(static_cast<size_t>(c.count) * 3);
+            fitPrev.reserve(static_cast<size_t>(c.count) * 3);
             for (uint32_t i = 0; i < n; ++i) {
-                if (clusterIdx[i] == big) members.push_back(static_cast<int>(i));
+                if (clusterIdx[i] != big) continue;
+                members.push_back(static_cast<int>(i));
+                for (int k = 0; k < 3; ++k) {
+                    fitNow.push_back(posNow[static_cast<size_t>(i) * 3 + k]);
+                    fitPrev.push_back(posPrev[static_cast<size_t>(i) * 3 + k]);
+                }
             }
-            buildGrid(now, members.data(), static_cast<int>(members.size()), posNow.data());
+            float w[3], tf[3], rms = 0.0f;
+            const bool fitOk = temporalRigidFit(fitNow.data(), fitPrev.data(),
+                                                static_cast<int>(members.size()), w, tf, &rms);
+            const float fitDeg = fitOk ? sqrtf(w[0] * w[0] + w[1] * w[1] + w[2] * w[2]) * 57.2957795f : 0.0f;
+            const float fitM = fitOk ? sqrtf(tf[0] * tf[0] + tf[1] * tf[1] + tf[2] * tf[2]) : 0.0f;
+            // A body for the pass TURNS (the feature is rotating stations; a
+            // pure translation is another ship, or the player's own parts,
+            // and hands the station a shift it never made), fits as one
+            // rigid thing (the residual), and keeps a sane rate.
+            const float dt = dtMs >= 5 && dtMs <= 50 ? static_cast<float>(dtMs) : 11.1f;
+            if (fitOk && rms <= kMotionMaxRmsM && fitDeg >= kMotionMinDeg && fitDeg <= kMotionMaxDeg &&
+                fitM <= kMotionMaxM) {
+                temporalRodrigues(w, g_motion.R);
+                memcpy(g_motion.t, tf, sizeof(g_motion.t));
+                for (int k = 0; k < 3; ++k) {
+                    g_motion.omegaPerMs[k] = w[k] / dt;
+                    g_motion.tPerMs[k] = tf[k] / dt;
+                }
+                g_motion.dtMs = dt;
+                g_motion.rms = rms;
+                g_motion.share = share;
+                g_motion.records = c.count;
+                g_motion.age = 0;
+                g_motionAge = 0;
+                g_motionValid = true;
+                buildGrid(now, members.data(), static_cast<int>(members.size()), posNow.data());
+            }
         }
         ++g_bigPairs;
         g_bigShareSum += static_cast<double>(c.count) / static_cast<double>(poseChanged);
@@ -705,6 +763,7 @@ void issueCopy(ID3D11DeviceContext* ctx, bool keep) {
         ctx->CopyResource(s.staging, g_pool);
         if (s.sceneStaging && g_scene) ctx->CopyResource(s.sceneStaging, g_scene);
         s.frame = g_frame;
+        s.stamp = stampMs();
         s.inUse = true;
         s.keep = keep;
         return;
@@ -746,9 +805,11 @@ void poll(ID3D11DeviceContext* ctx) {
             g_keep.assign(bytes, bytes + s->bytes);
             g_keepScene.assign(scene, scene + sceneBytes);
             g_keepFrame = s->frame;
+            g_keepStamp = s->stamp;
             g_keepValid = true;
         } else if (g_keepValid && g_keepFrame + 1 == s->frame && g_keep.size() == s->bytes) {
-            diffPair(g_keep.data(), bytes, s->bytes);
+            diffPair(g_keep.data(), bytes, s->bytes,
+                     static_cast<uint32_t>(s->stamp > g_keepStamp ? s->stamp - g_keepStamp : 0));
             if (g_verbose && g_dumps < kDumpMax && dueMs(g_dumpMs, kDumpEveryMs)) {
                 g_dumpMs = stampMs();
                 ++g_dumps;

@@ -66,8 +66,17 @@ void objectProbeShutdown();
 // once it has gone stale.
 constexpr uint32_t kObjectGrid = 64;   // cells a side of the body's occupancy grid
 struct ObjectMotion {
-    float    R[9];       // row-major 3x3
+    float    R[9];       // row-major 3x3, over the pair's own interval (for the record)
     float    t[3];
+    // The motion as RATES, per millisecond: the axis-angle and the
+    // translation of the least-squares rigid fit over the cluster's parts,
+    // divided by the pair's interval, so a reader scales them by its own
+    // frame's length (a pair on a long frame is a larger turn, and a station
+    // turns at a constant rate). Rodrigues of omega * dt is the frame's R.
+    float    omegaPerMs[3];
+    float    tPerMs[3];
+    float    dtMs;       // the pair's own interval
+    float    rms;        // the fit's residual, metres
     float    share;      // of the pair's pose changes the cluster held, 0..1
     uint32_t records;    // records in it
     uint32_t age;        // frames since the pair's second frame
