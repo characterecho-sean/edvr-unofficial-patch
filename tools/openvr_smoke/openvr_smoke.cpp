@@ -491,6 +491,118 @@ int guardCropChecks() {
 // promotes the lie; the crop fractions through the selftest export; and a
 // second object of the hooked class still receiving pure truth while the
 // lie is live for the game's own interface.
+// The separability probe (advanced.cull_guard_channel = raw | matrix).
+//
+// This is the cell that keeps a flight honest. The probe's whole value is
+// that ONE call lies and the other tells the truth while the image is left
+// completely alone -- and every way that can break silently produces a
+// plausible-looking flight that means nothing. If the split does not split,
+// or the size lie or the crop still runs, the tiles and the picture move for
+// reasons that have nothing to do with what Elite reads, and the wrong
+// conclusion gets drawn about the culler. So: assert the lie lands on the
+// named call, assert the OTHER call is untouched, and assert nothing on the
+// image path moved at all.
+//
+// Same fixture and same margins as guardChild, so the lied numbers are the
+// ones documented there: left eye truth l=-1.25 r=+0.75 t=-1.2 b=+0.8 ->
+// lie l=-1.25 r=+1.25 t=-1.2 b=+1.0 at fraction_v = 0.5.
+int probeChild(const char* dir, bool rawChannel) {
+    const char* chan = rawChannel ? "raw" : "matrix";
+    wchar_t proxy[MAX_PATH];
+    _snwprintf_s(proxy, _TRUNCATE, L"%hs\\openvr_api.dll", dir);
+    HMODULE m = LoadLibraryW(proxy);
+    if (!m) { printf("  FAIL  probe child (%s) could not load the proxy\n", chan); return 10; }
+
+    typedef void*(__cdecl* PFN_GetGenericInterface)(const char*, int*);
+    typedef unsigned int(*PFN_Crop)(int, float*);
+
+    auto getIface = reinterpret_cast<PFN_GetGenericInterface>(
+        GetProcAddress(m, "VR_GetGenericInterface"));
+    if (!getIface) { printf("  FAIL  probe child (%s): no VR_GetGenericInterface\n", chan); return 11; }
+    int err = -1;
+    void* iface = getIface("IVRSystem_012", &err);
+    if (!iface) { printf("  FAIL  probe child (%s): interface came back null\n", chan); return 12; }
+    auto* sys = static_cast<fakevr::ISystem012*>(iface);
+
+    int bad = 0;
+    float l = 0, r = 0, t = 0, b = 0;
+
+    // Both eyes' truth is what arms the lie; then the boundary-less
+    // fallback in periodic() promotes. A split channel goes from a standing
+    // start STRAIGHT to stage 2 -- there is no size stage to pass through --
+    // so one warmup call is enough, and a second costs nothing.
+    sys->GetProjectionRaw(0, &l, &r, &t, &b);
+    sys->GetProjectionRaw(1, &l, &r, &t, &b);
+    Sleep(2300);
+    sys->GetProjectionRaw(0, &l, &r, &t, &b);
+    sys->GetProjectionRaw(0, &l, &r, &t, &b);
+
+    // The named call lies; the other one does not.
+    sys->GetProjectionRaw(0, &l, &r, &t, &b);
+    float wantRaw[4];
+    fakevr::expectedRaw(0, wantRaw);
+    if (rawChannel) {
+        if (l != -1.25f || r != 1.25f || t != -1.2f || fabsf(b - 1.0f) > 1e-5f) {
+            printf("  FAIL  probe child (raw): the raw answer is %g/%g/%g/%g, "
+                   "expected the lie -1.25/+1.25/-1.2/+1.0 -- the channel did "
+                   "not reach the tangents\n", l, r, t, b);
+            ++bad;
+        }
+    } else if (l != wantRaw[0] || r != wantRaw[1] || t != wantRaw[2] ||
+               b != wantRaw[3]) {
+        printf("  FAIL  probe child (matrix): the raw answer is %g/%g/%g/%g "
+               "but should be untouched truth %g/%g/%g/%g -- the split leaked\n",
+               l, r, t, b, wantRaw[0], wantRaw[1], wantRaw[2], wantRaw[3]);
+        ++bad;
+    }
+
+    fakevr::M44 got = sys->GetProjectionMatrix(0, 0.5f, 100.0f, 0);
+    fakevr::M44 want = fakevr::expectedMatrix(0, 0.5f, 100.0f, 0);
+    if (rawChannel) {
+        if (memcmp(&got, &want, sizeof(got)) != 0) {
+            printf("  FAIL  probe child (raw): the matrix was edited (m00 %g "
+                   "want %g) -- the split leaked, and a flight on this build "
+                   "would move the picture for the wrong reason\n",
+                   got.m[0][0], want.m[0][0]);
+            ++bad;
+        }
+    } else if (fabsf(got.m[0][0] - 0.8f) > 1e-5f || fabsf(got.m[0][2]) > 1e-5f ||
+               fabsf(got.m[1][1] - 2.0f / 2.2f) > 1e-4f) {
+        printf("  FAIL  probe child (matrix): the matrix is %g/%g/%g, expected "
+               "the lie 0.8/0/%g -- the channel did not reach the matrix\n",
+               got.m[0][0], got.m[0][2], got.m[1][1], 2.0f / 2.2f);
+        ++bad;
+    }
+
+    // And the image path is untouched on BOTH channels. This is the half
+    // that makes the probe readable: the game renders exactly what it would
+    // have rendered anyway, so anything that moves is the lie's doing.
+    {
+        uint32_t w = 0, h = 0;
+        sys->GetRecommendedRenderTargetSize(&w, &h);
+        if (w != fakevr::kSizeW || h != fakevr::kSizeH) {
+            printf("  FAIL  probe child (%s): the target size was inflated to "
+                   "%ux%u -- a split channel must never ask for more pixels\n",
+                   chan, w, h);
+            ++bad;
+        }
+    }
+    {
+        auto crop = reinterpret_cast<PFN_Crop>(
+            GetProcAddress(m, "edvr_selftest_cull_guard"));
+        float f[4] = {};
+        if (crop && crop(0, f) != 0u) {
+            printf("  FAIL  probe child (%s): the submit crop is armed "
+                   "(%g..%g) -- nothing was rendered wider, so cropping would "
+                   "shrink a true-frustum image\n", chan, f[0], f[2]);
+            ++bad;
+        }
+    }
+
+    FreeLibrary(m);
+    return bad ? 20 : 0;
+}
+
 int guardChild(const char* dir) {
     wchar_t proxy[MAX_PATH];
     _snwprintf_s(proxy, _TRUNCATE, L"%hs\\openvr_api.dll", dir);
@@ -1665,6 +1777,8 @@ int sentinelChecks() {
 int main(int argc, char** argv) {
     if (argc >= 3 && strcmp(argv[2], "--fault-child") == 0) return faultChild(argv[1]);
     if (argc >= 3 && strcmp(argv[2], "--guard-child") == 0) return guardChild(argv[1]);
+    if (argc >= 3 && strcmp(argv[2], "--probe-raw-child") == 0) return probeChild(argv[1], true);
+    if (argc >= 3 && strcmp(argv[2], "--probe-matrix-child") == 0) return probeChild(argv[1], false);
 
     printf("edvr openvr smoke\n");
     if (argc < 2) {
@@ -1820,6 +1934,68 @@ int main(int argc, char** argv) {
         }
         printf("  ok    cull guard: true first, symmetric lie after go-live, "
                "matrix rebuilt, crop correct, strangers untouched\n");
+    }
+
+    // The separability probe, one child per channel. Staged the same way as
+    // the guard child and for the same reason -- the channel is read when
+    // the hook installs, and this parent's proxy installed with the guard
+    // off. See probeChild for why each assertion is load-bearing.
+    for (int pass = 0; pass < 2; ++pass) {
+        const bool rawPass = (pass == 0);
+        const char* chan = rawPass ? "raw" : "matrix";
+        char dirP[MAX_PATH * 2];
+        snprintf(dirP, sizeof(dirP), "%s_probe_%s", argv[1], chan);
+        CreateDirectoryA(dirP, nullptr);
+        char src[MAX_PATH * 2], dst[MAX_PATH * 2];
+        snprintf(src, sizeof(src), "%s\\openvr_api.dll", argv[1]);
+        snprintf(dst, sizeof(dst), "%s\\openvr_api.dll", dirP);
+        if (!CopyFileA(src, dst, FALSE)) return fail("could not stage the probe child's proxy");
+        snprintf(src, sizeof(src), "%s\\openvr_api_orig.dll", argv[1]);
+        snprintf(dst, sizeof(dst), "%s\\openvr_api_orig.dll", dirP);
+        if (!CopyFileA(src, dst, FALSE)) return fail("could not stage the probe child's stand-in");
+        snprintf(dst, sizeof(dst), "%s\\edvr.ini", dirP);
+        {
+            FILE* f = nullptr;
+            if (fopen_s(&f, dst, "w") != 0 || !f) {
+                return fail("could not write the probe child's edvr.ini");
+            }
+            fprintf(f,
+                    "[fix]\ncull_guard = symmetric\ncull_guard_fraction_v = 0.5\n"
+                    "cull_guard_headsets = 88x89\n"
+                    "\n[advanced]\ncull_guard_channel = %s\n",
+                    chan);
+            fclose(f);
+        }
+        wchar_t armed[MAX_PATH];
+        _snwprintf_s(armed, _TRUNCATE, L"%hs\\edvr_logs\\system_hook.armed", dirP);
+        DeleteFileW(armed);
+
+        wchar_t self[MAX_PATH]{};
+        GetModuleFileNameW(nullptr, self, MAX_PATH);
+        wchar_t cmd[MAX_PATH * 2];
+        _snwprintf_s(cmd, _TRUNCATE, L"\"%s\" \"%hs\" --probe-%hs-child", self,
+                     dirP, chan);
+        STARTUPINFOW si{};
+        si.cb = sizeof(si);
+        PROCESS_INFORMATION pi{};
+        if (!CreateProcessW(nullptr, cmd, nullptr, nullptr, FALSE, 0, nullptr,
+                            nullptr, &si, &pi)) {
+            return fail("could not start the probe child");
+        }
+        WaitForSingleObject(pi.hProcess, 30000);
+        DWORD code = 0xFFFFFFFF;
+        GetExitCodeProcess(pi.hProcess, &code);
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+        if (code != 0) {
+            printf("  FAIL  the %s probe child exited 0x%08lX -- the channel "
+                   "split leaked, or the probe touched the image (its FAIL "
+                   "lines are above)\n", chan, code);
+            printf("\nOPENVR SMOKE FAILED\n");
+            return 1;
+        }
+        printf("  ok    cull guard probe (channel %s): only that call lies, "
+               "the other stays true, target size and crop untouched\n", chan);
     }
 
     // Shared code with no other coverage. Runs last because it touches nothing

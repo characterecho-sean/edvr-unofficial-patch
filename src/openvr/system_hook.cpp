@@ -815,6 +815,15 @@ void emitSummary(State* s) {
 // smoke fixture's vertical is asymmetric on purpose so that inversion can
 // never come back quietly.
 bool cropFractions(const State* s, int eye, float out[4]) {
+    // THE choke point for the whole crop rule, and it belongs here rather
+    // than at the entry points: a split channel renders at the true frustum,
+    // so there is nothing wider to crop back out of, and cropping by the
+    // lie's fractions would shrink a true-frustum image -- the one thing the
+    // separability probe must never do. Guarding the two exported entry
+    // points missed edvr_selftest_cull_guard, which reaches this directly;
+    // the smoke cell caught it, and one rule in one place is why it cannot
+    // come back through the next caller either.
+    if (channelSplit(s)) return false;
     const float* t = s->trueRaw[eye];
     const float* lie = s->lied[eye];
     const float du = lie[1] - lie[0], dv = lie[3] - lie[2];
@@ -1310,12 +1319,8 @@ bool systemHookCropFractions(vr::EVREye eye, float out[4]) {
     State* s = g_state;
     if (!s || !out) return false;
     const int e = (eye == vr::Eye_Left) ? 0 : 1;
-    // A split channel never renders wider, so there is nothing to crop back
-    // out: cropping by the lie's fractions would shrink an image that was
-    // drawn at the true frustum, which is the one thing the probe must not do.
-    if (channelSplit(s)) return false;
     if (!lieActiveFor(s, e)) return false;
-    return cropFractions(s, e, out);
+    return cropFractions(s, e, out);   // refuses on a split channel
 }
 
 bool systemHookSubmitCopyMode() {
@@ -1389,11 +1394,10 @@ bool systemHookCropBounds(vr::EVREye eye, const vr::VRTextureBounds_t* in,
     State* s = g_state;
     if (!s || !out) return false;
     const int e = (eye == vr::Eye_Left) ? 0 : 1;
-    if (channelSplit(s)) return false;   // nothing widened, nothing to crop
     if (!lieActiveFor(s, e)) return false;
 
     float f[4];
-    if (!cropFractions(s, e, f)) return false;
+    if (!cropFractions(s, e, f)) return false;   // refuses on a split channel
 
     // Compose within the caller's own span, whichever direction it runs:
     // OpenVR permits flipped bounds, and a fraction applied inside the span
