@@ -28,6 +28,7 @@
 #include "panel_quad.h"
 #include "device_hook.h"  // contextHookModeFor
 #include "draw_census.h"
+#include "object_probe.h"     // tier 2 stage 1: the instanced-mesh pool, read on two frames
 #include "fss_panel.h"
 #include "fss_probe.h"
 #include "fss_panel_rect.h"
@@ -1485,8 +1486,8 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         !remlokWantsDraws() && !holoWantsDraws() && !targetSharpWantsDraws() && !hudSpriteWantsDraws() && !panelUpscaleWantsDraws() && !hudGrainWantsDraws() &&
         !uiDepthWantsDraws() && !witchstarWantsDraws() &&
         !sunglareWantsDraws() && !cbPeekEnabled() && !billboardWantsDraws() &&
-        !drawCensusArmed() && !panelQuadWants() && !panelCurveWants() &&
-        !particleWantsDraws() && !backdropWantsDraws() &&
+        !drawCensusArmed() && !objectProbeWantsDraws() && !panelQuadWants() &&
+        !panelCurveWants() && !particleWantsDraws() && !backdropWantsDraws() &&
         !scrimWantsDraws() && !quadProbeWants() && !loaderPanelWants() &&
         !introProbeWants() && !introPanelWants()) {
         return DrawVerdict::kNone;
@@ -1887,6 +1888,9 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     if (drawCensusArmed()) {
         drawCensusEyeDraw(self, kind, count, instances, s->eyeDrawsThisFrame, args);
     }
+    // The pool probe (object_probe.h): one bool while off; a few t33 reads a
+    // frame until the pool is known, then one a second.
+    objectProbeOnEyeDraw(self, kind, instances);
 
     // The suppression probe, after the census so a census taken while probing
     // still records what the game SUBMITTED. Everything before this point is
@@ -3796,6 +3800,7 @@ void vScreenRefreshConfig() {
     panelQuadConfigure(cfg);
     panelCurveConfigure(cfg);
     particleConfigure(cfg);
+    objectProbeConfigure(cfg);
     billboardConfigure(cfg);
     // Every fix.head_offset_* key, on the reload path as well as the startup
     // one. A config reader on only one of the two is a specific repeatable bug
@@ -3870,6 +3875,7 @@ void vScreenFrameBoundary() {
     if (g_state && g_state->ownerCtx) {
         quadProbeTick(g_state->ownerCtx);
         drawCensusTick(g_state->ownerCtx);
+        objectProbeFrameBoundary(g_state->ownerCtx);
         panelUpscaleFrameEnd();
         wakePulseReport();
         uiDepthFrameBoundary(g_state->ownerCtx);
@@ -4804,6 +4810,7 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     panelQuadConfigure(cfg);
     panelCurveConfigure(cfg);
     particleConfigure(cfg);
+    objectProbeConfigure(cfg);
     billboardConfigure(cfg);
     // installGlitchFrameFix is called before this, deliberately, so this is its
     // settled answer rather than a guess about config it has not read yet.
@@ -4985,6 +4992,7 @@ void shutdownVScreenFixes() {
     panelQuadShutdown();
     panelCurveShutdown();
     particleShutdown();
+    objectProbeShutdown();
     if (g_state->ourCb) {
         g_state->ourCb->Release();
         g_state->ourCb = nullptr;

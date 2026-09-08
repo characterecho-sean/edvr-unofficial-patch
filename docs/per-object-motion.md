@@ -1369,6 +1369,31 @@ which is this project's contract for every read of the game.
    pixels and counts the buckets; then the tags; then the resolve. Retire
    `temporal_aa_ship_metres` only after the candidate has won on a docked
    interval and in the slot.
+
+   *Started 2026-09-08, the pool probe* (`advanced.object_probe`,
+   `src/d3d11/object_probe.cpp`): the first stage's first instrument, and
+   the one that gates the rest now that question 4 has closed. It
+   recognises the pool from a scene draw's `t33` binding (a 336-stride
+   structured buffer; a few reads a frame until found, one a second after),
+   copies two consecutive frames of it on the GPU every eighth frame into
+   a staging ring, maps them three frames later without waiting -- a
+   mapped `WRITE_DISCARD` pointer is write-combined memory and reading
+   megabytes of it on the CPU costs milliseconds, which rules out the tee
+   the design first proposed for the pool -- and diffs the pair record by
+   record: unchanged, pose changed with the rest intact, rewritten, found
+   at another slot. The changed records' motions `D = W_prev · W_now⁻¹`
+   are bucketed within a hundredth of a degree and a centimetre (the same
+   `D` for every part of one assembly, so a station is one bucket), and a
+   pair where more than half the pool took one pure translation is an
+   origin rebase. The totals line every 20 s reads: **question 3** is
+   "found at another slot" near zero (records keep their slots) or not (a
+   repacked pool, and the classifier matches by content instead);
+   **question 6** is the motions figure against the two codes;
+   **question 7's first half** is the rebase count and size. Next in the
+   stage: the instance stream's slot and element from the input layout at
+   creation (one device-side hook), the record index read at each draw's
+   own start instance, the classifier, and the records' delta as a
+   registration candidate against the head on cockpit pixels.
 4. **Tier 2b** only if question 1 says no bits.
 5. **Tier 3** as `tools/` work against dumped frames, never on the hot
    path.
