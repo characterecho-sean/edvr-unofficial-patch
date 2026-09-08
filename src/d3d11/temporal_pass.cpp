@@ -252,6 +252,12 @@ bool insideBody(float3 d, float z) {
     if (any(u < 0.0) || any(u >= 1.0)) return false;
     return BG.Load(int4(int3(u * 64.0), 0)) > 0.5;
 }
+// The interface's pixel, by ui_depth's coverage mask when it is bound
+// (probe.z): the station's target brackets and its label sit at the
+// station's depth, inside its grid, and do not turn with it.
+bool uiCovered(int2 q) {
+    return probe.z != 0.0 && UM.Load(int3(q, 0)) > 0.0;
+}
 // Where this pixel's surface was last frame if it moved with the body:
 // the camera's path composed with the body's turn. False when it lands
 // behind the eye or off the image.
@@ -353,7 +359,7 @@ bool fetchHistoryT(float2 p, float3 r0, float3 r1, float3 r2, float3 tv,
     // and that depth places it in the body (insideBody says). world = 2
     // marks it for the counters and the debug view; the fetch below is
     // the same either way.
-    if (zBody > 0.0 && insideBody(d, zBody)) {
+    if (zBody > 0.0 && !uiCovered(region.xy + int2(p)) && insideBody(d, zBody)) {
         float2 ppB;
         float zpB;
         if (bodyPixel(d, zBody, ppB, zpB)) {
@@ -486,8 +492,9 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
             pp.x = (xt - tanPrev.x) / (tanPrev.y - tanPrev.x) * float(size.x) - 0.5;
             pp.y = (tanPrev.w - yt) / (tanPrev.w - tanPrev.z) * float(size.y) - 0.5;
             motion = pp - p;
-            // The body's path for the pixels the body's grid claims.
-            if (zBody > 0.0 && insideBody(d, zBody)) {
+            // The body's path for the pixels the body's grid claims, the
+            // interface's excepted.
+            if (zBody > 0.0 && !uiCovered(region.xy + int2(p)) && insideBody(d, zBody)) {
                 float2 ppB;
                 float zpB;
                 if (bodyPixel(d, zBody, ppB, zpB)) {
@@ -1698,6 +1705,30 @@ bool ensureBodyGrid(ID3D11Device* dev, ID3D11DeviceContext* ctx, const ObjectMot
         g_bodyGridVersion = om.gridVersion;
     }
     return true;
+}
+
+// A shader view over the interface's coverage mask (ui_depth.h), cached
+// per eye on the texture's identity. Two readers: the mv entry folds it
+// into NVIDIA's bias mask, and the body path keeps its hands off the
+// pixels it marks -- the station's target brackets and its label sit at
+// the station's distance in depth and inside its grid, and they do not
+// turn with it (the body path's fourth flight, 2026-09-08: "artifacts
+// particularly with the 3d targeting UI", the text "smearing").
+bool ensureUiMaskSrv(ID3D11Device* dev, EyeState& e, ID3D11Texture2D* mask) {
+    if (!dev || !mask) return false;
+    if (e.uiMaskRes == static_cast<void*>(mask) && e.uiMaskSrv) return true;
+    if (e.uiMaskSrv) { e.uiMaskSrv->Release(); e.uiMaskSrv = nullptr; }
+    e.uiMaskRes = nullptr;
+    D3D11_SHADER_RESOURCE_VIEW_DESC md{};
+    md.Format = DXGI_FORMAT_R8_UNORM;
+    md.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+    md.Texture2D.MipLevels = 1;
+    if (SUCCEEDED(dev->CreateShaderResourceView(mask, &md, &e.uiMaskSrv)) && e.uiMaskSrv) {
+        e.uiMaskRes = mask;
+        return true;
+    }
+    e.uiMaskSrv = nullptr;
+    return false;
 }
 float    g_foveaDeg = 0.0f;        // advanced.temporal_aa_fovea: NVIDIA runs on a crop this many degrees across; 0 = whole frame
 float    g_foveaEdgeDeg = 6.0f;    // advanced.temporal_aa_fovea_edge: the blend band, in degrees
@@ -3129,23 +3160,11 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     // the texture's identity.
                     ID3D11Texture2D* reactiveMask = nullptr;
                     if (!uiDepthReactiveMask(w, h, eye, &reactiveMask)) reactiveMask = nullptr;
-                    const bool foldUi = p.movers[0] != 0.0f && reactiveMask != nullptr &&
-                                        e.dlMaskUav != nullptr;
-                    if (foldUi && (e.uiMaskRes != static_cast<void*>(reactiveMask) || !e.uiMaskSrv)) {
-                        if (e.uiMaskSrv) { e.uiMaskSrv->Release(); e.uiMaskSrv = nullptr; }
-                        e.uiMaskRes = nullptr;
-                        D3D11_SHADER_RESOURCE_VIEW_DESC md{};
-                        md.Format = DXGI_FORMAT_R8_UNORM;
-                        md.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
-                        md.Texture2D.MipLevels = 1;
-                        if (SUCCEEDED(dev->CreateShaderResourceView(reactiveMask, &md, &e.uiMaskSrv)) &&
-                            e.uiMaskSrv) {
-                            e.uiMaskRes = reactiveMask;
-                        } else {
-                            e.uiMaskSrv = nullptr;
-                        }
-                    }
-                    const bool uiBound = foldUi && e.uiMaskSrv != nullptr;
+                    // Bound for the fold when the mover mask is on, and for
+                    // the body path's exclusion whenever that is on.
+                    const bool wantUi = reactiveMask != nullptr &&
+                                        ((p.movers[0] != 0.0f && e.dlMaskUav != nullptr) || p.tvSt[3] != 0.0f);
+                    const bool uiBound = wantUi && ensureUiMaskSrv(dev, e, reactiveMask);
                     p.probe[2] = uiBound ? 1.0f : 0.0f;
                     setParams(ctx, p);
                     ID3D11ShaderResourceView* nullSrvM[6] = {};
@@ -3288,6 +3307,14 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         }
         const int readIdx = e.histRead;
         const int writeIdx = 1 - readIdx;
+        // The own path: the interface's coverage mask at t4 for the body
+        // path's exclusion (the trained block above binds its own).
+        if (!usedDlaa) {
+            ID3D11Texture2D* rm = nullptr;
+            const bool uiOwn = p.tvSt[3] != 0.0f && uiDepthReactiveMask(w, h, eye, &rm) && rm &&
+                               ensureUiMaskSrv(dev, e, rm);
+            p.probe[2] = uiOwn ? 1.0f : 0.0f;
+        }
         bool ran = usedDlaa ? true : setParams(ctx, p);
         bool ownRan = false;
         if (ran && !usedDlaa) {
@@ -3424,7 +3451,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     ctx->CSSetShader(g_csMv, nullptr, 0);
                     ID3D11ShaderResourceView* srvsM[6] = {inSrv, e.histSrv[readIdx], depthSrv,
                                                           p.movers[0] != 0.0f ? e.zPrevSrv : nullptr,
-                                                          nullptr,
+                                                          p.probe[2] != 0.0f ? e.uiMaskSrv : nullptr,
                                                           p.tvSt[3] != 0.0f ? g_bodyGridSrv : nullptr};
                     // u2 (the stats buffer) is left UNBOUND here: the own pass
                     // writes its stats when it runs, and the mv entry writes
@@ -3580,7 +3607,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                 ctx->CSSetShader(g_cs, nullptr, 0);
                 ID3D11ShaderResourceView* srvs[6] = {inSrv, e.histSrv[readIdx], depthSrv,
                                                      (carry && p.movers[0] != 0.0f) ? e.zPrevSrv : nullptr,
-                                                     nullptr,
+                                                     p.probe[2] != 0.0f ? e.uiMaskSrv : nullptr,
                                                      p.tvSt[3] != 0.0f ? g_bodyGridSrv : nullptr};
                 ID3D11UnorderedAccessView* uavs[5] = {e.outUav, e.histUav[writeIdx],
                                                       g_statsUav, nullptr,

@@ -1705,6 +1705,28 @@ which is this project's contract for every read of the game.
    station and whatever the game turns with it -- so the sixteen-
    kilometre cube stands, at 256 m cells. The body path's own accuracy on
    those pairs: 0.016-0.064 px.
+
+   *Its fourth flight* (16:24 the same day, `v0.14.1-65-g6879098`; the
+   slot, on): **"rim looks steady now. Much better"; at the slot "crystal
+   clear."** The approach was "quite blurry", with "artifacts particularly
+   with the 3d targeting UI for the station" and the target's text
+   "smearing and shimmering" once targeted. The pair intervals read
+   10.7-12.3 ms with decimals, the residuals 0.008-0.192 m, the share
+   4-36% of the frame; the world path's own registration on the approach
+   sat within 0.1 px. The targeting UI is the interface's: ui_depth
+   writes the flight HUD's depth, so the station's brackets and its label
+   sit at the station's distance in depth, inside its grid, and took the
+   station's turn, which they do not share. The interface's own coverage
+   mask (marked wherever the interface covers a pixel, by the draw that
+   writes its depth) is now the exclusion on every dispatch: a pixel it
+   marks keeps the camera's vector. Two things that are not the body
+   path's: the text's SHIMMER is `advanced.ui_depth_reactive = 1` in the
+   player's own ini (set that morning from the menu; at 1 the interface
+   stops accumulating altogether, the sharp-but-shimmering interface the
+   module's header describes, against the shipped 0.5), and the
+   approach's general softness is DLSS at 50% per axis under 5 m a frame
+   of motion, the candidate that has stood since the third flight of the
+   day, with the station small on screen.
 4. **Tier 2b** only if question 1 says no bits.
 5. **Tier 3** as `tools/` work against dumped frames, never on the hot
    path.
