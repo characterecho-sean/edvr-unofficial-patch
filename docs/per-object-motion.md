@@ -1674,7 +1674,15 @@ which is this project's contract for every read of the game.
    deg a pair), since a pure translation is another ship or the player's
    own parts and handed the station a shift it never made. The
    registration line now prints the fit's residual and the pair's
-   interval beside the turn.
+   interval beside the turn. The player's second note -- "the station's
+   parts near the outer edge shimmered as it moved" -- adds the rim: it
+   is farthest from the axis and moves fastest, so a wrong rate costs the
+   most pixels there; and the grid's box was cut to the parts' extent
+   every pair, so its cell boundaries moved by up to a cell as members
+   came and went and the pixels along the outer skin flipped between the
+   body's vector and the camera's. The grid's cells now sit on a fixed
+   world lattice (a power of two of metres a side, the box's corner at a
+   multiple of it), so the same place is the same cell pair after pair.
 4. **Tier 2b** only if question 1 says no bits.
 5. **Tier 3** as `tools/` work against dumped frames, never on the hot
    path.

@@ -74,30 +74,45 @@ void buildGrid(const uint8_t* now, const int* memberSlots, int count, const floa
             if (p[k] > hi[k]) hi[k] = p[k];
         }
     }
+    // The cells sit on a FIXED world lattice: a power of two of metres a
+    // side, the box's corner at a multiple of it, sixty-two cells covering
+    // the parts' extent with the reach either side. A box cut to the
+    // parts' extent moved its cell boundaries by up to a cell every pair
+    // as members came and went, and the pixels along the station's outer
+    // skin flipped between the body's vector and the camera's -- the
+    // shimmer at the rim the player saw on the second flight. On the
+    // lattice the same place in the world is the same cell, pair after
+    // pair, while the cell size holds (it moves only when the extent
+    // crosses a power of two).
+    const int n = static_cast<int>(kObjectGrid);
+    float ext = 1.0f;
     for (int k = 0; k < 3; ++k) {
-        lo[k] -= g_reachM;
-        hi[k] += g_reachM;
-        if (hi[k] - lo[k] < 1.0f) hi[k] = lo[k] + 1.0f;
+        const float e = (hi[k] - lo[k]) + 2.0f * g_reachM;
+        if (e > ext) ext = e;
+    }
+    float cell = 16.0f;
+    while (cell * static_cast<float>(n - 2) < ext && cell < 8192.0f) cell *= 2.0f;
+    for (int k = 0; k < 3; ++k) {
+        lo[k] = floorf((lo[k] - g_reachM) / cell) * cell;
+        hi[k] = lo[k] + cell * static_cast<float>(n);
         g_motion.bmin[k] = lo[k];
         g_motion.bmax[k] = hi[k];
     }
     memset(g_grid, 0, sizeof(g_grid));
-    const int n = static_cast<int>(kObjectGrid);
+    int dil = static_cast<int>(ceilf(g_reachM / cell));
+    dil = dil < 1 ? 1 : (dil > 4 ? 4 : dil);
     for (int m = 0; m < count; ++m) {
         const float* p = pos + memberSlots[m] * 3;
-        int c[3], dil[3];
+        int c[3];
         for (int k = 0; k < 3; ++k) {
-            const float cell = (hi[k] - lo[k]) / static_cast<float>(n);
             int idx = static_cast<int>((p[k] - lo[k]) / cell);
             c[k] = idx < 0 ? 0 : (idx >= n ? n - 1 : idx);
-            int d = static_cast<int>(ceilf(g_reachM / cell));
-            dil[k] = d < 1 ? 1 : (d > 4 ? 4 : d);
         }
-        for (int z = c[2] - dil[2]; z <= c[2] + dil[2]; ++z) {
+        for (int z = c[2] - dil; z <= c[2] + dil; ++z) {
             if (z < 0 || z >= n) continue;
-            for (int y = c[1] - dil[1]; y <= c[1] + dil[1]; ++y) {
+            for (int y = c[1] - dil; y <= c[1] + dil; ++y) {
                 if (y < 0 || y >= n) continue;
-                for (int x = c[0] - dil[0]; x <= c[0] + dil[0]; ++x) {
+                for (int x = c[0] - dil; x <= c[0] + dil; ++x) {
                     if (x < 0 || x >= n) continue;
                     g_grid[(z * n + y) * n + x] = 255;
                 }
