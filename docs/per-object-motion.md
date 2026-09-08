@@ -592,6 +592,17 @@ the mask's:
   creations in the frame -- textures, buffers, shaders, and their bytes
   about -- so the next such frame says whether it was streaming rather
   than leaving it inferred.
+  *The third reading* (the session of 12:00), with those counts on the
+  lines: the 154 ms frame at 12:02:15 created 681 buffers (612 MB) and 64
+  shaders; the 113 ms one before it, 42 textures; the 32 ms one at
+  12:02:52, 52 textures and 25 buffers (156 MB); the 28 ms one at
+  12:03:17, 190 buffers. That is the station's detail level arriving --
+  its meshes, its textures, and the shader permutations for their
+  materials, which the driver compiles at creation -- on the render
+  thread, as the player read it ("when a new LOD for the station is
+  loaded"). One 85 ms frame at 12:01:28 created nothing, the exception in
+  seventeen. Not EDVR's to fix. What EDVR owes it is not to make the frame
+  after it worse, which is the history lag of the next bullet.
 - **On a hitch the station's turn seems to step back and resume** (the
   player, 11:36). The history lags the turn by construction: the vectors
   carry the camera's motion and not the station's rotation, so the
@@ -1496,6 +1507,34 @@ which is this project's contract for every read of the game.
    unwritten slots hold whatever the allocation held last time round,
    stale records counted live; the third flight's engage line prints the
    usage.
+
+   *Its third flight* (12:00 the same day, `v0.14.1-50-gd54c1ff`; distant,
+   the slot, the landing pad): the pool buffer IS dynamic (cpu write,
+   structured, a shader resource), so unwritten slots do carry stale
+   records. **The second pose block is a copy of the record's own pose** --
+   equal to this frame's first block on 100% of changed records in every
+   interval, and to last frame's only where the pose had not changed -- so
+   the game does not hand over the previous pose, with motion blur off at
+   least: the field is shaped like a previous-pose slot, and one flight with
+   Elite's motion blur on says whether it then fills. **The signature
+   identifies the type, not the instance**: 0-8% of live records carry one
+   no other does, so "kept at slot" (91-95% of changed records) is a
+   type-level fact and instance identity needs pose continuity on top. The
+   order is stable while the set is stable and reshuffles with churn: at
+   the landing pad 820 records a pair were byte for byte at a new slot,
+   static objects re-slotted. And the motions did not cluster even on the
+   steady approach -- 63 clusters, the largest 45% at 0.02 deg and 0.6 m a
+   frame against the eye's 2.2 m -- which no totals line can separate into
+   a frame that moves, stale slots mixing multi-frame deltas, or a decode
+   that is off (the decode matches the game's own in `fss_panel_vs.h`, whose
+   `camRel = inst.pos - cb1[275]` also says the record's frame is not the
+   camera's). So the probe now writes raw pairs to disk --
+   `edvr_logs\pool\pool_HHMMSS_<frame>.bin`, a 32-byte header, the scene
+   block from VS b1 with each frame, then the records; eight pairs a
+   session, one every 30 s -- and `tools/pool_pair.py` answers on the desk
+   what a flight's totals cannot: the camera's own delta from cb1[275]
+   beside the records', the per-slot steps, the rigid clusters, and the
+   same records matched by content instead of slot.
 4. **Tier 2b** only if question 1 says no bits.
 5. **Tier 3** as `tools/` work against dumped frames, never on the hot
    path.

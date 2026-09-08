@@ -752,6 +752,16 @@ python "%ROOT%\tools\draw_identity.py" --self-test || (
     exit /b 1
 )
 
+echo [edvr] === pool pair self-test ===
+REM The reader of the object probe's raw pair dumps (edvr_logs\pool\*.bin,
+REM since 2026-09-08): the pose decode, the rigid clustering and the header
+REM layout it shares with src\d3d11\object_probe.cpp. A decode one field off
+REM reads as a plausible cloud of motions. It fails HERE.
+python "%ROOT%\tools\pool_pair.py" --self-test || (
+    echo [edvr] ERROR: the pool pair tool failed its own test
+    exit /b 1
+)
+
 echo [edvr] === eye-split diff self-test ===
 REM The tool that compares the two eyes of one frame. It registers the
 REM eyes before it compares them, because their projections are off-centre

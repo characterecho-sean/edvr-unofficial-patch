@@ -30,6 +30,12 @@ constexpr int      kRing = 4;
 constexpr uint64_t kReportMs = 20000;
 constexpr float    kRotQuantDeg = 0.01f; // the design's tolerance: a hundredth of a degree
 constexpr uint32_t kAbsentFrames = 600;  // frames with the probe on and no pool before saying so
+// Raw pairs to disk for the desk (the third flight, 2026-09-08 12:00: the
+// totals could not tell a frame that moves from a decode that is off from a
+// stale slot; two frames' raw records with the scene block of each can).
+constexpr uint64_t kDumpEveryMs = 30000;
+constexpr uint32_t kDumpMax = 8;
+constexpr uint32_t kSceneSlot = 1;       // the scene block, VS b1: cb1[275] is the camera in the record's frame
 
 bool     g_on = false;
 bool     g_wasOn = false;
@@ -38,20 +44,28 @@ uint64_t g_checkMs = 0;
 ID3D11Buffer* g_pool = nullptr;      // held (AddRef) while recognised
 uint32_t g_poolBytes = 0;
 uint32_t g_records = 0;
+ID3D11Buffer* g_scene = nullptr;     // the scene block bound with it, held likewise
+uint32_t g_sceneBytes = 0;
 bool     g_noted = false;
 uint32_t g_frame = 0;
 uint32_t g_framesWithoutPool = 0;
 bool     g_absentNoted = false;
+uint64_t g_dumpMs = 0;
+uint32_t g_dumps = 0;
+bool     g_dumpDirMade = false;
 
 struct Slot {
     ID3D11Buffer* staging = nullptr;
+    ID3D11Buffer* sceneStaging = nullptr;
     uint32_t bytes = 0;
+    uint32_t sceneBytes = 0;
     uint32_t frame = 0;
     bool     inUse = false;
     bool     keep = false;   // the first of a pair: its bytes are kept for the second
 };
 Slot g_ring[kRing];
-std::vector<uint8_t> g_keep;   // the first frame of a pair, copied out of its staging buffer
+std::vector<uint8_t> g_keep;        // the first frame of a pair, copied out of its staging buffer
+std::vector<uint8_t> g_keepScene;   // ...and its scene block
 uint32_t g_keepFrame = 0;
 bool     g_keepValid = false;
 
@@ -386,9 +400,11 @@ void diffPair(const uint8_t* prev, const uint8_t* now, uint32_t bytes) {
 void releaseRing() {
     for (Slot& s : g_ring) {
         if (s.staging) s.staging->Release();
+        if (s.sceneStaging) s.sceneStaging->Release();
         s = Slot();
     }
     g_keep.clear();
+    g_keepScene.clear();
     g_keepValid = false;
 }
 
@@ -397,6 +413,48 @@ void releasePool() {
     g_pool = nullptr;
     g_poolBytes = 0;
     g_records = 0;
+    if (g_scene) g_scene->Release();
+    g_scene = nullptr;
+    g_sceneBytes = 0;
+}
+
+// One frame of a pair to disk: a 32-byte header, the scene block, the pool.
+// tools/pool_pair.py reads it.
+bool writeDump(const uint8_t* pool, uint32_t poolBytes, const uint8_t* scene, uint32_t sceneBytes,
+               uint32_t frame, wchar_t* path, size_t pathN) {
+    const std::wstring dir = Log::get().dir() + L"\\pool";
+    if (!g_dumpDirMade) {
+        g_dumpDirMade = true;
+        CreateDirectoryW(dir.c_str(), nullptr);
+    }
+    SYSTEMTIME st{};
+    GetLocalTime(&st);
+    _snwprintf_s(path, pathN, _TRUNCATE, L"%s\\pool_%02u%02u%02u_%u.bin", dir.c_str(),
+                 static_cast<unsigned>(st.wHour), static_cast<unsigned>(st.wMinute),
+                 static_cast<unsigned>(st.wSecond), frame);
+    HANDLE h = CreateFileW(path, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) {
+        path[0] = 0;
+        return false;
+    }
+    struct Header {
+        char     magic[8];
+        uint32_t version;
+        uint32_t frame;
+        uint32_t poolBytes;
+        uint32_t sceneBytes;
+        uint32_t recordBytes;
+        uint32_t records;
+    };
+    static_assert(sizeof(Header) == 32, "the reader assumes a 32-byte header");
+    Header hd = {{'E', 'D', 'V', 'R', 'P', 'O', 'O', 'L'}, 1u, frame, poolBytes, sceneBytes,
+                 kRecordBytes, poolBytes / kRecordBytes};
+    DWORD w = 0;
+    bool ok = WriteFile(h, &hd, sizeof(hd), &w, nullptr) != 0;
+    if (ok && sceneBytes) ok = WriteFile(h, scene, sceneBytes, &w, nullptr) != 0;
+    if (ok) ok = WriteFile(h, pool, poolBytes, &w, nullptr) != 0;
+    CloseHandle(h);
+    return ok;
 }
 
 // The byte histogram as ranges: which bytes of a changed record change in
@@ -507,19 +565,36 @@ void report() {
     g_byteHistN = 0;
 }
 
+bool makeStaging(ID3D11Device* dev, uint32_t bytes, ID3D11Buffer** out) {
+    D3D11_BUFFER_DESC bd{};
+    bd.ByteWidth = bytes;
+    bd.Usage = D3D11_USAGE_STAGING;
+    bd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    return SUCCEEDED(dev->CreateBuffer(&bd, nullptr, out)) && *out;
+}
+
 bool ensureSlot(ID3D11DeviceContext* ctx, Slot& s) {
-    if (s.staging && s.bytes == g_poolBytes) return true;
-    if (s.staging) { s.staging->Release(); s.staging = nullptr; }
+    const bool poolOk = s.staging && s.bytes == g_poolBytes;
+    const bool sceneOk = (!g_scene && !s.sceneStaging) || (s.sceneStaging && s.sceneBytes == g_sceneBytes);
+    if (poolOk && sceneOk) return true;
     ID3D11Device* dev = nullptr;
     ctx->GetDevice(&dev);
     if (!dev) return false;
-    D3D11_BUFFER_DESC bd{};
-    bd.ByteWidth = g_poolBytes;
-    bd.Usage = D3D11_USAGE_STAGING;
-    bd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-    const bool ok = SUCCEEDED(dev->CreateBuffer(&bd, nullptr, &s.staging)) && s.staging;
+    bool ok = true;
+    if (!poolOk) {
+        if (s.staging) { s.staging->Release(); s.staging = nullptr; }
+        ok = makeStaging(dev, g_poolBytes, &s.staging);
+        s.bytes = ok ? g_poolBytes : 0;
+    }
+    if (ok && !sceneOk) {
+        if (s.sceneStaging) { s.sceneStaging->Release(); s.sceneStaging = nullptr; }
+        s.sceneBytes = 0;
+        // The scene block is a want, not a need: a pair without it still diffs.
+        if (g_scene && g_sceneBytes && makeStaging(dev, g_sceneBytes, &s.sceneStaging)) {
+            s.sceneBytes = g_sceneBytes;
+        }
+    }
     dev->Release();
-    s.bytes = ok ? g_poolBytes : 0;
     return ok;
 }
 
@@ -528,6 +603,7 @@ void issueCopy(ID3D11DeviceContext* ctx, bool keep) {
         if (s.inUse) continue;
         if (!ensureSlot(ctx, s)) { ++g_skipped; return; }
         ctx->CopyResource(s.staging, g_pool);
+        if (s.sceneStaging && g_scene) ctx->CopyResource(s.sceneStaging, g_scene);
         s.frame = g_frame;
         s.inUse = true;
         s.keep = keep;
@@ -555,17 +631,48 @@ void poll(ID3D11DeviceContext* ctx) {
         }
         if (FAILED(hr) || !m.pData) { s->inUse = false; ++g_skipped; continue; }
         const uint8_t* bytes = static_cast<const uint8_t*>(m.pData);
+        // The scene block's copy was issued right after the pool's, so it is
+        // done when the pool's is; a refusal just means a dump without it.
+        const uint8_t* scene = nullptr;
+        uint32_t sceneBytes = 0;
+        D3D11_MAPPED_SUBRESOURCE ms{};
+        if (s->sceneStaging &&
+            SUCCEEDED(ctx->Map(s->sceneStaging, 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &ms)) &&
+            ms.pData) {
+            scene = static_cast<const uint8_t*>(ms.pData);
+            sceneBytes = s->sceneBytes;
+        }
         if (s->keep) {
             g_keep.assign(bytes, bytes + s->bytes);
+            g_keepScene.assign(scene, scene + sceneBytes);
             g_keepFrame = s->frame;
             g_keepValid = true;
         } else if (g_keepValid && g_keepFrame + 1 == s->frame && g_keep.size() == s->bytes) {
             diffPair(g_keep.data(), bytes, s->bytes);
+            if (g_dumps < kDumpMax && dueMs(g_dumpMs, kDumpEveryMs)) {
+                g_dumpMs = stampMs();
+                ++g_dumps;
+                wchar_t pa[MAX_PATH], pb[MAX_PATH];
+                const bool okA = writeDump(g_keep.data(), static_cast<uint32_t>(g_keep.size()),
+                                           g_keepScene.data(), static_cast<uint32_t>(g_keepScene.size()),
+                                           g_keepFrame, pa, MAX_PATH);
+                const bool okB = writeDump(bytes, s->bytes, scene, sceneBytes, s->frame, pb, MAX_PATH);
+                Log::get().note(
+                    "object probe: the pair of frames %u and %u is on disk for the desk -- %ls and "
+                    "%ls (each a 32-byte header, the scene block's %u bytes from VS b%u, then the "
+                    "pool's %u bytes; tools/pool_pair.py reads them)%s. At most %u pairs a session, "
+                    "one every %u s; the write may show as one long frame.",
+                    g_keepFrame, s->frame, okA ? pa : L"(not written)", okB ? pb : L"(not written)",
+                    sceneBytes, kSceneSlot, s->bytes,
+                    (okA && okB) ? "" : " -- a write FAILED, the directory may be unwritable",
+                    kDumpMax, static_cast<unsigned>(kDumpEveryMs / 1000));
+            }
             g_keepValid = false;
         } else {
             ++g_skipped;
             g_keepValid = false;
         }
+        if (scene) ctx->Unmap(s->sceneStaging, 0);
         ctx->Unmap(s->staging, 0);
         s->inUse = false;
     }
@@ -644,6 +751,23 @@ void objectProbeOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t instance
                 }
             } else {
                 buf->Release();
+            }
+            // The scene block bound with the pool on the same draw, for the
+            // dumps: cb1[275] is the camera in the record's frame (the game's
+            // own shader subtracts it from the record's position), so a pair
+            // on disk carries the frame's own motion beside the records'.
+            ID3D11Buffer* scene = nullptr;
+            guardedBudget(g_budget, [&] { ctx->VSGetConstantBuffers(kSceneSlot, 1, &scene); });
+            if (scene) {
+                if (scene != g_scene) {
+                    if (g_scene) g_scene->Release();
+                    g_scene = scene;   // the Get's reference is the one held
+                    D3D11_BUFFER_DESC sd{};
+                    scene->GetDesc(&sd);
+                    g_sceneBytes = sd.ByteWidth;
+                } else {
+                    scene->Release();
+                }
             }
             g_checksLeft = 0;
             g_checkMs = stampMs();
