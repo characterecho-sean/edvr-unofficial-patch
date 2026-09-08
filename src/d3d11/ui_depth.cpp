@@ -68,6 +68,7 @@ FaultBudget g_budget("uiDepth", 5);
 
 bool     g_keyOn = false;      // fix.ui_depth = on
 bool     g_passOn = false;     // fix.temporal_aa is not off
+bool     g_trained = false;    // ...and it is NVIDIA's history, which reads the mask
 bool     g_on = false;         // both
 bool     g_stoodDown = false;
 bool     g_announced = false;
@@ -903,6 +904,9 @@ void uiDepthConfigure(Config& cfg) {
     // configure because fix.temporal_aa is live (depth_probe.cpp's rule).
     const std::string aa = cfg.getString("fix.temporal_aa", "off");
     g_passOn = !aa.empty() && _stricmp(aa.c_str(), "off") != 0;
+    // Only NVIDIA's history reads a bias mask; the pass's own does not, so
+    // marking one under temporal_aa = on would be draws for nothing.
+    g_trained = _stricmp(aa.c_str(), "dlaa") == 0 || _stricmp(aa.c_str(), "dlss") == 0;
     // The direct list: the flight HUD built in, the ini's additions after.
     g_familyCount = 0;
     g_families[g_familyCount++] = kFlightHud;
@@ -951,7 +955,7 @@ void uiDepthConfigure(Config& cfg) {
         g_alphaFloor = a;
     }
     {
-        float r = cfg.getFloat("advanced.ui_depth_reactive", 0.0f);
+        float r = cfg.getFloat("advanced.ui_depth_reactive", 0.5f);
         if (!(r >= 0.0f)) r = 0.0f;
         if (r > 1.0f) r = 1.0f;
         if (r != g_reactive) {
@@ -1105,7 +1109,7 @@ bool uiDepthOnEyeDraw(ID3D11DeviceContext* ctx) {
         // The reactive mask, when one is asked for and this family's pixel
         // stage has a coverage shader: a second draw marks it. The depth
         // is already written in place by the game's own draw.
-        if (g_reactive > 0.0f) {
+        if (g_reactive > 0.0f && g_trained) {
             const uint64_t ph = boundPsHash(ctx);
             DepthShader* shader = depthShaderFor(ctx, ph);
             ResourceInfo rt;
@@ -1184,7 +1188,7 @@ bool uiDepthOnEyeDraw(ID3D11DeviceContext* ctx) {
             g_rebindH = rt.b;
         }
     }
-    g_wantMask = g_reactive > 0.0f && g_drawEye >= 0;
+    g_wantMask = g_reactive > 0.0f && g_trained && g_drawEye >= 0;
     g_mode = Mode::kReissue;
     g_reissueShader = shader;
     noteFamily(h, ph, scenePair ? "interface projection; its depth written by the "
