@@ -2,6 +2,7 @@
 
 #include <windows.h>
 
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 
@@ -105,20 +106,45 @@ void* menuDoorTreat(vr::EVREye eye, void* handle, const vr::VRTextureBounds_t* b
     }
     if (!s.fn) return nullptr;
 
-    uint32_t seq = 0;
-    float anchor[12];
-    if (!menuAnchor(anchor, &seq)) {
-        if (!s.noAnchorNoted) {
-            s.noAnchorNoted = true;
-            Log::get().note("menu door: the panel is visible but no anchor has been published; "
-                            "nothing is drawn until one is.");
-        }
-        return nullptr;
+    float current[12];
+    for (int r = 0; r < 3; ++r) {
+        for (int c = 0; c < 4; ++c) current[r * 4 + c] = renderPose.m[r][c];
     }
-    if (seq != s.anchorSeq || !s.anchorValid) {
-        s.anchorSeq = seq;
-        memcpy(s.anchor, anchor, sizeof(anchor));
-        s.anchorValid = true;
+
+    // The anchor: head-locked, built from THIS frame's pose turned by the
+    // overlay's yaw and pitch (R * Ry * Rx), or the world anchor the d3d11
+    // half published at summon.
+    float yaw = 0.0f, pitch = 0.0f;
+    float lockAnchor[12];
+    const float* anchorUsed = s.anchor;
+    if (menuHeadLock(&yaw, &pitch)) {
+        const float ty = yaw * 0.0174532925f, tp = pitch * 0.0174532925f;
+        const float cy = cosf(ty), sy = sinf(ty), cp = cosf(tp), sp = sinf(tp);
+        const float m[9] = {cy, sy * sp, sy * cp, 0.0f, cp, -sp, -sy, cy * sp, cy * cp};
+        for (int r = 0; r < 3; ++r) {
+            const float x = current[r * 4 + 0], y = current[r * 4 + 1], z = current[r * 4 + 2];
+            lockAnchor[r * 4 + 0] = x * m[0] + y * m[3] + z * m[6];
+            lockAnchor[r * 4 + 1] = x * m[1] + y * m[4] + z * m[7];
+            lockAnchor[r * 4 + 2] = x * m[2] + y * m[5] + z * m[8];
+            lockAnchor[r * 4 + 3] = current[r * 4 + 3];
+        }
+        anchorUsed = lockAnchor;
+    } else {
+        uint32_t seq = 0;
+        float anchor[12];
+        if (!menuAnchor(anchor, &seq)) {
+            if (!s.noAnchorNoted) {
+                s.noAnchorNoted = true;
+                Log::get().note("menu door: the panel is visible but no anchor has been published; "
+                                "nothing is drawn until one is.");
+            }
+            return nullptr;
+        }
+        if (seq != s.anchorSeq || !s.anchorValid) {
+            s.anchorSeq = seq;
+            memcpy(s.anchor, anchor, sizeof(anchor));
+            s.anchorValid = true;
+        }
     }
 
     float b4[4] = {0.0f, 0.0f, 1.0f, 1.0f};
@@ -136,10 +162,6 @@ void* menuDoorTreat(vr::EVREye eye, void* handle, const vr::VRTextureBounds_t* b
         }
     }
 
-    float current[12];
-    for (int r = 0; r < 3; ++r) {
-        for (int c = 0; c < 4; ++c) current[r * 4 + c] = renderPose.m[r][c];
-    }
     float eyeOff[3] = {e == 0 ? -kHalfIpd : kHalfIpd, 0.0f, 0.0f};
     float e2h[12];
     if (systemHookEyeToHead(eye, e2h)) {
@@ -148,7 +170,7 @@ void* menuDoorTreat(vr::EVREye eye, void* handle, const vr::VRTextureBounds_t* b
         eyeOff[2] = e2h[11];
     }
     float xf[12];
-    menuDoorXform(s.anchor, current, eyeOff, xf);
+    menuDoorXform(anchorUsed, current, eyeOff, xf);
 
     void* out = s.fn(handle, e, haveBounds ? b4 : nullptr, xf);
     if (!out) return nullptr;   // nothing to draw yet, or refused and said so

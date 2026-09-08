@@ -16,6 +16,7 @@
 
 #include "../../src/common/hotkey.h"
 #include "../../src/common/iniedit.h"
+#include "../../src/common/perf_math.h"
 #include "../../src/d3d11/input_gate.h"
 #include "../../src/d3d11/menu_panel.h"
 #include "../../src/openvr/menu_door.h"
@@ -234,6 +235,34 @@ void testIniWrite() {
     check(out == src, "write: merging a document with itself is a no-op");
 }
 
+// --- the Monitor page's statistics ------------------------------------------
+
+void testPerfStats() {
+    // 100 frames at 11.1 ms with one 40 ms hitch: the mean barely moves,
+    // the max is the hitch, and the 1% low IS the hitch.
+    float ms[100];
+    for (int i = 0; i < 100; ++i) ms[i] = 11.1f;
+    ms[37] = 40.0f;
+    const PerfStats s = perfStatsOf(ms, 100);
+    check(s.count == 100, "stats: every sample counted");
+    check(approx(s.avgMs, 11.389f, 0.01f), "stats: the mean carries the hitch at a hundredth");
+    check(approx(s.maxMs, 40.0f), "stats: the max is the hitch");
+    check(approx(s.p99Ms, 40.0f), "stats: the 1% low is the hitch when it is one frame in a hundred");
+    check(approx(s.p50Ms, 11.1f), "stats: the median is the steady frame");
+    // A stall past the cap is left out, so a loading screen does not own the mean.
+    ms[37] = 900.0f;
+    const PerfStats t = perfStatsOf(ms, 100);
+    check(t.count == 99 && approx(t.avgMs, 11.1f) && approx(t.maxMs, 11.1f),
+          "stats: a sample over the cap is dropped from every figure");
+    // Zeros (frames before the clock started) are dropped too.
+    ms[37] = 0.0f;
+    check(perfStatsOf(ms, 100).count == 99, "stats: a zero sample is not a frame");
+    check(perfStatsOf(nullptr, 5).count == 0 && perfStatsOf(ms, 0).count == 0,
+          "stats: nothing in, nothing out");
+    check(approx(perfFpsOf(11.1f), 90.09f, 0.01f) && perfFpsOf(0.0f) == 0.0f,
+          "stats: fps of a frame time, and none of nothing");
+}
+
 }  // namespace
 
 int main() {
@@ -245,6 +274,7 @@ int main() {
     testHitCurved();
     testXform();
     testIniWrite();
+    testPerfStats();
     if (g_fails) {
         printf("MENU TEST FAILED (%d)\n", g_fails);
         return 1;

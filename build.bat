@@ -274,7 +274,7 @@ cl.exe %CFLAGS% %NGXFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\common\frame_flag.cpp" ^
     "src\common\iat_hook.cpp" "src\common\iniedit.cpp" ^
     "src\d3d11\input_gate.cpp" "src\d3d11\menu.cpp" ^
-    "src\d3d11\menu_panel.cpp" ^
+    "src\d3d11\menu_panel.cpp" "src\d3d11\perf_monitor.cpp" ^
     "src\d3d11\d3d11_proxy.cpp" "src\d3d11\device_hook.cpp" ^
     "src\d3d11\exposure_fix.cpp" "src\d3d11\vscreen.cpp" ^
     "src\d3d11\glitch_frame.cpp" "src\d3d11\vscreen_res.cpp" ^
@@ -385,7 +385,7 @@ cl.exe %CFLAGS% /Fo"%OBJ%\openvr"\ ^
     "src\openvr\system_hook.cpp" "src\openvr\guard_crop.cpp" ^
     "src\openvr\supersample_resolve.cpp" ^
     "src\openvr\temporal_aa.cpp" ^
-    "src\openvr\sharpen.cpp" "src\openvr\menu_door.cpp" ^
+    "src\openvr\sharpen.cpp" "src\openvr\menu_door.cpp" "src\openvr\frame_timing.cpp" ^
     "src\openvr\early_session.cpp" "src\openvr\launch_centre.cpp" ^
     "src\openvr\gaze_probe.cpp" ^
     "src\d3d11\elite_binds.cpp"

@@ -153,12 +153,14 @@ void layout(const MenuContent& c, std::vector<Op>& ops, std::vector<LineRect>& l
     const int cap = c.capPx;
     const int W = c.widthPx;
     const int pad = cap * 8 / 10;
-    const int rowPitch = cap * 2;
+    const int rowPitch = c.compact ? cap * 17 / 10 : cap * 2;
     const int tabH = c.toast ? 0 : cap * 24 / 10;
     const int hintH = c.toast ? 0 : cap * 34 / 10;   // two lines of hint
     const int footH = c.toast ? 0 : cap * 16 / 10;
+    const int graphH = c.graphCount > 0 ? cap * 40 / 10 : 0;
     const int rows = c.lineCount;
-    const int H = pad + tabH + rows * rowPitch + (c.toast ? cap * 2 / 10 : 0) + hintH + footH + pad;
+    const int H = pad + tabH + rows * rowPitch + (c.toast ? cap * 2 / 10 : 0) + graphH + hintH +
+                  footH + pad;
     *outH = H;
 
     // Background.
@@ -250,6 +252,58 @@ void layout(const MenuContent& c, std::vector<Op>& ops, std::vector<LineRect>& l
             }
         }
         y += rowPitch;
+    }
+    if (c.graphCount > 0) {
+        // The frame-time strip: one bar per frame, oldest left, against a
+        // scale of twice the display's budget, with the budget drawn as a
+        // line. Green within budget, amber over it, red at twice it.
+        const int gx0 = pad, gx1 = W - pad;
+        const int gy0 = y + cap / 2, gy1 = y + graphH - cap / 4;
+        {
+            Op bg;
+            bg.rect = {gx0, gy0, gx1, gy1};
+            bg.rgb = Rgb{0, 0, 0};
+            bg.alpha = 0.35f;
+            ops.push_back(bg);
+        }
+        const float scale = c.graphBudgetMs > 0.0f ? 2.0f * c.graphBudgetMs : 22.2f;
+        const int   plotH = gy1 - gy0;
+        const float barW = static_cast<float>(gx1 - gx0) / static_cast<float>(c.graphCount);
+        for (int i = 0; i < c.graphCount; ++i) {
+            const float ms = c.graph[i];
+            if (!(ms > 0.0f)) continue;
+            float frac = ms / scale;
+            if (frac > 1.0f) frac = 1.0f;
+            const int h = static_cast<int>(frac * plotH + 0.5f);
+            Op b;
+            b.rect = {gx0 + static_cast<int>(i * barW), gy1 - h,
+                      gx0 + static_cast<int>((i + 1) * barW) - 1, gy1};
+            if (b.rect.right <= b.rect.left) b.rect.right = b.rect.left + 1;
+            b.rgb = ms > 2.0f * c.graphBudgetMs   ? Rgb{255, 90, 70}
+                    : ms > c.graphBudgetMs * 1.02f ? Rgb{255, 170, 60}
+                                                   : Rgb{110, 200, 120};
+            b.alpha = 0.9f;
+            ops.push_back(b);
+        }
+        {
+            Op line;
+            const int ly = gy1 - static_cast<int>(0.5f * plotH + 0.5f);
+            line.rect = {gx0, ly, gx1, ly + (cap / 12 > 0 ? cap / 12 : 1)};
+            line.rgb = kLabel;
+            line.alpha = 0.5f;
+            ops.push_back(line);
+        }
+        if (c.graphLabel[0]) {
+            Op t;
+            t.text = true;
+            t.str = widen(c.graphLabel);
+            t.rect = {gx0 + cap / 3, gy0, gx1, gy0 + cap * 14 / 10};
+            t.align = DT_LEFT;
+            t.font = Font::Small;
+            t.rgb = kFooter;
+            ops.push_back(t);
+        }
+        y += graphH;
     }
     if (!c.toast) {
         if (c.hint[0]) {
@@ -399,6 +453,7 @@ cbuffer C : register(b0) {
     int2   outSize;
     int    flipV;      // the submit's rows run bottom-up
     int    linearOut;  // the frame is linear light: linearise the panel
+    int4   box;        // the output pixels this dispatch covers (x1, y1 exclusive)
     float4 tans;       // left, right, top, bottom tangent magnitudes
     float4 m0;         // current-head -> anchor rotation rows; .w = origin
     float4 m1;
@@ -410,8 +465,9 @@ float3 toLinear(float3 c) {
     return c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4);
 }
 [numthreads(8, 8, 1)]
-void main(uint3 id : SV_DispatchThreadID) {
-    if (id.x >= (uint)outSize.x || id.y >= (uint)outSize.y) return;
+void main(uint3 tid : SV_DispatchThreadID) {
+    uint2 id = uint2(box.x + tid.x, box.y + tid.y);
+    if (id.x >= (uint)box.z || id.y >= (uint)box.w) return;
     float4 src = S.Load(int3(region.x + id.x, region.y + id.y, 0));
     float u = (id.x + 0.5) / outSize.x;
     float v = (id.y + 0.5) / outSize.y;
@@ -466,6 +522,7 @@ struct Params {
     int32_t outSize[2];
     int32_t flipV;
     int32_t linearOut;
+    int32_t box[4];
     float   tans[4];
     float   m0[4];
     float   m1[4];
@@ -506,7 +563,134 @@ bool     g_fmtNoted = false;
 bool     g_firstNoted = false;
 uint32_t g_draws = 0;
 
+// The GPU price, the sharpen pass's ring: a timestamp pair around the copy
+// and the dispatch, never awaited, averaged and said once after enough of
+// them -- so the overlay's cost is a number in the log, not a belief.
+struct QuerySlot {
+    ID3D11Query* disjoint = nullptr;
+    ID3D11Query* begin = nullptr;
+    ID3D11Query* end = nullptr;
+    bool         inUse = false;
+};
+constexpr int kQueryRing = 8;
+QuerySlot g_qring[kQueryRing];
+uint32_t  g_timeCount = 0;
+double    g_timeSum = 0.0;
+double    g_timeMax = 0.0;
+bool      g_timeLogged = false;
+std::atomic<float> g_gpuMsAvg{0.0f};
+uint32_t  g_lastBoxW = 0, g_lastBoxH = 0;
+
 FaultBudget g_budget("menuPanel", 8);
+
+void releaseQueries() {
+    for (QuerySlot& q : g_qring) {
+        if (q.disjoint) { q.disjoint->Release(); q.disjoint = nullptr; }
+        if (q.begin) { q.begin->Release(); q.begin = nullptr; }
+        if (q.end) { q.end->Release(); q.end = nullptr; }
+        q.inUse = false;
+    }
+}
+
+void pollQueries(ID3D11DeviceContext* ctx) {
+    for (QuerySlot& q : g_qring) {
+        if (!q.inUse) continue;
+        D3D11_QUERY_DATA_TIMESTAMP_DISJOINT dj{};
+        if (ctx->GetData(q.disjoint, &dj, sizeof(dj), D3D11_ASYNC_GETDATA_DONOTFLUSH) != S_OK) continue;
+        UINT64 t0 = 0, t1 = 0;
+        const HRESULT h0 = ctx->GetData(q.begin, &t0, sizeof(t0), D3D11_ASYNC_GETDATA_DONOTFLUSH);
+        const HRESULT h1 = ctx->GetData(q.end, &t1, sizeof(t1), D3D11_ASYNC_GETDATA_DONOTFLUSH);
+        q.inUse = false;
+        if (dj.Disjoint || h0 != S_OK || h1 != S_OK || dj.Frequency == 0) continue;
+        const double ms = static_cast<double>(t1 - t0) * 1000.0 / static_cast<double>(dj.Frequency);
+        ++g_timeCount;
+        g_timeSum += ms;
+        if (ms > g_timeMax) g_timeMax = ms;
+        g_gpuMsAvg.store(static_cast<float>(g_timeSum / g_timeCount));
+    }
+    if (!g_timeLogged && g_timeCount >= 240) {
+        g_timeLogged = true;
+        Log::get().note("menu panel: measured %.3f ms per eye on average (max %.3f) -- the region "
+                        "copy plus the composite over the panel's %ux%u pixel box. That is the "
+                        "overlay's whole GPU price while it is up.",
+                        g_timeSum / g_timeCount, g_timeMax, g_lastBoxW, g_lastBoxH);
+    }
+}
+
+int acquireQuery(ID3D11Device* dev) {
+    for (int i = 0; i < kQueryRing; ++i) {
+        QuerySlot& q = g_qring[i];
+        if (q.inUse) continue;
+        if (!q.disjoint) {
+            D3D11_QUERY_DESC qd{};
+            qd.Query = D3D11_QUERY_TIMESTAMP_DISJOINT;
+            D3D11_QUERY_DESC qt{};
+            qt.Query = D3D11_QUERY_TIMESTAMP;
+            if (FAILED(dev->CreateQuery(&qd, &q.disjoint)) || FAILED(dev->CreateQuery(&qt, &q.begin)) ||
+                FAILED(dev->CreateQuery(&qt, &q.end))) {
+                if (q.disjoint) { q.disjoint->Release(); q.disjoint = nullptr; }
+                if (q.begin) { q.begin->Release(); q.begin = nullptr; }
+                if (q.end) { q.end->Release(); q.end = nullptr; }
+                return -1;
+            }
+        }
+        return i;
+    }
+    return -1;
+}
+
+// The panel's footprint in this eye, in region pixels, from its corners
+// (nine points along the top and bottom edges, so a curved panel's bulge
+// is inside it) projected through the eye's frustum. False when the panel
+// is behind the eye or entirely outside it: nothing to draw here.
+bool panelBox(const float* xf, const float* tans, float dist, float curve, float halfW, float halfH,
+              uint32_t regionW, uint32_t regionH, bool flipV, int32_t box[4]) {
+    float minU = 1e9f, maxU = -1e9f, minV = 1e9f, maxV = -1e9f;
+    const float lt = tans[0], rt = tans[1], top = tans[2], bot = tans[3];
+    for (int i = 0; i <= 8; ++i) {
+        const float t = -1.0f + 2.0f * static_cast<float>(i) / 8.0f;
+        float qx, qz;
+        if (curve > 0.005f) {
+            const float R = dist / curve;
+            const float th = t * halfW / R;
+            qx = R * sinf(th);
+            qz = (R - dist) - R * cosf(th);
+        } else {
+            qx = t * halfW;
+            qz = -dist;
+        }
+        for (int s = -1; s <= 1; s += 2) {
+            const float q[3] = {qx - xf[9], static_cast<float>(s) * halfH - xf[10], qz - xf[11]};
+            // Anchor -> eye: D transposed.
+            const float vx = xf[0] * q[0] + xf[3] * q[1] + xf[6] * q[2];
+            const float vy = xf[1] * q[0] + xf[4] * q[1] + xf[7] * q[2];
+            const float vz = xf[2] * q[0] + xf[5] * q[1] + xf[8] * q[2];
+            if (vz > -1e-3f) return false;   // at or behind the eye: draw the whole region instead
+            const float tx = vx / -vz, ty = vy / -vz;
+            const float u = (tx + lt) / (lt + rt);
+            float v = (top - ty) / (top + bot);
+            if (flipV) v = 1.0f - v;
+            if (u < minU) minU = u;
+            if (u > maxU) maxU = u;
+            if (v < minV) minV = v;
+            if (v > maxV) maxV = v;
+        }
+    }
+    const float W = static_cast<float>(regionW), H = static_cast<float>(regionH);
+    int32_t x0 = static_cast<int32_t>(floorf(minU * W)) - 2;
+    int32_t x1 = static_cast<int32_t>(ceilf(maxU * W)) + 2;
+    int32_t y0 = static_cast<int32_t>(floorf(minV * H)) - 2;
+    int32_t y1 = static_cast<int32_t>(ceilf(maxV * H)) + 2;
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 > static_cast<int32_t>(regionW)) x1 = static_cast<int32_t>(regionW);
+    if (y1 > static_cast<int32_t>(regionH)) y1 = static_cast<int32_t>(regionH);
+    box[0] = x0;
+    box[1] = y0;
+    box[2] = x1;
+    box[3] = y1;
+    return true;
+}
 
 void failOnce(const char* what) {
     if (g_failNoted) return;
@@ -714,27 +898,57 @@ void* compositeInner(void* srcTex, int eye, const float* bounds, const float* xf
             top = bot = (outer + inner) * 0.5f * (static_cast<float>(regionH) / static_cast<float>(regionW));
         }
         Params p{};
-        if (viaCopy) {
-            D3D11_BOX box{};
-            box.left = region[0];
-            box.top = region[1];
-            box.right = region[2];
-            box.bottom = region[3];
-            box.back = 1;
-            ctx->CopySubresourceRegion(e.copyTex, 0, 0, 0, 0, src, 0, &box);
-            p.region[2] = static_cast<int32_t>(regionW);
-            p.region[3] = static_cast<int32_t>(regionH);
-        } else {
-            for (int i = 0; i < 4; ++i) p.region[i] = static_cast<int32_t>(region[i]);
-        }
-        p.outSize[0] = static_cast<int32_t>(regionW);
-        p.outSize[1] = static_cast<int32_t>(regionH);
-        p.flipV = flipV ? 1 : 0;
-        p.linearOut = linear ? 1 : 0;
         p.tans[0] = eye == 0 ? outer : inner;
         p.tans[1] = eye == 0 ? inner : outer;
         p.tans[2] = top;
         p.tans[3] = bot;
+        // Where the panel lands in this eye. Outside it entirely: forward
+        // the frame untouched, nothing copied, nothing dispatched. Behind
+        // the eye (a look away from a world-anchored panel): the whole
+        // region, which the shader answers pixel by pixel.
+        int32_t box[4] = {0, 0, static_cast<int32_t>(regionW), static_cast<int32_t>(regionH)};
+        const float halfH = g.halfW * g_panelAspect.load();
+        if (panelBox(xf, p.tans, g.dist, g.curve, g.halfW, halfH, regionW, regionH, flipV, box) &&
+            (box[2] <= box[0] || box[3] <= box[1])) {
+            if (ctx) ctx->Release();
+            if (dev) dev->Release();
+            src->Release();
+            return nullptr;
+        }
+        pollQueries(ctx);
+        const int qs = acquireQuery(dev);
+        if (qs >= 0) {
+            ctx->Begin(g_qring[qs].disjoint);
+            ctx->End(g_qring[qs].begin);
+        }
+        D3D11_BOX rb{};
+        rb.left = region[0];
+        rb.top = region[1];
+        rb.right = region[2];
+        rb.bottom = region[3];
+        rb.back = 1;
+        if (viaCopy) {
+            ctx->CopySubresourceRegion(e.copyTex, 0, 0, 0, 0, src, 0, &rb);
+            p.region[2] = static_cast<int32_t>(regionW);
+            p.region[3] = static_cast<int32_t>(regionH);
+            // The dispatch fills the whole output from the copy.
+            box[0] = 0;
+            box[1] = 0;
+            box[2] = static_cast<int32_t>(regionW);
+            box[3] = static_cast<int32_t>(regionH);
+        } else {
+            // The region lands in the output by copy; only the panel's box
+            // is then composited, reading the source through its view.
+            ctx->CopySubresourceRegion(e.outTex, 0, 0, 0, 0, src, 0, &rb);
+            for (int i = 0; i < 4; ++i) p.region[i] = static_cast<int32_t>(region[i]);
+        }
+        for (int i = 0; i < 4; ++i) p.box[i] = box[i];
+        g_lastBoxW = static_cast<uint32_t>(box[2] - box[0]);
+        g_lastBoxH = static_cast<uint32_t>(box[3] - box[1]);
+        p.outSize[0] = static_cast<int32_t>(regionW);
+        p.outSize[1] = static_cast<int32_t>(regionH);
+        p.flipV = flipV ? 1 : 0;
+        p.linearOut = linear ? 1 : 0;
         p.m0[0] = xf[0]; p.m0[1] = xf[1]; p.m0[2] = xf[2]; p.m0[3] = xf[9];
         p.m1[0] = xf[3]; p.m1[1] = xf[4]; p.m1[2] = xf[5]; p.m1[3] = xf[10];
         p.m2[0] = xf[6]; p.m2[1] = xf[7]; p.m2[2] = xf[8]; p.m2[3] = xf[11];
@@ -772,7 +986,13 @@ void* compositeInner(void* srcTex, int eye, const float* bounds, const float* xf
             ctx->CSSetSamplers(0, 1, &g_samp);
             ctx->CSSetShaderResources(0, 2, setSrv);
             ctx->CSSetUnorderedAccessViews(0, 1, &e.outUav, nullptr);
-            ctx->Dispatch((regionW + 7) / 8, (regionH + 7) / 8, 1);
+            ctx->Dispatch((static_cast<UINT>(box[2] - box[0]) + 7) / 8,
+                          (static_cast<UINT>(box[3] - box[1]) + 7) / 8, 1);
+            if (qs >= 0) {
+                ctx->End(g_qring[qs].end);
+                ctx->End(g_qring[qs].disjoint);
+                g_qring[qs].inUse = true;
+            }
 
             ctx->CSSetShaderResources(0, 2, nullSrv);
             ctx->CSSetUnorderedAccessViews(0, 1, &nullUav, nullptr);
@@ -802,6 +1022,12 @@ void* compositeInner(void* srcTex, int eye, const float* bounds, const float* xf
                     viaCopy ? " (the source was copied out first: it refuses a shader view)" : "");
             }
         } else {
+            if (qs >= 0) {
+                // A query begun and never ended would wedge its slot.
+                ctx->End(g_qring[qs].end);
+                ctx->End(g_qring[qs].disjoint);
+                g_qring[qs].inUse = true;
+            }
             failOnce("the parameter buffer could not be written");
         }
     }
@@ -922,12 +1148,13 @@ int menuPanelLineAt(float u, float v) {
     return -1;
 }
 
-bool menuPanelStats(int* w, int* h, double* lastMs) {
+bool menuPanelStats(int* w, int* h, double* lastMs, float* gpuMs) {
     std::lock_guard<std::mutex> lock(g_w.m);
     if (g_w.liveW == 0) return false;
     if (w) *w = g_w.liveW;
     if (h) *h = g_w.liveH;
     if (lastMs) *lastMs = g_w.lastMs;
+    if (gpuMs) *gpuMs = g_gpuMsAvg.load();
     return true;
 }
 
@@ -940,6 +1167,7 @@ void menuPanelShutdown() {
     if (g_w.started && g_w.thread.joinable()) g_w.thread.join();
     g_w.started = false;
     for (EyeState& e : g_eye) releaseEye(e);
+    releaseQueries();
     if (g_panelSrv) { g_panelSrv->Release(); g_panelSrv = nullptr; }
     if (g_panelTex) { g_panelTex->Release(); g_panelTex = nullptr; }
     if (g_samp) { g_samp->Release(); g_samp = nullptr; }

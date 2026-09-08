@@ -25,6 +25,15 @@ keys in `[advanced]` and `[experimental]` do not yet say when they apply,
 and rewriting 61 comments was not this change's job), and `iniedit` moved
 to `src/common` in namespace `edvr`. Every Phase 0 gate is still open.*
 
+*Flown 2026-09-07, the same evening, on the Pimax Crystal Super under
+SteamVR: the panel appears where you look and holds still, the keys are
+private, the rows write the ini. Two changes from that flight, both below:
+head-aim fought the arrow keys and is off by default now (`menu.aim =
+keys`), and the frame-time line left the Status page for a **Monitor
+page** with fpsVR's readout and a frame-time strip, plus an optional
+head-locked readout while the menu is closed (`menu.fps_overlay`), the
+toolkit's overlay.*
+
 ## The ask
 
 Sean, 2026-09-07: an in-game menu that lets players switch settings
@@ -264,11 +273,13 @@ Head-aim and keys coexist; whichever moved last owns the highlight.
 **Head-aim.** The head ray (from `headPose()`, the raw pose the openvr half
 publishes every frame) is intersected with the panel in its anchor frame;
 the row under it highlights, with hitboxes one full row pitch tall and a
-hysteresis of a third of a row before the highlight moves, so a resting
-head never flickers it (gate G6 measures the numbers). After a key press
-head-aim is parked until the ray leaves the highlighted row's hitbox by
-more than one row, so pressing Down is not undone by a head still pointing
-at the old row. `menu.aim = head | keys | both` (default both).
+hysteresis before the highlight moves, so a resting head never flickers it.
+After a key press head-aim is parked until the ray leaves the highlighted
+row's hitbox by more than one row. `menu.aim = keys | head | both`.
+**Flown 2026-09-07: `both` fought the keys** -- a head that drifts back to
+the row it was reading re-selects it under a hand that just moved away --
+so the default is `keys`, and head-aim is an opt-in for a player who wants
+it (gate G6's numbers would tune `both`, and are still unmeasured).
 
 **Dwell-to-select** is off by default and stays a phase C item: it needs
 an aim ray steadier than a head, which means the eye tracker, and
@@ -299,15 +310,57 @@ and where it applies, the measured cost or the restart badge.
 2. **Fixes.** Every other `[fix]` row tagged `menu`, under the ini's own
    headings ("When the eyes disagree", ...), scrolling. Restart rows are
    shown, badged, and editable: the badge is the point of showing them.
-3. **Status.** Read-only, the README's "checking it worked" as a live
+3. **Monitor.** fpsVR's readout, gathered as cheaply as it can be, and
+   where each number comes from:
+   - frame rate, frame time, the 1% low (the 99th-percentile frame time)
+     and the max, over the last ten seconds, from EDVR's own
+     Present-to-Present clock, ringed every frame;
+   - the app's GPU time and the compositor's, the CPU frame interval,
+     dropped frames (the last ten seconds and since launch) and the
+     reprojected and motion-smoothed shares, from **the compositor's own
+     frame timing** -- `IVRCompositor::GetFrameTiming`, slot 8 of every
+     generation this build knows, read once a frame at the WaitGetPoses
+     boundary by the openvr half (`src/openvr/frame_timing.cpp`) and
+     published on the channel; the first answer is validated before any
+     is believed, OpenComposite's refusal is recognised, and
+     `advanced.compositor_timing = off` turns the read off;
+   - the display's rate and frame budget, and the eye size;
+   - CPU load (system and Elite's share), RAM, VRAM through
+     `IDXGIAdapter3::QueryVideoMemoryInfo`, and GPU load and temperature
+     through NvAPI where an NVIDIA driver is present (elsewhere "n/a" --
+     fpsVR's AMD path is a vendor library this project does not carry);
+   - EDVR's own passes' measured cost, from the totals they already keep;
+   - a **frame-time strip** of the last 120 frames against the budget
+     line, green within it, amber over it, red at twice it.
+   Its cost, by construction: the ring is one clock read and a store per
+   frame; the compositor read is one small copy per frame; the load and
+   memory samplers run once a second and ONLY while the page is showing;
+   the page re-rasterises at 4 Hz on the worker thread. Frame time lives
+   here now and not on Status.
+4. **Status.** Read-only, the README's "checking it worked" as a live
    panel, and the page a support thread will ask for: EDVR's version and
    the game build; the runtime under the proxy (Valve's SteamVR,
    OpenComposite, or unknown, by the launch centre's export test); eye
    texture size and tangents; guard stage; temporal mode and whether
-   NVIDIA's library loaded; frame time and long frames from the pace
-   machinery; the gate's state (which doors are armed, which the game has
-   reached, keys private or shared); the list of changes waiting for a
-   restart; and the result of the last ini write.
+   NVIDIA's library loaded; the gate's state (which doors are armed, which
+   the game has reached, keys private or shared); this panel's own price
+   (bitmap size, raster time, the composite's measured GPU time per eye);
+   the list of changes waiting for a restart; and the result of the last
+   ini write.
+
+**The overlay** (`menu.fps_overlay = on`, off by default): a one-line
+readout -- frames per second and frame time over the last second, the
+app's GPU time, frames dropped in the last ten seconds -- shown while the
+menu is CLOSED and pinned to the head, the toolkit's overlay, because that
+is what was asked for and a gauge you carry has its uses. `fps_overlay_yaw`
+and `fps_overlay_pitch` put it where you can stop seeing it (default 16
+degrees below the look). The lock has no lag: the door builds its anchor
+from each frame's own pose (`setMenuHeadLock` on the channel) rather than
+from a value published a frame earlier. Its price is the panel's: one
+region copy plus a composite over the readout's own pixel box per eye per
+frame, timed by a timestamp pair and printed in the graphics log after 240
+frames (`menu panel: measured ... ms per eye`), so the number is measured
+and not believed.
 
 With `menu.developer = on`, three more pages and two changes everywhere:
 the ini's dotted key name appears under each label, and each row's hint
@@ -396,14 +449,17 @@ the door first takes the per-eye copy the resubmit shadow already knows how
 to make, draws on the copy, and submits that. The game's textures are never
 drawn on.
 
-**The draw.** One alpha-blended draw per eye of a curved strip
-(`panel_curve`'s grid generator, curve `menu.curve` default 0.2), through
-an asymmetric-frustum projection built from the published tangents (the
-intro panel builds the same), sampling the panel bitmap. No depth: the
-panel draws over the cockpit like the game's own HUD does. A 150 ms fade in
-and out is the only animation. The shader pair is embedded HLSL, compiled
-once and warmed on the first frame the way `fssTheaterWarm` is, so the
-first summon does not pay a compile at the door.
+**The draw** (as built): a compute pass in the FSS theater's shape rather
+than a quad -- per output pixel, the view ray from the published tangents
+is rotated into the anchor's frame and intersected with the panel, flat or
+on a cylinder (curve `menu.curve`, default 0.2), and the bitmap is blended
+over the frame's pixel. The eye's region is copied into an EDVR-owned
+texture and the dispatch covers only the panel's projected bounding box
+(nine points along its top and bottom edges, so a curved panel's bulge is
+inside it); a panel entirely outside an eye costs that eye nothing at all.
+No depth: the panel draws over the cockpit like the game's own HUD does. A
+150 ms fade in and out is the only animation. The shader is embedded HLSL,
+compiled on first use.
 
 **Type in degrees.** Cap height `menu.text_degrees` (default 1.1, gate G5
 measures it), row pitch twice that, the panel about 24 by 18 degrees. The
@@ -485,9 +541,14 @@ menu = F8
 # Live.
 keyboard = private
 
-# How the highlighted row is chosen: where your head points (head), the
-# arrow keys (keys), or whichever moved last (both). Live.
-aim = both
+# How the highlighted row is chosen: the arrow keys (keys), where your
+# head points (head), or whichever moved last (both). Live.
+aim = keys
+
+# The head-locked readout while the menu is closed, and where it sits.
+fps_overlay = off
+fps_overlay_yaw = 0
+fps_overlay_pitch = -16
 
 # Metres from your head to the panel, and how much it wraps toward you.
 # Live.

@@ -1,0 +1,220 @@
+#include "frame_timing.h"
+
+#include <windows.h>
+
+#include <cmath>
+#include <cstdint>
+#include <cstring>
+
+#include "../common/config.h"
+#include "../common/frame_flag.h"
+#include "../common/guard.h"
+#include "../common/log.h"
+#include "../common/timing.h"
+#include "openvr_min.h"
+#include "system_hook.h"
+
+namespace edvr {
+namespace {
+
+constexpr size_t kSlotGetFrameTiming = 8;
+constexpr size_t kSysSlotFloatProp = 22;
+constexpr int32_t kPropDisplayFrequency = 2002;
+
+typedef bool (*PFN_GetFrameTiming)(void* self, void* timing, uint32_t framesAgo);
+typedef float (*PFN_FloatProp)(void* self, uint32_t device, int32_t prop, int32_t* error);
+
+// Compositor_FrameTiming as openvr.h laid it out in the 1.0 era (176
+// bytes), with the two vsync counts the later layout appends (184). The
+// fields read are the ones both share.
+struct FrameTimingRaw {
+    uint32_t size;
+    uint32_t frameIndex;
+    uint32_t numFramePresents;
+    uint32_t numMisPresented;
+    uint32_t numDroppedFrames;
+    uint32_t reprojectionFlags;
+    double   systemTimeInSeconds;
+    float    preSubmitGpuMs;
+    float    postSubmitGpuMs;
+    float    totalRenderGpuMs;
+    float    compositorRenderGpuMs;
+    float    compositorRenderCpuMs;
+    float    compositorIdleCpuMs;
+    float    clientFrameIntervalMs;
+    float    presentCallCpuMs;
+    float    waitForPresentCpuMs;
+    float    submitFrameMs;
+    float    waitGetPosesCalledMs;
+    float    newPosesReadyMs;
+    float    newFrameReadyMs;
+    float    compositorUpdateStartMs;
+    float    compositorUpdateEndMs;
+    float    compositorRenderStartMs;
+    vr::TrackedDevicePose_t hmdPose;
+    uint32_t numVSyncsReadyForUse;
+    uint32_t numVSyncsToFirstView;
+};
+static_assert(offsetof(FrameTimingRaw, numVSyncsReadyForUse) == 176,
+              "the 1.0-era Compositor_FrameTiming is 176 bytes");
+static_assert(sizeof(FrameTimingRaw) == 184, "the later layout is 184 bytes");
+
+struct State {
+    bool     on = true;
+    bool     configured = false;
+    bool     standDown = false;
+    bool     armed = false;         // the first answer validated
+    uint32_t sizeUsed = 0;          // 176 or 184, once one worked
+    uint32_t lastIndex = 0;
+    uint32_t droppedTotal = 0;
+    uint32_t published = 0;
+    uint32_t refusals = 0;
+    uint32_t faults = 0;
+    float    hz = 0.0f;
+    uint64_t hzMs = 0;
+};
+State g_s;
+
+FaultBudget g_budget("frameTiming", 4);
+
+void standDown(const char* why) {
+    if (g_s.standDown) return;
+    g_s.standDown = true;
+    Log::get().note("compositor timing: STANDING DOWN -- %s. The Monitor page shows what it can "
+                    "measure itself (frame intervals) and leaves the compositor's columns blank.",
+                    why);
+}
+
+bool finite(float v) { return v == v && v <= 1.0e6f && v >= -1.0e6f; }
+
+// The headset's refresh, once a second through the system interface's
+// float-property slot (range-checked as predictDisplayPose checks it).
+void refreshHz() {
+    if (!dueMs(g_s.hzMs, 1000)) return;
+    g_s.hzMs = stampMs();
+    void* sys = systemInterfaceV012();
+    if (!sys) return;
+    if (systemInterfacePrefixV012() <= kSysSlotFloatProp) return;
+    void** vt = *reinterpret_cast<void***>(sys);
+    if (!vt || !vt[kSysSlotFloatProp]) return;
+    guarded("frameTiming/hz", [&] {
+        int32_t err = 0;
+        const float hz = reinterpret_cast<PFN_FloatProp>(vt[kSysSlotFloatProp])(
+            sys, vr::k_unTrackedDeviceIndex_Hmd, kPropDisplayFrequency, &err);
+        if (finite(hz) && hz >= 20.0f && hz <= 500.0f) g_s.hz = hz;
+    });
+}
+
+}  // namespace
+
+void frameTimingConfigure() {
+    State& s = g_s;
+    const std::string v = Config::get().getString("advanced.compositor_timing", "on");
+    const bool on = !(v == "off" || v == "0" || v == "false" || v == "no");
+    if (s.configured && on != s.on) {
+        Log::get().note("compositor timing: %s.", on ? "on" : "off");
+    }
+    s.on = on;
+    s.configured = true;
+}
+
+void frameTimingBoundary(void* iface, size_t prefix) {
+    State& s = g_s;
+    if (!s.on || s.standDown || !iface) return;
+    if (prefix <= kSlotGetFrameTiming) {
+        standDown("the compositor's table has too few entries for GetFrameTiming");
+        return;
+    }
+    void** vt = *reinterpret_cast<void***>(iface);
+    if (!vt || !vt[kSlotGetFrameTiming]) {
+        standDown("the GetFrameTiming slot is empty");
+        return;
+    }
+    refreshHz();
+
+    FrameTimingRaw raw{};
+    bool got = false;
+    const bool survived = guardedBudget(g_budget, [&] {
+        PFN_GetFrameTiming fn = reinterpret_cast<PFN_GetFrameTiming>(vt[kSlotGetFrameTiming]);
+        // The size the runtime expects for the generation it serves: the
+        // 1.0-era layout first, then the later one, remembered once one works.
+        const uint32_t sizes[2] = {s.sizeUsed ? s.sizeUsed : 176u, s.sizeUsed ? s.sizeUsed : 184u};
+        for (int i = 0; i < 2 && !got; ++i) {
+            memset(&raw, 0, sizeof(raw));
+            raw.size = sizes[i];
+            if (fn(iface, &raw, 0)) {
+                got = true;
+                s.sizeUsed = sizes[i];
+            }
+        }
+    });
+    if (!survived) {
+        if (++s.faults >= 3) standDown("GetFrameTiming faulted repeatedly");
+        return;
+    }
+    if (!got) {
+        // Refused: the runtime has no timing yet (the first frames), or
+        // this runtime does not implement it (OpenComposite). Give it a few
+        // seconds of frames before concluding the second.
+        if (++s.refusals == 600) {
+            standDown("the runtime answered false to GetFrameTiming for 600 frames -- "
+                      "OpenComposite does not implement it, and SteamVR answers within "
+                      "a few frames");
+        }
+        return;
+    }
+    // Validate the first answer before believing any: the echoed size, a
+    // finite interval in a frame's range, an index that moves.
+    if (!s.armed) {
+        const bool sane = raw.size == s.sizeUsed && finite(raw.clientFrameIntervalMs) &&
+                          finite(raw.preSubmitGpuMs) && finite(raw.totalRenderGpuMs) &&
+                          raw.clientFrameIntervalMs >= 0.0f && raw.clientFrameIntervalMs < 5000.0f;
+        if (!sane) {
+            standDown("the first GetFrameTiming answer did not read as a frame timing (size "
+                      "not echoed, or an interval out of range) -- the slot or the layout is "
+                      "not this build's; please report this log");
+            return;
+        }
+        if (s.lastIndex == 0) {
+            s.lastIndex = raw.frameIndex;
+            return;   // one more frame, to see the index move
+        }
+        if (raw.frameIndex == s.lastIndex) return;
+        s.armed = true;
+        Log::get().note(
+            "compositor timing: armed -- IVRCompositor::GetFrameTiming answers (layout %u "
+            "bytes), one read per frame at the boundary for the menu's Monitor page: the "
+            "app's GPU time, the compositor's, dropped and reprojected frames, the CPU "
+            "frame interval. advanced.compositor_timing = off turns it off, live.",
+            s.sizeUsed);
+    }
+    FrameTimingSample out{};
+    if (raw.frameIndex != s.lastIndex) {
+        // A new compositor frame: its dropped count is new information.
+        s.droppedTotal += raw.numDroppedFrames;
+        s.lastIndex = raw.frameIndex;
+    }
+    out.frameIndex = raw.frameIndex;
+    out.presents = raw.numFramePresents;
+    out.droppedTotal = s.droppedTotal;
+    out.reprojFlags = raw.reprojectionFlags;
+    out.appGpuMs = raw.preSubmitGpuMs + raw.postSubmitGpuMs;
+    out.totalGpuMs = raw.totalRenderGpuMs;
+    out.compGpuMs = raw.compositorRenderGpuMs;
+    out.cpuFrameMs = raw.clientFrameIntervalMs;
+    out.presentCpuMs = raw.presentCallCpuMs;
+    out.idleCpuMs = raw.compositorIdleCpuMs;
+    out.displayHz = s.hz;
+    publishFrameTiming(out);
+    ++s.published;
+}
+
+void frameTimingShutdown() {
+    if (g_s.published) {
+        Log::get().note("compositor timing: %u samples published, %u frames dropped by the "
+                        "compositor this session.",
+                        g_s.published, g_s.droppedTotal);
+    }
+}
+
+}  // namespace edvr

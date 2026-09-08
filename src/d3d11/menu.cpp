@@ -22,6 +22,7 @@
 #include "input_gate.h"
 #include "menu_panel.h"
 #include "menu_schema.h"
+#include "perf_monitor.h"
 #include "sharpen_pass.h"
 #include "temporal_pass.h"
 
@@ -55,8 +56,11 @@ constexpr uint64_t kNotDrawnCloseMs = 1500;
 // A toast's life, and the pitch it sits below the look direction.
 constexpr uint64_t kToastMs = 2500;
 constexpr float    kToastPitchDeg = -12.0f;
-// The Status page's live values are refreshed at this cadence while shown.
+// The Status page's live values are refreshed at this cadence while shown;
+// the Monitor page's at four a second, so its digits read as a gauge and
+// not a flicker.
 constexpr uint64_t kStatusRefreshMs = 500;
+constexpr uint64_t kMonitorRefreshMs = 250;
 // R twice within this long resets a row to its shipped value.
 constexpr uint64_t kResetArmMs = 3000;
 
@@ -74,7 +78,8 @@ struct Page {
     std::vector<Entry> entries;
     int                highlight = 0;   // an entry index; never a heading when one exists
     int                scroll = 0;
-    bool               status = false;
+    bool               status = false;    // an information page: no rows to pick
+    bool               monitor = false;   // ...and this one is the performance monitor
 };
 
 struct Action {
@@ -145,6 +150,17 @@ struct State {
     uint64_t toastUntilMs = 0;
     std::string toastText;
 
+    // The head-locked readout (menu.fps_overlay), shown while the menu is
+    // down: re-anchored to the head every frame, re-rasterised twice a
+    // second.
+    bool     overlay = false;
+    float    overlayYaw = 0.0f;
+    float    overlayPitch = -16.0f;
+    bool     overlayUp = false;
+    float    overlayAlpha = 0.0f;
+    uint64_t overlayTextMs = 0;
+    std::string overlayText;
+
     // Restart bookkeeping.
     bool snapshotTaken = false;
     std::string lastWrite;
@@ -154,12 +170,6 @@ struct State {
     int      resetArmedEntry = -1;
     uint64_t resetArmedMs = 0;
 
-    // Frame timing for the Status page.
-    int64_t  lastQpc = 0;
-    double   frameMsEma = 0.0;
-    uint32_t longFrames = 0;
-    uint32_t longFramesShown = 0;
-    uint64_t longWindowMs = 0;
     uint64_t statusRefreshMs = 0;
     uint32_t markers = 0;
 };
@@ -483,6 +493,13 @@ void buildPages() {
     }
     {
         Page p;
+        p.name = "Monitor";
+        p.status = true;
+        p.monitor = true;
+        s.pages.push_back(p);
+    }
+    {
+        Page p;
         p.name = "Status";
         p.status = true;
         s.pages.push_back(p);
@@ -606,16 +623,6 @@ void buildStatus(MenuContent& c) {
         statusLine(c, "Sharpening", buf);
     }
     {
-        const State& s = g_s;
-        if (s.frameMsEma > 0.0) {
-            snprintf(buf, sizeof(buf), "%.1f ms (%.0f fps), %u long in 30 s", s.frameMsEma,
-                     1000.0 / s.frameMsEma, s.longFramesShown);
-        } else {
-            snprintf(buf, sizeof(buf), "measuring");
-        }
-        statusLine(c, "Frame time", buf);
-    }
-    {
         char line[240];
         inputGateStatusLine(line, sizeof(line));
         statusLine(c, "Keyboard", line);
@@ -623,8 +630,10 @@ void buildStatus(MenuContent& c) {
     {
         int w = 0, h = 0;
         double ms = 0.0;
-        if (menuPanelStats(&w, &h, &ms)) {
-            snprintf(buf, sizeof(buf), "%dx%d bitmap, %.1f ms to draw", w, h, ms);
+        float gpu = 0.0f;
+        if (menuPanelStats(&w, &h, &ms, &gpu)) {
+            snprintf(buf, sizeof(buf), "%dx%d bitmap, %.1f ms to draw, %.2f ms/eye on the GPU", w, h,
+                     ms, static_cast<double>(gpu));
         } else {
             snprintf(buf, sizeof(buf), "no raster yet");
         }
@@ -648,6 +657,19 @@ void buildStatus(MenuContent& c) {
     statusLine(c, "Last write", g_s.lastWrite.empty() ? "none this session" : g_s.lastWrite.c_str());
 }
 
+// The Monitor page: fpsVR's readout from perf_monitor.h, and the frame-time
+// strip underneath.
+void buildMonitor(MenuContent& c) {
+    PerfLine lines[kMenuMaxLines];
+    const int n = perfMonitorLines(lines, kMenuMaxLines);
+    for (int i = 0; i < n; ++i) statusLine(c, lines[i].left, lines[i].right);
+    c.compact = true;
+    c.graphCount = perfMonitorGraph(c.graph, static_cast<int>(sizeof(c.graph) / sizeof(c.graph[0])),
+                                    &c.graphBudgetMs);
+    snprintf(c.graphLabel, sizeof(c.graphLabel), "frame time, last %d frames -- line = %.1f ms budget",
+             c.graphCount, static_cast<double>(c.graphBudgetMs));
+}
+
 // ---------------------------------------------------------------------------
 // Content
 
@@ -663,7 +685,13 @@ void buildContent(MenuContent& c) {
     Page& p = s.pages[s.page];
     const int pendingN = pendingRestartCount();
 
-    if (p.status) {
+    if (p.monitor) {
+        buildMonitor(c);
+        snprintf(c.hint, sizeof(c.hint), "%s",
+                 "Frame rate and 1% low from EDVR's own frame clock; GPU, dropped and reprojected "
+                 "frames from the compositor's timing; load and memory sampled once a second while "
+                 "this page is up.");
+    } else if (p.status) {
         buildStatus(c);
         snprintf(c.hint, sizeof(c.hint), "%s",
                  "The page a support thread will ask to see. Tab or PageDown for the next page.");
@@ -755,7 +783,11 @@ void buildContent(MenuContent& c) {
     if (c.capPx > 80) c.capPx = 80;
 }
 
-void buildToastContent(MenuContent& c, const std::string& text) {
+// The toast's and the overlay's angular width.
+constexpr float kToastWidthDeg = 16.0f;
+constexpr float kOverlayWidthDeg = 12.0f;
+
+void buildToastContent(MenuContent& c, const std::string& text, float widthDeg, float capScale) {
     memset(&c, 0, sizeof(c));
     c.toast = true;
     c.lineCount = 1;
@@ -770,10 +802,10 @@ void buildToastContent(MenuContent& c, const std::string& text) {
     }
     if (ppd < 12.0f) ppd = 12.0f;
     if (ppd > 80.0f) ppd = 80.0f;
-    c.widthPx = static_cast<int>(ppd * 16.0f + 0.5f);
+    c.widthPx = static_cast<int>(ppd * widthDeg + 0.5f);
     if (c.widthPx < 320) c.widthPx = 320;
     if (c.widthPx > 1200) c.widthPx = 1200;
-    c.capPx = static_cast<int>(ppd * g_s.textDeg + 0.5f);
+    c.capPx = static_cast<int>(ppd * g_s.textDeg * capScale + 0.5f);
     if (c.capPx < 10) c.capPx = 10;
     if (c.capPx > 80) c.capPx = 80;
 }
@@ -1059,23 +1091,27 @@ void handleAim(uint64_t now) {
 // ---------------------------------------------------------------------------
 // Open, close, anchor
 
-void latchAnchor(float pitchDeg) {
+// Anchor the panel at the head's current pose, turned by yaw about the
+// head's up axis and then pitched about its right axis: R' = R * Ry(yaw) *
+// Rx(pitch). Zero and zero is where you are looking; a toast sits a little
+// below; the overlay wherever it was put.
+void latchAnchor(float yawDeg, float pitchDeg) {
     State& s = g_s;
     float c[12];
     if (!headPose(c)) {
         s.anchorValid = false;
         return;
     }
-    // Rotate the anchor's frame about its own x axis by pitchDeg, for a toast
-    // that sits below the look direction: R' = R * Rx(theta).
-    const float th = pitchDeg * 0.0174532925f;
-    const float cs = cosf(th), sn = sinf(th);
+    const float ty = yawDeg * 0.0174532925f, tp = pitchDeg * 0.0174532925f;
+    const float cy = cosf(ty), sy = sinf(ty), cp = cosf(tp), sp = sinf(tp);
+    // Ry(yaw) * Rx(pitch), row-major.
+    const float m[9] = {cy, sy * sp, sy * cp, 0.0f, cp, -sp, -sy, cy * sp, cy * cp};
     float out[12];
     for (int r = 0; r < 3; ++r) {
-        const float y = c[r * 4 + 1], z = c[r * 4 + 2];
-        out[r * 4 + 0] = c[r * 4 + 0];
-        out[r * 4 + 1] = y * cs + z * sn;
-        out[r * 4 + 2] = -y * sn + z * cs;
+        const float x = c[r * 4 + 0], y = c[r * 4 + 1], z = c[r * 4 + 2];
+        out[r * 4 + 0] = x * m[0] + y * m[3] + z * m[6];
+        out[r * 4 + 1] = x * m[1] + y * m[4] + z * m[7];
+        out[r * 4 + 2] = x * m[2] + y * m[5] + z * m[8];
         out[r * 4 + 3] = c[r * 4 + 3];
     }
     memcpy(s.anchor, out, sizeof(out));
@@ -1095,7 +1131,7 @@ void openMenu(uint64_t now) {
         }
         return;
     }
-    latchAnchor(0.0f);
+    latchAnchor(0.0f, 0.0f);
     if (!s.anchorValid) {
         if (!s.noPoseNoted) {
             s.noPoseNoted = true;
@@ -1115,6 +1151,8 @@ void openMenu(uint64_t now) {
     s.contentDirty = true;
     s.toastUp = false;
     s.toastAlpha = 0.0f;
+    s.overlayUp = false;
+    s.overlayAlpha = 0.0f;
     Log::get().note("menu: open (%s, %.1f m, keys %s).", s.pages[s.page].name,
                     static_cast<double>(s.distance), s.privateWanted ? "private" : "shared");
 }
@@ -1146,7 +1184,7 @@ void menuConfigure(Config& cfg) {
     }
     const std::string kb = cfg.getString("menu.keyboard", "private");
     s.privateWanted = _stricmp(kb.c_str(), "shared") != 0;
-    const std::string aim = cfg.getString("menu.aim", "both");
+    const std::string aim = cfg.getString("menu.aim", "keys");
     s.aimMode = _stricmp(aim.c_str(), "head") == 0 ? 0 : _stricmp(aim.c_str(), "keys") == 0 ? 1 : 2;
     float d = cfg.getFloat("menu.distance", 1.4f);
     if (!(d >= 0.5f) || d > 5.0f) d = 1.4f;
@@ -1159,6 +1197,19 @@ void menuConfigure(Config& cfg) {
     s.textDeg = t;
     s.idleSeconds = cfg.getIntInRange("menu.idle_dismiss", 20, 0, 600);
     s.toasts = cfg.getBool("menu.toasts", true);
+    {
+        const bool ov = cfg.getBool("menu.fps_overlay", false);
+        float yaw = cfg.getFloat("menu.fps_overlay_yaw", 0.0f);
+        float pitch = cfg.getFloat("menu.fps_overlay_pitch", -16.0f);
+        if (!(yaw >= -60.0f) || yaw > 60.0f) yaw = 0.0f;
+        if (!(pitch >= -45.0f) || pitch > 45.0f) pitch = -16.0f;
+        if (s.configured && ov != s.overlay) {
+            Log::get().note("menu: the frame-rate overlay is %s.", ov ? "on" : "off");
+        }
+        s.overlay = ov;
+        s.overlayYaw = yaw;
+        s.overlayPitch = pitch;
+    }
     const bool dev = cfg.getBool("menu.developer", false);
     if (dev != s.developer) {
         s.developer = dev;
@@ -1240,25 +1291,11 @@ void menuTick(ID3D11Device* dev) {
         const uint64_t dt = s.lastTickMs ? now - s.lastTickMs : 0;
         s.lastTickMs = now;
 
-        // Frame timing, on the fine clock: Present to Present.
-        {
-            const int64_t q = qpcNow();
-            if (s.lastQpc && qpcFrequency() > 0) {
-                const double ms = static_cast<double>(q - s.lastQpc) * 1000.0 /
-                                  static_cast<double>(qpcFrequency());
-                if (ms > 0.0 && ms < 2000.0) {
-                    if (s.frameMsEma <= 0.0) s.frameMsEma = ms;
-                    else s.frameMsEma += (ms - s.frameMsEma) * 0.02;
-                    if (s.frameMsEma > 2.0 && ms > s.frameMsEma * 1.5) ++s.longFrames;
-                }
-            }
-            s.lastQpc = q;
-            if (dueMs(s.longWindowMs, 30000)) {
-                s.longWindowMs = stampMs();
-                s.longFramesShown = s.longFrames;
-                s.longFrames = 0;
-            }
-        }
+        // The monitor's ring: one clock read and a store per frame, and the
+        // compositor's sample when a new one was published. Its slow
+        // samplers run only while the Monitor page is showing.
+        perfMonitorFrame(dev);
+        perfMonitorSetActive(s.open && s.pages[s.page].monitor);
 
         // The summon key: EDVR's own, focus-gated. With Shift, recentre.
         if (s.summon.pressed()) {
@@ -1266,7 +1303,7 @@ void menuTick(ID3D11Device* dev) {
             if (!s.open) {
                 openMenu(now);
             } else if (shift) {
-                latchAnchor(0.0f);
+                latchAnchor(0.0f, 0.0f);
                 s.lastInputMs = now;
                 Log::get().note("menu: recentred where you are looking.");
             } else {
@@ -1314,17 +1351,19 @@ void menuTick(ID3D11Device* dev) {
             else if (s.alpha > target) s.alpha = s.alpha - rate < target ? target : s.alpha - rate;
         }
 
-        // Toasts, when the menu is down.
+        // Toasts, when the menu is down; the overlay when nothing else is up.
         if (!s.open && s.alpha <= 0.0f) {
             if (!s.toastUp && !s.toastQueue.empty()) {
                 s.toastText = s.toastQueue.front();
                 s.toastQueue.erase(s.toastQueue.begin());
-                latchAnchor(kToastPitchDeg);
+                latchAnchor(0.0f, kToastPitchDeg);
                 if (s.anchorValid) {
                     s.toastUp = true;
+                    s.overlayUp = false;
+                    s.overlayAlpha = 0.0f;
                     s.toastUntilMs = now + kToastMs;
                     MenuContent c;
-                    buildToastContent(c, s.toastText);
+                    buildToastContent(c, s.toastText, kToastWidthDeg, 1.0f);
                     menuPanelSubmit(c);
                 }
             }
@@ -1339,15 +1378,49 @@ void menuTick(ID3D11Device* dev) {
                     s.contentDirty = true;   // the menu's content must be re-sent after a toast
                 }
             }
+            // The head-locked readout: the door anchors it to each frame's
+            // own pose (setMenuHeadLock below), so it rides the look with no
+            // lag, the toolkit's way; its text is refreshed twice a second.
+            // Never while a toast has the panel.
+            if (s.overlay && !s.toastUp) {
+                float pose[12];
+                s.anchorValid = headPose(pose);
+                if (s.anchorValid) {
+                    if (!s.overlayUp || dueMs(s.overlayTextMs, 500)) {
+                        s.overlayTextMs = stampMs();
+                        char line[120];
+                        perfMonitorOverlayLine(line, sizeof(line));
+                        if (!s.overlayUp || line != s.overlayText) {
+                            s.overlayText = line;
+                            MenuContent c;
+                            buildToastContent(c, s.overlayText, kOverlayWidthDeg, 0.85f);
+                            menuPanelSubmit(c);
+                        }
+                        s.overlayUp = true;
+                    }
+                }
+            } else if (s.overlayUp && !s.overlay) {
+                s.overlayUp = false;
+                s.overlayAlpha = 0.0f;
+            }
+            if (s.overlayUp && !s.toastUp) {
+                const float rate = dt > 0 ? static_cast<float>(dt) / static_cast<float>(kFadeMs) : 1.0f;
+                const float target = 0.9f;
+                if (s.overlayAlpha < target) s.overlayAlpha = s.overlayAlpha + rate > target ? target : s.overlayAlpha + rate;
+            } else {
+                s.overlayAlpha = 0.0f;
+            }
         } else {
             s.toastUp = false;
             s.toastAlpha = 0.0f;
+            s.overlayUp = false;
+            s.overlayAlpha = 0.0f;
         }
 
         // Content, geometry, visibility, the gate.
         if (s.open || s.alpha > 0.0f) {
             Page& p = s.pages[s.page];
-            if (p.status && dueMs(s.statusRefreshMs, kStatusRefreshMs)) {
+            if (p.status && dueMs(s.statusRefreshMs, p.monitor ? kMonitorRefreshMs : kStatusRefreshMs)) {
                 s.statusRefreshMs = stampMs();
                 s.contentDirty = true;
             }
@@ -1359,12 +1432,15 @@ void menuTick(ID3D11Device* dev) {
             }
         }
         const bool showingMenu = s.alpha > 0.0f && !s.toastUp;
+        const bool showingOverlay = !showingMenu && !s.toastUp && s.overlayUp && s.overlayAlpha > 0.0f;
         MenuGeometry g;
         g.dist = s.distance;
-        g.curve = s.toastUp ? 0.0f : s.curve;
-        g.halfW = s.distance * tanf((s.toastUp ? 16.0f : s.widthDeg) * 0.5f * 0.0174532925f);
-        g.alpha = s.toastUp ? s.toastAlpha : s.alpha;
+        g.curve = (s.toastUp || showingOverlay) ? 0.0f : s.curve;
+        const float widthDeg = s.toastUp ? kToastWidthDeg : showingOverlay ? kOverlayWidthDeg : s.widthDeg;
+        g.halfW = s.distance * tanf(widthDeg * 0.5f * 0.0174532925f);
+        g.alpha = s.toastUp ? s.toastAlpha : showingOverlay ? s.overlayAlpha : s.alpha;
         menuPanelSetGeometry(g);
+        setMenuHeadLock(showingOverlay, s.overlayYaw, s.overlayPitch);
         setMenuVisible(g.alpha);
         const bool drawnFresh = now - s.lastDrawnMs <= kDrawnFreshMs;
         inputGateSetPrivate(s.open && showingMenu && drawnFresh);
@@ -1381,8 +1457,10 @@ void menuTick(ID3D11Device* dev) {
 void menuShutdown() {
     inputGateSetPrivate(false);
     setMenuVisible(0.0f);
+    setMenuHeadLock(false, 0.0f, 0.0f);
     inputGateShutdown();
     menuPanelShutdown();
+    perfMonitorShutdown();
 }
 
 }  // namespace edvr

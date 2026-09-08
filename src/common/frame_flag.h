@@ -343,6 +343,14 @@ bool gazeCentre(float* tx, float* ty, uint32_t* stamp);
 void publishMenuAnchor(const float* m12);
 bool menuAnchor(float* out12, uint32_t* seq);
 
+// HEAD-LOCKED instead: the panel rides the look (menu.fps_overlay, the
+// toolkit's way), turned by yaw and pitch from straight ahead. The door
+// then builds the anchor from the frame's OWN pose rather than the
+// published one, so the lock has no lag at all. Written every frame by
+// d3d11; off (zero) means "use the published anchor".
+void setMenuHeadLock(bool on, float yawDeg, float pitchDeg);
+bool menuHeadLock(float* yawDeg, float* pitchDeg);
+
 // VISIBLE: written by d3d11 EVERY FRAME while the menu machinery runs, with
 // the panel's fade alpha (0..1) -- and the stamp moves on every write, the
 // externalCam discipline, so "closed" and "d3d11 stopped saying" stay
@@ -363,6 +371,30 @@ uint32_t menuDrawnValue();
 // openvr half after its launch-centre identification.
 void announceRuntimeKind(uint32_t kind);
 uint32_t runtimeKind();
+
+// THE COMPOSITOR'S FRAME TIMING (docs/settings-menu.md, the Monitor page):
+// what the runtime itself measured for the frame just presented, read by the
+// openvr half through IVRCompositor::GetFrameTiming at each WaitGetPoses and
+// published whole. The d3d11 half's monitor rings it up. Published under a
+// sequence counter that is odd while a write is in flight, so the reader
+// never sees half a sample; a reader that catches an odd count tries again.
+struct FrameTimingSample {
+    uint32_t frameIndex;      // the compositor's, increments per compositor frame
+    uint32_t presents;        // times this frame was presented
+    uint32_t droppedTotal;    // dropped frames since launch, as counted by the reader
+    uint32_t reprojFlags;     // the compositor's reprojection flags for this frame
+    float    appGpuMs;        // pre-submit + post-submit GPU time, the app's
+    float    totalGpuMs;      // from the previous present to the end of compositor work
+    float    compGpuMs;       // the compositor's own GPU time
+    float    cpuFrameMs;      // the app's interval between WaitGetPoses calls
+    float    presentCpuMs;    // time blocked in Present
+    float    idleCpuMs;       // compositor-measured slack before running start
+    float    displayHz;       // the headset's refresh, or 0 when unknown
+};
+void publishFrameTiming(const FrameTimingSample& s);
+// The latest sample; false when none has been published. `seq` receives
+// the publish count so a reader can tell a fresh sample from a repeat.
+bool frameTimingSample(FrameTimingSample* out, uint32_t* seq);
 
 // The cull guard's state, published by openvr_api.dll at its stage
 // transitions and read by d3d11.dll once per frame boundary.

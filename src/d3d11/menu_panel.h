@@ -69,10 +69,18 @@ struct MenuContent {
     char     hint[200];     // the highlighted row's explanation
     char     footer[160];   // keys, pending-restart count, warnings
     bool     toast = false; // a one-line panel instead of the menu
+    bool     compact = false;   // info pages: a tighter row pitch
     // Sizing, decided by the model from the channel: bitmap width in
     // pixels, and the cap height of row text in pixels.
     int      widthPx = 0;
     int      capPx = 0;
+    // The Monitor page's frame-time strip: the last graphCount frame
+    // intervals in ms, oldest first, drawn as bars against the display's
+    // budget; graphCount 0 draws nothing.
+    float    graph[120];
+    int      graphCount = 0;
+    float    graphBudgetMs = 11.1f;
+    char     graphLabel[48];
 };
 
 // Where the panel sits, in the anchor's frame: metres to it, how much it
@@ -106,8 +114,9 @@ int menuPanelLineAt(float u, float v);
 bool menuPanelHit(const float org[3], const float dir[3], float dist, float curve,
                   float halfW, float halfH, float* su, float* sv);
 
-// For the Status page: the raster's size and how long the last one took.
-bool menuPanelStats(int* w, int* h, double* lastMs);
+// For the Status page: the raster's size, how long the last one took on the
+// CPU, and the composite's measured GPU price per eye (0 until measured).
+bool menuPanelStats(int* w, int* h, double* lastMs, float* gpuMs);
 
 void menuPanelShutdown();
 

@@ -204,6 +204,14 @@ struct Shared {
     volatile LONG menuVisibleStamp;
     volatile LONG menuDrawn;
     volatile LONG runtimeKind;
+    // The compositor's frame timing (openvr -> d3d11), for the monitor:
+    // a seqlock -- perfSeq is odd while a write is in flight, and a reader
+    // that sees it odd, or sees it change across its copy, tries again.
+    volatile LONG     perfSeq;
+    FrameTimingSample perf;
+    // The overlay's head lock: bit 31 on, then yaw and pitch as tenths of a
+    // degree biased by 4096 in twelve bits each.
+    volatile LONG     menuHeadLock;
 };
 
 // Per PROCESS, not per logon session.
@@ -220,6 +228,8 @@ struct Shared {
 // The name is built once, at first use. The two DLLs are in the same process,
 // so the channel between them is unaffected.
 //
+// _v25 because the compositor's frame timing joined, for the menu's
+// Monitor page (frame_flag.h, docs/settings-menu.md).
 // _v24 because the settings menu's channel joined: the anchor, the
 // visibility heartbeat, the drawn counter and the runtime kind
 // (frame_flag.h, docs/settings-menu.md).
@@ -260,7 +270,7 @@ const wchar_t* mappingName() {
     static wchar_t name[64];
     static bool built = false;
     if (!built) {
-        _snwprintf_s(name, _TRUNCATE, L"Local\\edvr_glitch_frame_v24_%lu",
+        _snwprintf_s(name, _TRUNCATE, L"Local\\edvr_glitch_frame_v25_%lu",
                      GetCurrentProcessId());
         built = true;
     }
@@ -710,6 +720,65 @@ void announceRuntimeKind(uint32_t kind) {
 uint32_t runtimeKind() {
     Shared* s = map();
     return s ? static_cast<uint32_t>(InterlockedCompareExchange(&s->runtimeKind, 0, 0)) : 0;
+}
+
+void setMenuHeadLock(bool on, float yawDeg, float pitchDeg) {
+    Shared* s = map();
+    if (!s) return;
+    if (!on) {
+        InterlockedExchange(&s->menuHeadLock, 0);
+        return;
+    }
+    auto tenths = [](float deg) -> uint32_t {
+        float c = deg;
+        if (!(c > -180.0f)) c = -180.0f;
+        if (!(c < 180.0f)) c = 180.0f;
+        return static_cast<uint32_t>(static_cast<int32_t>(c * 10.0f) + 4096) & 0xFFFu;
+    };
+    const uint32_t packed = 0x80000000u | (tenths(yawDeg) << 12) | tenths(pitchDeg);
+    InterlockedExchange(&s->menuHeadLock, static_cast<LONG>(packed));
+}
+
+bool menuHeadLock(float* yawDeg, float* pitchDeg) {
+    Shared* s = map();
+    if (!s) return false;
+    const uint32_t v = static_cast<uint32_t>(InterlockedCompareExchange(&s->menuHeadLock, 0, 0));
+    if (!(v & 0x80000000u)) return false;
+    if (yawDeg) *yawDeg = (static_cast<int32_t>((v >> 12) & 0xFFFu) - 4096) / 10.0f;
+    if (pitchDeg) *pitchDeg = (static_cast<int32_t>(v & 0xFFFu) - 4096) / 10.0f;
+    return true;
+}
+
+void publishFrameTiming(const FrameTimingSample& sample) {
+    Shared* s = map();
+    if (!s) return;
+    // Odd while writing. One writer (the openvr half's frame boundary), so
+    // the increments need no exchange loop; the barriers keep the payload
+    // between them.
+    InterlockedIncrement(&s->perfSeq);
+    MemoryBarrier();
+    s->perf = sample;
+    MemoryBarrier();
+    InterlockedIncrement(&s->perfSeq);
+}
+
+bool frameTimingSample(FrameTimingSample* out, uint32_t* seq) {
+    Shared* s = map();
+    if (!s || !out) return false;
+    for (int tries = 0; tries < 4; ++tries) {
+        const LONG a = InterlockedCompareExchange(&s->perfSeq, 0, 0);
+        if (a == 0) return false;          // never published
+        if (a & 1) continue;               // a write in flight
+        MemoryBarrier();
+        const FrameTimingSample copy = s->perf;
+        MemoryBarrier();
+        const LONG b = InterlockedCompareExchange(&s->perfSeq, 0, 0);
+        if (a != b) continue;
+        *out = copy;
+        if (seq) *seq = static_cast<uint32_t>(a >> 1);
+        return true;
+    }
+    return false;
 }
 
 bool takeSubmitHoldFrame() {

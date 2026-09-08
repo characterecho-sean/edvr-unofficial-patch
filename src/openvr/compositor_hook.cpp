@@ -21,6 +21,7 @@
 #include "../common/log.h"
 #include "../common/proxy.h"  // breadcrumb(), EDVR_BREADCRUMB_ONCE
 #include "../common/vtable_hook.h"
+#include "frame_timing.h"
 #include "guard_crop.h"
 #include "menu_door.h"
 #include "openvr_min.h"
@@ -1819,6 +1820,12 @@ vr::EVRCompositorError hookedWaitGetPoses(void* self,
     // advanced.gaze_probe says otherwise; see gaze_probe.h.
     gazeProbeApply(result, renderPoses, renderCount);
 
+    // The compositor's own timing for the frame just presented, for the
+    // menu's Monitor page: one read, published whole (frame_timing.h).
+    if (s->validated) {
+        frameTimingBoundary(s->ownerIface, s->compositorHook.executablePrefix());
+    }
+
     // The pair-timing boundary: frame cadence, and the burst summary.
     {
         ++s->pace_boundaryNo;
@@ -2183,6 +2190,8 @@ vr::EVRCompositorError hookedWaitGetPoses(void* self,
             temporalAaConfigure();
             // The sharpening's strength is a slider judged in the headset.
             sharpenConfigure();
+            // The compositor timing read, for the Monitor page.
+            frameTimingConfigure();
             // The snapshot toggle is an in-headset A/B experiment, so it is
             // live too; the flip logs its own receipt.
             resubmitShadowConfigure();
@@ -2543,6 +2552,7 @@ void* interceptInterface(void* iface, const char* interfaceVersion) {
     supersampleResolveConfigure();
     temporalAaConfigure();
     sharpenConfigure();
+    frameTimingConfigure();
 
     return iface;
 }
@@ -2560,6 +2570,7 @@ void shutdownCompositorHook() {
     temporalAaShutdown();
     sharpenShutdown();
     menuDoorShutdown();
+    frameTimingShutdown();
     resubmitShadowShutdown();
     g_state->compositorHook.uninstall();
     if (g_state->sentinel) g_state->sentinel->confirm();
