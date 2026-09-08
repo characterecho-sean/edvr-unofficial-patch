@@ -1775,6 +1775,28 @@ which is this project's contract for every read of the game.
    matter: at ten kilometres the turn is a tenth of a pixel a frame and
    the panels' fine structure is under-sampled by the 2514 render, which
    no vector can restore.
+
+   *Its seventh flight* (17:21, `v0.14.1-68-g407cb11`, the robust fit
+   and the HUD's coverage pass in, crisp on): "better, but the solar
+   panels still appear jerky at any distance", with the mirror window
+   showing the panel arrays on their long booms. The fit was clean now --
+   residuals of five to eleven millimetres, the turn steady, the trim
+   dropping nothing on the desk -- so the vectors were right where the
+   grid claimed them, and the desk found where it did not: **548 of 956
+   live records of the station's types sat outside its cluster** on the
+   pair nearest the slot (153 and 222 on the two before). A record not
+   rewritten that frame, or in a shuffled slot, is never a pose change
+   and never a member, and the grid was marked around members alone; the
+   dense core stayed claimed because some member always marked its cells,
+   while a boom with a few records depended on those few being members
+   THAT pair, so its claim flickered every eighth frame -- and the booms
+   are the farthest from the axis, moving the most. The grid is now marked
+   by every live record whose signature is one of the body's types (the
+   fourth flight found the signature to be the type), inside the members'
+   box and outside the ship's radius; the box, the lattice and the fit
+   are the members' as before. The HUD's family line read as designed:
+   "the flight HUD; its depth written by the coverage pass in the scene's
+   projection".
 4. **Tier 2b** only if question 1 says no bits.
 5. **Tier 3** as `tools/` work against dumped frames, never on the hot
    path.

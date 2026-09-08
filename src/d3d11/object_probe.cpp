@@ -61,6 +61,33 @@ float    g_reachM = 60.0f;
 uint8_t  g_grid[kObjectGrid * kObjectGrid * kObjectGrid];
 uint32_t g_gridVersion = 0;
 float    g_gridCell = 0.0f;   // the lattice's cell, metres; 0 = not chosen yet
+constexpr float kShipRadiusM = 100.0f;   // the player's own parts sit here, co-rotating in a slot; not the body's
+
+// The record's head, decoded the way the game's own shaders decode it
+// (fss_panel_vs.h: edvrDecodeQuat, the position at byte 16).
+struct Pose {
+    float s;
+    float q[4];   // x y z w
+    float p[3];
+};
+
+Pose decodePose(const uint8_t* r) {
+    Pose o;
+    memcpy(&o.s, r + 4, 4);
+    uint32_t xy = 0, zw = 0;
+    memcpy(&xy, r + 8, 4);
+    memcpy(&zw, r + 12, 4);
+    o.q[0] = static_cast<float>(xy & 0xFFFFu) * 0.000031f - 1.0f;
+    o.q[1] = static_cast<float>(xy >> 16) * 0.000031f - 1.0f;
+    o.q[2] = static_cast<float>(zw & 0xFFFFu) * 0.000031f - 1.0f;
+    o.q[3] = static_cast<float>(zw >> 16) * 0.000031f - 1.0f;
+    const float n = sqrtf(o.q[0] * o.q[0] + o.q[1] * o.q[1] + o.q[2] * o.q[2] + o.q[3] * o.q[3]);
+    if (n > 1e-6f) {
+        for (float& c : o.q) c /= n;
+    }
+    memcpy(o.p, r + 16, 12);
+    return o;
+}
 
 // The body's occupancy: boxed by its members' positions now, padded by the
 // reach, and marked by EVERY live record of the body's types -- each
@@ -227,32 +254,6 @@ uint64_t g_byteHistN = 0;
 
 FaultBudget g_budget("objectProbe", 5);
 
-// The record's head, decoded the way the game's own shaders decode it
-// (fss_panel_vs.h: edvrDecodeQuat, the position at byte 16).
-struct Pose {
-    float s;
-    float q[4];   // x y z w
-    float p[3];
-};
-
-Pose decodePose(const uint8_t* r) {
-    Pose o;
-    memcpy(&o.s, r + 4, 4);
-    uint32_t xy = 0, zw = 0;
-    memcpy(&xy, r + 8, 4);
-    memcpy(&zw, r + 12, 4);
-    o.q[0] = static_cast<float>(xy & 0xFFFFu) * 0.000031f - 1.0f;
-    o.q[1] = static_cast<float>(xy >> 16) * 0.000031f - 1.0f;
-    o.q[2] = static_cast<float>(zw & 0xFFFFu) * 0.000031f - 1.0f;
-    o.q[3] = static_cast<float>(zw >> 16) * 0.000031f - 1.0f;
-    const float n = sqrtf(o.q[0] * o.q[0] + o.q[1] * o.q[1] + o.q[2] * o.q[2] + o.q[3] * o.q[3]);
-    if (n > 1e-6f) {
-        for (float& c : o.q) c /= n;
-    }
-    memcpy(o.p, r + 16, 12);
-    return o;
-}
-
 // a * conj(b): the rotation taking b's frame to a's.
 void quatMulConj(const float a[4], const float b[4], float out[4]) {
     const float bx = -b[0], by = -b[1], bz = -b[2], bw = b[3];
@@ -331,7 +332,6 @@ constexpr float kClusterPosPerM = 1.0e-4f;  // ...plus the quantum's lever arm o
 // panels at the slot "crisp for a few frames, then jerk and blur".
 constexpr float    kFitTrimM = 0.25f;
 constexpr int      kFitPasses = 3;
-constexpr float    kShipRadiusM = 100.0f;   // the player's own parts sit here, co-rotating in a slot; not the body's
 
 struct Cluster {
     float    q[4];       // the running MEAN delta, normalised: a member's noise averages out
