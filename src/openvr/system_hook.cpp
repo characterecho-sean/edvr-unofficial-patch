@@ -116,6 +116,34 @@ typedef void (*PFN_Raw)(void* self, int32_t eye, float* l, float* r, float* t,
 
 enum class GuardMode : uint8_t { Off, Symmetric, Percent };
 
+// WHICH of the two projection answers carries the guard's lie.
+//
+// `Both` is the shipped guard, and the only channel that renders wider and
+// crops the true region back out. Consistency is the whole game, as the file
+// header says, and it is kept there because nothing has ever shown which
+// consumer reads which call -- the guard has always moved both together, by
+// design, so it cannot tell them apart.
+//
+// The split channels are the probe that would tell them apart
+// (docs/canted-projection.md, "the gates"). Each lies through ONE call and
+// leaves the other true, and each deliberately changes nothing else: no
+// larger targets, no crop, no submit-side work at all. The image is then
+// exactly the image the session would have rendered anyway, so whatever
+// moves is what that one channel feeds:
+//
+//   Raw    -- only GetProjectionRaw is widened. Terrain quads at the edges
+//             getting covered while the picture stays put says the culler
+//             reads the tangents and the rasterizer does not.
+//   Matrix -- only GetProjectionMatrix is widened. The picture visibly
+//             widening into the same target says the rasterizer reads the
+//             matrix.
+//
+// A split channel is INCONSISTENT within a frame on purpose. That makes it a
+// diagnostic and not a shipping configuration, which is why it lives under
+// [advanced], why it never touches the submit path, and why every go-live
+// line says plainly which channel is lying.
+enum class GuardChannel : uint8_t { Both, Raw, Matrix };
+
 // How long periodic() waits for a frame boundary that never comes before
 // promoting the lie itself. In the game, WaitGetPoses fires every ~11 ms
 // and this path is unreachable; in a boundary-less process (the smoke
@@ -143,6 +171,10 @@ struct State {
     // single-word writes, and a torn read costs one oddly-margined frame in
     // an opt-in experiment.
     GuardMode modeRequested = GuardMode::Off;
+    // Written by the same configure, read the same way. Both is the shipped
+    // guard; a split channel is the separability probe and never renders
+    // wider or crops -- see GuardChannel.
+    GuardChannel channel = GuardChannel::Both;
     float     percent = 8.0f;
     // How much of each axis's deficit symmetric mode actually covers: the
     // short side is extended by fraction x (larger tangent - short tangent).
@@ -271,6 +303,12 @@ float degrees(float tangent) {
     return atanf(fabsf(tangent)) * 57.29578f;
 }
 
+const char* channelName(GuardChannel c) {
+    return c == GuardChannel::Raw    ? "raw"
+         : c == GuardChannel::Matrix ? "matrix"
+                                     : "both";
+}
+
 const char* modeName(GuardMode m) {
     return m == GuardMode::Symmetric ? "symmetric"
          : m == GuardMode::Percent   ? "percent"
@@ -333,6 +371,20 @@ bool gatePasses(const State* s) {
 bool lieActiveFor(const State* s, int32_t eye) {
     return s->lieLive && !s->guardInert && s->modeRequested != GuardMode::Off &&
            eye >= 0 && eye < 2 && s->trueSeen[eye];
+}
+
+// A split channel lies through one call only, and pays nothing on the submit
+// side: no larger targets, no crop. Everything that widens or narrows the
+// IMAGE asks this first.
+bool channelSplit(const State* s) { return s->channel != GuardChannel::Both; }
+
+// The two halves of the lie, per channel. Both true under the shipped
+// `Both`, which is how the guard has always answered.
+bool lieRawFor(const State* s, int32_t eye) {
+    return lieActiveFor(s, eye) && s->channel != GuardChannel::Matrix;
+}
+bool lieMatrixFor(const State* s, int32_t eye) {
+    return lieActiveFor(s, eye) && s->channel != GuardChannel::Raw;
 }
 
 // ---------------------------------------------------------------------------
@@ -455,7 +507,7 @@ void hookedGetProjectionRaw(void* self, int32_t eye, float* l, float* r,
                 s->liePending = true;
                 s->liePendingSinceMs = stampMs();
             }
-            if (lieActiveFor(s, eye)) {
+            if (lieRawFor(s, eye)) {
                 *l = lie[0];
                 *r = lie[1];
                 *t = lie[2];
@@ -598,7 +650,7 @@ vr::HmdMatrix44_t MatrixReceiver::GetProjectionMatrix(int32_t eye, float nearZ,
     // otherwise, either shifted by the temporal pass's jitter when one is
     // live -- the same numbers the raw thunk answers, so the two calls tell
     // one story about where the frustum sits this frame.
-    const bool lie = lieActiveFor(s, eye);
+    const bool lie = lieMatrixFor(s, eye);
     const bool jit = s->jitLive && s->matrixFormulaOk[eye];
     if ((lie || jit) && s->matrixFormulaOk[eye]) {
         float tt[4];
@@ -861,6 +913,41 @@ void promoteOrDemote(State* s) {
                 "cull guard INERT: the widened spans are degenerate "
                 "(u %g->%g, v %g->%g). Report this log.",
                 duT, duL, dvT, dvL);
+            return;
+        }
+        // The separability probe goes live here and now. One channel lies and
+        // the image is untouched, so there is no rebuild to wait for, no
+        // canonical size to establish and nothing for the submit side to do:
+        // stage 2 directly, with unit size factors so every size answer
+        // forwards the truth.
+        if (channelSplit(s)) {
+            s->sizeFactorH = 1.0f;
+            s->sizeFactorV = 1.0f;
+            for (int e = 0; e < 2; ++e) {
+                s->canonicalW[e] = 0;
+                s->canonicalH[e] = 0;
+            }
+            s->stage = 2;
+            s->lieLive = true;
+            announceCullGuardState(2, 1.0f, 1.0f);
+            for (int eye = 0; eye < 2; ++eye) {
+                const float* t = s->trueRaw[eye];
+                const float* lie = s->lied[eye];
+                Log::get().note(
+                    "cull guard PROBE LIVE (%s, channel %s): %s eye true "
+                    "l=%+.4f r=%+.4f t=%+.4f b=%+.4f -> %s alone answers "
+                    "l=%+.4f r=%+.4f t=%+.4f b=%+.4f and the other call "
+                    "answers the truth. Render targets and the submitted "
+                    "image are UNTOUCHED, so whatever changes is what the %s "
+                    "call feeds. This frame is inconsistent on purpose: a "
+                    "diagnostic, not a setting to fly with.",
+                    modeName(s->modeRequested), channelName(s->channel),
+                    eyeName(eye), t[0], t[1], t[2], t[3],
+                    s->channel == GuardChannel::Raw ? "GetProjectionRaw"
+                                                    : "GetProjectionMatrix",
+                    lie[0], lie[1], lie[2], lie[3],
+                    s->channel == GuardChannel::Raw ? "raw" : "matrix");
+            }
             return;
         }
         s->sizeFactorH = duL / duT;
@@ -1150,14 +1237,30 @@ void systemHookConfigure() {
     const std::string sub = cfg.getString("advanced.cull_guard_submit", "copy");
     const bool copyMode = _stricmp(sub.c_str(), "bounds") != 0;
 
+    // Which of the two projection answers carries the lie. "both" is the
+    // guard; "raw" and "matrix" are the separability probe, which never
+    // widens a target or crops a submission -- see GuardChannel.
+    const std::string chan =
+        cfg.getString("advanced.cull_guard_channel", "both");
+    GuardChannel channel = GuardChannel::Both;
+    if (_stricmp(chan.c_str(), "raw") == 0) channel = GuardChannel::Raw;
+    else if (_stricmp(chan.c_str(), "matrix") == 0) channel = GuardChannel::Matrix;
+    else if (_stricmp(chan.c_str(), "both") != 0 && !chan.empty()) {
+        Log::get().note(
+            "cull_guard_channel = \"%s\" is not a channel this build knows "
+            "(both, raw, matrix). Treating it as both.",
+            chan.c_str());
+    }
+
     const GuardMode before = s->modeRequested;
     const bool lieParamsChanged =
-        before != mode ||
+        before != mode || s->channel != channel ||
         (mode == GuardMode::Percent && fabsf(s->percent - pct) > 0.01f) ||
         (mode == GuardMode::Symmetric && (fabsf(s->fracH - fh) > 0.001f ||
                                           fabsf(s->fracV - fv) > 0.001f)) ||
         gateChanged;
     s->modeRequested = mode;
+    s->channel = channel;
     s->percent = pct;
     s->fracH = fh;
     s->fracV = fv;
@@ -1187,12 +1290,18 @@ void systemHookConfigure() {
     if (lieParamsChanged) {
         if (s->receiverInstalled || mode == GuardMode::Off) {
             Log::get().note(
-                "cull guard config: mode %s%s (was %s), margins h=%.2f v=%.2f, "
-                "%u headset signature(s) gated. Changes take effect at the "
-                "next frame boundary.",
+                "cull guard config: mode %s%s (was %s), channel %s%s, margins "
+                "h=%.2f v=%.2f, %u headset signature(s) gated. Changes take "
+                "effect at the next frame boundary.",
                 modeName(mode),
                 mode == GuardMode::Percent ? " (see cull_guard_percent)" : "",
-                modeName(before), fh, fv, gateCount);
+                modeName(before), channelName(channel),
+                channel == GuardChannel::Both
+                    ? ""
+                    : " -- SEPARABILITY PROBE: one call lies, the other tells "
+                      "the truth, and neither the render size nor the "
+                      "submitted image is touched",
+                fh, fv, gateCount);
         }
     }
 }
@@ -1201,6 +1310,10 @@ bool systemHookCropFractions(vr::EVREye eye, float out[4]) {
     State* s = g_state;
     if (!s || !out) return false;
     const int e = (eye == vr::Eye_Left) ? 0 : 1;
+    // A split channel never renders wider, so there is nothing to crop back
+    // out: cropping by the lie's fractions would shrink an image that was
+    // drawn at the true frustum, which is the one thing the probe must not do.
+    if (channelSplit(s)) return false;
     if (!lieActiveFor(s, e)) return false;
     return cropFractions(s, e, out);
 }
@@ -1276,6 +1389,7 @@ bool systemHookCropBounds(vr::EVREye eye, const vr::VRTextureBounds_t* in,
     State* s = g_state;
     if (!s || !out) return false;
     const int e = (eye == vr::Eye_Left) ? 0 : 1;
+    if (channelSplit(s)) return false;   // nothing widened, nothing to crop
     if (!lieActiveFor(s, e)) return false;
 
     float f[4];
