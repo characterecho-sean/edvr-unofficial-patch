@@ -25,6 +25,7 @@
 #include "draw_census.h"
 #include "quad_probe.h"
 #include "exposure_fix.h"
+#include "menu.h"
 #include "vscreen.h"
 #include "glitch_frame.h"
 #include "vscreen_res.h"
@@ -1005,6 +1006,11 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
                     byKey ? "your FSS key" : "the game's GuiFocus");
             }
         }
+        // The settings menu (docs/settings-menu.md): its summon key, its
+        // navigation keys and head-aim, its fade, the keyboard gate that
+        // follows its draw, and the upload of a fresh raster. One key poll
+        // when closed.
+        menuTick(g_state->device);
         // Reading the view the game is actually on, and telling the gate.
         //
         // The keypress count above stays as the fallback, for when this cannot
@@ -1028,7 +1034,10 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
         // tuning by feel have to take effect without a restart. Was every 90
         // frames, which is once a second on exactly one of the three rates.
         ++g_state->frameCounter;
-        if (dueMs(g_state->configPollMs, kConfigPollMs)) {
+        // The menu asks for the poll NOW after each write it made, so the
+        // change lands this frame through the same configure path a hand
+        // edit takes -- nothing applies a value except the reload.
+        if (menuTakeConfigPollRequest() || dueMs(g_state->configPollMs, kConfigPollMs)) {
             g_state->configPollMs = stampMs();
             vScreenRefreshConfig();
             g_state->fssTheaterWanted =
@@ -1222,11 +1231,42 @@ void readoptGameBindings() {
     }
 }
 
+// The Instruments page's rows: the same functions the diagnostic hotkeys
+// fire, reachable from a headset with no key bound.
+void menuActionDumpCamera(void*) { dumpCameraRing("the settings menu"); }
+void menuActionCensus(void*) {
+    drawCensusRequest();
+    quadProbeRequest();
+}
+void menuActionResetView(void*) {
+    headOffsetGateNewFootSession("the settings menu", /*journalSaysSo=*/false);
+}
+void menuActionMarker(void*) {
+    static uint32_t n = 0;
+    Log::get().note("----- marker %u, from the settings menu -----", ++n);
+}
+
 State& ensureState() {
     if (!g_state) {
         g_state = new State();
         g_state->toggleKey.setBinding(Config::get().getString("hotkey.toggle_exposure", "SCROLLLOCK").c_str());
         g_state->dumpKey.setBinding(Config::get().getString("hotkey.dump_camera", "PAUSE").c_str());
+        // The settings menu, read here for install and on vScreen's reload
+        // path for live changes; its Instruments page gets the diagnostic
+        // keys' functions as rows.
+        menuRegisterAction("Dump the camera history now",
+                           "The PAUSE key's job: the last ten seconds of viewpoint history to the log.",
+                           &menuActionDumpCamera, nullptr);
+        menuRegisterAction("Take a draw census and quad probe",
+                           "The dump_draws key's job: every draw into the eyes for a few frames.",
+                           &menuActionCensus, nullptr);
+        menuRegisterAction("Reset Explorer Cam's counted view to 0",
+                           "For a keypress count that desynced: the manual twin of the wake reset.",
+                           &menuActionResetView, nullptr);
+        menuRegisterAction("Write a marker line to the graphics log",
+                           "So a moment you noticed can be found in the log afterwards.",
+                           &menuActionMarker, nullptr);
+        menuConfigure(Config::get());
         // Empty default: the census is chased-bug instrumentation, and an
         // unbound key is how "off" is spelled for a hotkey.
         //
@@ -1922,6 +1962,9 @@ void deviceHookNoteCleanExit() {
 }
 
 void shutdownDeviceHooks() {
+    // The keyboard first: a gate left set past the module's life is a
+    // keyboard the game never gets back.
+    menuShutdown();
     journalWatchShutdown();
     // Reverse of install order: vScreen's vtable copy was taken on top of the
     // exposure fix's, so it comes off first.

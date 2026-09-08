@@ -45,6 +45,22 @@ Commented-out expert settings inside [fix] are not required to have one.
 Annotate one and it appears; leave it and it stays where it is, which is the
 right default for a developer instrument.
 
+THE IN-HEADSET MENU (docs/settings-menu.md) is the second consumer, and it
+reads the same annotations. A `menu` token on a [fix] setting's ui: line puts
+that row on the menu's Fixes page; `menu performance` puts it on the
+Performance page. A [fix] row with no token stays desktop-only. The menu's
+developer tier shows every [advanced] and [experimental] key the code reads,
+with no annotation at all: a getBool read is a switch, a bounded number is a
+number, and a getString read is read-only unless a `# dev: choices a, b, c`
+line above it names its values (the mirror of ui:, allowed only OUTSIDE
+[fix]). `# dev: hidden` keeps a key off the menu entirely.
+
+The menu's restart flagging is derived here too, from the same prose the
+window reads: a menu row on the Fixes or Performance page that does not say
+when it takes effect is a build error (as for the window); a developer-tier
+key that does not say is a WARNING, listed, and the row wears a "?" badge
+until the sentence is written.
+
 Usage:
   python tools/gen_settings_schema.py --root <repo> --out <gen dir>
   python tools/gen_settings_schema.py --root <repo> --check    (no output written)
@@ -72,6 +88,10 @@ READ_RE = re.compile(
     r'get(Bool|Int|Float|String)([A-Za-z]*)\s*\(\s*"([^"]+)"\s*,\s*([^;]*?)\)', re.S)
 KEY_RE = re.compile(r'^([A-Za-z0-9_.-]+)\s*=\s*(.*)$')
 UI_RE = re.compile(r'^ui\s*:\s*(.*)$', re.I)
+DEV_RE = re.compile(r'^dev\s*:\s*(.*)$', re.I)
+# The sections the menu's developer tier lists in full.
+DEV_SECTIONS = ('advanced', 'experimental')
+MENU_PAGES = ('fixes', 'performance')
 # A heading in edvr.ini: a rule, the title, a rule. The heading a person
 # reads in the file is the heading the window shows, so there is no second
 # list of group names to keep in step with this one.
@@ -143,6 +163,13 @@ class Setting(object):
         self.hidden = False
         self.annotated = False
         self.line = 0
+        # The menu's half (docs/settings-menu.md): which page a [fix] row
+        # sits on (None = desktop-only), and the dev: annotation's answers
+        # for the developer tier.
+        self.menuPage = None
+        self.devAnnotated = False
+        self.devChoices = []
+        self.devHidden = False
 
 
 def parse_ini(path):
@@ -157,6 +184,7 @@ def parse_ini(path):
     expectTitle = None
     prose = []          # comment lines since the last key or blank run
     annotation = None
+    devAnnotation = None
     movedFrom = []      # (old dotted, old default) lines since the last key
 
     for index, raw in enumerate(lines):
@@ -164,6 +192,7 @@ def parse_ini(path):
         if not line:
             prose = []
             annotation = None
+            devAnnotation = None
             movedFrom = []
             continue
         if line.startswith('['):
@@ -173,6 +202,7 @@ def parse_ini(path):
             group = ''
             prose = []
             annotation = None
+            devAnnotation = None
             continue
 
         commented = line[0] in '#;'
@@ -194,8 +224,11 @@ def parse_ini(path):
                 expectTitle = False   # the closing rule is still to come
                 continue
             ui = UI_RE.match(body)
+            dev = DEV_RE.match(body)
             if ui:
                 annotation = ui.group(1).strip()
+            elif dev:
+                devAnnotation = dev.group(1).strip()
             elif body.startswith('moved-from:'):
                 # Migration metadata, not prose -- captured so the window can
                 # read an un-migrated file the way the runtime does.
@@ -230,10 +263,26 @@ def parse_ini(path):
         if annotation is not None:
             s.annotated = True
             apply_annotation(s, annotation)
+        if devAnnotation is not None:
+            s.devAnnotated = True
+            apply_dev_annotation(s, devAnnotation)
         settings.append(s)
         prose = []
         annotation = None
+        devAnnotation = None
     return settings
+
+
+def apply_dev_annotation(setting, text):
+    """`dev: choices a, b, c` or `dev: hidden`, for the menu's developer tier."""
+    parts = [p.strip() for p in text.split('|')]
+    for part in parts:
+        lower = part.lower()
+        if lower.startswith('hidden'):
+            setting.devHidden = True
+        elif lower.startswith('choices'):
+            rest = part.split(None, 1)[1] if ' ' in part else ''
+            setting.devChoices = [c.strip() for c in rest.split(',') if c.strip()]
 
 
 def strip_inline_comment(value):
@@ -281,6 +330,11 @@ def apply_annotation(setting, text):
             setting.applies = 'restart'
         elif lower == 'live':
             setting.applies = 'live'
+        elif lower == 'menu' or lower.startswith('menu '):
+            # The in-headset menu's page: bare `menu` is the Fixes page,
+            # `menu performance` the Performance page.
+            page = part.split(None, 1)[1].strip().lower() if ' ' in part else 'fixes'
+            setting.menuPage = page
 
 
 def when_it_applies(setting):
@@ -393,6 +447,22 @@ def main():
             print('  edvr.ini:%d  %s.%s' % (s.line, s.section, s.key))
         return 1
 
+    strayDev = [s for s in settings if s.devAnnotated and s.section in EXPOSED_SECTIONS]
+    if strayDev:
+        print('gen_settings_schema: ERROR: a dev: line belongs outside [%s]; inside it the '
+              'ui: line carries the choices.' % ']/['.join(EXPOSED_SECTIONS))
+        for s in strayDev:
+            print('  edvr.ini:%d  %s.%s' % (s.line, s.section, s.key))
+        return 1
+
+    badPage = [s for s in settings if s.menuPage and s.menuPage not in MENU_PAGES]
+    if badPage:
+        print('gen_settings_schema: ERROR: the menu token names a page this build has no '
+              'page for. Pages: %s.' % ', '.join(MENU_PAGES))
+        for s in badPage:
+            print('  edvr.ini:%d  %s.%s  (menu %s)' % (s.line, s.section, s.key, s.menuPage))
+        return 1
+
     missing = [s for s in settings
                if s.live and s.section in EXPOSED_SECTIONS and not s.annotated]
     if missing:
@@ -461,14 +531,78 @@ def main():
             print('  edvr.ini:%d  %s.%s' % (s.line, s.section, s.key))
         return 1
 
+    # ---- the menu's rows (docs/settings-menu.md) --------------------------
+    #
+    # A [fix] row with a menu token, plus every [advanced] / [experimental] key
+    # the code reads (dev: hidden excepted). Each carries what the window's
+    # row carries and three things more: which page, which tier, and when it
+    # applies as a tri-state -- unknown is allowed for the developer tier and
+    # shown as a badge, never silently read as live.
+    menuRows = []
+    menuFix = [s for s in exposed if s.menuPage]
+    for s in menuFix:
+        menuRows.append((s, s.menuPage, 'Fix'))
+    devSilent = []
+    for s in settings:
+        if s.section not in DEV_SECTIONS or s.devHidden:
+            continue
+        dotted = '%s.%s' % (s.section, s.key)
+        if dotted not in code:
+            continue
+        if when_it_applies(s) is None:
+            devSilent.append(s)
+        menuRows.append((s, s.section, 'Advanced' if s.section == 'advanced' else 'Experimental'))
+    if devSilent:
+        print('gen_settings_schema: WARNING: %d developer-tier setting(s) do not say when they '
+              'take effect; the menu shows them with a "?" badge. End the comment block with '
+              '"Live." or the sentence that says a restart is needed:' % len(devSilent))
+        for s in devSilent:
+            print('  edvr.ini:%d  %s.%s' % (s.line, s.section, s.key))
+
     if args.check or not args.out:
         restarts = len([s for s in exposed if when_it_applies(s) == 'restart'])
         print('gen_settings_schema: %d exposed, %d of them needing a game restart; '
-              '%d live in [%s]'
+              '%d live in [%s]; menu: %d fix rows on %s, %d developer rows'
               % (len(exposed), restarts,
                  len([s for s in settings if s.live and s.section in EXPOSED_SECTIONS]),
-                 ']/['.join(EXPOSED_SECTIONS)))
+                 ']/['.join(EXPOSED_SECTIONS), len(menuFix),
+                 '/'.join(sorted(set(s.menuPage for s in menuFix))) or 'no page',
+                 len(menuRows) - len(menuFix)))
         return 0
+
+    menuOut = []
+    for s, page, tier in menuRows:
+        dotted = '%s.%s' % (s.section, s.key)
+        kind, default, lo, hi, precision = code[dotted]
+        if lo is None and s.range_lo is not None:
+            lo, hi = s.range_lo, s.range_hi
+        choices = s.choices if s.section in EXPOSED_SECTIONS else s.devChoices
+        if choices:
+            kind = 'choice'
+        applies = when_it_applies(s)
+        menuOut.append(
+            '    {%s, %s, %s, %s,\n     MenuKind::%s, %s, %s, %s, %d, %s, %s, %d,\n'
+            '     MenuTier::%s, %s, %s},' % (
+                c_string(s.section), c_string(s.key),
+                c_string(s.label if s.section in EXPOSED_SECTIONS else s.key),
+                c_string(summarise(s.description)),
+                {'toggle': 'Toggle', 'number': 'Number', 'text': 'Text',
+                 'choice': 'Choice'}[kind],
+                c_string(s.value), c_string(lo or ''), c_string(hi or ''), precision,
+                c_string('|'.join(choices)),
+                'true' if s.percent else 'false',
+                {None: 0, 'live': 1, 'restart': 2}[applies],
+                tier, c_string(page), c_string(s.group)))
+    os.makedirs(args.out, exist_ok=True)
+    menu_path = os.path.join(args.out, 'menu_schema.inc')
+    with open(menu_path, 'w', encoding='utf-8', newline='\r\n') as f:
+        f.write('// Generated by tools/gen_settings_schema.py from edvr.ini and src/.\n')
+        f.write('// Do not edit, and do not commit: the sources are the ini and the code.\n')
+        f.write('// The in-headset menu\'s rows (src/d3d11/menu_schema.h).\n')
+        f.write('static const MenuRowDef kMenuRows[] = {\n')
+        f.write('\n'.join(menuOut))
+        f.write('\n};\n')
+    print('gen_settings_schema: wrote %s (%d rows)' % (menu_path, len(menuOut)))
 
     rows = []
     for s in exposed:

@@ -7,8 +7,23 @@ about the game and about Windows are labelled MEASURED (established at the
 desk or in a field log kept by this repo) or BELIEVED (inference, each with
 a gate below that turns it into a measurement before code may depend on
 it); what can only be settled with a headset on is collected under Phase 0.
-Nothing here is implemented. Written 2026-09-07 on branch
-`claude/ingame-settings-menu-78317d` off main `5e2d545`.*
+Written 2026-09-07 on branch `claude/ingame-settings-menu-78317d` off main
+`5e2d545`.*
+
+*Status, 2026-09-07, later the same day: **phase A is BUILT and UNFLOWN**
+on the same branch -- the three doors (`src/d3d11/input_gate.cpp` over
+`src/common/iat_hook.cpp`), the model and the ini write
+(`src/d3d11/menu.cpp`), the GDI raster and the compute composite
+(`src/d3d11/menu_panel.cpp`, export `edvrMenuPanel`), the door's caller
+(`src/openvr/menu_door.cpp`), the channel fields (`frame_flag` `_v24`),
+the generated row table (`menu_schema.inc` from
+`tools/gen_settings_schema.py`), the `[menu]` section and `hotkey.menu = F8`
+in `edvr.ini`, and `tools/menu_test`. Two things differ from the text
+below and are marked where they occur: the developer tier's restart
+enforcement is a build WARNING with a `?` badge rather than an error (61
+keys in `[advanced]` and `[experimental]` do not yet say when they apply,
+and rewriting 61 comments was not this change's job), and `iniedit` moved
+to `src/common` in namespace `edvr`. Every Phase 0 gate is still open.*
 
 ## The ask
 
@@ -333,12 +348,15 @@ Sean's addition, made a first-class mechanism rather than a badge:
   ini does not.
 - **Enforced at build time.** Today the generator already fails the build
   when a `[fix]` setting shown in the desktop window says neither word
-  (`gen_settings_schema.py`, "do not say when they take effect"). That
-  error extends to every row the menu shows: the `[advanced]` and
-  `[experimental]` keys, which today are not checked at all, get the same
-  message ("End the comment block with 'Live.' or the sentence that says a
-  restart is needed"). A restart row that reads as live is the failure
-  this exists to prevent, and it is silent everywhere else.
+  (`gen_settings_schema.py`, "do not say when they take effect"), and
+  every `[fix]` row the menu shows is one of those. For the developer tier
+  -- the `[advanced]` and `[experimental]` keys, which were never checked
+  -- the generator prints a WARNING naming each key that does not say, and
+  the row wears a `?` badge with "when it applies is not documented" in
+  its hint, so an unknown is never silently read as live. (As built: 61
+  such keys on 2026-09-07; the error form waits until their comments are
+  written, which is a separate change.) A restart row that reads as live
+  is the failure this exists to prevent.
 - **Shown three ways.** The row wears a `restart` badge always. After a
   change it shows the running value and the pending one (`stock -> early
   at next launch`). The panel footer counts them ("2 changes take effect
@@ -409,12 +427,14 @@ and neither is needed to start.
 The menu writes `edvr.ini` and nothing else; the running configuration
 changes because the file did.
 
-- **The installer's own edit.** `iniedit.cpp` moves from `src/installer`
-  to `src/common` (it already follows `config.cpp`'s grammar exactly and
-  has no installer dependencies); the d3d11 half uses `mergeIni(source,
-  source, &source, {{dotted, value}})` for one value, exactly as
-  `SettingsModel::set` does -- the line where the key already lives,
-  uncommented if it was an expert default, every comment untouched.
+- **The installer's own edit.** `iniedit.cpp` moved from `src/installer`
+  to `src/common` (it already followed `config.cpp`'s grammar exactly and
+  had no installer dependencies; it now lives in the plain `edvr`
+  namespace, which the installer's own namespace finds unqualified); the
+  d3d11 half uses `mergeIni(source, source, &source, {{dotted, value}})`
+  for one value, exactly as `SettingsModel::set` does -- the line where
+  the key already lives, uncommented if it was an expert default, every
+  comment untouched.
 - **Re-read before write**, the installer's 2026-08-28 lesson: the file on
   disk is the source, never a cached copy.
 - **Atomic write**: temp file beside the ini, then `MoveFileExW` with

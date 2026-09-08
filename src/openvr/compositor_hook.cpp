@@ -22,6 +22,7 @@
 #include "../common/proxy.h"  // breadcrumb(), EDVR_BREADCRUMB_ONCE
 #include "../common/vtable_hook.h"
 #include "guard_crop.h"
+#include "menu_door.h"
 #include "openvr_min.h"
 #include "resubmit_shadow.h"
 #include "sharpen.h"
@@ -1176,6 +1177,23 @@ vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
         *bnds = storage;
     };
 
+    // The settings menu (docs\settings-menu.md), LAST of all on every path:
+    // the panel composited onto the native-size outgoing frame, after the
+    // sharpen, so its text never passes through a pass. Drawn with the pose
+    // the game rendered this frame from, which is the pose the compositor
+    // reprojects against, so the panel holds still in the world for free.
+    // One flag test per submit when it is down.
+    auto applyMenu = [&](vr::Texture_t* tex, const vr::VRTextureBounds_t** bnds,
+                         vr::VRTextureBounds_t* storage) {
+        if (!s->validated || !menuDoorWanted()) return;
+        if (tex->eType != vr::TextureType_DirectX) return;
+        void* out = menuDoorTreat(eye, tex->handle, *bnds, storage, s->theaterRealPose,
+                                  s->theaterRealValid);
+        if (!out) return;
+        tex->handle = out;
+        *bnds = storage;
+    };
+
     // The temporal pass (docs\anti-aliasing.md, Feature B), FIRST at the
     // door: on the game's own frame at render size, wide under the guard,
     // before the crop and the resolve, so everything downstream sees a
@@ -1310,6 +1328,8 @@ vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
                 applyResolve(&sub, &subBounds, &subStorage);
                 vr::VRTextureBounds_t subStorage2;
                 applySharpen(&sub, &subBounds, &subStorage2);
+                vr::VRTextureBounds_t subStorage3;
+                applyMenu(&sub, &subBounds, &subStorage3);
                 return forwardSubmit(s, self, eye, &sub, subBounds, flags);
             }
         }
@@ -1679,6 +1699,8 @@ vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
             applyResolve(&sub, &subBounds, &subStorage2);
             vr::VRTextureBounds_t subStorage3;
             applySharpen(&sub, &subBounds, &subStorage3);
+            vr::VRTextureBounds_t subStorage4;
+            applyMenu(&sub, &subBounds, &subStorage4);
             return forwardSubmit(s, self, eye, &sub, subBounds, flags);
         }
         if (s->notesLeft > 0) {
@@ -1732,6 +1754,8 @@ vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
         applyResolve(&fwd, &fwdBounds, &fwdStorage2);
         vr::VRTextureBounds_t fwdStorage3;
         applySharpen(&fwd, &fwdBounds, &fwdStorage3);
+        vr::VRTextureBounds_t fwdStorage4;
+        applyMenu(&fwd, &fwdBounds, &fwdStorage4);
         const vr::EVRCompositorError result =
             forwardSubmit(s, self, eye, &fwd, fwdBounds, flags);
         // This frame was FORWARDED and accepted, so it becomes the copy a
@@ -2535,6 +2559,7 @@ void shutdownCompositorHook() {
     supersampleResolveShutdown();
     temporalAaShutdown();
     sharpenShutdown();
+    menuDoorShutdown();
     resubmitShadowShutdown();
     g_state->compositorHook.uninstall();
     if (g_state->sentinel) g_state->sentinel->confirm();

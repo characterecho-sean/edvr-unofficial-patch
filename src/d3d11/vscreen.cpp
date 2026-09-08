@@ -44,6 +44,7 @@
 #include "fss_theater.h"  // the warm-up; the theater itself runs at submit
 #include "depth_probe.h"       // Phase 0 item 3: which depth target the eye draws use, and how it reads
 #include "sharpen_pass.h"      // likewise: warm-up and totals; the sharpening runs at submit
+#include "menu.h"              // the settings menu's reload: its keys, then the row diff
 #include "supersample_pass.h"  // likewise: warm-up and totals; the pass runs at submit
 #include "temporal_pass.h"     // and the temporal pass: warm-up, the camera capture, totals
 #include "fov_probe.h"
@@ -3690,6 +3691,10 @@ void vScreenRefreshConfig() {
     resolveProbeConfigure(cfg);
     resolveBindConfigure(cfg);
     stencilProbeConfigure(cfg);
+    // The settings menu: its own keys, then the reload's diff -- every row's
+    // value, the restart snapshot, and a toast for what changed from outside.
+    menuConfigure(cfg);
+    menuNoteConfigReloaded();
     {
         s->censusFssJump = cfg.getInt("advanced.census_fss_jump", 0) ? 1 : 0;
         s->fssTheaterOn = cfg.getFloat("experimental.fss_theater", 0.0f) > 0.0f;

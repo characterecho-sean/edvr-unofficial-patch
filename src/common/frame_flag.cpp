@@ -192,6 +192,18 @@ struct Shared {
     //            can tell a fresh publish from a held one.
     volatile LONG gaze;
     volatile LONG gazeStamp;
+    // The settings menu (docs/settings-menu.md): the anchor pose the panel
+    // was summoned at (d3d11 -> openvr, headPose's layout, seq as presence
+    // and change stamp), the per-frame visibility heartbeat with the fade
+    // alpha in per-mille (d3d11 -> openvr), the drawn counter the keyboard
+    // gate follows (openvr's draw, bumped by the d3d11 export), and the
+    // runtime kind for the Status page (openvr -> d3d11).
+    volatile LONG menuAnchorSeq;
+    float         menuAnchorM[12];
+    volatile LONG menuAlphaMille;
+    volatile LONG menuVisibleStamp;
+    volatile LONG menuDrawn;
+    volatile LONG runtimeKind;
 };
 
 // Per PROCESS, not per logon session.
@@ -208,6 +220,9 @@ struct Shared {
 // The name is built once, at first use. The two DLLs are in the same process,
 // so the channel between them is unaffected.
 //
+// _v24 because the settings menu's channel joined: the anchor, the
+// visibility heartbeat, the drawn counter and the runtime kind
+// (frame_flag.h, docs/settings-menu.md).
 // _v23 because the eye-tracked gaze joined, for the foveation's moving
 // centre (frame_flag.h).
 // _v22 because the scene-arrived latch joined, so the cull guard can hold
@@ -245,7 +260,7 @@ const wchar_t* mappingName() {
     static wchar_t name[64];
     static bool built = false;
     if (!built) {
-        _snwprintf_s(name, _TRUNCATE, L"Local\\edvr_glitch_frame_v23_%lu",
+        _snwprintf_s(name, _TRUNCATE, L"Local\\edvr_glitch_frame_v24_%lu",
                      GetCurrentProcessId());
         built = true;
     }
@@ -636,6 +651,65 @@ bool gazeCentre(float* tx, float* ty, uint32_t* stamp) {
     if (tx) *tx = (static_cast<int32_t>((v >> 15) & 0x7FFFu) - 16384) / 1000.0f;
     if (ty) *ty = (static_cast<int32_t>(v & 0x7FFFu) - 16384) / 1000.0f;
     return true;
+}
+
+void publishMenuAnchor(const float* m12) {
+    Shared* s = map();
+    if (!s || !m12) return;
+    for (int i = 0; i < 12; ++i) s->menuAnchorM[i] = m12[i];
+    InterlockedIncrement(&s->menuAnchorSeq);
+}
+
+bool menuAnchor(float* out12, uint32_t* seq) {
+    Shared* s = map();
+    if (!s) return false;
+    const LONG q = InterlockedCompareExchange(&s->menuAnchorSeq, 0, 0);
+    if (seq) *seq = static_cast<uint32_t>(q);
+    if (q == 0) return false;
+    if (out12) {
+        for (int i = 0; i < 12; ++i) out12[i] = s->menuAnchorM[i];
+    }
+    return true;
+}
+
+void setMenuVisible(float alpha) {
+    Shared* s = map();
+    if (!s) return;
+    float a = alpha;
+    if (!(a > 0.0f)) a = 0.0f;   // NaN lands on "not visible"
+    if (a > 1.0f) a = 1.0f;
+    InterlockedExchange(&s->menuAlphaMille, static_cast<LONG>(a * 1000.0f + 0.5f));
+    InterlockedIncrement(&s->menuVisibleStamp);
+}
+
+bool menuVisible(float* alpha, uint32_t* stamp) {
+    Shared* s = map();
+    if (!s) return false;
+    if (stamp) *stamp = static_cast<uint32_t>(InterlockedCompareExchange(&s->menuVisibleStamp, 0, 0));
+    const LONG mille = InterlockedCompareExchange(&s->menuAlphaMille, 0, 0);
+    if (alpha) *alpha = static_cast<float>(mille) / 1000.0f;
+    return mille > 0;
+}
+
+void bumpMenuDrawn() {
+    Shared* s = map();
+    if (s) InterlockedIncrement(&s->menuDrawn);
+}
+
+uint32_t menuDrawnValue() {
+    Shared* s = map();
+    return s ? static_cast<uint32_t>(InterlockedCompareExchange(&s->menuDrawn, 0, 0)) : 0;
+}
+
+void announceRuntimeKind(uint32_t kind) {
+    Shared* s = map();
+    if (!s || kind > 2) return;
+    InterlockedExchange(&s->runtimeKind, static_cast<LONG>(kind));
+}
+
+uint32_t runtimeKind() {
+    Shared* s = map();
+    return s ? static_cast<uint32_t>(InterlockedCompareExchange(&s->runtimeKind, 0, 0)) : 0;
 }
 
 bool takeSubmitHoldFrame() {

@@ -4,7 +4,7 @@
 #include <cctype>
 #include <set>
 
-namespace edvr::installer {
+namespace edvr {
 namespace {
 
 std::string trim(const std::string& s) {
@@ -667,4 +667,4 @@ std::string mergeIni(const std::string& next, const std::string& user, const std
     return result.text();
 }
 
-}  // namespace edvr::installer
+}  // namespace edvr

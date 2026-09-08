@@ -332,6 +332,38 @@ void announceGaze(float tx, float ty);
 void announceGazeLost();
 bool gazeCentre(float* tx, float* ty, uint32_t* stamp);
 
+// THE SETTINGS MENU'S CHANNEL (docs/settings-menu.md). The d3d11 half owns
+// the menu -- its rows, its keys, its bitmap -- and the openvr half owns the
+// door the frame leaves through, so three facts cross:
+//
+// The ANCHOR: the raw head pose (headPose's own 3x4 layout) the panel was
+// summoned at, published by d3d11 once per summon or recentre. The openvr
+// half builds each eye's transform from it at Submit. seq is the presence
+// bit and the change stamp in one.
+void publishMenuAnchor(const float* m12);
+bool menuAnchor(float* out12, uint32_t* seq);
+
+// VISIBLE: written by d3d11 EVERY FRAME while the menu machinery runs, with
+// the panel's fade alpha (0..1) -- and the stamp moves on every write, the
+// externalCam discipline, so "closed" and "d3d11 stopped saying" stay
+// distinguishable. The openvr half draws when alpha > 0 and the stamp moved
+// within the last few frames.
+void setMenuVisible(float alpha);
+bool menuVisible(float* alpha, uint32_t* stamp);
+
+// DRAWN: bumped by the d3d11 export every time the openvr half actually
+// composited the panel onto an outgoing eye frame. The keyboard gate follows
+// this and not the menu's own idea of itself: a menu that is not being drawn
+// must never take the keyboard (the fail-open rule).
+void bumpMenuDrawn();
+uint32_t menuDrawnValue();
+
+// The runtime under the openvr proxy, for the Status page: 0 unknown or
+// unpublished, 1 Valve's SteamVR, 2 OpenComposite. Published once by the
+// openvr half after its launch-centre identification.
+void announceRuntimeKind(uint32_t kind);
+uint32_t runtimeKind();
+
 // The cull guard's state, published by openvr_api.dll at its stage
 // transitions and read by d3d11.dll once per frame boundary.
 //
