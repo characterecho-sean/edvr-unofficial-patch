@@ -406,6 +406,51 @@ reach. What it cannot do is *move* anything: a flat hull crossing the
 frame at constant depth passes the test in its interior and ghosts there
 exactly as it does today, so tier 1 is a floor, not the feature.
 
+**Built 2026-09-08, behind `fix.temporal_aa_movers = off`, unflown.** What
+was built, and where it differs from the paragraph above:
+
+- *The carry costs no copy.* Both shader entries write this frame's depth
+  into the trained set's depth copy (`ZC`, `dlDepth`), and at the frame's
+  end the copy and a twin (`zPrev`) swap pointers, so next frame reads last
+  frame's at `t3`. The own path makes the depth copy alone when no trained
+  set exists; a rebuild, a withhold or a frame without a depth in hand
+  clears `zPrevValid`, and the mask stays off until a frame has written one
+  again. One `R32_FLOAT` per eye more resident (74 MB at 4340x4284).
+- *The test is against a range, not a texel.* The prediction is the
+  reprojection's own point -- `-dp.z` in last frame's eye space, for the
+  path the pixel actually took (the head's delta or the camera's) -- and it
+  is compared with the 3x3 of last frame's depth around `pp`, in metres,
+  with the tolerance (`advanced.temporal_aa_movers_tolerance`, 3% of depth)
+  applied to the range's ends: the jitter shifts the grid half a pixel
+  between frames and a single-texel compare fires on every silhouette every
+  frame whether anything moved or not, which is the same reason the
+  reprojection dilates. The far plane is consistent only with the far
+  plane, so a pixel that is sky now where a hull was last frame -- a
+  mover's trail -- is masked too, and a surface now where only sky was has
+  moved in. `temporalMoverTest` in `temporal_math.h` is the reference and
+  `tools/temporal_test` pins nine cases of it.
+- *What the mask does.* In the own pass the history weight is multiplied
+  by `1 - strength` where the mask is set (`advanced.temporal_aa_movers_
+  strength`, 1.0: the fresh frame alone, spatially settled by the filter).
+  On the trained path the `mv` entry writes `strength` into an `R8_UNORM`
+  texture that `dlaaEvaluate` hands NVIDIA as `pInBiasCurrentColorMask`
+  (question 9), the full frame only -- the fovea crop and the steady
+  periphery evaluations are not handed it, though the own periphery pass
+  applies it when it runs.
+- *What it costs.* Nine extra `R32` loads a pixel where the reprojection
+  landed on the image; the mv entry writes one byte more. The price prints
+  in the totals as before.
+- *How to read the flight.* The engage line says the mask is on and what
+  it was set to; the registration line's second half gains "the mover mask
+  set N% of pixels". Docked with the head still, N is the noise floor for
+  the tolerance and should read near zero; in the slot it is the rim's
+  edges and whatever crosses the view. `advanced.temporal_aa_debug =
+  movers` paints the mask white over the frame dimmed, on either path.
+  Then Sean's eyes: the distant station's rim without its trail, the
+  station lights that blurred under vessel movement (the Pimax flight of
+  2026-09-04), and whether anything static flickers at its edges, which is
+  what a tolerance set too tight looks like.
+
 ### Tier 2b -- the tag by a second draw
 
 If Phase 0 finds no free stencil bits, the tag goes into an EDVR target
@@ -1145,7 +1190,8 @@ which is this project's contract for every read of the game.
    which is tier 2's first stage, not a flight.
 2. **Tier 1**, about a day, behind its own key: the mask, the reactive
    weight, the bias mask on the trained path. It ships on its own merit and
-   stays on under tier 2.
+   stays on under tier 2. *Built 2026-09-08* (`fix.temporal_aa_movers`, off
+   until flown; the tier's own section says what to read).
 3. **Tier 2**, behind `fix.temporal_aa_objects = off`: the pool shadow and
    the classifier first, with the candidate and the debug view and *no
    tags* -- one flight that proves the records against the head on cockpit

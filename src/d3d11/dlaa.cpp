@@ -311,11 +311,11 @@ bool dlaaEvaluate(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* colour,
                   ID3D11Texture2D* depth, ID3D11Texture2D* motion,
                   ID3D11Texture2D* output, uint32_t w, uint32_t h,
                   uint32_t outW, uint32_t outH, float jx, float jy, bool reset,
-                  float frameMs, const char** reason) {
+                  float frameMs, const char** reason, ID3D11Texture2D* biasMask) {
 #ifndef EDVR_HAVE_NGX
     (void)ctx; (void)eye; (void)colour; (void)depth; (void)motion; (void)output;
     (void)w; (void)h; (void)outW; (void)outH; (void)jx; (void)jy; (void)reset;
-    (void)frameMs;
+    (void)frameMs; (void)biasMask;
     if (reason) *reason = "this build has no DLSS SDK in it";
     return false;
 #else
@@ -461,6 +461,11 @@ bool dlaaEvaluate(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* colour,
     // to denoise or anti-alias based on the speed of the object"); zero
     // when unknown, which the runtime treats as unstated.
     ep.InFrameTimeDeltaInMsec = frameMs;
+    // The mover mask, when the pass has one (tier 1 of
+    // docs/per-object-motion.md): the helper passes it straight through as
+    // NVSDK_NGX_Parameter_DLSS_Input_Bias_Current_Color_Mask, full frame
+    // (the sub-rect base stays at the origin, like the colour's).
+    ep.pInBiasCurrentColorMask = biasMask;
 
     ID3D11Device* dev = nullptr;
     ctx->GetDevice(&dev);

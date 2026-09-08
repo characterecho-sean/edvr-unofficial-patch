@@ -175,6 +175,24 @@ inline float temporalDepthToMetres(float d, float nearZ, float farZ) {
     return nearZ * farZ / den;
 }
 
+// Tier 1 of docs/per-object-motion.md, the mover test for one pixel
+// (2026-09-08). The camera-only reprojection predicts that this pixel's
+// surface sat at view depth zPred last frame (metres; 0 or less = the far
+// plane, or no depth); last frame's depth around the predicted position
+// spans [zMin, zMax] metres over its 3x3, with anyFar true when any of
+// those texels was the far plane. True when the surface is NOT where the
+// camera alone would have put it -- a mover or a disocclusion -- by more
+// than tol, a fraction of depth. The range rather than one texel because
+// the jitter shifts the grid half a pixel between frames and a single
+// compare fires on every silhouette every frame. The shader's moverAt
+// transcribes this; tools/temporal_test pins it.
+inline bool temporalMoverTest(float zPred, float zMin, float zMax, bool anyFar,
+                              float tol) {
+    if (!(zPred > 0.0f)) return !anyFar;   // sky now: consistent only with sky then
+    if (!(zMax > 0.0f)) return true;       // a surface now where only sky was
+    return zPred < zMin * (1.0f - tol) || zPred > zMax * (1.0f + tol);
+}
+
 // The angle of a rotation, in degrees, from the trace and the skew both:
 // cos = (trace - 1) / 2, sin = |skew| / 2, angle = atan2(sin, cos). An acos
 // of the trace alone cannot resolve below about 0.02 degrees in float (the

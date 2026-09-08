@@ -46,12 +46,17 @@ bool dlaaAvailable(ID3D11Device* dev, const char** reason);
 // of 2026-09-04 found it raised every frame; frameMs is the time since
 // this eye's previous evaluation, zero when unknown. A feature per eye is
 // created on first use and rebuilt on a size change. False on any
-// refusal, with its reason.
+// refusal, with its reason. biasMask, when given, is the runtime's
+// bias-current-colour input (R8_UNORM, w x h, 1 = take this frame's
+// colour over the history): the temporal pass's mover mask (tier 1 of
+// docs/per-object-motion.md), written where a pixel's surface is not
+// where the camera alone would have put it.
 bool dlaaEvaluate(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* colour,
                   ID3D11Texture2D* depth, ID3D11Texture2D* motion,
                   ID3D11Texture2D* output, uint32_t w, uint32_t h,
                   uint32_t outW, uint32_t outH, float jx, float jy, bool reset,
-                  float frameMs, const char** reason);
+                  float frameMs, const char** reason,
+                  ID3D11Texture2D* biasMask = nullptr);
 
 // One eye, one frame, but NVIDIA runs on a CROP of the frame -- the fovea,
 // docs/performance.md feature 6. The colour, depth and motion are the same

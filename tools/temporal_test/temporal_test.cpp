@@ -214,6 +214,31 @@ int main() {
         check(edvr::temporalDepthToMetres(0.0f, 0.025f, 50000.0f) > 40000.0f,
               "depth: the far plane reads as the far distance");
 
+        // The mover test (tier 1 of docs/per-object-motion.md): a surface
+        // where last frame's depth put it is not a mover; one behind what
+        // was there is a disocclusion; one where only sky was has moved in;
+        // sky over sky is consistent and sky where a hull was is its trail.
+        // The 3x3 range absorbs a grazing floor's gradient and the jitter.
+        using edvr::temporalMoverTest;
+        check(!temporalMoverTest(10.0f, 9.9f, 10.1f, false, 0.03f),
+              "mover: a surface where last frame's depth put it is not a mover");
+        check(temporalMoverTest(10.0f, 2.0f, 2.1f, false, 0.03f),
+              "mover: a surface behind what was there is a disocclusion");
+        check(temporalMoverTest(10.0f, 0.0f, 0.0f, true, 0.03f),
+              "mover: a surface where only sky was has moved in");
+        check(!temporalMoverTest(0.0f, 0.0f, 0.0f, true, 0.03f),
+              "mover: sky over sky is consistent");
+        check(temporalMoverTest(0.0f, 5.0f, 5.0f, false, 0.03f),
+              "mover: sky where a hull was is the hull's trail");
+        check(!temporalMoverTest(100.0f, 96.0f, 104.0f, false, 0.03f),
+              "mover: a grazing floor stays inside its 3x3's range");
+        check(!temporalMoverTest(10.25f, 10.0f, 10.0f, false, 0.03f),
+              "mover: 2.5 percent off is within a 3 percent tolerance");
+        check(temporalMoverTest(10.4f, 10.0f, 10.0f, false, 0.03f),
+              "mover: 4 percent off is not");
+        check(!temporalMoverTest(10.0f, 4.0f, 10.0f, true, 0.03f),
+              "mover: a hull's edge against sky, inside the range, is not a mover");
+
         // The game's camera: the two readings of the rows differ by a
         // transpose, and the transposed reading is the other's inverse.
         float dv[9], dvT[9], prod[9];

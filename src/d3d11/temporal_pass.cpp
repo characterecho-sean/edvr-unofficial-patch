@@ -3,6 +3,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <utility>   // std::swap, for the depth carry's pointer swap
 
 #include <windows.h>
 
@@ -41,7 +42,9 @@ RWTexture2D<float4> O : register(u0);    // the output, region-sized, the game's
 RWTexture2D<float4> N : register(u1);    // the new history
 RWStructuredBuffer<uint> Stats : register(u2);   // 0 rejected, 1 clipped, 2 the clips' size (luma/255, summed); then the same three per candidate, four of them; 15 pixels on the world path, 16 bright pixels, 17 bright pixels with no depth; 18-20 the registration probes on the world path (sum dx*100, sum dy*100, count) and 21-23 on the ship; 24-27 world pixels, world clipped, ship pixels, ship clipped; 28-29 unused (the depth layers, retired 2026-09-04); 30-32 the registration probes on the sky (the far plane: sum dx*100, sum dy*100, count); 33-34 the probes' sum resid.mv*100 and sum mv.mv*100 on the sky, 35-36 on the world with a depth, 37-38 on the ship
 RWTexture2D<float2> MV : register(u3);   // for a trained pass: motion vectors, pixels, current -> previous
-RWTexture2D<float>  ZC : register(u4);   // and the depth, copied as it is
+RWTexture2D<float>  ZC : register(u4);   // and the depth, copied as it is (both entries, when the mover mask wants last frame's)
+Texture2D<float> ZP : register(t3);      // LAST frame's ZC, when the mover mask is on (movers.x)
+RWTexture2D<float> MK : register(u5);    // for a trained pass: the mover mask, NVIDIA's bias-current-colour input
 cbuffer P : register(b0) {
     int4   region;      // x0 y0 x1 y1: this eye's pixels in S (x1, y1 exclusive)
     int2   size;        // the region's size = the output's
@@ -75,6 +78,7 @@ cbuffer P : register(b0) {
     float4 split;       // x the ship's radius in metres (nearer: the head's delta; farther and the far plane: the camera's); y the debug view (1 motion, 2 error, 3 depth); z a depth in metres for depthless pixels in a menu-like scene (0 off); w 1 = menu-like scene
     float4 fovea0;      // xy the fovea centre in output pixels, z the inner radius (px) where the periphery calming starts, w 1/(the ramp width in px)
     float4 fovea1;      // x the periphery calm strength (0..1), w 1 = the fovea is on (else no modulation)
+    float4 movers;      // x 1 = the mover mask is on (ZP holds last frame's depth for this frustum); y the depth tolerance, a fraction; z the strength, how much history a masked pixel loses (0..1); w 1 = main writes ZC
 };
 float3 rgbToYcocg(float3 c) {
     return float3(0.25 * c.r + 0.5 * c.g + 0.25 * c.b,
@@ -153,9 +157,56 @@ R"HLSL(
 // depth anywhere the pass can see (docs/anti-aliasing.md has the record).
 float zSceneAt(int2 q) { return Z.Load(int3(q, 0)); }
 float zAt(int2 q) { return zSceneAt(q); }
+// Tier 1 of docs/per-object-motion.md: the mover mask from depth
+// consistency (2026-09-08). The reprojection says where this pixel's
+// surface WAS if it moved with the camera alone -- at pp, at view depth
+// zPred metres -- and last frame's depth copy says what actually was at
+// pp. Where the two disagree the surface is either a mover (something the
+// camera's vectors cannot follow: a station's rim, a ship crossing the
+// view) or a disocclusion (the history at pp shows what was in front a
+// frame ago), and both deserve less history: a moving edge stops trailing
+// a ghost, and the far side of a pillar you move past stops showing the
+// pillar. It compares against the RANGE of last frame's 3x3 around pp,
+// not one texel: the jitter shifts the sample grid half a pixel between
+// frames, and at a depth edge a single-texel compare fires on every
+// silhouette every frame whether anything moved or not (the same reason
+// the reprojection dilates). The far plane is consistent only with the
+// far plane, so a pixel that is sky now where a hull was last frame -- a
+// mover's trail -- is masked too. What it cannot see is a mover's
+// INTERIOR at constant depth, which passes; that is the later tiers'
+// work, and this is the floor under them. temporalMoverTest in
+// temporal_math.h is the reference the test pins; this transcribes it.
+// zPred <= 0 means the pixel has no depth now (the far plane, or none).
+float moverAt(float2 pp, float zPred) {
+    int2 pq = int2(round(pp));
+    float zmin = 1e30;
+    float zmax = 0.0;
+    bool anyFar = false;
+    [unroll] for (int oy = -1; oy <= 1; ++oy) {
+        [unroll] for (int ox = -1; ox <= 1; ++ox) {
+            int2 q = clamp(pq + int2(ox, oy), int2(0, 0), size - 1);
+            float zr = ZP.Load(int3(q, 0));
+            float den = zr * (knobs.w - knobs.z) + knobs.z;
+            if (zr <= 0.0 || den <= 0.0) {
+                anyFar = true;
+            } else {
+                float z = knobs.z * knobs.w / den;
+                zmin = min(zmin, z);
+                zmax = max(zmax, z);
+            }
+        }
+    }
+    if (zPred <= 0.0) return anyFar ? 0.0 : 1.0;   // sky now: consistent only with sky then
+    if (zmax <= 0.0) return 1.0;                   // a surface now where only sky was
+    float tol = movers.y;
+    return (zPred < zmin * (1.0 - tol) || zPred > zmax * (1.0 + tol)) ? 1.0 : 0.0;
+}
+// zPred: the predicted view depth of this pixel's surface in last frame's
+// eye space, metres, for the mover mask -- 0 when the pixel took no real
+// depth (the far plane, the menu's assumed depth, no depth bound).
 bool fetchHistoryT(float2 p, float3 r0, float3 r1, float3 r2, float3 tv,
                    bool useDepth, bool allowWorld, out uint world, out float2 mvOut,
-                   out float3 hy) {
+                   out float zPred, out float3 hy) {
     float3 d;
     d.x = tanNow.x + (p.x + 0.5) / float(size.x) * (tanNow.y - tanNow.x);
     d.y = tanNow.w - (p.y + 0.5) / float(size.y) * (tanNow.w - tanNow.z);
@@ -163,6 +214,7 @@ bool fetchHistoryT(float2 p, float3 r0, float3 r1, float3 r2, float3 tv,
     float3 dp = float3(dot(r0, d), dot(r1, d), dot(r2, d));
     world = 0;
     mvOut = 0.0;
+    zPred = 0.0;
     // The world/ship split: the ship's own things (the cockpit, the hull)
     // move with the head's delta; everything farther than split.x metres,
     // and the far plane, moves with the game's CAMERA -- the head and the
@@ -191,9 +243,13 @@ bool fetchHistoryT(float2 p, float3 r0, float3 r1, float3 r2, float3 tv,
         if (worldOn && (far || z > split.x)) {
             world = 1;
             dp = float3(dot(c2R0.xyz, d), dot(c2R1.xyz, d), dot(c2R2.xyz, d));
-            if (!far) dp = dp * z + tvCam.xyz;
+            if (!far) {
+                dp = dp * z + tvCam.xyz;
+                zPred = -dp.z;
+            }
         } else if (useDepth && !far) {
             dp = dp * z + tv;
+            zPred = -dp.z;
         } else if (useDepth && far && split.w != 0.0 && split.z > 0.0) {
             // A menu-like scene's depthless pixels (the main menu's hangar
             // wall reads no depth and reprojected as the far plane, so it
@@ -228,7 +284,8 @@ bool fetchHistoryT(float2 p, float3 r0, float3 r1, float3 r2, float3 tv,
 bool fetchHistory(float2 p, float3 r0, float3 r1, float3 r2, out float3 hy) {
     uint wd = 0;
     float2 mvd = 0.0;
-    return fetchHistoryT(p, r0, r1, r2, float3(0.0, 0.0, 0.0), false, false, wd, mvd, hy);
+    float zd = 0.0;
+    return fetchHistoryT(p, r0, r1, r2, float3(0.0, 0.0, 0.0), false, false, wd, mvd, zd, hy);
 }
 // How far a clip moved the history, in luma, as a count of 1/255ths: a
 // nudge on a text edge is a few, a history that landed somewhere else
@@ -257,7 +314,7 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
     // Three counters, not forty. This pass writes 15, 16 and 17 and no
     // others, and a forty-element local array costs forty registers of
     // occupancy on a dispatch that covers the whole eye.
-    uint count15 = 0, count16 = 0, count17 = 0;
+    uint count15 = 0, count16 = 0, count17 = 0, count28 = 0;
     if (id.x < (uint)size.x && id.y < (uint)size.y) {
         float2 p = float2(id.xy);
         float3 d;
@@ -266,6 +323,7 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
         d.z = -1.0;
         float3 dp = float3(dot(dR0.xyz, d), dot(dR1.xyz, d), dot(dR2.xyz, d));
         float zraw = zAt(region.xy + int2(p));
+        float zPred = 0.0;   // for the mover mask: the surface's predicted depth last frame, 0 = none
         if (knobs.y != 0.0) {
             float zr = 0.0;
             [unroll] for (int oy = -1; oy <= 1; ++oy) {
@@ -281,9 +339,13 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
             if (worldOn && (far || z > split.x)) {
                 count15 = 1;
                 dp = float3(dot(c2R0.xyz, d), dot(c2R1.xyz, d), dot(c2R2.xyz, d));
-                if (!far) dp = dp * z + tvCam.xyz;
+                if (!far) {
+                    dp = dp * z + tvCam.xyz;
+                    zPred = -dp.z;
+                }
             } else if (!far) {
                 dp = dp * z + tvUsed.xyz;
+                zPred = -dp.z;
             } else if (split.w != 0.0 && split.z > 0.0) {
                 dp = dp * split.z + tvUsed.xyz;   // the menu's assumed depth (fetchHistoryT says)
             }
@@ -294,6 +356,7 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
             }
         }
         float2 motion = 0.0;
+        float mover = 0.0;
         if (dp.z < -1e-6) {
             float xt = dp.x / -dp.z;
             float yt = dp.y / -dp.z;
@@ -301,13 +364,28 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
             pp.x = (xt - tanPrev.x) / (tanPrev.y - tanPrev.x) * float(size.x) - 0.5;
             pp.y = (tanPrev.w - yt) / (tanPrev.w - tanPrev.z) * float(size.y) - 0.5;
             motion = pp - p;
+            // The mover mask, where the prediction lands on last frame's
+            // image (off it NVIDIA has no history to bias against anyway).
+            if (movers.x != 0.0 && pp.x >= 0.0 && pp.y >= 0.0 &&
+                pp.x <= float(size.x) - 1.0 && pp.y <= float(size.y) - 1.0) {
+                mover = moverAt(pp, zPred);
+                if (mover != 0.0) count28 = 1;
+            }
         }
         MV[id.xy] = motion;
+        // NVIDIA's bias-current-colour mask: the strength is the value, so
+        // one knob means the same on both paths.
+        MK[id.xy] = mover * movers.z;
         // The motion view on the trained path: painted into the output in
         // NVIDIA's place (the pass skips its evaluation that frame).
         if (split.y == 1.0) {
             O[id.xy] = float4(saturate(0.5 + motion.x / 16.0), saturate(0.5 + motion.y / 16.0),
                               count15 != 0 ? 1.0 : 0.0, 1.0);
+        } else if (split.y == 4.0) {
+            // The mover view: the mask white over the frame dimmed, so a
+            // screenshot in the slot shows the rim's edges and nothing else.
+            float3 dim = S.Load(int3(region.xy + int2(p), 0)).rgb * 0.25;
+            O[id.xy] = float4(mover != 0.0 ? float3(1.0, 1.0, 1.0) : dim, 1.0);
         } else if (split.y == 3.0) {
             float zs3 = zSceneAt(region.xy + int2(p));
             float3 o3;
@@ -327,6 +405,7 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
     if (count15 != 0) InterlockedAdd(gCount[15], count15);
     if (count16 != 0) InterlockedAdd(gCount[16], count16);
     if (count17 != 0) InterlockedAdd(gCount[17], count17);
+    if (count28 != 0) InterlockedAdd(gCount[28], count28);
     GroupMemoryBarrierWithGroupSync();
     // Only the counters that moved. A group whose counters are all zero --
     // which is nearly every group, since these count rare classes of pixel
@@ -428,11 +507,23 @@ void main(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
         uint worldTaken = 0;
         float2 mvUsed = 0.0;
         float errUsed = 0.0;
+        float mover = 0.0;
         if (haveHistory != 0) {
             float3 hy;
+            float zPred = 0.0;
             if (fetchHistoryT(p, dR0.xyz, dR1.xyz, dR2.xyz, tvUsed.xyz,
-                              knobs.y != 0.0 && tvUsed.w != 0.0, true, worldTaken, mvUsed, hy)) {
+                              knobs.y != 0.0 && tvUsed.w != 0.0, true, worldTaken, mvUsed, zPred, hy)) {
                 if (worldTaken != 0) count[15] = 1;
+                // The mover mask (moverAt says): a masked pixel keeps less
+                // of its history, by the strength -- at 1 it is the fresh
+                // frame alone, spatially settled by the filter above.
+                if (movers.x != 0.0) {
+                    mover = moverAt(p + mvUsed, zPred);
+                    if (mover != 0.0) {
+                        count[28] = 1;
+                        blEff *= 1.0 - movers.z;
+                    }
+                }
                 errUsed = saturate(abs(hy.x - rgbToYcocg(cur.rgb).x) * 4.0);
                 float3 hc = clipToBox(boxMin, boxMax, hy);
                 if (any(abs(hc - hy) > 1e-4)) {
@@ -476,7 +567,8 @@ void main(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
                 float3 h;
                 uint wc = 0;
                 float2 mvc = 0.0;
-                if (!fetchHistoryT(p, r0, r1, r2, tvc, depthC, false, wc, mvc, h)) {
+                float zc = 0.0;
+                if (!fetchHistoryT(p, r0, r1, r2, tvc, depthC, false, wc, mvc, zc, h)) {
                     count[3 + c * 3] = 1;
                 } else {
                     float3 hc2 = clipToBox(boxMin, boxMax, h);
@@ -555,6 +647,9 @@ void main(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
         if (!used) count[0] = 1;
         float3 o = saturate(outc);
         N[id.xy] = float4(o, 1.0);
+        // This frame's depth, kept for next frame's mover mask (movers.w):
+        // the trained path's mv entry writes the same copy for NVIDIA.
+        if (movers.w != 0.0) ZC[id.xy] = zAt(region.xy + ci);
         // The debug views (advanced.temporal_aa_debug): the history keeps
         // accumulating as normal, only what leaves changes. motion paints
         // the used reprojection -- +x red, +y green, around mid-grey with
@@ -567,6 +662,9 @@ void main(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
                        worldTaken != 0 ? 1.0 : 0.0);
         } else if (split.y == 2.0) {
             o = errUsed.xxx;
+        } else if (split.y == 4.0) {
+            // The mover view: the mask white over the frame dimmed.
+            o = mover != 0.0 ? float3(1.0, 1.0, 1.0) : cur.rgb * 0.25;
         } else if (split.y == 3.0) {
             // The depth view: where each pixel's depth comes from -- the
             // scene's in grey by distance (near bright, log scale to
@@ -754,7 +852,7 @@ void down(uint3 id : SV_DispatchThreadID) {
 }
 )HLSL";
 
-// The cbuffer above, laid out to match: 448 bytes, twenty-eight 16-byte rows.
+// The cbuffer above, laid out to match: 464 bytes, twenty-nine 16-byte rows.
 struct PassParams {
     int32_t region[4];
     int32_t size[2];
@@ -777,8 +875,9 @@ struct PassParams {
     float   split[4];    // x the ship's radius in metres
     float   fovea0[4];   // xy centre px, z inner radius px, w 1/ramp px (feature 6, periphery calming)
     float   fovea1[4];   // x calm strength 0..1, w 1 = fovea on
+    float   movers[4];   // x 1 = mover mask on, y tolerance (fraction), z strength 0..1, w 1 = main writes the depth copy (tier 1, docs/per-object-motion.md)
 };
-static_assert(sizeof(PassParams) == 448, "the cbuffer is twenty-eight 16-byte rows");
+static_assert(sizeof(PassParams) == 464, "the cbuffer is twenty-nine 16-byte rows");
 
 // The format allowlist: the supersample resolve's, for its reasons
 // (supersample_pass.cpp) -- typeless and UNORM families read and written
@@ -860,6 +959,20 @@ struct EyeState {
     ID3D11Texture2D*           dlSubmit = nullptr;  // NVIDIA's frame copied into the game's own format: what goes out
     uint32_t                   dlW = 0, dlH = 0;
     uint32_t                   dlOutW = 0, dlOutH = 0;
+    // Tier 1 of docs/per-object-motion.md (2026-09-08), the mover mask:
+    // LAST frame's depth copy -- the twin of dlDepth, swapped with it after
+    // every frame that wrote one, so no copy is ever made -- and the mask
+    // NVIDIA is handed (R8_UNORM). zPrevValid says the swap happened last
+    // frame at this size; a rebuild, a reset or a frame without a depth
+    // write clears it, and the mask stays off until it is true again.
+    // Both live and die with the dl set (releaseDl), whichever path made
+    // it: the own path makes dlDepth alone when it needs the carry.
+    ID3D11Texture2D*           zPrev = nullptr;
+    ID3D11ShaderResourceView*  zPrevSrv = nullptr;
+    ID3D11UnorderedAccessView* zPrevUav = nullptr;
+    bool                       zPrevValid = false;
+    ID3D11Texture2D*           dlMask = nullptr;
+    ID3D11UnorderedAccessView* dlMaskUav = nullptr;
     ID3D11Texture2D*           copyTex = nullptr;  // the copy-through, for a source that refuses a view
     ID3D11ShaderResourceView*  copySrv = nullptr;
     uint32_t                   copyW = 0, copyH = 0;
@@ -943,6 +1056,12 @@ void releasePeriph(EyeState& e) {
 }
 void releaseDl(EyeState& e) {
     releasePeriph(e);   // the periphery's sizes follow the render's
+    if (e.zPrevUav) { e.zPrevUav->Release(); e.zPrevUav = nullptr; }
+    if (e.zPrevSrv) { e.zPrevSrv->Release(); e.zPrevSrv = nullptr; }
+    if (e.zPrev) { e.zPrev->Release(); e.zPrev = nullptr; }
+    e.zPrevValid = false;
+    if (e.dlMaskUav) { e.dlMaskUav->Release(); e.dlMaskUav = nullptr; }
+    if (e.dlMask) { e.dlMask->Release(); e.dlMask = nullptr; }
     if (e.dlColourSrv) { e.dlColourSrv->Release(); e.dlColourSrv = nullptr; }
     if (e.dlMvSrv) { e.dlMvSrv->Release(); e.dlMvSrv = nullptr; }
     if (e.dlDepthSrv) { e.dlDepthSrv->Release(); e.dlDepthSrv = nullptr; }
@@ -1105,6 +1224,7 @@ constexpr float kStillDeg = 0.03f;   // under 2 deg/s at 72 Hz: tracking noise
 constexpr float kSlowDeg = 0.30f;    // under 22 deg/s: a glance
 bool     g_priceLogged = false;
 uint32_t g_lastW = 0, g_lastH = 0;
+uint64_t g_moverPix = 0;   // pixels the mover mask set this interval (Stats[28]; tier 1)
 
 void maybeLogPrice() {
     if (g_priceLogged || g_timeCount < 120 || g_pixelsSeen == 0) return;
@@ -1157,6 +1277,7 @@ void pollSlots(ID3D11DeviceContext* ctx) {
                 g_worldPix += v[15];
                 g_brightPix += v[16];
                 g_brightNoDepthPix += v[17];
+                g_moverPix += v[28];
                 g_probeWorldDx += static_cast<int32_t>(v[18]);
                 g_probeWorldDy += static_cast<int32_t>(v[19]);
                 g_probeWorldN += v[20];
@@ -1283,6 +1404,13 @@ int      g_debugMode = 0;          // advanced.temporal_aa_debug: 0 off, 1 motio
 float    g_lastNear = 0.0f;        // the planes the last treat decoded with (temporalPassPlanes)
 float    g_lastFar = 0.0f;
 float    g_menuMetres = 0.0f;      // advanced.temporal_aa_menu_metres: a depth for depthless pixels in a menu-like scene
+// Tier 1 of docs/per-object-motion.md, the mover mask (2026-09-08): off by
+// default until it has flown. The tolerance is a fraction of depth, the
+// strength how much history a masked pixel loses.
+bool     g_moversOn = false;       // fix.temporal_aa_movers
+float    g_moversTol = 0.03f;      // advanced.temporal_aa_movers_tolerance, percent in the ini
+float    g_moversStrength = 1.0f;  // advanced.temporal_aa_movers_strength
+bool     g_moversNoted = false;    // the engage line, once
 float    g_foveaDeg = 0.0f;        // advanced.temporal_aa_fovea: NVIDIA runs on a crop this many degrees across; 0 = whole frame
 float    g_foveaEdgeDeg = 6.0f;    // advanced.temporal_aa_fovea_edge: the blend band, in degrees
 float    g_peripheryCalm = 0.4f;   // advanced.temporal_aa_periphery_calm: how much the own history is eased toward the periphery (0 uniform, 1 max), the sharp periphery only
@@ -1502,6 +1630,69 @@ bool makeTex(ID3D11Device* dev, uint32_t w, uint32_t h, DXGI_FORMAT texFmt,
         ud.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D;
         if (FAILED(dev->CreateUnorderedAccessView(*outTex, &ud, outUav))) {
             return false;
+        }
+    }
+    return true;
+}
+
+// The mask NVIDIA is handed is R8_UNORM written from a compute shader,
+// which needs typed unordered access to that format -- checked once, and
+// its absence only loses NVIDIA's copy of the mask, never the own pass's.
+bool g_maskFmtChecked = false;
+bool g_maskFmtOk = false;
+bool maskFormatOk(ID3D11Device* dev) {
+    if (!g_maskFmtChecked) {
+        g_maskFmtChecked = true;
+        UINT support = 0;
+        g_maskFmtOk = SUCCEEDED(dev->CheckFormatSupport(DXGI_FORMAT_R8_UNORM, &support)) &&
+                      (support & D3D11_FORMAT_SUPPORT_TYPED_UNORDERED_ACCESS_VIEW) != 0;
+        if (!g_maskFmtOk) {
+            Log::get().note(
+                "temporal aa: this GPU/driver reports no typed unordered access for R8_UNORM, "
+                "so the mover mask cannot be handed to NVIDIA; the pass's own history still "
+                "applies it.");
+        }
+    }
+    return g_maskFmtOk;
+}
+
+// Tier 1's textures beside the depth copy (docs/per-object-motion.md,
+// 2026-09-08): last frame's depth -- the depth copy's twin, swapped with it
+// after every frame that wrote one, so the carry costs no copy -- and the
+// mask NVIDIA is handed. Made at the depth copy's size, and the depth copy
+// itself when the own path runs without a trained set (a stale set at
+// another size goes with it; the trained block rebuilds its own, and its
+// test sees the missing output). A failure leaves e.zPrev null, which is
+// how the pass knows to keep the mask off; the mask texture is optional.
+bool ensureMoverPair(ID3D11Device* dev, EyeState& e, uint32_t w, uint32_t h) {
+    if (!e.dlDepth || e.dlW != w || e.dlH != h) {
+        releaseDl(e);
+        if (!makeTex(dev, w, h, DXGI_FORMAT_R32_FLOAT, DXGI_FORMAT_R32_FLOAT,
+                     D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS,
+                     &e.dlDepth, &e.dlDepthSrv, &e.dlDepthUav)) {
+            releaseDl(e);
+            return false;
+        }
+        e.dlW = w;
+        e.dlH = h;
+    }
+    if (!e.zPrev) {
+        e.zPrevValid = false;
+        if (!makeTex(dev, w, h, DXGI_FORMAT_R32_FLOAT, DXGI_FORMAT_R32_FLOAT,
+                     D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS,
+                     &e.zPrev, &e.zPrevSrv, &e.zPrevUav)) {
+            if (e.zPrevUav) { e.zPrevUav->Release(); e.zPrevUav = nullptr; }
+            if (e.zPrevSrv) { e.zPrevSrv->Release(); e.zPrevSrv = nullptr; }
+            if (e.zPrev) { e.zPrev->Release(); e.zPrev = nullptr; }
+            return false;
+        }
+    }
+    if (!e.dlMask && maskFormatOk(dev)) {
+        if (!makeTex(dev, w, h, DXGI_FORMAT_R8_UNORM, DXGI_FORMAT_R8_UNORM,
+                     D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS,
+                     &e.dlMask, nullptr, &e.dlMaskUav)) {
+            if (e.dlMaskUav) { e.dlMaskUav->Release(); e.dlMaskUav = nullptr; }
+            if (e.dlMask) { e.dlMask->Release(); e.dlMask = nullptr; }
         }
     }
     return true;
@@ -1853,6 +2044,10 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         if (flags & 1u) {
             e.haveHistory = false;
             e.dlHaveHistory = false;
+            // ...and the depth carry: a withheld frame broke the pose
+            // stream's continuity, so last frame's depth is not the frame
+            // the delta describes. The mask waits one frame.
+            e.zPrevValid = false;
         }
 
         // This frame's camera rows, chosen from the frame's writes (once).
@@ -2144,6 +2339,32 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         p.split[1] = static_cast<float>(g_debugMode);
         p.split[2] = g_menuMetres;
         p.split[3] = (haveDepth && sceneDraws < 50u) ? 1.0f : 0.0f;
+        // Tier 1's mover mask (docs/per-object-motion.md): on only when last
+        // frame's depth is in hand at this size AND the frustum and delta in
+        // these constants describe that frame -- compared against any other
+        // image it would mask everything. The depth copy is written whenever
+        // the mask is wanted and a depth is bound, so the next frame has its
+        // carry; the compare itself waits for zPrevValid.
+        const bool moversOn = g_moversOn && haveDepth && e.zPrevValid && e.zPrev != nullptr &&
+                              e.zPrevSrv != nullptr && useTanPrev && haveDelta;
+        p.movers[0] = moversOn ? 1.0f : 0.0f;
+        p.movers[1] = g_moversTol;
+        p.movers[2] = g_moversStrength;
+        p.movers[3] = (g_moversOn && haveDepth) ? 1.0f : 0.0f;
+        if (moversOn && !g_moversNoted) {
+            g_moversNoted = true;
+            Log::get().note(
+                "temporal aa: the mover mask is on (fix.temporal_aa_movers) -- a pixel whose "
+                "surface is not where the camera alone would have put it last frame (its depth "
+                "off by more than %.0f%% from last frame's at that spot: a mover's edge, a "
+                "disocclusion) keeps %.0f%% less history, and under dlaa/dlss NVIDIA is handed "
+                "the same mask as its bias-current-colour input. One depth copy per eye more "
+                "resident (%.0f MB at %ux%u); the masked share prints on the registration line, "
+                "and advanced.temporal_aa_debug = movers paints it.",
+                100.0 * static_cast<double>(g_moversTol),
+                100.0 * static_cast<double>(g_moversStrength),
+                static_cast<double>(w) * h * 4.0 / 1048576.0, w, h);
+        }
         for (int c = 0; c < 3; ++c) {
             p.dR0[c] = delta[0 * 3 + c];
             p.dR1[c] = delta[1 * 3 + c];
@@ -2383,6 +2604,10 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         }
 
         bool usedDlaa = false;
+        // Tier 1's depth carry: true once a dispatch this frame wrote ZC into
+        // e.dlDepth with a depth bound and a twin to swap it with, so the
+        // frame's end can make it last frame's.
+        bool zcWritten = false;
         // The trained path copies the colour into R8G8B8A8_UNORM, which is
         // only legal within that family (the review of 2026-09-04, F9): any
         // other family runs the pass's own history and says so once.
@@ -2450,9 +2675,12 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                         e.dlH = h;
                         e.dlOutW = oW;
                         e.dlOutH = oH;
+                        if (g_moversOn) ensureMoverPair(dev, e, w, h);
                     } else {
                         releaseDl(e);
                     }
+                } else if (made && g_moversOn && !e.zPrev) {
+                    ensureMoverPair(dev, e, w, h);   // the mask switched on under a live set
                 }
                 if (made && setParams(ctx, p)) {
                     // The colour, typed, whichever way the source came.
@@ -2476,25 +2704,30 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     } else {
                         ctx->CopySubresourceRegion(e.dlColour, 0, 0, 0, 0, src, 0, &box);
                     }
-                    // The motion vectors and the depth copy.
-                    ID3D11ShaderResourceView* nullSrvM[3] = {};
-                    ID3D11UnorderedAccessView* nullUavM[5] = {};
-                    ctx->CSSetShaderResources(0, 3, nullSrvM);
-                    ctx->CSSetUnorderedAccessViews(0, 5, nullUavM, nullptr);
+                    // The motion vectors and the depth copy -- and, with the
+                    // mover mask on, last frame's depth read at t3 and the
+                    // mask written at u5 (tier 1, docs/per-object-motion.md).
+                    const bool debugPaint = g_debugMode == 1 || g_debugMode == 3 || g_debugMode == 4;
+                    ID3D11ShaderResourceView* nullSrvM[4] = {};
+                    ID3D11UnorderedAccessView* nullUavM[6] = {};
+                    ctx->CSSetShaderResources(0, 4, nullSrvM);
+                    ctx->CSSetUnorderedAccessViews(0, 6, nullUavM, nullptr);
                     ctx->CSSetShader(g_csMv, nullptr, 0);
-                    ID3D11ShaderResourceView* srvsM[3] = {inSrv, e.histSrv[e.histRead], depthSrv};
-                    ID3D11UnorderedAccessView* uavsM[5] = {(g_debugMode == 1 || g_debugMode == 3) ? e.dlOutUav : nullptr,
+                    ID3D11ShaderResourceView* srvsM[4] = {inSrv, e.histSrv[e.histRead], depthSrv,
+                                                          p.movers[0] != 0.0f ? e.zPrevSrv : nullptr};
+                    ID3D11UnorderedAccessView* uavsM[6] = {debugPaint ? e.dlOutUav : nullptr,
                                                            nullptr, g_statsUav, e.dlMvUav,
-                                                           e.dlDepthUav};
+                                                           e.dlDepthUav, e.dlMaskUav};
                     ID3D11Buffer* cbM = g_cb;
                     ID3D11SamplerState* smpM = g_samp;
-                    ctx->CSSetShaderResources(0, 3, srvsM);
-                    ctx->CSSetUnorderedAccessViews(0, 5, uavsM, nullptr);
+                    ctx->CSSetShaderResources(0, 4, srvsM);
+                    ctx->CSSetUnorderedAccessViews(0, 6, uavsM, nullptr);
                     ctx->CSSetConstantBuffers(0, 1, &cbM);
                     ctx->CSSetSamplers(0, 1, &smpM);
                     ctx->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
-                    ctx->CSSetShaderResources(0, 3, nullSrvM);
-                    ctx->CSSetUnorderedAccessViews(0, 5, nullUavM, nullptr);
+                    ctx->CSSetShaderResources(0, 4, nullSrvM);
+                    ctx->CSSetUnorderedAccessViews(0, 6, nullUavM, nullptr);
+                    if (haveDepth && e.zPrev) zcWritten = true;
                     // NVIDIA's evaluation. Its history restarts only when it is
                     // broken: this eye's first frame, a withhold (flags bit 0),
                     // rebuilt textures, or a frame the pass's own history ran in
@@ -2514,13 +2747,15 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                         if (frameMs < 1.0f || frameMs > 100.0f) frameMs = 0.0f;
                     }
                     e.dlLastQpc = qNow.QuadPart;
-                    if (g_debugMode == 1 || g_debugMode == 3) {
-                        // The motion view: the mv entry painted the vectors into
-                        // the output; NVIDIA is skipped and starts afresh after.
+                    if (debugPaint) {
+                        // The motion, depth and mover views: the mv entry
+                        // painted into the output; NVIDIA is skipped and
+                        // starts afresh after.
                         usedDlaa = true;
                         e.dlHaveHistory = false;
                     } else if (dlaaEvaluate(ctx, eye, e.dlColour, e.dlDepth, e.dlMv, e.dlOut, w, h,
-                                            oW, oH, jxNow, jyNow, resetHist, frameMs, &why)) {
+                                            oW, oH, jxNow, jyNow, resetHist, frameMs, &why,
+                                            p.movers[0] != 0.0f ? e.dlMask : nullptr)) {
                         usedDlaa = true;
                         e.dlHaveHistory = true;
                         if (!g_dlaaNoted || (oW != w && !g_dlssNoted)) {
@@ -2670,9 +2905,12 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                                    &e.dlOut, &e.dlOutSrv, &e.dlOutUav);
                     if (made) {
                         e.dlW = w; e.dlH = h; e.dlOutW = foW; e.dlOutH = foH;
+                        if (g_moversOn) ensureMoverPair(dev, e, w, h);
                     } else {
                         releaseDl(e);
                     }
+                } else if (made && g_moversOn && !e.zPrev) {
+                    ensureMoverPair(dev, e, w, h);
                 }
                 if (made && (!e.foveaOut || e.foveaW != foW || e.foveaH != foH)) {
                     if (e.foveaOutUav) { e.foveaOutUav->Release(); e.foveaOutUav = nullptr; }
@@ -2728,29 +2966,33 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     }
                     // Motion vectors and the depth copy, full frame (NVIDIA
                     // reads the crop's sub-rectangle of them; the reduction
-                    // reads them whole).
-                    ID3D11ShaderResourceView* nullSrvM[3] = {};
-                    ID3D11UnorderedAccessView* nullUavM[5] = {};
-                    ctx->CSSetShaderResources(0, 3, nullSrvM);
-                    ctx->CSSetUnorderedAccessViews(0, 5, nullUavM, nullptr);
+                    // reads them whole). The mover mask is computed here too
+                    // (t3, u5) but only the own periphery pass applies it:
+                    // the crop and periphery evaluations are not handed it.
+                    ID3D11ShaderResourceView* nullSrvM[4] = {};
+                    ID3D11UnorderedAccessView* nullUavM[6] = {};
+                    ctx->CSSetShaderResources(0, 4, nullSrvM);
+                    ctx->CSSetUnorderedAccessViews(0, 6, nullUavM, nullptr);
                     ctx->CSSetShader(g_csMv, nullptr, 0);
-                    ID3D11ShaderResourceView* srvsM[3] = {inSrv, e.histSrv[readIdx], depthSrv};
+                    ID3D11ShaderResourceView* srvsM[4] = {inSrv, e.histSrv[readIdx], depthSrv,
+                                                          p.movers[0] != 0.0f ? e.zPrevSrv : nullptr};
                     // u2 (the stats buffer) is left UNBOUND here: the own pass
                     // writes its stats when it runs, and the mv entry writes
                     // the same slots (15-17), so binding it would double them
                     // (the review of 2026-09-05, F5). Atomics on a null UAV
                     // are dropped.
-                    ID3D11UnorderedAccessView* uavsM[5] = {nullptr, nullptr, nullptr,
-                                                           e.dlMvUav, e.dlDepthUav};
+                    ID3D11UnorderedAccessView* uavsM[6] = {nullptr, nullptr, nullptr,
+                                                           e.dlMvUav, e.dlDepthUav, e.dlMaskUav};
                     ID3D11Buffer* cbM = g_cb;
                     ID3D11SamplerState* smpM = g_samp;
-                    ctx->CSSetShaderResources(0, 3, srvsM);
-                    ctx->CSSetUnorderedAccessViews(0, 5, uavsM, nullptr);
+                    ctx->CSSetShaderResources(0, 4, srvsM);
+                    ctx->CSSetUnorderedAccessViews(0, 6, uavsM, nullptr);
                     ctx->CSSetConstantBuffers(0, 1, &cbM);
                     ctx->CSSetSamplers(0, 1, &smpM);
                     ctx->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
-                    ctx->CSSetShaderResources(0, 3, nullSrvM);
-                    ctx->CSSetUnorderedAccessViews(0, 5, nullUavM, nullptr);
+                    ctx->CSSetShaderResources(0, 4, nullSrvM);
+                    ctx->CSSetUnorderedAccessViews(0, 6, nullUavM, nullptr);
+                    if (haveDepth && e.zPrev) zcWritten = true;
 
                     // NVIDIA's frame delta, shared by the periphery and the
                     // crop (evaluated together): the time since this eye's
@@ -2874,21 +3116,33 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
             // the fovea both ran and the composite is ready to take them.
             const bool ownNeeded = !(foveaMode && steady && periphOk && foveaEvalOk && compositeReady);
             if (ownNeeded) {
-                ID3D11ShaderResourceView* nullSrv[3] = {};
-                ID3D11UnorderedAccessView* nullUav[3] = {};
-                ctx->CSSetShaderResources(0, 3, nullSrv);
-                ctx->CSSetUnorderedAccessViews(0, 3, nullUav, nullptr);
+                // Tier 1's carry on the own path: last frame's depth at t3
+                // when the mask is on, this frame's written at u4 whenever
+                // the mask is wanted and a depth is bound. The textures are
+                // the trained set's depth copy and its twin, made here alone
+                // when no trained set exists; u3/u5 stay unbound (MV and the
+                // mask are NVIDIA's inputs, and writes to a null UAV drop).
+                const bool carry = g_moversOn && haveDepth && ensureMoverPair(dev, e, w, h);
+                ID3D11ShaderResourceView* nullSrv[4] = {};
+                ID3D11UnorderedAccessView* nullUav[5] = {};
+                ctx->CSSetShaderResources(0, 4, nullSrv);
+                ctx->CSSetUnorderedAccessViews(0, 5, nullUav, nullptr);
                 ctx->CSSetShader(g_cs, nullptr, 0);
-                ID3D11ShaderResourceView* srvs[3] = {inSrv, e.histSrv[readIdx], depthSrv};
-                ID3D11UnorderedAccessView* uavs[3] = {e.outUav, e.histUav[writeIdx],
-                                                      g_statsUav};
+                ID3D11ShaderResourceView* srvs[4] = {inSrv, e.histSrv[readIdx], depthSrv,
+                                                     (carry && p.movers[0] != 0.0f) ? e.zPrevSrv : nullptr};
+                ID3D11UnorderedAccessView* uavs[5] = {e.outUav, e.histUav[writeIdx],
+                                                      g_statsUav, nullptr,
+                                                      carry ? e.dlDepthUav : nullptr};
                 ID3D11Buffer* cb = g_cb;
                 ID3D11SamplerState* smp = g_samp;
-                ctx->CSSetShaderResources(0, 3, srvs);
-                ctx->CSSetUnorderedAccessViews(0, 3, uavs, nullptr);
+                ctx->CSSetShaderResources(0, 4, srvs);
+                ctx->CSSetUnorderedAccessViews(0, 5, uavs, nullptr);
                 ctx->CSSetConstantBuffers(0, 1, &cb);
                 ctx->CSSetSamplers(0, 1, &smp);
                 ctx->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
+                ctx->CSSetShaderResources(0, 4, nullSrv);
+                ctx->CSSetUnorderedAccessViews(0, 5, nullUav, nullptr);
+                if (carry) zcWritten = true;
                 ownRan = true;
             }
             // THE COMPOSITE: NVIDIA's crop over whichever periphery there is.
@@ -2985,6 +3239,20 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         e.foveaHaveHistory = foveaEvalOk;
         e.prHaveHistory = periphOk;
 
+        // Tier 1's depth carry: this frame's copy becomes last frame's by
+        // swapping the two textures and their views -- no copy -- and the
+        // mask may compare against it next frame. A frame that wrote none
+        // (no depth in hand, no dispatch with the copy bound) breaks the
+        // carry, and the mask waits for the next one that does.
+        if (zcWritten && e.zPrev) {
+            std::swap(e.dlDepth, e.zPrev);
+            std::swap(e.dlDepthSrv, e.zPrevSrv);
+            std::swap(e.dlDepthUav, e.zPrevUav);
+            e.zPrevValid = true;
+        } else {
+            e.zPrevValid = false;
+        }
+
         if (ran && usedDlaa) {
             // The trained pass's frame goes out; the pass's own history is
             // marked broken so a switch back starts afresh.
@@ -3078,11 +3346,27 @@ void temporalPassConfigure(Config& cfg) {
     g_shipMetres = ship;
     const std::string dbg = cfg.getString("advanced.temporal_aa_debug", "off");
     g_debugMode = _stricmp(dbg.c_str(), "motion") == 0 ? 1 : _stricmp(dbg.c_str(), "error") == 0 ? 2
-                : _stricmp(dbg.c_str(), "depth") == 0 ? 3 : 0;
+                : _stricmp(dbg.c_str(), "depth") == 0 ? 3 : _stricmp(dbg.c_str(), "movers") == 0 ? 4 : 0;
     float menu = cfg.getFloat("advanced.temporal_aa_menu_metres", 0.0f);
     if (!std::isfinite(menu) || menu < 0.0f) menu = 0.0f;
     if (menu > 50.0f) menu = 50.0f;
     g_menuMetres = menu;
+    // Tier 1's mover mask (docs/per-object-motion.md). The tolerance is a
+    // percent of depth in the ini and a fraction here; bounded below where
+    // the reprojection's own noise would fire it everywhere and above where
+    // nothing could ever trip it. All three live.
+    const std::string movers = cfg.getString("fix.temporal_aa_movers", "off");
+    g_moversOn = _stricmp(movers.c_str(), "on") == 0;
+    float tol = cfg.getFloat("advanced.temporal_aa_movers_tolerance", 3.0f);
+    if (!std::isfinite(tol)) tol = 3.0f;
+    if (tol < 0.5f) tol = 0.5f;
+    if (tol > 25.0f) tol = 25.0f;
+    g_moversTol = tol / 100.0f;
+    float strength = cfg.getFloat("advanced.temporal_aa_movers_strength", 1.0f);
+    if (!std::isfinite(strength)) strength = 1.0f;
+    if (strength < 0.0f) strength = 0.0f;
+    if (strength > 1.0f) strength = 1.0f;
+    g_moversStrength = strength;
     // DLSS where you look (docs/performance.md feature 6). The crop's width
     // in degrees of visual angle; 0 is the whole frame, today's behaviour.
     // Bounded below by a size worth cropping (a crop wider than the frame is
@@ -3408,6 +3692,17 @@ bool temporalPassRegistration(char* buf, size_t n, char* buf2, size_t n2, char* 
                                        static_cast<double>(g_classShipPix)
                                  : 0.0);
     }
+    // Tier 1's mover mask: its share of the interval's pixels. With the
+    // head still and the ship docked this should read near zero (what fires
+    // then is the reprojection's own noise against the tolerance); in the
+    // slot it is the rim's edges and whatever moves past.
+    if (g_moversOn && g_intervalPix) {
+        regAppend(buf, n, used,
+                  "; the mover mask set %.2f%% of pixels (tolerance %.1f%% of depth, strength "
+                  "%.2f)",
+                  100.0 * static_cast<double>(g_moverPix) / static_cast<double>(g_intervalPix),
+                  100.0 * static_cast<double>(g_moversTol), static_cast<double>(g_moversStrength));
+    }
     // The third line: the probes and the rows against the head.
     buf = buf3;
     n = buf3 ? n3 : 0;
@@ -3509,6 +3804,7 @@ bool temporalPassRegistration(char* buf, size_t n, char* buf2, size_t n2, char* 
     g_probeShipN = 0;
     g_classWorldPix = g_classWorldClip = 0;
     g_classShipPix = g_classShipClip = 0;
+    g_moverPix = 0;
     g_probeSkyDx = g_probeSkyDy = 0;
     g_probeSkyN = 0;
     memset(g_probeDot, 0, sizeof(g_probeDot));
