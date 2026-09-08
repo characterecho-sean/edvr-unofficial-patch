@@ -537,7 +537,9 @@ int perfMonitorTiles(PerfTile* out, int max) {
         out[n].sub[sizeof(out[n].sub) - 1] = 0;
         ++n;
     };
-    char v[32], sub[48];
+    // Sub-lines are at most about thirty characters: a four-across tile
+    // fits sixteen a line in its face, over two lines.
+    char v[32], sub[40];
 
     // The interval ring, summarised, and the drops attributed.
     float present[kRing], appGpu[kRing], compGpu[kRing], appCpu[kRing];
@@ -581,23 +583,21 @@ int perfMonitorTiles(PerfTile* out, int max) {
     // from the compositor, poses ready to second submit -- and the Present
     // period sits on its sub-line. The two differ by the wait for the
     // compositor's running start when the game is hitting rate (flown
-    // 2026-09-07: about 2 ms on a 90 Hz Pimax), so a tile that showed the
-    // period read as slower than fpsVR by exactly that.
+    // 2026-09-07: about 2 ms on a 90 Hz Pimax).
     if (ps.count) {
         snprintf(v, sizeof(v), "%.1f", perfFpsOf(ps.avgMs));
-        snprintf(sub, sizeof(sub), "fps, %.0f s window", windowS);
-        tile("FRAME RATE", v, sub);
+        tile("FRAME RATE", v, "fps");
         if (cpuCnt) {
             const PerfStats ac = perfStatsOf(appCpu, cpuCnt);
             snprintf(v, sizeof(v), "%.1f", ac.avgMs);
-            snprintf(sub, sizeof(sub), "ms busy, max %.1f; period %.1f", ac.maxMs, ps.avgMs);
+            snprintf(sub, sizeof(sub), "ms busy, period %.1f", ps.avgMs);
         } else {
             snprintf(v, sizeof(v), "%.1f", ps.avgMs);
-            snprintf(sub, sizeof(sub), "ms period, max %.1f (no busy time)", ps.maxMs);
+            snprintf(sub, sizeof(sub), "ms period, max %.1f", ps.maxMs);
         }
         tile("FRAME TIME", v, sub);
         snprintf(v, sizeof(v), "%.0f", perfFpsOf(ps.p99Ms));
-        snprintf(sub, sizeof(sub), "fps, slowest 1%% = %.1f ms", ps.p99Ms);
+        snprintf(sub, sizeof(sub), "fps, worst 1%% %.1f ms", ps.p99Ms);
         tile("1% LOW", v, sub);
     } else {
         tile("FRAME RATE", "--", "measuring");
@@ -606,36 +606,40 @@ int perfMonitorTiles(PerfTile* out, int max) {
     }
     if (compCnt) {
         const PerfStats ag = perfStatsOf(appGpu, compCnt);
-        const PerfStats cg = perfStatsOf(compGpu, compCnt);
         snprintf(v, sizeof(v), "%.1f", ag.avgMs);
-        snprintf(sub, sizeof(sub), "ms, max %.1f, compositor %.1f", ag.maxMs, cg.avgMs);
+        snprintf(sub, sizeof(sub), "ms, max %.1f", ag.maxMs);
         tile("APP GPU", v, sub);
     } else {
         tile("APP GPU", "--", glitchConsumerPresent() ? "no compositor timing" : "no openvr half");
     }
 
-    // Row 2: drops and the display.
+    // Row 2: the compositor and the drops.
     if (compCnt) {
+        const PerfStats cg = perfStatsOf(compGpu, compCnt);
+        snprintf(v, sizeof(v), "%.1f", cg.avgMs);
+        tile("COMPOSITOR", v, "ms GPU per frame");
         snprintf(v, sizeof(v), "%d", dropped);
-        snprintf(sub, sizeof(sub), "in %.0f s, %u since launch", windowS,
-                 s.haveSample ? s.lastSample.droppedTotal : 0u);
+        snprintf(sub, sizeof(sub), "in %.0f s, %u total", windowS, s.haveSample ? s.lastSample.droppedTotal : 0u);
         tile("DROPPED", v, sub);
         if (dropped) {
-            char ev[40];
+            char ev[24];
             eventList(static_cast<uint16_t>(dropEventBits), 0.0f, ev, sizeof(ev));
             snprintf(v, sizeof(v), "%d / %d", dropsWithEdvr, dropsClean);
-            snprintf(sub, sizeof(sub), "with EDVR / clean: %s", dropsWithEdvr ? ev : "none");
-            tile("DROPS BY CAUSE", v, sub);
+            snprintf(sub, sizeof(sub), "EDVR / clean; %s", dropsWithEdvr ? ev : "none");
+            tile("BY CAUSE", v, sub);
         } else {
-            tile("DROPS BY CAUSE", "--", "no drops in the window");
+            tile("BY CAUSE", "--", "no drops");
         }
         snprintf(v, sizeof(v), "%.0f%%", 100.0f * static_cast<float>(reproj) / static_cast<float>(compCnt));
-        tile("REPROJECTED", v, "of frames, any reason");
+        tile("REPROJECTED", v, "of frames");
     } else {
+        tile("COMPOSITOR", "--", "");
         tile("DROPPED", "--", "no compositor timing");
-        tile("DROPS BY CAUSE", "--", "");
+        tile("BY CAUSE", "--", "");
         tile("REPROJECTED", "--", "");
     }
+
+    // Row 3: the display and the machine.
     {
         uint32_t ew = 0, eh = 0;
         const bool haveEye = eyeTextureSize(&ew, &eh);
@@ -644,19 +648,17 @@ int perfMonitorTiles(PerfTile* out, int max) {
             if (haveEye) snprintf(sub, sizeof(sub), "%.1f ms budget, %ux%u", budget, ew, eh);
             else snprintf(sub, sizeof(sub), "%.1f ms budget", budget);
         } else if (haveEye) {
-            snprintf(v, sizeof(v), "%ux%u", ew, eh);
-            snprintf(sub, sizeof(sub), "per eye, rate unknown");
+            snprintf(v, sizeof(v), "--");
+            snprintf(sub, sizeof(sub), "%ux%u per eye", ew, eh);
         } else {
             snprintf(v, sizeof(v), "--");
             snprintf(sub, sizeof(sub), "not published yet");
         }
         tile("DISPLAY", v, sub);
     }
-
-    // Row 3: the machine.
     if (s.cpuSystemPct >= 0.0f) {
         snprintf(v, sizeof(v), "%.0f%%", s.cpuSystemPct);
-        snprintf(sub, sizeof(sub), "Elite %.0f%% of %u threads", s.cpuProcessPct >= 0.0f ? s.cpuProcessPct : 0.0f,
+        snprintf(sub, sizeof(sub), "Elite %.0f%% of %u", s.cpuProcessPct >= 0.0f ? s.cpuProcessPct : 0.0f,
                  s.cpuThreads);
         tile("CPU", v, sub);
     } else {
@@ -679,6 +681,8 @@ int perfMonitorTiles(PerfTile* out, int max) {
         snprintf(sub, sizeof(sub), "of %s GB", vb);
         tile("VRAM", vu, s.vramBudget ? sub : "sampling");
     }
+
+    // Row 4: memory, and EDVR's own price.
     {
         char rp[24] = "--", ra[24] = "?", rt[24] = "?";
         if (s.ramTotal) {
@@ -686,55 +690,58 @@ int perfMonitorTiles(PerfTile* out, int max) {
             gb(ra, sizeof(ra), s.ramAvail);
             gb(rt, sizeof(rt), s.ramTotal);
         }
-        snprintf(sub, sizeof(sub), "GB Elite, %s free of %s", ra, rt);
+        snprintf(sub, sizeof(sub), "GB, %s free of %s", ra, rt);
         tile("RAM", rp, s.ramTotal ? sub : "sampling");
     }
-
-    // Row 4: EDVR's own price.
     {
         const double frames = cnt > 0 ? static_cast<double>(cnt) : 1.0;
         if (doorGpuN) {
             snprintf(v, sizeof(v), "%.2f", doorGpu / doorGpuN);
-            snprintf(sub, sizeof(sub), "ms/frame at the door, both eyes");
+            snprintf(sub, sizeof(sub), "ms/frame at the door");
         } else {
             snprintf(v, sizeof(v), "--");
-            snprintf(sub, sizeof(sub), glitchConsumerPresent() ? "no pair measured yet" : "no openvr half");
+            snprintf(sub, sizeof(sub), glitchConsumerPresent() ? "no pair yet" : "no openvr half");
         }
         tile("EDVR GPU", v, sub);
         const double total = edvrBoundary / frames + edvrDoor / frames +
                              (s.drawsSampled ? static_cast<double>(s.drawsMsRunning) : 0.0);
         snprintf(v, sizeof(v), "%.2f", total);
         if (s.drawsSampled) {
-            snprintf(sub, sizeof(sub), "ms: %.2f boundary, %.2f door, %.2f hooks", edvrBoundary / frames,
-                     edvrDoor / frames, static_cast<double>(s.drawsMsRunning));
+            snprintf(sub, sizeof(sub), "ms/frame; hooks %.2f", static_cast<double>(s.drawsMsRunning));
         } else {
-            snprintf(sub, sizeof(sub), "ms: %.2f boundary, %.2f door", edvrBoundary / frames,
-                     edvrDoor / frames);
+            snprintf(sub, sizeof(sub), "ms/frame; hooks not yet");
         }
         tile("EDVR CPU", v, sub);
     }
     {
         uint32_t t = 0, resets = 0;
         double avg = 0.0, mx = 0.0, rej = 0.0, clip = 0.0;
-        char pv[24] = "--", psub[48] = "no pass running";
+        double temporal = -1.0, sharpen = -1.0;
+        bool trained = false;
         if (temporalPassDlaaTotals(&t, &avg, &mx, &resets) && t) {
-            snprintf(pv, sizeof(pv), "%.2f", avg);
-            snprintf(psub, sizeof(psub), "ms/eye, NVIDIA's pass");
+            temporal = avg;
+            trained = true;
         } else if (temporalPassTotals(&t, &avg, &mx, &rej, &clip) && t) {
-            snprintf(pv, sizeof(pv), "%.2f", avg);
-            snprintf(psub, sizeof(psub), "ms/eye, temporal pass");
+            temporal = avg;
         }
-        tile("TEMPORAL", pv, psub);
-        char sv[24] = "--", ssub[48] = "off";
-        if (sharpenPassTotals(&t, &avg, &mx) && t) {
-            snprintf(sv, sizeof(sv), "%.2f", avg);
-            snprintf(ssub, sizeof(ssub), "ms/eye, RCAS");
+        if (sharpenPassTotals(&t, &avg, &mx) && t) sharpen = avg;
+        if (temporal >= 0.0 && sharpen >= 0.0) {
+            snprintf(v, sizeof(v), "%.1f+%.1f", temporal, sharpen);
+            snprintf(sub, sizeof(sub), "ms/eye %s + sharpen", trained ? "NVIDIA" : "temporal");
+        } else if (temporal >= 0.0) {
+            snprintf(v, sizeof(v), "%.2f", temporal);
+            snprintf(sub, sizeof(sub), "ms/eye, %s pass", trained ? "NVIDIA's" : "temporal");
+        } else if (sharpen >= 0.0) {
+            snprintf(v, sizeof(v), "%.2f", sharpen);
+            snprintf(sub, sizeof(sub), "ms/eye, sharpen");
+        } else {
+            snprintf(v, sizeof(v), "--");
+            snprintf(sub, sizeof(sub), "no pass running");
         }
-        tile("SHARPEN", sv, ssub);
+        tile("EDVR PASSES", v, sub);
     }
     return n;
 }
-
 void perfMonitorLastDropLine(char* buf, size_t bufLen) {
     State& s = g_s;
     if (!buf || !bufLen) return;

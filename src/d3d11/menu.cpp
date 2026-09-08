@@ -788,10 +788,9 @@ void buildContent(MenuContent& c) {
     const int pendingN = pendingRestartCount();
 
     if (p.monitor) {
+        // No hint line: the tiles carry their own captions, and the height
+        // is better spent on them.
         buildMonitor(c);
-        snprintf(c.hint, sizeof(c.hint), "%s",
-                 "Frame figures from EDVR's own clock; GPU, dropped and reprojected frames from the "
-                 "compositor; CPU, GPU, VRAM and RAM sampled once a second while this page is up.");
     } else if (p.status) {
         buildStatus(c);
         snprintf(c.hint, sizeof(c.hint), "%s",

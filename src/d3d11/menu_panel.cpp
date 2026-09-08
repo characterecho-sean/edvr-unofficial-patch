@@ -47,8 +47,8 @@ constexpr Rgb kHint = {190, 190, 190};
 constexpr Rgb kFooter = {140, 140, 140};
 constexpr Rgb kToastText = {255, 200, 120};
 
-enum class Font { Row, Tab, Small, Hint, Big };
-constexpr int kFontCount = 5;
+enum class Font { Row, Tab, Small, Hint, Big, Caption, TileSub };
+constexpr int kFontCount = 7;
 
 struct Op {
     bool         text = false;
@@ -56,8 +56,9 @@ struct Op {
     Rgb          rgb{};
     float        alpha = 1.0f;   // fills only
     std::wstring str;
-    UINT         align = 0;      // DT_LEFT / DT_RIGHT / DT_CENTER
+    UINT         align = 0;      // DT_LEFT / DT_RIGHT / DT_CENTER, DT_WORDBREAK for wrapping
     Font         font = Font::Row;
+    bool         top = false;    // draw from the rect's top, unclipped, rather than centred
 };
 
 struct LineRect {
@@ -161,14 +162,20 @@ void layout(const MenuContent& c, std::vector<Op>& ops, std::vector<LineRect>& l
     const int footH = c.toast ? 0 : cap * 16 / 10;
     const int graphH = c.graphCount > 0 ? cap * 40 / 10 : 0;
     const int rows = c.lineCount;
-    // The tile grid: caption, big value, sub-line, in a box 3.6 caps tall.
+    // The tile grid: caption, big value, a two-line sub, in a box five
+    // tile-units tall, the unit being nine tenths of a cap. Each box is
+    // sized to its font's LINE height, not its cap height -- the first
+    // build gave the big number 1.7 caps for a face whose line box is
+    // 2.8, and the digits clipped top and bottom.
     const int columns = c.tileColumns > 0 ? c.tileColumns : 4;
     const int tileRows = c.tileCount > 0 ? (c.tileCount + columns - 1) / columns : 0;
-    const int tileH = cap * 36 / 10;
+    const int u = cap * 9 / 10;
+    const int tileH = u * 50 / 10;
     const int tileGap = cap / 4;
     const int tilesH = tileRows > 0 ? tileRows * (tileH + tileGap) + cap / 2 : 0;
+    const int hintHUsed = c.hint[0] ? hintH : 0;
     const int H = pad + tabH + tilesH + rows * rowPitch + (c.toast ? cap * 2 / 10 : 0) + graphH +
-                  hintH + footH + pad;
+                  hintHUsed + footH + pad;
     *outH = H;
 
     // Background.
@@ -217,29 +224,31 @@ void layout(const MenuContent& c, std::vector<Op>& ops, std::vector<LineRect>& l
             box.rgb = Rgb{255, 255, 255};
             box.alpha = 0.06f;
             ops.push_back(box);
+            const int inset = u / 3;
             Op cap1;
             cap1.text = true;
             cap1.str = widen(t.caption);
-            cap1.rect = {x0 + cap / 3, y0 + cap / 6, x0 + tileW - cap / 3, y0 + cap * 11 / 10};
+            cap1.rect = {x0 + inset, y0 + u / 8, x0 + tileW - inset, y0 + u * 12 / 10};
             cap1.align = DT_LEFT;
-            cap1.font = Font::Small;
+            cap1.font = Font::Caption;
             cap1.rgb = kDimText;
             ops.push_back(cap1);
             Op val;
             val.text = true;
             val.str = widen(t.value);
-            val.rect = {x0 + cap / 3, y0 + cap * 10 / 10, x0 + tileW - cap / 3, y0 + cap * 27 / 10};
+            val.rect = {x0 + inset, y0 + u * 10 / 10, x0 + tileW - inset, y0 + u * 31 / 10};
             val.align = DT_LEFT;
             val.font = Font::Big;
             val.rgb = kLabel;
+            val.top = true;
             ops.push_back(val);
             if (t.sub[0]) {
                 Op sub;
                 sub.text = true;
                 sub.str = widen(t.sub);
-                sub.rect = {x0 + cap / 3, y0 + cap * 26 / 10, x0 + tileW - cap / 3, y0 + tileH - cap / 8};
-                sub.align = DT_LEFT;
-                sub.font = Font::Small;
+                sub.rect = {x0 + inset, y0 + u * 29 / 10, x0 + tileW - inset, y0 + tileH - u / 10};
+                sub.align = DT_LEFT | DT_WORDBREAK;
+                sub.font = Font::TileSub;
                 sub.rgb = kHint;
                 ops.push_back(sub);
             }
@@ -371,7 +380,7 @@ void layout(const MenuContent& c, std::vector<Op>& ops, std::vector<LineRect>& l
             h.rgb = kHint;
             ops.push_back(h);
         }
-        y += hintH;
+        y += hintHUsed;
         if (c.footer[0]) {
             Op f;
             f.text = true;
@@ -398,8 +407,14 @@ void execute(Dib& d, const std::vector<Op>& ops, bool coverage, HFONT fonts[kFon
         SetTextColor(d.dc, coverage ? RGB(255, 255, 255) : RGB(o.rgb.r, o.rgb.g, o.rgb.b));
         RECT r = o.rect;
         UINT fmt = o.align | DT_NOPREFIX;
-        if (!(o.align & DT_WORDBREAK)) fmt |= DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS;
-        else fmt |= DT_END_ELLIPSIS;
+        if (!(o.align & DT_WORDBREAK)) {
+            fmt |= DT_SINGLELINE | DT_END_ELLIPSIS;
+            // Centred in the box, or set from its top and never clipped: a
+            // big number's descender room may reach past its box.
+            fmt |= o.top ? DT_NOCLIP : DT_VCENTER;
+        } else {
+            fmt |= DT_END_ELLIPSIS;
+        }
         DrawTextW(d.dc, o.str.c_str(), -1, &r, fmt);
         SelectObject(d.dc, oldF);
     }
@@ -420,12 +435,19 @@ bool rasterise(const MenuContent& c, Raster& out) {
         return false;
     }
     const int cap = c.capPx;
+    // Em sizes from the cap height: Segoe UI's cap height is about 0.7 em,
+    // and its line box about 1.33 em. The tile faces are sized from the
+    // tile unit (0.9 cap): the number 1.5 units, the caption 0.8, the sub
+    // 0.72 -- about sixteen characters a line in a four-across tile.
+    const int u = cap * 9 / 10;
     HFONT fonts[kFontCount] = {
         makeFont(cap * 10 / 7, false),        // Row
         makeFont(cap * 9 / 7, true),          // Tab
         makeFont(cap * 7 / 7, false),         // Small
         makeFont(cap * 8 / 7, false),         // Hint
-        makeFont(cap * 15 / 7, true),         // Big: the tiles' numbers
+        makeFont(u * 15 / 10, true),          // Big: the tiles' numbers
+        makeFont(u * 8 / 10, true),           // Caption
+        makeFont(u * 72 / 100, false),        // TileSub
     };
     execute(colour, ops, false, fonts);
     execute(cover, ops, true, fonts);

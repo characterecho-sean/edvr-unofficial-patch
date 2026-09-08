@@ -342,7 +342,13 @@ and where it applies, the measured cost or the restart badge.
    Laid out as **sixteen tiles, four across** -- a caption, one big
    number, one small line each -- after the first flight found rows of
    sentences full of numbers unreadable in a headset; the last drop and
-   EDVR's events in it are the one line under the tiles.
+   EDVR's events in it are the one line under the tiles. The second
+   flight found the big number clipped and the sub-lines running off
+   the tiles: a four-across tile is about seven degrees wide, sixteen
+   characters of a small face, and the number's box had been sized to
+   its cap height rather than its line box. Now every box is sized to
+   its font's line height, the sub-line wraps over two lines in a
+   smaller face, and no sub-line is longer than about thirty characters.
    Its cost, by construction: the ring is one clock read and a store per
    frame; the compositor read is one small copy per frame; the load and
    memory samplers run once a second and ONLY while the page is showing;
