@@ -803,6 +803,15 @@ answered it. The rest need the game running -- see
    one census with the setting on and one with it off, noted by hand.
 9. **The bias mask.** `pInBiasCurrentColorMask` in the vendored NGX helper
    header, for tier 1 on the trained path.
+
+   **Answered YES, at the desk, no flight needed** (2026-09-07). It is a real
+   field of the D3D11 evaluation block -- `ID3D11Resource*
+   pInBiasCurrentColorMask`, `nvsdk_ngx_helpers.h:152` -- and the helper
+   passes it straight through as
+   `NVSDK_NGX_Parameter_DLSS_Input_Bias_Current_Color_Mask` (`:235`). So tier
+   1's reactive mask has somewhere to go on the trained path as well as in
+   the pass's own history, and the block EDVR already fills
+   (`dlaa.cpp:362-376`) is the one that carries it.
 10. **The learning cost.** Time `IAGetVertexBuffers` on a scene draw with
     the timing the totals line already uses, and the memo's hit rate over
     an interval, printed once.
