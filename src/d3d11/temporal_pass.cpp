@@ -79,6 +79,7 @@ cbuffer P : register(b0) {
     float4 fovea0;      // xy the fovea centre in output pixels, z the inner radius (px) where the periphery calming starts, w 1/(the ramp width in px)
     float4 fovea1;      // x the periphery calm strength (0..1), w 1 = the fovea is on (else no modulation)
     float4 movers;      // x 1 = the mover mask is on (ZP holds last frame's depth for this frustum); y the depth tolerance, a fraction; z the strength, how much history a masked pixel loses (0..1); w 1 = main writes ZC
+    float4 probe;       // for the mv entry: x the history's scale (H is NVIDIA's previous output at outW/w times the render size); y 1 = run the registration probes against it; zw unused
 };
 float3 rgbToYcocg(float3 c) {
     return float3(0.25 * c.r + 0.5 * c.g + 0.25 * c.b,
@@ -376,6 +377,68 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
         // NVIDIA's bias-current-colour mask: the strength is the value, so
         // one knob means the same on both paths.
         MK[id.xy] = mover * movers.z;
+        // The registration probes on the trained path (2026-09-08): main's
+        // 5x5 luma SAD search, transcribed, against NVIDIA's PREVIOUS output
+        // -- the history as the runtime accumulated it, bound at t1 in place
+        // of the pass's own and probe.x times the render size (1 under DLAA,
+        // 2 under DLSS at half), so the window steps probe.x texels to span
+        // the same render pixels. Until this ran, no line in the log had
+        // measured the vectors NVIDIA is handed against what it kept: the
+        // probes lived in the own pass and the flown path was NVIDIA's, so a
+        // station approach that "looked soft on every moving surface" had no
+        // number behind it. Same classes and slots as main's, so the
+        // registration line reads the same either way.
+        if (probe.y != 0.0 && dp.z < -1e-6 && (id.x & 63) == 16 && (id.y & 63) == 16 &&
+            id.x >= 8 && id.y >= 8 && id.x + 8 < (uint)size.x && id.y + 8 < (uint)size.y) {
+            int2 ci = int2(id.xy);
+            float curL[25];
+            float meanL = 0.0;
+            int kk = 0;
+            [unroll] for (int wy = -2; wy <= 2; ++wy) {
+                [unroll] for (int wx = -2; wx <= 2; ++wx) {
+                    curL[kk] = rgbToYcocg(S.Load(int3(region.xy + ci + int2(wx, wy), 0)).rgb).x;
+                    meanL += curL[kk];
+                    ++kk;
+                }
+            }
+            meanL /= 25.0;
+            float varL = 0.0;
+            [unroll] for (int jj = 0; jj < 25; ++jj) varL += (curL[jj] - meanL) * (curL[jj] - meanL);
+            const bool sky = count15 != 0 && knobs.y != 0.0 && zraw <= 0.0;
+            if (varL > (sky ? 0.0025 : 0.0225)) {
+                float2 pp2 = p + motion;
+                int2 pq = int2(round(pp2));
+                float bestSad = 1e9;
+                int2 best = int2(0, 0);
+                for (int sy = -4; sy <= 4; ++sy) {
+                    for (int sx = -4; sx <= 4; ++sx) {
+                        float sad = 0.0;
+                        int mm = 0;
+                        [unroll] for (int wy2 = -2; wy2 <= 2; ++wy2) {
+                            [unroll] for (int wx2 = -2; wx2 <= 2; ++wx2) {
+                                int2 q = clamp(pq + int2(sx + wx2, sy + wy2), int2(0, 0), size - 1);
+                                // The history texel this render pixel maps to.
+                                int2 hq = int2(round((float2(q) + 0.5) * probe.x - 0.5));
+                                sad += abs(curL[mm] - rgbToYcocg(H.Load(int3(hq, 0)).rgb).x);
+                                ++mm;
+                            }
+                        }
+                        if (sad < bestSad) {
+                            bestSad = sad;
+                            best = int2(sx, sy);
+                        }
+                    }
+                }
+                float2 resid = float2(best) + (float2(pq) - pp2);
+                uint base = sky ? 30u : (count15 != 0 ? 18u : 21u);
+                InterlockedAdd(Stats[base], asuint(int(round(resid.x * 100.0))));
+                InterlockedAdd(Stats[base + 1], asuint(int(round(resid.y * 100.0))));
+                InterlockedAdd(Stats[base + 2], 1u);
+                uint base2 = sky ? 33u : (count15 != 0 ? 35u : 37u);
+                InterlockedAdd(Stats[base2], asuint(int(round(dot(resid, motion) * 100.0))));
+                InterlockedAdd(Stats[base2 + 1], uint(round(dot(motion, motion) * 100.0)));
+            }
+        }
         // The motion view on the trained path: painted into the output in
         // NVIDIA's place (the pass skips its evaluation that frame).
         if (split.y == 1.0) {
@@ -852,7 +915,7 @@ void down(uint3 id : SV_DispatchThreadID) {
 }
 )HLSL";
 
-// The cbuffer above, laid out to match: 464 bytes, twenty-nine 16-byte rows.
+// The cbuffer above, laid out to match: 480 bytes, thirty 16-byte rows.
 struct PassParams {
     int32_t region[4];
     int32_t size[2];
@@ -876,8 +939,9 @@ struct PassParams {
     float   fovea0[4];   // xy centre px, z inner radius px, w 1/ramp px (feature 6, periphery calming)
     float   fovea1[4];   // x calm strength 0..1, w 1 = fovea on
     float   movers[4];   // x 1 = mover mask on, y tolerance (fraction), z strength 0..1, w 1 = main writes the depth copy (tier 1, docs/per-object-motion.md)
+    float   probe[4];    // x the history's scale for the mv entry's probes (outW / w), y 1 = run them (NVIDIA's previous output bound at t1)
 };
-static_assert(sizeof(PassParams) == 464, "the cbuffer is twenty-nine 16-byte rows");
+static_assert(sizeof(PassParams) == 480, "the cbuffer is thirty 16-byte rows");
 
 // The format allowlist: the supersample resolve's, for its reasons
 // (supersample_pass.cpp) -- typeless and UNORM families read and written
@@ -2727,12 +2791,29 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     // mover mask on, last frame's depth read at t3 and the
                     // mask written at u5 (tier 1, docs/per-object-motion.md).
                     const bool debugPaint = g_debugMode == 1 || g_debugMode == 3 || g_debugMode == 4;
+                    // The registration probes against NVIDIA's previous output
+                    // (the shader says why, 2026-09-08): its last frame is
+                    // still in e.dlOut until the evaluation below overwrites
+                    // it, so it is bound at t1 in the own history's place --
+                    // never while a debug view is painting into it (a
+                    // resource cannot be read and written by one dispatch),
+                    // and only once it holds a frame that continued the
+                    // history, which is what the prediction is measured
+                    // against. The constants were written before this block
+                    // decided, so the probe row is patched and rewritten here.
+                    const bool probeNv = !debugPaint && e.dlHaveHistory && (flags & 1u) == 0 &&
+                                         e.dlOutSrv && g_statsUav != nullptr;
+                    p.probe[0] = static_cast<float>(oW) / static_cast<float>(w);
+                    p.probe[1] = probeNv ? 1.0f : 0.0f;
+                    setParams(ctx, p);
                     ID3D11ShaderResourceView* nullSrvM[4] = {};
                     ID3D11UnorderedAccessView* nullUavM[6] = {};
                     ctx->CSSetShaderResources(0, 4, nullSrvM);
                     ctx->CSSetUnorderedAccessViews(0, 6, nullUavM, nullptr);
                     ctx->CSSetShader(g_csMv, nullptr, 0);
-                    ID3D11ShaderResourceView* srvsM[4] = {inSrv, e.histSrv[e.histRead], depthSrv,
+                    ID3D11ShaderResourceView* srvsM[4] = {inSrv,
+                                                          probeNv ? e.dlOutSrv : e.histSrv[e.histRead],
+                                                          depthSrv,
                                                           p.movers[0] != 0.0f ? e.zPrevSrv : nullptr};
                     ID3D11UnorderedAccessView* uavsM[6] = {debugPaint ? e.dlOutUav : nullptr,
                                                            nullptr, g_statsUav, e.dlMvUav,

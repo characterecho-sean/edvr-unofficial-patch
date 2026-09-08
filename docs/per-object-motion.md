@@ -492,6 +492,35 @@ the mask's:
   rotation itself, which is tier 2's job -- the mask set 0.02-0.26% of
   pixels through the approach, blind to in-plane motion at constant depth
   exactly as predicted.
+- **The chooser fix flew the same afternoon** (`edvr_gfx_20260908_095212.log`,
+  `v0.14.1-22-gdbcace9`): through the approach the world path was up at
+  55-68% of pixels with the bound block chosen on 1776-1800 of 1800 frames,
+  the resync firing five times during the launch transition and never
+  after. And the station still looked "soft, slightly fuzzy on all moving
+  surfaces under motion". Two things to know before reading that log's
+  registration line. First, its `k` figures in flight (-0.3 to -0.55) are
+  not a registration error: `k` projects the rows' residual against the
+  head onto the head's turn, and in flight the residual IS the ship's
+  turn, which anti-correlates with the head's whenever the head
+  counter-rotates to keep a station in view -- docked and still it reads
+  -0.003. Second, and the reason the question is still open: **no line in
+  any log had ever measured registration on the trained path.** The
+  "best match sat (x, y) px from the prediction" probes live in the pass's
+  own shader entry, and the flown path is NVIDIA's. The `mv` entry now
+  runs the same 5x5 luma SAD search against NVIDIA's previous output --
+  its last frame is still in `dlOut` when the vectors are computed, bound
+  at `t1` in the own history's place, stepped by the output-to-render
+  scale so the window spans the same render pixels -- into the same
+  stats slots, so the next approach prints the residual in pixels for the
+  world, the ship and the sky. Read it against the candidates the eye
+  cannot separate: DLSS at 50% per axis (this session's "performance"
+  mode) is soft under motion by construction; station structure nearer
+  than `temporal_aa_ship_metres` takes the head's delta and smears by the
+  ship's own motion (the split's known limit, and tier 2's job); and the
+  mask at strength 1.0 hands NVIDIA the fresh frame alone at its 0.4-0.5%
+  of edge pixels, which at a 2x upscale is a soft edge. The first two
+  have live knobs (`temporal_aa_movers = off`, `temporal_aa_ship_metres =
+  10`, Elite's HMD Quality); the probe decides the third.
 - **The hitching coincides with the transition-flash detector's
   withholds.** It withheld 10 frames between 09:34:23 and 09:35:03 ("drawn
   from 5016 world units off the camera's path", while cataloguing the
