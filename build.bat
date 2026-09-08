@@ -243,7 +243,7 @@ if defined NGX (
 cl.exe %CFLAGS% %NGXFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "%ROOT%\src\common\log.cpp" "%ROOT%\src\common\config.cpp" ^
     "%ROOT%\src\common\config_audit.cpp" ^
-    "%ROOT%\src\common\guard.cpp" "%ROOT%\src\common\vtable_hook.cpp" ^
+    "%ROOT%\src\common\guard.cpp" "%ROOT%\src\common\vtable_hook.cpp" "%ROOT%\src\common\code_hook.cpp" ^
     "%ROOT%\src\common\hotkey.cpp" "%ROOT%\src\common\proxy.cpp" ^
     "%ROOT%\src\common\frame_flag.cpp" ^
     "%ROOT%\src\d3d11\d3d11_proxy.cpp" "%ROOT%\src\d3d11\device_hook.cpp" ^
@@ -344,7 +344,7 @@ if errorlevel 1 ( echo [edvr] ERROR: ml64 failed for system_thunks & exit /b 1 )
 cl.exe %CFLAGS% /Fo"%OBJ%\openvr"\ ^
     "%ROOT%\src\common\log.cpp" "%ROOT%\src\common\config.cpp" ^
     "%ROOT%\src\common\config_audit.cpp" ^
-    "%ROOT%\src\common\guard.cpp" "%ROOT%\src\common\vtable_hook.cpp" ^
+    "%ROOT%\src\common\guard.cpp" "%ROOT%\src\common\vtable_hook.cpp" "%ROOT%\src\common\code_hook.cpp" ^
     "%ROOT%\src\common\hotkey.cpp" "%ROOT%\src\common\proxy.cpp" ^
     "%ROOT%\src\common\frame_flag.cpp" ^
     "%ROOT%\src\openvr\openvr_proxy.cpp" "%ROOT%\src\openvr\compositor_hook.cpp" ^
@@ -496,7 +496,7 @@ if not exist "%OBJ%\vtabletest" mkdir "%OBJ%\vtabletest"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\vtabletest"\ ^
     /Fe"%BUILD%\vtable_test.exe" "%ROOT%\tools\vtable_test\vtable_test.cpp" ^
-    "%ROOT%\src\common\vtable_hook.cpp" "%ROOT%\src\common\guard.cpp" ^
+    "%ROOT%\src\common\vtable_hook.cpp" "%ROOT%\src\common\code_hook.cpp" "%ROOT%\src\common\guard.cpp" ^
     "%ROOT%\src\common\log.cpp" "%ROOT%\src\common\config.cpp" ^
     "%ROOT%\src\common\proxy.cpp" ^
     /link /INCREMENTAL:NO kernel32.lib user32.lib version.lib

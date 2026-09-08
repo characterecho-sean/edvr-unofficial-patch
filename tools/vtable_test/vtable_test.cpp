@@ -40,6 +40,7 @@
 
 #include <cstdio>
 
+#include "../../src/common/code_hook.h"
 #include "../../src/common/vtable_hook.h"
 
 using namespace edvr;
@@ -157,6 +158,32 @@ static int      g_chainHits = 0;
 static int chainerOne(IThing* self) {
     ++g_chainHits;
     return g_chainSaved(self) + 30000;
+}
+
+// THE CODE HOOK'S TARGET AND ITS REPLACEMENT.
+//
+// __declspec(noinline) so there is a real function to hook, and the body is
+// deliberately ordinary: a compiler-generated prologue is exactly what the
+// decoder has to cope with in system32\d3d11.dll.
+// volatile, and for the same reason the vtable stores above are: the compiler
+// can SEE codeTarget's body, sees that it never touches g_codeHookCalls, and is
+// entitled to fold "did the hook run" to false without loading it. Measured --
+// the cell reported the redirect had not happened while its own return value
+// proved it had. An optimiser reasoning about code being changed behind its
+// back is this file's recurring hazard.
+static volatile int g_codeTargetCalls = 0;
+static volatile int g_codeHookCalls = 0;
+typedef int (*PFN_CodeTarget)(int);
+static PFN_CodeTarget g_codeOriginal = nullptr;
+
+__declspec(noinline) static int codeTarget(int x) {
+    ++g_codeTargetCalls;
+    return x + 7;
+}
+
+static int codeReplacement(int x) {
+    ++g_codeHookCalls;
+    return g_codeOriginal(x) + 100;
 }
 
 // The same write, but into a table named DIRECTLY rather than found through an
@@ -670,6 +697,132 @@ int main() {
                 writeSlot(&wrapper, 0, wrapper.mySlotOneAtBirth);
             }
         }
+    }
+
+    // THE CODE HOOK -- owning the function instead of the slot.
+    //
+    // The mechanism issue #21 forced: on that rig Windows' d3d11.dll restores
+    // the context's table every frame, so no patch to a slot survives a frame
+    // and the fixes ran on 0% of them. Hooking the FUNCTION the slot names is
+    // immune to that -- the table can be restored as often as its owner likes.
+    //
+    // What must hold: the redirect happens, the original is still reachable
+    // through the trampoline, the composition is right, and uninstall puts the
+    // function back byte for byte. And the decoder must REFUSE what it cannot
+    // safely move, which is the half that keeps this from being a crash
+    // somewhere else with EDVR nowhere on the stack.
+    {
+        CodeHook hook;
+        g_codeTargetCalls = 0;
+        g_codeHookCalls = 0;
+        check(codeTarget(1) == 8, "the target behaves before it is hooked",
+              "the test's own function is not what this cell assumes");
+
+        const bool got = hook.install(reinterpret_cast<void*>(&codeTarget),
+                                      reinterpret_cast<void*>(&codeReplacement),
+                                      reinterpret_cast<void**>(&g_codeOriginal),
+                                      "code-cell");
+        check(got, "the code hook installs on an ordinary compiled function",
+              "install refused a plain prologue -- the decoder is too strict to "
+              "be useful, or the entry point was not aligned");
+        if (got) {
+            g_codeTargetCalls = 0;
+            g_codeHookCalls = 0;
+            const int result = codeTarget(1);
+            check(g_codeHookCalls == 1,
+                  "...calls to the function arrive at the replacement",
+                  "the patch did not redirect the call");
+            // ALSO the rip-relative relocation test, and the strongest one
+            // available. codeTarget begins `FF 05 <disp32>` -- MSVC's way of
+            // incrementing a global -- so this counter only moves if the
+            // displacement was rewritten for the trampoline's address. Copy
+            // the instruction unchanged and it increments some other four
+            // bytes entirely, with nothing to show for it here.
+            check(g_codeTargetCalls == 1,
+                  "...and the trampoline still runs the original body, with its "
+                  "rip-relative operand still addressing the right global",
+                  "the original was not reachable, or its relocated "
+                  "displacement now points somewhere else");
+            check(result == 108,
+                  "...composed in the right order",
+                  "the return value says the composition is wrong");
+            check(hook.stolenBytes() >= kCodeHookPatchBytes,
+                  "...having relocated at least the patched bytes",
+                  "fewer bytes were stolen than the patch overwrites, so the "
+                  "trampoline resumes inside an instruction");
+
+            hook.uninstall();
+            g_codeTargetCalls = 0;
+            g_codeHookCalls = 0;
+            check(codeTarget(1) == 8 && g_codeHookCalls == 0 &&
+                      g_codeTargetCalls == 1,
+                  "uninstall puts the function back exactly as it was",
+                  "the function did not survive being unhooked");
+        }
+    }
+
+    // THE DECODER -- what it measures, where it says the displacement is, and
+    // what it refuses. The refusals matter more than the successes: a length
+    // this gets wrong is a crash in somebody else's code with EDVR nowhere on
+    // the stack.
+    {
+        size_t disp = 123;   // poisoned, so "left alone" is distinguishable
+
+        // sub rsp, 0x28 -- four bytes, the commonest prologue there is.
+        const uint8_t frame[] = {0x48, 0x83, 0xEC, 0x28};
+        check(codeInstructionLength(frame, sizeof(frame), &disp) == 4 && disp == 0,
+              "the decoder measures `sub rsp, 0x28` and reports no displacement",
+              "a prologue this common must be movable or nothing will hook");
+
+        // mov [rsp+8], rcx -- five bytes, the parameter spill.
+        const uint8_t spill[] = {0x48, 0x89, 0x4C, 0x24, 0x08};
+        check(codeInstructionLength(spill, sizeof(spill), &disp) == 5,
+              "...and `mov [rsp+8], rcx`",
+              "the shadow-space spill was not understood");
+
+        // push rbx.
+        const uint8_t push[] = {0x53};
+        check(codeInstructionLength(push, sizeof(push), &disp) == 1,
+              "...and `push rbx`",
+              "a one-byte push was not understood");
+
+        // inc dword ptr [rip+disp32] -- six bytes, displacement at offset 2.
+        // This is how a compiler increments a global, and it is exactly what
+        // the first function this class was pointed at began with.
+        const uint8_t incGlobal[] = {0xFF, 0x05, 0x11, 0x22, 0x33, 0x44};
+        check(codeInstructionLength(incGlobal, sizeof(incGlobal), &disp) == 6 &&
+                  disp == 2,
+              "...and measures `inc [rip+disp32]`, saying where its "
+              "displacement is",
+              "a rip-relative global access was refused or mislocated, which "
+              "would refuse most real prologues or relocate one wrongly");
+
+        // lea rax, [rip+disp32] -- seven bytes, displacement at offset 3.
+        const uint8_t ripLea[] = {0x48, 0x8D, 0x05, 0x00, 0x00, 0x00, 0x00};
+        check(codeInstructionLength(ripLea, sizeof(ripLea), &disp) == 7 &&
+                  disp == 3,
+              "...and a REX-prefixed rip-relative lea, displacement included",
+              "the prefix threw the displacement offset out, so the fixup would "
+              "rewrite the wrong four bytes");
+
+        // jmp rel32 -- a function that begins with a jump is a linker thunk or
+        // somebody else's hook; following it would cut them out.
+        const uint8_t jump[] = {0xE9, 0x00, 0x00, 0x00, 0x00};
+        check(codeInstructionLength(jump, sizeof(jump), &disp) == 0,
+              "the decoder REFUSES a relative jump",
+              "it would follow a thunk or splice out another tool's hook");
+
+        // call rel32.
+        const uint8_t call[] = {0xE8, 0x00, 0x00, 0x00, 0x00};
+        check(codeInstructionLength(call, sizeof(call), &disp) == 0,
+              "...refuses a relative call",
+              "a relocated call returns to the wrong address");
+
+        // A truncated instruction: the buffer ends mid-operand.
+        const uint8_t truncated[] = {0x48, 0x83};
+        check(codeInstructionLength(truncated, sizeof(truncated), &disp) == 0,
+              "...and refuses an instruction it cannot see the end of",
+              "it read past the bytes it was given");
     }
 
     // THE WRITE WATCH -- does it catch a write, name it, and let it through?
