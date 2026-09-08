@@ -131,27 +131,27 @@ void testHitFlat() {
     float su = 0, sv = 0;
     // Straight ahead at a panel 1.4 m out, 0.3 m half-width, 0.2 half-height.
     const float ahead[3] = {0.0f, 0.0f, -1.0f};
-    check(menuPanelHit(org, ahead, 1.4f, 0.0f, 0.3f, 0.2f, &su, &sv) && approx(su, 0.5f) &&
+    check(menuPanelHit(org, ahead, 1.4f, 0.0f, 0.3f, 0.2f, 0.0f, &su, &sv) && approx(su, 0.5f) &&
               approx(sv, 0.5f),
           "flat: straight ahead lands on the centre");
     // Looking right by the panel's half-width at its distance: the right edge.
     const float right[3] = {0.3f / 1.4f, 0.0f, -1.0f};
-    check(menuPanelHit(org, right, 1.4f, 0.0f, 0.3f, 0.2f, &su, &sv) && approx(su, 1.0f) &&
+    check(menuPanelHit(org, right, 1.4f, 0.0f, 0.3f, 0.2f, 0.0f, &su, &sv) && approx(su, 1.0f) &&
               approx(sv, 0.5f),
           "flat: the right edge is su = 1");
     // Looking up by the half-height: the top, sv = 1 (bottom-up).
     const float up[3] = {0.0f, 0.2f / 1.4f, -1.0f};
-    check(menuPanelHit(org, up, 1.4f, 0.0f, 0.3f, 0.2f, &su, &sv) && approx(sv, 1.0f),
+    check(menuPanelHit(org, up, 1.4f, 0.0f, 0.3f, 0.2f, 0.0f, &su, &sv) && approx(sv, 1.0f),
           "flat: the top edge is sv = 1, so the bitmap's row 0 is the top");
     const float away[3] = {0.0f, 0.0f, 1.0f};
-    check(!menuPanelHit(org, away, 1.4f, 0.0f, 0.3f, 0.2f, &su, &sv),
+    check(!menuPanelHit(org, away, 1.4f, 0.0f, 0.3f, 0.2f, 0.0f, &su, &sv),
           "flat: looking away misses");
     const float wide[3] = {0.4f, 0.0f, -1.0f};
-    check(!menuPanelHit(org, wide, 1.4f, 0.0f, 0.3f, 0.2f, &su, &sv),
+    check(!menuPanelHit(org, wide, 1.4f, 0.0f, 0.3f, 0.2f, 0.0f, &su, &sv),
           "flat: past the edge misses");
     // A head moved 0.1 m right: the centre now sits left of the look.
     const float orgR[3] = {0.1f, 0.0f, 0.0f};
-    check(menuPanelHit(orgR, ahead, 1.4f, 0.0f, 0.3f, 0.2f, &su, &sv) &&
+    check(menuPanelHit(orgR, ahead, 1.4f, 0.0f, 0.3f, 0.2f, 0.0f, &su, &sv) &&
               approx(su, (0.1f + 0.3f) / 0.6f),
           "flat: head translation shifts the hit, not the panel");
 }
@@ -160,7 +160,7 @@ void testHitCurved() {
     const float org[3] = {0.0f, 0.0f, 0.0f};
     float su = 0, sv = 0;
     const float ahead[3] = {0.0f, 0.0f, -1.0f};
-    check(menuPanelHit(org, ahead, 1.4f, 0.3f, 0.3f, 0.2f, &su, &sv) && approx(su, 0.5f) &&
+    check(menuPanelHit(org, ahead, 1.4f, 0.3f, 0.3f, 0.2f, 0.0f, &su, &sv) && approx(su, 0.5f) &&
               approx(sv, 0.5f),
           "curved: straight ahead lands on the centre, on the surface at dist");
     // A look 10 degrees right, worked by hand for curve 0.3 (R = 4.667 m,
@@ -170,12 +170,58 @@ void testHitCurved() {
     // at x = 0.2468, su = 0.9113: the curve brings the edges nearer, so the
     // same angle covers less of the surface.
     const float right10[3] = {tanf(10.0f * 0.0174533f), 0.0f, -1.0f};
-    const bool hit = menuPanelHit(org, right10, 1.4f, 0.3f, 0.3f, 0.2f, &su, &sv);
+    const bool hit = menuPanelHit(org, right10, 1.4f, 0.3f, 0.3f, 0.2f, 0.0f, &su, &sv);
     check(hit && approx(su, 0.9097f, 0.002f), "curved: a 10-degree look lands at the hand-worked su");
     float suFlat = 0;
-    menuPanelHit(org, right10, 1.4f, 0.0f, 0.3f, 0.2f, &suFlat, &sv);
+    menuPanelHit(org, right10, 1.4f, 0.0f, 0.3f, 0.2f, 0.0f, &suFlat, &sv);
     check(approx(suFlat, 0.9113f, 0.002f) && suFlat > su,
           "curved: the same look covers less of the surface than on the flat panel");
+}
+
+// --- the tooltip strip's surface shift ---------------------------------------
+//
+// The bitmap is wider than the menu card so the tooltip has somewhere to
+// sit; the shift slides the bitmap along its own surface so the CARD, not
+// the bitmap, is centred on where the user is looking. These check the one
+// property the whole arrangement exists for: a look straight ahead must
+// land on the card's middle, on a flat panel and on a curved one alike,
+// and the card must still be exactly as wide as it was without the strip.
+void testHitShift() {
+    const float org[3] = {0.0f, 0.0f, 0.0f};
+    const float ahead[3] = {0.0f, 0.0f, -1.0f};
+    float su = 0, sv = 0;
+    // A card of half-width 0.3 with the strip beside it: the bitmap is
+    // kTipRatio times as wide, and the shift is what the model computes.
+    const float cardHalf = 0.3f;
+    const float halfW = cardHalf * kTipRatio;
+    const float shift = halfW * (kTipRatio - 1.0f) / kTipRatio;
+    const float cardMid = 1.0f / (2.0f * kTipRatio);   // the card's middle in u
+
+    check(menuPanelHit(org, ahead, 1.4f, 0.0f, halfW, 0.2f, shift, &su, &sv) &&
+              approx(su, cardMid, 0.0005f),
+          "shift: straight ahead lands on the CARD's middle, not the bitmap's");
+    // The card's own edges, at exactly the angles they had before the
+    // strip. The left one is su = 0, which sits on the boundary the hit
+    // test rejects by a rounding bit, so the coordinate is read directly.
+    const float leftEdge[3] = {-cardHalf / 1.4f, 0.0f, -1.0f};
+    su = 9.0f;
+    menuPanelHit(org, leftEdge, 1.4f, 0.0f, halfW, 0.2f, shift, &su, &sv);
+    check(approx(su, 0.0f, 0.0005f), "shift: the card's left edge is still at its own half-width");
+    const float rightEdge[3] = {cardHalf / 1.4f, 0.0f, -1.0f};
+    check(menuPanelHit(org, rightEdge, 1.4f, 0.0f, halfW, 0.2f, shift, &su, &sv) &&
+              approx(su, 1.0f / kTipRatio, 0.0005f),
+          "shift: the card's right edge is where the strip begins");
+    // Curved: the card's middle is on the cylinder's apex, so the same look
+    // lands in the same place whatever the curve.
+    check(menuPanelHit(org, ahead, 1.4f, 0.3f, halfW, 0.2f, shift, &su, &sv) &&
+              approx(su, cardMid, 0.0005f),
+          "shift: a curved panel puts the card's middle on the apex too");
+    // And the strip really is to the RIGHT: a look past the card's right
+    // edge is still on the bitmap.
+    const float intoStrip[3] = {1.5f * cardHalf / 1.4f, 0.0f, -1.0f};
+    check(menuPanelHit(org, intoStrip, 1.4f, 0.0f, halfW, 0.2f, shift, &su, &sv) &&
+              su > 1.0f / kTipRatio,
+          "shift: past the card's right edge is the tooltip's strip");
 }
 
 // --- the door's eye transform -----------------------------------------------
@@ -276,6 +322,7 @@ int main() {
     testDikMap();
     testHitFlat();
     testHitCurved();
+    testHitShift();
     testXform();
     testIniWrite();
     testPerfStats();

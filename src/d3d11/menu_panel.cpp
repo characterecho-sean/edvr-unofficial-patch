@@ -58,8 +58,8 @@ constexpr float kPopupAlpha = 0.97f;
 constexpr Rgb kPopupEdge = {255, 150, 40};
 constexpr Rgb kEditField = {255, 255, 255};
 
-enum class Font { Row, Tab, Small, Hint, Big, Caption, TileSub };
-constexpr int kFontCount = 7;
+enum class Font { Row, Tab, Small, Hint, Big, Caption, TileSub, Tip };
+constexpr int kFontCount = 8;
 
 struct Op {
     bool         text = false;
@@ -87,6 +87,7 @@ struct Raster {
     std::vector<uint8_t> rgba;   // premultiplied
     int      w = 0, h = 0;
     std::vector<LineRect> lines;
+    float    cardFrac = 1.0f;    // how much of the width the menu card spans
     double   ms = 0.0;
 };
 
@@ -212,18 +213,43 @@ std::wstring widen(const char* s) {
     return out;
 }
 
+// How tall a wrapped run of text actually is, asked of GDI rather than
+// estimated from a character count. The tooltip is sized to its own text,
+// so a guess that ran short clipped the body and a guess that ran long
+// left an empty card; DT_CALCRECT is the same measurement DrawTextW will
+// make when it draws it.
+int measureWrapped(const std::wstring& s, int widthPx, int emPx) {
+    if (s.empty() || widthPx <= 0 || emPx <= 0) return 0;
+    HDC dc = CreateCompatibleDC(nullptr);
+    if (!dc) return 0;
+    HFONT f = makeFont(emPx, false);
+    HGDIOBJ old = f ? SelectObject(dc, f) : nullptr;
+    RECT r = {0, 0, widthPx, 1};
+    DrawTextW(dc, s.c_str(), -1, &r, DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX);
+    if (old) SelectObject(dc, old);
+    if (f) DeleteObject(f);
+    DeleteDC(dc);
+    return r.bottom - r.top;
+}
+
 // Lay the content out into ops and line rectangles. All sizes derive from
 // the cap height in pixels, so the panel reads the same in degrees on any
-// headset.
-void layout(const MenuContent& c, std::vector<Op>& ops, std::vector<LineRect>& lines, int* outH) {
+// headset. `popupBodyH` is the measured height of the tooltip's body, 0
+// when there is none.
+void layout(const MenuContent& c, std::vector<Op>& ops, std::vector<LineRect>& lines, int* outH,
+            int popupBodyH) {
     const int cap = c.capPx;
     const int W = c.widthPx;
+    // The MENU CARD's width. The bitmap is wider: the pixels past the card
+    // are the tooltip's, and are transparent when no tooltip is up.
+    const int cardW = c.cardPx > 0 && c.cardPx <= W ? c.cardPx : W;
     const int pad = cap * 8 / 10;
     const int rowPitch = c.compact ? cap * 17 / 10 : cap * 2;
     const int tabH = c.toast ? 0 : cap * 24 / 10;
     const int hintH = c.toast ? 0 : cap * 34 / 10;   // two lines of hint
     const int footH = c.toast ? 0 : cap * 16 / 10;
-    const int graphH = c.graphCount > 0 ? cap * 40 / 10 : 0;
+    const int graphOneH = cap * 32 / 10;
+    const int graphH = c.graphCount * graphOneH;
     const int rows = c.lineCount;
     // The tile grid: caption, big value, a two-line sub, in a box five
     // tile-units tall, the unit being nine tenths of a cap. Each box is
@@ -244,7 +270,7 @@ void layout(const MenuContent& c, std::vector<Op>& ops, std::vector<LineRect>& l
     // Background.
     {
         Op o;
-        o.rect = {0, 0, W, H};
+        o.rect = {0, 0, cardW, H};
         o.rgb = kBg;
         o.alpha = kBgAlpha;
         ops.push_back(o);
@@ -298,7 +324,7 @@ void layout(const MenuContent& c, std::vector<Op>& ops, std::vector<LineRect>& l
         y += tabH;
     }
     if (tileRows > 0) {
-        const int gridW = W - 2 * pad;
+        const int gridW = cardW - 2 * pad;
         const int tileW = (gridW - (columns - 1) * tileGap) / columns;
         for (int i = 0; i < c.tileCount; ++i) {
             const MenuTile& t = c.tiles[i];
@@ -344,7 +370,7 @@ void layout(const MenuContent& c, std::vector<Op>& ops, std::vector<LineRect>& l
     int popupRowTop = -1, popupRowBottom = -1;
     for (int i = 0; i < rows; ++i) {
         const MenuLine& l = c.lines[i];
-        const RECT rr = {pad / 2, y, W - pad / 2, y + rowPitch};
+        const RECT rr = {pad / 2, y, cardW - pad / 2, y + rowPitch};
         if (i == c.popupLine) {
             popupRowTop = rr.top;
             popupRowBottom = rr.bottom;
@@ -366,7 +392,9 @@ void layout(const MenuContent& c, std::vector<Op>& ops, std::vector<LineRect>& l
         // Information rows carry long values, so the split sits further
         // left for them than for a setting's label and value; a note has
         // the whole width.
-        const int split = l.style == kMenuNote ? W - pad : l.style == kMenuInfo ? W * 26 / 100 : W * 6 / 10;
+        const int split = l.style == kMenuNote   ? cardW - pad
+                          : l.style == kMenuInfo ? cardW * 26 / 100
+                                                 : cardW * 6 / 10;
         Op left;
         left.text = true;
         left.str = widen(l.left);
@@ -379,14 +407,14 @@ void layout(const MenuContent& c, std::vector<Op>& ops, std::vector<LineRect>& l
                    : c.toast               ? kToastText
                                            : kLabel;
         if (l.style == kMenuHeading) left.rect.left = pad / 2;
-        if (c.toast) left.rect.right = W - pad;
+        if (c.toast) left.rect.right = cardW - pad;
         ops.push_back(left);
         if (l.toggle) {
             // The switch: a pill the width of two knobs, the knob at the
             // end the value is at. The installer's proportions.
             const int h = rowPitch * 55 / 100;
             const int wsw = h * 19 / 10;
-            const int right = W - pad;
+            const int right = cardW - pad;
             const RECT box = {right - wsw, y + (rowPitch - h) / 2, right, y + (rowPitch + h) / 2};
             const bool on = l.toggle == 2;
             Op track;
@@ -410,7 +438,7 @@ void layout(const MenuContent& c, std::vector<Op>& ops, std::vector<LineRect>& l
             if (l.style == kMenuRowEdit) {
                 // A field behind the typed value, so the row reads as one.
                 Op field;
-                field.rect = {split, y + rowPitch / 6, W - pad, y + rowPitch - rowPitch / 6};
+                field.rect = {split, y + rowPitch / 6, cardW - pad, y + rowPitch - rowPitch / 6};
                 field.rgb = kEditField;
                 field.alpha = 0.10f;
                 field.radius = cap / 5;
@@ -423,7 +451,7 @@ void layout(const MenuContent& c, std::vector<Op>& ops, std::vector<LineRect>& l
             }
             right.text = true;
             right.str = widen(l.right);
-            right.rect = {split, y, W - pad, y + rowPitch};
+            right.rect = {split, y, cardW - pad, y + rowPitch};
             right.align = l.style == kMenuInfo ? DT_LEFT : DT_RIGHT;
             right.font = Font::Row;
             right.rgb = l.style == kMenuInfo ? kLabel
@@ -438,7 +466,7 @@ void layout(const MenuContent& c, std::vector<Op>& ops, std::vector<LineRect>& l
                 b.str = l.badge == kBadgeRestart ? L"restart"
                         : l.badge == kBadgePending ? L"at next launch"
                                                    : L"?";
-                b.rect = {split, y + rowPitch * 62 / 100, W - pad, y + rowPitch};
+                b.rect = {split, y + rowPitch * 62 / 100, cardW - pad, y + rowPitch};
                 b.align = DT_RIGHT;
                 b.font = Font::Small;
                 b.rgb = l.badge == kBadgeUnknown ? kDimText : kBadge;
@@ -449,12 +477,14 @@ void layout(const MenuContent& c, std::vector<Op>& ops, std::vector<LineRect>& l
         }
         y += rowPitch;
     }
-    if (c.graphCount > 0) {
-        // The frame-time strip: one bar per frame, oldest left, against a
-        // scale of twice the display's budget, with the budget drawn as a
-        // line. Green within budget, amber over it, red at twice it.
-        const int gx0 = pad, gx1 = W - pad;
-        const int gy0 = y + cap / 2, gy1 = y + graphH - cap / 4;
+    for (int g = 0; g < c.graphCount; ++g) {
+        // One strip per measure, fpsVR's pair stacked: one bar per frame,
+        // oldest left, against a scale of twice the display's budget, with
+        // the budget drawn as a line halfway up. Green within budget, amber
+        // over it, red at twice it.
+        const MenuGraph& mg = c.graphs[g];
+        const int gx0 = pad, gx1 = cardW - pad;
+        const int gy0 = y + cap / 2, gy1 = y + graphOneH - cap / 4;
         {
             Op bg;
             bg.rect = {gx0, gy0, gx1, gy1};
@@ -462,12 +492,13 @@ void layout(const MenuContent& c, std::vector<Op>& ops, std::vector<LineRect>& l
             bg.alpha = 0.35f;
             ops.push_back(bg);
         }
-        const float scale = c.graphBudgetMs > 0.0f ? 2.0f * c.graphBudgetMs : 22.2f;
+        const float scale = mg.budgetMs > 0.0f ? 2.0f * mg.budgetMs : 22.2f;
         const int   plotH = gy1 - gy0;
-        const float barW = static_cast<float>(gx1 - gx0) / static_cast<float>(c.graphCount);
-        for (int i = 0; i < c.graphCount; ++i) {
-            const float ms = c.graph[i];
-            if (!(ms > 0.0f)) continue;
+        const float barW =
+            mg.count > 0 ? static_cast<float>(gx1 - gx0) / static_cast<float>(mg.count) : 0.0f;
+        for (int i = 0; i < mg.count; ++i) {
+            const float ms = mg.samples[i];
+            if (!(ms > 0.0f)) continue;   // a frame with no measurement is a gap
             float frac = ms / scale;
             if (frac > 1.0f) frac = 1.0f;
             const int h = static_cast<int>(frac * plotH + 0.5f);
@@ -475,9 +506,9 @@ void layout(const MenuContent& c, std::vector<Op>& ops, std::vector<LineRect>& l
             b.rect = {gx0 + static_cast<int>(i * barW), gy1 - h,
                       gx0 + static_cast<int>((i + 1) * barW) - 1, gy1};
             if (b.rect.right <= b.rect.left) b.rect.right = b.rect.left + 1;
-            b.rgb = ms > 2.0f * c.graphBudgetMs   ? Rgb{255, 90, 70}
-                    : ms > c.graphBudgetMs * 1.02f ? Rgb{255, 170, 60}
-                                                   : Rgb{110, 200, 120};
+            b.rgb = ms > 2.0f * mg.budgetMs   ? Rgb{255, 90, 70}
+                    : ms > mg.budgetMs * 1.02f ? Rgb{255, 170, 60}
+                                               : Rgb{110, 200, 120};
             b.alpha = 0.9f;
             ops.push_back(b);
         }
@@ -489,24 +520,24 @@ void layout(const MenuContent& c, std::vector<Op>& ops, std::vector<LineRect>& l
             line.alpha = 0.5f;
             ops.push_back(line);
         }
-        if (c.graphLabel[0]) {
+        if (mg.label[0]) {
             Op t;
             t.text = true;
-            t.str = widen(c.graphLabel);
+            t.str = widen(mg.label);
             t.rect = {gx0 + cap / 3, gy0, gx1, gy0 + cap * 14 / 10};
             t.align = DT_LEFT;
             t.font = Font::Small;
             t.rgb = kFooter;
             ops.push_back(t);
         }
-        y += graphH;
+        y += graphOneH;
     }
     if (!c.toast) {
         if (c.hint[0]) {
             Op h;
             h.text = true;
             h.str = widen(c.hint);
-            h.rect = {pad, y + cap / 4, W - pad, y + hintH};
+            h.rect = {pad, y + cap / 4, cardW - pad, y + hintH};
             h.align = DT_LEFT | DT_WORDBREAK;
             h.font = Font::Hint;
             h.rgb = kHint;
@@ -517,7 +548,7 @@ void layout(const MenuContent& c, std::vector<Op>& ops, std::vector<LineRect>& l
             Op f;
             f.text = true;
             f.str = widen(c.footer);
-            f.rect = {pad, y, W - pad, y + footH};
+            f.rect = {pad, y, cardW - pad, y + footH};
             f.align = DT_LEFT;
             f.font = Font::Small;
             f.rgb = kFooter;
@@ -525,40 +556,30 @@ void layout(const MenuContent& c, std::vector<Op>& ops, std::vector<LineRect>& l
         }
     }
 
-    // The tooltip, last, so it sits over the rows: a card beside the
-    // highlighted row carrying what edvr.ini says about that key. It is
-    // sized to its own text, and it slides up when there is not room
-    // below, so it never runs off the panel.
-    if (!c.toast && c.popupLine >= 0 && popupRowTop >= 0 && c.popup[0]) {
-        const int cardW = W * 46 / 100;
-        const int inset = cap * 6 / 10;
-        const int titleH = cap * 15 / 10;
-        const int bodyLead = cap * 12 / 10;      // a line of the small face
-        const int textW = cardW - 2 * inset;
-        // The wrapped line count, estimated the way the face measures:
-        // Segoe UI averages about half its em per character.
-        const int emSmall = cap * 7 / 7;
-        const int perLine = textW * 2 / (emSmall > 0 ? emSmall : 1);
-        int bodyLines = 0;
-        {
-            int run = 0;
-            for (const char* q = c.popup; *q; ++q) {
-                if (*q == '\n') {
-                    bodyLines += run > 0 ? (run + perLine - 1) / perLine : 1;
-                    run = 0;
-                } else {
-                    ++run;
-                }
-            }
-            if (run > 0) bodyLines += (run + perLine - 1) / perLine;
-        }
-        if (bodyLines < 1) bodyLines = 1;
-        if (bodyLines > 14) bodyLines = 14;
-        const int cardH = inset + titleH + bodyLines * bodyLead + inset;
-        int top = popupRowTop - cap / 4;
+    // The tooltip: a card of its own, in the strip BESIDE the menu, never
+    // over it. The first build drew it across the rows and hid the values
+    // it was explaining (flown 2026-09-07). It is sized to its whole text
+    // in a smaller face, capped at the panel's height, and it sits level
+    // with the row it belongs to, sliding only as far as it must to stay
+    // on the panel.
+    if (!c.toast && cardW < W && c.popupLine >= 0 && popupRowTop >= 0 && c.popup[0]) {
+        // The strip's gap is the same fraction the model reserved for it,
+        // so the drawn card is the width its name says.
+        const int stripL = cardW + static_cast<int>(cardW * kTipGapFrac);
+        const int stripR = W;
+        const int tipW = stripR - stripL;
+        const int inset = cap * 55 / 100;
+        const int titleLead = cap * 13 / 10;
+        // The body's real height, measured; capped only by the panel's own,
+        // which is what keeps the tooltip from ever changing the bitmap.
+        int bodyH = popupBodyH > 0 ? popupBodyH : cap;
+        const int roomH = H - pad - 2 * inset - titleLead;
+        if (bodyH > roomH) bodyH = roomH > cap ? roomH : cap;
+        const int cardH = inset + titleLead + bodyH + inset;
+        int top = popupRowTop - cap / 2;
         if (top + cardH > H - pad / 2) top = H - pad / 2 - cardH;
         if (top < pad / 2) top = pad / 2;
-        const RECT card = {W - pad / 2 - cardW, top, W - pad / 2, top + cardH};
+        const RECT card = {stripL, top, stripR, top + cardH};
         Op bg;
         bg.rect = card;
         bg.rgb = kPopupBg;
@@ -567,15 +588,15 @@ void layout(const MenuContent& c, std::vector<Op>& ops, std::vector<LineRect>& l
         ops.push_back(bg);
         Op edge = bg;
         edge.rgb = kPopupEdge;
-        edge.alpha = 0.55f;
-        edge.stroke = cap / 12 > 0 ? cap / 12 : 1;
+        edge.alpha = 0.5f;
+        edge.stroke = cap / 14 > 0 ? cap / 14 : 1;
         ops.push_back(edge);
         if (c.popupTitle[0]) {
             Op t;
             t.text = true;
             t.str = widen(c.popupTitle);
             t.rect = {card.left + inset, card.top + inset, card.right - inset,
-                      card.top + inset + titleH};
+                      card.top + inset + titleLead};
             t.align = DT_LEFT;
             t.font = Font::Caption;
             t.rgb = kValue;
@@ -584,19 +605,20 @@ void layout(const MenuContent& c, std::vector<Op>& ops, std::vector<LineRect>& l
         Op b;
         b.text = true;
         b.str = widen(c.popup);
-        b.rect = {card.left + inset, card.top + inset + titleH, card.right - inset,
+        b.rect = {card.left + inset, card.top + inset + titleLead, card.right - inset,
                   card.bottom - inset};
         b.align = DT_LEFT | DT_WORDBREAK;
-        b.font = Font::Small;
+        b.font = Font::Tip;
         b.rgb = kHint;
         ops.push_back(b);
-        // A tick from the row to the card, so which row it belongs to is
+        // A rule from the row to the card, so which row it belongs to is
         // never in doubt.
+        const int mid = (popupRowTop + popupRowBottom) / 2;
         Op tick;
-        tick.rect = {card.left - cap / 3, (popupRowTop + popupRowBottom) / 2 - cap / 12,
-                     card.left, (popupRowTop + popupRowBottom) / 2 + cap / 12};
+        tick.rect = {cardW - pad / 2, mid - (cap / 14 > 0 ? cap / 14 : 1), card.left,
+                     mid + (cap / 14 > 0 ? cap / 14 : 1)};
         tick.rgb = kPopupEdge;
-        tick.alpha = 0.55f;
+        tick.alpha = 0.5f;
         ops.push_back(tick);
     }
 }
@@ -633,9 +655,21 @@ bool rasterise(const MenuContent& c, Raster& out) {
     std::vector<Op> ops;
     std::vector<LineRect> lines;
     int H = 0;
-    layout(c, ops, lines, &H);
+    // Measure the tooltip's body before laying out, so the card is sized to
+    // the text GDI will actually wrap rather than to a character count.
+    int popupBodyH = 0;
+    if (!c.toast && c.popupLine >= 0 && c.popup[0] && c.cardPx > 0 && c.cardPx < c.widthPx) {
+        const int stripL = c.cardPx + static_cast<int>(c.cardPx * kTipGapFrac);
+        const int inset = c.capPx * 55 / 100;
+        popupBodyH = measureWrapped(widen(c.popup), c.widthPx - stripL - 2 * inset,
+                                    c.capPx * 78 / 100);
+    }
+    layout(c, ops, lines, &H, popupBodyH);
     const int W = c.widthPx;
-    if (W < 64 || H < 32 || H > 2048) return false;
+    // The width is bounded upstream (the model clamps the CARD, and the
+    // strip is a fixed fraction of it), but say so here too: this is the
+    // twin of the height guard, and the DIBs below are sized from it.
+    if (W < 64 || W > 2600 || H < 32 || H > 2048) return false;
     Dib colour, cover;
     if (!makeDib(colour, W, H) || !makeDib(cover, W, H)) {
         freeDib(colour);
@@ -656,6 +690,7 @@ bool rasterise(const MenuContent& c, Raster& out) {
         makeFont(u * 15 / 10, true),          // Big: the tiles' numbers
         makeFont(u * 8 / 10, true),           // Caption
         makeFont(u * 72 / 100, false),        // TileSub
+        makeFont(cap * 78 / 100, false),      // Tip: the tooltip's body
     };
     execute(colour, ops, false, fonts);
     execute(cover, ops, true, fonts);
@@ -681,6 +716,8 @@ bool rasterise(const MenuContent& c, Raster& out) {
     freeDib(colour);
     freeDib(cover);
     out.lines.swap(lines);
+    out.cardFrac = c.cardPx > 0 && c.cardPx <= W ? static_cast<float>(c.cardPx) / static_cast<float>(W)
+                                                 : 1.0f;
     out.ms = qpcFrequency() > 0
                  ? static_cast<double>(qpcNow() - t0) * 1000.0 / static_cast<double>(qpcFrequency())
                  : 0.0;
@@ -702,6 +739,7 @@ struct Worker {
     // The layout the hit test reads, from the raster most recently uploaded.
     std::vector<LineRect>   liveLines;
     int                     liveW = 0, liveH = 0;
+    float                   liveCardFrac = 1.0f;
     double                  lastMs = 0.0;
 };
 Worker g_w;
@@ -777,7 +815,7 @@ void main(uint3 tid : SV_DispatchThreadID) {
             if (t > 0) {
                 float3 hit = org + t * df;
                 float th = atan2(hit.x, zc - hit.z);
-                su = (th * R + halfW) / (2.0 * halfW);
+                su = (th * R - misc.y + halfW) / (2.0 * halfW);
                 sv = (hit.y + halfH) / (2.0 * halfH);
             }
         }
@@ -785,7 +823,7 @@ void main(uint3 tid : SV_DispatchThreadID) {
         float t = (-dist - org.z) / df.z;
         if (t > 0) {
             float3 hit = org + t * df;
-            su = (hit.x + halfW) / (2.0 * halfW);
+            su = (hit.x - misc.y + halfW) / (2.0 * halfW);
             sv = (hit.y + halfH) / (2.0 * halfH);
         }
     }
@@ -930,19 +968,22 @@ int acquireQuery(ID3D11Device* dev) {
 // is inside it) projected through the eye's frustum. False when the panel
 // is behind the eye or entirely outside it: nothing to draw here.
 bool panelBox(const float* xf, const float* tans, float dist, float curve, float halfW, float halfH,
-              uint32_t regionW, uint32_t regionH, bool flipV, int32_t box[4]) {
+              float shift, uint32_t regionW, uint32_t regionH, bool flipV, int32_t box[4]) {
     float minU = 1e9f, maxU = -1e9f, minV = 1e9f, maxV = -1e9f;
     const float lt = tans[0], rt = tans[1], top = tans[2], bot = tans[3];
     for (int i = 0; i <= 8; ++i) {
         const float t = -1.0f + 2.0f * static_cast<float>(i) / 8.0f;
+        // The surface position of this sample, shifted the same way the
+        // shader shifts it, so the box covers where the panel is DRAWN.
+        const float sp = t * halfW + shift;
         float qx, qz;
         if (curve > 0.005f) {
             const float R = dist / curve;
-            const float th = t * halfW / R;
+            const float th = sp / R;
             qx = R * sinf(th);
             qz = (R - dist) - R * cosf(th);
         } else {
-            qx = t * halfW;
+            qx = sp;
             qz = -dist;
         }
         for (int s = -1; s <= 1; s += 2) {
@@ -1193,8 +1234,12 @@ void* compositeInner(void* srcTex, int eye, const float* bounds, const float* xf
         // the eye (a look away from a world-anchored panel): the whole
         // region, which the shader answers pixel by pixel.
         int32_t box[4] = {0, 0, static_cast<int32_t>(regionW), static_cast<int32_t>(regionH)};
-        const float halfH = g.halfW * g_panelAspect.load();
-        if (panelBox(xf, p.tans, g.dist, g.curve, g.halfW, halfH, regionW, regionH, flipV, box) &&
+        // Read the aspect ONCE: a raster landing between two reads would
+        // give the culling box and the shader different panels for a frame.
+        const float aspect = g_panelAspect.load();
+        const float halfH = g.halfW * aspect;
+        if (panelBox(xf, p.tans, g.dist, g.curve, g.halfW, halfH, g.shift, regionW, regionH, flipV,
+                     box) &&
             (box[2] <= box[0] || box[3] <= box[1])) {
             if (ctx) ctx->Release();
             if (dev) dev->Release();
@@ -1241,8 +1286,9 @@ void* compositeInner(void* srcTex, int eye, const float* bounds, const float* xf
         p.geom[0] = g.dist;
         p.geom[1] = g.curve;
         p.geom[2] = g.halfW;
-        p.geom[3] = g.halfW * g_panelAspect.load();
+        p.geom[3] = halfH;
         p.misc[0] = g.alpha;
+        p.misc[1] = g.shift;
         D3D11_MAPPED_SUBRESOURCE m{};
         bool ran = false;
         if (SUCCEEDED(ctx->Map(g_cb, 0, D3D11_MAP_WRITE_DISCARD, 0, &m)) && m.pData) {
@@ -1328,7 +1374,7 @@ void* compositeInner(void* srcTex, int eye, const float* bounds, const float* xf
 // ---------------------------------------------------------------------------
 
 bool menuPanelHit(const float org[3], const float dir[3], float dist, float curve, float halfW,
-                  float halfH, float* su, float* sv) {
+                  float halfH, float shift, float* su, float* sv) {
     float u = -1.0f, v = -1.0f;
     if (curve > 0.005f) {
         const float R = dist / curve;
@@ -1344,7 +1390,7 @@ bool menuPanelHit(const float org[3], const float dir[3], float dist, float curv
                 const float hy = org[1] + t * dir[1];
                 const float hz = org[2] + t * dir[2];
                 const float th = atan2f(hx, zc - hz);
-                u = (th * R + halfW) / (2.0f * halfW);
+                u = (th * R - shift + halfW) / (2.0f * halfW);
                 v = (hy + halfH) / (2.0f * halfH);
             }
         }
@@ -1353,7 +1399,7 @@ bool menuPanelHit(const float org[3], const float dir[3], float dist, float curv
         if (t > 0.0f) {
             const float hx = org[0] + t * dir[0];
             const float hy = org[1] + t * dir[1];
-            u = (hx + halfW) / (2.0f * halfW);
+            u = (hx - shift + halfW) / (2.0f * halfW);
             v = (hy + halfH) / (2.0f * halfH);
         }
     }
@@ -1414,6 +1460,7 @@ void menuPanelTick(ID3D11Device* dev) {
         g_w.liveLines = r.lines;
         g_w.liveW = r.w;
         g_w.liveH = r.h;
+        g_w.liveCardFrac = r.cardFrac;
         g_w.lastMs = r.ms;
     });
 }
@@ -1428,6 +1475,9 @@ float menuPanelAspect() { return g_panelAspect.load(); }
 int menuPanelLineAt(float u, float v) {
     if (u < 0.0f || u > 1.0f || v < 0.0f || v > 1.0f) return -1;
     std::lock_guard<std::mutex> lock(g_w.m);
+    // The tooltip's strip is not the menu: a look parked on it selects
+    // nothing, rather than the row that happens to be at that height.
+    if (u > g_w.liveCardFrac) return -1;
     for (size_t i = 0; i < g_w.liveLines.size(); ++i) {
         const LineRect& l = g_w.liveLines[i];
         if (v >= l.y0 && v < l.y1) return l.selectable ? static_cast<int>(i) : -1;

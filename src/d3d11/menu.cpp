@@ -147,8 +147,16 @@ struct State {
     float curve = 0.2f;
     float textDeg = 1.1f;
     float widthDeg = 30.0f;
-    int   idleSeconds = 20;
+    int   idleSeconds = 0;
     int   aimMode = 2;   // 0 head, 1 keys, 2 both
+    // The tooltip beside the highlighted row: how long a row must be held
+    // before it appears, 0 for never. The row it is showing, when it is up.
+    float    tooltipDelayS = 1.5f;
+    uint64_t highlightSinceMs = 0;
+    bool     tooltipUp = false;
+    bool     tooltipsWere = true;    // to notice a live change of shape
+    bool     tipWidthNoted = false;
+    uint64_t tickMs = 0;
 
     bool  open = false;
     float alpha = 0.0f;
@@ -759,8 +767,12 @@ void buildStatus(MenuContent& c) {
         double ms = 0.0;
         float gpu = 0.0f;
         if (menuPanelStats(&w, &h, &ms, &gpu)) {
-            snprintf(buf, sizeof(buf), "%dx%d bitmap, %.1f ms to draw, %.2f ms/eye on the GPU", w, h,
-                     ms, static_cast<double>(gpu));
+            // The bitmap is wider than the card when the tooltip's strip is
+            // in it, so say which number is which.
+            const int card =
+                g_s.tooltipDelayS > 0.0f ? static_cast<int>(w / kTipRatio + 0.5f) : w;
+            snprintf(buf, sizeof(buf), "%dx%d bitmap (%d card), %.1f ms to draw, %.2f ms/eye GPU", w,
+                     h, card, ms, static_cast<double>(gpu));
         } else {
             snprintf(buf, sizeof(buf), "no raster yet");
         }
@@ -806,19 +818,65 @@ void buildMonitor(MenuContent& c) {
         l.badge = kBadgeNone;
     }
     c.compact = true;
-    c.graphCount = perfMonitorGraph(c.graph, static_cast<int>(sizeof(c.graph) / sizeof(c.graph[0])),
-                                    &c.graphBudgetMs);
-    snprintf(c.graphLabel, sizeof(c.graphLabel), "frame time, last %d frames; the line is the %.1f ms budget",
-             c.graphCount, static_cast<double>(c.graphBudgetMs));
+    // Two strips, fpsVR's pair: the GPU frame the compositor measured, and
+    // the render thread's own busy time.
+    const int kinds[2] = {kGraphGpu, kGraphCpu};
+    const char* names[2] = {"GPU", "CPU"};
+    c.graphCount = 0;
+    for (int g = 0; g < 2; ++g) {
+        MenuGraph& mg = c.graphs[c.graphCount];
+        mg.count = perfMonitorGraph(kinds[g], mg.samples,
+                                    static_cast<int>(sizeof(mg.samples) / sizeof(mg.samples[0])),
+                                    &mg.budgetMs);
+        if (!mg.count) continue;
+        snprintf(mg.label, sizeof(mg.label), "%s, last %d frames; the line is the %.1f ms budget",
+                 names[g], mg.count, static_cast<double>(mg.budgetMs));
+        ++c.graphCount;
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Content
 
+// THE TOOLTIP'S STRIP (the fractions live in menu_panel.h, because the
+// raster draws from the same numbers the model reserves). The bitmap is
+// wider than the menu card by a gap and a tooltip's width. The strip is
+// transparent when no tooltip is up, so the panel's size never changes as
+// one comes and goes -- and the whole bitmap is SLID along its own surface
+// so the CARD lands where the user was looking rather than the bitmap's
+// middle.
+bool tooltipsOn() { return g_s.tooltipDelayS > 0.0f; }
+
+// The panel's half-width in METRES: the card exactly as wide as
+// width_degrees asks, plus the strip beside it. Scaled in metres and not in
+// degrees, because the bitmap maps linearly onto the surface while tan does
+// not -- multiplying the ANGLE by the ratio would draw the card 3.6% wider
+// than it was asked for at the default, and 9% at width_degrees 45.
+float panelHalfW(float widthDeg, bool withTip) {
+    const float card = g_s.distance * tanf(widthDeg * 0.5f * 0.0174532925f);
+    return withTip ? card * kTipRatio : card;
+}
+
+// How far to slide the bitmap along its own surface so the CARD's middle
+// sits on the anchor's forward. The card is the bitmap's left part, so the
+// surface moves right by the difference.
+//
+// This is a shift along the surface and NOT a turn of the anchor. Turning
+// the anchor would put the card's middle in the right direction but leave
+// it facing the old one: at the default ratio the card would be seen 9
+// degrees oblique, its left edge 1.50 m away and its right 1.41 m. A shift
+// leaves the card exactly where it was before the strip existed -- same
+// width, same distance, square to the look -- and, being recomputed every
+// frame rather than latched at summon, it cannot go stale when the ini is
+// edited with the panel up.
+float panelShift(float halfW, bool withTip) {
+    return withTip ? halfW * (kTipRatio - 1.0f) / kTipRatio : 0.0f;
+}
+
 // The bitmap's size, from the headset's own pixels per degree at the
 // panel: the panel is specified in degrees, so it reads the same size in
-// any headset and composites near 1:1.
-void sizeContent(MenuContent& c, float widthDeg, float textDeg) {
+// any headset and composites near 1:1. `withTip` adds the strip.
+void sizeContent(MenuContent& c, float widthDeg, float textDeg, bool withTip = false) {
     float ppd = 45.0f;
     uint32_t ew = 0, eh = 0;
     float outer = 0.0f, inner = 0.0f;
@@ -828,9 +886,14 @@ void sizeContent(MenuContent& c, float widthDeg, float textDeg) {
     }
     if (ppd < 12.0f) ppd = 12.0f;
     if (ppd > 80.0f) ppd = 80.0f;
-    c.widthPx = static_cast<int>(ppd * widthDeg + 0.5f);
-    if (c.widthPx < 480) c.widthPx = 480;
-    if (c.widthPx > 1600) c.widthPx = 1600;
+    int card = static_cast<int>(ppd * widthDeg + 0.5f);
+    if (card < 480) card = 480;
+    if (card > 1600) card = 1600;
+    // The ratio is applied AFTER the card is clamped, so the strip is
+    // always exactly its fraction of the card and the anchor's offset,
+    // which is computed from the ratio alone, stays exact.
+    c.cardPx = card;
+    c.widthPx = withTip ? static_cast<int>(card * kTipRatio + 0.5f) : card;
     c.capPx = static_cast<int>(ppd * textDeg + 0.5f);
     if (c.capPx < 10) c.capPx = 10;
     if (c.capPx > 80) c.capPx = 80;
@@ -840,7 +903,7 @@ void buildContent(MenuContent& c) {
     State& s = g_s;
     memset(&c, 0, sizeof(c));
     c.popupLine = -1;
-    sizeContent(c, s.widthDeg, s.textDeg);
+    sizeContent(c, s.widthDeg, s.textDeg, tooltipsOn());
 
     // The tab strip: a window of pages that fits the panel, always
     // including the current one, with an arrow at whichever end has more.
@@ -856,7 +919,7 @@ void buildContent(MenuContent& c) {
             return static_cast<int>(strlen(s.pages[i].name)) * c.capPx * 6 / 10 + c.capPx;
         };
         int first = 0, last = total - 1;
-        int room = c.widthPx - 2 * pad;
+        int room = c.cardPx - 2 * pad;
         // Grow outward from the current page while there is room, ending
         // before the arrows that say what is left over.
         first = last = s.page;
@@ -900,6 +963,12 @@ void buildContent(MenuContent& c) {
         snprintf(c.hint, sizeof(c.hint), "%s",
                  "The page a support thread will ask to see. Tab or PageDown for the next page.");
     } else {
+        // The tooltip waits for the look or the hand to settle on one row:
+        // it is an explanation for someone who has stopped, not something
+        // to flick past.
+        const bool showTip =
+            tooltipsOn() &&
+            s.tickMs >= s.highlightSinceMs + static_cast<uint64_t>(s.tooltipDelayS * 1000.0f);
         // Keep the highlight in the window.
         const int total = static_cast<int>(p.entries.size());
         if (p.highlight >= total) p.highlight = total ? total - 1 : 0;
@@ -949,39 +1018,45 @@ void buildContent(MenuContent& c) {
                 l.right[0] = 0;
             }
             l.style = editingThis ? kMenuRowEdit : (hi ? kMenuRowHi : kMenuRow);
-            if (hi) {
+            if (hi && showTip) {
                 // The tooltip beside the row: what the ini says about this
                 // key, in the ini's own words, plus the facts a person
                 // needs to type a value -- the range, the default, and
                 // whether the change waits for a restart.
                 c.popupLine = c.lineCount - 1;
                 snprintf(c.popupTitle, sizeof(c.popupTitle), "%s.%s", d.section, d.key);
-                std::string body = d.detail[0] ? d.detail : d.hint;
-                body += "\n";
+                // THE FACTS FIRST, THE INI'S PROSE LAST. Some comment
+                // blocks run to three thousand characters, and this buffer
+                // holds seven hundred; if the prose led, the truncation ate
+                // exactly the four things somebody about to change a value
+                // needs -- its range, its shipped value, when it applies,
+                // and which key does it.
+                std::string body;
                 if (d.kind == MenuKind::Number && d.lo[0] && d.hi[0]) {
-                    body += std::string("\nRange ") + d.lo + " to " + d.hi + ".";
+                    body += std::string("Range ") + d.lo + " to " + d.hi + ".  ";
                 } else if (d.kind == MenuKind::Choice) {
                     std::string list;
                     for (const ChoiceItem& ch : choicesOf(d)) {
                         if (!list.empty()) list += ", ";
                         list += ch.label;
                     }
-                    if (!list.empty()) body += "\nChoices: " + list + ".";
+                    if (!list.empty()) body += "Choices: " + list + ".  ";
                 }
-                body += std::string("\nShipped ") + displayValue(d, d.shipped) + ". " +
+                body += std::string("Shipped ") + displayValue(d, d.shipped) + ".  " +
                         (d.applies == 1   ? "Applies at once."
                          : d.applies == 2 ? "Takes effect at the next launch."
                                           : "When it applies is not documented.");
                 if (editingThis) {
-                    body += s.editBad ? "\n\nThat is not a value this key accepts."
-                                      : "\n\nEnter writes it, Escape leaves it alone.";
+                    body += s.editBad ? "\nThat is not a value this key accepts."
+                                      : "\nEnter writes it, Escape leaves it alone.";
                 } else if (s.resetArmedEntry == i) {
-                    body += "\n\nPress R again to reset it to the shipped value.";
+                    body += "\nPress R again to reset it to the shipped value.";
                 } else if (d.kind == MenuKind::Toggle || d.kind == MenuKind::Choice) {
-                    body += "\n\nEnter or Left/Right changes it.";
+                    body += "\nEnter or Left/Right changes it.";
                 } else {
-                    body += "\n\nEnter types a value; Left/Right steps it.";
+                    body += "\nEnter types a value; Left/Right steps it.";
                 }
+                body += std::string("\n\n") + (d.detail[0] ? d.detail : d.hint);
                 strncpy(c.popup, body.c_str(), sizeof(c.popup) - 1);
             }
         }
@@ -990,6 +1065,13 @@ void buildContent(MenuContent& c) {
             strncpy(l.left, "Nothing on this page yet.", sizeof(l.left) - 1);
             l.style = kMenuDim;
         }
+        // The DWELL is what this records, not whether a card was drawn. A
+        // row that yields no tooltip -- an action, a heading, an empty
+        // page -- would otherwise leave the flag clear forever, and the
+        // tick below would ask for a fresh raster of the whole bitmap on
+        // every frame for as long as the highlight sat there. The
+        // Instruments page is built entirely from actions.
+        s.tooltipUp = showTip;
     }
 
     std::string footer =
@@ -1019,7 +1101,12 @@ void buildToastContent(MenuContent& c, const std::string& text, float widthDeg, 
     c.lines[0].style = kMenuInfo;
     c.popupLine = -1;
     sizeContent(c, widthDeg, g_s.textDeg * capScale);
-    if (c.widthPx > 1200) c.widthPx = 1200;
+    // The card must never be wider than the bitmap it lives in: everything
+    // downstream reads cardPx as a part of widthPx.
+    if (c.widthPx > 1200) {
+        c.widthPx = 1200;
+        c.cardPx = c.widthPx;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1145,6 +1232,12 @@ void activateEntry() {
     }
 }
 
+// The dwell the tooltip waits on restarts whenever the row changes.
+void noteHighlightMoved() {
+    g_s.highlightSinceMs = g_s.tickMs;
+    g_s.tooltipUp = false;
+}
+
 void moveHighlight(int dir) {
     State& s = g_s;
     Page& p = s.pages[s.page];
@@ -1156,6 +1249,7 @@ void moveHighlight(int dir) {
         if (h < 0 || h >= n) return;
         if (p.entries[h].kind != EntryKind::Heading) {
             p.highlight = h;
+            noteHighlightMoved();
             s.contentDirty = true;
             return;
         }
@@ -1168,6 +1262,7 @@ void changePage(int dir) {
     if (n == 0) return;
     s.page = ((s.page + dir) % n + n) % n;
     s.resetArmedEntry = -1;
+    noteHighlightMoved();
     s.contentDirty = true;
 }
 
@@ -1352,10 +1447,10 @@ void handleKeys(uint64_t now) {
             case kPgUp: changePage(-1); break;
             case kPgDn: changePage(+1); break;
             case kHome:
-                if (!p.status) { p.highlight = 0; moveHighlight(0); if (p.entries.size() && p.entries[0].kind == EntryKind::Heading) moveHighlight(+1); s.contentDirty = true; }
+                if (!p.status) { p.highlight = 0; moveHighlight(0); if (p.entries.size() && p.entries[0].kind == EntryKind::Heading) moveHighlight(+1); noteHighlightMoved(); s.contentDirty = true; }
                 break;
             case kEnd:
-                if (!p.status && !p.entries.empty()) { p.highlight = static_cast<int>(p.entries.size()) - 1; s.contentDirty = true; }
+                if (!p.status && !p.entries.empty()) { p.highlight = static_cast<int>(p.entries.size()) - 1; noteHighlightMoved(); s.contentDirty = true; }
                 break;
             case kReset:
                 if (!p.status && !p.entries.empty() && p.entries[p.highlight].kind == EntryKind::Setting) {
@@ -1416,12 +1511,20 @@ void handleAim(uint64_t now) {
     if (!headRayInAnchor(org, dir)) return;
     const float aspect = menuPanelAspect();
     if (!(aspect > 0.0f)) return;
-    const float halfW = s.distance * tanf(s.widthDeg * 0.5f * 0.0174532925f);
+    // The whole panel, strip included: the hit test works in the bitmap's
+    // own coordinates, and menuPanelLineAt rejects the strip itself.
+    const float halfW = panelHalfW(s.widthDeg, tooltipsOn());
     const float halfH = halfW * aspect;
+    const float shift = panelShift(halfW, tooltipsOn());
     float su = 0.0f, sv = 0.0f;
     int line = -1;
-    if (menuPanelHit(org, dir, s.distance, s.curve, halfW, halfH, &su, &sv)) {
+    const bool onPanel = menuPanelHit(org, dir, s.distance, s.curve, halfW, halfH, shift, &su, &sv);
+    if (onPanel) {
         line = menuPanelLineAt(su, 1.0f - sv);
+        // Reading the tooltip is using the menu. Without this, resting on
+        // the card generates no input at all and an idle_dismiss set by
+        // hand would close the panel mid-sentence.
+        s.lastInputMs = now;
     }
     // The line index is into the CONTENT's window; map it to an entry.
     int entry = -1;
@@ -1448,6 +1551,7 @@ void handleAim(uint64_t now) {
     if (entry != p.highlight && s.aimSameCount >= 3) {
         p.highlight = entry;
         s.resetArmedEntry = -1;
+        noteHighlightMoved();
         s.contentDirty = true;
         s.lastInputMs = now;
     }
@@ -1522,6 +1626,8 @@ void openMenu(uint64_t now) {
     s.open = true;
     s.openedMs = now;
     s.lastInputMs = now;
+    s.highlightSinceMs = now;
+    s.tooltipUp = false;
     s.lastDrawnMs = now;   // grace: the first draw has not had a chance yet
     s.aimParked = false;
     s.contentDirty = true;
@@ -1576,8 +1682,41 @@ void menuConfigure(Config& cfg) {
     s.textDeg = t;
     float w = cfg.getFloat("menu.width_degrees", 30.0f);
     if (!(w >= 16.0f) || w > 45.0f) w = 30.0f;
+    s.idleSeconds = cfg.getIntInRange("menu.idle_dismiss", 0, 0, 600);
+    {
+        // Under a third of a second is not a dwell, it is a flicker: those
+        // values, and 0, mean no tooltip at all.
+        float d = cfg.getFloat("menu.tooltip_delay", 1.5f);
+        if (!(d >= 0.3f)) d = 0.0f;
+        if (d > 10.0f) d = 10.0f;
+        s.tooltipDelayS = d;
+    }
+    // With a tooltip beside it, the panel reaches out to
+    // atan(2.14 * tan(w/2)) on the right -- 29.8 degrees at the default
+    // width, 41.5 at the widest. Past about 35 the strip leaves one eye's
+    // frustum on most headsets and the card renders to one eye only, which
+    // is the worst possible thing to do to text somebody has stopped to
+    // read. So the card is held to 36 degrees while tooltips are on.
+    if (s.tooltipDelayS > 0.0f && w > 36.0f) {
+        if (!s.tipWidthNoted) {
+            s.tipWidthNoted = true;
+            Log::get().note(
+                "menu: width_degrees = %.0f is held to 36 while the settings tooltip is on, "
+                "because the card beside the panel would otherwise reach past 35 degrees and "
+                "be seen by one eye only. Set menu.tooltip_delay = 0 to have the full width "
+                "back without it.",
+                static_cast<double>(w));
+        }
+        w = 36.0f;
+    }
+    // The bitmap changes shape when either of these does, and nothing else
+    // would ask for the raster that follows: no [menu] key is a menu row,
+    // so this is the hand-edit-while-it-is-up path.
+    if (s.configured && (w != s.widthDeg || (s.tooltipDelayS > 0.0f) != s.tooltipsWere)) {
+        s.contentDirty = true;
+    }
     s.widthDeg = w;
-    s.idleSeconds = cfg.getIntInRange("menu.idle_dismiss", 20, 0, 600);
+    s.tooltipsWere = s.tooltipDelayS > 0.0f;
     s.toasts = cfg.getBool("menu.toasts", true);
     {
         const bool ov = cfg.getBool("menu.fps_overlay", false);
@@ -1672,6 +1811,9 @@ void menuTick(ID3D11Device* dev) {
         const uint64_t now = nowMs();
         const uint64_t dt = s.lastTickMs ? now - s.lastTickMs : 0;
         s.lastTickMs = now;
+        // The clock the content build reads, so the tooltip's dwell and the
+        // raster agree on when the row was last moved.
+        s.tickMs = now;
 
         // The monitor's ring: one clock read and a store per frame, and the
         // compositor's sample when a new one was published. Its slow
@@ -1714,6 +1856,12 @@ void menuTick(ID3D11Device* dev) {
         if (s.open) {
             handleKeys(now);
             handleAim(now);
+            // The tooltip's dwell has passed: nothing else changed, so ask
+            // for the one re-raster that brings it up.
+            if (!s.tooltipUp && tooltipsOn() && !s.pages[s.page].status &&
+                now >= s.highlightSinceMs + static_cast<uint64_t>(s.tooltipDelayS * 1000.0f)) {
+                s.contentDirty = true;
+            }
             if (s.idleSeconds > 0 && now - s.lastInputMs > static_cast<uint64_t>(s.idleSeconds) * 1000) {
                 closeMenu("idle");
             }
@@ -1829,8 +1977,13 @@ void menuTick(ID3D11Device* dev) {
         MenuGeometry g;
         g.dist = s.distance;
         g.curve = (s.toastUp || showingOverlay) ? 0.0f : s.curve;
-        const float widthDeg = s.toastUp ? kToastWidthDeg : showingOverlay ? kOverlayWidthDeg : s.widthDeg;
-        g.halfW = s.distance * tanf(widthDeg * 0.5f * 0.0174532925f);
+        // The toast and the head-locked overlay are their own bitmaps with
+        // no strip, so they take no shift.
+        const bool menuBranch = !s.toastUp && !showingOverlay;
+        const float widthDeg =
+            s.toastUp ? kToastWidthDeg : showingOverlay ? kOverlayWidthDeg : s.widthDeg;
+        g.halfW = panelHalfW(widthDeg, menuBranch && tooltipsOn());
+        g.shift = panelShift(g.halfW, menuBranch && tooltipsOn());
         g.alpha = s.toastUp ? s.toastAlpha : showingOverlay ? s.overlayAlpha : s.alpha;
         menuPanelSetGeometry(g);
         setMenuHeadLock(showingOverlay, s.overlayYaw, s.overlayPitch);

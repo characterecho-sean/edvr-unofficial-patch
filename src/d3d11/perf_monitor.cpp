@@ -25,6 +25,14 @@ namespace {
 
 // Ten seconds at 90 Hz for the statistics; the graph shows the tail.
 constexpr int kRing = 900;
+// fpsVR prints the MEAN of each frametime over one overlay update, about
+// 200 ms, and has since its version 1.24.1 (August 2022). Its pinned Q&A
+// still describes the maximum, because that is what it did BEFORE that
+// release and the Q&A was never edited -- do not take that page as the
+// answer. This is the window the GPU TIME and CPU TIME tiles average over,
+// so the two agree; the ten-second mean is on the sub-line, where it is
+// the steadier number to tune against.
+constexpr float kMatchWindowS = 0.2f;
 constexpr uint64_t kSlowEveryMs = 1000;
 constexpr uint64_t kGraceMs = 2000;
 // One frame in sixteen samples the draw hooks.
@@ -600,6 +608,27 @@ int perfMonitorTiles(PerfTile* out, int max) {
     // The interval ring, summarised, and the drops attributed.
     float present[kRing], appGpu[kRing], compGpu[kRing], gpuFrame[kRing], busy[kRing], waits[kRing];
     int cnt = 0, compCnt = 0, reproj = 0, dropped = 0;
+    // The mean over fpsVR's own update window, so the two numbers can be
+    // read side by side. Averaging the whole ten-second ring instead read
+    // about a millisecond under it (flown 2026-09-07).
+    double matchGpu = 0.0, matchCpu = 0.0;
+    int matchGpuN = 0, matchCpuN = 0;
+    float matchSecs = 0.0f;
+    for (int i = s.count - 1; i >= 0 && matchSecs < kMatchWindowS; --i) {
+        const Frame& f = ringAt(i);
+        if (f.haveComp) {
+            matchGpu += f.totalGpuMs;
+            ++matchGpuN;
+        }
+        const float b = f.presentMs - f.presentWaitMs - f.posesWaitMs;
+        if (b > 0.0f) {
+            matchCpu += b;
+            ++matchCpuN;
+        }
+        matchSecs += f.presentMs / 1000.0f;
+    }
+    const float recentGpu = matchGpuN ? static_cast<float>(matchGpu / matchGpuN) : 0.0f;
+    const float recentCpu = matchCpuN ? static_cast<float>(matchCpu / matchCpuN) : 0.0f;
     int dropsWithEdvr = 0, dropsClean = 0;
     uint32_t dropEventBits = 0;
     double edvrBoundary = 0.0, edvrDoor = 0.0, doorGpu = 0.0;
@@ -669,8 +698,8 @@ int perfMonitorTiles(PerfTile* out, int max) {
     }
     if (compCnt) {
         const PerfStats gf = perfStatsOf(gpuFrame, compCnt);
-        snprintf(v, sizeof(v), "%.1f", gf.avgMs);
-        snprintf(sub, sizeof(sub), "ms, max %.1f", gf.maxMs);
+        snprintf(v, sizeof(v), "%.1f", recentGpu > 0.0f ? recentGpu : gf.avgMs);
+        snprintf(sub, sizeof(sub), "ms now; %.1f over 10 s", gf.avgMs);
         tile("GPU TIME", v, sub);
     } else {
         tile("GPU TIME", "--", glitchConsumerPresent() ? "no compositor timing" : "no openvr half");
@@ -678,9 +707,10 @@ int perfMonitorTiles(PerfTile* out, int max) {
     if (ps.count) {
         const PerfStats bs = perfStatsOf(busy, cnt);
         const PerfStats ws = perfStatsOf(waits, cnt);
-        snprintf(v, sizeof(v), "%.1f", bs.avgMs);
-        snprintf(sub, sizeof(sub), "ms thread busy; waits %.1f", ws.avgMs);
+        snprintf(v, sizeof(v), "%.1f", recentCpu > 0.0f ? recentCpu : bs.avgMs);
+        snprintf(sub, sizeof(sub), "ms now; %.1f over 10 s", bs.avgMs);
         tile("CPU TIME", v, sub);
+        (void)ws;
     } else {
         tile("CPU TIME", "--", "");
     }
@@ -837,12 +867,24 @@ void perfMonitorLastDropLine(char* buf, size_t bufLen) {
              static_cast<double>(ago) / 1000.0, static_cast<double>(s.lastDropFrameMs), ev);
     buf[bufLen - 1] = 0;
 }
-int perfMonitorGraph(float* out, int max, float* budgetMs) {
+int perfMonitorGraph(int which, float* out, int max, float* budgetMs) {
     State& s = g_s;
     if (budgetMs) *budgetMs = budgetNow();
     if (!out || max <= 0) return 0;
     const int n = s.count < max ? s.count : max;
-    for (int i = 0; i < n; ++i) out[i] = ringAt(s.count - n + i).presentMs;
+    for (int i = 0; i < n; ++i) {
+        const Frame& f = ringAt(s.count - n + i);
+        if (which == kGraphGpu) {
+            // A frame whose record has not settled plots as a gap, not as
+            // a zero: two frames at the young end always lack one.
+            out[i] = f.haveComp ? f.totalGpuMs : 0.0f;
+        } else if (which == kGraphCpu) {
+            const float b = f.presentMs - f.presentWaitMs - f.posesWaitMs;
+            out[i] = b > 0.0f ? b : 0.0f;
+        } else {
+            out[i] = f.presentMs;
+        }
+    }
     return n;
 }
 

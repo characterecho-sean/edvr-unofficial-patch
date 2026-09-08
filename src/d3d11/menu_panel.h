@@ -58,6 +58,14 @@ struct MenuLine {
     uint8_t toggle;   // 0 none; 1 off, 2 on: a switch is drawn in place of `right`
 };
 
+// THE TOOLTIP'S STRIP, as fractions of the menu card's width: the gap
+// between the two cards, and the tooltip card itself. The model reserves
+// the bitmap from these and the raster draws from them, so they live here
+// and not in either file.
+constexpr float kTipGapFrac = 0.05f;
+constexpr float kTipWidthFrac = 0.52f;
+constexpr float kTipRatio = 1.0f + kTipGapFrac + kTipWidthFrac;
+
 constexpr int kMenuMaxTabs = 8;
 constexpr int kMenuMaxLines = 14;
 constexpr int kMenuMaxTiles = 16;
@@ -70,6 +78,15 @@ struct MenuTile {
     char value[24];
     char sub[40];
 };
+
+// One frame-time strip: the samples, what they are, and the budget line.
+struct MenuGraph {
+    float samples[120];
+    int   count = 0;        // how many samples; 0 draws nothing
+    float budgetMs = 11.1f;
+    char  label[64];
+};
+constexpr int kMenuMaxGraphs = 2;
 
 // Everything the panel shows, as text. The model builds one of these on
 // every change; the raster lays it out.
@@ -90,33 +107,49 @@ struct MenuContent {
     int      tileColumns = 0;
     char     hint[200];     // an explanation under the rows (information pages)
     char     footer[160];   // keys, pending-restart count, warnings
-    // The tooltip beside the highlighted row: a title line and a wrapped
-    // body, drawn over the rows below (or above) line `popupLine`; -1 for
-    // none. Sized to its text, up to nine lines of it.
+    // The tooltip: a title line and a wrapped body, drawn in the STRIP
+    // beside the card (from `cardPx` to `widthPx`), level with line
+    // `popupLine`; -1 for none. Its card is sized to the measured height of
+    // its own text and capped by the panel's height, so it never changes
+    // the bitmap. The body is what fits this buffer -- the facts the model
+    // puts first always do; a long ini comment is what gets cut.
     char     popupTitle[96];
-    char     popup[720];
+    char     popup[1024];
     int      popupLine = -1;
     bool     toast = false; // a one-line panel instead of the menu
     bool     compact = false;   // info pages: a tighter row pitch
-    // Sizing, decided by the model from the channel: bitmap width in
-    // pixels, and the cap height of row text in pixels.
+    // Sizing, decided by the model from the channel: the bitmap's width in
+    // pixels, the MENU CARD's width within it, and the cap height of row
+    // text. The bitmap is wider than the card so the tooltip has somewhere
+    // to sit that is not on top of the values; the pixels between them are
+    // transparent, and the anchor is offset so the card still lands where
+    // the user was looking. cardPx 0 means the card is the whole bitmap.
     int      widthPx = 0;
+    int      cardPx = 0;
     int      capPx = 0;
-    // The Monitor page's frame-time strip: the last graphCount frame
-    // intervals in ms, oldest first, drawn as bars against the display's
-    // budget; graphCount 0 draws nothing.
-    float    graph[120];
-    int      graphCount = 0;
-    float    graphBudgetMs = 11.1f;
-    char     graphLabel[48];
+    // The Monitor page's strips: the last `count` frames in ms, oldest
+    // first, drawn as bars against the display's budget. fpsVR draws the
+    // GPU and the CPU as two strips, because a frame over budget on one is
+    // a different problem from a frame over budget on the other.
+    MenuGraph graphs[kMenuMaxGraphs];
+    int       graphCount = 0;   // how many strips, not how many samples
 };
 
 // Where the panel sits, in the anchor's frame: metres to it, how much it
 // wraps (0 flat .. 0.9), its half-width along the surface, and the fade.
+//
+// `halfW` is half of the WHOLE BITMAP, the tooltip's strip included --
+// `halfH = halfW * menuPanelAspect()` is only correct under that reading,
+// because the aspect is the bitmap's. `shift` slides the bitmap along its
+// own surface so that the MENU CARD's middle, not the bitmap's, lands on
+// the anchor's forward; it is metres, positive to the right, and the same
+// value must reach the shader, the hit test and the culling box or the
+// three will describe different panels.
 struct MenuGeometry {
     float dist = 1.4f;
     float curve = 0.0f;
     float halfW = 0.3f;
+    float shift = 0.0f;
     float alpha = 0.0f;
 };
 
@@ -132,7 +165,8 @@ void menuPanelSetGeometry(const MenuGeometry& g);
 float menuPanelAspect();
 
 // Which line a panel-relative point lands on: u 0..1 left to right, v 0..1
-// TOP to bottom. -1 for none, a heading, or no raster yet.
+// TOP to bottom. -1 for none, a heading, no raster yet, or a point in the
+// tooltip's strip rather than on the menu card.
 int menuPanelLineAt(float u, float v);
 
 // The panel's ray intersection, pure, shared by the CPU aim and (by
@@ -140,7 +174,7 @@ int menuPanelLineAt(float u, float v);
 // returns whether the ray hits the panel and where, su 0..1 left to right,
 // sv 0..1 BOTTOM to top.
 bool menuPanelHit(const float org[3], const float dir[3], float dist, float curve,
-                  float halfW, float halfH, float* su, float* sv);
+                  float halfW, float halfH, float shift, float* su, float* sv);
 
 // For the Status page: the raster's size, how long the last one took on the
 // CPU, and the composite's measured GPU price per eye (0 until measured).

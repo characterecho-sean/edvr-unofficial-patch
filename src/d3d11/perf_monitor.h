@@ -53,10 +53,14 @@ int perfMonitorTiles(PerfTile* out, int max);
 // line for under the gauges.
 void perfMonitorLastDropLine(char* buf, size_t bufLen);
 
-// The last `max` frame intervals in milliseconds, oldest first, and the
+// One strip of the last `max` frames in milliseconds, oldest first, and the
 // display's frame budget (1000 / Hz, or 11.1 when the rate is unknown).
-// Returns how many.
-int perfMonitorGraph(float* out, int max, float* budgetMs);
+// Returns how many. `which` picks what is plotted: the GPU frame the
+// compositor measured, or the render thread's own busy time -- fpsVR draws
+// the two as separate strips, and a frame over budget on one of them is a
+// different problem from a frame over budget on the other.
+enum PerfGraph { kGraphGpu = 0, kGraphCpu = 1, kGraphPeriod = 2 };
+int perfMonitorGraph(int which, float* out, int max, float* budgetMs);
 
 // The one-line readout for the head-locked overlay (menu.fps_overlay):
 // frame rate and time over the last second, the app's GPU time, and the

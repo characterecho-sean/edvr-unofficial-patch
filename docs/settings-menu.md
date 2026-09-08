@@ -231,9 +231,12 @@ choice of key that causes it.
 2. **Every thunk is budgeted.** A fault inside a door drops that door to
    pass-through for the session (the `guardedBudget` pattern), and the menu
    footer and the Status page say "keys shared with the game" from then on.
-3. **Idle dismiss always runs.** `menu.idle_dismiss` seconds (default 20)
-   without a key or an aim change closes the menu and clears the flag, so a
-   stuck condition costs at most that long.
+3. **Idle dismiss, when it is set.** `menu.idle_dismiss` seconds without a
+   key or an aim change closes the menu and clears the flag. It SHIPS AT 0
+   -- the menu stays up until the summon key or Escape puts it down, which
+   is what a settings panel should do (asked for 2026-09-07) -- so this is
+   a belt for someone who wants one, not the safeguard. The safeguards
+   that always run are the two below: the draw stamp and the two keys.
 4. **Escape and the summon key both close it,** and both are read by EDVR's
    own polling, which no door can affect.
 5. **`menu.keyboard = shared`** turns the flag off entirely: the doors stay
@@ -267,7 +270,7 @@ Head-aim and keys coexist; whichever moved last owns the highlight.
 | Tab / Shift+Tab, PageUp / PageDown | previous / next page |
 | Home / End | first / last row |
 | R | reset the highlighted row to its shipped default (a confirm on the row, then R again) |
-| Escape, the summon key | close (fade out, keys released) |
+| Escape, the summon key | close (fade out, keys released); Escape first abandons a value being typed |
 | the summon key with Shift | recentre: re-anchor the panel where you are looking now |
 
 **Head-aim.** The head ray (from `headPose()`, the raw pose the openvr half
@@ -306,15 +309,67 @@ is told apart from a choice at a glance. A row with a pending restart
 change keeps its text (`off -> on`), because a switch cannot show two
 values at once.
 
-**The tooltip.** The highlighted row carries a card beside it with what
-`edvr.ini` says about that key: the dotted name as its title, the ini's
-WHOLE comment block (not just the first sentence the rows show), the
-range or the list of choices, the shipped value, whether the change
-applies at once or waits for a launch, and the keys that act on it. The
-card is sized to its own text, anchored to the row with a tick, and
-slides up when there is no room below, so it never runs off the panel.
-The generator carries the full comment block into the row table as
-`detail` for exactly this.
+**The tooltip is a card of its own, BESIDE the panel.** The highlighted
+row gets what `edvr.ini` says about that key. **The facts come first** --
+the range or the list of choices, the shipped value, whether the change
+applies at once or waits for a launch, and the key that acts on it --
+and the ini's own comment block follows. That order is deliberate: the
+buffer holds about a thousand characters and forty-six of the comment
+blocks are longer than that (the longest is three and a half thousand),
+so something is cut on those rows, and what is cut must be prose and
+never a fact. The generator carries the full comment block into the row
+table as `detail` for this.
+
+It appears only after `menu.tooltip_delay` seconds resting on one row
+(1.5 by default, 0 for never): an explanation is for someone who has
+stopped, not something to flick past. It is set in a face smaller than
+the rows, and its card is sized to the MEASURED height of its text --
+`DT_CALCRECT` with the same font and the same wrap the draw will use,
+not a character count -- capped by the panel's own height. A rule joins
+it to the row it belongs to. Resting the look on the card counts as
+using the menu, so an idle dismiss set by hand cannot close the panel
+mid-sentence.
+
+**How it sits beside the panel without moving it.** The rasterised bitmap
+is WIDER than the menu card -- the card, a gap, and the tooltip's strip,
+the last two a fixed fraction of the card (`kTipGapFrac` and
+`kTipWidthFrac`, in `menu_panel.h` because both the model and the raster
+must read the same numbers) -- and the strip is transparent whenever no
+tooltip is up. Because the strip is always allocated, the panel's size in
+the world never changes as a tooltip comes and goes, or between pages.
+
+The bitmap is then **slid along its own surface** by `panelShift()`, so
+that the CARD's middle lands on the anchor's forward rather than the
+bitmap's. One value reaches the shader, the hit test and the culling box,
+and the card comes out exactly as it was before the strip existed: the
+same width, the same distance, square to the look.
+
+Two things were got wrong on the way here and are worth keeping written
+down. The first build **turned the anchor** instead. That put the card's
+middle in the right direction but left it facing the old one, so the card
+was seen nine degrees oblique, its left edge 1.50 m away and its right
+1.41 m; and being latched at summon, it went stale the moment the ini was
+edited with the panel up. The second mistake was scaling the panel's
+angle by the strip's ratio: the bitmap maps linearly onto the surface and
+the tangent does not, so the card came out 3.6% wider than
+`width_degrees` asked, and 9% at the widest setting. Both are why
+`panelHalfW()` works in metres and `panelShift()` is recomputed every
+frame.
+
+The head-aim hit test works in the bitmap's own coordinates and
+`menuPanelLineAt` rejects any point in the strip, so a look parked on the
+tooltip selects nothing rather than the row at that height. The toast and
+the fps overlay share the raster and get no strip and no shift.
+
+With the strip, the panel reaches `atan(2.14 * tan(w/2))` to the right --
+29.8 degrees at the default width. Past about 35 the strip leaves one
+eye's frustum on most headsets and the card would be seen by one eye
+only, which is the worst thing to do to text somebody has stopped to
+read, so `menu.width_degrees` is held to 36 while tooltips are on and the
+log says once that it was.
+
+The very first build drew the card over the rows, and it hid the values
+it was explaining (flown 2026-09-07).
 
 **Pads** (phase B): d-pad navigates and steps, A activates, B closes,
 bumpers change page, watched through `xinput_watch` and masked from the
@@ -361,8 +416,13 @@ they were there (flown 2026-09-07).
      through NvAPI where an NVIDIA driver is present (elsewhere "n/a" --
      fpsVR's AMD path is a vendor library this project does not carry);
    - EDVR's own passes' measured cost, from the totals they already keep;
-   - a **frame-time strip** of the last 120 frames against the budget
-     line, green within it, amber over it, red at twice it.
+   - **two frame-time strips**, fpsVR's pair: the GPU frame and the
+     render thread's busy time, each the last 120 frames against its own
+     budget line, green within it, amber over it, red at twice it. A
+     frame over budget on the GPU strip is a different problem from one
+     over budget on the CPU strip, which is why they are drawn apart; a
+     frame whose compositor record has not settled is a gap in the GPU
+     strip rather than a zero-height bar.
    **GPU TIME and CPU TIME are fpsVR's two frametimes.** GPU TIME is the
    compositor's own GPU frame total -- its record's "time between work
    submitted immediately after present until the end of compositor
@@ -374,7 +434,17 @@ they were there (flown 2026-09-07).
    time. The APP GPU tile carries the app's share, the frame total less
    the compositor's, and names the record's own two app fields beside it.
    The Present period sits on the FRAME RATE tile; frame rate, the 1%
-   low and the strip stay on the period, as fpsVR's do.
+   low and the strips stay on the period, as fpsVR's do.
+   **Both are the mean over about 200 milliseconds**, which is fpsVR's
+   own update window, with the ten-second mean on the sub-line. Averaging
+   the whole ring instead read about a millisecond under fpsVR (flown
+   2026-09-07), and that is the whole of that gap.
+   A trap worth recording: fpsVR's PINNED Q&A defines both readouts as
+   the "Maximum ... per fpsVR refresh interval", and that page is wrong
+   today. It describes the behaviour before fpsVR 1.24.1 (August 2022),
+   which changed the printed numbers to the arithmetic mean over one
+   overlay update; the Q&A was never edited. The graphs stayed
+   per-frame. Do not take that page as the answer a second time.
    **The record read is the settled one, two compositor frames back.**
    Flown 2026-09-07 with the most recent record (`framesAgo = 0`): its
    GPU fields had not resolved at the WaitGetPoses boundary. Two further
@@ -703,8 +773,12 @@ text_degrees = 1.1
 width_degrees = 30
 
 # Close after this many seconds without a key or a look; 0 stays open
-# until dismissed. Live.
-idle_dismiss = 20
+# until dismissed, which is what it ships doing. Live.
+idle_dismiss = 0
+
+# Seconds resting on a row before its explanation appears beside the
+# panel; 0 never shows one. Live.
+tooltip_delay = 1.5
 
 # One-line confirmations when a setting changes outside the menu. Live.
 toasts = on
