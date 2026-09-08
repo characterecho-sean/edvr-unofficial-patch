@@ -521,6 +521,21 @@ the mask's:
   of edge pixels, which at a 2x upscale is a soft edge. The first two
   have live knobs (`temporal_aa_movers = off`, `temporal_aa_ship_metres =
   10`, Elite's HMD Quality); the probe decides the third.
+  *The probe's first reading* (the session of 11:12, `v0.14.1-47-gde86ca5`,
+  DLSS at 50% per axis): docked and still, the ship's best match sat
+  (+0.20, +0.22) px from the prediction; in flight the world with depth
+  (+0.20 to +0.51, +0.29 to +0.47) px, the ship (+0.13 to +0.24, +0.18 to
+  +0.24), the sky (+0.10 to +0.28, +0.03 to +0.24), `k` within 0.013 of
+  zero everywhere. A quarter of a pixel of that on every class -- the sky
+  and the still cockpit included -- was the probe's own: at a 2x upscale
+  it read the output texel just past the render pixel's centre
+  (`round((q + 0.5)·2 − 0.5)` is `2q + 1`, whose centre is `q + 0.75`).
+  It now samples the output bilinearly at the pixel's own centre, the
+  mean of the 2x2 it covers. With that bias off, the trained path is
+  registered to 0.1-0.2 px with the scale right to 1%: **the softness is
+  not misregistration.** What is left of the three is DLSS at 50% and
+  structure inside `ship_metres` taking the head's delta; the mask was
+  off for that flight, so not the mask.
 - **The interface's text swam again with the mask on** (the session of
   10:43, after main's interface reactive mask had been merged in and the
   player had judged that mask good on main). Two things in the mask did
@@ -559,6 +574,13 @@ the mask's:
   `transition_flash = 0`. The interaction itself is a design point for the
   transition-flash workstream: under a trained history, every false
   positive is a visible pop, not just a repeated frame.
+  *The A/B flew* (the session of 11:12, `transition_flash = 0`, nothing
+  withheld all session): the long frames came anyway -- 328, 125, 67,
+  108, 172, 474, 165 and 143 ms in the first two minutes at the station,
+  then bursts of 13-30 ms in space. Not the withholds. What is left is
+  the game's own streaming near a station, which no setting of EDVR's
+  reaches; the coincidence in the earlier log was the station, not the
+  detector.
 
 ### Tier 2b -- the tag by a second draw
 
@@ -1389,11 +1411,33 @@ which is this project's contract for every read of the game.
    "found at another slot" near zero (records keep their slots) or not (a
    repacked pool, and the classifier matches by content instead);
    **question 6** is the motions figure against the two codes;
-   **question 7's first half** is the rebase count and size. Next in the
-   stage: the instance stream's slot and element from the input layout at
-   creation (one device-side hook), the record index read at each draw's
-   own start instance, the classifier, and the records' delta as a
-   registration candidate against the head on cockpit pixels.
+   **question 7's first half** is the rebase count and size.
+
+   *Its first flight* (11:12 the same day, `v0.14.1-47-gde86ca5`, the
+   Steam copy): the pool was found at once -- 2048 records (0.7 MB), then
+   a second pool of 4096 -- and no pair was skipped. About 180 records
+   changed per frame docked, 1,150-1,300 EVERY frame in space, 1,900-2,100
+   of 4,096 later; every changed record counted as "rewritten" and none
+   as "pose only", so the game rewrites more than the pose each frame
+   and the rest-of-record criterion never fired: nothing was bucketed.
+   "Found at another slot" read 95-1022 per pair, inflated by slots
+   freed to zeros matching every other empty slot. Neither question 3
+   nor 6 is answered by it. The probe was corrected the same hour: an
+   empty record is nobody (allocation and freeing are counted apart), a
+   pose change is a pose change whatever else changed, a moved record
+   needs its source slot to have changed since, and a per-byte change
+   histogram over the interval prints as ranges with the share of
+   changed records each range changed in -- the record's per-frame
+   fields read off its behaviour, so the identity test can key on the
+   bytes that do not move for a live object. The second flight's totals
+   line reads: the ranges (which of the 336 bytes are per-frame -- the
+   position at 16-27 if positions are camera-relative, and whatever
+   else), "found at another slot" against the live count, the motions
+   figure, the rebase count. Next in the stage: the instance stream's
+   slot and element from the input layout at creation (one device-side
+   hook), the record index read at each draw's own start instance, the
+   classifier, and the records' delta as a registration candidate
+   against the head on cockpit pixels.
 4. **Tier 2b** only if question 1 says no bits.
 5. **Tier 3** as `tools/` work against dumped frames, never on the hot
    path.
