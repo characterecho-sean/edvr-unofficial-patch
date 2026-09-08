@@ -872,6 +872,257 @@ int main(int argc, char** argv) {
                 } else {
                     printf("  skip  dlaa: the reset count needs the runtime\n");
                 }
+
+                // The moving-crop probe (docs/performance.md, feature 6 and
+                // Phase 0 item 16): whether NVIDIA's history survives a crop
+                // that moves with the gaze once the shift is in the vectors.
+                // Any verdict is a finding, printed; only a probe that could
+                // not run on a machine where DLAA is available is a failure.
+                typedef int (*PFN_CropProbe)(void*, void*, char*, unsigned);
+                PFN_CropProbe cropProbe =
+                    reinterpret_cast<PFN_CropProbe>(GetProcAddress(mod, "edvrDlaaCropProbe"));
+                if (!cropProbe) {
+                    printf("  FAIL  edvrDlaaCropProbe is not exported\n");
+                    rc = 1;
+                } else if (avail) {
+                    static char report[4096];
+                    const int verdict = cropProbe(device, ctx, report, sizeof(report));
+                    char* line = report;
+                    while (line && *line) {
+                        char* nl = strchr(line, '\n');
+                        if (nl) *nl = 0;
+                        printf("  info  %s\n", line);
+                        line = nl ? nl + 1 : nullptr;
+                    }
+                    if (verdict == 0) {
+                        printf("  FAIL  dlaa: the moving-crop probe could not run\n");
+                        rc = 1;
+                    } else {
+                        printf("  ok    dlaa: the moving-crop probe ran (verdict %d: 1 pan, 2 "
+                               "reset-like, 3 smear, 4 not measurable)\n", verdict);
+                    }
+                } else {
+                    printf("  skip  dlaa: the moving-crop probe needs the runtime\n");
+                }
+
+                // The motion probe (2026-09-05): the same panning scene through
+                // NVIDIA's full-frame feature, the fovea crop and a half-size
+                // frame (the steady periphery's), the error in the crop's
+                // interior frame by frame -- does a crop soften under motion
+                // where the full frame does not? Findings are printed; only a
+                // probe that could not run where DLAA is available fails.
+                typedef int (*PFN_MotionProbe)(void*, void*, char*, unsigned);
+                PFN_MotionProbe motionProbe =
+                    reinterpret_cast<PFN_MotionProbe>(GetProcAddress(mod, "edvrDlaaMotionProbe"));
+                if (!motionProbe) {
+                    printf("  FAIL  edvrDlaaMotionProbe is not exported\n");
+                    rc = 1;
+                } else if (avail) {
+                    static char report2[16384];
+                    const int verdict2 = motionProbe(device, ctx, report2, sizeof(report2));
+                    char* line2 = report2;
+                    while (line2 && *line2) {
+                        char* nl = strchr(line2, '\n');
+                        if (nl) *nl = 0;
+                        printf("  info  %s\n", line2);
+                        line2 = nl ? nl + 1 : nullptr;
+                    }
+                    if (verdict2 == 0) {
+                        printf("  FAIL  dlaa: the motion probe could not run\n");
+                        rc = 1;
+                    } else {
+                        printf("  ok    dlaa: the motion probe ran (verdict %d: 1 crop matches full, 2 crop "
+                               "softer in motion, 3 crop slower after the stop, 4 not measurable)\n",
+                               verdict2);
+                    }
+                } else {
+                    printf("  skip  dlaa: the motion probe needs the runtime\n");
+                }
+
+                // The cost probe (2026-09-05): NVIDIA's price per mode and model
+                // at the Crystal Super's sizes, printed for the design record.
+                typedef int (*PFN_CostProbe)(void*, void*, char*, unsigned);
+                PFN_CostProbe costProbe =
+                    reinterpret_cast<PFN_CostProbe>(GetProcAddress(mod, "edvrDlaaCostProbe"));
+                if (!costProbe) {
+                    printf("  FAIL  edvrDlaaCostProbe is not exported\n");
+                    rc = 1;
+                } else if (avail) {
+                    static char report3[4096];
+                    const int cr = costProbe(device, ctx, report3, sizeof(report3));
+                    char* line3 = report3;
+                    while (line3 && *line3) {
+                        char* nl = strchr(line3, '\n');
+                        if (nl) *nl = 0;
+                        printf("  info  %s\n", line3);
+                        line3 = nl ? nl + 1 : nullptr;
+                    }
+                    if (cr == 0) {
+                        printf("  FAIL  dlaa: the cost probe could not run\n");
+                        rc = 1;
+                    } else {
+                        printf("  ok    dlaa: the cost probe ran\n");
+                    }
+                } else {
+                    printf("  skip  dlaa: the cost probe needs the runtime\n");
+                }
+
+                // Foveated shading's desk test (docs/performance.md, feature
+                // 2): NvAPI armed on this device, a target drawn through a
+                // shading-rate image whose tile rows name every rate, and the
+                // shaded block size measured per row from the readback. The
+                // rate values and the view dimension are transcribed rather
+                // than vendored, so this is where a wrong one would show --
+                // as a block that is not the size its name says.
+                typedef int (*PFN_FovProbe)(void*, void*, char*, unsigned);
+                PFN_FovProbe fovProbe =
+                    reinterpret_cast<PFN_FovProbe>(GetProcAddress(mod, "edvrFoveationProbe"));
+                if (!fovProbe) {
+                    printf("  FAIL  edvrFoveationProbe is not exported\n");
+                    rc = 1;
+                } else {
+                    static char report4[16384];
+                    const int fv = fovProbe(device, ctx, report4, sizeof(report4));
+                    char* line4 = report4;
+                    while (line4 && *line4) {
+                        char* nl = strchr(line4, '\n');
+                        if (nl) *nl = 0;
+                        printf("  info  %s\n", line4);
+                        line4 = nl ? nl + 1 : nullptr;
+                    }
+                    // Once more on a device at the GAME's feature level: Elite
+                    // creates its D3D11 device at 12.0 (its log says
+                    // featureLevel=0xC000), this harness at 11.0. Informational;
+                    // the verdict above stands.
+                    {
+                        const D3D_FEATURE_LEVEL want12[] = {D3D_FEATURE_LEVEL_12_0};
+                        ID3D11Device* dev12 = nullptr;
+                        ID3D11DeviceContext* ctx12 = nullptr;
+                        D3D_FEATURE_LEVEL got12{};
+                        if (SUCCEEDED(create(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0, want12, 1,
+                                             D3D11_SDK_VERSION, &dev12, &got12, &ctx12))) {
+                            static char report5[16384];
+                            const int fv2 = fovProbe(dev12, ctx12, report5, sizeof(report5));
+                            printf("  info  foveation probe on a feature level 0x%X device (the game's): verdict %d\n",
+                                   static_cast<unsigned>(got12), fv2);
+                            char* line5 = report5;
+                            int shown = 0;
+                            while (line5 && *line5) {
+                                char* nl = strchr(line5, '\n');
+                                if (nl) *nl = 0;
+                                if (shown < 4 || strstr(line5, "FULL RATE") || strstr(line5, "NO EFFECT")) {
+                                    printf("  info  [FL 12.0] %s\n", line5);
+                                }
+                                ++shown;
+                                line5 = nl ? nl + 1 : nullptr;
+                            }
+                            ctx12->Release();
+                            dev12->Release();
+                        } else {
+                            printf("  note  foveation: no feature level 12.0 device for the second probe\n");
+                        }
+                    }
+                    if (fv == 1) {
+                        printf("  ok    foveation: the shading-rate image, written as the module writes it, "
+                               "shades every rate as named\n");
+                    } else if (fv == -1) {
+                        printf("  skip  foveation: variable-rate shading is not available on this "
+                               "machine\n");
+                    } else {
+                        printf("  FAIL  foveation: the shading-rate image %s\n",
+                               fv == 0 ? "had no effect on the shading"
+                                       : "shaded a rate as a different block size than its name");
+                        rc = 1;
+                    }
+                }
+
+                // The fovea path's 1:1 crop check (the review of 2026-09-05,
+                // F1/F12): a solid colour through the PRODUCTION fovea eval must
+                // come back as itself inside the crop and leave the periphery
+                // untouched. This is the test that would have caught the
+                // feature-created-at-full-size bug (0xBAD00005) before a flight.
+                typedef int (*PFN_FoveaCheck)(void*, void*, const char**);
+                PFN_FoveaCheck foveaCheck =
+                    reinterpret_cast<PFN_FoveaCheck>(GetProcAddress(mod, "edvrDlaaFoveaCheck"));
+                if (!foveaCheck) {
+                    printf("  FAIL  edvrDlaaFoveaCheck is not exported\n");
+                    rc = 1;
+                } else {
+                    const char* fw = "";
+                    const int fr = foveaCheck(device, ctx, &fw);
+                    if (fr == 1) {
+                        printf("  ok    dlaa: the fovea crop runs (1:1 and upscaled) and stays inside "
+                               "its rectangle; the periphery slot runs whole-frame\n");
+                    } else if (fr < 0) {
+                        printf("  skip  dlaa: the fovea crop check needs the runtime (%s)\n", fw);
+                    } else {
+                        printf("  FAIL  dlaa: the fovea crop check -- %s\n", fw);
+                        rc = 1;
+                    }
+                }
+
+                // The fovea pipeline end to end (2026-09-05): the fovea crop,
+                // the steady periphery's reduction and DLAA, and the composite,
+                // driven through the production export with the fovea set by
+                // the dev hook (there is no ini here). A steady solid colour
+                // must come back as itself at the centre (NVIDIA's crop) and
+                // at a corner (the periphery, upscaled), and the composite
+                // must have RUN -- a fovea that quietly stood down to
+                // full-frame DLAA would pass the colour check vacuously. Both
+                // peripheries: steady (NVIDIA on a half-size copy) and sharp
+                // (the own history, with the hand-off into it).
+                typedef unsigned (*PFN_FoveaDev)(float, float, int, float, int);
+                PFN_FoveaDev foveaDev =
+                    reinterpret_cast<PFN_FoveaDev>(GetProcAddress(mod, "edvrTemporalAaFoveaDev"));
+                if (!foveaDev) {
+                    printf("  FAIL  edvrTemporalAaFoveaDev is not exported\n");
+                    rc = 1;
+                } else if (avail) {
+                    // Three cases: the steady periphery at a half scale (an exact
+                    // 2:1 reduction), at 0.7 (a fractional ratio, the area-weighted
+                    // box's general path -- the 2026-09-05 flight ran here), and the
+                    // sharp periphery with its hand-off.
+                    const struct { int steady; float scale; const char* mode; } cases[3] = {
+                        {1, 0.5f, "steady periphery, half"},
+                        {1, 0.7f, "steady periphery, 0.7"},
+                        {0, 0.5f, "sharp periphery"}};
+                    for (int ci = 0; ci < 3; ++ci) {
+                        const int steady = cases[ci].steady;
+                        const char* mode = cases[ci].mode;
+                        const unsigned before = foveaDev(60.0f, 6.0f, steady, cases[ci].scale, 1);
+                        bool okp = true;
+                        for (int k = 0; k < 3 && okp; ++k) {
+                            void* rp = taa(srcD, 0, nullptr, tan, tan, 0.125f * k, -0.125f * k, ident,
+                                           nullptr, nullptr, 0.0f, 0.0f, 0.0f, 3, 0.9f, 1.0f, 0u, 0u,
+                                           k == 0 ? (1u | 2u) : 2u);
+                            char label[96];
+                            snprintf(label, sizeof(label), "fovea (%s): frame %d, the centre",
+                                     mode, k);
+                            if (!checkResolved(device, ctx, rp, label, 400, 304, 200, 152, cr, cg, cb, 4)) {
+                                okp = false;
+                            }
+                            snprintf(label, sizeof(label), "fovea (%s): frame %d, a corner",
+                                     mode, k);
+                            if (okp && !checkResolved(device, ctx, rp, label, 400, 304, 6, 6, cr, cg, cb, 4)) {
+                                okp = false;
+                            }
+                        }
+                        const unsigned after = foveaDev(0.0f, 6.0f, 1, 0.5f, 1);   // off again
+                        if (!okp) {
+                            rc = 1;
+                        } else if (after - before < 3u) {
+                            printf("  FAIL  fovea (%s): the composite ran %u times over 3 frames "
+                                   "(expected 3: the fovea stood down or never engaged)\n",
+                                   mode, after - before);
+                            rc = 1;
+                        } else {
+                            printf("  ok    fovea (%s): 3 frames composited, the colour holds at "
+                                   "the centre and a corner\n", mode);
+                        }
+                    }
+                } else {
+                    printf("  skip  fovea pipeline: needs the runtime\n");
+                }
                 srcD->Release();
 
                 // The NGX conventions rig (the review of 2026-09-04: F5, and

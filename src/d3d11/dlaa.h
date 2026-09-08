@@ -53,6 +53,64 @@ bool dlaaEvaluate(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* colour,
                   uint32_t outW, uint32_t outH, float jx, float jy, bool reset,
                   float frameMs, const char** reason);
 
+// One eye, one frame, but NVIDIA runs on a CROP of the frame -- the fovea,
+// docs/performance.md feature 6. The colour, depth and motion are the same
+// full-frame textures dlaaEvaluate is fed; the crop names the sub-rectangle
+// (in render pixels, cropX/cropY the top-left, cropW/cropH the size) that
+// NVIDIA reads and writes, through the runtime's input and output
+// sub-rectangles. DLAA only (1:1), so the output crop is the input crop; a
+// per-eye feature is created with output sub-rectangles enabled and rebuilt
+// on a size change. The crop must lie inside the frame. `output` is written
+// only in the crop region; the periphery is the caller's to fill and blend.
+// The moving-crop probe (2026-09-04) proved a crop pans cleanly through
+// NVIDIA's history; a fixed centre is the trivial case of that. False on any
+// refusal, with its reason. Counts into the same totals as dlaaEvaluate.
+bool dlaaEvaluateFovea(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* colour,
+                       ID3D11Texture2D* depth, ID3D11Texture2D* motion,
+                       ID3D11Texture2D* output, uint32_t w, uint32_t h,
+                       uint32_t cropX, uint32_t cropY, uint32_t cropW, uint32_t cropH,
+                       float jx, float jy, bool reset, float frameMs,
+                       const char** reason);
+
+// The general form: NVIDIA runs on an INPUT crop (icx,icy,icw,ich) of the
+// render-size textures and writes an OUTPUT crop (ocx,ocy,ocw,och) of the
+// native output. Equal crops are DLAA (1:1, dlaaEvaluateFovea above); a
+// smaller input crop is DLSS upscaling just the fovea (docs/performance.md
+// feature 6, the half-render variant). The feature is created at the input
+// crop -> output crop and rebuilt when either changes. False on refusal.
+bool dlssEvaluateFovea(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* colour,
+                       ID3D11Texture2D* depth, ID3D11Texture2D* motion,
+                       ID3D11Texture2D* output, uint32_t inW, uint32_t inH,
+                       uint32_t outW, uint32_t outH, uint32_t icx, uint32_t icy,
+                       uint32_t icw, uint32_t ich, uint32_t ocx, uint32_t ocy,
+                       uint32_t ocw, uint32_t och, float jx, float jy, bool reset,
+                       float frameMs, const char** reason);
+
+// The steady periphery (docs/performance.md feature 6): DLAA over the WHOLE
+// of a w x h frame -- a copy of the render reduced to the periphery's scale,
+// or the render itself when the game rendered small -- through a third
+// per-eye feature with its own history, so the fovea, the periphery and the
+// full frame never share an accumulation. The composite upscales what comes
+// back around the fovea. The inputs are the same kinds as dlaaEvaluate's, at
+// w x h; `output` (R8G8B8A8_UNORM, w x h, an unordered-access view possible)
+// is written whole. False on any refusal, with its reason.
+bool dlaaEvaluatePeriphery(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* colour,
+                           ID3D11Texture2D* depth, ID3D11Texture2D* motion,
+                           ID3D11Texture2D* output, uint32_t w, uint32_t h, float jx, float jy,
+                           bool reset, float frameMs, const char** reason);
+
+// The model NVIDIA runs, as its render-preset number (nvsdk_ngx_defs.h:
+// 11 = K, 10 = J, 12 = L, 13 = M, 0 = the driver's own choice per quality
+// mode): `preset` for the full frame and the periphery in every mode,
+// `foveaPreset` for the fovea crop when it upscales. Read from the config by
+// the temporal pass; a change recreates every live feature on its next
+// evaluation, so it is live. Under DLAA the upscaling models L and M are
+// never applied (L cost five times K on the desk). The desk (2026-09-05):
+// Performance mode's default M is at 2.7x K's error at rest on fine detail;
+// under motion L softens least and converges fastest from fresh content,
+// which is what a crop needs; on the full frame the models cost the same.
+void dlaaSetPreset(unsigned preset, unsigned foveaPreset);
+
 // The measured price, for the totals line: evaluations, the mean
 // milliseconds by timestamp query, and how many evaluations carried the
 // reset. False when nothing has run.
@@ -60,5 +118,42 @@ bool dlaaTotals(uint32_t* evaluations, double* avgMs, double* maxMs,
                 uint32_t* resets);
 
 void dlaaShutdown();
+
+// The moving-crop probe (docs/performance.md, feature 6 and Phase 0 item
+// 16), a desk experiment for the smoke harness: does NVIDIA's history
+// survive a crop that moves with the gaze when the shift is folded into
+// the motion vectors? Runs a synthetic scene through DLAA on a 512x384
+// crop of a 1280x960 frame under six conditions and writes a multi-line
+// report into `report`. Returns 1 when a moved crop converges like a
+// still one (a pan), 2 when it converges like a fresh history (a reset
+// per move), 3 when it is worse than a fresh history (a smear), 4 when
+// the scene did not discriminate (the still crop's history did not beat
+// its first frame, so nothing can be placed against it), 0 when the
+// probe could not run (the report says why).
+int dlaaCropProbe(ID3D11Device* dev, ID3D11DeviceContext* ctx, char* report,
+                  uint32_t reportBytes);
+
+// The motion probe (2026-09-05): does NVIDIA's model behave the same on a
+// fovea crop as on the full frame while the content MOVES? The crop probe's
+// synthetic scene pans 6 px/frame for eighteen frames and then stands still
+// for eighteen; the full frame, the crop (a feature of the crop's size, output
+// sub-rectangles, a fixed base) and a half-size frame reduced the way the
+// steady periphery is are evaluated on identical inputs, and the error in the
+// crop's interior is recorded after every frame. Returns 1 when the crop
+// matches the full frame under motion and after it (any softening seen in the
+// field is the model's own), 2 when the crop is softer under motion, 3 when it
+// recovers slower after the pan stops, 4 when the scene did not discriminate,
+// 0 when the probe could not run (the report says why).
+int dlaaMotionProbe(ID3D11Device* dev, ID3D11DeviceContext* ctx, char* report,
+                    uint32_t reportBytes);
+
+// The cost probe (2026-09-05): NVIDIA's price per evaluation, per mode and
+// model, at the Pimax Crystal Super's sizes -- the full frame at Quality 1.0
+// and 0.65 under each model, the periphery variants, the flown fovea crop --
+// so the fovea design's trade (a crop's price against its lost history) is
+// priced rather than assumed. Synchronous timestamp queries; a desk tool.
+// Returns 1 when at least one case ran, 0 otherwise (the report says why).
+int dlaaCostProbe(ID3D11Device* dev, ID3D11DeviceContext* ctx, char* report,
+                  uint32_t reportBytes);
 
 }  // namespace edvr

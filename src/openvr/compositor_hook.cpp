@@ -2,6 +2,7 @@
 
 #include "../common/timing.h"
 #include "head_offset.h"
+#include "gaze_probe.h"
 #include "launch_centre.h"
 
 #include <windows.h>
@@ -1789,6 +1790,11 @@ vr::EVRCompositorError hookedWaitGetPoses(void* self,
     // launch. See launch_centre.h.
     launchCentreApply(result, renderPoses, renderCount, gamePoses, gameCount);
 
+    // The gaze probe's one call a frame, at the same boundary the design
+    // names for the real thing (docs/performance.md, feature 3). Off unless
+    // advanced.gaze_probe says otherwise; see gaze_probe.h.
+    gazeProbeApply(result, renderPoses, renderCount);
+
     // The pair-timing boundary: frame cadence, and the burst summary.
     {
         ++s->pace_boundaryNo;
@@ -2140,6 +2146,7 @@ vr::EVRCompositorError hookedWaitGetPoses(void* self,
             Log::get().note("config reloaded");
             headOffsetConfigure();
     launchCentreConfigure();
+            gazeProbeConfigure();
             configurePoseRing(s);
             // The cull guard's margin is tuned from inside a headset, so its
             // keys are live; mode changes take effect at the next boundary.
@@ -2501,6 +2508,7 @@ void* interceptInterface(void* iface, const char* interfaceVersion) {
     // from install and from reload.
     headOffsetConfigure();
     launchCentreConfigure();
+    gazeProbeConfigure();
     resubmitShadowConfigure();
     // The cull guard's twin of the same rule (its own install already read
     // config -- the system interface arrives first -- but this path is the

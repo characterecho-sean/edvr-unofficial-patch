@@ -326,6 +326,125 @@ the scene-pair check making the default free and explicit elsewhere. The
 "about forty lines" of the plan became about 450 with the classifier's
 memos and the logging.
 
+## The menus and the loading screen: the rebind (2026-09-07)
+
+Sean, after the merged build: the cockpit UI "looks great", the main menu,
+the settings menu and the loading screens are still aliased and swimming.
+Expected from the review's finding 3: those composites bind a depth target
+of their own that nothing reads, while the pass reads the busiest pair (the
+hangar's in the menu; the ship model's on the loading screen), so a depth
+written where the game put it registers nothing.
+
+The fix is to write it where the pass reads. For a classified draw whose
+bound depth is not the scene pair's, the module binds EDVR's own depth view
+over the pair's texture for that eye in the game's place for the one draw
+(`depthProbeSceneDepthFormat` hands out the probe's texture and the view
+format the game binds it with; `vScreenSetRenderTargetsRaw` goes through
+the original OM entry so the binding shadow keeps describing the game's
+bindings), writes with the ALWAYS twin the test-off state derives to, and
+puts the game's targets back before anything else looks. The eye is read
+from the order the draw's colour target first appears among treated draws
+in the frame -- first is the left, the depth probe's own rule for the pair
+-- with `advanced.ui_depth_eyes = swapped` as the A/B if a menu steadies in
+one eye only, and `advanced.ui_depth_menus = 0` as the kill switch. The
+totals line counts the rebound draws and the draws with no pair to bind.
+
+What it rests on that is not yet measured: that the LDR composites appear
+in the same eye order as the G-buffer passes the probe orders the pair by
+(a swap degrades to a half-fixed panel, since both eyes' panels sit at the
+same depth and only their screen positions differ); and that a composite's
+`SV_Position.z` is a real distance, which the shader dump supports (every
+composite vertex shader projects through the scene block's rows) and a
+2D quad placed in NDC would break -- none of the classified families is
+one. Unflown at the time of writing.
+
+### Flight 3 (2026-09-07 12:50, v0.14.0-19-g8cd6e55): no change in the menus, the loader's ship model worse
+
+The rebind engaged exactly as built (one composite an eye in the menu,
+six a frame on the loading screen, all onto the pass's pair, no "no
+pair"), and Sean saw no change in the menu or loading text while the
+loading screen's 3D ship model "seemed to be flickering/blurring more".
+Both are explained by two things the flight-1 census already held:
+
+- **The encoding.** The menu's UI-pass depth targets sample the centre of
+  the view -- the panel -- at a raw reversed-Z value of 0.097, which the
+  pass's decode (near 0.025 m) calls 0.26 m and the game's other
+  projection pair (0.1 m .. 1000 m, logged by the receiver) calls 1.03 m.
+  A menu panel a metre away is plausible; a quarter of a metre is not. So
+  the menu and loader composites are drawn through the interface
+  projection, and their depth written as it comes into the scene's pair
+  decodes four times too near: the head-translation correction overshoots
+  fourfold and the text keeps moving. The cockpit families never had this
+  problem because they bind the scene pair and test against it, so they
+  must share the scene's projection (the census: all three cockpit
+  families bind the same two depth views, cleared to zero every frame).
+- **The loading screen's pair is not a scene.** With the ship model drawn
+  by a handful of draws, "the two busiest eye-sized depth targets" is an
+  arbitrary pick, and the loader's full-view composite (its scrim region
+  is translucent, not discarded) stamped the dialog's depth over the
+  model, which then reprojected at the dialog's distance.
+
+**The fix, same build family.** The rebound draw is written through a
+viewport depth range whose `MaxDepth` is the ratio of the nears (0.025 /
+0.1 = 0.25): a reversed-Z value is near/z to within a part in a thousand
+this side of ten metres, so scaling what the rasteriser writes by that
+ratio converts the interface encoding into the scene's with no shader
+touched (`advanced.ui_depth_planes` carries the interface pair, default
+the measured 0.1, 1000). And the rebind requires a real scene pair
+(`depthProbeSceneDraws() >= 50`, the pass's own rule), so the loading
+screen is left exactly as the game issues it; its text stays unfixed and
+its model stays right. The menu's UI-pass depth targets are NOT cleared
+by the game each frame (no clear of them in the census's frames), which
+the rebind sidesteps by writing into the pair, cleared every frame.
+
+Measured, not yet flown: the corrected menu depth. The `temporal_aa_debug
+= depth` view is the check -- the panel should paint at about a metre,
+nearer than the hangar wall, not far brighter than everything.
+
+### Flight 4 (2026-09-07 13:10, v0.14.0-20-g0ba94c9): the main menu fixed
+
+Sean: "Main menu is fixed (and any similar invocation it seems). Loading
+screen is not, but the model doesn't shimmer. I also notice the intro
+screen/modals are swimming too." So the encoding was the whole of the
+menu's problem, and the remaining cases are the frames with no real scene:
+the loading screen and the intro's splash with its modals, which the
+real-scene gate had deliberately left alone.
+
+### The alpha-aware depth pass (2026-09-07, built for flight 5)
+
+The loader's and the intro's composites need the same depth as the menu's,
+minus one thing: their translucent full-view regions (the loader's 40%
+scrim, the vignette) lie over the ship model, and a depth written there
+moves the model with the dialog (flight 3). Depth alone cannot tell a
+scrim from a box; the composite's ALPHA can. The shader dump gave the two
+composite pixel shaders' alpha paths in a few instructions each: `ps
+85565E9261812E2F` (the curved screen, vs `4EF6DDB075A927FA`) samples the
+surface at TEXCOORD0 through slot 0; `ps 9107E72CB016CC02` (the panel, vs
+`A888D51024D9798E`) samples it at TEXCOORD6 through slot 1, adds a
+holographic smear, and discards only where every channel is under 5/255.
+The third "composite" the surface rule had named, vs `B018D143700AB803`,
+turned out to run a pixel shader that reads nothing and outputs zero: its
+surface binding is a leftover, and it is now excluded by hash.
+
+So an interface-projection composite is left exactly as the game draws
+it, and then drawn ONCE MORE, depth only: no colour target, EDVR's pixel
+shader in the game's place (the same surface sample, `clip` below
+`advanced.ui_depth_alpha`, 0.5 by default -- the scrim drops out, the box
+and the text stay), the pass's depth for its eye bound where the
+composite's own is not it, the nearer-wins test so a model in front of the
+screen keeps its depth, and the viewport depth range converting the
+encoding. The real-scene gate is gone: the alpha rule is what it stood in
+for. Same shape as the splash dim's re-issue in `forwardWithVerdict`, and
+the cockpit's families keep the in-place twin. Per-family log lines now
+carry both hashes and say which path a family took, so an unknown
+composite in a new context (the galaxy map, the SRV) shows up as "no
+depth shader of its own yet" with its pixel shader named.
+
+Not covered: the intro movie's own quad (placed in NDC by its vertex
+buffer, not a GUI surface) and the splash still if it is composited by
+something other than the loader's screen composite; the first flight of
+this pass says which.
+
 # Design A: the UI layer
 
 ## A1. What counts as UI: the classifier

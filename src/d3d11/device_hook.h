@@ -41,6 +41,17 @@ void hookFactoryForDevice(ID3D11Device* device);
 // FreeLibrary one alone was not enough, and why a real crash still trips.
 void deviceHookNoteCleanExit();
 
+// The render fraction advanced.texture_lod_bias = auto derived its bias
+// from, read out of Elite's graphics preset before any sampler existed.
+// False when auto was not used, or the preset gave nothing.
+//
+// Worth checking against the fraction the frame turns out to have. A mip
+// bias is baked into every sampler at creation and cannot be changed
+// after, so if the commander moves HMD Quality mid-session -- or if that
+// multiplier ever stops meaning what it means today -- the mips are wrong
+// for the rest of the session and nothing else would say so.
+bool deviceHookAutoBiasSource(float* multiplier, float* bias);
+
 // The FSS theater's mode latch: true while the player is (believed to
 // be) in the Full System Scanner -- keyed by their own FSS bindings for
 // frame-exact edges, reconciled against the game's GuiFocus. vscreen's

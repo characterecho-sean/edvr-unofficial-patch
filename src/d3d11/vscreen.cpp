@@ -34,6 +34,7 @@
 #include "fss_reveal.h"
 #include "fss_dump.h"
 #include "eye_split.h"
+#include "foveation.h"        // feature 2: the shading-rate image, bound at eye draws
 #include "resolve_probe.h"
 #include "resolve_bind_fix.h"
 #include "stencil_probe.h"
@@ -1470,7 +1471,7 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         s->censusAutoW == 0 && !fssResActive() && !fssScanWantsDraws() &&
         !fssPanelWantsDraws() && !fssProbeWants() && !fssRevealWantsDraws() &&
         !fssRingWantsDraws() && !fssDumpWantsDraws() &&
-        !eyeSplitWantsDraws() && !resolveProbeWantsDraws() &&
+        !eyeSplitWantsDraws() && !foveationWantsDraws() && !resolveProbeWantsDraws() &&
         !stencilProbeWantsDraws() && !resolveBindWants() &&
         !remlokWantsDraws() && !holoWantsDraws() && !targetSharpWantsDraws() && !hudSpriteWantsDraws() && !panelUpscaleWantsDraws() && !hudGrainWantsDraws() &&
         !uiDepthWantsDraws() && !witchstarWantsDraws() &&
@@ -1512,6 +1513,12 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         s->rtv0Eye = targetIsEyeSized(bindingGet(BindSlot::Rtv0), &s->rtv0Cand);
         s->rtv0EyeGen = rtvGen;
     }
+    // Foveated shading (foveation.h): the shading-rate image follows the
+    // census's verdict on slot 0 -- bound for an eye-sized target, cleared
+    // for anything else. One compare per draw once the answer is known, and
+    // it changes no binding of the game's, so everything below composes
+    // with it.
+    foveationOnDraw(self, s->rtv0Eye, bindingGet(BindSlot::Rtv0), rtvGen, kind, count, instances);
     // The intro probe, ABOVE the eye gate and deliberately. Its subject is the
     // startup sequence, and for the whole of the sequence's first phase there
     // is no eye texture to be on the right side of a gate about: one eye's
@@ -2429,6 +2436,7 @@ void STDMETHODCALLTYPE hookedClearState(ID3D11DeviceContext* self) {
                         kSlotClearState);
     }
     forgetBindings(s);
+    foveationOnClearState();
     s->realClearState(self);
 }
 
@@ -2849,6 +2857,28 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     if (v == DrawVerdict::kParticle) particleBegin(self);
     if (v == DrawVerdict::kBackdrop) backdropBegin(self);
     draw();
+    // The interface's alpha-aware depth pass (ui_depth.h): a composite
+    // drawn through the interface projection is drawn once more, depth
+    // only, right after its own draw and inside the scope that owns the
+    // flag -- the splash dim's re-issue shape below, for the same reason:
+    // the placement state the second draw needs is still bound.
+    // Gated on the scope's THREAD-LOCAL flag, not on the module's globals.
+    // uiDepthWantsReissue reads g_mode, which the render thread sets and
+    // clears around this block, so a draw arriving on another context in
+    // between would run Begin on the FOREIGN context and overwrite the
+    // saved bindings this thread is about to restore. `on` is the flag
+    // captured for the draw this thread itself classified.
+    //
+    // And the second draw is issued only when Begin says it set the
+    // depth-only state up. A decline leaves the game's own state exactly
+    // as it was, so a draw issued regardless would be the game's composite
+    // a second time, in full colour, over itself -- and the paths that
+    // decline latch, so it would last the session (the pre-release review
+    // of 2026-09-07). splashDimBegin below has had this shape all along.
+    if (uiDepthScope.on && uiDepthWantsReissue()) {
+        if (uiDepthReissueBegin(self)) draw();
+        uiDepthReissueEnd(self);
+    }
     if (v == DrawVerdict::kBackdrop) backdropEnd(self);
     // The splash screen's dim under the loader's dialogs (splash_dim.h):
     // the still's composite and the intro movie's composite are the two
@@ -3596,6 +3626,13 @@ void readCensusSkip(Config& cfg, State* s) {
     }
 }
 
+void vScreenSetRenderTargetsRaw(ID3D11DeviceContext* ctx, uint32_t n,
+                                ID3D11RenderTargetView* const* rtvs,
+                                ID3D11DepthStencilView* dsv) {
+    if (!g_state || !g_state->realOMSetRenderTargets || !ctx) return;
+    g_state->realOMSetRenderTargets(ctx, n, rtvs, dsv);
+}
+
 bool vScreenIsEyeSized(uint32_t w, uint32_t h) {
     State* s = g_state;
     if (!s || !w || !h) return false;
@@ -3649,6 +3686,7 @@ void vScreenRefreshConfig() {
     fssRingConfigure(cfg);
     fssDumpConfigure(cfg);
     eyeSplitConfigure(cfg);
+    foveationConfigure(cfg);
     resolveProbeConfigure(cfg);
     resolveBindConfigure(cfg);
     stencilProbeConfigure(cfg);
@@ -3862,6 +3900,7 @@ void vScreenFrameBoundary() {
     fssRingFrameBoundary();
     fssDumpFrameBoundary(s->ownerCtx);
     eyeSplitFrameBoundary(s->ownerCtx);
+    foveationFrameBoundary(s->ownerCtx);
 
     // FSS frame pacing (round 31): the left-only squares are now measured
     // to be runtime-side (both submitted images carry the flicker equally),
@@ -4657,6 +4696,7 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     fssRingConfigure(cfg);
     fssDumpConfigure(cfg);
     eyeSplitConfigure(cfg);
+    foveationConfigure(cfg);
     resolveProbeConfigure(cfg);
     resolveBindConfigure(cfg);
     stencilProbeConfigure(cfg);
@@ -4886,6 +4926,7 @@ void shutdownVScreenFixes() {
     fssRingShutdown();
     fssDumpShutdown();
     eyeSplitShutdown();
+    foveationShutdown();
     resolveProbeShutdown();
     resolveBindShutdown();
     stencilProbeShutdown();

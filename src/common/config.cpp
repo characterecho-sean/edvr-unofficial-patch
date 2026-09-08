@@ -297,15 +297,31 @@ void Config::auditResolve(void* parsedMap) {
     for (size_t i = 0; i < g_auditKnownCount; ++i) known.insert(g_auditKnown[i]);
     std::string dead;
     int deadCount = 0;
+    int deadShown = 0;
     for (const auto& kv : parsed) {
         if (known.count(kv.first) || movedOld.count(kv.first)) continue;
         if (!m_impl->auditNoted.insert("uk:" + kv.first).second) continue;
-        if (!dead.empty()) dead += ", ";
-        if (deadCount < 8) dead += kv.first;
+        // The separator belongs to the NAME, not to the iteration. It was
+        // appended every time round while the name stopped after eight, so
+        // a file with more than eight dead lines printed its first eight
+        // and then a run of bare commas -- which is what the field log of
+        // 2026-09-07 showed.
+        //
+        // The cap was the worse half. `parsed` is sorted, so all eight
+        // slots went to advanced.* and every misplaced fix.* key was
+        // invisible BY CONSTRUCTION. That is how an advanced.texture_lod_bias
+        // written under [fix] stayed unread AND unreported through a whole
+        // session of wondering why the picture was soft. Fill the line the
+        // log can carry, and only then say there are more.
+        if (dead.size() < 900) {
+            if (deadShown) dead += ", ";
+            dead += kv.first;
+            ++deadShown;
+        }
         ++deadCount;
     }
     if (deadCount) {
-        if (deadCount > 8) dead += ", ...";
+        if (deadCount > deadShown) dead += ", ...";
         m_impl->auditPending.push_back(
             "edvr.ini: " + std::to_string(deadCount) +
             " line(s) name settings this build does not read: " + dead +

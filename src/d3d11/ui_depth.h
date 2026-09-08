@@ -103,12 +103,27 @@ void uiDepthNoteOffscreenDraw(ID3D11DeviceContext* ctx);
 // depth; the caller wraps it in Begin/End.
 bool uiDepthOnEyeDraw(ID3D11DeviceContext* ctx);
 
-// Around the real draw: the depth-stencil state swapped for a writing twin
-// of the game's own (derived once per game state and cached), and put back
-// after -- the restore never skipped. A begin that cannot derive a twin
-// leaves the draw untouched.
+// Around the real draw, for a family sharing the scene's projection: the
+// depth-stencil state swapped for a writing twin of the game's own (derived
+// once per game state and cached), and put back after -- the restore never
+// skipped. A begin that cannot derive a twin leaves the draw untouched.
 void uiDepthBegin(ID3D11DeviceContext* ctx);
 void uiDepthEnd(ID3D11DeviceContext* ctx);
+
+// AFTER the real draw, for a composite drawn through the interface
+// projection (the menus, the loading screen, the modals): the same
+// geometry drawn once more with no colour target, EDVR's pixel shader
+// clipping below the alpha floor, the pass's depth for its eye bound where
+// the composite's own is not it, the nearer-wins test, and the viewport
+// depth range converting the encoding. The caller issues the second draw
+// between Begin and End when WantsReissue says so AND Begin returns true.
+bool uiDepthWantsReissue();
+// True when the depth-only draw is set up and the caller should issue it.
+// False means this call declined and left the game's own state untouched,
+// so issuing the draw anyway would be the game's composite a second time,
+// in full colour, over itself.
+bool uiDepthReissueBegin(ID3D11DeviceContext* ctx);
+void uiDepthReissueEnd(ID3D11DeviceContext* ctx);
 
 // Once per frame: the engage line, the totals line every 20 s.
 void uiDepthFrameBoundary();

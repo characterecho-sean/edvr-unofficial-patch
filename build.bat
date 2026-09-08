@@ -282,6 +282,7 @@ cl.exe %CFLAGS% %NGXFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "%ROOT%\src\d3d11\temporal_pass.cpp" ^
     "%ROOT%\src\d3d11\depth_probe.cpp" ^
     "%ROOT%\src\d3d11\dlaa.cpp" ^
+    "%ROOT%\src\d3d11\foveation.cpp" ^
     "%ROOT%\src\d3d11\sharpen_pass.cpp" ^
     "%ROOT%\src\d3d11\loader_panel.cpp" ^
     "%ROOT%\src\d3d11\splash_dim.cpp" ^
@@ -355,6 +356,7 @@ cl.exe %CFLAGS% /Fo"%OBJ%\openvr"\ ^
     "%ROOT%\src\openvr\temporal_aa.cpp" ^
     "%ROOT%\src\openvr\sharpen.cpp" ^
     "%ROOT%\src\openvr\early_session.cpp" "%ROOT%\src\openvr\launch_centre.cpp" ^
+    "%ROOT%\src\openvr\gaze_probe.cpp" ^
     "%ROOT%\src\d3d11\elite_binds.cpp"
 if errorlevel 1 ( echo [edvr] ERROR: openvr compile failed & exit /b 1 )
 

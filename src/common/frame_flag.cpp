@@ -184,6 +184,14 @@ struct Shared {
     //               cull guard so it does not lie about the frustum while
     //               the intro is still on screen. See frame_flag.h.
     volatile LONG sceneArrived;
+    // gaze  the eye-tracked gaze as head-frame tangents, headForward's
+    //       packing (presence bit, biased milli-tangents), written by
+    //       openvr_api.dll every frame it has one and as ZERO when it has
+    //       not -- so a reader falls back the frame the tracker is lost.
+    // gazeStamp  bumped on every write of gaze, lost included, so a reader
+    //            can tell a fresh publish from a held one.
+    volatile LONG gaze;
+    volatile LONG gazeStamp;
 };
 
 // Per PROCESS, not per logon session.
@@ -200,6 +208,8 @@ struct Shared {
 // The name is built once, at first use. The two DLLs are in the same process,
 // so the channel between them is unaffected.
 //
+// _v23 because the eye-tracked gaze joined, for the foveation's moving
+// centre (frame_flag.h).
 // _v22 because the scene-arrived latch joined, so the cull guard can hold
 // off while the intro is up (frame_flag.h).
 // _v21 because
@@ -235,7 +245,7 @@ const wchar_t* mappingName() {
     static wchar_t name[64];
     static bool built = false;
     if (!built) {
-        _snwprintf_s(name, _TRUNCATE, L"Local\\edvr_glitch_frame_v22_%lu",
+        _snwprintf_s(name, _TRUNCATE, L"Local\\edvr_glitch_frame_v23_%lu",
                      GetCurrentProcessId());
         built = true;
     }
@@ -587,6 +597,40 @@ bool headForward(float* tx, float* ty) {
     Shared* s = map();
     if (!s) return false;
     const LONG packed = InterlockedCompareExchange(&s->headForward, 0, 0);
+    if (!packed) return false;
+    const uint32_t v = static_cast<uint32_t>(packed);
+    if (tx) *tx = (static_cast<int32_t>((v >> 15) & 0x7FFFu) - 16384) / 1000.0f;
+    if (ty) *ty = (static_cast<int32_t>(v & 0x7FFFu) - 16384) / 1000.0f;
+    return true;
+}
+
+void announceGaze(float tx, float ty) {
+    Shared* s = map();
+    if (!s) return;
+    auto biased = [](float t) -> uint32_t {
+        float c = t;
+        if (!(c > -3.0f)) c = -3.0f;
+        if (!(c < 3.0f)) c = 3.0f;
+        const int32_t milli = static_cast<int32_t>(c * 1000.0f);
+        return static_cast<uint32_t>(milli + 16384) & 0x7FFFu;
+    };
+    const uint32_t packed = 0x80000000u | (biased(tx) << 15) | biased(ty);
+    InterlockedExchange(&s->gaze, static_cast<LONG>(packed));
+    InterlockedIncrement(&s->gazeStamp);
+}
+
+void announceGazeLost() {
+    Shared* s = map();
+    if (!s) return;
+    InterlockedExchange(&s->gaze, 0);
+    InterlockedIncrement(&s->gazeStamp);
+}
+
+bool gazeCentre(float* tx, float* ty, uint32_t* stamp) {
+    Shared* s = map();
+    if (!s) return false;
+    if (stamp) *stamp = static_cast<uint32_t>(InterlockedCompareExchange(&s->gazeStamp, 0, 0));
+    const LONG packed = InterlockedCompareExchange(&s->gaze, 0, 0);
     if (!packed) return false;
     const uint32_t v = static_cast<uint32_t>(packed);
     if (tx) *tx = (static_cast<int32_t>((v >> 15) & 0x7FFFu) - 16384) / 1000.0f;

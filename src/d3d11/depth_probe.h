@@ -98,6 +98,14 @@ bool depthProbeSceneDepth(uint32_t w, uint32_t h, int eye, ID3D11Texture2D** tex
 // False until the pair has been chosen.
 bool depthProbeIsSceneDepth(const void* resource);
 
+// The scene pair's texture for one eye AND the view format the game binds
+// it with, for a module that must bind that texture itself: ui_depth
+// binds the pass's depth at a menu or loader composite, whose own depth
+// target nothing reads. The texture reference is the probe's (held for the
+// frame); the caller creates its own view over it. False when no pair.
+bool depthProbeSceneDepthFormat(uint32_t w, uint32_t h, int eye,
+                                ID3D11Texture2D** tex, uint32_t* dsvFormat);
+
 // How many draws the scene pair's lesser target took last frame: the
 // temporal pass's test of a REAL scene (hundreds in the cockpit and in
 // space; one or two for the main menu's pre-rendered backdrop, whose

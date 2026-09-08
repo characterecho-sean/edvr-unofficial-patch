@@ -69,6 +69,12 @@ void temporalPassNoteFirstEyeDraw(ID3D11DeviceContext* ctx);
 // This frame's rows become last frame's; called at the frame boundary.
 void temporalPassFrameBoundary();
 
+// The eye's offset from the head as the runtime last handed it to the pass
+// (metres, x toward the right), for the foveation's nasal shift. False
+// until a frame has been treated with a head delta and an offset: the
+// caller keeps its own default.
+bool temporalPassEyeOffset(int eye, float out[3]);
+
 // For the periodic totals line: eye-submits treated, the measured price,
 // and the share of pixels whose history was rejected (off the image or
 // none yet) or clipped (pulled to the neighbourhood). False when nothing
@@ -112,6 +118,12 @@ bool temporalPassRegistration(char* buf, size_t n, char* buf2, size_t n2, char* 
 // frame, each size change, each withhold). False when it never ran.
 bool temporalPassDlaaTotals(uint32_t* frames, double* avgMs, double* maxMs,
                             uint32_t* resets);
+
+// The scene's near and far planes the last treat decoded depth with (the
+// openvr half's smallest-near pair). For ui_depth, which re-scales a
+// composite's depth from the interface projection's encoding into the
+// scene's. False until a treat has run.
+bool temporalPassPlanes(float* nearZ, float* farZ);
 
 void temporalPassShutdown();
 
