@@ -32,6 +32,7 @@ const char* g_reason = "not asked yet";
 
 uint32_t g_evaluations = 0;
 uint32_t g_resets = 0;        // evaluations that restarted NVIDIA's history
+bool     g_maskNoted = false; // the bias mask's arrival, said once
 uint32_t g_timeCount = 0;
 double   g_timeSum = 0.0;
 double   g_timeMax = 0.0;
@@ -309,11 +310,13 @@ bool dlaaAvailable(ID3D11Device* dev, const char** reason) {
 
 bool dlaaEvaluate(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* colour,
                   ID3D11Texture2D* depth, ID3D11Texture2D* motion,
-                  ID3D11Texture2D* output, uint32_t w, uint32_t h,
+                  ID3D11Texture2D* output, ID3D11Texture2D* reactive,
+                  uint32_t w, uint32_t h,
                   uint32_t outW, uint32_t outH, float jx, float jy, bool reset,
                   float frameMs, const char** reason) {
 #ifndef EDVR_HAVE_NGX
     (void)ctx; (void)eye; (void)colour; (void)depth; (void)motion; (void)output;
+    (void)reactive;
     (void)w; (void)h; (void)outW; (void)outH; (void)jx; (void)jy; (void)reset;
     (void)frameMs;
     if (reason) *reason = "this build has no DLSS SDK in it";
@@ -448,6 +451,15 @@ bool dlaaEvaluate(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* colour,
     ep.Feature.InSharpness = 0.0f;
     ep.pInDepth = depth;
     ep.pInMotionVectors = motion;
+    // The bias-current-colour mask, when a caller has one. Null is the
+    // shipped state and the same as a mask of zeroes.
+    ep.pInBiasCurrentColorMask = reactive;
+    if (reactive && !g_maskNoted) {
+        g_maskNoted = true;
+        Log::get().note("dlaa: a bias-current-colour mask is being handed to NVIDIA "
+                        "with each evaluation -- where it is set, the runtime favours "
+                        "this frame's colour over the history.");
+    }
     ep.InJitterOffsetX = jx;
     ep.InJitterOffsetY = jy;
     ep.InRenderSubrectDimensions.Width = w;

@@ -17,6 +17,7 @@
 #include "../common/temporal_math.h"
 #include "depth_probe.h"
 #include "dlaa.h"
+#include "ui_depth.h"   // uiDepthReactiveMask: the interface's bias mask
 #include "shader_swap.h"
 
 namespace edvr {
@@ -2514,12 +2515,18 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                         if (frameMs < 1.0f || frameMs > 100.0f) frameMs = 0.0f;
                     }
                     e.dlLastQpc = qNow.QuadPart;
+                    // The interface's reactive mask, when ui_depth marked one
+                    // this frame at this size: content that changes without
+                    // moving, which no motion vector can describe (ui_depth.h).
+                    ID3D11Texture2D* reactiveMask = nullptr;
+                    if (!uiDepthReactiveMask(w, h, eye, &reactiveMask)) reactiveMask = nullptr;
                     if (g_debugMode == 1 || g_debugMode == 3) {
                         // The motion view: the mv entry painted the vectors into
                         // the output; NVIDIA is skipped and starts afresh after.
                         usedDlaa = true;
                         e.dlHaveHistory = false;
-                    } else if (dlaaEvaluate(ctx, eye, e.dlColour, e.dlDepth, e.dlMv, e.dlOut, w, h,
+                    } else if (dlaaEvaluate(ctx, eye, e.dlColour, e.dlDepth, e.dlMv, e.dlOut,
+                                            reactiveMask, w, h,
                                             oW, oH, jxNow, jyNow, resetHist, frameMs, &why)) {
                         usedDlaa = true;
                         e.dlHaveHistory = true;

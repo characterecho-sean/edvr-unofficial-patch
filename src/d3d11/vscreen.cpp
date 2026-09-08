@@ -3792,7 +3792,7 @@ void vScreenFrameBoundary() {
         drawCensusTick(g_state->ownerCtx);
         panelUpscaleFrameEnd();
         wakePulseReport();
-        uiDepthFrameBoundary();
+        uiDepthFrameBoundary(g_state->ownerCtx);
         // The supersample resolve's warm compile, once a frame,
         // unconditionally -- not nested under any other feature's gate,
         // so a session with every FSS feature off still reaches it. A flag
