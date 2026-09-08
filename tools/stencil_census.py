@@ -43,11 +43,20 @@ Exit 0 when at least one census was read, 1 otherwise.
 
 import re
 import sys
-from collections import OrderedDict
+from collections import Counter, OrderedDict
 
-# EDVR's own motion-vector compute shader (the reviewed build). It is the
-# reader question 2 measures up to; --mv overrides it when a build renumbers.
-MV_HASH = '6D94E9C00DCE909F'
+# EDVR's own motion-vector compute shader. It is the reader question 2
+# measures up to; --mv overrides it.
+#
+# THIS VALUE GOES STALE, and it did (2026-09-07). It is a CONTENT hash, so it
+# changes whenever the pass's shader source changes -- a merge from main
+# altered the temporal pass and the hash went from 6D94E9C00DCE909F to
+# F2245E4791F22F7F. The tool then reported "no mv dispatch in this census" on
+# a log that had one in every frame, which reads exactly like the pass having
+# been off. So a miss is no longer silent: mvCandidates() below names the
+# dispatches that look like it, and the report tells you to re-run with --mv.
+MV_HASH = 'F2245E4791F22F7F'
+MV_HASH_PRIOR = '6D94E9C00DCE909F'   # before 2026-09-07; still read
 
 DXGI = {
     0: 'UNKNOWN', 19: 'R32G8X24_TYPELESS', 20: 'D32F_S8X24',
@@ -415,7 +424,7 @@ def mv_reads(census):
     deadline = {}
     seen = {}
     for ev in census.events:
-        if ev.tag != 'DCX' or ev.ch != MV_HASH:
+        if ev.tag != 'DCX' or ev.ch not in (MV_HASH, MV_HASH_PRIOR):
             continue
         if ev.frame not in seen or ev.q < seen[ev.frame]:
             seen[ev.frame] = ev.q
@@ -427,6 +436,35 @@ def mv_reads(census):
             if ev.frame not in per or ev.q < per[ev.frame]:
                 per[ev.frame] = ev.q
     return deadline, seen
+
+
+def mvCandidates(census):
+    """Dispatches that LOOK like EDVR's motion-vector pass, for when the hash
+    above has gone stale.
+
+    The signature that does not depend on a content hash: a compute dispatch
+    that SAMPLES a depth target which the scene drew into heavily. Nothing
+    else in Elite's frame reads the scene depth from a compute shader.
+    Returns [(hash, samples, dispatch count)], commonest first."""
+    # The busiest depth targets, RANKED rather than thresholded: an absolute
+    # floor either misses a small capture or lets every shadow map in, and
+    # the scene pair is always among the top few by draw count.
+    counts = Counter()
+    for ev in census.events:
+        if ev.tag in ('DC', 'DCO') and ev.d not in ('-', '?'):
+            counts[census.res_of(ev.d)] += 1
+    heavy = {res for res, _n in counts.most_common(3)}
+    out = Counter()
+    for ev in census.events:
+        if ev.tag != 'DCX':
+            continue
+        for tok in ev.s:
+            if tok in ('-', '?', ''):
+                continue
+            if census.res_of(tok) in heavy:
+                out[(ev.ch, tok)] += 1
+                break
+    return out.most_common(8)
 
 
 def touches(census, ev, res):
@@ -474,8 +512,21 @@ def report(census, w, listing):
             MV_HASH, ', '.join('f%d:%d' % (f, q)
                                for f, q in sorted(mv_seen.items()))))
     else:
-        w('  EDVR motion-vector dispatch %s: NOT PRESENT in this census, so\n'
-          '  question 2 has no deadline to measure to here.\n' % MV_HASH)
+        w('  EDVR motion-vector dispatch %s: NOT PRESENT in this census.\n'
+          % MV_HASH)
+        cand = mvCandidates(census)
+        if cand:
+            w('  BUT the hash is a CONTENT hash and goes stale whenever the\n'
+              '  pass\'s shader changes. These dispatches sample a depth\n'
+              '  target the scene drew into heavily, which is what the motion\n'
+              '  vector pass does and nothing else in the frame does:\n')
+            for (ch, tok), n in cand:
+                w('      ch=%s  reads %s %s  x%d\n'
+                  % (ch, tok, census.desc(tok), n))
+            w('  Re-run with --mv <hash> before concluding the pass was off.\n')
+        else:
+            w('  No dispatch reads a busy depth target either, so the pass\n'
+              '  really does look absent. Question 2 has no deadline here.\n')
 
     for res, toks in targets_of(census).items():
         draws = [e for e in census.events
@@ -807,6 +858,28 @@ def self_test():
     if ((~(narrow | 0x18)) & 0xFF) != 0xE3:
         print('self-test: narrow free-bit arithmetic wrong')
         return 1
+
+    # A stale MV_HASH must not read as "the pass was off" (2026-09-07): the
+    # hash is a CONTENT hash and a shader edit changed it, after which the
+    # tool reported no dispatch on a log that had one every frame. The
+    # recovery names candidates by what they READ, which no hash can stale.
+    saved = globals()['MV_HASH']
+    globals()['MV_HASH'] = 'DEADBEEFDEADBEEF'
+    prior = globals()['MV_HASH_PRIOR']
+    globals()['MV_HASH_PRIOR'] = 'DEADBEEFDEADBEEF'
+    try:
+        dl, sn = mv_reads(c1)
+        if dl or sn:
+            print('self-test: a wrong hash still matched a dispatch')
+            return 1
+        cand = mvCandidates(c1)
+        if not any(ch == '6D94E9C00DCE909F' for (ch, _tok), _n in cand):
+            print('self-test: the stale-hash recovery did not name the real '
+                  'dispatch: %r' % (cand,))
+            return 1
+    finally:
+        globals()['MV_HASH'] = saved
+        globals()['MV_HASH_PRIOR'] = prior
 
     # A stencil-disabled draw must contribute nothing in either direction.
     off = [e for e in draws if e.sten.enable is False]
