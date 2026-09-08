@@ -6,6 +6,8 @@
 
 #include <dxgi1_2.h>
 
+#include <atomic>
+
 #include "../common/config.h"
 #include "../common/eye_sync.h"
 #include "../common/frame_flag.h"
@@ -383,6 +385,48 @@ void dumpShaderBlob(const wchar_t* prefix, uint64_t hash, const void* bytecode,
     CloseHandle(h);
 }
 
+// The game's own creations, counted for the monitor's long-frame line
+// (2026-09-08: the hitches on a station approach came with the instance
+// pool's churn -- detail streaming in -- and a 423 ms frame whose render
+// thread was BUSY for 415 of them with EDVR's share at 0.2 ms; whether a
+// busy frame was making textures, buffers and shaders, which is streaming,
+// or something else, is what these say). Atomics: the creates run on the
+// game's streaming threads. Taken and zeroed once a frame.
+std::atomic<uint32_t> g_createTextures{0};
+std::atomic<uint32_t> g_createBuffers{0};
+std::atomic<uint32_t> g_createShaders{0};
+std::atomic<uint64_t> g_createTextureBytes{0};
+std::atomic<uint64_t> g_createBufferBytes{0};
+
+// About: bits per texel by the DXGI enum's contiguous families, and a third
+// again for a mip chain. A count, not an accounting.
+uint32_t formatBits(DXGI_FORMAT f) {
+    const unsigned v = static_cast<unsigned>(f);
+    if (v >= 1 && v <= 4) return 128;
+    if (v >= 5 && v <= 8) return 96;
+    if (v >= 9 && v <= 22) return 64;
+    if (v >= 23 && v <= 47) return 32;
+    if (v >= 48 && v <= 59) return 16;
+    if (v >= 60 && v <= 65) return 8;
+    if (v == 66) return 1;
+    if (v >= 67 && v <= 69) return 32;
+    if (v >= 70 && v <= 72) return 4;    // BC1
+    if (v >= 73 && v <= 78) return 8;    // BC2, BC3
+    if (v >= 79 && v <= 81) return 4;    // BC4
+    if (v >= 82 && v <= 84) return 8;    // BC5
+    if (v >= 85 && v <= 86) return 16;
+    if (v >= 87 && v <= 93) return 32;
+    if (v >= 94 && v <= 99) return 8;    // BC6H, BC7
+    return 32;
+}
+
+uint64_t texture2DBytes(const D3D11_TEXTURE2D_DESC& d) {
+    uint64_t bytes = static_cast<uint64_t>(d.Width) * d.Height * formatBits(d.Format) / 8u;
+    bytes *= d.ArraySize ? d.ArraySize : 1u;
+    if (d.MipLevels != 1) bytes += bytes / 3u;
+    return bytes;
+}
+
 HRESULT STDMETHODCALLTYPE hookedCreateVS(ID3D11Device* self, const void* bytecode,
                                          SIZE_T len, ID3D11ClassLinkage* linkage,
                                          void** out) {
@@ -390,6 +434,7 @@ HRESULT STDMETHODCALLTYPE hookedCreateVS(ID3D11Device* self, const void* bytecod
         return g_state->realCreateVS(self, bytecode, len, linkage, out);
     }
     const HRESULT hr = g_state->realCreateVS(self, bytecode, len, linkage, out);
+    if (SUCCEEDED(hr)) g_createShaders.fetch_add(1, std::memory_order_relaxed);
     guardedBudget(g_createBudget, [&] {
         if (FAILED(hr) || !bytecode || len == 0 || !out || !*out) return;
         const uint64_t hash = fnv1a64(bytecode, len);
@@ -411,6 +456,7 @@ HRESULT STDMETHODCALLTYPE hookedCreatePS(ID3D11Device* self, const void* bytecod
         return g_state->realCreatePS(self, bytecode, len, linkage, out);
     }
     const HRESULT hr = g_state->realCreatePS(self, bytecode, len, linkage, out);
+    if (SUCCEEDED(hr)) g_createShaders.fetch_add(1, std::memory_order_relaxed);
     guardedBudget(g_createBudget, [&] {
         if (FAILED(hr) || !bytecode || len == 0 || !out || !*out) return;
         const uint64_t hash = fnv1a64(bytecode, len);
@@ -471,8 +517,13 @@ HRESULT STDMETHODCALLTYPE hookedCreateTexture2D(ID3D11Device* self,
                                                 const D3D11_SUBRESOURCE_DATA* init,
                                                 ID3D11Texture2D** out) {
     const HRESULT hr = createTexture2DForwarded(self, desc, init, out);
-    if (FAILED(hr) && self == g_state->device) {
-        noteDeviceCreateFailure(kDevCreateTexture2D, hr, desc, init, false);
+    if (self == g_state->device) {
+        if (FAILED(hr)) {
+            noteDeviceCreateFailure(kDevCreateTexture2D, hr, desc, init, false);
+        } else if (desc) {
+            g_createTextures.fetch_add(1, std::memory_order_relaxed);
+            g_createTextureBytes.fetch_add(texture2DBytes(*desc), std::memory_order_relaxed);
+        }
     }
     return hr;
 }
@@ -642,8 +693,16 @@ HRESULT STDMETHODCALLTYPE hookedDevCreate(ID3D11Device* self, const void* first,
     const HRESULT hr = g_state->realDevCreate[Slot](self, first, second, out);
     // Patching in place hooks the CLASS, so another device sharing the table
     // arrives here too. It gets the same forward; only ours gets the line.
-    if (FAILED(hr) && self == g_state->device) {
-        noteDeviceCreateFailure(Slot, hr, first, second, FirstIsResource);
+    if (self == g_state->device) {
+        if (FAILED(hr)) {
+            noteDeviceCreateFailure(Slot, hr, first, second, FirstIsResource);
+        } else if constexpr (Slot == kDevCreateBuffer) {
+            if (first) {
+                g_createBuffers.fetch_add(1, std::memory_order_relaxed);
+                g_createBufferBytes.fetch_add(static_cast<const D3D11_BUFFER_DESC*>(first)->ByteWidth,
+                                              std::memory_order_relaxed);
+            }
+        }
     }
     return hr;
 }
@@ -659,6 +718,7 @@ HRESULT STDMETHODCALLTYPE hookedCreateCS(ID3D11Device* self, const void* bytecod
         return g_state->realCreateCS(self, bytecode, len, linkage, out);
     }
     const HRESULT hr = g_state->realCreateCS(self, bytecode, len, linkage, out);
+    if (SUCCEEDED(hr)) g_createShaders.fetch_add(1, std::memory_order_relaxed);
     guardedBudget(g_createBudget, [&] {
         if (FAILED(hr) || !bytecode || len == 0 || !out || !*out) return;
         const uint64_t hash = fnv1a64(bytecode, len);
@@ -1994,6 +2054,16 @@ void deviceHookNoteCleanExit() {
         g_state->sentinelConfirmed = true;
         g_state->sentinel->confirm();
     }
+}
+
+DeviceCreates deviceCreatesTake() {
+    DeviceCreates c;
+    c.textures = g_createTextures.exchange(0, std::memory_order_relaxed);
+    c.buffers = g_createBuffers.exchange(0, std::memory_order_relaxed);
+    c.shaders = g_createShaders.exchange(0, std::memory_order_relaxed);
+    c.textureBytes = g_createTextureBytes.exchange(0, std::memory_order_relaxed);
+    c.bufferBytes = g_createBufferBytes.exchange(0, std::memory_order_relaxed);
+    return c;
 }
 
 void shutdownDeviceHooks() {

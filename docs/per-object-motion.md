@@ -581,6 +581,29 @@ the mask's:
   the game's own streaming near a station, which no setting of EDVR's
   reaches; the coincidence in the earlier log was the station, not the
   detector.
+  *The second reading* (the session of 11:36, still nothing withheld):
+  99, 171 and 416 ms frames at the launch -- the monitor timed the 423 ms
+  one with the render thread BUSY for 415 of them and EDVR's share at
+  0.2 ms -- then 143 frames over 13 ms in the 35 s of the approach while
+  the pool's live count climbed from 963 to 1563 with 80-110 records
+  allocated and freed a pair: detail streaming in, which is how the
+  player read it from the headset ("as more detail gets added to the
+  station"). The monitor's long-frame line now counts the game's own
+  creations in the frame -- textures, buffers, shaders, and their bytes
+  about -- so the next such frame says whether it was streaming rather
+  than leaving it inferred.
+- **On a hitch the station's turn seems to step back and resume** (the
+  player, 11:36). The history lags the turn by construction: the vectors
+  carry the camera's motion and not the station's rotation, so the
+  history is blended in at the station's OLD angle every frame -- a
+  hundredth of a degree at a station's rate, invisible -- and a 400 ms
+  frame is tens of frames of turn at once, metres at the rim and pixels
+  on the eye, which the blend then re-converges over its window: a step
+  back and a catch-up. Tier 2's vectors carry the turn and close it. The
+  A/B is the same approach with `temporal_aa = off`, on which the game's
+  frame has no history to lag; the runtime's own reprojection through a
+  hitch is rotation-only and would shift the whole scene, not the
+  station's angle alone, which tells the two apart by eye.
 
 ### Tier 2b -- the tag by a second draw
 
@@ -1438,6 +1461,41 @@ which is this project's contract for every read of the game.
    hook), the record index read at each draw's own start instance, the
    classifier, and the records' delta as a registration candidate
    against the head on cockpit pixels.
+
+   *Its second flight* (11:36 the same day, `v0.14.1-48-gc4622d3`; on the
+   pad, out, and back to the slot): one pool of 2048 records all session,
+   no pair skipped, and the byte histogram read the record's layout off
+   its behaviour. Bytes 8-27 -- the quaternion at 8-15 as unorm16x4, the
+   position at 16-27 -- change on 95% of rewritten records in flight, the
+   low bytes every frame and the high bytes on 22-48% of them: a turn of
+   0.2-0.4 deg a frame and metres of translation, which is the SHIP's turn
+   and speed and no station's. **The pool's poses are in a frame that
+   rotates with the ship**; on the pad with the head moving, 2 records
+   changed a pair of 181 live, so not the head's frame either. Bytes
+   288-319 change with exactly the first block's pattern (292-303 as
+   16-27, 312-319 as 8-15): the record carries a SECOND pose. If it is last
+   frame's -- the third flight compares it byte for byte with the slot's
+   previous first block -- then the per-object motion is inside the record
+   and no frame-to-frame identity is needed at all. Bytes 0-7 change on
+   5-11% of rewritten records (the bone base and the scale), 30-55 on
+   10-40% (per-instance parameters), and 28-29, 31, 56-287, 304-307 and
+   320-335 never: the identity's signature, which the third flight keys
+   on. "Found at another slot" read 0 whenever nothing was allocated or
+   freed (the pad, the slot's approach) and 270-520 a pair while the set
+   churned (80-110 allocated and freed a pair): **the pool is repacked
+   when the visible set changes and stable otherwise**, so the classifier
+   matches by signature, not slot. The exact-key buckets overflowed (64 of
+   64, every interval in flight): the quaternion's quantum, 0.0035 deg, is
+   six centimetres of translation at a kilometre, so one motion split by
+   distance. Question 6 waits on the third flight's tolerance clustering
+   (0.03 deg, 3 cm plus 0.2 mm per metre of distance), which also names
+   the common motion -- the largest cluster's turn and translation, to be
+   read against the ship's on the registration line -- and counts what
+   lies outside it. And 175-206 records "allocated" a pair on the pad
+   against 3-20 freed says the buffer is renamed: a dynamic buffer's
+   unwritten slots hold whatever the allocation held last time round,
+   stale records counted live; the third flight's engage line prints the
+   usage.
 4. **Tier 2b** only if question 1 says no bits.
 5. **Tier 3** as `tools/` work against dumped frames, never on the hot
    path.

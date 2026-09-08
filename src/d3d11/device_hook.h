@@ -63,6 +63,18 @@ bool deviceHookFssModeLatch();
 // earliest marker. Consumed on read.
 bool deviceHookTakeFssZoomPress();
 
+// The game's own resource creations since the last take (the monitor takes
+// them once a frame for its long-frame line): counts, and the textures' and
+// buffers' bytes about.
+struct DeviceCreates {
+    uint32_t textures = 0;
+    uint32_t buffers = 0;
+    uint32_t shaders = 0;
+    uint64_t textureBytes = 0;
+    uint64_t bufferBytes = 0;
+};
+DeviceCreates deviceCreatesTake();
+
 void shutdownDeviceHooks();
 
 }  // namespace edvr

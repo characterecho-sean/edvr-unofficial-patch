@@ -17,6 +17,7 @@
 #include "../common/log.h"
 #include "../common/perf_math.h"
 #include "../common/timing.h"
+#include "device_hook.h"
 #include "sharpen_pass.h"
 #include "temporal_pass.h"
 
@@ -68,6 +69,13 @@ struct Frame {
     float    cpuDoorMs = 0.0f;
     float    cpuDrawsMs = 0.0f;  // the running sampled figure
     float    doorGpuMs = 0.0f;   // the last completed pair, both eyes
+    // The game's own creations in the frame (device_hook.h), for the
+    // long-frame line: a busy frame that made a hundred textures was
+    // streaming, whatever else it looked like.
+    uint32_t createTextures = 0;
+    uint32_t createBuffers = 0;
+    uint32_t createShaders = 0;
+    float    createMb = 0.0f;
 };
 
 // ---- NvAPI, the two entry points the page wants ---------------------------
@@ -436,12 +444,14 @@ void dropLine(const Frame& f, float budgetMs) {
     const float busy = f.presentMs - f.presentWaitMs - f.posesWaitMs;
     Log::get().note(
         "monitor: %s -- %.1f ms between Presents (budget %.1f), of which the thread waited %.1f in "
-        "Present and %.1f in WaitGetPoses (busy %.1f); %s; EDVR this frame: boundary %.2f ms, "
+        "Present and %.1f in WaitGetPoses (busy %.1f); %s; the game's creations in it: %u "
+        "textures, %u buffers (%.1f MB together), %u shaders; EDVR this frame: boundary %.2f ms, "
         "door %.2f ms, draw hooks ~%.2f ms (sampled), door GPU %.2f ms; EDVR events: %s. At most "
         "one of these lines every %u s, %u a session.",
         f.dropped ? "DROPPED FRAME" : "LONG FRAME", static_cast<double>(f.presentMs),
         static_cast<double>(budgetMs), static_cast<double>(f.presentWaitMs),
         static_cast<double>(f.posesWaitMs), static_cast<double>(busy > 0.0f ? busy : 0.0f), comp,
+        f.createTextures, f.createBuffers, static_cast<double>(f.createMb), f.createShaders,
         static_cast<double>(f.cpuBoundaryMs), static_cast<double>(f.cpuDoorMs),
         static_cast<double>(f.cpuDrawsMs), static_cast<double>(f.doorGpuMs), ev,
         static_cast<unsigned>(kDropLogEveryMs / 1000), kDropLogMax);
@@ -495,6 +505,11 @@ void perfMonitorFrame(ID3D11Device* dev) {
     s.drawWholeTicks = s.drawRealTicks = 0;
     s.sampleDraws = (s.frameNo % kDrawSampleEvery) == 0;
     f.doorGpuMs = s.doorGpuMs[0] + s.doorGpuMs[1];
+    const DeviceCreates made = deviceCreatesTake();
+    f.createTextures = made.textures;
+    f.createBuffers = made.buffers;
+    f.createShaders = made.shaders;
+    f.createMb = static_cast<float>(static_cast<double>(made.textureBytes + made.bufferBytes) / 1048576.0);
     ringPush(f);
 
     // The compositor's word describes the frame kFrameTimingLag frames
