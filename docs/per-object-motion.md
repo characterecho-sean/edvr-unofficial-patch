@@ -603,6 +603,14 @@ the mask's:
   loaded"). One 85 ms frame at 12:01:28 created nothing, the exception in
   seventeen. Not EDVR's to fix. What EDVR owes it is not to make the frame
   after it worse, which is the history lag of the next bullet.
+  *The fourth reading* (the session of 13:47): the same load at the same
+  point -- 211 ms with 768 buffers (615 MB) and 74 shaders at 13:49:16 --
+  and the approach's share of long frames the same as before (198 of
+  2,589), though the player noticed less. The two minutes landed before
+  it ran at 13 fps for a different reason: 75 ms waits in WaitGetPoses
+  with the game busy 2 ms and nothing created, which is the runtime
+  pacing the app -- a headset off the head or the dashboard up -- and not
+  a hitch of anyone's.
 - **On a hitch the station's turn seems to step back and resume** (the
   player, 11:36). The history lags the turn by construction: the vectors
   carry the camera's motion and not the station's rotation, so the
@@ -1535,6 +1543,42 @@ which is this project's contract for every read of the game.
    what a flight's totals cannot: the camera's own delta from cb1[275]
    beside the records', the per-slot steps, the rigid clusters, and the
    same records matched by content instead of slot.
+
+   *Its fourth flight* (13:47 the same day, `v0.14.1-59-g5ad454e`; landed,
+   distant, the slot), the first with pairs on disk, read by
+   `tools/pool_pair.py` -- and questions 3, 6 and 7 close on it. **The
+   frame is the ship's.** cb1[275] reads (0.030, -0.002, 0.000) m, the
+   pilot's head in the cockpit, and rows 277-278 are the camera's basis in
+   that frame, turning with the head while the records do not: a pair
+   with the head turning and the ship still (frames 8360-8361, 1,876
+   live) had not one record change. In flight (11064-11065) every station
+   part moved by the inverse of the ship's motion, and the largest rigid
+   cluster held 52% of the pose changes at 0.043 deg and 0.19 m a frame
+   (76% on 13768-13769, at 0.035 deg and 0.45 m): the station, rigid, in
+   the ship's frame; the records' median displacement of 1.1 m a frame at
+   1.5 km is that turn's lever arm. **The slot is not an identity, even
+   at rest.** Landed, ship still, set stable (4680-4681: nothing
+   allocated, 11 freed), 160 of 279 live records sat byte for byte at a
+   NEW slot and the nearest same-signature record was at the same slot for
+   only 67: the pool is partly re-ordered every frame, so a quarter to a
+   half of the per-slot deltas are two different objects' poses (medians
+   of 90 deg and 20-70 m at rest), which is what filled the in-game totals
+   with clusters. Identity is by content: the signature (the type) and
+   the nearest pose within the frame's own motion, unambiguous for a
+   static part since parts sit metres apart and move centimetres a frame.
+   **The second block is the current pose**, every pair, 100%. So:
+   question 3, no slot identity, content identity instead; question 6,
+   one dominant rigid motion (the station) with a few small bodies beside
+   it; question 7, the frame is the ship's, the head's position in
+   cb1[275], and no rebase seen. What follows for the design: the world
+   path already carries the ship's own motion through the camera rows, so
+   a static station part is registered by it, and the per-object work
+   reduces to the STATION's own rotation relative to the ship -- one rigid
+   motion for all its parts -- plus the few other bodies. The classifier's
+   arithmetic is to subtract the ship's motion from each cluster's `D`
+   (the camera's world delta the pass already has, less the head's delta
+   that cb1[275..278] gives in the ship's frame), and the tag's job is
+   membership.
 4. **Tier 2b** only if question 1 says no bits.
 5. **Tier 3** as `tools/` work against dumped frames, never on the hot
    path.
