@@ -67,9 +67,31 @@
 // bit-4 readers, not particles. Naming the explosion shader needs another
 // flight with explosions in it and the buffer fixed.
 //
-// What this shader IS: an unfixed camera-locked billboard family in no list
-// this project keeps, worth pinning on its own merit for the same reason
-// the plume was.
+// WHAT THIS SHADER IS, from its census lines (2026-09-07). Sean's guess was
+// station holograms; the draw state argues against it, and for a BACKGROUND
+// STAR OR DUST FIELD:
+//
+//   * Its viewport collapses the depth range to z=0.000-0.000. In Elite's
+//     reversed-Z that is the FAR plane, and only 18 of 15,070 recorded draws
+//     in that log do it -- 14,519 use the ordinary 0.000-1.000.
+//   * With the depth test GEQUAL and the fragment forced to 0, it passes
+//     ONLY where the depth buffer is still at the far plane, i.e. on
+//     unoccluded sky. A hologram inside a station sits at a finite distance
+//     and has to depth-test normally against the structure around it.
+//   * n=12 i=7273..8869: two triangles an instance, thousands of them,
+//     additive (bl=15,2,1 = SRC_ALPHA + ONE), no depth write (ds=17wZ).
+//   * At the one moment near census 1 where the probe sampled the scene
+//     pair, 141-174 of 256 sampled pixels were at the far plane and most of
+//     the rest under 2 m: open sky with the cockpit in the near field, not
+//     an enclosed interior.
+//
+// So: an unfixed camera-locked billboard family in no list this project
+// keeps, worth pinning on its own merit for the same reason the plume was --
+// but it is the sky layer, not the holograms and not the explosions.
+//
+// STILL UNCAPTURED, both of them: the explosion sprites (flown, but both
+// censuses were cut before the effects pass) and the station holograms (no
+// census on this machine has been taken inside a station).
 //
 // NOT YET TRANSCRIBED. Nothing replaces this shader today.
 //
