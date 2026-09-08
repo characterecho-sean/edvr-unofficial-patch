@@ -283,6 +283,23 @@ int main(int argc, char** argv) {
         } else {
             Config::get().init(scratch);
             Log::get().close();          // in case anything above opened one
+
+            // Clear previous runs first. Each leaves about a megabyte, so
+            // without this every build grows the scratch directory forever --
+            // and it also makes "the newest match" below provably THIS run's
+            // rather than whichever name sorted last.
+            {
+                WIN32_FIND_DATAW old{};
+                HANDLE oh = FindFirstFileW((scratch + L"\\edvr_buftest_*.log").c_str(),
+                                           &old);
+                if (oh != INVALID_HANDLE_VALUE) {
+                    do {
+                        DeleteFileW((scratch + L"\\" + old.cFileName).c_str());
+                    } while (FindNextFileW(oh, &old));
+                    FindClose(oh);
+                }
+            }
+
             if (!Log::get().open(scratch, L"buftest")) {
                 fail("log buffer", "the log would not open in the scratch dir");
             } else {

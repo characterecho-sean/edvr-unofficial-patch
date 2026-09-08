@@ -67,7 +67,12 @@ private:
     // counts -- and the flusher reads it from a third. This is the same
     // read-modify-write FaultBudget's comment in guard.h already names.
     std::atomic<uint64_t> m_dropped{0};
-    uint64_t m_droppedReported = 0;   // flusher thread only
+    // Written by whichever thread is inside writeBuffer, which is the flusher
+    // OR the one calling close() -- never both, because close() joins the
+    // flusher first and the join is the happens-before edge. "One writer at a
+    // time, ordered", not "one thread": the plain type is safe for that and
+    // not for anything looser.
+    uint64_t m_droppedReported = 0;
     bool m_open = false;
 
     // Hard ceiling, so a long session cannot fill a disk.

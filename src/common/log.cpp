@@ -50,7 +50,6 @@ namespace {
 // buffer is swapped for a fresh one at the reserve size. Below it the
 // capacity is left alone, so the steady state never allocates at all.
 constexpr int    kDefaultBufferMb   = 16;
-constexpr size_t kMinBufferBytes    = 64u * 1024u;
 constexpr size_t kReserveBytes      = 64u * 1024u;
 constexpr size_t kReclaimAboveBytes = 1u * 1024u * 1024u;
 constexpr DWORD  kFlushIntervalMs   = 250;
@@ -140,10 +139,17 @@ bool Log::open(const std::wstring& dir, const wchar_t* tag) {
     // Clamped rather than trusted: 0 here would drop every line silently, and
     // the value is read once at open so a typo cannot be walked back mid
     // session.
+    //
+    // The raw text is kept because getIntInRange reports a clamp or a parse
+    // failure through note() -- and this is the first call to it that happens
+    // BEFORE the log is open, so that report goes nowhere (note() returns on
+    // !m_open). A buffer_mb of 0, 999 or "sixteen" would otherwise be
+    // corrected in silence, which is the one failure this whole change exists
+    // to end. Said below, once the log can carry it.
+    const std::string rawBufMb = Config::get().getString("log.buffer_mb", "");
     const int bufMb = Config::get().getIntInRange("log.buffer_mb",
                                                   kDefaultBufferMb, 1, 256);
     m_bufferCapBytes = static_cast<size_t>(bufMb) * 1024u * 1024u;
-    if (m_bufferCapBytes < kMinBufferBytes) m_bufferCapBytes = kMinBufferBytes;
 
     m_impl = new Impl();
     m_impl->buf[0].reserve(kReserveBytes);
@@ -200,6 +206,20 @@ bool Log::open(const std::wstring& dir, const wchar_t* tag) {
         note("version %s", EDVR_VERSION_STRING);
     }
     note("If you are reporting a problem, paste this whole file.");
+
+    // The buffer in force, and whether the file said something else. Printed
+    // here rather than at the read above because note() needs m_open. The
+    // size is worth a line on its own: the drop notice tells a reader to
+    // raise log.buffer_mb, and that advice is only actionable next to the
+    // number actually running.
+    if (!rawBufMb.empty() && rawBufMb != std::to_string(bufMb)) {
+        note("log.buffer_mb = \"%s\" is not a value this build can use; "
+             "running at %d MB instead (1..256).",
+             rawBufMb.c_str(), bufMb);
+    } else if (bufMb != kDefaultBufferMb) {
+        note("log buffer %d MB (log.buffer_mb; the default is %d).", bufMb,
+             kDefaultBufferMb);
+    }
     return true;
 }
 
@@ -232,6 +252,23 @@ void Log::writeBuffer(int index) {
         return;
     }
 
+    // Empty it AND give the memory back, on every path that empties it.
+    // clear() keeps capacity, so a burst that grew this buffer to the ceiling
+    // would hold that memory until the process exits; a swap rather than
+    // shrink_to_fit(), which is only a request. Below the threshold the
+    // capacity is left alone, so the steady state never reallocates.
+    //
+    // A lambda because the size-cap path below empties the buffer too, and
+    // when this lived only on the writing path a capture taken after
+    // log.max_mb was reached kept its peak for the rest of the session.
+    auto release = [&] {
+        b.clear();
+        if (b.capacity() > kReclaimAboveBytes) {
+            std::vector<char>().swap(b);
+            b.reserve(kReserveBytes);
+        }
+    };
+
     if (m_maxBytes && m_bytesWritten >= m_maxBytes) {
         if (!m_capped) {
             m_capped = true;
@@ -241,7 +278,7 @@ void Log::writeBuffer(int index) {
             WriteFile(m_impl->file, msg, sizeof(msg) - 1, &n, nullptr);
             FlushFileBuffers(m_impl->file);
         }
-        b.clear();
+        release();
         return;
     }
 
@@ -250,15 +287,7 @@ void Log::writeBuffer(int index) {
         WriteFile(m_impl->file, b.data(), static_cast<DWORD>(b.size()), &written,
                   nullptr);
         m_bytesWritten += written;
-        b.clear();
-        // clear() keeps capacity, so a burst that grew this buffer to the
-        // ceiling would hold that memory until the process exits. Give it
-        // back once it is well past the steady state; a swap because
-        // shrink_to_fit() is a non-binding request.
-        if (b.capacity() > kReclaimAboveBytes) {
-            std::vector<char>().swap(b);
-            b.reserve(kReserveBytes);
-        }
+        release();
     }
 
     // Say so when lines were lost (2026-09-07).
@@ -277,15 +306,22 @@ void Log::writeBuffer(int index) {
     // for m_droppedReported and the line cannot itself be lost.
     const uint64_t lost = m_dropped.load(std::memory_order_relaxed);
     if (lost > m_droppedReported) {
-        char msg[240];
+        char msg[288];
+        // The interval and the size come from the values in force, not from
+        // literals: the advice to raise log.buffer_mb is only actionable
+        // beside the number the reader is actually running, and a hard-coded
+        // "250 ms" would drift the day kFlushIntervalMs changes.
         const int n = _snprintf_s(
             msg, sizeof(msg), _TRUNCATE,
-            "[edvr] %llu log line(s) were DROPPED here -- more text arrived in "
-            "250 ms than the buffer holds, so what follows is not continuous. "
-            "%llu lost this session. Raise log.buffer_mb (default %d) if this "
-            "is a capture you need whole.\r\n",
+            "[edvr] %llu log line(s) were DROPPED here -- more text arrived "
+            "between two writes to disk (at least %u ms apart) than the %zu MB "
+            "buffer holds, so what follows is not continuous. %llu lost this "
+            "session. Raise log.buffer_mb if this is a capture you need "
+            "whole.\r\n",
             static_cast<unsigned long long>(lost - m_droppedReported),
-            static_cast<unsigned long long>(lost), kDefaultBufferMb);
+            static_cast<unsigned>(kFlushIntervalMs),
+            m_bufferCapBytes / (1024u * 1024u),
+            static_cast<unsigned long long>(lost));
         if (n > 0) {
             DWORD w = 0;
             WriteFile(m_impl->file, msg, static_cast<DWORD>(n), &w, nullptr);
@@ -377,6 +413,26 @@ void Log::detachDuringProcessExit() {
             DWORD written = 0;
             WriteFile(m_impl->file, b.data(), static_cast<DWORD>(b.size()), &written,
                       nullptr);
+        }
+        // And the drop notice, which writeBuffer would have written had a
+        // flush pass got there first. Without this, lines lost in the last
+        // window before the process dies are still silent -- the same silence
+        // this change exists to end, narrowed to the final 250 ms, and a
+        // crash is exactly when a reader most needs to know the tail is
+        // incomplete. Stack buffer and a direct WriteFile: no lock, no heap,
+        // no note(), which is what this function is allowed to use.
+        const uint64_t lost = m_dropped.load(std::memory_order_relaxed);
+        if (lost > m_droppedReported) {
+            char msg[200];
+            const int n = _snprintf_s(
+                msg, sizeof(msg), _TRUNCATE,
+                "[edvr] %llu log line(s) were DROPPED before this point and "
+                "the process is exiting; the tail above is not continuous.\r\n",
+                static_cast<unsigned long long>(lost));
+            if (n > 0) {
+                DWORD w = 0;
+                WriteFile(m_impl->file, msg, static_cast<DWORD>(n), &w, nullptr);
+            }
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         // Buffers were mid-update when their writer was killed. Nothing to
