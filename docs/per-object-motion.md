@@ -1621,6 +1621,34 @@ which is this project's contract for every read of the game.
    frame while the fix is on). The first flight reads the share against
    the slot's approach: a few percent far off, most of the frame in the
    slot, and the panels' smear gone with it.
+
+   *Its first flight* (14:49 the same day, `v0.14.1-61-g2d8b165`; the
+   player's A/B "didn't see much difference at all if any"): the path
+   engaged -- the gates rejected the docked scatter (2% at 5-8 deg) and
+   accepted the station in flight (31-71% at 0.034-0.056 deg a frame) --
+   and took 0.00-0.69% of pixels. Two reasons, both on the desk from the
+   flight's own pairs. The station was 10.6 km away for the A/B: at that
+   range its turn moves its parts 0.07-0.11 px a frame, under the
+   "no question" third of a pixel and under anything an eye or a history
+   could show; the smear the player reported lives at the slot, where the
+   same turn is 2-5 px a frame. And the choice could not have worked at
+   any range: a 3x3 match against a history that was ACCUMULATED at the
+   camera's landing is self-confirming -- its smear is centred exactly
+   there -- so the camera wins every comparison, and the registration
+   probe's near-zero residuals on the world path are the same fact from
+   the other side. The composition itself is exact: on every pair the
+   body path predicts a part's previous view position to 0.01-0.07 px
+   where the camera path misses by the turn's lever arm, and it nails a
+   passing ship too (19 records at 138 m doing 4 m a frame: 0.001 px
+   against the camera path's 41). So the comparison went, and membership
+   became GEOMETRY: the probe boxes the body's parts' positions (padded
+   by `advanced.temporal_aa_objects_reach`, 60 m) and marks a 64-cell
+   occupancy grid over the box, each part marking the cells within the
+   reach of it; the pass uploads the grid when it changes and each
+   world-path pixel with a depth is placed in the world by this frame's
+   camera rows and tested against it -- one load, no comparison, and a
+   ship crossing the empty space between the arms stays the camera's. The
+   next flight's A/B belongs at the slot.
 4. **Tier 2b** only if question 1 says no bits.
 5. **Tier 3** as `tools/` work against dumped frames, never on the hot
    path.

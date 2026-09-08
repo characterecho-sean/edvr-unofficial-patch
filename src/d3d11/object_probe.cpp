@@ -53,6 +53,59 @@ constexpr float    kMotionMaxM = 20.0f;
 ObjectMotion g_motion = {};
 bool     g_motionValid = false;
 uint32_t g_motionAge = 0;
+float    g_reachM = 60.0f;
+uint8_t  g_grid[kObjectGrid * kObjectGrid * kObjectGrid];
+uint32_t g_gridVersion = 0;
+
+// The body's occupancy: its members' positions now, boxed and padded by the
+// reach, each marking the cells within the reach of it. A station's parts
+// are placed metres apart and tens of metres across, so at sixty metres
+// the slot's walls and the rim read solid and the space between the arms
+// stays empty.
+void buildGrid(const uint8_t* now, const int* memberSlots, int count, const float* pos) {
+    float lo[3] = {1e30f, 1e30f, 1e30f}, hi[3] = {-1e30f, -1e30f, -1e30f};
+    for (int m = 0; m < count; ++m) {
+        const float* p = pos + memberSlots[m] * 3;
+        for (int k = 0; k < 3; ++k) {
+            if (p[k] < lo[k]) lo[k] = p[k];
+            if (p[k] > hi[k]) hi[k] = p[k];
+        }
+    }
+    for (int k = 0; k < 3; ++k) {
+        lo[k] -= g_reachM;
+        hi[k] += g_reachM;
+        if (hi[k] - lo[k] < 1.0f) hi[k] = lo[k] + 1.0f;
+        g_motion.bmin[k] = lo[k];
+        g_motion.bmax[k] = hi[k];
+    }
+    memset(g_grid, 0, sizeof(g_grid));
+    const int n = static_cast<int>(kObjectGrid);
+    for (int m = 0; m < count; ++m) {
+        const float* p = pos + memberSlots[m] * 3;
+        int c[3], dil[3];
+        for (int k = 0; k < 3; ++k) {
+            const float cell = (hi[k] - lo[k]) / static_cast<float>(n);
+            int idx = static_cast<int>((p[k] - lo[k]) / cell);
+            c[k] = idx < 0 ? 0 : (idx >= n ? n - 1 : idx);
+            int d = static_cast<int>(ceilf(g_reachM / cell));
+            dil[k] = d < 1 ? 1 : (d > 4 ? 4 : d);
+        }
+        for (int z = c[2] - dil[2]; z <= c[2] + dil[2]; ++z) {
+            if (z < 0 || z >= n) continue;
+            for (int y = c[1] - dil[1]; y <= c[1] + dil[1]; ++y) {
+                if (y < 0 || y >= n) continue;
+                for (int x = c[0] - dil[0]; x <= c[0] + dil[0]; ++x) {
+                    if (x < 0 || x >= n) continue;
+                    g_grid[(z * n + y) * n + x] = 255;
+                }
+            }
+        }
+    }
+    (void)now;
+    ++g_gridVersion;
+    g_motion.gridVersion = g_gridVersion;
+    g_motion.grid = g_grid;
+}
 uint64_t g_checkMs = 0;
 ID3D11Buffer* g_pool = nullptr;      // held (AddRef) while recognised
 uint32_t g_poolBytes = 0;
@@ -300,6 +353,9 @@ void diffPair(const uint8_t* prev, const uint8_t* now, uint32_t bytes) {
     Cluster clusters[kMaxClusters];
     int nc = 0;
     uint32_t overflow = 0;
+    // Each pose change's cluster and position now, for the body's grid.
+    std::vector<int> clusterIdx(n, -1);
+    std::vector<float> posNow(static_cast<size_t>(n) * 3, 0.0f);
     for (uint32_t i = 0; i < n; ++i) {
         const uint8_t* a = prev + i * kRecordBytes;
         const uint8_t* b = now + i * kRecordBytes;
@@ -341,8 +397,15 @@ void diffPair(const uint8_t* prev, const uint8_t* now, uint32_t bytes) {
         if (poseDiff) {
             ++poseChanged;
             float qd[4], t[3], angle = 0.0f, trans = 0.0f, dist = 0.0f;
-            if (rigidDelta(decodePose(a), decodePose(b), qd, t, &angle, &trans, &dist)) {
-                if (clusterOf(clusters, &nc, qd, t, angle, trans, dist) < 0) ++overflow;
+            const Pose pb = decodePose(b);
+            if (rigidDelta(decodePose(a), pb, qd, t, &angle, &trans, &dist)) {
+                const int cj = clusterOf(clusters, &nc, qd, t, angle, trans, dist);
+                if (cj < 0) {
+                    ++overflow;
+                } else {
+                    clusterIdx[i] = cj;
+                    memcpy(&posNow[static_cast<size_t>(i) * 3], pb.p, sizeof(pb.p));
+                }
             }
         } else {
             ++otherOnly;
@@ -413,6 +476,12 @@ void diffPair(const uint8_t* prev, const uint8_t* now, uint32_t bytes) {
             g_motion.age = 0;
             g_motionAge = 0;
             g_motionValid = true;
+            std::vector<int> members;
+            members.reserve(c.count);
+            for (uint32_t i = 0; i < n; ++i) {
+                if (clusterIdx[i] == big) members.push_back(static_cast<int>(i));
+            }
+            buildGrid(now, members.data(), static_cast<int>(members.size()), posNow.data());
         }
         ++g_bigPairs;
         g_bigShareSum += static_cast<double>(c.count) / static_cast<double>(poseChanged);
@@ -726,6 +795,11 @@ bool objectMotionGet(ObjectMotion* out) {
     *out = g_motion;
     out->age = g_motionAge;
     return true;
+}
+
+void objectMotionSetReach(float metres) {
+    if (!std::isfinite(metres)) return;
+    g_reachM = metres < 1.0f ? 1.0f : (metres > 500.0f ? 500.0f : metres);
 }
 
 void objectProbeOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t instances) {

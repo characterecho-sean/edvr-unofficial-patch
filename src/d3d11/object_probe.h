@@ -64,13 +64,29 @@ void objectProbeShutdown();
 // every part of it in one cluster -- and held for a while after, since a
 // station's rate is constant. False until a pair has given one, and again
 // once it has gone stale.
+constexpr uint32_t kObjectGrid = 64;   // cells a side of the body's occupancy grid
 struct ObjectMotion {
     float    R[9];       // row-major 3x3
     float    t[3];
     float    share;      // of the pair's pose changes the cluster held, 0..1
     uint32_t records;    // records in it
     uint32_t age;        // frames since the pair's second frame
+    // Where the body IS: the box around its parts' positions now (world
+    // frame, padded by the reach), and an occupancy grid over that box --
+    // a cell is set within the reach of any part -- so a pixel whose depth
+    // puts it inside a set cell is the body's, and one in the empty space
+    // between (a ship crossing the slot) is not. The grid is the probe's
+    // own buffer, kObjectGrid cubed bytes, x fastest; gridVersion bumps on
+    // every rebuild so a reader uploads only what changed.
+    float    bmin[3];
+    float    bmax[3];
+    uint32_t gridVersion;
+    const uint8_t* grid;
 };
 bool objectMotionGet(ObjectMotion* out);
+// The reach, metres, that a part marks around itself in the grid (the
+// temporal pass's setting, read once a reload); before a rebuild it takes
+// the value it finds here.
+void objectMotionSetReach(float metres);
 
 }  // namespace edvr
