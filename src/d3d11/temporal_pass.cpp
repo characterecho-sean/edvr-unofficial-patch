@@ -180,7 +180,15 @@ float zAt(int2 q) { return zSceneAt(q); }
 // work, and this is the floor under them. temporalMoverTest in
 // temporal_math.h is the reference the test pins; this transcribes it.
 // zPred <= 0 means the pixel has no depth now (the far plane, or none).
-float moverAt(float2 pp, float zPred) {
+// `thick`: at least six of the nine texels around the pixel have a depth
+// NOW. The "surface where only sky was" rule is for a hull's leading edge
+// arriving over empty space; a THIN feature -- a text stroke the interface
+// wrote depth under, a wire, a railing -- reprojects onto texels that had
+// no depth last frame on every frame the head moves, and the rule called
+// every one of them a mover (2026-09-08: the interface's text swam again
+// with the mask on, the very thing ui_depth had fixed). A thin feature
+// gets the range test alone.
+float moverAt(float2 pp, float zPred, bool thick) {
     int2 pq = int2(round(pp));
     float zmin = 1e30;
     float zmax = 0.0;
@@ -200,16 +208,18 @@ float moverAt(float2 pp, float zPred) {
         }
     }
     if (zPred <= 0.0) return anyFar ? 0.0 : 1.0;   // sky now: consistent only with sky then
-    if (zmax <= 0.0) return 1.0;                   // a surface now where only sky was
+    if (zmax <= 0.0) return thick ? 1.0 : 0.0;     // a surface now where only sky was: a hull's edge, not a stroke's
     float tol = movers.y;
     return (zPred < zmin * (1.0 - tol) || zPred > zmax * (1.0 + tol)) ? 1.0 : 0.0;
 }
 // zPred: the predicted view depth of this pixel's surface in last frame's
 // eye space, metres, for the mover mask -- 0 when the pixel took no real
 // depth (the far plane, the menu's assumed depth, no depth bound).
+// depthN: how many of the 3x3 around the pixel have a depth now, for the
+// mask's thick-or-thin verdict (moverAt says); 0 when no depth was read.
 bool fetchHistoryT(float2 p, float3 r0, float3 r1, float3 r2, float3 tv,
                    bool useDepth, bool allowWorld, out uint world, out float2 mvOut,
-                   out float zPred, out float3 hy) {
+                   out float zPred, out uint depthN, out float3 hy) {
     float3 d;
     d.x = tanNow.x + (p.x + 0.5) / float(size.x) * (tanNow.y - tanNow.x);
     d.y = tanNow.w - (p.y + 0.5) / float(size.y) * (tanNow.w - tanNow.z);
@@ -218,6 +228,7 @@ bool fetchHistoryT(float2 p, float3 r0, float3 r1, float3 r2, float3 tv,
     world = 0;
     mvOut = 0.0;
     zPred = 0.0;
+    depthN = 0;
     // The world/ship split: the ship's own things (the cockpit, the hull)
     // move with the head's delta; everything farther than split.x metres,
     // and the far plane, moves with the game's CAMERA -- the head and the
@@ -237,7 +248,9 @@ bool fetchHistoryT(float2 p, float3 r0, float3 r1, float3 r2, float3 tv,
         [unroll] for (int oy = -1; oy <= 1; ++oy) {
             [unroll] for (int ox = -1; ox <= 1; ++ox) {
                 int2 q = clamp(int2(p) + int2(ox, oy), int2(0, 0), size - 1);
-                zr = max(zr, zSceneAt(region.xy + q));
+                float zs = zSceneAt(region.xy + q);
+                zr = max(zr, zs);
+                if (zs > 0.0) ++depthN;
             }
         }
         float den = zr * (knobs.w - knobs.z) + knobs.z;
@@ -288,7 +301,8 @@ bool fetchHistory(float2 p, float3 r0, float3 r1, float3 r2, out float3 hy) {
     uint wd = 0;
     float2 mvd = 0.0;
     float zd = 0.0;
-    return fetchHistoryT(p, r0, r1, r2, float3(0.0, 0.0, 0.0), false, false, wd, mvd, zd, hy);
+    uint dn = 0;
+    return fetchHistoryT(p, r0, r1, r2, float3(0.0, 0.0, 0.0), false, false, wd, mvd, zd, dn, hy);
 }
 // How far a clip moved the history, in luma, as a count of 1/255ths: a
 // nudge on a text edge is a few, a history that landed somewhere else
@@ -327,12 +341,15 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
         float3 dp = float3(dot(dR0.xyz, d), dot(dR1.xyz, d), dot(dR2.xyz, d));
         float zraw = zAt(region.xy + int2(p));
         float zPred = 0.0;   // for the mover mask: the surface's predicted depth last frame, 0 = none
+        uint depthN = 0;     // ...and how many of the 3x3 have a depth now (thick or thin)
         if (knobs.y != 0.0) {
             float zr = 0.0;
             [unroll] for (int oy = -1; oy <= 1; ++oy) {
                 [unroll] for (int ox = -1; ox <= 1; ++ox) {
                     int2 q = clamp(int2(p) + int2(ox, oy), int2(0, 0), size - 1);
-                    zr = max(zr, zSceneAt(region.xy + q));
+                    float zs = zSceneAt(region.xy + q);
+                    zr = max(zr, zs);
+                    if (zs > 0.0) ++depthN;
                 }
             }
             float den = zr * (knobs.w - knobs.z) + knobs.z;
@@ -371,7 +388,7 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
             // image (off it NVIDIA has no history to bias against anyway).
             if (movers.x != 0.0 && pp.x >= 0.0 && pp.y >= 0.0 &&
                 pp.x <= float(size.x) - 1.0 && pp.y <= float(size.y) - 1.0) {
-                mover = moverAt(pp, zPred);
+                mover = moverAt(pp, zPred, depthN >= 6);
                 if (mover != 0.0) count28 = 1;
             }
         }
@@ -380,9 +397,15 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
         // one knob means the same on both paths. The runtime takes ONE such
         // mask, and the interface's reactive mask (ui_depth.h: a readout
         // whose digits change in place) wants the same input, so it is
-        // folded in here when bound -- the stronger bias wins per pixel.
+        // folded in here when bound -- and where the interface has marked a
+        // pixel, ITS value stands. The interface module knows its pixels and
+        // chose its strength with the player's eyes on the text (0.5, flown
+        // 2026-09-08); the mover mask is for the world's geometry, and a
+        // max() let it raise the interface's text to "fresh frame only"
+        // wherever its depth test tripped on a stroke, which is text that
+        // never accumulates -- the swim ui_depth exists to fix.
         float ui = probe.z != 0.0 ? UM.Load(int3(id.xy, 0)) : 0.0;
-        MK[id.xy] = max(ui, mover * movers.z);
+        MK[id.xy] = ui > 0.0 ? ui : mover * movers.z;
         // The registration probes on the trained path (2026-09-08): main's
         // 5x5 luma SAD search, transcribed, against NVIDIA's PREVIOUS output
         // -- the history as the runtime accumulated it, bound at t1 in place
@@ -580,14 +603,16 @@ void main(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
         if (haveHistory != 0) {
             float3 hy;
             float zPred = 0.0;
+            uint depthN = 0;
             if (fetchHistoryT(p, dR0.xyz, dR1.xyz, dR2.xyz, tvUsed.xyz,
-                              knobs.y != 0.0 && tvUsed.w != 0.0, true, worldTaken, mvUsed, zPred, hy)) {
+                              knobs.y != 0.0 && tvUsed.w != 0.0, true, worldTaken, mvUsed, zPred,
+                              depthN, hy)) {
                 if (worldTaken != 0) count[15] = 1;
                 // The mover mask (moverAt says): a masked pixel keeps less
                 // of its history, by the strength -- at 1 it is the fresh
                 // frame alone, spatially settled by the filter above.
                 if (movers.x != 0.0) {
-                    mover = moverAt(p + mvUsed, zPred);
+                    mover = moverAt(p + mvUsed, zPred, depthN >= 6);
                     if (mover != 0.0) {
                         count[28] = 1;
                         blEff *= 1.0 - movers.z;
@@ -637,7 +662,8 @@ void main(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
                 uint wc = 0;
                 float2 mvc = 0.0;
                 float zc = 0.0;
-                if (!fetchHistoryT(p, r0, r1, r2, tvc, depthC, false, wc, mvc, zc, h)) {
+                uint dnc = 0;
+                if (!fetchHistoryT(p, r0, r1, r2, tvc, depthC, false, wc, mvc, zc, dnc, h)) {
                     count[3 + c * 3] = 1;
                 } else {
                     float3 hc2 = clipToBox(boxMin, boxMax, h);

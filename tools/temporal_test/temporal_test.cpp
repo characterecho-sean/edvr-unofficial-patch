@@ -238,6 +238,13 @@ int main() {
               "mover: 4 percent off is not");
         check(!temporalMoverTest(10.0f, 4.0f, 10.0f, true, 0.03f),
               "mover: a hull's edge against sky, inside the range, is not a mover");
+        // A THIN feature -- a text stroke the interface wrote depth under --
+        // landing on depthless texels is not a mover; only a thick surface
+        // arriving over empty space is (the 2026-09-08 text swim).
+        check(!temporalMoverTest(1.4f, 0.0f, 0.0f, true, 0.03f, false),
+              "mover: a thin stroke over texels that had no depth is not a mover");
+        check(temporalMoverTest(1.4f, 0.0f, 0.0f, true, 0.03f, true),
+              "mover: a thick surface over texels that had no depth has moved in");
 
         // The game's camera: the two readings of the rows differ by a
         // transpose, and the transposed reading is the other's inverse.

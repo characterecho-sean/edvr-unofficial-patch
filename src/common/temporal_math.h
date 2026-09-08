@@ -184,12 +184,17 @@ inline float temporalDepthToMetres(float d, float nearZ, float farZ) {
 // camera alone would have put it -- a mover or a disocclusion -- by more
 // than tol, a fraction of depth. The range rather than one texel because
 // the jitter shifts the grid half a pixel between frames and a single
-// compare fires on every silhouette every frame. The shader's moverAt
+// compare fires on every silhouette every frame. `thick`: at least six of
+// the nine texels around the pixel have a depth now -- a hull, not a text
+// stroke or a wire. A thin feature reprojects onto depthless texels on
+// every frame the head moves, and "a surface where only sky was" called
+// each one a mover (2026-09-08: the interface's text swam with the mask
+// on); a thin feature gets the range test alone. The shader's moverAt
 // transcribes this; tools/temporal_test pins it.
 inline bool temporalMoverTest(float zPred, float zMin, float zMax, bool anyFar,
-                              float tol) {
+                              float tol, bool thick = true) {
     if (!(zPred > 0.0f)) return !anyFar;   // sky now: consistent only with sky then
-    if (!(zMax > 0.0f)) return true;       // a surface now where only sky was
+    if (!(zMax > 0.0f)) return thick;      // a surface now where only sky was: a hull's edge, not a stroke's
     return zPred < zMin * (1.0f - tol) || zPred > zMax * (1.0f + tol);
 }
 
