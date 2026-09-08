@@ -203,6 +203,33 @@ def key_args(census, d, cross=False):
     return key_shape(census, d, cross) + (d.ia, f(d.ib))
 
 
+def ia_parts(d):
+    """(start, base, startInstance) as strings, None where the line had none."""
+    parts = (d.ia or '').split(',')
+    while len(parts) < 3:
+        parts.append(None)
+    return parts[0], parts[1], parts[2]
+
+
+# The args key taken apart, one field at a time. The 2026-09-08 flight
+# answered the question this way: the geometry (index buffer, start index,
+# base vertex) recurs at 95-98% frame to frame but names only 6-9% of the
+# scene's draws -- the same mesh drawn many times -- while the start
+# instance names 77-81% uniquely and recurs at 98% in a quiet scene and at
+# 19-29% in flight, because it is the draw's address in an instance stream
+# that is packed afresh every frame and shifts for every later draw when
+# anything before it changes count. A key that lumps the fields together
+# reports the worst of them; these say which field did what.
+FIELD_KEYS = (
+    ('shape', lambda c, d, x: key_shape(c, d, x)),
+    ('+ib', lambda c, d, x: key_shape(c, d, x) + ((c.cross(d.ib) if x else d.ib),)),
+    ('+start+base', lambda c, d, x: key_shape(c, d, x) + ia_parts(d)[:2]),
+    ('+startInstance', lambda c, d, x: key_shape(c, d, x) + (ia_parts(d)[2],)),
+    ('geometry', lambda c, d, x: key_shape(c, d, x) + ((c.cross(d.ib) if x else d.ib),) + ia_parts(d)[:2]),
+    ('args (all)', lambda c, d, x: key_args(c, d, x)),
+)
+
+
 def scene_targets(census):
     """The res identities of the two busiest depth targets: the scene pair.
     Returns a set of res values (or raw tokens when the table is missing)."""
@@ -296,6 +323,20 @@ def report(census, out, scene_only=False):
                       'recur %s positional %s usable %s\n' % (
                           a, b, name, pct(r, n), pct(p, n), pct(u, n),
                           pct(r2, n), pct(p2, n), pct(u2, n)))
+    # The fields one at a time, on the scene pair's first frame pair: which
+    # of them names a draw, and which of them survives a frame.
+    if len(frames) >= 2 and census.has_args():
+        da_ = [d for d in per_frame[frames[0]] if census.res_of(d.d) in scene]
+        db_ = [d for d in per_frame[frames[1]] if census.res_of(d.d) in scene]
+        if da_:
+            out.write('  the scene pair, frame %d->%d, by field:\n' % (frames[0], frames[1]))
+            for name, fn in FIELD_KEYS:
+                ka = [fn(census, d, False) for d in da_]
+                kb = [fn(census, d, False) for d in db_]
+                n, _, uq = frame_stats(ka)
+                r, p, u = pair_stats(ka, kb)
+                out.write('    %-15s unique %s  recur %s  positional %s  usable %s\n' % (
+                    name, pct(uq, n), pct(r, n), pct(p, n), pct(u, n)))
 
 
 def report_across(a, b, out):
@@ -460,6 +501,19 @@ def self_test():
     text = sink.getvalue()
     if 'NO ia= COLUMN' not in text or 'usable  60%' not in text:
         print('self-test: the report did not say what it should:\n%s' % text)
+        return 1
+    # The field split: in the fixture the start index is what tells A, B
+    # and C apart (60% unique) and every start instance is 0, so that field
+    # adds nothing to the shape (0%). A split that read the fields in the
+    # wrong order would swap those two figures.
+    f0 = per[0]
+    by = dict((name, fn) for name, fn in FIELD_KEYS)
+    if frame_stats([by['+start+base'](c1, d, False) for d in f0])[2] != 3 or \
+            frame_stats([by['+startInstance'](c1, d, False) for d in f0])[2] != 0:
+        print('self-test: the field split reads the wrong fields')
+        return 1
+    if 'by field:' not in text or '+startInstance  unique   0%' not in text:
+        print('self-test: the field split is missing from the report:\n%s' % text)
         return 1
     print('self-test: ok')
     return 0

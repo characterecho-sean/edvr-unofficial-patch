@@ -451,6 +451,22 @@ was built, and where it differs from the paragraph above:
   2026-09-04), and whether anything static flickers at its edges, which is
   what a tolerance set too tight looks like.
 
+**Flown 2026-09-08** (`edvr_gfx_20260908_090950.log`, DLSS at 2514x2482,
+the mask switched on live at 09:16:39). The plumbing held: the census's
+`DCX` lines show the `mv` dispatch with the mask at `u5` and last frame's
+depth at `t3` from the first frame after the engage line, and NVIDIA's
+running price read 2.39 ms/eye before and 2.40 after (the pass's own 2.55
+-> 2.56), at 85-89 fps -- the cost is below what the running average can
+see. The masked share: **0.45% of pixels with the ship and head still**
+(the world delta 0.000 deg/frame, the eye 0.0006 m/frame), which is the 3%
+tolerance's noise floor and is not zero -- about 28,000 pixels an eye-frame
+firing on something that does not move, most likely depth edges of thin
+geometry and the interface's depth-written strokes, which the `movers`
+debug view would name in one screenshot; **0.6-1.5% under way** (the eye
+moving 0.1-1.4 m/frame in the rows), the higher figures with the higher
+speeds, as disocclusion and parallax should. What the eyes made of it is
+the open half.
+
 ### Tier 2b -- the tag by a second draw
 
 If Phase 0 finds no free stencil bits, the tag goes into an EDVR target
@@ -825,6 +841,46 @@ answered it. The rest need the game running -- see
 
    The instance-stream half (the slot, the usage, the write path) still
    needs the input layout at creation and is untouched.
+
+   **ANSWERED 2026-09-08, from one flight with the column** (`edvr_gfx_
+   20260908_090950.log`, `v0.14.1-20-g2bf4556`, five complete censuses with
+   their intern tables, 2514x2482 under DLSS). The whole args key names
+   83-86% of the scene pair's draws uniquely, so a per-draw identity exists
+   *within* a frame -- and the field split says which field does what:
+
+   | key, scene pair | unique | recurs next frame, quiet (censuses 1-2) | recurs next frame, in flight (3-5) | recurs 2.8 s later |
+   |---|---|---|---|---|
+   | shape | 6-9% | 98% | 94-99% | 91% |
+   | + index buffer, start index, base vertex | 6-9% | 98% | 89-98% | 91% |
+   | + start instance | 77-81% | 98% | 19-29% | 22% |
+
+   The *geometry* is stable and shared: the same mesh drawn many times
+   (`n=372 i=2 vh=6D8886… ia=15567904,2077572,*` over and over) is why it
+   names nothing. The *start instance* is what names a draw, and it is not
+   an identity but an **address in an instance stream packed afresh every
+   frame**: monotonic through the pass (182, 301, 995, 1114 … 5927, 5955,
+   6045 …), and shifted for every later draw whenever anything before it
+   changes count -- `995 -> 994`, `5927 -> 5920`, `6045 -> 6038` between two
+   consecutive frames of a scene with particles in it (censuses 3-5 had
+   16-70 of them). In a quiet scene nothing shifts and it recurs at 98%.
+
+   So the memo is dead as an identity and unnecessary as a mechanism. The
+   draw's own start instance IS the record's location in the stream, handed
+   over by the call for nothing; the stream's binding is one thing to learn
+   per frame (it is append-only, so one `IAGetVertexBuffers` at the pass's
+   first instanced draw, re-verified every hundred draws, is the whole
+   learning cost); and the identity that has to survive a frame is the
+   RECORD's, not the draw's. That moves the gate to **question 3's second
+   half -- does a record keep its index in the pool between frames** --
+   which the pool shadow answers at the desk-plus-one-flight: tee the
+   pool's writes (it is Map-written, the 2026-09-07 censuses saw no other
+   writer), keep last frame's copy, and print once a second how many of the
+   first few hundred records changed bytes, changed pose only, or moved
+   slot. If records keep their slots, the classifier is `record[i].pose`
+   now against `record[i].pose` then and the design proceeds as written; if
+   the pool is repacked too, objects are matched by content (bone base,
+   scale, a pose within tolerance), which is the fallback to build then.
+   Either way the draw-order and draw-identity questions are closed.
 5. **The record head across families.** Dump the scene's vertex shaders
    (`glare_shader_dump`, `edvr.ini:1470-1472`) and look for the pattern:
    a structured load at stride 336, the position at byte 16, the subtraction
@@ -1188,6 +1244,28 @@ which is this project's contract for every read of the game.
    distant station taken twice. The unseen-draw counter closes the third
    census gap as a count. Questions 3, 6, 7 and 10 need the pool shadow,
    which is tier 2's first stage, not a flight.
+
+   *The flight of 2026-09-08, in space* (`edvr_gfx_20260908_090950.log`,
+   five censuses), added one reader the station captures had not shown and
+   re-confirmed question 2 on the new build. **Question 2:** the scene pair
+   is untouched between its last draw and the `mv` dispatch in every frame
+   of every census (the tool's `(d)` lines; the dispatch's content hash is
+   now `860998BA3E70923D`, since the mover mask changed the shader, and the
+   tool keeps every hash the pass has had). **Question 1's caveat:** in
+   space `FC1193AFFC596F74` -- a three-vertex full-screen triangle, once
+   per eye -- reads the whole plane (`ref=8 r=FF LEQUAL`) and replaces it
+   through `w=FF` where it passes, which makes the tool's order-blind union
+   read "no bit free". It sits at the START of the pass -- draw #23 of each
+   eye's 656, with the narrow late readers at #490-492 -- before the six
+   hundred scene draws that follow it. A tag stamped by any later draw is
+   never seen by it; and by arithmetic a tag in bit 1 (+2) never changes
+   its `>= 8` verdict while a tag in bit 6 (+64) always would, so bit 6 is
+   safe only for draws after it and bit 1 is safe regardless. Every other
+   reader is the narrow cast of 09-07 (bits 0, 4, 5 and 7). The two codes
+   stand, with the rule that the first two dozen draws of a pass (the sky
+   dome `84F6596FAF22CCFA` at #0 and the early instanced draws) cannot
+   carry one; the tool now prints where in the pass each reading state
+   first appears, so the next scene can be judged the same way.
 2. **Tier 1**, about a day, behind its own key: the mask, the reactive
    weight, the bias mask on the trained path. It ships on its own merit and
    stays on under tier 2. *Built 2026-09-08* (`fix.temporal_aa_movers`, off
