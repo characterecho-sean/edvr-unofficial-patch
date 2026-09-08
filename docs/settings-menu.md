@@ -256,6 +256,22 @@ choice of key that causes it.
   do (the head-steer design's one exception is gated to a camera mode and
   still unbuilt).
 
+*2026-09-08, the Steam copy:* "the shared table reaches a device that
+already exists" is the assumption the DirectInput door rests on, and the
+first session on the Steam install put it in question -- the door's
+entries pointed into `gameoverlayrenderer64.dll` before the patch, the menu
+said "keys private", and Tab boosted the ship. If the overlay hands each
+device a private copy of the table, the door sits on our dummy's copy and
+the game's device never arrives. The install line now says whose memory
+the table lives in (dinput8.dll's own image is the shared one), and a line
+prints once when the menu has held the keys a second with no keyboard but
+ours having reached the door; the Status page's doors line shows "not
+reached yet" for the same condition. `dinput8.dll`'s own keyboard device
+is fed by a low-level hook and `GetAsyncKeyState` (its imports say so), so
+there is no import of the runtime's to gate below the vtable; if the table
+is not shared, the door needs the device the game actually holds, which is
+the open question for this module.
+
 ## Navigation and interaction
 
 Head-aim and keys coexist; whichever moved last owns the highlight.

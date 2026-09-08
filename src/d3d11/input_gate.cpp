@@ -94,9 +94,26 @@ struct DiDoor {
     uint32_t stateSeen = 0;          // for the reclaim vouch
     uint32_t dataSeen = 0;
     uint32_t quietSeconds = 0;
+    // Where the patched table lives and where its GetDeviceState pointed
+    // before the patch, for the blindness line below (2026-09-08).
+    char tableModule[64] = "?";
+    char entryModule[64] = "?";
 };
 DiDoor g_diA;
 DiDoor g_diW;
+
+// The door's blindness, said once. The DirectInput door patches OUR dummy
+// device's table and reaches the game's device only if that table is the
+// shared one. On the Steam copy (2026-09-08) the entries pointed into
+// gameoverlayrenderer64.dll before the patch: the overlay wraps devices,
+// and if it hands each one a private copy of the table, the door sits on
+// our copy alone -- the menu reports "keys private" while Tab boosts the
+// ship. Counted per frame while the keys are private; the verdict prints
+// once the menu has had them for over a second with no keyboard but our
+// own having reached the door.
+uint32_t g_privateTicks = 0;
+bool     g_unreachedNoted = false;
+constexpr uint32_t kUnreachedAfterTicks = 120;
 
 struct UserDoor {
     IatPatch asyncKey;
@@ -440,13 +457,23 @@ void installDiDoor(PFN_DirectInput8Create create, HINSTANCE inst, const GUID& ii
     }
     d.installed = true;
     *sharedTableOut = table;
+    // Whose memory the table is in: dinput8.dll's own image is the class's
+    // shared table, which every keyboard device dispatches through; a
+    // table anywhere else (a tool's module, or no module at all -- a heap
+    // copy) was made for our dummy alone, and the game's device has one
+    // of its own that this patch never touches.
+    iatHookEntryModule(table, d.tableModule, sizeof(d.tableModule));
+    strncpy_s(d.entryModule, sizeof(d.entryModule), modState, _TRUNCATE);
     Log::get().note(
         "keyboard gate: the DirectInput door is installed on %s (GetDeviceState pointed "
         "into %s, GetDeviceData into %s before the patch -- dinput8.dll is the runtime's "
         "own, anything else is a tool ahead of EDVR in the chain, chained through). The "
-        "game's own keyboard device reaches it if the table is shared; the probe line "
-        "says whether it does.",
-        name, modState, modData);
+        "table itself lives in %s (dinput8.dll's own image is the shared one; anywhere "
+        "else is a copy made for our device alone). The game's own keyboard device "
+        "reaches the door only if the table is shared; the probe line says whether it "
+        "does, and a line prints once if it has not by the time the menu has held the "
+        "keys a second.",
+        name, modState, modData, d.tableModule);
 }
 
 void installUserDoors() {
@@ -634,6 +661,36 @@ void inputGateTick() {
     if (g_probe && dueMs(g_probeMs, kProbeEveryMs)) {
         g_probeMs = stampMs();
         probeLine();
+    }
+    // The blindness verdict (the note at g_privateTicks says why). A
+    // keyboard call counted at either door is any keyboard device's -- the
+    // dummy is held, never polled -- so zero after a second of private
+    // keys means the game's device dispatches through a table the door is
+    // not on, and DirectInput keys are reaching the ship.
+    if (g_private.load(std::memory_order_relaxed) != 0) {
+        if (g_privateTicks < kUnreachedAfterTicks) ++g_privateTicks;
+        if (!g_unreachedNoted && g_privateTicks == kUnreachedAfterTicks) {
+            const DiDoor* live = (g_diW.installed && !g_diW.retired) ? &g_diW
+                               : (g_diA.installed && !g_diA.retired) ? &g_diA : nullptr;
+            const uint32_t kbd = g_diW.stateKeyboard.load() + g_diA.stateKeyboard.load() +
+                                 g_diW.dataKeyboard.load() + g_diA.dataKeyboard.load();
+            if (live && kbd == 0) {
+                g_unreachedNoted = true;
+                Log::get().note(
+                    "keyboard gate: the menu has held the keys for %u frames and no keyboard "
+                    "device but our own has reached the DirectInput door -- the game's device "
+                    "dispatches through a table the door is not on (ours lives in %s; its "
+                    "GetDeviceState pointed into %s, a tool ahead in the chain that hands each "
+                    "device a table of its own), so DirectInput keys are REACHING THE GAME while "
+                    "the menu is open: Tab boosts, Space and Enter act in the ship. PageUp/"
+                    "PageDown change the page and the arrows move the highlight, and are safe "
+                    "where Elite has nothing bound to them. The Status page's doors line says "
+                    "'not reached yet' for the same reason.",
+                    kUnreachedAfterTicks, live->tableModule, live->entryModule);
+            }
+        }
+    } else {
+        g_privateTicks = 0;
     }
 }
 
