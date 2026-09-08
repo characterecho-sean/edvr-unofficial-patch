@@ -1113,6 +1113,19 @@ had been smearing the world on every dropped frame. The registration
 line says how the choice went (bound, another block's, a resync, none)
 and how often the carry ran.
 
+*2026-09-08, a station approach:* continuity is self-reinforcing, and a
+chain that lands on another object's camera -- an auxiliary pass of the
+station's, written every frame and continuous with itself -- never comes
+back on its own, because the bound block's real rows are never within
+three degrees of the wrong chain again ("another's on 1774 frames, the
+bound block's on 0" for 58 seconds, the head-follow score holding the
+world path down the whole time and the station smearing under the ship's
+motion). So while the rows have stopped following the head and the bound
+block wrote this frame, the chooser now takes the bound block's latest
+write over the chain; the score decides when the path comes back, and
+the registration line counts those frames (docs/per-object-motion.md
+has the flight).
+
 **The fourth flight (e2d93db) made the choice work -- the bound block's
 rows on 1,795 of 1,800 frames in space, no drops, no carries -- and the
 smear REVERSED direction.** With half the frames head-only the history

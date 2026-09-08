@@ -1450,6 +1450,7 @@ uint64_t    g_candSumCount = 0;      // this frame's candidate writes, summed
 uint32_t    g_chooseBound = 0;       // frames whose chosen rows were the bound object's
 uint32_t    g_chooseOther = 0;       // ...another object's, by continuity
 uint32_t    g_chooseResync = 0;      // ...nothing followed last frame's: the latest taken
+uint32_t    g_chooseRefollow = 0;    // ...the bound block's, taken over a continuous chain that had stopped following the head
 uint32_t    g_chooseNone = 0;        // ...no write this frame at all
 bool        g_chosenThisFrame = false;
 int         g_latchSlotVs = -1;      // where the bound block was found, for the log
@@ -1573,7 +1574,25 @@ void chooseCameraRows() {
         }
     }
     int pick = bestIdx;
-    if (pick >= 0) {
+    // The resync (2026-09-08, a station approach): continuity is self-
+    // reinforcing. Once the chain has landed on another object's camera --
+    // an auxiliary pass of the station's, written every frame and
+    // continuous with itself -- the bound block's real rows are never
+    // within three degrees of the chain again, so the chain never comes
+    // back on its own: "another's on 1774 frames, the bound block's on 0"
+    // for 58 seconds of the approach, with the head-follow score keeping
+    // the world path down the whole time and the station smearing under
+    // the ship's motion. That score is the detector; this is what it was
+    // missing. While the rows have stopped following the head (the path
+    // is already down, so a wrong pick costs nothing more) and the bound
+    // block wrote this frame, take its latest write over the chain. The
+    // score then decides: rows that turn with the head bring the path
+    // back within a few dozen frames, and a bound block holding a
+    // reflection camera fails the same test and is dropped again.
+    if (g_rowsFollow < 0 && fallBound && !(pick >= 0 && bestBound)) {
+        pick = fallIdx;
+        ++g_chooseRefollow;
+    } else if (pick >= 0) {
         if (bestBound) ++g_chooseBound; else ++g_chooseOther;
     } else if (fallIdx >= 0) {
         pick = fallIdx;
@@ -3660,15 +3679,18 @@ bool temporalPassRegistration(char* buf, size_t n, char* buf2, size_t n2, char* 
                   g_camHeadDiffSum / g_camFrames, g_camMoveSum / g_camFrames);
     }
     if (g_rowsFramesSum) {
-        const uint32_t chosen = g_chooseBound + g_chooseOther + g_chooseResync + g_chooseNone;
+        const uint32_t chosen = g_chooseBound + g_chooseOther + g_chooseResync + g_chooseNone +
+                                g_chooseRefollow;
         regAppend(buf, n, used,
                   "; the scene block was written %.1f times a frame (%.1f candidates); the rows "
                   "chosen by continuity were the bound block's on %u frames and another's on "
-                  "%u, nothing followed last frame's on %u, no write on %u; the ship's delta "
-                  "was carried over a drop on %u frames",
+                  "%u, nothing followed last frame's on %u, no write on %u, the bound block's "
+                  "taken over a chain that had stopped following the head on %u; the ship's "
+                  "delta was carried over a drop on %u frames",
                   static_cast<double>(g_rowsWritesSum) / static_cast<double>(g_rowsFramesSum),
                   chosen ? static_cast<double>(g_candSumCount) / static_cast<double>(chosen) : 0.0,
-                  g_chooseBound, g_chooseOther, g_chooseResync, g_chooseNone, g_camCarried);
+                  g_chooseBound, g_chooseOther, g_chooseResync, g_chooseNone, g_chooseRefollow,
+                  g_camCarried);
     }
     // The second line: the logger caps a line at 1200 characters, and the
     // probes' figures fell off the end of the first (2026-09-04).
@@ -3795,6 +3817,7 @@ bool temporalPassRegistration(char* buf, size_t n, char* buf2, size_t n2, char* 
     g_chooseBound = 0;
     g_chooseOther = 0;
     g_chooseResync = 0;
+    g_chooseRefollow = 0;
     g_chooseNone = 0;
     g_camCarried = 0;
     g_camCarriedJump = 0;

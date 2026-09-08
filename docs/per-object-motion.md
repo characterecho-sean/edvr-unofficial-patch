@@ -467,6 +467,47 @@ moving 0.1-1.4 m/frame in the rows), the higher figures with the higher
 speeds, as disocclusion and parallax should. What the eyes made of it is
 the open half.
 
+**The station approach, same day** (`edvr_gfx_20260908_093227.log`): "the
+station's solar panels still seem pretty blurred with their rotational
+movement as I approached", and some frame hitching. Two findings, neither
+the mask's:
+
+- **The world path was down for the first 58 seconds of the approach.**
+  The camera chooser latched onto another object's rows -- one of the
+  station's auxiliary render passes, written every frame and continuous
+  with itself -- and continuity is self-reinforcing: once the chain is on
+  that camera, the bound block's real rows are never within three degrees
+  of it again ("another's on 1774 frames, the bound block's on 0", two
+  intervals running). The head-follow score did its job and stood the world
+  path down at 09:33:03, but nothing re-synced the chain until the
+  auxiliary camera stopped writing at 09:34:01. For that minute every pixel
+  beyond 100 m took the head's delta alone, so the whole station -- panels,
+  hub, rim -- smeared under the ship's motion, which is the 2026-09-04
+  regression, not the rotation. Fixed in the chooser: while the rows have
+  stopped following the head and the bound block wrote this frame, its
+  latest write is taken over the chain (the path is already down, so a
+  wrong pick costs nothing more, and the score decides when to bring it
+  back); the registration line counts those frames. With the path up
+  (09:34:07 on: 62-66% of pixels) what remains on the panels is the
+  rotation itself, which is tier 2's job -- the mask set 0.02-0.26% of
+  pixels through the approach, blind to in-plane motion at constant depth
+  exactly as predicted.
+- **The hitching coincides with the transition-flash detector's
+  withholds.** It withheld 10 frames between 09:34:23 and 09:35:03 ("drawn
+  from 5016 world units off the camera's path", while cataloguing the
+  station's auxiliary cameras at radii 947 to 10126 units), each a repeated
+  frame AND, under DLSS, a restart of NVIDIA's history (the reset count
+  went 4 to 16 in that minute). The vr pacing lines show a ~67 ms frame in
+  each burst that holds a withhold, against 13-400 ms long frames scattered
+  through the whole session that look like the game's own streaming near a
+  station. The pass's and NVIDIA's own GPU maxima never exceeded 49 ms (the
+  start-up compile) and 3.1 ms, and no CPU-side wait exists in the frame
+  path (the depth probe's blocking `Map` is in its self-test only), so the
+  67 ms frames are not timed as EDVR's; the A/B is the same approach with
+  `transition_flash = 0`. The interaction itself is a design point for the
+  transition-flash workstream: under a trained history, every false
+  positive is a visible pop, not just a repeated frame.
+
 ### Tier 2b -- the tag by a second draw
 
 If Phase 0 finds no free stencil bits, the tag goes into an EDVR target
