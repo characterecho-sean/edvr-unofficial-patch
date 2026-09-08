@@ -59,6 +59,7 @@ uint32_t g_motionAge = 0;
 float    g_reachM = 60.0f;
 uint8_t  g_grid[kObjectGrid * kObjectGrid * kObjectGrid];
 uint32_t g_gridVersion = 0;
+float    g_gridCell = 0.0f;   // the lattice's cell, metres; 0 = not chosen yet
 
 // The body's occupancy: its members' positions now, boxed and padded by the
 // reach, each marking the cells within the reach of it. A station's parts
@@ -90,8 +91,15 @@ void buildGrid(const uint8_t* now, const int* memberSlots, int count, const floa
         const float e = (hi[k] - lo[k]) + 2.0f * g_reachM;
         if (e > ext) ext = e;
     }
-    float cell = 16.0f;
-    while (cell * static_cast<float>(n - 2) < ext && cell < 8192.0f) cell *= 2.0f;
+    // The cell size holds unless the extent outgrows the grid or shrinks
+    // under a third of it: a body whose extent hovers at a power of two
+    // would otherwise flip the lattice every other pair.
+    float cell = g_gridCell;
+    if (cell <= 0.0f || cell * static_cast<float>(n - 2) < ext || cell * static_cast<float>(n - 2) > 3.0f * ext) {
+        cell = 16.0f;
+        while (cell * static_cast<float>(n - 2) < ext && cell < 8192.0f) cell *= 2.0f;
+    }
+    g_gridCell = cell;
     for (int k = 0; k < 3; ++k) {
         lo[k] = floorf((lo[k] - g_reachM) / cell) * cell;
         hi[k] = lo[k] + cell * static_cast<float>(n);
@@ -144,7 +152,7 @@ struct Slot {
     uint32_t bytes = 0;
     uint32_t sceneBytes = 0;
     uint32_t frame = 0;
-    uint64_t stamp = 0;      // when the copy was issued, ms: the pair's interval is the two stamps' difference
+    double   stampMs = 0.0;  // when the copy was issued, QPC milliseconds: the pair's interval is the two stamps' difference
     bool     inUse = false;
     bool     keep = false;   // the first of a pair: its bytes are kept for the second
 };
@@ -152,8 +160,20 @@ Slot g_ring[kRing];
 std::vector<uint8_t> g_keep;        // the first frame of a pair, copied out of its staging buffer
 std::vector<uint8_t> g_keepScene;   // ...and its scene block
 uint32_t g_keepFrame = 0;
-uint64_t g_keepStamp = 0;
+double   g_keepStamp = 0.0;
 bool     g_keepValid = false;
+
+// The clock for the pair's interval: QPC, not the millisecond tick. The
+// tick's 15.6 ms grain read a 90 Hz frame as 15 ms on two pairs in three
+// (the body path's third flight, 2026-09-08 16:11), and the rate handed
+// to the pass swung by a quarter from pair to pair -- the rim's textures
+// vibrating every few frames, and the turn stuttering.
+double qpcMs() {
+    LARGE_INTEGER c{}, f{};
+    QueryPerformanceCounter(&c);
+    QueryPerformanceFrequency(&f);
+    return f.QuadPart > 0 ? static_cast<double>(c.QuadPart) * 1000.0 / static_cast<double>(f.QuadPart) : 0.0;
+}
 
 // The interval's figures.
 uint64_t g_pairs = 0, g_skipped = 0;
@@ -362,7 +382,7 @@ bool emptyRecord(const uint8_t* r) {
 // the pose each frame, and the byte histogram says which fields. The
 // second flight added the identity by signature, the second pose block's
 // provenance and the tolerance clustering.
-void diffPair(const uint8_t* prev, const uint8_t* now, uint32_t bytes, uint32_t dtMs) {
+void diffPair(const uint8_t* prev, const uint8_t* now, uint32_t bytes, float dtMs) {
     const uint32_t n = bytes / kRecordBytes;
     std::vector<uint64_t> hashNow(n, 0), sigPrev(n, 0), sigNow(n, 0);
     std::vector<uint8_t> livePrev(n, 0), liveNow(n, 0);
@@ -537,14 +557,35 @@ void diffPair(const uint8_t* prev, const uint8_t* now, uint32_t bytes, uint32_t 
             // pure translation is another ship, or the player's own parts,
             // and hands the station a shift it never made), fits as one
             // rigid thing (the residual), and keeps a sane rate.
-            const float dt = dtMs >= 5 && dtMs <= 50 ? static_cast<float>(dtMs) : 11.1f;
+            const float dt = (dtMs >= 5.0f && dtMs <= 50.0f) ? dtMs : 11.1f;
             if (fitOk && rms <= kMotionMaxRmsM && fitDeg >= kMotionMinDeg && fitDeg <= kMotionMaxDeg &&
                 fitM <= kMotionMaxM) {
                 temporalRodrigues(w, g_motion.R);
                 memcpy(g_motion.t, tf, sizeof(g_motion.t));
+                // The rates: blended into the held ones when this pair
+                // agrees with them (the same body, turning at its constant
+                // rate: within 20 deg of axis and 30% of rate), so each
+                // pair nudges the vectors and never steps them; a pair that
+                // disagrees is a new body, and replaces.
+                float wr[3], tr[3];
                 for (int k = 0; k < 3; ++k) {
-                    g_motion.omegaPerMs[k] = w[k] / dt;
-                    g_motion.tPerMs[k] = tf[k] / dt;
+                    wr[k] = w[k] / dt;
+                    tr[k] = tf[k] / dt;
+                }
+                bool blend = false;
+                if (g_motionValid) {
+                    const float* ho = g_motion.omegaPerMs;
+                    const float hn = sqrtf(ho[0] * ho[0] + ho[1] * ho[1] + ho[2] * ho[2]);
+                    const float nn = sqrtf(wr[0] * wr[0] + wr[1] * wr[1] + wr[2] * wr[2]);
+                    if (hn > 0.0f && nn > 0.0f) {
+                        const float cosA = (ho[0] * wr[0] + ho[1] * wr[1] + ho[2] * wr[2]) / (hn * nn);
+                        blend = cosA > 0.94f && nn > 0.7f * hn && nn < 1.3f * hn;
+                    }
+                }
+                const float a = blend ? 0.3f : 1.0f;
+                for (int k = 0; k < 3; ++k) {
+                    g_motion.omegaPerMs[k] = (1.0f - a) * g_motion.omegaPerMs[k] + a * wr[k];
+                    g_motion.tPerMs[k] = (1.0f - a) * g_motion.tPerMs[k] + a * tr[k];
                 }
                 g_motion.dtMs = dt;
                 g_motion.rms = rms;
@@ -778,7 +819,7 @@ void issueCopy(ID3D11DeviceContext* ctx, bool keep) {
         ctx->CopyResource(s.staging, g_pool);
         if (s.sceneStaging && g_scene) ctx->CopyResource(s.sceneStaging, g_scene);
         s.frame = g_frame;
-        s.stamp = stampMs();
+        s.stampMs = qpcMs();
         s.inUse = true;
         s.keep = keep;
         return;
@@ -820,11 +861,11 @@ void poll(ID3D11DeviceContext* ctx) {
             g_keep.assign(bytes, bytes + s->bytes);
             g_keepScene.assign(scene, scene + sceneBytes);
             g_keepFrame = s->frame;
-            g_keepStamp = s->stamp;
+            g_keepStamp = s->stampMs;
             g_keepValid = true;
         } else if (g_keepValid && g_keepFrame + 1 == s->frame && g_keep.size() == s->bytes) {
             diffPair(g_keep.data(), bytes, s->bytes,
-                     static_cast<uint32_t>(s->stamp > g_keepStamp ? s->stamp - g_keepStamp : 0));
+                     static_cast<float>(s->stampMs > g_keepStamp ? s->stampMs - g_keepStamp : 0.0));
             if (g_verbose && g_dumps < kDumpMax && dueMs(g_dumpMs, kDumpEveryMs)) {
                 g_dumpMs = stampMs();
                 ++g_dumps;

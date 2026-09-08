@@ -1683,6 +1683,28 @@ which is this project's contract for every read of the game.
    body's vector and the camera's. The grid's cells now sit on a fixed
    world lattice (a power of two of metres a side, the box's corner at a
    multiple of it), so the same place is the same cell pair after pair.
+
+   *Its third flight* (16:11 the same day, `v0.14.1-64-g790244a`; the
+   slot, on): **"an improvement -- the textures on the face of the
+   station resolve much more cleanly"**, with the outer rim's textures
+   still vibrating every few frames and the turn stuttering. The log had
+   the cause on its face: the pair's interval read 15.0 ms on two lines
+   and 11.1 on the third. The stamps were the millisecond tick, whose
+   grain is 15.6 ms, so a 90 Hz frame read as 15 or as nothing, and the
+   rate handed to the pass swung by a quarter from pair to pair -- at the
+   rim a step of a fraction of a pixel every eighth frame. Now the
+   interval is QPC to the microsecond; the rates are blended into the
+   held ones when a pair agrees with them (the same body at its constant
+   rate), so a pair nudges the vectors and never steps them; the pass
+   eases its own frame interval the same way, taking a frame a fifth
+   longer or shorter as real; and the lattice's cell size holds unless
+   the extent outgrows the grid or shrinks under a third of it. The
+   cluster's extent was checked on the flight's pairs and is real: half
+   the parts within 2.5 km of the centroid, ninety percent within 4, the
+   far ones turning with the rest to a hundredth of a degree -- the
+   station and whatever the game turns with it -- so the sixteen-
+   kilometre cube stands, at 256 m cells. The body path's own accuracy on
+   those pairs: 0.016-0.064 px.
 4. **Tier 2b** only if question 1 says no bits.
 5. **Tier 3** as `tools/` work against dumped frames, never on the hot
    path.

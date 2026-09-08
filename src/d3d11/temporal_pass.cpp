@@ -2667,7 +2667,17 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                 if (s_lastBodyFrame != g_rowsFrame) {
                     s_lastBodyQpc = qNowB.QuadPart;
                     s_lastBodyFrame = g_rowsFrame;
-                    g_bodyDtMs = (dtMs >= 5.0f && dtMs <= 50.0f) ? dtMs : 11.1f;
+                    // The frame's length, eased: at a steady 90 Hz the
+                    // interval is a constant with a little scheduling
+                    // noise on it, and the body's turn should not carry
+                    // that noise; a frame a fifth longer or shorter than
+                    // the run is a real one and taken as it is.
+                    const float m = (dtMs >= 5.0f && dtMs <= 50.0f) ? dtMs : 11.1f;
+                    if (m > 1.2f * g_bodyDtMs || m < 0.8f * g_bodyDtMs) {
+                        g_bodyDtMs = m;
+                    } else {
+                        g_bodyDtMs = 0.75f * g_bodyDtMs + 0.25f * m;
+                    }
                 }
                 const float wF[3] = {om.omegaPerMs[0] * g_bodyDtMs, om.omegaPerMs[1] * g_bodyDtMs,
                                      om.omegaPerMs[2] * g_bodyDtMs};
