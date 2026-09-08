@@ -438,12 +438,78 @@ for. Same shape as the splash dim's re-issue in `forwardWithVerdict`, and
 the cockpit's families keep the in-place twin. Per-family log lines now
 carry both hashes and say which path a family took, so an unknown
 composite in a new context (the galaxy map, the SRV) shows up as "no
-depth shader of its own yet" with its pixel shader named.
+depth shader of its own yet" with its pixel shader named. **That last
+sentence was not true until 2026-09-08 -- see below.**
 
 Not covered: the intro movie's own quad (placed in NDC by its vertex
 buffer, not a GUI surface) and the splash still if it is composited by
 something other than the loader's screen composite; the first flight of
 this pass says which.
+
+## The escape menu opened in flight: a pixel-stage variant (2026-09-08)
+
+**Sean, on v0.14.1-37-gc468661: the game menu you get by hitting escape in
+flight is still swimming**, while the main menu, the loading screen and the
+modals hold still. That flight's log names the defect in one number:
+
+```
+ui depth totals: ... left alone: 1.0 a frame with no depth shader for
+their family, 1.0 with no pair or planes ...
+```
+
+and **no line says which family**. Two bugs, one hiding the other:
+
+1. **The family log deduped on the VERTEX shader alone.** The escape menu's
+   composite is drawn by the panel vertex shader `A888D51024D9798E`, which
+   the main menu's composite had already put in the logged list at
+   11:24:44. Every later draw of that vertex shader was therefore silent,
+   whatever its pixel stage. The promise three paragraphs up -- that an
+   unknown composite shows up named -- held only for a family whose VERTEX
+   shader was new.
+2. **The `no pair or planes` path called `noteFamily` not at all**, so its
+   1.0 a frame named nothing by construction.
+
+**What the variant is, settled from the dump rather than another flight.**
+`advanced.glare_shader_dump` from 2026-09-06 is still on disk (637 shaders,
+`edvr_logs\shaders`, `<stage>_<hash>.dxbc`). A pixel shader can only be
+paired with a vertex shader whose OUTPUT signature covers its INPUT
+signature, and that is readable straight out of the DXBC ISGN/OSGN chunks.
+Of the 637, **140 are signature-compatible with the panel vertex shader and
+exactly three read the whole of its output** (`TEXCOORD0.xyzw`, `2.xyz`,
+`4.xyz`, `5.xyz`, `6.xy`); the other 137 read only `TEXCOORD0.xy` and
+belong to simpler families. The three:
+
+| ps | what it is |
+| --- | --- |
+| `9107E72CB016CC02` | the one already transcribed (main menu, loader, modals) |
+| `015EF9349EC097E8` | the same, plus a colour matrix `cb1[85..87]` after the tone curve and a `cb2[12].x` scale |
+| `F2F872B191F656D5` | the same again with a 2-tap smear loop where the first has 8 |
+
+Their disassemblies differ in nine lines and **none of them is the
+sampling**: all three take the interface surface with
+`sample r1.xyzw, v4.xyxx, t1.xyzw, s1` -- t1 through s1 at TEXCOORD6, which
+is exactly what `kPanelDepthHlsl` transcribes. So the fix needed no new
+shader at all, only the two hashes against the one already there.
+
+**And named-only is the same trap one variant later**, so a transcription
+now also stands in for any pixel shader of *its own vertex family*. The
+reasoning that makes this safe rather than hopeful: a replacement pixel
+shader must match the VERTEX shader's output signature, which every variant
+of a family shares by construction, so the signature can never be the thing
+that breaks. The one thing that could differ is **the slot the interface
+surface is bound in**, which a transcription hard-codes as a register -- so
+the classifier now records WHICH of the four slots it found the learned
+surface in, and a stand-in is offered only when that slot is the one its
+HLSL reads. What stays unchecked is the TEXCOORD the variant samples at,
+which is why every adopted shader is named in the log and
+`advanced.ui_depth_variants = 0` declines the lot.
+
+**The lesson for the next instrument.** A totals line that can report work
+skipped must not be able to report it anonymously. Both counters here could,
+and between them they hid a visible defect for two days behind a log that
+looked complete. The family log is now keyed on vertex AND pixel shader,
+and every decline on the interface-projection path names its family and
+says which of the four reasons it was.
 
 # Design A: the UI layer
 

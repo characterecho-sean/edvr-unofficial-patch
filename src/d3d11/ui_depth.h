@@ -50,6 +50,38 @@
 // is named by its vertex shader's hash; advanced.ui_depth_families adds
 // others, advanced.ui_depth_exclude removes any.
 //
+// WHICH EYE a composite is drawn into is read from the order its colour
+// target appears in the frame -- counted separately for each target SIZE
+// AND FORMAT, because Elite renders a cockpit frame through three pairs of
+// same-sized targets. One table for the whole frame filled up on the lit
+// HDR pair (the holo panels and the flight HUD) and left the escape menu's
+// composite, which lands in the tonemapped pair, with no eye and no depth:
+// the main menu was fixed because nothing else is treated there, and the
+// same menu in flight was not (measured from a census, 2026-09-08).
+//
+// TWO families are named as sharing the scene's projection rather than
+// found by the surface rule alone: the cockpit's holo panels, and the
+// SPRITE composite (vs E508648660A352B2), which draws into the same lit
+// HDR target and was measured still swimming on 2026-09-08 after
+// everything else had stopped. Both are composites by the surface rule,
+// which is what decides they are interface at all; being named is only
+// what says their depth belongs in the scene's own encoding, written in
+// place, rather than through the alpha-aware pass. Naming them here rather
+// than in advanced.ui_depth_families is deliberate: that list is consulted
+// BEFORE the surface test, so it would also claim the sprite family's
+// draws that sample no interface surface, and there are tens of thousands
+// of those (hud_sprite.h).
+//
+// A family's PIXEL stage has variants where its vertex stage does not. The
+// panel that composites the main menu also composites the escape menu you
+// open in flight, through a pixel shader that adds a colour matrix -- and a
+// third with fewer blur taps. A stand-in has to match the VERTEX shader's
+// output signature, which a variant shares by construction, so the only
+// thing that could differ is the slot the interface surface sits in: that
+// is checked (the classifier knows which slot it learned the surface in),
+// and a variant passing the check is drawn by its family's stand-in and
+// named in the log. advanced.ui_depth_variants declines them instead.
+//
 // The target direction indicator quad (vs 5DA53D8B0133341E) is left alone
 // because it samples an authored atlas and lookup tables, never a learned
 // surface -- not because the code refuses its target. It is drawn into the

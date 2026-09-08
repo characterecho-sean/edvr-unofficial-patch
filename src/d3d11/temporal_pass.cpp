@@ -39,7 +39,7 @@ Texture2D<float4> S : register(t0);      // this frame, the game's own texture (
 Texture2D<float4> H : register(t1);      // the history, region-sized, on the unjittered grid
 Texture2D<float> Z : register(t2);       // the scene's depth, the game's own, when the pass has it
 SamplerState L : register(s0);           // bilinear, clamp
-RWTexture2D<float4> O : register(u0);    // the output, region-sized, the game's format
+RWTexture2D<float4> O : register(u0);    // the output: region-sized in the game's format for main, and for mv's debug views the trained runtime's OUTPUT texture, which is LARGER under DLSS -- paintDebug, not O[id.xy]
 RWTexture2D<float4> N : register(u1);    // the new history
 RWStructuredBuffer<uint> Stats : register(u2);   // 0 rejected, 1 clipped, 2 the clips' size (luma/255, summed); then the same three per candidate, four of them; 15 pixels on the world path, 16 bright pixels, 17 bright pixels with no depth; 18-20 the registration probes on the world path (sum dx*100, sum dy*100, count) and 21-23 on the ship; 24-27 world pixels, world clipped, ship pixels, ship clipped; 28-29 unused (the depth layers, retired 2026-09-04); 30-32 the registration probes on the sky (the far plane: sum dx*100, sum dy*100, count); 33-34 the probes' sum resid.mv*100 and sum mv.mv*100 on the sky, 35-36 on the world with a depth, 37-38 on the ship
 RWTexture2D<float2> MV : register(u3);   // for a trained pass: motion vectors, pixels, current -> previous
@@ -315,6 +315,37 @@ uint clipSize(float3 hc, float3 hy) {
 // (adjacent literals: MSVC caps one at 16 KB)
 R"HLSL(
 groupshared uint gCount[40];
+// A debug view's pixel, painted into the OUTPUT rather than at this
+// thread's own index.
+//
+// The mv entry is dispatched over the RENDER size, because that is what it
+// computes; its debug views are painted into O, which on this path is the
+// trained runtime's OUTPUT texture. Those two are the same size under DLAA
+// and are not under DLSS, and writing O[id.xy] put the whole frame in the
+// top-left corner -- the view "skewed up and left" at 2x, and every debug
+// view under DLSS wrong since the trained path was written (Sean,
+// 2026-09-08). So each render pixel paints the block of output pixels that
+// belongs to it: [ceil(id*s), ceil((id+1)*s)), which is exactly the set of
+// output pixels that map back to this one, so the block tiles the output
+// with no seam and no overlap. Four each way covers every ratio a trained
+// runtime offers (ultra performance is three); at 1:1 it is one write, as
+// before.
+void paintDebug(uint2 idx, int2 sz, float3 c) {
+    uint ow = 0, oh = 0;
+    O.GetDimensions(ow, oh);
+    if (ow == 0 || oh == 0 || sz.x <= 0 || sz.y <= 0) return;
+    float2 s = float2(float(ow) / float(sz.x), float(oh) / float(sz.y));
+    int2 lo = int2(ceil(float2(idx) * s));
+    int2 hi = int2(ceil((float2(idx) + 1.0) * s));
+    [unroll] for (int dy = 0; dy < 4; ++dy) {
+        [unroll] for (int dx = 0; dx < 4; ++dx) {
+            int2 q = lo + int2(dx, dy);
+            if (q.x < hi.x && q.y < hi.y && q.x < int(ow) && q.y < int(oh)) {
+                O[q] = float4(c, 1.0);
+            }
+        }
+    }
+}
 // The motion vectors for a trained pass (DLAA): the same reprojection
 // the history fetch does, written out instead of used -- the pixel's
 // position last frame minus its position now, in render pixels, which
@@ -477,13 +508,15 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
         // The motion view on the trained path: painted into the output in
         // NVIDIA's place (the pass skips its evaluation that frame).
         if (split.y == 1.0) {
-            O[id.xy] = float4(saturate(0.5 + motion.x / 16.0), saturate(0.5 + motion.y / 16.0),
-                              count15 != 0 ? 1.0 : 0.0, 1.0);
+            paintDebug(id.xy, size,
+                       float3(saturate(0.5 + motion.x / 16.0), saturate(0.5 + motion.y / 16.0),
+                              count15 != 0 ? 1.0 : 0.0));
         } else if (split.y == 4.0) {
             // The mover view: the mask white over the frame dimmed, so a
             // screenshot in the slot shows the rim's edges and nothing else.
+            // Painted the way main's views are, into the output's own size.
             float3 dim = S.Load(int3(region.xy + int2(p), 0)).rgb * 0.25;
-            O[id.xy] = float4(mover != 0.0 ? float3(1.0, 1.0, 1.0) : dim, 1.0);
+            paintDebug(id.xy, size, mover != 0.0 ? float3(1.0, 1.0, 1.0) : dim);
         } else if (split.y == 3.0) {
             float zs3 = zSceneAt(region.xy + int2(p));
             float3 o3;
@@ -496,7 +529,7 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
             } else {
                 o3 = float3(1.0, 0.0, 1.0);
             }
-            O[id.xy] = float4(o3, 1.0);
+            paintDebug(id.xy, size, o3);
         }
         ZC[id.xy] = knobs.y != 0.0 ? zraw : 0.0;
     }
