@@ -40,12 +40,18 @@ void perfMonitorFrame(ID3D11Device* dev);
 // The page is showing (or not): starts and stops the once-a-second samplers.
 void perfMonitorSetActive(bool active);
 
-// The page's rows, label and value, up to `max`. Returns how many.
-struct PerfLine {
-    char left[48];
-    char right[80];
+// The page's gauges: a caption, a big value and one small line each, in
+// the order they are laid out four across. Returns how many.
+struct PerfTile {
+    char caption[24];
+    char value[24];
+    char sub[40];
 };
-int perfMonitorLines(PerfLine* out, int max);
+int perfMonitorTiles(PerfTile* out, int max);
+
+// The most recent dropped or long frame, with EDVR's events in it, as one
+// line for under the gauges.
+void perfMonitorLastDropLine(char* buf, size_t bufLen);
 
 // The last `max` frame intervals in milliseconds, oldest first, and the
 // display's frame budget (1000 / Hz, or 11.1 when the rate is unknown).

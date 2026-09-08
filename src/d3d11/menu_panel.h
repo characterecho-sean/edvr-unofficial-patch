@@ -39,6 +39,7 @@ enum MenuLineStyle : uint8_t {
     kMenuHeading = 2,   // a group heading
     kMenuInfo = 3,      // status text: label left, value right, no highlight
     kMenuDim = 4,       // a read-only row
+    kMenuNote = 5,      // one full-width line of small text, `left` only
 };
 
 enum MenuBadge : uint8_t {
@@ -57,6 +58,16 @@ struct MenuLine {
 
 constexpr int kMenuMaxTabs = 8;
 constexpr int kMenuMaxLines = 14;
+constexpr int kMenuMaxTiles = 16;
+
+// A gauge: a big number with a small caption above and one small line
+// below -- the Monitor page's shape, four across. A sentence of numbers is
+// unreadable in a headset; a tile is read at a glance.
+struct MenuTile {
+    char caption[24];
+    char value[24];
+    char sub[40];
+};
 
 // Everything the panel shows, as text. The model builds one of these on
 // every change; the raster lays it out.
@@ -66,6 +77,10 @@ struct MenuContent {
     int      activeTab = 0;
     MenuLine lines[kMenuMaxLines];
     int      lineCount = 0;
+    // Tiles are laid out ABOVE the lines, `tileColumns` across (4 when 0).
+    MenuTile tiles[kMenuMaxTiles];
+    int      tileCount = 0;
+    int      tileColumns = 0;
     char     hint[200];     // the highlighted row's explanation
     char     footer[160];   // keys, pending-restart count, warnings
     bool     toast = false; // a one-line panel instead of the menu

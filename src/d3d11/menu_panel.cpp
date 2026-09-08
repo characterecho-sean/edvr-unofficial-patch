@@ -47,7 +47,8 @@ constexpr Rgb kHint = {190, 190, 190};
 constexpr Rgb kFooter = {140, 140, 140};
 constexpr Rgb kToastText = {255, 200, 120};
 
-enum class Font { Row, Tab, Small, Hint };
+enum class Font { Row, Tab, Small, Hint, Big };
+constexpr int kFontCount = 5;
 
 struct Op {
     bool         text = false;
@@ -160,8 +161,14 @@ void layout(const MenuContent& c, std::vector<Op>& ops, std::vector<LineRect>& l
     const int footH = c.toast ? 0 : cap * 16 / 10;
     const int graphH = c.graphCount > 0 ? cap * 40 / 10 : 0;
     const int rows = c.lineCount;
-    const int H = pad + tabH + rows * rowPitch + (c.toast ? cap * 2 / 10 : 0) + graphH + hintH +
-                  footH + pad;
+    // The tile grid: caption, big value, sub-line, in a box 3.6 caps tall.
+    const int columns = c.tileColumns > 0 ? c.tileColumns : 4;
+    const int tileRows = c.tileCount > 0 ? (c.tileCount + columns - 1) / columns : 0;
+    const int tileH = cap * 36 / 10;
+    const int tileGap = cap / 4;
+    const int tilesH = tileRows > 0 ? tileRows * (tileH + tileGap) + cap / 2 : 0;
+    const int H = pad + tabH + tilesH + rows * rowPitch + (c.toast ? cap * 2 / 10 : 0) + graphH +
+                  hintH + footH + pad;
     *outH = H;
 
     // Background.
@@ -197,6 +204,48 @@ void layout(const MenuContent& c, std::vector<Op>& ops, std::vector<LineRect>& l
         }
         y += tabH;
     }
+    if (tileRows > 0) {
+        const int gridW = W - 2 * pad;
+        const int tileW = (gridW - (columns - 1) * tileGap) / columns;
+        for (int i = 0; i < c.tileCount; ++i) {
+            const MenuTile& t = c.tiles[i];
+            const int col = i % columns, row = i / columns;
+            const int x0 = pad + col * (tileW + tileGap);
+            const int y0 = y + row * (tileH + tileGap);
+            Op box;
+            box.rect = {x0, y0, x0 + tileW, y0 + tileH};
+            box.rgb = Rgb{255, 255, 255};
+            box.alpha = 0.06f;
+            ops.push_back(box);
+            Op cap1;
+            cap1.text = true;
+            cap1.str = widen(t.caption);
+            cap1.rect = {x0 + cap / 3, y0 + cap / 6, x0 + tileW - cap / 3, y0 + cap * 11 / 10};
+            cap1.align = DT_LEFT;
+            cap1.font = Font::Small;
+            cap1.rgb = kDimText;
+            ops.push_back(cap1);
+            Op val;
+            val.text = true;
+            val.str = widen(t.value);
+            val.rect = {x0 + cap / 3, y0 + cap * 10 / 10, x0 + tileW - cap / 3, y0 + cap * 27 / 10};
+            val.align = DT_LEFT;
+            val.font = Font::Big;
+            val.rgb = kLabel;
+            ops.push_back(val);
+            if (t.sub[0]) {
+                Op sub;
+                sub.text = true;
+                sub.str = widen(t.sub);
+                sub.rect = {x0 + cap / 3, y0 + cap * 26 / 10, x0 + tileW - cap / 3, y0 + tileH - cap / 8};
+                sub.align = DT_LEFT;
+                sub.font = Font::Small;
+                sub.rgb = kHint;
+                ops.push_back(sub);
+            }
+        }
+        y += tilesH;
+    }
     for (int i = 0; i < rows; ++i) {
         const MenuLine& l = c.lines[i];
         const RECT rr = {pad / 2, y, W - pad / 2, y + rowPitch};
@@ -213,16 +262,18 @@ void layout(const MenuContent& c, std::vector<Op>& ops, std::vector<LineRect>& l
             ops.push_back(h);
         }
         // Information rows carry long values, so the split sits further
-        // left for them than for a setting's label and value.
-        const int split = l.style == kMenuInfo ? W * 26 / 100 : W * 6 / 10;
+        // left for them than for a setting's label and value; a note has
+        // the whole width.
+        const int split = l.style == kMenuNote ? W - pad : l.style == kMenuInfo ? W * 26 / 100 : W * 6 / 10;
         Op left;
         left.text = true;
         left.str = widen(l.left);
         left.rect = {pad, y, split, y + rowPitch};
         left.align = DT_LEFT;
-        left.font = l.style == kMenuHeading ? Font::Small : Font::Row;
+        left.font = l.style == kMenuHeading ? Font::Small : l.style == kMenuNote ? Font::Hint : Font::Row;
         left.rgb = l.style == kMenuHeading ? kHeading
                    : l.style == kMenuDim   ? kDimText
+                   : l.style == kMenuNote  ? kHint
                    : c.toast               ? kToastText
                                            : kLabel;
         if (l.style == kMenuHeading) left.rect.left = pad / 2;
@@ -335,7 +386,7 @@ void layout(const MenuContent& c, std::vector<Op>& ops, std::vector<LineRect>& l
 }
 
 // Execute the ops into one DIB, in colour or as coverage.
-void execute(Dib& d, const std::vector<Op>& ops, bool coverage, HFONT fonts[4]) {
+void execute(Dib& d, const std::vector<Op>& ops, bool coverage, HFONT fonts[kFontCount]) {
     for (const Op& o : ops) {
         if (!o.text) {
             if (coverage) fillOver(d, o.rect, Rgb{255, 255, 255}, o.alpha);
@@ -369,11 +420,12 @@ bool rasterise(const MenuContent& c, Raster& out) {
         return false;
     }
     const int cap = c.capPx;
-    HFONT fonts[4] = {
+    HFONT fonts[kFontCount] = {
         makeFont(cap * 10 / 7, false),        // Row
         makeFont(cap * 9 / 7, true),          // Tab
         makeFont(cap * 7 / 7, false),         // Small
         makeFont(cap * 8 / 7, false),         // Hint
+        makeFont(cap * 15 / 7, true),         // Big: the tiles' numbers
     };
     execute(colour, ops, false, fonts);
     execute(cover, ops, true, fonts);

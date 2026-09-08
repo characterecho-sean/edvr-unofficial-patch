@@ -115,7 +115,7 @@ struct State {
     float distance = 1.4f;
     float curve = 0.2f;
     float textDeg = 1.1f;
-    float widthDeg = 26.0f;
+    float widthDeg = 30.0f;
     int   idleSeconds = 20;
     int   aimMode = 2;   // 0 head, 1 keys, 2 both
 
@@ -747,13 +747,28 @@ void buildStatus(MenuContent& c) {
 // The Monitor page: fpsVR's readout from perf_monitor.h, and the frame-time
 // strip underneath.
 void buildMonitor(MenuContent& c) {
-    PerfLine lines[kMenuMaxLines];
-    const int n = perfMonitorLines(lines, kMenuMaxLines);
-    for (int i = 0; i < n; ++i) statusLine(c, lines[i].left, lines[i].right);
+    PerfTile tiles[kMenuMaxTiles];
+    const int n = perfMonitorTiles(tiles, kMenuMaxTiles);
+    for (int i = 0; i < n; ++i) {
+        strncpy(c.tiles[i].caption, tiles[i].caption, sizeof(c.tiles[i].caption) - 1);
+        strncpy(c.tiles[i].value, tiles[i].value, sizeof(c.tiles[i].value) - 1);
+        strncpy(c.tiles[i].sub, tiles[i].sub, sizeof(c.tiles[i].sub) - 1);
+    }
+    c.tileCount = n;
+    c.tileColumns = 4;
+    // One line under the gauges: the last drop and what EDVR was doing.
+    {
+        char line[200];
+        perfMonitorLastDropLine(line, sizeof(line));
+        MenuLine& l = c.lines[c.lineCount++];
+        strncpy(l.left, line, sizeof(l.left) - 1);
+        l.style = kMenuNote;
+        l.badge = kBadgeNone;
+    }
     c.compact = true;
     c.graphCount = perfMonitorGraph(c.graph, static_cast<int>(sizeof(c.graph) / sizeof(c.graph[0])),
                                     &c.graphBudgetMs);
-    snprintf(c.graphLabel, sizeof(c.graphLabel), "frame time, last %d frames -- line = %.1f ms budget",
+    snprintf(c.graphLabel, sizeof(c.graphLabel), "frame time, last %d frames; the line is the %.1f ms budget",
              c.graphCount, static_cast<double>(c.graphBudgetMs));
 }
 
@@ -775,9 +790,8 @@ void buildContent(MenuContent& c) {
     if (p.monitor) {
         buildMonitor(c);
         snprintf(c.hint, sizeof(c.hint), "%s",
-                 "Frame rate and 1% low from EDVR's own frame clock; GPU, dropped and reprojected "
-                 "frames from the compositor's timing; load and memory sampled once a second while "
-                 "this page is up.");
+                 "Frame figures from EDVR's own clock; GPU, dropped and reprojected frames from the "
+                 "compositor; CPU, GPU, VRAM and RAM sampled once a second while this page is up.");
     } else if (p.status) {
         buildStatus(c);
         snprintf(c.hint, sizeof(c.hint), "%s",
@@ -1310,6 +1324,9 @@ void menuConfigure(Config& cfg) {
     float t = cfg.getFloat("menu.text_degrees", 1.1f);
     if (!(t >= 0.6f) || t > 3.0f) t = 1.1f;
     s.textDeg = t;
+    float w = cfg.getFloat("menu.width_degrees", 30.0f);
+    if (!(w >= 16.0f) || w > 45.0f) w = 30.0f;
+    s.widthDeg = w;
     s.idleSeconds = cfg.getIntInRange("menu.idle_dismiss", 20, 0, 600);
     s.toasts = cfg.getBool("menu.toasts", true);
     {

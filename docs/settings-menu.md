@@ -332,6 +332,10 @@ and where it applies, the measured cost or the restart badge.
    - EDVR's own passes' measured cost, from the totals they already keep;
    - a **frame-time strip** of the last 120 frames against the budget
      line, green within it, amber over it, red at twice it.
+   Laid out as **sixteen tiles, four across** -- a caption, one big
+   number, one small line each -- after the first flight found rows of
+   sentences full of numbers unreadable in a headset; the last drop and
+   EDVR's events in it are the one line under the tiles.
    Its cost, by construction: the ring is one clock read and a store per
    frame; the compositor read is one small copy per frame; the load and
    memory samplers run once a second and ONLY while the page is showing;
@@ -603,8 +607,10 @@ fps_overlay_pitch = -16
 distance = 1.4
 curve = 0.2
 
-# The height of a capital letter, in degrees of your view. Live.
+# The height of a capital letter, and the panel's width, in degrees of
+# your view. Live.
 text_degrees = 1.1
+width_degrees = 30
 
 # Close after this many seconds without a key or a look; 0 stays open
 # until dismissed. Live.
