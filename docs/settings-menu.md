@@ -7,8 +7,32 @@ about the game and about Windows are labelled MEASURED (established at the
 desk or in a field log kept by this repo) or BELIEVED (inference, each with
 a gate below that turns it into a measurement before code may depend on
 it); what can only be settled with a headset on is collected under Phase 0.
-Nothing here is implemented. Written 2026-09-07 on branch
-`claude/ingame-settings-menu-78317d` off main `5e2d545`.*
+Written 2026-09-07 on branch `claude/ingame-settings-menu-78317d` off main
+`5e2d545`.*
+
+*Status, 2026-09-07, later the same day: **phase A is BUILT and UNFLOWN**
+on the same branch -- the three doors (`src/d3d11/input_gate.cpp` over
+`src/common/iat_hook.cpp`), the model and the ini write
+(`src/d3d11/menu.cpp`), the GDI raster and the compute composite
+(`src/d3d11/menu_panel.cpp`, export `edvrMenuPanel`), the door's caller
+(`src/openvr/menu_door.cpp`), the channel fields (`frame_flag` `_v24`),
+the generated row table (`menu_schema.inc` from
+`tools/gen_settings_schema.py`), the `[menu]` section and `hotkey.menu = F8`
+in `edvr.ini`, and `tools/menu_test`. Two things differ from the text
+below and are marked where they occur: the developer tier's restart
+enforcement is a build WARNING with a `?` badge rather than an error (61
+keys in `[advanced]` and `[experimental]` do not yet say when they apply,
+and rewriting 61 comments was not this change's job), and `iniedit` moved
+to `src/common` in namespace `edvr`. Every Phase 0 gate is still open.*
+
+*Flown 2026-09-07, the same evening, on the Pimax Crystal Super under
+SteamVR: the panel appears where you look and holds still, the keys are
+private, the rows write the ini. Two changes from that flight, both below:
+head-aim fought the arrow keys and is off by default now (`menu.aim =
+keys`), and the frame-time line left the Status page for a **Monitor
+page** with fpsVR's readout and a frame-time strip, plus an optional
+head-locked readout while the menu is closed (`menu.fps_overlay`), the
+toolkit's overlay.*
 
 ## The ask
 
@@ -207,9 +231,12 @@ choice of key that causes it.
 2. **Every thunk is budgeted.** A fault inside a door drops that door to
    pass-through for the session (the `guardedBudget` pattern), and the menu
    footer and the Status page say "keys shared with the game" from then on.
-3. **Idle dismiss always runs.** `menu.idle_dismiss` seconds (default 20)
-   without a key or an aim change closes the menu and clears the flag, so a
-   stuck condition costs at most that long.
+3. **Idle dismiss, when it is set.** `menu.idle_dismiss` seconds without a
+   key or an aim change closes the menu and clears the flag. It SHIPS AT 0
+   -- the menu stays up until the summon key or Escape puts it down, which
+   is what a settings panel should do (asked for 2026-09-07) -- so this is
+   a belt for someone who wants one, not the safeguard. The safeguards
+   that always run are the two below: the draw stamp and the two keys.
 4. **Escape and the summon key both close it,** and both are read by EDVR's
    own polling, which no door can affect.
 5. **`menu.keyboard = shared`** turns the flag off entirely: the doors stay
@@ -239,31 +266,125 @@ Head-aim and keys coexist; whichever moved last owns the highlight.
 |---|---|
 | Up / Down | move the highlight; hold to repeat (400 ms, then 12 Hz) |
 | Left / Right | step the highlighted row: toggle, cycle a choice, step a number; hold to repeat; Shift steps a number by ten steps |
-| Enter / Space | activate: toggle, next choice, or (phase B) open a number for typing; on an action row, fire it |
-| Tab / Shift+Tab, PageUp / PageDown | previous / next page |
+| Enter / Space | activate: flip a switch, next choice, or open a number or string for typing; on an action row, fire it |
+| Tab / Shift+Tab | next / previous page |
+| PageUp / PageDown | read on through the explanation beside the row, three lines at a time; changes the page when there is nothing to scroll |
 | Home / End | first / last row |
 | R | reset the highlighted row to its shipped default (a confirm on the row, then R again) |
-| Escape, the summon key | close (fade out, keys released) |
+| Escape, the summon key | close (fade out, keys released); Escape first abandons a value being typed |
 | the summon key with Shift | recentre: re-anchor the panel where you are looking now |
 
 **Head-aim.** The head ray (from `headPose()`, the raw pose the openvr half
 publishes every frame) is intersected with the panel in its anchor frame;
 the row under it highlights, with hitboxes one full row pitch tall and a
-hysteresis of a third of a row before the highlight moves, so a resting
-head never flickers it (gate G6 measures the numbers). After a key press
-head-aim is parked until the ray leaves the highlighted row's hitbox by
-more than one row, so pressing Down is not undone by a head still pointing
-at the old row. `menu.aim = head | keys | both` (default both).
+hysteresis before the highlight moves, so a resting head never flickers it.
+After a key press head-aim is parked until the ray leaves the highlighted
+row's hitbox by more than one row. `menu.aim = keys | head | both`.
+**Flown 2026-09-07: `both` fought the keys** -- a head that drifts back to
+the row it was reading re-selects it under a hand that just moved away --
+so the default is `keys`, and head-aim is an opt-in for a player who wants
+it (gate G6's numbers would tune `both`, and are still unmeasured).
 
 **Dwell-to-select** is off by default and stays a phase C item: it needs
 an aim ray steadier than a head, which means the eye tracker, and
 `docs/eye-tracking.md` records that no field driver publishes a usable one
 today.
 
-**Typing a value** (phase B, needs `menu.keyboard = private`): Enter on a
-number row opens it for text; digits, `.`, `-` and Backspace edit; Enter
-commits, clamped to the row's range and precision; Escape cancels. This is
-the one interaction the gate makes possible that Feature 4 could not offer.
+**Typing a value** (BUILT 2026-09-07, the gate's whole point): Enter on a
+number or string row opens it for typing. The digits, the letters, the
+numeric pad, `.` `-` `,` space and Backspace edit the buffer -- and
+nothing else, so a stray key cannot corrupt a value; Enter writes it,
+Escape leaves it alone, and moving off the row abandons it. A number is
+checked before it is written: one that does not parse, or falls outside
+the row's own range, is refused with the range named on the Status page's
+last-write line rather than written and clamped silently. While a row is
+being typed the arrows and Tab belong to the editor, and head-aim is
+parked, so a look that wanders cannot take the row away mid-value.
+Typing is what the keyboard gate makes possible and Feature 4 could not
+offer.
+
+**Anything with two states is a switch.** A `Toggle` row draws the
+installer's control where its value would be -- an accent track with the
+knob at the end the value is at -- and so does a two-way CHOICE where one
+side is "leave the game alone", by the installer's own rule
+(`twoChoiceToggle` in `settings_view.cpp`): exactly two choices, one of
+them `off` or `stock`. That is most of the fixes, and they read as
+switches now rather than as words to cycle. Where the value written is
+not literally `on`/`off` -- one that writes `steady` against `stock` --
+the word stays beside the switch, because the switch alone cannot say
+it; where it is, the word goes. A row with a pending restart change keeps
+its text (`off -> on`), because a switch cannot show two values at once.
+
+**The tooltip is a card of its own, BESIDE the panel.** The highlighted
+row gets what `edvr.ini` says about that key. **The facts come first** --
+the range or the list of choices, the shipped value, whether the change
+applies at once or waits for a launch, and the key that acts on it --
+and the ini's own comment block follows. That order is deliberate: the
+buffer holds about a thousand characters and forty-six of the comment
+blocks are longer than that (the longest is three and a half thousand),
+so something is cut on those rows, and what is cut must be prose and
+never a fact. The generator carries the full comment block into the row
+table as `detail` for this.
+
+It appears only after `menu.tooltip_delay` seconds resting on one row
+(1.5 by default, 0 for never): an explanation is for someone who has
+stopped, not something to flick past. It is set in a face smaller than
+the rows, and its card is sized to the MEASURED height of its text --
+`DT_CALCRECT` with the same font and the same wrap the draw will use,
+not a character count -- capped by the panel's own height. A rule joins
+it to the row it belongs to. Resting the look on the card counts as
+using the menu, so an idle dismiss set by hand cannot close the panel
+mid-sentence.
+
+**What does not fit is scrolled to, not lost.** PageUp and PageDown move
+the body three lines at a time, with a thumb on the card's edge showing
+how much there is and where in it you are. The raster measures the text
+and publishes how far it can still go (`menuPanelPopupScrollMax`), and
+the model clamps its counter to that, so the scroll cannot run off the
+end of a text only the raster has measured. Those two keys fall back to
+changing the page when there is nothing to scroll; Tab is what changes
+the page deliberately.
+
+**How it sits beside the panel without moving it.** The rasterised bitmap
+is WIDER than the menu card -- the card, a gap, and the tooltip's strip,
+the last two a fixed fraction of the card (`kTipGapFrac` and
+`kTipWidthFrac`, in `menu_panel.h` because both the model and the raster
+must read the same numbers) -- and the strip is transparent whenever no
+tooltip is up. Because the strip is always allocated, the panel's size in
+the world never changes as a tooltip comes and goes, or between pages.
+
+The bitmap is then **slid along its own surface** by `panelShift()`, so
+that the CARD's middle lands on the anchor's forward rather than the
+bitmap's. One value reaches the shader, the hit test and the culling box,
+and the card comes out exactly as it was before the strip existed: the
+same width, the same distance, square to the look.
+
+Two things were got wrong on the way here and are worth keeping written
+down. The first build **turned the anchor** instead. That put the card's
+middle in the right direction but left it facing the old one, so the card
+was seen nine degrees oblique, its left edge 1.50 m away and its right
+1.41 m; and being latched at summon, it went stale the moment the ini was
+edited with the panel up. The second mistake was scaling the panel's
+angle by the strip's ratio: the bitmap maps linearly onto the surface and
+the tangent does not, so the card came out 3.6% wider than
+`width_degrees` asked, and 9% at the widest setting. Both are why
+`panelHalfW()` works in metres and `panelShift()` is recomputed every
+frame.
+
+The head-aim hit test works in the bitmap's own coordinates and
+`menuPanelLineAt` rejects any point in the strip, so a look parked on the
+tooltip selects nothing rather than the row at that height. The toast and
+the fps overlay share the raster and get no strip and no shift.
+
+With the strip, the panel reaches `atan(2.14 * tan(w/2))` to the right --
+29.8 degrees at the default width. Past about 35 the strip leaves one
+eye's frustum on most headsets and the card would be seen by one eye
+only, which is the worst thing to do to text somebody has stopped to
+read, so `menu.width_degrees` is held to 36 while tooltips are on and the
+log says once that it was.
+
+The very first build drew the card over the rows, and it hid the values
+it was explaining (flown 2026-09-07).
 
 **Pads** (phase B): d-pad navigates and steps, A activates, B closes,
 bumpers change page, watched through `xinput_watch` and masked from the
@@ -271,9 +392,15 @@ game through door 4.
 
 ## What it shows
 
-Pages, in tab order. Each row is: label, value, a one-line hint (the
-ini's own explanation, first sentence, by the generator's `summarise()`),
-and where it applies, the measured cost or the restart badge.
+Pages, in tab order. Each row is: label, then its value as a switch, a
+number, a choice or a typed string, and where it applies, the restart
+badge. The ini's own explanation is in the tooltip beside the row.
+
+**The tab strip scrolls.** It shows the window of pages that fits the
+panel's width, always including the current one, with a `<` or `>` at
+whichever end has more. Developer mode adds four pages and the strip ran
+off the edge -- the pages past it could not be seen, and nothing said
+they were there (flown 2026-09-07).
 
 1. **Performance.** The rows tagged `menu performance` in `edvr.ini`:
    `temporal_aa`, `ui_depth`, `render_sharpness`, `supersample_filter`,
@@ -284,15 +411,214 @@ and where it applies, the measured cost or the restart badge.
 2. **Fixes.** Every other `[fix]` row tagged `menu`, under the ini's own
    headings ("When the eyes disagree", ...), scrolling. Restart rows are
    shown, badged, and editable: the badge is the point of showing them.
-3. **Status.** Read-only, the README's "checking it worked" as a live
+3. **Monitor.** fpsVR's readout, gathered as cheaply as it can be, and
+   where each number comes from:
+   - frame rate, frame time, the 1% low (the 99th-percentile frame time)
+     and the max, over the last ten seconds, from EDVR's own
+     Present-to-Present clock, ringed every frame;
+   - the app's GPU time and the compositor's, the CPU frame interval,
+     dropped frames (the last ten seconds and since launch) and the
+     reprojected and motion-smoothed shares, from **the compositor's own
+     frame timing** -- `IVRCompositor::GetFrameTiming`, slot 8 of every
+     generation this build knows, read once a frame at the WaitGetPoses
+     boundary by the openvr half (`src/openvr/frame_timing.cpp`) and
+     published on the channel; the first answer is validated before any
+     is believed, OpenComposite's refusal is recognised, and
+     `advanced.compositor_timing = off` turns the read off;
+   - the display's rate and frame budget, and the eye size;
+   - CPU load (system and Elite's share), RAM, VRAM through
+     `IDXGIAdapter3::QueryVideoMemoryInfo`, and GPU load and temperature
+     through NvAPI where an NVIDIA driver is present (elsewhere "n/a" --
+     fpsVR's AMD path is a vendor library this project does not carry);
+   - EDVR's own passes' measured cost, from the totals they already keep;
+   - **two frame-time strips**, fpsVR's pair: the GPU frame and the
+     render thread's busy time, each the last 120 frames against its own
+     budget line, green within it, amber over it, red at twice it. A
+     frame over budget on the GPU strip is a different problem from one
+     over budget on the CPU strip, which is why they are drawn apart; a
+     frame whose compositor record has not settled is a gap in the GPU
+     strip rather than a zero-height bar.
+   **GPU TIME and CPU TIME are fpsVR's two frametimes.** GPU TIME is the
+   compositor's own GPU frame total -- its record's "time between work
+   submitted immediately after present until the end of compositor
+   submitted work", which is the timeline fpsVR's author describes as the
+   scene, the companion window and the distortion pass. CPU TIME is
+   EDVR's own measurement, not the compositor's: the Present-to-Present
+   period less the time the game's thread spent blocked inside
+   WaitGetPoses and inside Present, which is the render thread's busy
+   time -- a LARGER window than the compositor's, by the work the game
+   does after its second submit, and the more useful of the two when a
+   frame is CPU bound. APP GPU carries the scene's own GPU work, which
+   the record reports directly. The Present period sits on the FRAME RATE
+   tile; frame rate, the 1% low and the strips stay on the period, as
+   fpsVR's do.
+   Both tiles are the **mean over about 200 milliseconds**, fpsVR's own
+   update window, with the ten-second mean on the sub-line.
+
+   **THE RECORD IS NOT THE STRUCT IN openvr.h, AND ITS SIZE FIELD DOES
+   NOT SAY SO.** This cost four flights and two wrong answers, so it is
+   written down in full.
+
+   Elite ships an `openvr_api.dll` that exports `IVRCompositor_014`,
+   which is OpenVR **v0.9.20**. SteamVR fills the `Compositor_FrameTiming`
+   belonging to the interface a process BOUND, not the size the caller
+   asked for: we passed 184, it echoed 184 back untouched, and it filled
+   the 176-byte v0.9.20 record. Decoding that with the modern struct
+   displaced eleven fields. What the Monitor page was actually showing:
+
+   | Tile | Read from | Which is really |
+   |---|---|---|
+   | GPU TIME | byte 40 | `m_flCompositorIdleCpuMs` |
+   | APP GPU | bytes 32+36 | the compositor's own GPU and CPU |
+   | DROPPED | byte 16 | the low half of the record's clock |
+   | REPROJECTED | byte 20 | the high half of the record's clock |
+
+   The clock is what proved it. Read bytes 16 to 23 as one double and
+   they are a plausible uptime that advances by one frame period per
+   frame index, and by exactly the wall-clock seconds between two
+   probes. Nothing else fits.
+
+   So the reader now **measures which layout it is being given** and
+   never asks the size field. The test is that clock: only one candidate
+   offset holds a value that is a plausible uptime AND advances like a
+   frame clock, and the pose confirms it, since an `HmdMatrix34_t` whose
+   rows are unit vectors sits at byte 84 in one layout and 96 in the
+   other. Both must agree before the reader arms, and it says in the log
+   which layout it found and why.
+
+   The real field map, v0.9.20: dropped frames at **12**, the clock at
+   **16**, the scene's GPU work at **24**, the GPU frame at **28**, the
+   compositor's GPU at 32 and CPU at 36, its idle at 40, the WaitGetPoses
+   / poses-ready / frame-ready stamps at 60, 64 and 68, the pose at 84,
+   and the reprojection flags LAST at **168**.
+
+   **GPU TIME** is `m_flTotalRenderGpuMs` (byte 28), which is Valve's own
+   worked example on the `Compositor_FrameTiming` page and what fpsVR
+   shows: 9.51 ms mean across the six probe samples against fpsVR's
+   steady 9.6. **CPU TIME** is that page's other example,
+   `m_flNewFrameReadyMs - m_flNewPosesReadyMs + m_flCompositorRenderCpuMs`
+   (2.47 ms mean), with EDVR's own render-thread figure (3.67 ms) beside
+   it; the 1.20 ms between them is entirely the tail from the second
+   submit to the next WaitGetPoses call, which fpsVR's window excludes
+   and ours includes.
+
+   Two claims from the misdecode are now retracted, in case they are
+   remembered: "Elite calls WaitGetPoses thirty microseconds before it
+   submits" was `compositorRenderStart - compositorUpdateEnd`, two
+   adjacent compositor stamps. It really calls it 7.2 ms before the
+   vsync, gets poses 0.2 ms after it, and submits 2.6 ms after that. And
+   "the app's GPU time reads 0.2 ms" was the compositor's own GPU plus
+   CPU time.
+
+   **The record read is the settled one, two compositor frames back**;
+   with the most recent one (`framesAgo = 0`) the GPU fields have not
+   resolved at the WaitGetPoses boundary. The monitor writes it into the
+   ring entry of the frame it describes, two back, so drops and EDVR's
+   events line up. Twice a session (20 s and 60 s after arming, three
+   frames each) the openvr half logs the four most recent records field
+   by field, and then the newest record's RAW WORDS in hex. That hex is
+   what identified the layout; keep it, because it is the only thing that
+   can be read off any flight's log without another build.
+   Laid out as **sixteen tiles, four across** -- a caption, one big
+   number, one small line each -- after the first flight found rows of
+   sentences full of numbers unreadable in a headset; the last drop and
+   EDVR's events in it are the one line under the tiles. The second
+   flight found the big number clipped and the sub-lines running off
+   the tiles: a four-across tile is about seven degrees wide, sixteen
+   characters of a small face, and the number's box had been sized to
+   its cap height rather than its line box. Now every box is sized to
+   its font's line height, the sub-line wraps over two lines in a
+   smaller face, and no sub-line is longer than about thirty characters.
+   Its cost, by construction: the ring is one clock read and a store per
+   frame; the compositor read is one small copy per frame; the load and
+   memory samplers run once a second and ONLY while the page is showing;
+   the page re-rasterises at 4 Hz on the worker thread. Frame time lives
+   here now and not on Status.
+4. **Status.** Read-only, the README's "checking it worked" as a live
    panel, and the page a support thread will ask for: EDVR's version and
    the game build; the runtime under the proxy (Valve's SteamVR,
    OpenComposite, or unknown, by the launch centre's export test); eye
    texture size and tangents; guard stage; temporal mode and whether
-   NVIDIA's library loaded; frame time and long frames from the pace
-   machinery; the gate's state (which doors are armed, which the game has
-   reached, keys private or shared); the list of changes waiting for a
-   restart; and the result of the last ini write.
+   NVIDIA's library loaded; the gate's state (which doors are armed, which
+   the game has reached, keys private or shared); this panel's own price
+   (bitmap size, raster time, the composite's measured GPU time per eye);
+   the list of changes waiting for a restart; and the result of the last
+   ini write.
+
+**Diagnosing drops caused by the mod** (built 2026-09-07 the same night,
+after the question was asked). A drop count says drops happened, not why,
+and the mod's own one-off work is the class that would explain one: a
+shader compile at first engage, a withhold, a reload parsing the ini on
+the render thread, the menu's own write. So every frame's ring entry now
+carries what EDVR did in it and what it cost, and the page and the log
+read the two together:
+
+- **Events**, ORed into the frame from wherever they happen, both halves
+  (`PerfEvent` in `perf_monitor.h`, the openvr half's crossing on the
+  channel): a reload with its duration, an ini write, a shader compile
+  with its duration (every `shaderSwapCompile*`), NVIDIA's feature
+  creation with its duration, a withhold, a resubmit, a census request, a
+  bitmap upload, a bindings re-read, the menu opening or closing.
+- **EDVR's CPU time**, measured: the frame boundary's body (a clock around
+  `hookedPresent`'s frame work), the door's passes per eye (a clock around
+  the lambdas in `hookedSubmit`, crossing on the channel), and the draw
+  hooks on one frame in sixteen -- the four draw thunks clock themselves
+  and the real call they forward, and the difference is EDVR's own cost in
+  the hook. Two clock reads per draw on a sample frame, one branch on the
+  other fifteen.
+- **EDVR's GPU time at the door**: a timestamp pair per eye around every
+  pass the door runs (`edvrDoorGpuBegin` / `End`, exports the openvr half
+  calls), never awaited, polled on later calls. This is the mod's whole
+  submit-side GPU price in one number, beside the compositor's app GPU
+  figure. What it does not cover: the ui_depth second draws and the
+  theater's draw-path work, which happen inside the game's frame.
+- **The page**: "Dropped frames" now ends with how many of the window's
+  drops coincided with EDVR activity, naming the events, against how many
+  were clean; "Last drop" shows the most recent drop or long frame with
+  its interval and EDVR's events in it; "EDVR CPU" and "EDVR GPU" show the
+  measured per-frame figures.
+- **The log**: a `monitor: DROPPED FRAME` (or `LONG FRAME`, for one over
+  twice the budget by EDVR's own clock when the compositor reports no
+  drop) line with the interval, the compositor's record for the frame
+  (GPU app and compositor, the app's busy time, when the poses came and
+  when the submit landed, from the vsync), EDVR's four costs and its
+  events, at most one every five seconds and sixty a session -- so a
+  field report carries the attribution without the headset on.
+- **The frame the record describes.** The compositor's record is read
+  two frames back (the settled one, above), and it is written into the
+  ring entry of THAT frame, beside the events EDVR raised in it. The
+  first build wrote it into the newest entry, so a drop was blamed on
+  whatever EDVR did two frames after it -- and with the Monitor page up,
+  that was its own bitmap upload four times a second, which is why the
+  "with EDVR" count climbed steadily on the second flight (2026-09-07)
+  while every logged drop said "EDVR events: none".
+- **And the hitch removed**: the menu's ini write (read, merge, write,
+  replace, mirror copy, backup copy) ran on the render thread in the first
+  build; it now runs on a worker, serialised and coalesced while a key is
+  held, and the frame thread only enqueues, shows the value, and drains
+  the results.
+
+What this cannot do is name a cause the ring does not carry. A drop with
+no EDVR event and ordinary EDVR costs is the game's or the runtime's, and
+the page says so by calling it clean.
+
+**The overlay** (`menu.fps_overlay`, off by default, and **a switch on
+the Performance page** since 2026-09-08 -- it is the one thing a player
+wants to turn on from inside the headset, and until then it was reachable
+only by editing the file): a one-line readout -- frames per second over
+the last second, the GPU frame time from the settled records in it, the
+render thread's busy time, frames dropped in the last ten seconds --
+shown while the
+menu is CLOSED and pinned to the head, the toolkit's overlay, because that
+is what was asked for and a gauge you carry has its uses. `fps_overlay_yaw`
+and `fps_overlay_pitch` put it where you can stop seeing it (default 16
+degrees below the look). The lock has no lag: the door builds its anchor
+from each frame's own pose (`setMenuHeadLock` on the channel) rather than
+from a value published a frame earlier. Its price is the panel's: one
+region copy plus a composite over the readout's own pixel box per eye per
+frame, timed by a timestamp pair and printed in the graphics log after 240
+frames (`menu panel: measured ... ms per eye`), so the number is measured
+and not believed.
 
 With `menu.developer = on`, three more pages and two changes everywhere:
 the ini's dotted key name appears under each label, and each row's hint
@@ -301,11 +627,24 @@ gains the "live" or "restart" word the generator derived.
 4. **Advanced** and 5. **Experimental.** Every key the build reads from
    those sections, automatically: `getBool` reads are toggles, `getInt` /
    `getFloat` (and their `InRange` forms) are numbers with the declared
-   bounds, and `getString` reads are read-only unless the key carries a
-   `# dev: choices a, b, c` line (a new, optional annotation, allowed only
-   outside `[fix]`, the mirror of the rule that `# ui:` is allowed only
-   inside it). Instruments that write files or scan memory are still one
-   toggle away, which is why the tier exists and is off by default.
+   bounds, and `getString` reads are typed unless the key carries choices.
+   A developer key gets its choices from a `# dev: choices a, b, c` line,
+   or from a full `# ui:` line where it has one.
+   **A `ui:` line is allowed outside `[fix]`** (`UI_SECTIONS` in the
+   generator). It buys the key its LABEL and its CHOICES in this menu and
+   nothing else: the installer's window still shows only `[fix]`
+   (`EXPOSED_SECTIONS`), and for a developer key the page and tier still
+   come from its section. Only `[fix]` and `[menu]` keys may carry a
+   `| menu` token and be ordinary rows (`MENU_ROW_SECTIONS`); the
+   generator refuses the token anywhere else, because everywhere else the
+   section already decides the page. The point is that demoting a setting out of `[fix]` costs it
+   its tier and its page but not the words somebody already wrote for it.
+   Foveated shading was demoted that way on 2026-09-08 -- it ships off,
+   and what it saves does not move the frame rate on Elite -- and kept
+   both its label and its four presets. A key may carry a `ui:` line or a
+   `dev:` line, never both.
+   Instruments that write files or scan memory are still one toggle away,
+   which is why the tier exists and is off by default.
 6. **Instruments.** Action rows for the things that today need a hotkey
    bound: dump the camera history (the `PAUSE` key's job), take a draw
    census with the quad probe, reload `edvr.ini` now, write a marker line
@@ -333,12 +672,15 @@ Sean's addition, made a first-class mechanism rather than a badge:
   ini does not.
 - **Enforced at build time.** Today the generator already fails the build
   when a `[fix]` setting shown in the desktop window says neither word
-  (`gen_settings_schema.py`, "do not say when they take effect"). That
-  error extends to every row the menu shows: the `[advanced]` and
-  `[experimental]` keys, which today are not checked at all, get the same
-  message ("End the comment block with 'Live.' or the sentence that says a
-  restart is needed"). A restart row that reads as live is the failure
-  this exists to prevent, and it is silent everywhere else.
+  (`gen_settings_schema.py`, "do not say when they take effect"), and
+  every `[fix]` row the menu shows is one of those. For the developer tier
+  -- the `[advanced]` and `[experimental]` keys, which were never checked
+  -- the generator prints a WARNING naming each key that does not say, and
+  the row wears a `?` badge with "when it applies is not documented" in
+  its hint, so an unknown is never silently read as live. (As built: 61
+  such keys on 2026-09-07; the error form waits until their comments are
+  written, which is a separate change.) A restart row that reads as live
+  is the failure this exists to prevent.
 - **Shown three ways.** The row wears a `restart` badge always. After a
   change it shows the running value and the pending one (`stock -> early
   at next launch`). The panel footer counts them ("2 changes take effect
@@ -353,9 +695,13 @@ Sean's addition, made a first-class mechanism rather than a badge:
 
 ## Placement and rendering
 
-**Anchor.** On summon, the d3d11 half latches the current raw head pose
+**Anchor.** On summon, the d3d11 half reads the current raw head pose
 (`headPose()`, published by the openvr half before any EDVR offset touches
-it) as the anchor and publishes it on the channel; the panel sits
+it), takes its look direction's yaw and pitch and builds the anchor from
+those with **no roll** -- upright in the world, so the panel's edges are
+level whatever tilt the head had at the summon (the first build latched
+the whole pose, roll included, and a head cocked at F8 got a cocked menu;
+flown 2026-09-07) -- and publishes it on the channel; the panel sits
 `menu.distance` metres (default 1.4) along the anchor's forward, upright
 in the anchor frame, and does not move until recentred or re-summoned. At
 the door, the openvr half computes the per-eye transform exactly as
@@ -378,14 +724,17 @@ the door first takes the per-eye copy the resubmit shadow already knows how
 to make, draws on the copy, and submits that. The game's textures are never
 drawn on.
 
-**The draw.** One alpha-blended draw per eye of a curved strip
-(`panel_curve`'s grid generator, curve `menu.curve` default 0.2), through
-an asymmetric-frustum projection built from the published tangents (the
-intro panel builds the same), sampling the panel bitmap. No depth: the
-panel draws over the cockpit like the game's own HUD does. A 150 ms fade in
-and out is the only animation. The shader pair is embedded HLSL, compiled
-once and warmed on the first frame the way `fssTheaterWarm` is, so the
-first summon does not pay a compile at the door.
+**The draw** (as built): a compute pass in the FSS theater's shape rather
+than a quad -- per output pixel, the view ray from the published tangents
+is rotated into the anchor's frame and intersected with the panel, flat or
+on a cylinder (curve `menu.curve`, default 0.2), and the bitmap is blended
+over the frame's pixel. The eye's region is copied into an EDVR-owned
+texture and the dispatch covers only the panel's projected bounding box
+(nine points along its top and bottom edges, so a curved panel's bulge is
+inside it); a panel entirely outside an eye costs that eye nothing at all.
+No depth: the panel draws over the cockpit like the game's own HUD does. A
+150 ms fade in and out is the only animation. The shader is embedded HLSL,
+compiled on first use.
 
 **Type in degrees.** Cap height `menu.text_degrees` (default 1.1, gate G5
 measures it), row pitch twice that, the panel about 24 by 18 degrees. The
@@ -409,12 +758,14 @@ and neither is needed to start.
 The menu writes `edvr.ini` and nothing else; the running configuration
 changes because the file did.
 
-- **The installer's own edit.** `iniedit.cpp` moves from `src/installer`
-  to `src/common` (it already follows `config.cpp`'s grammar exactly and
-  has no installer dependencies); the d3d11 half uses `mergeIni(source,
-  source, &source, {{dotted, value}})` for one value, exactly as
-  `SettingsModel::set` does -- the line where the key already lives,
-  uncommented if it was an expert default, every comment untouched.
+- **The installer's own edit.** `iniedit.cpp` moved from `src/installer`
+  to `src/common` (it already followed `config.cpp`'s grammar exactly and
+  had no installer dependencies; it now lives in the plain `edvr`
+  namespace, which the installer's own namespace finds unqualified); the
+  d3d11 half uses `mergeIni(source, source, &source, {{dotted, value}})`
+  for one value, exactly as `SettingsModel::set` does -- the line where
+  the key already lives, uncommented if it was an expert default, every
+  comment untouched.
 - **Re-read before write**, the installer's 2026-08-28 lesson: the file on
   disk is the source, never a cached copy.
 - **Atomic write**: temp file beside the ini, then `MoveFileExW` with
@@ -465,21 +816,32 @@ menu = F8
 # Live.
 keyboard = private
 
-# How the highlighted row is chosen: where your head points (head), the
-# arrow keys (keys), or whichever moved last (both). Live.
-aim = both
+# How the highlighted row is chosen: the arrow keys (keys), where your
+# head points (head), or whichever moved last (both). Live.
+aim = keys
+
+# The head-locked readout while the menu is closed, and where it sits.
+fps_overlay = off
+fps_overlay_yaw = 0
+fps_overlay_pitch = -16
 
 # Metres from your head to the panel, and how much it wraps toward you.
 # Live.
 distance = 1.4
 curve = 0.2
 
-# The height of a capital letter, in degrees of your view. Live.
+# The height of a capital letter, and the panel's width, in degrees of
+# your view. Live.
 text_degrees = 1.1
+width_degrees = 30
 
 # Close after this many seconds without a key or a look; 0 stays open
-# until dismissed. Live.
-idle_dismiss = 20
+# until dismissed, which is what it ships doing. Live.
+idle_dismiss = 0
+
+# Seconds resting on a row before its explanation appears beside the
+# panel; 0 never shows one. Live.
+tooltip_delay = 1.5
 
 # One-line confirmations when a setting changes outside the menu. Live.
 toasts = on

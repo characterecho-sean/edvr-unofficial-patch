@@ -11,6 +11,7 @@
 #include <d3d11.h>
 
 #include "../common/log.h"
+#include "perf_monitor.h"   // the feature's creation is an event with a duration
 
 #ifdef EDVR_HAVE_NGX
 // NVIDIA's SDK, as shipped: nvsdk_ngx.h declares the D3D11 entry points,
@@ -32,6 +33,7 @@ const char* g_reason = "not asked yet";
 
 uint32_t g_evaluations = 0;
 uint32_t g_resets = 0;        // evaluations that restarted NVIDIA's history
+bool     g_maskNoted = false; // the bias mask's arrival, said once
 uint32_t g_timeCount = 0;
 double   g_timeSum = 0.0;
 double   g_timeMax = 0.0;
@@ -309,13 +311,15 @@ bool dlaaAvailable(ID3D11Device* dev, const char** reason) {
 
 bool dlaaEvaluate(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* colour,
                   ID3D11Texture2D* depth, ID3D11Texture2D* motion,
-                  ID3D11Texture2D* output, uint32_t w, uint32_t h,
+                  ID3D11Texture2D* output, ID3D11Texture2D* reactive,
+                  uint32_t w, uint32_t h,
                   uint32_t outW, uint32_t outH, float jx, float jy, bool reset,
-                  float frameMs, const char** reason, ID3D11Texture2D* biasMask) {
+                  float frameMs, const char** reason) {
 #ifndef EDVR_HAVE_NGX
     (void)ctx; (void)eye; (void)colour; (void)depth; (void)motion; (void)output;
+    (void)reactive;
     (void)w; (void)h; (void)outW; (void)outH; (void)jx; (void)jy; (void)reset;
-    (void)frameMs; (void)biasMask;
+    (void)frameMs;
     if (reason) *reason = "this build has no DLSS SDK in it";
     return false;
 #else
@@ -409,8 +413,16 @@ bool dlaaEvaluate(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* colour,
                                   NVSDK_NGX_DLSS_Feature_Flags_DepthInverted;
         cp.InEnableOutputSubrects = false;
         applyPresetHints();
+        // An event with a duration for the monitor's drop attribution: the
+        // feature's creation is the mod's own heaviest one-off on the render
+        // thread, and it recurs at every size change.
+        const int64_t createT0 = qpcNow();
         const NVSDK_NGX_Result cr =
             NGX_D3D11_CREATE_DLSS_EXT(ctx, &f.handle, g_params, &cp);
+        perfMonitorNoteEvent(kEvNgx, qpcFrequency() > 0
+                                         ? static_cast<double>(qpcNow() - createT0) * 1000.0 /
+                                               static_cast<double>(qpcFrequency())
+                                         : 0.0);
         if (NVSDK_NGX_FAILED(cr) || !f.handle) {
             f.handle = nullptr;
             snprintf(g_reasonBuf, sizeof(g_reasonBuf),
@@ -448,6 +460,15 @@ bool dlaaEvaluate(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* colour,
     ep.Feature.InSharpness = 0.0f;
     ep.pInDepth = depth;
     ep.pInMotionVectors = motion;
+    // The bias-current-colour mask, when a caller has one. Null is the
+    // shipped state and the same as a mask of zeroes.
+    ep.pInBiasCurrentColorMask = reactive;
+    if (reactive && !g_maskNoted) {
+        g_maskNoted = true;
+        Log::get().note("dlaa: a bias-current-colour mask is being handed to NVIDIA "
+                        "with each evaluation -- where it is set, the runtime favours "
+                        "this frame's colour over the history.");
+    }
     ep.InJitterOffsetX = jx;
     ep.InJitterOffsetY = jy;
     ep.InRenderSubrectDimensions.Width = w;
@@ -461,12 +482,6 @@ bool dlaaEvaluate(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* colour,
     // to denoise or anti-alias based on the speed of the object"); zero
     // when unknown, which the runtime treats as unstated.
     ep.InFrameTimeDeltaInMsec = frameMs;
-    // The mover mask, when the pass has one (tier 1 of
-    // docs/per-object-motion.md): the helper passes it straight through as
-    // NVSDK_NGX_Parameter_DLSS_Input_Bias_Current_Color_Mask, full frame
-    // (the sub-rect base stays at the origin, like the colour's).
-    ep.pInBiasCurrentColorMask = biasMask;
-
     ID3D11Device* dev = nullptr;
     ctx->GetDevice(&dev);
     const int qs = dev ? acquireQuerySlot(dev) : -1;

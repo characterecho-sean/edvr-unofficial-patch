@@ -332,6 +332,112 @@ void announceGaze(float tx, float ty);
 void announceGazeLost();
 bool gazeCentre(float* tx, float* ty, uint32_t* stamp);
 
+// THE SETTINGS MENU'S CHANNEL (docs/settings-menu.md). The d3d11 half owns
+// the menu -- its rows, its keys, its bitmap -- and the openvr half owns the
+// door the frame leaves through, so three facts cross:
+//
+// The ANCHOR: the raw head pose (headPose's own 3x4 layout) the panel was
+// summoned at, published by d3d11 once per summon or recentre. The openvr
+// half builds each eye's transform from it at Submit. seq is the presence
+// bit and the change stamp in one.
+void publishMenuAnchor(const float* m12);
+bool menuAnchor(float* out12, uint32_t* seq);
+
+// HEAD-LOCKED instead: the panel rides the look (menu.fps_overlay, the
+// toolkit's way), turned by yaw and pitch from straight ahead. The door
+// then builds the anchor from the frame's OWN pose rather than the
+// published one, so the lock has no lag at all. Written every frame by
+// d3d11; off (zero) means "use the published anchor".
+void setMenuHeadLock(bool on, float yawDeg, float pitchDeg);
+bool menuHeadLock(float* yawDeg, float* pitchDeg);
+
+// VISIBLE: written by d3d11 EVERY FRAME while the menu machinery runs, with
+// the panel's fade alpha (0..1) -- and the stamp moves on every write, the
+// externalCam discipline, so "closed" and "d3d11 stopped saying" stay
+// distinguishable. The openvr half draws when alpha > 0 and the stamp moved
+// within the last few frames.
+void setMenuVisible(float alpha);
+bool menuVisible(float* alpha, uint32_t* stamp);
+
+// DRAWN: bumped by the d3d11 export every time the openvr half actually
+// composited the panel onto an outgoing eye frame. The keyboard gate follows
+// this and not the menu's own idea of itself: a menu that is not being drawn
+// must never take the keyboard (the fail-open rule).
+void bumpMenuDrawn();
+uint32_t menuDrawnValue();
+
+// The runtime under the openvr proxy, for the Status page: 0 unknown or
+// unpublished, 1 Valve's SteamVR, 2 OpenComposite. Published once by the
+// openvr half after its launch-centre identification.
+void announceRuntimeKind(uint32_t kind);
+uint32_t runtimeKind();
+
+// THE COMPOSITOR'S FRAME TIMING (docs/settings-menu.md, the Monitor page):
+// what the runtime itself measured for a SETTLED frame -- the one two
+// compositor frames back, whose GPU timestamps have resolved (the most
+// recent record is still in flight at the boundary, and reads its GPU
+// fields as a fraction of a millisecond) -- read by the openvr half through
+// IVRCompositor::GetFrameTiming at each WaitGetPoses and published whole.
+// The d3d11 half's monitor rings it up against the frame it describes.
+// Published under a sequence counter that is odd while a write is in
+// flight, so the reader never sees half a sample; a reader that catches an
+// odd count tries again.
+constexpr uint32_t kFrameTimingLag = 2;   // the record read: this many compositor frames back
+struct FrameTimingSample {
+    uint32_t layout;          // which layout the runtime was measured to be filling: 176 (openvr 0.9.20 / IVRCompositor_014, which Elite binds) or 184 (the current openvr.h)
+    uint32_t frameIndex;      // the compositor's, increments per compositor frame
+    uint32_t presents;        // times this frame was presented
+    uint32_t droppedTotal;    // dropped frames since launch, as counted by the reader
+    uint32_t reprojFlags;     // the compositor's reprojection flags for this frame
+    float    appGpuMs;        // pre-submit + post-submit GPU time, the app's
+    float    totalGpuMs;      // from the previous present to the end of compositor work
+    float    compGpuMs;       // the compositor's own GPU time
+    float    compCpuMs;       // the compositor's own CPU time submitting that work
+    float    cpuFrameMs;      // unused: no layout this build reads carries a usable frame interval
+    float    appCpuMs;        // the app's CPU frame: poses ready to second submit, plus the compositor's submit cost -- fpsVR's CPU frametime
+    float    posesReadyMs;    // when WaitGetPoses returned, ms from the frame's vsync (running start is negative)
+    float    frameReadyMs;    // when the second Submit landed, ms from the same vsync
+    float    presentCpuMs;    // time blocked in Present
+    float    idleCpuMs;       // compositor-measured slack before running start
+    float    displayHz;       // the headset's refresh, or 0 when unknown
+};
+void publishFrameTiming(const FrameTimingSample& s);
+// The latest sample; false when none has been published. `seq` receives
+// the publish count so a reader can tell a fresh sample from a repeat.
+bool frameTimingSample(FrameTimingSample* out, uint32_t* seq);
+
+// EDVR'S OWN ACTIVITY, for the monitor's drop attribution: the openvr half
+// ORs in the events it causes during a frame (a withhold, a resubmit --
+// perf_monitor.h names the bits) and adds the CPU time its door work took
+// in microseconds; the d3d11 half takes both at its frame boundary, which
+// clears them. One frame's worth crosses at a time.
+void     noteEdvrEvent(uint32_t bits);
+uint32_t takeEdvrEvents();
+void     addDoorCpuUs(uint32_t us);
+uint32_t takeDoorCpuUs();
+// The microseconds the game's thread spent BLOCKED inside the runtime's
+// WaitGetPoses this frame (the openvr half clocks the real call). With the
+// time blocked in Present, it is what the Monitor page subtracts from the
+// frame period to get the render thread's own busy time. That is a LARGER
+// window than the compositor's poses-to-submit one -- by the work after the
+// second submit -- and the more useful of the two when a frame is CPU
+// bound; the compositor's is the one that matches fpsVR, so the tile shows
+// that and this on its sub-line.
+void     addWaitCpuUs(uint32_t us);
+uint32_t takeWaitCpuUs();
+
+// THE HEAD-LOCKED OVERLAY'S ANGLES cross as tenths of a degree in twelve
+// bits each, so they carry a bias: 1800 puts -180.0 at 0 and +180.0 at
+// 3600, both inside the field.
+//
+// It was 4096, which is 0x1000 -- one bit ABOVE a twelve-bit field, so the
+// mask that follows threw the whole bias away and every angle came back
+// 409.6 degrees low. Zero meant 49.6 degrees right of centre and 29.6 down
+// (flown 2026-09-08: "I had to set 60 across to kind of get it centered",
+// "40 up still puts it below my eye line" -- both predicted to the degree
+// by that arithmetic). A bias must fit in the field it is masked into.
+constexpr int32_t kHeadLockBias = 1800;
+
 // The cull guard's state, published by openvr_api.dll at its stage
 // transitions and read by d3d11.dll once per frame boundary.
 //

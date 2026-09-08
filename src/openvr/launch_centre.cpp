@@ -7,6 +7,7 @@
 #include <string>
 
 #include "../common/config.h"
+#include "../common/frame_flag.h"   // announceRuntimeKind, for the menu's Status page
 #include "../common/guard.h"
 #include "../common/log.h"
 #include "system_hook.h"
@@ -146,6 +147,9 @@ void launchCentreConfigure() {
 
     if (g_runtime == Runtime::Unknown) g_runtime = identifyRuntime(g_realModule);
     const bool oc = (g_runtime == Runtime::OpenComposite);
+    // Told to the d3d11 half for the settings menu's Status page, the same
+    // verdict as the line below.
+    announceRuntimeKind(g_runtime == Runtime::Valve ? 1u : oc ? 2u : 0u);
 
     bool on = false;
     if (v == "on" || v == "1") {

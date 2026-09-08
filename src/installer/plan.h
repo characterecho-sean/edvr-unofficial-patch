@@ -18,7 +18,7 @@
 #include <vector>
 
 #include "detect.h"
-#include "iniedit.h"
+#include "../common/iniedit.h"
 #include "probe.h"
 #include "state.h"
 

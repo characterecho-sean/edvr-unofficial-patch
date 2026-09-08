@@ -192,6 +192,32 @@ struct Shared {
     //            can tell a fresh publish from a held one.
     volatile LONG gaze;
     volatile LONG gazeStamp;
+    // The settings menu (docs/settings-menu.md): the anchor pose the panel
+    // was summoned at (d3d11 -> openvr, headPose's layout, seq as presence
+    // and change stamp), the per-frame visibility heartbeat with the fade
+    // alpha in per-mille (d3d11 -> openvr), the drawn counter the keyboard
+    // gate follows (openvr's draw, bumped by the d3d11 export), and the
+    // runtime kind for the Status page (openvr -> d3d11).
+    volatile LONG menuAnchorSeq;
+    float         menuAnchorM[12];
+    volatile LONG menuAlphaMille;
+    volatile LONG menuVisibleStamp;
+    volatile LONG menuDrawn;
+    volatile LONG runtimeKind;
+    // The compositor's frame timing (openvr -> d3d11), for the monitor:
+    // a seqlock -- perfSeq is odd while a write is in flight, and a reader
+    // that sees it odd, or sees it change across its copy, tries again.
+    volatile LONG     perfSeq;
+    FrameTimingSample perf;
+    // The overlay's head lock: bit 31 on, then yaw and pitch as tenths of a
+    // degree, each biased into twelve bits (kHeadLockBias).
+    volatile LONG     menuHeadLock;
+    // EDVR's activity this frame, openvr -> d3d11: event bits ORed in, the
+    // door's CPU microseconds added; both taken (cleared) at the d3d11
+    // frame boundary.
+    volatile LONG     edvrEvents;
+    volatile LONG     doorCpuUs;
+    volatile LONG     waitCpuUs;
 };
 
 // Per PROCESS, not per logon session.
@@ -208,6 +234,21 @@ struct Shared {
 // The name is built once, at first use. The two DLLs are in the same process,
 // so the channel between them is unaffected.
 //
+// _v29 because the head lock's two angles are packed with a bias that fits
+// the field they are masked into; the old pair would read each other's
+// angles 409.6 degrees out.
+// _v28 because the frame timing sample names its layout (184 or 176) and
+// the WaitGetPoses block time crosses for the render thread's busy time.
+// _v27 because the frame timing sample is now the SETTLED record (two
+// compositor frames back) and carries the compositor's CPU time and the
+// poses-ready and frame-ready stamps.
+// _v26 because the frame timing sample gained the app's busy time (fpsVR's
+// CPU frametime), and the EDVR-activity and head-lock words.
+// _v25 because the compositor's frame timing joined, for the menu's
+// Monitor page (frame_flag.h, docs/settings-menu.md).
+// _v24 because the settings menu's channel joined: the anchor, the
+// visibility heartbeat, the drawn counter and the runtime kind
+// (frame_flag.h, docs/settings-menu.md).
 // _v23 because the eye-tracked gaze joined, for the foveation's moving
 // centre (frame_flag.h).
 // _v22 because the scene-arrived latch joined, so the cull guard can hold
@@ -245,7 +286,7 @@ const wchar_t* mappingName() {
     static wchar_t name[64];
     static bool built = false;
     if (!built) {
-        _snwprintf_s(name, _TRUNCATE, L"Local\\edvr_glitch_frame_v23_%lu",
+        _snwprintf_s(name, _TRUNCATE, L"Local\\edvr_glitch_frame_v29_%lu",
                      GetCurrentProcessId());
         built = true;
     }
@@ -636,6 +677,154 @@ bool gazeCentre(float* tx, float* ty, uint32_t* stamp) {
     if (tx) *tx = (static_cast<int32_t>((v >> 15) & 0x7FFFu) - 16384) / 1000.0f;
     if (ty) *ty = (static_cast<int32_t>(v & 0x7FFFu) - 16384) / 1000.0f;
     return true;
+}
+
+void publishMenuAnchor(const float* m12) {
+    Shared* s = map();
+    if (!s || !m12) return;
+    for (int i = 0; i < 12; ++i) s->menuAnchorM[i] = m12[i];
+    InterlockedIncrement(&s->menuAnchorSeq);
+}
+
+bool menuAnchor(float* out12, uint32_t* seq) {
+    Shared* s = map();
+    if (!s) return false;
+    const LONG q = InterlockedCompareExchange(&s->menuAnchorSeq, 0, 0);
+    if (seq) *seq = static_cast<uint32_t>(q);
+    if (q == 0) return false;
+    if (out12) {
+        for (int i = 0; i < 12; ++i) out12[i] = s->menuAnchorM[i];
+    }
+    return true;
+}
+
+void setMenuVisible(float alpha) {
+    Shared* s = map();
+    if (!s) return;
+    float a = alpha;
+    if (!(a > 0.0f)) a = 0.0f;   // NaN lands on "not visible"
+    if (a > 1.0f) a = 1.0f;
+    InterlockedExchange(&s->menuAlphaMille, static_cast<LONG>(a * 1000.0f + 0.5f));
+    InterlockedIncrement(&s->menuVisibleStamp);
+}
+
+bool menuVisible(float* alpha, uint32_t* stamp) {
+    Shared* s = map();
+    if (!s) return false;
+    if (stamp) *stamp = static_cast<uint32_t>(InterlockedCompareExchange(&s->menuVisibleStamp, 0, 0));
+    const LONG mille = InterlockedCompareExchange(&s->menuAlphaMille, 0, 0);
+    if (alpha) *alpha = static_cast<float>(mille) / 1000.0f;
+    return mille > 0;
+}
+
+void bumpMenuDrawn() {
+    Shared* s = map();
+    if (s) InterlockedIncrement(&s->menuDrawn);
+}
+
+uint32_t menuDrawnValue() {
+    Shared* s = map();
+    return s ? static_cast<uint32_t>(InterlockedCompareExchange(&s->menuDrawn, 0, 0)) : 0;
+}
+
+void announceRuntimeKind(uint32_t kind) {
+    Shared* s = map();
+    if (!s || kind > 2) return;
+    InterlockedExchange(&s->runtimeKind, static_cast<LONG>(kind));
+}
+
+uint32_t runtimeKind() {
+    Shared* s = map();
+    return s ? static_cast<uint32_t>(InterlockedCompareExchange(&s->runtimeKind, 0, 0)) : 0;
+}
+
+void setMenuHeadLock(bool on, float yawDeg, float pitchDeg) {
+    Shared* s = map();
+    if (!s) return;
+    if (!on) {
+        InterlockedExchange(&s->menuHeadLock, 0);
+        return;
+    }
+    auto tenths = [](float deg) -> uint32_t {
+        float c = deg;
+        if (!(c > -180.0f)) c = -180.0f;
+        if (!(c < 180.0f)) c = 180.0f;
+        return static_cast<uint32_t>(static_cast<int32_t>(c * 10.0f) + kHeadLockBias) & 0xFFFu;
+    };
+    const uint32_t packed = 0x80000000u | (tenths(yawDeg) << 12) | tenths(pitchDeg);
+    InterlockedExchange(&s->menuHeadLock, static_cast<LONG>(packed));
+}
+
+bool menuHeadLock(float* yawDeg, float* pitchDeg) {
+    Shared* s = map();
+    if (!s) return false;
+    const uint32_t v = static_cast<uint32_t>(InterlockedCompareExchange(&s->menuHeadLock, 0, 0));
+    if (!(v & 0x80000000u)) return false;
+    if (yawDeg) *yawDeg = (static_cast<int32_t>((v >> 12) & 0xFFFu) - kHeadLockBias) / 10.0f;
+    if (pitchDeg) *pitchDeg = (static_cast<int32_t>(v & 0xFFFu) - kHeadLockBias) / 10.0f;
+    return true;
+}
+
+void noteEdvrEvent(uint32_t bits) {
+    Shared* s = map();
+    if (s && bits) InterlockedOr(&s->edvrEvents, static_cast<LONG>(bits));
+}
+
+uint32_t takeEdvrEvents() {
+    Shared* s = map();
+    return s ? static_cast<uint32_t>(InterlockedExchange(&s->edvrEvents, 0)) : 0u;
+}
+
+void addDoorCpuUs(uint32_t us) {
+    Shared* s = map();
+    if (s && us) InterlockedExchangeAdd(&s->doorCpuUs, static_cast<LONG>(us > 1000000u ? 1000000u : us));
+}
+
+uint32_t takeDoorCpuUs() {
+    Shared* s = map();
+    return s ? static_cast<uint32_t>(InterlockedExchange(&s->doorCpuUs, 0)) : 0u;
+}
+
+void addWaitCpuUs(uint32_t us) {
+    Shared* s = map();
+    if (s && us) InterlockedExchangeAdd(&s->waitCpuUs, static_cast<LONG>(us > 1000000u ? 1000000u : us));
+}
+
+uint32_t takeWaitCpuUs() {
+    Shared* s = map();
+    return s ? static_cast<uint32_t>(InterlockedExchange(&s->waitCpuUs, 0)) : 0u;
+}
+
+void publishFrameTiming(const FrameTimingSample& sample) {
+    Shared* s = map();
+    if (!s) return;
+    // Odd while writing. One writer (the openvr half's frame boundary), so
+    // the increments need no exchange loop; the barriers keep the payload
+    // between them.
+    InterlockedIncrement(&s->perfSeq);
+    MemoryBarrier();
+    s->perf = sample;
+    MemoryBarrier();
+    InterlockedIncrement(&s->perfSeq);
+}
+
+bool frameTimingSample(FrameTimingSample* out, uint32_t* seq) {
+    Shared* s = map();
+    if (!s || !out) return false;
+    for (int tries = 0; tries < 4; ++tries) {
+        const LONG a = InterlockedCompareExchange(&s->perfSeq, 0, 0);
+        if (a == 0) return false;          // never published
+        if (a & 1) continue;               // a write in flight
+        MemoryBarrier();
+        const FrameTimingSample copy = s->perf;
+        MemoryBarrier();
+        const LONG b = InterlockedCompareExchange(&s->perfSeq, 0, 0);
+        if (a != b) continue;
+        *out = copy;
+        if (seq) *seq = static_cast<uint32_t>(a >> 1);
+        return true;
+    }
+    return false;
 }
 
 bool takeSubmitHoldFrame() {

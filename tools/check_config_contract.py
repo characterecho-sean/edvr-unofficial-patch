@@ -50,7 +50,7 @@ EARLY_RE = re.compile(r'readConfigStringEarly\s*\([^,]+,[^,]+,\s*"([^"]+)"', re.
 # A section we know about followed by a dotted name, anywhere in a string. Used
 # to catch key names mentioned in log text that nothing actually reads.
 SECTIONS = ('fix', 'advanced', 'hotkey', 'log', 'openvr', 'd3d11',
-            'experimental', 'luminance')
+            'experimental', 'luminance', 'menu')
 # A dotted name INSIDE a string literal. The literals are pulled out first and
 # searched separately, because scanning the raw line let a match start at a
 # CLOSING quote and run on into the C++ after it: a line reading
@@ -105,8 +105,9 @@ def keys_mentioned():
                 for literal in STRING_RE.findall(stripped):
                     mentioned.extend(MENTION_RE.findall(literal))
                 for key in mentioned:
-                    # "d3d11.dll", "log.h" -- a filename, not a setting.
-                    if key.rsplit('.', 1)[-1] in ('dll', 'h', 'cpp', 'ini', 'txt', 'exe'):
+                    # "d3d11.dll", "log.h", "settings-menu.md" -- a filename,
+                    # not a setting.
+                    if key.rsplit('.', 1)[-1] in ('dll', 'h', 'cpp', 'ini', 'txt', 'exe', 'md'):
                         continue
                     found.setdefault(key, []).append('%s:%d' % (rel, i))
     return found

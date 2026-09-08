@@ -77,6 +77,7 @@
 #include <cstdint>
 
 struct ID3D11DeviceContext;
+struct ID3D11Texture2D;
 
 namespace edvr {
 
@@ -125,8 +126,40 @@ bool uiDepthWantsReissue();
 bool uiDepthReissueBegin(ID3D11DeviceContext* ctx);
 void uiDepthReissueEnd(ID3D11DeviceContext* ctx);
 
-// Once per frame: the engage line, the totals line every 20 s.
-void uiDepthFrameBoundary();
+// THE REACTIVE MASK, the other half of registering the interface.
+//
+// Depth told the pass where the interface IS, and the trained history then
+// accumulated it -- which is the whole point for a static label, and wrong
+// for a readout whose digits change in place. A digit that changes does not
+// move, so its motion vector is zero, and the runtime blends the new digit
+// with the old one: measured 2026-09-08, and confirmed by the player in the
+// obvious A/B, since fix.ui_depth = off restores the swim and takes the
+// blur away with it.
+//
+// NVIDIA's evaluation takes a bias-current-colour mask for exactly this
+// (dlaa.h). This module owns one per eye, at the render size, cleared every
+// frame and marked wherever the interface covers a pixel -- by the same
+// second draw and the same surface alpha that write the interface's depth,
+// so coverage costs no new geometry and no new maths. The value is
+// advanced.ui_depth_reactive, 0 to 1; 0 makes no mask at all, and so does
+// any mode but NVIDIA's, whose history is the only one that reads one.
+//
+// The strength is a trade, not a free win: at 1 the marked pixels stop
+// accumulating altogether, which is the sharp-but-shimmering interface of
+// fix.ui_depth = off with the swim still fixed; at 0 it is the steady
+// interface with the blur. 0.5 resolves a changing readout while a static
+// label still converges, flown 2026-09-08 and the shipped value. Marking
+// only what CHANGED, rather than the whole interface, is the next step if
+// one value ever stops serving, and it needs last frame's surface to
+// compare against.
+//
+// The texture for one eye, for the temporal pass to hand to NVIDIA: null
+// when the strength is zero, when nothing has been marked, or when the
+// pass's size is not the size the mask was drawn at.
+bool uiDepthReactiveMask(uint32_t w, uint32_t h, int eye, ID3D11Texture2D** tex);
+
+// Once per frame: the masks cleared, the engage line, the totals every 20 s.
+void uiDepthFrameBoundary(ID3D11DeviceContext* ctx);
 
 void uiDepthShutdown();
 

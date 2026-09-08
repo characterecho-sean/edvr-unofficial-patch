@@ -65,12 +65,12 @@ ones included -- unattributed and therefore at full rate for the rest of the
 session, silently. It now evicts the least recently drawn into, and the census
 counts evictions.
 
-**The gaze source armed for everyone.** `fix.foveation_centre` defaults to
+**The gaze source armed for everyone.** `experimental.foveation_centre` defaults to
 `eyes`, and the openvr half read only that key, so it requested the IVRSystem
 function table, validated it and made three runtime calls a frame on every
 rig, for commanders who had never turned foveated shading on -- and printed an
 ARMED line promising summaries that would never come. It now reads
-`fix.foveation` as well and arms only when the feature is on.
+`experimental.foveation` as well and arms only when the feature is on.
 
 **A blink moved the rings.** A gaze published as lost was honoured
 immediately, while a silence needed ninety frames. A blink is a short run of

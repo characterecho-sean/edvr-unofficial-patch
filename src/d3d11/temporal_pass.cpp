@@ -18,6 +18,7 @@
 #include "../common/temporal_math.h"
 #include "depth_probe.h"
 #include "dlaa.h"
+#include "ui_depth.h"   // uiDepthReactiveMask: the interface's bias mask
 #include "shader_swap.h"
 
 namespace edvr {
@@ -44,7 +45,8 @@ RWStructuredBuffer<uint> Stats : register(u2);   // 0 rejected, 1 clipped, 2 the
 RWTexture2D<float2> MV : register(u3);   // for a trained pass: motion vectors, pixels, current -> previous
 RWTexture2D<float>  ZC : register(u4);   // and the depth, copied as it is (both entries, when the mover mask wants last frame's)
 Texture2D<float> ZP : register(t3);      // LAST frame's ZC, when the mover mask is on (movers.x)
-RWTexture2D<float> MK : register(u5);    // for a trained pass: the mover mask, NVIDIA's bias-current-colour input
+Texture2D<float> UM : register(t4);      // the interface's reactive mask (ui_depth.h), folded into MK when probe.z says it is bound
+RWTexture2D<float> MK : register(u5);    // for a trained pass: the mover mask, NVIDIA's bias-current-colour input (ONE texture: the interface's mask is folded in)
 cbuffer P : register(b0) {
     int4   region;      // x0 y0 x1 y1: this eye's pixels in S (x1, y1 exclusive)
     int2   size;        // the region's size = the output's
@@ -79,7 +81,7 @@ cbuffer P : register(b0) {
     float4 fovea0;      // xy the fovea centre in output pixels, z the inner radius (px) where the periphery calming starts, w 1/(the ramp width in px)
     float4 fovea1;      // x the periphery calm strength (0..1), w 1 = the fovea is on (else no modulation)
     float4 movers;      // x 1 = the mover mask is on (ZP holds last frame's depth for this frustum); y the depth tolerance, a fraction; z the strength, how much history a masked pixel loses (0..1); w 1 = main writes ZC
-    float4 probe;       // for the mv entry: x the history's scale (H is NVIDIA's previous output at outW/w times the render size); y 1 = run the registration probes against it; zw unused
+    float4 probe;       // for the mv entry: x the history's scale (H is NVIDIA's previous output at outW/w times the render size); y 1 = run the registration probes against it; z 1 = UM holds the interface's reactive mask, to fold into MK; w unused
 };
 float3 rgbToYcocg(float3 c) {
     return float3(0.25 * c.r + 0.5 * c.g + 0.25 * c.b,
@@ -375,8 +377,12 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
         }
         MV[id.xy] = motion;
         // NVIDIA's bias-current-colour mask: the strength is the value, so
-        // one knob means the same on both paths.
-        MK[id.xy] = mover * movers.z;
+        // one knob means the same on both paths. The runtime takes ONE such
+        // mask, and the interface's reactive mask (ui_depth.h: a readout
+        // whose digits change in place) wants the same input, so it is
+        // folded in here when bound -- the stronger bias wins per pixel.
+        float ui = probe.z != 0.0 ? UM.Load(int3(id.xy, 0)) : 0.0;
+        MK[id.xy] = max(ui, mover * movers.z);
         // The registration probes on the trained path (2026-09-08): main's
         // 5x5 luma SAD search, transcribed, against NVIDIA's PREVIOUS output
         // -- the history as the runtime accumulated it, bound at t1 in place
@@ -1037,6 +1043,11 @@ struct EyeState {
     bool                       zPrevValid = false;
     ID3D11Texture2D*           dlMask = nullptr;
     ID3D11UnorderedAccessView* dlMaskUav = nullptr;
+    // A shader view over the interface's reactive mask (ui_depth.h owns the
+    // texture), for the mv entry to fold into dlMask: keyed on the texture's
+    // identity, remade when ui_depth remakes it.
+    void*                      uiMaskRes = nullptr;
+    ID3D11ShaderResourceView*  uiMaskSrv = nullptr;
     ID3D11Texture2D*           copyTex = nullptr;  // the copy-through, for a source that refuses a view
     ID3D11ShaderResourceView*  copySrv = nullptr;
     uint32_t                   copyW = 0, copyH = 0;
@@ -1126,6 +1137,8 @@ void releaseDl(EyeState& e) {
     e.zPrevValid = false;
     if (e.dlMaskUav) { e.dlMaskUav->Release(); e.dlMaskUav = nullptr; }
     if (e.dlMask) { e.dlMask->Release(); e.dlMask = nullptr; }
+    if (e.uiMaskSrv) { e.uiMaskSrv->Release(); e.uiMaskSrv = nullptr; }
+    e.uiMaskRes = nullptr;
     if (e.dlColourSrv) { e.dlColourSrv->Release(); e.dlColourSrv = nullptr; }
     if (e.dlMvSrv) { e.dlMvSrv->Release(); e.dlMvSrv = nullptr; }
     if (e.dlDepthSrv) { e.dlDepthSrv->Release(); e.dlDepthSrv = nullptr; }
@@ -2805,29 +2818,63 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                                          e.dlOutSrv && g_statsUav != nullptr;
                     p.probe[0] = static_cast<float>(oW) / static_cast<float>(w);
                     p.probe[1] = probeNv ? 1.0f : 0.0f;
+                    // The interface's reactive mask, when ui_depth marked one
+                    // this frame at this size: content that changes without
+                    // moving, which no motion vector can describe (ui_depth.h).
+                    // NVIDIA takes ONE bias mask, so with the mover mask on it
+                    // is bound at t4 and the mv entry folds it into e.dlMask
+                    // (the stronger bias wins per pixel); off, it goes to the
+                    // runtime as it is. A shader view over ui_depth's texture
+                    // (made with the shader-resource bind), cached per eye on
+                    // the texture's identity.
+                    ID3D11Texture2D* reactiveMask = nullptr;
+                    if (!uiDepthReactiveMask(w, h, eye, &reactiveMask)) reactiveMask = nullptr;
+                    const bool foldUi = p.movers[0] != 0.0f && reactiveMask != nullptr &&
+                                        e.dlMaskUav != nullptr;
+                    if (foldUi && (e.uiMaskRes != static_cast<void*>(reactiveMask) || !e.uiMaskSrv)) {
+                        if (e.uiMaskSrv) { e.uiMaskSrv->Release(); e.uiMaskSrv = nullptr; }
+                        e.uiMaskRes = nullptr;
+                        D3D11_SHADER_RESOURCE_VIEW_DESC md{};
+                        md.Format = DXGI_FORMAT_R8_UNORM;
+                        md.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+                        md.Texture2D.MipLevels = 1;
+                        if (SUCCEEDED(dev->CreateShaderResourceView(reactiveMask, &md, &e.uiMaskSrv)) &&
+                            e.uiMaskSrv) {
+                            e.uiMaskRes = reactiveMask;
+                        } else {
+                            e.uiMaskSrv = nullptr;
+                        }
+                    }
+                    const bool uiBound = foldUi && e.uiMaskSrv != nullptr;
+                    p.probe[2] = uiBound ? 1.0f : 0.0f;
                     setParams(ctx, p);
-                    ID3D11ShaderResourceView* nullSrvM[4] = {};
+                    ID3D11ShaderResourceView* nullSrvM[5] = {};
                     ID3D11UnorderedAccessView* nullUavM[6] = {};
-                    ctx->CSSetShaderResources(0, 4, nullSrvM);
+                    ctx->CSSetShaderResources(0, 5, nullSrvM);
                     ctx->CSSetUnorderedAccessViews(0, 6, nullUavM, nullptr);
                     ctx->CSSetShader(g_csMv, nullptr, 0);
-                    ID3D11ShaderResourceView* srvsM[4] = {inSrv,
+                    ID3D11ShaderResourceView* srvsM[5] = {inSrv,
                                                           probeNv ? e.dlOutSrv : e.histSrv[e.histRead],
                                                           depthSrv,
-                                                          p.movers[0] != 0.0f ? e.zPrevSrv : nullptr};
+                                                          p.movers[0] != 0.0f ? e.zPrevSrv : nullptr,
+                                                          uiBound ? e.uiMaskSrv : nullptr};
                     ID3D11UnorderedAccessView* uavsM[6] = {debugPaint ? e.dlOutUav : nullptr,
                                                            nullptr, g_statsUav, e.dlMvUav,
                                                            e.dlDepthUav, e.dlMaskUav};
                     ID3D11Buffer* cbM = g_cb;
                     ID3D11SamplerState* smpM = g_samp;
-                    ctx->CSSetShaderResources(0, 4, srvsM);
+                    ctx->CSSetShaderResources(0, 5, srvsM);
                     ctx->CSSetUnorderedAccessViews(0, 6, uavsM, nullptr);
                     ctx->CSSetConstantBuffers(0, 1, &cbM);
                     ctx->CSSetSamplers(0, 1, &smpM);
                     ctx->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
-                    ctx->CSSetShaderResources(0, 4, nullSrvM);
+                    ctx->CSSetShaderResources(0, 5, nullSrvM);
                     ctx->CSSetUnorderedAccessViews(0, 6, nullUavM, nullptr);
                     if (haveDepth && e.zPrev) zcWritten = true;
+                    // What NVIDIA is handed: the union when the mover mask
+                    // ran this frame, else the interface's alone (as before
+                    // the mover mask existed), else nothing.
+                    ID3D11Texture2D* biasMask = (p.movers[0] != 0.0f && e.dlMask) ? e.dlMask : reactiveMask;
                     // NVIDIA's evaluation. Its history restarts only when it is
                     // broken: this eye's first frame, a withhold (flags bit 0),
                     // rebuilt textures, or a frame the pass's own history ran in
@@ -2853,9 +2900,9 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                         // starts afresh after.
                         usedDlaa = true;
                         e.dlHaveHistory = false;
-                    } else if (dlaaEvaluate(ctx, eye, e.dlColour, e.dlDepth, e.dlMv, e.dlOut, w, h,
-                                            oW, oH, jxNow, jyNow, resetHist, frameMs, &why,
-                                            p.movers[0] != 0.0f ? e.dlMask : nullptr)) {
+                    } else if (dlaaEvaluate(ctx, eye, e.dlColour, e.dlDepth, e.dlMv, e.dlOut,
+                                            biasMask, w, h,
+                                            oW, oH, jxNow, jyNow, resetHist, frameMs, &why)) {
                         usedDlaa = true;
                         e.dlHaveHistory = true;
                         if (!g_dlaaNoted || (oW != w && !g_dlssNoted)) {

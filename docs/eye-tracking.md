@@ -456,7 +456,7 @@ tangents agreeing within about 2 degrees RMS.
 docs/performance.md, feature 2, "the centre following the eyes". The source
 lives in `gaze_probe.cpp` beside the probe rather than in a file of its own,
 because it needs the probe's table arming, validation and sentinel and
-nothing else; `fix.foveation_centre = eyes` is its switch. The sketch below
+nothing else; `experimental.foveation_centre = eyes` is its switch. The sketch below
 stands as written for what it does; the source tag is the driver's name in
 the arming line, blinks hold by way of the d3d11 half's one-second grace,
 and the privacy rule is kept: nothing per frame is written down. *Flown
