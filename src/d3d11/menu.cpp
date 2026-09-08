@@ -1795,9 +1795,9 @@ void menuConfigure(Config& cfg) {
     {
         const bool ov = cfg.getBool("menu.fps_overlay", false);
         float yaw = cfg.getFloat("menu.fps_overlay_yaw", 0.0f);
-        float pitch = cfg.getFloat("menu.fps_overlay_pitch", -16.0f);
+        float pitch = cfg.getFloat("menu.fps_overlay_pitch", 20.0f);
         if (!(yaw >= -60.0f) || yaw > 60.0f) yaw = 0.0f;
-        if (!(pitch >= -45.0f) || pitch > 45.0f) pitch = -16.0f;
+        if (!(pitch >= -45.0f) || pitch > 45.0f) pitch = 20.0f;
         if (s.configured && ov != s.overlay) {
             Log::get().note("menu: the frame-rate overlay is %s.", ov ? "on" : "off");
         }
