@@ -1751,6 +1751,30 @@ which is this project's contract for every read of the game.
    trip through the supersample resolve (whose kernel had been the calm
    Gaussian since a menu toggle), and the levers are the crisp kernel,
    `texture_lod_bias = auto`, and Elite's HMD Quality.
+
+   *Its sixth flight* (17:08, `v0.14.1-66-gc245d88`, the bias at auto):
+   "the solar panels rotating on the station badly blur at distance and
+   even at the mail slot they get crisp for a few frames and then jerk
+   and blur and then get crisp again". The log read the body's
+   translation term at 0.44, 0.29, 0.77 and 1.11 m from pair to pair at a
+   steady turn, and the desk found the station cluster's fit at 0.35,
+   0.49 and then 1.26 m with the residual tripled: contaminated. The
+   contaminants are the next clusters -- 53 and 107 records turning 3.27
+   and 0.46 deg about the station's OWN axis, whose rigid fits come out
+   at 12 deg and two kilometres -- which are not bodies but SLOT SHUFFLES
+   between neighbouring ring parts: the per-slot delta of two parts that
+   swapped slots is a turn about the station's axis by their angular
+   spacing, and the distance-scaled position tolerance (2 m at ten
+   kilometres) let the near-angle ones into the station's cluster. The
+   ship's own parts, meanwhile, are a clean separate cluster (75-109
+   records within 100 m of the camera, co-rotating in the slot). So the
+   fit is robust now -- fit, drop what the fit does not explain (a quarter
+   of a metre, or three times the rms), fit again -- records inside the
+   ship's radius of the pair's camera are left out of the body and its
+   grid, and the tolerance's lever arm is halved. Distance is a different
+   matter: at ten kilometres the turn is a tenth of a pixel a frame and
+   the panels' fine structure is under-sampled by the 2514 render, which
+   no vector can restore.
 4. **Tier 2b** only if question 1 says no bits.
 5. **Tier 3** as `tools/` work against dumped frames, never on the hot
    path.

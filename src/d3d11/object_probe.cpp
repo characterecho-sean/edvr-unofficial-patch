@@ -296,7 +296,20 @@ constexpr int   kMaxClusters = 64;
 // pixel or two every eighth frame. That was the shimmer.
 constexpr float kClusterAngleDeg = 0.01f;
 constexpr float kClusterPosM = 0.03f;       // three centimetres...
-constexpr float kClusterPosPerM = 2.0e-4f;  // ...plus the quantum's lever arm on the record's distance
+constexpr float kClusterPosPerM = 1.0e-4f;  // ...plus the quantum's lever arm on the record's distance
+// The body's fit is ROBUST: members whose residual under the fit exceeds
+// this (or three times the fit's rms) are dropped and the fit repeated.
+// The clusters admit slot shuffles between neighbouring ring parts -- the
+// per-slot delta of two parts that swapped slots is a turn about the
+// station's own axis by their angular spacing, within the angle tolerance
+// when the spacing is small and within the distance-scaled position
+// tolerance ten kilometres off -- and the flight of 2026-09-08 17:08 read
+// the station's translation term at 0.35, 0.49 and then 1.26 m from pair
+// to pair with the residual tripled: the fit pulled by shuffles, and the
+// panels at the slot "crisp for a few frames, then jerk and blur".
+constexpr float    kFitTrimM = 0.25f;
+constexpr int      kFitPasses = 3;
+constexpr float    kShipRadiusM = 100.0f;   // the player's own parts sit here, co-rotating in a slot; not the body's
 
 struct Cluster {
     float    q[4];       // the running MEAN delta, normalised: a member's noise averages out
@@ -382,7 +395,8 @@ bool emptyRecord(const uint8_t* r) {
 // the pose each frame, and the byte histogram says which fields. The
 // second flight added the identity by signature, the second pose block's
 // provenance and the tolerance clustering.
-void diffPair(const uint8_t* prev, const uint8_t* now, uint32_t bytes, float dtMs) {
+void diffPair(const uint8_t* prev, const uint8_t* now, uint32_t bytes, float dtMs,
+              const float* camPos) {
     const uint32_t n = bytes / kRecordBytes;
     std::vector<uint64_t> hashNow(n, 0), sigPrev(n, 0), sigNow(n, 0);
     std::vector<uint8_t> livePrev(n, 0), liveNow(n, 0);
@@ -542,15 +556,58 @@ void diffPair(const uint8_t* prev, const uint8_t* now, uint32_t bytes, float dtM
             fitPrev.reserve(static_cast<size_t>(c.count) * 3);
             for (uint32_t i = 0; i < n; ++i) {
                 if (clusterIdx[i] != big) continue;
+                const float* pn = &posNow[static_cast<size_t>(i) * 3];
+                if (camPos) {
+                    // The player's own parts, co-rotating with a station
+                    // inside its slot: near the camera, and not the body's.
+                    const float dx = pn[0] - camPos[0], dy = pn[1] - camPos[1], dz = pn[2] - camPos[2];
+                    if (dx * dx + dy * dy + dz * dz < kShipRadiusM * kShipRadiusM) continue;
+                }
                 members.push_back(static_cast<int>(i));
                 for (int k = 0; k < 3; ++k) {
-                    fitNow.push_back(posNow[static_cast<size_t>(i) * 3 + k]);
+                    fitNow.push_back(pn[k]);
                     fitPrev.push_back(posPrev[static_cast<size_t>(i) * 3 + k]);
                 }
             }
-            float w[3], tf[3], rms = 0.0f;
-            const bool fitOk = temporalRigidFit(fitNow.data(), fitPrev.data(),
-                                                static_cast<int>(members.size()), w, tf, &rms);
+            // The robust fit: fit, drop what the fit does not explain, fit
+            // again -- a shuffled slot is two objects' poses and sits metres
+            // from any rigid motion of the rest.
+            float w[3] = {}, tf[3] = {}, rms = 0.0f;
+            bool fitOk = false;
+            for (int pass = 0; pass < kFitPasses; ++pass) {
+                fitOk = temporalRigidFit(fitNow.data(), fitPrev.data(), static_cast<int>(members.size()),
+                                         w, tf, &rms);
+                if (!fitOk || pass + 1 == kFitPasses) break;
+                float R[9];
+                temporalRodrigues(w, R);
+                const float lim = rms * 3.0f > kFitTrimM ? rms * 3.0f : kFitTrimM;
+                std::vector<int> keptMembers;
+                std::vector<float> keptNow, keptPrev;
+                keptMembers.reserve(members.size());
+                keptNow.reserve(fitNow.size());
+                keptPrev.reserve(fitPrev.size());
+                for (size_t m = 0; m < members.size(); ++m) {
+                    float q[3];
+                    temporalApply3(R, &fitNow[m * 3], q);
+                    float e2 = 0.0f;
+                    for (int k = 0; k < 3; ++k) {
+                        const float e = q[k] + tf[k] - fitPrev[m * 3 + k];
+                        e2 += e * e;
+                    }
+                    if (e2 > lim * lim) continue;
+                    keptMembers.push_back(members[m]);
+                    for (int k = 0; k < 3; ++k) {
+                        keptNow.push_back(fitNow[m * 3 + k]);
+                        keptPrev.push_back(fitPrev[m * 3 + k]);
+                    }
+                }
+                if (keptMembers.size() == members.size()) break;   // nothing to drop: the fit stands
+                if (keptMembers.size() < kMotionMinRecords) { fitOk = false; break; }
+                members.swap(keptMembers);
+                fitNow.swap(keptNow);
+                fitPrev.swap(keptPrev);
+            }
+            if (members.size() < kMotionMinRecords) fitOk = false;
             const float fitDeg = fitOk ? sqrtf(w[0] * w[0] + w[1] * w[1] + w[2] * w[2]) * 57.2957795f : 0.0f;
             const float fitM = fitOk ? sqrtf(tf[0] * tf[0] + tf[1] * tf[1] + tf[2] * tf[2]) : 0.0f;
             // A body for the pass TURNS (the feature is rotating stations; a
@@ -590,7 +647,7 @@ void diffPair(const uint8_t* prev, const uint8_t* now, uint32_t bytes, float dtM
                 g_motion.dtMs = dt;
                 g_motion.rms = rms;
                 g_motion.share = share;
-                g_motion.records = c.count;
+                g_motion.records = static_cast<uint32_t>(members.size());
                 g_motion.age = 0;
                 g_motionAge = 0;
                 g_motionValid = true;
@@ -864,8 +921,17 @@ void poll(ID3D11DeviceContext* ctx) {
             g_keepStamp = s->stampMs;
             g_keepValid = true;
         } else if (g_keepValid && g_keepFrame + 1 == s->frame && g_keep.size() == s->bytes) {
+            // The camera's position in the record's frame, from the scene
+            // block's camera rows (233-235, their fourth column; the pass
+            // reads the same rows), for the ship-radius exclusion.
+            float cam[3];
+            const float* camPos = nullptr;
+            if (scene && sceneBytes >= 236u * 16u) {
+                for (int r = 0; r < 3; ++r) memcpy(&cam[r], scene + (233 + r) * 16 + 12, sizeof(float));
+                camPos = cam;
+            }
             diffPair(g_keep.data(), bytes, s->bytes,
-                     static_cast<float>(s->stampMs > g_keepStamp ? s->stampMs - g_keepStamp : 0.0));
+                     static_cast<float>(s->stampMs > g_keepStamp ? s->stampMs - g_keepStamp : 0.0), camPos);
             if (g_verbose && g_dumps < kDumpMax && dueMs(g_dumpMs, kDumpEveryMs)) {
                 g_dumpMs = stampMs();
                 ++g_dumps;
