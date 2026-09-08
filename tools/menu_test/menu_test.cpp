@@ -14,6 +14,7 @@
 #include <cstring>
 #include <string>
 
+#include "../../src/common/frame_flag.h"
 #include "../../src/common/hotkey.h"
 #include "../../src/common/iniedit.h"
 #include "../../src/common/perf_math.h"
@@ -178,6 +179,37 @@ void testHitCurved() {
           "curved: the same look covers less of the surface than on the flat panel");
 }
 
+// --- the head-locked overlay's angles across the channel ---------------------
+//
+// They are packed as tenths of a degree into twelve bits each. The bias was
+// 4096 -- one bit above the field it is masked into -- so it was thrown
+// away and every angle came back 409.6 degrees low: a readout asked for
+// straight ahead appeared 49.6 degrees right and 29.6 down. Flown
+// 2026-09-08 and reported as exactly that.
+void testHeadLockAngles() {
+    const float cases[][2] = {{0.0f, 0.0f},   {60.0f, 20.0f}, {-60.0f, -45.0f},
+                              {0.0f, 40.0f},  {12.3f, -7.7f}, {180.0f, -180.0f}};
+    bool allOk = true;
+    for (const auto& c : cases) {
+        setMenuHeadLock(true, c[0], c[1]);
+        float yaw = 999.0f, pitch = 999.0f;
+        if (!menuHeadLock(&yaw, &pitch) || !approx(yaw, c[0], 0.05f) ||
+            !approx(pitch, c[1], 0.05f)) {
+            allOk = false;
+            printf("  head lock: asked %.1f/%.1f, got %.1f/%.1f\n", c[0], c[1], yaw, pitch);
+        }
+    }
+    check(allOk, "head lock: every angle comes back the one that was asked for");
+    // Zero is the case that mattered, so it gets its own line.
+    setMenuHeadLock(true, 0.0f, 0.0f);
+    float yaw = 999.0f, pitch = 999.0f;
+    menuHeadLock(&yaw, &pitch);
+    check(approx(yaw, 0.0f, 0.001f) && approx(pitch, 0.0f, 0.001f),
+          "head lock: zero is straight ahead, not 49.6 right and 29.6 down");
+    setMenuHeadLock(false, 0.0f, 0.0f);
+    check(!menuHeadLock(&yaw, &pitch), "head lock: off is off");
+}
+
 // --- the tooltip strip's surface shift ---------------------------------------
 //
 // The bitmap is wider than the menu card so the tooltip has somewhere to
@@ -323,6 +355,7 @@ int main() {
     testHitFlat();
     testHitCurved();
     testHitShift();
+    testHeadLockAngles();
     testXform();
     testIniWrite();
     testPerfStats();

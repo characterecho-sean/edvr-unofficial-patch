@@ -426,6 +426,18 @@ uint32_t takeDoorCpuUs();
 void     addWaitCpuUs(uint32_t us);
 uint32_t takeWaitCpuUs();
 
+// THE HEAD-LOCKED OVERLAY'S ANGLES cross as tenths of a degree in twelve
+// bits each, so they carry a bias: 1800 puts -180.0 at 0 and +180.0 at
+// 3600, both inside the field.
+//
+// It was 4096, which is 0x1000 -- one bit ABOVE a twelve-bit field, so the
+// mask that follows threw the whole bias away and every angle came back
+// 409.6 degrees low. Zero meant 49.6 degrees right of centre and 29.6 down
+// (flown 2026-09-08: "I had to set 60 across to kind of get it centered",
+// "40 up still puts it below my eye line" -- both predicted to the degree
+// by that arithmetic). A bias must fit in the field it is masked into.
+constexpr int32_t kHeadLockBias = 1800;
+
 // The cull guard's state, published by openvr_api.dll at its stage
 // transitions and read by d3d11.dll once per frame boundary.
 //

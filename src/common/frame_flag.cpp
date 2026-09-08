@@ -210,7 +210,7 @@ struct Shared {
     volatile LONG     perfSeq;
     FrameTimingSample perf;
     // The overlay's head lock: bit 31 on, then yaw and pitch as tenths of a
-    // degree biased by 4096 in twelve bits each.
+    // degree, each biased into twelve bits (kHeadLockBias).
     volatile LONG     menuHeadLock;
     // EDVR's activity this frame, openvr -> d3d11: event bits ORed in, the
     // door's CPU microseconds added; both taken (cleared) at the d3d11
@@ -234,6 +234,9 @@ struct Shared {
 // The name is built once, at first use. The two DLLs are in the same process,
 // so the channel between them is unaffected.
 //
+// _v29 because the head lock's two angles are packed with a bias that fits
+// the field they are masked into; the old pair would read each other's
+// angles 409.6 degrees out.
 // _v28 because the frame timing sample names its layout (184 or 176) and
 // the WaitGetPoses block time crosses for the render thread's busy time.
 // _v27 because the frame timing sample is now the SETTLED record (two
@@ -283,7 +286,7 @@ const wchar_t* mappingName() {
     static wchar_t name[64];
     static bool built = false;
     if (!built) {
-        _snwprintf_s(name, _TRUNCATE, L"Local\\edvr_glitch_frame_v28_%lu",
+        _snwprintf_s(name, _TRUNCATE, L"Local\\edvr_glitch_frame_v29_%lu",
                      GetCurrentProcessId());
         built = true;
     }
@@ -746,7 +749,7 @@ void setMenuHeadLock(bool on, float yawDeg, float pitchDeg) {
         float c = deg;
         if (!(c > -180.0f)) c = -180.0f;
         if (!(c < 180.0f)) c = 180.0f;
-        return static_cast<uint32_t>(static_cast<int32_t>(c * 10.0f) + 4096) & 0xFFFu;
+        return static_cast<uint32_t>(static_cast<int32_t>(c * 10.0f) + kHeadLockBias) & 0xFFFu;
     };
     const uint32_t packed = 0x80000000u | (tenths(yawDeg) << 12) | tenths(pitchDeg);
     InterlockedExchange(&s->menuHeadLock, static_cast<LONG>(packed));
@@ -757,8 +760,8 @@ bool menuHeadLock(float* yawDeg, float* pitchDeg) {
     if (!s) return false;
     const uint32_t v = static_cast<uint32_t>(InterlockedCompareExchange(&s->menuHeadLock, 0, 0));
     if (!(v & 0x80000000u)) return false;
-    if (yawDeg) *yawDeg = (static_cast<int32_t>((v >> 12) & 0xFFFu) - 4096) / 10.0f;
-    if (pitchDeg) *pitchDeg = (static_cast<int32_t>(v & 0xFFFu) - 4096) / 10.0f;
+    if (yawDeg) *yawDeg = (static_cast<int32_t>((v >> 12) & 0xFFFu) - kHeadLockBias) / 10.0f;
+    if (pitchDeg) *pitchDeg = (static_cast<int32_t>(v & 0xFFFu) - kHeadLockBias) / 10.0f;
     return true;
 }
 
