@@ -210,6 +210,39 @@ void testHeadLockAngles() {
     check(!menuHeadLock(&yaw, &pitch), "head lock: off is off");
 }
 
+// --- which way the head-locked readout's offsets point ------------------------
+//
+// The panel sits on its anchor's forward. With an identity head pose the
+// anchor IS the rotation, so the panel's centre in head space is minus its
+// third column times the distance -- and its x tells you which way the
+// offset moved it. Positive yaw must go RIGHT (+x) and positive pitch UP,
+// which is what edvr.ini promises; the code had yaw the other way.
+void testHeadLockDirection() {
+    const float identity[12] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0};
+    auto centreOf = [&](float yaw, float pitch, float out[3]) {
+        float a[12];
+        menuHeadLockAnchor(identity, yaw, pitch, a);
+        // The forward is minus the third column; the centre is dist along it.
+        out[0] = -a[2];
+        out[1] = -a[6];
+        out[2] = -a[10];
+    };
+    float c[3];
+    centreOf(0.0f, 0.0f, c);
+    check(approx(c[0], 0.0f, 0.001f) && approx(c[1], 0.0f, 0.001f) && approx(c[2], -1.0f, 0.001f),
+          "head lock: no offset is straight ahead");
+    centreOf(30.0f, 0.0f, c);
+    check(c[0] > 0.4f && approx(c[1], 0.0f, 0.001f),
+          "head lock: a POSITIVE yaw puts the readout to the RIGHT");
+    centreOf(-30.0f, 0.0f, c);
+    check(c[0] < -0.4f, "head lock: a negative yaw puts it to the left");
+    centreOf(0.0f, 30.0f, c);
+    check(c[1] > 0.4f && approx(c[0], 0.0f, 0.001f),
+          "head lock: a positive pitch puts it up");
+    centreOf(0.0f, -30.0f, c);
+    check(c[1] < -0.4f, "head lock: a negative pitch puts it down");
+}
+
 // --- the tooltip strip's surface shift ---------------------------------------
 //
 // The bitmap is wider than the menu card so the tooltip has somewhere to
@@ -356,6 +389,7 @@ int main() {
     testHitCurved();
     testHitShift();
     testHeadLockAngles();
+    testHeadLockDirection();
     testXform();
     testIniWrite();
     testPerfStats();

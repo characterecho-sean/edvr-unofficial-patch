@@ -37,6 +37,12 @@ void* menuDoorTreat(vr::EVREye eye, void* handle, const vr::VRTextureBounds_t* b
 void menuDoorXform(const float anchor[12], const float current[12], const float eyeOffset[3],
                    float xf[12]);
 
+// The head-locked readout's anchor, pure, for the test: this frame's pose
+// turned by the overlay's offsets. POSITIVE YAW PUTS IT TO THE RIGHT and
+// positive pitch up, which is what edvr.ini promises; the negation that
+// makes the first of those true lives in the implementation.
+void menuHeadLockAnchor(const float current[12], float yawDeg, float pitchDeg, float out[12]);
+
 void menuDoorShutdown();
 
 }  // namespace edvr

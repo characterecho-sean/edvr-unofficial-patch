@@ -51,6 +51,28 @@ void standDown(const char* why) {
 
 }  // namespace
 
+// The head-locked panel's anchor: this frame's pose turned by the offsets
+// the overlay was given. R' = R * Ry(-yaw) * Rx(pitch).
+//
+// THE YAW IS NEGATED, and that is the whole of the sign convention here.
+// The panel sits on its anchor's forward, which for a rotation of +t about
+// the up axis points at (-sin t, 0, -cos t) -- toward NEGATIVE x, which is
+// the viewer's LEFT. Negating makes a positive yaw put the panel to the
+// RIGHT, which is what edvr.ini has always promised and what anyone would
+// assume. Pitch needs no flip: +pitch already reads as up.
+void menuHeadLockAnchor(const float current[12], float yawDeg, float pitchDeg, float out[12]) {
+    const float ty = -yawDeg * 0.0174532925f, tp = pitchDeg * 0.0174532925f;
+    const float cy = cosf(ty), sy = sinf(ty), cp = cosf(tp), sp = sinf(tp);
+    const float m[9] = {cy, sy * sp, sy * cp, 0.0f, cp, -sp, -sy, cy * sp, cy * cp};
+    for (int r = 0; r < 3; ++r) {
+        const float x = current[r * 4 + 0], y = current[r * 4 + 1], z = current[r * 4 + 2];
+        out[r * 4 + 0] = x * m[0] + y * m[3] + z * m[6];
+        out[r * 4 + 1] = x * m[1] + y * m[4] + z * m[7];
+        out[r * 4 + 2] = x * m[2] + y * m[5] + z * m[8];
+        out[r * 4 + 3] = current[r * 4 + 3];
+    }
+}
+
 void menuDoorXform(const float a[12], const float c[12], const float e[3], float xf[12]) {
     // D = Ra^T * Rc, row-major: D[i][j] = sum_k a[k][i] * c[k][j].
     for (int i = 0; i < 3; ++i) {
@@ -118,16 +140,7 @@ void* menuDoorTreat(vr::EVREye eye, void* handle, const vr::VRTextureBounds_t* b
     float lockAnchor[12];
     const float* anchorUsed = s.anchor;
     if (menuHeadLock(&yaw, &pitch)) {
-        const float ty = yaw * 0.0174532925f, tp = pitch * 0.0174532925f;
-        const float cy = cosf(ty), sy = sinf(ty), cp = cosf(tp), sp = sinf(tp);
-        const float m[9] = {cy, sy * sp, sy * cp, 0.0f, cp, -sp, -sy, cy * sp, cy * cp};
-        for (int r = 0; r < 3; ++r) {
-            const float x = current[r * 4 + 0], y = current[r * 4 + 1], z = current[r * 4 + 2];
-            lockAnchor[r * 4 + 0] = x * m[0] + y * m[3] + z * m[6];
-            lockAnchor[r * 4 + 1] = x * m[1] + y * m[4] + z * m[7];
-            lockAnchor[r * 4 + 2] = x * m[2] + y * m[5] + z * m[8];
-            lockAnchor[r * 4 + 3] = current[r * 4 + 3];
-        }
+        menuHeadLockAnchor(current, yaw, pitch, lockAnchor);
         anchorUsed = lockAnchor;
     } else {
         uint32_t seq = 0;
