@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <cstring>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include <windows.h>
@@ -61,12 +62,25 @@ uint8_t  g_grid[kObjectGrid * kObjectGrid * kObjectGrid];
 uint32_t g_gridVersion = 0;
 float    g_gridCell = 0.0f;   // the lattice's cell, metres; 0 = not chosen yet
 
-// The body's occupancy: its members' positions now, boxed and padded by the
-// reach, each marking the cells within the reach of it. A station's parts
-// are placed metres apart and tens of metres across, so at sixty metres
-// the slot's walls and the rim read solid and the space between the arms
-// stays empty.
-void buildGrid(const uint8_t* now, const int* memberSlots, int count, const float* pos) {
+// The body's occupancy: boxed by its members' positions now, padded by the
+// reach, and marked by EVERY live record of the body's types -- each
+// marking the cells within the reach of it. The members alone marked it
+// on the first grid builds, and that flickered the sparse parts: a record
+// not rewritten this frame, or sitting in a shuffled slot, is never a pose
+// change and never a member, and the flight of 2026-09-08 17:21 had 548 of
+// 956 live records of a station's types outside its cluster on one pair
+// (153 and 222 on the two before). The dense core stayed claimed because
+// some member always marked its cells; a panel boom with a few records
+// depended on those few being members THAT pair, and the panels "appear
+// jerky at any distance". The signature is the type (the fourth flight:
+// 0-8% unique), which is what a body's occupancy should be keyed on: a
+// station's parts are its own types, and a stray of the same type
+// elsewhere falls outside the box. A station's parts are placed metres
+// apart and tens of metres across, so at sixty metres the slot's walls and
+// the rim read solid and the space between the arms stays empty.
+void buildGrid(const uint8_t* now, uint32_t n, const std::vector<uint8_t>& liveNow,
+               const std::vector<uint64_t>& sigNow, const std::unordered_set<uint64_t>& bodySigs,
+               const int* memberSlots, int count, const float* pos, const float* camPos) {
     float lo[3] = {1e30f, 1e30f, 1e30f}, hi[3] = {-1e30f, -1e30f, -1e30f};
     for (int m = 0; m < count; ++m) {
         const float* p = pos + memberSlots[m] * 3;
@@ -85,7 +99,7 @@ void buildGrid(const uint8_t* now, const int* memberSlots, int count, const floa
     // lattice the same place in the world is the same cell, pair after
     // pair, while the cell size holds (it moves only when the extent
     // crosses a power of two).
-    const int n = static_cast<int>(kObjectGrid);
+    const int gn = static_cast<int>(kObjectGrid);
     float ext = 1.0f;
     for (int k = 0; k < 3; ++k) {
         const float e = (hi[k] - lo[k]) + 2.0f * g_reachM;
@@ -95,39 +109,47 @@ void buildGrid(const uint8_t* now, const int* memberSlots, int count, const floa
     // under a third of it: a body whose extent hovers at a power of two
     // would otherwise flip the lattice every other pair.
     float cell = g_gridCell;
-    if (cell <= 0.0f || cell * static_cast<float>(n - 2) < ext || cell * static_cast<float>(n - 2) > 3.0f * ext) {
+    if (cell <= 0.0f || cell * static_cast<float>(gn - 2) < ext || cell * static_cast<float>(gn - 2) > 3.0f * ext) {
         cell = 16.0f;
-        while (cell * static_cast<float>(n - 2) < ext && cell < 8192.0f) cell *= 2.0f;
+        while (cell * static_cast<float>(gn - 2) < ext && cell < 8192.0f) cell *= 2.0f;
     }
     g_gridCell = cell;
     for (int k = 0; k < 3; ++k) {
         lo[k] = floorf((lo[k] - g_reachM) / cell) * cell;
-        hi[k] = lo[k] + cell * static_cast<float>(n);
+        hi[k] = lo[k] + cell * static_cast<float>(gn);
         g_motion.bmin[k] = lo[k];
         g_motion.bmax[k] = hi[k];
     }
     memset(g_grid, 0, sizeof(g_grid));
     int dil = static_cast<int>(ceilf(g_reachM / cell));
     dil = dil < 1 ? 1 : (dil > 4 ? 4 : dil);
-    for (int m = 0; m < count; ++m) {
-        const float* p = pos + memberSlots[m] * 3;
+    for (uint32_t i = 0; i < n; ++i) {
+        if (!liveNow[i] || !bodySigs.count(sigNow[i])) continue;
+        const Pose pr = decodePose(now + i * kRecordBytes);
+        const float* p = pr.p;
+        if (camPos) {
+            const float dx = p[0] - camPos[0], dy = p[1] - camPos[1], dz = p[2] - camPos[2];
+            if (dx * dx + dy * dy + dz * dz < kShipRadiusM * kShipRadiusM) continue;
+        }
+        bool inBox = true;
         int c[3];
         for (int k = 0; k < 3; ++k) {
+            if (p[k] < lo[k] || p[k] >= hi[k]) inBox = false;
             int idx = static_cast<int>((p[k] - lo[k]) / cell);
-            c[k] = idx < 0 ? 0 : (idx >= n ? n - 1 : idx);
+            c[k] = idx < 0 ? 0 : (idx >= gn ? gn - 1 : idx);
         }
+        if (!inBox) continue;
         for (int z = c[2] - dil; z <= c[2] + dil; ++z) {
-            if (z < 0 || z >= n) continue;
+            if (z < 0 || z >= gn) continue;
             for (int y = c[1] - dil; y <= c[1] + dil; ++y) {
-                if (y < 0 || y >= n) continue;
+                if (y < 0 || y >= gn) continue;
                 for (int x = c[0] - dil; x <= c[0] + dil; ++x) {
-                    if (x < 0 || x >= n) continue;
-                    g_grid[(z * n + y) * n + x] = 255;
+                    if (x < 0 || x >= gn) continue;
+                    g_grid[(z * gn + y) * gn + x] = 255;
                 }
             }
         }
     }
-    (void)now;
     ++g_gridVersion;
     g_motion.gridVersion = g_gridVersion;
     g_motion.grid = g_grid;
@@ -651,7 +673,11 @@ void diffPair(const uint8_t* prev, const uint8_t* now, uint32_t bytes, float dtM
                 g_motion.age = 0;
                 g_motionAge = 0;
                 g_motionValid = true;
-                buildGrid(now, members.data(), static_cast<int>(members.size()), posNow.data());
+                std::unordered_set<uint64_t> bodySigs;
+                bodySigs.reserve(members.size());
+                for (int m : members) bodySigs.insert(sigNow[static_cast<size_t>(m)]);
+                buildGrid(now, n, liveNow, sigNow, bodySigs, members.data(),
+                          static_cast<int>(members.size()), posNow.data(), camPos);
             }
         }
         ++g_bigPairs;
