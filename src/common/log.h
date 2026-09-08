@@ -13,6 +13,7 @@
 // the alternative is touching the filesystem from the render thread at 90Hz.
 #pragma once
 
+#include <atomic>
 #include <cstdarg>
 #include <cstdint>
 #include <string>
@@ -40,7 +41,7 @@ public:
     void note(const char* fmt, ...);
 
     bool isOpen() const { return m_open; }
-    uint64_t dropped() const { return m_dropped; }
+    uint64_t dropped() const { return m_dropped.load(std::memory_order_relaxed); }
     const std::wstring& dir() const { return m_dir; }
 
 private:
@@ -60,13 +61,24 @@ private:
     Impl* m_impl = nullptr;
 
     std::wstring m_dir;
-    volatile uint64_t m_dropped = 0;
+
+    // Atomic, not volatile (2026-09-07). The increment used to happen AFTER
+    // append() released the spinlock, so two threads dropping at once lost
+    // counts -- and the flusher reads it from a third. This is the same
+    // read-modify-write FaultBudget's comment in guard.h already names.
+    std::atomic<uint64_t> m_dropped{0};
+    uint64_t m_droppedReported = 0;   // flusher thread only
     bool m_open = false;
 
     // Hard ceiling, so a long session cannot fill a disk.
     uint64_t m_maxBytes = 0;      // 0 = unlimited
     uint64_t m_bytesWritten = 0;
     bool     m_capped = false;
+
+    // How much unflushed text may queue between two flusher passes. From
+    // log.buffer_mb; see the comment on kDefaultBufferMb in log.cpp for why
+    // the default is what it is.
+    size_t   m_bufferCapBytes = 0;
 };
 
 uint64_t fnv1a64(const void* data, size_t bytes);
