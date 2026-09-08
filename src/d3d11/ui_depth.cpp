@@ -40,6 +40,20 @@ constexpr uint64_t kPanelVs  = 0xA888D51024D9798Eull;
 constexpr uint64_t kPanelPs  = 0x9107E72CB016CC02ull;
 constexpr uint64_t kScreenVs = 0x4EF6DDB075A927FAull;
 constexpr uint64_t kScreenPs = 0x85565E9261812E2Full;
+// The panel family's other two pixel shaders. The dump of 2026-09-06 holds
+// 140 pixel shaders whose input signature the panel vertex shader can feed,
+// and exactly three read the whole of it; the other two are this one with a
+// colour matrix (cb1[85..87]) after the tone curve, and that one again with
+// a 2-tap smear where the first has 8. Their disassemblies differ from
+// kPanelPs's in nine lines, none of them in the sampling: all three take the
+// interface surface from t1 through s1 at TEXCOORD6, so kPanelDepthHlsl is
+// their transcription too. The in-flight escape menu draws through one of
+// them, which is why it kept swimming while the main menu was fixed: the
+// composite was classified, found no depth shader for its pixel stage and
+// was left alone (Sean, 2026-09-08; the flight of c468661 counts 1.0 such
+// draws a frame in the window its menu was up).
+constexpr uint64_t kPanelPsTinted = 0x015EF9349EC097E8ull;
+constexpr uint64_t kPanelPsCheap  = 0xF2F872B191F656D5ull;
 // The cockpit holo panels' pixel shader, for the reactive mask's coverage:
 // it samples the interface surface at t2 through s1 at TEXCOORD8 (its own
 // disassembly, 2026-09-08 -- the same shape as the menu panel's, which
@@ -200,9 +214,19 @@ const void* g_dsvJudged = nullptr;
 uint32_t    g_dsvJudgedFrame = ~0u;
 bool        g_dsvIsScene = false;
 
-// Families seen, for the one-line-each log.
-uint64_t g_familyLogged[kMaxFamilyLines];
+// Families seen, for the one-line-each log. Kept as the VERTEX shader and
+// the PIXEL shader together: a family's pixel stage has variants, and one
+// of them going untreated is exactly what a field log has to be able to
+// say. Keyed on the vertex shader alone, the in-flight escape menu's
+// composite was silent for two days behind the main menu's line
+// (2026-09-08).
+uint64_t g_familyLoggedVs[kMaxFamilyLines];
+uint64_t g_familyLoggedPs[kMaxFamilyLines];
 uint32_t g_familyLoggedCount = 0;
+// Pixel shaders adopted by another's transcription, named once each.
+bool     g_variants = true;    // advanced.ui_depth_variants
+uint64_t g_variantLogged[kMaxHashes];
+uint32_t g_variantLoggedCount = 0;
 
 // The game's depth-stencil state and its writing twin. The game's is held
 // (AddRef) so its pointer stays a valid key for as long as the twin lives.
@@ -278,18 +302,34 @@ const char kHoloDepthHlsl[] =
     "    return floorAndStrength.y;\n"
     "}\n";
 
+// A transcription stands in for the pixel shaders it names -- and, when the
+// game draws a variant none of them names, for any pixel shader of the same
+// VERTEX family that takes the interface surface from the slot this one
+// reads. The signature a replacement must match is the vertex shader's
+// output, so a variant of the same family always fits; the slot is the part
+// that could differ, and it is checked rather than assumed (the classifier
+// already knows which slot held the learned surface). What is left unchecked
+// is the TEXCOORD the variant samples at, which is why the fallback names
+// every shader it adopts in the log and advanced.ui_depth_variants turns it
+// off.
+constexpr uint32_t kMaxStandIns = 4;
 struct DepthShader {
-    uint64_t            ps = 0;         // the game's pixel shader it stands in for
-    const char*         hlsl = nullptr;
-    size_t              len = 0;
-    const char*         name = nullptr;
-    ID3D11PixelShader*  shader = nullptr;
-    bool                tried = false;
+    uint64_t            ps[kMaxStandIns];  // the game's pixel shaders it stands in for
+    uint64_t            vs;                // their vertex family, for a variant
+    uint32_t            slot;              // the PS SRV slot its HLSL reads
+    const char*         hlsl;
+    size_t              len;
+    const char*         name;
+    ID3D11PixelShader*  shader;
+    bool                tried;
 };
 DepthShader g_depthShaders[3] = {
-    {kPanelPs, kPanelDepthHlsl, sizeof(kPanelDepthHlsl) - 1, "ui_depth_panel_ps", nullptr, false},
-    {kScreenPs, kScreenDepthHlsl, sizeof(kScreenDepthHlsl) - 1, "ui_depth_screen_ps", nullptr, false},
-    {kHoloPanelPs, kHoloDepthHlsl, sizeof(kHoloDepthHlsl) - 1, "ui_depth_holo_ps", nullptr, false},
+    {{kPanelPs, kPanelPsTinted, kPanelPsCheap, 0}, kPanelVs, 1,
+     kPanelDepthHlsl, sizeof(kPanelDepthHlsl) - 1, "ui_depth_panel_ps", nullptr, false},
+    {{kScreenPs, 0, 0, 0}, kScreenVs, 0,
+     kScreenDepthHlsl, sizeof(kScreenDepthHlsl) - 1, "ui_depth_screen_ps", nullptr, false},
+    {{kHoloPanelPs, 0, 0, 0}, kHoloPanel, 2,
+     kHoloDepthHlsl, sizeof(kHoloDepthHlsl) - 1, "ui_depth_holo_ps", nullptr, false},
 };
 ID3D11Buffer* g_floorCb = nullptr;
 float         g_floorCbValue = -1.0f;
@@ -511,10 +551,19 @@ void noteExhausted(const void* res) {
 
 // A family seen for the first time: one line with its target, the
 // visibility the header promises, so a field log can say what was treated.
+bool familySeen(uint64_t vh, uint64_t ph) {
+    for (uint32_t i = 0; i < g_familyLoggedCount; ++i) {
+        if (g_familyLoggedVs[i] == vh && g_familyLoggedPs[i] == ph) return true;
+    }
+    return false;
+}
+
 void noteFamily(uint64_t vh, uint64_t ph, const char* how) {
     if (!vh || g_familyLoggedCount >= kMaxFamilyLines) return;
-    if (inList(g_familyLogged, g_familyLoggedCount, vh)) return;
-    g_familyLogged[g_familyLoggedCount++] = vh;
+    if (familySeen(vh, ph)) return;
+    g_familyLoggedVs[g_familyLoggedCount] = vh;
+    g_familyLoggedPs[g_familyLoggedCount] = ph;
+    ++g_familyLoggedCount;
     ResourceInfo rt;
     const bool haveRt = bindingResolve(bindingGet(BindSlot::Rtv0), &rt) && rt.isTexture2D;
     Log::get().note("ui depth: a new interface family -- vs %016llX ps %016llX draws "
@@ -624,15 +673,43 @@ ID3D11DepthStencilState* reissueState(ID3D11DeviceContext* ctx) {
     return g_reissueDss;
 }
 
-DepthShader* depthShaderFor(ID3D11DeviceContext* ctx, uint64_t ps) {
+DepthShader* compiled(ID3D11DeviceContext* ctx, DepthShader& s) {
+    if (!s.shader && !s.tried) {
+        s.tried = true;
+        s.shader = shaderSwapCompilePs(ctx, s.hlsl, s.len, "main", s.name, nullptr,
+                                       "ui depth");
+    }
+    return s.shader ? &s : nullptr;
+}
+
+// The transcription for this draw's pixel stage: the one that names the
+// shader, or -- for a variant of a family we know, sampling from the slot
+// that transcription reads -- that family's. `slot` is where the classifier
+// found the learned surface, or -1 for a draw that samples none.
+DepthShader* depthShaderFor(ID3D11DeviceContext* ctx, uint64_t ps, uint64_t vs, int slot) {
     for (DepthShader& s : g_depthShaders) {
-        if (s.ps != ps) continue;
-        if (!s.shader && !s.tried) {
-            s.tried = true;
-            s.shader = shaderSwapCompilePs(ctx, s.hlsl, s.len, "main", s.name, nullptr,
-                                           "ui depth");
+        for (const uint64_t named : s.ps) {
+            if (named && named == ps) return compiled(ctx, s);
         }
-        return s.shader ? &s : nullptr;
+    }
+    if (!g_variants || !vs || slot < 0) return nullptr;
+    for (DepthShader& s : g_depthShaders) {
+        if (s.vs != vs || s.slot != static_cast<uint32_t>(slot)) continue;
+        DepthShader* got = compiled(ctx, s);
+        if (!got) return nullptr;
+        if (!inList(g_variantLogged, g_variantLoggedCount, ps) &&
+            g_variantLoggedCount < kMaxHashes) {
+            g_variantLogged[g_variantLoggedCount++] = ps;
+            Log::get().note("ui depth: ps %016llX is a variant of the %016llX family "
+                            "this build has no transcription of its own for, and it "
+                            "takes the interface surface from the slot that family's "
+                            "reads (%u), so that one stands in. If its interface "
+                            "gains depth where nothing is drawn, this is the draw to "
+                            "suspect (advanced.ui_depth_variants = 0 declines it).",
+                            static_cast<unsigned long long>(ps),
+                            static_cast<unsigned long long>(vs), s.slot);
+        }
+        return got;
     }
     return nullptr;
 }
@@ -995,6 +1072,15 @@ void uiDepthConfigure(Config& cfg) {
                         menus ? "get the alpha-aware depth pass"
                               : "are left alone (advanced.ui_depth_menus = 0)");
     }
+    const bool variants = cfg.getBool("advanced.ui_depth_variants", true);
+    if (variants != g_variants) {
+        g_variants = variants;
+        Log::get().note("ui depth: a pixel shader this build has no transcription "
+                        "for %s.",
+                        variants ? "is drawn by its vertex family's, when that one "
+                                   "reads the slot the surface is in"
+                                 : "is left alone (advanced.ui_depth_variants = 0)");
+    }
     // The test instrument changes what a twin is, so the twins are remade.
     const std::string test = cfg.getString("advanced.ui_depth_test", "as_is");
     const bool always = test == "always";
@@ -1080,15 +1166,19 @@ bool uiDepthOnEyeDraw(ID3D11DeviceContext* ctx) {
         ++g_wDepthless;
         return false;
     }
-    bool composite = false;
+    // WHICH SLOT held the learned surface, not just whether one did: a
+    // transcription reads a named register, so the slot is what says
+    // whether it can stand in for a pixel shader it does not name.
+    int surfaceSlot = -1;
     static const BindSlot kSlots[4] = {BindSlot::PsSrv0, BindSlot::PsSrv1,
                                        BindSlot::PsSrv2, BindSlot::PsSrv3};
-    for (const BindSlot slot : kSlots) {
-        if (viewIsSurface(bindingGet(slot))) {
-            composite = true;
+    for (int i = 0; i < 4; ++i) {
+        if (viewIsSurface(bindingGet(kSlots[i]))) {
+            surfaceSlot = i;
             break;
         }
     }
+    const bool composite = surfaceSlot >= 0;
     // The hash: for a composite, the family line and the exclude list
     // (a couple of dozen a frame); otherwise the direct list, which is the
     // only test left for the other draws.
@@ -1106,12 +1196,14 @@ bool uiDepthOnEyeDraw(ID3D11DeviceContext* ctx) {
     const bool sceneFamily = h == kHoloPanel || inList(g_families, g_familyCount, h);
     if (scenePair && sceneFamily) {
         g_mode = Mode::kInPlace;
+        const bool wantLine = g_familyLoggedCount < kMaxFamilyLines;
+        const bool wantMask = g_reactive > 0.0f && g_trained;
+        const uint64_t ph = (wantMask || wantLine) ? boundPsHash(ctx) : 0;
         // The reactive mask, when one is asked for and this family's pixel
         // stage has a coverage shader: a second draw marks it. The depth
         // is already written in place by the game's own draw.
-        if (g_reactive > 0.0f && g_trained) {
-            const uint64_t ph = boundPsHash(ctx);
-            DepthShader* shader = depthShaderFor(ctx, ph);
+        if (wantMask) {
+            DepthShader* shader = depthShaderFor(ctx, ph, h, surfaceSlot);
             ResourceInfo rt;
             if (shader && bindingResolve(bindingGet(BindSlot::Rtv0), &rt) && rt.isTexture2D) {
                 int eye = eyeIndexFor(rt.resource);
@@ -1125,8 +1217,8 @@ bool uiDepthOnEyeDraw(ID3D11DeviceContext* ctx) {
                 }
             }
         }
-        if (g_familyLoggedCount < kMaxFamilyLines && !inList(g_familyLogged, g_familyLoggedCount, h)) {
-            noteFamily(h, boundPsHash(ctx),
+        if (wantLine) {
+            noteFamily(h, ph,
                        composite ? "samples a learned surface; writes its depth in "
                                    "place, the scene's own encoding"
                                  : "named direct family; writes its depth in place");
@@ -1147,22 +1239,30 @@ bool uiDepthOnEyeDraw(ID3D11DeviceContext* ctx) {
     // the scene's planes for the encoding, and the pass's depth for the
     // eye when the composite's own is not it.
     const uint64_t ph = boundPsHash(ctx);
-    DepthShader* shader = depthShaderFor(ctx, ph);
+    DepthShader* shader = depthShaderFor(ctx, ph, h, surfaceSlot);
     if (!shader) {
         ++g_wNoShader;
         noteFamily(h, ph, "samples a learned surface but has no depth shader of "
-                          "its own yet; left alone");
+                          "its own yet, and none of this build's stands in; "
+                          "left alone -- this composite still swims");
         return false;
     }
+    // Every decline below counts as "no pair or planes" in the totals, and
+    // each says which once: a totals line reporting draws left alone with
+    // nothing naming them is what hid the escape menu (2026-09-08).
     float sn = 0.0f, sf = 0.0f;
     if (!temporalPassPlanes(&sn, &sf)) {
         ++g_wNoPair;
+        noteFamily(h, ph, "drawn through the interface projection, but the pass "
+                          "has published no scene planes yet; left alone");
         return false;
     }
     if (!scenePair) {
         ResourceInfo rt;
         if (!bindingResolve(bindingGet(BindSlot::Rtv0), &rt) || !rt.isTexture2D) {
             ++g_wNoPair;
+            noteFamily(h, ph, "drawn through the interface projection into "
+                              "something that is not a 2D colour target; left alone");
             return false;
         }
         int eye = eyeIndexFor(rt.resource);
@@ -1171,6 +1271,12 @@ bool uiDepthOnEyeDraw(ID3D11DeviceContext* ctx) {
         uint32_t fmt = 0;
         if (eye < 0 || !depthProbeSceneDepthFormat(rt.a, rt.b, eye, &tex, &fmt)) {
             ++g_wNoPair;
+            noteFamily(h, ph,
+                       eye < 0 ? "drawn through the interface projection into a "
+                                 "target that is not one of the eyes; left alone"
+                               : "drawn through the interface projection into an "
+                                 "eye the pass has no depth of this size for; "
+                                 "left alone");
             return false;
         }
         g_wantRebind = true;

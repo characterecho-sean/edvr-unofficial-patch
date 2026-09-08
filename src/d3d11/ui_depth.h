@@ -50,6 +50,16 @@
 // is named by its vertex shader's hash; advanced.ui_depth_families adds
 // others, advanced.ui_depth_exclude removes any.
 //
+// A family's PIXEL stage has variants where its vertex stage does not. The
+// panel that composites the main menu also composites the escape menu you
+// open in flight, through a pixel shader that adds a colour matrix -- and a
+// third with fewer blur taps. A stand-in has to match the VERTEX shader's
+// output signature, which a variant shares by construction, so the only
+// thing that could differ is the slot the interface surface sits in: that
+// is checked (the classifier knows which slot it learned the surface in),
+// and a variant passing the check is drawn by its family's stand-in and
+// named in the log. advanced.ui_depth_variants declines them instead.
+//
 // The target direction indicator quad (vs 5DA53D8B0133341E) is left alone
 // because it samples an authored atlas and lookup tables, never a learned
 // surface -- not because the code refuses its target. It is drawn into the
