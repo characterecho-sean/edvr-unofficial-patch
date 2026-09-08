@@ -552,12 +552,48 @@ answered it. The rest need the game running -- see
      early in the scene pass** (q=585..1509 of frames spanning to ~3,800),
      before the movers, so a tag stamped after them survives them.
 
-   The cost of the answer is the bit budget. **Two bits, not the three the
-   cost table assumed: three movers and zero, not seven.** Buckets will
-   overflow more often in the slot than the design expected, and overflow
-   degrades to the world path, which is what every mover gets today. If more
-   tags are needed later, bit 3 is the next candidate -- one family reads it,
-   through mask `08`, once per frame.
+   **Why the other six bits are out**, each for its own reason and each
+   measured in both flights:
+
+   - **Bits 0, 2 and 3 are dead.** `E8FDC0D92EEBA6D7` is a full-screen
+     triangle (`n=3`) with the depth test DISABLED (`ds=02wA`), running
+     `w=0D` with fail-op AND pass-op REPLACE against reference 0. It zeroes
+     those three bits across the whole eye unconditionally, and it runs at
+     or near the end of the scene pass -- the literal last draw in three of
+     the six passes seen, and 116 to 1,465 draws from the end in the others.
+     Nothing survives it.
+   - **Bit 5 is read and then wiped, by the same family in a pair.**
+     `53211E8C072CD02E` draws twice back to back: first `ds=16wZ ref=0 r=20
+     EQUAL`, which READS bit 5, then immediately `ds=02wA ref=0 r=FF w=20
+     ALWAYS KEEP/KEEP/ZERO` -- full-screen, depth disabled, which ZEROES it.
+     Both late in the pass. The pair appears in five of the six passes.
+   - **Bit 4 is read late**, by the `r=10` NOTEQUAL draws, after any point a
+     tag could be stamped.
+   - **Bit 7 would produce false tags.** The `ref=149 w=95` family sets it
+     to 1 on large static geometry (index counts to 101,697), so a reader of
+     bit 7 would find "movers" all over the hull of a station.
+
+   **The budget is two codes, not seven.** With bits 1 and 6, four codes
+   exist. `00` is what every `w=FF` write with reference 21, 0 or 8 leaves,
+   so it is "no tag" -- which is the graceful degradation the design already
+   wants. `11` is reachable too: `6D8886012A4C6785` writes reference 255
+   through `w=FF`, and although it is depth-tested and so only claims pixels
+   it owns, those pixels would read as a tag. Reserve it. **That leaves `01`
+   and `10`: two distinct rigid motions a frame**, against the seven the
+   cost table assumed.
+
+   Two movers is enough for the acceptance test -- a station at distance is
+   one motion, and the cockpit already has the head path -- and it is not
+   enough for the slot. So the honest position is that tier 2 ships for the
+   case it was designed around and overflows in the busiest one, where
+   overflow means the world path, which is what every mover gets today. If
+   that proves too tight, **tier 2b's `R16_UINT` target carries 65,535 tags
+   for the cost of re-rasterising the movers**, and the choice between them
+   is now a measured trade rather than an open question.
+
+   One thing the flight settled in the design's favour: the scene depth's
+   bind flags are `0x48`, so `SHADER_RESOURCE` is set and step 4's stencil
+   view is creatable directly, with no copy.
 2. **Whether the stencil survives to Submit.** From the same census: after
    the last scene draw, does anything clear or write the pair's stencil
    before EDVR's `mv` dispatch (which `review-ui-depth-2026-09-06.md:67-71`
