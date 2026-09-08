@@ -726,7 +726,11 @@ def self_test():
         # The clear, first thing in the frame.
         'DCL 0 #0 D dsv=@10 f=3 z=0.000 s=0 q=1',
         # Scene draws: stencil on, ref 4, reads through mask FF, all KEEP.
-        'DC 0 #1 X n=900 i=1 r=@1 d=@10 c=@9 s=@3,-,-,- vh=AAAA000000000001 '
+        # This one carries the whole IA tail with ia=/ib= (2026-09-08), the
+        # draw's own arguments and index buffer: two more key=value pairs
+        # this reader must parse past without losing q= or so=.
+        'DC 0 #1 X n=900 i=1 r=@1 d=@10 c=@9 s=@3,-,-,- vs=@30 '
+        'vh=AAAA000000000001 vb=@31 sd=32 of=0 tp=4 ia=1536,-12,0 ib=@32+64 '
         'ds=17wA st=14 bm=F pr=- bl=0,2,1,1/2,1,1 sm=FFFFFFFF '
         'so=rFF/wFF/f7/1,1,1 q=2',
         # ...the same target through its OTHER view token: one target.

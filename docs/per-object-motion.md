@@ -740,6 +740,46 @@ answered it. The rest need the game running -- see
    (the input layout at creation), its usage and write path, and whether
    the scene pair's draw order is stable frame to frame (the census's `q=`
    ordinals, diffed across the three frames of one census).
+
+   **The draw-order half came back NEGATIVE from the field** (the two
+   2026-09-07 flights, six scene passes), **and the memo of step 2 cannot
+   work as written.** Draw order is not stable across seconds: two censuses
+   of one scene three seconds apart agreed only 47-62% positionally, and the
+   shape key the census could see -- kind, count, vertex shader, vertex
+   buffer, stride, offset, topology, the VS constant object -- does not
+   distinguish one draw from the next. `tools/draw_identity.py`, written
+   2026-09-08, puts numbers on the same logs: on the scene pair that key
+   names **3-4% of draws uniquely** (590 distinct keys over 2,106 draws, the
+   rest shared by families of look-alikes), frame-to-frame order within one
+   census is 92% positional, and across the three seconds between censuses
+   the whole population's order agrees 0%. A memo keyed on that shape would
+   answer wrong for 96% of draws and never know it. So: **the memo must be a
+   one-frame carry, rebuilt every frame and never held across a scene
+   change**, unless a per-draw identity exists that the census had not
+   recorded.
+
+   **What could still make one, now measured by the next flight.** The
+   census's `DC` lines carry two columns since 2026-09-08, printed after
+   `tp=` so nothing before them changes meaning: **`ia=start,base,
+   startInstance`**, the draw call's own arguments (the start index, the
+   base vertex -- or the start vertex, for the non-indexed kinds -- and the
+   start instance), and **`ib=`**, the bound index buffer. Together with the
+   shape they are exactly the key the design's memo proposed. The thunks
+   have them in hand at no cost and pass them through rather than stash
+   them (`vscreen.cpp`, `hookedDraw` says why). `tools/draw_identity.py`
+   reports, per frame and for the shape key and the augmented key side by
+   side, how many draws each names uniquely and how many recur next frame
+   at all, at the same ordinal, and usably (unique in both frames) -- for
+   every recorded draw and for the scene pair alone -- and between two
+   censuses with every token resolved. **The one number that decides the
+   memo's fate is the scene pair's `usable` share under the args key**: near
+   the shape key's 3-4% and no per-draw identity exists, the carry is the
+   design; near 100% and the memo is back, keyed on the augmented shape. A
+   census taken before the column reads as "NO ia= COLUMN" and the args
+   figures repeat the shape's, so the two cannot be confused.
+
+   The instance-stream half (the slot, the usage, the write path) still
+   needs the input layout at creation and is untouched.
 5. **The record head across families.** Dump the scene's vertex shaders
    (`glare_shader_dump`, `edvr.ini:1470-1472`) and look for the pattern:
    a structured load at stride 336, the position at byte 16, the subtraction
@@ -979,6 +1019,17 @@ Question 4's draw-order half: two censuses of the same scene, and whether the
 same draws appear in the same order.
 
 ```bash
+python tools/draw_identity.py "<path>\edvr_logs\edvr_gfx_<stamp>.log"
+```
+
+Question 4's identity half, on a log from the 2026-09-08 DLL or later: per
+frame, how many draws the shape key and the `ia=`/`ib=` key each name
+uniquely, and frame to frame how many recur, at the same ordinal, and usably.
+Read the scene pair's `usable` figure under the args key; the question says
+what each end of it means. Take the SAME scene twice, a few seconds apart,
+for the cross-census line.
+
+```bash
 python tools/crisp_ui_gates.py "<path>\edvr_logs\edvr_gfx_<stamp>.log"
 ```
 
@@ -1009,6 +1060,15 @@ three are things the instrument already has in hand and throws away.
    stamps tags into the scene's stencil, a class of scene draws the
    instrument cannot see is a hole worth closing before the flight, or at
    minimum turning the fix off for the census.
+
+   *Counted since 2026-09-08, still not recorded.* The three returns that
+   sit above the census calls -- the particle substitution, the withheld
+   witchspace stars and the FSS chrome skip -- each note the draw they
+   swallow while a census is recording; the frame and end lines carry
+   `unseen=`, and a nonzero total gets one plain line at the end naming
+   which fix hid how many. A census taken with `particle_billboard = steady`
+   now says so in its own totals instead of quietly under-counting the
+   scene. The cure for a census that must see them is unchanged: `stock`.
 
 ## Verification
 
@@ -1075,6 +1135,14 @@ which is this project's contract for every read of the game.
    answer that argues for pessimism** -- every stencil bit is named by some
    draw's reference, so budget for tier 2b. What is left is the flight:
    questions 1 (the masks), 3, 4, 6, 7 and 10.
+
+   *Updated 2026-09-08.* Question 1 is answered from two flights (bits 1 and
+   6, two codes); question 4's draw-order half is answered and negative, and
+   its identity half has its column (`ia=`/`ib=`) and its reader
+   (`tools/draw_identity.py`) built and waiting for one capture of the
+   distant station taken twice. The unseen-draw counter closes the third
+   census gap as a count. Questions 3, 6, 7 and 10 need the pool shadow,
+   which is tier 2's first stage, not a flight.
 2. **Tier 1**, about a day, behind its own key: the mask, the reactive
    weight, the bias mask on the trained path. It ships on its own merit and
    stays on under tier 2.

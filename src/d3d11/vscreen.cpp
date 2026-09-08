@@ -1321,9 +1321,13 @@ enum class DrawVerdict {
 };
 
 // kind, count and instances describe the draw for the census and the census
-// probe; every other consumer of this function is indifferent to them.
+// probe, and args is the rest of the call's own argument set (start index,
+// base vertex, start instance -- draw_census.h, DrawArgs), passed through
+// rather than stashed because a stash read the wrong draw's numbers once
+// (hookedDraw says); every other consumer of this function is indifferent
+// to them.
 DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
-                               UINT instances) {
+                               UINT instances, const DrawArgs& args) {
     State* s = g_state;
     // A draw on somebody else's context is not our panel and not an eye draw.
     // This one early return covers all four draw thunks, and it covers them
@@ -1409,6 +1413,9 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
                         mask);
                 }
                 ++s->fssChromeSkipped;
+                // A skip above the census calls is a draw the census never
+                // sees; the count says so on its end line.
+                if (drawCensusArmed()) drawCensusNoteUnseen('f');
                 return DrawVerdict::kSkip;
             }
         }
@@ -1422,7 +1429,7 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         // deferred context's bindings, and draws recorded here were the
         // last draw class no census had ever carried.
         if (drawCensusArmed()) {
-            drawCensusDrawDirect(self, kind, count, instances, true, nullptr, 0);
+            drawCensusDrawDirect(self, kind, count, instances, true, nullptr, 0, args);
         }
         return DrawVerdict::kNone;
     }
@@ -1495,7 +1502,14 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     // The particle billboards, before the eye gate for the same reason the
     // probe is: on foot they draw into the panel, and a fix that only ran
     // for the stereo view would leave the flat view swimming.
+    //
+    // Both returns here sit ABOVE the census calls, so a census taken with
+    // either fix on is missing these draws with nothing in the log saying
+    // so -- the third census gap docs/per-object-motion.md named
+    // (2026-09-08). Counted, not recorded: a census that must see them whole
+    // sets the fix to stock, and the end line now says when it did not.
     if (particleSteady() && particleOnDraw(self, kind, count, instances)) {
+        if (drawCensusArmed()) drawCensusNoteUnseen('p');
         return DrawVerdict::kParticle;
     }
 
@@ -1504,6 +1518,7 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     // same identification -- by shader hash, before the eye gate, since the
     // jump tunnel draws into the panel on foot as well.
     if (witchspaceStarsSkip(self, kind, count, instances)) {
+        if (drawCensusArmed()) drawCensusNoteUnseen('w');
         return DrawVerdict::kSkip;
     }
 
@@ -1589,7 +1604,7 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         // could see was being assembled somewhere this function had already
         // returned from.
         if (drawCensusWantsOffscreen() && drawCensusArmed()) {
-            drawCensusOffDraw(self, kind, count, instances);
+            drawCensusOffDraw(self, kind, count, instances, args);
         }
         // The interface's surfaces, learned where the GUI renderer draws
         // them (ui_depth.h): one bool while off, one hash while a target is
@@ -1868,7 +1883,7 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     // the ones it will run with. Armed is rare and brief; the cost of asking is
     // one call and one bool.
     if (drawCensusArmed()) {
-        drawCensusEyeDraw(self, kind, count, instances, s->eyeDrawsThisFrame);
+        drawCensusEyeDraw(self, kind, count, instances, s->eyeDrawsThisFrame, args);
     }
 
     // The suppression probe, after the census so a census taken while probing
@@ -3113,17 +3128,27 @@ void STDMETHODCALLTYPE hookedRSSetViewports(ID3D11DeviceContext* self, UINT n,
 // vertex's index is offset by. The quad probe reads it (quad_probe.h); it
 // was reading whatever the last INDEXED draw had left there, which for a
 // spec aimed at a 4-vertex draw would have been a silently wrong rectangle.
+//
+// The census's DrawArgs (draw_census.h) are built here and PASSED, never
+// stashed: the stash above is exactly what once read the previous indexed
+// draw's numbers for a non-indexed one, and a census column is worth
+// nothing if it can carry the wrong draw's arguments.
 void STDMETHODCALLTYPE hookedDraw(ID3D11DeviceContext* self, UINT count, UINT start) {
     ++g_state->thunkHits[kHitDraw];
     if (quadProbeWants()) g_state->qsBaseVertex = static_cast<INT>(start);
-    const DrawVerdict v = beginPanelOverride(self, 'D', count, 1);
+    DrawArgs args;
+    args.base = static_cast<int32_t>(start);
+    const DrawVerdict v = beginPanelOverride(self, 'D', count, 1, args);
     forwardWithVerdict(self, v, [&] { g_state->realDraw(self, count, start); });
     if (v == DrawVerdict::kPanel) endPanelOverride(self);
 }
 void STDMETHODCALLTYPE hookedDrawIndexed(ID3D11DeviceContext* self, UINT count,
                                          UINT startIndex, INT baseVertex) {
     ++g_state->thunkHits[kHitDrawIndexed];
-    const DrawVerdict v = beginPanelOverride(self, 'I', count, 1);
+    DrawArgs args;
+    args.start = startIndex;
+    args.base = baseVertex;
+    const DrawVerdict v = beginPanelOverride(self, 'I', count, 1, args);
     forwardWithVerdict(self, v, [&] {
         g_state->realDrawIndexed(self, count, startIndex, baseVertex);
     });
@@ -3134,7 +3159,10 @@ void STDMETHODCALLTYPE hookedDrawInstanced(ID3D11DeviceContext* self, UINT perIn
                                            UINT startInstance) {
     // See hookedDraw: the start vertex, before the call that reads it.
     if (quadProbeWants()) g_state->qsBaseVertex = static_cast<INT>(startVertex);
-    const DrawVerdict v = beginPanelOverride(self, 'N', perInstance, instances);
+    DrawArgs args;
+    args.base = static_cast<int32_t>(startVertex);
+    args.startInstance = startInstance;
+    const DrawVerdict v = beginPanelOverride(self, 'N', perInstance, instances, args);
     // The draw's instance window, for the glare telemetry: the trains
     // share one record buffer at different offsets, and which train a
     // draw carries is only knowable from (start, count).
@@ -3172,7 +3200,11 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
         g_state->qsBaseVertex = baseVertex;
         g_state->qsStartInstance = startInstance;
     }
-    const DrawVerdict v = beginPanelOverride(self, 'X', perInstance, instances);
+    DrawArgs args;
+    args.start = startIndex;
+    args.base = baseVertex;
+    args.startInstance = startInstance;
+    const DrawVerdict v = beginPanelOverride(self, 'X', perInstance, instances, args);
     forwardWithVerdict(self, v, [&] {
         g_state->realDrawIndexedInstanced(self, perInstance, instances, startIndex,
                                           baseVertex, startInstance);

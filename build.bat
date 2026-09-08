@@ -693,6 +693,17 @@ python "%ROOT%\tools\stencil_census.py" --self-test || (
     exit /b 1
 )
 
+echo [edvr] === draw identity self-test ===
+REM The reader that answers "does a stable per-draw identity exist" off the
+REM ia=/ib= columns the DLL prints since 2026-09-08 (docs/per-object-motion.md
+REM Phase 0 question 4). Its numbers decide whether the design's memo can be
+REM built at all, and a key assembled one field short reads as a plausible
+REM percentage. It fails HERE.
+python "%ROOT%\tools\draw_identity.py" --self-test || (
+    echo [edvr] ERROR: the draw identity tool failed its own test
+    exit /b 1
+)
+
 echo [edvr] === eye-split diff self-test ===
 REM The tool that compares the two eyes of one frame. It registers the
 REM eyes before it compares them, because their projections are off-centre

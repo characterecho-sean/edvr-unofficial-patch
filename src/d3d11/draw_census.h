@@ -61,12 +61,38 @@ void drawCensusRequest();
 // a per-draw path and must not be able to spam the log.
 void drawCensusAutoRequest();
 
+// The draw call's own arguments, which no binding shadow carries: where in
+// the index buffer a draw starts, what its indices are offset by, and where
+// in the instance stream it starts (2026-09-08, docs/per-object-motion.md
+// Phase 0 question 4).
+//
+// WHY. The design's step-2 memo wanted a draw recognised again next frame by
+// its shape -- index buffer, start index, count, base vertex, the VS constant
+// object -- and the two 2026-09-07 flights said the shape the census COULD
+// see (kind, count, shader, target, stride, topology) does not distinguish
+// one draw from the next: hundreds of draws a frame share it, and the draw
+// ORDER agrees only 47-62% positionally across three seconds. Whether a
+// stable per-draw identity exists at all comes down to these three numbers
+// and the index buffer, which no census had ever recorded. The thunks have
+// them in hand at no cost; nothing else ever will.
+//
+// The non-indexed kinds ('D', 'N') carry their START VERTEX in `base`, the
+// way quad_probe.h stashes it: it plays the same role, being what a vertex's
+// index is offset by, and `start` is 0 for them. Printed as ia=start,base,
+// startInstance after tp=, beside ib= (the bound index buffer's token),
+// so no existing column changes meaning; tools/draw_identity.py reads it.
+struct DrawArgs {
+    uint32_t start = 0;          // StartIndexLocation (indexed kinds)
+    int32_t  base = 0;           // BaseVertexLocation, or the start vertex
+    uint32_t startInstance = 0;  // StartInstanceLocation (instanced kinds)
+};
+
 // One draw that reached an eye texture, called between the bindings being
 // read and the draw being forwarded. kind: 'D' Draw, 'I' DrawIndexed,
 // 'N' DrawInstanced, 'X' DrawIndexedInstanced. count is the vertex or index
 // count, instances is 1 for the non-instanced kinds. eyeDrawIndex is
 // vscreen's running count for this frame, so a line can be placed within the
-// frame it came from.
+// frame it came from. args is the call's own argument set (above).
 //
 // ctx is the immediate context the draw is about to run on -- vscreen has
 // already established that it is ours -- and it is here for the input
@@ -92,7 +118,19 @@ void drawCensusAutoRequest();
 // so whether recognising by shader would catch the eye that today's
 // panel-sized-SRV test misses.
 void drawCensusEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
-                       uint32_t instances, uint32_t eyeDrawIndex);
+                       uint32_t instances, uint32_t eyeDrawIndex,
+                       const DrawArgs& args);
+
+// A draw the verdict chain returned on BEFORE either census call could
+// record it: a substituted particle billboard ('p', fix.particle_billboard
+// = steady), a withheld witchspace star ('w', fix.witchspace_stars = off) or
+// a skipped FSS chrome quad ('f'). Counted only while a census is recording,
+// printed as unseen= on the frame and end lines and explained once at the
+// end when nonzero -- so a census taken with a fix on says how much of the
+// scene it could not see, instead of silently under-counting it (2026-09-08;
+// docs/per-object-motion.md named this the third census gap). The caller
+// gates on drawCensusArmed(), so an unarmed session pays nothing.
+void drawCensusNoteUnseen(char why);
 
 // Is the census also recording draws that land OUTSIDE the eye textures?
 // Read once when a census starts, never on the draw path.
@@ -124,7 +162,7 @@ bool drawCensusWantsOffscreen();
 // Logged as "DCO" rather than "DC" so tools/diff_draw_census.py keeps seeing
 // exactly the draw population it was written against.
 void drawCensusOffDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
-                       uint32_t instances);
+                       uint32_t instances, const DrawArgs& args);
 
 // One CopyResource ('R') or CopySubresourceRegion ('S'), recorded while a
 // census is running. Logged as "DCC".
@@ -163,10 +201,13 @@ void drawCensusCopy(char kind, void* dst, uint32_t dstSub, uint32_t dstX,
 // 'Y' DrawInstancedIndirect / 'Z' DrawIndexedInstancedIndirect, n=0 i=0,
 // args= naming the argument buffer). Round seventeen: the ring draws read
 // per-eye surfaces nothing recorded ever wrote, and these were the two draw
-// classes no census line had ever carried.
+// classes no census line had ever carried. `args` is the call's own
+// argument set for the direct kinds; an indirect draw's live on the GPU,
+// so its line carries no ia= and the default stands.
 void drawCensusDrawDirect(ID3D11DeviceContext* ctx, char kind, uint32_t count,
                           uint32_t instances, bool foreignCtx,
-                          void* indirectArgs, uint32_t indirectOff);
+                          void* indirectArgs, uint32_t indirectOff,
+                          const DrawArgs& args = DrawArgs());
 
 // One CopyStructureCount, logged as "DCS": the call that moves a GPU-side
 // element count into an argument buffer -- the write that arms every
