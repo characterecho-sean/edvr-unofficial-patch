@@ -88,7 +88,12 @@ EXPOSED_SECTIONS = ('fix',)
 # key is its LABEL and its CHOICES in the in-headset menu, so that demoting a
 # setting from [fix] to [experimental] costs it its tier and its page but not
 # the words somebody already wrote for it.
-UI_SECTIONS = ('fix', 'advanced', 'experimental')
+UI_SECTIONS = ('fix', 'advanced', 'experimental', 'menu')
+# The sections whose keys may be ordinary rows of the in-headset menu -- the
+# fixes, and the menu's own switches, which are the only [menu] keys anyone
+# would reach for while wearing the headset. Both are Fix tier: neither is a
+# developer instrument, and neither is hidden behind menu.developer.
+MENU_ROW_SECTIONS = ('fix', 'menu')
 
 READ_RE = re.compile(
     r'get(Bool|Int|Float|String)([A-Za-z]*)\s*\(\s*"([^"]+)"\s*,\s*([^;]*?)\)', re.S)
@@ -553,9 +558,19 @@ def main():
     # applies as a tri-state -- unknown is allowed for the developer tier and
     # shown as a badge, never silently read as live.
     menuRows = []
-    menuFix = [s for s in exposed if s.menuPage]
+    menuFix = [s for s in settings
+               if s.menuPage and not s.hidden and s.section in MENU_ROW_SECTIONS
+               and '%s.%s' % (s.section, s.key) in code]
     for s in menuFix:
         menuRows.append((s, s.menuPage, 'Fix'))
+    strayToken = [s for s in settings
+                  if s.menuPage and s.section not in MENU_ROW_SECTIONS]
+    if strayToken:
+        print('gen_settings_schema: ERROR: a `| menu` token belongs to a [%s] setting; '
+              'elsewhere the section decides the page.' % ']/['.join(MENU_ROW_SECTIONS))
+        for s in strayToken:
+            print('  edvr.ini:%d  %s.%s' % (s.line, s.section, s.key))
+        return 1
     devSilent = []
     for s in settings:
         if s.section not in DEV_SECTIONS or s.devHidden:

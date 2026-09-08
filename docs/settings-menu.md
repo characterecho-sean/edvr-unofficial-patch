@@ -570,10 +570,13 @@ What this cannot do is name a cause the ring does not carry. A drop with
 no EDVR event and ordinary EDVR costs is the game's or the runtime's, and
 the page says so by calling it clean.
 
-**The overlay** (`menu.fps_overlay = on`, off by default): a one-line
-readout -- frames per second over the last second, the GPU frame time
-from the settled records in it, the render thread's busy time, frames
-dropped in the last ten seconds -- shown while the
+**The overlay** (`menu.fps_overlay`, off by default, and **a switch on
+the Performance page** since 2026-09-08 -- it is the one thing a player
+wants to turn on from inside the headset, and until then it was reachable
+only by editing the file): a one-line readout -- frames per second over
+the last second, the GPU frame time from the settled records in it, the
+render thread's busy time, frames dropped in the last ten seconds --
+shown while the
 menu is CLOSED and pinned to the head, the toolkit's overlay, because that
 is what was asked for and a gauge you carry has its uses. `fps_overlay_yaw`
 and `fps_overlay_pitch` put it where you can stop seeing it (default 16
@@ -598,8 +601,11 @@ gains the "live" or "restart" word the generator derived.
    **A `ui:` line is allowed outside `[fix]`** (`UI_SECTIONS` in the
    generator). It buys the key its LABEL and its CHOICES in this menu and
    nothing else: the installer's window still shows only `[fix]`
-   (`EXPOSED_SECTIONS`), and the key's page and tier still come from its
-   section. The point is that demoting a setting out of `[fix]` costs it
+   (`EXPOSED_SECTIONS`), and for a developer key the page and tier still
+   come from its section. Only `[fix]` and `[menu]` keys may carry a
+   `| menu` token and be ordinary rows (`MENU_ROW_SECTIONS`); the
+   generator refuses the token anywhere else, because everywhere else the
+   section already decides the page. The point is that demoting a setting out of `[fix]` costs it
    its tier and its page but not the words somebody already wrote for it.
    Foveated shading was demoted that way on 2026-09-08 -- it ships off,
    and what it saves does not move the frame rate on Elite -- and kept
