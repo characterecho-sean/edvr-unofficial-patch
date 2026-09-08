@@ -43,7 +43,7 @@
 //
 // SETTINGS
 //
-//   fix.foveation = off | quality | balanced | performance
+//   experimental.foveation = off | quality | balanced | performance
 //   advanced.foveation_inner, _outer (degrees across; 0 = the preset's),
 //   advanced.foveation_distance (metres; the nasal shift),
 //   advanced.foveation_passes = all | geometry

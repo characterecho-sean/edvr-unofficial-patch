@@ -61,12 +61,12 @@ PFN_RealGetGenericInterface g_get = nullptr;
 bool g_wanted = false;       // advanced.gaze_probe, as read at launch
 bool g_configured = false;
 bool g_saidChanged = false;
-// The gaze SOURCE (docs/eye-tracking.md, Phase 2): fix.foveation_centre =
+// The gaze SOURCE (docs/eye-tracking.md, Phase 2): experimental.foveation_centre =
 // eyes arms the same table and, on Pimax's driver, publishes the repaired
 // gaze to the d3d11 half every frame -- d = t - p, one subtraction, as the
 // flights of 2026-09-05/06 measured against Pimax's own tracker. It rides
 // on the probe's arming and its sentinel, and logs nothing per frame.
-bool     g_sourceWanted = false;   // fix.foveation_centre = eyes, as read at launch
+bool     g_sourceWanted = false;   // experimental.foveation_centre = eyes, as read at launch
 bool     g_sourceOn = false;       // armed and publishing
 // The tracker is not ready when the runtime's first frame arrives. On
 // 2026-09-07 the source read once, was declined, and switched itself off
@@ -1335,7 +1335,7 @@ void sourceArm() {
     if (strcmp(g_trackingSystem, "aapvr") != 0) {
         Log::get().note(
             "gaze source: OFF -- this headset's tracking system is \"%s\" and the repair (d = t - p) "
-            "was measured on Pimax's \"aapvr\"; the rings stay on straight ahead. fix.foveation_centre = "
+            "was measured on Pimax's \"aapvr\"; the rings stay on straight ahead. experimental.foveation_centre = "
             "eyes is the Pimax route only, so far.",
             g_trackingSystem);
         return;
@@ -1369,7 +1369,7 @@ void sourceTry() {
     }
     g_sourceOn = true;
     Log::get().note(
-        "gaze source: ON (fix.foveation_centre = eyes) -- the eye-tracked centre is published to the d3d11 "
+        "gaze source: ON (experimental.foveation_centre = eyes) -- the eye-tracked centre is published to the d3d11 "
         "half every frame: d = t - p from entries 36 and 12 on \"%s\", head-frame tangents (%+.3f, %+.3f) at "
         "arming, after %u frame(s) of asking. The rings follow it; a lost gaze is published as lost and the "
         "rings fall back to straight ahead. Nothing per frame is written down.",
@@ -1444,15 +1444,15 @@ void gazeProbeConfigure() {
         g_wanted = want;
         // The source: read at launch, since it rides on the one-time arming.
         //
-        // Both keys, and fix.foveation is the one that decides: the centre
+        // Both keys, and experimental.foveation is the one that decides: the centre
         // defaults to "eyes", so reading it alone armed this table, its
         // validation and three runtime calls a frame for EVERY commander on
         // every headset, whether or not they had asked for foveated shading
         // at all -- and printed an ARMED line promising summaries that
         // would never come (the pre-ship review of 2026-09-06). A gaze
         // nobody asked for is nobody's to read.
-        const std::string mode = cfg.getString("fix.foveation", "off");
-        const std::string centre = cfg.getString("fix.foveation_centre", "eyes");
+        const std::string mode = cfg.getString("experimental.foveation", "off");
+        const std::string centre = cfg.getString("experimental.foveation_centre", "eyes");
         // The same five spellings the d3d11 half accepts as on, and no
         // others: a mode it does not recognise stands the feature down
         // there with a warning, so a typo must not leave this half reading
@@ -1462,7 +1462,7 @@ void gazeProbeConfigure() {
         g_sourceWanted = on && centre != "ahead";
         if (g_sourceWanted) {
             Log::get().note(
-                "gaze source: wanted (fix.foveation = %s with fix.foveation_centre = eyes) -- the "
+                "gaze source: wanted (experimental.foveation = %s with experimental.foveation_centre = eyes) -- the "
                 "eye-tracked centre for the foveation's rings, published once a frame when this "
                 "headset's driver gives one (docs/eye-tracking.md). Arms with the runtime's first "
                 "frame.",

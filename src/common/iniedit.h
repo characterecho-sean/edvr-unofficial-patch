@@ -27,6 +27,13 @@
 // comments, inline comments that need whitespace in front, last value wins,
 // and a UTF-8 BOM skipped. A merge that disagreed with the reader about which
 // value is live would write a file whose settings are not the ones it reports.
+//
+// Lives in common, not the installer, since 2026-09-07: the in-headset
+// settings menu (docs/settings-menu.md) writes edvr.ini with the same
+// one-value merge the installer's settings window uses, and one copy of the
+// grammar is the only way the two can never disagree about what a line
+// says. Plain `edvr` namespace, so the installer's own namespace finds these
+// names unqualified exactly as it did before the move.
 #pragma once
 
 #include <map>
@@ -34,7 +41,7 @@
 #include <utility>
 #include <vector>
 
-namespace edvr::installer {
+namespace edvr {
 
 enum class LineKind {
     Blank,
@@ -105,4 +112,4 @@ std::string mergeIni(const std::string& next, const std::string& user, const std
 std::string iniValue(const std::string& text, const std::string& dotted,
                      const std::string& fallback = std::string());
 
-}  // namespace edvr::installer
+}  // namespace edvr

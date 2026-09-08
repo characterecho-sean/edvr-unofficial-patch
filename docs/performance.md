@@ -376,7 +376,7 @@ all. What was built:
   targets alike in size and format, the first bound in the frame is the
   left). Instrumented: a 600-frame summary of targets per eye, how many were
   known by the submitted texture, and image switches per frame.
-- *Settings.* `fix.foveation = off | quality | balanced | performance`
+- *Settings.* `experimental.foveation = off | quality | balanced | performance`
   (70/100, 50/84, 38/70 degrees across for the full-rate disc and the 2x2
   ring's outer edge); `advanced.foveation_inner`, `_outer` override the
   preset; `advanced.foveation_distance` (0.7 m); `advanced.foveation_passes
@@ -483,7 +483,7 @@ at each frame boundary: a fresh gaze moves the rings' centre, on top of the
 nasal shift, once it has travelled past a 1.5-degree dead band from the
 centre the images were last built on (a refill by UpdateSubresource, a few
 kilobytes an image); a gaze published as lost, or silent for a second,
-returns the centre to straight ahead with one line. `fix.foveation_centre =
+returns the centre to straight ahead with one line. `experimental.foveation_centre =
 eyes | ahead`, eyes the default; the tracker side reads it at launch, the
 rings live. The summary names the centre's state and the refill count, and
 now carries the GPU's own busy percentage, sampled once a second through

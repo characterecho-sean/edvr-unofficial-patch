@@ -535,6 +535,20 @@ Everything is in `edvr.ini`, next to the game; with the file missing you get the
 defaults. `black_void`, `panel_distance` and the Explorer Cam offsets reload
 while the game runs; the rest need a restart.
 
+**The in-headset menu.** Press **F8** in the game (the key is `hotkey.menu`)
+and a settings panel appears where you are looking, anchored in the world so it
+stays put while you read it. Up and Down pick a row; Left and Right change it;
+Enter toggles; Tab changes page; Escape closes. While it is open the game sees
+no keyboard at all, so none of those keys reach the ship -- your HOTAS and
+mouse still do. Every change is written to `edvr.ini` and applies the way a
+hand edit would, and a row that only takes effect at the next launch says so.
+The **Monitor** page is fpsVR's readout -- frame rate and 1% low, the app's
+and the compositor's GPU time, dropped and reprojected frames, CPU, GPU, VRAM
+and RAM -- with a frame-time strip; `menu.fps_overlay = on` pins a one-line
+version of it to your view while the menu is closed. `menu.developer = on`
+adds the advanced and experimental sections. The whole design is in
+[docs/settings-menu.md](docs/settings-menu.md).
+
 ## Running alongside other mods
 
 **The installer does all of this for you** — it recognises what is in the
