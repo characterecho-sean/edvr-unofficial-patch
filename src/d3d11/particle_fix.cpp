@@ -548,31 +548,37 @@ bool heatHazeSkip(ID3D11DeviceContext* ctx, char kind, uint32_t count, uint32_t 
     // indexed draws of a multiple of 36 indices (a segment is six quads),
     // and that leaves a handful of the eye's draws for the VSGetShader.
     if (kind != 'X' || instances == 0 || count == 0 || count > 4096 || (count % 36) != 0) return false;
-    // The context's own answer, for the handful the shape leaves. The
-    // flight of 15:13 (2026-09-09) drew the haze for three minutes beside
-    // a ship while this skip, reading the binding shadow, withheld nothing
-    // -- the flight before the shadow had withheld 13524 -- and nothing in
-    // the log said why. Until the shadow's disagreement is explained the
-    // skip decides by the Get it used then, and counts how the shadow
-    // differed, pointer or hash, for its note to say.
-    ID3D11VertexShader* vs = nullptr;
-    ctx->VSGetShader(&vs, nullptr, nullptr);
-    if (!vs) return false;
-    const uint64_t h = lookupShaderHash(vs);
+    // The shape leaves seventy draws a frame, not a handful: 1.1 million
+    // in three minutes on the flight of 16:22 (2026-09-09), every one of
+    // them asked of the context after the flight of 15:13 had drawn the
+    // haze for three minutes with this skip withholding nothing -- and the
+    // binding shadow agreed with the context on every one. The silence had
+    // been the drives' absence, not the shadow. So the shadow decides
+    // again, and one draw in sixty-four still asks the context and counts
+    // the disagreement, pointer or hash, for the note's bracket.
     ++g_hazeAsked;
-    void* held = bindingGet(BindSlot::Vs);
-    if (!held) {
-        ++g_hazeShadowNull;
-    } else if (held != static_cast<void*>(vs)) {
-        ++g_hazeShadowPtr;
-        g_hazeLastShadow = bindingShaderHash(BindSlot::Vs);
-        g_hazeLastGet = h;
-    } else if (bindingShaderHash(BindSlot::Vs) != h) {
-        ++g_hazeShadowHash;
-        g_hazeLastShadow = bindingShaderHash(BindSlot::Vs);
-        g_hazeLastGet = h;
+    uint64_t h;
+    if ((g_hazeAsked & 63) == 0) {
+        ID3D11VertexShader* vs = nullptr;
+        ctx->VSGetShader(&vs, nullptr, nullptr);
+        if (!vs) return false;
+        h = lookupShaderHash(vs);
+        void* held = bindingGet(BindSlot::Vs);
+        if (!held) {
+            ++g_hazeShadowNull;
+        } else if (held != static_cast<void*>(vs)) {
+            ++g_hazeShadowPtr;
+            g_hazeLastShadow = bindingShaderHash(BindSlot::Vs);
+            g_hazeLastGet = h;
+        } else if (bindingShaderHash(BindSlot::Vs) != h) {
+            ++g_hazeShadowHash;
+            g_hazeLastShadow = bindingShaderHash(BindSlot::Vs);
+            g_hazeLastGet = h;
+        }
+        vs->Release();
+    } else {
+        h = boundVsHashFast(ctx);
     }
-    vs->Release();
     if (h != kHeatHazeVs[0] && h != kHeatHazeVs[1] && h != kHeatHazeVs[2]) return false;
     ++g_hazeSkipped;
     const uint64_t now = nowMs();
@@ -580,9 +586,9 @@ bool heatHazeSkip(ID3D11DeviceContext* ctx, char kind, uint32_t count, uint32_t 
         g_hazeNoteMs = now;
         Log::get().note("heat haze: OFF -- %llu draw(s) of the drives' refraction withheld so far; the "
                         "smoke and the glow stay. fix.heat_haze = on has them back. (%llu ribbon-shaped "
-                        "draws asked the context for their shader; the binding shadow disagreed on "
-                        "%llu of them, %llu by pointer and %llu by hash, and was empty for %llu; it "
-                        "last held %016llX where the context held %016llX.)",
+                        "draws, one in sixty-four checked against the context: the binding shadow "
+                        "disagreed on %llu of those, %llu by pointer and %llu by hash, and was empty for "
+                        "%llu; it last held %016llX where the context held %016llX.)",
                         static_cast<unsigned long long>(g_hazeSkipped),
                         static_cast<unsigned long long>(g_hazeAsked),
                         static_cast<unsigned long long>(g_hazeShadowPtr + g_hazeShadowHash),

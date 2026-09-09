@@ -146,7 +146,8 @@ std::vector<float> g_body2Pos;   // x y z per part, the last pair it was found
 float    g_body2ReachM = 0.0f;
 uint32_t g_body2LastRecords = 0;
 float    g_body2LastDeg = 0.0f;
-uint64_t g_body2Pairs = 0, g_body2HeldPairs = 0;
+float    g_body2LastRelDeg = 0.0f;   // its turn's difference from the body's, degrees a pair
+uint64_t g_body2Pairs = 0, g_body2HeldPairs = 0, g_body2Fragments = 0;
 // Moving ships (object_probe.h, takeShips): taken within this of the
 // camera (the pass's setting), held this long past their pair -- three
 // pair intervals, so a pair that lost a ship to a slot shuffle does not
@@ -1394,7 +1395,19 @@ void diffPair(const uint8_t* prev, const uint8_t* now, uint32_t bytes, float dtM
                                 fitTrimmed(members2, posNow, posPrev, w2, t2, &rms2) && rms2 <= kMotionMaxRmsM) {
                                 const float deg2 = sqrtf(w2[0] * w2[0] + w2[1] * w2[1] + w2[2] * w2[2]) * 57.2957795f;
                                 const float m2 = sqrtf(t2[0] * t2[0] + t2[1] * t2[1] + t2[2] * t2[2]);
-                                if (deg2 >= kMotionMinDeg && deg2 <= kMotionMaxDeg && m2 <= kMotionMaxM) {
+                                // A second body TURNS OTHERWISE than the body: the ring's own
+                                // cluster splits at the table's overflow, and its other half
+                                // (267 and 394 parts at the body's own 0.042 deg, the flight
+                                // of 16:22) is the body, not a second one. The ships' slice
+                                // test, the other way about: a quarter of the body's turn
+                                // apart, at least.
+                                const float rx = w2[0] - w[0], ry = w2[1] - w[1], rz = w2[2] - w[2];
+                                const float rel = sqrtf(rx * rx + ry * ry + rz * rz);
+                                const float wn = sqrtf(w[0] * w[0] + w[1] * w[1] + w[2] * w[2]);
+                                const bool ownTurn = rel >= 0.25f * wn + 6e-5f;
+                                if (!ownTurn) ++g_body2Fragments;
+                                if (ownTurn && deg2 >= kMotionMinDeg && deg2 <= kMotionMaxDeg && m2 <= kMotionMaxM) {
+                                    g_body2LastRelDeg = rel * 57.2957795f;
                                     // Continuity against its own last centroid, else a new ring.
                                     bool same2 = g_lastRel2Valid && g_body2Hold > 0;
                                     if (same2) {
@@ -1712,14 +1725,16 @@ void report() {
             static_cast<double>(g_shipsOwn) / sp,
             static_cast<double>(g_shipsFew) / sp, kShipMinRecords, static_cast<double>(g_shipsUnfit) / sp);
     }
-    if (g_body2Pairs || g_body2HeldPairs) {
+    if (g_body2Pairs || g_body2HeldPairs || g_body2Fragments) {
         Log::get().note(
             "object probe, the second body: found on %llu pairs and held over %llu that did not find it; "
-            "the last had %u parts turning %.4f deg a pair, marked %.0f m around each in the grid.",
+            "the last had %u parts turning %.4f deg a pair, %.4f deg from the body's turn, marked %.0f m "
+            "around each in the grid. %llu pairs offered a fragment of the body (the same turn) instead.",
             static_cast<unsigned long long>(g_body2Pairs), static_cast<unsigned long long>(g_body2HeldPairs),
-            g_body2LastRecords, static_cast<double>(g_body2LastDeg), static_cast<double>(g_body2ReachM));
+            g_body2LastRecords, static_cast<double>(g_body2LastDeg), static_cast<double>(g_body2LastRelDeg),
+            static_cast<double>(g_body2ReachM), static_cast<unsigned long long>(g_body2Fragments));
     }
-    g_body2Pairs = g_body2HeldPairs = 0;
+    g_body2Pairs = g_body2HeldPairs = g_body2Fragments = 0;
     g_shipPairs = g_shipsTaken = g_shipsOutOfRange = g_shipsSlices = 0;
     g_shipsOwn = 0;
     g_shipsStill = g_shipsUnfit = g_shipsOverCap = g_shipsFew = 0;
