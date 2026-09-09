@@ -1681,7 +1681,7 @@ bool     g_moversNoted = false;    // the engage line, once
 // instance pool's largest rigid cluster (object_probe.cpp), taken per pixel
 // against the camera's by a 3x3 match with this margin.
 bool     g_objectsOn = false;      // fix.temporal_aa_objects
-float    g_objectsReach = 700.0f;  // advanced.temporal_aa_objects_reach, metres
+float    g_objectsReach = 1000.0f; // advanced.temporal_aa_objects_reach, metres
 bool     g_objectsNoted = false;   // the engage line, once
 ObjectMotion g_bodyLast = {};      // the motion last handed to the shader, for the log
 bool     g_bodyLastValid = false;
@@ -4163,8 +4163,8 @@ void temporalPassConfigure(Config& cfg) {
                 : _stricmp(dbg.c_str(), "depth") == 0 ? 3 : _stricmp(dbg.c_str(), "movers") == 0 ? 4
                 : _stricmp(dbg.c_str(), "objects") == 0 ? 5 : 0;
     g_objectsOn = cfg.getBool("fix.temporal_aa_objects", false);
-    float reach = cfg.getFloat("advanced.temporal_aa_objects_reach", 700.0f);
-    if (!std::isfinite(reach)) reach = 700.0f;
+    float reach = cfg.getFloat("advanced.temporal_aa_objects_reach", 1000.0f);
+    if (!std::isfinite(reach)) reach = 1000.0f;
     if (reach < 1.0f) reach = 1.0f;
     if (reach > 2000.0f) reach = 2000.0f;
     g_objectsReach = reach;

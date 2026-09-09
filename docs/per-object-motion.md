@@ -2063,6 +2063,23 @@ which is this project's contract for every read of the game.
    station, so the grid is 128 cells a side (2 MB): 256 m here as
    before, 32 m at a Coriolis, the dilation's cost being the occupied
    lines and not the reach.
+
+   *Its sixteenth flight* (07:01, `v0.14.1-86-g22eacd9`): "it appears
+   to have regressed", with a dump: the station seen through its rings
+   from 8.5 km, the rings and the spine white, and the hub's central
+   section DARK -- a long capsule with its radial struts, unclaimed. The
+   desk rebuilt the grid from the pair nearest the dump and found every
+   station record in a marked cell, so the dark is surface far from any
+   record; and along the axis the station's core parts are recorded
+   about a kilometre apart, one record per spine module, with the hub's
+   central section recorded at its two ends 1.7 km apart. Its middle is
+   850 m from any record. At 256 m cells the reach of seven hundred
+   reached 768 to 1024 m and covered it by the luck of where the records
+   sat in their cells; the finer grid gave this station 128 m cells and
+   a reach of 768 to 896, and the luck ran out. The reach is a thousand
+   metres now (eight cells here, 1024 to 1152 m), which is the rule the
+   station sets: the reach must cover half the largest gap between a
+   part's records, not the largest part's radius alone.
 4. **Tier 2b** only if question 1 says no bits.
 5. **Tier 3** as `tools/` work against dumped frames, never on the hot
    path.
