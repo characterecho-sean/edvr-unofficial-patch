@@ -554,8 +554,8 @@ DepthShader*             g_reissueShader = nullptr;
 // pixels the temporal pass keeps off a turning body's path -- a label at a
 // station's distance does not turn with it -- and three quanta of 255
 // under it for the families drawn AT the target that should ride that
-// path: the flight HUD's strokes (the target's chevrons are two capsule
-// strokes each), the holo material's markers, the target-time sprite. The
+// path: the holo material's markers and the target-time sprite (the flight
+// HUD's strokes, the target's chevrons among them, tried it and swam). The
 // mask's value is the only way the pass can tell the two apart at a pixel,
 // three quanta read the same to NVIDIA, and the pass tests the mask
 // against the strength less a quantum and a half (temporal_pass.cpp,
@@ -1442,7 +1442,13 @@ bool uiDepthOnEyeDraw(ID3D11DeviceContext* ctx) {
         // depth over the station (2026-09-09). All three ride a turning
         // body's path (g_reissueMaskOffset says how).
         const bool hud = h == kFlightHud || h == kHoloPanel || h == kHudSprite;
-        g_reissueMaskOffset = hud ? -3.0f / 255.0f : 0.0f;
+        // The flight HUD stays OFF a turning body's path: with its fringe
+        // riding it (2026-09-09 07:11) the reticle's glow moved with the
+        // station while its core did not, and the chevrons "swam". Its
+        // fringe keeps the scene's depth (kHudDepthHlsl), so the station
+        // under the glow reprojects at its own depth, the turn alone
+        // unvectored there.
+        g_reissueMaskOffset = (h == kHoloPanel || h == kHudSprite) ? -3.0f / 255.0f : 0.0f;
         const uint64_t ph = (hud || wantMask || wantLine) ? boundPsHash(ctx) : 0;
         DepthShader* shader = (hud || wantMask) ? depthShaderFor(ctx, ph, h, surfaceSlot) : nullptr;
         if (hud && shader) {
@@ -1472,8 +1478,8 @@ bool uiDepthOnEyeDraw(ID3D11DeviceContext* ctx) {
                        g_mode == Mode::kReissueScene
                            ? (h == kFlightHud
                                   ? "the flight HUD; its depth written by the coverage pass in the "
-                                    "scene's projection, under its strokes and not their quads; its "
-                                    "pixels ride a turning body's path"
+                                    "scene's projection, under its strokes' cores, the scene's under "
+                                    "their fringe; its pixels stay off a turning body's path"
                               : h == kHudSprite
                                   ? "the target-time sprite; its depth written by the coverage pass in "
                                     "the scene's projection, under its opaque core and not its fringe; "

@@ -2080,6 +2080,30 @@ which is this project's contract for every read of the game.
    metres now (eight cells here, 1024 to 1152 m), which is the rule the
    station sets: the reach must cover half the largest gap between a
    part's records, not the largest part's radius alone.
+
+   *Its seventeenth flight* (07:11, `v0.14.1-87-gc177443`): "still
+   seeing pieces of the station (including the tips) not included", and
+   the chevrons "blurring and swimming themselves now", with a dump from
+   9.6 km through the rings. The hub's central drum and its radial
+   struts are dark in it AGAIN, at a reach of a thousand -- and the desk
+   rebuilt the grid from the pair nearest the dump and found no point of
+   the station's axis farther than 830 m from a keyed record, well
+   inside the 1024 m the cells give. So the reach is not it, and the
+   dark drum is unclaimed for some other reason: a depth the pass does
+   not have (a far representation of the hub at that range, written
+   somewhere the pass's depth is not), a depth that reconstructs outside
+   the cells, or the mask. Rather than guess a third time the objects
+   view now says which: under DLSS every world-path pixel the body did
+   not take is coloured by its reason -- blue no depth, green the mask,
+   red outside the cells, yellow inside them but predicted off the
+   image -- and the next dump at the hub reads as a verdict. The tips
+   in the same dump are the same question. The chevrons: with the flight
+   HUD's fringe riding the body's path the reticle's glow moved with the
+   station while its core did not, which is the swim; the flight HUD
+   stays off the body's path again, its core with its own depth, its
+   fringe with the scene's, so the station under the glow reprojects at
+   its own depth with only the turn unvectored there -- the lesser of
+   the two, by the player's own words.
 4. **Tier 2b** only if question 1 says no bits.
 5. **Tier 3** as `tools/` work against dumped frames, never on the hot
    path.

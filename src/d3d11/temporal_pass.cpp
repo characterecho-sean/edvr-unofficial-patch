@@ -461,6 +461,8 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
         float zPred = 0.0;   // for the mover mask: the surface's predicted depth last frame, 0 = none
         uint depthN = 0;     // ...and how many of the 3x3 have a depth now (thick or thin)
         float zBody = 0.0;   // the depth the body's path would take; 0 = not this pixel's question
+        bool farPx = true;   // the objects view's reasons: no depth here...
+        float zPx = 0.0;     // ...and the depth otherwise
         if (knobs.y != 0.0) {
             float zr = 0.0;
             [unroll] for (int oy = -1; oy <= 1; ++oy) {
@@ -474,6 +476,8 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
             float den = zr - knobs.x;   // depth = A + B / z: z = B / (depth - A)
             bool far = zr <= 0.0 || den <= 0.0;
             float z = far ? 0.0 : knobs.z / den;
+            farPx = far;
+            zPx = z;
             bool worldOn = tvCam.w != 0.0 && split.x > 0.0;
             if (worldOn && (far || z > split.x)) {
                 count15 = 1;
@@ -620,10 +624,24 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
             float3 dim = S.Load(int3(region.xy + int2(p), 0)).rgb * 0.25;
             paintDebug(id.xy, size, mover != 0.0 ? float3(1.0, 1.0, 1.0) : dim);
         } else if (split.y == 5.0) {
-            // The objects view: the pixels that took the body's path, white
-            // over the frame dimmed -- a station should light up whole.
+            // The objects view, by reason (2026-09-09, for reading an eye
+            // dump off the desk): white where the body's path was taken;
+            // where the world path had it and the body's path is on, blue
+            // for no depth (the far plane), green for the interface's mask,
+            // red for a depth that lands outside the body's cells, yellow
+            // for one inside them whose prediction fell off the image; the
+            // frame dimmed elsewhere (the ship's path, or the body off).
             float3 dim = S.Load(int3(region.xy + int2(p), 0)).rgb * 0.25;
-            paintDebug(id.xy, size, count29 != 0 ? float3(1.0, 1.0, 1.0) : dim);
+            float3 o5 = dim;
+            if (count29 != 0) {
+                o5 = float3(1.0, 1.0, 1.0);
+            } else if (count15 != 0 && tvSt.w != 0.0) {
+                if (farPx) o5 = float3(0.0, 0.3, 1.0);
+                else if (uiCovered(region.xy + int2(p))) o5 = float3(0.0, 1.0, 0.0);
+                else if (!insideBody(d, zPx)) o5 = float3(1.0, 0.0, 0.0);
+                else o5 = float3(1.0, 1.0, 0.0);
+            }
+            paintDebug(id.xy, size, o5);
         } else if (split.y == 3.0) {
             float zs3 = zSceneAt(region.xy + int2(p));
             float3 o3;
