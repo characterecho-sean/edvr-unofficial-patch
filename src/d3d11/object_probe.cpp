@@ -115,6 +115,7 @@ uint64_t   g_shipPairs = 0, g_shipsTaken = 0, g_shipsOutOfRange = 0, g_shipsSlic
 uint64_t   g_shipsStill = 0, g_shipsUnfit = 0, g_shipsOverCap = 0, g_shipsFew = 0;
 uint32_t   g_shipsMax = 0;
 uint64_t   g_shipNoteMs = 0;
+uint32_t   g_pairLagFrames = 0;   // frames from the pair's second copy to its diff (poll sets it): the ships' age starts there
 
 // The record's head, decoded the way the game's own shaders decode it
 // (fss_panel_vs.h: edvrDecodeQuat, the position at byte 16).
@@ -356,6 +357,7 @@ uint64_t g_bigPairs = 0;                   // pairs with any pose change (a larg
 double   g_bigShareSum = 0.0, g_bigAngleSum = 0.0, g_bigTransSum = 0.0;
 uint64_t g_commonPairs = 0;
 uint64_t g_outsideSum = 0, g_secondSum = 0;
+uint64_t g_shuffled = 0;                   // pose changes in a repacked slot, left unclustered (diffPair says)
 uint64_t g_rebasePairs = 0;
 double   g_rebaseMaxM = 0.0;
 uint32_t g_poolChanges = 0;
@@ -424,7 +426,13 @@ uint64_t signatureOf(const uint8_t* r) {
 // is 0.0035 deg, and at a kilometre that is six centimetres of translation,
 // so the first flight's exact keys at a centimetre split one motion across
 // more buckets than the table had (64 of 64, every interval in flight).
-constexpr int   kMaxClusters = 64;
+// 256 since 2026-09-09 (from 64): the table filled every pair -- "64 at
+// most (and more past the table)" on every report -- and a ship whose
+// first part came after it filled was invisible that pair. Most of the
+// filling was records in a repacked slot, which diffPair no longer
+// clusters; the rest is headroom, and the angle test below is a dot
+// against a cosine so a table this size costs nothing to walk.
+constexpr int   kMaxClusters = 256;
 // 0.01 deg: three quanta. It was 0.03 on the body path's first two flights
 // and that is WIDER than a station's turn (0.021-0.043 deg a frame), so
 // every static thing in view merged into the station's cluster -- a box
@@ -433,6 +441,7 @@ constexpr int   kMaxClusters = 64;
 // handed to the pass as the station and re-registering its pixels by a
 // pixel or two every eighth frame. That was the shimmer.
 constexpr float kClusterAngleDeg = 0.01f;
+const float     kClusterCosHalf = cosf(kClusterAngleDeg * 0.5f * 0.01745329f);   // |q1 . q2| at that angle
 constexpr float kClusterPosM = 0.03f;       // three centimetres...
 constexpr float kClusterPosPerM = 1.0e-4f;  // ...plus the quantum's lever arm on the record's distance
 // The body's fit is ROBUST: members whose residual under the fit exceeds
@@ -483,7 +492,7 @@ int clusterOf(Cluster* cs, int* n, const float qd[4], const float t[3], float an
         float dot = 0.0f;
         for (int i = 0; i < 4; ++i) dot += qd[i] * c.q[i];
         dot = fabsf(dot) > 1.0f ? 1.0f : fabsf(dot);
-        if (2.0f * acosf(dot) * 57.2957795f > kClusterAngleDeg) continue;
+        if (dot < kClusterCosHalf) continue;   // 2 acos(dot) > kClusterAngleDeg, without the acos
         const float dx = t[0] - c.t[0], dy = t[1] - c.t[1], dz = t[2] - c.t[2];
         if (sqrtf(dx * dx + dy * dy + dz * dz) > posTol) continue;
         ++c.count;
@@ -677,11 +686,12 @@ void takeShips(const Cluster* clusters, int nc, int big, const std::vector<int>&
     }
     memcpy(g_ships, found, sizeof(ObjectShip) * nf);
     g_shipCount = nf;
-    g_shipAge = 0;
+    g_shipAge = g_pairLagFrames;   // the parts' positions are the copy's frame's, three or more frames ago
     memcpy(g_shipCamPos, camPos, sizeof(g_shipCamPos));
     g_shipsTaken += nf;
     if (nf > g_shipsMax) g_shipsMax = nf;
     if (dueMs(g_shipNoteMs, 30000)) {
+        g_shipNoteMs = stampMs();   // dueMs reads the stamp; it does not set it (the first flight noted every pair)
         const ObjectShip& s0 = found[0];
         const float* ow = s0.omegaPerMs;
         const float* ot = s0.tPerMs;
@@ -737,7 +747,7 @@ void diffPair(const uint8_t* prev, const uint8_t* now, uint32_t bytes, float dtM
     }
 
     uint32_t live = 0, sigUnique = 0, twins = 0;
-    uint32_t changed = 0, poseChanged = 0, otherOnly = 0, moved = 0;
+    uint32_t changed = 0, poseChanged = 0, otherOnly = 0, moved = 0, shuffled = 0;
     uint32_t allocated = 0, freed = 0;
     uint32_t sigKept = 0, sigMoved = 0, sigNew = 0;
     uint32_t twinQuatPrev = 0, twinPosPrev = 0, twinScalePrev = 0, twinQuatSelf = 0, twinPosSelf = 0;
@@ -786,7 +796,15 @@ void diffPair(const uint8_t* prev, const uint8_t* now, uint32_t bytes, float dtM
         if (memcmp(b + 312, b + 8, 8) == 0) ++twinQuatSelf;
         if (memcmp(b + 292, b + 16, 12) == 0) ++twinPosSelf;
         const bool poseDiff = memcmp(a + 4, b + 4, 24) != 0;
-        if (poseDiff) {
+        if (poseDiff && sigNow[i] != sigPrev[i]) {
+            // Another object in the slot (the pool repacked, sigMoved or
+            // sigNew above): its delta is the difference of two objects'
+            // poses, not a motion, and clustered it made a cluster of its
+            // own per record -- sixty a pair on the ships' first flight
+            // (2026-09-09 11:19), filling the table before a ship's parts
+            // came. Counted, not clustered.
+            ++shuffled;
+        } else if (poseDiff) {
             ++poseChanged;
             float qd[4], t[3], angle = 0.0f, trans = 0.0f, dist = 0.0f;
             const Pose pa = decodePose(a);
@@ -833,6 +851,7 @@ void diffPair(const uint8_t* prev, const uint8_t* now, uint32_t bytes, float dtM
     g_twins += twins;
     g_changed += changed;
     g_poseChanged += poseChanged;
+    g_shuffled += shuffled;
     g_otherOnly += otherOnly;
     g_moved += moved;
     g_allocated += allocated;
@@ -953,6 +972,7 @@ void diffPair(const uint8_t* prev, const uint8_t* now, uint32_t bytes, float dtM
                         sameBody = false;
                         ++g_otherBodyPairs;
                         if (dueMs(g_otherBodyNoteMs, 30000)) {
+                            g_otherBodyNoteMs = stampMs();
                             Log::get().note(
                                 "object probe: a pair's body (%u parts, fit to %.3f m) sat %.0f m from the last "
                                 "one's, camera-relative -- another object, or a slice of the station -- and the "
@@ -1034,6 +1054,7 @@ void diffPair(const uint8_t* prev, const uint8_t* now, uint32_t bytes, float dtM
                     if (ringCount >= 4 && medMag > 0.0f && (nn > 2.0f * medMag || nn < 0.5f * medMag)) {
                         ++g_rateOutliers;
                         if (dueMs(g_rateOutlierNoteMs, 30000)) {
+                            g_rateOutlierNoteMs = stampMs();
                             Log::get().note(
                                 "object probe: a pair's turn (%.4f deg over its %.1f ms) sits %.1fx the held "
                                 "median rate; the median of the last %u pairs holds. %llu such pairs so far.",
@@ -1208,7 +1229,8 @@ void report() {
         "own if it matches the ship's turn and speed on the registration line), %.0f pose "
         "changes a pair outside it (the movers, or noise) and %.0f in the second-largest; the "
         "live records shifted together without a turn on %llu pairs (an origin rebase, up to "
-        "%.1f m); the pool object changed %u times. The fields of a changed record that changed, "
+        "%.1f m); %.0f a pair sat in a repacked slot and went unclustered; the pool object changed "
+        "%u times. The fields of a changed record that changed, "
         "by range with the share of changed records they changed in (under 5%% left out): %s.",
         static_cast<double>(kClusterAngleDeg), 100.0 * static_cast<double>(kClusterPosM),
         1000.0 * static_cast<double>(kClusterPosPerM),
@@ -1218,7 +1240,8 @@ void report() {
         static_cast<unsigned long long>(g_bigPairs), g_bigAngleSum / bigPairs,
         g_bigTransSum / bigPairs, static_cast<double>(g_outsideSum) / bigPairs,
         static_cast<double>(g_secondSum) / bigPairs,
-        static_cast<unsigned long long>(g_rebasePairs), g_rebaseMaxM, g_poolChanges,
+        static_cast<unsigned long long>(g_rebasePairs), g_rebaseMaxM,
+        static_cast<double>(g_shuffled) / pairs, g_poolChanges,
         ranges[0] ? ranges : "none");
     if (g_shipRangeM > 0.0f && g_shipPairs) {
         const double sp = static_cast<double>(g_shipPairs);
@@ -1252,6 +1275,7 @@ void report() {
     g_outsideSum = g_secondSum = 0;
     g_rebasePairs = 0;
     g_rebaseMaxM = 0.0;
+    g_shuffled = 0;
     g_poolChanges = 0;
     memset(g_byteHist, 0, sizeof(g_byteHist));
     g_byteHistN = 0;
@@ -1361,6 +1385,7 @@ void poll(ID3D11DeviceContext* ctx) {
                 for (int r = 0; r < 3; ++r) memcpy(&cam[r], scene + (233 + r) * 16 + 12, sizeof(float));
                 camPos = cam;
             }
+            g_pairLagFrames = g_frame >= s->frame ? g_frame - s->frame : 0;
             diffPair(g_keep.data(), bytes, s->bytes,
                      static_cast<float>(s->stampMs > g_keepStamp ? s->stampMs - g_keepStamp : 0.0), camPos);
             if (g_verbose && g_dumps < kDumpMax && dueMs(g_dumpMs, kDumpEveryMs)) {

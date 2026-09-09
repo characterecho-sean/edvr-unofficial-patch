@@ -3229,10 +3229,26 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                             for (int c = 0; c < 3; ++c) p.shR[shipsOn * 3 + r][c] = Ws[r * 3 + c];
                             p.shR[shipsOn * 3 + r][3] = 0.0f;
                         }
+                        // The box, carried to THIS frame. The pair's positions are
+                        // up to eleven frames old by the time they are applied (the
+                        // copy's three frames to the diff and eight to the next
+                        // pair), and a ship at five metres a frame has left its own
+                        // padded box in six: the ships' first flight (2026-09-09
+                        // 11:19) had a ship in hand at two hundred metres and claimed
+                        // a hundredth of a percent of pixels. The parts move by the
+                        // ship's translation a frame (p_now = R^-1 (p_prev - t), minus
+                        // t to the turn's approximation), and the box widens by a
+                        // fifth of the way carried plus five metres for what those
+                        // frames may have changed.
+                        const float lagMs = static_cast<float>(shipAge) * g_bodyDtMs;
+                        float carry[3];
+                        for (int k = 0; k < 3; ++k) carry[k] = -sh.tPerMs[k] * lagMs;
+                        const float grow = 5.0f + 0.2f * sqrtf(carry[0] * carry[0] + carry[1] * carry[1] +
+                                                               carry[2] * carry[2]);
                         for (int k = 0; k < 3; ++k) {
                             p.shTv[shipsOn][k] = tvs[k];
-                            p.shBox0[shipsOn][k] = sh.bmin[k] + bodyShift[k];
-                            p.shBox1[shipsOn][k] = sh.bmax[k] + bodyShift[k];
+                            p.shBox0[shipsOn][k] = sh.bmin[k] + bodyShift[k] + carry[k] - grow;
+                            p.shBox1[shipsOn][k] = sh.bmax[k] + bodyShift[k] + carry[k] + grow;
                         }
                         p.shTv[shipsOn][3] = p.shBox0[shipsOn][3] = p.shBox1[shipsOn][3] = 0.0f;
                         ++shipsOn;
