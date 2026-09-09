@@ -433,6 +433,18 @@ struct DepthShader {
     const char*         name;
     ID3D11PixelShader*  shader;
     bool                tried;
+    // What this family's coverage writes into the reactive mask, relative
+    // to the strength: nought for the interface proper, whose pixels the
+    // temporal pass keeps off a turning body's path (the label under a
+    // target does not turn with the station), and three quanta under it
+    // for the holo material's markers, which ride the body's path -- the
+    // mask's value is the only way the pass can tell the two apart at a
+    // pixel, and three quanta of 255 read the same to NVIDIA. The pass
+    // tests the mask against the strength less a quantum and a half
+    // (temporal_pass.cpp, uiCovered). Measured 2026-09-09 from an eye dump:
+    // with the markers excluded, the station under each chevron and its
+    // few pixels of halo fell to the camera's path and smeared.
+    float               maskOffset;
 };
 DepthShader g_depthShaders[4] = {
     {{kPanelPs, kPanelPsTinted, kPanelPsCheap, 0}, {kPanelVs, 0, 0, 0}, 1,
@@ -449,11 +461,15 @@ DepthShader g_depthShaders[4] = {
     {{kScreenPs, kSpritePs, 0, 0}, {kScreenVs, kHudSprite, 0, 0}, 0,
      kScreenDepthHlsl, sizeof(kScreenDepthHlsl) - 1, "ui_depth_screen_ps", nullptr, false},
     {{kHoloPanelPs, 0, 0, 0}, {kHoloPanel, 0, 0, 0}, 2,
-     kHoloDepthHlsl, sizeof(kHoloDepthHlsl) - 1, "ui_depth_holo_ps", nullptr, false},
+     kHoloDepthHlsl, sizeof(kHoloDepthHlsl) - 1, "ui_depth_holo_ps", nullptr, false,
+     -3.0f / 255.0f},
 };
-ID3D11Buffer* g_floorCb = nullptr;
-float         g_floorCbValue = -1.0f;
-float         g_floorCbStrength = -1.0f;
+struct FloorCb {
+    ID3D11Buffer* cb = nullptr;
+    float         floor = -1.0f;
+    float         strength = -1.0f;
+};
+FloorCb g_floorCbs[2];   // [0] the interface proper, [1] the holo markers (DepthShader::maskOffset)
 ID3D11DepthStencilState* g_reissueDss = nullptr;   // GEQUAL, write all
 bool          g_reissueDssFailedNoted = false;
 
@@ -960,30 +976,37 @@ ID3D11DepthStencilState* maskDepthState(ID3D11DeviceContext* ctx) {
 // The alpha floor and the reactive strength, in a constant buffer of
 // EDVR's at b13 (a slot the game's composites leave empty: their pixel
 // stages declare b2 alone).
-ID3D11Buffer* floorBuffer(ID3D11DeviceContext* ctx) {
-    if (g_floorCb && g_floorCbValue == g_alphaFloor && g_floorCbStrength == g_reactive) {
-        return g_floorCb;
+// ...one buffer per mask offset in use (DepthShader::maskOffset): the
+// interface proper at the strength, the holo material's markers under it.
+ID3D11Buffer* floorBuffer(ID3D11DeviceContext* ctx, float maskOffset) {
+    const float strength = g_reactive > 0.0f ? (g_reactive + maskOffset > 0.0f ? g_reactive + maskOffset : 0.0f)
+                                             : 0.0f;
+    // Two families with different offsets draw in one frame; each keeps
+    // its own buffer rather than the pair trading one back and forth.
+    FloorCb& slot = g_floorCbs[maskOffset != 0.0f ? 1 : 0];
+    if (slot.cb && slot.floor == g_alphaFloor && slot.strength == strength) {
+        return slot.cb;
     }
-    if (g_floorCb) {
-        g_floorCb->Release();
-        g_floorCb = nullptr;
+    if (slot.cb) {
+        slot.cb->Release();
+        slot.cb = nullptr;
     }
     ID3D11Device* dev = nullptr;
     ctx->GetDevice(&dev);
     if (!dev) return nullptr;
-    const float data[4] = {g_alphaFloor, g_reactive, 0.0f, 0.0f};
+    const float data[4] = {g_alphaFloor, strength, 0.0f, 0.0f};
     D3D11_BUFFER_DESC bd{};
     bd.ByteWidth = sizeof(data);
     bd.Usage = D3D11_USAGE_IMMUTABLE;
     bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
     D3D11_SUBRESOURCE_DATA sd{};
     sd.pSysMem = data;
-    const HRESULT hr = dev->CreateBuffer(&bd, &sd, &g_floorCb);
+    const HRESULT hr = dev->CreateBuffer(&bd, &sd, &slot.cb);
     dev->Release();
-    if (FAILED(hr)) g_floorCb = nullptr;
-    g_floorCbValue = g_alphaFloor;
-    g_floorCbStrength = g_reactive;
-    return g_floorCb;
+    if (FAILED(hr)) slot.cb = nullptr;
+    slot.floor = g_alphaFloor;
+    slot.strength = strength;
+    return slot.cb;
 }
 
 void parseHashes(const std::string& spec, uint64_t* out, uint32_t* count,
@@ -1306,6 +1329,8 @@ void uiDepthConfigure(Config& cfg) {
 
 bool uiDepthWantsDraws() { return g_on && !g_stoodDown; }
 
+float uiDepthReactive() { return g_on && !g_stoodDown ? g_reactive : 0.0f; }
+
 void uiDepthNoteOffscreenDraw(ID3D11DeviceContext* ctx) {
     if (!g_on || g_stoodDown) return;
     const uint32_t gen = bindingGeneration(BindSlot::Rtv0);
@@ -1604,7 +1629,7 @@ bool uiDepthReissueBegin(ID3D11DeviceContext* ctx) {
         // mask-only pass over a family whose depth is already written just
         // marks, with the same test and no writes.
         ID3D11DepthStencilState* dss = depthPass ? reissueState(ctx) : maskDepthState(ctx);
-        ID3D11Buffer* cb = floorBuffer(ctx);
+        ID3D11Buffer* cb = floorBuffer(ctx, shader->maskOffset);
         if (!dss || !cb) {
             ++g_wNoTwin;
             return;
@@ -1839,9 +1864,11 @@ void uiDepthShutdown() {
         s.shader = nullptr;
         s.tried = false;
     }
-    if (g_floorCb) {
-        g_floorCb->Release();
-        g_floorCb = nullptr;
+    for (FloorCb& f : g_floorCbs) {
+        if (f.cb) {
+            f.cb->Release();
+            f.cb = nullptr;
+        }
     }
     g_surfaceCount = 0;
     g_surfaceNext = 0;

@@ -1284,3 +1284,17 @@ floor). A panel's translucent background under the floor keeps the scene's
 depth -- a flat dark colour, which no reprojection can smear visibly -- and
 its text and frame keep theirs. If a panel ever shows its background
 swimming, the floor (`advanced.ui_depth_alpha`) is the knob.
+
+## 2026-09-09, later: the mask tells the holo markers from the interface
+
+The temporal pass keeps the interface's pixels off a turning body's path
+(per-object motion, tier 2: a label at a station's distance does not turn
+with it), and it reads that from the reactive mask. The holo material's
+target markers, which sit at the target too, must ride the body's path
+instead -- an eye dump showed the station smeared under each excluded
+chevron and its halo. The mask carries the distinction: the holo family's
+coverage (`DepthShader::maskOffset`, `-3/255`) marks it three quanta under
+`advanced.ui_depth_reactive`, and the pass tests the mask against the
+strength less a quantum and a half (`uiCovered`, `probe.w`). NVIDIA reads
+three quanta as the same strength. The mask is R8_UNORM, so the two values
+are one quantum apart on either side of the test at any strength.

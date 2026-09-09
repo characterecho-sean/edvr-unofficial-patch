@@ -2004,6 +2004,23 @@ which is this project's contract for every read of the game.
    `edvr_logs\eyes\eye_HHMMSS_L.bmp` and `_R.bmp` -- a debug view can
    be read off the desk instead of photographed through the lens
    (`tools/eye_bmp_to_png.py` shrinks or crops one to a PNG to look at).
+
+   *Its thirteenth flight* (06:11, `v0.14.1-81-ge403278`): "the arc I
+   saw before is fixed", and the first eye dump -- the objects debug
+   view at 5028 by 4964, the hub a white capsule with the ring's rim a
+   thin white curve to its left and the ring's parts white to its right,
+   the cockpit dim, nothing of the cockpit claimed. "The targeting
+   brackets showed up still": at the hub's centre, four chevrons, each
+   a dark hole in the white with a few pixels of halo -- the coverage's
+   footprint at the floor, excluded from the body's path and handed to
+   the camera's, which is a small smear under each. The exclusion was
+   for the interface proper, whose pixels do not turn with a station;
+   the markers should ride it, and the mask's value is the only way to
+   tell the two apart at a pixel. So the holo material's coverage marks
+   the mask three quanta of 255 under the strength, and the pass keeps
+   off the body's path only what sits above the strength less a quantum
+   and a half: the flight HUD's strokes and the composites stay off it,
+   the chevrons ride it. NVIDIA reads three quanta as the same strength.
 4. **Tier 2b** only if question 1 says no bits.
 5. **Tier 3** as `tools/` work against dumped frames, never on the hot
    path.

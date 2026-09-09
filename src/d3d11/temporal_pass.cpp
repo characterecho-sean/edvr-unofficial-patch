@@ -84,7 +84,7 @@ cbuffer P : register(b0) {
     float4 fovea0;      // xy the fovea centre in output pixels, z the inner radius (px) where the periphery calming starts, w 1/(the ramp width in px)
     float4 fovea1;      // x the periphery calm strength (0..1), w 1 = the fovea is on (else no modulation)
     float4 movers;      // x 1 = the mover mask is on (ZP holds last frame's depth for this frustum); y the depth tolerance, a fraction; z the strength, how much history a masked pixel loses (0..1); w 1 = main writes ZC
-    float4 probe;       // for the mv entry: x the history's scale (H is NVIDIA's previous output at outW/w times the render size); y 1 = run the registration probes against it; z 1 = UM holds the interface's reactive mask, to fold into MK; w unused
+    float4 probe;       // for the mv entry: x the history's scale (H is NVIDIA's previous output at outW/w times the render size); y 1 = run the registration probes against it; z 1 = UM holds the interface's reactive mask, to fold into MK; w the mask value above which a pixel is the interface proper (the strength less a quantum and a half; the holo markers sit under it)
     float4 stR0;        // the body's path (tier 2, docs/per-object-motion.md): the composite delta's rows,
     float4 stR1;        // the camera's with the dominant body's own turn -- a station's -- in it
     float4 stR2;
@@ -257,7 +257,12 @@ bool insideBody(float3 d, float z) {
 // (probe.z): the station's target brackets and its label sit at the
 // station's depth, inside its grid, and do not turn with it.
 bool uiCovered(int2 q) {
-    return probe.z != 0.0 && UM.Load(int3(q, 0)) > 0.0;
+    // Above probe.w: the interface proper (its strength). The holo
+    // material's target markers are marked three quanta under the strength
+    // and fall below it, so they ride the body's path with the station
+    // behind them (the eye dump of 2026-09-09 showed the station smeared
+    // under each excluded chevron and its halo).
+    return probe.z != 0.0 && UM.Load(int3(q, 0)) > probe.w;
 }
 // Where this pixel's surface was last frame if it moved with the body:
 // the camera's path composed with the body's turn. False when it lands
@@ -3488,6 +3493,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                                         ((p.movers[0] != 0.0f && e.dlMaskUav != nullptr) || p.tvSt[3] != 0.0f);
                     const bool uiBound = wantUi && ensureUiMaskSrv(dev, e, reactiveMask);
                     p.probe[2] = uiBound ? 1.0f : 0.0f;
+                    p.probe[3] = uiDepthReactive() - 1.5f / 255.0f;   // the interface proper is above this, the markers below
                     setParams(ctx, p);
                     ID3D11ShaderResourceView* nullSrvM[6] = {};
                     ID3D11UnorderedAccessView* nullUavM[6] = {};
@@ -3636,6 +3642,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
             const bool uiOwn = p.tvSt[3] != 0.0f && uiDepthReactiveMask(w, h, eye, &rm) && rm &&
                                ensureUiMaskSrv(dev, e, rm);
             p.probe[2] = uiOwn ? 1.0f : 0.0f;
+            p.probe[3] = uiDepthReactive() - 1.5f / 255.0f;
         }
         bool ran = usedDlaa ? true : setParams(ctx, p);
         bool ownRan = false;
