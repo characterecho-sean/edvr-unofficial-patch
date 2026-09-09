@@ -102,7 +102,7 @@ cbuffer P : register(b0) {
     float4 shBox1[8];   // xyz ...high corner; w unused
     float4 shDir[8];    // xyz the way the ship flies (unit, world; zero when unknown), w its tail plane: a point whose dot with xyz is under w is behind the ship -- its plume, which is not the ship's
     float4 shParts[256];   // per ship kObjectShipParts of its parts' positions (xyz, this frame's frame), shBox0[i].w of them: the ship's claim is the space within objects.z (a reach, squared) of one
-    float4 shRect[8];   // per ship, its box's footprint on the image in pixels (x0 y0 x1 y1; the whole image when a corner is behind the eye), for the claim's counters
+    float4 shRect[8];   // per ship, its box's footprint on the image in pixels (x0 y0 x1 y1; empty when a corner is behind the eye), for the claim's counters
 };
 float3 rgbToYcocg(float3 c) {
     return float3(0.25 * c.r + 0.5 * c.g + 0.25 * c.b,
@@ -303,6 +303,10 @@ int shipFootprint(float3 d) {
     float3 r = float3(dot(wR0.xyz, vg), dot(wR1.xyz, vg), dot(wR2.xyz, vg));
     int n = int(ships.x);
     for (int i = 0; i < n; ++i) {
+        // A box the eye sits in -- a ship within thirty metres, or the
+        // player's own parts taken as one -- is nobody's footprint: every
+        // ray hits it, and the fourth flight's sky read teal whole.
+        if (all(o >= shBox0[i].xyz) && all(o <= shBox1[i].xyz)) continue;
         float3 inv = 1.0 / (abs(r) > 1e-9 ? r : 1e-9);
         float3 t1 = (shBox0[i].xyz - o) * inv;
         float3 t2 = (shBox1[i].xyz - o) * inv;
@@ -564,7 +568,7 @@ void paintDebug(uint2 idx, int2 sz, float3 c) {
 // line the way main's do.
 [numthreads(8, 8, 1)]
 void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
-    if (gi < 40) gCount[gi] = 0;
+    if (gi < 48) gCount[gi] = 0;
     GroupMemoryBarrierWithGroupSync();
     // Three counters, not forty. This pass writes 15, 16 and 17 and no
     // others, and a forty-element local array costs forty registers of
@@ -850,7 +854,7 @@ R"HLSL(
 R"HLSL(
 [numthreads(8, 8, 1)]
 void main(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
-    if (gi < 40) gCount[gi] = 0;
+    if (gi < 48) gCount[gi] = 0;
     GroupMemoryBarrierWithGroupSync();
     uint count[48] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
     if (id.x < (uint)size.x && id.y < (uint)size.y) {
@@ -3419,9 +3423,11 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                             if (py > ry1) ry1 = py;
                         }
                         if (behindEye) {
-                            rx0 = ry0 = 0.0f;
-                            rx1 = static_cast<float>(p.size[0]);
-                            ry1 = static_cast<float>(p.size[1]);
+                            // Empty: a box with a corner behind the eye is too
+                            // near to count (the whole image counted, every sky
+                            // pixel was "in a footprint" on the fourth flight).
+                            rx0 = ry0 = -1.0f;
+                            rx1 = ry1 = -2.0f;
                         }
                         p.shRect[shipsOn][0] = rx0;
                         p.shRect[shipsOn][1] = ry0;
