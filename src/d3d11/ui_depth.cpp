@@ -84,6 +84,19 @@ constexpr uint64_t kSpritePs  = 0x63ABD86359B57D01ull;
 // disassembly, 2026-09-08 -- the same shape as the menu panel's, which
 // takes t1 through s1 at TEXCOORD6).
 constexpr uint64_t kHoloPanelPs = 0xA2965EC2931A39C8ull;
+// THE DRIVES' SMOKE (fix.temporal_aa_smoke, 2026-09-09): the trail a ship
+// leaves is a ribbon of fifty translucent quads -- vs 5E417E9DF2E7F9E6, ps
+// BD801F2FB02522EB, additive, a 1024x512 streak scrolled twice and a
+// soft-particle fade against the depth resolve -- with no depth of their
+// own, so the temporal pass carried it at the sky's distance while the
+// ship's motion moved it, and each segment's fade kept a different history
+// from its neighbour's: "still seeing some rectangles in the smoke" once the
+// heat haze was withheld (the census of 13:03, the dump of 14:56). Through
+// the coverage pass the flight HUD uses, the smoke's dense core writes its
+// own depth for the pass (kSmokeDepthHlsl) and the pass keeps it in place.
+constexpr uint64_t kSmokeVs = 0x5E417E9DF2E7F9E6ull;
+constexpr uint64_t kSmokePs = 0xBD801F2FB02522EBull;
+bool g_smokeOn = true;
 // A mesh draw whose pixel shader (258B95AC99520C1F) reads nothing and writes
 // nothing; the interface surface in its slot 0 is a leftover binding, and
 // the surface rule took it for a composite on the loading screen
@@ -337,6 +350,52 @@ const char kHoloDepthHlsl[] =
     "    return floorAndStrength.w;\n"
     "}\n";
 
+// THE SMOKE'S COVERAGE (kSmokeVs): ps BD801F2FB02522EB register for register
+// -- the sphere test and the soft fade against the depth resolve at t0
+// (through s1), the two scrolled samples of the streak at t1 (through s0),
+// the alpha their product -- then the pass's depth under the dense core
+// alone. The floor is the interface's capped low: additive smoke is faint by
+// design, and a core above eight percent is the part that shows.
+const char kSmokeDepthHlsl[] =
+    "Texture2D<float4> Depth : register(t0);\n"
+    "Texture2D<float4> Streak : register(t1);\n"
+    "SamplerState Smp0 : register(s0);\n"
+    "SamplerState Smp1 : register(s1);\n"
+    "cbuffer CB1 : register(b1) { float4 cb1[211]; };\n"
+    "cbuffer CB2 : register(b2) { float4 cb2[3]; };\n"
+    "cbuffer P : register(b13) { float4 floorAndStrength; };\n"
+    "struct In {\n"
+    "    float3 tc0 : TEXCOORD0;\n"
+    "    float3 tc1 : TEXCOORD1;\n"
+    "    float3 tc2 : TEXCOORD2;\n"
+    "    float2 tc3 : TEXCOORD3;\n"
+    "    float4 pos : SV_Position;\n"
+    "};\n"
+    "float4 main(In i, out float oDepth : SV_Depth) : SV_Target {\n"
+    "    float3 d = i.tc2 - i.tc0;\n"
+    "    float dd = (dot(d, d) - cb1[126].x * cb1[126].x) * 4.0;\n"
+    "    float3 n = normalize(i.tc2);\n"
+    "    float a = dot(-n, d);\n"
+    "    float b = a + a;\n"
+    "    float disc = sqrt(b * b - dd);\n"
+    "    bool hit = 0.0 < disc;\n"
+    "    float t = hit ? (-a * 2.0 + disc) * 0.5 : 0.0;\n"
+    "    float sphereZ = -n.z * t + i.tc2.z;\n"
+    "    float2 uv = i.tc1.xy / i.tc1.z * float2(0.5, -0.5) + 0.5;\n"
+    "    float sceneZ = Depth.Sample(Smp1, uv).x;\n"
+    "    if (sceneZ - sphereZ + cb1[126].x * 0.0001 < 0.0) discard;\n"
+    "    float fade = saturate((sceneZ - i.tc1.z) / (cb1[126].x * 0.4));\n"
+    "    fade = hit ? 1.0 : fade;\n"
+    "    fade *= cb1[126].z * cb2[1].z;\n"
+    "    float2 uv1 = float2(i.tc3.x - cb1[210].y * cb2[1].w, (i.tc3.y + 1.0) * 0.5);\n"
+    "    float2 uv2 = float2(i.tc3.x + cb1[210].y * cb2[2].x, i.tc3.y * 0.5);\n"
+    "    float streak = Streak.Sample(Smp0, uv1).x + Streak.Sample(Smp0, uv2).x;\n"
+    "    float alpha = fade * streak;\n"
+    "    clip(alpha - min(floorAndStrength.x, 0.08));\n"
+    "    oDepth = i.pos.z;\n"
+    "    return floorAndStrength.w;\n"
+    "}\n";
+
 // THE FLIGHT HUD'S COVERAGE, for the depth pass in the scene's projection.
 //
 // Under the writing twin the HUD's own draw wrote depth over every pixel of
@@ -462,7 +521,7 @@ struct DepthShader {
     ID3D11PixelShader*  shader;
     bool                tried;
 };
-DepthShader g_depthShaders[4] = {
+DepthShader g_depthShaders[5] = {
     {{kPanelPs, kPanelPsTinted, kPanelPsCheap, 0}, {kPanelVs, 0, 0, 0}, 1,
      kPanelDepthHlsl, sizeof(kPanelDepthHlsl) - 1, "ui_depth_panel_ps", nullptr, false},
     // The flight HUD's coverage (kHudDepthHlsl): its slot is the depth
@@ -478,6 +537,9 @@ DepthShader g_depthShaders[4] = {
      kScreenDepthHlsl, sizeof(kScreenDepthHlsl) - 1, "ui_depth_screen_ps", nullptr, false},
     {{kHoloPanelPs, 0, 0, 0}, {kHoloPanel, 0, 0, 0}, 2,
      kHoloDepthHlsl, sizeof(kHoloDepthHlsl) - 1, "ui_depth_holo_ps", nullptr, false},
+    // The drives' smoke: its slot is the depth resolve, as the flight HUD's.
+    {{kSmokePs, 0, 0, 0}, {kSmokeVs, 0, 0, 0}, 0xFFFFu,
+     kSmokeDepthHlsl, sizeof(kSmokeDepthHlsl) - 1, "ui_depth_smoke_ps", nullptr, false},
 };
 struct FloorCb {
     ID3D11Buffer* cb = nullptr;
@@ -485,7 +547,7 @@ struct FloorCb {
     float         strength = -1.0f;
     float         nearDepth = -1.0f;   // the depth value at one metre (temporalPassDepthAt), for a floating stroke's core
 };
-FloorCb g_floorCbs[3];   // [0] the interface proper, [1] the holo material and the sprite, [2] the flight HUD (g_reissueMaskSlot)
+FloorCb g_floorCbs[4];   // [0] the interface proper, [1] the holo material and the sprite, [2] the flight HUD, [3] the smoke (g_reissueMaskSlot)
 ID3D11DepthStencilState* g_reissueDss = nullptr;   // GEQUAL, write all
 bool          g_reissueDssFailedNoted = false;
 
@@ -1019,7 +1081,7 @@ ID3D11Buffer* floorBuffer(ID3D11DeviceContext* ctx, int slotIndex, float maskOff
                                              : 0.0f;
     // Three families with different offsets draw in one frame; each keeps
     // its own buffer rather than trading one back and forth.
-    FloorCb& slot = g_floorCbs[slotIndex < 0 ? 0 : (slotIndex > 2 ? 2 : slotIndex)];
+    FloorCb& slot = g_floorCbs[slotIndex < 0 ? 0 : (slotIndex > 3 ? 3 : slotIndex)];
     const float nearDepth = temporalPassDepthAt(1.0f);
     if (slot.cb && slot.floor == g_alphaFloor && slot.strength == strength && slot.nearDepth == nearDepth) {
         return slot.cb;
@@ -1251,6 +1313,8 @@ void uiDepthConfigure(Config& cfg) {
     // The direct list: the flight HUD built in, the ini's additions after.
     g_familyCount = 0;
     g_families[g_familyCount++] = kFlightHud;
+    g_smokeOn = cfg.getBool("fix.temporal_aa_smoke", true);
+    if (g_smokeOn) g_families[g_familyCount++] = kSmokeVs;   // the drives' smoke, a direct family (kSmokeVs says)
     uint64_t extra[kMaxHashes];
     uint32_t extraCount = 0;
     parseHashes(cfg.getString("advanced.ui_depth_families", ""), extra, &extraCount,
@@ -1486,7 +1550,8 @@ bool uiDepthOnEyeDraw(ID3D11DeviceContext* ctx) {
         // own draw's alpha discard let its soft fringe write the target's
         // depth over the station (2026-09-09). Which of their pixels ride a
         // turning body's path is the mask's parity (floorBuffer says).
-        const bool hud = h == kFlightHud || h == kHoloPanel || h == kHudSprite;
+        const bool hud = h == kFlightHud || h == kHoloPanel || h == kHudSprite ||
+                         (g_smokeOn && h == kSmokeVs);
         // All three ride a turning body's path where their pixels sit on it
         // (a stroke drawn AT the surface -- the docking hologram over the
         // hub's drum, 2026-09-09 08:03 -- turns with it); a stroke's core
@@ -1502,8 +1567,13 @@ bool uiDepthOnEyeDraw(ID3D11DeviceContext* ctx) {
         // value's parity (floorBuffer): a flight HUD core drawn at the
         // surface rides, and everything that floats -- the holo material's
         // markers, the sprite, a floating core -- keeps the camera's path.
-        g_reissueMaskSlot = h == kFlightHud ? 2 : (hud ? 1 : 0);
-        g_reissueMaskOffset = h == kFlightHud ? -0.5f * g_reactive : (hud ? -3.0f / 255.0f : 0.0f);
+        // The smoke is marked at one quantum -- odd, so it keeps the camera's
+        // path at its own depth, and as good as unmarked to NVIDIA, since
+        // its history is what smooths it.
+        g_reissueMaskSlot = h == kFlightHud ? 2 : h == kSmokeVs ? 3 : (hud ? 1 : 0);
+        g_reissueMaskOffset = h == kFlightHud ? -0.5f * g_reactive
+                            : h == kSmokeVs ? (1.0f / 255.0f - g_reactive)
+                            : (hud ? -3.0f / 255.0f : 0.0f);
         const uint64_t ph = (hud || wantMask || wantLine) ? boundPsHash(ctx) : 0;
         DepthShader* shader = (hud || wantMask) ? depthShaderFor(ctx, ph, h, surfaceSlot) : nullptr;
         if (hud && shader) {
@@ -1531,7 +1601,11 @@ bool uiDepthOnEyeDraw(ID3D11DeviceContext* ctx) {
         if (wantLine) {
             noteFamily(h, ph,
                        g_mode == Mode::kReissueScene
-                           ? (h == kFlightHud
+                           ? (h == kSmokeVs
+                                  ? "the drives' smoke; its dense core's depth written by the coverage "
+                                    "pass in the scene's projection (fix.temporal_aa_smoke), so the pass "
+                                    "keeps the trail in place"
+                              : h == kFlightHud
                                   ? "the flight HUD; its depth written by the coverage pass in the "
                                     "scene's projection, under its strokes' cores alone (the glow "
                                     "keeps the scene's); a core drawn at the surface rides a turning "
