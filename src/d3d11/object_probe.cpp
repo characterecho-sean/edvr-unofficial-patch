@@ -165,6 +165,22 @@ uint64_t g_body2Pairs = 0, g_body2HeldPairs = 0, g_body2Fragments = 0;
 constexpr uint32_t kBody2Confirm = 3;   // consistent pairs before a second body is taken (the stepped parts alternate)
 uint32_t g_body2Streak = 0;
 float    g_body2LastW[3] = {};
+// THE STEPPED PARTS' state (object_probe.h says what they are; trackFrame
+// does the work): the frame before's copy, each slot's history of its
+// multiple of the body's turn, the predictions made, this frame's cells,
+// and the report's counts.
+constexpr uint32_t kMHist = 8;
+constexpr float    kMAxisSlack = 0.35f;   // of the body's turn: a turn off the body's axis is no multiple of it
+std::vector<uint8_t>  g_lastBytes;        // the frame before's copy
+uint32_t g_lastBytesFrame = 0;
+double   g_lastBytesStamp = 0.0;
+std::vector<int8_t>   g_mHist;            // n * kMHist, [i * kMHist] the newest; 127 = no entry
+std::vector<int8_t>   g_mPred;            // the prediction made per slot, for g_mPredFrame; 127 = none
+std::vector<uint32_t> g_mPredFrame;
+std::vector<SteppedCell> g_steppedCells;
+uint64_t g_stTrackFrames = 0, g_stStepped = 0, g_stPeriod2 = 0, g_stSteady = 0, g_stIrregular = 0;
+uint64_t g_stPredicted = 0, g_stHit = 0;
+double   g_stMsSum = 0.0;
 // Moving ships (object_probe.h, takeShips): taken within this of the
 // camera (the pass's setting), held this long past their pair -- three
 // pair intervals, so a pair that lost a ship to a slot shuffle does not
@@ -1969,18 +1985,6 @@ void stopWorker() {
 // stamped with the prediction for the pass (objectSteppedCells). A part
 // that has turned the body's turn on every frame it was seen is the
 // body's, and its cells are left alone.
-constexpr uint32_t kMHist = 8;
-constexpr float    kMAxisSlack = 0.35f;   // of the body's turn: a turn off the body's axis is no multiple of it
-std::vector<uint8_t>  g_lastBytes;        // the frame before's copy
-uint32_t g_lastBytesFrame = 0;
-double   g_lastBytesStamp = 0.0;
-std::vector<int8_t>   g_mHist;            // n * kMHist, [i * kMHist] the newest; 127 = no entry
-std::vector<int8_t>   g_mPred;            // the prediction made per slot, for g_mPredFrame; 127 = none
-std::vector<uint32_t> g_mPredFrame;
-std::vector<SteppedCell> g_steppedCells;
-uint64_t g_stTrackFrames = 0, g_stStepped = 0, g_stPeriod2 = 0, g_stSteady = 0, g_stIrregular = 0;
-uint64_t g_stPredicted = 0, g_stHit = 0;
-double   g_stMsSum = 0.0;
 
 void trackFrame(const uint8_t* bytes, uint32_t nbytes, uint32_t frame, double stampMs) {
     const uint32_t n = nbytes / kRecordBytes;
