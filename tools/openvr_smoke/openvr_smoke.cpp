@@ -624,6 +624,54 @@ int guardChild(const char* dir) {
     int bad = 0;
     float l = 0, r = 0, t = 0, b = 0, e[4];
 
+    // The stage 1 -> 2 adoption rule, as arithmetic. It has no other
+    // coverage: reaching it live needs a game that rebuilds its targets, and
+    // this harness goes live through the boundary-less fallback instead. The
+    // field case it exists for is issue 24 -- HMD Quality 0.5 on a 4550x3948
+    // recommendation submits 2957x2566, and a bar keyed to the RECOMMENDATION
+    // wanted 6664 wide from a game that would never offer more than 4479. The
+    // guard stalled at stage 1 four times in one flight and the whole control
+    // measured nothing. The baseline has to be what the game was actually
+    // submitting.
+    {
+        typedef unsigned int(*PFN_Adopt)(unsigned, unsigned, unsigned, unsigned, float, float);
+        auto adopt = reinterpret_cast<PFN_Adopt>(
+            GetProcAddress(m, "edvr_selftest_cull_adopt"));
+        if (!adopt) {
+            printf("  FAIL  guard child: edvr_selftest_cull_adopt not exported\n");
+            ++bad;
+        } else {
+            // Issue 24's numbers, rebuilt: 2957 * 1.51 = 4465 submitted
+            // against a bar of 2957 * 1.51 * 0.97 = 4331. Adopts. Under the
+            // old recommendation-keyed bar this was 6664 and never could.
+            if (adopt(2957, 2566, 4465, 2566, 1.51f, 1.0f) != 1u) {
+                printf("  FAIL  guard child: a quality-0.5 rig that DID rebuild "
+                       "(2957 -> 4465 at 1.51x) is not counted as adopted -- "
+                       "issue 24's stall would still happen\n");
+                ++bad;
+            }
+            // Not rebuilt yet: same size as before stage 1.
+            if (adopt(2957, 2566, 2957, 2566, 1.51f, 1.0f) != 0u) {
+                printf("  FAIL  guard child: an UNCHANGED submission counted as "
+                       "adopted -- the canonical would freeze on a size the "
+                       "game is about to abandon\n");
+                ++bad;
+            }
+            // Rebuilt, but not far enough (a partial resize seen mid-flight).
+            if (adopt(2957, 2566, 3600, 2566, 1.51f, 1.0f) != 0u) {
+                printf("  FAIL  guard child: a submission below the margin "
+                       "counted as adopted\n");
+                ++bad;
+            }
+            // No baseline at all: never adopt on zeroes.
+            if (adopt(0, 0, 4465, 2566, 1.51f, 1.0f) != 0u) {
+                printf("  FAIL  guard child: adoption without a seeded "
+                       "baseline\n");
+                ++bad;
+            }
+        }
+    }
+
     // Before go-live: pure truth, both eyes (which is also what arms the
     // lie -- it waits for both eyes' true tangents).
     sys->GetProjectionRaw(0, &l, &r, &t, &b);

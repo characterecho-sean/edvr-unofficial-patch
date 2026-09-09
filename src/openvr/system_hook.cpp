@@ -835,6 +835,35 @@ bool cropFractions(const State* s, int eye, float out[4]) {
     return true;
 }
 
+// Has this eye's target actually been rebuilt at the widened size?
+//
+// The baseline is what the game WAS SUBMITTING when stage 1 began, not what
+// the runtime recommended. Elite multiplies whatever size it is told by its
+// own HMD Quality, so a rig below 1.0 submits a fraction of the
+// recommendation -- and a threshold keyed to the recommendation is then
+// unreachable by construction. The guard sits at stage 1 for ever, silently,
+// and every success this fix predates simply happened to run quality >= 1.0.
+//
+// Measured 2026-09-09 (issue 24): HMD Quality 0.5 against a 4550x3948
+// recommendation submits 2957x2566. Stage 1 asked for 6891x3948, the old
+// test wanted 6664 wide, and the game would never have offered more than
+// 0.65 * 6891 = 4479. Four go-live attempts in one flight, four stalls, and
+// the whole `channel = both` control of that flight measured nothing.
+// preStage carries the same quality multiple already applied, so the
+// comparison is like with like.
+//
+// 0.97 is the slack the original test used and is kept: the game rounds its
+// own target sizes, so an exact product is not a fair bar.
+bool sizeAdopted(uint32_t preW, uint32_t preH, uint32_t subW, uint32_t subH,
+                 float factorH, float factorV) {
+    if (!preW || !preH || !subW || !subH) return false;
+    // Unchanged means the game has not rebuilt yet, whatever the numbers say.
+    if (subW == preW && subH == preH) return false;
+    const float needW = static_cast<float>(preW) * factorH * 0.97f;
+    const float needH = static_cast<float>(preH) * factorV * 0.97f;
+    return static_cast<float>(subW) >= needW && static_cast<float>(subH) >= needH;
+}
+
 // Stage transitions happen HERE and only here, at the frame boundary (or
 // periodic's fallback for boundary-less processes), so one frame's raw
 // answers, matrix answers, target-size answers and submit handling always
@@ -1000,22 +1029,13 @@ void promoteOrDemote(State* s) {
     if (s->stage == 1) {
         bool adopted = s->trueSizeW != 0;
         for (int e = 0; e < 2 && adopted; ++e) {
-            const float needW =
-                static_cast<float>(s->trueSizeW) * s->sizeFactorH * 0.97f;
-            const float needH =
-                static_cast<float>(s->trueSizeH) * s->sizeFactorV * 0.97f;
-            if (static_cast<float>(s->submittedW[e]) < needW ||
-                static_cast<float>(s->submittedH[e]) < needH) {
-                adopted = false;
-            }
-            // The size must have MOVED since stage 1 began -- see preStageW.
-            // The threshold alone reads leftover bigger-than-needed targets
-            // (a re-stage down in margin, or HMD Quality above 1.0) as
-            // instant adoption and freezes the canonical against a size the
-            // game is about to abandon. Unseeded means no probe has run yet.
+            // Unseeded means no probe has run yet, so there is no baseline to
+            // measure against. The size must also have MOVED since stage 1
+            // began -- both rules live in sizeAdopted, which explains why the
+            // baseline is the pre-stage SUBMISSION and not the recommendation.
             if (!s->preStageSeeded[e] ||
-                (s->submittedW[e] == s->preStageW[e] &&
-                 s->submittedH[e] == s->preStageH[e])) {
+                !sizeAdopted(s->preStageW[e], s->preStageH[e], s->submittedW[e],
+                             s->submittedH[e], s->sizeFactorH, s->sizeFactorV)) {
                 adopted = false;
             }
         }
@@ -1025,18 +1045,26 @@ void promoteOrDemote(State* s) {
         if (!adopted && !fallback) {
             if (!s->stage1WaitNoted && elapsedMs(s->stage1SinceMs, 10000)) {
                 s->stage1WaitNoted = true;
+                // Both numbers, and the baseline they come from: a stall is
+                // then one line to diagnose. The bar is the pre-stage
+                // SUBMISSION times the margin, which already carries the
+                // game's own HMD Quality -- see sizeAdopted.
+                const uint32_t baseW =
+                    s->preStageSeeded[0] ? s->preStageW[0] : s->trueSizeW;
+                const uint32_t baseH =
+                    s->preStageSeeded[0] ? s->preStageH[0] : s->trueSizeH;
                 Log::get().note(
                     "cull guard: still at stage 1 after 10 s -- the game has "
                     "not rebuilt its render targets at the larger size "
-                    "(submitting %ux%u / %ux%u, want about %ux%u). Everything "
-                    "runs normally meanwhile; if this is the guard's last "
-                    "line, report the log.",
+                    "(submitting %ux%u / %ux%u, want about %ux%u, measured "
+                    "from the %ux%u it was submitting when stage 1 began). "
+                    "Everything runs normally meanwhile; if this is the "
+                    "guard's last line, report the log.",
                     s->submittedW[0], s->submittedH[0], s->submittedW[1],
                     s->submittedH[1],
-                    static_cast<unsigned>(
-                        lroundf(s->trueSizeW * s->sizeFactorH)),
-                    static_cast<unsigned>(
-                        lroundf(s->trueSizeH * s->sizeFactorV)));
+                    static_cast<unsigned>(lroundf(baseW * s->sizeFactorH)),
+                    static_cast<unsigned>(lroundf(baseH * s->sizeFactorV)),
+                    baseW, baseH);
             }
             return;
         }
@@ -1715,6 +1743,14 @@ extern "C" unsigned int edvr_selftest_system_hook(void) {
     v |= sat(edvr_sysCounts[4]) << 16;
     v |= sat(edvr_sysCounts[2]) << 24;
     return v;
+}
+
+extern "C" unsigned int edvr_selftest_cull_adopt(unsigned int preW,
+                                                 unsigned int preH,
+                                                 unsigned int subW,
+                                                 unsigned int subH,
+                                                 float factorH, float factorV) {
+    return edvr::sizeAdopted(preW, preH, subW, subH, factorH, factorV) ? 1u : 0u;
 }
 
 extern "C" unsigned int edvr_selftest_cull_guard(int eye, float out[4]) {
