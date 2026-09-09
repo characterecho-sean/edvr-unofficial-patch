@@ -2176,6 +2176,38 @@ which is this project's contract for every read of the game.
    station seen through a contrail takes the contrail's path and
    smears under it. That is the translucency limit of a depth-owned
    pixel, the same one the reticle's glow met, and it is left as it is.
+
+   *Its twenty-first flight* (09:52, `v0.14.1-91-gb841283`): "much
+   better"; the target indicator "still flickering a little bit and
+   swims"; and the station's flicker "seems to correlate with movement,
+   either my head or the ship relative to the station -- holding still
+   doesn't seem to trigger it". The log put numbers under all three.
+   The rate guard fired seventy-seven times in the flight: the fitted
+   turn per pair is steady near 0.040 degrees while the pair's clock
+   interval jitters (8.8 to 12.6 ms for the same turn), so a rate taken
+   as angle over interval is noisy where the station is not, and a
+   thirty-percent test on each pair is the wrong tool. The held rate is
+   now the rolling median of the last sixteen pairs' rates, magnitude
+   and axis apart; a pair far from it is counted and said, and a new
+   body starts its own ring. The movement correlation: the body stood
+   down on every frame whose camera delta the world path carried -- a
+   fast head turn trips the three-degree test against the head's own
+   delta -- and on every jump's frame, and each such frame dropped the
+   station to the camera's path. The body now composes with the carried
+   delta on those frames (temporalBodyPathCarried: its own turn taken
+   into last frame's view by the rows, then the carried delta; the
+   test pins it to the rows' form when the camera only turns), and
+   stands down only when its pair is in another frame. The indicator:
+   at one metre it sat on the ship's path and held under the head but
+   not under the ship's turn, which the ship's path does not carry, so
+   it swam whenever the ship turned; a floating stroke's core takes the
+   scene's depth behind it now, where the camera's path carries a far
+   point rightly under the ship's turn and the head's alike, with no
+   parallax to speak of. Asked at the same time: the spars' white
+   edge lines alias as they turn. That is the render's own sampling of
+   a bright line thinner than a pixel at 2514, moving a fraction of a
+   pixel a frame; no vector fixes it, and the levers are Elite's HMD
+   Quality, the calm resolve kernel, and NVIDIA's preset.
 4. **Tier 2b** only if question 1 says no bits.
 5. **Tier 3** as `tools/` work against dumped frames, never on the hot
    path.

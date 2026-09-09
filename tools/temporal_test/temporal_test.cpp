@@ -328,6 +328,33 @@ int main() {
         for (int i = 0; i < 9; ++i) same = same && fabsf(W[i] - Wc[i]) < 1e-6f;
         for (int i = 0; i < 3; ++i) same = same && fabsf(tv[i] - tvc[i]) < 1e-6f;
         check(same, "body path: with no body motion it is the camera path");
+        // The carried form: the same path composed with the camera delta
+        // handed in rather than the rows. With the camera turned but not
+        // moved (c_n = c_p, the one approximation exact) and a body turn of
+        // one degree about y, it must equal temporalBodyPath to the float.
+        {
+            float nowTurn[12];
+            yaw34(2.0f * 3.14159265f / 180.0f, nowTurn);
+            const float cb = cosf(1.0f * 3.14159265f / 180.0f);
+            const float sb = sinf(1.0f * 3.14159265f / 180.0f);
+            const float RdY[9] = {cb, 0, sb, 0, 1, 0, -sb, 0, cb};
+            const float tdY[3] = {0.3f, -0.2f, 0.1f};
+            float Wd[9], tvd[3];
+            edvr::temporalBodyPath(prev, nowTurn, RdY, tdY, Wd, tvd);
+            float Rn2[9], Wc2[9], tvc2[3];
+            edvr::temporalRot3Of34(nowTurn, Rn2);
+            edvr::temporalMul3(RpT, Rn2, Wc2);
+            const float dc2[3] = {nowTurn[3] - prev[3], nowTurn[7] - prev[7], nowTurn[11] - prev[11]};
+            edvr::temporalApply3(RpT, dc2, tvc2);
+            Wc2[2] = -Wc2[2]; Wc2[5] = -Wc2[5]; Wc2[6] = -Wc2[6]; Wc2[7] = -Wc2[7];
+            tvc2[2] = -tvc2[2];
+            float Wk[9], tvk[3];
+            edvr::temporalBodyPathCarried(prev, RdY, tdY, Wc2, tvc2, Wk, tvk);
+            bool sameK = true;
+            for (int i = 0; i < 9; ++i) sameK = sameK && fabsf(Wk[i] - Wd[i]) < 1e-5f;
+            for (int i = 0; i < 3; ++i) sameK = sameK && fabsf(tvk[i] - tvd[i]) < 1e-5f;
+            check(sameK, "body path: the carried form composes to the rows' form when the camera only turns");
+        }
         // A fixed camera at the origin: the path is the body's delta itself
         // (its rotation about y keeps the xz entries, which the flip negates).
         const float c = cosf(1.0f * 3.14159265f / 180.0f);

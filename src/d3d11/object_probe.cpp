@@ -80,9 +80,15 @@ float    g_lastRel[3] = {};
 bool     g_lastRelValid = false;
 uint64_t g_otherBodyPairs = 0;
 uint64_t g_otherBodyNoteMs = 0;
-// The held rate's standing: how many pairs running have agreed with it
-// (diffPair says what a disagreeing pair does once three have).
-uint32_t g_rateAgreed = 0;
+// The held rate: the rolling median of the last sixteen pairs' rates
+// (diffPair says why a median).
+struct RatePair {
+    float w[3];   // the pair's turn per ms, an axis-angle in radians
+    float t[3];   // ...and its translation per ms, metres
+};
+constexpr uint32_t kRateRing = 16;
+RatePair g_rateRing[kRateRing] = {};
+uint32_t g_rateRingN = 0;
 uint64_t g_rateOutliers = 0;
 uint64_t g_rateOutlierNoteMs = 0;
 
@@ -776,51 +782,66 @@ void diffPair(const uint8_t* prev, const uint8_t* now, uint32_t bytes, float dtM
                     wr[k] = w[k] / dt;
                     tr[k] = tf[k] / dt;
                 }
-                bool blend = false;
-                if (g_motionValid) {
-                    const float* ho = g_motion.omegaPerMs;
-                    const float hn = sqrtf(ho[0] * ho[0] + ho[1] * ho[1] + ho[2] * ho[2]);
+                // The held rate is the ROLLING MEDIAN of the last sixteen
+                // pairs' rates, magnitude and axis apart. A pair's own rate
+                // is noisy where the station is not: the fitted turn per pair
+                // ran 0.036-0.050 deg at the same interval on 2026-09-09, and
+                // 0.025 or 0.076 on odd ones -- the game's step landing early
+                // or late against the probe's own clock -- and a blend that
+                // adopted or refused each pair on a thirty-percent test
+                // either wobbled with them (the outer ring smeared) or
+                // refused seventy-seven pairs in one flight. The median of
+                // sixteen takes neither the wobble nor the outliers, and a
+                // new body starts its own.
+                if (!g_motionValid || g_motionAge >= kBodyContinuityFrames) g_rateRingN = 0;
+                RatePair& rp = g_rateRing[g_rateRingN % kRateRing];
+                memcpy(rp.w, wr, sizeof(rp.w));
+                memcpy(rp.t, tr, sizeof(rp.t));
+                ++g_rateRingN;
+                const uint32_t ringCount = g_rateRingN < kRateRing ? g_rateRingN : kRateRing;
+                float mags[kRateRing];
+                float axis[3] = {0.0f, 0.0f, 0.0f};
+                for (uint32_t i = 0; i < ringCount; ++i) {
+                    const float* rw = g_rateRing[i].w;
+                    mags[i] = sqrtf(rw[0] * rw[0] + rw[1] * rw[1] + rw[2] * rw[2]);
+                    for (int k = 0; k < 3; ++k) axis[k] += rw[k];
+                }
+                for (uint32_t i = 1; i < ringCount; ++i) {   // an insertion sort: sixteen at most
+                    const float v = mags[i];
+                    uint32_t jj = i;
+                    while (jj > 0 && mags[jj - 1] > v) { mags[jj] = mags[jj - 1]; --jj; }
+                    mags[jj] = v;
+                }
+                const float medMag = mags[ringCount / 2];
+                const float an = sqrtf(axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2]);
+                if (an > 0.0f) {
+                    for (int k = 0; k < 3; ++k) g_motion.omegaPerMs[k] = axis[k] / an * medMag;
+                }
+                for (int k = 0; k < 3; ++k) {
+                    float comps[kRateRing];
+                    for (uint32_t i = 0; i < ringCount; ++i) comps[i] = g_rateRing[i].t[k];
+                    for (uint32_t i = 1; i < ringCount; ++i) {
+                        const float v = comps[i];
+                        uint32_t jj = i;
+                        while (jj > 0 && comps[jj - 1] > v) { comps[jj] = comps[jj - 1]; --jj; }
+                        comps[jj] = v;
+                    }
+                    g_motion.tPerMs[k] = comps[ringCount / 2];
+                }
+                // A pair far from the median is counted and, now and then, said.
+                {
                     const float nn = sqrtf(wr[0] * wr[0] + wr[1] * wr[1] + wr[2] * wr[2]);
-                    if (hn > 0.0f && nn > 0.0f) {
-                        const float cosA = (ho[0] * wr[0] + ho[1] * wr[1] + ho[2] * wr[2]) / (hn * nn);
-                        blend = cosA > 0.94f && nn > 0.7f * hn && nn < 1.3f * hn;
+                    if (ringCount >= 4 && medMag > 0.0f && (nn > 2.0f * medMag || nn < 0.5f * medMag)) {
+                        ++g_rateOutliers;
+                        if (dueMs(g_rateOutlierNoteMs, 30000)) {
+                            Log::get().note(
+                                "object probe: a pair's turn (%.4f deg over its %.1f ms) sits %.1fx the held "
+                                "median rate; the median of the last %u pairs holds. %llu such pairs so far.",
+                                static_cast<double>(fitDeg), static_cast<double>(dt),
+                                static_cast<double>(nn / medMag), ringCount,
+                                static_cast<unsigned long long>(g_rateOutliers));
+                        }
                     }
-                }
-                const float a = blend ? 0.3f : 1.0f;
-                // ...but a pair that disagrees with a rate the last three
-                // pairs agreed on, while the body is fresh, is the pair's own
-                // noise and not a new rate: the fitted turn per pair on
-                // 2026-09-09 ran 0.040 deg most of the time, 0.031-0.047 on
-                // others, and 0.076 over one 6.1 ms pair -- the game's step
-                // landing late -- and replacing the held rate with such a
-                // pair put vectors three times too long on the whole station
-                // for the frames until the next pair: "occasional flickers
-                // where the whole world object seems to blur". Such a pair
-                // keeps the held rates and gives its positions.
-                bool keepRates = false;
-                if (g_motionValid && !blend && g_rateAgreed >= 3 && g_motionAge < kBodyContinuityFrames) {
-                    keepRates = true;
-                    ++g_rateOutliers;
-                    if (dueMs(g_rateOutlierNoteMs, 30000)) {
-                        const float hn = sqrtf(g_motion.omegaPerMs[0] * g_motion.omegaPerMs[0] +
-                                               g_motion.omegaPerMs[1] * g_motion.omegaPerMs[1] +
-                                               g_motion.omegaPerMs[2] * g_motion.omegaPerMs[2]);
-                        const float nn = sqrtf(wr[0] * wr[0] + wr[1] * wr[1] + wr[2] * wr[2]);
-                        Log::get().note(
-                            "object probe: a pair's rate (%.4f deg over its %.1f ms, %.5f deg/ms) disagrees with "
-                            "the held %.5f deg/ms that %u pairs agreed on; the held rate is kept and the pair's "
-                            "positions taken. %llu such pairs so far.",
-                            static_cast<double>(fitDeg), static_cast<double>(dt), static_cast<double>(nn),
-                            static_cast<double>(hn), g_rateAgreed,
-                            static_cast<unsigned long long>(g_rateOutliers));
-                    }
-                }
-                if (!keepRates) {
-                    for (int k = 0; k < 3; ++k) {
-                        g_motion.omegaPerMs[k] = (1.0f - a) * g_motion.omegaPerMs[k] + a * wr[k];
-                        g_motion.tPerMs[k] = (1.0f - a) * g_motion.tPerMs[k] + a * tr[k];
-                    }
-                    g_rateAgreed = blend ? g_rateAgreed + 1 : 0;
                 }
                 g_motion.dtMs = dt;
                 g_motion.rms = rms;

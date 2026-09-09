@@ -266,6 +266,38 @@ inline void temporalBodyPath(const float prev34[12], const float now34[12],
     tv[2] = -tv[2];
 }
 
+// The same path on a frame whose rows are not the view's own -- another
+// camera's, a stale latch, a jump's -- composed with the camera delta the
+// pass carries for that frame (Wc, tvc: the eye-frame delta worldFromRows
+// gives, last frame's when this frame's was dropped) rather than with the
+// rows. R_p^T Rd R_n = (R_p^T Rd R_p)(R_p^T R_n): the body's turn taken
+// into last frame's view by its rows, then the camera's own delta; and
+// tv = R_p^T ((Rd - I) c_n + td) + tvc with c_n taken as c_p (their
+// difference is a frame's motion, and (Rd - I) of it is millimetres).
+// Before this the body stood down on such frames, and a head turn dropped
+// the station to the camera's path for a frame at a time (2026-09-09).
+inline void temporalBodyPathCarried(const float prev34[12], const float Rd[9], const float td[3],
+                                    const float Wc[9], const float tvc[3], float W[9], float tv[3]) {
+    float Rp[9], RpT[9], tmp[9], conj[9];
+    temporalRot3Of34(prev34, Rp);
+    temporalTranspose3(Rp, RpT);
+    temporalMul3(Rd, Rp, tmp);
+    temporalMul3(RpT, tmp, conj);
+    conj[2] = -conj[2];
+    conj[5] = -conj[5];
+    conj[6] = -conj[6];
+    conj[7] = -conj[7];
+    temporalMul3(conj, Wc, W);
+    const float cP[3] = {prev34[3], prev34[7], prev34[11]};
+    float rc[3];
+    temporalApply3(Rd, cP, rc);
+    const float dc[3] = {rc[0] - cP[0] + td[0], rc[1] - cP[1] + td[1], rc[2] - cP[2] + td[2]};
+    float t[3];
+    temporalApply3(RpT, dc, t);
+    t[2] = -t[2];
+    for (int i = 0; i < 3; ++i) tv[i] = t[i] + tvc[i];
+}
+
 // The rotation of an axis-angle vector (Rodrigues): w's direction the axis,
 // its length the angle in radians; row-major, R v rotates v.
 inline void temporalRodrigues(const float w[3], float R[9]) {
