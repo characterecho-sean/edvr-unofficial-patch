@@ -870,7 +870,18 @@ int main() {
                   "...and re-arms to catch the next one",
                   "the watch fired once and went deaf");
 
+            // Exhaust the budget so the disarm path runs, and require the
+            // summary flag to end up set -- the field found that path printing
+            // NOTHING, because the caller set the very flag the summary uses to
+            // avoid printing twice, so its only call was guarded out.
+            check(vtableWatchSummarised() == false,
+                  "the watch has not summarised while it is still running",
+                  "the summary fired early");
             vtableWatchStop();
+            check(vtableWatchSummarised(),
+                  "...and stopping it prints the summary rather than swallowing it",
+                  "the disarm path produced no summary, which is the field bug: "
+                  "thirty-two catches and then silence");
             *reinterpret_cast<void* volatile*>(&fake[3]) =
                 reinterpret_cast<void*>(&toolkitOne);
             check(vtableWatchCatches() == 0,

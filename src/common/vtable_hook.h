@@ -158,6 +158,12 @@ void vtableWatchRearm();
 // asking whether an armed watch ever fired.
 uint32_t vtableWatchCatches();
 
+// Has the watch printed its closing summary? For the unit cell, which exists
+// because the field found that summary never printing: the disarm path set the
+// flag the summary uses to avoid printing twice, so its one call was guarded
+// out and thirty-two catches were followed by silence.
+bool vtableWatchSummarised();
+
 // Disarm: give the page its write permission back and forget the watch. Safe
 // to call when nothing is armed. Called at teardown so a session never ends
 // leaving somebody else's page read-only, and by the unit cell between runs.

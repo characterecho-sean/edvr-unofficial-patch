@@ -358,7 +358,14 @@ LONG CALLBACK writeWatchHandler(EXCEPTION_POINTERS* ep) {
 
     if (g_watch.catches >= kMaxWatchCatches ||
         g_watch.inTable >= kMaxWatchReports) {
-        g_watch.finished = true;   // the single step will not re-arm
+        // NOT `finished = true` here. reportWatchSummary sets it itself, and
+        // its first line is a guard against printing twice -- so setting it
+        // first made the guard fire on the only call there was, and the summary
+        // never printed at all. Reported from the field on the run that most
+        // needed it: thirty-two catches, then silence where the line that
+        // explains them should have been. The flag also stops the single step
+        // re-arming, and the summary sets it before it returns, so the ordering
+        // is unchanged.
         InterlockedExchange(&g_watch.rearmWanted, 0);
         reportWatchSummary();
     }
@@ -465,8 +472,15 @@ void vtableWatchRearm() {
 
 uint32_t vtableWatchCatches() { return g_watch.catches; }
 
+bool vtableWatchSummarised() { return g_watch.finished; }
+
 void vtableWatchStop() {
     if (!g_watch.slotAddress) return;
+    // A session that ends before the budget still deserves its summary -- the
+    // span and the slot set are the whole product, and a watch that caught
+    // twenty things and then had the game closed on it should not take them
+    // with it. No-op when the budget already printed one.
+    if (g_watch.catches) reportWatchSummary();
     InterlockedExchange(&g_watch.armed, 0);
     InterlockedExchange(&g_watch.rearmWanted, 0);
     DWORD previous = 0;
