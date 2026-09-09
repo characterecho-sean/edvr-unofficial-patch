@@ -2580,14 +2580,27 @@ which is this project's contract for every read of the game.
    station is crisp in all three -- the hub's face and the ring under
    DLSS at 16:24:39, under the pass's own history at 16:25:22 (the render
    at 2862x2826, "first treated frame ... history in R10G10B10A2"), and
-   at 16:25:38 with a ship exploding beside the hub. But the pool pairs
-   of this session show ONE cluster at the station: 623 parts turning
-   0.040 deg about the same axis, no counter-turning hub, and the body
-   held 870 records at 16:24:45 -- the hub's parts in the ring's cluster.
-   The same station, the same range, the same face, and the hub turns
-   with the ring in this session where it turned against it in the last.
-   The counter-turn comes and goes with the session, then, and the second
-   body must be there for when it comes; this flight it was not needed.
+   at 16:25:38 with a ship exploding beside the hub. Crisp at a glance:
+   at twice the zoom the DLSS frame has the ring's spokes and panels
+   resolved and the hub's docking face smeared in arcs, the same
+   tangential smear as the flight before, while the pass's own history at
+   16:25:22 has the hub crisp. The pilot's reading: "this feels like what
+   the station would look like at close range before you fixed it --
+   maybe the vectors aren't vectors at this distance?" For the hub they
+   are not. The pool pairs of this session show ONE cluster at the
+   station, 623 parts, and 271 to 298 records at the station's distance
+   -- a contiguous run at the pool's tail, the hub's among them -- live
+   in the SECOND frame of every saved pair and never in the first (824
+   and 851 live against 1122; the probe's own line: 182 to 287 allocated
+   a pair, none freed). The game writes those records on alternate frames
+   only, so a pair of consecutive frames holds them once at most, the
+   diff never saw the hub, and the hub took the ring's path, wrong by
+   twice the turn as before. The flight before had them in both frames
+   (25 in the second only). The hub counter-turns at range in every
+   session, then; what varied was whether its records were diffable. So
+   the pair is now two frames apart, from a start that alternates between
+   even and odd frames: every other pair holds the hub twice, and the
+   second body's hold spans the pairs between.
    What the detector did find, once a window, was a fragment of the ring
    -- 267 and 394 parts turning the body's own 0.042 deg, the cluster
    split at the table's overflow -- and took it, harmlessly, as a second
@@ -2600,7 +2613,8 @@ which is this project's contract for every read of the game.
    them, by pointer or by hash. The shadow was never wrong; the 15:13
    silence was the drives' absence, and the distant shimmer of that
    flight is not the three haze shaders. So the skip reads the shadow
-   again and checks one draw in sixty-four. Built as v0.14.1-121-gbc3db07.
+   again and checks one draw in sixty-four. Built as v0.14.1-121-gbc3db07,
+   and the two-frame pair as v0.14.1-123-g553638e.
 4. **Tier 2b** only if question 1 says no bits.
 5. **Tier 3** as `tools/` work against dumped frames, never on the hot
    path.
@@ -2739,11 +2753,17 @@ parts (a hub of four skins) marks less than it covers. And the pairs on
 disk are a sample every thirty seconds: whether the hub's counter-turn
 begins at a fixed range, or with a LOD, is not yet known.
 
-The next flight (16:22) qualified the finding: the same station at the
-same range showed ONE cluster, 623 parts, the hub's parts inside it --
-the hub turning with the ring. The counter-turn is a state the game is
-sometimes in, not a property of the station, and the second body is for
-the sessions that have it. Its detector also learned that a fragment of
-the body is not a second body: the ring's own cluster splits at the
-cluster table's overflow, and the other half turns the body's own turn.
-A second body must turn a quarter of the body's turn apart at least.
+The next flight (16:22) read at first as the hub turning with the ring
+-- one cluster, 623 parts -- and the dumps said otherwise: the ring crisp
+and the hub's face smeared in the same DLSS frame. The pool pairs held
+the answer: 271 to 298 records at the station, the hub's among them,
+live in the second frame of every pair and never in the first. The game
+writes them on alternate frames, a consecutive pair holds them once, and
+a record seen once cannot be diffed. So the pair is two frames apart
+from a start that alternates between even and odd frames, and every
+other pair holds the hub twice; the hub counter-turns at range in every
+session, and only its visibility to the diff varied. The detector also
+learned that a fragment of the body is not a second body: the ring's
+own cluster splits at the cluster table's overflow, and the other half
+turns the body's own turn. A second body must turn a quarter of the
+body's turn apart at least.
