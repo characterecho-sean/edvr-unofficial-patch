@@ -2321,6 +2321,27 @@ which is this project's contract for every read of the game.
    ship, the ships' radius is twenty metres, so a ship within a hundred
    gets its path and a big hull's far parts (61 parts at 105 m moving
    13.6 m a frame, this flight) are not a ship of their own.
+
+   *Its twenty-seventh flight* (12:49, `v0.14.1-102-gdb695f2`, near a
+   trail and a ship; two dumps in the normal view at 12:53 and three in
+   the objects view at 12:55). The ship is claimed: the security ship at
+   six to seven hundred metres reads solid cyan in the objects view,
+   which the counters could not say (they read eleven trillion pixels:
+   the group counters past forty were never zeroed, and a ship within
+   thirty metres put its box around the eye, so every ray hit it and
+   the whole sky read teal; both fixed in the build after). The
+   soft-particle mute engages -- the flight HUD's t0 is a 3743 by 3695
+   R32 resolve, and thirty-five to a hundred draws a frame across a
+   dozen pixel-shader families had their depth write muted -- but the
+   trail's thin core lines still carry depth: white in the objects view
+   where the station's grid reaches them, so their draw does not sample
+   the resolve and was not among the muted. Whether the rectangles
+   themselves survived the flight did not say; the smoke band beside
+   the ship at 534 m reads soft in the normal dump. The draw that owns
+   the trail's depth is the next thing to name, and the draw census
+   (`hotkey.dump_draws`, once with no trail in view and once with one,
+   `tools/diff_draw_census.py` between them) is the instrument built
+   for exactly that.
 4. **Tier 2b** only if question 1 says no bits.
 5. **Tier 3** as `tools/` work against dumped frames, never on the hot
    path.
