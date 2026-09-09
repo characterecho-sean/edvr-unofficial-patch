@@ -297,7 +297,7 @@ const char kPanelDepthHlsl[] =
     "float4 main(In i) : SV_Target {\n"
     "    float a = Surf.Sample(Smp, i.tc6).a;\n"
     "    clip(a - floorAndStrength.x);\n"
-    "    return floorAndStrength.y;\n"
+    "    return floorAndStrength.w;\n"
     "}\n";
 const char kScreenDepthHlsl[] =
     "Texture2D<float4> Surf : register(t0);\n"
@@ -307,7 +307,7 @@ const char kScreenDepthHlsl[] =
     "float4 main(In i) : SV_Target {\n"
     "    float a = Surf.Sample(Smp, i.tc0).a;\n"
     "    clip(a - floorAndStrength.x);\n"
-    "    return floorAndStrength.y;\n"
+    "    return floorAndStrength.w;\n"
     "}\n";
 // The holo material: the cockpit's panels and, instanced from the pool at
 // the target, the target markers. Its depth was written in place by the
@@ -334,7 +334,7 @@ const char kHoloDepthHlsl[] =
     "float4 main(In i) : SV_Target {\n"
     "    float a = Surf.Sample(Smp, i.tc8).a;\n"
     "    clip(a - floorAndStrength.x);\n"
-    "    return floorAndStrength.y;\n"
+    "    return floorAndStrength.w;\n"
     "}\n";
 
 // THE FLIGHT HUD'S COVERAGE, for the depth pass in the scene's projection.
@@ -430,8 +430,15 @@ const char kHudDepthHlsl[] =
     "    // reprojected it by whole degrees a frame ('swim/shimmering on the\n"
     "    // hud sprites'); at one metre, on the ship's path, it held under the\n"
     "    // head but not under the ship's turn, and swam again (2026-09-09).\n"
-    "    oDepth = (i.pos.z <= sceneZ * 1.5) ? i.pos.z : sceneZ;\n"
-    "    return floorAndStrength.y;\n"
+    "    // ...and the mask says which: floorAndStrength.w is the floating\n"
+    "    // value, its quantum odd, which keeps the temporal pass's body path\n"
+    "    // off the stroke (floorBuffer says) -- a target bracket tracks the\n"
+    "    // station's centre and does not turn with the station, and until\n"
+    "    // 2026-09-09 its side over the station's silhouette rode the spin\n"
+    "    // while its side over the sky did not: 'shimmering on just one side'.\n"
+    "    bool attached = i.pos.z <= sceneZ * 1.5;\n"
+    "    oDepth = attached ? i.pos.z : sceneZ;\n"
+    "    return attached ? floorAndStrength.y : floorAndStrength.w;\n"
     "}\n";
 
 // A transcription stands in for the pixel shaders it names -- and, when the
@@ -563,19 +570,19 @@ ID3D11RenderTargetView*  g_savedRtvs[kMaxRtvs] = {};
 ID3D11DepthStencilView*  g_savedDsv = nullptr;
 DepthShader*             g_reissueShader = nullptr;
 // What the reissue writes into the reactive mask, relative to the strength:
-// nought for the interface proper (the composites: panels, labels), whose
-// pixels the temporal pass keeps off a turning body's path -- a label at a
-// station's distance does not turn with it -- and three quanta of 255
-// under it for the families drawn AT the target that should ride that
-// path: the flight HUD's strokes, the holo material's markers and the
-// target-time sprite -- their cores only; their glow is not marked. The
-// mask's value is the only way the pass can tell the two apart at a pixel,
-// three quanta read the same to NVIDIA, and the pass tests the mask
-// against the strength less a quantum and a half (temporal_pass.cpp,
-// uiCovered). Measured 2026-09-09 from an eye dump: with the chevrons
-// excluded, the station under each and its few pixels of halo fell to the
-// camera's path and smeared; with the holo material alone brought across,
-// no change -- the chevrons are the flight HUD's.
+// nought for the interface proper (the composites: panels, labels), three
+// quanta of 255 under it for the holo material's markers and the
+// target-time sprite, and half the strength for the flight HUD's strokes
+// -- their cores only; their glow is not marked. The mask's value is the
+// only way the pass can tell one pixel's kind from another's, and a few
+// quanta read the same to NVIDIA. Which pixels ride a turning body's path
+// is the value's PARITY (floorBuffer), not its band: a flight HUD stroke's
+// core drawn at the surface rides, everything that floats keeps the
+// camera's path. Measured 2026-09-09 from an eye dump, when a band said
+// which: with the chevrons excluded, the station under each and its few
+// pixels of halo fell to the camera's path and smeared -- the glow was
+// marked then; with the holo material alone brought across, no change --
+// the chevrons are the flight HUD's.
 float                    g_reissueMaskOffset = 0.0f;
 int                      g_reissueMaskSlot = 0;   // which cached constant buffer carries it (floorBuffer)
 ID3D11PixelShader*       g_savedPs = nullptr;
@@ -1020,7 +1027,24 @@ ID3D11Buffer* floorBuffer(ID3D11DeviceContext* ctx, int slotIndex, float maskOff
     ID3D11Device* dev = nullptr;
     ctx->GetDevice(&dev);
     if (!dev) return nullptr;
-    const float data[4] = {g_alphaFloor, strength, nearDepth, 0.0f};
+    // The mask's value is NVIDIA's reactive strength, and its quantum's
+    // PARITY is the temporal pass's word on the body's path (uiCovered
+    // there): even rides a turning body where the pixel sits on it, odd
+    // keeps the camera's path at the pixel's depth. y is the value a
+    // family writes for a stroke drawn AT a surface (the flight HUD's
+    // coverage decides per pixel), w for one that floats over the scene;
+    // the interface proper (slot 0) floats always, and so do the holo
+    // material's markers and the sprite, whose shaders write w. Until
+    // 2026-09-09 a BAND of values said which, and every stroke's core
+    // fell in the riding band: the station's target brackets rode its
+    // spin where they crossed its silhouette and kept the camera's path
+    // over the sky beside it -- "shimmering on just one side".
+    const int q = static_cast<int>(strength * 255.0f + 0.5f);
+    const int qRide = (q & 1) ? q - 1 : q;
+    const int qFloat = (q & 1) ? q : q + 1;
+    const float ride = static_cast<float>(qRide) / 255.0f;
+    const float flt = static_cast<float>(qFloat) / 255.0f;
+    const float data[4] = {g_alphaFloor, slotIndex <= 0 ? flt : ride, nearDepth, flt};
     D3D11_BUFFER_DESC bd{};
     bd.ByteWidth = sizeof(data);
     bd.Usage = D3D11_USAGE_IMMUTABLE;
@@ -1470,6 +1494,10 @@ bool uiDepthOnEyeDraw(ID3D11DeviceContext* ctx) {
         // that changes in place, their motion is the scene's own since
         // 2026-09-09, and at the full strength's half-fresh history the
         // target indicator was "not as steady/solid as it should be".
+        // Which pixels ride is no longer the family's band but the mask
+        // value's parity (floorBuffer): a flight HUD core drawn at the
+        // surface rides, and everything that floats -- the holo material's
+        // markers, the sprite, a floating core -- keeps the camera's path.
         g_reissueMaskSlot = h == kFlightHud ? 2 : (hud ? 1 : 0);
         g_reissueMaskOffset = h == kFlightHud ? -0.5f * g_reactive : (hud ? -3.0f / 255.0f : 0.0f);
         const uint64_t ph = (hud || wantMask || wantLine) ? boundPsHash(ctx) : 0;

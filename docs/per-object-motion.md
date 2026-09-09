@@ -2227,6 +2227,101 @@ which is this project's contract for every read of the game.
    spent loading. The two 250 to 290 ms frames are the eye dumps
    themselves. The rate's rolling median held: two pairs in the flight
    sat 2.5 and 3.1 times the held rate and were counted, not adopted.
+
+   *Its twenty-third flight* (10:40, `v0.14.1-93-ge06cfd7`; the dump at
+   10:49 is of a targeted ship, not the station): "the target indicator
+   on the station was still shimmering on just one side", and the ask
+   that opens the next stage, "can we start the work to do the same
+   thing with moving ships in our field of view? It probably only needs
+   to happen within a certain distance, maybe 1k or less". The one side
+   is the mask's doing, and the code says so without the dump. A
+   stroke's core that floats takes the scene's depth behind it, and the
+   flight HUD's and the holo material's strokes both sat under the mask
+   value the pass read as "the interface proper", so they rode the
+   body's path wherever that depth fell inside the station's cells: the
+   bracket's side over the station's silhouette was carried by the
+   station's spin, which a bracket tracking the station's centre never
+   makes, and its side over the sky beside it kept the camera's path.
+   The mask value's quantum now carries the word by its parity -- even
+   rides, odd floats -- so each family keeps the reactive strength it
+   needs and the pass leaves a floating core alone at any strength; a
+   core drawn at the surface, the docking hologram over the drum, still
+   rides. The moving ships are the section at the end of this document.
 4. **Tier 2b** only if question 1 says no bits.
 5. **Tier 3** as `tools/` work against dumped frames, never on the hot
    path.
+
+## The moving ships
+
+Asked on the twenty-third flight (2026-09-09): "the same thing with
+moving ships in our field of view ... within a certain distance, maybe
+1k or less". The pieces were in hand. The probe clusters every pose
+change of a pair by its rigid delta and took the largest cluster as the
+body; the others were counted and dropped. A ship in view is one of
+them: its parts are records of the same pool (the player's own ship is
+a hundred and thirteen of them within a hundred metres of the seat),
+they move as one rigid thing, and their delta is nothing like the
+station's. So the stage takes, from each pair, every other cluster that
+
+- has at least three parts outside the player's own hundred metres (the
+  rigid fit's floor; a ship of one or two recorded parts is not taken),
+- moves -- a turn of 0.004 degrees or two centimetres in the pair; a
+  cluster that does neither is the world's, and the camera's path has
+  it,
+- is not a slice of the station: a cluster within twice the angle
+  tolerance and four times the position tolerance of the station's own
+  delta, whose parts split from the station's cluster by the
+  quaternion's quantum on their lever arm from the origin, and whose
+  pixels the station's grid claims already,
+- sits within `advanced.temporal_aa_objects_ships_metres` of the camera
+  (a thousand by default; nought takes none), and
+- fits as one rigid motion to half a metre, the same least-squares fit
+  as the station's over its parts' positions,
+
+nearest first, eight at most, and hands them to the pass with the
+pair's camera position. On a rebase pair (the live records shifted
+together without a turn) it takes none: the deltas are the origin's. A
+pair that finds none leaves the last pair's ships to age out over three
+pair intervals, so a slot shuffle that hides a ship for one pair does
+not drop it.
+
+Each ship's rate is its own pair's. A ship's motion changes, so the
+sixteen-pair median that steadies the station's rate has nothing to
+work with; what the ship borrows from the station's lesson is the
+interval, the pair's delta divided by the median of the last sixteen
+pairs' clock intervals instead of its own (the game's step per frame is
+steady where the probe's clock on the copies is not, 8.8 to 12.6 ms for
+the same turn on the flight of 09:52). A pair comes every eighth frame,
+so a ship's rate is up to eight frames old when it is applied: a ship
+at two metres a frame that turns its heading three degrees in that
+time puts its predicted point a tenth of a metre off, a third of a
+pixel at five hundred metres; a ship that flips over in a second is
+wrong by whole pixels for those eight frames, and that is the limit of
+the stage as built. Reading a pair every frame would close it at the
+cost of a diff a frame, and is the next step if the flights ask for it.
+
+There is no grid for a ship. Its box -- its parts' recorded positions
+padded by thirty metres, a part's mesh around its origin -- is its
+claim: a world-path pixel whose depth places it in the box takes the
+ship's path, and the boxes are tested before the station's grid, since
+a ship crossing the slot sits inside the station's cells too and took
+the station's turn there until now. The pass composes each ship's
+motion exactly as the station's (`temporalBodyPath`, the carried form
+on another camera's frames, the origin's shift) from the same eased
+frame length, and the shader carries eight of them as three rows, a
+translation and a box each. The player's own ship is never one: the
+split has it (`temporal_aa_ship_metres`), and any part within a hundred
+metres of the seat is left out of every cluster; nor is anything
+within the body's near floor of fifty metres claimed. The registration
+line says what share of pixels the ships took and names the nearest;
+the probe's twenty-second report counts what it took and what it left
+out and why; and the debug view (`temporal_aa_debug = objects`) paints
+a ship's claimed pixels cyan.
+
+What it does not reach: a ship of one or two recorded parts, a ship
+holding still against the world (which needs nothing), a ship's turret
+or landing gear moving against its hull (the hull's motion, as the
+station's panels are the station's), the eight-frame lag above, and
+whatever sits inside a ship's padded box at the ship's depth -- a
+station wall the ship skims -- which takes the ship's motion for as
+long as the ship is over it.

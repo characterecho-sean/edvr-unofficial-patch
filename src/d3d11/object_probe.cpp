@@ -91,6 +91,30 @@ RatePair g_rateRing[kRateRing] = {};
 uint32_t g_rateRingN = 0;
 uint64_t g_rateOutliers = 0;
 uint64_t g_rateOutlierNoteMs = 0;
+// Moving ships (object_probe.h, takeShips): taken within this of the
+// camera (the pass's setting), held this long past their pair -- three
+// pair intervals, so a pair that lost a ship to a slot shuffle does not
+// drop it, and a ship that left the pool or the range is gone within a
+// third of a second -- and boxed this far past their parts' recorded
+// positions: a part's mesh around its origin, a hull section or a
+// thruster housing, is tens of metres on the largest hulls.
+constexpr uint32_t kShipHoldFrames = 24;
+constexpr float    kShipPadM = 30.0f;
+constexpr uint32_t kShipMinRecords = 3;     // the rigid fit's floor
+constexpr float    kShipMaxRmsM = 0.5f;     // the fit's residual: parts that moved as one
+constexpr float    kShipMinMoveM = 0.02f;   // a pair: under this and under kMotionMinDeg it stands still (the world path's)
+constexpr uint32_t kDtRing = 16;
+float      g_shipRangeM = 1000.0f;
+ObjectShip g_ships[kObjectShipsMax] = {};
+uint32_t   g_shipCount = 0;
+uint32_t   g_shipAge = 0;
+float      g_shipCamPos[3] = {};
+float      g_dtRing[kDtRing] = {};
+uint32_t   g_dtRingN = 0;
+uint64_t   g_shipPairs = 0, g_shipsTaken = 0, g_shipsOutOfRange = 0, g_shipsSlices = 0;
+uint64_t   g_shipsStill = 0, g_shipsUnfit = 0, g_shipsOverCap = 0, g_shipsFew = 0;
+uint32_t   g_shipsMax = 0;
+uint64_t   g_shipNoteMs = 0;
 
 // The record's head, decoded the way the game's own shaders decode it
 // (fss_panel_vs.h: edvrDecodeQuat, the position at byte 16).
@@ -499,6 +523,182 @@ bool emptyRecord(const uint8_t* r) {
     return true;
 }
 
+// The pair's clock interval, eased: the game's step per frame is steady
+// where the probe's own clock on the copies is not (8.8 to 12.6 ms for
+// the same turn on the flight of 2026-09-09 09:52), and a ship's rate has
+// no sixteen-pair median to hide that in -- its motion changes from pair
+// to pair, and each pair's own must serve. The median of the last sixteen
+// pairs' intervals is the frame's own length, and a ship's rate is the
+// pair's delta over that.
+float easedPairDt(float dtMs) {
+    if (dtMs >= 5.0f && dtMs <= 50.0f) {
+        g_dtRing[g_dtRingN % kDtRing] = dtMs;
+        ++g_dtRingN;
+    }
+    const uint32_t cnt = g_dtRingN < kDtRing ? g_dtRingN : kDtRing;
+    if (cnt == 0) return 11.1f;
+    float v[kDtRing];
+    memcpy(v, g_dtRing, sizeof(float) * cnt);
+    for (uint32_t i = 1; i < cnt; ++i) {   // an insertion sort: sixteen at most
+        const float x = v[i];
+        uint32_t j = i;
+        while (j > 0 && v[j - 1] > x) { v[j] = v[j - 1]; --j; }
+        v[j] = x;
+    }
+    return v[cnt / 2];
+}
+
+// THE MOVING SHIPS (object_probe.h; 2026-09-09): every other rigid
+// cluster of the pair that moves, near enough, as a body of its own.
+// Which: not the dominant body's cluster (the station, diffPair's); not a
+// slice of it -- a cluster within a few tolerances of the station's own
+// delta, its parts split from the station's cluster by the quaternion's
+// quantum on their lever arm from the origin, whose pixels the station's
+// grid claims already; not standing still, which is the world path's;
+// and not the player's own parts, within kShipRadiusM of the camera,
+// which move with it. Each is fitted as the station is (the least-squares
+// rigid motion over its parts, the residual saying they moved as one) and
+// keeps its own rate: a ship's changes, so no median across pairs, and
+// the eased interval in place of the pair's own noisy one. On a rebase
+// pair (every live record shifted together) nothing is taken: the deltas
+// are the origin's. The nearest kObjectShipsMax are kept, nearest first,
+// and replace the last pair's; a pair that finds none leaves the last
+// pair's to age out (kShipHoldFrames).
+void takeShips(const Cluster* clusters, int nc, int big, const std::vector<int>& clusterIdx,
+               const std::vector<float>& posNow, const std::vector<float>& posPrev, uint32_t n,
+               const float* camPos, float dtMs, uint32_t live) {
+    if (g_shipRangeM <= 0.0f || !camPos || nc <= 0) return;
+    const float dt = easedPairDt(dtMs);
+    if (big >= 0) {
+        const Cluster& b = clusters[big];
+        if (b.angleSum / b.count < static_cast<double>(kRotQuantDeg) && live && b.count * 2 > live) return;
+    }
+    ++g_shipPairs;
+    ObjectShip found[kObjectShipsMax];
+    uint32_t nf = 0;
+    std::vector<int> members;
+    std::vector<float> fitNow, fitPrev;
+    for (int j = 0; j < nc; ++j) {
+        if (j == big) continue;
+        const Cluster& c = clusters[j];
+        if (c.count < kShipMinRecords) {
+            ++g_shipsFew;
+            continue;
+        }
+        const double angle = c.angleSum / c.count;
+        const double trans = c.transSum / c.count;
+        if (angle > static_cast<double>(kMotionMaxDeg) || trans > static_cast<double>(kMotionMaxM)) continue;
+        if (angle < static_cast<double>(kMotionMinDeg) && trans < static_cast<double>(kShipMinMoveM)) {
+            ++g_shipsStill;
+            continue;
+        }
+        members.clear();
+        fitNow.clear();
+        fitPrev.clear();
+        float cen[3] = {0.0f, 0.0f, 0.0f};
+        for (uint32_t i = 0; i < n; ++i) {
+            if (clusterIdx[i] != j) continue;
+            const float* pn = &posNow[static_cast<size_t>(i) * 3];
+            const float dx = pn[0] - camPos[0], dy = pn[1] - camPos[1], dz = pn[2] - camPos[2];
+            if (dx * dx + dy * dy + dz * dz < kShipRadiusM * kShipRadiusM) continue;
+            members.push_back(static_cast<int>(i));
+            for (int k = 0; k < 3; ++k) {
+                fitNow.push_back(pn[k]);
+                fitPrev.push_back(posPrev[static_cast<size_t>(i) * 3 + k]);
+                cen[k] += pn[k];
+            }
+        }
+        if (members.size() < kShipMinRecords) {
+            ++g_shipsFew;
+            continue;
+        }
+        for (int k = 0; k < 3; ++k) cen[k] /= static_cast<float>(members.size());
+        const float cx = cen[0] - camPos[0], cy = cen[1] - camPos[1], cz = cen[2] - camPos[2];
+        const float dist = sqrtf(cx * cx + cy * cy + cz * cz);
+        if (dist > g_shipRangeM) {
+            ++g_shipsOutOfRange;
+            continue;
+        }
+        if (big >= 0) {
+            const Cluster& b = clusters[big];
+            float dot = 0.0f;
+            for (int q = 0; q < 4; ++q) dot += c.q[q] * b.q[q];
+            dot = fabsf(dot) > 1.0f ? 1.0f : fabsf(dot);
+            const float dAng = 2.0f * acosf(dot) * 57.2957795f;
+            const float tx = c.t[0] - b.t[0], ty = c.t[1] - b.t[1], tz = c.t[2] - b.t[2];
+            const float originM = sqrtf(cen[0] * cen[0] + cen[1] * cen[1] + cen[2] * cen[2]);
+            const float posTol = kClusterPosM + kClusterPosPerM * originM;
+            if (dAng <= 2.0f * kClusterAngleDeg && sqrtf(tx * tx + ty * ty + tz * tz) <= 4.0f * posTol) {
+                ++g_shipsSlices;
+                continue;
+            }
+        }
+        float w[3] = {}, tf[3] = {}, rms = 0.0f;
+        if (!temporalRigidFit(fitNow.data(), fitPrev.data(), static_cast<int>(members.size()), w, tf, &rms) ||
+            rms > kShipMaxRmsM) {
+            ++g_shipsUnfit;
+            continue;
+        }
+        ObjectShip sh = {};
+        for (int k = 0; k < 3; ++k) {
+            sh.omegaPerMs[k] = w[k] / dt;
+            sh.tPerMs[k] = tf[k] / dt;
+            sh.bmin[k] = 1e30f;
+            sh.bmax[k] = -1e30f;
+        }
+        for (int m : members) {
+            const float* pm = &posNow[static_cast<size_t>(m) * 3];
+            for (int k = 0; k < 3; ++k) {
+                if (pm[k] - kShipPadM < sh.bmin[k]) sh.bmin[k] = pm[k] - kShipPadM;
+                if (pm[k] + kShipPadM > sh.bmax[k]) sh.bmax[k] = pm[k] + kShipPadM;
+            }
+        }
+        sh.distM = dist;
+        sh.rms = rms;
+        sh.records = static_cast<uint32_t>(members.size());
+        // Nearest first; past the table the farthest yields.
+        if (nf < kObjectShipsMax) {
+            found[nf++] = sh;
+        } else {
+            uint32_t farthest = 0;
+            for (uint32_t f = 1; f < nf; ++f) {
+                if (found[f].distM > found[farthest].distM) farthest = f;
+            }
+            if (dist < found[farthest].distM) found[farthest] = sh;
+            ++g_shipsOverCap;
+        }
+    }
+    if (!nf) return;
+    for (uint32_t i = 1; i < nf; ++i) {   // an insertion sort, nearest first
+        const ObjectShip x = found[i];
+        uint32_t j = i;
+        while (j > 0 && found[j - 1].distM > x.distM) { found[j] = found[j - 1]; --j; }
+        found[j] = x;
+    }
+    memcpy(g_ships, found, sizeof(ObjectShip) * nf);
+    g_shipCount = nf;
+    g_shipAge = 0;
+    memcpy(g_shipCamPos, camPos, sizeof(g_shipCamPos));
+    g_shipsTaken += nf;
+    if (nf > g_shipsMax) g_shipsMax = nf;
+    if (dueMs(g_shipNoteMs, 30000)) {
+        const ObjectShip& s0 = found[0];
+        const float* ow = s0.omegaPerMs;
+        const float* ot = s0.tPerMs;
+        Log::get().note(
+            "object probe: %u moving ship%s within %.0f m -- the nearest %u parts at %.0f m, fit to "
+            "%.3f m, turning %.3f deg and moving %.2f m a frame of %.1f ms, its box %.0f x %.0f x "
+            "%.0f m. %llu taken so far.",
+            nf, nf == 1 ? "" : "s", static_cast<double>(g_shipRangeM), s0.records,
+            static_cast<double>(s0.distM), static_cast<double>(s0.rms),
+            static_cast<double>(sqrtf(ow[0] * ow[0] + ow[1] * ow[1] + ow[2] * ow[2]) * dt * 57.2957795f),
+            static_cast<double>(sqrtf(ot[0] * ot[0] + ot[1] * ot[1] + ot[2] * ot[2]) * dt),
+            static_cast<double>(dt), static_cast<double>(s0.bmax[0] - s0.bmin[0]),
+            static_cast<double>(s0.bmax[1] - s0.bmin[1]), static_cast<double>(s0.bmax[2] - s0.bmin[2]),
+            static_cast<unsigned long long>(g_shipsTaken));
+    }
+}
+
 // The pair's diff: one sampled frame against the one before it. An empty
 // (all-zero) slot is nobody: a slot freed to zeros matched every other
 // empty slot as "moved" on the first flight and inflated that figure a
@@ -870,6 +1070,7 @@ void diffPair(const uint8_t* prev, const uint8_t* now, uint32_t bytes, float dtM
             if (trans > g_rebaseMaxM) g_rebaseMaxM = trans;
         }
     }
+    takeShips(clusters, nc, big, clusterIdx, posNow, posPrev, n, camPos, dtMs, live);
 }
 
 void releaseRing() {
@@ -1019,6 +1220,22 @@ void report() {
         static_cast<double>(g_secondSum) / bigPairs,
         static_cast<unsigned long long>(g_rebasePairs), g_rebaseMaxM, g_poolChanges,
         ranges[0] ? ranges : "none");
+    if (g_shipRangeM > 0.0f && g_shipPairs) {
+        const double sp = static_cast<double>(g_shipPairs);
+        Log::get().note(
+            "object probe, the ships: over %llu pairs with the moving ships on, %.2f taken a pair within "
+            "%.0f m (%u at most in one pair, %llu more past the %u kept); left out a pair: %.2f out of "
+            "range, %.2f slices of the dominant body, %.2f standing still, %.2f with under %u parts of "
+            "their own, %.2f that did not fit as one thing.",
+            static_cast<unsigned long long>(g_shipPairs), static_cast<double>(g_shipsTaken) / sp,
+            static_cast<double>(g_shipRangeM), g_shipsMax, static_cast<unsigned long long>(g_shipsOverCap),
+            kObjectShipsMax, static_cast<double>(g_shipsOutOfRange) / sp,
+            static_cast<double>(g_shipsSlices) / sp, static_cast<double>(g_shipsStill) / sp,
+            static_cast<double>(g_shipsFew) / sp, kShipMinRecords, static_cast<double>(g_shipsUnfit) / sp);
+    }
+    g_shipPairs = g_shipsTaken = g_shipsOutOfRange = g_shipsSlices = 0;
+    g_shipsStill = g_shipsUnfit = g_shipsOverCap = g_shipsFew = 0;
+    g_shipsMax = 0;
     g_pairs = g_skipped = 0;
     g_live = g_sigUnique = g_twins = 0;
     g_changed = g_poseChanged = g_otherOnly = g_moved = 0;
@@ -1205,6 +1422,20 @@ void objectMotionSetReach(float metres) {
     g_reachM = metres < 1.0f ? 1.0f : (metres > 2000.0f ? 2000.0f : metres);
 }
 
+uint32_t objectShipsGet(ObjectShip* out, uint32_t cap, float camPos[3], uint32_t* age) {
+    if (!g_shipCount || !out || !cap) return 0;
+    const uint32_t n = g_shipCount < cap ? g_shipCount : cap;
+    memcpy(out, g_ships, sizeof(ObjectShip) * n);
+    if (camPos) memcpy(camPos, g_shipCamPos, sizeof(g_shipCamPos));
+    if (age) *age = g_shipAge;
+    return n;
+}
+
+void objectShipsSetRange(float metres) {
+    if (!std::isfinite(metres)) return;
+    g_shipRangeM = metres < 0.0f ? 0.0f : (metres > 5000.0f ? 5000.0f : metres);
+}
+
 void objectProbeOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t instances) {
     if (!g_on || g_checksLeft == 0 || !ctx) return;
     // The record-carrying families are instanced (question 5: every carrier
@@ -1306,6 +1537,7 @@ void objectProbeFrameBoundary(ID3D11DeviceContext* ctx) {
             g_wasOn = false;
             g_noted = false;
             g_motionValid = false;
+            g_shipCount = 0;
         }
         return;
     }
@@ -1313,6 +1545,7 @@ void objectProbeFrameBoundary(ID3D11DeviceContext* ctx) {
     ++g_frame;
     // The body's motion ages a frame; past the hold it is nobody's.
     if (g_motionValid && ++g_motionAge > kMotionHoldFrames) g_motionValid = false;
+    if (g_shipCount && ++g_shipAge > kShipHoldFrames) g_shipCount = 0;
     g_checksLeft = (g_pool && !dueMs(g_checkMs, kRecheckMs)) ? 0 : kChecksPerFrame;
     if (!ctx) return;
     guardedBudget(g_budget, [&] {
@@ -1343,6 +1576,7 @@ void objectProbeShutdown() {
     g_on = false;
     g_wasOn = false;
     g_motionValid = false;
+    g_shipCount = 0;
 }
 
 }  // namespace edvr

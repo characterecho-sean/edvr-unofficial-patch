@@ -116,4 +116,32 @@ bool objectMotionGet(ObjectMotion* out);
 // the value it finds here.
 void objectMotionSetReach(float metres);
 
+// A MOVING SHIP's motion (2026-09-09, the twenty-third flight's ask: "the
+// same thing with moving ships in our field of view ... within a certain
+// distance, maybe 1k or less"): a rigid cluster of the pair that is not
+// the dominant body's, not a slice of it, not standing still, and not
+// the player's own parts, whose parts' centroid sits within
+// objectShipsSetRange of the camera. Rates as ObjectMotion's, from the
+// same rigid fit; the box is its parts' positions padded by a part's own
+// size, and there is no grid -- a ship is compact, and its box is its
+// claim. Nearest first, up to kObjectShipsMax of them.
+constexpr uint32_t kObjectShipsMax = 8;
+struct ObjectShip {
+    float    omegaPerMs[3];
+    float    tPerMs[3];
+    float    bmin[3];
+    float    bmax[3];
+    float    distM;      // its centroid's distance from the camera at the pair
+    float    rms;        // the rigid fit's residual, metres
+    uint32_t records;    // parts in the fit
+};
+// The ships in hand, with the camera position of the pair they were read
+// in (the frame their boxes are in, as ObjectMotion::camPos) and the
+// frames since. Zero until a pair has given any, and again once they
+// have gone stale.
+uint32_t objectShipsGet(ObjectShip* out, uint32_t cap, float camPos[3], uint32_t* age);
+// The range, metres, within which a moving ship is taken (0 = none; the
+// temporal pass's setting, read once a reload).
+void objectShipsSetRange(float metres);
+
 }  // namespace edvr

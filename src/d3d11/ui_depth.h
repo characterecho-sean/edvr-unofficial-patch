@@ -191,10 +191,12 @@ void uiDepthReissueEnd(ID3D11DeviceContext* ctx);
 bool uiDepthReactiveMask(uint32_t w, uint32_t h, int eye, ID3D11Texture2D** tex);
 
 // The strength the interface proper is marked at (advanced.ui_depth_reactive;
-// 0 = no mask). The holo material's markers are marked three quanta of 255
-// under it, so the temporal pass can keep the interface off a turning body's
-// path while the markers ride it: it tests the mask against the strength
-// less a quantum and a half.
+// 0 = no mask). The holo material's markers and the sprite are marked three
+// quanta of 255 under it and the flight HUD's strokes at half of it; and
+// whether a marked pixel rides a turning body's path (the temporal pass's
+// uiCovered) is the value's quantum's parity, even riding and odd not,
+// which ui_depth.cpp's floorBuffer sets per family and the flight HUD's
+// coverage shader per pixel (a core drawn at the surface rides).
 float uiDepthReactive();
 
 // Once per frame: the masks cleared, the engage line, the totals every 20 s.

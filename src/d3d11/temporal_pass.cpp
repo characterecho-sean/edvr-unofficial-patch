@@ -43,7 +43,7 @@ Texture2D<float> Z : register(t2);       // the scene's depth, the game's own, w
 SamplerState L : register(s0);           // bilinear, clamp
 RWTexture2D<float4> O : register(u0);    // the output: region-sized in the game's format for main, and for mv's debug views the trained runtime's OUTPUT texture, which is LARGER under DLSS -- paintDebug, not O[id.xy]
 RWTexture2D<float4> N : register(u1);    // the new history
-RWStructuredBuffer<uint> Stats : register(u2);   // 0 rejected, 1 clipped, 2 the clips' size (luma/255, summed); then the same three per candidate, four of them; 15 pixels on the world path, 16 bright pixels, 17 bright pixels with no depth; 18-20 the registration probes on the world path (sum dx*100, sum dy*100, count) and 21-23 on the ship; 24-27 world pixels, world clipped, ship pixels, ship clipped; 28-29 unused (the depth layers, retired 2026-09-04); 30-32 the registration probes on the sky (the far plane: sum dx*100, sum dy*100, count); 33-34 the probes' sum resid.mv*100 and sum mv.mv*100 on the sky, 35-36 on the world with a depth, 37-38 on the ship
+RWStructuredBuffer<uint> Stats : register(u2);   // 0 rejected, 1 clipped, 2 the clips' size (luma/255, summed); then the same three per candidate, four of them; 15 pixels on the world path, 16 bright pixels, 17 bright pixels with no depth; 18-20 the registration probes on the world path (sum dx*100, sum dy*100, count) and 21-23 on the ship; 24-27 world pixels, world clipped, ship pixels, ship clipped; 28-29 unused (the depth layers, retired 2026-09-04); 30-32 the registration probes on the sky (the far plane: sum dx*100, sum dy*100, count); 33-34 the probes' sum resid.mv*100 and sum mv.mv*100 on the sky, 35-36 on the world with a depth, 37-38 on the ship; 39 pixels on a moving ship's path (tier 2, 2026-09-09)
 RWTexture2D<float2> MV : register(u3);   // for a trained pass: motion vectors, pixels, current -> previous
 RWTexture2D<float>  ZC : register(u4);   // and the depth, copied as it is (both entries, when the mover mask wants last frame's)
 Texture2D<float> ZP : register(t3);      // LAST frame's ZC, when the mover mask is on (movers.x)
@@ -84,7 +84,7 @@ cbuffer P : register(b0) {
     float4 fovea0;      // xy the fovea centre in output pixels, z the inner radius (px) where the periphery calming starts, w 1/(the ramp width in px)
     float4 fovea1;      // x the periphery calm strength (0..1), w 1 = the fovea is on (else no modulation)
     float4 movers;      // x 1 = the mover mask is on (ZP holds last frame's depth for this frustum); y the depth tolerance, a fraction; z the strength, how much history a masked pixel loses (0..1); w 1 = main writes ZC
-    float4 probe;       // for the mv entry: x the history's scale (H is NVIDIA's previous output at outW/w times the render size); y 1 = run the registration probes against it; z 1 = UM holds the interface's reactive mask, to fold into MK; w the mask value above which a pixel is the interface proper (the strength less a quantum and a half; the holo markers sit under it)
+    float4 probe;       // for the mv entry: x the history's scale (H is NVIDIA's previous output at outW/w times the render size); y 1 = run the registration probes against it; z 1 = UM holds the interface's reactive mask, to fold into MK; w unused since 2026-09-09 (uiCovered reads the mask's parity)
     float4 stR0;        // the body's path (tier 2, docs/per-object-motion.md): the composite delta's rows,
     float4 stR1;        // the camera's with the dominant body's own turn -- a station's -- in it
     float4 stR2;
@@ -95,6 +95,11 @@ cbuffer P : register(b0) {
     float4 wR2;
     float4 box0;        // xyz the body's box, low corner (world)
     float4 box1;        // xyz ...high corner; the grid BG spans it
+    float4 ships;       // x the moving ships in hand this frame, 0..8 (object_probe.h, 2026-09-09): each on the body's path with its own motion, its box its claim, no grid
+    float4 shR[24];     // per ship, three rows of its composite delta (stR0..2's shape)
+    float4 shTv[8];     // xyz its translation term
+    float4 shBox0[8];   // xyz its box, low corner (world)
+    float4 shBox1[8];   // xyz ...high corner
 };
 float3 rgbToYcocg(float3 c) {
     return float3(0.25 * c.r + 0.5 * c.g + 0.25 * c.b,
@@ -253,16 +258,52 @@ bool insideBody(float3 d, float z) {
     if (any(u < 0.0) || any(u >= 1.0)) return false;
     return BG.Load(int4(int3(u * 128.0), 0)) > 0.5;   // kObjectGrid cells a side (object_probe.h)
 }
+// The moving ships (object_probe.h, 2026-09-09): compact bodies with a box
+// each and no grid. The nearest whose box holds the pixel's world point
+// claims it, and the boxes are tested BEFORE the dominant body's grid: a
+// ship crossing the slot sits inside the station's cells too, and took the
+// station's turn there until the ships had paths of their own.
+int insideShip(float3 d, float z) {
+    float3 vg = float3(d.x * z, d.y * z, -d.z * z);
+    float3 w = float3(dot(wR0.xyz, vg), dot(wR1.xyz, vg), dot(wR2.xyz, vg)) +
+               float3(wR0.w, wR1.w, wR2.w);
+    int n = int(ships.x);
+    for (int i = 0; i < n; ++i) {
+        if (all(w >= shBox0[i].xyz) && all(w <= shBox1[i].xyz)) return i;
+    }
+    return -1;
+}
+// bodyPixel's twin for ship i.
+bool shipPixel(int i, float3 d, float z, out float2 pp, out float zp) {
+    float3 dp = float3(dot(shR[i * 3].xyz, d), dot(shR[i * 3 + 1].xyz, d), dot(shR[i * 3 + 2].xyz, d)) * z +
+                shTv[i].xyz;
+    zp = -dp.z;
+    pp = 0.0;
+    if (dp.z >= -1e-6) return false;
+    float xt = dp.x / -dp.z;
+    float yt = dp.y / -dp.z;
+    pp.x = (xt - tanPrev.x) / (tanPrev.y - tanPrev.x) * float(size.x) - 0.5;
+    pp.y = (tanPrev.w - yt) / (tanPrev.w - tanPrev.z) * float(size.y) - 0.5;
+    return pp.x >= 0.0 && pp.y >= 0.0 && pp.x <= float(size.x) - 1.0 && pp.y <= float(size.y) - 1.0;
+}
 // The interface's pixel, by ui_depth's coverage mask when it is bound
-// (probe.z): the station's target brackets and its label sit at the
-// station's depth, inside its grid, and do not turn with it.
+// (probe.z), as far as the body's path is concerned. The mask's value is
+// NVIDIA's reactive strength, and its QUANTUM'S PARITY is ui_depth's word
+// on the path (floorBuffer there): even rides a turning body's path where
+// the pixel sits on it -- a stroke drawn AT the surface, the docking
+// hologram over the hub's drum -- and odd keeps the camera's path at the
+// pixel's depth: the interface proper, the holo material's target markers,
+// the target-time sprite, and a flight HUD stroke's core that floats over
+// the scene at the scene's depth. The station's target brackets are the
+// last kind: they track the station's centre and do not turn with it, and
+// before 2026-09-09 (when a band of values said which, and every stroke
+// fell in the riding band) they rode the station's spin where they
+// crossed its silhouette and kept the camera's path over the sky beside
+// it -- "shimmering on just one side".
 bool uiCovered(int2 q) {
-    // Above probe.w: the interface proper (its strength). The holo
-    // material's target markers are marked three quanta under the strength
-    // and fall below it, so they ride the body's path with the station
-    // behind them (the eye dump of 2026-09-09 showed the station smeared
-    // under each excluded chevron and its halo).
-    return probe.z != 0.0 && UM.Load(int3(q, 0)) > probe.w;
+    if (probe.z == 0.0) return false;
+    uint v = uint(UM.Load(int3(q, 0)) * 255.0 + 0.5);
+    return (v & 1u) != 0u;
 }
 // Where this pixel's surface was last frame if it moved with the body:
 // the camera's path composed with the body's turn. False when it lands
@@ -329,7 +370,7 @@ bool fetchHistoryT(float2 p, float3 r0, float3 r1, float3 r2, float3 tv,
             if (!far) {
                 dp = dp * z + tvCam.xyz;
                 zPred = -dp.z;
-                zBody = tvSt.w != 0.0 ? z : 0.0;
+                zBody = (tvSt.w != 0.0 || ships.x != 0.0) ? z : 0.0;
             }
         } else if (useDepth && !far) {
             dp = dp * z + tv;
@@ -339,7 +380,7 @@ bool fetchHistoryT(float2 p, float3 r0, float3 r1, float3 r2, float3 tv,
             // until the ship is latched to the pad, while the ship's own
             // hull, within the floor as seen from the seat, does not
             // (2026-09-09). The claim below decides by the grid as usual.
-            zBody = (tvSt.w != 0.0 && z > objects.y) ? z : 0.0;
+            zBody = ((tvSt.w != 0.0 || ships.x != 0.0) && z > objects.y) ? z : 0.0;
         } else if (useDepth && far && split.w != 0.0 && split.z > 0.0) {
             // A menu-like scene's depthless pixels (the main menu's hangar
             // wall reads no depth and reprojected as the far plane, so it
@@ -371,13 +412,26 @@ bool fetchHistoryT(float2 p, float3 r0, float3 r1, float3 r2, float3 tv,
     // and that depth places it in the body (insideBody says). world = 2
     // marks it for the counters and the debug view; the fetch below is
     // the same either way.
-    if (zBody > 0.0 && !uiCovered(region.xy + int2(p)) && insideBody(d, zBody)) {
-        float2 ppB;
-        float zpB;
-        if (bodyPixel(d, zBody, ppB, zpB)) {
-            pp = ppB;
-            zPred = zpB;
-            world = 2;
+    if (zBody > 0.0 && !uiCovered(region.xy + int2(p))) {
+        // A moving ship's box first (insideShip says why), the body's
+        // grid after; world = 3 marks a ship's pixel.
+        int si = ships.x != 0.0 ? insideShip(d, zBody) : -1;
+        if (si >= 0) {
+            float2 ppS;
+            float zpS;
+            if (shipPixel(si, d, zBody, ppS, zpS)) {
+                pp = ppS;
+                zPred = zpS;
+                world = 3;
+            }
+        } else if (tvSt.w != 0.0 && insideBody(d, zBody)) {
+            float2 ppB;
+            float zpB;
+            if (bodyPixel(d, zBody, ppB, zpB)) {
+                pp = ppB;
+                zPred = zpB;
+                world = 2;
+            }
         }
     }
     mvOut = pp - p;
@@ -449,7 +503,7 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
     // Three counters, not forty. This pass writes 15, 16 and 17 and no
     // others, and a forty-element local array costs forty registers of
     // occupancy on a dispatch that covers the whole eye.
-    uint count15 = 0, count16 = 0, count17 = 0, count28 = 0, count29 = 0;
+    uint count15 = 0, count16 = 0, count17 = 0, count28 = 0, count29 = 0, count39 = 0;
     if (id.x < (uint)size.x && id.y < (uint)size.y) {
         float2 p = float2(id.xy);
         float3 d;
@@ -485,12 +539,12 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
                 if (!far) {
                     dp = dp * z + tvCam.xyz;
                     zPred = -dp.z;
-                    zBody = tvSt.w != 0.0 ? z : 0.0;
+                    zBody = (tvSt.w != 0.0 || ships.x != 0.0) ? z : 0.0;
                 }
             } else if (!far) {
                 dp = dp * z + tvUsed.xyz;
                 zPred = -dp.z;
-                zBody = (tvSt.w != 0.0 && z > objects.y) ? z : 0.0;   // past the body's floor (fetchHistoryT says)
+                zBody = ((tvSt.w != 0.0 || ships.x != 0.0) && z > objects.y) ? z : 0.0;   // past the body's floor (fetchHistoryT says)
             } else if (split.w != 0.0 && split.z > 0.0) {
                 dp = dp * split.z + tvUsed.xyz;   // the menu's assumed depth (fetchHistoryT says)
             }
@@ -511,14 +565,26 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
             motion = pp - p;
             // The body's path for the pixels the body's grid claims, the
             // interface's excepted.
-            if (zBody > 0.0 && !uiCovered(region.xy + int2(p)) && insideBody(d, zBody)) {
-                float2 ppB;
-                float zpB;
-                if (bodyPixel(d, zBody, ppB, zpB)) {
-                    pp = ppB;
-                    motion = pp - p;
-                    zPred = zpB;
-                    count29 = 1;
+            if (zBody > 0.0 && !uiCovered(region.xy + int2(p))) {
+                int si = ships.x != 0.0 ? insideShip(d, zBody) : -1;
+                if (si >= 0) {
+                    float2 ppS;
+                    float zpS;
+                    if (shipPixel(si, d, zBody, ppS, zpS)) {
+                        pp = ppS;
+                        motion = pp - p;
+                        zPred = zpS;
+                        count39 = 1;
+                    }
+                } else if (tvSt.w != 0.0 && insideBody(d, zBody)) {
+                    float2 ppB;
+                    float zpB;
+                    if (bodyPixel(d, zBody, ppB, zpB)) {
+                        pp = ppB;
+                        motion = pp - p;
+                        zPred = zpB;
+                        count29 = 1;
+                    }
                 }
             }
             // The mover mask, where the prediction lands on last frame's
@@ -633,9 +699,11 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
             // frame dimmed elsewhere (the ship's path, or the body off).
             float3 dim = S.Load(int3(region.xy + int2(p), 0)).rgb * 0.25;
             float3 o5 = dim;
-            if (count29 != 0) {
+            if (count39 != 0) {
+                o5 = float3(0.0, 1.0, 1.0);   // cyan: a moving ship's path
+            } else if (count29 != 0) {
                 o5 = float3(1.0, 1.0, 1.0);
-            } else if (count15 != 0 && tvSt.w != 0.0) {
+            } else if (count15 != 0 && (tvSt.w != 0.0 || ships.x != 0.0)) {
                 if (farPx) o5 = float3(0.0, 0.3, 1.0);
                 else if (uiCovered(region.xy + int2(p))) o5 = float3(0.0, 1.0, 0.0);
                 else if (!insideBody(d, zPx)) o5 = float3(1.0, 0.0, 0.0);
@@ -663,6 +731,7 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
     if (count17 != 0) InterlockedAdd(gCount[17], count17);
     if (count28 != 0) InterlockedAdd(gCount[28], count28);
     if (count29 != 0) InterlockedAdd(gCount[29], count29);
+    if (count39 != 0) InterlockedAdd(gCount[39], count39);
     GroupMemoryBarrierWithGroupSync();
     // Only the counters that moved. A group whose counters are all zero --
     // which is nearly every group, since these count rare classes of pixel
@@ -774,6 +843,7 @@ void main(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
                               depthN, hy)) {
                 if (worldTaken != 0) count[15] = 1;
                 if (worldTaken == 2) count[29] = 1;   // the body's path taken
+                if (worldTaken == 3) count[39] = 1;   // a moving ship's
                 // The mover mask (moverAt says): a masked pixel keeps less
                 // of its history, by the strength -- at 1 it is the fresh
                 // frame alone, spatially settled by the filter above.
@@ -928,7 +998,8 @@ void main(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
             o = mover != 0.0 ? float3(1.0, 1.0, 1.0) : cur.rgb * 0.25;
         } else if (split.y == 5.0) {
             // The objects view: the pixels that took the body's path.
-            o = worldTaken == 2 ? float3(1.0, 1.0, 1.0) : cur.rgb * 0.25;
+            o = worldTaken == 2 ? float3(1.0, 1.0, 1.0)
+              : worldTaken == 3 ? float3(0.0, 1.0, 1.0) : cur.rgb * 0.25;   // a moving ship's path cyan
         } else if (split.y == 3.0) {
             // The depth view: where each pixel's depth comes from -- the
             // scene's in grey by distance (near bright, log scale to
@@ -1151,8 +1222,13 @@ struct PassParams {
     float   wR2[4];
     float   box0[4];     // the body's box, low corner
     float   box1[4];     // ...high corner
+    float   ships[4];    // x the moving ships in hand this frame (object_probe.h, 2026-09-09)
+    float   shR[kObjectShipsMax * 3][4];   // per ship, three rows of its composite delta
+    float   shTv[kObjectShipsMax][4];      // xyz its translation term
+    float   shBox0[kObjectShipsMax][4];    // xyz its box, low corner (world)
+    float   shBox1[kObjectShipsMax][4];    // xyz ...high corner
 };
-static_assert(sizeof(PassParams) == 640, "the cbuffer is forty 16-byte rows");
+static_assert(sizeof(PassParams) == 1424, "the cbuffer is eighty-nine 16-byte rows");
 
 // The format allowlist: the supersample resolve's, for its reasons
 // (supersample_pass.cpp) -- typeless and UNORM families read and written
@@ -1508,6 +1584,7 @@ bool     g_priceLogged = false;
 uint32_t g_lastW = 0, g_lastH = 0;
 uint64_t g_moverPix = 0;   // pixels the mover mask set this interval (Stats[28]; tier 1)
 uint64_t g_bodyPix = 0;    // pixels that took the body's path this interval (Stats[29]; tier 2)
+uint64_t g_shipPix = 0;    // pixels that took a moving ship's path this interval (Stats[39]; 2026-09-09)
 
 void maybeLogPrice() {
     if (g_priceLogged || g_timeCount < 120 || g_pixelsSeen == 0) return;
@@ -1562,6 +1639,7 @@ void pollSlots(ID3D11DeviceContext* ctx) {
                 g_brightNoDepthPix += v[17];
                 g_moverPix += v[28];
                 g_bodyPix += v[29];
+                g_shipPix += v[39];
                 g_probeWorldDx += static_cast<int32_t>(v[18]);
                 g_probeWorldDy += static_cast<int32_t>(v[19]);
                 g_probeWorldN += v[20];
@@ -1704,6 +1782,11 @@ bool     g_objectsNoted = false;   // the engage line, once
 ObjectMotion g_bodyLast = {};      // the motion last handed to the shader, for the log
 bool     g_bodyLastValid = false;
 float    g_bodyDtMs = 11.1f;       // this frame's length, for the body's rates
+float    g_shipsRangeM = 1000.0f;  // advanced.temporal_aa_objects_ships_metres: moving ships within this take their own path (0 off)
+bool     g_shipsNoted = false;     // the ships' engage line, once
+ObjectShip g_shipsLast = {};       // the nearest ship last handed to the shader, for the log
+uint32_t g_shipsLastN = 0;         // how many were, this frame
+uint32_t g_shipsLastAge = 0;
 // The body's pair and this frame's rows must be in the same frame: the
 // pool's positions and the box are in the frame of the pair's own camera
 // rows, and the floating origin moves on an approach (a rebase of 13 km
@@ -2972,6 +3055,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         // and the pool has given a body. The trained block below may still
         // stand it down for a frame it cannot compare against.
         bool bodyOn = false;
+        uint32_t shipsOn = 0;   // moving ships handed to the shader this frame
         // A jump this frame (the shift just took it), or rows the world path
         // did not take (another camera's, a stale latch): the body composes
         // with the camera delta the world path carries this frame instead
@@ -2984,13 +3068,13 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         // agreement carries the body over by it; neither stands the body
         // down.
         float bodyShift[3] = {0.0f, 0.0f, 0.0f};
-        auto bodyFrameAgrees = [&](const ObjectMotion& om) {
+        auto bodyFrameAgrees = [&](const float* pairCam) {
             static uint32_t s_frameHold = 0;
             static uint32_t s_frameUsed = 0;
             const double cn[3] = {g_curRows[3], g_curRows[7], g_curRows[11]};
             double dNo = 0.0, dSh = 0.0;
             for (int i = 0; i < 3; ++i) {
-                const double a = cn[i] - om.camPos[i];
+                const double a = cn[i] - pairCam[i];
                 const double b = a - g_bodyShift[i];
                 dNo += a * a;
                 dSh += b * b;
@@ -3015,37 +3099,37 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
             return false;
         };
         if (g_objectsOn && worldOn) {
+            // The body's motion over THIS frame's length: its rates
+            // times the interval since the last frame (a station turns
+            // at a constant rate; a pair measured on a long frame is a
+            // larger turn, and the frame it is applied to may be short).
+            LARGE_INTEGER qNowB{}, qFreqB{};
+            QueryPerformanceCounter(&qNowB);
+            QueryPerformanceFrequency(&qFreqB);
+            static LONGLONG s_lastBodyQpc = 0;
+            static uint32_t s_lastBodyFrame = 0;
+            float dtMs = 11.1f;
+            if (s_lastBodyQpc && qFreqB.QuadPart > 0 && s_lastBodyFrame != g_rowsFrame) {
+                dtMs = static_cast<float>(static_cast<double>(qNowB.QuadPart - s_lastBodyQpc) * 1000.0 /
+                                          static_cast<double>(qFreqB.QuadPart));
+            }
+            if (s_lastBodyFrame != g_rowsFrame) {
+                s_lastBodyQpc = qNowB.QuadPart;
+                s_lastBodyFrame = g_rowsFrame;
+                // The frame's length, eased: at a steady 90 Hz the
+                // interval is a constant with a little scheduling
+                // noise on it, and the body's turn should not carry
+                // that noise; a frame a fifth longer or shorter than
+                // the run is a real one and taken as it is.
+                const float m = (dtMs >= 5.0f && dtMs <= 50.0f) ? dtMs : 11.1f;
+                if (m > 1.2f * g_bodyDtMs || m < 0.8f * g_bodyDtMs) {
+                    g_bodyDtMs = m;
+                } else {
+                    g_bodyDtMs = 0.75f * g_bodyDtMs + 0.25f * m;
+                }
+            }
             ObjectMotion om;
-            if (objectMotionGet(&om) && bodyFrameAgrees(om) && ensureBodyGrid(dev, ctx, om)) {
-                // The body's motion over THIS frame's length: its rates
-                // times the interval since the last frame (a station turns
-                // at a constant rate; a pair measured on a long frame is a
-                // larger turn, and the frame it is applied to may be short).
-                LARGE_INTEGER qNowB{}, qFreqB{};
-                QueryPerformanceCounter(&qNowB);
-                QueryPerformanceFrequency(&qFreqB);
-                static LONGLONG s_lastBodyQpc = 0;
-                static uint32_t s_lastBodyFrame = 0;
-                float dtMs = 11.1f;
-                if (s_lastBodyQpc && qFreqB.QuadPart > 0 && s_lastBodyFrame != g_rowsFrame) {
-                    dtMs = static_cast<float>(static_cast<double>(qNowB.QuadPart - s_lastBodyQpc) * 1000.0 /
-                                              static_cast<double>(qFreqB.QuadPart));
-                }
-                if (s_lastBodyFrame != g_rowsFrame) {
-                    s_lastBodyQpc = qNowB.QuadPart;
-                    s_lastBodyFrame = g_rowsFrame;
-                    // The frame's length, eased: at a steady 90 Hz the
-                    // interval is a constant with a little scheduling
-                    // noise on it, and the body's turn should not carry
-                    // that noise; a frame a fifth longer or shorter than
-                    // the run is a real one and taken as it is.
-                    const float m = (dtMs >= 5.0f && dtMs <= 50.0f) ? dtMs : 11.1f;
-                    if (m > 1.2f * g_bodyDtMs || m < 0.8f * g_bodyDtMs) {
-                        g_bodyDtMs = m;
-                    } else {
-                        g_bodyDtMs = 0.75f * g_bodyDtMs + 0.25f * m;
-                    }
-                }
+            if (objectMotionGet(&om) && bodyFrameAgrees(om.camPos) && ensureBodyGrid(dev, ctx, om)) {
                 const float wF[3] = {om.omegaPerMs[0] * g_bodyDtMs, om.omegaPerMs[1] * g_bodyDtMs,
                                      om.omegaPerMs[2] * g_bodyDtMs};
                 const float tF[3] = {om.tPerMs[0] * g_bodyDtMs, om.tPerMs[1] * g_bodyDtMs,
@@ -3110,7 +3194,83 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                         static_cast<double>(g_objectsReach));
                 }
             }
+            // The moving ships (object_probe.h): each on the same path as the
+            // body -- its own rates over this frame's length, the same frame
+            // test and origin shift, the same composition on carried frames --
+            // with its box in place of a grid; the shader tests the boxes
+            // before the grid (insideShip says why).
+            if (g_shipsRangeM > 0.0f) {
+                ObjectShip ships[kObjectShipsMax];
+                float shipCam[3] = {0.0f, 0.0f, 0.0f};
+                uint32_t shipAge = 0;
+                const uint32_t nShips = objectShipsGet(ships, kObjectShipsMax, shipCam, &shipAge);
+                if (nShips && bodyFrameAgrees(shipCam)) {
+                    for (uint32_t i = 0; i < nShips && shipsOn < kObjectShipsMax; ++i) {
+                        const ObjectShip& sh = ships[i];
+                        const float wS[3] = {sh.omegaPerMs[0] * g_bodyDtMs, sh.omegaPerMs[1] * g_bodyDtMs,
+                                             sh.omegaPerMs[2] * g_bodyDtMs};
+                        const float tS[3] = {sh.tPerMs[0] * g_bodyDtMs, sh.tPerMs[1] * g_bodyDtMs,
+                                             sh.tPerMs[2] * g_bodyDtMs};
+                        float Rs[9];
+                        temporalRodrigues(wS, Rs);
+                        float tSs[3];
+                        for (int k = 0; k < 3; ++k) {
+                            const float rs = Rs[k * 3 + 0] * bodyShift[0] + Rs[k * 3 + 1] * bodyShift[1] +
+                                             Rs[k * 3 + 2] * bodyShift[2];
+                            tSs[k] = tS[k] + bodyShift[k] - rs;
+                        }
+                        float Ws[9], tvs[3];
+                        if (!carriedRows) {
+                            temporalBodyPath(g_prevRows, g_curRows, Rs, tSs, Ws, tvs);
+                        } else {
+                            temporalBodyPathCarried(g_prevRows, Rs, tSs, worldDelta, tvCam, Ws, tvs);
+                        }
+                        for (int r = 0; r < 3; ++r) {
+                            for (int c = 0; c < 3; ++c) p.shR[shipsOn * 3 + r][c] = Ws[r * 3 + c];
+                            p.shR[shipsOn * 3 + r][3] = 0.0f;
+                        }
+                        for (int k = 0; k < 3; ++k) {
+                            p.shTv[shipsOn][k] = tvs[k];
+                            p.shBox0[shipsOn][k] = sh.bmin[k] + bodyShift[k];
+                            p.shBox1[shipsOn][k] = sh.bmax[k] + bodyShift[k];
+                        }
+                        p.shTv[shipsOn][3] = p.shBox0[shipsOn][3] = p.shBox1[shipsOn][3] = 0.0f;
+                        ++shipsOn;
+                    }
+                    if (shipsOn && !bodyOn) {
+                        // The camera rows for the shader's world point (the
+                        // body's block fills them when the body is on).
+                        float* wrows[3] = {p.wR0, p.wR1, p.wR2};
+                        for (int r = 0; r < 3; ++r) {
+                            for (int c = 0; c < 4; ++c) wrows[r][c] = g_curRows[r * 4 + c];
+                        }
+                    }
+                    g_shipsLast = ships[0];
+                    g_shipsLastAge = shipAge;
+                    if (shipsOn && !g_shipsNoted) {
+                        g_shipsNoted = true;
+                        const float* ow = ships[0].omegaPerMs;
+                        const float* ot = ships[0].tPerMs;
+                        Log::get().note(
+                            "temporal aa: a moving ship's own path is on -- %u ship%s within %.0f m from the "
+                            "instance pool's other rigid clusters, the nearest %u parts at %.0f m (fit to "
+                            "%.3f m) turning %.4f deg and moving %.3f m a frame; each world-path pixel whose "
+                            "depth places it in a ship's box (its parts, padded) takes that ship's path over "
+                            "the camera's and the station's. The registration line's share says how many.",
+                            shipsOn, shipsOn == 1 ? "" : "s", static_cast<double>(g_shipsRangeM),
+                            ships[0].records, static_cast<double>(ships[0].distM),
+                            static_cast<double>(ships[0].rms),
+                            static_cast<double>(sqrtf(ow[0] * ow[0] + ow[1] * ow[1] + ow[2] * ow[2]) *
+                                                g_bodyDtMs * 57.2957795f),
+                            static_cast<double>(sqrtf(ot[0] * ot[0] + ot[1] * ot[1] + ot[2] * ot[2]) *
+                                                g_bodyDtMs));
+                    }
+                }
+            }
         }
+        p.ships[0] = static_cast<float>(shipsOn);
+        p.ships[1] = p.ships[2] = p.ships[3] = 0.0f;
+        g_shipsLastN = shipsOn;
         p.tvSt[3] = bodyOn ? 1.0f : 0.0f;
         p.objects[0] = g_objectsReach;
         p.objects[1] = kBodyNearM;
@@ -3517,10 +3677,11 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     // Bound for the fold when the mover mask is on, and for
                     // the body path's exclusion whenever that is on.
                     const bool wantUi = reactiveMask != nullptr &&
-                                        ((p.movers[0] != 0.0f && e.dlMaskUav != nullptr) || p.tvSt[3] != 0.0f);
+                                        ((p.movers[0] != 0.0f && e.dlMaskUav != nullptr) || p.tvSt[3] != 0.0f ||
+                                         p.ships[0] != 0.0f);
                     const bool uiBound = wantUi && ensureUiMaskSrv(dev, e, reactiveMask);
                     p.probe[2] = uiBound ? 1.0f : 0.0f;
-                    p.probe[3] = uiDepthReactive() - 1.5f / 255.0f;   // the interface proper is above this, the markers below
+                    p.probe[3] = uiDepthReactive() - 1.5f / 255.0f;   // unused since 2026-09-09 (uiCovered reads the parity); kept for the record
                     setParams(ctx, p);
                     ID3D11ShaderResourceView* nullSrvM[6] = {};
                     ID3D11UnorderedAccessView* nullUavM[6] = {};
@@ -3666,7 +3827,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         // path's exclusion (the trained block above binds its own).
         if (!usedDlaa) {
             ID3D11Texture2D* rm = nullptr;
-            const bool uiOwn = p.tvSt[3] != 0.0f && uiDepthReactiveMask(w, h, eye, &rm) && rm &&
+            const bool uiOwn = (p.tvSt[3] != 0.0f || p.ships[0] != 0.0f) && uiDepthReactiveMask(w, h, eye, &rm) && rm &&
                                ensureUiMaskSrv(dev, e, rm);
             p.probe[2] = uiOwn ? 1.0f : 0.0f;
             p.probe[3] = uiDepthReactive() - 1.5f / 255.0f;
@@ -4196,6 +4357,11 @@ void temporalPassConfigure(Config& cfg) {
     if (reach > 2000.0f) reach = 2000.0f;
     g_objectsReach = reach;
     objectMotionSetReach(reach);
+    float shipsM = cfg.getFloat("advanced.temporal_aa_objects_ships_metres", 1000.0f);
+    if (!std::isfinite(shipsM) || shipsM < 0.0f) shipsM = 0.0f;
+    if (shipsM > 5000.0f) shipsM = 5000.0f;
+    g_shipsRangeM = shipsM;
+    objectShipsSetRange(shipsM);
     float menu = cfg.getFloat("advanced.temporal_aa_menu_metres", 0.0f);
     if (!std::isfinite(menu) || menu < 0.0f) menu = 0.0f;
     if (menu > 50.0f) menu = 50.0f;
@@ -4599,6 +4765,22 @@ bool temporalPassRegistration(char* buf, size_t n, char* buf2, size_t n2, char* 
                       "over %u frames by the origin's move since its pair",
                       g_bodyFrameHolds, g_bodyRowsHolds, g_bodyShiftUsed);
         }
+        // The moving ships (2026-09-09): their share and the nearest one.
+        if (g_shipsRangeM > 0.0f) {
+            if (g_shipsLastN) {
+                regAppend(buf, n, used,
+                          "; the moving ships' path took %.2f%% of pixels (%u ship%s in hand within %.0f m, the "
+                          "nearest %u parts at %.0f m fit to %.3f m, %u frames old)",
+                          100.0 * static_cast<double>(g_shipPix) / static_cast<double>(g_intervalPix),
+                          g_shipsLastN, g_shipsLastN == 1 ? "" : "s", static_cast<double>(g_shipsRangeM),
+                          g_shipsLast.records, static_cast<double>(g_shipsLast.distM),
+                          static_cast<double>(g_shipsLast.rms), g_shipsLastAge);
+            } else if (g_shipPix) {
+                regAppend(buf, n, used,
+                          "; the moving ships' path took %.2f%% of pixels this interval (none in hand now)",
+                          100.0 * static_cast<double>(g_shipPix) / static_cast<double>(g_intervalPix));
+            }
+        }
     }
     // The third line: the probes and the rows against the head.
     buf = buf3;
@@ -4704,6 +4886,7 @@ bool temporalPassRegistration(char* buf, size_t n, char* buf2, size_t n2, char* 
     g_classShipPix = g_classShipClip = 0;
     g_moverPix = 0;
     g_bodyPix = 0;
+    g_shipPix = 0;
     g_bodyFrameHolds = 0;
     g_bodyRowsHolds = 0;
     g_bodyShiftUsed = 0;
