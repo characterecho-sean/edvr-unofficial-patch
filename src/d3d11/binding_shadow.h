@@ -67,6 +67,8 @@ enum class BindSlot : uint32_t {
     CsUav1,
     CsUav2,
     CsUav3,
+    Vs,            // the bound vertex shader, with its content hash (bindingShaderHash)
+    Ps,            // the bound pixel shader, likewise
     Count
 };
 
@@ -100,6 +102,16 @@ uint32_t bindingGeneration(BindSlot slot);
 // unchanged: an identical address after a rebind is not evidence of an identical
 // object, which is the bug that shipped as 0.5.2.
 void bindingSet(BindSlot slot, void* ptr);
+
+// A shader binding with its content hash, looked up once at the set. The
+// draw path asked VSGetShader for it three times a draw -- the billboard
+// variant, the interface classifier, the scanner's chrome tracker -- and each
+// asking is a device critical section, a registry lock and a Release: about
+// two milliseconds a frame in a busy scene (the review of 2026-09-09). The
+// hash is 0 for a slot never set; a caller that finds the pointer null falls
+// back to the Get, since the shadow follows the owner context only.
+void bindingSetShader(BindSlot slot, void* ptr, uint64_t hash);
+uint64_t bindingShaderHash(BindSlot slot);
 
 // Everything is unbound -- ClearState, or ExecuteCommandList without restore.
 // The only place forgetting a pointer is the truth rather than a guess.

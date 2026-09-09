@@ -667,6 +667,9 @@ bool inList(const uint64_t* list, uint32_t n, uint64_t h) {
 // The bound vertex shader's hash: one COM call, then the memo instead of
 // the registry's lock on every draw.
 uint64_t boundVsHash(ID3D11DeviceContext* ctx) {
+    // The binding shadow's, set with the shader (2026-09-09); the Get only
+    // when the shadow has seen no set, which is before the first draw.
+    if (bindingGet(BindSlot::Vs)) return bindingShaderHash(BindSlot::Vs);
     uint64_t h = 0;
     guardedBudget(g_budget, [&] {
         ID3D11VertexShader* vs = nullptr;
@@ -686,6 +689,7 @@ uint64_t boundVsHash(ID3D11DeviceContext* ctx) {
 
 // The bound pixel shader's hash, the same way; asked only of composites.
 uint64_t boundPsHash(ID3D11DeviceContext* ctx) {
+    if (bindingGet(BindSlot::Ps)) return bindingShaderHash(BindSlot::Ps);   // the shadow's (boundVsHash says)
     uint64_t h = 0;
     guardedBudget(g_budget, [&] {
         ID3D11PixelShader* ps = nullptr;

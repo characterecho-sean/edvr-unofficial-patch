@@ -116,6 +116,8 @@ constexpr uint32_t kCensusAutoFireCap = 8;
 // these collide with the exposure fix's slots, so the two hooks coexist.
 constexpr size_t kSlotVSSetConstantBuffers  = 7;
 constexpr size_t kSlotPSSetShaderResources  = 8;
+constexpr size_t kSlotPSSetShader           = 9;    // the binding shadow's Ps (bindingSetShader)
+constexpr size_t kSlotVSSetShader           = 11;   // ...and its Vs
 constexpr size_t kSlotDrawIndexed           = 12;
 constexpr size_t kSlotDraw                  = 13;
 constexpr size_t kSlotMap                   = 14;
@@ -241,6 +243,10 @@ typedef void(STDMETHODCALLTYPE* PFN_SetConstantBuffers)(ID3D11DeviceContext*, UI
                                                         ID3D11Buffer* const*);
 typedef void(STDMETHODCALLTYPE* PFN_SetShaderResources)(ID3D11DeviceContext*, UINT, UINT,
                                                         ID3D11ShaderResourceView* const*);
+typedef void(STDMETHODCALLTYPE* PFN_VSSetShader)(ID3D11DeviceContext*, ID3D11VertexShader*,
+                                                 ID3D11ClassInstance* const*, UINT);
+typedef void(STDMETHODCALLTYPE* PFN_PSSetShader)(ID3D11DeviceContext*, ID3D11PixelShader*,
+                                                 ID3D11ClassInstance* const*, UINT);
 typedef void(STDMETHODCALLTYPE* PFN_Draw)(ID3D11DeviceContext*, UINT, UINT);
 typedef void(STDMETHODCALLTYPE* PFN_DrawIndexed)(ID3D11DeviceContext*, UINT, UINT, INT);
 typedef void(STDMETHODCALLTYPE* PFN_DrawInstanced)(ID3D11DeviceContext*, UINT, UINT, UINT,
@@ -299,6 +305,22 @@ struct State {
 
     PFN_SetConstantBuffers   realVSSetConstantBuffers = nullptr;
     PFN_SetShaderResources   realPSSetShaderResources = nullptr;
+    PFN_VSSetShader          realVSSetShader = nullptr;
+    PFN_PSSetShader          realPSSetShader = nullptr;
+    // The shader hash memo the shader hooks fill (shaderHashMemo): the
+    // registry's lock once per new pointer, not once per set.
+    struct ShaderMemo {
+        void*    ptr[32] = {};
+        uint64_t hash[32] = {};
+    };
+    ShaderMemo vsMemo, psMemo;
+    // The Map hook's memo of a resource's kind and size by address (hookedMap
+    // says why), 64 slots direct-mapped.
+    struct MapMemo {
+        void*    res = nullptr;
+        uint32_t byteWidth = 0;
+    };
+    MapMemo mapMemo[64];
     PFN_Draw                 realDraw = nullptr;
     PFN_DrawIndexed          realDrawIndexed = nullptr;
     PFN_DrawInstanced        realDrawInstanced = nullptr;
@@ -1142,6 +1164,13 @@ bool isFlatGrey(const FLOAT c[4]) {
 // default, or the raised size when the resolution fix is on. Nothing else an
 // eye-sized draw samples has exactly those dimensions.
 bool srv0IsPanelSized(State* s, char kind, uint32_t count) {
+    // The composite that reads the panel is a quad -- six indices, the
+    // intro's and the menu backdrop's censuses agree -- so a draw of more
+    // than a few dozen is not it, and asking costs a resolve per draw
+    // (the slot's generation moves with every material: the review of
+    // 2026-09-09 put it at 0.6 ms a frame).
+    (void)kind;
+    if (count > 64) return false;
     void* srv = bindingGet(BindSlot::PsSrv0);
     if (!srv) return false;
 
@@ -1351,10 +1380,7 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         kind == 'X' && count == 6) {
         bool chromeMatched = false;
         guardedBudget(g_panelCbBudget, [&] {
-            ID3D11VertexShader* vs = nullptr;
-            self->VSGetShader(&vs, nullptr, nullptr);
-            const uint64_t h = lookupShaderHash(vs);
-            if (vs) vs->Release();
+            const uint64_t h = bindingShaderHash(BindSlot::Vs);   // the shadow's, set with the shader
             if (h != 0xA888D51024D9798Eull && h != 0xB018D143700AB803ull) {
                 return;
             }
@@ -1909,10 +1935,7 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
             // the bound shader costs a VSGetShader per candidate draw and
             // happens only while a probe spec is set.
             if (s->censusSkip[i].vsHash) {
-                ID3D11VertexShader* vs = nullptr;
-                self->VSGetShader(&vs, nullptr, nullptr);
-                const uint64_t h = lookupShaderHash(vs);
-                if (vs) vs->Release();
+                const uint64_t h = bindingShaderHash(BindSlot::Vs);   // the shadow's, set with the shader
                 if (h != s->censusSkip[i].vsHash) continue;
                 ++s->censusSkipped;
                 return DrawVerdict::kSkip;
@@ -2443,6 +2466,35 @@ void STDMETHODCALLTYPE hookedVSSetConstantBuffers(ID3D11DeviceContext* self, UIN
 
 // Everything is unbound. Forget all of it -- this is the one place where
 // forgetting the pointers is the truth rather than a guess.
+// The shader setters, for the binding shadow's Vs and Ps (binding_shadow.h):
+// the content hash is looked up here, once per new pointer through a small
+// direct-mapped memo, so the draw path reads it without a VSGetShader --
+// which cost a device critical section and a Release per call, three times
+// a draw across the billboard variant, the interface classifier and the
+// scanner's chrome tracker (the review of 2026-09-09: about two
+// milliseconds a frame in a busy scene).
+uint64_t shaderHashMemo(State::ShaderMemo& m, void* shader) {
+    if (!shader) return 0;
+    const size_t i = (reinterpret_cast<uintptr_t>(shader) >> 4) & 31;
+    if (m.ptr[i] != shader) {
+        m.ptr[i] = shader;
+        m.hash[i] = lookupShaderHash(shader);
+    }
+    return m.hash[i];
+}
+
+void STDMETHODCALLTYPE hookedVSSetShader(ID3D11DeviceContext* self, ID3D11VertexShader* vs,
+                                         ID3D11ClassInstance* const* ci, UINT n) {
+    if (!foreignContext(self)) bindingSetShader(BindSlot::Vs, vs, shaderHashMemo(g_state->vsMemo, vs));
+    g_state->realVSSetShader(self, vs, ci, n);
+}
+
+void STDMETHODCALLTYPE hookedPSSetShader(ID3D11DeviceContext* self, ID3D11PixelShader* ps,
+                                         ID3D11ClassInstance* const* ci, UINT n) {
+    if (!foreignContext(self)) bindingSetShader(BindSlot::Ps, ps, shaderHashMemo(g_state->psMemo, ps));
+    g_state->realPSSetShader(self, ps, ci, n);
+}
+
 void forgetBindings(State*) { bindingForgetAll(); }
 
 // Both of these say so the first time they run.
@@ -2547,16 +2599,27 @@ HRESULT STDMETHODCALLTYPE hookedMap(ID3D11DeviceContext* self, ID3D11Resource* r
         // one on a texture writes a 44-byte texture description into the
         // 20-byte buffer description below. That is a stack smash, and it
         // brought the whole process down on the first frame.
-        D3D11_RESOURCE_DIMENSION dim = D3D11_RESOURCE_DIMENSION_UNKNOWN;
-        res->GetType(&dim);
-        if (dim == D3D11_RESOURCE_DIMENSION_BUFFER) {
-            D3D11_BUFFER_DESC d{};
-            static_cast<ID3D11Buffer*>(res)->GetDesc(&d);
-            if (glitchFrameWantsBuffer(d.ByteWidth)) {
-                s->camResource = res;
-                s->camData = mapped->pData;
-                s->camBytes = d.ByteWidth;
+        // The kind and size, memoised by address: a Map a draw at three
+        // thousand draws paid the two COM calls each for a detector that
+        // wants one buffer (the review of 2026-09-09: up to 0.4 ms a frame).
+        // A recycled address gives the detector one wrong size for one
+        // observe, which it survives.
+        State::MapMemo& mm = s->mapMemo[(reinterpret_cast<uintptr_t>(res) >> 6) & 63];
+        if (mm.res != res) {
+            mm.res = res;
+            mm.byteWidth = 0;
+            D3D11_RESOURCE_DIMENSION dim = D3D11_RESOURCE_DIMENSION_UNKNOWN;
+            res->GetType(&dim);
+            if (dim == D3D11_RESOURCE_DIMENSION_BUFFER) {
+                D3D11_BUFFER_DESC d{};
+                static_cast<ID3D11Buffer*>(res)->GetDesc(&d);
+                mm.byteWidth = d.ByteWidth;
             }
+        }
+        if (mm.byteWidth && glitchFrameWantsBuffer(mm.byteWidth)) {
+            s->camResource = res;
+            s->camData = mapped->pData;
+            s->camBytes = mm.byteWidth;
         }
     }
     // The peek target, independent of the chain above on purpose: the buffer
@@ -4861,6 +4924,10 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
                    reinterpret_cast<void**>(&s.realOMSetRtvAndUav));
     s.hook.replace(kSlotPSSetShaderResources, &hookedPSSetShaderResources,
                    reinterpret_cast<void**>(&s.realPSSetShaderResources));
+    s.hook.replace(kSlotVSSetShader, &hookedVSSetShader,
+                   reinterpret_cast<void**>(&s.realVSSetShader));
+    s.hook.replace(kSlotPSSetShader, &hookedPSSetShader,
+                   reinterpret_cast<void**>(&s.realPSSetShader));
     s.hook.replace(kSlotVSSetConstantBuffers, &hookedVSSetConstantBuffers,
                    reinterpret_cast<void**>(&s.realVSSetConstantBuffers));
     s.hook.replace(kSlotCopyResource, &hookedCopyResource,

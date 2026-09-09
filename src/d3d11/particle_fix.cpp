@@ -15,6 +15,7 @@
 #include <string>
 
 #include "../common/timing.h"
+#include "binding_shadow.h"   // bindingShaderHash: the bound vertex shader's hash, set with the shader
 #include "exposure_fix.h"   // lookupShaderHash
 #include "flare_vs.h"
 #include "particle_vs.h"
@@ -202,12 +203,22 @@ uint32_t bindOffsetRegs(ID3D11DeviceContext* ctx, UINT slot) {
 // Which billboard variant is this draw, or -1 for none? By shader hash and
 // nothing else: the geyser hunt established that kind, count, stride and
 // every sampler size are shared with the terrain and prop pipelines.
-int billboardVariantFor(ID3D11DeviceContext* ctx) {
+// The bound vertex shader's hash: the binding shadow's, set with the
+// shader (2026-09-09; a VSGetShader per draw was a millisecond a frame
+// here), and the Get only when the shadow has seen no set.
+uint64_t boundVsHashFast(ID3D11DeviceContext* ctx) {
+    if (bindingGet(BindSlot::Vs)) return bindingShaderHash(BindSlot::Vs);
     ID3D11VertexShader* vs = nullptr;
     ctx->VSGetShader(&vs, nullptr, nullptr);
-    if (!vs) return -1;
+    if (!vs) return 0;
     const uint64_t h = lookupShaderHash(vs);
     vs->Release();
+    return h;
+}
+
+int billboardVariantFor(ID3D11DeviceContext* ctx) {
+    const uint64_t h = boundVsHashFast(ctx);
+    if (!h) return -1;
     for (int i = 0; i < kVariantCount; ++i) {
         if (h == kVariants[i].hash) return i;
     }
@@ -506,11 +517,7 @@ bool witchspaceStarsSkip(ID3D11DeviceContext* ctx, char kind, uint32_t count,
     if (!g_hideWitchspaceStars || !ctx) return false;
     if (kind != 'X' && kind != 'N') return false;
     if (instances == 0 || count < 6) return false;
-    ID3D11VertexShader* vs = nullptr;
-    ctx->VSGetShader(&vs, nullptr, nullptr);
-    if (!vs) return false;
-    const uint64_t h = lookupShaderHash(vs);
-    vs->Release();
+    const uint64_t h = boundVsHashFast(ctx);
     if (h != kWitchspaceStarsVs) return false;
     ++g_starsSkipped;
     const uint64_t now = nowMs();
@@ -532,11 +539,7 @@ bool heatHazeSkip(ID3D11DeviceContext* ctx, char kind, uint32_t count, uint32_t 
     // indexed draws of a multiple of 36 indices (a segment is six quads),
     // and that leaves a handful of the eye's draws for the VSGetShader.
     if (kind != 'X' || instances == 0 || count == 0 || count > 4096 || (count % 36) != 0) return false;
-    ID3D11VertexShader* vs = nullptr;
-    ctx->VSGetShader(&vs, nullptr, nullptr);
-    if (!vs) return false;
-    const uint64_t h = lookupShaderHash(vs);
-    vs->Release();
+    const uint64_t h = boundVsHashFast(ctx);
     if (h != kHeatHazeVs[0] && h != kHeatHazeVs[1] && h != kHeatHazeVs[2]) return false;
     ++g_hazeSkipped;
     const uint64_t now = nowMs();

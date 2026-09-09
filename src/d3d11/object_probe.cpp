@@ -505,8 +505,17 @@ constexpr float kClusterAngleDeg = 0.02f;
 // in radians, to the angle squared.
 constexpr float kClusterHalfRad = kClusterAngleDeg * 0.5f * 0.01745329f;
 constexpr float kClusterHalfRad2 = kClusterHalfRad * kClusterHalfRad;
-constexpr float kClusterPosM = 0.03f;       // three centimetres...
-constexpr float kClusterPosPerM = 1.0e-4f;  // ...plus the quantum's lever arm on the record's distance
+// Five centimetres plus four tenths of a millimetre a metre of the part's
+// distance from the camera (the term's reference since 2026-09-09; rigidDelta
+// says). The quaternion's quantum is a tenth of a millimetre a metre at
+// worst -- two quantised quaternions in a delta, three components each --
+// and a tolerance equal to the worst case split a station's parts down
+// the middle on every flight (the largest cluster 14-57% of the pose
+// changes, 135-239 clusters a pair on the flight of 14:52); four times
+// it keeps a body together, and the angle test still parts a ship that
+// does not turn with it.
+constexpr float kClusterPosM = 0.05f;
+constexpr float kClusterPosPerM = 4.0e-4f;
 // The body's fit is ROBUST: members whose residual under the fit exceeds
 // this (or three times the fit's rms) are dropped and the fit repeated.
 // The clusters admit slot shuffles between neighbouring ring parts -- the

@@ -12,6 +12,7 @@ namespace {
 struct Slot {
     void*    ptr = nullptr;
     uint32_t gen = 1;   // starts at 1 so a caller's zero-initialised cache is stale
+    uint64_t hash = 0;  // a shader slot's content hash (bindingSetShader)
 };
 
 Slot g_slots[static_cast<size_t>(BindSlot::Count)];
@@ -85,9 +86,19 @@ void bindingSet(BindSlot slot, void* ptr) {
     ++s.gen;
 }
 
+void bindingSetShader(BindSlot slot, void* ptr, uint64_t hash) {
+    Slot& s = slotOf(slot);
+    s.ptr = ptr;
+    s.hash = hash;
+    ++s.gen;
+}
+
+uint64_t bindingShaderHash(BindSlot slot) { return slotOf(slot).hash; }
+
 void bindingForgetAll() {
     for (Slot& s : g_slots) {
         s.ptr = nullptr;
+        s.hash = 0;
         ++s.gen;
     }
 }
