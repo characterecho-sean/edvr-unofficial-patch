@@ -2494,6 +2494,23 @@ which is this project's contract for every read of the game.
    its depth for the pass through the coverage machinery the HUD uses
    -- a depth-only second draw under the streak's alpha -- which needs
    its vertex shader's output layout from the shader dump.
+
+   *The same afternoon, the pilot's A/B*: "I did an A/B with and without
+   DLSS turned on (no TAA at all) and yeah the rectangles are an
+   artifact of this code path. As are the shimmering haze fade out
+   shader being noticeable." The dump held both of the smoke ribbon's
+   shaders, so the depth-only draw is built: `tools/dxbc_disasm.py`
+   reads a dumped shader through D3DDisassemble, and the smoke's pixel
+   shader, register for register -- a sphere test and a soft fade
+   against the depth resolve at t0, two scrolled samples of the streak
+   at t1, the alpha their product -- became `kSmokeDepthHlsl`, the
+   fifth coverage shader, clipping at eight percent of alpha (additive
+   smoke is faint by design) and writing the quad's own depth. The
+   smoke is a direct family of ui_depth under `fix.temporal_aa_smoke`
+   (on), marked at one quantum, odd, so it keeps the camera's path at
+   its own depth and is as good as unmarked to NVIDIA. The heat haze
+   stays withheld under the pass; with its depth known the same way it
+   could come back, but its shaders were not in the dump.
 4. **Tier 2b** only if question 1 says no bits.
 5. **Tier 3** as `tools/` work against dumped frames, never on the hot
    path.
