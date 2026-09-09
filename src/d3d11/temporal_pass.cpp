@@ -43,7 +43,7 @@ Texture2D<float> Z : register(t2);       // the scene's depth, the game's own, w
 SamplerState L : register(s0);           // bilinear, clamp
 RWTexture2D<float4> O : register(u0);    // the output: region-sized in the game's format for main, and for mv's debug views the trained runtime's OUTPUT texture, which is LARGER under DLSS -- paintDebug, not O[id.xy]
 RWTexture2D<float4> N : register(u1);    // the new history
-RWStructuredBuffer<uint> Stats : register(u2);   // 0 rejected, 1 clipped, 2 the clips' size (luma/255, summed); then the same three per candidate, four of them; 15 pixels on the world path, 16 bright pixels, 17 bright pixels with no depth; 18-20 the registration probes on the world path (sum dx*100, sum dy*100, count) and 21-23 on the ship; 24-27 world pixels, world clipped, ship pixels, ship clipped; 28-29 unused (the depth layers, retired 2026-09-04); 30-32 the registration probes on the sky (the far plane: sum dx*100, sum dy*100, count); 33-34 the probes' sum resid.mv*100 and sum mv.mv*100 on the sky, 35-36 on the world with a depth, 37-38 on the ship; 39 pixels on a moving ship's path (tier 2, 2026-09-09)
+RWStructuredBuffer<uint> Stats : register(u2);   // 0 rejected, 1 clipped, 2 the clips' size (luma/255, summed); then the same three per candidate, four of them; 15 pixels on the world path, 16 bright pixels, 17 bright pixels with no depth; 18-20 the registration probes on the world path (sum dx*100, sum dy*100, count) and 21-23 on the ship; 24-27 world pixels, world clipped, ship pixels, ship clipped; 28-29 unused (the depth layers, retired 2026-09-04); 30-32 the registration probes on the sky (the far plane: sum dx*100, sum dy*100, count); 33-34 the probes' sum resid.mv*100 and sum mv.mv*100 on the sky, 35-36 on the world with a depth, 37-38 on the ship; 39 pixels on a moving ship's path (tier 2, 2026-09-09); 40-45 the ships' claim by reason: 40 in a ship's footprint with a depth and not claimed, 41 of those outside the box at their depth, 42 behind the tail, 43 beyond the parts' reach, 44 the sum over 41 of (the pixel's depth less the box centre's) in decimetres (signed), 45 in a footprint with no depth
 RWTexture2D<float2> MV : register(u3);   // for a trained pass: motion vectors, pixels, current -> previous
 RWTexture2D<float>  ZC : register(u4);   // and the depth, copied as it is (both entries, when the mover mask wants last frame's)
 Texture2D<float> ZP : register(t3);      // LAST frame's ZC, when the mover mask is on (movers.x)
@@ -102,6 +102,7 @@ cbuffer P : register(b0) {
     float4 shBox1[8];   // xyz ...high corner; w unused
     float4 shDir[8];    // xyz the way the ship flies (unit, world; zero when unknown), w its tail plane: a point whose dot with xyz is under w is behind the ship -- its plume, which is not the ship's
     float4 shParts[256];   // per ship kObjectShipParts of its parts' positions (xyz, this frame's frame), shBox0[i].w of them: the ship's claim is the space within objects.z (a reach, squared) of one
+    float4 shRect[8];   // per ship, its box's footprint on the image in pixels (x0 y0 x1 y1; the whole image when a corner is behind the eye), for the claim's counters
 };
 float3 rgbToYcocg(float3 c) {
     return float3(0.25 * c.r + 0.5 * c.g + 0.25 * c.b,
@@ -311,6 +312,29 @@ int shipFootprint(float3 d) {
     }
     return -1;
 }
+// For the claim's counters (the registration line says): the ship whose
+// footprint rectangle holds this pixel, and why that ship refused the
+// pixel's world point -- 1 outside its box at this depth, 2 behind its
+// tail, 3 beyond its parts' reach -- and the view depth of its box centre.
+int shipRect(float2 p) {
+    int n = int(ships.x);
+    for (int i = 0; i < n; ++i) {
+        if (p.x >= shRect[i].x && p.y >= shRect[i].y && p.x <= shRect[i].z && p.y <= shRect[i].w) return i;
+    }
+    return -1;
+}
+int shipRefusal(float3 d, float z, int i) {
+    float3 vg = float3(d.x * z, d.y * z, -d.z * z);
+    float3 w = float3(dot(wR0.xyz, vg), dot(wR1.xyz, vg), dot(wR2.xyz, vg)) +
+               float3(wR0.w, wR1.w, wR2.w);
+    if (any(w < shBox0[i].xyz) || any(w > shBox1[i].xyz)) return 1;
+    if (dot(w, shDir[i].xyz) < shDir[i].w) return 2;
+    return 3;
+}
+float shipCentreZ(int i) {
+    float3 c = 0.5 * (shBox0[i].xyz + shBox1[i].xyz) - float3(wR0.w, wR1.w, wR2.w);
+    return dot(float3(wR0.z, wR1.z, wR2.z), c);
+}
 // bodyPixel's twin for ship i.
 bool shipPixel(int i, float3 d, float z, out float2 pp, out float zp) {
     float3 dp = float3(dot(shR[i * 3].xyz, d), dot(shR[i * 3 + 1].xyz, d), dot(shR[i * 3 + 2].xyz, d)) * z +
@@ -495,7 +519,7 @@ uint clipSize(float3 hc, float3 hy) {
 )HLSL"
 // (adjacent literals: MSVC caps one at 16 KB)
 R"HLSL(
-groupshared uint gCount[40];
+groupshared uint gCount[48];
 // A debug view's pixel, painted into the OUTPUT rather than at this
 // thread's own index.
 //
@@ -544,6 +568,8 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
     // others, and a forty-element local array costs forty registers of
     // occupancy on a dispatch that covers the whole eye.
     uint count15 = 0, count16 = 0, count17 = 0, count28 = 0, count29 = 0, count39 = 0;
+    uint count40 = 0, count41 = 0, count42 = 0, count43 = 0, count45 = 0;
+    int count44 = 0;
     if (id.x < (uint)size.x && id.y < (uint)size.y) {
         float2 p = float2(id.xy);
         float3 d;
@@ -624,6 +650,28 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
                         motion = pp - p;
                         zPred = zpB;
                         count29 = 1;
+                    }
+                }
+            }
+            // The ships' claim, counted (Stats 40-45, the registration
+            // line): a pixel in a ship's footprint the ship did not claim,
+            // and why.
+            if (ships.x != 0.0 && count39 == 0) {
+                int fr = shipRect(p);
+                if (fr >= 0) {
+                    if (farPx) {
+                        count45 = 1;
+                    } else if (zBody > 0.0 && !uiCovered(region.xy + int2(p))) {
+                        count40 = 1;
+                        int why = shipRefusal(d, zBody, fr);
+                        if (why == 1) {
+                            count41 = 1;
+                            count44 = int(round(clamp((zBody - shipCentreZ(fr)) * 10.0, -100000.0, 100000.0)));
+                        } else if (why == 2) {
+                            count42 = 1;
+                        } else {
+                            count43 = 1;
+                        }
                     }
                 }
             }
@@ -778,6 +826,12 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
     if (count28 != 0) InterlockedAdd(gCount[28], count28);
     if (count29 != 0) InterlockedAdd(gCount[29], count29);
     if (count39 != 0) InterlockedAdd(gCount[39], count39);
+    if (count40 != 0) InterlockedAdd(gCount[40], count40);
+    if (count41 != 0) InterlockedAdd(gCount[41], count41);
+    if (count42 != 0) InterlockedAdd(gCount[42], count42);
+    if (count43 != 0) InterlockedAdd(gCount[43], count43);
+    if (count44 != 0) InterlockedAdd(gCount[44], asuint(count44));
+    if (count45 != 0) InterlockedAdd(gCount[45], count45);
     GroupMemoryBarrierWithGroupSync();
     // Only the counters that moved. A group whose counters are all zero --
     // which is nearly every group, since these count rare classes of pixel
@@ -785,7 +839,7 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
     // regardless. At the Crystal Super's size that is 290,512 groups an
     // eye, so 11.6 million atomic adds an eye and 23 million a frame, for
     // a set of numbers that only a log line reads.
-    if (gi < 40 && gCount[gi] != 0) InterlockedAdd(Stats[gi], gCount[gi]);
+    if (gi < 48 && gCount[gi] != 0) InterlockedAdd(Stats[gi], gCount[gi]);
 }
 )HLSL"
 // (adjacent literals: MSVC caps one at 16 KB)
@@ -794,7 +848,7 @@ R"HLSL(
 void main(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
     if (gi < 40) gCount[gi] = 0;
     GroupMemoryBarrierWithGroupSync();
-    uint count[40] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+    uint count[48] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
     if (id.x < (uint)size.x && id.y < (uint)size.y) {
         float2 p = float2(id.xy);
         int2 ci = int2(id.xy);
@@ -1068,11 +1122,11 @@ void main(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
     // One atomic per group per counter, not per pixel -- and none at all
     // for a counter that did not move, which is most of them in most
     // groups.
-    [unroll] for (int k = 0; k < 40; ++k) {
+    [unroll] for (int k = 0; k < 48; ++k) {
         if (count[k] != 0) InterlockedAdd(gCount[k], count[k]);
     }
     GroupMemoryBarrierWithGroupSync();
-    if (gi < 40 && gCount[gi] != 0) InterlockedAdd(Stats[gi], gCount[gi]);
+    if (gi < 48 && gCount[gi] != 0) InterlockedAdd(Stats[gi], gCount[gi]);
 }
 )HLSL";
 
@@ -1275,8 +1329,9 @@ struct PassParams {
     float   shBox1[kObjectShipsMax][4];    // xyz ...high corner
     float   shDir[kObjectShipsMax][4];     // xyz its way (unit), w its tail plane
     float   shParts[kObjectShipsMax * kObjectShipParts][4];   // its parts' positions, shBox0[i].w of them
+    float   shRect[kObjectShipsMax][4];    // its box's footprint on the image, pixels
 };
-static_assert(sizeof(PassParams) == 5648, "the cbuffer is 353 16-byte rows");
+static_assert(sizeof(PassParams) == 5776, "the cbuffer is 361 16-byte rows");
 
 // The format allowlist: the supersample resolve's, for its reasons
 // (supersample_pass.cpp) -- typeless and UNORM families read and written
@@ -1539,7 +1594,7 @@ struct Slot {
     bool          hadHistory = false;
 };
 constexpr int kSlots = 8;
-constexpr int kStatCount = 40;   // all 40 used since 2026-09-09 (39 = the moving ships); a 160-byte buffer
+constexpr int kStatCount = 48;   // 46 used since 2026-09-09 (39-45 the moving ships); a 192-byte buffer
 Slot g_slots[kSlots];
 
 void releaseSlot(Slot& q) {
@@ -1633,6 +1688,12 @@ uint32_t g_lastW = 0, g_lastH = 0;
 uint64_t g_moverPix = 0;   // pixels the mover mask set this interval (Stats[28]; tier 1)
 uint64_t g_bodyPix = 0;    // pixels that took the body's path this interval (Stats[29]; tier 2)
 uint64_t g_shipPix = 0;    // pixels that took a moving ship's path this interval (Stats[39]; 2026-09-09)
+uint64_t g_shipFoot = 0;         // ...and in a ship's footprint with a depth, not claimed (Stats[40])
+uint64_t g_shipOutBox = 0;       // of those, outside the box at their depth (41)
+uint64_t g_shipBehind = 0;       // behind the tail (42)
+uint64_t g_shipFar = 0;          // beyond the parts' reach (43)
+int64_t  g_shipOutBoxDm = 0;     // the sum over 41 of the depth less the box centre's, decimetres (44)
+uint64_t g_shipFootNoDepth = 0;  // in a footprint with no depth (45)
 
 void maybeLogPrice() {
     if (g_priceLogged || g_timeCount < 120 || g_pixelsSeen == 0) return;
@@ -1688,6 +1749,12 @@ void pollSlots(ID3D11DeviceContext* ctx) {
                 g_moverPix += v[28];
                 g_bodyPix += v[29];
                 g_shipPix += v[39];
+                g_shipFoot += v[40];
+                g_shipOutBox += v[41];
+                g_shipBehind += v[42];
+                g_shipFar += v[43];
+                g_shipOutBoxDm += static_cast<int32_t>(v[44]);
+                g_shipFootNoDepth += v[45];
                 g_probeWorldDx += static_cast<int32_t>(v[18]);
                 g_probeWorldDy += static_cast<int32_t>(v[19]);
                 g_probeWorldN += v[20];
@@ -3315,6 +3382,45 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                             along += (bodyShift[k] + carry[k]) * sh.dir[k];
                         }
                         p.shDir[shipsOn][3] = sh.rear > -1e29f ? sh.rear + along : -1e30f;
+                        // The box's footprint on the image, for the counters:
+                        // its corners through this frame's rows (view = R^T
+                        // (w - c), the game's z forward) and the eye's tangents;
+                        // the whole image when a corner is behind the eye.
+                        float rx0 = 1e9f, ry0 = 1e9f, rx1 = -1e9f, ry1 = -1e9f;
+                        bool behindEye = false;
+                        for (int corner = 0; corner < 8 && !behindEye; ++corner) {
+                            float rel[3];
+                            for (int k = 0; k < 3; ++k) {
+                                const float cw = ((corner >> k) & 1) ? p.shBox1[shipsOn][k] : p.shBox0[shipsOn][k];
+                                rel[k] = cw - g_curRows[k * 4 + 3];
+                            }
+                            float v[3];
+                            for (int k = 0; k < 3; ++k) {
+                                v[k] = g_curRows[0 * 4 + k] * rel[0] + g_curRows[1 * 4 + k] * rel[1] +
+                                       g_curRows[2 * 4 + k] * rel[2];
+                            }
+                            if (v[2] <= 0.01f) {
+                                behindEye = true;
+                                break;
+                            }
+                            const float px = (v[0] / v[2] - p.tanNow[0]) / (p.tanNow[1] - p.tanNow[0]) *
+                                             static_cast<float>(p.size[0]);
+                            const float py = (p.tanNow[3] - v[1] / v[2]) / (p.tanNow[3] - p.tanNow[2]) *
+                                             static_cast<float>(p.size[1]);
+                            if (px < rx0) rx0 = px;
+                            if (py < ry0) ry0 = py;
+                            if (px > rx1) rx1 = px;
+                            if (py > ry1) ry1 = py;
+                        }
+                        if (behindEye) {
+                            rx0 = ry0 = 0.0f;
+                            rx1 = static_cast<float>(p.size[0]);
+                            ry1 = static_cast<float>(p.size[1]);
+                        }
+                        p.shRect[shipsOn][0] = rx0;
+                        p.shRect[shipsOn][1] = ry0;
+                        p.shRect[shipsOn][2] = rx1;
+                        p.shRect[shipsOn][3] = ry1;
                         ++shipsOn;
                     }
                     if (shipsOn && !bodyOn) {
@@ -4861,6 +4967,22 @@ bool temporalPassRegistration(char* buf, size_t n, char* buf2, size_t n2, char* 
                           "; the moving ships' path took %.2f%% of pixels this interval (none in hand now)",
                           100.0 * static_cast<double>(g_shipPix) / static_cast<double>(g_intervalPix));
             }
+            // The claim by reason (Stats 40-45): what the footprints held.
+            const uint64_t foot = g_shipPix + g_shipFoot + g_shipFootNoDepth;
+            if (foot) {
+                const double f = static_cast<double>(foot);
+                regAppend(buf, n, used,
+                          "; in the ships' footprints %.1fk pixels: %.0f%% claimed, %.0f%% without depth, "
+                          "%.0f%% outside the box at their depth (%+.1f m along the ray from the box's "
+                          "centre on average), %.0f%% behind the tail, %.0f%% beyond the parts' reach",
+                          f / 1000.0, 100.0 * static_cast<double>(g_shipPix) / f,
+                          100.0 * static_cast<double>(g_shipFootNoDepth) / f,
+                          100.0 * static_cast<double>(g_shipOutBox) / f,
+                          g_shipOutBox ? 0.1 * static_cast<double>(g_shipOutBoxDm) / static_cast<double>(g_shipOutBox)
+                                       : 0.0,
+                          100.0 * static_cast<double>(g_shipBehind) / f,
+                          100.0 * static_cast<double>(g_shipFar) / f);
+            }
         }
     }
     // The third line: the probes and the rows against the head.
@@ -4968,6 +5090,8 @@ bool temporalPassRegistration(char* buf, size_t n, char* buf2, size_t n2, char* 
     g_moverPix = 0;
     g_bodyPix = 0;
     g_shipPix = 0;
+    g_shipFoot = g_shipOutBox = g_shipBehind = g_shipFar = g_shipFootNoDepth = 0;
+    g_shipOutBoxDm = 0;
     g_bodyFrameHolds = 0;
     g_bodyRowsHolds = 0;
     g_bodyShiftUsed = 0;

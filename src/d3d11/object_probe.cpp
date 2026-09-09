@@ -118,6 +118,14 @@ uint64_t   g_shipsStill = 0, g_shipsUnfit = 0, g_shipsOverCap = 0, g_shipsFew = 
 uint32_t   g_shipsMax = 0;
 uint64_t   g_shipNoteMs = 0;
 uint32_t   g_pairLagFrames = 0;   // frames from the pair's second copy to its diff (poll sets it): the ships' age starts there
+// The pair's FIRST camera position (the kept copy's), so takeShips can tell
+// the player's own parts by their motion: they move with the camera.
+float      g_keepCam[3] = {};
+bool       g_keepCamValid = false;
+float      g_pairCamPrev[3] = {};
+bool       g_pairCamPrevValid = false;
+constexpr float kShipOwnRadiusM = 20.0f;   // ships: parts this near the seat are the player's whatever they do
+uint64_t   g_shipsOwn = 0;
 
 // The record's head, decoded the way the game's own shaders decode it
 // (fss_panel_vs.h: edvrDecodeQuat, the position at byte 16).
@@ -585,6 +593,22 @@ void takeShips(const Cluster* clusters, int nc, int big, const std::vector<int>&
         if (b.angleSum / b.count < static_cast<double>(kRotQuantDeg) && live && b.count * 2 > live) return;
     }
     ++g_shipPairs;
+    // The player's own parts move WITH the camera: a cluster whose
+    // translation over the pair is the camera's own (p_prev = R p_now + t,
+    // so t is the camera's old position less its new one, to the head's
+    // few centimetres) is the player's ship wherever its parts sit. The
+    // hundred-metre radius that once said so (kShipRadiusM, still the
+    // station's rule) left every other ship within it to the camera's
+    // path, and took a big hull's far parts as a ship of their own -- 61
+    // parts at 105 m moving 13.6 m a frame on the ships' third flight
+    // (2026-09-09 12:25).
+    float camT[3] = {0.0f, 0.0f, 0.0f};
+    bool haveCamT = false;
+    if (g_pairCamPrevValid) {
+        for (int k = 0; k < 3; ++k) camT[k] = g_pairCamPrev[k] - camPos[k];
+        haveCamT = true;
+    }
+    const float camSpeed = sqrtf(camT[0] * camT[0] + camT[1] * camT[1] + camT[2] * camT[2]);
     ObjectShip found[kObjectShipsMax];
     uint32_t nf = 0;
     std::vector<int> members;
@@ -603,6 +627,13 @@ void takeShips(const Cluster* clusters, int nc, int big, const std::vector<int>&
             ++g_shipsStill;
             continue;
         }
+        if (haveCamT) {
+            const float ex = c.t[0] - camT[0], ey = c.t[1] - camT[1], ez = c.t[2] - camT[2];
+            if (sqrtf(ex * ex + ey * ey + ez * ez) <= 0.5f + 0.05f * camSpeed) {
+                ++g_shipsOwn;
+                continue;
+            }
+        }
         members.clear();
         fitNow.clear();
         fitPrev.clear();
@@ -611,7 +642,7 @@ void takeShips(const Cluster* clusters, int nc, int big, const std::vector<int>&
             if (clusterIdx[i] != j) continue;
             const float* pn = &posNow[static_cast<size_t>(i) * 3];
             const float dx = pn[0] - camPos[0], dy = pn[1] - camPos[1], dz = pn[2] - camPos[2];
-            if (dx * dx + dy * dy + dz * dz < kShipRadiusM * kShipRadiusM) continue;
+            if (dx * dx + dy * dy + dz * dz < kShipOwnRadiusM * kShipOwnRadiusM) continue;
             members.push_back(static_cast<int>(i));
             for (int k = 0; k < 3; ++k) {
                 fitNow.push_back(pn[k]);
@@ -1272,15 +1303,18 @@ void report() {
         Log::get().note(
             "object probe, the ships: over %llu pairs with the moving ships on, %.2f taken a pair within "
             "%.0f m (%u at most in one pair, %llu more past the %u kept); left out a pair: %.2f out of "
-            "range, %.2f slices of the dominant body, %.2f standing still, %.2f with under %u parts of "
-            "their own, %.2f that did not fit as one thing.",
+            "range, %.2f slices of the dominant body, %.2f standing still, %.2f moving with the camera "
+            "(the player's own), %.2f with under %u parts of their own, %.2f that did not fit as one "
+            "thing.",
             static_cast<unsigned long long>(g_shipPairs), static_cast<double>(g_shipsTaken) / sp,
             static_cast<double>(g_shipRangeM), g_shipsMax, static_cast<unsigned long long>(g_shipsOverCap),
             kObjectShipsMax, static_cast<double>(g_shipsOutOfRange) / sp,
             static_cast<double>(g_shipsSlices) / sp, static_cast<double>(g_shipsStill) / sp,
+            static_cast<double>(g_shipsOwn) / sp,
             static_cast<double>(g_shipsFew) / sp, kShipMinRecords, static_cast<double>(g_shipsUnfit) / sp);
     }
     g_shipPairs = g_shipsTaken = g_shipsOutOfRange = g_shipsSlices = 0;
+    g_shipsOwn = 0;
     g_shipsStill = g_shipsUnfit = g_shipsOverCap = g_shipsFew = 0;
     g_shipsMax = 0;
     g_pairs = g_skipped = 0;
@@ -1391,6 +1425,8 @@ void poll(ID3D11DeviceContext* ctx) {
             g_keepFrame = s->frame;
             g_keepStamp = s->stampMs;
             g_keepValid = true;
+            g_keepCamValid = s->camPassValid;
+            if (s->camPassValid) memcpy(g_keepCam, s->camPass, sizeof(g_keepCam));
         } else if (g_keepValid && g_keepFrame + 1 == s->frame && g_keep.size() == s->bytes) {
             // The camera's position in the record's frame, for the ship-radius
             // exclusion and the pair's frame stamp: the pass's chosen camera
@@ -1410,6 +1446,8 @@ void poll(ID3D11DeviceContext* ctx) {
                 camPos = cam;
             }
             g_pairLagFrames = g_frame >= s->frame ? g_frame - s->frame : 0;
+            g_pairCamPrevValid = g_keepCamValid && s->camPassValid;
+            if (g_pairCamPrevValid) memcpy(g_pairCamPrev, g_keepCam, sizeof(g_pairCamPrev));
             diffPair(g_keep.data(), bytes, s->bytes,
                      static_cast<float>(s->stampMs > g_keepStamp ? s->stampMs - g_keepStamp : 0.0), camPos);
             if (g_verbose && g_dumps < kDumpMax && dueMs(g_dumpMs, kDumpEveryMs)) {
