@@ -2291,6 +2291,36 @@ which is this project's contract for every read of the game.
    each quad's history fetched from where the ship had been. The claim
    is the parts' reach and the tail plane now (the section at the end
    says), and the plume keeps the camera's path.
+
+   *Its twenty-sixth flight* (12:23, `v0.14.1-99-g1800d73`; a dump in
+   the normal view at 12:26 and two in the objects view on a ship at
+   12:27): "I still see the long rectangular shapes". The normal-view
+   dump has them across a trail with no ship in hand -- the ship 1.8 km
+   off, past the range -- so they are not the ships' path. A trail's
+   quads write their depth over the whole quad, clear part and all, and
+   the pass reprojects everything seen through a quad at the quad's
+   distance: the stars behind it smear into a rectangle under the
+   player's own motion, and the earlier "contrails overly blur the
+   station" was the same depth over the station. That is a fix in
+   ui_depth, whose hook already wraps every eye draw: a draw into the
+   scene pair that samples the scene's depth (the resource the flight
+   HUD binds at t0 for its own depth test, which soft particles read to
+   fade near geometry) and is not the interface's has its depth write
+   muted around the draw (`fix.temporal_aa_particles`, on; the game's
+   state with its write off, cached per state as the writing twin is).
+   The smoke then takes the motion of what is behind it, blurry as
+   smoke, and nothing behind it tears. The objects-view dump showed the
+   targeted ship magenta inside a teal box -- a depth the claim refused,
+   or another ship's box over it (eight were in hand that pair) -- which
+   the dump cannot tell apart, so the registration line now counts the
+   footprints' pixels by outcome: claimed, without depth, outside the
+   box at their depth with the mean offset along the ray from the box's
+   centre, behind the tail, beyond the parts' reach. And the player's
+   own parts are told by their motion now, not by a radius: a cluster
+   whose translation over the pair is the camera's own is the player's
+   ship, the ships' radius is twenty metres, so a ship within a hundred
+   gets its path and a big hull's far parts (61 parts at 105 m moving
+   13.6 m a frame, this flight) are not a ship of their own.
 4. **Tier 2b** only if question 1 says no bits.
 5. **Tier 3** as `tools/` work against dumped frames, never on the hot
    path.
