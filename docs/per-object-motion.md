@@ -2544,6 +2544,36 @@ which is this project's contract for every read of the game.
    owner draw audits the shadow against the context and reports a
    disagreement at most every thirty seconds. Built as v0.14.1-117-gd0beb52.
    The next flight's haze note carries the verdict in its bracket.
+
+   *The thirty-third flight, 15:40 (v0.14.1-117)*: "the station is
+   blurred upon my initial load", two dumps. The game loaded in at
+   15:42:14 about ten kilometres from Macleod Market, the station seen
+   face-on along its axis. For thirty seconds the pool held no station --
+   193 to 283 live records, 145 to 208 clusters a pair, the largest at
+   two or three percent -- so the body's path had nothing; then at
+   15:42:46 the records came in, the body was taken (618 records, 63% of
+   the movers, fit to 0.009 m) and the objects view of 15:43:19 shows the
+   station claimed whole. The normal view of 15:43:30 shows it ghosted:
+   the docking hub's face smeared tangentially by ten to fifteen pixels,
+   the ring largely crisp at three times zoom. Neither the haze note nor
+   the binding shadow's audit printed, so the fix of the flight before is
+   untested still. The pool pairs on disk (`tools/pool_pair.py` and two
+   desk scripts on top of it) say what the log could not: two rigid
+   clusters at the station in every pair of this flight, 641 parts out to
+   2.4 km from the axis turning 0.043 deg a frame one way and 211 parts
+   within 475 m of it turning 0.044 deg the other, and the sense is in
+   the POSITIONS -- each part's step about the axis, signed, is +0.044 for
+   the one and -0.044 for the other -- not only in the stored
+   orientations. The ring and spine, and the docking hub, counter-rotate
+   in the game's records at this range. The hub's parts are of the ring's
+   types, and the grid seeds every record of the body's types, so the hub
+   sat in the body's cells and took the ring's path: wrong there by twice
+   the turn, the smear the pilot saw. The flights before were closer,
+   two to seven kilometres, where the same pairs show no second cluster
+   -- the hub is not in the pool at all there, or is one mesh -- and the
+   hub took the ring's path unpunished. Built as v0.14.1-119-gea86768: the
+   second body (the section below). The haze and the shadow wait for a
+   flight beside a ship's drives.
 4. **Tier 2b** only if question 1 says no bits.
 5. **Tier 3** as `tools/` work against dumped frames, never on the hot
    path.
@@ -2635,3 +2665,49 @@ station's panels are the station's), the eight-frame lag above, and
 whatever sits inside a ship's padded box at the ship's depth -- a
 station wall the ship skims -- which takes the ship's motion for as
 long as the ship is over it.
+
+## The second body
+
+A station is one rigid body until it is not. The thirty-third flight's
+pool pairs (2026-09-09 15:42 and 15:43, Macleod Market at ten kilometres)
+hold two rigid clusters at the station, turning about the same axis at
+the same rate in opposite senses: the ring and its spine, 615 to 641
+parts at radii from 270 m to 2.4 km, and the docking hub, 211 to 239
+parts within 475 m, most of them near 400. The signed turn of each part's
+position about the axis is +0.044 deg a frame for the one set and -0.044
+for the other, so it is the parts that counter-rotate, not merely their
+orientations. Whether an Orbis's hub truly turns against its ring or
+only its distant instanced pieces do, the pass must follow what is drawn,
+and what is drawn is the pool.
+
+The body's grid seeds a cell for every live record of the body's TYPES
+(the tips that shuffle slots every frame are only reachable by type),
+and the hub's parts are of the ring's types, so the hub's cells were the
+ring's and its pixels took the ring's turn -- wrong by twice the turn,
+the tangential smear of the hub's face in the dump of 15:43:30 while the
+ring stayed crisp. Under the camera's path alone the hub would be wrong
+by one turn: at ten kilometres that is a tenth of a pixel a frame.
+
+So the probe takes a SECOND BODY (`ObjectMotion::body2`): after the body,
+the largest other cluster of forty or more parts whose centroid sits
+within six kilometres of the body's, camera-relative -- the same
+structure, moving otherwise -- fitted with the body's trimmed fit, its
+rates their own sixteen-pair median, continuity against its own last
+centroid, held over four pairs that do not find it (its cluster comes and
+goes with the table's overflow). Its parts' cells are stamped 128 in the
+grid after the body's dilation writes 255 -- a cube of three times their
+median spacing around each part, never under two cells nor over the
+body's reach -- and its cluster is kept from the ships. The pass carries
+a second set of rows composed exactly as the body's, with the same origin
+shift; `insideBody` answers 0, 1 or 2, and a 2 takes the second body's
+path when one is in hand and the camera's when not. The registration
+line says its share and turn, the 20 s probe report how often it was
+found and held, and the objects view paints it grey.
+
+Limits, stated: one second body, chosen by size; a station with three
+counter-turning sections keeps the third on the body's path. The stamped
+cubes are cubes, so a spoke's root within the hub's reach takes the hub's
+turn. Its reach is set from its parts' spacing, so a body of few large
+parts (a hub of four skins) marks less than it covers. And the pairs on
+disk are a sample every thirty seconds: whether the hub's counter-turn
+begins at a fixed range, or with a LOD, is not yet known.
