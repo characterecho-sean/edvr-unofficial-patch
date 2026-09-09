@@ -2511,6 +2511,39 @@ which is this project's contract for every read of the game.
    its own depth and is as good as unmarked to NVIDIA. The heat haze
    stays withheld under the pass; with its depth known the same way it
    could come back, but its shaders were not in the dump.
+
+   *The thirty-second flight, 15:13 (v0.14.1-115)*: three dumps beside a
+   ship's trail near the station -- the normal view, the depth view and
+   the objects view. The smoke's family engaged at 15:15:18 ("the drives'
+   smoke; its dense core's depth written by the coverage pass") and the
+   trails carry depth now: thin dark lines in the depth view, red lines
+   in the objects view, which is depth in hand and outside the body's
+   cells, exactly what a trail that keeps the camera's path should show.
+   The interface's passes treated 74 draws a frame; the clusters ran 38
+   to 65 a pair with the largest at 75-79% (the rotation-vector test),
+   and the worker took 10-11 ms a pair with nothing dropped. The pilot:
+   "I'm still seeing the heat haze shimmer at a distance." The log
+   agrees, and says why in its silence: the heat haze skip's thirty-second
+   note, which the flight of 14:52 printed at 1, 5682 and 13524 draws
+   withheld, never printed at all. The skip had not changed. What had
+   changed underneath it was the perf build (v0.14.1-113): the
+   VSGetShader per draw became a binding shadow set by the VSSetShader
+   hook, with the content hash from a 32-slot memo, and the skip read
+   the shadow. The smoke's family was recognised through the same shadow
+   in the same session, so the shadow answers correctly for some draws
+   and wrongly for the haze's, and a shadow that is wrong is a shadow
+   that answers -- nothing logged a miss. The fix does not guess which:
+   the skip's shape prefilter leaves a handful of ribbon-shaped draws a
+   frame, and those ask the context again as the 14:52 build did, while
+   the shadow's answer is compared with the context's and counted, by
+   pointer (a set the hook never saw) or by hash (the memo's or the
+   registry's), for the note to say. Underneath, the memo asks the
+   registry again when its generation has moved (a destroyed shader's
+   address comes back as another shader's) and when it holds a zero, a
+   held zero falls back to the Get in every reader, and every 1024th
+   owner draw audits the shadow against the context and reports a
+   disagreement at most every thirty seconds. Built as v0.14.1-117-gd0beb52.
+   The next flight's haze note carries the verdict in its bracket.
 4. **Tier 2b** only if question 1 says no bits.
 5. **Tier 3** as `tools/` work against dumped frames, never on the hot
    path.
