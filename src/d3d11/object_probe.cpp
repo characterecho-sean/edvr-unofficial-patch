@@ -6,6 +6,10 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+#include <atomic>
+#include <condition_variable>
+#include <mutex>
+#include <thread>
 
 #include <windows.h>
 
@@ -55,11 +59,45 @@ constexpr float    kMotionMaxDeg = 1.0f;    // a frame; a station turns a twenti
 constexpr float    kMotionMaxM = 20.0f;
 constexpr float    kMotionMaxRmsM = 0.5f;   // the rigid fit's residual: parts that moved as one
 ObjectMotion g_motion = {};
-bool     g_motionValid = false;
-uint32_t g_motionAge = 0;
+uint32_t g_motionAge = 0;          // frames since the published body's pair (the render thread's, under g_publish)
 float    g_reachM = 1500.0f;
-uint8_t  g_grid[kObjectGrid * kObjectGrid * kObjectGrid];
+// THE PUBLISHED BODY (objectMotionGet) and its lock. The diff runs on a
+// worker thread (workerMain says why) and writes g_motion, its own
+// working copy, as it goes; what the render thread reads is g_motionPub,
+// copied from it in one short critical section when a pair is taken,
+// with the age reset. The grid is double-buffered: the worker fills the
+// back buffer and publishes its pointer, so the upload the pass makes
+// from the last pointer is never overwritten under it (the next fill is
+// eight frames away at the soonest).
+std::mutex   g_publish;
+ObjectMotion g_motionPub = {};
+bool         g_motionPubValid = false;
+constexpr size_t kGridBytes = static_cast<size_t>(kObjectGrid) * kObjectGrid * kObjectGrid;
+uint8_t  g_gridBufs[2][kGridBytes];
+int      g_gridBack = 0;
+uint8_t* g_grid = g_gridBufs[0];   // the buffer being filled (buildGrid picks it)
 uint32_t g_gridVersion = 0;
+// THE WORKER (workerMain): one job at a time, the pair's two copies and
+// the camera positions; a pair that finds the worker still on the last
+// is dropped and counted.
+struct DiffJob {
+    std::vector<uint8_t> prev, now;
+    float    dtMs = 0.0f;
+    float    cam[3] = {0.0f, 0.0f, 0.0f};
+    bool     haveCam = false;
+    float    camPrev[3] = {0.0f, 0.0f, 0.0f};
+    bool     haveCamPrev = false;
+    uint32_t lagFrames = 0;
+};
+std::mutex              g_jobLock;
+std::condition_variable g_jobCv;
+DiffJob                 g_job;
+bool                    g_jobPending = false;
+bool                    g_jobRunning = false;
+bool                    g_workerStop = false;
+std::thread*            g_worker = nullptr;   // a pointer: a joinable std::thread destroyed at unload would terminate the process
+std::atomic<bool>       g_resetWorker{false};   // switched off and on: the worker's continuity and rings start over
+uint64_t                g_busySkipped = 0;
 float    g_gridCell = 0.0f;   // the lattice's cell, metres; 0 = not chosen yet
 constexpr float kShipRadiusM = 100.0f;   // the player's own parts sit here, co-rotating in a slot; not the body's
 // The body's near floor, shared with the pass (objects.y): parts nearer the
@@ -242,7 +280,9 @@ void buildGrid(const uint8_t* now, uint32_t n, const std::vector<uint8_t>& liveN
         g_motion.bmin[k] = lo[k];
         g_motion.bmax[k] = hi[k];
     }
-    memset(g_grid, 0, sizeof(g_grid));
+    g_grid = g_gridBufs[g_gridBack];   // the back buffer (g_publish says why two)
+    g_gridBack ^= 1;
+    memset(g_grid, 0, kGridBytes);
     // The seeds: one cell per recorded part of the body's types, skipping
     // the parts at the pilot's elbow (the ship's own, within the body's
     // near floor) and anything outside the box.
@@ -452,7 +492,14 @@ constexpr int   kMaxClusters = 256;
 // record came first: 0.012 deg one pair, 0.000 deg and 1.57 m the next,
 // handed to the pass as the station and re-registering its pixels by a
 // pixel or two every eighth frame. That was the shimmer.
-constexpr float kClusterAngleDeg = 0.01f;
+// 0.02 deg since 2026-09-09 14:28, from 0.01: with the test in rotation
+// vectors the quantisation of the two quaternions a delta is made of (a
+// half quantum each, per component, on both) reaches a hundredth of a
+// degree between two parts of one body often enough that a station's parts
+// still split into 95-150 clusters a pair; two hundredths keeps them
+// together and is still under a station's own turn (0.035-0.045 deg), so
+// a part that does not turn with it stays apart.
+constexpr float kClusterAngleDeg = 0.02f;
 // The tolerance as the squared distance between two small rotations'
 // quaternion xyz parts: |q1.xyz - q2.xyz| is half the angle between them,
 // in radians, to the angle squared.
@@ -809,10 +856,13 @@ void takeShips(const Cluster* clusters, int nc, int big, bool bodyTaken, const f
         while (j > 0 && found[j - 1].distM > x.distM) { found[j] = found[j - 1]; --j; }
         found[j] = x;
     }
-    memcpy(g_ships, found, sizeof(ObjectShip) * nf);
-    g_shipCount = nf;
-    g_shipAge = g_pairLagFrames;   // the parts' positions are the copy's frame's, three or more frames ago
-    memcpy(g_shipCamPos, camPos, sizeof(g_shipCamPos));
+    {
+        std::lock_guard<std::mutex> lk(g_publish);
+        memcpy(g_ships, found, sizeof(ObjectShip) * nf);
+        g_shipCount = nf;
+        g_shipAge = g_pairLagFrames;   // the parts' positions are the copy's frame's, three or more frames ago
+        memcpy(g_shipCamPos, camPos, sizeof(g_shipCamPos));
+    }
     g_shipsTaken += nf;
     if (nf > g_shipsMax) g_shipsMax = nf;
     if (dueMs(g_shipNoteMs, 30000)) {
@@ -879,6 +929,16 @@ void diffPair(const uint8_t* prev, const uint8_t* now, uint32_t bytes, float dtM
     Cluster clusters[kMaxClusters];
     int nc = 0;
     uint32_t overflow = 0;
+    // The held body as the render thread has it, taken once: whether one
+    // is published and how old it is (the age is the render thread's count,
+    // under g_publish).
+    bool heldValid = false;
+    uint32_t heldAge = 0;
+    {
+        std::lock_guard<std::mutex> lk(g_publish);
+        heldValid = g_motionPubValid;
+        heldAge = g_motionAge;
+    }
     // Each pose change's cluster and positions, for the body's fit and grid.
     // The deltas' translation term is about the camera (rigidDelta says).
     const float zeroRef[3] = {0.0f, 0.0f, 0.0f};
@@ -1102,7 +1162,7 @@ void diffPair(const uint8_t* prev, const uint8_t* now, uint32_t bytes, float dtM
                     for (int k = 0; k < 3; ++k) relC[k] += posNow[static_cast<size_t>(m) * 3 + k];
                 }
                 for (int k = 0; k < 3; ++k) relC[k] = relC[k] / static_cast<float>(members.size()) - camPos[k];
-                if (g_motionValid && g_lastRelValid && g_motionAge < kBodyContinuityFrames) {
+                if (heldValid && g_lastRelValid && heldAge < kBodyContinuityFrames) {
                     const float dx = relC[0] - g_lastRel[0], dy = relC[1] - g_lastRel[1], dz = relC[2] - g_lastRel[2];
                     const float dist = sqrtf(dx * dx + dy * dy + dz * dz);
                     if (dist > kBodyContinuityM) {
@@ -1115,7 +1175,7 @@ void diffPair(const uint8_t* prev, const uint8_t* now, uint32_t bytes, float dtM
                                 "one's, camera-relative -- another object, or a slice of the station -- and the "
                                 "last body is kept (%u frames old). %llu such pairs so far.",
                                 static_cast<unsigned>(members.size()), static_cast<double>(rms),
-                                static_cast<double>(dist), g_motionAge,
+                                static_cast<double>(dist), heldAge,
                                 static_cast<unsigned long long>(g_otherBodyPairs));
                         }
                     }
@@ -1150,7 +1210,7 @@ void diffPair(const uint8_t* prev, const uint8_t* now, uint32_t bytes, float dtM
                 // refused seventy-seven pairs in one flight. The median of
                 // sixteen takes neither the wobble nor the outliers, and a
                 // new body starts its own.
-                if (!g_motionValid || g_motionAge >= kBodyContinuityFrames) g_rateRingN = 0;
+                if (!heldValid || heldAge >= kBodyContinuityFrames) g_rateRingN = 0;
                 RatePair& rp = g_rateRing[g_rateRingN % kRateRing];
                 memcpy(rp.w, wr, sizeof(rp.w));
                 memcpy(rp.t, tr, sizeof(rp.t));
@@ -1207,14 +1267,20 @@ void diffPair(const uint8_t* prev, const uint8_t* now, uint32_t bytes, float dtM
                 g_motion.records = static_cast<uint32_t>(members.size());
                 for (int k = 0; k < 3; ++k) g_motion.camPos[k] = camPos ? camPos[k] : 0.0f;
                 g_motion.age = 0;
-                g_motionAge = 0;
-                g_motionValid = true;
                 bodyTaken = true;
                 std::unordered_set<uint64_t> bodySigs;
                 bodySigs.reserve(members.size());
                 for (int m : members) bodySigs.insert(sigNow[static_cast<size_t>(m)]);
                 buildGrid(now, n, liveNow, sigNow, bodySigs, members.data(),
                           static_cast<int>(members.size()), posNow.data(), camPos);
+                // Published for the render thread in one short section: the
+                // struct with its grid's pointer, the age reset.
+                {
+                    std::lock_guard<std::mutex> lk(g_publish);
+                    g_motionPub = g_motion;
+                    g_motionPubValid = true;
+                    g_motionAge = 0;
+                }
             }
         }
         ++g_bigPairs;
@@ -1237,7 +1303,7 @@ void diffPair(const uint8_t* prev, const uint8_t* now, uint32_t bytes, float dtM
     if (bodyFit) {
         bw = bodyW;
         bt = bodyT;
-    } else if (g_motionValid) {
+    } else if (heldValid) {
         const float dtb = (dtMs >= 5.0f && dtMs <= 50.0f) ? dtMs : 11.1f;
         for (int k = 0; k < 3; ++k) {
             heldW[k] = g_motion.omegaPerMs[k] * dtb;
@@ -1385,8 +1451,8 @@ void report() {
         "changes a pair outside it (the movers, or noise) and %.0f in the second-largest; the "
         "live records shifted together without a turn on %llu pairs (an origin rebase, up to "
         "%.1f m); %.0f a pair sat in a repacked slot and went unclustered; the pool object changed "
-        "%u times; the diff took %.2f ms a pair on the render thread, %.2f at most. The fields of a "
-        "changed record that changed, "
+        "%u times; the diff took %.2f ms a pair on its worker thread, %.2f at most, and %llu pairs "
+        "were dropped with the worker busy. The fields of a changed record that changed, "
         "by range with the share of changed records they changed in (under 5%% left out): %s.",
         static_cast<double>(kClusterAngleDeg), 100.0 * static_cast<double>(kClusterPosM),
         1000.0 * static_cast<double>(kClusterPosPerM),
@@ -1399,6 +1465,7 @@ void report() {
         static_cast<unsigned long long>(g_rebasePairs), g_rebaseMaxM,
         static_cast<double>(g_shuffled) / pairs, g_poolChanges,
         g_diffN ? g_diffMsSum / g_diffN : 0.0, g_diffMsMax,
+        static_cast<unsigned long long>(g_busySkipped),
         ranges[0] ? ranges : "none");
     if (g_shipRangeM > 0.0f && g_shipPairs) {
         const double sp = static_cast<double>(g_shipPairs);
@@ -1438,6 +1505,7 @@ void report() {
     g_shuffled = 0;
     g_diffMsSum = g_diffMsMax = 0.0;
     g_diffN = 0;
+    g_busySkipped = 0;
     g_poolChanges = 0;
     memset(g_byteHist, 0, sizeof(g_byteHist));
     g_byteHistN = 0;
@@ -1491,6 +1559,97 @@ void issueCopy(ID3D11DeviceContext* ctx, bool keep) {
         return;
     }
     ++g_skipped;
+}
+
+// THE WORKER. The diff ran on the render thread every eighth frame and
+// took 2-13 ms a pair near a station with ships about (the flight of
+// 2026-09-09 14:28: "the diff took 9.30 ms a pair, 13.00 at most") -- a
+// frame's budget every eighth frame, felt as the station juddering at
+// steady frame times. Nothing in it touches the device: the two copies
+// are bytes once mapped, and the results are a struct, eight ships and a
+// grid. So it runs on a thread of its own, one job at a time; poll copies
+// the pair into the job (1.4 MB, a tenth of a millisecond) and a pair that
+// finds the worker still on the last is dropped and counted. The results
+// are published under g_publish in short sections (the body's struct with
+// its grid's pointer, the ships, the ages); the counters the report prints
+// are read without it, a torn count being a cosmetic risk taken knowingly.
+void workerMain() {
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);   // the render thread first
+    DiffJob job;
+    for (;;) {
+        {
+            std::unique_lock<std::mutex> lk(g_jobLock);
+            g_jobCv.wait(lk, [] { return g_jobPending || g_workerStop; });
+            if (g_workerStop) return;
+            std::swap(job, g_job);
+            g_jobPending = false;
+            g_jobRunning = true;
+        }
+        if (g_resetWorker.exchange(false)) {
+            g_lastRelValid = false;
+            g_rateRingN = 0;
+            g_dtRingN = 0;
+        }
+        guarded("objectProbe.diff", [&] {
+            g_pairLagFrames = job.lagFrames;
+            g_pairCamPrevValid = job.haveCamPrev;
+            if (job.haveCamPrev) memcpy(g_pairCamPrev, job.camPrev, sizeof(g_pairCamPrev));
+            LARGE_INTEGER dq0{}, dq1{}, dqf{};
+            QueryPerformanceCounter(&dq0);
+            diffPair(job.prev.data(), job.now.data(), static_cast<uint32_t>(job.now.size()), job.dtMs,
+                     job.haveCam ? job.cam : nullptr);
+            QueryPerformanceCounter(&dq1);
+            QueryPerformanceFrequency(&dqf);
+            if (dqf.QuadPart > 0) {
+                const double ms = static_cast<double>(dq1.QuadPart - dq0.QuadPart) * 1000.0 /
+                                  static_cast<double>(dqf.QuadPart);
+                g_diffMsSum += ms;
+                if (ms > g_diffMsMax) g_diffMsMax = ms;
+                ++g_diffN;
+            }
+        });
+        {
+            std::lock_guard<std::mutex> lk(g_jobLock);
+            g_jobRunning = false;
+        }
+    }
+}
+
+void enqueueDiff(const uint8_t* now, uint32_t bytes, float dtMs, const float* camPos, bool haveCamPrev,
+                 uint32_t lagFrames) {
+    {
+        std::lock_guard<std::mutex> lk(g_jobLock);
+        if (g_jobPending || g_jobRunning) {
+            ++g_busySkipped;
+            return;
+        }
+        g_job.prev.assign(g_keep.begin(), g_keep.end());
+        g_job.now.assign(now, now + bytes);
+        g_job.dtMs = dtMs;
+        g_job.haveCam = camPos != nullptr;
+        if (camPos) memcpy(g_job.cam, camPos, sizeof(g_job.cam));
+        g_job.haveCamPrev = haveCamPrev;
+        if (haveCamPrev) memcpy(g_job.camPrev, g_keepCam, sizeof(g_job.camPrev));
+        g_job.lagFrames = lagFrames;
+        g_jobPending = true;
+        if (!g_worker) g_worker = new std::thread(workerMain);
+    }
+    g_jobCv.notify_one();
+}
+
+void stopWorker() {
+    if (!g_worker) return;
+    {
+        std::lock_guard<std::mutex> lk(g_jobLock);
+        g_workerStop = true;
+    }
+    g_jobCv.notify_one();
+    g_worker->join();
+    delete g_worker;
+    g_worker = nullptr;
+    g_workerStop = false;
+    g_jobPending = false;
+    g_jobRunning = false;
 }
 
 void poll(ID3D11DeviceContext* ctx) {
@@ -1549,22 +1708,11 @@ void poll(ID3D11DeviceContext* ctx) {
                 for (int r = 0; r < 3; ++r) memcpy(&cam[r], scene + (233 + r) * 16 + 12, sizeof(float));
                 camPos = cam;
             }
-            g_pairLagFrames = g_frame >= s->frame ? g_frame - s->frame : 0;
-            g_pairCamPrevValid = g_keepCamValid && s->camPassValid;
-            if (g_pairCamPrevValid) memcpy(g_pairCamPrev, g_keepCam, sizeof(g_pairCamPrev));
-            LARGE_INTEGER dq0{}, dq1{}, dqf{};
-            QueryPerformanceCounter(&dq0);
-            diffPair(g_keep.data(), bytes, s->bytes,
-                     static_cast<float>(s->stampMs > g_keepStamp ? s->stampMs - g_keepStamp : 0.0), camPos);
-            QueryPerformanceCounter(&dq1);
-            QueryPerformanceFrequency(&dqf);
-            if (dqf.QuadPart > 0) {
-                const double ms = static_cast<double>(dq1.QuadPart - dq0.QuadPart) * 1000.0 /
-                                  static_cast<double>(dqf.QuadPart);
-                g_diffMsSum += ms;
-                if (ms > g_diffMsMax) g_diffMsMax = ms;
-                ++g_diffN;
-            }
+            // The diff goes to the worker with copies of both frames
+            // (workerMain says why).
+            enqueueDiff(bytes, s->bytes,
+                        static_cast<float>(s->stampMs > g_keepStamp ? s->stampMs - g_keepStamp : 0.0), camPos,
+                        g_keepCamValid && s->camPassValid, g_frame >= s->frame ? g_frame - s->frame : 0);
             if (g_verbose && g_dumps < kDumpMax && dueMs(g_dumpMs, kDumpEveryMs)) {
                 g_dumpMs = stampMs();
                 ++g_dumps;
@@ -1607,8 +1755,10 @@ void objectProbeConfigure(Config& cfg) {
 bool objectProbeWantsDraws() { return g_on; }
 
 bool objectMotionGet(ObjectMotion* out) {
-    if (!g_motionValid || !out) return false;
-    *out = g_motion;
+    if (!out) return false;
+    std::lock_guard<std::mutex> lk(g_publish);
+    if (!g_motionPubValid) return false;
+    *out = g_motionPub;
     out->age = g_motionAge;
     return true;
 }
@@ -1625,7 +1775,9 @@ void objectMotionSetReach(float metres) {
 }
 
 uint32_t objectShipsGet(ObjectShip* out, uint32_t cap, float camPos[3], uint32_t* age) {
-    if (!g_shipCount || !out || !cap) return 0;
+    if (!out || !cap) return 0;
+    std::lock_guard<std::mutex> lk(g_publish);
+    if (!g_shipCount) return 0;
     const uint32_t n = g_shipCount < cap ? g_shipCount : cap;
     memcpy(out, g_ships, sizeof(ObjectShip) * n);
     if (camPos) memcpy(camPos, g_shipCamPos, sizeof(g_shipCamPos));
@@ -1738,16 +1890,24 @@ void objectProbeFrameBoundary(ID3D11DeviceContext* ctx) {
             releasePool();
             g_wasOn = false;
             g_noted = false;
-            g_motionValid = false;
-            g_shipCount = 0;
+            {
+                std::lock_guard<std::mutex> lk(g_publish);
+                g_motionPubValid = false;
+                g_shipCount = 0;
+            }
+            g_resetWorker = true;
         }
         return;
     }
     g_wasOn = true;
     ++g_frame;
-    // The body's motion ages a frame; past the hold it is nobody's.
-    if (g_motionValid && ++g_motionAge > kMotionHoldFrames) g_motionValid = false;
-    if (g_shipCount && ++g_shipAge > kShipHoldFrames) g_shipCount = 0;
+    // The body's motion and the ships age a frame, under the publish lock
+    // the worker publishes into; past the hold they are nobody's.
+    {
+        std::lock_guard<std::mutex> lk(g_publish);
+        if (g_motionPubValid && ++g_motionAge > kMotionHoldFrames) g_motionPubValid = false;
+        if (g_shipCount && ++g_shipAge > kShipHoldFrames) g_shipCount = 0;
+    }
     g_checksLeft = (g_pool && !dueMs(g_checkMs, kRecheckMs)) ? 0 : kChecksPerFrame;
     if (!ctx) return;
     guardedBudget(g_budget, [&] {
@@ -1773,11 +1933,13 @@ void objectProbeFrameBoundary(ID3D11DeviceContext* ctx) {
 }
 
 void objectProbeShutdown() {
+    stopWorker();
     releaseRing();
     releasePool();
     g_on = false;
     g_wasOn = false;
-    g_motionValid = false;
+    std::lock_guard<std::mutex> lk(g_publish);
+    g_motionPubValid = false;
     g_shipCount = 0;
 }
 
