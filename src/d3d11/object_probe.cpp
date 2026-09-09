@@ -31,6 +31,19 @@ constexpr uint32_t kPoolSlot = 33;       // ...at t33, likewise
 constexpr uint32_t kChecksPerFrame = 4;  // instanced eye draws asked for t33 before a frame gives up
 constexpr uint64_t kRecheckMs = 1000;    // once the pool is known, one look a second
 constexpr uint32_t kPairEvery = 8;       // a frame PAIR is copied every this many frames
+// THE PAIR IS TWO FRAMES APART, from a start that alternates between even
+// and odd frames (2026-09-09, the flight of 16:22). The pool's tail -- 271
+// to 298 records at the station, the docking hub's among them -- was live
+// in the second frame of every saved pair and never in the first: the
+// game writes those records on alternate frames only, and a pair of
+// consecutive frames holds them once at most, so the diff never saw the
+// hub and the hub took the ring's path (its face smeared while the ring
+// was crisp). Two frames apart, a pair whose start has the right parity
+// holds them twice; the start alternates so every other pair does, and
+// the second body's hold (kBody2HoldPairs) spans the pairs between. The
+// rates divide by the pair's own interval, so nothing downstream changes
+// but the per-pair thresholds, which a doubled motion meets more easily.
+constexpr uint32_t kPairSpan = 2;
 constexpr uint32_t kReadAfter = 3;       // frames before a copy is asked for (never waited on)
 constexpr uint32_t kDropAfter = 30;      // ...and after which a copy still in flight is given up
 constexpr int      kRing = 4;
@@ -1943,7 +1956,7 @@ void poll(ID3D11DeviceContext* ctx) {
             g_keepValid = true;
             g_keepCamValid = s->camPassValid;
             if (s->camPassValid) memcpy(g_keepCam, s->camPass, sizeof(g_keepCam));
-        } else if (g_keepValid && g_keepFrame + 1 == s->frame && g_keep.size() == s->bytes) {
+        } else if (g_keepValid && g_keepFrame + kPairSpan == s->frame && g_keep.size() == s->bytes) {
             // The camera's position in the record's frame, for the ship-radius
             // exclusion and the pair's frame stamp: the pass's chosen camera
             // when this copy was issued (objectProbeNoteCamera), which is the
@@ -2166,8 +2179,12 @@ void objectProbeFrameBoundary(ID3D11DeviceContext* ctx) {
     guardedBudget(g_budget, [&] {
         if (g_pool) {
             g_framesWithoutPool = 0;
+            // The pair's two copies, kPairSpan frames apart from an
+            // alternating start (kPairSpan says why).
             const uint32_t phase = g_frame % kPairEvery;
-            if (phase == 0 || phase == 1) issueCopy(ctx, phase == 0);
+            const uint32_t base = (g_frame / kPairEvery) & 1u;
+            if (phase == base) issueCopy(ctx, true);
+            else if (phase == base + kPairSpan) issueCopy(ctx, false);
             poll(ctx);
         } else if (++g_framesWithoutPool == kAbsentFrames && !g_absentNoted && g_verbose) {
             g_absentNoted = true;
