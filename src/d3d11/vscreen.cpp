@@ -312,8 +312,16 @@ struct State {
     struct ShaderMemo {
         void*    ptr[32] = {};
         uint64_t hash[32] = {};
+        uint32_t gen[32] = {};   // the registry's generation at the lookup
     };
     ShaderMemo vsMemo, psMemo;
+    // The shadow's audit (bindingAudit): every 1024th draw of the owner's
+    // compared with the context's own answer, and the shader hooks' counts.
+    uint32_t bindAuditSeq = 0;
+    uint64_t auditSampled = 0, auditNull = 0, auditPtr = 0, auditHash = 0;
+    uint64_t auditNoted = 0, auditNoteMs = 0;
+    uint64_t auditLastShadow = 0, auditLastGet = 0;
+    uint64_t vsSets = 0, vsSetsNoHash = 0, psSets = 0, psSetsNoHash = 0;
     // The Map hook's memo of a resource's kind and size by address (hookedMap
     // says why), 64 slots direct-mapped.
     struct MapMemo {
@@ -1352,6 +1360,62 @@ enum class DrawVerdict {
     kBackdrop
 };
 
+// THE SHADOW'S AUDIT (2026-09-09). The heat haze's skip went silent the
+// flight after the binding shadow replaced its VSGetShader -- 15:13, three
+// minutes beside a ship's drives, not one draw withheld; 14:52, the flight
+// before, 13524 -- and nothing in the log said why, because a shadow that
+// is wrong is a shadow that answers. So every 1024th draw of the owner's
+// asks the context for its vertex shader and compares: a pointer the shadow
+// does not hold is a set the hook never saw; the same pointer with another
+// hash is the memo's or the registry's. Reported at most every thirty
+// seconds and only when they disagreed. A Get and a Release per thousand
+// draws is nothing against the three a draw this replaced.
+void bindingAudit(State* s, ID3D11DeviceContext* ctx) {
+    ID3D11VertexShader* vs = nullptr;
+    ctx->VSGetShader(&vs, nullptr, nullptr);
+    ++s->auditSampled;
+    void* held = bindingGet(BindSlot::Vs);
+    if (!held) {
+        ++s->auditNull;
+    } else if (held != static_cast<void*>(vs)) {
+        ++s->auditPtr;
+        s->auditLastShadow = bindingShaderHash(BindSlot::Vs);
+        s->auditLastGet = vs ? lookupShaderHash(vs) : 0;
+    } else {
+        const uint64_t hs = bindingShaderHash(BindSlot::Vs);
+        const uint64_t hg = lookupShaderHash(vs);
+        if (hs != hg) {
+            ++s->auditHash;
+            s->auditLastShadow = hs;
+            s->auditLastGet = hg;
+        }
+    }
+    if (vs) vs->Release();
+    const uint64_t wrong = s->auditPtr + s->auditHash;
+    if (wrong == s->auditNoted) return;
+    const uint64_t now = nowMs();
+    if (now - s->auditNoteMs < 30000) return;
+    s->auditNoteMs = now;
+    s->auditNoted = wrong;
+    Log::get().note(
+        "binding shadow: the context's vertex shader disagreed with the shadow on %llu of "
+        "%llu sampled draws -- %llu by pointer (a set the hook never saw) and %llu by hash "
+        "(the same shader, another hash: the memo's or the registry's); the shadow last "
+        "held %016llX where the context held %016llX, and %llu samples found the shadow "
+        "empty. %llu vertex and %llu pixel shader sets so far, %llu and %llu of them "
+        "with no hash to give. A consumer reading the shadow -- the billboards, the "
+        "interface's families, the scanner's chrome -- was wrong that often.",
+        static_cast<unsigned long long>(wrong), static_cast<unsigned long long>(s->auditSampled),
+        static_cast<unsigned long long>(s->auditPtr), static_cast<unsigned long long>(s->auditHash),
+        static_cast<unsigned long long>(s->auditLastShadow),
+        static_cast<unsigned long long>(s->auditLastGet),
+        static_cast<unsigned long long>(s->auditNull),
+        static_cast<unsigned long long>(s->vsSets), static_cast<unsigned long long>(s->psSets),
+        static_cast<unsigned long long>(s->vsSetsNoHash),
+        static_cast<unsigned long long>(s->psSetsNoHash));
+}
+
+
 // kind, count and instances describe the draw for the census and the census
 // probe, and args is the rest of the call's own argument set (start index,
 // base vertex, start instance -- draw_census.h, DrawArgs), passed through
@@ -1518,6 +1582,9 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         !introProbeWants() && !introPanelWants()) {
         return DrawVerdict::kNone;
     }
+
+    // The shadow's audit, one draw in 1024 (bindingAudit says).
+    if ((++s->bindAuditSeq & 1023u) == 0) bindingAudit(s, self);
 
     // The particle probe sits ABOVE the eye-texture gate on purpose. On
     // foot the world -- plumes included -- is drawn into the PANEL, which
@@ -2473,11 +2540,24 @@ void STDMETHODCALLTYPE hookedVSSetConstantBuffers(ID3D11DeviceContext* self, UIN
 // a draw across the billboard variant, the interface classifier and the
 // scanner's chrome tracker (the review of 2026-09-09: about two
 // milliseconds a frame in a busy scene).
+//
+// Asked again on three grounds, not one (2026-09-09: the flight of 15:13
+// drew the drives' heat haze for three minutes beside a ship while its
+// skip, reading this shadow, withheld nothing; the flight before the
+// shadow, 14:52, withheld 13524): a pointer the slot does not hold; a
+// registration since (the registry's generation moves at every one, and a
+// destroyed shader's address comes back as another shader's, which a memo
+// keyed by address alone answers with the dead one's hash); and a held
+// hash of zero -- a set that beat its registration, or a shader the
+// registry never met -- asked again at every set, because zero is the one
+// answer a consumer cannot tell from "no shader".
 uint64_t shaderHashMemo(State::ShaderMemo& m, void* shader) {
     if (!shader) return 0;
     const size_t i = (reinterpret_cast<uintptr_t>(shader) >> 4) & 31;
-    if (m.ptr[i] != shader) {
+    const uint32_t gen = shaderRegistryGeneration();
+    if (m.ptr[i] != shader || m.gen[i] != gen || m.hash[i] == 0) {
         m.ptr[i] = shader;
+        m.gen[i] = gen;
         m.hash[i] = lookupShaderHash(shader);
     }
     return m.hash[i];
@@ -2485,13 +2565,23 @@ uint64_t shaderHashMemo(State::ShaderMemo& m, void* shader) {
 
 void STDMETHODCALLTYPE hookedVSSetShader(ID3D11DeviceContext* self, ID3D11VertexShader* vs,
                                          ID3D11ClassInstance* const* ci, UINT n) {
-    if (!foreignContext(self)) bindingSetShader(BindSlot::Vs, vs, shaderHashMemo(g_state->vsMemo, vs));
+    if (!foreignContext(self)) {
+        const uint64_t h = shaderHashMemo(g_state->vsMemo, vs);
+        bindingSetShader(BindSlot::Vs, vs, h);
+        ++g_state->vsSets;
+        if (vs && !h) ++g_state->vsSetsNoHash;
+    }
     g_state->realVSSetShader(self, vs, ci, n);
 }
 
 void STDMETHODCALLTYPE hookedPSSetShader(ID3D11DeviceContext* self, ID3D11PixelShader* ps,
                                          ID3D11ClassInstance* const* ci, UINT n) {
-    if (!foreignContext(self)) bindingSetShader(BindSlot::Ps, ps, shaderHashMemo(g_state->psMemo, ps));
+    if (!foreignContext(self)) {
+        const uint64_t h = shaderHashMemo(g_state->psMemo, ps);
+        bindingSetShader(BindSlot::Ps, ps, h);
+        ++g_state->psSets;
+        if (ps && !h) ++g_state->psSetsNoHash;
+    }
     g_state->realPSSetShader(self, ps, ci, n);
 }
 
