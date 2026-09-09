@@ -1820,7 +1820,13 @@ which is this project's contract for every read of the game.
    1.2, 2.1 m) with millimetre residuals, which is the game's world
    ORIGIN rebasing during the approach -- question 7 revisited: it does
    -- and a held body is then in the old origin's frame for up to eleven
-   frames. The pass already flags a camera jump of over fifty metres in
+   frames. The flight's dumps settle it: between the 18:30:19 and
+   18:30:49 pairs the station's moving parts' centroid moved 13.1 km in
+   the frame while the camera moved 4.3 km, and the camera then stood
+   fifty metres from the origin -- the origin had been put at the ship.
+   Landed on the pad, the origin was at the station (its parts' centroid
+   at nought, the camera a hundred metres off). The pass already flags a
+   camera jump of over fifty metres in
    a frame; the body now stands down for twelve frames after one, and
    the registration line counts them. Not every jump is a rebase,
    though: the same log counted two jumps an interval at rest in the
