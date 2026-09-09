@@ -69,6 +69,12 @@ void temporalPassNoteFirstEyeDraw(ID3D11DeviceContext* ctx);
 // This frame's rows become last frame's; called at the frame boundary.
 void temporalPassFrameBoundary();
 
+// hotkey.dump_eyes, and the settings menu's "Dump both eyes as seen": the
+// next treated frame's two eyes, as the compositor receives them, to
+// edvr_logs\eyes as 24-bit BMP -- what the player sees through the lens,
+// readable off the desk.
+void temporalPassArmEyeDump();
+
 // The eye's offset from the head as the runtime last handed it to the pass
 // (metres, x toward the right), for the foveation's nasal shift. False
 // until a frame has been treated with a head delta and an offset: the

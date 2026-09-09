@@ -55,6 +55,12 @@ void objectProbeOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t instance
 // readbacks, the diff and the totals.
 void objectProbeFrameBoundary(ID3D11DeviceContext* ctx);
 
+// The temporal pass's chosen camera this frame (its rows' position column):
+// the frame the pool's positions are read in, stamped on the pair captured
+// this frame. The scene buffer's own end-of-frame contents are whichever
+// camera wrote it last, another's often enough (2026-09-09).
+void objectProbeNoteCamera(const float pos[3]);
+
 void objectProbeShutdown();
 
 // The dominant rigid body's motion between two consecutive frames, in the

@@ -1973,6 +1973,36 @@ which is this project's contract for every read of the game.
    pool holding 14 records until the station's 1070 arrive at 9.3 km;
    beyond that the station is not in the instance pool at all, and
    there is nothing for the body to fit.
+
+   *Its twelfth flight* (05:48, `v0.14.1-78-g5f08a6c`, with the objects
+   debug view up and a phone held to the lens): "a weird arc that
+   shifts position in a fixed space", on the hub, and "other sections of
+   the station further down look like this too". The arc is the reach's
+   fringe. The marked cells are the recorded parts' cells plus the reach
+   in whole cells either side, and the parts turn with the station, so
+   the fringe steps a cell as records cross cell boundaries; where a
+   part's skin lies near the fringe -- the hub's end sphere, five
+   hundred metres from the one record at its centre, against a reach of
+   four hundred that reaches 512 to 768 m at this station's cells -- the
+   claim's edge runs across the skin and wanders with the turn. The
+   desk's hemispheres had been centred inside the end record and never
+   reached the fringe; re-sampled on the record itself they are still
+   inside, which says the real sphere is a little larger than the guess,
+   and the reach goes to 700 m (three cells here: 768 to 1024 m from
+   every record). The same log put a second thing right: "the body stood
+   down 16 and 25 frames with its pair in another frame" with nothing
+   carried over, and no jump to carry. The probe stamped its pairs with
+   the scene buffer's end-of-frame contents, which are whichever camera
+   wrote it last -- another's, often enough -- so the pair's camera and
+   the pass's rows disagreed with no origin move between them. The pass
+   now hands the probe its chosen camera each frame and the probe stamps
+   the pair with that: the same chooser on both sides, and a difference
+   between them is an origin move and nothing else. And a third thing,
+   asked for: a way to see what the player sees. `hotkey.dump_eyes` and
+   the settings menu's "Dump both eyes as seen" write the next treated
+   frame's two eyes, as the compositor receives them, to
+   `edvr_logs\eyes\eye_HHMMSS_L.bmp` and `_R.bmp` -- a debug view can
+   be read off the desk instead of photographed through the lens.
 4. **Tier 2b** only if question 1 says no bits.
 5. **Tier 3** as `tools/` work against dumped frames, never on the hot
    path.

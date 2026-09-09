@@ -28,6 +28,7 @@
 #include "quad_probe.h"
 #include "exposure_fix.h"
 #include "menu.h"
+#include "temporal_pass.h"   // temporalPassArmEyeDump: the eye dump key's job
 #include "perf_monitor.h"
 #include "vscreen.h"
 #include "glitch_frame.h"
@@ -173,6 +174,9 @@ struct State {
     // The draw census key (issue 69074 instrumentation). Unbound by default;
     // the census costs nothing until this is both bound and pressed.
     Hotkey censusKey;
+    // The eye dump key: both eyes as the headset receives them, to
+    // edvr_logs\eyes as BMP (temporalPassArmEyeDump). Unbound by default.
+    Hotkey eyesKey;
     // The external camera key, and only that one.
     //
     // A keypress is not a heuristic, and it is the whole reason this feature can
@@ -872,6 +876,8 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
             quadProbeRequest();
             perfMonitorNoteEvent(kEvCensus);
         }
+        // The eye dump key: the next treated frame's two eyes to disk.
+        if (g_state->eyesKey.pressed()) temporalPassArmEyeDump();
         if (g_state->missedCensusNotes < kMissedDumpNotes &&
             g_state->censusKey.takeMissedWhileUnfocused()) {
             ++g_state->missedCensusNotes;
@@ -1336,6 +1342,9 @@ void menuActionCensus(void*) {
 void menuActionResetView(void*) {
     headOffsetGateNewFootSession("the settings menu", /*journalSaysSo=*/false);
 }
+void menuActionDumpEyes(void*) {
+    temporalPassArmEyeDump();
+}
 void menuActionMarker(void*) {
     static uint32_t n = 0;
     Log::get().note("----- marker %u, from the settings menu -----", ++n);
@@ -1361,6 +1370,9 @@ State& ensureState() {
         menuRegisterAction("Write a marker line to the graphics log",
                            "So a moment you noticed can be found in the log afterwards.",
                            &menuActionMarker, nullptr);
+        menuRegisterAction("Dump both eyes as seen",
+                           "The dump_eyes key's job: the treated frame, both eyes, to edvr_logs\\eyes as BMP.",
+                           &menuActionDumpEyes, nullptr);
         menuConfigure(Config::get());
         // Empty default: the census is chased-bug instrumentation, and an
         // unbound key is how "off" is spelled for a hotkey.
@@ -1388,6 +1400,22 @@ State& ensureState() {
                     "hotkey: dump_draws is set but bound nothing (the line "
                     "above says why), so the draw census cannot be armed this "
                     "session.");
+            }
+        }
+        // The eye dump key: both eyes as the headset receives them, to
+        // edvr_logs\eyes as BMP -- what the player sees, readable off the
+        // desk (asked for 2026-09-09, with a debug view up). The census
+        // key's shape: empty is off, and a bind is said.
+        {
+            const std::string b = Config::get().getString("hotkey.dump_eyes", "");
+            g_state->eyesKey.setBinding(b.c_str());
+            if (g_state->eyesKey.key() != 0) {
+                Log::get().note("hotkey: eye dump key bound: %s (vk 0x%02X, mods 0x%X) -- both eyes to "
+                                "edvr_logs\\eyes as BMP on each press, one hitch each.",
+                                b.c_str(), g_state->eyesKey.key(), g_state->eyesKey.mods());
+            } else if (!b.empty()) {
+                Log::get().note("hotkey: dump_eyes is set but bound nothing, so the eye dump cannot be "
+                                "armed this session (the settings menu's row still can).");
             }
         }
         // The camera keys come from the GAME's own key configuration, and

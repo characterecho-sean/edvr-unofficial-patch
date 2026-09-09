@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <cstring>
 #include <utility>   // std::swap, for the depth carry's pointer swap
+#include <vector>    // the eye dump's row buffer
 
 #include <windows.h>
 
@@ -1675,7 +1676,7 @@ bool     g_moversNoted = false;    // the engage line, once
 // instance pool's largest rigid cluster (object_probe.cpp), taken per pixel
 // against the camera's by a 3x3 match with this margin.
 bool     g_objectsOn = false;      // fix.temporal_aa_objects
-float    g_objectsReach = 400.0f;  // advanced.temporal_aa_objects_reach, metres
+float    g_objectsReach = 700.0f;  // advanced.temporal_aa_objects_reach, metres
 bool     g_objectsNoted = false;   // the engage line, once
 ObjectMotion g_bodyLast = {};      // the motion last handed to the shader, for the log
 bool     g_bodyLastValid = false;
@@ -1707,6 +1708,179 @@ uint32_t g_bodyRowsHolds = 0;      // frames stood down on another camera's rows
 float    g_bodyShift[3] = {};
 uint32_t g_bodyShiftFrame = ~0u;   // the frame of the last jump
 uint32_t g_bodyShiftUsed = 0;      // frames carried over by the shift this interval
+
+// hotkey.dump_eyes, and the settings menu's "Dump both eyes as seen": the
+// treated eye as the compositor receives it -- after DLSS, the fovea
+// composite, everything -- to edvr_logs\eyes\eye_HHMMSS_L.bmp and _R.bmp,
+// 24-bit, so what the player saw through the lens can be read off the desk
+// instead of photographed through it (asked for on 2026-09-09, with a debug
+// view up). One staging copy and a map that waits for the GPU: a hitch,
+// once per press. Float formats are taken as linear and encoded sRGB for
+// the file; the 8- and 10-bit ones are written as they are.
+bool     g_eyeDumpArmed[2] = {false, false};
+uint32_t g_eyeDumps = 0;
+bool     g_eyeDumpDirMade = false;
+
+float halfToFloat(uint16_t h) {
+    const uint32_t s = (h >> 15) & 1u, e = (h >> 10) & 0x1Fu, m = h & 0x3FFu;
+    float v;
+    if (e == 0) {
+        v = static_cast<float>(m) / 1024.0f * 6.103515625e-5f;   // subnormal: m * 2^-24
+    } else if (e == 31) {
+        v = m ? 0.0f : 65504.0f;                                  // nan reads black, inf white
+    } else {
+        v = (1.0f + static_cast<float>(m) / 1024.0f) * powf(2.0f, static_cast<float>(e) - 15.0f);
+    }
+    return s ? -v : v;
+}
+
+uint8_t dumpByte(float v, bool linear) {
+    if (!(v > 0.0f)) v = 0.0f;
+    if (v > 1.0f) v = 1.0f;
+    if (linear) v = v <= 0.0031308f ? 12.92f * v : 1.055f * powf(v, 1.0f / 2.4f) - 0.055f;
+    return static_cast<uint8_t>(v * 255.0f + 0.5f);
+}
+
+void dumpEye(ID3D11DeviceContext* ctx, ID3D11Texture2D* tex, int eye) {
+    D3D11_TEXTURE2D_DESC d{};
+    tex->GetDesc(&d);
+    ID3D11Device* dev = nullptr;
+    ctx->GetDevice(&dev);
+    if (!dev) return;
+    D3D11_TEXTURE2D_DESC sd = d;
+    sd.Usage = D3D11_USAGE_STAGING;
+    sd.BindFlags = 0;
+    sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    sd.MiscFlags = 0;
+    sd.MipLevels = 1;
+    sd.ArraySize = 1;
+    ID3D11Texture2D* st = nullptr;
+    const HRESULT hr = dev->CreateTexture2D(&sd, nullptr, &st);
+    dev->Release();
+    if (FAILED(hr) || !st) {
+        Log::get().note("temporal aa: the eye dump could not make its staging copy (0x%08lX); nothing written.",
+                        static_cast<unsigned long>(hr));
+        return;
+    }
+    ctx->CopySubresourceRegion(st, 0, 0, 0, 0, tex, 0, nullptr);
+    D3D11_MAPPED_SUBRESOURCE ms{};
+    if (FAILED(ctx->Map(st, 0, D3D11_MAP_READ, 0, &ms))) {
+        st->Release();
+        Log::get().note("temporal aa: the eye dump could not map its staging copy; nothing written.");
+        return;
+    }
+    const uint32_t w = d.Width, h = d.Height;
+    const uint32_t rowBytes = (w * 3u + 3u) & ~3u;
+    std::vector<uint8_t> out(static_cast<size_t>(rowBytes) * h);
+    bool known = true;
+    for (uint32_t y = 0; y < h && known; ++y) {
+        const uint8_t* src = static_cast<const uint8_t*>(ms.pData) + static_cast<size_t>(y) * ms.RowPitch;
+        uint8_t* dst = out.data() + static_cast<size_t>(h - 1u - y) * rowBytes;   // BMP rows run bottom-up
+        for (uint32_t x = 0; x < w; ++x) {
+            float r = 0.0f, g = 0.0f, b = 0.0f;
+            bool linear = false;
+            switch (d.Format) {
+                case DXGI_FORMAT_R8G8B8A8_TYPELESS:
+                case DXGI_FORMAT_R8G8B8A8_UNORM:
+                case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
+                    r = src[x * 4 + 0] / 255.0f;
+                    g = src[x * 4 + 1] / 255.0f;
+                    b = src[x * 4 + 2] / 255.0f;
+                    break;
+                case DXGI_FORMAT_B8G8R8A8_TYPELESS:
+                case DXGI_FORMAT_B8G8R8A8_UNORM:
+                case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:
+                case DXGI_FORMAT_B8G8R8X8_TYPELESS:
+                case DXGI_FORMAT_B8G8R8X8_UNORM:
+                case DXGI_FORMAT_B8G8R8X8_UNORM_SRGB:
+                    b = src[x * 4 + 0] / 255.0f;
+                    g = src[x * 4 + 1] / 255.0f;
+                    r = src[x * 4 + 2] / 255.0f;
+                    break;
+                case DXGI_FORMAT_R10G10B10A2_TYPELESS:
+                case DXGI_FORMAT_R10G10B10A2_UNORM: {
+                    uint32_t v = 0;
+                    memcpy(&v, src + x * 4, 4);
+                    r = static_cast<float>(v & 1023u) / 1023.0f;
+                    g = static_cast<float>((v >> 10) & 1023u) / 1023.0f;
+                    b = static_cast<float>((v >> 20) & 1023u) / 1023.0f;
+                    break;
+                }
+                case DXGI_FORMAT_R16G16B16A16_TYPELESS:
+                case DXGI_FORMAT_R16G16B16A16_FLOAT: {
+                    uint16_t hv[3];
+                    memcpy(hv, src + x * 8, 6);
+                    r = halfToFloat(hv[0]);
+                    g = halfToFloat(hv[1]);
+                    b = halfToFloat(hv[2]);
+                    linear = true;
+                    break;
+                }
+                case DXGI_FORMAT_R32G32B32A32_FLOAT: {
+                    float fv[3];
+                    memcpy(fv, src + x * 16, 12);
+                    r = fv[0];
+                    g = fv[1];
+                    b = fv[2];
+                    linear = true;
+                    break;
+                }
+                default:
+                    known = false;
+                    break;
+            }
+            if (!known) break;
+            dst[x * 3 + 0] = dumpByte(b, linear);
+            dst[x * 3 + 1] = dumpByte(g, linear);
+            dst[x * 3 + 2] = dumpByte(r, linear);
+        }
+    }
+    ctx->Unmap(st, 0);
+    st->Release();
+    if (!known) {
+        Log::get().note("temporal aa: the eye dump cannot read DXGI format %d; nothing written.",
+                        static_cast<int>(d.Format));
+        return;
+    }
+    const std::wstring dir = Log::get().dir() + L"\\eyes";
+    if (!g_eyeDumpDirMade) {
+        g_eyeDumpDirMade = true;
+        CreateDirectoryW(dir.c_str(), nullptr);
+    }
+    SYSTEMTIME stm{};
+    GetLocalTime(&stm);
+    wchar_t path[MAX_PATH];
+    _snwprintf_s(path, MAX_PATH, _TRUNCATE, L"%s\\eye_%02u%02u%02u_%c.bmp", dir.c_str(),
+                 static_cast<unsigned>(stm.wHour), static_cast<unsigned>(stm.wMinute),
+                 static_cast<unsigned>(stm.wSecond), eye == 0 ? L'L' : L'R');
+    HANDLE f = CreateFileW(path, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (f == INVALID_HANDLE_VALUE) {
+        Log::get().note("temporal aa: the eye dump could not open %ls for writing.", path);
+        return;
+    }
+    const uint32_t bytes = rowBytes * h;
+    BITMAPFILEHEADER fh{};
+    BITMAPINFOHEADER ih{};
+    fh.bfType = 0x4D42;
+    fh.bfOffBits = sizeof(fh) + sizeof(ih);
+    fh.bfSize = fh.bfOffBits + bytes;
+    ih.biSize = sizeof(ih);
+    ih.biWidth = static_cast<LONG>(w);
+    ih.biHeight = static_cast<LONG>(h);
+    ih.biPlanes = 1;
+    ih.biBitCount = 24;
+    ih.biCompression = BI_RGB;
+    ih.biSizeImage = bytes;
+    DWORD wrote = 0;
+    bool ok = WriteFile(f, &fh, sizeof(fh), &wrote, nullptr) != 0;
+    if (ok) ok = WriteFile(f, &ih, sizeof(ih), &wrote, nullptr) != 0;
+    if (ok) ok = WriteFile(f, out.data(), bytes, &wrote, nullptr) != 0;
+    CloseHandle(f);
+    ++g_eyeDumps;
+    Log::get().note("temporal aa: eye %d dumped to %ls -- %ux%u, DXGI format %d, the treated frame as the "
+                    "compositor receives it%s.",
+                    eye, path, w, h, static_cast<int>(d.Format), ok ? "" : " (the write FAILED)");
+}
 // The body's occupancy grid on the GPU (object_probe.h): one for both
 // eyes, uploaded when the probe's version moves.
 ID3D11Texture3D*          g_bodyGrid = nullptr;
@@ -1961,6 +2135,13 @@ void chooseCameraRows() {
         g_curProj[0] = g_rowsRing[pick].proj[0];
         g_curProj[1] = g_rowsRing[pick].proj[1];
         g_curValid = true;
+        // The object probe stamps its pairs with THIS camera (the frame's
+        // chosen rows), not the scene buffer's end-of-frame contents, which
+        // are whichever camera wrote it last -- another's, often enough that
+        // the body's frame test stood the body down for 16-25 frames an
+        // interval with nothing to carry it over (2026-09-09 05:48).
+        const float cam[3] = {g_curRows[3], g_curRows[7], g_curRows[11]};
+        objectProbeNoteCamera(cam);
     }
 }
 
@@ -3942,10 +4123,20 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         }
     }
 
+    // The eye dump, armed by its key or the menu: this treated eye, as it goes
+    // out, before the references are dropped.
+    if (result && ctx && g_eyeDumpArmed[eye]) {
+        g_eyeDumpArmed[eye] = false;
+        dumpEye(ctx, static_cast<ID3D11Texture2D*>(result), eye);
+    }
     if (ctx) ctx->Release();
     if (dev) dev->Release();
     src->Release();
     return result;
+}
+
+void temporalPassArmEyeDump() {
+    g_eyeDumpArmed[0] = g_eyeDumpArmed[1] = true;
 }
 
 }  // namespace
@@ -3969,8 +4160,8 @@ void temporalPassConfigure(Config& cfg) {
                 : _stricmp(dbg.c_str(), "depth") == 0 ? 3 : _stricmp(dbg.c_str(), "movers") == 0 ? 4
                 : _stricmp(dbg.c_str(), "objects") == 0 ? 5 : 0;
     g_objectsOn = cfg.getBool("fix.temporal_aa_objects", false);
-    float reach = cfg.getFloat("advanced.temporal_aa_objects_reach", 400.0f);
-    if (!std::isfinite(reach)) reach = 400.0f;
+    float reach = cfg.getFloat("advanced.temporal_aa_objects_reach", 700.0f);
+    if (!std::isfinite(reach)) reach = 700.0f;
     if (reach < 1.0f) reach = 1.0f;
     if (reach > 2000.0f) reach = 2000.0f;
     g_objectsReach = reach;

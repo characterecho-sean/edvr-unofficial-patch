@@ -57,7 +57,7 @@ constexpr float    kMotionMaxRmsM = 0.5f;   // the rigid fit's residual: parts t
 ObjectMotion g_motion = {};
 bool     g_motionValid = false;
 uint32_t g_motionAge = 0;
-float    g_reachM = 400.0f;
+float    g_reachM = 700.0f;
 uint8_t  g_grid[kObjectGrid * kObjectGrid * kObjectGrid];
 uint32_t g_gridVersion = 0;
 float    g_gridCell = 0.0f;   // the lattice's cell, metres; 0 = not chosen yet
@@ -234,9 +234,13 @@ struct Slot {
     uint32_t sceneBytes = 0;
     uint32_t frame = 0;
     double   stampMs = 0.0;  // when the copy was issued, QPC milliseconds: the pair's interval is the two stamps' difference
+    float    camPass[3] = {};  // the pass's chosen camera when the copy was issued (objectProbeNoteCamera)
+    bool     camPassValid = false;
     bool     inUse = false;
     bool     keep = false;   // the first of a pair: its bytes are kept for the second
 };
+float g_camPass[3] = {};
+bool  g_camPassValid = false;
 Slot g_ring[kRing];
 std::vector<uint8_t> g_keep;        // the first frame of a pair, copied out of its staging buffer
 std::vector<uint8_t> g_keepScene;   // ...and its scene block
@@ -936,6 +940,8 @@ void issueCopy(ID3D11DeviceContext* ctx, bool keep) {
         if (s.sceneStaging && g_scene) ctx->CopyResource(s.sceneStaging, g_scene);
         s.frame = g_frame;
         s.stampMs = qpcMs();
+        memcpy(s.camPass, g_camPass, sizeof(s.camPass));
+        s.camPassValid = g_camPassValid;
         s.inUse = true;
         s.keep = keep;
         return;
@@ -980,12 +986,20 @@ void poll(ID3D11DeviceContext* ctx) {
             g_keepStamp = s->stampMs;
             g_keepValid = true;
         } else if (g_keepValid && g_keepFrame + 1 == s->frame && g_keep.size() == s->bytes) {
-            // The camera's position in the record's frame, from the scene
-            // block's camera rows (233-235, their fourth column; the pass
-            // reads the same rows), for the ship-radius exclusion.
+            // The camera's position in the record's frame, for the ship-radius
+            // exclusion and the pair's frame stamp: the pass's chosen camera
+            // when this copy was issued (objectProbeNoteCamera), which is the
+            // frame the pass reads the positions in; failing that, the scene
+            // block's own camera rows (233-235, their fourth column), which
+            // are whichever camera wrote the block last -- another's often
+            // enough that the body stood down 16-25 frames an interval on it
+            // (2026-09-09 05:48).
             float cam[3];
             const float* camPos = nullptr;
-            if (scene && sceneBytes >= 236u * 16u) {
+            if (s->camPassValid) {
+                memcpy(cam, s->camPass, sizeof(cam));
+                camPos = cam;
+            } else if (scene && sceneBytes >= 236u * 16u) {
                 for (int r = 0; r < 3; ++r) memcpy(&cam[r], scene + (233 + r) * 16 + 12, sizeof(float));
                 camPos = cam;
             }
@@ -1037,6 +1051,12 @@ bool objectMotionGet(ObjectMotion* out) {
     *out = g_motion;
     out->age = g_motionAge;
     return true;
+}
+
+void objectProbeNoteCamera(const float pos[3]) {
+    if (!pos) return;
+    memcpy(g_camPass, pos, sizeof(g_camPass));
+    g_camPassValid = true;
 }
 
 void objectMotionSetReach(float metres) {
