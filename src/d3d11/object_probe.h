@@ -133,6 +133,33 @@ bool objectMotionGet(ObjectMotion* out);
 // the value it finds here.
 void objectMotionSetReach(float metres);
 
+// THE STEPPED PARTS (2026-09-09, the thirty-fifth flight). The game
+// updates some of a station's instances at a lower rate than the frame --
+// the docking hub's skin and the solar panel arrays at ten kilometres: 290
+// records within 500 m of the axis and 19 at the panels' radius held the
+// same pose across a two-frame pair while the ring turned, and the flight
+// before had them present on alternate frames only -- and what it draws
+// for them steps, or alternates between two buffered poses, so a smooth
+// vector cannot match them and DLSS smears them: "the solar panels blur as
+// they move", and the hub's face smeared at range in every flight, which
+// read as a counter-turn and was not one (the pilot: "to my eye they all
+// appear to spin in one direction"). So the probe copies the pool EVERY
+// frame, measures each record's own turn against the body's, keeps a short
+// history per slot, and predicts the multiple of the body's turn each
+// stepped record will make on the frame the pass draws next (a stepping
+// part repeats with a period of two frames). Their cells carry the
+// multiple, and the pass reprojects them by that much.
+constexpr int     kSteppedMin = -3;        // the multiples the grid can hold...
+constexpr int     kSteppedMax = 8;
+constexpr uint8_t kSteppedCellBase = 64;   // ...as the cell's byte: base + (m - kSteppedMin), 64..75
+struct SteppedCell {
+    uint32_t index;   // x + 128 (y + 128 z)
+    uint8_t  value;
+};
+// This frame's stamps over the grid's current lattice, none when nothing
+// steps; read on the render thread after the frame boundary ran.
+uint32_t objectSteppedCells(const SteppedCell** cells);
+
 // A MOVING SHIP's motion (2026-09-09, the twenty-third flight's ask: "the
 // same thing with moving ships in our field of view ... within a certain
 // distance, maybe 1k or less"): a rigid cluster of the pair that is not

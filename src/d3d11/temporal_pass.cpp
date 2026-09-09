@@ -93,6 +93,8 @@ cbuffer P : register(b0) {
     float4 st2R1;
     float4 st2R2;
     float4 tv2St;       // xyz its translation term; w 1 = on this frame (its grid cells hold 128)
+    float4 st3R[36];    // the stepped parts' paths (object_probe.h, 2026-09-09): twelve composite deltas, one per
+    float4 tv3[12];     // multiple of the body's turn from kSteppedMin (-3) to kSteppedMax (8); w 1 = filled this frame
     float4 objects;     // x the reach in metres (for the record; the grid already carries it); y the body's near floor, metres; z a moving ship's reach around each of its parts, squared
     float4 wR0;         // the camera rows this frame, view -> world: xyz the row, w the position's component,
     float4 wR1;         // so a view-space point v (the game's, z forward) sits at R v + c in the body's frame
@@ -266,9 +268,9 @@ R"HLSL(
     float3 u = (w - box0.xyz) / max(box1.xyz - box0.xyz, 1e-3);
     if (any(u < 0.0) || any(u >= 1.0)) return 0;
     // kObjectGrid cells a side (object_probe.h): 255 the body's, 128 the
-    // second body's (ObjectMotion::body2), 0 the space between.
-    float g = BG.Load(int4(int3(u * 128.0), 0));
-    return g > 0.75 ? 1 : (g > 0.25 ? 2 : 0);
+    // second body's (ObjectMotion::body2), 64..75 a stepped part's multiple
+    // of the body's turn plus 67 (kSteppedCellBase), 0 the space between.
+    return int(BG.Load(int4(int3(u * 128.0), 0)) * 255.0 + 0.5);
 }
 )HLSL"
 R"HLSL(
@@ -401,6 +403,12 @@ bool bodyPixel(float3 d, float z, out float2 pp, out float zp) {
 bool bodyPixel2(float3 d, float z, out float2 pp, out float zp) {
     return bodyPixelRows(st2R0.xyz, st2R1.xyz, st2R2.xyz, tv2St.xyz, d, z, pp, zp);
 }
+// A stepped part's (object_probe.h): the composite delta for its cell's
+// multiple of the body's turn, v the cell's byte (64..75).
+bool steppedPixel(int v, float3 d, float z, out float2 pp, out float zp) {
+    int e = v - 64;
+    return bodyPixelRows(st3R[e * 3].xyz, st3R[e * 3 + 1].xyz, st3R[e * 3 + 2].xyz, tv3[e].xyz, d, z, pp, zp);
+}
 )HLSL"
 R"HLSL(
 // zPred: the predicted view depth of this pixel's surface in last frame's
@@ -520,13 +528,21 @@ bool fetchHistoryT(float2 p, float3 r0, float3 r1, float3 r2, float3 tv,
             int inb = insideBody(d, zBody);
             float2 ppB;
             float zpB;
-            if (inb == 2) {
+            if (inb == 128) {
                 if (tv2St.w != 0.0 && bodyPixel2(d, zBody, ppB, zpB)) {
                     pp = ppB;
                     zPred = zpB;
                     world = 4;
                 }
-            } else if (inb == 1 && bodyPixel(d, zBody, ppB, zpB)) {
+            } else if (inb >= 64 && inb < 76) {
+                // A stepped part's cell (object_probe.h): its own multiple
+                // of the body's turn this frame. world = 5 marks it.
+                if (tv3[0].w != 0.0 && steppedPixel(inb, d, zBody, ppB, zpB)) {
+                    pp = ppB;
+                    zPred = zpB;
+                    world = 5;
+                }
+            } else if (inb == 255 && bodyPixel(d, zBody, ppB, zpB)) {
                 pp = ppB;
                 zPred = zpB;
                 world = 2;
@@ -602,7 +618,7 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
     // Three counters, not forty. This pass writes 15, 16 and 17 and no
     // others, and a forty-element local array costs forty registers of
     // occupancy on a dispatch that covers the whole eye.
-    uint count15 = 0, count16 = 0, count17 = 0, count28 = 0, count29 = 0, count39 = 0, count46 = 0;
+    uint count15 = 0, count16 = 0, count17 = 0, count28 = 0, count29 = 0, count39 = 0, count46 = 0, count47 = 0;
     uint count40 = 0, count41 = 0, count42 = 0, count43 = 0, count45 = 0;
     int count44 = 0;
     if (id.x < (uint)size.x && id.y < (uint)size.y) {
@@ -681,17 +697,24 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
                     }
                 }
                 if (!taken && tvSt.w != 0.0) {
-                    int inb = insideBody(d, zBody);   // 2 = the second body's cells (bodyPixel2)
+                    int inb = insideBody(d, zBody);   // 128 = the second body's cells, 64..75 a stepped part's
                     float2 ppB;
                     float zpB;
-                    if (inb == 2) {
+                    if (inb == 128) {
                         if (tv2St.w != 0.0 && bodyPixel2(d, zBody, ppB, zpB)) {
                             pp = ppB;
                             motion = pp - p;
                             zPred = zpB;
                             count46 = 1;
                         }
-                    } else if (inb == 1 && bodyPixel(d, zBody, ppB, zpB)) {
+                    } else if (inb >= 64 && inb < 76) {
+                        if (tv3[0].w != 0.0 && steppedPixel(inb, d, zBody, ppB, zpB)) {
+                            pp = ppB;
+                            motion = pp - p;
+                            zPred = zpB;
+                            count47 = 1;
+                        }
+                    } else if (inb == 255 && bodyPixel(d, zBody, ppB, zpB)) {
                         pp = ppB;
                         motion = pp - p;
                         zPred = zpB;
@@ -844,6 +867,8 @@ R"HLSL(
                 o5 = float3(1.0, 1.0, 1.0);
             } else if (count46 != 0) {
                 o5 = float3(0.7, 0.7, 0.7);   // grey: the second body's path (object_probe.h)
+            } else if (count47 != 0) {
+                o5 = float3(1.0, 0.55, 0.0);   // orange: a stepped part on its own multiple of the turn (object_probe.h)
             } else if (count15 != 0 && (tvSt.w != 0.0 || ships.x != 0.0)) {
                 // In a moving ship's footprint but not the ship's: teal with
                 // no depth at all, magenta with a depth the claim refused
@@ -879,6 +904,7 @@ R"HLSL(
     if (count28 != 0) InterlockedAdd(gCount[28], count28);
     if (count29 != 0) InterlockedAdd(gCount[29], count29);
     if (count46 != 0) InterlockedAdd(gCount[46], count46);
+    if (count47 != 0) InterlockedAdd(gCount[47], count47);
     if (count39 != 0) InterlockedAdd(gCount[39], count39);
     if (count40 != 0) InterlockedAdd(gCount[40], count40);
     if (count41 != 0) InterlockedAdd(gCount[41], count41);
@@ -998,6 +1024,7 @@ void main(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
                 if (worldTaken != 0) count[15] = 1;
                 if (worldTaken == 2) count[29] = 1;   // the body's path taken
                 if (worldTaken == 4) count[46] = 1;   // the second body's
+                if (worldTaken == 5) count[47] = 1;   // a stepped part's
                 if (worldTaken == 3) count[39] = 1;   // a moving ship's
                 // The mover mask (moverAt says): a masked pixel keeps less
                 // of its history, by the strength -- at 1 it is the fresh
@@ -1157,6 +1184,7 @@ R"HLSL(
             // The objects view: the pixels that took the body's path.
             o = worldTaken == 2 ? float3(1.0, 1.0, 1.0)
               : worldTaken == 4 ? float3(0.7, 0.7, 0.7)   // the second body's path grey
+              : worldTaken == 5 ? float3(1.0, 0.55, 0.0)  // a stepped part's path orange
               : worldTaken == 3 ? float3(0.0, 1.0, 1.0) : cur.rgb * 0.25;   // a moving ship's path cyan
         } else if (split.y == 3.0) {
             // The depth view: where each pixel's depth comes from -- the
@@ -1378,6 +1406,8 @@ struct PassParams {
     float   st2_1[4];
     float   st2_2[4];
     float   tv2St[4];    // ...w 1 = on this frame
+    float   st3R[36][4]; // the stepped parts' twelve composite deltas (object_probe.h), three rows each
+    float   tv3[12][4];  // ...and their translation terms, w 1 = filled this frame
     float   objects[4];  // x the reach in metres, for the record
     float   wR0[4];      // this frame's camera rows, view -> world, with the position in w
     float   wR1[4];
@@ -1393,7 +1423,7 @@ struct PassParams {
     float   shParts[kObjectShipsMax * kObjectShipParts][4];   // its parts' positions, shBox0[i].w of them
     float   shRect[kObjectShipsMax][4];    // its box's footprint on the image, pixels
 };
-static_assert(sizeof(PassParams) == 5840, "the cbuffer is 365 16-byte rows");
+static_assert(sizeof(PassParams) == 6608, "the cbuffer is 413 16-byte rows");
 
 // The format allowlist: the supersample resolve's, for its reasons
 // (supersample_pass.cpp) -- typeless and UNORM families read and written
@@ -1751,6 +1781,8 @@ uint64_t g_moverPix = 0;   // pixels the mover mask set this interval (Stats[28]
 uint64_t g_bodyPix = 0;    // pixels that took the body's path this interval (Stats[29]; tier 2)
 uint64_t g_body2Pix = 0;   // ...the second body's (Stats[46]; object_probe.h, 2026-09-09)
 uint64_t g_body2Frames = 0;   // frames the second body's path was on
+uint64_t g_steppedPix = 0;    // ...a stepped part's (Stats[47]; object_probe.h, 2026-09-09)
+uint64_t g_steppedFrames = 0; // frames with stepped cells stamped
 uint64_t g_shipPix = 0;    // pixels that took a moving ship's path this interval (Stats[39]; 2026-09-09)
 uint64_t g_shipFoot = 0;         // ...and in a ship's footprint with a depth, not claimed (Stats[40])
 uint64_t g_shipOutBox = 0;       // of those, outside the box at their depth (41)
@@ -1813,6 +1845,7 @@ void pollSlots(ID3D11DeviceContext* ctx) {
                 g_moverPix += v[28];
                 g_bodyPix += v[29];
                 g_body2Pix += v[46];
+                g_steppedPix += v[47];
                 g_shipPix += v[39];
                 g_shipFoot += v[40];
                 g_shipOutBox += v[41];
@@ -2207,6 +2240,64 @@ bool ensureBodyGrid(ID3D11Device* dev, ID3D11DeviceContext* ctx, const ObjectMot
         g_bodyGridVersion = om.gridVersion;
     }
     return true;
+}
+
+// THE STEPPED PARTS' cells (object_probe.h): this frame's stamps over the
+// worker's grid, uploaded as the box that holds them -- a few kilobytes a
+// frame against the grid's two megabytes -- widened to last frame's box so
+// the cells stamped then and not now go back to the worker's bytes.
+D3D11_BOX g_steppedBox = {};
+bool g_steppedBoxValid = false;
+std::vector<uint8_t> g_steppedScratch;
+void applySteppedCells(ID3D11DeviceContext* ctx, const ObjectMotion& om, const SteppedCell* cells, uint32_t n) {
+    if (!g_bodyGrid || !om.grid) return;
+    const uint32_t gn = kObjectGrid;
+    D3D11_BOX box{};
+    if (n) {
+        uint32_t lo[3] = {gn, gn, gn}, hi[3] = {0, 0, 0};
+        for (uint32_t i = 0; i < n; ++i) {
+            const uint32_t c[3] = {cells[i].index % gn, (cells[i].index / gn) % gn, cells[i].index / (gn * gn)};
+            for (int k = 0; k < 3; ++k) {
+                if (c[k] < lo[k]) lo[k] = c[k];
+                if (c[k] > hi[k]) hi[k] = c[k];
+            }
+        }
+        box.left = lo[0]; box.right = hi[0] + 1;
+        box.top = lo[1]; box.bottom = hi[1] + 1;
+        box.front = lo[2]; box.back = hi[2] + 1;
+        if (g_steppedBoxValid) {
+            if (g_steppedBox.left < box.left) box.left = g_steppedBox.left;
+            if (g_steppedBox.right > box.right) box.right = g_steppedBox.right;
+            if (g_steppedBox.top < box.top) box.top = g_steppedBox.top;
+            if (g_steppedBox.bottom > box.bottom) box.bottom = g_steppedBox.bottom;
+            if (g_steppedBox.front < box.front) box.front = g_steppedBox.front;
+            if (g_steppedBox.back > box.back) box.back = g_steppedBox.back;
+        }
+    } else if (g_steppedBoxValid) {
+        box = g_steppedBox;
+    } else {
+        return;
+    }
+    const uint32_t w = box.right - box.left, h = box.bottom - box.top, d = box.back - box.front;
+    if (!w || !h || !d || box.right > gn || box.bottom > gn || box.back > gn) { g_steppedBoxValid = false; return; }
+    g_steppedScratch.resize(static_cast<size_t>(w) * h * d);
+    for (uint32_t z = 0; z < d; ++z) {
+        for (uint32_t y = 0; y < h; ++y) {
+            memcpy(&g_steppedScratch[(static_cast<size_t>(z) * h + y) * w],
+                   om.grid + (static_cast<size_t>(box.front + z) * gn + (box.top + y)) * gn + box.left, w);
+        }
+    }
+    for (uint32_t i = 0; i < n; ++i) {
+        const uint32_t x = cells[i].index % gn, y = (cells[i].index / gn) % gn, z = cells[i].index / (gn * gn);
+        g_steppedScratch[(static_cast<size_t>(z - box.front) * h + (y - box.top)) * w + (x - box.left)] = cells[i].value;
+    }
+    ctx->UpdateSubresource(g_bodyGrid, 0, &box, g_steppedScratch.data(), w, w * h);
+    if (n) {
+        g_steppedBox = box;
+        g_steppedBoxValid = true;
+    } else {
+        g_steppedBoxValid = false;
+    }
 }
 
 // A shader view over the interface's coverage mask (ui_depth.h), cached
@@ -3399,6 +3490,66 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     for (int i = 0; i < 3; ++i) p.tv2St[i] = tv2[i];
                     p.tv2St[3] = 1.0f;
                     ++g_body2Frames;
+                }
+                // THE STEPPED PARTS' table (object_probe.h): the body's path
+                // for every multiple m of its turn from kSteppedMin to
+                // kSteppedMax, composed as the body's own is. The turn's axis
+                // point c and its axial part come from the body's own (R, t):
+                // t = (I - R) c + t_par with c = t_perp / 2 + sin / (2 - 2 cos)
+                // (axis x t_perp), so the m-th is (I - R^m) c + m t_par, and
+                // m = 1 gives t back.
+                {
+                    const float th = sqrtf(wF[0] * wF[0] + wF[1] * wF[1] + wF[2] * wF[2]);
+                    float ah[3] = {0.0f, 0.0f, 0.0f}, tPar[3] = {0.0f, 0.0f, 0.0f}, cAx[3] = {0.0f, 0.0f, 0.0f};
+                    if (th > 1e-7f) {
+                        for (int k = 0; k < 3; ++k) ah[k] = wF[k] / th;
+                        const float along = tF[0] * ah[0] + tF[1] * ah[1] + tF[2] * ah[2];
+                        float tPerp[3];
+                        for (int k = 0; k < 3; ++k) {
+                            tPar[k] = along * ah[k];
+                            tPerp[k] = tF[k] - tPar[k];
+                        }
+                        const float cx[3] = {ah[1] * tPerp[2] - ah[2] * tPerp[1], ah[2] * tPerp[0] - ah[0] * tPerp[2],
+                                             ah[0] * tPerp[1] - ah[1] * tPerp[0]};
+                        const float den = 2.0f - 2.0f * cosf(th);
+                        const float sn = sinf(th);
+                        for (int k = 0; k < 3; ++k) cAx[k] = 0.5f * tPerp[k] + (den > 1e-12f ? sn / den * cx[k] : 0.0f);
+                    } else {
+                        for (int k = 0; k < 3; ++k) tPar[k] = tF[k];
+                    }
+                    for (int m = kSteppedMin; m <= kSteppedMax; ++m) {
+                        const int e = m - kSteppedMin;
+                        const float fm = static_cast<float>(m);
+                        const float wM[3] = {wF[0] * fm, wF[1] * fm, wF[2] * fm};
+                        float RM[9];
+                        temporalRodrigues(wM, RM);
+                        float tMs[3];
+                        for (int k = 0; k < 3; ++k) {
+                            const float rc = RM[k * 3 + 0] * cAx[0] + RM[k * 3 + 1] * cAx[1] + RM[k * 3 + 2] * cAx[2];
+                            const float rs = RM[k * 3 + 0] * bodyShift[0] + RM[k * 3 + 1] * bodyShift[1] +
+                                             RM[k * 3 + 2] * bodyShift[2];
+                            tMs[k] = (cAx[k] - rc + tPar[k] * fm) + bodyShift[k] - rs;
+                        }
+                        float WM[9], tvM[3];
+                        if (!carriedRows) {
+                            temporalBodyPath(g_prevRows, g_curRows, RM, tMs, WM, tvM);
+                        } else {
+                            temporalBodyPathCarried(g_prevRows, RM, tMs, worldDelta, tvCam, WM, tvM);
+                        }
+                        for (int r = 0; r < 3; ++r) {
+                            for (int c = 0; c < 3; ++c) p.st3R[e * 3 + r][c] = WM[r * 3 + c];
+                            p.st3R[e * 3 + r][3] = 0.0f;
+                        }
+                        for (int k = 0; k < 3; ++k) p.tv3[e][k] = tvM[k];
+                        p.tv3[e][3] = 1.0f;
+                    }
+                }
+                // ...and their cells this frame, stamped over the grid.
+                {
+                    const SteppedCell* cells = nullptr;
+                    const uint32_t nCells = objectSteppedCells(&cells);
+                    applySteppedCells(ctx, om, cells, nCells);
+                    if (nCells) ++g_steppedFrames;
                 }
                 bodyOn = true;
                 g_bodyLast = om;
@@ -5065,6 +5216,13 @@ bool temporalPassRegistration(char* buf, size_t n, char* buf2, size_t n2, char* 
                           g_bodyLast.records2, static_cast<double>(temporalRotationAngleDeg(g_bodyLast.R2)),
                           static_cast<unsigned long long>(g_body2Frames));
             }
+            if (g_steppedPix || g_steppedFrames) {
+                regAppend(buf, n, used,
+                          "; the stepped parts (updated by the game at a lower rate; object_probe.h) took %.2f%% of "
+                          "pixels on their own multiples of the turn, cells stamped on %llu frames",
+                          100.0 * static_cast<double>(g_steppedPix) / static_cast<double>(g_intervalPix),
+                          static_cast<unsigned long long>(g_steppedFrames));
+            }
         } else {
             regAppend(buf, n, used, "; the body's path is on but no body is in hand (no pool, or no pair yet)");
         }
@@ -5214,6 +5372,8 @@ bool temporalPassRegistration(char* buf, size_t n, char* buf2, size_t n2, char* 
     g_bodyPix = 0;
     g_body2Pix = 0;
     g_body2Frames = 0;
+    g_steppedPix = 0;
+    g_steppedFrames = 0;
     g_shipPix = 0;
     g_shipFoot = g_shipOutBox = g_shipBehind = g_shipFar = g_shipFootNoDepth = 0;
     g_shipOutBoxDm = 0;

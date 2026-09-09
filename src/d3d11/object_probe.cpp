@@ -44,9 +44,10 @@ constexpr uint32_t kPairEvery = 8;       // a frame PAIR is copied every this ma
 // rates divide by the pair's own interval, so nothing downstream changes
 // but the per-pair thresholds, which a doubled motion meets more easily.
 constexpr uint32_t kPairSpan = 2;
-constexpr uint32_t kReadAfter = 3;       // frames before a copy is asked for (never waited on)
+constexpr uint32_t kReadAfter = 2;       // frames before a copy is asked for (never waited on); two, so a
+                                         // stepped part's multiple (trackFrame) is a frame fresher
 constexpr uint32_t kDropAfter = 30;      // ...and after which a copy still in flight is given up
-constexpr int      kRing = 4;
+constexpr int      kRing = 6;            // a copy a frame (the stepped parts), two to three in flight
 constexpr uint64_t kReportMs = 20000;
 constexpr float    kRotQuantDeg = 0.01f; // the design's tolerance: a hundredth of a degree
 constexpr uint32_t kAbsentFrames = 600;  // frames with the probe on and no pool before saying so
@@ -161,6 +162,9 @@ uint32_t g_body2LastRecords = 0;
 float    g_body2LastDeg = 0.0f;
 float    g_body2LastRelDeg = 0.0f;   // its turn's difference from the body's, degrees a pair
 uint64_t g_body2Pairs = 0, g_body2HeldPairs = 0, g_body2Fragments = 0;
+constexpr uint32_t kBody2Confirm = 3;   // consistent pairs before a second body is taken (the stepped parts alternate)
+uint32_t g_body2Streak = 0;
+float    g_body2LastW[3] = {};
 // Moving ships (object_probe.h, takeShips): taken within this of the
 // camera (the pass's setting), held this long past their pair -- three
 // pair intervals, so a pair that lost a ship to a slot shuffle does not
@@ -457,7 +461,7 @@ struct Slot {
     float    camPass[3] = {};  // the pass's chosen camera when the copy was issued (objectProbeNoteCamera)
     bool     camPassValid = false;
     bool     inUse = false;
-    bool     keep = false;   // the first of a pair: its bytes are kept for the second
+    uint8_t  role = 0;       // 0 a frame's own copy (the stepped parts: trackFrame), 1 the pair's first (kept), 2 its second (diffed)
 };
 float g_camPass[3] = {};
 bool  g_camPassValid = false;
@@ -1419,7 +1423,26 @@ void diffPair(const uint8_t* prev, const uint8_t* now, uint32_t bytes, float dtM
                                 const float wn = sqrtf(w[0] * w[0] + w[1] * w[1] + w[2] * w[2]);
                                 const bool ownTurn = rel >= 0.25f * wn + 6e-5f;
                                 if (!ownTurn) ++g_body2Fragments;
-                                if (ownTurn && deg2 >= kMotionMinDeg && deg2 <= kMotionMaxDeg && m2 <= kMotionMaxM) {
+                                // ...and turns the same way it did on kBody2Confirm pairs
+                                // running: a part the game updates at a lower rate steps
+                                // and alternates from pair to pair (the stepped parts,
+                                // object_probe.h) and must not be taken for a body.
+                                bool steady2 = false;
+                                if (ownTurn) {
+                                    const float sx = w2[0] - g_body2LastW[0], sy = w2[1] - g_body2LastW[1],
+                                                sz = w2[2] - g_body2LastW[2];
+                                    const float w2n = sqrtf(w2[0] * w2[0] + w2[1] * w2[1] + w2[2] * w2[2]);
+                                    if (g_body2Streak > 0 && sqrtf(sx * sx + sy * sy + sz * sz) <= 0.25f * w2n + 6e-5f) {
+                                        ++g_body2Streak;
+                                    } else {
+                                        g_body2Streak = 1;
+                                    }
+                                    memcpy(g_body2LastW, w2, sizeof(g_body2LastW));
+                                    steady2 = g_body2Streak >= kBody2Confirm;
+                                } else {
+                                    g_body2Streak = 0;
+                                }
+                                if (steady2 && deg2 >= kMotionMinDeg && deg2 <= kMotionMaxDeg && m2 <= kMotionMaxM) {
                                     g_body2LastRelDeg = rel * 57.2957795f;
                                     // Continuity against its own last centroid, else a new ring.
                                     bool same2 = g_lastRel2Valid && g_body2Hold > 0;
@@ -1748,6 +1771,21 @@ void report() {
             static_cast<double>(g_body2ReachM), static_cast<unsigned long long>(g_body2Fragments));
     }
     g_body2Pairs = g_body2HeldPairs = g_body2Fragments = 0;
+    if (g_stTrackFrames) {
+        const double f = static_cast<double>(g_stTrackFrames);
+        Log::get().note(
+            "object probe, the stepped parts: over %llu frames, %.1f records a frame at the station turned by "
+            "something other than the body's turn every frame -- %.1f with a period of two frames, %.1f steady "
+            "on one multiple (nought for a part holding still), %.1f irregular -- and their next multiple was "
+            "predicted right on %.0f%% of %llu checks; the tracking took %.2f ms a frame.",
+            static_cast<unsigned long long>(g_stTrackFrames), static_cast<double>(g_stStepped) / f,
+            static_cast<double>(g_stPeriod2) / f, static_cast<double>(g_stSteady) / f,
+            static_cast<double>(g_stIrregular) / f,
+            g_stPredicted ? 100.0 * static_cast<double>(g_stHit) / static_cast<double>(g_stPredicted) : 0.0,
+            static_cast<unsigned long long>(g_stPredicted), g_stMsSum / f);
+    }
+    g_stTrackFrames = g_stStepped = g_stPeriod2 = g_stSteady = g_stIrregular = g_stPredicted = g_stHit = 0;
+    g_stMsSum = 0.0;
     g_shipPairs = g_shipsTaken = g_shipsOutOfRange = g_shipsSlices = 0;
     g_shipsOwn = 0;
     g_shipsStill = g_shipsUnfit = g_shipsOverCap = g_shipsFew = 0;
@@ -1810,7 +1848,7 @@ bool ensureSlot(ID3D11DeviceContext* ctx, Slot& s) {
     return ok;
 }
 
-void issueCopy(ID3D11DeviceContext* ctx, bool keep) {
+void issueCopy(ID3D11DeviceContext* ctx, uint8_t role) {
     for (Slot& s : g_ring) {
         if (s.inUse) continue;
         if (!ensureSlot(ctx, s)) { ++g_skipped; return; }
@@ -1821,7 +1859,7 @@ void issueCopy(ID3D11DeviceContext* ctx, bool keep) {
         memcpy(s.camPass, g_camPass, sizeof(s.camPass));
         s.camPassValid = g_camPassValid;
         s.inUse = true;
-        s.keep = keep;
+        s.role = role;
         return;
     }
     ++g_skipped;
@@ -1918,6 +1956,167 @@ void stopWorker() {
     g_jobRunning = false;
 }
 
+// THE STEPPED PARTS (object_probe.h says what they are). Every frame's
+// copy, read back kReadAfter frames on, is compared with the frame before
+// it: each live record at the station turns about the body's axis by some
+// multiple of the body's own turn that frame -- one for a part the game
+// updates every frame, nought or two or more for one it updates less
+// often, minus one when it steps back to an older buffered pose. The
+// multiple's history per slot says what the part will do on the frame the
+// pass is about to draw: a stepping part repeats with a period of two, so
+// the prediction is the entry of the same parity; a part that has kept
+// one multiple keeps it; an irregular one gets the mean. Their cells are
+// stamped with the prediction for the pass (objectSteppedCells). A part
+// that has turned the body's turn on every frame it was seen is the
+// body's, and its cells are left alone.
+constexpr uint32_t kMHist = 8;
+constexpr float    kMAxisSlack = 0.35f;   // of the body's turn: a turn off the body's axis is no multiple of it
+std::vector<uint8_t>  g_lastBytes;        // the frame before's copy
+uint32_t g_lastBytesFrame = 0;
+double   g_lastBytesStamp = 0.0;
+std::vector<int8_t>   g_mHist;            // n * kMHist, [i * kMHist] the newest; 127 = no entry
+std::vector<int8_t>   g_mPred;            // the prediction made per slot, for g_mPredFrame; 127 = none
+std::vector<uint32_t> g_mPredFrame;
+std::vector<SteppedCell> g_steppedCells;
+uint64_t g_stTrackFrames = 0, g_stStepped = 0, g_stPeriod2 = 0, g_stSteady = 0, g_stIrregular = 0;
+uint64_t g_stPredicted = 0, g_stHit = 0;
+double   g_stMsSum = 0.0;
+
+void trackFrame(const uint8_t* bytes, uint32_t nbytes, uint32_t frame, double stampMs) {
+    const uint32_t n = nbytes / kRecordBytes;
+    const bool consecutive = !g_lastBytes.empty() && g_lastBytes.size() == nbytes && g_lastBytesFrame + 1 == frame;
+    if (g_mHist.size() != static_cast<size_t>(n) * kMHist || !consecutive) {
+        g_mHist.assign(static_cast<size_t>(n) * kMHist, 127);
+        g_mPred.assign(n, 127);
+        g_mPredFrame.assign(n, 0);
+    }
+    g_steppedCells.clear();
+    ObjectMotion om;
+    const bool haveBody = objectMotionGet(&om) && om.grid != nullptr;
+    if (consecutive && haveBody) {
+        const double t0 = qpcMs();
+        float dt = static_cast<float>(stampMs - g_lastBytesStamp);
+        if (dt < 5.0f || dt > 50.0f) dt = 11.1f;
+        const float wb[3] = {om.omegaPerMs[0] * dt, om.omegaPerMs[1] * dt, om.omegaPerMs[2] * dt};
+        const float wbn2 = wb[0] * wb[0] + wb[1] * wb[1] + wb[2] * wb[2];
+        const float cell = (om.bmax[0] - om.bmin[0]) / static_cast<float>(kObjectGrid);
+        const int gn = static_cast<int>(kObjectGrid);
+        if (wbn2 > 1e-12f && cell > 0.0f) {
+            // The frame the pass draws next is g_frame; this copy is `frame`.
+            const uint32_t parity = (g_frame - frame) & 1u;
+            uint32_t stepped = 0, p2 = 0, steady = 0, irr = 0;
+            for (uint32_t i = 0; i < n; ++i) {
+                const uint8_t* a = g_lastBytes.data() + static_cast<size_t>(i) * kRecordBytes;
+                const uint8_t* b = bytes + static_cast<size_t>(i) * kRecordBytes;
+                int8_t* h = &g_mHist[static_cast<size_t>(i) * kMHist];
+                if (emptyRecord(a) || emptyRecord(b)) {
+                    for (uint32_t k = 0; k < kMHist; ++k) h[k] = 127;
+                    continue;
+                }
+                const Pose pb = decodePose(b);
+                bool inBox = true;
+                int c[3];
+                for (int k = 0; k < 3; ++k) {
+                    if (pb.p[k] < om.bmin[k] || pb.p[k] >= om.bmax[k]) inBox = false;
+                    const int idx = static_cast<int>((pb.p[k] - om.bmin[k]) / cell);
+                    c[k] = idx < 0 ? 0 : (idx >= gn ? gn - 1 : idx);
+                }
+                const float dx = pb.p[0] - om.camPos[0], dy = pb.p[1] - om.camPos[1], dz = pb.p[2] - om.camPos[2];
+                if (!inBox || dx * dx + dy * dy + dz * dz < kBodyNearM * kBodyNearM) {
+                    for (uint32_t k = 0; k < kMHist; ++k) h[k] = 127;
+                    continue;
+                }
+                int m;
+                if (memcmp(a + 4, b + 4, 24) == 0) {   // scale, quaternion, position: the pose held
+                    m = 0;
+                } else {
+                    const Pose pa = decodePose(a);
+                    float qd[4];
+                    quatMulConj(pa.q, pb.q, qd);
+                    if (qd[3] < 0.0f) {
+                        for (int k = 0; k < 4; ++k) qd[k] = -qd[k];
+                    }
+                    const float xyz = sqrtf(qd[0] * qd[0] + qd[1] * qd[1] + qd[2] * qd[2]);
+                    float rv[3] = {0.0f, 0.0f, 0.0f};
+                    if (xyz > 1e-9f) {
+                        const float ang = 2.0f * atan2f(xyz, qd[3]);
+                        for (int k = 0; k < 3; ++k) rv[k] = qd[k] / xyz * ang;
+                    }
+                    const float proj = (rv[0] * wb[0] + rv[1] * wb[1] + rv[2] * wb[2]) / wbn2;
+                    const float ex = rv[0] - proj * wb[0], ey = rv[1] - proj * wb[1], ez = rv[2] - proj * wb[2];
+                    if (ex * ex + ey * ey + ez * ez > kMAxisSlack * kMAxisSlack * wbn2 + 1e-10f) {
+                        for (uint32_t k = 0; k < kMHist; ++k) h[k] = 127;   // not about the body's axis
+                        ++irr;
+                        continue;
+                    }
+                    m = static_cast<int>(floorf(proj + 0.5f));
+                    if (m < kSteppedMin) m = kSteppedMin;
+                    if (m > kSteppedMax) m = kSteppedMax;
+                }
+                if (g_mPred[i] != 127 && g_mPredFrame[i] == frame) {
+                    ++g_stPredicted;
+                    if (g_mPred[i] == m) ++g_stHit;
+                }
+                for (uint32_t k = kMHist - 1; k > 0; --k) h[k] = h[k - 1];
+                h[0] = static_cast<int8_t>(m);
+                int have = 0;
+                for (uint32_t k = 0; k < kMHist; ++k) {
+                    if (h[k] == 127) break;
+                    ++have;
+                }
+                if (have < 4) continue;
+                bool allOne = true, allSame = true, per2 = true;
+                for (int k = 0; k < have; ++k) {
+                    if (h[k] != 1) allOne = false;
+                    if (h[k] != h[0]) allSame = false;
+                }
+                for (int k = 2; k < have; ++k) {
+                    if (h[k] != h[k - 2]) per2 = false;
+                }
+                if (allOne) continue;   // the body's own: every frame, the body's turn
+                int pred;
+                if (allSame) {
+                    pred = h[0];
+                    ++steady;
+                } else if (per2) {
+                    pred = h[parity];
+                    ++p2;
+                } else {
+                    int sum = 0;
+                    for (int k = 0; k < have; ++k) sum += h[k];
+                    pred = static_cast<int>(floorf(static_cast<float>(sum) / static_cast<float>(have) + 0.5f));
+                    ++irr;
+                }
+                if (pred < kSteppedMin) pred = kSteppedMin;
+                if (pred > kSteppedMax) pred = kSteppedMax;
+                g_mPred[i] = static_cast<int8_t>(pred);
+                g_mPredFrame[i] = g_frame;
+                ++stepped;
+                const uint8_t v = static_cast<uint8_t>(kSteppedCellBase + (pred - kSteppedMin));
+                for (int z = c[2] - 1; z <= c[2] + 1; ++z) {
+                    if (z < 0 || z >= gn) continue;
+                    for (int y = c[1] - 1; y <= c[1] + 1; ++y) {
+                        if (y < 0 || y >= gn) continue;
+                        for (int x = c[0] - 1; x <= c[0] + 1; ++x) {
+                            if (x < 0 || x >= gn) continue;
+                            g_steppedCells.push_back({static_cast<uint32_t>((z * gn + y) * gn + x), v});
+                        }
+                    }
+                }
+            }
+            ++g_stTrackFrames;
+            g_stStepped += stepped;
+            g_stPeriod2 += p2;
+            g_stSteady += steady;
+            g_stIrregular += irr;
+        }
+        g_stMsSum += qpcMs() - t0;
+    }
+    g_lastBytes.assign(bytes, bytes + nbytes);
+    g_lastBytesFrame = frame;
+    g_lastBytesStamp = stampMs;
+}
+
 void poll(ID3D11DeviceContext* ctx) {
     // In frame order, so a pair's first copy is kept before its second is
     // diffed against it.
@@ -1948,7 +2147,8 @@ void poll(ID3D11DeviceContext* ctx) {
             scene = static_cast<const uint8_t*>(ms.pData);
             sceneBytes = s->sceneBytes;
         }
-        if (s->keep) {
+        trackFrame(bytes, s->bytes, s->frame, s->stampMs);
+        if (s->role == 1) {
             g_keep.assign(bytes, bytes + s->bytes);
             g_keepScene.assign(scene, scene + sceneBytes);
             g_keepFrame = s->frame;
@@ -1956,7 +2156,7 @@ void poll(ID3D11DeviceContext* ctx) {
             g_keepValid = true;
             g_keepCamValid = s->camPassValid;
             if (s->camPassValid) memcpy(g_keepCam, s->camPass, sizeof(g_keepCam));
-        } else if (g_keepValid && g_keepFrame + kPairSpan == s->frame && g_keep.size() == s->bytes) {
+        } else if (s->role == 2 && g_keepValid && g_keepFrame + kPairSpan == s->frame && g_keep.size() == s->bytes) {
             // The camera's position in the record's frame, for the ship-radius
             // exclusion and the pair's frame stamp: the pass's chosen camera
             // when this copy was issued (objectProbeNoteCamera), which is the
@@ -1998,7 +2198,7 @@ void poll(ID3D11DeviceContext* ctx) {
                     kDumpMax, static_cast<unsigned>(kDumpEveryMs / 1000));
             }
             g_keepValid = false;
-        } else {
+        } else if (s->role == 2) {
             ++g_skipped;
             g_keepValid = false;
         }
@@ -2038,6 +2238,11 @@ void objectProbeNoteCamera(const float pos[3]) {
 void objectMotionSetReach(float metres) {
     if (!std::isfinite(metres)) return;
     g_reachM = metres < 1.0f ? 1.0f : (metres > 2000.0f ? 2000.0f : metres);
+}
+
+uint32_t objectSteppedCells(const SteppedCell** cells) {
+    *cells = g_steppedCells.empty() ? nullptr : g_steppedCells.data();
+    return static_cast<uint32_t>(g_steppedCells.size());
 }
 
 uint32_t objectShipsGet(ObjectShip* out, uint32_t cap, float camPos[3], uint32_t* age) {
@@ -2179,12 +2384,12 @@ void objectProbeFrameBoundary(ID3D11DeviceContext* ctx) {
     guardedBudget(g_budget, [&] {
         if (g_pool) {
             g_framesWithoutPool = 0;
-            // The pair's two copies, kPairSpan frames apart from an
+            // A copy EVERY frame for the stepped parts (trackFrame), two of
+            // which are the pair's, kPairSpan frames apart from an
             // alternating start (kPairSpan says why).
             const uint32_t phase = g_frame % kPairEvery;
             const uint32_t base = (g_frame / kPairEvery) & 1u;
-            if (phase == base) issueCopy(ctx, true);
-            else if (phase == base + kPairSpan) issueCopy(ctx, false);
+            issueCopy(ctx, phase == base ? 1 : (phase == base + kPairSpan ? 2 : 0));
             poll(ctx);
         } else if (++g_framesWithoutPool == kAbsentFrames && !g_absentNoted && g_verbose) {
             g_absentNoted = true;
