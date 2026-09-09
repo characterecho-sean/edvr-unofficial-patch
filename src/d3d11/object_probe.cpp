@@ -518,8 +518,8 @@ int clusterOf(Cluster* cs, int* n, const float qd[4], const float t[3], float an
         // station's parts split into a hundred or two clusters of one (the
         // review of 2026-09-09 emulated it: 51-60% in the largest cluster
         // at a station's rate, 135-194 clusters).
-        const float dx = qd[0] - c.q[0], dy = qd[1] - c.q[1], dz = qd[2] - c.q[2];
-        if (dx * dx + dy * dy + dz * dz > kClusterHalfRad2) continue;
+        const float qx = qd[0] - c.q[0], qy = qd[1] - c.q[1], qz = qd[2] - c.q[2];
+        if (qx * qx + qy * qy + qz * qz > kClusterHalfRad2) continue;
         const float dx = t[0] - c.t[0], dy = t[1] - c.t[1], dz = t[2] - c.t[2];
         if (sqrtf(dx * dx + dy * dy + dz * dz) > posTol) continue;
         ++c.count;
