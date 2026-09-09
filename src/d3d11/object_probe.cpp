@@ -57,7 +57,7 @@ constexpr float    kMotionMaxRmsM = 0.5f;   // the rigid fit's residual: parts t
 ObjectMotion g_motion = {};
 bool     g_motionValid = false;
 uint32_t g_motionAge = 0;
-float    g_reachM = 1000.0f;
+float    g_reachM = 1500.0f;
 uint8_t  g_grid[kObjectGrid * kObjectGrid * kObjectGrid];
 uint32_t g_gridVersion = 0;
 float    g_gridCell = 0.0f;   // the lattice's cell, metres; 0 = not chosen yet

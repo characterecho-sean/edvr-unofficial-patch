@@ -2104,6 +2104,31 @@ which is this project's contract for every read of the game.
    fringe with the scene's, so the station under the glow reprojects at
    its own depth with only the turn unvectored there -- the lesser of
    the two, by the player's own words.
+
+   *Its eighteenth flight* (08:00, `v0.14.1-88-g089750d`), the verdict
+   dump at the hub. Two colours, two causes. The hub's drum is GREEN:
+   the interface's mask, which means a HUD element the size of the
+   drum is drawn over it -- the docking hologram's strokes, with the
+   docking granted -- and the pass kept the whole area off the body's
+   path for it; inside the green, patches of the frame dimmed, where
+   those strokes' cores carry their own near depth. The spine's cargo
+   blocks carry RED stripes on their outer faces: depth that lands
+   outside the cells. The blocks are recorded at the spine and reach
+   well over a kilometre out, past a thousand metres of reach; it is
+   now fifteen hundred (twelve cells here, 1536 to 1664 m), and the
+   rule is restated: the reach covers the farthest surface from any
+   record, whichever way the part hangs. For the HUD the third way of
+   three: the coverage marks and writes depth under a stroke's core
+   alone (alpha at seven tenths and over), and nothing under the glow,
+   so those pixels are the scene's with the scene's depth and the
+   scene's motion, the glow blended over them. The glow with the
+   stroke's own near depth smeared the station through it; the glow
+   with the scene's depth but marked and riding the turn made the
+   reticle swim; marked and held off the turn it smeared the drum
+   under the hologram. All three families drawn at the target ride the
+   body's path where their pixels sit on it; a core that sits near
+   reconstructs outside the cells and takes the camera's path whatever
+   the mask says.
 4. **Tier 2b** only if question 1 says no bits.
 5. **Tier 3** as `tools/` work against dumped frames, never on the hot
    path.

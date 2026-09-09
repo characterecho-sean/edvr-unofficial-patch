@@ -383,9 +383,8 @@ const char kHudDepthHlsl[] =
     "    float4 tc16 : TEXCOORD16;\n"
     "    float2 tc17 : TEXCOORD17;\n"
     "    float3 tc18 : TEXCOORD18;\n"
-    "    float4 pos : SV_Position;\n"
     "};\n"
-    "float4 main(In i, out float oDepth : SV_Depth) : SV_Target {\n"
+    "float4 main(In i) : SV_Target {\n"
     "    // The game's own depth test against the resolve at t0.\n"
     "    float2 uv = i.tc1.xy / i.tc1.z * 0.5 + 0.5;\n"
     "    float sceneZ = Depth.Sample(Smp1, float2(uv.x, 1.0 - uv.y)).x;\n"
@@ -410,15 +409,16 @@ const char kHudDepthHlsl[] =
     "    float q = nd * nd;\n"
     "    // The march's bound stands in for the march.\n"
     "    float a = opacity * saturate(1.0 - q / 0.35);\n"
-    "    clip(a - floorAndStrength.x);\n"
-    "    // The stroke's own depth under its core alone; its translucent\n"
-    "    // fringe keeps the scene's depth behind it (the resolve's value,\n"
-    "    // written back as it is). A target's reticle sits near, in front of\n"
-    "    // everything, and with its depth under the whole band the station\n"
-    "    // seen through the fringe reprojected as near and smeared around\n"
-    "    // the chevrons (the eye dumps of 2026-09-09). The mask is marked\n"
-    "    // under both, so the fringe stays reactive.\n"
-    "    oDepth = a >= 0.7 ? i.pos.z : sceneZ;\n"
+    "    // The stroke's core alone -- its depth and its mask -- and nothing\n"
+    "    // under the glow: those pixels are the scene's, with the scene's\n"
+    "    // depth and the scene's motion, the glow blended over them. The eye\n"
+    "    // dumps of 2026-09-09 tried the other two ways. With the glow given\n"
+    "    // the stroke's own near depth the station seen through it reprojected\n"
+    "    // as near and smeared; with the glow given the scene's depth but\n"
+    "    // marked (reactive, riding the station's turn) the reticle 'swam';\n"
+    "    // and marked but kept off that turn, the docking hologram's strokes\n"
+    "    // over the hub's drum kept the whole drum off it and smeared it.\n"
+    "    clip(a - max(floorAndStrength.x, 0.7));\n"
     "    return floorAndStrength.y;\n"
     "}\n";
 
@@ -554,8 +554,8 @@ DepthShader*             g_reissueShader = nullptr;
 // pixels the temporal pass keeps off a turning body's path -- a label at a
 // station's distance does not turn with it -- and three quanta of 255
 // under it for the families drawn AT the target that should ride that
-// path: the holo material's markers and the target-time sprite (the flight
-// HUD's strokes, the target's chevrons among them, tried it and swam). The
+// path: the flight HUD's strokes, the holo material's markers and the
+// target-time sprite -- their cores only; their glow is not marked. The
 // mask's value is the only way the pass can tell the two apart at a pixel,
 // three quanta read the same to NVIDIA, and the pass tests the mask
 // against the strength less a quantum and a half (temporal_pass.cpp,
@@ -1442,13 +1442,14 @@ bool uiDepthOnEyeDraw(ID3D11DeviceContext* ctx) {
         // depth over the station (2026-09-09). All three ride a turning
         // body's path (g_reissueMaskOffset says how).
         const bool hud = h == kFlightHud || h == kHoloPanel || h == kHudSprite;
-        // The flight HUD stays OFF a turning body's path: with its fringe
-        // riding it (2026-09-09 07:11) the reticle's glow moved with the
-        // station while its core did not, and the chevrons "swam". Its
-        // fringe keeps the scene's depth (kHudDepthHlsl), so the station
-        // under the glow reprojects at its own depth, the turn alone
-        // unvectored there.
-        g_reissueMaskOffset = (h == kHoloPanel || h == kHudSprite) ? -3.0f / 255.0f : 0.0f;
+        // All three ride a turning body's path where their pixels sit on it
+        // (a stroke drawn AT the surface -- the docking hologram over the
+        // hub's drum, 2026-09-09 08:03 -- turns with it); a stroke's core
+        // that sits near, the reticle's, reconstructs outside the body's
+        // cells and takes the camera's path whatever the mask says. Their
+        // glow is not marked at all now (kHudDepthHlsl), which is what
+        // settled the reticle's 'swim' and the drum's smear both.
+        g_reissueMaskOffset = hud ? -3.0f / 255.0f : 0.0f;
         const uint64_t ph = (hud || wantMask || wantLine) ? boundPsHash(ctx) : 0;
         DepthShader* shader = (hud || wantMask) ? depthShaderFor(ctx, ph, h, surfaceSlot) : nullptr;
         if (hud && shader) {
@@ -1478,8 +1479,9 @@ bool uiDepthOnEyeDraw(ID3D11DeviceContext* ctx) {
                        g_mode == Mode::kReissueScene
                            ? (h == kFlightHud
                                   ? "the flight HUD; its depth written by the coverage pass in the "
-                                    "scene's projection, under its strokes' cores, the scene's under "
-                                    "their fringe; its pixels stay off a turning body's path"
+                                    "scene's projection, under its strokes' cores alone (the glow "
+                                    "keeps the scene's); its pixels ride a turning body's path where "
+                                    "they sit on it"
                               : h == kHudSprite
                                   ? "the target-time sprite; its depth written by the coverage pass in "
                                     "the scene's projection, under its opaque core and not its fringe; "
