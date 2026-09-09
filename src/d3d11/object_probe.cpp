@@ -80,6 +80,11 @@ float    g_lastRel[3] = {};
 bool     g_lastRelValid = false;
 uint64_t g_otherBodyPairs = 0;
 uint64_t g_otherBodyNoteMs = 0;
+// The held rate's standing: how many pairs running have agreed with it
+// (diffPair says what a disagreeing pair does once three have).
+uint32_t g_rateAgreed = 0;
+uint64_t g_rateOutliers = 0;
+uint64_t g_rateOutlierNoteMs = 0;
 
 // The record's head, decoded the way the game's own shaders decode it
 // (fss_panel_vs.h: edvrDecodeQuat, the position at byte 16).
@@ -782,9 +787,40 @@ void diffPair(const uint8_t* prev, const uint8_t* now, uint32_t bytes, float dtM
                     }
                 }
                 const float a = blend ? 0.3f : 1.0f;
-                for (int k = 0; k < 3; ++k) {
-                    g_motion.omegaPerMs[k] = (1.0f - a) * g_motion.omegaPerMs[k] + a * wr[k];
-                    g_motion.tPerMs[k] = (1.0f - a) * g_motion.tPerMs[k] + a * tr[k];
+                // ...but a pair that disagrees with a rate the last three
+                // pairs agreed on, while the body is fresh, is the pair's own
+                // noise and not a new rate: the fitted turn per pair on
+                // 2026-09-09 ran 0.040 deg most of the time, 0.031-0.047 on
+                // others, and 0.076 over one 6.1 ms pair -- the game's step
+                // landing late -- and replacing the held rate with such a
+                // pair put vectors three times too long on the whole station
+                // for the frames until the next pair: "occasional flickers
+                // where the whole world object seems to blur". Such a pair
+                // keeps the held rates and gives its positions.
+                bool keepRates = false;
+                if (g_motionValid && !blend && g_rateAgreed >= 3 && g_motionAge < kBodyContinuityFrames) {
+                    keepRates = true;
+                    ++g_rateOutliers;
+                    if (dueMs(g_rateOutlierNoteMs, 30000)) {
+                        const float hn = sqrtf(g_motion.omegaPerMs[0] * g_motion.omegaPerMs[0] +
+                                               g_motion.omegaPerMs[1] * g_motion.omegaPerMs[1] +
+                                               g_motion.omegaPerMs[2] * g_motion.omegaPerMs[2]);
+                        const float nn = sqrtf(wr[0] * wr[0] + wr[1] * wr[1] + wr[2] * wr[2]);
+                        Log::get().note(
+                            "object probe: a pair's rate (%.4f deg over its %.1f ms, %.5f deg/ms) disagrees with "
+                            "the held %.5f deg/ms that %u pairs agreed on; the held rate is kept and the pair's "
+                            "positions taken. %llu such pairs so far.",
+                            static_cast<double>(fitDeg), static_cast<double>(dt), static_cast<double>(nn),
+                            static_cast<double>(hn), g_rateAgreed,
+                            static_cast<unsigned long long>(g_rateOutliers));
+                    }
+                }
+                if (!keepRates) {
+                    for (int k = 0; k < 3; ++k) {
+                        g_motion.omegaPerMs[k] = (1.0f - a) * g_motion.omegaPerMs[k] + a * wr[k];
+                        g_motion.tPerMs[k] = (1.0f - a) * g_motion.tPerMs[k] + a * tr[k];
+                    }
+                    g_rateAgreed = blend ? g_rateAgreed + 1 : 0;
                 }
                 g_motion.dtMs = dt;
                 g_motion.rms = rms;

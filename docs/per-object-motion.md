@@ -2155,6 +2155,27 @@ which is this project's contract for every read of the game.
    at one metre -- inside the ship split, so it reprojects with the head
    alone and holds still the way the game draws it. The pass gives
    ui_depth the depth value for a metre from the scene's own projection.
+
+   *Its twentieth flight* (09:13, `v0.14.1-90-g7a5ea1b`), with a dump
+   of the picture itself: the docking face crisp to its pad labels,
+   the outer ring and the far booms smeared along the turn. The log
+   has the reason in the fitted turns: 0.040 degrees a pair most of
+   the time, 0.031 to 0.047 on others at the same interval, and 0.076
+   over one pair of 6.1 ms -- the game's step landing late in a short
+   frame -- and the rule had been that a pair disagreeing with the
+   held rate by over thirty percent REPLACES it, as a new body. A late
+   step then put vectors three times too long on the whole station
+   until the next pair, and the outer ring, which moves the most, took
+   the worst of every wobble: the "occasional flickers where the whole
+   world object seems to blur", inside and out. A pair that disagrees
+   with a rate the last three pairs agreed on, while the body is under
+   sixty frames old, now keeps the held rate and gives only its
+   positions, and the log counts it. Seen with it: ships' contrails
+   over the station show red in the objects view -- they carry their
+   own depth, nearer than the station and outside its cells -- so the
+   station seen through a contrail takes the contrail's path and
+   smears under it. That is the translucency limit of a depth-owned
+   pixel, the same one the reticle's glow met, and it is left as it is.
 4. **Tier 2b** only if question 1 says no bits.
 5. **Tier 3** as `tools/` work against dumped frames, never on the hot
    path.
