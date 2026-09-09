@@ -1,5 +1,6 @@
 #include "object_probe.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -129,6 +130,23 @@ RatePair g_rateRing[kRateRing] = {};
 uint32_t g_rateRingN = 0;
 uint64_t g_rateOutliers = 0;
 uint64_t g_rateOutlierNoteMs = 0;
+// THE SECOND BODY's own (ObjectMotion::body2 says what it is): its rate
+// ring and last centroid for continuity, the pairs it is held over when a
+// pair does not find it, its parts' positions for the grid meanwhile, and
+// what the report says of it.
+constexpr uint32_t kBody2MinRecords = 40;
+constexpr float    kBody2NearM = 6000.0f;   // its centroid within this of the body's, camera-relative: the same structure
+constexpr uint32_t kBody2HoldPairs = 4;
+RatePair g_rateRing2[kRateRing] = {};
+uint32_t g_rateRing2N = 0;
+float    g_lastRel2[3] = {};
+bool     g_lastRel2Valid = false;
+uint32_t g_body2Hold = 0;
+std::vector<float> g_body2Pos;   // x y z per part, the last pair it was found
+float    g_body2ReachM = 0.0f;
+uint32_t g_body2LastRecords = 0;
+float    g_body2LastDeg = 0.0f;
+uint64_t g_body2Pairs = 0, g_body2HeldPairs = 0;
 // Moving ships (object_probe.h, takeShips): taken within this of the
 // camera (the pass's setting), held this long past their pair -- three
 // pair intervals, so a pair that lost a ship to a slot shuffle does not
@@ -207,9 +225,34 @@ Pose decodePose(const uint8_t* r) {
 // elsewhere falls outside the box. A station's parts are placed metres
 // apart and tens of metres across, so at sixty metres the slot's walls and
 // the rim read solid and the space between the arms stays empty.
+// The second body's reach around each of its parts: three times their
+// median spacing (a hub's skin pieces sit tens of metres apart), never
+// under two cells nor over the body's reach. Its parts are few, so the
+// pairwise pass is nothing.
+float body2Reach(const float* pos, int count, float cell) {
+    std::vector<float> nn(static_cast<size_t>(count), 1e30f);
+    for (int a = 0; a < count; ++a) {
+        const float* pa = pos + a * 3;
+        for (int b = a + 1; b < count; ++b) {
+            const float* pb = pos + b * 3;
+            const float dx = pa[0] - pb[0], dy = pa[1] - pb[1], dz = pa[2] - pb[2];
+            const float d2 = dx * dx + dy * dy + dz * dz;
+            if (d2 < nn[static_cast<size_t>(a)]) nn[static_cast<size_t>(a)] = d2;
+            if (d2 < nn[static_cast<size_t>(b)]) nn[static_cast<size_t>(b)] = d2;
+        }
+    }
+    std::vector<float> sorted(nn);
+    std::sort(sorted.begin(), sorted.end());
+    float reach = 3.0f * sqrtf(sorted[sorted.size() / 2]);
+    if (reach < 2.0f * cell) reach = 2.0f * cell;
+    if (reach > g_reachM) reach = g_reachM;
+    return reach;
+}
+
 void buildGrid(const uint8_t* now, uint32_t n, const std::vector<uint8_t>& liveNow,
                const std::vector<uint64_t>& sigNow, const std::unordered_set<uint64_t>& bodySigs,
-               const int* memberSlots, int count, const float* pos, const float* camPos) {
+               const int* memberSlots, int count, const float* pos, const float* camPos,
+               const float* b2Pos, int b2Count) {
     float lo[3] = {1e30f, 1e30f, 1e30f}, hi[3] = {-1e30f, -1e30f, -1e30f};
     for (int m = 0; m < count; ++m) {
         const float* p = pos + memberSlots[m] * 3;
@@ -335,6 +378,39 @@ void buildGrid(const uint8_t* now, uint32_t n, const std::vector<uint8_t>& liveN
                         const int to = i + dil >= gn ? gn - 1 : i + dil;
                         base[i * s] = cnt[to + 1] - cnt[from] > 0 ? 255 : 0;
                     }
+                }
+            }
+        }
+    }
+    // THE SECOND BODY's cells, over the body's (ObjectMotion::body2): a cube
+    // of its reach around each of its parts, stamped 128 where the body's
+    // dilation wrote 255. The body's seeds are its TYPES' records, and the
+    // hub's parts are of the ring's types, so without this the hub's cells
+    // were the ring's. The parts are few and close, so the cubes are
+    // stamped outright rather than dilated.
+    if (b2Pos && b2Count > 0) {
+        const float reach2 = body2Reach(b2Pos, b2Count, cell);
+        g_body2ReachM = reach2;
+        int r2 = static_cast<int>(ceilf(reach2 / cell));
+        r2 = r2 < 1 ? 1 : (r2 > 8 ? 8 : r2);
+        for (int m = 0; m < b2Count; ++m) {
+            const float* p = b2Pos + m * 3;
+            bool inBox = true;
+            int c[3];
+            for (int k = 0; k < 3; ++k) {
+                if (p[k] < lo[k] || p[k] >= hi[k]) inBox = false;
+                int idx = static_cast<int>((p[k] - lo[k]) / cell);
+                c[k] = idx < 0 ? 0 : (idx >= gn ? gn - 1 : idx);
+            }
+            if (!inBox) continue;
+            for (int z = c[2] - r2; z <= c[2] + r2; ++z) {
+                if (z < 0 || z >= gn) continue;
+                for (int y = c[1] - r2; y <= c[1] + r2; ++y) {
+                    if (y < 0 || y >= gn) continue;
+                    uint8_t* row = g_grid + (z * gn + y) * gn;
+                    const int x0 = c[0] - r2 < 0 ? 0 : c[0] - r2;
+                    const int x1 = c[0] + r2 >= gn ? gn - 1 : c[0] + r2;
+                    for (int x = x0; x <= x1; ++x) row[x] = 128;
                 }
             }
         }
@@ -670,7 +746,91 @@ float easedPairDt(float dtMs) {
 // tests are on the FIT: the centroid's own motion for own, still and
 // tail, and the body's fitted motion for the slice test (the body's
 // cluster is skipped only when it was taken as the body).
-void takeShips(const Cluster* clusters, int nc, int big, bool bodyTaken, const float* bodyW,
+// The rigid fit with the body's trim (fit, drop what the fit does not
+// explain, fit again), for the second body: the members in, the survivors
+// out, false under kBody2MinRecords of them.
+bool fitTrimmed(std::vector<int>& members, const std::vector<float>& posNow,
+                const std::vector<float>& posPrev, float w[3], float tf[3], float* rms) {
+    std::vector<float> fitNow, fitPrev;
+    fitNow.reserve(members.size() * 3);
+    fitPrev.reserve(members.size() * 3);
+    for (int m : members) {
+        for (int k = 0; k < 3; ++k) {
+            fitNow.push_back(posNow[static_cast<size_t>(m) * 3 + k]);
+            fitPrev.push_back(posPrev[static_cast<size_t>(m) * 3 + k]);
+        }
+    }
+    bool ok = false;
+    for (int pass = 0; pass < kFitPasses; ++pass) {
+        ok = temporalRigidFit(fitNow.data(), fitPrev.data(), static_cast<int>(members.size()), w, tf, rms);
+        if (!ok || pass + 1 == kFitPasses) break;
+        float R[9];
+        temporalRodrigues(w, R);
+        const float lim = *rms * 3.0f > kFitTrimM ? *rms * 3.0f : kFitTrimM;
+        std::vector<int> keptMembers;
+        std::vector<float> keptNow, keptPrev;
+        for (size_t m = 0; m < members.size(); ++m) {
+            float q[3];
+            temporalApply3(R, &fitNow[m * 3], q);
+            float e2 = 0.0f;
+            for (int k = 0; k < 3; ++k) {
+                const float e = q[k] + tf[k] - fitPrev[m * 3 + k];
+                e2 += e * e;
+            }
+            if (e2 > lim * lim) continue;
+            keptMembers.push_back(members[m]);
+            for (int k = 0; k < 3; ++k) {
+                keptNow.push_back(fitNow[m * 3 + k]);
+                keptPrev.push_back(fitPrev[m * 3 + k]);
+            }
+        }
+        if (keptMembers.size() == members.size()) break;
+        if (keptMembers.size() < kBody2MinRecords) return false;
+        members.swap(keptMembers);
+        fitNow.swap(keptNow);
+        fitPrev.swap(keptPrev);
+    }
+    return ok && members.size() >= kBody2MinRecords;
+}
+
+// The rolling median of a rate ring (diffPair says why a median): the axis
+// the ring's sum, the magnitude the median's, each translation component
+// its own median. Returns the median magnitude, for the outlier test; the
+// axis is left as it was when the ring sums to nothing.
+float rateMedian(const RatePair* ring, uint32_t count, float omega[3], float t[3]) {
+    float mags[kRateRing];
+    float axis[3] = {0.0f, 0.0f, 0.0f};
+    for (uint32_t i = 0; i < count; ++i) {
+        const float* rw = ring[i].w;
+        mags[i] = sqrtf(rw[0] * rw[0] + rw[1] * rw[1] + rw[2] * rw[2]);
+        for (int k = 0; k < 3; ++k) axis[k] += rw[k];
+    }
+    for (uint32_t i = 1; i < count; ++i) {   // an insertion sort: sixteen at most
+        const float v = mags[i];
+        uint32_t jj = i;
+        while (jj > 0 && mags[jj - 1] > v) { mags[jj] = mags[jj - 1]; --jj; }
+        mags[jj] = v;
+    }
+    const float medMag = mags[count / 2];
+    const float an = sqrtf(axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2]);
+    if (an > 0.0f) {
+        for (int k = 0; k < 3; ++k) omega[k] = axis[k] / an * medMag;
+    }
+    for (int k = 0; k < 3; ++k) {
+        float comps[kRateRing];
+        for (uint32_t i = 0; i < count; ++i) comps[i] = ring[i].t[k];
+        for (uint32_t i = 1; i < count; ++i) {
+            const float v = comps[i];
+            uint32_t jj = i;
+            while (jj > 0 && comps[jj - 1] > v) { comps[jj] = comps[jj - 1]; --jj; }
+            comps[jj] = v;
+        }
+        t[k] = comps[count / 2];
+    }
+    return medMag;
+}
+
+void takeShips(const Cluster* clusters, int nc, int big, bool bodyTaken, int skip2, const float* bodyW,
                const float* bodyT, const std::vector<int>& clusterIdx,
                const std::vector<float>& posNow, const std::vector<float>& posPrev, uint32_t n,
                const float* camPos, float dtMs, uint32_t live) {
@@ -721,7 +881,7 @@ void takeShips(const Cluster* clusters, int nc, int big, bool bodyTaken, const f
         // The largest cluster is skipped only when it was taken as the body:
         // alone in open space with one other ship, the largest cluster IS
         // that ship (the review of 2026-09-09).
-        if (j == big && bodyTaken) continue;
+        if ((j == big && bodyTaken) || j == skip2) continue;   // the body's cluster, and the second body's
         const Cluster& c = clusters[j];
         if (c.count < kShipMinRecords) {
             ++g_shipsFew;
@@ -1038,6 +1198,7 @@ void diffPair(const uint8_t* prev, const uint8_t* now, uint32_t bytes, float dtM
     // rigid motion, and whether it was taken as the body.
     float bodyW[3] = {0.0f, 0.0f, 0.0f}, bodyT[3] = {0.0f, 0.0f, 0.0f};
     bool bodyFit = false, bodyTaken = false;
+    int body2Cluster = -1;   // the second body's cluster this pair, kept from the ships (takeShips)
     for (int j = 0; j < nc; ++j) {
         if (big < 0 || clusters[j].count > clusters[big].count) {
             second = big;
@@ -1196,6 +1357,91 @@ void diffPair(const uint8_t* prev, const uint8_t* now, uint32_t bytes, float dtM
                     memcpy(g_lastRel, relC, sizeof(g_lastRel));
                     g_lastRelValid = true;
                 }
+                // THE SECOND BODY (ObjectMotion::body2 says what it is): the
+                // largest other cluster of kBody2MinRecords parts whose
+                // centroid sits within kBody2NearM of the body's, camera-
+                // relative -- the same structure, moving otherwise -- fitted
+                // as the body is, its rates their own median, held over
+                // kBody2HoldPairs pairs that do not find it (its cluster
+                // comes and goes with the table's overflow) so its cells do
+                // not flicker to the camera's path.
+                bool found2 = false;
+                if (camPos) {
+                    int best = -1;
+                    for (int ci = 0; ci < nc; ++ci) {
+                        if (ci == big || clusters[ci].count < kBody2MinRecords) continue;
+                        if (best < 0 || clusters[ci].count > clusters[best].count) best = ci;
+                    }
+                    if (best >= 0) {
+                        std::vector<int> members2;
+                        members2.reserve(clusters[best].count);
+                        float cen2[3] = {0.0f, 0.0f, 0.0f};
+                        for (uint32_t i = 0; i < n; ++i) {
+                            if (clusterIdx[i] != best) continue;
+                            const float* pn = &posNow[static_cast<size_t>(i) * 3];
+                            const float dx = pn[0] - camPos[0], dy = pn[1] - camPos[1], dz = pn[2] - camPos[2];
+                            if (dx * dx + dy * dy + dz * dz < kShipRadiusM * kShipRadiusM) continue;
+                            members2.push_back(static_cast<int>(i));
+                            for (int k = 0; k < 3; ++k) cen2[k] += pn[k];
+                        }
+                        if (members2.size() >= kBody2MinRecords) {
+                            for (int k = 0; k < 3; ++k) {
+                                cen2[k] = cen2[k] / static_cast<float>(members2.size()) - camPos[k];
+                            }
+                            const float ddx = cen2[0] - relC[0], ddy = cen2[1] - relC[1], ddz = cen2[2] - relC[2];
+                            float w2[3] = {}, t2[3] = {}, rms2 = 0.0f;
+                            if (ddx * ddx + ddy * ddy + ddz * ddz <= kBody2NearM * kBody2NearM &&
+                                fitTrimmed(members2, posNow, posPrev, w2, t2, &rms2) && rms2 <= kMotionMaxRmsM) {
+                                const float deg2 = sqrtf(w2[0] * w2[0] + w2[1] * w2[1] + w2[2] * w2[2]) * 57.2957795f;
+                                const float m2 = sqrtf(t2[0] * t2[0] + t2[1] * t2[1] + t2[2] * t2[2]);
+                                if (deg2 >= kMotionMinDeg && deg2 <= kMotionMaxDeg && m2 <= kMotionMaxM) {
+                                    // Continuity against its own last centroid, else a new ring.
+                                    bool same2 = g_lastRel2Valid && g_body2Hold > 0;
+                                    if (same2) {
+                                        const float ex = cen2[0] - g_lastRel2[0], ey = cen2[1] - g_lastRel2[1],
+                                                    ez = cen2[2] - g_lastRel2[2];
+                                        same2 = ex * ex + ey * ey + ez * ez <= kBodyContinuityM * kBodyContinuityM;
+                                    }
+                                    if (!same2) g_rateRing2N = 0;
+                                    memcpy(g_lastRel2, cen2, sizeof(g_lastRel2));
+                                    g_lastRel2Valid = true;
+                                    RatePair& rp2 = g_rateRing2[g_rateRing2N % kRateRing];
+                                    for (int k = 0; k < 3; ++k) {
+                                        rp2.w[k] = w2[k] / dt;
+                                        rp2.t[k] = t2[k] / dt;
+                                    }
+                                    ++g_rateRing2N;
+                                    const uint32_t rc2 = g_rateRing2N < kRateRing ? g_rateRing2N : kRateRing;
+                                    rateMedian(g_rateRing2, rc2, g_motion.omega2PerMs, g_motion.t2PerMs);
+                                    temporalRodrigues(w2, g_motion.R2);
+                                    memcpy(g_motion.t2, t2, sizeof(g_motion.t2));
+                                    g_motion.records2 = static_cast<uint32_t>(members2.size());
+                                    g_motion.body2 = true;
+                                    g_body2Hold = kBody2HoldPairs;
+                                    g_body2Pos.clear();
+                                    for (int m : members2) {
+                                        for (int k = 0; k < 3; ++k) g_body2Pos.push_back(posNow[static_cast<size_t>(m) * 3 + k]);
+                                    }
+                                    g_body2LastRecords = g_motion.records2;
+                                    g_body2LastDeg = deg2;
+                                    body2Cluster = best;
+                                    found2 = true;
+                                    ++g_body2Pairs;
+                                }
+                            }
+                        }
+                    }
+                }
+                if (!found2) {
+                    if (g_body2Hold > 0) {
+                        --g_body2Hold;
+                        ++g_body2HeldPairs;
+                    }
+                    if (g_body2Hold == 0) {
+                        g_motion.body2 = false;
+                        g_body2Pos.clear();
+                    }
+                }
                 temporalRodrigues(w, g_motion.R);
                 memcpy(g_motion.t, tf, sizeof(g_motion.t));
                 // The rates: blended into the held ones when this pair
@@ -1225,35 +1471,7 @@ void diffPair(const uint8_t* prev, const uint8_t* now, uint32_t bytes, float dtM
                 memcpy(rp.t, tr, sizeof(rp.t));
                 ++g_rateRingN;
                 const uint32_t ringCount = g_rateRingN < kRateRing ? g_rateRingN : kRateRing;
-                float mags[kRateRing];
-                float axis[3] = {0.0f, 0.0f, 0.0f};
-                for (uint32_t i = 0; i < ringCount; ++i) {
-                    const float* rw = g_rateRing[i].w;
-                    mags[i] = sqrtf(rw[0] * rw[0] + rw[1] * rw[1] + rw[2] * rw[2]);
-                    for (int k = 0; k < 3; ++k) axis[k] += rw[k];
-                }
-                for (uint32_t i = 1; i < ringCount; ++i) {   // an insertion sort: sixteen at most
-                    const float v = mags[i];
-                    uint32_t jj = i;
-                    while (jj > 0 && mags[jj - 1] > v) { mags[jj] = mags[jj - 1]; --jj; }
-                    mags[jj] = v;
-                }
-                const float medMag = mags[ringCount / 2];
-                const float an = sqrtf(axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2]);
-                if (an > 0.0f) {
-                    for (int k = 0; k < 3; ++k) g_motion.omegaPerMs[k] = axis[k] / an * medMag;
-                }
-                for (int k = 0; k < 3; ++k) {
-                    float comps[kRateRing];
-                    for (uint32_t i = 0; i < ringCount; ++i) comps[i] = g_rateRing[i].t[k];
-                    for (uint32_t i = 1; i < ringCount; ++i) {
-                        const float v = comps[i];
-                        uint32_t jj = i;
-                        while (jj > 0 && comps[jj - 1] > v) { comps[jj] = comps[jj - 1]; --jj; }
-                        comps[jj] = v;
-                    }
-                    g_motion.tPerMs[k] = comps[ringCount / 2];
-                }
+                const float medMag = rateMedian(g_rateRing, ringCount, g_motion.omegaPerMs, g_motion.tPerMs);
                 // A pair far from the median is counted and, now and then, said.
                 {
                     const float nn = sqrtf(wr[0] * wr[0] + wr[1] * wr[1] + wr[2] * wr[2]);
@@ -1281,7 +1499,9 @@ void diffPair(const uint8_t* prev, const uint8_t* now, uint32_t bytes, float dtM
                 bodySigs.reserve(members.size());
                 for (int m : members) bodySigs.insert(sigNow[static_cast<size_t>(m)]);
                 buildGrid(now, n, liveNow, sigNow, bodySigs, members.data(),
-                          static_cast<int>(members.size()), posNow.data(), camPos);
+                          static_cast<int>(members.size()), posNow.data(), camPos,
+                          g_motion.body2 && !g_body2Pos.empty() ? g_body2Pos.data() : nullptr,
+                          g_motion.body2 ? static_cast<int>(g_body2Pos.size() / 3) : 0);
                 // Published for the render thread in one short section: the
                 // struct with its grid's pointer, the age reset.
                 {
@@ -1321,7 +1541,8 @@ void diffPair(const uint8_t* prev, const uint8_t* now, uint32_t bytes, float dtM
         bw = heldW;
         bt = heldT;
     }
-    takeShips(clusters, nc, big, bodyTaken, bw, bt, clusterIdx, posNow, posPrev, n, camPos, dtMs, live);
+    takeShips(clusters, nc, big, bodyTaken, body2Cluster, bw, bt, clusterIdx, posNow, posPrev, n, camPos, dtMs,
+              live);
 }
 
 void releaseRing() {
@@ -1491,6 +1712,14 @@ void report() {
             static_cast<double>(g_shipsOwn) / sp,
             static_cast<double>(g_shipsFew) / sp, kShipMinRecords, static_cast<double>(g_shipsUnfit) / sp);
     }
+    if (g_body2Pairs || g_body2HeldPairs) {
+        Log::get().note(
+            "object probe, the second body: found on %llu pairs and held over %llu that did not find it; "
+            "the last had %u parts turning %.4f deg a pair, marked %.0f m around each in the grid.",
+            static_cast<unsigned long long>(g_body2Pairs), static_cast<unsigned long long>(g_body2HeldPairs),
+            g_body2LastRecords, static_cast<double>(g_body2LastDeg), static_cast<double>(g_body2ReachM));
+    }
+    g_body2Pairs = g_body2HeldPairs = 0;
     g_shipPairs = g_shipsTaken = g_shipsOutOfRange = g_shipsSlices = 0;
     g_shipsOwn = 0;
     g_shipsStill = g_shipsUnfit = g_shipsOverCap = g_shipsFew = 0;

@@ -89,6 +89,10 @@ cbuffer P : register(b0) {
     float4 stR1;        // the camera's with the dominant body's own turn -- a station's -- in it
     float4 stR2;
     float4 tvSt;        // xyz its translation term; w 1 = the body's path is on this frame
+    float4 st2R0;       // the second body's path (object_probe.h, 2026-09-09): its composite delta's rows
+    float4 st2R1;
+    float4 st2R2;
+    float4 tv2St;       // xyz its translation term; w 1 = on this frame (its grid cells hold 128)
     float4 objects;     // x the reach in metres (for the record; the grid already carries it); y the body's near floor, metres; z a moving ship's reach around each of its parts, squared
     float4 wR0;         // the camera rows this frame, view -> world: xyz the row, w the position's component,
     float4 wR1;         // so a view-space point v (the game's, z forward) sits at R v + c in the body's frame
@@ -251,7 +255,7 @@ float moverAt(float2 pp, float zPred, bool thick) {
 // fourth flight), so nothing per instance can be trusted from one frame to
 // the next, but a turn shared by a thousand parts and the space they fill
 // can, and this is all it needs.
-bool insideBody(float3 d, float z) {
+int insideBody(float3 d, float z) {
 )HLSL"
 R"HLSL(
     // The view-space point, the game's way round (z forward), into the
@@ -260,8 +264,11 @@ R"HLSL(
     float3 w = float3(dot(wR0.xyz, vg), dot(wR1.xyz, vg), dot(wR2.xyz, vg)) +
                float3(wR0.w, wR1.w, wR2.w);
     float3 u = (w - box0.xyz) / max(box1.xyz - box0.xyz, 1e-3);
-    if (any(u < 0.0) || any(u >= 1.0)) return false;
-    return BG.Load(int4(int3(u * 128.0), 0)) > 0.5;   // kObjectGrid cells a side (object_probe.h)
+    if (any(u < 0.0) || any(u >= 1.0)) return 0;
+    // kObjectGrid cells a side (object_probe.h): 255 the body's, 128 the
+    // second body's (ObjectMotion::body2), 0 the space between.
+    float g = BG.Load(int4(int3(u * 128.0), 0));
+    return g > 0.75 ? 1 : (g > 0.25 ? 2 : 0);
 }
 )HLSL"
 R"HLSL(
@@ -376,8 +383,8 @@ bool uiCovered(int2 q) {
 // Where this pixel's surface was last frame if it moved with the body:
 // the camera's path composed with the body's turn. False when it lands
 // behind the eye or off the image.
-bool bodyPixel(float3 d, float z, out float2 pp, out float zp) {
-    float3 dp = float3(dot(stR0.xyz, d), dot(stR1.xyz, d), dot(stR2.xyz, d)) * z + tvSt.xyz;
+bool bodyPixelRows(float3 r0, float3 r1, float3 r2, float3 tv, float3 d, float z, out float2 pp, out float zp) {
+    float3 dp = float3(dot(r0, d), dot(r1, d), dot(r2, d)) * z + tv;
     zp = -dp.z;
     pp = 0.0;
     if (dp.z >= -1e-6) return false;
@@ -386,6 +393,13 @@ bool bodyPixel(float3 d, float z, out float2 pp, out float zp) {
     pp.x = (xt - tanPrev.x) / (tanPrev.y - tanPrev.x) * float(size.x) - 0.5;
     pp.y = (tanPrev.w - yt) / (tanPrev.w - tanPrev.z) * float(size.y) - 0.5;
     return pp.x >= 0.0 && pp.y >= 0.0 && pp.x <= float(size.x) - 1.0 && pp.y <= float(size.y) - 1.0;
+}
+bool bodyPixel(float3 d, float z, out float2 pp, out float zp) {
+    return bodyPixelRows(stR0.xyz, stR1.xyz, stR2.xyz, tvSt.xyz, d, z, pp, zp);
+}
+// The second body's (object_probe.h, 2026-09-09): its own rows.
+bool bodyPixel2(float3 d, float z, out float2 pp, out float zp) {
+    return bodyPixelRows(st2R0.xyz, st2R1.xyz, st2R2.xyz, tv2St.xyz, d, z, pp, zp);
 }
 )HLSL"
 R"HLSL(
@@ -499,10 +513,20 @@ bool fetchHistoryT(float2 p, float3 r0, float3 r1, float3 r2, float3 tv,
         }
         // A ship's pixel whose prediction fell off the image is offered to
         // the body's grid as before the ships (the review of 2026-09-09).
-        if (!taken && tvSt.w != 0.0 && insideBody(d, zBody)) {
+        if (!taken && tvSt.w != 0.0) {
+            // 1 the body's cells, 2 the second body's: its own path when
+            // one is in hand, else the camera's (the body's would be wrong
+            // there by twice the turn). world = 4 marks the second body's.
+            int inb = insideBody(d, zBody);
             float2 ppB;
             float zpB;
-            if (bodyPixel(d, zBody, ppB, zpB)) {
+            if (inb == 2) {
+                if (tv2St.w != 0.0 && bodyPixel2(d, zBody, ppB, zpB)) {
+                    pp = ppB;
+                    zPred = zpB;
+                    world = 4;
+                }
+            } else if (inb == 1 && bodyPixel(d, zBody, ppB, zpB)) {
                 pp = ppB;
                 zPred = zpB;
                 world = 2;
@@ -578,7 +602,7 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
     // Three counters, not forty. This pass writes 15, 16 and 17 and no
     // others, and a forty-element local array costs forty registers of
     // occupancy on a dispatch that covers the whole eye.
-    uint count15 = 0, count16 = 0, count17 = 0, count28 = 0, count29 = 0, count39 = 0;
+    uint count15 = 0, count16 = 0, count17 = 0, count28 = 0, count29 = 0, count39 = 0, count46 = 0;
     uint count40 = 0, count41 = 0, count42 = 0, count43 = 0, count45 = 0;
     int count44 = 0;
     if (id.x < (uint)size.x && id.y < (uint)size.y) {
@@ -656,10 +680,18 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
                         taken = true;
                     }
                 }
-                if (!taken && tvSt.w != 0.0 && insideBody(d, zBody)) {
+                if (!taken && tvSt.w != 0.0) {
+                    int inb = insideBody(d, zBody);   // 2 = the second body's cells (bodyPixel2)
                     float2 ppB;
                     float zpB;
-                    if (bodyPixel(d, zBody, ppB, zpB)) {
+                    if (inb == 2) {
+                        if (tv2St.w != 0.0 && bodyPixel2(d, zBody, ppB, zpB)) {
+                            pp = ppB;
+                            motion = pp - p;
+                            zPred = zpB;
+                            count46 = 1;
+                        }
+                    } else if (inb == 1 && bodyPixel(d, zBody, ppB, zpB)) {
                         pp = ppB;
                         motion = pp - p;
                         zPred = zpB;
@@ -810,6 +842,8 @@ R"HLSL(
                 o5 = float3(0.0, 1.0, 1.0);   // cyan: a moving ship's path
             } else if (count29 != 0) {
                 o5 = float3(1.0, 1.0, 1.0);
+            } else if (count46 != 0) {
+                o5 = float3(0.7, 0.7, 0.7);   // grey: the second body's path (object_probe.h)
             } else if (count15 != 0 && (tvSt.w != 0.0 || ships.x != 0.0)) {
                 // In a moving ship's footprint but not the ship's: teal with
                 // no depth at all, magenta with a depth the claim refused
@@ -819,7 +853,7 @@ R"HLSL(
                 if (farPx) o5 = fs >= 0 ? float3(0.0, 0.5, 0.5) : float3(0.0, 0.3, 1.0);
                 else if (uiCovered(region.xy + int2(p))) o5 = float3(0.0, 1.0, 0.0);
                 else if (fs >= 0) o5 = float3(1.0, 0.0, 1.0);
-                else if (!insideBody(d, zPx)) o5 = float3(1.0, 0.0, 0.0);
+                else if (insideBody(d, zPx) == 0) o5 = float3(1.0, 0.0, 0.0);
                 else o5 = float3(1.0, 1.0, 0.0);
             }
             paintDebug(id.xy, size, o5);
@@ -844,6 +878,7 @@ R"HLSL(
     if (count17 != 0) InterlockedAdd(gCount[17], count17);
     if (count28 != 0) InterlockedAdd(gCount[28], count28);
     if (count29 != 0) InterlockedAdd(gCount[29], count29);
+    if (count46 != 0) InterlockedAdd(gCount[46], count46);
     if (count39 != 0) InterlockedAdd(gCount[39], count39);
     if (count40 != 0) InterlockedAdd(gCount[40], count40);
     if (count41 != 0) InterlockedAdd(gCount[41], count41);
@@ -962,6 +997,7 @@ void main(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
                               depthN, hy)) {
                 if (worldTaken != 0) count[15] = 1;
                 if (worldTaken == 2) count[29] = 1;   // the body's path taken
+                if (worldTaken == 4) count[46] = 1;   // the second body's
                 if (worldTaken == 3) count[39] = 1;   // a moving ship's
                 // The mover mask (moverAt says): a masked pixel keeps less
                 // of its history, by the strength -- at 1 it is the fresh
@@ -1120,6 +1156,7 @@ R"HLSL(
         } else if (split.y == 5.0) {
             // The objects view: the pixels that took the body's path.
             o = worldTaken == 2 ? float3(1.0, 1.0, 1.0)
+              : worldTaken == 4 ? float3(0.7, 0.7, 0.7)   // the second body's path grey
               : worldTaken == 3 ? float3(0.0, 1.0, 1.0) : cur.rgb * 0.25;   // a moving ship's path cyan
         } else if (split.y == 3.0) {
             // The depth view: where each pixel's depth comes from -- the
@@ -1337,6 +1374,10 @@ struct PassParams {
     float   st1[4];
     float   st2[4];
     float   tvSt[4];     // ...xyz its translation term, w 1 = on this frame
+    float   st2_0[4];    // the second body's path (object_probe.h, 2026-09-09): the same shape
+    float   st2_1[4];
+    float   st2_2[4];
+    float   tv2St[4];    // ...w 1 = on this frame
     float   objects[4];  // x the reach in metres, for the record
     float   wR0[4];      // this frame's camera rows, view -> world, with the position in w
     float   wR1[4];
@@ -1352,7 +1393,7 @@ struct PassParams {
     float   shParts[kObjectShipsMax * kObjectShipParts][4];   // its parts' positions, shBox0[i].w of them
     float   shRect[kObjectShipsMax][4];    // its box's footprint on the image, pixels
 };
-static_assert(sizeof(PassParams) == 5776, "the cbuffer is 361 16-byte rows");
+static_assert(sizeof(PassParams) == 5840, "the cbuffer is 365 16-byte rows");
 
 // The format allowlist: the supersample resolve's, for its reasons
 // (supersample_pass.cpp) -- typeless and UNORM families read and written
@@ -1708,6 +1749,8 @@ bool     g_priceLogged = false;
 uint32_t g_lastW = 0, g_lastH = 0;
 uint64_t g_moverPix = 0;   // pixels the mover mask set this interval (Stats[28]; tier 1)
 uint64_t g_bodyPix = 0;    // pixels that took the body's path this interval (Stats[29]; tier 2)
+uint64_t g_body2Pix = 0;   // ...the second body's (Stats[46]; object_probe.h, 2026-09-09)
+uint64_t g_body2Frames = 0;   // frames the second body's path was on
 uint64_t g_shipPix = 0;    // pixels that took a moving ship's path this interval (Stats[39]; 2026-09-09)
 uint64_t g_shipFoot = 0;         // ...and in a ship's footprint with a depth, not claimed (Stats[40])
 uint64_t g_shipOutBox = 0;       // of those, outside the box at their depth (41)
@@ -1769,6 +1812,7 @@ void pollSlots(ID3D11DeviceContext* ctx) {
                 g_brightNoDepthPix += v[17];
                 g_moverPix += v[28];
                 g_bodyPix += v[29];
+                g_body2Pix += v[46];
                 g_shipPix += v[39];
                 g_shipFoot += v[40];
                 g_shipOutBox += v[41];
@@ -3326,6 +3370,36 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     p.box1[i] = om.bmax[i] + bodyShift[i];
                 }
                 p.box0[3] = p.box1[3] = 0.0f;
+                // THE SECOND BODY's path (ObjectMotion::body2), composed as
+                // the body's is, with the same shift; its cells hold 128.
+                if (om.body2) {
+                    const float w2F[3] = {om.omega2PerMs[0] * g_bodyDtMs, om.omega2PerMs[1] * g_bodyDtMs,
+                                          om.omega2PerMs[2] * g_bodyDtMs};
+                    const float t2F[3] = {om.t2PerMs[0] * g_bodyDtMs, om.t2PerMs[1] * g_bodyDtMs,
+                                          om.t2PerMs[2] * g_bodyDtMs};
+                    float R2f[9];
+                    temporalRodrigues(w2F, R2f);
+                    float t2Fs[3];
+                    for (int k = 0; k < 3; ++k) {
+                        const float rs = R2f[k * 3 + 0] * bodyShift[0] + R2f[k * 3 + 1] * bodyShift[1] +
+                                         R2f[k * 3 + 2] * bodyShift[2];
+                        t2Fs[k] = t2F[k] + bodyShift[k] - rs;
+                    }
+                    float W2[9], tv2[3];
+                    if (!carriedRows) {
+                        temporalBodyPath(g_prevRows, g_curRows, R2f, t2Fs, W2, tv2);
+                    } else {
+                        temporalBodyPathCarried(g_prevRows, R2f, t2Fs, worldDelta, tvCam, W2, tv2);
+                    }
+                    float* rows2[3] = {p.st2_0, p.st2_1, p.st2_2};
+                    for (int r = 0; r < 3; ++r) {
+                        for (int c = 0; c < 3; ++c) rows2[r][c] = W2[r * 3 + c];
+                        rows2[r][3] = 0.0f;
+                    }
+                    for (int i = 0; i < 3; ++i) p.tv2St[i] = tv2[i];
+                    p.tv2St[3] = 1.0f;
+                    ++g_body2Frames;
+                }
                 bodyOn = true;
                 g_bodyLast = om;
                 g_bodyLastValid = true;
@@ -4983,6 +5057,14 @@ bool temporalPassRegistration(char* buf, size_t n, char* buf2, size_t n2, char* 
                       static_cast<double>(g_bodyLast.bmax[1] - g_bodyLast.bmin[1]),
                       static_cast<double>(g_bodyLast.bmax[2] - g_bodyLast.bmin[2]),
                       g_bodyLast.age);
+            if (g_bodyLast.body2) {
+                regAppend(buf, n, used,
+                          "; the second body's path took %.2f%% of pixels (%u records turning %.4f deg over "
+                          "the pair, on %llu frames)",
+                          100.0 * static_cast<double>(g_body2Pix) / static_cast<double>(g_intervalPix),
+                          g_bodyLast.records2, static_cast<double>(temporalRotationAngleDeg(g_bodyLast.R2)),
+                          static_cast<unsigned long long>(g_body2Frames));
+            }
         } else {
             regAppend(buf, n, used, "; the body's path is on but no body is in hand (no pool, or no pair yet)");
         }
@@ -5130,6 +5212,8 @@ bool temporalPassRegistration(char* buf, size_t n, char* buf2, size_t n2, char* 
     g_classShipPix = g_classShipClip = 0;
     g_moverPix = 0;
     g_bodyPix = 0;
+    g_body2Pix = 0;
+    g_body2Frames = 0;
     g_shipPix = 0;
     g_shipFoot = g_shipOutBox = g_shipBehind = g_shipFar = g_shipFootNoDepth = 0;
     g_shipOutBoxDm = 0;

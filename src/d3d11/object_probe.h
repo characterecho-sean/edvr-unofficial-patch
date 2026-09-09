@@ -109,6 +109,23 @@ struct ObjectMotion {
     float    bmax[3];
     uint32_t gridVersion;
     const uint8_t* grid;
+    // THE SECOND BODY (2026-09-09, the thirty-third flight): the pool's
+    // second-largest rigid cluster when it sits among the body's parts. An
+    // Orbis's docking hub at ten kilometres turns AGAINST its ring in the
+    // pool's records -- 211 parts within 475 m of the axis at 0.044 deg a
+    // frame one way, 641 parts out to 2.4 km the other (the pairs of
+    // 15:42 and 15:43) -- and under the ring's path its face smeared while
+    // the ring stayed crisp, since the hub's parts share the ring's types
+    // and seeded its cells. So the hub gets rates of its own: its cells in
+    // the grid hold 128 where the body's hold 255, and a reader with no
+    // second body in hand leaves those pixels to the camera's path (off by
+    // one turn there, not two).
+    bool     body2;
+    uint32_t records2;
+    float    omega2PerMs[3];
+    float    t2PerMs[3];
+    float    R2[9];      // over the pair, for the record
+    float    t2[3];
 };
 bool objectMotionGet(ObjectMotion* out);
 // The reach, metres, that a part marks around itself in the grid (the
