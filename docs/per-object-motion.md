@@ -2271,6 +2271,26 @@ which is this project's contract for every read of the game.
    1.4 m, passed the slice test at five hundred metres once; a station
    slice fitted as its own body claims its own pixels with the
    station's motion, so it costs a line in the log and nothing seen.
+
+   *Its twenty-fifth flight* (11:57, `v0.14.1-96-g779afd4`, on one ship;
+   a dump at 12:01 of a security ship at 263 m, a sliver on the image):
+   "weird rectangular artifacts in the smoke trail behind the ship, is
+   there any way we can ignore those ... it's fine if that smoke is
+   blurry". The probe took ships on six pairs in ten, up to eight in
+   one, the nearest from 250 to 1000 m, and the table held them all (256
+   deep now; the singletons it holds, 130 to 250 a pair, are the
+   station's far parts split by the quaternion's quantum, not repacked
+   slots, which the diff no longer clusters). The ships' share stayed a
+   few hundredths of a percent, which a twenty-metre ship at three
+   hundred metres would give if claimed whole, so the share alone does
+   not say whether the hull is claimed; the objects view now paints a
+   pixel in a ship's footprint that was not claimed teal (no depth) or
+   magenta (a depth the claim refused), which the next dump in that
+   view will settle. The smoke: the plume's particles are left in space
+   and inside the box at the ship's depth they took the ship's motion,
+   each quad's history fetched from where the ship had been. The claim
+   is the parts' reach and the tail plane now (the section at the end
+   says), and the plume keeps the camera's path.
 4. **Tier 2b** only if question 1 says no bits.
 5. **Tier 3** as `tools/` work against dumped frames, never on the hot
    path.
@@ -2329,11 +2349,20 @@ pair every frame would close the rate's lag at the cost of a diff a
 frame, and is the next step if the flights ask for it.
 
 There is no grid for a ship. Its box -- its parts' recorded positions
-padded by thirty metres, a part's mesh around its origin -- is its
-claim: a world-path pixel whose depth places it in the box takes the
-ship's path, and the boxes are tested before the station's grid, since
-a ship crossing the slot sits inside the station's cells too and took
-the station's turn there until now. The pass composes each ship's
+padded by thirty metres, a part's mesh around its origin -- is the
+first test, and the claim within it is the space within thirty metres
+of one of its parts (up to thirty-two of them carried in the constants)
+and ahead of its tail, the plane five metres behind its rearmost part
+along the way it flies: a world-path pixel whose depth places it there
+takes the ship's path, and the boxes are tested before the station's
+grid, since a ship crossing the slot sits inside the station's cells
+too and took the station's turn there until now. The tail is the plume:
+the particles of a ship's drives are left in space as the ship goes,
+each quad writing its depth, and inside the box at the ship's depth
+they took the ship's motion -- "weird rectangular artifacts in the
+smoke trail" on the ships' second flight -- so behind the tail nothing
+is the ship's and the plume keeps the camera's path, blurry and whole.
+The pass composes each ship's
 motion exactly as the station's (`temporalBodyPath`, the carried form
 on another camera's frames, the origin's shift) from the same eased
 frame length, and the shader carries eight of them as three rows, a
