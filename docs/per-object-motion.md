@@ -2463,6 +2463,37 @@ which is this project's contract for every read of the game.
    body often enough, so the tolerance is two hundredths, still under a
    station's own turn. A performance review of the rest of the hot path
    runs alongside.
+
+   *Its thirty-first flight* (14:52, `v0.14.1-111-g7fddbe2`, the worker's
+   first; a dump at 14:56): "much better, but still seeing some
+   rectangles in the smoke. Also I think the heat haze effect is when
+   the smoke fades out there's some shader that appears to render
+   wrong". The worker took 4 to 10 ms a pair with none dropped, and the
+   frame no longer pays it. The pool still split into 135-239 clusters a
+   pair with the largest at 14-57%: the position tolerance, three
+   centimetres plus a tenth of a millimetre a metre, equalled the
+   quaternion quantum's worst case on the lever arm, so half of a body's
+   parts fell outside it on every flight so far; five centimetres plus
+   four tenths now. The performance review's per-draw findings went in
+   with it: the vertex and pixel shader setters are hooked and the
+   binding shadow carries the bound shader with its hash, so the
+   billboard variant, the interface classifier, the scanner's chrome
+   tracker and the skips read a pointer instead of asking VSGetShader
+   (three device critical sections and Releases a draw, about two
+   milliseconds a frame busy); the panel-size check returns early for
+   any draw over sixty-four indices; the Map hook memoises a resource's
+   kind and size. The remaining rectangles are in the dump: the smoke
+   trail itself is a ribbon of fifty quads, additive, sampling the
+   resolve and a 1024 by 512 streak (vs 5E417E9DF2E7F9E6, ps
+   BD801F2FB02522EB), and its segments show as a chain of dark
+   rectangles. It has no depth, so the pass carries it at the far plane
+   while the ship's translation moves it, and each segment's fade
+   accumulates a different history from its neighbour's. Two ways on:
+   confirm it by withholding that shader alone (`advanced.census_skip =
+   vs:5E417E9DF2E7F9E6`, an experiment, not a fix), and give the smoke
+   its depth for the pass through the coverage machinery the HUD uses
+   -- a depth-only second draw under the streak's alpha -- which needs
+   its vertex shader's output layout from the shader dump.
 4. **Tier 2b** only if question 1 says no bits.
 5. **Tier 3** as `tools/` work against dumped frames, never on the hot
    path.
