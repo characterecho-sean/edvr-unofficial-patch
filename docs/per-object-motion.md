@@ -1822,7 +1822,18 @@ which is this project's contract for every read of the game.
    -- and a held body is then in the old origin's frame for up to eleven
    frames. The pass already flags a camera jump of over fifty metres in
    a frame; the body now stands down for twelve frames after one, and
-   the registration line counts them. The player's word on the fifth
+   the registration line counts them. Not every jump is a rebase,
+   though: the same log counted two jumps an interval at rest in the
+   slot while the body's origin term stood at 3.06 km on three lines
+   running, which is another camera's rows in for a frame and out again
+   (the transition-flash instrument's "parked" cameras), and a body
+   composed with those rows is wrong on both frames of the flip. A jump
+   that lands within fifty metres of where the camera stood before the
+   hold began is read as the flip's return, and the body is back the
+   frame after; the frames whose delta the world path carried (another
+   camera's rotation, over three degrees from the head's) stand the body
+   down the same way, since the body's path takes the raw rows and the
+   carried delta is not theirs. The player's word on the fifth
    flight's fix, given with this one: "The UI targeting symbols seem to
    be fixed" -- the HUD coverage pass holds.
 4. **Tier 2b** only if question 1 says no bits.

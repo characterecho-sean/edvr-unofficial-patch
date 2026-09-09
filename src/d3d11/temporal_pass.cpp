@@ -1682,6 +1682,9 @@ float    g_bodyDtMs = 11.1f;       // this frame's length, for the body's rates
 uint32_t g_bodyHoldOff = 0;
 uint32_t g_bodyJumpHolds = 0;      // frames stood down this interval, for the line
 constexpr uint32_t kBodyHoldOffFrames = 12;
+float    g_bodyJumpFrom[3] = {};   // where the camera stood before the jump that began the hold
+bool     g_bodyRowsOk = false;     // this frame's rows are the view's own (its delta not carried)
+uint32_t g_bodyRowsHolds = 0;      // frames stood down on another camera's rows this interval
 // The body's occupancy grid on the GPU (object_probe.h): one for both
 // eyes, uploaded when the probe's version moves.
 ID3D11Texture3D*          g_bodyGrid = nullptr;
@@ -2599,7 +2602,32 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
             if (jump) {
                 for (int i = 0; i < 3; ++i) tvCam[i] = 0.0f;
                 ++g_camDropMove;
-                g_bodyHoldOff = kBodyHoldOffFrames;   // the body's frame may have moved under it
+                // The body's path (tier 2) composes with the raw rows, and
+                // its body is measured in the rows' frame, so a jump is one
+                // of two things to it: the floating origin rebasing, after
+                // which a held body is in the old frame until a fresh pair
+                // replaces it (the body stands down for twelve frames), or
+                // another camera's rows in for a frame and out again -- the
+                // flight of 2026-09-08 18:28 counted two jumps an interval
+                // at rest in the slot with the body's origin term unmoved
+                // (3.06 km on three lines running), so those were not
+                // rebases. A jump that lands within 50 m of where the camera
+                // stood before the hold began is the second kind: this
+                // frame's delta still has the other camera's rows on one
+                // side, and the body is back the frame after.
+                const float cn[3] = {g_curRows[3], g_curRows[7], g_curRows[11]};
+                if (g_bodyHoldOff) {
+                    const double dx = static_cast<double>(cn[0]) - g_bodyJumpFrom[0];
+                    const double dy = static_cast<double>(cn[1]) - g_bodyJumpFrom[1];
+                    const double dz = static_cast<double>(cn[2]) - g_bodyJumpFrom[2];
+                    const bool back = sqrt(dx * dx + dy * dy + dz * dz) < 50.0;
+                    g_bodyHoldOff = back ? 2 : kBodyHoldOffFrames;
+                } else {
+                    g_bodyJumpFrom[0] = g_prevRows[3];
+                    g_bodyJumpFrom[1] = g_prevRows[7];
+                    g_bodyJumpFrom[2] = g_prevRows[11];
+                    g_bodyHoldOff = kBodyHoldOffFrames;
+                }
             }
             if (diffDeg > 3.0f) {
                 ++g_camDropRot;
@@ -2621,6 +2649,13 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                 if (!jump) memcpy(g_lastGoodTv, tvCam, sizeof(g_lastGoodTv));
                 g_lastGoodValid = true;
             }
+            // The body's path takes the raw rows, so a frame whose delta the
+            // world path carried (another camera's rotation, or a stale
+            // latch) does not get the body either: its pixels take the
+            // world path's carried delta with the body's turn unvectored
+            // for the frame, rather than a body composed with rows that are
+            // not the view's.
+            g_bodyRowsOk = diffDeg <= 3.0f;
         }
 
         PassParams p{};
@@ -2694,7 +2729,12 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
             --g_bodyHoldOff;
             ++g_bodyJumpHolds;
         }
-        if (g_objectsOn && worldOn && g_bodyHoldOff == 0) {
+        static uint32_t s_rowsFrame = 0;
+        if (g_objectsOn && worldOn && g_bodyHoldOff == 0 && !g_bodyRowsOk && s_rowsFrame != g_rowsFrame) {
+            s_rowsFrame = g_rowsFrame;
+            ++g_bodyRowsHolds;
+        }
+        if (g_objectsOn && worldOn && g_bodyHoldOff == 0 && g_bodyRowsOk) {
             ObjectMotion om;
             if (objectMotionGet(&om) && ensureBodyGrid(dev, ctx, om)) {
                 // The body's motion over THIS frame's length: its rates
@@ -4234,9 +4274,11 @@ bool temporalPassRegistration(char* buf, size_t n, char* buf2, size_t n2, char* 
         } else {
             regAppend(buf, n, used, "; the body's path is on but no body is in hand (no pool, or no pair yet)");
         }
-        if (g_bodyJumpHolds) {
-            regAppend(buf, n, used, "; the body stood down %u frames after camera jumps (an origin rebase)",
-                      g_bodyJumpHolds);
+        if (g_bodyJumpHolds || g_bodyRowsHolds) {
+            regAppend(buf, n, used,
+                      "; the body stood down %u frames after camera jumps (a rebase's twelve, a flip's two) "
+                      "and %u on another camera's rows",
+                      g_bodyJumpHolds, g_bodyRowsHolds);
         }
     }
     // The third line: the probes and the rows against the head.
@@ -4344,6 +4386,7 @@ bool temporalPassRegistration(char* buf, size_t n, char* buf2, size_t n2, char* 
     g_moverPix = 0;
     g_bodyPix = 0;
     g_bodyJumpHolds = 0;
+    g_bodyRowsHolds = 0;
     g_probeSkyDx = g_probeSkyDy = 0;
     g_probeSkyN = 0;
     memset(g_probeDot, 0, sizeof(g_probeDot));
