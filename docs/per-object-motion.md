@@ -2208,6 +2208,25 @@ which is this project's contract for every read of the game.
    a bright line thinner than a pixel at 2514, moving a fraction of a
    pixel a frame; no vector fixes it, and the levers are Elite's HMD
    Quality, the calm resolve kernel, and NVIDIA's preset.
+
+   *Its twenty-second flight* (10:11, `v0.14.1-92-gcf226ca`), a dump
+   of the picture: the docking face crisp to its labels from eight
+   kilometres, the outer ring's rim single. Two things reported. "The
+   targeting indicator is still not as steady/solid as it should be":
+   its strokes were marked for NVIDIA at the same half-fresh strength
+   as the panels' text, which is the right strength for a readout that
+   changes in place and more than a stroke needs whose motion is now
+   the scene's own; the flight HUD's strokes are marked at half the
+   strength now, the panels and the holo material as before. And
+   "hitching/blurring doing any high boost manoeuvres": the monitor's
+   long frames in the flight run 22 to 29 ms and each names the game's
+   own creations in it -- 8 to 50 textures and 18 to 59 buffers, up to
+   250 MB in one frame -- which is the game streaming the station's
+   assets as the ship covers ground fast, with the pass's own cost on
+   those frames under a millisecond; the blur is the frame the game
+   spent loading. The two 250 to 290 ms frames are the eye dumps
+   themselves. The rate's rolling median held: two pairs in the flight
+   sat 2.5 and 3.1 times the held rate and were counted, not adopted.
 4. **Tier 2b** only if question 1 says no bits.
 5. **Tier 3** as `tools/` work against dumped frames, never on the hot
    path.

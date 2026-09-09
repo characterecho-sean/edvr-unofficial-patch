@@ -478,7 +478,7 @@ struct FloorCb {
     float         strength = -1.0f;
     float         nearDepth = -1.0f;   // the depth value at one metre (temporalPassDepthAt), for a floating stroke's core
 };
-FloorCb g_floorCbs[2];   // [0] the interface proper, [1] the families that ride a body's path (g_reissueMaskOffset)
+FloorCb g_floorCbs[3];   // [0] the interface proper, [1] the holo material and the sprite, [2] the flight HUD (g_reissueMaskSlot)
 ID3D11DepthStencilState* g_reissueDss = nullptr;   // GEQUAL, write all
 bool          g_reissueDssFailedNoted = false;
 
@@ -577,6 +577,7 @@ DepthShader*             g_reissueShader = nullptr;
 // camera's path and smeared; with the holo material alone brought across,
 // no change -- the chevrons are the flight HUD's.
 float                    g_reissueMaskOffset = 0.0f;
+int                      g_reissueMaskSlot = 0;   // which cached constant buffer carries it (floorBuffer)
 ID3D11PixelShader*       g_savedPs = nullptr;
 // The second draw's saved state, kept apart from the in-place swap's: the
 // two nest, and sharing one slot let the re-issue's restore null the state
@@ -1002,12 +1003,12 @@ ID3D11DepthStencilState* maskDepthState(ID3D11DeviceContext* ctx) {
 // stages declare b2 alone).
 // ...one buffer per mask offset in use (g_reissueMaskOffset): the interface
 // proper at the strength, the families that ride a body's path under it.
-ID3D11Buffer* floorBuffer(ID3D11DeviceContext* ctx, float maskOffset) {
+ID3D11Buffer* floorBuffer(ID3D11DeviceContext* ctx, int slotIndex, float maskOffset) {
     const float strength = g_reactive > 0.0f ? (g_reactive + maskOffset > 0.0f ? g_reactive + maskOffset : 0.0f)
                                              : 0.0f;
-    // Two families with different offsets draw in one frame; each keeps
-    // its own buffer rather than the pair trading one back and forth.
-    FloorCb& slot = g_floorCbs[maskOffset != 0.0f ? 1 : 0];
+    // Three families with different offsets draw in one frame; each keeps
+    // its own buffer rather than trading one back and forth.
+    FloorCb& slot = g_floorCbs[slotIndex < 0 ? 0 : (slotIndex > 2 ? 2 : slotIndex)];
     const float nearDepth = temporalPassDepthAt(1.0f);
     if (slot.cb && slot.floor == g_alphaFloor && slot.strength == strength && slot.nearDepth == nearDepth) {
         return slot.cb;
@@ -1396,6 +1397,7 @@ bool uiDepthOnEyeDraw(ID3D11DeviceContext* ctx) {
     g_drawEye = -1;
     g_reissueShader = nullptr;
     g_reissueMaskOffset = 0.0f;   // the interface proper unless the family below says otherwise
+    g_reissueMaskSlot = 0;
     if (!g_on || g_stoodDown) return false;
     // Cheapest first: no depth target, nothing to write (the post chain's
     // fullscreen draws, ten a frame).
@@ -1463,8 +1465,13 @@ bool uiDepthOnEyeDraw(ID3D11DeviceContext* ctx) {
         // that sits near, the reticle's, reconstructs outside the body's
         // cells and takes the camera's path whatever the mask says. Their
         // glow is not marked at all now (kHudDepthHlsl), which is what
-        // settled the reticle's 'swim' and the drum's smear both.
-        g_reissueMaskOffset = hud ? -3.0f / 255.0f : 0.0f;
+        // settled the reticle's 'swim' and the drum's smear both. The flight
+        // HUD's strokes are marked at HALF the strength: they draw no text
+        // that changes in place, their motion is the scene's own since
+        // 2026-09-09, and at the full strength's half-fresh history the
+        // target indicator was "not as steady/solid as it should be".
+        g_reissueMaskSlot = h == kFlightHud ? 2 : (hud ? 1 : 0);
+        g_reissueMaskOffset = h == kFlightHud ? -0.5f * g_reactive : (hud ? -3.0f / 255.0f : 0.0f);
         const uint64_t ph = (hud || wantMask || wantLine) ? boundPsHash(ctx) : 0;
         DepthShader* shader = (hud || wantMask) ? depthShaderFor(ctx, ph, h, surfaceSlot) : nullptr;
         if (hud && shader) {
@@ -1676,7 +1683,7 @@ bool uiDepthReissueBegin(ID3D11DeviceContext* ctx) {
         // mask-only pass over a family whose depth is already written just
         // marks, with the same test and no writes.
         ID3D11DepthStencilState* dss = depthPass ? reissueState(ctx) : maskDepthState(ctx);
-        ID3D11Buffer* cb = floorBuffer(ctx, g_reissueMaskOffset);
+        ID3D11Buffer* cb = floorBuffer(ctx, g_reissueMaskSlot, g_reissueMaskOffset);
         if (!dss || !cb) {
             ++g_wNoTwin;
             return;
