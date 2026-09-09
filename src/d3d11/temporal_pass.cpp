@@ -486,6 +486,7 @@ bool fetchHistoryT(float2 p, float3 r0, float3 r1, float3 r2, float3 tv,
         // A moving ship's box first (insideShip says why), the body's
         // grid after; world = 3 marks a ship's pixel.
         int si = ships.x != 0.0 ? insideShip(d, zBody) : -1;
+        bool taken = false;
         if (si >= 0) {
             float2 ppS;
             float zpS;
@@ -493,8 +494,12 @@ bool fetchHistoryT(float2 p, float3 r0, float3 r1, float3 r2, float3 tv,
                 pp = ppS;
                 zPred = zpS;
                 world = 3;
+                taken = true;
             }
-        } else if (tvSt.w != 0.0 && insideBody(d, zBody)) {
+        }
+        // A ship's pixel whose prediction fell off the image is offered to
+        // the body's grid as before the ships (the review of 2026-09-09).
+        if (!taken && tvSt.w != 0.0 && insideBody(d, zBody)) {
             float2 ppB;
             float zpB;
             if (bodyPixel(d, zBody, ppB, zpB)) {
@@ -639,6 +644,7 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
             // interface's excepted.
             if (zBody > 0.0 && !uiCovered(region.xy + int2(p))) {
                 int si = ships.x != 0.0 ? insideShip(d, zBody) : -1;
+                bool taken = false;
                 if (si >= 0) {
                     float2 ppS;
                     float zpS;
@@ -647,8 +653,10 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
                         motion = pp - p;
                         zPred = zpS;
                         count39 = 1;
+                        taken = true;
                     }
-                } else if (tvSt.w != 0.0 && insideBody(d, zBody)) {
+                }
+                if (!taken && tvSt.w != 0.0 && insideBody(d, zBody)) {
                     float2 ppB;
                     float zpB;
                     if (bodyPixel(d, zBody, ppB, zpB)) {
@@ -672,7 +680,10 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
                         int why = shipRefusal(d, zBody, fr);
                         if (why == 1) {
                             count41 = 1;
-                            count44 = int(round(clamp((zBody - shipCentreZ(fr)) * 10.0, -100000.0, 100000.0)));
+                            // Clamped to a hundred metres either way: a footprint over a
+                            // station two kilometres behind the ship summed past 2^31 in
+                            // one frame (the review of 2026-09-09).
+                            count44 = int(round(clamp((zBody - shipCentreZ(fr)) * 10.0, -1000.0, 1000.0)));
                         } else if (why == 2) {
                             count42 = 1;
                         } else {
@@ -1921,8 +1932,15 @@ uint32_t g_shipsLastAge = 0;
 // another camera's rows this frame -- and the body waits for a pair taken
 // in this one. (A twelve-frame hold after every camera jump did this on
 // 2026-09-08, and the player saw each hold as the station blurring and
-// resolving again: 13-26 frames an interval.)
-constexpr float kBodyFrameM = 500.0f;
+// resolving again: 13-26 frames an interval.) Four kilometres since
+// 2026-09-09, from five hundred: the pair's camera also stands where the
+// camera WAS, and a body held up to 120 frames behind a ship at boost
+// covered the five hundred in a second -- "the body stood down 10-28
+// frames with its pair in another frame" an interval on the ships'
+// flights, each a frame the station fell to the camera's path, and the
+// player felt it as the station juddering. A rebase is thirteen
+// kilometres (the dumps of 2026-09-08); four covers a boost.
+constexpr float kBodyFrameM = 4000.0f;
 constexpr float kBodyNearM = 50.0f;  // the body's near floor, metres (the probe shares it)
 uint32_t g_bodyFrameHolds = 0;     // frames stood down with the pair in another frame this interval
 bool     g_bodyRowsOk = false;     // this frame's rows are the view's own (its delta not carried)
@@ -3194,7 +3212,15 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         // agreement carries the body over by it; neither stands the body
         // down.
         float bodyShift[3] = {0.0f, 0.0f, 0.0f};
-        auto bodyFrameAgrees = [&](const float* pairCam) {
+        float shipShift[3] = {0.0f, 0.0f, 0.0f};
+        // ...for the station body (own) and for the ships, each with its own
+        // pair's camera and its own shift. Only the station's call may clear
+        // the accumulated jump: the ships' pair is often newer than the
+        // body's (a pair whose largest cluster was another object keeps the
+        // last body, and its ships), and on the ships' first flights the
+        // ships' call, agreeing unshifted in the new frame, cleared the shift
+        // the body still needed, and the body stood down until its next pair.
+        auto bodyFrameAgrees = [&](const float* pairCam, float* shiftOut, bool own) {
             static uint32_t s_frameHold = 0;
             static uint32_t s_frameUsed = 0;
             const double cn[3] = {g_curRows[3], g_curRows[7], g_curRows[11]};
@@ -3207,18 +3233,21 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
             }
             const double lim = static_cast<double>(kBodyFrameM) * kBodyFrameM;
             if (dNo < lim) {
-                for (int i = 0; i < 3; ++i) g_bodyShift[i] = 0.0f;
+                if (own) {
+                    for (int i = 0; i < 3; ++i) g_bodyShift[i] = 0.0f;
+                }
+                for (int i = 0; i < 3; ++i) shiftOut[i] = 0.0f;
                 return true;
             }
             if (dSh < lim) {
-                for (int i = 0; i < 3; ++i) bodyShift[i] = g_bodyShift[i];
-                if (s_frameUsed != g_rowsFrame) {
+                for (int i = 0; i < 3; ++i) shiftOut[i] = g_bodyShift[i];
+                if (own && s_frameUsed != g_rowsFrame) {
                     s_frameUsed = g_rowsFrame;
                     ++g_bodyShiftUsed;
                 }
                 return true;
             }
-            if (s_frameHold != g_rowsFrame) {
+            if (own && s_frameHold != g_rowsFrame) {
                 s_frameHold = g_rowsFrame;
                 ++g_bodyFrameHolds;
             }
@@ -3255,7 +3284,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                 }
             }
             ObjectMotion om;
-            if (objectMotionGet(&om) && bodyFrameAgrees(om.camPos) && ensureBodyGrid(dev, ctx, om)) {
+            if (objectMotionGet(&om) && bodyFrameAgrees(om.camPos, bodyShift, true) && ensureBodyGrid(dev, ctx, om)) {
                 const float wF[3] = {om.omegaPerMs[0] * g_bodyDtMs, om.omegaPerMs[1] * g_bodyDtMs,
                                      om.omegaPerMs[2] * g_bodyDtMs};
                 const float tF[3] = {om.tPerMs[0] * g_bodyDtMs, om.tPerMs[1] * g_bodyDtMs,
@@ -3330,7 +3359,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                 float shipCam[3] = {0.0f, 0.0f, 0.0f};
                 uint32_t shipAge = 0;
                 const uint32_t nShips = objectShipsGet(ships, kObjectShipsMax, shipCam, &shipAge);
-                if (nShips && bodyFrameAgrees(shipCam)) {
+                if (nShips && bodyFrameAgrees(shipCam, shipShift, false)) {
                     for (uint32_t i = 0; i < nShips && shipsOn < kObjectShipsMax; ++i) {
                         const ObjectShip& sh = ships[i];
                         const float wS[3] = {sh.omegaPerMs[0] * g_bodyDtMs, sh.omegaPerMs[1] * g_bodyDtMs,
@@ -3341,9 +3370,9 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                         temporalRodrigues(wS, Rs);
                         float tSs[3];
                         for (int k = 0; k < 3; ++k) {
-                            const float rs = Rs[k * 3 + 0] * bodyShift[0] + Rs[k * 3 + 1] * bodyShift[1] +
-                                             Rs[k * 3 + 2] * bodyShift[2];
-                            tSs[k] = tS[k] + bodyShift[k] - rs;
+                            const float rs = Rs[k * 3 + 0] * shipShift[0] + Rs[k * 3 + 1] * shipShift[1] +
+                                             Rs[k * 3 + 2] * shipShift[2];
+                            tSs[k] = tS[k] + shipShift[k] - rs;
                         }
                         float Ws[9], tvs[3];
                         if (!carriedRows) {
@@ -3368,13 +3397,13 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                         // frames may have changed.
                         const float lagMs = static_cast<float>(shipAge) * g_bodyDtMs;
                         float carry[3];
-                        for (int k = 0; k < 3; ++k) carry[k] = -sh.tPerMs[k] * lagMs;
+                        for (int k = 0; k < 3; ++k) carry[k] = sh.movePerMs[k] * lagMs;   // the centroid's own motion (ObjectShip says)
                         const float grow = 5.0f + 0.2f * sqrtf(carry[0] * carry[0] + carry[1] * carry[1] +
                                                                carry[2] * carry[2]);
                         for (int k = 0; k < 3; ++k) {
                             p.shTv[shipsOn][k] = tvs[k];
-                            p.shBox0[shipsOn][k] = sh.bmin[k] + bodyShift[k] + carry[k] - grow;
-                            p.shBox1[shipsOn][k] = sh.bmax[k] + bodyShift[k] + carry[k] + grow;
+                            p.shBox0[shipsOn][k] = sh.bmin[k] + shipShift[k] + carry[k] - grow;
+                            p.shBox1[shipsOn][k] = sh.bmax[k] + shipShift[k] + carry[k] + grow;
                         }
                         p.shTv[shipsOn][3] = p.shBox1[shipsOn][3] = 0.0f;
                         // The parts and the tail, carried the same way; the tail
@@ -3383,13 +3412,13 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                         p.shBox0[shipsOn][3] = static_cast<float>(np);
                         for (uint32_t j = 0; j < np; ++j) {
                             float* pt = p.shParts[shipsOn * kObjectShipParts + j];
-                            for (int k = 0; k < 3; ++k) pt[k] = sh.parts[j][k] + bodyShift[k] + carry[k];
+                            for (int k = 0; k < 3; ++k) pt[k] = sh.parts[j][k] + shipShift[k] + carry[k];
                             pt[3] = 0.0f;
                         }
                         float along = 0.0f;
                         for (int k = 0; k < 3; ++k) {
                             p.shDir[shipsOn][k] = sh.dir[k];
-                            along += (bodyShift[k] + carry[k]) * sh.dir[k];
+                            along += (shipShift[k] + carry[k]) * sh.dir[k];
                         }
                         p.shDir[shipsOn][3] = sh.rear > -1e29f ? sh.rear + along : -1e30f;
                         // The box's footprint on the image, for the counters:
@@ -3448,7 +3477,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     if (shipsOn && !g_shipsNoted) {
                         g_shipsNoted = true;
                         const float* ow = ships[0].omegaPerMs;
-                        const float* ot = ships[0].tPerMs;
+                        const float* ot = ships[0].movePerMs;
                         Log::get().note(
                             "temporal aa: a moving ship's own path is on -- %u ship%s within %.0f m from the "
                             "instance pool's other rigid clusters, the nearest %u parts at %.0f m (fit to "

@@ -130,6 +130,14 @@ constexpr uint32_t kObjectShipParts = 32;
 struct ObjectShip {
     float    omegaPerMs[3];
     float    tPerMs[3];
+    // The centroid's own motion, metres per ms, now less last: what the
+    // ship DID over the pair, for carrying its box and for its tail.
+    // tPerMs is the rigid motion's translation term about the world origin
+    // (p_prev = R p_now + t), which carries (I - R) times the parts'
+    // distance from the floating origin -- metres a frame for a turning
+    // body kilometres out, in a direction the body does not move -- and
+    // is the path's, not the box's (the review of 2026-09-09).
+    float    movePerMs[3];
     float    bmin[3];
     float    bmax[3];
     float    distM;      // its centroid's distance from the camera at the pair

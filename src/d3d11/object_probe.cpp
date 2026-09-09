@@ -451,7 +451,11 @@ constexpr int   kMaxClusters = 256;
 // handed to the pass as the station and re-registering its pixels by a
 // pixel or two every eighth frame. That was the shimmer.
 constexpr float kClusterAngleDeg = 0.01f;
-const float     kClusterCosHalf = cosf(kClusterAngleDeg * 0.5f * 0.01745329f);   // |q1 . q2| at that angle
+// The tolerance as the squared distance between two small rotations'
+// quaternion xyz parts: |q1.xyz - q2.xyz| is half the angle between them,
+// in radians, to the angle squared.
+constexpr float kClusterHalfRad = kClusterAngleDeg * 0.5f * 0.01745329f;
+constexpr float kClusterHalfRad2 = kClusterHalfRad * kClusterHalfRad;
 constexpr float kClusterPosM = 0.03f;       // three centimetres...
 constexpr float kClusterPosPerM = 1.0e-4f;  // ...plus the quantum's lever arm on the record's distance
 // The body's fit is ROBUST: members whose residual under the fit exceeds
@@ -483,8 +487,12 @@ bool rigidDelta(const Pose& prev, const Pose& now, float qd[4], float t[3], floa
     if (qd[3] < 0.0f) {
         for (int i = 0; i < 4; ++i) qd[i] = -qd[i];
     }
-    const float w = qd[3] > 1.0f ? 1.0f : qd[3];
-    *angleDeg = 2.0f * acosf(w) * 57.2957795f;
+    // The angle from the xyz part against w, not from acos(w): acos at
+    // w = 1 - 4e-9 (a hundredth of a degree) sees 1.0 in float and says
+    // nought, and at the next float below one says 0.04 deg, so every
+    // small turn read as one of a few values (the review of 2026-09-09).
+    const float xyz = sqrtf(qd[0] * qd[0] + qd[1] * qd[1] + qd[2] * qd[2]);
+    *angleDeg = 2.0f * atan2f(xyz, qd[3]) * 57.2957795f;
     float rp[3];
     quatRotate(qd, now.p, rp);
     for (int i = 0; i < 3; ++i) t[i] = prev.p[i] - rp[i];
@@ -499,10 +507,19 @@ int clusterOf(Cluster* cs, int* n, const float qd[4], const float t[3], float an
     const float posTol = kClusterPosM + kClusterPosPerM * distM;
     for (int j = 0; j < *n; ++j) {
         Cluster& c = cs[j];
-        float dot = 0.0f;
-        for (int i = 0; i < 4; ++i) dot += qd[i] * c.q[i];
-        dot = fabsf(dot) > 1.0f ? 1.0f : fabsf(dot);
-        if (dot < kClusterCosHalf) continue;   // 2 acos(dot) > kClusterAngleDeg, without the acos
+        // The angle between two small rotations as the distance between
+        // their quaternions' xyz parts (both with w >= 0, rigidDelta's
+        // doing): half the angle in radians, and the float keeps every
+        // quantum of it. A dot of unit quaternions cannot: at a hundredth
+        // of a degree the dot is 1 - 4e-9, under the float's own step
+        // below one (6e-8), so the old tests -- acos of the dot, then the
+        // dot against a cosine -- passed a record when its dot rounded to
+        // 1.0 and failed it otherwise, luck per record per pair, and a
+        // station's parts split into a hundred or two clusters of one (the
+        // review of 2026-09-09 emulated it: 51-60% in the largest cluster
+        // at a station's rate, 135-194 clusters).
+        const float dx = qd[0] - c.q[0], dy = qd[1] - c.q[1], dz = qd[2] - c.q[2];
+        if (dx * dx + dy * dy + dz * dz > kClusterHalfRad2) continue;
         const float dx = t[0] - c.t[0], dy = t[1] - c.t[1], dz = t[2] - c.t[2];
         if (sqrtf(dx * dx + dy * dy + dz * dz) > posTol) continue;
         ++c.count;
@@ -582,58 +599,55 @@ float easedPairDt(float dtMs) {
 // pair (every live record shifted together) nothing is taken: the deltas
 // are the origin's. The nearest kObjectShipsMax are kept, nearest first,
 // and replace the last pair's; a pair that finds none leaves the last
-// pair's to age out (kShipHoldFrames).
-void takeShips(const Cluster* clusters, int nc, int big, const std::vector<int>& clusterIdx,
+// pair's to age out (kShipHoldFrames). Since the review of 2026-09-09 the
+// tests are on the FIT: the centroid's own motion for own, still and
+// tail, and the body's fitted motion for the slice test (the body's
+// cluster is skipped only when it was taken as the body).
+void takeShips(const Cluster* clusters, int nc, int big, bool bodyTaken, const float* bodyW,
+               const float* bodyT, const std::vector<int>& clusterIdx,
                const std::vector<float>& posNow, const std::vector<float>& posPrev, uint32_t n,
                const float* camPos, float dtMs, uint32_t live) {
     if (g_shipRangeM <= 0.0f || !camPos || nc <= 0) return;
     const float dt = easedPairDt(dtMs);
     if (big >= 0) {
+        // A rebase pair: the live records shifted together, without a turn,
+        // by kilometres. Without the distance the player's own parts
+        // qualified -- over half the live records when the pool holds
+        // little else, moving four metres a frame -- and the ships' fifth
+        // flight took none on those pairs.
         const Cluster& b = clusters[big];
-        if (b.angleSum / b.count < static_cast<double>(kRotQuantDeg) && live && b.count * 2 > live) return;
+        if (b.angleSum / b.count < static_cast<double>(kRotQuantDeg) && live && b.count * 2 > live &&
+            b.transSum / b.count > 50.0) {
+            return;
+        }
     }
     ++g_shipPairs;
-    // The player's own parts move WITH the camera: a cluster whose
-    // translation over the pair is the camera's own (p_prev = R p_now + t,
-    // so t is the camera's old position less its new one, to the head's
-    // few centimetres) is the player's ship wherever its parts sit. The
-    // hundred-metre radius that once said so (kShipRadiusM, still the
-    // station's rule) left every other ship within it to the camera's
-    // path, and took a big hull's far parts as a ship of their own -- 61
-    // parts at 105 m moving 13.6 m a frame on the ships' third flight
-    // (2026-09-09 12:25).
-    float camT[3] = {0.0f, 0.0f, 0.0f};
-    bool haveCamT = false;
+    // The camera's displacement over the pair, now less last, for the
+    // player's own parts: their centroid moves with it (to the head's few
+    // centimetres), wherever they sit.
+    float camDisp[3] = {0.0f, 0.0f, 0.0f};
+    bool haveCam = false;
     if (g_pairCamPrevValid) {
-        for (int k = 0; k < 3; ++k) camT[k] = g_pairCamPrev[k] - camPos[k];
-        haveCamT = true;
+        for (int k = 0; k < 3; ++k) camDisp[k] = camPos[k] - g_pairCamPrev[k];
+        haveCam = true;
     }
-    const float camSpeed = sqrtf(camT[0] * camT[0] + camT[1] * camT[1] + camT[2] * camT[2]);
+    const float camSpeed = sqrtf(camDisp[0] * camDisp[0] + camDisp[1] * camDisp[1] + camDisp[2] * camDisp[2]);
     ObjectShip found[kObjectShipsMax];
     uint32_t nf = 0;
     std::vector<int> members;
     std::vector<float> fitNow, fitPrev;
     for (int j = 0; j < nc; ++j) {
-        if (j == big) continue;
+        // The largest cluster is skipped only when it was taken as the body:
+        // alone in open space with one other ship, the largest cluster IS
+        // that ship (the review of 2026-09-09).
+        if (j == big && bodyTaken) continue;
         const Cluster& c = clusters[j];
         if (c.count < kShipMinRecords) {
             ++g_shipsFew;
             continue;
         }
         const double angle = c.angleSum / c.count;
-        const double trans = c.transSum / c.count;
-        if (angle > static_cast<double>(kMotionMaxDeg) || trans > static_cast<double>(kMotionMaxM)) continue;
-        if (angle < static_cast<double>(kMotionMinDeg) && trans < static_cast<double>(kShipMinMoveM)) {
-            ++g_shipsStill;
-            continue;
-        }
-        if (haveCamT) {
-            const float ex = c.t[0] - camT[0], ey = c.t[1] - camT[1], ez = c.t[2] - camT[2];
-            if (sqrtf(ex * ex + ey * ey + ez * ez) <= 0.5f + 0.05f * camSpeed) {
-                ++g_shipsOwn;
-                continue;
-            }
-        }
+        if (angle > static_cast<double>(kMotionMaxDeg)) continue;   // a scatter, or a shuffle's turn
         members.clear();
         fitNow.clear();
         fitPrev.clear();
@@ -661,30 +675,62 @@ void takeShips(const Cluster* clusters, int nc, int big, const std::vector<int>&
             ++g_shipsOutOfRange;
             continue;
         }
-        if (big >= 0) {
-            const Cluster& b = clusters[big];
-            float dot = 0.0f;
-            for (int q = 0; q < 4; ++q) dot += c.q[q] * b.q[q];
-            dot = fabsf(dot) > 1.0f ? 1.0f : fabsf(dot);
-            const float dAng = 2.0f * acosf(dot) * 57.2957795f;
-            const float tx = c.t[0] - b.t[0], ty = c.t[1] - b.t[1], tz = c.t[2] - b.t[2];
-            const float originM = sqrtf(cen[0] * cen[0] + cen[1] * cen[1] + cen[2] * cen[2]);
-            const float posTol = kClusterPosM + kClusterPosPerM * originM;
-            if (dAng <= 2.0f * kClusterAngleDeg && sqrtf(tx * tx + ty * ty + tz * tz) <= 4.0f * posTol) {
-                ++g_shipsSlices;
-                continue;
-            }
-        }
         float w[3] = {}, tf[3] = {}, rms = 0.0f;
         if (!temporalRigidFit(fitNow.data(), fitPrev.data(), static_cast<int>(members.size()), w, tf, &rms) ||
             rms > kShipMaxRmsM) {
             ++g_shipsUnfit;
             continue;
         }
+        // What the ship DID over the pair: its centroid's motion, now less
+        // last, which is -((R - I) cen + t) = -(w x cen + t) to the angle
+        // squared. The fit's t alone is the rigid motion's term about the
+        // world origin and carries (I - R) times the parts' distance from
+        // the floating origin -- metres a frame for a turning body
+        // kilometres out, in a direction the body does not move (the
+        // review of 2026-09-09: the player's own hull read as a ship moving
+        // 13.6 m a frame on every turn) -- so the own, still, speed and
+        // tail tests take the centroid's motion, and the path keeps t.
+        const float wxc[3] = {w[1] * cen[2] - w[2] * cen[1], w[2] * cen[0] - w[0] * cen[2],
+                              w[0] * cen[1] - w[1] * cen[0]};
+        float move[3];
+        for (int k = 0; k < 3; ++k) move[k] = -(wxc[k] + tf[k]);
+        const float speed = sqrtf(move[0] * move[0] + move[1] * move[1] + move[2] * move[2]);
+        if (speed > kMotionMaxM) continue;   // twenty metres a pair: nothing that flies
+        const float fitDeg = sqrtf(w[0] * w[0] + w[1] * w[1] + w[2] * w[2]) * 57.2957795f;
+        if (fitDeg < kMotionMinDeg && speed < kShipMinMoveM) {
+            ++g_shipsStill;
+            continue;
+        }
+        // A slice of the body: the body's own rigid motion, turn and term
+        // alike, to a quarter of the turn and the position tolerance. The
+        // old test compared the clusters' mean quaternions by their dot,
+        // which the float cannot resolve at these angles (clusterOf says),
+        // and half of the station's splinters passed as ships.
+        if (bodyW && bodyT) {
+            const float bwn = sqrtf(bodyW[0] * bodyW[0] + bodyW[1] * bodyW[1] + bodyW[2] * bodyW[2]);
+            const float ex = w[0] - bodyW[0], ey = w[1] - bodyW[1], ez = w[2] - bodyW[2];
+            const float tx = tf[0] - bodyT[0], ty = tf[1] - bodyT[1], tz = tf[2] - bodyT[2];
+            const float originM = sqrtf(cen[0] * cen[0] + cen[1] * cen[1] + cen[2] * cen[2]);
+            const float posTol = kClusterPosM + kClusterPosPerM * originM;
+            if (sqrtf(ex * ex + ey * ey + ez * ez) <= 0.25f * bwn + 6.0e-5f &&
+                sqrtf(tx * tx + ty * ty + tz * tz) <= 0.5f + 4.0f * posTol) {
+                ++g_shipsSlices;
+                continue;
+            }
+        }
+        // The player's own parts: their centroid moves with the camera.
+        if (haveCam) {
+            const float ex = move[0] - camDisp[0], ey = move[1] - camDisp[1], ez = move[2] - camDisp[2];
+            if (sqrtf(ex * ex + ey * ey + ez * ez) <= 0.5f + 0.05f * camSpeed) {
+                ++g_shipsOwn;
+                continue;
+            }
+        }
         ObjectShip sh = {};
         for (int k = 0; k < 3; ++k) {
             sh.omegaPerMs[k] = w[k] / dt;
             sh.tPerMs[k] = tf[k] / dt;
+            sh.movePerMs[k] = move[k] / dt;
             sh.bmin[k] = 1e30f;
             sh.bmax[k] = -1e30f;
         }
@@ -698,14 +744,13 @@ void takeShips(const Cluster* clusters, int nc, int big, const std::vector<int>&
         sh.distM = dist;
         sh.rms = rms;
         sh.records = static_cast<uint32_t>(members.size());
-        // The tail and the parts (ObjectShip says). The ship moves by minus
-        // t a frame, so its way is minus t; the rearmost part is the one
-        // farthest back along it.
-        const float speed = sqrtf(tf[0] * tf[0] + tf[1] * tf[1] + tf[2] * tf[2]);
+        // The tail and the parts (ObjectShip says): the way it flies is its
+        // centroid's motion; the rearmost part is the one farthest back
+        // along it.
         sh.dir[0] = sh.dir[1] = sh.dir[2] = 0.0f;
         sh.rear = -1e30f;
         if (speed >= kShipTailSpeedM) {
-            for (int k = 0; k < 3; ++k) sh.dir[k] = -tf[k] / speed;
+            for (int k = 0; k < 3; ++k) sh.dir[k] = move[k] / speed;
             float rearAlong = 1e30f;
             for (int m : members) {
                 const float* pm = &posNow[static_cast<size_t>(m) * 3];
@@ -749,7 +794,7 @@ void takeShips(const Cluster* clusters, int nc, int big, const std::vector<int>&
         g_shipNoteMs = stampMs();   // dueMs reads the stamp; it does not set it (the first flight noted every pair)
         const ObjectShip& s0 = found[0];
         const float* ow = s0.omegaPerMs;
-        const float* ot = s0.tPerMs;
+        const float* om = s0.movePerMs;
         Log::get().note(
             "object probe: %u moving ship%s within %.0f m -- the nearest %u parts at %.0f m, fit to "
             "%.3f m, turning %.3f deg and moving %.2f m a frame of %.1f ms, its box %.0f x %.0f x "
@@ -757,7 +802,7 @@ void takeShips(const Cluster* clusters, int nc, int big, const std::vector<int>&
             nf, nf == 1 ? "" : "s", static_cast<double>(g_shipRangeM), s0.records,
             static_cast<double>(s0.distM), static_cast<double>(s0.rms),
             static_cast<double>(sqrtf(ow[0] * ow[0] + ow[1] * ow[1] + ow[2] * ow[2]) * dt * 57.2957795f),
-            static_cast<double>(sqrtf(ot[0] * ot[0] + ot[1] * ot[1] + ot[2] * ot[2]) * dt),
+            static_cast<double>(sqrtf(om[0] * om[0] + om[1] * om[1] + om[2] * om[2]) * dt),
             static_cast<double>(dt), static_cast<double>(s0.bmax[0] - s0.bmin[0]),
             static_cast<double>(s0.bmax[1] - s0.bmin[1]), static_cast<double>(s0.bmax[2] - s0.bmin[2]),
             static_cast<unsigned long long>(g_shipsTaken));
@@ -892,6 +937,10 @@ void diffPair(const uint8_t* prev, const uint8_t* now, uint32_t bytes, float dtM
     // ship turned; without a turn and over half the LIVE records, an origin
     // rebase.
     int big = -1, second = -1;
+    // The body's fit this pair, for the ships' slice test (takeShips): its
+    // rigid motion, and whether it was taken as the body.
+    float bodyW[3] = {0.0f, 0.0f, 0.0f}, bodyT[3] = {0.0f, 0.0f, 0.0f};
+    bool bodyFit = false, bodyTaken = false;
     for (int j = 0; j < nc; ++j) {
         if (big < 0 || clusters[j].count > clusters[big].count) {
             second = big;
@@ -995,6 +1044,11 @@ void diffPair(const uint8_t* prev, const uint8_t* now, uint32_t bytes, float dtM
                 fitPrev.swap(keptPrev);
             }
             if (members.size() < kMotionMinRecords) fitOk = false;
+            if (fitOk) {
+                memcpy(bodyW, w, sizeof(bodyW));
+                memcpy(bodyT, tf, sizeof(bodyT));
+                bodyFit = true;
+            }
             const float fitDeg = fitOk ? sqrtf(w[0] * w[0] + w[1] * w[1] + w[2] * w[2]) * 57.2957795f : 0.0f;
             const float fitM = fitOk ? sqrtf(tf[0] * tf[0] + tf[1] * tf[1] + tf[2] * tf[2]) : 0.0f;
             // A body for the pass TURNS (the feature is rotating stations; a
@@ -1127,6 +1181,7 @@ void diffPair(const uint8_t* prev, const uint8_t* now, uint32_t bytes, float dtM
                 g_motion.age = 0;
                 g_motionAge = 0;
                 g_motionValid = true;
+                bodyTaken = true;
                 std::unordered_set<uint64_t> bodySigs;
                 bodySigs.reserve(members.size());
                 for (int m : members) bodySigs.insert(sigNow[static_cast<size_t>(m)]);
@@ -1146,7 +1201,24 @@ void diffPair(const uint8_t* prev, const uint8_t* now, uint32_t bytes, float dtM
             if (trans > g_rebaseMaxM) g_rebaseMaxM = trans;
         }
     }
-    takeShips(clusters, nc, big, clusterIdx, posNow, posPrev, n, camPos, dtMs, live);
+    // The body's motion over this pair for the slice test: the fit when
+    // there was one, else the held rates over the interval.
+    float heldW[3], heldT[3];
+    const float* bw = nullptr;
+    const float* bt = nullptr;
+    if (bodyFit) {
+        bw = bodyW;
+        bt = bodyT;
+    } else if (g_motionValid) {
+        const float dtb = (dtMs >= 5.0f && dtMs <= 50.0f) ? dtMs : 11.1f;
+        for (int k = 0; k < 3; ++k) {
+            heldW[k] = g_motion.omegaPerMs[k] * dtb;
+            heldT[k] = g_motion.tPerMs[k] * dtb;
+        }
+        bw = heldW;
+        bt = heldT;
+    }
+    takeShips(clusters, nc, big, bodyTaken, bw, bt, clusterIdx, posNow, posPrev, n, camPos, dtMs, live);
 }
 
 void releaseRing() {
