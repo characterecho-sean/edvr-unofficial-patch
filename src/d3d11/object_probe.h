@@ -70,7 +70,13 @@ void objectProbeShutdown();
 // every part of it in one cluster -- and held for a while after, since a
 // station's rate is constant. False until a pair has given one, and again
 // once it has gone stale.
-constexpr uint32_t kObjectGrid = 64;   // cells a side of the body's occupancy grid
+// Cells a side of the body's occupancy grid: 128 (2 MB) since 2026-09-09,
+// from 64. A station's cluster spans 14 km along its axis and its unslotted
+// tips a couple more, which at 62 cells of 256 m did not fit with the
+// reach either side and would have doubled the cell; 126 cells hold it at
+// 256 m, and a Coriolis at 32 m. The dilation's cost is the grid's
+// occupied lines, not the reach, so the finer grid costs the upload alone.
+constexpr uint32_t kObjectGrid = 128;
 struct ObjectMotion {
     float    R[9];       // row-major 3x3, over the pair's own interval (for the record)
     float    t[3];

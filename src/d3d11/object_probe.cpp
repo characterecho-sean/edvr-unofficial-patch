@@ -67,6 +67,10 @@ constexpr float kShipRadiusM = 100.0f;   // the player's own parts sit here, co-
 // than this -- the ship's own hull as seen from the seat is within it, a
 // hangar's walls before the ship is latched to the pad are not (2026-09-09).
 constexpr float kBodyNearM = 50.0f;
+// How far past the members' box a recorded part of the body's types still
+// widens it (buildGrid says why): a station's unslotted tips, not a second
+// station of the kind.
+constexpr float kBodyTipM = 3000.0f;
 
 // The record's head, decoded the way the game's own shaders decode it
 // (fss_panel_vs.h: edvrDecodeQuat, the position at byte 16).
@@ -120,6 +124,33 @@ void buildGrid(const uint8_t* now, uint32_t n, const std::vector<uint8_t>& liveN
             if (p[k] < lo[k]) lo[k] = p[k];
             if (p[k] > hi[k]) hi[k] = p[k];
         }
+    }
+    // ...widened to the body's other recorded parts near it. A station's
+    // tips land in new slots every frame (the dumps of 2026-09-09 06:43: the
+    // spine's last parts "shuffled" in every pair, a kilometre or two past
+    // the last member), so they can never be members; keyed by type they
+    // would mark, but only inside the box, and the box was the members'.
+    // Any live record of the body's types within kBodyTipM of the members'
+    // box widens it; a stray of the same type farther off (another station
+    // of the kind, tens of kilometres away) does not, which keeps the cell
+    // from growing to cover it.
+    {
+        float wlo[3], whi[3];
+        for (int k = 0; k < 3; ++k) { wlo[k] = lo[k]; whi[k] = hi[k]; }
+        for (uint32_t i = 0; i < n; ++i) {
+            if (!liveNow[i] || !bodySigs.count(sigNow[i])) continue;
+            const Pose pr = decodePose(now + i * kRecordBytes);
+            bool near = true;
+            for (int k = 0; k < 3; ++k) {
+                if (pr.p[k] < lo[k] - kBodyTipM || pr.p[k] > hi[k] + kBodyTipM) near = false;
+            }
+            if (!near) continue;
+            for (int k = 0; k < 3; ++k) {
+                if (pr.p[k] < wlo[k]) wlo[k] = pr.p[k];
+                if (pr.p[k] > whi[k]) whi[k] = pr.p[k];
+            }
+        }
+        for (int k = 0; k < 3; ++k) { lo[k] = wlo[k]; hi[k] = whi[k]; }
     }
     // The cells sit on a FIXED world lattice: a power of two of metres a
     // side, the box's corner at a multiple of it, sixty-two cells covering

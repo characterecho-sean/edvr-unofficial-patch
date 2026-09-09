@@ -2036,6 +2036,33 @@ which is this project's contract for every read of the game.
    still is among them -- while the composites (panels, labels) stay off
    it. The sprite goes through the coverage pass in the scene's
    projection too, so only its opaque core writes depth.
+
+   *Its fifteenth flight* (06:39, `v0.14.1-84-gf31342f`), with two eye
+   dumps: the chevrons "look better (more thinly drawn), but I still see
+   some blurring around" them, and "the tips of the station structure
+   ... do not seem to be included in the object". The dumps say what
+   both are. The chevrons are dark in the objects view with no halo at
+   all now, so nothing excludes them by the mask any more; they are
+   unclaimed by GEOMETRY. A target's reticle sits near, in front of
+   everything (the shader's own depth test is what lets it show over the
+   station), and the coverage pass wrote that near depth under the whole
+   of each stroke's glow band, so the station seen through the band
+   reprojected as something twenty metres off and smeared around the
+   chevrons under any head motion. The coverage now writes the stroke's
+   own depth under its core alone (its alpha at seven tenths and over)
+   and, under the fringe, the scene's depth read from the resolve and
+   written back as it is; the mask is marked under both. The tips: the
+   pool pairs around the dumps put the members' span at 13.6 km and the
+   spine's last parts a kilometre or two beyond it, "shuffled" in every
+   pair -- landing in new slots each frame, so never members -- and of
+   the body's types, so the type-keyed marking would take them, but only
+   inside the box, and the box was the members'. Any live record of the
+   body's types within three kilometres of the members' box widens it
+   now; a stray of the kind farther off does not. Fitting that in
+   sixty-two cells would have doubled the cell to 512 m for this
+   station, so the grid is 128 cells a side (2 MB): 256 m here as
+   before, 32 m at a Coriolis, the dilation's cost being the occupied
+   lines and not the reach.
 4. **Tier 2b** only if question 1 says no bits.
 5. **Tier 3** as `tools/` work against dumped frames, never on the hot
    path.

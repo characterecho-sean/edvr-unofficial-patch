@@ -251,7 +251,7 @@ bool insideBody(float3 d, float z) {
                float3(wR0.w, wR1.w, wR2.w);
     float3 u = (w - box0.xyz) / max(box1.xyz - box0.xyz, 1e-3);
     if (any(u < 0.0) || any(u >= 1.0)) return false;
-    return BG.Load(int4(int3(u * 64.0), 0)) > 0.5;
+    return BG.Load(int4(int3(u * 128.0), 0)) > 0.5;   // kObjectGrid cells a side (object_probe.h)
 }
 // The interface's pixel, by ui_depth's coverage mask when it is bound
 // (probe.z): the station's target brackets and its label sit at the
