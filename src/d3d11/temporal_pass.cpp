@@ -252,6 +252,8 @@ float moverAt(float2 pp, float zPred, bool thick) {
 // the next, but a turn shared by a thousand parts and the space they fill
 // can, and this is all it needs.
 bool insideBody(float3 d, float z) {
+)HLSL"
+R"HLSL(
     // The view-space point, the game's way round (z forward), into the
     // world by this frame's camera rows, into the grid by the box.
     float3 vg = float3(d.x * z, d.y * z, -d.z * z);
@@ -765,6 +767,8 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
                 InterlockedAdd(Stats[base2 + 1], uint(round(dot(motion, motion) * 100.0)));
             }
         }
+)HLSL"
+R"HLSL(
         // The motion view on the trained path: painted into the output in
         // NVIDIA's place (the pass skips its evaluation that frame).
         if (split.y == 1.0) {
@@ -946,6 +950,8 @@ void main(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
                 if (worldTaken == 3) count[39] = 1;   // a moving ship's
                 // The mover mask (moverAt says): a masked pixel keeps less
                 // of its history, by the strength -- at 1 it is the fresh
+)HLSL"
+R"HLSL(
                 // frame alone, spatially settled by the filter above.
                 if (movers.x != 0.0) {
                     mover = moverAt(p + mvUsed, zPred, depthN >= 6);
