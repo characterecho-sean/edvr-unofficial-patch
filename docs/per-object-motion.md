@@ -2439,6 +2439,30 @@ which is this project's contract for every read of the game.
    judder that is left has no named mechanism yet; the next flight's
    cluster count and diff time say whether the pool's noise or the
    probe's own cost is in it.
+
+   *Its thirtieth flight* (14:28, `v0.14.1-109-ga551ee4`): "heat haze is
+   gone it seems, but cpu frame time is [high] and judders with lots of
+   ships around I'm guessing. Maybe we should do a performance review?"
+   The report's new figure named it: the diff took 2 to 9 ms a pair on
+   the render thread on average and 13 at most near a station with
+   ships about, half a millisecond with no body in hand -- a frame's
+   budget every eighth frame, which is a judder at steady frame times
+   and the CPU figure both. Nothing in the diff touches the device (the
+   pair's copies are bytes once mapped; the results are a struct, eight
+   ships and a grid), so it runs on a thread of its own now, below
+   normal priority, one job at a time: poll copies the pair into the
+   job, a pair that finds the worker still on the last is dropped and
+   counted, and the results are published under a lock in short
+   sections -- the body's struct with its grid's pointer (the grid
+   double-buffered, so the pass's upload from the last pointer is never
+   overwritten under it), the ships, and the ages the render thread
+   counts. The report says the diff's time on its thread and the pairs
+   dropped. The cluster count was 95 to 151 a pair still, with the
+   translation term about the camera: the two quantised quaternions a
+   delta is made of reach a hundredth of a degree between parts of one
+   body often enough, so the tolerance is two hundredths, still under a
+   station's own turn. A performance review of the rest of the hot path
+   runs alongside.
 4. **Tier 2b** only if question 1 says no bits.
 5. **Tier 3** as `tools/` work against dumped frames, never on the hot
    path.
