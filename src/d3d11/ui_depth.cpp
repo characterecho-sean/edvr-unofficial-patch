@@ -433,18 +433,6 @@ struct DepthShader {
     const char*         name;
     ID3D11PixelShader*  shader;
     bool                tried;
-    // What this family's coverage writes into the reactive mask, relative
-    // to the strength: nought for the interface proper, whose pixels the
-    // temporal pass keeps off a turning body's path (the label under a
-    // target does not turn with the station), and three quanta under it
-    // for the holo material's markers, which ride the body's path -- the
-    // mask's value is the only way the pass can tell the two apart at a
-    // pixel, and three quanta of 255 read the same to NVIDIA. The pass
-    // tests the mask against the strength less a quantum and a half
-    // (temporal_pass.cpp, uiCovered). Measured 2026-09-09 from an eye dump:
-    // with the markers excluded, the station under each chevron and its
-    // few pixels of halo fell to the camera's path and smeared.
-    float               maskOffset;
 };
 DepthShader g_depthShaders[4] = {
     {{kPanelPs, kPanelPsTinted, kPanelPsCheap, 0}, {kPanelVs, 0, 0, 0}, 1,
@@ -461,15 +449,14 @@ DepthShader g_depthShaders[4] = {
     {{kScreenPs, kSpritePs, 0, 0}, {kScreenVs, kHudSprite, 0, 0}, 0,
      kScreenDepthHlsl, sizeof(kScreenDepthHlsl) - 1, "ui_depth_screen_ps", nullptr, false},
     {{kHoloPanelPs, 0, 0, 0}, {kHoloPanel, 0, 0, 0}, 2,
-     kHoloDepthHlsl, sizeof(kHoloDepthHlsl) - 1, "ui_depth_holo_ps", nullptr, false,
-     -3.0f / 255.0f},
+     kHoloDepthHlsl, sizeof(kHoloDepthHlsl) - 1, "ui_depth_holo_ps", nullptr, false},
 };
 struct FloorCb {
     ID3D11Buffer* cb = nullptr;
     float         floor = -1.0f;
     float         strength = -1.0f;
 };
-FloorCb g_floorCbs[2];   // [0] the interface proper, [1] the holo markers (DepthShader::maskOffset)
+FloorCb g_floorCbs[2];   // [0] the interface proper, [1] the families that ride a body's path (g_reissueMaskOffset)
 ID3D11DepthStencilState* g_reissueDss = nullptr;   // GEQUAL, write all
 bool          g_reissueDssFailedNoted = false;
 
@@ -553,6 +540,21 @@ bool                     g_rebound = false;      // the OM was swapped for this 
 ID3D11RenderTargetView*  g_savedRtvs[kMaxRtvs] = {};
 ID3D11DepthStencilView*  g_savedDsv = nullptr;
 DepthShader*             g_reissueShader = nullptr;
+// What the reissue writes into the reactive mask, relative to the strength:
+// nought for the interface proper (the composites: panels, labels), whose
+// pixels the temporal pass keeps off a turning body's path -- a label at a
+// station's distance does not turn with it -- and three quanta of 255
+// under it for the families drawn AT the target that should ride that
+// path: the flight HUD's strokes (the target's chevrons are two capsule
+// strokes each), the holo material's markers, the target-time sprite. The
+// mask's value is the only way the pass can tell the two apart at a pixel,
+// three quanta read the same to NVIDIA, and the pass tests the mask
+// against the strength less a quantum and a half (temporal_pass.cpp,
+// uiCovered). Measured 2026-09-09 from an eye dump: with the chevrons
+// excluded, the station under each and its few pixels of halo fell to the
+// camera's path and smeared; with the holo material alone brought across,
+// no change -- the chevrons are the flight HUD's.
+float                    g_reissueMaskOffset = 0.0f;
 ID3D11PixelShader*       g_savedPs = nullptr;
 // The second draw's saved state, kept apart from the in-place swap's: the
 // two nest, and sharing one slot let the re-issue's restore null the state
@@ -976,8 +978,8 @@ ID3D11DepthStencilState* maskDepthState(ID3D11DeviceContext* ctx) {
 // The alpha floor and the reactive strength, in a constant buffer of
 // EDVR's at b13 (a slot the game's composites leave empty: their pixel
 // stages declare b2 alone).
-// ...one buffer per mask offset in use (DepthShader::maskOffset): the
-// interface proper at the strength, the holo material's markers under it.
+// ...one buffer per mask offset in use (g_reissueMaskOffset): the interface
+// proper at the strength, the families that ride a body's path under it.
 ID3D11Buffer* floorBuffer(ID3D11DeviceContext* ctx, float maskOffset) {
     const float strength = g_reactive > 0.0f ? (g_reactive + maskOffset > 0.0f ? g_reactive + maskOffset : 0.0f)
                                              : 0.0f;
@@ -1369,6 +1371,7 @@ bool uiDepthOnEyeDraw(ID3D11DeviceContext* ctx) {
     g_rebindEye = -1;
     g_drawEye = -1;
     g_reissueShader = nullptr;
+    g_reissueMaskOffset = 0.0f;   // the interface proper unless the family below says otherwise
     if (!g_on || g_stoodDown) return false;
     // Cheapest first: no depth target, nothing to write (the post chain's
     // fullscreen draws, ten a frame).
@@ -1424,7 +1427,13 @@ bool uiDepthOnEyeDraw(ID3D11DeviceContext* ctx) {
         // which barely moves: "small blurry quads under each of the four
         // brackets". The coverage stand-in (kHoloDepthHlsl) takes the
         // surface's own alpha at the floor: the strokes, not the glow.
-        const bool hud = h == kFlightHud || h == kHoloPanel;
+        // ...and the target-time sprite family (kHudSprite), which appears
+        // in the log within a second of a target being taken: in place, its
+        // own draw's alpha discard let its soft fringe write the target's
+        // depth over the station (2026-09-09). All three ride a turning
+        // body's path (g_reissueMaskOffset says how).
+        const bool hud = h == kFlightHud || h == kHoloPanel || h == kHudSprite;
+        g_reissueMaskOffset = hud ? -3.0f / 255.0f : 0.0f;
         const uint64_t ph = (hud || wantMask || wantLine) ? boundPsHash(ctx) : 0;
         DepthShader* shader = (hud || wantMask) ? depthShaderFor(ctx, ph, h, surfaceSlot) : nullptr;
         if (hud && shader) {
@@ -1454,10 +1463,16 @@ bool uiDepthOnEyeDraw(ID3D11DeviceContext* ctx) {
                        g_mode == Mode::kReissueScene
                            ? (h == kFlightHud
                                   ? "the flight HUD; its depth written by the coverage pass in the "
-                                    "scene's projection, under its strokes and not their quads"
+                                    "scene's projection, under its strokes and not their quads; its "
+                                    "pixels ride a turning body's path"
+                              : h == kHudSprite
+                                  ? "the target-time sprite; its depth written by the coverage pass in "
+                                    "the scene's projection, under its opaque core and not its fringe; "
+                                    "its pixels ride a turning body's path"
                                   : "the holo material (the cockpit's panels, the target markers); "
                                     "its depth written by the coverage pass in the scene's "
-                                    "projection, under the surface's strokes and not the glow")
+                                    "projection, under the surface's strokes and not the glow; its "
+                                    "pixels ride a turning body's path")
                        : composite ? "samples a learned surface; writes its depth in "
                                      "place, the scene's own encoding"
                                    : "named direct family; writes its depth in place");
@@ -1629,7 +1644,7 @@ bool uiDepthReissueBegin(ID3D11DeviceContext* ctx) {
         // mask-only pass over a family whose depth is already written just
         // marks, with the same test and no writes.
         ID3D11DepthStencilState* dss = depthPass ? reissueState(ctx) : maskDepthState(ctx);
-        ID3D11Buffer* cb = floorBuffer(ctx, shader->maskOffset);
+        ID3D11Buffer* cb = floorBuffer(ctx, g_reissueMaskOffset);
         if (!dss || !cb) {
             ++g_wNoTwin;
             return;

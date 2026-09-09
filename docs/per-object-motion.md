@@ -2021,6 +2021,21 @@ which is this project's contract for every read of the game.
    off the body's path only what sits above the strength less a quantum
    and a half: the flight HUD's strokes and the composites stay off it,
    the chevrons ride it. NVIDIA reads three quanta as the same strength.
+
+   *Its fourteenth flight* (06:23, `v0.14.1-82-g620bfce`): "no change
+   to the brackets". The chevrons are not the holo material's: a chevron
+   in the dump is two capsule strokes with rounded ends, which is the
+   flight HUD's shader, and the log shows a third family appearing
+   within a second of the target being taken -- the target-time sprite
+   (`E508648660A352B2`, in place under the writing twin, its own alpha
+   discard letting its soft fringe write the target's depth over the
+   station). So the mask offset is by FAMILY now, not by stand-in, and
+   all three families drawn at the target ride the body's path: the
+   flight HUD's strokes, the holo material's markers, the sprite -- the
+   flight HUD draws strokes and not text, so nothing that should hold
+   still is among them -- while the composites (panels, labels) stay off
+   it. The sprite goes through the coverage pass in the scene's
+   projection too, so only its opaque core writes depth.
 4. **Tier 2b** only if question 1 says no bits.
 5. **Tier 3** as `tools/` work against dumped frames, never on the hot
    path.

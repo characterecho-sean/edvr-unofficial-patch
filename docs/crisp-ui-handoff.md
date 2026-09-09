@@ -1298,3 +1298,13 @@ coverage (`DepthShader::maskOffset`, `-3/255`) marks it three quanta under
 strength less a quantum and a half (`uiCovered`, `probe.w`). NVIDIA reads
 three quanta as the same strength. The mask is R8_UNORM, so the two values
 are one quantum apart on either side of the test at any strength.
+
+Corrected the same day: the target's chevrons are the flight HUD's capsule
+strokes, and a third family appears at targeting, the target-time sprite
+(`vs E508648660A352B2`, `ps 63ABD86359B57D01`, "writes its depth in place"
+before). The mask offset is per family now (`g_reissueMaskOffset`, set in
+the classification): the flight HUD, the holo material and the sprite mark
+three quanta under the strength and ride a turning body's path; the
+composites mark at the strength and stay off it. The sprite also goes
+through `Mode::kReissueScene`, its depth from `kScreenDepthHlsl` (alpha at
+TEXCOORD0 over the floor) under its opaque core only.
