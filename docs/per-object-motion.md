@@ -1842,6 +1842,40 @@ which is this project's contract for every read of the game.
    carried delta is not theirs. The player's word on the fifth
    flight's fix, given with this one: "The UI targeting symbols seem to
    be fixed" -- the HUD coverage pass holds.
+
+   *Its ninth flight* (19:52, `v0.14.1-73-g6eac4de`, the camera-jump
+   guard): parked some ten kilometres from the station and facing it,
+   "if I hold my head still the station flashes between clear and
+   blurry as it rotates; if I'm moving my head it remains blurry", and
+   the target brackets artifact again. The log says why before any
+   geometry does: the body's path took 0.06 to 0.37 percent of the
+   frame at that range, against 12 to 17 at the slot, with the body in
+   hand (335-477 records, fits to 2-7 mm) and the world path holding 66
+   percent -- the station had depth and took the world path, and the
+   grid said it was not the body's. The flight's dumps put the parts
+   where the rows say they should be (833 of 838 in front of the camera
+   read as world = M view + c, and 5 the other way round), so the
+   transform is right and the DEPTH is wrong: the pass decoded the
+   scene's depth with the planes the game asks the runtime for,
+   0.025..50000 m, while the scene block's own projection row (row 198:
+   [0 0 0 0.025] over [0 0 1 0]) is reversed-Z with no far plane at all,
+   depth = 0.025 / z. The two agree to a part in a thousand at the slot
+   and part company with distance: 3 km decoded as 2.8, 10 km as 8.3.
+   Every world-path pixel of the station reconstructed 1.7 km short of
+   it and outside every marked cell, and the body's per-pixel vectors on
+   the few that got in were 17 percent too long. The pass now takes A
+   and B from the block's row (latched with the camera rows, from the
+   same write) and decodes z = B / (depth - A) everywhere it reads depth
+   in metres: the history fetch, the mover mask, the debug views. This
+   retires the eighth flight's verdict: the shimmer beyond a few hundred
+   metres was not sampling, it was the body's path never reaching that
+   far, and "within a few hundred metres" was the range at which the
+   decode's error still fell inside the grid's cell. The brackets are
+   the same story at that range -- the station under them unclaimed and
+   smeared, the bracket's own region treated differently by the reactive
+   mask -- and the coverage pass itself did not change between the
+   flights; if they still artifact once the station is claimed at range,
+   that is the next question.
 4. **Tier 2b** only if question 1 says no bits.
 5. **Tier 3** as `tools/` work against dumped frames, never on the hot
    path.

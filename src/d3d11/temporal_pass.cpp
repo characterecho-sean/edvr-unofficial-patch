@@ -75,7 +75,7 @@ cbuffer P : register(b0) {
     float  gamma;       // clip half-width, in standard deviations
     int    haveHistory; // 0: nothing to blend, this frame goes out as it is
     int    candMask;    // bit c: candidate c has a delta this frame
-    float4 knobs;       // x unused (the rest snap, retired 2026-09-04); y 1 = depth bound; z near, w far
+    float4 knobs;       // x, z: the depth's encoding, written = x + z / metres (reversed-Z; x = 0 with no far plane); y 1 = depth bound; w the runtime's far, unused
     float4 tvUsed;      // xyz the translation term for the used delta (depth motion), w unused
     float4 tvCand;      // xyz the same for the instrument's swapped-eyes candidate
     float4 tvCam;       // xyz the translation term for the camera rows (the world path); w 1 = the world path is on
@@ -209,11 +209,11 @@ float moverAt(float2 pp, float zPred, bool thick) {
         [unroll] for (int ox = -1; ox <= 1; ++ox) {
             int2 q = clamp(pq + int2(ox, oy), int2(0, 0), size - 1);
             float zr = ZP.Load(int3(q, 0));
-            float den = zr * (knobs.w - knobs.z) + knobs.z;
+            float den = zr - knobs.x;   // depth = A + B / z: z = B / (depth - A)
             if (zr <= 0.0 || den <= 0.0) {
                 anyFar = true;
             } else {
-                float z = knobs.z * knobs.w / den;
+                float z = knobs.z / den;
                 zmin = min(zmin, z);
                 zmax = max(zmax, z);
             }
@@ -314,9 +314,9 @@ bool fetchHistoryT(float2 p, float3 r0, float3 r1, float3 r2, float3 tv,
                 if (zs > 0.0) ++depthN;
             }
         }
-        float den = zr * (knobs.w - knobs.z) + knobs.z;
+        float den = zr - knobs.x;   // depth = A + B / z: z = B / (depth - A)
         bool far = zr <= 0.0 || den <= 0.0;
-        float z = far ? 0.0 : knobs.z * knobs.w / den;
+        float z = far ? 0.0 : knobs.z / den;
         if (worldOn && (far || z > split.x)) {
             world = 1;
             dp = float3(dot(c2R0.xyz, d), dot(c2R1.xyz, d), dot(c2R2.xyz, d));
@@ -459,9 +459,9 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
                     if (zs > 0.0) ++depthN;
                 }
             }
-            float den = zr * (knobs.w - knobs.z) + knobs.z;
+            float den = zr - knobs.x;   // depth = A + B / z: z = B / (depth - A)
             bool far = zr <= 0.0 || den <= 0.0;
-            float z = far ? 0.0 : knobs.z * knobs.w / den;
+            float z = far ? 0.0 : knobs.z / den;
             bool worldOn = tvCam.w != 0.0 && split.x > 0.0;
             if (worldOn && (far || z > split.x)) {
                 count15 = 1;
@@ -617,7 +617,7 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
             if (knobs.y == 0.0) {
                 o3 = float3(0.25, 0.0, 0.25);
             } else if (zs3 > 0.0) {
-                float m3 = knobs.z * knobs.w / (zs3 * (knobs.w - knobs.z) + knobs.z);
+                float m3 = knobs.z / (zs3 - knobs.x);
                 float g3 = saturate(1.0 - log2(max(m3, 0.5)) / 8.0);
                 o3 = g3.xxx;
             } else {
@@ -908,7 +908,7 @@ void main(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
             if (knobs.y == 0.0) {
                 o = float3(0.25, 0.0, 0.25);
             } else if (zs3 > 0.0) {
-                float m3 = knobs.z * knobs.w / (zs3 * (knobs.w - knobs.z) + knobs.z);
+                float m3 = knobs.z / (zs3 - knobs.x);
                 float g3 = saturate(1.0 - log2(max(m3, 0.5)) / 8.0);
                 o = g3.xxx;
             } else {
@@ -1760,6 +1760,7 @@ bool     g_warmNoted = false;
 struct RowsWrite {
     const void* buf = nullptr;
     float       rows[12] = {};
+    float       proj[2] = {};   // the projection's z row: the depth written is proj[0] + proj[1] / z
     uint32_t    frame = 0;
     uint32_t    seq = 0;
     bool        valid = false;
@@ -1792,6 +1793,8 @@ bool        g_lastGoodValid = false;
 uint32_t    g_camCarried = 0;        // frames the ship's delta was carried over a drop
 uint32_t    g_camCarriedJump = 0;    // ...of which carried a translation over 50 m: zero by construction
 float    g_curRows[12] = {};
+float    g_curProj[2] = {};        // the picked write's projection z row (A, B); B > 0 once read
+bool     g_projNoted = false;      // the encoding line, once
 bool     g_curValid = false;
 bool     g_curLatched = false;
 float    g_prevRows[12] = {};
@@ -1933,6 +1936,8 @@ void chooseCameraRows() {
     }
     if (pick >= 0) {
         memcpy(g_curRows, g_rowsRing[pick].rows, sizeof(g_curRows));
+        g_curProj[0] = g_rowsRing[pick].proj[0];
+        g_curProj[1] = g_rowsRing[pick].proj[1];
         g_curValid = true;
     }
 }
@@ -2692,9 +2697,48 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         p.jit[1] = jyNow;
         p.jit[2] = g_filterCurrent ? 1.0f : 0.0f;
         p.jit[3] = g_historyC;
-        p.knobs[0] = 0.0f;   // the rest snap's slot, retired 2026-09-04
+        // The depth's encoding: what the game wrote is A + B / z, A and B
+        // from the scene block's own projection row when the frame's rows
+        // came with one (B > 0), else from the planes the game asked the
+        // runtime for (A = n / (n - f), B = n f / (f - n): the same
+        // reversed-Z form with a far plane, and the decode the pass used
+        // until 2026-09-08). The block's row on build 332841 says A = 0,
+        // B = 0.025 -- no far plane -- where the runtime's 0.025..50000 m
+        // decoded 10 km as 8.3 km, 3 km as 2.8 km, and the body's grid
+        // missed the station beyond a few hundred metres (19:52).
+        float projA = 0.0f, projB = 0.0f;
+        if (g_curProj[1] > 0.0f) {
+            projA = g_curProj[0];
+            projB = g_curProj[1];
+        } else if (nearZ > 0.0f && farZ > nearZ) {
+            projA = nearZ / (nearZ - farZ);
+            projB = nearZ * farZ / (farZ - nearZ);
+        }
+        if (g_curProj[1] > 0.0f && !g_projNoted && nearZ > 0.0f && farZ > nearZ) {
+            g_projNoted = true;
+            const float a = g_curProj[0], b = g_curProj[1];
+            const float nearRow = (1.0f - a) != 0.0f ? b / (1.0f - a) : b;
+            char farTxt[64];
+            if (a >= 0.0f) {
+                snprintf(farTxt, sizeof(farTxt), "no far plane (depth = %.3f / z)", static_cast<double>(b));
+            } else {
+                snprintf(farTxt, sizeof(farTxt), "far %.0f m", static_cast<double>(-b / a));
+            }
+            const float an = nearZ / (nearZ - farZ), bn = nearZ * farZ / (farZ - nearZ);
+            const float zr10 = a + b / 10000.0f;
+            const float old10 = (zr10 - an) > 0.0f ? bn / (zr10 - an) : 0.0f;
+            Log::get().note(
+                "temporal aa: the scene block's projection row says reversed-Z with near %.3f m and %s; "
+                "the pass decodes the scene's depth with it from here. The %.3f..%.0f m the game asks "
+                "the runtime for is the runtime's projection: decoding with those planes read a surface "
+                "at 10 km as %.0f m (2026-09-08: the body's grid missed the station beyond a few "
+                "hundred metres for it).",
+                static_cast<double>(nearRow), farTxt, static_cast<double>(nearZ),
+                static_cast<double>(farZ), static_cast<double>(old10));
+        }
+        p.knobs[0] = projA;
         p.knobs[1] = haveDepth ? 1.0f : 0.0f;
-        p.knobs[2] = nearZ;
+        p.knobs[2] = projB;
         p.knobs[3] = farZ;
         if (haveDepth) {
             for (int i = 0; i < 3; ++i) {
@@ -4027,6 +4071,18 @@ void temporalPassNoteSceneWrite(const void* res, const void* data, uint32_t byte
     RowsWrite& w = g_rowsRing[g_rowsSeq % kRowsRing];
     w.buf = res;
     memcpy(w.rows, f, sizeof(w.rows));
+    // The projection's z row sits at row 198 of the same block (float
+    // offset 792), read the column-vector way the x and y rows' off-centre
+    // terms confirm: clip z = A * view z + B with the view z as clip w, so
+    // the depth the game writes is A + B / z. On build 332841 it reads
+    // A = 0, B = 0.025 -- reversed-Z with NO far plane, depth = 0.025 / z.
+    // The 0.025..50000 m the game asks the runtime for is the runtime's
+    // projection, not this one, and decoding with those planes read 10 km
+    // as 8.3 km (2026-09-08 19:52: the body's grid missed the station
+    // beyond a few hundred metres for it).
+    const float* pz = static_cast<const float*>(data) + 792;
+    w.proj[0] = pz[2];
+    w.proj[1] = pz[3];
     w.frame = g_rowsFrame;
     w.seq = g_rowsSeq;
     w.valid = true;
