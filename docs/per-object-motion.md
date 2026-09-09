@@ -2412,6 +2412,33 @@ which is this project's contract for every read of the game.
    attached verdict (a path flip under a stroke over the drum), the
    footprint percentages' denominator, and the mask fold's `region.xy`
    offset on a side-by-side submit.
+
+   *Its twenty-ninth flight* (14:06, `v0.14.1-107-ga701fec`): "stars are
+   steady, station still judders a bit. CPU time was also high, I tried
+   with aa particles on and off and saw no difference, the rectangles
+   are still there. Can we remove those heatwaves entirely and just keep
+   the smoke?" The stars settle the dust question. The angle fix moved
+   the station's cluster from about half of its parts to 65-82% (948
+   records in the body, its path 10-20% of pixels near the slot), but
+   the pool still split into 125-154 clusters a pair: the translation
+   term about the world origin carries the quaternion's quantum on the
+   lever arm from the floating origin -- a metre at ten kilometres --
+   against a position tolerance of three centimetres plus a tenth of a
+   millimetre a metre, so the position test split what the angle test
+   no longer did. The term is taken about the camera now, where the arm
+   is the part's distance in view. The mute engaged on the haze ribbons
+   with the key on (17.8 a frame) and changed nothing, so it comes out
+   entirely; in its place `fix.heat_haze` (auto: withheld under the
+   temporal pass; on; off) does not forward the three shaders the census
+   named -- the refraction ribbons trailing a ship and the shimmer at
+   its nozzles -- and the smoke, the glow and everything else stay. The
+   CPU question gets an instrument: the probe's 20 s report says what
+   the diff took on the render thread, a pair and at most, and the
+   ships' member gathering is a counting sort in place of a scan of the
+   pool per cluster (half a million steps a pair at 256 clusters). The
+   judder that is left has no named mechanism yet; the next flight's
+   cluster count and diff time say whether the pool's noise or the
+   probe's own cost is in it.
 4. **Tier 2b** only if question 1 says no bits.
 5. **Tier 3** as `tools/` work against dumped frames, never on the hot
    path.
