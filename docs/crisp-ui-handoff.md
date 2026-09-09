@@ -1308,3 +1308,20 @@ three quanta under the strength and ride a turning body's path; the
 composites mark at the strength and stay off it. The sprite also goes
 through `Mode::kReissueScene`, its depth from `kScreenDepthHlsl` (alpha at
 TEXCOORD0 over the floor) under its opaque core only.
+
+## The mask's parity (2026-09-09, v0.14.1-94)
+
+The per-family mask offset above still sets each family's reactive
+strength (the interface proper at the strength, the holo material and
+the sprite three quanta under it, the flight HUD's strokes at half),
+but it no longer says which pixels ride a turning body's path. That is
+the value's quantum's parity now: even rides, odd floats. `floorBuffer`
+quantises two values per family, the flight HUD's coverage shader
+returns the riding one for a core drawn at the surface (its own depth
+within half again of the scene's) and the floating one otherwise, every
+other coverage shader returns the floating one, and the temporal pass's
+`uiCovered` reads the parity. The reason: a floating core takes the
+scene's depth, and where that depth fell inside the station's cells the
+core rode the station's spin -- the station's target brackets shimmered
+on the side over the silhouette and not on the side over the sky. The
+strengths are unchanged; `probe.w` in the pass is unused.
