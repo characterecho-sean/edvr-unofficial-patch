@@ -2002,7 +2002,8 @@ which is this project's contract for every read of the game.
    the settings menu's "Dump both eyes as seen" write the next treated
    frame's two eyes, as the compositor receives them, to
    `edvr_logs\eyes\eye_HHMMSS_L.bmp` and `_R.bmp` -- a debug view can
-   be read off the desk instead of photographed through the lens.
+   be read off the desk instead of photographed through the lens
+   (`tools/eye_bmp_to_png.py` shrinks or crops one to a PNG to look at).
 4. **Tier 2b** only if question 1 says no bits.
 5. **Tier 3** as `tools/` work against dumped frames, never on the hot
    path.
