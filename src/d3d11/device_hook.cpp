@@ -4,6 +4,7 @@
 
 #include <windows.h>
 
+#include <d3d11_4.h>   // ID3D11Multithread, for the protection probe
 #include <dxgi1_2.h>
 
 #include "../common/config.h"
@@ -264,6 +265,43 @@ struct State {
     // The advanced.d3d11_fixes = 0 paragraph, said once. hookDevice runs per
     // created device and the game creates more than one.
     bool      fixesOffNoted = false;
+
+    // MULTITHREAD PROTECTION, watched but never touched.
+    //
+    // Issue #21's rig has Windows' own d3d11.dll rewriting the immediate
+    // context's whole dispatch table every frame. Reading the binary
+    // (10.0.26100.9278) says what that code IS: two complete sets of method
+    // implementations, 97 entries each with no function in common, and a
+    // three-instruction test picking between them --
+    // `cmp byte ptr [rcx+0xE46], 0` in front of each writer block. A boolean in
+    // the context object selects which whole table the object gets.
+    //
+    // D3D11 has exactly one documented boolean of that shape: multithread
+    // protection. Turning it on makes every context method take the runtime's
+    // critical section, and the natural way to implement that is a second
+    // complete set of implementations rather than a branch in every method --
+    // which is what the binary shows.
+    //
+    // That is an INFERENCE, and this exists to end it rather than repeat it.
+    // Two facts are wanted and they are different questions: what the flag IS,
+    // and whether it CHANGES. The table being rewritten every frame does not
+    // prove the flag moves -- the writer routine could be reached for some
+    // other reason and simply re-lay whichever table the flag currently
+    // selects. If the value never changes while the rewriting continues, the
+    // flag is a red herring and the hunt moves to what keeps calling that
+    // routine, which is worth learning from one line of log rather than from
+    // building the wrong thing.
+    //
+    // Read-only, always. Setting it would be a real change to the game's
+    // threading contract -- on costs a lock in every D3D11 call, off is a data
+    // race if something in the process needs it -- and neither belongs in a
+    // measurement.
+    ID3D11Multithread* multithread = nullptr;
+    int       mtProtected = -1;      // -1 until asked; 0 or 1 after
+    uint32_t  mtChanges = 0;         // how many times it has flipped
+    uint32_t  mtReports = 0;         // change lines printed
+    uint64_t  mtFrames = 0;          // frames it has been sampled over
+    bool      mtSettledNoted = false;  // the standing answer, said once
 };
 
 // How long the hooks must survive before install is treated as having worked.
@@ -1080,6 +1118,47 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
         // the whole safety argument rather than a shortcut.
         vScreenReclaimTick();
         exposureFixReclaimTick();
+
+        // The multithread-protection sample. One virtual call that reads a
+        // flag, per frame, and a line only when the answer differs from last
+        // time -- so a rig where nothing moves pays a compare and says nothing,
+        // and a rig where it toggles every frame says so in the first second
+        // and then at doublings. See the State field for what it settles.
+        if (g_state->multithread) {
+            ++g_state->mtFrames;
+            const int now = g_state->multithread->GetMultithreadProtected() ? 1 : 0;
+            if (now != g_state->mtProtected) {
+                g_state->mtProtected = now;
+                ++g_state->mtChanges;
+                const uint32_t n = g_state->mtChanges;
+                if (n <= 4 || (n & (n - 1)) == 0) {
+                    ++g_state->mtReports;
+                    Log::get().note(
+                        "multithread protection CHANGED to %s (change #%u, "
+                        "frame %llu). Every one of these makes Windows re-lay "
+                        "the context's entire function table, which is what "
+                        "removes EDVR's hooks from it. Reported for the first "
+                        "few and then at doublings.",
+                        now ? "ON" : "off", n,
+                        static_cast<unsigned long long>(g_state->mtFrames));
+                }
+            }
+            // The standing answer, said once, because a NEGATIVE has to be
+            // stated to be read. A session where this never changes prints no
+            // change lines at all, and "no lines" is indistinguishable from
+            // "the probe never ran" -- which is the shape of mistake this
+            // investigation has already made three times.
+            if (g_state->mtFrames == 1800 && !g_state->mtSettledNoted) {
+                g_state->mtSettledNoted = true;
+                Log::get().note(
+                    "multithread protection after 1800 frames: %s, changed %u "
+                    "time(s). If that count is zero on a rig whose context "
+                    "table is still being rewritten every frame, then this flag "
+                    "is NOT what is causing it and the cause is something else "
+                    "reaching the same routine.",
+                    g_state->mtProtected ? "ON" : "off", g_state->mtChanges);
+            }
+        }
         // Polled rather than watched, twice a second by the journal watcher
         // and once a second here. The user is wearing a
         // headset and cannot see a text editor, so the settings that are worth
@@ -1905,6 +1984,38 @@ void hookDevice(ID3D11Device* device) {
         device->GetImmediateContext(&ctx);
         if (ctx) {
             ctxMode = contextHookModeFor(ctx);
+
+            // The multithread-protection probe, opened here because this is
+            // where the immediate context is already in hand. Asked of the
+            // CONTEXT first and the device second: the flag the disassembly
+            // found lives in the context object, and the two are documented
+            // inconsistently enough that trying both costs less than being
+            // sure. Absent on neither, in practice -- and if it is, the log
+            // says so once and nothing else changes.
+            if (FAILED(ctx->QueryInterface(__uuidof(ID3D11Multithread),
+                                           reinterpret_cast<void**>(&s.multithread)))) {
+                s.multithread = nullptr;
+                device->QueryInterface(__uuidof(ID3D11Multithread),
+                                       reinterpret_cast<void**>(&s.multithread));
+            }
+            if (s.multithread) {
+                s.mtProtected = s.multithread->GetMultithreadProtected() ? 1 : 0;
+                Log::get().note(
+                    "multithread protection is %s at install. It decides which "
+                    "of two complete sets of context methods this device "
+                    "dispatches through -- the protected set takes the "
+                    "runtime's lock in every call -- and switching it makes "
+                    "Windows rewrite the context's whole function table. EDVR "
+                    "only reads it; every change is reported below. If it never "
+                    "changes and the table is still being rewritten, the cause "
+                    "is something else and that is worth knowing.",
+                    s.mtProtected ? "ON" : "off");
+            } else {
+                Log::get().note(
+                    "multithread protection could not be queried on this device "
+                    "(no ID3D11Multithread), so this session cannot say whether "
+                    "it changes. Nothing else is affected.");
+            }
             ctx->Release();
         }
     }
@@ -2071,6 +2182,12 @@ void shutdownDeviceHooks() {
     // keyboard the game never gets back.
     menuShutdown();
     journalWatchShutdown();
+    // The probe's reference on the device. Read-only for its whole life, so
+    // there is nothing to put back -- only the reference to let go.
+    if (g_state && g_state->multithread) {
+        g_state->multithread->Release();
+        g_state->multithread = nullptr;
+    }
     // Reverse of install order: vScreen's vtable copy was taken on top of the
     // exposure fix's, so it comes off first.
     revertVScreenModeResolution();
