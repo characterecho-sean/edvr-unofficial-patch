@@ -2342,6 +2342,76 @@ which is this project's contract for every read of the game.
    (`hotkey.dump_draws`, once with no trail in view and once with one,
    `tools/diff_draw_census.py` between them) is the instrument built
    for exactly that.
+
+   *Its twenty-eighth flight* (13:03, `v0.14.1-104-g8af0dd7`; three
+   draw censuses, the first with no trail in view): "still see the
+   rectangles in the smoke trails", and two things new since the
+   ships: "the skybox stars are flickering now and I still feel like
+   the station is juddering despite my frametime staying constant", with
+   the ask for an adversarial review. Three reviewers read e06cfd7..HEAD
+   (one file each) while the census was read. What they found:
+
+   - *The cluster angle test was degenerate in float from the start.*
+     A dot of two unit quaternions a hundredth of a degree apart is
+     1 - 4e-9, under the float's own step below one (6e-8), so a record
+     joined a cluster when its dot rounded to 1.0 and not otherwise --
+     luck per record per pair -- and the old acos form and the cosine
+     form both reduced to that; the 0.03 to 0.01 change of 2026-09-08
+     was a no-op. The reviewer emulated it: at a station's rate the
+     largest cluster held 51-60% of the parts and the rest split into
+     135-194 clusters of one -- the "100-250 with under 3 parts" every
+     report showed. The test is the distance between the quaternions'
+     xyz parts now (half the angle in radians, every quantum kept), and
+     the per-record angle is atan2 of xyz against w.
+   - *The splinters were taken as ships.* Half of the station's
+     secondary clusters passed the slice test (degenerate the same way)
+     and got a one-pair rate, carried by the translation term's lever
+     arm -- station pixels alternating between the held median path and
+     a per-pair path every eighth frame: a judder at steady frame times.
+     The slice test compares the candidate's rigid fit with the body's
+     now, turn and term alike.
+   - *The translation term is not the motion.* The fit's t is the rigid
+     motion's term about the world origin, which carries (I - R) times
+     the parts' distance from the floating origin: metres a frame for a
+     turning hull kilometres out, in a direction it does not move. The
+     own-parts test (the player's hull's far parts read as a ship moving
+     13.6 m a frame on every turn), the still, speed and tail tests, and
+     the box's carry all take the centroid's own motion -(w x c + t)
+     now; the path keeps t.
+   - *The station's frame test was too tight for a boost.* Five hundred
+     metres between the pair's camera and the rows', with a body held up
+     to 120 frames, is a second at boost: "stood down 10-28 frames an
+     interval", each a frame the station fell to the camera's path. Four
+     kilometres now; a rebase is thirteen.
+   - *The ships' frame test corrupted the body's.* It cleared the body's
+     origin shift when the ships' newer pair agreed unshifted, and shared
+     the body's local shift. Each caller has its own now, and only the
+     body's clears.
+   - *The mute caught the wrong thing.* The census decodes each draw's
+     depth state: the trail's haze ribbons (vs 0A298DE7DF833A46, ps
+     6FD4C38BA927C8C7, up to thirty-four a frame near a ship) sample the
+     resolve, blend as translucents, and carry depth test OFF with the
+     write mask ALL -- a state the mute declined as "writes nothing".
+     The one family it did mute was a depth-tested translucent drawn
+     every frame near the eye -- the space dust, on the evidence -- which
+     then flickered like stars. `fix.temporal_aa_particles` is off by
+     default; its rule is test-off, write-all, translucent now, it counts
+     only engagements, honours the exclude list, validates the resolve
+     it learns, and costs nothing with the key off (its four view
+     resolves a draw ran on every scene draw before). Whether Direct3D
+     writes depth with the test off is what the next flight with the key
+     on will say: the trail's core lines read teal in the objects view if
+     it does.
+   - Smaller: the along-ray counter overflowed int32 in a frame
+     (clamped to a hundred metres); a ship claim whose prediction fell
+     off the image now falls back to the body's grid; the largest
+     cluster is a ship candidate when it was not taken as the body (a
+     ship alone in open space); the rebase gate wants kilometres.
+
+   Not done from the reviews: hysteresis on the flight HUD's per-pixel
+   attached verdict (a path flip under a stroke over the drum), the
+   footprint percentages' denominator, and the mask fold's `region.xy`
+   offset on a side-by-side submit.
 4. **Tier 2b** only if question 1 says no bits.
 5. **Tier 3** as `tools/` work against dumped frames, never on the hot
    path.
