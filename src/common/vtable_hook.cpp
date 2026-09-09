@@ -494,6 +494,10 @@ void vtableWatchStop() {
     g_watch.catches = 0;
 }
 
+const char* vtableOwnerModuleName(void* p, char* buf, size_t bufLen) {
+    return ownerModuleName(p, buf, bufLen);
+}
+
 bool isExecutableAddress(const void* p) {
     if (!p) return false;
     MEMORY_BASIC_INFORMATION mbi{};
@@ -1037,7 +1041,28 @@ void VTableHook::noteCopyDrift(const char* who) {
         ++drifted;
         appendSlot(slots, sizeof(slots), i);
     }
-    if (!drifted) return;
+    if (!drifted) {
+        // SAY THE NEGATIVE, once, on the first pass.
+        //
+        // This returned silently when nothing had drifted, so "no drift" and
+        // "the walk never ran" were the same log -- and the walk HAS been dead
+        // code once already in this file's history. Worse, the conclusion drawn
+        // from that silence ("the runtime re-lays the same values, so a frozen
+        // copy is safe") is load-bearing, and it was resting on an absence.
+        // First pass, always, whatever the answer: a rig that dies 1.7 seconds
+        // in gets exactly one of these and it should still say something.
+        if (!m_copyCleanNoted) {
+            m_copyCleanNoted = true;
+            Log::get().note(
+                "VTableHook %s: the vtable EDVR copied still matches the table "
+                "it was copied from -- all %zu entries, checked once a second "
+                "from here on. Nothing has drifted, which is what the "
+                "private-copy mode needs to be true and is reported here so "
+                "that its being true is visible rather than merely unmentioned.",
+                who, span);
+        }
+        return;
+    }
 
     ++m_copyDriftEvents;
     char modBuf[MAX_PATH];
@@ -1434,22 +1459,46 @@ size_t VTableHook::reclaim(const char* name, const size_t* quietSlots,
             // The variant census rides the doubling line, because it is the
             // number that decides whether patrolling this table is the best
             // EDVR can do or merely the cheapest. See Patch::seen.
-            uint8_t widest = 0;
-            bool    overflowed = false;
+            // WHICH slot, and WHAT the entries are -- not just how many.
+            //
+            // This printed the count alone, and two independent rigs reported
+            // it going from 1 to 2 about a second in. That second value is the
+            // difference between "the runtime re-lays the same pointers
+            // forever" and "the runtime genuinely re-selects", which is the
+            // whole question, and the line that saw it could not say what it
+            // was. A count is not evidence; a module and an offset are.
+            const Patch* busiest = nullptr;
+            bool          overflowed = false;
             for (const Patch& q : m_patches) {
-                if (q.seenCount > widest) widest = q.seenCount;
+                if (!busiest || q.seenCount > busiest->seenCount) busiest = &q;
                 if (q.seenOverflow) overflowed = true;
+            }
+            char entries[3 * MAX_PATH];
+            entries[0] = '\0';
+            if (busiest) {
+                for (uint8_t k = 0; k < busiest->seenCount; ++k) {
+                    char modBuf[MAX_PATH];
+                    char one[MAX_PATH + 4];
+                    _snprintf_s(one, sizeof(one), _TRUNCATE, "%s%s", k ? "; " : "",
+                                ownerModuleName(busiest->seen[k], modBuf,
+                                                sizeof(modBuf)));
+                    strncat_s(entries, sizeof(entries), one, _TRUNCATE);
+                }
             }
             Log::get().note(
                 "VTableHook %s: reclaim #%u (slot(s) %s, taken by %s). The "
-                "busiest slot has been through %u distinct entr%s so far%s.",
+                "busiest is slot %zu, which has been through %u distinct "
+                "entr%s: %s.%s",
                 who, m_reclaimEvents, slots, adoptedMod ? adoptedMod : "?",
-                widest, widest == 1 ? "y" : "ies",
-                overflowed ? " and at least one slot has had more than four, so "
-                             "the set is not small"
-                           : " -- a small set means every one of them could be "
+                busiest ? busiest->slot : 0,
+                busiest ? busiest->seenCount : 0,
+                (busiest && busiest->seenCount == 1) ? "y" : "ies",
+                entries[0] ? entries : "none recorded",
+                overflowed ? " At least one slot has had more than four, so the "
+                             "set is not small."
+                           : " A small set means every one of them could be "
                              "hooked directly, which would end this exchange "
-                             "for good");
+                             "for good.");
         }
         // Said separately the first time it happens, because it is a different
         // event with a different meaning: not a rival tool bypassing us, but the

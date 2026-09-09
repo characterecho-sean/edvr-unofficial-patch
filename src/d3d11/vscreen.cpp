@@ -824,6 +824,11 @@ struct State {
     // the session and hides the slots that ARE being held. Reported as its own
     // number instead.
     uint32_t hookConceded = 0;
+    // The staleness detector: armed only in copy mode, where a frozen table is
+    // the thing in question. See noteStaleForward.
+    bool     watchStale = false;
+    bool     staleNoted = false;
+    uint64_t staleForwards = 0;
     bool     lowPeakNoted = false;
     // When the journal first said gameplay had started, 0 until it does. The
     // low-peak notice is timed off this rather than off install, because
@@ -3142,9 +3147,66 @@ struct DrawClock {
     }
 };
 
+// THE STALENESS DETECTOR, and it is the one measurement this whole arc still
+// lacks.
+//
+// In the private-copy mode the object dispatches through a table EDVR froze at
+// install, while Windows' d3d11.dll goes on re-laying the REAL table inside the
+// context object every frame. The question nobody has answered is whether those
+// two ever say different things. If they do not -- if the runtime writes the
+// same pointers back forever -- the frozen copy is harmless and the crash on
+// two users' rigs is something else. If they DO, the game is calling last
+// second's implementation with this second's state, which is exactly how a GPU
+// gets wedged, and the crash has its mechanism.
+//
+// Everything measuring this so far has been a once-a-second sample taken after
+// Present. That is three samples on a rig that dies in 1.7 seconds, it cannot
+// see a value that changes and changes back within a frame, and the eye-draw
+// counts (243 patched in place versus 682 copied) say the re-lay lands about a
+// third of the way THROUGH a frame -- exactly where a post-Present sample is
+// blind. So this asks at the only moment that settles it: the instant before
+// the call is forwarded.
+//
+// One load and one compare, on the draw path, only in copy mode. The first
+// mismatch goes to the BREADCRUMB file as well as the log, because that file is
+// written unbuffered and survives the process being killed by a TDR -- which is
+// how these sessions end.
+inline void noteStaleForward(size_t slot, const void* frozen, const char* what) {
+    State* s = g_state;
+    if (!s || !s->watchStale) return;
+    void** live = s->hook.originalVTable();
+    if (!live) return;
+    void* now = nullptr;
+    if (!guarded("vScreen/stale-check", [&] { now = live[slot]; })) return;
+    if (now == frozen) return;
+
+    ++s->staleForwards;
+    if (!s->staleNoted) {
+        s->staleNoted = true;
+        char crumb[192];
+        _snprintf_s(crumb, sizeof(crumb), _TRUNCATE,
+                    "gfx: STALE FORWARD on %s (slot %zu): copy holds %p, the "
+                    "live table now holds %p",
+                    what, slot, frozen, now);
+        breadcrumb(crumb);
+        char modBuf[MAX_PATH];
+        Log::get().note(
+            "vScreen: STALE FORWARD. %s (slot %zu) is about to be called "
+            "through EDVR's frozen copy, which holds %p -- but the context's "
+            "own table now holds %p (%s). The two have diverged, so the game is "
+            "calling an implementation the runtime has moved on from. THIS is "
+            "the private-copy mode's failure case and it has never been "
+            "observed before. Said once; the count is reported with the totals.",
+            what, slot, frozen, now,
+            vtableOwnerModuleName(now, modBuf, sizeof(modBuf)));
+    }
+}
+
 void STDMETHODCALLTYPE hookedDraw(ID3D11DeviceContext* self, UINT count, UINT start) {
     DrawClock clock;
     ++g_state->thunkHits[kHitDraw];
+    noteStaleForward(kSlotDraw, reinterpret_cast<const void*>(g_state->realDraw),
+                     "Draw");
     if (quadProbeWants()) g_state->qsBaseVertex = static_cast<INT>(start);
     const DrawVerdict v = beginPanelOverride(self, 'D', count, 1);
     forwardWithVerdict(self, v, [&] {
@@ -3158,6 +3220,9 @@ void STDMETHODCALLTYPE hookedDrawIndexed(ID3D11DeviceContext* self, UINT count,
                                          UINT startIndex, INT baseVertex) {
     DrawClock clock;
     ++g_state->thunkHits[kHitDrawIndexed];
+    noteStaleForward(kSlotDrawIndexed,
+                     reinterpret_cast<const void*>(g_state->realDrawIndexed),
+                     "DrawIndexed");
     const DrawVerdict v = beginPanelOverride(self, 'I', count, 1);
     forwardWithVerdict(self, v, [&] {
         const int64_t r0 = clock.on ? qpcNow() : 0;
@@ -4524,6 +4589,18 @@ void vScreenFrameBoundary() {
         // Only when there is something to say. A hook nobody contests holds the
         // table on every frame and does not need a line saying so every twenty
         // seconds for the rest of the session.
+        // The staleness count, whenever there is one. Its first occurrence has
+        // its own line and a breadcrumb; this says whether it was a one-off or
+        // the steady state, which is the difference between a curiosity and the
+        // reason two users' machines die.
+        if (s->staleForwards) {
+            Log::get().note(
+                "vScreen: %llu draw(s) so far have been forwarded through an "
+                "entry EDVR's frozen copy holds and the context's own table no "
+                "longer does. See the STALE FORWARD line above for the first "
+                "one; this is the running total.",
+                static_cast<unsigned long long>(s->staleForwards));
+        }
         if (s->hookFrames && (s->hookFramesHeld < s->hookFrames || s->hookConceded)) {
             const unsigned held =
                 static_cast<unsigned>((s->hookFramesHeld * 100ull) / s->hookFrames);
@@ -4900,6 +4977,9 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     // the runtime's own re-pointing without waiting for call evidence that a
     // total bypass never produces (issue #21).
     s.hook.setImplementationModule(systemD3D11Module());
+    // The frozen table is only a question in copy mode; in place there is one
+    // table and nothing to diverge from.
+    s.watchStale = (mode == HookMode::CopyVptr);
 
     s.hook.replace(kSlotClearRenderTargetView, &hookedClearRtv,
                    reinterpret_cast<void**>(&s.realClearRtv));

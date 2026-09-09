@@ -100,6 +100,15 @@ bool vtableInsideModule(void** vtable, void* moduleBase);
 // live, which vtableInsideModule was not.
 size_t vtableEntriesInModule(void** vtable, size_t count, void* moduleBase);
 
+// Which loaded module a code pointer belongs to, as "<full path>+0x<offset>".
+//
+// The full path and not the basename, because "d3d11.dll" names two different
+// modules in this process -- Windows' runtime and EDVR's own proxy, which the
+// game loads under exactly that name -- and a line that cannot tell them apart
+// cannot answer the question it was printed for. Returns a description of why
+// not when the pointer belongs to no module. `buf` should be MAX_PATH.
+const char* vtableOwnerModuleName(void* p, char* buf, size_t bufLen);
+
 // WATCH ONE VTABLE SLOT AND NAME WHOEVER WRITES TO IT.
 //
 // Every attribution this file makes is of a POINTER FOUND IN A SLOT, not of the
@@ -452,6 +461,9 @@ private:
     // runtime that re-points every second must stay visible without filling
     // the log with the fact.
     uint32_t           m_copyDriftEvents = 0;
+    // The "nothing has drifted" line, said once. A negative that is never
+    // stated is a negative nobody can rely on.
+    bool               m_copyCleanNoted = false;
     // The "the module re-pointed its own table" explanation, said once. It is
     // a different event from a rival tool's clobber and needs its own line.
     bool               m_ownerRepointNoted = false;
