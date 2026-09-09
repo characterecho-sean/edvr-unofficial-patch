@@ -140,11 +140,11 @@ void buildGrid(const uint8_t* now, uint32_t n, const std::vector<uint8_t>& liveN
         for (uint32_t i = 0; i < n; ++i) {
             if (!liveNow[i] || !bodySigs.count(sigNow[i])) continue;
             const Pose pr = decodePose(now + i * kRecordBytes);
-            bool near = true;
+            bool nearBox = true;   // ("near" is a Windows macro)
             for (int k = 0; k < 3; ++k) {
-                if (pr.p[k] < lo[k] - kBodyTipM || pr.p[k] > hi[k] + kBodyTipM) near = false;
+                if (pr.p[k] < lo[k] - kBodyTipM || pr.p[k] > hi[k] + kBodyTipM) nearBox = false;
             }
-            if (!near) continue;
+            if (!nearBox) continue;
             for (int k = 0; k < 3; ++k) {
                 if (pr.p[k] < wlo[k]) wlo[k] = pr.p[k];
                 if (pr.p[k] > whi[k]) whi[k] = pr.p[k];
