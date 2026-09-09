@@ -1797,6 +1797,32 @@ which is this project's contract for every read of the game.
    are the members' as before. The HUD's family line read as designed:
    "the flight HUD; its depth written by the coverage pass in the scene's
    projection".
+
+   *Its eighth flight* (18:28, `v0.14.1-70-g4a3b71f`, the type-keyed
+   grid): "panels still shimmer and do not stay crystal clear at all
+   distances. Within a few hundred meters they stop shimmering." The
+   fits are exact now -- residuals of one to ten millimetres, the turn
+   steady at 0.039-0.047 deg, the claim 12-17% of the frame at the slot
+   -- so the vectors on the panels are right, and what is left is
+   SAMPLING. The panel struts are under a metre wide; beyond a few
+   hundred metres they are narrower than a render pixel at 2514, so each
+   frame's jittered sample lands on strut or gap by chance, the depth
+   buffer flickers between panel and space the same way, and a pattern
+   moving a non-integer number of pixels a frame cannot be accumulated
+   by any reconstruction. That is the threshold the player describes:
+   within a few hundred metres the struts reach two pixels and it stops.
+   It is the distant-station shimmer the anti-aliasing work has carried
+   as open since the temporal pass shipped, and its lever is input
+   resolution (Elite's HMD Quality), or the calm kernel to soften it. The
+   body path has done what it set out to do for one station: the face
+   crisp, the rim steady, the booms claimed. One more thing the log
+   showed: the body's translation term stepped between pairs (7.8, 4.3,
+   1.2, 2.1 m) with millimetre residuals, which is the game's world
+   ORIGIN rebasing during the approach -- question 7 revisited: it does
+   -- and a held body is then in the old origin's frame for up to eleven
+   frames. The pass already flags a camera jump of over fifty metres in
+   a frame; the body now stands down for twelve frames after one, and
+   the registration line counts them.
 4. **Tier 2b** only if question 1 says no bits.
 5. **Tier 3** as `tools/` work against dumped frames, never on the hot
    path.

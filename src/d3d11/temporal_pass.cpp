@@ -1673,6 +1673,15 @@ bool     g_objectsNoted = false;   // the engage line, once
 ObjectMotion g_bodyLast = {};      // the motion last handed to the shader, for the log
 bool     g_bodyLastValid = false;
 float    g_bodyDtMs = 11.1f;       // this frame's length, for the body's rates
+// After a camera jump (a translation over 50 m in one frame: the game's
+// world origin rebasing, which the flight of 2026-09-08 18:28 showed
+// happening on an approach -- the body's translation term stepping between
+// pairs with millimetre residuals), a held body is in the OLD origin's
+// frame until the next pair replaces it, up to eleven frames. It stands
+// down for that long.
+uint32_t g_bodyHoldOff = 0;
+uint32_t g_bodyJumpHolds = 0;      // frames stood down this interval, for the line
+constexpr uint32_t kBodyHoldOffFrames = 12;
 // The body's occupancy grid on the GPU (object_probe.h): one for both
 // eyes, uploaded when the probe's version moves.
 ID3D11Texture3D*          g_bodyGrid = nullptr;
@@ -2590,6 +2599,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
             if (jump) {
                 for (int i = 0; i < 3; ++i) tvCam[i] = 0.0f;
                 ++g_camDropMove;
+                g_bodyHoldOff = kBodyHoldOffFrames;   // the body's frame may have moved under it
             }
             if (diffDeg > 3.0f) {
                 ++g_camDropRot;
@@ -2678,7 +2688,13 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         // and the pool has given a body. The trained block below may still
         // stand it down for a frame it cannot compare against.
         bool bodyOn = false;
-        if (g_objectsOn && worldOn) {
+        static uint32_t s_holdFrame = 0;
+        if (g_bodyHoldOff && s_holdFrame != g_rowsFrame) {
+            s_holdFrame = g_rowsFrame;
+            --g_bodyHoldOff;
+            ++g_bodyJumpHolds;
+        }
+        if (g_objectsOn && worldOn && g_bodyHoldOff == 0) {
             ObjectMotion om;
             if (objectMotionGet(&om) && ensureBodyGrid(dev, ctx, om)) {
                 // The body's motion over THIS frame's length: its rates
@@ -4218,6 +4234,10 @@ bool temporalPassRegistration(char* buf, size_t n, char* buf2, size_t n2, char* 
         } else {
             regAppend(buf, n, used, "; the body's path is on but no body is in hand (no pool, or no pair yet)");
         }
+        if (g_bodyJumpHolds) {
+            regAppend(buf, n, used, "; the body stood down %u frames after camera jumps (an origin rebase)",
+                      g_bodyJumpHolds);
+        }
     }
     // The third line: the probes and the rows against the head.
     buf = buf3;
@@ -4323,6 +4343,7 @@ bool temporalPassRegistration(char* buf, size_t n, char* buf2, size_t n2, char* 
     g_classShipPix = g_classShipClip = 0;
     g_moverPix = 0;
     g_bodyPix = 0;
+    g_bodyJumpHolds = 0;
     g_probeSkyDx = g_probeSkyDy = 0;
     g_probeSkyN = 0;
     memset(g_probeDot, 0, sizeof(g_probeDot));
