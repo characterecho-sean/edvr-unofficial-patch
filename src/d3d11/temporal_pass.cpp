@@ -260,6 +260,8 @@ bool insideBody(float3 d, float z) {
     if (any(u < 0.0) || any(u >= 1.0)) return false;
     return BG.Load(int4(int3(u * 128.0), 0)) > 0.5;   // kObjectGrid cells a side (object_probe.h)
 }
+)HLSL"
+R"HLSL(
 // The moving ships (object_probe.h, 2026-09-09): compact bodies with a box
 // each and no grid. The nearest whose box holds the pixel's world point
 // claims it, and the boxes are tested BEFORE the dominant body's grid: a
@@ -355,6 +357,8 @@ bool bodyPixel(float3 d, float z, out float2 pp, out float zp) {
     pp.y = (tanPrev.w - yt) / (tanPrev.w - tanPrev.z) * float(size.y) - 0.5;
     return pp.x >= 0.0 && pp.y >= 0.0 && pp.x <= float(size.x) - 1.0 && pp.y <= float(size.y) - 1.0;
 }
+)HLSL"
+R"HLSL(
 // zPred: the predicted view depth of this pixel's surface in last frame's
 // eye space, metres, for the mover mask -- 0 when the pixel took no real
 // depth (the far plane, the menu's assumed depth, no depth bound).
