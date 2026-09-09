@@ -4135,10 +4135,6 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
     return result;
 }
 
-void temporalPassArmEyeDump() {
-    g_eyeDumpArmed[0] = g_eyeDumpArmed[1] = true;
-}
-
 }  // namespace
 
 void temporalPassConfigure(Config& cfg) {
@@ -4745,6 +4741,10 @@ bool temporalPassPlanes(float* nearZ, float* farZ) {
     *nearZ = g_lastNear;
     *farZ = g_lastFar;
     return g_lastNear > 0.0f && g_lastFar > g_lastNear;
+}
+
+void temporalPassArmEyeDump() {
+    g_eyeDumpArmed[0] = g_eyeDumpArmed[1] = true;
 }
 
 }  // namespace edvr
