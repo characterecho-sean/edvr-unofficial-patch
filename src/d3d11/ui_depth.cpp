@@ -309,8 +309,17 @@ const char kScreenDepthHlsl[] =
     "    clip(a - floorAndStrength.x);\n"
     "    return floorAndStrength.y;\n"
     "}\n";
-// The cockpit holo panels: their depth is written in place by the game's
-// own draw under the writing twin, so this one only ever marks the mask.
+// The holo material: the cockpit's panels and, instanced from the pool at
+// the target, the target markers. Its depth was written in place by the
+// game's own draw under the writing twin until 2026-09-09, this shader only
+// marking the mask; but the material's alpha carries an eight-tap smear
+// past every stroke of the surface (a glow the game discards only under
+// 1e-5), and in place each marker corner wrote its depth over the station
+// around it. Now this shader writes the depth too, through the second draw
+// in the scene's projection (Mode::kReissueScene), under the surface's
+// strokes at the floor and not under the glow. A panel's translucent
+// background under the floor keeps the scene's depth -- a flat dark colour,
+// which no reprojection can smear visibly; its text and frame keep theirs.
 const char kHoloDepthHlsl[] =
     "Texture2D<float4> Surf : register(t2);\n"
     "SamplerState Smp : register(s1);\n"
@@ -1380,7 +1389,17 @@ bool uiDepthOnEyeDraw(ID3D11DeviceContext* ctx) {
         // coverage shader (kHudDepthHlsl says why), so its pixel stage is
         // always looked up; the others only when the mask or the line
         // wants it.
-        const bool hud = h == kFlightHud;
+        // The holo material goes the same way since 2026-09-09: it draws
+        // the cockpit's panels AND the target markers (instanced from the
+        // pool at the target), and its alpha carries an eight-tap smear
+        // past every stroke -- a glow above the game's own discard at
+        // 1e-5 -- so in place, under the writing twin, each marker corner
+        // wrote its depth over the station around it, and the station
+        // there reprojected as a point at the marker's depth near the axis,
+        // which barely moves: "small blurry quads under each of the four
+        // brackets". The coverage stand-in (kHoloDepthHlsl) takes the
+        // surface's own alpha at the floor: the strokes, not the glow.
+        const bool hud = h == kFlightHud || h == kHoloPanel;
         const uint64_t ph = (hud || wantMask || wantLine) ? boundPsHash(ctx) : 0;
         DepthShader* shader = (hud || wantMask) ? depthShaderFor(ctx, ph, h, surfaceSlot) : nullptr;
         if (hud && shader) {
@@ -1408,8 +1427,12 @@ bool uiDepthOnEyeDraw(ID3D11DeviceContext* ctx) {
         if (wantLine) {
             noteFamily(h, ph,
                        g_mode == Mode::kReissueScene
-                           ? "the flight HUD; its depth written by the coverage pass in the "
-                             "scene's projection, under its strokes and not their quads"
+                           ? (h == kFlightHud
+                                  ? "the flight HUD; its depth written by the coverage pass in the "
+                                    "scene's projection, under its strokes and not their quads"
+                                  : "the holo material (the cockpit's panels, the target markers); "
+                                    "its depth written by the coverage pass in the scene's "
+                                    "projection, under the surface's strokes and not the glow")
                        : composite ? "samples a learned surface; writes its depth in "
                                      "place, the scene's own encoding"
                                    : "named direct family; writes its depth in place");

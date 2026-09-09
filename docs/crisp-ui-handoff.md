@@ -1266,3 +1266,21 @@ too wide.
 Flown 2026-09-08 (v0.14.1-70-g4a3b71f, the slot, the station targeted):
 "The UI targeting symbols seem to be fixed" -- the bracket quad is gone
 and the station stays clear under it.
+
+## 2026-09-09: the holo material's depth under its strokes, not its glow
+
+The holo panel family (`vs 81216C77F90DEDD6`, `ps A2965EC2931A39C8`) draws
+the cockpit's panels AND the target markers, instanced from the pool at the
+target. Its alpha is the surface's own plus an eight-tap smear of it along
+a direction (the hologram's glow), and the game discards only under 1e-5;
+written in place under the writing twin, each target-marker corner wrote
+its depth over the station in the glow's square, and once the temporal
+pass carried the station's turn (per-object motion, tier 2) the station
+there reprojected as a point at the marker's depth near the axis: "small
+blurry quads under each of the four brackets". The family now goes through
+`Mode::kReissueScene` like the flight HUD: no writing twin, depth and mask
+by the second draw with `kHoloDepthHlsl` (the surface's alpha at the
+floor). A panel's translucent background under the floor keeps the scene's
+depth -- a flat dark colour, which no reprojection can smear visibly -- and
+its text and frame keep theirs. If a panel ever shows its background
+swimming, the floor (`advanced.ui_depth_alpha`) is the knob.

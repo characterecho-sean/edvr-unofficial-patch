@@ -1927,6 +1927,52 @@ which is this project's contract for every read of the game.
    50 m. Also on the line: the body held "1289 records, 120 frames old"
    with nothing claimed through the docking, the last pair before the
    origin moved to the station; the frame test retires that too.
+
+   *Its eleventh flight* (05:12, `v0.14.1-77-g1316a17`: the reach at
+   400, the pair-frame test, the hangar floor): the angled cut gone;
+   "still seeing the occasional flash of the whole station turning
+   blurry"; the target brackets "have small blurry quads under each of
+   the four brackets" while the label under the target does not
+   ("though it does swim somewhat"); the hub's end sphere "still wasn't
+   totally clear"; and "it started off blurry at a greater distance and
+   then resolved once I got closer". The player had also set the ship
+   split to ten metres on his own (`advanced.temporal_aa_ship_metres =
+   10`) and found it "greatly helped with blurring on landing" -- which
+   puts a hangar past the split and on the world path outright, the
+   body's floor moot at that setting. The flash, from the line: "the
+   body stood down 8, 25, 47 frames with its pair in another frame" on
+   the approach and after launch -- the frame test doing what it said,
+   the body down after each origin move until a pair taken in the new
+   frame, up to twenty frames at the probe's cadence, each one the
+   station on the camera's path. Replaced: the jump's own vector,
+   summed over jumps, carries the held body into the new frame (the box
+   by it, the translation term by (I - R) times it, the pair's camera
+   by it for the test), cleared when a pair agrees unshifted; a flip's
+   return sums back to nought. The body stands down on the jump frame
+   itself only. The brackets: the log names an interface family
+   appearing at the second of targeting, vs 81216C77F90DEDD6 with ps
+   A2965EC2931A39C8 -- the HOLO MATERIAL, the cockpit panels' shader,
+   which also draws the target markers instanced from the pool. Its
+   disassembly: the alpha is the surface's own plus an eight-tap smear
+   of it along a direction (the hologram's glow), discarded only under
+   1e-5, and its depth was written IN PLACE under the writing twin, so
+   each marker corner wrote its depth over the station around it in the
+   glow's square, and the station there, reconstructed at the marker's
+   depth near the axis, barely moved. The family now goes through the
+   coverage pass in the scene's projection like the flight HUD (its
+   stand-in takes the surface's alpha at the floor: the strokes, not the
+   glow); a panel's translucent background under the floor keeps the
+   scene's depth, a flat dark colour no reprojection can smear visibly,
+   and the label was never the issue, text being the surface's own
+   alpha at one. The sphere: the desk rebuilt the grid from the 05:16
+   pairs and sampled a 500 m hemisphere at each hub end -- none of 200
+   samples outside the marked cells at reach 400 -- so the grid is not
+   the cut there, and the question goes to the objects debug view on
+   the next flight (`advanced.temporal_aa_debug = objects`: the body's
+   pixels white over the frame dimmed). The distance: the dumps show the
+   pool holding 14 records until the station's 1070 arrive at 9.3 km;
+   beyond that the station is not in the instance pool at all, and
+   there is nothing for the body to fit.
 4. **Tier 2b** only if question 1 says no bits.
 5. **Tier 3** as `tools/` work against dumped frames, never on the hot
    path.

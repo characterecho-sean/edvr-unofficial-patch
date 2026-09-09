@@ -1694,6 +1694,19 @@ constexpr float kBodyNearM = 50.0f;  // the body's near floor, metres (the probe
 uint32_t g_bodyFrameHolds = 0;     // frames stood down with the pair in another frame this interval
 bool     g_bodyRowsOk = false;     // this frame's rows are the view's own (its delta not carried)
 uint32_t g_bodyRowsHolds = 0;      // frames stood down on another camera's rows this interval
+// After the origin moves (a camera jump of over 50 m in a frame) the held
+// pair's positions and box are in the OLD frame. Rather than standing down
+// until a fresh pair -- up to twenty frames, each one the station on the
+// camera's path, the flash the player saw on 2026-09-09 -- the jump's own
+// vector carries the body over: the box shifts by it, the translation term
+// by (I - R) times it (a rotation about an axis a is (I - R) a, and the
+// axis moved with everything else), and the pair's camera by it for the
+// test above. Summed over jumps, cleared when a pair agrees with the rows
+// unshifted; a flip's return sums back to nought on its own. The body
+// stands down on the jump frame itself, whose rows may be another camera's.
+float    g_bodyShift[3] = {};
+uint32_t g_bodyShiftFrame = ~0u;   // the frame of the last jump
+uint32_t g_bodyShiftUsed = 0;      // frames carried over by the shift this interval
 // The body's occupancy grid on the GPU (object_probe.h): one for both
 // eyes, uploaded when the probe's version moves.
 ID3D11Texture3D*          g_bodyGrid = nullptr;
@@ -2616,12 +2629,11 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
             if (jump) {
                 for (int i = 0; i < 3; ++i) tvCam[i] = 0.0f;
                 ++g_camDropMove;
-                // (The body's path once stood down for twelve frames here:
-                // a jump is the floating origin rebasing, after which a held
-                // body's box is in the old frame, or another camera's rows
-                // in and out. Both are caught where the body is taken up,
-                // by the pair's own camera position against this frame's
-                // rows, and a flip costs the body one frame, not twelve.)
+                // The body's path: the jump's vector, summed, carries the
+                // held body into the new frame (g_bodyShift says how); a
+                // flip's return adds the opposite vector back.
+                for (int i = 0; i < 3; ++i) g_bodyShift[i] += camMove[i];
+                g_bodyShiftFrame = g_rowsFrame;
             }
             if (diffDeg > 3.0f) {
                 ++g_camDropRot;
@@ -2762,19 +2774,41 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
             ++g_bodyRowsHolds;
         }
         // The pair's frame against the rows' (kBodyFrameM says why): the
-        // pair's own camera position rides in the motion record.
+        // pair's own camera position rides in the motion record. Unshifted
+        // agreement clears the shift (the pair is in this frame); shifted
+        // agreement carries the body over by it; neither, or a jump this
+        // very frame, stands the body down.
+        float bodyShift[3] = {0.0f, 0.0f, 0.0f};
         auto bodyFrameAgrees = [&](const ObjectMotion& om) {
-            const double dx = static_cast<double>(g_curRows[3]) - om.camPos[0];
-            const double dy = static_cast<double>(g_curRows[7]) - om.camPos[1];
-            const double dz = static_cast<double>(g_curRows[11]) - om.camPos[2];
-            const bool same = dx * dx + dy * dy + dz * dz <
-                              static_cast<double>(kBodyFrameM) * kBodyFrameM;
             static uint32_t s_frameHold = 0;
-            if (!same && s_frameHold != g_rowsFrame) {
+            static uint32_t s_frameUsed = 0;
+            const double cn[3] = {g_curRows[3], g_curRows[7], g_curRows[11]};
+            double dNo = 0.0, dSh = 0.0;
+            for (int i = 0; i < 3; ++i) {
+                const double a = cn[i] - om.camPos[i];
+                const double b = a - g_bodyShift[i];
+                dNo += a * a;
+                dSh += b * b;
+            }
+            const double lim = static_cast<double>(kBodyFrameM) * kBodyFrameM;
+            const bool jumpedNow = g_bodyShiftFrame == g_rowsFrame;
+            if (!jumpedNow && dNo < lim) {
+                for (int i = 0; i < 3; ++i) g_bodyShift[i] = 0.0f;
+                return true;
+            }
+            if (!jumpedNow && dSh < lim) {
+                for (int i = 0; i < 3; ++i) bodyShift[i] = g_bodyShift[i];
+                if (s_frameUsed != g_rowsFrame) {
+                    s_frameUsed = g_rowsFrame;
+                    ++g_bodyShiftUsed;
+                }
+                return true;
+            }
+            if (s_frameHold != g_rowsFrame) {
                 s_frameHold = g_rowsFrame;
                 ++g_bodyFrameHolds;
             }
-            return same;
+            return false;
         };
         if (g_objectsOn && worldOn && g_bodyRowsOk) {
             ObjectMotion om;
@@ -2814,8 +2848,16 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                                      om.tPerMs[2] * g_bodyDtMs};
                 float Rf[9];
                 temporalRodrigues(wF, Rf);
+                // The origin's move since the pair, if any (bodyFrameAgrees):
+                // the translation term shifts by (I - R) times it.
+                float tFs[3];
+                for (int k = 0; k < 3; ++k) {
+                    const float rs = Rf[k * 3 + 0] * bodyShift[0] + Rf[k * 3 + 1] * bodyShift[1] +
+                                     Rf[k * 3 + 2] * bodyShift[2];
+                    tFs[k] = tF[k] + bodyShift[k] - rs;
+                }
                 float W[9], tv[3];
-                temporalBodyPath(g_prevRows, g_curRows, Rf, tF, W, tv);
+                temporalBodyPath(g_prevRows, g_curRows, Rf, tFs, W, tv);
                 float* rows[3] = {p.st0, p.st1, p.st2};
                 float* wrows[3] = {p.wR0, p.wR1, p.wR2};
                 for (int r = 0; r < 3; ++r) {
@@ -2828,8 +2870,8 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                 }
                 for (int i = 0; i < 3; ++i) {
                     p.tvSt[i] = tv[i];
-                    p.box0[i] = om.bmin[i];
-                    p.box1[i] = om.bmax[i];
+                    p.box0[i] = om.bmin[i] + bodyShift[i];
+                    p.box1[i] = om.bmax[i] + bodyShift[i];
                 }
                 p.box0[3] = p.box1[3] = 0.0f;
                 bodyOn = true;
@@ -4329,11 +4371,12 @@ bool temporalPassRegistration(char* buf, size_t n, char* buf2, size_t n2, char* 
         } else {
             regAppend(buf, n, used, "; the body's path is on but no body is in hand (no pool, or no pair yet)");
         }
-        if (g_bodyFrameHolds || g_bodyRowsHolds) {
+        if (g_bodyFrameHolds || g_bodyRowsHolds || g_bodyShiftUsed) {
             regAppend(buf, n, used,
-                      "; the body stood down %u frames with its pair in another frame (a rebase since it, "
-                      "or another camera's rows) and %u on carried rows",
-                      g_bodyFrameHolds, g_bodyRowsHolds);
+                      "; the body stood down %u frames with its pair in another frame (a jump's own frame, "
+                      "or another camera's rows) and %u on carried rows, and was carried over %u frames "
+                      "by the origin's move since its pair",
+                      g_bodyFrameHolds, g_bodyRowsHolds, g_bodyShiftUsed);
         }
     }
     // The third line: the probes and the rows against the head.
@@ -4442,6 +4485,7 @@ bool temporalPassRegistration(char* buf, size_t n, char* buf2, size_t n2, char* 
     g_bodyPix = 0;
     g_bodyFrameHolds = 0;
     g_bodyRowsHolds = 0;
+    g_bodyShiftUsed = 0;
     g_probeSkyDx = g_probeSkyDy = 0;
     g_probeSkyN = 0;
     memset(g_probeDot, 0, sizeof(g_probeDot));
