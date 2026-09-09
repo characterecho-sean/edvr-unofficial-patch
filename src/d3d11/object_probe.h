@@ -80,6 +80,12 @@ struct ObjectMotion {
     float    share;      // of the pair's pose changes the cluster held, 0..1
     uint32_t records;    // records in it
     uint32_t age;        // frames since the pair's second frame
+    // The camera's position in the pair's second frame, from its scene
+    // block: the frame the positions and the box below are in. The floating
+    // origin moves on an approach (a rebase of 13 km read from the dumps of
+    // 2026-09-08), so a reader whose own camera rows stand far from this is
+    // in another frame and should wait for a pair taken in its own.
+    float    camPos[3];
     // Where the body IS: the box around its parts' positions now (world
     // frame, padded by the reach), and an occupancy grid over that box --
     // a cell is set within the reach of any part -- so a pixel whose depth

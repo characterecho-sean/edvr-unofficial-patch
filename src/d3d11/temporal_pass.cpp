@@ -88,7 +88,7 @@ cbuffer P : register(b0) {
     float4 stR1;        // the camera's with the dominant body's own turn -- a station's -- in it
     float4 stR2;
     float4 tvSt;        // xyz its translation term; w 1 = the body's path is on this frame
-    float4 objects;     // x the reach in metres (for the record; the grid already carries it)
+    float4 objects;     // x the reach in metres (for the record; the grid already carries it); y the body's near floor, metres
     float4 wR0;         // the camera rows this frame, view -> world: xyz the row, w the position's component,
     float4 wR1;         // so a view-space point v (the game's, z forward) sits at R v + c in the body's frame
     float4 wR2;
@@ -328,6 +328,12 @@ bool fetchHistoryT(float2 p, float3 r0, float3 r1, float3 r2, float3 tv,
         } else if (useDepth && !far) {
             dp = dp * z + tv;
             zPred = -dp.z;
+            // Inside the ship split but past the body's own floor
+            // (objects.y): a hangar's walls and floor turn with the station
+            // until the ship is latched to the pad, while the ship's own
+            // hull, within the floor as seen from the seat, does not
+            // (2026-09-09). The claim below decides by the grid as usual.
+            zBody = (tvSt.w != 0.0 && z > objects.y) ? z : 0.0;
         } else if (useDepth && far && split.w != 0.0 && split.z > 0.0) {
             // A menu-like scene's depthless pixels (the main menu's hangar
             // wall reads no depth and reprojected as the far plane, so it
@@ -474,6 +480,7 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
             } else if (!far) {
                 dp = dp * z + tvUsed.xyz;
                 zPred = -dp.z;
+                zBody = (tvSt.w != 0.0 && z > objects.y) ? z : 0.0;   // past the body's floor (fetchHistoryT says)
             } else if (split.w != 0.0 && split.z > 0.0) {
                 dp = dp * split.z + tvUsed.xyz;   // the menu's assumed depth (fetchHistoryT says)
             }
@@ -1668,21 +1675,23 @@ bool     g_moversNoted = false;    // the engage line, once
 // instance pool's largest rigid cluster (object_probe.cpp), taken per pixel
 // against the camera's by a 3x3 match with this margin.
 bool     g_objectsOn = false;      // fix.temporal_aa_objects
-float    g_objectsReach = 60.0f;   // advanced.temporal_aa_objects_reach, metres
+float    g_objectsReach = 400.0f;  // advanced.temporal_aa_objects_reach, metres
 bool     g_objectsNoted = false;   // the engage line, once
 ObjectMotion g_bodyLast = {};      // the motion last handed to the shader, for the log
 bool     g_bodyLastValid = false;
 float    g_bodyDtMs = 11.1f;       // this frame's length, for the body's rates
-// After a camera jump (a translation over 50 m in one frame: the game's
-// world origin rebasing, which the flight of 2026-09-08 18:28 showed
-// happening on an approach -- the body's translation term stepping between
-// pairs with millimetre residuals), a held body is in the OLD origin's
-// frame until the next pair replaces it, up to eleven frames. It stands
-// down for that long.
-uint32_t g_bodyHoldOff = 0;
-uint32_t g_bodyJumpHolds = 0;      // frames stood down this interval, for the line
-constexpr uint32_t kBodyHoldOffFrames = 12;
-float    g_bodyJumpFrom[3] = {};   // where the camera stood before the jump that began the hold
+// The body's pair and this frame's rows must be in the same frame: the
+// pool's positions and the box are in the frame of the pair's own camera
+// rows, and the floating origin moves on an approach (a rebase of 13 km
+// read from the dumps of 2026-09-08). A pair whose camera stands over this
+// far from the frame's rows is in another frame -- a rebase since it, or
+// another camera's rows this frame -- and the body waits for a pair taken
+// in this one. (A twelve-frame hold after every camera jump did this on
+// 2026-09-08, and the player saw each hold as the station blurring and
+// resolving again: 13-26 frames an interval.)
+constexpr float kBodyFrameM = 500.0f;
+constexpr float kBodyNearM = 50.0f;  // the body's near floor, metres (the probe shares it)
+uint32_t g_bodyFrameHolds = 0;     // frames stood down with the pair in another frame this interval
 bool     g_bodyRowsOk = false;     // this frame's rows are the view's own (its delta not carried)
 uint32_t g_bodyRowsHolds = 0;      // frames stood down on another camera's rows this interval
 // The body's occupancy grid on the GPU (object_probe.h): one for both
@@ -2607,32 +2616,12 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
             if (jump) {
                 for (int i = 0; i < 3; ++i) tvCam[i] = 0.0f;
                 ++g_camDropMove;
-                // The body's path (tier 2) composes with the raw rows, and
-                // its body is measured in the rows' frame, so a jump is one
-                // of two things to it: the floating origin rebasing, after
-                // which a held body is in the old frame until a fresh pair
-                // replaces it (the body stands down for twelve frames), or
-                // another camera's rows in for a frame and out again -- the
-                // flight of 2026-09-08 18:28 counted two jumps an interval
-                // at rest in the slot with the body's origin term unmoved
-                // (3.06 km on three lines running), so those were not
-                // rebases. A jump that lands within 50 m of where the camera
-                // stood before the hold began is the second kind: this
-                // frame's delta still has the other camera's rows on one
-                // side, and the body is back the frame after.
-                const float cn[3] = {g_curRows[3], g_curRows[7], g_curRows[11]};
-                if (g_bodyHoldOff) {
-                    const double dx = static_cast<double>(cn[0]) - g_bodyJumpFrom[0];
-                    const double dy = static_cast<double>(cn[1]) - g_bodyJumpFrom[1];
-                    const double dz = static_cast<double>(cn[2]) - g_bodyJumpFrom[2];
-                    const bool back = sqrt(dx * dx + dy * dy + dz * dz) < 50.0;
-                    g_bodyHoldOff = back ? 2 : kBodyHoldOffFrames;
-                } else {
-                    g_bodyJumpFrom[0] = g_prevRows[3];
-                    g_bodyJumpFrom[1] = g_prevRows[7];
-                    g_bodyJumpFrom[2] = g_prevRows[11];
-                    g_bodyHoldOff = kBodyHoldOffFrames;
-                }
+                // (The body's path once stood down for twelve frames here:
+                // a jump is the floating origin rebasing, after which a held
+                // body's box is in the old frame, or another camera's rows
+                // in and out. Both are caught where the body is taken up,
+                // by the pair's own camera position against this frame's
+                // rows, and a flip costs the body one frame, not twelve.)
             }
             if (diffDeg > 3.0f) {
                 ++g_camDropRot;
@@ -2767,20 +2756,29 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         // and the pool has given a body. The trained block below may still
         // stand it down for a frame it cannot compare against.
         bool bodyOn = false;
-        static uint32_t s_holdFrame = 0;
-        if (g_bodyHoldOff && s_holdFrame != g_rowsFrame) {
-            s_holdFrame = g_rowsFrame;
-            --g_bodyHoldOff;
-            ++g_bodyJumpHolds;
-        }
         static uint32_t s_rowsFrame = 0;
-        if (g_objectsOn && worldOn && g_bodyHoldOff == 0 && !g_bodyRowsOk && s_rowsFrame != g_rowsFrame) {
+        if (g_objectsOn && worldOn && !g_bodyRowsOk && s_rowsFrame != g_rowsFrame) {
             s_rowsFrame = g_rowsFrame;
             ++g_bodyRowsHolds;
         }
-        if (g_objectsOn && worldOn && g_bodyHoldOff == 0 && g_bodyRowsOk) {
+        // The pair's frame against the rows' (kBodyFrameM says why): the
+        // pair's own camera position rides in the motion record.
+        auto bodyFrameAgrees = [&](const ObjectMotion& om) {
+            const double dx = static_cast<double>(g_curRows[3]) - om.camPos[0];
+            const double dy = static_cast<double>(g_curRows[7]) - om.camPos[1];
+            const double dz = static_cast<double>(g_curRows[11]) - om.camPos[2];
+            const bool same = dx * dx + dy * dy + dz * dz <
+                              static_cast<double>(kBodyFrameM) * kBodyFrameM;
+            static uint32_t s_frameHold = 0;
+            if (!same && s_frameHold != g_rowsFrame) {
+                s_frameHold = g_rowsFrame;
+                ++g_bodyFrameHolds;
+            }
+            return same;
+        };
+        if (g_objectsOn && worldOn && g_bodyRowsOk) {
             ObjectMotion om;
-            if (objectMotionGet(&om) && ensureBodyGrid(dev, ctx, om)) {
+            if (objectMotionGet(&om) && bodyFrameAgrees(om) && ensureBodyGrid(dev, ctx, om)) {
                 // The body's motion over THIS frame's length: its rates
                 // times the interval since the last frame (a station turns
                 // at a constant rate; a pair measured on a long frame is a
@@ -2860,7 +2858,8 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         }
         p.tvSt[3] = bodyOn ? 1.0f : 0.0f;
         p.objects[0] = g_objectsReach;
-        p.objects[1] = p.objects[2] = p.objects[3] = 0.0f;
+        p.objects[1] = kBodyNearM;
+        p.objects[2] = p.objects[3] = 0.0f;
         p.split[0] = g_shipMetres;
         p.split[1] = static_cast<float>(g_debugMode);
         p.split[2] = g_menuMetres;
@@ -3928,10 +3927,10 @@ void temporalPassConfigure(Config& cfg) {
                 : _stricmp(dbg.c_str(), "depth") == 0 ? 3 : _stricmp(dbg.c_str(), "movers") == 0 ? 4
                 : _stricmp(dbg.c_str(), "objects") == 0 ? 5 : 0;
     g_objectsOn = cfg.getBool("fix.temporal_aa_objects", false);
-    float reach = cfg.getFloat("advanced.temporal_aa_objects_reach", 60.0f);
-    if (!std::isfinite(reach)) reach = 60.0f;
+    float reach = cfg.getFloat("advanced.temporal_aa_objects_reach", 400.0f);
+    if (!std::isfinite(reach)) reach = 400.0f;
     if (reach < 1.0f) reach = 1.0f;
-    if (reach > 500.0f) reach = 500.0f;
+    if (reach > 2000.0f) reach = 2000.0f;
     g_objectsReach = reach;
     objectMotionSetReach(reach);
     float menu = cfg.getFloat("advanced.temporal_aa_menu_metres", 0.0f);
@@ -4330,11 +4329,11 @@ bool temporalPassRegistration(char* buf, size_t n, char* buf2, size_t n2, char* 
         } else {
             regAppend(buf, n, used, "; the body's path is on but no body is in hand (no pool, or no pair yet)");
         }
-        if (g_bodyJumpHolds || g_bodyRowsHolds) {
+        if (g_bodyFrameHolds || g_bodyRowsHolds) {
             regAppend(buf, n, used,
-                      "; the body stood down %u frames after camera jumps (a rebase's twelve, a flip's two) "
-                      "and %u on another camera's rows",
-                      g_bodyJumpHolds, g_bodyRowsHolds);
+                      "; the body stood down %u frames with its pair in another frame (a rebase since it, "
+                      "or another camera's rows) and %u on carried rows",
+                      g_bodyFrameHolds, g_bodyRowsHolds);
         }
     }
     // The third line: the probes and the rows against the head.
@@ -4441,7 +4440,7 @@ bool temporalPassRegistration(char* buf, size_t n, char* buf2, size_t n2, char* 
     g_classShipPix = g_classShipClip = 0;
     g_moverPix = 0;
     g_bodyPix = 0;
-    g_bodyJumpHolds = 0;
+    g_bodyFrameHolds = 0;
     g_bodyRowsHolds = 0;
     g_probeSkyDx = g_probeSkyDy = 0;
     g_probeSkyN = 0;

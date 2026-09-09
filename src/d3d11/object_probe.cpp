@@ -57,11 +57,16 @@ constexpr float    kMotionMaxRmsM = 0.5f;   // the rigid fit's residual: parts t
 ObjectMotion g_motion = {};
 bool     g_motionValid = false;
 uint32_t g_motionAge = 0;
-float    g_reachM = 60.0f;
+float    g_reachM = 400.0f;
 uint8_t  g_grid[kObjectGrid * kObjectGrid * kObjectGrid];
 uint32_t g_gridVersion = 0;
 float    g_gridCell = 0.0f;   // the lattice's cell, metres; 0 = not chosen yet
 constexpr float kShipRadiusM = 100.0f;   // the player's own parts sit here, co-rotating in a slot; not the body's
+// The body's near floor, shared with the pass (objects.y): parts nearer the
+// camera than this do not mark the grid, and the pass claims no pixel nearer
+// than this -- the ship's own hull as seen from the seat is within it, a
+// hangar's walls before the ship is latched to the pad are not (2026-09-09).
+constexpr float kBodyNearM = 50.0f;
 
 // The record's head, decoded the way the game's own shaders decode it
 // (fss_panel_vs.h: edvrDecodeQuat, the position at byte 16).
@@ -148,15 +153,16 @@ void buildGrid(const uint8_t* now, uint32_t n, const std::vector<uint8_t>& liveN
         g_motion.bmax[k] = hi[k];
     }
     memset(g_grid, 0, sizeof(g_grid));
-    int dil = static_cast<int>(ceilf(g_reachM / cell));
-    dil = dil < 1 ? 1 : (dil > 4 ? 4 : dil);
+    // The seeds: one cell per recorded part of the body's types, skipping
+    // the parts at the pilot's elbow (the ship's own, within the body's
+    // near floor) and anything outside the box.
     for (uint32_t i = 0; i < n; ++i) {
         if (!liveNow[i] || !bodySigs.count(sigNow[i])) continue;
         const Pose pr = decodePose(now + i * kRecordBytes);
         const float* p = pr.p;
         if (camPos) {
             const float dx = p[0] - camPos[0], dy = p[1] - camPos[1], dz = p[2] - camPos[2];
-            if (dx * dx + dy * dy + dz * dz < kShipRadiusM * kShipRadiusM) continue;
+            if (dx * dx + dy * dy + dz * dz < kBodyNearM * kBodyNearM) continue;
         }
         bool inBox = true;
         int c[3];
@@ -166,13 +172,39 @@ void buildGrid(const uint8_t* now, uint32_t n, const std::vector<uint8_t>& liveN
             c[k] = idx < 0 ? 0 : (idx >= gn ? gn - 1 : idx);
         }
         if (!inBox) continue;
-        for (int z = c[2] - dil; z <= c[2] + dil; ++z) {
-            if (z < 0 || z >= gn) continue;
-            for (int y = c[1] - dil; y <= c[1] + dil; ++y) {
-                if (y < 0 || y >= gn) continue;
-                for (int x = c[0] - dil; x <= c[0] + dil; ++x) {
-                    if (x < 0 || x >= gn) continue;
-                    g_grid[(z * gn + y) * gn + x] = 255;
+        g_grid[(c[2] * gn + c[1]) * gn + c[0]] = 255;
+    }
+    // The reach, as cells either side of every seed: a station's biggest
+    // single parts -- the docking hub's skin, a ring's deck -- reach
+    // several hundred metres from where the game records them, and at one
+    // cell either side (sixty metres at 256 m cells, 2026-09-09) the hub's
+    // skin ran past the marked cells along a lattice plane, a straight cut
+    // between clear and smeared that the player saw. Three one-dimensional
+    // passes make a box of 2*dil+1 cells a side around every seed; each
+    // pass is a prefix count per line, so the cost is the grid's size
+    // whatever the reach, and a line with no seed is skipped.
+    int dil = static_cast<int>(ceilf(g_reachM / cell));
+    dil = dil < 1 ? 1 : (dil > gn - 1 ? gn - 1 : dil);
+    {
+        uint16_t cnt[kObjectGrid + 1];
+        const int strides[3] = {1, gn, gn * gn};
+        for (int axis = 0; axis < 3; ++axis) {
+            const int s = strides[axis];
+            const int s1 = strides[(axis + 1) % 3];
+            const int s2 = strides[(axis + 2) % 3];
+            for (int a = 0; a < gn; ++a) {
+                for (int b = 0; b < gn; ++b) {
+                    uint8_t* base = g_grid + a * s1 + b * s2;
+                    cnt[0] = 0;
+                    for (int i = 0; i < gn; ++i) {
+                        cnt[i + 1] = static_cast<uint16_t>(cnt[i] + (base[i * s] ? 1u : 0u));
+                    }
+                    if (cnt[gn] == 0) continue;
+                    for (int i = 0; i < gn; ++i) {
+                        const int from = i - dil < 0 ? 0 : i - dil;
+                        const int to = i + dil >= gn ? gn - 1 : i + dil;
+                        base[i * s] = cnt[to + 1] - cnt[from] > 0 ? 255 : 0;
+                    }
                 }
             }
         }
@@ -670,6 +702,7 @@ void diffPair(const uint8_t* prev, const uint8_t* now, uint32_t bytes, float dtM
                 g_motion.rms = rms;
                 g_motion.share = share;
                 g_motion.records = static_cast<uint32_t>(members.size());
+                for (int k = 0; k < 3; ++k) g_motion.camPos[k] = camPos ? camPos[k] : 0.0f;
                 g_motion.age = 0;
                 g_motionAge = 0;
                 g_motionValid = true;
@@ -1008,7 +1041,7 @@ bool objectMotionGet(ObjectMotion* out) {
 
 void objectMotionSetReach(float metres) {
     if (!std::isfinite(metres)) return;
-    g_reachM = metres < 1.0f ? 1.0f : (metres > 500.0f ? 500.0f : metres);
+    g_reachM = metres < 1.0f ? 1.0f : (metres > 2000.0f ? 2000.0f : metres);
 }
 
 void objectProbeOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t instances) {

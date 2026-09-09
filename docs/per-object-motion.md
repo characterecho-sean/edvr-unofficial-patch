@@ -1884,6 +1884,49 @@ which is this project's contract for every read of the game.
    lattice lands on 256 m cells; the marked region is the parts plus a
    cell either side, coarse but a superset, and a finer grid is the
    lever if a ship near a station is ever seen taking the station's turn.
+
+   *Its tenth flight* (2026-09-09 04:42, `v0.14.1-75-g0714529`, the
+   depth decoded by the game's own row): "much better! Most of the
+   station is clear now", and three things left. First, "the lattice
+   texture is blurred, but only partially ... a very clear angled
+   delineation between clear on the left and blurred on the right,
+   which also extends to the bottom half sphere": the grid's cut. The
+   claim is per pixel by the pixel's own surface position against cells
+   marked around each RECORDED part, and a station's biggest single
+   parts -- the docking hub's skin, a ring's deck -- reach several
+   hundred metres from where the game records them; with the box at
+   256 m cells for this station and the reach at sixty (one cell either
+   side), the hub's skin ran past the marked cells along a lattice
+   plane, which is the angled line. Rebuilding the flight's grid on the
+   desk from its 04:46 dump pair (the camera at the hub, 98 m off the
+   axis), 31 to 60 of 1200 samples on the hub's skin fell outside it at
+   one cell of dilation and none at two. The reach is now 400 m (two
+   cells at 256 m, four at 128, seven at 64), and the dilation is three
+   one-dimensional passes of a prefix count over the grid, so its cost
+   is the grid's size whatever the reach. Second, "an occasional
+   flicker where the whole thing blurs and then resolves sharp again":
+   the twelve-frame stand-downs after camera jumps, 13 to 26 frames an
+   interval on the line, each one the station dropping to the camera's
+   path for a seventh of a second -- and the return of a flip was not
+   being recognised either, since the ship had moved on before the rows
+   came back. The hold is gone; in its place the body is taken up only
+   when the pair's own camera position, carried in the motion record,
+   stands within 500 m of this frame's rows -- the actual condition,
+   since the box is in the pair's frame -- and a fresh pair satisfies
+   it within a few frames. Third, the hangar: "close to my landing pad,
+   details around the pad were blurred until I became latched", and
+   the same on launch. Inside the ship split (100 m) every pixel had
+   been the ship's, moving with the head, and a hangar's walls turn
+   with the station until the ship is latched to the pad. The body may
+   now claim from 50 m out: past the ship's own hull as seen from the
+   seat, short of the pad under it, which stays with the ship's path
+   until latched. The risk taken with it, to watch: a hull part farther
+   than 50 m from the head, inside a station's marked cells, takes the
+   station's turn -- a big ship's wing tips at the slot are the case.
+   The record's exclusion of parts near the camera follows the same
+   50 m. Also on the line: the body held "1289 records, 120 frames old"
+   with nothing claimed through the docking, the last pair before the
+   origin moved to the station; the frame test retires that too.
 4. **Tier 2b** only if question 1 says no bits.
 5. **Tier 3** as `tools/` work against dumped frames, never on the hot
    path.
