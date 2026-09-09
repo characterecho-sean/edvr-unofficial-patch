@@ -383,8 +383,9 @@ const char kHudDepthHlsl[] =
     "    float4 tc16 : TEXCOORD16;\n"
     "    float2 tc17 : TEXCOORD17;\n"
     "    float3 tc18 : TEXCOORD18;\n"
+    "    float4 pos : SV_Position;\n"
     "};\n"
-    "float4 main(In i) : SV_Target {\n"
+    "float4 main(In i, out float oDepth : SV_Depth) : SV_Target {\n"
     "    // The game's own depth test against the resolve at t0.\n"
     "    float2 uv = i.tc1.xy / i.tc1.z * 0.5 + 0.5;\n"
     "    float sceneZ = Depth.Sample(Smp1, float2(uv.x, 1.0 - uv.y)).x;\n"
@@ -419,6 +420,15 @@ const char kHudDepthHlsl[] =
     "    // and marked but kept off that turn, the docking hologram's strokes\n"
     "    // over the hub's drum kept the whole drum off it and smeared it.\n"
     "    clip(a - max(floorAndStrength.x, 0.7));\n"
+    "    // A core drawn AT the surface (its own depth within half again of\n"
+    "    // the scene's) keeps its depth and turns with the body; a core that\n"
+    "    // floats -- the reticle, the docking hologram's strokes -- is written\n"
+    "    // at one metre (floorAndStrength.z), inside the ship split, so it\n"
+    "    // reprojects with the head alone and holds still on the screen the\n"
+    "    // way the game draws it. At its own depth of tens of metres the\n"
+    "    // ship's own motion reprojected it by whole degrees a frame and\n"
+    "    // it never accumulated: 'swim/shimmering on the hud sprites'.\n"
+    "    oDepth = (i.pos.z <= sceneZ * 1.5 || floorAndStrength.z <= 0.0) ? i.pos.z : floorAndStrength.z;\n"
     "    return floorAndStrength.y;\n"
     "}\n";
 
@@ -464,6 +474,7 @@ struct FloorCb {
     ID3D11Buffer* cb = nullptr;
     float         floor = -1.0f;
     float         strength = -1.0f;
+    float         nearDepth = -1.0f;   // the depth value at one metre (temporalPassDepthAt), for a floating stroke's core
 };
 FloorCb g_floorCbs[2];   // [0] the interface proper, [1] the families that ride a body's path (g_reissueMaskOffset)
 ID3D11DepthStencilState* g_reissueDss = nullptr;   // GEQUAL, write all
@@ -995,7 +1006,8 @@ ID3D11Buffer* floorBuffer(ID3D11DeviceContext* ctx, float maskOffset) {
     // Two families with different offsets draw in one frame; each keeps
     // its own buffer rather than the pair trading one back and forth.
     FloorCb& slot = g_floorCbs[maskOffset != 0.0f ? 1 : 0];
-    if (slot.cb && slot.floor == g_alphaFloor && slot.strength == strength) {
+    const float nearDepth = temporalPassDepthAt(1.0f);
+    if (slot.cb && slot.floor == g_alphaFloor && slot.strength == strength && slot.nearDepth == nearDepth) {
         return slot.cb;
     }
     if (slot.cb) {
@@ -1005,7 +1017,7 @@ ID3D11Buffer* floorBuffer(ID3D11DeviceContext* ctx, float maskOffset) {
     ID3D11Device* dev = nullptr;
     ctx->GetDevice(&dev);
     if (!dev) return nullptr;
-    const float data[4] = {g_alphaFloor, strength, 0.0f, 0.0f};
+    const float data[4] = {g_alphaFloor, strength, nearDepth, 0.0f};
     D3D11_BUFFER_DESC bd{};
     bd.ByteWidth = sizeof(data);
     bd.Usage = D3D11_USAGE_IMMUTABLE;
@@ -1017,6 +1029,7 @@ ID3D11Buffer* floorBuffer(ID3D11DeviceContext* ctx, float maskOffset) {
     if (FAILED(hr)) slot.cb = nullptr;
     slot.floor = g_alphaFloor;
     slot.strength = strength;
+    slot.nearDepth = nearDepth;
     return slot.cb;
 }
 

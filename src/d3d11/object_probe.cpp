@@ -71,6 +71,15 @@ constexpr float kBodyNearM = 50.0f;
 // widens it (buildGrid says why): a station's unslotted tips, not a second
 // station of the kind.
 constexpr float kBodyTipM = 3000.0f;
+// The same body from pair to pair (diffPair says why): its parts' centroid,
+// camera-relative, within this of the last pair's, unless the last body is
+// this old.
+constexpr float    kBodyContinuityM = 2000.0f;
+constexpr uint32_t kBodyContinuityFrames = 60;
+float    g_lastRel[3] = {};
+bool     g_lastRelValid = false;
+uint64_t g_otherBodyPairs = 0;
+uint64_t g_otherBodyNoteMs = 0;
 
 // The record's head, decoded the way the game's own shaders decode it
 // (fss_panel_vs.h: edvrDecodeQuat, the position at byte 16).
@@ -134,9 +143,13 @@ void buildGrid(const uint8_t* now, uint32_t n, const std::vector<uint8_t>& liveN
     // box widens it; a stray of the same type farther off (another station
     // of the kind, tens of kilometres away) does not, which keeps the cell
     // from growing to cover it.
-    {
-        float wlo[3], whi[3];
-        for (int k = 0; k < 3; ++k) { wlo[k] = lo[k]; whi[k] = hi[k]; }
+    // ...and grown again from what it took in, until nothing more is within
+    // reach of it: a pair whose members are one end of the station (the
+    // whole station flashed "outside the cells" for a split second on
+    // 2026-09-09) still boxes the station's every recorded part, since no
+    // two of them sit more than kBodyTipM apart along it.
+    for (int pass = 0; pass < 8; ++pass) {
+        bool grew = false;
         for (uint32_t i = 0; i < n; ++i) {
             if (!liveNow[i] || !bodySigs.count(sigNow[i])) continue;
             const Pose pr = decodePose(now + i * kRecordBytes);
@@ -146,11 +159,11 @@ void buildGrid(const uint8_t* now, uint32_t n, const std::vector<uint8_t>& liveN
             }
             if (!nearBox) continue;
             for (int k = 0; k < 3; ++k) {
-                if (pr.p[k] < wlo[k]) wlo[k] = pr.p[k];
-                if (pr.p[k] > whi[k]) whi[k] = pr.p[k];
+                if (pr.p[k] < lo[k]) { lo[k] = pr.p[k]; grew = true; }
+                if (pr.p[k] > hi[k]) { hi[k] = pr.p[k]; grew = true; }
             }
         }
-        for (int k = 0; k < 3; ++k) { lo[k] = wlo[k]; hi[k] = whi[k]; }
+        if (!grew) break;
     }
     // The cells sit on a FIXED world lattice: a power of two of metres a
     // side, the box's corner at a multiple of it, sixty-two cells covering
@@ -704,8 +717,48 @@ void diffPair(const uint8_t* prev, const uint8_t* now, uint32_t bytes, float dtM
             // and hands the station a shift it never made), fits as one
             // rigid thing (the residual), and keeps a sane rate.
             const float dt = (dtMs >= 5.0f && dtMs <= 50.0f) ? dtMs : 11.1f;
-            if (fitOk && rms <= kMotionMaxRmsM && fitDeg >= kMotionMinDeg && fitDeg <= kMotionMaxDeg &&
-                fitM <= kMotionMaxM) {
+            // The same body as the last pair's? Its parts' centroid, taken
+            // relative to the camera so the floating origin's moves drop
+            // out, sits where the last one's did to within two kilometres
+            // while the ship flies -- and a pair whose largest rigid cluster
+            // is another object (a ship's parts on a frame the station's
+            // slots were shuffled), or a slice of the station at one end,
+            // sits kilometres off. The player saw the whole station flash
+            // from claimed to "outside the cells" for a split second on
+            // 2026-09-09 (v0.14.1-89): a pair's box around something else.
+            // Such a pair keeps the last body; only a body older than
+            // kBodyContinuityFrames yields to it.
+            bool sameBody = true;
+            float relC[3] = {0.0f, 0.0f, 0.0f};
+            if (fitOk && camPos && !members.empty()) {
+                for (int m : members) {
+                    for (int k = 0; k < 3; ++k) relC[k] += posNow[static_cast<size_t>(m) * 3 + k];
+                }
+                for (int k = 0; k < 3; ++k) relC[k] = relC[k] / static_cast<float>(members.size()) - camPos[k];
+                if (g_motionValid && g_lastRelValid && g_motionAge < kBodyContinuityFrames) {
+                    const float dx = relC[0] - g_lastRel[0], dy = relC[1] - g_lastRel[1], dz = relC[2] - g_lastRel[2];
+                    const float dist = sqrtf(dx * dx + dy * dy + dz * dz);
+                    if (dist > kBodyContinuityM) {
+                        sameBody = false;
+                        ++g_otherBodyPairs;
+                        if (dueMs(g_otherBodyNoteMs, 30000)) {
+                            Log::get().note(
+                                "object probe: a pair's body (%u parts, fit to %.3f m) sat %.0f m from the last "
+                                "one's, camera-relative -- another object, or a slice of the station -- and the "
+                                "last body is kept (%u frames old). %llu such pairs so far.",
+                                static_cast<unsigned>(members.size()), static_cast<double>(rms),
+                                static_cast<double>(dist), g_motionAge,
+                                static_cast<unsigned long long>(g_otherBodyPairs));
+                        }
+                    }
+                }
+            }
+            if (fitOk && sameBody && rms <= kMotionMaxRmsM && fitDeg >= kMotionMinDeg &&
+                fitDeg <= kMotionMaxDeg && fitM <= kMotionMaxM) {
+                if (camPos) {
+                    memcpy(g_lastRel, relC, sizeof(g_lastRel));
+                    g_lastRelValid = true;
+                }
                 temporalRodrigues(w, g_motion.R);
                 memcpy(g_motion.t, tf, sizeof(g_motion.t));
                 // The rates: blended into the held ones when this pair

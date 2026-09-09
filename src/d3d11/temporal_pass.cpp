@@ -4772,6 +4772,17 @@ void temporalPassArmEyeDump() {
     g_eyeDumpArmed[0] = g_eyeDumpArmed[1] = true;
 }
 
+float temporalPassDepthAt(float metres) {
+    if (!(metres > 0.0f)) return 0.0f;
+    if (g_curProj[1] > 0.0f) return g_curProj[0] + g_curProj[1] / metres;
+    if (g_lastNear > 0.0f && g_lastFar > g_lastNear) {
+        const float a = g_lastNear / (g_lastNear - g_lastFar);
+        const float b = g_lastNear * g_lastFar / (g_lastFar - g_lastNear);
+        return a + b / metres;
+    }
+    return 0.0f;
+}
+
 }  // namespace edvr
 
 extern "C" __declspec(dllexport) void* edvrTemporalAa(

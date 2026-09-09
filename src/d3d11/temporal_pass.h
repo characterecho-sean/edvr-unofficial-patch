@@ -131,6 +131,13 @@ bool temporalPassDlaaTotals(uint32_t* frames, double* avgMs, double* maxMs,
 // scene's. False until a treat has run.
 bool temporalPassPlanes(float* nearZ, float* farZ);
 
+// The depth-buffer value the scene's own projection writes for a surface
+// this many metres away (the scene block's row when it has been read, else
+// the planes above in the same reversed-Z form); 0 when neither is known.
+// ui_depth writes a floating HUD stroke's core at one metre with it, so the
+// stroke sits inside the ship split and reprojects with the head alone.
+float temporalPassDepthAt(float metres);
+
 void temporalPassShutdown();
 
 }  // namespace edvr

@@ -2129,6 +2129,32 @@ which is this project's contract for every read of the game.
    body's path where their pixels sit on it; a core that sits near
    reconstructs outside the cells and takes the camera's path whatever
    the mask says.
+
+   *Its nineteenth flight* (08:1x, `v0.14.1-89-g90f845e`): "much
+   better, solid white for the most part"; the tips red for a moment
+   at first and then healed; "still bad swim/shimmering on the hud
+   sprites"; and the occasional whole-station flicker, inside and out,
+   once caught as the whole body going from white to totally red for a
+   split second and back. Red for the whole body is a pair whose box
+   is around something else -- its largest rigid cluster another
+   object (a ship's parts on a frame the station's slots were
+   shuffled), or one end of the station alone -- and the frame test
+   cannot see it, since the pair's own camera is fine. Two guards. The
+   probe keeps a body's parts' centroid relative to the camera (the
+   floating origin's moves drop out) and a pair whose centroid sits
+   more than two kilometres from the last body's, while that body is
+   under sixty frames old, keeps the last body and says so in the log.
+   And the box is grown until nothing of the body's types is left
+   within three kilometres of it, so a pair whose members are one end
+   of the station still boxes all of it; that is the tips' first-moment
+   red as well. The sprites: a floating stroke's core written at its
+   own depth of tens of metres reprojected under the SHIP's motion by
+   whole degrees a frame, the history never matching, so it shimmered
+   and swam. A core drawn at the surface (its own depth within half
+   again of the scene's) keeps its depth; a floating core is written
+   at one metre -- inside the ship split, so it reprojects with the head
+   alone and holds still the way the game draws it. The pass gives
+   ui_depth the depth value for a metre from the scene's own projection.
 4. **Tier 2b** only if question 1 says no bits.
 5. **Tier 3** as `tools/` work against dumped frames, never on the hot
    path.
