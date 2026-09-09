@@ -368,6 +368,8 @@ double   g_bigShareSum = 0.0, g_bigAngleSum = 0.0, g_bigTransSum = 0.0;
 uint64_t g_commonPairs = 0;
 uint64_t g_outsideSum = 0, g_secondSum = 0;
 uint64_t g_shuffled = 0;                   // pose changes in a repacked slot, left unclustered (diffPair says)
+double   g_diffMsSum = 0.0, g_diffMsMax = 0.0;   // the diff's own time on the render thread, a pair
+uint32_t g_diffN = 0;
 uint64_t g_rebasePairs = 0;
 double   g_rebaseMaxM = 0.0;
 uint32_t g_poolChanges = 0;
@@ -481,8 +483,16 @@ struct Cluster {
     double   transSum;
 };
 
-bool rigidDelta(const Pose& prev, const Pose& now, float qd[4], float t[3], float* angleDeg,
-                float* transM, float* distM) {
+// The translation term is taken about REF -- the camera, when the pair has
+// one -- and not the world origin: t = prev - R (now - ref) - ref, with
+// distM the part's distance from ref. The quaternion's quantum (0.0035 deg
+// a component) on the lever arm from the origin is a metre at ten
+// kilometres, the floating origin's reach, and it split a station's parts
+// over a hundred clusters at the position tolerance even with the angle
+// test fixed (the flight of 2026-09-09 14:06: 125-154 clusters a pair).
+// About the camera the arm is the part's distance in view.
+bool rigidDelta(const Pose& prev, const Pose& now, const float* ref, float qd[4], float t[3],
+                float* angleDeg, float* transM, float* distM) {
     quatMulConj(prev.q, now.q, qd);
     if (qd[3] < 0.0f) {
         for (int i = 0; i < 4; ++i) qd[i] = -qd[i];
@@ -493,11 +503,12 @@ bool rigidDelta(const Pose& prev, const Pose& now, float qd[4], float t[3], floa
     // small turn read as one of a few values (the review of 2026-09-09).
     const float xyz = sqrtf(qd[0] * qd[0] + qd[1] * qd[1] + qd[2] * qd[2]);
     *angleDeg = 2.0f * atan2f(xyz, qd[3]) * 57.2957795f;
-    float rp[3];
-    quatRotate(qd, now.p, rp);
-    for (int i = 0; i < 3; ++i) t[i] = prev.p[i] - rp[i];
+    float rel[3], rp[3];
+    for (int i = 0; i < 3; ++i) rel[i] = now.p[i] - ref[i];
+    quatRotate(qd, rel, rp);
+    for (int i = 0; i < 3; ++i) t[i] = prev.p[i] - rp[i] - ref[i];
     *transM = sqrtf(t[0] * t[0] + t[1] * t[1] + t[2] * t[2]);
-    *distM = sqrtf(now.p[0] * now.p[0] + now.p[1] * now.p[1] + now.p[2] * now.p[2]);
+    *distM = sqrtf(rel[0] * rel[0] + rel[1] * rel[1] + rel[2] * rel[2]);
     return std::isfinite(*angleDeg) && std::isfinite(*transM) && std::isfinite(*distM);
 }
 
@@ -636,6 +647,20 @@ void takeShips(const Cluster* clusters, int nc, int big, bool bodyTaken, const f
     uint32_t nf = 0;
     std::vector<int> members;
     std::vector<float> fitNow, fitPrev;
+    // The records by cluster, gathered once (a counting sort): a scan of
+    // the pool per cluster was half a million steps a pair at 256 clusters.
+    std::vector<uint32_t> firstOf(static_cast<size_t>(nc) + 1, 0u);
+    for (uint32_t i = 0; i < n; ++i) {
+        if (clusterIdx[i] >= 0) ++firstOf[static_cast<size_t>(clusterIdx[i]) + 1];
+    }
+    for (int j = 0; j < nc; ++j) firstOf[static_cast<size_t>(j) + 1] += firstOf[static_cast<size_t>(j)];
+    std::vector<int> byCluster(firstOf[static_cast<size_t>(nc)]);
+    {
+        std::vector<uint32_t> fill(firstOf.begin(), firstOf.end() - 1);
+        for (uint32_t i = 0; i < n; ++i) {
+            if (clusterIdx[i] >= 0) byCluster[fill[static_cast<size_t>(clusterIdx[i])]++] = static_cast<int>(i);
+        }
+    }
     for (int j = 0; j < nc; ++j) {
         // The largest cluster is skipped only when it was taken as the body:
         // alone in open space with one other ship, the largest cluster IS
@@ -652,8 +677,8 @@ void takeShips(const Cluster* clusters, int nc, int big, bool bodyTaken, const f
         fitNow.clear();
         fitPrev.clear();
         float cen[3] = {0.0f, 0.0f, 0.0f};
-        for (uint32_t i = 0; i < n; ++i) {
-            if (clusterIdx[i] != j) continue;
+        for (uint32_t bi = firstOf[static_cast<size_t>(j)]; bi < firstOf[static_cast<size_t>(j) + 1]; ++bi) {
+            const uint32_t i = static_cast<uint32_t>(byCluster[bi]);
             const float* pn = &posNow[static_cast<size_t>(i) * 3];
             const float dx = pn[0] - camPos[0], dy = pn[1] - camPos[1], dz = pn[2] - camPos[2];
             if (dx * dx + dy * dy + dz * dz < kShipOwnRadiusM * kShipOwnRadiusM) continue;
@@ -855,6 +880,9 @@ void diffPair(const uint8_t* prev, const uint8_t* now, uint32_t bytes, float dtM
     int nc = 0;
     uint32_t overflow = 0;
     // Each pose change's cluster and positions, for the body's fit and grid.
+    // The deltas' translation term is about the camera (rigidDelta says).
+    const float zeroRef[3] = {0.0f, 0.0f, 0.0f};
+    const float* deltaRef = camPos ? camPos : zeroRef;
     std::vector<int> clusterIdx(n, -1);
     std::vector<float> posNow(static_cast<size_t>(n) * 3, 0.0f);
     std::vector<float> posPrev(static_cast<size_t>(n) * 3, 0.0f);
@@ -909,7 +937,7 @@ void diffPair(const uint8_t* prev, const uint8_t* now, uint32_t bytes, float dtM
             float qd[4], t[3], angle = 0.0f, trans = 0.0f, dist = 0.0f;
             const Pose pa = decodePose(a);
             const Pose pb = decodePose(b);
-            if (rigidDelta(pa, pb, qd, t, &angle, &trans, &dist)) {
+            if (rigidDelta(pa, pb, deltaRef, qd, t, &angle, &trans, &dist)) {
                 const int cj = clusterOf(clusters, &nc, qd, t, angle, trans, dist);
                 if (cj < 0) {
                     ++overflow;
@@ -1357,7 +1385,8 @@ void report() {
         "changes a pair outside it (the movers, or noise) and %.0f in the second-largest; the "
         "live records shifted together without a turn on %llu pairs (an origin rebase, up to "
         "%.1f m); %.0f a pair sat in a repacked slot and went unclustered; the pool object changed "
-        "%u times. The fields of a changed record that changed, "
+        "%u times; the diff took %.2f ms a pair on the render thread, %.2f at most. The fields of a "
+        "changed record that changed, "
         "by range with the share of changed records they changed in (under 5%% left out): %s.",
         static_cast<double>(kClusterAngleDeg), 100.0 * static_cast<double>(kClusterPosM),
         1000.0 * static_cast<double>(kClusterPosPerM),
@@ -1369,6 +1398,7 @@ void report() {
         static_cast<double>(g_secondSum) / bigPairs,
         static_cast<unsigned long long>(g_rebasePairs), g_rebaseMaxM,
         static_cast<double>(g_shuffled) / pairs, g_poolChanges,
+        g_diffN ? g_diffMsSum / g_diffN : 0.0, g_diffMsMax,
         ranges[0] ? ranges : "none");
     if (g_shipRangeM > 0.0f && g_shipPairs) {
         const double sp = static_cast<double>(g_shipPairs);
@@ -1406,6 +1436,8 @@ void report() {
     g_rebasePairs = 0;
     g_rebaseMaxM = 0.0;
     g_shuffled = 0;
+    g_diffMsSum = g_diffMsMax = 0.0;
+    g_diffN = 0;
     g_poolChanges = 0;
     memset(g_byteHist, 0, sizeof(g_byteHist));
     g_byteHistN = 0;
@@ -1520,8 +1552,19 @@ void poll(ID3D11DeviceContext* ctx) {
             g_pairLagFrames = g_frame >= s->frame ? g_frame - s->frame : 0;
             g_pairCamPrevValid = g_keepCamValid && s->camPassValid;
             if (g_pairCamPrevValid) memcpy(g_pairCamPrev, g_keepCam, sizeof(g_pairCamPrev));
+            LARGE_INTEGER dq0{}, dq1{}, dqf{};
+            QueryPerformanceCounter(&dq0);
             diffPair(g_keep.data(), bytes, s->bytes,
                      static_cast<float>(s->stampMs > g_keepStamp ? s->stampMs - g_keepStamp : 0.0), camPos);
+            QueryPerformanceCounter(&dq1);
+            QueryPerformanceFrequency(&dqf);
+            if (dqf.QuadPart > 0) {
+                const double ms = static_cast<double>(dq1.QuadPart - dq0.QuadPart) * 1000.0 /
+                                  static_cast<double>(dqf.QuadPart);
+                g_diffMsSum += ms;
+                if (ms > g_diffMsMax) g_diffMsMax = ms;
+                ++g_diffN;
+            }
             if (g_verbose && g_dumps < kDumpMax && dueMs(g_dumpMs, kDumpEveryMs)) {
                 g_dumpMs = stampMs();
                 ++g_dumps;

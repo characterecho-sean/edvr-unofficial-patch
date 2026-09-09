@@ -1524,6 +1524,12 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         if (drawCensusArmed()) drawCensusNoteUnseen('w');
         return DrawVerdict::kSkip;
     }
+    // The heat haze behind drives, withheld when asked (fix.heat_haze): the
+    // same identification, by shader hash, in the same place.
+    if (heatHazeSkip(self, kind, count, instances)) {
+        if (drawCensusArmed()) drawCensusNoteUnseen('h');
+        return DrawVerdict::kSkip;
+    }
 
     const uint32_t rtvGen = bindingGeneration(BindSlot::Rtv0);
     if (s->rtv0EyeGen != rtvGen) {

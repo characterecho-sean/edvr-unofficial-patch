@@ -264,40 +264,6 @@ struct StatePair {
 StatePair g_states[kMaxStates];
 uint32_t  g_stateCount = 0;
 bool      g_statesFullNoted = false;
-// SOFT PARTICLES (fix.temporal_aa_particles, 2026-09-09): a draw into the
-// scene pair that SAMPLES the scene's depth -- the resource the flight HUD
-// binds at t0 for its own depth test, which the particle shaders read to
-// fade near geometry -- and is not the interface's. Elite's smoke trails
-// are such draws: translucent quads that write their depth over the whole
-// quad, clear part and all, so the temporal pass reprojected everything
-// seen through a quad at the quad's distance and each quad showed as a
-// smeared rectangle across the stars behind it, and near a moving ship on
-// its own path the quads tore with the ship ("weird rectangular artifacts
-// in the smoke trail", the ships' second flight). Their depth write is
-// muted: the game's own state with DepthWriteMask ZERO, cached per game
-// state as the writing twin is. The smoke then takes the motion of what
-// is behind it, which blurs it as smoke should blur, and nothing behind
-// it is torn.
-bool      g_particlesOn = true;
-constexpr uint32_t kMaxResolves = 4;
-void*     g_resolves[kMaxResolves] = {};   // the depth resources the flight HUD samples at t0 (identities, never dereferenced)
-uint32_t  g_resolveCount = 0;
-struct MutePair {
-    ID3D11DepthStencilState* game = nullptr;   // held (AddRef), the key
-    ID3D11DepthStencilState* ours = nullptr;   // null when the game's writes nothing already
-};
-MutePair  g_mutes[kMaxStates];
-uint32_t  g_muteCount = 0;
-bool      g_mutesFullNoted = false;
-struct ParticleFamily {
-    uint64_t ps;
-    uint64_t draws;
-};
-constexpr uint32_t kMaxParticleFamilies = 12;
-ParticleFamily g_particleFamilies[kMaxParticleFamilies] = {};
-uint32_t  g_particleFamilyCount = 0;
-uint64_t  g_wParticles = 0;         // draws muted this window
-uint64_t  g_sessionParticles = 0;
 bool      g_createFailedNoted = false;
 
 // THE ALPHA-AWARE DEPTH PASS, for a composite drawn through the interface
@@ -589,7 +555,7 @@ bool        g_frameTargetsFullNoted = false;
 // flight HUD, whose own draw would write every pixel of a stroke's
 // bounding quad. No viewport change and no rebind: it already draws into
 // the scene's pair with the scene's projection.
-enum class Mode { kNone, kInPlace, kReissue, kReissueScene, kMuteDepth };
+enum class Mode { kNone, kInPlace, kReissue, kReissueScene };
 Mode                     g_mode = Mode::kNone;
 bool                     g_engaged = false;
 ID3D11DepthStencilState* g_savedDss = nullptr;   // the in-place swap's, owned by Begin/End
@@ -816,157 +782,6 @@ void noteFamily(uint64_t vh, uint64_t ph, const char* how) {
                     static_cast<unsigned long long>(vh),
                     static_cast<unsigned long long>(ph),
                     haveRt ? rt.a : 0u, haveRt ? rt.b : 0u, haveRt ? rt.fmt : 0u, how);
-}
-
-// The muting twin of the game's depth-stencil state (fix.temporal_aa_particles):
-// the same state with its depth write off. Null when the game's writes
-// nothing already, or no twin can be made.
-ID3D11DepthStencilState* mutingTwin(ID3D11DeviceContext* ctx, ID3D11DepthStencilState* game) {
-    for (uint32_t i = 0; i < g_muteCount; ++i) {
-        if (g_mutes[i].game == game) return g_mutes[i].ours;
-    }
-    if (g_muteCount >= kMaxStates) {
-        if (!g_mutesFullNoted) {
-            g_mutesFullNoted = true;
-            Log::get().note("ui depth: more than %u distinct depth states at soft-particle draws; "
-                            "the ones past the table keep their depth write.",
-                            kMaxStates);
-        }
-        return nullptr;
-    }
-    D3D11_DEPTH_STENCIL_DESC d{};
-    if (game) {
-        game->GetDesc(&d);
-    } else {
-        // A null state is D3D's default: depth on, LESS, write all.
-        d.DepthEnable = TRUE;
-        d.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ALL;
-        d.DepthFunc = D3D11_COMPARISON_LESS;
-        d.StencilEnable = FALSE;
-        d.StencilReadMask = D3D11_DEFAULT_STENCIL_READ_MASK;
-        d.StencilWriteMask = D3D11_DEFAULT_STENCIL_WRITE_MASK;
-        const D3D11_DEPTH_STENCILOP_DESC keep = {D3D11_STENCIL_OP_KEEP, D3D11_STENCIL_OP_KEEP,
-                                                D3D11_STENCIL_OP_KEEP, D3D11_COMPARISON_ALWAYS};
-        d.FrontFace = keep;
-        d.BackFace = keep;
-    }
-    MutePair& m = g_mutes[g_muteCount];
-    m.game = game;
-    m.ours = nullptr;
-    if (game) game->AddRef();
-    // Only a draw that writes depth WITHOUT testing it: a trail's haze
-    // ribbons carry that state (the census of 2026-09-09 13:03, depth off
-    // and the write mask all), and it is the state that puts a quad's
-    // depth over everything behind the quad. A draw that tests its depth
-    // -- the space dust near the eye, blended and tested -- keeps its
-    // write: its depth is its own, and muting it on the ships' fourth
-    // flight had the dust flicker like stars.
-    const bool untestedWrite = !d.DepthEnable && d.DepthWriteMask == D3D11_DEPTH_WRITE_MASK_ALL;
-    if (untestedWrite) {
-        d.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ZERO;
-        ID3D11Device* dev = nullptr;
-        ctx->GetDevice(&dev);
-        if (dev) {
-            if (FAILED(dev->CreateDepthStencilState(&d, &m.ours))) m.ours = nullptr;
-            dev->Release();
-        }
-    }
-    ++g_muteCount;
-    return m.ours;
-}
-
-// Is the bound blend state a translucent one (blending on, the destination
-// kept)? A replace (one, zero) is a composite that happens to blend, and
-// its depth is not a particle's. Cached per state, the reference from
-// OMGet held as the key.
-struct BlendMemo {
-    ID3D11BlendState* state = nullptr;
-    bool              translucent = false;
-};
-BlendMemo g_blends[kMaxStates];
-uint32_t  g_blendCount = 0;
-bool translucentBlend(ID3D11DeviceContext* ctx) {
-    ID3D11BlendState* bs = nullptr;
-    float factor[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-    UINT mask = 0;
-    ctx->OMGetBlendState(&bs, factor, &mask);
-    if (!bs) return false;   // the default: opaque
-    for (uint32_t i = 0; i < g_blendCount; ++i) {
-        if (g_blends[i].state == bs) {
-            bs->Release();
-            return g_blends[i].translucent;
-        }
-    }
-    D3D11_BLEND_DESC d{};
-    bs->GetDesc(&d);
-    const D3D11_RENDER_TARGET_BLEND_DESC& r = d.RenderTarget[0];
-    const bool t = r.BlendEnable && r.DestBlend != D3D11_BLEND_ZERO;
-    if (g_blendCount < kMaxStates) {
-        g_blends[g_blendCount].state = bs;   // the OMGet reference, held as the key
-        g_blends[g_blendCount].translucent = t;
-        ++g_blendCount;
-    } else {
-        bs->Release();
-    }
-    return t;
-}
-
-// Does this eye draw sample one of the depth resources the flight HUD
-// samples (learnResolve)? The pixel stage's first four slots, resolved
-// through the binding shadow's cache, as the composite test above them.
-bool samplesSceneDepth() {
-    static const BindSlot kSlots[4] = {BindSlot::PsSrv0, BindSlot::PsSrv1,
-                                       BindSlot::PsSrv2, BindSlot::PsSrv3};
-    for (int i = 0; i < 4; ++i) {
-        void* v = bindingGet(kSlots[i]);
-        if (!v) continue;
-        ResourceInfo info;
-        if (!bindingResolve(v, &info) || !info.resource) continue;
-        for (uint32_t r = 0; r < g_resolveCount; ++r) {
-            if (g_resolves[r] == info.resource) return true;
-        }
-    }
-    return false;
-}
-
-// The flight HUD's t0: the scene's depth, or a resolve of it, as an
-// identity for samplesSceneDepth. Learned at the HUD's own draws, a few
-// resources a session.
-void learnResolve() {
-    if (g_resolveCount >= kMaxResolves) return;
-    ResourceInfo info;
-    if (!bindingResolve(bindingGet(BindSlot::PsSrv0), &info) || !info.resource) return;
-    for (uint32_t r = 0; r < g_resolveCount; ++r) {
-        if (g_resolves[r] == info.resource) return;
-    }
-    // The scene's depth or an R32 resolve of it, eye-sized; anything else
-    // at t0 (a variant's other binding) is not learned (the review of
-    // 2026-09-09: an address learned unchecked could name any texture).
-    if (!depthProbeIsSceneDepth(info.resource) && !(info.isTexture2D && info.fmt == 39)) return;
-    g_resolves[g_resolveCount++] = info.resource;
-    Log::get().note("ui depth: the flight HUD samples the scene's depth at t0 -- %ux%u, DXGI format %u%s; "
-                    "a draw into the scene pair that samples it, is not the interface's, blends as a "
-                    "translucent and writes depth without testing it (a trail's haze) has its depth "
-                    "write %s (fix.temporal_aa_particles).",
-                    info.a, info.b, info.fmt,
-                    depthProbeIsSceneDepth(info.resource) ? " (the scene's own depth texture)"
-                                                          : " (a resolve of it)",
-                    g_particlesOn ? "muted" : "left as the game writes it (off)");
-}
-
-void noteParticleFamily(ID3D11DeviceContext* ctx) {
-    const uint64_t ps = boundPsHash(ctx);
-    for (uint32_t i = 0; i < g_particleFamilyCount; ++i) {
-        if (g_particleFamilies[i].ps == ps) {
-            ++g_particleFamilies[i].draws;
-            return;
-        }
-    }
-    if (g_particleFamilyCount < kMaxParticleFamilies) {
-        g_particleFamilies[g_particleFamilyCount].ps = ps;
-        g_particleFamilies[g_particleFamilyCount].draws = 1;
-        ++g_particleFamilyCount;
-    }
 }
 
 enum class TwinWhy { kOk, kAlreadyWrites, kNoTwin };
@@ -1429,7 +1244,6 @@ void uiDepthConfigure(Config& cfg) {
     // Only NVIDIA's history reads a bias mask; the pass's own does not, so
     // marking one under temporal_aa = on would be draws for nothing.
     g_trained = _stricmp(aa.c_str(), "dlaa") == 0 || _stricmp(aa.c_str(), "dlss") == 0;
-    g_particlesOn = cfg.getBool("fix.temporal_aa_particles", false);
     // The direct list: the flight HUD built in, the ini's additions after.
     g_familyCount = 0;
     g_families[g_familyCount++] = kFlightHud;
@@ -1633,20 +1447,7 @@ bool uiDepthOnEyeDraw(ID3D11DeviceContext* ctx) {
     // (a couple of dozen a frame); otherwise the direct list, which is the
     // only test left for the other draws.
     const uint64_t h = boundVsHash(ctx);
-    if (!composite && !(h && inList(g_families, g_familyCount, h))) {
-        // Not the interface's. A soft particle's draw, if it samples the
-        // scene's depth into the scene pair (g_particlesOn says why): its
-        // depth write is muted around the draw (uiDepthBegin).
-        // (The resolve test costs four view resolves a draw -- the review of
-        // 2026-09-09 -- so it runs only with the key on, and honours the
-        // exclude list as every other classification does.)
-        if (g_particlesOn && g_resolveCount && !(h && inList(g_exclude, g_excludeCount, h)) &&
-            dsvIsSceneDepth(dsv) && samplesSceneDepth()) {
-            g_mode = Mode::kMuteDepth;   // uiDepthBegin decides by its states, and counts
-            return true;
-        }
-        return false;
-    }
+    if (!composite && !(h && inList(g_families, g_familyCount, h))) return false;
     if (h && inList(g_exclude, g_excludeCount, h)) return false;
 
     // WHICH PROJECTION. The cockpit's families bind the scene pair and
@@ -1658,7 +1459,6 @@ bool uiDepthOnEyeDraw(ID3D11DeviceContext* ctx) {
     const bool scenePair = dsvIsSceneDepth(dsv);
     const bool sceneFamily = h == kHoloPanel || h == kHudSprite ||
                              inList(g_families, g_familyCount, h);
-    if (g_particlesOn && scenePair && h == kFlightHud) learnResolve();
     if (scenePair && sceneFamily) {
         g_mode = Mode::kInPlace;
         const bool wantLine = g_familyLoggedCount < kMaxFamilyLines;
@@ -1837,45 +1637,28 @@ bool uiDepthWantsReissue() {
 
 void uiDepthBegin(ID3D11DeviceContext* ctx) {
     g_engaged = false;
-    if (!g_on || g_stoodDown || (g_mode != Mode::kInPlace && g_mode != Mode::kMuteDepth)) return;
+    if (!g_on || g_stoodDown || g_mode != Mode::kInPlace) return;
     const bool ran = guardedBudget(g_budget, [&] {
         ID3D11DepthStencilState* game = nullptr;
         UINT ref = 0;
         ctx->OMGetDepthStencilState(&game, &ref);
-        ID3D11DepthStencilState* ours = nullptr;
-        if (g_mode == Mode::kMuteDepth) {
-            // A soft particle's draw: muted only when it blends as a
-            // translucent and writes depth without testing it (mutingTwin
-            // says why); the game's state with its write off.
-            ours = translucentBlend(ctx) ? mutingTwin(ctx, game) : nullptr;
-            if (!ours) {
-                if (game) game->Release();
-                return;
+        TwinWhy why = TwinWhy::kNoTwin;
+        ID3D11DepthStencilState* ours = writingTwin(ctx, game, &why);
+        if (!ours) {
+            if (game) game->Release();
+            if (why == TwinWhy::kAlreadyWrites) {
+                ++g_wAlreadyWrote;
+            } else {
+                ++g_wNoTwin;
             }
-            noteParticleFamily(ctx);
-            ++g_wParticles;
-            ++g_sessionParticles;
-        } else {
-            TwinWhy why = TwinWhy::kNoTwin;
-            ours = writingTwin(ctx, game, &why);
-            if (!ours) {
-                if (game) game->Release();
-                if (why == TwinWhy::kAlreadyWrites) {
-                    ++g_wAlreadyWrote;
-                } else {
-                    ++g_wNoTwin;
-                }
-                return;
-            }
+            return;
         }
         g_savedDss = game;   // the AddRef from OMGet, released at End
         g_savedRef = ref;
         ctx->OMSetDepthStencilState(ours, ref);
         g_engaged = true;
-        if (g_mode == Mode::kInPlace) {
-            ++g_wWrote;
-            ++g_sessionWrote;
-        }
+        ++g_wWrote;
+        ++g_sessionWrote;
     });
     if (!ran && !g_budget.shouldRun() && !g_stoodDown) {
         g_stoodDown = true;
@@ -2095,26 +1878,6 @@ void uiDepthFrameBoundary(ID3D11DeviceContext* ctx) {
                         g_wWrote, g_wComposite, g_surfaceCount, g_wDirect, g_wReissued);
     }
     if (g_wFrames >= kTotalsFrames) {
-        if (g_wParticles) {
-            char fam[400];
-            size_t used = 0;
-            fam[0] = 0;
-            for (uint32_t i = 0; i < g_particleFamilyCount && used + 40 < sizeof(fam); ++i) {
-                const int m = snprintf(fam + used, sizeof(fam) - used, "%sps %016llX x %.1f",
-                                       i ? ", " : "",
-                                       static_cast<unsigned long long>(g_particleFamilies[i].ps),
-                                       static_cast<double>(g_particleFamilies[i].draws) / g_wFrames);
-                if (m < 0) break;
-                used += static_cast<size_t>(m);
-            }
-            Log::get().note("ui depth: %.1f untested translucent depth writers a frame had their depth "
-                            "write muted (fix.temporal_aa_particles; %llu this session), by pixel shader a "
-                            "frame: %s.",
-                            static_cast<double>(g_wParticles) / g_wFrames,
-                            static_cast<unsigned long long>(g_sessionParticles), fam[0] ? fam : "none");
-            g_wParticles = 0;
-            g_particleFamilyCount = 0;
-        }
         if (g_wWrote || g_wNotScene || g_wRebound || g_wNoPair || g_wNoShader ||
             g_wNoTwin || g_wLearned || g_evictions) {
             Log::get().note("ui depth totals: %.1f interface draws a frame wrote depth "
@@ -2142,18 +1905,6 @@ void uiDepthFrameBoundary(ID3D11DeviceContext* ctx) {
 }
 
 void uiDepthShutdown() {
-    for (uint32_t i = 0; i < g_muteCount; ++i) {
-        if (g_mutes[i].game) g_mutes[i].game->Release();
-        if (g_mutes[i].ours) g_mutes[i].ours->Release();
-        g_mutes[i] = MutePair();
-    }
-    g_muteCount = 0;
-    g_resolveCount = 0;
-    for (uint32_t i = 0; i < g_blendCount; ++i) {
-        if (g_blends[i].state) g_blends[i].state->Release();
-        g_blends[i] = BlendMemo();
-    }
-    g_blendCount = 0;
     if (g_savedDss) {
         g_savedDss->Release();
         g_savedDss = nullptr;

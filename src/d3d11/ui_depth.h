@@ -132,10 +132,8 @@ void uiDepthNoteOffscreenDraw(ID3D11DeviceContext* ctx);
 
 // Every eye draw: a UI composite (samples a learned surface in a
 // pixel-stage slot 0..3) or a named direct family, with a depth target
-// bound that is the scene pair's. True means the caller wraps the draw in
-// Begin/End: its depth-stencil state is swapped for the draw -- a writing
-// twin for the interface's, a muting twin for a soft particle's
-// (fix.temporal_aa_particles).
+// bound that is the scene pair's. True means the draw should write its
+// depth; the caller wraps it in Begin/End.
 bool uiDepthOnEyeDraw(ID3D11DeviceContext* ctx);
 
 // Around the real draw, for a family sharing the scene's projection: the

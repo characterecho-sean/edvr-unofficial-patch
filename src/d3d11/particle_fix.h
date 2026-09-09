@@ -40,6 +40,14 @@ bool particleSteady();
 bool witchspaceStarsSkip(ID3D11DeviceContext* ctx, char kind, uint32_t count,
                          uint32_t instances);
 
+// Is this draw the heat haze behind a ship's drives -- the refraction
+// ribbons that trail it and the shimmer at its nozzles -- with fix.heat_haze
+// withholding them (off, or auto under the temporal pass)? True means do
+// not forward it; the smoke, the glow and everything else stay. Costs one
+// comparison per draw when the key leaves them on, a VSGetShader on the
+// few draws shaped like them when it does not.
+bool heatHazeSkip(ID3D11DeviceContext* ctx, char kind, uint32_t count, uint32_t instances);
+
 // The matched draw, for the verdict chain: this draw is a particle
 // billboard AND a substitute is ready to bind.
 bool particleOnDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,

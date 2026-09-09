@@ -82,6 +82,28 @@ constexpr uint64_t kFlareVs = 0x6041FD2D3D0164E1ull;
 // jump tunnel, not proof it draws nowhere else.
 constexpr uint64_t kWitchspaceStarsVs = 0x9AEC596A2B036EA6ull;
 bool g_hideWitchspaceStars = false;
+// THE HEAT HAZE behind a ship's drives (fix.heat_haze). Three vertex
+// shaders, named by the draw census of 2026-09-09 13:03 (three censuses,
+// the first with no trail in view; tools/diff_draw_census.py): the
+// refraction ribbons that trail a ship at speed -- vs 0A298DE7DF833A46,
+// ps 6FD4C38BA927C8C7, indexed draws of 72 to 756 indices in multiples of
+// 36, one instance, up to 34 a frame near a ship, sampling the scene's
+// depth resolve, the scene's colour and a 1024x256 streak, blended
+// SRC_ALPHA over INV_SRC_ALPHA with the depth test off and the write mask
+// all -- and the shimmer at the nozzles, vs 0C4E76889907B963 and
+// D8FCE3CEA16B9B51, 36-index quads instanced ten to sixty at a time with
+// the same samplers and state. Under the temporal pass the refraction
+// inside each ribbon changes every frame in a way no history can follow,
+// and each ribbon shows as a long smeared rectangle over the stars behind
+// it (the ships' flights of 2026-09-09); muting their depth write changed
+// nothing, and the player asked for them gone: "remove those heatwaves
+// entirely and just keep the smoke".
+constexpr uint64_t kHeatHazeVs[3] = {0x0A298DE7DF833A46ull, 0x0C4E76889907B963ull,
+                                     0xD8FCE3CEA16B9B51ull};
+int      g_heatHaze = 2;          // 0 off (withheld), 1 on (the game's), 2 auto (withheld under the temporal pass)
+bool     g_hideHeatHaze = false;  // what the mode resolves to
+uint64_t g_hazeSkipped = 0;
+uint64_t g_hazeNoteMs = 0;
 
 struct BillboardVariant {
     uint64_t    hash;
@@ -504,6 +526,29 @@ bool witchspaceStarsSkip(ID3D11DeviceContext* ctx, char kind, uint32_t count,
     return true;
 }
 
+bool heatHazeSkip(ID3D11DeviceContext* ctx, char kind, uint32_t count, uint32_t instances) {
+    if (!g_hideHeatHaze || !ctx) return false;
+    // The shape first, the shader after: the ribbons and the quads are
+    // indexed draws of a multiple of 36 indices (a segment is six quads),
+    // and that leaves a handful of the eye's draws for the VSGetShader.
+    if (kind != 'X' || instances == 0 || count == 0 || count > 4096 || (count % 36) != 0) return false;
+    ID3D11VertexShader* vs = nullptr;
+    ctx->VSGetShader(&vs, nullptr, nullptr);
+    if (!vs) return false;
+    const uint64_t h = lookupShaderHash(vs);
+    vs->Release();
+    if (h != kHeatHazeVs[0] && h != kHeatHazeVs[1] && h != kHeatHazeVs[2]) return false;
+    ++g_hazeSkipped;
+    const uint64_t now = nowMs();
+    if (now - g_hazeNoteMs >= 30000) {
+        g_hazeNoteMs = now;
+        Log::get().note("heat haze: OFF -- %llu draw(s) of the drives' refraction withheld so far; the "
+                        "smoke and the glow stay. fix.heat_haze = on has them back.",
+                        static_cast<unsigned long long>(g_hazeSkipped));
+    }
+    return true;
+}
+
 void* particleTargetCb0() {
     return g_mode == Mode::kSteady ? g_target0 : nullptr;
 }
@@ -700,6 +745,27 @@ void particleConfigure(Config& cfg) {
     // The witchspace starfield switch. "on" is the game's own behaviour and
     // the default; "off" empties the jump tunnel, which a player asked for
     // after 0.12.3 did it by accident.
+    // The heat haze behind drives: on (the game's), off (withheld), or auto
+    // (withheld under the temporal pass, where it tears; the default).
+    {
+        const std::string hz = cfg.getString("fix.heat_haze", "auto");
+        const std::string aa = cfg.getString("fix.temporal_aa", "off");
+        const bool passOn = !aa.empty() && _stricmp(aa.c_str(), "off") != 0;
+        const int mode = _stricmp(hz.c_str(), "off") == 0 ? 0 : _stricmp(hz.c_str(), "on") == 0 ? 1 : 2;
+        if (mode == 2 && _stricmp(hz.c_str(), "auto") != 0) {
+            Log::get().note("heat haze: fix.heat_haze = \"%s\" is not on, off or auto; auto.", hz.c_str());
+        }
+        const bool hide = mode == 0 || (mode == 2 && passOn);
+        if (hide != g_hideHeatHaze || mode != g_heatHaze) {
+            Log::get().note("heat haze: %s -- the drives' refraction ribbons and nozzle shimmer are %s "
+                            "(fix.heat_haze = %s%s).",
+                            hide ? "OFF" : "ON", hide ? "withheld; the smoke and the glow stay" : "the game's",
+                            mode == 0 ? "off" : mode == 1 ? "on" : "auto",
+                            mode == 2 ? (passOn ? ", the temporal pass on" : ", the temporal pass off") : "");
+        }
+        g_heatHaze = mode;
+        g_hideHeatHaze = hide;
+    }
     const std::string ws = cfg.getString("fix.witchspace_stars", "on");
     const bool wasHidden = g_hideWitchspaceStars;
     if (ws == "off") {
