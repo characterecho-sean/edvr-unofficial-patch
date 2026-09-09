@@ -2615,6 +2615,33 @@ which is this project's contract for every read of the game.
    flight is not the three haze shaders. So the skip reads the shadow
    again and checks one draw in sixty-four. Built as v0.14.1-121-gbc3db07,
    and the two-frame pair as v0.14.1-123-g553638e.
+
+   *The thirty-fifth flight, 16:55 (v0.14.1-123)*: a census and a dump,
+   and the pilot's crop: "the most obvious thing here is the solar panels
+   blur as they move" -- the hexagonal arrays smeared along the ring's
+   motion, the spokes beside them crisp. And on the counter-turn: "to my
+   eye they all appear to spin in one direction." The two-frame pair
+   held the tail in both frames now (nothing allocated or freed a pair)
+   and no second body was found -- and 455 records held the same pose
+   across the pair while the ring's 655 parts turned 0.075 deg: 310 of
+   them beyond the pilot's own ship, 290 within 500 m of the axis (the
+   hub's skin) and 19 at 1.2 to 2 km (the panel arrays), none at the
+   ring's radius. The same parts that had smeared in every flight at
+   range. The game updates them at a lower rate than the frame -- held
+   across two frames here, present on alternate frames the flight before,
+   and the "counter-turn" of the flight before that was such a part
+   caught stepping back to an older buffered pose -- and what it draws
+   for them steps or alternates, which no smooth vector can match, so
+   DLSS smears them and the eye sees them spin with the rest. The second
+   body was the wrong reading and stays only for a genuine one, now
+   needing three pairs turning the same way. The fix is per frame: the
+   pool copied every frame, each record's own turn measured against the
+   body's as a multiple, an eight-frame history per slot, the multiple
+   for the frame the pass draws next predicted from it (a stepping part
+   repeats with a period of two), their cells stamped with it, and the
+   pass reprojecting them by a table of twelve composite deltas, one per
+   multiple. Built as v0.14.1-126-g79bd1b8; the 20 s probe line says how many
+   parts step, in what pattern, and how often the prediction was right.
 4. **Tier 2b** only if question 1 says no bits.
 5. **Tier 3** as `tools/` work against dumped frames, never on the hot
    path.
@@ -2767,3 +2794,48 @@ learned that a fragment of the body is not a second body: the ring's
 own cluster splits at the cluster table's overflow, and the other half
 turns the body's own turn. A second body must turn a quarter of the
 body's turn apart at least.
+
+## The stepped parts
+
+The thirty-fifth flight retracted the counter-turn. What the pool showed
+across the flights at ten kilometres was one thing seen three ways: the
+docking hub's skin (about 290 records within 500 m of the axis) and the
+solar panel arrays (about 19 at 1.2 to 2 km) are updated by the game at
+a lower rate than the frame. A consecutive pair caught them stepping back
+to an older buffered pose (the "counter-turn", 15:40), a consecutive pair
+of the next flight found them present on alternate frames only (16:22),
+and a two-frame pair found them holding one pose across both frames
+while the ring turned (16:55). What the game draws for them steps, or
+alternates between two poses a frame apart, and the pilot's eye sees
+them spin with the rest -- but a smooth vector cannot match a step, and
+DLSS smeared them in every flight at range while the spokes beside them,
+updated every frame, stayed crisp.
+
+So the probe copies the pool every frame now (six staging slots, two of
+which are the pair's), and `trackFrame` compares each frame with the one
+before: every live record at the station turns about the body's axis by
+some multiple of the body's own turn that frame -- one for a part the
+game updates every frame, nought for one holding an old pose, two or more
+for one catching up, minus one for one stepping back. A part that has
+turned the body's turn on every frame it was seen is the body's and its
+cells are left alone. For the rest, an eight-entry history per slot
+names the kind: a period of two (the prediction is the entry of the same
+parity as the frame the pass draws next), one value held (kept), or
+irregular (the mean). Their cells -- a one-cell cube around each -- are
+stamped 64 plus the multiple offset by three, over the worker's grid,
+and uploaded each frame as the box that holds them. The pass carries a
+table of twelve composite deltas, one per multiple from -3 to 8, each
+composed exactly as the body's own from the body's turn: the axis point
+c solves (I - R) c = t_perp, and the m-th translation is (I - R^m) c +
+m t_par, so m = 1 gives the body's own path and m = 0 the camera's. A
+pixel in a stamped cell takes its cell's entry. The objects view paints
+them orange; the registration line says their share; the probe's 20 s
+line says how many parts step, in what pattern, and how often the
+prediction held.
+
+Limits, stated: the prediction is a guess two frames on from what the
+readback could see, right for a period of two and for a held value, a
+mean for anything else; the cube is a cube, so a spoke's root inside a
+panel's cube takes the panel's multiple; and a part whose turn is not
+about the body's axis is left to the body's path, which is where the
+ships' own stage takes over.
