@@ -1875,7 +1875,15 @@ which is this project's contract for every read of the game.
    smeared, the bracket's own region treated differently by the reactive
    mask -- and the coverage pass itself did not change between the
    flights; if they still artifact once the station is claimed at range,
-   that is the next question.
+   that is the next question. One more reading from the same dumps, for
+   the record: the body's box is 16 km a side because the station's
+   rigid cluster really spans 14 km along its axis in the pool (the hub
+   and rings in a 7 km stretch, the spine's module clusters at 7, 9, 11
+   and 12 km, 233 records of two types, all within 2.5 km of the axis
+   and fitting the same turn to millimetres), so the sixty-four-cell
+   lattice lands on 256 m cells; the marked region is the parts plus a
+   cell either side, coarse but a superset, and a finer grid is the
+   lever if a ship near a station is ever seen taking the station's turn.
 4. **Tier 2b** only if question 1 says no bits.
 5. **Tier 3** as `tools/` work against dumped frames, never on the hot
    path.
