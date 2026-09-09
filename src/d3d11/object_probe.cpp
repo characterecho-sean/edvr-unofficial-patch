@@ -103,6 +103,8 @@ constexpr float    kShipPadM = 30.0f;
 constexpr uint32_t kShipMinRecords = 3;     // the rigid fit's floor
 constexpr float    kShipMaxRmsM = 0.5f;     // the fit's residual: parts that moved as one
 constexpr float    kShipMinMoveM = 0.02f;   // a pair: under this and under kMotionMinDeg it stands still (the world path's)
+constexpr float    kShipTailSpeedM = 0.5f;  // a pair (forty-five metres a second): slower, the plume is short and the way it flies a guess
+constexpr float    kShipTailM = 5.0f;       // behind the rearmost part: the drive's nozzle sits a few metres behind its part's origin
 constexpr uint32_t kDtRing = 16;
 float      g_shipRangeM = 1000.0f;
 ObjectShip g_ships[kObjectShipsMax] = {};
@@ -665,6 +667,28 @@ void takeShips(const Cluster* clusters, int nc, int big, const std::vector<int>&
         sh.distM = dist;
         sh.rms = rms;
         sh.records = static_cast<uint32_t>(members.size());
+        // The tail and the parts (ObjectShip says). The ship moves by minus
+        // t a frame, so its way is minus t; the rearmost part is the one
+        // farthest back along it.
+        const float speed = sqrtf(tf[0] * tf[0] + tf[1] * tf[1] + tf[2] * tf[2]);
+        sh.dir[0] = sh.dir[1] = sh.dir[2] = 0.0f;
+        sh.rear = -1e30f;
+        if (speed >= kShipTailSpeedM) {
+            for (int k = 0; k < 3; ++k) sh.dir[k] = -tf[k] / speed;
+            float rearAlong = 1e30f;
+            for (int m : members) {
+                const float* pm = &posNow[static_cast<size_t>(m) * 3];
+                const float a = pm[0] * sh.dir[0] + pm[1] * sh.dir[1] + pm[2] * sh.dir[2];
+                if (a < rearAlong) rearAlong = a;
+            }
+            sh.rear = rearAlong - kShipTailM;
+        }
+        const size_t stride = (members.size() + kObjectShipParts - 1) / kObjectShipParts;
+        sh.partCount = 0;
+        for (size_t m = 0; m < members.size() && sh.partCount < kObjectShipParts; m += stride) {
+            memcpy(sh.parts[sh.partCount], &posNow[static_cast<size_t>(members[m]) * 3], sizeof(float) * 3);
+            ++sh.partCount;
+        }
         // Nearest first; past the table the farthest yields.
         if (nf < kObjectShipsMax) {
             found[nf++] = sh;

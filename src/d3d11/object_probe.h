@@ -126,6 +126,7 @@ void objectMotionSetReach(float metres);
 // size, and there is no grid -- a ship is compact, and its box is its
 // claim. Nearest first, up to kObjectShipsMax of them.
 constexpr uint32_t kObjectShipsMax = 8;
+constexpr uint32_t kObjectShipParts = 32;
 struct ObjectShip {
     float    omegaPerMs[3];
     float    tPerMs[3];
@@ -134,6 +135,20 @@ struct ObjectShip {
     float    distM;      // its centroid's distance from the camera at the pair
     float    rms;        // the rigid fit's residual, metres
     uint32_t records;    // parts in the fit
+    // Where the ship IS within its box: its parts' positions (every
+    // stride-th when there are more than kObjectShipParts), each claiming
+    // the space within the pass's reach of it, and its tail -- the way it
+    // flies (unit, world; zero when it is too slow to say) and the plane
+    // behind its rearmost part along that way: a point whose dot with dir
+    // is under rear is behind the ship. The plume of a ship's drives is
+    // particles left in space as the ship goes, and inside the box at the
+    // ship's depth they took the ship's motion: "weird rectangular
+    // artifacts in the smoke trail behind the ship" (the ships' second
+    // flight, 2026-09-09 11:57). Behind the tail nothing is the ship's.
+    uint32_t partCount;
+    float    parts[kObjectShipParts][3];
+    float    dir[3];
+    float    rear;
 };
 // The ships in hand, with the camera position of the pair they were read
 // in (the frame their boxes are in, as ObjectMotion::camPos) and the

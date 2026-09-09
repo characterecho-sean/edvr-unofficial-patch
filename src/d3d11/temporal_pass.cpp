@@ -89,7 +89,7 @@ cbuffer P : register(b0) {
     float4 stR1;        // the camera's with the dominant body's own turn -- a station's -- in it
     float4 stR2;
     float4 tvSt;        // xyz its translation term; w 1 = the body's path is on this frame
-    float4 objects;     // x the reach in metres (for the record; the grid already carries it); y the body's near floor, metres
+    float4 objects;     // x the reach in metres (for the record; the grid already carries it); y the body's near floor, metres; z a moving ship's reach around each of its parts, squared
     float4 wR0;         // the camera rows this frame, view -> world: xyz the row, w the position's component,
     float4 wR1;         // so a view-space point v (the game's, z forward) sits at R v + c in the body's frame
     float4 wR2;
@@ -99,7 +99,9 @@ cbuffer P : register(b0) {
     float4 shR[24];     // per ship, three rows of its composite delta (stR0..2's shape)
     float4 shTv[8];     // xyz its translation term
     float4 shBox0[8];   // xyz its box, low corner (world)
-    float4 shBox1[8];   // xyz ...high corner
+    float4 shBox1[8];   // xyz ...high corner; w unused
+    float4 shDir[8];    // xyz the way the ship flies (unit, world; zero when unknown), w its tail plane: a point whose dot with xyz is under w is behind the ship -- its plume, which is not the ship's
+    float4 shParts[256];   // per ship kObjectShipParts of its parts' positions (xyz, this frame's frame), shBox0[i].w of them: the ship's claim is the space within objects.z (a reach, squared) of one
 };
 float3 rgbToYcocg(float3 c) {
     return float3(0.25 * c.r + 0.5 * c.g + 0.25 * c.b,
@@ -269,7 +271,41 @@ int insideShip(float3 d, float z) {
                float3(wR0.w, wR1.w, wR2.w);
     int n = int(ships.x);
     for (int i = 0; i < n; ++i) {
-        if (all(w >= shBox0[i].xyz) && all(w <= shBox1[i].xyz)) return i;
+        if (any(w < shBox0[i].xyz) || any(w > shBox1[i].xyz)) continue;
+        // Behind the tail (shDir says): the plume, which is particles
+        // left in space and not the ship's -- "rectangular artifacts in
+        // the smoke trail", the ships' second flight, 2026-09-09.
+        if (dot(w, shDir[i].xyz) < shDir[i].w) continue;
+        // ...and within the reach of one of its parts: the hull, not the
+        // box's empty corners nor a wall the ship skims.
+        int np = int(shBox0[i].w);
+        int base = i * 32;   // kObjectShipParts
+        bool hit = false;
+        for (int j = 0; j < np && !hit; ++j) {
+            float3 e = w - shParts[base + j].xyz;
+            if (dot(e, e) < objects.z) hit = true;
+        }
+        if (hit) return i;
+    }
+    return -1;
+}
+// For the objects view: the ship, if any, whose box this pixel's ray
+// passes through at some depth -- the ship's footprint on the image, so
+// a pixel in it that was not claimed can say why.
+int shipFootprint(float3 d) {
+    float3 o = float3(wR0.w, wR1.w, wR2.w);
+    float3 vg = float3(d.x, d.y, -d.z);
+    float3 r = float3(dot(wR0.xyz, vg), dot(wR1.xyz, vg), dot(wR2.xyz, vg));
+    int n = int(ships.x);
+    for (int i = 0; i < n; ++i) {
+        float3 inv = 1.0 / (abs(r) > 1e-9 ? r : 1e-9);
+        float3 t1 = (shBox0[i].xyz - o) * inv;
+        float3 t2 = (shBox1[i].xyz - o) * inv;
+        float3 tlo = min(t1, t2);
+        float3 thi = max(t1, t2);
+        float tmin = max(max(tlo.x, tlo.y), tlo.z);
+        float tmax = min(min(thi.x, thi.y), thi.z);
+        if (tmax >= max(tmin, 0.0)) return i;
     }
     return -1;
 }
@@ -704,8 +740,14 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
             } else if (count29 != 0) {
                 o5 = float3(1.0, 1.0, 1.0);
             } else if (count15 != 0 && (tvSt.w != 0.0 || ships.x != 0.0)) {
-                if (farPx) o5 = float3(0.0, 0.3, 1.0);
+                // In a moving ship's footprint but not the ship's: teal with
+                // no depth at all, magenta with a depth the claim refused
+                // (outside the box at that depth, behind the tail, or beyond
+                // its parts' reach).
+                int fs = ships.x != 0.0 ? shipFootprint(d) : -1;
+                if (farPx) o5 = fs >= 0 ? float3(0.0, 0.5, 0.5) : float3(0.0, 0.3, 1.0);
                 else if (uiCovered(region.xy + int2(p))) o5 = float3(0.0, 1.0, 0.0);
+                else if (fs >= 0) o5 = float3(1.0, 0.0, 1.0);
                 else if (!insideBody(d, zPx)) o5 = float3(1.0, 0.0, 0.0);
                 else o5 = float3(1.0, 1.0, 0.0);
             }
@@ -1227,8 +1269,10 @@ struct PassParams {
     float   shTv[kObjectShipsMax][4];      // xyz its translation term
     float   shBox0[kObjectShipsMax][4];    // xyz its box, low corner (world)
     float   shBox1[kObjectShipsMax][4];    // xyz ...high corner
+    float   shDir[kObjectShipsMax][4];     // xyz its way (unit), w its tail plane
+    float   shParts[kObjectShipsMax * kObjectShipParts][4];   // its parts' positions, shBox0[i].w of them
 };
-static_assert(sizeof(PassParams) == 1424, "the cbuffer is eighty-nine 16-byte rows");
+static_assert(sizeof(PassParams) == 5648, "the cbuffer is 353 16-byte rows");
 
 // The format allowlist: the supersample resolve's, for its reasons
 // (supersample_pass.cpp) -- typeless and UNORM families read and written
@@ -1491,7 +1535,7 @@ struct Slot {
     bool          hadHistory = false;
 };
 constexpr int kSlots = 8;
-constexpr int kStatCount = 40;   // 39 used; a 160-byte buffer
+constexpr int kStatCount = 40;   // all 40 used since 2026-09-09 (39 = the moving ships); a 160-byte buffer
 Slot g_slots[kSlots];
 
 void releaseSlot(Slot& q) {
@@ -1783,6 +1827,7 @@ ObjectMotion g_bodyLast = {};      // the motion last handed to the shader, for 
 bool     g_bodyLastValid = false;
 float    g_bodyDtMs = 11.1f;       // this frame's length, for the body's rates
 float    g_shipsRangeM = 1000.0f;  // advanced.temporal_aa_objects_ships_metres: moving ships within this take their own path (0 off)
+constexpr float kShipReachM = 30.0f;   // a ship's claim around each recorded part: the probe pads its box by the same (kShipPadM there)
 bool     g_shipsNoted = false;     // the ships' engage line, once
 ObjectShip g_shipsLast = {};       // the nearest ship last handed to the shader, for the log
 uint32_t g_shipsLastN = 0;         // how many were, this frame
@@ -3250,7 +3295,22 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                             p.shBox0[shipsOn][k] = sh.bmin[k] + bodyShift[k] + carry[k] - grow;
                             p.shBox1[shipsOn][k] = sh.bmax[k] + bodyShift[k] + carry[k] + grow;
                         }
-                        p.shTv[shipsOn][3] = p.shBox0[shipsOn][3] = p.shBox1[shipsOn][3] = 0.0f;
+                        p.shTv[shipsOn][3] = p.shBox1[shipsOn][3] = 0.0f;
+                        // The parts and the tail, carried the same way; the tail
+                        // plane's offset moves by the carry's component along it.
+                        const uint32_t np = sh.partCount < kObjectShipParts ? sh.partCount : kObjectShipParts;
+                        p.shBox0[shipsOn][3] = static_cast<float>(np);
+                        for (uint32_t j = 0; j < np; ++j) {
+                            float* pt = p.shParts[shipsOn * kObjectShipParts + j];
+                            for (int k = 0; k < 3; ++k) pt[k] = sh.parts[j][k] + bodyShift[k] + carry[k];
+                            pt[3] = 0.0f;
+                        }
+                        float along = 0.0f;
+                        for (int k = 0; k < 3; ++k) {
+                            p.shDir[shipsOn][k] = sh.dir[k];
+                            along += (bodyShift[k] + carry[k]) * sh.dir[k];
+                        }
+                        p.shDir[shipsOn][3] = sh.rear > -1e29f ? sh.rear + along : -1e30f;
                         ++shipsOn;
                     }
                     if (shipsOn && !bodyOn) {
@@ -3290,7 +3350,8 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         p.tvSt[3] = bodyOn ? 1.0f : 0.0f;
         p.objects[0] = g_objectsReach;
         p.objects[1] = kBodyNearM;
-        p.objects[2] = p.objects[3] = 0.0f;
+        p.objects[2] = kShipReachM * kShipReachM;
+        p.objects[3] = 0.0f;
         p.split[0] = g_shipMetres;
         p.split[1] = static_cast<float>(g_debugMode);
         p.split[2] = g_menuMetres;
