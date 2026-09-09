@@ -1822,7 +1822,9 @@ which is this project's contract for every read of the game.
    -- and a held body is then in the old origin's frame for up to eleven
    frames. The pass already flags a camera jump of over fifty metres in
    a frame; the body now stands down for twelve frames after one, and
-   the registration line counts them.
+   the registration line counts them. The player's word on the fifth
+   flight's fix, given with this one: "The UI targeting symbols seem to
+   be fixed" -- the HUD coverage pass holds.
 4. **Tier 2b** only if question 1 says no bits.
 5. **Tier 3** as `tools/` work against dumped frames, never on the hot
    path.

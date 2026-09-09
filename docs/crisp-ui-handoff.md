@@ -1262,3 +1262,7 @@ The family line reads "the flight HUD; its depth written by the coverage
 pass in the scene's projection". If a HUD element ever loses depth it
 should have, q's ramp (0.35) is the knob; if a quad gains it, the ramp is
 too wide.
+
+Flown 2026-09-08 (v0.14.1-70-g4a3b71f, the slot, the station targeted):
+"The UI targeting symbols seem to be fixed" -- the bracket quad is gone
+and the station stays clear under it.
