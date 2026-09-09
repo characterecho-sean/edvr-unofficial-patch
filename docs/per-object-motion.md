@@ -2247,6 +2247,30 @@ which is this project's contract for every read of the game.
    needs and the pass leaves a floating core alone at any strength; a
    core drawn at the surface, the docking hologram over the drum, still
    rides. The moving ships are the section at the end of this document.
+
+   *Its twenty-fourth flight* (11:19, `v0.14.1-94-g4e40a72`, the ships'
+   first; dumps at 11:22 near the slot with ships): the probe took ships
+   every pair from two hundred to nine hundred metres, four to
+   fifty-nine parts each, fit to a millimetre or two, three to six
+   metres a frame -- and the pass claimed a hundredth of a percent of
+   pixels with one in hand at two hundred metres; the dump shows that
+   ship's trailing edges doubled. The pair's positions were up to eleven
+   frames old when applied, three from the copy to the diff and eight
+   to the next pair, and a ship at five metres a frame leaves its own
+   padded box in six. The box is carried now by minus the ship's
+   translation times the frames since the copy (the age counts from the
+   copy) and widened by a fifth of the way plus five metres. Two more
+   things the log said. The cluster table filled every pair, sixty of
+   its sixty-four clusters one record each: a record whose signature
+   changed at its slot is another object's pose, not a motion, and is
+   counted and not clustered now, and the table is 256 with the angle
+   test a dot against a cosine. And the probe's thirty-second notes
+   fired every pair, because `dueMs` reads its stamp and leaves the
+   stamping to the caller; they stamp. One cluster of thirty parts,
+   seven hundred metres long, turning at the station's rate and moving
+   1.4 m, passed the slice test at five hundred metres once; a station
+   slice fitted as its own body claims its own pixels with the
+   station's motion, so it costs a line in the log and nothing seen.
 4. **Tier 2b** only if question 1 says no bits.
 5. **Tier 3** as `tools/` work against dumped frames, never on the hot
    path.
@@ -2297,8 +2321,12 @@ at two metres a frame that turns its heading three degrees in that
 time puts its predicted point a tenth of a metre off, a third of a
 pixel at five hundred metres; a ship that flips over in a second is
 wrong by whole pixels for those eight frames, and that is the limit of
-the stage as built. Reading a pair every frame would close it at the
-cost of a diff a frame, and is the next step if the flights ask for it.
+the stage as built. The box, unlike the rate, is carried to the frame
+it is applied on by the ship's translation times the frames since the
+copy, and widened by a fifth of the way; the ships' first flight
+claimed a hundredth of a percent of pixels before it was. Reading a
+pair every frame would close the rate's lag at the cost of a diff a
+frame, and is the next step if the flights ask for it.
 
 There is no grid for a ship. Its box -- its parts' recorded positions
 padded by thirty metres, a part's mesh around its origin -- is its
