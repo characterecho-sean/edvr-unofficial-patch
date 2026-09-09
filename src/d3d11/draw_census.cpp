@@ -47,10 +47,18 @@ constexpr uint32_t kMaxLinesCeiling = 16384;
 // interned 160 and missed 1216 more -- Elite runs hundreds of distinct
 // eye-sized views and per-state textures through three frames, and the
 // table filled before the LATE-frame render targets arrived, which cost the
-// exact draws the census existed to name. 512 covers what was measured with
+// exact draws the census existed to name. 512 covered what was measured with
 // three times over; past it, tokens degrade to inline resolution (below),
 // never to an unusable '?'.
-constexpr uint32_t kMaxInterned = 512;
+//
+// 2048 since 2026-09-06: a three-frame cockpit census with offscreen draws
+// interned 512 and overflowed by 310 to 963 (the 2026-09-03 logs), and an
+// inline token carries no identity -- the two eyes' same-shaped depth
+// buffers then read as one, which is exactly the question the crisp-UI
+// gates ask (tools/crisp_ui_gates.py). internOf is a linear scan, so a
+// full table costs a few tens of milliseconds per census frame; a hitch
+// on the three frames of an instrument nobody runs by accident.
+constexpr uint32_t kMaxInterned = 2048;
 
 // The startup schedule (advanced.census_at_ms). At most eight moments, each
 // naming milliseconds after this session's FIRST frame edge.
@@ -89,6 +97,14 @@ struct Interned {
     void*        ptr = nullptr;
     ResourceInfo info;
     bool         resolved = false;
+    // The VIEW's own format, for views over a typeless texture: the resource
+    // line says R8G8B8A8_TYPELESS and cannot say whether the game blends
+    // through an sRGB or a UNORM view, which is the difference between
+    // blending in linear light and in encoded values (docs/crisp-ui-handoff.md,
+    // gate G1). Captured at intern time with the resource, for the same
+    // reason resolution happens there: the pointer is certainly alive.
+    uint32_t     viewFmt = 0;
+    bool         viewFmtKnown = false;
 };
 
 bool resolveByKind(void* ptr, Kind kind, ResourceInfo* out) {
@@ -226,6 +242,57 @@ uint32_t g_overflow = 0;         // intern-table misses
 Interned g_tab[kMaxInterned];
 uint32_t g_tabCount = 0;
 
+// A view's own format, off the view itself. A view bound to the OM or PS
+// stage is one of four interfaces; each is asked in turn and the first that
+// answers gives its desc. Under its own budget: a stale view here must not
+// cost the resolve that every other token on a census line depends on.
+FaultBudget g_viewBudget("drawCensus.viewFormat", 5);
+
+bool viewFormatOf(void* view, uint32_t* fmt) {
+    bool ok = false;
+    guardedBudget(g_viewBudget, [&] {
+        IUnknown* u = static_cast<IUnknown*>(view);
+        ID3D11RenderTargetView* rtv = nullptr;
+        ID3D11DepthStencilView* dsv = nullptr;
+        ID3D11ShaderResourceView* srv = nullptr;
+        ID3D11UnorderedAccessView* uav = nullptr;
+        if (SUCCEEDED(u->QueryInterface(__uuidof(ID3D11RenderTargetView),
+                                        reinterpret_cast<void**>(&rtv))) &&
+            rtv) {
+            D3D11_RENDER_TARGET_VIEW_DESC d{};
+            rtv->GetDesc(&d);
+            *fmt = static_cast<uint32_t>(d.Format);
+            ok = true;
+            rtv->Release();
+        } else if (SUCCEEDED(u->QueryInterface(__uuidof(ID3D11DepthStencilView),
+                                               reinterpret_cast<void**>(&dsv))) &&
+                   dsv) {
+            D3D11_DEPTH_STENCIL_VIEW_DESC d{};
+            dsv->GetDesc(&d);
+            *fmt = static_cast<uint32_t>(d.Format);
+            ok = true;
+            dsv->Release();
+        } else if (SUCCEEDED(u->QueryInterface(__uuidof(ID3D11ShaderResourceView),
+                                               reinterpret_cast<void**>(&srv))) &&
+                   srv) {
+            D3D11_SHADER_RESOURCE_VIEW_DESC d{};
+            srv->GetDesc(&d);
+            *fmt = static_cast<uint32_t>(d.Format);
+            ok = true;
+            srv->Release();
+        } else if (SUCCEEDED(u->QueryInterface(__uuidof(ID3D11UnorderedAccessView),
+                                               reinterpret_cast<void**>(&uav))) &&
+                   uav) {
+            D3D11_UNORDERED_ACCESS_VIEW_DESC d{};
+            uav->GetDesc(&d);
+            *fmt = static_cast<uint32_t>(d.Format);
+            ok = true;
+            uav->Release();
+        }
+    });
+    return ok;
+}
+
 // The table index for a bound object, interning on first sight. Resolution
 // happens here, at record time, while the binding is certainly alive --
 // resolving at dump time would probe pointers three frames stale, which is
@@ -250,6 +317,7 @@ int internOf(void* ptr, Kind kind) {
     // 512 bytes"), and one that used to cost a separate probe to learn.
     // Contents are still not the census's business.
     e.resolved = resolveByKind(ptr, kind, &e.info);
+    e.viewFmtKnown = kind == Kind::kView && viewFormatOf(ptr, &e.viewFmt);
     return static_cast<int>(g_tabCount++);
 }
 
@@ -516,11 +584,31 @@ void dumpInternTable() {
         if (!e.resolved) {
             Log::get().note("DC id @%u ?", i);
         } else if (e.info.isTexture2D) {
-            Log::get().note("DC id @%u tex %ux%u fmt=%u res=%p", i, e.info.a,
-                            e.info.b, e.info.fmt, e.info.resource);
+            if (e.viewFmtKnown) {
+                Log::get().note("DC id @%u tex %ux%u fmt=%u res=%p vf=%u", i,
+                                e.info.a, e.info.b, e.info.fmt,
+                                e.info.resource, e.viewFmt);
+            } else {
+                Log::get().note("DC id @%u tex %ux%u fmt=%u res=%p", i,
+                                e.info.a, e.info.b, e.info.fmt,
+                                e.info.resource);
+            }
         } else if (e.info.isBuffer) {
-            Log::get().note("DC id @%u buf %u res=%p", i, e.info.a,
-                            e.info.resource);
+            // stride= is the STRUCTURE stride, and it identifies a buffer the
+            // way a texture's WxH does (2026-09-07). binding_shadow has
+            // resolved it into ResourceInfo::b since it was written and this
+            // line has always thrown it away, so the instanced-mesh pool --
+            // the one the per-object motion design needs, recognisable by its
+            // 336-byte record -- was indistinguishable from any other buffer
+            // of the same byte width. Omitted when zero, which is every
+            // constant and vertex buffer.
+            if (e.info.b) {
+                Log::get().note("DC id @%u buf %u res=%p stride=%u", i,
+                                e.info.a, e.info.resource, e.info.b);
+            } else {
+                Log::get().note("DC id @%u buf %u res=%p", i, e.info.a,
+                                e.info.resource);
+            }
         } else {
             Log::get().note("DC id @%u ?", i);
         }
@@ -659,6 +747,57 @@ static void recordDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
         if (ps) ps->Release();
     }
 
+    // VERTEX-shader resources, slots 32-39 (2026-09-07, the per-object motion
+    // hunt).
+    //
+    // Every shader-resource column this file has ever had is the PIXEL
+    // side -- s= is PSGetShaderResources(0,8) and x= is (4,4). Nothing has
+    // ever read a VS SRV, so the instanced-mesh POOL has been invisible to
+    // every census ever taken: the structured buffer Elite's vertex shaders
+    // index for each instance's pose, which docs/per-object-motion.md needs
+    // named, sized and its write path found before a per-mover tag can be
+    // built. Phase 0's question 3 was unanswerable for want of this one call.
+    //
+    // 32..39 rather than 0..7 because that is where the pool lives: 71 of 71
+    // dumped vertex shaders declare it at t33 with a 336-byte stride, and the
+    // bone palette beside it at t38 (docs/shaders/fss-panel-vs.asm, and the
+    // 2026-09-06 dump). If a future build moves them, this window is the
+    // thing to move, and a fresh glare_shader_dump is how you would learn it.
+    //
+    // One COM call on recorded draws only, the same bargain x= above makes.
+    // The column is OMITTED when the whole window is empty, which is most
+    // draws -- a line per draw is what the log buffer is sized around, and a
+    // run of eight dashes on every one of them would buy nothing.
+    char vsr[224] = "";
+    if (st.ok) {
+        ID3D11ShaderResourceView* vres[8] = {};
+        bool got = false;
+        guardedBudget(g_iaBudget, [&] {
+            ctx->VSGetShaderResources(32, 8, vres);
+            got = true;
+        });
+        if (got) {
+            bool any = false;
+            for (ID3D11ShaderResourceView* v : vres) {
+                if (v) { any = true; break; }
+            }
+            if (any) {
+                char vb[8][24];
+                const char* tk[8];
+                for (int i = 0; i < 8; ++i) {
+                    tk[i] = bindingToken(vres[i], Kind::kView, vb[i],
+                                         sizeof(vb[i]));
+                }
+                _snprintf_s(vsr, sizeof(vsr), _TRUNCATE,
+                            " vt=%s,%s,%s,%s,%s,%s,%s,%s", tk[0], tk[1], tk[2],
+                            tk[3], tk[4], tk[5], tk[6], tk[7]);
+            }
+        }
+        for (ID3D11ShaderResourceView* v : vres) {
+            if (v) v->Release();
+        }
+    }
+
     // WHERE THE DRAW LANDS, which this has never recorded (2026-08-30).
     //
     // The black-planet hunt reached a draw that is ISSUED for both eyes,
@@ -729,7 +868,13 @@ static void recordDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
     //
     // Three COM calls and two GetDesc on recorded draws only, which is the
     // same bargain the sampler probe above already makes.
-    char sv[128] = "";
+    //
+    // 256 and not 128 (2026-09-07): the so= token below adds up to 29 more
+    // characters, and the tail was already within about forty of the old
+    // buffer once every %u in it is allowed its full width. _snprintf_s with
+    // _TRUNCATE loses the END of the line silently, which is where q= lives,
+    // so an overflow here would cost a census rather than a column.
+    char sv[256] = "";
     {
         ID3D11DepthStencilState* dss = nullptr;
         ID3D11BlendState*        bs = nullptr;
@@ -753,6 +898,51 @@ static void recordDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
             bool haveBs = false;
             if (bs) { bs->GetDesc(&bd); haveBs = true; }
             if (haveDs || haveBs || pred) {
+                // so= is the rest of the stencil state (2026-09-07,
+                // docs/per-object-motion.md Phase 0 question 1). st= has
+                // always printed the enable and the REFERENCE, which says
+                // what a draw compares against and nothing about which BITS
+                // it touches -- and the per-object-motion design needs bits
+                // the game neither reads nor writes to stamp a per-mover tag
+                // into. A reference of 4 is not evidence that bit 2 is the
+                // only bit read: that is the read mask's to say, and no
+                // census has ever carried one.
+                //
+                // r/w are the read and write masks in hex, f is
+                // FrontFace.StencilFunc, then the three front ops in the
+                // order fail, depth-fail, pass. The back face is appended
+                // after a + only when it differs from the front, because it
+                // almost never does and a column that is identical on every
+                // line is a column nobody reads. Both faces share the two
+                // masks, which is why they are not repeated.
+                //
+                // Costs nothing new: dd is the GetDesc the ds= column above
+                // already paid for.
+                char so[64] = "";
+                if (haveDs) {
+                    const D3D11_DEPTH_STENCILOP_DESC& fr = dd.FrontFace;
+                    const D3D11_DEPTH_STENCILOP_DESC& bk = dd.BackFace;
+                    char bkb[32] = "";
+                    if (bk.StencilFunc != fr.StencilFunc ||
+                        bk.StencilFailOp != fr.StencilFailOp ||
+                        bk.StencilDepthFailOp != fr.StencilDepthFailOp ||
+                        bk.StencilPassOp != fr.StencilPassOp) {
+                        _snprintf_s(bkb, sizeof(bkb), _TRUNCATE,
+                                    "+f%u/%u,%u,%u",
+                                    static_cast<unsigned>(bk.StencilFunc),
+                                    static_cast<unsigned>(bk.StencilFailOp),
+                                    static_cast<unsigned>(bk.StencilDepthFailOp),
+                                    static_cast<unsigned>(bk.StencilPassOp));
+                    }
+                    _snprintf_s(so, sizeof(so), _TRUNCATE,
+                                " so=r%02X/w%02X/f%u/%u,%u,%u%s",
+                                static_cast<unsigned>(dd.StencilReadMask),
+                                static_cast<unsigned>(dd.StencilWriteMask),
+                                static_cast<unsigned>(fr.StencilFunc),
+                                static_cast<unsigned>(fr.StencilFailOp),
+                                static_cast<unsigned>(fr.StencilDepthFailOp),
+                                static_cast<unsigned>(fr.StencilPassOp), bkb);
+                }
                 // bl= is the whole slot-0 blend equation and sm= the sample
                 // mask (2026-09-01, the DSS black planet). Every test that
                 // could reject a pixel AFTER the shader had been recorded or
@@ -763,7 +953,7 @@ static void recordDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
                 // "opaque, writes land".
                 _snprintf_s(sv, sizeof(sv), _TRUNCATE,
                             " ds=%c%uw%c st=%c%u bm=%X pr=%c"
-                            " bl=%c%u,%u,%u/%u,%u,%u%s sm=%X",
+                            " bl=%c%u,%u,%u/%u,%u,%u%s sm=%X%s",
                             haveDs ? (dd.DepthEnable ? '1' : '0') : '?',
                             haveDs ? static_cast<unsigned>(dd.DepthFunc) : 0u,
                             haveDs ? (dd.DepthWriteMask ==
@@ -796,7 +986,7 @@ static void recordDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
                                          bd.RenderTarget[0].BlendOpAlpha)
                                    : 1u,
                             haveBs && bd.AlphaToCoverageEnable ? ",a2c" : "",
-                            sampleMask);
+                            sampleMask, so);
             }
         }
         if (dss) dss->Release();
@@ -805,9 +995,9 @@ static void recordDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
     }
 
     Log::get().note(
-        "%s %u #%u %c n=%u i=%u r=%s d=%s c=%s s=%s,%s,%s,%s%s%s%s%s%s q=%u",
+        "%s %u #%u %c n=%u i=%u r=%s d=%s c=%s s=%s,%s,%s,%s%s%s%s%s%s%s q=%u",
         tag, g_frameOrdinal, index, kind, count, instances, r, d, c, s0, s1,
-        s2, s3, tail, xt, pt, vt, sv, q);
+        s2, s3, tail, xt, pt, vsr, vt, sv, q);
 
     // The CB watch, after the draw's own line so a DCW dump always follows
     // the draw it belongs to. Any recorded draw can match -- DC for the FSS

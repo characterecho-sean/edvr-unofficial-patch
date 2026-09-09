@@ -530,6 +530,30 @@ bool depthProbeSceneDepth(uint32_t w, uint32_t h, int eye, ID3D11Texture2D** tex
     return true;
 }
 
+bool depthProbeSceneDepthFormat(uint32_t w, uint32_t h, int eye,
+                                ID3D11Texture2D** tex, uint32_t* dsvFormat) {
+    if (!tex || !dsvFormat) return false;
+    *dsvFormat = 0;
+    if (!depthProbeSceneDepth(w, h, eye, tex) || !*tex) return false;
+    for (int i = 0; i < g_targetCount; ++i) {
+        if (g_targets[i].tex == *tex) {
+            *dsvFormat = static_cast<uint32_t>(g_targets[i].dsvFmt);
+            return *dsvFormat != 0;
+        }
+    }
+    return false;
+}
+
+bool depthProbeIsSceneDepth(const void* resource) {
+    if (!resource || !g_wanted) return false;
+    for (int k = 0; k < 2; ++k) {
+        const int i = g_scenePick[k];
+        if (i < 0 || i >= g_targetCount) return false;
+        if (g_targets[i].tex == resource) return true;
+    }
+    return false;
+}
+
 uint32_t depthProbeSceneDraws() {
     if (!g_wanted || g_scenePick[0] < 0 || g_scenePick[1] < 0 ||
         g_scenePick[0] >= g_targetCount || g_scenePick[1] >= g_targetCount) {

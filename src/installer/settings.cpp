@@ -3,7 +3,7 @@
 #include <windows.h>
 
 #include "detect.h"
-#include "iniedit.h"
+#include "../common/iniedit.h"
 #include "state.h"
 
 namespace edvr::installer {

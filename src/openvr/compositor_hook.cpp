@@ -2,6 +2,7 @@
 
 #include "../common/timing.h"
 #include "head_offset.h"
+#include "gaze_probe.h"
 #include "launch_centre.h"
 
 #include <windows.h>
@@ -17,10 +18,13 @@
 #include "../common/guard.h"
 #include "../common/hotkey.h"
 #include "../d3d11/elite_binds.h"   // the camera key, from the game's own bindings
+#include "../d3d11/perf_monitor.h"  // the event bits the monitor's drop attribution names
 #include "../common/log.h"
 #include "../common/proxy.h"  // breadcrumb(), EDVR_BREADCRUMB_ONCE
 #include "../common/vtable_hook.h"
+#include "frame_timing.h"
 #include "guard_crop.h"
+#include "menu_door.h"
 #include "openvr_min.h"
 #include "resubmit_shadow.h"
 #include "sharpen.h"
@@ -1175,6 +1179,23 @@ vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
         *bnds = storage;
     };
 
+    // The settings menu (docs\settings-menu.md), LAST of all on every path:
+    // the panel composited onto the native-size outgoing frame, after the
+    // sharpen, so its text never passes through a pass. Drawn with the pose
+    // the game rendered this frame from, which is the pose the compositor
+    // reprojects against, so the panel holds still in the world for free.
+    // One flag test per submit when it is down.
+    auto applyMenu = [&](vr::Texture_t* tex, const vr::VRTextureBounds_t** bnds,
+                         vr::VRTextureBounds_t* storage) {
+        if (!s->validated || !menuDoorWanted()) return;
+        if (tex->eType != vr::TextureType_DirectX) return;
+        void* out = menuDoorTreat(eye, tex->handle, *bnds, storage, s->theaterRealPose,
+                                  s->theaterRealValid);
+        if (!out) return;
+        tex->handle = out;
+        *bnds = storage;
+    };
+
     // The temporal pass (docs\anti-aliasing.md, Feature B), FIRST at the
     // door: on the game's own frame at render size, wide under the guard,
     // before the crop and the resolve, so everything downstream sees a
@@ -1309,6 +1330,8 @@ vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
                 applyResolve(&sub, &subBounds, &subStorage);
                 vr::VRTextureBounds_t subStorage2;
                 applySharpen(&sub, &subBounds, &subStorage2);
+                vr::VRTextureBounds_t subStorage3;
+                applyMenu(&sub, &subBounds, &subStorage3);
                 return forwardSubmit(s, self, eye, &sub, subBounds, flags);
             }
         }
@@ -1666,6 +1689,9 @@ vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
                     "this many frames.",
                     static_cast<int>(eye), s->framesWithheld);
             }
+            // An EDVR event for the monitor's drop attribution: a withhold
+            // answered with the previous frame's copy.
+            noteEdvrEvent(kEvWithhold | kEvResubmit);
             vr::Texture_t sub = *texture;
             sub.handle = shadow;
             const vr::VRTextureBounds_t* subBounds = effBounds;
@@ -1673,13 +1699,20 @@ vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
             // A repeated frame is not new history; the pass restarts on
             // the next real one rather than blend a frame with itself.
             temporalAaNoteWithheld(eye);
+            const int eyeNo = eye == vr::Eye_Left ? 0 : 1;
+            frameTimingDoorBegin(shadow, eyeNo);
             applyCullGuard(&sub, &subBounds, &subStorage);
             vr::VRTextureBounds_t subStorage2;
             applyResolve(&sub, &subBounds, &subStorage2);
             vr::VRTextureBounds_t subStorage3;
             applySharpen(&sub, &subBounds, &subStorage3);
+            vr::VRTextureBounds_t subStorage4;
+            applyMenu(&sub, &subBounds, &subStorage4);
+            frameTimingDoorEnd(shadow, eyeNo);
             return forwardSubmit(s, self, eye, &sub, subBounds, flags);
         }
+        // The classic withhold: nothing submitted, the compositor reprojects.
+        noteEdvrEvent(kEvWithhold);
         if (s->notesLeft > 0) {
             --s->notesLeft;
             Log::get().note("transition flash: frame NOT submitted (eye %d). SteamVR will "
@@ -1724,6 +1757,12 @@ vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
                 snapped = true;
             }
         }
+        // The door's bracket (frame_timing.h): CPU time here, GPU time by a
+        // timestamp pair the d3d11 half keeps, around every pass below, for
+        // the monitor's "EDVR at the door" figures.
+        const int  eyeNo = eye == vr::Eye_Left ? 0 : 1;
+        void* const doorTex = (texture && texture->eType == vr::TextureType_DirectX) ? fwd.handle : nullptr;
+        frameTimingDoorBegin(doorTex, eyeNo);
         vr::VRTextureBounds_t fwdStorage0;
         applyTemporal(&fwd, &fwdBounds, &fwdStorage0);
         applyCullGuard(&fwd, &fwdBounds, &fwdStorage);
@@ -1731,6 +1770,9 @@ vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
         applyResolve(&fwd, &fwdBounds, &fwdStorage2);
         vr::VRTextureBounds_t fwdStorage3;
         applySharpen(&fwd, &fwdBounds, &fwdStorage3);
+        vr::VRTextureBounds_t fwdStorage4;
+        applyMenu(&fwd, &fwdBounds, &fwdStorage4);
+        frameTimingDoorEnd(doorTex, eyeNo);
         const vr::EVRCompositorError result =
             forwardSubmit(s, self, eye, &fwd, fwdBounds, flags);
         // This frame was FORWARDED and accepted, so it becomes the copy a
@@ -1773,9 +1815,19 @@ vr::EVRCompositorError hookedWaitGetPoses(void* self,
     }
 
     // WaitGetPoses blocks until the compositor releases the app, which makes it
-    // the natural frame boundary.
+    // the natural frame boundary. How long it blocked crosses to the monitor:
+    // with the time blocked in Present, it is what the frame period loses to
+    // waiting, and the rest is the render thread's own time.
+    LARGE_INTEGER waitT0, waitT1, waitF;
+    QueryPerformanceCounter(&waitT0);
     const vr::EVRCompositorError result =
         s->realWaitGetPoses(self, renderPoses, renderCount, gamePoses, gameCount);
+    QueryPerformanceCounter(&waitT1);
+    QueryPerformanceFrequency(&waitF);
+    if (waitF.QuadPart > 0 && waitT1.QuadPart > waitT0.QuadPart) {
+        const int64_t us = (waitT1.QuadPart - waitT0.QuadPart) * 1000000 / waitF.QuadPart;
+        addWaitCpuUs(us > 0 ? static_cast<uint32_t>(us) : 0u);
+    }
 
     if (s->inert) return result;
 
@@ -1788,6 +1840,17 @@ vr::EVRCompositorError hookedWaitGetPoses(void* self,
     // screens disagree by however far the runtime's origin drifted this
     // launch. See launch_centre.h.
     launchCentreApply(result, renderPoses, renderCount, gamePoses, gameCount);
+
+    // The gaze probe's one call a frame, at the same boundary the design
+    // names for the real thing (docs/performance.md, feature 3). Off unless
+    // advanced.gaze_probe says otherwise; see gaze_probe.h.
+    gazeProbeApply(result, renderPoses, renderCount);
+
+    // The compositor's own timing for the frame just presented, for the
+    // menu's Monitor page: one read, published whole (frame_timing.h).
+    if (s->validated) {
+        frameTimingBoundary(s->ownerIface, s->compositorHook.executablePrefix());
+    }
 
     // The pair-timing boundary: frame cadence, and the burst summary.
     {
@@ -2140,6 +2203,7 @@ vr::EVRCompositorError hookedWaitGetPoses(void* self,
             Log::get().note("config reloaded");
             headOffsetConfigure();
     launchCentreConfigure();
+            gazeProbeConfigure();
             configurePoseRing(s);
             // The cull guard's margin is tuned from inside a headset, so its
             // keys are live; mode changes take effect at the next boundary.
@@ -2152,6 +2216,8 @@ vr::EVRCompositorError hookedWaitGetPoses(void* self,
             temporalAaConfigure();
             // The sharpening's strength is a slider judged in the headset.
             sharpenConfigure();
+            // The compositor timing read, for the Monitor page.
+            frameTimingConfigure();
             // The snapshot toggle is an in-headset A/B experiment, so it is
             // live too; the flip logs its own receipt.
             resubmitShadowConfigure();
@@ -2501,6 +2567,7 @@ void* interceptInterface(void* iface, const char* interfaceVersion) {
     // from install and from reload.
     headOffsetConfigure();
     launchCentreConfigure();
+    gazeProbeConfigure();
     resubmitShadowConfigure();
     // The cull guard's twin of the same rule (its own install already read
     // config -- the system interface arrives first -- but this path is the
@@ -2511,6 +2578,7 @@ void* interceptInterface(void* iface, const char* interfaceVersion) {
     supersampleResolveConfigure();
     temporalAaConfigure();
     sharpenConfigure();
+    frameTimingConfigure();
 
     return iface;
 }
@@ -2527,6 +2595,8 @@ void shutdownCompositorHook() {
     supersampleResolveShutdown();
     temporalAaShutdown();
     sharpenShutdown();
+    menuDoorShutdown();
+    frameTimingShutdown();
     resubmitShadowShutdown();
     g_state->compositorHook.uninstall();
     if (g_state->sentinel) g_state->sentinel->confirm();

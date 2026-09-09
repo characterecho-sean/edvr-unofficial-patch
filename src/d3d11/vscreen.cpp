@@ -34,6 +34,7 @@
 #include "fss_reveal.h"
 #include "fss_dump.h"
 #include "eye_split.h"
+#include "foveation.h"        // feature 2: the shading-rate image, bound at eye draws
 #include "resolve_probe.h"
 #include "resolve_bind_fix.h"
 #include "stencil_probe.h"
@@ -43,6 +44,8 @@
 #include "fss_theater.h"  // the warm-up; the theater itself runs at submit
 #include "depth_probe.h"       // Phase 0 item 3: which depth target the eye draws use, and how it reads
 #include "sharpen_pass.h"      // likewise: warm-up and totals; the sharpening runs at submit
+#include "menu.h"              // the settings menu's reload: its keys, then the row diff
+#include "perf_monitor.h"      // the draw hooks' sampled cost, and the reload as an event
 #include "supersample_pass.h"  // likewise: warm-up and totals; the pass runs at submit
 #include "temporal_pass.h"     // and the temporal pass: warm-up, the camera capture, totals
 #include "fov_probe.h"
@@ -53,6 +56,7 @@
 #include "panel_upscale.h"
 #include "wake_pulse.h"
 #include "hud_grain.h"
+#include "ui_depth.h"
 #include "intro_panel.h"
 #include "intro_upscale.h"
 #include "intro_probe.h"
@@ -1269,6 +1273,14 @@ void noteForeignDraw(ID3D11DeviceContext* self) {
 // with its instance count clamped to sunglareKeep() -- SV_InstanceID
 // restarts at zero per call, so a prefix is the only subset that keeps
 // every element's identity.
+// Set by beginPanelOverride when this eye draw is a piece of the interface
+// that should write its depth (ui_depth.h), consumed by forwardWithVerdict's
+// scope. A flag rather than a DrawVerdict for curveThisDraw's reason: it
+// composes with whatever verdict claims the draw. Thread-local rather than
+// a State member so a draw recorded on a deferred context by another thread
+// cannot take a flag the render thread set for its own next draw.
+thread_local bool t_uiDepthThisDraw = false;
+
 enum class DrawVerdict {
     kNone, kPanel, kSkip, kRemlok, kHolo, kWitchstar, kBillboard,
     // The target direction indicator, reconstructed rather than smeared
@@ -1432,6 +1444,7 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     // Cleared before anything can set it, on every draw, so a substitution
     // can never be attributed to a draw that did not ask for one.
     s->curveThisDraw = false;
+    t_uiDepthThisDraw = false;
     // Counting eye draws is not part of the panel distance fix, even though it
     // happens here.
     //
@@ -1473,10 +1486,10 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         s->censusAutoW == 0 && !fssResActive() && !fssScanWantsDraws() &&
         !fssPanelWantsDraws() && !fssProbeWants() && !fssRevealWantsDraws() &&
         !fssRingWantsDraws() && !fssDumpWantsDraws() &&
-        !eyeSplitWantsDraws() && !resolveProbeWantsDraws() &&
+        !eyeSplitWantsDraws() && !foveationWantsDraws() && !resolveProbeWantsDraws() &&
         !stencilProbeWantsDraws() && !resolveBindWants() &&
         !remlokWantsDraws() && !holoWantsDraws() && !targetSharpWantsDraws() && !hudSpriteWantsDraws() && !panelUpscaleWantsDraws() && !hudGrainWantsDraws() &&
-        !witchstarWantsDraws() &&
+        !uiDepthWantsDraws() && !witchstarWantsDraws() &&
         !sunglareWantsDraws() && !cbPeekEnabled() && !billboardWantsDraws() &&
         !drawCensusArmed() && !panelQuadWants() && !panelCurveWants() &&
         !particleWantsDraws() && !backdropWantsDraws() &&
@@ -1515,6 +1528,12 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         s->rtv0Eye = targetIsEyeSized(bindingGet(BindSlot::Rtv0), &s->rtv0Cand);
         s->rtv0EyeGen = rtvGen;
     }
+    // Foveated shading (foveation.h): the shading-rate image follows the
+    // census's verdict on slot 0 -- bound for an eye-sized target, cleared
+    // for anything else. One compare per draw once the answer is known, and
+    // it changes no binding of the game's, so everything below composes
+    // with it.
+    foveationOnDraw(self, s->rtv0Eye, bindingGet(BindSlot::Rtv0), rtvGen, kind, count, instances);
     // The intro probe, ABOVE the eye gate and deliberately. Its subject is the
     // startup sequence, and for the whole of the sequence's first phase there
     // is no eye texture to be on the right side of a gate about: one eye's
@@ -1587,6 +1606,11 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         if (drawCensusWantsOffscreen() && drawCensusArmed()) {
             drawCensusOffDraw(self, kind, count, instances);
         }
+        // The interface's surfaces, learned where the GUI renderer draws
+        // them (ui_depth.h): one bool while off, one hash while a target is
+        // new. Before the returns below, because a surface is a surface
+        // whatever else this draw turns out to be.
+        if (uiDepthWantsDraws()) uiDepthNoteOffscreenDraw(self);
         // The intro movie's YUV-to-RGB fill: a four-vertex draw with all
         // three planes bound, into the surface the composite reads. It is
         // what tells this frame apart from the splash's, which uses the
@@ -1814,6 +1838,11 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     // The depth target this eye draw uses, for the depth probe -- one
     // pointer compare unless it changed (depth_probe.h).
     depthProbeNoteEyeDraw(self, bindingGet(BindSlot::Dsv0), s->eyeDrawsThisFrame);
+    // The interface's depth (ui_depth.h): a composite of a learned surface,
+    // or a named family drawn straight into the eye, writes its depth. A
+    // flag and not a verdict, so it composes with whatever claims the draw
+    // below; forwardWithVerdict's scope consumes it.
+    if (uiDepthWantsDraws()) t_uiDepthThisDraw = uiDepthOnEyeDraw(self);
 
     // The intro movie's panel (intro_panel.h). First thing in the eye
     // branch, because it must see the composite before any other fix
@@ -2422,6 +2451,7 @@ void STDMETHODCALLTYPE hookedClearState(ID3D11DeviceContext* self) {
                         kSlotClearState);
     }
     forgetBindings(s);
+    foveationOnClearState();
     s->realClearState(self);
 }
 
@@ -2688,6 +2718,25 @@ void STDMETHODCALLTYPE hookedUnmap(ID3D11DeviceContext* self, ID3D11Resource* re
 template <typename RealDraw>
 void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
                         RealDraw&& draw) {
+    // The interface's depth write (ui_depth.h) brackets EVERY path below --
+    // the swallows that draw their own geometry, the sub-draw re-issue, the
+    // skip that draws nothing -- as a scope, so no return can leave the
+    // game's depth state swapped. Consumes the flag the way the skip below
+    // consumes curveThisDraw: its lifetime ends inside the call that set it.
+    // The flag is thread-local, so a deferred-context draw on another
+    // thread can neither steal it nor be treated by it.
+    struct UiDepthScope {
+        ID3D11DeviceContext* ctx;
+        bool                 on;
+        explicit UiDepthScope(ID3D11DeviceContext* c)
+            : ctx(c), on(t_uiDepthThisDraw) {
+            t_uiDepthThisDraw = false;
+            if (on) uiDepthBegin(ctx);
+        }
+        ~UiDepthScope() {
+            if (on) uiDepthEnd(ctx);
+        }
+    } uiDepthScope(self);
     if (v == DrawVerdict::kSkip) {
         // A skipped draw is not drawn at all, so there is nothing to replace.
         // Clearing here rather than trusting the next draw to do it keeps the
@@ -2823,6 +2872,28 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     if (v == DrawVerdict::kParticle) particleBegin(self);
     if (v == DrawVerdict::kBackdrop) backdropBegin(self);
     draw();
+    // The interface's alpha-aware depth pass (ui_depth.h): a composite
+    // drawn through the interface projection is drawn once more, depth
+    // only, right after its own draw and inside the scope that owns the
+    // flag -- the splash dim's re-issue shape below, for the same reason:
+    // the placement state the second draw needs is still bound.
+    // Gated on the scope's THREAD-LOCAL flag, not on the module's globals.
+    // uiDepthWantsReissue reads g_mode, which the render thread sets and
+    // clears around this block, so a draw arriving on another context in
+    // between would run Begin on the FOREIGN context and overwrite the
+    // saved bindings this thread is about to restore. `on` is the flag
+    // captured for the draw this thread itself classified.
+    //
+    // And the second draw is issued only when Begin says it set the
+    // depth-only state up. A decline leaves the game's own state exactly
+    // as it was, so a draw issued regardless would be the game's composite
+    // a second time, in full colour, over itself -- and the paths that
+    // decline latch, so it would last the session (the pre-release review
+    // of 2026-09-07). splashDimBegin below has had this shape all along.
+    if (uiDepthScope.on && uiDepthWantsReissue()) {
+        if (uiDepthReissueBegin(self)) draw();
+        uiDepthReissueEnd(self);
+    }
     if (v == DrawVerdict::kBackdrop) backdropEnd(self);
     // The splash screen's dim under the loader's dialogs (splash_dim.h):
     // the still's composite and the intro movie's composite are the two
@@ -3057,25 +3128,48 @@ void STDMETHODCALLTYPE hookedRSSetViewports(ID3D11DeviceContext* self, UINT n,
 // vertex's index is offset by. The quad probe reads it (quad_probe.h); it
 // was reading whatever the last INDEXED draw had left there, which for a
 // spec aimed at a 4-vertex draw would have been a silently wrong rectangle.
+// The draw hooks' own cost, for the monitor's drop attribution: on a sample
+// frame (one in sixteen, perf_monitor.h) each draw thunk clocks itself and
+// the real call it forwards, and the difference is what EDVR spent in the
+// hook. Two clock reads per draw on those frames, one branch otherwise.
+struct DrawClock {
+    bool    on;
+    int64_t t0;
+    int64_t real = 0;
+    DrawClock() : on(perfMonitorSampleDraws()), t0(on ? qpcNow() : 0) {}
+    ~DrawClock() {
+        if (on) perfMonitorDrawTicks(qpcNow() - t0, real);
+    }
+};
+
 void STDMETHODCALLTYPE hookedDraw(ID3D11DeviceContext* self, UINT count, UINT start) {
+    DrawClock clock;
     ++g_state->thunkHits[kHitDraw];
     if (quadProbeWants()) g_state->qsBaseVertex = static_cast<INT>(start);
     const DrawVerdict v = beginPanelOverride(self, 'D', count, 1);
-    forwardWithVerdict(self, v, [&] { g_state->realDraw(self, count, start); });
+    forwardWithVerdict(self, v, [&] {
+        const int64_t r0 = clock.on ? qpcNow() : 0;
+        g_state->realDraw(self, count, start);
+        if (clock.on) clock.real += qpcNow() - r0;
+    });
     if (v == DrawVerdict::kPanel) endPanelOverride(self);
 }
 void STDMETHODCALLTYPE hookedDrawIndexed(ID3D11DeviceContext* self, UINT count,
                                          UINT startIndex, INT baseVertex) {
+    DrawClock clock;
     ++g_state->thunkHits[kHitDrawIndexed];
     const DrawVerdict v = beginPanelOverride(self, 'I', count, 1);
     forwardWithVerdict(self, v, [&] {
+        const int64_t r0 = clock.on ? qpcNow() : 0;
         g_state->realDrawIndexed(self, count, startIndex, baseVertex);
+        if (clock.on) clock.real += qpcNow() - r0;
     });
     if (v == DrawVerdict::kPanel) endPanelOverride(self);
 }
 void STDMETHODCALLTYPE hookedDrawInstanced(ID3D11DeviceContext* self, UINT perInstance,
                                            UINT instances, UINT startVertex,
                                            UINT startInstance) {
+    DrawClock clock;
     // See hookedDraw: the start vertex, before the call that reads it.
     if (quadProbeWants()) g_state->qsBaseVertex = static_cast<INT>(startVertex);
     const DrawVerdict v = beginPanelOverride(self, 'N', perInstance, instances);
@@ -3092,8 +3186,10 @@ void STDMETHODCALLTYPE hookedDrawInstanced(ID3D11DeviceContext* self, UINT perIn
                            ? g_state->glareClamp
                            : instances;
     forwardWithVerdict(self, v, [&] {
+        const int64_t r0 = clock.on ? qpcNow() : 0;
         g_state->realDrawInstanced(self, perInstance, drawn, startVertex,
                                    startInstance);
+        if (clock.on) clock.real += qpcNow() - r0;
     });
     if (v == DrawVerdict::kPanel) endPanelOverride(self);
 }
@@ -3101,6 +3197,7 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
                                                   UINT perInstance, UINT instances,
                                                   UINT startIndex, INT baseVertex,
                                                   UINT startInstance) {
+    DrawClock clock;
     // The rect deriver's capture runs INSIDE beginPanelOverride (the
     // chrome tracker's matched branch), so its draw-args stash must land
     // before the call.
@@ -3118,8 +3215,10 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
     }
     const DrawVerdict v = beginPanelOverride(self, 'X', perInstance, instances);
     forwardWithVerdict(self, v, [&] {
+        const int64_t r0 = clock.on ? qpcNow() : 0;
         g_state->realDrawIndexedInstanced(self, perInstance, instances, startIndex,
                                           baseVertex, startInstance);
+        if (clock.on) clock.real += qpcNow() - r0;
     });
     if (v == DrawVerdict::kPanel) endPanelOverride(self);
     if (v == DrawVerdict::kIntroPanel) introPanelEndDraw(self);
@@ -3570,6 +3669,13 @@ void readCensusSkip(Config& cfg, State* s) {
     }
 }
 
+void vScreenSetRenderTargetsRaw(ID3D11DeviceContext* ctx, uint32_t n,
+                                ID3D11RenderTargetView* const* rtvs,
+                                ID3D11DepthStencilView* dsv) {
+    if (!g_state || !g_state->realOMSetRenderTargets || !ctx) return;
+    g_state->realOMSetRenderTargets(ctx, n, rtvs, dsv);
+}
+
 bool vScreenIsEyeSized(uint32_t w, uint32_t h) {
     State* s = g_state;
     if (!s || !w || !h) return false;
@@ -3583,7 +3689,20 @@ void vScreenRefreshConfig() {
     if (!s) return;
     Config& cfg = Config::get();
     // Cheap: one GetFileAttributesEx, and only when the write time moved.
+    const int64_t reloadT0 = qpcNow();
     if (!cfg.reloadIfChanged()) return;
+    // A reload -- the parse of a 124 KB ini and every module's reconfigure,
+    // on the render thread -- is an EDVR event with a duration, for the
+    // monitor's drop attribution.
+    struct ReloadClock {
+        int64_t t0;
+        ~ReloadClock() {
+            perfMonitorNoteEvent(kEvReload, qpcFrequency() > 0
+                                                ? static_cast<double>(qpcNow() - t0) * 1000.0 /
+                                                      static_cast<double>(qpcFrequency())
+                                                : 0.0);
+        }
+    } reloadClock{reloadT0};
 
     const bool  wasVoid  = s->blackVoid;
     const float wasScale = s->distanceScale;
@@ -3603,6 +3722,7 @@ void vScreenRefreshConfig() {
     panelUpscaleConfigure(cfg);
     wakePulseConfigure(cfg);
     hudGrainConfigure(cfg);
+    uiDepthConfigure(cfg);
     scrimConfigure(cfg);
     quadProbeConfigure(cfg);
     loaderPanelConfigure(cfg);
@@ -3622,9 +3742,14 @@ void vScreenRefreshConfig() {
     fssRingConfigure(cfg);
     fssDumpConfigure(cfg);
     eyeSplitConfigure(cfg);
+    foveationConfigure(cfg);
     resolveProbeConfigure(cfg);
     resolveBindConfigure(cfg);
     stencilProbeConfigure(cfg);
+    // The settings menu: its own keys, then the reload's diff -- every row's
+    // value, the restart snapshot, and a toast for what changed from outside.
+    menuConfigure(cfg);
+    menuNoteConfigReloaded();
     {
         s->censusFssJump = cfg.getInt("advanced.census_fss_jump", 0) ? 1 : 0;
         s->fssTheaterOn = cfg.getFloat("experimental.fss_theater", 0.0f) > 0.0f;
@@ -3776,6 +3901,7 @@ void vScreenFrameBoundary() {
         drawCensusTick(g_state->ownerCtx);
         panelUpscaleFrameEnd();
         wakePulseReport();
+        uiDepthFrameBoundary(g_state->ownerCtx);
         // The supersample resolve's warm compile, once a frame,
         // unconditionally -- not nested under any other feature's gate,
         // so a session with every FSS feature off still reaches it. A flag
@@ -3883,6 +4009,7 @@ void vScreenFrameBoundary() {
     fssRingFrameBoundary();
     fssDumpFrameBoundary(s->ownerCtx);
     eyeSplitFrameBoundary(s->ownerCtx);
+    foveationFrameBoundary(s->ownerCtx);
 
     // FSS frame pacing (round 31): the left-only squares are now measured
     // to be runtime-side (both submitted images carry the flicker equally),
@@ -4690,6 +4817,7 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     panelUpscaleConfigure(cfg);
     wakePulseConfigure(cfg);
     hudGrainConfigure(cfg);
+    uiDepthConfigure(cfg);
     scrimConfigure(cfg);
     quadProbeConfigure(cfg);
     loaderPanelConfigure(cfg);
@@ -4709,6 +4837,7 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     fssRingConfigure(cfg);
     fssDumpConfigure(cfg);
     eyeSplitConfigure(cfg);
+    foveationConfigure(cfg);
     resolveProbeConfigure(cfg);
     resolveBindConfigure(cfg);
     stencilProbeConfigure(cfg);
@@ -4965,6 +5094,7 @@ void shutdownVScreenFixes() {
     }
     remlokShutdown();
     holoShutdown();
+    uiDepthShutdown();
     scrimShutdown();
     quadProbeShutdown();
     wakePulseShutdown();
@@ -4979,6 +5109,7 @@ void shutdownVScreenFixes() {
     fssRingShutdown();
     fssDumpShutdown();
     eyeSplitShutdown();
+    foveationShutdown();
     resolveProbeShutdown();
     resolveBindShutdown();
     stencilProbeShutdown();

@@ -27,6 +27,7 @@
 #include <string>
 
 #include "../../src/common/config.h"
+#include "../../src/common/log.h"
 
 using namespace edvr;
 
@@ -255,6 +256,105 @@ int main(int argc, char** argv) {
                       "a real old-line choice still follows the move");
         }
         Config::get().setAuditTables(nullptr, 0, nullptr, 0);
+    }
+
+    // --- the log's buffer, and that a lost line SAYS it was lost -----------
+    //
+    // WHY THIS IS HERE (2026-09-07). Log::append drops a line when more text
+    // queues between two flusher passes than the buffer holds, counts it in
+    // m_dropped -- and until this date NOTHING EVER PRINTED THAT COUNT. Six
+    // draw censuses across two flights were read as complete when every one
+    // had lost its tail at the old 1 MB cap, taking the intern table that
+    // says what each @N refers to. The diagnosis went to draw_census.cpp
+    // twice before it came to the logger.
+    //
+    // So the property under test is not "the buffer is big enough" -- that is
+    // a number in edvr.ini -- but "a log that lost lines is not silent about
+    // it". Driven at buffer_mb = 1, the floor, so the test stays fast.
+    if (argc >= 3) {
+        const std::wstring scratch = widen(argv[2]);
+        static const char kLogIni[] =
+            "[log]\r\n"
+            "enabled = 1\r\n"
+            "buffer_mb = 1\r\n"
+            "max_mb = 64\r\n";
+        if (!writeIni(scratch, kLogIni)) {
+            fail("log scratch ini", "could not write it");
+        } else {
+            Config::get().init(scratch);
+            Log::get().close();          // in case anything above opened one
+
+            // Clear previous runs first. Each leaves about a megabyte, so
+            // without this every build grows the scratch directory forever --
+            // and it also makes "the newest match" below provably THIS run's
+            // rather than whichever name sorted last.
+            {
+                WIN32_FIND_DATAW old{};
+                HANDLE oh = FindFirstFileW((scratch + L"\\edvr_buftest_*.log").c_str(),
+                                           &old);
+                if (oh != INVALID_HANDLE_VALUE) {
+                    do {
+                        DeleteFileW((scratch + L"\\" + old.cFileName).c_str());
+                    } while (FindNextFileW(oh, &old));
+                    FindClose(oh);
+                }
+            }
+
+            if (!Log::get().open(scratch, L"buftest")) {
+                fail("log buffer", "the log would not open in the scratch dir");
+            } else {
+                // Well past 1 MB, and fast: the flusher sleeps 250 ms before
+                // its first pass, so this whole burst lands in one buffer --
+                // which is exactly the shape of a draw census.
+                std::string filler(800, 'x');
+                for (int i = 0; i < 4000; ++i) {
+                    Log::get().note("burst %d %s", i, filler.c_str());
+                }
+                const uint64_t lost = Log::get().dropped();
+                Log::get().close();      // joins the flusher, flushes both
+
+                if (lost == 0) {
+                    fail("log buffer", "4000 x ~800 bytes did not overrun a "
+                                       "1 MB buffer; the cap is not being read");
+                } else {
+                    ok("a burst past the buffer drops lines and counts them");
+                }
+
+                // And the count reaches the FILE, which is the half that was
+                // missing: a reader of the log must see the gap.
+                WIN32_FIND_DATAW fd{};
+                const std::wstring pat = scratch + L"\\edvr_buftest_*.log";
+                HANDLE h = FindFirstFileW(pat.c_str(), &fd);
+                std::string body;
+                if (h != INVALID_HANDLE_VALUE) {
+                    std::wstring newest = fd.cFileName;
+                    while (FindNextFileW(h, &fd)) newest = fd.cFileName;
+                    FindClose(h);
+                    HANDLE f = CreateFileW((scratch + L"\\" + newest).c_str(),
+                                           GENERIC_READ, FILE_SHARE_READ, nullptr,
+                                           OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL,
+                                           nullptr);
+                    if (f != INVALID_HANDLE_VALUE) {
+                        char chunk[65536];
+                        DWORD got = 0;
+                        while (ReadFile(f, chunk, sizeof(chunk), &got, nullptr) &&
+                               got) {
+                            body.append(chunk, got);
+                        }
+                        CloseHandle(f);
+                    }
+                }
+                if (body.empty()) {
+                    fail("log buffer", "could not read the log back");
+                } else if (body.find("were DROPPED here") == std::string::npos) {
+                    fail("log buffer",
+                         "lines were dropped and the log does not say so -- "
+                         "the exact silence this test exists to prevent");
+                } else {
+                    ok("the log says in its own text that lines were dropped");
+                }
+            }
+        }
     }
 
     if (g_fails) {

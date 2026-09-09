@@ -6,6 +6,7 @@
 
 #include "../common/guard.h"
 #include "../common/log.h"
+#include "perf_monitor.h"   // the compile is an event with a duration
 
 namespace edvr {
 namespace {
@@ -184,6 +185,22 @@ void compileInnerCs(ID3D11DeviceContext* ctx, const char* hlsl,
 
 }  // namespace
 
+// Every compile is an EVENT for the monitor's drop attribution, with its
+// duration: a compile on the render thread is the mod's own classic hitch
+// (the theater's 142 ms, the temporal pass's 6 s on issue #20), and a
+// dropped frame that coincides with one is explained.
+namespace {
+struct CompileClock {
+    int64_t t0 = qpcNow();
+    ~CompileClock() {
+        const double ms = qpcFrequency() > 0
+                              ? static_cast<double>(qpcNow() - t0) * 1000.0 / static_cast<double>(qpcFrequency())
+                              : 0.0;
+        perfMonitorNoteEvent(kEvCompile, ms);
+    }
+};
+}  // namespace
+
 ID3D11ComputeShader* shaderSwapCompileCs(ID3D11DeviceContext* ctx,
                                          const char* hlsl, size_t hlslLen,
                                          const char* entry, const char* name,
@@ -191,6 +208,7 @@ ID3D11ComputeShader* shaderSwapCompileCs(ID3D11DeviceContext* ctx,
                                          const char* who) {
     if (!ctx || !hlsl || !hlslLen) return nullptr;
     ID3D11ComputeShader* out = nullptr;
+    CompileClock clock;
     guardedBudget(g_budget, [&] {
         compileInnerCs(ctx, hlsl, hlslLen, entry, name, macros, who, &out);
     });
@@ -204,6 +222,7 @@ ID3D11PixelShader* shaderSwapCompilePs(ID3D11DeviceContext* ctx,
                                        const char* who) {
     if (!ctx || !hlsl || !hlslLen) return nullptr;
     ID3D11PixelShader* out = nullptr;
+    CompileClock clock;
     guardedBudget(g_budget, [&] {
         compileInnerPs(ctx, hlsl, hlslLen, entry, name, macros, who, &out);
     });
@@ -217,6 +236,7 @@ ID3D11VertexShader* shaderSwapCompileVs(ID3D11DeviceContext* ctx,
                                         const char* who) {
     if (!ctx || !hlsl || !hlslLen) return nullptr;
     ID3D11VertexShader* out = nullptr;
+    CompileClock clock;
     guardedBudget(g_budget, [&] {
         compileInner(ctx, hlsl, hlslLen, entry, name, macros, who, &out);
     });

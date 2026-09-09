@@ -1497,6 +1497,12 @@ the most work, which the pass can compute for itself — not a per-draw
 matrix capture and an object-ID pass, which is the engine's own velocity
 buffer built from outside and re-built after every update.
 
+*Revisited on 2026-09-07 in [per-object-motion.md](per-object-motion.md):
+the formula is the world path's with one matrix per rigid mover, the pose
+is a 24-byte slice of the instanced-mesh record EDVR already decodes, and
+the scene depth's own stencil can carry the tag. The same question, three
+of its costs since measured; nothing built.*
+
 **Performantly: yes.** The pass is one compute dispatch per eye over the
 eye image, a handful of taps per pixel; believed a fraction of a
 millisecond per eye at Quest-3 sizes, measured by timestamp query in Phase
@@ -1602,8 +1608,14 @@ things it does change:
   not a promise.
 
 The eye-tracked centre is unchanged. A foveated *resolve* — full-quality
-temporal filtering at the fovea, cheaper in the periphery — is a small
-saving the same gaze point could drive; noted, not designed.
+temporal filtering at the fovea, cheaper in the periphery — was noted here
+as a small saving the same gaze point could drive. It is no longer small:
+NVIDIA's pass measured 2.7 ms per eye on the Pimax at HMD Quality 1.0,
+scaling with output size, and running it on a crop around the gaze point
+recovers most of that. It is designed as performance.md's feature 6, DLSS
+where you look, with the runtime's sub-rectangle inputs, and the gaze
+probe that decides which headsets can drive it is built
+(`advanced.gaze_probe`, 2026-09-04).
 
 ## Considered and declined
 
@@ -1845,3 +1857,45 @@ frames at the door, the jitter and the size are edited answers the guard
 already edits, the LOD bias is a number added to a description on its way
 to the driver. A player who wants none of it leaves the settings at their
 defaults and runs a build identical in behaviour to today's.
+
+## What the pass costs, and one thing it was wasting (2026-09-06)
+
+Turning the pass off at native took a Crystal Super frame from 13.3 ms to
+8.2, so at that resolution it is about forty percent of the frame: 2.80 ms
+an eye by its own totals, of which NVIDIA's evaluation is 1.75 and the rest
+is the work around it -- a full-frame copy in so NVIDIA has a typed texture
+to read, one compute dispatch over every pixel for the motion vectors and
+the depth copy, and a full-frame copy out so the compositor gets the game's
+own format back and can view it as sRGB.
+
+Reading that path found something that should never have been in it. Both
+the motion-vector shader and the own-history one ended by flushing forty
+diagnostic counters with forty global atomic adds per thread group,
+unconditionally, onto forty contended addresses. At 4336x4284 with 8x8
+groups that is 290,512 groups an eye: **11.6 million atomic adds an eye,
+23 million a frame**, for a set of numbers that only the registration log
+line reads. The motion-vector shader also carried a forty-element counter
+array per thread while writing three of them, forty registers of occupancy
+on a dispatch covering 18.6 megapixels.
+
+A counter that did not move is no longer flushed, which is exactly
+behaviour-preserving -- adding zero is a no-op -- and the shader keeps its
+three real counters. Measured in flight the next morning, the same scenes:
+
+| The pass, per eye | Before | After |
+|---|---|---|
+| Total | 2.80 ms | 2.02 ms |
+| NVIDIA's evaluation | 1.75 | 1.72 |
+| EDVR's own work around it | 1.05 | 0.30 |
+
+About 1.5 ms a frame, on every rig running the pass, for a change that
+alters no pixel. What is left of our own share is the two full-frame copies
+and the dispatch's real work. Both copies are avoidable in principle -- the
+one in only because the game's texture may be typeless where NVIDIA needs a
+typed view, the one out only because the compositor needs the game's format
+to make an sRGB view, which telling Submit the colour space outright would
+also solve -- but at 0.3 ms an eye they are no longer the place to look.
+
+The wider lesson is the one the foveation arc kept relearning: measure the
+frame before optimising a part of it. A diagnostic in a per-pixel shader is
+part of the frame.

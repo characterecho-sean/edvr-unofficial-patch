@@ -56,6 +56,10 @@ READERS = [
     # The render sharpening's strength (fix.render_sharpness): one number,
     # live, and zero means the pass never runs.
     ('sharpenConfigure', os.path.join('src', 'openvr', 'compositor_hook.cpp')),
+    # The compositor timing read for the menu's Monitor page
+    # (advanced.compositor_timing): live, and off means the page loses its
+    # compositor columns.
+    ('frameTimingConfigure', os.path.join('src', 'openvr', 'compositor_hook.cpp')),
 ]
 
 

@@ -6,7 +6,7 @@
 #include <vector>
 
 #include "detect.h"
-#include "iniedit.h"
+#include "../common/iniedit.h"
 
 namespace edvr::installer {
 

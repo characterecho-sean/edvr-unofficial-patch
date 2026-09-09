@@ -158,3 +158,11 @@ look.
 One bool read per eye draw, which is the same early-out every other
 instrument in `vscreen.cpp` sits behind. Nothing is allocated, hooked or
 copied until the key is set.
+
+## The next hunt
+
+Ambient occlusion that disagrees between the eyes, first reported on
+cracked asteroids on 2026-09-07 and expected wherever the pass runs. The
+measured frame's one-byte-per-texel eye-sized target is the first place
+that hunt looks, and the dump's exact-size gate is the first thing it may
+need to widen: [ambient-occlusion.md](ambient-occlusion.md).

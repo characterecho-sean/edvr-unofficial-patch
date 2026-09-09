@@ -32,6 +32,9 @@
 #include "../../src/installer/settings.h"
 
 using namespace edvr::installer;
+// The ini merge lives in common now (src/common/iniedit.h, shared with the
+// in-headset menu), in the plain edvr namespace.
+using namespace edvr;
 
 static int g_fails = 0;
 

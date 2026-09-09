@@ -25,6 +25,8 @@
 #include "draw_census.h"
 #include "quad_probe.h"
 #include "exposure_fix.h"
+#include "menu.h"
+#include "perf_monitor.h"
 #include "vscreen.h"
 #include "glitch_frame.h"
 #include "vscreen_res.h"
@@ -149,6 +151,9 @@ struct State {
     // point sampler, whose look is deliberate.
     int          samplerAniso = 0;
     float        samplerBias = 0.0f;
+    char         samplerBiasWhy[220] = {};   // where the bias came from, for the log
+    bool         samplerBiasAuto = false;    // derived from Elite's own multiplier
+    float        samplerBiasMult = 0.0f;     // ...and the multiplier it was derived from
     bool         samplerForceNoted = false;
     // The shader-swap arc's dump mode: while armed, every vertex and pixel
     // shader blob the game creates is written to <logdir>\shaders by hash,
@@ -659,7 +664,22 @@ HRESULT STDMETHODCALLTYPE hookedCreateCS(ID3D11Device* self, const void* bytecod
     const HRESULT hr = g_state->realCreateCS(self, bytecode, len, linkage, out);
     guardedBudget(g_createBudget, [&] {
         if (FAILED(hr) || !bytecode || len == 0 || !out || !*out) return;
-        registerShaderHash(*out, fnv1a64(bytecode, len));
+        const uint64_t hash = fnv1a64(bytecode, len);
+        registerShaderHash(*out, hash);
+        // COMPUTE shaders dump too (2026-09-07), and they had to start.
+        //
+        // This hook has registered their hashes since it was written, so a
+        // census could NAME a dispatch -- and the dump wrote only vs_ and
+        // ps_, so nothing could ever read one. That gap bit twice in one
+        // day. The per-object motion work found the game reading the scene
+        // depth's STENCIL plane from compute (5998146D464F5C0E and
+        // EB0245DE0BB23BB6, the amortized tile renderer of
+        // docs/fss-scanner.md), which is a consumer a stencil tag must not
+        // disturb and which the draw-level so= column cannot see, because a
+        // compute shader has no depth-stencil state to record. And the
+        // temporal pass's own dispatch hash changes whenever its shader
+        // does, which a dump makes checkable instead of inferable.
+        if (g_state->shaderDump) dumpShaderBlob(L"cs", hash, bytecode, len);
     });
     return hr;
 }
@@ -672,7 +692,15 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
     if (self != g_state->swapChain) {
         return g_state->realPresent(self, syncInterval, flags);
     }
+    // The time blocked in the real Present is the monitor's, with the time
+    // blocked in WaitGetPoses: the frame period less the two is the render
+    // thread's own busy time.
+    const int64_t presentT0 = qpcNow();
     const HRESULT hr = g_state->realPresent(self, syncInterval, flags);
+    if (qpcFrequency() > 0) {
+        perfMonitorNotePresentWait(static_cast<double>(qpcNow() - presentT0) * 1000.0 /
+                                   static_cast<double>(qpcFrequency()));
+    }
 
     // OUTSIDE the fault budget, and that is the point. Confirming is a file
     // delete; putting it inside would mean a burst of faults anywhere in the
@@ -700,6 +728,10 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
             static_cast<unsigned long>(GetCurrentThreadId()));
     }
 
+    // The frame boundary's own CPU time, credited to the frame the monitor
+    // just ringed inside it (menuTick runs perfMonitorFrame), so a dropped
+    // frame's row says what EDVR's boundary work cost in it.
+    const int64_t boundaryT0 = qpcNow();
     guardedBudget(g_frameBudget, [&] {
         if (g_state->toggleKey.pressed()) toggleExposureFix();
         // Deliberately not part of the toggle: it reports, it does not change
@@ -781,6 +813,7 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
             // WHERE. Two instruments on one press keeps the two answers on
             // the same frame, which is the only way they can be compared.
             quadProbeRequest();
+            perfMonitorNoteEvent(kEvCensus);
         }
         if (g_state->missedCensusNotes < kMissedDumpNotes &&
             g_state->censusKey.takeMissedWhileUnfocused()) {
@@ -1005,6 +1038,11 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
                     byKey ? "your FSS key" : "the game's GuiFocus");
             }
         }
+        // The settings menu (docs/settings-menu.md): its summon key, its
+        // navigation keys and head-aim, its fade, the keyboard gate that
+        // follows its draw, and the upload of a fresh raster. One key poll
+        // when closed.
+        menuTick(g_state->device);
         // Reading the view the game is actually on, and telling the gate.
         //
         // The keypress count above stays as the fallback, for when this cannot
@@ -1048,7 +1086,10 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
         // tuning by feel have to take effect without a restart. Was every 90
         // frames, which is once a second on exactly one of the three rates.
         ++g_state->frameCounter;
-        if (dueMs(g_state->configPollMs, kConfigPollMs)) {
+        // The menu asks for the poll NOW after each write it made, so the
+        // change lands this frame through the same configure path a hand
+        // edit takes -- nothing applies a value except the reload.
+        if (menuTakeConfigPollRequest() || dueMs(g_state->configPollMs, kConfigPollMs)) {
             g_state->configPollMs = stampMs();
             vScreenRefreshConfig();
             g_state->fssTheaterWanted =
@@ -1092,6 +1133,10 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
             exposureFixReclaimHooks(sceneRendered);
         }
     });
+    if (qpcFrequency() > 0) {
+        perfMonitorNoteCpu(kCpuBoundary, static_cast<double>(qpcNow() - boundaryT0) * 1000.0 /
+                                             static_cast<double>(qpcFrequency()));
+    }
     return hr;
 }
 
@@ -1131,6 +1176,7 @@ HRESULT STDMETHODCALLTYPE hookedCreateSwapChainForHwnd(
 void readoptGameBindings() {
     char b[48];
     bool changed = false;
+    perfMonitorNoteEvent(kEvBinds);
     {
         const auto before = g_state->externalCamKey.key();
         // The ON-FOOT element first: the game acts on _Humanoid on foot,
@@ -1242,11 +1288,43 @@ void readoptGameBindings() {
     }
 }
 
+// The Instruments page's rows: the same functions the diagnostic hotkeys
+// fire, reachable from a headset with no key bound.
+void menuActionDumpCamera(void*) { dumpCameraRing("the settings menu"); }
+void menuActionCensus(void*) {
+    drawCensusRequest();
+    quadProbeRequest();
+    perfMonitorNoteEvent(kEvCensus);
+}
+void menuActionResetView(void*) {
+    headOffsetGateNewFootSession("the settings menu", /*journalSaysSo=*/false);
+}
+void menuActionMarker(void*) {
+    static uint32_t n = 0;
+    Log::get().note("----- marker %u, from the settings menu -----", ++n);
+}
+
 State& ensureState() {
     if (!g_state) {
         g_state = new State();
         g_state->toggleKey.setBinding(Config::get().getString("hotkey.toggle_exposure", "SCROLLLOCK").c_str());
         g_state->dumpKey.setBinding(Config::get().getString("hotkey.dump_camera", "PAUSE").c_str());
+        // The settings menu, read here for install and on vScreen's reload
+        // path for live changes; its Instruments page gets the diagnostic
+        // keys' functions as rows.
+        menuRegisterAction("Dump the camera history now",
+                           "The PAUSE key's job: the last ten seconds of viewpoint history to the log.",
+                           &menuActionDumpCamera, nullptr);
+        menuRegisterAction("Take a draw census and quad probe",
+                           "The dump_draws key's job: every draw into the eyes for a few frames.",
+                           &menuActionCensus, nullptr);
+        menuRegisterAction("Reset Explorer Cam's counted view to 0",
+                           "For a keypress count that desynced: the manual twin of the wake reset.",
+                           &menuActionResetView, nullptr);
+        menuRegisterAction("Write a marker line to the graphics log",
+                           "So a moment you noticed can be found in the log afterwards.",
+                           &menuActionMarker, nullptr);
+        menuConfigure(Config::get());
         // Empty default: the census is chased-bug instrumentation, and an
         // unbound key is how "off" is spelled for a hotkey.
         //
@@ -1421,6 +1499,84 @@ State& ensureState() {
 
 }  // namespace
 
+// ELITE'S OWN VR RENDER-TARGET MULTIPLIER, for advanced.texture_lod_bias
+// = auto.
+//
+// A mip bias is baked into a sampler when it is created and is immutable
+// after, and this renderer makes its samplers up front (see the census
+// below) -- before the eye targets exist, so before anything in this
+// process can measure the render scale from a frame. Measuring it later
+// would bias only the stragglers, which is a feature that does almost
+// nothing and says nothing about it.
+//
+// So take it from the game's own settings, which are written before it
+// starts: Options\Graphics\<preset>.<major>.<minor>.fxcfg carries
+// <HMDRenderTargetMultiplier>, the fraction of the runtime's recommended
+// size Elite renders at. The newest .fxcfg is the one it last wrote.
+// SSAAMultiplier is read alongside only to be reported, so that if the
+// bias ever disagrees with the render size in the log, the second number
+// is already there to explain it.
+//
+// A format this file does not control, so every failure is silent-safe:
+// no directory, no file, no field, or an unreasonable value all leave the
+// bias at zero and say why.
+bool eliteHmdMultiplier(float* mult, float* ssaa, char* fileOut, size_t fileLen) {
+    if (mult) *mult = 0.0f;
+    if (ssaa) *ssaa = 0.0f;
+    if (fileOut && fileLen) fileOut[0] = 0;
+    wchar_t appdata[MAX_PATH] = {};
+    const DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", appdata, MAX_PATH);
+    if (n == 0 || n >= MAX_PATH) return false;
+    std::wstring dir = std::wstring(appdata) +
+                       L"\\Frontier Developments\\Elite Dangerous\\Options\\Graphics\\";
+    WIN32_FIND_DATAW fd = {};
+    HANDLE h = FindFirstFileW((dir + L"*.fxcfg").c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    std::wstring best;
+    FILETIME bestTime = {};
+    do {
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+        if (best.empty() || CompareFileTime(&fd.ftLastWriteTime, &bestTime) > 0) {
+            best = fd.cFileName;
+            bestTime = fd.ftLastWriteTime;
+        }
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+    if (best.empty()) return false;
+    HANDLE f = CreateFileW((dir + best).c_str(), GENERIC_READ,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
+                           FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (f == INVALID_HANDLE_VALUE) return false;
+    const DWORD size = GetFileSize(f, nullptr);
+    std::string text;
+    if (size != INVALID_FILE_SIZE && size <= (1u << 20)) {
+        text.resize(size);
+        DWORD got = 0;
+        if (!ReadFile(f, &text[0], size, &got, nullptr)) got = 0;
+        text.resize(got);
+    }
+    CloseHandle(f);
+    if (text.empty()) return false;
+    if (fileOut && fileLen) {
+        const int w = WideCharToMultiByte(CP_UTF8, 0, best.c_str(), -1, fileOut,
+                                          static_cast<int>(fileLen), nullptr, nullptr);
+        if (w <= 0) fileOut[0] = 0;
+    }
+    struct Field { const char* tag; float* out; };
+    const Field fields[] = {{"<HMDRenderTargetMultiplier>", mult}, {"<SSAAMultiplier>", ssaa}};
+    bool gotMult = false;
+    for (const Field& fl : fields) {
+        if (!fl.out) continue;
+        const size_t at = text.find(fl.tag);
+        if (at == std::string::npos) continue;
+        const float v = static_cast<float>(atof(text.c_str() + at + strlen(fl.tag)));
+        if (!(v > 0.0f) || !(v < 8.0f)) continue;
+        *fl.out = v;
+        if (fl.out == mult) gotMult = true;
+    }
+    return gotMult;
+}
+
 // The reduction type lives in bits 7-8 of a D3D11_FILTER: 0 standard,
 // 1 comparison, 2 minimum, 3 maximum. Only a standard filter is ours to
 // touch, and only a linear or anisotropic one -- promoting a point
@@ -1515,11 +1671,12 @@ HRESULT STDMETHODCALLTYPE hookedCreateSamplerState(ID3D11Device* self,
                 s.samplerForceNoted = true;
                 Log::get().note(
                     "texture filtering: the game's linear and anisotropic samplers are "
-                    "being created with anisotropy %d and %+.2f added to their mip bias. "
-                    "Point, comparison, minimum and maximum filters are left alone. A "
+                    "being created with anisotropy %d and %+.2f added to their mip bias "
+                    "(%s). Point, comparison, minimum and maximum filters are left alone. A "
                     "positive bias trades sharpness for quiet on distant repeating "
                     "detail; a negative one does the reverse.",
-                    s.samplerAniso, static_cast<double>(s.samplerBias));
+                    s.samplerAniso, static_cast<double>(s.samplerBias),
+                    s.samplerBiasWhy[0] ? s.samplerBiasWhy : "no bias asked for");
             }
         }
         // Once the creates have settled: a renderer makes its samplers up
@@ -1688,7 +1845,36 @@ void hookDevice(ID3D11Device* device) {
 #undef EDVR_HOOK_DEV_CREATE
     {
         const int aniso = sentinelCfg.getIntInRange("advanced.texture_anisotropy", 0, 0, 16);
-        float bias = sentinelCfg.getFloat("advanced.texture_lod_bias", 0.0f);
+        const std::string biasKey = sentinelCfg.getString("advanced.texture_lod_bias", "0");
+        float bias = 0.0f;
+        if (_stricmp(biasKey.c_str(), "auto") == 0) {
+            float mult = 0.0f, ssaa = 0.0f;
+            char file[80] = {};
+            if (eliteHmdMultiplier(&mult, &ssaa, file, sizeof(file))) {
+                bias = log2f(mult);
+                s.samplerBiasAuto = true;
+                s.samplerBiasMult = mult;
+                snprintf(s.samplerBiasWhy, sizeof(s.samplerBiasWhy),
+                         "auto: Elite renders at %.3f of the size the runtime recommends "
+                         "(HMDRenderTargetMultiplier in %s; its SSAAMultiplier is %.3f), and "
+                         "log2 of that is the bias the mips want",
+                         static_cast<double>(mult), file[0] ? file : "its graphics preset",
+                         static_cast<double>(ssaa));
+            } else {
+                // Say it here rather than leave it to the sampler line: a
+                // failed auto leaves the bias at zero, which switches the
+                // whole override off, which would print nothing at all.
+                Log::get().note(
+                    "texture filtering: advanced.texture_lod_bias = auto, but Elite's graphics "
+                    "preset gave no HMDRenderTargetMultiplier (Options\\Graphics\\*.fxcfg under "
+                    "%%LOCALAPPDATA%%\\Frontier Developments\\Elite Dangerous). No bias is applied. "
+                    "Set a number instead, or check the game has written its settings once.");
+            }
+        } else {
+            bias = static_cast<float>(atof(biasKey.c_str()));
+            snprintf(s.samplerBiasWhy, sizeof(s.samplerBiasWhy),
+                     "advanced.texture_lod_bias = %s", biasKey.c_str());
+        }
         if (!(bias > -4.0f)) bias = -4.0f;
         if (!(bias < 4.0f)) bias = 4.0f;
         s.samplerAniso = aniso;
@@ -1838,6 +2024,14 @@ bool deviceHookTakeFssZoomPress() {
     return true;
 }
 
+bool deviceHookAutoBiasSource(float* multiplier, float* bias) {
+    State& s = ensureState();
+    if (!s.samplerBiasAuto) return false;
+    if (multiplier) *multiplier = s.samplerBiasMult;
+    if (bias) *bias = s.samplerBias;
+    return true;
+}
+
 void deviceHookNoteCleanExit() {
     // REACHING THIS IS THE PROOF, and it is the only proof there is.
     //
@@ -1873,6 +2067,9 @@ void deviceHookNoteCleanExit() {
 }
 
 void shutdownDeviceHooks() {
+    // The keyboard first: a gate left set past the module's life is a
+    // keyboard the game never gets back.
+    menuShutdown();
     journalWatchShutdown();
     // Reverse of install order: vScreen's vtable copy was taken on top of the
     // exposure fix's, so it comes off first.

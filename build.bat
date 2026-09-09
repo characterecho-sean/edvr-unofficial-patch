@@ -115,6 +115,14 @@ exit /b 1
 
 :toolchain_ok
 
+REM Sources are named RELATIVE to the repo from here on. A worktree under
+REM .claude\worktrees\<name> put the d3d11 compile line past cmd's 8191
+REM characters with every file spelled absolute, and cmd truncated it SILENTLY:
+REM the last eight files were never compiled and the link reported them as
+REM 57 unresolved externals (2026-09-07). setlocal at the top restores the
+REM caller's directory on exit, so this needs no popd.
+pushd "%ROOT%"
+
 if not exist "%BUILD%" mkdir "%BUILD%"
 if not exist "%GEN%" mkdir "%GEN%"
 if not exist "%OBJ%" mkdir "%OBJ%"
@@ -162,16 +170,33 @@ set CFLAGS=/nologo /c /O2 /MT /std:c++17 /EHsc /W4 /GR- ^
 echo.
 REM The runtime config audit data: known keys + the moved-from map,
 REM generated from the same sources the late contract check verifies.
-python "%ROOT%\tools\check_config_contract.py" --quiet --emit "%GEN%\config_contract_gen.h"
+python "tools\check_config_contract.py" --quiet --emit "%GEN%\config_contract_gen.h"
 if errorlevel 1 ( echo [edvr] ERROR: contract header generation failed & exit /b 1 )
 
 echo [edvr] === d3d11.dll ===
 REM AMD FSR 1.0 as embeddable HLSL. Generated rather than committed so the
 REM vendored headers stay byte-identical to upstream (src\d3d11\fsr\).
-python "%ROOT%\tools\gen_fsr_hlsl.py" --root "%ROOT%" --out "%GEN%"
+python "tools\gen_fsr_hlsl.py" --root "%ROOT%" --out "%GEN%"
 if errorlevel 1 ( echo [edvr] ERROR: FSR shader embedding failed & exit /b 1 )
 
-python "%ROOT%\tools\gen_exports.py" --source "%SystemRoot%\System32\d3d11.dll" ^
+REM The settings schema -- the installer's window AND the in-headset menu's
+REM row table (docs\settings-menu.md) -- generated from edvr.ini and the
+REM accessor calls in src\, with the gate that keeps it complete. Here,
+REM before the d3d11 compile, because menu.cpp includes menu_schema.inc.
+REM
+REM A setting that is uncommented in edvr.ini is one this build ships ON. If it
+REM is not also reachable from the settings window, it is invisible to everybody
+REM who does not edit ini files, and nothing else in the build would notice: the
+REM game reads it, the log names it, and the window that is supposed to expose
+REM it simply does not. One annotation line above the key is what this asks for,
+REM and it fails the build until it is there.
+python "tools\gen_settings_schema.py" --root "%ROOT%" --out "%GEN%"
+if errorlevel 1 (
+    echo [edvr] ERROR: the settings schema is incomplete ^(see above^)
+    exit /b 1
+)
+
+python "tools\gen_exports.py" --source "%SystemRoot%\System32\d3d11.dll" ^
     --tag d3d11 --out "%GEN%" ^
     --wrap D3D11CreateDevice --wrap D3D11CreateDeviceAndSwapChain ^
     --extra-export edvr_selftest_hooks ^
@@ -184,7 +209,10 @@ python "%ROOT%\tools\gen_exports.py" --source "%SystemRoot%\System32\d3d11.dll" 
     --extra-export edvrSharpen ^
     --extra-export edvrDepthProbeSelftest ^
     --extra-export edvrDlaaAvailable ^
-    --extra-export edvrDlaaCounts
+    --extra-export edvrDlaaCounts ^
+    --extra-export edvrMenuPanel ^
+    --extra-export edvrDoorGpuBegin ^
+    --extra-export edvrDoorGpuEnd
 if errorlevel 1 ( echo [edvr] ERROR: export generation failed & exit /b 1 )
 
 if not exist "%OBJ%\d3d11" mkdir "%OBJ%\d3d11"
@@ -212,7 +240,7 @@ if not defined NGX if exist "%LOCALAPPDATA%\EDVR\ngx-sdk\include\nvsdk_ngx.h" se
 set NGXFLAGS=
 set NGXLIB=
 if defined NGX (
-    python "%ROOT%\tools\fetch_ngx.py" --verify "%NGX%" || (
+    python "tools\fetch_ngx.py" --verify "%NGX%" || (
         echo [edvr] ERROR: the DLSS SDK at %NGX% is not the pinned one. tools\fetch_ngx.py
         echo        names the commit and the runtime's hash; fetch it again, or update the
         echo        pin on purpose.
@@ -241,57 +269,64 @@ if defined NGX (
     if exist "%BUILD%\NVIDIA-DLSS-LICENSE.txt" del /q "%BUILD%\NVIDIA-DLSS-LICENSE.txt"
 )
 cl.exe %CFLAGS% %NGXFLAGS% /Fo"%OBJ%\d3d11"\ ^
-    "%ROOT%\src\common\log.cpp" "%ROOT%\src\common\config.cpp" ^
-    "%ROOT%\src\common\config_audit.cpp" ^
-    "%ROOT%\src\common\guard.cpp" "%ROOT%\src\common\vtable_hook.cpp" "%ROOT%\src\common\code_hook.cpp" ^
-    "%ROOT%\src\common\hotkey.cpp" "%ROOT%\src\common\proxy.cpp" ^
-    "%ROOT%\src\common\frame_flag.cpp" ^
-    "%ROOT%\src\d3d11\d3d11_proxy.cpp" "%ROOT%\src\d3d11\device_hook.cpp" ^
-    "%ROOT%\src\d3d11\exposure_fix.cpp" "%ROOT%\src\d3d11\vscreen.cpp" ^
-    "%ROOT%\src\d3d11\glitch_frame.cpp" "%ROOT%\src\d3d11\vscreen_res.cpp" ^
-    "%ROOT%\src\d3d11\binding_shadow.cpp" "%ROOT%\src\d3d11\head_offset_gate.cpp" ^
-    "%ROOT%\src\d3d11\camera_view.cpp" "%ROOT%\src\d3d11\journal_watch.cpp" ^
-    "%ROOT%\src\d3d11\elite_binds.cpp" "%ROOT%\src\d3d11\draw_census.cpp" ^
-    "%ROOT%\src\d3d11\fss_res.cpp" "%ROOT%\src\d3d11\fss_scan.cpp" ^
-    "%ROOT%\src\d3d11\fss_panel.cpp" "%ROOT%\src\d3d11\fss_probe.cpp" ^
-    "%ROOT%\src\d3d11\fss_reveal.cpp" "%ROOT%\src\d3d11\fss_ring.cpp" ^
-    "%ROOT%\src\d3d11\fss_dump.cpp" "%ROOT%\src\d3d11\fss_heal.cpp" ^
-    "%ROOT%\src\d3d11\eye_split.cpp" ^
-    "%ROOT%\src\d3d11\resolve_probe.cpp" ^
-    "%ROOT%\src\d3d11\stencil_probe.cpp" ^
-    "%ROOT%\src\d3d11\resolve_bind_fix.cpp" ^
-    "%ROOT%\src\d3d11\fss_theater.cpp" ^
-    "%ROOT%\src\d3d11\xinput_watch.cpp" ^
-    "%ROOT%\src\d3d11\fss_panel_rect.cpp" ^
-    "%ROOT%\src\d3d11\panel_quad.cpp" "%ROOT%\src\d3d11\panel_curve.cpp" ^
-    "%ROOT%\src\d3d11\shader_sig.cpp" ^
-    "%ROOT%\src\d3d11\remlok_fix.cpp" "%ROOT%\src\d3d11\holo_fix.cpp" ^
-    "%ROOT%\src\d3d11\target_sharp.cpp" ^
-    "%ROOT%\src\d3d11\hud_sprite.cpp" ^
-    "%ROOT%\src\d3d11\panel_upscale.cpp" ^
-    "%ROOT%\src\d3d11\wake_pulse.cpp" ^
-    "%ROOT%\src\d3d11\hud_grain.cpp" ^
-    "%ROOT%\src\d3d11\backdrop_fix.cpp" ^
-    "%ROOT%\src\d3d11\scrim_fix.cpp" ^
-    "%ROOT%\src\d3d11\quad_probe.cpp" ^
-    "%ROOT%\src\d3d11\intro_probe.cpp" ^
-    "%ROOT%\src\d3d11\intro_panel.cpp" ^
-    "%ROOT%\src\d3d11\intro_upscale.cpp" ^
-    "%ROOT%\src\d3d11\supersample_pass.cpp" ^
-    "%ROOT%\src\d3d11\temporal_pass.cpp" ^
-    "%ROOT%\src\d3d11\depth_probe.cpp" ^
-    "%ROOT%\src\d3d11\dlaa.cpp" ^
-    "%ROOT%\src\d3d11\sharpen_pass.cpp" ^
-    "%ROOT%\src\d3d11\loader_panel.cpp" ^
-    "%ROOT%\src\d3d11\splash_dim.cpp" ^
-    "%ROOT%\src\d3d11\witchstar_fix.cpp" "%ROOT%\src\d3d11\fov_probe.cpp" ^
-    "%ROOT%\src\d3d11\cb_peek.cpp" "%ROOT%\src\d3d11\billboard_fix.cpp" ^
-    "%ROOT%\src\d3d11\particle_fix.cpp" "%ROOT%\src\d3d11\shader_swap.cpp" "%ROOT%\src\d3d11\sunglare_fix.cpp"
+    "src\common\log.cpp" "src\common\config.cpp" ^
+    "src\common\config_audit.cpp" ^
+    "src\common\guard.cpp" "src\common\vtable_hook.cpp" "src\common\code_hook.cpp" ^
+    "src\common\hotkey.cpp" "src\common\proxy.cpp" ^
+    "src\common\frame_flag.cpp" ^
+    "src\common\iat_hook.cpp" "src\common\iniedit.cpp" ^
+    "src\d3d11\input_gate.cpp" "src\d3d11\menu.cpp" ^
+    "src\d3d11\menu_panel.cpp" "src\d3d11\perf_monitor.cpp" ^
+    "src\d3d11\d3d11_proxy.cpp" "src\d3d11\device_hook.cpp" ^
+    "src\d3d11\exposure_fix.cpp" "src\d3d11\vscreen.cpp" ^
+    "src\d3d11\glitch_frame.cpp" "src\d3d11\vscreen_res.cpp" ^
+    "src\d3d11\binding_shadow.cpp" "src\d3d11\head_offset_gate.cpp" ^
+    "src\d3d11\camera_view.cpp" "src\d3d11\journal_watch.cpp" ^
+    "src\d3d11\elite_binds.cpp" "src\d3d11\draw_census.cpp" ^
+    "src\d3d11\fss_res.cpp" "src\d3d11\fss_scan.cpp" ^
+    "src\d3d11\fss_panel.cpp" "src\d3d11\fss_probe.cpp" ^
+    "src\d3d11\fss_reveal.cpp" "src\d3d11\fss_ring.cpp" ^
+    "src\d3d11\fss_dump.cpp" "src\d3d11\fss_heal.cpp" ^
+    "src\d3d11\eye_split.cpp" ^
+    "src\d3d11\resolve_probe.cpp" ^
+    "src\d3d11\stencil_probe.cpp" ^
+    "src\d3d11\resolve_bind_fix.cpp" ^
+    "src\d3d11\fss_theater.cpp" ^
+    "src\d3d11\xinput_watch.cpp" ^
+    "src\d3d11\fss_panel_rect.cpp" ^
+    "src\d3d11\panel_quad.cpp" "src\d3d11\panel_curve.cpp" ^
+    "src\d3d11\shader_sig.cpp" ^
+    "src\d3d11\remlok_fix.cpp" "src\d3d11\holo_fix.cpp" ^
+    "src\d3d11\target_sharp.cpp" ^
+    "src\d3d11\hud_sprite.cpp" ^
+    "src\d3d11\panel_upscale.cpp" ^
+    "src\d3d11\wake_pulse.cpp" ^
+    "src\d3d11\hud_grain.cpp" ^
+    "src\d3d11\ui_depth.cpp" ^
+    "src\d3d11\backdrop_fix.cpp" ^
+    "src\d3d11\scrim_fix.cpp" ^
+    "src\d3d11\quad_probe.cpp" ^
+    "src\d3d11\intro_probe.cpp" ^
+    "src\d3d11\intro_panel.cpp" ^
+    "src\d3d11\intro_upscale.cpp" ^
+    "src\d3d11\supersample_pass.cpp" ^
+    "src\d3d11\temporal_pass.cpp" ^
+    "src\d3d11\depth_probe.cpp" ^
+    "src\d3d11\dlaa.cpp" ^
+    "src\d3d11\foveation.cpp" ^
+    "src\d3d11\sharpen_pass.cpp" ^
+    "src\d3d11\loader_panel.cpp" ^
+    "src\d3d11\splash_dim.cpp" ^
+    "src\d3d11\witchstar_fix.cpp" "src\d3d11\fov_probe.cpp" ^
+    "src\d3d11\cb_peek.cpp" "src\d3d11\billboard_fix.cpp" ^
+    "src\d3d11\particle_fix.cpp" "src\d3d11\shader_swap.cpp" "src\d3d11\sunglare_fix.cpp"
 if errorlevel 1 ( echo [edvr] ERROR: compile failed & exit /b 1 )
 
+REM gdi32.lib: the settings menu's panel is rasterised with GDI (the game
+REM already imports GDI32, so the DLL adds no module to the process).
 link.exe /nologo /DLL /MACHINE:X64 /INCREMENTAL:NO ^
     /DEF:"%GEN%\edvr_d3d11.def" /OUT:"%BUILD%\d3d11.dll" ^
-    "%OBJ%\d3d11\*.obj" kernel32.lib user32.lib version.lib %NGXLIB%
+    "%OBJ%\d3d11\*.obj" kernel32.lib user32.lib gdi32.lib version.lib %NGXLIB%
 if errorlevel 1 ( echo [edvr] ERROR: link failed & exit /b 1 )
 
 echo [edvr] built %BUILD%\d3d11.dll
@@ -304,7 +339,7 @@ REM --lazy: this proxy must not load its real module from DllMain. The d3d11
 REM side can, because the system d3d11.dll is already mapped and the call only
 REM bumps a refcount; openvr_api_orig.dll is mapped by nothing, so loading it
 REM there runs its DllMain under the loader lock.
-python "%ROOT%\tools\gen_exports.py" --source "%OPENVR_SRC%" ^
+python "tools\gen_exports.py" --source "%OPENVR_SRC%" ^
     --tag openvr --out "%GEN%" --wrap VR_GetGenericInterface --lazy ^
     --extra-export edvr_selftest_system_hook ^
     --extra-export edvr_selftest_cull_guard
@@ -338,23 +373,24 @@ REM slots that return structs by value, observed by register-preserving
 REM tail-jump thunks because no C signature can receive both calling
 REM conventions (see system_thunks.asm). No rsp movement, so the unwind-info
 REM assertion on the generated shim deliberately does not apply here.
-ml64.exe /nologo /c /Fo"%OBJ%\openvr\systhunks.obj" "%ROOT%\src\openvr\system_thunks.asm" >nul
+ml64.exe /nologo /c /Fo"%OBJ%\openvr\systhunks.obj" "src\openvr\system_thunks.asm" >nul
 if errorlevel 1 ( echo [edvr] ERROR: ml64 failed for system_thunks & exit /b 1 )
 
 cl.exe %CFLAGS% /Fo"%OBJ%\openvr"\ ^
-    "%ROOT%\src\common\log.cpp" "%ROOT%\src\common\config.cpp" ^
-    "%ROOT%\src\common\config_audit.cpp" ^
-    "%ROOT%\src\common\guard.cpp" "%ROOT%\src\common\vtable_hook.cpp" "%ROOT%\src\common\code_hook.cpp" ^
-    "%ROOT%\src\common\hotkey.cpp" "%ROOT%\src\common\proxy.cpp" ^
-    "%ROOT%\src\common\frame_flag.cpp" ^
-    "%ROOT%\src\openvr\openvr_proxy.cpp" "%ROOT%\src\openvr\compositor_hook.cpp" ^
-    "%ROOT%\src\openvr\head_offset.cpp" "%ROOT%\src\openvr\resubmit_shadow.cpp" ^
-    "%ROOT%\src\openvr\system_hook.cpp" "%ROOT%\src\openvr\guard_crop.cpp" ^
-    "%ROOT%\src\openvr\supersample_resolve.cpp" ^
-    "%ROOT%\src\openvr\temporal_aa.cpp" ^
-    "%ROOT%\src\openvr\sharpen.cpp" ^
-    "%ROOT%\src\openvr\early_session.cpp" "%ROOT%\src\openvr\launch_centre.cpp" ^
-    "%ROOT%\src\d3d11\elite_binds.cpp"
+    "src\common\log.cpp" "src\common\config.cpp" ^
+    "src\common\config_audit.cpp" ^
+    "src\common\guard.cpp" "src\common\vtable_hook.cpp" "src\common\code_hook.cpp" ^
+    "src\common\hotkey.cpp" "src\common\proxy.cpp" ^
+    "src\common\frame_flag.cpp" ^
+    "src\openvr\openvr_proxy.cpp" "src\openvr\compositor_hook.cpp" ^
+    "src\openvr\head_offset.cpp" "src\openvr\resubmit_shadow.cpp" ^
+    "src\openvr\system_hook.cpp" "src\openvr\guard_crop.cpp" ^
+    "src\openvr\supersample_resolve.cpp" ^
+    "src\openvr\temporal_aa.cpp" ^
+    "src\openvr\sharpen.cpp" "src\openvr\menu_door.cpp" "src\openvr\frame_timing.cpp" ^
+    "src\openvr\early_session.cpp" "src\openvr\launch_centre.cpp" ^
+    "src\openvr\gaze_probe.cpp" ^
+    "src\d3d11\elite_binds.cpp"
 if errorlevel 1 ( echo [edvr] ERROR: openvr compile failed & exit /b 1 )
 
 link.exe /nologo /DLL /MACHINE:X64 /INCREMENTAL:NO ^
@@ -388,36 +424,24 @@ REM resources in one image, which Windows refuses to start at all: "the
 REM side-by-side configuration is incorrect", before a line of our code runs.
 REM It links and packages perfectly happily.
 if not exist "%OBJ%\installer" mkdir "%OBJ%\installer"
-python "%ROOT%\tools\gen_installer_rc.py" --root "%ROOT%" --build "%BUILD%" ^
+python "tools\gen_installer_rc.py" --root "%ROOT%" --build "%BUILD%" ^
     --out "%GEN%" --version "%EDVR_VER%"
 if errorlevel 1 ( echo [edvr] ERROR: installer resource generation failed & exit /b 1 )
 
-REM The settings window's contents, generated from edvr.ini and the accessor
-REM calls in src\ -- and the gate that keeps it complete.
-REM
-REM A setting that is uncommented in edvr.ini is one this build ships ON. If it
-REM is not also reachable from the settings window, it is invisible to everybody
-REM who does not edit ini files, and nothing else in the build would notice: the
-REM game reads it, the log names it, and the window that is supposed to expose
-REM it simply does not. One annotation line above the key is what this asks for,
-REM and it fails the build until it is there.
-python "%ROOT%\tools\gen_settings_schema.py" --root "%ROOT%" --out "%GEN%"
-if errorlevel 1 (
-    echo [edvr] ERROR: the settings schema is incomplete ^(see above^)
-    exit /b 1
-)
+REM The settings window's contents were generated above, before the d3d11
+REM compile, since the in-headset menu shares the schema.
 
 rc.exe /nologo /fo "%OBJ%\installer\payload.res" "%GEN%\payload.rc"
 if errorlevel 1 ( echo [edvr] ERROR: rc.exe failed on the installer resources & exit /b 1 )
 
-set INSTALLER_SRC="%ROOT%\src\installer\main.cpp" "%ROOT%\src\installer\gui.cpp" ^
-    "%ROOT%\src\installer\ui.cpp" "%ROOT%\src\installer\settings.cpp" ^
-    "%ROOT%\src\installer\settings_view.cpp" "%ROOT%\src\installer\logbundle.cpp" ^
-    "%ROOT%\src\installer\app.cpp" "%ROOT%\src\installer\plan.cpp" ^
-    "%ROOT%\src\installer\apply.cpp" "%ROOT%\src\installer\detect.cpp" ^
-    "%ROOT%\src\installer\probe.cpp" "%ROOT%\src\installer\iniedit.cpp" ^
-    "%ROOT%\src\installer\state.cpp" "%ROOT%\src\installer\mirror.cpp" ^
-    "%ROOT%\src\installer\payload.cpp"
+set INSTALLER_SRC="src\installer\main.cpp" "src\installer\gui.cpp" ^
+    "src\installer\ui.cpp" "src\installer\settings.cpp" ^
+    "src\installer\settings_view.cpp" "src\installer\logbundle.cpp" ^
+    "src\installer\app.cpp" "src\installer\plan.cpp" ^
+    "src\installer\apply.cpp" "src\installer\detect.cpp" ^
+    "src\installer\probe.cpp" "src\common\iniedit.cpp" ^
+    "src\installer\state.cpp" "src\installer\mirror.cpp" ^
+    "src\installer\payload.cpp"
 set INSTALLER_LIBS=user32.lib gdi32.lib gdiplus.lib dwmapi.lib uxtheme.lib ^
     shell32.lib ole32.lib comctl32.lib advapi32.lib version.lib bcrypt.lib dxgi.lib kernel32.lib
 
@@ -450,12 +474,12 @@ if not exist "%OBJ%\insttest" mkdir "%OBJ%\insttest"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /GR- /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /I"%GEN%" ^
     /Fo"%OBJ%\insttest"\ /Fe"%BUILD%\installer_test.exe" ^
-    "%ROOT%\tools\installer_test\installer_test.cpp" ^
-    "%ROOT%\src\installer\plan.cpp" "%ROOT%\src\installer\apply.cpp" ^
-    "%ROOT%\src\installer\detect.cpp" "%ROOT%\src\installer\probe.cpp" ^
-    "%ROOT%\src\installer\iniedit.cpp" "%ROOT%\src\installer\state.cpp" ^
-    "%ROOT%\src\installer\mirror.cpp" ^
-    "%ROOT%\src\installer\settings.cpp" "%ROOT%\src\installer\logbundle.cpp" ^
+    "tools\installer_test\installer_test.cpp" ^
+    "src\installer\plan.cpp" "src\installer\apply.cpp" ^
+    "src\installer\detect.cpp" "src\installer\probe.cpp" ^
+    "src\common\iniedit.cpp" "src\installer\state.cpp" ^
+    "src\installer\mirror.cpp" ^
+    "src\installer\settings.cpp" "src\installer\logbundle.cpp" ^
     /link /INCREMENTAL:NO %INSTALLER_LIBS%
 if errorlevel 1 ( echo [edvr] ERROR: installer_test build failed & exit /b 1 )
 "%BUILD%\installer_test.exe" "%ROOT%" "%BUILD%\insttest_scratch" || (
@@ -475,7 +499,7 @@ echo [edvr] === smoke.exe ===
 if not exist "%OBJ%\smoke" mkdir "%OBJ%\smoke"
 cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /DNDEBUG ^
     /Fo"%OBJ%\smoke\\" /Fe"%BUILD%\smoke.exe" ^
-    "%ROOT%\tools\smoke\smoke.cpp" /link /INCREMENTAL:NO d3d11.lib kernel32.lib
+    "tools\smoke\smoke.cpp" /link /INCREMENTAL:NO d3d11.lib kernel32.lib
 if errorlevel 1 ( echo [edvr] ERROR: smoke build failed & exit /b 1 )
 echo [edvr] built %BUILD%\smoke.exe
 
@@ -483,7 +507,7 @@ echo [edvr] === fakechain.dll ===
 if not exist "%OBJ%\fakechain" mkdir "%OBJ%\fakechain"
 cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /DNDEBUG /LD ^
     /Fo"%OBJ%\fakechain\\" /Fe"%BUILD%\fakechain.dll" ^
-    "%ROOT%\tools\fakechain\fakechain.cpp" /link /INCREMENTAL:NO kernel32.lib
+    "tools\fakechain\fakechain.cpp" /link /INCREMENTAL:NO kernel32.lib
 if errorlevel 1 ( echo [edvr] ERROR: fakechain build failed & exit /b 1 )
 echo [edvr] built %BUILD%\fakechain.dll
 
@@ -495,14 +519,40 @@ REM it, which is the only reason to believe them now.
 if not exist "%OBJ%\vtabletest" mkdir "%OBJ%\vtabletest"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\vtabletest"\ ^
-    /Fe"%BUILD%\vtable_test.exe" "%ROOT%\tools\vtable_test\vtable_test.cpp" ^
-    "%ROOT%\src\common\vtable_hook.cpp" "%ROOT%\src\common\code_hook.cpp" "%ROOT%\src\common\guard.cpp" ^
-    "%ROOT%\src\common\log.cpp" "%ROOT%\src\common\config.cpp" ^
-    "%ROOT%\src\common\proxy.cpp" ^
+    /Fe"%BUILD%\vtable_test.exe" "tools\vtable_test\vtable_test.cpp" ^
+    "src\common\vtable_hook.cpp" "src\common\code_hook.cpp" "src\common\guard.cpp" ^
+    "src\common\log.cpp" "src\common\config.cpp" ^
+    "src\common\proxy.cpp" ^
     /link /INCREMENTAL:NO kernel32.lib user32.lib version.lib
 if errorlevel 1 ( echo [edvr] ERROR: vtable_test build failed & exit /b 1 )
 "%BUILD%\vtable_test.exe" || (
     echo [edvr] ERROR: vtable hooking does not compose with object wrappers
+    exit /b 1
+)
+
+echo [edvr] === menu_test.exe ===
+REM The settings menu's pure parts (docs\settings-menu.md): the keyboard
+REM gate's filter policies (zeroed state, ups kept and downs dropped, the
+REM summon swallow, the scan-code map), the panel's ray intersection flat
+REM and curved, the door's eye transform against a hand-worked pose, and
+REM the one-value ini write's merge -- each one a place a wrong sign or an
+REM off-by-one would otherwise be found in a headset.
+if not exist "%OBJ%\menutest" mkdir "%OBJ%\menutest"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /I"%GEN%" ^
+    /Fo"%OBJ%\menutest"\ /Fe"%BUILD%\menu_test.exe" ^
+    "tools\menu_test\menu_test.cpp" ^
+    "src\d3d11\input_gate.cpp" "src\d3d11\menu_panel.cpp" ^
+    "src\openvr\menu_door.cpp" "src\d3d11\shader_swap.cpp" ^
+    "src\common\iat_hook.cpp" "src\common\iniedit.cpp" ^
+    "src\common\vtable_hook.cpp" "src\common\code_hook.cpp" "src\common\hotkey.cpp" ^
+    "src\common\config.cpp" "src\common\log.cpp" ^
+    "src\common\guard.cpp" "src\common\frame_flag.cpp" ^
+    "src\common\proxy.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib user32.lib gdi32.lib version.lib d3d11.lib
+if errorlevel 1 ( echo [edvr] ERROR: menu_test build failed & exit /b 1 )
+"%BUILD%\menu_test.exe" || (
+    echo [edvr] ERROR: the settings menu's arithmetic or gate policy is wrong
     exit /b 1
 )
 
@@ -515,8 +565,8 @@ REM in a build.
 if not exist "%OBJ%\cfgtest" mkdir "%OBJ%\cfgtest"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\cfgtest"\ ^
-    /Fe"%BUILD%\config_test.exe" "%ROOT%\tools\config_test\config_test.cpp" ^
-    "%ROOT%\src\common\config.cpp" "%ROOT%\src\common\log.cpp" ^
+    /Fe"%BUILD%\config_test.exe" "tools\config_test\config_test.cpp" ^
+    "src\common\config.cpp" "src\common\log.cpp" ^
     /link /INCREMENTAL:NO kernel32.lib
 if errorlevel 1 ( echo [edvr] ERROR: config_test build failed & exit /b 1 )
 "%BUILD%\config_test.exe" "%ROOT%" "%BUILD%\cfgscratch" || (
@@ -528,11 +578,11 @@ echo [edvr] === gate_test.exe ===
 if not exist "%OBJ%\gatetest" mkdir "%OBJ%\gatetest"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\gatetest"\ /Fe"%BUILD%\gate_test.exe" ^
-    "%ROOT%\tools\gate_test\gate_test.cpp" ^
-    "%ROOT%\src\d3d11\head_offset_gate.cpp" "%ROOT%\src\common\config.cpp" ^
-    "%ROOT%\src\common\log.cpp" "%ROOT%\src\common\frame_flag.cpp" ^
-    "%ROOT%\src\d3d11\camera_view.cpp" "%ROOT%\src\common\guard.cpp" ^
-    "%ROOT%\src\common\proxy.cpp" "%ROOT%\src\d3d11\journal_watch.cpp" ^
+    "tools\gate_test\gate_test.cpp" ^
+    "src\d3d11\head_offset_gate.cpp" "src\common\config.cpp" ^
+    "src\common\log.cpp" "src\common\frame_flag.cpp" ^
+    "src\d3d11\camera_view.cpp" "src\common\guard.cpp" ^
+    "src\common\proxy.cpp" "src\d3d11\journal_watch.cpp" ^
     /link /INCREMENTAL:NO kernel32.lib user32.lib version.lib
 if errorlevel 1 ( echo [edvr] ERROR: gate_test build failed & exit /b 1 )
 "%BUILD%\gate_test.exe" "%ROOT%" || (
@@ -548,9 +598,9 @@ REM it as judder on a planet surface.
 if not exist "%OBJ%\glitchtest" mkdir "%OBJ%\glitchtest"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\glitchtest"\ ^
-    /Fe"%BUILD%\glitch_test.exe" "%ROOT%\tools\glitch_test\glitch_test.cpp" ^
-    "%ROOT%\src\d3d11\glitch_frame.cpp" "%ROOT%\src\common\config.cpp" ^
-    "%ROOT%\src\common\frame_flag.cpp" "%ROOT%\src\common\log.cpp" ^
+    /Fe"%BUILD%\glitch_test.exe" "tools\glitch_test\glitch_test.cpp" ^
+    "src\d3d11\glitch_frame.cpp" "src\common\config.cpp" ^
+    "src\common\frame_flag.cpp" "src\common\log.cpp" ^
     /link /INCREMENTAL:NO kernel32.lib
 if errorlevel 1 ( echo [edvr] ERROR: glitch_test build failed & exit /b 1 )
 "%BUILD%\glitch_test.exe" "%BUILD%\glitchscratch" || (
@@ -562,7 +612,7 @@ echo [edvr] === pose_test.exe ===
 if not exist "%OBJ%\posetest" mkdir "%OBJ%\posetest"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\posetest"\ ^
-    /Fe"%BUILD%\pose_test.exe" "%ROOT%\tools\pose_test\pose_test.cpp" ^
+    /Fe"%BUILD%\pose_test.exe" "tools\pose_test\pose_test.cpp" ^
     /link /INCREMENTAL:NO
 if errorlevel 1 ( echo [edvr] ERROR: pose_test build failed & exit /b 1 )
 "%BUILD%\pose_test.exe" || (
@@ -581,7 +631,7 @@ if not exist "%OBJ%\sstest" mkdir "%OBJ%\sstest"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\sstest"\ ^
     /Fe"%BUILD%\supersample_test.exe" ^
-    "%ROOT%\tools\supersample_test\supersample_test.cpp" ^
+    "tools\supersample_test\supersample_test.cpp" ^
     /link /INCREMENTAL:NO
 if errorlevel 1 ( echo [edvr] ERROR: supersample_test build failed & exit /b 1 )
 "%BUILD%\supersample_test.exe" || (
@@ -599,7 +649,7 @@ if not exist "%OBJ%\taatest" mkdir "%OBJ%\taatest"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\taatest"\ ^
     /Fe"%BUILD%\temporal_test.exe" ^
-    "%ROOT%\tools\temporal_test\temporal_test.cpp" ^
+    "tools\temporal_test\temporal_test.cpp" ^
     /link /INCREMENTAL:NO
 if errorlevel 1 ( echo [edvr] ERROR: temporal_test build failed & exit /b 1 )
 "%BUILD%\temporal_test.exe" || (
@@ -611,7 +661,7 @@ echo [edvr] === fakevr.dll + openvr_smoke.exe ===
 if not exist "%OBJ%\fakevr" mkdir "%OBJ%\fakevr"
 cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /DNDEBUG /LD ^
     /Fo"%OBJ%\fakevr\\" /Fe"%BUILD%\fakevr.dll" ^
-    "%ROOT%\tools\fakevr\fakevr.cpp" /link /INCREMENTAL:NO kernel32.lib
+    "tools\fakevr\fakevr.cpp" /link /INCREMENTAL:NO kernel32.lib
 if errorlevel 1 ( echo [edvr] ERROR: fakevr build failed & exit /b 1 )
 if not exist "%OBJ%\openvrsmoke" mkdir "%OBJ%\openvrsmoke"
 REM Links the shared guard, and what guard.cpp needs, because the harness now
@@ -621,12 +671,12 @@ REM crash or a wrong pixel.
 cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /DNDEBUG ^
     /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
     /Fo"%OBJ%\openvrsmoke\\" /Fe"%BUILD%\openvr_smoke.exe" ^
-    "%ROOT%\tools\openvr_smoke\openvr_smoke.cpp" ^
-    "%ROOT%\src\common\guard.cpp" "%ROOT%\src\common\log.cpp" ^
-    "%ROOT%\src\common\config.cpp" "%ROOT%\src\common\proxy.cpp" ^
-    "%ROOT%\src\common\frame_flag.cpp" "%ROOT%\src\common\hotkey.cpp" ^
-    "%ROOT%\src\openvr\resubmit_shadow.cpp" "%ROOT%\src\openvr\guard_crop.cpp" ^
-    "%ROOT%\src\d3d11\elite_binds.cpp" ^
+    "tools\openvr_smoke\openvr_smoke.cpp" ^
+    "src\common\guard.cpp" "src\common\log.cpp" ^
+    "src\common\config.cpp" "src\common\proxy.cpp" ^
+    "src\common\frame_flag.cpp" "src\common\hotkey.cpp" ^
+    "src\openvr\resubmit_shadow.cpp" "src\openvr\guard_crop.cpp" ^
+    "src\d3d11\elite_binds.cpp" ^
     /link /INCREMENTAL:NO kernel32.lib user32.lib version.lib d3d11.lib
 if errorlevel 1 ( echo [edvr] ERROR: openvr_smoke build failed & exit /b 1 )
 echo [edvr] built %BUILD%\openvr_smoke.exe
@@ -653,19 +703,40 @@ REM there and a missing key falls back to its default. Only run when python is
 REM available; a missing interpreter must not stop a build.
 echo.
 echo [edvr] === install-read check ===
-python "%ROOT%\tools\check_install_reads.py"
+python "tools\check_install_reads.py"
 if errorlevel 1 ( echo [edvr] ERROR: a config reader runs only on the reload path & exit /b 1 )
 
 echo [edvr] === exit-path check ===
-python "%ROOT%\tools\check_exit_paths.py"
+python "tools\check_exit_paths.py"
 if errorlevel 1 ( echo [edvr] ERROR: cleanup that matters runs only on FreeLibrary & exit /b 1 )
 
 echo [edvr] === draw census diff self-test ===
 REM The tool that reads the census a field session paid for. A parser that
 REM drifts from the DC line format fails HERE, not in the ten minutes after a
 REM user finally reproduced the effect being chased.
-python "%ROOT%\tools\diff_draw_census.py" --self-test || (
+python "tools\diff_draw_census.py" --self-test || (
     echo [edvr] ERROR: the census diff tool failed its own test
+    exit /b 1
+)
+
+echo [edvr] === crisp-UI gates parse self-test ===
+REM This reader had none until 2026-09-07, and it reads the same census
+REM emitter the two tools around it do. It asserts the PARSE, not the gates:
+REM a new trailing field that swallowed q= would leave every report subtly
+REM wrong with no error anywhere.
+python "%ROOT%\tools\crisp_ui_gates.py" --self-test || (
+    echo [edvr] ERROR: the crisp-UI gates reader failed its own test
+    exit /b 1
+)
+
+echo [edvr] === stencil census self-test ===
+REM The reader that answers "which stencil bits are free" and "does the
+REM stencil survive to the motion-vector dispatch" off a census
+REM (docs/per-object-motion.md Phase 0). It decodes the so= column the DLL
+REM started printing on 2026-09-07, and a mask read one bit out is a wrong
+REM answer that looks exactly like a right one. It fails HERE.
+python "%ROOT%\tools\stencil_census.py" --self-test || (
+    echo [edvr] ERROR: the stencil census tool failed its own test
     exit /b 1
 )
 
@@ -676,7 +747,7 @@ REM by different amounts and far content does not land on the same pixel in
 REM both. A sign flip in that step reads as plausible either way, and once
 REM cost a fix built on tiles that had landed on the Milky Way band. It
 REM fails HERE, not in the next report somebody trusts.
-python "%ROOT%\tools\diff_eye_split.py" --self-test || (
+python "tools\diff_eye_split.py" --self-test || (
     echo [edvr] ERROR: the eye-split diff tool failed its own test
     exit /b 1
 )
@@ -686,7 +757,7 @@ where python >nul 2>&1
 if errorlevel 1 (
     echo [edvr] NOTE: python not found, skipping the config contract check
 ) else (
-    python "%ROOT%\tools\check_config_contract.py" || (
+    python "tools\check_config_contract.py" || (
         echo [edvr] ERROR: config contract check failed or crashed
         exit /b 1
     )

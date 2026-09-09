@@ -23,6 +23,8 @@
 
 struct ID3D11Device;
 struct ID3D11DeviceContext;
+struct ID3D11RenderTargetView;
+struct ID3D11DepthStencilView;
 
 namespace edvr {
 
@@ -93,6 +95,16 @@ inline bool eyeShapedAtScale(uint32_t w, uint32_t h, uint32_t eyeW, uint32_t eye
 // Answers false when nothing has been published and nothing measured, which
 // is the same "disable yourself" answer those two already acted on.
 bool vScreenIsEyeSized(uint32_t w, uint32_t h);
+
+// The context's OMSetRenderTargets through the ORIGINAL entry, past the
+// hook and the binding shadow: for a fix that rebinds around one draw and
+// puts the game's bindings back before anything else looks (ui_depth binds
+// the pass's depth at a menu composite). The shadow is never told, so it
+// keeps describing the game's own bindings, which is the truth by the time
+// the draw returns. Null-safe before the hooks are installed (no-op).
+void vScreenSetRenderTargetsRaw(ID3D11DeviceContext* ctx, uint32_t n,
+                                ID3D11RenderTargetView* const* rtvs,
+                                ID3D11DepthStencilView* dsv);
 
 // Installs the context hooks using the mechanism the caller decided for this
 // device -- shared with the exposure hooks so the two never split modes on

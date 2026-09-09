@@ -303,8 +303,15 @@ that scale with the internal render size, so at HMD Quality 0.67 their
 text is rasterised at two-thirds size and no upscaler recovers it. (Every
 trained flight before 2026-09-04 ran with NVIDIA's history reset every
 frame, a bug found by review; the verdicts on those flights are of a
-spatial filter, not of DLSS.)
-*Details: [docs/anti-aliasing.md](docs/anti-aliasing.md).*
+spatial filter, not of DLSS.) What the trained modes did to the HUD's text
+before `ui_depth` was make it swim: Elite draws its interface depth-tested but
+never writes its depth, so the pass held a panel a metre away at infinity
+and NVIDIA's history rejected it under every head movement. `ui_depth`
+(on by default; nothing happens while `temporal_aa` is off) has the holo
+panels and the flight HUD write their depth into the buffer the pass
+reads, and the text holds still (flown 2026-09-06).
+*Details: [docs/anti-aliasing.md](docs/anti-aliasing.md) and
+[docs/crisp-ui-handoff.md](docs/crisp-ui-handoff.md).*
 
 **The RemLok helmet's edge lines hanging along your nose.** When the
 emergency helmet deploys, its faint edge lines end up in the middle of your
@@ -564,6 +571,20 @@ way.
 Everything is in `edvr.ini`, next to the game; with the file missing you get the
 defaults. `black_void`, `panel_distance` and the Explorer Cam offsets reload
 while the game runs; the rest need a restart.
+
+**The in-headset menu.** Press **F8** in the game (the key is `hotkey.menu`)
+and a settings panel appears where you are looking, anchored in the world so it
+stays put while you read it. Up and Down pick a row; Left and Right change it;
+Enter toggles; Tab changes page; Escape closes. While it is open the game sees
+no keyboard at all, so none of those keys reach the ship -- your HOTAS and
+mouse still do. Every change is written to `edvr.ini` and applies the way a
+hand edit would, and a row that only takes effect at the next launch says so.
+The **Monitor** page is fpsVR's readout -- frame rate and 1% low, the app's
+and the compositor's GPU time, dropped and reprojected frames, CPU, GPU, VRAM
+and RAM -- with a frame-time strip; `menu.fps_overlay = on` pins a one-line
+version of it to your view while the menu is closed. `menu.developer = on`
+adds the advanced and experimental sections. The whole design is in
+[docs/settings-menu.md](docs/settings-menu.md).
 
 ## Running alongside other mods
 
