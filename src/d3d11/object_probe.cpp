@@ -192,6 +192,7 @@ constexpr uint32_t kRunFrames = 4;
 std::vector<uint8_t> g_run[kRunFrames];
 uint32_t g_runFrame[kRunFrames] = {};
 uint32_t g_runNext = 0;
+void steppedSample(char* out, size_t cap);   // the 20 s line's sample (defined with trackFrame)
 // Moving ships (object_probe.h, takeShips): taken within this of the
 // camera (the pass's setting), held this long past their pair -- three
 // pair intervals, so a pair that lost a ship to a slot shuffle does not
