@@ -267,6 +267,11 @@ struct State {
     // so it applies to the NEXT frame's submits -- the same place and the same
     // reasoning as the pair latch's reset.
     bool     holdThisFrame = false;
+    // This frame's withhold is a JUMP the detector has yet to judge (not a
+    // hold): the temporal pass waits for the verdict before restarting its
+    // history (temporalAaNoteWithheld). Decided with the pair latch's
+    // verdict, so both eyes tell the pass the same thing.
+    bool     withholdJumpOnly = false;
     bool     threadNoted = false;
 
     // What has been published to the d3d11 half about the eye textures, and how
@@ -1326,7 +1331,7 @@ vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
                 // existing, and unmeasured with both live at once.)
                 const vr::VRTextureBounds_t* subBounds = bounds;
                 vr::VRTextureBounds_t subStorage;
-                temporalAaNoteWithheld(eye);   // not the game's frame: the history restarts after
+                temporalAaNoteWithheld(eye, false);   // not the game's frame: the history restarts after
                 applyResolve(&sub, &subBounds, &subStorage);
                 vr::VRTextureBounds_t subStorage2;
                 applySharpen(&sub, &subBounds, &subStorage2);
@@ -1452,7 +1457,7 @@ vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
                     sub.handle = healed;
                     const vr::VRTextureBounds_t* subBounds = bounds;
                     vr::VRTextureBounds_t subStorage;
-                    temporalAaNoteWithheld(eye);
+                    temporalAaNoteWithheld(eye, false);
                     applyResolve(&sub, &subBounds, &subStorage);
                     vr::VRTextureBounds_t subStorage2;
                     applySharpen(&sub, &subBounds, &subStorage2);
@@ -1664,7 +1669,10 @@ vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
             static_cast<unsigned long>(GetCurrentThreadId()));
     }
 
-    if (s->validated && s->pairLatch.verdict(glitchFrameMarked() || s->holdThisFrame)) {
+    const bool markedNow = glitchFrameMarked();
+    const bool pairDecided = s->pairLatch.latched();
+    if (s->validated && s->pairLatch.verdict(markedNow || s->holdThisFrame)) {
+        if (!pairDecided) s->withholdJumpOnly = markedNow && !s->holdThisFrame;
         ++s->framesWithheld;
         // 1f: hand SteamVR the game's own previous frame instead of a missed
         // deadline. The copy is EDVR's, refreshed only from frames that were
@@ -1697,8 +1705,9 @@ vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
             const vr::VRTextureBounds_t* subBounds = effBounds;
             vr::VRTextureBounds_t subStorage;
             // A repeated frame is not new history; the pass restarts on
-            // the next real one rather than blend a frame with itself.
-            temporalAaNoteWithheld(eye);
+            // the next real one rather than blend a frame with itself --
+            // after the detector's verdict when the withhold is a jump's.
+            temporalAaNoteWithheld(eye, s->withholdJumpOnly);
             const int eyeNo = eye == vr::Eye_Left ? 0 : 1;
             frameTimingDoorBegin(shadow, eyeNo);
             applyCullGuard(&sub, &subBounds, &subStorage);
@@ -1720,7 +1729,7 @@ vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
                             "-- two per frame, so half this many frames.",
                             static_cast<int>(eye), s->framesWithheld);
         }
-        temporalAaNoteWithheld(eye);
+        temporalAaNoteWithheld(eye, s->withholdJumpOnly);
         // Success without submitting: what the game is told about every frame
         // the compositor later drops for timing reasons. 0 rather than a named
         // constant because openvr_min.h declares EVRCompositorError as a plain

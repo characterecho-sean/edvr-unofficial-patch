@@ -4,10 +4,12 @@
 #include <d3d11.h>   // GetDesc on the texture about to go out, for its size only
 
 #include <cmath>
+#include <cstdio>    // the shutdown line's verdict counts
 #include <cstring>
 #include <string>
 
 #include "../common/config.h"
+#include "../common/frame_flag.h"   // the detector's verdict on a jump (jumpVerdictPacked)
 #include "../common/guard.h"
 #include "../common/log.h"
 #include "../common/supersample_math.h"   // the eye region from Submit bounds
@@ -81,6 +83,16 @@ struct State {
     float    tanPrev[2][4] = {};
     bool     havePrev[2] = {};
     bool     resetNext[2] = {true, true};
+    // A withhold on a jump the detector has yet to judge: the restart waits
+    // for its verdict (temporalAaNoteWithheld says why). The channel's word
+    // as it read at the withhold, and the treats waited since.
+    bool     resetPending[2] = {};
+    uint32_t resetSeen[2] = {};
+    uint32_t resetWaited[2] = {};
+    uint32_t resetsDeferred = 0;   // eye-frames withheld on a jump, the restart deferred
+    uint32_t resetsSpared = 0;     // ...the camera stayed: the history kept
+    uint32_t resetsReturned = 0;   // ...the camera came back: restarted
+    uint32_t resetsUnjudged = 0;   // ...no verdict within kVerdictTreats: restarted
 
     uint32_t faults = 0;
     bool     faultsNoted = false;
@@ -114,6 +126,13 @@ struct State {
 };
 State g_s;
 constexpr uint32_t kReadOrderFrames = 600;
+// The treats of one eye a deferred restart waits for the detector's verdict.
+// The verdict needs the frame after the jump and lands at that frame's
+// boundary, after its treat, so the second treat normally has it; the rest
+// is room for a frame the detector cannot judge (an auxiliary camera's, or
+// one with no world camera), and past it the restart happens anyway -- an
+// older d3d11 half that never answers must not leave the history unbroken.
+constexpr uint32_t kVerdictTreats = 4;
 
 const char* motionName(Motion m) {
     return m == Motion::Depth ? "head with depth" : m == Motion::Head ? "head" : "none";
@@ -533,10 +552,42 @@ void* temporalAaTreat(vr::EVREye eye, void* handle,
     (void)deltaLag;
     const bool haveDelta =
         (s.motion == Motion::Head || s.motion == Motion::Depth) && haveHeadDelta;
+    // A withhold on a jump, waiting for the detector's verdict (the frame
+    // after the jump says whether the camera came back). Returned: a glitch,
+    // and the history restarts as it always did. Stayed: a change of
+    // reference frame -- the game's floating origin moving under way near a
+    // station, every few seconds -- and the history is kept: the withheld
+    // frame never entered it, and the d3d11 pass carries the station over
+    // the jump itself. Until 2026-09-10 every withhold restarted the history
+    // on the frame after, and under DLSS a restart is a flash to the raw
+    // frame and a third of a second of re-accumulation: the flicker the
+    // pilot saw whenever the ship moved near a station.
+    if (s.resetPending[e]) {
+        const uint32_t v = jumpVerdictPacked();
+        if (v != s.resetSeen[e]) {
+            s.resetPending[e] = false;
+            if ((v & 3u) == 1u) {
+                s.resetNext[e] = true;
+                ++s.resetsReturned;
+            } else if ((v & 3u) == 2u) {
+                ++s.resetsSpared;
+            } else {
+                s.resetNext[e] = true;
+                ++s.resetsUnjudged;
+            }
+        } else if (++s.resetWaited[e] >= kVerdictTreats) {
+            s.resetPending[e] = false;
+            s.resetNext[e] = true;
+            ++s.resetsUnjudged;
+        }
+    }
     unsigned flags = 0;
     if (s.resetNext[e] || !s.havePrev[e] ||
         ((s.motion == Motion::Head || s.motion == Motion::Depth) && !haveDelta)) {
         flags |= 1u;
+        // A restart for any reason settles a deferred one: the break it
+        // waited on is moot once the history starts afresh.
+        s.resetPending[e] = false;
     }
     // Bit 1: NVIDIA's history instead of the pass's own, when the d3d11
     // half has the runtime; it says so once either way and falls back.
@@ -629,17 +680,36 @@ void* temporalAaTreat(vr::EVREye eye, void* handle,
     return out;
 }
 
-void temporalAaNoteWithheld(vr::EVREye eye) {
+void temporalAaNoteWithheld(vr::EVREye eye, bool jumpUnjudged) {
     State& s = g_s;
-    s.resetNext[eye == vr::Eye_Left ? 0 : 1] = true;
+    const int e = eye == vr::Eye_Left ? 0 : 1;
+    if (!jumpUnjudged) {
+        s.resetNext[e] = true;
+        return;
+    }
+    // The channel's word now; a different one at a treat is the verdict on
+    // this jump (temporalAaTreat decides from it).
+    s.resetPending[e] = true;
+    s.resetSeen[e] = jumpVerdictPacked();
+    s.resetWaited[e] = 0;
+    ++s.resetsDeferred;
 }
 
 void temporalAaShutdown() {
     const State& s = g_s;
     if (s.treats == 0) return;
-    Log::get().note("temporal aa: %u eye-submits treated this session%s.",
+    char verdicts[320] = "";
+    if (s.resetsDeferred) {
+        snprintf(verdicts, sizeof(verdicts),
+                 " %u eye-frames withheld on a jump waited for the detector's verdict: %u kept their "
+                 "history (the camera stayed, a change of reference frame), %u restarted it (the camera "
+                 "came back), %u restarted for want of a verdict.",
+                 s.resetsDeferred, s.resetsSpared, s.resetsReturned, s.resetsUnjudged);
+    }
+    Log::get().note("temporal aa: %u eye-submits treated this session%s.%s",
                     s.treats,
-                    s.standDown ? " (then stood down -- see the line above)" : "");
+                    s.standDown ? " (then stood down -- see the line above)" : "",
+                    verdicts);
 }
 
 }  // namespace edvr

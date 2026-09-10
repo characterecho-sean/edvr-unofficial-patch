@@ -2242,11 +2242,18 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
                 s->camPrev[a] = s->frameFarPos[a];
             }
             s->camPrevValid = 2;
+            // ...and the openvr half's temporal pass, waiting on this since
+            // the withhold, restarts its history: the guard's own case.
+            noteJumpVerdict(1);
         } else {
             // Stayed. The reference frame moved, so further jumps here are the
             // same event and withholding them buys nothing but judder.
             s->cooldownUntilMs = nowMs() + kRebaseCooldownMs;
             s->camPrevValid = 0;
+            // ...and the openvr half's temporal pass keeps its history: the
+            // withheld frame never entered it, and the pass carries the
+            // station over the jump itself (temporal_pass.cpp, g_bodyShift).
+            noteJumpVerdict(2);
             // NOT recorded as a separation, deliberately, though it is a
             // repeating-magnitude memory sitting right here.
             //

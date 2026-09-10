@@ -55,8 +55,14 @@ void* temporalAaTreat(vr::EVREye eye, void* handle,
 
 // A frame for this eye was withheld (the shadow copy or nothing went
 // out): continuity is broken, and the next treated frame starts the
-// history afresh.
-void temporalAaNoteWithheld(vr::EVREye eye);
+// history afresh -- unless the withhold was a JUMP the flash guard has
+// yet to judge (jumpUnjudged). Then the history waits for the detector's
+// verdict (frame_flag.h, noteJumpVerdict) and restarts only if the camera
+// came back, a glitch: a change of reference frame is no break at all,
+// the withheld frame never having entered the history, and the restart
+// under DLSS was the flicker whenever the ship moved near a station
+// (2026-09-10).
+void temporalAaNoteWithheld(vr::EVREye eye, bool jumpUnjudged);
 
 void temporalAaStandDown(const char* why);
 

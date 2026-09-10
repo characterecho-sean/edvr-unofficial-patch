@@ -142,6 +142,21 @@ bool takeWorldJump();
 void announceGlitchConsumer();
 bool glitchConsumerPresent();
 
+// The detector's verdict on the last jump, d3d11 -> openvr. A jump is withheld
+// the frame it happens, and only the NEXT frame's camera says which it was: it
+// came back (1, a glitch -- the guard's own case) or it stayed (2, a change of
+// reference frame: a station arrival, a map, and the game's floating origin
+// moving under way near a station, every few seconds). The openvr half's
+// temporal pass reads it before restarting NVIDIA's history after the
+// withhold (temporalAaNoteWithheld): until 2026-09-10 the history restarted
+// on the frame after EVERY withhold, and under DLSS each restart is a visible
+// flash to the raw frame and a third of a second of re-accumulation -- the
+// flicker whenever the ship moved near a station. The packed word carries a
+// count above the verdict's two bits, so the reader can tell a new verdict
+// from the last jump's (jumpVerdictPacked before, compared after).
+void noteJumpVerdict(uint32_t verdict);
+uint32_t jumpVerdictPacked();
+
 // The player is on foot in the external camera, having arrived there from the
 // flat panel -- the one state where moving the head pose is wanted.
 //
