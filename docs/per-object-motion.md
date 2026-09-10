@@ -3002,6 +3002,25 @@ which is this project's contract for every read of the game.
    5..50 ms clamp underpredict long frames; and the treated-frame
    sharpness scores say nothing about motion fidelity. The boost data
    asked for stands, now against the fixed build.
+
+   *The review's second note, the trail's rectangles*: the trail is a
+   ribbon of some fifty segments whose texture scrolls and fades along
+   them, and three things expose their edges under the history -- the
+   smoke and the stars behind it need different motion where one pixel
+   holds both and the pass gives it one depth; the coverage writes the
+   smoke's depth only above an opacity floor capped at 8%, so each
+   segment steps between the smoke's depth and the sky's at its own time
+   as it fades; and the smoke is marked at one quantum, as good as
+   unmarked, so its scrolling texture accumulates in full. The proposed
+   experiment: a stronger mark that follows the smoke's opacity, measured
+   through a fade-out with the stars behind. Agreed, with one addition:
+   the mark alone leaves the fringe to the floor's step, so the floor is a
+   knob too. Built (v0.14.1-154-g4e3b074), defaults unchanged, both live:
+   advanced.temporal_aa_smoke_floor (0.08) and
+   advanced.temporal_aa_smoke_reactive (0 = the one-quantum mark; above
+   it, the mark is the smoke's opacity times this, quantised odd so the
+   pass keeps the camera's path). The pilot's own answer to the trail is
+   fix.drives_smoke = off; the knobs are for the default's sake.
 4. **Tier 2b** only if question 1 says no bits.
 5. **Tier 3** as `tools/` work against dumped frames, never on the hot
    path.
