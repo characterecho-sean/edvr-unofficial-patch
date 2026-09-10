@@ -2897,7 +2897,52 @@ which is this project's contract for every read of the game.
    bias-current-colour mask, which the interface already fills
    (ui_depth.h): marking the light sprites' pixels in it renders the
    lights from the current frame, as points, and leaves the structure to
-   the history. Built next as a switch, off by default.
+   the history. Built next as a switch, off by default. Then the pilot
+   named his real concern: THE SOLAR PANELS' blur, flickering into
+   sharpness briefly. The panels in this run: the 117 outermost records
+   (2174-2277 m from the axis), 71 drawn through 436193B352A2897E and
+   EB5234DB6ADB491D -- opaque, depth written (the census's ds=17wA,
+   bl=02), no discard in their pixel shaders -- turning smoothly at 0.040
+   a frame with the body; frame 0 against 15 shows the array shifted the
+   2.5 px the records predict; the path took 0.37% of the frame against
+   the station's 0.29% lit. Vectors, depth and ownership all right, and
+   the treated panel washed out while the ring beside it resolves: the
+   lattice's period is near a pixel at this range, the game's own turn
+   per frame is irregular by a fifth (0.031 to 0.052) which a rate-based
+   vector cannot follow, and NVIDIA's model averages a near-pixel lattice
+   as aliasing. The flicker is a history reset (a pose without a delta;
+   two in twenty seconds in the 05:33 session) showing one raw frame.
+   Offered as flights, not builds: DLAA (temporal_aa = dlaa, the
+   lattice's input period half again larger), the model J
+   (temporal_aa_model = responsive), and an eye run in the objects view
+   (advanced.temporal_aa_debug = objects) to see the panels white. Held
+   back: vectors from the pool's actual step (two frames late), and a
+   current-frame mark on the panels (the moire would crawl).
+
+   *The forty-fifth flight, 06:07 (v0.14.1-144)*: "j actually looks much
+   better with it. I did still see some flickering, can we fix that?"
+   The session's log: NVIDIA's history was reset on four frames at the
+   load and two at the pilot's own on/off toggle of the pass at 06:11,
+   none in between; the camera's delta was dropped as another camera's
+   on 30 and 12 frames in the load's intervals and on none while the
+   station was in view. So the flicker under J is not the reset flash of
+   the earlier flights and not a dropped frame: it is J's own trade,
+   named in the ini -- it keeps more of each new frame, and a pattern
+   near the pixel size twinkles as the jitter (Halton 2,3 over eight
+   frames) moves its aliasing, the raw's own frame-to-frame change on
+   the panels being a quarter of their contrast, the hub's and the
+   ring's the same (tools/eye_run_shimmer.py on the 05:46 raw crops).
+   The mip bias is -0.62 (auto, from Elite's 0.650 render fraction),
+   which sharpens the lattice's texture below the render's own grid --
+   more aliasing for J to show; a bias nearer nought is the A/B, at a
+   restart. Built (v0.14.1-147-g35e77ff): the eye run's TREATED form,
+   advanced.eye_run_treated = 1 -- the sixteen crops are NVIDIA's output
+   about its centre (eye_HHMMSS_T00..T15.bmp), the first frame whole as
+   before -- and tools/eye_run_shimmer.py, which aligns the frames and
+   prints each region's change between consecutive frames and its
+   per-pixel deviation over the run against its contrast, and shows a
+   flash as every region changing at once. Two runs at the same spot,
+   K and J, are the measurement.
 4. **Tier 2b** only if question 1 says no bits.
 5. **Tier 3** as `tools/` work against dumped frames, never on the hot
    path.
