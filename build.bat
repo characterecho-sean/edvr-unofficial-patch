@@ -807,11 +807,27 @@ if exist "%BUILD%\nvngx_dlss.dll" (
     echo        above says where it looked^). Not a release build.
 )
 echo.
-echo [edvr] To install: copy build\d3d11.dll and edvr.ini next to
-echo        EliteDangerous64.exe, and build\openvr_api.dll into
-echo        Openvr\win64, replacing the game's file of that name --
-echo        the original must already be renamed openvr_api_orig.dll.
-echo        The two halves do NOT go in the same place. See README.md.
+echo [edvr] To install this build for a test flight:
+echo        python tools\install_edvr.py --target steam --dry-run
+echo        python tools\install_edvr.py --target steam
+echo.
+echo        --target takes steam, frontier or a path; --openvr adds the VR
+echo        half. It refuses while the game is running, keeps one backup
+echo        per commit, and hashes what it copied against what it built --
+echo        an outdated DLL has invalidated a flight before. It leaves
+echo        edvr.ini alone unless --ini asks for it. Copying these by hand
+echo        is what filled both game directories with backups named four
+echo        different ways; CLAUDE.md says why not to.
+echo.
+echo [edvr] Where those files land, because the two halves do NOT go in the
+echo        same place: d3d11.dll and edvr.ini beside EliteDangerous64.exe,
+echo        and openvr_api.dll into Openvr\win64, replacing the game's file
+echo        of that name -- whose original must already be renamed
+echo        openvr_api_orig.dll. See README.md.
+echo.
+echo [edvr] After the flight, before reading a counter off the log --
+echo        whether the log is even this build:
+echo        python tools\edvr_log.py --target steam --expect-build HEAD
 echo.
 echo [edvr] Or hand somebody build\edvr-installer.exe: it carries the two
 echo        DLLs and edvr.ini, finds Steam, Epic and Frontier installs,
