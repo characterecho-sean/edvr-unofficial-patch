@@ -2912,8 +2912,11 @@ which is this project's contract for every read of the game.
    vector cannot follow, and NVIDIA's model averages a near-pixel lattice
    as aliasing. The flicker is a history reset (a pose without a delta;
    two in twenty seconds in the 05:33 session) showing one raw frame.
-   Offered as flights, not builds: DLAA (temporal_aa = dlaa, the
-   lattice's input period half again larger), the model J
+   Offered as flights, not builds: DLAA (temporal_aa = dlaa -- WRONG as
+   advised: the mode keeps the frame Elite submitted, at its 0.650
+   fraction; the input test is Elite's HMD Quality at 1.0 with DLAA,
+   verified in the graphics log's sizes; the review of 2026-09-10), the
+   model J
    (temporal_aa_model = responsive), and an eye run in the objects view
    (advanced.temporal_aa_debug = objects) to see the panels white. Held
    back: vectors from the pool's actual step (two frames late), and a
@@ -2971,6 +2974,34 @@ which is this project's contract for every read of the game.
    write hitch shows in the pool as a 0.7 deg step in one frame, sixteen
    times the turn, which the rate times the frame's length cannot follow
    either. Asked for: two presses while boosting, treated and raw.
+
+   *The review of 2026-09-10* (another agent's, docs/
+   review-distance-motion-2026-09-10.md in its worktree; source 3340c87):
+   two coordinate-continuity faults in the station's path, both confirmed
+   here and fixed (v0.14.1-151-g944ba90). ONE: the pass added a camera jump of
+   over fifty metres to the body's shift in EACH EYE's evaluation, on rows
+   chosen once a frame -- the second eye doubled it (13 km became 26), the
+   agreement gate at 4 km refused the held pair, and the station fell to
+   the camera's path until a new pair agreed unshifted: the boost
+   intervals' seventeen stand-downs, including the 06:26:09 interval that
+   had refusals and no new jump. The jump is added once a scene frame now.
+   TWO: the probe's sixteen-pair rate ring kept translations fitted in the
+   OLD origin after the floating origin moved and medianed them with the
+   new pairs' -- the fit's t is about the pool's origin, and the same turn
+   reads t + (I - R) s after a move by s -- so the published translation
+   was wrong for up to eight pairs (0.7 s) at a low residual, 9 m a frame
+   at ten kilometres by the review's reproduction. Each held sample is
+   re-expressed in the new origin (t -= w x s per millisecond) when the
+   pair's camera moves by 200 m or more within the pair or since the last
+   pair, before the new sample joins them. The registration line's per-eye
+   counters say eye-frames now. Also taken from the review: DLAA at the
+   present render fraction is not more input (above); a full capture
+   should save raw and treated for the same frames with depth, vectors,
+   ownership, the applied matrices, the pair's origin, the reset flags and
+   the timing, batched; the rate predictor's eased interval and its
+   5..50 ms clamp underpredict long frames; and the treated-frame
+   sharpness scores say nothing about motion fidelity. The boost data
+   asked for stands, now against the fixed build.
 4. **Tier 2b** only if question 1 says no bits.
 5. **Tier 3** as `tools/` work against dumped frames, never on the hot
    path.
