@@ -391,9 +391,15 @@ const char kSmokeDepthHlsl[] =
     "    float2 uv2 = float2(i.tc3.x + cb1[210].y * cb2[2].x, i.tc3.y * 0.5);\n"
     "    float streak = Streak.Sample(Smp0, uv1).x + Streak.Sample(Smp0, uv2).x;\n"
     "    float alpha = fade * streak;\n"
-    "    clip(alpha - min(floorAndStrength.x, 0.08));\n"
+    "    clip(alpha - floorAndStrength.z);\n"
     "    oDepth = i.pos.z;\n"
-    "    return floorAndStrength.w;\n"
+    "    // The mask (the review of 2026-09-10): w is the strength at full\n"
+    "    // opacity, and the value follows the smoke's own alpha up to it,\n"
+    "    // quantised to an ODD quantum -- the pass keeps the camera's path\n"
+    "    // under an odd one (floorBuffer). w of nought is the one-quantum\n"
+    "    // mark of before, as good as unmarked to NVIDIA.\n"
+    "    float q = floor(saturate(alpha * floorAndStrength.w) * 127.0 + 0.5);\n"
+    "    return (2.0 * q + 1.0) / 255.0;\n"
     "}\n";
 
 // THE FLIGHT HUD'S COVERAGE, for the depth pass in the scene's projection.
@@ -546,7 +552,18 @@ struct FloorCb {
     float         floor = -1.0f;
     float         strength = -1.0f;
     float         nearDepth = -1.0f;   // the depth value at one metre (temporalPassDepthAt), for a floating stroke's core
+    float         smokeFloor = -1.0f;  // slot 3, the smoke's: its opacity floor for the depth it writes (z)...
+    float         smokeMax = -1.0f;    // ...and the mask's strength at full opacity (w); advanced.temporal_aa_smoke_*
 };
+// THE SMOKE'S COVERAGE, tunable (the review of 2026-09-10): the trail's
+// rectangles trace its segments, each fading through the depth floor at
+// its own time -- a hard step between the smoke's depth and the sky's --
+// while its scrolling texture is accumulated under a one-quantum mark.
+// The floor is the smoke's own now (advanced.temporal_aa_smoke_floor,
+// 0.08 as before), and the mask can follow its opacity up to a strength
+// (advanced.temporal_aa_smoke_reactive; 0 keeps the one-quantum mark).
+float g_smokeFloor = 0.08f;
+float g_smokeReactive = 0.0f;
 FloorCb g_floorCbs[4];   // [0] the interface proper, [1] the holo material and the sprite, [2] the flight HUD, [3] the smoke (g_reissueMaskSlot)
 ID3D11DepthStencilState* g_reissueDss = nullptr;   // GEQUAL, write all
 bool          g_reissueDssFailedNoted = false;
@@ -1090,7 +1107,9 @@ ID3D11Buffer* floorBuffer(ID3D11DeviceContext* ctx, int slotIndex, float maskOff
     // its own buffer rather than trading one back and forth.
     FloorCb& slot = g_floorCbs[slotIndex < 0 ? 0 : (slotIndex > 3 ? 3 : slotIndex)];
     const float nearDepth = temporalPassDepthAt(1.0f);
-    if (slot.cb && slot.floor == g_alphaFloor && slot.strength == strength && slot.nearDepth == nearDepth) {
+    const bool smoke = slotIndex == 3;
+    if (slot.cb && slot.floor == g_alphaFloor && slot.strength == strength && slot.nearDepth == nearDepth &&
+        (!smoke || (slot.smokeFloor == g_smokeFloor && slot.smokeMax == g_smokeReactive))) {
         return slot.cb;
     }
     if (slot.cb) {
@@ -1117,7 +1136,10 @@ ID3D11Buffer* floorBuffer(ID3D11DeviceContext* ctx, int slotIndex, float maskOff
     const int qFloat = (q & 1) ? q : q + 1;
     const float ride = static_cast<float>(qRide) / 255.0f;
     const float flt = static_cast<float>(qFloat) / 255.0f;
-    const float data[4] = {g_alphaFloor, slotIndex <= 0 ? flt : ride, nearDepth, flt};
+    // The smoke's slot carries its own floor in z and the mask's strength at
+    // full opacity in w (kSmokeDepthHlsl quantises); the others as before.
+    const float data[4] = {g_alphaFloor, slotIndex <= 0 ? flt : ride, smoke ? g_smokeFloor : nearDepth,
+                           smoke ? g_smokeReactive : flt};
     D3D11_BUFFER_DESC bd{};
     bd.ByteWidth = sizeof(data);
     bd.Usage = D3D11_USAGE_IMMUTABLE;
@@ -1130,6 +1152,8 @@ ID3D11Buffer* floorBuffer(ID3D11DeviceContext* ctx, int slotIndex, float maskOff
     slot.floor = g_alphaFloor;
     slot.strength = strength;
     slot.nearDepth = nearDepth;
+    slot.smokeFloor = g_smokeFloor;
+    slot.smokeMax = g_smokeReactive;
     return slot.cb;
 }
 
@@ -1321,6 +1345,22 @@ void uiDepthConfigure(Config& cfg) {
     g_familyCount = 0;
     g_families[g_familyCount++] = kFlightHud;
     g_smokeOn = cfg.getBool("fix.temporal_aa_smoke", true);
+    {
+        float f = cfg.getFloat("advanced.temporal_aa_smoke_floor", 0.08f);
+        if (f < 0.01f) f = 0.01f;
+        if (f > 0.9f) f = 0.9f;
+        float r = cfg.getFloat("advanced.temporal_aa_smoke_reactive", 0.0f);
+        if (r < 0.0f) r = 0.0f;
+        if (r > 1.0f) r = 1.0f;
+        if (f != g_smokeFloor || r != g_smokeReactive) {
+            Log::get().note("ui depth: the smoke's coverage writes depth above %.0f%% opacity and marks the mask %s "
+                            "(advanced.temporal_aa_smoke_floor, advanced.temporal_aa_smoke_reactive).",
+                            static_cast<double>(f) * 100.0,
+                            r > 0.0f ? "up to the strength with its opacity" : "at one quantum, as good as unmarked");
+        }
+        g_smokeFloor = f;
+        g_smokeReactive = r;
+    }
     if (g_smokeOn) g_families[g_familyCount++] = kSmokeVs;   // the drives' smoke, a direct family (kSmokeVs says)
     uint64_t extra[kMaxHashes];
     uint32_t extraCount = 0;
