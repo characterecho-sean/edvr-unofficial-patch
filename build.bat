@@ -752,6 +752,39 @@ python "tools\diff_eye_split.py" --self-test || (
     exit /b 1
 )
 
+echo [edvr] === install self-test ===
+REM The tool that puts a build next to the game. Its --dry-run must write
+REM NOTHING -- not a copy, not a backup, not a directory -- and its backup
+REM naming is one string in one place, which is what keeps the game
+REM directories from filling with .bak files named six different ways. The
+REM test asserts both, against a fake game directory in the temp folder.
+python "tools\install_edvr.py" --self-test || (
+    echo [edvr] ERROR: the install tool failed its own test
+    exit /b 1
+)
+
+echo [edvr] === log reader self-test ===
+REM The tool that answers "is this log from the build I just installed"
+REM before anybody reads a counter off it. Its version regex has to match
+REM the line Log::note() really writes, timestamp prefix and all: anchored
+REM without that prefix it matched the synthetic logs in its own test and
+REM nothing whatsoever in the field. Its fixtures now carry the prefix.
+python "tools\edvr_log.py" --self-test || (
+    echo [edvr] ERROR: the log reader failed its own test
+    exit /b 1
+)
+
+echo [edvr] === release-note reflow self-test ===
+REM The tool that reflows release notes and docs. It must leave fenced
+REM code, tables and long URLs exactly as they are, must be idempotent --
+REM otherwise --check can never pass -- and must write UTF-8 with no BOM,
+REM because PowerShell 5.1 reads a BOM-less file as the ANSI codepage and
+REM has turned an em-dash into mojibake on a published comment before.
+python "tools\reflow_notes.py" --self-test || (
+    echo [edvr] ERROR: the reflow tool failed its own test
+    exit /b 1
+)
+
 echo [edvr] === config contract ===
 where python >nul 2>&1
 if errorlevel 1 (
