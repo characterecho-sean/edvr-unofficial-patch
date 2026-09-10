@@ -2665,6 +2665,34 @@ which is this project's contract for every read of the game.
    frames, for what a two-frame pair cannot show. Built as
    v0.14.1-130-g03e84b2; the next flight's objects view, orange or not, and
    those counters decide where the fault is.
+
+   *The thirty-seventh flight, 18:19 (v0.14.1-130)*: "captured a few eye
+   dumps, saw flickering orange at times". The objects view has the
+   station white with a few orange specks at the hub's edge: the stamped
+   cells miss the hub's visible pixels almost entirely (0.000% of pixels
+   sat in one), and the 20 s line's sample shows what they carried --
+   slots at 9850 m alternating -3 and +8, the clamp's ends. The run of
+   four consecutive frames on disk is the first direct look at the hub's
+   records from one frame to the next, and it ends the stepped-parts
+   reading: slots 815 to 837, at 340 to 420 m from the axis, turn 0.033
+   deg one way and 0.033 deg back, frame about, with a 0.22 m tangential
+   step and back -- no net motion at all -- while the ring's records turn
+   0.05 deg a frame the same way every frame. The hub's records do not
+   turn; the drawn hub does. The shader dump says how: every vertex
+   shader that reads the pool (62 of them, a 336-byte structured buffer
+   at t33) also reads a 48-byte bone palette at t0 and applies the pool
+   record's quaternion over the skinned vertex, so a part's spin can live
+   in a bone the pool never shows. Whether the bone turns the hub at the
+   station's rate, steps, or turns at some other rate is not knowable
+   from the pool at all, and the "stepped parts" machinery was built on
+   the records' jitter. The stamps are off; the tracking stays for the
+   20 s line. The dump key now takes an EYE RUN -- four consecutive
+   frames of the left eye, copied to staging as they go out and written
+   after the fourth, eye_HHMMSS_L0..L3.bmp -- and `tools/eye_run_spin.py`
+   unwraps each frame into polar bins about a centre and cross-correlates
+   two rings' angular profiles between frames: the hub's turn and the
+   ring's, frame by frame, to a hundredth of a degree (a synthetic 0.05
+   deg came back as 0.035 to 0.061). Built as v0.14.1-132-ge4eb2d2.
 4. **Tier 2b** only if question 1 says no bits.
 5. **Tier 3** as `tools/` work against dumped frames, never on the hot
    path.
@@ -2862,3 +2890,15 @@ mean for anything else; the cube is a cube, so a spoke's root inside a
 panel's cube takes the panel's multiple; and a part whose turn is not
 about the body's axis is left to the body's path, which is where the
 ships' own stage takes over.
+
+The thirty-seventh flight retracted the stepped parts as built. The
+run of four consecutive pool frames shows the hub's records turning 0.033
+deg one way and back, frame about, with no net motion, while the ring's
+records turn 0.05 deg a frame steadily; and the objects view shows the
+stamped cells missing the hub's visible pixels. The drawn hub turns, so
+its turn is not in its records: the pool's vertex shaders skin each vertex
+by a 48-byte bone palette at t0 before the record's quaternion, and a
+bone can carry a spin the pool never shows. The stamps are off. What the
+hub actually does from one frame to the next is measured from the
+picture now: the dump key takes four consecutive frames of the left eye,
+and `tools/eye_run_spin.py` reads a ring's turn per frame off them.
