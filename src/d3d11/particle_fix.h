@@ -48,6 +48,12 @@ bool witchspaceStarsSkip(ID3D11DeviceContext* ctx, char kind, uint32_t count,
 // few draws shaped like them when it does not.
 bool heatHazeSkip(ID3D11DeviceContext* ctx, char kind, uint32_t count, uint32_t instances);
 
+// Is this eye draw the smoke trail behind a ship's drives -- the grey
+// ribbon, or the volume that follows it -- with fix.drives_smoke = off
+// withholding them? True means do not forward it. One comparison per draw
+// when the key leaves them on (the default).
+bool drivesSmokeSkip(ID3D11DeviceContext* ctx, char kind, uint32_t count, uint32_t instances);
+
 // The matched draw, for the verdict chain: this draw is a particle
 // billboard AND a substitute is ready to bind.
 bool particleOnDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,

@@ -1623,6 +1623,12 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         if (drawCensusArmed()) drawCensusNoteUnseen('h');
         return DrawVerdict::kSkip;
     }
+    // The smoke trail behind drives, withheld when asked (fix.drives_smoke):
+    // the same identification, in the same place.
+    if (drivesSmokeSkip(self, kind, count, instances)) {
+        if (drawCensusArmed()) drawCensusNoteUnseen('t');
+        return DrawVerdict::kSkip;
+    }
 
     const uint32_t rtvGen = bindingGeneration(BindSlot::Rtv0);
     if (s->rtv0EyeGen != rtvGen) {

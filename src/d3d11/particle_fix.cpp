@@ -109,6 +109,23 @@ uint64_t g_hazeNoteMs = 0;
 // draws asked, and how the shadow differed from the context's answer.
 uint64_t g_hazeAsked = 0, g_hazeShadowNull = 0, g_hazeShadowPtr = 0, g_hazeShadowHash = 0;
 uint64_t g_hazeLastShadow = 0, g_hazeLastGet = 0;
+// THE SMOKE TRAIL behind a ship's drives (fix.drives_smoke, 2026-09-10):
+// the grey ribbon -- vs 5E417E9DF2E7F9E6, ps BD801F2FB02522EB, one indexed
+// draw of 600 indices an eye, depth test off, SRC_ALPHA over ONE -- and
+// the VOLUME that follows it, vs 203DF51758AADC4D, ps EEAAC839A9F09448, one
+// indexed draw of 5334 indices an eye right after the ribbon's, premultiplied
+// alpha under the depth test with the write off, a scattering shader over
+// the depth resolve, two gradients and a cubemap. Named by the draw census
+// of 06:50 with the pilot's own trail in view, where the volume drew four
+// times in two frames and not once in the census of 2026-09-09 16:58 with
+// no trail about. The heat haze (kHeatHazeVs) withheld, the pilot still saw
+// "that strange haze/blur shader" turning around on his own trail, and the
+// ribbon skipped by hand left it: it was the volume. He would rather have
+// no plume in space at all, so off withholds both.
+constexpr uint64_t kDrivesSmokeVs[2] = {0x5E417E9DF2E7F9E6ull, 0x203DF51758AADC4Dull};
+bool     g_hideDrivesSmoke = false;
+uint64_t g_smokeSkipped = 0;
+uint64_t g_smokeNoteMs = 0;
 
 struct BillboardVariant {
     uint64_t    hash;
@@ -542,6 +559,25 @@ bool witchspaceStarsSkip(ID3D11DeviceContext* ctx, char kind, uint32_t count,
     return true;
 }
 
+bool drivesSmokeSkip(ID3D11DeviceContext* ctx, char kind, uint32_t count, uint32_t instances) {
+    if (!g_hideDrivesSmoke || !ctx) return false;
+    // The shape first: both are single-instance indexed draws of some
+    // hundreds to thousands of indices; then the binding shadow's hash,
+    // which the haze skip's audit found never wrong (2026-09-09).
+    if (kind != 'X' || instances != 1 || count < 300 || count > 16384) return false;
+    const uint64_t h = boundVsHashFast(ctx);
+    if (h != kDrivesSmokeVs[0] && h != kDrivesSmokeVs[1]) return false;
+    ++g_smokeSkipped;
+    const uint64_t now = nowMs();
+    if (now - g_smokeNoteMs >= 30000) {
+        g_smokeNoteMs = now;
+        Log::get().note("drives' smoke: OFF -- %llu draw(s) of the trail's ribbon and volume withheld so far; "
+                        "the engine glow stays. fix.drives_smoke = on has the trail back.",
+                        static_cast<unsigned long long>(g_smokeSkipped));
+    }
+    return true;
+}
+
 bool heatHazeSkip(ID3D11DeviceContext* ctx, char kind, uint32_t count, uint32_t instances) {
     if (!g_hideHeatHaze || !ctx) return false;
     // The shape first, the shader after: the ribbons and the quads are
@@ -817,6 +853,21 @@ void particleConfigure(Config& cfg) {
         }
         g_heatHaze = mode;
         g_hideHeatHaze = hide;
+    }
+    // The smoke trail behind drives: on (the game's, the default) or off
+    // (the ribbon and the volume withheld).
+    {
+        const std::string sm = cfg.getString("fix.drives_smoke", "on");
+        const bool hide = _stricmp(sm.c_str(), "off") == 0;
+        if (!hide && _stricmp(sm.c_str(), "on") != 0) {
+            Log::get().note("drives' smoke: fix.drives_smoke = \"%s\" is not on or off; on.", sm.c_str());
+        }
+        if (hide != g_hideDrivesSmoke) {
+            Log::get().note("drives' smoke: %s -- the trail's ribbon and volume are %s (fix.drives_smoke = %s).",
+                            hide ? "OFF" : "ON", hide ? "withheld; the engine glow stays" : "the game's",
+                            hide ? "off" : "on");
+        }
+        g_hideDrivesSmoke = hide;
     }
     const std::string ws = cfg.getString("fix.witchspace_stars", "on");
     const bool wasHidden = g_hideWitchspaceStars;
