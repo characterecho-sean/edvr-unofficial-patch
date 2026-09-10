@@ -536,11 +536,17 @@ bool fetchHistoryT(float2 p, float3 r0, float3 r1, float3 r2, float3 tv,
                 }
             } else if (inb >= 64 && inb < 76) {
                 // A stepped part's cell (object_probe.h): its own multiple
-                // of the body's turn this frame. world = 5 marks it.
+                // of the body's turn this frame. world = 5 marks it. Counted
+                // straight into Stats (48 the cell hit, 49 the path refused):
+                // the flight of 18:00 stamped cells on every frame and no
+                // pixel took the path, and the counts say which half failed.
+                InterlockedAdd(Stats[48], 1u);
                 if (tv3[0].w != 0.0 && steppedPixel(inb, d, zBody, ppB, zpB)) {
                     pp = ppB;
                     zPred = zpB;
                     world = 5;
+                } else {
+                    InterlockedAdd(Stats[49], 1u);
                 }
             } else if (inb == 255 && bodyPixel(d, zBody, ppB, zpB)) {
                 pp = ppB;
@@ -1686,7 +1692,7 @@ struct Slot {
     bool          hadHistory = false;
 };
 constexpr int kSlots = 8;
-constexpr int kStatCount = 48;   // 46 used since 2026-09-09 (39-45 the moving ships); a 192-byte buffer
+constexpr int kStatCount = 52;   // 50 used since 2026-09-09 (39-45 the moving ships, 46 the second body, 47-49 the stepped parts); a 208-byte buffer
 Slot g_slots[kSlots];
 
 void releaseSlot(Slot& q) {
@@ -1782,6 +1788,8 @@ uint64_t g_bodyPix = 0;    // pixels that took the body's path this interval (St
 uint64_t g_body2Pix = 0;   // ...the second body's (Stats[46]; object_probe.h, 2026-09-09)
 uint64_t g_body2Frames = 0;   // frames the second body's path was on
 uint64_t g_steppedPix = 0;    // ...a stepped part's (Stats[47]; object_probe.h, 2026-09-09)
+uint64_t g_steppedCellPix = 0;   // pixels whose cell was a stepped part's (Stats[48])...
+uint64_t g_steppedOffPix = 0;    // ...and whose path was refused there (Stats[49])
 uint64_t g_steppedFrames = 0; // frames with stepped cells stamped
 uint64_t g_shipPix = 0;    // pixels that took a moving ship's path this interval (Stats[39]; 2026-09-09)
 uint64_t g_shipFoot = 0;         // ...and in a ship's footprint with a depth, not claimed (Stats[40])
@@ -1846,6 +1854,8 @@ void pollSlots(ID3D11DeviceContext* ctx) {
                 g_bodyPix += v[29];
                 g_body2Pix += v[46];
                 g_steppedPix += v[47];
+                g_steppedCellPix += v[48];
+                g_steppedOffPix += v[49];
                 g_shipPix += v[39];
                 g_shipFoot += v[40];
                 g_shipOutBox += v[41];
@@ -5216,12 +5226,17 @@ bool temporalPassRegistration(char* buf, size_t n, char* buf2, size_t n2, char* 
                           g_bodyLast.records2, static_cast<double>(temporalRotationAngleDeg(g_bodyLast.R2)),
                           static_cast<unsigned long long>(g_body2Frames));
             }
-            if (g_steppedPix || g_steppedFrames) {
+            if (g_steppedPix || g_steppedFrames || g_steppedCellPix) {
                 regAppend(buf, n, used,
                           "; the stepped parts (updated by the game at a lower rate; object_probe.h) took %.2f%% of "
-                          "pixels on their own multiples of the turn, cells stamped on %llu frames",
+                          "pixels on their own multiples of the turn, cells stamped on %llu frames; %.3f%% of pixels "
+                          "sat in a stamped cell and the path was refused on %.0f%% of those",
                           100.0 * static_cast<double>(g_steppedPix) / static_cast<double>(g_intervalPix),
-                          static_cast<unsigned long long>(g_steppedFrames));
+                          static_cast<unsigned long long>(g_steppedFrames),
+                          100.0 * static_cast<double>(g_steppedCellPix) / static_cast<double>(g_intervalPix),
+                          g_steppedCellPix ? 100.0 * static_cast<double>(g_steppedOffPix) /
+                                                 static_cast<double>(g_steppedCellPix)
+                                           : 0.0);
             }
         } else {
             regAppend(buf, n, used, "; the body's path is on but no body is in hand (no pool, or no pair yet)");
@@ -5373,6 +5388,8 @@ bool temporalPassRegistration(char* buf, size_t n, char* buf2, size_t n2, char* 
     g_body2Pix = 0;
     g_body2Frames = 0;
     g_steppedPix = 0;
+    g_steppedCellPix = 0;
+    g_steppedOffPix = 0;
     g_steppedFrames = 0;
     g_shipPix = 0;
     g_shipFoot = g_shipOutBox = g_shipBehind = g_shipFar = g_shipFootNoDepth = 0;

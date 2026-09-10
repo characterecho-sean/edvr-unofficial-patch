@@ -181,6 +181,17 @@ std::vector<SteppedCell> g_steppedCells;
 uint64_t g_stTrackFrames = 0, g_stStepped = 0, g_stPeriod2 = 0, g_stSteady = 0, g_stIrregular = 0;
 uint64_t g_stPredicted = 0, g_stHit = 0;
 double   g_stMsSum = 0.0;
+constexpr float kMAxisFloor = 3e-4f;      // radians: the quaternion's quantum on a delta, under the slack
+std::vector<uint8_t>  g_lastPose;         // n * 24: each slot's pose bytes the last frame it was live
+std::vector<uint32_t> g_lastPoseFrame;    // ...and that frame; 0 = never
+uint64_t g_stOffAxis = 0, g_stAbsent = 0, g_stPeriod34 = 0;
+uint64_t g_stMHist[kSteppedMax - kSteppedMin + 1] = {};   // the window's multiples, m - kSteppedMin
+// The last four frames' copies, written beside the pair dump for the desk
+// (the consecutive frames a two-frame pair cannot show).
+constexpr uint32_t kRunFrames = 4;
+std::vector<uint8_t> g_run[kRunFrames];
+uint32_t g_runFrame[kRunFrames] = {};
+uint32_t g_runNext = 0;
 // Moving ships (object_probe.h, takeShips): taken within this of the
 // camera (the pass's setting), held this long past their pair -- three
 // pair intervals, so a pair that lost a ship to a slot shuffle does not
@@ -1789,18 +1800,34 @@ void report() {
     g_body2Pairs = g_body2HeldPairs = g_body2Fragments = 0;
     if (g_stTrackFrames) {
         const double f = static_cast<double>(g_stTrackFrames);
+        char hist[256];
+        size_t hu = 0;
+        hist[0] = 0;
+        for (int m = kSteppedMin; m <= kSteppedMax && hu < sizeof(hist) - 24; ++m) {
+            const uint64_t c = g_stMHist[m - kSteppedMin];
+            if (!c) continue;
+            hu += static_cast<size_t>(snprintf(hist + hu, sizeof(hist) - hu, "%s%d: %.1f", hu ? ", " : "", m,
+                                               static_cast<double>(c) / f));
+        }
+        char sample[512];
+        steppedSample(sample, sizeof(sample));
         Log::get().note(
             "object probe, the stepped parts: over %llu frames, %.1f records a frame at the station turned by "
-            "something other than the body's turn every frame -- %.1f with a period of two frames, %.1f steady "
-            "on one multiple (nought for a part holding still), %.1f irregular -- and their next multiple was "
-            "predicted right on %.0f%% of %llu checks; the tracking took %.2f ms a frame.",
+            "something other than the body's turn every frame -- %.1f with a period of two frames, %.1f of "
+            "three or four, %.1f holding one multiple (nought for a part holding still), %.1f irregular -- and "
+            "their next multiple was predicted right on %.0f%% of %llu checks; %.1f a frame turned off the "
+            "body's axis and %.1f were absent from the pool; the multiples a frame: %s; the tracking took %.2f "
+            "ms a frame. A sample, the multiples oldest first: %s.",
             static_cast<unsigned long long>(g_stTrackFrames), static_cast<double>(g_stStepped) / f,
-            static_cast<double>(g_stPeriod2) / f, static_cast<double>(g_stSteady) / f,
-            static_cast<double>(g_stIrregular) / f,
+            static_cast<double>(g_stPeriod2) / f, static_cast<double>(g_stPeriod34) / f,
+            static_cast<double>(g_stSteady) / f, static_cast<double>(g_stIrregular) / f,
             g_stPredicted ? 100.0 * static_cast<double>(g_stHit) / static_cast<double>(g_stPredicted) : 0.0,
-            static_cast<unsigned long long>(g_stPredicted), g_stMsSum / f);
+            static_cast<unsigned long long>(g_stPredicted), static_cast<double>(g_stOffAxis) / f,
+            static_cast<double>(g_stAbsent) / f, hist[0] ? hist : "none", g_stMsSum / f, sample);
     }
-    g_stTrackFrames = g_stStepped = g_stPeriod2 = g_stSteady = g_stIrregular = g_stPredicted = g_stHit = 0;
+    g_stTrackFrames = g_stStepped = g_stPeriod2 = g_stPeriod34 = g_stSteady = g_stIrregular = 0;
+    g_stPredicted = g_stHit = g_stOffAxis = g_stAbsent = 0;
+    memset(g_stMHist, 0, sizeof(g_stMHist));
     g_stMsSum = 0.0;
     g_shipPairs = g_shipsTaken = g_shipsOutOfRange = g_shipsSlices = 0;
     g_shipsOwn = 0;
@@ -1993,6 +2020,8 @@ void trackFrame(const uint8_t* bytes, uint32_t nbytes, uint32_t frame, double st
         g_mHist.assign(static_cast<size_t>(n) * kMHist, 127);
         g_mPred.assign(n, 127);
         g_mPredFrame.assign(n, 0);
+        g_lastPose.assign(static_cast<size_t>(n) * 24, 0);
+        g_lastPoseFrame.assign(n, 0);
     }
     g_steppedCells.clear();
     ObjectMotion om;
@@ -2006,18 +2035,33 @@ void trackFrame(const uint8_t* bytes, uint32_t nbytes, uint32_t frame, double st
         const float cell = (om.bmax[0] - om.bmin[0]) / static_cast<float>(kObjectGrid);
         const int gn = static_cast<int>(kObjectGrid);
         if (wbn2 > 1e-12f && cell > 0.0f) {
-            // The frame the pass draws next is g_frame; this copy is `frame`.
-            const uint32_t parity = (g_frame - frame) & 1u;
-            uint32_t stepped = 0, p2 = 0, steady = 0, irr = 0;
+            uint32_t stepped = 0, p2 = 0, p34 = 0, steady = 0, irr = 0;
+            const uint32_t delta = g_frame - frame;   // the frames from this copy to the one the pass draws next
             for (uint32_t i = 0; i < n; ++i) {
-                const uint8_t* a = g_lastBytes.data() + static_cast<size_t>(i) * kRecordBytes;
                 const uint8_t* b = bytes + static_cast<size_t>(i) * kRecordBytes;
                 int8_t* h = &g_mHist[static_cast<size_t>(i) * kMHist];
-                if (emptyRecord(a) || emptyRecord(b)) {
-                    for (uint32_t k = 0; k < kMHist; ++k) h[k] = 127;
+                uint8_t* lp = &g_lastPose[static_cast<size_t>(i) * 24];
+                const uint32_t lpf = g_lastPoseFrame[i];
+                const bool seenLately = lpf != 0 && frame > lpf && frame - lpf <= kMHist;
+                if (emptyRecord(b)) {
+                    // Absent this frame: the game draws it as it was (the
+                    // flight of 16:22 had the hub's records on alternate
+                    // frames), so the pose is held -- a nought -- while it was
+                    // seen within kMHist frames; longer gone, the slot is fresh.
+                    if (seenLately) {
+                        for (uint32_t k = kMHist - 1; k > 0; --k) h[k] = h[k - 1];
+                        h[0] = 0;
+                        ++g_stAbsent;
+                        ++g_stMHist[0 - kSteppedMin];
+                    } else {
+                        for (uint32_t k = 0; k < kMHist; ++k) h[k] = 127;
+                    }
                     continue;
                 }
                 const Pose pb = decodePose(b);
+                // ...the pose bytes kept for the next frame, whatever follows.
+                uint8_t poseNow[24];
+                memcpy(poseNow, b + 4, 24);
                 bool inBox = true;
                 int c[3];
                 for (int k = 0; k < 3; ++k) {
@@ -2028,13 +2072,31 @@ void trackFrame(const uint8_t* bytes, uint32_t nbytes, uint32_t frame, double st
                 const float dx = pb.p[0] - om.camPos[0], dy = pb.p[1] - om.camPos[1], dz = pb.p[2] - om.camPos[2];
                 if (!inBox || dx * dx + dy * dy + dz * dz < kBodyNearM * kBodyNearM) {
                     for (uint32_t k = 0; k < kMHist; ++k) h[k] = 127;
+                    memcpy(lp, poseNow, 24);
+                    g_lastPoseFrame[i] = frame;
+                    continue;
+                }
+                if (!seenLately) {
+                    // First seen, or back after a long absence: nothing to
+                    // compare with yet.
+                    for (uint32_t k = 0; k < kMHist; ++k) h[k] = 127;
+                    memcpy(lp, poseNow, 24);
+                    g_lastPoseFrame[i] = frame;
                     continue;
                 }
                 int m;
-                if (memcmp(a + 4, b + 4, 24) == 0) {   // scale, quaternion, position: the pose held
+                if (memcmp(lp, poseNow, 24) == 0) {   // scale, quaternion, position: the pose held
                     m = 0;
                 } else {
-                    const Pose pa = decodePose(a);
+                    // Against the pose the last frame it was live: a gap of g
+                    // frames makes this frame's step the catch-up over them.
+                    Pose pa;
+                    {
+                        uint8_t rec[kRecordBytes];
+                        memset(rec, 0, sizeof(rec));
+                        memcpy(rec + 4, lp, 24);
+                        pa = decodePose(rec);
+                    }
                     float qd[4];
                     quatMulConj(pa.q, pb.q, qd);
                     if (qd[3] < 0.0f) {
@@ -2048,15 +2110,20 @@ void trackFrame(const uint8_t* bytes, uint32_t nbytes, uint32_t frame, double st
                     }
                     const float proj = (rv[0] * wb[0] + rv[1] * wb[1] + rv[2] * wb[2]) / wbn2;
                     const float ex = rv[0] - proj * wb[0], ey = rv[1] - proj * wb[1], ez = rv[2] - proj * wb[2];
-                    if (ex * ex + ey * ey + ez * ez > kMAxisSlack * kMAxisSlack * wbn2 + 1e-10f) {
+                    if (ex * ex + ey * ey + ez * ez > kMAxisSlack * kMAxisSlack * wbn2 + kMAxisFloor * kMAxisFloor) {
                         for (uint32_t k = 0; k < kMHist; ++k) h[k] = 127;   // not about the body's axis
-                        ++irr;
+                        ++g_stOffAxis;
+                        memcpy(lp, poseNow, 24);
+                        g_lastPoseFrame[i] = frame;
                         continue;
                     }
                     m = static_cast<int>(floorf(proj + 0.5f));
                     if (m < kSteppedMin) m = kSteppedMin;
                     if (m > kSteppedMax) m = kSteppedMax;
                 }
+                memcpy(lp, poseNow, 24);
+                g_lastPoseFrame[i] = frame;
+                ++g_stMHist[m - kSteppedMin];
                 if (g_mPred[i] != 127 && g_mPredFrame[i] == frame) {
                     ++g_stPredicted;
                     if (g_mPred[i] == m) ++g_stHit;
@@ -2069,22 +2136,30 @@ void trackFrame(const uint8_t* bytes, uint32_t nbytes, uint32_t frame, double st
                     ++have;
                 }
                 if (have < 4) continue;
-                bool allOne = true, allSame = true, per2 = true;
+                bool allOne = true;
                 for (int k = 0; k < have; ++k) {
                     if (h[k] != 1) allOne = false;
-                    if (h[k] != h[0]) allSame = false;
-                }
-                for (int k = 2; k < have; ++k) {
-                    if (h[k] != h[k - 2]) per2 = false;
                 }
                 if (allOne) continue;   // the body's own: every frame, the body's turn
+                // The period, one to four frames: the smallest that the whole
+                // history repeats with (one is a value held); the prediction
+                // for the frame `delta` on is the entry of the same phase.
+                int period = 0;
+                for (int pr = 1; pr <= 4 && period == 0; ++pr) {
+                    if (have < pr + 2) break;
+                    bool ok = true;
+                    for (int k = pr; k < have; ++k) {
+                        if (h[k] != h[k - pr]) { ok = false; break; }
+                    }
+                    if (ok) period = pr;
+                }
                 int pred;
-                if (allSame) {
-                    pred = h[0];
-                    ++steady;
-                } else if (per2) {
-                    pred = h[parity];
-                    ++p2;
+                if (period > 0) {
+                    const int j = (period - static_cast<int>(delta % static_cast<uint32_t>(period))) % period;
+                    pred = h[j];
+                    if (period == 1) ++steady;
+                    else if (period == 2) ++p2;
+                    else ++p34;
                 } else {
                     int sum = 0;
                     for (int k = 0; k < have; ++k) sum += h[k];
@@ -2111,6 +2186,7 @@ void trackFrame(const uint8_t* bytes, uint32_t nbytes, uint32_t frame, double st
             ++g_stTrackFrames;
             g_stStepped += stepped;
             g_stPeriod2 += p2;
+            g_stPeriod34 += p34;
             g_stSteady += steady;
             g_stIrregular += irr;
         }
@@ -2119,6 +2195,43 @@ void trackFrame(const uint8_t* bytes, uint32_t nbytes, uint32_t frame, double st
     g_lastBytes.assign(bytes, bytes + nbytes);
     g_lastBytesFrame = frame;
     g_lastBytesStamp = stampMs;
+    g_run[g_runNext].assign(bytes, bytes + nbytes);
+    g_runFrame[g_runNext] = frame;
+    g_runNext = (g_runNext + 1) % kRunFrames;
+}
+
+// The 20 s line's sample of stepped slots: the first six with a history
+// that is not the body's, their distance and their multiples, newest last.
+void steppedSample(char* out, size_t cap) {
+    size_t used = 0;
+    out[0] = 0;
+    int shown = 0;
+    const uint32_t n = static_cast<uint32_t>(g_lastPoseFrame.size());
+    for (uint32_t i = 0; i < n && shown < 6; ++i) {
+        const int8_t* h = &g_mHist[static_cast<size_t>(i) * kMHist];
+        int have = 0;
+        bool allOne = true;
+        for (uint32_t k = 0; k < kMHist; ++k) {
+            if (h[k] == 127) break;
+            ++have;
+            if (h[k] != 1) allOne = false;
+        }
+        if (have < 4 || allOne) continue;
+        float p[3];
+        memcpy(p, &g_lastPose[static_cast<size_t>(i) * 24 + 12], sizeof(p));
+        const float dist = sqrtf(p[0] * p[0] + p[1] * p[1] + p[2] * p[2]);
+        char hist[64];
+        size_t hu = 0;
+        for (int k = have - 1; k >= 0 && hu < sizeof(hist) - 4; --k) {
+            hu += static_cast<size_t>(snprintf(hist + hu, sizeof(hist) - hu, "%d ", static_cast<int>(h[k])));
+        }
+        const int w = snprintf(out + used, cap - used, "%sslot %u (%.0f m): %s", shown ? "; " : "", i,
+                               static_cast<double>(dist), hist);
+        if (w <= 0 || used + static_cast<size_t>(w) >= cap) break;
+        used += static_cast<size_t>(w);
+        ++shown;
+    }
+    if (!shown) snprintf(out, cap, "none");
 }
 
 void poll(ID3D11DeviceContext* ctx) {
@@ -2200,6 +2313,24 @@ void poll(ID3D11DeviceContext* ctx) {
                     sceneBytes, kSceneSlot, s->bytes,
                     (okA && okB) ? "" : " -- a write FAILED, the directory may be unwritable",
                     kDumpMax, static_cast<unsigned>(kDumpEveryMs / 1000));
+                // ...and the last four frames' copies, consecutive, for what
+                // a two-frame pair cannot show (the stepped parts).
+                uint32_t runWritten = 0;
+                for (uint32_t k = 0; k < kRunFrames; ++k) {
+                    const uint32_t idx = (g_runNext + k) % kRunFrames;   // oldest first
+                    if (g_run[idx].empty()) continue;
+                    wchar_t pr[MAX_PATH];
+                    if (writeDump(g_run[idx].data(), static_cast<uint32_t>(g_run[idx].size()), nullptr, 0,
+                                  g_runFrame[idx], pr, MAX_PATH)) {
+                        ++runWritten;
+                    }
+                }
+                if (runWritten) {
+                    Log::get().note("object probe: a run of %u consecutive frames (%u to %u) is on disk beside "
+                                    "the pair, pool_HHMMSS_<frame>.bin, for the stepped parts.",
+                                    runWritten, g_runFrame[g_runNext % kRunFrames],
+                                    g_runFrame[(g_runNext + kRunFrames - 1) % kRunFrames]);
+                }
             }
             g_keepValid = false;
         } else if (s->role == 2) {
