@@ -2715,6 +2715,22 @@ which is this project's contract for every read of the game.
    registration line counts NVIDIA's history resets and how many the
    openvr half asked for (a withheld frame, or a pose without a delta).
    Built as v0.14.1-134-gbf9df4c.
+
+   *The thirty-ninth flight, 20:27 (v0.14.1-134)*: an eye run at the
+   station, four treated and four raw frames at 20:29:20. NVIDIA's
+   history was reset on no frame of the station's window (four at the
+   load, two of them asked for), so this run had no raw frame among the
+   treated ones, and the raw frames were the measurement. Too small a
+   one: at ten kilometres the station is four hundred pixels across in
+   the 2862 render, the ring 190 from the axis, and four frames are a
+   0.15 deg baseline -- a tenth of a pixel on that ring -- under the
+   aliasing of a raw frame. The spin tool read the hub's face at 0.05 to
+   0.09 deg a frame and the ring at 0.02 to 0.05, with the three-frame
+   totals disagreeing with their own sums. Not a result. So the run is
+   long now: sixteen consecutive crops of the raw input, 1400 pixels
+   square about its centre, written after the sixteenth with the first
+   treated frame whole -- a 0.75 deg baseline, two pixels on the ring, and
+   the pattern frame to frame. Built as v0.14.1-136-gafbdc50.
 4. **Tier 2b** only if question 1 says no bits.
 5. **Tier 3** as `tools/` work against dumped frames, never on the hot
    path.
