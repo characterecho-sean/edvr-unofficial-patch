@@ -3021,6 +3021,32 @@ which is this project's contract for every read of the game.
    it, the mark is the smoke's opacity times this, quantised odd so the
    pass keeps the camera's path). The pilot's own answer to the trail is
    fix.drives_smoke = off; the knobs are for the default's sake.
+
+   *The forty-seventh session, 07:56 (v0.14.1-154)*: a census of the
+   smoke trail, an eye dump of it, and an eye dump of "the station
+   blurring under motion". The motion dump (08:02:17, 4.3 km, under way):
+   the panels and the ring are CRISP in the treated frame; the smear is a
+   long feathered band along the ship's own canopy frame -- the world
+   uncovered behind the ship as it moves, disocclusion, which the movers
+   mask (temporal_aa_movers, off) exists for; not the station's path. The
+   smoke dump's crops did not contain the trail (the run crops the
+   centre 1400 px of the left eye; the trail must be in the middle of
+   the view). THE FLICKER UNDER MOTION, named: the openvr half's
+   transition-flash guard withholds the first frame of every jump, and
+   near a station the game moves its floating origin every few seconds
+   under way -- 26 frames withheld this session, 36 jumps judged, every
+   one "the camera did not return: a change of reference frame". Each
+   withhold asked NVIDIA for a history restart on the frame after (the
+   registration's "reset on 6 eye-frames, 6 asked by the openvr half" an
+   interval), BEFORE the guard's verdict; under DLSS a restart is a flash
+   to the raw frame and a third of a second of re-accumulation. Built
+   (v0.14.1-156-ga9c3a7a): the detector's came-back verdict crosses the shared
+   mapping (noteJumpVerdict, _v30) and the restart on a jump-withheld
+   frame waits for it -- stayed keeps the history (the withheld frame
+   never entered it; the pass carries the station over the jump itself),
+   returned restarts it as before, no verdict within four treats restarts
+   it too; holds, the theater and the FSS heal restart at once. The
+   shutdown line counts the deferred restarts by outcome. No new keys.
 4. **Tier 2b** only if question 1 says no bits.
 5. **Tier 3** as `tools/` work against dumped frames, never on the hot
    path.
