@@ -2361,6 +2361,7 @@ void captureEyeRunRaw(ID3D11DeviceContext* ctx, ID3D11Texture2D* colour) {
     box.front = 0;
     box.back = 1;
     ctx->CopySubresourceRegion(g_eyeRawStaging[k], 0, 0, 0, 0, colour, 0, &box);
+    objectProbeLedgerMark(k);   // the ledger's frame for this crop
     ++g_eyeRunTaken;
     --g_eyeRunLeft;
     if (g_eyeRunLeft > 0) return;
@@ -2388,7 +2389,8 @@ void captureEyeRunRaw(ID3D11DeviceContext* ctx, ID3D11Texture2D* colour) {
     Log::get().note("temporal aa: an eye run of %d consecutive raw crops of the left eye is on disk "
                     "(eye_%ls_C00..%02d.bmp, %ux%u about the input's centre, the game's render as handed to "
                     "NVIDIA) with the first treated frame whole (%d written, eye_%ls_L0.bmp): the frames the "
-                    "game drew in a row, for what a part does from one to the next.",
+                    "game drew in a row, for what a part does from one to the next; the object probe's ledger "
+                    "of the same frames follows when it is on (object_probe.h).",
                     wrote, g_eyeRunStamp, g_eyeRunTaken - 1, cw, ch, wroteTreated, g_eyeRunStamp);
     g_eyeRunTaken = 0;
 }
@@ -5687,6 +5689,9 @@ void temporalPassArmEyeDump() {
                  static_cast<unsigned>(stm.wMinute), static_cast<unsigned>(stm.wSecond));
     g_eyeRunTaken = 0;
     g_eyeRunLeft = kEyeRun;
+    // ...and the object probe's ledger of the same frames (object_probe.h),
+    // when the probe is on; the crops' names and its share the stamp.
+    objectProbeArmLedger(g_eyeRunStamp);
 }
 
 float temporalPassDepthAt(float metres) {

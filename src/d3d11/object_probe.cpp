@@ -494,6 +494,62 @@ struct Slot {
 float g_camPass[3] = {};
 bool  g_camPassValid = false;
 Slot g_ring[kRing];
+
+// THE EYE RUN'S LEDGER (object_probe.h says why). Held only between the arm
+// and the write, some twenty frames; the copies ride the pool's own staging
+// pattern -- issued at the boundary, read back late, never waited on.
+constexpr int      kLedgerFrames = 20;          // the run's sixteen crops and slack either side
+constexpr uint32_t kLedgerBonesMax = 1u << 20;  // the palette's first megabyte: rows to 21845; the station's bases reached 16413 (2026-09-10)
+constexpr int      kLedgerRing = 4;
+constexpr int      kLedgerCrops = 32;
+struct LedgerDraw {
+    uint64_t vs;             // the bound vertex shader's hash (the binding shadow's; 0 = one the registry had not met)
+    uint32_t count;          // the vertex or index count
+    uint32_t instances;
+    uint32_t startInstance;  // StartInstanceLocation: where its records' indices sit in the instance stream
+    uint8_t  kind;           // 'D' 'I' 'N' 'X'
+    uint8_t  pool;           // 1 = t33 was the pool on this draw (asked of the context; armed only)
+    uint16_t pad;
+};
+static_assert(sizeof(LedgerDraw) == 24, "tools/eye_run_ledger.py reads 24-byte rows");
+struct LedgerCopy {
+    ID3D11Buffer* staging = nullptr;
+    uint32_t bytes = 0;
+    uint32_t frame = 0;
+    bool     inUse = false;
+};
+bool     g_ledgerOn = false;
+wchar_t  g_ledgerStamp[16] = L"";
+uint32_t g_ledgerFrame0 = 0, g_ledgerLastFrame = 0;
+int      g_ledgerCropFrame[kLedgerCrops];
+std::vector<uint8_t>    g_ledgerPool[kLedgerFrames];
+std::vector<uint8_t>    g_ledgerInst[kLedgerFrames];
+std::vector<uint8_t>    g_ledgerBones[kLedgerFrames];
+std::vector<LedgerDraw> g_ledgerDraws[kLedgerFrames];
+ID3D11Buffer* g_inst = nullptr;    // the instance stream, held (AddRef) while armed
+uint32_t g_instBytes = 0, g_instStride = 0;
+ID3D11Buffer* g_bones = nullptr;   // the bone palette at VS t38, held likewise
+uint32_t g_bonesBytes = 0, g_bonesStride = 0;
+LedgerCopy g_ledgerRing[2][kLedgerRing];   // [0] the instance stream's copies, [1] the palette's
+uint32_t g_ledgerSkipped = 0;
+void ledgerRelease() {
+    if (g_inst) g_inst->Release();
+    g_inst = nullptr;
+    g_instBytes = 0;
+    g_instStride = 0;
+    if (g_bones) g_bones->Release();
+    g_bones = nullptr;
+    g_bonesBytes = 0;
+    g_bonesStride = 0;
+    for (auto& ring : g_ledgerRing) {
+        for (LedgerCopy& c : ring) {
+            if (c.staging) c.staging->Release();
+            c.staging = nullptr;
+            c.bytes = 0;
+            c.inUse = false;
+        }
+    }
+}
 std::vector<uint8_t> g_keep;        // the first frame of a pair, copied out of its staging buffer
 std::vector<uint8_t> g_keepScene;   // ...and its scene block
 uint32_t g_keepFrame = 0;
@@ -1641,22 +1697,28 @@ void releasePool() {
     if (g_scene) g_scene->Release();
     g_scene = nullptr;
     g_sceneBytes = 0;
+    ledgerRelease();   // the instance stream and the palette went with the pool they were learned on
 }
 
 // One frame of a pair to disk: a 32-byte header, the scene block, the pool.
-// tools/pool_pair.py reads it.
+// tools/pool_pair.py reads it. stamp names the file by the eye run it
+// belongs to (the ledger) instead of the clock.
 bool writeDump(const uint8_t* pool, uint32_t poolBytes, const uint8_t* scene, uint32_t sceneBytes,
-               uint32_t frame, wchar_t* path, size_t pathN) {
+               uint32_t frame, wchar_t* path, size_t pathN, const wchar_t* stamp = nullptr) {
     const std::wstring dir = Log::get().dir() + L"\\pool";
     if (!g_dumpDirMade) {
         g_dumpDirMade = true;
         CreateDirectoryW(dir.c_str(), nullptr);
     }
-    SYSTEMTIME st{};
-    GetLocalTime(&st);
-    _snwprintf_s(path, pathN, _TRUNCATE, L"%s\\pool_%02u%02u%02u_%u.bin", dir.c_str(),
-                 static_cast<unsigned>(st.wHour), static_cast<unsigned>(st.wMinute),
-                 static_cast<unsigned>(st.wSecond), frame);
+    if (stamp) {
+        _snwprintf_s(path, pathN, _TRUNCATE, L"%s\\pool_%s_%u.bin", dir.c_str(), stamp, frame);
+    } else {
+        SYSTEMTIME st{};
+        GetLocalTime(&st);
+        _snwprintf_s(path, pathN, _TRUNCATE, L"%s\\pool_%02u%02u%02u_%u.bin", dir.c_str(),
+                     static_cast<unsigned>(st.wHour), static_cast<unsigned>(st.wMinute),
+                     static_cast<unsigned>(st.wSecond), frame);
+    }
     HANDLE h = CreateFileW(path, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (h == INVALID_HANDLE_VALUE) {
         path[0] = 0;
@@ -2235,6 +2297,250 @@ void steppedSample(char* out, size_t cap) {
     if (!shown) snprintf(out, cap, "none");
 }
 
+// THE LEDGER's two buffers, learned on a pool draw once armed: the vertex
+// buffer of stride 8 among the first four slots (the record and model-data
+// indices, 8 bytes an instance -- the census of 2026-09-09 16:58 showed one
+// 128 KB buffer shared by every pool draw, each draw's StartInstanceLocation
+// its window into it), and the 48-byte structured buffer at t38, every
+// pool-reading shader's palette (the dump of 2026-09-09: 62 of 62 skin by it).
+void ledgerLearn(ID3D11DeviceContext* ctx) {
+    if (!g_inst) {
+        ID3D11Buffer* vbs[4] = {};
+        UINT strides[4] = {}, offsets[4] = {};
+        ctx->IAGetVertexBuffers(0, 4, vbs, strides, offsets);
+        int pick = -1;
+        for (int i = 0; i < 4; ++i) {
+            if (vbs[i] && strides[i] == 8 && pick < 0) pick = i;
+        }
+        for (int i = 0; i < 4 && pick < 0; ++i) {
+            if (vbs[i]) pick = i;
+        }
+        for (int i = 0; i < 4; ++i) {
+            if (!vbs[i]) continue;
+            if (i == pick) {
+                D3D11_BUFFER_DESC bd{};
+                vbs[i]->GetDesc(&bd);
+                g_inst = vbs[i];   // the Get's reference is the one held
+                g_instBytes = bd.ByteWidth;
+                g_instStride = strides[i];
+            } else {
+                vbs[i]->Release();
+            }
+        }
+    }
+    if (!g_bones) {
+        ID3D11ShaderResourceView* srv = nullptr;
+        ctx->VSGetShaderResources(38, 1, &srv);
+        if (srv) {
+            ResourceInfo info;
+            if (bindingResolve(srv, &info) && info.isBuffer && info.b == 48) {
+                ID3D11Resource* res = nullptr;
+                srv->GetResource(&res);
+                if (res) {
+                    ID3D11Buffer* buf = nullptr;
+                    res->QueryInterface(__uuidof(ID3D11Buffer), reinterpret_cast<void**>(&buf));
+                    res->Release();
+                    if (buf) {
+                        g_bones = buf;
+                        g_bonesBytes = info.a;
+                        g_bonesStride = 48;
+                    }
+                }
+            }
+            srv->Release();
+        }
+    }
+}
+
+// One eye draw's row while armed. The pool question is asked of the context
+// -- three COM calls on each instanced draw for twenty frames, a millisecond
+// or two a frame, and only then.
+void ledgerNoteDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count, uint32_t instances,
+                    uint32_t startInstance) {
+    const uint32_t frame = g_frame + 1;   // this frame's draws precede its boundary, where g_frame steps
+    if (frame < g_ledgerFrame0 || frame > g_ledgerLastFrame) return;
+    LedgerDraw d{};
+    d.vs = bindingGet(BindSlot::Vs) ? bindingShaderHash(BindSlot::Vs) : 0;
+    d.count = count;
+    d.instances = instances;
+    d.startInstance = startInstance;
+    d.kind = static_cast<uint8_t>(kind);
+    if ((kind == 'X' || kind == 'N') && instances && g_pool) {
+        guardedBudget(g_budget, [&] {
+            ID3D11ShaderResourceView* srv = nullptr;
+            ctx->VSGetShaderResources(kPoolSlot, 1, &srv);
+            if (!srv) return;
+            ID3D11Resource* res = nullptr;
+            srv->GetResource(&res);
+            if (res) {
+                ID3D11Buffer* buf = nullptr;
+                res->QueryInterface(__uuidof(ID3D11Buffer), reinterpret_cast<void**>(&buf));
+                res->Release();
+                if (buf) {
+                    d.pool = buf == g_pool ? 1 : 0;
+                    buf->Release();
+                }
+            }
+            srv->Release();
+            if (d.pool && (!g_inst || !g_bones)) ledgerLearn(ctx);
+        });
+    }
+    g_ledgerDraws[frame - g_ledgerFrame0].push_back(d);
+}
+
+// The boundary's copies of the two buffers (the pool's own copy is issued
+// beside them), into their rings; the palette's first megabyte only.
+void ledgerIssue(ID3D11DeviceContext* ctx) {
+    ID3D11Device* dev = nullptr;
+    for (int what = 0; what < 2; ++what) {
+        ID3D11Buffer* src = what == 0 ? g_inst : g_bones;
+        const uint32_t whole = what == 0 ? g_instBytes : g_bonesBytes;
+        const uint32_t bytes = what == 0 ? whole : (whole < kLedgerBonesMax ? whole : kLedgerBonesMax);
+        if (!src || !bytes) continue;
+        LedgerCopy* c = nullptr;
+        for (LedgerCopy& s : g_ledgerRing[what]) {
+            if (!s.inUse) { c = &s; break; }
+        }
+        if (!c) { ++g_ledgerSkipped; continue; }
+        if (c->staging && c->bytes != bytes) {
+            c->staging->Release();
+            c->staging = nullptr;
+            c->bytes = 0;
+        }
+        if (!c->staging) {
+            if (!dev) ctx->GetDevice(&dev);
+            if (!dev || !makeStaging(dev, bytes, &c->staging)) { ++g_ledgerSkipped; continue; }
+            c->bytes = bytes;
+        }
+        if (bytes == whole) {
+            ctx->CopyResource(c->staging, src);
+        } else {
+            D3D11_BOX box{0, 0, 0, bytes, 1, 1};
+            ctx->CopySubresourceRegion(c->staging, 0, 0, 0, 0, src, 0, &box);
+        }
+        c->frame = g_frame;
+        c->inUse = true;
+    }
+    if (dev) dev->Release();
+}
+
+// The late readbacks, kept by frame; a copy still in flight past kDropAfter
+// is given up like the pool's.
+void ledgerPoll(ID3D11DeviceContext* ctx) {
+    for (int what = 0; what < 2; ++what) {
+        for (LedgerCopy& c : g_ledgerRing[what]) {
+            if (!c.inUse || g_frame - c.frame < kReadAfter) continue;
+            D3D11_MAPPED_SUBRESOURCE m{};
+            const HRESULT hr = ctx->Map(c.staging, 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &m);
+            if (hr == DXGI_ERROR_WAS_STILL_DRAWING) {
+                if (g_frame - c.frame > kDropAfter) { c.inUse = false; ++g_ledgerSkipped; }
+                continue;
+            }
+            if (FAILED(hr) || !m.pData) { c.inUse = false; ++g_ledgerSkipped; continue; }
+            if (c.frame >= g_ledgerFrame0 && c.frame <= g_ledgerLastFrame) {
+                const uint8_t* b = static_cast<const uint8_t*>(m.pData);
+                (what == 0 ? g_ledgerInst : g_ledgerBones)[c.frame - g_ledgerFrame0].assign(b, b + c.bytes);
+            }
+            ctx->Unmap(c.staging, 0);
+            c.inUse = false;
+        }
+    }
+}
+
+bool writeRaw(const wchar_t* dir, const wchar_t* prefix, uint32_t frame, const std::vector<uint8_t>& bytes,
+              wchar_t* path, size_t pathN) {
+    _snwprintf_s(path, pathN, _TRUNCATE, L"%s\\%s_%s_%u.bin", dir, prefix, g_ledgerStamp, frame);
+    HANDLE h = CreateFileW(path, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    DWORD w = 0;
+    const bool ok = WriteFile(h, bytes.data(), static_cast<DWORD>(bytes.size()), &w, nullptr) != 0;
+    CloseHandle(h);
+    return ok;
+}
+
+// Everything to disk once the last frame's readbacks have had their chance:
+// the pool copies as pool_<stamp>_<frame>.bin (the pair dumps' format), the
+// two buffers raw, the draws as one file -- a header, then per frame the
+// frame, a count and the rows. One long frame, after the run's own.
+void writeLedger() {
+    const std::wstring dir = Log::get().dir() + L"\\pool";
+    if (!g_dumpDirMade) {
+        g_dumpDirMade = true;
+        CreateDirectoryW(dir.c_str(), nullptr);
+    }
+    int pools = 0, insts = 0, bones = 0;
+    wchar_t path[MAX_PATH];
+    for (int i = 0; i < kLedgerFrames; ++i) {
+        const uint32_t frame = g_ledgerFrame0 + static_cast<uint32_t>(i);
+        if (!g_ledgerPool[i].empty() &&
+            writeDump(g_ledgerPool[i].data(), static_cast<uint32_t>(g_ledgerPool[i].size()), nullptr, 0, frame,
+                      path, MAX_PATH, g_ledgerStamp)) {
+            ++pools;
+        }
+        if (!g_ledgerInst[i].empty() && writeRaw(dir.c_str(), L"inst", frame, g_ledgerInst[i], path, MAX_PATH)) ++insts;
+        if (!g_ledgerBones[i].empty() && writeRaw(dir.c_str(), L"bones", frame, g_ledgerBones[i], path, MAX_PATH)) ++bones;
+    }
+    struct Header {
+        char     magic[8];
+        uint32_t version;
+        uint32_t frames;
+        uint32_t frame0;
+        uint32_t instStride;
+        uint32_t bonesStride;
+        uint32_t poolBytes;
+        int32_t  crop[kLedgerCrops];   // crop k's frame, -1 = not taken
+    };
+    static_assert(sizeof(Header) == 160, "tools/eye_run_ledger.py reads a 160-byte header");
+    Header hd = {{'E', 'D', 'V', 'R', 'L', 'D', 'G', 'R'}, 1u, static_cast<uint32_t>(kLedgerFrames), g_ledgerFrame0,
+                 g_instStride, g_bonesStride, g_poolBytes, {}};
+    memcpy(hd.crop, g_ledgerCropFrame, sizeof(hd.crop));
+    _snwprintf_s(path, MAX_PATH, _TRUNCATE, L"%s\\draws_%s.bin", dir.c_str(), g_ledgerStamp);
+    HANDLE h = CreateFileW(path, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    bool drawsOk = h != INVALID_HANDLE_VALUE;
+    uint32_t rows = 0;
+    if (drawsOk) {
+        DWORD w = 0;
+        drawsOk = WriteFile(h, &hd, sizeof(hd), &w, nullptr) != 0;
+        for (int i = 0; drawsOk && i < kLedgerFrames; ++i) {
+            const uint32_t n = static_cast<uint32_t>(g_ledgerDraws[i].size());
+            const uint32_t frame = g_ledgerFrame0 + static_cast<uint32_t>(i);
+            drawsOk = WriteFile(h, &frame, 4, &w, nullptr) != 0 && WriteFile(h, &n, 4, &w, nullptr) != 0;
+            if (drawsOk && n) {
+                drawsOk = WriteFile(h, g_ledgerDraws[i].data(), static_cast<DWORD>(n * sizeof(LedgerDraw)), &w,
+                                    nullptr) != 0;
+            }
+            rows += n;
+        }
+        CloseHandle(h);
+    }
+    int first = -1, last = -1;
+    for (int k = 0; k < kLedgerCrops; ++k) {
+        if (g_ledgerCropFrame[k] < 0) continue;
+        if (first < 0) first = k;
+        last = k;
+    }
+    Log::get().note(
+        "object probe: the eye run's LEDGER is on disk beside its crops -- %d frames from %u: %d pool copies "
+        "(pool_%ls_<frame>.bin), %d instance streams (inst_%ls_<frame>.bin, %u bytes, stride %u), %d palette "
+        "copies (bones_%ls_<frame>.bin, the first %u of %u bytes, stride %u) and %u eye draws in draws_%ls.bin%s; "
+        "the crops C%02d..C%02d were frames %d..%d. tools/eye_run_ledger.py reads them: which records each draw "
+        "took from the pool, how far each turned between consecutive crops, and how the bones moved. %u copies "
+        "were skipped.",
+        kLedgerFrames, g_ledgerFrame0, pools, g_ledgerStamp, insts, g_ledgerStamp, g_instBytes, g_instStride, bones,
+        g_ledgerStamp, g_bonesBytes < kLedgerBonesMax ? g_bonesBytes : kLedgerBonesMax, g_bonesBytes, g_bonesStride,
+        rows, g_ledgerStamp, drawsOk ? "" : " (the draws file FAILED to write)", first < 0 ? 0 : first,
+        last < 0 ? 0 : last, first < 0 ? -1 : g_ledgerCropFrame[first], last < 0 ? -1 : g_ledgerCropFrame[last],
+        g_ledgerSkipped);
+    for (int i = 0; i < kLedgerFrames; ++i) {
+        std::vector<uint8_t>().swap(g_ledgerPool[i]);
+        std::vector<uint8_t>().swap(g_ledgerInst[i]);
+        std::vector<uint8_t>().swap(g_ledgerBones[i]);
+        std::vector<LedgerDraw>().swap(g_ledgerDraws[i]);
+    }
+    g_ledgerOn = false;
+    ledgerRelease();
+}
+
 void poll(ID3D11DeviceContext* ctx) {
     // In frame order, so a pair's first copy is kept before its second is
     // diffed against it.
@@ -2266,6 +2572,9 @@ void poll(ID3D11DeviceContext* ctx) {
             sceneBytes = s->sceneBytes;
         }
         trackFrame(bytes, s->bytes, s->frame, s->stampMs);
+        if (g_ledgerOn && s->frame >= g_ledgerFrame0 && s->frame <= g_ledgerLastFrame) {
+            g_ledgerPool[s->frame - g_ledgerFrame0].assign(bytes, bytes + s->bytes);   // the ledger's frame
+        }
         if (s->role == 1) {
             g_keep.assign(bytes, bytes + s->bytes);
             g_keepScene.assign(scene, scene + sceneBytes);
@@ -2397,8 +2706,11 @@ void objectShipsSetRange(float metres) {
     g_shipRangeM = metres < 0.0f ? 0.0f : (metres > 5000.0f ? 5000.0f : metres);
 }
 
-void objectProbeOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t instances) {
-    if (!g_on || g_checksLeft == 0 || !ctx) return;
+void objectProbeOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count, uint32_t instances,
+                          uint32_t startInstance) {
+    if (!g_on || !ctx) return;
+    if (g_ledgerOn) ledgerNoteDraw(ctx, kind, count, instances, startInstance);
+    if (g_checksLeft == 0) return;
     // The record-carrying families are instanced (question 5: every carrier
     // declares INSTANCEANDMODELDATAINDEX); a plain draw is not asked.
     if ((kind != 'X' && kind != 'N') || instances == 0) return;
@@ -2495,6 +2807,7 @@ void objectProbeFrameBoundary(ID3D11DeviceContext* ctx) {
             if (g_verbose) report();
             releaseRing();
             releasePool();
+            g_ledgerOn = false;
             g_wasOn = false;
             g_noted = false;
             {
@@ -2527,6 +2840,11 @@ void objectProbeFrameBoundary(ID3D11DeviceContext* ctx) {
             const uint32_t base = (g_frame / kPairEvery) & 1u;
             issueCopy(ctx, phase == base ? 1 : (phase == base + kPairSpan ? 2 : 0));
             poll(ctx);
+            if (g_ledgerOn) {
+                if (g_frame <= g_ledgerLastFrame) ledgerIssue(ctx);
+                ledgerPoll(ctx);
+                if (g_frame > g_ledgerLastFrame + kReadAfter + kDropAfter) writeLedger();
+            }
         } else if (++g_framesWithoutPool == kAbsentFrames && !g_absentNoted && g_verbose) {
             g_absentNoted = true;
             Log::get().note(
@@ -2543,10 +2861,33 @@ void objectProbeFrameBoundary(ID3D11DeviceContext* ctx) {
     }
 }
 
+void objectProbeArmLedger(const wchar_t* stamp) {
+    if (!g_on || g_ledgerOn) return;
+    wcsncpy_s(g_ledgerStamp, 16, stamp ? stamp : L"000000", _TRUNCATE);
+    g_ledgerFrame0 = g_frame + 1;   // this frame's draws get their copy at the next boundary
+    g_ledgerLastFrame = g_ledgerFrame0 + static_cast<uint32_t>(kLedgerFrames) - 1u;
+    for (int k = 0; k < kLedgerCrops; ++k) g_ledgerCropFrame[k] = -1;
+    for (int i = 0; i < kLedgerFrames; ++i) {
+        g_ledgerPool[i].clear();
+        g_ledgerInst[i].clear();
+        g_ledgerBones[i].clear();
+        g_ledgerDraws[i].clear();
+    }
+    g_ledgerSkipped = 0;
+    ledgerRelease();
+    g_ledgerOn = true;
+}
+
+void objectProbeLedgerMark(int k) {
+    if (!g_ledgerOn || k < 0 || k >= kLedgerCrops) return;
+    g_ledgerCropFrame[k] = static_cast<int>(g_frame + 1);   // as ledgerNoteDraw counts this frame
+}
+
 void objectProbeShutdown() {
     stopWorker();
     releaseRing();
     releasePool();
+    g_ledgerOn = false;
     g_on = false;
     g_wasOn = false;
     std::lock_guard<std::mutex> lk(g_publish);

@@ -1989,7 +1989,7 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     }
     // The pool probe (object_probe.h): one bool while off; a few t33 reads a
     // frame until the pool is known, then one a second.
-    objectProbeOnEyeDraw(self, kind, instances);
+    objectProbeOnEyeDraw(self, kind, count, instances, args.startInstance);
 
     // The suppression probe, after the census so a census taken while probing
     // still records what the game SUBMITTED. Everything before this point is

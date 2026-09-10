@@ -48,8 +48,30 @@ bool objectProbeWantsDraws();
 
 // One eye draw, after the eye gate: an instanced draw may be asked for its
 // t33 binding, a few times a frame until the pool is known and then once a
-// second. One bool when the probe is off.
-void objectProbeOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t instances);
+// second. One bool when the probe is off. count is the draw's vertex or
+// index count and startInstance its StartInstanceLocation -- the ledger's
+// row (objectProbeArmLedger below); nothing else reads them.
+void objectProbeOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count, uint32_t instances,
+                          uint32_t startInstance);
+
+// THE EYE RUN'S LEDGER (2026-09-10). The run's raw crops say how much each
+// part of a station turned from one frame to the next; the pool says how
+// much its RECORDS turned. At ten kilometres the two disagreed -- the drawn
+// ring at a third of its records' turn, the hub's face at nearly all of it
+// (the flight of 04:16) -- and nothing in hand said which draws paint the
+// ring at that range, from which records, through which bones. So the key
+// that takes the run also arms this: for the same frames, every frame's
+// pool copy is kept; the scene's instance stream (the per-instance record
+// indices every pool draw reads, 8 bytes each) and the first megabyte of
+// the bone palette at VS t38 are copied and kept; and every eye draw is
+// noted with its shader, its counts, its start instance and whether t33
+// was the pool -- all written beside the crops after the run, for
+// tools/eye_run_ledger.py: which records were drawn, how far each turned
+// between consecutive crops, and how the bones moved. Nothing of it runs
+// unarmed. stamp is the run's HHMMSS, shared with the crops' names.
+void objectProbeArmLedger(const wchar_t* stamp);
+// The pass took the run's crop k this frame: the ledger notes the frame.
+void objectProbeLedgerMark(int k);
 
 // The frame edge, with the owner context: the pair's copies, the late
 // readbacks, the diff and the totals.
