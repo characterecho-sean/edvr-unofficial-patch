@@ -519,6 +519,7 @@ It presented as intermittent because EDVR's crash sentinel disables the
 Direct3D fixes on the launch after a crash, so it alternated. EDVR now swaps
 the individual method pointers where they already live and never touches the
 object.
+
 </details>
 
 <details>
@@ -550,6 +551,7 @@ instead of guessing, and says so in both logs. If the count is still stuck at
 it to an issue. As an immediate workaround on any version, set
 `vscreen_res_width`/`_height` to `2880`/`1620` (short enough that nothing
 collides) or back to `1920`/`1080`.
+
 </details>
 
 <details>
@@ -562,6 +564,7 @@ the first graphics call instead. Tested with a stand-in proxy that does work in
 its own `DllMain` — the exact thing that used to crash — plus the three ways it
 can go wrong: a missing name, a non-proxy file, and a setting pointed at EDVR
 itself. All three fall back to the system DLL and say so.
+
 </details>
 
 ## Game updates
