@@ -1150,8 +1150,9 @@ void buildContent(MenuContent& c) {
         snprintf(pb, sizeof(pb), "   %d change%s at next launch", pendingN, pendingN == 1 ? "" : "s");
         footer += pb;
     }
-    if (s.open && s.privateWanted && !inputGatePrivate()) footer += "   KEYS SHARED WITH THE GAME";
-    if (!s.privateWanted) footer += "   keys shared (menu.keyboard)";
+    if (s.open && s.privateWanted && !p.status && !inputGatePrivate()) footer += "   KEYS SHARED WITH THE GAME";
+    if (p.status) footer += std::string("   keys shared (") + p.name + ")";
+    else if (!s.privateWanted) footer += "   keys shared (menu.keyboard)";
     strncpy(c.footer, footer.c_str(), sizeof(c.footer) - 1);
 }
 
@@ -2081,7 +2082,7 @@ void menuTick(ID3D11Device* dev) {
         setMenuHeadLock(showingOverlay, s.overlayYaw, s.overlayPitch);
         setMenuVisible(g.alpha);
         const bool drawnFresh = now - s.lastDrawnMs <= kDrawnFreshMs;
-        inputGateSetPrivate(s.open && showingMenu && drawnFresh);
+        inputGateSetPrivate(s.open && showingMenu && drawnFresh && !s.pages[s.page].status);
         inputGateTick();
         if (dev) menuPanelTick(dev);
     });

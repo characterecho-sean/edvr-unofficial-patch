@@ -274,6 +274,37 @@ the open question for this module.
 
 ## Navigation and interaction
 
+**Keyboard capture update (2026-09-10).** The latest Steam flight
+(`edvr_gfx_20260910_171220.log`, build `6AA33721`) confirmed the private-table
+failure above: no game keyboard reached the dummy hook during 120 menu frames.
+EDVR now intercepts the executable's `DirectInput8Create` import before game
+startup, observes the returned factories, and hooks the keyboard devices they
+actually return. Each distinct table keeps its own forwarding functions;
+Steam's overlay stays in the chain and device identities stay intact. Retained
+COM references keep the restore targets alive until shutdown. The shared-table
+fallback remains for sessions without an observed factory.
+The Steam executable imports both `DINPUT8.dll!DirectInput8Create` and
+`d3d11.dll!D3D11CreateDevice` through its normal startup import table, so the
+DLL's early capture is installed before the game begins creating input devices.
+
+This path is independent of the VR runtime and applies to both SteamVR and
+OpenComposite. `menu.keyboard = private` remains the default. All keyboard
+state reads and buffered presses are suppressed while the menu is drawn,
+except on **Monitor** and **Status**, which pass keys through and say so in
+their footers; the menu summon key remains reserved on every page;
+buffered releases still reach the game, and joystick devices keep their input.
+Keys held when the menu closes wait for release before they can act in Elite.
+No new configuration is required; installing this change requires a game
+restart so the initial DirectInput creation can be captured.
+
+`input_gate_test` exercises independent private factory/device tables, original
+call chaining, shared-table joysticks, buffered peek/read semantics, input loss,
+held closing keys across all three input paths, restoration and reference
+balance. It also creates real ANSI and Unicode DirectInput keyboards through
+the test executable's patched import. The flight log now distinguishes a
+captured keyboard from evidence that the game has actually called its gate.
+These tests do not replace an in-headset confirmation on each VR runtime.
+
 Head-aim and keys coexist; whichever moved last owns the highlight.
 
 **Keys, while the menu is open** (all private to the menu):

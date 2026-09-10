@@ -8,10 +8,11 @@
 // reload applies it -- the file stays the single source of truth, and the
 // installer's window and this panel can never disagree.
 //
-// While the panel is drawn the keyboard is the menu's (input_gate.h): the
+// While a settings page is drawn the keyboard is the menu's (input_gate.h): the
 // game sees every key released, so Up, Down, Enter and Escape are free to
 // mean what they say. The gate follows the DRAW, not the menu's belief: a
 // panel that is not reaching the headset never takes the keyboard.
+// The read-only Status and Monitor pages deliberately pass keys to the game.
 //
 // This half owns the model, the keys, the aim, the ini write and the restart
 // bookkeeping. menu_panel.h owns the pixels: the GDI rasterisation and the

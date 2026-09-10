@@ -9,8 +9,11 @@
 // makes from it). It imports no Raw Input function at all. So one atomic
 // flag and three thin hooks make the keyboard private:
 //
-//   Door 1  IDirectInputDevice8::GetDeviceState / GetDeviceData, reached
-//           through the shared vtable of a dummy keyboard device EDVR
+//   Door 1  The EXE's DirectInput8Create import is captured during loader
+//           attach. Returned factories' CreateDevice methods capture the
+//           game's actual keyboard, including private Steam-overlay tables,
+//           and hook GetDeviceState / GetDeviceData without changing identity.
+//           A fallback uses the shared vtable of a dummy keyboard device EDVR
 //           creates itself (dinput8.dll dispatches every device object of
 //           the class through one static table, which is the mechanism; a
 //           CopyVptr hook on our dummy would hook our dummy and nothing
@@ -29,6 +32,8 @@
 // so a key the game saw go down before the menu opened still gets its
 // release and no toggle is left half-pressed; the trio answers up;
 // keyboard messages are nulled.
+// After closing, keys held at that instant remain private until released,
+// so the Escape that closes EDVR cannot also open Elite's pause menu.
 //
 // THE SUMMON KEY IS PRIVATE TOO, with the menu closed: whenever its chord
 // is held, the key itself is swallowed at every door, so the game never
@@ -52,12 +57,17 @@ namespace edvr {
 
 class Config;
 
+// Capture DirectInput factories before the game creates its keyboard.
+// Loader-safe: patches only the executable's existing import slot.
+void inputGateInstallEarly();
+
 // Reads hotkey.menu (for the swallow), menu.keyboard (private | shared)
 // and advanced.input_probe. Install AND reload.
 void inputGateConfigure(Config& cfg);
 
 // Install the doors. Idempotent; each door reports its own outcome once.
-// Called lazily by the menu on its first use, from the frame thread.
+// Called lazily by the menu on its first use, from the frame thread. The
+// early factory capture above is already installed before game startup.
 void inputGateInstall();
 
 // The flag. True while the menu is drawn AND menu.keyboard = private. The

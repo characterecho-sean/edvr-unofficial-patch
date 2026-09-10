@@ -578,6 +578,23 @@ if errorlevel 1 ( echo [edvr] ERROR: config_test build failed & exit /b 1 )
     exit /b 1
 )
 
+echo [edvr] === input_gate_test.exe ===
+REM Actual private DirectInput tables, buffered keys, close/release behavior,
+REM and real A/W factories through the executable's early import hook.
+if not exist "%OBJ%\inputgatetest" mkdir "%OBJ%\inputgatetest"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\inputgatetest"\ ^
+    /Fe"%BUILD%\input_gate_test.exe" "tools\input_gate_test\input_gate_test.cpp" ^
+    "src\common\iat_hook.cpp" "src\common\vtable_hook.cpp" ^
+    "src\common\hotkey.cpp" "src\common\config.cpp" "src\common\log.cpp" ^
+    "src\common\guard.cpp" "src\common\frame_flag.cpp" "src\common\proxy.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib user32.lib version.lib dinput8.lib
+if errorlevel 1 ( echo [edvr] ERROR: input_gate_test build failed & exit /b 1 )
+"%BUILD%\input_gate_test.exe" || (
+    echo [edvr] ERROR: the menu keyboard gate failed its device or release checks
+    exit /b 1
+)
+
 echo [edvr] === gate_test.exe ===
 if not exist "%OBJ%\gatetest" mkdir "%OBJ%\gatetest"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^

@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <cstring>
 #include <initializer_list>
+#include <utility>
 
 #include <windows.h>
 
@@ -41,6 +42,7 @@ constexpr size_t kSlotGetDeviceData = 10;
 constexpr size_t kSlotGetDeviceInfo = 15;
 
 typedef HRESULT(WINAPI* PFN_DirectInput8Create)(HINSTANCE, DWORD, REFIID, LPVOID*, LPUNKNOWN);
+typedef HRESULT(STDMETHODCALLTYPE* PFN_CreateDevice)(void*, REFGUID, void**, LPUNKNOWN);
 typedef HRESULT(STDMETHODCALLTYPE* PFN_GetDeviceState)(void*, DWORD, LPVOID);
 typedef HRESULT(STDMETHODCALLTYPE* PFN_GetDeviceData)(void*, DWORD, LPDIDEVICEOBJECTDATA,
                                                       LPDWORD, DWORD);
@@ -76,13 +78,9 @@ struct DiDoor {
     VTableHook hook;
     PFN_GetDeviceState origState = nullptr;
     PFN_GetDeviceData  origData = nullptr;
-    bool  installed = false;
+    std::atomic<bool> installed{false};
     bool  retired = false;           // a fault took it out for the session
-    // The per-object keyboard verdicts. Fixed and small: a game has a
-    // handful of devices. An unknown object past the table passes through.
-    struct Verdict { void* self; bool keyboard; };
-    Verdict verdicts[16] = {};
-    volatile LONG verdictCount = 0;
+    bool  gameDevice = false;        // observed at the game's CreateDevice return
     // Counters, relaxed: evidence for the probe and the reclaim vouch.
     std::atomic<uint32_t> stateCalls{0};
     std::atomic<uint32_t> stateForeign{0};   // a `this` that is not our dummy
@@ -101,6 +99,67 @@ struct DiDoor {
 };
 DiDoor g_diA;
 DiDoor g_diW;
+
+// A wrapper can give each device a different table. Capture the returned
+// objects before Elite receives them, and keep one reference per patched
+// table so both the table and our restore target stay alive until shutdown.
+constexpr size_t kGameDeviceDoors = 16;
+constexpr size_t kFactoryDoors = 8;
+DiDoor g_gameDi[kGameDeviceDoors];
+struct FactoryDoor {
+    void* owner = nullptr;
+    VTableHook hook;
+    PFN_CreateDevice original = nullptr;
+};
+FactoryDoor g_factories[kFactoryDoors];
+SRWLOCK g_captureLock = SRWLOCK_INIT;
+IatPatch g_createImport;
+std::atomic<uint64_t> g_gameKeyboardCalls{0};
+
+// Closing with Escape (or another key still held) must not turn that same
+// press into an Elite action. Only keys held at close wait for release;
+// a fresh press after release works normally. EDVR reads its own imports.
+std::atomic<bool> g_releaseTail{false};
+std::atomic<bool> g_heldVk[256]{};
+std::atomic<bool> g_heldDik[256]{};
+
+void captureReleaseTail(PFN_GetAsyncKeyState readKey) {
+    for (int k = 0; k < 256; ++k) g_heldDik[k].store(false);
+    bool any = false;
+    for (int vk = 0; vk < 256; ++vk) {
+        const bool down = vk > VK_XBUTTON2 && (readKey(vk) & 0x8000) != 0;
+        g_heldVk[vk].store(down);
+        if (down) {
+            any = true;
+            const uint8_t dik = inputGateDikOf(vk);
+            if (dik) g_heldDik[dik].store(true);
+        }
+    }
+    g_releaseTail.store(any);
+}
+
+void refreshReleaseTail(PFN_GetAsyncKeyState readKey) {
+    if (!g_releaseTail.load()) return;
+    bool any = false;
+    for (int vk = 0; vk < 256; ++vk) {
+        if (!g_heldVk[vk].load()) continue;
+        if (readKey(vk) & 0x8000) { any = true; continue; }
+        g_heldVk[vk].store(false);
+    }
+    // Rebuild after releases: generic/left/right modifier VKs can share a DIK.
+    bool held[256]{};
+    for (int vk = 0; vk < 256; ++vk) if (g_heldVk[vk].load()) {
+        const uint8_t dik = inputGateDikOf(vk);
+        if (dik) held[dik] = true;
+    }
+    for (int k = 0; k < 256; ++k) g_heldDik[k].store(held[k]);
+    g_releaseTail.store(any);
+}
+
+bool releaseTailVk(int vk) {
+    return g_releaseTail.load(std::memory_order_relaxed) && vk >= 0 && vk < 256 &&
+           g_heldVk[vk].load(std::memory_order_relaxed);
+}
 
 // The door's blindness, said once. The DirectInput door patches OUR dummy
 // device's table and reaches the game's device only if that table is the
@@ -169,47 +228,23 @@ uint32_t modsNow() {
 
 bool summonModsHeldNow(uint32_t mods) { return (mods & ~modsNow()) == 0; }
 
-// Is this object a keyboard? Asked once per object through the table's
-// own, unpatched GetDeviceInfo; remembered by pointer. `Wide` picks the
-// instance struct the table speaks.
+// GetCapabilities has the same layout on A and W. The retained keyboard
+// is known; other devices sharing its table are checked without caching a
+// raw pointer that a released device could reuse for a joystick later.
 template <bool Wide>
 bool isKeyboard(DiDoor& d, void* self) {
     if (self == d.dummy) return true;
-    const LONG n = d.verdictCount;
-    for (LONG i = 0; i < n; ++i) {
-        if (d.verdicts[i].self == self) return d.verdicts[i].keyboard;
-    }
     void** vt = *reinterpret_cast<void***>(self);
-    bool keyboard = false;
-    if (vt && vt[kSlotGetDeviceInfo]) {
-        if (Wide) {
-            DIDEVICEINSTANCEW di{};
-            di.dwSize = sizeof(di);
-            if (SUCCEEDED(reinterpret_cast<PFN_GetDeviceInfoW>(vt[kSlotGetDeviceInfo])(self, &di))) {
-                keyboard = GET_DIDEVICE_TYPE(di.dwDevType) == DI8DEVTYPE_KEYBOARD;
-            }
-        } else {
-            DIDEVICEINSTANCEA di{};
-            di.dwSize = sizeof(di);
-            if (SUCCEEDED(reinterpret_cast<PFN_GetDeviceInfoA>(vt[kSlotGetDeviceInfo])(self, &di))) {
-                keyboard = GET_DIDEVICE_TYPE(di.dwDevType) == DI8DEVTYPE_KEYBOARD;
-            }
-        }
-    }
-    // Remember it, if there is room. A table full of sixteen objects is a
-    // game this was not written for; the seventeenth is asked every call,
-    // which is slower and still correct.
-    if (n < 16) {
-        d.verdicts[n].self = self;
-        d.verdicts[n].keyboard = keyboard;
-        InterlockedIncrement(&d.verdictCount);
-    }
-    return keyboard;
+    if (!vt || !vt[3]) return false;
+    DIDEVCAPS caps{};
+    caps.dwSize = sizeof(caps);
+    typedef HRESULT(STDMETHODCALLTYPE* GetCaps)(void*, LPDIDEVCAPS);
+    return SUCCEEDED(reinterpret_cast<GetCaps>(vt[3])(self, &caps)) &&
+           GET_DIDEVICE_TYPE(caps.dwDevType) == DI8DEVTYPE_KEYBOARD;
 }
 
-template <DiDoor* Door, bool Wide>
-HRESULT STDMETHODCALLTYPE hookGetDeviceState(void* self, DWORD cb, LPVOID data) {
-    DiDoor& d = *Door;
+template <bool Wide>
+HRESULT filterDeviceState(DiDoor& d, void* self, DWORD cb, LPVOID data) {
     const HRESULT hr = d.origState(self, cb, data);
     d.stateCalls.fetch_add(1, std::memory_order_relaxed);
     if (self != d.dummy) d.stateForeign.fetch_add(1, std::memory_order_relaxed);
@@ -217,6 +252,7 @@ HRESULT STDMETHODCALLTYPE hookGetDeviceState(void* self, DWORD cb, LPVOID data) 
     guardedBudget(g_budgetDi, [&] {
         if (!isKeyboard<Wide>(d, self)) return;
         d.stateKeyboard.fetch_add(1, std::memory_order_relaxed);
+        if (d.gameDevice) g_gameKeyboardCalls.fetch_add(1, std::memory_order_relaxed);
         const bool priv = g_private.load(std::memory_order_relaxed) != 0;
         int vk = 0;
         uint8_t dik = 0;
@@ -237,6 +273,10 @@ HRESULT STDMETHODCALLTYPE hookGetDeviceState(void* self, DWORD cb, LPVOID data) 
                 if (!(st[dik] & 0x80)) d.swallowed.fetch_add(1, std::memory_order_relaxed);
             }
         }
+        if (cb == 256 && g_releaseTail.load(std::memory_order_relaxed)) {
+            auto* st = static_cast<uint8_t*>(data);
+            for (int k = 0; k < 256; ++k) if (g_heldDik[k].load()) st[k] = 0;
+        }
     });
     if (!g_budgetDi.shouldRun() && !d.retired) {
         d.retired = true;
@@ -248,10 +288,9 @@ HRESULT STDMETHODCALLTYPE hookGetDeviceState(void* self, DWORD cb, LPVOID data) 
     return hr;
 }
 
-template <DiDoor* Door, bool Wide>
-HRESULT STDMETHODCALLTYPE hookGetDeviceData(void* self, DWORD cbObj, LPDIDEVICEOBJECTDATA rgdod,
-                                            LPDWORD inOut, DWORD flags) {
-    DiDoor& d = *Door;
+template <bool Wide>
+HRESULT filterDeviceData(DiDoor& d, void* self, DWORD cbObj, LPDIDEVICEOBJECTDATA rgdod,
+                         LPDWORD inOut, DWORD flags) {
     const HRESULT hr = d.origData(self, cbObj, rgdod, inOut, flags);
     d.dataCalls.fetch_add(1, std::memory_order_relaxed);
     if (d.retired || FAILED(hr) || !rgdod || !inOut || *inOut == 0) return hr;
@@ -259,6 +298,7 @@ HRESULT STDMETHODCALLTYPE hookGetDeviceData(void* self, DWORD cbObj, LPDIDEVICEO
     guardedBudget(g_budgetDi, [&] {
         if (!isKeyboard<Wide>(d, self)) return;
         d.dataKeyboard.fetch_add(1, std::memory_order_relaxed);
+        if (d.gameDevice) g_gameKeyboardCalls.fetch_add(1, std::memory_order_relaxed);
         const bool priv = g_private.load(std::memory_order_relaxed) != 0;
         int vk = 0;
         uint8_t dik = 0;
@@ -266,12 +306,22 @@ HRESULT STDMETHODCALLTYPE hookGetDeviceData(void* self, DWORD cbObj, LPDIDEVICEO
         const uint32_t packed = g_summon.load(std::memory_order_relaxed);
         if (packed & 0x80000000u) unpackSummon(packed, &vk, &dik, &mods);
         const bool swallow = dik != 0 && summonModsHeldNow(mods);
-        if (!priv && !swallow) return;
+        if (!priv && !swallow && !g_releaseTail.load()) return;
         static_assert(sizeof(DiObjectData) == sizeof(DIDEVICEOBJECTDATA),
                       "DiObjectData mirrors DIDEVICEOBJECTDATA");
         const uint32_t before = *inOut;
-        const uint32_t kept = inputGateFilterData(reinterpret_cast<DiObjectData*>(rgdod),
+        uint32_t kept = inputGateFilterData(reinterpret_cast<DiObjectData*>(rgdod),
                                                   before, priv, dik, swallow);
+        if (g_releaseTail.load()) {
+            uint32_t out = 0;
+            for (uint32_t i = 0; i < kept; ++i) {
+                const auto& event = rgdod[i];
+                if ((event.dwData & 0x80) && event.dwOfs < 256 &&
+                    g_heldDik[event.dwOfs].load()) continue;
+                rgdod[out++] = event;
+            }
+            kept = out;
+        }
         *inOut = kept;
         if (kept < before) {
             (priv ? d.zeroed : d.swallowed).fetch_add(before - kept, std::memory_order_relaxed);
@@ -280,10 +330,22 @@ HRESULT STDMETHODCALLTYPE hookGetDeviceData(void* self, DWORD cbObj, LPDIDEVICEO
     return hr;
 }
 
+template <DiDoor* Door, bool Wide>
+HRESULT STDMETHODCALLTYPE hookGetDeviceState(void* self, DWORD cb, LPVOID data) {
+    return filterDeviceState<Wide>(*Door, self, cb, data);
+}
+
+template <DiDoor* Door, bool Wide>
+HRESULT STDMETHODCALLTYPE hookGetDeviceData(void* self, DWORD cb, LPDIDEVICEOBJECTDATA data,
+                                            LPDWORD count, DWORD flags) {
+    return filterDeviceData<Wide>(*Door, self, cb, data, count, flags);
+}
+
 SHORT WINAPI hookGetAsyncKeyState(int vk) {
     g_user.asyncCalls.fetch_add(1, std::memory_order_relaxed);
     if (!g_user.retired2) {
         if (g_private.load(std::memory_order_relaxed)) return 0;
+        if (releaseTailVk(vk)) return 0;
         const uint32_t packed = g_summon.load(std::memory_order_relaxed);
         if (packed & 0x80000000u) {
             int svk = 0;
@@ -303,6 +365,7 @@ SHORT WINAPI hookGetKeyState(int vk) {
     g_user.keyStateCalls.fetch_add(1, std::memory_order_relaxed);
     if (!g_user.retired2) {
         if (g_private.load(std::memory_order_relaxed)) return 0;
+        if (releaseTailVk(vk)) return 0;
         const uint32_t packed = g_summon.load(std::memory_order_relaxed);
         if (packed & 0x80000000u) {
             int svk = 0;
@@ -326,6 +389,9 @@ BOOL WINAPI hookGetKeyboardState(PBYTE state) {
         if (g_private.load(std::memory_order_relaxed)) {
             memset(state, 0, 256);
             return;
+        }
+        if (g_releaseTail.load()) {
+            for (int vk = 0; vk < 256; ++vk) if (g_heldVk[vk].load()) state[vk] = 0;
         }
         const uint32_t packed = g_summon.load(std::memory_order_relaxed);
         if (packed & 0x80000000u) {
@@ -371,6 +437,18 @@ BOOL WINAPI hookPeekMessageA(LPMSG msg, HWND hwnd, UINT lo, UINT hi, UINT remove
             g_user.nulled.fetch_add(1, std::memory_order_relaxed);
             return;
         }
+        if (g_releaseTail.load()) {
+            const bool key = m == WM_KEYDOWN || m == WM_KEYUP ||
+                             m == WM_SYSKEYDOWN || m == WM_SYSKEYUP;
+            const unsigned dik = ((msg->lParam >> 16) & 0x7f) |
+                                 ((msg->lParam & (1 << 24)) ? 0x80 : 0);
+            if ((key && releaseTailVk(static_cast<int>(msg->wParam))) ||
+                (!key && g_heldDik[dik].load())) {
+                msg->message = WM_NULL;
+                g_user.nulled.fetch_add(1, std::memory_order_relaxed);
+                return;
+            }
+        }
         const uint32_t packed = g_summon.load(std::memory_order_relaxed);
         if ((packed & 0x80000000u) &&
             (m == WM_KEYDOWN || m == WM_KEYUP || m == WM_SYSKEYDOWN || m == WM_SYSKEYUP)) {
@@ -392,7 +470,132 @@ BOOL WINAPI hookPeekMessageA(LPMSG msg, HWND hwnd, UINT lo, UINT hi, UINT remove
     return r;
 }
 
-// Install one DirectInput door: make the dummy device, patch its table.
+template <size_t Index>
+HRESULT STDMETHODCALLTYPE gameDeviceState(void* self, DWORD cb, LPVOID data) {
+    return filterDeviceState<false>(g_gameDi[Index], self, cb, data);
+}
+
+template <size_t Index>
+HRESULT STDMETHODCALLTYPE gameDeviceData(void* self, DWORD cb, LPDIDEVICEOBJECTDATA data,
+                                         LPDWORD count, DWORD flags) {
+    return filterDeviceData<false>(g_gameDi[Index], self, cb, data, count, flags);
+}
+
+struct CaptureLock {
+    CaptureLock() { AcquireSRWLockExclusive(&g_captureLock); }
+    ~CaptureLock() { ReleaseSRWLockExclusive(&g_captureLock); }
+};
+
+template <size_t... I>
+void captureKeyboard(void* device, std::index_sequence<I...>) {
+    DiDoor unknown;
+    if (!isKeyboard<false>(unknown, device)) return;
+    static const PFN_GetDeviceState stateHooks[] = {&gameDeviceState<I>...};
+    static const PFN_GetDeviceData dataHooks[] = {&gameDeviceData<I>...};
+    CaptureLock lock;
+    void** table = *reinterpret_cast<void***>(device);
+    // A shared system table may already have a fallback hook. Do not stack
+    // another gate on it. Private overlay tables each get their own original.
+    for (DiDoor* d : {&g_diW, &g_diA}) {
+        if (d->installed && d->hook.originalVTable() == table) return;
+    }
+    for (auto& d : g_gameDi) {
+        if (d.installed && d.hook.originalVTable() == table) return;
+    }
+    for (size_t i = 0; i < kGameDeviceDoors; ++i) {
+        auto& d = g_gameDi[i];
+        if (d.installed) continue;
+        if (!d.hook.attach(device, 32) || d.hook.executablePrefix() <= kSlotGetDeviceData) {
+            d.hook.uninstall();
+            return;
+        }
+        d.name = "game keyboard";
+        d.gameDevice = true;
+        d.dummy = device;
+        reinterpret_cast<IUnknown*>(device)->AddRef();
+        d.hook.setMode(HookMode::InPlace);
+        const bool staged =
+            d.hook.replace(kSlotGetDeviceState, reinterpret_cast<void*>(stateHooks[i]),
+                           reinterpret_cast<void**>(&d.origState)) &&
+            d.hook.replace(kSlotGetDeviceData, reinterpret_cast<void*>(dataHooks[i]),
+                           reinterpret_cast<void**>(&d.origData));
+        if (!staged || !d.hook.commit()) {
+            d.hook.uninstall();
+            reinterpret_cast<IUnknown*>(device)->Release();
+            d.dummy = nullptr;
+            return;
+        }
+        d.installed = true;
+        iatHookEntryModule(table, d.tableModule, sizeof(d.tableModule));
+        iatHookEntryModule(reinterpret_cast<void*>(d.origState), d.entryModule,
+                          sizeof(d.entryModule));
+        Log::get().note("keyboard gate: captured the game's keyboard at CreateDevice; "
+                        "table %zu in %s, forwarding through %s. Private overlay tables "
+                        "are covered; the device's identity is unchanged.",
+                        i, d.tableModule, d.entryModule);
+        return;
+    }
+    Log::get().note("keyboard gate: all %zu keyboard tables are occupied; a new table "
+                    "is left untouched. Please report this log.", kGameDeviceDoors);
+}
+
+template <size_t Index>
+HRESULT STDMETHODCALLTYPE factoryCreateDevice(void* self, REFGUID guid, void** device,
+                                               LPUNKNOWN outer) {
+    const HRESULT hr = g_factories[Index].original(self, guid, device, outer);
+    if (SUCCEEDED(hr) && device && *device && !outer) {
+        guardedBudget(g_budgetDi, [&] {
+            captureKeyboard(*device, std::make_index_sequence<kGameDeviceDoors>{});
+        });
+    }
+    return hr;
+}
+
+template <size_t... I>
+void captureFactory(void* factory, std::index_sequence<I...>) {
+    static const PFN_CreateDevice hooks[] = {&factoryCreateDevice<I>...};
+    CaptureLock lock;
+    void** table = *reinterpret_cast<void***>(factory);
+    for (const auto& f : g_factories) {
+        if (f.owner && f.hook.originalVTable() == table) return;
+    }
+    for (size_t i = 0; i < kFactoryDoors; ++i) {
+        auto& f = g_factories[i];
+        if (f.owner) continue;
+        if (!f.hook.attach(factory, 11) || f.hook.executablePrefix() <= 3) {
+            f.hook.uninstall();
+            return;
+        }
+        f.owner = factory;
+        reinterpret_cast<IUnknown*>(factory)->AddRef();
+        f.hook.setMode(HookMode::InPlace);
+        if (!f.hook.replace(3, reinterpret_cast<void*>(hooks[i]),
+                            reinterpret_cast<void**>(&f.original)) || !f.hook.commit()) {
+            f.hook.uninstall();
+            f.owner = nullptr;
+            reinterpret_cast<IUnknown*>(factory)->Release();
+        }
+        return;
+    }
+    Log::get().note("keyboard gate: all %zu DirectInput factory tables are occupied; "
+                    "a new factory is left untouched.", kFactoryDoors);
+}
+
+HRESULT WINAPI hookDirectInput8Create(HINSTANCE instance, DWORD version, REFIID iid,
+                                      LPVOID* out, LPUNKNOWN outer) {
+    const auto original = reinterpret_cast<PFN_DirectInput8Create>(g_createImport.original);
+    const HRESULT hr = original(instance, version, iid, out, outer);
+    if (SUCCEEDED(hr) && out && *out && !outer &&
+        (IsEqualGUID(iid, kIidDirectInput8A) || IsEqualGUID(iid, kIidDirectInput8W))) {
+        guardedBudget(g_budgetDi, [&] {
+            captureFactory(*out, std::make_index_sequence<kFactoryDoors>{});
+        });
+    }
+    return hr;
+}
+
+// Fallback for a runtime without an observed factory: make a dummy device
+// and patch the shared table, preserving the path that works without overlays.
 template <DiDoor* Door, bool Wide>
 void installDiDoor(PFN_DirectInput8Create create, HINSTANCE inst, const GUID& iid,
                    const char* name, void*** sharedTableOut) {
@@ -601,19 +804,26 @@ void inputGateConfigure(Config& cfg) {
         }
     }
     g_summon.store(packed);
-    if (!g_privateWanted && g_private.load()) g_private.store(0);
+    if (!g_privateWanted) {
+        g_private.store(0);
+        g_releaseTail.store(false);
+    }
 }
 
 void inputGateInstall() {
     if (g_installTried) return;
     g_installTried = true;
     guarded("inputGate/install", [&] {
+        bool captured = false;
+        for (const auto& d : g_gameDi) captured |= d.installed;
         HMODULE di = GetModuleHandleW(L"dinput8.dll");
         if (!di) di = LoadLibraryW(L"dinput8.dll");
         PFN_DirectInput8Create create =
             di ? reinterpret_cast<PFN_DirectInput8Create>(GetProcAddress(di, "DirectInput8Create"))
                : nullptr;
-        if (!create) {
+        if (captured) {
+            Log::get().note("keyboard gate: using the keyboard device captured from the game.");
+        } else if (!create) {
             Log::get().note("keyboard gate: dinput8.dll or DirectInput8Create is missing; the "
                             "DirectInput door is not installed and bound keys reach the game.");
         } else {
@@ -630,19 +840,36 @@ void inputGateInstall() {
 
 void inputGateSetPrivate(bool priv) {
     const int want = (priv && g_privateWanted) ? 1 : 0;
-    if (g_private.load() != want) g_private.store(want);
+    if (g_private.load() != want) {
+        if (!want) captureReleaseTail(&GetAsyncKeyState);
+        else g_releaseTail.store(false);
+        g_private.store(want);
+    } else if (!want) {
+        // The menu's fault path still calls SetPrivate(false) each frame,
+        // even when its normal tick has retired. Never strand held keys there.
+        refreshReleaseTail(&GetAsyncKeyState);
+    }
 }
 
 bool inputGatePrivate() { return g_private.load() != 0; }
 
 void inputGateTick() {
     if (!g_installTried) return;
+    refreshReleaseTail(&GetAsyncKeyState);
+    static bool gameReachedNoted = false;
+    if (!gameReachedNoted && g_gameKeyboardCalls.load() != 0) {
+        gameReachedNoted = true;
+        Log::get().note("keyboard gate: the game's captured keyboard is reaching the gate; "
+                        "state and buffered reads follow menu privacy.");
+    }
     if (dueMs(g_reclaimMs, kReclaimEveryMs)) {
         g_reclaimMs = stampMs();
         // Vouch only for slots the game has been reaching and that have gone
         // quiet for several seconds while frames flow -- the same evidence
         // rule vScreen applies. A slot never reached is never vouched.
-        for (DiDoor* d : {&g_diW, &g_diA}) {
+        DiDoor* doors[kGameDeviceDoors + 2] = {&g_diW, &g_diA};
+        for (size_t i = 0; i < kGameDeviceDoors; ++i) doors[i + 2] = &g_gameDi[i];
+        for (DiDoor* d : doors) {
             if (!d->installed) continue;
             const uint32_t st = d->stateCalls.load(std::memory_order_relaxed);
             const uint32_t da = d->dataCalls.load(std::memory_order_relaxed);
@@ -674,7 +901,7 @@ void inputGateTick() {
                                : (g_diA.installed && !g_diA.retired) ? &g_diA : nullptr;
             const uint32_t kbd = g_diW.stateKeyboard.load() + g_diA.stateKeyboard.load() +
                                  g_diW.dataKeyboard.load() + g_diA.dataKeyboard.load();
-            if (live && kbd == 0) {
+            if (live && kbd == 0 && g_gameKeyboardCalls.load() == 0) {
                 g_unreachedNoted = true;
                 Log::get().note(
                     "keyboard gate: the menu has held the keys for %u frames and no keyboard "
@@ -696,10 +923,11 @@ void inputGateTick() {
 
 void inputGateStatusLine(char* buf, size_t bufLen) {
     if (!buf || !bufLen) return;
-    const bool di = (g_diW.installed && !g_diW.retired) || (g_diA.installed && !g_diA.retired);
+    bool di = (g_diW.installed && !g_diW.retired) || (g_diA.installed && !g_diA.retired);
+    for (const auto& d : g_gameDi) di |= d.installed && !d.retired;
     const bool reached = g_diW.stateForeign.load() + g_diA.stateForeign.load() +
                              g_diW.dataKeyboard.load() + g_diA.dataKeyboard.load() >
-                         0;
+                         0 || g_gameKeyboardCalls.load() != 0;
     const bool trio = g_user.asyncKey.applied && !g_user.retired2;
     const bool pump = g_user.peek.applied && !g_user.retired3;
     snprintf(buf, bufLen, "keys %s -- doors: dinput %s%s, key-state %s, pump %s",
@@ -712,6 +940,8 @@ void inputGateStatusLine(char* buf, size_t bufLen) {
 void inputGateShutdown() {
     g_private.store(0);
     g_summon.store(0);
+    g_releaseTail.store(false);
+    iatHookUninstall(&g_createImport);
     iatHookUninstall(&g_user.peek);
     iatHookUninstall(&g_user.keyboardState);
     iatHookUninstall(&g_user.keyState);
@@ -724,6 +954,25 @@ void inputGateShutdown() {
             d->dummy = nullptr;
         }
     }
+    for (auto& d : g_gameDi) {
+        d.hook.uninstall();
+        d.installed = false;
+        if (d.dummy) reinterpret_cast<IUnknown*>(d.dummy)->Release();
+        d.dummy = nullptr;
+    }
+    for (auto& f : g_factories) {
+        f.hook.uninstall();
+        if (f.owner) reinterpret_cast<IUnknown*>(f.owner)->Release();
+        f.owner = nullptr;
+    }
+}
+
+void inputGateInstallEarly() {
+    // Called during loader attach: only inspect the already-mapped EXE's
+    // imports and exchange one pointer. No DirectInput creation, loading,
+    // logging or config access here. Actual devices arrive after startup.
+    iatHookInstall("dinput8.dll", "DirectInput8Create",
+                   reinterpret_cast<void*>(&hookDirectInput8Create), &g_createImport);
 }
 
 }  // namespace edvr
