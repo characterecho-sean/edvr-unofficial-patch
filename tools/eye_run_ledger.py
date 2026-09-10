@@ -130,7 +130,13 @@ def main():
     ap.add_argument('--hub-radius', type=float, default=500.0)
     ap.add_argument('--ring-radius', type=float, default=800.0)
     ap.add_argument('--big', type=int, default=50, help='a non-pool instanced draw with at least this many instances is listed')
+    ap.add_argument('--pool-vs', help='a file of vertex shader hashes (hex, one a line) that read t33: the pool draws. Without it the '
+                                     'ledger flag decides, which only says t33 HELD the pool at the draw -- true of every draw after a '
+                                     'pool draw, the game never unbinding it (the run of 2026-09-10 05:37)')
     a = ap.parse_args()
+    readers = None
+    if a.pool_vs:
+        readers = set(int(l.strip(), 16) for l in open(a.pool_vs) if l.strip())
     dp = os.path.join(a.dir, f'draws_{a.stamp}.bin')
     b = open(dp, 'rb').read()
     magic, ver, frames, frame0, instStride, bonesStride, poolBytes = struct.unpack('<8sIIIIII', b[:32])
@@ -140,8 +146,10 @@ def main():
     draws = {}
     for i in range(frames):
         frame, n = struct.unpack('<II', b[off:off + 8]); off += 8
-        rows = np.frombuffer(b, dtype=np.dtype([('vs', '<u8'), ('count', '<u4'), ('inst', '<u4'), ('start', '<u4'), ('kind', 'u1'), ('pool', 'u1'), ('pad', '<u2')]), count=n, offset=off)
+        rows = np.frombuffer(b, dtype=np.dtype([('vs', '<u8'), ('count', '<u4'), ('inst', '<u4'), ('start', '<u4'), ('kind', 'u1'), ('pool', 'u1'), ('pad', '<u2')]), count=n, offset=off).copy()
         off += n * 24
+        if readers is not None:
+            rows['pool'] = np.array([1 if int(v) in readers else 0 for v in rows['vs']], dtype=np.uint8)
         draws[frame] = rows
     cropFrames = [(k, f) for k, f in enumerate(crop) if f >= 0]
     print(f"ledger {a.stamp}: {frames} frames from {frame0}; instance stride {instStride}, palette stride {bonesStride}, pool {poolBytes} bytes")
@@ -217,17 +225,26 @@ def main():
         if sk.sum() and fa in bones and fb in bones:
             idx = np.nonzero(sk)[0]
             Ra = qmat(A['q'][idx]); Rb = qmat(B['q'][idx])
-            for pi in sorted(set(bones[fa]) & set(bones[fb])):
-                Ma, oka = bone_mats(bones[fa][pi], A['base'][idx], len(idx)); Mb, okb = bone_mats(bones[fb][pi], B['base'][idx], len(idx))
-                # a palette whose rows at the bases are rotations (orthonormal) is the hub's; zeros are another's
-                orth = np.abs(np.einsum('nij,nkj->nik', Ma, Ma) - np.eye(3)).max(axis=(1, 2)) < 0.05
-                ok = oka & okb & orth
-                if ok.sum() < max(3, len(idx) // 4): continue
-                t_rec = np.median(rot_angle(Ra[ok], Rb[ok]))
-                t_bone = np.median(rot_angle(Ma[ok], Mb[ok]))
-                t_both = np.median(rot_angle(np.einsum('nij,njk->nik', Ra[ok], Ma[ok]), np.einsum('nij,njk->nik', Rb[ok], Mb[ok])))
-                skin_txt = f"{sk.sum():>13d} {t_rec:>6.4f} {t_bone:>6.4f} {t_both:>6.4f} (palette {pi}, {ok.sum()} rotations)"
-                break
+            def pick(frame, bases):
+                # the palette whose rows at the bases are rotations (orthonormal), chosen per frame: the
+                # game binds two and alternates
+                best = None
+                for pi in sorted(bones[frame]):
+                    M, ok = bone_mats(bones[frame][pi], bases, len(bases))
+                    orth = ok & (np.abs(np.einsum('nij,nkj->nik', M, M) - np.eye(3)).max(axis=(1, 2)) < 0.05)
+                    if best is None or orth.sum() > best[2].sum(): best = (pi, M, orth)
+                return best
+            pa = pick(fa, A['base'][idx]); pb = pick(fb, B['base'][idx])
+            if pa and pb:
+                ok = pa[2] & pb[2]
+                if ok.sum() >= 3:
+                    Ma, Mb = pa[1], pb[1]
+                    t_rec = np.median(rot_angle(Ra[ok], Rb[ok]))
+                    t_bone = np.median(rot_angle(Ma[ok], Mb[ok]))
+                    t_both = np.median(rot_angle(np.einsum('nij,njk->nik', Ra[ok], Ma[ok]), np.einsum('nij,njk->nik', Rb[ok], Mb[ok])))
+                    skin_txt = f"{sk.sum():>13d} {t_rec:>6.4f} {t_bone:>6.4f} {t_both:>6.4f} (palettes {pa[0]}/{pb[0]}, {ok.sum()} rotations)"
+                else:
+                    skin_txt = f"{sk.sum():>13d} {'-':>6s} {'-':>6s} {'-':>6s} (no rotations at the bases in any palette: {pa[2].sum()}/{pb[2].sum()})"
         print(f"{fa:>6d}->{fb:<6d} {turn:>6.4f}/{body.sum():<3d}| " + " | ".join(cells) + f" | {skin_txt}")
     # THE AUX: the big non-pool instanced draws -- per consecutive frames, the turn of cb2's world rows
     # (rows 2-4, the ones the dumped shaders multiply positions by) and what changed in t0 / the streams

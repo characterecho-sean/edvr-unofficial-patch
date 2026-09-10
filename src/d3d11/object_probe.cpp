@@ -508,7 +508,9 @@ struct LedgerDraw {
     uint32_t instances;
     uint32_t startInstance;  // StartInstanceLocation: where its records' indices sit in the instance stream
     uint8_t  kind;           // 'D' 'I' 'N' 'X'
-    uint8_t  pool;           // 1 = t33 was the pool on this draw (asked of the context; armed only)
+    uint8_t  pool;           // 1 = t33 HELD the pool at this draw (asked of the context; armed only) -- which
+                             // it does on every draw after a pool draw, the game never unbinding it;
+                             // whether the shader READS it is the desk's question (tools/eye_run_ledger.py --pool-vs)
     uint16_t pad;
 };
 static_assert(sizeof(LedgerDraw) == 24, "tools/eye_run_ledger.py reads 24-byte rows");
@@ -535,6 +537,7 @@ constexpr int kLedgerPalettes = 4;
 ID3D11Buffer* g_palette[kLedgerPalettes] = {};   // held while armed
 uint32_t g_paletteBytes[kLedgerPalettes] = {};
 int      g_paletteCount = 0;
+bool     g_paletteSeen[kLedgerPalettes] = {};   // copied at this frame's first pool draw binding it (not at the boundary: the run of 05:37 read zeros there, the game having discarded them for the next frame)
 // [0] the instance stream's copies, [1..4] the palettes'
 LedgerCopy g_ledgerRing[1 + kLedgerPalettes][kLedgerRing];
 std::vector<uint8_t> g_ledgerPalette[kLedgerPalettes][kLedgerFrames];
@@ -583,6 +586,7 @@ void ledgerRelease() {
         g_paletteBytes[i] = 0;
     }
     g_paletteCount = 0;
+    for (bool& seen : g_paletteSeen) seen = false;
     for (auto& ring : g_ledgerRing) {
         for (LedgerCopy& c : ring) releaseCopy(c);
     }
@@ -2407,8 +2411,9 @@ void ledgerLearn(ID3D11DeviceContext* ctx) {
 // A watched shader's buffers, copied at its first draw of the frame: cb2
 // whole, t0 when it is a buffer, the first two vertex buffers -- each up to
 // kLedgerAuxBytes, into the slot's rings, read back at the boundary.
-bool auxStage(ID3D11DeviceContext* ctx, ID3D11Device*& dev, LedgerCopy* ring, ID3D11Buffer* src, uint32_t whole) {
-    const uint32_t bytes = whole < kLedgerAuxBytes ? whole : kLedgerAuxBytes;
+bool auxStage(ID3D11DeviceContext* ctx, ID3D11Device*& dev, LedgerCopy* ring, ID3D11Buffer* src, uint32_t whole,
+              uint32_t cap = kLedgerAuxBytes) {
+    const uint32_t bytes = whole < cap ? whole : cap;
     if (!src || !bytes) return false;
     LedgerCopy* c = nullptr;
     for (int i = 0; i < kLedgerRing; ++i) {
@@ -2489,6 +2494,36 @@ void auxCapture(ID3D11DeviceContext* ctx, uint64_t vs, uint32_t count, uint32_t 
     if (dev) dev->Release();
 }
 
+// A palette's copy at this frame's first pool draw binding it, the megabyte
+// the bases reach into (kLedgerBonesMax): at the boundary the copies read
+// zeros, the game having discarded and rewritten them for the next frame
+// before present (the run of 05:37). Three COM calls a pool draw until every
+// palette in hand has been seen this frame.
+void paletteCapture(ID3D11DeviceContext* ctx) {
+    bool all = g_paletteCount > 0;
+    for (int i = 0; i < g_paletteCount; ++i) all = all && g_paletteSeen[i];
+    if (all || g_paletteCount == 0) return;
+    ID3D11ShaderResourceView* srv = nullptr;
+    ctx->VSGetShaderResources(38, 1, &srv);
+    if (!srv) return;
+    ID3D11Resource* res = nullptr;
+    srv->GetResource(&res);
+    srv->Release();
+    if (!res) return;
+    ID3D11Buffer* buf = nullptr;
+    res->QueryInterface(__uuidof(ID3D11Buffer), reinterpret_cast<void**>(&buf));
+    res->Release();
+    if (!buf) return;
+    for (int i = 0; i < g_paletteCount; ++i) {
+        if (g_palette[i] != buf || g_paletteSeen[i]) continue;
+        g_paletteSeen[i] = true;
+        ID3D11Device* dev = nullptr;
+        if (!auxStage(ctx, dev, g_ledgerRing[1 + i], buf, g_paletteBytes[i], kLedgerBonesMax)) ++g_ledgerSkipped;
+        if (dev) dev->Release();
+    }
+    buf->Release();
+}
+
 // One eye draw's row while armed. The pool question is asked of the context
 // -- three COM calls on each instanced draw for twenty frames, a millisecond
 // or two a frame, and only then.
@@ -2504,6 +2539,11 @@ void ledgerNoteDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count, uint32_
     d.kind = static_cast<uint8_t>(kind);
     if ((kind == 'X' || kind == 'N') && instances && g_pool) {
         guardedBudget(g_budget, [&] {
+            // Every big instanced draw first, whatever t33 holds: the pool's own
+            // draws carry a handful of instances each, and the draws this is for
+            // bind nothing at t33 -- the run of 05:37 asked the pool question
+            // first and left on that before reaching here.
+            if (instances >= kLedgerAuxMin) auxCapture(ctx, d.vs, count, instances);
             ID3D11ShaderResourceView* srv = nullptr;
             ctx->VSGetShaderResources(kPoolSlot, 1, &srv);
             if (!srv) return;
@@ -2519,8 +2559,10 @@ void ledgerNoteDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count, uint32_
                 }
             }
             srv->Release();
-            if (d.pool && (!g_inst || g_paletteCount < kLedgerPalettes)) ledgerLearn(ctx);
-            if (!d.pool && instances >= kLedgerAuxMin) auxCapture(ctx, d.vs, count, instances);
+            if (d.pool) {
+                if (!g_inst || g_paletteCount < kLedgerPalettes) ledgerLearn(ctx);
+                paletteCapture(ctx);
+            }
         });
     }
     g_ledgerDraws[frame - g_ledgerFrame0].push_back(d);
@@ -2530,10 +2572,10 @@ void ledgerNoteDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count, uint32_
 // beside them), into their rings; the palette's first megabyte only.
 void ledgerIssue(ID3D11DeviceContext* ctx) {
     ID3D11Device* dev = nullptr;
-    for (int what = 0; what < 1 + kLedgerPalettes; ++what) {
-        ID3D11Buffer* src = what == 0 ? g_inst : g_palette[what - 1];
-        const uint32_t whole = what == 0 ? g_instBytes : g_paletteBytes[what - 1];
-        const uint32_t bytes = what == 0 ? whole : (whole < kLedgerBonesMax ? whole : kLedgerBonesMax);
+    for (int what = 0; what < 1; ++what) {   // the instance stream; the palettes are copied at their draws (paletteCapture)
+        ID3D11Buffer* src = g_inst;
+        const uint32_t whole = g_instBytes;
+        const uint32_t bytes = whole;
         if (!src || !bytes) continue;
         LedgerCopy* c = nullptr;
         for (LedgerCopy& s : g_ledgerRing[what]) {
@@ -2741,9 +2783,10 @@ void writeLedger() {
     Log::get().note(
         "object probe: the eye run's LEDGER is on disk beside its crops -- %d frames from %u: %d pool copies "
         "(pool_%ls_<frame>.bin), %d instance streams (inst_%ls_<frame>.bin, %u bytes, stride %u), %d palette "
-        "copies of %d palettes of [%s] bytes (bones<p>_%ls_<frame>.bin, the first %u bytes of each), %d aux files "
+        "copies of %d palettes of [%s] bytes (bones<p>_%ls_<frame>.bin, the first %u bytes of each, copied at the "
+        "draw), %d aux files "
         "(aux_%ls_<frame>.bin: cb2, t0 and the first two vertex buffers of the %d shaders drawing %u+ instances "
-        "with no pool: [%s]) and %u eye draws in draws_%ls.bin%s; the crops C%02d..C%02d were frames %d..%d. "
+        "in a draw: [%s]) and %u eye draws in draws_%ls.bin%s; the crops C%02d..C%02d were frames %d..%d. "
         "tools/eye_run_ledger.py reads them. %u copies were skipped.",
         kLedgerFrames, g_ledgerFrame0, pools, g_ledgerStamp, insts, g_ledgerStamp, g_instBytes, g_instStride, bones,
         g_paletteCount, pal, g_ledgerStamp, kLedgerBonesMax, auxes, g_ledgerStamp, g_auxCount, kLedgerAuxMin, aux,
@@ -3064,6 +3107,7 @@ void objectProbeFrameBoundary(ID3D11DeviceContext* ctx) {
                 if (g_frame <= g_ledgerLastFrame) ledgerIssue(ctx);
                 ledgerPoll(ctx);
                 for (AuxSlot& a : g_aux) a.seenThisFrame = false;   // the next frame's first draw of each
+                for (bool& seen : g_paletteSeen) seen = false;
                 if (g_frame > g_ledgerLastFrame + kReadAfter + kDropAfter) writeLedger();
             }
         } else if (++g_framesWithoutPool == kAbsentFrames && !g_absentNoted && g_verbose) {
