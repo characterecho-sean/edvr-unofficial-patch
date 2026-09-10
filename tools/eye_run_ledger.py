@@ -75,34 +75,39 @@ def bone_mats(bones, base, count):
             M[i] = r[:, :3]; ok[i] = True
     return M, ok
 
+def kabsch(p0, p1):
+    """the rigid motion p1 = R p0 + t of a point cloud, by SVD"""
+    c0 = p0.mean(0); c1 = p1.mean(0)
+    H = (p0 - c0).T @ (p1 - c1)
+    U, S, Vt = np.linalg.svd(H)
+    d = np.sign(np.linalg.det(Vt.T @ U.T))
+    R = Vt.T @ np.diag([1, 1, d]) @ U.T
+    return R, c1 - R @ c0
+
 def fit_axis(p0, p1, ang, axis, mask):
-    """the station's axis (unit) and a point on it, from records that turned: p1 - p0 = (R - I)(p0 - c)"""
-    m = mask & (ang > 0.005) & (ang < 1.0)
-    if m.sum() < 20: return None, None
-    a = axis[m]
-    # the common axis: the principal direction of the per-record axes (sign-aligned)
-    ref = a[np.argmax(np.abs(a).sum(1))]
-    a = a * np.sign(a @ ref)[:, None]
-    u = a.mean(0); u /= np.linalg.norm(u)
-    th = np.radians(np.median(ang[m]))
-    K = np.array([[0, -u[2], u[1]], [u[2], 0, -u[0]], [-u[1], u[0], 0]])
-    R = np.eye(3) + math.sin(th) * K + (1 - math.cos(th)) * (K @ K)
-    A = R - np.eye(3)
-    # least squares for c: (R - I) c = (R - I) p0 - (p1 - p0)  summed over records; the axis direction is unobservable, so solve in the plane
-    P0 = p0[m]; P1 = p1[m]
-    rhs = (P0 @ A.T) - (P1 - P0)
-    # solve A c = rhs_i for all i (stack)
-    AA = np.vstack([A] * 1)
-    # normal equations over all records
-    M = A.T @ A * m.sum()
-    v = (A.T @ rhs.T).sum(1)
-    # remove the axis direction from the solve
-    Pp = np.eye(3) - np.outer(u, u)
-    M2 = Pp @ M @ Pp + np.outer(u, u)
-    c = np.linalg.lstsq(M2, Pp @ v, rcond=None)[0]
-    # place c at the records' mean along the axis
-    c = c + u * ((P0.mean(0) - c) @ u)
-    return u, c
+    """the station's turn between the frames from the records' POSITIONS: a rigid fit (Kabsch) of the
+    masked records, refined three times by dropping the records that do not move with the rest (the
+    traffic, a record freed and reused) -- the quaternions' per-record axes are too coarse at a
+    twentieth of a degree (unorm16). Returns the unit axis, a point on it, the turn in degrees and the
+    mask of the records that fitted."""
+    m = mask & (ang < 1.0)
+    if m.sum() < 20: return None, None, 0.0, m
+    for _ in range(4):
+        R, t = kabsch(p0[m], p1[m])
+        res = np.linalg.norm(p0 @ R.T + t - p1, axis=1)
+        cut = max(0.05, 3.0 * np.median(res[m]))
+        m2 = mask & (ang < 1.0) & (res < cut)
+        if m2.sum() < 20 or m2.sum() == m.sum(): m = m2 if m2.sum() >= 20 else m; break
+        m = m2
+    R, t = kabsch(p0[m], p1[m])
+    th = math.degrees(math.acos(max(-1.0, min(1.0, (np.trace(R) - 1) / 2))))
+    w = np.array([R[2, 1] - R[1, 2], R[0, 2] - R[2, 0], R[1, 0] - R[0, 1]])
+    if np.linalg.norm(w) < 1e-12: return None, None, th, m
+    u = w / np.linalg.norm(w)
+    # p1 = R(p0 - c) + c: t = (I - R) c, singular along the axis, which the pseudo-inverse leaves out
+    c = np.linalg.pinv(np.eye(3) - R, rcond=1e-6) @ t
+    c = c + u * ((p0[m].mean(0) - c) @ u)
+    return u, c, th, m
 
 def main():
     ap = argparse.ArgumentParser()
@@ -159,7 +164,7 @@ def main():
     print()
     print("per pair of consecutive crops: the station's records (5-15 km) by radius band about the fitted axis --")
     print("   drawn = taken by a pool draw in BOTH frames; turn = the median turn of those records between the frames (deg)")
-    hdr = f"{'frames':>13s} {'axis fit':>9s} | {'hub: drawn/all':>15s} {'turn':>7s} {'undrawn':>8s} | {'mid: drawn/all':>15s} {'turn':>7s} {'undrawn':>8s} | {'ring: drawn/all':>16s} {'turn':>7s} {'undrawn':>8s} | {'skinned drawn':>13s} {'rec':>6s} {'bone':>6s} {'both':>6s}"
+    hdr = f"{'frames':>13s} {'body turn/n':>11s}| {'hub: drawn/all':>15s} {'turn':>7s} {'undrawn':>8s} | {'mid: drawn/all':>15s} {'turn':>7s} {'undrawn':>8s} | {'ring: drawn/all':>16s} {'turn':>7s} {'undrawn':>8s} | {'skinned drawn':>13s} {'rec':>6s} {'bone':>6s} {'both':>6s}"
     print(hdr)
     for fa, fb in pairs:
         if fa not in pools or fb not in pools:
@@ -169,7 +174,7 @@ def main():
         station = (d0 > 5000) & (d0 < 15000) & np.isfinite(d0)
         same = station & (A['base'] == B['base']) & (np.linalg.norm(B['pos'] - A['pos'], axis=1) < 50)
         ang, axis = qrel(A['q'], B['q'])
-        u, c = fit_axis(A['pos'], B['pos'], ang, axis, same & (A['base'] == 0))
+        u, c, turn, body = fit_axis(A['pos'], B['pos'], ang, axis, same & (A['base'] == 0))
         if u is None:
             print(f"{fa:>6d}->{fb:<6d} (no axis: too few records turned)"); continue
         rel = A['pos'] - c
@@ -199,7 +204,7 @@ def main():
                 t_bone = np.median(rot_angle(Ma[ok], Mb[ok]))
                 t_both = np.median(rot_angle(np.einsum('nij,njk->nik', Ra[ok], Ma[ok]), np.einsum('nij,njk->nik', Rb[ok], Mb[ok])))
                 skin_txt = f"{sk.sum():>13d} {t_rec:>6.4f} {t_bone:>6.4f} {t_both:>6.4f}"
-        print(f"{fa:>6d}->{fb:<6d} {np.degrees(0):>9.0f} | " + " | ".join(cells) + f" | {skin_txt}")
+        print(f"{fa:>6d}->{fb:<6d} {turn:>6.4f}/{body.sum():<3d}| " + " | ".join(cells) + f" | {skin_txt}")
     # the draws by shader, first pair's first frame
     if pairs and pairs[0][0] in draws:
         f = pairs[0][0]
