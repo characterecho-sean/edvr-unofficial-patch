@@ -2943,6 +2943,34 @@ which is this project's contract for every read of the game.
    per-pixel deviation over the run against its contrast, and shows a
    flash as every region changing at once. Two runs at the same spot,
    K and J, are the measurement.
+
+   *The forty-sixth session, 06:21 and 06:36 (v0.14.1-147)*: "K seems fine
+   too when stationary. When in motion, boosted flight, the station and
+   especially the solar panels blur. Also still seeing that strange
+   haze/blur shader" -- then: "the haze is from me turning around on my
+   own smoke trail, but heat haze should not be a thing in space." The
+   ribbon's vertex shader skipped by hand (advanced.census_skip) did not
+   remove it, and the census taken with the trail in view says why: that
+   shader draws the ribbon alone (two draws a frame, one pixel shader),
+   and right after each ribbon draw comes a second one, vs
+   203DF51758AADC4D, a 5334-index VOLUME under a scattering shader over
+   the depth resolve, two gradients and a cubemap, premultiplied under the
+   depth test with the write off -- four draws in two frames there, none
+   in the census of the day before with no trail about. Built
+   (v0.14.1-149-g0ce4d6e): fix.drives_smoke, on (the game's) or off (the ribbon
+   and the volume withheld; the glow and the heat haze stay their own
+   keys), live, with a menu row. "The station's arms are not lit properly
+   anymore, did we break something?" -- not by the skip (it never touched
+   another draw), and the arms' point lights (8289669D93A18C1D, sixty
+   light volumes reading the depth resolve and the G-buffer at each pixel)
+   are in the census; the check is the mod's AA off against on in the same
+   view, since the treated frame is the only one on disk. THE BOOST BLUR:
+   the boost intervals are the ones where the body stood down seventeen
+   frames on origin jumps whose carried shift was wrong (the same frames
+   dropped as another camera's) -- the candidate, unverified; the run's own
+   write hitch shows in the pool as a 0.7 deg step in one frame, sixteen
+   times the turn, which the rate times the frame's length cannot follow
+   either. Asked for: two presses while boosting, treated and raw.
 4. **Tier 2b** only if question 1 says no bits.
 5. **Tier 3** as `tools/` work against dumped frames, never on the hot
    path.
