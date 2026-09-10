@@ -1,8 +1,9 @@
 # EDVR — an unofficial patch for Elite Dangerous: Odyssey in VR
 
-Fixes for things that make Odyssey uncomfortable in a headset. Twelve fixes,
-two files, about three minutes — what each fix does is under
-[What it fixes](#what-it-fixes).
+Fixes for things that make Odyssey uncomfortable in a headset. Two dozen fixes,
+two files, about three minutes — the short list is under
+[What it fixes](#what-it-fixes), and each one in full is in
+[docs/fixes.md](docs/fixes.md).
 
 **Something not working?** [Open an
 issue](https://github.com/characterecho-sean/edvr-unofficial-patch/issues/new/choose)
@@ -172,195 +173,38 @@ By hand: delete `d3d11.dll` and `edvr.ini` from the game folder; in whichever
 
 ## What it fixes
 
-**One eye going darker than the other near bright lights.** Elite meters scene
-brightness separately per eye, so near a star or a floodlight one eye stops down
-and the other does not — two eyes disagreeing about how bright the world is.
-Measured at a held view of a star: about **1.5 stops** apart without the fix,
-**0.4** with it; what remains is the glow in the eye that can actually see the
-star, which is correct. *Details: [docs/eye-brightness.md](docs/eye-brightness.md).*
+Almost every one of them is the same shape: something correct on a monitor is
+wrong in a headset — drawn once for two eyes, pinned to your face instead of
+standing in the world, or sized for a screen you are not looking at.
 
-**The one-frame flash when you jump or drop out of supercruise.** Once per
-transition, Elite draws a single frame from the wrong viewpoint. On a monitor it
-is a blink; in a headset it reads as the world lurching. EDVR spots that frame
-and does not send it, so SteamVR holds the previous frame for a moment instead.
-*Details: [docs/transition-flash.md](docs/transition-flash.md).*
+- **The two eyes made to agree.** One eye stopping down near a star while the
+  other does not (1.5 stops apart, measured; 0.4 with the fix). The planet
+  that renders as a black disc in one eye in the scanners. The FSS showing
+  each eye a different scan. The RemLok helmet's edge lines hanging along your
+  nose instead of at your temples.
+- **Things put back in the world.** A star's whole glare, which stock rolls
+  and tilts with your head like a camera overlay. Geyser plumes and solar
+  prominences, which swim as you look past them. The loading ship's
+  head-locked scan pattern. The launch movie, off its 27-degree rectangle and
+  onto the splash screen's own surface.
+- **The one-frame flash** each time you jump or drop out of supercruise —
+  detected and not sent, so the runtime holds the previous frame instead.
+- **Shimmer and sharpness.** A proper filtered resolve whenever the game
+  supersamples, on by default. A temporal anti-aliasing pass Elite does not
+  have, with DLAA and DLSS on RTX cards, off by default because it trades text
+  sharpness for calm. RCAS sharpening at the door. And the HUD text made to
+  stop swimming underneath all of it.
+- **The terrain missing at the edges of view** over planets — Elite culls
+  against a narrower frustum than it renders, so squares of ground go
+  undrawn. Off by default; it costs about 6% GPU at the tested values.
+- **On foot:** the grey surround made properly black, the screen moved, bent
+  and raised above its forced 1920x1080, and Explorer Cam, which gives you a
+  real stereo view of your commander in the external camera.
 
-**The missing terrain at the edges of view.** *Off by default.* Over planets,
-Elite culls terrain against a narrower frustum than it renders, so squares of
-ground at the edges of your view are simply not drawn — black tiles popping in
-and out as you look around (Frontier issue
-[72609](https://issues.frontierstore.net/issue-detail/72609)). EDVR tells the
-game your headset shows a little more than it does and hands SteamVR only the
-part you really see, so those tiles get drawn. Costs GPU time — about 6% at
-the values tested on a Quest 3. Three settings:
-[The terrain fix](#the-terrain-fix-cull-guard).
-*Details: [docs/terrain-culling.md](docs/terrain-culling.md).*
-
-**Aliasing when you supersample — the resolve at the door.** *On by
-default, and idle unless the game supersamples.* When Elite renders each
-eye larger than the headset asked for (its HMD Quality above 1.0), the
-compositor shrinks the image on the fly as it corrects for the lenses, with
-whatever sampler it happens to use. `supersample_resolve = auto` (the
-default) has EDVR filter each eye down to exactly the recommended size
-itself, at submit, in linear light, with a calm (Gaussian) or crisp
-(Mitchell) kernel — `supersample_filter` and `supersample_width`, both live
-— and hand the compositor a frame it samples one to one. The pixels are
-the game's; only who filters them changes, so it cannot add detail and does
-nothing unless the game is already submitting larger than asked. Costs one
-small GPU pass per eye, measured by timestamp query and printed in the
-graphics log: about half a millisecond per eye on a Pimax Crystal Super at
-HMD Quality 1.25 (6780x6695 down to 5424x5356), a tenth of one on a Quest 3
-at 1.5 (3096x3312 down to 2064x2208). `off` gives the compositor its
-filtering back. For the shimmer itself:
-supersample through HMD Quality rather than Elite's Supersampling slider
-(the slider shrinks the image before the game's own post-processing), set
-Elite's anti-aliasing to Off or SMAA and stop expecting it to touch
-flicker, run anisotropic filtering at 16x, and on SteamVR turn on Advanced
-Supersample Filtering.
-*Details: [docs/anti-aliasing.md](docs/anti-aliasing.md).*
-
-**The shimmer on a steady ship.** A headset's tracking never quite stops:
-measured on a Pimax Crystal Super lying on a desk, the reported orientation
-wanders about a tenth of an arcminute every frame, and the compositor
-re-warps every frame by that motion, so any line about a pixel wide blinks
-as it crosses pixel rows. A rest lock that held the render pose while the
-head was still shipped on 2026-09-03 and was retired the next day: the
-temporal pass below integrates that wander instead of fighting it, and the
-lock could not engage on a Quest 3's tracking at all.
-*Details: [docs/anti-aliasing.md](docs/anti-aliasing.md).*
-
-**The shimmer itself — temporal anti-aliasing.** *Off by default; in the
-installer's settings window.* Elite has no temporal anti-aliasing, and its menu's options are
-edge filters that cannot touch content flickering on and off the pixel
-grid as your head moves. `temporal_aa = on` blends each frame with the
-frames before it, each moved to where its content sits now, with the
-projection the game renders through nudged by a sub-pixel amount every
-frame so the average converges to a real supersample even with the head
-held still. The first build moves the history by the headset's turn, which
-is exact for the cockpit and the HUD and right for the world whenever the
-ship is not turning; a fast turn leaves the world un-anti-aliased for
-those frames rather than ghosted. Set Elite's own anti-aliasing to Off or
-SMAA with it on. Live to turn on, as are the weight and the clamp. Every
-temporal filter trades a little edge contrast for its calm, so
-`render_sharpness` (0 to 1, live) runs AMD's RCAS on every outgoing frame
-as the last pass at the door, for the resolve's calm kernel as much as for
-this; the first flight found text a little soft without it, and 0.3 to 0.5
-is where to start. The second flight found the limit of the first build:
-a history moved by the head's rotation alone registers the world but not
-the cockpit, whose text sits close enough that the head's translation
-moves it by pixels, so it ghosts under head motion and stays soft. The
-cockpit census then found the scene's own depth, and the pass now
-reprojects every pixel with the head's translation through it by default,
-which is what a near panel needs to hold still (three docked flights: the
-history lands on the cockpit with 40% fewer clips than by rotation alone). Know the trade before
-turning it on: a temporal filter converges
-to a properly filtered image, which is calmer and softer than the hard,
-aliased edges of text without it, and a side-by-side at HMD Quality 1.5
-found the text much sharper with the resolve alone. If crisp text matters
-more to you than calm edges, leave this off and keep the resolve. On an RTX
-GPU, `temporal_aa = dlaa` hands the same inputs to NVIDIA's trained
-history instead, and `dlss` also lets Elite's HMD Quality below 1.0 render
-a fraction of the size and brings it back to full size, which buys frame
-time. It does not buy text: the cockpit's panels are drawn into surfaces
-that scale with the internal render size, so at HMD Quality 0.67 their
-text is rasterised at two-thirds size and no upscaler recovers it. (Every
-trained flight before 2026-09-04 ran with NVIDIA's history reset every
-frame, a bug found by review; the verdicts on those flights are of a
-spatial filter, not of DLSS.) What the trained modes did to the HUD's text
-before `ui_depth` was make it swim: Elite draws its interface depth-tested but
-never writes its depth, so the pass held a panel a metre away at infinity
-and NVIDIA's history rejected it under every head movement. `ui_depth`
-(on by default; nothing happens while `temporal_aa` is off) has the holo
-panels and the flight HUD write their depth into the buffer the pass
-reads, and the text holds still (flown 2026-09-06).
-*Details: [docs/anti-aliasing.md](docs/anti-aliasing.md) and
-[docs/crisp-ui-handoff.md](docs/crisp-ui-handoff.md).*
-
-**The RemLok helmet's edge lines hanging along your nose.** When the
-emergency helmet deploys, its faint edge lines end up in the middle of your
-view instead of at your temples — the game stamps the same both-edges
-overlay into each eye with no per-eye placement (Frontier issue
-[69074](https://issues.frontierstore.net/issue-detail/69074)). EDVR clips
-each eye to the line on its own outward side, which is what a real helmet
-looks like; `remlok_lines = hide` removes the lines entirely, `stock`
-restores the game's behaviour, and because the game parks the lines at the
-lens rim, `remlok_line_angle` (default 46°) places them at a visible angle
-derived per headset from its real projection. Field-verified on a Pimax via
-OpenComposite; if any rig shows the lines back on the nose, `remlok_swap_eyes`
-in the ini is the one-line correction, and that log is worth an issue.
-*Details: [docs/remlok-lines.md](docs/remlok-lines.md).*
-
-**The planet you are scanning going black in one eye.** In the surface and
-system scanners (DSS and FSS) the body renders as a featureless black disc in
-the right eye and correctly in the left — silhouette intact, the blue markers
-and the scanner's own UI fine in both (Frontier issue
-[78021](https://issues.frontierstore.net/issue-detail/78021)). The game
-issues the second eye's lighting draw with one of its inputs missing, so that
-eye's lighting lands nowhere. EDVR lends the draw the input the first eye's
-just used, for that one draw, put back exactly as found; `scanner_body = off`
-restores the game's behaviour. Present on some machines and absent on others,
-and on a machine without the bug it never engages.
-*Details: [docs/scanner-body.md](docs/scanner-body.md).*
-
-**The loading screen's shimmering ship.** The spinning ship hologram carries
-a faint, low-res, head-locked pattern inside its silhouette — the hologram
-is synthesized from the model's depth, and its scan pattern is sampled in
-*screen* space, which a monitor can never show moving but a headset always
-does. Nauseating if you focus on it. EDVR holds the pattern still for
-exactly that one draw per eye; `holo_pattern = stock` restores the game's
-behaviour. *Details: [docs/loading-hologram.md](docs/loading-hologram.md).*
-
-**The sun's glare riding your head.** *On by default (`vivid`).* A star's
-whole glare — corona, veiling smudge, light beams, rays, lens flare — is
-drawn flat on your view like a camera overlay: it rolls when you roll your
-head, the beams stay pinned horizontal to your face, and the disc tilts and
-breathes as you look around. `vivid` (the default) keeps everything — beams
-world-locked, the lens flare still sliding across your view — the
-movie-camera look without the head coupling; `realistic` anchors only the
-glow a real eye would see (corona and smudge) and removes the camera
-artifacts; `sun_glare = stock` restores the game's behaviour. Works on
-every star, witchspace arrivals included. Live: swap modes mid-flight
-and compare. *Details: [docs/sun-glare.md](docs/sun-glare.md).*
-
-**Smoke, steam and solar flares swimming as you look around.** *On by default
-(`steady`).* Geyser plumes, the prominences that erupt off star surfaces, and
-particle effects like them are drawn as flat cards all sharing
-one orientation taken from the camera — so in a headset the whole plume
-rolls when you tilt your head, and appears to rotate about its own axis as
-you look past it. `steady` (the default) gives each particle its own
-orientation, aimed at you and referenced to the world, so a plume stands
-still like the volume of smoke it is meant to be. It also settles the
-swimming you can see on a flat screen when you swing the mouse;
-`particle_billboard = stock` restores the game's behaviour.
-*Details: [docs/particle-billboards.md](docs/particle-billboards.md).*
-
-**The on-foot screen being flat.** *Off by default.* `panel_curvature`
-bends the on-foot / HMD Cinema Mode screen toward you, the way Virtual
-Desktop curves its virtual display — the edges come nearer instead of
-falling away. `0.3`, paired with `panel_distance = 0.7`, is a comfortable
-on-foot starting point; both are live.
-*Details: [docs/screen-curvature.md](docs/screen-curvature.md).*
-
-**The grey haze around the on-foot screen.** On foot, the world is shown on a
-flat screen surrounded by dark grey — lit pixels on an OLED headset, so the
-screen floats in a glowing rectangle. This makes the surround properly black.
-
-**The on-foot screen's distance.** Fixed by the game; adjustable here. The stock
-distance is the default; `0.7` with the curve above is the tested pairing.
-
-**The on-foot screen's resolution.** *Off by default.* Elite renders that screen
-at 1920x1080 regardless of headset, which is why on-foot text looks soft. This
-raises it — any 16:9 size from 640 to 8192 wide; **2880x1620**, **3200x1800**,
-**3840x2160** and **5120x2880** are the useful ones (the last is ~1.8x the
-memory of 4K). It costs GPU time and video memory in proportion, and it is the
-one fix that changes the game's code in memory — read
-[What it does and does not do](#what-it-does-and-does-not-do) first.
-
-**On foot not being in 3D — Explorer Cam.** First person on foot is a flat image
-shown to both eyes; the external camera renders real stereo. Explorer Cam puts
-your viewpoint at your commander's head while you are in that camera, so the
-surface, your ship, and the room you are standing in have depth. Off until you
-configure it, and worth the few minutes — see [Explorer Cam](#explorer-cam).
+**Each fix in full — what it costs, what it is measured at, and which setting
+turns it off — is in [docs/fixes.md](docs/fixes.md).** The defaults are what
+most people want; the exceptions are called out there and in the in-headset
+menu.
 
 ## Explorer Cam
 
