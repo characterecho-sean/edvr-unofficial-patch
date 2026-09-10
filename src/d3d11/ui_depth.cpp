@@ -363,7 +363,7 @@ const char kSmokeDepthHlsl[] =
     "SamplerState Smp1 : register(s1);\n"
     "cbuffer CB1 : register(b1) { float4 cb1[211]; };\n"
     "cbuffer CB2 : register(b2) { float4 cb2[3]; };\n"
-    "cbuffer P : register(b13) { float4 floorAndStrength; };\n"
+    "cbuffer P : register(b13) { float4 floorAndStrength; float4 proj; };\n"
     "struct In {\n"
     "    float3 tc0 : TEXCOORD0;\n"
     "    float3 tc1 : TEXCOORD1;\n"
@@ -391,14 +391,28 @@ const char kSmokeDepthHlsl[] =
     "    float2 uv2 = float2(i.tc3.x + cb1[210].y * cb2[2].x, i.tc3.y * 0.5);\n"
     "    float streak = Streak.Sample(Smp0, uv1).x + Streak.Sample(Smp0, uv2).x;\n"
     "    float alpha = fade * streak;\n"
-    "    clip(alpha - floorAndStrength.z);\n"
-    "    oDepth = i.pos.z;\n"
     "    // The mask (the review of 2026-09-10): w is the strength at full\n"
     "    // opacity, and the value follows the smoke's own alpha up to it,\n"
     "    // quantised to an ODD quantum -- the pass keeps the camera's path\n"
     "    // under an odd one (floorBuffer). w of nought is the one-quantum\n"
     "    // mark of before, as good as unmarked to NVIDIA.\n"
     "    float q = floor(saturate(alpha * floorAndStrength.w) * 127.0 + 0.5);\n"
+    "    // The dense core (alpha at the floor or above) writes its depth;\n"
+    "    // the fringe under it writes none -- the target is EDVR's own,\n"
+    "    // cleared to the far value, so a far depth changes nothing -- and\n"
+    "    // marks the mask only where the strength gives it a quantum, so\n"
+    "    // the mark fades with the smoke instead of stepping at the floor\n"
+    "    // (the review's second note).\n"
+    "    bool core = alpha >= floorAndStrength.z;\n"
+    "    clip((core || q > 0.0) ? 1.0 : -1.0);\n"
+    "    // The depth from the ribbon's own view depth (TEXCOORD1.z, the\n"
+    "    // value its shader compares with the depth resolve) in the scene's\n"
+    "    // encoding: the raster's z is the vertex shader's clip z plus a\n"
+    "    // constant (15.01, before the divide) whose meaning rests on the\n"
+    "    // matrix the game uploads (the review's lead), while this is exact.\n"
+    "    // The raster's z when no projection is known.\n"
+    "    float own = proj.y != 0.0 ? proj.x + proj.y / max(i.tc1.z, 0.01) : i.pos.z;\n"
+    "    oDepth = core ? own : 0.0;\n"
     "    return (2.0 * q + 1.0) / 255.0;\n"
     "}\n";
 
@@ -554,6 +568,7 @@ struct FloorCb {
     float         nearDepth = -1.0f;   // the depth value at one metre (temporalPassDepthAt), for a floating stroke's core
     float         smokeFloor = -1.0f;  // slot 3, the smoke's: its opacity floor for the depth it writes (z)...
     float         smokeMax = -1.0f;    // ...and the mask's strength at full opacity (w); advanced.temporal_aa_smoke_*
+    float         depthAt2 = -1.0f;    // the depth value at two metres, with nearDepth the pass's projection pair (the second float4)
 };
 // THE SMOKE'S COVERAGE, tunable (the review of 2026-09-10): the trail's
 // rectangles trace its segments, each fading through the depth floor at
@@ -580,6 +595,28 @@ struct Mask {
 Mask     g_mask[2];
 bool     g_maskFailedNoted = false;
 bool     g_maskSizeNoted = false;
+// THE SMOKE'S OWN DEPTH TARGET (the review of 2026-09-10 on the trail's
+// voids). The smoke's coverage draw wrote its depth into the SCENE's depth
+// target in the middle of the frame, and the game draws on after the
+// ribbon with the depth test on -- the trail's scattering volume right
+// after it, tested GREATER_EQUAL -- so an opaque depth surface under a
+// translucent effect cut out whatever came later behind it, segment by
+// segment. The coverage now writes into a target of EDVR's, cleared each
+// frame before its first draw, and the temporal pass folds it into the
+// scene's depth as it reads (temporal_pass.cpp's zSceneAt: the nearer
+// wins), so the game's depth is never touched and every consumer of the
+// pass's depth -- the vectors, NVIDIA's depth input, the depth view --
+// sees the smoke where it is. One per eye, the scene depth target's size.
+struct SmokeDepth {
+    ID3D11Texture2D*          tex = nullptr;
+    ID3D11DepthStencilView*   dsv = nullptr;
+    ID3D11ShaderResourceView* srv = nullptr;
+    uint32_t                  w = 0, h = 0;
+    bool                      written = false;   // cleared and drawn into this frame
+};
+SmokeDepth g_smokeDepth[2];
+bool       g_smokeDepthFailedNoted = false;
+bool       g_smokeDepthNoted = false;
 ID3D11BlendState* g_maskBlend = nullptr;     // opaque, red only
 ID3D11DepthStencilState* g_maskDss = nullptr; // test as the game, writes off
 
@@ -1062,6 +1099,62 @@ Mask* maskFor(ID3D11DeviceContext* ctx, int eye, uint32_t w, uint32_t h) {
     return &m;
 }
 
+SmokeDepth* smokeDepthFor(ID3D11DeviceContext* ctx, int eye, uint32_t w, uint32_t h) {
+    if (eye < 0 || eye > 1 || !w || !h) return nullptr;
+    SmokeDepth& s = g_smokeDepth[eye];
+    if (s.tex && s.w == w && s.h == h) return &s;
+    if (s.srv) { s.srv->Release(); s.srv = nullptr; }
+    if (s.dsv) { s.dsv->Release(); s.dsv = nullptr; }
+    if (s.tex) { s.tex->Release(); s.tex = nullptr; }
+    s.w = 0;
+    s.h = 0;
+    s.written = false;
+    ID3D11Device* dev = nullptr;
+    ctx->GetDevice(&dev);
+    if (!dev) return nullptr;
+    // A 32-bit depth of its own whatever the scene's format: the values are
+    // the scene's encoding either way, and the pass reads it as a float.
+    D3D11_TEXTURE2D_DESC td{};
+    td.Width = w;
+    td.Height = h;
+    td.MipLevels = 1;
+    td.ArraySize = 1;
+    td.Format = DXGI_FORMAT_R32_TYPELESS;
+    td.SampleDesc.Count = 1;
+    td.Usage = D3D11_USAGE_DEFAULT;
+    td.BindFlags = D3D11_BIND_DEPTH_STENCIL | D3D11_BIND_SHADER_RESOURCE;
+    HRESULT hr = dev->CreateTexture2D(&td, nullptr, &s.tex);
+    if (SUCCEEDED(hr) && s.tex) {
+        D3D11_DEPTH_STENCIL_VIEW_DESC dd{};
+        dd.Format = DXGI_FORMAT_D32_FLOAT;
+        dd.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
+        hr = dev->CreateDepthStencilView(s.tex, &dd, &s.dsv);
+    }
+    if (SUCCEEDED(hr) && s.dsv) {
+        D3D11_SHADER_RESOURCE_VIEW_DESC vd{};
+        vd.Format = DXGI_FORMAT_R32_FLOAT;
+        vd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+        vd.Texture2D.MipLevels = 1;
+        hr = dev->CreateShaderResourceView(s.tex, &vd, &s.srv);
+    }
+    dev->Release();
+    if (FAILED(hr) || !s.tex || !s.dsv || !s.srv) {
+        if (s.srv) { s.srv->Release(); s.srv = nullptr; }
+        if (s.dsv) { s.dsv->Release(); s.dsv = nullptr; }
+        if (s.tex) { s.tex->Release(); s.tex = nullptr; }
+        if (!g_smokeDepthFailedNoted) {
+            g_smokeDepthFailedNoted = true;
+            Log::get().note("ui depth: the smoke's %ux%u depth target could not be made (0x%08lX); "
+                            "the trail keeps the sky's depth under the pass.",
+                            w, h, static_cast<unsigned long>(hr));
+        }
+        return nullptr;
+    }
+    s.w = w;
+    s.h = h;
+    return &s;
+}
+
 // The mask draw's states: colour written opaquely into the red channel,
 // and the game's own depth test kept with writes off, so a panel behind
 // the cockpit frame marks nothing where it is hidden.
@@ -1107,8 +1200,10 @@ ID3D11Buffer* floorBuffer(ID3D11DeviceContext* ctx, int slotIndex, float maskOff
     // its own buffer rather than trading one back and forth.
     FloorCb& slot = g_floorCbs[slotIndex < 0 ? 0 : (slotIndex > 3 ? 3 : slotIndex)];
     const float nearDepth = temporalPassDepthAt(1.0f);
+    const float depthAt2 = temporalPassDepthAt(2.0f);
     const bool smoke = slotIndex == 3;
     if (slot.cb && slot.floor == g_alphaFloor && slot.strength == strength && slot.nearDepth == nearDepth &&
+        slot.depthAt2 == depthAt2 &&
         (!smoke || (slot.smokeFloor == g_smokeFloor && slot.smokeMax == g_smokeReactive))) {
         return slot.cb;
     }
@@ -1138,8 +1233,14 @@ ID3D11Buffer* floorBuffer(ID3D11DeviceContext* ctx, int slotIndex, float maskOff
     const float flt = static_cast<float>(qFloat) / 255.0f;
     // The smoke's slot carries its own floor in z and the mask's strength at
     // full opacity in w (kSmokeDepthHlsl quantises); the others as before.
-    const float data[4] = {g_alphaFloor, slotIndex <= 0 ? flt : ride, smoke ? g_smokeFloor : nearDepth,
-                           smoke ? g_smokeReactive : flt};
+    // The second float4 is the pass's projection pair (depth = a + b / metres,
+    // temporalPassDepthAt), from the values at one and two metres, for the
+    // smoke's encoding of its own view depth; zero when no projection is
+    // known, and the smoke's shader falls back to the raster's z.
+    const float projB = 2.0f * (nearDepth - depthAt2);
+    const float projA = nearDepth - projB;
+    const float data[8] = {g_alphaFloor, slotIndex <= 0 ? flt : ride, smoke ? g_smokeFloor : nearDepth,
+                           smoke ? g_smokeReactive : flt, projA, projB, 0.0f, 0.0f};
     D3D11_BUFFER_DESC bd{};
     bd.ByteWidth = sizeof(data);
     bd.Usage = D3D11_USAGE_IMMUTABLE;
@@ -1154,6 +1255,7 @@ ID3D11Buffer* floorBuffer(ID3D11DeviceContext* ctx, int slotIndex, float maskOff
     slot.nearDepth = nearDepth;
     slot.smokeFloor = g_smokeFloor;
     slot.smokeMax = g_smokeReactive;
+    slot.depthAt2 = depthAt2;
     return slot.cb;
 }
 
@@ -1863,6 +1965,48 @@ bool uiDepthReissueBegin(ID3D11DeviceContext* ctx) {
                                 g_rebindW, g_rebindH, g_rebindEye);
             }
         }
+        // The smoke's depth goes to EDVR's own target (SmokeDepth says why),
+        // the size of the scene's depth target bound at the draw, cleared
+        // once a frame before its first draw. Without one -- no eye for the
+        // draw, a multisampled scene depth, a failed make -- the smoke is
+        // left to the sky's depth this frame rather than written into the
+        // game's.
+        if (depthPass && g_reissueMaskSlot == 3) {
+            SmokeDepth* sdp = nullptr;
+            if (g_savedDsv) {
+                ID3D11Resource* res = nullptr;
+                g_savedDsv->GetResource(&res);
+                ID3D11Texture2D* tex = nullptr;
+                if (res) {
+                    res->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&tex));
+                    res->Release();
+                }
+                if (tex) {
+                    D3D11_TEXTURE2D_DESC td{};
+                    tex->GetDesc(&td);
+                    tex->Release();
+                    if (td.SampleDesc.Count == 1) sdp = smokeDepthFor(ctx, g_drawEye, td.Width, td.Height);
+                }
+            }
+            if (!sdp) {
+                releaseSavedOm();
+                ++g_wNoPair;   // no target for the depth pass, the rebind's word for it
+                return;
+            }
+            if (!sdp->written) {
+                ctx->ClearDepthStencilView(sdp->dsv, D3D11_CLEAR_DEPTH, 0.0f, 0);
+                sdp->written = true;
+            }
+            target = sdp->dsv;
+            if (!g_smokeDepthNoted) {
+                g_smokeDepthNoted = true;
+                Log::get().note("ui depth: the smoke's coverage writes its depth into a %ux%u target "
+                                "of EDVR's for eye %d, which the temporal pass folds into the scene's "
+                                "as it reads; the game's depth is no longer written under the trail "
+                                "(the review of 2026-09-10).",
+                                sdp->w, sdp->h, g_drawEye);
+            }
+        }
         // The mask as the only colour target when one is wanted, none
         // otherwise; through the original entry so the binding shadow keeps
         // describing the game's bindings.
@@ -1979,6 +2123,16 @@ bool uiDepthReactiveMask(uint32_t w, uint32_t h, int eye, ID3D11Texture2D** tex)
     return true;
 }
 
+bool uiDepthSmokeDepth(uint32_t w, uint32_t h, int eye, ID3D11ShaderResourceView** srv) {
+    if (!srv) return false;
+    *srv = nullptr;
+    if (!g_on || g_stoodDown || !g_smokeOn || eye < 0 || eye > 1) return false;
+    const SmokeDepth& s = g_smokeDepth[eye];
+    if (!s.srv || !s.written || s.w != w || s.h != h) return false;
+    *srv = s.srv;
+    return true;
+}
+
 void uiDepthFrameBoundary(ID3D11DeviceContext* ctx) {
     ++g_frame;
     g_frameTargetCount = 0;
@@ -1992,6 +2146,9 @@ void uiDepthFrameBoundary(ID3D11DeviceContext* ctx) {
             m.marked = false;
         }
     }
+    // The smoke's depth is cleared at its first draw of a frame (the pass
+    // read this frame's at the submits); here the frame's writes are over.
+    for (SmokeDepth& s : g_smokeDepth) s.written = false;
     if (!g_on) return;
     ++g_wFrames;
     if (!g_announced && g_wWrote > 0) {
@@ -2057,6 +2214,12 @@ void uiDepthShutdown() {
         if (m.rtv) m.rtv->Release();
         if (m.tex) m.tex->Release();
         m = Mask();
+    }
+    for (SmokeDepth& s : g_smokeDepth) {
+        if (s.srv) s.srv->Release();
+        if (s.dsv) s.dsv->Release();
+        if (s.tex) s.tex->Release();
+        s = SmokeDepth();
     }
     if (g_maskBlend) {
         g_maskBlend->Release();

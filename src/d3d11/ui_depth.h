@@ -190,6 +190,14 @@ void uiDepthReissueEnd(ID3D11DeviceContext* ctx);
 // pass's size is not the size the mask was drawn at.
 bool uiDepthReactiveMask(uint32_t w, uint32_t h, int eye, ID3D11Texture2D** tex);
 
+// The drives' smoke's own depth for one eye (fix.temporal_aa_smoke): the
+// coverage pass writes it into a target of EDVR's, the scene depth's size,
+// rather than the game's -- which cut out the game's later depth-tested
+// draws behind the trail (the review of 2026-09-10) -- and the temporal
+// pass folds it into the scene's depth as it reads. Null when nothing was
+// drawn this frame or the size is not the scene depth's.
+bool uiDepthSmokeDepth(uint32_t w, uint32_t h, int eye, ID3D11ShaderResourceView** srv);
+
 // The strength the interface proper is marked at (advanced.ui_depth_reactive;
 // 0 = no mask). The holo material's markers and the sprite are marked three
 // quanta of 255 under it and the flight HUD's strokes at half of it; and

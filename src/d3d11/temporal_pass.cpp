@@ -49,6 +49,7 @@ RWTexture2D<float>  ZC : register(u4);   // and the depth, copied as it is (both
 Texture2D<float> ZP : register(t3);      // LAST frame's ZC, when the mover mask is on (movers.x)
 Texture2D<float> UM : register(t4);      // the interface's reactive mask (ui_depth.h), folded into MK when probe.z says it is bound
 Texture3D<float> BG : register(t5);      // the dominant body's occupancy grid over box0..box1 (tier 2), when tvSt.w says the body's path is on
+Texture2D<float> ZS : register(t6);      // the drives' smoke's own depth (ui_depth.h, uiDepthSmokeDepth), the scene depth's size; unbound = none this frame, and reads as the far value
 RWTexture2D<float> MK : register(u5);    // for a trained pass: the mover mask, NVIDIA's bias-current-colour input (ONE texture: the interface's mask is folded in)
 cbuffer P : register(b0) {
     int4   region;      // x0 y0 x1 y1: this eye's pixels in S (x1, y1 exclusive)
@@ -185,7 +186,12 @@ R"HLSL(
 // which took a distant station's lit faces for text and left Elite's
 // orange HUD text, below its brightness bar, untouched. The HUD writes no
 // depth anywhere the pass can see (docs/anti-aliasing.md has the record).
-float zSceneAt(int2 q) { return Z.Load(int3(q, 0)); }
+// ...with the drives' smoke folded in: its coverage writes into a target
+// of EDVR's (ui_depth.cpp, SmokeDepth), the scene depth's size, so the
+// game's own depth is never written mid-frame -- which cut out the game's
+// later depth-tested draws behind the trail (the review of 2026-09-10).
+// Reversed-Z, the nearer wins; an unbound t6 reads zero, the far value.
+float zSceneAt(int2 q) { return max(Z.Load(int3(q, 0)), ZS.Load(int3(q, 0))); }
 float zAt(int2 q) { return zSceneAt(q); }
 // Tier 1 of docs/per-object-motion.md: the mover mask from depth
 // consistency (2026-09-08). The reprojection says where this pixel's
@@ -1802,6 +1808,10 @@ constexpr bool kSteppedStampOn = false;
 // blur back as the history rebuilds on the pass's vectors), and how many
 // the openvr half asked for (a withheld frame, or a pose without a delta).
 uint64_t g_dlResets = 0, g_dlResetsAsked = 0;
+// ...the openvr half's reasons, bits 2-5 of the flags (temporal_aa.cpp): a
+// hold or a healed frame, a withheld jump the camera came back from, one
+// left unjudged, a pose without a delta.
+uint64_t g_dlResetsHeld = 0, g_dlResetsReturned = 0, g_dlResetsUnjudged = 0, g_dlResetsNoDelta = 0;
 uint64_t g_steppedCellPix = 0;   // pixels whose cell was a stepped part's (Stats[48])...
 uint64_t g_steppedOffPix = 0;    // ...and whose path was refused there (Stats[49])
 uint64_t g_steppedFrames = 0; // frames with stepped cells stamped
@@ -3197,6 +3207,11 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         }
     }
     if (eye == 0) g_depthHeld = depthSrv != nullptr;
+    // The drives' smoke's own depth for this eye, folded into the scene's
+    // by zSceneAt (t6): null when the trail drew nothing this frame, or
+    // the target is not the scene depth's size.
+    ID3D11ShaderResourceView* smokeSrv = nullptr;
+    if (depthSrv && !uiDepthSmokeDepth(sd.Width, sd.Height, eye, &smokeSrv)) smokeSrv = nullptr;
 
     // The owned pair and the output, rebuilt on any change of size or
     // format -- which is a history reset too.
@@ -4398,28 +4413,29 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     p.probe[2] = uiBound ? 1.0f : 0.0f;
                     p.probe[3] = uiDepthReactive() - 1.5f / 255.0f;   // unused since 2026-09-09 (uiCovered reads the parity); kept for the record
                     setParams(ctx, p);
-                    ID3D11ShaderResourceView* nullSrvM[6] = {};
+                    ID3D11ShaderResourceView* nullSrvM[7] = {};
                     ID3D11UnorderedAccessView* nullUavM[6] = {};
-                    ctx->CSSetShaderResources(0, 6, nullSrvM);
+                    ctx->CSSetShaderResources(0, 7, nullSrvM);
                     ctx->CSSetUnorderedAccessViews(0, 6, nullUavM, nullptr);
                     ctx->CSSetShader(g_csMv, nullptr, 0);
-                    ID3D11ShaderResourceView* srvsM[6] = {inSrv,
+                    ID3D11ShaderResourceView* srvsM[7] = {inSrv,
                                                           probeNv ? e.dlOutSrv : e.histSrv[e.histRead],
                                                           depthSrv,
                                                           p.movers[0] != 0.0f ? e.zPrevSrv : nullptr,
                                                           uiBound ? e.uiMaskSrv : nullptr,
-                                                          p.tvSt[3] != 0.0f ? g_bodyGridSrv : nullptr};
+                                                          p.tvSt[3] != 0.0f ? g_bodyGridSrv : nullptr,
+                                                          smokeSrv};
                     ID3D11UnorderedAccessView* uavsM[6] = {debugPaint ? e.dlOutUav : nullptr,
                                                            nullptr, g_statsUav, e.dlMvUav,
                                                            e.dlDepthUav, e.dlMaskUav};
                     ID3D11Buffer* cbM = g_cb;
                     ID3D11SamplerState* smpM = g_samp;
-                    ctx->CSSetShaderResources(0, 6, srvsM);
+                    ctx->CSSetShaderResources(0, 7, srvsM);
                     ctx->CSSetUnorderedAccessViews(0, 6, uavsM, nullptr);
                     ctx->CSSetConstantBuffers(0, 1, &cbM);
                     ctx->CSSetSamplers(0, 1, &smpM);
                     ctx->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
-                    ctx->CSSetShaderResources(0, 6, nullSrvM);
+                    ctx->CSSetShaderResources(0, 7, nullSrvM);
                     ctx->CSSetUnorderedAccessViews(0, 6, nullUavM, nullptr);
                     if (haveDepth && e.zPrev) zcWritten = true;
                     // What NVIDIA is handed: the union when the mover mask
@@ -4433,7 +4449,13 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     const bool resetHist = (flags & 1u) != 0 || !e.dlHaveHistory;
                     if (resetHist) {
                         ++g_dlResets;
-                        if (flags & 1u) ++g_dlResetsAsked;
+                        if (flags & 1u) {
+                            ++g_dlResetsAsked;
+                            if (flags & 4u) ++g_dlResetsHeld;
+                            if (flags & 8u) ++g_dlResetsReturned;
+                            if (flags & 16u) ++g_dlResetsUnjudged;
+                            if (flags & 32u) ++g_dlResetsNoDelta;
+                        }
                     }
                     // The time since this eye's previous evaluation, which the
                     // runtime uses to weigh motion against frame rate; zero on
@@ -4680,15 +4702,16 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     // reads them whole). The mover mask is computed here too
                     // (t3, u5) but only the own periphery pass applies it:
                     // the crop and periphery evaluations are not handed it.
-                    ID3D11ShaderResourceView* nullSrvM[6] = {};
+                    ID3D11ShaderResourceView* nullSrvM[7] = {};
                     ID3D11UnorderedAccessView* nullUavM[6] = {};
-                    ctx->CSSetShaderResources(0, 6, nullSrvM);
+                    ctx->CSSetShaderResources(0, 7, nullSrvM);
                     ctx->CSSetUnorderedAccessViews(0, 6, nullUavM, nullptr);
                     ctx->CSSetShader(g_csMv, nullptr, 0);
-                    ID3D11ShaderResourceView* srvsM[6] = {inSrv, e.histSrv[readIdx], depthSrv,
+                    ID3D11ShaderResourceView* srvsM[7] = {inSrv, e.histSrv[readIdx], depthSrv,
                                                           p.movers[0] != 0.0f ? e.zPrevSrv : nullptr,
                                                           p.probe[2] != 0.0f ? e.uiMaskSrv : nullptr,
-                                                          p.tvSt[3] != 0.0f ? g_bodyGridSrv : nullptr};
+                                                          p.tvSt[3] != 0.0f ? g_bodyGridSrv : nullptr,
+                                                          smokeSrv};
                     // u2 (the stats buffer) is left UNBOUND here: the own pass
                     // writes its stats when it runs, and the mv entry writes
                     // the same slots (15-17), so binding it would double them
@@ -4698,12 +4721,12 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                                                            e.dlMvUav, e.dlDepthUav, e.dlMaskUav};
                     ID3D11Buffer* cbM = g_cb;
                     ID3D11SamplerState* smpM = g_samp;
-                    ctx->CSSetShaderResources(0, 6, srvsM);
+                    ctx->CSSetShaderResources(0, 7, srvsM);
                     ctx->CSSetUnorderedAccessViews(0, 6, uavsM, nullptr);
                     ctx->CSSetConstantBuffers(0, 1, &cbM);
                     ctx->CSSetSamplers(0, 1, &smpM);
                     ctx->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
-                    ctx->CSSetShaderResources(0, 6, nullSrvM);
+                    ctx->CSSetShaderResources(0, 7, nullSrvM);
                     ctx->CSSetUnorderedAccessViews(0, 6, nullUavM, nullptr);
                     if (haveDepth && e.zPrev) zcWritten = true;
 
@@ -4836,26 +4859,27 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                 // when no trained set exists; u3/u5 stay unbound (MV and the
                 // mask are NVIDIA's inputs, and writes to a null UAV drop).
                 const bool carry = g_moversOn && haveDepth && ensureMoverPair(dev, e, w, h);
-                ID3D11ShaderResourceView* nullSrv[6] = {};
+                ID3D11ShaderResourceView* nullSrv[7] = {};
                 ID3D11UnorderedAccessView* nullUav[5] = {};
-                ctx->CSSetShaderResources(0, 6, nullSrv);
+                ctx->CSSetShaderResources(0, 7, nullSrv);
                 ctx->CSSetUnorderedAccessViews(0, 5, nullUav, nullptr);
                 ctx->CSSetShader(g_cs, nullptr, 0);
-                ID3D11ShaderResourceView* srvs[6] = {inSrv, e.histSrv[readIdx], depthSrv,
+                ID3D11ShaderResourceView* srvs[7] = {inSrv, e.histSrv[readIdx], depthSrv,
                                                      (carry && p.movers[0] != 0.0f) ? e.zPrevSrv : nullptr,
                                                      p.probe[2] != 0.0f ? e.uiMaskSrv : nullptr,
-                                                     p.tvSt[3] != 0.0f ? g_bodyGridSrv : nullptr};
+                                                     p.tvSt[3] != 0.0f ? g_bodyGridSrv : nullptr,
+                                                     smokeSrv};
                 ID3D11UnorderedAccessView* uavs[5] = {e.outUav, e.histUav[writeIdx],
                                                       g_statsUav, nullptr,
                                                       carry ? e.dlDepthUav : nullptr};
                 ID3D11Buffer* cb = g_cb;
                 ID3D11SamplerState* smp = g_samp;
-                ctx->CSSetShaderResources(0, 6, srvs);
+                ctx->CSSetShaderResources(0, 7, srvs);
                 ctx->CSSetUnorderedAccessViews(0, 5, uavs, nullptr);
                 ctx->CSSetConstantBuffers(0, 1, &cb);
                 ctx->CSSetSamplers(0, 1, &smp);
                 ctx->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
-                ctx->CSSetShaderResources(0, 6, nullSrv);
+                ctx->CSSetShaderResources(0, 7, nullSrv);
                 ctx->CSSetUnorderedAccessViews(0, 5, nullUav, nullptr);
                 if (carry) zcWritten = true;
                 ownRan = true;
@@ -5462,9 +5486,14 @@ bool temporalPassRegistration(char* buf, size_t n, char* buf2, size_t n2, char* 
     // interval; zero with a body in hand means the margin never let it in.
     if (g_dlResets) {
         regAppend(buf, n, used,
-                  "; NVIDIA's history was reset on %llu eye-frames, %llu of them asked by the openvr half (a "
-                  "withheld frame, or a pose without a delta) and the rest for want of a history",
-                  static_cast<unsigned long long>(g_dlResets), static_cast<unsigned long long>(g_dlResetsAsked));
+                  "; NVIDIA's history was reset on %llu eye-frames, %llu of them asked by the openvr half (%llu "
+                  "for a hold or a healed frame, %llu for a withheld jump the camera came back from, %llu for "
+                  "one left unjudged, %llu for a pose without a delta) and the rest for want of a history",
+                  static_cast<unsigned long long>(g_dlResets), static_cast<unsigned long long>(g_dlResetsAsked),
+                  static_cast<unsigned long long>(g_dlResetsHeld),
+                  static_cast<unsigned long long>(g_dlResetsReturned),
+                  static_cast<unsigned long long>(g_dlResetsUnjudged),
+                  static_cast<unsigned long long>(g_dlResetsNoDelta));
     }
     if (g_objectsOn && g_intervalPix) {
         if (g_bodyLastValid) {
@@ -5659,6 +5688,7 @@ bool temporalPassRegistration(char* buf, size_t n, char* buf2, size_t n2, char* 
     g_steppedFrames = 0;
     g_dlResets = 0;
     g_dlResetsAsked = 0;
+    g_dlResetsHeld = g_dlResetsReturned = g_dlResetsUnjudged = g_dlResetsNoDelta = 0;
     g_shipPix = 0;
     g_shipFoot = g_shipOutBox = g_shipBehind = g_shipFar = g_shipFootNoDepth = 0;
     g_shipOutBoxDm = 0;

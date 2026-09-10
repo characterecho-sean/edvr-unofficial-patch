@@ -10,6 +10,7 @@
 
 #include "../common/config.h"
 #include "../common/frame_flag.h"   // the detector's verdict on a jump (jumpVerdictPacked)
+#include "../common/timing.h"       // the verdict note's cadence
 #include "../common/guard.h"
 #include "../common/log.h"
 #include "../common/supersample_math.h"   // the eye region from Submit bounds
@@ -93,6 +94,13 @@ struct State {
     uint32_t resetsSpared = 0;     // ...the camera stayed: the history kept
     uint32_t resetsReturned = 0;   // ...the camera came back: restarted
     uint32_t resetsUnjudged = 0;   // ...no verdict within kVerdictTreats: restarted
+    uint32_t resetsNoted = 0;      // the outcomes' sum at the last 30-s note
+    uint64_t verdictNoteMs = 0;
+    // Why the next restart is asked, for the graphics log's registration
+    // line (the flags' bits 2-5): 4 a hold or a healed frame, 8 a withheld
+    // jump the camera came back from, 16 one left unjudged; 32 (a pose
+    // without a delta) is set at the treat.
+    unsigned resetWhy[2] = {};
 
     uint32_t faults = 0;
     bool     faultsNoted = false;
@@ -568,16 +576,19 @@ void* temporalAaTreat(vr::EVREye eye, void* handle,
             s.resetPending[e] = false;
             if ((v & 3u) == 1u) {
                 s.resetNext[e] = true;
+                s.resetWhy[e] |= 8u;
                 ++s.resetsReturned;
             } else if ((v & 3u) == 2u) {
                 ++s.resetsSpared;
             } else {
                 s.resetNext[e] = true;
+                s.resetWhy[e] |= 16u;
                 ++s.resetsUnjudged;
             }
         } else if (++s.resetWaited[e] >= kVerdictTreats) {
             s.resetPending[e] = false;
             s.resetNext[e] = true;
+            s.resetWhy[e] |= 16u;
             ++s.resetsUnjudged;
         }
     }
@@ -585,6 +596,10 @@ void* temporalAaTreat(vr::EVREye eye, void* handle,
     if (s.resetNext[e] || !s.havePrev[e] ||
         ((s.motion == Motion::Head || s.motion == Motion::Depth) && !haveDelta)) {
         flags |= 1u;
+        // ...and why (bits 2-5, resetWhy), for the registration line.
+        flags |= s.resetWhy[e] & 28u;
+        if ((s.motion == Motion::Head || s.motion == Motion::Depth) && !haveDelta) flags |= 32u;
+        s.resetWhy[e] = 0;
         // A restart for any reason settles a deferred one: the break it
         // waited on is moot once the history starts afresh.
         s.resetPending[e] = false;
@@ -633,6 +648,21 @@ void* temporalAaTreat(vr::EVREye eye, void* handle,
     s.havePrev[e] = true;
     s.resetNext[e] = false;
     ++s.treats;
+    // The deferred restarts' outcomes, every 30 s while they change: the
+    // shutdown line has the totals, but a session the game ends without
+    // the DLL's detach never prints it (10:19, 2026-09-10).
+    {
+        const uint32_t outcomes = s.resetsSpared + s.resetsReturned + s.resetsUnjudged;
+        if (outcomes != s.resetsNoted && dueMs(s.verdictNoteMs, 30000)) {
+            s.verdictNoteMs = stampMs();
+            s.resetsNoted = outcomes;
+            Log::get().note("temporal aa: %u eye-frames withheld on a jump have waited for the detector's "
+                            "verdict so far: %u kept their history (the camera stayed, a change of reference "
+                            "frame), %u restarted it (the camera came back), %u restarted for want of a "
+                            "verdict.",
+                            s.resetsDeferred, s.resetsSpared, s.resetsReturned, s.resetsUnjudged);
+        }
+    }
     {
         const uint32_t reads = systemHookProjectionReads();
         if (s.firstTreatOfFrame) {
@@ -685,6 +715,7 @@ void temporalAaNoteWithheld(vr::EVREye eye, bool jumpUnjudged) {
     const int e = eye == vr::Eye_Left ? 0 : 1;
     if (!jumpUnjudged) {
         s.resetNext[e] = true;
+        s.resetWhy[e] |= 4u;
         return;
     }
     // The channel's word now; a different one at a treat is the verdict on
