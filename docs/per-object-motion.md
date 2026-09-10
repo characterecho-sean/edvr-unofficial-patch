@@ -2838,6 +2838,31 @@ which is this project's contract for every read of the game.
    buffers copied (aux_<stamp>_<frame>.bin); the desk tool reads the turn
    of each such draw's world rows between consecutive crops, and the
    palette whose rows at the bases are rotations is the hub's.
+
+   *The forty-third flight, 05:33 (v0.14.1-142)*: the run at 05:37:02,
+   nearly face-on this time (the hub's face at the ring's centre), the
+   ledger written with two palettes (both 8 MB, the game alternating) and
+   NO aux file: the draws the capture was for bind nothing at t33, and
+   the pool question's early return on an empty slot came first. And
+   both palettes read zeros at the bases -- copied at the frame boundary,
+   after the game had discarded and rewritten them for the next frame.
+   The face-on crops by radius band about the hub's centre (974, 579):
+   the hub's inner face 0.042-0.044 deg a frame (the records' rate), its
+   outer face 0.032-0.037, the spokes 0.033-0.037, the ring 0.022-0.029.
+   The synthetic check redone with the run's own jitter sequence, nearest
+   and bilinear, returns 0.036-0.049 in every band for a true 0.043, so
+   the shortfall is in the picture, not the fit; and the pool shader's
+   position path (436193B352A2897E, read whole) is the record's
+   quaternion, its scale, its position and the camera, no other
+   transform -- a pool-drawn part turns exactly as its record. So the
+   outer parts' slow turn is drawn by something that reads no pool, most
+   likely the 512-instance lights, weighted more the farther out and
+   fainter the structure gets. The pool flag in the ledger says only that
+   t33 HELD the pool at the draw, true of every draw after a pool draw,
+   the game never unbinding it; tools/eye_run_ledger.py takes --pool-vs,
+   the hashes that read t33, instead. Built (v0.14.1-144-gd7c52cc): the aux
+   capture before the pool question, and each palette copied at the
+   frame's first pool draw that binds it.
 4. **Tier 2b** only if question 1 says no bits.
 5. **Tier 3** as `tools/` work against dumped frames, never on the hot
    path.
