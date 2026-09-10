@@ -3505,8 +3505,8 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                 // for every multiple m of its turn from kSteppedMin to
                 // kSteppedMax, composed as the body's own is. The turn's axis
                 // point c and its axial part come from the body's own (R, t):
-                // t = (I - R) c + t_par with c = t_perp / 2 + sin / (2 - 2 cos)
-                // (axis x t_perp), so the m-th is (I - R^m) c + m t_par, and
+                // t = (I - R) c + t_par with c = t_perp / 2 + (axis x t_perp) /
+                // (2 tan(theta / 2)), so the m-th is (I - R^m) c + m t_par, and
                 // m = 1 gives t back.
                 {
                     const float th = sqrtf(wF[0] * wF[0] + wF[1] * wF[1] + wF[2] * wF[2]);
@@ -3521,9 +3521,13 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                         }
                         const float cx[3] = {ah[1] * tPerp[2] - ah[2] * tPerp[1], ah[2] * tPerp[0] - ah[0] * tPerp[2],
                                              ah[0] * tPerp[1] - ah[1] * tPerp[0]};
-                        const float den = 2.0f - 2.0f * cosf(th);
-                        const float sn = sinf(th);
-                        for (int k = 0; k < 3; ++k) cAx[k] = 0.5f * tPerp[k] + (den > 1e-12f ? sn / den * cx[k] : 0.0f);
+                        // sin / (2 - 2 cos) is 1 / (2 tan(theta / 2)), and the
+                        // second form keeps its digits: at the station's turn a
+                        // frame (0.00075 rad) 2 - 2 cos loses six percent to
+                        // float32's spacing near one, 240 m on a 4 km axis point.
+                        const float ht = tanf(0.5f * th);
+                        const float k2 = ht > 1e-12f ? 0.5f / ht : 0.0f;
+                        for (int k = 0; k < 3; ++k) cAx[k] = 0.5f * tPerp[k] + k2 * cx[k];
                     } else {
                         for (int k = 0; k < 3; ++k) tPar[k] = tF[k];
                     }
