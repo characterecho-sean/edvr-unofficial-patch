@@ -1797,6 +1797,11 @@ uint64_t g_steppedPix = 0;    // ...a stepped part's (Stats[47]; object_probe.h,
 // tracking stays for the 20 s line until the hub's own motion is measured
 // from an eye run (kEyeRun).
 constexpr bool kSteppedStampOn = false;
+// NVIDIA's history resets this interval (the run of 18:43, 2026-09-09: the
+// station "flickering into sharpness" -- a raw frame every reset, the
+// blur back as the history rebuilds on the pass's vectors), and how many
+// the openvr half asked for (a withheld frame, or a pose without a delta).
+uint64_t g_dlResets = 0, g_dlResetsAsked = 0;
 uint64_t g_steppedCellPix = 0;   // pixels whose cell was a stepped part's (Stats[48])...
 uint64_t g_steppedOffPix = 0;    // ...and whose path was refused there (Stats[49])
 uint64_t g_steppedFrames = 0; // frames with stepped cells stamped
@@ -2078,6 +2083,13 @@ bool     g_eyeDumpDirMade = false;
 // quaternion), so it has to be measured from the picture.
 constexpr int    kEyeRun = 4;
 ID3D11Texture2D* g_eyeRunStaging[kEyeRun] = {};
+// ...and the RAW frames beside them (eye_HHMMSS_R0..3.bmp): the game's
+// render as the pass hands it to NVIDIA, before any history. The run of
+// 18:43 (2026-09-09) showed why both are needed: NVIDIA's output is the
+// history reprojected by the pass's own vectors blended with the new
+// frame, so a turn measured on it is the vectors' as much as the
+// object's; the raw frames alone say what the object did.
+ID3D11Texture2D* g_eyeRawStaging[kEyeRun] = {};
 int              g_eyeRunLeft = 0;    // captures still to take
 int              g_eyeRunTaken = 0;
 wchar_t          g_eyeRunStamp[16] = L"";
@@ -2256,25 +2268,22 @@ bool writeEyeBmp(ID3D11DeviceContext* ctx, ID3D11Texture2D* st, const D3D11_TEXT
     return ok;
 }
 
-// THE EYE RUN's capture (kEyeRun says why): this frame's left eye into the
-// next staging slot, a copy and nothing more; the fourth writes them all.
-void captureEyeRun(ID3D11DeviceContext* ctx, ID3D11Texture2D* tex) {
+// A staging copy of `tex` into slot k of `ring`, made or remade to its size.
+bool stageEyeRun(ID3D11DeviceContext* ctx, ID3D11Texture2D* tex, ID3D11Texture2D** ring, int k) {
     D3D11_TEXTURE2D_DESC d{};
     tex->GetDesc(&d);
-    const int k = g_eyeRunTaken;
-    if (k < 0 || k >= kEyeRun) { g_eyeRunLeft = 0; return; }
-    if (g_eyeRunStaging[k]) {
+    if (ring[k]) {
         D3D11_TEXTURE2D_DESC sd{};
-        g_eyeRunStaging[k]->GetDesc(&sd);
+        ring[k]->GetDesc(&sd);
         if (sd.Width != d.Width || sd.Height != d.Height || sd.Format != d.Format) {
-            g_eyeRunStaging[k]->Release();
-            g_eyeRunStaging[k] = nullptr;
+            ring[k]->Release();
+            ring[k] = nullptr;
         }
     }
-    if (!g_eyeRunStaging[k]) {
+    if (!ring[k]) {
         ID3D11Device* dev = nullptr;
         ctx->GetDevice(&dev);
-        if (!dev) { g_eyeRunLeft = 0; return; }
+        if (!dev) return false;
         D3D11_TEXTURE2D_DESC sd = d;
         sd.Usage = D3D11_USAGE_STAGING;
         sd.BindFlags = 0;
@@ -2282,17 +2291,33 @@ void captureEyeRun(ID3D11DeviceContext* ctx, ID3D11Texture2D* tex) {
         sd.MiscFlags = 0;
         sd.MipLevels = 1;
         sd.ArraySize = 1;
-        const HRESULT hr = dev->CreateTexture2D(&sd, nullptr, &g_eyeRunStaging[k]);
+        const HRESULT hr = dev->CreateTexture2D(&sd, nullptr, &ring[k]);
         dev->Release();
-        if (FAILED(hr) || !g_eyeRunStaging[k]) {
-            g_eyeRunStaging[k] = nullptr;
-            g_eyeRunLeft = 0;
-            Log::get().note("temporal aa: the eye run could not make its staging copy (0x%08lX); nothing written.",
+        if (FAILED(hr) || !ring[k]) {
+            ring[k] = nullptr;
+            Log::get().note("temporal aa: the eye run could not make a staging copy (0x%08lX); nothing written.",
                             static_cast<unsigned long>(hr));
-            return;
+            return false;
         }
     }
-    ctx->CopySubresourceRegion(g_eyeRunStaging[k], 0, 0, 0, 0, tex, 0, nullptr);
+    ctx->CopySubresourceRegion(ring[k], 0, 0, 0, 0, tex, 0, nullptr);
+    return true;
+}
+
+// THE EYE RUN's raw capture: the pass's input colour for this frame, into
+// the slot the treated frame will take (captureEyeRun counts).
+void captureEyeRunRaw(ID3D11DeviceContext* ctx, ID3D11Texture2D* colour) {
+    const int k = g_eyeRunTaken;
+    if (!colour || k < 0 || k >= kEyeRun) return;
+    stageEyeRun(ctx, colour, g_eyeRawStaging, k);
+}
+
+// THE EYE RUN's capture (kEyeRun says why): this frame's left eye into the
+// next staging slot, a copy and nothing more; the fourth writes them all.
+void captureEyeRun(ID3D11DeviceContext* ctx, ID3D11Texture2D* tex) {
+    const int k = g_eyeRunTaken;
+    if (k < 0 || k >= kEyeRun) { g_eyeRunLeft = 0; return; }
+    if (!stageEyeRun(ctx, tex, g_eyeRunStaging, k)) { g_eyeRunLeft = 0; return; }
     ++g_eyeRunTaken;
     --g_eyeRunLeft;
     if (g_eyeRunLeft > 0) return;
@@ -2301,18 +2326,23 @@ void captureEyeRun(ID3D11DeviceContext* ctx, ID3D11Texture2D* tex) {
         g_eyeDumpDirMade = true;
         CreateDirectoryW(dir.c_str(), nullptr);
     }
-    int wrote = 0;
+    int wrote = 0, wroteRaw = 0;
     for (int i = 0; i < g_eyeRunTaken; ++i) {
         wchar_t path[MAX_PATH];
         _snwprintf_s(path, MAX_PATH, _TRUNCATE, L"%s\\eye_%s_L%d.bmp", dir.c_str(), g_eyeRunStamp, i);
         D3D11_TEXTURE2D_DESC sd{};
         g_eyeRunStaging[i]->GetDesc(&sd);
         if (writeEyeBmp(ctx, g_eyeRunStaging[i], sd, 0, path)) ++wrote;
+        if (g_eyeRawStaging[i]) {
+            _snwprintf_s(path, MAX_PATH, _TRUNCATE, L"%s\\eye_%s_R%d.bmp", dir.c_str(), g_eyeRunStamp, i);
+            g_eyeRawStaging[i]->GetDesc(&sd);
+            if (writeEyeBmp(ctx, g_eyeRawStaging[i], sd, 0, path)) ++wroteRaw;
+        }
     }
     Log::get().note("temporal aa: an eye run of %d consecutive frames of the left eye is on disk "
-                    "(eye_%ls_L0..%d.bmp), the frames the game drew in a row, for what a part does from one "
-                    "to the next.",
-                    wrote, g_eyeRunStamp, g_eyeRunTaken - 1);
+                    "(eye_%ls_L0..%d.bmp, and %d raw frames as handed to NVIDIA, eye_%ls_R0..%d.bmp), the "
+                    "frames the game drew in a row, for what a part does from one to the next.",
+                    wrote, g_eyeRunStamp, g_eyeRunTaken - 1, wroteRaw, g_eyeRunStamp, g_eyeRunTaken - 1);
     g_eyeRunTaken = 0;
 }
 // The body's occupancy grid on the GPU (object_probe.h): one for both
@@ -4210,6 +4240,8 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     } else {
                         ctx->CopySubresourceRegion(e.dlColour, 0, 0, 0, 0, src, 0, &box);
                     }
+                    // The eye run's raw frame (g_eyeRawStaging says why).
+                    if (eye == 0 && g_eyeRunLeft > 0) captureEyeRunRaw(ctx, e.dlColour);
                     // The motion vectors and the depth copy -- and, with the
                     // mover mask on, last frame's depth read at t3 and the
                     // mask written at u5 (tier 1, docs/per-object-motion.md).
@@ -4282,6 +4314,10 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     // rebuilt textures, or a frame the pass's own history ran in
                     // between -- never every frame (the review's F1, 2026-09-04).
                     const bool resetHist = (flags & 1u) != 0 || !e.dlHaveHistory;
+                    if (resetHist) {
+                        ++g_dlResets;
+                        if (flags & 1u) ++g_dlResetsAsked;
+                    }
                     // The time since this eye's previous evaluation, which the
                     // runtime uses to weigh motion against frame rate; zero on
                     // a restart, when there is no previous frame to measure to.
@@ -5306,6 +5342,12 @@ bool temporalPassRegistration(char* buf, size_t n, char* buf2, size_t n2, char* 
     // a station should read as a few percent of the frame far off and
     // most of it in the slot, with its turn steady from interval to
     // interval; zero with a body in hand means the margin never let it in.
+    if (g_dlResets) {
+        regAppend(buf, n, used,
+                  "; NVIDIA's history was reset on %llu frames, %llu of them asked by the openvr half (a "
+                  "withheld frame, or a pose without a delta) and the rest for want of a history",
+                  static_cast<unsigned long long>(g_dlResets), static_cast<unsigned long long>(g_dlResetsAsked));
+    }
     if (g_objectsOn && g_intervalPix) {
         if (g_bodyLastValid) {
             regAppend(buf, n, used,
@@ -5497,6 +5539,8 @@ bool temporalPassRegistration(char* buf, size_t n, char* buf2, size_t n2, char* 
     g_steppedCellPix = 0;
     g_steppedOffPix = 0;
     g_steppedFrames = 0;
+    g_dlResets = 0;
+    g_dlResetsAsked = 0;
     g_shipPix = 0;
     g_shipFoot = g_shipOutBox = g_shipBehind = g_shipFar = g_shipFootNoDepth = 0;
     g_shipOutBoxDm = 0;
@@ -5548,6 +5592,7 @@ void temporalPassShutdown() {
     if (g_bodyGridSrv) { g_bodyGridSrv->Release(); g_bodyGridSrv = nullptr; }
     for (int k = 0; k < kEyeRun; ++k) {
         if (g_eyeRunStaging[k]) { g_eyeRunStaging[k]->Release(); g_eyeRunStaging[k] = nullptr; }
+        if (g_eyeRawStaging[k]) { g_eyeRawStaging[k]->Release(); g_eyeRawStaging[k] = nullptr; }
     }
     g_eyeRunLeft = 0;
     g_eyeRunTaken = 0;
