@@ -691,9 +691,11 @@ eye is the worse one.
 
 The reporter's shader dump is complete and useful, and it cannot contain
 the pass. 348 blobs arrived, 200 pixel shaders and 148 vertex shaders and
-no compute shader at all, because the dump writes only `vs` and `ps`
-(`device_hook.cpp:397` and `:413`). Every stage of Elite's HBAO ends in
-`_CS`.
+no compute shader at all, because the dump on that build writes only `vs`
+and `ps`. Every stage of Elite's HBAO ends in `_CS`. (`192a36d`, later the
+same day, added the `cs` case at `device_hook.cpp:680` -- from another
+workstream, for another reason. It is on `main` and in no release, so it
+does not help this capture, and it changes everything about the next one.)
 
 All 200 pixel shaders were disassembled and read anyway, twice, under two
 different briefs. What that found:
@@ -943,8 +945,10 @@ say: it records what is bound, not what is written.
 It may not matter. C is present by construction whatever those tables hold.
 If they are identical the fault is C alone; if they differ, that is A **on
 top of** C, and both live inside the same three dispatches. One shipped key
-tests that in one flight, which is the next thing to ask for and the last
-thing to ask for before building.
+tests that in one flight -- and a build carrying `192a36d` would put
+`9347F8FC2DCE0248`'s own bytecode on disk, which answers A by reading the
+shader rather than by guessing at its inputs. See the instrument list
+below; that commit exists and is unreleased.
 
 ### Phase 2, as it can be typed today
 
@@ -982,18 +986,25 @@ being up, and this pass runs game-wide.
 
 The list from three days ago reorders, and gains two entries.
 
-1. **Dump compute shaders** (new, and now the blocker). `CreateComputeShader`
-   is already hooked -- `kDevCreateComputeShader` is slot 18 and
-   `hookedCreateCS` is installed at `device_hook.cpp:1600` -- but
-   `dumpShaderBlob` is called for `vs` (`:397`) and `ps` (`:413`) and
-   nothing else. One line in `hookedCreateCS` puts `HBAO_PERFORM_AO_CS`'s
-   bytecode on disk, and without it there is no reading of the rotation and
-   no transcription to replace it with. Everything C1 needs is behind this
-   one line.
-2. **Read a dispatch's SRV-bound buffer** (new). The A gate, and the only
-   way to compare the two eyes' sixteen rotations from the desk.
-   `cbWatchOnDispatch` would need a companion that maps a named dispatch's
-   `s` slot instead of its `b` slots.
+1. **Dump compute shaders -- already built, not yet released.** This was
+   written up as the blocker and it is not one: `192a36d` added it on
+   2026-09-07, the same day this document said it was missing, from the
+   per-object-motion work rather than from here
+   (`dumpShaderBlob(L"cs", ...)`, `device_hook.cpp:680`). The hash it names
+   the file by is `fnv1a64` of the bytecode, which is the same value
+   `lookupShaderHash` gives the census for its `ch=` column
+   (`draw_census.cpp:1345`), so a dump on a build carrying that commit
+   writes **`cs_9347F8FC2DCE0248.dxbc`** and the pass's own code can be
+   read at last. It is on `main` and in no release: the reporter is on
+   v0.14.0 and the newest tag, v0.14.1, predates the commit by hours.
+   **Everything C1 needs, and the only desk-side answer to A, is behind
+   shipping a build with it.**
+2. **Read a dispatch's SRV-bound buffer** (new, and the only genuinely
+   missing one). `cbWatchOnDispatch` would need a companion that maps a
+   named dispatch's `s` slot rather than its `b` slots. It is the direct
+   way to compare the two eyes' sixteen rotations -- though if item 1
+   ships, the disassembly may make it unnecessary by showing what the
+   shader does with the table rather than what is in it.
 3. **A census key that does not need window focus.** Still wanted. The
    reporter worked around it by watching for the confirmation line, which
    works and should not have to be discovered.
