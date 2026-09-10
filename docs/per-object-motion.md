@@ -2693,6 +2693,28 @@ which is this project's contract for every read of the game.
    two rings' angular profiles between frames: the hub's turn and the
    ring's, frame by frame, to a hundredth of a degree (a synthetic 0.05
    deg came back as 0.035 to 0.061). Built as v0.14.1-132-ge4eb2d2.
+
+   *The thirty-eighth flight, 18:40 (v0.14.1-132)*: "took an eye run at
+   the station. Interesting, it seemed to be flickering into sharpness
+   briefly." The run, four consecutive frames at 18:43:05, has the answer
+   to the flicker in it: frames 0 and 1 show the hub's face smeared in
+   arcs and the ring soft, frame 2 is a RAW frame -- sharp, aliased, every
+   tile of the hub's face distinct -- and frame 3 is the blur beginning
+   again. NVIDIA's history was reset between frames 1 and 2, the raw
+   render showed for a frame, and the history rebuilt on the pass's
+   vectors. So the station's blur is accumulated history on wrong
+   vectors, not NVIDIA's softness, and the flicker is the resets. The
+   spin tool on the run, with the head's own one-pixel-a-frame drift
+   removed, read the ring's turn at a hundredth of a degree a frame and
+   the hub's face at a few hundredths, against the pool's 0.05 -- but a
+   turn measured on NVIDIA's output is the history's reprojection as
+   much as the object's, and the raw frames of the run are one and a
+   half, not two. So the run now writes the pass's INPUT frames beside
+   the treated ones, eye_HHMMSS_R0..R3.bmp, the game's render before any
+   history, and the object's own motion is read off those; and the
+   registration line counts NVIDIA's history resets and how many the
+   openvr half asked for (a withheld frame, or a pose without a delta).
+   Built as v0.14.1-134-gbf9df4c.
 4. **Tier 2b** only if question 1 says no bits.
 5. **Tier 3** as `tools/` work against dumped frames, never on the hot
    path.
