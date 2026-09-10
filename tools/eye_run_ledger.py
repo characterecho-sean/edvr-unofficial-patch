@@ -260,8 +260,9 @@ def main():
                 if not ea or not eb: line.append("   -   "); continue
                 ca, cb = ea['bytes'][0], eb['bytes'][0]
                 if len(ca) >= 80 and len(cb) >= 80:
-                    Ma = np.frombuffer(ca, dtype=np.float32, count=48)[32:44].reshape(3, 4)[:, :3].astype(np.float64)
-                    Mb = np.frombuffer(cb, dtype=np.float32, count=48)[32:44].reshape(3, 4)[:, :3].astype(np.float64)
+                    # rows 2-4 are floats 8..19 (a row is four floats)
+                    Ma = np.frombuffer(ca, dtype=np.float32, count=20)[8:20].reshape(3, 4)[:, :3].astype(np.float64)
+                    Mb = np.frombuffer(cb, dtype=np.float32, count=20)[8:20].reshape(3, 4)[:, :3].astype(np.float64)
                     # normalise the rows (a scale may ride along)
                     na = np.linalg.norm(Ma, axis=1, keepdims=True); nb = np.linalg.norm(Mb, axis=1, keepdims=True)
                     if na.min() > 1e-6 and nb.min() > 1e-6:
@@ -284,6 +285,27 @@ def main():
                     da = np.frombuffer(ea['bytes'][what], dtype=np.uint32); db = np.frombuffer(eb['bytes'][what], dtype=np.uint32)
                     ch.append(str(int((da != db).sum())))
                 if any(c != "-" for c in ch): print(f"      {name} dwords changed/pair: " + " ".join(ch))
+            # a per-instance stream (vb0/vb1/t0 with a stride of 12 or more): its elements' first three floats as a
+            # position -- the median displacement per pair, and the turn of the cloud about its own centroid (Kabsch)
+            for what, name in ((1, "t0"), (2, "vb0"), (3, "vb1")):
+                st = e0['stride'][what]
+                if st < 12 or not e0['bytes'][what]: continue
+                n = min(len(e0['bytes'][what]) // st, max(e0['instances'], 1))
+                if n < 8: continue
+                disp = []; turns = []
+                for fa, fb in pairs:
+                    ea = next((e for e in auxes.get(fa, []) if e['vs'] == vs), None); eb = next((e for e in auxes.get(fb, []) if e['vs'] == vs), None)
+                    if not ea or not eb or len(ea['bytes'][what]) < n * st or len(eb['bytes'][what]) < n * st: disp.append(float('nan')); turns.append(float('nan')); continue
+                    Pa = np.frombuffer(ea['bytes'][what], dtype=np.uint8, count=n * st).reshape(n, st)[:, :12].copy().view(np.float32).reshape(n, 3).astype(np.float64)
+                    Pb = np.frombuffer(eb['bytes'][what], dtype=np.uint8, count=n * st).reshape(n, st)[:, :12].copy().view(np.float32).reshape(n, 3).astype(np.float64)
+                    okp = np.isfinite(Pa).all(1) & np.isfinite(Pb).all(1) & (np.abs(Pa).max(1) < 1e7) & (np.abs(Pb).max(1) < 1e7)
+                    if okp.sum() < 8: disp.append(float('nan')); turns.append(float('nan')); continue
+                    disp.append(float(np.median(np.linalg.norm(Pb[okp] - Pa[okp], axis=1))))
+                    R, t = kabsch(Pa[okp], Pb[okp])
+                    turns.append(math.degrees(math.acos(max(-1.0, min(1.0, (np.trace(R) - 1) / 2)))))
+                if all(np.isnan(disp)): continue
+                print(f"      {name} as {n} positions (first 3 floats of {st}-byte elements): median |d|/pair " + " ".join(f"{d:.3f}" for d in disp))
+                print(f"      {name} cloud turn/pair (Kabsch): " + " ".join(f"{t:.4f}" for t in turns) + f"; centroid radius {np.linalg.norm(Pa[okp].mean(0)):.0f} m, spread {np.linalg.norm(Pa[okp] - Pa[okp].mean(0), axis=1).mean():.0f} m")
             # t0 as 48-byte matrices: the per-instance rotation between the first pair
             if e0['stride'][1] == 48 and pairs:
                 fa, fb = pairs[0]

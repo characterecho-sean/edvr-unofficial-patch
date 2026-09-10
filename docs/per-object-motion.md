@@ -2863,6 +2863,41 @@ which is this project's contract for every read of the game.
    the hashes that read t33, instead. Built (v0.14.1-144-gd7c52cc): the aux
    capture before the pool question, and each palette copied at the
    frame's first pool draw that binds it.
+
+   *The forty-fourth flight, 05:44 (v0.14.1-144)*: the run at 05:46:36,
+   face-on, and the ledger whole this time -- twenty pool copies, the
+   instance streams, both palettes copied at their draws, and nineteen
+   aux files for the five shaders drawing fifty or more instances in a
+   draw: 0357BBB2DEE43C1F x392 (the lights), 8289669D93A18C1D x146,
+   A1B7CFCD0BE7493E x141, the 4784-instance starfield and the 1334
+   sprites. THE LIGHTS: their constant buffer's rows 2-4 are a world-view
+   matrix that turns only with the head (0.002 to 0.05 deg a frame,
+   shared with 8289's draws); their per-instance stream, 32 bytes a
+   light with a camera-frame position first, moves each light 1.3 to
+   1.8 m a frame -- the station's rate at the ring's radius -- and the
+   146 instances at t0 (a position, a size of 350 and parameters, not a
+   matrix) 0.5 to 0.7 m a frame likewise. The pool records turn 0.040.
+   And the crops, by radius band about the hub's centre: the inner face
+   0.045 deg a frame, the outer face 0.040, the spokes 0.039, the ring
+   0.039 -- everything drawn turns as its records do, and frame 0 against
+   frame 15 magnified shows the ring's lights shifted the nine pixels
+   the records predict. The earlier runs' slower readings cannot be
+   re-examined: only this run's frames remain on disk, the rest deleted
+   (not by the DLL). THE TREATED FRAME, with the path on and the vectors
+   right, keeps 0.81 (the hub) and 0.91 (the ring) of the fine detail of
+   a bicubic upscale of the raw frame, against 0.71 to 1.25 for the
+   static cockpit dashboard: DLSS treats the station like anything else
+   here. What the eye misses at ten kilometres is the LIGHTS: each is one
+   pixel in the render, which the upscale reconstructs as a blob two or
+   three wide, so the rows of lights on the ring and the hub's tiles fuse
+   into bands, where the raw frame -- what the mod's AA off shows -- has
+   single aliased pixels that twinkle with the jitter. That is the
+   crispness the pilot likes, and it is aliasing. The model is already
+   NVIDIA's K. The lever that is not sharpening: NVIDIA's
+   bias-current-colour mask, which the interface already fills
+   (ui_depth.h): marking the light sprites' pixels in it renders the
+   lights from the current frame, as points, and leaves the structure to
+   the history. Built next as a switch, off by default.
 4. **Tier 2b** only if question 1 says no bits.
 5. **Tier 3** as `tools/` work against dumped frames, never on the hot
    path.
