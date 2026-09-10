@@ -32,6 +32,33 @@ uses, so do not just overwrite it: see RUNNING ALONGSIDE OTHER MODS below, which
 takes one rename and one setting.
 
 
+HEADSETS AND VR RUNTIMES
+
+EDVR supports headsets that reach Elite through OpenVR: SteamVR, or an OpenXR
+runtime by way of OpenComposite (Virtual Desktop's VDXR, PiOpenXR, Meta's own
+OpenXR runtime - OpenComposite supplies the openvr_api.dll the game loads and
+translates to OpenXR underneath). Elite has no OpenXR back end of its own, so
+Windows' OpenXR runtime selector and the Meta app's OpenXR toggles change
+nothing here on their own.
+
+ELITE'S NATIVE OCULUS PATH IS NOT SUPPORTED. When the Meta (Oculus) PC runtime
+drives your headset - a Rift, a Rift S, or a Quest over Link or Air Link with
+the Meta PC app - Elite prefers its own Oculus back end and never loads
+openvr_api.dll at all, so that half of the patch cannot run and the fixes in it
+are inert. No install is at fault and nothing about the install can fix it.
+
+To tell which you are on, look in edvr_logs after a session: two logs, the
+second with "vr" in the name, means the OpenVR path, and its "launch centre:"
+line names SteamVR or OpenComposite. One log only - with edvr_breadcrumbs.txt
+carrying "gfx:" lines but never a "vr:" line - means the Oculus path. On that
+path, ignore any log message saying openvr_api.dll is NOT installed: the file is
+there, the game just never opened it.
+
+Getting a Meta headset onto OpenVR means bypassing the Meta PC runtime: Steam
+Link on Quest 2/3/Pro, or Virtual Desktop in SteamVR mode or VDXR with
+OpenComposite.
+
+
 WHAT IT FIXES
 
 One eye going darker than the other near bright lights. Elite works out how

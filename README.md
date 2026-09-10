@@ -5,6 +5,11 @@ two files, about three minutes — the short list is under
 [What it fixes](#what-it-fixes), and each one in full is in
 [docs/fixes.md](docs/fixes.md).
 
+**It needs Elite running on its OpenVR path** — SteamVR, or an OpenXR runtime
+through OpenComposite. Elite's own Oculus path is not supported; if a Meta
+headset is driven by the Meta PC app over Link or Air Link, read
+[Headsets and VR runtimes](#headsets-and-vr-runtimes) before you install.
+
 **Something not working?** [Open an
 issue](https://github.com/characterecho-sean/edvr-unofficial-patch/issues/new/choose)
 — that is the place a bug gets fixed, because you can attach the log, and the
@@ -21,6 +26,88 @@ EDVR is free and stays free. If it improves your VR experience,
 > rename and one setting, under
 > [Running alongside other mods](#running-alongside-other-mods). ReShade needs
 > nothing at all as of 0.7.2.
+
+## Headsets and VR runtimes
+
+**EDVR supports headsets that reach Elite through OpenVR — SteamVR, or an
+OpenXR runtime by way of OpenComposite. Elite's own Oculus/Meta path is not
+supported.**
+
+Elite ships two VR back ends and picks one at launch: OpenVR, and Oculus'
+native SDK. It has no OpenXR back end of its own. EDVR's second file *is*
+`openvr_api.dll` — the fixes that act on a finished frame live inside the game's
+own OpenVR library — so if the game does not take the OpenVR path, that half of
+the patch is never loaded and everything in it is inert.
+
+**Works:**
+
+- **SteamVR**, and anything SteamVR drives — Valve Index, HTC Vive, Bigscreen
+  Beyond, Pimax through its SteamVR driver, a Quest over **Steam Link**, and so
+  on.
+- **OpenXR runtimes through [OpenComposite](https://gitlab.com/znixian/OpenOVR)**
+  — Virtual Desktop's VDXR, PiOpenXR, Meta's own OpenXR runtime. OpenComposite
+  supplies the `openvr_api.dll` the game loads and translates to OpenXR
+  underneath, so as far as Elite and EDVR are concerned it is still the OpenVR
+  path. EDVR knows OpenComposite when it is there — it identifies the runtime
+  beneath it by its exports, says which in the `vr` log, and has settings that
+  exist only for it (`launch_centre`, `vr_handover`,
+  `advanced.suppress_interfaces`).
+
+Field-verified on a Quest 3 over Virtual Desktop and a Pimax Crystal Super over
+PiOpenXR, both through OpenComposite. Real SteamVR is supported and less
+measured — a log from there is a useful report either way.
+
+**Does not work: Elite's native Oculus path.** When the Meta (Oculus) PC runtime
+is what drives your headset — a Rift, a Rift S, or a Quest over Link or Air Link
+with the Meta PC app — Elite prefers its own Oculus back end, loads
+`LibOVRRT64_1.dll`, and never loads `openvr_api.dll` at all. Measured on a Rift
+S user's machine in September 2026: a byte-perfect, correctly-placed install of
+both EDVR files that the game simply never opened. **Nothing about the install
+can fix this** — it is which back end the game chose, decided before EDVR has a
+say.
+
+Elite having no OpenXR back end is worth stating separately, because it is where
+people look first: **Windows' OpenXR runtime selector and the Meta app's OpenXR
+toggles have no bearing on any of this.** Changing them does not move Elite onto
+OpenXR, because Elite never asks for OpenXR. OpenComposite is what makes an
+OpenXR runtime reachable, and it does it by answering as OpenVR.
+
+**Which one am I on?** Look in `edvr_logs\` next to the game after a session:
+
+| What you find | What it means |
+|---|---|
+| Two logs, the second with `vr` in the name | The OpenVR path. Its `launch centre:` line names the runtime underneath — Valve's SteamVR or OpenComposite. The in-headset menu's **Status** page says the same. |
+| One log only, and `edvr_breadcrumbs.txt` has `gfx:` lines but never a `vr:` line | The Oculus path. EDVR's `openvr_api.dll` was never loaded. |
+
+One caution while reading that log on the Oculus path: several messages say
+`openvr_api.dll is NOT installed` when the file is installed, correct, and
+merely never opened. Take them as "the openvr half never ran", not as an install
+fault — the breadcrumb test above is the one that decides.
+
+**What still works there.** The fixes that live entirely in `d3d11.dll` keep
+working — the exposure fix, the RemLok lines, the sun's glare, the particle
+billboards, the loading hologram, the scanner body, the on-foot screen's
+resolution and curvature — though a few of them lean on the other half for
+per-headset tuning and fall back to their defaults without it. What goes
+outright: the temporal pass and DLAA/DLSS, the supersample resolve, the
+sharpening, the terrain fix, the transition flash, Explorer Cam, the in-headset
+settings menu, the black void and the panel distance. That is most of the reason
+to install it.
+
+**Getting a Meta headset onto OpenVR.** Both of the usual routes bypass the Meta
+PC runtime rather than arguing with it:
+
+- **Steam Link** on Quest 2/3/Pro — streams to SteamVR directly, and the game
+  finds no Oculus runtime to prefer.
+- **Virtual Desktop** — either its SteamVR mode, or VDXR with OpenComposite,
+  which is the configuration this project measures on a Quest 3.
+
+With Link or Air Link and the Meta app running, Elite will keep choosing Oculus.
+There is an old community workaround — running `EliteDangerous64.exe` in Windows
+7 compatibility mode, which Oculus' runtime refuses, pushing the game onto
+SteamVR — but it dates from the Rift CV1 era, this project has not tested it,
+and it is not something to rely on. If you try it and it works, that is a useful
+thing to report.
 
 ## Install
 
@@ -137,7 +224,9 @@ Logs appear in `edvr_logs\` next to the game. There are two of them; the second,
 with `vr` in the name, says
 `compositor hook installed on IVRCompositor_014`. If it reports an unknown
 compositor version instead, the fix is off, the game runs normally, and that
-version string is worth reporting. If you see a flash anyway, press **Pause**
+version string is worth reporting. **If there is no second log at all**, the
+game is not on its OpenVR path and half the patch never loaded — see
+[Headsets and VR runtimes](#headsets-and-vr-runtimes). If you see a flash anyway, press **Pause**
 straight after and send the logs — that writes the last ten seconds of viewpoint
 history, which separates "detected and let through" from "never detected".
 
