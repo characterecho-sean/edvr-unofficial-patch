@@ -1,6 +1,7 @@
 #include "glitch_frame.h"
 
 #include "../common/timing.h"
+#include "vr_runtime.h"
 
 namespace edvr {
 // The arrival-mono fix's questions, registered by vscreen at install so
@@ -1304,17 +1305,29 @@ void validate() {
     // By now the compositor hook has long since seen its first eight Submit
     // calls, so this is a reliable moment to say whether the other half is
     // there -- and the most visible line in the log to say it on.
+    //
+    // WHAT IT USED TO SAY, and why it does not any more: "WARNING:
+    // openvr_api.dll is NOT installed". That is one of four reasons the hook
+    // can be silent and it was the wrong one for the session that made this
+    // matter -- see vr_runtime.h. It was also called a WARNING on a monitor,
+    // where having no VR runtime is simply what a flat session is.
+    char tail[900];
+    if (glitchConsumerPresent()) {
+        snprintf(tail, sizeof(tail),
+                 "The openvr half is hooked, so bad frames will be withheld.");
+    } else {
+        snprintf(tail, sizeof(tail),
+                 "Bad frames will be detected and logged but NOT WITHHELD -- you will still see "
+                 "the flash, because %s.",
+                 vrRuntimeShortWhy());
+        vrRuntimeExplainOnce();
+    }
     Log::get().note(
         "transition flash fix ACTIVE: watching the camera at float %u of the %u-byte "
         "scene buffer, which moved in %u of the first %u frames of rendered scene. "
         "Threshold %.0f world units, or %.1fx the current speed, whichever is larger. %s",
         s->posOffset, s->bufferBytes, s->validateMoved, s->validateFrames,
-        s->jumpMin, s->jumpFactor,
-        glitchConsumerPresent()
-            ? "openvr_api.dll is installed, so bad frames will be withheld."
-            : "WARNING: openvr_api.dll is NOT installed, so bad frames will be "
-              "detected and logged but NOT withheld -- you will still see the flash. "
-              "See the openvr folder in the download.");
+        s->jumpMin, s->jumpFactor, tail);
 }
 
 }  // namespace
@@ -2160,15 +2173,25 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
         if (s->notesLeft > 0) {
             --s->notesLeft;
             const bool acted = glitchConsumerPresent();
+            // The SHORT reason, because this line repeats -- forty times in the
+            // measured session. The full paragraph is on the ACTIVE line above
+            // and in the shutdown summary, which are said once each.
+            char verdict[220];
+            if (acted) {
+                snprintf(verdict, sizeof(verdict),
+                         "Withheld; the runtime will reproject the previous frame.");
+            } else {
+                snprintf(verdict, sizeof(verdict),
+                         "NOT withheld -- nothing was in a position to stop it being shown, "
+                         "because %s.",
+                         vrRuntimeShortWhy());
+            }
             Log::get().note(
                 "transition flash: frame %u was drawn from %.0f world units off the "
                 "camera's path (threshold %.0f), at (%+.0f %+.0f %+.0f) with %u eye "
                 "draws. %s %u detected this session.",
                 s->frameNo, s->lastResid, s->lastTrip, s->frameFarPos[0],
-                s->frameFarPos[1], s->frameFarPos[2], gateDraws,
-                acted ? "Withheld; SteamVR will reproject the previous frame."
-                      : "NOT withheld -- openvr_api.dll is not installed, so nothing "
-                        "was in a position to stop it being shown.",
+                s->frameFarPos[1], s->frameFarPos[2], gateDraws, verdict,
                 s->framesWithheld);
         }
     } else if (s->jumpedThisFrame) {
@@ -2361,6 +2384,13 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
         if (s->framesWithheld != s->totalsWithheld ||
             s->suppressed != s->totalsSuppressed) {
             const bool acted = glitchConsumerPresent();
+            char withheldWord[200];
+            if (acted) {
+                snprintf(withheldWord, sizeof(withheldWord), "withheld");
+            } else {
+                snprintf(withheldWord, sizeof(withheldWord),
+                         "detected but NOT withheld (%s)", vrRuntimeShortWhy());
+            }
             Log::get().note(
                 "transition flash so far: %u frame(s) %s this session, and %u "
                 "more recognised as render-pass geometry and left alone -- %u by a "
@@ -2375,8 +2405,7 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
                 "expected to be large near a planet surface and are not a fault -- "
                 "they are frames that would have been withheld before, and felt as "
                 "judder.",
-                s->framesWithheld, acted ? "withheld" : "detected but NOT withheld "
-                                           "(openvr_api.dll is not installed)",
+                s->framesWithheld, withheldWord,
                 s->suppressed, s->suppressedBySeparation, s->suppressedByRadius,
                 s->suppressedByPark, s->suppressedByDrift,
                 s->framesWithheld - s->totalsWithheld,
@@ -2644,10 +2673,9 @@ void shutdownGlitchFrameFix() {
         // skipped the second file that the fix had been working all along.
         Log::get().note(
             "transition flash fix: %u bad frame(s) detected this session, and NONE of "
-            "them were withheld -- openvr_api.dll is not installed, so the detection "
-            "had nothing to act on. Everything else in EDVR works without it; only "
-            "this fix needs it. See the openvr folder in the download.",
-            s->framesWithheld);
+            "them were withheld -- the detection had nothing to act on, because %s.",
+            s->framesWithheld, vrRuntimeShortWhy());
+        vrRuntimeExplainOnce();
     } else {
         Log::get().note(
             "transition flash fix: %u frame(s) withheld this session, and %u more "

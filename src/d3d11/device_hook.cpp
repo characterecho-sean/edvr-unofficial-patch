@@ -1,6 +1,7 @@
 ﻿#include "device_hook.h"
 
 #include "shader_sig.h"
+#include "vr_runtime.h"
 
 #include <windows.h>
 
@@ -730,6 +731,13 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
     // frame's row says what EDVR's boundary work cost in it.
     const int64_t boundaryT0 = qpcNow();
     guardedBudget(g_frameBudget, [&] {
+        // WHICH VR BACK END THIS ACTUALLY IS, said once near the top of the
+        // log. Inside the budget because it reads the process module list;
+        // rate-limited to once a second by the module itself, and silent from
+        // the moment it has spoken. See vr_runtime.h for the session that made
+        // it necessary -- a perfect install the game never opened, and eight
+        // messages telling its owner the file was missing.
+        vrRuntimeTick();
         if (g_state->toggleKey.pressed()) toggleExposureFix();
         // Deliberately not part of the toggle: it reports, it does not change
         // anything, so there is no reason for it to follow the fix being off.
