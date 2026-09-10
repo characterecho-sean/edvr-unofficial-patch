@@ -2761,6 +2761,48 @@ which is this project's contract for every read of the game.
    Not proven: the run that decides it is a long run at ten kilometres,
    the hub's face against the ring over fifteen frames, and a second run
    there with the body's path off for the baseline smear.
+
+   *The forty-first flight, 04:16 on 2026-09-10 (v0.14.1-136)*: the deciding
+   runs, both at the load position -- the pool puts the station's records
+   at a median 10.0 km, and so it did for the 20:36 run, which the passage
+   above wrongly calls six kilometres. A long run with the path on at
+   04:20:13, the menu's "rotating stations" off at 04:23:13, a second run
+   at 04:23:23. THE TREATED FRAMES LOOK THE SAME. By a fine-detail score
+   (the Laplacian's variance over the region's, the treated frame brought
+   to the raw's scale) the OFF frame is no softer and slightly sharper:
+   the hub's tiles 1.27 against 1.00, its inner face 2.91 against 2.10,
+   the ring 2.30 against 1.54, the raw frames 5.5-9.6. The path took 1.7%
+   of pixels -- the station's -- and changed nothing the eye could see.
+   So at ten kilometres the vectors are not the lever, though they are
+   applied. The raw crops, measured three ways (tools/eye_run_fit.py, a
+   rigid fit of each frame to the one before over an annulus of the
+   2-px-blurred picture, the pass's own sub-pixel jitter falling out as
+   the fitted shift, validated on synthetic rotations of the same frame
+   smooth and re-rasterised to within 0.003 deg; the ring's and the hub's
+   lights tracked as blobs; the angular profiles' correlation between
+   frames 0 and 15), on both runs and on 20:36's: the HUB'S FACE turns
+   about 0.035 deg a frame and the RING about 0.013 to 0.020, both
+   clockwise on the picture, while the pool's records -- the 912
+   unskinned and the 105 skinned alike, over the four-frame run of
+   04:20:39 -- turn 0.031, 0.047 and 0.042 in successive frames, 0.040 on
+   average. The hub's face turns at about its records' rate; the drawn
+   ring at a third of it. Reprojecting both by 0.040 is nearly right for
+   the hub and wrong for the ring by 0.025 a frame; reprojecting neither
+   is wrong for both by less. Hence on and off alike. The 16:58 census of
+   the day before, at this range, shows the far station drawn through the
+   pool shaders (2966 instances a frame over 1334 draws) beside big
+   instanced draws that read no pool -- 454 lights, 101 matrices at t0,
+   1456 sprites, the 4784-instance starfield -- and nothing in hand says
+   which of them paint the ring. Built: THE EYE RUN'S LEDGER
+   (object_probe.h): the dump key's run also has the object probe keep
+   every frame's pool copy, copy the scene's instance stream (the
+   per-instance record indices every pool draw reads) and the first
+   megabyte of the bone palette at VS t38, and note every eye draw with
+   its shader, counts, start instance and whether t33 was the pool --
+   written beside the crops, named by the run's stamp, for
+   tools/eye_run_ledger.py: which records each draw took, how far each
+   turned between consecutive crops, how the bones moved, and the big
+   non-pool draws for the next look. Built as v0.14.1-139-g01463e1.
 4. **Tier 2b** only if question 1 says no bits.
 5. **Tier 3** as `tools/` work against dumped frames, never on the hot
    path.
