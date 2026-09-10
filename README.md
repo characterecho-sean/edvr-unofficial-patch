@@ -157,66 +157,10 @@ Windows will say the program is unrecognised, because it is unsigned: **More
 info → Run anyway**. Every release lists the installer's SHA-256, which is the
 only provenance an unsigned binary can offer.
 
-<details>
-<summary><b>Or install the two files by hand</b> — the same thing, done yourself</summary>
-
-Two files. The first enables most of the fixes; the second is needed by the
-transition flash fix and Explorer Cam.
-
-### The first file — `d3d11.dll`
-
-1. Close Elite Dangerous.
-2. Check there is no `d3d11.dll` already next to `EliteDangerous64.exe`. If
-   there is, stop — see [Running alongside other mods](#running-alongside-other-mods).
-3. Copy `d3d11.dll` and `edvr.ini` into **the folder containing
-   `EliteDangerous64.exe`**. Where that is depends on how you installed the
-   game — these are the ones people have reported:
-
-   | Install | Folder |
-   |---|---|
-   | Frontier launcher | `…\Frontier\EDLaunch\Products\elite-dangerous-odyssey-64` (often under `Program Files (x86)`, and not always on C:) |
-   | Steam | `…\steamapps\common\Elite Dangerous\Products\elite-dangerous-odyssey-64` |
-   | Epic | `…\Epic Games\EliteDangerous\Products\elite-dangerous-odyssey-64` |
-
-   If none of those match, find `EliteDangerous64.exe` yourself — that folder
-   is the answer, whatever its path. EDVR writes the folder it loaded from
-   into the first lines of its log, so you can always check afterwards.
-4. Start the game.
-
-Press **Scroll Lock** in game to toggle the brightness fix; at a star the
-difference is immediate.
-
-### The second file — `openvr_api.dll`
-
-The transition flash fix and Explorer Cam are applied here. It is part of the
-patch rather than an extra: an install without it is one where those two fixes
-are quietly absent. It installs differently from the first file, because the
-game already ships a file with this name and EDVR needs that original kept:
-
-> **Do not overwrite or delete the game's `openvr_api.dll`. Rename it.** EDVR
-> loads the renamed original and passes every call through to it. If the
-> original is overwritten instead, EDVR has nothing to forward to — VR will not
-> start, and the log will say exactly this. (If that happens: verify the install
-> in Frontier's launcher to restore the file, and redo the steps below.)
-
-1. Close Elite Dangerous.
-2. Find **the folder that already contains the game's own `openvr_api.dll`**.
-   Start from the `Openvr` folder next to `EliteDangerous64.exe`: on some
-   installs the file sits directly in `Openvr\`, on others in `Openvr\win64\`.
-   Whichever one holds it is the right folder — there is no single correct
-   path, so go by the file rather than the name.
-3. **Rename** the `openvr_api.dll` already there to `openvr_api_orig.dll`.
-4. Copy EDVR's `openvr_api.dll` (from the release's `openvr` folder) into its
-   place.
-5. Start the game.
-
-The reason this fix cannot ride along in `d3d11.dll`: the decision not to show a
-frame has to be made where frames are handed to SteamVR, and that is this file.
-Skipping it leaves the flash fix able to detect and log only, and **Explorer Cam
-doing nothing at all** — EDVR says so in the log the first time it would have
-engaged.
-
-</details>
+**Would rather place the two files yourself?**
+[docs/manual-install.md](docs/manual-install.md) is the same install by hand:
+where each file goes, and the `openvr_api.dll` rename that most manual installs
+get wrong.
 
 ### Checking it worked
 
@@ -507,65 +451,11 @@ parked under the renamed file — and puts both back.)
 **ReShade** needs no configuration — install it the way ReShade tells you to
 (normally as `dxgi.dll`) and EDVR composes with it. Both mods' effects apply.
 
-<details>
-<summary>If you are on 0.7.1 or earlier and the game crashes on launch</summary>
-
-Update to 0.7.2. Before it, EDVR intercepted Direct3D calls by copying an
-object's method table and pointing *the object itself* at the copy — which
-quietly re-pointed objects ReShade owns and dispatches through, and the game
-crashed while EDVR was installing
-([#6](https://github.com/characterecho-sean/edvr-unofficial-patch/issues/6)).
-It presented as intermittent because EDVR's crash sentinel disables the
-Direct3D fixes on the launch after a crash, so it alternated. EDVR now swaps
-the individual method pointers where they already live and never touches the
-object.
-
-</details>
-
-<details>
-<summary>If everything except the exposure fix stopped working</summary>
-
-Look in `edvr_gfx_*.log` for the periodic `vScreen totals:` line. If
-**`largest eye-draw count`** is `0` and stays `0` while you are actually
-flying or on foot, that one number is the whole fault: the black void, the
-panel distance, the transition flash fix and Explorer Cam all read it, and a
-zero switches all four off at once. The exposure fix does not read it, which
-is why it keeps working and makes the rest look individually broken.
-
-EDVR decides which render targets are your eye textures. Before 0.7.3 it
-guessed by size — 2048×2048 or larger, minus anything exactly the size of the
-on-foot panel. Two things defeated that guess, both silently:
-
-- **A panel raised to exactly your eye-texture size.** The panel exclusion
-  then removed the eyes along with the panel. This is the one to suspect if
-  you set `vscreen_res_width`/`_height` to `3840`/`2160`.
-- **Eye textures under 2048 on an axis**, which never qualified at all. This
-  is most headsets: a Quest 3 through SteamVR renders about 1832×1920 or
-  1728×1824 per eye at ordinary settings, and only clears 2048 on both axes
-  near or above its native panel resolution.
-
-From 0.7.3, `openvr_api.dll` reads the size of the texture the game actually
-submits and tells the graphics side, so it matches your real eye textures
-instead of guessing, and says so in both logs. If the count is still stuck at
-0, EDVR now prints a line naming every target size it did see — please attach
-it to an issue. As an immediate workaround on any version, set
-`vscreen_res_width`/`_height` to `2880`/`1620` (short enough that nothing
-collides) or back to `1920`/`1080`.
-
-</details>
-
-<details>
-<summary>Why an earlier version of this crashed with EDHM, if you hit that</summary>
-
-The first attempt loaded the other mod during `DllMain`, where Windows holds the
-loader lock; loading a DLL that isn't already in memory runs *its* startup code
-under that lock, which Windows doesn't support. It now loads the other mod on
-the first graphics call instead. Tested with a stand-in proxy that does work in
-its own `DllMain` — the exact thing that used to crash — plus the three ways it
-can go wrong: a missing name, a non-proxy file, and a setting pointed at EDVR
-itself. All three fall back to the system DLL and say so.
-
-</details>
+**If something has gone wrong** and the log has not answered it — a launch crash on
+0.7.1 or earlier, every fix except the brightness one going quiet at once, or
+an old EDHM pairing that crashed —
+[docs/troubleshooting.md](docs/troubleshooting.md) has the three faults with a
+known cause and what each one needs.
 
 ## Game updates
 
