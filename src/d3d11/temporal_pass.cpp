@@ -2081,8 +2081,17 @@ bool     g_eyeDumpDirMade = false;
 // drawn hub turns by a skinning bone the pool never shows (the pool's
 // vertex shaders read a 48-byte bone palette at t0 under the record's
 // quaternion), so it has to be measured from the picture.
-constexpr int    kEyeRun = 4;
-ID3D11Texture2D* g_eyeRunStaging[kEyeRun] = {};
+// ...and LONG (2026-09-09 20:29): four raw frames gave a 0.15 deg baseline,
+// a tenth of a pixel on a ring 190 px from the axis in the 2862 render,
+// under the noise of an aliased frame. So the run is sixteen consecutive
+// CROPS of the raw input, kEyeCrop pixels square about its centre (7.8 MB
+// of staging each against 32 for a frame), written after the sixteenth,
+// with the first treated frame whole for context: a 0.75 deg baseline,
+// two pixels on that ring, and the frame-to-frame pattern of a part that
+// steps or holds.
+constexpr int    kEyeRun = 16;
+constexpr uint32_t kEyeCrop = 1400;
+ID3D11Texture2D* g_eyeRunStaging[1] = {};   // the first treated frame
 // ...and the RAW frames beside them (eye_HHMMSS_R0..3.bmp): the game's
 // render as the pass hands it to NVIDIA, before any history. The run of
 // 18:43 (2026-09-09) showed why both are needed: NVIDIA's output is the
@@ -2304,20 +2313,54 @@ bool stageEyeRun(ID3D11DeviceContext* ctx, ID3D11Texture2D* tex, ID3D11Texture2D
     return true;
 }
 
-// THE EYE RUN's raw capture: the pass's input colour for this frame, into
-// the slot the treated frame will take (captureEyeRun counts).
+// THE EYE RUN's raw capture: a crop of the pass's input colour about its
+// centre into the next slot, and the write after the last (kEyeRun says).
 void captureEyeRunRaw(ID3D11DeviceContext* ctx, ID3D11Texture2D* colour) {
     const int k = g_eyeRunTaken;
-    if (!colour || k < 0 || k >= kEyeRun) return;
-    stageEyeRun(ctx, colour, g_eyeRawStaging, k);
-}
-
-// THE EYE RUN's capture (kEyeRun says why): this frame's left eye into the
-// next staging slot, a copy and nothing more; the fourth writes them all.
-void captureEyeRun(ID3D11DeviceContext* ctx, ID3D11Texture2D* tex) {
-    const int k = g_eyeRunTaken;
-    if (k < 0 || k >= kEyeRun) { g_eyeRunLeft = 0; return; }
-    if (!stageEyeRun(ctx, tex, g_eyeRunStaging, k)) { g_eyeRunLeft = 0; return; }
+    if (!colour || k < 0 || k >= kEyeRun) { g_eyeRunLeft = 0; return; }
+    D3D11_TEXTURE2D_DESC d{};
+    colour->GetDesc(&d);
+    const uint32_t cw = d.Width < kEyeCrop ? d.Width : kEyeCrop;
+    const uint32_t ch = d.Height < kEyeCrop ? d.Height : kEyeCrop;
+    if (g_eyeRawStaging[k]) {
+        D3D11_TEXTURE2D_DESC sd{};
+        g_eyeRawStaging[k]->GetDesc(&sd);
+        if (sd.Width != cw || sd.Height != ch || sd.Format != d.Format) {
+            g_eyeRawStaging[k]->Release();
+            g_eyeRawStaging[k] = nullptr;
+        }
+    }
+    if (!g_eyeRawStaging[k]) {
+        ID3D11Device* dev = nullptr;
+        ctx->GetDevice(&dev);
+        if (!dev) { g_eyeRunLeft = 0; return; }
+        D3D11_TEXTURE2D_DESC sd = d;
+        sd.Width = cw;
+        sd.Height = ch;
+        sd.Usage = D3D11_USAGE_STAGING;
+        sd.BindFlags = 0;
+        sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        sd.MiscFlags = 0;
+        sd.MipLevels = 1;
+        sd.ArraySize = 1;
+        const HRESULT hr = dev->CreateTexture2D(&sd, nullptr, &g_eyeRawStaging[k]);
+        dev->Release();
+        if (FAILED(hr) || !g_eyeRawStaging[k]) {
+            g_eyeRawStaging[k] = nullptr;
+            g_eyeRunLeft = 0;
+            Log::get().note("temporal aa: the eye run could not make a crop's staging copy (0x%08lX); nothing "
+                            "written.", static_cast<unsigned long>(hr));
+            return;
+        }
+    }
+    D3D11_BOX box{};
+    box.left = (d.Width - cw) / 2;
+    box.top = (d.Height - ch) / 2;
+    box.right = box.left + cw;
+    box.bottom = box.top + ch;
+    box.front = 0;
+    box.back = 1;
+    ctx->CopySubresourceRegion(g_eyeRawStaging[k], 0, 0, 0, 0, colour, 0, &box);
     ++g_eyeRunTaken;
     --g_eyeRunLeft;
     if (g_eyeRunLeft > 0) return;
@@ -2326,24 +2369,35 @@ void captureEyeRun(ID3D11DeviceContext* ctx, ID3D11Texture2D* tex) {
         g_eyeDumpDirMade = true;
         CreateDirectoryW(dir.c_str(), nullptr);
     }
-    int wrote = 0, wroteRaw = 0;
+    int wrote = 0, wroteTreated = 0;
     for (int i = 0; i < g_eyeRunTaken; ++i) {
+        if (!g_eyeRawStaging[i]) continue;
         wchar_t path[MAX_PATH];
-        _snwprintf_s(path, MAX_PATH, _TRUNCATE, L"%s\\eye_%s_L%d.bmp", dir.c_str(), g_eyeRunStamp, i);
+        _snwprintf_s(path, MAX_PATH, _TRUNCATE, L"%s\\eye_%s_C%02d.bmp", dir.c_str(), g_eyeRunStamp, i);
         D3D11_TEXTURE2D_DESC sd{};
-        g_eyeRunStaging[i]->GetDesc(&sd);
-        if (writeEyeBmp(ctx, g_eyeRunStaging[i], sd, 0, path)) ++wrote;
-        if (g_eyeRawStaging[i]) {
-            _snwprintf_s(path, MAX_PATH, _TRUNCATE, L"%s\\eye_%s_R%d.bmp", dir.c_str(), g_eyeRunStamp, i);
-            g_eyeRawStaging[i]->GetDesc(&sd);
-            if (writeEyeBmp(ctx, g_eyeRawStaging[i], sd, 0, path)) ++wroteRaw;
-        }
+        g_eyeRawStaging[i]->GetDesc(&sd);
+        if (writeEyeBmp(ctx, g_eyeRawStaging[i], sd, 0, path)) ++wrote;
     }
-    Log::get().note("temporal aa: an eye run of %d consecutive frames of the left eye is on disk "
-                    "(eye_%ls_L0..%d.bmp, and %d raw frames as handed to NVIDIA, eye_%ls_R0..%d.bmp), the "
-                    "frames the game drew in a row, for what a part does from one to the next.",
-                    wrote, g_eyeRunStamp, g_eyeRunTaken - 1, wroteRaw, g_eyeRunStamp, g_eyeRunTaken - 1);
+    if (g_eyeRunStaging[0]) {
+        wchar_t path[MAX_PATH];
+        _snwprintf_s(path, MAX_PATH, _TRUNCATE, L"%s\\eye_%s_L0.bmp", dir.c_str(), g_eyeRunStamp);
+        D3D11_TEXTURE2D_DESC sd{};
+        g_eyeRunStaging[0]->GetDesc(&sd);
+        if (writeEyeBmp(ctx, g_eyeRunStaging[0], sd, 0, path)) ++wroteTreated;
+    }
+    Log::get().note("temporal aa: an eye run of %d consecutive raw crops of the left eye is on disk "
+                    "(eye_%ls_C00..%02d.bmp, %ux%u about the input's centre, the game's render as handed to "
+                    "NVIDIA) with the first treated frame whole (%d written, eye_%ls_L0.bmp): the frames the "
+                    "game drew in a row, for what a part does from one to the next.",
+                    wrote, g_eyeRunStamp, g_eyeRunTaken - 1, cw, ch, wroteTreated, g_eyeRunStamp);
     g_eyeRunTaken = 0;
+}
+
+// THE EYE RUN's treated capture: the run's first frame whole, as the
+// compositor receives it, for context (the raw crops are the measurement).
+void captureEyeRun(ID3D11DeviceContext* ctx, ID3D11Texture2D* tex) {
+    if (g_eyeRunTaken != 1) return;   // the first raw crop was just taken this frame
+    stageEyeRun(ctx, tex, g_eyeRunStaging, 0);
 }
 // The body's occupancy grid on the GPU (object_probe.h): one for both
 // eyes, uploaded when the probe's version moves.
@@ -5590,8 +5644,8 @@ void temporalPassShutdown() {
     for (EyeState& e : g_eye) releaseEye(e);
     for (Slot& q : g_slots) releaseSlot(q);
     if (g_bodyGridSrv) { g_bodyGridSrv->Release(); g_bodyGridSrv = nullptr; }
+    if (g_eyeRunStaging[0]) { g_eyeRunStaging[0]->Release(); g_eyeRunStaging[0] = nullptr; }
     for (int k = 0; k < kEyeRun; ++k) {
-        if (g_eyeRunStaging[k]) { g_eyeRunStaging[k]->Release(); g_eyeRunStaging[k] = nullptr; }
         if (g_eyeRawStaging[k]) { g_eyeRawStaging[k]->Release(); g_eyeRawStaging[k] = nullptr; }
     }
     g_eyeRunLeft = 0;
@@ -5624,8 +5678,8 @@ bool temporalPassPlanes(float* nearZ, float* farZ) {
 }
 
 void temporalPassArmEyeDump() {
-    // The key takes a RUN of the left eye (kEyeRun says why), not a pair of
-    // single frames; a run already under way is left to finish.
+    // The key takes a RUN of the left eye (kEyeRun says why): sixteen raw
+    // crops and the first treated frame; a run under way is left to finish.
     if (g_eyeRunLeft > 0) return;
     SYSTEMTIME stm{};
     GetLocalTime(&stm);
