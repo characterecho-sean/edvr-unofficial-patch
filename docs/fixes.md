@@ -146,15 +146,6 @@ resolve kernel trades a little edge contrast for its calm. `fix.render_sharpness
 door; 0.3 to 0.5 is where to start. `fix.render_sharpness = 0.0` (off).
 *[anti-aliasing.md](anti-aliasing.md).*
 
-**The shimmer on a steady ship — retired.** A headset's tracking never quite
-stops: on a Pimax Crystal Super lying on a desk the reported orientation wanders
-about a tenth of an arcminute a frame, and the compositor re-warps by that
-motion, so any line about a pixel wide blinks as it crosses pixel rows. A rest
-lock that held the render pose while the head was still shipped 2026-09-03 and
-was retired the next day — the temporal pass above integrates that wander
-instead of fighting it, and the lock could not engage on a Quest 3's tracking at
-all. *[anti-aliasing.md](anti-aliasing.md).*
-
 ---
 
 ## Over a planet
