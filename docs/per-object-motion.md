@@ -2803,6 +2803,41 @@ which is this project's contract for every read of the game.
    tools/eye_run_ledger.py: which records each draw took, how far each
    turned between consecutive crops, how the bones moved, and the big
    non-pool draws for the next look. Built as v0.14.1-139-g01463e1.
+
+   *The forty-second flight, 05:17 (v0.14.1-139)*: one press at the load
+   position with the path on, the run at 05:19:51, the ledger written a
+   few frames after it -- twenty pool copies, nineteen instance streams,
+   nineteen palette copies, 29254 eye draws, the crops C00..C15 at frames
+   17771..17786. THE WHOLE STATION IS DRAWN FROM THE POOL: of its records
+   within 500 m of the fitted axis 268 of 545 were taken by pool draws in
+   both frames of every pair, of those beyond 800 m 176 of 288, and the
+   drawn ones turned exactly as the undrawn -- 0.030 to 0.056 a frame,
+   0.042 on average, the hub's, the ring's and the skinned records alike
+   -- through the three big pool shaders (436193B352A2897E,
+   EB5234DB6ADB491D, DE545DC8EE4FBB87) with meshes up to 14499 indices.
+   The one palette copied at t38 read all zeros at the bases the hub's
+   records carry: the census counts four 48-byte palettes and the hub's
+   is another. The crops of this run measured like the others: the hub's
+   face 0.027 to 0.037 a frame, the ring 0.010 to 0.020, against the
+   records' 0.042; the cockpit and the stars in the same crops turn
+   within 0.003 of nothing, so no head roll hides in it. The light
+   tracker fails its own synthetic (a re-rasterised 0.046 comes back as
+   0.017 on the ring, 0.003 on the hub: a sub-pixel light's centroid
+   snaps to the grid), so its readings are withdrawn; the rigid fit
+   passes the same test and stands. So the picture's slow ring is drawn
+   by something that reads no pool -- the candidates are the instanced
+   draws beside the station's: 512 and 57 lights (0357BBB2DEE43C1F, a
+   per-instance stream and a world matrix in cb2), 180 matrices at t0
+   (8289669D93A18C1D), 192 in a stream (A1B7CFCD0BE7493E), 83 of 112-byte
+   records at t0 (963B52C73B4143AC) -- and at ten kilometres the lights
+   are most of what the eye, and the fit, can see of the ring. THE
+   SECOND LOOK (v0.14.1-142-g21bf0fd): every distinct palette the pool
+   draws bind at t38 is copied each frame (up to four, bones<p>_), and
+   each shader drawing fifty or more instances with no pool has, at its
+   first draw of the frame, its cb2, its t0 and its first two vertex
+   buffers copied (aux_<stamp>_<frame>.bin); the desk tool reads the turn
+   of each such draw's world rows between consecutive crops, and the
+   palette whose rows at the bases are rotations is the hub's.
 4. **Tier 2b** only if question 1 says no bits.
 5. **Tier 3** as `tools/` work against dumped frames, never on the hot
    path.
