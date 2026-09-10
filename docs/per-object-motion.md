@@ -1,5 +1,47 @@
 # Per-object motion vectors: a design
 
+**Reading this on 2026-09-10:** this is a historical design followed by a
+flight journal; the opening's "Nothing here is implemented" describes its
+original state. Later entries implement and revise several approaches.
+For the current review of blur during movement, including two reproduced
+origin-continuity bugs and a correction to the DLAA resolution test, see
+[the distance-and-motion review](review-distance-motion-2026-09-10.md).
+The [follow-up smoke review](review-smoke-voids-2026-09-10.md) checks the
+branch through `44edb30`, verifies those two fixes, and examines the new
+10:25–10:26 eye runs and draw ledgers.
+The [latest-run and switch review](review-smoke-toggles-2026-09-10.md)
+checks `794ee65` and the 11:14 capture, and documents the takeover changes
+on `codex/smoke-temporal-history`.
+The [12:02 capture review](review-smoke-capture-1202.md) retracts the
+earlier ship-smoke-volume identification: that shader also renders
+planetary bodies/rings. It documents the trails surviving both switches
+and the particle families selected for a controlled diagnostic.
+The [12:19 capture review](review-smoke-capture-1219.md) records that those
+particle skips did not remove the confirmed blue-haze gaps. It connects
+their AA-only occurrence to shared upstream processing and documents the
+successful UI-depth-off diagnostic. The follow-up implementation moves
+HUD/interface depth into private targets; the user confirmed that it fixed
+the smoke holes with UI depth enabled again.
+The [13:02 flight review](review-station-flicker-2026-09-10.md) investigates
+the remaining whole-station flicker, reproduces a carried-motion origin
+mismatch, and adds matching raw/treated captures with per-eye motion data.
+The [13:33 UI and panel review](review-ui-panels-2026-09-10.md) identifies
+two targeting-chevron motion errors, adds adaptive UI history, and fixes
+paired crop coverage under DLSS for the remaining solar-panel investigation.
+The [14:16 coverage review](review-ui-coverage-2026-09-10.md) reproduces
+false chevron coverage against the game's shader, separates smoke from UI
+history evidence, and repairs AA-off dumps. It distinguishes the approved
+higher-resolution experiment from the unresolved loss of station detail
+during temporal reconstruction.
+The [14:53 station-depth review](review-station-depth-2026-09-10.md)
+uses the new GPU inputs to identify near-plane depth beneath the chevrons
+and the finite-far fallback misplacing distant station surfaces by kilometres.
+It corrects the fallback and preserves original scene depth under floating HUD.
+The [15:20 yaw and sprite review](review-yaw-sprite-depth-2026-09-10.md)
+measures a false world-motion shutdown during opposing ship/head turns,
+and traces persistent chevron depth one to the sprite vertex shader's
+forced raster depth. It corrects both without changing resolution or sharpening.
+
 *A design document, written before the code, as a companion to
 [anti-aliasing.md](anti-aliasing.md) (feature B, the temporal pass) and to
 the two reviews of 2026-09-04

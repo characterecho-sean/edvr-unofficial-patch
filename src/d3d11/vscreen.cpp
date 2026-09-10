@@ -1599,13 +1599,19 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     // probe is: on foot they draw into the panel, and a fix that only ran
     // for the stereo view would leave the flat view swimming.
     //
-    // Both returns here sit ABOVE the census calls, so a census taken with
-    // either fix on is missing these draws with nothing in the log saying
-    // so -- the third census gap docs/per-object-motion.md named
-    // (2026-09-08). Counted, not recorded: a census that must see them whole
-    // sets the fix to stock, and the end line now says when it did not.
+    // Visible substituted draws need their own census/ledger entry here,
+    // since the early return bypasses the normal recording below. Effects
+    // withheld entirely are instead counted by drawCensusNoteUnseen.
     if (particleSteady() && particleOnDraw(self, kind, count, instances)) {
-        if (drawCensusArmed()) drawCensusNoteUnseen('p');
+        // This is still a visible draw. Capture the ORIGINAL shader and
+        // resources before particleBegin substitutes its vertex stage;
+        // otherwise the smoke that survives the drive switches is absent
+        // from both instruments used to identify it.
+        if (drawCensusArmed() || objectProbeLedgerActive()) {
+            const bool eye = targetIsEyeSized(bindingGet(BindSlot::Rtv0));
+            if (drawCensusArmed()) drawCensusEarlyDraw(self, kind, count, instances, eye, args);
+            if (eye) objectProbeNoteEarlyDraw(self, kind, count, instances, args.startInstance);
+        }
         return DrawVerdict::kParticle;
     }
 
@@ -2889,20 +2895,15 @@ void STDMETHODCALLTYPE hookedUnmap(ID3D11DeviceContext* self, ID3D11Resource* re
 template <typename RealDraw>
 void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
                         RealDraw&& draw) {
-    // The interface's depth write (ui_depth.h) brackets EVERY path below --
-    // the swallows that draw their own geometry, the sub-draw re-issue, the
-    // skip that draws nothing -- as a scope, so no return can leave the
-    // game's depth state swapped. Consumes the flag the way the skip below
-    // consumes curveThisDraw: its lifetime ends inside the call that set it.
-    // The flag is thread-local, so a deferred-context draw on another
-    // thread can neither steal it nor be treated by it.
+    // Per-draw coverage classification is cleared on every exit, including
+    // skips and fixes that draw their own geometry. The original draw keeps
+    // its depth state; supported coverage is reissued into private depth below.
     struct UiDepthScope {
         ID3D11DeviceContext* ctx;
         bool                 on;
         explicit UiDepthScope(ID3D11DeviceContext* c)
             : ctx(c), on(t_uiDepthThisDraw) {
             t_uiDepthThisDraw = false;
-            if (on) uiDepthBegin(ctx);
         }
         ~UiDepthScope() {
             if (on) uiDepthEnd(ctx);
@@ -3152,14 +3153,16 @@ void STDMETHODCALLTYPE hookedEnd(ID3D11DeviceContext* self,
     g_state->realEnd(self, async);
 }
 
-// The GPU-driven draws, record-only: the argument buffer holds the counts,
-// so n=0 i=0 and args= names the buffer instead. Kind 'Z' indexed, 'Y' not.
+// The argument buffer holds the counts, so the census records n=0 i=0
+// and args= names the buffer. Shader-identified drive switches do not need
+// those counts, and must also apply here. Kind 'Z' indexed, 'Y' not.
 void STDMETHODCALLTYPE hookedDrawIndexedInstancedIndirect(
     ID3D11DeviceContext* self, ID3D11Buffer* args, UINT off) {
     if (drawCensusArmed()) {
         drawCensusDrawDirect(self, 'Z', 0, 0, foreignContext(self), args, off);
     }
     if (!foreignContext(self)) {
+        if (heatHazeSkip(self, 'Z', 0, 0) || drivesSmokeSkip(self, 'Z', 0, 0)) return;
         depthProbeNoteIndirectDraw(self, bindingGet(BindSlot::Dsv0));
     }
     g_state->realDrawIndexedInstancedIndirect(self, args, off);
@@ -3171,6 +3174,7 @@ void STDMETHODCALLTYPE hookedDrawInstancedIndirect(ID3D11DeviceContext* self,
         drawCensusDrawDirect(self, 'Y', 0, 0, foreignContext(self), args, off);
     }
     if (!foreignContext(self)) {
+        if (heatHazeSkip(self, 'Y', 0, 0) || drivesSmokeSkip(self, 'Y', 0, 0)) return;
         depthProbeNoteIndirectDraw(self, bindingGet(BindSlot::Dsv0));
     }
     g_state->realDrawInstancedIndirect(self, args, off);

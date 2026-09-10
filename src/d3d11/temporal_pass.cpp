@@ -12,6 +12,7 @@
 #include <cstdarg>
 
 #include "../common/config.h"
+#include "../common/temporal_mode.h"
 #include "../common/guard.h"
 #include "../common/log.h"
 #include "device_hook.h"   // the auto mip bias's source, to check against a real frame
@@ -37,6 +38,9 @@ namespace {
 // the history: stored as the output is, so a frame with no history to
 // blend is bit-for-bit the game's own.
 constexpr char kTemporalCsHlsl[] = R"HLSL(
+#ifndef EDVR_TEMPORAL_DIAGNOSTICS
+#define EDVR_TEMPORAL_DIAGNOSTICS 1
+#endif
 Texture2D<float4> S : register(t0);      // this frame, the game's own texture (or the region copied out of it)
 Texture2D<float4> H : register(t1);      // the history, region-sized, on the unjittered grid
 Texture2D<float> Z : register(t2);       // the scene's depth, the game's own, when the pass has it
@@ -50,6 +54,9 @@ Texture2D<float> ZP : register(t3);      // LAST frame's ZC, when the mover mask
 Texture2D<float> UM : register(t4);      // the interface's reactive mask (ui_depth.h), folded into MK when probe.z says it is bound
 Texture3D<float> BG : register(t5);      // the dominant body's occupancy grid over box0..box1 (tier 2), when tvSt.w says the body's path is on
 Texture2D<float> ZS : register(t6);      // the drives' smoke's own depth (ui_depth.h, uiDepthSmokeDepth), the scene depth's size; unbound = none this frame, and reads as the far value
+Texture2D<float> ZUI : register(t7);     // private UI depth; never used by game draws
+Texture2D<float4> UP : register(t8);     // previous unjittered UI colour; alpha is coverage, not opacity
+RWTexture2D<float4> UN : register(u6);   // this frame's UI evidence, separate from accumulated colour
 RWTexture2D<float> MK : register(u5);    // for a trained pass: the mover mask, NVIDIA's bias-current-colour input (ONE texture: the interface's mask is folded in)
 cbuffer P : register(b0) {
     int4   region;      // x0 y0 x1 y1: this eye's pixels in S (x1, y1 exclusive)
@@ -85,7 +92,7 @@ cbuffer P : register(b0) {
     float4 fovea0;      // xy the fovea centre in output pixels, z the inner radius (px) where the periphery calming starts, w 1/(the ramp width in px)
     float4 fovea1;      // x the periphery calm strength (0..1), w 1 = the fovea is on (else no modulation)
     float4 movers;      // x 1 = the mover mask is on (ZP holds last frame's depth for this frustum); y the depth tolerance, a fraction; z the strength, how much history a masked pixel loses (0..1); w 1 = main writes ZC
-    float4 probe;       // for the mv entry: x the history's scale (H is NVIDIA's previous output at outW/w times the render size); y 1 = run the registration probes against it; z 1 = UM holds the interface's reactive mask, to fold into MK; w unused since 2026-09-09 (uiCovered reads the mask's parity)
+    float4 probe;       // x history scale, y registration probes, z coverage bound; w bits: 1 fixed bias, 2 prior UI valid, 4 adaptive UI
     float4 stR0;        // the body's path (tier 2, docs/per-object-motion.md): the composite delta's rows,
     float4 stR1;        // the camera's with the dominant body's own turn -- a station's -- in it
     float4 stR2;
@@ -179,19 +186,11 @@ float4 catmullRom(float2 uv, float2 tsize) {
 )HLSL"
 // (adjacent literals: MSVC caps one at 16 KB)
 R"HLSL(
-// The depth at a texel: the scene's target. Two levers once sat here and
-// are gone since 2026-09-04: extra eye-sized depth targets joined as HUD
-// layers, of which the only one ever found was a head-locked render of the
-// ship's own model; and an assumed depth for bright text-like pixels,
-// which took a distant station's lit faces for text and left Elite's
-// orange HUD text, below its brightness bar, untouched. The HUD writes no
-// depth anywhere the pass can see (docs/anti-aliasing.md has the record).
-// ...with the drives' smoke folded in: its coverage writes into a target
-// of EDVR's (ui_depth.cpp, SmokeDepth), the scene depth's size, so the
-// game's own depth is never written mid-frame -- which cut out the game's
-// later depth-tested draws behind the trail (the review of 2026-09-10).
-// Reversed-Z, the nearer wins; an unbound t6 reads zero, the far value.
-float zSceneAt(int2 q) { return max(Z.Load(int3(q, 0)), ZS.Load(int3(q, 0))); }
+// Merge current scene depth with private smoke and UI coverage. The UI
+// copy is seeded once per eye/frame; reading the latest scene here also
+// lets later nearer geometry win. The game's live depth is never modified
+// by these coverage passes. Reversed-Z; unbound layer SRVs read far (zero).
+float zSceneAt(int2 q) { return max(max(Z.Load(int3(q, 0)), ZS.Load(int3(q, 0))), ZUI.Load(int3(q, 0))); }
 float zAt(int2 q) { return zSceneAt(q); }
 // Tier 1 of docs/per-object-motion.md: the mover mask from depth
 // consistency (2026-09-08). The reprojection says where this pixel's
@@ -383,6 +382,43 @@ bool shipPixel(int i, float3 d, float z, out float2 pp, out float zp) {
 // fell in the riding band) they rode the station's spin where they
 // crossed its silhouette and kept the camera's path over the sky beside
 // it -- "shimmering on just one side".
+// UI history decisions compare UI evidence, independently of fixed bias.
+// Flags in probe.w: 1 fixed bias, 2 previous evidence valid, 4 capture/adapt.
+// A one-pixel neighbourhood tolerates raster jitter and subpixel movement.
+float4 uiEvidence(int2 q) {
+    q = clamp(q, int2(0,0), size - 1);
+    uint kind = uint(UM.Load(int3(q,0))*255.0+0.5) & 3u;
+    float marked = probe.z != 0.0 && (kind == 1u || kind == 2u) ? 1.0 : 0.0;
+    float2 uv = (float2(region.xy + q) + jit.xy + 0.5) / float2(texSize);
+    return marked != 0.0 ? float4(S.SampleLevel(L, uv, 0).rgb, 1.0) : 0.0;
+}
+float adaptiveUiReactive(int2 q, float2 previous) {
+    uint flags = uint(probe.w + 0.5);
+    if ((flags & 4u) == 0u) return 0.0;
+    float4 current = uiEvidence(q);
+    if ((flags & 2u) == 0u) return current.a;
+    int2 pq = int2(floor(previous + 0.5));
+    if (any(pq < 0) || any(pq >= size)) return current.a;
+    float4 oldCentre = UP.Load(int3(pq,0));
+    if (current.a == 0.0 && oldCentre.a == 0.0) return 0.0;
+    float3 lo = 1e10, hi = -1e10;
+    float nowCount = 0.0, oldCount = 0.0;
+    [unroll] for (int y=-1; y<=1; ++y) [unroll] for (int x=-1; x<=1; ++x) {
+        float4 c = uiEvidence(q + int2(x,y));
+        if (c.a != 0.0) { lo = min(lo,c.rgb); hi = max(hi,c.rgb); nowCount += 1.0; }
+    }
+    float error = 1e10;
+    [unroll] for (int py=-1; py<=1; ++py) [unroll] for (int px=-1; px<=1; ++px) {
+        int2 s = clamp(pq + int2(px,py), int2(0,0), size-1);
+        float4 old = UP.Load(int3(s,0));
+        if (old.a != 0.0) {
+            float3 e = max(max(lo-old.rgb,old.rgb-hi),0.0);
+            error = min(error,max(e.x,max(e.y,e.z))); oldCount += 1.0;
+        }
+    }
+    if (nowCount == 0.0 || oldCount == 0.0) return 1.0;
+    return saturate((error - 0.03) / 0.17);
+}
 bool uiCovered(int2 q) {
     if (probe.z == 0.0) return false;
     uint v = uint(UM.Load(int3(q, 0)) * 255.0 + 0.5);
@@ -546,13 +582,17 @@ bool fetchHistoryT(float2 p, float3 r0, float3 r1, float3 r2, float3 tv,
                 // straight into Stats (48 the cell hit, 49 the path refused):
                 // the flight of 18:00 stamped cells on every frame and no
                 // pixel took the path, and the counts say which half failed.
+#if EDVR_TEMPORAL_DIAGNOSTICS
                 InterlockedAdd(Stats[48], 1u);
+#endif
                 if (tv3[0].w != 0.0 && steppedPixel(inb, d, zBody, ppB, zpB)) {
                     pp = ppB;
                     zPred = zpB;
                     world = 5;
                 } else {
+#if EDVR_TEMPORAL_DIAGNOSTICS
                     InterlockedAdd(Stats[49], 1u);
+#endif
                 }
             } else if (inb == 255 && bodyPixel(d, zBody, ppB, zpB)) {
                 pp = ppB;
@@ -582,7 +622,9 @@ uint clipSize(float3 hc, float3 hy) {
 )HLSL"
 // (adjacent literals: MSVC caps one at 16 KB)
 R"HLSL(
+#if EDVR_TEMPORAL_DIAGNOSTICS
 groupshared uint gCount[48];
+#endif
 // A debug view's pixel, painted into the OUTPUT rather than at this
 // thread's own index.
 //
@@ -623,10 +665,20 @@ void paintDebug(uint2 idx, int2 sz, float3 c) {
 // it (reversed-Z, told to the runtime as such). The world/ship split is
 // the history fetch's, transcribed, and the counts feed the registration
 // line the way main's do.
+groupshared float mvDepthTile[100];
 [numthreads(8, 8, 1)]
 void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
+    int2 local = int2(gi & 7u, gi >> 3u);
+    int2 origin = int2(id.xy) - local;
+    for (uint k = gi; k < 100; k += 64) {
+        int2 q = clamp(origin + int2(k % 10, k / 10) - 1, int2(0,0), size - 1);
+        mvDepthTile[k] = zSceneAt(region.xy + q);
+    }
+    GroupMemoryBarrierWithGroupSync();
+#if EDVR_TEMPORAL_DIAGNOSTICS
     if (gi < 48) gCount[gi] = 0;
     GroupMemoryBarrierWithGroupSync();
+#endif
     // Three counters, not forty. This pass writes 15, 16 and 17 and no
     // others, and a forty-element local array costs forty registers of
     // occupancy on a dispatch that covers the whole eye.
@@ -636,11 +688,12 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
     if (id.x < (uint)size.x && id.y < (uint)size.y) {
         float2 p = float2(id.xy);
         float3 d;
+        if ((uint(probe.w + 0.5) & 4u) != 0u) UN[id.xy] = uiEvidence(int2(id.xy));
         d.x = tanNow.x + (p.x + 0.5) / float(size.x) * (tanNow.y - tanNow.x);
         d.y = tanNow.w - (p.y + 0.5) / float(size.y) * (tanNow.w - tanNow.z);
         d.z = -1.0;
         float3 dp = float3(dot(dR0.xyz, d), dot(dR1.xyz, d), dot(dR2.xyz, d));
-        float zraw = zAt(region.xy + int2(p));
+        float zraw = mvDepthTile[(local.y + 1) * 10 + local.x + 1];
         float zPred = 0.0;   // for the mover mask: the surface's predicted depth last frame, 0 = none
         uint depthN = 0;     // ...and how many of the 3x3 have a depth now (thick or thin)
         float zBody = 0.0;   // the depth the body's path would take; 0 = not this pixel's question
@@ -650,8 +703,7 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
             float zr = 0.0;
             [unroll] for (int oy = -1; oy <= 1; ++oy) {
                 [unroll] for (int ox = -1; ox <= 1; ++ox) {
-                    int2 q = clamp(int2(p) + int2(ox, oy), int2(0, 0), size - 1);
-                    float zs = zSceneAt(region.xy + q);
+                    float zs = mvDepthTile[(local.y + 1 + oy) * 10 + local.x + 1 + ox];
                     zr = max(zr, zs);
                     if (zs > 0.0) ++depthN;
                 }
@@ -768,19 +820,14 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
             }
         }
         MV[id.xy] = motion;
-        // NVIDIA's bias-current-colour mask: the strength is the value, so
-        // one knob means the same on both paths. The runtime takes ONE such
-        // mask, and the interface's reactive mask (ui_depth.h: a readout
-        // whose digits change in place) wants the same input, so it is
-        // folded in here when bound -- and where the interface has marked a
-        // pixel, ITS value stands. The interface module knows its pixels and
-        // chose its strength with the player's eyes on the text (0.5, flown
-        // 2026-09-08); the mover mask is for the world's geometry, and a
-        // max() let it raise the interface's text to "fresh frame only"
-        // wherever its depth test tripped on a stroke, which is text that
-        // never accumulates -- the swim ui_depth exists to fix.
-        float ui = probe.z != 0.0 ? UM.Load(int3(id.xy, 0)) : 0.0;
-        MK[id.xy] = ui > 0.0 ? ui : mover * movers.z;
+        // Combine detected UI changes and the optional fixed UI bias.
+        // World-mover rejection must not override stable marked UI.
+        uint mark = probe.z != 0.0 ? uint(UM.Load(int3(id.xy,0))*255.0+0.5) : 0u;
+        uint kind = mark & 3u;
+        float ui = (kind == 3u || (uint(probe.w + 0.5) & 1u) != 0u) ? float(mark >> 2u)/63.0 : 0.0;
+        float adaptive = adaptiveUiReactive(int2(id.xy), p + motion);
+        bool uiHere = kind == 1u || kind == 2u;
+        MK[id.xy] = max(adaptive, uiHere ? ui : max(ui, mover * movers.z));
         // The registration probes on the trained path (2026-09-08): main's
         // 5x5 luma SAD search, transcribed, against NVIDIA's PREVIOUS output
         // -- the history as the runtime accumulated it, bound at t1 in place
@@ -792,6 +839,7 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
         // station approach that "looked soft on every moving surface" had no
         // number behind it. Same classes and slots as main's, so the
         // registration line reads the same either way.
+#if EDVR_TEMPORAL_DIAGNOSTICS
         if (probe.y != 0.0 && dp.z < -1e-6 && (id.x & 63) == 16 && (id.y & 63) == 16 &&
             id.x >= 8 && id.y >= 8 && id.x + 8 < (uint)size.x && id.y + 8 < (uint)size.y) {
             int2 ci = int2(id.xy);
@@ -841,14 +889,19 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
                 }
                 float2 resid = float2(best) + (float2(pq) - pp2);
                 uint base = sky ? 30u : (count15 != 0 ? 18u : 21u);
+#if EDVR_TEMPORAL_DIAGNOSTICS
                 InterlockedAdd(Stats[base], asuint(int(round(resid.x * 100.0))));
                 InterlockedAdd(Stats[base + 1], asuint(int(round(resid.y * 100.0))));
                 InterlockedAdd(Stats[base + 2], 1u);
+#endif
                 uint base2 = sky ? 33u : (count15 != 0 ? 35u : 37u);
+#if EDVR_TEMPORAL_DIAGNOSTICS
                 InterlockedAdd(Stats[base2], asuint(int(round(dot(resid, motion) * 100.0))));
                 InterlockedAdd(Stats[base2 + 1], uint(round(dot(motion, motion) * 100.0)));
+#endif
             }
         }
+#endif
 )HLSL"
 R"HLSL(
         // The motion view on the trained path: painted into the output in
@@ -910,6 +963,7 @@ R"HLSL(
         }
         ZC[id.xy] = knobs.y != 0.0 ? zraw : 0.0;
     }
+#if EDVR_TEMPORAL_DIAGNOSTICS
     if (count15 != 0) InterlockedAdd(gCount[15], count15);
     if (count16 != 0) InterlockedAdd(gCount[16], count16);
     if (count17 != 0) InterlockedAdd(gCount[17], count17);
@@ -925,25 +979,31 @@ R"HLSL(
     if (count44 != 0) InterlockedAdd(gCount[44], asuint(count44));
     if (count45 != 0) InterlockedAdd(gCount[45], count45);
     GroupMemoryBarrierWithGroupSync();
+#endif
     // Only the counters that moved. A group whose counters are all zero --
     // which is nearly every group, since these count rare classes of pixel
     // -- used to pay forty global atomics onto forty contended addresses
     // regardless. At the Crystal Super's size that is 290,512 groups an
     // eye, so 11.6 million atomic adds an eye and 23 million a frame, for
     // a set of numbers that only a log line reads.
+#if EDVR_TEMPORAL_DIAGNOSTICS
     if (gi < 48 && gCount[gi] != 0) InterlockedAdd(Stats[gi], gCount[gi]);
+#endif
 }
 )HLSL"
 // (adjacent literals: MSVC caps one at 16 KB)
 R"HLSL(
 [numthreads(8, 8, 1)]
 void main(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
+#if EDVR_TEMPORAL_DIAGNOSTICS
     if (gi < 48) gCount[gi] = 0;
     GroupMemoryBarrierWithGroupSync();
+#endif
     uint count[48] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
     if (id.x < (uint)size.x && id.y < (uint)size.y) {
         float2 p = float2(id.xy);
         int2 ci = int2(id.xy);
+        if ((uint(probe.w + 0.5) & 4u) != 0u) UN[id.xy] = uiEvidence(ci);
         // Foveation-aware periphery (docs/performance.md feature 6, the
         // sharp periphery only): toward the frame's edge the history's
         // WEIGHT is eased down and the fallback sample is blurred a little
@@ -1043,7 +1103,8 @@ void main(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
 )HLSL"
 R"HLSL(
                 // frame alone, spatially settled by the filter above.
-                if (movers.x != 0.0) {
+                uint uiKind = probe.z != 0.0 ? uint(UM.Load(int3(ci,0))*255.0+0.5)&3u : 0u;
+                if (movers.x != 0.0 && uiKind != 1u && uiKind != 2u) {
                     mover = moverAt(p + mvUsed, zPred, depthN >= 6);
                     if (mover != 0.0) {
                         count[28] = 1;
@@ -1051,6 +1112,7 @@ R"HLSL(
                     }
                 }
                 errUsed = saturate(abs(hy.x - rgbToYcocg(cur.rgb).x) * 4.0);
+                blEff *= 1.0 - adaptiveUiReactive(ci, p + mvUsed);
                 float3 hc = clipToBox(boxMin, boxMax, hy);
                 if (any(abs(hc - hy) > 1e-4)) {
                     count[1] = 1;
@@ -1158,17 +1220,21 @@ R"HLSL(
                 }
                 float2 resid = float2(best) + (float2(pq) - pp);
                 uint base = sky ? 30u : (worldTaken != 0 ? 18u : 21u);
+#if EDVR_TEMPORAL_DIAGNOSTICS
                 InterlockedAdd(Stats[base], asuint(int(round(resid.x * 100.0))));
                 InterlockedAdd(Stats[base + 1], asuint(int(round(resid.y * 100.0))));
                 InterlockedAdd(Stats[base + 2], 1u);
+#endif
                 // The match against the prediction's own motion, for a
                 // least-squares scale: with resid = k * mv the true motion
                 // was (1 + k) times the vector, k = sum(resid.mv) /
                 // sum(mv.mv) over the class. A signed mean cancels over a
                 // head that turns both ways; this does not.
                 uint base2 = sky ? 33u : (worldTaken != 0 ? 35u : 37u);
+#if EDVR_TEMPORAL_DIAGNOSTICS
                 InterlockedAdd(Stats[base2], asuint(int(round(dot(resid, mvUsed) * 100.0))));
                 InterlockedAdd(Stats[base2 + 1], uint(round(dot(mvUsed, mvUsed) * 100.0)));
+#endif
             }
         }
         if (!used) count[0] = 1;
@@ -1221,10 +1287,14 @@ R"HLSL(
     // for a counter that did not move, which is most of them in most
     // groups.
     [unroll] for (int k = 0; k < 48; ++k) {
+#if EDVR_TEMPORAL_DIAGNOSTICS
         if (count[k] != 0) InterlockedAdd(gCount[k], count[k]);
+#endif
     }
+#if EDVR_TEMPORAL_DIAGNOSTICS
     GroupMemoryBarrierWithGroupSync();
     if (gi < 48 && gCount[gi] != 0) InterlockedAdd(Stats[gi], gCount[gi]);
+#endif
 }
 )HLSL";
 
@@ -1494,6 +1564,12 @@ const char* motionName(int motion) {
 // change; a change of size is also a reset of the history, which cannot
 // mean anything across a resize.
 struct EyeState {
+    ID3D11Texture2D* uiHistory[2] = {};
+    ID3D11ShaderResourceView* uiHistorySrv[2] = {};
+    ID3D11UnorderedAccessView* uiHistoryUav[2] = {};
+    uint32_t uiHistoryW = 0, uiHistoryH = 0;
+    int uiHistoryRead = 0;
+    bool uiHistoryValid = false;
     void*                      srcRes = nullptr;   // the game's texture the view is over (identity)
     ID3D11ShaderResourceView*  srcSrv = nullptr;
     // The scene's depth for this eye, from the depth probe's held texture:
@@ -1650,7 +1726,7 @@ void releaseCopy(EyeState& e) {
     e.copyW = e.copyH = 0;
     e.copyFmt = DXGI_FORMAT_UNKNOWN;
 }
-void releaseOwned(EyeState& e) {
+void releaseNative(EyeState& e) {
     for (int i = 0; i < 2; ++i) {
         if (e.histUav[i]) { e.histUav[i]->Release(); e.histUav[i] = nullptr; }
         if (e.histSrv[i]) { e.histSrv[i]->Release(); e.histSrv[i] = nullptr; }
@@ -1659,6 +1735,11 @@ void releaseOwned(EyeState& e) {
     if (e.outUav) { e.outUav->Release(); e.outUav = nullptr; }
     if (e.outSrv) { e.outSrv->Release(); e.outSrv = nullptr; }
     if (e.outTex) { e.outTex->Release(); e.outTex = nullptr; }
+    e.haveHistory = false;
+    e.histRead = 0;
+}
+void releaseOwned(EyeState& e) {
+    releaseNative(e);
     if (e.foveaOutUav) { e.foveaOutUav->Release(); e.foveaOutUav = nullptr; }
     if (e.foveaOut) { e.foveaOut->Release(); e.foveaOut = nullptr; }
     e.foveaW = e.foveaH = 0;
@@ -1669,7 +1750,16 @@ void releaseOwned(EyeState& e) {
     e.haveHistory = false;
     e.histRead = 0;
 }
+void releaseUiHistory(EyeState& e) {
+    for (int k=0;k<2;++k) {
+        if (e.uiHistorySrv[k]) { e.uiHistorySrv[k]->Release(); e.uiHistorySrv[k]=nullptr; }
+        if (e.uiHistoryUav[k]) { e.uiHistoryUav[k]->Release(); e.uiHistoryUav[k]=nullptr; }
+        if (e.uiHistory[k]) { e.uiHistory[k]->Release(); e.uiHistory[k]=nullptr; }
+    }
+    e.uiHistoryValid=false; e.uiHistoryRead=0; e.uiHistoryW=e.uiHistoryH=0;
+}
 void releaseEye(EyeState& e) {
+    releaseUiHistory(e);
     releaseSrc(e);
     releaseDepth(e);
     releaseDl(e);
@@ -1800,9 +1890,8 @@ uint64_t g_steppedPix = 0;    // ...a stepped part's (Stats[47]; object_probe.h,
 // pool records' jitter, not what is drawn: the hub's records jitter in
 // place a third of a degree either way, frame about, with no net turn,
 // while the drawn hub turns by a skinning bone the pool never shows. The
-// tracking stays for the 20 s line until the hub's own motion is measured
-// from an eye run (kEyeRun).
-constexpr bool kSteppedStampOn = false;
+// Tracking runs only during captures or explicit diagnostics.
+// The shared producer/consumer switch lives in object_probe.h.
 // NVIDIA's history resets this interval (the run of 18:43, 2026-09-09: the
 // station "flickering into sharpness" -- a raw frame every reset, the
 // blur back as the history rebuilds on the pass's vectors), and how many
@@ -1963,6 +2052,22 @@ ID3D11ComputeShader*       g_cs = nullptr;
 bool                       g_csTried = false;
 ID3D11ComputeShader*       g_csMv = nullptr;     // the motion-vector entry, for DLAA
 bool                       g_csMvTried = false;
+ID3D11ComputeShader*       g_csMvFast = nullptr;
+bool                       g_csMvFastTried = false;
+bool                       g_diagnostics = false;
+
+ID3D11ComputeShader* motionShader(ID3D11DeviceContext* ctx, bool diagnostics) {
+    auto*& shader = diagnostics ? g_csMv : g_csMvFast;
+    auto& tried = diagnostics ? g_csMvTried : g_csMvFastTried;
+    if (!shader && !tried) {
+        tried = true;
+        const SwapMacro macros[] = {{"EDVR_TEMPORAL_DIAGNOSTICS", diagnostics ? "1" : "0"}, {nullptr, nullptr}};
+        shader = shaderSwapCompileCs(ctx, kTemporalCsHlsl, sizeof(kTemporalCsHlsl) - 1,
+                                     "mv", diagnostics ? "temporal_mv_cs" : "temporal_mv_fast_cs",
+                                     macros, "temporal aa");
+    }
+    return shader;
+}
 ID3D11ComputeShader*       g_csFovea = nullptr;  // the fovea composite (feature 6)
 bool                       g_csFoveaTried = false;
 ID3D11Buffer*              g_foveaCb = nullptr;   // its crop and edge band
@@ -2008,7 +2113,7 @@ uint32_t g_treats = 0;
 bool     g_wanted = false;
 bool     g_filterCurrent = true;   // advanced.temporal_aa_current = filtered | raw
 float    g_historyC = 0.5f;        // advanced.temporal_aa_history_sharp: the cubic's C
-float    g_shipMetres = 100.0f;    // advanced.temporal_aa_ship_metres: the world/ship split (0 off)
+float    g_shipMetres = kTemporalShipMetres;    // advanced.temporal_aa_ship_metres: the world/ship split (0 off)
 int      g_debugMode = 0;          // advanced.temporal_aa_debug: 0 off, 1 motion, 2 error, 3 depth
 float    g_lastNear = 0.0f;        // the planes the last treat decoded with (temporalPassPlanes)
 float    g_lastFar = 0.0f;
@@ -2016,7 +2121,7 @@ float    g_menuMetres = 0.0f;      // advanced.temporal_aa_menu_metres: a depth 
 // Tier 1 of docs/per-object-motion.md, the mover mask (2026-09-08): off by
 // default until it has flown. The tolerance is a fraction of depth, the
 // strength how much history a masked pixel loses.
-bool     g_moversOn = false;       // fix.temporal_aa_movers
+bool     g_moversOn = false;       // experimental.temporal_aa_movers
 float    g_moversTol = 0.03f;      // advanced.temporal_aa_movers_tolerance, percent in the ini
 float    g_moversStrength = 1.0f;  // advanced.temporal_aa_movers_strength
 bool     g_moversNoted = false;    // the engage line, once
@@ -2065,10 +2170,17 @@ uint32_t g_bodyRowsHolds = 0;      // frames the body composed with the carried 
 // axis moved with everything else), and the pair's camera by it for the
 // test above. Summed over jumps, cleared when a pair agrees with the rows
 // unshifted; a flip's return sums back to nought on its own. The body
-// stands down on the jump frame itself, whose rows may be another camera's.
+// uses the carried camera on the jump frame itself.
 float    g_bodyShift[3] = {};
+float    g_bodyOriginStep[3] = {}; // this jump alone; previous camera -> current origin
 uint32_t g_bodyShiftFrame = ~0u;   // the frame of the last jump
 uint32_t g_bodyShiftUsed = 0;      // frames carried over by the shift this interval
+// A worker can publish between eye submissions. Freeze the station sample
+// for the scene frame so its rates, coordinate stamp and grid version agree
+// in both eyes; ensureBodyGrid uploads that version on the first use.
+ObjectMotion g_frameBody{};
+uint32_t g_frameBodyFrame = ~0u;
+bool g_frameBodyValid = false;
 
 // hotkey.dump_eyes, and the settings menu's "Dump both eyes as seen": the
 // treated eye as the compositor receives it -- after DLSS, the fovea
@@ -2101,7 +2213,7 @@ bool     g_eyeDumpDirMade = false;
 // steps or holds.
 constexpr int    kEyeRun = 16;
 constexpr uint32_t kEyeCrop = 1400;
-ID3D11Texture2D* g_eyeRunStaging[1] = {};   // the first treated frame
+ID3D11Texture2D* g_eyeRunStaging[2] = {};   // overview; AA-off also captures the right eye
 // ...and the RAW frames beside them (eye_HHMMSS_R0..3.bmp): the game's
 // render as the pass hands it to NVIDIA, before any history. The run of
 // 18:43 (2026-09-09) showed why both are needed: NVIDIA's output is the
@@ -2115,10 +2227,78 @@ ID3D11Texture2D* g_eyeRawStaging[kEyeRun] = {};
 // flicker or a shimmer is the history's doing, and only its output shows
 // it, frame to frame.
 bool             g_eyeRunTreated = false;
+bool             g_eyeRunPaired = true; // matching input/output sequence, default for new captures
 ID3D11Texture2D* g_eyeTreatedStaging[kEyeRun] = {};
 int              g_eyeRunLeft = 0;    // captures still to take
 int              g_eyeRunTaken = 0;
 wchar_t          g_eyeRunStamp[16] = L"";
+bool             g_eyeRunReady = false;
+bool             g_eyeRunUntreated = false;
+bool             g_eyeOverviewTaken[2] = {};
+ID3D11Texture2D*  g_eyeInputs[5] = {};
+uint32_t         g_eyeInputsFrame=0,g_eyeInputsUiBound=0,g_eyeInputsUiFlags=0;
+const wchar_t* const kEyeInputNames[5]={L"MV",L"Z",L"UI",L"Bias",L"SceneZ"};
+uint32_t         g_eyeRunWidth = 0, g_eyeRunHeight = 0;
+bool             g_eyeRawTaken[kEyeRun] = {};
+uint32_t         g_eyeRunFrames[kEyeRun] = {};
+uint32_t         g_eyeRawInputW[kEyeRun] = {}, g_eyeRawInputH[kEyeRun] = {};
+uint32_t         g_eyeCaptureFrame = 0; // current scene frame, stamped before treatment
+struct EyeMotionTrace {
+    uint32_t frame, eye, flags, outputWidth, outputHeight;
+    bool bodyValid, rowsOk, jumped, dlHistory;
+    bool rowsBound;
+    int rowsFollow;
+    uint32_t sceneDraws;
+    float dtMs, prevRows[12], nowRows[12], shift[3], originStep[3];
+    ObjectMotion body; // only scalar fields are written; grid pointer is never dereferenced
+    PassParams params;
+};
+EyeMotionTrace g_eyeMotionTrace[kEyeRun * 4] = {};
+uint32_t g_eyeMotionTraceCount = 0;
+void writeEyeMotionTrace(const std::wstring& dir) {
+    wchar_t path[MAX_PATH];
+    _snwprintf_s(path, MAX_PATH, _TRUNCATE, L"%s\\eye_%s_motion.csv", dir.c_str(), g_eyeRunStamp);
+    FILE* f = nullptr;
+    if (_wfopen_s(&f, path, L"wb") || !f) {
+        Log::get().note("temporal aa: could not write eye motion trace %ls.", path);
+        return;
+    }
+    fprintf(f, "frame,eye,crop,rawCaptured,flags,outW,outH,bodyValid,rowsOk,jumped,dlHistory,dtMs,gridVersion,age,records,pairDtMs,fitRms,history,inputW,inputH");
+    auto names = [&](const char* name, int n) { for (int k = 0; k < n; ++k) fprintf(f, ",%s%d", name, k); };
+    names("prev",12); names("now",12); names("shift",3); names("originStep",3);
+    names("pairCam",3); names("omega",3); names("rateT",3);
+    names("tanNow",4); names("tanPrev",4); names("jitter",4);
+    names("bodyR",12); names("bodyTv",4); names("body2R",12); names("body2Tv",4);
+    names("cameraR",12); names("cameraTv",4); names("boxLow",4); names("boxHigh",4);
+    names("headR",12); names("headTv",4);
+    fprintf(f, ",projectionA,projectionB,rowsBound,rowsFollow,sceneDraws");
+    fprintf(f, "\n");
+    for (uint32_t i = 0; i < g_eyeMotionTraceCount; ++i) {
+        const EyeMotionTrace& t = g_eyeMotionTrace[i];
+        const PassParams& p = t.params;
+        int crop = -1;
+        for (int k = 0; k < g_eyeRunTaken; ++k) if (g_eyeRunFrames[k] == t.frame) crop = k;
+        fprintf(f, "%u,%u,%d,%d,%u,%u,%u,%d,%d,%d,%d,%.9g,%u,%u,%u,%.9g,%.9g,%d,%d,%d",
+                t.frame, t.eye, crop, crop >= 0 && g_eyeRawTaken[crop], t.flags, t.outputWidth, t.outputHeight,
+                t.bodyValid, t.rowsOk, t.jumped, t.dlHistory, t.dtMs, t.body.gridVersion, t.body.age,
+                t.body.records, t.body.dtMs, t.body.rms, p.haveHistory, p.size[0], p.size[1]);
+        auto values = [&](const float* a, int n) { for (int k = 0; k < n; ++k) fprintf(f, ",%.9g", a[k]); };
+        values(t.prevRows,12); values(t.nowRows,12); values(t.shift,3); values(t.originStep,3);
+        values(t.body.camPos,3); values(t.body.omegaPerMs,3); values(t.body.tPerMs,3);
+        values(p.tanNow,4); values(p.tanPrev,4); values(p.jit,4);
+        values(p.st0,4); values(p.st1,4); values(p.st2,4); values(p.tvSt,4);
+        values(p.st2_0,4); values(p.st2_1,4); values(p.st2_2,4); values(p.tv2St,4);
+        for (int r = 0; r < 3; ++r) values(p.cand[2][r],4);
+        values(p.tvCam,4); values(p.box0,4); values(p.box1,4);
+        values(p.dR0,4); values(p.dR1,4); values(p.dR2,4); values(p.tvUsed,4);
+        fprintf(f, ",%.9g,%.9g,%d,%d,%u", p.knobs[0], p.knobs[2], t.rowsBound, t.rowsFollow, t.sceneDraws);
+        fprintf(f, "\n");
+    }
+    const bool wrote = !ferror(f);
+    const int closed = fclose(f);
+    Log::get().note("temporal aa: eye motion trace %ls: %u eye evaluations, %s (scene-frame IDs link both eyes to the crop sequence).",
+                    path, g_eyeMotionTraceCount, wrote && closed == 0 ? "written" : "write failed");
+}
 bool writeEyeBmp(ID3D11DeviceContext* ctx, ID3D11Texture2D* st, const D3D11_TEXTURE2D_DESC& d, int eye,
                  const wchar_t* pathIn);
 
@@ -2330,15 +2510,61 @@ bool stageEyeRun(ID3D11DeviceContext* ctx, ID3D11Texture2D* tex, ID3D11Texture2D
     return true;
 }
 
-// THE EYE RUN's crop: kEyeCrop pixels square about the texture's centre
-// into the staging slot, made or remade to fit. The size the crop came out
-// at is returned for the note.
+uint32_t g_rowsFrame = 0; // scene boundary counter, shared by captures and row selection
+
+// Preserve the actual first-frame inputs before the next eye overwrites them.
+void stageEyeInputs(ID3D11DeviceContext* ctx,EyeState& e,ID3D11ShaderResourceView* scene,
+                    ID3D11Texture2D* ui,float uiBound,float uiFlags) {
+    if(g_eyeRunLeft<=0 || g_eyeRunTaken!=0 || g_eyeInputs[0])return;
+    ID3D11Texture2D* textures[5]={e.dlMv,e.dlDepth,ui,e.dlMask,nullptr};
+    if(scene) {
+        ID3D11Resource* res=nullptr;scene->GetResource(&res);
+        if(res){res->QueryInterface(__uuidof(ID3D11Texture2D),reinterpret_cast<void**>(&textures[4]));res->Release();}
+    }
+    for(int k=0;k<5;++k)if(textures[k])stageEyeRun(ctx,textures[k],g_eyeInputs,k);
+    if(textures[4])textures[4]->Release();
+    g_eyeInputsFrame=g_rowsFrame;g_eyeInputsUiBound=static_cast<uint32_t>(uiBound);
+    g_eyeInputsUiFlags=static_cast<uint32_t>(uiFlags);
+}
+void writeEyeInputs(ID3D11DeviceContext* ctx,const std::wstring& dir) {
+    for(int k=0;k<5;++k) {
+        auto* texture=g_eyeInputs[k];if(!texture)continue;
+        D3D11_TEXTURE2D_DESC d{};texture->GetDesc(&d);
+        uint32_t bytes=0;
+        switch(d.Format) {
+        case DXGI_FORMAT_R8_UNORM:bytes=1;break;
+        case DXGI_FORMAT_R16_TYPELESS:case DXGI_FORMAT_D16_UNORM:bytes=2;break;
+        case DXGI_FORMAT_R16G16_FLOAT:case DXGI_FORMAT_R32_FLOAT:case DXGI_FORMAT_R32_TYPELESS:
+        case DXGI_FORMAT_D32_FLOAT:case DXGI_FORMAT_R24G8_TYPELESS:case DXGI_FORMAT_D24_UNORM_S8_UINT:bytes=4;break;
+        case DXGI_FORMAT_R32G8X24_TYPELESS:case DXGI_FORMAT_D32_FLOAT_S8X24_UINT:bytes=8;break;
+        default:break;
+        }
+        D3D11_MAPPED_SUBRESOURCE map{};
+        if(bytes && SUCCEEDED(ctx->Map(texture,0,D3D11_MAP_READ,0,&map))) {
+            wchar_t path[MAX_PATH];_snwprintf_s(path,MAX_PATH,_TRUNCATE,L"%s\\eye_%s_%s.bin",dir.c_str(),g_eyeRunStamp,kEyeInputNames[k]);
+            FILE* f=nullptr;_wfopen_s(&f,path,L"wb");
+            if(f) {
+                const uint32_t header[9]={1,d.Width,d.Height,static_cast<uint32_t>(d.Format),d.Width*bytes,g_eyeInputsFrame,0,g_eyeInputsUiBound,g_eyeInputsUiFlags};
+                bool ok=fwrite("EDVRTEX1",1,8,f)==8 && fwrite(header,sizeof(header),1,f)==1;
+                for(uint32_t y=0;y<d.Height && ok;++y)ok=fwrite(static_cast<const char*>(map.pData)+y*map.RowPitch,1,d.Width*bytes,f)==d.Width*bytes;
+                fclose(f);
+                Log::get().note("eye capture: %ls input %ls %ux%u format %u, scene frame %u: %s.",g_eyeRunStamp,kEyeInputNames[k],d.Width,d.Height,static_cast<unsigned>(d.Format),g_eyeInputsFrame,ok?"written":"write failed");
+            }
+            ctx->Unmap(texture,0);
+        }
+        texture->Release();g_eyeInputs[k]=nullptr;
+    }
+}
+
 bool stageEyeCrop(ID3D11DeviceContext* ctx, ID3D11Texture2D* tex, ID3D11Texture2D** slot, uint32_t* cwOut,
-                  uint32_t* chOut) {
+                  uint32_t* chOut, const uint32_t* region = nullptr,
+                  uint32_t wantW = kEyeCrop, uint32_t wantH = kEyeCrop) {
     D3D11_TEXTURE2D_DESC d{};
     tex->GetDesc(&d);
-    const uint32_t cw = d.Width < kEyeCrop ? d.Width : kEyeCrop;
-    const uint32_t ch = d.Height < kEyeCrop ? d.Height : kEyeCrop;
+    const uint32_t width = region ? region[2] - region[0] : d.Width;
+    const uint32_t height = region ? region[3] - region[1] : d.Height;
+    const uint32_t cw = width < wantW ? width : wantW;
+    const uint32_t ch = height < wantH ? height : wantH;
     if (*slot) {
         D3D11_TEXTURE2D_DESC sd{};
         (*slot)->GetDesc(&sd);
@@ -2370,8 +2596,8 @@ bool stageEyeCrop(ID3D11DeviceContext* ctx, ID3D11Texture2D* tex, ID3D11Texture2
         }
     }
     D3D11_BOX box{};
-    box.left = (d.Width - cw) / 2;
-    box.top = (d.Height - ch) / 2;
+    box.left = (region ? region[0] : 0) + (width - cw) / 2;
+    box.top = (region ? region[1] : 0) + (height - ch) / 2;
     box.right = box.left + cw;
     box.bottom = box.top + ch;
     box.front = 0;
@@ -2390,16 +2616,24 @@ void writeEyeRun(ID3D11DeviceContext* ctx, uint32_t cw, uint32_t ch) {
         g_eyeDumpDirMade = true;
         CreateDirectoryW(dir.c_str(), nullptr);
     }
-    ID3D11Texture2D** ring = g_eyeRunTreated ? g_eyeTreatedStaging : g_eyeRawStaging;
+    const bool paired = g_eyeRunPaired && !g_eyeRunUntreated;
+    writeEyeInputs(ctx,dir);
+    const bool treated = (g_eyeRunPaired || g_eyeRunTreated) && !g_eyeRunUntreated;
+    ID3D11Texture2D** ring = treated ? g_eyeTreatedStaging : g_eyeRawStaging;
     int wrote = 0, wroteTreated = 0;
     for (int i = 0; i < g_eyeRunTaken; ++i) {
         if (!ring[i]) continue;
         wchar_t path[MAX_PATH];
         _snwprintf_s(path, MAX_PATH, _TRUNCATE, L"%s\\eye_%s_%c%02d.bmp", dir.c_str(), g_eyeRunStamp,
-                     g_eyeRunTreated ? L'T' : L'C', i);
+                     treated ? L'T' : L'C', i);
         D3D11_TEXTURE2D_DESC sd{};
         ring[i]->GetDesc(&sd);
         if (writeEyeBmp(ctx, ring[i], sd, 0, path)) ++wrote;
+        if (paired && g_eyeRawTaken[i] && g_eyeRawStaging[i]) {
+            _snwprintf_s(path, MAX_PATH, _TRUNCATE, L"%s\\eye_%s_C%02d.bmp", dir.c_str(), g_eyeRunStamp, i);
+            g_eyeRawStaging[i]->GetDesc(&sd);
+            if (writeEyeBmp(ctx, g_eyeRawStaging[i], sd, 0, path)) ++wroteTreated;
+        }
     }
     if (g_eyeRunStaging[0]) {
         wchar_t path[MAX_PATH];
@@ -2408,7 +2642,29 @@ void writeEyeRun(ID3D11DeviceContext* ctx, uint32_t cw, uint32_t ch) {
         g_eyeRunStaging[0]->GetDesc(&sd);
         if (writeEyeBmp(ctx, g_eyeRunStaging[0], sd, 0, path)) ++wroteTreated;
     }
-    if (g_eyeRunTreated) {
+    if (g_eyeRunUntreated) {
+        if (g_eyeOverviewTaken[1] && g_eyeRunStaging[1]) {
+            wchar_t path[MAX_PATH];D3D11_TEXTURE2D_DESC sd{};
+            _snwprintf_s(path,MAX_PATH,_TRUNCATE,L"%s\\eye_%s_R0.bmp",dir.c_str(),g_eyeRunStamp);
+            g_eyeRunStaging[1]->GetDesc(&sd);writeEyeBmp(ctx,g_eyeRunStaging[1],sd,1,path);
+        }
+        wchar_t path[MAX_PATH];_snwprintf_s(path,MAX_PATH,_TRUNCATE,L"%s\\eye_%s_capture.csv",dir.c_str(),g_eyeRunStamp);
+        FILE* file=nullptr;_wfopen_s(&file,path,L"wb");
+        if(file) {
+            fprintf(file,"frame,crop,mode,inputW,inputH,cropW,cropH\n");
+            for(int k=0;k<g_eyeRunTaken;++k)fprintf(file,"%u,%d,off,%u,%u,%u,%u\n",g_eyeRunFrames[k],k,g_eyeRawInputW[k],g_eyeRawInputH[k],cw,ch);
+            fclose(file);
+        }
+        Log::get().note("eye capture: AA off; %d untreated crops C00..%02d (%ux%u), left/right overviews and capture.csv written for run %ls.",
+                        wrote,g_eyeRunTaken-1,cw,ch,g_eyeRunStamp);
+    } else if (g_eyeRunPaired) {
+        writeEyeMotionTrace(dir);
+        Log::get().note("temporal aa: paired eye run %ls: %d treated crops T00..%02d (%ux%u), "
+                        "%d raw crops plus overview written. C and T share scene-frame IDs in "
+                        "eye_%ls_motion.csv; their pixel scales follow inputW/inputH and outW/outH. "
+                        "Copies were taken together; files written after both eyes completed.",
+                        g_eyeRunStamp, wrote, g_eyeRunTaken - 1, cw, ch, wroteTreated, g_eyeRunStamp);
+    } else if (g_eyeRunTreated) {
         Log::get().note("temporal aa: an eye run of %d consecutive TREATED crops of the left eye is on disk "
                         "(eye_%ls_T00..%02d.bmp, %ux%u about the output's centre, NVIDIA's output as the "
                         "compositor receives it; advanced.eye_run_treated) with the first frame whole (%d "
@@ -2427,11 +2683,37 @@ void writeEyeRun(ID3D11DeviceContext* ctx, uint32_t cw, uint32_t ch) {
     g_eyeRunTaken = 0;
 }
 
+// Called at Submit even when temporal AA is disabled. Copies only; no
+// reprojection, history, shader binding or change to the submitted texture.
+void captureUntreatedEye(ID3D11Texture2D* tex,int eye,const float* bounds) {
+    if (!tex || eye<0 || eye>1 || (g_eyeRunLeft<=0 && !g_eyeRunReady)) return;
+    D3D11_TEXTURE2D_DESC td{};tex->GetDesc(&td);
+    if(td.SampleDesc.Count!=1 || td.ArraySize!=1 || td.MipLevels!=1) return;
+    uint32_t region[4]{};bool flipU=false,flipV=false;
+    if(!supersampleRegionFromBounds(td.Width,td.Height,bounds,region,&flipU,&flipV))return;
+    ID3D11Device* dev=nullptr;ID3D11DeviceContext* ctx=nullptr;
+    tex->GetDevice(&dev);if(!dev)return;dev->GetImmediateContext(&ctx);dev->Release();if(!ctx)return;
+    g_eyeRunUntreated=true;
+    const uint32_t w=region[2]-region[0],h=region[3]-region[1];uint32_t cw=0,ch=0;
+    if(!g_eyeOverviewTaken[eye])g_eyeOverviewTaken[eye]=stageEyeCrop(ctx,tex,&g_eyeRunStaging[eye],&cw,&ch,region,w,h);
+    if(eye==0 && g_eyeRunLeft>0 && g_eyeRunTaken<kEyeRun) {
+        const int k=g_eyeRunTaken;
+        if(stageEyeCrop(ctx,tex,&g_eyeRawStaging[k],&cw,&ch,region)) {
+            g_eyeRawTaken[k]=true;g_eyeRawInputW[k]=w;g_eyeRawInputH[k]=h;
+            g_eyeRunFrames[k]=g_rowsFrame;objectProbeLedgerMark(k);
+            ++g_eyeRunTaken;--g_eyeRunLeft;
+            if(g_eyeRunLeft==0){g_eyeRunReady=true;g_eyeRunWidth=cw;g_eyeRunHeight=ch;}
+        }
+    }
+    if(eye==1 && g_eyeRunReady){writeEyeRun(ctx,g_eyeRunWidth,g_eyeRunHeight);g_eyeRunReady=false;}
+    ctx->Release();
+}
+
 // THE EYE RUN's raw capture: a crop of the pass's input colour about its
 // centre into the next slot, and the write after the last (kEyeRun says).
 // Under advanced.eye_run_treated the treated hook takes the run instead.
 void captureEyeRunRaw(ID3D11DeviceContext* ctx, ID3D11Texture2D* colour) {
-    if (g_eyeRunTreated) return;
+    if (g_eyeRunPaired || g_eyeRunTreated) return;
     const int k = g_eyeRunTaken;
     if (!colour || k < 0 || k >= kEyeRun) { g_eyeRunLeft = 0; return; }
     uint32_t cw = 0, ch = 0;
@@ -2447,7 +2729,7 @@ void captureEyeRunRaw(ID3D11DeviceContext* ctx, ID3D11Texture2D* colour) {
 // compositor receives it, for context (the raw crops are the measurement)
 // -- or, under advanced.eye_run_treated, the sixteen crops themselves.
 void captureEyeRun(ID3D11DeviceContext* ctx, ID3D11Texture2D* tex) {
-    if (!g_eyeRunTreated) {
+    if (!g_eyeRunPaired && !g_eyeRunTreated) {
         if (g_eyeRunTaken != 1) return;   // the first raw crop was just taken this frame
         stageEyeRun(ctx, tex, g_eyeRunStaging, 0);
         return;
@@ -2456,11 +2738,28 @@ void captureEyeRun(ID3D11DeviceContext* ctx, ID3D11Texture2D* tex) {
     if (!tex || k < 0 || k >= kEyeRun) { g_eyeRunLeft = 0; return; }
     if (k == 0) stageEyeRun(ctx, tex, g_eyeRunStaging, 0);
     uint32_t cw = 0, ch = 0;
-    if (!stageEyeCrop(ctx, tex, &g_eyeTreatedStaging[k], &cw, &ch)) { g_eyeRunLeft = 0; return; }
+    uint32_t wantW=kEyeCrop, wantH=kEyeCrop;
+    if (g_eyeRunPaired && g_eyeRawTaken[k] && g_eyeRawInputW[k] && g_eyeRawInputH[k]) {
+        // Under DLSS, 1400 output pixels show less of the scene than 1400
+        // input pixels. Preserve angular coverage so both sequences include
+        // the same station panels. Each image retains its native scale.
+        D3D11_TEXTURE2D_DESC raw{}, output{};
+        g_eyeRawStaging[k]->GetDesc(&raw); tex->GetDesc(&output);
+        wantW=static_cast<uint32_t>((static_cast<uint64_t>(raw.Width)*output.Width+g_eyeRawInputW[k]-1)/g_eyeRawInputW[k]);
+        wantH=static_cast<uint32_t>((static_cast<uint64_t>(raw.Height)*output.Height+g_eyeRawInputH[k]-1)/g_eyeRawInputH[k]);
+    }
+    if (!stageEyeCrop(ctx, tex, &g_eyeTreatedStaging[k], &cw, &ch, nullptr, wantW, wantH)) { g_eyeRunLeft = 0; return; }
+    g_eyeRunFrames[k] = g_eyeCaptureFrame;
     objectProbeLedgerMark(k);
     ++g_eyeRunTaken;
     --g_eyeRunLeft;
     if (g_eyeRunLeft > 0) return;
+    if (g_eyeRunPaired) {
+        g_eyeRunReady = true;
+        g_eyeRunWidth = cw;
+        g_eyeRunHeight = ch;
+        return;
+    }
     writeEyeRun(ctx, cw, ch);
 }
 // The body's occupancy grid on the GPU (object_probe.h): one for both
@@ -2585,7 +2884,7 @@ bool     g_periphSteady = true;    // advanced.temporal_aa_periphery: steady (NV
 float    g_periphScale = 0.5f;     // advanced.temporal_aa_periphery_scale: the steady periphery's size as a fraction of the output each way
 bool     g_foveaRound = true;      // advanced.temporal_aa_fovea_shape: round (a disc) or square (the crop)
 float    g_foveaDistance = 0.0f;   // advanced.temporal_aa_fovea_distance: where the two eyes' discs meet in depth, metres (0 = infinity: the straight-ahead point)
-int      g_rowsFollow = 0;         // +1 a frame the rows turn with the head, -4 a frame they do not; the world path needs >= 0
+int      g_rowsFollow = 0;         // bound populated scene: trusted; auxiliary chain: head-follow score, needs >= 0
 bool     g_rowsFollowNoted = false;
 bool     g_warmNoted = false;
 
@@ -2608,7 +2907,6 @@ struct RowsWrite {
 constexpr int kRowsRing = 256;
 RowsWrite   g_rowsRing[kRowsRing];
 uint32_t    g_rowsSeq = 0;           // writes ever, the ring's clock
-uint32_t    g_rowsFrame = 0;         // bumped each boundary
 const void* g_boundBuf = nullptr;    // the object bound at this frame's first scene draw
 bool        g_boundSeen = false;
 uint32_t    g_rowsWrites = 0;        // writes this frame
@@ -2632,6 +2930,7 @@ float    g_curRows[12] = {};
 float    g_curProj[2] = {};        // the picked write's projection z row (A, B); B > 0 once read
 bool     g_projNoted = false;      // the encoding line, once
 bool     g_curValid = false;
+bool     g_curRowsBound = false;
 bool     g_curLatched = false;
 float    g_prevRows[12] = {};
 bool     g_prevValid = false;
@@ -2651,6 +2950,7 @@ void chooseCameraRows() {
     if (g_chosenThisFrame) return;
     g_chosenThisFrame = true;
     g_curValid = false;
+    g_curRowsBound = false;
     int bestIdx = -1, fallIdx = -1;
     uint32_t bestSeq = 0, fallSeq = 0;
     bool bestBound = false, fallBound = false;
@@ -2775,6 +3075,7 @@ void chooseCameraRows() {
         g_curProj[0] = g_rowsRing[pick].proj[0];
         g_curProj[1] = g_rowsRing[pick].proj[1];
         g_curValid = true;
+        g_curRowsBound = g_boundSeen && g_rowsRing[pick].buf == g_boundBuf;
         // The object probe stamps its pairs with THIS camera (the frame's
         // chosen rows), not the scene buffer's end-of-frame contents, which
         // are whichever camera wrote it last -- another's, often enough that
@@ -2862,6 +3163,27 @@ bool maskFormatOk(ID3D11Device* dev) {
 // another size goes with it; the trained block rebuilds its own, and its
 // test sees the missing output). A failure leaves e.zPrev null, which is
 // how the pass knows to keep the mask off; the mask texture is optional.
+bool ensureUiHistory(ID3D11Device* dev, EyeState& e, uint32_t w, uint32_t h) {
+    if (e.uiHistoryW != w || e.uiHistoryH != h) releaseUiHistory(e);
+    if (e.uiHistory[0] && e.uiHistory[1]) return true;
+    for (int k=0;k<2;++k) {
+        if (!makeTex(dev,w,h,DXGI_FORMAT_R8G8B8A8_UNORM,DXGI_FORMAT_R8G8B8A8_UNORM,
+                     D3D11_BIND_SHADER_RESOURCE|D3D11_BIND_UNORDERED_ACCESS,
+                     &e.uiHistory[k],&e.uiHistorySrv[k],&e.uiHistoryUav[k])) {
+            releaseUiHistory(e); return false;
+        }
+    }
+    e.uiHistoryW=w; e.uiHistoryH=h;
+    Log::get().note("temporal aa: adaptive UI evidence ready at %ux%u, %.1f MiB "
+                    "per eye; UI changes are independent of fixed bias.",
+                    w,h,static_cast<double>(w)*h*8.0/1048576.0);
+    return true;
+}
+bool ensureBiasMask(ID3D11Device* dev, EyeState& e, uint32_t w, uint32_t h) {
+    if (e.dlMask) return true;
+    return maskFormatOk(dev) && makeTex(dev,w,h,DXGI_FORMAT_R8_UNORM,DXGI_FORMAT_R8_UNORM,
+        D3D11_BIND_SHADER_RESOURCE|D3D11_BIND_UNORDERED_ACCESS,&e.dlMask,nullptr,&e.dlMaskUav);
+}
 bool ensureMoverPair(ID3D11Device* dev, EyeState& e, uint32_t w, uint32_t h) {
     if (!e.dlDepth || e.dlW != w || e.dlH != h) {
         releaseDl(e);
@@ -2929,6 +3251,22 @@ DXGI_FORMAT pickHistoryFormat(ID3D11Device* dev) {
 bool     g_depthNoted = false;
 bool     g_depthHeld = false;      // the last treat had the depth in hand
 uint32_t g_depthLostCount = 0;
+
+// Only native TAA (including a refused NVIDIA evaluation) needs this storage.
+bool ensureNative(ID3D11Device* dev, EyeState& e, DXGI_FORMAT viewFmt) {
+    if (e.outTex && e.hist[0] && e.hist[1]) return true;
+    releaseNative(e);
+    bool made = makeTex(dev, e.w, e.h, e.outFmt, viewFmt,
+                        D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS,
+                        &e.outTex, &e.outSrv, &e.outUav);
+    for (int i = 0; i < 2 && made; ++i) {
+        made = makeTex(dev, e.w, e.h, e.histFmt, e.histFmt,
+                       D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS,
+                       &e.hist[i], &e.histSrv[i], &e.histUav[i]);
+    }
+    if (!made) { releaseNative(e); failOnce("the native history or output textures could not be created"); }
+    return made;
+}
 
 void* temporalInner(void* srcTex, int eye, const float* bounds,
                     const float* tanNow, const float* tanPrev, float jxNow,
@@ -3213,35 +3551,32 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
     ID3D11ShaderResourceView* smokeSrv = nullptr;
     if (depthSrv && !uiDepthSmokeDepth(sd.Width, sd.Height, eye, &smokeSrv)) smokeSrv = nullptr;
 
-    // The owned pair and the output, rebuilt on any change of size or
-    // format -- which is a history reset too.
+    ID3D11ShaderResourceView* uiDepthSrv = nullptr;
+    if (depthSrv) {
+        ID3D11Resource* res = nullptr;
+        depthSrv->GetResource(&res);
+        ID3D11Texture2D* scene = nullptr;
+        if (res) {
+            res->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&scene));
+            res->Release();
+        }
+        if (scene) {
+            uiDepthTemporalDepth(sd.Width, sd.Height, eye, scene, &uiDepthSrv);
+            scene->Release();
+        }
+    }
+
+    // Input identity is independent of native fallback resource allocation.
     if (ok) {
         EyeState& e = *eptr;
-        if (!e.outTex || e.w != w || e.h != h || e.outFmt != sd.Format ||
-            e.histFmt != g_histFmt) {
+        if (e.w != w || e.h != h || e.outFmt != sd.Format || e.histFmt != g_histFmt) {
             releaseOwned(e);
-            bool made = makeTex(dev, w, h, sd.Format, viewFmt,
-                                D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS,
-                                &e.outTex, &e.outSrv, &e.outUav);
-            for (int i = 0; i < 2 && made; ++i) {
-                made = makeTex(dev, w, h, g_histFmt, g_histFmt,
-                               D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS,
-                               &e.hist[i], &e.histSrv[i], &e.histUav[i]);
-            }
-            if (made) {
-                e.w = w;
-                e.h = h;
-                e.outFmt = sd.Format;
-                e.histFmt = g_histFmt;
-            } else {
-                releaseOwned(e);
-                ok = false;
-                failOnce("the history or output textures could not be created");
-            }
+            e.w = w; e.h = h; e.outFmt = sd.Format; e.histFmt = g_histFmt;
         }
     }
 
     void* result = nullptr;
+    bool uiEvidenceWritten = false;
     if (ok) {
         EyeState& e = *eptr;
         if (flags & 1u) {
@@ -3324,6 +3659,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         float tvCam[3] = {0.0f, 0.0f, 0.0f};
         float worldDelta[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
         bool worldValid = false;
+        const uint32_t sceneDraws = depthProbeSceneDraws();
         auto worldFromRows = [](const float prev[12], const float now[12],
                                 float W[9], float tv[3], float camMove[3]) {
             float Rp[9], Rn[9], RpT[9];
@@ -3409,32 +3745,21 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                 ++g_tvFrames;
             }
             ++g_camFrames;
-            // Do the rows follow the head at all? In the cockpit they carry it;
-            // at the main menu the camera is the menu's and the head is applied
-            // elsewhere, so the rows stand still while the head turns, and a
-            // world path built on them held the hangar's far wall still under
-            // a head turn (2026-09-04, at 40 m; not at 100 m, which put the
-            // wall on the head's path). A turning head with rows that turn
-            // less than a third as much is that case; the score keeps the
-            // path down until the rows follow again for a while.
-            if (headDeg > 0.1f) {
-                const float rowsDeg = temporalRotationAngleDeg(worldDelta);
-                if (rowsDeg < 0.3f * headDeg) {
-                    g_rowsFollow = g_rowsFollow > -30 ? g_rowsFollow - 4 : -30;
-                    if (g_rowsFollow < 0 && !g_rowsFollowNoted) {
-                        g_rowsFollowNoted = true;
-                        Log::get().note(
-                            "temporal aa: the game's view rows do not follow the head here (the "
-                            "menu's camera?) -- the world path stands down until they do.");
-                    }
-                } else {
-                    g_rowsFollow = g_rowsFollow < 30 ? g_rowsFollow + 1 : 30;
-                    if (g_rowsFollow >= 0 && g_rowsFollowNoted) {
-                        g_rowsFollowNoted = false;
-                        Log::get().note("temporal aa: the game's view rows follow the head again -- "
-                                        "the world path is back.");
-                    }
-                }
+            // The 15:20 yaw capture supplies correct bound camera rows even
+            // while ship and head turns cancel. The old magnitude test shut
+            // the world/body paths off for six captured frames (5.6 px sky
+            // error), and a still head could leave that score negative.
+            // Menus remain excluded by sceneDraws; ambiguous camera chains
+            // retain the detector used by chooseCameraRows to resynchronize.
+            g_rowsFollow = temporalCameraFollowScore(g_rowsFollow, sceneDraws, g_curRowsBound,
+                                                     headDeg, temporalRotationAngleDeg(worldDelta));
+            if (g_rowsFollow < 0 && !g_rowsFollowNoted) {
+                g_rowsFollowNoted = true;
+                Log::get().note("temporal aa: auxiliary camera rows do not follow the head; "
+                                "the world path waits for the scene camera.");
+            } else if (g_rowsFollow >= 0 && g_rowsFollowNoted) {
+                g_rowsFollowNoted = false;
+                Log::get().note("temporal aa: scene camera accepted -- the world path is back.");
             }
             // Plausibility, per frame: the rows' delta is the head's plus the
             // ship's turn, and no ship turns 270 degrees a second; a delta
@@ -3467,6 +3792,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                 // the boost flights of 06:21 and 06:36.
                 if (g_bodyShiftFrame != g_rowsFrame) {
                     for (int i = 0; i < 3; ++i) g_bodyShift[i] += camMove[i];
+                    memcpy(g_bodyOriginStep, camMove, sizeof(g_bodyOriginStep));
                     g_bodyShiftFrame = g_rowsFrame;
                 }
             }
@@ -3534,23 +3860,20 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         p.jit[2] = g_filterCurrent ? 1.0f : 0.0f;
         p.jit[3] = g_historyC;
         // The depth's encoding: what the game wrote is A + B / z, A and B
-        // from the scene block's own projection row when the frame's rows
-        // came with one (B > 0), else from the planes the game asked the
-        // runtime for (A = n / (n - f), B = n f / (f - n): the same
-        // reversed-Z form with a far plane, and the decode the pass used
-        // until 2026-09-08). The block's row on build 332841 says A = 0,
+        // from a usable scene row, else the game's infinite-far scene
+        // encoding. The camera rows can arrive without a projection row;
+        // the runtime's finite far plane is not a valid fallback for it.
+        // The scene row on build 332841 says A = 0,
         // B = 0.025 -- no far plane -- where the runtime's 0.025..50000 m
         // decoded 10 km as 8.3 km, 3 km as 2.8 km, and the body's grid
         // missed the station beyond a few hundred metres (19:52).
         float projA = 0.0f, projB = 0.0f;
-        if (g_curProj[1] > 0.0f) {
-            projA = g_curProj[0];
-            projB = g_curProj[1];
-        } else if (nearZ > 0.0f && farZ > nearZ) {
-            projA = nearZ / (nearZ - farZ);
-            projB = nearZ * farZ / (farZ - nearZ);
+        const bool measuredProjection = temporalSceneProjection(g_curProj[0], g_curProj[1], nearZ, &projA, &projB);
+        if (!measuredProjection && !g_projNoted && projB > 0.0f) {
+            g_projNoted = true;
+            Log::get().note("temporal aa: no usable scene projection row; using Elite's infinite-far reversed-Z depth = %.6g / metres. OpenVR's finite far plane does not describe this scene depth.", static_cast<double>(projB));
         }
-        if (g_curProj[1] > 0.0f && !g_projNoted && nearZ > 0.0f && farZ > nearZ) {
+        if (measuredProjection && !g_projNoted && nearZ > 0.0f && farZ > nearZ) {
             g_projNoted = true;
             const float a = g_curProj[0], b = g_curProj[1];
             const float nearRow = (1.0f - a) != 0.0f ? b / (1.0f - a) : b;
@@ -3592,7 +3915,6 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         // frame. The main menu's backdrop is a pre-rendered image at the far
         // plane drawn with one or two, and its camera does not follow the
         // head, so the world path detached its hangar wall (2026-09-04).
-        const uint32_t sceneDraws = depthProbeSceneDraws();
         const bool worldOn = depthMotion && haveDepth && g_shipMetres > 0.0f &&
                              candValid[2] && worldValid && sceneDraws >= 50u &&
                              g_rowsFollow >= 0;
@@ -3609,6 +3931,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         // with the camera delta the world path carries this frame instead
         // of the rows (temporalBodyPathCarried), and no longer stands down.
         const bool jumpedNow = g_bodyShiftFrame == g_rowsFrame;
+        const float* bodyOriginStep = jumpedNow ? g_bodyOriginStep : nullptr;
         const bool carriedRows = !g_bodyRowsOk || jumpedNow;
         // The pair's frame against the rows' (kBodyFrameM says why): the
         // pair's own camera position rides in the motion record. Unshifted
@@ -3627,6 +3950,8 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         auto bodyFrameAgrees = [&](const float* pairCam, float* shiftOut, bool own) {
             static uint32_t s_frameHold = 0;
             static uint32_t s_frameUsed = 0;
+            static bool s_held = false;
+            static uint32_t s_holdStart = 0;
             const double cn[3] = {g_curRows[3], g_curRows[7], g_curRows[11]};
             double dNo = 0.0, dSh = 0.0;
             for (int i = 0; i < 3; ++i) {
@@ -3636,6 +3961,13 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                 dSh += b * b;
             }
             const double lim = static_cast<double>(kBodyFrameM) * kBodyFrameM;
+            if (own && s_held && (dNo < lim || dSh < lim)) {
+                Log::get().note("temporal aa: body frame gate recovered at frame %u after %u frames; "
+                                "grid %u age %u, distance %.1f m, shifted %.1f m.",
+                                g_rowsFrame, g_rowsFrame - s_holdStart, g_frameBody.gridVersion,
+                                g_frameBody.age, sqrt(dNo), sqrt(dSh));
+                s_held = false;
+            }
             if (dNo < lim) {
                 if (own) {
                     for (int i = 0; i < 3; ++i) g_bodyShift[i] = 0.0f;
@@ -3652,6 +3984,16 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                 return true;
             }
             if (own && s_frameHold != g_rowsFrame) {
+                if (!s_held) {
+                    s_held = true;
+                    s_holdStart = g_rowsFrame;
+                    Log::get().note("temporal aa: body frame gate rejected at frame %u; grid %u age %u, "
+                                    "distance %.1f m, shifted %.1f m; camera (%.3f %.3f %.3f), "
+                                    "pair (%.3f %.3f %.3f), shift (%.3f %.3f %.3f), jump %d rowsOk %d.",
+                                    g_rowsFrame, g_frameBody.gridVersion, g_frameBody.age, sqrt(dNo), sqrt(dSh),
+                                    cn[0], cn[1], cn[2], pairCam[0], pairCam[1], pairCam[2],
+                                    g_bodyShift[0], g_bodyShift[1], g_bodyShift[2], jumpedNow, g_bodyRowsOk);
+                }
                 s_frameHold = g_rowsFrame;
                 ++g_bodyFrameHolds;
             }
@@ -3687,8 +4029,12 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     g_bodyDtMs = 0.75f * g_bodyDtMs + 0.25f * m;
                 }
             }
-            ObjectMotion om;
-            if (objectMotionGet(&om) && bodyFrameAgrees(om.camPos, bodyShift, true) && ensureBodyGrid(dev, ctx, om)) {
+            if (g_frameBodyFrame != g_rowsFrame) {
+                g_frameBodyFrame = g_rowsFrame;
+                g_frameBodyValid = objectMotionGet(&g_frameBody);
+            }
+            const ObjectMotion& om = g_frameBody;
+            if (g_frameBodyValid && bodyFrameAgrees(om.camPos, bodyShift, true) && ensureBodyGrid(dev, ctx, om)) {
                 const float wF[3] = {om.omegaPerMs[0] * g_bodyDtMs, om.omegaPerMs[1] * g_bodyDtMs,
                                      om.omegaPerMs[2] * g_bodyDtMs};
                 const float tF[3] = {om.tPerMs[0] * g_bodyDtMs, om.tPerMs[1] * g_bodyDtMs,
@@ -3707,7 +4053,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                 if (!carriedRows) {
                     temporalBodyPath(g_prevRows, g_curRows, Rf, tFs, W, tv);
                 } else {
-                    temporalBodyPathCarried(g_prevRows, Rf, tFs, worldDelta, tvCam, W, tv);
+                    temporalBodyPathCarried(g_prevRows, Rf, tFs, worldDelta, tvCam, W, tv, bodyOriginStep);
                     static uint32_t s_carriedFrame = 0;
                     if (s_carriedFrame != g_rowsFrame) {
                         s_carriedFrame = g_rowsFrame;
@@ -3749,7 +4095,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     if (!carriedRows) {
                         temporalBodyPath(g_prevRows, g_curRows, R2f, t2Fs, W2, tv2);
                     } else {
-                        temporalBodyPathCarried(g_prevRows, R2f, t2Fs, worldDelta, tvCam, W2, tv2);
+                        temporalBodyPathCarried(g_prevRows, R2f, t2Fs, worldDelta, tvCam, W2, tv2, bodyOriginStep);
                     }
                     float* rows2[3] = {p.st2_0, p.st2_1, p.st2_2};
                     for (int r = 0; r < 3; ++r) {
@@ -3767,7 +4113,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                 // t = (I - R) c + t_par with c = t_perp / 2 + (axis x t_perp) /
                 // (2 tan(theta / 2)), so the m-th is (I - R^m) c + m t_par, and
                 // m = 1 gives t back.
-                {
+                if (kObjectSteppedMotionEnabled) {
                     const float th = sqrtf(wF[0] * wF[0] + wF[1] * wF[1] + wF[2] * wF[2]);
                     float ah[3] = {0.0f, 0.0f, 0.0f}, tPar[3] = {0.0f, 0.0f, 0.0f}, cAx[3] = {0.0f, 0.0f, 0.0f};
                     if (th > 1e-7f) {
@@ -3807,7 +4153,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                         if (!carriedRows) {
                             temporalBodyPath(g_prevRows, g_curRows, RM, tMs, WM, tvM);
                         } else {
-                            temporalBodyPathCarried(g_prevRows, RM, tMs, worldDelta, tvCam, WM, tvM);
+                            temporalBodyPathCarried(g_prevRows, RM, tMs, worldDelta, tvCam, WM, tvM, bodyOriginStep);
                         }
                         for (int r = 0; r < 3; ++r) {
                             for (int c = 0; c < 3; ++c) p.st3R[e * 3 + r][c] = WM[r * 3 + c];
@@ -3818,10 +4164,10 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     }
                 }
                 // ...and their cells this frame, stamped over the grid.
-                {
+                if (kObjectSteppedMotionEnabled) {
                     const SteppedCell* cells = nullptr;
                     const uint32_t nCells = objectSteppedCells(&cells);
-                    if (kSteppedStampOn) {
+                    if (kObjectSteppedMotionEnabled) {
                         applySteppedCells(ctx, om, cells, nCells);
                         if (nCells) ++g_steppedFrames;
                     }
@@ -3878,7 +4224,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                         if (!carriedRows) {
                             temporalBodyPath(g_prevRows, g_curRows, Rs, tSs, Ws, tvs);
                         } else {
-                            temporalBodyPathCarried(g_prevRows, Rs, tSs, worldDelta, tvCam, Ws, tvs);
+                            temporalBodyPathCarried(g_prevRows, Rs, tSs, worldDelta, tvCam, Ws, tvs, bodyOriginStep);
                         }
                         for (int r = 0; r < 3; ++r) {
                             for (int c = 0; c < 3; ++c) p.shR[shipsOn * 3 + r][c] = Ws[r * 3 + c];
@@ -4022,7 +4368,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         if (moversOn && !g_moversNoted) {
             g_moversNoted = true;
             Log::get().note(
-                "temporal aa: the mover mask is on (fix.temporal_aa_movers) -- a pixel whose "
+                "temporal aa: the mover mask is on (experimental.temporal_aa_movers) -- a pixel whose "
                 "surface is not where the camera alone would have put it last frame (its depth "
                 "off by more than %.0f%% from last frame's at that spot: a mover's edge, a "
                 "disocclusion) keeps %.0f%% less history, and under dlaa/dlss NVIDIA is handed "
@@ -4050,15 +4396,49 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         p.gamma = clampSigma;
         p.haveHistory = useHistory ? 1 : 0;
         p.candMask = useHistory ? candMask : 0;
+        const bool uiTrack = uiDepthWantsDraws() && ensureUiHistory(dev,e,w,h);
+        if ((flags & 1u) != 0 || !uiTrack) e.uiHistoryValid = false;
+        auto uiFlags = [&]() {
+            return static_cast<float>((uiDepthReactive()>0.0f?1u:0u) |
+                (uiTrack && e.uiHistoryValid?2u:0u) | (uiTrack?4u:0u));
+        };
+
+        // Capture before either temporal path changes colour. Paired runs
+        // use the submitted eye rectangle, including the native TAA path;
+        // the old raw-only hook below remains for legacy single runs.
+        if (g_eyeRunPaired && (g_eyeRunLeft > 0 || g_eyeRunReady)) {
+            g_eyeCaptureFrame = g_rowsFrame;
+            if (eye == 0 && g_eyeRunLeft > 0 && g_eyeRunTaken < kEyeRun) {
+                uint32_t cw = 0, ch = 0;
+                g_eyeRawTaken[g_eyeRunTaken] = stageEyeCrop(ctx, src, &g_eyeRawStaging[g_eyeRunTaken], &cw, &ch, region);
+                g_eyeRawInputW[g_eyeRunTaken]=w; g_eyeRawInputH[g_eyeRunTaken]=h;
+            }
+            if (g_eyeMotionTraceCount < kEyeRun * 4) {
+                EyeMotionTrace& t = g_eyeMotionTrace[g_eyeMotionTraceCount++];
+                t = {};
+                t.frame = g_rowsFrame; t.eye = eye; t.flags = flags;
+                t.outputWidth = outW ? outW : w; t.outputHeight = outH ? outH : h;
+                t.bodyValid = g_frameBodyFrame == g_rowsFrame && g_frameBodyValid;
+                if (t.bodyValid) t.body = g_frameBody;
+                t.rowsOk = g_bodyRowsOk; t.jumped = jumpedNow; t.dlHistory = e.dlHaveHistory;
+                t.dtMs = g_bodyDtMs;
+                t.rowsBound = g_curRowsBound; t.rowsFollow = g_rowsFollow; t.sceneDraws = sceneDraws;
+                memcpy(t.prevRows, g_prevRows, sizeof(t.prevRows));
+                memcpy(t.nowRows, g_curRows, sizeof(t.nowRows));
+                memcpy(t.shift, g_bodyShift, sizeof(t.shift));
+                if (bodyOriginStep) memcpy(t.originStep, bodyOriginStep, sizeof(t.originStep));
+                t.params = p;
+            }
+        }
 
         ID3D11ComputeShader* savedCs = nullptr;
-        ID3D11ShaderResourceView* savedSrv[3] = {};
-        ID3D11UnorderedAccessView* savedUav[3] = {};
+        ID3D11ShaderResourceView* savedSrv[9] = {};
+        ID3D11UnorderedAccessView* savedUav[7] = {};
         ID3D11Buffer* savedCb = nullptr;
         ID3D11SamplerState* savedSamp = nullptr;
         ctx->CSGetShader(&savedCs, nullptr, nullptr);
-        ctx->CSGetShaderResources(0, 3, savedSrv);
-        ctx->CSGetUnorderedAccessViews(0, 3, savedUav);
+        ctx->CSGetShaderResources(0, 9, savedSrv);
+        ctx->CSGetUnorderedAccessViews(0, 7, savedUav);
         ctx->CSGetConstantBuffers(0, 1, &savedCb);
         ctx->CSGetSamplers(0, 1, &savedSamp);
         // The game's depth target may still be bound on the output-merger
@@ -4082,13 +4462,17 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         // work (the colour copy and the motion-vector dispatch) is timed
         // too, and its counts (the world path, the bright pixels without
         // depth) come back through the same staging buffer.
-        const int qs = acquireSlot(dev);
+        // Keep periodic cost measurements without full-rate readbacks. Captures
+        // and explicit diagnostics retain all statistics and registration probes.
+        const bool diagnostics = g_diagnostics || g_debugMode != 0 || g_eyeRunLeft > 0 || g_eyeRunReady;
+        const bool statsWritten = diagnostics || (flags & 2u) == 0 || g_foveaDeg > 0.0f;
+        const int qs = (statsWritten || (g_rowsFrame & 31u) == 0) ? acquireSlot(dev) : -1;
         if (qs >= 0) {
             ctx->Begin(g_slots[qs].disjoint);
             ctx->End(g_slots[qs].begin);
         }
         const UINT zeros[4] = {0, 0, 0, 0};
-        ctx->ClearUnorderedAccessViewUint(g_statsUav, zeros);
+        if (statsWritten) ctx->ClearUnorderedAccessViewUint(g_statsUav, zeros);
 
         // DLSS where you look (docs/performance.md feature 6): with a fovea
         // width set, NVIDIA runs on a crop around the straight-ahead point and
@@ -4297,17 +4681,12 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                         why);
                 }
             } else {
-                if (!g_csMv && !g_csMvTried) {
-                    g_csMvTried = true;
-                    g_csMv = shaderSwapCompileCs(ctx, kTemporalCsHlsl, sizeof(kTemporalCsHlsl) - 1,
-                                                 "mv", "temporal_mv_cs", nullptr,
-                                                 "temporal aa");
-                }
+                ID3D11ComputeShader* mvCs = motionShader(ctx, diagnostics);
                 // The size to come back at: the frame's own, or the larger
                 // one asked for (DLSS proper).
                 const uint32_t oW = (outW && outH && (outW != w || outH != h)) ? outW : w;
                 const uint32_t oH = (outW && outH && (outW != w || outH != h)) ? outH : h;
-                bool made = g_csMv != nullptr;
+                bool made = mvCs != nullptr;
                 // !e.dlSubmit is in the test because the fovea path rebuilds
                 // e.dlColour..e.dlOut at the same size but never dlSubmit (it
                 // does not use it) -- so a fovea -> full-DLAA switch would find
@@ -4389,7 +4768,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     // history, which is what the prediction is measured
                     // against. The constants were written before this block
                     // decided, so the probe row is patched and rewritten here.
-                    const bool probeNv = !debugPaint && e.dlHaveHistory && (flags & 1u) == 0 &&
+                    const bool probeNv = diagnostics && !debugPaint && e.dlHaveHistory && (flags & 1u) == 0 &&
                                          e.dlOutSrv && g_statsUav != nullptr;
                     p.probe[0] = static_cast<float>(oW) / static_cast<float>(w);
                     p.probe[1] = probeNv ? 1.0f : 0.0f;
@@ -4404,44 +4783,51 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     // the texture's identity.
                     ID3D11Texture2D* reactiveMask = nullptr;
                     if (!uiDepthReactiveMask(w, h, eye, &reactiveMask)) reactiveMask = nullptr;
+                    ID3D11Texture2D* coverageMask = nullptr;
+                    if (!uiDepthCoverageMask(w, h, eye, &coverageMask)) coverageMask = nullptr;
                     // Bound for the fold when the mover mask is on, and for
                     // the body path's exclusion whenever that is on.
-                    const bool wantUi = reactiveMask != nullptr &&
+                    const bool wantUi = coverageMask != nullptr &&
                                         ((p.movers[0] != 0.0f && e.dlMaskUav != nullptr) || p.tvSt[3] != 0.0f ||
-                                         p.ships[0] != 0.0f);
-                    const bool uiBound = wantUi && ensureUiMaskSrv(dev, e, reactiveMask);
+                                         p.ships[0] != 0.0f || uiTrack);
+                    const bool uiBound = wantUi && ensureUiMaskSrv(dev, e, coverageMask);
                     p.probe[2] = uiBound ? 1.0f : 0.0f;
-                    p.probe[3] = uiDepthReactive() - 1.5f / 255.0f;   // unused since 2026-09-09 (uiCovered reads the parity); kept for the record
+                    p.probe[3] = uiFlags();
+                    if (uiTrack) ensureBiasMask(dev,e,w,h);
                     setParams(ctx, p);
-                    ID3D11ShaderResourceView* nullSrvM[7] = {};
-                    ID3D11UnorderedAccessView* nullUavM[6] = {};
-                    ctx->CSSetShaderResources(0, 7, nullSrvM);
-                    ctx->CSSetUnorderedAccessViews(0, 6, nullUavM, nullptr);
-                    ctx->CSSetShader(g_csMv, nullptr, 0);
-                    ID3D11ShaderResourceView* srvsM[7] = {inSrv,
+                    ID3D11ShaderResourceView* nullSrvM[9] = {};
+                    ID3D11UnorderedAccessView* nullUavM[7] = {};
+                    ctx->CSSetShaderResources(0, 9, nullSrvM);
+                    ctx->CSSetUnorderedAccessViews(0, 7, nullUavM, nullptr);
+                    ctx->CSSetShader(mvCs, nullptr, 0);
+                    ID3D11ShaderResourceView* srvsM[9] = {inSrv,
                                                           probeNv ? e.dlOutSrv : e.histSrv[e.histRead],
                                                           depthSrv,
                                                           p.movers[0] != 0.0f ? e.zPrevSrv : nullptr,
                                                           uiBound ? e.uiMaskSrv : nullptr,
                                                           p.tvSt[3] != 0.0f ? g_bodyGridSrv : nullptr,
-                                                          smokeSrv};
-                    ID3D11UnorderedAccessView* uavsM[6] = {debugPaint ? e.dlOutUav : nullptr,
+                                                          smokeSrv, uiDepthSrv,
+                                                          uiTrack && e.uiHistoryValid ? e.uiHistorySrv[e.uiHistoryRead] : nullptr};
+                    ID3D11UnorderedAccessView* uavsM[7] = {debugPaint ? e.dlOutUav : nullptr,
                                                            nullptr, g_statsUav, e.dlMvUav,
-                                                           e.dlDepthUav, e.dlMaskUav};
+                                                           e.dlDepthUav, e.dlMaskUav,
+                                                           uiTrack ? e.uiHistoryUav[1-e.uiHistoryRead] : nullptr};
                     ID3D11Buffer* cbM = g_cb;
                     ID3D11SamplerState* smpM = g_samp;
-                    ctx->CSSetShaderResources(0, 7, srvsM);
-                    ctx->CSSetUnorderedAccessViews(0, 6, uavsM, nullptr);
+                    ctx->CSSetShaderResources(0, 9, srvsM);
+                    ctx->CSSetUnorderedAccessViews(0, 7, uavsM, nullptr);
                     ctx->CSSetConstantBuffers(0, 1, &cbM);
                     ctx->CSSetSamplers(0, 1, &smpM);
                     ctx->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
-                    ctx->CSSetShaderResources(0, 7, nullSrvM);
-                    ctx->CSSetUnorderedAccessViews(0, 6, nullUavM, nullptr);
+                    ctx->CSSetShaderResources(0, 9, nullSrvM);
+                    ctx->CSSetUnorderedAccessViews(0, 7, nullUavM, nullptr);
                     if (haveDepth && e.zPrev) zcWritten = true;
+                    if (uiTrack) uiEvidenceWritten = true;
+                    if(eye==0)stageEyeInputs(ctx,e,depthSrv,coverageMask,p.probe[2],p.probe[3]);
                     // What NVIDIA is handed: the union when the mover mask
                     // ran this frame, else the interface's alone (as before
                     // the mover mask existed), else nothing.
-                    ID3D11Texture2D* biasMask = (p.movers[0] != 0.0f && e.dlMask) ? e.dlMask : reactiveMask;
+                    ID3D11Texture2D* biasMask = ((p.movers[0] != 0.0f || uiTrack) && e.dlMask) ? e.dlMask : reactiveMask;
                     // NVIDIA's evaluation. Its history restarts only when it is
                     // broken: this eye's first frame, a withhold (flags bit 0),
                     // rebuilt textures, or a frame the pass's own history ran in
@@ -4568,12 +4954,15 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         // path's exclusion (the trained block above binds its own).
         if (!usedDlaa) {
             ID3D11Texture2D* rm = nullptr;
-            const bool uiOwn = (p.tvSt[3] != 0.0f || p.ships[0] != 0.0f) && uiDepthReactiveMask(w, h, eye, &rm) && rm &&
+            const bool uiOwn = (p.tvSt[3] != 0.0f || p.ships[0] != 0.0f || uiTrack) && uiDepthCoverageMask(w, h, eye, &rm) && rm &&
                                ensureUiMaskSrv(dev, e, rm);
             p.probe[2] = uiOwn ? 1.0f : 0.0f;
-            p.probe[3] = uiDepthReactive() - 1.5f / 255.0f;
+            p.probe[3] = uiFlags();
         }
-        bool ran = usedDlaa ? true : setParams(ctx, p);
+        bool ran = usedDlaa || (ensureNative(dev, e, viewFmt) && setParams(ctx, p));
+        // A native fallback also writes counters, even when the requested
+        // trained path was running without diagnostics.
+        if (ran && !usedDlaa && !statsWritten) ctx->ClearUnorderedAccessViewUint(g_statsUav, zeros);
         bool ownRan = false;
         if (ran && !usedDlaa) {
             // THE FOVEA (docs/performance.md feature 6), NVIDIA's part first:
@@ -4609,19 +4998,8 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                 }
             };
             if (foveaMode) {
-                bool made = g_csMv != nullptr;
-                if (!g_csMv && !g_csMvTried) {
-                    g_csMvTried = true;
-                    g_csMv = shaderSwapCompileCs(ctx, kTemporalCsHlsl, sizeof(kTemporalCsHlsl) - 1,
-                                                 "mv", "temporal_mv_cs", nullptr, "temporal aa");
-                    made = g_csMv != nullptr;
-                }
-                // The colour, motion and depth are RENDER size (w x h); NVIDIA
-                // reads the input crop from them, and the reduction reads them
-                // whole through the shader views. The output e.dlOut is NATIVE
-                // size (foW x foH == w x h for DLAA, larger for DLSS), where
-                // NVIDIA writes the upscaled crop. Rebuilt on a size change,
-                // or when the full-frame path built them without the views.
+                ID3D11ComputeShader* mvCs = motionShader(ctx, true);
+                bool made = mvCs != nullptr;
                 if (made && (!e.dlOut || !e.dlColourSrv || !e.dlDepthSrv || !e.dlMvSrv ||
                              e.dlW != w || e.dlH != h || e.dlOutW != foW || e.dlOutH != foH)) {
                     releaseDl(e);
@@ -4702,33 +5080,36 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     // reads them whole). The mover mask is computed here too
                     // (t3, u5) but only the own periphery pass applies it:
                     // the crop and periphery evaluations are not handed it.
-                    ID3D11ShaderResourceView* nullSrvM[7] = {};
-                    ID3D11UnorderedAccessView* nullUavM[6] = {};
-                    ctx->CSSetShaderResources(0, 7, nullSrvM);
-                    ctx->CSSetUnorderedAccessViews(0, 6, nullUavM, nullptr);
-                    ctx->CSSetShader(g_csMv, nullptr, 0);
-                    ID3D11ShaderResourceView* srvsM[7] = {inSrv, e.histSrv[readIdx], depthSrv,
+                    ID3D11ShaderResourceView* nullSrvM[9] = {};
+                    ID3D11UnorderedAccessView* nullUavM[7] = {};
+                    ctx->CSSetShaderResources(0, 9, nullSrvM);
+                    ctx->CSSetUnorderedAccessViews(0, 7, nullUavM, nullptr);
+                    ctx->CSSetShader(mvCs, nullptr, 0);
+                    ID3D11ShaderResourceView* srvsM[9] = {inSrv, e.histSrv[readIdx], depthSrv,
                                                           p.movers[0] != 0.0f ? e.zPrevSrv : nullptr,
                                                           p.probe[2] != 0.0f ? e.uiMaskSrv : nullptr,
                                                           p.tvSt[3] != 0.0f ? g_bodyGridSrv : nullptr,
-                                                          smokeSrv};
+                                                          smokeSrv, uiDepthSrv,
+                                                          uiTrack && e.uiHistoryValid ? e.uiHistorySrv[e.uiHistoryRead] : nullptr};
                     // u2 (the stats buffer) is left UNBOUND here: the own pass
                     // writes its stats when it runs, and the mv entry writes
                     // the same slots (15-17), so binding it would double them
                     // (the review of 2026-09-05, F5). Atomics on a null UAV
                     // are dropped.
-                    ID3D11UnorderedAccessView* uavsM[6] = {nullptr, nullptr, nullptr,
-                                                           e.dlMvUav, e.dlDepthUav, e.dlMaskUav};
+                    ID3D11UnorderedAccessView* uavsM[7] = {nullptr, nullptr, nullptr,
+                                                           e.dlMvUav, e.dlDepthUav, e.dlMaskUav,
+                                                           uiTrack ? e.uiHistoryUav[1-e.uiHistoryRead] : nullptr};
                     ID3D11Buffer* cbM = g_cb;
                     ID3D11SamplerState* smpM = g_samp;
-                    ctx->CSSetShaderResources(0, 7, srvsM);
-                    ctx->CSSetUnorderedAccessViews(0, 6, uavsM, nullptr);
+                    ctx->CSSetShaderResources(0, 9, srvsM);
+                    ctx->CSSetUnorderedAccessViews(0, 7, uavsM, nullptr);
                     ctx->CSSetConstantBuffers(0, 1, &cbM);
                     ctx->CSSetSamplers(0, 1, &smpM);
                     ctx->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
-                    ctx->CSSetShaderResources(0, 7, nullSrvM);
-                    ctx->CSSetUnorderedAccessViews(0, 6, nullUavM, nullptr);
+                    ctx->CSSetShaderResources(0, 9, nullSrvM);
+                    ctx->CSSetUnorderedAccessViews(0, 7, nullUavM, nullptr);
                     if (haveDepth && e.zPrev) zcWritten = true;
+                    if (uiTrack) uiEvidenceWritten = true;
 
                     // NVIDIA's frame delta, shared by the periphery and the
                     // crop (evaluated together): the time since this eye's
@@ -4859,29 +5240,32 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                 // when no trained set exists; u3/u5 stay unbound (MV and the
                 // mask are NVIDIA's inputs, and writes to a null UAV drop).
                 const bool carry = g_moversOn && haveDepth && ensureMoverPair(dev, e, w, h);
-                ID3D11ShaderResourceView* nullSrv[7] = {};
-                ID3D11UnorderedAccessView* nullUav[5] = {};
-                ctx->CSSetShaderResources(0, 7, nullSrv);
-                ctx->CSSetUnorderedAccessViews(0, 5, nullUav, nullptr);
+                ID3D11ShaderResourceView* nullSrv[9] = {};
+                ID3D11UnorderedAccessView* nullUav[7] = {};
+                ctx->CSSetShaderResources(0, 9, nullSrv);
+                ctx->CSSetUnorderedAccessViews(0, 7, nullUav, nullptr);
                 ctx->CSSetShader(g_cs, nullptr, 0);
-                ID3D11ShaderResourceView* srvs[7] = {inSrv, e.histSrv[readIdx], depthSrv,
+                ID3D11ShaderResourceView* srvs[9] = {inSrv, e.histSrv[readIdx], depthSrv,
                                                      (carry && p.movers[0] != 0.0f) ? e.zPrevSrv : nullptr,
                                                      p.probe[2] != 0.0f ? e.uiMaskSrv : nullptr,
                                                      p.tvSt[3] != 0.0f ? g_bodyGridSrv : nullptr,
-                                                     smokeSrv};
-                ID3D11UnorderedAccessView* uavs[5] = {e.outUav, e.histUav[writeIdx],
+                                                     smokeSrv, uiDepthSrv,
+                                                     uiTrack && e.uiHistoryValid ? e.uiHistorySrv[e.uiHistoryRead] : nullptr};
+                ID3D11UnorderedAccessView* uavs[7] = {e.outUav, e.histUav[writeIdx],
                                                       g_statsUav, nullptr,
-                                                      carry ? e.dlDepthUav : nullptr};
+                                                      carry ? e.dlDepthUav : nullptr, nullptr,
+                                                      uiTrack ? e.uiHistoryUav[1-e.uiHistoryRead] : nullptr};
                 ID3D11Buffer* cb = g_cb;
                 ID3D11SamplerState* smp = g_samp;
-                ctx->CSSetShaderResources(0, 7, srvs);
-                ctx->CSSetUnorderedAccessViews(0, 5, uavs, nullptr);
+                ctx->CSSetShaderResources(0, 9, srvs);
+                ctx->CSSetUnorderedAccessViews(0, 7, uavs, nullptr);
                 ctx->CSSetConstantBuffers(0, 1, &cb);
                 ctx->CSSetSamplers(0, 1, &smp);
                 ctx->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
-                ctx->CSSetShaderResources(0, 7, nullSrv);
-                ctx->CSSetUnorderedAccessViews(0, 5, nullUav, nullptr);
+                ctx->CSSetShaderResources(0, 9, nullSrv);
+                ctx->CSSetUnorderedAccessViews(0, 7, nullUav, nullptr);
                 if (carry) zcWritten = true;
+                if (uiTrack) uiEvidenceWritten = true;
                 ownRan = true;
             }
             // THE COMPOSITE: NVIDIA's crop over whichever periphery there is.
@@ -4937,10 +5321,10 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         if (qs >= 0) {
             ctx->End(g_slots[qs].end);
             ctx->End(g_slots[qs].disjoint);
-            ctx->CopyResource(g_slots[qs].staging, g_stats);
+            if (statsWritten || (ran && !usedDlaa)) ctx->CopyResource(g_slots[qs].staging, g_stats);
             g_slots[qs].inUse = true;
             g_slots[qs].timeDone = false;
-            g_slots[qs].statsDone = false;
+            g_slots[qs].statsDone = !(statsWritten || (ran && !usedDlaa));
             g_slots[qs].pixels = static_cast<uint64_t>(w) * h;
             g_slots[qs].hadHistory = useHistory;
             g_slots[qs].headDeg = headDeg;
@@ -4950,18 +5334,18 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
             }
         }
 
-        ID3D11ShaderResourceView* nullSrv2[3] = {};
-        ID3D11UnorderedAccessView* nullUav2[3] = {};
-        ctx->CSSetShaderResources(0, 3, nullSrv2);
-        ctx->CSSetUnorderedAccessViews(0, 3, nullUav2, nullptr);
+        ID3D11ShaderResourceView* nullSrv2[9] = {};
+        ID3D11UnorderedAccessView* nullUav2[7] = {};
+        ctx->CSSetShaderResources(0, 9, nullSrv2);
+        ctx->CSSetUnorderedAccessViews(0, 7, nullUav2, nullptr);
         if (depthSrv) {
             ctx->OMSetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, savedRtv, savedDsv);
             for (auto* v : savedRtv) if (v) v->Release();
             if (savedDsv) savedDsv->Release();
         }
         ctx->CSSetShader(savedCs, nullptr, 0);
-        ctx->CSSetShaderResources(0, 3, savedSrv);
-        ctx->CSSetUnorderedAccessViews(0, 3, savedUav, nullptr);
+        ctx->CSSetShaderResources(0, 9, savedSrv);
+        ctx->CSSetUnorderedAccessViews(0, 7, savedUav, nullptr);
         ctx->CSSetConstantBuffers(0, 1, &savedCb);
         ctx->CSSetSamplers(0, 1, &savedSamp);
         if (savedCs) savedCs->Release();
@@ -4996,6 +5380,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
             // The trained pass's frame goes out; the pass's own history is
             // marked broken so a switch back starts afresh.
             e.haveHistory = false;
+            releaseNative(e); // successful full-frame DLSS owns its own history
             result = e.dlSubmit;
             ++g_treats;
             ++g_dlaaTreats;
@@ -5063,12 +5448,21 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
 
     // The eye dump, armed by its key or the menu: this treated eye, as it goes
     // out, before the references are dropped.
+    if (eptr) {
+        if (result && uiEvidenceWritten) {
+            eptr->uiHistoryRead = 1 - eptr->uiHistoryRead;
+            eptr->uiHistoryValid = true;
+        } else eptr->uiHistoryValid = false;
+    }
     if (result && ctx && g_eyeDumpArmed[eye]) {
         g_eyeDumpArmed[eye] = false;
         dumpEye(ctx, static_cast<ID3D11Texture2D*>(result), eye);
     }
     if (result && ctx && eye == 0 && g_eyeRunLeft > 0) {
         captureEyeRun(ctx, static_cast<ID3D11Texture2D*>(result));
+    }
+    if(eye==1 && ctx && g_eyeRunReady) {
+        writeEyeRun(ctx,g_eyeRunWidth,g_eyeRunHeight);g_eyeRunReady=false;
     }
     if (ctx) ctx->Release();
     if (dev) dev->Release();
@@ -5080,7 +5474,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
 
 void temporalPassConfigure(Config& cfg) {
     const std::string mode = cfg.getString("fix.temporal_aa", "off");
-    g_wanted = _stricmp(mode.c_str(), "off") != 0 && !mode.empty();
+    g_wanted = temporalModeEnabled(mode);
     const std::string cur = cfg.getString("advanced.temporal_aa_current", "filtered");
     g_filterCurrent = _stricmp(cur.c_str(), "raw") != 0;
     float c = cfg.getFloat("advanced.temporal_aa_history_sharp", 0.5f);
@@ -5088,16 +5482,18 @@ void temporalPassConfigure(Config& cfg) {
     if (c < 0.5f) c = 0.5f;
     if (c > 1.0f) c = 1.0f;
     g_historyC = c;
-    float ship = cfg.getFloat("advanced.temporal_aa_ship_metres", 100.0f);
+    float ship = cfg.getFloat("advanced.temporal_aa_ship_metres", kTemporalShipMetres);
     if (!std::isfinite(ship) || ship < 0.0f) ship = 0.0f;
     if (ship > 100000.0f) ship = 100000.0f;
     g_shipMetres = ship;
     g_eyeRunTreated = cfg.getBool("advanced.eye_run_treated", false);
+    g_eyeRunPaired = cfg.getBool("advanced.eye_run_paired", true);
+    g_diagnostics = cfg.getBool("advanced.temporal_aa_diagnostics", false);
     const std::string dbg = cfg.getString("advanced.temporal_aa_debug", "off");
     g_debugMode = _stricmp(dbg.c_str(), "motion") == 0 ? 1 : _stricmp(dbg.c_str(), "error") == 0 ? 2
                 : _stricmp(dbg.c_str(), "depth") == 0 ? 3 : _stricmp(dbg.c_str(), "movers") == 0 ? 4
                 : _stricmp(dbg.c_str(), "objects") == 0 ? 5 : 0;
-    g_objectsOn = cfg.getBool("fix.temporal_aa_objects", false);
+    g_objectsOn = g_wanted;
     float reach = cfg.getFloat("advanced.temporal_aa_objects_reach", 1500.0f);
     if (!std::isfinite(reach)) reach = 1500.0f;
     if (reach < 1.0f) reach = 1.0f;
@@ -5117,7 +5513,7 @@ void temporalPassConfigure(Config& cfg) {
     // percent of depth in the ini and a fraction here; bounded below where
     // the reprojection's own noise would fire it everywhere and above where
     // nothing could ever trip it. All three live.
-    const std::string movers = cfg.getString("fix.temporal_aa_movers", "off");
+    const std::string movers = cfg.getString("experimental.temporal_aa_movers", "off");
     g_moversOn = _stricmp(movers.c_str(), "on") == 0;
     float tol = cfg.getFloat("advanced.temporal_aa_movers_tolerance", 3.0f);
     if (!std::isfinite(tol)) tol = 3.0f;
@@ -5169,7 +5565,7 @@ void temporalPassConfigure(Config& cfg) {
     if (dist > 0.0f && dist < 0.3f) dist = 0.3f;
     if (dist > 1000.0f) dist = 1000.0f;
     g_foveaDistance = dist;
-    // The model NVIDIA runs (dlaa.h): steady, the default = K for the full
+    // K is the default in every mode. The legacy "steady" alias uses K for the full
     // frame and the periphery in every mode, L for the fovea crop when it
     // upscales (the desk found L converging fastest from fresh content and
     // softening least under motion, which is what a crop needs, and priced
@@ -5181,8 +5577,8 @@ void temporalPassConfigure(Config& cfg) {
     // Performance). The letters are silent aliases for one model everywhere
     // (L and M are never applied under DLAA: five times the price). Live: a
     // change recreates the features.
-    const std::string model = cfg.getString("advanced.temporal_aa_model", "steady");
-    unsigned preset = 11, presetFov = 12;
+    const std::string model = cfg.getString("fix.temporal_aa_model", "k");
+    unsigned preset = 11, presetFov = 11;
     if (_stricmp(model.c_str(), "quality") == 0 || _stricmp(model.c_str(), "k") == 0) { preset = 11; presetFov = 11; }
     else if (_stricmp(model.c_str(), "steady") == 0) { preset = 11; presetFov = 12; }
     else if (_stricmp(model.c_str(), "auto") == 0 || _stricmp(model.c_str(), "default") == 0) { preset = 0; presetFov = 0; }
@@ -5193,8 +5589,7 @@ void temporalPassConfigure(Config& cfg) {
     // Preset (nvsdk_ngx_defs.h, DLSS SDK 310.4) has no A, B, C or D at all
     // -- they were removed, with the header saying to use J or K instead --
     // and it marks G, H, I, N and O as reverting to default behaviour if
-    // asked for. E and F survive as deprecated. So the selectable set is
-    // exactly E, F, J, K, L, M, which is what the branches above accept.
+    // asked for. E and F are deprecated; this UI exposes J, K, L and M.
     // A tidier-looking letter range would offer four presets that no
     // longer exist.
     else if (!model.empty()) {
@@ -5205,10 +5600,8 @@ void temporalPassConfigure(Config& cfg) {
         if (!modelWarned) {
             modelWarned = true;
             Log::get().note(
-                "temporal aa: advanced.temporal_aa_model = \"%s\" is not a model this build knows "
-                "(steady, quality, responsive, auto, or a preset letter e, f, j, k, l or m -- NVIDIA "
-                "removed A to D and ignores G, H, I, N and O). Running steady: preset K for the "
-                "frame, L for the fovea crop.",
+                "temporal aa: fix.temporal_aa_model = \"%s\" is not a model this build knows "
+                "(k, j, l, m, auto, or legacy steady/quality/responsive). Running preset K.",
                 model.c_str());
         }
     }
@@ -5219,7 +5612,15 @@ void temporalPassConfigure(Config& cfg) {
 }
 
 void temporalPassTick(ID3D11DeviceContext* ctx) {
+    if (g_eyeRunReady && ctx) {
+        writeEyeRun(ctx, g_eyeRunWidth, g_eyeRunHeight);
+        g_eyeRunReady = false;
+    }
     if (!g_wanted || !ctx) return;
+    // Compile both variants during warm-up so arming an eye dump does not
+    // introduce a shader-compile hitch in the captured head movement.
+    motionShader(ctx, false);
+    motionShader(ctx, true);
     if (!g_cs && !g_csTried) {
         g_csTried = true;
         g_cs = compileShader(ctx);
@@ -5727,6 +6128,7 @@ bool temporalPassDlaaTotals(uint32_t* frames, double* avgMs, double* maxMs,
 void temporalPassShutdown() {
     dlaaShutdown();
     if (g_csMv) { g_csMv->Release(); g_csMv = nullptr; }
+    if (g_csMvFast) { g_csMvFast->Release(); g_csMvFast = nullptr; }
     if (g_csFovea) { g_csFovea->Release(); g_csFovea = nullptr; }
     if (g_foveaCb) { g_foveaCb->Release(); g_foveaCb = nullptr; }
     if (g_csDown) { g_csDown->Release(); g_csDown = nullptr; }
@@ -5738,13 +6140,20 @@ void temporalPassShutdown() {
     for (EyeState& e : g_eye) releaseEye(e);
     for (Slot& q : g_slots) releaseSlot(q);
     if (g_bodyGridSrv) { g_bodyGridSrv->Release(); g_bodyGridSrv = nullptr; }
-    if (g_eyeRunStaging[0]) { g_eyeRunStaging[0]->Release(); g_eyeRunStaging[0] = nullptr; }
+    for(auto& overview:g_eyeRunStaging)if(overview){overview->Release();overview=nullptr;}
     for (int k = 0; k < kEyeRun; ++k) {
         if (g_eyeRawStaging[k]) { g_eyeRawStaging[k]->Release(); g_eyeRawStaging[k] = nullptr; }
         if (g_eyeTreatedStaging[k]) { g_eyeTreatedStaging[k]->Release(); g_eyeTreatedStaging[k] = nullptr; }
     }
     g_eyeRunLeft = 0;
     g_eyeRunTaken = 0;
+    g_eyeRunReady = false;
+    g_eyeMotionTraceCount = 0;
+    g_eyeRunUntreated=false;
+    memset(g_eyeOverviewTaken,0,sizeof(g_eyeOverviewTaken));
+    for(auto& texture:g_eyeInputs)if(texture){texture->Release();texture=nullptr;}
+    g_frameBodyValid = false;
+    g_frameBodyFrame = ~0u;
     if (g_bodyGrid) { g_bodyGrid->Release(); g_bodyGrid = nullptr; }
     if (g_statsUav) { g_statsUav->Release(); g_statsUav = nullptr; }
     if (g_stats) { g_stats->Release(); g_stats = nullptr; }
@@ -5775,13 +6184,21 @@ bool temporalPassPlanes(float* nearZ, float* farZ) {
 void temporalPassArmEyeDump() {
     // The key takes a RUN of the left eye (kEyeRun says why): sixteen raw
     // crops and the first treated frame; a run under way is left to finish.
-    if (g_eyeRunLeft > 0) return;
+    if (g_eyeRunLeft > 0 || g_eyeRunReady) return;
     SYSTEMTIME stm{};
     GetLocalTime(&stm);
     _snwprintf_s(g_eyeRunStamp, 16, _TRUNCATE, L"%02u%02u%02u", static_cast<unsigned>(stm.wHour),
                  static_cast<unsigned>(stm.wMinute), static_cast<unsigned>(stm.wSecond));
     g_eyeRunTaken = 0;
     g_eyeRunLeft = kEyeRun;
+    g_eyeMotionTraceCount = 0;
+    g_eyeRunUntreated=false;
+    memset(g_eyeOverviewTaken,0,sizeof(g_eyeOverviewTaken));
+    for(auto& texture:g_eyeInputs)if(texture){texture->Release();texture=nullptr;}
+    memset(g_eyeRawTaken, 0, sizeof(g_eyeRawTaken));
+    memset(g_eyeRawInputW, 0, sizeof(g_eyeRawInputW));
+    memset(g_eyeRawInputH, 0, sizeof(g_eyeRawInputH));
+    memset(g_eyeRunFrames, 0, sizeof(g_eyeRunFrames));
     // ...and the object probe's ledger of the same frames (object_probe.h),
     // when the probe is on; the crops' names and its share the stamp.
     objectProbeArmLedger(g_eyeRunStamp);
@@ -5789,16 +6206,18 @@ void temporalPassArmEyeDump() {
 
 float temporalPassDepthAt(float metres) {
     if (!(metres > 0.0f)) return 0.0f;
-    if (g_curProj[1] > 0.0f) return g_curProj[0] + g_curProj[1] / metres;
-    if (g_lastNear > 0.0f && g_lastFar > g_lastNear) {
-        const float a = g_lastNear / (g_lastNear - g_lastFar);
-        const float b = g_lastNear * g_lastFar / (g_lastFar - g_lastNear);
-        return a + b / metres;
-    }
-    return 0.0f;
+    float a=0.0f,b=0.0f;
+    temporalSceneProjection(g_curProj[0],g_curProj[1],g_lastNear,&a,&b);
+    return a+b/metres;
 }
 
 }  // namespace edvr
+
+extern "C" __declspec(dllexport) void edvrEyeCaptureUntreated(void* texture,int eye,const float* bounds) {
+    edvr::guarded("eye capture/untreated",[&]{edvr::captureUntreatedEye(static_cast<ID3D11Texture2D*>(texture),eye,bounds);});
+}
+// Also available to the diagnostic tools; the hotkey uses the same arm.
+extern "C" __declspec(dllexport) void edvrEyeCaptureArm() { edvr::temporalPassArmEyeDump(); }
 
 extern "C" __declspec(dllexport) void* edvrTemporalAa(
     void* srcTex, int eye, const float* bounds, const float* tanNow,

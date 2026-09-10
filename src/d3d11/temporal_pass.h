@@ -70,9 +70,9 @@ void temporalPassNoteFirstEyeDraw(ID3D11DeviceContext* ctx);
 void temporalPassFrameBoundary();
 
 // hotkey.dump_eyes, and the settings menu's "Dump both eyes as seen": the
-// next treated frame's two eyes, as the compositor receives them, to
-// edvr_logs\eyes as 24-bit BMP -- what the player sees through the lens,
-// readable off the desk.
+// sixteen paired raw/treated left-eye crops, a whole treated overview,
+// and per-eye motion metadata in edvr_logs\eyes. The paired run is the
+// default; advanced.eye_run_paired=0 keeps the older single-run selection.
 void temporalPassArmEyeDump();
 
 // The eye's offset from the head as the runtime last handed it to the pass

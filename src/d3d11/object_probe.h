@@ -38,6 +38,10 @@ struct ID3D11DeviceContext;
 
 namespace edvr {
 
+// Stepped pool records do not describe the rendered animation. Keep their
+// producer and GPU consumer gated together; diagnostics may still measure them.
+inline constexpr bool kObjectSteppedMotionEnabled = false;
+
 class Config;
 
 // advanced.object_probe, live.
@@ -53,6 +57,13 @@ bool objectProbeWantsDraws();
 // row (objectProbeArmLedger below); nothing else reads them.
 void objectProbeOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count, uint32_t instances,
                           uint32_t startInstance);
+
+// Visible draws routed before the normal eye-draw hook (particle billboards).
+// The caller establishes that the target is an eye. Record the original
+// shader in an active ledger, without probing its unrelated instance pool.
+bool objectProbeLedgerActive();
+void objectProbeNoteEarlyDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
+                             uint32_t instances, uint32_t startInstance);
 
 // THE EYE RUN'S LEDGER (2026-09-10). The run's raw crops say how much each
 // part of a station turned from one frame to the next; the pool says how

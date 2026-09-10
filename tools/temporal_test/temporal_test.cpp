@@ -15,6 +15,7 @@
 #include <cstring>
 
 #include "../../src/common/temporal_math.h"
+#include "../../src/common/temporal_mode.h"
 
 namespace {
 
@@ -52,6 +53,40 @@ void yaw34(float theta, float m34[12]) {
 }  // namespace
 
 int main() {
+    for (float scale : {0.5f, 0.65f, 0.999f}) {
+        if (strcmp(edvr::temporalNvidiaLabel(scale), "DLSS")) { ++g_fails; puts("FAIL: upscaling label"); }
+    }
+    for (float scale : {1.0f, 1.25f, 2.0f}) {
+        if (strcmp(edvr::temporalNvidiaLabel(scale), "DLAA")) { ++g_fails; puts("FAIL: native or supersampled label"); }
+    }
+    for (float scale : {0.0f, -1.0f, NAN, INFINITY}) {
+        if (strcmp(edvr::temporalNvidiaLabel(scale), "DLSS / DLAA")) { ++g_fails; puts("FAIL: unknown scale label"); }
+    }
+    for (const char* mode : {"on", "ON", "dlaa", "DLAA", "dlss", "DLSS"}) {
+        if (!edvr::temporalModeEnabled(mode)) { ++g_fails; printf("FAIL: bundled temporal mode %s\n", mode); }
+    }
+    for (const char* mode : {"off", "OFF", "", "bogus"}) {
+        if (edvr::temporalModeEnabled(mode)) { ++g_fails; printf("FAIL: inactive temporal mode %s\n", mode); }
+    }
+    {
+        using edvr::temporalCameraFollowScore;
+        int score = -30;
+        // Recorded yaw/head cancellation: the scene camera barely turns,
+        // but its rows predict the stars correctly. Recover on a still
+        // head too, rather than waiting indefinitely for another head turn.
+        score = temporalCameraFollowScore(score, 1100, true, .25f, .03f);
+        check(score == 30, "bound scene camera survives opposing ship/head yaw");
+        check(temporalCameraFollowScore(-30, 1100, true, 0, .25f) == 30,
+              "bound scene camera recovers with the head stationary");
+        for (int i=0;i<16;++i) score = temporalCameraFollowScore(score, 1100, true, .25f, 0);
+        check(score == 30, "sustained cancellation cannot disable scene motion");
+        check(temporalCameraFollowScore(0, 2, true, .25f, 0) == -4,
+              "sparse menu backdrop still uses head-follow detector");
+        check(temporalCameraFollowScore(0, 1100, false, .25f, 0) == -4,
+              "auxiliary camera chain still triggers resynchronization");
+        check(temporalCameraFollowScore(-30, 1100, false, .25f, .25f) == -29,
+              "auxiliary camera can regain confidence");
+    }
     setvbuf(stdout, nullptr, _IONBF, 0);
     printf("edvr temporal test\n\n");
 
@@ -396,6 +431,58 @@ int main() {
     }
 
     {
+        // A station's carried motion must be independent of the world's
+        // origin, also with simultaneous camera translation and head turn.
+        // Compare against direct world-point composition, then shift the
+        // entire scene by 13 km while keeping the same physical camera delta.
+        const float I[9] = {1,0,0, 0,1,0, 0,0,1};
+        const float zero[3] = {};
+        float worst = 0.0f, oldError = 0.0f;
+        for (int axis = 0; axis < 3; ++axis) {
+            for (int sign = -1; sign <= 1; sign += 2) {
+                for (int moving = 0; moving < 2; ++moving) {
+                    float prev[12], now[12];
+                    yaw34(0.4f, prev);
+                    yaw34(0.417f, now);
+                    for (int k = 0; k < 3; ++k) {
+                        prev[k * 4 + 3] = 100.0f * (k + 1);
+                        now[k * 4 + 3] = prev[k * 4 + 3] + moving * (k - 1.5f) * 4.0f;
+                    }
+                    float w[3] = {}, R[9];
+                    w[axis] = sign * 0.0006981317f; // 0.04 degrees per frame
+                    edvr::temporalRodrigues(w, R);
+                    const float t[3] = {0.3f, -0.2f, 0.1f};
+                    float cameraW[9], cameraTv[3], wantW[9], wantTv[3];
+                    edvr::temporalBodyPath(prev, now, I, zero, cameraW, cameraTv);
+                    edvr::temporalBodyPath(prev, now, R, t, wantW, wantTv);
+                    for (int shifted = 0; shifted < 2; ++shifted) {
+                        float shift[3] = {}, rs[3], ts[3];
+                        shift[(axis + 1) % 3] = shifted * sign * 13000.0f;
+                        edvr::temporalApply3(R, shift, rs);
+                        for (int k = 0; k < 3; ++k) ts[k] = t[k] + shift[k] - rs[k];
+                        for (int eye = 0; eye < 2; ++eye) {
+                            float gotW[9], gotTv[3];
+                            edvr::temporalBodyPathCarried(prev, R, ts, cameraW, cameraTv, gotW, gotTv, shift);
+                            for (int k = 0; k < 9; ++k) worst = fmaxf(worst, fabsf(gotW[k] - wantW[k]));
+                            for (int k = 0; k < 3; ++k) worst = fmaxf(worst, fabsf(gotTv[k] - wantTv[k]));
+                            // Positive control: the old call site rebased the
+                            // body translation but left the camera in the old
+                            // origin. It must expose metres of error here.
+                            if (shifted && !moving) {
+                                edvr::temporalBodyPathCarried(prev, R, ts, cameraW, cameraTv, gotW, gotTv);
+                                for (int k = 0; k < 3; ++k) oldError = fmaxf(oldError, fabsf(gotTv[k] - wantTv[k]));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        printf("  carried origin regression: corrected max %.6f m, old-origin control %.3f m\n", worst, oldError);
+        check(worst < 0.004f, "carried body: origin shift preserves motion under combined head and ship movement");
+        check(oldError > 8.0f, "carried body: old camera origin reproduces whole-body displacement");
+    }
+
+    {
         // The rigid fit (temporalRigidFit) and Rodrigues: twenty points of a
         // body ten kilometres off, turned 0.05 deg about a tilted axis
         // through a point away from the origin and moved 0.2 m, recovered
@@ -436,6 +523,22 @@ int main() {
         check(rms < 0.01f, "rigid fit: the residual is millimetres");
     }
 
+    {
+        float a=0, b=0;
+        check(!edvr::temporalSceneProjection(0,0,.025f,&a,&b), "missing scene row uses the scene fallback");
+        const float distances[] = {30.0f,3000.0f,15000.0f,25000.0f};
+        for (float metres : distances) {
+            const float captured=.025f/metres;
+            checkNear(b/(captured-a),metres,.005f,"missing projection still reconstructs actual station distance");
+        }
+        check(edvr::temporalSceneProjection(0,.025f,.025f,&a,&b),"measured infinite scene row accepted");
+        check(!edvr::temporalSceneProjection(1,2,.025f,&a,&b),"unrelated projection cannot create near-plane HUD depth");
+        checkNear(a,0,0,"invalid projection leaves infinite scene offset");
+        checkNear(b,.025f,0,"invalid projection retains scene near scale");
+        const float fa=.025f/(.025f-50000.0f),fb=.025f*50000.0f/(50000.0f-.025f);
+        check(edvr::temporalSceneProjection(fa,fb,.025f,&a,&b),"explicit measured finite row is respected");
+        checkNear(a,fa,0,"measured finite offset retained");
+    }
     if (g_fails) {
         printf("\nTEMPORAL TEST FAILED (%d)\n", g_fails);
         return 1;

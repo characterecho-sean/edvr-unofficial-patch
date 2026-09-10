@@ -22,6 +22,8 @@
 #include "../common/log.h"
 #include "../common/proxy.h"
 #include "../common/timing.h"
+#include "../common/temporal_mode.h"
+#include "device_hook.h"
 #include "input_gate.h"
 #include "menu_panel.h"
 #include "menu_schema.h"
@@ -300,6 +302,12 @@ struct ChoiceItem {
     std::string label;
 };
 
+const char* nvidiaLabel() {
+    float quality = 0.0f;
+    deviceHookHmdQuality(&quality);
+    return temporalNvidiaLabel(quality);
+}
+
 std::vector<ChoiceItem> choicesOf(const MenuRowDef& d) {
     std::vector<ChoiceItem> out;
     std::string packed(d.choices);
@@ -317,6 +325,9 @@ std::vector<ChoiceItem> choicesOf(const MenuRowDef& d) {
             } else {
                 c.value = item;
                 c.label = item;
+            }
+            if (strcmp(d.section, "fix") == 0 && strcmp(d.key, "temporal_aa") == 0 && c.value == "dlss") {
+                c.label = nvidiaLabel();
             }
             out.push_back(c);
         }
@@ -359,6 +370,9 @@ std::string switchWord(const MenuRowDef& d, const std::string& value) {
 }
 
 std::string displayValue(const MenuRowDef& d, const std::string& v) {
+    if (strcmp(d.section, "fix") == 0 && strcmp(d.key, "temporal_aa") == 0 && _stricmp(v.c_str(), "dlaa") == 0) {
+        return "DLAA"; // explicit legacy 1:1 mode, even below HMD Quality 1
+    }
     switch (d.kind) {
         case MenuKind::Toggle:
             return boolOf(v, boolOf(d.shipped, false)) ? "on" : "off";
@@ -1031,6 +1045,10 @@ void buildContent(MenuContent& c) {
             const RowState& r = g_rows[e.def];
             const bool editingThis = (s.editEntry == i);
             strncpy(l.left, d.label, sizeof(l.left) - 1);
+            if (strcmp(d.section, "fix") == 0 && strcmp(d.key, "temporal_aa_model") == 0) {
+                const std::string mode = Config::get().getString("fix.temporal_aa", "off");
+                snprintf(l.left, sizeof(l.left), "%s preset", _stricmp(mode.c_str(), "dlaa") == 0 ? "DLAA" : nvidiaLabel());
+            }
             std::string v = displayValue(d, r.value);
             if (editingThis) {
                 // What has been typed, with a caret. The raster shows a

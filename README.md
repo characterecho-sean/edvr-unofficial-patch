@@ -196,27 +196,13 @@ the values tested on a Quest 3. Three settings:
 [The terrain fix](#the-terrain-fix-cull-guard).
 *Details: [docs/terrain-culling.md](docs/terrain-culling.md).*
 
-**Aliasing when you supersample — the resolve at the door.** *On by
-default, and idle unless the game supersamples.* When Elite renders each
-eye larger than the headset asked for (its HMD Quality above 1.0), the
-compositor shrinks the image on the fly as it corrects for the lenses, with
-whatever sampler it happens to use. `supersample_resolve = auto` (the
-default) has EDVR filter each eye down to exactly the recommended size
-itself, at submit, in linear light, with a calm (Gaussian) or crisp
-(Mitchell) kernel — `supersample_filter` and `supersample_width`, both live
-— and hand the compositor a frame it samples one to one. The pixels are
-the game's; only who filters them changes, so it cannot add detail and does
-nothing unless the game is already submitting larger than asked. Costs one
-small GPU pass per eye, measured by timestamp query and printed in the
-graphics log: about half a millisecond per eye on a Pimax Crystal Super at
-HMD Quality 1.25 (6780x6695 down to 5424x5356), a tenth of one on a Quest 3
-at 1.5 (3096x3312 down to 2064x2208). `off` gives the compositor its
-filtering back. For the shimmer itself:
-supersample through HMD Quality rather than Elite's Supersampling slider
-(the slider shrinks the image before the game's own post-processing), set
-Elite's anti-aliasing to Off or SMAA and stop expecting it to touch
-flicker, run anisotropic filtering at 16x, and on SteamVR turn on Advanced
-Supersample Filtering.
+**Supersample filtering.** Experimental and off by default. When enabled,
+EDVR can filter a frame larger than the headset recommendation using a
+Gaussian or Mitchell kernel. Feedback reports softness and unstable fine
+detail, so the compositor handles downsampling by default. The controls
+are under Experimental: `supersample_resolve`, `supersample_filter` and
+`supersample_width`. This does not change the render scale or enable with
+TAA/DLSS.
 *Details: [docs/anti-aliasing.md](docs/anti-aliasing.md).*
 
 **The shimmer on a steady ship.** A headset's tracking never quite stops:
@@ -229,52 +215,27 @@ temporal pass below integrates that wander instead of fighting it, and the
 lock could not engage on a Quest 3's tracking at all.
 *Details: [docs/anti-aliasing.md](docs/anti-aliasing.md).*
 
-**The shimmer itself — temporal anti-aliasing.** *Off by default; in the
-installer's settings window.* Elite has no temporal anti-aliasing, and its menu's options are
-edge filters that cannot touch content flickering on and off the pixel
-grid as your head moves. `temporal_aa = on` blends each frame with the
-frames before it, each moved to where its content sits now, with the
-projection the game renders through nudged by a sub-pixel amount every
-frame so the average converges to a real supersample even with the head
-held still. The first build moves the history by the headset's turn, which
-is exact for the cockpit and the HUD and right for the world whenever the
-ship is not turning; a fast turn leaves the world un-anti-aliased for
-those frames rather than ghosted. Set Elite's own anti-aliasing to Off or
-SMAA with it on. Live to turn on, as are the weight and the clamp. Every
-temporal filter trades a little edge contrast for its calm, so
-`render_sharpness` (0 to 1, live) runs AMD's RCAS on every outgoing frame
-as the last pass at the door, for the resolve's calm kernel as much as for
-this; the first flight found text a little soft without it, and 0.3 to 0.5
-is where to start. The second flight found the limit of the first build:
-a history moved by the head's rotation alone registers the world but not
-the cockpit, whose text sits close enough that the head's translation
-moves it by pixels, so it ghosts under head motion and stays soft. The
-cockpit census then found the scene's own depth, and the pass now
-reprojects every pixel with the head's translation through it by default,
-which is what a near panel needs to hold still (three docked flights: the
-history lands on the cockpit with 40% fewer clips than by rotation alone). Know the trade before
-turning it on: a temporal filter converges
-to a properly filtered image, which is calmer and softer than the hard,
-aliased edges of text without it, and a side-by-side at HMD Quality 1.5
-found the text much sharper with the resolve alone. If crisp text matters
-more to you than calm edges, leave this off and keep the resolve. On an RTX
-GPU, `temporal_aa = dlaa` hands the same inputs to NVIDIA's trained
-history instead, and `dlss` also lets Elite's HMD Quality below 1.0 render
-a fraction of the size and brings it back to full size, which buys frame
-time. It does not buy text: the cockpit's panels are drawn into surfaces
-that scale with the internal render size, so at HMD Quality 0.67 their
-text is rasterised at two-thirds size and no upscaler recovers it. (Every
-trained flight before 2026-09-04 ran with NVIDIA's history reset every
-frame, a bug found by review; the verdicts on those flights are of a
-spatial filter, not of DLSS.) What the trained modes did to the HUD's text
-before `ui_depth` was make it swim: Elite draws its interface depth-tested but
-never writes its depth, so the pass held a panel a metre away at infinity
-and NVIDIA's history rejected it under every head movement. `ui_depth`
-(on by default; nothing happens while `temporal_aa` is off) has the holo
-panels and the flight HUD write their depth into the buffer the pass
-reads, and the text holds still (flown 2026-09-06).
+**Temporal anti-aliasing.** Select TAA or DLSS on the Performance page
+(`fix.temporal_aa`); off remains the shipped default. Both modes include
+UI and smoke depth, adaptive UI history, and rotating-station motion.
+These inputs follow the AA mode automatically, so no companion switches
+are required. UI coverage stays in private depth buffers and leaves the
+game's smoke and other depth-tested draws intact.
+
+DLSS uses NVIDIA's runtime on an RTX GPU, falling back to native TAA if
+unavailable. It upscales when rendering below the headset recommendation
+and runs as DLAA at native size. **DLSS preset** is on the Performance
+page, defaults to **K**, and also offers J, L, M and Automatic. Changing
+it restarts NVIDIA's history. Render scale and sharpening remain separate.
+The automatic NVIDIA selection and preset row display **DLAA** at HMD Quality
+1.0 or higher and **DLSS** below it; the stored automatic mode remains `dlss`.
+
+Temporal AA enables automatic texture mip bias by default at device
+creation. Restart after changing AA mode to pick up that texture default;
+explicit advanced overrides remain supported. Detailed registration and
+pool diagnostics run during eye captures or when explicitly enabled.
 *Details: [docs/anti-aliasing.md](docs/anti-aliasing.md) and
-[docs/crisp-ui-handoff.md](docs/crisp-ui-handoff.md).*
+[the September 10 review](docs/review-dlss-performance-2026-09-10.md).*
 
 **The RemLok helmet's edge lines hanging along your nose.** When the
 emergency helmet deploys, its faint edge lines end up in the middle of your
@@ -690,7 +651,7 @@ the only action it can take is to not forward a call — or to hand SteamVR the
 game's own previous frame in its place: a copy EDVR keeps of the last frame it
 forwarded, always the game's content, never EDVR's.
 
-**The supersample resolve**, on by default and idle unless the game submits
+**The supersample resolve**, experimental and off by default; when enabled it acts only if the game submits
 larger than the headset asked for, is one more thing of that kind:
 when the game submits a larger frame than the headset asked for, one GPU
 filter pass shrinks the game's frame into a texture EDVR owns, and that copy

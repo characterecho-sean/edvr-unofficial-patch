@@ -105,24 +105,19 @@ int      g_heatHaze = 2;          // 0 off (withheld), 1 on (the game's), 2 auto
 bool     g_hideHeatHaze = false;  // what the mode resolves to
 uint64_t g_hazeSkipped = 0;
 uint64_t g_hazeNoteMs = 0;
-// The skip's audit of the binding shadow (heatHazeSkip says): ribbon-shaped
-// draws asked, and how the shadow differed from the context's answer.
+// The skip's audit: matched draws, and how the binding shadow differed
+// from the context's answer on the sampled draws.
 uint64_t g_hazeAsked = 0, g_hazeShadowNull = 0, g_hazeShadowPtr = 0, g_hazeShadowHash = 0;
 uint64_t g_hazeLastShadow = 0, g_hazeLastGet = 0;
-// THE SMOKE TRAIL behind a ship's drives (fix.drives_smoke, 2026-09-10):
-// the grey ribbon -- vs 5E417E9DF2E7F9E6, ps BD801F2FB02522EB, one indexed
-// draw of 600 indices an eye, depth test off, SRC_ALPHA over ONE -- and
-// the VOLUME that follows it, vs 203DF51758AADC4D, ps EEAAC839A9F09448, one
-// indexed draw of 5334 indices an eye right after the ribbon's, premultiplied
-// alpha under the depth test with the write off, a scattering shader over
-// the depth resolve, two gradients and a cubemap. Named by the draw census
-// of 06:50 with the pilot's own trail in view, where the volume drew four
-// times in two frames and not once in the census of 2026-09-09 16:58 with
-// no trail about. The heat haze (kHeatHazeVs) withheld, the pilot still saw
-// "that strange haze/blur shader" turning around on his own trail, and the
-// ribbon skipped by hand left it: it was the volume. He would rather have
-// no plume in space at all, so off withholds both.
-constexpr uint64_t kDrivesSmokeVs[2] = {0x5E417E9DF2E7F9E6ull, 0x203DF51758AADC4Dull};
+// The identified smoke ribbon: vs 5E417E9DF2E7F9E6, ps BD801F2FB02522EB.
+// This is not every ship-trail particle family: the 12:02 captures show
+// trails surviving its suppression (docs/review-smoke-capture-1202.md).
+// 203DF51758AADC4D was incorrectly added as a smoke volume. It and
+// B12F7A618E1BDE98 also draw planetary bodies/rings in the FSS captures
+// documented in docs/fss-scanner.md. They cannot be globally withheld by
+// a ship-smoke switch. Keep them out until an exhaust-specific selector
+// is established; presence in a busy scene is not effect identification.
+constexpr uint64_t kDrivesSmokeVs[1] = {0x5E417E9DF2E7F9E6ull};
 bool     g_hideDrivesSmoke = false;
 uint64_t g_smokeSkipped = 0;
 uint64_t g_smokeNoteMs = 0;
@@ -561,18 +556,21 @@ bool witchspaceStarsSkip(ID3D11DeviceContext* ctx, char kind, uint32_t count,
 
 bool drivesSmokeSkip(ID3D11DeviceContext* ctx, char kind, uint32_t count, uint32_t instances) {
     if (!g_hideDrivesSmoke || !ctx) return false;
-    // The shape first: both are single-instance indexed draws of some
-    // hundreds to thousands of indices; then the binding shadow's hash,
-    // which the haze skip's audit found never wrong (2026-09-09).
-    if (kind != 'X' || instances != 1 || count < 300 || count > 16384) return false;
+    // Identity is the gate. Draw type, tessellation and instance count are
+    // not part of the effect's identity; indirect counts are not on the CPU
+    // at all. The old shape prefilter let the named effect through on those
+    // paths even with its switch off (the smoke investigation, 2026-09-10).
+    (void)kind;
+    (void)count;
+    (void)instances;
     const uint64_t h = boundVsHashFast(ctx);
-    if (h != kDrivesSmokeVs[0] && h != kDrivesSmokeVs[1]) return false;
+    if (h != kDrivesSmokeVs[0]) return false;
     ++g_smokeSkipped;
     const uint64_t now = nowMs();
     if (now - g_smokeNoteMs >= 30000) {
         g_smokeNoteMs = now;
-        Log::get().note("drives' smoke: OFF -- %llu draw(s) of the trail's ribbon and volume withheld so far; "
-                        "the engine glow stays. fix.drives_smoke = on has the trail back.",
+        Log::get().note("drives' smoke: OFF -- %llu draw(s) of the identified ribbon withheld so far; "
+                        "other particle families may remain. fix.drives_smoke = on restores this ribbon.",
                         static_cast<unsigned long long>(g_smokeSkipped));
     }
     return true;
@@ -580,20 +578,18 @@ bool drivesSmokeSkip(ID3D11DeviceContext* ctx, char kind, uint32_t count, uint32
 
 bool heatHazeSkip(ID3D11DeviceContext* ctx, char kind, uint32_t count, uint32_t instances) {
     if (!g_hideHeatHaze || !ctx) return false;
-    // The shape first, the shader after: the ribbons and the quads are
-    // indexed draws of a multiple of 36 indices (a segment is six quads),
-    // and that leaves a handful of the eye's draws for the VSGetShader.
-    if (kind != 'X' || instances == 0 || count == 0 || count > 4096 || (count % 36) != 0) return false;
-    // The shape leaves seventy draws a frame, not a handful: 1.1 million
-    // in three minutes on the flight of 16:22 (2026-09-09), every one of
-    // them asked of the context after the flight of 15:13 had drawn the
-    // haze for three minutes with this skip withholding nothing -- and the
-    // binding shadow agreed with the context on every one. The silence had
-    // been the drives' absence, not the shadow. So the shadow decides
-    // again, and one draw in sixty-four still asks the context and counts
-    // the disagreement, pointer or hash, for the note's bracket.
-    ++g_hazeAsked;
-    uint64_t h;
+    // Match the known shader on every draw path, including GPU-driven
+    // draws whose counts are unavailable here. A count observed in one
+    // census must not become a condition for the user's off switch.
+    (void)kind;
+    (void)count;
+    (void)instances;
+    uint64_t h = boundVsHashFast(ctx);
+    if (h != kHeatHazeVs[0] && h != kHeatHazeVs[1] && h != kHeatHazeVs[2]) return false;
+    // Keep the existing one-in-64 context audit, now sampled among shader
+    // matches. Auditing all draws that passed the old shape filter found
+    // no shadow disagreement in the 2026-09-09 and 2026-09-10 captures.
+    ++g_hazeAsked;   // audit matched shaders, not every scene draw
     if ((g_hazeAsked & 63) == 0) {
         ID3D11VertexShader* vs = nullptr;
         ctx->VSGetShader(&vs, nullptr, nullptr);
@@ -612,8 +608,6 @@ bool heatHazeSkip(ID3D11DeviceContext* ctx, char kind, uint32_t count, uint32_t 
             g_hazeLastGet = h;
         }
         vs->Release();
-    } else {
-        h = boundVsHashFast(ctx);
     }
     if (h != kHeatHazeVs[0] && h != kHeatHazeVs[1] && h != kHeatHazeVs[2]) return false;
     ++g_hazeSkipped;
@@ -621,7 +615,7 @@ bool heatHazeSkip(ID3D11DeviceContext* ctx, char kind, uint32_t count, uint32_t 
     if (now - g_hazeNoteMs >= 30000) {
         g_hazeNoteMs = now;
         Log::get().note("heat haze: OFF -- %llu draw(s) of the drives' refraction withheld so far; the "
-                        "smoke and the glow stay. fix.heat_haze = on has them back. (%llu ribbon-shaped "
+                        "smoke and the glow stay. fix.heat_haze = on has them back. (%llu matched "
                         "draws, one in sixty-four checked against the context: the binding shadow "
                         "disagreed on %llu of those, %llu by pointer and %llu by hash, and was empty for "
                         "%llu; it last held %016llX where the context held %016llX.)",
@@ -855,7 +849,7 @@ void particleConfigure(Config& cfg) {
         g_hideHeatHaze = hide;
     }
     // The smoke trail behind drives: on (the game's, the default) or off
-    // (the ribbon and the volume withheld).
+    // (the identified ribbon withheld).
     {
         const std::string sm = cfg.getString("fix.drives_smoke", "on");
         const bool hide = _stricmp(sm.c_str(), "off") == 0;
@@ -863,7 +857,8 @@ void particleConfigure(Config& cfg) {
             Log::get().note("drives' smoke: fix.drives_smoke = \"%s\" is not on or off; on.", sm.c_str());
         }
         if (hide != g_hideDrivesSmoke) {
-            Log::get().note("drives' smoke: %s -- the trail's ribbon and volume are %s (fix.drives_smoke = %s).",
+            Log::get().note("drives' smoke: %s -- the identified ribbon is %s (fix.drives_smoke = %s); "
+                            "this switch does not yet cover every particle family.",
                             hide ? "OFF" : "ON", hide ? "withheld; the engine glow stays" : "the game's",
                             hide ? "off" : "on");
         }

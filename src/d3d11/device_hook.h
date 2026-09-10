@@ -52,6 +52,11 @@ void deviceHookNoteCleanExit();
 // for the rest of the session and nothing else would say so.
 bool deviceHookAutoBiasSource(float* multiplier, float* bias);
 
+// Current saved HMD Quality for menu labels, independent of mip overrides.
+// Reads the graphics preset at most once a second per menu thread. False
+// means unknown; callers should show a neutral DLSS/DLAA label.
+bool deviceHookHmdQuality(float* multiplier);
+
 // The FSS theater's mode latch: true while the player is (believed to
 // be) in the Full System Scanner -- keyed by their own FSS bindings for
 // frame-exact edges, reconciled against the game's GuiFocus. vscreen's

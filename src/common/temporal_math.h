@@ -34,6 +34,34 @@
 
 namespace edvr {
 
+// A scene camera includes both ship and head rotation. Opposing turns can
+// cancel, so a small camera delta does not prove a menu/stale camera.
+// Trust continuous rows from the bound scene block in a populated scene;
+// retain the head-follow detector only for ambiguous auxiliary chains.
+inline int temporalCameraFollowScore(int score, uint32_t sceneDraws, bool boundRows,
+                                     float headDeg, float rowsDeg) {
+    if (sceneDraws >= 50u && boundRows) return 30;
+    if (headDeg > 0.1f) score += rowsDeg < 0.3f * headDeg ? -4 : 1;
+    return score < -30 ? -30 : score > 30 ? 30 : score;
+}
+
+// Elite's scene depth is reversed Z with an infinite far plane. OpenVR's
+// finite clip planes describe the submitted projection, not this depth
+// buffer (14:53 capture: finite fallback displaced station pixels by km).
+// A usable scene row takes precedence; missing or unrelated rows must not
+// silently reintroduce the runtime's far-plane offset.
+inline bool temporalSceneProjection(float rowA, float rowB, float nearZ,
+                                     float* a, float* b) {
+    const bool haveNear = std::isfinite(nearZ) && nearZ > 0.0f;
+    const float rowNear = rowB / (1.0f - rowA);
+    const bool measured = std::isfinite(rowA) && std::isfinite(rowB) &&
+        rowA <= 0.0f && rowB > 0.0f && std::isfinite(rowNear) &&
+        (!haveNear || std::fabs(rowNear - nearZ) <= nearZ * 0.05f);
+    *a = measured ? rowA : 0.0f;
+    *b = measured ? rowB : haveNear ? nearZ : 0.0f;
+    return measured;
+}
+
 // How many frames the jitter sequence runs before repeating. Halton (2,3)
 // over eight frames covers the pixel evenly; longer sequences converge
 // finer detail but take longer to settle after a reset.
@@ -272,12 +300,18 @@ inline void temporalBodyPath(const float prev34[12], const float now34[12],
 // gives, last frame's when this frame's was dropped) rather than with the
 // rows. R_p^T Rd R_n = (R_p^T Rd R_p)(R_p^T R_n): the body's turn taken
 // into last frame's view by its rows, then the camera's own delta; and
-// tv = R_p^T ((Rd - I) c_n + td) + tvc with c_n taken as c_p (their
-// difference is a frame's motion, and (Rd - I) of it is millimetres).
+// tv = B tvc + F R_p^T ((Rd - I) c_p + td), B = F R_p^T Rd R_p F.
+// The previous camera position must share td's coordinate origin. On an
+// origin jump, originStep moves c_p into that origin without adding the
+// jump to the physical camera delta. Rebasing td alone leaves an error of
+// (I - Rd) originStep: about nine metres for a 13 km shift at a station's
+// normal turn per frame. Apply B to tvc as well so ship translation and
+// head rotation compose exactly, including on carried frames.
 // Before this the body stood down on such frames, and a head turn dropped
 // the station to the camera's path for a frame at a time (2026-09-09).
 inline void temporalBodyPathCarried(const float prev34[12], const float Rd[9], const float td[3],
-                                    const float Wc[9], const float tvc[3], float W[9], float tv[3]) {
+                                    const float Wc[9], const float tvc[3], float W[9], float tv[3],
+                                    const float* originStep = nullptr) {
     float Rp[9], RpT[9], tmp[9], conj[9];
     temporalRot3Of34(prev34, Rp);
     temporalTranspose3(Rp, RpT);
@@ -288,14 +322,17 @@ inline void temporalBodyPathCarried(const float prev34[12], const float Rd[9], c
     conj[6] = -conj[6];
     conj[7] = -conj[7];
     temporalMul3(conj, Wc, W);
-    const float cP[3] = {prev34[3], prev34[7], prev34[11]};
+    float cP[3] = {prev34[3], prev34[7], prev34[11]};
+    if (originStep) for (int i = 0; i < 3; ++i) cP[i] += originStep[i];
     float rc[3];
     temporalApply3(Rd, cP, rc);
     const float dc[3] = {rc[0] - cP[0] + td[0], rc[1] - cP[1] + td[1], rc[2] - cP[2] + td[2]};
     float t[3];
     temporalApply3(RpT, dc, t);
     t[2] = -t[2];
-    for (int i = 0; i < 3; ++i) tv[i] = t[i] + tvc[i];
+    float bodyCameraTv[3];
+    temporalApply3(conj, tvc, bodyCameraTv);
+    for (int i = 0; i < 3; ++i) tv[i] = t[i] + bodyCameraTv[i];
 }
 
 // The rotation of an axis-angle vector (Rodrigues): w's direction the axis,

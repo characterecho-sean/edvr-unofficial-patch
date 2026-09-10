@@ -1,109 +1,19 @@
-// The interface writes its depth, so the temporal pass can follow it.
+// UI coverage for temporal AA. The game's color/depth draw runs unchanged;
+// supported HUD, hologram and interface composites are then reissued into
+// a private scene-depth copy, optionally also marking the reactive mask.
 //
-// THE DEFECT (Sean, 2026-09-05; measured on five censuses, 2026-09-03 and
-// 2026-09-06)
+// A copy seeded once per eye/frame preserves the scene's occlusion test.
+// Only the temporal pass reads these added depths. Writing them into the
+// game's live depth caused later smoke to have rectangular holes, confirmed
+// by the 2026-09-10 UI-depth-off test (review-smoke-capture-1219.md).
+// Unknown coverage shaders and unsupported targets are declined.
 //
-// Under fix.temporal_aa every piece of Elite's 2D interface flickers and
-// swims: the cockpit's holo panels and the flight HUD above all. Elite
-// draws them depth-TESTED and depth-SILENT: the draws bind the scene's
-// depth pair and test against it (GEQUAL under reversed-Z) but never write
-// it. The pass reprojects a pixel by its depth, a pixel with none falls on
-// the far-plane path, and the far plane follows head ROTATION but not head
-// TRANSLATION -- so a panel a metre away misregisters by pixels under an
-// ordinary head sweep, NVIDIA's history rejects it there, and the raw
-// jittered frame shows through as a half-pixel shuttle. That is the
-// flicker; a partial rejection is the swim.
+// Offscreen GUI draws teach the classifier which textures are UI surfaces.
+// A composite sampling one, or a supported direct family, can contribute
+// depth. Eyes are identified separately for each target size and format,
+// because HDR and tonemapped composites use different pairs in one frame.
+// Interface-projection composites convert their depth to scene encoding.
 //
-// THE FIX, and why it is this small
-//
-// For exactly those draws, swap the depth-stencil state for one that WRITES
-// depth, keeping the game's own test (so the cockpit still occludes a
-// panel). The depth then lands in the scene pair the pass, the depth probe
-// and NVIDIA's depth copy already read, at the panel's true distance. No
-// new targets, no eye pairing, no copy, no pass change. Three censuses said
-// nothing downstream reads that depth after the UI draws except EDVR's own
-// motion-vector dispatch (gate G10, docs/crisp-ui-handoff.md), and the
-// panels' and the HUD's pixel shaders discard on alpha, so the depth lands
-// on the strokes and the backing, not on empty quad. Flown 2026-09-06 on
-// the Pimax under DLSS: "that looks much better".
-//
-// WHERE IT WRITES, and where it deliberately does not
-//
-// Only into the depth the pass reads. A draw whose bound depth target is
-// not the scene pair (depthProbeIsSceneDepth) is left alone and counted:
-// the main menu's panel binds a depth of its own that nothing reads, and
-// writing there would be work for nothing (measured, review of
-// 2026-09-06). And only while the pass is on: with fix.temporal_aa off the
-// module does nothing at all, so the default costs a stock install nothing.
-//
-// WHAT COUNTS AS THE INTERFACE, without a list of composites
-//
-// Elite's GUI renderer is three shader families -- the textureless vector
-// widget shader, the glyph-atlas text shader, the BC7 icon shader -- and
-// every 2D panel is rasterised by them into an offscreen INTERFACE SURFACE
-// that a mesh in the eye then samples. So: any target those families draw
-// into is a UI surface (learned at the offscreen draws, kept for the
-// session, validated by size and format when sampled so a recycled address
-// cannot lie), and any eye draw whose pixel stage samples a UI surface is a
-// UI composite. That one rule finds the 24 holo-panel draws without naming
-// them. The flight HUD is vector geometry drawn straight into the eye and
-// is named by its vertex shader's hash; advanced.ui_depth_families adds
-// others, advanced.ui_depth_exclude removes any.
-//
-// WHICH EYE a composite is drawn into is read from the order its colour
-// target appears in the frame -- counted separately for each target SIZE
-// AND FORMAT, because Elite renders a cockpit frame through three pairs of
-// same-sized targets. One table for the whole frame filled up on the lit
-// HDR pair (the holo panels and the flight HUD) and left the escape menu's
-// composite, which lands in the tonemapped pair, with no eye and no depth:
-// the main menu was fixed because nothing else is treated there, and the
-// same menu in flight was not (measured from a census, 2026-09-08).
-//
-// TWO families are named as sharing the scene's projection rather than
-// found by the surface rule alone: the cockpit's holo panels, and the
-// SPRITE composite (vs E508648660A352B2), which draws into the same lit
-// HDR target and was measured still swimming on 2026-09-08 after
-// everything else had stopped. Both are composites by the surface rule,
-// which is what decides they are interface at all; being named is only
-// what says their depth belongs in the scene's own encoding, written in
-// place, rather than through the alpha-aware pass. Naming them here rather
-// than in advanced.ui_depth_families is deliberate: that list is consulted
-// BEFORE the surface test, so it would also claim the sprite family's
-// draws that sample no interface surface, and there are tens of thousands
-// of those (hud_sprite.h).
-//
-// A family's PIXEL stage has variants where its vertex stage does not. The
-// panel that composites the main menu also composites the escape menu you
-// open in flight, through a pixel shader that adds a colour matrix -- and a
-// third with fewer blur taps. A stand-in has to match the VERTEX shader's
-// output signature, which a variant shares by construction, so the only
-// thing that could differ is the slot the interface surface sits in: that
-// is checked (the classifier knows which slot it learned the surface in),
-// and a variant passing the check is drawn by its family's stand-in and
-// named in the log. advanced.ui_depth_variants declines them instead.
-//
-// The target direction indicator quad (vs 5DA53D8B0133341E) is left alone
-// because it samples an authored atlas and lookup tables, never a learned
-// surface -- not because the code refuses its target. It is drawn into the
-// G-buffer before the lighting resolve, and a depth written there would
-// light and fog the space behind the hologram; the log names every newly
-// classified family with its target's size and format, so a family that
-// ever lands somewhere new is visible in a field log.
-//
-// WHAT THE KEPT TEST COSTS
-//
-// With the game's test kept and depth now written, a piece of interface
-// drawn LATER and FARTHER loses its overlap against an earlier, nearer one
-// (the flight HUD is drawn before the panels). Nothing was seen on the
-// first flight; advanced.ui_depth_test = always is the A/B if it ever is.
-// The twin preserves the game's stencil settings, not the stencil OUTCOME
-// of a depth test that now fails where it used to pass -- confined to the
-// frame, since the pair is cleared with its stencil every frame before the
-// interface draws.
-//
-// Free when off or when the pass is off: one bool on the draw path. On:
-// two hashed memos (sampled views, vertex shaders) keep the per-draw work
-// to pointer probes, with a handful of resolves a frame.
 #pragma once
 
 #include <cstdint>
@@ -134,21 +44,18 @@ void uiDepthNoteOffscreenDraw(ID3D11DeviceContext* ctx);
 // Every eye draw: a UI composite (samples a learned surface in a
 // pixel-stage slot 0..3) or a named direct family, with a depth target
 // bound that is the scene pair's. True means the draw should write its
-// depth; the caller wraps it in Begin/End.
+// coverage depth; the caller reissues it after the original draw.
 bool uiDepthOnEyeDraw(ID3D11DeviceContext* ctx);
 
-// Around the real draw, for a family sharing the scene's projection: the
-// depth-stencil state swapped for a writing twin of the game's own (derived
-// once per game state and cached), and put back after -- the restore never
-// skipped. A begin that cannot derive a twin leaves the draw untouched.
-void uiDepthBegin(ID3D11DeviceContext* ctx);
+// Clear per-draw classification, including when another fix skipped the
+// draw. The original draw's depth state is never changed by this module.
 void uiDepthEnd(ID3D11DeviceContext* ctx);
 
 // AFTER the real draw, for a composite drawn through the interface
 // projection (the menus, the loading screen, the modals): the same
 // geometry drawn once more with no colour target, EDVR's pixel shader
-// clipping below the alpha floor, the pass's depth for its eye bound where
-// the composite's own is not it, the nearer-wins test, and the viewport
+// clipping below the alpha floor, a private scene-depth copy for its eye,
+// the nearer-wins test, and the viewport
 // depth range converting the encoding. The caller issues the second draw
 // between Begin and End when WantsReissue says so AND Begin returns true.
 bool uiDepthWantsReissue();
@@ -159,37 +66,21 @@ bool uiDepthWantsReissue();
 bool uiDepthReissueBegin(ID3D11DeviceContext* ctx);
 void uiDepthReissueEnd(ID3D11DeviceContext* ctx);
 
-// THE REACTIVE MASK, the other half of registering the interface.
+// Coverage also supports UI history decisions. It is marked at zero fixed
+// bias and under native TAA. The temporal pass keeps per-eye raw UI colour
+// and coverage, aligns it with UI motion, and rejects detected changes.
+// Stable strokes can accumulate; new, erased or recoloured strokes favour
+// the current frame. This is independent of the legacy fixed NVIDIA bias.
 //
-// Depth told the pass where the interface IS, and the trained history then
-// accumulated it -- which is the whole point for a static label, and wrong
-// for a readout whose digits change in place. A digit that changes does not
-// move, so its motion vector is zero, and the runtime blends the new digit
-// with the old one: measured 2026-09-08, and confirmed by the player in the
-// obvious A/B, since fix.ui_depth = off restores the swim and takes the
-// blur away with it.
-//
-// NVIDIA's evaluation takes a bias-current-colour mask for exactly this
-// (dlaa.h). This module owns one per eye, at the render size, cleared every
-// frame and marked wherever the interface covers a pixel -- by the same
-// second draw and the same surface alpha that write the interface's depth,
-// so coverage costs no new geometry and no new maths. The value is
-// advanced.ui_depth_reactive, 0 to 1; 0 makes no mask at all, and so does
-// any mode but NVIDIA's, whose history is the only one that reads one.
-//
-// The strength is a trade, not a free win: at 1 the marked pixels stop
-// accumulating altogether, which is the sharp-but-shimmering interface of
-// fix.ui_depth = off with the swim still fixed; at 0 it is the steady
-// interface with the blur. 0.5 resolves a changing readout while a static
-// label still converges, flown 2026-09-08 and the shipped value. Marking
-// only what CHANGED, rather than the whole interface, is the next step if
-// one value ever stops serving, and it needs last frame's surface to
-// compare against.
-//
-// The texture for one eye, for the temporal pass to hand to NVIDIA: null
-// when the strength is zero, when nothing has been marked, or when the
-// pass's size is not the size the mask was drawn at.
+// The legacy fixed-bias texture: null at zero strength, with no marked
+// coverage, or when the requested dimensions do not match.
 bool uiDepthReactiveMask(uint32_t w, uint32_t h, int eye, ID3D11Texture2D** tex);
+
+// Motion classification exists independently of NVIDIA reactivity. The
+// R8 value's low two bits are 1 floating UI, 2 attached UI, 3 smoke;
+// its upper six bits carry fixed bias. Classification remains at zero
+// fixed bias and under native TAA. Smoke is not adaptive UI evidence.
+bool uiDepthCoverageMask(uint32_t w, uint32_t h, int eye, ID3D11Texture2D** tex);
 
 // The drives' smoke's own depth for one eye (fix.temporal_aa_smoke): the
 // coverage pass writes it into a target of EDVR's, the scene depth's size,
@@ -199,13 +90,18 @@ bool uiDepthReactiveMask(uint32_t w, uint32_t h, int eye, ID3D11Texture2D** tex)
 // drawn this frame or the size is not the scene depth's.
 bool uiDepthSmokeDepth(uint32_t w, uint32_t h, int eye, ID3D11ShaderResourceView** srv);
 
+// HUD and interface coverage in a private scene-depth copy. Seeded once
+// per eye/frame to preserve scene occlusion, then merged by the temporal
+// pass with the latest scene and smoke depth. The scene identity must still
+// match the probe's selection. Returns a borrowed view, or null while off,
+// before this frame's first coverage draw, or after an eye/target change.
+bool uiDepthTemporalDepth(uint32_t w, uint32_t h, int eye, ID3D11Texture2D* scene,
+                          ID3D11ShaderResourceView** srv);
+
 // The strength the interface proper is marked at (advanced.ui_depth_reactive;
-// 0 = no mask). The holo material's markers and the sprite are marked three
-// quanta of 255 under it and the flight HUD's strokes at half of it; and
-// whether a marked pixel rides a turning body's path (the temporal pass's
-// uiCovered) is the value's quantum's parity, even riding and odd not,
-// which ui_depth.cpp's floorBuffer sets per family and the flight HUD's
-// coverage shader per pixel (a core drawn at the surface rides).
+// 0 = no fixed NVIDIA bias; motion classification and adaptive history remain).
+// HUD strokes use half this strength. Coverage shaders choose motion class
+// separately: opaque HUD cores drawn at a surface can ride its motion.
 float uiDepthReactive();
 
 // Once per frame: the masks cleared, the engage line, the totals every 20 s.

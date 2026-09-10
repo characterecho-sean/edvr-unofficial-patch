@@ -9,6 +9,7 @@
 #include <atomic>
 
 #include "../common/config.h"
+#include "../common/temporal_mode.h"
 #include "../common/eye_sync.h"
 #include "../common/frame_flag.h"
 #include "../common/guard.h"
@@ -1863,7 +1864,8 @@ void hookDevice(ID3D11Device* device) {
 #undef EDVR_HOOK_DEV_CREATE
     {
         const int aniso = sentinelCfg.getIntInRange("advanced.texture_anisotropy", 0, 0, 16);
-        const std::string biasKey = sentinelCfg.getString("advanced.texture_lod_bias", "0");
+        const bool temporal = temporalModeEnabled(sentinelCfg.getString("fix.temporal_aa", "off"));
+        const std::string biasKey = sentinelCfg.getString("advanced.texture_lod_bias", temporal ? "auto" : "0");
         float bias = 0.0f;
         if (_stricmp(biasKey.c_str(), "auto") == 0) {
             float mult = 0.0f, ssaa = 0.0f;
@@ -2040,6 +2042,19 @@ bool deviceHookTakeFssZoomPress() {
     if (!g_state || !g_state->fssZoomPressPending) return false;
     g_state->fssZoomPressPending = false;
     return true;
+}
+
+bool deviceHookHmdQuality(float* multiplier) {
+    static thread_local uint64_t nextRead = 0;
+    static thread_local float quality = 0.0f;
+    static thread_local bool valid = false;
+    const uint64_t now = GetTickCount64();
+    if (now >= nextRead) {
+        valid = eliteHmdMultiplier(&quality, nullptr, nullptr, 0);
+        nextRead = now + 1000;
+    }
+    if (multiplier) *multiplier = valid ? quality : 0.0f;
+    return valid;
 }
 
 bool deviceHookAutoBiasSource(float* multiplier, float* bias) {

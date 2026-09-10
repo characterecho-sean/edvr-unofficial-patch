@@ -121,10 +121,16 @@ void drawCensusEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
                        uint32_t instances, uint32_t eyeDrawIndex,
                        const DrawArgs& args);
 
+// A visible draw routed before the eye gate, captured before shader
+// substitution. Uses the normal DC/DCO formats and the offscreen gate.
+void drawCensusEarlyDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
+                         uint32_t instances, bool eye, const DrawArgs& args);
+
 // A draw the verdict chain returned on BEFORE either census call could
 // record it: a substituted particle billboard ('p', fix.particle_billboard
-// = steady), a withheld witchspace star ('w', fix.witchspace_stars = off) or
-// a skipped FSS chrome quad ('f'). Counted only while a census is recording,
+// = steady, legacy bucket), a withheld witchspace star ('w'), FSS chrome
+// quad ('f'), heat haze ('h') or drive smoke ('t'). Visible substituted
+// particles now use drawCensusEarlyDraw. Counted only while a census is recording,
 // printed as unseen= on the frame and end lines and explained once at the
 // end when nonzero -- so a census taken with a fix on says how much of the
 // scene it could not see, instead of silently under-counting it (2026-09-08;

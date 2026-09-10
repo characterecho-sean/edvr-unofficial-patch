@@ -17,11 +17,13 @@
 #include <d3d11.h>
 
 #include "../common/config.h"
+#include "../common/temporal_mode.h"
 #include "../common/guard.h"
 #include "../common/log.h"
 #include "../common/temporal_math.h"   // temporalRigidFit, temporalRodrigues: the body's motion from its parts
 #include "../common/timing.h"
 #include "binding_shadow.h"
+#include "draw_census.h"
 
 namespace edvr {
 namespace {
@@ -59,6 +61,7 @@ constexpr uint32_t kDumpMax = 8;
 constexpr uint32_t kSceneSlot = 1;       // the scene block, VS b1: cb1[275] is the camera in the record's frame
 
 bool     g_on = false;        // the pool is copied and diffed (the probe, or the fix that reads it)
+bool     g_details = false;   // explicit temporal diagnostics; captures also opt in
 bool     g_verbose = false;   // advanced.object_probe: the totals, the dumps, the absent line
 bool     g_wasOn = false;
 uint32_t g_checksLeft = 0;
@@ -103,6 +106,7 @@ struct DiffJob {
     float    camPrev[3] = {0.0f, 0.0f, 0.0f};
     bool     haveCamPrev = false;
     uint32_t lagFrames = 0;
+    bool diagnostics = false;
 };
 std::mutex              g_jobLock;
 std::condition_variable g_jobCv;
@@ -521,6 +525,7 @@ struct LedgerCopy {
     bool     inUse = false;
 };
 bool     g_ledgerOn = false;
+bool steppedTrackingWanted() { return kObjectSteppedMotionEnabled || g_details || g_ledgerOn; }
 wchar_t  g_ledgerStamp[16] = L"";
 uint32_t g_ledgerFrame0 = 0, g_ledgerLastFrame = 0;
 int      g_ledgerCropFrame[kLedgerCrops];
@@ -619,7 +624,7 @@ double qpcMs() {
 }
 
 // The interval's figures.
-uint64_t g_pairs = 0, g_skipped = 0;
+uint64_t g_pairs = 0, g_skipped = 0, g_detailPairs = 0;
 uint64_t g_live = 0;                       // non-empty records, summed over pairs
 uint64_t g_sigUnique = 0, g_twins = 0;     // ...with a signature no other has; byte-for-byte twins
 uint64_t g_changed = 0, g_poseChanged = 0, g_otherOnly = 0, g_moved = 0;
@@ -1237,15 +1242,19 @@ void takeShips(const Cluster* clusters, int nc, int big, bool bodyTaken, int ski
 // second flight added the identity by signature, the second pose block's
 // provenance and the tolerance clustering.
 void diffPair(const uint8_t* prev, const uint8_t* now, uint32_t bytes, float dtMs,
-              const float* camPos) {
+              const float* camPos, bool diagnostics) {
     const uint32_t n = bytes / kRecordBytes;
-    std::vector<uint64_t> hashNow(n, 0), sigPrev(n, 0), sigNow(n, 0);
-    std::vector<uint8_t> livePrev(n, 0), liveNow(n, 0);
-    std::unordered_map<uint64_t, uint32_t> prevByHash, prevSigCount, nowSigCount, nowHashCount;
+    // This function runs on one worker. Reuse scratch capacity between pairs.
+    static thread_local std::vector<uint64_t> hashNow, sigPrev, sigNow;
+    static thread_local std::vector<uint8_t> livePrev, liveNow;
+    hashNow.assign(n, 0); sigPrev.assign(n, 0); sigNow.assign(n, 0);
+    livePrev.assign(n, 0); liveNow.assign(n, 0);
+    static thread_local std::unordered_map<uint64_t, uint32_t> prevByHash, prevSigCount, nowSigCount, nowHashCount;
+    prevByHash.clear(); prevSigCount.clear(); nowSigCount.clear(); nowHashCount.clear();
     prevByHash.reserve(n);
     prevSigCount.reserve(n);
     nowSigCount.reserve(n);
-    nowHashCount.reserve(n);
+    if (diagnostics) nowHashCount.reserve(n);
     for (uint32_t i = 0; i < n; ++i) {
         const uint8_t* a = prev + i * kRecordBytes;
         const uint8_t* b = now + i * kRecordBytes;
@@ -1259,7 +1268,7 @@ void diffPair(const uint8_t* prev, const uint8_t* now, uint32_t bytes, float dtM
             liveNow[i] = 1;
             hashNow[i] = fnv1a(b, kRecordBytes);
             sigNow[i] = signatureOf(b);
-            ++nowHashCount[hashNow[i]];
+            if (diagnostics) ++nowHashCount[hashNow[i]];
             ++nowSigCount[sigNow[i]];
         }
     }
@@ -1286,25 +1295,29 @@ void diffPair(const uint8_t* prev, const uint8_t* now, uint32_t bytes, float dtM
     // The deltas' translation term is about the camera (rigidDelta says).
     const float zeroRef[3] = {0.0f, 0.0f, 0.0f};
     const float* deltaRef = camPos ? camPos : zeroRef;
-    std::vector<int> clusterIdx(n, -1);
-    std::vector<float> posNow(static_cast<size_t>(n) * 3, 0.0f);
-    std::vector<float> posPrev(static_cast<size_t>(n) * 3, 0.0f);
+    static thread_local std::vector<int> clusterIdx;
+    static thread_local std::vector<float> posNow, posPrev;
+    clusterIdx.assign(n, -1);
+    posNow.assign(static_cast<size_t>(n) * 3, 0.0f);
+    posPrev.assign(static_cast<size_t>(n) * 3, 0.0f);
     for (uint32_t i = 0; i < n; ++i) {
         const uint8_t* a = prev + i * kRecordBytes;
         const uint8_t* b = now + i * kRecordBytes;
         if (liveNow[i]) {
             ++live;
             if (nowSigCount[sigNow[i]] == 1) ++sigUnique;
-            if (nowHashCount[hashNow[i]] > 1) ++twins;
+            if (diagnostics && nowHashCount[hashNow[i]] > 1) ++twins;
         }
         if (memcmp(a, b, kRecordBytes) == 0) continue;
         if (!liveNow[i]) { ++freed; continue; }
         if (!livePrev[i]) { ++allocated; continue; }
         ++changed;
-        for (uint32_t k = 0; k < kRecordBytes; ++k) {
-            if (a[k] != b[k]) ++g_byteHist[k];
+        if (diagnostics) {
+            for (uint32_t k = 0; k < kRecordBytes; ++k) {
+                if (a[k] != b[k]) ++g_byteHist[k];
+            }
+            ++g_byteHistN;
         }
-        ++g_byteHistN;
         // The identity: the same signature at the same slot is the same
         // object moved; the signature at another slot last frame is a
         // repacked pool; neither is a new object, or one whose "stable"
@@ -1321,11 +1334,13 @@ void diffPair(const uint8_t* prev, const uint8_t* now, uint32_t bytes, float dtM
         // block at this slot, and against this frame's own: last frame's
         // pose in the record would be the game's own motion source, and
         // the per-object motion in hand without any identity at all.
-        if (memcmp(b + 312, a + 8, 8) == 0) ++twinQuatPrev;
-        if (memcmp(b + 292, a + 16, 12) == 0) ++twinPosPrev;
-        if (memcmp(b + 288, a + 4, 4) == 0) ++twinScalePrev;
-        if (memcmp(b + 312, b + 8, 8) == 0) ++twinQuatSelf;
-        if (memcmp(b + 292, b + 16, 12) == 0) ++twinPosSelf;
+        if (diagnostics) {
+            if (memcmp(b + 312, a + 8, 8) == 0) ++twinQuatPrev;
+            if (memcmp(b + 292, a + 16, 12) == 0) ++twinPosPrev;
+            if (memcmp(b + 288, a + 4, 4) == 0) ++twinScalePrev;
+            if (memcmp(b + 312, b + 8, 8) == 0) ++twinQuatSelf;
+            if (memcmp(b + 292, b + 16, 12) == 0) ++twinPosSelf;
+        }
         const bool poseDiff = memcmp(a + 4, b + 4, 24) != 0;
         if (poseDiff && sigNow[i] != sigPrev[i]) {
             // Another object in the slot (the pool repacked, sigMoved or
@@ -1382,6 +1397,7 @@ void diffPair(const uint8_t* prev, const uint8_t* now, uint32_t bytes, float dtM
         }
     }
     ++g_pairs;
+    if (diagnostics) ++g_detailPairs;
     g_live += live;
     g_sigUnique += sigUnique;
     g_twins += twins;
@@ -1857,6 +1873,7 @@ void report() {
     const double bigPairs = g_bigPairs ? static_cast<double>(g_bigPairs) : 1.0;
     char ranges[640];
     byteRanges(ranges, sizeof(ranges));
+    if (g_detailPairs == g_pairs) {
     Log::get().note(
         "object probe: over %llu frame pairs (%llu skipped, a copy not ready in time): %.0f live "
         "records of %u a frame, %.0f%% of them with a signature no other record carries (bytes "
@@ -1883,6 +1900,12 @@ void report() {
         100.0 * static_cast<double>(g_twinScalePrev) / changed,
         100.0 * static_cast<double>(g_twinQuatSelf) / changed,
         100.0 * static_cast<double>(g_twinPosSelf) / changed);
+    } else {
+        Log::get().note("object probe: %llu pairs, %.0f live records; detailed byte/duplicate diagnostics "
+                        "sampled on %llu pairs (explicit diagnostics or eye capture).",
+                        static_cast<unsigned long long>(g_pairs), static_cast<double>(g_live) / pairs,
+                        static_cast<unsigned long long>(g_detailPairs));
+    }
     Log::get().note(
         "object probe, the motions: among the pose changes, rigid motions clustered within %.2f "
         "deg and %.0f cm plus %.1f mm per metre of the record's distance: %.1f clusters a pair on "
@@ -1968,7 +1991,7 @@ void report() {
     g_shipsOwn = 0;
     g_shipsStill = g_shipsUnfit = g_shipsOverCap = g_shipsFew = 0;
     g_shipsMax = 0;
-    g_pairs = g_skipped = 0;
+    g_pairs = g_skipped = g_detailPairs = 0;
     g_live = g_sigUnique = g_twins = 0;
     g_changed = g_poseChanged = g_otherOnly = g_moved = 0;
     g_allocated = g_freed = 0;
@@ -2115,7 +2138,7 @@ void workerMain() {
             LARGE_INTEGER dq0{}, dq1{}, dqf{};
             QueryPerformanceCounter(&dq0);
             diffPair(job.prev.data(), job.now.data(), static_cast<uint32_t>(job.now.size()), job.dtMs,
-                     job.haveCam ? job.cam : nullptr);
+                     job.haveCam ? job.cam : nullptr, job.diagnostics);
             QueryPerformanceCounter(&dq1);
             QueryPerformanceFrequency(&dqf);
             if (dqf.QuadPart > 0) {
@@ -2149,6 +2172,7 @@ void enqueueDiff(const uint8_t* now, uint32_t bytes, float dtMs, const float* ca
         g_job.haveCamPrev = haveCamPrev;
         if (haveCamPrev) memcpy(g_job.camPrev, g_keepCam, sizeof(g_job.camPrev));
         g_job.lagFrames = lagFrames;
+        g_job.diagnostics = g_details || g_ledgerOn;
         g_jobPending = true;
         if (!g_worker) g_worker = new std::thread(workerMain);
     }
@@ -2892,7 +2916,7 @@ void poll(ID3D11DeviceContext* ctx) {
             scene = static_cast<const uint8_t*>(ms.pData);
             sceneBytes = s->sceneBytes;
         }
-        trackFrame(bytes, s->bytes, s->frame, s->stampMs);
+        if (steppedTrackingWanted()) trackFrame(bytes, s->bytes, s->frame, s->stampMs);
         if (g_ledgerOn && s->frame >= g_ledgerFrame0 && s->frame <= g_ledgerLastFrame) {
             g_ledgerPool[s->frame - g_ledgerFrame0].assign(bytes, bytes + s->bytes);   // the ledger's frame
         }
@@ -2981,10 +3005,11 @@ void objectProbeConfigure(Config& cfg) {
     // feed the temporal pass's body path (fix.temporal_aa_objects), which
     // needs them without the log.
     g_verbose = cfg.getBool("advanced.object_probe", false);
-    g_on = g_verbose || cfg.getBool("fix.temporal_aa_objects", false);
+    g_details = cfg.getBool("advanced.temporal_aa_diagnostics", false);
+    g_on = g_verbose || temporalModeEnabled(cfg.getString("fix.temporal_aa", "off"));
 }
 
-bool objectProbeWantsDraws() { return g_on; }
+bool objectProbeWantsDraws() { return g_on || g_ledgerOn; }
 
 bool objectMotionGet(ObjectMotion* out) {
     if (!out) return false;
@@ -3029,7 +3054,7 @@ void objectShipsSetRange(float metres) {
 
 void objectProbeOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count, uint32_t instances,
                           uint32_t startInstance) {
-    if (!g_on || !ctx) return;
+    if ((!g_on && !g_ledgerOn) || !ctx) return;
     if (g_ledgerOn) ledgerNoteDraw(ctx, kind, count, instances, startInstance);
     if (g_checksLeft == 0) return;
     // The record-carrying families are instanced (question 5: every carrier
@@ -3121,7 +3146,7 @@ void objectProbeOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count, u
 }
 
 void objectProbeFrameBoundary(ID3D11DeviceContext* ctx) {
-    if (!g_on) {
+    if (!g_on && !g_ledgerOn) {
         if (g_wasOn) {
             // Switched off live: the copies and the reference go, the
             // figures print once more.
@@ -3154,12 +3179,17 @@ void objectProbeFrameBoundary(ID3D11DeviceContext* ctx) {
     guardedBudget(g_budget, [&] {
         if (g_pool) {
             g_framesWithoutPool = 0;
-            // A copy EVERY frame for the stepped parts (trackFrame), two of
-            // which are the pair's, kPairSpan frames apart from an
-            // alternating start (kPairSpan says why).
+            // Preserve the rigid-body pairs and their phase. Only a capture
+            // or explicit diagnostics needs intervening frames for stepped parts.
             const uint32_t phase = g_frame % kPairEvery;
             const uint32_t base = (g_frame / kPairEvery) & 1u;
-            issueCopy(ctx, phase == base ? 1 : (phase == base + kPairSpan ? 2 : 0));
+            const int role = phase == base ? 1 : (phase == base + kPairSpan ? 2 : 0);
+            if (role || steppedTrackingWanted()) issueCopy(ctx, role);
+            if (!steppedTrackingWanted() && !g_lastBytes.empty()) {
+                g_lastBytes.clear(); g_steppedCells.clear();
+                for (auto& frame : g_run) frame.clear();
+                g_runNext = 0;
+            }
             poll(ctx);
             if (g_ledgerOn) {
                 if (g_frame <= g_ledgerLastFrame) ledgerIssue(ctx);
@@ -3184,8 +3214,15 @@ void objectProbeFrameBoundary(ID3D11DeviceContext* ctx) {
     }
 }
 
+bool objectProbeLedgerActive() { return g_ledgerOn; }
+
+void objectProbeNoteEarlyDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
+                             uint32_t instances, uint32_t startInstance) {
+    if (objectProbeLedgerActive() && ctx) ledgerNoteDraw(ctx, kind, count, instances, startInstance);
+}
+
 void objectProbeArmLedger(const wchar_t* stamp) {
-    if (!g_on || g_ledgerOn) return;
+    if (g_ledgerOn) return;
     wcsncpy_s(g_ledgerStamp, 16, stamp ? stamp : L"000000", _TRUNCATE);
     g_ledgerFrame0 = g_frame + 1;   // this frame's draws get their copy at the next boundary
     g_ledgerLastFrame = g_ledgerFrame0 + static_cast<uint32_t>(kLedgerFrames) - 1u;
@@ -3200,6 +3237,14 @@ void objectProbeArmLedger(const wchar_t* stamp) {
     g_ledgerSkipped = 0;
     ledgerRelease();
     g_ledgerOn = true;
+    // The eye run is an explicit diagnostic capture. Pair its ledger with
+    // the full draw census so offscreen effects and surviving billboard
+    // particles have their PS/resources recorded without another keypress.
+    if (!drawCensusArmed()) {
+        drawCensusAutoRequest();
+        Log::get().note("object probe: eye run %ls also armed the full draw census; "
+                        "visible substituted particles are included before replacement.", g_ledgerStamp);
+    }
 }
 
 void objectProbeLedgerMark(int k) {

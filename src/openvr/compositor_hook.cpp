@@ -1211,7 +1211,11 @@ vr::EVRCompositorError hookedSubmit(void* self, vr::EVREye eye,
     auto applyTemporal = [&](vr::Texture_t* tex,
                              const vr::VRTextureBounds_t** bnds,
                              vr::VRTextureBounds_t* storage) {
-        if (!s->validated || !temporalAaWanted()) return;
+        if (!s->validated) return;
+        if (!temporalAaWanted()) {
+            if(tex->eType==vr::TextureType_DirectX)temporalAaCaptureUntreated(eye,tex->handle,*bnds);
+            return;
+        }
         if (tex->eType != vr::TextureType_DirectX) {
             temporalAaStandDown("the game is not submitting DirectX textures, "
                                 "which the pass needs");

@@ -29,6 +29,9 @@ void temporalAaConfigure();
 
 // The mode is on and the pass has not stood down.
 bool temporalAaWanted();
+// Capture the actual submitted image when AA is off. The graphics half
+// does nothing unless the user's eye-dump run is armed.
+void temporalAaCaptureUntreated(vr::EVREye eye,void* handle,const vr::VRTextureBounds_t* bounds);
 
 // The runtime's head pose for the frame about to render, from
 // WaitGetPoses, before any EDVR offset touches it (the offset moves the

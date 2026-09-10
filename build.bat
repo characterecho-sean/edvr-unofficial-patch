@@ -205,6 +205,8 @@ python "tools\gen_exports.py" --source "%SystemRoot%\System32\d3d11.dll" ^
     --extra-export edvrFssTheater ^
     --extra-export edvrSupersampleResolve ^
     --extra-export edvrTemporalAa ^
+    --extra-export edvrEyeCaptureUntreated ^
+    --extra-export edvrEyeCaptureArm ^
     --extra-export edvrTemporalAaNoteHead ^
     --extra-export edvrSharpen ^
     --extra-export edvrDepthProbeSelftest ^
@@ -655,6 +657,29 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
 if errorlevel 1 ( echo [edvr] ERROR: temporal_test build failed & exit /b 1 )
 "%BUILD%\temporal_test.exe" || (
     echo [edvr] ERROR: the temporal pass's arithmetic is wrong
+    exit /b 1
+)
+
+echo [edvr] === drive switch regression checks ===
+REM Compile the actual skip functions and indirect hooks against a context
+REM double: disabled effects must stay disabled across draw API/count changes.
+python.exe tools\check_drive_switches.py || (
+    echo [edvr] ERROR: drive smoke / heat haze suppression regression
+    exit /b 1
+)
+
+echo [edvr] === private UI depth regression ===
+REM Keep the executable away from build\d3d11.dll: these tests use system
+REM D3D11 WARP and include the production coverage pass directly.
+if not exist "%OBJ%\uidepthtest" mkdir "%OBJ%\uidepthtest"
+cl.exe /nologo /O2 /Gy /MT /std:c++17 /EHsc /W4 /wd4702 ^
+    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
+    /Fo"%OBJ%\uidepthtest\\" /Fe"%OBJ%\uidepthtest\ui_depth_test.exe" ^
+    "tools\ui_depth_test\ui_depth_test.cpp" ^
+    /link /INCREMENTAL:NO /OPT:REF d3d11.lib d3dcompiler.lib
+if errorlevel 1 ( echo [edvr] ERROR: ui_depth_test build failed & exit /b 1 )
+"%OBJ%\uidepthtest\ui_depth_test.exe" || (
+    echo [edvr] ERROR: private UI depth regression
     exit /b 1
 )
 

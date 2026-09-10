@@ -1,5 +1,10 @@
 # Anti-aliasing and the shimmer: a design
 
+**Current defaults (2026-09-10):** TAA/DLSS includes UI/smoke depth and station
+motion automatically. The Performance page exposes **DLSS preset**, default K.
+Supersample filtering is experimental and its resolve defaults off. Earlier
+flight notes below describe the settings available at the time.
+
 *A design document, written before the code, as a companion to
 [performance.md](performance.md). Claims about EDVR cite the source; claims
 about the game, runtimes and SDKs are labelled measured (established in this
@@ -284,7 +289,7 @@ is not in this tree yet and is not invented here — the active mode waits
 on it):
 
 ```
-supersample_resolve = auto   ; off | auto | on. auto engages whenever the
+supersample_resolve = off    ; off (default) | auto | on. auto engages when
                              ; game submits larger than the runtime asked
                              ; for, however that came about, and stays
                              ; quiet otherwise; on is the same and says so

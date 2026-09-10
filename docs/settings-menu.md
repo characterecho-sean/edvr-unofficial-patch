@@ -419,11 +419,13 @@ off the edge -- the pages past it could not be seen, and nothing said
 they were there (flown 2026-09-07).
 
 1. **Performance.** The rows tagged `menu performance` in `edvr.ini`:
-   `temporal_aa`, `ui_depth`, `render_sharpness`, `supersample_filter`,
+   `temporal_aa`, `temporal_aa_model` (labelled **DLSS preset**, default K), `render_sharpness`,
    `foveation`, `foveation_centre`, and `render_scale` when its branch
    lands. Costs where they are measured: the temporal pass's own timing,
    NVIDIA's pass per eye, the sharpen's timestamp pair, the pixel fraction
    under scale.
+   UI/smoke depth and station motion follow the AA mode automatically.
+   Supersample filtering is on the Experimental page and its resolve defaults off.
 2. **Fixes.** Every other `[fix]` row tagged `menu`, under the ini's own
    headings ("When the eyes disagree", ...), scrolling. Restart rows are
    shown, badged, and editable: the badge is the point of showing them.

@@ -417,6 +417,21 @@ void temporalAaFrameBoundary() {
     s.jitterLive = live;
 }
 
+void temporalAaCaptureUntreated(vr::EVREye eye,void* handle,const vr::VRTextureBounds_t* bounds) {
+    using Capture=void(*)(void*,int,const float*);
+    static Capture fn=nullptr;
+    if(!fn) {
+        HMODULE module=GetModuleHandleW(L"d3d11.dll");
+        if(module)fn=reinterpret_cast<Capture>(GetProcAddress(module,"edvrEyeCaptureUntreated"));
+    }
+    if(!fn || !handle)return;
+    guarded("eye capture/untreated",[&]{
+        float region[4]={0,0,1,1};
+        if(bounds){region[0]=bounds->uMin;region[1]=bounds->vMin;region[2]=bounds->uMax;region[3]=bounds->vMax;}
+        fn(handle,eye==vr::Eye_Left?0:1,region);
+    });
+}
+
 void* temporalAaTreat(vr::EVREye eye, void* handle,
                       const vr::VRTextureBounds_t* bounds,
                       vr::VRTextureBounds_t* outBounds) {
