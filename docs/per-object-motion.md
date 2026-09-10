@@ -2731,6 +2731,36 @@ which is this project's contract for every read of the game.
    square about its centre, written after the sixteenth with the first
    treated frame whole -- a 0.75 deg baseline, two pixels on the ring, and
    the pattern frame to frame. Built as v0.14.1-136-gafbdc50.
+
+   *The fortieth flight, 20:36 (v0.14.1-136)*: the long run at 20:38:43,
+   sixteen raw crops and the first treated frame, at about six
+   kilometres this time, twenty-five seconds after the load. No history
+   reset in the station's window. The treated frame is the best the
+   station has looked at range: the ring crisp, the panels crisp, the
+   hub's outer ring of tiles crisp -- and the hub's INNER face, where the
+   docked and moving ships sit, smeared in arcs, which is the traffic
+   (the pool's 33-54 records at 337 m from the axis turning 0.45 deg a
+   frame) beyond the ships' stage's range, not the hub. On the crops the
+   spin tool, with the head's shift removed, read per-frame turns within
+   their own noise (the hub's outer face 0.03, the ring 0.025 to 0.03,
+   scatter 0.03 to 0.05) -- at six kilometres the ring is 200 px from the
+   axis in the crop and a frame's turn under a fifth of a pixel, which
+   the aliasing locks toward zero. So the absolute rates are biased low;
+   the RATIO between rings of the same run is the number to keep. From
+   the ten-kilometre run of 20:29 the raw frames gave the hub's outer
+   face 0.066, 0.088 and 0.053 deg a frame against the ring's 0.027,
+   0.047 and 0.024: the hub about twice the ring, both biased alike. Put
+   with everything else -- the hub's face and the panels smeared at ten
+   kilometres and not at six; the hub's pool records jittering with no
+   net turn while its drawn face turns; the pilot's "they all spin one
+   way" -- the reading is that the station's FAR detail level spins the
+   hub (and perhaps the panels) at about twice the ring's rate, through
+   the skinning bone the pool never shows, while the near level spins
+   everything as one. Under the pass's one rate for the whole body, a
+   part at twice the rate smears by one rate's worth, and only at range.
+   Not proven: the run that decides it is a long run at ten kilometres,
+   the hub's face against the ring over fifteen frames, and a second run
+   there with the body's path off for the baseline smear.
 4. **Tier 2b** only if question 1 says no bits.
 5. **Tier 3** as `tools/` work against dumped frames, never on the hot
    path.
