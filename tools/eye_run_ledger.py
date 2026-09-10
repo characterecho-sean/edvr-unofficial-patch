@@ -67,7 +67,7 @@ def rot_angle(Ra, Rb):
 
 def bone_mats(bones, base, count):
     """the 3x3 of the first bone at each base (48-byte rows: three float4 rows)"""
-    rows = np.frombuffer(bones, dtype=np.float32).reshape(-1, 12)
+    rows = np.frombuffer(bones, dtype=np.float32, count=(len(bones) // 48) * 12).reshape(-1, 12)   # whole rows only: a megabyte is not a multiple of 48
     M = np.zeros((count, 3, 3)); ok = np.zeros(count, bool)
     for i, b in enumerate(base):
         if b < rows.shape[0]:
@@ -109,6 +109,21 @@ def fit_axis(p0, p1, ang, axis, mask):
     c = c + u * ((p0[m].mean(0) - c) @ u)
     return u, c, th, m
 
+def load_aux(path):
+    b = open(path, 'rb').read()
+    magic, ver, frame, entries, pad = struct.unpack('<8sIIII', b[:24])
+    assert magic == b'EDVRLAUX', path
+    off = 24; out = []
+    for _ in range(entries):
+        vs, instances, count = struct.unpack('<QII', b[off:off + 16]); off += 16
+        sizes = struct.unpack('<4I', b[off:off + 16]); off += 16
+        strides = struct.unpack('<4I', b[off:off + 16]); off += 16
+        blobs = []
+        for k in range(4):
+            blobs.append(b[off:off + sizes[k]]); off += sizes[k]
+        out.append(dict(vs=vs, instances=instances, count=count, stride=strides, bytes=blobs))
+    return out
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('dir'); ap.add_argument('stamp')
@@ -131,15 +146,20 @@ def main():
     cropFrames = [(k, f) for k, f in enumerate(crop) if f >= 0]
     print(f"ledger {a.stamp}: {frames} frames from {frame0}; instance stride {instStride}, palette stride {bonesStride}, pool {poolBytes} bytes")
     print("crops: " + " ".join(f"C{k:02d}=f{f}" for k, f in cropFrames))
-    pools = {}; insts = {}; bones = {}
+    pools = {}; insts = {}; bones = {}; auxes = {}
     for frame in range(frame0, frame0 + frames):
         p = os.path.join(a.dir, f'pool_{a.stamp}_{frame}.bin')
         if os.path.exists(p): pools[frame] = load_pool(p)
         p = os.path.join(a.dir, f'inst_{a.stamp}_{frame}.bin')
         if os.path.exists(p): insts[frame] = np.frombuffer(open(p, 'rb').read(), dtype=np.uint32)
-        p = os.path.join(a.dir, f'bones_{a.stamp}_{frame}.bin')
-        if os.path.exists(p): bones[frame] = open(p, 'rb').read()
-    print(f"on disk: {len(pools)} pool frames, {len(insts)} instance streams, {len(bones)} palette copies, {sum(len(v) for v in draws.values())} draw rows")
+        for pi in range(4):
+            p = os.path.join(a.dir, f'bones{pi}_{a.stamp}_{frame}.bin')
+            if os.path.exists(p): bones.setdefault(frame, {})[pi] = open(p, 'rb').read()
+        p = os.path.join(a.dir, f'bones_{a.stamp}_{frame}.bin')   # the first build's single palette
+        if os.path.exists(p): bones.setdefault(frame, {})[0] = open(p, 'rb').read()
+        p = os.path.join(a.dir, f'aux_{a.stamp}_{frame}.bin')
+        if os.path.exists(p): auxes[frame] = load_aux(p)
+    print(f"on disk: {len(pools)} pool frames, {len(insts)} instance streams, {len(bones)} frames of palettes, {len(auxes)} aux files, {sum(len(v) for v in draws.values())} draw rows")
     stride_u32 = max(1, instStride // 4)
 
     def drawn_records(frame):
@@ -197,14 +217,65 @@ def main():
         if sk.sum() and fa in bones and fb in bones:
             idx = np.nonzero(sk)[0]
             Ra = qmat(A['q'][idx]); Rb = qmat(B['q'][idx])
-            Ma, oka = bone_mats(bones[fa], A['base'][idx], len(idx)); Mb, okb = bone_mats(bones[fb], B['base'][idx], len(idx))
-            ok = oka & okb
-            if ok.any():
+            for pi in sorted(set(bones[fa]) & set(bones[fb])):
+                Ma, oka = bone_mats(bones[fa][pi], A['base'][idx], len(idx)); Mb, okb = bone_mats(bones[fb][pi], B['base'][idx], len(idx))
+                # a palette whose rows at the bases are rotations (orthonormal) is the hub's; zeros are another's
+                orth = np.abs(np.einsum('nij,nkj->nik', Ma, Ma) - np.eye(3)).max(axis=(1, 2)) < 0.05
+                ok = oka & okb & orth
+                if ok.sum() < max(3, len(idx) // 4): continue
                 t_rec = np.median(rot_angle(Ra[ok], Rb[ok]))
                 t_bone = np.median(rot_angle(Ma[ok], Mb[ok]))
                 t_both = np.median(rot_angle(np.einsum('nij,njk->nik', Ra[ok], Ma[ok]), np.einsum('nij,njk->nik', Rb[ok], Mb[ok])))
-                skin_txt = f"{sk.sum():>13d} {t_rec:>6.4f} {t_bone:>6.4f} {t_both:>6.4f}"
+                skin_txt = f"{sk.sum():>13d} {t_rec:>6.4f} {t_bone:>6.4f} {t_both:>6.4f} (palette {pi}, {ok.sum()} rotations)"
+                break
         print(f"{fa:>6d}->{fb:<6d} {turn:>6.4f}/{body.sum():<3d}| " + " | ".join(cells) + f" | {skin_txt}")
+    # THE AUX: the big non-pool instanced draws -- per consecutive frames, the turn of cb2's world rows
+    # (rows 2-4, the ones the dumped shaders multiply positions by) and what changed in t0 / the streams
+    if auxes:
+        print()
+        print("the big instanced draws that read no pool -- cb2's rows 2-4 as a rotation, its turn between consecutive crops; t0 and the streams: dwords changed")
+        vss = sorted(set(e['vs'] for fr in auxes.values() for e in fr))
+        for vs in vss:
+            line = []
+            for fa, fb in pairs:
+                ea = next((e for e in auxes.get(fa, []) if e['vs'] == vs), None)
+                eb = next((e for e in auxes.get(fb, []) if e['vs'] == vs), None)
+                if not ea or not eb: line.append("   -   "); continue
+                ca, cb = ea['bytes'][0], eb['bytes'][0]
+                if len(ca) >= 80 and len(cb) >= 80:
+                    Ma = np.frombuffer(ca, dtype=np.float32, count=48)[32:44].reshape(3, 4)[:, :3].astype(np.float64)
+                    Mb = np.frombuffer(cb, dtype=np.float32, count=48)[32:44].reshape(3, 4)[:, :3].astype(np.float64)
+                    # normalise the rows (a scale may ride along)
+                    na = np.linalg.norm(Ma, axis=1, keepdims=True); nb = np.linalg.norm(Mb, axis=1, keepdims=True)
+                    if na.min() > 1e-6 and nb.min() > 1e-6:
+                        D = (Mb / nb) @ (Ma / na).T
+                        tr = np.clip((np.trace(D) - 1) / 2, -1, 1)
+                        line.append(f"{math.degrees(math.acos(tr)):.4f}")
+                    else:
+                        line.append(" zero ")
+                else:
+                    line.append(" none ")
+            e0 = next((e for fr in auxes.values() for e in fr if e['vs'] == vs), None)
+            print(f"   {vs:016X} x{e0['instances']} n={e0['count']} cb2 {len(e0['bytes'][0])} B, t0 {len(e0['bytes'][1])} B stride {e0['stride'][1]}, vb0 {len(e0['bytes'][2])} B stride {e0['stride'][2]}, vb1 {len(e0['bytes'][3])} B stride {e0['stride'][3]}")
+            print("      cb2 rows 2-4 turn/pair: " + " ".join(line))
+            for what, name in ((1, "t0"), (2, "vb0"), (3, "vb1")):
+                ch = []
+                for fa, fb in pairs:
+                    ea = next((e for e in auxes.get(fa, []) if e['vs'] == vs), None)
+                    eb = next((e for e in auxes.get(fb, []) if e['vs'] == vs), None)
+                    if not ea or not eb or not ea['bytes'][what] or len(ea['bytes'][what]) != len(eb['bytes'][what]): ch.append("-"); continue
+                    da = np.frombuffer(ea['bytes'][what], dtype=np.uint32); db = np.frombuffer(eb['bytes'][what], dtype=np.uint32)
+                    ch.append(str(int((da != db).sum())))
+                if any(c != "-" for c in ch): print(f"      {name} dwords changed/pair: " + " ".join(ch))
+            # t0 as 48-byte matrices: the per-instance rotation between the first pair
+            if e0['stride'][1] == 48 and pairs:
+                fa, fb = pairs[0]
+                ea = next((e for e in auxes.get(fa, []) if e['vs'] == vs), None); eb = next((e for e in auxes.get(fb, []) if e['vs'] == vs), None)
+                if ea and eb and ea['bytes'][1] and len(ea['bytes'][1]) == len(eb['bytes'][1]):
+                    n = min(len(ea['bytes'][1]) // 48, e0['instances'])
+                    Ma = np.frombuffer(ea['bytes'][1], dtype=np.float32, count=n * 12).reshape(n, 3, 4)[:, :, :3].astype(np.float64)
+                    Mb = np.frombuffer(eb['bytes'][1], dtype=np.float32, count=n * 12).reshape(n, 3, 4)[:, :, :3].astype(np.float64)
+                    print(f"      t0 as {n} 3x4 matrices: per-instance turn {fa}->{fb} median {np.median(rot_angle(Ma, Mb)):.4f} deg; translation column median |d| {np.median(np.linalg.norm(np.frombuffer(eb['bytes'][1], dtype=np.float32, count=n*12).reshape(n,3,4)[:,:,3] - np.frombuffer(ea['bytes'][1], dtype=np.float32, count=n*12).reshape(n,3,4)[:,:,3], axis=1)):.3f}")
     # the draws by shader, first pair's first frame
     if pairs and pairs[0][0] in draws:
         f = pairs[0][0]

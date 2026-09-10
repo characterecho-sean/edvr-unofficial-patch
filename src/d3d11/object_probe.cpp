@@ -524,31 +524,77 @@ uint32_t g_ledgerFrame0 = 0, g_ledgerLastFrame = 0;
 int      g_ledgerCropFrame[kLedgerCrops];
 std::vector<uint8_t>    g_ledgerPool[kLedgerFrames];
 std::vector<uint8_t>    g_ledgerInst[kLedgerFrames];
-std::vector<uint8_t>    g_ledgerBones[kLedgerFrames];
 std::vector<LedgerDraw> g_ledgerDraws[kLedgerFrames];
 ID3D11Buffer* g_inst = nullptr;    // the instance stream, held (AddRef) while armed
 uint32_t g_instBytes = 0, g_instStride = 0;
-ID3D11Buffer* g_bones = nullptr;   // the bone palette at VS t38, held likewise
-uint32_t g_bonesBytes = 0, g_bonesStride = 0;
-LedgerCopy g_ledgerRing[2][kLedgerRing];   // [0] the instance stream's copies, [1] the palette's
+// The palettes: every distinct 48-byte structured buffer a pool draw binds
+// at t38 while armed, up to four (the first run's single copy, the 8 MB
+// one, read all zeros at the bases the hub's records carry: the census of
+// 2026-09-09 counted four such buffers, and the hub's is another).
+constexpr int kLedgerPalettes = 4;
+ID3D11Buffer* g_palette[kLedgerPalettes] = {};   // held while armed
+uint32_t g_paletteBytes[kLedgerPalettes] = {};
+int      g_paletteCount = 0;
+// [0] the instance stream's copies, [1..4] the palettes'
+LedgerCopy g_ledgerRing[1 + kLedgerPalettes][kLedgerRing];
+std::vector<uint8_t> g_ledgerPalette[kLedgerPalettes][kLedgerFrames];
 uint32_t g_ledgerSkipped = 0;
+// THE AUX CAPTURES: the big instanced draws that read no pool -- a station's
+// ring built of segments, its lights, a sprite batch -- placed by a world
+// matrix in their per-draw constant buffer (cb2, the rows the dumped
+// shaders multiply by) and per-instance data at t0 or in a vertex stream.
+// The first draw of each such shader in a frame has cb2, t0 and its first
+// two vertex buffers copied (kLedgerAuxBytes of each at most), for how each
+// turns from frame to frame.
+constexpr int      kLedgerAux = 8;            // shaders watched, in order of first appearance
+constexpr uint32_t kLedgerAuxMin = 50;        // instances a draw needs to be watched
+constexpr uint32_t kLedgerAuxBytes = 65536;   // of each buffer
+constexpr int      kAuxWhat = 4;              // cb2, t0, vb0, vb1
+struct AuxSlot {
+    uint64_t vs = 0;
+    uint32_t instances = 0, count = 0;
+    uint32_t stride[kAuxWhat] = {};   // t0's structure stride, the vertex buffers' strides
+    bool     seenThisFrame = false;
+    LedgerCopy ring[kAuxWhat][kLedgerRing];
+};
+AuxSlot g_aux[kLedgerAux];
+int     g_auxCount = 0;
+struct AuxFrame {   // one watched shader's buffers in one frame
+    uint64_t vs;
+    uint32_t instances, count;
+    uint32_t stride[kAuxWhat];
+    std::vector<uint8_t> bytes[kAuxWhat];
+};
+std::vector<AuxFrame> g_ledgerAux[kLedgerFrames];
+void releaseCopy(LedgerCopy& c) {
+    if (c.staging) c.staging->Release();
+    c.staging = nullptr;
+    c.bytes = 0;
+    c.inUse = false;
+}
 void ledgerRelease() {
     if (g_inst) g_inst->Release();
     g_inst = nullptr;
     g_instBytes = 0;
     g_instStride = 0;
-    if (g_bones) g_bones->Release();
-    g_bones = nullptr;
-    g_bonesBytes = 0;
-    g_bonesStride = 0;
+    for (int i = 0; i < kLedgerPalettes; ++i) {
+        if (g_palette[i]) g_palette[i]->Release();
+        g_palette[i] = nullptr;
+        g_paletteBytes[i] = 0;
+    }
+    g_paletteCount = 0;
     for (auto& ring : g_ledgerRing) {
-        for (LedgerCopy& c : ring) {
-            if (c.staging) c.staging->Release();
-            c.staging = nullptr;
-            c.bytes = 0;
-            c.inUse = false;
+        for (LedgerCopy& c : ring) releaseCopy(c);
+    }
+    for (AuxSlot& a : g_aux) {
+        a.vs = 0;
+        a.instances = a.count = 0;
+        a.seenThisFrame = false;
+        for (auto& ring : a.ring) {
+            for (LedgerCopy& c : ring) releaseCopy(c);
         }
     }
+    g_auxCount = 0;
 }
 std::vector<uint8_t> g_keep;        // the first frame of a pair, copied out of its staging buffer
 std::vector<uint8_t> g_keepScene;   // ...and its scene block
@@ -2328,7 +2374,7 @@ void ledgerLearn(ID3D11DeviceContext* ctx) {
             }
         }
     }
-    if (!g_bones) {
+    if (g_paletteCount < kLedgerPalettes) {
         ID3D11ShaderResourceView* srv = nullptr;
         ctx->VSGetShaderResources(38, 1, &srv);
         if (srv) {
@@ -2341,15 +2387,106 @@ void ledgerLearn(ID3D11DeviceContext* ctx) {
                     res->QueryInterface(__uuidof(ID3D11Buffer), reinterpret_cast<void**>(&buf));
                     res->Release();
                     if (buf) {
-                        g_bones = buf;
-                        g_bonesBytes = info.a;
-                        g_bonesStride = 48;
+                        bool known = false;
+                        for (int i = 0; i < g_paletteCount; ++i) known = known || g_palette[i] == buf;
+                        if (known) {
+                            buf->Release();
+                        } else {
+                            g_palette[g_paletteCount] = buf;   // the QueryInterface reference is the one held
+                            g_paletteBytes[g_paletteCount] = info.a;
+                            ++g_paletteCount;
+                        }
                     }
                 }
             }
             srv->Release();
         }
     }
+}
+
+// A watched shader's buffers, copied at its first draw of the frame: cb2
+// whole, t0 when it is a buffer, the first two vertex buffers -- each up to
+// kLedgerAuxBytes, into the slot's rings, read back at the boundary.
+bool auxStage(ID3D11DeviceContext* ctx, ID3D11Device*& dev, LedgerCopy* ring, ID3D11Buffer* src, uint32_t whole) {
+    const uint32_t bytes = whole < kLedgerAuxBytes ? whole : kLedgerAuxBytes;
+    if (!src || !bytes) return false;
+    LedgerCopy* c = nullptr;
+    for (int i = 0; i < kLedgerRing; ++i) {
+        if (!ring[i].inUse) { c = &ring[i]; break; }
+    }
+    if (!c) return false;
+    if (c->staging && c->bytes != bytes) releaseCopy(*c);
+    if (!c->staging) {
+        if (!dev) ctx->GetDevice(&dev);
+        if (!dev || !makeStaging(dev, bytes, &c->staging)) return false;
+        c->bytes = bytes;
+    }
+    if (bytes == whole) {
+        ctx->CopyResource(c->staging, src);
+    } else {
+        D3D11_BOX box{0, 0, 0, bytes, 1, 1};
+        ctx->CopySubresourceRegion(c->staging, 0, 0, 0, 0, src, 0, &box);
+    }
+    c->frame = g_frame + 1;   // this frame's, as ledgerNoteDraw counts it
+    c->inUse = true;
+    return true;
+}
+void auxCapture(ID3D11DeviceContext* ctx, uint64_t vs, uint32_t count, uint32_t instances) {
+    int slot = -1;
+    for (int i = 0; i < g_auxCount; ++i) {
+        if (g_aux[i].vs == vs) { slot = i; break; }
+    }
+    if (slot < 0) {
+        if (g_auxCount >= kLedgerAux) return;
+        slot = g_auxCount++;
+        g_aux[slot].vs = vs;
+    }
+    AuxSlot& a = g_aux[slot];
+    if (a.seenThisFrame) return;
+    a.seenThisFrame = true;
+    a.instances = instances;
+    a.count = count;
+    ID3D11Device* dev = nullptr;
+    ID3D11Buffer* cb = nullptr;
+    ctx->VSGetConstantBuffers(2, 1, &cb);
+    if (cb) {
+        D3D11_BUFFER_DESC bd{};
+        cb->GetDesc(&bd);
+        if (!auxStage(ctx, dev, a.ring[0], cb, bd.ByteWidth)) ++g_ledgerSkipped;
+        cb->Release();
+    }
+    ID3D11ShaderResourceView* srv = nullptr;
+    ctx->VSGetShaderResources(0, 1, &srv);
+    if (srv) {
+        ResourceInfo info;
+        if (bindingResolve(srv, &info) && info.isBuffer) {
+            ID3D11Resource* res = nullptr;
+            srv->GetResource(&res);
+            if (res) {
+                ID3D11Buffer* buf = nullptr;
+                res->QueryInterface(__uuidof(ID3D11Buffer), reinterpret_cast<void**>(&buf));
+                res->Release();
+                if (buf) {
+                    a.stride[1] = info.b;
+                    if (!auxStage(ctx, dev, a.ring[1], buf, info.a)) ++g_ledgerSkipped;
+                    buf->Release();
+                }
+            }
+        }
+        srv->Release();
+    }
+    ID3D11Buffer* vbs[2] = {};
+    UINT strides[2] = {}, offsets[2] = {};
+    ctx->IAGetVertexBuffers(0, 2, vbs, strides, offsets);
+    for (int i = 0; i < 2; ++i) {
+        if (!vbs[i]) continue;
+        D3D11_BUFFER_DESC bd{};
+        vbs[i]->GetDesc(&bd);
+        a.stride[2 + i] = strides[i];
+        if (!auxStage(ctx, dev, a.ring[2 + i], vbs[i], bd.ByteWidth)) ++g_ledgerSkipped;
+        vbs[i]->Release();
+    }
+    if (dev) dev->Release();
 }
 
 // One eye draw's row while armed. The pool question is asked of the context
@@ -2382,7 +2519,8 @@ void ledgerNoteDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count, uint32_
                 }
             }
             srv->Release();
-            if (d.pool && (!g_inst || !g_bones)) ledgerLearn(ctx);
+            if (d.pool && (!g_inst || g_paletteCount < kLedgerPalettes)) ledgerLearn(ctx);
+            if (!d.pool && instances >= kLedgerAuxMin) auxCapture(ctx, d.vs, count, instances);
         });
     }
     g_ledgerDraws[frame - g_ledgerFrame0].push_back(d);
@@ -2392,9 +2530,9 @@ void ledgerNoteDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count, uint32_
 // beside them), into their rings; the palette's first megabyte only.
 void ledgerIssue(ID3D11DeviceContext* ctx) {
     ID3D11Device* dev = nullptr;
-    for (int what = 0; what < 2; ++what) {
-        ID3D11Buffer* src = what == 0 ? g_inst : g_bones;
-        const uint32_t whole = what == 0 ? g_instBytes : g_bonesBytes;
+    for (int what = 0; what < 1 + kLedgerPalettes; ++what) {
+        ID3D11Buffer* src = what == 0 ? g_inst : g_palette[what - 1];
+        const uint32_t whole = what == 0 ? g_instBytes : g_paletteBytes[what - 1];
         const uint32_t bytes = what == 0 ? whole : (whole < kLedgerBonesMax ? whole : kLedgerBonesMax);
         if (!src || !bytes) continue;
         LedgerCopy* c = nullptr;
@@ -2426,23 +2564,55 @@ void ledgerIssue(ID3D11DeviceContext* ctx) {
 
 // The late readbacks, kept by frame; a copy still in flight past kDropAfter
 // is given up like the pool's.
+// One copy's readback: 1 read, 0 not ready yet, -1 given up.
+int ledgerRead(ID3D11DeviceContext* ctx, LedgerCopy& c, std::vector<uint8_t>* into) {
+    if (!c.inUse || g_frame - c.frame < kReadAfter) return 0;
+    D3D11_MAPPED_SUBRESOURCE m{};
+    const HRESULT hr = ctx->Map(c.staging, 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &m);
+    if (hr == DXGI_ERROR_WAS_STILL_DRAWING) {
+        if (g_frame - c.frame > kDropAfter) { c.inUse = false; ++g_ledgerSkipped; return -1; }
+        return 0;
+    }
+    if (FAILED(hr) || !m.pData) { c.inUse = false; ++g_ledgerSkipped; return -1; }
+    if (into) {
+        const uint8_t* b = static_cast<const uint8_t*>(m.pData);
+        into->assign(b, b + c.bytes);
+    }
+    ctx->Unmap(c.staging, 0);
+    c.inUse = false;
+    return 1;
+}
 void ledgerPoll(ID3D11DeviceContext* ctx) {
-    for (int what = 0; what < 2; ++what) {
+    for (int what = 0; what < 1 + kLedgerPalettes; ++what) {
         for (LedgerCopy& c : g_ledgerRing[what]) {
-            if (!c.inUse || g_frame - c.frame < kReadAfter) continue;
-            D3D11_MAPPED_SUBRESOURCE m{};
-            const HRESULT hr = ctx->Map(c.staging, 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &m);
-            if (hr == DXGI_ERROR_WAS_STILL_DRAWING) {
-                if (g_frame - c.frame > kDropAfter) { c.inUse = false; ++g_ledgerSkipped; }
-                continue;
+            const bool kept = c.inUse && c.frame >= g_ledgerFrame0 && c.frame <= g_ledgerLastFrame;
+            std::vector<uint8_t>* into =
+                !kept ? nullptr
+                      : (what == 0 ? &g_ledgerInst[c.frame - g_ledgerFrame0]
+                                   : &g_ledgerPalette[what - 1][c.frame - g_ledgerFrame0]);
+            ledgerRead(ctx, c, into);
+        }
+    }
+    for (int s = 0; s < g_auxCount; ++s) {
+        AuxSlot& a = g_aux[s];
+        for (int what = 0; what < kAuxWhat; ++what) {
+            for (LedgerCopy& c : a.ring[what]) {
+                if (!c.inUse) continue;
+                const bool kept = c.frame >= g_ledgerFrame0 && c.frame <= g_ledgerLastFrame;
+                std::vector<uint8_t> got;
+                const int r = ledgerRead(ctx, c, kept ? &got : nullptr);
+                if (r != 1 || !kept) continue;
+                std::vector<AuxFrame>& fr = g_ledgerAux[c.frame - g_ledgerFrame0];
+                AuxFrame* e = nullptr;
+                for (AuxFrame& f : fr) {
+                    if (f.vs == a.vs) { e = &f; break; }
+                }
+                if (!e) {
+                    fr.push_back(AuxFrame{a.vs, a.instances, a.count, {a.stride[0], a.stride[1], a.stride[2], a.stride[3]}, {}});
+                    e = &fr.back();
+                }
+                e->bytes[what].swap(got);
             }
-            if (FAILED(hr) || !m.pData) { c.inUse = false; ++g_ledgerSkipped; continue; }
-            if (c.frame >= g_ledgerFrame0 && c.frame <= g_ledgerLastFrame) {
-                const uint8_t* b = static_cast<const uint8_t*>(m.pData);
-                (what == 0 ? g_ledgerInst : g_ledgerBones)[c.frame - g_ledgerFrame0].assign(b, b + c.bytes);
-            }
-            ctx->Unmap(c.staging, 0);
-            c.inUse = false;
         }
     }
 }
@@ -2468,7 +2638,7 @@ void writeLedger() {
         g_dumpDirMade = true;
         CreateDirectoryW(dir.c_str(), nullptr);
     }
-    int pools = 0, insts = 0, bones = 0;
+    int pools = 0, insts = 0, bones = 0, auxes = 0;
     wchar_t path[MAX_PATH];
     for (int i = 0; i < kLedgerFrames; ++i) {
         const uint32_t frame = g_ledgerFrame0 + static_cast<uint32_t>(i);
@@ -2478,7 +2648,43 @@ void writeLedger() {
             ++pools;
         }
         if (!g_ledgerInst[i].empty() && writeRaw(dir.c_str(), L"inst", frame, g_ledgerInst[i], path, MAX_PATH)) ++insts;
-        if (!g_ledgerBones[i].empty() && writeRaw(dir.c_str(), L"bones", frame, g_ledgerBones[i], path, MAX_PATH)) ++bones;
+        for (int p = 0; p < g_paletteCount; ++p) {
+            wchar_t prefix[16];
+            _snwprintf_s(prefix, 16, _TRUNCATE, L"bones%d", p);
+            if (!g_ledgerPalette[p][i].empty() &&
+                writeRaw(dir.c_str(), prefix, frame, g_ledgerPalette[p][i], path, MAX_PATH)) {
+                ++bones;
+            }
+        }
+        // The aux file: a header, then per watched shader its identity, the
+        // four buffers' sizes and strides, and the bytes.
+        if (!g_ledgerAux[i].empty()) {
+            _snwprintf_s(path, MAX_PATH, _TRUNCATE, L"%s\\aux_%s_%u.bin", dir.c_str(), g_ledgerStamp, frame);
+            HANDLE h = CreateFileW(path, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+            if (h != INVALID_HANDLE_VALUE) {
+                DWORD w = 0;
+                struct AuxHeader { char magic[8]; uint32_t version, frame, entries, pad; };
+                AuxHeader ah = {{'E', 'D', 'V', 'R', 'L', 'A', 'U', 'X'}, 1u, frame,
+                                static_cast<uint32_t>(g_ledgerAux[i].size()), 0u};
+                bool ok = WriteFile(h, &ah, sizeof(ah), &w, nullptr) != 0;
+                for (const AuxFrame& f : g_ledgerAux[i]) {
+                    struct Entry { uint64_t vs; uint32_t instances, count, bytes[kAuxWhat], stride[kAuxWhat]; };
+                    Entry e = {f.vs, f.instances, f.count, {}, {}};
+                    for (int k = 0; k < kAuxWhat; ++k) {
+                        e.bytes[k] = static_cast<uint32_t>(f.bytes[k].size());
+                        e.stride[k] = f.stride[k];
+                    }
+                    ok = ok && WriteFile(h, &e, sizeof(e), &w, nullptr) != 0;
+                    for (int k = 0; ok && k < kAuxWhat; ++k) {
+                        if (!f.bytes[k].empty()) {
+                            ok = WriteFile(h, f.bytes[k].data(), static_cast<DWORD>(f.bytes[k].size()), &w, nullptr) != 0;
+                        }
+                    }
+                }
+                CloseHandle(h);
+                if (ok) ++auxes;
+            }
+        }
     }
     struct Header {
         char     magic[8];
@@ -2492,7 +2698,7 @@ void writeLedger() {
     };
     static_assert(sizeof(Header) == 160, "tools/eye_run_ledger.py reads a 160-byte header");
     Header hd = {{'E', 'D', 'V', 'R', 'L', 'D', 'G', 'R'}, 1u, static_cast<uint32_t>(kLedgerFrames), g_ledgerFrame0,
-                 g_instStride, g_bonesStride, g_poolBytes, {}};
+                 g_instStride, 48u, g_poolBytes, {}};   // the palettes are 48-byte rows
     memcpy(hd.crop, g_ledgerCropFrame, sizeof(hd.crop));
     _snwprintf_s(path, MAX_PATH, _TRUNCATE, L"%s\\draws_%s.bin", dir.c_str(), g_ledgerStamp);
     HANDLE h = CreateFileW(path, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -2519,23 +2725,37 @@ void writeLedger() {
         if (first < 0) first = k;
         last = k;
     }
+    char pal[160] = "";
+    for (int p = 0; p < g_paletteCount; ++p) {
+        char one[40];
+        _snprintf_s(one, sizeof(one), _TRUNCATE, "%s%u", p ? ", " : "", g_paletteBytes[p]);
+        strncat_s(pal, one, _TRUNCATE);
+    }
+    char aux[400] = "";
+    for (int s = 0; s < g_auxCount; ++s) {
+        char one[60];
+        _snprintf_s(one, sizeof(one), _TRUNCATE, "%s%016llX x%u", s ? ", " : "",
+                    static_cast<unsigned long long>(g_aux[s].vs), g_aux[s].instances);
+        strncat_s(aux, one, _TRUNCATE);
+    }
     Log::get().note(
         "object probe: the eye run's LEDGER is on disk beside its crops -- %d frames from %u: %d pool copies "
         "(pool_%ls_<frame>.bin), %d instance streams (inst_%ls_<frame>.bin, %u bytes, stride %u), %d palette "
-        "copies (bones_%ls_<frame>.bin, the first %u of %u bytes, stride %u) and %u eye draws in draws_%ls.bin%s; "
-        "the crops C%02d..C%02d were frames %d..%d. tools/eye_run_ledger.py reads them: which records each draw "
-        "took from the pool, how far each turned between consecutive crops, and how the bones moved. %u copies "
-        "were skipped.",
+        "copies of %d palettes of [%s] bytes (bones<p>_%ls_<frame>.bin, the first %u bytes of each), %d aux files "
+        "(aux_%ls_<frame>.bin: cb2, t0 and the first two vertex buffers of the %d shaders drawing %u+ instances "
+        "with no pool: [%s]) and %u eye draws in draws_%ls.bin%s; the crops C%02d..C%02d were frames %d..%d. "
+        "tools/eye_run_ledger.py reads them. %u copies were skipped.",
         kLedgerFrames, g_ledgerFrame0, pools, g_ledgerStamp, insts, g_ledgerStamp, g_instBytes, g_instStride, bones,
-        g_ledgerStamp, g_bonesBytes < kLedgerBonesMax ? g_bonesBytes : kLedgerBonesMax, g_bonesBytes, g_bonesStride,
+        g_paletteCount, pal, g_ledgerStamp, kLedgerBonesMax, auxes, g_ledgerStamp, g_auxCount, kLedgerAuxMin, aux,
         rows, g_ledgerStamp, drawsOk ? "" : " (the draws file FAILED to write)", first < 0 ? 0 : first,
         last < 0 ? 0 : last, first < 0 ? -1 : g_ledgerCropFrame[first], last < 0 ? -1 : g_ledgerCropFrame[last],
         g_ledgerSkipped);
     for (int i = 0; i < kLedgerFrames; ++i) {
         std::vector<uint8_t>().swap(g_ledgerPool[i]);
         std::vector<uint8_t>().swap(g_ledgerInst[i]);
-        std::vector<uint8_t>().swap(g_ledgerBones[i]);
+        for (int p = 0; p < kLedgerPalettes; ++p) std::vector<uint8_t>().swap(g_ledgerPalette[p][i]);
         std::vector<LedgerDraw>().swap(g_ledgerDraws[i]);
+        std::vector<AuxFrame>().swap(g_ledgerAux[i]);
     }
     g_ledgerOn = false;
     ledgerRelease();
@@ -2843,6 +3063,7 @@ void objectProbeFrameBoundary(ID3D11DeviceContext* ctx) {
             if (g_ledgerOn) {
                 if (g_frame <= g_ledgerLastFrame) ledgerIssue(ctx);
                 ledgerPoll(ctx);
+                for (AuxSlot& a : g_aux) a.seenThisFrame = false;   // the next frame's first draw of each
                 if (g_frame > g_ledgerLastFrame + kReadAfter + kDropAfter) writeLedger();
             }
         } else if (++g_framesWithoutPool == kAbsentFrames && !g_absentNoted && g_verbose) {
@@ -2870,8 +3091,9 @@ void objectProbeArmLedger(const wchar_t* stamp) {
     for (int i = 0; i < kLedgerFrames; ++i) {
         g_ledgerPool[i].clear();
         g_ledgerInst[i].clear();
-        g_ledgerBones[i].clear();
+        for (int p = 0; p < kLedgerPalettes; ++p) g_ledgerPalette[p][i].clear();
         g_ledgerDraws[i].clear();
+        g_ledgerAux[i].clear();
     }
     g_ledgerSkipped = 0;
     ledgerRelease();

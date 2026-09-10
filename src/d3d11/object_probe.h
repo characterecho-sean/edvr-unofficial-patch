@@ -63,12 +63,18 @@ void objectProbeOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count, u
 // that takes the run also arms this: for the same frames, every frame's
 // pool copy is kept; the scene's instance stream (the per-instance record
 // indices every pool draw reads, 8 bytes each) and the first megabyte of
-// the bone palette at VS t38 are copied and kept; and every eye draw is
-// noted with its shader, its counts, its start instance and whether t33
-// was the pool -- all written beside the crops after the run, for
+// every bone palette the pool draws bind at VS t38 (up to four) are copied
+// and kept; every eye draw is noted with its shader, its counts, its start
+// instance and whether t33 was the pool; and the big instanced draws that
+// read no pool (the first run's ledger, 05:19: the whole station's records
+// were drawn and turned as one, so the slow ring is drawn by something
+// else -- a ring of segments placed by a world matrix, say) have their
+// per-draw constant buffer, t0 and first two vertex buffers copied at each
+// frame's first draw -- all written beside the crops after the run, for
 // tools/eye_run_ledger.py: which records were drawn, how far each turned
-// between consecutive crops, and how the bones moved. Nothing of it runs
-// unarmed. stamp is the run's HHMMSS, shared with the crops' names.
+// between consecutive crops, how the bones moved, and how each of those
+// draws' matrices turned. Nothing of it runs unarmed. stamp is the run's
+// HHMMSS, shared with the crops' names.
 void objectProbeArmLedger(const wchar_t* stamp);
 // The pass took the run's crop k this frame: the ledger notes the frame.
 void objectProbeLedgerMark(int k);
