@@ -1788,6 +1788,15 @@ uint64_t g_bodyPix = 0;    // pixels that took the body's path this interval (St
 uint64_t g_body2Pix = 0;   // ...the second body's (Stats[46]; object_probe.h, 2026-09-09)
 uint64_t g_body2Frames = 0;   // frames the second body's path was on
 uint64_t g_steppedPix = 0;    // ...a stepped part's (Stats[47]; object_probe.h, 2026-09-09)
+// The stamps are OFF (2026-09-09 18:22, the thirty-seventh flight): the
+// objects view had the hub white with orange specks -- the stamped cells
+// miss the hub's visible pixels -- and the multiples they carry are the
+// pool records' jitter, not what is drawn: the hub's records jitter in
+// place a third of a degree either way, frame about, with no net turn,
+// while the drawn hub turns by a skinning bone the pool never shows. The
+// tracking stays for the 20 s line until the hub's own motion is measured
+// from an eye run (kEyeRun).
+constexpr bool kSteppedStampOn = false;
 uint64_t g_steppedCellPix = 0;   // pixels whose cell was a stepped part's (Stats[48])...
 uint64_t g_steppedOffPix = 0;    // ...and whose path was refused there (Stats[49])
 uint64_t g_steppedFrames = 0; // frames with stepped cells stamped
@@ -2057,6 +2066,23 @@ uint32_t g_bodyShiftUsed = 0;      // frames carried over by the shift this inte
 bool     g_eyeDumpArmed[2] = {false, false};
 uint32_t g_eyeDumps = 0;
 bool     g_eyeDumpDirMade = false;
+// THE EYE RUN (2026-09-09, the thirty-seventh flight): the dump key takes
+// four consecutive frames of the left eye, each copied to a staging
+// texture as it goes out and all written after the fourth, so the frames
+// are the game's own consecutive ones -- a write's hitch between captures
+// would space them by two hundred milliseconds. What the docking hub
+// actually does from one frame to the next is not in the instance pool:
+// its records jitter in place by a third of a degree either way while the
+// drawn hub turns by a skinning bone the pool never shows (the pool's
+// vertex shaders read a 48-byte bone palette at t0 under the record's
+// quaternion), so it has to be measured from the picture.
+constexpr int    kEyeRun = 4;
+ID3D11Texture2D* g_eyeRunStaging[kEyeRun] = {};
+int              g_eyeRunLeft = 0;    // captures still to take
+int              g_eyeRunTaken = 0;
+wchar_t          g_eyeRunStamp[16] = L"";
+bool writeEyeBmp(ID3D11DeviceContext* ctx, ID3D11Texture2D* st, const D3D11_TEXTURE2D_DESC& d, int eye,
+                 const wchar_t* pathIn);
 
 float halfToFloat(uint16_t h) {
     const uint32_t s = (h >> 15) & 1u, e = (h >> 10) & 0x1Fu, m = h & 0x3FFu;
@@ -2100,11 +2126,18 @@ void dumpEye(ID3D11DeviceContext* ctx, ID3D11Texture2D* tex, int eye) {
         return;
     }
     ctx->CopySubresourceRegion(st, 0, 0, 0, 0, tex, 0, nullptr);
+    writeEyeBmp(ctx, st, d, eye, nullptr);
+    st->Release();
+}
+
+// The staging copy's pixels to a BMP: the given path, or the timestamped
+// one (eye_HHMMSS_L.bmp). The staging texture is the caller's to release.
+bool writeEyeBmp(ID3D11DeviceContext* ctx, ID3D11Texture2D* st, const D3D11_TEXTURE2D_DESC& d, int eye,
+                 const wchar_t* pathIn) {
     D3D11_MAPPED_SUBRESOURCE ms{};
     if (FAILED(ctx->Map(st, 0, D3D11_MAP_READ, 0, &ms))) {
-        st->Release();
         Log::get().note("temporal aa: the eye dump could not map its staging copy; nothing written.");
-        return;
+        return false;
     }
     const uint32_t w = d.Width, h = d.Height;
     const uint32_t rowBytes = (w * 3u + 3u) & ~3u;
@@ -2173,11 +2206,10 @@ void dumpEye(ID3D11DeviceContext* ctx, ID3D11Texture2D* tex, int eye) {
         }
     }
     ctx->Unmap(st, 0);
-    st->Release();
     if (!known) {
         Log::get().note("temporal aa: the eye dump cannot read DXGI format %d; nothing written.",
                         static_cast<int>(d.Format));
-        return;
+        return false;
     }
     const std::wstring dir = Log::get().dir() + L"\\eyes";
     if (!g_eyeDumpDirMade) {
@@ -2187,13 +2219,17 @@ void dumpEye(ID3D11DeviceContext* ctx, ID3D11Texture2D* tex, int eye) {
     SYSTEMTIME stm{};
     GetLocalTime(&stm);
     wchar_t path[MAX_PATH];
-    _snwprintf_s(path, MAX_PATH, _TRUNCATE, L"%s\\eye_%02u%02u%02u_%c.bmp", dir.c_str(),
-                 static_cast<unsigned>(stm.wHour), static_cast<unsigned>(stm.wMinute),
-                 static_cast<unsigned>(stm.wSecond), eye == 0 ? L'L' : L'R');
+    if (pathIn) {
+        wcsncpy_s(path, MAX_PATH, pathIn, _TRUNCATE);
+    } else {
+        _snwprintf_s(path, MAX_PATH, _TRUNCATE, L"%s\\eye_%02u%02u%02u_%c.bmp", dir.c_str(),
+                     static_cast<unsigned>(stm.wHour), static_cast<unsigned>(stm.wMinute),
+                     static_cast<unsigned>(stm.wSecond), eye == 0 ? L'L' : L'R');
+    }
     HANDLE f = CreateFileW(path, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (f == INVALID_HANDLE_VALUE) {
         Log::get().note("temporal aa: the eye dump could not open %ls for writing.", path);
-        return;
+        return false;
     }
     const uint32_t bytes = rowBytes * h;
     BITMAPFILEHEADER fh{};
@@ -2217,6 +2253,67 @@ void dumpEye(ID3D11DeviceContext* ctx, ID3D11Texture2D* tex, int eye) {
     Log::get().note("temporal aa: eye %d dumped to %ls -- %ux%u, DXGI format %d, the treated frame as the "
                     "compositor receives it%s.",
                     eye, path, w, h, static_cast<int>(d.Format), ok ? "" : " (the write FAILED)");
+    return ok;
+}
+
+// THE EYE RUN's capture (kEyeRun says why): this frame's left eye into the
+// next staging slot, a copy and nothing more; the fourth writes them all.
+void captureEyeRun(ID3D11DeviceContext* ctx, ID3D11Texture2D* tex) {
+    D3D11_TEXTURE2D_DESC d{};
+    tex->GetDesc(&d);
+    const int k = g_eyeRunTaken;
+    if (k < 0 || k >= kEyeRun) { g_eyeRunLeft = 0; return; }
+    if (g_eyeRunStaging[k]) {
+        D3D11_TEXTURE2D_DESC sd{};
+        g_eyeRunStaging[k]->GetDesc(&sd);
+        if (sd.Width != d.Width || sd.Height != d.Height || sd.Format != d.Format) {
+            g_eyeRunStaging[k]->Release();
+            g_eyeRunStaging[k] = nullptr;
+        }
+    }
+    if (!g_eyeRunStaging[k]) {
+        ID3D11Device* dev = nullptr;
+        ctx->GetDevice(&dev);
+        if (!dev) { g_eyeRunLeft = 0; return; }
+        D3D11_TEXTURE2D_DESC sd = d;
+        sd.Usage = D3D11_USAGE_STAGING;
+        sd.BindFlags = 0;
+        sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        sd.MiscFlags = 0;
+        sd.MipLevels = 1;
+        sd.ArraySize = 1;
+        const HRESULT hr = dev->CreateTexture2D(&sd, nullptr, &g_eyeRunStaging[k]);
+        dev->Release();
+        if (FAILED(hr) || !g_eyeRunStaging[k]) {
+            g_eyeRunStaging[k] = nullptr;
+            g_eyeRunLeft = 0;
+            Log::get().note("temporal aa: the eye run could not make its staging copy (0x%08lX); nothing written.",
+                            static_cast<unsigned long>(hr));
+            return;
+        }
+    }
+    ctx->CopySubresourceRegion(g_eyeRunStaging[k], 0, 0, 0, 0, tex, 0, nullptr);
+    ++g_eyeRunTaken;
+    --g_eyeRunLeft;
+    if (g_eyeRunLeft > 0) return;
+    const std::wstring dir = Log::get().dir() + L"\\eyes";
+    if (!g_eyeDumpDirMade) {
+        g_eyeDumpDirMade = true;
+        CreateDirectoryW(dir.c_str(), nullptr);
+    }
+    int wrote = 0;
+    for (int i = 0; i < g_eyeRunTaken; ++i) {
+        wchar_t path[MAX_PATH];
+        _snwprintf_s(path, MAX_PATH, _TRUNCATE, L"%s\\eye_%s_L%d.bmp", dir.c_str(), g_eyeRunStamp, i);
+        D3D11_TEXTURE2D_DESC sd{};
+        g_eyeRunStaging[i]->GetDesc(&sd);
+        if (writeEyeBmp(ctx, g_eyeRunStaging[i], sd, 0, path)) ++wrote;
+    }
+    Log::get().note("temporal aa: an eye run of %d consecutive frames of the left eye is on disk "
+                    "(eye_%ls_L0..%d.bmp), the frames the game drew in a row, for what a part does from one "
+                    "to the next.",
+                    wrote, g_eyeRunStamp, g_eyeRunTaken - 1);
+    g_eyeRunTaken = 0;
 }
 // The body's occupancy grid on the GPU (object_probe.h): one for both
 // eyes, uploaded when the probe's version moves.
@@ -3562,8 +3659,10 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                 {
                     const SteppedCell* cells = nullptr;
                     const uint32_t nCells = objectSteppedCells(&cells);
-                    applySteppedCells(ctx, om, cells, nCells);
-                    if (nCells) ++g_steppedFrames;
+                    if (kSteppedStampOn) {
+                        applySteppedCells(ctx, om, cells, nCells);
+                        if (nCells) ++g_steppedFrames;
+                    }
                 }
                 bodyOn = true;
                 g_bodyLast = om;
@@ -4791,6 +4890,9 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         g_eyeDumpArmed[eye] = false;
         dumpEye(ctx, static_cast<ID3D11Texture2D*>(result), eye);
     }
+    if (result && ctx && eye == 0 && g_eyeRunLeft > 0) {
+        captureEyeRun(ctx, static_cast<ID3D11Texture2D*>(result));
+    }
     if (ctx) ctx->Release();
     if (dev) dev->Release();
     src->Release();
@@ -5444,6 +5546,11 @@ void temporalPassShutdown() {
     for (EyeState& e : g_eye) releaseEye(e);
     for (Slot& q : g_slots) releaseSlot(q);
     if (g_bodyGridSrv) { g_bodyGridSrv->Release(); g_bodyGridSrv = nullptr; }
+    for (int k = 0; k < kEyeRun; ++k) {
+        if (g_eyeRunStaging[k]) { g_eyeRunStaging[k]->Release(); g_eyeRunStaging[k] = nullptr; }
+    }
+    g_eyeRunLeft = 0;
+    g_eyeRunTaken = 0;
     if (g_bodyGrid) { g_bodyGrid->Release(); g_bodyGrid = nullptr; }
     if (g_statsUav) { g_statsUav->Release(); g_statsUav = nullptr; }
     if (g_stats) { g_stats->Release(); g_stats = nullptr; }
@@ -5472,7 +5579,15 @@ bool temporalPassPlanes(float* nearZ, float* farZ) {
 }
 
 void temporalPassArmEyeDump() {
-    g_eyeDumpArmed[0] = g_eyeDumpArmed[1] = true;
+    // The key takes a RUN of the left eye (kEyeRun says why), not a pair of
+    // single frames; a run already under way is left to finish.
+    if (g_eyeRunLeft > 0) return;
+    SYSTEMTIME stm{};
+    GetLocalTime(&stm);
+    _snwprintf_s(g_eyeRunStamp, 16, _TRUNCATE, L"%02u%02u%02u", static_cast<unsigned>(stm.wHour),
+                 static_cast<unsigned>(stm.wMinute), static_cast<unsigned>(stm.wSecond));
+    g_eyeRunTaken = 0;
+    g_eyeRunLeft = kEyeRun;
 }
 
 float temporalPassDepthAt(float metres) {
