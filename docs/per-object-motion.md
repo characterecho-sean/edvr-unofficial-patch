@@ -2642,6 +2642,29 @@ which is this project's contract for every read of the game.
    pass reprojecting them by a table of twelve composite deltas, one per
    multiple. Built as v0.14.1-126-g79bd1b8; the 20 s probe line says how many
    parts step, in what pattern, and how often the prediction was right.
+
+   *The thirty-sixth flight, 18:00 (v0.14.1-126)*: "no change to my eye."
+   A short session -- the station in the pool from 18:01:50, the census
+   and the dump at 18:02:12, the game closed at 18:02:21. The 20 s line
+   had the machinery running: 86 stepped records a frame, 55 of them with
+   a period of two, the next multiple predicted right on 97% of 2206
+   checks, 0.16 ms a frame, cells stamped on every frame. And the
+   registration line: the stepped parts took 0.00% of pixels. The stamps
+   were made and no pixel took the path -- either they sit where no pixel
+   with depth lands, or the path refuses them. The pairs on disk cannot
+   say: two are from before the station loaded and the last caught the
+   game frozen at exit, every record still. So this build asks instead:
+   two counters straight from the shader, the pixels whose cell was
+   stamped and those the path refused; the tracker compares each record
+   with the last frame it was live (an absent frame is its pose held), a
+   floor under the axis slack for the quaternion's quantum (357 records a
+   frame had been turning "off the axis", the body's own parts in the
+   quantum's noise), periods of one to four frames, the multiples'
+   histogram and a sample of six stepped slots with their histories in
+   the 20 s line, and beside each pair dump the last four consecutive
+   frames, for what a two-frame pair cannot show. Built as
+   v0.14.1-130-g03e84b2; the next flight's objects view, orange or not, and
+   those counters decide where the fault is.
 4. **Tier 2b** only if question 1 says no bits.
 5. **Tier 3** as `tools/` work against dumped frames, never on the hot
    path.
