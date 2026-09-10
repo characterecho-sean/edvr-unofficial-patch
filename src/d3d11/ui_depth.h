@@ -110,6 +110,7 @@
 
 struct ID3D11DeviceContext;
 struct ID3D11Texture2D;
+struct ID3D11ShaderResourceView;
 
 namespace edvr {
 
