@@ -283,6 +283,7 @@ cl.exe %CFLAGS% %NGXFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\exposure_fix.cpp" "src\d3d11\vscreen.cpp" ^
     "src\d3d11\glitch_frame.cpp" "src\d3d11\vscreen_res.cpp" ^
     "src\d3d11\binding_shadow.cpp" "src\d3d11\head_offset_gate.cpp" ^
+    "src\d3d11\vr_runtime.cpp" ^
     "src\d3d11\camera_view.cpp" "src\d3d11\journal_watch.cpp" ^
     "src\d3d11\elite_binds.cpp" "src\d3d11\draw_census.cpp" ^
     "src\d3d11\object_probe.cpp" ^
@@ -582,7 +583,8 @@ if not exist "%OBJ%\gatetest" mkdir "%OBJ%\gatetest"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\gatetest"\ /Fe"%BUILD%\gate_test.exe" ^
     "tools\gate_test\gate_test.cpp" ^
-    "src\d3d11\head_offset_gate.cpp" "src\common\config.cpp" ^
+    "src\d3d11\head_offset_gate.cpp" "src\d3d11\vr_runtime.cpp" ^
+    "src\common\config.cpp" ^
     "src\common\log.cpp" "src\common\frame_flag.cpp" ^
     "src\d3d11\camera_view.cpp" "src\common\guard.cpp" ^
     "src\common\proxy.cpp" "src\d3d11\journal_watch.cpp" ^
@@ -602,7 +604,8 @@ if not exist "%OBJ%\glitchtest" mkdir "%OBJ%\glitchtest"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\glitchtest"\ ^
     /Fe"%BUILD%\glitch_test.exe" "tools\glitch_test\glitch_test.cpp" ^
-    "src\d3d11\glitch_frame.cpp" "src\common\config.cpp" ^
+    "src\d3d11\glitch_frame.cpp" "src\d3d11\vr_runtime.cpp" ^
+    "src\common\config.cpp" ^
     "src\common\frame_flag.cpp" "src\common\log.cpp" ^
     /link /INCREMENTAL:NO kernel32.lib
 if errorlevel 1 ( echo [edvr] ERROR: glitch_test build failed & exit /b 1 )
@@ -721,6 +724,37 @@ if exist "%BUILD%\openvr_api.dll" (
     )
 )
 
+echo [edvr] === vr_runtime_test.exe ===
+REM Which VR back end the process is REALLY on, checked against the real DLLs
+REM this build just made. Guards the failure that made the module exist: a
+REM perfect install the game never opened, and eight log lines telling its
+REM owner the file was missing. Skipped when the openvr proxy was not built,
+REM because ours-versus-theirs needs one of ours to point at.
+if not exist "%OBJ%\vrruntimetest" mkdir "%OBJ%\vrruntimetest"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\vrruntimetest"\ ^
+    /Fe"%BUILD%\vr_runtime_test.exe" "tools\vr_runtime_test\vr_runtime_test.cpp" ^
+    "src\d3d11\vr_runtime.cpp" "src\common\log.cpp" ^
+    "src\common\config.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib version.lib
+if errorlevel 1 ( echo [edvr] ERROR: vr_runtime_test build failed & exit /b 1 )
+if exist "%BUILD%\openvr_api.dll" (
+    if not exist "%BUILD%\vrscratch_ours" mkdir "%BUILD%\vrscratch_ours"
+    if not exist "%BUILD%\vrscratch_foreign" mkdir "%BUILD%\vrscratch_foreign"
+    REM fakevr.dll under the name openvr_api.dll IS what a foreign one looks
+    REM like from here: right name, no edvr_selftest_system_hook export.
+    if not exist "%BUILD%\vrforeign" mkdir "%BUILD%\vrforeign"
+    copy /Y "%BUILD%\fakevr.dll" "%BUILD%\vrforeign\openvr_api.dll" >nul
+    "%BUILD%\vr_runtime_test.exe" "%BUILD%\vrscratch_ours" ours "%BUILD%\openvr_api.dll" || (
+        echo [edvr] ERROR: the VR runtime verdict is wrong for our own openvr_api.dll
+        exit /b 1
+    )
+    "%BUILD%\vr_runtime_test.exe" "%BUILD%\vrscratch_foreign" foreign "%BUILD%\vrforeign\openvr_api.dll" || (
+        echo [edvr] ERROR: the VR runtime verdict is wrong for a foreign openvr_api.dll
+        exit /b 1
+    )
+)
+
 REM Do the code, edvr.ini and the log messages agree about setting names?
 REM
 REM Three settings were read from the wrong section for the whole of 0.5.x and
@@ -799,6 +833,39 @@ python "tools\diff_eye_split.py" --self-test || (
     exit /b 1
 )
 
+echo [edvr] === install self-test ===
+REM The tool that puts a build next to the game. Its --dry-run must write
+REM NOTHING -- not a copy, not a backup, not a directory -- and its backup
+REM naming is one string in one place, which is what keeps the game
+REM directories from filling with .bak files named six different ways. The
+REM test asserts both, against a fake game directory in the temp folder.
+python "tools\install_edvr.py" --self-test || (
+    echo [edvr] ERROR: the install tool failed its own test
+    exit /b 1
+)
+
+echo [edvr] === log reader self-test ===
+REM The tool that answers "is this log from the build I just installed"
+REM before anybody reads a counter off it. Its version regex has to match
+REM the line Log::note() really writes, timestamp prefix and all: anchored
+REM without that prefix it matched the synthetic logs in its own test and
+REM nothing whatsoever in the field. Its fixtures now carry the prefix.
+python "tools\edvr_log.py" --self-test || (
+    echo [edvr] ERROR: the log reader failed its own test
+    exit /b 1
+)
+
+echo [edvr] === release-note reflow self-test ===
+REM The tool that reflows release notes and docs. It must leave fenced
+REM code, tables and long URLs exactly as they are, must be idempotent --
+REM otherwise --check can never pass -- and must write UTF-8 with no BOM,
+REM because PowerShell 5.1 reads a BOM-less file as the ANSI codepage and
+REM has turned an em-dash into mojibake on a published comment before.
+python "tools\reflow_notes.py" --self-test || (
+    echo [edvr] ERROR: the reflow tool failed its own test
+    exit /b 1
+)
+
 echo [edvr] === config contract ===
 where python >nul 2>&1
 if errorlevel 1 (
@@ -821,11 +888,27 @@ if exist "%BUILD%\nvngx_dlss.dll" (
     echo        above says where it looked^). Not a release build.
 )
 echo.
-echo [edvr] To install: copy build\d3d11.dll and edvr.ini next to
-echo        EliteDangerous64.exe, and build\openvr_api.dll into
-echo        Openvr\win64, replacing the game's file of that name --
-echo        the original must already be renamed openvr_api_orig.dll.
-echo        The two halves do NOT go in the same place. See README.md.
+echo [edvr] To install this build for a test flight:
+echo        python tools\install_edvr.py --target steam --dry-run
+echo        python tools\install_edvr.py --target steam
+echo.
+echo        --target takes steam, frontier or a path; --openvr adds the VR
+echo        half. It refuses while the game is running, keeps one backup
+echo        per commit, and hashes what it copied against what it built --
+echo        an outdated DLL has invalidated a flight before. It leaves
+echo        edvr.ini alone unless --ini asks for it. Copying these by hand
+echo        is what filled both game directories with backups named four
+echo        different ways; CLAUDE.md says why not to.
+echo.
+echo [edvr] Where those files land, because the two halves do NOT go in the
+echo        same place: d3d11.dll and edvr.ini beside EliteDangerous64.exe,
+echo        and openvr_api.dll into Openvr\win64, replacing the game's file
+echo        of that name -- whose original must already be renamed
+echo        openvr_api_orig.dll. See README.md.
+echo.
+echo [edvr] After the flight, before reading a counter off the log --
+echo        whether the log is even this build:
+echo        python tools\edvr_log.py --target steam --expect-build HEAD
 echo.
 echo [edvr] Or hand somebody build\edvr-installer.exe: it carries the two
 echo        DLLs and edvr.ini, finds Steam, Epic and Frontier installs,

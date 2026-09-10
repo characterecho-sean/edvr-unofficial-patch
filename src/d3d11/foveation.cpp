@@ -15,6 +15,7 @@
 
 #include "../common/config.h"
 #include "../common/frame_flag.h"
+#include "vr_runtime.h"
 #include "../common/guard.h"
 #include "../common/log.h"
 #include "binding_shadow.h"
@@ -1893,8 +1894,9 @@ void foveationFrameBoundary(ID3D11DeviceContext* ctx) {
         if (!g_noTangentNoted && g_noTangentFrames >= 600) {
             g_noTangentNoted = true;
             Log::get().note("foveation: %u frames and the openvr half has published no eye tangents to "
-                            "centre the image on (no openvr_api.dll installed, or an older one). The "
-                            "image stays unbound until they arrive.", g_noTangentFrames);
+                            "centre the image on -- %s. The image stays unbound until they arrive.",
+                            g_noTangentFrames, vrRuntimeShortWhy());
+            vrRuntimeExplainOnce();
         }
     }
     settleEyesByOrder();
@@ -1919,9 +1921,10 @@ void foveationFrameBoundary(ID3D11DeviceContext* ctx) {
         g_wantedNoted = true;
         Log::get().note(
             "foveation: ON, but a minute of frames has passed without a single eye-sized target to arm on. "
-            "Either openvr_api.dll is not installed beside the game (or is an older one, which cannot "
-            "tell this half the eye size), or this headset's eye textures are not being recognised. "
-            "Nothing is being shaded coarsely. Said once.");
+            "Either the openvr half never told this one the eye size (%s), or this headset's eye "
+            "textures are not being recognised. Nothing is being shaded coarsely. Said once.",
+            vrRuntimeShortWhy());
+        vrRuntimeExplainOnce();
     }
     g_switchesFrame = 0;
     g_seenCount = 0;

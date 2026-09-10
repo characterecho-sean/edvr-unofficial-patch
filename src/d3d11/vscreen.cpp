@@ -1,6 +1,7 @@
 ﻿#include "vscreen.h"
 #include "head_offset_gate.h"
 #include "camera_view.h"
+#include "vr_runtime.h"
 
 #include <windows.h>
 
@@ -4345,7 +4346,12 @@ void vScreenFrameBoundary() {
         // report, is exactly the kind of lie this notice exists to end.
         const bool perDrawAskers = s->distanceEnabled || s->countForFlashFix ||
                                    headOffsetGateWantsPanel();
+        char adviceBuf[1100];
         const char* advice;
+        // The runtime paragraph goes on its own line AFTER the notice, not
+        // inside it: this notice is already most of the log's 1200-byte line
+        // buffer, and appending 784 more would truncate both mid-word.
+        bool explainRuntime = false;
         if (!perDrawAskers) {
             // Settled BEFORE the ask count is consulted: with every per-draw
             // consumer off, a zero eye-draw peak is structural whatever the
@@ -4369,12 +4375,20 @@ void vScreenFrameBoundary() {
                 "re-patches -- look for VTableHook lines near this one saying "
                 "so. If there are none, report this log.";
         } else if (!s->eyeW) {
-            advice =
-                "If one of those sizes is your eye texture, that is the "
-                "collision -- change fix.vscreen_res_width/height (2880x1620 "
-                "is safe, 1920x1080 is off). If none of them is, install "
-                "openvr_api.dll as well so this side stops guessing at what "
-                "your eye textures are.";
+            // THE LINE THE RIFT S USER READ (2026-09-06). It ended "install
+            // openvr_api.dll as well" -- to a commander whose openvr_api.dll
+            // was installed, correct, and simply never opened, because the
+            // game was on its native Oculus back end. He then spent three
+            // rounds on his install. The advice is now whatever the module
+            // list actually supports; see vr_runtime.h.
+            snprintf(adviceBuf, sizeof(adviceBuf),
+                     "If one of those sizes is your eye texture, that is the collision -- change "
+                     "fix.vscreen_res_width/height (2880x1620 is safe, 1920x1080 is off). If none "
+                     "of them is, this side is guessing at your eye textures because the openvr "
+                     "half has published nothing: %s. The next line says what to do about it.",
+                     vrRuntimeShortWhy());
+            advice = adviceBuf;
+            explainRuntime = true;
         } else {
             advice =
                 "If one of those sizes is your eye texture, that is the "
@@ -4397,6 +4411,7 @@ void vScreenFrameBoundary() {
             static_cast<unsigned long long>(s->panelExclusions),
             s->eyeW ? "has published its size" : "has published nothing",
             advice);
+        if (explainRuntime) vrRuntimeExplainOnce();
     }
 
     // ROLL THE SHAPE CANDIDATES, AND PROMOTE ONE IF THE DRAWS SAY SO.
