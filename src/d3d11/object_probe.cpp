@@ -982,6 +982,28 @@ float rateMedian(const RatePair* ring, uint32_t count, float omega[3], float t[3
     return medMag;
 }
 
+// THE ORIGIN'S MOVE and the rate ring (the review of 2026-09-10, P1-2). The
+// fit's translation is about the pool's ORIGIN (temporalRigidFit: p_prev =
+// R p_now + t), so when the floating origin moves by s every pair fitted
+// after it carries t + (I - R) s for the same physical turn -- and the ring
+// medianed sixteen of them across the move, the old origin's outvoting the
+// new one's for up to eight pairs: a 9 m translation error a frame at ten
+// kilometres by the review's reproduction, with the fit's residual saying
+// nothing of it. So a held sample is re-expressed in the new origin when
+// the move is seen: to the angle squared, (I - R) s = -w x s, per
+// millisecond as the ring keeps it.
+void rebaseRing(RatePair* ring, uint32_t count, const float s[3]) {
+    for (uint32_t i = 0; i < count; ++i) {
+        const float* w = ring[i].w;
+        const float wxs[3] = {w[1] * s[2] - w[2] * s[1], w[2] * s[0] - w[0] * s[2], w[0] * s[1] - w[1] * s[0]};
+        for (int k = 0; k < 3; ++k) ring[i].t[k] -= wxs[k];
+    }
+}
+constexpr float kRingRebaseM = 200.0f;   // a camera move over this between the pair's frames, or since the last pair, is the origin's
+uint64_t g_ringRebases = 0;
+double   g_ringRebaseMaxM = 0.0;
+uint64_t g_ringRebaseNoteMs = 0;
+
 void takeShips(const Cluster* clusters, int nc, int big, bool bodyTaken, int skip2, const float* bodyW,
                const float* bodyT, const std::vector<int>& clusterIdx,
                const std::vector<float>& posNow, const std::vector<float>& posPrev, uint32_t n,
@@ -2054,6 +2076,42 @@ void workerMain() {
             g_pairLagFrames = job.lagFrames;
             g_pairCamPrevValid = job.haveCamPrev;
             if (job.haveCamPrev) memcpy(g_pairCamPrev, job.camPrev, sizeof(g_pairCamPrev));
+            // The origin's move, within this pair or since the last one, seen
+            // in the pair's own camera (rebaseRing says why): every held rate
+            // goes into the new origin before this pair's sample joins them.
+            {
+                static float s_lastPairCam[3] = {0.0f, 0.0f, 0.0f};
+                static bool  s_lastPairCamValid = false;
+                float s[3] = {0.0f, 0.0f, 0.0f};
+                bool moved = false;
+                if (job.haveCam && job.haveCamPrev) {
+                    for (int k = 0; k < 3; ++k) s[k] = job.cam[k] - job.camPrev[k];
+                    moved = s[0] * s[0] + s[1] * s[1] + s[2] * s[2] >= kRingRebaseM * kRingRebaseM;
+                }
+                if (!moved && job.haveCamPrev && s_lastPairCamValid) {
+                    for (int k = 0; k < 3; ++k) s[k] = job.camPrev[k] - s_lastPairCam[k];
+                    moved = s[0] * s[0] + s[1] * s[1] + s[2] * s[2] >= kRingRebaseM * kRingRebaseM;
+                }
+                if (moved) {
+                    rebaseRing(g_rateRing, g_rateRingN < kRateRing ? g_rateRingN : kRateRing, s);
+                    rebaseRing(g_rateRing2, g_rateRing2N < kRateRing ? g_rateRing2N : kRateRing, s);
+                    ++g_ringRebases;
+                    const double m = sqrt(static_cast<double>(s[0]) * s[0] + static_cast<double>(s[1]) * s[1] +
+                                          static_cast<double>(s[2]) * s[2]);
+                    if (m > g_ringRebaseMaxM) g_ringRebaseMaxM = m;
+                    if (dueMs(g_ringRebaseNoteMs, 30000)) {
+                        g_ringRebaseNoteMs = stampMs();
+                        Log::get().note("object probe: the origin moved %.0f m at a pair; the held rates were "
+                                        "re-expressed in the new origin (%llu such moves so far, %.0f m at most; "
+                                        "the review of 2026-09-10).",
+                                        m, static_cast<unsigned long long>(g_ringRebases), g_ringRebaseMaxM);
+                    }
+                }
+                if (job.haveCam) {
+                    memcpy(s_lastPairCam, job.cam, sizeof(s_lastPairCam));
+                    s_lastPairCamValid = true;
+                }
+            }
             LARGE_INTEGER dq0{}, dq1{}, dqf{};
             QueryPerformanceCounter(&dq0);
             diffPair(job.prev.data(), job.now.data(), static_cast<uint32_t>(job.now.size()), job.dtMs,

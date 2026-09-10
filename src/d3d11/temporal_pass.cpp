@@ -3442,9 +3442,18 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                 ++g_camDropMove;
                 // The body's path: the jump's vector, summed, carries the
                 // held body into the new frame (g_bodyShift says how); a
-                // flip's return adds the opposite vector back.
-                for (int i = 0; i < 3; ++i) g_bodyShift[i] += camMove[i];
-                g_bodyShiftFrame = g_rowsFrame;
+                // flip's return adds the opposite vector back. ONCE A SCENE
+                // FRAME: this runs for each eye on the rows chosen once a
+                // frame, and until the review of 2026-09-10 the second eye
+                // added the same jump again -- a 13 km move became 26 km,
+                // the agreement gate (kBodyFrameM) refused the held pair,
+                // and the station fell to the camera's path until a new pair
+                // agreed unshifted: the seventeen stand-downs an interval on
+                // the boost flights of 06:21 and 06:36.
+                if (g_bodyShiftFrame != g_rowsFrame) {
+                    for (int i = 0; i < 3; ++i) g_bodyShift[i] += camMove[i];
+                    g_bodyShiftFrame = g_rowsFrame;
+                }
             }
             if (diffDeg > 3.0f) {
                 ++g_camDropRot;
@@ -5421,7 +5430,7 @@ bool temporalPassRegistration(char* buf, size_t n, char* buf2, size_t n2, char* 
     used = 0;
     if (g_camDropRot || g_camDropMove) {
         regAppend(buf, n, used,
-                  "; the camera's delta was dropped on %u frames as another camera's (over 3 "
+                  "; the camera's delta was dropped on %u eye-frames as another camera's (over 3 "
                   "deg from the head's) and its translation on %u as a jump (over 50 m); a "
                   "jump was carried on %u (zero by construction)",
                   g_camDropRot, g_camDropMove, g_camCarriedJump);
@@ -5453,7 +5462,7 @@ bool temporalPassRegistration(char* buf, size_t n, char* buf2, size_t n2, char* 
     // interval; zero with a body in hand means the margin never let it in.
     if (g_dlResets) {
         regAppend(buf, n, used,
-                  "; NVIDIA's history was reset on %llu frames, %llu of them asked by the openvr half (a "
+                  "; NVIDIA's history was reset on %llu eye-frames, %llu of them asked by the openvr half (a "
                   "withheld frame, or a pose without a delta) and the rest for want of a history",
                   static_cast<unsigned long long>(g_dlResets), static_cast<unsigned long long>(g_dlResetsAsked));
     }
