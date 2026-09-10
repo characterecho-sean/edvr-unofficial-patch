@@ -3047,6 +3047,55 @@ which is this project's contract for every read of the game.
    returned restarts it as before, no verdict within four treats restarts
    it too; holds, the theater and the FSS heal restart at once. The
    shutdown line counts the deferred restarts by outcome. No new keys.
+
+   *The forty-eighth session, 10:19 (v0.14.1-156), and the review of the
+   trail's voids*: the verdict gate flown near the station. Twenty-one
+   frames withheld in pairs at the origin's moves, seven judged "the
+   camera did not return", the body's stand-downs at the moves gone
+   (0 in the 10:25:42 interval) -- and the registration still counted
+   two to four eye-frames an interval reset at the openvr half's asking,
+   which the line could not attribute (a withheld frame or a pose without
+   a delta, it said) and the vr log's shutdown line never printed (the
+   game ends without the DLL's detach). Built: the openvr half says why
+   in the flags' bits 2-5 (a hold or a healed frame, a withheld jump the
+   camera came back from, one left unjudged, a pose without a delta) and
+   the registration line counts each; a 30-s vr note gives the deferred
+   restarts' outcomes. THE REVIEW (another agent's, docs/
+   review-smoke-voids-2026-09-10.md in its worktree): three findings on
+   the smoke's coverage, all taken (v0.14.1-159-g627d62f). ONE, a defect since
+   the coverage was built: it wrote the smoke's depth into the SCENE's
+   depth target in the middle of the frame, and the game draws on after
+   the ribbon with the depth test on -- the trail's scattering volume
+   right after it, GREATER_EQUAL -- so an opaque depth surface under a
+   translucent effect cut out whatever came later behind it, segment by
+   segment: a plausible source of the dark rectangles, though the
+   10:25:22 run had the gaps with no volume draw in its ledger, so not
+   proven the whole cause. The coverage now writes into a depth target of
+   EDVR's own (one per eye, the scene depth's size, cleared before its
+   first draw each frame) and the pass folds it into the scene's depth as
+   it reads (zSceneAt, t6: the nearer wins), so the vectors, NVIDIA's
+   depth input and the depth view see the smoke where it is and the
+   game's depth is never touched. TWO, the encoding: the ribbon's vertex
+   shader adds 15.01 to the clip z before the divide, so the raster's z
+   the coverage wrote depends on the matrix the game uploads (the
+   review's synthetic put a kilometre at 1.7 m; the depth view's black
+   trail says the real matrix compensates, since its palette turns white
+   under 2 m). The depth is now encoded from the ribbon's own view depth
+   (TEXCOORD1.z, the value its shader compares with the depth resolve)
+   with the pass's projection pair, exact by construction; the raster's
+   z stays the fallback when no projection is known. THREE, the fringe:
+   the clip at the floor came before both outputs, so the faint smoke
+   got neither depth nor mask, a step at the floor whatever the strength.
+   Under the floor the fringe now writes no depth (the far value into
+   EDVR's own target changes nothing) and marks the mask only where the
+   strength gives it a quantum, so the mark fades with the smoke. The
+   review's decisive follow-up stands and is the next flight: with DLSS,
+   drives_smoke on and the heat haze as it is, two eye runs of the trail
+   mid-view with advanced.eye_run_treated = 0 (raw crops and a treated
+   overview), fix.temporal_aa_smoke on then off -- raw holes that vanish
+   with the coverage off implicate the injected pass, clean raw colour
+   with gaps in the treated frame implicates the history, holes in both
+   implicate the game's own smoke draws.
 4. **Tier 2b** only if question 1 says no bits.
 5. **Tier 3** as `tools/` work against dumped frames, never on the hot
    path.
