@@ -379,6 +379,19 @@ namespace edvr {
 // clear majority in d3d11.dll is the runtime's own table.
 void* systemD3D11Module() { return g_systemModule; }
 
+// The mode's name for a log line. One function because three call sites in
+// here print it and a fourth reads it back out of a field report -- and a
+// ternary that says "CopyVptr : InPlace" silently renames the third mode to
+// InPlace the moment it exists, which is the kind of wrong log line that costs
+// a session to notice.
+static const char* hookModeName(HookMode m) {
+    switch (m) {
+        case HookMode::CopyVptr: return "CopyVptr";
+        case HookMode::LiveCopy: return "LiveCopy";
+        default:                 return "InPlace";
+    }
+}
+
 HookMode contextHookModeFor(ID3D11DeviceContext* ctx) {
     if (!ctx || !g_systemModule) return HookMode::InPlace;
     void** vt = nullptr;
@@ -438,6 +451,16 @@ HookMode contextHookModeFor(ID3D11DeviceContext* ctx) {
                _stricmp(want.c_str(), "copyvptr") == 0) {
         mode = HookMode::CopyVptr;
         forced = "private";
+    } else if (_stricmp(want.c_str(), "live") == 0 ||
+               _stricmp(want.c_str(), "livecopy") == 0) {
+        // The third mechanism (issue #21). Never chosen by the probe: `auto`
+        // decides whose CODE backs the object, which is the issue #6 question,
+        // and that answer has never been a reason to prefer this over the plain
+        // private copy. It is reached on purpose, from a log, by a rig where the
+        // private copy is fatal -- so leaving the probe's policy exactly as it
+        // was is deliberate rather than unfinished.
+        mode = HookMode::LiveCopy;
+        forced = "live";
     } else if (!want.empty() && _stricmp(want.c_str(), "auto") != 0) {
         // A misspelling must not read as an unset key. This is the setting a
         // crashing user is asked to set and then report two logs from, and
@@ -447,7 +470,7 @@ HookMode contextHookModeFor(ID3D11DeviceContext* ctx) {
         // their own bad values; a string one has to say it itself.
         Log::get().note(
             "edvr.ini: advanced.context_hook_mode = \"%s\" is not one of auto, "
-            "shared or private, so it was IGNORED and the probe decided as "
+            "shared, private or live, so it was IGNORED and the probe decided as "
             "usual. Check the spelling.",
             want.c_str());
     }
@@ -457,8 +480,10 @@ HookMode contextHookModeFor(ID3D11DeviceContext* ctx) {
         "Windows' d3d11.dll, and the vtable array itself is %s it. CopyVptr is "
         "chosen when the runtime's own code backs the methods (immune to the "
         "runtime re-pointing its shared table); InPlace when a wrapper owns "
-        "them (issue #6 safety).",
-        mode == HookMode::CopyVptr ? "CopyVptr" : "InPlace", inSystem, kSample,
+        "them (issue #6 safety). LiveCopy is the same swap with nothing frozen "
+        "-- every entry a stub that reads the runtime's own slot at the call -- "
+        "and is only ever reached by asking for it.",
+        hookModeName(mode), inSystem, kSample,
         arrayInside ? "inside" : "outside");
     if (forced) {
         // Said separately and always, never folded into the line above: a
@@ -469,8 +494,7 @@ HookMode contextHookModeFor(ID3D11DeviceContext* ctx) {
             "context hook mode: FORCED to %s by advanced.context_hook_mode = "
             "%s. The probe on its own would have chosen %s. Remove the setting "
             "to go back to the probe.",
-            forced, want.c_str(),
-            probed == HookMode::CopyVptr ? "CopyVptr" : "InPlace");
+            forced, want.c_str(), hookModeName(probed));
     }
     return mode;
 }

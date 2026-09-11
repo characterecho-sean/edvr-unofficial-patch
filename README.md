@@ -163,8 +163,8 @@ the thread, and an issue is what remembers a problem long enough to fix it.
 `edvr_breadcrumbs.txt` ending at `arming d3d11 hooks` means the Direct3D half
 got its hooks in and the game died shortly after. EDVR's crash sentinel turns
 those hooks off for the **next** launch on its own, so the usual shape of this
-is crash, play, crash, play. Two settings under `[advanced]` in `edvr.ini` are
-worth trying, in this order:
+is crash, play, crash, play. Three settings under `[advanced]` in `edvr.ini`
+are worth trying, in this order:
 
 ```ini
 [advanced]
@@ -181,6 +181,25 @@ If anything pushes EDVR out of a slot the log says so by name.
 
 ```ini
 [advanced]
+context_hook_mode = live
+```
+
+is the one to try after `shared`. It gives the context a dispatch table of
+EDVR's own, like `private` does — so nothing else in the process can write the
+table the game dispatches through — but every entry in it reads the game's own
+entry at the moment of each call instead of remembering what it said at
+startup. That matters because Windows' `d3d11.dll` re-lays the context's table
+while the game runs, sometimes onto a different internal implementation, and a
+copy taken at startup does not follow it. `live` follows it, call by call. The
+cost is two extra jumps per Direct3D call, which is below anything that has
+been measurable in a frame time; the risk is the same as `private`'s, which is
+that a mod wrapping Direct3D objects (ReShade as `dxgi.dll`) does not expect
+its object to be re-pointed. If `shared` keeps the game alive but the log then
+says EDVR's hooks keep being pushed out of the table, this is the mode that is
+both unbypassable and never out of date.
+
+```ini
+[advanced]
 d3d11_fixes = 0
 ```
 
@@ -192,7 +211,7 @@ frame boundary it runs on -- so this is not "EDVR loads and does nothing", and
 if a crash survives it, that is worth reporting: it is in one of those or in
 the VR half.
 
-Please report which of the two you needed, with the log from each -- that is
+Please report which of the three you needed, with the log from each -- that is
 the measurement that turns a workaround into a fix.
 
 ### Uninstall

@@ -105,8 +105,9 @@ struct State {
     VTableHook deviceHook;
     VTableHook swapChainHook;
     VTableHook factoryHook;
-    // The swap-only probe's hook on the immediate context: a private copy with
-    // nothing patched in it, standing in for BOTH context installers. See
+    // The swap-only and live-only probes' hook on the immediate context: a
+    // private table with nothing patched in it -- frozen for one, live stubs
+    // for the other -- standing in for BOTH context installers. See
     // advanced.context_hook_probe.
     VTableHook bareContextHook;
 
@@ -2046,41 +2047,78 @@ void hookDevice(ID3D11Device* device) {
     // A pass-through thunk was considered and is not built, because from the
     // GPU's side it is the swap plus one extra call frame -- it would answer
     // the same question as this, less cleanly.
+    // AND ITS TWIN, which takes the other half away instead.
+    //
+    // The swap-only probe removes the thunks and keeps two things: the vptr is
+    // RELOCATED and the table is FROZEN. If it crashes, that is still ambiguous
+    // -- "relocating the vptr is fatal" and "freezing the table is fatal" are
+    // different bugs with different fixes and the one probe cannot separate
+    // them. The LIVE-ONLY probe keeps the relocation and removes the freeze:
+    // every entry of the private table is a stub that reads the context's own
+    // slot at the moment of the call, so no call can ever reach an
+    // implementation the runtime has moved on from, and still no EDVR code runs
+    // inside any context method. Run the two and the answer is arithmetic.
     {
         const std::string probe =
             sentinelCfg.getString("advanced.context_hook_probe", "off");
-        if (_stricmp(probe.c_str(), "swap") == 0) {
+        const bool wantSwap = _stricmp(probe.c_str(), "swap") == 0;
+        const bool wantLive = _stricmp(probe.c_str(), "live") == 0;
+        if (wantSwap || wantLive) {
             ID3D11DeviceContext* ctx = nullptr;
             device->GetImmediateContext(&ctx);
             bool swapped = false;
             if (ctx) {
                 if (s.bareContextHook.attach(ctx) &&
-                    s.bareContextHook.setMode(HookMode::CopyVptr) &&
-                    s.bareContextHook.commitUnpatched()) {
+                    s.bareContextHook.setMode(wantLive ? HookMode::LiveCopy
+                                                       : HookMode::CopyVptr) &&
+                    (wantLive ? s.bareContextHook.commitLive()
+                              : s.bareContextHook.commitUnpatched())) {
                     swapped = true;
                 }
                 ctx->Release();
             }
-            Log::get().note(
-                swapped
-                    ? "SWAP-ONLY PROBE: the immediate context now dispatches "
-                      "through a byte-identical private copy of its table, with "
-                      "NOTHING patched in it and neither context installer run. "
-                      "No EDVR code is in the path of any context call. Every "
-                      "d3d11 fix is therefore off this session. If this session "
-                      "dies the way the normal private-copy mode does, the vptr "
-                      "swap is fatal on its own; if it survives, the swap is "
-                      "innocent and the cause is inside a thunk. Set "
-                      "advanced.context_hook_probe back to off afterwards."
-                    : "SWAP-ONLY PROBE asked for, but the bare copy could not be "
-                      "installed (see above). The context installers were "
-                      "skipped anyway, so this session tests nothing -- set "
-                      "advanced.context_hook_probe back to off.");
+            if (wantLive) {
+                Log::get().note(
+                    swapped
+                        ? "LIVE-ONLY PROBE: the immediate context now dispatches "
+                          "through a private table of EDVR's in which every entry "
+                          "is a jump stub that reads the context's OWN slot at "
+                          "the moment of the call. Nothing is patched, neither "
+                          "context installer ran, and no EDVR code is in the path "
+                          "of any context call -- so every d3d11 fix is off this "
+                          "session. The only thing not stock is WHERE the vptr "
+                          "points. If this dies the way the private-copy mode "
+                          "does, relocating the vptr is fatal on its own and "
+                          "following the runtime perfectly does not help; if it "
+                          "lives while the swap-only probe dies, the frozen table "
+                          "was the cause. Set advanced.context_hook_probe back to "
+                          "off afterwards."
+                        : "LIVE-ONLY PROBE asked for, but the live table could "
+                          "not be installed (see above). The context installers "
+                          "were skipped anyway, so this session tests nothing -- "
+                          "set advanced.context_hook_probe back to off.");
+            } else {
+                Log::get().note(
+                    swapped
+                        ? "SWAP-ONLY PROBE: the immediate context now dispatches "
+                          "through a byte-identical private copy of its table, with "
+                          "NOTHING patched in it and neither context installer run. "
+                          "No EDVR code is in the path of any context call. Every "
+                          "d3d11 fix is therefore off this session. If this session "
+                          "dies the way the normal private-copy mode does, the vptr "
+                          "swap is fatal on its own; if it survives, the swap is "
+                          "innocent and the cause is inside a thunk. Set "
+                          "advanced.context_hook_probe back to off afterwards."
+                        : "SWAP-ONLY PROBE asked for, but the bare copy could not be "
+                          "installed (see above). The context installers were "
+                          "skipped anyway, so this session tests nothing -- set "
+                          "advanced.context_hook_probe back to off.");
+            }
         } else {
             if (!probe.empty() && _stricmp(probe.c_str(), "off") != 0) {
                 Log::get().note(
                     "edvr.ini: advanced.context_hook_probe = \"%s\" is not one of "
-                    "off or swap, so it was IGNORED. Check the spelling.",
+                    "off, swap or live, so it was IGNORED. Check the spelling.",
                     probe.c_str());
             }
             installExposureFix(device, ctxMode);

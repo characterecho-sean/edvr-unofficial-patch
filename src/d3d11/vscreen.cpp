@@ -3961,13 +3961,13 @@ void vScreenReclaimTick() {
     // inside the handler -- the faulting instruction needs a writable page to
     // finish on.
     vtableWatchRearm();
-    // Nothing to patrol in copy mode: the object dispatches through a table
-    // only EDVR can write, so there is no slot for anyone to take. reclaim's
-    // copy branch does real work -- a breach scan and a 300-entry drift walk --
-    // and running that per frame would buy the same answer 144 times a second
-    // and make its own "this check repeats about once a second" a lie. The
-    // once-a-second pass still runs it.
-    if (s->hook.mode() == HookMode::CopyVptr) return;
+    // Nothing to patrol in either private mode: the object dispatches through a
+    // table only EDVR can write, so there is no slot for anyone to take.
+    // reclaim's private branch does real work -- a breach scan and a 300-entry
+    // census walk -- and running that per frame would buy the same answer 144
+    // times a second and make its own "this check repeats about once a second"
+    // a lie. The once-a-second pass still runs it.
+    if (s->hook.mode() != HookMode::InPlace) return;
     s->hook.reclaim("vScreen context", nullptr, 0);
     if (!s->hook.lastPassRan()) return;   // unpatrolled is not "held"
     ++s->hookFrames;
@@ -4997,8 +4997,11 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     // the runtime's own re-pointing without waiting for call evidence that a
     // total bypass never produces (issue #21).
     s.hook.setImplementationModule(systemD3D11Module());
-    // The frozen table is only a question in copy mode; in place there is one
-    // table and nothing to diverge from.
+    // The frozen table is only a question in copy mode. In place there is one
+    // table and nothing to diverge from; in LIVE mode the forward IS the stub
+    // that reads the live entry, so it cannot be stale by construction and a
+    // detector for it would compare a stub's address against a function's and
+    // report every call as a divergence. Off in both.
     s.watchStale = (mode == HookMode::CopyVptr);
 
     s.hook.replace(kSlotClearRenderTargetView, &hookedClearRtv,
@@ -5078,6 +5081,14 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
                           "one cannot bypass the fixes -- but one that writes "
                           "through the OBJECT still reaches the copy, and the "
                           "copy does not follow the table it was taken from)"
+                    : s.hook.mode() == HookMode::LiveCopy
+                        ? "by LIVE private vtable (this object dispatches through "
+                          "a table of EDVR's own in which every entry is a stub "
+                          "that reads the context's own slot at the moment of the "
+                          "call, so a tool writing the shared table cannot bypass "
+                          "the fixes AND nothing is ever frozen -- the runtime may "
+                          "re-select its variants as often as it likes and the "
+                          "next call follows it)"
                         : "in place (the shared table is patched, so anything else "
                           "that writes those slots composes with EDVR; reclaim "
                           "watches for our entries being re-pointed)");
@@ -5089,16 +5100,17 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     {
         const int probeSlot =
             cfg.getIntInRange("advanced.vtable_writer_probe", 0, 0, 511);
-        if (probeSlot > 0 && s.hook.mode() != HookMode::CopyVptr) {
+        if (probeSlot > 0 && s.hook.mode() == HookMode::InPlace) {
             vtableWatchSlot(s.hook.originalVTable(),
                             static_cast<size_t>(probeSlot),
                             s.hook.executablePrefix(), "vScreen context");
         } else if (probeSlot > 0) {
             Log::get().note(
                 "advanced.vtable_writer_probe asked to watch slot %d, but this "
-                "context is hooked by private vtable copy, where the shared "
-                "table is not what the object dispatches through and nobody "
-                "writes it. Set context_hook_mode = shared to use the probe.",
+                "context is hooked by a private vtable, where THIS hook's table "
+                "is the exposure hook's private buffer rather than the one the "
+                "runtime writes. Set context_hook_mode = shared to use the "
+                "probe.",
                 probeSlot);
         }
     }

@@ -1,4 +1,4 @@
-// COM vtable interception, by whichever of two mechanisms fits the table.
+// COM vtable interception, by whichever of three mechanisms fits the table.
 //
 // TWO MECHANISMS, ONE QUESTION. Both existed as sole mechanisms first, each
 // shipped, and each was refuted in the field by a rig the other would have
@@ -37,6 +37,40 @@
 // issue #6. vtableInsideModule() is the probe; the POLICY stays with callers,
 // who know which module implements what they hooked. tools/vtable_test holds
 // both mechanisms' cells, each written to fail against the wrong one first.
+//
+// AND THEN A THIRD, which exists because those two do not span the space and
+// issue #21 is the rig standing in the gap between them.
+//
+//   LiveCopy -- the object's vptr moves to a private table exactly as CopyVptr
+//   moves it, and EVERY entry of that private table is a twelve-byte jump stub
+//   that reads the RUNTIME'S OWN entry for that slot and jumps through it, at
+//   the moment of the call. Nothing is frozen. The only thing that differs
+//   from stock is WHERE the vptr points.
+//
+//   It is built to answer one question that nothing else can. On two users'
+//   rigs CopyVptr dies 1.7 s after install with the GPU hung, and the
+//   once-a-second walk saw 24 work-emitting slots switch to a second variant at
+//   the frame that hung (slot 12 DrawIndexed from ..._DrawIndexed_<1> to
+//   ..._DrawIndexed_Amortized<1>). Two things changed at once in that mode and
+//   only one of them can be the cause: the vptr was RELOCATED, and the table was
+//   FROZEN. commitUnpatched() (the swap-only probe) removes the thunks and keeps
+//   both; this removes the freeze and keeps the relocation. Run both and the
+//   answer is arithmetic rather than inference -- if swap dies and live lives,
+//   staleness is fatal and the frozen copy is the bug; if both die, relocating
+//   the vptr is fatal on its own and no amount of following the runtime helps.
+//
+//   And if live LIVES, it is not merely a probe: it is a mechanism with
+//   CopyVptr's immunity (a tool writing the shared table cannot reach a slot
+//   the object no longer dispatches through) and none of its staleness, for two
+//   extra jumps per call. What it costs is what CopyVptr costs -- issue #6, a
+//   wrapper's object re-pointed -- so the pick between InPlace and this is the
+//   same question, asked the same way.
+//
+//   WHAT "ORIGINAL" MEANS IN THIS MODE, because a caller's whole forwarding
+//   contract rests on it: the pointer replace() hands back for a patched slot is
+//   that slot's LIVE STUB, so calling it means "call whatever the runtime's own
+//   table holds for this slot right now, read at this call". It is never a
+//   snapshot, and a thunk body needs no change at all to get that.
 //
 // WHAT THE CHANGE COSTS THE CALLER: patching a vtable hooks EVERY object of
 // that class, not the one you attached to. Each hook body must therefore
@@ -183,7 +217,22 @@ void vtableWatchStop();
 enum class HookMode : uint32_t {
     InPlace = 0,   // patch the shared table; reclaim() watches it
     CopyVptr,      // private table copy; immune to table owners, no reclaim
+    LiveCopy,      // private table of jump stubs, each reading the live entry
 };
+
+// How many bytes one live-mode stub occupies.
+//
+// Twelve are used -- `mov rax, imm64` (10) then `jmp qword ptr [rax]` (2) --
+// and sixteen are spent, so every stub starts on a sixteen-byte boundary and
+// the slot index is a shift rather than a multiply for anyone reading a
+// disassembly. The four spare bytes are int3, so a jump into the gap stops
+// there instead of running into the next stub.
+//
+// rax is the choice because the x64 calling convention makes it neither an
+// argument register nor callee-saved, and no D3D11 method is variadic (where
+// rax carries the vector-register count). The stub therefore clobbers nothing
+// any callee may read.
+constexpr size_t kLiveStubBytes = 16;
 
 class VTableHook {
 public:
@@ -201,10 +250,14 @@ public:
     bool attach(void* object, size_t maxEntries = 512);
 
     // Selects the mechanism. Callable only between attach() and the first
-    // replace(): the two mechanisms stage differently, and switching after
+    // replace(): the three mechanisms stage differently, and switching after
     // staging would mean patches recorded against a table that is no longer
     // the one being modified. Defaults to InPlace, which is the mode that
     // never breaks somebody else's object.
+    //
+    // LiveCopy also allocates and writes the stub page here, and can fail for
+    // that reason alone -- a caller that ignores the return value gets a hook
+    // still in InPlace mode rather than a half-built live one.
     bool setMode(HookMode mode);
     HookMode mode() const { return m_mode; }
 
@@ -214,17 +267,20 @@ public:
     // chain is preserved in both directions by the polite uninstall below.
     // In CopyVptr mode "what the slot holds now" reads through the object's
     // CURRENT vptr, so stacking two copy-mode hooks on one object chains
-    // exactly like stacking two in-place hooks on one table. Must be called
-    // before commit(). Refuses indices beyond the executable prefix, since
-    // those are not methods we have any reason to believe in.
+    // exactly like stacking two in-place hooks on one table. In LiveCopy mode
+    // it is that slot's live stub, which is the same statement with the
+    // staleness taken out: forwarding to it reaches whatever the runtime's own
+    // table holds at the moment of each call. Must be called before commit().
+    // Refuses indices beyond the executable prefix, since those are not
+    // methods we have any reason to believe in.
     bool replace(size_t index, void* replacement, void** origOut);
 
     // Applies the staged patches. InPlace: writes every staged entry into the
     // shared table, all-or-nothing -- a partial failure rolls back the slots
     // already written, the same discipline vscreen_res uses for code
-    // patching. CopyVptr: writes the patches into the private copy and swaps
-    // the object's vptr -- one aligned pointer store, which cannot be
-    // partial.
+    // patching. CopyVptr and LiveCopy: writes the patches into the private
+    // table and swaps the object's vptr -- one aligned pointer store, which
+    // cannot be partial.
     bool commit();
 
     // THE SWAP WITH NOTHING IN IT. CopyVptr only: point the object at a
@@ -244,13 +300,36 @@ public:
     // in twenty-nine functions that can be bisected.
     bool commitUnpatched();
 
+    // THE SWAP THAT FREEZES NOTHING. LiveCopy only, and the other half of the
+    // experiment commitUnpatched() opens.
+    //
+    // The object is pointed at a private table in which every entry is a stub
+    // that jumps through the runtime's own entry for that slot, read at the
+    // call. No slot is patched, no thunk exists anywhere, and no call can ever
+    // reach an implementation the runtime has moved on from. The only thing
+    // that differs from stock is the ADDRESS of the table the vptr names.
+    //
+    // So the pair separates the two things CopyVptr does at once. If
+    // context_hook_probe = swap dies and this lives, the fatal half is the
+    // FREEZE -- the game was calling last second's implementation with this
+    // second's state -- and the mechanism to build is this one. If both die,
+    // relocating the vptr is fatal by itself on that rig, following the runtime
+    // perfectly does not help, and InPlace is the only mechanism left. Either
+    // answer is worth one session; neither is obtainable any other way.
+    //
+    // Refuses a non-empty patch list on purpose: commit() is how a patched live
+    // table is reached, and one way to each state is what keeps a log line
+    // meaning what it says.
+    bool commitLive();
+
     // InPlace: restores each entry we wrote, but ONLY where it still holds
     // our replacement. An entry someone patched after us belongs to them now;
     // restoring it would clobber their hook, which is the same composition
     // failure this class exists to stop, viewed from the other side.
-    // CopyVptr: restores the vptr this hook found at attach -- which, for
-    // stacked copy hooks, is the copy underneath, so unwinding in reverse
-    // install order peels the stack exactly as it was built.
+    // CopyVptr and LiveCopy: restores the vptr this hook found at attach --
+    // which, for stacked private hooks, is the table underneath, so unwinding
+    // in reverse install order peels the stack exactly as it was built. The
+    // live mode's stub page is NEVER freed; see the definition.
     void uninstall();
 
     // Name the module that IMPLEMENTS these methods, if the caller knows it.
@@ -328,9 +407,9 @@ public:
     // Returns how many slots were re-patched this pass. `name` labels the log
     // lines; the first reclaim explains itself, later ones report at doublings.
     //
-    // CopyVptr mode re-patches nothing and always returns 0: the private copy
+    // The private modes re-patch nothing and always return 0: the private table
     // has no co-owners to misread and no shared table for the runtime or a
-    // clean-resolving tool to rewrite -- immunity is the mode's whole reason to
+    // clean-resolving tool to rewrite -- immunity is their whole reason to
     // exist, and re-patching over it would be patrolling a wall nobody can
     // reach. (A later tool that vtable-patches finds the copy through the
     // object's vptr and chains through our thunks; one that swaps the vptr
@@ -347,6 +426,11 @@ public:
     // failure mode, with the game calling an implementation the runtime has
     // moved on from. Issue #21 is the field case that turned that from an
     // unstated premise into a question; see noteCopyDrift in the .cpp.
+    //
+    // In LiveCopy the same walk runs and is not an alarm at all: nothing can be
+    // stale there, so it is a CENSUS of how often the runtime re-selects its own
+    // variants and which slots it moves -- the measurement the copy-mode logs
+    // from issue #21 produced, taken on a rig that is not being harmed by it.
     size_t reclaim(const char* name, const size_t* quietSlots = nullptr,
                    size_t quietCount = 0);
 
@@ -369,7 +453,7 @@ public:
     // the slots that ARE being healed within a frame. Those are counted by
     // lastPassConceded instead, so the caller can report both.
     //
-    // Zero in CopyVptr mode, where the question does not arise: the object
+    // Zero in the private modes, where the question does not arise: the object
     // dispatches through a table only we can write.
     size_t   lastPassDisplaced() const { return m_lastDisplaced; }
 
@@ -379,7 +463,7 @@ public:
     size_t   lastPassConceded() const { return m_lastConceded; }
 
     // Did the last reclaim() actually inspect the table? False when the hook is
-    // uncommitted, in copy mode, or when the slot registry overflowed and
+    // uncommitted, in a private mode, or when the slot registry overflowed and
     // re-claiming is off for the session. A caller sampling lastPassDisplaced()
     // must not score an unpatrolled hook as perfectly held.
     bool     lastPassRan() const { return m_lastPassRan; }
@@ -438,6 +522,22 @@ private:
         bool     seenOverflow = false;
     };
 
+    // Does this mode dispatch the object through a table of ours? True for
+    // CopyVptr and LiveCopy, which differ in what the table HOLDS and agree
+    // about everything else: where patches are staged, how the vptr is swapped,
+    // how uninstall peels a stack, and that there is no shared slot to patrol.
+    bool usesPrivateTable() const { return m_mode != HookMode::InPlace; }
+
+    // LiveCopy only: allocate the stub page and fill m_copy with its entries.
+    // Called from setMode, once, before anything is staged.
+    bool buildLiveStubs();
+
+    // The one aligned pointer store that moves the object onto m_copy, shared
+    // by commit(), commitUnpatched() and commitLive() so that three entry
+    // points cannot drift apart on the one operation that actually changes the
+    // object. `why` labels the guard site.
+    bool installVptr(const char* why);
+
     // Writes one entry with the page temporarily writable. Returns false and
     // changes nothing if the protection could not be moved.
     //
@@ -456,9 +556,12 @@ private:
     // Called from every one of uninstall()'s three exits; see the definition.
     void forgetObject();
 
-    // CopyVptr only, read-only, from reclaim(): compare the copy we dispatch
-    // through against the live shared table and report where they no longer
-    // agree. The measurement of the premise the mode rests on -- see the .cpp.
+    // Private modes only, read-only, from reclaim(): compare what the runtime's
+    // table said when we attached against what it says now, and report where
+    // they no longer agree. In CopyVptr that is the measurement of the premise
+    // the mode rests on; in LiveCopy it is a census of the runtime's own
+    // variant selection, which the live table follows by construction. See the
+    // .cpp for both wordings and why they are different sentences.
     void noteCopyDrift(const char* who);
 
     void*              m_object = nullptr;
@@ -467,11 +570,31 @@ private:
     size_t             m_execPrefix = 0;
     bool               m_committed = false;
     HookMode           m_mode = HookMode::InPlace;
-    // CopyVptr state: the private table, and the vptr found at attach (what
-    // uninstall puts back). The vector must never reallocate after commit --
-    // the object's vptr points at its data -- so it is sized at attach and
-    // never touched again except by uninstall's clear.
+    // Private-table state: the table the object dispatches through, and the
+    // vptr found at attach (what uninstall puts back). The vector must never
+    // reallocate after commit -- the object's vptr points at its data -- so it
+    // is sized at attach and never touched again except by uninstall's clear.
+    // In CopyVptr it holds copied entries; in LiveCopy it holds stub addresses.
     std::vector<void*> m_copy;
+    // LiveCopy only: what the runtime's table held when this hook attached.
+    //
+    // The census below asks "has the runtime changed its own entries since we
+    // installed", and in copy mode m_copy IS that baseline. In live mode m_copy
+    // holds stubs, so the baseline has to be kept separately or the walk would
+    // report all 302 entries as changed on the first pass, every pass, forever.
+    // It is read-only after setMode and is never dispatched through.
+    std::vector<void*> m_frozen;
+    // LiveCopy only: the executable page holding one stub per entry.
+    //
+    // DELIBERATELY LEAKED at uninstall, and this is not an oversight to tidy up
+    // later. A thread can be executing inside a stub at the instant the vptr is
+    // restored -- the call was dispatched before the store and returns after it
+    // -- and freeing the page under it is an access violation in somebody
+    // else's code with EDVR nowhere on the stack. It is a few kilobytes, once
+    // per hook per session, on a teardown that only runs under FreeLibrary
+    // (the game exits by TerminateProcess). Forgetting the pointer IS the leak.
+    uint8_t*           m_stubs = nullptr;
+    size_t             m_stubCount = 0;
     bool               m_copyBreachNoted = false;  // the copy-mode breach line, said once
     // How many passes found the live shared table saying something our copy
     // does not. Same cadence as m_reclaimEvents, and for the same reason: a

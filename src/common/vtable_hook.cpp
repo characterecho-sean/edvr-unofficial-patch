@@ -676,14 +676,76 @@ bool VTableHook::attach(void* object, size_t maxEntries) {
     return true;
 }
 
+// THE LIVE STUB PAGE. One twelve-byte trampoline per entry, each reading the
+// runtime's OWN slot and jumping through it at the moment of the call.
+//
+//     48 B8 <8 bytes>   mov rax, &m_vtable[i]   -- the slot's ADDRESS, not its
+//                                                  contents; the contents are
+//                                                  read afresh by the next
+//                                                  instruction, every call
+//     FF 20             jmp qword ptr [rax]
+//     CC CC CC CC       padding to sixteen
+//
+// The address is an immediate rather than rip-relative because the stub has to
+// reach a heap cell arbitrarily far from wherever VirtualAlloc put the page, and
+// a 32-bit displacement cannot promise that. Ten bytes buys unconditional
+// reach.
+//
+// Written READ-WRITE and then flipped to EXECUTE-READ, never allocated RWX: a
+// writable-executable page is the single strongest heuristic every antivirus
+// scanner looks for, and EDVR already carries a Defender false positive without
+// handing it one. FlushInstructionCache afterwards because these bytes were
+// written as data and are about to be fetched as code.
+bool VTableHook::buildLiveStubs() {
+    const size_t count = m_copy.size();
+    if (!count) return false;
+    const size_t bytes = count * kLiveStubBytes;
+    uint8_t* page = static_cast<uint8_t*>(
+        VirtualAlloc(nullptr, bytes, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+    if (!page) {
+        Log::get().note("VTableHook: could not allocate %zu bytes for the live "
+                        "vtable's jump stubs (err %lu), so the live mode is off "
+                        "and the caller keeps the mode it had.",
+                        bytes, GetLastError());
+        return false;
+    }
+    for (size_t i = 0; i < count; ++i) {
+        uint8_t* s = page + i * kLiveStubBytes;
+        void* const cell = static_cast<void*>(&m_vtable[i]);
+        s[0] = 0x48;
+        s[1] = 0xB8;
+        memcpy(s + 2, &cell, sizeof(cell));
+        s[10] = 0xFF;
+        s[11] = 0x20;
+        for (size_t k = 12; k < kLiveStubBytes; ++k) s[k] = 0xCC;
+    }
+    DWORD previous = 0;
+    if (!VirtualProtect(page, bytes, PAGE_EXECUTE_READ, &previous)) {
+        Log::get().note("VTableHook: the live vtable's stub page at %p could not "
+                        "be made executable (err %lu), so the live mode is off. "
+                        "Nothing was installed.",
+                        static_cast<void*>(page), GetLastError());
+        // Safe to release: no vptr points at it and no thread can be inside it.
+        VirtualFree(page, 0, MEM_RELEASE);
+        return false;
+    }
+    FlushInstructionCache(GetCurrentProcess(), page, bytes);
+    m_stubs = page;
+    m_stubCount = count;
+    for (size_t i = 0; i < count; ++i) {
+        m_copy[i] = static_cast<void*>(page + i * kLiveStubBytes);
+    }
+    return true;
+}
+
 bool VTableHook::setMode(HookMode mode) {
-    // Before any staging: the two mechanisms record patches against different
-    // tables (the shared one vs the private copy), so a switch after the first
+    // Before any staging: the three mechanisms record patches against different
+    // tables (the shared one vs the private one), so a switch after the first
     // replace() would leave patches describing a table we are no longer using.
     if (!m_object || m_committed || !m_patches.empty()) return false;
     if (mode == m_mode) return true;
 
-    if (mode == HookMode::CopyVptr) {
+    if (mode == HookMode::CopyVptr || mode == HookMode::LiveCopy) {
         // Copy as wide a window as is readable, NOT just the executable
         // prefix. Stopping at the first non-code slot builds a table that
         // works until the host calls a method past the cut and reads off the
@@ -692,8 +754,8 @@ bool VTableHook::setMode(HookMode mode) {
         // whatever the original held. reserve() to the same width first, so
         // the vector never reallocates after commit points the vptr at it.
         m_copy.clear();
+        m_frozen.clear();
         m_copy.reserve(512);
-        bool ok = true;
         for (size_t i = 0; i < 512; ++i) {
             void* entry = nullptr;
             if (!guarded("VTableHook::setMode/copy", [&] { entry = m_vtable[i]; })) break;
@@ -701,11 +763,23 @@ bool VTableHook::setMode(HookMode mode) {
         }
         if (m_copy.size() < m_execPrefix) {
             m_copy.clear();
-            ok = false;
+            return false;
         }
-        if (!ok) return false;
+        if (mode == HookMode::LiveCopy) {
+            // The census baseline, taken BEFORE the stubs overwrite m_copy --
+            // see m_frozen. The stub build is the only part of this that can
+            // fail on its own, and a failure leaves the hook exactly as it was
+            // rather than half converted.
+            m_frozen = m_copy;
+            if (!buildLiveStubs()) {
+                m_copy.clear();
+                m_frozen.clear();
+                return false;
+            }
+        }
     } else {
         m_copy.clear();
+        m_frozen.clear();
     }
     m_mode = mode;
     return true;
@@ -716,10 +790,12 @@ bool VTableHook::replace(size_t index, void* replacement, void** origOut) {
     if (index >= m_execPrefix) return false;
 
     // The current entry is read through whichever table this mode dispatches
-    // by: the shared vtable in place, our copy once CopyVptr has taken it.
-    // Both answer "what a call on this object runs right now", which is what
-    // the caller must forward to.
-    void** table = (m_mode == HookMode::CopyVptr) ? m_copy.data() : m_vtable;
+    // by: the shared vtable in place, our private one once CopyVptr or LiveCopy
+    // has taken it. All three answer "what a call on this object runs right
+    // now", which is what the caller must forward to -- and in LiveCopy that
+    // answer is the slot's stub, so the caller's forward resolves the runtime's
+    // current entry at every call instead of freezing this one.
+    void** table = usesPrivateTable() ? m_copy.data() : m_vtable;
     void* original = nullptr;
     if (!guarded("VTableHook::replace/read-slot",
                  [&] { original = table[index]; })) {
@@ -735,15 +811,15 @@ bool VTableHook::replace(size_t index, void* replacement, void** origOut) {
     return true;
 }
 
-bool VTableHook::commitUnpatched() {
-    if (!m_object || m_committed) return false;
-    if (m_mode != HookMode::CopyVptr) return false;
-    if (!m_patches.empty()) return false;   // that is what commit() is for
-    if (m_copy.empty()) return false;
-
-    // The same one aligned store commit() does, into a copy that differs from
-    // the original in nothing but its address. See the header for why anyone
-    // would want that.
+// The store that moves the object onto our table, and the only place it
+// happens.
+//
+// One aligned pointer write, which cannot be partial, so there is no rollback
+// path to write. It was copied out three times once commitLive() joined
+// commit() and commitUnpatched(); three copies of the operation that actually
+// changes somebody else's object is three places for the protection dance to
+// drift, so there is one.
+bool VTableHook::installVptr(const char* why) {
     void** target = reinterpret_cast<void**>(m_object);
     DWORD oldProtect = 0;
     if (!VirtualProtect(target, sizeof(void*), PAGE_READWRITE, &oldProtect)) {
@@ -751,7 +827,7 @@ bool VTableHook::commitUnpatched() {
                         m_object, GetLastError());
         return false;
     }
-    const bool ok = guarded("VTableHook::commitUnpatched/vptr", [&] {
+    const bool ok = guarded(why, [&] {
         *target = reinterpret_cast<void*>(m_copy.data());
     });
     DWORD ignored = 0;
@@ -761,34 +837,45 @@ bool VTableHook::commitUnpatched() {
     return true;
 }
 
+bool VTableHook::commitUnpatched() {
+    if (!m_object || m_committed) return false;
+    if (m_mode != HookMode::CopyVptr) return false;
+    if (!m_patches.empty()) return false;   // that is what commit() is for
+    if (m_copy.empty()) return false;
+
+    // Into a copy that differs from the original in nothing but its address.
+    // See the header for why anyone would want that.
+    return installVptr("VTableHook::commitUnpatched/vptr");
+}
+
+bool VTableHook::commitLive() {
+    if (!m_object || m_committed) return false;
+    if (m_mode != HookMode::LiveCopy) return false;
+    if (!m_patches.empty()) return false;   // that is what commit() is for
+    if (m_copy.empty()) return false;
+
+    // Into a table of stubs that differs from the original in nothing but its
+    // address and two jumps. See the header for the experiment this is half of.
+    return installVptr("VTableHook::commitLive/vptr");
+}
+
 bool VTableHook::commit() {
     if (!m_object || m_committed) return false;
     if (m_patches.empty()) return false;
 
-    if (m_mode == HookMode::CopyVptr) {
-        // Patch the private copy, then point the object at it -- one aligned
-        // pointer store, which cannot be partial, so there is no rollback
-        // path to write. No registry entry and no reclaim: the copy is
-        // unreachable by the table owners this whole registry exists to
-        // arbitrate. See the header.
+    if (usesPrivateTable()) {
+        // Patch the private table, then point the object at it. No registry
+        // entry and no reclaim: the table is unreachable by the table owners
+        // this whole registry exists to arbitrate. See the header.
+        //
+        // In LiveCopy the entry being overwritten is that slot's stub, and the
+        // caller already holds it as its forward -- so the patched slot runs our
+        // thunk, and our thunk's "original" is the stub that reads the runtime's
+        // current entry. Nothing about a thunk body changes between the modes.
         for (const Patch& p : m_patches) {
             if (p.slot < m_copy.size()) m_copy[p.slot] = p.replacement;
         }
-        void** target = reinterpret_cast<void**>(m_object);
-        DWORD oldProtect = 0;
-        if (!VirtualProtect(target, sizeof(void*), PAGE_READWRITE, &oldProtect)) {
-            Log::get().note("VTableHook: VirtualProtect failed on object %p (err %lu)",
-                            m_object, GetLastError());
-            return false;
-        }
-        const bool ok = guarded("VTableHook::commit/vptr", [&] {
-            *target = reinterpret_cast<void*>(m_copy.data());
-        });
-        DWORD ignored = 0;
-        VirtualProtect(target, sizeof(void*), oldProtect, &ignored);
-        if (!ok) return false;
-        m_committed = true;
-        return true;
+        return installVptr("VTableHook::commit/vptr");
     }
 
     size_t written = 0;
@@ -856,7 +943,7 @@ bool VTableHook::commit() {
 void VTableHook::uninstall() {
     if (!m_object) return;
 
-    if (m_mode == HookMode::CopyVptr) {
+    if (usesPrivateTable()) {
         if (m_committed) {
             // Restore the vptr this hook found at attach -- but ONLY if the
             // object still dispatches through OUR copy, mirroring the polite
@@ -864,6 +951,15 @@ void VTableHook::uninstall() {
             // reverse install order (the shipped order), the object does still
             // point at our copy, so this restores the copy underneath and the
             // stack peels as it was built.
+            //
+            // THAT TEST CARRIES MORE WEIGHT IN LIVE MODE, and it already
+            // carries it correctly. A live hook stacked ON TOP of this one has
+            // baked the addresses of OUR m_copy cells into its own stubs and
+            // dereferences them at every call -- so freeing our table while it
+            // is still installed would dangle on the next draw. The test below
+            // sees that case as "somebody swapped on top of us", takes the leak
+            // path, and never frees. Unwinding in the shipped upper-first order
+            // never reaches it.
             //
             // If the object points SOMEWHERE ELSE, a later tool swapped the
             // vptr on top of us and it belongs to them now: writing our stale
@@ -886,10 +982,13 @@ void VTableHook::uninstall() {
                     VirtualProtect(target, sizeof(void*), oldProtect, &ignored);
                 }
                 // Restored: nothing dispatches through our copy any more, so
-                // it can go.
+                // it can go. The live mode's STUB PAGE still cannot -- a thread
+                // dispatched before the store above is still inside a stub and
+                // returns after it -- so that is leaked, always. See m_stubs.
                 m_committed = false;
                 forgetObject();
                 m_copy.clear();
+                m_frozen.clear();
                 return;
             }
             // Swapped away by a later tool: leave THEIR vptr, and DELIBERATELY
@@ -977,6 +1076,12 @@ void VTableHook::forgetObject() {
     m_object = nullptr;
     m_vtable = nullptr;
     m_execPrefix = 0;
+    // The stub page is NOT freed here, and forgetting the pointer is exactly
+    // what makes it a leak rather than a use-after-free. See m_stubs: a thread
+    // can be executing inside a stub at this instant, and the page must outlive
+    // it. A re-attach builds a fresh one.
+    m_stubs = nullptr;
+    m_stubCount = 0;
     m_patches.clear();
     m_reclaimEvents = 0;
     m_implModule = nullptr;
@@ -1033,6 +1138,19 @@ void VTableHook::forgetObject() {
 //     interface", because a slot the object has no method at cannot be called
 //     through and is not evidence of anything.
 void VTableHook::noteCopyDrift(const char* who) {
+    // THE SAME WALK, TWO DIFFERENT SENTENCES, and the difference is not
+    // cosmetic. In CopyVptr a changed entry is a hazard: the object dispatches
+    // through a table that no longer agrees with the runtime's. In LiveCopy the
+    // very same change is the instrument WORKING -- the stub reads the new entry
+    // at the next call, and the count is a census of how often the runtime
+    // re-selects rather than a report of anything going wrong. Printing the
+    // copy-mode wording in live mode would send a reader chasing a fault that
+    // cannot exist there, which is the sort of false alarm this file has spent
+    // three releases learning to avoid.
+    const bool live = (m_mode == HookMode::LiveCopy);
+    // What the runtime's table said when we attached. m_copy is that in copy
+    // mode; in live mode m_copy holds stubs and m_frozen is the baseline.
+    const std::vector<void*>& base = live ? m_frozen : m_copy;
     size_t drifted = 0;
     void*  firstNow = nullptr;
     // Wider than reclaim's list, because this walks the whole probe prefix
@@ -1044,17 +1162,22 @@ void VTableHook::noteCopyDrift(const char* who) {
     char   slots[512];
     slots[0] = '\0';
 
-    const size_t span = m_execPrefix < m_copy.size() ? m_execPrefix : m_copy.size();
+    const size_t span = m_execPrefix < base.size() ? m_execPrefix : base.size();
     for (size_t i = 0; i < span; ++i) {
-        // What this slot held when we copied it. Our patches overwrote the
-        // copy, so for a patched slot that value lives in the Patch and not in
-        // m_copy -- comparing the live table against our own thunk would report
-        // every hooked slot as drift, every pass, forever.
-        void* copied = m_copy[i];
-        for (const Patch& p : m_patches) {
-            if (p.slot == i) {
-                copied = p.original;
-                break;
+        // What this slot held when we copied it. In copy mode our patches
+        // overwrote the copy, so for a patched slot that value lives in the
+        // Patch and not in m_copy -- comparing the live table against our own
+        // thunk would report every hooked slot as drift, every pass, forever.
+        // In live mode m_frozen was taken before anything was staged, so it
+        // already holds the runtime's entry for every slot, patched or not
+        // (and a live Patch::original is a STUB, which would be wrong here).
+        void* copied = base[i];
+        if (!live) {
+            for (const Patch& p : m_patches) {
+                if (p.slot == i) {
+                    copied = p.original;
+                    break;
+                }
             }
         }
         void* now = nullptr;
@@ -1080,11 +1203,18 @@ void VTableHook::noteCopyDrift(const char* who) {
         if (!m_copyCleanNoted) {
             m_copyCleanNoted = true;
             Log::get().note(
-                "VTableHook %s: the vtable EDVR copied still matches the table "
-                "it was copied from -- all %zu entries, checked once a second "
-                "from here on. Nothing has drifted, which is what the "
-                "private-copy mode needs to be true and is reported here so "
-                "that its being true is visible rather than merely unmentioned.",
+                live
+                    ? "VTableHook %s: the context's own table still holds every "
+                      "entry it held when EDVR attached -- all %zu of them, "
+                      "checked once a second from here on. The live private "
+                      "table would have followed a change at the next call; so "
+                      "far there has been nothing to follow."
+                    : "VTableHook %s: the vtable EDVR copied still matches the "
+                      "table it was copied from -- all %zu entries, checked once "
+                      "a second from here on. Nothing has drifted, which is what "
+                      "the private-copy mode needs to be true and is reported "
+                      "here so that its being true is visible rather than merely "
+                      "unmentioned.",
                 who, span);
         }
         return;
@@ -1093,23 +1223,42 @@ void VTableHook::noteCopyDrift(const char* who) {
     ++m_copyDriftEvents;
     char modBuf[MAX_PATH];
     if (m_copyDriftEvents == 1) {
-        Log::get().note(
-            "VTableHook %s: the vtable EDVR copied has DRIFTED from the table it "
-            "was copied FROM -- %zu of the first %zu entries (%s) now hold "
-            "something else, and the first of them points into %s. EDVR's copy "
-            "still holds what they held at install, and this object dispatches "
-            "through the copy, so for any of those that is a method of this "
-            "interface, the game is calling the older entry. That is what the "
-            "private-copy mode is FOR when the two are interchangeable, and a "
-            "genuine hazard when they are not. Nothing was changed. This check "
-            "repeats about once a second and reports again at doublings; if this "
-            "log ends in a crash, this line is the one to report.",
-            who, drifted, span, slots,
-            ownerModuleName(firstNow, modBuf, sizeof(modBuf)));
+        if (live) {
+            Log::get().note(
+                "VTableHook %s: the runtime has CHANGED %zu of the first %zu "
+                "entries of the context's own table (%s), and the first of them "
+                "now points into %s. Nothing is stale: this object dispatches "
+                "through a private table of jump stubs that read the runtime's "
+                "own slot at every call, so the very next call through each of "
+                "those went to the NEW entry. This line is a census of how often "
+                "the runtime re-selects its own variants -- the same measurement "
+                "the private-copy mode reports as DRIFT, taken where it cannot "
+                "do any harm. It repeats about once a second and reports again "
+                "at doublings.",
+                who, drifted, span, slots,
+                ownerModuleName(firstNow, modBuf, sizeof(modBuf)));
+        } else {
+            Log::get().note(
+                "VTableHook %s: the vtable EDVR copied has DRIFTED from the table "
+                "it was copied FROM -- %zu of the first %zu entries (%s) now hold "
+                "something else, and the first of them points into %s. EDVR's "
+                "copy still holds what they held at install, and this object "
+                "dispatches through the copy, so for any of those that is a "
+                "method of this interface, the game is calling the older entry. "
+                "That is what the private-copy mode is FOR when the two are "
+                "interchangeable, and a genuine hazard when they are not. Nothing "
+                "was changed. This check repeats about once a second and reports "
+                "again at doublings; if this log ends in a crash, this line is "
+                "the one to report.",
+                who, drifted, span, slots,
+                ownerModuleName(firstNow, modBuf, sizeof(modBuf)));
+        }
     } else if ((m_copyDriftEvents & (m_copyDriftEvents - 1)) == 0) {
         Log::get().note(
-            "VTableHook %s: copy drift #%u (%zu slot(s): %s; first points into "
-            "%s).",
+            live ? "VTableHook %s: runtime re-point #%u (%zu slot(s): %s; first "
+                   "points into %s). Followed by the live table at the next call."
+                 : "VTableHook %s: copy drift #%u (%zu slot(s): %s; first points "
+                   "into %s).",
             who, m_copyDriftEvents, drifted, slots,
             ownerModuleName(firstNow, modBuf, sizeof(modBuf)));
     }
@@ -1127,7 +1276,7 @@ size_t VTableHook::reclaim(const char* name, const size_t* quietSlots,
     m_lastConceded = 0;
     m_lastPassRan = false;
     if (!m_committed) return 0;
-    if (m_mode == HookMode::CopyVptr) {
+    if (usesPrivateTable()) {
         // No war to fight -- but VERIFY the immunity rather than assume it,
         // because a silent grey void is the exact failure this project exists
         // to end. Two things must still hold: the object dispatches through

@@ -38,7 +38,9 @@
 // chain), and concede a tug-of-war at the cap instead of fighting forever.
 #include <windows.h>
 
+#include <cstdint>
 #include <cstdio>
+#include <cstring>
 
 #include "../../src/common/code_hook.h"
 #include "../../src/common/vtable_hook.h"
@@ -1199,6 +1201,255 @@ int main() {
               "the copy stack did not unwind to the original");
         check(o->one() == 1, "...and dispatch is stock",
               "a copy hook survived the full unwind");
+    }
+
+    // ===================================================================
+    // LiveCopy mode -- the vptr moves and NOTHING is frozen. Every entry of
+    // the private table is a stub that reads the runtime's own slot at the
+    // moment of the call, so the one property CopyVptr lacks -- following the
+    // table owner -- is the property these cells are written to prove.
+    // ===================================================================
+
+    // (a) THE LIVE-ONLY COMMIT, and the property that separates it from the
+    // swap-only probe above. The object moves onto the private table, every
+    // call runs the original code with no thunk anywhere -- and then the
+    // EMBEDDED table is re-pointed and the very next call goes to the NEW
+    // function. The swap-only cell above proves the opposite for its mode; if
+    // this cell ever starts behaving like that one, the stubs have stopped
+    // reading and started copying.
+    {
+        RealThing obj;
+        void** birth = *reinterpret_cast<void***>(&obj);
+        void*  birthSlot0 = readTableSlot(birth, 0);
+        IThing* r = &obj;
+        VTableHook live;
+        g_owner = &obj;
+        g_ownerHits = 0;
+        g_toolkitHits = 0;
+        if (!live.attach(&obj)) {
+            fail("attach for the live-only cell", "attach refused");
+        } else {
+            check(live.setMode(HookMode::LiveCopy),
+                  "setMode(LiveCopy) builds the stub table",
+                  "the stub page could not be allocated or made executable");
+            check(live.commitLive(), "an unpatched live table commits",
+                  "commitLive refused a plain live table");
+            check(*reinterpret_cast<void***>(&obj) != birth,
+                  "...and the object now dispatches through it",
+                  "the vptr was not moved, so this cell would test nothing");
+            check(r->one() == 1 && g_ownerHits == 0,
+                  "...running exactly the original code -- no thunk anywhere",
+                  "something other than the original ran through a live table "
+                  "that has nothing patched in it");
+
+            // THE PROPERTY. The table's owner re-selects its own entry, the way
+            // Windows' d3d11.dll does to the context every frame.
+            g_toolkitClean = reinterpret_cast<PFN_One>(birthSlot0);
+            writeTableSlot(birth, 0, reinterpret_cast<void*>(&toolkitOne));
+            check(readTableSlot(birth, 0) == reinterpret_cast<void*>(&toolkitOne),
+                  "the owner's re-point actually landed in the embedded table",
+                  "the store was optimised away, so this cell proves nothing");
+            g_toolkitHits = 0;
+            check(r->one() == 10001 && g_toolkitHits == 1,
+                  "a live table FOLLOWS the owner re-pointing its own entry",
+                  "the call went to the entry the table held at install -- the "
+                  "stubs are freezing instead of reading, which is CopyVptr "
+                  "with extra steps");
+
+            writeTableSlot(birth, 0, birthSlot0);
+            live.uninstall();
+            check(*reinterpret_cast<void***>(&obj) == birth && r->one() == 1,
+                  "uninstall puts the birth vptr back",
+                  "the object was left on a private table");
+        }
+    }
+
+    // (b) A PATCHED LIVE SLOT. The thunk fires, and its forward -- which
+    // replace() handed back as the slot's STUB rather than as a function --
+    // follows an embedded re-point. This is the whole reason a thunk body needs
+    // no change between the modes.
+    {
+        RealThing obj;
+        IThing* r = &obj;
+        void** birth = *reinterpret_cast<void***>(&obj);
+        void*  birthSlot0 = readTableSlot(birth, 0);
+
+        VTableHook live;
+        g_owner = &obj;
+        g_ownerHits = 0;
+        if (!live.attach(&obj) || !live.setMode(HookMode::LiveCopy)) {
+            fail("attach/setMode for the patched-live cell", "refused");
+        } else {
+            live.replace(0, reinterpret_cast<void*>(&thunkOne),
+                         reinterpret_cast<void**>(&g_realOne));
+            check(live.commit(), "a patched live table commits", "commit failed");
+            check(r->one() == 1001 && g_ownerHits == 1,
+                  "our thunk fires through the live table",
+                  "the live hook did not take effect");
+
+            // The runtime re-selects. Our thunk must still run, and the thing it
+            // forwards to must be the NEW entry -- proved by the counter inside
+            // toolkitOne, not by arithmetic alone.
+            g_toolkitClean = reinterpret_cast<PFN_One>(birthSlot0);
+            writeTableSlot(birth, 0, reinterpret_cast<void*>(&toolkitOne));
+            g_ownerHits = 0;
+            g_toolkitHits = 0;
+            const int got = r->one();
+            check(g_ownerHits == 1 && g_toolkitHits == 1,
+                  "after an embedded re-point BOTH run, our thunk in front",
+                  "the thunk's forward did not follow the re-point");
+            // 1 from RealThing::one, +10000 as the new entry wraps it, +1000 as
+            // our thunk wraps that.
+            check(got == 11001, "...composed in the right order",
+                  "the return value says the composed chain is wrong");
+
+            writeTableSlot(birth, 0, birthSlot0);
+            g_ownerHits = 0;
+            check(r->one() == 1001 && g_ownerHits == 1,
+                  "...and it follows the re-point BACK again",
+                  "the forward latched onto the new entry instead of reading "
+                  "the slot at each call");
+
+            live.uninstall();
+            check(*reinterpret_cast<void***>(&obj) == birth && r->one() == 1,
+                  "uninstall restores the birth vptr",
+                  "a live hook survived uninstall");
+        }
+    }
+
+    // (c) TWO STACKED LIVE HOOKS, in the shipped order: exposure underneath
+    // (its table is the runtime's real one), vScreen on top (its table is the
+    // lower hook's). The upper hook's stubs read the LOWER hook's cells, which
+    // hold stubs or thunks -- two extra jumps and still nothing frozen, which
+    // this cell proves by re-pointing the bottom table and requiring the call
+    // to follow it through both layers.
+    {
+        RealThing obj;
+        IThing* o = &obj;
+        void** birth = *reinterpret_cast<void***>(&obj);
+        void*  birthSlot0 = readTableSlot(birth, 0);
+
+        VTableHook lower, upper;
+        g_owner = &obj;
+        lower.attach(&obj);
+        check(lower.setMode(HookMode::LiveCopy), "the lower live hook builds",
+              "setMode refused");
+        lower.replace(0, reinterpret_cast<void*>(&thunkOne),
+                      reinterpret_cast<void**>(&g_realOne));
+        lower.commit();
+
+        upper.attach(&obj);          // reads the vptr the lower hook installed
+        check(upper.setMode(HookMode::LiveCopy), "the upper live hook builds",
+              "setMode refused on a table of stubs");
+        upper.replace(0, reinterpret_cast<void*>(&thunkOneB),
+                      reinterpret_cast<void**>(&g_realOneB));
+        upper.commit();
+
+        g_ownerHits = 0;
+        g_bHits = 0;
+        check(o->one() == 3001 && g_ownerHits == 1 && g_bHits == 1,
+              "two live hooks stack, both run, each once",
+              "the stacked live chain does not run both exactly once");
+
+        g_toolkitClean = reinterpret_cast<PFN_One>(birthSlot0);
+        writeTableSlot(birth, 0, reinterpret_cast<void*>(&toolkitOne));
+        g_ownerHits = 0;
+        g_bHits = 0;
+        g_toolkitHits = 0;
+        check(o->one() == 13001 && g_ownerHits == 1 && g_bHits == 1 &&
+                  g_toolkitHits == 1,
+              "...and a re-point of the bottom table is followed through both",
+              "a stacked live table froze somewhere in the middle");
+        writeTableSlot(birth, 0, birthSlot0);
+
+        upper.uninstall();
+        g_ownerHits = 0;
+        check(o->one() == 1001 && g_ownerHits == 1,
+              "peeling the upper live hook leaves the lower",
+              "uninstalling the upper live hook broke the lower");
+        lower.uninstall();
+        check(*reinterpret_cast<void***>(&obj) == birth && o->one() == 1,
+              "peeling both restores the birth vptr",
+              "the live stack did not unwind to the original");
+    }
+
+    // (d) ONE WAY TO EACH STATE. commit() is for a staged table and refuses an
+    // empty list; commitLive() is for an empty one and refuses a staged list.
+    // Two doors into the same room is how a log line stops meaning what it
+    // says: "LIVE-ONLY PROBE" must imply no thunk exists, and the only thing
+    // that can enforce that is the entry point refusing.
+    {
+        RealThing obj;
+        void** birth = *reinterpret_cast<void***>(&obj);
+        VTableHook live;
+        g_owner = &obj;
+        if (!live.attach(&obj) || !live.setMode(HookMode::LiveCopy)) {
+            fail("attach/setMode for the live entry-point cell", "refused");
+        } else {
+            check(!live.commit(),
+                  "commit() refuses a live table with nothing staged",
+                  "commit accepted an empty patch list");
+            live.replace(0, reinterpret_cast<void*>(&thunkOne),
+                         reinterpret_cast<void**>(&g_realOne));
+            check(!live.commitLive(),
+                  "...and commitLive() refuses one with a patch staged",
+                  "the live-only probe would have installed a thunk while the "
+                  "log said no EDVR code was in the path");
+            check(!live.commitUnpatched(),
+                  "...and commitUnpatched() refuses the live mode outright",
+                  "the copy-mode probe accepted a live table, so the two "
+                  "probes would report each other's result");
+            check(live.commit(), "...and commit() takes the staged one",
+                  "commit refused a properly staged live table");
+            live.uninstall();
+            check(*reinterpret_cast<void***>(&obj) == birth,
+                  "...cleanup restored the vptr",
+                  "the entry-point cell left the object hooked");
+        }
+    }
+
+    // (e) WHAT AN UNPATCHED LIVE ENTRY ACTUALLY IS, byte for byte. Everything
+    // above tests behaviour, and behaviour can be produced by the wrong
+    // mechanism -- a table of copied function pointers would pass cell (a) on a
+    // run where nothing re-pointed. This asserts the twelve bytes:
+    //
+    //   48 B8 <&table[i]>   mov rax, the ADDRESS of the runtime's slot
+    //   FF 20               jmp qword ptr [rax]
+    //
+    // If the immediate is ever the slot's CONTENTS rather than its address, the
+    // stub freezes and every cell above starts passing for the wrong reason on
+    // any machine where the runtime happens not to move.
+    {
+        RealThing obj;
+        void** birth = *reinterpret_cast<void***>(&obj);
+        VTableHook live;
+        g_owner = &obj;
+        if (!live.attach(&obj) || !live.setMode(HookMode::LiveCopy) ||
+            !live.commitLive()) {
+            fail("attach/commit for the stub-bytes cell", "refused");
+        } else {
+            void** table = *reinterpret_cast<void***>(&obj);
+            bool shaped = true;
+            for (size_t i = 0; i < 8 && shaped; ++i) {
+                const uint8_t* stub = static_cast<const uint8_t*>(table[i]);
+                void* want = static_cast<void*>(&birth[i]);
+                void* got = nullptr;
+                memcpy(&got, stub + 2, sizeof(got));
+                shaped = stub[0] == 0x48 && stub[1] == 0xB8 && got == want &&
+                         stub[10] == 0xFF && stub[11] == 0x20;
+            }
+            check(shaped,
+                  "every unpatched live entry is `mov rax, &table[i]; jmp [rax]`",
+                  "a stub does not have the shape that makes it read the live "
+                  "entry -- if the immediate is the slot's value rather than "
+                  "its address, this mode is a frozen copy wearing a disguise");
+            check(static_cast<void*>(table[0]) !=
+                      static_cast<void*>(table[1]),
+                  "...and each slot has its own stub",
+                  "two slots share a stub, so one of them dispatches the "
+                  "other's method");
+            live.uninstall();
+        }
     }
 
     // The module probe that drives the whole decision: a vtable inside a

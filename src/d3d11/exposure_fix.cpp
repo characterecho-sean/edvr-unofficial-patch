@@ -1588,10 +1588,52 @@ void installExposureFix(ID3D11Device* device, HookMode mode) {
     }
 
     Log::get().note("exposure fix installed on %p (%zu methods), currently %s, "
-                    "target %s",
+                    "target %s, hooking %s",
                     static_cast<void*>(ctx), s.hook.executablePrefix(),
                     s.enabled ? "ON" : "off",
-                    s.pinned ? "pinned by config" : "detected automatically");
+                    s.pinned ? "pinned by config" : "detected automatically",
+                    s.hook.mode() == HookMode::CopyVptr
+                        ? "by private vtable copy"
+                    : s.hook.mode() == HookMode::LiveCopy
+                        ? "by live private vtable (stubs that read the context's "
+                          "own slot at each call)"
+                        : "in place");
+
+    // WHICH VARIANT THE TABLE WAS ON AT INSTALL, named by module and offset.
+    //
+    // Issue #21's whole question is whether the runtime SWITCHES the
+    // work-emitting family between two implementations, and the reporter's
+    // logs name the destination (..._DrawIndexed_Amortized<1>) without ever
+    // naming the departure point -- so "24 entries changed" cannot be matched
+    // up between two runs, or between a run and a PDB. Two slots are enough to
+    // fix that: DrawIndexed, which the field data says moves, and
+    // ClearRenderTargetView, which is the same family and a different block of
+    // the table. Costs two VirtualQuery calls, once, at install.
+    //
+    // Read from THIS hook and not vScreen's. The exposure hook installs first,
+    // so its m_vtable is the runtime's real embedded table in every mode; once
+    // a private mode is in play vScreen's is this hook's private buffer, and
+    // printing that would name EDVR's own stubs as the runtime's variant.
+    {
+        void** table = s.hook.originalVTable();
+        if (table && s.hook.executablePrefix() > 50) {
+            void* drawIndexed = nullptr;
+            void* clearRtv = nullptr;
+            guarded("exposure/install-variant-read", [&] {
+                drawIndexed = table[12];
+                clearRtv = table[50];
+            });
+            char a[MAX_PATH], b[MAX_PATH];
+            Log::get().note(
+                "context table at install: slot 12 (DrawIndexed) = %s; slot 50 "
+                "(ClearRenderTargetView) = %s. These are the entries the runtime "
+                "had selected when EDVR arrived -- quote them beside any later "
+                "line about entries changing, because a changed entry only means "
+                "something next to the one it changed FROM.",
+                vtableOwnerModuleName(drawIndexed, a, sizeof(a)),
+                vtableOwnerModuleName(clearRtv, b, sizeof(b)));
+        }
+    }
     exposureConfigure(cfg);
     ctx->Release();
 }
@@ -1630,8 +1672,8 @@ void exposureFixReclaimHooks(bool sceneRendered) {
 void exposureFixReclaimTick() {
     State* s = g_state;
     if (!s) return;
-    // Copy mode has no slot to lose; see vScreenReclaimTick.
-    if (s->hook.mode() == HookMode::CopyVptr) return;
+    // A private table has no slot to lose; see vScreenReclaimTick.
+    if (s->hook.mode() != HookMode::InPlace) return;
     s->hook.reclaim("exposure context", nullptr, 0);
 }
 
