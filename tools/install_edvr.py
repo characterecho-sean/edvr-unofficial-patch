@@ -18,7 +18,8 @@ Three things it does that a `copy` does not:
     with a sharing violation or -- worse, if the game has not touched it
     yet -- succeeds and is then thrown away by the next launch. The check
     is by image name, so any install being open blocks any install: it
-    over-refuses on purpose, and --force is the escape.
+    over-refuses on purpose, and --force is the escape. A --dry-run is
+    never refused: it copies nothing, so there is nothing to protect.
   * VERIFIES by SHA-256 after copying, source against destination, and
     says both hashes. An outdated DLL has invalidated a test flight
     before, and a hash is the only thing that can tell you it did.
@@ -301,7 +302,12 @@ def main(argv=None):
     if args.verify_only:
         return 0 if do_verify(plan) else 1
 
-    if not args.force and game_running():
+    # The guard exists because copying onto a loaded DLL is what goes wrong
+    # with the game open. A dry run copies nothing, so it is not refused:
+    # `--target steam --dry-run` with Elite open prints the plan, as
+    # CLAUDE.md says it does (it was refused before 2026-09-11, and the
+    # self-test papered over that with --force).
+    if not args.force and not args.dry_run and game_running():
         print("[edvr] ERROR: %s is running. Close the game, or pass --force\n"
               "       if you know this install is not the one that is open."
               % GAME_EXE)
@@ -406,7 +412,12 @@ def self_test():
 
         # The property that matters most: --dry-run writes nothing. Not
         # the copy, not the backup, not a directory. This project has
-        # shipped a --dry-run that wrote files.
+        # shipped a --dry-run that wrote files. No --force here, on
+        # purpose: a dry run is not refused while the game runs (it copies
+        # nothing), and this call is what keeps that so -- the build gate
+        # went red on 2026-09-11 with Elite open when the running-game
+        # guard sat ahead of the dry-run branch. The listing and the bytes
+        # are what prove the property, not the exit code.
         before = sorted(os.listdir(game))
         before_bytes = open(os.path.join(game, "d3d11.dll"), "rb").read()
         rc = main(["--root", root, "--target", game, "--dll", "--dry-run"])
