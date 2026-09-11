@@ -1239,10 +1239,11 @@ void reportFlipSummary(const char* why) {
         "the last frame. That is what this probe costs. Of the writes INSIDE the "
         "table, %u changed a value and %u put the same value back; %u event(s) "
         "were overwritten before the frame path could read them, %u never had "
-        "their second half, %u faulted on another thread while this one was "
-        "mid-catch and were let through unrecorded, and %u single step(s) "
-        "arrived without matching the pair we owed ourselves (that last one must "
-        "be zero).%s",
+        "their second half, %u faulted while a catch was already in progress and "
+        "were let through unrecorded (that includes a catching thread's own "
+        "store faulting a second time after its pages were closed under it, "
+        "which loses nothing), and %u single step(s) arrived on a thread that "
+        "did not own the catch (that last one must be zero).%s",
         g_watch.who, why, static_cast<unsigned>(catches),
         static_cast<unsigned long long>(g_flip.frames), perFrame,
         perFrame * kCatchCostUs / 1000.0, kCatchCostUs,
