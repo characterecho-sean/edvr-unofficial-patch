@@ -569,6 +569,7 @@ UN[id.xy]=uiEvidence(id.xy);Result[id.xy]=adaptiveUiReactive(id.xy,float2(id.xy)
         constexpr UINT w=13,h=9;
         auto raw=texture(w,h,DXGI_FORMAT_R8G8B8A8_UNORM),mask=texture(w,h,DXGI_FORMAT_R8_UNORM);
         auto previous=texture(w,h,DXGI_FORMAT_R8G8B8A8_UNORM),next=texture(w,h,DXGI_FORMAT_R8G8B8A8_UNORM);
+        auto velocity=texture(w,h,DXGI_FORMAT_R32G32_FLOAT);auto velocityV=srv(velocity.Get());
         auto rawV=srv(raw.Get()),maskV=srv(mask.Get()),previousV=srv(previous.Get());auto nextU=uav(next.Get());
         struct Params {int region[4]={0,0,w,h};int size[2]={w,h};int texSize[2]={w,h};float tn[4]={},tp[4]={},jit[4]={};} p;
         D3D11_BUFFER_DESC resolveDesc{};resolveDesc.ByteWidth=sizeof(p);resolveDesc.BindFlags=D3D11_BIND_CONSTANT_BUFFER;
@@ -578,15 +579,17 @@ UN[id.xy]=uiEvidence(id.xy);Result[id.xy]=adaptiveUiReactive(id.xy,float2(id.xy)
             auto trained=texture(ow,oh,DXGI_FORMAT_R8G8B8A8_UNORM),output=texture(ow,oh,DXGI_FORMAT_R8G8B8A8_UNORM);
             auto trainedV=srv(trained.Get());auto outputU=uav(output.Get());
             std::vector<unsigned char> colour(w*h*4,0),mark(w*h,0),old(w*h*4,0),model(ow*oh*4,0);
+            std::vector<float> motion(w*h*2,0);
             for(UINT i=0;i<ow*oh;++i){model[4*i]=static_cast<unsigned char>(64+i%100);model[4*i+3]=127;}
             auto run=[&](bool haveHistory){
                 ctx->UpdateSubresource(raw.Get(),0,nullptr,colour.data(),w*4,0);ctx->UpdateSubresource(mask.Get(),0,nullptr,mark.data(),w,0);
                 ctx->UpdateSubresource(previous.Get(),0,nullptr,old.data(),w*4,0);ctx->UpdateSubresource(trained.Get(),0,nullptr,model.data(),ow*4,0);
                 ctx->UpdateSubresource(cb.Get(),0,nullptr,&p,0,0);
-                ID3D11ShaderResourceView* in[]={rawV.Get(),trainedV.Get(),maskV.Get(),haveHistory?previousV.Get():nullptr};
+                ctx->UpdateSubresource(velocity.Get(),0,nullptr,motion.data(),w*8,0);
+                ID3D11ShaderResourceView* in[]={rawV.Get(),trainedV.Get(),maskV.Get(),haveHistory?previousV.Get():nullptr,velocityV.Get()};
                 ID3D11UnorderedAccessView* out[]={outputU.Get(),nextU.Get()};
                 const float poison[4]={1,1,1,1};ctx->ClearUnorderedAccessViewFloat(outputU.Get(),poison);
-                ctx->CSSetShader(cs.Get(),nullptr,0);ctx->CSSetShaderResources(0,4,in);ctx->CSSetUnorderedAccessViews(0,2,out,nullptr);
+                ctx->CSSetShader(cs.Get(),nullptr,0);ctx->CSSetShaderResources(0,5,in);ctx->CSSetUnorderedAccessViews(0,2,out,nullptr);
                 ctx->CSSetConstantBuffers(0,1,cb.GetAddressOf());ctx->Dispatch((w+7)/8,(h+7)/8,1);ctx->ClearState();
                 return read(dev.Get(),ctx.Get(),output.Get());
             };
@@ -594,6 +597,22 @@ UN[id.xy]=uiEvidence(id.xy);Result[id.xy]=adaptiveUiReactive(id.xy,float2(id.xy)
             for(UINT i=0;i<ow*oh;++i)check(std::fabs(resolvedValues[i]-model[4*i]/255.f)<1e-6,"UI resolve copies every world output pixel unchanged");
             for(float a:read(dev.Get(),ctx.Get(),output.Get(),3))check(std::fabs(a-127/255.f)<1e-6,"UI resolve preserves submission alpha");
             for(float a:read(dev.Get(),ctx.Get(),next.Get(),3))check(a==0,"unmarked scene cannot grow UI influence");
+            // An exposed world pixel carries last frame's UI six pixels
+            // sideways and four down. Neither current coverage nor the old
+            // screen position includes the new trail (104513 RIKEN dump).
+            old[4*(2*w+2)+3]=255;
+            motion[2*(6*w+8)]=-6;motion[2*(6*w+8)+1]=-4;
+            resolvedValues=run(true);
+            for(UINT y=0;y<oh;++y)for(UINT x=0;x<ow;++x){
+                const UINT qx=x*w/ow,qy=y*h/oh;
+                const bool owned=(qx==2&&qy==2)||(qx==8&&qy==6);
+                check(owned?resolvedValues[y*ow+x]==0:std::fabs(resolvedValues[y*ow+x]-model[4*(y*ow+x)]/255.f)<1e-6,"transported UI trail is clipped while unrelated world output stays identical");
+            }
+            // Invalid/off-screen motion cannot smear border UI inward.
+            motion[2*(6*w+8)]=-1000;resolvedValues=run(true);
+            for(UINT y=0;y<oh;++y)for(UINT x=0;x<ow;++x)
+                if(x*w/ow==8&&y*h/oh==6)check(std::fabs(resolvedValues[y*ow+x]-model[4*(y*ow+x)]/255.f)<1e-6,"off-screen transported history is rejected");
+            old.assign(w*h*4,0);motion.assign(w*h*2,0);
             mark.assign(w*h,3);resolvedValues=run(false);
             for(UINT i=0;i<ow*oh;++i)check(std::fabs(resolvedValues[i]-model[4*i]/255.f)<1e-6,"smoke is excluded from UI resolve");
             mark.assign(w*h,1);resolvedValues=run(false);

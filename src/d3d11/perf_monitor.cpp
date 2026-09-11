@@ -602,6 +602,19 @@ void perfMonitorSetActive(bool active) {
     if (active) s.activeUntilMs = nowMs() + kGraceMs;
 }
 
+namespace {
+PerfRecentTimes recentTimes() {
+    PerfRecentTimes times;
+    float seconds = 0;
+    for (int i = g_s.count - 1; i >= 0 && seconds < kMatchWindowS; --i) {
+        const Frame& f = ringAt(i);
+        times.add(f.presentMs, f.presentWaitMs, f.posesWaitMs, f.haveComp != 0, f.totalGpuMs, f.appCpuMs);
+        seconds += f.presentMs / 1000.f;
+    }
+    return times;
+}
+}
+
 int perfMonitorTiles(PerfTile* out, int max) {
     State& s = g_s;
     if (!out || max <= 0) return 0;
@@ -626,29 +639,9 @@ int perfMonitorTiles(PerfTile* out, int max) {
     // The mean over fpsVR's own update window, so the two numbers can be
     // read side by side. Averaging the whole ten-second ring instead read
     // about a millisecond under it (flown 2026-09-07).
-    double matchGpu = 0.0, matchCpu = 0.0, matchApp = 0.0;
-    int matchGpuN = 0, matchCpuN = 0, matchAppN = 0;
-    float matchSecs = 0.0f;
-    for (int i = s.count - 1; i >= 0 && matchSecs < kMatchWindowS; --i) {
-        const Frame& f = ringAt(i);
-        if (f.haveComp) {
-            matchGpu += f.totalGpuMs;
-            ++matchGpuN;
-            if (f.appCpuMs > 0.0f) {
-                matchApp += f.appCpuMs;
-                ++matchAppN;
-            }
-        }
-        const float b = f.presentMs - f.presentWaitMs - f.posesWaitMs;
-        if (b > 0.0f) {
-            matchCpu += b;
-            ++matchCpuN;
-        }
-        matchSecs += f.presentMs / 1000.0f;
-    }
-    const float recentGpu = matchGpuN ? static_cast<float>(matchGpu / matchGpuN) : 0.0f;
-    const float recentCpu = matchCpuN ? static_cast<float>(matchCpu / matchCpuN) : 0.0f;
-    const float recentAppCpu = matchAppN ? static_cast<float>(matchApp / matchAppN) : 0.0f;
+    const PerfRecentTimes recent = recentTimes();
+    const float recentGpu = recent.gpuMs(), recentCpu = recent.threadMs();
+    const float recentAppCpu = recent.appCount ? recent.cpuMs() : 0;
     int dropsWithEdvr = 0, dropsClean = 0;
     uint32_t dropEventBits = 0;
     double edvrBoundary = 0.0, edvrDoor = 0.0, doorGpu = 0.0;
@@ -895,7 +888,7 @@ int perfMonitorGraph(int which, float* out, int max, float* budgetMs) {
             out[i] = f.haveComp ? f.totalGpuMs : 0.0f;
         } else if (which == kGraphCpu) {
             const float b = f.presentMs - f.presentWaitMs - f.posesWaitMs;
-            out[i] = b > 0.0f ? b : 0.0f;
+            out[i] = f.haveComp && f.appCpuMs > 0 ? f.appCpuMs : (b > 0 ? b : 0);
         } else {
             out[i] = f.presentMs;
         }
@@ -906,36 +899,28 @@ int perfMonitorGraph(int which, float* out, int max, float* budgetMs) {
 void perfMonitorOverlayLine(char* buf, size_t bufLen) {
     State& s = g_s;
     if (!buf || !bufLen) return;
-    // The last second of intervals, the last ten of drops; the GPU frame
-    // (the compositor's total, fpsVR's GPU frametime) from the settled
-    // records in that second, and the render thread's busy time.
-    float present[kRing], gpuFrame[kRing], busy[kRing];
-    int n = 0, gpuN = 0, dropped = 0;
-    float secs = 0.0f;
+    // FPS keeps its one-second window; CPU/GPU match the menu's recent
+    // compositor window. Thread time is explicitly named when unavailable.
+    float present[kRing];
+    int n = 0, dropped = 0;
+    float secs = 0;
     for (int i = s.count - 1; i >= 0; --i) {
         const Frame& f = ringAt(i);
         dropped += f.dropped;
-        if (secs < 1.0f) {
-            present[n] = f.presentMs;
-            const float b = f.presentMs - f.presentWaitMs - f.posesWaitMs;
-            busy[n] = b > 0.0f ? b : 0.0f;
-            ++n;
-            if (f.haveComp) gpuFrame[gpuN++] = f.totalGpuMs;
-            secs += f.presentMs / 1000.0f;
+        if (secs < 1.f) {
+            present[n++] = f.presentMs;
+            secs += f.presentMs / 1000.f;
         }
     }
     const PerfStats ps = perfStatsOf(present, n);
-    if (!ps.count) {
-        snprintf(buf, bufLen, "measuring");
-        return;
-    }
+    if (!ps.count) { snprintf(buf, bufLen, "measuring"); return; }
+    const PerfRecentTimes recent = recentTimes();
+    const char* cpuLabel = recent.appCount ? "cpu" : "thread";
     char times[80] = "";
-    if (gpuN) {
-        snprintf(times, sizeof(times), "   gpu %.1f   cpu %.1f", perfStatsOf(gpuFrame, gpuN).avgMs,
-                 perfStatsOf(busy, n).avgMs);
-    } else {
-        snprintf(times, sizeof(times), "   %.1f ms   cpu %.1f", ps.avgMs, perfStatsOf(busy, n).avgMs);
-    }
+    if (recent.gpuCount)
+        snprintf(times, sizeof(times), "   gpu %.1f   %s %.1f", recent.gpuMs(), cpuLabel, recent.cpuMs());
+    else
+        snprintf(times, sizeof(times), "   %.1f ms   %s %.1f", ps.avgMs, cpuLabel, recent.cpuMs());
     char drop[40] = "";
     if (dropped) snprintf(drop, sizeof(drop), "   %d dropped", dropped);
     snprintf(buf, bufLen, "%.0f fps%s%s", perfFpsOf(ps.avgMs), times, drop);

@@ -1991,13 +1991,10 @@ void maybeLogPrice() {
     g_priceLogged = true;
     Log::get().note(
         "temporal aa: measured %.2f ms per eye on average (max %.2f) at "
-        "%ux%u -- one dispatch, nine history taps and a 3x3 neighbourhood "
-        "per pixel. History rejected for %.1f%% of pixels and clipped for "
-        "%.1f%% so far; both low with the head turning and the ship steady "
-        "means the reprojection is right (docs\\anti-aliasing.md Phase 0 "
-        "item 6's price, measured).",
-        g_timeSum / static_cast<double>(g_timeCount), g_timeMax, g_lastW,
-        g_lastH,
+        "the temporal work's GPU bracket. Diagnostic rejection %.1f%%, "
+        "clipping %.1f%%; these counters describe the native resolve only "
+        "and cannot validate DLSS history or motion.",
+        g_timeSum / static_cast<double>(g_timeCount), g_timeMax,
         100.0 * static_cast<double>(g_rejected) / static_cast<double>(g_pixelsSeen),
         100.0 * static_cast<double>(g_clipped) / static_cast<double>(g_pixelsSeen));
 }
@@ -5081,15 +5078,15 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     // says why). Inside the timed region, so the price is honest.
                     if (usedDlaa && uiResolve) {
                         ctx->CSSetShaderResources(0,14,nullSrvM);ctx->CSSetUnorderedAccessViews(0,7,nullUavM,nullptr);
-                        ID3D11ShaderResourceView* srvs[4]={e.dlColourSrv,e.dlOutSrv,uiBound?e.uiMaskSrv:nullptr,e.uiHistoryValid?e.uiHistorySrv[e.uiHistoryRead]:nullptr};
+                        ID3D11ShaderResourceView* srvs[5]={e.dlColourSrv,e.dlOutSrv,uiBound?e.uiMaskSrv:nullptr,e.uiHistoryValid?e.uiHistorySrv[e.uiHistoryRead]:nullptr,e.dlMvSrv};
                         ID3D11UnorderedAccessView* uavs[2]={e.dlSubmitUav,e.uiHistoryUav[1-e.uiHistoryRead]};
-                        ctx->CSSetShader(g_csUiResolve,nullptr,0);ctx->CSSetShaderResources(0,4,srvs);ctx->CSSetUnorderedAccessViews(0,2,uavs,nullptr);
+                        ctx->CSSetShader(g_csUiResolve,nullptr,0);ctx->CSSetShaderResources(0,5,srvs);ctx->CSSetUnorderedAccessViews(0,2,uavs,nullptr);
                         // NGX may change compute bindings, including b0.
                         ctx->CSSetConstantBuffers(0,1,&g_cb);
                         ctx->Dispatch((w+7)/8,(h+7)/8,1);
                         ctx->CSSetShaderResources(0,14,nullSrvM);ctx->CSSetUnorderedAccessViews(0,7,nullUavM,nullptr);
                         uiEvidenceWritten=uiResolveWritten=true;
-                        if(!g_uiResolveNoted){g_uiResolveNoted=true;Log::get().note("UI resolve: current-raster bounds applied after DLSS; model-independent ghost rejection, existing submit/UI-history textures reused. No adaptive colour work in the DLSS motion pass.");}
+                        if(!g_uiResolveNoted){g_uiResolveNoted=true;Log::get().note("UI resolve: current-raster bounds applied after DLSS; UI influence follows submitted motion as well as its old screen position. Existing submit/UI-history textures reused; no adaptive colour work in the DLSS motion pass.");}
                     } else if (usedDlaa) ctx->CopyResource(e.dlSubmit, e.dlOut);
                 }
             }

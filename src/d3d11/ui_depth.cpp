@@ -1,6 +1,7 @@
 #include "ui_depth.h"
 #include "ui_depth_layer.h"
 #include "stellar_coverage.h"
+#include "gpu_interval.h"
 
 #include <windows.h>
 
@@ -755,6 +756,7 @@ bool     g_maskNotedOnce = false;
 struct StellarCpu { uint32_t calls=0,samples=0; int64_t ticks=0; } g_stellarCpu[2];
 int g_stellarCpuActive=-1;
 int64_t g_stellarCpuStart=0;
+GpuIntervals<64> g_stellarGpu[2];
 
 void resetWindow() {
     g_wComposite = g_wDirect = g_wWrote = g_wDepthless = g_wNotScene = 0;
@@ -762,6 +764,7 @@ void resetWindow() {
     g_wNoTwin = g_wLearned = g_wMarked = 0;
     g_wFrames = 0;
     for(auto& sample:g_stellarCpu) sample={};
+    for(auto& sample:g_stellarGpu) sample.totals={};
 }
 
 int surfaceIndex(const void* res) {
@@ -1785,7 +1788,11 @@ bool uiDepthReissueBegin(ID3D11DeviceContext* ctx) {
     if(stellar>=0) {
         ++g_stellarCpu[stellar].calls;
         // Include preparation, the extra draw and restoration. No GPU wait.
-        if((g_frame&15u)==0u) {g_stellarCpuActive=stellar;g_stellarCpuStart=qpcNow();}
+        if((g_frame&15u)==0u) {
+            // Query creation is diagnostic setup, excluded from CPU samples.
+            g_stellarGpu[stellar].begin(ctx);
+            g_stellarCpuActive=stellar;g_stellarCpuStart=qpcNow();
+        }
     }
     const bool ran = guardedBudget(g_budget, [&] {
         // The depth pass writes depth with the nearer-wins test; a
@@ -1966,7 +1973,7 @@ bool uiDepthReissueBegin(ID3D11DeviceContext* ctx) {
         Log::get().note("ui depth: STANDING DOWN for the session -- the depth pass "
                         "faulted repeatedly. The interface draws as the game issues it.");
     }
-    if (!ran) uiDepthReissueEnd(ctx);
+    if (!ran || !g_reissueOn) uiDepthReissueEnd(ctx);
     return g_reissueOn;
 }
 
@@ -2022,7 +2029,8 @@ void uiDepthReissueEnd(ID3D11DeviceContext* ctx) {
     g_reissueShader = nullptr;
     if(g_stellarCpuActive>=0) {
         auto& sample=g_stellarCpu[g_stellarCpuActive];
-        sample.ticks+=qpcNow()-g_stellarCpuStart;++sample.samples;g_stellarCpuActive=-1;
+        sample.ticks+=qpcNow()-g_stellarCpuStart;++sample.samples;
+        g_stellarGpu[g_stellarCpuActive].end(ctx);g_stellarCpuActive=-1;
     }
 }
 
@@ -2108,6 +2116,7 @@ void uiDepthHoloWriteDump(ID3D11DeviceContext* ctx,const wchar_t* directory,cons
 
 void uiDepthFrameBoundary(ID3D11DeviceContext* ctx) {
     ++g_frame;
+    if(ctx) for(auto& sample:g_stellarGpu) sample.poll(ctx);
     for (UiDepthLayer& layer : g_uiDepth) layer.frameBoundary();
     for(auto& motion:g_holoMotion) motion.frameBoundary();
     g_frameTargetCount = 0;
@@ -2139,6 +2148,12 @@ void uiDepthFrameBoundary(ID3D11DeviceContext* ctx) {
             if(s.calls) Log::get().note("stellar coverage CPU: %s calls=%u sampled=%u frames=%u, %.3f us/call (prepare, reissue and restore; sampled every 16th frame; no GPU wait).",
                 i==0?"ring":"orbital",s.calls,s.samples,g_wFrames,
                 s.samples?double(s.ticks)*1e6/double(qpcFrequency())/s.samples:0.0);
+            const auto& gpu=g_stellarGpu[i].totals;
+            if(s.calls || gpu.samples || gpu.invalid || gpu.skipped)
+                Log::get().note("stellar coverage GPU: %s completed=%u skipped=%u invalid=%u, %.3f us/call; estimated %.3f ms/frame from %u calls/%u frames. Separate from EDVR-at-door GPU; sampled every 16th frame, no wait or flush.",
+                    i==0?"ring":"orbital",gpu.samples,gpu.skipped,gpu.invalid,
+                    gpu.samples?gpu.ms*1000.0/gpu.samples:0.0,
+                    gpu.samples?gpu.ms/gpu.samples*double(s.calls)/g_wFrames:0.0,s.calls,g_wFrames);
         }
         if (g_wWrote || g_wNotScene || g_wRebound || g_wNoPair || g_wNoShader ||
             g_wNoTwin || g_wLearned || g_evictions) {
@@ -2166,6 +2181,8 @@ void uiDepthFrameBoundary(ID3D11DeviceContext* ctx) {
 }
 
 void uiDepthShutdown() {
+    for(auto& sample:g_stellarGpu) sample={};
+    g_stellarCpuActive=-1;
     g_holoDump.Reset(); g_holoDumpCount=0;
     for(auto& motion:g_holoMotion) motion=HoloMotion{};
     if(g_savedHoloInfo) { g_savedHoloInfo->Release(); g_savedHoloInfo=nullptr; }

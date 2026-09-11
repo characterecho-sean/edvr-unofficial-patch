@@ -465,9 +465,8 @@ bool dlaaEvaluate(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* colour,
     ep.pInBiasCurrentColorMask = reactive;
     if (reactive && !g_maskNoted) {
         g_maskNoted = true;
-        Log::get().note("dlaa: a bias-current-colour mask is being handed to NVIDIA "
-                        "with each evaluation -- where it is set, the runtime favours "
-                        "this frame's colour over the history.");
+        Log::get().note("dlaa: a bias-current-colour mask is being handed to NVIDIA. "
+                        "Only preset F supports this input; modern presets use EDVR's separate UI resolve.");
     }
     ep.InJitterOffsetX = jx;
     ep.InJitterOffsetY = jy;

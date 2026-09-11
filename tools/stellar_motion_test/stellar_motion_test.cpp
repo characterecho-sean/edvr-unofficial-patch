@@ -1,5 +1,6 @@
 #include "../../src/d3d11/holo_motion.h"
 #include "../../src/d3d11/stellar_coverage.h"
+#include "../../src/d3d11/gpu_interval.h"
 #include <d3dcompiler.h>
 #include <d3d11sdklayers.h>
 #include <vector>
@@ -30,6 +31,17 @@ int main(int argc,char** argv){
     HRESULT made=D3D11CreateDevice(nullptr,D3D_DRIVER_TYPE_WARP,nullptr,D3D11_CREATE_DEVICE_DEBUG,nullptr,0,D3D11_SDK_VERSION,&dev,&level,&ctx);
     if(made==DXGI_ERROR_SDK_COMPONENT_MISSING)made=D3D11CreateDevice(nullptr,D3D_DRIVER_TYPE_WARP,nullptr,0,nullptr,0,D3D11_SDK_VERSION,&dev,&level,&ctx);hr(made);
     ComPtr<ID3D11InfoQueue> messages;dev.As(&messages);
+    {
+        GpuIntervals<2> timer;
+        for(int i=0;i<2;++i){check(timer.begin(ctx.Get()),"GPU coverage interval begins");timer.end(ctx.Get());}
+        check(!timer.begin(ctx.Get())&&timer.totals.skipped==1,"full GPU interval ring skips without waiting or overwriting");
+        // Only the test flushes/waits. Production polls once per frame.
+        ctx->Flush();
+        for(unsigned i=0;i<2000 && timer.totals.samples+timer.totals.invalid<2;++i){timer.poll(ctx.Get());Sleep(1);}
+        check(timer.totals.samples==2&&timer.totals.invalid==0&&timer.totals.ms>=0,"GPU coverage timestamps complete and are counted exactly once");
+        timer.poll(ctx.Get());check(timer.totals.samples==2,"completed GPU intervals are not counted twice");
+        check(timer.begin(ctx.Get()),"completed GPU interval can be reused");timer.end(ctx.Get());
+    }
     auto buffer=[&](UINT size,UINT bind){D3D11_BUFFER_DESC d{};d.ByteWidth=size;d.BindFlags=bind;ComPtr<ID3D11Buffer> b;hr(dev->CreateBuffer(&d,nullptr,&b));return b;};
     auto read=[&](ID3D11ShaderResourceView* view){
         ComPtr<ID3D11Resource> res;view->GetResource(&res);ComPtr<ID3D11Buffer> src;hr(res.As(&src));D3D11_BUFFER_DESC d{};src->GetDesc(&d);

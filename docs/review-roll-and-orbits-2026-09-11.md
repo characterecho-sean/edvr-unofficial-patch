@@ -326,3 +326,81 @@ GPU/parser fixture and the unchanged 243-key configuration contract.
 `smoke-ui-resolve.log` passes the production graphics DLL smoke test, including
 actual DLSS evaluation and motion/jitter convention checks. The investigation
 remains bounded by the visual and CPU limitations stated above.
+
+### Local-space performance report and RIKEN, 10:41 flight
+
+`edvr_gfx_20260911_104106.log` matches `7f45298`, graphics build `6AA42AE7`.
+This SteamVR run uses DLSS 310.7.0.0, preset L, 2268x2240 input and
+4536x4480 output per eye. The user's reported EDVR GPU time is about 7.5 ms.
+
+Ruled out: ring coverage causes the entire reported 7.5 ms at submission.
+The log records 7.55 ms at 10:42:07, before stellar coverage activates at
+10:44:09. NVIDIA evaluation accounts for about 3.16 ms per eye then, rising
+to a cumulative 3.41 ms later. The EDVR GPU tile measures both eyes at the
+submission boundary; it excludes the earlier coverage draws. The frame rate
+drops to about 82-83 after entering local space, so added scene/coverage cost
+must still be measured rather than dismissed on the basis of that tile.
+
+Ruled out: the sampled ring CPU path alone accounts for high sustained CPU
+frametime. The 10:44:58 window has 21,600 calls over 1,800 frames, 1,356
+samples, and 1.249 microseconds per call: roughly 0.015 ms per stereo frame
+for preparation, reissue and restoration. No orbital coverage activates in
+this flight. These samples do not measure all process CPU usage.
+
+The HUD displayed render-thread time over one second, while the menu's main
+CPU tile displayed compositor app time over 0.2 seconds. They now share the
+same recent accumulator and source selection; the CPU graph follows the app
+source too. Render-thread time remains available on the menu subline and is
+explicitly labelled `thread` in the HUD when app stamps are unavailable.
+This corrects a measurement mismatch, not the actual workload.
+
+The user approved switching the Steam INI and its saved mirror from L to K.
+The local cost probe measured K at 1.59 ms/eye versus L at 2.79 ms/eye at
+2168x2142 to 4336x4284 on this GPU. This is a benchmark at a slightly smaller
+size, not a measured improvement in the next flight. Other settings remain
+unchanged. Separate sampled GPU intervals now bracket the stellar preparation,
+reissue and restoration. Queries are bounded, polled at least four frames
+later with DONOTFLUSH, and never awaited. Completed, skipped and invalid
+samples are logged separately from the existing submission GPU cost.
+
+The RIKEN capture `104513` identifies a further UI-history gap. In its first
+treated frame, the crop x=1700..1919/y=1200..1279 contains 280 pixels exceeding
+their current raw colour bounds by more than 2/255, with maximum error 67/255.
+All lie outside the current dilated UI coverage. Their median background
+motion is approximately (+0.11,-6.98) input pixels, while the panel follows
+its own transform. Sampling the present UI footprint at those previous-frame
+locations reaches UI for 244 of the 280 pixels. This is an estimate using
+present coverage, not a captured previous influence texture.
+
+Ruled out: all remaining RIKEN ghosting is colour that fits inside the local
+UI clip range. The visible faint copies below the name are outside both that
+range and the current UI mask. The old correction only retained influence at
+its previous screen position; DLSS can carry UI into a new position using the
+newly exposed background's vector. The resolve now also reprojects previous
+influence with the exact submitted motion buffer. It preserves fractional
+coverage over the bilinear footprint, rejects off-screen/nonfinite coordinates,
+and retains the existing expiry. No extra textures or sharpen/filter changes
+are introduced.
+
+The GPU regression verifies a transported trail six pixels sideways and four
+down, separate from the old footprint, plus unchanged unrelated world output,
+invalid motion and the existing alpha/jitter/expiry/size cases. An actual-DLSS
+moving-text replay with separate UI/background vectors shows a small change
+in overall ghost energy: K 0.437 to 0.412 and L 0.309255 to 0.309218 on a
+0-255 scale. Most of that fixture's residual lies inside the clip footprint;
+it does not prove the full name is ghost-free in flight. The captured trace
+and the direct transported-history regression support this narrower fix.
+
+At the flight's 2268x2240 to 4536x4480 dimensions, the changed resolve measured
+0.106-0.128 ms/eye versus 0.116-0.119 before, using captured approach coverage
+and the new run's motion buffer. This isolated benchmark shows no material
+added cost; it is not a whole-game GPU measurement. The next flight must verify
+preset K, separate ring GPU samples, consistent CPU displays and the RIKEN
+trail during ship movement.
+
+Validation: `build-perf-transport.log` passes the full build and all gates,
+including 15,485 UI checks, the shared CPU-source checks and the asynchronous
+GPU-query regression. `test-perf-transport.log` also passes the captured
+cockpit/stellar transform and original shader fixtures. The production DLL
+passes `smoke-perf-transport.log`, including actual NVIDIA evaluation. These
+checks do not replace the remaining headset verification described above.

@@ -655,9 +655,10 @@ the page says so by calling it clean.
 the Performance page** since 2026-09-08 -- it is the one thing a player
 wants to turn on from inside the headset, and until then it was reachable
 only by editing the file): a one-line readout -- frames per second over
-the last second, the GPU frame time from the settled records in it, the
-render thread's busy time, frames dropped in the last ten seconds --
-shown while the
+the last second, CPU/GPU time over the same 0.2-second window and from the
+same compositor source as the menu, and frames dropped in the last ten seconds.
+The label `thread` identifies the CPU fallback when app stamps are absent.
+It is shown while the
 menu is CLOSED and pinned to the head, the toolkit's overlay, because that
 is what was asked for and a gauge you carry has its uses. `fps_overlay_yaw`
 and `fps_overlay_pitch` put it where you can stop seeing it (default 16

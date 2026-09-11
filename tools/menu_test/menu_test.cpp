@@ -408,6 +408,14 @@ void testIniWrite() {
 // --- the Monitor page's statistics ------------------------------------------
 
 void testPerfStats() {
+    PerfRecentTimes recent;
+    recent.add(20,1,3,true,9,2);
+    recent.add(18,1,3,true,11,4);
+    recent.add(22,1,3,false,999,999); // unsettled stamps cannot enter app/GPU means
+    check(approx(recent.cpuMs(),3)&&approx(recent.gpuMs(),10),"monitor: both surfaces select settled app time, not longer render-thread time");
+    check(approx(recent.threadMs(),16),"monitor: render-thread time remains available separately");
+    PerfRecentTimes unavailable;unavailable.add(20,1,3,false,0,0);
+    check(!unavailable.appCount&&approx(unavailable.cpuMs(),16)&&unavailable.gpuMs()==0,"monitor: missing compositor timings use an explicitly identifiable thread fallback");
     // 100 frames at 11.1 ms with one 40 ms hitch: the mean barely moves,
     // the max is the hitch, and the 1% low IS the hitch.
     float ms[100];
