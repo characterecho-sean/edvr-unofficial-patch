@@ -696,6 +696,17 @@ if errorlevel 1 ( echo [edvr] ERROR: ui_depth_test build failed & exit /b 1 )
     exit /b 1
 )
 
+echo [edvr] === hologram motion regression ===
+if not exist "%OBJ%\holomotion" mkdir "%OBJ%\holomotion"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
+    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
+    /Fo"%OBJ%\holomotion\\" /Fe"%OBJ%\holomotion\holo_motion_test.exe" ^
+    "tools\holo_motion_test\holo_motion_test.cpp" ^
+    /link /INCREMENTAL:NO d3d11.lib d3dcompiler.lib
+if errorlevel 1 ( echo [edvr] ERROR: hologram motion test build failed & exit /b 1 )
+"%OBJ%\holomotion\holo_motion_test.exe" || exit /b 1
+python "tools\holo_motion.py" --self-test || exit /b 1
+
 echo [edvr] === terrain motion regression ===
 if not exist "%OBJ%\terrainmotion" mkdir "%OBJ%\terrainmotion"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 ^

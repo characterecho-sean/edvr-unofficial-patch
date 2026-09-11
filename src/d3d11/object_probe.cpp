@@ -558,6 +558,7 @@ uint32_t g_ledgerSkipped = 0;
 constexpr int      kLedgerAux = 8;            // shaders watched, in order of first appearance
 constexpr uint32_t kLedgerAuxMin = 50;        // instances a draw needs to be watched
 constexpr uint32_t kLedgerAuxBytes = 65536;   // of each buffer
+constexpr uint64_t kOrbitalLineVs = 0xC7FA0C0F5DD49180ull;
 constexpr int      kAuxWhat = 4;              // cb2, t0, vb0, vb1
 struct AuxSlot {
     uint64_t vs = 0;
@@ -2573,7 +2574,12 @@ void auxCapture(ID3D11DeviceContext* ctx, uint64_t vs, uint32_t count, uint32_t 
         D3D11_BUFFER_DESC bd{};
         vbs[i]->GetDesc(&bd);
         a.stride[2 + i] = strides[i];
-        if (!auxStage(ctx, dev, a.ring[2 + i], vbs[i], bd.ByteWidth)) ++g_ledgerSkipped;
+        // Orbital lines have six instances, with their transforms in VB1
+        // rather than b0/b2. Keep the full 8194-vertex stroke on explicit
+        // eye runs; log offsets so the copied bindings can be reconstructed.
+        const uint32_t cap=vs==kOrbitalLineVs ? 256*1024 : kLedgerAuxBytes;
+        if (!auxStage(ctx, dev, a.ring[2 + i], vbs[i], bd.ByteWidth,cap)) ++g_ledgerSkipped;
+        if(vs==kOrbitalLineVs) Log::get().note("eye orbital inputs: frame %u vb%d offset %u stride %u bytes %u (copy cap %u).",g_frame+1,i,offsets[i],strides[i],bd.ByteWidth,cap);
         vbs[i]->Release();
     }
     if (dev) dev->Release();
@@ -2632,7 +2638,7 @@ void ledgerNoteDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count, uint32_
             // draws carry a handful of instances each, and the draws this is for
             // bind nothing at t33 -- the run of 05:37 asked the pool question
             // first and left on that before reaching here.
-            if (instances >= kLedgerAuxMin) auxCapture(ctx, d.vs, count, instances);
+            if (instances >= kLedgerAuxMin || d.vs==kOrbitalLineVs) auxCapture(ctx, d.vs, count, instances);
             ID3D11ShaderResourceView* srv = nullptr;
             ctx->VSGetShaderResources(kPoolSlot, 1, &srv);
             if (!srv) return;

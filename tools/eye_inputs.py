@@ -23,7 +23,9 @@ def read(path):
     if meta['version'] != 1 or len(data) != 44 + meta['row_bytes'] * meta['height']:
         raise ValueError('Unsupported version or incomplete capture')
     fmt, w, h = meta['format'], meta['width'], meta['height']
-    if fmt == 34:
+    if fmt == 16:  # R32G32_FLOAT: hologram record index and exact raster depth
+        image = np.frombuffer(data, '<f4', offset=44).reshape(h, w, 2)
+    elif fmt == 34:
         image = np.frombuffer(data, '<f2', offset=44).reshape(h, w, 2).astype('float32')
     elif fmt in (39, 40, 41):
         image = np.frombuffer(data, '<f4', offset=44).reshape(h, w)

@@ -217,18 +217,18 @@ moon.
 An additional timing trap is visible in scene b1[149]: during the terrain draw
 it still carries the prior approach state. Comparing its deltas to
 patch-derived translation gives roughly 8% mean relative disagreement without
-shifting the sequence. The **next** pair's field delta agrees much more
-closely (about 0.2% and 0.016% mean relative disagreement in the two runs).
-Later draws in the same frame already contain that next value. Reading that
-field directly at a terrain draw would introduce a frame of lag.
+shifting the sequence. The **next** pair's field delta agrees much more closely
+(about 0.2% and 0.016% mean relative disagreement in the two runs). Later draws
+in the same frame already contain that next value. Reading that field directly
+at a terrain draw would introduce a frame of lag.
 
 Reprojecting the first faster-approach raw image into the next, using its
 actual jittered projection and recorded depth, reduces gradient-pixel RMS
 intensity error from **8.95 to 5.51** when the patch translation is included.
-This is a limited two-frame image check, not a DLSS quality verdict. The
-slower pair has only about 0.01 pixel median extra displacement and its RMS
-does not improve (5.23 to 5.32); that noisy pair alone cannot measure such a
-small correction reliably.
+This is a limited two-frame image check, not a DLSS quality verdict. The slower
+pair has only about 0.01 pixel median extra displacement and its RMS does not
+improve (5.23 to 5.32); that noisy pair alone cannot measure such a small
+correction reliably.
 
 - Ruled out: missing camera rotation in these approach captures, because
   patch-derived rotation agrees with the selected camera to below 3e-7 per
@@ -246,17 +246,17 @@ It pairs patches using unchanged sampled bounds/UV parameters and retained VS
 texture-view identities, rather than draw order or a reused constant-buffer
 address. A changed LOD, missing frame, duplicate predecessor key or invalid
 projection declines to ordinary camera motion. Each eye has independent
-history, bounded to 512 draws. The original terrain depth draw is reissued
-with a constant index shader into private index/depth textures. Both native
-TAA and DLSS accept its motion only where that depth agrees with the final
-scene and no floating UI covers the pixel. Later foreground geometry, sky,
-stations and smoke retain their existing paths.
+history, bounded to 512 draws. The original terrain depth draw is reissued with
+a constant index shader into private index/depth textures. Both native TAA and
+DLSS accept its motion only where that depth agrees with the final scene and no
+floating UI covers the pixel. Later foreground geometry, sky, stations and
+smoke retain their existing paths.
 
-This adds one small compute dispatch and one depth/coverage draw per
-recognised terrain patch, without normal-play CPU readback. At this input size
-the two private index/depth pairs occupy about 77.5 MiB, plus bounded record
-buffers. Geometry/raster cost needs a flight measurement. The shaders return
-before reading terrain textures when no terrain layer is bound.
+This adds one small compute dispatch and one depth/coverage draw per recognised
+terrain patch, without normal-play CPU readback. At this input size the two
+private index/depth pairs occupy about 77.5 MiB, plus bounded record buffers.
+Geometry/raster cost needs a flight measurement. The shaders return before
+reading terrain textures when no terrain layer is bound.
 
 Cockpit-distance holo surfaces now use the comms panel's minimum source-alpha
 coverage rule (1/255), with the existing temporal cockpit range as the domain.
@@ -281,19 +281,19 @@ Eye dumps now retain `TerrainIndex` and `TerrainZ` alongside the existing
 first-frame inputs and a bounded `eye_<stamp>_Terrain.bin` record snapshot.
 `tools/terrain_motion.py` reads the latter; the log reports how many patch
 transforms matched. This distinguishes an active coverage draw from usable
-history. Readback is only for an explicitly requested eye dump, after its
-grace period, with a nonblocking map. No record file or a failed readback is
-not evidence of a match.
+history. Readback is only for an explicitly requested eye dump, after its grace
+period, with a nonblocking map. No record file or a failed readback is not
+evidence of a match.
 
 ## Verification of the corrections
 
-The production GPU fixture verifies draw-time preservation when the game
-buffer is overwritten, prior-depth and motion-vector sign/units, unchanged
-live scene depth, foreground/UI rejection, missing-frame and LOD fallback,
-duplicate-key rejection, per-eye isolation, draw limits and restored bindings.
-Both complete temporal shader entries compile. It also writes a real terrain
-dump which the standard-library reader validates; malformed/truncated reader
-inputs are rejected.
+The production GPU fixture verifies draw-time preservation when the game buffer
+is overwritten, prior-depth and motion-vector sign/units, unchanged live scene
+depth, foreground/UI rejection, missing-frame and LOD fallback, duplicate-key
+rejection, per-eye isolation, draw limits and restored bindings. Both complete
+temporal shader entries compile. It also writes a real terrain dump which the
+standard-library reader validates; malformed/truncated reader inputs are
+rejected.
 
 The optional replay uses **864 actual adjacent transform pairs**, across both
 eyes and both approach captures. All projection/key checks pass and GPU
@@ -301,8 +301,8 @@ translation agrees with the double-precision reference within float precision
 at the captured celestial distances. The UI fixture exercises 124/255 rank
 text, faint backing, zero/sub-quantum alpha and a 16 km marker through the
 production holo coverage shader. Existing smoke-hole, sprite, HUD, menu and
-adaptive-UI regressions pass as well. The captured replay and UI results are
-in `build/review_motion/sep11/test-rendering-final.log`.
+adaptive-UI regressions pass as well. The captured replay and UI results are in
+`build/review_motion/sep11/test-rendering-final.log`.
 
 The full build passed all gates, including the new terrain GPU/reader fixture
 and the configuration contract. The production DLL smoke test also passed.
@@ -310,5 +310,121 @@ Logs: `build/review_motion/sep11/build-terrain-verified.log` and
 `smoke-terrain.log`.
 
 These are bench-tested rendering corrections; flight confirmation remains
-necessary, especially for near-panel translucency and performance while
-terrain is visible.
+necessary, especially for near-panel translucency and performance while terrain
+is visible.
+
+
+## Follow-up flight: 07:42, captures 074458 / 074511 / 074645 / 074658
+
+The run matches `edd5c7c` (v0.15.1-3-gedd5c7c, graphics build 6AA402A3). The
+user confirms the moon is sharp. Preserve that terrain correction. The rank
+panel and comms still flicker while the ship moves. The last two captures show
+the gas giant, its rings and orbital lines. Input size is 2268x2240 per eye,
+output 4536x4480, with continuous DLSS history and no recorded history reset in
+these captures.
+
+### Two demonstrated cockpit UI errors
+
+**Ruled out: the previous near-hologram alpha exception was independent of ship
+orientation.** Holo VS 81216C77F90DEDD6 writes TEXCOORD6 using b0[9..11], but
+those rows are identity in these cockpit draws. The value is the
+camera-relative **world** position, not view-space depth. In the rank capture,
+the panel's relative Z is negative while its actual clip W is about 1.08 m. The
+prior `tc6.z > 0` check therefore rejects its dim letters. The comms panel also
+has negative relative Z. Correct the distance check using raster device depth
+and the temporal projection's A/B encoding. The GPU regression deliberately
+supplies negative TEXCOORD6 Z while rendering at both cockpit and 16 km marker
+distances. The marker's existing alpha cutoff remains intact.
+
+**Ruled out: accurate headset-only vectors fully describe moving cockpit
+panels.** The pool records include the game's actual ship-relative placement,
+quaternion quantization and world-origin subtraction. These produce small
+motion absent from the runtime headset pose. For comms, raw-image registration
+after removing raster jitter differs from head-only vectors by RMS 0.48 px
+horizontally and 1.09 px vertically over the 15 adjacent image pairs.
+Reconstructing the panel from the captured pool record and draw-time b0/b1
+instead predicts the same image registration to about 0.011/0.005 px RMS. Both
+text and icons share the discrepancy. This is geometric evidence, not a
+sharpening or reactive-strength experiment.
+
+The rank panel's pool index changes within its capture. Treating that integer
+as a stable object ID creates a gross false movement. Also, b2[2] changes every
+frame: it animates glow coordinates, while primary surface UVs and vertex
+positions do not depend on it. Neither the pool index nor this material
+animation belongs in the motion-history key.
+
+### Correction in this build
+
+`holo_motion.h` keeps bounded GPU history for supported unskinned cockpit
+holograms. It captures the actual pool record, b0 clip transform and b1 origin
+at the draw. It uses the game's non-normalized UNORM16 quaternion operation and
+computes the current-to-previous clip mapping. Surface and mesh bindings
+identify candidates; a unique nearby projected origin disambiguates repeated
+geometry. Resource references keep these binding identities alive across
+history. Reordered pool slots and animated glow coordinates cannot invalidate
+an otherwise continuous panel.
+
+The existing private UI coverage draw also writes a record index and its exact
+device depth into an additional target. No additional geometry draw is needed.
+The temporal pass accepts those vectors only for marked UI whose depth still
+matches that coverage, with a valid unique predecessor and consecutive
+raster-jitter history. Later foreground geometry, skinned surfaces, distant
+markers, unsupported layouts/viewports, missing frames and ambiguous matches
+retain the existing path. Both native TAA and DLSS remove the previous/current
+raster-jitter difference from the captured mapping. Live game depth remains
+untouched.
+
+Limits: 128 supported hologram draws per eye; one instance per indexed draw;
+the observed 8-byte instance / 40-byte mesh layout and full-eye viewport. Two
+R32G32_FLOAT coverage targets cost about 77.5 MiB at this flight's stereo input
+size, plus roughly 120 KiB of record buffers. Normal play has GPU
+copies/dispatches but no readback. Translucent pixels still have one motion
+vector; the implementation favours panel content there. Flight validation is
+still required for perceived stability and performance.
+
+Explicit eye runs now save `HoloCoverage.bin` (record index and exact raster
+depth) and `Holo.bin` (EDVRHLO1, 240-byte GPU records). The log distinguishes
+total, eligible and matched transforms; absence/failure is reported rather than
+counted as success. `tools/holo_motion.py` reads these records and rejects
+malformed captures.
+
+### Rings and orbital lines: confirmed missing inputs, still outstanding
+
+In 074658, all 3,986 bright pixels in the ring ROI (783,760)-(855,880), all
+5,104 in (1090,1230)-(1190,1285), and all 634 yellow orbital-arc pixels in
+(1092,390)-(1113,594) have **zero** depth in the actual merged temporal input.
+Coordinates refer to C00's 1400-square crop. They consequently take the
+sky/camera rotation path. This explains why the terrain correction does not fix
+their approach motion. The gas-giant sphere is also a separate renderer from
+the terrain-depth family.
+
+The ring draw families are layered translucent materials; their original pixel
+shaders compute opacity from radial textures, distance fades and view angle. A
+rectangular or whole-mesh depth stamp would incorrectly move stars seen through
+transparent ring regions. No such stamp is shipped in this change. These
+materials need their own opacity-aware coverage and draw-transform history.
+
+Orbital-line VS C7FA0C0F5DD49180 reads per-instance transforms from its vertex
+stream, outside the pool and b0/b2 snapshot. Its six instances were below the
+auxiliary capture's 50-instance threshold. Explicit eye runs now include this
+family regardless of that threshold, keep up to 256 KiB of each vertex buffer
+to cover its 8194-vertex stroke, and log the actual binding offsets and strides
+for each captured frame. The existing draw ledger supplies frame and
+start-instance joins. Ordinary play does not perform these diagnostic copies.
+
+### Bench evidence
+
+The hologram fixture replays 72 actual adjacent panel-transform pairs across
+both eyes and both UI captures, including their reordered pool records. GPU
+projection agrees with the double-precision reconstruction within 0.015 input
+pixels. Synthetic cases exercise missing and ambiguous history, animation, pool
+reordering, skinned and distant geometry refusal, and restoration of caller
+compute bindings. The actual temporal consumer runs on WARP and verifies
+DLSS/native raster-jitter removal, prior physical depth, foreground rejection
+and skipped-frame fallback. The existing UI alpha/occlusion/smoke-hole and
+terrain fixtures remain build gates.
+
+The complete build passed all gates (`build-holo-final.log`). The captured
+replay and both temporal-consumer modes passed 1,498 checks
+(`test-holo-final.log`); the existing private UI fixture passed 6,777 checks.
+These logs are under `build/review_motion/sep11/`.

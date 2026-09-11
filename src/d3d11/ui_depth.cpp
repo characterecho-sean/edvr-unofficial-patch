@@ -6,6 +6,7 @@
 #include <d3d11.h>
 
 #include <cstdint>
+#include <cstdio>
 #include <cmath>
 #include <cstdlib>   // _strtoui64, strtod: the hash lists and the planes
 #include <cstring>
@@ -146,6 +147,12 @@ float    g_uiNear = 0.1f;       // advanced.ui_depth_planes
 float    g_uiFar = 1000.0f;
 float    g_alphaFloor = 0.5f;   // advanced.ui_depth_alpha: below it, no depth
 float    g_cockpitMetres = kTemporalShipMetres; // same near-field domain as temporal AA
+HoloMotion g_holoMotion[2];
+HoloDraw g_holoDraw;
+bool g_holoBound=false, g_holoNoted=false;
+ID3D11Buffer* g_savedHoloInfo=nullptr;
+Microsoft::WRL::ComPtr<ID3D11Buffer> g_holoDump;
+unsigned g_holoDumpCount=0;
 float    g_reactive = 0.0f;     // advanced.ui_depth_reactive: the bias mask's value
 bool     g_scaleNoted = false;
 constexpr uint32_t kMaxViewports = 16;
@@ -356,17 +363,21 @@ const char kHoloDepthHlsl[] =
     "Texture2D<float4> Surf : register(t2);\n"
     "SamplerState Smp : register(s1);\n"
     "cbuffer P : register(b13) { float4 floorAndStrength; float4 sceneProjection; };\n"
+    "cbuffer Motion : register(b12) { uint4 motionInfo; };\n"
     "struct In {\n"
     "    float4 tc0 : TEXCOORD0;\n"
     "    float3 tc4 : TEXCOORD4;\n"
     "    float3 tc6 : TEXCOORD6;\n"
     "    float3 tc7 : TEXCOORD7;\n"
     "    float2 tc8 : TEXCOORD8;\n"
+    "    float4 pos : SV_Position;\n"
     "};\n"
-    "float4 main(In i) : SV_Target {\n"
+    "float4 main(In i, out float2 motion : SV_Target1) : SV_Target0 {\n"
     "    float a = Surf.Sample(Smp, i.tc8).a;\n"
-    "    bool cockpit = i.tc6.z > 0 && i.tc6.z < sceneProjection.z;\n"
+    "    float den = i.pos.z - sceneProjection.x;\n"
+    "    bool cockpit = den > 0 && sceneProjection.y > 0 && sceneProjection.y / den < sceneProjection.z;\n"
     "    clip(a - (cockpit ? min(floorAndStrength.x, 1.0 / 255.0) : floorAndStrength.x));\n"
+    "    motion = float2(motionInfo.x+1, i.pos.z);\n"
     "    return floorAndStrength.w;\n"
     "}\n";
 
@@ -1101,8 +1112,10 @@ ID3D11BlendState* maskBlend(ID3D11DeviceContext* ctx) {
     ctx->GetDevice(&dev);
     if (!dev) return nullptr;
     D3D11_BLEND_DESC bd{};
+    bd.IndependentBlendEnable = TRUE;
     bd.RenderTarget[0].BlendEnable = FALSE;
     bd.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_RED;
+    bd.RenderTarget[1].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
     const HRESULT hr = dev->CreateBlendState(&bd, &g_maskBlend);
     dev->Release();
     if (FAILED(hr)) g_maskBlend = nullptr;
@@ -1512,7 +1525,8 @@ void uiDepthNoteOffscreenDraw(ID3D11DeviceContext* ctx) {
     }
 }
 
-bool uiDepthOnEyeDraw(ID3D11DeviceContext* ctx) {
+bool uiDepthOnEyeDraw(ID3D11DeviceContext* ctx, const HoloDraw& draw) {
+    g_holoDraw=draw;
     g_mode = Mode::kNone;
     g_wantRebind = false;
     g_wantMask = false;
@@ -1779,6 +1793,14 @@ bool uiDepthReissueBegin(ID3D11DeviceContext* ctx) {
         ID3D11DepthStencilView* target = nullptr;
         if (g_reissueMaskSlot != 3 && scene && g_drawEye >= 0 && g_drawEye < 2)
             target = g_uiDepth[g_drawEye].acquire(ctx, scene);
+        bool holo=false;
+        if (target && scene && mask && shader==&g_depthShaders[3]) {
+            holo=g_holoMotion[g_drawEye].prepare(ctx,scene,g_holoDraw,g_cockpitMetres);
+            if(holo && !g_holoNoted) {
+                g_holoNoted=true;
+                Log::get().note("holo motion: draw-time cockpit transform history active; 128 draws per eye, pool-slot-independent matching, TAA/DLSS.");
+            }
+        }
         if (scene) scene->Release();
         if (g_reissueMaskSlot != 3 && !target) {
             releaseSavedOm();
@@ -1854,6 +1876,7 @@ bool uiDepthReissueBegin(ID3D11DeviceContext* ctx) {
         ctx->OMGetDepthStencilState(&g_reSavedDss, &g_reSavedRef);
         ctx->PSGetShader(&g_savedPs, nullptr, nullptr);
         ctx->PSGetConstantBuffers(13, 1, &g_savedFloorCb);
+        if(holo) ctx->PSGetConstantBuffers(12,1,&g_savedHoloInfo);
         if (hudScene) ctx->PSGetShaderResources(2, 1, &g_savedHudScene);
         if (mask) ctx->OMGetBlendState(&g_reSavedBlend, g_reSavedBlendFactor, &g_reSavedSampleMask);
         g_reBlendSaved = mask != nullptr;
@@ -1863,7 +1886,12 @@ bool uiDepthReissueBegin(ID3D11DeviceContext* ctx) {
         // otherwise; through the original entry so the binding shadow keeps
         // describing the game's bindings.
         ID3D11RenderTargetView* rtv = mask ? mask->rtv : nullptr;
-        vScreenSetRenderTargetsRaw(ctx, mask ? 1 : 0, mask ? &rtv : nullptr, target);
+        ID3D11RenderTargetView* rtvs[2]={rtv,holo?g_holoMotion[g_drawEye].target():nullptr};
+        vScreenSetRenderTargetsRaw(ctx, holo?2:(mask?1:0), mask?rtvs:nullptr, target);
+        if(holo) {
+            g_holoBound=true;
+            ID3D11Buffer* info=g_holoMotion[g_drawEye].info(); ctx->PSSetConstantBuffers(12,1,&info);
+        }
         if (hudScene) {
             g_hudSceneBound = true;
             ctx->PSSetShaderResources(2, 1, &hudScene);
@@ -1909,6 +1937,7 @@ void uiDepthReissueEnd(ID3D11DeviceContext* ctx) {
         guarded("uiDepth.reissueRestore", [&] {
             ctx->PSSetShader(g_savedPs, nullptr, 0);
             ctx->PSSetConstantBuffers(13, 1, &g_savedFloorCb);
+            if(g_holoBound) ctx->PSSetConstantBuffers(12,1,&g_savedHoloInfo);
             if (g_hudSceneBound) ctx->PSSetShaderResources(2, 1, &g_savedHudScene);
             ctx->OMSetDepthStencilState(g_reSavedDss, g_reSavedRef);
             if (g_reBlendSaved) {
@@ -1918,6 +1947,8 @@ void uiDepthReissueEnd(ID3D11DeviceContext* ctx) {
             restoreViewports(ctx);
         });
         if (g_savedFloorCb) { g_savedFloorCb->Release(); g_savedFloorCb = nullptr; }
+        if(g_savedHoloInfo) { g_savedHoloInfo->Release(); g_savedHoloInfo=nullptr; }
+        g_holoBound=false;
         if (g_savedHudScene) { g_savedHudScene->Release(); g_savedHudScene = nullptr; }
         g_hudSceneBound = false;
         if (g_savedPs) {
@@ -1992,9 +2023,42 @@ bool uiDepthTemporalDepth(uint32_t w, uint32_t h, int eye, ID3D11Texture2D* scen
     return *srv != nullptr;
 }
 
+void uiDepthHoloMotion(int eye, ID3D11Texture2D* scene, ID3D11ShaderResourceView** views) {
+    views[0]=views[1]=nullptr;
+    if(g_on && !g_stoodDown && eye>=0 && eye<2) g_holoMotion[eye].views(scene,views);
+}
+
+void uiDepthHoloStageDump(ID3D11DeviceContext* ctx, ID3D11Texture2D* scene) {
+    g_holoDump.Reset(); g_holoDumpCount=0;
+    ID3D11ShaderResourceView* views[2]{}; uiDepthHoloMotion(0,scene,views); if(!views[1]) return;
+    Microsoft::WRL::ComPtr<ID3D11Resource> resource; views[1]->GetResource(&resource);
+    Microsoft::WRL::ComPtr<ID3D11Buffer> buffer; if(FAILED(resource.As(&buffer))) return;
+    D3D11_BUFFER_DESC bd{}; buffer->GetDesc(&bd); bd.BindFlags=bd.MiscFlags=bd.StructureByteStride=0;
+    bd.Usage=D3D11_USAGE_STAGING; bd.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
+    Microsoft::WRL::ComPtr<ID3D11Device> dev; ctx->GetDevice(&dev);
+    if(SUCCEEDED(dev->CreateBuffer(&bd,nullptr,&g_holoDump))) {
+        ctx->CopyResource(g_holoDump.Get(),buffer.Get()); g_holoDumpCount=g_holoMotion[0].recordCount();
+    }
+}
+void uiDepthHoloWriteDump(ID3D11DeviceContext* ctx,const wchar_t* directory,const wchar_t* stamp) {
+    if(!g_holoDump) { Log::get().note("holo motion: eye run %ls has no records.",stamp); return; }
+    D3D11_MAPPED_SUBRESOURCE map{}; HRESULT result=ctx->Map(g_holoDump.Get(),0,D3D11_MAP_READ,D3D11_MAP_FLAG_DO_NOT_WAIT,&map);
+    if(SUCCEEDED(result)) {
+        unsigned valid=0,matched=0;
+        for(unsigned i=0;i<g_holoDumpCount;++i) { const auto* p=static_cast<const float*>(map.pData)+i*60; valid+=p[56]==1; matched+=p[59]==1; }
+        wchar_t path[MAX_PATH]; _snwprintf_s(path,MAX_PATH,_TRUNCATE,L"%s\\eye_%s_Holo.bin",directory,stamp);
+        FILE* file=nullptr; _wfopen_s(&file,path,L"wb"); bool ok=false;
+        if(file) { const uint32_t header[2]={g_holoDumpCount,240}; ok=fwrite("EDVRHLO1",1,8,file)==8 && fwrite(header,8,1,file)==1 && fwrite(map.pData,240,g_holoDumpCount,file)==g_holoDumpCount; if(fclose(file)!=0) ok=false; }
+        ctx->Unmap(g_holoDump.Get(),0);
+        Log::get().note("holo motion: eye run %ls matched %u/%u eligible transforms (%u total); record file %s.",stamp,matched,valid,g_holoDumpCount,ok?"written":"FAILED");
+    } else Log::get().note("holo motion: eye run %ls readback unavailable (0x%08X).",stamp,unsigned(result));
+    g_holoDump.Reset(); g_holoDumpCount=0;
+}
+
 void uiDepthFrameBoundary(ID3D11DeviceContext* ctx) {
     ++g_frame;
     for (UiDepthLayer& layer : g_uiDepth) layer.frameBoundary();
+    for(auto& motion:g_holoMotion) motion.frameBoundary();
     g_frameTargetCount = 0;
     // The masks are marked during the frame and read at its submits, so
     // the clear belongs here, after both.
@@ -2045,6 +2109,10 @@ void uiDepthFrameBoundary(ID3D11DeviceContext* ctx) {
 }
 
 void uiDepthShutdown() {
+    g_holoDump.Reset(); g_holoDumpCount=0;
+    for(auto& motion:g_holoMotion) motion=HoloMotion{};
+    if(g_savedHoloInfo) { g_savedHoloInfo->Release(); g_savedHoloInfo=nullptr; }
+    g_holoBound=g_holoNoted=false;
     if (g_savedFloorCb) { g_savedFloorCb->Release(); g_savedFloorCb = nullptr; }
     if (g_savedPs) {
         g_savedPs->Release();

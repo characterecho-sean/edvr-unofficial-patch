@@ -1945,7 +1945,8 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     // or a named family drawn straight into the eye, writes its depth. A
     // flag and not a verdict, so it composes with whatever claims the draw
     // below; forwardWithVerdict's scope consumes it.
-    if (uiDepthWantsDraws()) t_uiDepthThisDraw = uiDepthOnEyeDraw(self);
+    if (uiDepthWantsDraws()) t_uiDepthThisDraw = uiDepthOnEyeDraw(self,
+        {kind,count,instances,args.start,args.base,args.startInstance});
 
     // The intro movie's panel (intro_panel.h). First thing in the eye
     // branch, because it must see the composite before any other fix

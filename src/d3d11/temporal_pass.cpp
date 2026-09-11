@@ -60,6 +60,9 @@ Texture2D<float4> UP : register(t8);     // previous unjittered UI colour; alpha
 Texture2D<uint> TI : register(t9);      // terrain patch index, zero outside rasterised coverage
 Texture2D<float> TZ : register(t10);    // terrain depth, compared against final scene/UI depth
 struct TerrainRecord { uint4 key[12]; float4 q; float4 t; float4 r[3]; };
+Texture2D<float2> HC : register(t12);
+struct HoloRecord { uint4 key[8]; float4 clip[3]; float4 map[3]; float4 meta; };
+StructuredBuffer<HoloRecord> HR : register(t13);
 StructuredBuffer<TerrainRecord> TR : register(t11);
 RWTexture2D<float4> UN : register(u6);   // this frame's UI evidence, separate from accumulated colour
 RWTexture2D<float> MK : register(u5);    // for a trained pass: the mover mask, NVIDIA's bias-current-colour input (ONE texture: the interface's mask is folded in)
@@ -122,6 +125,7 @@ cbuffer P : register(b0) {
     float4 shDir[8];    // xyz the way the ship flies (unit, world; zero when unknown), w its tail plane: a point whose dot with xyz is under w is behind the ship -- its plume, which is not the ship's
     float4 shParts[256];   // per ship kObjectShipParts of its parts' positions (xyz, this frame's frame), shBox0[i].w of them: the ship's claim is the space within objects.z (a reach, squared) of one
     float4 shRect[8];   // per ship, its box's footprint on the image in pixels (x0 y0 x1 y1; empty when a corner is behind the eye), for the claim's counters
+    float4 holoJitter; // current minus previous raster jitter; z = consecutive treated frames
 };
 float3 rgbToYcocg(float3 c) {
     return float3(0.25 * c.r + 0.5 * c.g + 0.25 * c.b,
@@ -429,6 +433,26 @@ bool uiCovered(int2 q) {
     uint v = uint(UM.Load(int3(q, 0)) * 255.0 + 0.5);
     return (v & 1u) != 0u;
 }
+// Follow the actual nearby panel transform, including pool quantization
+// and animation. Exact coverage depth rejects later foreground geometry.
+// Offset is jitter for native TAA's output grid, zero for DLSS's input grid.
+bool holoPixel(float2 p, float2 offset, out float2 pp, out float zp) {
+    pp=0; zp=0;
+    if((uint(probe.w+.5)&16u)==0u || holoJitter.z==0) return false;
+    int2 q=region.xy+int2(round(p+offset));
+    float2 cov=HC.Load(int3(q,0)); uint index=uint(cov.x+.5);
+    if(index==0 || index>128 || !uiCovered(q)) return false;
+    if(cov.y<=knobs.x || abs(zSceneAt(q)-cov.y)>abs(cov.y)*1e-6) return false;
+    HoloRecord r=HR[index-1]; if(r.meta.w!=1) return false;
+    float z=knobs.z/(cov.y-knobs.x);
+    float2 ndc=(p+offset+region.xy+.5)/r.meta.yz*float2(2,-2)+float2(-1,1);
+    float4 current=float4(ndc*z,z,1);
+    float3 before=float3(dot(r.map[0],current),dot(r.map[1],current),dot(r.map[2],current));
+    if(before.z<=0 || !all(isfinite(before))) return false;
+    pp=(before.xy/before.z*float2(.5,-.5)+.5)*r.meta.yz-.5-region.xy+holoJitter.xy-offset;
+    zp=before.z;
+    return all(isfinite(pp));
+}
 // Exact terrain coverage only. The patch transform is in DirectX view
 // space (+Z forward); the pass's rays use the runtime's -Z convention.
 bool terrainPixel(float2 p, float3 d, out float2 pp, out float zp) {
@@ -632,6 +656,11 @@ bool fetchHistoryT(float2 p, float3 r0, float3 r1, float3 r2, float3 tv,
         pp=terrainP; zPred=terrainZ; world=1;
         if (any(pp<0) || any(pp>float2(size)-1)) return false;
     }
+    float2 holoP; float holoZ;
+    if (allowWorld && holoPixel(p,jit.xy,holoP,holoZ)) {
+        pp=holoP; zPred=holoZ; world=0;
+        if(any(pp<0) || any(pp>float2(size)-1)) return false;
+    }
     mvOut = pp - p;
     hy = rgbToYcocg(catmullRom((pp + 0.5) / float2(size), float2(size)).rgb);
     return true;
@@ -820,6 +849,10 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
             float2 terrainP; float terrainZ;
             if (terrainPixel(p,d,terrainP,terrainZ)) {
                 pp=terrainP; motion=pp-p; zPred=terrainZ;
+            }
+            float2 holoP; float holoZ;
+            if(holoPixel(p,0,holoP,holoZ)) {
+                pp=holoP; motion=pp-p; zPred=holoZ;
             }
             // The ships' claim, counted (Stats 40-45, the registration
             // line): a pixel in a ship's footprint the ship did not claim,
@@ -1539,8 +1572,9 @@ struct PassParams {
     float   shDir[kObjectShipsMax][4];     // xyz its way (unit), w its tail plane
     float   shParts[kObjectShipsMax * kObjectShipParts][4];   // its parts' positions, shBox0[i].w of them
     float   shRect[kObjectShipsMax][4];    // its box's footprint on the image, pixels
+    float   holoJitter[4];
 };
-static_assert(sizeof(PassParams) == 6608, "the cbuffer is 413 16-byte rows");
+static_assert(sizeof(PassParams) == 6624, "the cbuffer is 414 16-byte rows");
 
 // The format allowlist: the supersample resolve's, for its reasons
 // (supersample_pass.cpp) -- typeless and UNORM families read and written
@@ -1671,6 +1705,8 @@ struct EyeState {
     float                      headNow[12] = {};
     float                      eyeOff[3] = {};
     bool                       headNoted = false;
+    float                      rasterJitter[2] = {};
+    uint32_t                   jitterFrame = UINT32_MAX;
 
     ID3D11Texture2D*           outTex = nullptr;
     ID3D11UnorderedAccessView* outUav = nullptr;
@@ -2290,9 +2326,9 @@ wchar_t          g_eyeRunStamp[16] = L"";
 bool             g_eyeRunReady = false;
 bool             g_eyeRunUntreated = false;
 bool             g_eyeOverviewTaken[2] = {};
-ID3D11Texture2D*  g_eyeInputs[7] = {};
+ID3D11Texture2D*  g_eyeInputs[8] = {};
 uint32_t         g_eyeInputsFrame=0,g_eyeInputsUiBound=0,g_eyeInputsUiFlags=0;
-const wchar_t* const kEyeInputNames[7]={L"MV",L"Z",L"UI",L"Bias",L"SceneZ",L"TerrainIndex",L"TerrainZ"};
+const wchar_t* const kEyeInputNames[8]={L"MV",L"Z",L"UI",L"Bias",L"SceneZ",L"TerrainIndex",L"TerrainZ",L"HoloCoverage"};
 uint32_t         g_eyeRunWidth = 0, g_eyeRunHeight = 0;
 bool             g_eyeRawTaken[kEyeRun] = {};
 uint32_t         g_eyeRunFrames[kEyeRun] = {};
@@ -2571,12 +2607,13 @@ uint32_t g_rowsFrame = 0; // scene boundary counter, shared by captures and row 
 void stageEyeInputs(ID3D11DeviceContext* ctx,EyeState& e,ID3D11ShaderResourceView* scene,
                     ID3D11Texture2D* ui,float uiBound,float uiFlags) {
     if(g_eyeRunLeft<=0 || g_eyeRunTaken!=0 || g_eyeInputs[0])return;
-    ID3D11Texture2D* textures[7]={e.dlMv,e.dlDepth,ui,e.dlMask,nullptr,nullptr,nullptr};
+    ID3D11Texture2D* textures[8]={e.dlMv,e.dlDepth,ui,e.dlMask,nullptr,nullptr,nullptr,nullptr};
     if(scene) {
         ID3D11Resource* res=nullptr;scene->GetResource(&res);
         if(res){res->QueryInterface(__uuidof(ID3D11Texture2D),reinterpret_cast<void**>(&textures[4]));res->Release();}
     }
     celestialMotionStageDump(ctx,textures[4]);
+    uiDepthHoloStageDump(ctx,textures[4]);
     if(textures[4]) {
         ID3D11ShaderResourceView* terrain[3]{}; celestialMotionViews(textures[4],terrain);
         for(int k=0;k<2;++k)if(terrain[k]) {
@@ -2584,14 +2621,21 @@ void stageEyeInputs(ID3D11DeviceContext* ctx,EyeState& e,ID3D11ShaderResourceVie
             if(res){res->QueryInterface(__uuidof(ID3D11Texture2D),reinterpret_cast<void**>(&textures[k+5]));res->Release();}
         }
     }
-    for(int k=0;k<7;++k)if(textures[k])stageEyeRun(ctx,textures[k],g_eyeInputs,k);
-    for(int k=5;k<7;++k)if(textures[k])textures[k]->Release();
+    if(textures[4]) {
+        ID3D11ShaderResourceView* holo[2]{}; uiDepthHoloMotion(0,textures[4],holo);
+        if(holo[0]) {
+            ID3D11Resource* res=nullptr; holo[0]->GetResource(&res);
+            if(res) { res->QueryInterface(__uuidof(ID3D11Texture2D),reinterpret_cast<void**>(&textures[7])); res->Release(); }
+        }
+    }
+    for(int k=0;k<8;++k)if(textures[k])stageEyeRun(ctx,textures[k],g_eyeInputs,k);
+    for(int k=5;k<8;++k)if(textures[k])textures[k]->Release();
     if(textures[4])textures[4]->Release();
     g_eyeInputsFrame=g_rowsFrame;g_eyeInputsUiBound=static_cast<uint32_t>(uiBound);
     g_eyeInputsUiFlags=static_cast<uint32_t>(uiFlags);
 }
 void writeEyeInputs(ID3D11DeviceContext* ctx,const std::wstring& dir) {
-    for(int k=0;k<7;++k) {
+    for(int k=0;k<8;++k) {
         auto* texture=g_eyeInputs[k];if(!texture)continue;
         D3D11_TEXTURE2D_DESC d{};texture->GetDesc(&d);
         uint32_t bytes=0;
@@ -2601,7 +2645,7 @@ void writeEyeInputs(ID3D11DeviceContext* ctx,const std::wstring& dir) {
         case DXGI_FORMAT_R16G16_FLOAT:case DXGI_FORMAT_R32_FLOAT:case DXGI_FORMAT_R32_TYPELESS:
         case DXGI_FORMAT_D32_FLOAT:case DXGI_FORMAT_R24G8_TYPELESS:case DXGI_FORMAT_D24_UNORM_S8_UINT:
         case DXGI_FORMAT_R32_UINT:bytes=4;break;
-        case DXGI_FORMAT_R32G8X24_TYPELESS:case DXGI_FORMAT_D32_FLOAT_S8X24_UINT:bytes=8;break;
+        case DXGI_FORMAT_R32G32_FLOAT:case DXGI_FORMAT_R32G8X24_TYPELESS:case DXGI_FORMAT_D32_FLOAT_S8X24_UINT:bytes=8;break;
         default:break;
         }
         D3D11_MAPPED_SUBRESOURCE map{};
@@ -2620,6 +2664,7 @@ void writeEyeInputs(ID3D11DeviceContext* ctx,const std::wstring& dir) {
         texture->Release();g_eyeInputs[k]=nullptr;
     }
     celestialMotionWriteDump(ctx,dir.c_str(),g_eyeRunStamp);
+    uiDepthHoloWriteDump(ctx,dir.c_str(),g_eyeRunStamp);
 }
 
 bool stageEyeCrop(ID3D11DeviceContext* ctx, ID3D11Texture2D* tex, ID3D11Texture2D** slot, uint32_t* cwOut,
@@ -3627,6 +3672,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
 
     ID3D11ShaderResourceView* uiDepthSrv = nullptr;
     ID3D11ShaderResourceView* terrainSrvs[3] = {};
+    ID3D11ShaderResourceView* holoSrvs[2] = {};
     if (depthSrv) {
         ID3D11Resource* res = nullptr;
         depthSrv->GetResource(&res);
@@ -3638,6 +3684,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         if (scene) {
             uiDepthTemporalDepth(sd.Width, sd.Height, eye, scene, &uiDepthSrv);
             celestialMotionViews(scene, terrainSrvs);
+            uiDepthHoloMotion(eye,scene,holoSrvs);
             scene->Release();
         }
     }
@@ -3933,6 +3980,9 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         memcpy(p.tanPrev, useTanPrev ? tanPrev : tanNow, sizeof(p.tanPrev));
         p.jit[0] = jxNow;
         p.jit[1] = jyNow;
+        p.holoJitter[0]=jxNow-e.rasterJitter[0];
+        p.holoJitter[1]=jyNow-e.rasterJitter[1];
+        p.holoJitter[2]=e.jitterFrame+1==g_rowsFrame ? 1.0f:0.0f;
         p.jit[2] = g_filterCurrent ? 1.0f : 0.0f;
         p.jit[3] = g_historyC;
         // The depth's encoding: what the game wrote is A + B / z, A and B
@@ -4476,7 +4526,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         if ((flags & 1u) != 0 || !uiTrack) e.uiHistoryValid = false;
         auto uiFlags = [&]() {
             return static_cast<float>((uiDepthReactive()>0.0f?1u:0u) |
-                (uiTrack && e.uiHistoryValid?2u:0u) | (uiTrack?4u:0u) | (terrainSrvs[0]?8u:0u));
+                (uiTrack && e.uiHistoryValid?2u:0u) | (uiTrack?4u:0u) | (terrainSrvs[0]?8u:0u) | (holoSrvs[0]?16u:0u));
         };
 
         // Capture before either temporal path changes colour. Paired runs
@@ -4508,12 +4558,12 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         }
 
         ID3D11ComputeShader* savedCs = nullptr;
-        ID3D11ShaderResourceView* savedSrv[12] = {};
+        ID3D11ShaderResourceView* savedSrv[14] = {};
         ID3D11UnorderedAccessView* savedUav[7] = {};
         ID3D11Buffer* savedCb = nullptr;
         ID3D11SamplerState* savedSamp = nullptr;
         ctx->CSGetShader(&savedCs, nullptr, nullptr);
-        ctx->CSGetShaderResources(0, 12, savedSrv);
+        ctx->CSGetShaderResources(0, 14, savedSrv);
         ctx->CSGetUnorderedAccessViews(0, 7, savedUav);
         ctx->CSGetConstantBuffers(0, 1, &savedCb);
         ctx->CSGetSamplers(0, 1, &savedSamp);
@@ -4871,12 +4921,12 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     p.probe[3] = uiFlags();
                     if (uiTrack) ensureBiasMask(dev,e,w,h);
                     setParams(ctx, p);
-                    ID3D11ShaderResourceView* nullSrvM[12] = {};
+                    ID3D11ShaderResourceView* nullSrvM[14] = {};
                     ID3D11UnorderedAccessView* nullUavM[7] = {};
-                    ctx->CSSetShaderResources(0, 12, nullSrvM);
+                    ctx->CSSetShaderResources(0, 14, nullSrvM);
                     ctx->CSSetUnorderedAccessViews(0, 7, nullUavM, nullptr);
                     ctx->CSSetShader(mvCs, nullptr, 0);
-                    ID3D11ShaderResourceView* srvsM[12] = {inSrv,
+                    ID3D11ShaderResourceView* srvsM[14] = {inSrv,
                                                           probeNv ? e.dlOutSrv : e.histSrv[e.histRead],
                                                           depthSrv,
                                                           p.movers[0] != 0.0f ? e.zPrevSrv : nullptr,
@@ -4884,19 +4934,19 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                                                           p.tvSt[3] != 0.0f ? g_bodyGridSrv : nullptr,
                                                           smokeSrv, uiDepthSrv,
                                                           uiTrack && e.uiHistoryValid ? e.uiHistorySrv[e.uiHistoryRead] : nullptr,
-                                                          terrainSrvs[0], terrainSrvs[1], terrainSrvs[2]};
+                                                          terrainSrvs[0], terrainSrvs[1], terrainSrvs[2], holoSrvs[0], holoSrvs[1]};
                     ID3D11UnorderedAccessView* uavsM[7] = {debugPaint ? e.dlOutUav : nullptr,
                                                            nullptr, g_statsUav, e.dlMvUav,
                                                            e.dlDepthUav, e.dlMaskUav,
                                                            uiTrack ? e.uiHistoryUav[1-e.uiHistoryRead] : nullptr};
                     ID3D11Buffer* cbM = g_cb;
                     ID3D11SamplerState* smpM = g_samp;
-                    ctx->CSSetShaderResources(0, 12, srvsM);
+                    ctx->CSSetShaderResources(0, 14, srvsM);
                     ctx->CSSetUnorderedAccessViews(0, 7, uavsM, nullptr);
                     ctx->CSSetConstantBuffers(0, 1, &cbM);
                     ctx->CSSetSamplers(0, 1, &smpM);
                     ctx->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
-                    ctx->CSSetShaderResources(0, 12, nullSrvM);
+                    ctx->CSSetShaderResources(0, 14, nullSrvM);
                     ctx->CSSetUnorderedAccessViews(0, 7, nullUavM, nullptr);
                     if (haveDepth && e.zPrev) zcWritten = true;
                     if (uiTrack) uiEvidenceWritten = true;
@@ -5157,18 +5207,18 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     // reads them whole). The mover mask is computed here too
                     // (t3, u5) but only the own periphery pass applies it:
                     // the crop and periphery evaluations are not handed it.
-                    ID3D11ShaderResourceView* nullSrvM[12] = {};
+                    ID3D11ShaderResourceView* nullSrvM[14] = {};
                     ID3D11UnorderedAccessView* nullUavM[7] = {};
-                    ctx->CSSetShaderResources(0, 12, nullSrvM);
+                    ctx->CSSetShaderResources(0, 14, nullSrvM);
                     ctx->CSSetUnorderedAccessViews(0, 7, nullUavM, nullptr);
                     ctx->CSSetShader(mvCs, nullptr, 0);
-                    ID3D11ShaderResourceView* srvsM[12] = {inSrv, e.histSrv[readIdx], depthSrv,
+                    ID3D11ShaderResourceView* srvsM[14] = {inSrv, e.histSrv[readIdx], depthSrv,
                                                           p.movers[0] != 0.0f ? e.zPrevSrv : nullptr,
                                                           p.probe[2] != 0.0f ? e.uiMaskSrv : nullptr,
                                                           p.tvSt[3] != 0.0f ? g_bodyGridSrv : nullptr,
                                                           smokeSrv, uiDepthSrv,
                                                           uiTrack && e.uiHistoryValid ? e.uiHistorySrv[e.uiHistoryRead] : nullptr,
-                                                          terrainSrvs[0], terrainSrvs[1], terrainSrvs[2]};
+                                                          terrainSrvs[0], terrainSrvs[1], terrainSrvs[2], holoSrvs[0], holoSrvs[1]};
                     // u2 (the stats buffer) is left UNBOUND here: the own pass
                     // writes its stats when it runs, and the mv entry writes
                     // the same slots (15-17), so binding it would double them
@@ -5179,12 +5229,12 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                                                            uiTrack ? e.uiHistoryUav[1-e.uiHistoryRead] : nullptr};
                     ID3D11Buffer* cbM = g_cb;
                     ID3D11SamplerState* smpM = g_samp;
-                    ctx->CSSetShaderResources(0, 12, srvsM);
+                    ctx->CSSetShaderResources(0, 14, srvsM);
                     ctx->CSSetUnorderedAccessViews(0, 7, uavsM, nullptr);
                     ctx->CSSetConstantBuffers(0, 1, &cbM);
                     ctx->CSSetSamplers(0, 1, &smpM);
                     ctx->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
-                    ctx->CSSetShaderResources(0, 12, nullSrvM);
+                    ctx->CSSetShaderResources(0, 14, nullSrvM);
                     ctx->CSSetUnorderedAccessViews(0, 7, nullUavM, nullptr);
                     if (haveDepth && e.zPrev) zcWritten = true;
                     if (uiTrack) uiEvidenceWritten = true;
@@ -5318,30 +5368,30 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                 // when no trained set exists; u3/u5 stay unbound (MV and the
                 // mask are NVIDIA's inputs, and writes to a null UAV drop).
                 const bool carry = g_moversOn && haveDepth && ensureMoverPair(dev, e, w, h);
-                ID3D11ShaderResourceView* nullSrv[12] = {};
+                ID3D11ShaderResourceView* nullSrv[14] = {};
                 ID3D11UnorderedAccessView* nullUav[7] = {};
-                ctx->CSSetShaderResources(0, 12, nullSrv);
+                ctx->CSSetShaderResources(0, 14, nullSrv);
                 ctx->CSSetUnorderedAccessViews(0, 7, nullUav, nullptr);
                 ctx->CSSetShader(g_cs, nullptr, 0);
-                ID3D11ShaderResourceView* srvs[12] = {inSrv, e.histSrv[readIdx], depthSrv,
+                ID3D11ShaderResourceView* srvs[14] = {inSrv, e.histSrv[readIdx], depthSrv,
                                                      (carry && p.movers[0] != 0.0f) ? e.zPrevSrv : nullptr,
                                                      p.probe[2] != 0.0f ? e.uiMaskSrv : nullptr,
                                                      p.tvSt[3] != 0.0f ? g_bodyGridSrv : nullptr,
                                                      smokeSrv, uiDepthSrv,
                                                      uiTrack && e.uiHistoryValid ? e.uiHistorySrv[e.uiHistoryRead] : nullptr,
-                                                          terrainSrvs[0], terrainSrvs[1], terrainSrvs[2]};
+                                                          terrainSrvs[0], terrainSrvs[1], terrainSrvs[2], holoSrvs[0], holoSrvs[1]};
                 ID3D11UnorderedAccessView* uavs[7] = {e.outUav, e.histUav[writeIdx],
                                                       g_statsUav, nullptr,
                                                       carry ? e.dlDepthUav : nullptr, nullptr,
                                                       uiTrack ? e.uiHistoryUav[1-e.uiHistoryRead] : nullptr};
                 ID3D11Buffer* cb = g_cb;
                 ID3D11SamplerState* smp = g_samp;
-                ctx->CSSetShaderResources(0, 12, srvs);
+                ctx->CSSetShaderResources(0, 14, srvs);
                 ctx->CSSetUnorderedAccessViews(0, 7, uavs, nullptr);
                 ctx->CSSetConstantBuffers(0, 1, &cb);
                 ctx->CSSetSamplers(0, 1, &smp);
                 ctx->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
-                ctx->CSSetShaderResources(0, 12, nullSrv);
+                ctx->CSSetShaderResources(0, 14, nullSrv);
                 ctx->CSSetUnorderedAccessViews(0, 7, nullUav, nullptr);
                 if (carry) zcWritten = true;
                 if (uiTrack) uiEvidenceWritten = true;
@@ -5413,9 +5463,9 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
             }
         }
 
-        ID3D11ShaderResourceView* nullSrv2[12] = {};
+        ID3D11ShaderResourceView* nullSrv2[14] = {};
         ID3D11UnorderedAccessView* nullUav2[7] = {};
-        ctx->CSSetShaderResources(0, 12, nullSrv2);
+        ctx->CSSetShaderResources(0, 14, nullSrv2);
         ctx->CSSetUnorderedAccessViews(0, 7, nullUav2, nullptr);
         if (depthSrv) {
             ctx->OMSetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, savedRtv, savedDsv);
@@ -5423,7 +5473,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
             if (savedDsv) savedDsv->Release();
         }
         ctx->CSSetShader(savedCs, nullptr, 0);
-        ctx->CSSetShaderResources(0, 12, savedSrv);
+        ctx->CSSetShaderResources(0, 14, savedSrv);
         ctx->CSSetUnorderedAccessViews(0, 7, savedUav, nullptr);
         ctx->CSSetConstantBuffers(0, 1, &savedCb);
         ctx->CSSetSamplers(0, 1, &savedSamp);
@@ -5439,6 +5489,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         // a later re-engage of the fovea resets rather than blending a stale
         // crop against fresh motion (the review of 2026-09-05, F4).
         e.foveaHaveHistory = foveaEvalOk;
+        e.rasterJitter[0]=jxNow; e.rasterJitter[1]=jyNow; e.jitterFrame=g_rowsFrame;
         e.prHaveHistory = periphOk;
 
         // Tier 1's depth carry: this frame's copy becomes last frame's by

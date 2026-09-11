@@ -29,6 +29,8 @@ uint64_t bindingShaderHash(BindSlot) { std::abort(); }
 bool bindingResolve(void*, ResourceInfo*) { std::abort(); }
 bool depthProbeIsSceneDepth(const void*) { std::abort(); }
 uint64_t lookupShaderHash(void*) { std::abort(); }
+ID3D11ComputeShader* shaderSwapCompileCs(ID3D11DeviceContext*, const char*, size_t,
+    const char*, const char*, const SwapMacro*, const char*) { std::abort(); }
 ID3D11PixelShader* shaderSwapCompilePs(ID3D11DeviceContext*, const char*, size_t,
     const char*, const char*, const SwapMacro*, const char*) { std::abort(); }
 float temporalPassDepthAt(float metres) { return 0.025f / metres; }
@@ -219,7 +221,7 @@ int main(int argc, char** argv) {
     // The rank panel's dim glyphs peak at 124/255 alpha. Exercise the
     // actual holo shader at cockpit and target distances, including fully
     // transparent texels and sub-quantum source/glow values.
-    auto holoVsCode=compile("cbuffer C:register(b0){float4 v;} struct O{float4 tc0:TEXCOORD0;float3 tc4:TEXCOORD4;float3 view:TEXCOORD6;float3 tc7:TEXCOORD7;float2 uv:TEXCOORD8;float4 p:SV_Position;}; O main(uint id:SV_VertexID){O o=(O)0;float2 p=float2((id<<1)&2,id&2);o.p=float4(p*float2(2,-2)+float2(-1,1),.025/v.x,1);o.uv=p;o.view=float3(0,0,v.x);return o;}","vs_5_0");
+    auto holoVsCode=compile("cbuffer C:register(b0){float4 v;} struct O{float4 tc0:TEXCOORD0;float3 tc4:TEXCOORD4;float3 view:TEXCOORD6;float3 tc7:TEXCOORD7;float2 uv:TEXCOORD8;float4 p:SV_Position;}; O main(uint id:SV_VertexID){O o=(O)0;float2 p=float2((id<<1)&2,id&2);o.p=float4(p*float2(2,-2)+float2(-1,1),.025/v.x,1);o.uv=p;o.view=float3(0,0,-v.x);return o;}","vs_5_0");
     ComPtr<ID3D11VertexShader> holoVs;
     hr(dev->CreateVertexShader(holoVsCode->GetBufferPointer(),holoVsCode->GetBufferSize(),nullptr,&holoVs));
     for (float distance : {.6f, 16000.0f}) for (float alpha : {124.0f/255,33.0f/255,1.0f/255,.001f,0.0f,.8f}) {

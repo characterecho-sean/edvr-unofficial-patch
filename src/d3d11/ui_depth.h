@@ -17,6 +17,7 @@
 #pragma once
 
 #include <cstdint>
+#include "holo_motion.h"
 
 struct ID3D11DeviceContext;
 struct ID3D11Texture2D;
@@ -45,7 +46,7 @@ void uiDepthNoteOffscreenDraw(ID3D11DeviceContext* ctx);
 // pixel-stage slot 0..3) or a named direct family, with a depth target
 // bound that is the scene pair's. True means the draw should write its
 // coverage depth; the caller reissues it after the original draw.
-bool uiDepthOnEyeDraw(ID3D11DeviceContext* ctx);
+bool uiDepthOnEyeDraw(ID3D11DeviceContext* ctx, const HoloDraw& draw = {});
 
 // Clear per-draw classification, including when another fix skipped the
 // draw. The original draw's depth state is never changed by this module.
@@ -97,6 +98,10 @@ bool uiDepthSmokeDepth(uint32_t w, uint32_t h, int eye, ID3D11ShaderResourceView
 // before this frame's first coverage draw, or after an eye/target change.
 bool uiDepthTemporalDepth(uint32_t w, uint32_t h, int eye, ID3D11Texture2D* scene,
                           ID3D11ShaderResourceView** srv);
+// Exact draw-transform history for nearby holograms; borrowed coverage/record views.
+void uiDepthHoloMotion(int eye, ID3D11Texture2D* scene, ID3D11ShaderResourceView** views);
+void uiDepthHoloStageDump(ID3D11DeviceContext* ctx, ID3D11Texture2D* scene);
+void uiDepthHoloWriteDump(ID3D11DeviceContext* ctx, const wchar_t* directory, const wchar_t* stamp);
 
 // The strength the interface proper is marked at (advanced.ui_depth_reactive;
 // 0 = no fixed NVIDIA bias; motion classification and adaptive history remain).
