@@ -51,8 +51,8 @@ public:
         uint32_t whole[4] = {}, copied[4] = {};
         Buffer stage[4];
         uint32_t start=0;int32_t base=0;
-        struct Stream {uint32_t offset=0,stride=0,whole=0,copied=0;Buffer stage;};
-        Stream streams[3]; // VB0, VB1, index buffer; copied from binding offset
+        struct Stream {uint32_t offset=0,stride=0,whole=0,copied=0,captureOffset=0;Buffer stage;};
+        Stream streams[3]; // VB0 instance IDs, VB1 packed vertices, index buffer
     };
     struct Surface {
         Texture source, stage;
@@ -152,11 +152,23 @@ public:
                 auto& s=d.streams[i];s.offset=i==2?ibOffset:offsets[i];s.stride=i==2?(fmt==DXGI_FORMAT_R16_UINT?2u:fmt==DXGI_FORMAT_R32_UINT?4u:0u):strides[i];
                 D3D11_BUFFER_DESC bd{};src->GetDesc(&bd);s.whole=bd.ByteWidth;
                 if(s.offset>=s.whole || !s.stride)continue;
-                UINT bytes=s.whole-s.offset;if(bytes>256*1024)bytes=256*1024;
+                // These watched packed families use VB0 for per-instance
+                // IDs and VB1 for vertices. Shared buffers can place a
+                // six-index sprite megabytes beyond the binding offset.
+                // Keep original bindings separately from the copied window.
+                const bool indexed=kind=='X'||kind=='I';
+                uint64_t begin=s.offset;
+                if(i==2 && indexed)begin+=uint64_t(start)*s.stride;
+                if(i==1)begin+=uint64_t(base>0?base:0)*s.stride;
+                if(begin>=s.whole){++vertexDeclined;continue;}
+                s.captureOffset=static_cast<uint32_t>(begin);
+                UINT bytes=s.whole-s.captureOffset;if(bytes>256*1024)bytes=256*1024;
+                if(i==2 && indexed && uint64_t(count)*s.stride<bytes)bytes=count*s.stride;
+                if(!bytes)continue;
                 if(vertexBytes+bytes>32*1024*1024){++vertexDeclined;continue;}
                 bd.ByteWidth=bytes;bd.Usage=D3D11_USAGE_STAGING;bd.BindFlags=bd.MiscFlags=bd.StructureByteStride=0;bd.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
                 if(FAILED(dev->CreateBuffer(&bd,nullptr,&s.stage))){++failures;continue;}
-                D3D11_BOX box{s.offset,0,0,s.offset+bytes,1,1};ctx->CopySubresourceRegion(s.stage.Get(),0,0,0,0,src.Get(),0,&box);
+                D3D11_BOX box{s.captureOffset,0,0,s.captureOffset+bytes,1,1};ctx->CopySubresourceRegion(s.stage.Get(),0,0,0,0,src.Get(),0,&box);
                 s.copied=bytes;vertexBytes+=bytes;copied=true;
             }
             vertexDraws+=copied?1u:0u;
@@ -173,7 +185,7 @@ public:
         bool ok = fwrite("EDVRDRW1", 1, 8, f) == 8;
         auto u32 = [&](uint32_t v) { ok = fwrite(&v, 4, 1, f) == 1 && ok; };
         auto u64 = [&](uint64_t v) { ok = fwrite(&v, 8, 1, f) == 1 && ok; };
-        u32(2); u32(static_cast<uint32_t>(draws.size())); u32(static_cast<uint32_t>(surfaces.size())); u32(dropped);
+        u32(3); u32(static_cast<uint32_t>(draws.size())); u32(static_cast<uint32_t>(surfaces.size())); u32(dropped);
         auto payload = [&](ID3D11Resource* resource, uint32_t bytes, uint32_t row, uint32_t height) {
             D3D11_MAPPED_SUBRESOURCE m{};
             const bool mapped = resource && SUCCEEDED(ctx->Map(resource, 0, D3D11_MAP_READ,
@@ -197,7 +209,7 @@ public:
                 payload(d.stage[i].Get(), d.copied[i], 0, 0);
             }
             u32(d.start);u32(static_cast<uint32_t>(d.base));
-            for(auto& s:d.streams){u32(s.offset);u32(s.stride);u32(s.whole);payload(s.stage.Get(),s.copied,0,0);}
+            for(auto& s:d.streams){u32(s.offset);u32(s.stride);u32(s.whole);u32(s.captureOffset);payload(s.stage.Get(),s.copied,0,0);}
         }
         for (Surface& s : surfaces) {
             u32(s.frame); u32(s.width); u32(s.height); u32(s.format);

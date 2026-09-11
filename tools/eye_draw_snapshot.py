@@ -2,9 +2,10 @@
 """Read drawstate_HHMMSS.bin from an eye run (eye_draw_snapshot.h).
 
 Each draw preserves VS b0/b1/b2 and PS b2 at the draw, before buffer reuse.
-Version 2 also preserves draw start/base and bounded HUD/sprite VB0/VB1/IB
-payloads, beginning at each recorded binding offset, for the first three
-watched frames. Version 1 captures remain readable.
+Version 2 preserves draw start/base and bounded HUD/sprite VB0/VB1/IB
+payloads. Version 3 copies around the draw's base/start and records each
+capture_offset separately from its binding offset, for the first three
+watched frames. Earlier captures remain readable.
 Frames/ordinals join draws_HHMMSS.bin, whose crop map joins the eye images.
 Holo t2 surfaces are copied once per resource; their alpha is diagnostic,
 not a per-frame history. No resource address is a persistent object ID.
@@ -34,7 +35,7 @@ def read(path):
     if take(8) != b'EDVRDRW1':
         raise ValueError('Not an EDVRDRW1 snapshot')
     version, nd, ns, dropped = unpack('<4I')
-    if version not in (1, 2) or nd > 4096 or ns > 24:
+    if version not in (1, 2, 3) or nd > 4096 or ns > 24:
         raise ValueError('Unsupported version or invalid counts')
     draws, surfaces = [], []
     vertex_bytes = 0
@@ -51,16 +52,18 @@ def read(path):
                 raise ValueError('Invalid constant-buffer payload')
             d['buffers'].append(dict(identity=identity, whole=whole, data=take(size)))
         d['streams'] = []
-        if version == 2:
+        if version >= 2:
             d['start'], d['base'] = unpack('<Ii')
             for slot in range(3):
-                offset, stride, whole, size = unpack('<4I')
-                if size > min(max(0, whole-offset), 256*1024):
+                offset, stride, whole = unpack('<3I')
+                capture_offset = unpack('<I')[0] if version >= 3 else offset
+                size, = unpack('<I')
+                if size > min(max(0, whole-capture_offset), 256*1024):
                     raise ValueError('Invalid vertex payload')
                 vertex_bytes += size
                 if vertex_bytes > 32*1024*1024:
                     raise ValueError('Vertex payload budget exceeded')
-                d['streams'].append(dict(offset=offset, stride=stride, whole=whole, data=take(size)))
+                d['streams'].append(dict(offset=offset, stride=stride, whole=whole, capture_offset=capture_offset, data=take(size)))
         draws.append(d)
     total = 0
     for _ in range(ns):
@@ -103,7 +106,7 @@ def export_surfaces(capture, directory, dry_run=False):
 
 
 def verify_fixture(capture):
-    assert len(capture['draws']) == 5 and len(capture['surfaces']) == 1
+    assert len(capture['draws']) == 7 and len(capture['surfaces']) == 1
     assert capture['dropped'] == 0 and capture['failures'] == 0
     for i, d in enumerate(capture['draws'][:3]):
         assert (d['frame'], d['ordinal'], d['width'], d['height']) == (100+i, i*2, 8, 8)
@@ -115,11 +118,16 @@ def verify_fixture(capture):
     s = capture['surfaces'][0]
     assert (s['width'], s['height'], s['format']) == (3, 2, 28)
     assert s['data'] == bytes(range(24)), 'Texture rows or first-draw timing differ'
-    for i, d in enumerate(capture['draws'][3:]):
+    for i, d in enumerate(capture['draws'][3:5]):
         assert (d['start'], d['base']) == (2, -3)
         v = d['streams'][0]
         assert (v['offset'], v['stride'], v['whole']) == (8, 16, 64)
         assert v['data'] == bytes(range(8+i*64, 64+i*64)), 'Vertex buffer captured after reuse'
+    for i, d in enumerate(capture['draws'][5:]):
+        assert (d['start'], d['base']) == (150000, 8000)
+        for s, binding, start, length in [(d['streams'][1], 16, 320016, 184), (d['streams'][2], 4, 300004, 12)]:
+            assert (s['offset'], s['capture_offset']) == (binding, start)
+            assert s['data'] == bytes((k+i*37) & 255 for k in range(start, start+length)), 'Shared-buffer draw window lost or overwritten'
 
 
 def self_test():
@@ -130,7 +138,7 @@ def self_test():
         c = read(p)
         assert c['draws'] == [] and c['surfaces'] == []
         for bad in (b'', head, head+b'\0'*5, head.replace(b'EDVRDRW1', b'EDVRBAD1'),
-                    b'EDVRDRW1'+struct.pack('<4I', 3, 0, 0, 0),
+                    b'EDVRDRW1'+struct.pack('<4I', 4, 0, 0, 0),
                     b'EDVRDRW1'+struct.pack('<4I', 1, 4097, 0, 0)):
             p.write_bytes(bad)
             try:

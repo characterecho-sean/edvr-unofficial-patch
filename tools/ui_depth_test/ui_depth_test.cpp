@@ -1,6 +1,7 @@
 // Exercise the production coverage pass on D3D11 WARP. Only the game's
 // depth-probe selection, logging and raw-hook entry are supplied here.
 #include "../../src/d3d11/ui_depth.cpp"
+#include "../../src/d3d11/ui_resolve.h"
 #include <d3dcompiler.h>
 #include <d3d11sdklayers.h>
 #include <wrl/client.h>
@@ -18,6 +19,8 @@ ID3D11Texture2D* testScene = nullptr;
 Log& Log::get() { static Log instance; return instance; }
 Log::~Log() = default;
 void Log::note(const char*, ...) {}
+int64_t qpcNow() { LARGE_INTEGER t;QueryPerformanceCounter(&t);return t.QuadPart; }
+int64_t qpcFrequency() { LARGE_INTEGER t;QueryPerformanceFrequency(&t);return t.QuadPart; }
 int guardFilter(unsigned long, const char*) { return EXCEPTION_EXECUTE_HANDLER; }
 void FaultBudget::charge() { --m_remaining; }
 // Classification/configuration are outside these render-pass tests. Abort
@@ -92,6 +95,7 @@ std::vector<float> read(ID3D11Device* dev, ID3D11DeviceContext* ctx, ID3D11Resou
     for (UINT y = 0; y < td.Height; ++y) for (UINT x = 0; x < td.Width; ++x) {
         const auto* p = static_cast<const unsigned char*>(map.pData) + y * map.RowPitch + x * stride;
         if (td.Format == DXGI_FORMAT_R8_UNORM) values[y * td.Width + x] = *p / 255.0f;
+        else if (td.Format == DXGI_FORMAT_R8G8B8A8_UNORM) values[y * td.Width + x] = p[channel] / 255.0f;
         else if (td.Format == DXGI_FORMAT_R24G8_TYPELESS)
             values[y * td.Width + x] = static_cast<float>(*reinterpret_cast<const UINT*>(p) & 0xffffff) / 16777215.0f;
         else values[y * td.Width + x] = reinterpret_cast<const float*>(p)[channel];
@@ -520,13 +524,15 @@ UN[id.xy]=uiEvidence(id.xy);Result[id.xy]=adaptiveUiReactive(id.xy,float2(id.xy)
         for(float v:run())check(v<.001f,"disabled adaptation does not reject history");
         reset();stroke(3,3,true,204,25,51);stroke(3,3,false);
         reactivity=run();check(reactivity[27]>.999f,"changed UI colour rejects stale UI");
+        reset();mask.assign(64,1);for(int i=0;i<64;++i)old[i*4+3]=255;stroke(3,3,false);
+        reactivity=run();check(reactivity[27]>.999f,"erased glyph on marked dark panel rejects its own history despite matching black neighbours");
         reset();stroke(3,3,true);reactivity=run();check(reactivity[27]>.999f,"appearing UI is fresh");
         reset();stroke(3,3,false);reactivity=run();check(reactivity[27]>.999f,"erased isolated stroke clears its history");
-        check(reactivity[35]>.999f,"transparent centre rejects a departed glyph in the history footprint");
-        check(reactivity[36]>.999f,"diagonal reconstruction footprint rejects departing UI");
+        check(reactivity[35]<.001f,"empty history does not extend rejection beyond reprojected coverage");
+        check(reactivity[36]<.001f,"empty diagonal history stays unchanged");
         check(reactivity[63]<.001f,"unrelated sky retains history");
         reset();stroke(4,3,true);stroke(3,3,false);
-        reactivity=run();check(reactivity[28]<.001f,"one pixel raster shift tolerates matching UI colour at the stroke");
+        reactivity=run();check(reactivity[28]>.999f,"new stroke without aligned raster history cannot borrow an unrelated neighbour");
         params.offset[0]=-1;
         reactivity=run();check(reactivity[28]<.001f,"motion aligns UI evidence");
         reset();stroke(3,3,true);stroke(3,3,false);
@@ -534,6 +540,10 @@ UN[id.xy]=uiEvidence(id.xy);Result[id.xy]=adaptiveUiReactive(id.xy,float2(id.xy)
         for(float v:run())check(v<.001f,"background change outside UI preserves UI history");
         reset();stroke(3,3,true);stroke(3,3,false);mask[27]=2;
         for(float v:run())check(v<.001f,"attached UI uses adaptation as well as floating UI");
+        params.jit[0]=.49f;params.jit[1]=-.49f;
+        reactivity=run();check(reactivity[27]<.001f,"raster evidence colour and coverage remain at the same pixel under jitter");
+        reset();stroke(3,3,true);stroke(2,3,false);params.offset[0]=-.75f;
+        reactivity=run();check(reactivity[27]<.001f,"fractional history normalizes coverage without mixing unmarked background into UI colour");
         params.offset[0]=20;reactivity=run();check(reactivity[27]>.999f,"offscreen history cannot blur current UI");
         reset();stroke(3,3,true);mask[27]=3;
         for(float v:run())check(v<.001f,"smoke coverage cannot trigger adaptive UI rejection");
@@ -542,6 +552,73 @@ UN[id.xy]=uiEvidence(id.xy);Result[id.xy]=adaptiveUiReactive(id.xy,float2(id.xy)
         reset();stroke(3,3,true);params.probe[2]=0;
         for(float v:run())check(v<.001f,"unbound coverage cannot mark scene content as UI");
         std::puts("PASS: production adaptive UI shader keeps stable strokes and rejects changed, new and erased UI.");
+    }
+    // Exercise the model-independent resolve itself. Odd dimensions and
+    // noninteger output ratios catch holes/overlap in block ownership.
+    {
+        ctx->ClearState();
+        auto code=compile(kUiResolve,"cs_5_0");ComPtr<ID3D11ComputeShader> cs;
+        hr(dev->CreateComputeShader(code->GetBufferPointer(),code->GetBufferSize(),nullptr,&cs));
+        auto texture=[&](UINT w,UINT h,DXGI_FORMAT f){
+            D3D11_TEXTURE2D_DESC d{};d.Width=w;d.Height=h;d.MipLevels=d.ArraySize=d.SampleDesc.Count=1;
+            d.Format=f;d.BindFlags=D3D11_BIND_SHADER_RESOURCE|D3D11_BIND_UNORDERED_ACCESS;
+            ComPtr<ID3D11Texture2D> t;hr(dev->CreateTexture2D(&d,nullptr,&t));return t;
+        };
+        auto srv=[&](ID3D11Texture2D* t){ComPtr<ID3D11ShaderResourceView> v;hr(dev->CreateShaderResourceView(t,nullptr,&v));return v;};
+        auto uav=[&](ID3D11Texture2D* t){ComPtr<ID3D11UnorderedAccessView> v;hr(dev->CreateUnorderedAccessView(t,nullptr,&v));return v;};
+        constexpr UINT w=13,h=9;
+        auto raw=texture(w,h,DXGI_FORMAT_R8G8B8A8_UNORM),mask=texture(w,h,DXGI_FORMAT_R8_UNORM);
+        auto previous=texture(w,h,DXGI_FORMAT_R8G8B8A8_UNORM),next=texture(w,h,DXGI_FORMAT_R8G8B8A8_UNORM);
+        auto rawV=srv(raw.Get()),maskV=srv(mask.Get()),previousV=srv(previous.Get());auto nextU=uav(next.Get());
+        struct Params {int region[4]={0,0,w,h};int size[2]={w,h};int texSize[2]={w,h};float tn[4]={},tp[4]={},jit[4]={};} p;
+        D3D11_BUFFER_DESC resolveDesc{};resolveDesc.ByteWidth=sizeof(p);resolveDesc.BindFlags=D3D11_BIND_CONSTANT_BUFFER;
+        ComPtr<ID3D11Buffer> cb;hr(dev->CreateBuffer(&resolveDesc,nullptr,&cb));
+        for(auto dims:{std::pair{13u,9u},std::pair{26u,18u},std::pair{21u,14u},std::pair{7u,5u}}){
+            const UINT ow=dims.first,oh=dims.second;
+            auto trained=texture(ow,oh,DXGI_FORMAT_R8G8B8A8_UNORM),output=texture(ow,oh,DXGI_FORMAT_R8G8B8A8_UNORM);
+            auto trainedV=srv(trained.Get());auto outputU=uav(output.Get());
+            std::vector<unsigned char> colour(w*h*4,0),mark(w*h,0),old(w*h*4,0),model(ow*oh*4,0);
+            for(UINT i=0;i<ow*oh;++i){model[4*i]=static_cast<unsigned char>(64+i%100);model[4*i+3]=127;}
+            auto run=[&](bool haveHistory){
+                ctx->UpdateSubresource(raw.Get(),0,nullptr,colour.data(),w*4,0);ctx->UpdateSubresource(mask.Get(),0,nullptr,mark.data(),w,0);
+                ctx->UpdateSubresource(previous.Get(),0,nullptr,old.data(),w*4,0);ctx->UpdateSubresource(trained.Get(),0,nullptr,model.data(),ow*4,0);
+                ctx->UpdateSubresource(cb.Get(),0,nullptr,&p,0,0);
+                ID3D11ShaderResourceView* in[]={rawV.Get(),trainedV.Get(),maskV.Get(),haveHistory?previousV.Get():nullptr};
+                ID3D11UnorderedAccessView* out[]={outputU.Get(),nextU.Get()};
+                const float poison[4]={1,1,1,1};ctx->ClearUnorderedAccessViewFloat(outputU.Get(),poison);
+                ctx->CSSetShader(cs.Get(),nullptr,0);ctx->CSSetShaderResources(0,4,in);ctx->CSSetUnorderedAccessViews(0,2,out,nullptr);
+                ctx->CSSetConstantBuffers(0,1,cb.GetAddressOf());ctx->Dispatch((w+7)/8,(h+7)/8,1);ctx->ClearState();
+                return read(dev.Get(),ctx.Get(),output.Get());
+            };
+            auto resolvedValues=run(false);
+            for(UINT i=0;i<ow*oh;++i)check(std::fabs(resolvedValues[i]-model[4*i]/255.f)<1e-6,"UI resolve copies every world output pixel unchanged");
+            for(float a:read(dev.Get(),ctx.Get(),output.Get(),3))check(std::fabs(a-127/255.f)<1e-6,"UI resolve preserves submission alpha");
+            for(float a:read(dev.Get(),ctx.Get(),next.Get(),3))check(a==0,"unmarked scene cannot grow UI influence");
+            mark.assign(w*h,3);resolvedValues=run(false);
+            for(UINT i=0;i<ow*oh;++i)check(std::fabs(resolvedValues[i]-model[4*i]/255.f)<1e-6,"smoke is excluded from UI resolve");
+            mark.assign(w*h,1);resolvedValues=run(false);
+            for(float v:resolvedValues)check(v==0,"dark marked panel rejects obsolete bright text after DLSS");
+            for(float a:read(dev.Get(),ctx.Get(),next.Get(),3))check(a==1,"visible panel retains UI influence");
+            mark.assign(w*h,0);for(UINT i=0;i<w*h;++i)old[4*i+3]=255;resolvedValues=run(true);
+            for(float v:resolvedValues)check(v==0,"erased UI rejects a model trail after raw coverage disappears");
+            auto influence=read(dev.Get(),ctx.Get(),next.Get(),3);
+            for(UINT y=0;y<h;++y)for(UINT x=0;x<w;++x){
+                bool owns=((x*ow+w-1)/w)<(((x+1)*ow+w-1)/w)&&((y*oh+h-1)/h)<(((y+1)*oh+h-1)/h);
+                check(owns?(influence[y*w+x]>0&&influence[y*w+x]<1):influence[y*w+x]==0,"departing influence decays while its output block contains stale colour");
+            }
+            for(UINT i=0;i<w*h;++i)old[4*i+3]=1;run(true);
+            for(float a:read(dev.Get(),ctx.Get(),next.Get(),3))check(a==0,"old UI influence expires even if world detail continues to differ");
+            model.assign(ow*oh*4,0);run(true);
+            for(float a:read(dev.Get(),ctx.Get(),next.Get(),3))check(a==0,"completed model trail releases influence");
+            // Retain antialiasing inside the current colour range; a clip is
+            // not a replacement of trained detail with the raw input pixel.
+            mark.assign(w*h,2);for(UINT y=0;y<h;++y)for(UINT x=0;x<w;++x)colour[4*(y*w+x)]=(x&1)?255:0;
+            for(UINT i=0;i<ow*oh;++i)model[4*i]=128;
+            p.jit[0]=.49f;p.jit[1]=-.49f;resolvedValues=run(false);
+            for(UINT y=1;y+1<oh;++y)for(UINT x=2;x+2<ow;++x)check(std::fabs(resolvedValues[y*ow+x]-128/255.f)<1e-6,"valid subpixel UI colour retains trained antialiasing under jitter");
+            p.jit[0]=p.jit[1]=0;
+        }
+        std::puts("PASS: post-DLSS UI resolve bounds stale colour, retains AA/alpha, excludes world/smoke, and covers noninteger output sizes.");
     }
     // Copy/view compatibility, identity, resize and frame rollover for all
     // depth encodings supported by the temporal pass.

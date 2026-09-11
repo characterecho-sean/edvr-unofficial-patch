@@ -752,12 +752,16 @@ uint32_t g_wComposite = 0, g_wDirect = 0, g_wWrote = 0, g_wDepthless = 0,
          g_wMarked = 0, g_wFrames = 0;
 uint64_t g_sessionWrote = 0;
 bool     g_maskNotedOnce = false;
+struct StellarCpu { uint32_t calls=0,samples=0; int64_t ticks=0; } g_stellarCpu[2];
+int g_stellarCpuActive=-1;
+int64_t g_stellarCpuStart=0;
 
 void resetWindow() {
     g_wComposite = g_wDirect = g_wWrote = g_wDepthless = g_wNotScene = 0;
     g_wRebound = g_wNoPair = g_wReissued = g_wNoShader = 0;
     g_wNoTwin = g_wLearned = g_wMarked = 0;
     g_wFrames = 0;
+    for(auto& sample:g_stellarCpu) sample={};
 }
 
 int surfaceIndex(const void* res) {
@@ -1765,6 +1769,7 @@ void uiDepthEnd(ID3D11DeviceContext*) {
 // after, and the doubling would last the session (the pre-release review
 // of 2026-09-07). splashDimBegin below has taken this shape all along.
 bool uiDepthReissueBegin(ID3D11DeviceContext* ctx) {
+    g_stellarCpuActive=-1;
     g_reissueOn = false;
     g_rebound = false;
     if (!g_on || g_stoodDown || !g_reissueShader) return false;
@@ -1776,6 +1781,12 @@ bool uiDepthReissueBegin(ID3D11DeviceContext* ctx) {
     g_wantMask = false;
     if (!depthPass && !wantMask) return false;
     DepthShader* shader = g_reissueShader;
+    const int stellar=shader==&g_depthShaders[6]?0:shader==&g_depthShaders[7]?1:-1;
+    if(stellar>=0) {
+        ++g_stellarCpu[stellar].calls;
+        // Include preparation, the extra draw and restoration. No GPU wait.
+        if((g_frame&15u)==0u) {g_stellarCpuActive=stellar;g_stellarCpuStart=qpcNow();}
+    }
     const bool ran = guardedBudget(g_budget, [&] {
         // The depth pass writes depth with the nearer-wins test; a
         // mask-only pass over a family whose depth is already written just
@@ -2009,6 +2020,10 @@ void uiDepthReissueEnd(ID3D11DeviceContext* ctx) {
     }
     g_mode = Mode::kNone;
     g_reissueShader = nullptr;
+    if(g_stellarCpuActive>=0) {
+        auto& sample=g_stellarCpu[g_stellarCpuActive];
+        sample.ticks+=qpcNow()-g_stellarCpuStart;++sample.samples;g_stellarCpuActive=-1;
+    }
 }
 
 bool uiDepthCoverageMask(uint32_t w, uint32_t h, int eye, ID3D11Texture2D** tex) {
@@ -2119,6 +2134,12 @@ void uiDepthFrameBoundary(ID3D11DeviceContext* ctx) {
                         g_wWrote, g_wComposite, g_surfaceCount, g_wDirect, g_wReissued);
     }
     if (g_wFrames >= kTotalsFrames) {
+        for(int i=0;i<2;++i) {
+            const auto& s=g_stellarCpu[i];
+            if(s.calls) Log::get().note("stellar coverage CPU: %s calls=%u sampled=%u frames=%u, %.3f us/call (prepare, reissue and restore; sampled every 16th frame; no GPU wait).",
+                i==0?"ring":"orbital",s.calls,s.samples,g_wFrames,
+                s.samples?double(s.ticks)*1e6/double(qpcFrequency())/s.samples:0.0);
+        }
         if (g_wWrote || g_wNotScene || g_wRebound || g_wNoPair || g_wNoShader ||
             g_wNoTwin || g_wLearned || g_evictions) {
             Log::get().note("ui depth totals: %.1f interface draws a frame wrote depth "

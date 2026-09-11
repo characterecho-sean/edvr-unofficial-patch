@@ -2904,7 +2904,7 @@ void writeLedger(ID3D11DeviceContext* ctx) {
                     static_cast<uint32_t>(g_drawSnapshot.draws.size()),
                     static_cast<uint32_t>(g_drawSnapshot.surfaces.size()), g_drawSnapshot.dropped,
                     g_drawSnapshot.failures, missingShaders, snapshotOk ? "written" : "WRITE FAILED");
-    Log::get().note("object probe: target UI vertex snapshots: %u draws, %u bytes, %u budget declines; first three watched frames, 256 KiB per stream, 32 MiB total. Draw offsets and VB0/VB1/IB bindings are in snapshot version 2.",g_drawSnapshot.vertexDraws,g_drawSnapshot.vertexBytes,g_drawSnapshot.vertexDeclined);
+    Log::get().note("object probe: target UI vertex snapshots: %u draws, %u bytes, %u range/budget declines; first three watched frames, 256 KiB per stream, 32 MiB total. Snapshot version 3 preserves draw offsets, bindings and capture ranges around base/start.",g_drawSnapshot.vertexDraws,g_drawSnapshot.vertexBytes,g_drawSnapshot.vertexDeclined);
     g_ledgerOn = false;
     ledgerRelease();
 }

@@ -45,6 +45,10 @@ The [September 11 panel and approach review](review-planet-panels-2026-09-11.md)
 measures missing dim rank-label coverage and celestial expansion absent from
 the supplied vectors. It rules out the cockpit split for these bodies and
 adds draw-time transform and source-alpha capture; it is not a rendering fix.
+The [September 11 roll and orbit follow-up](review-roll-and-orbits-2026-09-11.md#follow-up-0930-flight-regression)
+corrects the assumption that modern DLSS models honor the UI bias mask.
+It documents a model-independent UI resolve, the remaining target-motion
+capture gap, and inner-ring aliasing already present in raw eye images.
 
 *A design document, written before the code, as a companion to
 [anti-aliasing.md](anti-aliasing.md) (feature B, the temporal pass) and to

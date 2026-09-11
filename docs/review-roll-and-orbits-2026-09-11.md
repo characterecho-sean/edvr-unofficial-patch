@@ -179,3 +179,150 @@ The targeted logs are under `build/review_motion/sep11/`:
 Flight confirmation remains necessary for the UI trail and both new stellar
 paths. The target-widget rendering change remains outstanding pending its
 draw-time vertex evidence.
+
+## Follow-up: 09:30 flight regression
+
+The run `edvr_gfx_20260911_093018.log` matches `fc7358e`, graphics build
+`6AA41DC9`. Runs `093139`, `093216`, `093217`, `093259`, and `093301` capture
+loading text, the ranks panel, and celestial approach. Loading text visibly
+doubles in treated crops during rapid yaw. The panel still ghosts RIKEN.
+
+Ruled out: expanding the previous UI footprint solves the name streak. The user
+reports the same streak after `fc7358e`; its synthetic isolated-stroke fixture
+did not represent text over a marked dark panel background.
+
+Ruled out: stellar coverage was inactive or its table overflowed. The last two
+runs contain 33 records each and 30 matched transforms. Visible ring coverage
+and most orbital coverage agree with temporal depth. Three distant orbital
+records have ambiguous predecessors; this is separate from the nearby ring and
+orbital arcs, which match. The loading capture precedes the first stellar
+activation and contains no stellar records.
+
+Two UI-history defects need independent regressions. Colour was sampled at
+`q+jitter` while coverage was loaded at `q`; history comparison also omitted
+the change in raster jitter. In addition, taking the minimum error across any
+previous neighbour accepts a stale glyph whenever a black neighbour matches the
+current panel's black background. Current panel captures mark the backing as
+UI, so testing only an isolated erased stroke misses this case.
+
+CPU attribution remains open: the run mostly produces 85-90 FPS; sampled
+draw-hook times outside compilation are about 0.01-0.28 ms. The first orbital
+shader compilation costs 9 ms, and explicit dumps allocate/copy diagnostic
+resources. Neither these samples nor FPS measure sustained process CPU use.
+
+### DLSS mask support and the independent UI resolve
+
+Ruled out: correcting or strengthening BiasCurrentColorMask fixes preset L UI
+trails. Replaying 32 controlled moving-text frames through the installed DLSS
+310.7.0.0 with the old and corrected masks produces byte-identical output.
+NVIDIA's March 2026 [DLSS programming guide, section
+3.15](https://raw.githubusercontent.com/NVIDIA/DLSS/main/doc/DLSS_Programming_Guide_Release.pdf)
+says only preset F supports this input. Earlier mask tests verified EDVR's
+buffer, not that the selected model consumed it. The old reports attributing
+modern-model improvements to this mask must not be treated as proof.
+
+The full-eye DLAA/DLSS path now resolves marked UI after NVIDIA reconstruction.
+It clips excess colour to the four raw texels surrounding each output sample,
+with raster jitter applied consistently. Values within that range retain NVIDIA
+reconstruction. Current coverage includes floating and attached UI, including
+classified target widgets and orbital strokes. Smoke and unmarked world pixels
+are excluded. Departing coverage persists only while clipping stale colour, and
+expires within 32 frames so new world detail cannot indefinitely retain an old
+UI restriction.
+
+This replaces the existing submit copy and reuses the submit texture and two
+UI-history textures. It allocates no additional full-eye textures. The obsolete
+adaptive-colour calculation and its evidence write are skipped in the DLSS
+motion pass when this resolve runs. Native TAA retains the corrected
+raster-aligned adaptive helper. The experimental foveated path and unsupported
+submit formats retain their existing path. Explicit legacy bias settings remain
+available; their documentation now states the preset limitation.
+
+A controlled 512x192 to 1024x384 preset-L replay changed RIKEN to NOVA during
+motion. Bright trailing pixels over the next four frames decreased from 1,848
+to 844; background trail energy decreased from 1.132 to 0.613 on a 0-255 scale.
+Stable-motion mean absolute error changed from 1.862 to 1.890; after settling,
+it improved from 1.772 to 1.658. This is measurable ghost rejection, not proof
+that rapid head yaw, ship roll or target approach is fixed in the headset. Fine
+text still needs that confirmation. A broader 3x3 input bound admitted more
+obsolete glyph colour and was rejected in favor of the actual output sample
+footprint.
+
+### CPU attribution and cost
+
+The draw-hook timer subtracted every forwarded driver draw, including EDVR
+coverage reissues. It now subtracts only the game's original call. Existing
+small hook numbers therefore understated EDVR's cost. New `stellar coverage
+CPU` log lines separately report ring/orbital call counts, sample counts and
+mean preparation/reissue/restoration time. They sample every sixteenth frame
+and report every 1,800 frames; they do not wait for the GPU or read back
+transforms. Zero samples are printed explicitly, not mistaken for a measured
+zero cost.
+
+The final four-texel resolve was benchmarked at the flight's 2268x2240 input /
+4536x4480 output, using its captured approach coverage. Local GPU timestamps
+were 0.116-0.126 ms per eye, versus 0.042-0.053 ms for CopyResource alone. This
+isolated benchmark excludes NVIDIA inference and the adaptive work removed from
+the motion pass; it is not a whole-flight performance claim.
+
+Ruled out: packing the orbital history dispatch into one 64-thread group is an
+optimization on this GPU. The 16-instance benchmark increased from
+0.0052-0.0062 ms to 0.0079-0.0091 ms. The original dispatch was restored.
+Sustained supercruise process CPU remains unproven; the corrected attribution
+and separate stellar samples are required before blaming the orbital reissue or
+declaring the report solved.
+
+### Inner ring and orbital sharpness
+
+The user now distinguishes inner-ring aliasing visible even in local space from
+approach blur. The 09:32:59 raw crop already contains a repeating alias pattern
+in the bright inner ring. DLSS reduces it but does not eliminate it. This
+supports a source sampling/material/geometry issue; it does not identify which
+of those causes it. No sharpening or global texture-bias change is installed.
+The flight used the automatic -1.00 mip bias for a 0.5 input fraction; a
+material-specific filtering investigation remains necessary, including the
+separate volumetric ring material not handled by the opaque coverage path.
+
+Ruled out: the tracked ring and orbital VS families do not receive raster
+jitter. Across the two approach sequences, projection-derived jitter follows
+the requested jitter with slopes 0.99992-1.00007 and residuals below 0.00008
+input pixels. Visible opaque-ring transforms and most orbital transforms are
+also already matched. Three distant orbital records remain ambiguous. Neither
+those three records nor the new UI resolve explains the stationary inner-ring
+alias pattern. Orbital-line sharpness remains a visual verification item.
+
+### Target circle, distance and name text
+
+The shared resolve applies to classified target coverage, but it is not a
+verified target-motion correction. The newest sprite draws use
+StartIndexLocation=1472272 and BaseVertexLocation=585561. Version-2 snapshots
+saved only the first 256 KiB of the bound IB/VB1, leaving the actual referenced
+geometry outside the payload even though the copy succeeded. This invalidates
+any conclusion that those snapshots fully captured target vertex motion.
+
+Snapshot version 3 preserves original binding offsets separately from capture
+offsets, copies the IB window at the draw's start and VB1 around its base
+vertex, and retains the same per-stream and total byte caps. VB0 continues to
+preserve the instance IDs. Out-of-range/budget declines are explicit. A GPU
+regression overwrites large shared buffers between two draws and verifies that
+each copy contains the correct data above 256 KiB. Older versions remain
+readable. Because indices may still reference outside a bounded vertex window,
+analysis must check the actual referenced range before using it. No normal-play
+readbacks or extra target-motion guesses are introduced.
+
+### Follow-up verification
+
+The focused production shader replay passes the UI resolve and adaptive-history
+checks, 72 captured cockpit transform pairs, 502 stellar draw pairs with 1,334
+matched instances, 139,935 original orbital VS vertices and 54 original ring PS
+opacity comparisons. Tests cover unchanged world/smoke output, submission
+alpha, marked dark-panel glyph erasure, disappearing coverage, influence
+expiry, preserved subpixel UI values and noninteger output ratios. Full-build,
+smoke and installation results are recorded after final validation below.
+
+Final validation: `build-ui-resolve-final.log` passes the full production build
+and every build gate, including 14,538 UI checks, the version-3 draw snapshot
+GPU/parser fixture and the unchanged 243-key configuration contract.
+`smoke-ui-resolve.log` passes the production graphics DLL smoke test, including
+actual DLSS evaluation and motion/jitter convention checks. The investigation
+remains bounded by the visual and CPU limitations stated above.

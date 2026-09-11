@@ -22,6 +22,7 @@
 #include "dlaa.h"
 #include "object_probe.h"   // objectMotionGet: the dominant body's own motion, for the body's path (tier 2)
 #include "ui_depth.h"   // uiDepthReactiveMask: the interface's bias mask
+#include "ui_resolve.h"
 #include "celestial_motion.h"
 #include "shader_swap.h"
 
@@ -56,7 +57,7 @@ Texture2D<float> UM : register(t4);      // the interface's reactive mask (ui_de
 Texture3D<float> BG : register(t5);      // the dominant body's occupancy grid over box0..box1 (tier 2), when tvSt.w says the body's path is on
 Texture2D<float> ZS : register(t6);      // the drives' smoke's own depth (ui_depth.h, uiDepthSmokeDepth), the scene depth's size; unbound = none this frame, and reads as the far value
 Texture2D<float> ZUI : register(t7);     // private UI depth; never used by game draws
-Texture2D<float4> UP : register(t8);     // previous unjittered UI colour; alpha is coverage, not opacity
+Texture2D<float4> UP : register(t8);     // previous raw-raster UI colour; alpha is coverage, not opacity
 Texture2D<uint> TI : register(t9);      // terrain patch index, zero outside rasterised coverage
 Texture2D<float> TZ : register(t10);    // terrain depth, compared against final scene/UI depth
 struct TerrainRecord { uint4 key[12]; float4 q; float4 t; float4 r[3]; };
@@ -398,45 +399,31 @@ float4 uiEvidence(int2 q) {
     q = clamp(q, int2(0,0), size - 1);
     uint kind = uint(UM.Load(int3(q,0))*255.0+0.5) & 3u;
     float marked = probe.z != 0.0 && (kind == 1u || kind == 2u) ? 1.0 : 0.0;
-    float2 uv = (float2(region.xy + q) + jit.xy + 0.5) / float2(texSize);
-    return marked != 0.0 ? float4(S.SampleLevel(L, uv, 0).rgb, 1.0) : 0.0;
+    // Evidence lives on the raw raster grid, just like its coverage. Adding
+    // jitter only to colour paired a glyph's mask with a neighbouring pixel.
+    return marked != 0.0 ? float4(S.Load(int3(region.xy + q, 0)).rgb, 1.0) : 0.0;
 }
 float adaptiveUiReactive(int2 q, float2 previous) {
     uint flags = uint(probe.w + 0.5);
     if ((flags & 4u) == 0u) return 0.0;
     float4 current = uiEvidence(q);
     if ((flags & 2u) == 0u) return current.a;
-    int2 pq = int2(floor(previous + 0.5));
-    if (any(pq < 0) || any(pq >= size)) return current.a;
-    if (current.a == 0.0 && UP.Load(int3(pq,0)).a == 0.0) {
-        // A fast empty-footprint test keeps the full colour comparison local
-        // to UI. Four overlapping 2x2 gathers cover the required 3x3 area.
-        float4 nearby=0;
-        [unroll] for(int y=-1;y<=0;++y) [unroll] for(int x=-1;x<=0;++x)
-            nearby=max(nearby,UP.GatherAlpha(L,(float2(pq+int2(x,y))+.5)/float2(size)));
-        if(!any(nearby>0)) return 0.0;
-    }
+    if (any(previous < 0) || any(previous > size-1)) return current.a;
+    float4 old = UP.SampleLevel(L, (previous + .5) / float2(size), 0);
+    if (current.a == 0.0 && old.a == 0.0) return 0.0;
     float3 lo = 1e10, hi = -1e10;
-    float nowCount = 0.0, oldCount = 0.0;
+    float nowCount = 0.0;
     [unroll] for (int y=-1; y<=1; ++y) [unroll] for (int x=-1; x<=1; ++x) {
         float4 c = uiEvidence(q + int2(x,y));
         if (c.a != 0.0) { lo = min(lo,c.rgb); hi = max(hi,c.rgb); nowCount += 1.0; }
     }
-    float error = 1e10;
-    [unroll] for (int py=-1; py<=1; ++py) [unroll] for (int px=-1; px<=1; ++px) {
-        int2 s = clamp(pq + int2(px,py), int2(0,0), size-1);
-        float4 old = UP.Load(int3(s,0));
-        if (old.a != 0.0) {
-            float3 e = max(max(lo-old.rgb,old.rgb-hi),0.0);
-            error = min(error,max(e.x,max(e.y,e.z))); oldCount += 1.0;
-        }
-    }
-    // Reconstruction samples a footprint, not just its centre. During a
-    // roll, sky motion can put a transparent pixel beside a previous glyph
-    // even when both centres are unmarked. Reject that departing footprint
-    // before DLSS carries it into another transparent pixel next frame.
-    if (nowCount == 0.0 && oldCount == 0.0) return 0.0;
-    if (nowCount == 0.0 || oldCount == 0.0) return 1.0;
+    if (nowCount == 0.0 || old.a == 0.0) return 1.0;
+    // Test the history actually reprojected here. Taking the best of nine
+    // old colours let a black neighbour excuse stale white text on a dark
+    // marked panel. Alpha is validity, so normalize the bilinear footprint
+    // before comparing; unmarked background is not UI colour evidence.
+    float3 e = max(max(lo-old.rgb/old.a,old.rgb/old.a-hi),0.0);
+    float error = max(e.x,max(e.y,e.z));
     return saturate((error - 0.03) / 0.17);
 }
 bool uiCovered(int2 q) {
@@ -905,7 +892,7 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
         uint mark = probe.z != 0.0 ? uint(UM.Load(int3(id.xy,0))*255.0+0.5) : 0u;
         uint kind = mark & 3u;
         float ui = (kind == 3u || (uint(probe.w + 0.5) & 1u) != 0u) ? float(mark >> 2u)/63.0 : 0.0;
-        float adaptive = adaptiveUiReactive(int2(id.xy), p + motion);
+        float adaptive = adaptiveUiReactive(int2(id.xy), p + motion - holoJitter.xy);
         bool uiHere = kind == 1u || kind == 2u;
         MK[id.xy] = max(adaptive, uiHere ? ui : max(ui, mover * movers.z));
         // The registration probes on the trained path (2026-09-08): main's
@@ -1192,7 +1179,7 @@ R"HLSL(
                     }
                 }
                 errUsed = saturate(abs(hy.x - rgbToYcocg(cur.rgb).x) * 4.0);
-                blEff *= 1.0 - adaptiveUiReactive(ci, p + mvUsed);
+                blEff *= 1.0 - adaptiveUiReactive(int2(round(p+jit.xy)), p + mvUsed + jit.xy - holoJitter.xy);
                 float3 hc = clipToBox(boxMin, boxMax, hy);
                 if (any(abs(hc - hy) > 1e-4)) {
                     count[1] = 1;
@@ -1672,6 +1659,8 @@ struct EyeState {
     ID3D11UnorderedAccessView* dlOutUav = nullptr;   // the debug motion view paints here
     ID3D11ShaderResourceView*  dlOutSrv = nullptr;   // the fovea composite reads NVIDIA's crop through this
     ID3D11Texture2D*           dlSubmit = nullptr;  // NVIDIA's frame copied into the game's own format: what goes out
+    ID3D11UnorderedAccessView* dlSubmitUav = nullptr;
+    bool                      uiResolvedHistory = false;
     uint32_t                   dlW = 0, dlH = 0;
     uint32_t                   dlOutW = 0, dlOutH = 0;
     // Tier 1 of docs/per-object-motion.md (2026-09-08), the mover mask:
@@ -1798,6 +1787,8 @@ void releaseDl(EyeState& e) {
     if (e.dlOutSrv) { e.dlOutSrv->Release(); e.dlOutSrv = nullptr; }
     if (e.dlOut) { e.dlOut->Release(); e.dlOut = nullptr; }
     if (e.dlSubmit) { e.dlSubmit->Release(); e.dlSubmit = nullptr; }
+    if (e.dlSubmitUav) { e.dlSubmitUav->Release(); e.dlSubmitUav = nullptr; }
+    e.uiResolvedHistory = false;
     e.dlW = e.dlH = 0;
     e.dlOutW = e.dlOutH = 0;
     e.dlHaveHistory = false;
@@ -2172,6 +2163,8 @@ ID3D11ComputeShader* motionShader(ID3D11DeviceContext* ctx, bool diagnostics) {
     return shader;
 }
 ID3D11ComputeShader*       g_csFovea = nullptr;  // the fovea composite (feature 6)
+ID3D11ComputeShader*       g_csUiResolve = nullptr;
+bool                      g_csUiResolveTried = false, g_uiResolveNoted = false;
 bool                       g_csFoveaTried = false;
 ID3D11Buffer*              g_foveaCb = nullptr;   // its crop and edge band
 bool                       g_foveaNoted = false;
@@ -3712,6 +3705,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
 
     void* result = nullptr;
     bool uiEvidenceWritten = false;
+    bool uiResolveWritten = false;
     if (ok) {
         EyeState& e = *eptr;
         if (flags & 1u) {
@@ -4853,8 +4847,11 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                            // one admits an sRGB view, and that was the one uniform
                            // brightness change the trained path could have made (the
                            // review of 2026-09-04, D1).
-                           makeTex(dev, oW, oH, sd.Format, viewFmt, D3D11_BIND_SHADER_RESOURCE,
-                                   &e.dlSubmit, nullptr, nullptr);
+                           makeTex(dev, oW, oH, sd.Format,
+                                   (sd.Format==DXGI_FORMAT_R8G8B8A8_TYPELESS || sd.Format==DXGI_FORMAT_R8G8B8A8_UNORM) ? DXGI_FORMAT_R8G8B8A8_UNORM : viewFmt,
+                                   D3D11_BIND_SHADER_RESOURCE | ((sd.Format==DXGI_FORMAT_R8G8B8A8_TYPELESS || sd.Format==DXGI_FORMAT_R8G8B8A8_UNORM) ? D3D11_BIND_UNORDERED_ACCESS : 0),
+                                   &e.dlSubmit, nullptr,
+                                   (sd.Format==DXGI_FORMAT_R8G8B8A8_TYPELESS || sd.Format==DXGI_FORMAT_R8G8B8A8_UNORM) ? &e.dlSubmitUav : nullptr);
                     if (made) {
                         e.dlW = w;
                         e.dlH = h;
@@ -4929,8 +4926,18 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                                         ((p.movers[0] != 0.0f && e.dlMaskUav != nullptr) || p.tvSt[3] != 0.0f ||
                                          p.ships[0] != 0.0f || uiTrack);
                     const bool uiBound = wantUi && ensureUiMaskSrv(dev, e, coverageMask);
+                    if(uiTrack && e.dlSubmitUav && !g_csUiResolveTried) {
+                        g_csUiResolveTried=true;
+                        g_csUiResolve=shaderSwapCompileCs(ctx,kUiResolve,sizeof(kUiResolve)-1,"main","UI resolve",nullptr,"UI resolve");
+                    }
+                    const bool uiResolve=uiTrack && e.dlSubmitUav && g_csUiResolve && !debugPaint;
+                    if(uiResolve && !e.uiResolvedHistory) e.uiHistoryValid=false;
                     p.probe[2] = uiBound ? 1.0f : 0.0f;
                     p.probe[3] = uiFlags();
+                    // Modern DLSS presets ignore the bias mask. The final UI
+                    // resolve writes its own influence history below; avoid
+                    // the ineffective adaptive colour work in the MV shader.
+                    if(uiResolve) p.probe[3]=float(uint32_t(p.probe[3])&~6u);
                     if (uiTrack) ensureBiasMask(dev,e,w,h);
                     setParams(ctx, p);
                     ID3D11ShaderResourceView* nullSrvM[14] = {};
@@ -4950,7 +4957,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     ID3D11UnorderedAccessView* uavsM[7] = {debugPaint ? e.dlOutUav : nullptr,
                                                            nullptr, g_statsUav, e.dlMvUav,
                                                            e.dlDepthUav, e.dlMaskUav,
-                                                           uiTrack ? e.uiHistoryUav[1-e.uiHistoryRead] : nullptr};
+                                                           uiTrack && !uiResolve ? e.uiHistoryUav[1-e.uiHistoryRead] : nullptr};
                     ID3D11Buffer* cbM = g_cb;
                     ID3D11SamplerState* smpM = g_samp;
                     ctx->CSSetShaderResources(0, 14, srvsM);
@@ -4961,7 +4968,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     ctx->CSSetShaderResources(0, 14, nullSrvM);
                     ctx->CSSetUnorderedAccessViews(0, 7, nullUavM, nullptr);
                     if (haveDepth && e.zPrev) zcWritten = true;
-                    if (uiTrack) uiEvidenceWritten = true;
+                    if (uiTrack && !uiResolve) uiEvidenceWritten = true;
                     if(eye==0)stageEyeInputs(ctx,e,depthSrv,coverageMask,p.probe[2],p.probe[3]);
                     // What NVIDIA is handed: the union when the mover mask
                     // ran this frame, else the interface's alone (as before
@@ -5072,7 +5079,18 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     }
                     // The frame that goes out, in the game's own format (dlSubmit
                     // says why). Inside the timed region, so the price is honest.
-                    if (usedDlaa) ctx->CopyResource(e.dlSubmit, e.dlOut);
+                    if (usedDlaa && uiResolve) {
+                        ctx->CSSetShaderResources(0,14,nullSrvM);ctx->CSSetUnorderedAccessViews(0,7,nullUavM,nullptr);
+                        ID3D11ShaderResourceView* srvs[4]={e.dlColourSrv,e.dlOutSrv,uiBound?e.uiMaskSrv:nullptr,e.uiHistoryValid?e.uiHistorySrv[e.uiHistoryRead]:nullptr};
+                        ID3D11UnorderedAccessView* uavs[2]={e.dlSubmitUav,e.uiHistoryUav[1-e.uiHistoryRead]};
+                        ctx->CSSetShader(g_csUiResolve,nullptr,0);ctx->CSSetShaderResources(0,4,srvs);ctx->CSSetUnorderedAccessViews(0,2,uavs,nullptr);
+                        // NGX may change compute bindings, including b0.
+                        ctx->CSSetConstantBuffers(0,1,&g_cb);
+                        ctx->Dispatch((w+7)/8,(h+7)/8,1);
+                        ctx->CSSetShaderResources(0,14,nullSrvM);ctx->CSSetUnorderedAccessViews(0,7,nullUavM,nullptr);
+                        uiEvidenceWritten=uiResolveWritten=true;
+                        if(!g_uiResolveNoted){g_uiResolveNoted=true;Log::get().note("UI resolve: current-raster bounds applied after DLSS; model-independent ghost rejection, existing submit/UI-history textures reused. No adaptive colour work in the DLSS motion pass.");}
+                    } else if (usedDlaa) ctx->CopyResource(e.dlSubmit, e.dlOut);
                 }
             }
         }
@@ -5092,6 +5110,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         // The own path: the interface's coverage mask at t4 for the body
         // path's exclusion (the trained block above binds its own).
         if (!usedDlaa) {
+            if(e.uiResolvedHistory){e.uiHistoryValid=false;e.uiResolvedHistory=false;}
             ID3D11Texture2D* rm = nullptr;
             const bool uiOwn = (p.tvSt[3] != 0.0f || p.ships[0] != 0.0f || uiTrack) && uiDepthCoverageMask(w, h, eye, &rm) && rm &&
                                ensureUiMaskSrv(dev, e, rm);
@@ -5591,6 +5610,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
     // The eye dump, armed by its key or the menu: this treated eye, as it goes
     // out, before the references are dropped.
     if (eptr) {
+        eptr->uiResolvedHistory = result && uiResolveWritten;
         if (result && uiEvidenceWritten) {
             eptr->uiHistoryRead = 1 - eptr->uiHistoryRead;
             eptr->uiHistoryValid = true;
@@ -6280,6 +6300,8 @@ void temporalPassShutdown() {
     if (g_csMvFast) { g_csMvFast->Release(); g_csMvFast = nullptr; }
     if (g_passDevice) { g_passDevice->Release(); g_passDevice = nullptr; }
     if (g_csFovea) { g_csFovea->Release(); g_csFovea = nullptr; }
+    if (g_csUiResolve) { g_csUiResolve->Release(); g_csUiResolve=nullptr; }
+    g_csUiResolveTried=g_uiResolveNoted=false;
     if (g_foveaCb) { g_foveaCb->Release(); g_foveaCb = nullptr; }
     if (g_csDown) { g_csDown->Release(); g_csDown = nullptr; }
     if (g_downCb) { g_downCb->Release(); g_downCb = nullptr; }

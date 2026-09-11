@@ -57,6 +57,24 @@ int wmain(int argc, wchar_t** argv) {
     }
     uint8_t overwritten[64]{};ctx->UpdateSubresource(vertices.Get(),0,nullptr,overwritten,0,0);
     check(snap.vertexDraws==2&&snap.vertexBytes==112,"per-draw vertex snapshots counted");
+    // The flight sprites use large base/start offsets into shared buffers.
+    // Verify the capture preserves the actual draw window across reuse.
+    bd.ByteWidth=320200;ComPtr<ID3D11Buffer> packed;hr(dev->CreateBuffer(&bd,nullptr,&packed));
+    UINT packedStride=40,packedOffset=16;ctx->IASetVertexBuffers(1,1,packed.GetAddressOf(),&packedStride,&packedOffset);
+    bd.ByteWidth=300100;bd.BindFlags=D3D11_BIND_INDEX_BUFFER;ComPtr<ID3D11Buffer> indices;hr(dev->CreateBuffer(&bd,nullptr,&indices));
+    ctx->IASetIndexBuffer(indices.Get(),DXGI_FORMAT_R16_UINT,4);
+    for(UINT i=0;i<2;++i){
+        std::vector<uint8_t> data(320200);for(UINT k=0;k<data.size();++k)data[k]=static_cast<uint8_t>(k+i*37);
+        ctx->UpdateSubresource(packed.Get(),0,nullptr,data.data(),0,0);
+        ctx->UpdateSubresource(indices.Get(),0,nullptr,data.data(),0,0);
+        snap.capture(ctx.Get(),102,12+i,edvr::EyeDrawSnapshot::kHud,0,'X',6,1,0,150000,8000);
+        const auto& captured=snap.draws.back();
+        check(captured.streams[1].captureOffset==320016&&captured.streams[1].copied==184,"vertex window starts at draw base");
+        check(captured.streams[2].captureOffset==300004&&captured.streams[2].copied==12,"index window starts at draw start");
+        check(captured.streams[1].offset==16&&captured.streams[2].offset==4,"binding offsets remain distinct from capture offsets");
+    }
+    const uint32_t capturedBytes=snap.vertexBytes;
+    ID3D11Buffer* noBuffer=nullptr;UINT zero=0;ctx->IASetVertexBuffers(1,1,&noBuffer,&zero,&zero);ctx->IASetIndexBuffer(nullptr,DXGI_FORMAT_R16_UINT,0);
     // Only the test waits, to make WARP deterministic. Production writes
     // after the eye ledger grace period and reports unavailable copies.
     D3D11_QUERY_DESC qd{D3D11_QUERY_EVENT, 0}; ComPtr<ID3D11Query> query;
@@ -79,7 +97,7 @@ int wmain(int argc, wchar_t** argv) {
     check(std::memcmp(saved, shaderBytes, sizeof(saved)) == 0, "shader payload content");
     fclose(shader);
     snap.capture(ctx.Get(),103,10,edvr::EyeDrawSnapshot::kHud,0,'X',3,1,0);
-    check(snap.vertexBytes==112,"vertex capture stops after three frames");
+    check(snap.vertexBytes==capturedBytes,"vertex capture stops after three frames");
     snap.vertexBytes=32*1024*1024;snap.capture(ctx.Get(),102,11,edvr::EyeDrawSnapshot::kHud,0,'X',3,1,0);
     check(snap.vertexDeclined==1,"vertex byte budget declines explicitly");
     snap.draws.resize(edvr::EyeDrawSnapshot::kMaxDraws);

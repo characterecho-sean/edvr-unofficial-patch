@@ -3309,7 +3309,14 @@ struct DrawClock {
     bool    on;
     int64_t t0;
     int64_t real = 0;
+    bool forwarded = false;
     DrawClock() : on(perfMonitorSampleDraws()), t0(on ? qpcNow() : 0) {}
+    void realCall(int64_t start) {
+        // Only the first call forwards the game's draw. Coverage reissues
+        // are EDVR work; subtracting every call hid their CPU/driver cost.
+        if(!forwarded) real += qpcNow()-start;
+        forwarded=true;
+    }
     ~DrawClock() {
         if (on) perfMonitorDrawTicks(qpcNow() - t0, real);
     }
@@ -3325,7 +3332,7 @@ void STDMETHODCALLTYPE hookedDraw(ID3D11DeviceContext* self, UINT count, UINT st
     forwardWithVerdict(self, v, [&] {
         const int64_t r0 = clock.on ? qpcNow() : 0;
         g_state->realDraw(self, count, start);
-        if (clock.on) clock.real += qpcNow() - r0;
+        if (clock.on) clock.realCall(r0);
     });
     if (v == DrawVerdict::kPanel) endPanelOverride(self);
 }
@@ -3340,7 +3347,7 @@ void STDMETHODCALLTYPE hookedDrawIndexed(ID3D11DeviceContext* self, UINT count,
     forwardWithVerdict(self, v, [&] {
         const int64_t r0 = clock.on ? qpcNow() : 0;
         g_state->realDrawIndexed(self, count, startIndex, baseVertex);
-        if (clock.on) clock.real += qpcNow() - r0;
+        if (clock.on) clock.realCall(r0);
     });
     if (v == DrawVerdict::kPanel) endPanelOverride(self);
 }
@@ -3370,7 +3377,7 @@ void STDMETHODCALLTYPE hookedDrawInstanced(ID3D11DeviceContext* self, UINT perIn
         const int64_t r0 = clock.on ? qpcNow() : 0;
         g_state->realDrawInstanced(self, perInstance, drawn, startVertex,
                                    startInstance);
-        if (clock.on) clock.real += qpcNow() - r0;
+        if (clock.on) clock.realCall(r0);
     });
     if (v == DrawVerdict::kPanel) endPanelOverride(self);
 }
@@ -3403,7 +3410,7 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
         const int64_t r0 = clock.on ? qpcNow() : 0;
         g_state->realDrawIndexedInstanced(self, perInstance, instances, startIndex,
                                           baseVertex, startInstance);
-        if (clock.on) clock.real += qpcNow() - r0;
+        if (clock.on) clock.realCall(r0);
     });
     if (v == DrawVerdict::kPanel) endPanelOverride(self);
     if (v == DrawVerdict::kIntroPanel) introPanelEndDraw(self);
