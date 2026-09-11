@@ -227,6 +227,23 @@ public:
     // partial.
     bool commit();
 
+    // THE SWAP WITH NOTHING IN IT. CopyVptr only: point the object at a
+    // byte-identical private copy of its table, with no slot patched and no
+    // thunk anywhere in the path. Every call the object receives then runs
+    // exactly the code it would have run before -- from a different address.
+    //
+    // A diagnostic, and the sharpest one this mechanism admits. Two users'
+    // machines die 1.7 seconds after the private-copy mode installs, and the
+    // one fact that separates their rigs from a working one is that EDVR's
+    // thunks RUN there (the in-place mode, where the runtime overwrites the
+    // thunks before the first frame, is stable on both). That leaves two
+    // suspects with nothing between them: the swap itself, or what the thunks
+    // do once they are running. This removes the second entirely. If the game
+    // still dies, the swap is fatal on its own and no hook body was ever the
+    // problem; if it lives, the mechanism is innocent and the bug is somewhere
+    // in twenty-nine functions that can be bisected.
+    bool commitUnpatched();
+
     // InPlace: restores each entry we wrote, but ONLY where it still holds
     // our replacement. An entry someone patched after us belongs to them now;
     // restoring it would clobber their hook, which is the same composition

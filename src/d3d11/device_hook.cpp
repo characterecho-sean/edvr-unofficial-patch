@@ -105,6 +105,10 @@ struct State {
     VTableHook deviceHook;
     VTableHook swapChainHook;
     VTableHook factoryHook;
+    // The swap-only probe's hook on the immediate context: a private copy with
+    // nothing patched in it, standing in for BOTH context installers. See
+    // advanced.context_hook_probe.
+    VTableHook bareContextHook;
 
     ID3D11Device*   device = nullptr;
     IDXGISwapChain* swapChain = nullptr;
@@ -2020,12 +2024,74 @@ void hookDevice(ID3D11Device* device) {
         }
     }
 
-    installExposureFix(device, ctxMode);
-    // Before the vScreen fixes, which ask it whether it needs the eye-draw
-    // count. It installs no hooks of its own -- it is driven from vScreen's Map
-    // and Unmap -- so nothing else depends on the order.
-    installGlitchFrameFix();
-    installVScreenFixes(device, ctxMode);
+    // THE SWAP-ONLY PROBE, which stands in for both context installers.
+    //
+    // Two users' machines die 1.7 seconds after the private-copy mode goes in.
+    // The in-place mode is stable on both -- and on both, the runtime
+    // overwrites every in-place thunk before the first frame, so in that mode
+    // EDVR's thunks never run at all. That is the one clean difference between
+    // the mode that dies and the mode that lives: whether our code executes on
+    // the context's calls. And it leaves exactly two suspects with nothing in
+    // between: the vptr swap itself, or what twenty-nine thunks DO once they are
+    // running.
+    //
+    // This removes the second. The context gets a private copy of its table
+    // with nothing patched -- every call runs the code it always ran, from a
+    // different address -- and neither installer runs, so no thunk exists to
+    // execute. If the game still dies, the swap is fatal on its own and the
+    // thunks were never the problem. If it lives, the mechanism is innocent,
+    // the bug is in what a thunk does, and that is a bisection rather than a
+    // new hooking design.
+    //
+    // A pass-through thunk was considered and is not built, because from the
+    // GPU's side it is the swap plus one extra call frame -- it would answer
+    // the same question as this, less cleanly.
+    {
+        const std::string probe =
+            sentinelCfg.getString("advanced.context_hook_probe", "off");
+        if (_stricmp(probe.c_str(), "swap") == 0) {
+            ID3D11DeviceContext* ctx = nullptr;
+            device->GetImmediateContext(&ctx);
+            bool swapped = false;
+            if (ctx) {
+                if (s.bareContextHook.attach(ctx) &&
+                    s.bareContextHook.setMode(HookMode::CopyVptr) &&
+                    s.bareContextHook.commitUnpatched()) {
+                    swapped = true;
+                }
+                ctx->Release();
+            }
+            Log::get().note(
+                swapped
+                    ? "SWAP-ONLY PROBE: the immediate context now dispatches "
+                      "through a byte-identical private copy of its table, with "
+                      "NOTHING patched in it and neither context installer run. "
+                      "No EDVR code is in the path of any context call. Every "
+                      "d3d11 fix is therefore off this session. If this session "
+                      "dies the way the normal private-copy mode does, the vptr "
+                      "swap is fatal on its own; if it survives, the swap is "
+                      "innocent and the cause is inside a thunk. Set "
+                      "advanced.context_hook_probe back to off afterwards."
+                    : "SWAP-ONLY PROBE asked for, but the bare copy could not be "
+                      "installed (see above). The context installers were "
+                      "skipped anyway, so this session tests nothing -- set "
+                      "advanced.context_hook_probe back to off.");
+        } else {
+            if (!probe.empty() && _stricmp(probe.c_str(), "off") != 0) {
+                Log::get().note(
+                    "edvr.ini: advanced.context_hook_probe = \"%s\" is not one of "
+                    "off or swap, so it was IGNORED. Check the spelling.",
+                    probe.c_str());
+            }
+            installExposureFix(device, ctxMode);
+            // Before the vScreen fixes, which ask it whether it needs the
+            // eye-draw count. It installs no hooks of its own -- it is driven
+            // from vScreen's Map and Unmap -- so nothing else depends on the
+            // order.
+            installGlitchFrameFix();
+            installVScreenFixes(device, ctxMode);
+        }
+    }
 
     // The panel resolution, if asked for. Applied here because it has to land
     // before the game builds its render chain, and the device exists first.
@@ -2194,6 +2260,10 @@ void shutdownDeviceHooks() {
     shutdownGlitchFrameFix();
     shutdownVScreenFixes();
     shutdownExposureFix();
+    // The swap-only probe's bare copy, if that was what ran instead of the two
+    // installers above. Restoring the vptr frees nothing anyone dispatches
+    // through: the copy held no thunks, so nothing chained into it.
+    if (g_state) g_state->bareContextHook.uninstall();
     if (!g_state) return;
     deviceHookNoteCleanExit();
     g_state->factoryHook.uninstall();

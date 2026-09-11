@@ -1080,6 +1080,43 @@ int main() {
         }
     }
 
+    // THE SWAP WITH NOTHING IN IT -- the probe that separates "the private copy
+    // is fatal" from "a thunk is". It must move the object onto a copy, the
+    // copy must be byte-identical (every call runs the original, no thunk
+    // anywhere), and uninstall must put the birth vptr back. A probe that
+    // secretly patched something, or dispatched differently, would answer the
+    // wrong question on the one rig it exists for.
+    {
+        RealThing obj;
+        void** birth = *reinterpret_cast<void***>(&obj);
+        IThing* r = &obj;
+        VTableHook bare;
+        g_owner = &obj;
+        g_ownerHits = 0;
+        if (!bare.attach(&obj)) {
+            fail("attach for the swap-only cell", "attach refused");
+        } else {
+            check(bare.setMode(HookMode::CopyVptr) && bare.commitUnpatched(),
+                  "an unpatched copy commits in copy mode",
+                  "commitUnpatched refused a plain copy");
+            check(*reinterpret_cast<void***>(&obj) != birth,
+                  "...and the object now dispatches through the copy",
+                  "the vptr was not moved, so the probe would test nothing");
+            check(r->one() == 1 && g_ownerHits == 0,
+                  "...running exactly the original code -- no thunk anywhere",
+                  "something other than the original ran through a copy that "
+                  "was supposed to be empty");
+            check(!bare.commit(),
+                  "...and commit() still refuses with nothing staged",
+                  "commit accepted an empty patch list, which is a second way "
+                  "to reach this state that the header does not describe");
+            bare.uninstall();
+            check(*reinterpret_cast<void***>(&obj) == birth && r->one() == 1,
+                  "uninstall puts the birth vptr back",
+                  "the object was left on a freed copy");
+        }
+    }
+
     // Copy-mode uninstall is POLITE: if a later tool swapped the object's
     // vptr on top of ours, uninstall must leave their vptr alone rather than
     // restore over them (and must not free our copy their chain still runs

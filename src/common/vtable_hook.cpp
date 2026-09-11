@@ -735,6 +735,32 @@ bool VTableHook::replace(size_t index, void* replacement, void** origOut) {
     return true;
 }
 
+bool VTableHook::commitUnpatched() {
+    if (!m_object || m_committed) return false;
+    if (m_mode != HookMode::CopyVptr) return false;
+    if (!m_patches.empty()) return false;   // that is what commit() is for
+    if (m_copy.empty()) return false;
+
+    // The same one aligned store commit() does, into a copy that differs from
+    // the original in nothing but its address. See the header for why anyone
+    // would want that.
+    void** target = reinterpret_cast<void**>(m_object);
+    DWORD oldProtect = 0;
+    if (!VirtualProtect(target, sizeof(void*), PAGE_READWRITE, &oldProtect)) {
+        Log::get().note("VTableHook: VirtualProtect failed on object %p (err %lu)",
+                        m_object, GetLastError());
+        return false;
+    }
+    const bool ok = guarded("VTableHook::commitUnpatched/vptr", [&] {
+        *target = reinterpret_cast<void*>(m_copy.data());
+    });
+    DWORD ignored = 0;
+    VirtualProtect(target, sizeof(void*), oldProtect, &ignored);
+    if (!ok) return false;
+    m_committed = true;
+    return true;
+}
+
 bool VTableHook::commit() {
     if (!m_object || m_committed) return false;
     if (m_patches.empty()) return false;

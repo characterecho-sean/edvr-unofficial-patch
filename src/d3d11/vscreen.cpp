@@ -2291,8 +2291,65 @@ void endPanelOverride(ID3D11DeviceContext* self) {
 
 // --- hooks ------------------------------------------------------------------
 
+// THE STALENESS DETECTOR, and it is the one measurement this whole arc still
+// lacks.
+//
+// In the private-copy mode the object dispatches through a table EDVR froze at
+// install, while Windows' d3d11.dll goes on re-laying the REAL table inside the
+// context object every frame. The question nobody has answered is whether those
+// two ever say different things. If they do not -- if the runtime writes the
+// same pointers back forever -- the frozen copy is harmless and the crash on
+// two users' rigs is something else. If they DO, the game is calling last
+// second's implementation with this second's state, which is exactly how a GPU
+// gets wedged, and the crash has its mechanism.
+//
+// Everything measuring this so far has been a once-a-second sample taken after
+// Present. That is three samples on a rig that dies in 1.7 seconds, it cannot
+// see a value that changes and changes back within a frame, and the eye-draw
+// counts (243 patched in place versus 682 copied) say the re-lay lands about a
+// third of the way THROUGH a frame -- exactly where a post-Present sample is
+// blind. So this asks at the only moment that settles it: the instant before
+// the call is forwarded.
+//
+// One load and one compare, on the draw path, only in copy mode. The first
+// mismatch goes to the BREADCRUMB file as well as the log, because that file is
+// written unbuffered and survives the process being killed by a TDR -- which is
+// how these sessions end.
+inline void noteStaleForward(size_t slot, const void* frozen, const char* what) {
+    State* s = g_state;
+    if (!s || !s->watchStale) return;
+    void** live = s->hook.originalVTable();
+    if (!live) return;
+    void* now = nullptr;
+    if (!guarded("vScreen/stale-check", [&] { now = live[slot]; })) return;
+    if (now == frozen) return;
+
+    ++s->staleForwards;
+    if (!s->staleNoted) {
+        s->staleNoted = true;
+        char crumb[192];
+        _snprintf_s(crumb, sizeof(crumb), _TRUNCATE,
+                    "gfx: STALE FORWARD on %s (slot %zu): copy holds %p, the "
+                    "live table now holds %p",
+                    what, slot, frozen, now);
+        breadcrumb(crumb);
+        char modBuf[MAX_PATH];
+        Log::get().note(
+            "vScreen: STALE FORWARD. %s (slot %zu) is about to be called "
+            "through EDVR's frozen copy, which holds %p -- but the context's "
+            "own table now holds %p (%s). The two have diverged, so the game is "
+            "calling an implementation the runtime has moved on from. THIS is "
+            "the private-copy mode's failure case and it has never been "
+            "observed before. Said once; the count is reported with the totals.",
+            what, slot, frozen, now,
+            vtableOwnerModuleName(now, modBuf, sizeof(modBuf)));
+    }
+}
+
 void STDMETHODCALLTYPE hookedClearRtv(ID3D11DeviceContext* self,
                                       ID3D11RenderTargetView* rtv, const FLOAT c[4]) {
+    noteStaleForward(kSlotClearRenderTargetView, reinterpret_cast<const void*>(g_state->realClearRtv),
+                     "ClearRenderTargetView");
     State* s = g_state;
     ++s->thunkHits[kHitClearRtv];
     if (foreignContext(self)) {
@@ -2943,6 +3000,8 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
 // session that is by definition the one being measured.
 void STDMETHODCALLTYPE hookedCopyResource(ID3D11DeviceContext* self,
                                           ID3D11Resource* dst, ID3D11Resource* src) {
+    noteStaleForward(kSlotCopyResource, reinterpret_cast<const void*>(g_state->realCopyResource),
+                     "CopyResource");
     if (drawCensusArmed()) {
         drawCensusCopy('R', dst, 0, 0, 0, src, 0, false, 0, 0, 0, 0,
                        foreignContext(self));
@@ -2956,6 +3015,8 @@ void STDMETHODCALLTYPE hookedCopyResource(ID3D11DeviceContext* self,
 void STDMETHODCALLTYPE hookedClearDsv(ID3D11DeviceContext* self,
                                       ID3D11DepthStencilView* dsv, UINT flags,
                                       FLOAT depth, UINT8 stencil) {
+    noteStaleForward(kSlotClearDepthStencilView, reinterpret_cast<const void*>(g_state->realClearDsv),
+                     "ClearDepthStencilView");
     if (drawCensusArmed()) {
         drawCensusClearDepth(dsv, flags, depth, stencil,
                              foreignContext(self));
@@ -2990,6 +3051,8 @@ void STDMETHODCALLTYPE hookedEnd(ID3D11DeviceContext* self,
 // so n=0 i=0 and args= names the buffer instead. Kind 'Z' indexed, 'Y' not.
 void STDMETHODCALLTYPE hookedDrawIndexedInstancedIndirect(
     ID3D11DeviceContext* self, ID3D11Buffer* args, UINT off) {
+    noteStaleForward(kSlotDrawIndexedInstancedIndirect, reinterpret_cast<const void*>(g_state->realDrawIndexedInstancedIndirect),
+                     "DrawIndexedInstancedIndirect");
     if (drawCensusArmed()) {
         drawCensusDrawDirect(self, 'Z', 0, 0, foreignContext(self), args, off);
     }
@@ -3001,6 +3064,8 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstancedIndirect(
 
 void STDMETHODCALLTYPE hookedDrawInstancedIndirect(ID3D11DeviceContext* self,
                                                    ID3D11Buffer* args, UINT off) {
+    noteStaleForward(kSlotDrawInstancedIndirect, reinterpret_cast<const void*>(g_state->realDrawInstancedIndirect),
+                     "DrawInstancedIndirect");
     if (drawCensusArmed()) {
         drawCensusDrawDirect(self, 'Y', 0, 0, foreignContext(self), args, off);
     }
@@ -3022,6 +3087,8 @@ void STDMETHODCALLTYPE hookedCopyStructureCount(ID3D11DeviceContext* self,
 void STDMETHODCALLTYPE hookedCopySubresourceRegion(
     ID3D11DeviceContext* self, ID3D11Resource* dst, UINT dstSub, UINT dstX, UINT dstY,
     UINT dstZ, ID3D11Resource* src, UINT srcSub, const D3D11_BOX* box) {
+    noteStaleForward(kSlotCopySubresourceRegion, reinterpret_cast<const void*>(g_state->realCopySubresourceRegion),
+                     "CopySubresourceRegion");
     if (drawCensusArmed()) {
         drawCensusCopy('S', dst, dstSub, dstX, dstY, src, srcSub, box != nullptr,
                        box ? box->left : 0, box ? box->top : 0,
@@ -3040,6 +3107,8 @@ void STDMETHODCALLTYPE hookedUpdateSubresource(ID3D11DeviceContext* self,
                                                ID3D11Resource* dst, UINT dstSub,
                                                const D3D11_BOX* box, const void* data,
                                                UINT rowPitch, UINT depthPitch) {
+    noteStaleForward(kSlotUpdateSubresource, reinterpret_cast<const void*>(g_state->realUpdateSubresource),
+                     "UpdateSubresource");
     if (drawCensusArmed()) {
         drawCensusCopy('U', dst, dstSub, box ? box->left : 0, box ? box->top : 0,
                        nullptr, 0, box != nullptr,
@@ -3069,6 +3138,8 @@ void STDMETHODCALLTYPE hookedResolveSubresource(ID3D11DeviceContext* self,
                                                 ID3D11Resource* dst, UINT dstSub,
                                                 ID3D11Resource* src, UINT srcSub,
                                                 DXGI_FORMAT fmt) {
+    noteStaleForward(kSlotResolveSubresource, reinterpret_cast<const void*>(g_state->realResolveSubresource),
+                     "ResolveSubresource");
     if (drawCensusArmed()) {
         drawCensusResolve(dst, dstSub, src, srcSub, static_cast<uint32_t>(fmt));
     }
@@ -3147,61 +3218,6 @@ struct DrawClock {
     }
 };
 
-// THE STALENESS DETECTOR, and it is the one measurement this whole arc still
-// lacks.
-//
-// In the private-copy mode the object dispatches through a table EDVR froze at
-// install, while Windows' d3d11.dll goes on re-laying the REAL table inside the
-// context object every frame. The question nobody has answered is whether those
-// two ever say different things. If they do not -- if the runtime writes the
-// same pointers back forever -- the frozen copy is harmless and the crash on
-// two users' rigs is something else. If they DO, the game is calling last
-// second's implementation with this second's state, which is exactly how a GPU
-// gets wedged, and the crash has its mechanism.
-//
-// Everything measuring this so far has been a once-a-second sample taken after
-// Present. That is three samples on a rig that dies in 1.7 seconds, it cannot
-// see a value that changes and changes back within a frame, and the eye-draw
-// counts (243 patched in place versus 682 copied) say the re-lay lands about a
-// third of the way THROUGH a frame -- exactly where a post-Present sample is
-// blind. So this asks at the only moment that settles it: the instant before
-// the call is forwarded.
-//
-// One load and one compare, on the draw path, only in copy mode. The first
-// mismatch goes to the BREADCRUMB file as well as the log, because that file is
-// written unbuffered and survives the process being killed by a TDR -- which is
-// how these sessions end.
-inline void noteStaleForward(size_t slot, const void* frozen, const char* what) {
-    State* s = g_state;
-    if (!s || !s->watchStale) return;
-    void** live = s->hook.originalVTable();
-    if (!live) return;
-    void* now = nullptr;
-    if (!guarded("vScreen/stale-check", [&] { now = live[slot]; })) return;
-    if (now == frozen) return;
-
-    ++s->staleForwards;
-    if (!s->staleNoted) {
-        s->staleNoted = true;
-        char crumb[192];
-        _snprintf_s(crumb, sizeof(crumb), _TRUNCATE,
-                    "gfx: STALE FORWARD on %s (slot %zu): copy holds %p, the "
-                    "live table now holds %p",
-                    what, slot, frozen, now);
-        breadcrumb(crumb);
-        char modBuf[MAX_PATH];
-        Log::get().note(
-            "vScreen: STALE FORWARD. %s (slot %zu) is about to be called "
-            "through EDVR's frozen copy, which holds %p -- but the context's "
-            "own table now holds %p (%s). The two have diverged, so the game is "
-            "calling an implementation the runtime has moved on from. THIS is "
-            "the private-copy mode's failure case and it has never been "
-            "observed before. Said once; the count is reported with the totals.",
-            what, slot, frozen, now,
-            vtableOwnerModuleName(now, modBuf, sizeof(modBuf)));
-    }
-}
-
 void STDMETHODCALLTYPE hookedDraw(ID3D11DeviceContext* self, UINT count, UINT start) {
     DrawClock clock;
     ++g_state->thunkHits[kHitDraw];
@@ -3234,6 +3250,8 @@ void STDMETHODCALLTYPE hookedDrawIndexed(ID3D11DeviceContext* self, UINT count,
 void STDMETHODCALLTYPE hookedDrawInstanced(ID3D11DeviceContext* self, UINT perInstance,
                                            UINT instances, UINT startVertex,
                                            UINT startInstance) {
+    noteStaleForward(kSlotDrawInstanced, reinterpret_cast<const void*>(g_state->realDrawInstanced),
+                     "DrawInstanced");
     DrawClock clock;
     // See hookedDraw: the start vertex, before the call that reads it.
     if (quadProbeWants()) g_state->qsBaseVertex = static_cast<INT>(startVertex);
@@ -3262,6 +3280,8 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
                                                   UINT perInstance, UINT instances,
                                                   UINT startIndex, INT baseVertex,
                                                   UINT startInstance) {
+    noteStaleForward(kSlotDrawIndexedInstanced, reinterpret_cast<const void*>(g_state->realDrawIndexedInstanced),
+                     "DrawIndexedInstanced");
     DrawClock clock;
     // The rect deriver's capture runs INSIDE beginPanelOverride (the
     // chrome tracker's matched branch), so its draw-args stash must land
