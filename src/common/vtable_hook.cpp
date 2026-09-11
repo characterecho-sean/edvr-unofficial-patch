@@ -292,10 +292,20 @@ struct WriteWatch {
     volatile LONG catchState = 0;    // set to kCatchIdle at arming, see below
     volatile LONG rearmWanted = 0;   // the frame-path fallback, see vtableWatchRearm
     // When the frame-path re-arm first held off for the catch it is holding
-    // for, as a QPC stamp, and whose catch that was; 0 when it is not holding.
+    // for, as a QPC stamp, and WHICH catch that was -- the owning thread id and
+    // the sequence number below, because the same thread taking two catches in
+    // a row is two catches and must not share one clock. 0 when not holding.
     // Frame path only, so no atomics. See vtableWatchRearm.
     uint64_t  rearmHeldSince = 0;
     LONG      rearmHeldOwner = 0;
+    LONG      rearmHeldSeq = 0;
+    // Bumped by every claim, so (owner, sequence) names one catch. A thread id
+    // alone does not: Windows recycles them, and a hot slot written from one
+    // render thread produces a long run of catches that all carry the same id.
+    volatile LONG catchSeq = 0;
+    // Consecutive frames on which the re-arm's VirtualProtect refused. Frame
+    // path only. See kMaxProtectFailures.
+    uint32_t  protectFailures = 0;
     // A budget ran out and the frame path must stop the watch. Set in the
     // handler, acted on from vtableWatchFrameTick -- see reportWatchSummary for
     // why the handler may not do the stopping itself.
@@ -417,6 +427,13 @@ constexpr LONG kStopNone = 0;
 constexpr LONG kStopCatchBudget = 1;   // the timeline's session catch budget
 constexpr LONG kStopWriterProbe = 2;   // the writer probe's own small caps
 constexpr LONG kStopCostCeiling = 3;   // milliseconds per frame, over the ceiling
+constexpr LONG kStopProtectFailed = 4; // the pages cannot be closed any more
+
+// How many consecutive frames the re-arm may fail to close the pages before the
+// watch gives up and says so. Eight frames is a tenth of a second; a watch that
+// cannot protect its own pages for that long is not observing anything, and the
+// one thing it must not do is keep printing a cost-per-frame it never paid.
+constexpr uint32_t kMaxProtectFailures = 8;
 
 // How many distinct (slot, old, new, writer) tuples the aggregate holds. A
 // runtime alternating one slot between two implementations is two rows; the 24
@@ -954,6 +971,11 @@ LONG CALLBACK writeWatchHandler(EXCEPTION_POINTERS* ep) {
         // has to be reached for the frame path to know a catch is outstanding.
         // See vtableWatchRearm: it reads the STATE, not a flag this handler
         // might be interrupted before setting.
+        //
+        // The sequence number is not ownership, it is identity: it lets the
+        // frame path tell this catch from the next one the same thread takes.
+        // Nothing depends on it being seen promptly.
+        InterlockedIncrement(&g_watch.catchSeq);
     } else {
         // No context to step with, so no step will ever come: hand the state
         // back and let the frame path close the pages. A whole frame late, and
@@ -1411,8 +1433,11 @@ bool vtableWatchSlot(void** vtable, size_t slot, size_t slotCount,
     InterlockedExchange(&g_watch.stopReason, kStopNone);
     InterlockedExchange(&g_watch.escaped, 0);
     InterlockedExchange(&g_watch.escapedOwner, 0);
+    InterlockedExchange(&g_watch.catchSeq, 0);
     g_watch.rearmHeldSince = 0;
     g_watch.rearmHeldOwner = 0;
+    g_watch.rearmHeldSeq = 0;
+    g_watch.protectFailures = 0;
     for (uint32_t i = 0; i < 8; ++i) InterlockedExchange64(&g_watch.slotsWritten[i], 0);
     g_watch.finished = false;
     g_watch.timeline = timeline;
@@ -1556,10 +1581,23 @@ void vtableWatchRearm() {
         // since the last frame that happened to land between catches" rather
         // than "how long this catch has been outstanding". Two seconds of that
         // would give up on a catch that was a microsecond old.
+        // AND KEYED ON THE CATCH, NOT ON THE THREAD. Two back-to-back catches by
+        // the SAME thread are two catches, and a clock that only restarted when
+        // the id changed would carry the first one's elapsed time into the
+        // second -- so a hot slot written repeatedly from one render thread, or
+        // a thread id Windows has recycled, could reach two seconds of
+        // accumulated holding across catches that were each microseconds old and
+        // have the escape give up on a perfectly healthy one. Every claim bumps
+        // a sequence number; the pair is what identifies the catch being held
+        // for.
         const uint64_t now = static_cast<uint64_t>(qpcNow());
-        if (!g_watch.rearmHeldSince || g_watch.rearmHeldOwner != prev) {
+        const LONG seq = InterlockedCompareExchange(&g_watch.catchSeq, 0, 0);
+        if (!g_watch.rearmHeldSince || g_watch.rearmHeldOwner != prev ||
+            g_watch.rearmHeldSeq != seq) {
             g_watch.rearmHeldSince = now;
             g_watch.rearmHeldOwner = prev;
+            g_watch.rearmHeldSeq = seq;
+            return;   // this catch has been held for no time at all yet
         }
         const int64_t freq = qpcFrequency();
         const double held =
@@ -1574,26 +1612,51 @@ void vtableWatchRearm() {
         InterlockedExchange(&g_watch.escapedOwner, prev);
         InterlockedExchange(&g_watch.catchState, kCatchArmed);
         InterlockedIncrement(&g_flip.unfinished);
-    } else if (prev == kCatchArmed &&
-               !InterlockedCompareExchange(&g_watch.rearmWanted, 0, 0)) {
-        // Armed, nobody mid-catch, and nobody has asked for anything: the pages
-        // are as the owner's own step left them, which is closed. This is the
-        // ordinary frame and it costs one compare-exchange. (kCatchIdle is NOT
-        // this case: the state says nobody owns the catch but nothing has
-        // necessarily closed the pages, so that one falls through and protects.)
-        g_watch.rearmHeldSince = 0;
-        g_watch.rearmHeldOwner = 0;
-        return;
     }
     g_watch.rearmHeldSince = 0;
     g_watch.rearmHeldOwner = 0;
+    g_watch.rearmHeldSeq = 0;
     InterlockedExchange(&g_watch.rearmWanted, 0);
-    // The state says ARMED from here whether it was idle or already armed; the
-    // pages may still be open either way (a concurrent catch opens them without
-    // touching the state), so protect unconditionally.
+    // ARMED IS NOT EVIDENCE THAT THE PAGES ARE CLOSED, so they are closed every
+    // frame, and the syscall-free early return that used to sit here is gone.
+    //
+    // It read "state ARMED and nobody asked" as "the owner's own step left the
+    // pages read-only" and skipped the VirtualProtect. Nothing in the process
+    // owes that. VTableHook::writeEntry opens the WHOLE page for every in-place
+    // re-patch and restores the protection it SAMPLED -- so a re-patch that
+    // samples while a catch has the pages open restores PAGE_READWRITE, and one
+    // whose two calls straddle the owner's step does the same. The state still
+    // says ARMED, nobody has asked for anything, and every frame from then on
+    // took the early return: the watch was blind for the rest of the session and
+    // its closing summary still printed a catches-per-frame figure as though it
+    // had been watching all of it. Measured: one such stomp, 200 frames of
+    // re-arm and tick, the page still writable and a fresh store not caught,
+    // three runs out of three -- and in the pairing the README actually
+    // recommends (shared mode with the timeline on) reclaim drives writeEntry
+    // over about 29 slots of that very page every frame, so "eventually" is
+    // seconds. The same thing happens if anybody decommits and recommits the
+    // page under us, which no state word can see either.
+    //
+    // One VirtualProtect per frame while armed, about a microsecond, and it is
+    // idempotent on a page that is already read-only. That is the whole cost of
+    // not having to trust anybody.
     DWORD previous = 0;
-    VirtualProtect(g_watch.pageBase, g_watch.pageSize, g_watch.readOnlyProtect,
-                   &previous);
+    if (VirtualProtect(g_watch.pageBase, g_watch.pageSize,
+                       g_watch.readOnlyProtect, &previous)) {
+        g_watch.protectFailures = 0;
+        return;
+    }
+    // AND THE RETURN VALUE IS READ. A refusal here means the state says ARMED
+    // over pages that are not: exactly the blindness above, arrived at from the
+    // other side. Ask for another go next frame, the way the handler does -- and
+    // if it keeps refusing, say so and stop, because an instrument that cannot
+    // close the pages is not watching anything and must not go on claiming a
+    // cost-per-frame it never paid.
+    InterlockedExchange(&g_watch.rearmWanted, 1);
+    if (++g_watch.protectFailures >= kMaxProtectFailures) {
+        InterlockedExchange(&g_watch.stopReason, kStopProtectFailed);
+        InterlockedExchange(&g_watch.stopWanted, 1);
+    }
 }
 
 // What a stopped watch says on its way out, in the words of whichever budget
@@ -1632,6 +1695,18 @@ static void reportWatchStop() {
             static_cast<unsigned>(g_flip.lastFrameCatches), kCatchCostUs,
             perFrame * kCatchCostUs / 1000.0, kMaxCatchMsPerFrame,
             kCostCeilingGraceS);
+    } else if (reason == kStopProtectFailed) {
+        Log::get().note(
+            "VTableHook %s: THE WATCH CANNOT CLOSE ITS OWN PAGES and is stopping. "
+            "The re-arm's VirtualProtect has been refused on %u consecutive "
+            "frames (last error %lu), which means the pages are writable while "
+            "the watch believes they are not -- every write from then on would "
+            "have gone through unseen while the summary went on reporting a cost "
+            "per frame it was no longer paying. %u write(s) were caught before "
+            "this. Something else in the process is changing the protection of "
+            "that memory, or it has been freed underneath us.",
+            g_watch.who, static_cast<unsigned>(kMaxProtectFailures),
+            GetLastError(), static_cast<unsigned>(catches));
     } else {
         Log::get().note(
             "VTableHook %s: the write watch has seen enough (%u write(s) caught, "
@@ -1871,6 +1946,10 @@ uint32_t vtableWatchLastDumpInside() { return g_flip.lastDumpInside; }
 
 uint32_t vtableWatchEscapedSteps() {
     return static_cast<uint32_t>(InterlockedCompareExchange(&g_watch.escaped, 0, 0));
+}
+
+uint32_t vtableWatchUnfinishedCatches() {
+    return static_cast<uint32_t>(InterlockedCompareExchange(&g_flip.unfinished, 0, 0));
 }
 
 

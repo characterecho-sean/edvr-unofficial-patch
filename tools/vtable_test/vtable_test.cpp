@@ -1480,6 +1480,208 @@ int main() {
         }
     }
 
+    // THE PAGES OPENED BEHIND THE WATCH'S BACK, which no state word can see.
+    //
+    // The re-arm had a syscall-free early return: state ARMED and nobody asking
+    // meant the owner's own step had left the pages closed, so skip the
+    // VirtualProtect. Nothing owes that. VTableHook::writeEntry opens the WHOLE
+    // page for every in-place re-patch and restores the protection it SAMPLED --
+    // so a re-patch that samples while a catch has the pages open puts
+    // PAGE_READWRITE back, the state still says ARMED, nobody asks for anything,
+    // and every frame from then on takes the early return. In the pairing the
+    // README recommends (shared mode with the timeline on) reclaim drives
+    // writeEntry over about 29 slots of that very page every frame.
+    //
+    // Both halves of this cell put the pages back to writable without the watch
+    // hearing about it -- one by writeEntry's exact sequence over an already
+    // open page, one by decommitting and recommitting -- and then require the
+    // watch to be catching again three frames later.
+    {
+        void** fake = static_cast<void**>(
+            VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+        if (!fake) {
+            fail("VirtualAlloc for the stomped-protection cell", "allocation refused");
+        } else {
+            for (size_t i = 0; i < 8; ++i) fake[i] = reinterpret_cast<void*>(&thunkOne);
+            check(vtableWatchSlot(fake, 3, 8, "stomp-cell", true),
+                  "the flip timeline arms for the stomped-protection cell",
+                  "arming refused");
+            vtableWatchFrameTick(600);
+
+            // (i) writeEntry's own sequence, over a page that is open because a
+            // catch has it open. It samples PAGE_READWRITE and restores it.
+            DWORD opened = 0;
+            VirtualProtect(fake, 4096, PAGE_READWRITE, &opened);
+            DWORD sampled = 0;
+            VirtualProtect(&fake[5], sizeof(void*), PAGE_READWRITE, &sampled);
+            *reinterpret_cast<void* volatile*>(&fake[5]) =
+                reinterpret_cast<void*>(&chainerOne);
+            DWORD ignored = 0;
+            VirtualProtect(&fake[5], sizeof(void*), sampled, &ignored);
+            check(!pageIsReadOnly(fake),
+                  "an in-place re-patch that sampled an open page leaves it open",
+                  "the cell did not reproduce the stomp, so it proves nothing");
+
+            for (int i = 0; i < 3; ++i) {
+                vtableWatchRearm();
+                vtableWatchFrameTick(601 + static_cast<uint64_t>(i));
+            }
+            check(pageIsReadOnly(fake),
+                  "...and three frames of the frame path close them again",
+                  "the re-arm believed the state word instead of the pages, so "
+                  "the watch is armed over memory anybody can write and every "
+                  "write from here on is invisible");
+            uint32_t caught = vtableWatchCatches();
+            WatchStoreJob fresh{fake, 3, reinterpret_cast<void*>(&toolkitOne)};
+            HANDLE t1 = CreateThread(nullptr, 0, oneStoreThread, &fresh, 0, nullptr);
+            if (t1) {
+                WaitForSingleObject(t1, INFINITE);
+                CloseHandle(t1);
+            }
+            check(vtableWatchCatches() > caught,
+                  "...so a fresh write is caught again",
+                  "the pages read as closed but nothing is being caught");
+
+            // (ii) The same blindness arrived at from outside the protection
+            // system entirely: the page is decommitted and committed again, which
+            // brings it back PAGE_READWRITE with every EDVR state word unchanged.
+            for (int i = 0; i < 3; ++i) {
+                vtableWatchRearm();
+                vtableWatchFrameTick(610 + static_cast<uint64_t>(i));
+            }
+            VirtualFree(fake, 4096, MEM_DECOMMIT);
+            VirtualAlloc(fake, 4096, MEM_COMMIT, PAGE_READWRITE);
+            for (size_t i = 0; i < 8; ++i) fake[i] = reinterpret_cast<void*>(&thunkOne);
+            check(!pageIsReadOnly(fake),
+                  "a decommit and recommit brings the page back writable",
+                  "the cell did not reproduce the second stomp");
+            for (int i = 0; i < 3; ++i) {
+                vtableWatchRearm();
+                vtableWatchFrameTick(620 + static_cast<uint64_t>(i));
+            }
+            caught = vtableWatchCatches();
+            WatchStoreJob fresh2{fake, 6, reinterpret_cast<void*>(&toolkitOne)};
+            HANDLE t2 = CreateThread(nullptr, 0, oneStoreThread, &fresh2, 0, nullptr);
+            if (t2) {
+                WaitForSingleObject(t2, INFINITE);
+                CloseHandle(t2);
+            }
+            check(vtableWatchCatches() > caught,
+                  "...and the watch recovers from that too",
+                  "a page replaced underneath the watch is never re-protected, so "
+                  "the rest of the session is unwatched");
+            vtableWatchStop();
+            VirtualFree(fake, 0, MEM_RELEASE);
+        }
+    }
+
+    // TWO CATCHES BY ONE THREAD ARE TWO CATCHES. The hold clock that lets the
+    // frame path give up on a catch after two seconds was keyed on the owning
+    // thread id alone, and reset only when a re-arm actually succeeded -- so a
+    // run of catches by the SAME thread with no successful re-arm between them
+    // accumulated one clock across all of them, and the escape could give up on
+    // a catch that was microseconds old, stamping ARMED over a live owner.
+    //
+    // Made deterministic with the suspend trick, twice: 1.2 seconds of holding
+    // for one catch, then 1.2 seconds for the NEXT catch by the same thread,
+    // with no frame in between where the re-arm could succeed. Keyed on the
+    // thread alone that is 2.4 seconds of one clock and the escape fires; keyed
+    // on (thread, sequence) it is two clocks of 1.2 and nothing is given up on.
+    {
+        void** fake = static_cast<void**>(
+            VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+        if (!fake) {
+            fail("VirtualAlloc for the two-catch-clock cell", "allocation refused");
+        } else {
+            for (size_t i = 0; i < 8; ++i) fake[i] = reinterpret_cast<void*>(&thunkOne);
+            check(vtableWatchSlot(fake, 3, 8, "two-catch-cell", true),
+                  "the flip timeline arms for the two-catch clock cell",
+                  "arming refused");
+            vtableWatchFrameTick(700);
+
+            volatile LONG stop = 0;
+            SpinJob job{fake, 3, reinterpret_cast<void*>(&toolkitOne), &stop};
+            HANDLE spinner = CreateThread(nullptr, 0, spinStoreThread, &job, 0, nullptr);
+            if (!spinner) {
+                fail("CreateThread for the two-catch-clock cell", "thread refused");
+            } else {
+                uint64_t frame = 700;
+                bool bothHeld = true;
+                for (int round = 0; round < 2 && bothHeld; ++round) {
+                    // MID-CATCH MEANS THE TRAP FLAG IS STANDING, and here that
+                    // has to be checked rather than inferred. An open page says
+                    // a catch is outstanding; it does not say the catch is
+                    // ESTABLISHED. The claim is a compare-exchange, then a
+                    // VirtualProtect syscall, then the trap flag -- and a thread
+                    // stopped in that window has claimed a catch whose step will
+                    // never come, which is the ABANDONED state the cell above
+                    // exists for and not the one this cell is about. Left
+                    // suspended there, both rounds hold the same catch, the
+                    // escape correctly gives up on it, and this cell would
+                    // report a defect that is not there. The suspended thread's
+                    // own EFlags settle it.
+                    bool midCatch = false;
+                    for (int tries = 0; tries < 20000 && !midCatch; ++tries) {
+                        SuspendThread(spinner);
+                        CONTEXT ctx{};
+                        ctx.ContextFlags = CONTEXT_CONTROL;
+                        if (!pageIsReadOnly(fake) &&
+                            GetThreadContext(spinner, &ctx) &&
+                            (ctx.EFlags & 0x100)) {
+                            midCatch = true;
+                            break;
+                        }
+                        ResumeThread(spinner);
+                        Sleep(0);
+                    }
+                    if (!midCatch) { bothHeld = false; break; }
+                    const DWORD start = GetTickCount();
+                    while (GetTickCount() - start < 1200) {
+                        vtableWatchRearm();
+                        vtableWatchFrameTick(++frame);
+                        Sleep(2);
+                    }
+                    // Straight back to spinning, with NO frame between the two
+                    // holds: a re-arm that succeeded here would reset the clock
+                    // even under the old keying and the cell would prove nothing.
+                    //
+                    // But it must really BE a second catch. ResumeThread only
+                    // drops the suspend count -- the thread need not have been
+                    // scheduled before the next probe suspends it again, and
+                    // then the page is still open and the trap flag still set
+                    // from the SAME catch, which the probe would accept and the
+                    // two holds would share a clock legitimately. Waiting for
+                    // the catch counter to move is waiting for a claim that
+                    // completed and a fresh one to have begun.
+                    const uint32_t before = vtableWatchCatches();
+                    ResumeThread(spinner);
+                    const DWORD progressBy = GetTickCount() + 2000;
+                    while (vtableWatchCatches() < before + 2 &&
+                           GetTickCount() < progressBy) {
+                        Sleep(0);
+                    }
+                    if (vtableWatchCatches() < before + 2) bothHeld = false;
+                }
+                check(bothHeld,
+                      "the same thread can be held mid-catch twice over, with no "
+                      "successful re-arm between",
+                      "the cell never reached the second hold, so the two clocks "
+                      "were never put side by side");
+                check(vtableWatchUnfinishedCatches() == 0,
+                      "...and neither catch is given up on: the clock is per "
+                      "catch, not per thread",
+                      "the escape fired on a catch that was milliseconds old, "
+                      "because two catches by one thread shared one clock");
+                InterlockedExchange(&stop, 1);
+                ResumeThread(spinner);
+                WaitForSingleObject(spinner, INFINITE);
+                CloseHandle(spinner);
+            }
+            vtableWatchStop();
+            VirtualFree(fake, 0, MEM_RELEASE);
+        }
+    }
+
     // WHICH FRAME THE DUMP IS ABOUT. The monitor's long-frame path runs in the
     // block for frame N and reports the frame that just ENDED, N-1 -- and the
     // flips inside that frame carry N-1 as well. The dump printed the frame in

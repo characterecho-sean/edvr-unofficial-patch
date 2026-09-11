@@ -340,6 +340,11 @@ uint32_t vtableWatchInTableWrites();
 // caused. It is counted here instead, and swallowed exactly the same way.
 uint32_t vtableWatchEscapedSteps();
 
+// Catches the frame path gave up on: the other end of the same escape. It is in
+// the closing summary as "never had their second half", and it is here because
+// a cell has to be able to say that a HEALTHY catch was never given up on.
+uint32_t vtableWatchUnfinishedCatches();
+
 // Single-step exceptions that arrived while a watch existed and did NOT match
 // the fault/step pair the handler owed itself.
 //
