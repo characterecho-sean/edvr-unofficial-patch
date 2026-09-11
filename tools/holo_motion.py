@@ -26,7 +26,7 @@ def read(path):
         values = struct.unpack_from('<28f', data, at + 128)
         key = struct.unpack_from('<32I', data, at)
         records.append(dict(index=i+1, key=key,
-                            family={0: 'cockpit', 1: 'ring', 2: 'orbital'}.get(key[15], 'unknown'),
+                            family={0: 'cockpit', 1: 'ring', 2: 'orbital', 3: 'sprite'}.get(key[15], 'unknown'),
                             clip=[values[j:j+4] for j in range(0, 12, 4)],
                             rows=[values[j:j+4] for j in range(12, 24, 4)],
                             eligible=values[24] == 1, matched=values[27] == 1))

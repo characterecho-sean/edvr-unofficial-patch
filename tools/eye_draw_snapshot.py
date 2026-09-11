@@ -6,6 +6,11 @@ Version 2 preserves draw start/base and bounded HUD/sprite VB0/VB1/IB
 payloads. Version 3 copies around the draw's base/start and records each
 capture_offset separately from its binding offset, for the first three
 watched frames. Earlier captures remain readable.
+
+On-foot source records use ordinal UINT32_MAX. Their DSV is copied when
+the screen composite runs, alongside its source colour; depth surfaces
+use DSV format IDs 20/40/45/55. Only colour surfaces export to PNG.
+The explicit on-foot dump permits 128 MiB per surface / 256 MiB total.
 Frames/ordinals join draws_HHMMSS.bin, whose crop map joins the eye images.
 Holo t2 surfaces are copied once per resource; their alpha is diagnostic,
 not a per-frame history. No resource address is a persistent object ID.
@@ -68,10 +73,10 @@ def read(path):
     total = 0
     for _ in range(ns):
         s = dict(zip(('frame', 'width', 'height', 'format', 'size'), unpack('<5I')))
-        bpp = {28: 4, 29: 4, 87: 4, 91: 4, 10: 8}.get(s['format'])
+        bpp = {28: 4, 29: 4, 87: 4, 91: 4, 10: 8, 20: 8, 40: 4, 45: 4, 55: 2}.get(s['format'])
         expected = s['width'] * s['height'] * (bpp or 0)
         total += expected
-        if not bpp or not s['width'] or not s['height'] or expected > 16*1024*1024 or total > 64*1024*1024:
+        if not bpp or not s['width'] or not s['height'] or expected > 128*1024*1024 or total > 256*1024*1024:
             raise ValueError('Invalid surface descriptor')
         if s['size'] not in (0, expected):
             raise ValueError('Invalid surface payload')
@@ -85,14 +90,15 @@ def read(path):
 
 def export_surfaces(capture, directory, dry_run=False):
     directory = Path(directory)
-    paths = [directory / f'surface_{i:02d}.png' for i, s in enumerate(capture['surfaces']) if s['data']]
+    colour_formats = (28, 29, 87, 91, 10)
+    paths = [directory / f'surface_{i:02d}.png' for i, s in enumerate(capture['surfaces']) if s['data'] and s['format'] in colour_formats]
     if dry_run:
         return paths
     from PIL import Image
     if paths:
         directory.mkdir(parents=True, exist_ok=True)
     for i, s in enumerate(capture['surfaces']):
-        if not s['data']:
+        if not s['data'] or s['format'] not in colour_formats:
             continue
         if s['format'] == 10:
             values = struct.iter_unpack('<e', s['data'])
@@ -170,6 +176,12 @@ def main():
     c = read(a.path)
     if a.verify_fixture:
         verify_fixture(c)
+        v = read(str(a.path)+'.vscreen')
+        assert len(v['draws']) == 3 and len(v['surfaces']) == 2 and v['failures'] == 0
+        assert v['draws'][0]['ordinal'] == 0xffffffff and v['draws'][0]['texture'] == 0xffffffff
+        assert v['draws'][1]['texture'] == 0 and v['draws'][2]['texture'] == 0
+        assert all(z == .75 for z in struct.unpack('<64f', v['surfaces'][1]['data'])), 'Source depth was copied before scene completion or after reuse'
+        assert export_surfaces(v, Path('unused'), True) == [Path('unused/surface_00.png')], 'Depth was treated as colour'
         print('GPU draw snapshot fixture passed')
         return
     print(json.dumps(dict(version=c['version'], draws=len(c['draws']), surfaces=len(c['surfaces']), dropped=c['dropped'],

@@ -23,6 +23,7 @@
 #include "object_probe.h"   // objectMotionGet: the dominant body's own motion, for the body's path (tier 2)
 #include "ui_depth.h"   // uiDepthReactiveMask: the interface's bias mask
 #include "ui_resolve.h"
+#include "screen_motion.h"
 #include "celestial_motion.h"
 #include "shader_swap.h"
 
@@ -64,6 +65,7 @@ struct TerrainRecord { uint4 key[12]; float4 q; float4 t; float4 r[3]; };
 Texture2D<float2> HC : register(t12);
 struct HoloRecord { uint4 key[8]; float4 clip[3]; float4 map[3]; float4 meta; };
 StructuredBuffer<HoloRecord> HR : register(t13);
+Texture2D<float4> Screen : register(t14);
 StructuredBuffer<TerrainRecord> TR : register(t11);
 RWTexture2D<float4> UN : register(u6);   // this frame's UI evidence, separate from accumulated colour
 RWTexture2D<float> MK : register(u5);    // for a trained pass: the mover mask, NVIDIA's bias-current-colour input (ONE texture: the interface's mask is folded in)
@@ -101,7 +103,7 @@ cbuffer P : register(b0) {
     float4 fovea0;      // xy the fovea centre in output pixels, z the inner radius (px) where the periphery calming starts, w 1/(the ramp width in px)
     float4 fovea1;      // x the periphery calm strength (0..1), w 1 = the fovea is on (else no modulation)
     float4 movers;      // x 1 = the mover mask is on (ZP holds last frame's depth for this frustum); y the depth tolerance, a fraction; z the strength, how much history a masked pixel loses (0..1); w 1 = main writes ZC
-    float4 probe;       // x history scale, y registration probes, z coverage bound; w bits: 1 fixed bias, 2 prior UI valid, 4 adaptive UI, 8 terrain inputs
+    float4 probe;       // x history scale, y registration probes, z coverage bound; w bits: 1 fixed bias, 2 prior UI valid, 4 adaptive UI, 8 terrain, 16 holo, 32 screen
     float4 stR0;        // the body's path (tier 2, docs/per-object-motion.md): the composite delta's rows,
     float4 stR1;        // the camera's with the dominant body's own turn -- a station's -- in it
     float4 stR2;
@@ -200,7 +202,10 @@ R"HLSL(
 // copy is seeded once per eye/frame; reading the latest scene here also
 // lets later nearer geometry win. The game's live depth is never modified
 // by these coverage passes. Reversed-Z; unbound layer SRVs read far (zero).
-float zSceneAt(int2 q) { return max(max(Z.Load(int3(q, 0)), ZS.Load(int3(q, 0))), ZUI.Load(int3(q, 0))); }
+float zSceneAt(int2 q) {
+    if((uint(probe.w+.5)&32u)!=0u) { float4 s=Screen.Load(int3(q,0));if(s.w>0)return s.z; }
+    return max(max(Z.Load(int3(q, 0)), ZS.Load(int3(q, 0))), ZUI.Load(int3(q, 0)));
+}
 float zAt(int2 q) { return zSceneAt(q); }
 // Tier 1 of docs/per-object-motion.md: the mover mask from depth
 // consistency (2026-09-08). The reprojection says where this pixel's
@@ -445,6 +450,17 @@ bool holoPixel(float2 p, float2 offset, out float2 pp, out float zp) {
     if(r.key[3].w==1 ? uiCovered(q) : !uiCovered(q)) return false;
     float z=knobs.z/(cov.y-knobs.x);
     float2 ndc=(p+offset+region.xy+.5)/r.meta.yz*float2(2,-2)+float2(-1,1);
+    if(r.key[3].w==3) {
+        // Sprites intentionally draw over nearer geometry. Coverage stores
+        // the selected scene depth for visibility validation, while motion
+        // must use the sprite's actual plane (captured local Y=0), not that
+        // foreground depth or the VS's forced Z=W.
+        float3 normal=cross(r.clip[2].xyz,r.clip[0].xyz);
+        float den=dot(normal,float3(ndc,1));
+        if(den==0) return false;
+        z=dot(normal,float3(r.clip[0].w,r.clip[1].w,r.clip[2].w))/den;
+        if(z<=0 || !isfinite(z)) return false;
+    }
     float4 current=float4(ndc*z,z,1);
     float3 before=float3(dot(r.map[0],current),dot(r.map[1],current),dot(r.map[2],current));
     if(before.z<=0 || !all(isfinite(before))) return false;
@@ -519,6 +535,18 @@ bool fetchHistoryT(float2 p, float3 r0, float3 r1, float3 r2, float3 tv,
     mvOut = 0.0;
     zPred = 0.0;
     depthN = 0;
+    hy=0;
+    if(allowWorld && (uint(probe.w+.5)&32u)!=0u) {
+        float4 s=Screen.Load(int3(region.xy+int2(round(p+jit.xy)),0));
+        if(s.w>1)return false;
+        if(s.w==1) {
+            float2 previous=p+s.xy+holoJitter.xy;
+            if(any(previous<0) || any(previous>float2(size)-1))return false;
+            mvOut=previous-p;
+            hy=rgbToYcocg(catmullRom((previous+.5)/float2(size),float2(size)).rgb);
+            return true;
+        }
+    }
     float zBody = 0.0;   // the depth the body's path would take; 0 = not this pixel's question
     // The world/ship split: the ship's own things (the cockpit, the hull)
     // move with the head's delta; everything farther than split.x metres,
@@ -884,6 +912,15 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
                 pp.x <= float(size.x) - 1.0 && pp.y <= float(size.y) - 1.0) {
                 mover = moverAt(pp, zPred, depthN >= 6);
                 if (mover != 0.0) count28 = 1;
+            }
+        }
+        if((uint(probe.w+.5)&32u)!=0u) {
+            float4 s=Screen.Load(int3(region.xy+int2(p),0));
+            if(s.w>0) {
+                motion=s.w!=2?s.xy+holoJitter.xy:float2(size)*2;zraw=s.z;
+                // The eye-space prediction above is not source-scene depth.
+                // Do not apply its mover rejection to screen pixels.
+                mover=0;
             }
         }
         MV[id.xy] = motion;
@@ -1661,6 +1698,7 @@ struct EyeState {
     ID3D11Texture2D*           dlSubmit = nullptr;  // NVIDIA's frame copied into the game's own format: what goes out
     ID3D11UnorderedAccessView* dlSubmitUav = nullptr;
     bool                      uiResolvedHistory = false;
+    bool                      screenHistory = false;
     uint32_t                   dlW = 0, dlH = 0;
     uint32_t                   dlOutW = 0, dlOutH = 0;
     // Tier 1 of docs/per-object-motion.md (2026-09-08), the mover mask:
@@ -2328,10 +2366,10 @@ wchar_t          g_eyeRunStamp[16] = L"";
 bool             g_eyeRunReady = false;
 bool             g_eyeRunUntreated = false;
 bool             g_eyeOverviewTaken[2] = {};
-constexpr int kEyeInputs=9;
+constexpr int kEyeInputs=10;
 ID3D11Texture2D*  g_eyeInputs[kEyeInputs] = {};
 uint32_t         g_eyeInputsFrame=0,g_eyeInputsUiBound=0,g_eyeInputsUiFlags=0;
-const wchar_t* const kEyeInputNames[kEyeInputs]={L"MV",L"Z",L"UI",L"Bias",L"SceneZ",L"TerrainIndex",L"TerrainZ",L"HoloCoverage",L"UiEdits"};
+const wchar_t* const kEyeInputNames[kEyeInputs]={L"MV",L"Z",L"UI",L"Bias",L"SceneZ",L"TerrainIndex",L"TerrainZ",L"HoloCoverage",L"UiEdits",L"ScreenMotion"};
 uint32_t         g_eyeRunWidth = 0, g_eyeRunHeight = 0;
 bool             g_eyeRawTaken[kEyeRun] = {};
 uint32_t         g_eyeRunFrames[kEyeRun] = {};
@@ -2615,6 +2653,8 @@ void stageEyeInputs(ID3D11DeviceContext* ctx,EyeState& e,ID3D11ShaderResourceVie
         D3D11_TEXTURE2D_DESC d{};e.dlMv->GetDesc(&d);
         auto* edits=uiDepthContentChanges(d.Width,d.Height,0);
         if(edits) {Microsoft::WRL::ComPtr<ID3D11Resource> r;edits->GetResource(&r);r->QueryInterface(__uuidof(ID3D11Texture2D),reinterpret_cast<void**>(&textures[8]));}
+        auto* screen=screenMotionView(0,d.Width,d.Height);
+        if(screen){Microsoft::WRL::ComPtr<ID3D11Resource> r;screen->GetResource(&r);r->QueryInterface(__uuidof(ID3D11Texture2D),reinterpret_cast<void**>(&textures[9]));}
     }
     if(scene) {
         ID3D11Resource* res=nullptr;scene->GetResource(&res);
@@ -2649,6 +2689,7 @@ void writeEyeInputs(ID3D11DeviceContext* ctx,const std::wstring& dir) {
         uint32_t bytes=0;
         switch(d.Format) {
         case DXGI_FORMAT_R8_UNORM:bytes=1;break;
+        case DXGI_FORMAT_R16G16B16A16_FLOAT:bytes=8;break;
         case DXGI_FORMAT_R16_TYPELESS:case DXGI_FORMAT_D16_UNORM:bytes=2;break;
         case DXGI_FORMAT_R16G16_FLOAT:case DXGI_FORMAT_R32_FLOAT:case DXGI_FORMAT_R32_TYPELESS:
         case DXGI_FORMAT_D32_FLOAT:case DXGI_FORMAT_R24G8_TYPELESS:case DXGI_FORMAT_D24_UNORM_S8_UINT:
@@ -3681,6 +3722,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
     ID3D11ShaderResourceView* uiDepthSrv = nullptr;
     ID3D11ShaderResourceView* terrainSrvs[3] = {};
     ID3D11ShaderResourceView* holoSrvs[2] = {};
+    ID3D11ShaderResourceView* screenSrv=screenMotionView(eye,sd.Width,sd.Height);
     if (depthSrv) {
         ID3D11Resource* res = nullptr;
         depthSrv->GetResource(&res);
@@ -3711,6 +3753,10 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
     bool uiResolveWritten = false;
     if (ok) {
         EyeState& e = *eptr;
+        if(e.screenHistory!=(screenSrv!=nullptr)) {
+            e.haveHistory=e.dlHaveHistory=e.zPrevValid=false;
+            e.screenHistory=screenSrv!=nullptr;
+        }
         if (flags & 1u) {
             e.haveHistory = false;
             e.dlHaveHistory = false;
@@ -4031,7 +4077,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                 static_cast<double>(farZ), static_cast<double>(old10));
         }
         p.knobs[0] = projA;
-        p.knobs[1] = haveDepth ? 1.0f : 0.0f;
+        p.knobs[1] = (haveDepth || screenSrv) ? 1.0f : 0.0f;
         p.knobs[2] = projB;
         p.knobs[3] = farZ;
         if (haveDepth) {
@@ -4535,7 +4581,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         if ((flags & 1u) != 0 || !uiTrack) e.uiHistoryValid = false;
         auto uiFlags = [&]() {
             return static_cast<float>((uiDepthReactive()>0.0f?1u:0u) |
-                (uiTrack && e.uiHistoryValid?2u:0u) | (uiTrack?4u:0u) | (terrainSrvs[0]?8u:0u) | (holoSrvs[0]?16u:0u));
+                (uiTrack && e.uiHistoryValid?2u:0u) | (uiTrack?4u:0u) | (terrainSrvs[0]?8u:0u) | (holoSrvs[0]?16u:0u) | (screenSrv?32u:0u));
         };
 
         // Capture before either temporal path changes colour. Paired runs
@@ -4567,12 +4613,12 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         }
 
         ID3D11ComputeShader* savedCs = nullptr;
-        ID3D11ShaderResourceView* savedSrv[14] = {};
+        ID3D11ShaderResourceView* savedSrv[15] = {};
         ID3D11UnorderedAccessView* savedUav[7] = {};
         ID3D11Buffer* savedCb = nullptr;
         ID3D11SamplerState* savedSamp = nullptr;
         ctx->CSGetShader(&savedCs, nullptr, nullptr);
-        ctx->CSGetShaderResources(0, 14, savedSrv);
+        ctx->CSGetShaderResources(0, 15, savedSrv);
         ctx->CSGetUnorderedAccessViews(0, 7, savedUav);
         ctx->CSGetConstantBuffers(0, 1, &savedCb);
         ctx->CSGetSamplers(0, 1, &savedSamp);
@@ -4943,12 +4989,12 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     if(uiResolve) p.probe[3]=float(uint32_t(p.probe[3])&~6u);
                     if (uiTrack) ensureBiasMask(dev,e,w,h);
                     setParams(ctx, p);
-                    ID3D11ShaderResourceView* nullSrvM[14] = {};
+                    ID3D11ShaderResourceView* nullSrvM[15] = {};
                     ID3D11UnorderedAccessView* nullUavM[7] = {};
-                    ctx->CSSetShaderResources(0, 14, nullSrvM);
+                    ctx->CSSetShaderResources(0, 15, nullSrvM);
                     ctx->CSSetUnorderedAccessViews(0, 7, nullUavM, nullptr);
                     ctx->CSSetShader(mvCs, nullptr, 0);
-                    ID3D11ShaderResourceView* srvsM[14] = {inSrv,
+                    ID3D11ShaderResourceView* srvsM[15] = {inSrv,
                                                           probeNv ? e.dlOutSrv : e.histSrv[e.histRead],
                                                           depthSrv,
                                                           p.movers[0] != 0.0f ? e.zPrevSrv : nullptr,
@@ -4956,19 +5002,19 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                                                           p.tvSt[3] != 0.0f ? g_bodyGridSrv : nullptr,
                                                           smokeSrv, uiDepthSrv,
                                                           uiTrack && e.uiHistoryValid ? e.uiHistorySrv[e.uiHistoryRead] : nullptr,
-                                                          terrainSrvs[0], terrainSrvs[1], terrainSrvs[2], holoSrvs[0], holoSrvs[1]};
+                                                          terrainSrvs[0], terrainSrvs[1], terrainSrvs[2], holoSrvs[0], holoSrvs[1], screenSrv};
                     ID3D11UnorderedAccessView* uavsM[7] = {debugPaint ? e.dlOutUav : nullptr,
                                                            nullptr, g_statsUav, e.dlMvUav,
                                                            e.dlDepthUav, e.dlMaskUav,
                                                            uiTrack && !uiResolve ? e.uiHistoryUav[1-e.uiHistoryRead] : nullptr};
                     ID3D11Buffer* cbM = g_cb;
                     ID3D11SamplerState* smpM = g_samp;
-                    ctx->CSSetShaderResources(0, 14, srvsM);
+                    ctx->CSSetShaderResources(0, 15, srvsM);
                     ctx->CSSetUnorderedAccessViews(0, 7, uavsM, nullptr);
                     ctx->CSSetConstantBuffers(0, 1, &cbM);
                     ctx->CSSetSamplers(0, 1, &smpM);
                     ctx->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
-                    ctx->CSSetShaderResources(0, 14, nullSrvM);
+                    ctx->CSSetShaderResources(0, 15, nullSrvM);
                     ctx->CSSetUnorderedAccessViews(0, 7, nullUavM, nullptr);
                     if (haveDepth && e.zPrev) zcWritten = true;
                     if (uiTrack && !uiResolve) uiEvidenceWritten = true;
@@ -5083,14 +5129,22 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     // The frame that goes out, in the game's own format (dlSubmit
                     // says why). Inside the timed region, so the price is honest.
                     if (usedDlaa && uiResolve) {
-                        ctx->CSSetShaderResources(0,14,nullSrvM);ctx->CSSetUnorderedAccessViews(0,7,nullUavM,nullptr);
-                        ID3D11ShaderResourceView* srvs[6]={e.dlColourSrv,e.dlOutSrv,uiBound?e.uiMaskSrv:nullptr,e.uiHistoryValid?e.uiHistorySrv[e.uiHistoryRead]:nullptr,e.dlMvSrv,uiDepthContentChanges(w,h,eye)};
+                        ctx->CSSetShaderResources(0,15,nullSrvM);ctx->CSSetUnorderedAccessViews(0,7,nullUavM,nullptr);
+                        auto* resolveScreen=screenSrv;
+                        if(screenSrv && (p.region[0]!=int32_t(region[0]) || p.region[1]!=int32_t(region[1]))) {
+                            // Raw colour is cropped, but the screen map is in
+                            // the original eye texture even on the copy path.
+                            PassParams resolveParams=p;
+                            for(int i=0;i<4;++i)resolveParams.region[i]=int32_t(region[i]);
+                            if(!setParams(ctx,resolveParams))resolveScreen=nullptr;
+                        }
+                        ID3D11ShaderResourceView* srvs[7]={e.dlColourSrv,e.dlOutSrv,uiBound?e.uiMaskSrv:nullptr,e.uiHistoryValid?e.uiHistorySrv[e.uiHistoryRead]:nullptr,e.dlMvSrv,uiDepthContentChanges(w,h,eye),resolveScreen};
                         ID3D11UnorderedAccessView* uavs[2]={e.dlSubmitUav,e.uiHistoryUav[1-e.uiHistoryRead]};
-                        ctx->CSSetShader(g_csUiResolve,nullptr,0);ctx->CSSetShaderResources(0,6,srvs);ctx->CSSetUnorderedAccessViews(0,2,uavs,nullptr);
+                        ctx->CSSetShader(g_csUiResolve,nullptr,0);ctx->CSSetShaderResources(0,7,srvs);ctx->CSSetUnorderedAccessViews(0,2,uavs,nullptr);
                         // NGX may change compute bindings, including b0.
                         ctx->CSSetConstantBuffers(0,1,&g_cb);
                         ctx->Dispatch((w+7)/8,(h+7)/8,1);
-                        ctx->CSSetShaderResources(0,14,nullSrvM);ctx->CSSetUnorderedAccessViews(0,7,nullUavM,nullptr);
+                        ctx->CSSetShaderResources(0,15,nullSrvM);ctx->CSSetUnorderedAccessViews(0,7,nullUavM,nullptr);
                         uiEvidenceWritten=uiResolveWritten=true;
                         if(!g_uiResolveNoted){g_uiResolveNoted=true;Log::get().note("UI resolve: current-raster bounds applied after DLSS; UI influence follows submitted motion as well as its old screen position. Existing submit/UI-history textures reused; no adaptive colour work in the DLSS motion pass.");}
                     } else if (usedDlaa) ctx->CopyResource(e.dlSubmit, e.dlOut);
@@ -5241,18 +5295,18 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     // reads them whole). The mover mask is computed here too
                     // (t3, u5) but only the own periphery pass applies it:
                     // the crop and periphery evaluations are not handed it.
-                    ID3D11ShaderResourceView* nullSrvM[14] = {};
+                    ID3D11ShaderResourceView* nullSrvM[15] = {};
                     ID3D11UnorderedAccessView* nullUavM[7] = {};
-                    ctx->CSSetShaderResources(0, 14, nullSrvM);
+                    ctx->CSSetShaderResources(0, 15, nullSrvM);
                     ctx->CSSetUnorderedAccessViews(0, 7, nullUavM, nullptr);
                     ctx->CSSetShader(mvCs, nullptr, 0);
-                    ID3D11ShaderResourceView* srvsM[14] = {inSrv, e.histSrv[readIdx], depthSrv,
+                    ID3D11ShaderResourceView* srvsM[15] = {inSrv, e.histSrv[readIdx], depthSrv,
                                                           p.movers[0] != 0.0f ? e.zPrevSrv : nullptr,
                                                           p.probe[2] != 0.0f ? e.uiMaskSrv : nullptr,
                                                           p.tvSt[3] != 0.0f ? g_bodyGridSrv : nullptr,
                                                           smokeSrv, uiDepthSrv,
                                                           uiTrack && e.uiHistoryValid ? e.uiHistorySrv[e.uiHistoryRead] : nullptr,
-                                                          terrainSrvs[0], terrainSrvs[1], terrainSrvs[2], holoSrvs[0], holoSrvs[1]};
+                                                          terrainSrvs[0], terrainSrvs[1], terrainSrvs[2], holoSrvs[0], holoSrvs[1], screenSrv};
                     // u2 (the stats buffer) is left UNBOUND here: the own pass
                     // writes its stats when it runs, and the mv entry writes
                     // the same slots (15-17), so binding it would double them
@@ -5263,12 +5317,12 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                                                            uiTrack ? e.uiHistoryUav[1-e.uiHistoryRead] : nullptr};
                     ID3D11Buffer* cbM = g_cb;
                     ID3D11SamplerState* smpM = g_samp;
-                    ctx->CSSetShaderResources(0, 14, srvsM);
+                    ctx->CSSetShaderResources(0, 15, srvsM);
                     ctx->CSSetUnorderedAccessViews(0, 7, uavsM, nullptr);
                     ctx->CSSetConstantBuffers(0, 1, &cbM);
                     ctx->CSSetSamplers(0, 1, &smpM);
                     ctx->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
-                    ctx->CSSetShaderResources(0, 14, nullSrvM);
+                    ctx->CSSetShaderResources(0, 15, nullSrvM);
                     ctx->CSSetUnorderedAccessViews(0, 7, nullUavM, nullptr);
                     if (haveDepth && e.zPrev) zcWritten = true;
                     if (uiTrack) uiEvidenceWritten = true;
@@ -5402,30 +5456,30 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                 // when no trained set exists; u3/u5 stay unbound (MV and the
                 // mask are NVIDIA's inputs, and writes to a null UAV drop).
                 const bool carry = g_moversOn && haveDepth && ensureMoverPair(dev, e, w, h);
-                ID3D11ShaderResourceView* nullSrv[14] = {};
+                ID3D11ShaderResourceView* nullSrv[15] = {};
                 ID3D11UnorderedAccessView* nullUav[7] = {};
-                ctx->CSSetShaderResources(0, 14, nullSrv);
+                ctx->CSSetShaderResources(0, 15, nullSrv);
                 ctx->CSSetUnorderedAccessViews(0, 7, nullUav, nullptr);
                 ctx->CSSetShader(g_cs, nullptr, 0);
-                ID3D11ShaderResourceView* srvs[14] = {inSrv, e.histSrv[readIdx], depthSrv,
+                ID3D11ShaderResourceView* srvs[15] = {inSrv, e.histSrv[readIdx], depthSrv,
                                                      (carry && p.movers[0] != 0.0f) ? e.zPrevSrv : nullptr,
                                                      p.probe[2] != 0.0f ? e.uiMaskSrv : nullptr,
                                                      p.tvSt[3] != 0.0f ? g_bodyGridSrv : nullptr,
                                                      smokeSrv, uiDepthSrv,
                                                      uiTrack && e.uiHistoryValid ? e.uiHistorySrv[e.uiHistoryRead] : nullptr,
-                                                          terrainSrvs[0], terrainSrvs[1], terrainSrvs[2], holoSrvs[0], holoSrvs[1]};
+                                                          terrainSrvs[0], terrainSrvs[1], terrainSrvs[2], holoSrvs[0], holoSrvs[1], screenSrv};
                 ID3D11UnorderedAccessView* uavs[7] = {e.outUav, e.histUav[writeIdx],
                                                       g_statsUav, nullptr,
                                                       carry ? e.dlDepthUav : nullptr, nullptr,
                                                       uiTrack ? e.uiHistoryUav[1-e.uiHistoryRead] : nullptr};
                 ID3D11Buffer* cb = g_cb;
                 ID3D11SamplerState* smp = g_samp;
-                ctx->CSSetShaderResources(0, 14, srvs);
+                ctx->CSSetShaderResources(0, 15, srvs);
                 ctx->CSSetUnorderedAccessViews(0, 7, uavs, nullptr);
                 ctx->CSSetConstantBuffers(0, 1, &cb);
                 ctx->CSSetSamplers(0, 1, &smp);
                 ctx->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
-                ctx->CSSetShaderResources(0, 14, nullSrv);
+                ctx->CSSetShaderResources(0, 15, nullSrv);
                 ctx->CSSetUnorderedAccessViews(0, 7, nullUav, nullptr);
                 if (carry) zcWritten = true;
                 if (uiTrack) uiEvidenceWritten = true;
@@ -5497,9 +5551,9 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
             }
         }
 
-        ID3D11ShaderResourceView* nullSrv2[14] = {};
+        ID3D11ShaderResourceView* nullSrv2[15] = {};
         ID3D11UnorderedAccessView* nullUav2[7] = {};
-        ctx->CSSetShaderResources(0, 14, nullSrv2);
+        ctx->CSSetShaderResources(0, 15, nullSrv2);
         ctx->CSSetUnorderedAccessViews(0, 7, nullUav2, nullptr);
         if (depthSrv) {
             ctx->OMSetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, savedRtv, savedDsv);
@@ -5507,7 +5561,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
             if (savedDsv) savedDsv->Release();
         }
         ctx->CSSetShader(savedCs, nullptr, 0);
-        ctx->CSSetShaderResources(0, 14, savedSrv);
+        ctx->CSSetShaderResources(0, 15, savedSrv);
         ctx->CSSetUnorderedAccessViews(0, 7, savedUav, nullptr);
         ctx->CSSetConstantBuffers(0, 1, &savedCb);
         ctx->CSSetSamplers(0, 1, &savedSamp);

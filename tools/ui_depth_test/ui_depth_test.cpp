@@ -260,10 +260,14 @@ int main(int argc, char** argv) {
     std::ifstream source("src/d3d11/temporal_pass.cpp");
     std::string temporal((std::istreambuf_iterator<char>(source)), {});
     std::string merge;
-    for(const char* start : {"Texture2D<float> Z :", "Texture2D<float> ZS :", "Texture2D<float> ZUI :", "float zSceneAt("}) {
+    for(const char* start : {"Texture2D<float> Z :", "Texture2D<float> ZS :", "Texture2D<float> ZUI :", "Texture2D<float4> Screen :"}) {
         auto begin=temporal.find(start); check(begin!=std::string::npos,"temporal depth source found");
         merge += temporal.substr(begin,temporal.find('\n',begin)-begin)+"\n";
     }
+    merge+="static const float4 probe=0;\n";
+    auto depthBegin=temporal.find("float zSceneAt("),depthEnd=temporal.find("float zAt(",depthBegin);
+    check(depthBegin!=std::string::npos && depthEnd!=std::string::npos,"complete temporal depth accessor found");
+    merge+=temporal.substr(depthBegin,depthEnd-depthBegin);
     merge += "RWTexture2D<float> Result:register(u0);[numthreads(8,8,1)]void main(uint3 id:SV_DispatchThreadID){Result[id.xy]=zSceneAt(id.xy);}";
     auto mergeCode=compile(merge.c_str(),"cs_5_0"); ComPtr<ID3D11ComputeShader> mergeCs;
     hr(dev->CreateComputeShader(mergeCode->GetBufferPointer(),mergeCode->GetBufferSize(),nullptr,&mergeCs));
@@ -632,6 +636,30 @@ UN[id.xy]=uiEvidence(id.xy);Result[id.xy]=adaptiveUiReactive(id.xy,float2(id.xy)
             pixels.assign(4*4*4,0);ctx->UpdateSubresource(uiSurface.Get(),0,nullptr,pixels.data(),16,0);
         }
         ctx->ClearState();uiDepthFrameBoundary(ctx.Get());check(!uiDepthContentChanges(8,8,0),"projected edit mask clears after both eyes submit");g_trained=false;
+        // Scrolling sprite ticks must not retain depth or edit footprints
+        // where their source has become transparent. Dim current strokes
+        // still carry coverage, and visible changed pixels still reject
+        // stale text. Exercise the actual reissue with source tracking.
+        pixels.assign(4*4*4,0);pixels[4*5+3]=29;
+        ctx->UpdateSubresource(uiSurface.Get(),0,nullptr,pixels.data(),16,0);g_trained=true;
+        for(unsigned f=0;f<3;++f) {
+            uiDepthFrameBoundary(ctx.Get());ctx->ClearDepthStencilView(scene.dsv.Get(),D3D11_CLEAR_DEPTH,0,0);
+            bind(scene.dsv.Get());setZ(.6f);ctx->PSSetShaderResources(0,1,uiView.GetAddressOf());
+            g_on=true;g_reactive=0;g_mode=Mode::kReissueScene;g_reissueShader=&g_depthShaders[5];g_drawEye=0;g_reissueMaskSlot=1;
+            g_rebindW=g_rebindH=8;g_wantMask=true;g_wantRebind=false;
+            check(uiDepthReissueBegin(ctx.Get()),"scrolling sprite coverage begins");ctx->Draw(3,0);uiDepthReissueEnd(ctx.Get());ctx->OMSetRenderTargets(0,nullptr,nullptr);
+            auto mark=valuesOf(g_mask[0].srv),edit=valuesOf(uiDepthContentChanges(8,8,0));
+            if(f<2)check(mark[3*8+3]>0,"faint sprite stroke retains motion and antialiasing coverage");
+            if(f==1)check(edit[3*8+3]>0,"changed visible sprite retains fresh reconstruction");
+            if(f==2) {
+                for(float a:mark)check(a==0,"erased scrolling tick leaves no rectangle of sprite coverage");
+                for(float a:edit)check(a==0,"erased tick cannot force spatial reconstruction over terrain");
+                check(uiDepthTemporalDepth(8,8,0,scene.tex.Get(),&ui),"sprite private depth available after erasure");ui->GetResource(privateRes.ReleaseAndGetAddressOf());
+                for(float z:read(dev.Get(),ctx.Get(),privateRes.Get()))check(z==0,"erased tick leaves private scene depth intact");
+            }
+            pixels[4*5+3]=f==0?77:0;ctx->UpdateSubresource(uiSurface.Get(),0,nullptr,pixels.data(),16,0);
+        }
+        ctx->ClearState();uiDepthFrameBoundary(ctx.Get());g_trained=false;
         std::puts("PASS: UI source edits preserve stable/dim text, detect erasure, expire, restore state, and respect eye/cache/byte bounds.");
     }
     // Exercise the model-independent resolve itself. Odd dimensions and
@@ -650,6 +678,7 @@ UN[id.xy]=uiEvidence(id.xy);Result[id.xy]=adaptiveUiReactive(id.xy,float2(id.xy)
         constexpr UINT w=13,h=9;
         auto raw=texture(w,h,DXGI_FORMAT_R8G8B8A8_UNORM),mask=texture(w,h,DXGI_FORMAT_R8_UNORM),edits=texture(w,h,DXGI_FORMAT_R8_UNORM);
         auto editsV=srv(edits.Get());
+        auto screen=texture(w+4,h+6,DXGI_FORMAT_R32G32B32A32_FLOAT);auto screenV=srv(screen.Get());
         auto previous=texture(w,h,DXGI_FORMAT_R8G8B8A8_UNORM),next=texture(w,h,DXGI_FORMAT_R8G8B8A8_UNORM);
         auto velocity=texture(w,h,DXGI_FORMAT_R32G32_FLOAT);auto velocityV=srv(velocity.Get());
         auto rawV=srv(raw.Get()),maskV=srv(mask.Get()),previousV=srv(previous.Get());auto nextU=uav(next.Get());
@@ -663,6 +692,7 @@ UN[id.xy]=uiEvidence(id.xy);Result[id.xy]=adaptiveUiReactive(id.xy,float2(id.xy)
             std::vector<unsigned char> colour(w*h*4,0),mark(w*h,0),old(w*h*4,0),model(ow*oh*4,0);
             std::vector<float> motion(w*h*2,0);
             std::vector<unsigned char> edit(w*h,0);
+            std::vector<float> screenPixels((w+4)*(h+6)*4,0);
             for(UINT i=0;i<ow*oh;++i){model[4*i]=static_cast<unsigned char>(64+i%100);model[4*i+3]=127;}
             auto run=[&](bool haveHistory){
                 ctx->UpdateSubresource(raw.Get(),0,nullptr,colour.data(),w*4,0);ctx->UpdateSubresource(mask.Get(),0,nullptr,mark.data(),w,0);
@@ -670,10 +700,11 @@ UN[id.xy]=uiEvidence(id.xy);Result[id.xy]=adaptiveUiReactive(id.xy,float2(id.xy)
                 ctx->UpdateSubresource(cb.Get(),0,nullptr,&p,0,0);
                 ctx->UpdateSubresource(velocity.Get(),0,nullptr,motion.data(),w*8,0);
                 ctx->UpdateSubresource(edits.Get(),0,nullptr,edit.data(),w,0);
-                ID3D11ShaderResourceView* in[]={rawV.Get(),trainedV.Get(),maskV.Get(),haveHistory?previousV.Get():nullptr,velocityV.Get(),editsV.Get()};
+                ctx->UpdateSubresource(screen.Get(),0,nullptr,screenPixels.data(),(w+4)*16,0);
+                ID3D11ShaderResourceView* in[]={rawV.Get(),trainedV.Get(),maskV.Get(),haveHistory?previousV.Get():nullptr,velocityV.Get(),editsV.Get(),screenV.Get()};
                 ID3D11UnorderedAccessView* out[]={outputU.Get(),nextU.Get()};
                 const float poison[4]={1,1,1,1};ctx->ClearUnorderedAccessViewFloat(outputU.Get(),poison);
-                ctx->CSSetShader(cs.Get(),nullptr,0);ctx->CSSetShaderResources(0,6,in);ctx->CSSetUnorderedAccessViews(0,2,out,nullptr);
+                ctx->CSSetShader(cs.Get(),nullptr,0);ctx->CSSetShaderResources(0,7,in);ctx->CSSetUnorderedAccessViews(0,2,out,nullptr);
                 ctx->CSSetConstantBuffers(0,1,cb.GetAddressOf());ctx->Dispatch((w+7)/8,(h+7)/8,1);ctx->ClearState();
                 return read(dev.Get(),ctx.Get(),output.Get());
             };
@@ -735,7 +766,18 @@ UN[id.xy]=uiEvidence(id.xy);Result[id.xy]=adaptiveUiReactive(id.xy,float2(id.xy)
                 else {check(a[y*ow+x]!=b[y*ow+x],"static UI retains model antialiasing beside changed text");++stable;}
             }
             check(changed && stable,"dynamic/static resolve controls both exercised at every output ratio");
+            edit.assign(w*h,0);mark.assign(w*h,0);screenPixels[4*((4+3)*(w+4)+6+2)+3]=3;
+            p.region[0]=2;p.region[1]=3;
+            for(UINT i=0;i<ow*oh;++i)model[4*i]=80;
+            auto screenA=run(false);
+            for(UINT i=0;i<ow*oh;++i)model[4*i]=170;
+            auto screenB=run(false);
+            for(UINT y=1;y+1<oh;++y)for(UINT x=2;x+2<ow;++x){
+                const UINT qx=x*w/ow,qy=y*h/oh;const bool sourceUi=qx>=5&&qx<=7&&qy>=3&&qy<=5;
+                check(sourceUi?screenA[y*ow+x]==screenB[y*ow+x]:screenA[y*ow+x]!=screenB[y*ow+x],"source UI resolves fresh without eye coverage while world keeps trained detail");
+            }
             for(float alpha:read(dev.Get(),ctx.Get(),output.Get(),3))check(std::fabs(alpha-127/255.f)<1e-6,"dynamic reconstruction preserves submission alpha");
+            p.region[0]=p.region[1]=0;
         }
         std::puts("PASS: post-DLSS UI resolve bounds stale colour, retains AA/alpha, excludes world/smoke, and covers noninteger output sizes.");
     }
