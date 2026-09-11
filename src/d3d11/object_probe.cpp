@@ -24,6 +24,7 @@
 #include "../common/timing.h"
 #include "binding_shadow.h"
 #include "draw_census.h"
+#include "eye_draw_snapshot.h"
 
 namespace edvr {
 namespace {
@@ -567,6 +568,7 @@ struct AuxSlot {
 };
 AuxSlot g_aux[kLedgerAux];
 int     g_auxCount = 0;
+EyeDrawSnapshot g_drawSnapshot;
 struct AuxFrame {   // one watched shader's buffers in one frame
     uint64_t vs;
     uint32_t instances, count;
@@ -581,6 +583,7 @@ void releaseCopy(LedgerCopy& c) {
     c.inUse = false;
 }
 void ledgerRelease() {
+    g_drawSnapshot.reset();
     if (g_inst) g_inst->Release();
     g_inst = nullptr;
     g_instBytes = 0;
@@ -2619,6 +2622,10 @@ void ledgerNoteDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count, uint32_
     d.instances = instances;
     d.startInstance = startInstance;
     d.kind = static_cast<uint8_t>(kind);
+    if (EyeDrawSnapshot::watches(d.vs)) {
+        g_drawSnapshot.capture(ctx, frame, static_cast<uint32_t>(g_ledgerDraws[frame - g_ledgerFrame0].size()),
+                               d.vs, bindingShaderHash(BindSlot::Ps), kind, count, instances, startInstance);
+    }
     if ((kind == 'X' || kind == 'N') && instances && g_pool) {
         guardedBudget(g_budget, [&] {
             // Every big instanced draw first, whatever t33 holds: the pool's own
@@ -2756,7 +2763,7 @@ bool writeRaw(const wchar_t* dir, const wchar_t* prefix, uint32_t frame, const s
 // the pool copies as pool_<stamp>_<frame>.bin (the pair dumps' format), the
 // two buffers raw, the draws as one file -- a header, then per frame the
 // frame, a count and the rows. One long frame, after the run's own.
-void writeLedger() {
+void writeLedger(ID3D11DeviceContext* ctx) {
     const std::wstring dir = Log::get().dir() + L"\\pool";
     if (!g_dumpDirMade) {
         g_dumpDirMade = true;
@@ -2882,6 +2889,15 @@ void writeLedger() {
         std::vector<LedgerDraw>().swap(g_ledgerDraws[i]);
         std::vector<AuxFrame>().swap(g_ledgerAux[i]);
     }
+    _snwprintf_s(path, MAX_PATH, _TRUNCATE, L"%s\\drawstate_%s.bin", dir.c_str(), g_ledgerStamp);
+    const bool snapshotOk = g_drawSnapshot.write(ctx, path);
+    const uint32_t missingShaders = g_drawSnapshot.writeShaders(dir.c_str());
+    Log::get().note("object probe: eye draw snapshots %ls: %u draws, %u holo surfaces, %u capped draws, "
+                    "%u failed copies, %u missing shader files; %s. VS b0/b1/b2 and PS b2 are captured at each watched draw; "
+                    "surface alpha is from its first draw only.", path,
+                    static_cast<uint32_t>(g_drawSnapshot.draws.size()),
+                    static_cast<uint32_t>(g_drawSnapshot.surfaces.size()), g_drawSnapshot.dropped,
+                    g_drawSnapshot.failures, missingShaders, snapshotOk ? "written" : "WRITE FAILED");
     g_ledgerOn = false;
     ledgerRelease();
 }
@@ -3191,13 +3207,6 @@ void objectProbeFrameBoundary(ID3D11DeviceContext* ctx) {
                 g_runNext = 0;
             }
             poll(ctx);
-            if (g_ledgerOn) {
-                if (g_frame <= g_ledgerLastFrame) ledgerIssue(ctx);
-                ledgerPoll(ctx);
-                for (AuxSlot& a : g_aux) a.seenThisFrame = false;   // the next frame's first draw of each
-                for (bool& seen : g_paletteSeen) seen = false;
-                if (g_frame > g_ledgerLastFrame + kReadAfter + kDropAfter) writeLedger();
-            }
         } else if (++g_framesWithoutPool == kAbsentFrames && !g_absentNoted && g_verbose) {
             g_absentNoted = true;
             Log::get().note(
@@ -3206,6 +3215,15 @@ void objectProbeFrameBoundary(ID3D11DeviceContext* ctx) {
                 "a loading screen), or the pool has moved from where the 2026-09-06 dump put it. "
                 "It keeps looking.",
                 kAbsentFrames);
+        }
+        // A non-pool celestial/UI capture must still finish and report its
+        // draw snapshots, even if no scene instance pool was discovered.
+        if (g_ledgerOn) {
+            if (g_frame <= g_ledgerLastFrame) ledgerIssue(ctx);
+            ledgerPoll(ctx);
+            for (AuxSlot& a : g_aux) a.seenThisFrame = false;
+            for (bool& seen : g_paletteSeen) seen = false;
+            if (g_frame > g_ledgerLastFrame + kReadAfter + kDropAfter) writeLedger(ctx);
         }
     });
     if (dueMs(g_reportMs, kReportMs)) {

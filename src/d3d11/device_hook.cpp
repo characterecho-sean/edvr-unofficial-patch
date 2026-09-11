@@ -28,6 +28,7 @@
 #include "../common/vtable_hook.h"
 #include "binding_shadow.h"
 #include "draw_census.h"
+#include "eye_draw_snapshot.h"
 #include "quad_probe.h"
 #include "exposure_fix.h"
 #include "menu.h"
@@ -452,6 +453,7 @@ HRESULT STDMETHODCALLTYPE hookedCreateVS(ID3D11Device* self, const void* bytecod
         // vertices it is handed decides whether the curved screen is possible
         // at all. See shader_sig.h.
         shaderSigRegister(*out, bytecode, static_cast<size_t>(len));
+        EyeDrawSnapshot::rememberShader(hash, bytecode, static_cast<size_t>(len));
         if (g_state->shaderDump) dumpShaderBlob(L"vs", hash, bytecode, len);
     });
     return hr;

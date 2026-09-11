@@ -695,6 +695,18 @@ if errorlevel 1 ( echo [edvr] ERROR: ui_depth_test build failed & exit /b 1 )
     exit /b 1
 )
 
+echo [edvr] === eye draw snapshot regression ===
+if not exist "%OBJ%\drawsnapshot" mkdir "%OBJ%\drawsnapshot"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
+    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
+    /Fo"%OBJ%\drawsnapshot\\" /Fe"%OBJ%\drawsnapshot\eye_draw_snapshot_test.exe" ^
+    "tools\eye_draw_snapshot_test\eye_draw_snapshot_test.cpp" ^
+    /link /INCREMENTAL:NO d3d11.lib
+if errorlevel 1 ( echo [edvr] ERROR: eye draw snapshot test build failed & exit /b 1 )
+"%OBJ%\drawsnapshot\eye_draw_snapshot_test.exe" "%OBJ%\drawsnapshot\fixture.bin" || exit /b 1
+python "tools\eye_draw_snapshot.py" --self-test || exit /b 1
+python "tools\eye_draw_snapshot.py" "%OBJ%\drawsnapshot\fixture.bin" --verify-fixture || exit /b 1
+
 echo [edvr] === fakevr.dll + openvr_smoke.exe ===
 if not exist "%OBJ%\fakevr" mkdir "%OBJ%\fakevr"
 cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /DNDEBUG /LD ^

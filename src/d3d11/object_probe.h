@@ -86,6 +86,11 @@ void objectProbeNoteEarlyDraw(ID3D11DeviceContext* ctx, char kind, uint32_t coun
 // between consecutive crops, how the bones moved, and how each of those
 // draws' matrices turned. Nothing of it runs unarmed. stamp is the run's
 // HHMMSS, shared with the crops' names.
+// drawstate_<stamp>.bin also keeps each watched celestial/holo draw's VS
+// b0/b1/b2 and PS b2, plus the first t2 image of each holo surface. These
+// draws often have one instance and were absent from the old aux capture.
+// tools/eye_draw_snapshot.py reads them. The watched VS bytecode is kept
+// at creation and written with the run; no broad shader-dump switch is needed.
 void objectProbeArmLedger(const wchar_t* stamp);
 // The pass took the run's crop k this frame: the ledger notes the frame.
 void objectProbeLedgerMark(int k);

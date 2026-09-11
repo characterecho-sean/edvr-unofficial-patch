@@ -1,6 +1,6 @@
 # Per-object motion vectors: a design
 
-**Reading this on 2026-09-10:** this is a historical design followed by a
+**Reading this on 2026-09-11:** this is a historical design followed by a
 flight journal; the opening's "Nothing here is implemented" describes its
 original state. Later entries implement and revise several approaches.
 For the current review of blur during movement, including two reproduced
@@ -41,6 +41,10 @@ The [15:20 yaw and sprite review](review-yaw-sprite-depth-2026-09-10.md)
 measures a false world-motion shutdown during opposing ship/head turns,
 and traces persistent chevron depth one to the sprite vertex shader's
 forced raster depth. It corrects both without changing resolution or sharpening.
+The [September 11 panel and approach review](review-planet-panels-2026-09-11.md)
+measures missing dim rank-label coverage and celestial expansion absent from
+the supplied vectors. It rules out the cockpit split for these bodies and
+adds draw-time transform and source-alpha capture; it is not a rendering fix.
 
 *A design document, written before the code, as a companion to
 [anti-aliasing.md](anti-aliasing.md) (feature B, the temporal pass) and to
