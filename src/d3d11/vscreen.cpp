@@ -1696,6 +1696,12 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
             ++c.thisFrame;
             if (c.w == s->sceneW && c.h == s->sceneH) ++s->sceneDrawsThisFrame;
         }
+        if(objectProbeLedgerActive()) {
+            ResourceInfo source;
+            if(bindingResolve(bindingGet(BindSlot::Rtv0),&source) && source.isTexture2D &&
+               source.a==(s->panelW?s->panelW:1920) && source.b==(s->panelH?s->panelH:1080))
+                objectProbeNoteSourceDraw(self,kind,count,instances,args.startInstance,args.start,args.base);
+        }
         // The census line for a draw that did NOT land in an eye texture,
         // recorded only when advanced.census_offscreen asked for it. Before
         // the skip probe below, for the same reason the eye form is: a census

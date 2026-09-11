@@ -85,6 +85,25 @@ int wmain(int argc, wchar_t** argv) {
     }
     const uint32_t capturedBytes=snap.vertexBytes;
     ID3D11Buffer* noBuffer=nullptr;UINT zero=0;ctx->IASetVertexBuffers(1,1,&noBuffer,&zero,&zero);ctx->IASetIndexBuffer(nullptr,DXGI_FORMAT_R16_UINT,0);
+    edvr::EyeDrawSnapshot vscreenSnap;
+    td.Width=td.Height=8;td.Format=DXGI_FORMAT_R8G8B8A8_UNORM;td.BindFlags=D3D11_BIND_SHADER_RESOURCE;
+    ComPtr<ID3D11Texture2D> source;ComPtr<ID3D11ShaderResourceView> sourceView;
+    hr(dev->CreateTexture2D(&td,nullptr,&source));hr(dev->CreateShaderResourceView(source.Get(),nullptr,&sourceView));
+    td.Format=DXGI_FORMAT_R32_TYPELESS;td.BindFlags=D3D11_BIND_DEPTH_STENCIL;
+    ComPtr<ID3D11Texture2D> sourceDepth;ComPtr<ID3D11DepthStencilView> sourceDsv;
+    hr(dev->CreateTexture2D(&td,nullptr,&sourceDepth));
+    D3D11_DEPTH_STENCIL_VIEW_DESC dd{};dd.Format=DXGI_FORMAT_D32_FLOAT;dd.ViewDimension=D3D11_DSV_DIMENSION_TEXTURE2D;
+    hr(dev->CreateDepthStencilView(sourceDepth.Get(),&dd,&sourceDsv));
+    ctx->OMSetRenderTargets(1,&r,sourceDsv.Get());ctx->ClearDepthStencilView(sourceDsv.Get(),D3D11_CLEAR_DEPTH,.25f,0);
+    vscreenSnap.captureSource(ctx.Get(),100,edvr::EyeDrawSnapshot::kScene,0,'X',6,1,0,0,0);
+    vscreenSnap.captureSource(ctx.Get(),100,edvr::EyeDrawSnapshot::kScene,0,'X',6,1,0,0,0);
+    check(vscreenSnap.draws.size()==1,"on-foot source camera captured once per frame");
+    ctx->ClearDepthStencilView(sourceDsv.Get(),D3D11_CLEAR_DEPTH,.75f,0);ctx->OMSetRenderTargets(1,&r,nullptr);
+    ctx->PSSetShaderResources(0,1,sourceView.GetAddressOf());
+    vscreenSnap.capture(ctx.Get(),100,0,edvr::EyeDrawSnapshot::kVscreen,edvr::EyeDrawSnapshot::kVscreenPs,'X',6,1,0);
+    vscreenSnap.capture(ctx.Get(),100,1,edvr::EyeDrawSnapshot::kVscreen,edvr::EyeDrawSnapshot::kVscreenPs,'X',6,1,0);
+    ctx->ClearDepthStencilView(sourceDsv.Get(),D3D11_CLEAR_DEPTH,0,0);
+    check(vscreenSnap.surfaces.size()==2,"on-foot source colour and completed depth copied once for both eyes");
     // Only the test waits, to make WARP deterministic. Production writes
     // after the eye ledger grace period and reports unavailable copies.
     D3D11_QUERY_DESC qd{D3D11_QUERY_EVENT, 0}; ComPtr<ID3D11Query> query;
@@ -94,12 +113,17 @@ int wmain(int argc, wchar_t** argv) {
     while ((ready = ctx->GetData(query.Get(), nullptr, 0, 0)) == S_FALSE && GetTickCount64()<deadline) Sleep(1);
     hr(ready); check(ready == S_OK, "GPU timeout");
     check(snap.write(ctx.Get(), argv[1]), "snapshot write");
+    check(vscreenSnap.write(ctx.Get(),(std::wstring(argv[1])+L".vscreen").c_str()),"on-foot snapshot write");
+    check(vscreenSnap.failures==0,"on-foot capture completed without missing copies");
     check(snap.failures == 0, "missing copies");
     const char shaderBytes[] = "captured-bytecode";
     edvr::EyeDrawSnapshot::rememberShader(edvr::EyeDrawSnapshot::kHolo, shaderBytes, sizeof(shaderBytes));
     edvr::EyeDrawSnapshot::rememberShader(edvr::EyeDrawSnapshot::kHud, shaderBytes, sizeof(shaderBytes));
+    for(uint64_t hash:{edvr::EyeDrawSnapshot::kVscreen,edvr::EyeDrawSnapshot::kVscreenPs,edvr::EyeDrawSnapshot::kScene})
+        edvr::EyeDrawSnapshot::rememberShader(hash,shaderBytes,sizeof(shaderBytes));
     std::wstring directory = argv[1]; directory.resize(directory.find_last_of(L"\\/"));
     check(snap.writeShaders(directory.c_str()) == 0, "retained shader write");
+    check(vscreenSnap.writeShaders(directory.c_str())==0,"on-foot vertex and pixel shader writes");
     const std::wstring shaderPath = directory + L"\\vs_81216C77F90DEDD6.dxbc";
     FILE* shader = nullptr; check(_wfopen_s(&shader, shaderPath.c_str(), L"rb") == 0, "shader file");
     char saved[sizeof(shaderBytes)] = {};

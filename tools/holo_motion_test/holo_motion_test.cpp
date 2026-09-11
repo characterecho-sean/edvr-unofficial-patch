@@ -62,9 +62,10 @@ int main(int argc,char** argv) {
         ctx->VSSetShaderResources(33,1,poolSrv.GetAddressOf()); ctx->PSSetShaderResources(2,1,surface.GetAddressOf());
         D3D11_VIEWPORT vp{0,0,8,8,0,1}; ctx->RSSetViewports(1,&vp);
     };
-    auto run=[&] {
+    auto run=[&](unsigned mode=0) {
         bind(); ctx->CSSetConstantBuffers(1,1,cb[1].GetAddressOf()); ctx->CSSetShaderResources(2,1,poolSrv.GetAddressOf());
-        check(motion.prepare(ctx.Get(),scene.Get(),args,10),"production history prepared");
+        if(mode==3)ctx->PSSetShaderResources(0,1,surface.GetAddressOf());
+        check(motion.prepare(ctx.Get(),scene.Get(),args,10,mode),"production history prepared");
         ComPtr<ID3D11Buffer> after; ctx->CSGetConstantBuffers(1,1,&after); check(after.Get()==cb[1].Get(),"caller CS constants restored");
         ComPtr<ID3D11ShaderResourceView> afterSrv; ctx->CSGetShaderResources(2,1,&afterSrv); check(afterSrv.Get()==poolSrv.Get(),"caller CS resource restored");
         ID3D11ShaderResourceView* views[2]{}; motion.views(scene.Get(),views); check(views[0] && views[1],"current-eye inputs exposed"); return read(dev.Get(),ctx.Get(),views[1]);
@@ -83,21 +84,23 @@ int main(int argc,char** argv) {
     std::memcpy(&records[1][6],&z,4); motion.frameBoundary(); run();
     // Actual captured constants and reordered pool records, against double-
     // precision projected motion at the panel centre. Optional local fixture.
-    if(argc>1) {
-        std::ifstream input(argv[1],std::ios::binary); UINT pairs=0; input.read(reinterpret_cast<char*>(&pairs),4); check(pairs>0 && pairs<4096,"fixture pair count");
+    for(int fixture=1;fixture<argc && fixture<=2;++fixture) {
+        const unsigned mode=fixture==2?3:0;
+        std::ifstream input(argv[fixture],std::ios::binary); UINT pairs=0; input.read(reinterpret_cast<char*>(&pairs),4); check(pairs>0 && pairs<4096,"fixture pair count");
         for(UINT pair=0;pair<pairs;++pair) {
             motion.frameBoundary(); motion.frameBoundary(); inst[0]=0;
             for(int side=0;side<2;++side) {
                 input.read(reinterpret_cast<char*>(model),sizeof(model)); input.read(reinterpret_cast<char*>(sceneData),sizeof(sceneData));
                 input.read(reinterpret_cast<char*>(material),sizeof(material)); input.read(reinterpret_cast<char*>(records[0]),336);
-                check(bool(input),"captured state complete"); values=run(); if(side==0) motion.frameBoundary();
+                check(bool(input),"captured state complete"); values=run(mode); if(side==0) motion.frameBoundary();
             }
             float point[3],expected[3]; input.read(reinterpret_cast<char*>(point),12); input.read(reinterpret_cast<char*>(expected),12);
+            if(values[59]!=1)std::printf("fixture %d pair %u eligible %.0f matched %.0f origin %.9g %.9g %.9g\n",fixture,pair,values[56],values[59],values[35],values[39],values[43]);
             check(bool(input) && values[59]==1,"captured pair matched");
             float before[3]{}; for(int r=0;r<3;++r) { before[r]=values[44+r*4+3]; for(int j=0;j<3;++j) before[r]+=values[44+r*4+j]*point[j]; }
             for(int j=0;j<2;++j) check(std::fabs((before[j]/before[2]-expected[j]/expected[2])*1134)<.015,"captured projection within 0.015 pixels");
         }
-        std::printf("replayed %u captured hologram pairs\n",pairs);
+        std::printf("replayed %u captured %s pairs\n",pairs,mode==3?"sprite":"hologram");
     }
     // Compile the production temporal consumer, including both grid modes.
     std::ifstream file("src/d3d11/temporal_pass.cpp"); std::string source((std::istreambuf_iterator<char>(file)),{});
@@ -132,6 +135,28 @@ int main(int argc,char** argv) {
     check(pixels[27*4+3]==1 && std::fabs(pixels[27*4]+.08f)<1e-5 && std::fabs(pixels[27*4+2]-1)<1e-5,"DLSS consumer removes raster jitter and preserves prior physical depth");
     parameters[4]=.25f; pixels=consume(); check(pixels[27*4+3]==1 && std::fabs(pixels[27*4]+.08f)<1e-5,"native output grid gives the same physical motion");
     parameters[2]=0; pixels=consume(); check(pixels[27*4+3]==0,"skipped temporal frame declines unmatched jitter history");
+    // The sprite is a plane at local Y=0, viewed at Z=15 (beyond the
+    // cockpit split) and later at planetary distance. Nearer scenery is
+    // retained in coverage depth, without changing the sprite's motion.
+    for(float distance:{15.f,60000000.f}) {
+        ctx->ClearState();motion=HoloMotion{};inst[0]=0;
+        std::memset(model,0,sizeof(model));std::memset(records,0,sizeof(records));std::memset(material,0,sizeof(material));
+        // Map local X,Z into view X,Y; local Y is the plane normal.
+        model[4][0]=1;model[5][2]=1;model[7][1]=1;model[7][3]=distance;
+        std::memcpy(&records[0][1],&distance,4);records[0][2]=0x80008000;records[0][3]=0xffff8000;
+        sceneData[275][0]=sceneData[275][1]=sceneData[275][2]=0;
+        values=run(3);check(values[56]==1 && values[59]==0,"sprite permits forced projection and far plane without inventing history");
+        motion.frameBoundary();model[4][3]=distance*.02f;values=run(3);
+        check(values[59]==1,"sprite transform survives arbitrary physical distance");
+        motion.views(scene.Get(),views);const float spriteCoverage[4]={1,.05f,0,0};ctx->ClearRenderTargetView(motion.target(),spriteCoverage);
+        for(auto& d:depths)d=.05f;depths[10]=.1f;ctx->UpdateSubresource(scene.Get(),0,nullptr,depths,8*sizeof(float),0);
+        parameters[0]=parameters[1]=parameters[4]=parameters[5]=0;parameters[2]=1;
+        pixels=consume();check(pixels[10*4+3]==0,"later foreground still rejects sprite motion");
+        check(pixels[27*4+3]==1 && std::fabs(pixels[27*4]+.08f)<1e-4,"sprite motion uses its plane rather than the foreground depth");
+        check(std::fabs(pixels[27*4+2]/distance-1)<.001,"sprite preserves physical predecessor depth");
+        motion.frameBoundary();material[0][0]=.25f;values=run(3);check(values[59]==1,"sprite brightness changes retain geometry history");
+        motion.frameBoundary();material[1][0]=.25f;values=run(3);check(values[59]==0,"different sprite UV tile declines predecessor");
+    }
     if(messages) for(UINT64 i=0;i<messages->GetNumStoredMessagesAllowedByRetrievalFilter();++i) {
         SIZE_T bytes=0; messages->GetMessage(i,nullptr,&bytes); std::vector<char> memory(bytes); auto* message=reinterpret_cast<D3D11_MESSAGE*>(memory.data()); hr(messages->GetMessage(i,message,&bytes));
         if(message->Severity<=D3D11_MESSAGE_SEVERITY_ERROR) { std::puts(message->pDescription); check(false,"D3D debug layer"); }

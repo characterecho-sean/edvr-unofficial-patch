@@ -2905,6 +2905,10 @@ void writeLedger(ID3D11DeviceContext* ctx) {
                     static_cast<uint32_t>(g_drawSnapshot.surfaces.size()), g_drawSnapshot.dropped,
                     g_drawSnapshot.failures, missingShaders, snapshotOk ? "written" : "WRITE FAILED");
     Log::get().note("object probe: target UI vertex snapshots: %u draws, %u bytes, %u range/budget declines; first three watched frames, 256 KiB per stream, 32 MiB total. Snapshot version 3 preserves draw offsets, bindings and capture ranges around base/start.",g_drawSnapshot.vertexDraws,g_drawSnapshot.vertexBytes,g_drawSnapshot.vertexDeclined);
+    uint32_t sourceCameras=0,screenDraws=0,sourceDepths=0;
+    for(const auto& d:g_drawSnapshot.draws) {sourceCameras+=d.ordinal==UINT32_MAX;screenDraws+=d.vs==EyeDrawSnapshot::kVscreen;}
+    for(const auto& t:g_drawSnapshot.surfaces)sourceDepths+=t.format==20 || t.format==40 || t.format==45 || t.format==55;
+    if(screenDraws)Log::get().note("object probe: on-foot source capture: %u camera frames, %u screen draws, %u completed depth surfaces; colour/depth copied at first composite, no temporal changes.",sourceCameras,screenDraws,sourceDepths);
     g_ledgerOn = false;
     ledgerRelease();
 }
@@ -3073,6 +3077,13 @@ uint32_t objectShipsGet(ObjectShip* out, uint32_t cap, float camPos[3], uint32_t
 void objectShipsSetRange(float metres) {
     if (!std::isfinite(metres)) return;
     g_shipRangeM = metres < 0.0f ? 0.0f : (metres > 5000.0f ? 5000.0f : metres);
+}
+
+void objectProbeNoteSourceDraw(ID3D11DeviceContext* ctx,char kind,uint32_t count,uint32_t instances,
+                              uint32_t startInstance,uint32_t start,int32_t base) {
+    if(!g_ledgerOn || !ctx || g_frame+1<g_ledgerFrame0 || g_frame+1>g_ledgerLastFrame)return;
+    g_drawSnapshot.captureSource(ctx,g_frame+1,bindingShaderHash(BindSlot::Vs),bindingShaderHash(BindSlot::Ps),
+                                 kind,count,instances,startInstance,start,base);
 }
 
 void objectProbeOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count, uint32_t instances,

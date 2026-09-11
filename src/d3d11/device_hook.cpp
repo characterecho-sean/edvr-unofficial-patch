@@ -471,6 +471,7 @@ HRESULT STDMETHODCALLTYPE hookedCreatePS(ID3D11Device* self, const void* bytecod
         if (FAILED(hr) || !bytecode || len == 0 || !out || !*out) return;
         const uint64_t hash = fnv1a64(bytecode, len);
         registerShaderHash(*out, hash);
+        if(hash==EyeDrawSnapshot::kVscreenPs) EyeDrawSnapshot::rememberShader(hash,bytecode,static_cast<size_t>(len));
         if (g_state->shaderDump) dumpShaderBlob(L"ps", hash, bytecode, len);
     });
     return hr;

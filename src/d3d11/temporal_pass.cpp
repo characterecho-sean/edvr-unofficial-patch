@@ -445,6 +445,17 @@ bool holoPixel(float2 p, float2 offset, out float2 pp, out float zp) {
     if(r.key[3].w==1 ? uiCovered(q) : !uiCovered(q)) return false;
     float z=knobs.z/(cov.y-knobs.x);
     float2 ndc=(p+offset+region.xy+.5)/r.meta.yz*float2(2,-2)+float2(-1,1);
+    if(r.key[3].w==3) {
+        // Sprites intentionally draw over nearer geometry. Coverage stores
+        // the selected scene depth for visibility validation, while motion
+        // must use the sprite's actual plane (captured local Y=0), not that
+        // foreground depth or the VS's forced Z=W.
+        float3 normal=cross(r.clip[2].xyz,r.clip[0].xyz);
+        float den=dot(normal,float3(ndc,1));
+        if(den==0) return false;
+        z=dot(normal,float3(r.clip[0].w,r.clip[1].w,r.clip[2].w))/den;
+        if(z<=0 || !isfinite(z)) return false;
+    }
     float4 current=float4(ndc*z,z,1);
     float3 before=float3(dot(r.map[0],current),dot(r.map[1],current),dot(r.map[2],current));
     if(before.z<=0 || !all(isfinite(before))) return false;

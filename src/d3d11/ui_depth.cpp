@@ -349,12 +349,17 @@ Texture2D<float4> Surf : register(t0);
 Texture2D<float> SceneDeviceDepth : register(t2);
 SamplerState Smp : register(s0);
 cbuffer P : register(b13) { float4 floorAndStrength; float4 sceneProjection; };
+cbuffer Motion : register(b12) { uint4 motionInfo; };
 struct In { float2 tc0 : TEXCOORD0; float4 pos : SV_Position; };
-float4 main(In i, out float depth : SV_Depth, out float edit : SV_Target2) : SV_Target0 {
+float4 main(In i, out float depth : SV_Depth, out float2 motion : SV_Target1, out float edit : SV_Target2) : SV_Target0 {
+    // This composite has no holo glow. Retain its faint antialiased strokes,
+    // but never turn erased scrolling ticks into 32-frame terrain strips.
+    // Departed text is already cleared by the post-resolve influence history.
+    clip(Surf.Sample(Smp, i.tc0).a - min(floorAndStrength.x, 1.0/255.0));
     edit = uiEdit(i.tc0);
-    clip(max(Surf.Sample(Smp, i.tc0).a - floorAndStrength.x, edit - 1.0/255.0));
     float own = sceneProjection.x + sceneProjection.y / max(i.pos.w, 0.000001);
     depth = max(own, SceneDeviceDepth.Load(int3(int2(i.pos.xy),0)));
+    motion = float2(motionInfo.x+1, depth);
     return floorAndStrength.w;
 }
 )HLSL";
@@ -1841,10 +1846,10 @@ bool uiDepthReissueBegin(ID3D11DeviceContext* ctx) {
         if (g_reissueMaskSlot != 3 && scene && g_drawEye >= 0 && g_drawEye < 2)
             target = g_uiDepth[g_drawEye].acquire(ctx, scene);
         bool holo=false;
-        const bool ring=shader==&g_depthShaders[6],orbital=shader==&g_depthShaders[7];
+        const bool ring=shader==&g_depthShaders[6],orbital=shader==&g_depthShaders[7],sprite=shader==&g_depthShaders[5];
         if(orbital && !g_orbitalVs) g_orbitalVs.Attach(shaderSwapCompileVs(ctx,kOrbitalCoverageVs,sizeof(kOrbitalCoverageVs)-1,"main","orbital coverage",nullptr,"stellar motion"));
-        if (target && scene && mask && (shader==&g_depthShaders[3] || ring || (orbital && g_orbitalVs))) {
-            holo=g_holoMotion[g_drawEye].prepare(ctx,scene,g_holoDraw,g_cockpitMetres,ring?1:orbital?2:0);
+        if (target && scene && mask && (shader==&g_depthShaders[3] || sprite || ring || (orbital && g_orbitalVs))) {
+            holo=g_holoMotion[g_drawEye].prepare(ctx,scene,g_holoDraw,g_cockpitMetres,ring?1:orbital?2:sprite?3:0);
             if(holo && !g_holoNoted) {
                 g_holoNoted=true;
                 Log::get().note("holo motion: draw-time cockpit transform history active; 128 draws per eye, pool-slot-independent matching, TAA/DLSS.");

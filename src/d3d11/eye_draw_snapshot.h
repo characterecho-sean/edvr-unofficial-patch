@@ -23,9 +23,13 @@ public:
     static constexpr uint32_t kMaxTextures = 24;
     static constexpr uint32_t kMaxTextureBytes = 16 * 1024 * 1024;
     static constexpr uint32_t kTotalTextureBytes = 64 * 1024 * 1024;
+    static constexpr uint32_t kVscreenTextureBytes = 128 * 1024 * 1024;
+    static constexpr uint32_t kVscreenTotalBytes = 256 * 1024 * 1024;
     static constexpr uint64_t kHolo = 0x81216C77F90DEDD6ull;
     static constexpr uint64_t kHud = 0xB7790CBFC6554097ull, kSprite=0xE508648660A352B2ull;
     static constexpr uint64_t kPanel=0xA888D51024D9798Eull,kScreen=0x4EF6DDB075A927FAull;
+    static constexpr uint64_t kVscreen=0x5C36AF051B98B9F1ull,kVscreenPs=0xCFE84157BC76E921ull;
+    static constexpr uint64_t kScene=0x4435F2E50020E7F3ull;
     static bool watches(uint64_t vs) {
         switch (vs) {
         case kHolo:
@@ -33,6 +37,7 @@ public:
         case kSprite:
         case kPanel:
         case kScreen:
+        case kVscreen:
         case 0xACE405F428C17EF6ull: // matching 2304/104448-index depth/colour draws
         case 0x72BDD292154158ADull:
         case 0x19F70CE80DA3242Bull: // sphere draw using cb0[9..11], cb1[270..273]
@@ -65,12 +70,15 @@ public:
     std::vector<Surface> surfaces;
     uint32_t dropped = 0, failures = 0, textureBytes = 0;
     uint32_t firstFrame=0,vertexBytes=0,vertexDraws=0,vertexDeclined=0;
+    Texture sourceDepth;
+    DXGI_FORMAT sourceDepthFormat=DXGI_FORMAT_UNKNOWN;
+    uint32_t sourceFrame=0;
 
     // The game may create these before a dump is armed. Retain only this
     // bounded VS set, then write only shaders seen in the requested run.
     // No broad shader-dump setting or startup disk writes are necessary.
     static void rememberShader(uint64_t hash, const void* bytes, size_t size) {
-        if (!watches(hash) || !bytes || !size || size > 256*1024) return;
+        if ((!watches(hash) && hash!=kScene && hash!=kVscreenPs) || !bytes || !size || size > 256*1024) return;
         std::lock_guard<std::mutex> lock(shaderMutex());
         auto& shaders = shaderBytes();
         if (shaders.count(hash)) return;
@@ -79,9 +87,20 @@ public:
     }
     uint32_t writeShaders(const wchar_t* directory) const {
         std::lock_guard<std::mutex> lock(shaderMutex());
+        const auto& shaders=shaderBytes();
         uint32_t missing = 0;
         std::map<uint64_t, bool> seen;
         for (const Draw& d : draws) {
+            if(d.vs==kVscreen && seen.emplace(kVscreenPs,true).second) {
+                const auto ps=shaders.find(kVscreenPs);
+                if(ps==shaders.end())++missing;
+                else {
+                    wchar_t path[MAX_PATH];_snwprintf_s(path,MAX_PATH,_TRUNCATE,L"%s\\ps_%016llX.dxbc",directory,static_cast<unsigned long long>(kVscreenPs));
+                    FILE* f=nullptr;
+                    if(_wfopen_s(&f,path,L"wb") || !f)++missing;
+                    else {bool ok=fwrite(ps->second.data(),1,ps->second.size(),f)==ps->second.size();if(fclose(f)!=0 || !ok)++missing;}
+                }
+            }
             if (!seen.emplace(d.vs, true).second) continue;
             const auto it = shaderBytes().find(d.vs);
             if (it == shaderBytes().end()) { ++missing; continue; }
@@ -100,12 +119,31 @@ public:
     void reset() {
         draws.clear(); surfaces.clear(); dropped = failures = textureBytes = 0;
         firstFrame=vertexBytes=vertexDraws=vertexDeclined=0;
+        sourceDepth.Reset();sourceDepthFormat=DXGI_FORMAT_UNKNOWN;sourceFrame=0;
+    }
+
+    // First world/terrain draw per source frame, not every offscreen draw.
+    // Retain the scene DSV now, copy it at the final screen composite after
+    // the scene is complete. This diagnostic never selects temporal inputs.
+    void captureSource(ID3D11DeviceContext* ctx,uint32_t frame,uint64_t vs,uint64_t ps,
+                       char kind,uint32_t count,uint32_t instances,uint32_t startInstance,uint32_t start,int32_t base) {
+        if(!ctx || (vs!=kScene && vs!=0xACE405F428C17EF6ull))return;
+        if(sourceFrame==frame)return;
+        Microsoft::WRL::ComPtr<ID3D11DepthStencilView> dsv;ctx->OMGetRenderTargets(0,nullptr,&dsv);
+        if(!dsv)return;
+        Microsoft::WRL::ComPtr<ID3D11Resource> resource;dsv->GetResource(&resource);Texture tex;
+        if(FAILED(resource.As(&tex)))return;
+        D3D11_TEXTURE2D_DESC td{};tex->GetDesc(&td);
+        D3D11_DEPTH_STENCIL_VIEW_DESC dd{};dsv->GetDesc(&dd);
+        if(td.SampleDesc.Count!=1 || td.ArraySize!=1 || dd.ViewDimension!=D3D11_DSV_DIMENSION_TEXTURE2D)return;
+        sourceDepth=tex;sourceDepthFormat=dd.Format;sourceFrame=frame;
+        capture(ctx,frame,UINT32_MAX,vs,ps,kind,count,instances,startInstance,start,base,true);
     }
 
     void capture(ID3D11DeviceContext* ctx, uint32_t frame, uint32_t ordinal,
                  uint64_t vs, uint64_t ps, char kind, uint32_t count,
-                 uint32_t instances, uint32_t startInstance,uint32_t start=0,int32_t base=0) {
-        if (!ctx || !watches(vs)) return;
+                 uint32_t instances, uint32_t startInstance,uint32_t start=0,int32_t base=0,bool source=false) {
+        if (!ctx || (!watches(vs) && !(source && vs==kScene))) return;
         if (draws.size() >= kMaxDraws) { ++dropped; return; }
         Draw d;
         d.frame = frame; d.ordinal = ordinal; d.vs = vs; d.ps = ps;
@@ -142,12 +180,18 @@ public:
             ctx->CopySubresourceRegion(d.stage[i].Get(), 0, 0, 0, 0, src.Get(), 0, &box);
             d.copied[i] = bd.ByteWidth;
         }
-        if (vs==kHolo || vs==kSprite || vs==kPanel || vs==kScreen)
-            d.texture=captureSurface(ctx,dev.Get(),frame,vs==kHolo?2:vs==kPanel?1:0);
+        if (vs==kHolo || vs==kSprite || vs==kPanel || vs==kScreen || vs==kVscreen)
+            d.texture=captureSurface(ctx,dev.Get(),frame,vs==kHolo?2:vs==kPanel?1:0,vs==kVscreen);
+        if(vs==kVscreen && sourceFrame==frame && sourceDepth && d.texture!=UINT32_MAX) {
+            D3D11_TEXTURE2D_DESC depth{};sourceDepth->GetDesc(&depth);
+            const auto& colour=surfaces[d.texture];
+            if(colour.frame==frame && depth.Width==colour.width && depth.Height==colour.height)
+                copySurface(ctx,dev.Get(),frame,sourceDepth.Get(),sourceDepthFormat,true);
+        }
         // Target labels and vector widgets can move inside their dynamic
         // vertex streams. Preserve each draw, not the first binding of a VS.
         // Three frames and 32 MiB bound this explicit diagnostic's cost.
-        if((vs==kHud || vs==kSprite) && frame-firstFrame<3) {
+        if((vs==kHud || vs==kSprite || vs==kVscreen) && frame-firstFrame<3) {
             ID3D11Buffer* raw[3]{};UINT strides[2]{},offsets[2]{},ibOffset=0;DXGI_FORMAT fmt{};
             ctx->IAGetVertexBuffers(0,2,raw,strides,offsets);ctx->IAGetIndexBuffer(raw+2,&fmt,&ibOffset);
             bool copied=false;
@@ -163,7 +207,8 @@ public:
                 const bool indexed=kind=='X'||kind=='I';
                 uint64_t begin=s.offset;
                 if(i==2 && indexed)begin+=uint64_t(start)*s.stride;
-                if(i==1)begin+=uint64_t(base>0?base:0)*s.stride;
+                if(i==(vs==kVscreen?0:1))begin+=uint64_t(base>0?base:0)*s.stride;
+                if(vs==kVscreen && i==1)begin+=uint64_t(startInstance)*s.stride;
                 if(begin>=s.whole){++vertexDeclined;continue;}
                 s.captureOffset=static_cast<uint32_t>(begin);
                 UINT bytes=s.whole-s.captureOffset;if(bytes>256*1024)bytes=256*1024;
@@ -229,36 +274,43 @@ private:
     static std::map<uint64_t, std::vector<uint8_t>>& shaderBytes() {
         static std::map<uint64_t, std::vector<uint8_t>> s; return s;
     }
-    uint32_t captureSurface(ID3D11DeviceContext* ctx, ID3D11Device* dev, uint32_t frame,UINT slot) {
+    uint32_t captureSurface(ID3D11DeviceContext* ctx, ID3D11Device* dev, uint32_t frame,UINT slot,bool large=false) {
         Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> srv;
         ctx->PSGetShaderResources(slot, 1, &srv);
         if (!srv) return UINT32_MAX;
         Microsoft::WRL::ComPtr<ID3D11Resource> res; srv->GetResource(&res);
         Texture tex;
         if (FAILED(res.As(&tex))) { ++failures; return UINT32_MAX; }
-        for (uint32_t i = 0; i < surfaces.size(); ++i)
-            if (surfaces[i].source.Get() == tex.Get()) return i;
-        D3D11_TEXTURE2D_DESC td{}; tex->GetDesc(&td);
         D3D11_SHADER_RESOURCE_VIEW_DESC sd{}; srv->GetDesc(&sd);
+        if(sd.ViewDimension!=D3D11_SRV_DIMENSION_TEXTURE2D || sd.Texture2D.MostDetailedMip!=0) {++failures;return UINT32_MAX;}
+        return copySurface(ctx,dev,frame,tex.Get(),sd.Format,large);
+    }
+    uint32_t copySurface(ID3D11DeviceContext* ctx,ID3D11Device* dev,uint32_t frame,ID3D11Texture2D* tex,DXGI_FORMAT format,bool large) {
+        for (uint32_t i = 0; i < surfaces.size(); ++i)
+            if (surfaces[i].source.Get() == tex) return i;
+        D3D11_TEXTURE2D_DESC td{}; tex->GetDesc(&td);
         uint32_t bpp = 0;
-        switch (sd.Format) {
+        switch (format) {
         case DXGI_FORMAT_R8G8B8A8_UNORM: case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
         case DXGI_FORMAT_B8G8R8A8_UNORM: case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB: bpp = 4; break;
         case DXGI_FORMAT_R16G16B16A16_FLOAT: bpp = 8; break;
+        case DXGI_FORMAT_D32_FLOAT_S8X24_UINT:bpp=large?8:0;break;
+        case DXGI_FORMAT_D32_FLOAT:case DXGI_FORMAT_D24_UNORM_S8_UINT:bpp=large?4:0;break;
+        case DXGI_FORMAT_D16_UNORM:bpp=large?2:0;break;
         default: break;
         }
         const uint64_t bytes = static_cast<uint64_t>(td.Width) * td.Height * bpp;
         if (!bpp || td.SampleDesc.Count != 1 || td.ArraySize != 1 ||
-            sd.ViewDimension != D3D11_SRV_DIMENSION_TEXTURE2D || sd.Texture2D.MostDetailedMip != 0 ||
-            bytes > kMaxTextureBytes || bytes + textureBytes > kTotalTextureBytes || surfaces.size() >= kMaxTextures) {
+            bytes > (large?kVscreenTextureBytes:kMaxTextureBytes) ||
+            bytes + textureBytes > (large?kVscreenTotalBytes:kTotalTextureBytes) || surfaces.size() >= kMaxTextures) {
             ++failures; return UINT32_MAX;
         }
         Surface s; s.source = tex; s.frame = frame; s.width = td.Width; s.height = td.Height;
-        s.format = sd.Format; s.bytes = static_cast<uint32_t>(bytes);
+        s.format = format; s.bytes = static_cast<uint32_t>(bytes);
         td.MipLevels = 1; td.Usage = D3D11_USAGE_STAGING;
         td.BindFlags = td.MiscFlags = 0; td.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
         if (FAILED(dev->CreateTexture2D(&td, nullptr, &s.stage))) { ++failures; return UINT32_MAX; }
-        ctx->CopySubresourceRegion(s.stage.Get(), 0, 0, 0, 0, tex.Get(), 0, nullptr);
+        ctx->CopySubresourceRegion(s.stage.Get(), 0, 0, 0, 0, tex, 0, nullptr);
         textureBytes += s.bytes;
         surfaces.push_back(std::move(s));
         return static_cast<uint32_t>(surfaces.size() - 1);

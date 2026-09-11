@@ -632,6 +632,30 @@ UN[id.xy]=uiEvidence(id.xy);Result[id.xy]=adaptiveUiReactive(id.xy,float2(id.xy)
             pixels.assign(4*4*4,0);ctx->UpdateSubresource(uiSurface.Get(),0,nullptr,pixels.data(),16,0);
         }
         ctx->ClearState();uiDepthFrameBoundary(ctx.Get());check(!uiDepthContentChanges(8,8,0),"projected edit mask clears after both eyes submit");g_trained=false;
+        // Scrolling sprite ticks must not retain depth or edit footprints
+        // where their source has become transparent. Dim current strokes
+        // still carry coverage, and visible changed pixels still reject
+        // stale text. Exercise the actual reissue with source tracking.
+        pixels.assign(4*4*4,0);pixels[4*5+3]=29;
+        ctx->UpdateSubresource(uiSurface.Get(),0,nullptr,pixels.data(),16,0);g_trained=true;
+        for(unsigned f=0;f<3;++f) {
+            uiDepthFrameBoundary(ctx.Get());ctx->ClearDepthStencilView(scene.dsv.Get(),D3D11_CLEAR_DEPTH,0,0);
+            bind(scene.dsv.Get());setZ(.6f);ctx->PSSetShaderResources(0,1,uiView.GetAddressOf());
+            g_on=true;g_reactive=0;g_mode=Mode::kReissueScene;g_reissueShader=&g_depthShaders[5];g_drawEye=0;g_reissueMaskSlot=1;
+            g_rebindW=g_rebindH=8;g_wantMask=true;g_wantRebind=false;
+            check(uiDepthReissueBegin(ctx.Get()),"scrolling sprite coverage begins");ctx->Draw(3,0);uiDepthReissueEnd(ctx.Get());ctx->OMSetRenderTargets(0,nullptr,nullptr);
+            auto mark=valuesOf(g_mask[0].srv),edit=valuesOf(uiDepthContentChanges(8,8,0));
+            if(f<2)check(mark[3*8+3]>0,"faint sprite stroke retains motion and antialiasing coverage");
+            if(f==1)check(edit[3*8+3]>0,"changed visible sprite retains fresh reconstruction");
+            if(f==2) {
+                for(float a:mark)check(a==0,"erased scrolling tick leaves no rectangle of sprite coverage");
+                for(float a:edit)check(a==0,"erased tick cannot force spatial reconstruction over terrain");
+                check(uiDepthTemporalDepth(8,8,0,scene.tex.Get(),&ui),"sprite private depth available after erasure");ui->GetResource(privateRes.ReleaseAndGetAddressOf());
+                for(float z:read(dev.Get(),ctx.Get(),privateRes.Get()))check(z==0,"erased tick leaves private scene depth intact");
+            }
+            pixels[4*5+3]=f==0?77:0;ctx->UpdateSubresource(uiSurface.Get(),0,nullptr,pixels.data(),16,0);
+        }
+        ctx->ClearState();uiDepthFrameBoundary(ctx.Get());g_trained=false;
         std::puts("PASS: UI source edits preserve stable/dim text, detect erasure, expire, restore state, and respect eye/cache/byte bounds.");
     }
     // Exercise the model-independent resolve itself. Odd dimensions and
